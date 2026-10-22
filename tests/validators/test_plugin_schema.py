@@ -348,6 +348,39 @@ skills:
         assert result.passed
         assert any(detail.check_name == "demo" for detail in result.success_details)
 
+    def test_linked_skills_directory_produces_finding(self, tmp_path: Path):
+        _write_manifest(tmp_path, _VALID_MANIFEST)
+        target = tmp_path / "linked-skills"
+        target.mkdir()
+        skills_root = tmp_path / "skills"
+        skills_root.symlink_to(target, target_is_directory=True)
+
+        result = PluginSchemaValidator().validate(tmp_path)
+
+        assert not result.passed
+        # The plugin tree check fails closed on a linked skills folder before any bundled skill is read.
+        finding = next(f for f in result.findings if f.check_name == "unsafe_plugin_filesystem")
+        assert finding.category == "PLUGIN_SCHEMA"
+        assert finding.severity == Severity.HIGH
+        assert "'skills'" in finding.message
+        assert "symlink" in finding.message
+
+    def test_skill_discovery_failure_produces_finding(self, tmp_path: Path, monkeypatch):
+        _write_manifest(tmp_path, _VALID_MANIFEST)
+
+        def fail_discovery(root, skills_dir="skills"):
+            raise ValueError("Cannot inspect skill manifest")
+
+        monkeypatch.setattr("skillevaluator.utils.helpers.find_bundled_plugin_skill_manifests", fail_discovery)
+
+        result = PluginSchemaValidator().validate(tmp_path)
+
+        assert not result.passed
+        finding = next(f for f in result.findings if f.check_name == "bundled_skill_path_unsafe")
+        assert finding.category == "PLUGIN_SCHEMA"
+        assert finding.file_path == str(tmp_path / "skills")
+        assert "Cannot inspect skill manifest" in finding.message
+
 
 def _bundle_manifest(dir_path: Path, *, skills=None, rules=None, **fields) -> Path:
     body: dict = {"name": "ref-bundle", "author": {"email": "dev@example.com"}, **fields}

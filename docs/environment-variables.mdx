@@ -6,7 +6,7 @@ layout: reference
 
 Every environment variable SkillEvaluator reads, grouped by feature area. Each group links to the guide that explains the workflow the variables belong to — this page is the inventory, not the tutorial.
 
-Boolean variables accept `1`, `true`, `yes`, or `on` (case-insensitive) as true, and `0`, `false`, `no`, or `off` as false. Any other value that is set, including an empty one, also counts as false.
+Unless a variable's row specifies otherwise, boolean variables accept `1`, `true`, `yes`, or `on` (case-insensitive) as true, and `0`, `false`, `no`, or `off` as false. Any other value that is set, including an empty one, also counts as false.
 
 Two historical SkillEvaluator prefixes coexist. `SKILL_EVAL_*` covers provider
 and model configuration plus a small set of Tier 3 engine knobs;
@@ -153,6 +153,9 @@ execution environments are covered in
 | `SKILLEVALUATOR_LOCAL_STRICT_READS` | `false` | Tightens the sandbox's read-only view of the host system to a stricter path set. |
 | `SKILLEVALUATOR_LOCAL_INHERIT_AGENT_KEYS` | `false` | When true, local-mode trials inherit the host's agent credential variables into their ambient environment. Off by default so a hostile skill command cannot read credentials — agents and verifiers receive credentials per-exec instead. |
 | `SKILLEVALUATOR_RUNTIME_DIR` | `~/.local/share/skillevaluator/runtimes` | Where local mode looks for managed agent CLIs. Must be a dedicated subdirectory — not the home directory or one of its parents. |
+| `SKILLEVALUATOR_DISABLE_CUSTOM_BACKENDS` | unset (custom backends enabled) | Set to `1`, `true`, or `yes` (case-insensitive, with surrounding whitespace ignored) to hide every installed custom execution backend and reject its mode. Other values leave discovery enabled. Built-in modes remain available. See [Custom execution backends](agents-and-sandboxes.mdx#custom-execution-backends). |
+| `SKILLEVALUATOR_ALLOWED_MCP_HOSTS` | unset | Comma-separated hostnames approved for MCP endpoints receiving environment-variable references or authentication headers from skill-authored MCP declarations. Matching uses the whole hostname, case-insensitively; supply hostnames, not URLs or wildcard patterns. |
+| `SKILLEVALUATOR_ALLOWED_MCP_SECRETS` | unset | Comma-separated, case-sensitive environment-variable names approved for references such as `${DEDICATED_MCP_TOKEN}` in skill-authored MCP declarations and `harbor.runtime_env`. Export the dedicated non-LLM credential on the host; literal secret values remain prohibited. Remote declarations also require the endpoint in `SKILLEVALUATOR_ALLOWED_MCP_HOSTS`. This allowlist cannot authorize operator-owned agent or provider credentials. |
 | `SKILL_EVAL_HARBOR_PREBUILD_TASK_ENVS` | unset | Set to exactly `1` to opt in to pre-building Harbor task environment images before trials start (other truthy spellings are not honored). Opt-in because concurrent trial cleanup can remove a shared prebuilt image that sibling trials still need. |
 | `SKILL_EVAL_JUDGE_MODEL` | falls back to `SKILL_EVAL_LLM_MODEL` | Operator-controlled model override for the Tier 3 dimension judge in standard grading. `LLM_JUDGE_MODEL` is honored as a higher-precedence spelling; when neither is set, the judge uses `SKILL_EVAL_LLM_MODEL`, then the built-in judge default. Both spellings change only the model used with the configured `SKILL_EVAL_LLM_PROVIDER`; they do not select a separate judge provider, so the model must be supported by that provider. Standard grading makes both spellings resolve to the selected override in Harbor's parent process, then forwards them through its verifier-only job layer, which takes precedence over task and step verifier declarations. Neither name is injected into the evaluated agent's initial environment; attempts to set or reference one from skill-authored `runtime_env` or native `[environment.env]` tables are rejected. Native custom-only graders keep ownership of their verifier configuration. Shared agent/verifier containers are a process boundary, not a confidentiality boundary; use a separate verifier environment when the model name itself must be hidden from untrusted agent processes. `run_config.json` records the configured judge provider, model, source, `override_applied`, reasoning effort, and catalog-verification status separately from agent models; an allowed provider fallback may use a different model for an individual judge call. When `override_applied` is false for a native Harbor task, `effective_model_source` is `native_harbor_runtime` and catalog verification is explicitly inconclusive because an authored task or step verifier declaration may supersede the recorded fallback. |
 | `LLM_JUDGE_FALLBACK_MODELS` | unset | Comma-separated fallback models for the Tier 3 standard judges in the Harbor verifier. When the provider rejects the judge model as not found, invalid, or not accessible to the key, the verifier tries each fallback in order with the same provider. Fallback applies to the `openai`, `nv_build`, and `openai-compatible` providers. A safety refusal or an empty reply from the judge model also moves to the next fallback, on every provider. The value is forwarded only to standard verifier jobs, never to the agent environment or `custom_only` runs. |
@@ -182,6 +185,11 @@ directory with `.env` loading and Harbor telemetry disabled:
 - Relative paths in allowlisted path variables, such as `KUBECONFIG`,
   `DOCKER_CONFIG`, `SSL_CERT_FILE`, or `AWS_SHARED_CREDENTIALS_FILE`, resolve
   against the directory where you ran `skillevaluator`.
+- On Windows, `PROGRAMFILES`, `PROGRAMW6432`, and `PROGRAMDATA` reach Harbor
+  so Docker Desktop can discover Compose. `PYTHONUTF8` and
+  `PYTHONIOENCODING` are also forwarded when set; use `PYTHONUTF8=1` and
+  `PYTHONIOENCODING=utf-8` for a non-UTF-8 locale. See the
+  [PowerShell setup](agents-and-sandboxes.mdx#windows-hosts).
 - Setting `HARBOR_TELEMETRY` or `PYTHON_DOTENV_DISABLED` yourself has no
   effect; SkillEvaluator always overrides both.
 - Tier 3 needs python-dotenv 1.2.0 or newer, which the `tier3` extra installs.

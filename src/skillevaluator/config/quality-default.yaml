@@ -1,0 +1,22 @@
+# SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+# SPDX-License-Identifier: Apache-2.0
+
+# Default deterministic quality-check configuration.
+expected_headers:
+  - heading: "## Prerequisites"
+    alternatives:
+      - "## Requirements"
+    points: 5
+    message: "No prerequisites/requirements documented"
+    suggestion: "Document dependencies, API keys, or setup needed"
+  - heading: "## Limitations"
+    points: 5
+    message: "No limitations documented"
+    suggestion: "Add '## Limitations' section with known issues/constraints"
+  - heading: "## Troubleshooting"
+    alternatives:
+      - "## Common Issues"
+      - "## FAQ"
+    points: 5
+    message: "No troubleshooting section documented"
+    suggestion: "Add '## Troubleshooting' with Error/Cause/Solution patterns"

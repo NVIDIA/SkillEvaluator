@@ -330,6 +330,7 @@ def run_validation(
     use_llm: bool = False,
     llm_verify: bool = False,
     min_score: int = 70,
+    quality_config: Path | None = None,
     previous_version: str | None = None,
     policy: ValidationPolicy | None = None,
     content_type: str | None = None,
@@ -376,6 +377,7 @@ def run_validation(
         use_llm=use_llm,
         llm_verify=llm_verify,
         min_score=min_score,
+        quality_config=quality_config,
         previous_version=previous_version,
         policy=policy,
         content_type=content_type,
@@ -396,6 +398,7 @@ def _run_validation(
     use_llm: bool,
     llm_verify: bool,
     min_score: int,
+    quality_config: Path | None,
     previous_version: str | None,
     policy: ValidationPolicy | None,
     content_type: str | None,
@@ -487,9 +490,9 @@ def _run_validation(
 
     def _quality_results() -> list[ValidationResult]:
         if quality_dirs is None or _same_dirs(quality_dirs, bundled_skill_dirs):
-            v = QualityScoreValidator(min_score=min_score)
+            v = QualityScoreValidator(min_score=min_score, quality_config=quality_config)
             return [_run_result("quality", v.name, v.description, v.validate, target=skill_target)]
-        listed = _ListedSkillsQuality(quality_dirs, min_score=min_score)
+        listed = _ListedSkillsQuality(quality_dirs, min_score=min_score, quality_config=quality_config)
         return [_run_result("quality", listed.name, listed.description, listed.validate_listed)]
 
     def _lint_results() -> list[ValidationResult]:
@@ -582,8 +585,10 @@ def _run_validation(
     return results
 
 
-def run_quality_check(target_path: Path, *, min_score: int = 70) -> list[ValidationResult]:
-    validator = QualityScoreValidator(min_score=min_score)
+def run_quality_check(
+    target_path: Path, *, min_score: int = 70, quality_config: Path | None = None
+) -> list[ValidationResult]:
+    validator = QualityScoreValidator(min_score=min_score, quality_config=quality_config)
     return [
         _as_result(
             validator.name,
@@ -690,8 +695,8 @@ def _same_dirs(left: list[Path], right: list[Path]) -> bool:
 class _ListedSkillsQuality(QualityScoreValidator):
     """QUALITY over a given list of skill folders, aggregated like a skills folder."""
 
-    def __init__(self, skill_dirs: list[Path], *, min_score: int) -> None:
-        super().__init__(min_score=min_score)
+    def __init__(self, skill_dirs: list[Path], *, min_score: int, quality_config: Path | None = None) -> None:
+        super().__init__(min_score=min_score, quality_config=quality_config)
         self._listed = list(skill_dirs)
 
     def _find_all_skills(self, root_path: Path) -> list[Path]:  # noqa: ARG002 - the listed folders replace discovery

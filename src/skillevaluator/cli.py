@@ -29,6 +29,7 @@ from skillevaluator.constants import (
 )
 from skillevaluator.logging_config import setup_logging
 from skillevaluator.models.result import ValidationResult
+from skillevaluator.quality_config import QualityConfigError, load_quality_config
 from skillevaluator.reporting.console_ui import (
     ValidateView,
     ViewProgressReporter,
@@ -105,6 +106,24 @@ CUSTOM_GRADING_MODE_CHOICE = _AliasChoice(
     ["default_plus_custom", "custom_only"],
     {"aces_plus_custom": "default_plus_custom"},
 )
+
+
+class _QualityConfigPath(click.Path):
+    """A ``--quality-config`` file, validated while arguments are parsed."""
+
+    def __init__(self) -> None:
+        super().__init__(exists=True, dir_okay=False, path_type=Path)
+
+    def convert(self, value, param, ctx):
+        path = super().convert(value, param, ctx)
+        try:
+            load_quality_config(path)
+        except QualityConfigError as exc:
+            self.fail(str(exc), param, ctx)
+        return path
+
+
+QUALITY_CONFIG_PATH = _QualityConfigPath()
 
 
 def _validate_similarity_threshold(_ctx: click.Context, _param: click.Parameter, value: float) -> float:
@@ -1756,7 +1775,23 @@ def _print_catalog_summary(total: int, failures: list[tuple[str, str]], reports_
 CATALOG_SUMMARY_FILENAME = "catalog-summary.json"
 
 
-def _catalog_child_argv_from_ctx(ctx: click.Context, skill_dir: Path, output_dir: Path) -> list[str]:
+def _catalog_results_dir(ctx: click.Context, skill_dir: Path, catalog_root: Path) -> Path | None:
+    """Preserve catalog-relative parents under an external Tier 3 results root."""
+    import os
+
+    from skillevaluator.tier3.results_location import ENV_RESULTS_DIR
+
+    configured = ctx.params.get("results_dir")
+    if configured is None:
+        configured = os.environ.get(ENV_RESULTS_DIR)
+    if not configured:
+        return None
+    return Path(configured).expanduser() / skill_dir.relative_to(catalog_root).parent
+
+
+def _catalog_child_argv_from_ctx(
+    ctx: click.Context, skill_dir: Path, output_dir: Path, *, catalog_root: Path | None = None
+) -> list[str]:
     """Rebuild ``validate`` argv from the active Click context (pytest-safe)."""
     params = ctx.params
     argv: list[str] = ["validate", str(skill_dir)]
@@ -1791,6 +1826,8 @@ def _catalog_child_argv_from_ctx(ctx: click.Context, skill_dir: Path, output_dir
     min_score = params.get("min_score", 70)
     if min_score != 70:
         argv.extend(["--min-score", str(min_score)])
+    if params.get("quality_config"):
+        argv.extend(["--quality-config", str(Path(params["quality_config"]).resolve())])
     if params.get("external"):
         argv.append("--external")
     if params.get("policy_path"):
@@ -1853,8 +1890,9 @@ def _catalog_child_argv_from_ctx(ctx: click.Context, skill_dir: Path, output_dir
         argv.extend(["--agent-model", str(override)])
     if params.get("grading_mode"):
         argv.extend(["--grading-mode", str(params["grading_mode"])])
-    if params.get("results_dir"):
-        argv.extend(["--results-dir", str(params["results_dir"])])
+    results_dir = _catalog_results_dir(ctx, skill_dir, catalog_root) if catalog_root else params.get("results_dir")
+    if results_dir is not None:
+        argv.extend(["--results-dir", str(results_dir)])
     for skill in params.get("include_skills") or ():
         argv.extend(["--include-skills", str(skill)])
     if params.get("copy_repo"):
@@ -1991,9 +2029,11 @@ def _write_catalog_summary(output_dir: Path, skills: list[dict[str, object]]) ->
 def _validate_catalog(
     ctx: click.Context,
     *,
+    resolved_target: Path,
     skill_dirs: list[Path],
     output_dir: Path,
     workers: int = 1,
+    discovery_problems: dict[Path, str] | None = None,
 ) -> None:
     """Run the full validate pipeline once per skill in the catalog.
 
@@ -2010,35 +2050,47 @@ def _validate_catalog(
             f"--previous-version (or {PREVIOUS_VERSION_ENV}) applies to one skill and cannot be reused for a "
             "catalog; validate each skill separately with its own previous version"
         )
+    discovery_problems = discovery_problems or {}
     if workers > 1:
-        _validate_catalog_parallel(ctx, skill_dirs=skill_dirs, output_dir=output_dir, workers=workers)
+        _validate_catalog_parallel(
+            ctx,
+            skill_dirs=skill_dirs,
+            catalog_root=resolved_target,
+            output_dir=output_dir,
+            workers=workers,
+            discovery_problems=discovery_problems,
+        )
         return
 
-    failures: list[tuple[str, str]] = []
+    failures = [(path.relative_to(resolved_target).as_posix(), reason) for path, reason in discovery_problems.items()]
     meta_key = "skillevaluator_catalog_report_root"
     previous_catalog_root = ctx.meta.get(meta_key)
     ctx.meta[meta_key] = output_dir
     skill_reports: dict[str, str | None] = {}
     try:
         for index, skill_dir in enumerate(skill_dirs, start=1):
-            _print_catalog_divider(index, len(skill_dirs), skill_dir.name)
-            skill_output = output_dir / skill_dir.name
+            skill_name = skill_dir.relative_to(resolved_target).as_posix()
+            _print_catalog_divider(index, len(skill_dirs), skill_name)
+            if skill_dir in discovery_problems:
+                continue
+            skill_output = output_dir / skill_name
             overrides = {
                 **ctx.params,
                 "target_path": skill_dir,
                 "content_type": "skill",
                 "output_dir": skill_output,
+                "results_dir": _catalog_results_dir(ctx, skill_dir, resolved_target),
             }
             reason = ""
             try:
                 ctx.invoke(validate, **overrides)
             except click.ClickException as exc:
                 reason = str(getattr(exc, "message", exc))
-                failures.append((skill_dir.name, reason))
+                failures.append((skill_name, reason))
             except Exception as exc:  # unexpected: keep the catalog running, report it on the scoreboard
                 reason = f"unexpected error: {exc}"
-                failures.append((skill_dir.name, reason))
-            skill_reports[skill_dir.name] = _consume_validate_json_report()
+                failures.append((skill_name, reason))
+            skill_reports[skill_name] = _consume_validate_json_report()
     finally:
         if previous_catalog_root is None:
             ctx.meta.pop(meta_key, None)
@@ -2047,13 +2099,13 @@ def _validate_catalog(
     failure_map = dict(failures)
     skill_entries = [
         _catalog_skill_entry(
-            skill_dir.name,
-            output_dir / skill_dir.name,
-            passed=skill_dir.name not in failure_map,
-            reason=failure_map.get(skill_dir.name, ""),
-            json_report_name=skill_reports.get(skill_dir.name),
+            skill_name,
+            output_dir / skill_name,
+            passed=skill_name not in failure_map,
+            reason=failure_map.get(skill_name, ""),
+            json_report_name=skill_reports.get(skill_name),
         )
-        for skill_dir in skill_dirs
+        for skill_name in (skill_dir.relative_to(resolved_target).as_posix() for skill_dir in skill_dirs)
     ]
     _write_catalog_summary(output_dir, skill_entries)
     _print_catalog_summary(len(skill_dirs), failures, output_dir)
@@ -2068,12 +2120,15 @@ def _validate_catalog_parallel(
     ctx: click.Context,
     *,
     skill_dirs: list[Path],
+    catalog_root: Path,
     output_dir: Path,
     workers: int,
+    discovery_problems: dict[Path, str] | None = None,
 ) -> None:
     """Validate catalog skills concurrently in isolated child processes."""
     from skillevaluator.reporting.console_ui import make_view_console
 
+    discovery_problems = discovery_problems or {}
     if not skill_dirs:
         _write_catalog_summary(output_dir, [])
         _print_catalog_summary(0, [], output_dir)
@@ -2087,14 +2142,16 @@ def _validate_catalog_parallel(
 
     jobs = [
         {
-            "skill_name": skill_dir.name,
-            "argv": _catalog_child_argv_from_ctx(ctx, skill_dir, output_dir / skill_dir.name),
+            "skill_name": skill_name,
+            "argv": _catalog_child_argv_from_ctx(ctx, skill_dir, output_dir / skill_name, catalog_root=catalog_root),
             "cwd": workdir,
-            "output_dir": str(output_dir / skill_dir.name),
+            "output_dir": str(output_dir / skill_name),
         }
         for skill_dir in skill_dirs
+        if skill_dir not in discovery_problems
+        for skill_name in [skill_dir.relative_to(catalog_root).as_posix()]
     ]
-    failures: list[tuple[str, str]] = []
+    failures = [(path.relative_to(catalog_root).as_posix(), reason) for path, reason in discovery_problems.items()]
     worker_reports: dict[str, str | None] = {}
     with ProcessPoolExecutor(max_workers=workers) as executor:
         futures = [executor.submit(_run_catalog_skill_worker, job) for job in jobs]
@@ -2108,13 +2165,13 @@ def _validate_catalog_parallel(
     failure_map = dict(failures)
     skill_entries = [
         _catalog_skill_entry(
-            skill_dir.name,
-            output_dir / skill_dir.name,
-            passed=skill_dir.name not in failure_map,
-            reason=failure_map.get(skill_dir.name, ""),
-            json_report_name=worker_reports.get(skill_dir.name),
+            skill_name,
+            output_dir / skill_name,
+            passed=skill_name not in failure_map,
+            reason=failure_map.get(skill_name, ""),
+            json_report_name=worker_reports.get(skill_name),
         )
-        for skill_dir in skill_dirs
+        for skill_name in (skill_dir.relative_to(catalog_root).as_posix() for skill_dir in skill_dirs)
     ]
     _write_catalog_summary(output_dir, skill_entries)
     _print_catalog_summary(len(skill_dirs), failures, output_dir)
@@ -2318,8 +2375,11 @@ class _ValidateTarget(NamedTuple):
 
     content_type: str
     root: Path
-    #: The direct child skills of a catalog (a directory of skills without a root manifest); otherwise empty.
+    #: The skills of a catalog (a directory of skills without a root manifest), nested ones included, and the
+    #: linked or unreadable skill folders discovery reported; otherwise empty.
     catalog_skill_dirs: list[Path]
+    #: The catalog entries discovery could not validate (linked or unreadable), each with its reason.
+    discovery_problems: dict[Path, str]
 
 
 def _resolve_validate_target(
@@ -2336,9 +2396,11 @@ def _resolve_validate_target(
     directory, never when the target names a selected manifest; an
     auto-detected type is then detected again on the resolved root. A
     directory of skills without a regular root ``SKILL.md`` is a catalog, and
-    its direct child skills are returned so each one is validated as its own
-    job. A directory of unknown type whose direct children are plugins is
-    refused: no plugin check would run on it.
+    its skills, nested ones included, are returned so each one is validated as
+    its own job; linked or unreadable skill folders are returned with their
+    discovery problems and reported as failed entries. A directory of unknown
+    type whose direct children are plugins is refused: no plugin check would
+    run on it.
     """
     from skillevaluator.cli_core import detect_content_type, resolve_content_path
     from skillevaluator.constants import (
@@ -2375,6 +2437,7 @@ def _resolve_validate_target(
             resolved_target = resolve_content_path(resolved_target, resolved_type)
 
     catalog_skill_dirs: list[Path] = []
+    discovery_problems: dict[Path, str] = {}
     if (
         resolved_type in (CONTENT_TYPE_SKILL, CONTENT_TYPE_UNKNOWN)
         and resolved_target.is_dir()
@@ -2382,12 +2445,15 @@ def _resolve_validate_target(
     ):
         from skillevaluator.utils.helpers import find_skills_in_directory
 
+        problems: dict[Path, str] = {}
         try:
-            discovered = find_skills_in_directory(resolved_target)
+            discovered = find_skills_in_directory(resolved_target, problems=problems)
         except ValueError as exc:
             raise click.ClickException(f"Cannot discover validation target safely: {exc}") from exc
+        # A root that holds a manifest of its own (even one that is not regular) is one skill, not a catalog.
         if resolved_target not in discovered:
-            catalog_skill_dirs = sorted(skill_dir for skill_dir in discovered if skill_dir.parent == resolved_target)
+            catalog_skill_dirs = discovered
+            discovery_problems = problems
     if not catalog_skill_dirs and resolved_type == CONTENT_TYPE_UNKNOWN and resolved_target.is_dir():
         # Generic checks on a folder of plugins never check a plugin, so its report would pass any plugin.
         try:
@@ -2405,7 +2471,7 @@ def _resolve_validate_target(
                 f"Validation target is a folder of {len(plugin_dirs)} plugins ({names}{more}), not one plugin; "
                 "validate each plugin root on its own"
             )
-    return _ValidateTarget(resolved_type, resolved_target, catalog_skill_dirs)
+    return _ValidateTarget(resolved_type, resolved_target, catalog_skill_dirs, discovery_problems)
 
 
 @cli.command(epilog=_VALIDATE_EPILOG)
@@ -2507,6 +2573,14 @@ def _resolve_validate_target(
     cls=GroupedOption,
     help_group=_TIER1_GROUP,
     help="Minimum quality score (0-100) required to pass when the 'quality' check runs.",
+)
+@click.option(
+    "--quality-config",
+    type=QUALITY_CONFIG_PATH,
+    default=None,
+    cls=GroupedOption,
+    help_group=_TIER1_GROUP,
+    help="Override the packaged quality-default.yaml with a custom YAML file.",
 )
 @click.option(
     "--profile",
@@ -2832,6 +2906,7 @@ def validate(
     llm: bool,
     llm_verify: bool,
     min_score: int,
+    quality_config: Path | None,
     profile: str | None,
     external: bool,
     policy_path: Path | None,
@@ -2957,7 +3032,7 @@ def validate(
 
     run_tier2 = dedup and detected_type in (CONTENT_TYPE_SKILL, CONTENT_TYPE_PLUGIN)
     run_tier3 = agent_eval and detected_type in (CONTENT_TYPE_SKILL, CONTENT_TYPE_PLUGIN)
-    resolved_type, resolved_target, catalog_skill_dirs = _resolve_validate_target(
+    resolved_type, resolved_target, catalog_skill_dirs, discovery_problems = _resolve_validate_target(
         target_path,
         content_type=content_type,
         detected_type=detected_type,
@@ -2998,9 +3073,11 @@ def validate(
     if catalog_skill_dirs:
         _validate_catalog(
             click.get_current_context(),
+            resolved_target=resolved_target,
             skill_dirs=catalog_skill_dirs,
             output_dir=output_dir,
             workers=workers,
+            discovery_problems=discovery_problems,
         )
         return
 
@@ -3071,6 +3148,7 @@ def validate(
         use_llm=llm,
         llm_verify=llm_verify,
         min_score=min_score,
+        quality_config=quality_config,
         previous_version=previous_version,
         policy=policy,
         content_type=resolved_type,
@@ -3370,12 +3448,24 @@ validate.help_group_descriptions = {
 @cli.command("quality-check")
 @_target_argument
 @click.option("--min-score", type=int, default=70, show_default=True)
+@click.option(
+    "--quality-config",
+    type=QUALITY_CONFIG_PATH,
+    default=None,
+    help="Override the packaged quality-default.yaml with a custom YAML file.",
+)
 @_report_options
-def quality_check(target_path: Path, min_score: int, report_formats: tuple[str, ...], output_dir: Path) -> None:
+def quality_check(
+    target_path: Path,
+    min_score: int,
+    quality_config: Path | None,
+    report_formats: tuple[str, ...],
+    output_dir: Path,
+) -> None:
     """Score skill quality across correctness, discoverability, reliability, and efficiency."""
     output_dir = _resolve_file_report_output_location(target_path.resolve(), output_dir, report_formats)
     if not emit_reports(
-        run_quality_check(target_path, min_score=min_score),
+        run_quality_check(target_path, min_score=min_score, quality_config=quality_config),
         report_formats=report_formats,
         output_dir=output_dir,
         basename=report_basename("quality"),
@@ -3650,6 +3740,12 @@ def _workflow_report_options(func):
     "--llm/--no-llm", default=None, help="Include rubric, LLM security, and verification [default: when configured]."
 )
 @click.option("--min-score", type=click.IntRange(0, 100), default=70, show_default=True)
+@click.option(
+    "--quality-config",
+    type=QUALITY_CONFIG_PATH,
+    default=None,
+    help="Override the packaged quality-default.yaml with a custom YAML file.",
+)
 @click.option("--profile", default=None, help="Validation policy profile [default: external].")
 @click.option("--previous-version", default=None, help="Previous version for version checks.")
 @_workflow_report_options
@@ -3658,6 +3754,7 @@ def _tier1_workflow(
     checks: str | None,
     llm: bool | None,
     min_score: int,
+    quality_config: Path | None,
     profile: str | None,
     previous_version: str | None,
     report_formats: tuple[str, ...],
@@ -3676,6 +3773,7 @@ def _tier1_workflow(
         checks=checks,
         llm=llm,
         min_score=min_score,
+        quality_config=quality_config,
         profile=policy,
         previous_version=previous_version,
     )

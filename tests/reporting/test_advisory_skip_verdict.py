@@ -4080,3 +4080,38 @@ def test_completed_tier3_rejects_punctuation_and_placeholder_identities(
     assert json_payload["publication_status"] == "incomplete"
     assert json_payload["publication"]["tier3"]["evidence_complete"] is False
     assert "Overall verdict: INCOMPLETE" in benchmark
+
+
+def test_previous_skill_tier3_skip_never_certifies_publication(tmp_path: Path) -> None:
+    from skillevaluator import cli as cli_module
+    from skillevaluator.reporting.base import assess_publication
+
+    results = _publication_ready_results("MD")
+    assert assess_publication(results).status == "pass"
+    current = tmp_path / "current" / "candidate-md"
+    previous = tmp_path / "previous" / "candidate-md"
+    for skill, owner in ((current, "release"), (previous, "platform")):
+        skill.mkdir(parents=True)
+        (skill / "SKILL.md").write_text(
+            f"---\nname: candidate-md\ndescription: Demo\nmetadata:\n  owner: {owner}\n---\n# Demo\n",
+            encoding="utf-8",
+        )
+    (previous / "BENCHMARK.md").write_text("# Prior result\n", encoding="utf-8")
+
+    skipped = cli_module._run_agent_eval_or_skip(
+        current,
+        agents="codex",
+        env_mode="docker",
+        skip_baseline=False,
+        n_concurrent=None,
+        max_agents=None,
+        previous_skill=previous,
+    )
+    skipped.metadata["gating"] = {"tier": 3, "blocking": False}
+    results[-1] = skipped
+    assessment = assess_publication(results)
+
+    assert skipped.metadata["tier3_change_decision"]["reason_code"] == "metadata_only_change"
+    assert assessment.status == "incomplete"
+    assert assessment.benchmark_policy["tier3_required"] is True
+    _assert_publication_incomplete_across_reporters(results, tmp_path)

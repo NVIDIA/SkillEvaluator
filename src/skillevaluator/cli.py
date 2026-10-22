@@ -775,6 +775,7 @@ def _run_agent_eval_or_skip(
     agent_runtime_preflight: bool | None = None,
     block_on_agent_eval: bool = False,
     validate_source: bool = True,
+    previous_skill: Path | None = None,
     repo_context_exclude_paths: tuple[Path, ...] = (),
     evaluated_source: dict[str, str] | None = None,
     progress_reporter=None,
@@ -791,6 +792,36 @@ def _run_agent_eval_or_skip(
     # Persist the entry name that publication targets record, not a lexical
     # alias that a case- or normalization-insensitive filesystem accepted.
     skill_name = publication_target_name(target_path) or target_path.name
+    if previous_skill is not None:
+        from skillevaluator.evaluation.tier3_report import advisory_skip_result
+        from skillevaluator.tier3.change_detection import tier3_run_decision
+
+        decision = tier3_run_decision(target_path, previous_skill)
+        if decision.should_skip:
+            change_summary = (
+                "only SKILL.md metadata changed"
+                if decision.reason_code == "metadata_only_change"
+                else "SKILL.md content is unchanged"
+            )
+            result = advisory_skip_result(
+                f"Tier 3 live evaluation skipped: {change_summary} "
+                f"since the prior evaluation ({decision.evidence_file}).",
+                skill_name=skill_name,
+            )
+            result.metadata["tier3_change_decision"] = decision.to_dict()
+            result.metadata["tier3_applicability"] = {
+                "applicability": "not_required",
+                "reason_code": decision.reason_code,
+                "source_kind": "skill",
+            }
+            payload = result.metadata.get("agent_eval")
+            if isinstance(payload, dict):
+                payload["reason_code"] = decision.reason_code
+                summary = payload.get("summary")
+                if isinstance(summary, dict):
+                    summary["reason_code"] = decision.reason_code
+            return result
+
     if validate_source:
         from skillevaluator.evaluation.tier3_report import dataset_required_result
         from skillevaluator.tier3.evals_spec import validate_tier3_source
@@ -1059,6 +1090,8 @@ def _catalog_child_argv_from_ctx(ctx: click.Context, skill_dir: Path, output_dir
         argv.extend(["--checks", str(params["checks"])])
     if params.get("previous_version"):
         argv.extend(["--previous-version", str(params["previous_version"])])
+    if params.get("previous_skill"):
+        argv.extend(["--previous-skill", str(params["previous_skill"])])
     if params.get("fail_fast"):
         argv.append("--fail-fast")
     if params.get("continue_on_failure"):
@@ -1278,6 +1311,11 @@ def _validate_catalog(
         raise click.ClickException(
             "--previous-version applies to one skill and cannot be reused for a catalog; "
             "validate each skill separately with its own previous version"
+        )
+    if ctx.params.get("previous_skill"):
+        raise click.ClickException(
+            "--previous-skill applies to one skill and cannot be reused for a catalog; "
+            "validate each skill separately with its own previous copy"
         )
 
     skill_dirs = sorted(marker.parent for marker in resolved_target.glob("*/SKILL.md"))
@@ -1648,6 +1686,14 @@ def _print_run_banner(target_path: Path, content_type: str, profile: str | None)
     help="Run Tier 3 live agent evaluation. On by default for skills; --no-tier3 also disables dataset generation.",
 )
 @click.option(
+    "--previous-skill",
+    type=click.Path(exists=True, path_type=Path),
+    default=None,
+    cls=GroupedOption,
+    help_group=_TIER3_GROUP,
+    help="Previous evaluated copy of this skill. Metadata-only SKILL.md changes skip a fresh Tier 3 run when it has a skill card or benchmark.",
+)
+@click.option(
     "--block-on-agent-eval/--no-block-on-agent-eval",
     default=None,
     cls=GroupedOption,
@@ -1844,6 +1890,7 @@ def validate(
     dedup: bool,
     block_on_dedup: bool | None,
     agent_eval: bool | None,
+    previous_skill: Path | None,
     block_on_agent_eval: bool | None,
     autopilot: bool | None,
     agents: str | None,
@@ -1989,6 +2036,16 @@ def validate(
         )
         return
 
+    tier3_change_decision = None
+    if previous_skill is not None:
+        if not agent_eval:
+            raise click.ClickException("--previous-skill requires --tier3 or --agent-eval.")
+        if not preflight_tier3_source:
+            raise click.ClickException("--previous-skill applies only to a single skill.")
+        from skillevaluator.tier3.change_detection import tier3_run_decision
+
+        tier3_change_decision = tier3_run_decision(target_path, previous_skill)
+
     # Quiet (default) drives the compact pipeline view; --verbose keeps the
     # historical full-detail stream, as does DEBUG logging via the group -v.
     run_tier3 = agent_eval
@@ -2023,7 +2080,7 @@ def validate(
     autopilot_error: str | None = None
     autopilot_dataset_note: str | None = None
     view.start()
-    if autopilot:
+    if autopilot and (tier3_change_decision is None or tier3_change_decision.should_run):
         # Generation now precedes Tier 1, so surface it on the first live block
         # instead of leaving the pipeline view blank while the dataset is prepared.
         view.tier_start(0)
@@ -2168,6 +2225,7 @@ def validate(
             agent_runtime_preflight=agent_runtime_preflight,
             block_on_agent_eval=block_on_agent_eval_effective,
             validate_source=preflight_tier3_source,
+            previous_skill=previous_skill,
             evaluated_source=evaluated_source,
             progress_reporter=reporter,
             repo_context_exclude_paths=tuple(repo_context_exclude_paths),
@@ -2710,6 +2768,12 @@ def _tier2_workflow(
         "NVIDIA Build=opencode, OpenAI=codex, Anthropic=claude-code."
     ),
 )
+@click.option(
+    "--previous-skill",
+    type=click.Path(exists=True, path_type=Path),
+    default=None,
+    help="Previous evaluated copy of this skill. Metadata-only SKILL.md changes skip the live evaluation when it has a skill card or benchmark.",
+)
 @click.option("--env-mode", default="docker", show_default=True, type=ENV_MODE_CHOICE)
 @click.option(
     "--environment-kwarg",
@@ -2777,6 +2841,7 @@ def _tier2_workflow(
 def evaluate(
     skill_path: Path,
     agents: str | None,
+    previous_skill: Path | None,
     env_mode: str,
     environment_kwarg: tuple[str, ...],
     autopilot: bool,
@@ -2806,6 +2871,17 @@ def evaluate(
     progress: str,
 ) -> None:
     """Run Tier 3 live agent evaluation."""
+    if previous_skill is not None:
+        from skillevaluator.tier3.change_detection import tier3_run_decision
+
+        decision = tier3_run_decision(skill_path, previous_skill)
+        if decision.should_skip:
+            click.echo(
+                "Tier 3 live evaluation skipped: "
+                f"{decision.reason_code} confirmed by prior {decision.evidence_file}."
+            )
+            return
+
     from skillevaluator.evaluation import EvaluationOptions, EvaluationService
     from skillevaluator.tier3.harbor.progress import create_progress_reporter
 

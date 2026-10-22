@@ -530,10 +530,23 @@ class BenchmarkReporter(ReporterBase):
             for finding, result in findings_with_result
             if not result.passed or finding.severity.value in {"critical", "high"}
         ]
+        gate_failures = [
+            (result.validator_name, message)
+            for result in results
+            if not result.passed
+            for message in result.gate_failures
+        ]
 
-        if blocking:
+        if gate_failures or blocking:
             lines.extend(["## Blocking Findings", ""])
-            for finding in _top_findings(blocking, limit=self.max_findings_shown):
+            shown_gates = gate_failures[: max(0, self.max_findings_shown)]
+            for validator, message in shown_gates:
+                lines.append(
+                    f"- **GATE** {_publication_safe_inline(validator, private_labels)}: "
+                    f"{_publication_safe_inline(message, private_labels)}"
+                )
+            remaining_slots = max(0, self.max_findings_shown - len(shown_gates))
+            for finding in _top_findings(blocking, limit=remaining_slots):
                 lines.append(_finding_line(finding, private_labels))
             lines.append("")
 

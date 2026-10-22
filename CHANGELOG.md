@@ -124,6 +124,11 @@ All notable changes to SkillEvaluator are documented in this file.
 
 ### Changed
 
+- README and onboarding docs now offer two first-run paths: a lightweight,
+  keyless quality check on a bundled skill, or an NVIDIA Build rubric evaluation
+  with eligible free prototyping access. Installation adds extras as needed,
+  and the guides separate quality results from full scanner and live-agent
+  evidence.
 - Native plugin loading checks the MCP servers it writes into the agent's
   configuration against the same environment-variable and host allowlists as
   other MCP declarations, and a refused plugin server now says how to approve
@@ -165,6 +170,10 @@ All notable changes to SkillEvaluator are documented in this file.
 - Changing finding severities through a policy no longer clears an independent
   quality-score threshold failure. A score below `--min-score` still fails,
   and its reason appears in the terminal, HTML, benchmark, and JSON reports.
+- Tier 3 on Windows passes `PROGRAMFILES`, `PROGRAMW6432` and `PROGRAMDATA` to
+  Harbor, so Docker Desktop finds its `compose` plugin, and passes
+  `PYTHONUTF8` and `PYTHONIOENCODING` so Python UTF-8 mode reaches Harbor on
+  non-UTF-8 locales.
 - The native-loading and loose-parts Claude Code arms ran on a different agent
   wrapper from the no-plugin and skills-only arms, so Vertex AI routing and the
   Docker agent setup (which no longer installs Node/npm) could differ between the

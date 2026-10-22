@@ -3,17 +3,25 @@ title: "Installation"
 description: "Install SkillEvaluator with uv, from source, or in Docker, and choose per-tier extras to keep the footprint small."
 ---
 
-This page gets SkillEvaluator installed the way you want it — the full bundle, a smaller per-tier install, an editable source checkout, or a container. No API key is needed to install or to run the deterministic Tier 1 checks; keys only come into play later, for LLM-backed features ([Providers & Credentials](configuration.mdx)).
+Start with the base package for deterministic quality checks, then add only the
+extras needed for your next command. No API key is needed to install or to run
+deterministic Tier 1 checks. LLM-backed features use a configured provider
+([Providers & Credentials](configuration.mdx)); live Tier 3 evaluation adds an
+agent runtime and a sandbox.
 
-If you just want the fastest path to a first result, the [Quickstart](quickstart.mdx) covers it in one command.
+For a complete first run against a bundled skill, use the
+[keyless Quickstart](quickstart.mdx#run-without-an-llm), or add the `llm` extra
+for the [NVIDIA Build route](quickstart.mdx#use-nvidia-build). Those routes use a
+source checkout and `uv run`; the standalone install below is convenient when
+you already have your own skill directory.
 
 This project will download and install additional third-party open source software projects. Review the license terms of these open source projects before use.
 
 ## Requirements
 
 - [uv](https://docs.astral.sh/uv/getting-started/installation/) for the recommended install paths (plain pip works too — see the source tab below).
-- Python 3.12 or 3.13. `uv tool install` and `uv sync` provision a supported interpreter automatically when passed `--python 3.13`; only the plain-pip path needs one on PATH.
-- Git for source installs and separately installed security scanners.
+- Python 3.12 or 3.13. `uv tool install`, `uv run`, and `uv sync` provision a supported interpreter automatically when passed `--python 3.13`; only the plain-pip path needs one on PATH.
+- Git for installs from the repository and for the bundled-example checkout.
 - Docker, only for the container install and Tier 3 Docker-mode evaluation.
 - No API key is needed for deterministic Tier 1 checks. Full default scanner
   coverage requires the `security` extra plus separate Semgrep, SkillSpector,
@@ -25,24 +33,45 @@ This project will download and install additional third-party open source softwa
 <Tabs>
 <Tab title="uv tool (recommended)" language="uv">
 
-Install the full bundle as a standalone tool — uv provisions Python 3.13 for you:
+Install the base package as a standalone tool — uv provisions Python 3.13 for you:
 
-```bash title="Install everything"
-uv tool install --python 3.13 "skillevaluator[all] @ git+https://github.com/NVIDIA/SkillEvaluator.git"
+```bash title="Install the base package"
+uv tool install --python 3.13 "skillevaluator @ git+https://github.com/NVIDIA/SkillEvaluator.git"
+skillevaluator quality-check ./my-skill
 ```
 
-Prefer a smaller footprint? Swap the extras in the same one-liner:
+Replace `./my-skill` with a directory containing a `SKILL.md`. This quality
+check needs no API key, Docker, or security scanner. Full static scanner
+coverage has separate requirements under [System tools](#system-tools).
+
+Add the `llm` extra when you want to make your first rubric-evaluation call:
+
+```bash title="Add LLM support"
+uv tool install --python 3.13 --reinstall "skillevaluator[llm] @ git+https://github.com/NVIDIA/SkillEvaluator.git"
+```
+
+Then follow the [NVIDIA Build setup](quickstart.mdx#use-nvidia-build), using
+`skillevaluator rubric-eval ./my-skill` for a standalone installation. Provider
+clients install with the extra; an API key is still required for the model call.
+
+For other features, select their extras or use the optional evaluation bundle:
 
 ```bash title="Install with selected extras"
-uv tool install --python 3.13 "skillevaluator @ git+https://github.com/NVIDIA/SkillEvaluator.git"            # base checks; scanner checks report INCOMPLETE
-uv tool install --python 3.13 "skillevaluator[security] @ git+https://github.com/NVIDIA/SkillEvaluator.git"  # + bundled Python security scanners
-uv tool install --python 3.13 "skillevaluator[tier2,tier3] @ git+https://github.com/NVIDIA/SkillEvaluator.git"
+uv tool install --python 3.13 --reinstall "skillevaluator[security] @ git+https://github.com/NVIDIA/SkillEvaluator.git"
+uv tool install --python 3.13 --reinstall "skillevaluator[tier2,tier3] @ git+https://github.com/NVIDIA/SkillEvaluator.git"
+uv tool install --python 3.13 --reinstall "skillevaluator[all] @ git+https://github.com/NVIDIA/SkillEvaluator.git"
 ```
 
-To pick up the latest commit later, rerun the install with `--reinstall`:
+These are alternatives: include all the extras you need in the chosen command.
+`all` includes `tier2`, `tier3`, and `security`; it excludes the optional
+`dashboard` extra and external tools.
+
+To pick up the latest commit later, rerun the install with `--reinstall`,
+keeping your chosen extras. Choose the command matching your install:
 
 ```bash title="Upgrade to the latest commit"
-uv tool install --python 3.13 --reinstall "skillevaluator[all] @ git+https://github.com/NVIDIA/SkillEvaluator.git"
+uv tool install --python 3.13 --reinstall "skillevaluator @ git+https://github.com/NVIDIA/SkillEvaluator.git"
+uv tool install --python 3.13 --reinstall "skillevaluator[llm] @ git+https://github.com/NVIDIA/SkillEvaluator.git"
 ```
 
 Then confirm the command resolves:
@@ -54,7 +83,12 @@ skillevaluator --version
 </Tab>
 <Tab title="From source" language="source">
 
-For development or an editable environment, clone the repository and let uv create the environment from the committed lockfile:
+The [Quickstart](quickstart.mdx) uses `uv run --python 3.13` for the base quality
+check and adds `--extra llm` for the NVIDIA Build rubric call. This installs
+only the dependencies needed for each route.
+
+For development or an editable environment with every Python extra,
+clone the repository and let uv create the environment from the committed lockfile:
 
 ```bash title="Clone and sync"
 git clone https://github.com/NVIDIA/SkillEvaluator.git
@@ -88,7 +122,7 @@ skillevaluator --version          # inside the activated pip venv
 </Tab>
 <Tab title="Docker" language="docker">
 
-The repository ships a [Dockerfile](https://github.com/NVIDIA/SkillEvaluator/blob/main/Dockerfile) that installs every pip-installable feature (`[all]`). Build the image locally and run a deterministic validation against the included sample skill:
+The repository ships a [Dockerfile](https://github.com/NVIDIA/SkillEvaluator/blob/main/Dockerfile) that installs the evaluation bundle (`[all]`, excluding the optional dashboard). Run the following from a repository checkout to build the image locally and run a deterministic validation against the included sample skill:
 
 ```bash title="Build and run"
 docker build -t skillevaluator:local .
@@ -127,7 +161,7 @@ The image does not bundle the external Semgrep, SkillSpector, or Gitleaks execut
 
 ## Choosing extras
 
-The base package completes the schema, PII, license, quality, Unicode, script-lint, and hygiene checks on its own; scanner-backed checks still run but report INCOMPLETE until the `security` extra and the required external scanner executables are installed. Everything else lives behind an extra:
+The base package completes the schema, PII, license, quality, Unicode, script-lint, and hygiene checks on its own. `quality-check` needs no scanner setup. When you run the full static suite, scanner-backed checks report INCOMPLETE until the `security` extra and the required external scanner executables are installed. Running without an LLM or API key does not remove those scanner requirements. Everything else lives behind an extra:
 
 [Harbor](https://github.com/harbor-framework/harbor) is the open-source agent
 evaluation framework that the `tier3` extra installs for live task execution
@@ -189,7 +223,7 @@ Install any missing required scanner named in the report. The `security` extra s
 
 <CardGroup cols={2}>
   <Card title="Quickstart" icon="rocket" href="quickstart.mdx">
-    Run your first evaluation in about two minutes — no API key required.
+    Check a bundled skill without an LLM, or use NVIDIA Build for a rubric review.
   </Card>
   <Card title="Providers & Credentials" icon="shield" href="configuration.mdx">
     Wire up an LLM provider for Tier 2, Tier 3, and LLM-backed checks.

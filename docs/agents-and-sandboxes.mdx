@@ -50,7 +50,8 @@ To make an override persistent, set it in `evals/config.yml` under
 `harbor.agents.<name>.model` — see [Eval Datasets](eval-datasets.mdx).
 
 <Note>
-Agent CLIs are user-supplied: SkillEvaluator never installs an agent.
+Harbor installs agent CLIs in Docker and remote task environments. Local mode
+requires an agent CLI already installed on your machine.
 Operator credentials come only from the host environment — a
 `harbor.runtime_env` entry in `evals/config.yml` that sets an operator-owned
 credential name (`ANTHROPIC_API_KEY`, `ANTHROPIC_BASE_URL`,
@@ -431,6 +432,26 @@ The default path needs a running Docker daemon and Docker Compose v2 —
 own container, and both arms of the comparison are staged from the same
 environment definition — the baseline image differs only by not containing
 the skill — so the skill stays the only variable.
+
+### Windows hosts
+
+On native Windows, use Docker Desktop with Linux containers. Keep the Windows
+system variables available in the shell that runs SkillEvaluator: Harbor
+inherits `PROGRAMFILES`, `PROGRAMW6432`, and `PROGRAMDATA` so Docker Desktop
+can discover its Compose plugin.
+
+For a non-UTF-8 Windows locale, enable Python UTF-8 mode in PowerShell before
+running readiness checks or evaluations:
+
+```powershell title="Windows Docker readiness"
+$env:PYTHONUTF8 = "1"
+$env:PYTHONIOENCODING = "utf-8"
+skillevaluator doctor --env-mode docker
+```
+
+SkillEvaluator forwards both Python settings to Harbor when they are set;
+it does not enable them automatically. Native Windows local mode remains
+unsupported; use Docker or run local mode inside WSL2.
 
 ### Resource tuning
 

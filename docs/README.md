@@ -22,6 +22,7 @@ contributors making non-trivial edits.
 - `agents-and-sandboxes.mdx` — agents, environment backends, local mode, readiness
 - `custom-graders.mdx` — bring-your-own graders and native Harbor tasks
 - `reports.mdx` — report formats, scores, and the results-on-disk contract
+- `performance-dashboard.mdx` — compare saved Tier 3 scores and resource use
 - `benchmark-rollout.mdx` — regenerating and promoting `BENCHMARK.md` cards
 - `ci-integration.mdx` — exit codes, GitHub Actions recipe, progressive adoption
 - `cli-reference.mdx` — every command and flag

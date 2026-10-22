@@ -414,15 +414,15 @@ agents scored under different policies or metric sets.
 
 ### Skill Lift
 
-Skill Lift is `with-skill overall score - without-skill overall score`. It uses
-the same score units as both arms and ranges from -1.0 to +1.0. Because live
-agent runs are noisy, especially at low attempt counts, small deltas are kept
-neutral. The verdict bands:
+Skill Lift is `with-skill overall score - without-skill overall score` for
+comparable cases. It uses the same score units as both arms and ranges from
+-1.0 to +1.0. Because live agent runs are noisy, especially at low attempt
+counts, small deltas are kept neutral. The verdict bands:
 
 | Lift | Verdict | Read it as |
 | --- | --- | --- |
-| ≥ +0.05 | Pass | The skill measurably helps — publishable signal |
-| between −0.10 and +0.05 | Neutral | Within run noise; raise `--n-attempts` before concluding anything |
+| ≥ +0.05 | Pass | Positive observed lift; publication still requires the dimension and evidence gates |
+| between −0.10 and +0.05 | Neutral | Within the neutral band; raise `--n-attempts` for more evidence |
 | ≤ −0.10 | Fail | The skill makes the agent worse — investigate before shipping |
 
 These bands color-code Skill Lift as diagnostic evidence. They do not determine
@@ -432,10 +432,29 @@ all five dimensions at 0.50 or above; **NEUTRAL** when no agent passes but at
 least one has no dimension below 0.40; and **FAIL** when every successful agent
 has a dimension below 0.40.
 
-So a +0.03 lift isn't a pass — it's noise until more attempts say otherwise.
-Lift requires both arms; if you ran with `--skip-baseline`, there is no lift to
-report. In `custom_only` grading, your own grader defines the score and lift —
-see [Custom Graders & Tasks](custom-graders.mdx).
+A +0.03 lift therefore remains neutral under these bands. Lift requires both
+arms; if you ran with `--skip-baseline`, there is no lift to report. In
+`custom_only` grading, your own grader defines the score and lift — see
+[Custom Graders & Tasks](custom-graders.mdx).
+
+For each LLM metric (`accuracy`, `goal_accuracy`, and `behavior_check`), cases
+that used different judge models across the arms are excluded from that
+metric's lift. This includes model changes across repeated attempts or the
+scoring steps of a multi-step task. `lift.json` records the excluded case
+counts by metric in `judge_mixed_cases`. Arm scores still describe all scored
+cases, while evaluator, dimension, and overall lift use the eligible
+comparisons. A reported lift can therefore differ from subtracting the two
+displayed arm scores, even reversing their apparent direction. When no complete
+comparison with matching judge models remains, the affected metric, dimension,
+and overall lift are unavailable rather than zero.
+
+If every positive with-skill trial has confirmed zero activation, the agent's
+result is **INCONCLUSIVE: skill never activated**. Reports keep its arm scores
+and diagnostic trials but suppress its evaluator, dimension, overall, custom,
+and pass@k lift comparisons and skill-quality advice. Negative controls do not
+count as activation opportunities; missing or unsupported evidence remains
+unknown. Eligibility is determined separately for each agent, so another
+agent with observed activation can still contribute a comparison.
 
 ### Measured agent resources
 
@@ -538,116 +557,10 @@ alias.)
 
 ## Performance dashboard
 
-Install the optional Python dashboard and open saved JSON reports or individual
-retained Tier 3 run directories:
-
-```bash
-uv tool install --python 3.13 --reinstall "skillevaluator[all,dashboard] @ git+https://github.com/NVIDIA/SkillEvaluator.git"
-skillevaluator dashboard reports/run-a.json reports/run-b.json
-skillevaluator dashboard ./my-skill/evals/results/<run-id>
-# Start with an empty dashboard and upload several JSON reports in the browser:
-skillevaluator dashboard
-```
-
-From a checkout, use `uv run --extra dashboard skillevaluator dashboard ...`.
-For live reload while developing the dashboard, run
-`PYTHONPATH=src uv run --extra dashboard streamlit run src/skillevaluator/reporting/dashboard_ui/skillevaluator_dashboard.py -- PATH`;
-`PYTHONPATH=src` lets Streamlit watch the package modules for changes.
-The server runs at `http://127.0.0.1:8501`, or the next free port when 8501 is
-busy; pass `--port 8502` to require a specific port. Use `--no-browser` to
-suppress opening a browser, and Ctrl+C to stop it.
-The dashboard runs from its own package directory, so Streamlit settings or
-secrets in your project's `.streamlit/` folder are not applied. It accepts
-browser connections only for 127.0.0.1 and localhost.
-Browser uploads accept up to 16 MB (16,000,000 bytes) per file. Local JSON files
-accept up to 16 MiB (16,777,216 bytes); larger files produce a notice while other
-valid reports remain available.
-
-Filter the sortable tables by skill, model, harness, recorded harness features,
-condition, and execution status. The status and condition filters narrow the
-performance table only, so comparisons keep both arms; the other filters also
-remove arms from comparisons. Download the visible performance or comparison
-rows as CSV. Each performance row is one run, agent (harness and model),
-recorded feature configuration, and condition.
-Per-trial columns are means over the row's measured trials and stay blank when
-any trial is unmeasured. They help compare rows with different trial counts,
-but runs on different datasets are still not like-for-like.
-The comparison table calculates **with skill minus without skill**, and percent
-change relative to without skill. A negative usage difference means less usage;
-a positive score difference means higher performance. Comparisons stay within
-the same report and agent and require successful conditions with matching trial
-coverage, the same dataset digest, and the same attempt policy.
-When a pair's differences stay blank, the **Comparison reason** column says why.
-Repeated attempts pair by case, as in the HTML report: each arm must record the
-same number of attempts for every case, and each attempt must have its own
-trial ID. A trajectory above the report loader's size bound leaves that trial's
-token counts unavailable in canonical JSON but does not block score comparisons.
-Truncation limited to diagnostic details, such as evidence, raw reward fields,
-or non-best agent details, also leaves comparisons available, with a notice.
-Truncation that drops trials or other trial artifacts, or that is not
-explained, keeps comparisons unavailable.
-
-The dashboard reads each input once and reuses it while you filter or switch
-views. Rewriting a JSON file passed on the command line, or adding an entry
-directly inside a directory input, is picked up on the next interaction. Edits
-deeper inside a directory input (for example a run that is still writing trials)
-or in reports a catalog references appear after **Reload reports** in the
-sidebar; a browser refresh does not re-read them. Overlapping inputs, such as a
-results directory and a run inside it, are loaded once. Byte-identical uploads
-are skipped with a notice.
-
-Missing measurements stay unavailable, and cost is shown only when recorded in
-USD. Canonical Tier 3 JSON records each single-step trial's agent execution time
-(`agent_seconds`) when Harbor's timestamps carry a timezone. Timestamps without a
-timezone are treated as unavailable, as in the HTML report's
-[measured agent resources](#measured-agent-resources). Agent time excludes
-environment setup and verification. Canonical JSON never records USD cost; open
-the retained run directory to show Harbor's recorded `agent_result.cost_usd` and
-multi-step totals. For retained runs whose trajectory lacks token totals or
-cannot be read, the dashboard falls back to Harbor's `agent_result` token
-counters and keeps the trial's agent time and cost.
-Exports written before v0.5.0 could encode missing token counters as zero, so
-when a canonical JSON report's `evaluator_version` is earlier than 0.5.0 the
-dashboard shows its zero token counters as unavailable and adds a notice; open
-the retained run directory to recover recorded counters.
-Cached tokens are shown separately and are not added again
-to prompt plus completion tokens. No pricing estimates or new agent evaluations
-are performed. Adverse conditions and harness features are displayed when
-explicitly recorded; the dashboard does not run these experiments.
-
-Since v0.5.0, canonical JSON collapses multi-step trials without per-trial token
-or time totals, so they show as unmeasured. Older exports that repeat a trial ID
-across reward rows show an ambiguity notice. Open the retained run directory to
-recover totals from authoritative step results.
-
-### Recorded harness features
-
-Features are experiment metadata, not inferred from the harness name. Current
-SkillEvaluator commands do not record this field; add it to the canonical JSON
-or to `run_config.json` by hand. In a canonical Tier 3 JSON payload, an agent or
-condition can include:
-
-```json
-"dashboard_metadata": {
-  "harness_features": ["claude-rules:enabled", "memory:disabled"]
-}
-```
-
-`harness_features` can be a list of strings, a non-empty string, or a JSON
-object. For canonical JSON the condition's value wins over the agent's, which
-wins over the report's. For retained runs the order is the condition's
-`summary.json`, then the agent entry in `run_config.json`, then the root of
-`run_config.json`. Edit the run directory's `run_config.json`; the copy embedded
-in `result.json` is used only when that file cannot be read. An empty feature
-list records that no features were enabled and is shown as **none (recorded)**;
-an absent field is displayed as **unknown**. Differing recorded models or
-feature configurations are kept separate when pairing conditions.
-
-An explicitly imported adverse condition uses `conditions.adverse`,
-`trials_adverse`, `num_trials_adverse`, and `adverse` for its score in the same
-agent payload. It appears in the performance table; usage differences are
-calculated for with/without pairs only. Adverse conditions are import-only
-metadata: no evaluator command produces them, and the dashboard does not run them.
+Use the optional [Performance Dashboard](performance-dashboard.mdx) to filter
+saved Tier 3 reports and retained runs, compare paired scores and resource use,
+and download the visible tables as CSV. The guide covers installation,
+comparison eligibility, measurement limits, and reloading saved inputs.
 
 ## Machine-readable contract
 
@@ -671,7 +584,11 @@ For CI and tooling, two JSON entry points matter:
   describe the command/process gate. Tier 3 is advisory for the CLI exit code by default and becomes
   blocking with `--block-on-agent-eval`; Tier 2 is blocking for the exit code
   by default and becomes advisory with `--no-block-on-dedup`. Those exit-code
-  controls are separate from `benchmark_policy`.
+  controls are separate from `benchmark_policy`. A validator's independent
+  policy failures, such as a quality score below its required minimum, appear
+  in `gate_failures` when present. Check those alongside `findings`; changing
+  finding severity does not waive the minimum-score gate. The terminal, HTML
+  report, and `BENCHMARK.md` also show these failures.
 - **The evaluated source identity**: every JSON report always carries a
   top-level `evaluated_source` object, resolved from every carrier the run
   recorded, so the JSON and `BENCHMARK.md` name the same source tree. It is

@@ -65,6 +65,9 @@ navigation:
       - page: Reports & Results
         path: ../docs/reports.mdx
         slug: reports
+      - page: Performance Dashboard
+        path: ../docs/performance-dashboard.mdx
+        slug: performance-dashboard
       - page: "BENCHMARK.md Rollout and Backfill"
         path: ../docs/benchmark-rollout.mdx
         slug: benchmark-rollout

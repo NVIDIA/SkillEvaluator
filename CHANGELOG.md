@@ -30,6 +30,13 @@ All notable changes to SkillEvaluator are documented in this file.
   and the guides separate quality results from full scanner and live-agent
   evidence.
 
+### Documentation
+
+- Give the performance dashboard its own sidebar guide, retain the previous
+  Reports & Results link, and explain matching-judge and activation limits on
+  comparisons. Clarify the independent per-skill quality threshold, Windows
+  Docker setup, and custom-backend and MCP environment controls.
+
 ### Fixed
 
 - Catalog validation now includes nested and lowercase skill manifests, skips

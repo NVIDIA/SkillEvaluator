@@ -128,8 +128,13 @@ checks and exit codes.
 | Find repeated or overlapping guidance | The `tier2` extra, embeddings, and chat for intra-skill analysis | [Tier 2: Deduplication](tier2-deduplication.mdx) |
 | Measure whether a skill improves an agent | The `tier3` extra, evaluator and agent credentials, a supported agent, and Docker for the default sandbox | [Tier 3: Live Evaluation](tier3-live-evaluation.mdx) |
 | Run the combined pipeline or gate CI | The extras, credentials, scanners, and runtime for the selected tiers | [CLI Reference](cli-reference.mdx#validate) and [Gate Your CI](ci-integration.mdx) |
+| Evaluate an agent plugin | The extras and credentials for the selected tiers; `validate ./my-plugin --type plugin` runs Tiers 1 and 2, and `--tier3` or `tier3 evaluate-plugin` adds live evaluation | [Plugin Evaluation](plugin-evaluation.mdx) |
 
 The [live evaluation guide](tier3-live-evaluation.mdx#before-you-start) covers
 runtime readiness and the first with-skill and without-skill comparison.
 [Installation](installation.mdx#choosing-extras) explains how to add each extra
 to your checkout commands with `uv run --python 3.13 --extra EXTRA`.
+
+For rules, workflows, and plugins, `validate` runs their applicable validation
+stages without automatically enabling live skill evaluation. Plugin live evaluation runs
+with `--tier3` or `tier3 evaluate-plugin`; see [Plugin Evaluation](plugin-evaluation.mdx).

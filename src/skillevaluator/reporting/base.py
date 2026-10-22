@@ -36,6 +36,8 @@ from skillevaluator.constants import (
     DIMENSION_MAPPING,
     DIMENSION_VERDICT_NEUTRAL_THRESHOLD,
     DIMENSION_VERDICT_PASS_THRESHOLD,
+    PLUGIN_CATALOG_PLUGIN_SIMILARITY_KEY,
+    PLUGIN_CATALOG_SKILL_SIMILARITY_KEY,
 )
 from skillevaluator.publication_evidence import (
     TIER1_REQUIRED_CHECKS_KEY,
@@ -49,13 +51,21 @@ from skillevaluator.publication_text import (
     publication_identity_present,
     publication_semantic_text,
 )
+from skillevaluator.reporting.plugin_sections import (
+    completeness_view,
+    plugin_block,
+    plugin_provenance,
+    split_display_prefix,
+    tier1_plugin_view,
+)
 from skillevaluator.utils.path_security import canonicalize_trusted_root_alias
-from skillevaluator.utils.rich_markup import strip_terminal_controls
+from skillevaluator.utils.rich_markup import strip_terminal_sequences
 
 _AGENT_EVAL_MAX_FUTURE_CLOCK_SKEW = timedelta(minutes=5)
 
 if TYPE_CHECKING:
     from skillevaluator.models import ValidationResult
+    from skillevaluator.reporting.run_status import RunStatus
 
 
 _REPARSE_POINT = getattr(stat, "FILE_ATTRIBUTE_REPARSE_POINT", 0x400)
@@ -472,7 +482,7 @@ def _safe_skip_reason_text(value: object) -> str:
         return ""
     # Drop whole terminal escape sequences (OSC hyperlinks and titles, CSI
     # styling) before flattening, so their payloads never reach a report.
-    raw = strip_terminal_controls(raw)
+    raw = strip_terminal_sequences(raw)
     flattened = " ".join(
         "".join(
             " " if character.isspace() or unicodedata.category(character) in {"Cc", "Cf"} else character
@@ -2067,6 +2077,15 @@ def assess_tier3_evidence(
             selected_payload,
             "Tier 3 scanner evidence is incomplete.",
         )
+    if any(is_unfailed_partial_plugin_agent_eval(result) for result in tier3_results):
+        return Tier3EvidenceAssessment(
+            "incomplete",
+            False,
+            execution_status or "incomplete",
+            raw_verdict or "incomplete",
+            selected_payload,
+            "Tier 3 evaluated only part of the plugin.",
+        )
     # A cleanly skipped advisory result is non-passing by construction. When
     # its payload cannot be emitted losslessly, the serialization branch below
     # decides between an explicit failure and incomplete evidence.
@@ -2340,7 +2359,10 @@ def assess_publication(
     if reasons:
         return PublicationAssessment("incomplete", policy, tier3, tuple(reasons))
 
-    if any(not result.passed and not is_cleanly_skipped(result) for result in results):
+    if any(
+        not result.passed and not is_cleanly_skipped(result) and not is_unfailed_partial_plugin_agent_eval(result)
+        for result in results
+    ):
         return PublicationAssessment("fail", policy, tier3, ("A validator failed.",))
     if tier3.status == "fail":
         return PublicationAssessment("fail", policy, tier3, (tier3.reason or "Tier 3 failed.",))
@@ -2412,6 +2434,37 @@ def assess_publication(
     return PublicationAssessment("pass", policy, tier3)
 
 
+def is_partial_plugin_agent_eval(result: ValidationResult) -> bool:
+    """Return whether a Tier 3 result records a partial (INCOMPLETE) plugin run."""
+    metadata = result.metadata if isinstance(result.metadata, dict) else {}
+    completeness = completeness_view(plugin_provenance(metadata.get("agent_eval")))
+    return bool(completeness and completeness["partial"])
+
+
+def is_unfailed_partial_plugin_agent_eval(result: ValidationResult) -> bool:
+    """Return whether a partial plugin Tier 3 run is missing evidence rather than failed.
+
+    ``validate`` stamps a partial plugin run as not passed so it never reads as a pass. It is a failure only when its
+    evaluated parts already failed: a FAIL verdict (recorded or recomputed from the dimensions) or a confirmed Skill
+    Lift regression. Otherwise the publication assessment treats it as incomplete evidence.
+    """
+    if not is_tier3_result(result) or not is_partial_plugin_agent_eval(result):
+        return False
+    metadata = result.metadata if isinstance(result.metadata, dict) else {}
+    if metadata.get("tier3_gate_failures") or result.is_incomplete:
+        return False
+    payload = metadata.get("agent_eval")
+    if not isinstance(payload, dict) or agent_eval_report_serialization_issue(payload) is not None:
+        return False
+    verdict, _execution_status, _truth_consistent = _agent_eval_truth_state(payload)
+    lift_band = payload.get("lift_band") if isinstance(payload.get("lift_band"), dict) else {}
+    return bool(
+        verdict != "fail"
+        and agent_eval_dimension_verdict(payload) != "fail"
+        and lift_band.get("regression_confirmed") is not True
+    )
+
+
 def passes_required_gate(result: ValidationResult) -> bool:
     """Return whether *result* permits the required validation gate to pass."""
     gating = result.metadata.get("gating") if isinstance(result.metadata, dict) else None
@@ -2443,17 +2496,40 @@ def additional_errors(result: ValidationResult) -> list[str]:
     Findings also populate the legacy error list. Keep independent errors,
     including execution diagnostics, without repeating those mirrored entries.
     """
-    represented = {finding.to_legacy_string() for finding in result.findings}
-    for finding in result.findings:
-        # merge_with_prefix puts skill labels before legacy messages but inside
-        # structured finding paths. Recognize both forms, including nested merges.
-        location = finding.location
-        prefix = ""
-        while location.startswith("[") and "] " in location:
-            label, _, location = location.partition("] ")
-            prefix += label + "] "
-            represented.add(f"{prefix}{finding.tag} {finding.message} in {location}")
+    # merge_with_prefix puts skill labels before legacy messages but inside
+    # structured finding paths. Recognize both forms, including nested merges.
+    represented = {form for finding in result.findings for form in finding.legacy_string_forms()}
     return [error for error in result.errors if error not in represented]
+
+
+def additional_warnings(result: ValidationResult) -> list[str]:
+    """Return warnings not already displayed through a structured finding.
+
+    A non-blocking finding also adds its legacy string to ``warnings``; keep the
+    plain warnings (such as a skipped comparison) without repeating those.
+    """
+    represented = {form for finding in result.findings for form in finding.legacy_string_forms()}
+    return [warning for warning in result.warnings if warning not in represented]
+
+
+PLUGIN_CATALOG_SIMILARITY_KEYS = (PLUGIN_CATALOG_SKILL_SIMILARITY_KEY, PLUGIN_CATALOG_PLUGIN_SIMILARITY_KEY)
+
+
+def plugin_catalog_similarity_summary(result: ValidationResult) -> str | None:
+    """One-line text for a plugin Tier 2 local-catalog check, or ``None``."""
+    plugin = result.metadata.get("plugin") if isinstance(result.metadata, dict) else None
+    if not isinstance(plugin, dict):
+        return None
+    for key in PLUGIN_CATALOG_SIMILARITY_KEYS:
+        block = plugin.get(key)
+        if not isinstance(block, dict):
+            continue
+        if block.get("status") == "skipped":
+            return f"Skipped: {block.get('reason') or 'prerequisite unavailable'}"
+        matches = block.get("matches")
+        match_count = len(matches) if isinstance(matches, list) else 0
+        return f"Compared with {block.get('catalog_entries', 0)} catalog entries; {match_count} advisory match(es)"
+    return None
 
 
 class ReporterBase(ABC):
@@ -2534,3 +2610,70 @@ class ReporterBase(ABC):
             "sarif": ".sarif.json",
         }
         return extensions.get(self.name, ".txt")
+
+    @staticmethod
+    def _plugin_block(result: ValidationResult) -> dict[str, Any] | None:
+        """Return normalized Tier 1 plugin metadata for one result, if present."""
+        return plugin_block(result.metadata)
+
+    @classmethod
+    def _plugin_block_from_results(cls, results: list[ValidationResult]) -> dict[str, Any] | None:
+        """Return the plugin metadata merged across *results*.
+
+        Tier 1 (manifest, dependencies, components) and Tier 2 (advisory
+        catalog similarity) record their plugin keys on separate results, so
+        the ``plugin`` dicts are merged. The first non-empty value for a key
+        wins, which keeps the manifest identity from the Tier 1 result.
+        """
+        merged: dict[str, Any] = {}
+        found = False
+        for result in results:
+            block = cls._plugin_block(result)
+            if block is None:
+                metadata = result.metadata if isinstance(result.metadata, dict) else {}
+                block = dict(metadata["plugin"]) if isinstance(metadata.get("plugin"), dict) else None
+            if block is None:
+                continue
+            found = True
+            for key, value in block.items():
+                if merged.get(key) in (None, "", {}, []):
+                    merged[key] = value
+        return merged if found else None
+
+    @classmethod
+    def _tier1_plugin_view(cls, results: list[ValidationResult], status: RunStatus) -> dict[str, Any] | None:
+        """Return the Tier 1 plugin section's display model for *results*, or ``None`` without plugin data.
+
+        The plugin row shows ``status.plugin``: the run's headline, fail-closed on missing evidence.
+        """
+        block = cls._plugin_block_from_results(results)
+        if block is None:
+            return None
+        return tier1_plugin_view(
+            block,
+            status=status.plugin.value,
+            bundled_skills=cls._plugin_child_names(results, block),
+        )
+
+    @classmethod
+    def _plugin_child_names(cls, results: list[ValidationResult], block: dict[str, Any]) -> list[str]:
+        """Return the canonical root-relative bundled-skill identifiers of the merged plugin *block*."""
+        bundled = block.get("bundled_skills")
+        if isinstance(bundled, list):
+            return list(dict.fromkeys(name for name in bundled if isinstance(name, str) and name))
+
+        # Results produced before the explicit ``bundled_skills`` field existed
+        # name bundled skills only through success details and prefixed findings.
+        plugin_result = next((result for result in results if cls._plugin_block(result) is not None), None)
+        if plugin_result is None:
+            return []
+        names = [
+            detail.check_name
+            for detail in plugin_result.success_details
+            if detail.check_name != "plugin_manifest" and not detail.check_name.startswith("[")
+        ]
+        for finding in plugin_result.findings:
+            skill, _path = split_display_prefix(finding.file_path or "")
+            if skill is not None:
+                names.append(skill)
+        return list(dict.fromkeys(names))

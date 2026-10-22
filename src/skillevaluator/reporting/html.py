@@ -70,11 +70,32 @@ from skillevaluator.reporting.base import (
     is_tier2_validator_name as _is_tier2_validator_name,
 )
 from skillevaluator.reporting.harbor_viewer import normalize_agent_eval_harbor_links
+from skillevaluator.reporting.plugin_sections import split_display_prefix, tier3_plugin_view
+from skillevaluator.reporting.run_status import RunStatus, Status, resolve_run_status
+from skillevaluator.utils.rich_markup import replace_unencodable
 
 if TYPE_CHECKING:
     from skillevaluator.models import ValidationResult
 
 
+# How each status reads on a tier card and on a validator row: (CSS tone, label).
+_TIER_CARD = {
+    Status.PASSED: ("pass", "PASS"),
+    Status.NEUTRAL: ("warn", "NEUTRAL"),
+    Status.FAILED: ("fail", "FAIL"),
+    Status.INCOMPLETE: ("warn", "INCOMPLETE"),
+    Status.SKIPPED: ("skipped", "SKIPPED"),
+    Status.NOT_RUN: ("skipped", "N/A"),
+}
+_ROW_BADGE = {
+    Status.PASSED: ("pass", "Pass"),
+    Status.NEUTRAL: ("pass", "Pass"),
+    Status.FAILED: ("fail", "Fail"),
+    Status.INCOMPLETE: ("warn", "Incomplete"),
+    # A skipped row keeps main's warn tone; it never reads as a pass.
+    Status.SKIPPED: ("warn", "Skipped"),
+    Status.NOT_RUN: ("skipped", "Not run"),
+}
 # SkillSpector reports ``metadata.skillspector_version`` as a bare semantic
 # version. Anything else is dropped rather than echoed into the report.
 _SKILLSPECTOR_VERSION_RE = re.compile(r"\d{1,6}\.\d{1,6}\.\d{1,6}(?:[-+][0-9A-Za-z.-]{1,64})?")
@@ -1086,7 +1107,8 @@ class _Tier3PreviewBudget:
 
 
 def _compact_json(value: object) -> str:
-    return json.dumps(value, ensure_ascii=False, separators=(",", ":"), allow_nan=False)
+    # ensure_ascii=False keeps lone surrogates from untrusted text, which UTF-8 cannot encode.
+    return replace_unencodable(json.dumps(value, ensure_ascii=False, separators=(",", ":"), allow_nan=False))
 
 
 def _script_safe_json(value: object) -> str:
@@ -1188,6 +1210,15 @@ def _related_paths(finding: object) -> list[str]:
         if isinstance(value, str) and value and value not in paths:
             paths.append(value)
     return paths
+
+
+def _root_relative(path: str, roots: list[str]) -> str:
+    """Return *path* relative to the first of *roots* that contains it, else unchanged."""
+    for root in roots:
+        prefix = root.rstrip("/") + "/"
+        if path.startswith(prefix):
+            return path[len(prefix) :]
+    return path
 
 
 def _adaptive_unsigned_percent_decimals(percentage: float) -> int:
@@ -1319,8 +1350,20 @@ class HTMLReporter(ReporterBase):
         self._env = self._create_environment()
 
     def _create_environment(self) -> Environment:
+        from markupsafe import Markup
+
+        from skillevaluator.utils.rich_markup import show_format_characters
+
+        def _finalize(value: object) -> object:
+            # Plugin and scanner text can carry bidi controls, zero-width and tag characters
+            # (Unicode Cf); HTML escaping keeps them, so show each as a visible escape, as the
+            # Markdown and CLI reports do. Markup (already-safe template HTML) is left alone.
+            if isinstance(value, str) and not isinstance(value, Markup):
+                return show_format_characters(value)
+            return value
+
         loader = PackageLoader("skillevaluator.reporting", "templates")
-        environment = Environment(loader=loader, autoescape=True)
+        environment = Environment(loader=loader, autoescape=True, finalize=_finalize)
         environment.filters["cleanly_skipped"] = is_cleanly_skipped
         environment.filters["related_paths"] = _related_paths
         environment.filters["additional_errors"] = additional_errors
@@ -1366,7 +1409,7 @@ class HTMLReporter(ReporterBase):
         # Check for [prefix] pattern in any finding — indicates folder mode
         for r in results:
             for f in r.findings:
-                if f.file_path.startswith("[") and "]" in f.file_path:
+                if split_display_prefix(f.file_path)[0] is not None:
                     return None
 
         # Try to infer skill name from the first absolute file_path
@@ -1484,6 +1527,9 @@ class HTMLReporter(ReporterBase):
             return self._reorganize_single_skill(results, single_skill)
 
         skills: dict[str, dict[str, Any]] = {}
+        # Scanned roots, to group a finding with an absolute path by its path below the root.
+        plugin = self._plugin_block_from_results(results) or {}
+        roots = [str(root) for root in (plugin.get("root"), self.target_path) if root]
 
         for result in results:
             validator_name = result.validator_name
@@ -1525,14 +1571,13 @@ class HTMLReporter(ReporterBase):
             for finding in result.findings:
                 # Extract skill name from file_path (e.g., "[skill-name] file.md")
                 file_path = finding.file_path
-                skill_name = None
-                if file_path.startswith("[") and "]" in file_path:
-                    skill_name = file_path[1 : file_path.index("]")]
-                else:
-                    # Try to extract from path
-                    parts = file_path.split("/")
+                skill_name, clean_path = split_display_prefix(file_path)
+                if skill_name is None:
+                    # Try to extract from path; an absolute path outside every root is its own group.
+                    clean_path = _root_relative(clean_path, roots)
+                    parts = clean_path.split("/")
                     if len(parts) > 0:
-                        skill_name = parts[0]
+                        skill_name = parts[0] or clean_path
 
                 if skill_name:
                     if skill_name not in skills:
@@ -1548,11 +1593,6 @@ class HTMLReporter(ReporterBase):
 
                     skills[skill_name]["validators"][validator_name]["passed"] = False
                     skills[skill_name]["passed"] = False
-
-                    # Clean file_path: strip redundant [skill-name] prefix
-                    clean_path = file_path
-                    if file_path.startswith("[") and "] " in file_path:
-                        clean_path = file_path[file_path.index("] ") + 2 :]
 
                     # Strip absolute paths -- keep only path relative to skill dir
                     if "/" + skill_name + "/" in clean_path:
@@ -1698,7 +1738,7 @@ class HTMLReporter(ReporterBase):
         16 hex chars (~64 bits) is well below collision risk for the few
         dozen unique issue groups a single report ever shows.
         """
-        payload = f"{category}::{group_key}".encode()
+        payload = f"{category}::{group_key}".encode("utf-8", "surrogatepass")
         return hashlib.sha1(payload, usedforsecurity=False).hexdigest()[:16]
 
     @staticmethod
@@ -1802,13 +1842,12 @@ class HTMLReporter(ReporterBase):
 
                 # Handle prefixed success details from failed skills:
                 # check_name format: "[skill-name] author_format"
-                if detail.check_name.startswith("[") and "] author_format" in detail.check_name:
-                    sname = detail.check_name[1 : detail.check_name.index("]")]
-                    if sname in skills and sname not in skill_authors:
-                        msg = detail.message
-                        if ": " in msg:
-                            author = msg.split(": ", 1)[1]
-                            skill_authors[sname] = author
+                sname, check_name = split_display_prefix(detail.check_name)
+                if sname in skills and sname not in skill_authors and check_name == "author_format":
+                    msg = detail.message
+                    if ": " in msg:
+                        author = msg.split(": ", 1)[1]
+                        skill_authors[sname] = author
 
                 # Handle unprefixed author_format (single-skill runs):
                 # check_name is just "author_format" with author in message
@@ -1827,11 +1866,9 @@ class HTMLReporter(ReporterBase):
                     current_author = finding.metadata.get("current_author")
                     if current_author:
                         # Extract skill name from prefixed file_path "[skill-name] path"
-                        fp = finding.file_path
-                        if fp.startswith("[") and "]" in fp:
-                            sname = fp[1 : fp.index("]")]
-                            if sname in skills:
-                                skill_authors[sname] = current_author
+                        sname, _path = split_display_prefix(finding.file_path)
+                        if sname in skills:
+                            skill_authors[sname] = current_author
 
         # For single-skill runs, apply the unprefixed author to all skills
         # that don't already have an author assigned
@@ -1971,10 +2008,9 @@ class HTMLReporter(ReporterBase):
     def _compute_tier_summary(results: list[ValidationResult]) -> dict[str, Any]:
         """Compact stats for a single tier — what the hero chip displays.
 
-        Returns ``passed`` (boolean), executed/pass/skip counts,
-        ``issue_count`` (sum of findings), and per-severity totals.
-        ``total == 0`` lets the template hide the chip entirely without an
-        extra "did this tier run?" predicate.
+        Returns executed/pass/skip counts, ``issue_count`` (sum of findings),
+        and per-severity totals. The tier's status is the run status's
+        (``tier_cards``), not derived from these counts.
         """
         total = len(results)
         skipped_count = sum(1 for r in results if is_cleanly_skipped(r))
@@ -2013,7 +2049,11 @@ class HTMLReporter(ReporterBase):
             "low": low,
         }
 
-    def _results_to_dict(self, results: list[ValidationResult]) -> list[dict[str, Any]]:
+    def _results_to_dict(
+        self, results: list[ValidationResult], status: RunStatus | None = None
+    ) -> list[dict[str, Any]]:
+        # The row statuses come from the run status of the whole report.
+        status = status if status is not None else resolve_run_status(results)
         output = []
         for result in results:
             skipped = is_cleanly_skipped(result)
@@ -2021,7 +2061,7 @@ class HTMLReporter(ReporterBase):
                 "validator_name": result.validator_name,
                 "validator_description": result.validator_description,
                 "passed": result.passed,
-                "status": "skipped" if skipped else result.status,
+                "status": status.of(result).value,
                 "skipped": skipped,
                 "skip_reason": get_skip_reason(result) if skipped else None,
                 "incomplete_scans": result.incomplete_scans,
@@ -2413,7 +2453,13 @@ class HTMLReporter(ReporterBase):
         return self.render_all([result])
 
     def render_all(self, results: list[ValidationResult]) -> str:
-        tier1_results, tier2_results, tier3_results = self._split_results_by_tier(results)
+        # Every status this report shows comes from the run status: the headline badges, the tier
+        # cards, and each validator row.
+        status = resolve_run_status(results)
+        all_passed = status.headline is Status.PASSED
+        has_incomplete = status.headline is Status.INCOMPLETE
+        overall_status = status.headline.value
+        tier1_results, tier2_results, tier3_results = (list(status.tiers[number].results) for number in (1, 2, 3))
         tier3_data = self._tier3_report_data(tier3_results)
         # Preserve the raw policy/provenance assessment, then let the emitted
         # payload make the decision only more conservative. Display shaping
@@ -2437,10 +2483,6 @@ class HTMLReporter(ReporterBase):
                 3,
             ),
         )
-
-        all_passed = all(passes_required_gate(r) for r in results)
-        has_incomplete = any(r.is_incomplete for r in results)
-        overall_status = "incomplete" if has_incomplete else "passed" if all_passed else "failed"
         total_errors = sum(r.summary.errors for r in results)
         total_warnings = sum(r.summary.warnings for r in results)
         skipped_count = sum(1 for r in results if is_cleanly_skipped(r))
@@ -2505,6 +2547,10 @@ class HTMLReporter(ReporterBase):
         tier3_preview, tier3_preview_notice = _bounded_tier3_preview(tier3_data)
         tier3_canonical_data, tier3_canonical_encoding = _canonical_tier3_embed(tier3_data)
         tier3_truncation = tier3_data.get("report_truncation", {}) if isinstance(tier3_data, dict) else {}
+        # Plugin sections are built from the complete canonical data (not the
+        # bounded HTML preview) into their own bounded display models.
+        plugin_view = self._tier1_plugin_view(results, status)
+        tier3_plugin = tier3_plugin_view(tier3_data)
 
         # Keep the Tier 1 dashboard scoped to Tier 1. Tier 2 and Tier 3 have
         # dedicated tabs; including an advisory Tier 3 skip here would make
@@ -2652,6 +2698,7 @@ class HTMLReporter(ReporterBase):
             "summary": {
                 "all_passed": all_passed,
                 "status": overall_status,
+                "status_reasons": list(status.reasons),
                 "incomplete_scans": list(dict.fromkeys(tool for result in results for tool in result.incomplete_scans)),
                 "total_validators": total_validators,
                 "executed_count": executed_count,
@@ -2666,7 +2713,7 @@ class HTMLReporter(ReporterBase):
                 "failed_skills": failed_skills,
                 "publication_status": publication.status,
             },
-            "results": self._results_to_dict(results),
+            "results": self._results_to_dict(results, status),
             "skills": skills_by_name,
             "top_issues": top_issues,
             "contributors": contributors,
@@ -2715,7 +2762,7 @@ class HTMLReporter(ReporterBase):
 
         template = self._env.get_template("report.html.j2")
         cl = self.content_label
-        return template.render(
+        rendered = template.render(
             title=self.title,
             timestamp=timestamp,
             version=__version__,
@@ -2726,6 +2773,17 @@ class HTMLReporter(ReporterBase):
             all_passed=all_passed,
             has_incomplete=has_incomplete,
             overall_status=overall_status,
+            status_reasons=status.reasons,
+            tier_cards={
+                f"tier{number}": {
+                    "status": tier.status.value,
+                    "tone": _TIER_CARD[tier.status][0],
+                    "verdict": _TIER_CARD[tier.status][1],
+                }
+                for number, tier in status.tiers.items()
+            },
+            row_badge=lambda result: _ROW_BADGE[status.of(result)],
+            row_status=lambda result: status.of(result).value,
             publication_status=publication.status,
             publication_reasons=publication.reasons,
             tier3_effective_status=publication.tier3.status,
@@ -2780,7 +2838,11 @@ class HTMLReporter(ReporterBase):
             tier2_results=tier2_results,
             tier3_lift_pass_threshold=TIER3_LIFT_PASS_THRESHOLD,
             tier3_lift_fail_threshold=TIER3_LIFT_FAIL_THRESHOLD,
+            plugin_view=plugin_view,
+            tier3_plugin=tier3_plugin,
         )
+        # Untrusted text can carry lone surrogates, which UTF-8 cannot encode.
+        return replace_unencodable(rendered)
 
     def get_file_extension(self) -> str:
         return ".html"

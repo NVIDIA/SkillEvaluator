@@ -133,3 +133,32 @@ def test_multimodal_answer_uses_markers_without_media_paths(harbor_eval_template
     for bundle in shared.values():
         assert expected in bundle["prompt_evidence"]
         assert "/private/" not in json.dumps(bundle)
+
+
+def test_structured_final_answer_beside_a_tool_call_reaches_the_budgeted_history(
+    harbor_eval_template: ModuleType,
+) -> None:
+    from harbor.models.trajectories.trajectory import Trajectory
+
+    trajectory = Trajectory.model_validate(
+        {
+            "schema_version": "ATIF-v1.8",
+            "agent": {"name": "test-agent", "version": "test"},
+            "steps": [
+                {
+                    "step_id": 1,
+                    "source": "agent",
+                    "message": [{"type": "text", "text": "The answer is 4."}],
+                    "tool_calls": [
+                        {"tool_call_id": "call-1", "function_name": "bash", "arguments": {"command": "echo 4"}}
+                    ],
+                },
+                {"step_id": 2, "source": "agent", "message": [{"type": "text", "text": "   "}]},
+            ],
+        }
+    ).to_json_dict()
+
+    shared = atif_helpers.build_conversation_summary(trajectory, "What is 2+2?", max_chars=4000)
+
+    assert shared == harbor_eval_template.build_conversation_summary(trajectory, "What is 2+2?", max_chars=4000)
+    assert "Agent final answer: The answer is 4." in shared

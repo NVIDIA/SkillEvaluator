@@ -46,6 +46,8 @@ _UNSAFE_EVAL_IDS = (
 _SENSITIVE_REPO_FILES = (
     ".env.production",
     ".env.staging.local",
+    "config/.ENV",
+    "config/.Env.local",
     ".git-credentials",
     ".docker/config.json",
     ".kube/config",
@@ -66,6 +68,7 @@ _SENSITIVE_REPO_FILES = (
 _SAFE_REPO_FILES = (
     ".env.example",
     ".env.template",
+    "templates/.ENV.EXAMPLE",
     "docs/environment.production.md",
     "docs/git-credentials.md",
     "examples/docker/config.json",

@@ -37,12 +37,32 @@ class EvaluationOptions:
     custom_dockerfile_mode: str | None = None
     skill_workspace_mode: str | None = None
     include_skills: tuple[Path, ...] = ()
+    workspace_skills_baseline: bool = True
+    sum_of_parts_arm: bool = False
+    # Plugin ``--lift-mode ladder``: the loose-parts arm (native Claude Code in v1), next to the sum-of-parts arm.
+    loose_parts_arm: bool = False
+    eval_target_kind: str = "skill"
+    lift_mode_requested: str | None = None
+    integration_skip_reason: str | None = None
+    ladder_skip_reason: str | None = None
+    # Plugin only: ``wrapper`` (default), ``native``, or ``auto``, plus the
+    # prepared plugin snapshot the native harness adapters stage.
+    plugin_load: str = "wrapper"
+    native_plugin_source: Any = None
+    # Plugin only: the plugin root whose source snapshot the run certifies (the staged package is derived
+    # from it), and that root's publication target as recorded when the package was staged.
+    publication_root: Path | None = None
+    publication_target: dict[str, str] | None = None
     copy_repo: bool = False
     grading_mode: str | None = None
     results_dir: Path | None = None
+    resolved_results_root: Path | None = None
     harbor_keep_jobs: bool = False
     agent_runtime_preflight: bool | None = None
     timeout_multiplier: float | None = None
+    # Harbor retries per trial after an infrastructure error; 0 never retries and
+    # None defers to harbor.trial_retries in evals/config.yml, else 0.
+    trial_retries: int | None = None
     override_cpus: int | None = None
     override_memory_mb: int | None = None
     override_storage_mb: int | None = None

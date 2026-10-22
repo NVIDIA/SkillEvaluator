@@ -181,7 +181,8 @@ description: Test skill
 ---
 # Test
 """)
-        (skill_dir / "requirements.txt").write_text("requests>=2.28.0\nflask>=2.0.0\n")
+        # Exact pins: the audit checks declared pins and never resolves ranges.
+        (skill_dir / "requirements.txt").write_text("requests==2.28.0\nflask==2.0.0\n")
 
         validator = DependencySecurityValidator(use_safety=False)
 
@@ -235,6 +236,8 @@ description: Vulnerable skill
         with (
             mock_tool_available("pip_audit", "/usr/bin/pip-audit"),
             patch.object(Tools.pip_audit, "run", return_value=mock_result),
+            # No network: the advisory severity lookup fails, so the severity is unknown.
+            patch("skillevaluator.validators.dependency_ecosystems.fetch_osv_record", side_effect=OSError("offline")),
         ):
             result = validator.validate(skill_dir)
 
@@ -252,7 +255,7 @@ description: Test
 ---
 # Test
 """)
-        (skill_dir / "requirements.txt").write_text("requests>=2.28.0\n")
+        (skill_dir / "requirements.txt").write_text("requests==2.28.0\n")
 
         validator = DependencySecurityValidator()
 
@@ -411,7 +414,8 @@ description: Test
         mock_tool_available,
     ):
         """pip-audit skip entries describe missing coverage, not a completed scan."""
-        (sample_skill_dir / "requirements.txt").write_text("local-package @ file:///tmp/local-package\n")
+        # An exact pin the index does not know; a URL requirement is never handed to pip-audit.
+        (sample_skill_dir / "requirements.txt").write_text("local-package==1.0.0\n")
         tool_result = ToolResult(
             success=True,
             stdout=(

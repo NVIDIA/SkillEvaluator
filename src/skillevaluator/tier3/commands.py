@@ -35,6 +35,7 @@ from skillevaluator.tier3.evals_spec import validate_harbor_contract, validate_s
 from skillevaluator.tier3.harbor import (
     DEFAULT_LLM_VERIFIER_TIMEOUT_SEC,
     HARBOR_AGENTS,
+    HARBOR_AGENTS_EXPERIMENTAL,
     HARBOR_AGENTS_SUPPORTED,
     canonical_agent_name,
 )
@@ -48,6 +49,7 @@ from skillevaluator.tier3.harbor.metrics import (
     LEGACY_METRICS,
     LEGACY_SCORE_POLICY,
     PARTIAL_SCORE_POLICY,
+    not_applicable_list,
     overall_score_from_metrics,
 )
 from skillevaluator.tier3.harbor.progress import (
@@ -670,15 +672,28 @@ def evaluate(
     custom_dockerfile_mode: str | None,
     skill_workspace_mode: str | None,
     include_skills: tuple[Path, ...],
+    workspace_skills_baseline: bool = True,
+    sum_of_parts_arm: bool = False,
+    loose_parts_arm: bool = False,
+    eval_target_kind: str = "skill",
+    lift_mode_requested: str | None = None,
+    integration_skip_reason: str | None = None,
+    ladder_skip_reason: str | None = None,
+    plugin_load: str = "wrapper",
+    native_plugin_source: Any = None,
+    publication_root: Path | None = None,
+    publication_target: dict[str, str] | None = None,
     copy_repo: bool,
     grading_mode: str | None,
     results_dir: Path | None,
+    resolved_results_root: Path | None = None,
     harbor_keep_jobs: bool,
     agent_runtime_preflight: bool | None = None,
     timeout_multiplier: float | None,
     override_cpus: int | None,
     override_memory_mb: int | None,
     override_storage_mb: int | None,
+    trial_retries: int | None = None,
     repo_context_exclude_paths: tuple[Path, ...] = (),
     evaluated_source: dict[str, str] | None = None,
     progress_reporter: ProgressReporter | None = None,
@@ -711,13 +726,17 @@ def evaluate(
                 concurrency=n_concurrent,
                 max_agents=max_agents,
                 timeout_multiplier=timeout_multiplier,
+                trial_retries=trial_retries,
             )
         )
         reporter.emit(ProgressEvent(stage="configuration", state="running"))
         unknown = validate_agents(agent_list)
         if unknown:
             supported = ", ".join(sorted(HARBOR_AGENTS_SUPPORTED))
-            raise ValueError(f"Unknown agent(s): {', '.join(unknown)}. Supported agents: {supported}")
+            experimental = ", ".join(sorted(HARBOR_AGENTS_EXPERIMENTAL))
+            raise ValueError(
+                f"Unknown agent(s): {', '.join(unknown)}. Supported agents: {supported}; experimental: {experimental}"
+            )
 
         if agents is not None:
             try:
@@ -736,7 +755,7 @@ def evaluate(
                 "--agent-model provided for agent(s) not selected by -a/--agents: " + ", ".join(unknown_model_agents)
             )
 
-        output_dir = resolve_results_root(skill_path, results_dir)
+        output_dir = resolved_results_root or resolve_results_root(skill_path, results_dir)
         engine_started = True
         return run_harbor_eval(
             skill_path=skill_path.resolve(),
@@ -752,6 +771,17 @@ def evaluate(
             custom_dockerfile_mode=custom_dockerfile_mode,
             skill_workspace_mode=skill_workspace_mode,
             include_skills=[p.resolve() for p in include_skills] or None,
+            workspace_skills_baseline=workspace_skills_baseline,
+            sum_of_parts_arm=sum_of_parts_arm,
+            loose_parts_arm=loose_parts_arm,
+            eval_target_kind=eval_target_kind,
+            lift_mode_requested=lift_mode_requested,
+            integration_skip_reason=integration_skip_reason,
+            ladder_skip_reason=ladder_skip_reason,
+            plugin_load=plugin_load,
+            native_plugin_source=native_plugin_source,
+            publication_root=publication_root,
+            staged_publication_target=publication_target,
             copy_repo=copy_repo,
             grading_mode=grading_mode,
             output_dir=output_dir,
@@ -761,6 +791,7 @@ def evaluate(
             env_mode_source="CLI",
             environment_kwargs=merged_environment_kwargs,
             timeout_multiplier=timeout_multiplier,
+            trial_retries=trial_retries,
             evaluated_source=evaluated_source,
             override_cpus=override_cpus,
             override_memory_mb=override_memory_mb,
@@ -1078,6 +1109,8 @@ def compare_results(skill_path: Path, *, results_dir: Path | None = None) -> int
     agent_with: dict[str, dict[str, float]] = {}
     agent_without: dict[str, dict[str, float]] = {}
     agent_meta: dict[str, dict[str, Any]] = {}
+    agent_not_applicable: dict[str, frozenset[str]] = {}
+    agent_without_not_applicable: dict[str, frozenset[str]] = {}
 
     for candidate_root in candidate_roots:
         if not candidate_root.exists():
@@ -1085,6 +1118,8 @@ def compare_results(skill_path: Path, *, results_dir: Path | None = None) -> int
         root_with: dict[str, dict[str, float]] = {}
         root_without: dict[str, dict[str, float]] = {}
         root_meta: dict[str, dict[str, Any]] = {}
+        root_not_applicable: dict[str, frozenset[str]] = {}
+        root_without_not_applicable: dict[str, frozenset[str]] = {}
         for ts_dir in ordered_run_directories(candidate_root):
             allow_missing_status = _run_timestamp(ts_dir.name) is None or is_legacy_completed_run_dir(ts_dir)
             try:
@@ -1112,6 +1147,7 @@ def compare_results(skill_path: Path, *, results_dir: Path | None = None) -> int
                 overall = _summary_overall(data) if _summary_is_scoreable(data, allow_missing_status) else None
                 if scores or overall is not None:
                     root_with[agent_name] = scores
+                    root_not_applicable[agent_name] = _summary_not_applicable(data)
                     root_meta[agent_name] = {
                         "timestamp": ts_dir.name,
                         "path": str(agent_dir),
@@ -1138,11 +1174,17 @@ def compare_results(skill_path: Path, *, results_dir: Path | None = None) -> int
                             )
                             if (wo_scores or wo_overall is not None) and (
                                 _effective_compare_policy(
-                                    root_meta[agent_name]["score_policy_with_skill"], root_with[agent_name]
+                                    root_meta[agent_name]["score_policy_with_skill"],
+                                    root_with[agent_name],
+                                    root_not_applicable[agent_name],
                                 )
-                                == _effective_compare_policy(_summary_score_policy(wo_data), wo_scores)
+                                == _effective_compare_policy(
+                                    _summary_score_policy(wo_data), wo_scores, _summary_not_applicable(wo_data)
+                                )
                             ):
                                 root_without[agent_name] = wo_scores
+                                # The no-skill arm has no skill to discover or route to.
+                                root_without_not_applicable[agent_name] = _summary_not_applicable(wo_data)
                                 root_meta[agent_name].update(
                                     {
                                         "overall_without_skill": wo_overall,
@@ -1153,6 +1195,8 @@ def compare_results(skill_path: Path, *, results_dir: Path | None = None) -> int
                             pass
         if root_with:
             agent_with, agent_without, agent_meta = root_with, root_without, root_meta
+            agent_not_applicable = root_not_applicable
+            agent_without_not_applicable = root_without_not_applicable
             break
 
     if not agent_with:
@@ -1164,7 +1208,11 @@ def compare_results(skill_path: Path, *, results_dir: Path | None = None) -> int
     # canonical report. Standard agents must share one policy and metric set.
     standard_agents = [agent for agent in agents if not agent_meta[agent].get("custom_only")]
     comparison_policies = {
-        _effective_compare_policy(agent_meta[agent].get("score_policy_with_skill"), agent_with[agent])
+        _effective_compare_policy(
+            agent_meta[agent].get("score_policy_with_skill"),
+            agent_with[agent],
+            agent_not_applicable.get(agent, frozenset()),
+        )
         for agent in standard_agents
     }
     if len(comparison_policies) > 1:
@@ -1192,6 +1240,12 @@ def compare_results(skill_path: Path, *, results_dir: Path | None = None) -> int
     for metric in display_metrics:
         row: list[str | Text] = [Text(strip_terminal_controls(metric))]
         for agent in agents:
+            if metric in agent_not_applicable.get(agent, frozenset()) and metric not in agent_with[agent]:
+                # Not applicable: no eval case had a reference for this judge.
+                row.append(Text("N/A", style="dim"))
+                if agent in agent_without:
+                    row.append(Text("N/A", style="dim"))
+                continue
             with_score = _safe_score(agent_with[agent], metric)
             row.append(
                 Text(f"{with_score:.2f}", style=f"bold {_score_style(with_score)}")
@@ -1199,6 +1253,10 @@ def compare_results(skill_path: Path, *, results_dir: Path | None = None) -> int
                 else Text("-", style="dim")
             )
             if agent in agent_without:
+                if _without_not_applicable(agent, metric, agent_without, agent_without_not_applicable):
+                    # The no-skill arm cannot score it, so there is no lift (not a 0.0 baseline).
+                    row.append(Text("N/A", style="dim"))
+                    continue
                 without_score = _safe_score(agent_without[agent], metric)
                 delta = with_score - without_score if with_score is not None and without_score is not None else None
                 if delta is None:
@@ -1215,11 +1273,13 @@ def compare_results(skill_path: Path, *, results_dir: Path | None = None) -> int
     overall_row: list[str | Text] = [Text("Overall", style="bold")]
     for agent in agents:
         meta = agent_meta[agent]
+        with_not_applicable = agent_not_applicable.get(agent, frozenset())
         with_avg = _overall_score_for_display(
             agent_with[agent],
             overall_metrics,
             persisted_overall=meta.get("overall_with_skill"),
             score_policy=meta.get("score_policy_with_skill"),
+            not_applicable=with_not_applicable,
         )
         overall_row.append(
             Text(f"{with_avg:.2f}", style=f"bold {_score_style(with_avg)}")
@@ -1227,16 +1287,35 @@ def compare_results(skill_path: Path, *, results_dir: Path | None = None) -> int
             else Text("-", style="dim")
         )
         if agent in agent_without:
-            without_avg = _overall_score_for_display(
-                agent_without[agent],
-                overall_metrics,
-                persisted_overall=meta.get("overall_without_skill"),
-                score_policy=meta.get("score_policy_without_skill"),
-            )
-            if with_avg is None or without_avg is None:
+            without_not_applicable = agent_without_not_applicable.get(agent, frozenset())
+            if with_not_applicable == without_not_applicable:
+                lift_with = with_avg
+                lift_without = _overall_score_for_display(
+                    agent_without[agent],
+                    overall_metrics,
+                    persisted_overall=meta.get("overall_without_skill"),
+                    score_policy=meta.get("score_policy_without_skill"),
+                    not_applicable=without_not_applicable,
+                )
+            else:
+                # The lift compares only the metrics both arms scored: a metric N/A in either arm drops out of both.
+                shared_not_applicable = with_not_applicable | without_not_applicable
+                lift_with = _overall_score_for_display(
+                    {m: v for m, v in agent_with[agent].items() if m not in shared_not_applicable},
+                    overall_metrics,
+                    score_policy=meta.get("score_policy_with_skill"),
+                    not_applicable=shared_not_applicable,
+                )
+                lift_without = _overall_score_for_display(
+                    {m: v for m, v in agent_without[agent].items() if m not in shared_not_applicable},
+                    overall_metrics,
+                    score_policy=meta.get("score_policy_without_skill"),
+                    not_applicable=shared_not_applicable,
+                )
+            if lift_with is None or lift_without is None:
                 overall_row.append(Text("-", style="dim"))
             else:
-                delta = with_avg - without_avg
+                delta = lift_with - lift_without
                 delta_text = f"+{delta:.2f}" if delta > 0 else f"{delta:.2f}"
                 delta_style = "bold green" if delta > 0 else ("bold red" if delta < 0 else "bold dim")
                 overall_row.append(Text(delta_text, style=delta_style))
@@ -1279,6 +1358,12 @@ def _summary_scores(data: dict[str, Any], *, allow_missing_status: bool = False)
             if (numeric := _finite_numeric(value)) is not None:
                 scores[f"custom: {key}"] = numeric
     return scores
+
+
+def _summary_not_applicable(data: Any) -> frozenset[str]:
+    """Judged metrics a summary recorded as not applicable for its whole arm."""
+    raw = data.get("not_applicable_metrics") if isinstance(data, dict) else None
+    return frozenset(not_applicable_list(raw))
 
 
 def _summary_is_scoreable(data: dict[str, Any], allow_missing_status: bool) -> bool:
@@ -1332,12 +1417,18 @@ def _summaries_are_custom_only(summaries: list[dict[str, Any]]) -> bool:
     return not any(_summary_standard_metrics(summary) for summary in summaries)
 
 
-def _effective_compare_policy(policy: object, scores: dict[str, float]) -> str:
-    """Treat unversioned complete SkillEvaluator summaries as historical scores."""
+def _effective_compare_policy(
+    policy: object, scores: dict[str, float], not_applicable: frozenset[str] = frozenset()
+) -> str:
+    """Treat unversioned complete SkillEvaluator summaries as historical scores.
+
+    A metric the summary records as not applicable counts as complete.
+    """
     if isinstance(policy, str) and policy.strip():
         return policy.strip()
     if any(metric in scores for metric in DEFAULT_METRICS):
-        return LEGACY_SCORE_POLICY if set(DEFAULT_METRICS).issubset(scores) else PARTIAL_SCORE_POLICY
+        complete = (set(DEFAULT_METRICS) - not_applicable).issubset(scores)
+        return LEGACY_SCORE_POLICY if complete else PARTIAL_SCORE_POLICY
     return CUSTOM_SCORE_POLICY
 
 
@@ -1353,6 +1444,16 @@ def _display_metrics(agent_with: dict[str, dict[str, float]]) -> tuple[tuple[str
         return (*default_metrics, *custom_metrics), default_metrics
     metrics = tuple(sorted({metric for scores in agent_with.values() for metric in scores}))
     return metrics, metrics
+
+
+def _without_not_applicable(
+    agent: str,
+    metric: str,
+    agent_without: dict[str, dict[str, float]],
+    agent_without_not_applicable: dict[str, frozenset[str]],
+) -> bool:
+    """Whether the no-skill arm recorded *metric* as not applicable (no score, so no lift)."""
+    return metric in agent_without_not_applicable.get(agent, frozenset()) and metric not in agent_without.get(agent, {})
 
 
 def _safe_score(scores: dict[str, float], metric: str) -> float | None:
@@ -1376,12 +1477,16 @@ def _overall_score_for_display(
     *,
     persisted_overall: object = None,
     score_policy: object = DEFAULT_SCORE_POLICY,
+    not_applicable: frozenset[str] = frozenset(),
 ) -> float | None:
-    """Honor persisted score truth before inferring a policy from metric names."""
+    """Honor persisted score truth before inferring a policy from metric names.
+
+    Metrics in *not_applicable* that carry no score are left out of the overall.
+    """
     recorded_overall = _unit_interval_score(persisted_overall)
 
     if score_policy == DEFAULT_SCORE_POLICY:
-        score = overall_score_from_metrics(scores, metrics)
+        score = overall_score_from_metrics(scores, metrics, not_applicable=not_applicable)
         if score is not None:
             return score
 
@@ -1389,12 +1494,13 @@ def _overall_score_for_display(
         return recorded_overall
 
     if score_policy == LEGACY_SCORE_POLICY or (score_policy is None and metrics == DEFAULT_METRICS):
-        values = tuple(_safe_score(scores, metric) for metric in metrics)
+        scored = tuple(metric for metric in metrics if not (metric in not_applicable and metric not in scores))
+        values = tuple(_safe_score(scores, metric) for metric in scored)
         if values and all(value is not None for value in values):
             return round(sum(value for value in values if value is not None) / len(values), 4)
 
     if score_policy is None:
-        return overall_score_from_metrics(scores, metrics)
+        return overall_score_from_metrics(scores, metrics, not_applicable=not_applicable)
     return None
 
 

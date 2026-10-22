@@ -68,6 +68,8 @@ def test_html_escapes_gate_error_text() -> None:
 def test_benchmark_lists_gate_before_findings(with_findings: bool) -> None:
     result = _quality_result()
     if with_findings:
+        _add_finding(result, Severity.HIGH, "Blocking quality finding")
+        # A MEDIUM finding does not block (the gate failed the result), so it is not listed.
         _add_finding(result, Severity.MEDIUM, "Advisory quality observation")
 
     output = BenchmarkReporter(include_timestamp=False).render(result)
@@ -76,7 +78,8 @@ def test_benchmark_lists_gate_before_findings(with_findings: bool) -> None:
     assert blocking.startswith(f"- **GATE** QUALITY: {_GATE_MESSAGE}\n")
     assert blocking.count(_GATE_MESSAGE) == 1
     if with_findings:
-        assert blocking.index(_GATE_MESSAGE) < blocking.index("Advisory quality observation")
+        assert blocking.index(_GATE_MESSAGE) < blocking.index("Blocking quality finding")
+        assert "Advisory quality observation" not in blocking
 
 
 def test_benchmark_prioritizes_gates_within_blocking_findings_limit() -> None:

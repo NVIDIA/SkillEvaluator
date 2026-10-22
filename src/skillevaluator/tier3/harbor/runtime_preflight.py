@@ -1972,6 +1972,11 @@ def probe_model(provider: ProviderConfig, *, timeout_seconds: float = 15.0) -> M
     return ModelProbeResult(True, provider.provider, provider.model, f"model {provider.model} is available")
 
 
+def preflight_job_name(agent: str) -> str:
+    """Return the Harbor job name of one agent's runtime preflight."""
+    return f"runtime-preflight-{agent}"
+
+
 def run_agent_runtime_preflight(
     *,
     dataset: Path,
@@ -1987,10 +1992,15 @@ def run_agent_runtime_preflight(
     override_storage_mb: int | None = None,
     agent_import_path: str | None = None,
     environment_kwargs: Mapping[str, Any] | None = None,
+    trial_retries: int = 0,
 ) -> PreflightResult:
-    """Start one real agent task and stop before the full A/B matrix."""
+    """Start one real agent task and stop before the full A/B matrix.
+
+    With ``trial_retries``, Harbor may run the trial again after an
+    infrastructure error, so each attempt gets the full ``timeout_seconds``.
+    """
     task_name = _first_task_name(dataset)
-    job_name = f"runtime-preflight-{agent}"
+    job_name = preflight_job_name(agent)
     if task_name is None:
         return PreflightResult(False, agent, model, "No staged tasks are available for runtime preflight.", job_name)
 
@@ -2004,6 +2014,7 @@ def run_agent_runtime_preflight(
         model=model,
         jobs_dir=jobs_dir,
         timeout_multiplier=timeout_multiplier,
+        trial_retries=trial_retries,
         disable_verification=True,
         include_task_names=[task_name],
         override_cpus=override_cpus,
@@ -2012,6 +2023,7 @@ def run_agent_runtime_preflight(
         agent_import_path=agent_import_path,
         environment_kwargs=environment_kwargs,
     )
+    run_timeout_seconds = timeout_seconds * (trial_retries + 1)
     try:
         handoff = _nvidia_build_key_handoff(run_env, env_mode=env_mode)
         with _harbor_launch_cwd() as launch_cwd:
@@ -2022,7 +2034,7 @@ def run_agent_runtime_preflight(
                 input=handoff.stdin_text,
                 cwd=launch_cwd,
                 env=_harbor_launch_environment(handoff.subprocess_env),
-                timeout=timeout_seconds,
+                timeout=run_timeout_seconds,
                 check=False,
             )
     except subprocess.TimeoutExpired:
@@ -2030,7 +2042,7 @@ def run_agent_runtime_preflight(
             False,
             agent,
             model,
-            f"Agent runtime preflight timed out after {timeout_seconds}s.",
+            f"Agent runtime preflight timed out after {run_timeout_seconds}s.",
             job_name,
         )
     except OSError as exc:

@@ -40,7 +40,7 @@ from rich.panel import Panel
 from rich.text import Text
 
 from skillevaluator.reporting.base import get_skip_reason
-from skillevaluator.utils.rich_markup import strip_terminal_controls
+from skillevaluator.utils.rich_markup import strip_terminal_controls, strip_terminal_sequences
 
 if TYPE_CHECKING:
     from skillevaluator.models.result import ValidationResult
@@ -215,6 +215,7 @@ class Verdict:
     headline: str
     fix: list[tuple[str, str]] | None = None
     rerun: str | None = None
+    incomplete: bool = False  # exit 1 because required evidence is missing, not because a check failed
 
 
 class ValidateView:
@@ -456,7 +457,8 @@ class ValidateView:
                 ("  ", ""), (headline, f"bold {TEXT}"), ("  ·  exit 0", MUTED)
             )
             return Panel(body, box=box.ROUNDED, border_style=GREEN, width=self.width, padding=(0, 2))
-        line1 = _pill("✗ FAIL", RED, ink="#1C0605") + Text.assemble(
+        label = "! INCOMPLETE" if verdict.incomplete else "✗ FAIL"
+        line1 = _pill(label, RED, ink="#1C0605") + Text.assemble(
             ("  ", ""), (headline, f"bold {TEXT}"), ("  ·  exit 1", MUTED)
         )
         parts: list = [line1]
@@ -568,7 +570,7 @@ def _raw_skip_reason(result: ValidationResult) -> str:
         if not isinstance(candidate, str):
             # Non-text metadata keeps the shared single-line projection.
             return ""
-        if _bounded_console_line(strip_terminal_controls(candidate)):
+        if _bounded_console_line(strip_terminal_sequences(candidate)):
             return candidate
     return ""
 
@@ -584,7 +586,7 @@ def _skip_reason(result: ValidationResult) -> str:
     raw = _raw_skip_reason(result)
     if not raw:
         return _bounded_console_line(get_skip_reason(result))
-    sample = strip_terminal_controls(raw[:_SKIP_REASON_SOURCE_MAX_CHARS])
+    sample = strip_terminal_sequences(raw[:_SKIP_REASON_SOURCE_MAX_CHARS])
     lines = [
         bounded
         for line in sample.replace("\r\n", "\n").replace("\r", "\n").split("\n")
@@ -639,6 +641,7 @@ def _tier3_finite_number(value: object) -> float | None:
 
 
 _VALIDATOR_CHECK_KEYS = (
+    ("claude plugin validate", "claude-validate"),
     ("schema", "schema"),
     ("security scan", "security"),
     ("pii", "pii"),
@@ -834,9 +837,17 @@ def summarize_tier3(result: ValidationResult) -> tuple[bool, bool, list[TierRow]
     payload = raw_payload if isinstance(raw_payload, dict) else {}
     raw_summary = payload.get("summary")
     has_summary = isinstance(raw_summary, dict) and bool(raw_summary)
-    if _is_skipped(result) or (not result.passed and not has_summary):
-        return False, True, [], _skip_reason(result)
     summary = raw_summary if has_summary else payload
+    # validate stamps a partial plugin run execution_status "skipped" to mark it INCOMPLETE, but a run
+    # that scored trials did run; one that failed its gate keeps the FAIL row validate gives it.
+    incomplete_run = (
+        _is_skipped(result)
+        and bool(summary.get("scored_attempts"))
+        and payload.get("execution_status") != "skipped"
+        and not metadata.get("tier3_gate_failures")
+    )
+    if (_is_skipped(result) and not incomplete_run) or (not result.passed and not has_summary):
+        return False, True, [], _skip_reason(result)
     raw_agents = summary.get("agents_run")
     if not isinstance(raw_agents, list) or not raw_agents:
         raw_agents = payload.get("agents_run")
@@ -853,18 +864,28 @@ def summarize_tier3(result: ValidationResult) -> tuple[bool, bool, list[TierRow]
         rows.append(TierRow("verdict", [("INCONCLUSIVE: skill never activated", TEXT)]))
     lift = _tier3_finite_number(summary.get("overall_lift"))
     with_score = _tier3_finite_number(summary.get("overall_score"))
-    if (
-        lift is not None
-        and -1.0 <= lift <= 1.0
-        and with_score is not None
-        and 0.0 <= with_score <= 1.0
-    ):
-        baseline = with_score - lift
-        if 0.0 <= baseline <= 1.0:
-            rows.append(lift_row(lift, with_score, baseline))
+    if lift is not None and -1.0 <= lift <= 1.0 and with_score is not None and 0.0 <= with_score <= 1.0:
+        basis = _lift_basis_scores(payload, summary)
+        if basis is not None:
+            rows.append(lift_row(lift, *basis))
+        else:
+            # Older payloads have no lift basis; their lift is the full score minus the baseline.
+            baseline = with_score - lift
+            if 0.0 <= baseline <= 1.0:
+                rows.append(lift_row(lift, with_score, baseline))
     exec_status = payload.get("execution_status") or summary.get("execution_status")
     ok = bool(result.passed) and exec_status in (None, "succeeded")
-    if not ok:
+    if incomplete_run:
+        reason = _skip_reason(result) if metadata.get("skip_reason") else "INCOMPLETE: Tier 3 did not complete"
+        rows.append(
+            TierRow(
+                "incomplete",
+                [(sanitize_tier3_console_text(reason, limit=110), RED)],
+                glyph="!",
+                glyph_style=f"bold {RED}",
+            )
+        )
+    elif not ok:
         errors = _tier3_string_list(payload.get("execution_errors"), max_items=1)
         if not errors:
             errors = _tier3_string_list(result.errors, max_items=1)
@@ -878,6 +899,27 @@ def summarize_tier3(result: ValidationResult) -> tuple[bool, bool, list[TierRow]
             )
         )
     return True, ok, rows, ""
+
+
+def _lift_basis_scores(payload: dict, summary: dict) -> tuple[float, float] | None:
+    """The best agent's two arm scores on the lift's own basis, or ``None`` for older payloads.
+
+    The lift compares the dimensions both arms scored, case by case. The full
+    with-skill score also has Discoverability and Efficiency, which the arm
+    without the skill does not, so full score minus lift is not a baseline.
+    """
+    agents = payload.get("agents")
+    best = summary.get("best_agent") or payload.get("best_agent")
+    agent = agents.get(best) if isinstance(agents, dict) and isinstance(best, str) else None
+    bases = agent.get("lift_basis") if isinstance(agent, dict) else None
+    basis = bases.get("effectiveness") if isinstance(bases, dict) else None
+    if not isinstance(basis, dict):
+        return None
+    with_skill = _tier3_finite_number(basis.get("with_skill"))
+    baseline = _tier3_finite_number(basis.get("baseline"))
+    if with_skill is None or baseline is None or not (0.0 <= with_skill <= 1.0 and 0.0 <= baseline <= 1.0):
+        return None
+    return with_skill, baseline
 
 
 def _first_error(result: ValidationResult) -> str:

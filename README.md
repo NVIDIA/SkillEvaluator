@@ -124,7 +124,8 @@ uv run --python 3.13 --extra all skillevaluator validate ./my-skill
 with autopilot by default for skills; `--full` remains supported but is unnecessary.
 Use `--tiers 1,2` or `--no-tier3` to skip live evaluation, or `--tiers 1` for static
 checks. `--no-autopilot` requires an existing source. Other artifact types retain
-their applicable stages without automatically enabling skill evaluation.
+their applicable stages without automatically enabling skill evaluation; for plugins, see
+[Plugin Evaluation](https://docs.nvidia.com/skills/skillevaluator/plugin-evaluation).
 
 Tier 1 always gates `validate`. Tier 2 gates by default;
 `--no-block-on-dedup` makes its findings advisory. Tier 3 is advisory by default;

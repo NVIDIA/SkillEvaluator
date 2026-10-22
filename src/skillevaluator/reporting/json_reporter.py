@@ -20,16 +20,18 @@ from typing import TYPE_CHECKING, Any
 
 from skillevaluator.publication_evidence import result_publication_evidence_dict
 from skillevaluator.reporting.base import (
+    PLUGIN_CATALOG_SIMILARITY_KEYS,
     ReporterBase,
     assess_publication,
     get_skip_reason,
     is_advisory_agent_eval_skip,
     is_cleanly_skipped,
-    passes_required_gate,
     result_publication_target_conflict_marker,
     result_publication_target_dict,
     select_agent_eval_payload,
 )
+from skillevaluator.reporting.plugin_sections import json_safe, plugin_attributable_leaks
+from skillevaluator.reporting.run_status import RunStatus, Status, resolve_run_status
 from skillevaluator.source_identity import recorded_evaluated_source
 
 if TYPE_CHECKING:
@@ -89,7 +91,7 @@ class JSONReporter(ReporterBase):
 
     def render(self, result: ValidationResult) -> str:
         """Render single result to JSON."""
-        data = self._result_to_dict(result)
+        data = self._result_to_dict(result, resolve_run_status([result]))
         if self.include_timestamp:
             data["generated_at"] = datetime.now(tz=UTC).isoformat()
         return json.dumps(data, indent=self.indent, default=str, allow_nan=False)
@@ -98,11 +100,10 @@ class JSONReporter(ReporterBase):
         """Render all results to JSON with overall summary."""
         from skillevaluator.reporting.html import HTMLReporter
 
-        all_passed = all(passes_required_gate(r) for r in results)
+        status = resolve_run_status(results)
         skip_count = sum(1 for r in results if is_cleanly_skipped(r))
         advisory_skip_count = sum(1 for r in results if is_advisory_agent_eval_skip(r))
         incomplete_scans = list(dict.fromkeys(tool for result in results for tool in result.incomplete_scans))
-        overall_status = "incomplete" if incomplete_scans else "passed" if all_passed else "failed"
         total_errors = sum(r.summary.errors for r in results)
         total_warnings = sum(r.summary.warnings for r in results)
 
@@ -125,8 +126,12 @@ class JSONReporter(ReporterBase):
             )
 
         data: dict[str, Any] = {
-            "overall_passed": all_passed,
-            "overall_status": overall_status,
+            "overall_passed": status.headline is Status.PASSED,
+            # The headline every report gives: a real failure outranks missing evidence, which
+            # ``incomplete_scans`` still lists.
+            "overall_status": status.headline.value,
+            "status_reasons": list(status.reasons),
+            "tier_status": {str(number): tier.status.value for number, tier in status.tiers.items() if tier.results},
             "incomplete_scans": incomplete_scans,
             "total_validators": len(results),
             "total_skipped": skip_count,
@@ -134,14 +139,18 @@ class JSONReporter(ReporterBase):
             "total_errors": total_errors,
             "total_warnings": total_warnings,
             "severity_counts": {
-                "critical": sum(r.summary.critical_count for r in results),
+                # A plugin-attributable canary leak is critical, as in SARIF and BENCHMARK.md.
+                "critical": sum(
+                    r.summary.critical_count + len(plugin_attributable_leaks(r.metadata.get("agent_eval")))
+                    for r in results
+                ),
                 "high": sum(r.summary.high_count for r in results),
                 "medium": sum(r.summary.medium_count for r in results),
                 "low": sum(r.summary.low_count for r in results),
             },
             "skills": skills_summary,
             "contributors": contributors,
-            "results": [self._result_to_dict(r) for r in results],
+            "results": [self._result_to_dict(r, status) for r in results],
         }
 
         agent_eval = select_agent_eval_payload(results)
@@ -251,19 +260,25 @@ class JSONReporter(ReporterBase):
             if applicability is not None:
                 data["tier3_applicability"] = applicability
 
+        # Surface the Tier 1 plugin model without requiring consumers to
+        # inspect individual validator results.
+        plugin = self._plugin_block_from_results(results)
+        if plugin is not None:
+            data["plugin"] = json_safe(plugin)
+
         if self.include_timestamp:
             data["generated_at"] = datetime.now(tz=UTC).isoformat()
 
         return json.dumps(data, indent=self.indent, default=str, allow_nan=False)
 
-    def _result_to_dict(self, result: ValidationResult) -> dict[str, Any]:
+    def _result_to_dict(self, result: ValidationResult, status: RunStatus) -> dict[str, Any]:
         """Convert ValidationResult to serializable dictionary."""
         skipped = is_cleanly_skipped(result)
         data: dict[str, Any] = {
             "validator": result.validator_name,
             "description": result.validator_description,
             "passed": result.passed,
-            "status": "skipped" if skipped else result.status,
+            "status": status.of(result).value,
             "skipped": skipped,
             "skip_reason": get_skip_reason(result) if skipped else None,
             "incomplete_scans": result.incomplete_scans,
@@ -355,6 +370,17 @@ class JSONReporter(ReporterBase):
         llm_analysis = result.metadata.get("llm_analysis")
         if isinstance(llm_analysis, dict):
             data["llm_analysis"] = llm_analysis
+
+        # Plugin Tier 2 local-catalog comparisons (Check C-inter and Check B).
+        plugin_meta = result.metadata.get("plugin")
+        if isinstance(plugin_meta, dict):
+            catalog_similarity = {
+                key: plugin_meta[key]
+                for key in PLUGIN_CATALOG_SIMILARITY_KEYS
+                if isinstance(plugin_meta.get(key), dict)
+            }
+            if catalog_similarity:
+                data["plugin"] = catalog_similarity
 
         return data
 

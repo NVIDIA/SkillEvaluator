@@ -12,6 +12,8 @@ Input: JSONL where each line is one task's reward.json content.
 Output: JSON with six averaged evaluator scores and their five-dimension overall.
 """
 
+from __future__ import annotations
+
 import argparse
 import json
 import math
@@ -34,6 +36,21 @@ LEGACY_METRICS = [
 ]
 DEFAULT_SCORE_POLICY = "skill-evaluator-dimension-mean-v1"
 LEGACY_SCORE_POLICY = "skill-evaluator-metric-mean-v1"
+# The default score policy's five dimensions: security, correctness (accuracy),
+# discoverability (skill execution), effectiveness (goal accuracy and behavior
+# check), and efficiency (skill efficiency).
+SCORE_POLICY_DIMENSIONS = (
+    ("security",),
+    ("accuracy",),
+    ("skill_execution",),
+    ("goal_accuracy", "behavior_check"),
+    ("skill_efficiency",),
+)
+# reward.json is numeric-only: a metric that was not applicable to a case (a
+# judged metric without ground_truth / expected_behavior, or a skill metric of
+# an arm without the skill) is absent rather than 0. An explicit null is not
+# that marker and stays invalid. Security is always scored.
+ALWAYS_SCORED_METRICS = frozenset({"security"})
 
 
 def _metrics_for_rewards(rewards: list[dict]) -> list[str]:
@@ -72,7 +89,7 @@ def _score_policy_for_rewards(rewards: list[dict], metrics: list[str]) -> str:
 
 
 def _unit_score(value: object) -> float | None:
-    if isinstance(value, bool) or not isinstance(value, int | float):
+    if isinstance(value, bool) or not isinstance(value, (int, float)):
         return None
     try:
         numeric = float(value)
@@ -108,28 +125,36 @@ def main(input_path: Path, output_path: Path) -> None:
             if val is None and isinstance(reward.get("metrics"), dict):
                 m_data = reward["metrics"].get(metric)
                 val = m_data.get("score") if isinstance(m_data, dict) else m_data
+            nested = reward.get("metrics") if isinstance(reward.get("metrics"), dict) else {}
+            if metric not in reward and metric not in nested and metric not in ALWAYS_SCORED_METRICS:
+                continue  # absent from the numeric-only reward: not applicable to this case
             score = _unit_score(val)
             if score is None:
                 raise ValueError(f"Incomplete or invalid {metric} reward")
             sums[metric] += score
             counts[metric] += 1
 
+    # Omit a metric no task scored instead of reporting it as 0.0.
     result: dict[str, float | str] = {}
     for metric in metrics:
         c = counts[metric]
-        result[metric] = round(sums[metric] / c, 4)
+        if c > 0:
+            result[metric] = round(sums[metric] / c, 4)
+    if not any(metric in result for metric in metrics):
+        raise ValueError("No scored SkillEvaluator metrics in rewards")
 
     if score_policy == DEFAULT_SCORE_POLICY:
-        dimensions = (
-            result["security"],
-            result["accuracy"],
-            result["skill_execution"],
-            round((result["goal_accuracy"] + result["behavior_check"]) / 2, 4),
-            result["skill_efficiency"],
-        )
+        # The mean of the dimensions; a metric no task scored is left out of its
+        # dimension, and a dimension with no scored metric out of the mean.
+        dimensions = []
+        for dimension_metrics in SCORE_POLICY_DIMENSIONS:
+            values = [float(result[metric]) for metric in dimension_metrics if metric in result]
+            if values:
+                dimensions.append(round(sum(values) / len(values), 4))
         result["overall"] = round(sum(dimensions) / len(dimensions), 4)
     else:
-        result["overall"] = round(sum(float(result[metric]) for metric in metrics) / len(metrics), 4)
+        scored = [float(result[metric]) for metric in metrics if metric in result]
+        result["overall"] = round(sum(scored) / len(scored), 4)
     result["metric_set"] = "skill-evaluator-default-v2" if "security" in metrics else "skill-evaluator-default-v1"
     result["score_policy"] = score_policy
 

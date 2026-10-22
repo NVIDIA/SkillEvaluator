@@ -70,6 +70,7 @@ from skillevaluator.reporting.base import (
     is_tier2_validator_name as _is_tier2_validator_name,
 )
 from skillevaluator.reporting.harbor_viewer import normalize_agent_eval_harbor_links
+from skillevaluator.reporting.tier3_scope import completed_agent_result, validate_report_scope
 
 if TYPE_CHECKING:
     from skillevaluator.models import ValidationResult
@@ -1304,6 +1305,7 @@ class HTMLReporter(ReporterBase):
         content_label: str = "Skill",
         profile: str | None = None,
         expected_skill_name: str | None = None,
+        report_scope: str = "publication",
     ) -> None:
         self.include_timestamp = include_timestamp
         self.title = title or "SkillEvaluator Validation Report"
@@ -1315,6 +1317,8 @@ class HTMLReporter(ReporterBase):
         # in the report header so reviewers can tell which audience the
         # validation gate was applied for.
         self.profile = profile
+        validate_report_scope(report_scope, [])
+        self.report_scope = report_scope
         self.expected_skill_name = expected_skill_name
         self._env = self._create_environment()
 
@@ -2413,8 +2417,10 @@ class HTMLReporter(ReporterBase):
         return self.render_all([result])
 
     def render_all(self, results: list[ValidationResult]) -> str:
+        validate_report_scope(self.report_scope, results)
         tier1_results, tier2_results, tier3_results = self._split_results_by_tier(results)
         tier3_data = self._tier3_report_data(tier3_results)
+        completed_agent = completed_agent_result(tier3_data)
         # Preserve the raw policy/provenance assessment, then let the emitted
         # payload make the decision only more conservative. Display shaping
         # must never invent a successful run or erase a persisted waiver.
@@ -2716,6 +2722,8 @@ class HTMLReporter(ReporterBase):
         template = self._env.get_template("report.html.j2")
         cl = self.content_label
         return template.render(
+            report_scope=self.report_scope,
+            completed_agent=completed_agent,
             title=self.title,
             timestamp=timestamp,
             version=__version__,
@@ -2728,7 +2736,10 @@ class HTMLReporter(ReporterBase):
             overall_status=overall_status,
             publication_status=publication.status,
             publication_reasons=publication.reasons,
-            tier3_effective_status=publication.tier3.status,
+            tier3_effective_status=(
+                completed_agent["verdict"] if self.report_scope == "tier3" and completed_agent
+                else publication.tier3.status
+            ),
             total_validators=total_validators,
             executed_count=executed_count,
             passed_count=passed_count,

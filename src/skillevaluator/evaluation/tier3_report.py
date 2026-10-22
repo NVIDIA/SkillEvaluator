@@ -581,9 +581,10 @@ def render_agent_eval_html_report(
     env_mode: str | None = None,
     engine_result: dict[str, Any] | None = None,
     use_llm_judge: bool = True,
+    include_benchmark: bool = False,
 ) -> Path:
-    """Render one standalone Tier 3 run with the canonical HTML reporter."""
-    from skillevaluator.reporting import HTMLReporter
+    """Render a standalone Tier 3 HTML report and optional standard benchmark."""
+    from skillevaluator.reporting import BenchmarkReporter, HTMLReporter
 
     skill_path = skill_path.expanduser().resolve()
     run_dir = run_dir.expanduser().resolve()
@@ -613,12 +614,26 @@ def render_agent_eval_html_report(
     reporter = HTMLReporter(
         target_path=str(skill_path),
         content_label="Skill",
+        report_scope="tier3",
         tabs=[{"id": "tier3", "label": "Tier 3: Live Agent Evaluation"}],
         # The run records the filesystem entry name, which a lexical alias
         # on a case- or normalization-insensitive filesystem need not match.
         expected_skill_name=publication_target_name(skill_path) or skill_path.name,
     )
-    reporter.save([result], target)
+    written: list[Path] = []
+    try:
+        reporter.save([result], target)
+        written.append(target)
+        if include_benchmark:
+            BenchmarkReporter(
+                skill_name=publication_target_name(skill_path) or skill_path.name, report_scope="tier3"
+            ).save([result], target.with_name("BENCHMARK.md"))
+    except Exception:
+        # Do not advertise half of a newly generated report pair. An unsafe
+        # destination that the writer rejected is never followed or removed.
+        for path in written:
+            path.unlink(missing_ok=True)
+        raise
     return target
 
 

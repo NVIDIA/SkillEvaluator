@@ -6,6 +6,25 @@ All notable changes to SkillEvaluator are documented in this file.
 
 ### Added
 
+- Added an append-only, vendor-neutral error-code registry for evaluator
+  execution failures. Terminal provider and runtime-preflight results now
+  include a structured `error_code` while preserving `execution_errors` and
+  existing lowercase provider failure subtypes for compatibility.
+
+## 0.6.0 - 2026-10-20
+
+### Added
+
+- Custom execution backends. An installed package can add an `--env-mode`
+  through the `skillevaluator.env_modes` entry-point group, naming an
+  `EnvironmentBackendSpec` with a Harbor environment class plus the `--ek`
+  kwargs, host variables, prerequisite hook, and optional agent wrappers that
+  backend accepts. Custom execution backends follow the same kwarg and
+  `runtime_env` policy as Harbor-native backends, may not forward agent,
+  provider, or other backends' credentials, cannot replace a built-in mode or
+  share a name with another installed package, are not named on published
+  benchmark cards, and can be turned off with
+  `SKILLEVALUATOR_DISABLE_CUSTOM_BACKENDS=1`.
 - Optional `skillevaluator dashboard` tables for comparing saved Tier 3 reports
   and retained runs across skills, models, harnesses, recorded harness
   features, and skill conditions. Paired with/without differences cover score,
@@ -47,10 +66,6 @@ All notable changes to SkillEvaluator are documented in this file.
   and Mosaic backends. Runta's `mode` and Mosaic's `volume`, `persist`,
   `enable_ssh`, `build_args`, and `build_target` kwargs are reserved because they
   bypass the task image or let state and access outlive one isolated trial.
-- Added an append-only, vendor-neutral error-code registry for evaluator
-  execution failures. Terminal provider and runtime-preflight results now
-  include a structured `error_code` while preserving `execution_errors` and
-  existing lowercase provider failure subtypes for compatibility.
 
 ### Changed
 
@@ -85,7 +100,9 @@ All notable changes to SkillEvaluator are documented in this file.
 - `run_config.json` records the judge reasoning effort, and each standard
   judge's details record `judge_model_used`, `judge_reasoning_effort` and
   `judge_fallback_used`. Skill lift leaves out a case whose two conditions were
-  judged by different models and counts it in `judge_mixed_cases`.
+  judged by different models and counts it in `judge_mixed_cases`. Dashboard
+  score differences preserve this matching-judge lift, including unavailable
+  comparisons.
 - Removed the unused `CONTENT_DEDUP_LLM_*` constants and `LLM_VERIFY_MODEL`; an
   LLM client built from explicit credentials uses the provider default model.
 - Tier 3 pins the agent CLIs Harbor installs: Codex 0.161.0 and Claude Code
@@ -146,6 +163,26 @@ All notable changes to SkillEvaluator are documented in this file.
 
 ### Fixed
 
+- Tier 3 reports preserve judge-model exclusions when calculating dimension and
+  overall lift. Native multi-step results also retain the judge provenance needed
+  for those comparisons, so fallback judges cannot turn a regression into an
+  apparent improvement. Judge-free cases retain valid lift, bounded report loads
+  use the collector's recorded comparisons, and FINAL-strategy trials use only
+  the final step's judges. The CLI displays unavailable comparisons as `n/a`.
+- The LLM judge treats a schema option reported as `unavailable` as a schema
+  rejection and retries without it, so OpenAI-compatible endpoints such as
+  DeepSeek, which answer `response_format: json_schema` with HTTP 400 and
+  "This response_format type is unavailable now", can score Tier 3 instead
+  of failing every judge call (fixes #207).
+- Tier 3 reports an inconclusive result when every observed positive with-skill
+  trial has zero activation, and omits skill-lift comparisons for that agent.
+  Activation counts are reported separately; negative controls and missing
+  evidence do not imply that the skill was never loaded. The skill-execution
+  score is zero when positive activation fails, so unrelated successful checks
+  cannot inflate it to 0.5 (fixes #208). Benchmark cards and dashboard comparisons
+  preserve this eligibility rule, and multi-agent HTML labels explain why lift
+  is unavailable. Mixed-agent reports retain advice from the best eligible
+  agent without attributing never-activated trials to skill quality.
 - Tier 3 now uses one versioned, equal-weight five-dimension overall-score
   policy across Harbor rewards, pass@k, Skill Lift, reports, comparisons, and
   best-agent selection. Previously, some paths averaged all six evaluators
@@ -245,6 +282,49 @@ All notable changes to SkillEvaluator are documented in this file.
 - Hardened Tier 3 HTML and Markdown reporting against recursive or malformed
   display metadata, Markdown structure injection, and inline-JavaScript
   injection through untrusted agent or skill names.
+
+### Security
+
+- The docs-publishing workflow, the only one that passes a secret to a step,
+  now pins `actions/checkout` to a commit SHA, declares
+  `permissions: contents: read`, and sets `persist-credentials: false`.
+  `dco.yml` no longer persists checkout credentials either.
+- Docs are now published with the same Fern CLI version they are validated
+  with. Both workflows install the CLI from `fern/package.json` and its
+  committed lockfile; a test checks that the pin matches `fern/fern.config.json`.
+- Workflow hardening guards now glob `.github/workflows/` instead of a
+  hardcoded two-file list, so every workflow — including any added later — must
+  pin each action to a commit, avoid persisting checkout credentials, and
+  declare a `permissions:` block. The guards also cover job-level
+  `permissions:` overrides and job-level reusable-workflow `uses:` references,
+  neither of which the step-level checks reached.
+- The Fern CLI is now installed from a committed lockfile, `fern/package-lock.json`,
+  with `npm ci --prefix fern --ignore-scripts --omit=optional`, and both workflows
+  invoke `./fern/node_modules/.bin/fern` rather than a binary on `PATH`. Previously
+  `publish-docs.yml` ran `npm install`, which re-resolves every transitive
+  dependency from semver ranges on each run: pinning `fern-api`'s own version
+  pinned nothing beneath it. `@scarf/scarf` — reached through `fern-api`'s
+  optional dependency on `@boundaryml/baml` — declares a `postinstall` script.
+  The install step did not receive `FERN_TOKEN`, but its resulting CLI was later
+  run in the token-bearing publish step. The lockfile pins every package to an
+  exact version and integrity hash, `--ignore-scripts` stops lifecycle code
+  running, and `--omit=optional` (which npm honours for this local install, but
+  silently ignores for a `--global` one) leaves `fern-api` alone in the tree.
+  Guards now permit only the reviewed lockfile install command in workflows,
+  check the Fern manifest and lockfile dependency inputs, and require
+  `fern/package.json`, `fern/package-lock.json`, and `fern/fern.config.json` to
+  name the same CLI version. Fern dependency and config changes run the full
+  CI lane, including dependency review, while `fern check` runs in both lanes.
+  The developer-facing install instructions
+  (`docs/README.md`, `docs/AGENTS.md`, `docs/developer-guide.mdx`) use the same
+  lockfile install, so a contributor or agent following them gets the tree CI runs.
+- The action-pinning guard now accepts a same-repo composite action or
+  reusable workflow (`uses: ./...`) without requiring a commit SHA, since
+  GitHub always resolves a local reference from the caller's own commit and
+  nothing about it can float. A local reference that escapes the repository
+  (e.g. `./../outside`) or carries an `@ref` (a syntax local references don't
+  have) is still rejected, and a `docker://` reference is unaffected by the
+  exemption.
 
 ## 0.5.0 - 2026-10-06
 

@@ -39,6 +39,15 @@ human-readable dimensions:
 In `custom_only` mode, your own grader defines the score instead — see
 [Custom Graders & Tasks](custom-graders.mdx).
 
+If every positive with-skill trial has a confirmed activation score of zero,
+the result is **INCONCLUSIVE: skill never activated**. Tier 3 keeps the arm
+scores for inspection but omits lift comparisons and skill-quality advice for
+that agent. A positive case with failed activation receives a `skill_execution`
+score of zero, even if unrelated commands succeeded. Activation counts exclude
+negative controls; missing or unsupported activation evidence remains unknown.
+When at least one positive trial activates the skill, the usual lift calculation
+applies. This also makes activation failures visible with `--skip-baseline`.
+
 ## Before you start
 
 Every row below is checkable in seconds; the linked guide covers setup in

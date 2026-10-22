@@ -417,6 +417,7 @@ def parse_dashboard_report(payload: Any, source: str) -> DashboardData:
                     "_report_index": report_index,
                     "_agent_key": str(name),
                     "_trial_keys": keys,
+                    "_skill_activation_status": _dict(agent.get("skill_activation")).get("status", "unknown"),
                     "_dataset_digest": report.get("dataset_digest") or summary.get("dataset_digest"),
                     "_attempt_policy": report.get("attempt_policy"),
                     "_expected_usage_trials": max(
@@ -424,6 +425,10 @@ def parse_dashboard_report(payload: Any, source: str) -> DashboardData:
                     ),
                     "_ambiguous_trial_ids": tuple(sorted(ambiguous_ids)),
                 }
+                if "lift" in agent:
+                    # Canonical lift can use only the matching-judge cohort;
+                    # an explicit null must not become a full-cohort delta.
+                    row["_score_lift"] = _number(agent["lift"])
                 _set_features(row, details, agent, report)
                 _set_usage(
                     row,
@@ -508,6 +513,12 @@ def comparison_rows(rows: list[dict[str, Any]]) -> list[dict[str, Any]]:
             )
             status = "comparable" if paired else "incomplete or mismatched coverage"
             reason = "" if paired else _ineligible_reason(with_row, without_row)
+            if paired and with_row.get("_skill_activation_status") == "never_activated":
+                # Absolute scores and usage remain diagnostic, but a complete
+                # run that never exercised its skill cannot establish lift.
+                paired = False
+                status = "inconclusive"
+                reason = "Inconclusive: skill never activated in with-skill trials"
         result["comparison_status"] = status
         result["comparison_reason"] = reason
         result["coverage"] = (
@@ -521,7 +532,10 @@ def comparison_rows(rows: list[dict[str, Any]]) -> list[dict[str, Any]]:
             result[f"with_{metric}"] = with_value
             result[f"without_{metric}"] = without_value
             available = paired and with_value is not None and without_value is not None
-            result[f"{metric}_delta"] = _number(with_value - without_value) if available else None
+            delta = _number(with_value - without_value) if available else None
+            if metric == "score" and available and "_score_lift" in with_rows[0]:
+                delta = _number(with_rows[0]["_score_lift"])
+            result[f"{metric}_delta"] = delta
             if metric in _USAGE:
                 result[f"{metric}_percent"] = (
                     _number(100 * (with_value - without_value) / without_value)

@@ -309,6 +309,8 @@ class MarkdownReporter(ReporterBase):
             lines.append("")
             composite_text = _format_report_number(composite, signed=True)
             lines.append(f"**Verdict:** {verdict} (composite lift = {composite_text})")
+            if verdict == "INCONCLUSIVE":
+                lines.append("Skill never activated. Scores are diagnostic only; no lift verdict was computed.")
             runtime_number = _finite_report_number(runtime)
             runtime_text = f"{runtime_number:.1f}s" if runtime_number is not None else "N/A"
             lines.append(f"**Runtime:** {runtime_text}")

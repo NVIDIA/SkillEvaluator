@@ -969,7 +969,8 @@ plugin root is not a skill, so it is never scored or linted as one. These
 checks are skipped when a plugin bundles no skills. `quality` scores the skills
 the selected manifest's client loads: declared skill folders too, and not the
 `skills/` folder when the declared folders replace it (Cursor, and Codex when it
-keeps the path). A `SKILL.md` that is not UTF-8 is a HIGH
+keeps the path). `--min-score` and `--quality-config` apply to each of those
+skills as they do to a single skill. A `SKILL.md` that is not UTF-8 is a HIGH
 `bundled_skill_not_utf8` in the schema check, and the other checks still run.
 Frontmatter nested too deeply to parse is reported as an error and never stops
 the run.

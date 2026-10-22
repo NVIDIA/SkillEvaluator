@@ -6,6 +6,21 @@ All notable changes to SkillEvaluator are documented in this file.
 
 ### Added
 
+- `--quality-config PATH` on `validate`, `quality-check`, and `tier1` loads the
+  deterministic quality check's expected Markdown headings from a YAML file
+  instead of the built-in list. Each `expected_headers` entry sets a `heading`
+  and optional `alternatives`, `points` (default 5), `message`, and
+  `suggestion`; omitted message and suggestion text is generated from the
+  headings. Without the flag, the packaged `quality-default.yaml` reproduces
+  the previous Prerequisites, Limitations, and Troubleshooting checks and
+  wording, so default scores are unchanged. An invalid file (bad YAML or
+  unparseable values, unknown keys, duplicate keys or headings, non-heading
+  values) is rejected before validation starts with exit code 2 and a message
+  naming the file and field, even when `--checks` leaves out `quality`. The JSON report, Markdown report,
+  and BENCHMARK.md record which config produced the quality score as
+  `quality_config` (`packaged` or `custom`, the custom file's name, a
+  `sha256:` digest of the normalized rules, and the `--min-score` pass
+  threshold, which is kept out of the digest).
 - A plugin's Tier 3 run can now certify the plugin on `BENCHMARK.md` and in the
   public benchmark gate. When the plugin is staged for Tier 3, SkillEvaluator
   records the plugin root's publication target and source digest (the digest
@@ -165,8 +180,23 @@ All notable changes to SkillEvaluator are documented in this file.
   `sk-your-key-here` stay as written. Scores for cases that write files can
   change.
 
+### Documentation
+
+- Give the performance dashboard its own sidebar guide, retain the previous
+  Reports & Results link, and explain matching-judge and activation limits on
+  comparisons. Clarify the independent per-skill quality threshold, Windows
+  Docker setup, and custom-backend and MCP environment controls.
+
 ### Fixed
 
+- Catalog validation now includes nested and lowercase skill manifests, skips
+  generated directories, and stops at skill boundaries to avoid validating
+  bundled templates as separate skills. External linked directories containing
+  skills and unreadable directories appear as failures without stopping other
+  skills; links back into the catalog are ignored. Linked manifests retain
+  direct-target behavior, plugin discovery errors produce findings, and reports
+  and external Tier 3 results preserve catalog-relative paths for skills with
+  the same basename.
 - Changing finding severities through a policy no longer clears an independent
   quality-score threshold failure. A score below `--min-score` still fails,
   and its reason appears in the terminal, HTML, benchmark, and JSON reports.

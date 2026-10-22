@@ -1248,6 +1248,41 @@ def test_cloud_backend_preflight_failures_use_the_existing_code_mapping(
     }
 
 
+@pytest.mark.parametrize("error_type", ["value", "backend"])
+def test_custom_backend_agent_wrapper_rejection_is_a_coded_configuration_failure(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+    error_type: str,
+) -> None:
+    from skillevaluator.tier3_environments import EnvironmentBackendError
+
+    detail = (
+        "Custom execution backend 'example' runs codex with example:Agent, but the openai "
+        "provider requires gateway:Codex; the backend wrapper must subclass it"
+    )
+    launches: list[dict[str, Any]] = []
+    runner, skill = _stub_runner(
+        monkeypatch,
+        tmp_path,
+        run_agent=lambda **kwargs: launches.append(kwargs) or [],
+    )
+
+    def reject_wrapper(_provider, _agent, _env_mode):
+        raise (ValueError if error_type == "value" else EnvironmentBackendError)(detail)
+
+    monkeypatch.setattr(runner, "_agent_import_path", reject_wrapper)
+
+    result = runner.run_harbor_eval(skill, ["codex"], output_dir=tmp_path / "results")
+
+    assert result == {
+        "execution_status": "failed",
+        "error_code": "SKILLEVALUATOR-CONFIG-001",
+        "execution_errors": [detail],
+        "error": [detail],
+    }
+    assert launches == []
+
+
 @pytest.mark.parametrize(
     ("provider_name", "provider_base_url", "failure_kind", "http_status", "detail"),
     [

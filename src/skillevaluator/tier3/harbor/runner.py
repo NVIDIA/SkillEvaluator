@@ -4843,7 +4843,7 @@ def _run_harbor_eval_impl(
         }
     except (EnvironmentBackendError, ValueError) as exc:
         reporter.emit(ProgressEvent(stage="credential-validation", state="failed", detail=str(exc)))
-        return {"error": [str(exc)]}
+        return _terminal_failure_result([str(exc)], error_code=EvaluatorErrorCode.INVALID_CONFIGURATION)
     runtime_secret_values = set().union(
         *(secret_values_from_environment(plan.subprocess_env) for plan in runtime_plans.values())
     )

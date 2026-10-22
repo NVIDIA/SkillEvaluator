@@ -920,13 +920,13 @@ class CLIReporter(ReporterBase):
             for name, scores in evaluators.items():
                 scores = scores if isinstance(scores, dict) else {}
                 lift = number(scores.get("lift"))
-                # A missing lift (no baseline score) is neutral, not a regression or a gain.
+                # A missing lift (no baseline, or no matching-judge comparison) is neutral, not a gain or a loss.
                 lc = "dim" if lift is None else ("green" if lift > 0.01 else ("red" if lift < -0.01 else "dim"))
                 table.add_row(
                     escape_markup(str(name).replace("_", " ").title()),
-                    format_score(scores.get("with_skill"), ".2f"),
-                    format_score(scores.get("baseline"), ".2f"),
-                    f"[{lc}]{format_score(lift, '+.2f')}[/{lc}]",
+                    format_score(scores.get("with_skill"), ".2f", missing="n/a"),
+                    format_score(scores.get("baseline"), ".2f", missing="n/a"),
+                    f"[{lc}]{format_score(lift, '+.2f', missing='n/a')}[/{lc}]",
                 )
 
             console.print(table)

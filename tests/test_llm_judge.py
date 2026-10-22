@@ -577,6 +577,63 @@ def test_client_and_template_downgrade_on_400_422_and_memoize_across_calls(
     assert "response_format" not in http_requests[2]
 
 
+@pytest.mark.parametrize(
+    ("message", "param", "expected"),
+    [
+        # DeepSeek rejects response_format json_schema with this wording and no "param".
+        ("This response_format type is unavailable now", None, True),
+        ("This response_format type is unavailable now", "response_format", True),
+        ("structured outputs are unavailable on this endpoint", None, True),
+        # "unavailable" on its own is an availability problem, not a schema rejection.
+        ("The model is currently unavailable, please retry", None, False),
+        ("Service unavailable", None, False),
+    ],
+)
+def test_message_rejects_schema_option_recognizes_unavailable(
+    message: str,
+    param: str | None,
+    expected: bool,
+) -> None:
+    """Verify an 'unavailable' schema option is a rejection in both the client and the Harbor template."""
+    from skillevaluator.inference import client as inference_client
+
+    assert inference_client._message_rejects_schema_option(message, param) is expected
+    eval_template = load_harbor_eval_template("harbor_template_eval_unavailable")
+    assert eval_template._message_rejects_schema_option(message, param) is expected
+
+
+def test_deepseek_unavailable_response_format_is_a_schema_error() -> None:
+    """Verify DeepSeek's 400 body downgrades the judge in both the client and the Harbor template."""
+    from skillevaluator.inference import client as inference_client
+
+    body = {
+        "error": {
+            "message": "This response_format type is unavailable now",
+            "type": "invalid_request_error",
+            "param": None,
+            "code": "invalid_request_error",
+        }
+    }
+
+    class _BadRequestError(Exception):
+        def __init__(self) -> None:
+            super().__init__("Error code: 400")
+            self.status_code = 400
+            self.body = body
+
+    assert inference_client._is_schema_unsupported_error(_BadRequestError()) is True
+
+    eval_template = load_harbor_eval_template("harbor_template_eval_deepseek")
+    http_error = urllib.error.HTTPError(
+        "https://api.deepseek.com/v1/chat/completions",
+        400,
+        "Bad Request",
+        email.message.Message(),
+        io.BytesIO(json.dumps(body).encode()),
+    )
+    assert eval_template._is_schema_unsupported_http_error(http_error) is True
+
+
 def test_transient_429_preserves_schema_and_does_not_memoize_unsupported(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:

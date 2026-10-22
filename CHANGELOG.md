@@ -162,6 +162,9 @@ All notable changes to SkillEvaluator are documented in this file.
 
 ### Fixed
 
+- Changing finding severities through a policy no longer clears an independent
+  quality-score threshold failure. A score below `--min-score` still fails,
+  and its reason appears in the terminal, HTML, benchmark, and JSON reports.
 - The native-loading and loose-parts Claude Code arms ran on a different agent
   wrapper from the no-plugin and skills-only arms, so Vertex AI routing and the
   Docker agent setup (which no longer installs Node/npm) could differ between the

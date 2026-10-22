@@ -306,6 +306,14 @@ class ValidationResult:
         return [name for name in value if isinstance(name, str) and name]
 
     @property
+    def gate_failures(self) -> list[str]:
+        """Failed requirements independent of finding severity, such as a minimum score."""
+        value = self.metadata.get("gate_failures")
+        if not isinstance(value, list):
+            return []
+        return [message for message in value if isinstance(message, str) and message]
+
+    @property
     def is_incomplete(self) -> bool:
         """Whether required validation evidence is missing or unusable."""
         return bool(self.incomplete_scans)
@@ -439,18 +447,27 @@ class ValidationResult:
 
         Call after mutating finding severities (e.g. LLM verification downgrade)
         so that result state is consistent with the actual finding objects.
+        Independent gate failures remain errors regardless of those severities.
 
         With ``keep_legacy`` the errors and warnings that were added as plain
         strings (no Finding behind them) and are still listed stay listed, and a
         kept error still fails the result. A severity override then cannot erase
         a blocking legacy error (``apply_policy`` uses this).
         """
-        kept_errors = self._listed_legacy(self.errors, self.legacy_errors) if keep_legacy else []
+        gate_failures = self.gate_failures
+        # A gate failure is also a legacy error (``fail_gate`` adds it as one); it is listed once, first.
+        kept_errors = self._listed_legacy(self.errors, self.legacy_errors, exclude=gate_failures) if keep_legacy else []
         kept_warnings = self._listed_legacy(self.warnings, self.legacy_warnings) if keep_legacy else []
         self.errors.clear()
         self.warnings.clear()
         self.passed = not self.is_incomplete
         self.summary.reset_finding_counts()
+
+        for message in gate_failures:
+            # Appended directly: ``add_error`` would record the message as a new legacy error each rebuild.
+            self.errors.append(message)
+            self.passed = False
+            self.summary.errors += 1
 
         for finding in self.findings:
             sev = (
@@ -477,11 +494,17 @@ class ValidationResult:
             self.summary.warnings += 1
 
     @staticmethod
-    def _listed_legacy(listed: list[str], legacy: list[str]) -> list[str]:
-        """The legacy-only strings still in ``listed``, in list order (a caller may have removed some)."""
+    def _listed_legacy(listed: list[str], legacy: list[str], *, exclude: list[str] | None = None) -> list[str]:
+        """The legacy-only strings still in ``listed``, in list order (a caller may have removed some).
+
+        One occurrence of each string in *exclude* is left out.
+        """
         remaining: dict[str, int] = {}
         for message in legacy:
             remaining[message] = remaining.get(message, 0) + 1
+        for message in exclude or ():
+            if remaining.get(message, 0) > 0:
+                remaining[message] -= 1
         kept: list[str] = []
         for message in listed:
             if remaining.get(message, 0) > 0:
@@ -507,6 +530,14 @@ class ValidationResult:
         self.warnings.append(message)
         self.legacy_warnings.append(message)
         self.summary.warnings += 1
+
+    def fail_gate(self, message: str) -> None:
+        """Record a failed requirement that severity overrides cannot waive."""
+        failures = self.gate_failures
+        if message not in failures:
+            failures.append(message)
+            self.metadata["gate_failures"] = failures
+            self.add_error(message)
 
     def add_message(self, message: str) -> None:
         """Add an informational message.
@@ -543,9 +574,12 @@ class ValidationResult:
         # dict.update would let one sub-result's incomplete_scans clobber
         # another's (e.g. bandit and semgrep both failing); concatenate.
         incomplete = list(dict.fromkeys([*self.incomplete_scans, *other.incomplete_scans]))
+        gate_failures = [*self.gate_failures, *other.gate_failures]
         self.metadata.update(other.metadata)
         if incomplete:
             self.metadata["incomplete_scans"] = incomplete
+        if gate_failures:
+            self.metadata["gate_failures"] = gate_failures
 
         # Merge summary
         self.summary.files_scanned += other.summary.files_scanned
@@ -601,6 +635,9 @@ class ValidationResult:
         incomplete = list(dict.fromkeys([*self.incomplete_scans, *other.incomplete_scans]))
         if incomplete:
             self.metadata["incomplete_scans"] = incomplete
+        gate_failures = [*self.gate_failures, *(f"[{prefix}] {message}" for message in other.gate_failures)]
+        if gate_failures:
+            self.metadata["gate_failures"] = gate_failures
 
         # Merge summary
         self.summary.errors += other.summary.errors
@@ -612,7 +649,7 @@ class ValidationResult:
 
     def to_dict(self) -> dict:
         """Convert to dictionary for JSON serialization."""
-        return {
+        result = {
             "validator": self.validator_name,
             "description": self.validator_description,
             "passed": self.passed,
@@ -622,3 +659,6 @@ class ValidationResult:
             "findings": [f.to_dict() for f in self.findings],
             "success_details": [s.to_dict() for s in self.success_details],
         }
+        if self.gate_failures:
+            result["gate_failures"] = self.gate_failures
+        return result

@@ -55,6 +55,31 @@ def test_docker_opencode_nv_build_uses_operator_key_without_skill_runtime_env(
     assert "OPENAI_API_KEY" not in plan.subprocess_env
 
 
+def test_harbor_environment_keeps_windows_program_dirs_and_python_utf8_mode(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    # Docker Desktop finds its CLI plugins under %ProgramFiles%, and Harbor needs the
+    # UTF-8 mode variables on non-UTF-8 Windows locales.
+    windows_env = {
+        "PROGRAMDATA": r"C:\ProgramData",
+        "PROGRAMFILES": r"C:\Program Files",
+        "PROGRAMW6432": r"C:\Program Files",
+        "PYTHONIOENCODING": "utf-8",
+        "PYTHONUTF8": "1",
+    }
+    monkeypatch.setattr(runner.os, "environ", {"PATH": r"C:\Windows", "UNRELATED_TOKEN": "secret", **windows_env})
+
+    env = runner._harbor_subprocess_environment(
+        env_mode="docker",
+        provider=_provider("nv_build"),
+        configured_runtime_env={},
+        provider_env={},
+    )
+
+    assert {name: env.get(name) for name in windows_env} == windows_env
+    assert "UNRELATED_TOKEN" not in env
+
+
 @pytest.mark.parametrize(
     ("provider_name", "runtime_model", "catalog_model", "litellm_prefix"),
     [

@@ -2589,6 +2589,40 @@ sys.stdin.buffer.read()
     )
 
 
+def test_secure_handoff_keeps_program_files_for_every_compose_client(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    # Docker Desktop's CLI looks for its compose plugin under %ProgramFiles% on Windows.
+    audit_path = tmp_path / "program-files-audit.jsonl"
+    bin_dir = tmp_path / "trusted-bin"
+    bin_dir.mkdir()
+    docker_path = bin_dir / "docker"
+    docker_path.write_text(
+        f"""#!{sys.executable}
+import json
+import os
+import sys
+
+with open({str(audit_path)!r}, "a", encoding="utf-8") as audit:
+    audit.write(json.dumps(os.environ.get("PROGRAMFILES")) + "\\n")
+sys.stdin.buffer.read()
+""",
+        encoding="utf-8",
+    )
+    docker_path.chmod(0o700)
+    monkeypatch.setenv("PATH", str(bin_dir))
+    monkeypatch.setenv("PROGRAMFILES", r"C:\Program Files")
+    environment = _initialized_secure_docker_environment(tmp_path)
+
+    result = asyncio.run(environment.exec("true", env={"OPENAI_API_KEY": "sk-test-key"}))
+    audits = [json.loads(line) for line in audit_path.read_text(encoding="utf-8").splitlines()]
+
+    assert result.return_code == 0
+    assert len(audits) == 4
+    assert audits == [r"C:\Program Files"] * 4
+
+
 def test_sidecar_filter_preserves_harbor_infra_over_user_name_collision(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,

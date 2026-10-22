@@ -1973,11 +1973,15 @@ def _lift_note(
     lift: float | None,
     interval: object,
     sum_of_parts_baseline: bool,
+    *,
+    judge_mixed: bool = False,
 ) -> str | None:
     """Why an agent with a with-skill score shows no Skill Lift, in a few words; ``None`` otherwise.
 
-    A baseline that ran and failed is not "no baseline", and the partial
-    interval over the cases both arms scored (*interval*) is not final.
+    A baseline that ran and failed is not "no baseline", the partial
+    interval over the cases both arms scored (*interval*) is not final, and
+    with *judge_mixed* the comparison left after excluding the cases scored by
+    different judge models has no overall.
     """
     if lift is not None or with_skill is None or sum_of_parts_baseline:
         return None
@@ -1989,7 +1993,40 @@ def _lift_note(
     if isinstance(interval, dict) and interval.get("partial") is True:
         paired = _as_nonnegative_int(interval.get("n_cases"))
         notes.append(f"partial: {paired} of {_as_nonnegative_int(interval.get('expected_cases'))} cases, not final")
+    if judge_mixed:
+        notes.append("no complete comparison with matching judge models")
     return "; ".join(notes) or "no baseline"
+
+
+def _judge_matched_basis(
+    basis: dict[str, Any], judge_lift: dict[str, Any], control_key: str, *, mixed_contract: bool
+) -> dict[str, Any] | None:
+    """*basis* restated on the matching-judge comparison, or ``None`` when it has no final overall.
+
+    *judge_lift* (:func:`_judge_aware_lift`) leaves out each judge metric's
+    cases whose two arms were scored by different judge models, so its overall
+    is the lift #212 reports. A partial comparison or one across metric
+    contracts gets no headline, as without judge exclusions.
+    """
+    overall = judge_lift.get("overall")
+    overall = overall if isinstance(overall, dict) else {}
+    lift = _lift_value("overall", judge_lift)
+    treatment = _finite_float(overall.get("with_skill"))
+    control = _finite_float(overall.get("without_skill"))
+    if basis.get("partial") is True or mixed_contract or lift is None or treatment is None or control is None:
+        return None
+    mixed = judge_lift.get("judge_mixed_cases")
+    return {
+        **basis,
+        "basis": "matching_judge_metrics",
+        "with_skill": round(treatment, 4),
+        control_key: round(control, 4),
+        "lift": round(lift, 4),
+        "n_cases": None,
+        "expected_cases": None,
+        "partial": False,
+        "judge_mixed_cases": dict(mixed) if isinstance(mixed, dict) else {},
+    }
 
 
 def _agent_statistics(
@@ -2032,6 +2069,96 @@ def _baseline_is_sum_of_parts(run_config: dict[str, Any] | None, plugin_provenan
     if not _is_plugin_target(run_config) and not plugin_provenance:
         return False
     return _plugin_lift_modes(run_config, plugin_provenance)["effective"] == "integration"
+
+
+def _judge_aware_lift(
+    info: dict[str, Any],
+    with_scores: dict[str, Any],
+    without_scores: dict[str, Any],
+    score_policy: str,
+) -> dict[str, Any] | None:
+    """Rebuild judge exclusions, falling back to recorded lift for incomplete loads."""
+    from skillevaluator.tier3.harbor.collector import (
+        _LLM_JUDGE_METRICS,
+        _compute_lift,
+        _logical_attempt_rewards,
+        _reward_judge_models,
+    )
+    from skillevaluator.tier3.harbor.report_data import logical_trial_reward_groups
+
+    recorded = info.get("lift")
+    recorded = recorded if isinstance(recorded, dict) else {}
+    recorded_mixed = recorded.get("judge_mixed_cases")
+    mixed = (
+        {
+            metric: count
+            for metric, count in recorded_mixed.items()
+            if metric in _LLM_JUDGE_METRICS and isinstance(count, int) and not isinstance(count, bool) and count > 0
+        }
+        if isinstance(recorded_mixed, dict)
+        else {}
+    )
+    recorded_counts = mixed.copy()
+    if not mixed and not any(
+        _reward_judge_models(row, metric)
+        for rows in (info.get("rewards"), info.get("rewards_baseline"))
+        if isinstance(rows, list)
+        for row in rows
+        if isinstance(row, dict)
+        for metric in _LLM_JUDGE_METRICS
+    ):
+        return None
+    conditions: list[list[dict[str, Any]]] = []
+    complete = True
+    for key in ("rewards", "rewards_baseline"):
+        rows = info.get(key)
+        complete = complete and info.get(f"{key}_complete") is True
+        groups = logical_trial_reward_groups(
+            [row for row in rows if isinstance(row, dict)] if isinstance(rows, list) else []
+        )
+        logical_rows: list[dict[str, Any]] = []
+        for index, group in enumerate(groups):
+            if not _logical_group_entry_identity_is_consistent(group):
+                complete = False
+                continue
+            logical_rows.extend(
+                {
+                    **row,
+                    "_trial_root_name": str(index),
+                    **({"_step_name": str(step)} if len(group) > 1 else {}),
+                }
+                for step, row in enumerate(group)
+            )
+        conditions.append(_logical_attempt_rewards(logical_rows))
+    clean_scores = [
+        {metric: value for metric, raw in scores.items() if (value := _unit_interval_score(raw)) is not None}
+        for scores in (with_scores, without_scores)
+    ]
+    rebuilt = _compute_lift(*clean_scores, *conditions, score_policy=score_policy)
+    rebuilt_mixed = rebuilt.get("judge_mixed_cases", {})
+    unsupported_exclusions = {metric for metric, count in mixed.items() if rebuilt_mixed.get(metric, 0) < count}
+    for metric, count in rebuilt_mixed.items():
+        mixed[metric] = max(count, mixed.get(metric, 0))
+    if not mixed:
+        return None
+    if not complete:
+        # The collector already excluded mixed judges from the full cohort;
+        # a partial load must not replace its recorded comparison.
+        covered = {metric for metric, count in mixed.items() if recorded_counts.get(metric, 0) >= count}
+        if covered == mixed.keys():
+            covered.add("overall")
+        for metric in (*mixed, "overall"):
+            rebuilt.pop(metric, None)
+            if all(clean_scores) and metric in covered and metric in recorded:
+                rebuilt[metric] = recorded[metric]
+        rebuilt["judge_mixed_cases"] = mixed
+        return rebuilt
+    rebuilt["judge_mixed_cases"] = mixed
+    for metric in unsupported_exclusions:
+        rebuilt.pop(metric, None)
+    if unsupported_exclusions:
+        rebuilt.pop("overall", None)
+    return rebuilt
 
 
 def _build_agent(
@@ -2085,7 +2212,7 @@ def _build_agent(
     comparable_scores = (
         not never_activated and set(with_metrics) == set(baseline_metrics) and len(condition_policies) == 1
     )
-    lift_data = info.get("lift") or {}
+    lift_data = info.get("lift") if isinstance(info.get("lift"), dict) else {}
     raw_uncertainty = info.get("lift_uncertainty")
     uncertainty = _activated_uncertainty(
         raw_uncertainty if isinstance(raw_uncertainty, dict) else {},
@@ -2101,6 +2228,9 @@ def _build_agent(
         # A lift needs a usable baseline arm; an engine lift from a failed arm is not one.
         lift_data = {}
 
+    judge_lift = _judge_aware_lift(info, with_scores, without_scores, score_policy)
+    if judge_lift is not None:
+        lift_data = judge_lift
     evaluators = _build_evaluators(with_metrics, with_scores, without_scores, lift_data)
     baseline_not_applicable = _arm_not_applicable(info, "without_skill") if baseline_quality_available else []
     dimensions = _build_dimensions(
@@ -2108,6 +2238,7 @@ def _build_agent(
         without_scores,
         info.get("dimensions_with_skill") or {},
         info.get("dimensions_without_skill") or {},
+        judge_lift,
         baseline_not_applicable=baseline_not_applicable,
     )
     with_not_applicable = _arm_not_applicable(info, "with_skill") if with_quality_available else []
@@ -2272,6 +2403,28 @@ def _build_agent(
         if sum_of_parts_baseline:
             overall_bl = integration_basis["sum_of_parts"]
     integration_lift = integration_basis["lift"] if integration_basis else None
+    # Cases whose two arms were scored by different judge models stay out of the lift (#212). The
+    # case-weighted basis and its interval pair those cases too, so such a comparison takes its headline
+    # and basis from the matching-judge comparison and drops the interval; each arm's own score stays.
+    effectiveness_interval = integration_interval = True
+    judge_lift_unavailable = False
+    if judge_lift is not None:
+        mixed_contract = with_mixed_contract or baseline_mixed_contract
+        if sum_of_parts_baseline and integration_basis is not None:
+            # Legacy ``--lift-mode integration``: the baseline arm judge_lift compares with is the member skills.
+            integration_basis = _judge_matched_basis(
+                integration_basis, judge_lift, "sum_of_parts", mixed_contract=mixed_contract
+            )
+            integration_lift = integration_basis["lift"] if integration_basis else None
+            integration_interval = False
+        elif effectiveness_basis is not None:
+            judge_lift_unavailable = not effectiveness_basis["partial"]
+            effectiveness_basis = _judge_matched_basis(
+                effectiveness_basis, judge_lift, "baseline", mixed_contract=mixed_contract
+            )
+            overall_lift = effectiveness_basis["lift"] if effectiveness_basis else None
+            judge_lift_unavailable = judge_lift_unavailable and overall_lift is None
+            effectiveness_interval = False
 
     trials = _normalize_trials(info.get("rewards") or [], with_metrics)
     baseline_trials = _normalize_trials(info.get("rewards_baseline") or [], baseline_metrics)
@@ -2319,7 +2472,12 @@ def _build_agent(
         "sum_of_parts": sum_of_parts_overall,
         "integration_lift": integration_lift,
         "lift_note": _lift_note(
-            info, overall_ws, overall_lift, uncertainty.get("effectiveness"), sum_of_parts_baseline
+            info,
+            overall_ws,
+            overall_lift,
+            uncertainty.get("effectiveness"),
+            sum_of_parts_baseline,
+            judge_mixed=judge_lift_unavailable,
         ),
         # The comparable arm scores behind each lift (same dimensions, same cases).
         "lift_basis": {"effectiveness": effectiveness_basis, "integration": integration_basis},
@@ -2327,8 +2485,8 @@ def _build_agent(
         **_agent_statistics(
             info,
             sum_of_parts_baseline=sum_of_parts_baseline,
-            effectiveness=not never_activated,
-            integration=not integration_blocked,
+            effectiveness=not never_activated and effectiveness_interval,
+            integration=not integration_blocked and integration_interval,
         ),
         # The skill-bearing arms that never activated the skill: no Bundle lift or lift ladder uses them.
         "never_activated_arms": sorted(never_activated_arms),
@@ -2462,16 +2620,20 @@ def _build_evaluators(
     lift_data: dict[str, Any],
 ) -> dict[str, dict[str, Any]]:
     evaluators: dict[str, dict[str, Any]] = {}
+    mixed = lift_data.get("judge_mixed_cases")
+    mixed = mixed if isinstance(mixed, dict) else {}
     for metric in metrics:
         ws = _finite_float(with_scores.get(metric))
         if ws is None:
             continue
         bl = _finite_float(without_scores.get(metric))
         lift = _lift_value(metric, lift_data)
-        if lift is None and bl is not None:
+        excluded = metric in mixed
+        if lift is None and bl is not None and not excluded:
             lift = round(ws - bl, 4)
-        # ``lift`` stays None when there is no baseline to compare with: a 0.0
-        # would read as "measured, no change" in every report.
+        # ``lift`` stays None when there is no baseline to compare with, or when every case of a judge
+        # metric was scored by different judge models in the two arms: a 0.0 would read as "measured,
+        # no change" in every report.
         evaluators[metric] = {"with_skill": ws, "baseline": bl, "lift": lift}
     return evaluators
 
@@ -2498,6 +2660,7 @@ def _build_dimensions(
     without_scores: dict[str, Any],
     precomputed_with: dict[str, Any],
     precomputed_without: dict[str, Any],
+    judge_lift: dict[str, Any] | None = None,
     *,
     baseline_not_applicable: list[str] | None = None,
 ) -> list[dict[str, Any]]:
@@ -2508,8 +2671,11 @@ def _build_dimensions(
     Efficiency in an arm without the skill) is flagged
     ``baseline_not_applicable``, and its reasoning says so instead of "no
     baseline run": the baseline ran, it just has nothing to score there.
+    With *judge_lift*, a dimension fed by a judge metric whose arms were
+    scored by different judge models takes its lift from the matching-judge
+    comparison and says so.
     """
-    from skillevaluator.tier3.harbor.metrics import dimension_is_not_applicable
+    from skillevaluator.tier3.harbor.metrics import dimension_is_not_applicable, weighted_dimension_score
 
     dimensions: list[dict[str, Any]] = []
     for dim_id in _DIMENSION_IDS:
@@ -2527,10 +2693,41 @@ def _build_dimensions(
         signals = _dimension_signals(entry, with_scores, cfg)
         explanation = entry.get("explanation")
         reasoning_bullets = entry.get("reasoning_bullets")
+        comparison_signals = _dimension_signals({}, with_scores, cfg)
+        excluded = judge_lift is not None and any(
+            metric in judge_lift.get("judge_mixed_cases", {}) for metric in comparison_signals
+        )
+        reasoning_baseline = bl
+        if excluded and judge_lift is not None:
+            pairs = {metric: judge_lift.get(metric) for metric in comparison_signals}
+            paired_with = {metric: pair.get("with_skill") for metric, pair in pairs.items() if isinstance(pair, dict)}
+            paired_without = {
+                metric: pair.get("without_skill") for metric, pair in pairs.items() if isinstance(pair, dict)
+            }
+            comparison_ws = (
+                weighted_dimension_score(paired_with.get, cfg) if len(paired_with) == len(comparison_signals) else None
+            )
+            reasoning_baseline = (
+                weighted_dimension_score(paired_without.get, cfg)
+                if len(paired_without) == len(comparison_signals)
+                else None
+            )
+            lift = (
+                round(comparison_ws - reasoning_baseline, 4)
+                if comparison_ws is not None and reasoning_baseline is not None
+                else None
+            )
+            reasoning_bullets = explanation = None
         if not reasoning_bullets and not explanation:
             reasoning_bullets, explanation = _deterministic_reasoning(
-                ws, bl, lift, signals, with_scores, baseline_not_applicable=bl_not_applicable
+                ws, reasoning_baseline, lift, signals, with_scores, baseline_not_applicable=bl_not_applicable
             )
+        if excluded:
+            note = "Cases scored by different judge models are excluded from lift."
+            if lift is None:
+                reasoning_bullets[1] = "Lift unavailable: no complete comparison with matching judge models."
+            reasoning_bullets.append(note)
+            explanation = " ".join(reasoning_bullets)
         verdict = entry.get("verdict") or _deterministic_verdict(ws)
         dimension = {
             "id": dim_id,

@@ -68,6 +68,12 @@ All notable changes to SkillEvaluator are documented in this file.
   Harbor, so Docker Desktop finds its `compose` plugin, and passes
   `PYTHONUTF8` and `PYTHONIOENCODING` so Python UTF-8 mode reaches Harbor on
   non-UTF-8 locales.
+- A `SKILL.md` `metadata` value that is not a mapping, such as `true`, `1.5`, a
+  date, or a list or string containing `author` or `tags`, no longer crashes
+  the quality check with a `TypeError`, which aborted `validate`, `tier1`, and
+  `quality-check` before any report was written. The schema check reports the
+  malformed `metadata`, and the quality score counts `metadata.author` and
+  `metadata.tags` as missing, as it already did for other non-mapping values.
 
 ## 0.6.0 - 2026-10-20
 

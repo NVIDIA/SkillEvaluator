@@ -790,6 +790,8 @@ def _sanitize_tier3_evaluator_card(value: dict[str, Any]) -> dict[str, Any] | No
 
 def _sanitize_tier3_agent(value: dict[str, Any]) -> dict[str, Any]:
     agent = dict(value)
+    activation = agent.get("skill_activation")
+    agent["skill_activation"] = dict(activation) if isinstance(activation, dict) else {}
     for key in ("model", "model_name", "llm_model", "display_name", "label"):
         if key not in agent:
             continue
@@ -2203,7 +2205,7 @@ class HTMLReporter(ReporterBase):
         ) -> bool:
             if agent_eval_publication_evidence_complete(candidate):
                 return True
-            if payload_verdict(candidate) not in {"pass", "neutral", "fail"}:
+            if payload_verdict(candidate) not in {"pass", "neutral", "fail", "inconclusive"}:
                 return False
             execution_status = payload_execution_status(candidate)
             if execution_status == "succeeded":

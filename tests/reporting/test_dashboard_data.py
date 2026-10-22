@@ -76,6 +76,19 @@ def test_with_without_differences_and_explicit_features() -> None:
     assert comparison["cost_usd_percent"] == 100
 
 
+@pytest.mark.parametrize("lift", [-0.1, 0.0, None])
+def test_score_delta_preserves_canonical_judge_aware_lift(lift: float | None) -> None:
+    report = _report()
+    report["agents"]["claude-code"]["lift"] = lift
+    comparison = comparison_rows(parse_dashboard_report(report, "report.json").rows)[0]
+    assert comparison["comparison_status"] == "comparable"
+    assert comparison["with_score"] == 0.8
+    assert comparison["without_score"] == 0.6
+    assert comparison["score_delta"] == lift
+    assert comparison["pass_rate_delta"] == 1.0
+    assert comparison["total_tokens_delta"] == 30
+
+
 def test_single_trial_coverage_label_is_singular() -> None:
     assert parse_dashboard_report(_report(), "r").rows[0]["coverage"].startswith("1 trial (complete)")
 

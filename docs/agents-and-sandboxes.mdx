@@ -166,6 +166,9 @@ the environment extra shown below when a managed backend needs one.
 | `mosaic` | Harbor-native | `harbor[mosaic]==0.24.0` |
 | `local` | SkillEvaluator | Your machine, under an OS sandbox policy — see [Local mode](#local-mode). |
 
+Installed packages can add more modes, for example an organization's internal
+sandbox service. See [Custom execution backends](#custom-execution-backends).
+
 <Tip>
 SkillEvaluator documents setup for `docker`, `kata`, and `local`. For any other
 backend, install the mapped Harbor extra or system CLI shown above, set the
@@ -324,6 +327,102 @@ embedded credential URI, or raw secret value is rejected:
 
 Complex values use JSON syntax in the `KEY=VALUE` argument. Reference names
 must be trimmed and bounded; they cannot contain credential-bearing URIs.
+
+## Custom execution backends
+
+A Python package can add an `--env-mode` that runs trials on infrastructure
+Harbor does not ship, without changing SkillEvaluator. The package registers
+an entry point in the `skillevaluator.env_modes` group. The entry-point name
+becomes the mode name, and its value names an `EnvironmentBackendSpec` (or a
+function that returns one):
+
+```toml
+# pyproject.toml of the backend package
+[project.entry-points."skillevaluator.env_modes"]
+acme = "skillevaluator_acme.backend:SPEC"
+```
+
+```python
+# skillevaluator_acme/backend.py
+from skillevaluator.tier3_environments import EnvironmentBackendSpec
+
+SPEC = EnvironmentBackendSpec(
+    import_path="skillevaluator_acme.environment:AcmeEnvironment",
+    environment_kwargs=frozenset({"profile", "lease_seconds"}),
+    required_environment_kwargs=("profile",),
+    host_env_vars=frozenset({"ACME_SANDBOX_URL", "ACME_SANDBOX_TOKEN"}),
+    prerequisites="skillevaluator_acme.checks:prerequisites",
+    install_hint="Install 'skillevaluator-acme' from your package index.",
+)
+```
+
+`import_path` names a Harbor `BaseEnvironment` subclass. SkillEvaluator passes
+it to `harbor run --env`, so the class receives the same evaluator-staged task
+directory, verifier, and trial paths as a Harbor-native backend.
+
+### What a backend must provide
+
+- Support the Harbor release SkillEvaluator pins (`harbor==0.24.0`), including
+  its environment constructor options.
+- Run the evaluator-staged image: build each task's `environment/Dockerfile` as
+  written, or an equivalent image with the same layers. Do not substitute a
+  generic image.
+- Preserve the task workspace: `/workspace` with the staged skills under the
+  task's `skills_dir`, task input, and the agent working directory.
+- Preserve the verifier contract: run `tests/` with the verifier environment
+  SkillEvaluator stages, and return `/logs/verifier` and `/logs/agent`
+  (including the trajectory) to the host.
+- Clean up every trial resource, including after cancellation.
+
+The acceptance test for a backend is a full SkillEvaluator Tier 3 run of a
+skill with both the baseline and with-skill conditions on that backend. The
+run must produce the expected scores, retain trajectories and verifier
+artifacts, and leave no trial resources behind. Compare the results with the
+same skill on `--env-mode docker`.
+
+### Policy SkillEvaluator applies
+
+A custom execution backend follows the same policy as the Harbor-native
+backends:
+
+- `--ek` accepts only the names in `environment_kwargs`. Names in
+  `reserved_environment_kwargs`, SkillEvaluator's runtime-policy kwargs such as
+  `network_policy` and `session_id`, and secret-bearing names or values are
+  rejected.
+- Only the upper-case variables in `host_env_vars` reach the Harbor process,
+  in addition to the usual proxy, CA bundle, and locale variables. A skill's
+  `harbor.runtime_env` cannot set them. A backend cannot forward agent or
+  provider credentials (for example `ANTHROPIC_*`, `CLAUDE_*`, `CODEX_*`,
+  `OPENAI_*`, `OPENCODE_*`, `NVIDIA_*`, `AWS_*`, `GITHUB_*`, `GH_*`, `HF_*`),
+  another backend's credentials, judge settings, or process-control variables,
+  because Harbor's stock agents read some of them and can copy them into the
+  trial sandbox. `KUBECONFIG` is allowed. The runner supplies agent credentials
+  per agent as it does for every backend.
+- Harbor runs in a private working directory, so list host variables and `--ek`
+  kwargs that hold file paths in `host_path_env_vars` and
+  `host_path_environment_kwargs`; relative values are made absolute first.
+- `skillevaluator doctor --env-mode <mode>` checks
+  `required_environment_kwargs`, then runs the optional `prerequisites`
+  function (`fn(environment_kwargs) -> list[str]`), then the environment
+  class's Harbor `preflight()`. Diagnostics are redacted like built-in ones.
+- Tasks with a `docker-compose.yaml` are rejected unless the backend sets
+  `supports_docker_compose=True`.
+- `agent_import_paths` may map an agent name to a Harbor agent class, for
+  example one that uses a CLI already installed in the backend's image.
+  Agents without an entry use Harbor's stock agent. When the evaluator
+  provider needs its own wrapper (for example `SkillEvaluatorGatewayCodex` for
+  Codex with an OpenAI-compatible gateway), the backend's class must subclass
+  that wrapper; otherwise the run stops before any trial starts.
+
+A custom execution backend cannot replace a built-in mode name, and a name
+registered by more than one installed package is refused with every package
+name until all but one is uninstalled. Listing the available modes reads
+package metadata only; the backend module is imported when its mode is
+selected. Published benchmark cards show a custom execution backend as
+`Isolated sandbox` and do not name it. Set
+`SKILLEVALUATOR_DISABLE_CUSTOM_BACKENDS=1` to ignore every installed custom
+execution backend. Backend packages run with your privileges, so install only
+ones you trust.
 
 ## Docker mode
 

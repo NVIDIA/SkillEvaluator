@@ -1266,11 +1266,15 @@
                     </button>{% endif %}
                 </div>
                 <span class="header-status-badge {{ 'warn' if has_incomplete else ('pass' if all_passed else 'fail') }}">Process: {{ 'Incomplete' if has_incomplete else ('All Passed' if all_passed else 'Issues Found') }}</span>
+                {% if report_scope == 'tier3' %}
+                <span class="header-status-badge warn" data-publication-status="not-assessed">Publication: Not assessed (Tier 3 only)</span>
+                {% else %}
                 <span class="header-status-badge {{ 'pass' if publication_status == 'pass' else ('fail' if publication_status == 'fail' else 'warn') }}"
                       data-publication-status="{{ publication_status }}"
                       {% if publication_reasons %}title="{{ publication_reasons | join(' ') }}"{% endif %}>
                     Publication: {{ publication_status | title }}
                 </span>
+                {% endif %}
             </div>
         </div>
     </div>
@@ -1291,7 +1295,7 @@
             title — every step is opportunistic so the hero never goes blank.
         -#}
         {% set hero_title = explicit_skill_name | default(none) or friendly_label or (tier3.skill_name if has_tier3 and tier3.skill_name else (target_display or title)) %}
-        {% set hero_score = tier3.overall_score if has_tier3 and tier3.overall_score is not none else none %}
+        {% set hero_score = completed_agent.score if completed_agent else (tier3.overall_score if has_tier3 and tier3.overall_score is not none else none) %}
         {% set hero_trials = ((tier3.trials or []) | length) if has_tier3 else 0 %}
         {% set hero_metric_count = ((tier3.metric_ids or tier3.evaluators or {}) | length) if has_tier3 else 0 %}
         {% set hero_harbor = (tier3.get('harbor_viewer') or tier3.get('summary', {}).get('harbor_viewer') or {}) if has_tier3 else {} %}
@@ -1337,10 +1341,12 @@
                     <div class="agent-hero-score {{ 'score-pass' if hero_score is not none and hero_score >= 0.8 else ('score-warn' if hero_score is not none and hero_score >= 0.6 else 'score-fail') }}">{{ "%.2f" | format(hero_score) if hero_score is not none else "N/A" }}</div>
                     <div class="agent-hero-detail">
                         <div><strong>Best performing agent:</strong> {{ tier3.best_agent or 'N/A' }}</div>
+                        {% if completed_agent and completed_agent.needs_attention %}<div class="score-warn">Completed-agent result. Other execution failures need attention; see agent details.</div>{% endif %}
+                        {% if completed_agent and completed_agent.recovered_attempts %}<div>{{ completed_agent.recovered_attempts }} timeout attempt(s) recovered; failed history retained.</div>{% endif %}
                         <div><strong>Trials:</strong> {{ hero_trials }} across {{ (tier3.agents_run or []) | length }} agent(s)</div>
                         <div><strong>Metrics:</strong> {{ hero_metric_count }} evaluators</div>
                         {% if tier3_environment %}<div><strong>Environment:</strong> <code>{{ tier3_environment }}</code></div>{% endif %}
-                        {% if tier3.get('overall_lift') is not none %}<div><strong>Overall lift:</strong> {{ "%+.2f" | format(tier3.get('overall_lift')) }}</div>{% endif %}
+                        {% if tier3.get('overall_lift') is not none %}<div><strong>Best-agent lift:</strong> {{ "%+.2f" | format(tier3.get('overall_lift')) }}</div>{% endif %}
                     </div>
                 </div>
                 {% endif %}
@@ -1429,7 +1435,7 @@
                 {% endif %}
                 {% if has_tier3 %}
                 {% set tier3_display_verdict = 'SKIPPED' if tier3_is_skipped else tier3_verdict | upper %}
-                {% set t3_class = 'skipped' if tier3_is_skipped else ('pass' if tier3_verdict == 'pass' else ('fail' if tier3_verdict == 'fail' else 'warn')) %}
+                {% set t3_class = 'skipped' if tier3_is_skipped else ('warn' if completed_agent and completed_agent.needs_attention else ('pass' if tier3_verdict == 'pass' else ('fail' if tier3_verdict == 'fail' else 'warn'))) %}
                 <div class="tier-card {{ t3_class }}{% if initial_tab == 'tier3' %} active{% endif %}"
                      role="button"
                      tabindex="0"
@@ -1440,14 +1446,14 @@
                      title="Open Tier 3: Live Agent Evaluation">
                     <div class="tier-card-head">
                         <span class="tier-card-label">Tier 3</span>
-                        <span class="tier-card-verdict">{{ tier3_display_verdict }}</span>
+                        <span class="tier-card-verdict">{{ tier3_display_verdict }}{% if report_scope == 'tier3' and completed_agent %} · Quality{% if completed_agent.needs_attention %}; needs attention{% endif %}{% endif %}</span>
                     </div>
                     <h3 class="tier-card-title">Live Agent Evaluation</h3>
                     <div class="tier-card-stats">
                         {% if tier3_is_skipped %}
                         <span>{{ tier3_skip_message }}</span>
                         {% else %}
-                        <span>score <strong>{{ "%.2f" | format(tier3.overall_score) if tier3.overall_score is not none else "N/A" }}</strong></span>
+                        <span>score <strong>{{ "%.2f" | format(hero_score) if hero_score is not none else "N/A" }}</strong></span>
                         {% if tier3.get('overall_lift') is not none %}<span>lift <strong>{{ "%+.2f" | format(tier3.get('overall_lift')) }}</strong></span>{% endif %}
                         {% if hero_trials %}<span><strong>{{ hero_trials }}</strong> trial(s)</span>{% endif %}
                         {% endif %}
@@ -2392,11 +2398,17 @@
                 <strong>Inconclusive: skill never activated.</strong>
                 Scores are diagnostic only; no lift verdict was computed. Check skill loading and agent support, then rerun the evaluation.
                 {% else %}
+                {% if completed_agent and completed_agent.needs_attention %}
+                <strong>Completed-agent result: {{ completed_agent.verdict | upper }}.</strong>
+                {{ completed_agent.name }} scored {{ "%.2f" | format(completed_agent.score) }}.
+                Other execution failures need attention. This is not a whole-run or publication PASS.
+                {% else %}
                 <strong>Verdict at a glance:</strong>
                 {{ tier3_verdict | upper }} with an overall score of
-                {{ "%.2f" | format(tier3.overall_score) if tier3.overall_score is not none else "N/A" }}.
+                {{ "%.2f" | format(hero_score) if hero_score is not none else "N/A" }}.
                 {% if t3_best_name %}Best performing agent is <strong>{{ t3_best_name }}</strong>{% else %}No successfully scored agent is available{% endif %}
                 {% if tier3.get('overall_lift') is not none %} with {{ "%+.2f" | format(tier3.get('overall_lift')) }} skill lift{% endif %}.
+                {% endif %}
                 {% endif %}
             </div>
             {% if t3_harbor_job_url or t3_harbor_analysis_url %}
@@ -2413,13 +2425,13 @@
             {% endif %}
             <div class="dashboard">
                 <div class="dashboard-card {{ 'success' if tier3_verdict == 'pass' else ('danger' if tier3_verdict == 'fail' else '') }}">
-                    <h3 class="dashboard-card-title">Verdict</h3>
+                    <h3 class="dashboard-card-title">{{ 'Quality Verdict' if report_scope == 'tier3' and completed_agent else 'Verdict' }}</h3>
                     <p class="dashboard-card-value">{{ 'SKIPPED' if tier3_is_skipped else tier3_verdict | upper }}</p>
-                    <p class="dashboard-card-subtitle">Evaluation outcome</p>
+                    <p class="dashboard-card-subtitle">{{ 'Completed-agent quality; lift shown separately' if report_scope == 'tier3' and completed_agent else 'Evaluation outcome' }}</p>
                 </div>
                 <div class="dashboard-card">
-                    <h3 class="dashboard-card-title">Overall Score</h3>
-                    <p class="dashboard-card-value">{{ "%.2f" | format(tier3.overall_score) if tier3.overall_score is not none else "N/A" }}</p>
+                    <h3 class="dashboard-card-title">{{ 'Completed Agent Score' if completed_agent and completed_agent.needs_attention else 'Overall Score' }}</h3>
+                    <p class="dashboard-card-value">{{ "%.2f" | format(hero_score) if hero_score is not none else "N/A" }}</p>
                     <p class="dashboard-card-subtitle">Best run across evaluated dimensions</p>
                 </div>
                 <div class="dashboard-card">

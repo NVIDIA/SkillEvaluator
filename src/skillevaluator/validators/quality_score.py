@@ -315,7 +315,9 @@ class QualityScoreValidator(ValidatorBase):
 
         # Determine pass/fail based on min_score
         if qs.overall_score < self.min_score:
-            result.passed = False
+            result.fail_gate(
+                f"Quality score {qs.overall_score:.1f}/100 is below the required {self.min_score}/100 in {manifest}"
+            )
 
         result.metadata["quality_scores"] = qs.to_dict()
 

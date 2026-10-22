@@ -1907,6 +1907,9 @@
                 {% endif %}
                 {% else %}
                 <div class="findings-list">
+                    {% for error in result | additional_errors %}
+                    <div class="finding high"><div class="finding-header"><span class="finding-message">{{ error }}</span></div></div>
+                    {% endfor %}
                     {% if result.findings %}{% for finding in result.findings %}
                     <div class="finding {{ finding.severity.value }}">
                         <div class="finding-header">
@@ -1920,7 +1923,7 @@
                         {% if finding.line_content %}<div class="code-snippet">{{ finding.line_content | truncate(200) }}</div>{% endif %}
                         {% if finding.suggestion %}<div class="suggestion"><strong>Suggestion:</strong> {{ finding.suggestion }}</div>{% endif %}
                     </div>
-                    {% endfor %}{% elif result.errors %}{% for error in result.errors %}<div class="finding high"><div class="finding-header"><span class="finding-message">{{ error }}</span></div></div>{% endfor %}{% endif %}
+                    {% endfor %}{% endif %}
                 </div>
                 {% endif %}
             </div>

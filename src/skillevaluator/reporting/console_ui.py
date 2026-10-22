@@ -881,6 +881,8 @@ def summarize_tier3(result: ValidationResult) -> tuple[bool, bool, list[TierRow]
 
 
 def _first_error(result: ValidationResult) -> str:
+    if result.gate_failures:
+        return result.gate_failures[0]
     for finding in result.findings:
         severity = getattr(finding.severity, "value", str(finding.severity)).lower()
         if severity in ("critical", "high"):
@@ -895,8 +897,8 @@ def _first_error(result: ValidationResult) -> str:
 def first_fix(results: list[ValidationResult]) -> list[tuple[str, str]] | None:
     """The single most actionable fix: the gating finding's suggestion.
 
-    Prefers critical/high findings (the ones that actually failed the gate)
-    over advisory-severity ones, and trims to one terse directive line.
+    Prefers independent gate failures, then critical/high findings over
+    advisory-severity ones, and trims to one terse directive line.
     """
     severity_rank = {"critical": 0, "high": 1, "medium": 2, "low": 3}
 
@@ -907,8 +909,10 @@ def first_fix(results: list[ValidationResult]) -> list[tuple[str, str]] | None:
     for result in results:
         if result.passed or _is_skipped(result):
             continue
-        for finding in sorted(result.findings, key=rank):
-            text = finding.suggestion or finding.message
+        for text in [
+            *result.gate_failures,
+            *(finding.suggestion or finding.message for finding in sorted(result.findings, key=rank)),
+        ]:
             if text:
                 text = text.split(". ")[0].strip().rstrip(".")
                 if len(text) > 150:

@@ -11,6 +11,12 @@ All notable changes to SkillEvaluator are documented in this file.
   skill has a generated `skill-card.md` or `BENCHMARK.md`. The decision fails
   closed for any behavioral change, invalid frontmatter, or missing evidence.
 
+### Fixed
+
+- Changing finding severities through a policy no longer clears an independent
+  quality-score threshold failure. A score below `--min-score` still fails,
+  and its reason appears in the terminal, HTML, benchmark, and JSON reports.
+
 ## 0.6.0 - 2026-10-20
 
 ### Added

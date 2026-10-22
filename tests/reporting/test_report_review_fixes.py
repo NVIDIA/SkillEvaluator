@@ -110,7 +110,7 @@ def test_cli_renders_missing_baseline_as_not_available(tmp_path: Path, mode: str
 
     plain = _rich_text(lambda console: CLIReporter(console).render_result(result, console))
 
-    assert re.search(r"Accuracy\s*│\s*0\.80\s*│\s*N/A\s*│\s*N/A", plain), plain
+    assert re.search(r"Accuracy\s*│\s*0\.80\s*│\s*n/a\s*│\s*n/a", plain), plain
 
 
 def test_html_missing_baseline_does_not_claim_a_zero_lift(tmp_path: Path) -> None:

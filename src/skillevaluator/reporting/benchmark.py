@@ -626,8 +626,9 @@ class BenchmarkReporter(ReporterBase):
             for finding in shown:
                 lines.append(_finding_line(finding, private_labels))
             if hidden := len(gate_failures) - len(shown_gates) + len(blocking) - len(shown):
-                # Never cut the list silently: say how many blocking rows are not shown.
-                lines.append(f"- {hidden} more blocking finding(s) are in the full evaluation artifacts.")
+                # Never cut the list silently: say how many blocking rows are not shown, after the list
+                # rather than as one more row of it.
+                lines.extend(["", f"{hidden} more blocking finding(s) are in the full evaluation artifacts."])
             lines.append("")
 
         static_test_limitations = list(

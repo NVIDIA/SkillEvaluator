@@ -11,6 +11,7 @@ from __future__ import annotations
 
 import pytest
 
+from skillevaluator.tier3.eval_core.atif_helpers import extract_tool_calls_as_dicts
 from skillevaluator.tier3.eval_core.checks import check_error_recovery
 from skillevaluator.tier3.harbor.report import _collect_fail_reasons
 from skillevaluator.tier3.harbor.templates import eval as eval_template
@@ -516,3 +517,398 @@ def test_codex_output_does_not_strip_claude_marker(checker):
     result = checker([_call("rg TODO src", _codex_output(1, "[error] tool reported failure"))])
     assert result["passed"] is False
     assert result["score"] == 0.0
+
+
+@pytest.fixture(
+    params=[
+        (extract_tool_calls_as_dicts, check_error_recovery),
+        (eval_template.extract_tool_calls_as_dicts, eval_template.check_error_recovery),
+    ],
+    ids=["host", "harbor-verifier"],
+)
+def trajectory_checker(request):
+    """Extract tool calls from an ATIF trajectory and score them with one implementation."""
+    extract, check = request.param
+
+    def run(trajectory: dict) -> dict:
+        return check(extract(trajectory))
+
+    run.extract = extract
+    return run
+
+
+def _claude_code_trajectory(*commands: tuple[str, str, int]) -> dict:
+    """Build Harbor Claude Code ATIF steps for (command, output, exit code) tuples."""
+    from harbor.agents.installed.claude_code import ClaudeCode
+
+    steps = []
+    for index, (command, output, exit_code) in enumerate(commands):
+        if exit_code:
+            content = f"Exit code {exit_code}\n{output}".rstrip()
+            block = {"type": "tool_result", "content": content, "is_error": True}
+            observation, metadata = ClaudeCode._format_tool_result(block, f"Error: {content}")
+        else:
+            block = {"type": "tool_result", "content": output, "is_error": False}
+            tool_use_result = {"stdout": output, "stderr": "", "interrupted": False, "isImage": False}
+            observation, metadata = ClaudeCode._format_tool_result(block, tool_use_result)
+        call_id = f"toolu_{index}"
+        steps.append(
+            {
+                "step_id": index + 1,
+                "source": "agent",
+                "message": "",
+                "tool_calls": [{"tool_call_id": call_id, "function_name": "Bash", "arguments": {"command": command}}],
+                "observation": {
+                    "results": [
+                        {
+                            "source_call_id": call_id,
+                            "content": observation,
+                            # Harbor stores the result's is_error flag here.
+                            "extra": {"tool_result_metadata": metadata, "tool_result_is_error": block["is_error"]},
+                        }
+                    ]
+                },
+            }
+        )
+    return {"schema_version": "ATIF-v1.7", "agent": {"name": "claude-code"}, "steps": steps}
+
+
+@pytest.mark.parametrize(
+    "command,output",
+    [
+        (
+            'python3 -m py_compile repository.py && echo OK; python3 -c "import sqlalchemy" 2>&1 | tail -1',
+            "OK\nModuleNotFoundError: No module named 'sqlalchemy'",
+        ),
+        ("python scripts/fetch.py --url https://example.com/missing", '{"error": "HTTP 404: Not Found"}'),
+        ("cat scripts/call_api.py", 'result["error"] = f"Request timed out after {timeout} seconds"'),
+        ("cat scripts/parse.py", "    Raises:\n        ValueError: If the spec is malformed."),
+        ("ls missing; ls skills", "ls: missing: No such file or directory\nreport-builder"),
+        ("cat build.log", "step 3\nexit code 1\nretrying"),
+    ],
+)
+def test_claude_code_success_flag_skips_text_check(trajectory_checker, command, output):
+    trajectory = _claude_code_trajectory((command, output, 0))
+    assert trajectory_checker.extract(trajectory)[0]["is_error"] is False
+    result = trajectory_checker(trajectory)
+    assert result["score"] == 1.0
+    assert result["passed"] is True
+    assert result["failures"] == []
+
+
+def test_claude_code_success_flag_counts_as_recovery(trajectory_checker):
+    trajectory = _claude_code_trajectory(
+        ("python scripts/build.py", "Traceback (most recent call last):\nKeyError: 'x'", 1),
+        ("python scripts/build.py --in data.csv", "lint step failed, skipped\nexit code 1\nwrote report.html", 0),
+    )
+    result = trajectory_checker(trajectory)
+    assert result["score"] == 0.9
+    assert result["passed"] is True
+    assert len(result["corrections"]) == 1
+    assert result["unrecovered_failures"] == []
+
+
+@pytest.mark.parametrize(
+    "command,output,exit_code",
+    [
+        ("pytest -q", "F.\nFAILED tests/test_a.py::test_a - assert 1 == 2\n1 failed, 1 passed", 1),
+        ("python run.py", "Traceback (most recent call last):\nKeyError: 'x'", 1),
+        ("npx tsc --noEmit", "src/a.ts(3,7): error TS2322: Type 'string' is not assignable to type 'number'.", 2),
+        ("python run.py", "", 1),
+    ],
+)
+def test_claude_code_error_flag_still_fails(trajectory_checker, command, output, exit_code):
+    trajectory = _claude_code_trajectory((command, output, exit_code))
+    assert trajectory_checker.extract(trajectory)[0]["is_error"] is True
+    result = trajectory_checker(trajectory)
+    assert result["score"] == 0.0
+    assert result["passed"] is False
+    assert len(result["unrecovered_failures"]) == 1
+
+
+@pytest.mark.parametrize(
+    "content,score",
+    [
+        ("Command timed out after 2m 0.0s", 0.0),
+        ("Permission to use Bash with command rm -rf build has been denied.", 1.0),
+    ],
+)
+def test_claude_code_error_flag_without_exit_status_uses_text(trajectory_checker, content, score):
+    trajectory = _claude_code_trajectory(("rm -rf build", "", 0))
+    result_entry = trajectory["steps"][0]["observation"]["results"][0]
+    result_entry["content"] = f"{content}\n\n[error] tool reported failure"
+    result_entry["extra"] = {"tool_result_is_error": True}
+    assert trajectory_checker.extract(trajectory)[0]["is_error"] is True
+    assert trajectory_checker(trajectory)["score"] == score
+
+
+def test_unflagged_result_keeps_text_check(trajectory_checker):
+    trajectory = _claude_code_trajectory(("python run.py", "", 0))
+    result_entry = trajectory["steps"][0]["observation"]["results"][0]
+    result_entry["content"] = "Traceback (most recent call last):\nKeyError: 'x'"
+    del result_entry["extra"]
+    assert "is_error" not in trajectory_checker.extract(trajectory)[0]
+    result = trajectory_checker(trajectory)
+    assert result["score"] == 0.0
+    assert result["passed"] is False
+
+
+def _opencode_trajectory(tmp_path, *commands: tuple[str, str, int | None]) -> dict:
+    """Convert OpenCode bash events with Harbor's converter, which keeps only the output."""
+    from harbor.agents.installed.opencode import OpenCode
+
+    events = []
+    for index, (command, output, exit_code) in enumerate(commands):
+        state = {
+            "status": "completed",
+            "input": {"command": command, "description": "run"},
+            "output": output,
+            "metadata": {"exit": exit_code, "output": output, "description": "run"},
+        }
+        events.extend(
+            [
+                {"type": "step_start", "timestamp": 1000 + index, "sessionID": "s1", "part": {}},
+                {
+                    "type": "tool_use",
+                    "timestamp": 1000 + index,
+                    "sessionID": "s1",
+                    "part": {"type": "tool", "tool": "bash", "callID": f"call_{index}", "state": state},
+                },
+                {
+                    "type": "step_finish",
+                    "timestamp": 1000 + index,
+                    "sessionID": "s1",
+                    "part": {"tokens": {}, "cost": 0},
+                },
+            ]
+        )
+    agent = OpenCode(logs_dir=tmp_path, model_name="openai/gpt-5")
+    return agent._convert_events_to_trajectory(events).to_json_dict()
+
+
+OPENCODE_PYTEST_FAIL = (
+    "F.\n=================================== FAILURES ===================================\n"
+    "___ test_total ___\n\n    def test_total():\n>       assert total([1, 2]) == 4\nE       assert 3 == 4\n\n"
+    "tests/test_calc.py:4: AssertionError\n"
+    "=========================== short test summary info ============================\n"
+    "FAILED tests/test_calc.py::test_total - assert 3 == 4\n1 failed, 1 passed in 0.03s\n"
+)
+OPENCODE_FAILURES = {
+    "pytest": ("pytest -q", OPENCODE_PYTEST_FAIL, 1),
+    "pytest-collection": (
+        "pytest -q",
+        "==== short test summary info ====\nERROR tests/test_calc.py\n!!! Interrupted: 1 error during collection !!!\n",
+        2,
+    ),
+    "unittest": ("python -m unittest", "F\n----\nRan 1 test in 0.001s\n\nFAILED (failures=1)\n", 1),
+    "tsc": (
+        "npx tsc --noEmit",
+        "src/a.ts(3,7): error TS2322: Type 'string' is not assignable to type 'number'.\n\nFound 1 error in src/a.ts:3\n",
+        2,
+    ),
+    "jest": (
+        "npm test",
+        "> demo@1.0.0 test\n> jest\n\n FAIL  src/sum.test.js\n  x adds 1 + 2 to equal 3 (3 ms)\n\nTests:       1 failed, 1 total\n",
+        1,
+    ),
+    "npm-err": ("npm install", "npm ERR! code E404\nnpm ERR! 404 Not Found - GET https://registry.npmjs.org/nope\n", 1),
+    "npm-error": ("npm run build", "npm error Lifecycle script `build` failed with error:\nnpm error code 1\n", 1),
+    "go-test": (
+        "go test ./...",
+        "--- FAIL: TestTotal (0.00s)\n    calc_test.go:8: got 3, want 4\nFAIL\nFAIL\tdemo\t0.01s\n",
+        1,
+    ),
+    "timeout": (
+        "python long_job.py",
+        "partial output\n\n<bash_metadata>\nbash tool terminated command after exceeding timeout 120000 ms\n</bash_metadata>",
+        None,
+    ),
+}
+
+
+@pytest.mark.parametrize("name", sorted(OPENCODE_FAILURES))
+def test_opencode_unrecovered_test_and_build_failures(trajectory_checker, tmp_path, name):
+    trajectory = _opencode_trajectory(tmp_path, OPENCODE_FAILURES[name])
+    assert "is_error" not in trajectory_checker.extract(trajectory)[0]
+    result = trajectory_checker(trajectory)
+    assert result["score"] == 0.0
+    assert result["passed"] is False
+    assert result["first_attempt_clean"] is False
+    assert len(result["unrecovered_failures"]) == 1
+
+
+@pytest.mark.parametrize("name", ["pytest", "tsc"])
+def test_opencode_recovered_test_and_build_failures(trajectory_checker, tmp_path, name):
+    failure = OPENCODE_FAILURES[name]
+    trajectory = _opencode_trajectory(tmp_path, failure, (failure[0], "..\n2 passed in 0.02s\n", 0))
+    result = trajectory_checker(trajectory)
+    assert result["score"] == 0.9
+    assert result["passed"] is True
+    assert result["first_attempt_clean"] is False
+    assert len(result["corrections"]) == 1
+
+
+@pytest.mark.parametrize(
+    "output",
+    [
+        "..\n2 passed in 0.02s\n",
+        "Tests:       0 failed, 4 passed, 4 total\n",
+        "test result: ok. 3 passed; 0 failed; 0 ignored\n",
+        "FAIL_FAST = True\nFAILED = 'failed'\nERROR = 2\n",
+        "2 passed, 1 xfailed in 0.04s\n",
+    ],
+)
+def test_opencode_passing_test_output_is_not_failure(trajectory_checker, tmp_path, output):
+    result = trajectory_checker(_opencode_trajectory(tmp_path, ("pytest -q", output, 0)))
+    assert result["score"] == 1.0
+    assert result["passed"] is True
+    assert result["failures"] == []
+
+
+@pytest.mark.parametrize(
+    "observation",
+    [
+        'def call_api(url: str, method: str = "GET", timeout: int = 30) -> dict:',
+        "    Args:\n        --timeout: Request timeout in seconds.",
+        "class Settings(BaseModel):\n    retries: int = 3\n    timeout: float = 30.0",
+        "@dataclass\nclass Result:\n    ok: bool\n    error: str | None = None",
+        "export interface Result {\n  ok: boolean;\n  error: string | null;\n}",
+        "def run(\n    cmd: list[str],\n    timeout: int,\n    last_error: Optional[str] = None,\n):",
+    ],
+)
+def test_displayed_annotations_without_status_are_not_failures(checker, observation):
+    result = checker([_call("cat scripts/call_api.py", observation)])
+    assert result["score"] == 1.0
+    assert result["passed"] is True
+    assert result["failures"] == []
+
+
+@pytest.mark.parametrize(
+    "observation",
+    [
+        "timeout: invalid time interval 'abc'",
+        "error: externally-managed-environment",
+        "error: unrecognized arguments: --bogus",
+        "RuntimeError: boom",
+        "ValueError: invalid literal for int() with base 10: 'x'",
+        "requests.exceptions.Timeout: HTTPSConnectionPool(host='api.example.com', port=443)",
+        "Error: Cannot find module 'jest'",
+    ],
+)
+def test_diagnostics_without_status_still_fail(checker, observation):
+    result = checker([_call("python run.py", observation)])
+    assert result["score"] == 0.0
+    assert result["passed"] is False
+
+
+def _exit_one_observations(output: str, exit_code: int = 1) -> list[str]:
+    """The same failed command as a plain status line, a Harbor Claude Code result and a Codex result."""
+    from harbor.agents.installed.claude_code import ClaudeCode
+
+    content = f"Exit code {exit_code}\n{output}".rstrip()
+    claude_code, _ = ClaudeCode._format_tool_result(
+        {"type": "tool_result", "content": content, "is_error": True}, f"Error: {content}"
+    )
+    return [content, claude_code, _codex_output(exit_code, output)]
+
+
+@pytest.mark.parametrize(
+    "command,output",
+    [
+        ("grep -c TODO a.py", "0"),
+        ("grep -rc TODO src", "src/a.py:0\nsrc/b.py:0"),
+        ("rg --count TODO src", ""),
+        ("grep -rn TODO src 2>/dev/null", ""),
+        ("grep -q foo a.txt >/dev/null 2>&1", ""),
+        ("rg TODO src &>/dev/null", ""),
+        ("cd /app && grep -rn TODO src", ""),
+        ('cd "my app"; rg TODO', ""),
+        ("pwd && rg --files -g AGENTS.md .", "/workspace"),
+        ("cd /app && pwd; grep -rn TODO src", "/app"),
+        ("LC_ALL=C grep -q foo a.txt", ""),
+        ("ls | grep foo", ""),
+        ("ls src | grep -c test_", "0"),
+        ("test -f out.json && echo exists", ""),
+        ("[[ -f out.json ]]", ""),
+        ("command -v jq", ""),
+        ("which jq", ""),
+        ("git diff --quiet", ""),
+        ("git diff --quiet -- src/app.py", ""),
+    ],
+)
+def test_quiet_probe_variants_are_not_failures(checker, command, output):
+    for observation in _exit_one_observations(output):
+        result = checker([_call(command, observation)])
+        assert result["score"] == 1.0, observation
+        assert result["passed"] is True
+        assert result["failures"] == []
+
+
+@pytest.mark.parametrize(
+    "command,output,exit_code",
+    [
+        ("grep TODO a.py", "0", 1),
+        ("grep -c TODO a.py", "0\ngrep: b.py: Permission denied", 1),
+        ("grep -c TODO a.py", "3", 1),
+        ("grep -rn TODO src 2>/dev/null", "", 2),
+        ("cd /app && rg TODO src", "rg: src: No such file or directory", 1),
+        ("cd /app && python run.py", "", 1),
+        ("cd /app && grep -rn TODO src; python run.py", "", 1),
+        ("pwd && rg --files -g AGENTS.md .", "/workspace\nrg: ./private: Permission denied", 1),
+        ("pwd; python run.py", "/workspace", 1),
+        ("ls | python run.py", "", 1),
+        ("test -f out.json && python run.py", "", 1),
+        ("pytest -q 2>/dev/null", "", 1),
+        ("command jq", "", 1),
+        ("which jq", "which: no jq in (/usr/bin:/bin)", 1),
+        ("git diff", "", 1),
+        ("git diff --exit-code", "diff --git a/app.py b/app.py", 1),
+        ("git status --short", "fatal: not a git repository (or any of the parent directories): .git", 128),
+    ],
+)
+def test_quiet_probe_variants_keep_real_failures(checker, command, output, exit_code):
+    for observation in _exit_one_observations(output, exit_code):
+        result = checker([_call(command, observation)])
+        assert result["score"] == 0.0, observation
+        assert result["passed"] is False
+        assert len(result["unrecovered_failures"]) == 1
+
+
+@pytest.mark.parametrize(
+    "command,retry",
+    [
+        ("python skills/report-builder/scripts/build.py --in data.csv", "ls /tmp"),
+        ("cd /app && pytest -q", "cd /app && git status --short"),
+        ("cd /app; python run.py", "cd /app; ls"),
+        ("pytest tests/test_api.py", "cat pytest.ini"),
+    ],
+)
+def test_unrelated_command_in_window_does_not_recover(checker, command, retry):
+    calls = [
+        _call(command, "Traceback (most recent call last):\nKeyError: 'x'\nexit code 1"),
+        _call(retry, _codex_output(0, "skills")),
+    ]
+    result = checker(calls)
+    assert result["score"] == 0.0
+    assert result["passed"] is False
+    assert result["corrections"] == []
+    assert [failure["failed_cmd"] for failure in result["unrecovered_failures"]] == [command]
+
+
+@pytest.mark.parametrize(
+    "command,retry",
+    [
+        ("cd /app && pytest -q", "pytest -q tests/test_api.py"),
+        ("pytest -q", "cd /app && pytest -q"),
+        ("python run.py", "python3 run.py --verbose"),
+        ("/usr/bin/python3 run.py", "python run.py"),
+        ("pytest -q", "python -m pytest -q"),
+        ("bash scripts/build.sh", "scripts/build.sh --clean"),
+    ],
+)
+def test_related_command_in_window_recovers(checker, command, retry):
+    result = checker([_call(command, "exit code 1"), _call(retry, _codex_output(0, "done"))])
+    assert result["score"] == 0.9
+    assert result["passed"] is True
+    assert len(result["corrections"]) == 1
+    assert result["unrecovered_failures"] == []

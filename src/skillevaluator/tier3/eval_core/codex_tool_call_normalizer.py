@@ -101,20 +101,34 @@ def normalized_tool_call_observation(step: dict[str, Any], tool_call: dict[str, 
     )
 
 
-def normalized_tool_call_is_error(step: dict[str, Any], tool_call: dict[str, Any]) -> bool:
-    """Preserve explicit failure metadata only for an attributable tool result."""
+def normalized_tool_call_error_flag(step: dict[str, Any], tool_call: dict[str, Any]) -> bool | None:
+    """Return an attributable tool result's explicit ``tool_result_is_error`` flag.
+
+    ``True`` if any attributable result reports an error, ``False`` if they
+    explicitly report success, and ``None`` when none carries the flag.
+    """
     if tool_call.get("_atif_observation_status") not in (None, MAPPED_OUTER_EXEC_OBSERVATION):
-        return False
+        return None
     tool_call_id = tool_call.get("tool_call_id")
+    flag = None
     for result in (step.get("observation") or {}).get("results") or []:
         source_call_id = result.get("source_call_id")
         # Unscoped observations cannot prove that this particular call failed.
         if not tool_call_id or source_call_id != tool_call_id:
             continue
         extra = result.get("extra") or {}
-        if isinstance(extra, dict) and extra.get("tool_result_is_error") is True:
+        if not isinstance(extra, dict):
+            continue
+        if extra.get("tool_result_is_error") is True:
             return True
-    return False
+        if extra.get("tool_result_is_error") is False:
+            flag = False
+    return flag
+
+
+def normalized_tool_call_is_error(step: dict[str, Any], tool_call: dict[str, Any]) -> bool:
+    """Preserve explicit failure metadata only for an attributable tool result."""
+    return normalized_tool_call_error_flag(step, tool_call) is True
 
 
 def normalized_tool_call_wrapper_observation(step: dict[str, Any], tool_call: dict[str, Any]) -> str:

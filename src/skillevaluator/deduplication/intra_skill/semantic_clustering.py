@@ -70,6 +70,10 @@ def build_clusters(
     if n < 2:
         return []
 
+    def siblings(i: int, j: int) -> bool:
+        group = chunks[i].split_group
+        return group is not None and group == chunks[j].split_group
+
     uf = UnionFind(n)
     pair_scores: dict[tuple[int, int], float] = {}
 
@@ -79,7 +83,7 @@ def build_clusters(
             chunks[j].embedding,
         )
         pair_scores[(i, j)] = score
-        if score >= threshold:
+        if score >= threshold and not siblings(i, j):
             uf.union(i, j)
 
     clusters: list[ContentCluster] = []
@@ -88,7 +92,7 @@ def build_clusters(
             continue
 
         members = [chunks[i] for i in indices]
-        scores = [pair_scores.get((min(i, j), max(i, j)), 0.0) for i, j in combinations(indices, 2)]
+        scores = [pair_scores[(i, j)] for i, j in combinations(indices, 2) if not siblings(i, j)]
 
         clusters.append(
             ContentCluster(

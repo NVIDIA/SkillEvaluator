@@ -39,6 +39,10 @@ All notable changes to SkillEvaluator are documented in this file.
 
 ### Fixed
 
+- Tier 2 caps every intra-skill embedding chunk at 3,000 characters, preserves
+  meaningful short tails and actual Python docstring source ranges, and avoids
+  counting pieces of one original chunk as duplicates of each other.
+
 - Tier 3 error recovery now scores unrecovered command failures as zero and
   includes them in fault counts and failure verdicts/report reasons. Host and
   bundled verifier detection agree and use a result's execution status when it

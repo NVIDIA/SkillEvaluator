@@ -5749,6 +5749,8 @@ def _tool_searches_root(action: str, args: dict, text: str) -> bool:
                     cursor += 2
                 else:
                     break
+            if cursor < len(arguments) and arguments[cursor] == "--":
+                cursor += 1
             for argument in arguments[cursor:]:
                 if argument.startswith("-") or argument == "!":
                     break

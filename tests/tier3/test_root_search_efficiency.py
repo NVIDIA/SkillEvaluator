@@ -63,7 +63,16 @@ def test_scoped_searches_patterns_and_ordinary_calls_keep_existing_classificatio
 
 
 @pytest.mark.parametrize("module", [checks, template], ids=["host", "bundled"])
-@pytest.mark.parametrize("command", ["find -L / -name task.py", "find -H / -name task.py", "tree -f /"])
+@pytest.mark.parametrize(
+    "command",
+    [
+        "find -L / -name task.py",
+        "find -H / -name task.py",
+        "find -- / -name task.py",
+        "find -L -- / -name task.py",
+        "tree -f /",
+    ],
+)
 def test_search_utility_options_do_not_hide_a_root_operand(module, command):
     result = module.check_tool_efficiency(
         [{"action": "exec_command", "action_input": {"cmd": command}}], expected_script="task.py"

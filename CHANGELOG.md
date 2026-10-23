@@ -39,6 +39,10 @@ All notable changes to SkillEvaluator are documented in this file.
 
 ### Fixed
 
+- Plain removal of recognized regenerable caches no longer receives the Tier 3
+  destructive-command penalty. Dynamic commands, mixed targets and other
+  destructive operations retain their existing classification in both verifiers.
+
 - Tier 3 error recovery now scores unrecovered command failures as zero and
   includes them in fault counts and failure verdicts/report reasons. Host and
   bundled verifier detection agree and use a result's execution status when it

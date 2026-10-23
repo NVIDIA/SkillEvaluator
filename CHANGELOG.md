@@ -39,6 +39,10 @@ All notable changes to SkillEvaluator are documented in this file.
 
 ### Fixed
 
+- Explicit filesystem-root searches no longer gain tool-efficiency credit by
+  mentioning the expected skill or script. Host and bundled scoring agree,
+  while scoped searches and slash-valued patterns retain their classification.
+
 - Tier 3 error recovery now scores unrecovered command failures as zero and
   includes them in fault counts and failure verdicts/report reasons. Host and
   bundled verifier detection agree and use a result's execution status when it

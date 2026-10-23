@@ -113,7 +113,7 @@ vocabulary.
 
 | Extension | Chunking strategy |
 | --- | --- |
-| `.md`, `.mdc` | Heading-based sections; sections over 3,000 characters are split at eligible paragraph boundaries when possible; chunks under 80 characters are dropped |
+| `.md`, `.mdc` | Heading-based sections; eligible sections over 3,000 characters are split into bounded pieces, preferring paragraph and line boundaries |
 | `.py` | Module docstrings plus class and function signatures with their docstrings; implementation bodies are not included |
 | `.sh` | Function bodies and comment blocks of at least three consecutive comment lines |
 | Other extensions | Skipped |
@@ -122,6 +122,13 @@ Valid mapping frontmatter is removed from Markdown before chunking. Malformed,
 empty, or non-mapping frontmatter remains part of the analyzed text. Every
 retained chunk keeps its source file and line range, so findings point you to
 the exact overlapping sections.
+
+Each embedding input is capped at 3,000 characters, including long table rows,
+Python docstrings, and shell functions. The minimum-length filter applies before
+splitting; meaningful short final pieces are retained. Pieces from one original
+chunk do not count as duplicates of each other, but an independent copy can
+still join a duplicate cluster. Python pieces retain the enclosing source range
+because cleaned docstrings and function signatures are not contiguous text.
 
 ### Verdicts and what to do about them
 

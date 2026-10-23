@@ -29,6 +29,7 @@ import json
 import logging
 import math
 import os
+import posixpath
 import random
 import re
 import shlex
@@ -4782,8 +4783,7 @@ def check_activation(tool_calls, expected_skill, skill_tool_names=None, acceptab
             _is_execution_action(action) and _cmd_reads_skill_md(cmd)
         )
         if not has_skill_read_evidence or (
-            tc.get("is_error") is True
-            and (not _is_execution_action(action) or _failed_single_skill_read(tc))
+            tc.get("is_error") is True and (not _is_execution_action(action) or _failed_single_skill_read(tc))
         ):
             continue
         obs = str(tc.get("observation", "")).lower()
@@ -8248,9 +8248,7 @@ def check_error_recovery(tool_calls, expected_script=None):
             # Keep the original local correction heuristic, but require the
             # same command and arguments for retries beyond the five-call window.
             matches = (
-                _cmds_similar(cmd, retry_cmd)
-                if j - i <= 5
-                else bool(cmd.split()) and cmd.split() == retry_cmd.split()
+                _cmds_similar(cmd, retry_cmd) if j - i <= 5 else bool(cmd.split()) and cmd.split() == retry_cmd.split()
             )
             if matches and succeeded[j]:
                 corrections.append(
@@ -8297,6 +8295,185 @@ def check_error_recovery(tool_calls, expected_script=None):
     }
 
 
+def _search_path_is_root(value: str) -> bool:
+    return value.startswith("/") and not posixpath.normpath(value).strip("/")
+
+
+def _tool_searches_root(action: str, args: dict, text: str) -> bool:
+    """Recognize explicit root search operands, not '/' inside a pattern.
+
+    This is bounded top-level command classification. It does not execute or
+    interpret dynamically constructed shell programs.
+    """
+    if action in {"grep", "glob", "grep_files", "list_dir", "ls"}:
+        for key in ("path", "dir_path"):
+            value = args.get(key)
+            if isinstance(value, str) and _search_path_is_root(value.strip()):
+                return True
+        pattern = args.get("pattern")
+        if action == "glob" and isinstance(pattern, str) and pattern.startswith("/"):
+            first = pattern.lstrip("/").split("/", 1)[0]
+            if not first or any(char in first for char in "*?[{"):
+                return True
+    if not _is_execution_action(action) or len(text) > 65536:
+        return False
+    # Without a shell AST, comments, expansions and nested programs cannot be
+    # classified reliably. Keep their prior score instead of inventing a path.
+    if any(char in text for char in "$`#<>"):
+        return False
+    commands: list[list[str]] = [[]]
+    for token in _shell_tokens(text):
+        if token in {";", "&&", "||", "|", "&", "(", ")"}:
+            commands.append([])
+        else:
+            commands[-1].append(token)
+    for command in commands:
+        assignments: dict[str, str] = {}
+        index = _unwrap_shell_command(command, 0, assignments)
+        if index is None or index >= len(command):
+            continue
+        name = _shell_executable(_resolved_shell_arg(command[index], assignments))
+        if name not in {"find", "grep", "egrep", "fgrep", "rg", "ag", "du", "tree"}:
+            continue
+        arguments = [_resolved_shell_arg(arg, {}) for arg in command[index + 1 :]]
+        if name == "find":
+            cursor = 0
+            while cursor < len(arguments):
+                argument = arguments[cursor]
+                if argument in {"-H", "-L", "-P"} or re.fullmatch(r"-O[0-9]+", argument):
+                    cursor += 1
+                elif argument == "-D":
+                    cursor += 2
+                else:
+                    break
+            for argument in arguments[cursor:]:
+                if argument.startswith("-") or argument == "!":
+                    break
+                if _search_path_is_root(argument):
+                    return True
+            continue
+        pattern_tools = {"grep", "egrep", "fgrep", "rg", "ag"}
+        needs_pattern = name in pattern_tools
+        boolean_short = {
+            "grep": "rRnilLqsvcwxhHaboEFGPIUzZ",
+            "egrep": "rRnilLqsvcwxhHaboEFGPIUzZ",
+            "fgrep": "rRnilLqsvcwxhHaboEFGPIUzZ",
+            "rg": "niwlqzUuFSPovcHhNLa",
+            "ag": "niwlqsvac",
+            "tree": "adfipqNQDFhsiuxACn",
+            "du": "achkLmPsxH",
+        }
+        boolean_long = {
+            "--recursive",
+            "--ignore-case",
+            "--line-number",
+            "--files-with-matches",
+            "--files-without-match",
+            "--quiet",
+            "--no-messages",
+            "--invert-match",
+            "--word-regexp",
+            "--line-regexp",
+            "--count",
+            "--fixed-strings",
+            "--hidden",
+            "--no-ignore",
+            "--no-heading",
+            "--heading",
+            "--follow",
+            "--null",
+            "--text",
+        }
+        values = {
+            "grep": {
+                "-A",
+                "-B",
+                "-C",
+                "-m",
+                "--after-context",
+                "--before-context",
+                "--context",
+                "--max-count",
+                "--include",
+                "--exclude",
+                "--exclude-dir",
+            },
+            "rg": {
+                "-A",
+                "-B",
+                "-C",
+                "-m",
+                "-r",
+                "--replace",
+                "-g",
+                "--glob",
+                "--iglob",
+                "-t",
+                "-T",
+                "--type",
+                "--type-not",
+                "--max-depth",
+                "--encoding",
+                "--engine",
+                "--sort",
+                "--sortr",
+                "--max-count",
+                "--after-context",
+                "--before-context",
+                "--context",
+            },
+            "ag": {"-A", "-B", "-C", "-m", "--after", "--before", "--context"},
+            "tree": {"-L", "-P", "-I", "-o", "--filelimit", "--charset"},
+            "du": {"-d", "--max-depth", "-B", "--block-size", "--exclude"},
+        }
+        value_options = values.get("grep" if name in {"egrep", "fgrep"} else name, set())
+        index = 0
+        positional_only = False
+        unsupported = False
+        root_operand = False
+        while index < len(arguments):
+            argument = arguments[index]
+            index += 1
+            if not positional_only and argument == "--":
+                positional_only = True
+                continue
+            if not positional_only and argument.startswith("-"):
+                if name == "rg" and argument == "--files":
+                    needs_pattern = False
+                elif name in pattern_tools and argument in {"-e", "--regexp", "-f", "--file"}:
+                    needs_pattern = False
+                    index += 1
+                elif name in pattern_tools and (
+                    argument.startswith(("--regexp=", "--file=")) or argument.startswith(("-e", "-f"))
+                ):
+                    needs_pattern = False
+                elif argument in value_options:
+                    index += 1
+                elif (
+                    (argument.startswith("--") and argument.partition("=")[0] in value_options and "=" in argument)
+                    or (name in pattern_tools and argument in boolean_long)
+                    or (
+                        argument.startswith("-")
+                        and not argument.startswith("--")
+                        and len(argument) > 1
+                        and set(argument[1:]) <= set(boolean_short[name])
+                    )
+                ):
+                    pass
+                else:
+                    unsupported = True
+                    break
+                continue
+            if needs_pattern:
+                needs_pattern = False
+            elif _search_path_is_root(argument):
+                root_operand = True
+        if root_operand and not unsupported:
+            return True
+
+    return False
+
+
 def check_tool_efficiency(tool_calls, expected_skill=None, expected_script=None):
     if not tool_calls:
         return {"passed": True, "score": 1.0, "reason": "No tool calls"}
@@ -8318,7 +8495,9 @@ def check_tool_efficiency(tool_calls, expected_skill=None, expected_script=None)
         )
         full_text = f"{action} {cmd}".lower()
         is_productive = False
-        if ("read" in action and expected_skill and expected_skill in cmd) or (
+        if _tool_searches_root(action, args, cmd):
+            is_productive = False
+        elif ("read" in action and expected_skill and expected_skill in cmd) or (
             _is_execution_action(action) and expected_script and expected_script in cmd
         ):
             is_productive = True

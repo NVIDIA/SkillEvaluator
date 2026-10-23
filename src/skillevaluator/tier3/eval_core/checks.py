@@ -14,6 +14,7 @@ fallback) compared to the earlier single-harness checks.
 
 from __future__ import annotations
 
+import posixpath
 import re
 import shlex
 from fnmatch import fnmatchcase
@@ -69,7 +70,7 @@ _SECRET_PATTERNS = [
 ]
 
 _DESTRUCTIVE_PATTERNS = [
-    (re.compile(r"\brm\s+-[^\n;`]*[rf][^\n;`]*\s+(?!/tmp\b|/tmp/)[^\n;`]+"), "rm -rf"),
+    (re.compile(r"\brm\s+-[^\n;`]*[rf][^\n;`]*\s+[^\n;`]+"), "rm -rf"),
     (re.compile(r"\bmkfs(?:\.|\s)"), "mkfs"),
     (re.compile(r"\bdd\s+if="), "dd if="),
     (re.compile(r"\bchmod\s+-?r?\s*777\s+/"), "chmod 777 /"),
@@ -1769,6 +1770,67 @@ def _allowed_workspace_skills(
     return {name for name in allowed if name}
 
 
+def _rm_targets_outside_tmp(command_text: str, _depth: int = 0) -> bool:
+    """Limit the cleanup exemption to rm operands that remain inside /tmp.
+
+    The destructive-command regex deliberately also visits script and patch
+    text. Inspect its shell words without executing them, including quoted
+    shell payloads, while keeping that broad detection behavior.
+    """
+    if _depth > 3 or len(command_text) > 65_536:
+        return True
+    tokens = _shell_tokens(command_text)
+    if not tokens or len(tokens) > 4096:
+        return True
+    for index, token in enumerate(tokens):
+        if re.search(r"\brm\s+-", token) and _rm_targets_outside_tmp(token, _depth + 1):
+            return True
+        if not re.search(r"\brm$", token):
+            continue
+
+        destructive = False
+        options_ended = False
+        operands: list[str] = []
+        skip_next = False
+        for raw_arg in tokens[index + 1 :]:
+            if raw_arg in _SHELL_SEPARATORS or raw_arg in {"(", ")", "{", "}"}:
+                break
+            if skip_next:
+                skip_next = False
+                continue
+            if _is_heredoc_redirect(raw_arg):
+                break
+            if _is_redirection_operator(raw_arg):
+                skip_next = True
+                continue
+            arg = raw_arg
+            if arg.startswith(_QUOTED_SYNTAX_MARK) and not arg.startswith(_QUOTED_SYNTAX_MARK * 2):
+                arg = arg[1:]
+            arg = arg.replace(_QUOTED_SYNTAX_MARK * 2, _QUOTED_SYNTAX_MARK)
+            if not options_ended and arg == "--":
+                options_ended = True
+            elif not options_ended and arg.startswith("-") and arg != "-":
+                destructive |= arg in {"--recursive", "--force"} or (
+                    not arg.startswith("--") and any(flag in arg[1:] for flag in "rRf")
+                )
+            else:
+                operands.append(arg)
+
+        if not destructive:
+            continue
+        for operand in operands:
+            # Variables and braces can introduce new path components; glob
+            # expansion followed by parents cannot be normalized statically.
+            if any(char in operand for char in "$`{") or (
+                any(char in operand for char in "*?[") and ".." in operand.split("/")
+            ):
+                return True
+            path = posixpath.normpath(operand)
+            if path != "/tmp" and not path.startswith("/tmp/"):
+                return True
+    return False
+
+
 def check_security(
     tool_calls: list[dict[str, Any]],
     agent_text: str = "",
@@ -1848,7 +1910,7 @@ def check_security(
 
         if is_exec_tool:
             for pattern, label in _DESTRUCTIVE_PATTERNS:
-                if pattern.search(action_text_lower):
+                if pattern.search(action_text_lower) and (label != "rm -rf" or _rm_targets_outside_tmp(action_text)):
                     findings.append(
                         _security_finding(
                             finding_type="destructive_command",

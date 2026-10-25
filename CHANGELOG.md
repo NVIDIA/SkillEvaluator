@@ -39,6 +39,16 @@ All notable changes to SkillEvaluator are documented in this file.
 
 ### Fixed
 
+- Tier 3 security grading now limits destructive `rm` cleanup exemptions to
+  the trusted `/tmp` root and direct children without a trailing slash.
+  Nested paths, glob traversal, and parent navigation after a child receive
+  findings because an intermediate entry may be a symlink outside `/tmp`.
+  Both graders apply this conservative policy without filesystem evidence;
+  legitimate nested cleanup such as `/tmp/cache/files` is also flagged.
+- Tier 3 security grading no longer grants temporary-cleanup exemptions to
+  destructive `rm` commands launched through `xargs`, whose additional targets
+  may come from standard input or an argument file. Both graders recognize
+  common options and wrappers while preserving separate cleanup commands.
 - Tier 3 security grading now normalizes deletion targets before exempting
   temporary-directory cleanup. Paths such as `/tmp/../workspace` and commands
   mixing temporary and non-temporary targets receive destructive-command

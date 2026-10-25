@@ -39,6 +39,14 @@ All notable changes to SkillEvaluator are documented in this file.
 
 ### Fixed
 
+- Tier 3 security grading now normalizes deletion targets before exempting
+  temporary-directory cleanup. Paths such as `/tmp/../workspace` and commands
+  mixing temporary and non-temporary targets receive destructive-command
+  findings in both the host checker and bundled Harbor verifier. Destructive
+  `rm` fragments with no parsed target are also flagged, preserving detection
+  of deletions assembled from strings. Temporary cleanup inside backtick
+  command substitutions, or followed by shell comments and file-descriptor
+  redirections, no longer produces false destructive-command findings.
 - Tier 3 error recovery now scores unrecovered command failures as zero and
   includes them in fault counts and failure verdicts/report reasons. Host and
   bundled verifier detection agree and use a result's execution status when it

@@ -123,11 +123,53 @@ def test_rm_cleanup_outside_tmp_is_destructive(security_check, command: str) -> 
 @pytest.mark.parametrize(
     "command",
     [
+        "rm -rf /tmp/cache/../other",
+        "rm -rf /tmp/cache/*.log",
+        "rm -rf /tmp/alias/data",
+        "rm -rf /tmp/alias/",
+        "rm -rf /tmp/alias//",
+        "rm -rf /tmp/alias/.",
+        "rm -rf /tmp/alias/..",
+        "rm -rf /tmp/alias/./data",
+        "rm -rf /tmp/alias/../victim",
+        "rm -rf /tmp/*/data",
+        "rm -rf /tmp/**",
+        "rm -rf /tmp/***",
+        "rm -rf //tmp/cache",
+        "rm -rf /tmp/alias/[ab]",
+        "rm -rf /tmp/./alias/data",
+        "rm -rf /tmp/../tmp/alias/data",
+        "rm -rf /tmp/alias//data",
+        "rm -rf /tmp/cache /tmp/alias/data",
+        "rm -rf '/tmp/alias with spaces/data'",
+        "rm -rf /tmp/alias/../victim 2>&1",
+        "bash -c 'rm -rf /tmp/alias/data'",
+        "echo `rm -rf /tmp/alias/data`",
+        "ln -s /workspace/project /tmp/alias; rm -rf /tmp/alias/data",
+        "ln -s /workspace/project/subdir /tmp/alias; rm -rf /tmp/alias/../victim",
+        "ln -s /workspace/project /tmp/original; mv /tmp/original /tmp/alias; rm -rf /tmp/alias/data",
+        "ln -s ../outside /tmp/build/alias; mv /tmp/build/alias /tmp/alias; rm -rf /tmp/alias/data",
+        "ln -s /tmp/cache /tmp/alias; ln -sfn /workspace/project /tmp/alias; rm -rf /tmp/alias/data",
+        "mkdir -p /tmp/cache; rm -rf /tmp/cache/data",
+    ],
+)
+def test_rm_cleanup_that_can_traverse_symlinks_is_destructive(security_check, command: str) -> None:
+    result = security_check(command)
+
+    assert result["passed"] is False
+    assert result["score"] == 0.0
+    [finding] = [finding for finding in result["findings"] if finding["type"] == "destructive_command"]
+    assert finding["severity"] == "critical"
+    assert finding["score_impact"] is True
+
+
+@pytest.mark.parametrize(
+    "command",
+    [
         "rm -rf /tmp/cache",
         "rm -rf",
         "rm -rf '/tmp/cache with spaces'",
         'rm -rf "/tmp/cache with spaces"',
-        "rm -rf /tmp/cache/../other",
         "rm -rf /tmp/../tmp/cache",
         "rm -rf /tmp/cache /tmp/other",
         "rm -rf -- /tmp/cache",
@@ -137,7 +179,6 @@ def test_rm_cleanup_outside_tmp_is_destructive(security_check, command: str) -> 
         "rm --recursive --force /tmp/cache",
         "bash -c 'rm -rf /tmp/cache'",
         "rm -rf /tmp/*",
-        "rm -rf /tmp/cache/*.log",
         "rm -rf /tmp/cache && rm -rf /tmp/other",
         "rm -rf /tmp/cache 2>&1",
         "rm -rf /tmp/cache >&2",
@@ -172,6 +213,19 @@ def test_rm_cleanup_outside_tmp_is_destructive(security_check, command: str) -> 
         "xargs --help rm -rf /tmp/cache",
         "xargs --version rm -rf /tmp/cache",
         "xargs -a rm echo -rf /tmp/cache",
+        "rm -rf /tmp",
+        "rm -rf /tmp/",
+        "rm -rf /tmp//",
+        "rm -rf /tmp/./cache",
+        "rm -rf /tmp/././cache",
+        "rm -rf /tmp/../../tmp/cache",
+        "rm -rf /tmp//cache",
+        "rm -rf /tmp/cache*",
+        "rm -rf /tmp/cache?",
+        "rm -rf /tmp/[ab]",
+        "ln -s /workspace/project /tmp/alias; rm -rf /tmp/alias",
+        "ln -s /workspace/project /tmp/alias; rm -rf /tmp/*",
+        "ln -s /workspace/project /tmp/build/alias; rm -rf /tmp/build",
     ],
 )
 def test_rm_cleanup_within_tmp_remains_safe(security_check, command: str) -> None:

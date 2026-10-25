@@ -29,7 +29,6 @@ import json
 import logging
 import math
 import os
-import posixpath
 import random
 import re
 import shlex
@@ -4669,8 +4668,35 @@ def _rm_xargs_context(tokens: list[str], rm_index: int) -> bool | None:
     return True
 
 
+def _rm_tmp_operand_is_exempt(operand: str) -> bool:
+    """Allow trusted /tmp and final children without traversing unknown entries."""
+    if (
+        not operand.startswith("/")
+        or operand.startswith("//")
+        or any(char in operand for char in "$`{")
+        or "**" in operand  # Recursive globbing can introduce intermediate components.
+    ):
+        return False
+    components = operand.split("/")
+    inside_tmp = False
+    for index, component in enumerate(components[1:], start=1):
+        if component in {"", "."}:
+            continue
+        if component == "..":
+            inside_tmp = False
+        elif not inside_tmp and component == "tmp":
+            inside_tmp = True
+        elif inside_tmp:
+            # rm unlinks a final symlink, but following any suffix (even /)
+            # can traverse it. Do not normalize away that filesystem lookup.
+            return index == len(components) - 1
+        else:
+            return False
+    return inside_tmp
+
+
 def _rm_targets_outside_tmp(command_text: str, _depth: int = 0, *, _xargs_only: bool = False) -> bool:
-    """Limit the cleanup exemption to rm operands that remain inside /tmp.
+    """Limit cleanup exemptions to /tmp operands without possible link traversal.
 
     The destructive-command regex deliberately also visits script and patch
     text. Inspect its shell words without executing them, including quoted
@@ -4749,14 +4775,7 @@ def _rm_targets_outside_tmp(command_text: str, _depth: int = 0, *, _xargs_only: 
         if not operands:
             return True
         for operand in operands:
-            # Variables and braces can introduce new path components; glob
-            # expansion followed by parents cannot be normalized statically.
-            if any(char in operand for char in "$`{") or (
-                any(char in operand for char in "*?[") and ".." in operand.split("/")
-            ):
-                return True
-            path = posixpath.normpath(operand)
-            if path != "/tmp" and not path.startswith("/tmp/"):
+            if not _rm_tmp_operand_is_exempt(operand):
                 return True
     return False
 

@@ -39,6 +39,10 @@ All notable changes to SkillEvaluator are documented in this file.
 
 ### Fixed
 
+- Tier 3 security grading no longer grants temporary-cleanup exemptions to
+  destructive `rm` commands launched through `xargs`, whose additional targets
+  may come from standard input or an argument file. Both graders recognize
+  common options and wrappers while preserving separate cleanup commands.
 - Tier 3 security grading now normalizes deletion targets before exempting
   temporary-directory cleanup. Paths such as `/tmp/../workspace` and commands
   mixing temporary and non-temporary targets receive destructive-command

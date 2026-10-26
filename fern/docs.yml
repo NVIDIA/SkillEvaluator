@@ -32,6 +32,9 @@ navigation:
       - page: Quickstart
         path: ../docs/quickstart.mdx
         slug: quickstart
+      - page: Local Workbench
+        path: ../docs/local-workbench.mdx
+        slug: local-workbench
       - page: Installation
         path: ../docs/installation.mdx
         slug: installation

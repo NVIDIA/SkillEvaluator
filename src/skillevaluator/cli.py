@@ -182,7 +182,7 @@ Examples:
 
 _TOP_LEVEL_COMMAND_HELP_GROUPS = (
     ("Tier workflows", ("tier1", "tier2", "tier3")),
-    ("Core workflows", ("validate", "health-check", "doctor", "models", "dashboard")),
+    ("Core workflows", ("validate", "health-check", "doctor", "models", "ui", "dashboard")),
     (
         "Tier 1 · Static and security",
         ("quality-check", "rubric-eval", "security-scan", "pii-scan", "lint-scripts"),
@@ -3146,6 +3146,26 @@ def models_command(limit: int, as_json: bool) -> None:
     from skillevaluator.model_commands import run_models_command
 
     raise SystemExit(run_models_command(limit=limit, as_json=as_json))
+
+
+@cli.command("ui")
+@click.option("--port", type=click.IntRange(1024, 65535), default=7865, show_default=True, help="Local browser port.")
+@click.option(
+    "--data-dir",
+    type=click.Path(path_type=Path, file_okay=False),
+    default=None,
+    help="Directory for uploaded skills and saved runs.",
+)
+@click.option("--no-browser", is_flag=True, help="Print the local URL without opening a browser.")
+def ui_command(port: int, data_dir: Path | None, no_browser: bool) -> None:
+    """Open the guided local skill authoring and evaluation workbench.
+
+    Install skillevaluator[ui] first. Add the tier3 extra for live agent runs.
+    The UI binds only to 127.0.0.1 and needs no Node build or database.
+    """
+    from skillevaluator.studio.command import launch
+
+    launch(port, data_dir, no_browser)
 
 
 @cli.command("dashboard")

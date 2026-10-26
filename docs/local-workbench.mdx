@@ -1,0 +1,97 @@
+---
+title: "Local Workbench"
+description: "Import skills, author datasets, run checks and evaluations, and review evidence in a lightweight localhost UI."
+---
+
+From the cloned repository:
+
+```bash
+uv run --python 3.13 --extra ui skillevaluator ui
+```
+
+Open `http://127.0.0.1:7865`. **Guided** view starts with one action at a time:
+add `SKILL.md` or a zip, describe a task, review the proposed test cases, and
+save and continue to evaluation. Choose **Advanced** for execution settings,
+extra dataset guidance, detailed evidence, and diagnostics. Both names appear
+in the view selector at the top of the page.
+Template drafting, structure/quality checks, editing, and export need no key.
+Each test case has a **Remove** action. Save changes to persist removal,
+including removing the last case. Unchecking a case only excludes it from the
+next save. Earlier run results keep their original test cases.
+
+**Skills** lists the skills you have added. Uploading or pasting creates a working
+copy on this computer; the UI does not download a skill automatically or change
+your original file. You can add and switch between several skills, and
+**Run history** keeps their saved results.
+
+One background task runs at a time across the app: a draft, a check, dataset
+validation, or an evaluation. You can keep editing while it runs. A single
+evaluation can include many test cases; its Advanced settings control how many
+trials run concurrently. Wait for the current task to finish, or stop it in
+Run history before starting another.
+
+Use the appearance control to choose **System**, **Light**, or **Dark**. System
+follows your device. Theme and view preferences are saved in browser storage;
+provider keys remain in the local server session or environment.
+
+For model-assisted drafts, add `--extra llm`. For live agent evaluation, add
+the `tier3` extra, which also includes model support:
+
+```bash
+uv run --python 3.13 --extra ui --extra tier3 skillevaluator ui
+```
+
+Use Settings to select a public provider/model and set a key for the current
+server session. You can also set `NVIDIA_API_KEY`, `OPENAI_API_KEY`, or
+`ANTHROPIC_API_KEY` before launch. The NVIDIA setup links go to the public
+[API-key page](https://build.nvidia.com/settings/api-keys) and its
+[API-key quickstart](https://docs.api.nvidia.com/nim/docs/api-quickstart).
+NVIDIA offers [free prototyping access](https://docs.api.nvidia.com/nim/docs/product)
+through its Developer Program; NVIDIA usage limits apply. The connection dialog
+links directly to signup/key creation. Other providers and model overrides are
+available in Advanced.
+Model-backed actions send selected skill/task content to the configured provider.
+
+The UI calls the same public evaluator service as the CLI. Local evaluation
+requires an installed supported agent and the evaluator's OS sandbox; Docker
+evaluation requires a running Docker engine. Advanced settings cover the agent,
+model, attempts, baseline, concurrency, timeout multiplier, and grading mode.
+Results retain each case, arm and attempt, the actual response, checks, evidence,
+and available native summaries. Failed or unscored attempts do not become zeros.
+
+Under **Evaluate**, optional checks are available in both views:
+
+- **Scan skill (Tier 1):** native structure, version, security, PII, license,
+  code-integrity, Unicode, quality, and script-lint checks. Static scanning needs
+  no model key. **Add AI security review** enables SkillSpector's model-backed
+  security enrichment; it requires a provider key and the scanner's model support.
+- **Check repeated content:** Tier 2 compares chunks within this skill using
+  embeddings and reviews likely duplicates with an LLM. It needs an NVIDIA or
+  OpenAI key and the `tier2` optional dependencies. It uses in-memory similarity
+  comparison, with no Milvus, catalog, or database setup.
+
+Selected checks run first within **Run evaluation**, followed by the agent's
+test cases on the same frozen skill copy. **Run checks only** is available in
+Advanced without a dataset or agent. Findings and incomplete
+scans are retained independently of agent scores and lift; they do not stop an
+agent evaluation. Missing tools or provider failures are reported as incomplete.
+Completed check reports remain available if the subsequent agent run fails.
+Install the existing `security` extra for Bandit and see
+[Tier 1 setup](tier1-validation.mdx) for the external scanners. Dependency CVE
+auditing, rubric scoring, and AI PII verification remain separate CLI options.
+
+**Improve** is optional; evaluation results can be reviewed and downloaded
+without creating a candidate. The workbench can create a separate manually
+edited candidate and show retained original/candidate runs. It labels these as
+observations; automatic skill edits
+and optimizer acceptance are unavailable until an optimizer adapter is supplied.
+Template drafts and edits are not measured improvements. The existing
+`skillevaluator dashboard` remains the saved-report comparison surface.
+
+Browser assets ship in the Python package: no Node build, CDN, hosted frontend,
+database, or proprietary service is required. The UI itself binds only to loopback.
+Skills and reports default to `~/.local/share/skillevaluator/studio`; use
+`--data-dir PATH`, `--port PORT`, or `--no-browser` as needed. Uploaded archives
+are bounded and links/traversal are rejected. Jobs use immutable skill snapshots;
+keys are held in the server environment/session and excluded from workspace exports.
+Stopping the server interrupts active jobs; those records remain visible after restart.

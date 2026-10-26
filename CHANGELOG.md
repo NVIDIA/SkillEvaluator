@@ -6,6 +6,16 @@ All notable changes to SkillEvaluator are documented in this file.
 
 ### Added
 
+- Optional `skillevaluator ui` localhost workbench with bundled browser assets:
+  import or paste a skill, draft/review native datasets, run structure/quality
+  and dataset checks, optionally include Tier 1 scans/AI security review and
+  within-skill duplication, launch existing local/Docker evaluations, inspect
+  per-case evidence, remove saved test cases, and export skills or optionally
+  make manual candidate copies. Guided
+  and Advanced views retain the same data with different detail levels.
+  Public provider keys remain session/environment values. The UI keeps
+  automatic optimization unavailable until an optimizer adapter exists.
+
 - `--quality-config PATH` on `validate`, `quality-check`, and `tier1` loads the
   deterministic quality check's expected Markdown headings from a YAML file
   instead of the built-in list. Each `expected_headers` entry sets a `heading`

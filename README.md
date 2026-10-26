@@ -20,12 +20,13 @@ the [NVIDIA Verified Skills pipeline](https://github.com/NVIDIA/skills).
 
 ## Quickstart
 
-Choose a starting path. Both use the bundled `text-analyzer` skill; try your own afterward.
+Choose a path.
 
 | Start here | Requires | First result |
 | --- | --- | --- |
 | [Run without an LLM](#run-without-an-llm) | Git and uv | A deterministic quality score and findings |
 | [Use NVIDIA Build](#use-nvidia-build) | Git, uv, and a Build API key | Model-backed rubric scores and feedback |
+| [Open the local UI](docs/local-workbench.mdx) | Git and uv | Guided authoring and checks |
 
 Install [uv](https://docs.astral.sh/uv/getting-started/installation/) and Git,
 then get the example:

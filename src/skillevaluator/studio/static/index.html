@@ -1,0 +1,57 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <meta name="color-scheme" content="light dark">
+  <meta name="description" content="Add your skills, create test cases, and improve with evidence on your computer.">
+  <title>Skill Evaluator · Local Workbench</title>
+  <link rel="icon" href="data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 24 24'%3E%3Crect x='2' y='2' width='8' height='8' rx='2' fill='%233f6b4f'/%3E%3Crect x='14' y='2' width='8' height='8' rx='2' fill='%239ab19e'/%3E%3Crect x='2' y='14' width='8' height='8' rx='2' fill='%239ab19e'/%3E%3Crect x='14' y='14' width='8' height='8' rx='2' fill='%233f6b4f'/%3E%3C/svg%3E">
+  <link rel="stylesheet" href="/style.css">
+  <script src="/app.js" defer></script>
+</head>
+<body>
+  <a class="skip-link" href="#main">Skip to skills</a>
+  <div class="app-shell">
+    <aside class="rail" aria-label="Main navigation">
+      <a class="brand" href="#workspace" data-view="workspace" aria-label="Skill Evaluator skills"><span class="brand-mark" aria-hidden="true"><i></i><i></i><i></i><i></i></span><span>Skill Evaluator</span></a>
+      <p class="rail-label">ON THIS COMPUTER</p>
+      <nav class="rail-nav">
+        <button class="nav-item active" data-view="workspace" aria-label="My skills" aria-current="page"><span aria-hidden="true" class="nav-symbol">▦</span><span>My skills</span></button>
+        <button class="nav-item" data-view="runs" aria-label="Run history"><span aria-hidden="true" class="nav-symbol">◷</span><span>Run history</span><span id="running-count" class="nav-count" hidden></span></button>
+        <button class="nav-item" data-action="settings" aria-label="Settings"><span aria-hidden="true" class="nav-symbol">⚙</span><span>Settings</span></button>
+      </nav>
+      <div class="rail-footer"><div class="connection"><span class="status-dot" id="connection-dot"></span><span id="connection-label">Connecting to server</span></div><div id="local-address" class="mono"></div><p>Open source · Runs locally</p></div>
+    </aside>
+    <div class="app-body">
+      <header class="topbar"><div class="breadcrumb"><span id="view-breadcrumb">Skills</span><span aria-hidden="true">/</span><span id="skill-breadcrumb">New skill</span></div><div class="topbar-actions"><fieldset class="mode-switch" aria-label="View mode"><legend class="sr-only">View mode</legend><label><input class="sr-only" type="radio" name="display_mode" value="simple" checked><span>Guided</span></label><label><input class="sr-only" type="radio" name="display_mode" value="advanced"><span>Advanced</span></label></fieldset><label class="theme-control" for="theme-select"><span class="theme-control-label">Theme</span><span class="theme-symbol" aria-hidden="true">◐</span><select id="theme-select" aria-label="Appearance"><option value="system">System</option><option value="light">Light</option><option value="dark">Dark</option></select></label><button class="text-button" data-action="help">Help</button></div></header>
+      <main id="main" tabindex="-1">
+        <div id="connection-error" class="banner error" hidden></div><aside id="background-task-banner" class="surface background-task-note" aria-label="Background task" hidden></aside>
+        <div id="workspace-view">
+          <div class="page-heading"><div class="heading-copy"><p class="eyebrow">SKILL TESTING</p><h1>Test and improve your skill.</h1><p class="lede">Build a small test set. See what works. Improve with evidence.</p></div><div class="skill-heading-actions"><div id="skill-picker-wrap" hidden><label class="sr-only" for="skill-picker">Selected skill</label><select id="skill-picker" aria-label="Selected skill"></select></div><button class="button secondary" id="add-skill-button" data-action="new-skill" hidden>+ Add skill</button></div></div>
+          <nav class="stage-nav" aria-label="Skill workflow"><button class="stage active" data-stage="skill" aria-current="step"><span class="stage-number">01</span><span>Skill</span></button><button class="stage" data-stage="cases"><span class="stage-number">02</span><span>Test cases</span></button><button class="stage" data-stage="evaluate"><span class="stage-number">03</span><span>Evaluate</span></button><button class="stage optional-stage" data-stage="improve"><span>Improve<small>optional</small></span></button></nav>
+          <section id="workspace-content" aria-label="Current workflow step"><div class="loading-surface"><span class="spinner" aria-hidden="true"></span><p>Opening your skills…</p></div></section>
+        </div>
+        <div id="runs-view" hidden></div>
+        <footer class="page-footer"><span>Skill Evaluator <span id="app-version"></span></span><span>Evidence before edits.</span></footer>
+      </main>
+    </div>
+  </div>
+  <div id="toast" class="toast" role="status" aria-live="polite" hidden></div>
+  <div id="announcer" class="sr-only" role="status" aria-live="polite"></div>
+  <dialog id="settings-dialog" class="modal" aria-labelledby="settings-title">
+    <form id="settings-form">
+      <div class="modal-header"><div><p class="eyebrow">MODEL CONNECTION</p><h2 id="settings-title">Connect NVIDIA.</h2></div><button class="icon-button" type="button" data-action="close-dialog" aria-label="Close settings">×</button></div>
+      <p class="provider-link"><a class="button secondary key-link" href="https://build.nvidia.com/settings/api-keys" target="_blank" rel="noopener noreferrer">Get a free NVIDIA API key <span aria-hidden="true">↗</span></a><span class="field-hint">NVIDIA provides a free LLM API key for prototyping. Use it to try your skill experiments. Usage limits apply.</span></p>
+      <label id="provider-key-label" for="provider-key">NVIDIA API key</label><input id="provider-key" name="api_key" type="password" autocomplete="off" spellcheck="false" placeholder="Paste your key here">
+      <p class="field-hint">Kept in this local server session. Leave blank to keep an existing key.</p>
+      <details id="provider-details"><summary>Other providers and model settings</summary><div><label for="provider-name">Provider</label><select id="provider-name" name="name"><option value="nv_build">NVIDIA API Catalog</option><option value="openai">OpenAI</option><option value="anthropic">Anthropic</option></select><label for="provider-model">Model ID <span class="optional">optional</span></label><input id="provider-model" name="model" placeholder="Use the provider’s default model" autocomplete="off"></div></details>
+      <div id="provider-state" class="note"></div><div id="settings-error" class="banner error" hidden></div>
+      <div class="modal-footer"><button type="button" class="button secondary" data-action="close-dialog">Cancel</button><button type="submit" class="button primary">Save connection</button></div>
+    </form>
+  </dialog>
+  <dialog id="source-dialog" class="modal modal-wide" aria-labelledby="source-title"><div class="modal-header"><div><p class="eyebrow">COPIED SKILL DOCUMENT</p><h2 id="source-title">SKILL.md</h2></div><button class="icon-button" data-action="close-dialog" aria-label="Close source">×</button></div><pre id="source-content" class="source-view" tabindex="0"></pre><div class="modal-footer"><button class="button secondary" data-action="close-dialog">Done</button></div></dialog>
+  <dialog id="help-dialog" class="modal" aria-labelledby="help-title"><div class="modal-header"><div><p class="eyebrow">A SMALL, LOCAL WORKFLOW</p><h2 id="help-title">Start with a skill and one task.</h2></div><button class="icon-button" data-action="close-dialog" aria-label="Close help">×</button></div><ol class="help-steps"><li><strong>Add your skill.</strong> Add a Markdown document or skill package from your computer, paste instructions, or try the working sample. We keep a separate local copy; your original files stay unchanged.</li><li><strong>Review test cases.</strong> Draft a template without a key, or connect a model for an assisted draft. Edit and save cases before evaluating.</li><li><strong>Run and inspect.</strong> Check the dataset, run static checks, or evaluate with an agent. Expand each case for the actual response and checks.</li><li><strong>Improve (optional).</strong> Review the evidence, edit a separate copy, and evaluate it. A draft edit is not a measured improvement.</li></ol><div class="note section-gap"><strong>One background task at a time.</strong> Drafting, checks, dataset validation, and evaluations share one background slot in this app. You can keep adding skills and editing while it works. An evaluation can include many cases, with concurrent trials set in Advanced options.</div><div class="note section-gap advanced-only">This interface uses the installed SkillEvaluator. It does not train model weights. Automatic optimization and trajectory-based dataset generation are integration points for future backend capabilities.</div><div class="modal-footer"><button class="button primary" data-action="close-dialog">Back to skills</button></div></dialog>
+  <noscript><p class="banner error">JavaScript is needed for the local workbench. Enable it to import skills and start evaluations.</p></noscript>
+</body>
+</html>

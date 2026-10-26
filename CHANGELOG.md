@@ -24,6 +24,10 @@ All notable changes to SkillEvaluator are documented in this file.
 
 ### Changed
 
+- The CLI reference now compares the direct `tier1`, `tier2`, and `tier3`
+  workflows with `validate --tiers`: which tiers run, Tier 1 dependency and LLM
+  stages, report files, and exit codes. It also states that `--tiers` must
+  include Tier 1, so Tier 2 or Tier 3 alone runs through its direct workflow.
 - README and onboarding docs now offer two first-run paths: a lightweight,
   keyless quality check on a bundled skill, or an NVIDIA Build rubric evaluation
   with eligible free prototyping access. Installation adds extras as needed,

@@ -437,6 +437,55 @@ namespace precedes the NVIDIA catalog ID.
 
 Flags marked "unset" fall back to their matching keys in `evals/config.yml` where one exists, then to the built-in defaults. The exception is `--results-dir`, which resolves independently of `evals/config.yml`.
 
+## tier3 improve
+
+Prepare a Skill Improver evidence packet or candidate from an explicit retained
+evaluation made with `--harbor-keep-jobs`. The original skill is preserved. See the
+[workflow and proposal schema](tier3-live-evaluation.mdx#improve-a-skill-from-retained-evidence).
+
+```bash
+skillevaluator tier3 improve ./my-skill --result ./runs/original/RUN_ID \
+  --output-dir ./improvements/candidate-1 --mode llm
+```
+
+| Option | Default | Effect |
+| --- | --- | --- |
+| `--result PATH` | required | Explicit run directory, `result.json`, or a report with an explicit `run_dir` pointer; the original evaluation must retain task and job evidence with `--harbor-keep-jobs`. |
+| `--output-dir PATH` | required | New directory for evidence, proposal, diff, candidate and receipt; existing directories are refused. |
+| `--mode [export\|llm\|deterministic\|agent-command]` | `export` | Export instructions, request LLM edits, apply exact-match edits, or invoke a local proposal command. |
+| `--edits FILE` | none | Proposal JSON; required only for deterministic mode. |
+| `--model TEXT` | configured provider model | Editor model for LLM mode only; does not change evaluation models. |
+| `--include-agent-observations` | off | Include bounded final agent reports from discovery trials as unverified source-check hypotheses, with separately citable IDs. May invoke an editor even when task scores passed. |
+| `--agent-command TEXT` | none | Trusted local command with host filesystem and inherited environment access, invoked without a shell. Not sandboxed. Required only for agent-command mode. |
+
+Candidates remain unaccepted until evaluated. Evaluation directories are frozen;
+automatic edits require complete evidence, a matching evaluated source, and
+existing failed discovery finding IDs or explicitly enabled observation IDs. The default limits are eight edits,
+128 KiB per text file/edit, and 1 MiB per packet/proposal. Export and deterministic
+modes do not invoke an LLM.
+
+## tier3 compare-improvement
+
+Compare original and candidate runs without starting another evaluation. Both
+runs must use `--harbor-keep-jobs` and the same evaluation settings; missing
+runtime or grader evidence produces `abstain`.
+
+```bash
+skillevaluator tier3 compare-improvement ./runs/original/RUN_ID \
+  ./runs/candidate/RUN_ID --outcome-metric objective_outcome \
+  --output-dir ./improvements/comparison
+```
+
+| Option | Default | Effect |
+| --- | --- | --- |
+| `--outcome-metric TEXT` | none | Name an independent outcome check already recorded by your grader; repeat for multiple checks. |
+| `--output-dir PATH` | none | Write `comparison.json` and `comparison.md`; the comparison is also printed. |
+
+Verdicts distinguish `abstain`, `regression`, `outcome_improvement`,
+`signal_improvement`, and `no_demonstrated_benefit`. They describe the retained
+sample, not general reliability or automatic approval. Review individual cases
+and reserve holdout runs before accepting a candidate.
+
 ## create-eval-dataset
 
 Create synthetic eval datasets for agent skill evaluation, written to `evals/evals.json`. Uses the configured LLM provider unless you pass `--no-llm`. Dataset anatomy and the four case buckets are documented in [Eval Datasets](eval-datasets.mdx).
@@ -446,17 +495,17 @@ skillevaluator create-eval-dataset ./my-skill --full
 ```
 
 <Warning>
-`--force` overwrites an existing `evals/evals.json`, including any hand-edited cases, and `--refine` implies `--force`. Use `--dry-run` first if you are unsure.
+`--force` overwrites an existing `evals/evals.json`, including hand-edited cases. With an existing dataset, `--refine` preserves it and writes observations and unvalidated proposals to `evals/refinement.json`, even when combined with `--force`.
 </Warning>
 
 | Flag | Default | Effect |
 | --- | --- | --- |
-| `--full` | off | Generate the full four-bucket dataset (LLM). With `--no-llm`, template mode omits the negative bucket without an authored off-skill prompt in `EVAL.md`. |
+| `--full` | off | Generate up to four source-grounded draft cases (LLM). With `--no-llm`, template mode omits the negative bucket without an authored off-skill prompt in `EVAL.md`. |
 | `--no-llm` | off | Use local templates only (no API key needed). |
 | `--dry-run` | off | Preview without writing. |
 | `--force` | off | Overwrite existing `evals/evals.json`. |
 | `--prompt PATH` | none | Developer eval-guidance file for generation (default: auto-detects `evals/EVAL.md`). |
-| `--refine` | off | Refine cases using existing or collected trajectories. Reading trajectories from existing results does not require the `tier3` extra; when none exist, collecting one runs `claude-code` through Harbor and needs the `tier3` extra, Docker, and a configured provider (see [Eval Datasets](eval-datasets.mdx)). |
+| `--refine` | off | Record trajectory observations and optional proposals separately from existing grading criteria. Existing datasets and explicitly selected results never trigger a new agent run. Only a new dataset without trajectories may collect them through Harbor, requiring the `tier3` extra, Docker, and a configured provider (see [Eval Datasets](eval-datasets.mdx)). |
 | `--from-results PATH` | none | With `--refine`: results path containing agent trajectories (default: latest results). |
 | `--results-dir DIRECTORY` | unset | With `--refine`: external results root to search for trajectories. |
 

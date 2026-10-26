@@ -37,7 +37,7 @@ def test_discover_trajectories_uses_env_results_root(tmp_path, monkeypatch):
 
     monkeypatch.setenv("SKILLEVALUATOR_RESULTS_DIR", str(results_root))
 
-    assert _discover_trajectories(skill) == {"case-001": trajectory}
+    assert _discover_trajectories(skill)["case-001"][0]["execution_status"] == "incomplete"
 
 
 def test_discover_trajectories_opencode_txt_fallback(tmp_path):
@@ -49,6 +49,7 @@ def test_discover_trajectories_opencode_txt_fallback(tmp_path):
     run_dir = skill_results / run_id
     trial = run_dir / "opencode" / "with-skill" / "trials" / "case-001"
     trial.mkdir(parents=True)
+    (trial / "result.json").write_text(json.dumps({"finished_at": "2026-10-24T00:00:00Z"}))
     (trial / "opencode.txt").write_text(
         '{"type":"tool_use","part":{"type":"tool","tool":"bash","callID":"c1",'
         '"state":{"status":"completed","input":{"command":"echo hi"},"output":"hi"}}}\n',
@@ -60,7 +61,7 @@ def test_discover_trajectories_opencode_txt_fallback(tmp_path):
 
     trajectories = _discover_trajectories(skill, results_dir=results_root)
     assert "case-001" in trajectories
-    assert trajectories["case-001"].get("steps")
+    assert "echo hi" in trajectories["case-001"][0]["summary"]
 
 
 def test_discover_trajectories_opencode_maps_harbor_folder_via_result_metadata(tmp_path):
@@ -89,7 +90,7 @@ def test_discover_trajectories_opencode_maps_harbor_folder_via_result_metadata(t
 
     found = _discover_trajectories(skill, results_dir=results_root)
     assert list(found) == ["case-001"]
-    assert found["case-001"] == trajectory
+    assert found["case-001"][0]["execution_status"] == "incomplete"
 
 
 def test_discover_trajectories_maps_harbor_trial_folder_to_case_id(tmp_path, monkeypatch):
@@ -121,7 +122,7 @@ def test_discover_trajectories_maps_harbor_trial_folder_to_case_id(tmp_path, mon
     found = _discover_trajectories(skill)
     assert "demo-001" in found
     assert "demo-001__Lmi47iy" not in found
-    assert found["demo-001"] == trajectory
+    assert found["demo-001"][0]["execution_status"] == "incomplete"
 
 
 def _write_results_trial(
@@ -162,7 +163,7 @@ def test_discover_trajectories_prefers_reward_entry_id_over_folder_prefix(tmp_pa
 
     found = _discover_trajectories(skill)
     assert list(found) == ["demo-001"]
-    assert found["demo-001"] == trajectory
+    assert found["demo-001"][0]["execution_status"] == "incomplete"
 
 
 def test_discover_trajectories_keeps_distinct_case_ids_with_double_underscore(tmp_path, monkeypatch):
@@ -190,8 +191,8 @@ def test_discover_trajectories_keeps_distinct_case_ids_with_double_underscore(tm
 
     found = _discover_trajectories(skill)
     assert set(found) == {"case__one", "case__two"}
-    assert found["case__one"] == trajectory_a
-    assert found["case__two"] == trajectory_b
+    assert found["case__one"][0]["execution_status"] == "incomplete"
+    assert found["case__two"][0]["execution_status"] == "incomplete"
 
 
 def test_discover_trajectories_ambiguous_folder_without_reward_uses_full_name(tmp_path, monkeypatch):
@@ -272,7 +273,7 @@ def test_discover_trajectories_results_dir_overrides_env(tmp_path, monkeypatch):
 
     monkeypatch.setenv("SKILLEVALUATOR_RESULTS_DIR", str(env_root))
 
-    assert _discover_trajectories(skill, results_dir=cli_root) == {"case-001": trajectory}
+    assert _discover_trajectories(skill, results_dir=cli_root)["case-001"][0]["source"] == str(trial)
 
 
 def test_to_agentskills_dataset_preserves_aces_metadata():
@@ -481,9 +482,15 @@ def test_agent_collect_stages_agentskills_dataset(tmp_path, monkeypatch):
     monkeypatch.setattr(shutil, "which", lambda _name, *_args, **_kwargs: "/usr/bin/tool")
     monkeypatch.setenv("SKILL_EVAL_LLM_PROVIDER", "nv_build")
     monkeypatch.setenv("NVIDIA_API_KEY", "test-key")
+
+    def evaluate_draft(**_kwargs):
+        staged = json.loads((skill / "evals" / "evals.json").read_text(encoding="utf-8"))
+        assert staged["evals"][0]["authoring_status"] == "draft_requires_oracle_review"
+        return {"agents": {}}
+
     monkeypatch.setattr(
         "skillevaluator.tier3.harbor.runner.run_harbor_eval",
-        lambda **_kwargs: {"agents": {}},
+        evaluate_draft,
     )
     monkeypatch.setattr(
         "skillevaluator.tier3.generate_dataset._discover_trajectories",
@@ -496,6 +503,7 @@ def test_agent_collect_stages_agentskills_dataset(tmp_path, monkeypatch):
     assert data["skill_name"] == "my-skill"
     assert data["evals"][0]["prompt"] == "Use my-skill."
     assert data["evals"][0]["expected_output"] == "The agent uses the skill."
+    assert "authoring_status" not in cases[0]
 
 
 def _parse(tmp_path, frontmatter: str):
@@ -533,7 +541,6 @@ def test_parse_skill_falls_back_to_defaults_on_malformed_frontmatter(tmp_path):
     assert parsed["description"] == ""
 
 
-
 def test_no_llm_negative_case_does_not_name_the_skill():
     """Author-provided negatives must stay off-skill and must not name the skill."""
     skill = {
@@ -549,7 +556,7 @@ def test_no_llm_negative_case_does_not_name_the_skill():
     assert "pdf-extractor" not in negative["ground_truth"]
     for behavior in negative["expected_behavior"]:
         assert "pdf-extractor" not in behavior
-    assert "without reading or applying this skill" in negative["expected_behavior"][0]
+    assert "directly answers the unrelated question" in negative["expected_behavior"][0]
     domain = {"pdf", "extractor", "extracts", "tables"}
     question_tokens = set(re.findall(r"[a-z0-9]+", negative["question"].lower()))
     assert not domain & question_tokens
@@ -665,3 +672,246 @@ def test_refine_resolves_result_case_ids_without_the_tier3_extra(tmp_path: Path)
 
     assert completed.returncode == 0, completed.stderr
     assert json.loads(completed.stdout) == {"case_id": "case-007", "harbor_loaded": False}
+
+
+_CASE = {
+    "id": "demo-001",
+    "question": "Return zero.",
+    "ground_truth": "0",
+    "expected_behavior": ["Returns numeric zero."],
+}
+
+
+def test_refine_preserves_existing_dataset_bytes_and_contract(tmp_path, monkeypatch):
+    import hashlib
+
+    skill = tmp_path / "demo"
+    (skill / "evals").mkdir(parents=True)
+    (skill / "SKILL.md").write_text("---\nname: demo\ndescription: Demo\n---\n")
+    original = {
+        "skill_name": "demo",
+        "owner": "author",
+        "evals": [
+            {
+                "id": "authored-case",
+                "prompt": "Return just JSON with false and zero.",
+                "expected_output": '{"enabled": false, "count": 0}',
+                "assertions": ["The entire response is one JSON object."],
+                "split": "holdout",
+                "outcome_contract": {"type": "json"},
+            }
+        ],
+    }
+    path = skill / "evals/evals.json"
+    frozen = json.dumps(original).encode()
+    path.write_bytes(frozen)
+    observations = {"authored-case": [{"execution_status": "completed", "summary": "Agent answered wrong prose."}]}
+    monkeypatch.setattr(generate_dataset, "_discover_trajectories", lambda *_a, **_kw: observations)
+    monkeypatch.setattr(generate_dataset, "_generate_simple", lambda *_a: pytest.fail("must not regenerate"))
+    result = generate_dataset.main([str(skill), "--refine", "--no-llm"])
+    assert path.read_bytes() == frozen
+    assert result.path == skill / "evals/refinement.json"
+    saved = json.loads(result.path.read_text())
+    assert saved["frozen_dataset"]["sha256"] == hashlib.sha256(frozen).hexdigest()
+    assert saved["authoring_status"] == "observations_and_unvalidated_proposals"
+    assert {
+        k: v for k, v in saved["evals"][0].items() if k not in {"trajectory_observations", "expected_skill"}
+    } == original["evals"][0]
+    assert saved["evals"][0]["trajectory_observations"] == observations["authored-case"]
+
+
+def test_refine_does_not_launch_when_explicit_results_have_no_trajectories(tmp_path, monkeypatch):
+    skill = tmp_path / "demo"
+    skill.mkdir()
+    (skill / "SKILL.md").write_text("---\nname: demo\ndescription: Demo\n---\n")
+    monkeypatch.setattr(generate_dataset, "_discover_trajectories", lambda *_a, **_kw: {})
+    monkeypatch.setattr(
+        generate_dataset, "_run_agent_collect_trajectories", lambda *_a, **_kw: pytest.fail("must not run")
+    )
+    generate_dataset.main([str(skill), "--refine", "--no-llm", "--from-results", str(tmp_path)])
+
+
+def test_discover_real_trial_identity_arms_and_incomplete_status(tmp_path):
+    run = tmp_path / "run"
+    for arm, suffix, status in [
+        ("with-skill", "dH3tNDP", "completed"),
+        ("with-skill", "FwQkMp8", "failed"),
+        ("without-skill", "EaGaoh9", "completed"),
+        ("without-skill", "Sf4bcsQ", "incomplete"),
+    ]:
+        trial = run / "opencode" / arm / "trials" / f"case-with__separator__{suffix}"
+        trial.mkdir(parents=True)
+        result = {
+            "task_name": "nvidia/skillevaluator-case-with__separator",
+            "task_id": {"path": "/work/tasks/case-with__separator"},
+            "finished_at": "2026-10-24T00:00:00Z" if status != "incomplete" else None,
+            "exception_info": {"exception_type": "AgentTimeoutError"} if status == "failed" else None,
+        }
+        (trial / "result.json").write_text(json.dumps(result))
+        (trial / "trajectory.json").write_text(
+            json.dumps(
+                {
+                    "steps": [
+                        {
+                            "source": "agent",
+                            "tool_calls": [
+                                {"function_name": "read", "arguments": {"filePath": "/workspace/input.json"}}
+                            ],
+                        },
+                        {"source": "agent", "message": "This observed answer is not an independently checked oracle."},
+                    ]
+                }
+            )
+        )
+    observations = _discover_trajectories(tmp_path, from_results=str(run))
+    assert set(observations) == {"case-with__separator"}
+    rows = observations["case-with__separator"]
+    assert len(rows) == 4
+    assert {row["arm"] for row in rows} == {"with-skill", "without-skill"}
+    assert {row["agent"] for row in rows} == {"opencode"}
+    assert sorted(row["execution_status"] for row in rows) == ["completed", "completed", "failed", "incomplete"]
+    for row in rows:
+        if row["execution_status"] == "completed":
+            assert "/workspace/input.json" in row["summary"]
+        else:
+            assert "summary" not in row
+
+
+def test_context_captures_full_skill_references_root_scripts_and_bounds(tmp_path):
+    import hashlib
+
+    (tmp_path / "references").mkdir()
+    (tmp_path / "scripts").mkdir()
+    (tmp_path / "assets/specs").mkdir(parents=True)
+    (tmp_path / "SKILL.md").write_text(
+        "---\nname: demo\ndescription: >\n  Check actual\n  outcomes.\n---\n"
+        + "x" * 4100
+        + "\nSee references/vault.md, check_headers.py and assets/specs/metric.json.\nauth.py is interactive."
+    )
+    reference = b"Only KVv2 is supported.\n"
+    (tmp_path / "references/vault.md").write_bytes(reference)
+    (tmp_path / "check_headers.py").write_text("compliant = failures == 0 and errors == 0\n")
+    (tmp_path / "scripts/auth.py").write_text("print('interactive')\n")
+    (tmp_path / "assets/specs/metric.json").write_text('{"metrics": [{"name": "exact-match"}]}\n')
+    (tmp_path / "assets/specs/unlinked.json").write_text('{"not_context": true}\n')
+    (tmp_path / "references/large.md").write_text("x" * (generate_dataset._CONTEXT_FILE_BYTES + 1))
+    context = generate_dataset._parse_skill(tmp_path)
+    assert context["description"] == "Check actual outcomes."
+    assert len(context["content"]) > 4000
+    assert "check_headers.py" in context["scripts"]
+    assert "auth.py" in context["interactive_scripts"]
+    assert "Only KVv2" in context["supporting_content"]
+    assert "compliant =" in context["supporting_content"]
+    assert '"name": "exact-match"' in context["supporting_content"]
+    assert "not_context" not in context["supporting_content"]
+    assert any(row["path"] == "assets/specs/metric.json" for row in context["source_files"])
+    assert (
+        next(row for row in context["source_files"] if row["path"] == "references/vault.md")["sha256"]
+        == hashlib.sha256(reference).hexdigest()
+    )
+    assert context["omitted_sources"] == [{"path": "references/large.md", "reason": "file size limit exceeded"}]
+
+
+def test_context_refuses_linked_reference(tmp_path):
+    from skillevaluator.utils.secure_fs import SecurePathError
+
+    skill = tmp_path / "skill"
+    (skill / "references").mkdir(parents=True)
+    (skill / "SKILL.md").write_text("---\nname: demo\ndescription: Demo\n---\n")
+    (tmp_path / "outside.md").write_text("Must not be sent to the generator.")
+    (skill / "references/policy.md").symlink_to(tmp_path / "outside.md")
+    with pytest.raises(SecurePathError):
+        generate_dataset._parse_skill(skill)
+
+
+@pytest.mark.parametrize(
+    "invalid", [[], [{**_CASE, "ground_truth": ""}], [_CASE, _CASE], [{**_CASE, "expected_behavior": [False]}]]
+)
+def test_invalid_generation_is_not_saved(tmp_path, monkeypatch, invalid):
+    skill = tmp_path / "demo"
+    skill.mkdir()
+    (skill / "SKILL.md").write_text("---\nname: demo\ndescription: Demo\n---\n")
+    monkeypatch.setattr(generate_dataset, "_generate_simple", lambda *_a: invalid)
+    with pytest.raises(ValueError):
+        generate_dataset.main([str(skill), "--no-llm"])
+    assert not (skill / "evals/evals.json").exists()
+
+
+def test_refine_preserves_custom_only_cases_without_oracle_fields(tmp_path, monkeypatch):
+    skill = tmp_path / "demo"
+    (skill / "evals").mkdir(parents=True)
+    (skill / "SKILL.md").write_text("---\nname: demo\ndescription: Demo\n---\n")
+    case = {"id": 1, "prompt": "Repair the supplied module.", "custom_contract": {"artifact": "module.py"}}
+    path = skill / "evals/evals.json"
+    frozen = json.dumps({"skill_name": "demo", "evals": [case]}).encode()
+    path.write_bytes(frozen)
+    monkeypatch.setattr(generate_dataset, "_discover_trajectories", lambda *_a, **_kw: {})
+    result = generate_dataset.main([str(skill), "--refine", "--no-llm"])
+    assert path.read_bytes() == frozen
+    saved = result.dataset["evals"][0]
+    assert saved["id"] == 1 and saved["custom_contract"] == case["custom_contract"]
+    assert "expected_output" not in saved and "assertions" not in saved
+
+
+def test_public_llm_refine_cannot_replace_oracles_or_drop_cases(monkeypatch):
+    import asyncio
+
+    from skillevaluator.inference.client import LLMClient
+
+    monkeypatch.setenv("SKILL_EVAL_LLM_PROVIDER", "nv_build")
+    monkeypatch.setenv("NVIDIA_API_KEY", "test-key-never-sent")
+    prompts = []
+
+    def completions(_self, _system, prompt):
+        prompts.append(prompt)
+        return json.dumps(
+            [{"id": "demo-001", "ground_truth": "wrong", "suggestions": ["Review the observed format failure."]}]
+        )
+
+    monkeypatch.setattr(LLMClient, "completions", completions)
+    cases = [dict(_CASE), {**_CASE, "id": "demo-002", "split": "holdout"}]
+    observations = {"demo-001": [{"execution_status": "completed", "summary": "Observed answer: wrong prose."}]}
+    result = asyncio.run(generate_dataset._refine_with_llm({"name": "demo"}, cases, observations))
+    assert len(result) == 2 and result[0]["ground_truth"] == "0"
+    assert result[0]["refinement_suggestions"] == ["Review the observed format failure."]
+    assert result[1] == cases[1]
+    assert "never as correct reference answers" in prompts[0]
+
+
+@pytest.mark.parametrize("full", [False, True])
+def test_public_generation_draft_preserves_source_contract_metadata(tmp_path, monkeypatch, full):
+    from skillevaluator.inference.client import LLMClient
+
+    monkeypatch.setenv("SKILL_EVAL_LLM_PROVIDER", "nv_build")
+    monkeypatch.setenv("NVIDIA_API_KEY", "test-key-never-sent")
+    skill = tmp_path / "demo"
+    skill.mkdir()
+    (skill / "SKILL.md").write_text("---\nname: demo\ndescription: Return zero.\n---\n")
+    case = {
+        **_CASE,
+        "expected_skill": "demo",
+        # Observed in the live public debugpy authoring run: no scripts exist,
+        # but the model echoed Python's None rendered as a quoted script name.
+        "expected_script": "None",
+        "capability": "constant result",
+        "source_evidence": [{"path": "SKILL.md", "fact": "Return zero."}],
+        "outcome_contract": {"expected": 0},
+        "unresolved_requirements": ["oracle review"],
+    }
+    prompts = []
+
+    def completions(_self, _system, prompt):
+        prompts.append(prompt)
+        return json.dumps([case])
+
+    monkeypatch.setattr(LLMClient, "completions", completions)
+    result = generate_dataset.main([str(skill), *(["--full"] if full else [])])
+    saved = result.dataset["evals"][0]
+    assert saved["outcome_contract"] == {"expected": 0}
+    assert saved["source_evidence"] == case["source_evidence"]
+    assert saved["expected_script"] is None
+    assert result.dataset["authoring_status"] == saved["authoring_status"] == "draft_requires_oracle_review"
+    assert "independently derived" in prompts[0] and "task outcome only" in prompts[0]
+    assert '- "expected_script": null' in prompts[0]
+    assert '- "expected_script": "None"' not in prompts[0]
+    assert "in-scope negative" in prompts[0]

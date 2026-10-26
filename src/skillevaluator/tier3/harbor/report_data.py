@@ -641,6 +641,7 @@ def load_agent_data(
     results_dir: Path,
     *,
     allow_legacy_missing_status: bool = False,
+    include_agent_observations: bool = False,
 ) -> dict[str, dict[str, Any]]:
     """Load per-agent summaries, rewards, lift, and execution coverage."""
     agents: dict[str, dict[str, Any]] = {}
@@ -821,6 +822,8 @@ def load_agent_data(
                     if not isinstance(reward, dict):
                         rewards_complete = False
                         continue
+                    # Only the bounded retained trajectory may supply optional agent reports.
+                    reward.pop("_agent_observations", None)
                     if not reward.get("entry_id"):
                         reward["entry_id"] = trial_dir.name.split("__", 1)[0] if trial_dir.name else "unknown"
                     result_file = trial_dir / "result.json"
@@ -852,6 +855,36 @@ def load_agent_data(
                                 ),
                                 "cached_tokens": _trajectory_token_counter(final_metrics.get("total_cached_tokens")),
                             }
+                            if include_agent_observations and variant_key == "rewards" and isinstance(steps, list):
+                                from skillevaluator.tier3.eval_core.atif_helpers import get_final_response
+
+                                for index in range(len(steps) - 1, -1, -1):
+                                    step = steps[index]
+                                    if not isinstance(step, dict) or not isinstance(step.get("message"), (str, list)):
+                                        continue
+                                    response = get_final_response({"steps": [step]})
+                                    if not response.strip():
+                                        continue
+                                    encoded = response.encode("utf-8", errors="replace")
+                                    step_id = step.get("step_id")
+                                    if isinstance(step_id, str):
+                                        try:
+                                            if len(step_id.encode("utf-8")) > 128:
+                                                step_id = None
+                                        except UnicodeError:
+                                            step_id = None
+                                    elif type(step_id) is not int:
+                                        step_id = None
+                                    reward["_agent_observations"] = [{
+                                        "kind": "agent_observation",
+                                        "status": "unverified_source_check_hypothesis",
+                                        "text": encoded[:8192].decode("utf-8", errors="ignore"),
+                                        "truncated": len(encoded) > 8192,
+                                        "source": str(trajectory_file.relative_to(results_dir)),
+                                        "step_index": index,
+                                        "step_id": step_id,
+                                    }]
+                                    break
                     trial_list.append(reward)
             else:
                 rewards_complete = expected_logical_trials == 0

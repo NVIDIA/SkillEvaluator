@@ -3266,6 +3266,82 @@ def harbor_view(jobs_dir: Path) -> None:
     raise SystemExit(tier3_harbor_view(jobs_dir))
 
 
+@tier3.command("improve")
+@click.argument("skill_path", type=click.Path(exists=True, file_okay=False, path_type=Path))
+@click.option(
+    "--result",
+    "result_path",
+    required=True,
+    type=click.Path(exists=True, path_type=Path),
+    help="Explicit discovery run or result.json from an evaluation made with --harbor-keep-jobs.",
+)
+@click.option(
+    "--output-dir",
+    required=True,
+    type=click.Path(path_type=Path),
+    help="New directory for evidence, edits and candidate.",
+)
+@click.option(
+    "--mode",
+    type=click.Choice(["export", "llm", "deterministic", "agent-command"]),
+    default="export",
+    show_default=True,
+)
+@click.option("--edits", "edits_path", type=click.Path(exists=True, dir_okay=False, path_type=Path))
+@click.option("--model", help="Model used to propose edits in LLM mode.")
+@click.option(
+    "--include-agent-observations", is_flag=True,
+    help="Include unverified final agent reports for source checks; these are not measured failures or improvement claims.",
+)
+@click.option(
+    "--agent-command",
+    help="Trusted local command with host filesystem and inherited environment access; not sandboxed. Invoked without a shell.",
+)
+def improve_skill(skill_path, result_path, output_dir, mode, edits_path, model, agent_command, include_agent_observations):
+    """Propose evidence-backed skill edits; evaluate candidates before accepting."""
+    import shlex
+    import subprocess
+
+    from skillevaluator.inference.types import LLMClientError
+    from skillevaluator.tier3.improve import prepare_improvement
+
+    try:
+        receipt = prepare_improvement(
+            skill_path,
+            result_path,
+            output_dir,
+            mode=mode,
+            edits_path=edits_path,
+            model=model,
+            agent_command=shlex.split(agent_command) if agent_command else None,
+            include_agent_observations=include_agent_observations,
+        )
+    except (ValueError, OSError, LLMClientError, subprocess.SubprocessError) as error:
+        raise click.ClickException(str(error)) from error
+    click.echo(json.dumps(receipt, indent=2))
+
+
+@tier3.command("compare-improvement")
+@click.argument("before", type=click.Path(exists=True, path_type=Path))
+@click.argument("after", type=click.Path(exists=True, path_type=Path))
+@click.option("--outcome-metric", multiple=True, help="Independent outcome check; repeat for multiple checks.")
+@click.option("--output-dir", type=click.Path(path_type=Path), help="Write comparison.json and comparison.md.")
+def compare_improvement(before, after, outcome_metric, output_dir):
+    """Show case, lift, finding and cost changes between two retained runs."""
+    from skillevaluator.tier3.improvement_signals import compare_runs, comparison_markdown
+
+    try:
+        comparison = compare_runs(before, after, outcome_metrics=outcome_metric)
+        rendered = comparison_markdown(comparison)
+        if output_dir:
+            output_dir.mkdir(parents=True, exist_ok=True)
+            (output_dir / "comparison.json").write_text(json.dumps(comparison, indent=2) + "\n")
+            (output_dir / "comparison.md").write_text(rendered)
+    except (ValueError, OSError) as error:
+        raise click.ClickException(str(error)) from error
+    click.echo(rendered)
+
+
 # Expert aliases that intentionally share the same command implementations.
 tier1.workflow = _tier1_workflow
 tier1.add_command(copy.copy(_tier1_workflow), "validate")

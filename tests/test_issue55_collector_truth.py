@@ -627,6 +627,49 @@ def test_failed_judge_sidecar_is_merged_but_never_scored_and_reason_is_safe(tmp_
     assert not any(ord(character) < 32 or ord(character) == 127 for character in saved_reason)
 
 
+@pytest.mark.parametrize("layout", ["root", "step", "aggregate", "failed_harbor"])
+@pytest.mark.parametrize("has_error", [False, True])
+def test_custom_grader_error_is_unscored_but_valid_zero_remains_scoreable(
+    tmp_path: Path, layout: str, has_error: bool
+) -> None:
+    job_dir = tmp_path / "jobs" / "demo-opencode-with"
+    trial_name = "case-001__attempt"
+    trial_dir = job_dir / trial_name
+    if layout == "aggregate":
+        _write_authoritative_multistep_result(
+            job_dir, trial_name, aggregate={"overall": 0.0}, step_rewards=[{"overall": 0.0}]
+        )
+    verifier_dir = trial_dir / ("steps/step-1/verifier" if layout in {"step", "aggregate"} else "verifier")
+    verifier_dir.mkdir(parents=True)
+    (verifier_dir / "reward.json").write_text(json.dumps({"overall": 0.0}), encoding="utf-8")
+    custom = {"overall": 0.0, "entry_id": "case-001"}
+    if has_error:
+        custom["error"] = "custom_only requires numeric overall; Authorization: Bearer synthetic-secret-123456"
+    (verifier_dir / "custom_reward.json").write_text(json.dumps(custom), encoding="utf-8")
+    if layout == "failed_harbor" and has_error:
+        (trial_dir / "result.json").write_text(
+            json.dumps({"exception_info": {"exception_type": "VerifierError", "exception_message": "failed"}}),
+            encoding="utf-8",
+        )
+    _write_complete_job_result(job_dir, [trial_name])
+
+    result = _collect(tmp_path, skip_baseline=True, case_ids=["case-001"])
+
+    assert result["execution_status"] == ("failed" if has_error else "succeeded")
+    assert result["agents"]["opencode"]["conditions"]["with_skill"]["scored_attempts"] == (0 if has_error else 1)
+    persisted = list((tmp_path / "results" / "opencode" / "with-skill" / "trials").glob("*/reward.json"))
+    assert len(persisted) == 1
+    reward = json.loads(persisted[0].read_text(encoding="utf-8"))
+    if has_error:
+        assert reward["evaluation_status"] == "failed"
+        assert collector_module._partition_scoreable_rewards([reward])[0] == []
+        assert result["agents"]["opencode"]["pass_at_k"]["with_skill"] == {}
+        assert "custom_only requires numeric overall" in json.dumps(reward["evaluation_errors"])
+        assert "synthetic-secret-123456" not in json.dumps(reward)
+    else:
+        assert overall_score(reward) == 0.0
+
+
 @pytest.mark.parametrize("verifier_relative", [Path("verifier"), Path("steps/finish/verifier")])
 def test_failed_harbor_trial_preserves_redacted_judge_diagnostics(
     tmp_path: Path,
@@ -1818,7 +1861,6 @@ def test_step_fallback_aggregates_each_logical_trial_before_cross_trial_average(
     # the report-loader limit.
     monkeypatch.setattr(report_data, "_MAX_TRIALS_PER_CONDITION", 3)
     monkeypatch.setattr(report, "_generate_suggestions_structured", lambda *_args, **_kwargs: [])
-    monkeypatch.setattr(report, "_passing_skill_suggestions", lambda *_args, **_kwargs: [])
     assert report.display_findings_report(result, "demo", ["opencode"], tmp_path / "results")
     findings_payload = json.loads((tmp_path / "results" / "opencode" / "findings.json").read_text(encoding="utf-8"))
     [accuracy_finding] = [finding for finding in findings_payload["findings"] if finding["metric"] == "accuracy"]
@@ -1894,7 +1936,6 @@ def test_saved_fallback_steps_keep_logical_trial_weight_in_findings_and_html(
 
     monkeypatch.setattr(report_data, "_MAX_TRIALS_PER_CONDITION", 3)
     monkeypatch.setattr(report, "_generate_suggestions_structured", lambda *_args, **_kwargs: [])
-    monkeypatch.setattr(report, "_passing_skill_suggestions", lambda *_args, **_kwargs: [])
     assert report.display_findings_report(result, "demo", ["opencode"], tmp_path / "results")
     findings_payload = json.loads((tmp_path / "results" / "opencode" / "findings.json").read_text(encoding="utf-8"))
     [domain_finding] = [finding for finding in findings_payload["findings"] if finding["metric"] == "domain_quality"]
@@ -3647,7 +3688,6 @@ def test_reused_results_remove_stale_generated_quality_but_preserve_unrelated_fi
     first = _collect(tmp_path, skip_baseline=False, case_ids=["case-001"])
     agent_dir = tmp_path / "results" / "opencode"
     monkeypatch.setattr(report, "_generate_suggestions_structured", lambda *_args, **_kwargs: [])
-    monkeypatch.setattr(report, "_passing_skill_suggestions", lambda *_args, **_kwargs: [])
     assert report.display_findings_report(first, "demo", ["opencode"], tmp_path / "results")
     stale_trial = agent_dir / "with-skill" / "trials" / "case-stale__attempt"
     stale_trial.mkdir(parents=True)
@@ -3725,7 +3765,6 @@ def test_reused_results_remove_omitted_agent_from_report_discovery(tmp_path: Pat
         expected_trials=1,
     )
     monkeypatch.setattr(report, "_generate_suggestions_structured", lambda *_args, **_kwargs: [])
-    monkeypatch.setattr(report, "_passing_skill_suggestions", lambda *_args, **_kwargs: [])
     assert report.display_findings_report(first, "demo", ["opencode", "claude-code"], tmp_path / "results")
     results_dir = tmp_path / "results"
     omitted_dir = results_dir / "claude-code"
@@ -4407,7 +4446,6 @@ def test_findings_keep_succeeded_with_skill_when_only_baseline_failed(
     )
     (trial_dir / "reward.json").write_text(json.dumps(_default_reward("case-001", score)), encoding="utf-8")
     monkeypatch.setattr(report, "_generate_suggestions_structured", lambda *_args, **_kwargs: [])
-    monkeypatch.setattr(report, "_passing_skill_suggestions", lambda *_args, **_kwargs: [])
 
     rendered = report.display_findings_report(
         {
@@ -4468,7 +4506,6 @@ def test_findings_do_not_follow_external_reward_symlink(
         return []
 
     monkeypatch.setattr(report, "_generate_suggestions_structured", capture_suggestions)
-    monkeypatch.setattr(report, "_passing_skill_suggestions", lambda *_args, **_kwargs: [])
 
     rendered = report.display_findings_report(
         {
@@ -4563,8 +4600,9 @@ def test_findings_multi_agent_ranks_persisted_condition_overall_across_contracts
     assert rendered
     for agent, _contract, _score in agent_specs:
         artifact = json.loads((tmp_path / agent / "findings.json").read_text(encoding="utf-8"))
-        expected_mode = "passing_next_steps" if agent == expected_best else "not_generated"
+        expected_mode = "no_supported_change" if agent == expected_best else "not_generated"
         assert artifact["suggestion_mode"] == expected_mode
+        assert artifact["suggestions"] == []
 
 
 def test_findings_multi_agent_selects_and_writes_only_successful_agent(tmp_path: Path, monkeypatch) -> None:
@@ -4589,7 +4627,6 @@ def test_findings_multi_agent_selects_and_writes_only_successful_agent(tmp_path:
         )
         (trial_dir / "reward.json").write_text(json.dumps(_default_reward("case-001", score)), encoding="utf-8")
     monkeypatch.setattr(report, "_generate_suggestions_structured", lambda *_args, **_kwargs: [])
-    monkeypatch.setattr(report, "_passing_skill_suggestions", lambda *_args, **_kwargs: [])
 
     rendered = report.display_findings_report(
         {

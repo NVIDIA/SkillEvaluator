@@ -431,7 +431,7 @@ def get_read_calls(traj):
     for tc in get_all_tool_calls(traj):
         fn = tc["fn"].lower()
         if fn in ("read", "read_file"):
-            path = tc["args"].get("path", tc["args"].get("file_path", ""))
+            path = tc["args"].get("path", tc["args"].get("file_path", tc["args"].get("filePath", "")))
             if path:
                 paths.append(str(path))
         elif fn in ("bash", "execute"):
@@ -516,7 +516,7 @@ _DEFAULT_BEHAVIOR_CHECK_BUDGET = 8000
 _DEFAULT_TOOL_HISTORY_HEADROOM = 4000
 _MIN_BEHAVIOR_HISTORY_HEADROOM = 1600
 _SECTION_COMPACT_TOOL_HISTORY = "COMPACT TOOL HISTORY"
-_SECTION_FILE_CHANGES = "FILE CHANGES"
+_SECTION_FILE_CHANGES = "FILE CHANGES (attempts, newest first)"
 _SECTION_FINAL_RESPONSE = "FINAL RESPONSE"
 _SECTION_USER_REQUEST = "USER REQUEST"
 
@@ -597,7 +597,7 @@ def _append_section_with_budget(parts, title, body, max_chars, section_limit=Non
 
 
 def _tool_file_path(args):
-    for key in ("file_path", "path", "filename", "target_file"):
+    for key in ("file_path", "path", "filename", "target_file", "filePath"):
         value = args.get(key)
         if value:
             return str(value)
@@ -605,8 +605,9 @@ def _tool_file_path(args):
 
 
 def _tool_write_body(args):
+    """Retain labeled tool arguments; patches are not reconstructed file contents."""
     snippets = []
-    for key in ("content", "new_string", "patch", "code"):
+    for key in ("content", "new_string", "patch", "code", "patchText"):
         value = args.get(key)
         if value:
             snippets.append(f"{key}:\n{value}")
@@ -636,6 +637,7 @@ def _tool_name_looks_like_write(fn_lower):
 
 
 def _collect_file_change_evidence(traj):
+    """Return newest-first tool arguments and results, not reconstructed files."""
     changes = []
     for step in traj.get("steps", []):
         if step.get("source") != "agent":
@@ -671,7 +673,7 @@ def _collect_file_change_evidence(traj):
             if obs:
                 entry_parts.append(f"Tool returned: {_truncate_for_behavior(obs, 500)}")
             changes.append("\n".join(entry_parts))
-    return changes
+    return list(reversed(changes))
 
 
 def build_behavior_evidence(
@@ -701,6 +703,12 @@ def build_behavior_evidence(
     file_changes = "\n\n".join(_collect_file_change_evidence(traj))
     final = _get_final_response(traj)
     history = build_conversation_summary(traj, question)
+    recent_obs = _late_observation_excerpts(traj, _BUNDLE_ITEM_CHARS, include_commands=True)
+    if recent_obs:
+        history = (
+            "RECENT TOOL RESULTS (newest first)\n"
+            + "\n---\n".join(recent_obs[:_BUNDLE_ACCURACY_MAX_OBS]) + "\n\n" + history
+        )
     user_needed = (
         min(800, len(_SECTION_USER_REQUEST) + len(question.strip()) + 2) if question and question.strip() else 0
     )
@@ -1080,7 +1088,7 @@ def _clip(text, limit):
     return text if len(text) <= limit else text[:limit] + " …[clipped]"
 
 
-def _late_observation_excerpts(traj, limit):
+def _late_observation_excerpts(traj, limit, *, include_commands=False):
     out = []
     for step in reversed(traj.get("steps", [])):
         if step.get("source") != "agent":
@@ -1088,11 +1096,25 @@ def _late_observation_excerpts(traj, limit):
         for result in reversed((step.get("observation") or {}).get("results") or []):
             content = atif_content_text(result.get("content")).strip()
             if content:
-                out.append(_clip(content, limit))
+                if not include_commands:
+                    out.append(_clip(content, limit))
+                    continue
+                call_id = result.get("source_call_id")
+                call = next(
+                    (tc for tc in step.get("tool_calls", []) if call_id and tc.get("tool_call_id") == call_id),
+                    None,
+                )
+                context = ""
+                if call:
+                    context = _truncate_for_behavior(
+                        f"\nTool call: {call.get('function_name', 'unknown')} {json.dumps(call.get('arguments', {}))}",
+                        min(600, limit // 2),
+                    )
+                out.append(_truncate_for_behavior(content, limit - len(context)) + context)
     return out
 
 
-def _assemble(sections, budget):
+def _assemble(sections, budget, *, clip_sections=False):
     parts = []
     used = 0
     dropped = 0
@@ -1103,7 +1125,7 @@ def _assemble(sections, budget):
         if used + len(block) <= budget:
             parts.append(block)
             used += len(block) + 2
-        elif title == _SECTION_FINAL_RESPONSE and budget - used > 0:
+        elif (title == _SECTION_FINAL_RESPONSE or clip_sections) and budget - used > 0:
             avail = budget - used
             later_blocks = [len(f"{t}\n{b}") + 2 for t, b in non_empty[idx + 1 :]]
             if later_blocks and avail >= 160:
@@ -1267,10 +1289,11 @@ def build_metric_evidence_bundles(traj, question, *, ground_truth="", expected_b
     acc_text, acc_drop, acc_trunc = _assemble(
         [
             (_SECTION_FINAL_RESPONSE, final),
-            ("PRODUCED FILES / WRITES", file_changes),
+            ("EDIT ATTEMPTS (newest)", file_changes),
             ("KEY OBSERVATIONS", "\n---\n".join(late_obs[:_BUNDLE_ACCURACY_MAX_OBS])),
         ],
         budgets["accuracy"],
+        clip_sections=True,
     )
     bundles["accuracy"] = {
         "prompt_evidence": _prepend_facts(acc_text or _clip(get_agent_text(traj), budgets["accuracy"])),
@@ -1282,13 +1305,15 @@ def build_metric_evidence_bundles(traj, question, *, ground_truth="", expected_b
         },
         "verified": facts,
     }
+    goal_obs = _late_observation_excerpts(traj, _BUNDLE_ITEM_CHARS, include_commands=True)
     goal_text, goal_drop, goal_trunc = _assemble(
         [
             (_SECTION_FINAL_RESPONSE, final),
-            ("END-STATE FILE CHANGES", file_changes),
-            ("RECENT TOOL RESULTS (newest first)", "\n---\n".join(late_obs[:_BUNDLE_GOAL_MAX_OBS])),
+            ("RECENT TOOL RESULTS (newest first)", "\n---\n".join(goal_obs[:_BUNDLE_GOAL_MAX_OBS])),
+            ("EDIT ATTEMPTS (newest)", file_changes),
         ],
         budgets["goal_accuracy"],
+        clip_sections=True,
     )
     bundles["goal_accuracy"] = {
         "prompt_evidence": _prepend_facts(goal_text or _clip(get_agent_text(traj), budgets["goal_accuracy"])),
@@ -3535,7 +3560,7 @@ def _path_with_shell_cwd(value, current_directory):
     value = str(value)
     if not current_directory or not value or value.startswith(("/", "\\")) or re.match(r"^[A-Za-z]:[\\/]", value):
         return value
-    return f"{current_directory.rstrip('/\\')}/{value}"
+    return current_directory.rstrip("/\\") + "/" + value
 
 
 def _possibly_references_target_directory(value, target_skill):
@@ -8002,7 +8027,7 @@ def check_routing(
 
 
 def check_error_recovery(tool_calls, expected_script=None):
-    """Detect error-retry patterns and attribute fault to skill vs agent."""
+    """Detect observed error-retry patterns without inferring their cause."""
     if not tool_calls:
         return {
             "passed": True,
@@ -8012,6 +8037,7 @@ def check_error_recovery(tool_calls, expected_script=None):
             "corrections": [],
             "skill_faults": 0,
             "agent_faults": 0,
+            "unattributed_failures": 0,
         }
 
     exec_actions = {"bash", "execute", "run_code", "run"}
@@ -8041,6 +8067,7 @@ def check_error_recovery(tool_calls, expected_script=None):
             "corrections": [],
             "skill_faults": 0,
             "agent_faults": 0,
+            "unattributed_failures": 0,
         }
 
     # Only complete status lines are execution evidence; source code and prose
@@ -8074,7 +8101,8 @@ def check_error_recovery(tool_calls, expected_script=None):
         r"|\bbash tool terminated command after exceeding timeout\b",
         re.IGNORECASE | re.MULTILINE,
     )
-    skill_fault_kw = [
+    # Preserve the legacy friction penalty; these diagnostics do not establish cause.
+    legacy_high_penalty_keywords = [
         "no such file",
         "filenotfounderror",
         "not found",
@@ -8225,13 +8253,15 @@ def check_error_recovery(tool_calls, expected_script=None):
     corrections = []
     failures = []
     seen = set()
+    legacy_high_penalty_failures = 0
 
     for i, (orig_idx, call) in enumerate(exec_calls):
         if orig_idx in seen or not failed[i]:
             continue
         cmd = _cmd_text(call)
         obs = str(call.get("observation", ""))
-        fault = "skill" if any(k in obs.lower() for k in skill_fault_kw) else "agent"
+        legacy_high_penalty_failures += any(k in obs.lower() for k in legacy_high_penalty_keywords)
+        fault = "unattributed"
         # Record every observed failure, whether or not it is later recovered.
         # Previously only recovered failures (corrections) were tracked, so an
         # unrecovered failure was silently scored as first-attempt clean.
@@ -8267,8 +8297,6 @@ def check_error_recovery(tool_calls, expected_script=None):
                 break
 
     first_attempt_clean = len(failures) == 0
-    skill_faults = sum(1 for f in failures if f["fault"] == "skill")
-    agent_faults = sum(1 for f in failures if f["fault"] == "agent")
     unrecovered_failures = [f for f in failures if not f["recovered"]]
 
     if first_attempt_clean:
@@ -8277,23 +8305,24 @@ def check_error_recovery(tool_calls, expected_script=None):
         score = 0.0
         unrecovered_cmds = ", ".join(f["failed_cmd"][:60] for f in unrecovered_failures[:3])
         reason = f"{len(unrecovered_failures)} unrecovered failure(s): {unrecovered_cmds}"
-    elif skill_faults > 0:
-        score = max(0.0, 1.0 - (skill_faults * 0.25))
-        reason = f"{skill_faults} skill defect(s), {agent_faults} agent error(s)"
+    elif legacy_high_penalty_failures > 0:
+        score = max(0.0, 1.0 - (legacy_high_penalty_failures * 0.25))
+        reason = f"{len(failures)} recovered execution failure(s); cause not established"
     else:
-        score = max(0.5, 1.0 - (agent_faults * 0.1))
-        reason = f"{agent_faults} agent error(s), no skill defects"
+        score = max(0.5, 1.0 - (len(failures) * 0.1))
+        reason = f"{len(failures)} recovered execution failure(s); cause not established"
 
     return {
-        "passed": first_attempt_clean or (skill_faults == 0 and not unrecovered_failures),
+        "passed": first_attempt_clean or (legacy_high_penalty_failures == 0 and not unrecovered_failures),
         "score": round(score, 4),
         "reason": reason,
         "first_attempt_clean": first_attempt_clean,
         "corrections": corrections,
         "failures": failures,
         "unrecovered_failures": unrecovered_failures,
-        "skill_faults": skill_faults,
-        "agent_faults": agent_faults,
+        "skill_faults": 0,
+        "agent_faults": 0,
+        "unattributed_failures": len(failures),
     }
 
 
@@ -8739,6 +8768,12 @@ def _judge_goal_accuracy_custom(question, ground_truth, agent_text, tool_summary
 Step 1: What was the user's goal?
 Step 2: What end state did the agent reach?
 Step 3: Compare the end state to the expected outcome.
+
+Score the observed final outcome, not how smoothly the agent reached it. Recovered
+command failures do not reduce goal achievement unless the request explicitly
+requires first-attempt success or the attempts violated a stated constraint.
+A command that failed to execute is not evidence that its proposed file was
+created or incorrect. Ground factual claims in observed outputs and artifacts.
 
 USER REQUEST:
 {question}

@@ -794,7 +794,7 @@ def _path_with_shell_cwd(value: str, current_directory: str | None) -> str:
     value = str(value)
     if not current_directory or not value or value.startswith(("/", "\\")) or re.match(r"^[A-Za-z]:[\\/]", value):
         return value
-    return f"{current_directory.rstrip('/\\')}/{value}"
+    return current_directory.rstrip("/\\") + "/" + value
 
 
 def _possibly_references_target_directory(value: Any, target_skill: str) -> bool:
@@ -5192,11 +5192,11 @@ def check_error_recovery(
     tool_calls: list[dict[str, Any]],
     expected_script: str | None = None,
 ) -> dict[str, Any]:
-    """Detect error-retry patterns and attribute fault to skill vs agent.
+    """Detect observed error-retry patterns without inferring their cause.
 
     Scans bash/execute tool calls for commands that failed (non-zero exit or
     error keywords in observation) followed by a similar command that
-    succeeded.  Returns per-correction details with fault attribution.
+    succeeded. Returns per-correction evidence with unattributed causes.
     """
     if not tool_calls:
         return {
@@ -5207,6 +5207,7 @@ def check_error_recovery(
             "corrections": [],
             "skill_faults": 0,
             "agent_faults": 0,
+            "unattributed_failures": 0,
         }
 
     exec_actions = {"bash", "execute", "run_code", "run"}
@@ -5236,6 +5237,7 @@ def check_error_recovery(
             "corrections": [],
             "skill_faults": 0,
             "agent_faults": 0,
+            "unattributed_failures": 0,
         }
 
     # Only complete status lines are execution evidence; source code and prose
@@ -5269,7 +5271,8 @@ def check_error_recovery(
         r"|\bbash tool terminated command after exceeding timeout\b",
         re.IGNORECASE | re.MULTILINE,
     )
-    skill_fault_keywords = [
+    # Preserve the legacy friction penalty; these diagnostics do not establish cause.
+    legacy_high_penalty_keywords = [
         "no such file",
         "filenotfounderror",
         "not found",
@@ -5413,10 +5416,6 @@ def check_error_recovery(
         program1, program2 = (re.sub(r"[\d.]+$", "", words[0].rsplit("/", 1)[-1]) for words in (words1, words2))
         return (bool(program1) and program1 == program2) or words1[0] in words2 or words2[0] in words1
 
-    def _is_skill_fault(error_obs: str) -> bool:
-        obs_lower = error_obs.lower()
-        return any(kw in obs_lower for kw in skill_fault_keywords)
-
     failed = [_is_failure(call) for _, call in exec_calls]
     # A benign negative query is not a successful retry of an earlier error.
     succeeded = [not failed[i] and _exit_status(call) in (None, 0) for i, (_, call) in enumerate(exec_calls)]
@@ -5424,6 +5423,7 @@ def check_error_recovery(
     corrections: list[dict[str, Any]] = []
     failures: list[dict[str, Any]] = []
     seen_fail_indices: set[int] = set()
+    legacy_high_penalty_failures = 0
 
     for i, (orig_idx, call) in enumerate(exec_calls):
         if orig_idx in seen_fail_indices:
@@ -5433,7 +5433,8 @@ def check_error_recovery(
 
         cmd = _cmd_text(call)
         obs = str(call.get("observation", ""))
-        fault = "skill" if _is_skill_fault(obs) else "agent"
+        legacy_high_penalty_failures += any(kw in obs.lower() for kw in legacy_high_penalty_keywords)
+        fault = "unattributed"
         # Record every observed failure, whether or not it is later recovered.
         # Previously only recovered failures (corrections) were tracked, so an
         # unrecovered failure was silently scored as first-attempt clean.
@@ -5470,8 +5471,6 @@ def check_error_recovery(
                 break
 
     first_attempt_clean = len(failures) == 0
-    skill_faults = sum(1 for f in failures if f["fault"] == "skill")
-    agent_faults = sum(1 for f in failures if f["fault"] == "agent")
     unrecovered_failures = [f for f in failures if not f["recovered"]]
 
     if first_attempt_clean:
@@ -5481,23 +5480,24 @@ def check_error_recovery(
         score = 0.0
         unrecovered_cmds = ", ".join(f["failed_cmd"][:60] for f in unrecovered_failures[:3])
         reason = f"{len(unrecovered_failures)} unrecovered failure(s): {unrecovered_cmds}"
-    elif skill_faults > 0:
-        score = max(0.0, 1.0 - (skill_faults * 0.25))
-        reason = f"{skill_faults} skill defect(s), {agent_faults} agent error(s)"
+    elif legacy_high_penalty_failures > 0:
+        score = max(0.0, 1.0 - (legacy_high_penalty_failures * 0.25))
+        reason = f"{len(failures)} recovered execution failure(s); cause not established"
     else:
-        score = max(0.5, 1.0 - (agent_faults * 0.1))
-        reason = f"{agent_faults} agent error(s), no skill defects"
+        score = max(0.5, 1.0 - (len(failures) * 0.1))
+        reason = f"{len(failures)} recovered execution failure(s); cause not established"
 
     return {
-        "passed": first_attempt_clean or (skill_faults == 0 and not unrecovered_failures),
+        "passed": first_attempt_clean or (legacy_high_penalty_failures == 0 and not unrecovered_failures),
         "score": round(score, 4),
         "reason": reason,
         "first_attempt_clean": first_attempt_clean,
         "corrections": corrections,
         "failures": failures,
         "unrecovered_failures": unrecovered_failures,
-        "skill_faults": skill_faults,
-        "agent_faults": agent_faults,
+        "skill_faults": 0,
+        "agent_faults": 0,
+        "unattributed_failures": len(failures),
     }
 
 

@@ -1319,6 +1319,7 @@ _HARBOR_LAUNCH_ENV = MappingProxyType({"HARBOR_TELEMETRY": "0", "PYTHON_DOTENV_D
 # wrappers check a minimum version for the selected model.
 _CODEX_VERSION = "0.161.0"
 _CLAUDE_CODE_VERSION = "2.1.292"
+_OPENCODE_VERSION = "1.18.33"
 # Harbor 0.22's Codex agent ran with ``model_reasoning_effort=high``; later
 # releases defer to Codex's own default. Pin the effort SkillEvaluator was
 # validated with so scores and cost stay comparable across Harbor upgrades.
@@ -1326,6 +1327,7 @@ _HARBOR_AGENT_KWARGS: Mapping[str, Mapping[str, str]] = MappingProxyType(
     {
         "codex": MappingProxyType({"reasoning_effort": "high", "version": _CODEX_VERSION}),
         "claude-code": MappingProxyType({"version": _CLAUDE_CODE_VERSION}),
+        "opencode": MappingProxyType({"version": _OPENCODE_VERSION}),
     }
 )
 # Claude Code's default effort depends on the model, and Claude Opus 5 ran at

@@ -842,6 +842,12 @@ Step 1: What was the user's goal?
 Step 2: What end state did the agent reach?
 Step 3: Compare the end state to the expected outcome.
 
+Score the observed final outcome, not how smoothly the agent reached it. Recovered
+command failures do not reduce goal achievement unless the request explicitly
+requires first-attempt success or the attempts violated a stated constraint.
+A command that failed to execute is not evidence that its proposed file was
+created or incorrect. Ground factual claims in observed outputs and artifacts.
+
 USER REQUEST:
 {question}
 

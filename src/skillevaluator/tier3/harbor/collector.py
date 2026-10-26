@@ -917,7 +917,9 @@ def _read_failed_judge_sidecar(
     return (data, "") if isinstance(data, dict) else (None, read_failure)
 
 
-def _failed_judge_sidecar_paths(trial_dir: Path) -> tuple[list[tuple[str, Path, os.stat_result]], str]:
+def _failed_judge_sidecar_paths(
+    trial_dir: Path, *, filename: str = "skill_evaluator_reward.json"
+) -> tuple[list[tuple[str, Path, os.stat_result]], str]:
     """Return bounded sidecar paths plus a safe reason when the scan is incomplete.
 
     The candidate bound applies to sidecars that actually exist. Empty verifier
@@ -940,7 +942,7 @@ def _failed_judge_sidecar_paths(trial_dir: Path) -> tuple[list[tuple[str, Path, 
             return None, f"Judge sidecar scan refused a symlinked {location} verifier; trial was not scored"
         if not stat.S_ISDIR(verifier_metadata.st_mode):
             return None, "Judge sidecar scan found a non-directory verifier artifact; trial was not scored"
-        sidecar_path = verifier_dir / "skill_evaluator_reward.json"
+        sidecar_path = verifier_dir / filename
         try:
             sidecar_metadata = sidecar_path.lstat()
         except FileNotFoundError:
@@ -1007,36 +1009,42 @@ def _failed_judge_sidecar_paths(trial_dir: Path) -> tuple[list[tuple[str, Path, 
     return sorted(candidates, key=lambda item: (item[0], item[1].as_posix())), scan_failure
 
 
-def _failed_judge_diagnostic(trial_dir: Path) -> dict[str, Any] | None:
+def _failed_judge_diagnostic(trial_dir: Path, *, include_standard: bool = True) -> dict[str, Any] | None:
     """Project failed judge sidecars into one safe, intrinsically unscoreable record."""
     errors: dict[str, str] = {}
     entry_id = ""
-    sidecar_paths, scan_failure = _failed_judge_sidecar_paths(trial_dir)
-    found_failure = bool(scan_failure)
-    if scan_failure:
-        errors["collector"] = scan_failure
+    filenames = ("skill_evaluator_reward.json", "custom_reward.json") if include_standard else ("custom_reward.json",)
+    sidecar_paths = []
+    found_failure = False
+    for filename in filenames:
+        paths, scan_failure = _failed_judge_sidecar_paths(trial_dir, filename=filename)
+        sidecar_paths.extend(paths)
+        if scan_failure:
+            found_failure = True
+            errors.setdefault("collector", scan_failure)
     for step_name, path, expected in sidecar_paths:
         sidecar, read_failure = _read_failed_judge_sidecar(path, trial_dir=trial_dir, expected=expected)
         if read_failure:
             found_failure = True
             errors.setdefault("collector", read_failure)
             continue
-        if not sidecar or str(sidecar.get("evaluation_status") or "").casefold() not in {"error", "failed"}:
+        custom_error = sidecar.get("error") if sidecar and path.name == "custom_reward.json" else None
+        custom_errors = sidecar.get("evaluation_errors") if sidecar and path.name == "custom_reward.json" else None
+        if not sidecar or (
+            not custom_error
+            and not custom_errors
+            and str(sidecar.get("evaluation_status") or "").casefold() not in {"error", "failed"}
+        ):
             continue
         found_failure = True
         if not entry_id:
             entry_id = _safe_diagnostic_text(sidecar.get("entry_id"), max_len=256)
-        safe_errors = _safe_evaluation_errors(sidecar.get("evaluation_errors"))
-        if isinstance(safe_errors, dict):
-            error_items = safe_errors.items()
-        elif isinstance(safe_errors, list):
-            error_items = ((f"judge_{index + 1}", reason) for index, reason in enumerate(safe_errors))
-        elif safe_errors:
-            error_items = (("judge", safe_errors),)
-        else:
-            error_items = ()
+        safe_errors = _merge_bounded_evaluation_errors(
+            {"custom_grader": custom_error} if custom_error else None,
+            sidecar.get("evaluation_errors"),
+        )
         safe_step = _safe_diagnostic_text(step_name, max_len=64)
-        for metric, reason in error_items:
+        for metric, reason in safe_errors.items():
             key = f"{safe_step}.{metric}" if safe_step else str(metric)
             errors.setdefault(key, reason)
             if len(errors) >= len(DEFAULT_METRICS):
@@ -3051,12 +3059,9 @@ def _merge_reward_sidecars(data: dict[str, Any], verifier_dir: Path) -> None:
 
 def _merge_trial_evaluation_failures(data: dict[str, Any], trial_dir: Path) -> None:
     """Preserve judge-failure diagnostics when Harbor supplies an aggregate reward."""
-    # Pure custom-only verifiers do not run the standard Tier-3 LLM judge and
-    # must not inherit its sidecar scan limits merely because step directories
-    # exist. Default and default-plus-custom rewards carry canonical metrics.
-    if not _standard_reward_metrics(data):
-        return
-    diagnostic = _failed_judge_diagnostic(trial_dir)
+    # Custom-only rewards need their own failure sidecars, without consulting
+    # standard judge sidecars that do not belong to their scoring contract.
+    diagnostic = _failed_judge_diagnostic(trial_dir, include_standard=bool(_standard_reward_metrics(data)))
     if diagnostic is None:
         return
 

@@ -39,7 +39,85 @@ def test_late_write_survives_into_accuracy_and_goal_evidence() -> None:
         assert "test_gpu_engine_selection.py" in bundles[metric]["prompt_evidence"], metric
 
 
-def test_over_budget_sets_truncated_and_reason_not_silent() -> None:
+@pytest.mark.parametrize("bundled", [False, True])
+def test_opencode_paths_reach_read_and_write_evidence(bundled: bool) -> None:
+    compiler = _load_harbor_template_module() if bundled else atif_helpers
+    traj = {"steps": [{
+        "source": "agent",
+        "tool_calls": [
+            {"tool_call_id": "r", "function_name": "read", "arguments": {"filePath": "/skills/demo/SKILL.md"}},
+            {"tool_call_id": "w", "function_name": "write", "arguments": {
+                "filePath": "/workspace/output/result.py", "content": "print('done')",
+            }},
+        ],
+    }]}
+    assert compiler.get_read_calls(traj) == ["/skills/demo/SKILL.md"]
+    changes = compiler._collect_file_change_evidence(traj)
+    assert len(changes) == 1
+    assert "Path: /workspace/output/result.py" in changes[0]
+    assert "content:\nprint('done')" in changes[0]
+    bundles = compiler.build_metric_evidence_bundles(traj, "Create the result script.")
+    for metric in METRICS:
+        assert "Path: /workspace/output/result.py" in bundles[metric]["prompt_evidence"]
+    assert any(
+        ref.get("path") == "/workspace/output/result.py" and ref["kind"] == "file_change"
+        for ref in bundles["behavior_check"]["evidence_refs"]
+    )
+
+
+@pytest.mark.parametrize("bundled", [False, True])
+@pytest.mark.parametrize("result", ["Success. Updated the file.", "Error: patch context did not match."])
+def test_opencode_patch_is_labeled_attempt_with_observation(bundled: bool, result: str) -> None:
+    compiler = _load_harbor_template_module() if bundled else atif_helpers
+    patch = (
+        "*** Begin Patch\n*** Update File: /workspace/output/result.py\n@@\n"
+        "-browser.launch(headless=False)\n+browser.launch(headless=True)\n*** End Patch"
+    )
+    traj = {"steps": [{
+        "source": "agent",
+        "tool_calls": [{"tool_call_id": "p", "function_name": "apply_patch", "arguments": {"patchText": patch}}],
+        "observation": {"results": [{"source_call_id": "p", "content": result}]},
+    }]}
+    changes = compiler._collect_file_change_evidence(traj)
+    assert changes == [f"Agent called: apply_patch\npatchText:\n{patch}\nTool returned: {result}"]
+    bundles = compiler.build_metric_evidence_bundles(traj, "Update the browser script.")
+    for metric in METRICS:
+        evidence = bundles[metric]["prompt_evidence"]
+        assert f"patchText:\n{patch}" in evidence
+        assert result in evidence
+
+
+@pytest.mark.parametrize("bundled", [False, True])
+@pytest.mark.parametrize("result", ["EXIT 0\nRECEIPT: verified", "EXIT 1\nFAILED: verification"])
+def test_crowded_edits_keep_latest_patch_and_terminal_result(bundled: bool, result: str) -> None:
+    compiler = _load_harbor_template_module() if bundled else atif_helpers
+    steps = [{
+        "source": "agent",
+        "tool_calls": [{"tool_call_id": f"p{i}", "function_name": "apply_patch", "arguments": {
+            "patchText": "*** Begin Patch\n*** Add File: old.py\n" + "+old = True\n" * 200 + "*** End Patch",
+        }}],
+    } for i in range(12)]
+    patch = "*** Begin Patch\n*** Update File: result.py\n@@\n-old = True\n+FINAL_FIX = True\n*** End Patch"
+    steps.extend([
+        {"source": "agent", "tool_calls": [{"tool_call_id": "fix", "function_name": "apply_patch",
+                                            "arguments": {"patchText": patch}}]},
+        {"source": "agent", "tool_calls": [{"tool_call_id": "verify", "function_name": "bash",
+                                            "arguments": {"command": "python result.py"}}],
+         "observation": {"results": [{"source_call_id": "verify", "content": result}]}},
+        {"source": "agent", "message": "Final response after verification."},
+    ])
+    bundles = compiler.build_metric_evidence_bundles({"steps": steps}, "Repair and verify the script.")
+    for metric, budget in compiler._bundle_budgets().items():
+        bundle = bundles[metric]
+        assert "+FINAL_FIX = True" in bundle["prompt_evidence"]
+        assert result in bundle["prompt_evidence"]
+        assert "Final response after verification." in bundle["prompt_evidence"]
+        assert len(bundle["prompt_evidence"]) <= budget
+        assert bundle["omitted"]["truncated"] is True
+
+
+@pytest.mark.parametrize("bundled", [False, True])
+def test_over_budget_retains_recent_outcome_and_reports_truncation(bundled: bool) -> None:
     steps = [{"source": "user", "message": "go"}]
     for i in range(60):
         steps.append({
@@ -49,15 +127,18 @@ def test_over_budget_sets_truncated_and_reason_not_silent() -> None:
                 "tool_call_id": f"t{i}", "function_name": "bash",
                 "arguments": {"command": f"echo {i} " + ("z" * 1200)},
             }],
-            "observation": {"results": [{"source_call_id": f"t{i}", "content": "out " + ("w" * 1200)}]},
+            "observation": {"results": [{"source_call_id": f"t{i}", "content": f"OBSERVED_STEP_{i} " + ("w" * 1200)}]},
         })
     steps.append({"source": "agent", "message": "FINAL_MARKER done"})
-    bundles = atif_helpers.build_metric_evidence_bundles({"steps": steps}, "q", ground_truth="gt")
+    compiler = _load_harbor_template_module() if bundled else atif_helpers
+    bundles = compiler.build_metric_evidence_bundles({"steps": steps}, "q", ground_truth="gt")
     goal = bundles["goal_accuracy"]
     assert goal["omitted"]["truncated"] is True
     assert goal["omitted"]["count"] > 0
     assert goal["omitted"]["reason"]
     assert "FINAL_MARKER" in goal["prompt_evidence"]  # guaranteed-include survives truncation
+    assert "OBSERVED_STEP_59" in goal["prompt_evidence"]  # recent proof must not be dropped wholesale
+    assert len(goal["prompt_evidence"]) <= 12000
 
     bc = bundles["behavior_check"]
     assert bc["omitted"]["truncated"] is True  # behavior truncation is reported, not silent
@@ -74,6 +155,43 @@ def test_template_bundles_match_shared_helper() -> None:
     for metric in METRICS:
         assert shared[metric]["prompt_evidence"] == templated[metric]["prompt_evidence"], metric
         assert shared[metric]["omitted"] == templated[metric]["omitted"], metric
+
+
+@pytest.mark.parametrize("bundled", [False, True])
+def test_goal_observation_keeps_output_and_matching_command_within_item_budget(bundled: bool) -> None:
+    compiler = _load_harbor_template_module() if bundled else atif_helpers
+    command = "cp source.json /workspace/output/copy.json; cat /workspace/output/copy.json"
+    observed = "ROW_SCORES [1, 0]\n" + "x" * 2500 + "\nARTIFACT_EXISTS copy.json"
+    traj = {"steps": [{
+        "source": "agent",
+        "tool_calls": [
+            {"tool_call_id": "other", "function_name": "bash", "arguments": {"command": "UNRELATED_COMMAND"}},
+            {"tool_call_id": "copy", "function_name": "bash", "arguments": {"command": command}},
+        ],
+        "observation": {"results": [{"source_call_id": "copy", "content": observed}]},
+    }]}
+    # Accuracy retains its existing output-only representation.
+    assert compiler._late_observation_excerpts(traj, 1500) == [compiler._clip(observed, 1500)]
+    excerpt = compiler._late_observation_excerpts(traj, 1500, include_commands=True)[0]
+    assert len(excerpt) <= 1500
+    assert excerpt.startswith("ROW_SCORES [1, 0]")
+    assert "ARTIFACT_EXISTS copy.json" in excerpt
+    assert command in excerpt
+    assert "UNRELATED_COMMAND" not in excerpt
+    bundles = compiler.build_metric_evidence_bundles(traj, "Copy the output artifact.")
+    assert command in bundles["goal_accuracy"]["prompt_evidence"]
+    assert command not in bundles["accuracy"]["prompt_evidence"]
+
+
+@pytest.mark.parametrize("bundled", [False, True])
+def test_goal_observation_does_not_invent_context_for_unmatched_result(bundled: bool) -> None:
+    compiler = _load_harbor_template_module() if bundled else atif_helpers
+    traj = {"steps": [{
+        "source": "agent",
+        "tool_calls": [{"function_name": "bash", "arguments": {"command": "UNRELATED_COMMAND"}}],
+        "observation": {"results": [{"content": "Observed failure"}]},
+    }]}
+    assert compiler._late_observation_excerpts(traj, 1500, include_commands=True) == ["Observed failure"]
 
 
 def test_bundle_budgets_defaults_and_env_overrides(monkeypatch) -> None:

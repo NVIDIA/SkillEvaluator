@@ -82,9 +82,11 @@ def test_recovered_failure_behavior_unchanged(checker):
     assert len(result["corrections"]) == 1
     assert result["corrections"][0]["failed_cmd"] == "pytest tests/test_api.py"
     assert result["corrections"][0]["retry_cmd"] == "pytest tests/test_api.py -q"
-    # Unchanged pre-existing scoring: one corrected agent fault -> 0.9, passed.
+    # Preserve the legacy low-friction penalty without claiming agent fault.
     assert result["score"] == 0.9
     assert result["passed"] is True
+    assert result["corrections"][0]["fault"] == "unattributed"
+    assert "cause not established" in result["reason"]
 
 
 def test_unrecovered_failure_after_earlier_success(checker):
@@ -99,7 +101,7 @@ def test_unrecovered_failure_after_earlier_success(checker):
     assert result["score"] == 0.0
     assert len(result["failures"]) == 1
     assert len(result["unrecovered_failures"]) == 1
-    assert result["unrecovered_failures"][0]["fault"] == "skill"
+    assert result["unrecovered_failures"][0]["fault"] == "unattributed"
     assert "make build" in result["reason"]
 
 
@@ -116,8 +118,8 @@ def test_unrecovered_failure_after_earlier_recovery(checker):
     assert [f["failed_cmd"] for f in result["unrecovered_failures"]] == ["make build"]
     assert result["score"] == 0.0
     assert result["passed"] is False
-    assert result["skill_faults"] == 1
-    assert result["agent_faults"] == 1
+    assert result["skill_faults"] == result["agent_faults"] == 0
+    assert result["unattributed_failures"] == 2
 
 
 @pytest.mark.parametrize(
@@ -165,27 +167,30 @@ def test_failure_detection_agrees(checker, observation):
     assert result["score"] == 0.0
     assert result["first_attempt_clean"] is False
     assert len(result["unrecovered_failures"]) == 1
-    assert result["skill_faults"] + result["agent_faults"] == 1
+    assert result["skill_faults"] == result["agent_faults"] == 0
+    assert result["unattributed_failures"] == 1
 
 
-def test_unrecovered_skill_fault_report_reason(checker):
+def test_unrecovered_missing_file_report_reason(checker):
     result = checker([_call("make build", "gcc: error: missing.c: No such file or directory")])
     assert result["passed"] is False
-    assert result["skill_faults"] == 1
-    assert result["agent_faults"] == 0
+    assert result["skill_faults"] == result["agent_faults"] == 0
+    assert result["unattributed_failures"] == 1
     reasons = _collect_fail_reasons("skill_execution", [{"detail": {"error_recovery": result}}])
     assert result["reason"] in reasons
     assert "make build" in result["reason"]
 
 
-def test_recovered_skill_fault_counted_once(checker):
+def test_recovered_missing_file_preserves_friction_penalty_without_blame(checker):
     result = checker(
         [
             _call("make build", "No such file or directory"),
             _call("make build", "done"),
         ]
     )
-    assert result["skill_faults"] == 1
+    assert result["skill_faults"] == result["agent_faults"] == 0
+    assert result["unattributed_failures"] == 1
+    assert "cause not established" in result["reason"]
     assert result["score"] == 0.75
     assert result["passed"] is False
     assert result["unrecovered_failures"] == []
@@ -198,12 +203,12 @@ def test_recovered_skill_fault_counted_once(checker):
         "Traceback (most recent call last):\nValueError: bad input",
     ],
 )
-def test_unrecovered_agent_fault_report_reason(checker, observation):
+def test_unrecovered_execution_failure_report_reason(checker, observation):
     result = checker([_call("pytest", observation)])
     assert result["score"] == 0.0
     assert result["passed"] is False
-    assert result["agent_faults"] == 1
-    assert result["skill_faults"] == 0
+    assert result["skill_faults"] == result["agent_faults"] == 0
+    assert result["unattributed_failures"] == 1
     reasons = _collect_fail_reasons("skill_execution", [{"detail": {"error_recovery": result}}])
     assert result["reason"] in reasons
 

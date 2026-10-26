@@ -3104,9 +3104,6 @@ def _suggestions_for_dimensions(dimensions: list[dict[str, Any]]) -> list[str]:
             pending.append((score, dim.get("id", "")))
     pending.sort()
 
-    if not pending:
-        return ["Skill performance is healthy across all evaluated dimensions; consider expanding eval coverage."]
-
     return [
         f"Improve {dim_id.title()} (current score {score:.2f}); add eval coverage and tighten skill instructions."
         for score, dim_id in pending[:3]

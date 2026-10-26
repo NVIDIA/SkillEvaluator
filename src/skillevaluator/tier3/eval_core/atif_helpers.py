@@ -76,7 +76,7 @@ def get_read_calls(traj: dict[str, Any]) -> list[str]:
     for tc in get_all_tool_calls(traj):
         fn = tc["fn"].lower()
         if fn in ("read", "read_file"):
-            path = tc["args"].get("path", tc["args"].get("file_path", ""))
+            path = tc["args"].get("path", tc["args"].get("file_path", tc["args"].get("filePath", "")))
             if path:
                 paths.append(str(path))
         elif fn in ("bash", "execute", "exec_command", "run", "run_code", "shell", "command"):
@@ -179,7 +179,7 @@ _DEFAULT_BEHAVIOR_CHECK_BUDGET = 8000
 _DEFAULT_TOOL_HISTORY_HEADROOM = 4000
 _MIN_BEHAVIOR_HISTORY_HEADROOM = 1600
 _SECTION_COMPACT_TOOL_HISTORY = "COMPACT TOOL HISTORY"
-_SECTION_FILE_CHANGES = "FILE CHANGES"
+_SECTION_FILE_CHANGES = "FILE CHANGES (attempts, newest first)"
 _SECTION_FINAL_RESPONSE = "FINAL RESPONSE"
 _SECTION_USER_REQUEST = "USER REQUEST"
 
@@ -258,7 +258,7 @@ def _append_section_with_budget(
 
 
 def _tool_file_path(args: dict[str, Any]) -> str:
-    for key in ("file_path", "path", "filename", "target_file"):
+    for key in ("file_path", "path", "filename", "target_file", "filePath"):
         value = args.get(key)
         if value:
             return str(value)
@@ -266,8 +266,9 @@ def _tool_file_path(args: dict[str, Any]) -> str:
 
 
 def _tool_write_body(args: dict[str, Any]) -> str:
+    """Retain labeled tool arguments; patches are not reconstructed file contents."""
     snippets: list[str] = []
-    for key in ("content", "new_string", "patch", "code"):
+    for key in ("content", "new_string", "patch", "code", "patchText"):
         value = args.get(key)
         if value:
             snippets.append(f"{key}:\n{value}")
@@ -297,6 +298,7 @@ def _tool_name_looks_like_write(fn_lower: str) -> bool:
 
 
 def _collect_file_change_evidence(traj: dict[str, Any]) -> list[str]:
+    """Return newest-first tool arguments and results, not reconstructed files."""
     changes: list[str] = []
     for step in traj.get("steps", []):
         if step.get("source") != "agent":
@@ -332,7 +334,7 @@ def _collect_file_change_evidence(traj: dict[str, Any]) -> list[str]:
             if obs:
                 entry_parts.append(f"Tool returned: {_truncate_for_behavior(obs, 500)}")
             changes.append("\n".join(entry_parts))
-    return changes
+    return list(reversed(changes))
 
 
 def build_behavior_evidence(
@@ -369,6 +371,12 @@ def build_behavior_evidence(
     file_changes = "\n\n".join(_collect_file_change_evidence(traj))
     final = get_final_response(traj)
     history = build_conversation_summary(traj, question)
+    recent_obs = _late_observation_excerpts(traj, _BUNDLE_ITEM_CHARS, include_commands=True)
+    if recent_obs:
+        history = (
+            "RECENT TOOL RESULTS (newest first)\n"
+            + "\n---\n".join(recent_obs[:_BUNDLE_ACCURACY_MAX_OBS]) + "\n\n" + history
+        )
     user_needed = (
         min(800, len(_SECTION_USER_REQUEST) + len(question.strip()) + 2) if question and question.strip() else 0
     )
@@ -781,7 +789,9 @@ def _clip(text: str, limit: int) -> str:
     return text if len(text) <= limit else text[:limit] + " …[clipped]"
 
 
-def _late_observation_excerpts(traj: dict[str, Any], limit: int) -> list[str]:
+def _late_observation_excerpts(
+    traj: dict[str, Any], limit: int, *, include_commands: bool = False
+) -> list[str]:
     """Most-recent tool observations first (end-state evidence), each clipped."""
     out: list[str] = []
     for step in reversed(traj.get("steps", [])):
@@ -790,11 +800,25 @@ def _late_observation_excerpts(traj: dict[str, Any], limit: int) -> list[str]:
         for result in reversed((step.get("observation") or {}).get("results") or []):
             content = atif_content_text(result.get("content")).strip()
             if content:
-                out.append(_clip(content, limit))
+                if not include_commands:
+                    out.append(_clip(content, limit))
+                    continue
+                call_id = result.get("source_call_id")
+                call = next(
+                    (tc for tc in step.get("tool_calls", []) if call_id and tc.get("tool_call_id") == call_id),
+                    None,
+                )
+                context = ""
+                if call:
+                    context = _truncate_for_behavior(
+                        f"\nTool call: {call.get('function_name', 'unknown')} {json.dumps(call.get('arguments', {}))}",
+                        min(600, limit // 2),
+                    )
+                out.append(_truncate_for_behavior(content, limit - len(context)) + context)
     return out
 
 
-def _assemble(sections: list[tuple[str, str]], budget: int) -> tuple[str, int, bool]:
+def _assemble(sections: list[tuple[str, str]], budget: int, *, clip_sections: bool = False) -> tuple[str, int, bool]:
     """Join (title, body) sections under a char budget. Returns (text, dropped, truncated)."""
     parts: list[str] = []
     used = 0
@@ -806,7 +830,7 @@ def _assemble(sections: list[tuple[str, str]], budget: int) -> tuple[str, int, b
         if used + len(block) <= budget:
             parts.append(block)
             used += len(block) + 2
-        elif title == _SECTION_FINAL_RESPONSE and budget - used > 0:
+        elif (title == _SECTION_FINAL_RESPONSE or clip_sections) and budget - used > 0:
             avail = budget - used
             later_blocks = [len(f"{t}\n{b}") + 2 for t, b in non_empty[idx + 1 :]]
             if later_blocks and avail >= 160:
@@ -996,10 +1020,11 @@ def build_metric_evidence_bundles(
     acc_text, acc_drop, acc_trunc = _assemble(
         [
             (_SECTION_FINAL_RESPONSE, final),
-            ("PRODUCED FILES / WRITES", file_changes),
+            ("EDIT ATTEMPTS (newest)", file_changes),
             ("KEY OBSERVATIONS", "\n---\n".join(late_obs[:_BUNDLE_ACCURACY_MAX_OBS])),
         ],
         budgets["accuracy"],
+        clip_sections=True,
     )
     bundles["accuracy"] = {
         "prompt_evidence": _prepend_facts(acc_text or _clip(get_agent_text(traj), budgets["accuracy"])),
@@ -1012,13 +1037,15 @@ def build_metric_evidence_bundles(
         "verified": facts,
     }
 
+    goal_obs = _late_observation_excerpts(traj, _BUNDLE_ITEM_CHARS, include_commands=True)
     goal_text, goal_drop, goal_trunc = _assemble(
         [
             (_SECTION_FINAL_RESPONSE, final),
-            ("END-STATE FILE CHANGES", file_changes),
-            ("RECENT TOOL RESULTS (newest first)", "\n---\n".join(late_obs[:_BUNDLE_GOAL_MAX_OBS])),
+            ("RECENT TOOL RESULTS (newest first)", "\n---\n".join(goal_obs[:_BUNDLE_GOAL_MAX_OBS])),
+            ("EDIT ATTEMPTS (newest)", file_changes),
         ],
         budgets["goal_accuracy"],
+        clip_sections=True,
     )
     bundles["goal_accuracy"] = {
         "prompt_evidence": _prepend_facts(goal_text or _clip(get_agent_text(traj), budgets["goal_accuracy"])),

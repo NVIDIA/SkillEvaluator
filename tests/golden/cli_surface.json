@@ -2075,6 +2075,45 @@
             }
           ]
         },
+        "compare-improvement": {
+          "params": [
+            {
+              "name": "before",
+              "opts": [
+                "before"
+              ],
+              "param_type": "argument",
+              "required": true,
+              "type": "path"
+            },
+            {
+              "name": "after",
+              "opts": [
+                "after"
+              ],
+              "param_type": "argument",
+              "required": true,
+              "type": "path"
+            },
+            {
+              "multiple": true,
+              "name": "outcome_metric",
+              "opts": [
+                "--outcome-metric"
+              ],
+              "param_type": "option",
+              "type": "text"
+            },
+            {
+              "name": "output_dir",
+              "opts": [
+                "--output-dir"
+              ],
+              "param_type": "option",
+              "type": "path"
+            }
+          ]
+        },
         "create-eval-dataset": {
           "params": [
             {
@@ -2554,6 +2593,85 @@
               "param_type": "argument",
               "required": true,
               "type": "directory"
+            }
+          ]
+        },
+        "improve": {
+          "params": [
+            {
+              "name": "skill_path",
+              "opts": [
+                "skill_path"
+              ],
+              "param_type": "argument",
+              "required": true,
+              "type": "directory"
+            },
+            {
+              "name": "result_path",
+              "opts": [
+                "--result"
+              ],
+              "param_type": "option",
+              "required": true,
+              "type": "path"
+            },
+            {
+              "name": "output_dir",
+              "opts": [
+                "--output-dir"
+              ],
+              "param_type": "option",
+              "required": true,
+              "type": "path"
+            },
+            {
+              "choices": [
+                "export",
+                "llm",
+                "deterministic",
+                "agent-command"
+              ],
+              "default": "export",
+              "name": "mode",
+              "opts": [
+                "--mode"
+              ],
+              "param_type": "option"
+            },
+            {
+              "name": "edits_path",
+              "opts": [
+                "--edits"
+              ],
+              "param_type": "option",
+              "type": "file"
+            },
+            {
+              "name": "model",
+              "opts": [
+                "--model"
+              ],
+              "param_type": "option",
+              "type": "text"
+            },
+            {
+              "default": "False",
+              "is_flag": true,
+              "name": "include_agent_observations",
+              "opts": [
+                "--include-agent-observations"
+              ],
+              "param_type": "option",
+              "type": "boolean"
+            },
+            {
+              "name": "agent_command",
+              "opts": [
+                "--agent-command"
+              ],
+              "param_type": "option",
+              "type": "text"
             }
           ]
         },

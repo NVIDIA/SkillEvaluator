@@ -6,6 +6,14 @@ All notable changes to SkillEvaluator are documented in this file.
 
 ### Added
 
+- Native OpenClaw plugin manifests (`openclaw.plugin.json`) are detected across
+  the plugin workflows. Tier 1 checks `id`, `configSchema`, declared skill roots
+  and native package entrypoint boundaries; Tier 2 compares the declared skills;
+  Tier 3 can evaluate portable skills and supported MCP declarations through the
+  existing harnesses. Reports retain explicit unsupported OpenClaw runtime
+  coverage instead of claiming tools, hooks, channels or providers were loaded.
+  No OpenClaw Gateway runtime adapter is included.
+
 - `--quality-config PATH` on `validate`, `quality-check`, and `tier1` loads the
   deterministic quality check's expected Markdown headings from a YAML file
   instead of the built-in list. Each `expected_headers` entry sets a `heading`

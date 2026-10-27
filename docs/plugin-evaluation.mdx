@@ -30,7 +30,7 @@ Each tier answers a different question about the plugin:
 
 ```mermaid
 flowchart LR
-    P(["Plugin root<br/>agent_plugin.yaml, a Claude, Codex,<br/>or Cursor plugin.json, or an<br/>Agent Plugins plugin.json"])
+    P(["Plugin root<br/>agent_plugin.yaml, a Claude, Codex,<br/>or Cursor plugin.json, an<br/>Agent Plugins plugin.json,<br/>or openclaw.plugin.json"])
 
     subgraph T1["Tier 1: static, offline, gating"]
         direction TB
@@ -130,6 +130,7 @@ than one exists, the first one in this order is the **selected** manifest:
 | 4 | `plugin.json` at the root | `agent_plugins_v1` | [Agent Plugins v1](#agent-plugins-v1-manifest-pluginjson) |
 | 5 | `.codex-plugin/plugin.json` | `codex_plugin_json` | [Codex](#codex-manifest-codex-pluginpluginjson) |
 | 6 | `.cursor-plugin/plugin.json` | `cursor_plugin_json` | [Cursor](#cursor-manifest-cursor-pluginpluginjson) |
+| 7 | `openclaw.plugin.json` at the root | `openclaw_plugin_json` | [OpenClaw](#openclaw-manifest-openclawpluginjson) |
 
 A root `plugin.json` is an Agent Plugins manifest only when it declares an
 `https://agent-plugins.org/schemas/<version>/plugin.schema.json` `$schema`, the
@@ -245,6 +246,72 @@ declaration**:
   and keeps one `plugin.hook_risk` row, whose `risk_flags` hold the flags of
   both (for example `context_injection` on a `SubagentStart` handler that only
   Codex feeds to the model).
+
+### OpenClaw manifest: `openclaw.plugin.json`
+
+Native [OpenClaw plugins](https://docs.openclaw.ai/plugins/manifest) are
+recognized without renaming or converting their manifests. The root or the
+manifest path can be passed to the usual commands:
+
+```bash
+skillevaluator validate ./my-openclaw-plugin --tiers 1
+skillevaluator tier2 ./my-openclaw-plugin --catalog ./catalog.json
+skillevaluator tier3 evaluate-plugin ./my-openclaw-plugin --plugin-load wrapper
+```
+
+```json title="openclaw.plugin.json"
+{
+  "id": "release-helper",
+  "name": "Release Helper",
+  "description": "Portable guidance for preparing a release.",
+  "configSchema": { "type": "object", "additionalProperties": false },
+  "skills": ["./skills"]
+}
+```
+
+- `id` is the required stable identity, including in catalog entries, reports,
+  multi-manifest conflict checks and the generated evaluation package. `name`
+  is an optional display label, not an alternative to `id`. `configSchema`
+  must be an object; this check does not instantiate plugin configuration or
+  resolve JSON Schema references. Additional OpenClaw metadata is allowed.
+- Only `skills` roots explicitly declared in the manifest are evaluated as
+  OpenClaw members. Omitting the field or using `[]` does not enable an
+  implicit `skills/` directory. Declared roots may contain a `SKILL.md`
+  directly, or nested skills; discovery stops below a skill's own `SKILL.md`.
+  Dot-prefixed child directories and `node_modules` are not descended into;
+  an explicitly declared root itself may still have one of those names. The
+  normal bounded, contained, no-follow path checks and bundled-skill gates apply. Another client's default folders can still appear as static-only
+  cross-client inventory, but do not become OpenClaw members.
+- Inline `mcpServers` receive the shared static policy and portable staging
+  checks. This does not reproduce OpenClaw's enablement, operator overrides,
+  MCP App rendering or tool policy. OpenClaw stdio servers remain unsupported
+  in Tier 3 because their plugin-root working directory cannot be preserved by
+  the existing adapters; it is never silently dropped. Explicitly disabled
+  servers are not staged. Portable URL servers can use the existing MCP path,
+  subject to its configuration and coverage limits. Canonical `transport` wins
+  over legacy `type`, `streamable-http` maps to Harbor HTTP, and a URL server
+  without a transport retains OpenClaw's SSE default. Host-only auth, TLS and
+  other options are named as unapplied gaps and make the run partial. Effective
+  `sslVerify: false` (including its legacy alias) and literal enterprise client
+  secrets block static validation and staging. Unsupported host metadata and
+  configuration defaults are not forwarded into the generated wrapper manifest.
+- Native entrypoint paths in
+  [`package.json#openclaw`](https://docs.openclaw.ai/plugins/manifest/package-json)
+  (`extensions`, `runtimeExtensions`, `setupEntry`, `runtimeSetupEntry`) are
+  inventoried and boundary-checked without importing, installing or running
+  plugin code. Runtime registrations (tools, hooks, channels, providers and
+  services), configuration behavior and `requiresPlugins` resolution are **not
+  evaluated**. Every native OpenClaw manifest retains an unsupported
+  **OpenClaw runtime** coverage row, even if it has portable skills or no
+  declared entrypoints. A portable-skill result cannot certify runtime behavior.
+- There is no native OpenClaw Harbor agent adapter in this change.
+  `--plugin-load native` refers to the existing Claude Code, Codex or OpenCode
+  adapters, not an OpenClaw Gateway. Tier 3 with a dataset evaluates the
+  portable members and records missing runtime coverage; runtime-only plugins
+  without evaluable portable components are skipped explicitly, not passed.
+- SkillEvaluator currently accepts bounded UTF-8 **JSON**, not OpenClaw's
+  additional JSON5 syntax. It does not validate all evolving OpenClaw
+  metadata or reproduce host-version, activation and configuration checks.
 
 ### Bundle-reference manifest: `agent_plugin.yaml`
 
@@ -572,7 +639,10 @@ ignored.
 | `lsp`, `output_style`, `monitor`, `settings` | Yes | None | None | None | `unsupported` |
 
 "A or B" means a declared field replaces the default location; "A + B" means
-both are read.
+both are read. Native OpenClaw has no implicit skill or MCP folders: it reads
+only declared `skills` and inline `mcpServers`; native runtime contributions
+remain unsupported `extension` inventory. See the
+[OpenClaw format](#openclaw-manifest-openclawpluginjson) for its boundaries.
 
 Every declared skill folder gets the same skill schema checks as the skills in
 `skills/`. When a format's declared `skills` replace `skills/` (Cursor, and

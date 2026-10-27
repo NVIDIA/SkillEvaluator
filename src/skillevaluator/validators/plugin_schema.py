@@ -55,6 +55,7 @@ from skillevaluator.constants import (
     PLUGIN_MANIFEST_RELATIVE_PATHS,
     PLUGIN_MODE,
     PLUGIN_NAME_MAX_REPORT_CHARS,
+    PLUGIN_OPENCLAW_MANIFEST_TYPE,
 )
 from skillevaluator.logging_config import get_logger
 from skillevaluator.models.plugin import PluginManifest
@@ -63,6 +64,7 @@ from skillevaluator.plugin_formats import (
     DEFAULT_SKILLS_DIR,
     agent_plugins_schema_version,
     declared_value_replaces_default,
+    manifest_identity,
     manifest_syntax,
     normalized_component_manifest,
     parse_manifest_text,
@@ -1184,7 +1186,7 @@ class PluginSchemaValidator(ValidatorBase):
             suggestion=f"Fix the reported {location.manifest_filename} field problems, then rerun validation.",
         )
         plugin_meta = result.metadata.setdefault("plugin", {})
-        name = data.get("name")
+        name = manifest_identity(location.manifest_type, data)
         if isinstance(name, str) and name.strip():
             plugin_meta["name"] = name.strip()[:PLUGIN_NAME_MAX_REPORT_CHARS]
             result.add_message(f"Plugin name: {plugin_meta['name']}")
@@ -1446,7 +1448,7 @@ class PluginSchemaValidator(ValidatorBase):
             "manifest_filename": manifest_filename,
             "selected": selected,
             "status": "selected" if selected else "parsed",
-            "name": _field("name"),
+            "name": _field("id" if manifest_type == PLUGIN_OPENCLAW_MANIFEST_TYPE else "name"),
             "version": _field("version"),
         }
         spec_version = agent_plugins_schema_version(data.get("$schema")) if isinstance(data, dict) else None
@@ -1468,7 +1470,7 @@ class PluginSchemaValidator(ValidatorBase):
 
         profile = profile_for(manifest_type)
         value = (normalized_component_manifest(manifest_type, data) or {}).get("skills")
-        if not declared_value_replaces_default(profile, "skills", value):
+        if not profile.explicit_skills_only and not declared_value_replaces_default(profile, "skills", value):
             return None
         for raw in value if isinstance(value, list) else [value]:
             if isinstance(raw, str):

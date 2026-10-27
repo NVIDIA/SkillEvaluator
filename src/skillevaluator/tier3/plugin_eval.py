@@ -75,6 +75,7 @@ from skillevaluator.constants import (
     PLUGIN_CURSOR_MANIFEST_TYPE,
     PLUGIN_MANIFEST_RELATIVE_PATHS,
     PLUGIN_NAME_MAX_REPORT_CHARS,
+    PLUGIN_OPENCLAW_MANIFEST_TYPE,
     SCAN_EXCLUDED_DIRS,
 )
 from skillevaluator.models.result import Severity
@@ -113,10 +114,12 @@ from skillevaluator.plugin_dependencies import ref_name as _ref_name
 from skillevaluator.plugin_dependencies import ref_source as _ref_source
 from skillevaluator.plugin_formats import (
     CLAUDE_PROFILE,
+    manifest_identity,
     manifest_syntax,
     normalized_component_manifest,
     parse_manifest_text,
     profile_for,
+    validate_manifest_fields,
 )
 from skillevaluator.plugin_mcp import mcp_pinning_summary
 from skillevaluator.publication_identity import publication_target_from_path
@@ -622,7 +625,13 @@ def _locate_plugin(plugin_path: Path, *, allowed_private_hosts: tuple[str, ...] 
     location = _manifest_location(plugin_path)
     manifest_text = location.read_text()
     manifest = _load_manifest_text(manifest_text, location.path, location.manifest_type)
-    name = _plugin_name(manifest, location.root)
+    if location.manifest_type == PLUGIN_OPENCLAW_MANIFEST_TYPE:
+        errors = [
+            issue for issue in validate_manifest_fields(location.manifest_type, manifest) if issue.level == "error"
+        ]
+        if errors:
+            raise ValueError(f"Invalid OpenClaw manifest: {errors[0].message}")
+    name = _plugin_name(manifest, location.root, manifest_type=location.manifest_type)
     description = _plugin_description(manifest, name)
     inventory = build_plugin_inventory(
         location.secure_file.root,
@@ -649,7 +658,7 @@ def _resolve_member_skills(
     treated as paths.
     """
     contained_skills = (
-        _inventory_skill_dirs(plugin.inventory, plugin.plugin_root)
+        _inventory_skill_dirs(plugin.inventory, plugin.plugin_root, allow_root=plugin.profile.explicit_skills_only)
         if plugin.stage_from_inventory
         else tuple(path.resolve() for path in find_bundled_plugin_skills(plugin.plugin_dir))
     )
@@ -778,7 +787,11 @@ def _stage_package_files(
     _stage_agent_plugin_manifest(
         package_path / "agent_plugin.yaml",
         plugin.manifest_text,
-        plugin.manifest,
+        # Unsupported host metadata is not needed by a portable wrapper and
+        # must not leak config defaults or future credential fields to agents.
+        {"name": plugin.name, "description": plugin.description}
+        if plugin.location.manifest_type == PLUGIN_OPENCLAW_MANIFEST_TYPE
+        else plugin.manifest,
         contained_form=plugin.contained,
     )
     _write_plugin_skill_md(
@@ -1117,6 +1130,12 @@ def _other_type_row(component: Component, staging: _ArmStaging | None, agents: S
     from skillevaluator.plugin_components import is_skill_frontmatter_hook
 
     kind = component.type
+    if kind == "extension" and (component.name == "OpenClaw runtime" or component.name.startswith("openclaw.")):
+        return coverage_row(
+            component,
+            "unsupported",
+            "OpenClaw runtime is not loaded: native tools, hooks, channels, providers and services are inventoried only; this run evaluates portable components, not OpenClaw behavior",
+        )
     if is_skill_frontmatter_hook(component):
         others = [agent for agent in agents if agent != "claude-code"]
         ignored = f"{', '.join(others)} {'ignores' if len(others) == 1 else 'ignore'} them"
@@ -1309,7 +1328,7 @@ def _skill_row(
     *member_names* are the directory names exactly one staged member skill has; a
     resolved ref or a nested bundled skill records its staged name only when it is one.
     """
-    if component.path == ".":
+    if component.path == "." and plugin_root.resolve() not in member_skills:
         return coverage_row(
             component,
             "not_staged",
@@ -1328,7 +1347,7 @@ def _skill_row(
         )
     if (plugin_root / component.path).resolve() in member_skills:
         # A nested skill (``skills/release/notes-writer``) is staged, loaded, and activated by its directory name.
-        member = PurePosixPath(component.path).name
+        member = plugin_root.name if component.path == "." else PurePosixPath(component.path).name
         return coverage_row(
             component,
             "staged",
@@ -1398,6 +1417,8 @@ def _mcp_coverage_row(component: Component, contained: bool, mcp: _McpCoverage) 
             reason += (
                 "; its env/headers or ${user_config.*} values are not applied by the runtime (run reported INCOMPLETE)"
             )
+            if gaps := mcp.split.gaps.get(component.name):
+                reason += "; unapplied configuration: " + ", ".join(gaps)
         return coverage_row(component, "staged", reason)
     if mcp.plugin_file_agents and component.name in mcp.split.plugin_file_names:
         reason = (
@@ -1539,17 +1560,19 @@ def write_plugin_provenance(run_dir: Path, provenance: dict[str, Any]) -> Path |
         return None
 
 
-def _stageable_component(component: Component, component_type: str) -> bool:
+def _stageable_component(component: Component, component_type: str, *, allow_root: bool = False) -> bool:
     return (
         component.type == component_type
         and component.support == "evaluated"
         and component.problem is None
         and component.declared_by is None
-        and component.path not in {None, "", "."}
+        and component.path not in ({None, ""} if allow_root else {None, "", "."})
     )
 
 
-def _inventory_skill_dirs(inventory: PluginInventory, plugin_root: Path) -> tuple[Path, ...]:
+def _inventory_skill_dirs(
+    inventory: PluginInventory, plugin_root: Path, *, allow_root: bool = False
+) -> tuple[Path, ...]:
     """Skill directories the selected manifest declares or packages (newer formats).
 
     The inventory classified every path without following links, so each
@@ -1559,7 +1582,7 @@ def _inventory_skill_dirs(inventory: PluginInventory, plugin_root: Path) -> tupl
         dict.fromkeys(
             (plugin_root / component.path).resolve()
             for component in inventory.components
-            if _stageable_component(component, "skill") and component.path
+            if _stageable_component(component, "skill", allow_root=allow_root) and component.path
         )
     )
 
@@ -1606,10 +1629,10 @@ def _load_manifest_text(raw_text: str, manifest_path: Path, manifest_type: str) 
     return data
 
 
-def _plugin_name(manifest: dict[str, Any], plugin_dir: Path) -> str:
+def _plugin_name(manifest: dict[str, Any], plugin_dir: Path, *, manifest_type: str = "") -> str:
     """The plugin's own name. Plugin names are not skill names: Claude Code sets no length limit and Codex loads
     long names, so Tier 1 passes them and this bound is the report bound, not the 64-character skill limit."""
-    raw_name = manifest.get("name")
+    raw_name = manifest_identity(manifest_type, manifest)
     if raw_name is None or (isinstance(raw_name, str) and not raw_name.strip()):
         raw_name = plugin_dir.name
     return require_bounded_string(raw_name, "Plugin manifest name", max_chars=PLUGIN_NAME_MAX_REPORT_CHARS).strip()
@@ -2330,6 +2353,8 @@ def _normalize_mcp_entries(
             continue
         # Validated above: the effective declarations are some of the stageable ones.
         config = declaration.config
+        if manifest_type == PLUGIN_OPENCLAW_MANIFEST_TYPE and config.get("enabled") is False:
+            continue  # OpenClaw does not run an explicitly disabled server.
         entry: dict[str, Any] = {"name": declaration.name.strip()}
         # env/headers are declared config the eval runtime cannot apply (Harbor's
         # per-server MCPServerConfig has no such field). Record their presence so a

@@ -176,7 +176,8 @@ Content types (--type):
   workflows  workflow-rules.mdc in a workflow directory
   plugin     Bundle-reference manifest (agent_plugin.yaml/.yml) or
              contained plugin (.claude-plugin/, .codex-plugin/, or
-             .cursor-plugin/plugin.json, or an Agent Plugins root plugin.json)
+             .cursor-plugin/plugin.json, an Agent Plugins root plugin.json,
+             or a native OpenClaw openclaw.plugin.json)
 
 Report formats (-r/--report):
   cli        Rich terminal output (default)
@@ -491,9 +492,7 @@ def _resolve_report_output_location(target_path: Path, output_dir: Path) -> Path
             if output_is_real_directory and is_generated_output_root(output_dir):
                 return output_dir
         except (OSError, RuntimeError, ValueError) as exc:
-            raise click.ClickException(
-                f"Cannot safely reserve default report output directory: {output_dir}"
-            ) from exc
+            raise click.ClickException(f"Cannot safely reserve default report output directory: {output_dir}") from exc
 
     if output_is_default:
         relocated = target_path.with_name(f"{target_path.name}-reports")
@@ -536,8 +535,7 @@ def _reject_copy_repo_root_output(
     try:
         context_roots = [(resolve_repo_context_root(target_path), "repository root")]
         context_roots.extend(
-            (included_skill.resolve(strict=True), "runtime source root")
-            for included_skill in include_skills
+            (included_skill.resolve(strict=True), "runtime source root") for included_skill in include_skills
         )
     except (OSError, RuntimeError, ValueError) as exc:
         raise click.ClickException(f"Cannot validate {mode_label} report output directory: {output_dir}") from exc
@@ -2409,6 +2407,7 @@ def _resolve_validate_target(
         CONTENT_TYPE_UNKNOWN,
         PLUGIN_CONTAINED_MANIFEST_FILE,
         PLUGIN_MANIFEST_FILES,
+        PLUGIN_OPENCLAW_MANIFEST_FILE,
         RULES_FILE_EXTENSION,
         SKILL_MANIFEST_VARIANTS,
     )
@@ -2420,7 +2419,7 @@ def _resolve_validate_target(
             target_path.name in SKILL_MANIFEST_VARIANTS
             or target_path.name in PLUGIN_MANIFEST_FILES
             # Any plugin.json: vendor-directory manifests and the Agent Plugins root manifest.
-            or target_path.name == PLUGIN_CONTAINED_MANIFEST_FILE
+            or target_path.name.casefold() in {PLUGIN_CONTAINED_MANIFEST_FILE, PLUGIN_OPENCLAW_MANIFEST_FILE}
             or target_path.suffix == RULES_FILE_EXTENSION
         )
         if names_selected_manifest or not tier1_only or not target_path.is_dir():
@@ -2964,7 +2963,8 @@ def validate(
 
     A plugin (a bundle-reference ``agent_plugin.yaml``/``.yml`` manifest, or a
     contained ``.claude-plugin/``, ``.codex-plugin/``, or ``.cursor-plugin/``
-    ``plugin.json`` or Agent Plugins root ``plugin.json``) is auto-detected and
+    ``plugin.json``, Agent Plugins root ``plugin.json``, or native OpenClaw
+    ``openclaw.plugin.json``) is auto-detected and
     validated against its public contract; quality/lint/version checks run on
     each skill bundled under the plugin's ``skills/`` directory.
     """

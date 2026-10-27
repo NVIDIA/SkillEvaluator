@@ -52,6 +52,7 @@ from skillevaluator.constants import (
     PLUGIN_CURSOR_MANIFEST_TYPE,
     PLUGIN_MANIFEST_RELATIVE_PATHS,
     PLUGIN_MANIFEST_TYPE,
+    PLUGIN_OPENCLAW_MANIFEST_TYPE,
     PLUGIN_TREE_MAX_DISCOVERED_PATHS,
     SCAN_ARTIFACT_DIRS,
     SCAN_EXCLUDED_DIRS,
@@ -1134,9 +1135,71 @@ class _Builder:
         self.apps()
         self.extensions()
         self.openai_extension()
+        self.openclaw_runtime()
         self.env_files()
         self.finish_costs()
         return self.inventory
+
+    def openclaw_runtime(self) -> None:
+        """Inventory native entrypoints, never import them or translate them to MCP.
+
+        A manifest alone cannot enumerate dynamic registrations. Keep an
+        unsupported runtime row even when there are no package entrypoints,
+        so portable skill coverage cannot certify the whole OpenClaw plugin.
+        """
+        if self.profile.manifest_type != PLUGIN_OPENCLAW_MANIFEST_TYPE:
+            return
+        self._add(Component("extension", "OpenClaw runtime", "declared", self.manifest_rel, "unsupported"))
+        self.inventory.notes.append(
+            "OpenClaw runtime tools, hooks, channels, providers, services, config behavior and required plugins "
+            "are not loaded or verified; only portable skills and supported static MCP declarations are evaluated."
+        )
+        package_path = PurePosixPath("package.json")
+        if self.reader.kind(package_path) == "missing":
+            return
+        package = self._load_json(package_path, "OpenClaw package metadata")
+        metadata = package.get("openclaw") if isinstance(package, dict) else None
+        if metadata is None:
+            return
+        if not isinstance(metadata, dict):
+            self.inventory.findings.append(
+                _plugin_finding(
+                    Severity.HIGH,
+                    "plugin_openclaw_package_invalid",
+                    "package.json#openclaw must be an object",
+                    self.reader.display(package_path),
+                    "Use an object containing plugin-relative entrypoint paths.",
+                )
+            )
+            return
+        for field_name in ("extensions", "runtimeExtensions", "setupEntry", "runtimeSetupEntry"):
+            if field_name not in metadata:
+                continue
+            value = metadata[field_name]
+            array_field = field_name in {"extensions", "runtimeExtensions"}
+            if (array_field and not isinstance(value, list)) or (not array_field and not isinstance(value, str)):
+                self.inventory.findings.append(
+                    _plugin_finding(
+                        Severity.HIGH,
+                        "plugin_openclaw_package_invalid",
+                        f"openclaw.{field_name} must be {'an array' if array_field else 'a string'}",
+                        self.reader.display(package_path),
+                        "Declare an array of contained entrypoint paths.",
+                    )
+                )
+                continue
+            for raw in self._declared_values(field_name, value):
+                resolved = self._resolve_component("extension", f"openclaw.{field_name}", raw, kinds=("file",))
+                if resolved is not None:
+                    self._add(
+                        Component(
+                            "extension",
+                            f"openclaw.{field_name}: {raw}",
+                            "declared",
+                            resolved.rel.as_posix(),
+                            "unsupported",
+                        )
+                    )
 
     # -- inventory bookkeeping --------------------------------------------- #
     @property
@@ -1517,6 +1580,34 @@ class _Builder:
         declared_default = False
         declared_value = self.manifest.get("skills") if self.manifest is not None else None
         default_dir = PurePosixPath(DEFAULT_SKILLS_DIR)
+        if self.profile.explicit_skills_only:
+            from skillevaluator.plugin_skills import discover_openclaw_skill_manifests
+
+            roots = []
+            for raw in self._declared_values("skills", declared_value):
+                resolved = self._resolve_component("skill", "skills", raw, kinds=("dir",))
+                if resolved is not None:
+                    roots.append(resolved.rel.as_posix())
+            try:
+                manifests = discover_openclaw_skill_manifests(self.reader.root, {"skills": roots})
+            except (ValueError, SecurePathError) as exc:
+                self.inventory.findings.append(
+                    _plugin_finding(
+                        Severity.HIGH,
+                        "plugin_component_path_unsafe",
+                        f"OpenClaw skill discovery failed closed: {exc}",
+                        self.manifest_display,
+                        "Use regular contained skill roots within the discovery bounds.",
+                    )
+                )
+                return
+            self._check_item_count("OpenClaw member skills", len(manifests))
+            for manifest in manifests[:PLUGIN_COMPONENT_MAX_ITEMS]:
+                folder = manifest.relative_path.parent
+                name = folder.name or self.reader.root.name
+                component = self._add(Component("skill", name, "declared", folder.as_posix(), "evaluated"))
+                self._skill_cost(component, PurePosixPath(manifest.relative_path.as_posix()))
+            return
         if self.contained and self.manifest is not None:
             for raw in self._declared_values("skills", declared_value):
                 resolved = self._resolve_component("skill", "skills", raw, kinds=("dir",))

@@ -536,7 +536,7 @@ def _unscanned_server_files(
         return []
     seen: set[str] = set()
     findings: list[Finding] = []
-    for rel, is_cwd in _server_launch_files(config, relative_cwd=profile.mcp_dialect == "codex"):
+    for rel, is_cwd in _server_launch_files(config, relative_cwd=profile.mcp_dialect in {"codex", "openclaw"}):
         folder = _unscanned_folder(rel)
         if folder is None or rel.as_posix() in seen:
             continue
@@ -603,6 +603,60 @@ def _normalize_dialect(
         if not isinstance(config, dict):
             continue
         normalized = dict(config)
+        if profile.mcp_dialect == "openclaw":
+            # Native OpenClaw stdio servers launch from the plugin root, even
+            # when cwd is omitted. Harbor cannot preserve that working dir;
+            # retain it so existing staging refuses rather than runs elsewhere.
+            if normalized.get("command"):
+                normalized["cwd"] = normalized.get("cwd", normalized.get("workingDirectory", "."))
+            elif "workingDirectory" in normalized:
+                normalized["cwd"] = normalized["workingDirectory"]
+            # A command wins over HTTP aliases. For URL servers the canonical
+            # transport wins over legacy type; OpenClaw defaults to SSE.
+            transport = config.get("transport")
+            legacy = config.get("type")
+            effective = transport if isinstance(transport, str) and transport.strip() else legacy
+            if isinstance(effective, str):
+                effective = effective.strip().lower()
+            normalized["transport"] = (
+                "stdio"
+                if config.get("command")
+                else "http"
+                if effective == "streamable-http" or (not transport and effective == "http")
+                else effective or "sse"
+            )
+            normalized.pop("type", None)
+            if (
+                not config.get("command")
+                and isinstance(transport, str)
+                and transport.strip().lower() not in {"sse", "streamable-http", ""}
+            ):
+                collection.findings.append(
+                    _plugin_finding(
+                        Severity.HIGH,
+                        "mcp_transport_invalid",
+                        f"OpenClaw MCP server '{declaration.name}' has an unsupported canonical transport",
+                        reader.display(declaration.file),
+                        "Use transport: sse or streamable-http for a URL server.",
+                        category=MCP_CATEGORY,
+                        metadata={"mcp_server": declaration.name},
+                    )
+                )
+            # Do not silently discard host-specific auth/TLS/tool policy or
+            # future fields. Presence matters: sslVerify=false is meaningful.
+            portable = {
+                "command",
+                "args",
+                "url",
+                "transport",
+                "type",
+                "env",
+                "headers",
+                "cwd",
+                "workingDirectory",
+                "enabled",
+            }
+            declaration.unapplied = tuple(sorted(key for key in config if key not in portable))
         raw_type = normalized.get("type")
         if isinstance(raw_type, str) and raw_type.strip() in _HTTP_TYPE_ALIASES:
             normalized["type"] = "http"

@@ -1,0 +1,102 @@
+name: Build and publish Tier 1 image
+
+on:
+  pull_request:
+    paths:
+      - ci/**
+      - src/skillevaluator/**
+      - pyproject.toml
+      - uv.lock
+      - .dockerignore
+      - .github/workflows/publish-tier1-image.yml
+  workflow_dispatch:
+    inputs:
+      publish:
+        description: Publish the reviewed main revision to the official GHCR package
+        type: boolean
+        default: false
+
+permissions:
+  contents: read
+
+jobs:
+  verify:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 40
+    steps:
+      - uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0
+        with:
+          persist-credentials: false
+      - name: Build the complete Tier 1 runtime
+        run: docker build -f ci/Dockerfile.tier1 -t skillevaluator-tier1:verify .
+      - name: Exercise real scans and changed-skill selection
+        run: python3 ci/smoke_image.py --image skillevaluator-tier1:verify --output "$RUNNER_TEMP/image-verification"
+      - name: Retain integration evidence
+        if: always()
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02
+        with:
+          name: tier1-image-verification
+          path: ${{ runner.temp }}/image-verification
+          if-no-files-found: error
+          retention-days: 14
+
+  publish:
+    needs: verify
+    if: >-
+      github.event_name == 'workflow_dispatch' && inputs.publish &&
+      github.repository == 'NVIDIA/SkillEvaluator' && github.ref == 'refs/heads/main'
+    runs-on: ubuntu-24.04
+    timeout-minutes: 40
+    permissions:
+      contents: read
+      packages: write
+    env:
+      IMAGE: ghcr.io/nvidia/skillevaluator-tier1
+    steps:
+      - uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0
+        with:
+          persist-credentials: false
+      - name: Build the reviewed release revision
+        run: |
+          docker build -f ci/Dockerfile.tier1 \
+            --label org.opencontainers.image.source=https://github.com/NVIDIA/SkillEvaluator \
+            --label org.opencontainers.image.revision="$GITHUB_SHA" \
+            --label org.opencontainers.image.description='SkillEvaluator complete Tier 1 CI runtime' \
+            -t "$IMAGE:sha-$GITHUB_SHA" .
+      - name: Verify the exact image being published
+        run: python3 ci/smoke_image.py --image "$IMAGE:sha-$GITHUB_SHA" --output "$RUNNER_TEMP/release-verification"
+      - name: Publish the immutable revision
+        env:
+          GHCR_TOKEN: ${{ github.token }}
+        run: |
+          export DOCKER_CONFIG="$RUNNER_TEMP/publish-docker-config"
+          mkdir -p "$DOCKER_CONFIG"
+          trap 'docker logout ghcr.io >/dev/null 2>&1 || true' EXIT
+          printf '%s' "$GHCR_TOKEN" | docker login ghcr.io -u "$GITHUB_ACTOR" --password-stdin
+          docker push "$IMAGE:sha-$GITHUB_SHA"
+          docker inspect --format='{{index .RepoDigests 0}}' "$IMAGE:sha-$GITHUB_SHA" > "$RUNNER_TEMP/image-digest.txt"
+      - name: Verify anonymous access and prepare onboarding files
+        run: |
+          image_digest="$(cat "$RUNNER_TEMP/image-digest.txt")"
+          mkdir -p "$RUNNER_TEMP/anonymous-docker-config"
+          # First publication is private until a package maintainer changes its visibility.
+          # Do not announce consumer onboarding until an unauthenticated pull succeeds.
+          docker --config "$RUNNER_TEMP/anonymous-docker-config" pull "$image_digest"
+          python3 ci/render_templates.py --workflow-ref "$GITHUB_SHA" \
+            --image "$image_digest" --output "$RUNNER_TEMP/onboarding"
+          printf 'Published image: %s. Download **github-actions-onboarding** for pinned consumer workflows.\n' \
+            "$image_digest" >> "$GITHUB_STEP_SUMMARY"
+      - name: Upload pinned onboarding templates
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02
+        with:
+          name: github-actions-onboarding
+          path: ${{ runner.temp }}/onboarding
+          if-no-files-found: error
+          retention-days: 90
+      - name: Retain release verification evidence
+        if: always()
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02
+        with:
+          name: tier1-release-verification
+          path: ${{ runner.temp }}/release-verification
+          retention-days: 30

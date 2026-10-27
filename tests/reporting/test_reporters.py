@@ -1085,6 +1085,14 @@ class TestGatingSplit:
         assert gating["blocking"]["high"] == 1
         assert gating["would_block"] is True
 
+    def test_tier1_report_does_not_claim_combined_tier_policy(self) -> None:
+        output = HTMLReporter(include_timestamp=False).render_all([_failed_result("Security Scan")])
+
+        assert "Blocking (Tier 1 + Tier 2)" not in output
+        assert "Advisory (Tier 3 agent-eval)" not in output
+        assert "Tier 2 · Not run" in output
+        assert "Tier 3 · Not run" in output
+
     def test_tier3_failure_remains_advisory(self) -> None:
         output = HTMLReporter(include_timestamp=False).render_all([_failed_result("AGENT_EVAL")])
 

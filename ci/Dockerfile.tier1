@@ -1,0 +1,44 @@
+# Complete Tier 1 runtime for reusable GitHub Actions scans.
+FROM python:3.12-slim-bookworm
+
+ARG SKILLSPECTOR_COMMIT=c7958a3268d9498644b22edb75d0f051bbc8cbfc
+ENV PIP_NO_INPUT=1 PYTHONDONTWRITEBYTECODE=1 PYTHONUNBUFFERED=1 \
+    PYTHON_DOTENV_DISABLED=1 SEMGREP_SEND_METRICS=off SEMGREP_ENABLE_VERSION_CHECK=0 \
+    HOME=/tmp/evaluator-home
+
+RUN apt-get update && apt-get install -y --no-install-recommends ca-certificates curl git \
+    && rm -rf /var/lib/apt/lists/*
+RUN python -m pip install --no-cache-dir uv==0.11.27
+
+WORKDIR /opt/skillevaluator
+COPY . .
+RUN uv sync --frozen --no-dev --no-editable --extra security --extra llm
+
+# Independent environments avoid conflicting scanner dependency requirements.
+RUN uv venv /opt/semgrep && uv pip install --python /opt/semgrep/bin/python semgrep==1.182.0
+RUN uv venv /opt/skillspector && uv pip install --python /opt/skillspector/bin/python \
+    "git+https://github.com/NVIDIA/SkillSpector.git@${SKILLSPECTOR_COMMIT}"
+RUN set -eu; arch="$(dpkg --print-architecture)"; \
+    case "$arch" in \
+      amd64) asset=x64; checksum=79a3ab579b53f71efd634f3aaf7e04a0fa0cf206b7ed434638d1547a2470a66e ;; \
+      arm64) asset=arm64; checksum=b4cbbb6ddf7d1b2a603088cd03a4e3f7ce48ee7fd449b51f7de6ee2906f5fa2f ;; \
+      *) exit 1 ;; \
+    esac; \
+    curl --fail --location --retry 3 "https://github.com/gitleaks/gitleaks/releases/download/v8.30.0/gitleaks_8.30.0_linux_${asset}.tar.gz" -o /tmp/gitleaks.tar.gz; \
+    printf '%s  %s\n' "$checksum" /tmp/gitleaks.tar.gz | sha256sum --check; \
+    tar -xzf /tmp/gitleaks.tar.gz -C /usr/local/bin gitleaks; \
+    mkdir -p /usr/local/share/licenses/gitleaks; \
+    tar -xzf /tmp/gitleaks.tar.gz -C /usr/local/share/licenses/gitleaks LICENSE; \
+    rm /tmp/gitleaks.tar.gz
+
+ENV PATH="/opt/skillevaluator/.venv/bin:/opt/semgrep/bin:/opt/skillspector/bin:${PATH}"
+RUN skillevaluator --version && bandit --version && pip-audit --version \
+    && semgrep --version && skillspector --version && gitleaks version \
+    && /opt/skillspector/bin/python -c 'import yara'
+RUN useradd --uid 10001 --create-home --shell /usr/sbin/nologin evaluator \
+    && rm -rf /tmp/evaluator-home \
+    && mkdir -p /workspace /reports /tmp/evaluator-home \
+    && chown evaluator:evaluator /reports /tmp/evaluator-home
+USER evaluator
+WORKDIR /workspace
+ENTRYPOINT ["python", "/opt/skillevaluator/ci/run_tier1.py"]

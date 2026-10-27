@@ -159,6 +159,8 @@ SkillEvaluator release or commit. See [CITATION.cff](CITATION.cff).
 See [the documentation](https://docs.nvidia.com/skills/skillevaluator/) for
 setup, tier guides, reports, CI integration, CLI reference, and
 [performance dashboard](docs/reports.mdx#performance-dashboard).
+For the proposed reusable GitHub CI onboarding, see
+[GitHub Actions](docs/github-actions.mdx).
 
 ## Installation and third-party software
 

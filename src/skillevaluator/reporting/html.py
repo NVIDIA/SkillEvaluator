@@ -1280,6 +1280,63 @@ class PackageLoader(BaseLoader):
         return source, template, lambda: True
 
 
+def _detail_display_status(detail: Any) -> str:
+    """Recognize explicit producer evidence that a check was inapplicable."""
+    evidence = {
+        "version_optional": None,
+        "lint": "No scripts/ or tools/ directory found",
+        "code_file_discovery": "No code files found - code risk analysis is not applicable",
+        "dependency_file_discovery": "No dependency files found - vulnerability audit is not applicable",
+    }
+    if detail.check_name not in evidence:
+        return "pass"
+    expected = evidence[detail.check_name]
+    return "not_applicable" if expected is None or detail.message == expected else "pass"
+
+
+def _result_display_status(result: ValidationResult) -> str:
+    """Describe execution separately from the preserved gate boolean."""
+    not_applicable = (
+        bool(result.success_details)
+        and not result.findings
+        and all(_detail_display_status(detail) == "not_applicable" for detail in result.success_details)
+    )
+    if result.is_incomplete:
+        return "incomplete"
+    if is_cleanly_skipped(result):
+        return "skipped"
+    if result.passed and not_applicable:
+        return "not_applicable"
+    return "pass" if result.passed else "fail"
+
+
+def _validated_ci_context(context: dict[str, str] | None) -> dict[str, str]:
+    """Allow only bounded display text and HTTPS links in trusted CI chrome."""
+    if context is None:
+        return {}
+    if not isinstance(context, dict):
+        raise ValueError("ci_context must be a dictionary")
+    result = {}
+    for key in ("run_url", "report_index_url", "report_url", "canonical_json_url", "commit", "image", "ci_conclusion"):
+        value = context.get(key)
+        if value is None or value == "":
+            continue
+        if not isinstance(value, str) or len(value) > 4096 or any(ord(c) < 32 for c in value):
+            raise ValueError(f"Invalid CI context {key}")
+        if key.endswith("url"):
+            if (key, value) in {
+                ("report_index_url", "../index.html"),
+                ("canonical_json_url", "skillevaluator-tier1.json"),
+            }:
+                result[key] = value
+                continue
+            parsed = urlparse(value)
+            if parsed.scheme != "https" or not parsed.hostname or parsed.username or parsed.password or "\\" in value:
+                raise ValueError(f"CI context {key} must be an HTTPS URL")
+        result[key] = value
+    return result
+
+
 class HTMLReporter(ReporterBase):
     """HTML report generator using Jinja2 templates."""
 
@@ -1304,6 +1361,8 @@ class HTMLReporter(ReporterBase):
         content_label: str = "Skill",
         profile: str | None = None,
         expected_skill_name: str | None = None,
+        explicit_skill_name: str | None = None,
+        ci_context: dict[str, str] | None = None,
     ) -> None:
         self.include_timestamp = include_timestamp
         self.title = title or "SkillEvaluator Validation Report"
@@ -1316,12 +1375,15 @@ class HTMLReporter(ReporterBase):
         # validation gate was applied for.
         self.profile = profile
         self.expected_skill_name = expected_skill_name
+        self.explicit_skill_name = explicit_skill_name
+        self.ci_context = _validated_ci_context(ci_context)
         self._env = self._create_environment()
 
     def _create_environment(self) -> Environment:
         loader = PackageLoader("skillevaluator.reporting", "templates")
         environment = Environment(loader=loader, autoescape=True)
         environment.filters["cleanly_skipped"] = is_cleanly_skipped
+        environment.filters["execution_status"] = _result_display_status
         environment.filters["related_paths"] = _related_paths
         environment.filters["additional_errors"] = additional_errors
         environment.filters["adaptive_percent"] = _adaptive_percent
@@ -1363,6 +1425,9 @@ class HTMLReporter(ReporterBase):
 
         Returns the inferred skill name if single-skill mode, else None.
         """
+        if self.explicit_skill_name is not None:
+            return self.explicit_skill_name
+
         # Check for [prefix] pattern in any finding — indicates folder mode
         for r in results:
             for f in r.findings:
@@ -1400,12 +1465,17 @@ class HTMLReporter(ReporterBase):
         skill_name: str,
     ) -> dict[str, dict[str, Any]]:
         """Reorganize results for a single-skill run into one entry."""
-        skill_data: dict[str, Any] = {"passed": True, "validators": {}, "issue_count": 0}
+        skill_data: dict[str, Any] = {"passed": True, "validators": {}, "issue_count": 0, "status": "pass"}
 
         for result in results:
             vn = result.validator_name
+            display_status = _result_display_status(result)
             vdata: dict[str, Any] = {
                 "passed": result.passed,
+                "status": display_status,
+                "errors": list(result.errors),
+                "warnings": list(result.warnings),
+                "incomplete_scans": list(result.incomplete_scans),
                 "description": result.validator_description,
                 "details": [],
                 "findings": [],
@@ -1415,6 +1485,7 @@ class HTMLReporter(ReporterBase):
                 vdata["details"].append(
                     {
                         "check_name": detail.check_name,
+                        "status": _detail_display_status(detail),
                         "message": detail.message,
                         "metadata": detail.metadata,
                     }
@@ -1422,7 +1493,7 @@ class HTMLReporter(ReporterBase):
 
             for finding in result.findings:
                 clean_path = finding.file_path
-                if "/" + skill_name + "/" in clean_path:
+                if self.explicit_skill_name is None and "/" + skill_name + "/" in clean_path:
                     clean_path = clean_path[clean_path.index("/" + skill_name + "/") + len(skill_name) + 2 :]
 
                 confidence = "high"
@@ -1451,6 +1522,10 @@ class HTMLReporter(ReporterBase):
                 skill_data["passed"] = False
                 vdata["passed"] = False
 
+            if result.is_incomplete:
+                skill_data["status"] = "incomplete"
+            elif not result.passed and skill_data["status"] != "incomplete":
+                skill_data["status"] = "fail"
             skill_data["validators"][vn] = vdata
 
         # Deduplicate findings per validator
@@ -2717,6 +2792,12 @@ class HTMLReporter(ReporterBase):
         cl = self.content_label
         return template.render(
             title=self.title,
+            ci_context=self.ci_context,
+            explicit_skill_name=self.explicit_skill_name,
+            tier1_execution_summary={
+                status: sum(_result_display_status(r) == status for r in tier1_results)
+                for status in ("pass", "fail", "incomplete", "skipped", "not_applicable")
+            },
             timestamp=timestamp,
             version=__version__,
             target_path=self.target_path,

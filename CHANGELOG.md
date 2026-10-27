@@ -56,6 +56,9 @@ All notable changes to SkillEvaluator are documented in this file.
 
 ### Fixed
 
+- Local-mode verifier uploads now copy directly to the absent destination,
+  avoiding an unnecessary rollback snapshot of an empty tests directory. A
+  rejected upload no longer leaves an empty destination behind.
 - Rubric evaluation preserves the original `SKILL.md` text without adding YAML
   separators and includes reachable local Markdown guides under their source
   paths. Required guidance is collected before optional previews, with cycle

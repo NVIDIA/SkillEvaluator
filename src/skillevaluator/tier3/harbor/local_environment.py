@@ -732,9 +732,12 @@ class SkillEvaluatorLocalEnvironment(BaseEnvironment):
             raise ValueError(f"local mode upload target is outside the run directory: {target_dir}")
         if target.exists():
             shutil.rmtree(target)
-        target.mkdir(parents=True, exist_ok=True)
         if source.exists():
-            copytree_secure(source, target, dirs_exist_ok=True)
+            # Publish the validated tree directly. Precreating an empty target
+            # makes secure copying snapshot and merge a directory we just made.
+            copytree_secure(source, target)
+        else:
+            target.mkdir(parents=True, exist_ok=True)
         self._rewrite_uploaded_scripts(target)
 
     async def download_file(self, source_path: str, target_path: Path | str) -> None:

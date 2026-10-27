@@ -101,6 +101,11 @@ try:
 except ImportError:  # pragma: no cover -- source-tree import only
     from skillevaluator.evidence import evidence_ref_identity
 
+try:
+    from character_facts import append_character_facts, character_facts_enabled
+except ImportError:  # pragma: no cover -- source-tree import only
+    from skillevaluator.tier3.eval_core.character_facts import append_character_facts, character_facts_enabled
+
 
 logger = logging.getLogger(__name__)
 
@@ -8602,6 +8607,7 @@ SELECTED EVIDENCE (final response + produced artifacts; low-relevance steps may 
         prompt = prompt.replace('"SKILL_IDENTIFIED": true', '"SKILL_IDENTIFIED": false')
     # Adjust the rubric before interpolation so task/evidence text stays intact.
     prompt = prompt.format(question=question, ground_truth=ground_truth, agent_text=agent_text)
+    prompt = append_character_facts(prompt, question=question, ground_truth=ground_truth, agent_text=agent_text)
 
     def validate_payload(parsed):
         error = _accuracy_payload_error(parsed)
@@ -8668,6 +8674,9 @@ def _ragas_goal_accuracy_enabled():
 
     Reasoning judges reject the sampling settings RAGAS sends, so they use the prompt judge.
     """
+    # The prompt judge can append metadata outside the original evidence.
+    if character_facts_enabled():
+        return False
     if _public_provider() != "openai" or _is_openai_reasoning_model(_selected_judge_model()):
         return False
     try:
@@ -8755,6 +8764,9 @@ END-STATE EVIDENCE:
 Did the agent achieve the expected goal?
 Respond with ONLY a JSON object:
 {{"user_goal": "...", "end_state": "...", "achieved": true/false, "score": 1.0, "reason": "..."}}"""
+    prompt = append_character_facts(
+        prompt, question=question, ground_truth=ground_truth, tool_summary=tool_summary, agent_text=agent_text
+    )
 
     parsed, error, provenance = _call_validated_json_judge(
         prompt,
@@ -8805,12 +8817,13 @@ def judge_behavior_check(conversation_text, expected_behaviors):
         return {"score": 1.0, "reason": "No expected_behavior defined", "results": []}
 
     behaviors_text = "\n".join(f"{i + 1}. {b}" for i, b in enumerate(expected_behaviors))
+    conversation = _compact_behavior_conversation(conversation_text)
 
     prompt = f"""You are evaluating whether an AI agent followed expected behaviors during a task. \
 Analyze the full conversation and determine if each expected behavior was observed.
 
 CONVERSATION:
-{_compact_behavior_conversation(conversation_text)}
+{conversation}
 
 EXPECTED BEHAVIORS:
 {behaviors_text}
@@ -8819,6 +8832,7 @@ For each behavior, set "passed" to true (observed) or false (not observed) with 
 
 Respond with ONLY a JSON object:
 {{"results": [{{"step": 1, "passed": true, "reason": "..."}}, ...], "score": 0.67, "summary": "brief summary"}}"""
+    prompt = append_character_facts(prompt, conversation=conversation, expected_behaviors=behaviors_text)
 
     content, error = call_public_llm(
         prompt,

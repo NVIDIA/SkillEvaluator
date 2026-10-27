@@ -2900,7 +2900,7 @@ def _judge_model_config(
         model = provider.model
         source = "SKILL_EVAL_LLM_MODEL" if os.environ.get("SKILL_EVAL_LLM_MODEL", "").strip() else "provider default"
         override_applied = False
-    return {
+    configuration = {
         "enabled": True,
         "provider": provider.provider,
         "model": model,
@@ -2908,6 +2908,9 @@ def _judge_model_config(
         "override_applied": override_applied,
         "reasoning_effort": effective_reasoning_effort(provider.provider, model, JUDGE_REASONING_EFFORT),
     }
+    if character_facts := provider_env.get("SKILL_EVAL_JUDGE_CHARACTER_FACTS"):
+        configuration["character_facts"] = character_facts
+    return configuration
 
 
 def _job_judge_override(provider_env: Mapping[str, str], grading_mode: str) -> tuple[str, str] | None:

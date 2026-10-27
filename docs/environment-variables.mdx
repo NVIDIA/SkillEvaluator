@@ -198,6 +198,14 @@ directory with `.env` loading and Harbor telemetry disabled:
 
 ### Judge evidence budgets
 
+`SKILL_EVAL_JUDGE_CHARACTER_FACTS=1` optionally appends Unicode character metadata
+to standard Tier 3 judge prompts. It is off by default; `true`, `yes`, and `on`
+also enable it (case-insensitive). This operator-owned setting is forwarded only
+to standard verifier jobs, never to agent environments or `custom_only` jobs.
+When configured, its value is recorded as `judge.character_facts` in
+`run_config.json`. See [character-sensitive judging](tier3-live-evaluation.mdx#character-sensitive-judging)
+for scope, limits, and the effect on the goal-accuracy route.
+
 Before the Harbor verifier calls the `accuracy`, `goal_accuracy`, and
 `behavior_check` judges, it condenses the agent's trajectory into a separate
 evidence excerpt for each judge. These budgets cap each excerpt in characters.

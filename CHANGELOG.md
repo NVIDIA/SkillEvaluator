@@ -6,6 +6,12 @@ All notable changes to SkillEvaluator are documented in this file.
 
 ### Added
 
+- Opt-in `SKILL_EVAL_JUDGE_CHARACTER_FACTS=1` adds bounded, escaped Unicode
+  character facts to Tier 3 accuracy, goal-accuracy, and behavior-check prompts
+  without normalizing the evidence. The operator setting is verifier-only;
+  enabling it selects the prompt-based goal judge instead of the optional RAGAS
+  route. Existing prompts remain unchanged when the setting is unset.
+
 - `--quality-config PATH` on `validate`, `quality-check`, and `tier1` loads the
   deterministic quality check's expected Markdown headings from a YAML file
   instead of the built-in list. Each `expected_headers` entry sets a `heading`

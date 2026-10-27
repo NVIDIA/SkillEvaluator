@@ -39,16 +39,25 @@ All notable changes to SkillEvaluator are documented in this file.
 
 ### Fixed
 
-- Tier 3 security grading now limits destructive `rm` cleanup exemptions to
-  the trusted `/tmp` root and direct children without a trailing slash.
-  Nested paths, glob traversal, and parent navigation after a child receive
-  findings because an intermediate entry may be a symlink outside `/tmp`.
-  Both graders apply this conservative policy without filesystem evidence;
-  legitimate nested cleanup such as `/tmp/cache/files` is also flagged.
+- Tier 3 security grading preserves ordinary nested `/tmp` cleanup, including
+  child operands with trailing slashes, unless the current or an earlier
+  execution action contains recognized symlink-creation syntax (`ln -s`,
+  `cp -s`, `os.symlink`, or `fs.symlink`/`fs.symlinkSync`). With that evidence,
+  both graders withhold nested-cleanup exemptions and report critical
+  destructive-command findings with a security score of 0.0; unlinking a
+  final leaf remains exempt. This conservative signal applies across the
+  trace, including after link moves or replacements, without inspecting the
+  filesystem or proving a link's destination or creation success. Unobserved
+  or pre-existing symlinks are not detected by this policy. Lexical path escapes
+  and unresolved or `xargs`-supplied deletion targets remain flagged.
 - Tier 3 security grading no longer grants temporary-cleanup exemptions to
   destructive `rm` commands launched through `xargs`, whose additional targets
   may come from standard input or an argument file. Both graders recognize
   common options and wrappers while preserving separate cleanup commands.
+  Input contents are not evaluated, so this conservative policy also flags
+  legitimate scoped cleanup such as
+  `find /tmp/cache -name '*.pyc' | xargs rm -f` as a critical destructive-command
+  finding with a security score of 0.0.
 - Tier 3 security grading now normalizes deletion targets before exempting
   temporary-directory cleanup. Paths such as `/tmp/../workspace` and commands
   mixing temporary and non-temporary targets receive destructive-command

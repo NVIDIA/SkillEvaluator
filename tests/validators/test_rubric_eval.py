@@ -6,11 +6,15 @@
 import json
 import os
 from pathlib import Path
-from unittest.mock import patch
+from unittest.mock import MagicMock, patch
 
 import pytest
 
-from skillevaluator.constants import RUBRIC_CRITERIA
+from skillevaluator.constants import (
+    RUBRIC_CRITERIA,
+    RUBRIC_MAX_TOKENS,
+    RUBRIC_REASONING_MAX_TOKENS,
+)
 from skillevaluator.reporting import HTMLReporter
 from skillevaluator.validators.rubric_eval import (
     RubricEvalValidator,
@@ -109,6 +113,114 @@ class TestRubricJudge:
         judge = RubricJudge()
         result = judge.parse_response('{"score": 80, "overall_pass": true, "checks": []}')
         assert result["score"] == 80
+
+
+class TestRubricJudgeTokenBudget:
+    """The reasoning budget follows the model each request actually targets."""
+
+    @staticmethod
+    def _gateway_env(monkeypatch: pytest.MonkeyPatch, model: str) -> None:
+        monkeypatch.setenv("SKILL_EVAL_LLM_PROVIDER", "openai-compatible")
+        monkeypatch.setenv("SKILL_EVAL_LLM_API_KEY", "test-key")
+        monkeypatch.setenv("SKILL_EVAL_LLM_BASE_URL", "https://gateway.example.com/v1")
+        monkeypatch.setenv("SKILL_EVAL_LLM_MODEL", model)
+
+    @staticmethod
+    def _openai_request(judge: RubricJudge) -> dict:
+        mock_openai = MagicMock()
+        mock_openai.chat.completions.create.return_value.choices = [MagicMock(message=MagicMock(content="{}"))]
+        with patch("openai.OpenAI", return_value=mock_openai):
+            judge.completions("system", "user")
+        return mock_openai.chat.completions.create.call_args.kwargs
+
+    def test_reasoning_model_gets_a_larger_token_budget(self, monkeypatch: pytest.MonkeyPatch):
+        """Reasoning models spend the completion budget before emitting content.
+
+        Measured on deepseek/deepseek-v4.1-flash with a 4096-token cap:
+        ``reasoning_tokens=4000, text_tokens=0`` and ``finish_reason=length``,
+        so the rubric JSON was truncated mid-object and never parsed.
+        """
+        self._gateway_env(monkeypatch, "deepseek/deepseek-v4.1-flash")
+        request = self._openai_request(RubricJudge())
+        assert request["max_tokens"] == RUBRIC_REASONING_MAX_TOKENS
+        assert request["max_tokens"] > RUBRIC_MAX_TOKENS
+
+    def test_standard_model_keeps_default_token_budget(self, monkeypatch: pytest.MonkeyPatch):
+        """Non-reasoning models must not pay the larger budget's latency."""
+        self._gateway_env(monkeypatch, "gpt-4o")
+        assert self._openai_request(RubricJudge())["max_tokens"] == RUBRIC_MAX_TOKENS
+
+    def test_explicit_token_override_is_preserved(self, monkeypatch: pytest.MonkeyPatch):
+        """An explicit max_tokens always wins over the reasoning-model default."""
+        self._gateway_env(monkeypatch, "deepseek/deepseek-v4.1-flash")
+        assert self._openai_request(RubricJudge(max_tokens=1234))["max_tokens"] == 1234
+
+    def test_positional_model_overrides_environment_model(self, monkeypatch: pytest.MonkeyPatch):
+        """A positional model is the target, so the environment model must not pick the budget."""
+        self._gateway_env(monkeypatch, "deepseek/deepseek-v4.1-flash")
+        request = self._openai_request(RubricJudge("gpt-4o"))
+        assert request["model"] == "gpt-4o"
+        assert request["max_tokens"] == RUBRIC_MAX_TOKENS
+
+    def test_explicit_endpoint_uses_its_own_model(self, monkeypatch: pytest.MonkeyPatch):
+        """An explicit endpoint targets the class default model, not SKILL_EVAL_LLM_MODEL."""
+        self._gateway_env(monkeypatch, "o3")
+        judge = RubricJudge(api_key="test-key", base_url="https://gateway.example.com/v1")
+        request = self._openai_request(judge)
+        assert request["model"] == judge._resolved_config().model != "o3"
+        assert request["max_tokens"] == RUBRIC_MAX_TOKENS
+
+    def test_provider_configured_after_construction(self, monkeypatch: pytest.MonkeyPatch):
+        """The budget is chosen per request, after the provider is configured."""
+        for name in (
+            "SKILL_EVAL_LLM_PROVIDER",
+            "SKILL_EVAL_LLM_MODEL",
+            "OPENAI_API_KEY",
+            "NVIDIA_API_KEY",
+            "ANTHROPIC_API_KEY",
+        ):
+            monkeypatch.delenv(name, raising=False)
+        judge = RubricJudge()
+        self._gateway_env(monkeypatch, "deepseek/deepseek-v4.1-flash")
+        assert self._openai_request(judge)["max_tokens"] == RUBRIC_REASONING_MAX_TOKENS
+
+    def test_anthropic_reasoning_budget_is_sent_without_streaming(self, monkeypatch: pytest.MonkeyPatch):
+        """The Anthropic SDK refuses non-streaming requests above 21,333 output tokens.
+
+        A raised budget on that transport must stay under the limit, or the SDK
+        raises before sending and the judge reports itself unavailable.
+        """
+        pytest.importorskip("anthropic")
+        httpx = pytest.importorskip("httpx")
+        monkeypatch.setenv("SKILL_EVAL_LLM_PROVIDER", "anthropic")
+        monkeypatch.setenv("ANTHROPIC_API_KEY", "test-key")
+        monkeypatch.setenv("ANTHROPIC_BASE_URL", "https://gateway.example.com")
+        monkeypatch.delenv("SKILL_EVAL_LLM_BASE_URL", raising=False)
+        monkeypatch.setenv("SKILL_EVAL_LLM_MODEL", "deepseek-reasoner")
+        requests: list[dict] = []
+
+        def handler(request):
+            requests.append(json.loads(request.content))
+            return httpx.Response(
+                200,
+                json={
+                    "id": "msg_test",
+                    "type": "message",
+                    "role": "assistant",
+                    "model": "deepseek-reasoner",
+                    "content": [{"type": "text", "text": "{}"}],
+                    "stop_reason": "end_turn",
+                    "stop_sequence": None,
+                    "usage": {"input_tokens": 1, "output_tokens": 1},
+                },
+            )
+
+        with httpx.Client(transport=httpx.MockTransport(handler)) as http_client:
+            content = RubricJudge(http_client=http_client).completions("system", "user")
+
+        assert content == "{}"
+        assert len(requests) == 1
+        assert RUBRIC_MAX_TOKENS <= requests[0]["max_tokens"] <= 21333
 
 
 class TestCollectSupplementaryContent:

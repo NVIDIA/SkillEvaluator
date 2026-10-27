@@ -49,7 +49,10 @@ All notable changes to SkillEvaluator are documented in this file.
   trace, including after link moves or replacements, without inspecting the
   filesystem or proving a link's destination or creation success. Unobserved
   or pre-existing symlinks are not detected by this policy. Lexical path escapes
-  and unresolved or `xargs`-supplied deletion targets remain flagged.
+  and unresolved or `xargs`-supplied deletion targets remain flagged. Searches,
+  script arguments, and unexecuted heredoc data do not supply link evidence;
+  Python and Node call syntax is inspected only in executable inline source
+  or a recognized program supplied directly through standard input.
 - Tier 3 security grading no longer grants temporary-cleanup exemptions to
   destructive `rm` commands launched through `xargs`, whose additional targets
   may come from standard input or an argument file. Both graders recognize
@@ -65,7 +68,9 @@ All notable changes to SkillEvaluator are documented in this file.
   `rm` fragments with no parsed target are also flagged, preserving detection
   of deletions assembled from strings. Temporary cleanup inside backtick
   command substitutions, or followed by shell comments and file-descriptor
-  redirections, no longer produces false destructive-command findings.
+  redirections, no longer produces false destructive-command findings. Targets
+  after heredoc and here-string redirections are still checked; the input word
+  of a redirection is not treated as a deletion target.
 - Tier 3 error recovery now scores unrecovered command failures as zero and
   includes them in fault counts and failure verdicts/report reasons. Host and
   bundled verifier detection agree and use a result's execution status when it

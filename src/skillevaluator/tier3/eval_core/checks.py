@@ -1966,6 +1966,110 @@ def _rm_xargs_context(tokens: list[str], rm_index: int) -> bool | None:
     return True
 
 
+def _rm_inline_code(executable: str, words: list[str], index: int) -> str | None:
+    """Read only an interpreter's inline source, excluding its script argv."""
+    args = _interpreter_operands(words, index, {})
+    if executable == "deno":
+        return args[1] if len(args) > 1 and args[0] == "eval" else None
+    executable = _VERSION_SUFFIX_RE.sub("", executable)
+    executable = {"nodejs": "node", "bun": "node"}.get(executable, executable)
+    grammar = _INTERPRETER_GRAMMARS.get(executable)
+    if grammar is None:
+        return None
+    code_options = grammar["code"] - ({"-m"} if executable == "python" else set())
+    cursor = 0
+    while cursor < len(args):
+        option = args[cursor]
+        cursor += 1
+        if option == "--" or not option.startswith("-") or option == "-":
+            return None
+        name, equals, value = option.partition("=")
+        if name in code_options:
+            return value if equals else args[cursor] if cursor < len(args) else None
+        if option in grammar["terminal"] or option in grammar["code"]:
+            return None
+        if option in grammar["boolean"]:
+            continue
+        if name in grammar["value"]:
+            cursor += not equals
+            continue
+        if option.startswith("--"):
+            return None
+        for offset, flag in enumerate(option[1:], start=1):
+            short_option = "-" + flag
+            if short_option in code_options:
+                return option[offset + 1 :] or (args[cursor] if cursor < len(args) else None)
+            if short_option in grammar["terminal"] or short_option in grammar["code"]:
+                return None
+            if short_option in grammar["value"]:
+                cursor += offset == len(option) - 1
+                break
+            if short_option not in grammar["boolean"]:
+                return None
+    return None
+
+
+def _rm_stdin_code(command_text: str) -> tuple[str, str] | None:
+    """Associate a single input document with the command that reads it."""
+    position = _heredoc_operator_index(command_text)
+    if position < 0:
+        return None
+    prefix = re.sub(r"(?<!\S)\d+$", "", command_text[:position])
+    tokenized = _rm_shell_tokens(prefix)
+    if tokenized is None:
+        return None
+    words = tokenized[0]
+    start = next((i + 1 for i in range(len(words) - 1, -1, -1) if words[i] in _SHELL_SEPARATORS), 0)
+    words = words[start:]
+    rest = command_text[position + 2 :]
+    if rest.startswith("<"):
+        tail = _rm_shell_tokens(rest[1:])
+        if tail is None or not tail[0]:
+            return None
+        source, *suffix = tail[0]
+        source = _resolved_shell_arg(source, {})
+    else:
+        header_line, newline, body = rest.partition("\n")
+        header = _heredoc_header(header_line)
+        if header is None or not newline or len(header[2]) != 1 or header[1]:
+            return None
+        tail = _rm_shell_tokens(header[0])
+        if tail is None:
+            return None
+        suffix = tail[0]
+        terminator, strip_tabs = header[2][0]
+        source, _ = _split_heredoc_body(body, terminator, strip_tabs)
+        if strip_tabs:
+            source = "\n".join(line.lstrip("\t") for line in source.split("\n"))
+    end = next((i for i, word in enumerate(suffix) if word in _SHELL_SEPARATORS), len(suffix))
+    words += suffix[:end]
+    # A second input redirection can replace this document before execution.
+    if any(_REDIRECTION_WORD_RE.fullmatch(word) and "<" in word for word in words):
+        return None
+    index = _rm_wrapped_command_index(words, 0)
+    if index is None or index >= len(words):
+        return None
+    executable = _shell_executable(words[index])
+    base = _VERSION_SUFFIX_RE.sub("", executable)
+    base = {"nodejs": "node", "bun": "node"}.get(base, base)
+    if _reads_program_from_stdin(base, words, index, {}):
+        return executable, source
+    return None
+
+
+def _rm_symlink_call_seen(executable: str, source: str) -> bool:
+    """Inspect Python/Node source without treating strings or comments as calls."""
+    if not re.fullmatch(r"python(?:\d+(?:\.\d+)*)?|node|nodejs|bun|deno", executable):
+        return False
+    strings = r"'(?:\\.|[^'\\])*'|\"(?:\\.|[^\"\\])*\""
+    if not executable.startswith("python"):
+        strings += r"|`(?:\\.|[^`\\])*`"
+    source = re.sub(strings, "", source)
+    comments = r"#[^\n]*" if executable.startswith("python") else r"//[^\n]*|/\*[\s\S]*?\*/"
+    source = re.sub(comments, "", source)
+    return bool(re.search(r"\.\s*symlink(?:Sync)?\s*\(", source))
+
+
 def _rm_symlink_creation_seen(command_text: str, _depth: int = 0) -> bool:
     """Recognize link-creation evidence without inferring filesystem state."""
     if _depth > 3 or len(command_text) > 65_536:
@@ -1973,9 +2077,20 @@ def _rm_symlink_creation_seen(command_text: str, _depth: int = 0) -> bool:
     candidate = command_text.translate({ord("'"): None, ord('"'): None, ord("\\"): None})
     if "symlink" not in candidate and not re.search(r"\b(?:ln|cp)\b", candidate):
         return False
+    stdin = _rm_stdin_code(command_text)
+    if stdin is not None:
+        executable, source = stdin
+        if executable in _SHELL_COMMAND_INTERPRETERS:
+            if _rm_symlink_creation_seen(source, _depth + 1):
+                return True
+        elif _rm_symlink_call_seen(executable, source):
+            return True
+    # Heredoc bodies and here-string words are input data, not shell commands.
+    # A nested shell's inline source is inspected separately below.
+    command_text, _, _ = _split_heredocs(command_text)
     tokenized = _rm_shell_tokens(command_text)
     if tokenized is None:
-        return bool(re.search(r"\b(?:ln|cp)\s+-[^\s]*s|\.\s*symlink(?:Sync)?\s*\(", command_text))
+        return False
     tokens, payloads = tokenized
     if len(tokens) > 4096:
         return False
@@ -1996,14 +2111,14 @@ def _rm_symlink_creation_seen(command_text: str, _depth: int = 0) -> bool:
         executable = _shell_executable(_resolved_shell_arg(words[index], {}))
         if executable in _INERT_PRINT_COMMANDS:
             continue
-        # These are command-text indicators, not proof that a call succeeded.
-        # Keep evidence after moves/replacements rather than guessing link state.
-        source = " ".join(words[index:]).replace(_QUOTED_NEWLINE, "\n")
-        source = re.sub(r"'(?:\\.|[^'\\])*'|\"(?:\\.|[^\"\\])*\"", "", source)
-        comments = r"//[^\n]*|/\*[\s\S]*?\*/" if executable in {"node", "nodejs", "deno", "bun"} else r"#[^\n]*"
-        source = re.sub(comments, "", source)
-        if re.search(r"\.\s*symlink(?:Sync)?\s*\(", source):
-            return True
+        source = _rm_inline_code(executable, words, index)
+        if source is not None:
+            source = source.replace(_QUOTED_NEWLINE, "\n")
+            if executable in _SHELL_COMMAND_INTERPRETERS:
+                if _rm_symlink_creation_seen(source, _depth + 1):
+                    return True
+            elif _rm_symlink_call_seen(executable, source):
+                return True
         if executable in {"ln", "cp"}:
             args = _interpreter_operands(words, index, {})
             symbolic = False
@@ -2032,9 +2147,6 @@ def _rm_symlink_creation_seen(command_text: str, _depth: int = 0) -> bool:
                 else:
                     operands = True
             if symbolic and operands:
-                return True
-        for word in words[index + 1 :]:
-            if re.search(r"\b(?:ln|cp)\s+-", word) and _rm_symlink_creation_seen(word, _depth + 1):
                 return True
     return False
 
@@ -2129,9 +2241,8 @@ def _rm_targets_outside_tmp(
             if skip_next:
                 skip_next = False
                 continue
-            if _is_heredoc_redirect(raw_arg):
-                break
-            if _REDIRECTION_WORD_RE.fullmatch(raw_arg):
+            # Redirections consume one input word, not the remaining rm targets.
+            if _is_heredoc_redirect(raw_arg) or _REDIRECTION_WORD_RE.fullmatch(raw_arg):
                 skip_next = True
                 continue
             arg = raw_arg

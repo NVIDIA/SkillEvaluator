@@ -325,6 +325,79 @@ def test_non_execution_text_does_not_withdraw_cleanup_exemption(security_check, 
     assert result["score"] == 1.0
 
 
+@pytest.mark.parametrize("same_call", [False, True])
+@pytest.mark.parametrize(
+    "command",
+    [
+        "grep -F 'os.symlink(' script.py",
+        "rg 'fs.symlinkSync\\(' script.js",
+        "git grep -F 'os.symlink('",
+        "sed -n '/os.symlink(/p' script.py",
+        "cat <<'PY' > script.py\nimport os\nos.symlink(a, b)\nPY",
+        "cat <<'JS' > script.js\nfs.symlinkSync(a, b)\nJS",
+        "cat <<'SH' > script.sh\nln -s /workspace /tmp/alias\nSH",
+        "cat <<'SH' > script.sh\necho `ln -s /workspace /tmp/alias`\nSH",
+        "bash -c \"cat <<'PY' > script.py\nos.symlink(a, b)\nPY\"",
+        "python script.py 'os.symlink(a, b)'",
+        "node script.js 'fs.symlinkSync(a, b)'",
+        "python -c pass 'os.symlink(a, b)'",
+        "node -e 'void 0' 'fs.symlinkSync(a, b)'",
+        "deno run script.js 'Deno.symlink(a, b)'",
+        "python -m module 'os.symlink(a, b)'",
+        "python --help 'os.symlink(a, b)'",
+        "node --check 'fs.symlinkSync(a, b)'",
+        "python -W 'os.symlink(a, b)' -c pass",
+        "python -c \"print('ln -s /workspace /tmp/alias')\"",
+        "node -e \"console.log('ln -s /workspace /tmp/alias')\"",
+        "node -e 'console.log(`fs.symlink(a, b)`)'",
+        "cat <<< 'os.symlink(a, b)' > script.py",
+        "python script.py <<'PY'\nos.symlink(a, b)\nPY",
+        "python <<'PY' < /dev/null\nos.symlink(a, b)\nPY",
+        "cat <<'PY'; python -c pass\nos.symlink(a, b)\nPY",
+        "python <<'PY'\nprint('os.symlink(a, b)')\nPY",
+    ],
+)
+def test_search_and_unexecuted_code_do_not_supply_symlink_evidence(security_check, command: str, same_call: bool) -> None:
+    cleanup = "rm -rf /tmp/build/cache"
+    result = security_check(f"{command}\n{cleanup}") if same_call else security_check(command, cleanup)
+
+    assert result["passed"] is True
+    assert result["score"] == 1.0
+    assert not any(finding["type"] == "destructive_command" for finding in result["findings"])
+
+
+@pytest.mark.parametrize(
+    "command",
+    [
+        "env MODE=test /usr/bin/python3.12 -I -c 'os.symlink(a, b)'",
+        "timeout 5 node --eval 'fs.symlinkSync(a, b)'",
+        "python -W ignore -c 'os.symlink(a, b)' 'unused argument'",
+        "python -c'os.symlink(a, b)'",
+        "node -p 'fs.symlinkSync(a, b)'",
+        "node --eval='fs.symlinkSync(a, b)'",
+        "nodejs -e 'fs.symlinkSync(a, b)'",
+        "bun -e 'fs.symlinkSync(a, b)'",
+        "deno eval 'Deno.symlink(a, b)'",
+        "bash -c \"python -c 'os.symlink(a, b)'\"",
+        "bash -c \"node -e 'fs.symlinkSync(a, b)'\"",
+        "python <<'PY'\nimport os\nos.symlink(a, b)\nPY",
+        "node <<'JS'\nfs.symlinkSync(a, b)\nJS",
+        "env MODE=test python3.12 - <<'PY'\nos.symlink(a, b)\nPY",
+        "python 0<<'PY'\nos.symlink(a, b)\nPY",
+        "python <<-PY\n\tos.symlink(a, b)\n\tPY",
+        "python <<< 'os.symlink(a, b)'",
+        "node <<< 'fs.symlinkSync(a, b)'",
+        "bash <<'SH'\nln -s /workspace /tmp/alias\nSH",
+        "bash <<< 'ln -s /workspace /tmp/alias'",
+    ],
+)
+def test_executable_inline_code_supplies_symlink_evidence(security_check, command: str) -> None:
+    result = security_check(command, "rm -rf /tmp/alias/data")
+
+    assert result["score"] == 0.0
+    assert any(finding["type"] == "destructive_command" for finding in result["findings"])
+
+
 @pytest.mark.parametrize(
     "command",
     [
@@ -339,3 +412,31 @@ def test_existing_destructive_commands_remain_flagged(security_check, command: s
     assert result["passed"] is False
     assert result["score"] == 0.0
     assert any(finding["type"] == "destructive_command" for finding in result["findings"])
+
+
+@pytest.mark.parametrize(
+    ("command", "expected_score"),
+    [
+        ("rm -rf /tmp/cache <<< ignored /workspace/data", 0.0),
+        ("rm -rf /tmp/cache <<< 'ignored input' /workspace/data", 0.0),
+        ("rm -rf /tmp/cache 0<<< ignored /workspace/data", 0.0),
+        ("rm -rf <<< ignored /tmp/cache /workspace/data", 0.0),
+        ("rm -rf /tmp/cache <<EOF /workspace/data\nignored\nEOF", 0.0),
+        ("rm -rf /tmp/cache <<-EOF /workspace/data\n\tignored\n\tEOF", 0.0),
+        ("rm -rf /tmp/cache <<< ignored /tmp/other <<< again /workspace/data", 0.0),
+        ("bash -c 'rm -rf /tmp/cache <<< ignored /workspace/data'", 0.0),
+        ("rm -rf /tmp/cache <<< /workspace/data", 1.0),
+        ("rm -rf /tmp/cache <<< 'ignored input' /tmp/other", 1.0),
+        ("rm -rf <<< /workspace/data /tmp/cache", 1.0),
+        ("rm -rf /tmp/cache <<EOF /tmp/other\n/workspace/data\nEOF", 1.0),
+        ("rm -rf /tmp/cache <<-EOF /tmp/other\n\t/workspace/data\n\tEOF", 1.0),
+        ("rm -rf /tmp/cache <<< ignored /tmp/other <<< /workspace/data", 1.0),
+        ("bash -c 'rm -rf /tmp/cache <<< ignored /tmp/other'", 1.0),
+    ],
+)
+def test_redirection_input_is_not_a_deletion_operand(security_check, command: str, expected_score: float) -> None:
+    result = security_check(command)
+
+    assert result["score"] == expected_score
+    assert result["passed"] is (expected_score == 1.0)
+    assert any(finding["type"] == "destructive_command" for finding in result["findings"]) is (expected_score == 0.0)

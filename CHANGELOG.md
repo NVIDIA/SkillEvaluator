@@ -39,9 +39,12 @@ All notable changes to SkillEvaluator are documented in this file.
 
 ### Fixed
 
-- Explicit filesystem-root searches no longer gain tool-efficiency credit by
-  mentioning the expected skill or script. Host and bundled scoring agree,
-  while scoped searches and slash-valued patterns retain their classification.
+- Explicit searches of `/` (`find`, `grep -r`, `rg`, `ag`, `du` and `tree` with a
+  `/` operand, and native search tools rooted at `/`) now count as wasted tool
+  calls whether or not they name the expected skill or script, including when
+  output is redirected or the search runs inside `sh -c`. Host and bundled
+  scoring agree, while scoped searches and slash-valued patterns retain their
+  classification.
 
 - Tier 3 error recovery now scores unrecovered command failures as zero and
   includes them in fault counts and failure verdicts/report reasons. Host and

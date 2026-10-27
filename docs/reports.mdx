@@ -371,10 +371,11 @@ dimensions, each answering one question:
 | Efficiency | Did it avoid wasted tool or skill usage? | `skill_efficiency`, from deterministic trajectory checks |
 
 Tool-efficiency checks classify explicit searches rooted at `/` as wasted work,
-even when the command names the expected skill or script. Scoped searches and
-`/` used as a search pattern retain their existing classification. This rule
-recognizes common top-level search commands; it does not interpret dynamically
-constructed shell programs.
+whether or not the command names the expected skill or script. Scoped searches
+and `/` used as a search pattern retain their existing classification. This rule
+recognizes common search commands, including ones with redirections or wrapped in
+`sh -c`; it does not interpret expansions, comments, here-documents or other
+dynamically constructed shell programs.
 
 
 Every evaluator and dimension score is on a 0.0 to 1.0 scale. The generated

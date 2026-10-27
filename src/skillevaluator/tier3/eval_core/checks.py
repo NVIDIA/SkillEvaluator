@@ -5702,7 +5702,7 @@ def _search_path_is_root(value: str) -> bool:
     return value.startswith("/") and not posixpath.normpath(value).strip("/")
 
 
-def _tool_searches_root(action: str, args: dict, text: str) -> bool:
+def _tool_searches_root(action: str, args: dict, text: str, depth: int = 0) -> bool:
     """Recognize explicit root search operands, not '/' inside a pattern.
 
     This is bounded top-level command classification. It does not execute or
@@ -5720,15 +5720,25 @@ def _tool_searches_root(action: str, args: dict, text: str) -> bool:
                 return True
     if not _is_execution_action(action) or len(text) > 65536:
         return False
-    # Without a shell AST, comments, expansions and nested programs cannot be
-    # classified reliably. Keep their prior score instead of inventing a path.
-    if any(char in text for char in "$`#<>"):
+    # Without a shell AST, comments, expansions, here-documents and process
+    # substitutions cannot be classified reliably. Keep their prior score
+    # instead of inventing a path.
+    if any(char in text for char in "$`#"):
+        return False
+    tokens = _shell_tokens(text)
+    if any(_is_heredoc_redirect(token) or token in {"<(", ">("} for token in tokens):
         return False
     commands: list[list[str]] = [[]]
-    for token in _shell_tokens(text):
+    skip_redirect_target = False
+    for token in tokens:
         if token in {";", "&&", "||", "|", "&", "(", ")"}:
             commands.append([])
-        else:
+            skip_redirect_target = False
+        elif skip_redirect_target:
+            skip_redirect_target = False
+        elif _is_output_redirect(token) or token in _INPUT_REDIRECT_OPERATORS or _DESCRIPTOR_OPERATOR_RE.match(token):
+            skip_redirect_target = True
+        elif not _ATTACHED_REDIRECT_RE.match(token):
             commands[-1].append(token)
     for command in commands:
         assignments: dict[str, str] = {}
@@ -5736,6 +5746,15 @@ def _tool_searches_root(action: str, args: dict, text: str) -> bool:
         if index is None or index >= len(command):
             continue
         name = _shell_executable(_resolved_shell_arg(command[index], assignments))
+        if name in _SHELL_COMMAND_INTERPRETERS:
+            payload = _shell_c_payload(command, index, assignments)
+            if (
+                payload is not None
+                and depth < _MAX_SHELL_REFERENCE_DEPTH
+                and _tool_searches_root(action, {}, payload, depth + 1)
+            ):
+                return True
+            continue
         if name not in {"find", "grep", "egrep", "fgrep", "rg", "ag", "du", "tree"}:
             continue
         arguments = [_resolved_shell_arg(arg, {}) for arg in command[index + 1 :]]

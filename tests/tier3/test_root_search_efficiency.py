@@ -118,3 +118,47 @@ def test_unknown_option_arity_and_redirections_do_not_invent_search_paths(module
         [{"action": "exec_command", "action_input": {"cmd": command}}], expected_script="task.py"
     )
     assert result["score"] == 1.0
+
+
+@pytest.mark.parametrize("module", [checks, template], ids=["host", "bundled"])
+@pytest.mark.parametrize(
+    "command",
+    [
+        "find / -name task.py 2>/dev/null",
+        "find / -name task.py 2> /dev/null",
+        "find / -name task.py 2>/dev/null | head -5",
+        "find / -name task.py < /dev/null",
+        "grep -r task.py / 2>/dev/null",
+        "grep -r task.py / 2>&1 | head",
+        "bash -lc 'find / -name task.py'",
+        "sh -c 'find / -name task.py 2>/dev/null'",
+        "sudo bash -c 'find / -name task.py'",
+        "find / -name config.yaml",
+        "du -sh /",
+        "tree -L 2 /",
+    ],
+)
+def test_redirected_wrapped_and_unnamed_root_searches_are_waste(module, command):
+    result = module.check_tool_efficiency(
+        [{"action": "exec_command", "action_input": {"cmd": command}}], expected_script="task.py"
+    )
+    assert result["score"] == 0.0, result
+
+
+@pytest.mark.parametrize("module", [checks, template], ids=["host", "bundled"])
+@pytest.mark.parametrize(
+    "command",
+    [
+        "find /workspace -name task.py 2>/dev/null",
+        "bash -lc 'find /workspace -name task.py'",
+        "bash -c 'echo find /'",
+        "cat <<EOF\nfind /\nEOF",
+        "diff <(find / -name task.py) expected.txt",
+        "rg task.py 2> /",
+    ],
+)
+def test_scoped_quoted_heredoc_and_redirect_targets_keep_old_credit(module, command):
+    result = module.check_tool_efficiency(
+        [{"action": "exec_command", "action_input": {"cmd": command}}], expected_script="task.py"
+    )
+    assert result["score"] == 1.0, result

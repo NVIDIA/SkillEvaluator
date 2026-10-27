@@ -225,7 +225,9 @@ def show_skill_changes() -> None:
     )
     with st.expander("Run summaries, lift and activation"):
         for agent, result in comparison["agents"].items():
-            st.text(agent)
+            original_model = data["runs"]["before"]["agents"][agent].get("model") or "Not recorded"
+            candidate_model = data["runs"]["after"]["agents"][agent].get("model") or "Not recorded"
+            st.text(f"{agent} · Original model: {original_model} · Candidate model: {candidate_model}")
             st.dataframe(
                 [{"Metric": metric, **values} for metric, values in result["aggregate"].items()], hide_index=True
             )

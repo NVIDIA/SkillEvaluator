@@ -8269,6 +8269,8 @@ def check_error_recovery(tool_calls, expected_script=None):
     def _is_failure(tc):
         obs = str(tc.get("observation", ""))
         exit_code = _exit_status(tc)
+        if tc.get("is_error") is True and exit_code != 1:
+            return True
         if exit_code is not None:
             return exit_code != 0 and not (exit_code == 1 and _is_quiet_negative_probe(tc, obs))
         # Only results without an exit status are judged by their text.

@@ -6,10 +6,14 @@
 from __future__ import annotations
 
 import json
+from copy import deepcopy
 from pathlib import Path
+
+import pytest
 
 from skillevaluator.tier3.eval_core.atif_helpers import extract_tool_calls_as_dicts
 from skillevaluator.tier3.eval_core.checks import check_error_recovery
+from skillevaluator.tier3.eval_core.codex_tool_call_normalizer import normalized_tool_call_error_flag
 from skillevaluator.tier3.eval_core.log_converters import (
     load_trajectory_with_fallback,
     synthetic_trajectory_from_claude_stream_jsonl,
@@ -442,3 +446,177 @@ def test_opencode_non_dict_tool_input_is_not_treated_as_shell_command():
     assert traj is not None
     tcs = extract_tool_calls_as_dicts(traj)
     assert tcs[0]["action_input"] == {}
+
+
+def _native_opencode_pair():
+    call = {"tool_call_id": "c1", "function_name": "bash", "arguments": {"command": "probe", "n": 1}}
+    native = {
+        "session_id": "ses_actual",
+        "agent": {"name": "opencode", "version": "1.18.33"},
+        "schema_version": "ATIF-v1.2",
+        "final_metrics": {"total_tokens": 31},
+        "steps": [
+            {
+                "source": "agent",
+                "message": "Run the probe",
+                "timestamp": "2026-10-27T00:00:00Z",
+                "metrics": {"prompt_tokens": 17},
+                "tool_calls": [call],
+                "observation": {"results": [{"source_call_id": "c1", "content": ""}]},
+            }
+        ],
+    }
+    event = {
+        "type": "tool_use",
+        "sessionID": "ses_actual",
+        "part": {
+            "type": "tool",
+            "tool": "bash",
+            "callID": "c1",
+            "sessionID": "ses_actual",
+            "state": {
+                "status": "completed",
+                "input": deepcopy(call["arguments"]),
+                "output": "",
+                "metadata": {"exit": 1},
+            },
+        },
+    }
+    return native, event
+
+
+def _load_native_opencode(tmp_path, native, events):
+    path = tmp_path / "trajectory.json"
+    path.write_text(json.dumps(native), encoding="utf-8")
+    (tmp_path / "opencode.txt").write_text("\n".join(json.dumps(e) for e in events), encoding="utf-8")
+    return load_trajectory_with_fallback(path)
+
+
+def test_native_opencode_supplement_preserves_trace_and_reaches_consumers(tmp_path):
+    native, event = _native_opencode_pair()
+    data, meta = _load_native_opencode(tmp_path, native, [event])
+    assert meta["source"] == "trajectory.json" and "added for 1 call" in meta["note"]
+    calls = extract_tool_calls_as_dicts(data)
+    assert calls[0]["observation"] == "status=completed\nexit_code=1\n"
+    assert check_error_recovery(calls)["first_attempt_clean"] is False
+    assert check_error_recovery(calls)["score"] == 0
+    data["steps"][0]["observation"]["results"].pop(0)
+    assert data == native  # Includes original output, input, turns, timestamps and token metrics.
+
+
+def test_native_opencode_error_only_and_large_output_are_preserved(tmp_path):
+    native, event = _native_opencode_pair()
+    step, state = native["steps"][0], event["part"]["state"]
+    state.update(status="error", error="File not found: example.txt")
+    state.pop("output")
+    state.pop("metadata")
+    step["observation"]["results"] = []
+    data, _ = _load_native_opencode(tmp_path, native, [event])
+    call = data["steps"][0]["tool_calls"][0]
+    assert normalized_tool_call_error_flag(data["steps"][0], call) is True
+    assert "File not found: example.txt" in extract_tool_calls_as_dicts(data)[0]["observation"]
+    state["output"] = "original output" * 1000
+    step["observation"]["results"] = [{"source_call_id": "c1", "content": state["output"]}]
+    data, _ = _load_native_opencode(tmp_path, native, [event])
+    assert data["steps"][0]["observation"]["results"][-1]["content"] == state["output"]
+    assert "File not found: example.txt" in extract_tool_calls_as_dicts(data)[0]["observation"]
+
+
+@pytest.mark.parametrize(
+    "boundary",
+    [
+        "session",
+        "part_session",
+        "call_id",
+        "tool",
+        "bool_input",
+        "float_input",
+        "missing_input",
+        "duplicate_raw",
+        "duplicate_native",
+        "duplicate_result",
+        "output",
+        "native_flag",
+        "native_call_flag",
+        "pending",
+        "user",
+        "malformed_results",
+        "missing_session",
+        "partial_log",
+        "output_type",
+        "unscoped_result",
+        "empty_result_id",
+    ],
+)
+def test_native_opencode_supplement_refuses_uncertain_identity(tmp_path, boundary):
+    native, event = _native_opencode_pair()
+    step, part = native["steps"][0], event["part"]
+    events = [event]
+    if boundary == "session":
+        event["sessionID"] = "stale"
+    elif boundary == "part_session":
+        part["sessionID"] = "stale"
+    elif boundary == "call_id":
+        part["callID"] = "different"
+    elif boundary == "tool":
+        part["tool"] = "read"
+    elif boundary in ("bool_input", "float_input"):
+        part["state"]["input"]["n"] = True if boundary == "bool_input" else 1.0
+    elif boundary == "missing_input":
+        part["state"].pop("input")
+    elif boundary == "duplicate_raw":
+        events.append(deepcopy(event))
+    elif boundary == "duplicate_native":
+        native["steps"].append(deepcopy(step))
+    elif boundary == "duplicate_result":
+        step["observation"]["results"].append(deepcopy(step["observation"]["results"][0]))
+    elif boundary == "output":
+        part["state"]["output"] = "different"
+    elif boundary == "native_flag":
+        step["observation"]["results"][0]["extra"] = {"tool_result_is_error": False}
+    elif boundary == "native_call_flag":
+        step["tool_calls"][0]["is_error"] = False
+    elif boundary == "pending":
+        part["state"]["status"] = "running"
+    elif boundary == "user":
+        step["source"] = "user"
+    elif boundary == "malformed_results":
+        step["observation"]["results"] = 42
+    elif boundary == "missing_session":
+        native.pop("session_id")
+    elif boundary == "partial_log":
+        events = [{"type": "tool_use", "part": {"callID": "c1"}}]
+    elif boundary == "output_type":
+        step["observation"]["results"][0]["content"] = True
+        part["state"]["output"] = 1
+    elif boundary in ("unscoped_result", "empty_result_id"):
+        result = {"content": "exit_code=0"}
+        if boundary == "empty_result_id":
+            result["source_call_id"] = ""
+        step["observation"]["results"].append(result)
+    data, meta = _load_native_opencode(tmp_path, native, events)
+    assert data == native
+    assert meta["source"] == "trajectory.json" and meta["warning"] is None
+    assert "skipped" in meta["note"] or "added for 0 call" in meta["note"]
+
+
+@pytest.mark.parametrize("exit_value", [None, True, False, 1.0, "1", float("inf")])
+def test_native_opencode_never_coerces_or_infers_exit_status(tmp_path, exit_value):
+    native, event = _native_opencode_pair()
+    event["part"]["state"]["metadata"]["exit"] = exit_value
+    data, _ = _load_native_opencode(tmp_path, native, [event])
+    observation = extract_tool_calls_as_dicts(data)[0]["observation"]
+    assert "status=completed" in observation and "exit_code=" not in observation
+
+
+@pytest.mark.parametrize(("actual_exit", "quoted_exit"), [(17, 0), (0, 17)])
+def test_native_opencode_actual_exit_precedes_status_quoted_in_stdout(tmp_path, actual_exit, quoted_exit):
+    native, event = _native_opencode_pair()
+    output = f"exit_code={quoted_exit}\nThe diagnostic text above is an example."
+    native["steps"][0]["observation"]["results"][0]["content"] = output
+    event["part"]["state"].update(output=output, metadata={"exit": actual_exit})
+    data, _ = _load_native_opencode(tmp_path, native, [event])
+    calls = extract_tool_calls_as_dicts(data)
+    assert calls[0]["observation"].startswith(f"status=completed\nexit_code={actual_exit}\n")
+    assert check_error_recovery(calls)["first_attempt_clean"] is (actual_exit == 0)
+    assert data["steps"][0]["observation"]["results"][-1]["content"] == output

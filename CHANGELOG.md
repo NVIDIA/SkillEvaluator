@@ -81,6 +81,13 @@ All notable changes to SkillEvaluator are documented in this file.
 
 ### Fixed
 
+- Native OpenCode traces retain missing status, error and integer exit-code
+  evidence from uniquely matched raw log calls. Existing turns, output and token
+  metrics stay intact; ambiguous, mismatched or already annotated calls remain
+  unchanged, and loader diagnostics report supplementation. Actual exit metadata
+  precedes status text quoted in stdout. Explicit tool-error flags remain failures
+  even without recognizable diagnostic text; ordinary quiet exit-1 probes retain
+  their existing exception.
 - Combined Tier 3 grading retains custom-check diagnostics after a standard-grader
   failure while keeping the evaluation failed and excluded from performance scores.
 - Pin the sandboxed OpenCode CLI to `1.18.33` through the existing Harbor
@@ -89,8 +96,8 @@ All notable changes to SkillEvaluator are documented in this file.
   includes them in fault counts and failure verdicts/report reasons. Host and
   bundled verifier detection agree and use a result's execution status when it
   has one: a Codex exit code, a whole `exit code N` line, or Harbor marking a
-  Claude Code result as successful. Only results without a status, such as
-  OpenCode's, are judged by their text: tracebacks, `error:` lines, pytest,
+  Claude Code result as successful. Only results without a status are judged
+  by their text: tracebacks, `error:` lines, pytest,
   jest, go test, tsc and npm failures and OpenCode's timeout note count, while
   `0 errors`, exception handlers, numeric timeout settings and type annotations
   do not. Exit-1 probes with no other output (`grep`, `rg`, `test`, `diff`,

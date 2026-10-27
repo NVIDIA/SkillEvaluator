@@ -42,6 +42,22 @@ def _codex_output(exit_code: int, output: str = "") -> str:
     )
 
 
+@pytest.mark.parametrize(
+    "command,observation,is_error,clean",
+    [
+        ("python probe.py", "exit_code=0\nQuoted stdout example.", True, False),
+        ("python probe.py", "The tool declined this operation.", True, False),
+        ("grep -q needle missing-content.txt", "exit_code=1", True, True),
+        ("python probe.py", "exit_code=17\nQuoted stdout example.", False, True),
+    ],
+)
+def test_explicit_error_flag_overrides_output_without_changing_quiet_probe_exception(
+    checker, command, observation, is_error, clean
+):
+    result = checker([{**_call(command, observation), "is_error": is_error}])
+    assert result["first_attempt_clean"] is clean
+
+
 def test_failure_with_no_retry_is_not_first_attempt_clean(checker):
     """A failure that is never retried must not score 1.0 / passed-clean."""
     result = checker([_call("pytest tests/test_api.py -x", "ERROR: test_create_user failed\nexit code 1")])
@@ -635,10 +651,10 @@ def test_claude_code_error_flag_still_fails(trajectory_checker, command, output,
     "content,score",
     [
         ("Command timed out after 2m 0.0s", 0.0),
-        ("Permission to use Bash with command rm -rf build has been denied.", 1.0),
+        ("Permission to use Bash with command rm -rf build has been denied.", 0.0),
     ],
 )
-def test_claude_code_error_flag_without_exit_status_uses_text(trajectory_checker, content, score):
+def test_claude_code_error_flag_without_exit_status_is_still_a_failure(trajectory_checker, content, score):
     trajectory = _claude_code_trajectory(("rm -rf build", "", 0))
     result_entry = trajectory["steps"][0]["observation"]["results"][0]
     result_entry["content"] = f"{content}\n\n[error] tool reported failure"

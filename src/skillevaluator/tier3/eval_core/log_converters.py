@@ -16,6 +16,7 @@ from __future__ import annotations
 
 import json
 import re
+from collections import defaultdict
 from pathlib import Path
 from typing import Any
 
@@ -1002,6 +1003,106 @@ def synthetic_trajectory_from_codex_txt(text: str) -> dict[str, Any] | None:
     return None
 
 
+def _supplement_opencode_results(data: dict[str, Any], logs: Path) -> str | None:
+    """Fill Harbor's missing result metadata only when raw/native identity is unambiguous."""
+    if not isinstance(data.get("agent"), dict) or data["agent"].get("name") != "opencode":
+        return None
+    path = logs / "opencode.txt"
+    try:
+        if not path.is_file() or path.is_symlink():
+            return None
+        with path.open(encoding="utf-8", errors="replace") as stream:
+            text = stream.read(32 * 1024 * 1024 + 1)
+        if len(text) > 32 * 1024 * 1024:
+            return "OpenCode result supplement skipped: log exceeds 32M-character limit"
+    except OSError as exc:
+        return f"OpenCode result supplement unavailable: {exc}"
+    session = data.get("session_id")
+    if not isinstance(session, str) or not session or session == "unknown":
+        return "OpenCode result supplement skipped: native session identity unavailable"
+    calls, results, events = defaultdict(list), defaultdict(list), defaultdict(list)
+    for step in data["steps"]:
+        if not isinstance(step, dict):
+            return "OpenCode result supplement skipped: malformed native step"
+        native_calls, observation = step.get("tool_calls") or [], step.get("observation", {})
+        if not isinstance(native_calls, list) or not all(isinstance(call, dict) for call in native_calls):
+            return "OpenCode result supplement skipped: malformed native calls"
+        if not isinstance(observation, dict) or not isinstance(observation.get("results", []), list):
+            return "OpenCode result supplement skipped: malformed native observations"
+        for call in native_calls:
+            if isinstance(call, dict) and isinstance(call.get("tool_call_id"), str):
+                calls[call["tool_call_id"]].append((step, call))
+        for result in observation.get("results", []):
+            if (
+                not isinstance(result, dict)
+                or not isinstance(result.get("source_call_id"), str)
+                or not result["source_call_id"]
+            ):
+                return "OpenCode result supplement skipped: unscoped native observations"
+            results[result["source_call_id"]].append((step, result))
+    for event in _iter_jsonl_dicts(text):
+        part = event.get("part")
+        if event.get("type") == "tool_use" and isinstance(part, dict) and isinstance(part.get("callID"), str):
+            events[part["callID"]].append(event)
+    added = 0
+    for call_id, owners in calls.items():
+        if not call_id or len(owners) != 1 or len(events[call_id]) != 1 or len(results[call_id]) > 1:
+            continue
+        step, call = owners[0]
+        event = events[call_id][0]
+        part, state = event["part"], event["part"].get("state")
+        if (
+            step.get("source") != "agent"
+            or event.get("sessionID") != session
+            or part.get("sessionID", session) != session
+        ):
+            continue
+        if not isinstance(state, dict) or state.get("status") not in ("completed", "error"):
+            continue
+        if not isinstance(state.get("input"), dict) or not isinstance(call.get("arguments"), dict):
+            continue
+        if part.get("type") != "tool" or not isinstance(part.get("tool"), str) or not part["tool"]:
+            continue
+        if part["tool"] != call.get("function_name"):
+            continue
+        if any(
+            k in record
+            for record in (call, step.get("observation", {}))
+            for k in ("extra", "status", "error", "is_error", "exit_code")
+        ):
+            continue
+        try:
+            if json.dumps(state.get("input"), sort_keys=True, allow_nan=False) != json.dumps(
+                call.get("arguments"), sort_keys=True, allow_nan=False
+            ):
+                continue
+        except (TypeError, ValueError):
+            continue
+        previous = results[call_id]
+        if previous:
+            owner, result = previous[0]
+            if (
+                owner is not step
+                or set(result) - {"source_call_id", "content"}
+                or not isinstance(result.get("content"), str)
+                or result.get("content") != state.get("output")
+            ):
+                continue
+        elif state.get("output") is not None:
+            continue
+        metadata = state.get("metadata")
+        details = {"status": state["status"], "error": state.get("error")}
+        if isinstance(metadata, dict) and type(metadata.get("exit")) is int:
+            details["metadata"] = {"exit": metadata["exit"]}
+        content = _opencode_tool_observation(details) + ("\n" if previous else "")
+        _attach_tool_result([step], call_id, content, is_error=state["status"] == "error")
+        # Trusted execution metadata precedes stdout that may quote a different exit code.
+        observations = step["observation"]["results"]
+        observations.insert(0, observations.pop())
+        added += 1
+    return f"Native ATIF retained; OpenCode status/error evidence added for {added} call(s); {len(calls) - added} unmatched, ambiguous or annotated call(s) unchanged"
+
+
 def load_trajectory_with_fallback(
     trajectory_path: Path,
     logs_dir: Path | None = None,
@@ -1021,6 +1122,7 @@ def load_trajectory_with_fallback(
                 steps = data.get("steps")
                 if isinstance(steps, list) and len(steps) > 0:
                     meta["source"] = "trajectory.json"
+                    meta["note"] = _supplement_opencode_results(data, logs)
                     return data, meta
             meta["warning"] = "trajectory.json has no steps[]"
         except (json.JSONDecodeError, OSError) as e:

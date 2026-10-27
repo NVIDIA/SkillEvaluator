@@ -43,6 +43,10 @@ All notable changes to SkillEvaluator are documented in this file.
   destructive `rm` commands launched through `xargs`, whose additional targets
   may come from standard input or an argument file. Both graders recognize
   common options and wrappers while preserving separate cleanup commands.
+  Input contents are not evaluated, so this conservative policy also flags
+  legitimate scoped cleanup such as
+  `find /tmp/cache -name '*.pyc' | xargs rm -f` as a critical destructive-command
+  finding with a security score of 0.0.
 - Tier 3 security grading now normalizes deletion targets before exempting
   temporary-directory cleanup. Paths such as `/tmp/../workspace` and commands
   mixing temporary and non-temporary targets receive destructive-command

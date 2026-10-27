@@ -38,6 +38,13 @@ All notable changes to SkillEvaluator are documented in this file.
 
 ### Changed
 
+- Skill Improver records a bounded decision summary for LLM proposals, including
+  no-change decisions, and distinguishes skipped editors from attempted calls.
+  Unchanged candidates no longer recommend another evaluation of identical content.
+  Long explanations remain in the proposal and are explicitly shortened in the
+  receipt without invalidating otherwise valid edits or no-change decisions.
+- Behavior judging retains bounded execution-call evidence before long reports
+  consume the prompt budget, with matched returns and explicit coverage limits.
 - Tier 3 evidence recognizes OpenCode `filePath` and `patchText` arguments and
   keeps recent edit attempts alongside terminal tool results within existing
   evidence budgets. Patches remain labeled attempts, with tool outcomes retained.
@@ -70,6 +77,8 @@ All notable changes to SkillEvaluator are documented in this file.
 
 ### Fixed
 
+- Combined Tier 3 grading retains custom-check diagnostics after a standard-grader
+  failure while keeping the evaluation failed and excluded from performance scores.
 - Pin the sandboxed OpenCode CLI to `1.18.33` through the existing Harbor
   version option so evaluation runs do not silently adopt a new agent release.
 - Tier 3 error recovery now scores unrecovered command failures as zero and

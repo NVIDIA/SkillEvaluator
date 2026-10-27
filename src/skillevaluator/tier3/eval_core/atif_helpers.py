@@ -337,6 +337,49 @@ def _collect_file_change_evidence(traj: dict[str, Any]) -> list[str]:
     return list(reversed(changes))
 
 
+def _behavior_execution_evidence(traj: dict[str, Any], budget: int) -> str:
+    """Bounded actual tool calls, with explicit coverage rather than implied absence."""
+    execution_names = _BEHAVIOR_EXEC_TOOLS | {"shell_command"}
+    calls = [
+        (step, tc) for step, tc in iter_tool_calls(traj)
+        if step.get("source") == "agent"
+        if any(str(tc.get("function_name") or "").lower().rsplit(separator, 1)[-1] in execution_names
+               for separator in _TOOL_NAME_SEPARATORS)
+        or tc.get("_atif_normalization_status")
+    ]
+    if not calls or budget <= 0:
+        return ""
+    total = len(calls)
+    heading = (
+        "EXECUTION TOOL EVIDENCE (chronological; calls/returns do not prove task success)\n"
+        "Coverage: {shown}/{total} calls shown; {omitted} omitted; {clipped} clipped. "
+        "Other read/write history may also be incomplete.\n"
+    )
+    overhead = len(heading.format(shown=total, total=total, omitted=total, clipped=total))
+    shown = min(total, max(0, (budget - overhead) // 160))
+    if not shown:
+        return heading.format(shown=0, total=total, omitted=total, clipped=0)[:budget]
+    row_budget = (budget - overhead) // shown
+    rows, clipped = [], 0
+    for position in range(shown):
+        index = position * (total - 1) // (shown - 1) if shown > 1 else 0
+        step, tc = calls[index]
+        args = tc.get("arguments") or {}
+        args = args if isinstance(args, dict) else {}
+        command = _redact_evidence_text(str(args.get("command") or args.get("cmd") or args.get("code") or "[command unavailable]"))
+        status = tc.get("_atif_normalization_status") or tc.get("_atif_observation_status") or ""
+        if (error := normalized_tool_call_error_flag(step, tc)) is not None:
+            status = f"{status} is_error={error}"
+        full_identity = _redact_evidence_text(f"step={step.get('step_id', '?')} call={tc.get('tool_call_id', '?')} {status}")
+        identity = _truncate_for_behavior(full_identity, min(100, row_budget // 3))
+        excerpt = _truncate_for_behavior(command, min(256, row_budget - len(identity) - 70))
+        observed = _redact_evidence_text(_tool_call_observation(step, tc)) or "[no attributable observation text]"
+        observed_excerpt = _truncate_for_behavior(observed, min(500, row_budget - len(identity) - len(excerpt) - 12))
+        clipped += int(identity != full_identity or excerpt != command or observed_excerpt != observed)
+        rows.append(f"{identity}\n{excerpt}\nreturn: {observed_excerpt}")
+    return heading.format(shown=shown, total=total, omitted=total-shown, clipped=clipped) + "\n\n".join(rows)
+
+
 def build_behavior_evidence(
     traj: dict[str, Any],
     question: str,
@@ -365,7 +408,10 @@ def build_behavior_evidence(
                 effective_final_limit + _MIN_BEHAVIOR_HISTORY_HEADROOM,
             )
 
-    parts: list[str] = []
+    total_budget = max_chars
+    execution = _behavior_execution_evidence(traj, max_chars // 2)
+    parts = [execution] if execution else []
+    max_chars -= len(execution) + 2 if execution else 0
     remaining = max_chars
 
     file_changes = "\n\n".join(_collect_file_change_evidence(traj))
@@ -439,7 +485,7 @@ def build_behavior_evidence(
 
     remaining = _append_section_with_budget(parts, _SECTION_COMPACT_TOOL_HISTORY, history, remaining)
 
-    return "\n\n".join(parts)[:max_chars]
+    return "\n\n".join(parts)[:total_budget]
 
 
 _METRIC_EVIDENCE_REF_METRICS = ("accuracy", "goal_accuracy", "behavior_check")

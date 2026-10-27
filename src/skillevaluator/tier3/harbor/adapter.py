@@ -2331,8 +2331,10 @@ def _write_test_sh(task_dir: Path, *, grading_mode: str, custom_grader: bool) ->
     elif grading_mode == "default_plus_custom" and custom_grader:
         script = (
             prefix
-            + 'python3 -I "${evaluator_dir}/eval.py"\n'
+            + "default_status=0\n"
+            + 'python3 -I "${evaluator_dir}/eval.py" || default_status=$?\n'
             + 'python3 -I "${evaluator_dir}/custom_grader_runner.py" --mode default_plus_custom\n'
+            + 'exit "$default_status"\n'
         )
     else:
         script = prefix + 'python3 -I "${evaluator_dir}/eval.py"\n'

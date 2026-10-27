@@ -385,6 +385,7 @@ All editing modes use the same proposal format:
 ```json
 {
   "source_digest": "COPY_FROM_EVIDENCE_JSON",
+  "summary": "Evidence-based explanation of the proposed change or decision to abstain",
   "edits": [{
     "path": "SKILL.md",
     "old_text": "Exact existing text occurring once",
@@ -402,6 +403,18 @@ Routing and execution-friction scores are diagnostics: an agent can complete
 the task without using a skill, and a failed command does not establish who
 caused the failure. Check the independent outcome and observed evidence before
 turning either signal into an edit.
+Behavior judging retains bounded execution calls and available tool returns before
+long reports consume the evidence budget. Coverage text identifies omitted or
+clipped calls; it does not prove success or provide a complete read/write history.
+LLM proposals must include a nonempty `summary`, including the reason and missing
+evidence when no edit is proposed. This field remains optional for supplied
+deterministic and agent-command proposals. The receipt displays its first 2000
+characters in `proposal_summary`, marks shortening with `proposal_summary_truncated`,
+and records whether an editor invocation was attempted in `editor_invoked`. The full
+explanation stays in `edits.json` within the existing proposal size limit. It is
+unverified model rationale, not an acceptance verdict.
+An unchanged result recommends keeping the original, without requesting
+another evaluation of identical content.
 Both `evals/` and legacy `eval/` stay outside the editor packet and cannot be
 edited. Without failed discovery findings, LLM and agent-command modes return
 an unchanged candidate without invoking an editor.

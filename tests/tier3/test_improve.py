@@ -179,6 +179,10 @@ def test_no_failed_findings_skips_editor_calls(tmp_path, workspace, monkeypatch,
     )
     assert receipt["status"] == "unchanged"
     assert receipt["changed_files"] == []
+    assert receipt["editor_invoked"] is False
+    assert receipt["proposal_summary_truncated"] is False
+    assert "no eligible discovery" in receipt["proposal_summary"]
+    assert "no changed candidate" in receipt["next_step"]
     if mode == "agent-command":
         assert receipt["agent_command_execution"]["invoked"] is False
 
@@ -338,9 +342,11 @@ def test_incomplete_evidence_is_exported_but_blocks_automatic_edits(tmp_path, wo
         prepare_improvement(skill, run, tmp_path / "llm", mode="llm")
 
 
-def test_llm_uses_public_client_protocol_and_records_model(tmp_path, workspace, monkeypatch):
+@pytest.mark.parametrize("summary", ["The failed command matches the defect in SKILL.md.", "Evidence. " * 201])
+def test_llm_uses_public_client_protocol_and_records_model(tmp_path, workspace, monkeypatch, summary):
     skill, run, _ = workspace
     proposal = json.loads(proposal_for(tmp_path, skill, run).read_text())
+    proposal["summary"] = summary
 
     class LocalClient:
         def __init__(self, model):
@@ -351,6 +357,7 @@ def test_llm_uses_public_client_protocol_and_records_model(tmp_path, workspace, 
             assert "SECRET" not in instructions
             assert schema_name == "skill_improvement"
             assert response_schema["properties"]["edits"]["maxItems"] == 8
+            assert "summary" in response_schema["required"]
             return json.dumps(proposal)
 
     monkeypatch.setattr("skillevaluator.inference.client.LLMClient", LocalClient)
@@ -359,6 +366,39 @@ def test_llm_uses_public_client_protocol_and_records_model(tmp_path, workspace, 
     assert receipt["status"] == "candidate_created"
     assert json.loads((tmp_path / "llm" / "editor-response.txt").read_text()) == proposal
     assert receipt["editor_response_truncated"] is False
+    assert receipt["editor_invoked"] is True
+    assert receipt["proposal_summary"] == summary[:2000]
+    assert receipt["proposal_summary_truncated"] is (len(summary) > 2000)
+    assert json.loads((tmp_path / "llm" / "edits.json").read_text())["summary"] == summary
+
+
+@pytest.mark.parametrize("summary", ["No source defect is established.", None, "", " \n", 7, "x" * 2000, "雪" * 2001])
+def test_llm_abstention_bounds_display_without_rejecting_valid_explanation(tmp_path, workspace, monkeypatch, summary):
+    skill, run, _ = workspace
+    exported = prepare_improvement(skill, run, tmp_path / "export")
+    proposal = {"source_digest": exported["source_digest"], "edits": [], "summary": summary}
+
+    class LocalClient:
+        def __init__(self, model):
+            self.model = model
+
+        def completions(self, *_args, **_kwargs):
+            return json.dumps(proposal)
+
+    monkeypatch.setattr("skillevaluator.inference.client.LLMClient", LocalClient)
+    if isinstance(summary, str) and summary.strip():
+        receipt = prepare_improvement(skill, run, tmp_path / "llm", mode="llm")
+        assert receipt["status"] == "unchanged" and receipt["editor_invoked"]
+        assert receipt["proposal_summary"] == summary[:2000]
+        assert receipt["proposal_summary_truncated"] is (len(summary) > 2000)
+        assert json.loads((tmp_path / "llm" / "editor-response.txt").read_text())["summary"] == summary
+        assert json.loads((tmp_path / "llm" / "edits.json").read_text())["summary"] == summary
+        assert "no changed candidate" in receipt["next_step"]
+    else:
+        with pytest.raises(ValueError, match="Proposal summary"):
+            prepare_improvement(skill, run, tmp_path / "llm", mode="llm")
+        assert json.loads((tmp_path / "llm/receipt.json").read_text())["status"] == "failed"
+    assert (skill / "SKILL.md").read_text() == "Use broken command.\n"
 
 
 @pytest.mark.parametrize("response", ["I'll explain before giving JSON.", "x" * (1024 * 1024 + 1)], ids=["prose", "oversized"])

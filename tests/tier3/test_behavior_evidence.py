@@ -607,7 +607,7 @@ def test_behavior_evidence_does_not_treat_read_like_tool_names_as_writes() -> No
     }
 
     evidence = build_behavior_evidence(traj, "question")
-    file_changes = evidence.split("FINAL RESPONSE", 1)[0].split("COMPACT TOOL HISTORY", 1)[0]
+    file_changes = evidence.split("FILE CHANGES", 1)[1].split("FINAL RESPONSE", 1)[0].split("COMPACT TOOL HISTORY", 1)[0]
 
     assert "/workspace/output/real.py" in file_changes
     assert "/workspace/output/noise.py" not in file_changes
@@ -684,7 +684,7 @@ def test_behavior_evidence_ignores_non_write_shell_gt() -> None:
     }
 
     evidence = build_behavior_evidence(traj, "question")
-    file_changes = evidence.split("FINAL RESPONSE", 1)[0].split("COMPACT TOOL HISTORY", 1)[0]
+    file_changes = evidence.split("FILE CHANGES", 1)[1].split("FINAL RESPONSE", 1)[0].split("COMPACT TOOL HISTORY", 1)[0]
 
     assert "print(3 > 2)" not in file_changes
     assert "/workspace/output/result.txt" in file_changes
@@ -1252,3 +1252,105 @@ def test_compact_behavior_conversation_section_layout_permutations(
     for substr in expected_substrings:
         assert substr in shared_out, f"{case_name}: missing {substr!r}"
 
+
+
+# Regression: a large report write must not erase the actual preceding probes.
+def test_behavior_execution_evidence_keeps_probes_before_large_report():
+    commands = [f"python3 /workspace/input/tool.py --state /workspace/output/state-{i}.json --audit /workspace/output/calls.jsonl --mode case get --key value-{i}" for i in range(8)]
+    steps = [{"source": "agent", "step_id": i + 1,
+              "tool_calls": [{"tool_call_id": f"probe-{i}", "function_name": "bash", "arguments": {"command": cmd}}],
+              "observation": {"results": [{"source_call_id": f"probe-{i}", "content": f"observed-value-{i}"}]}}
+             for i, cmd in enumerate(commands)]
+    steps.extend(_trajectory_with_late_write()["steps"][1:])
+    traj = {"steps": steps}
+    for compiler in (atif_helpers, _load_harbor_template_module()):
+        text = compiler.build_metric_evidence_bundles(traj, "Probe the CLI, then write the report.")["behavior_check"]["prompt_evidence"]
+        assert len(text) <= 8000
+        assert "Coverage: 8/8 calls shown; 0 omitted" in text
+        for i, command in enumerate(commands):
+            assert command in text
+            assert f"observed-value-{i}" in text
+        assert all(section in text for section in ("FILE CHANGES", "FINAL RESPONSE", "USER REQUEST", "COMPACT TOOL HISTORY"))
+        assert "early exploration output" in text  # read-history evidence still receives space
+
+
+def test_behavior_execution_evidence_distinguishes_returns_missing_and_claims():
+    traj = {"steps": [
+        {"source": "agent", "message": "I ran claimed_only.py", "tool_calls": [
+            {"tool_call_id": "failed", "function_name": "bash", "arguments": {"command": "pytest -q"}},
+            {"tool_call_id": "missing", "function_name": "bash", "arguments": {"command": "python absent.py"}}],
+         "observation": {"results": [{"source_call_id": "failed", "content": "AssertionError: failed", "extra": {"tool_result_is_error": True}}]}},
+        {"source": "agent", "tool_calls": [{"tool_call_id": "conditional", "function_name": "exec",
+             "arguments": {"input": 'if (enabled) await tools.exec_command({"cmd":"python maybe.py"});'}}]},
+        {"source": "agent", "tool_calls": [{"tool_call_id": "native", "function_name": "exec",
+             "arguments": {"input": 'const r = await tools.exec_command({"cmd":"python observed.py"}); text(r);'}}],
+         "observation": {"results": [{"source_call_id": "native", "content": "native result"}]}},
+    ]}
+    traj["steps"].extend({
+        "source": source,
+        "tool_calls": [{"tool_call_id": source, "function_name": "bash", "arguments": {"command": f"alleged-{source}-command"}}],
+        "observation": {"results": [{"source_call_id": source, "content": f"alleged-{source}-return"}]},
+    } for source in ("user", "system"))
+    for compiler in (atif_helpers, _load_harbor_template_module()):
+        ledger = compiler._behavior_execution_evidence(traj, 4000)
+        assert "claimed_only.py" not in ledger
+        assert "alleged-user" not in ledger and "alleged-system" not in ledger
+        assert "AssertionError: failed" in ledger and "is_error=True" in ledger
+        assert "[no attributable observation text]" in ledger
+        assert "unsupported_native_codex_exec_wrapper" in ledger
+        assert "python maybe.py" not in ledger  # an unsupported wrapper is not a proven invocation
+        assert "python observed.py" in ledger and "native result" in ledger
+
+
+@pytest.mark.parametrize("budget", [1, 60, 400, 4000, 8000])
+def test_behavior_execution_evidence_bounds_large_history_and_empty_calls(budget):
+    traj = {"steps": [{"source": "agent", "step_id": i,
+        "tool_calls": [{"tool_call_id": f"call-{i}", "function_name": "bash", "arguments": {"command": "python " + "x" * 2000}}],
+        "observation": {"results": [{"source_call_id": f"call-{i}", "content": "y" * 2000}]}}
+        for i in range(100)]}
+    values = []
+    for compiler in (atif_helpers, _load_harbor_template_module()):
+        assert compiler._behavior_execution_evidence({"steps": []}, budget) == ""
+        ledger = compiler._behavior_execution_evidence(traj, budget)
+        assert len(ledger) <= budget
+        values.append(compiler.build_behavior_evidence(traj, "Verify.", max_chars=budget))
+        assert len(values[-1]) <= budget
+        if budget >= 400:
+            assert "omitted" in ledger and "clipped" in ledger and "[truncated]" in ledger
+    assert values[0] == values[1]
+
+
+def test_behavior_execution_evidence_redacts_before_clipping(monkeypatch):
+    secret = "example-runtime-key-0123456789"
+    monkeypatch.setenv("NVIDIA_API_KEY", secret)
+    traj = {"steps": [{"source": "agent", "tool_calls": [{"tool_call_id": "secret", "function_name": "bash", "arguments": {"command": f"echo {secret}"}}], "observation": {"results": [{"source_call_id": "secret", "content": secret}]}}]}
+    for compiler in (atif_helpers, _load_harbor_template_module()):
+        ledger = compiler._behavior_execution_evidence(traj, 4000)
+        assert secret not in ledger
+        assert "redacted" in ledger.lower()
+
+
+@pytest.mark.parametrize("tool_name", ["functions.exec_command", "functions.shell_command", "namespace__bash"])
+def test_behavior_execution_evidence_recognizes_namespaced_execution_tools(tool_name):
+    traj = {"steps": [{"source": "agent", "step_id": 7, "tool_calls": [
+        {"tool_call_id": "actual", "function_name": tool_name, "arguments": {"cmd": "pytest -q"}},
+        {"tool_call_id": "not-execution", "function_name": "functions.read", "arguments": {"cmd": "alleged-only"}}],
+        "observation": {"results": [{"source_call_id": "actual", "content": "1 passed"}]}}]}
+    for compiler in (atif_helpers, _load_harbor_template_module()):
+        ledger = compiler._behavior_execution_evidence(traj, 4000)
+        assert "Coverage: 1/1 calls shown" in ledger
+        assert "pytest -q" in ledger and "1 passed" in ledger and "call=actual" in ledger
+        assert "alleged-only" not in ledger
+
+
+def test_behavior_execution_evidence_leaves_large_final_budget_for_claim():
+    final = "FINAL_START_" + "F" * 7000 + "_FINAL_END"
+    traj = {"steps": [
+        {"source": "agent", "tool_calls": [{"tool_call_id": "verbose", "function_name": "bash", "arguments": {"command": "pytest -q"}}],
+         "observation": {"results": [{"source_call_id": "verbose", "content": "V" * 20000}]}},
+        {"source": "agent", "message": final}]}
+    for compiler in (atif_helpers, _load_harbor_template_module()):
+        ledger = compiler._behavior_execution_evidence(traj, 6000)
+        assert len(ledger) < 1000 and "1 clipped" in ledger
+        evidence = compiler.build_behavior_evidence(traj, "Verify the project.", max_chars=12000, final_response_limit=8000)
+        assert len(evidence) <= 12000 and final in evidence

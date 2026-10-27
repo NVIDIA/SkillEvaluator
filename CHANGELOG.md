@@ -10,7 +10,9 @@ All notable changes to SkillEvaluator are documented in this file.
   character facts to Tier 3 accuracy, goal-accuracy, and behavior-check prompts
   without normalizing the evidence. The operator setting is verifier-only;
   enabling it selects the prompt-based goal judge instead of the optional RAGAS
-  route. Existing prompts remain unchanged when the setting is unset.
+  route. Metadata uses the same text rendering as the judge prompts, including
+  numeric and nullable fields. Existing prompts remain unchanged when the
+  setting is unset.
 
 - `--quality-config PATH` on `validate`, `quality-check`, and `tier1` loads the
   deterministic quality check's expected Markdown headings from a YAML file

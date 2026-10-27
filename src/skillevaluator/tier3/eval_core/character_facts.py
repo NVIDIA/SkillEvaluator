@@ -65,11 +65,14 @@ def format_character_facts(
     )
 
 
-def append_character_facts(prompt: str, **evidence: str) -> str:
-    """Append bounded facts outside evidence sections, only when enabled."""
+def append_character_facts(prompt: str, **evidence: object) -> str:
+    """Append bounded facts for the evidence's prompt representation, when enabled."""
     if not character_facts_enabled():
         return prompt
-    panels = [facts for label, text in evidence.items() if (facts := format_character_facts(text, label=label))]
+    # Match the empty format spec used by the judges' str.format/f-string fields.
+    panels = [
+        facts for label, value in evidence.items() if (facts := format_character_facts(format(value), label=label))
+    ]
     if not panels:
         return prompt
     return prompt + "\n\n" + "\n\n".join(panels)

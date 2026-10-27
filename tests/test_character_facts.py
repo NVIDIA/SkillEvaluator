@@ -73,6 +73,68 @@ def test_enabled_metadata_is_separate_and_optional(monkeypatch, setting):
     assert append_character_facts("original", agent_text="\u00a0").startswith("original\n\nCharacter facts")
 
 
+@pytest.mark.parametrize("value", [None, 42, 0, 1.5, True, False, ["\u00a0"], {"answer": "\u200b"}])
+def test_non_string_evidence_preserves_its_prompt_representation(monkeypatch, value):
+    monkeypatch.setenv("SKILL_EVAL_JUDGE_CHARACTER_FACTS", "1")
+    prompt = f"Evidence: {value}"
+    # Container representations already escape these characters; the facts must
+    # describe the rendered representation, not recursively inspect its values.
+    assert append_character_facts(prompt, evidence=value) == prompt
+
+
+def test_character_facts_use_the_same_formatting_as_prompt_placeholders(monkeypatch):
+    class FormattedEvidence:
+        def __str__(self):
+            return "different text"
+
+        def __format__(self, spec):
+            assert spec == ""
+            return "42\u00a0"
+
+    monkeypatch.setenv("SKILL_EVAL_JUDGE_CHARACTER_FACTS", "1")
+    value = FormattedEvidence()
+    prompt = f"Evidence: {value}"
+    result = append_character_facts(prompt, evidence=value)
+    assert result.startswith(prompt + "\n\nCharacter facts")
+    assert "line 1, column 3: U+00A0 NO-BREAK SPACE" in result
+    assert json.loads(result.split("escaped context: ")[1]) == "42\u00a0"
+
+
+@pytest.mark.parametrize("implementation", ["host", "verifier"])
+@pytest.mark.parametrize("judge_name", ["judge_accuracy", "judge_goal_accuracy"])
+@pytest.mark.parametrize("ground_truth", [42, True, {"answer": [42, "\u00a0"]}])
+def test_judges_accept_non_string_fields_with_character_facts(monkeypatch, implementation, judge_name, ground_truth):
+    judge = llm_judge if implementation == "host" else load_harbor_eval_template()
+    payload = json.dumps(
+        {"score": 0.0, "reason": "test verdict", "achieved": False, "user_goal": "test", "end_state": "test"}
+    )
+    mock = MagicMock(return_value=(payload, None))
+    monkeypatch.setattr(judge, "call_public_llm", mock)
+    if implementation == "verifier":
+        monkeypatch.setattr(judge, "_public_provider", lambda: "anthropic")
+        if judge_name == "judge_goal_accuracy":
+            mock = MagicMock(return_value=(payload, None, {}))
+            monkeypatch.setattr(judge, "_call_public_llm_with_provenance", mock)
+    args = (None, ground_truth, "42\u00a0")
+    if judge_name == "judge_goal_accuracy":
+        args += (None,)
+    monkeypatch.delenv("SKILL_EVAL_JUDGE_CHARACTER_FACTS", raising=False)
+    original_result = getattr(judge, judge_name)(*args)
+    assert original_result["score"] == 0.0
+    original_prompt = mock.call_args.args[0]
+    assert str(ground_truth) in original_prompt
+    assert "None" in original_prompt
+    mock.reset_mock()
+    monkeypatch.setenv("SKILL_EVAL_JUDGE_CHARACTER_FACTS", "1")
+    assert getattr(judge, judge_name)(*args) == original_result
+    mock.assert_called_once()
+    augmented = mock.call_args.args[0]
+    assert augmented.startswith(original_prompt + "\n\nCharacter facts")
+    assert 'Character facts for "agent_text"' in augmented
+    assert "line 1, column 3: U+00A0 NO-BREAK SPACE" in augmented
+    assert 'Character facts for "ground_truth"' not in augmented
+
+
 @pytest.mark.parametrize("implementation", ["host", "verifier"])
 @pytest.mark.parametrize("judge_name", ["judge_accuracy", "judge_goal_accuracy", "judge_behavior_check"])
 def test_all_judges_preserve_original_evidence_and_append_facts(monkeypatch, implementation, judge_name):

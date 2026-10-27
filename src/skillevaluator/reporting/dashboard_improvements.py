@@ -246,11 +246,11 @@ def show_skill_changes() -> None:
                 "Case": case["entry_id"],
                 "Original attempts": counts["before", agent, case["entry_id"]],
                 "Candidate attempts": counts["after", agent, case["entry_id"]],
-                "Status": case["status"],
-                "Outcome gains": ", ".join(case["outcome_gains"])
+                "Signal status": case["status"],
+                "Outcome gains": ", ".join(case["outcome_gains"]) or "None"
                 if case["outcome_gains"] is not None
                 else "Not assessed",
-                "Outcome regressions": ", ".join(case["outcome_regressions"])
+                "Outcome regressions": ", ".join(case["outcome_regressions"]) or "None"
                 if case["outcome_regressions"] is not None
                 else "Not assessed",
                 "Other declines": ", ".join(case["other_metric_declines"]),

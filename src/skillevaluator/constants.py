@@ -409,6 +409,24 @@ RUBRIC_MAX_TOKENS = MAX_COMPLETION_TOKENS
 RUBRIC_MIN_SCORE = 60
 RUBRIC_REASONING_EFFORT = "medium"
 
+# Reasoning models spend the completion budget on hidden reasoning before any
+# visible content, so a small cap truncates the JSON mid-object (measured at
+# 4096: reasoning_tokens=4000, text_tokens=0). Raise the cap for known reasoning
+# families, matched against the resolved model of each request (16384 on the
+# anthropic provider). An explicit max_tokens argument to RubricJudge
+# overrides this default, subject to provider and model limits; there is no
+# environment-variable override.
+RUBRIC_REASONING_MODEL_MARKERS = (
+    "deepseek-r",
+    "deepseek-v4",
+    "o1",
+    "o3",
+    "o4",
+    "gpt-5",
+    "reasoning",
+)
+RUBRIC_REASONING_MAX_TOKENS = 32768
+
 RUBRIC_CRITERIA = [
     {
         "id": "description_clarity",

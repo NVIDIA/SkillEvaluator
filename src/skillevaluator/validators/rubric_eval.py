@@ -23,7 +23,14 @@ from collections import Counter
 from pathlib import Path
 from typing import Any
 
-from skillevaluator.constants import RUBRIC_CRITERIA, RUBRIC_MAX_TOKENS, RUBRIC_MIN_SCORE, RUBRIC_REASONING_EFFORT
+from skillevaluator.constants import (
+    RUBRIC_CRITERIA,
+    RUBRIC_MAX_TOKENS,
+    RUBRIC_MIN_SCORE,
+    RUBRIC_REASONING_EFFORT,
+    RUBRIC_REASONING_MAX_TOKENS,
+    RUBRIC_REASONING_MODEL_MARKERS,
+)
 from skillevaluator.inference.client import LLMClient
 from skillevaluator.logging_config import get_logger
 from skillevaluator.models.result import Finding, Severity, ValidationResult
@@ -217,6 +224,12 @@ class RubricJudge(LLMClient):
     """LLM judge that scores a skill against qualitative criteria."""
 
     default_max_tokens: int | None = RUBRIC_MAX_TOKENS
+    # A reasoning model burns the whole completion budget on hidden reasoning
+    # before emitting visible JSON, so the default cap truncates the answer
+    # mid-object. LLMClient raises the budget per request when the resolved
+    # model is in one of these families, unless max_tokens was explicit.
+    reasoning_max_tokens: int | None = RUBRIC_REASONING_MAX_TOKENS
+    reasoning_model_markers: tuple[str, ...] = RUBRIC_REASONING_MODEL_MARKERS
     default_reasoning_effort: str | None = RUBRIC_REASONING_EFFORT
     response_schema: dict[str, Any] | None = RUBRIC_JSON_SCHEMA
     schema_name: str = "rubric_evaluation"

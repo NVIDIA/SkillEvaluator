@@ -7,6 +7,7 @@ Tests ExternalTool, parse_json_output, create_temp_config, cvss_to_severity,
 and Tools registry with mocked subprocess and filesystem where appropriate.
 """
 
+import locale
 import os
 import sys
 from pathlib import Path
@@ -303,6 +304,64 @@ class TestExternalTool:
         assert result.stdout == '{"partial": true}'
         assert result.stderr == "still working"
         assert "timed out" in (result.error_message or "")
+
+    @staticmethod
+    def _python_child(monkeypatch: pytest.MonkeyPatch, codec: str, stdout: bytes, stderr: bytes) -> ToolResult:
+        """Run a real Python child that writes raw bytes, with ``codec`` as the selected text codec."""
+        if sys.flags.utf8_mode and codec != "utf-8":
+            pytest.skip("UTF-8 mode fixes the subprocess text codec to UTF-8")
+        monkeypatch.setattr(locale, "getencoding", lambda: codec)
+        monkeypatch.setenv("SKILLEVAL_TEST_PYTHON", sys.executable)
+        code = (
+            "import sys;"
+            f"sys.stdout.buffer.write(bytes.fromhex('{stdout.hex()}'));"
+            f"sys.stderr.buffer.write(bytes.fromhex('{stderr.hex()}'))"
+        )
+        tool = ExternalTool("Python", "python", override_env="SKILLEVAL_TEST_PYTHON")
+        return tool.run(["-I", "-c", code], log_command=False)
+
+    def test_run_decodes_non_utf8_output_tolerantly(self, monkeypatch: pytest.MonkeyPatch):
+        """A child emitting bytes outside the selected codec must not lose its captured streams.
+
+        A strict decode raises UnicodeDecodeError inside subprocess (in the
+        reader thread on Windows, leaving ``proc.stdout``/``proc.stderr`` as
+        None). Callers such as the SkillSpector wrapper then crash on
+        ``stderr.casefold()`` instead of reading the scanner's diagnostics.
+        """
+        result = self._python_child(
+            monkeypatch, "utf-8", stdout=b'{"ok": true}', stderr=b"WARNING path \xa1 not utf-8\r\n"
+        )
+
+        assert result.success is True
+        assert result.exit_code == 0
+        assert result.stdout == '{"ok": true}'
+        assert result.stderr == "WARNING path � not utf-8\n"
+
+    def test_run_keeps_the_selected_text_codec(self, monkeypatch: pytest.MonkeyPatch):
+        """Output in the parent's selected codec (a non-UTF-8 locale) keeps its non-ASCII paths."""
+        path = "café/中文.py"
+        result = self._python_child(
+            monkeypatch,
+            "gb18030",
+            stdout=f'{{"file": "{path}"}}'.encode("gb18030"),
+            stderr=f"warning: {path}\n".encode("gb18030"),
+        )
+
+        assert result.stdout == f'{{"file": "{path}"}}'
+        assert result.stderr == f"warning: {path}\n"
+
+    def test_run_decodes_text_with_replacement(self):
+        """subprocess.run keeps text mode but replaces undecodable bytes."""
+        mock_proc = CompletedProcess(args=["scanner"], returncode=0, stdout="out", stderr="err")
+        with (
+            patch("shutil.which", return_value="/usr/bin/scanner"),
+            patch("skillevaluator.utils.tool_runner.subprocess.run", return_value=mock_proc) as mock_run,
+        ):
+            result = ExternalTool("Scanner", "scanner").run([], log_command=False)
+
+        assert mock_run.call_args.kwargs.get("text") is True
+        assert mock_run.call_args.kwargs.get("errors") == "replace"
+        assert (result.stdout, result.stderr) == ("out", "err")
 
     def test_run_merges_extra_env_over_ambient(self):
         """env additions are merged onto os.environ, not substituted for it."""

@@ -46,7 +46,9 @@ All notable changes to SkillEvaluator are documented in this file.
   `rm` fragments with no parsed target are also flagged, preserving detection
   of deletions assembled from strings. Temporary cleanup inside backtick
   command substitutions, or followed by shell comments and file-descriptor
-  redirections, no longer produces false destructive-command findings.
+  redirections, no longer produces false destructive-command findings. Targets
+  after heredoc and here-string redirections are still checked; the input word
+  of a redirection is not treated as a deletion target.
 - Tier 3 error recovery now scores unrecovered command failures as zero and
   includes them in fault counts and failure verdicts/report reasons. Host and
   bundled verifier detection agree and use a result's execution status when it

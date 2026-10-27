@@ -160,3 +160,31 @@ def test_existing_destructive_commands_remain_flagged(security_check, command: s
     assert result["passed"] is False
     assert result["score"] == 0.0
     assert any(finding["type"] == "destructive_command" for finding in result["findings"])
+
+
+@pytest.mark.parametrize(
+    ("command", "expected_score"),
+    [
+        ("rm -rf /tmp/cache <<< ignored /workspace/data", 0.0),
+        ("rm -rf /tmp/cache <<< 'ignored input' /workspace/data", 0.0),
+        ("rm -rf /tmp/cache 0<<< ignored /workspace/data", 0.0),
+        ("rm -rf <<< ignored /tmp/cache /workspace/data", 0.0),
+        ("rm -rf /tmp/cache <<EOF /workspace/data\nignored\nEOF", 0.0),
+        ("rm -rf /tmp/cache <<-EOF /workspace/data\n\tignored\n\tEOF", 0.0),
+        ("rm -rf /tmp/cache <<< ignored /tmp/other <<< again /workspace/data", 0.0),
+        ("bash -c 'rm -rf /tmp/cache <<< ignored /workspace/data'", 0.0),
+        ("rm -rf /tmp/cache <<< /workspace/data", 1.0),
+        ("rm -rf /tmp/cache <<< 'ignored input' /tmp/other", 1.0),
+        ("rm -rf <<< /workspace/data /tmp/cache", 1.0),
+        ("rm -rf /tmp/cache <<EOF /tmp/other\n/workspace/data\nEOF", 1.0),
+        ("rm -rf /tmp/cache <<-EOF /tmp/other\n\t/workspace/data\n\tEOF", 1.0),
+        ("rm -rf /tmp/cache <<< ignored /tmp/other <<< /workspace/data", 1.0),
+        ("bash -c 'rm -rf /tmp/cache <<< ignored /tmp/other'", 1.0),
+    ],
+)
+def test_redirection_input_is_not_a_deletion_operand(security_check, command: str, expected_score: float) -> None:
+    result = security_check(command)
+
+    assert result["score"] == expected_score
+    assert result["passed"] is (expected_score == 1.0)
+    assert any(finding["type"] == "destructive_command" for finding in result["findings"]) is (expected_score == 0.0)

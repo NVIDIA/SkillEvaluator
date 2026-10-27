@@ -1886,9 +1886,8 @@ def _rm_targets_outside_tmp(command_text: str, _depth: int = 0) -> bool:
             if skip_next:
                 skip_next = False
                 continue
-            if _is_heredoc_redirect(raw_arg):
-                break
-            if _REDIRECTION_WORD_RE.fullmatch(raw_arg):
+            # Redirections consume one input word, not the remaining rm targets.
+            if _is_heredoc_redirect(raw_arg) or _REDIRECTION_WORD_RE.fullmatch(raw_arg):
                 skip_next = True
                 continue
             arg = raw_arg

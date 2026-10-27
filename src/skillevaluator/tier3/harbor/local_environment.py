@@ -8,14 +8,17 @@ from __future__ import annotations
 import asyncio
 import codecs
 import contextlib
+import errno
 import json
 import os
 import re
 import shlex
 import shutil
 import signal
+import stat
 import subprocess
 import sys
+import tempfile
 from pathlib import Path
 from typing import Any, NoReturn
 
@@ -36,6 +39,7 @@ from skillevaluator.tier3.harbor.progress import secret_values_from_environment
 from skillevaluator.tier3.harbor.secure_copy import copytree_secure
 from skillevaluator.tier3.harbor.stream_redaction import CommandOutputByteBudget, StreamingLogRedactor
 from skillevaluator.tier3.output_provenance import output_provenance_key_path
+from skillevaluator.utils.secure_fs import stat_is_link_or_reparse
 
 _SAFE_HOST_ENV = frozenset(
     {
@@ -730,15 +734,27 @@ class SkillEvaluatorLocalEnvironment(BaseEnvironment):
         target = self._resolve_path(target_dir)
         if not self._path_is_within_allowed_local_roots(target):
             raise ValueError(f"local mode upload target is outside the run directory: {target_dir}")
-        if target.exists():
-            shutil.rmtree(target)
-        if source.exists():
-            # Publish the validated tree directly. Precreating an empty target
-            # makes secure copying snapshot and merge a directory we just made.
-            copytree_secure(source, target)
-        else:
-            target.mkdir(parents=True, exist_ok=True)
-        self._rewrite_uploaded_scripts(target)
+        # Prepare and rewrite privately so a failed upload retains the previous
+        # verifier. The final secure copy handles overlays and rollback.
+        with tempfile.TemporaryDirectory(prefix="skillevaluator-local-upload-") as directory:
+            staged = Path(directory) / "bundle"
+            copytree_secure(source, staged)
+            self._rewrite_uploaded_scripts(staged)
+
+            # start() supplies an empty tests directory. Remove only that
+            # placeholder to avoid taking an unnecessary rollback snapshot.
+            try:
+                metadata = target.lstat()
+            except FileNotFoundError:
+                metadata = None
+            if metadata is not None and stat.S_ISDIR(metadata.st_mode) and not stat_is_link_or_reparse(metadata):
+                try:
+                    target.rmdir()
+                except OSError as exc:
+                    if exc.errno not in {errno.ENOTEMPTY, errno.EEXIST}:
+                        raise
+            # Harbor uploads shared tests followed by per-step overlays.
+            copytree_secure(staged, target, dirs_exist_ok=True)
 
     async def download_file(self, source_path: str, target_path: Path | str) -> None:
         source = self._resolve_path(source_path)

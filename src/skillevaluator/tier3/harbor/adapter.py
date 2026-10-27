@@ -220,7 +220,9 @@ _COMPOSE_ALLOWED_NETWORK_KEYS = frozenset({"attachable", "enable_ipv4", "enable_
 _COMPOSE_ALLOWED_VOLUME_KEYS = frozenset({"labels"})
 _VERIFIER_JUDGE_MODEL_ENV_VARS = frozenset({"LLM_JUDGE_MODEL", "SKILL_EVAL_JUDGE_MODEL"})
 _VERIFIER_JUDGE_FALLBACK_ENV_VARS = frozenset({"LLM_JUDGE_FALLBACK_MODELS"})
-_VERIFIER_JUDGE_CONTROL_ENV_VARS = _VERIFIER_JUDGE_MODEL_ENV_VARS | _VERIFIER_JUDGE_FALLBACK_ENV_VARS
+_VERIFIER_JUDGE_CONTROL_ENV_VARS = (
+    _VERIFIER_JUDGE_MODEL_ENV_VARS | _VERIFIER_JUDGE_FALLBACK_ENV_VARS | {"SKILL_EVAL_JUDGE_CHARACTER_FACTS"}
+)
 _VERIFIER_BUDGET_ENV_VARS = frozenset(
     {
         "SKILL_EVAL_ACCURACY_BUDGET",
@@ -2379,6 +2381,7 @@ def _copy_verifier(task_dir: Path) -> None:
         (_EVAL_CORE_DIR / "checks.py", "Deterministic grading checks"),
         (_EVAL_CORE_DIR / "secret_redaction.py", "Deterministic redaction helper"),
         (_EVAL_CORE_DIR / "codex_tool_call_normalizer.py", "Codex tool-call normalizer"),
+        (_EVAL_CORE_DIR / "character_facts.py", "Judge character-facts helper"),
         (_EVAL_CORE_DIR.parent.parent / "evidence.py", "Evidence-reference helper"),
     )
     for src, label in sources:

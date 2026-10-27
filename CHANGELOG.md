@@ -6,50 +6,14 @@ All notable changes to SkillEvaluator are documented in this file.
 
 ### Added
 
-- `tier3 evaluate` now leads with a case-first summary: a verdict line and one
-  row per `evals.json` case. With one agent, each row shows, for with and
-  without the skill, the pass count, per-attempt marks (`✓` pass, `✗` fail,
-  `⊘` did not run, `·` skipped after a pass) and mean score, plus an effect
-  column (`helps`, `hurts`, `both fail`, `better score`, `worse score`,
-  `no change`, `inconclusive`). With several agents, each agent gets a column
-  showing without-skill → with-skill marks and the pass-rate change. Success
-  rate, quality score, and dimensions follow. A "How to improve" list follows,
-  ranked by attempts lost and capped at three; each item names the case,
-  agent, issue type (`skill`, `skill not used`, `skill hurts`, `environment`,
-  `run error`, `eval case`, `missing input`, `goal not met`), one action, and an evidence
-  path, and is also written to `what_to_fix.json` in the run directory. When
-  nothing needs fixing it prints a one-line "nothing to fix" instead. The
-  verdict is `inconclusive` when attempts did not run. The per-evaluator and
-  per-dimension tables and metric findings moved behind the new `--verbose`
-  flag and remain in `report.html`.
-- `goal not met` flags with-skill attempts that pass on the aggregate score
-  while the judge scored goal accuracy 0.00 (for example, the agent only asked
-  for details).
-- `report.html` leads with the same case-based findings: "Verdict at a glance"
-  adds the per-case result, the highest-scoring agent versus the biggest skill
-  lift, and the goal-not-met count; "Conclusion & Next Steps" and the Insights
-  recommendations list the `what_to_fix.json` fixes (or "Nothing to fix").
-  Data fixes elsewhere: Pass@K shows attempts passed, a regressed passing
-  dimension reads "PASS · regressed" with its weakest signal, resource totals
-  are formatted with units and percent change, Attempt Details groups each
-  case's with/without rows and marks passes that missed the goal, and Error
-  Recovery lists only trials with faults, retries or warnings.
-- Reusable GitHub Actions onboarding for complete Tier 1 checks, with
-  pinned runtime/workflow consumer templates, affected-skill PR selection,
-  optional hosted reports and updated PR feedback. The new guide separates
-  basic scanning from publisher setup; public image publication and generated
-  release files require a reviewed manual release before consumer use. The
-  Tier 1 image is a multi-stage build with precompiled bytecode that ships only
-  the locked Semgrep, SkillSpector and SkillEvaluator environments, Gitleaks,
-  `ci/` and the license files. A release builds it without cached layers and
-  pushes the image it smoke-tested.
-- The reusable Tier 1 workflow scans up to four skills at once. The
-  `scan-workers` input (1 to 16) changes this, and `1` scans one skill at a
-  time. Each worker gets its own private home and temporary directory. Logs,
-  annotations and report rows keep skill order, and skills not started when the
-  scan time budget runs out are still reported as not evaluated. A timeout,
-  Ctrl-C or an error while saving results ends running scans together with
-  the scanner tools they started.
+- Opt-in `SKILL_EVAL_JUDGE_CHARACTER_FACTS=1` adds bounded, escaped Unicode
+  character facts to Tier 3 accuracy, goal-accuracy, and behavior-check prompts
+  without normalizing the evidence. The operator setting is verifier-only;
+  enabling it selects the prompt-based goal judge instead of the optional RAGAS
+  route. Metadata uses the same text rendering as the judge prompts, including
+  numeric and nullable fields. Existing prompts remain unchanged when the
+  setting is unset.
+
 - `--quality-config PATH` on `validate`, `quality-check`, and `tier1` loads the
   deterministic quality check's expected Markdown headings from a YAML file
   instead of the built-in list. Each `expected_headers` entry sets a `heading`

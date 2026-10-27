@@ -66,3 +66,16 @@ def test_missing_llm_key_requires_precise_configuration_failure(tmp_path):
     (tmp_path / "summary.json").write_text(json.dumps(summary))
     with pytest.raises(smoke.SmokeError):
         smoke.verify_case(tmp_path, "missing-llm-key", 1)
+
+
+@pytest.mark.parametrize("case", ["no-change", "missing-llm-key"])
+def test_real_github_rendered_markdown_is_accepted(tmp_path, case):
+    """Replay exact summary Markdown downloaded from the real image-verification run."""
+    summary = _no_change(tmp_path)
+    if case == "missing-llm-key":
+        summary.update(overall_status="error", error="LLM_API_KEY is required when LLM_ENABLED is true.")
+        summary["execution"]["llm_enabled"] = True
+    (tmp_path / "summary.json").write_text(json.dumps(summary))
+    captured = Path(__file__).with_name("fixtures") / f"smoke-{case}-summary.md"
+    (tmp_path / "summary.md").write_bytes(captured.read_bytes())
+    assert smoke.verify_case(tmp_path, case, 1 if case == "missing-llm-key" else 0)["verified"]

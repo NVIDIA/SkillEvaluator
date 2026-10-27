@@ -28,7 +28,10 @@ jobs:
         with:
           persist-credentials: false
       - name: Build the complete Tier 1 runtime
-        run: docker build -f ci/Dockerfile.tier1 -t skillevaluator-tier1:verify .
+        run: |
+          docker build -f ci/Dockerfile.tier1 \
+            --label org.opencontainers.image.revision="$GITHUB_SHA" \
+            -t skillevaluator-tier1:verify .
       - name: Exercise real scans and changed-skill selection
         run: python3 ci/smoke_image.py --image skillevaluator-tier1:verify --output "$RUNNER_TEMP/image-verification"
       - name: Retain integration evidence

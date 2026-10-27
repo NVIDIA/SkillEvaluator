@@ -155,6 +155,19 @@ def test_ci_validates_fern_on_the_required_python_312_context() -> None:
     assert "platform test matrix was skipped" not in docs_step["run"]
 
 
+def test_html_parser_patch_boundary_coverage_uses_available_runner_artifacts() -> None:
+    job = _load("ci.yml")["jobs"]["html-parser-compatibility"]
+    # Floating the OS can make these historical patch interpreters unavailable,
+    # preventing the compatibility regression tests from running at all.
+    assert job["runs-on"] == "ubuntu-24.04"
+    assert job["strategy"]["matrix"]["python-version"] == ["3.12.11", "3.13.5"]
+    setup_python = next(step for step in job["steps"] if step.get("uses", "").startswith("actions/setup-python@"))
+    assert setup_python["with"]["python-version"] == "${{ matrix.python-version }}"
+    commands = _runs(job)
+    assert "tests/validators/test_markdown.py" in commands
+    assert "tests/test_cli_html_parser_compat.py" in commands
+
+
 def test_ci_skips_every_other_required_job_only_after_classification() -> None:
     jobs = _load("ci.yml")["jobs"]
 

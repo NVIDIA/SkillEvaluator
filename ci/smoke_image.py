@@ -11,6 +11,7 @@ from __future__ import annotations
 
 import argparse
 import hashlib
+import html
 import json
 import os
 import re
@@ -188,6 +189,8 @@ def verify_case(directory: Path, case: str, exit_code: int) -> dict:
         _require((directory / name).is_file(), f"Required report missing: {name}")
     markdown = (directory / "summary.md").read_text(encoding="utf-8")
     _require(0 < len(markdown.encode()) <= 20 * 1024, "Actions summary must be present and bounded")
+    # CI Markdown deliberately escapes identifiers and may uppercase verdict labels.
+    visible = html.unescape(re.sub(r"\\([\\`*_{}\[\]()#+.!|~-])", r"\1", markdown))
     rows = summary.get("skills")
     _require(isinstance(rows, list), "Summary lacks skill rows")
     _require(summary.get("total") == len(rows), "Total count contradicts skill rows")
@@ -212,14 +215,14 @@ def verify_case(directory: Path, case: str, exit_code: int) -> dict:
             selection.get("mode") == "changed" and selection.get("discovered") == 2 and selection.get("selected") == [],
             "No-change selection evidence is missing",
         )
-        _require("No skills changed" in markdown, "No-change summary must explain that no skills changed")
+        _require("no skills changed" in visible.casefold(), "No-change summary must explain that no skills changed")
     elif case == "missing-llm-key":
         _require(
             exit_code == 1 and summary.get("overall_status") == "error" and summary.get("overall_passed") is False,
             "Absent LLM credentials must fail explicitly",
         )
         _require(
-            "LLM_API_KEY" in str(summary.get("error")) and "LLM_API_KEY" in markdown,
+            "LLM_API_KEY" in str(summary.get("error")) and "LLM_API_KEY" in visible,
             "Missing-key configuration diagnostic was not retained",
         )
         _require(summary.get("total_validators") == 0, "Missing-key rejection must precede scanning")

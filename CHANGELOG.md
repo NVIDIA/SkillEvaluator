@@ -6,6 +6,10 @@ All notable changes to SkillEvaluator are documented in this file.
 
 ### Added
 
+- A read-only **Skill changes** dashboard view connects cited discovery findings
+  to proposed edits and before/after validation results. It preserves native
+  verdicts alongside outcome gains and metric declines, and checks every retained
+  task's runtime source before associating results with a proposal.
 - `tier3 improve` stages reviewable skill candidates from retained discovery
   findings using export, LLM, deterministic edits, or a trusted local command.
   `tier3 compare-improvement` reports per-case and aggregate changes, distinguishes

@@ -4,7 +4,7 @@
 """Optional local Streamlit dashboard for quantitative Tier 3 reports.
 
 Run through ``skillevaluator dashboard`` so the dashboard extra is checked before
-starting Streamlit. Only normalized quantitative data is displayed or exported.
+starting Streamlit. Reports and explicitly selected improvement artifacts are read-only.
 """
 
 from __future__ import annotations
@@ -376,8 +376,14 @@ def main(paths: list[str] | None = None) -> None:
             for notice in notices:
                 st.text(notice)  # st.text parses neither Markdown nor HTML
     if not rows:
-        st.info("Upload JSON evaluation reports to start comparing results.")
-        st.caption("You can also open saved run directories with skillevaluator dashboard PATH [PATH …].")
+        from skillevaluator.reporting.dashboard_improvements import show_skill_changes
+
+        performance_tab, _, changes_tab = st.tabs(["Performance", "With vs without skill", "Skill changes"])
+        with performance_tab:
+            st.info("Upload JSON evaluation reports to start comparing results.")
+            st.caption("You can also open saved run directories with skillevaluator dashboard PATH [PATH …].")
+        with changes_tab:
+            show_skill_changes()
         return
 
     st.sidebar.header("Filter results")
@@ -406,11 +412,15 @@ def main(paths: list[str] | None = None) -> None:
             "No harness features are recorded in these reports. Add dashboard_metadata.harness_features to compare "
             "feature configurations; see Recorded harness features in the reports guide."
         )
-    performance_tab, comparison_tab = st.tabs(["Performance", "With vs without skill"])
+    from skillevaluator.reporting.dashboard_improvements import show_skill_changes
+
+    performance_tab, comparison_tab, changes_tab = st.tabs(["Performance", "With vs without skill", "Skill changes"])
     with performance_tab:
         _show_performance(performance_rows)
     with comparison_tab:
         _show_comparisons(dimension_rows)
+    with changes_tab:
+        show_skill_changes()
 
 
 if __name__ == "__main__":

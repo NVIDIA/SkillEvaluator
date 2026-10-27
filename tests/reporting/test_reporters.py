@@ -884,7 +884,7 @@ class TestTier3HarborCanonicalPayload:
                     "execution_errors": [],
                     "expected_attempts": 1,
                     "scored_attempts": 1,
-                    "with_skill": {"security": 1.0, "accuracy": 0.62, "goal_accuracy": 0.55},
+                    "with_skill": {"security": 1.0, "accuracy": 0.42, "goal_accuracy": 0.55},
                     "without_skill": {"security": 1.0, "accuracy": 0.50, "goal_accuracy": 0.40},
                     "rewards": [
                         {
@@ -892,7 +892,7 @@ class TestTier3HarborCanonicalPayload:
                             "entry_id": "log-analyzer-001",
                             "overall": 0.62,
                             "security": 1.0,
-                            "accuracy": 0.62,
+                            "accuracy": 0.42,
                             "goal_accuracy": 0.55,
                             "harbor_viewer": {
                                 "job_name": "log-analyzer-codex-with--20260624",

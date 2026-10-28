@@ -50,6 +50,17 @@ All notable changes to SkillEvaluator are documented in this file.
   with eligible free prototyping access. Installation adds extras as needed,
   and the guides separate quality results from full scanner and live-agent
   evidence.
+- The optional GitHub report publisher downloads only a small
+  `skill-evaluator-tier1-evidence-attempt-N` artifact holding `summary.json`
+  and each skill's JSON. At 99 skills the download drops from 4.2 MB to
+  0.46 MB, and HTML, SARIF and logs no longer count toward its 64 MiB limit.
+  A scan from an evaluator revision without this artifact must be rerun before
+  it can be published. The publisher also skips the Pages deploy when an
+  automatic run commits nothing new, installs uv into a private environment
+  instead of the runner's system Python, checks out only the tool files each
+  job needs and replaces site files atomically. It and the PR comment helper
+  share one GitHub client, which rejects sibling repository endpoints and
+  NaN or Infinity in JSON for both.
 
 ### Documentation
 

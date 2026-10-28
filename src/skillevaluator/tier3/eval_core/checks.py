@@ -6517,6 +6517,12 @@ def _search_path_is_root(value: str) -> bool:
     return value.startswith("/") and not posixpath.normpath(value).strip("/")
 
 
+def _assignment_written_unquoted(text: str, name: str) -> bool:
+    # Tokens lose their quoting, but the shell only treats an unquoted NAME= as
+    # an assignment; 'NAME=value' or NAME\=value is the command name instead.
+    return re.search(rf"(?:^|[\s;&|()]){re.escape(name)}=", text) is not None
+
+
 def _tool_searches_root(action: str, args: dict, text: str, depth: int = 0) -> bool:
     """Recognize explicit root search operands, not '/' inside a pattern.
 
@@ -6558,7 +6564,11 @@ def _tool_searches_root(action: str, args: dict, text: str, depth: int = 0) -> b
     for command in commands:
         assignments: dict[str, str] = {}
         index = 0
-        while index < len(command) and (assignment := _SHELL_ASSIGNMENT_RE.match(command[index])):
+        while (
+            index < len(command)
+            and (assignment := _SHELL_ASSIGNMENT_RE.match(command[index]))
+            and _assignment_written_unquoted(text, assignment.group(1))
+        ):
             assignments[assignment.group(1)] = assignment.group(2)
             index += 1
         index = _unwrap_shell_command(command, index, assignments)

@@ -9,6 +9,7 @@ import pytest
 
 from skillevaluator.models.quality import QualityScoreResult, score_to_grade
 from skillevaluator.quality_config import load_quality_config, quality_config_digest
+from skillevaluator.tier1.commands import run_validation
 from skillevaluator.validators.quality_score import QualityScoreValidator
 
 
@@ -130,6 +131,23 @@ def _write_issue_skill(
 def _finding_messages(skill_dir: Path) -> list[str]:
     result = QualityScoreValidator(min_score=0).validate(skill_dir)
     return [finding.message for finding in result.findings]
+
+
+def _write_metadata_skill(tmp_path: Path, metadata: str) -> Path:
+    """Write a skill whose frontmatter ``metadata`` is the given raw YAML value."""
+    skill_dir = tmp_path / "odd-metadata"
+    skill_dir.mkdir()
+    (skill_dir / "SKILL.md").write_text(
+        "---\n"
+        "name: odd-metadata\n"
+        "description: A focused skill. Use when testing malformed contributor metadata.\n"
+        f"metadata: {metadata}\n"
+        "---\n\n"
+        "# Odd Metadata\n\n"
+        "## Purpose\n\nThis skill verifies malformed metadata handling.\n\n"
+        "## Instructions\n\n1. Check quality findings.\n\n"
+    )
+    return skill_dir
 
 
 class TestScoreToGrade:
@@ -391,6 +409,28 @@ class TestQualityScoreValidator:
         result = QualityScoreValidator(min_score=0).validate(skill_dir)
 
         assert any("metadata.author" in finding.message for finding in result.findings)
+
+    @pytest.mark.parametrize("metadata", ["[author, tags]", '"author: Test User"', "true", "1.5", "2026-01-01"])
+    def test_non_mapping_metadata_counts_as_missing_fields(self, tmp_path, metadata):
+        """A list, string, or scalar ``metadata`` scores as absent metadata instead of being indexed."""
+        skill_dir = _write_metadata_skill(tmp_path, metadata)
+
+        result = QualityScoreValidator(min_score=0).validate(skill_dir)
+
+        messages = [finding.message for finding in result.findings]
+        assert "SKILL_SPEC recommended field missing: 'metadata.author'" in messages
+        assert "SKILL_SPEC recommended field missing: 'metadata.tags'" in messages
+
+    def test_non_mapping_metadata_is_reported_by_schema_not_a_crash(self, tmp_path):
+        """The quality check must not abort Tier 1 before the schema finding for ``metadata`` is reported."""
+        skill_dir = _write_metadata_skill(tmp_path, "[author, tags]")
+
+        results = run_validation(skill_dir, checks="schema,quality", on_check=lambda _check: None)
+
+        schema, quality = results
+        assert not schema.passed
+        assert any(finding.message.startswith("Field 'metadata':") for finding in schema.findings)
+        assert quality.metadata["quality_scores"]["skill_name"] == "odd-metadata"
 
     def test_xml_tags_in_description_remain_quality_error(self, tmp_path):
         """Real XML/HTML-like tags in descriptions are still flagged."""

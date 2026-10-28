@@ -634,11 +634,25 @@ def test_publisher_selects_the_evidence_artifact_not_the_full_reports():
 
 
 @pytest.mark.parametrize(
-    "name", ["skill-evaluator-tier1-attempt-1", "skill-evaluator-tier1", "skill-evaluator-tier1-evidence"]
+    "names",
+    [
+        # A failed or cancelled scan can stop before it writes any reports.
+        [],
+        ["skill-evaluator-tier1-attempt-1"],
+        ["skill-evaluator-tier1"],
+        ["skill-evaluator-tier1-evidence"],
+    ],
 )
-def test_missing_evidence_artifact_fails_clearly_without_reading_full_reports(name):
-    with pytest.raises(publisher.PublicationError, match=r"skill-evaluator-tier1-evidence-attempt-1\. Rerun the scan"):
-        publisher._select_artifact(ListingAPI([artifact_entry(name, 455)]), "owner/consumer", run_record())
+def test_missing_evidence_artifact_fails_clearly_without_reading_full_reports(names):
+    artifacts = [artifact_entry(name, 455) for name in names]
+    with pytest.raises(publisher.PublicationError) as raised:
+        publisher._select_artifact(ListingAPI(artifacts), "owner/consumer", run_record())
+    # Name every common cause; a scan that uploaded nothing is not an evaluator revision problem.
+    assert str(raised.value) == (
+        "The selected run attempt has no current report evidence artifact named "
+        "skill-evaluator-tier1-evidence-attempt-1. The scan may have stopped before writing reports, "
+        "the artifact may have expired, or the scan used an evaluator revision that does not upload it."
+    )
 
 
 @pytest.mark.parametrize(

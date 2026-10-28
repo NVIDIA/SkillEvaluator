@@ -622,7 +622,8 @@ def _select_artifact(api, repository: str, run: dict) -> dict:
     if not candidates:
         raise PublicationError(
             f"The selected run attempt has no current report evidence artifact named {name}. "
-            "Rerun the scan with an evaluator revision that uploads it."
+            "The scan may have stopped before writing reports, the artifact may have expired, "
+            "or the scan used an evaluator revision that does not upload it."
         )
     if len(candidates) != 1:
         raise PublicationError("The selected run attempt has ambiguous report artifacts.")

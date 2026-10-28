@@ -186,6 +186,19 @@ def test_shared_environment_renders_identically_from_many_threads(payload):
     assert all(document == expected[index % 2] for index, document in enumerate(documents))
 
 
+def test_only_standalone_reports_embed_the_export_json(payload):
+    standalone = render_retained_report(payload, skill_name="skill")
+    embedded = standalone.split('<script id="report-data" type="application/json">', 1)[1].split("</script>", 1)[0]
+    assert json.loads(embedded)["results"][0]["validator_name"] == payload["results"][0]["validator"]
+    assert 'onclick="exportJSON()"' in standalone
+    hosted = render_retained_report(
+        payload, skill_name="skill", context={"canonical_json_url": "skillevaluator-tier1.json"}
+    )
+    assert 'id="report-data"' not in hosted
+    assert 'href="skillevaluator-tier1.json" download' in hosted
+    assert 'onclick="exportJSON()"' not in hosted
+
+
 def test_not_applicable_and_incomplete_presentation_preserves_gate():
     lint = ValidationResult(validator_name="SCRIPT_LINT", validator_description="Scripts")
     lint.success_details.append(SuccessDetail(check_name="lint", message="No scripts/ or tools/ directory found"))

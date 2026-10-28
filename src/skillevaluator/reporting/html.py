@@ -2765,12 +2765,16 @@ class HTMLReporter(ReporterBase):
             },
             "skillspector_versions": tier1_skillspector_versions,
         }
-        report_json = (
-            json.dumps(report_data, indent=2, allow_nan=False)
-            .replace("<", "\\u003c")
-            .replace(">", "\\u003e")
-            .replace("&", "\\u0026")
-        )
+        # CI-native pages link Download JSON to the retained canonical file, so
+        # nothing on them reads an embedded copy. Only standalone reports embed it.
+        report_json = None
+        if not self.ci_context.get("canonical_json_url"):
+            report_json = (
+                json.dumps(report_data, indent=2, allow_nan=False)
+                .replace("<", "\\u003c")
+                .replace(">", "\\u003e")
+                .replace("&", "\\u0026")
+            )
 
         # Dynamically add Tier 3 tab when agent eval data is present
         active_tabs = list(self.tabs)

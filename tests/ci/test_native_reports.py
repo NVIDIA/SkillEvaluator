@@ -1,12 +1,16 @@
 # SPDX-License-Identifier: Apache-2.0
 """Native CI rendering preserves retained evidence and fails closed."""
 
+import base64
+import hashlib
 import json
+import re
 import shutil
+from html import unescape
 from pathlib import Path
 
 import pytest
-from ci.native_reports import render_native_reports
+from ci.native_reports import _InlineCode, render_native_reports
 from ci.run_tier1 import _summary
 
 from skillevaluator.models import Finding, ValidationResult
@@ -52,6 +56,20 @@ def _write_fixture(tmp_path: Path, failed=False):
     return _summary([row]), raw
 
 
+def _csp_hashes(document: str) -> set[str]:
+    policy = re.search(r'http-equiv="Content-Security-Policy" content="([^"]+)"', document)[1]
+    return set(re.findall(r"'(sha256-[^']+)'", unescape(policy)))
+
+
+def _inline_code_hashes(document: str) -> set[str]:
+    parser = _InlineCode()
+    parser.feed(document)
+    return {
+        "sha256-" + base64.b64encode(hashlib.sha256(code.encode()).digest()).decode()
+        for code in {*parser.scripts, *parser.handlers}
+    }
+
+
 @pytest.mark.parametrize("failed", [False, True])
 def test_native_reports_overwrite_artifact_html_keep_json_and_link_details(tmp_path, failed):
     summary, raw = _write_fixture(tmp_path, failed)
@@ -64,6 +82,9 @@ def test_native_reports_overwrite_artifact_html_keep_json_and_link_details(tmp_p
     assert 'href="skill-001/skillevaluator-tier1.html"' in index
     assert (tmp_path / "skill-001/skillevaluator-tier1.json").read_text() == raw
     assert "Content-Security-Policy" in native and "sha256-" in native and "unsafe-eval" not in native
+    # The page links the canonical JSON instead of embedding an unused copy.
+    assert 'id="report-data"' not in native
+    assert _csp_hashes(native) == _inline_code_hashes(native)
     assert "<img src=x onerror=alert(1)>" not in native
     assert "https://example.com/run/skill-001/skillevaluator-tier1.html" in (tmp_path / "details.md").read_text()
 

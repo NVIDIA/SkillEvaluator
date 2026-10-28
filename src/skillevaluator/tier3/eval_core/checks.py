@@ -1770,11 +1770,59 @@ def _allowed_workspace_skills(
     return {name for name in allowed if name}
 
 
+def _rm_group_end(text: str, start: int) -> int | None:
+    """Find a substitution's closing parenthesis without expanding its output."""
+    depth = 1
+    quote: str | None = None
+    index = start + 1
+    word_start = True
+    while index < len(text):
+        char = text[index]
+        if char == "\\" and quote != "'":
+            index += 2
+            word_start = False
+            continue
+        if quote:
+            if char == quote:
+                quote = None
+        elif char in "'\"":
+            quote = char
+        elif char == "#" and word_start:
+            end = text.find("\n", index)
+            index = len(text) if end < 0 else end
+            continue
+        elif char == "(":
+            depth += 1
+        elif char == ")":
+            depth -= 1
+            if depth == 0:
+                return index
+        word_start = char in " \t\n" or char in _SHELL_METACHARS
+        index += 1
+    return None
+
+
 def _rm_shell_tokens(command_text: str) -> tuple[list[str], list[str]] | None:
     """Keep rm operands separate from comments and backtick command payloads."""
     text = command_text.replace("\r\n", "\n")
     normalized: list[str] = []
     payloads: list[str] = []
+    # Data in a heredoc has its own quoting rules and must not break the
+    # surrounding shell. Keep broad rm inspection of script/patch bodies,
+    # but tokenize each body separately only when it contains a candidate.
+    spans = _heredoc_body_spans(text, "bash") if "<<" in text else []
+    if spans is None:
+        return None
+    pieces: list[str] = []
+    previous = 0
+    for start, end in spans:
+        pieces.extend((text[previous:start], "\n"))
+        body = text[start + 1 : end]
+        if re.search(r"\brm\s+-", body):
+            payloads.append(body)
+        previous = end
+    pieces.append(text[previous:])
+    text = "".join(pieces)
     quote: str | None = None
     word_start = True
     nested_syntax = False
@@ -1788,10 +1836,32 @@ def _rm_shell_tokens(command_text: str) -> tuple[list[str], list[str]] | None:
                 word_start = False
             index += 2
             continue
-        if quote is None and text.startswith("$'", index):
-            # shlex does not understand the escapes in ANSI-C quoted strings.
-            return None
-        if (quote != "'" and text.startswith(("$(", "${"), index)) or (
+        if quote is None and char == "$" and text[index + 1 : index + 2] == "'":
+            # ANSI-C quoted output stays unresolved. Its contents can still
+            # contain script text, but unrelated literals do not taint rm.
+            end = index + 2
+            while end < len(text) and text[end] != "'":
+                end += 2 if text[end] == "\\" else 1
+            if end >= len(text):
+                return None
+            payloads.append(text[index + 2 : end])
+            normalized.append("${__rm_ansi_c}")
+            word_start = False
+            index = end + 1
+            continue
+        if quote != "'" and text.startswith("$(", index):
+            end = _rm_group_end(text, index + 1)
+            if end is None:
+                return None
+            payloads.append(text[index + 2 : end])
+            # A substitution is one shell word even when it contains spaces
+            # or parentheses. Redirections consume the whole word, while rm
+            # operands keep unknown output and never gain an exemption.
+            normalized.append("${__rm_substitution}")
+            word_start = False
+            index = end + 1
+            continue
+        if (quote != "'" and text.startswith("${", index)) or (
             quote is None and text.startswith("((", index)
         ):
             nested_syntax = True
@@ -1825,9 +1895,13 @@ def _rm_shell_tokens(command_text: str) -> tuple[list[str], list[str]] | None:
             word_start = False
         elif char == "#" and word_start:
             # Expansions and arithmetic have their own quoting/comment rules.
-            # Do not discard text when this simple scan cannot settle them.
+            # Keep an ambiguous hash as data instead of discarding possibly
+            # executable text or failing unrelated cleanup in the action.
             if nested_syntax:
-                return None
+                normalized.append(char)
+                word_start = False
+                index += 1
+                continue
             end = text.find("\n", index)
             index = len(text) if end < 0 else end
             continue
@@ -1852,6 +1926,26 @@ def _rm_shell_tokens(command_text: str) -> tuple[list[str], list[str]] | None:
         return None
 
 
+def _rm_targets_fallback(command_text: str, _depth: int) -> bool:
+    """Confine parse failures and budgets to candidate deletion commands.
+
+    Raw separators can cut a quoted word or substitution short; that fragment
+    remains unresolved and keeps a finding. Continued lines are joined first
+    so a deletion target on the next physical line cannot disappear.
+    """
+    text = command_text.replace("\\\r\n", "").replace("\\\n", "")
+    for match in re.finditer(r"\brm\s+-", text):
+        start = max(text.rfind(char, 0, match.start()) for char in "\n;&|") + 1
+        tail = text[start : start + 65_537]
+        separator = re.search(r"[\n;&|]", tail)
+        fragment = tail[:separator.start()] if separator else tail
+        if len(fragment) > 65_536 or fragment == command_text:
+            return True
+        if _rm_targets_outside_tmp(fragment, _depth + 1):
+            return True
+    return False
+
+
 def _rm_targets_outside_tmp(command_text: str, _depth: int = 0) -> bool:
     """Limit the cleanup exemption to rm operands that remain inside /tmp.
 
@@ -1859,14 +1953,16 @@ def _rm_targets_outside_tmp(command_text: str, _depth: int = 0) -> bool:
     text. Inspect its shell words without executing them, including quoted
     shell payloads, while keeping that broad detection behavior.
     """
-    if _depth > 3 or len(command_text) > 65_536:
+    if _depth > 3:
         return True
+    if len(command_text) > 65_536:
+        return _rm_targets_fallback(command_text, _depth)
     tokenized = _rm_shell_tokens(command_text)
     if tokenized is None:
-        return True
+        return _rm_targets_fallback(command_text, _depth)
     tokens, payloads = tokenized
     if len(tokens) > 4096:
-        return True
+        return _rm_targets_fallback(command_text, _depth)
     for payload in payloads:
         if re.search(r"\brm\s+-", payload) and _rm_targets_outside_tmp(payload, _depth + 1):
             return True
@@ -1881,14 +1977,13 @@ def _rm_targets_outside_tmp(command_text: str, _depth: int = 0) -> bool:
         operands: list[str] = []
         skip_next = False
         for raw_arg in tokens[index + 1 :]:
-            if raw_arg in _SHELL_SEPARATORS or raw_arg in {"(", ")", "{", "}"}:
+            if re.fullmatch(r"[;&|(){}]+", raw_arg):
                 break
             if skip_next:
                 skip_next = False
                 continue
-            if _is_heredoc_redirect(raw_arg):
-                break
-            if _REDIRECTION_WORD_RE.fullmatch(raw_arg):
+            # Redirections consume one input word, not the remaining rm targets.
+            if _is_heredoc_redirect(raw_arg) or _REDIRECTION_WORD_RE.fullmatch(raw_arg):
                 skip_next = True
                 continue
             arg = raw_arg

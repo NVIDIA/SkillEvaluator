@@ -537,6 +537,107 @@ def test_exact_replacement_and_merge_modes_are_mutually_exclusive(tmp_path: Path
         _copytree_secure(source, tmp_path / "destination", dirs_exist_ok=True, replace_existing=True)
 
 
+def _reject_chmod_without_follow(monkeypatch: pytest.MonkeyPatch, module: object) -> list[str]:
+    # CPython raises this when fchmodat(AT_SYMLINK_NOFOLLOW) is unsupported, as on
+    # Linux with glibc before 2.32 or without /proc. CI hosts support the flag.
+    original = os.chmod
+    rejected: list[str] = []
+
+    def chmod(path: object, mode: int, *, dir_fd: int | None = None, follow_symlinks: bool = True) -> None:
+        if dir_fd is not None and not follow_symlinks:
+            rejected.append(os.fspath(path))
+            raise ValueError("chmod: cannot use dir_fd and follow_symlinks together")
+        original(path, mode, dir_fd=dir_fd, follow_symlinks=follow_symlinks)
+
+    monkeypatch.setattr(module.os, "chmod", chmod)
+    return rejected
+
+
+@pytest.mark.parametrize("mode", ["merge", "replace"])
+def test_existing_destination_publish_survives_chmod_without_nofollow_support(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    mode: str,
+) -> None:
+    module = importlib.import_module("skillevaluator.tier3.harbor.secure_copy")
+    if not module._DESCRIPTOR_BACKEND:
+        pytest.skip("descriptor-relative staging is unavailable")
+    source = tmp_path / "source"
+    source.mkdir()
+    (source / "new.txt").write_text("new", encoding="utf-8")
+    destination = tmp_path / "destination"
+    locked = destination / "locked"
+    locked.mkdir(parents=True)
+    (locked / "old.txt").write_text("old", encoding="utf-8")
+    # A read-only directory is what makes the chmod before removal load-bearing.
+    locked.chmod(0o500)
+    rejected = _reject_chmod_without_follow(monkeypatch, module)
+
+    try:
+        if mode == "merge":
+            module.copytree_secure(source, destination, dirs_exist_ok=True)
+        else:
+            module.copytree_secure(source, destination, replace_existing=True)
+    finally:
+        for path in (locked, *tmp_path.glob(".destination.backup-*/locked")):
+            if path.is_dir():
+                path.chmod(0o700)
+
+    assert rejected
+    assert (destination / "new.txt").read_text(encoding="utf-8") == "new"
+    if mode == "merge":
+        assert (locked / "old.txt").read_text(encoding="utf-8") == "old"
+    else:
+        assert sorted(path.name for path in destination.iterdir()) == ["new.txt"]
+    assert not list(tmp_path.glob(".destination.backup-*"))
+
+
+def test_existing_file_replacement_survives_chmod_without_nofollow_support(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    module = importlib.import_module("skillevaluator.tier3.harbor.secure_copy")
+    if not module._DESCRIPTOR_BACKEND:
+        pytest.skip("descriptor-relative staging is unavailable")
+    source = tmp_path / "source.txt"
+    source.write_text("new", encoding="utf-8")
+    destination = tmp_path / "destination.txt"
+    destination.write_text("old", encoding="utf-8")
+    rejected = _reject_chmod_without_follow(monkeypatch, module)
+
+    module.copy_file_secure(source, destination, allowed_root=tmp_path)
+
+    assert rejected
+    assert destination.read_text(encoding="utf-8") == "new"
+    assert not list(tmp_path.glob(".destination.txt.backup-*"))
+
+
+def test_chmod_fallback_refuses_a_link_without_following_it(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    module = importlib.import_module("skillevaluator.tier3.harbor.secure_copy")
+    if not module._DESCRIPTOR_BACKEND:
+        pytest.skip("descriptor-relative staging is unavailable")
+    outside = tmp_path / "outside"
+    outside.mkdir()
+    outside.chmod(0o755)
+    parent = tmp_path / "parent"
+    parent.mkdir()
+    (parent / "entry").symlink_to(outside, target_is_directory=True)
+    rejected = _reject_chmod_without_follow(monkeypatch, module)
+
+    descriptor = os.open(parent, module._DIRECTORY_FLAGS)
+    try:
+        with pytest.raises(module.UnsafeStagingError, match="symlink"):
+            module._chmod_named_entry(descriptor, "entry", 0o700)
+    finally:
+        os.close(descriptor)
+
+    assert rejected == ["entry"]
+    assert stat.S_IMODE(outside.stat().st_mode) == 0o755
+
+
 def test_copy_file_rejects_source_and_destination_links_and_hardlinks(tmp_path: Path) -> None:
     outside = tmp_path / "outside.txt"
     outside.write_text("outside-canary", encoding="utf-8")

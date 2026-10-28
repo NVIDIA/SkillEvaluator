@@ -63,7 +63,9 @@ Open **Actions → Skill checks**. The summary shows the outcome, affected skill
 and a bounded set of actionable reasons and fixes. Download the
 `skill-evaluator-tier1-attempt-N` artifact for that run attempt (`N`) to get
 `index.html`, per-skill HTML and JSON,
-detailed Markdown, SARIF and scanner logs. Failed and incomplete scans retain
+detailed Markdown, SARIF and scanner logs. The smaller
+`skill-evaluator-tier1-evidence-attempt-N` artifact holds only the JSON that
+the optional report publisher reads. Failed and incomplete scans retain
 their available reports; missing evidence is not a pass. Quality scores and the
 pass/fail decision are separate.
 

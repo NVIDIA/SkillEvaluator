@@ -40,6 +40,9 @@ MAX_TOTAL_BYTES = 64 * 1024 * 1024
 MAX_FILE_BYTES = 32 * 1024 * 1024
 MAX_HISTORY_BYTES = 512 * 1024 * 1024
 ARTIFACT_NAME = "skill-evaluator-tier1"
+# The scan uploads this small artifact next to the full one. It holds only the
+# JSON read here, so HTML and logs never count against the download limits.
+EVIDENCE_ARTIFACT = f"{ARTIFACT_NAME}-evidence"
 WORKFLOW_PATH = ".github/workflows/skill-checks.yml"
 SHA_PATTERN = github_api.COMMIT_SHA
 REPO_PATTERN = github_api.REPOSITORY
@@ -596,12 +599,10 @@ def _select_artifact(api, repository: str, run: dict) -> dict:
     finished = _timestamp(run.get("updated_at"))
     if finished < started:
         raise PublicationError("The selected run attempt has an invalid time interval.")
+    name = f"{EVIDENCE_ARTIFACT}-attempt-{run['run_attempt']}"
     candidates = []
     for artifact in listing["artifacts"]:
-        if (
-            artifact.get("name") not in {ARTIFACT_NAME, f"{ARTIFACT_NAME}-attempt-{run['run_attempt']}"}
-            or artifact.get("expired") is not False
-        ):
+        if artifact.get("name") != name or artifact.get("expired") is not False:
             continue
         identity = artifact.get("workflow_run", {})
         if identity.get("id") != run["id"] or identity.get("head_sha") != run["head_sha"]:
@@ -616,7 +617,10 @@ def _select_artifact(api, repository: str, run: dict) -> dict:
             raise PublicationError("The selected report artifact exceeds its size limit.")
         candidates.append(artifact)
     if not candidates:
-        raise PublicationError("The selected run attempt has no current report artifact.")
+        raise PublicationError(
+            f"The selected run attempt has no current report evidence artifact named {name}. "
+            "Rerun the scan with an evaluator revision that uploads it."
+        )
     if len(candidates) != 1:
         raise PublicationError("The selected run attempt has ambiguous report artifacts.")
     return candidates[0]

@@ -6,14 +6,17 @@
 import importlib.util
 import io
 import json
+import os
 import stat
 import urllib.error
 import zipfile
 from pathlib import Path
 
 import pytest
+import yaml
 
-SPEC = importlib.util.spec_from_file_location("publish_reports", Path(__file__).parents[2] / "ci/publish_reports.py")
+ROOT = Path(__file__).parents[2]
+SPEC = importlib.util.spec_from_file_location("publish_reports", ROOT / "ci/publish_reports.py")
 publisher = importlib.util.module_from_spec(SPEC)
 SPEC.loader.exec_module(publisher)
 
@@ -393,7 +396,7 @@ class FakeAPI:
                 "artifacts": [
                     {
                         "id": 456,
-                        "name": "skill-evaluator-tier1",
+                        "name": "skill-evaluator-tier1-evidence-attempt-1",
                         "expired": False,
                         "size_in_bytes": len(valid_archive()),
                         "created_at": "2026-10-21T12:01:00Z",
@@ -565,7 +568,7 @@ def test_requested_second_attempt_gets_only_its_own_artifact(tmp_path):
                     {
                         **result["artifacts"][0],
                         "id": 789,
-                        "name": "skill-evaluator-tier1-attempt-2",
+                        "name": "skill-evaluator-tier1-evidence-attempt-2",
                         "created_at": "2026-10-21T13:01:00Z",
                     }
                 )
@@ -593,11 +596,108 @@ def test_attempt_artifact_name_cannot_claim_another_attempt():
     class WrongNameAPI(FakeAPI):
         def get(self, path):
             result = super().get(path)
-            result["artifacts"][0]["name"] = "skill-evaluator-tier1-attempt-2"
+            result["artifacts"][0]["name"] = "skill-evaluator-tier1-evidence-attempt-2"
             return result
 
-    with pytest.raises(publisher.PublicationError, match="no current report artifact"):
+    with pytest.raises(publisher.PublicationError, match="no current report evidence artifact"):
         publisher._select_artifact(WrongNameAPI(), "owner/consumer", run_record())
+
+
+def artifact_entry(name, identifier, size=100):
+    return {
+        "id": identifier,
+        "name": name,
+        "expired": False,
+        "size_in_bytes": size,
+        "created_at": "2026-10-21T12:01:00Z",
+        "workflow_run": {"id": 123, "head_sha": "a" * 40},
+    }
+
+
+class ListingAPI(FakeAPI):
+    def __init__(self, artifacts):
+        super().__init__()
+        self.artifacts = artifacts
+
+    def get(self, path):
+        if path.endswith("/artifacts?per_page=100"):
+            return {"total_count": len(self.artifacts), "artifacts": self.artifacts}
+        return super().get(path)
+
+
+def test_publisher_selects_the_evidence_artifact_not_the_full_reports():
+    artifacts = [
+        artifact_entry("skill-evaluator-tier1-attempt-1", 455, size=publisher.MAX_TOTAL_BYTES + 1),
+        artifact_entry("skill-evaluator-tier1-evidence-attempt-1", 456),
+    ]
+    assert publisher._select_artifact(ListingAPI(artifacts), "owner/consumer", run_record())["id"] == 456
+
+
+@pytest.mark.parametrize(
+    "name", ["skill-evaluator-tier1-attempt-1", "skill-evaluator-tier1", "skill-evaluator-tier1-evidence"]
+)
+def test_missing_evidence_artifact_fails_clearly_without_reading_full_reports(name):
+    with pytest.raises(publisher.PublicationError, match=r"skill-evaluator-tier1-evidence-attempt-1\. Rerun the scan"):
+        publisher._select_artifact(ListingAPI([artifact_entry(name, 455)]), "owner/consumer", run_record())
+
+
+@pytest.mark.parametrize(
+    ("change", "message"),
+    [
+        ({"workflow_run": {"id": 999, "head_sha": "a" * 40}}, "does not match the selected run"),
+        ({"workflow_run": {"id": 123, "head_sha": "f" * 40}}, "does not match the selected run"),
+        ({"size_in_bytes": 64 * 1024 * 1024 + 1}, "size limit"),
+        ({"id": 0}, "size limit"),
+        ({"created_at": "2026-10-21T11:59:59Z"}, "no current report evidence"),
+        ({"created_at": "2026-10-21T12:02:01Z"}, "no current report evidence"),
+        ({"expired": True}, "no current report evidence"),
+    ],
+)
+def test_evidence_artifact_keeps_provenance_attempt_and_size_checks(change, message):
+    artifact = {**artifact_entry("skill-evaluator-tier1-evidence-attempt-1", 456), **change}
+    with pytest.raises(publisher.PublicationError, match=message):
+        publisher._select_artifact(ListingAPI([artifact]), "owner/consumer", run_record())
+
+
+def test_scan_evidence_upload_holds_exactly_what_the_publisher_reads(tmp_path):
+    steps = yaml.load((ROOT / ".github/workflows/evaluate-skills.yml").read_text(), Loader=yaml.BaseLoader)["jobs"][
+        "tier1"
+    ]["steps"]
+    uploads = [step for step in steps if step.get("uses", "").startswith("actions/upload-artifact@")]
+    full, evidence = uploads
+    assert evidence["uses"] == full["uses"] and evidence["if"] == full["if"] == "always()"
+    assert evidence["with"]["name"] == "${{ inputs.artifact-name }}-evidence-attempt-${{ github.run_attempt }}"
+    assert evidence["with"]["retention-days"] == full["with"]["retention-days"]
+    assert f"{publisher.EVIDENCE_ARTIFACT}-attempt-1" == "skill-evaluator-tier1-evidence-attempt-1"
+    reports = tmp_path / "skill-reports"
+    payload = summary()
+    for name in ("summary.md", "details.md", "pr-comment.md", "index.html"):
+        (reports / name).parent.mkdir(parents=True, exist_ok=True)
+        (reports / name).write_text("<p>not evidence</p>", encoding="utf-8")
+    (reports / "summary.json").write_text(json.dumps(payload), encoding="utf-8")
+    child = reports / "skill-001"
+    (child / "logs").mkdir(parents=True)
+    (child / "skillevaluator-tier1.json").write_text(json.dumps(report()), encoding="utf-8")
+    for name in ("skillevaluator-tier1.html", "skillevaluator-tier1.md", "skillevaluator-tier1.sarif", "logs/a.log"):
+        (child / name).write_text("not evidence", encoding="utf-8")
+    lines = [line.strip() for line in evidence["with"]["path"].splitlines() if line.strip()]
+    assert all(line.startswith("${{ runner.temp }}/") for line in lines)
+    patterns = [line.removeprefix("${{ runner.temp }}/") for line in lines]
+    # upload-artifact roots several paths at the common ancestor of their non-glob prefixes.
+    search = [str(tmp_path / pattern.split("*", 1)[0].rsplit("/", 1)[0]) for pattern in patterns]
+    root = Path(os.path.commonpath(search))
+    members = sorted(path.relative_to(root).as_posix() for pattern in patterns for path in tmp_path.glob(pattern))
+    assert root == reports
+    assert members == ["skill-001/skillevaluator-tier1.json", "summary.json"]
+    loaded, documents = publisher.read_artifact(archive([(name, (root / name).read_bytes()) for name in members]))
+    assert loaded == payload
+    assert list(documents) == ["skill-001"]
+
+
+def test_duplicate_evidence_artifacts_are_ambiguous():
+    artifacts = [artifact_entry("skill-evaluator-tier1-evidence-attempt-1", number) for number in (456, 457)]
+    with pytest.raises(publisher.PublicationError, match="ambiguous"):
+        publisher._select_artifact(ListingAPI(artifacts), "owner/consumer", run_record())
 
 
 @pytest.mark.parametrize("repo", [{"full_name": "attacker/fork"}, None])

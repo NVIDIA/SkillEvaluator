@@ -119,3 +119,14 @@ jobs:
           path: ${{ runner.temp }}/skill-reports/
           if-no-files-found: warn
           retention-days: 14
+      # The optional report publisher downloads only this JSON evidence, not the full reports.
+      - name: Upload publisher evidence even when validation fails
+        if: always()
+        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
+        with:
+          name: ${{ inputs.artifact-name }}-evidence-attempt-${{ github.run_attempt }}
+          path: |
+            ${{ runner.temp }}/skill-reports/summary.json
+            ${{ runner.temp }}/skill-reports/skill-*/skillevaluator-tier1.json
+          if-no-files-found: warn
+          retention-days: 14

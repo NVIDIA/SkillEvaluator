@@ -49,7 +49,9 @@ incomplete scans and missing or contradictory report evidence fail the job.
 The short `summary.md` is the Actions landing view. `details.md`, original
 per-skill JSON, native HTML, SARIF and scanner logs retain detailed evidence in
 the scan artifact, named `skill-evaluator-tier1-attempt-N` for attempt `N`.
-Artifacts expire after the configured retention period;
+A second, small artifact, `skill-evaluator-tier1-evidence-attempt-N`, holds
+only `summary.json` and each skill's `skillevaluator-tier1.json`. The optional
+publisher downloads only that one. Artifacts expire after the configured retention period;
 hosted history is an optional separate surface. Quality scores are not scanner
 pass percentages or proof of useful live-agent behavior.
 
@@ -93,7 +95,9 @@ Pages is not an inherent requirement for GitHub PR comments.
    **Skill checks**, and artifact name **skill-evaluator-tier1**. The dedicated
    publisher validates this caller and accepts exactly one approved referenced
    evaluator workflow. A differently named manual LLM workflow is not accepted
-   automatically.
+   automatically. The publisher reads only the attempt's
+   `skill-evaluator-tier1-evidence-attempt-N` artifact. A scan from an
+   evaluator revision that does not upload it is rejected; rerun that scan.
 5. Set `trusted-evaluator-shas` to the reviewed evaluator workflow commit. Set
    `tools-ref` to the reviewed immutable commit containing the publisher helpers;
    generated release files supply both. `tools-repository` defaults to

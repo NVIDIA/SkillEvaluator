@@ -434,8 +434,10 @@ def run(
                     "--llm" if llm else "--no-llm",
                     "--profile",
                     "external",
+                    # native_reports renders each skill's HTML from the retained JSON
+                    # and replaces any CLI copy, so the CLI does not render it.
                     "-r",
-                    "json,html,markdown,sarif",
+                    "json,markdown,sarif",
                     "-o",
                     str(raw),
                 ]

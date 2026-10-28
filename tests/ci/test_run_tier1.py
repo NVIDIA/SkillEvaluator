@@ -204,6 +204,11 @@ def test_all_skills_run_after_failure_and_scanner_stdout_is_not_printed(tmp_path
     assert "::error::" in (reports / "skill-001" / "stdout.log").read_text()
     assert "--no-llm" in calls[0][0]
     assert calls[0][1]["env"]["HOME"] == "/tmp/evaluator-home"
+    # The CLI writes no HTML; the native renderer supplies each skill page.
+    assert calls[0][0][calls[0][0].index("-r") + 1] == "json,markdown,sarif"
+    for child in ("skill-001", "skill-002"):
+        page = (reports / child / "skillevaluator-tier1.html").read_text()
+        assert "Content-Security-Policy" in page
 
 
 def test_structured_failure_logs_and_annotations_are_escaped(capsys):

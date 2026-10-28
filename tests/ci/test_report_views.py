@@ -393,6 +393,53 @@ def test_truncated_markdown_keeps_table_boundaries_intact():
     assert "| --- |" not in text
 
 
+def test_markdown_budget_stops_only_after_the_bounded_output_is_fixed():
+    import random
+
+    generator = random.Random(238)
+    for _ in range(300):
+        lines = []
+        for _ in range(generator.randrange(1, 60)):
+            text = generator.choice("xé€|") * generator.randrange(0, 90)
+            lines.append(f"| {text} |" if generator.random() < 0.4 else text)
+        limit = generator.randrange(200, 3000)
+        footer = "Full report: index.html"
+        kept = []
+        budget = views._Budget(kept, limit, footer)
+        for line in lines:
+            if budget.spent():
+                break
+            kept.append(line)
+        assert views._bounded(kept, limit, footer) == views._bounded(lines, limit, footer)
+
+
+def test_details_markdown_does_not_escape_evidence_past_its_limit(tmp_path, monkeypatch):
+    summary, data = example(tmp_path)
+    data["results"][0]["success_details"] = [{"check": f"check-{index}", "message": "x" * 900} for index in range(700)]
+    data["results"][0]["summary"]["checks_performed"] = 700
+    rows = []
+    for index in range(1, 4):
+        directory = tmp_path / f"skill-{index:03d}"
+        directory.mkdir(exist_ok=True)
+        if index == 3:
+            data["results"][0]["success_details"][0]["message"] = "LAST SKILL EVIDENCE"
+        (directory / "skillevaluator-tier1.json").write_text(json.dumps(data))
+        rows.append({**summary["skills"][0], "path": f"skills/sample-{index}", "report_dir": f"skill-{index:03d}"})
+    summary.update(skills=rows, total=3, passed=3)
+    escaped = []
+    original = views._md
+    monkeypatch.setattr(views, "_md", lambda value: escaped.append(value) or original(value))
+    views.render_reports(tmp_path, summary, {})
+    details = (tmp_path / "details.md").read_text()
+    assert "Truncated for CI display limits" in details
+    assert len(details.encode()) <= views.DETAIL_LIMIT
+    assert "## skills/sample\\-2" not in details
+    assert not any("LAST SKILL EVIDENCE" in str(value) for value in escaped)
+    # Escaping stops inside the first skill's 700 evidence lines (two values each).
+    assert len(escaped) < 1600
+    assert "3 skills · 3 passed · 0 failed · 0 incomplete" in (tmp_path / "summary.md").read_text()
+
+
 def test_markdown_findings_render_readable_quotes_and_preserve_entity_text(tmp_path):
     from html.parser import HTMLParser
 

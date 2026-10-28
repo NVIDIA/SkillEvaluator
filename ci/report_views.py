@@ -19,6 +19,7 @@ DETAIL_LIMIT = 500 * 1024
 SUMMARY_SKILL_LIMIT = 5
 COMMENT_LIMIT = 50 * 1024
 REPORT_LIMIT = 32 * 1024 * 1024
+_CONTROL_CHARACTERS = dict.fromkeys(range(32), " ")
 
 
 def _dict(value: object) -> dict:
@@ -42,7 +43,7 @@ def _h(value: object) -> str:
 
 
 def _md(value: object) -> str:
-    text = "".join(c if ord(c) >= 32 else " " for c in _text(value))
+    text = _text(value).translate(_CONTROL_CHARACTERS)
     # Break GitHub mention tokens while retaining readable author and finding text.
     text = text.replace("@", "@\u200b")
     escaped = re.sub(r"([\\`*_{}\[\]()#+.!|~-])", r"\\\1", text)
@@ -234,8 +235,12 @@ def _markdown_blocks(lines: list[str]) -> list[str]:
     return blocks
 
 
+def _reserve(footer: str) -> int:
+    return len(footer.encode("utf-8")) + 160
+
+
 def _bounded(blocks: list[str], limit: int, footer: str) -> str:
-    reserve = len(footer.encode("utf-8")) + 160
+    reserve = _reserve(footer)
     parts = []
     size = 0
     truncated = False
@@ -252,6 +257,26 @@ def _bounded(blocks: list[str], limit: int, footer: str) -> str:
         )
     parts.append(footer)
     return "\n\n".join(parts) + "\n"
+
+
+class _Budget:
+    """Tell when _bounded() will drop every further line, so callers can stop building them.
+
+    Each block costs at least one byte more than its lines, so the running sum
+    of line sizes plus one is a lower bound. Once that bound passes the limit,
+    _bounded() truncates within the lines already collected, whatever follows.
+    """
+
+    def __init__(self, lines: list[str], limit: int, footer: str) -> None:
+        self._lines = lines
+        self._counted = 0
+        self._left = limit - _reserve(footer)
+
+    def spent(self) -> bool:
+        new = self._lines[self._counted :]
+        self._counted += len(new)
+        self._left -= sum(len(line.encode("utf-8")) + 1 for line in new)
+        return self._left < 0
 
 
 def _write(path: Path, content: str) -> None:
@@ -665,6 +690,7 @@ def render_reports(reports: Path, summary: dict, context: dict, *, render_errors
         errors, warnings = data.get("total_errors"), data.get("total_warnings")
         markdown.append(f"| {_md(skill)} | {skill_status} | {score} | {_md(grade)} | {_md(errors)} | {_md(warnings)} |")
         comments.append(f"| {_md(skill)} | {skill_status} | {score} / {_md(grade)} | {_md(errors)} | {_md(warnings)} |")
+    details = _Budget(markdown, DETAIL_LIMIT, footer)
     for model in models:
         row = model["row"]
         skill = _text(row.get("path"))
@@ -699,11 +725,16 @@ def render_reports(reports: Path, summary: dict, context: dict, *, render_errors
             block.append(
                 f"| {_md(name)} | {outcome} | {_md(numbers.get('checks_performed'))} | {_md(numbers.get('errors'))} | {_md(numbers.get('warnings'))} |"
             )
-        for result in model["results"]:
-            block.append(f"### {_md(result.get('validator'))} — evidence")
-            for label, value in _evidence(result):
-                block.append(f"**{_md(label)}:** {_md(value)}")
         markdown.extend(block)
+        # details.md keeps only a prefix that fits. Skip escaping evidence it would drop.
+        for result in model["results"]:
+            if details.spent():
+                break
+            markdown.append(f"### {_md(result.get('validator'))} — evidence")
+            for label, value in _evidence(result):
+                if details.spent():
+                    break
+                markdown.append(f"**{_md(label)}:** {_md(value)}")
         failures = [result for result in model["results"] if _status(result) in {"FAIL", "INCOMPLETE", "UNKNOWN"}]
         for result in failures:
             findings = _items(result.get("findings"))

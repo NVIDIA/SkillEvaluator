@@ -574,6 +574,12 @@ def load_harbor_eval_template(module_name: str = "harbor_eval_template") -> Modu
     return mod
 
 
+@pytest.fixture(scope="session")
+def harbor_eval_template_loader() -> Callable[[str], ModuleType]:
+    """Expose the loader without importing pytest's ambiguous conftest name."""
+    return load_harbor_eval_template
+
+
 class MockUrllibResponse:
     """Mock a urllib response context manager returning serialized JSON or raw bytes."""
 

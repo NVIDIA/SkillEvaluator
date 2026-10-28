@@ -54,7 +54,18 @@ All notable changes to SkillEvaluator are documented in this file.
   `rm` fragments with no parsed target are also flagged, preserving detection
   of deletions assembled from strings. Temporary cleanup inside backtick
   command substitutions, or followed by shell comments and file-descriptor
-  redirections, no longer produces false destructive-command findings.
+  redirections, no longer produces false destructive-command findings. Targets
+  after heredoc and here-string redirections are still checked; the input word
+  of a redirection is not treated as a deletion target.
+  Case-arm/subshell terminators and unrelated comments, ANSI-C literals, or
+  heredoc data no longer remove the cleanup exemption. Command substitutions
+  used as redirection words do not hide later deletion targets. Unquoted
+  `/tmp` deletion targets containing variables, command substitutions, or
+  brace expansions (for example standalone `rm -rf /tmp/build-$$`) no longer
+  get the cleanup exemption because their destinations remain unresolved.
+  Operandless `xargs rm` invocations remain detectable when unrelated syntax
+  or parser budgets prevent a complete parse; the fallback uses a bounded
+  command span to avoid excessive backtracking on long actions.
 - Tier 3 error recovery now scores unrecovered command failures as zero and
   includes them in fault counts and failure verdicts/report reasons. Host and
   bundled verifier detection agree and use a result's execution status when it

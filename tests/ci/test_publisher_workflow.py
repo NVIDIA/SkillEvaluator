@@ -5,7 +5,10 @@
 
 import os
 import re
+import shutil
 import subprocess
+import sys
+import tomllib
 from pathlib import Path
 
 import pytest
@@ -229,3 +232,66 @@ def test_publish_step_reports_whether_it_pushed_new_content(tmp_path, diffs, pus
     assert load(".github/workflows/publish-skill-reports.yml")["jobs"]["prepare"]["outputs"]["committed"] == (
         "${{ steps.publish.outputs.committed }}"
     )
+
+
+def checkout(job: str) -> dict:
+    steps = load(".github/workflows/publish-skill-reports.yml")["jobs"][job]["steps"]
+    return next(
+        step for step in steps if step.get("uses", "").startswith("actions/checkout@") and "repository" in step["with"]
+    )
+
+
+def tracked_files() -> list[str]:
+    listing = subprocess.run(["git", "ls-files", "-z"], cwd=ROOT, capture_output=True, check=True).stdout
+    return [name for name in listing.decode().split("\0") if name and (ROOT / name).is_file()]
+
+
+def test_prepare_sparse_checkout_has_the_build_inputs_and_tools(tmp_path):
+    options = checkout("prepare")["with"]
+    assert options.get("sparse-checkout-cone-mode", "true") == "true"
+    directories = options["sparse-checkout"].split()
+    assert directories == ["ci", "src"]
+    # Cone mode checks out every root file plus the listed directories.
+    selected = [name for name in tracked_files() if "/" not in name or name.split("/", 1)[0] in directories]
+    for name in selected:
+        (tmp_path / name).parent.mkdir(parents=True, exist_ok=True)
+        shutil.copy2(ROOT / name, tmp_path / name)
+    project = tomllib.loads((tmp_path / "pyproject.toml").read_text())
+    build_inputs = [project["project"]["readme"], *project["project"]["license-files"], "uv.lock"]
+    build_inputs.append("ci/requirements/uv.txt")
+    for name in build_inputs:
+        assert (tmp_path / name).is_file(), name
+    for package, data in project["tool"]["setuptools"]["package-data"].items():
+        assert (tmp_path / "src" / package.replace(".", "/")).is_dir(), package
+        assert data
+    code = (
+        "import sys; sys.path[:0] = [sys.argv[1] + '/src', sys.argv[1] + '/ci'];"
+        "import publish_reports, native_reports, report_views, github_api, skillevaluator.reporting.retained as r;"
+        "mods = (publish_reports, native_reports, report_views, github_api, r);"
+        "assert all(m.__file__.startswith(sys.argv[1]) for m in mods), [m.__file__ for m in mods]"
+    )
+    subprocess.run([sys.executable, "-c", code, str(tmp_path)], check=True, capture_output=True, cwd=tmp_path)
+
+
+def test_comment_sparse_checkout_runs_with_only_the_standard_library(tmp_path):
+    options = checkout("comment")["with"]
+    assert options["sparse-checkout-cone-mode"] == "false"
+    names = options["sparse-checkout"].split()
+    assert names == ["ci/comment_report.py", "ci/github_api.py"]
+    for name in names:
+        (tmp_path / name).parent.mkdir(parents=True, exist_ok=True)
+        shutil.copy2(ROOT / name, tmp_path / name)
+    run = load(".github/workflows/publish-skill-reports.yml")["jobs"]["comment"]["steps"][-1]["run"]
+    assert run == "python3 publisher/ci/comment_report.py"
+    # No site-packages, user site or PYTHON* variables, like the runner's bare system Python.
+    result = subprocess.run(
+        [sys.executable, "-S", "-s", "-E", str(tmp_path / "ci/comment_report.py")],
+        cwd=tmp_path,
+        env={"REPORT_RUN_ID": "invalid"},
+        capture_output=True,
+        text=True,
+        check=False,
+    )
+    assert result.returncode == 1
+    assert "PR feedback rejected" in result.stderr
+    assert "Traceback" not in result.stderr

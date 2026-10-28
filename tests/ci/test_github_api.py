@@ -6,9 +6,6 @@
 import importlib.util
 import io
 import json
-import shutil
-import subprocess
-import sys
 from pathlib import Path
 
 import pytest
@@ -171,21 +168,3 @@ def test_workflow_copies_of_identity_patterns_match_the_shared_module(workflow, 
     script = next(item["run"] for job in jobs.values() for item in job["steps"] if item.get("name") == step)
     for name in patterns:
         assert f'r"{getattr(publisher.github_api, name).pattern}"' in script
-
-
-def test_comment_tools_run_with_only_the_standard_library(tmp_path):
-    for name in ("comment_report.py", "github_api.py"):
-        shutil.copy(ROOT / "ci" / name, tmp_path / name)
-    # No site-packages, user site or PYTHON* variables; the script directory stays on sys.path
-    # as it does for `python3 publisher/ci/comment_report.py` on the runner.
-    result = subprocess.run(
-        [sys.executable, "-S", "-s", "-E", str(tmp_path / "comment_report.py")],
-        cwd=tmp_path,
-        env={"REPORT_RUN_ID": "invalid"},
-        capture_output=True,
-        text=True,
-        check=False,
-    )
-    assert result.returncode == 1
-    assert "PR feedback rejected" in result.stderr
-    assert "Traceback" not in result.stderr

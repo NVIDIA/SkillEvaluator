@@ -71,6 +71,10 @@ jobs:
           ref: ${{ inputs.tools-ref }}
           path: publisher
           persist-credentials: false
+          # Cone mode also keeps every root file, including the package build inputs.
+          sparse-checkout: |
+            ci
+            src
       - name: Install the trusted native report renderer
         working-directory: publisher
         # No dependency cache is restored: other default-branch workflows can write
@@ -195,6 +199,10 @@ jobs:
           ref: ${{ inputs.tools-ref }}
           path: publisher
           persist-credentials: false
+          sparse-checkout: |
+            ci/comment_report.py
+            ci/github_api.py
+          sparse-checkout-cone-mode: false
       - name: Download this publication's feedback
         env:
           GH_TOKEN: ${{ github.token }}

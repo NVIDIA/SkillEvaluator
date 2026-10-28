@@ -121,7 +121,9 @@ Pages is not an inherent requirement for GitHub PR comments.
 
 The publisher rebuilds native HTML from bounded, validated JSON using pinned
 trusted tools. It does not execute consumer PR code or trust uploaded HTML as
-site code. Each completion event binds publication to its recorded run attempt;
+site code. Its jobs use sparse checkouts of the tools repository: preparation
+gets the root files, `ci/` and `src/`; the comment job gets only
+`ci/comment_report.py` and `ci/github_api.py`, which use only the standard library. Each completion event binds publication to its recorded run attempt;
 manual backfills must specify that attempt. It retains the newest 100 runs by
 default (`retention-runs`), within a 512 MiB site budget, plus current
 `main/latest/` and open-PR reports. Older unprotected runs are pruned first;

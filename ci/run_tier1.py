@@ -231,7 +231,8 @@ def _load_report(path: Path) -> dict:
         raise ValueError("The evaluator JSON report has invalid severity counts.")
     from skillevaluator.reporting.retained import retained_results
 
-    retained_results(data)
+    # Validation only: the results are discarded, so skip copying their metadata.
+    retained_results(data, copy_metadata=False)
     return data
 
 

@@ -420,6 +420,25 @@ def test_invalid_json_is_reported_and_later_skills_still_run(tmp_path):
     assert len(calls) == 2
 
 
+def test_report_loading_validates_without_copying_metadata(tmp_path, monkeypatch):
+    from skillevaluator.reporting import retained
+
+    report = payload(passed=False)
+    report["results"][0]["findings"][0]["metadata"] = {"rule": {"nested": ["evidence"]}}
+    path = tmp_path / "skillevaluator-tier1.json"
+    path.write_text(json.dumps(report), encoding="utf-8")
+
+    def no_copies(value, memo=None):
+        raise AssertionError("validation copied report metadata")
+
+    monkeypatch.setattr(retained.copy, "deepcopy", no_copies)
+    assert runner._load_report(path) == report
+    report["results"][0]["passed"] = "false"
+    path.write_text(json.dumps(report), encoding="utf-8")
+    with pytest.raises(ValueError, match="passed must be boolean"):
+        runner._load_report(path)
+
+
 def test_process_start_error_does_not_skip_later_skills(tmp_path):
     workspace = tmp_path / "workspace"
     skill(workspace, "skills/a")

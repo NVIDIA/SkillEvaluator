@@ -148,6 +148,19 @@ def test_fixed_relative_ci_links_only():
             HTMLReporter(ci_context={key: value})
 
 
+def test_validation_without_copies_matches_the_copying_rehydration(payload):
+    payload["results"][0]["findings"][0]["metadata"] = {"rule": {"nested": ["evidence"]}}
+    copied = retained_results(payload)
+    shared = retained_results(payload, copy_metadata=False)
+    assert shared == copied
+    finding_metadata = payload["results"][0]["findings"][0]["metadata"]
+    assert copied[0].findings[0].metadata is not finding_metadata
+    assert shared[0].findings[0].metadata is finding_metadata
+    payload["results"][0]["passed"] = "true"
+    with pytest.raises(RetainedReportError, match="passed must be boolean"):
+        retained_results(payload, copy_metadata=False)
+
+
 def test_reporters_share_one_environment_and_compile_each_template_once(payload, monkeypatch):
     from skillevaluator.reporting import html as html_module
 

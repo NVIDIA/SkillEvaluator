@@ -52,9 +52,9 @@ home_paths:
     description: Personal Linux home directory path
     suggestion: "Use a generic path or an environment variable like $HOME"
 
-# Email addresses (excluding placeholder/test domains and OData property names)
+# Email addresses (excluding RFC 2606 domains, legacy test.com, and OData property names)
 emails:
-  - pattern: '[A-Za-z0-9._%+-]+@(?!([a-z0-9-]+\.)*example\.com|([a-z0-9-]+\.)*example\.org|([a-z0-9-]+\.)*test\.com|odata\.)[A-Za-z0-9.-]+\.[A-Za-z]{2,}'
+  - pattern: '(?<![A-Za-z0-9._%+-])[A-Za-z0-9._%+-]+@(?!(?:[a-z0-9-]+\.)*(?:example\.(?:com|net|org)|test\.com|test|example|invalid|localhost)\.*(?![a-z0-9.-])|odata\.)[A-Za-z0-9.-]+\.[A-Za-z]{2,}'
     severity: high
     description: Non-placeholder email address
     suggestion: "Remove the address or use a placeholder like user@example.com"

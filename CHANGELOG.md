@@ -6,6 +6,10 @@ All notable changes to SkillEvaluator are documented in this file.
 
 ### Added
 
+- Generated single-step Docker cases can declare `artifact_pairs` to retain
+  specific original and delivered files before verification. Discovery evidence
+  includes bounded, redacted file comparisons with explicit availability and
+  truncation limits; byte differences alone do not establish semantic changes.
 - A read-only **Skill changes** dashboard view connects cited discovery findings
   to proposed edits and before/after validation results with their agent models. It preserves native
   verdicts alongside outcome gains and metric declines, and checks every retained
@@ -42,6 +46,13 @@ All notable changes to SkillEvaluator are documented in this file.
 
 ### Changed
 
+- Skill improvement and dataset refinement retain bounded tool calls and matched
+  returns, prioritize failure details, and distinguish final claims from observed
+  execution. Complete calls share unused space before clipping. Opt-in agent observations redact configured credentials before
+  clipping. Holdout and baseline artifacts remain outside improvement context.
+- Activation and routing attribute skill reads to their actual file operands or
+  isolated document identity. Unrelated command text cannot establish skill use;
+  unresolved reads remain explicitly unknown.
 - Skill Improver records a bounded decision summary for LLM proposals, including
   no-change decisions, and distinguishes skipped editors from attempted calls.
   Unchanged candidates no longer recommend another evaluation of identical content.
@@ -81,6 +92,8 @@ All notable changes to SkillEvaluator are documented in this file.
 
 ### Fixed
 
+- The Skill changes case picker uses stable agent and case identities when
+  switching reports, keeping the selected findings aligned with their case.
 - Native OpenCode traces retain missing status, error and integer exit-code
   evidence from uniquely matched raw log calls. Existing turns, output and token
   metrics stay intact; ambiguous, mismatched or already annotated calls remain

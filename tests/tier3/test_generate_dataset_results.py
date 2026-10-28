@@ -878,6 +878,162 @@ def test_public_llm_refine_cannot_replace_oracles_or_drop_cases(monkeypatch):
     assert "never as correct reference answers" in prompts[0]
 
 
+def test_refinement_summary_keeps_late_returns_recovery_and_claims_separate():
+    steps = [
+        {"source": "agent", "step_id": index, "tool_calls": [
+            {"tool_call_id": f"read-{index}", "function_name": "read", "arguments": {"path": f"file-{index}"}},
+        ]}
+        for index in range(30)
+    ]
+    for identity, output in (("failed-test", "FAILED: missing result"), ("fixed-test", "2 tests passed")):
+        steps.append({
+            "source": "agent", "step_id": identity,
+            "tool_calls": [{"tool_call_id": identity, "function_name": "bash", "arguments": {"command": "pytest"}}],
+            "observation": {"results": [{"source_call_id": identity, "content": output}]},
+        })
+    steps.append({"source": "agent", "message": "All tests succeeded on the first attempt."})
+    trajectory = {"steps": steps}
+    frozen = json.dumps(trajectory)
+    summary = generate_dataset._summarize_trajectory(trajectory)
+    assert "FAILED: missing result" in summary and "2 tests passed" in summary
+    assert "failed-test" in summary and "fixed-test" in summary
+    assert "All tests succeeded on the first attempt." in summary
+    assert "Coverage:" in summary and len(summary) <= 32000
+    assert json.dumps(trajectory) == frozen
+
+
+def test_refinement_redacts_before_clipping_and_labels_unattributed_results(monkeypatch):
+    secret = 'opaque-credential-"\\-' + "private-value" * 40
+    monkeypatch.setenv("SKILL_EVAL_LLM_API_KEY", secret)
+    trajectory = {"steps": [{
+        "source": "agent", "step_id": 1,
+        "tool_calls": [
+            {"tool_call_id": name, "function_name": "bash", "arguments": {"command": "pytest"}}
+            for name in ("first", "second")
+        ],
+        "observation": {"results": [{
+            "content": "x" * 450 + secret, "extra": {"tool_result_is_error": True},
+        }]},
+        "message": "m" * 780 + secret,
+    }]}
+    frozen = json.dumps(trajectory)
+    summary = generate_dataset._summarize_trajectory(trajectory)
+    assert "unattributed step-level observation" in summary
+    assert "does not prove which call completed" in summary
+    assert secret[:32] not in summary and "private-value" not in summary
+    assert "is_error=True" not in summary
+    assert len(summary) <= 32000 and json.dumps(trajectory) == frozen
+
+
+def test_refinement_keeps_complete_rows_when_trace_fits_and_execution_order():
+    steps = []
+    for call, command, returned in [
+        ("original", "for test in tests/*; do runner $test; done; ls", "listing\n" * 900
+         + "FAIL tests/consumer.test: leaked state\n" + "stack frame\n" * 900 + "exit_code=0"),
+        ("repair", "apply_patch fixture", "patch applied"),
+        ("rerun", "runner tests", "PASS tests/consumer.test\nexit_code=0"),
+    ]:
+        steps.append({"source": "agent", "step_id": len(steps),
+                      "tool_calls": [{"tool_call_id": call, "function_name": "bash",
+                                      "arguments": {"command": command}}],
+                      "observation": {"results": [{"source_call_id": call, "content": returned}]}})
+    summary = generate_dataset._summarize_trajectory({"steps": steps})
+    assert "FAIL tests/consumer.test: leaked state" in summary
+    assert summary.index("call=original") < summary.index("call=repair") < summary.index("call=rerun")
+    assert steps[0]["observation"]["results"][0]["content"] in summary
+    assert "0 clipped" in summary
+    assert "compound" in summary and "individual" in summary
+    assert len(summary) <= 32000
+
+
+@pytest.mark.parametrize("include_final_response", [False, True])
+def test_refinement_keeps_complete_row_at_exact_summary_boundary(include_final_response):
+    from skillevaluator.tier3.retained_evidence import summarize_trajectory
+
+    result = {"source_call_id": "read", "content": "x"}
+    trajectory = {"steps": [{"source": "agent", "step_id": 1,
+        "tool_calls": [{"tool_call_id": "read", "function_name": "read", "arguments": {}}],
+        "observation": {"results": [result]}}, {"source": "agent", "message": "An unverified final claim."}]}
+    summary = summarize_trajectory(trajectory, include_final_response=include_final_response)
+    result["content"] += "x" * (32000 - len(summary))
+    summary = summarize_trajectory(trajectory, include_final_response=include_final_response)
+    assert len(summary) == 32000 and result["content"] in summary and "0 clipped" in summary
+    assert ("FINAL RESPONSE" in summary) is include_final_response
+    result["content"] += "x"
+    summary = summarize_trajectory(trajectory, include_final_response=include_final_response)
+    assert len(summary) <= 32000 and "1 clipped" in summary
+
+
+def test_refinement_shares_short_row_budget_without_reordering_or_exposing_secrets(monkeypatch):
+    secret = 'opaque-"\\-credential-' + "private-value" * 40
+    monkeypatch.setenv("SKILL_EVAL_LLM_API_KEY", secret)
+    medium = "structure-start\n" + "ordinary context\n" * 800 + "structure-end"
+    outputs = [
+        ("large", "context\n" * 6000 + secret + "\nFAIL actual failure\n" + "tail\n" * 6000),
+        ("medium", medium),
+        ("repair", "patch applied"),
+    ]
+    trajectory = {"steps": [{"source": "agent", "step_id": index,
+        "tool_calls": [{"tool_call_id": name, "function_name": "bash", "arguments": {"command": "inspect"}}],
+        "observation": {"results": [{"source_call_id": name, "content": content}]}}
+        for index, (name, content) in enumerate(outputs)]}
+    original = json.dumps(trajectory)
+    summary = generate_dataset._summarize_trajectory(trajectory)
+    assert medium in summary and "1 clipped" in summary and "FAIL actual failure" in summary
+    assert summary.index("call=large") < summary.index("call=medium") < summary.index("call=repair")
+    assert "private-value" not in summary and secret[:24] not in summary
+    assert len(summary) <= 32000 and json.dumps(trajectory) == original
+
+
+def test_refinement_preserves_diagnostic_after_long_first_line_and_reports_omission():
+    calls = []
+    for index in range(100):
+        calls.append({"source": "agent", "step_id": index,
+            "tool_calls": [{"tool_call_id": f"c{index}", "function_name": "bash", "arguments": {"command": "check"}}],
+            "observation": {"results": [{"source_call_id": f"c{index}",
+                "content": "x" * 5000 + "\nFAIL case-one\n" + "y" * 5000}]}})
+    summary = generate_dataset._summarize_trajectory({"steps": calls})
+    assert "FAIL case-one" in summary
+    assert "64/100 calls shown; 36 omitted" in summary
+    assert "call=c99" in summary and len(summary) <= 32000
+
+
+def test_refinement_malformed_unicode_cannot_break_export():
+    trajectory = {"steps": [{"source": "agent",
+        "tool_calls": [{"tool_call_id": "bad-text", "function_name": "bash", "arguments": {"command": "check"}}],
+        "observation": {"results": [{"source_call_id": "bad-text", "content": "FAIL bad text \ud800"}]}}]}
+    summary = generate_dataset._summarize_trajectory(trajectory)
+    assert "FAIL bad text" in summary
+    summary.encode("utf-8")
+
+
+def test_refinement_failure_survives_positive_output_flood():
+    trajectory = {"steps": [{"source": "agent",
+        "tool_calls": [{"tool_call_id": "flood", "function_name": "bash", "arguments": {"command": "suite"}}],
+        "observation": {"results": [{"source_call_id": "flood",
+            "content": ("PASS control " + "detail " * 8 + "\n") * 1000 + "FAIL regression\n"}]}}]}
+    summary = generate_dataset._summarize_trajectory(trajectory)
+    assert "FAIL regression" in summary and "L1001:" in summary
+    assert "clipped" in summary and len(summary) <= 32000
+
+
+@pytest.mark.parametrize("marker", ["exit 0", "10+20 exit 1", "exit -9"])
+def test_refinement_keeps_numeric_exit_markers_inside_long_returns(marker):
+    steps = [{
+        "source": "agent",
+        "tool_calls": [{"tool_call_id": str(index), "function_name": "bash",
+                        "arguments": {"command": "run-tests; echo exit $?; diff before after"}}],
+        "observation": {"results": [{"source_call_id": str(index), "content": (
+            "exit_code=1\nPASS suite\n" + marker + "\n" + "diff context\n" * 2000
+            + "FAIL earlier check\nend of diff"
+        )}]},
+    } for index in range(9)]
+    summary = generate_dataset._summarize_trajectory({"steps": steps})
+    assert f"L3: {marker}" in summary
+    assert "exit_code=1" in summary and "FAIL earlier check" in summary
+    assert "clipped" in summary and len(summary) <= 32000
+
+
 @pytest.mark.parametrize("full", [False, True])
 def test_public_generation_draft_preserves_source_contract_metadata(tmp_path, monkeypatch, full):
     from skillevaluator.inference.client import LLMClient

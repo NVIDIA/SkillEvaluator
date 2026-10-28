@@ -293,6 +293,48 @@ documents. An eval entry's `files` string or list selects only those paths
 `null` stages no fixture. For backward compatibility, an entry that omits
 `files` receives the entire shared `evals/files/` directory.
 
+### Declared original and delivered files
+
+For a generated single-step Linux task running with `--env-mode docker`, add
+`artifact_pairs` to a case to retain specific files for improvement diagnostics:
+
+```json
+{
+  "id": "retry-tests",
+  "question": "Fix retry handling while preserving the existing tests.",
+  "artifact_pairs": [
+    {
+      "id": "retry-tests",
+      "original": "project/test_retry.py",
+      "delivered": "/workspace/output/project/test_retry.py"
+    }
+  ]
+}
+```
+
+`original` is relative to the case's staged `/workspace/input/` fixtures, so
+this example needs `evals/files/project/test_retry.py` when using the default
+fixture selection. `delivered` must be an explicit file below
+`/workspace/output/` or `/workspace/work/`. Declare at most eight distinct pairs;
+files are limited to 128 KiB each. Missing or unsafe originals fail task staging.
+Other backends and native or multi-step tasks currently reject this option.
+
+Harbor captures declared delivered files after agent execution and before
+verification. The secure Docker reader rejects links (including linked parent
+directories), hardlinks, special files, and oversized files. A failed capture is
+reported as unavailable evidence; it cannot become a successful comparison.
+
+Each saved trial's `artifact_evidence.json` contains file hashes, byte lengths,
+raw byte equality, and redacted text and diffs capped at 4,096 characters each.
+Binary or non-UTF-8 files are reported without text comparisons. Improvement
+signals and dataset refinement include these records only for eligible
+with-skill discovery attempts. They cover **only the declared files**: equal
+bytes establish byte equality, while a changed file or a partial diff does not
+by itself prove that tests were preserved or weakened. This evidence does not
+change scores or bypass improvement acceptance checks.
+
+### Custom environments
+
 **`evals/environment/`** customizes the container itself:
 
 | File | Rules |

@@ -14,6 +14,7 @@ through a short-lived container handoff removed before the requested command.
 from __future__ import annotations
 
 import asyncio
+import base64
 import codecs
 import contextlib
 import contextvars
@@ -2388,6 +2389,35 @@ class SkillEvaluatorDockerEnvironment(DockerEnvironment):
         service = _validate_compose_service_name(service)
         excluded_names, excluded_values = self._main_only_compose_environment()
 
+        from skillevaluator.tier3.artifact_evidence import CONTAINER_READ_SCRIPT, MAX_FILE_BYTES, PAIR_NAMESPACE
+        from skillevaluator.tier3.output_provenance import write_output_file_atomically
+
+        target = Path(target_path)
+        if len(target.parts) >= 4 and target.parts[-4] == "artifacts" and target.parts[-3] == PAIR_NAMESPACE:
+            if service != MAIN_SERVICE_NAME or self._is_windows_container or target.name != "delivered":
+                raise RuntimeError("Artifact pair capture requires the main Linux Docker service")
+            # Keep payloads out of Harbor's command-output callback/logs. This route
+            # retains native artifact scheduling, destination and manifest handling.
+            async with self._sidecar_operation(service):
+                result = await self._run_docker_compose_command(
+                    ["exec", "-T", MAIN_SERVICE_NAME, "python3", "-I", "-c", CONTAINER_READ_SCRIPT, source_path],
+                    check=False, timeout_sec=30, on_output=None,
+                    additional_secret_values=excluded_values,
+                    compose_env_excluded_names=excluded_names,
+                    compose_env_excluded_values=excluded_values,
+                    use_sidecar_compose_model=True,
+                )
+            if result.return_code != 0 or len(result.stdout or "") > (MAX_FILE_BYTES + 2) // 3 * 4:
+                raise RuntimeError("Artifact pair capture rejected an unsafe, missing or oversized file")
+            try:
+                raw = base64.b64decode(result.stdout or "", validate=True)
+            except ValueError:
+                raise RuntimeError("Artifact pair capture returned invalid bytes") from None
+            if len(raw) > MAX_FILE_BYTES:
+                raise RuntimeError("Artifact pair capture exceeded its byte limit")
+            write_output_file_atomically(target, raw)
+            return
+
         if service == MAIN_SERVICE_NAME and self._is_windows_container:
             target = Path(target_path)
             parent_usage = _missing_windows_target_parent_usage(target)
@@ -2471,6 +2501,11 @@ class SkillEvaluatorDockerEnvironment(DockerEnvironment):
         *,
         service: str | None = None,
     ) -> None:
+        from skillevaluator.tier3.artifact_evidence import PAIR_NAMESPACE
+
+        target = Path(target_dir)
+        if len(target.parts) >= 4 and target.parts[-4:-2] == ("artifacts", PAIR_NAMESPACE):
+            raise RuntimeError("Artifact pair capture requires a regular file, not a directory")
         service = MAIN_SERVICE_NAME if service is None else service
         service = _validate_compose_service_name(service)
         excluded_names, excluded_values = self._main_only_compose_environment()

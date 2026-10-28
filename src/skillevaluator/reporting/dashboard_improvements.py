@@ -261,13 +261,14 @@ def show_skill_changes() -> None:
         width="stretch",
     )
     if cases:
-        index = st.selectbox(
+        identities = [(agent, case["entry_id"]) for agent, case in cases]
+        selected = st.selectbox(
             "Validation case",
-            range(len(cases)),
-            format_func=lambda i: f"{cases[i][0]} / {cases[i][1]['entry_id']}",
+            identities,
+            format_func=lambda item: f"{item[0]} / {item[1]}",
             key="change_case",
         )
-        agent, case = cases[index]
+        agent, case = cases[identities.index(selected)]
         st.dataframe([{"Metric": metric, **values} for metric, values in case["metrics"].items()], hide_index=True)
         for label, run in data["runs"].items():
             matched = next(item for item in run["agents"][agent]["cases"] if item["entry_id"] == case["entry_id"])

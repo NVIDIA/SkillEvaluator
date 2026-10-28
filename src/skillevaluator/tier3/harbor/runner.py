@@ -1654,6 +1654,16 @@ def _kata_environment_kwarg_error(environment_kwargs: Mapping[str, Any]) -> str 
 
 def _staged_task_environment_error(env_mode: str, task_dirs: Iterable[Path]) -> str | None:
     """Reject staged task environments the selected backend cannot run."""
+    task_dirs = list(task_dirs)
+    for task_dir in task_dirs:
+        if (task_dir / "artifact_pairs.json").exists():
+            if env_mode != "docker":
+                return f"Artifact pairs require the secure Linux Docker backend; {env_mode!r} is unsupported."
+            import tomllib
+
+            config = tomllib.loads((task_dir / "task.toml").read_text(encoding="utf-8"))
+            if config.get("environment", {}).get("os", "linux") != "linux" or config.get("steps"):
+                return "Artifact pairs require generated single-step Linux Docker tasks."
     if (backend := _custom_backend(env_mode)) is not None:
         if backend.supports_docker_compose:
             return None
@@ -5481,6 +5491,7 @@ def _run_harbor_eval_impl(
             env_mode=env_mode,
             agent_models=model_resolution,
             launch_errors=errors,
+            staged_task_roots=agent_task_dirs,
         )
     except Exception:
         reporter.emit(ProgressEvent(stage="collection", state="failed", detail="result collection failed"))

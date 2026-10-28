@@ -56,7 +56,6 @@ from skillevaluator.constants import EXECUTABLE_SKILL_DIRS
 from skillevaluator.evaluation.results import DatasetGenerationError, DatasetGenerationResult
 from skillevaluator.tier3.case_ids import validate_case_ids
 from skillevaluator.tier3.dataset_utils import find_eval_file, load_dataset_entries
-from skillevaluator.tier3.eval_core.codex_tool_call_normalizer import atif_content_text
 from skillevaluator.utils.secure_fs import SecurePathError, SecureRoot, stat_is_link_or_reparse
 from skillevaluator.validators.frontmatter_parser import FRONTMATTER_PATTERN
 
@@ -760,6 +759,14 @@ def _discover_trajectories(
     if not results_dir.exists():
         return {}
 
+    from skillevaluator.tier3.artifact_evidence import load_artifact_evidence
+    from skillevaluator.tier3.harbor.report_data import load_dataset_snapshot
+    from skillevaluator.tier3.improve import RESERVED_SPLITS
+
+    snapshot = load_dataset_snapshot(results_dir)
+    retained_cases = {
+        str(case.get("id", case.get("entry_id", ""))): case for case in (snapshot or {}).get("dataset", [])
+    }
     observations: dict[str, list[dict[str, Any]]] = {}
     seen: set[Path] = set()
     for arm in ("with-skill", "without-skill"):
@@ -783,6 +790,13 @@ def _discover_trajectories(
                 "source": str(trial_dir),
                 "execution_status": status,
             }
+            retained_case = retained_cases.get(case_id)
+            if (arm == "with-skill" and retained_case is not None
+                    and str(retained_case.get("split", "discovery")).strip().lower() not in RESERVED_SPLITS):
+                observation["artifact_evidence"] = load_artifact_evidence(
+                    results_dir, observation["agent"], trial_dir.name, entry_id=case_id,
+                    declarations=retained_case.get("artifact_pairs"),
+                )
             if status == "completed":
                 traj, meta = load_trajectory_with_fallback(trial_dir / "trajectory.json", logs_dir=trial_dir)
                 if traj and traj.get("steps"):
@@ -794,41 +808,11 @@ def _discover_trajectories(
     return observations
 
 
-def _summarize_trajectory(trajectory: dict[str, Any], max_steps: int = 25) -> str:
-    """Convert ATIF trajectory to concise text for the LLM refinement prompt."""
-    steps = trajectory.get("steps", [])
-    lines: list[str] = []
-    n = 0
+def _summarize_trajectory(trajectory: dict[str, Any]) -> str:
+    """Keep bounded calls, returns and final claims without changing the retained trace."""
+    from skillevaluator.tier3.retained_evidence import summarize_trajectory
 
-    for step in steps:
-        for tc in step.get("tool_calls", []):
-            if n >= max_steps:
-                break
-            n += 1
-            fn = tc.get("function_name", "unknown")
-            args = tc.get("arguments", {})
-
-            if fn in ("read", "read_file"):
-                path = args.get("path", args.get("file_path", args.get("filePath", "?")))
-                lines.append(f"  {n}. [read_file] {path}")
-            elif fn in ("bash", "execute", "shell", "Shell"):
-                cmd = str(args.get("command", args))[:150]
-                lines.append(f"  {n}. [execute] {cmd}")
-            else:
-                args_str = json.dumps(args, ensure_ascii=False)[:120]
-                lines.append(f"  {n}. [{fn}] {args_str}")
-
-        msg = atif_content_text(step.get("message")).strip()
-        if msg and len(msg) > 30 and n < max_steps:
-            n += 1
-            truncated = msg[:250] + "..." if len(msg) > 250 else msg
-            lines.append(f'  {n}. {step.get("source", "unknown")} said: "{truncated}"')
-
-    total = sum(len(s.get("tool_calls", [])) for s in steps) + len(steps)
-    if n >= max_steps and total > max_steps:
-        lines.append(f"  ... ({total} total actions, showing first {max_steps})")
-
-    return "\n".join(lines) if lines else "  (no tool calls or messages recorded)"
+    return summarize_trajectory(trajectory)
 
 
 def _run_agent_collect_trajectories(

@@ -3462,21 +3462,14 @@ def _command_reads_skill_md_arg(command, cmd_idx, assignments):
 _SHELL_EXPANSION_CHARS = frozenset("{*?[$`")
 
 
-def _failed_single_skill_read(call):
-    """A shell failure only proves the skill read failed for an isolated read.
-
-    Compound commands, multi-file reads and operands that the shell may expand
-    into several files can print SKILL.md successfully before another file or
-    operation fails.
-    """
-    if call.get("is_error") is not True:
-        return False
-    tokens = _shell_tokens(_command_text(call))
+def _single_skill_read_operand(cmd):
+    """Recognize one viewer operand without interpreting shell expansion."""
+    tokens = _shell_tokens(cmd)
     if not tokens or any(token in _SHELL_SEPARATORS for token in tokens):
-        return False
+        return None
     command = tokens[0].rsplit("/", 1)[-1].lower()
     if command not in {"cat", "nl", "bat", "less", "more"}:
-        return False
+        return None
     files = []
     options_ended = False
     for arg in tokens[1:]:
@@ -3485,19 +3478,20 @@ def _failed_single_skill_read(call):
             options_ended = True
         elif options_ended or arg == "-" or not arg.startswith("-"):
             files.append(arg)
-    return len(files) == 1 and not _SHELL_EXPANSION_CHARS.intersection(files[0]) and _skill_md_arg(files[0], {})
+    return files[0] if len(files) == 1 and _skill_md_arg(files[0], {}) else None
 
 
-def _cmd_reads_skill_md(cmd) -> bool:
-    """True if a shell command reads a SKILL.md via a file-view utility.
+def _failed_single_skill_read(call):
+    """A shell failure only proves failure for one nonexpanding read operand."""
+    operand = _single_skill_read_operand(_command_text(call))
+    return call.get("is_error") is True and operand is not None and not _SHELL_EXPANSION_CHARS.intersection(operand)
 
-    Requires both a read verb (cat/sed/head/...) AND a ``SKILL.md`` filename
-    reference. The bare word ``SKILL`` is not enough: search commands such as
-    ``grep SKILL config.json`` or ``sed -n '/SKILL/p' config.json`` match the
-    word but never open a SKILL.md, and must not be credited as skill reads.
-    """
+
+def _shell_skill_md_reads(cmd) -> list[str]:
+    """Return read operands, without borrowing identity from other commands."""
     tokens = _shell_tokens(cmd)
-    assignments = {}
+    assignments: dict[str, str] = {}
+    paths: list[str] = []
     idx = 0
     while idx < len(tokens):
         if tokens[idx] in _SHELL_SEPARATORS:
@@ -3519,11 +3513,17 @@ def _cmd_reads_skill_md(cmd) -> bool:
 
         if cmd_idx < len(command):
             executable = command[cmd_idx].rsplit("/", 1)[-1].lower()
-            if executable in _FILE_READ_VERBS and _command_reads_skill_md_arg(command, cmd_idx, assignments):
-                return True
+            if executable in _FILE_READ_VERBS:
+                paths.extend(
+                    arg for arg in _command_input_args(command, cmd_idx, assignments) if _skill_md_arg(arg, {})
+                )
 
         idx = end + 1
-    return False
+    return paths
+
+
+def _cmd_reads_skill_md(cmd) -> bool:
+    return bool(_shell_skill_md_reads(cmd))
 
 
 _SCRIPT_INTERPRETERS = {"ash", "bash", "dash", "ksh", "mksh", "node", "perl", "python", "python3", "ruby", "sh", "zsh"}
@@ -4536,6 +4536,53 @@ def _skill_name_from_ref(ref):
     return ""
 
 
+def _skill_read_sources(call: dict[str, Any]) -> list[tuple[str, str]]:
+    """Attribute identity to a read operand; an empty name means unknown.
+
+    Frontmatter can identify a document from an isolated read's output. It
+    does not establish ownership by any particular installed skill directory.
+    """
+    action = str(call.get("action", ""))
+    shell = _is_execution_action(action)
+    if shell:
+        if _failed_single_skill_read(call):
+            return []
+        command = _command_text(call)
+        paths = _shell_skill_md_reads(command)
+        isolated = _single_skill_read_operand(command) is not None and len(paths) == 1
+    elif "read" in action.lower() and call.get("is_error") is not True:
+        path = _extract_path(call)
+        paths = [path] if _skill_md_arg(path, {}) else []
+        isolated = True
+    else:
+        return []
+    observation = str(call.get("observation", ""))
+    content = re.sub(r"\Astatus=[^\n]*\nexit_code=-?\d+\n", "", observation)
+    frontmatter = re.match(r"\s*---\s*\n(.*?)\n---(?:\n|$)", content, re.DOTALL) if isolated else None
+    declared = re.search(r"(?m)^name:\s*['\"]?([\w.-]+)['\"]?\s*$", frontmatter[1]) if frontmatter else None
+    sources = []
+    for path in paths:
+        name = _skill_name_from_ref(path)
+        if name in {".", ".."} or _SHELL_EXPANSION_CHARS.intersection(path):
+            name = ""
+        # An outer success can hide a failed read followed by another command.
+        diagnostic = shell and re.search(
+            r"(?m)^(?:cat|sed|head|tail|awk|less|more|nl|bat):[^\n]*" + re.escape(path) + r"['\"]?:", observation
+        )
+        sources.append((path, "" if diagnostic else declared[1] if declared else name))
+    return sources
+
+
+def _unknown_skill_read_result(paths: list[str]) -> dict[str, Any]:
+    return {
+        "passed": None,
+        "score": 0.5,
+        "supported": False,
+        "reason": "SKILL.md read identity or success could not be attributed",
+        "details": {"unattributed_reads": paths},
+    }
+
+
 def _allowed_workspace_skills(expected_skill, workspace_skill_names, workspace_mode, acceptable_skills=None):
     allowed = set(_accepted_skill_names(expected_skill, acceptable_skills))
     if workspace_mode == "group":
@@ -4787,8 +4834,18 @@ def _unsupported_native_codex_result(reason):
 
 
 def check_activation(tool_calls, expected_skill, skill_tool_names=None, acceptable_skills=None):
+    """Check whether the agent activated the expected skill.
+
+    Supports multiple activation patterns:
+      1. Claude Code ``Skill`` tool (via *skill_tool_names*)
+      2. ``read_file`` / ``read`` with path containing expected_skill + SKILL.md
+      3. ``bash cat`` of SKILL.md
+      4. Frontmatter identity from an isolated read output
+    """
     if not expected_skill:
         return {"passed": True, "score": 1.0, "reason": "No expected_skill -- skipped"}
+
+    # Check 1: Claude Code Skill tool
     if skill_tool_names:
         for s in skill_tool_names:
             match = _classify_skill_match(str(s), expected_skill, acceptable_skills, fuzzy=True)
@@ -4802,83 +4859,44 @@ def check_activation(tool_calls, expected_skill, skill_tool_names=None, acceptab
                     "reason": reason,
                     "details": {**_skill_match_details(expected_skill, acceptable_skills), **match},
                 }
-    read_calls = [tc for tc in tool_calls if "read" in tc["action"].lower() and tc.get("is_error") is not True]
-    for call in read_calls:
-        path_arg = _extract_path(call)
-        if "SKILL.md" not in path_arg:
-            continue
-        skill_name = _skill_name_from_ref(path_arg) or path_arg
-        match = _classify_skill_match(skill_name, expected_skill, acceptable_skills, fuzzy=skill_name == path_arg)
-        if match:
-            reason = f"Read SKILL.md for '{expected_skill}'"
-            if match["match_type"] == "acceptable_alternate":
-                reason = f"Read SKILL.md for acceptable alternate '{match['matched_skill']}'"
-            return {
-                "passed": True,
-                "score": match["score"],
-                "reason": reason,
-                "details": {**_skill_match_details(expected_skill, acceptable_skills), **match, "path": path_arg},
-            }
+
+    # Read identity must come from that read, not unrelated command/output text.
+    unknown_reads: list[str] = []
     for call in tool_calls:
-        if _is_execution_action(call["action"]) and not _failed_single_skill_read(call):
-            cmd = _command_text(call)
-            if _cmd_reads_skill_md(cmd):
-                match = _classify_skill_match(cmd, expected_skill, acceptable_skills, fuzzy=True)
-                if not match:
-                    match = _classify_skill_match(
-                        str(call.get("observation", "")),
-                        expected_skill,
-                        acceptable_skills,
-                        fuzzy=True,
-                    )
-                if match:
-                    score = min(0.75, float(match["score"]))
-                    reason = "Read SKILL.md via shell read command"
-                    if match["match_type"] == "acceptable_alternate":
-                        reason = f"Read acceptable alternate SKILL.md via shell read command: {match['matched_skill']}"
-                    return {
-                        "passed": True,
-                        "score": score,
-                        "reason": reason,
-                        "details": {**_skill_match_details(expected_skill, acceptable_skills), **match},
-                    }
+        shell = _is_execution_action(str(call.get("action", "")))
+        for path, name in _skill_read_sources(call):
+            if not name:
+                unknown_reads.append(path)
+                continue
+            match = _classify_skill_match(name, expected_skill, acceptable_skills, fuzzy=shell)
+            if match:
+                reason = (
+                    "Read SKILL.md via shell read command" if shell else f"Read SKILL.md for '{match['matched_skill']}'"
+                )
+                return {
+                    "passed": True,
+                    "score": min(0.75, float(match["score"])) if shell else match["score"],
+                    "reason": reason,
+                    "details": {**_skill_match_details(expected_skill, acceptable_skills), **match, "path": path},
+                }
+
     if _has_unsupported_native_codex_call(tool_calls):
         return _unsupported_native_codex_result(
             "Skill activation could not be evaluated because a native Codex exec wrapper was unsupported"
         )
-    for tc in tool_calls:
-        action = str(tc.get("action", ""))
-        cmd = _command_text(tc)
-        has_skill_read_evidence = ("read" in action.lower() and "SKILL.md" in str(tc.get("action_input", ""))) or (
-            _is_execution_action(action) and _cmd_reads_skill_md(cmd)
-        )
-        if not has_skill_read_evidence or (
-            tc.get("is_error") is True
-            and (not _is_execution_action(action) or _failed_single_skill_read(tc))
-        ):
-            continue
-        obs = str(tc.get("observation", "")).lower()
-        if "skill.md" in obs:
-            match = _classify_skill_match(obs, expected_skill, acceptable_skills, fuzzy=True)
-            if match:
-                score = min(0.75, float(match["score"]))
-                reason = "SKILL.md found in tool observation"
-                if match["match_type"] == "acceptable_alternate":
-                    reason = f"Acceptable alternate SKILL.md found in tool observation: {match['matched_skill']}"
-                return {
-                    "passed": True,
-                    "score": score,
-                    "reason": reason,
-                    "details": {**_skill_match_details(expected_skill, acceptable_skills), **match},
-                }
+    if unknown_reads:
+        return _unknown_skill_read_result(unknown_reads)
+
+    # An explicit activation of another skill is still negative evidence.
     if skill_tool_names:
         return {"passed": False, "score": 0.0, "reason": f"Activated different skill(s): {skill_tool_names}"}
+
     return {
         "passed": False,
         "score": 0.0,
         "reason": (
             f"No evidence of target skill use in trajectory for '{expected_skill}'. "
-            "Checked Skill tool calls, SKILL.md reads, bash cat commands, and tool observations."
+            "Checked Skill tool calls and attributable SKILL.md reads."
         ),
         "details": _skill_match_details(expected_skill, acceptable_skills),
     }
@@ -7957,51 +7975,38 @@ def check_routing(
     workspace_mode="isolated",
     acceptable_skills=None,
 ):
+    """Check the agent read only expected/allowed workspace skill docs."""
     unsupported_native_codex_call = _has_unsupported_native_codex_call(tool_calls)
-    read_calls = [tc for tc in tool_calls if "read" in tc["action"].lower() and tc.get("is_error") is not True]
-    skills_read, wrong_skills = [], []
+    skills_read: list[str] = []
+    wrong_skills: list[str] = []
+    unknown_reads: list[str] = []
     matched_expected = False
     matched_alternate = False
-    matched_alternates = []
+    matched_alternates: list[str] = []
     allowed_skills = _allowed_workspace_skills(
         expected_skill,
         workspace_skill_names,
         workspace_mode,
         acceptable_skills,
     )
-    for call in read_calls:
-        path = _extract_path(call)
-        if "SKILL.md" not in path:
-            continue
-        skills_read.append(path)
-        skill_name = _skill_name_from_ref(path)
-        match = _classify_skill_match(skill_name, expected_skill, acceptable_skills)
-        if match and match["match_type"] == "expected":
-            matched_expected = True
-        elif match and match["match_type"] == "acceptable_alternate":
-            matched_alternate = True
-            matched_alternates.append(str(match["matched_skill"]))
-        if skill_name and skill_name not in allowed_skills:
-            wrong_skills.append(path)
+
     for call in tool_calls:
-        action = call["action"].lower()
-        cmd = _command_text(call)
-        if not (_is_execution_action(action) and _cmd_reads_skill_md(cmd)) or _failed_single_skill_read(call):
-            continue
-        skills_read.append(cmd)
-        skill_name = _skill_name_from_ref(cmd)
-        match = _classify_skill_match(skill_name, expected_skill, acceptable_skills, fuzzy=not skill_name)
-        if not match:
-            match = _classify_skill_match(
-                str(call.get("observation", "")), expected_skill, acceptable_skills, fuzzy=True
-            )
-        if match and match["match_type"] == "expected":
-            matched_expected = True
-        elif match and match["match_type"] == "acceptable_alternate":
-            matched_alternate = True
-            matched_alternates.append(str(match["matched_skill"]))
-        if skill_name and skill_name not in allowed_skills and not match:
-            wrong_skills.append(cmd)
+        shell = _is_execution_action(str(call.get("action", "")))
+        for path, name in _skill_read_sources(call):
+            skills_read.append(path)
+            if not name:
+                unknown_reads.append(path)
+                continue
+            match = _classify_skill_match(name, expected_skill, acceptable_skills, fuzzy=shell)
+            if match and match["match_type"] == "expected":
+                matched_expected = True
+            elif match and match["match_type"] == "acceptable_alternate":
+                matched_alternate = True
+                matched_alternates.append(str(match["matched_skill"]))
+            if name not in allowed_skills and not match:
+                wrong_skills.append(path)
+
+    # Claude Code Skill tool activations also count
     if skill_tool_names:
         for s in skill_tool_names:
             skills_read.append(f"Skill({s})")
@@ -8013,6 +8018,7 @@ def check_routing(
                 matched_alternates.append(str(match["matched_skill"]))
             if str(s) not in allowed_skills and not match:
                 wrong_skills.append(f"Skill({s})")
+
     if not skills_read:
         if unsupported_native_codex_call:
             return _unsupported_native_codex_result(
@@ -8024,6 +8030,7 @@ def check_routing(
             "reason": "Agent did not read any SKILL.md",
             "details": _skill_match_details(expected_skill, acceptable_skills),
         }
+
     if wrong_skills:
         return {
             "passed": False,
@@ -8037,10 +8044,15 @@ def check_routing(
                 "matched_alternates": sorted(set(matched_alternates)),
             },
         }
+
     if unsupported_native_codex_call:
         return _unsupported_native_codex_result(
             "Skill routing could not be evaluated because a native Codex exec wrapper was unsupported"
         )
+
+    if unknown_reads:
+        return _unknown_skill_read_result(unknown_reads)
+
     if matched_alternate and not matched_expected:
         return {
             "passed": True,
@@ -8053,6 +8065,7 @@ def check_routing(
                 "matched_alternates": sorted(set(matched_alternates)),
             },
         }
+
     if workspace_mode == "group":
         return {
             "passed": True,
@@ -8064,6 +8077,7 @@ def check_routing(
                 "skills_read": skills_read,
             },
         }
+
     return {
         "passed": True,
         "score": 1.0,

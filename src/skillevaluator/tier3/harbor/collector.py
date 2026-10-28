@@ -5927,6 +5927,8 @@ def _save_trials(
     agent_model: str | None = None,
     agent_model_source: str | None = None,
     expected_case_ids: list[str] | set[str] | None = None,
+    staged_task_root: Path | None = None,
+    env_mode: str | None = None,
 ) -> None:
     """Save per-trial reward.json and trajectory.json into the results directory."""
     agent = _bounded_reward_metadata_text(agent) or "unknown"
@@ -6024,6 +6026,17 @@ def _save_trials(
 
         if trial_src:
             _copy_trial_artifacts(trial_src, trial_out, include_root_trajectory=False)
+            selector = reward.get("_trusted_task_selector")
+            if (env_mode == "docker" and staged_task_root is not None and not reward.get("_step_name")
+                    and isinstance(selector, str) and selector not in {"", ".", ".."}
+                    and Path(selector).name == selector and not reward.get("_trusted_case_identity_unresolved")):
+                from skillevaluator.tier3.artifact_evidence import collect_artifact_evidence
+
+                collect_artifact_evidence(
+                    staged_task_root / selector, trial_src, trial_out,
+                    entry_id=clean_reward.get("entry_id", ""), trial_id=clean_reward["trial_id"],
+                    agent=agent, variant=variant,
+                )
         if safe_materialized_traj:
             (trial_out / "trajectory.json").write_text(
                 json.dumps(
@@ -6359,6 +6372,7 @@ def collect_harbor_results(
     env_mode: str | None = None,
     agent_models: dict[str, dict[str, str]] | None = None,
     launch_errors: list[str] | None = None,
+    staged_task_roots: dict[str, tuple[Path, Path | None]] | None = None,
 ) -> dict[str, Any]:
     """Collect results from Harbor jobs into evals/results/<agent>/ structure.
 
@@ -6501,6 +6515,8 @@ def collect_harbor_results(
                 agent_model=agent_model,
                 agent_model_source=agent_model_source,
                 expected_case_ids=expected_case_ids,
+                staged_task_root=(staged_task_roots or {}).get(agent, (None, None))[0],
+                env_mode=env_mode,
             )
             with_summary = {
                 "agent": agent,
@@ -6702,6 +6718,8 @@ def collect_harbor_results(
                     agent_model=agent_model,
                     agent_model_source=agent_model_source,
                     expected_case_ids=expected_case_ids,
+                    staged_task_root=(staged_task_roots or {}).get(agent, (None, None))[1],
+                    env_mode=env_mode,
                 )
                 without_summary = {
                     "agent": agent,
@@ -6946,6 +6964,8 @@ def collect_harbor_results(
                     agent_model=agent_model,
                     agent_model_source=agent_model_source,
                     expected_case_ids=expected_case_ids,
+                    staged_task_root=(staged_task_roots or {}).get(agent, (None, None))[0],
+                    env_mode=env_mode,
                 )
 
         agent_execution = _aggregate_execution([with_execution, without_execution])

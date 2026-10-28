@@ -468,6 +468,25 @@ def test_agent_observations_are_opt_in_bounded_redacted_and_do_not_change_scores
         assert "agent_observations" not in load_signals(tmp_path, include_agent_observations=True)["agents"]["opencode"]["cases"][0]["attempts"][0]
 
 
+@pytest.mark.parametrize("padding", [0, 8186])
+def test_opt_in_observations_redact_configured_values_before_byte_clipping(tmp_path, monkeypatch, padding):
+    from skillevaluator.tier3.improve import discovery_packet
+
+    secret = 'opaqueConfiguredCredentialWith"Quote\\Slash'
+    monkeypatch.setenv("NVIDIA_API_KEY", secret)
+    _write_custom_signal_run(tmp_path)
+    trajectory = tmp_path / "opencode/with-skill/trials/case__one/trajectory.json"
+    trajectory.write_text(json.dumps({"steps": [{"source": "agent", "step_id": secret,
+        "message": "x" * padding + secret + " observed in output."}]}))
+    signals = load_signals(tmp_path, include_agent_observations=True)
+    observation = signals["agents"]["opencode"]["cases"][0]["attempts"][0]["agent_observations"][0]
+    assert observation["step_id"] is None
+    assert "opaque" not in observation["text"]
+    assert len(observation["text"].encode()) <= 8192
+    packet = discovery_packet(signals, include_agent_observations=True)
+    assert "opaque" not in json.dumps(packet)
+
+
 @pytest.mark.parametrize("split", ["selection", "holdout", "heldout", "held-out", "test", "validation", "val"])
 def test_reserved_case_observations_are_not_exported(tmp_path, split):
     from skillevaluator.tier3.harbor.report_data import build_dataset_snapshot
@@ -494,3 +513,66 @@ def test_optional_observation_step_ids_are_bounded_safe_scalars(tmp_path):
         observation = loaded["agents"]["opencode"]["cases"][0]["attempts"][0]["agent_observations"][0]
         assert observation["step_id"] == expected and observation["step_index"] == 0
         json.dumps(loaded, ensure_ascii=False).encode("utf-8")
+
+
+def test_discovery_execution_context_uses_retained_source_without_creating_findings(tmp_path):
+    from skillevaluator.tier3.improve import discovery_packet
+
+    _write_custom_signal_run(tmp_path)
+    trial = tmp_path / "opencode/with-skill/trials/case__one"
+    reward_path = trial / "reward.json"
+    reward = json.loads(reward_path.read_text())
+    reward.update(trial_id="case__one", execution_evidence={"summary": "forged evidence"})
+    reward_path.write_text(json.dumps(reward))
+    trajectory = {"steps": [{"source": "agent", "step_id": 2,
+        "tool_calls": [{"tool_call_id": "test", "function_name": "bash", "arguments": {"command": "pytest"}}],
+        "observation": {"results": [{"source_call_id": "test", "content": "FAIL original test"}]}},
+        {"source": "agent", "message": "FINAL SELF REPORT MUST BE OPT IN"}]}
+    (trial / "trajectory.json").write_text(json.dumps(trajectory))
+    attempt = discovery_packet(load_signals(tmp_path))["agents"]["opencode"]["cases"][0]["attempts"][0]
+    evidence = attempt["execution_evidence"]
+    assert evidence["status"] == "available" and len(evidence["sha256"]) == 64
+    assert evidence["source"] == "opencode/with-skill/trials/case__one/trajectory.json"
+    assert "FAIL original test" in evidence["summary"] and "forged evidence" not in str(attempt)
+    assert "FINAL SELF REPORT MUST BE OPT IN" not in str(attempt)
+    assert attempt["findings"] == [] and attempt["scores"]["objective_outcome"] == 1
+
+
+@pytest.mark.parametrize("source", ["missing", "malformed", "symlink", "parent_link", "traversal"])
+def test_execution_evidence_rejects_untrusted_source_paths(tmp_path, source):
+    from skillevaluator.tier3.improvement_signals import _execution_evidence
+
+    root = tmp_path / "run"
+    trial = root / "agent/with-skill/trials/case"
+    trial.mkdir(parents=True)
+    private = tmp_path / "private.json"
+    private.write_text(json.dumps({"steps": [{"source": "agent", "message": "PRIVATE HELDOUT ANSWER"}]}))
+    path = trial / "trajectory.json"
+    if source == "malformed":
+        path.write_text("{not json}")
+    elif source == "symlink":
+        path.symlink_to(private)
+    elif source == "parent_link":
+        trial.rmdir()
+        trial.symlink_to(tmp_path, target_is_directory=True)
+        (tmp_path / "trajectory.json").write_bytes(private.read_bytes())
+    evidence = _execution_evidence(root, "agent", "../../../../private.json" if source == "traversal" else "case")
+    assert evidence["status"] == "unavailable" and "PRIVATE HELDOUT ANSWER" not in str(evidence)
+
+
+def test_discovery_cannot_redirect_trajectory_identity_to_holdout(tmp_path):
+    _write_custom_signal_run(tmp_path)
+    trial = tmp_path / "opencode/with-skill/trials/case__one"
+    path = trial / "reward.json"
+    reward = json.loads(path.read_text())
+    reward["trial_id"] = "hidden__trial"
+    path.write_text(json.dumps(reward))
+    hidden = trial.parent / "hidden__trial"
+    hidden.mkdir()
+    (hidden / "reward.json").write_text(json.dumps({**reward, "entry_id": "hidden"}))
+    (hidden / "trajectory.json").write_text(json.dumps({"steps": [{"source": "agent",
+        "tool_calls": [{"tool_call_id": "read", "function_name": "read", "arguments": {"path": "oracle"}}],
+        "observation": {"results": [{"source_call_id": "read", "content": "PRIVATE HOLDOUT RESULT"}]}}]}))
+    case = next(case for case in load_signals(tmp_path)["agents"]["opencode"]["cases"] if case["entry_id"] == "case")
+    assert case["attempts"][0]["execution_evidence"]["status"] == "unavailable"
+    assert "PRIVATE HOLDOUT RESULT" not in str(case)

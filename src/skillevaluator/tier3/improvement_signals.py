@@ -129,6 +129,45 @@ def _runtime_context(run_dir: Path) -> dict:
     return context
 
 
+def _execution_evidence(run_dir: Path, agent: str, trial_id: Any, *, entry_id: str | None = None) -> dict:
+    """Read only the identified public trial; never trust a reward's embedded text/path."""
+    from skillevaluator.tier3.harbor.report_data import _read_bounded_bytes
+    from skillevaluator.tier3.retained_evidence import summarize_trajectory
+
+    unavailable = {"status": "unavailable", "reason": "Retained trajectory identity or content is unavailable"}
+    if any(not isinstance(value, str) or value in {"", ".", ".."} or Path(value).name != value
+           for value in (agent, trial_id)):
+        return unavailable
+    path = run_dir / agent / "with-skill" / "trials" / trial_id / "trajectory.json"
+    # Check every component. A contained-looking leaf may sit under a directory
+    # link to held-out data or to an unrelated host file.
+    if path.resolve() != path or not path.is_relative_to(run_dir):
+        return unavailable
+    raw = _read_bounded_bytes(path, [], artifact="improvement_trajectory")
+    if raw is None:
+        return unavailable
+    try:
+        identity_raw = _read_bounded_bytes(path.with_name("reward.json"), [], artifact="improvement_reward_identity")
+        identity = json.loads(identity_raw) if identity_raw else {}
+        if entry_id is None or identity.get("entry_id") != entry_id or identity.get("trial_id") != trial_id:
+            return unavailable
+        trajectory = json.loads(raw)
+        if not isinstance(trajectory, dict) or not isinstance(trajectory.get("steps"), list):
+            return unavailable
+        # Final reports have their own explicit opt-in channel. Tool returns here
+        # must not bypass that source boundary through the shared formatter.
+        summary = summarize_trajectory(trajectory, include_final_response=False)
+    except (ValueError, TypeError, AttributeError, UnicodeError):
+        return unavailable
+    return {
+        "status": "available",
+        "source": str(path.relative_to(run_dir)),
+        "sha256": hashlib.sha256(raw).hexdigest(),
+        "summary": summary,
+        "artifact_comparison": "unavailable_without_retained_original_and_delivered_pairs",
+    }
+
+
 def load_signals(run_dir: Path, *, include_agent_observations: bool = False) -> dict:
     """Read one explicit run; retain incomplete status rather than inventing scores.
 
@@ -201,6 +240,16 @@ def load_signals(run_dir: Path, *, include_agent_observations: bool = False) -> 
                     },
                 )
                 attempt = _attempt(reward, name)
+                if field == "attempts" and case_id in entries and str(case["split"]).lower().strip() not in RESERVED_SPLITS:
+                    from skillevaluator.tier3.artifact_evidence import load_artifact_evidence
+
+                    attempt["execution_evidence"] = _execution_evidence(
+                        run_dir, name, attempt["trial_id"], entry_id=case_id,
+                    )
+                    attempt["artifact_evidence"] = load_artifact_evidence(
+                        run_dir, name, attempt["trial_id"], entry_id=case_id,
+                        declarations=entries[case_id].get("artifact_pairs"),
+                    )
                 if field == "baseline_attempts" or str(case["split"]).lower().strip() in RESERVED_SPLITS:
                     attempt.pop("agent_observations", None)
                 if field == "baseline_attempts":

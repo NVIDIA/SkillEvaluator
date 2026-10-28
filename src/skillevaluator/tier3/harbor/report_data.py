@@ -857,6 +857,8 @@ def load_agent_data(
                             }
                             if include_agent_observations and variant_key == "rewards" and isinstance(steps, list):
                                 from skillevaluator.tier3.eval_core.atif_helpers import get_final_response
+                                from skillevaluator.tier3.eval_core.llm_judge import _redact_configured_credentials
+                                from skillevaluator.utils.redaction import redact_sensitive_text
 
                                 for index in range(len(steps) - 1, -1, -1):
                                     step = steps[index]
@@ -865,11 +867,13 @@ def load_agent_data(
                                     response = get_final_response({"steps": [step]})
                                     if not response.strip():
                                         continue
+                                    response = redact_sensitive_text(_redact_configured_credentials(response))
                                     encoded = response.encode("utf-8", errors="replace")
                                     step_id = step.get("step_id")
                                     if isinstance(step_id, str):
                                         try:
-                                            if len(step_id.encode("utf-8")) > 128:
+                                            if (len(step_id.encode("utf-8")) > 128
+                                                    or redact_sensitive_text(_redact_configured_credentials(step_id)) != step_id):
                                                 step_id = None
                                         except UnicodeError:
                                             step_id = None

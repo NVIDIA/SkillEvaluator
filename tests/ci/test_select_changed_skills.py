@@ -3,6 +3,7 @@
 
 import importlib.util
 import os
+import random
 import shutil
 import subprocess
 from pathlib import Path
@@ -240,3 +241,24 @@ def test_unrelated_histories_do_not_fall_back_to_full_scan(repository):
     head = commit(repo)
     with pytest.raises(selector.SelectionError, match="common merge base"):
         select(repo, base, head)
+
+
+def _reference_within(path, directory):
+    # The pairwise rule that _containing replaces.
+    return directory in {".", path} or path.startswith(directory + "/")
+
+
+@pytest.mark.parametrize("seed", range(20))
+def test_containing_set_matches_pairwise_directory_matching(seed):
+    generator = random.Random(seed)
+    names = ["a", "b", "ab", "a b", "SKILL.md", "[x]", "a.b"]
+
+    def path():
+        return "/".join(generator.choice(names) for _ in range(generator.randint(1, 4)))
+
+    paths = sorted({path() for _ in range(generator.randint(0, 30))})
+    directories = {".", *(path() for _ in range(40))}
+    directories |= {item.rsplit("/", 1)[0] for item in paths if "/" in item}
+    containing = selector._containing(paths)
+    for directory in directories:
+        assert (directory in containing) is any(_reference_within(item, directory) for item in paths), directory

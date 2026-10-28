@@ -148,8 +148,21 @@ def _paths(output: bytes) -> list[str]:
     return paths
 
 
-def _within(path: str, directory: str) -> bool:
-    return directory in {".", path} or path.startswith(directory + "/")
+def _containing(paths: list[str]) -> set[str]:
+    """Return every path plus each directory that contains one, including ".".
+
+    ``directory in _containing(paths)`` answers "is any path inside directory"
+    with one lookup instead of comparing every directory with every path.
+    """
+    found: set[str] = set()
+    for path in paths:
+        current = path
+        # A known entry already has all of its ancestors in the set.
+        while current not in found:
+            found.add(current)
+            slash = current.rfind("/")
+            current = current[:slash] if slash > 0 else "."
+    return found
 
 
 def _manifests(paths: list[str]) -> set[str]:
@@ -199,8 +212,9 @@ def select_changed_skills(workspace: Path, roots: str, base: str, head: str) -> 
         )
     before_files = _paths(_git(workspace, "ls-tree", "-r", "-z", "--name-only", base, "--", *configured))
     after_files = _paths(_git(workspace, "ls-tree", "-r", "-z", "--name-only", head, "--", *configured))
+    before_tree = _containing(before_files)
     for root in configured:
-        if not (workspace / root).is_dir() and not any(_within(path, root) for path in before_files):
+        if not (workspace / root).is_dir() and root not in before_tree:
             raise SelectionError("A configured skill root is missing from both the checkout and base revision.")
     before = _manifests(before_files)
     after = _manifests(after_files)
@@ -223,8 +237,9 @@ def select_changed_skills(workspace: Path, roots: str, base: str, head: str) -> 
         )
     )
     removed = sorted(before - after)
-    deleted = [directory for directory in removed if not any(_within(path, directory) for path in after_files)]
-    selected = sorted(directory for directory in after if any(_within(path, directory) for path in changed))
+    after_tree, changed_tree = _containing(after_files), _containing(changed)
+    deleted = [directory for directory in removed if directory not in after_tree]
+    selected = sorted(directory for directory in after if directory in changed_tree)
     selection = {
         "mode": "changed",
         "base": base,

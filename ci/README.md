@@ -41,6 +41,8 @@ deleted/skipped. A removed manifest with tracked files left in its skill
 folder is an error. Selection uses changed files inside discovered skills;
 shared files outside the configured roots are not inferred as dependencies.
 Use `scan-mode: all` when changes to those shared resources require evaluation.
+Changed-skill selection checks out full history without old file contents (a
+blobless clone); full scans fetch only the scanned commit.
 Static scanning is network connected: vulnerability databases may receive
 package metadata. Dependency auditing never installs packages or runs build
 scripts: requirements must provide exact package/version pins. Unpinned, URL,

@@ -296,3 +296,61 @@ def test_revision_shaped_file_name_is_not_read_as_a_path(repository):
     (repo / f"{missing}^{{commit}}").write_text("not a revision\n")
     with pytest.raises(selector.SelectionError, match="could not resolve"):
         select(repo, missing, head)
+
+
+def _clone(source, target, *options):
+    subprocess.run(
+        [
+            "git",
+            "-c",
+            "protocol.file.allow=always",
+            "clone",
+            "-q",
+            "--no-checkout",
+            *options,
+            source.as_uri(),
+            str(target),
+        ],
+        check=True,
+        env={**os.environ, "GIT_CONFIG_GLOBAL": os.devnull, "GIT_CONFIG_NOSYSTEM": "1"},
+        capture_output=True,
+    )
+
+
+def test_blobless_clone_selects_like_a_full_clone_without_fetching_blobs(repository, tmp_path):
+    # The workflow checks out changed mode with filter: blob:none; selection must
+    # need only commits, trees and the checked-out files.
+    repo, base = repository
+    (repo / "skills/first skill/SKILL.md").write_text("# Changed first skill\n")
+    (repo / "skills/second/notes.md").write_text("new file\n")
+    head = commit(repo)
+    git(repo, "config", "uploadpack.allowFilter", "true")
+    clone = tmp_path / "blobless"
+    _clone(repo, clone, "--filter=blob:none")
+    subprocess.run(
+        ["git", "-C", str(clone), "-c", "protocol.file.allow=always", "checkout", "-q", "--detach", head],
+        check=True,
+        env={**os.environ, "GIT_CONFIG_GLOBAL": os.devnull, "GIT_CONFIG_NOSYSTEM": "1"},
+        capture_output=True,
+    )
+    # Only the base commit has this manifest content, so a blobless clone lacks it.
+    old_blob = git(repo, "rev-parse", f"{base}:skills/first skill/SKILL.md")
+    missing = git(clone, "rev-list", "--objects", "--missing=print", base)
+    assert f"?{old_blob}" in missing.splitlines()
+    full = select(repo, base, head)
+    partial = select(clone, base, head)
+    assert partial["selected"] == full["selected"] == ["skills/first skill", "skills/second"]
+    assert partial == full
+    # Selection runs Git with protocol.allow=never, so the old blob stays missing.
+    assert f"?{old_blob}" in git(clone, "rev-list", "--objects", "--missing=print", base).splitlines()
+
+
+def test_shallow_clone_fails_changed_selection_instead_of_scanning_everything(repository, tmp_path):
+    repo, base = repository
+    (repo / "skills/second/SKILL.md").write_text("# Changed\n")
+    head = commit(repo)
+    clone = tmp_path / "shallow"
+    _clone(repo, clone, "--depth=1")
+    git(clone, "checkout", "-q", "--detach", head)
+    with pytest.raises(selector.SelectionError):
+        select(clone, base, head)

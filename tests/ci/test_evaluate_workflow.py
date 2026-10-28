@@ -26,13 +26,18 @@ def test_pr_history_mode_and_attempt_artifact_wiring():
     checkout = next(step for step in job["steps"] if step.get("uses", "").startswith("actions/checkout@"))
     scan = next(step for step in job["steps"] if step.get("name") == "Evaluate selected skills")
     env = scan["env"]
-    assert checkout["with"]["fetch-depth"] == "0"
-    assert checkout["with"]["ref"] == env["DIFF_HEAD_SHA"] == "${{ github.event.pull_request.head.sha || github.sha }}"
-    assert env["DIFF_BASE_SHA"] == "${{ github.event.pull_request.base.sha }}"
+    # Steps inherit the job's scan mode, which also sizes the checkout.
+    assert "SCAN_MODE" not in env
     assert (
-        env["SCAN_MODE"]
+        job["env"]["SCAN_MODE"]
         == "${{ inputs.scan-mode == 'auto' && (github.event_name == 'pull_request' && 'changed' || 'all') || inputs.scan-mode }}"
     )
+    # Only changed mode fetches history, and it skips old file contents.
+    # The numbers are ordered so that 0, which is falsy, is never the && operand.
+    assert checkout["with"]["fetch-depth"] == "${{ env.SCAN_MODE != 'changed' && 1 || 0 }}"
+    assert checkout["with"]["filter"] == "${{ env.SCAN_MODE == 'changed' && 'blob:none' || '' }}"
+    assert checkout["with"]["ref"] == env["DIFF_HEAD_SHA"] == "${{ github.event.pull_request.head.sha || github.sha }}"
+    assert env["DIFF_BASE_SHA"] == "${{ github.event.pull_request.base.sha }}"
     assert env["LLM_API_KEY"] == "${{ inputs.llm && secrets.LLM_API_KEY || '' }}"
     assert env["CALLER_WORKFLOW_SHA"] == "${{ github.workflow_sha }}"
     assert env["SCAN_WORKERS"] == "${{ inputs.scan-workers }}"

@@ -48,11 +48,16 @@ jobs:
     name: Tier 1 scan
     runs-on: ubuntu-24.04
     timeout-minutes: 60
+    env:
+      SCAN_MODE: ${{ inputs.scan-mode == 'auto' && (github.event_name == 'pull_request' && 'changed' || 'all') || inputs.scan-mode }}
     steps:
       - uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0
         with:
           persist-credentials: false
-          fetch-depth: 0
+          # Changed mode needs commits and trees for the merge base, not old
+          # file contents. Full scans need only the checked-out commit.
+          fetch-depth: ${{ env.SCAN_MODE != 'changed' && 1 || 0 }}
+          filter: ${{ env.SCAN_MODE == 'changed' && 'blob:none' || '' }}
           ref: ${{ github.event.pull_request.head.sha || github.sha }}
       - name: Validate the immutable image reference
         env:
@@ -72,7 +77,6 @@ jobs:
       - name: Evaluate selected skills
         env:
           IMAGE: ${{ inputs.image }}
-          SCAN_MODE: ${{ inputs.scan-mode == 'auto' && (github.event_name == 'pull_request' && 'changed' || 'all') || inputs.scan-mode }}
           DIFF_BASE_SHA: ${{ github.event.pull_request.base.sha }}
           DIFF_HEAD_SHA: ${{ github.event.pull_request.head.sha || github.sha }}
           SKILL_PATHS: ${{ inputs.paths }}

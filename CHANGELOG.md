@@ -193,6 +193,21 @@ All notable changes to SkillEvaluator are documented in this file.
   output is redirected or the search runs inside `sh -c`. Host and bundled
   scoring agree, while scoped searches and slash-valued patterns retain their
   classification.
+
+- Tier 3 `claude-code` trials no longer hang until the agent timeout after the
+  agent has already answered. Claude Code moves a shell command that outlasts
+  its Bash timeout to the background, and a headless run waits for background
+  commands before it exits, so a command that never finishes (for example a
+  `grep -r /` search for a missing skill) held the trial open and the case was
+  recorded as an unscored agent timeout. Generated and native tasks now set
+  `CLAUDE_CODE_DISABLE_BACKGROUND_TASKS=1` in the task environment for every
+  env mode, so each command finishes in its turn or is stopped at Claude Code's
+  Bash timeout (2 minutes unless the agent requests a longer one). Neither
+  `harbor.runtime_env` nor a native task's `[environment.env]` can turn
+  background tasks back on, and other agents ignore the variable. A skill whose
+  single commands need longer can raise Claude Code's default with
+  `BASH_DEFAULT_TIMEOUT_MS` in `harbor.runtime_env`.
+
 - PII email scans recognize all RFC 2606 reserved domains, including their
   subdomains, mixed-case forms, trailing dots, and prose ellipses. A local-part
   boundary prevents quadratic rescanning of long excluded addresses. Ordinary

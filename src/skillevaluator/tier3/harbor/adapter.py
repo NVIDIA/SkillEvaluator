@@ -3634,6 +3634,11 @@ _RUNTIME_POLICY_ENV_RESET = 'ENV CLAUDE_CODE_DISABLE_POLICY_SKILLS="1"'
 _EVALUATOR_MANAGED_RUNTIME_ENV = {
     **dict.fromkeys(_RUNTIME_LOADER_ENV_NAMES, ""),
     "CLAUDE_CODE_DISABLE_POLICY_SKILLS": "1",
+    # A headless Claude Code run waits for its background commands, so one that
+    # never exits (for example ``grep -r /``) holds a trial that has already
+    # answered until the agent timeout. With background tasks off, a command
+    # ends in its turn or at the Bash tool timeout. Other agents ignore it.
+    "CLAUDE_CODE_DISABLE_BACKGROUND_TASKS": "1",
 }
 _CLEAR_SKILL_ROOT_FUNCTION = (
     "clear_skill_root() { target=$1; "

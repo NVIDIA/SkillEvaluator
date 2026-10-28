@@ -30,6 +30,20 @@ The pinned CLI releases apply wherever Harbor installs the agent: Docker and
 the remote environments. [Local mode](#local-mode) runs the CLI already on your
 machine instead.
 
+Claude Code runs with background tasks turned off. Every staged task sets
+`CLAUDE_CODE_DISABLE_BACKGROUND_TASKS=1` in its environment, in every env mode,
+so a shell command finishes in the agent's turn or is stopped at Claude Code's
+Bash timeout (2 minutes unless the agent requests a longer one) instead of
+moving to the background. A headless Claude Code run waits for its background
+commands before it exits, so a command that never finishes would otherwise hold
+a trial that has already answered until the agent timeout. Neither
+`harbor.runtime_env` nor a native task's `[environment.env]` can turn
+background tasks back on. If a skill needs a single command to run
+longer, raise Claude Code's default in `evals/config.yml` with
+`harbor.runtime_env: {BASH_DEFAULT_TIMEOUT_MS: "240000"}` (milliseconds), and
+keep it below the trial's agent timeout: 300 seconds times
+`harbor.timeout_multiplier` for generated tasks.
+
 The `claude` alias is canonicalized to `claude-code` everywhere an agent
 name can appear — `-a/--agents`, `--agent-model`, and `harbor.agents` in
 `evals/config.yml` — so both spellings always name the same agent.

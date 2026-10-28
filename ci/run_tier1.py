@@ -46,9 +46,21 @@ except ModuleNotFoundError:
     from ci.report_views import finding_repository_path, render_reports
 
 try:
-    from select_changed_skills import SelectionError, select_changed_skills
+    from select_changed_skills import (
+        SelectionError,
+        has_control_character,
+        select_changed_skills,
+        skill_root,
+        skill_roots,
+    )
 except ModuleNotFoundError:
-    from ci.select_changed_skills import SelectionError, select_changed_skills
+    from ci.select_changed_skills import (
+        SelectionError,
+        has_control_character,
+        select_changed_skills,
+        skill_root,
+        skill_roots,
+    )
 
 MAX_SKILLS = 100
 MAX_REPORT_BYTES = 32 * 1024 * 1024
@@ -80,28 +92,16 @@ class ConfigurationError(ValueError):
 
 
 def discover_skills(workspace: Path, roots: str) -> list[Path]:
-    """Discover a bounded unique set; any linked scan content is rejected."""
+    """Discover a bounded unique set from SKILL_PATHS; linked scan content is rejected."""
     workspace = workspace.resolve(strict=True)
-    configured = [line.strip() for line in roots.splitlines() if line.strip()]
-    if not configured:
-        raise ConfigurationError("SKILL_PATHS must contain at least one relative directory.")
+    return skill_trees(workspace, skill_roots(workspace, roots, ConfigurationError))
+
+
+def skill_trees(workspace: Path, roots: list[str]) -> list[Path]:
+    """Walk validated relative roots and return the skills found under them."""
     discovered: set[Path] = set()
-    for raw in configured:
-        relative = Path(raw)
-        if (
-            relative.is_absolute()
-            or ".." in relative.parts
-            or "\\" in raw
-            or ":" in raw
-            or any(ord(character) < 32 or ord(character) == 127 for character in raw)
-        ):
-            raise ConfigurationError("Skill roots must be relative directories without parent traversal.")
-        current = workspace
-        for part in relative.parts:
-            current /= part
-            if current.is_symlink():
-                raise ConfigurationError("Symlinks are not supported in skill roots or scan content.")
-        root = workspace / relative
+    for relative in roots:
+        root = workspace / skill_root(workspace, relative, ConfigurationError)
         if not root.is_dir() or not root.resolve(strict=True).is_relative_to(workspace):
             raise ConfigurationError("A configured skill root is missing or outside the workspace.")
 
@@ -113,7 +113,8 @@ def discover_skills(workspace: Path, roots: str) -> list[Path]:
             inside_skill = any(parent.is_relative_to(skill) for skill in discovered) or "SKILL.md" in files
             for name in [*directories, *files]:
                 child = parent / name
-                if any(ord(character) < 32 or ord(character) == 127 for character in name):
+                # Names in scanned trees also reject DEL (0x7f).
+                if has_control_character(name) or "\x7f" in name:
                     raise ConfigurationError("Skill paths must not contain control characters.")
                 if child.is_symlink() and (inside_skill or name == "SKILL.md"):
                     raise ConfigurationError("Symlinks are not supported in skill roots or scan content.")
@@ -451,7 +452,7 @@ def run(
             )
             if selected:
                 # Validate scan trees without adding nested unchanged targets.
-                discover_skills(workspace, "\n".join(path.relative_to(workspace).as_posix() for path in selected))
+                skill_trees(workspace, [path.relative_to(workspace).as_posix() for path in selected])
         else:
             selected = discover_skills(workspace, roots)
             selection = {

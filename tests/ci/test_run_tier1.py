@@ -25,6 +25,11 @@ MODULE_PATH = Path(__file__).parents[2] / "ci" / "run_tier1.py"
 SPEC = importlib.util.spec_from_file_location("ci_run_tier1", MODULE_PATH)
 runner = importlib.util.module_from_spec(SPEC)
 SPEC.loader.exec_module(runner)
+SELECTOR_SPEC = importlib.util.spec_from_file_location(
+    "ci_selection", MODULE_PATH.with_name("select_changed_skills.py")
+)
+selector = importlib.util.module_from_spec(SELECTOR_SPEC)
+SELECTOR_SPEC.loader.exec_module(selector)
 # Upper bound for cross-thread waits; generous for loaded CI runners.
 WAIT = 60
 
@@ -162,6 +167,27 @@ def test_rejects_unsafe_roots(tmp_path, root):
     skill(tmp_path, "skills/m\x7fskill")
     with pytest.raises(runner.ConfigurationError, match="without parent traversal"):
         runner.discover_skills(tmp_path, root)
+
+
+LONG_NAME = "x" * 170
+
+
+@pytest.mark.parametrize(
+    "roots",
+    [
+        "skills/tab\tname",
+        "skills/escape\x1bname",
+        "\n".join(["skills"] * 101),
+        "\n".join([f"skills/{LONG_NAME}"] * 100),
+    ],
+)
+def test_full_scan_and_changed_selection_share_skill_root_rules(tmp_path, roots):
+    for name in ("tab\tname", "escape\x1bname", LONG_NAME):
+        skill(tmp_path, f"skills/{name}")
+    with pytest.raises(runner.ConfigurationError):
+        runner.discover_skills(tmp_path, roots)
+    with pytest.raises(selector.SelectionError):
+        selector.skill_roots(tmp_path, roots)
 
 
 def test_empty_selection_and_missing_root_fail(tmp_path):

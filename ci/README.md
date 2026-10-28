@@ -18,7 +18,7 @@ mutable image tag or an unreviewed branch reference.
 
 | Input | Basic configuration |
 | --- | --- |
-| `paths` | `skills`; newline-separated repository-relative skill directories or roots |
+| `paths` | `skills`; up to 100 newline-separated repository-relative skill directories or roots |
 | `scan-mode` | `auto`: affected skills on PRs, all configured skills on pushes/manual runs; `all` overrides selection |
 | `llm` | `false`; static Tier 1 requires no model key |
 | `artifact-name` | Keep `skill-evaluator-tier1` for the optional publisher |

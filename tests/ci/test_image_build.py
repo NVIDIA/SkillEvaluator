@@ -1,11 +1,13 @@
 # SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 # SPDX-License-Identifier: Apache-2.0
-"""Guard the Tier 1 image layout. Building the image is left to CI."""
+"""Guard the Tier 1 image layout and the workflow that builds it. Building the image is left to CI."""
 
 import fnmatch
 import re
 import shlex
 from pathlib import Path
+
+import yaml
 
 ROOT = Path(__file__).parents[2]
 DOCKERFILE = ROOT / "ci/Dockerfile.tier1"
@@ -33,6 +35,15 @@ def _stages() -> dict[str, list[tuple[str, str]]]:
 
 def _arguments(stage: list[tuple[str, str]], keyword: str) -> list[str]:
     return [arguments for name, arguments in stage if name == keyword]
+
+
+def _workflow() -> dict:
+    path = ROOT / ".github/workflows/publish-tier1-image.yml"
+    return yaml.load(path.read_text(encoding="utf-8"), Loader=yaml.BaseLoader)
+
+
+def _build_steps(job: dict) -> list[dict]:
+    return [step for step in job["steps"] if step.get("uses", "").startswith("docker/build-push-action@")]
 
 
 def test_runtime_stage_ships_only_what_scans_run():
@@ -119,3 +130,48 @@ def test_build_context_drops_unused_trees_but_keeps_image_inputs():
     for path in unused:
         assert (ROOT / path).exists(), path
         assert _dockerignored(path), path
+
+
+def test_pull_requests_read_but_never_write_the_layer_cache():
+    workflow = _workflow()
+    assert workflow["on"]["push"]["branches"] == ["main"]
+    assert workflow["on"]["push"]["paths"] == workflow["on"]["pull_request"]["paths"]
+    (verify,) = _build_steps(workflow["jobs"]["verify"])
+    assert verify["with"]["cache-from"] == "type=gha,scope=tier1-image"
+    cache_to = verify["with"]["cache-to"]
+    assert "github.event_name != 'pull_request'" in cache_to and "github.ref == 'refs/heads/main'" in cache_to
+    assert "'type=gha,scope=tier1-image,mode=max,ignore-error=true' || ''" in cache_to
+    (release,) = _build_steps(workflow["jobs"]["publish"])
+    assert release["with"]["cache-from"] == verify["with"]["cache-from"]
+    for step in (verify, release):
+        assert step["with"]["context"] == "."
+        assert step["with"]["file"] == "ci/Dockerfile.tier1"
+        assert step["with"]["load"] == "true" and "push" not in step["with"]
+    # These events run in main's cache scope on input that a pull request controls.
+    for path in (ROOT / ".github/workflows").glob("*.yml"):
+        triggers = yaml.load(path.read_text(encoding="utf-8"), Loader=yaml.BaseLoader)["on"]
+        triggers = [triggers] if isinstance(triggers, str) else triggers
+        assert {"pull_request_target", "workflow_run", "issue_comment"}.isdisjoint(triggers), path.name
+
+
+def test_release_builds_once_and_pushes_the_image_it_verified():
+    jobs = _workflow()["jobs"]
+    publish = jobs["publish"]
+    # Exactly one of the two building jobs runs for any event.
+    assert jobs["verify"]["if"] == "${{ !(" + publish["if"] + ") }}"
+    assert "needs" not in publish
+    (build,) = _build_steps(publish)
+    assert build["with"]["tags"] == "${{ env.IMAGE }}:sha-${{ github.sha }}"
+    assert build["with"]["labels"].splitlines() == [
+        "org.opencontainers.image.source=https://github.com/NVIDIA/SkillEvaluator",
+        "org.opencontainers.image.revision=${{ github.sha }}",
+        "org.opencontainers.image.description=SkillEvaluator complete Tier 1 CI runtime",
+    ]
+    steps = publish["steps"]
+    smoke = next(index for index, step in enumerate(steps) if "ci/smoke_image.py" in step.get("run", ""))
+    release = next(index for index, step in enumerate(steps) if step.get("id") == "release")
+    assert steps.index(build) < smoke < release
+    assert '--image "$IMAGE:sha-$GITHUB_SHA"' in steps[smoke]["run"]
+    assert 'docker push "$IMAGE:sha-$GITHUB_SHA"' in steps[release]["run"]
+    runs = [step.get("run", "") for job in jobs.values() for step in job["steps"]]
+    assert not any("docker build" in run for run in runs)

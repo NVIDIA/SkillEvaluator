@@ -867,7 +867,11 @@ class QualityScoreValidator(ValidatorBase):
     def _check_spec_fields(self, qs: QualityScoreResult, frontmatter: dict | None) -> None:
         if not frontmatter:
             return
-        metadata = frontmatter.get("metadata") or {}
+        metadata = frontmatter.get("metadata")
+        if not isinstance(metadata, dict):
+            # A list, string, or scalar is invalid metadata per the schema; score it
+            # as absent metadata rather than indexing into it.
+            metadata = {}
 
         top_level_fields = {
             "version": 'Semantic version (e.g., "1.0.0")',

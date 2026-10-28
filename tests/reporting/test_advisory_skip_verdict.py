@@ -410,7 +410,7 @@ def test_html_tier2_failure_stays_failed_when_cli_gate_is_nonblocking() -> None:
 
     assert html_data["summary"]["status"] == "passed"
     assert re.search(
-        r'tier-card fail.*?tier-card-label">Tier 2</span>.*?tier-card-verdict">\s*FAIL\s*</span>',
+        r'tier-card fail.*?tier-card-label">Tier 2</span>.*?tier-card-verdict">\s*Changes required\s*</span>',
         html,
         re.DOTALL,
     )
@@ -425,7 +425,7 @@ def test_html_tier2_incomplete_evidence_is_not_rendered_as_success() -> None:
     tier2_tab = _html_tab(html, "tier2")
 
     assert re.search(
-        r'tier-card warn.*?tier-card-label">Tier 2</span>.*?tier-card-verdict">\s*INCOMPLETE\s*</span>',
+        r'tier-card warn.*?tier-card-label">Tier 2</span>.*?tier-card-verdict">\s*Incomplete\s*</span>',
         html,
         re.DOTALL,
     )
@@ -449,12 +449,12 @@ def test_html_malformed_tier3_result_is_incomplete_like_benchmark() -> None:
 
     assert "| Tier 3 | Live agent evaluation | **INCOMPLETE** |" in benchmark
     assert re.search(
-        r'tier-card warn.*?tier-card-label">Tier 3</span>.*?tier-card-verdict">\s*INCOMPLETE\s*</span>',
+        r'tier-card warn.*?tier-card-label">Tier 3</span>.*?tier-card-verdict">\s*Incomplete\s*</span>',
         html,
         re.DOTALL,
     )
     assert not re.search(
-        r'tier-card pass.*?tier-card-label">Tier 3</span>.*?tier-card-verdict">\s*PASS\s*</span>',
+        r'tier-card pass.*?tier-card-label">Tier 3</span>.*?tier-card-verdict">\s*Passed\s*</span>',
         html,
         re.DOTALL,
     )
@@ -478,12 +478,12 @@ def test_html_tier3_scan_incomplete_is_not_rendered_as_failure() -> None:
     assert "| Tier 3 | Live agent evaluation | **INCOMPLETE** |" in benchmark
     assert html_data["summary"]["status"] == "incomplete"
     assert re.search(
-        r'tier-card warn.*?tier-card-label">Tier 3</span>.*?tier-card-verdict">\s*INCOMPLETE\s*</span>',
+        r'tier-card warn.*?tier-card-label">Tier 3</span>.*?tier-card-verdict">\s*Incomplete\s*</span>',
         html,
         re.DOTALL,
     )
     assert not re.search(
-        r'tier-card fail.*?tier-card-label">Tier 3</span>.*?tier-card-verdict">\s*FAIL\s*</span>',
+        r'tier-card fail.*?tier-card-label">Tier 3</span>.*?tier-card-verdict">\s*Changes required\s*</span>',
         html,
         re.DOTALL,
     )
@@ -513,7 +513,7 @@ def test_html_payloadless_generic_tier3_skip_is_rendered_as_skipped() -> None:
     assert "| Tier 3 | Live agent evaluation | **INCOMPLETE** |" in benchmark
     assert html_data["summary"]["status"] == "passed"
     assert re.search(
-        r'tier-card skipped.*?tier-card-label">Tier 3</span>.*?tier-card-verdict">\s*SKIPPED\s*</span>',
+        r'tier-card skipped.*?tier-card-label">Tier 3</span>.*?tier-card-verdict">\s*Skipped\s*</span>',
         html,
         re.DOTALL,
     )
@@ -629,12 +629,12 @@ def test_html_partial_tier3_payload_is_process_pass_but_publication_incomplete()
         assert html_data["summary"]["status"] == "passed"
         assert html_data["publication"]["status"] == "incomplete"
         assert re.search(
-            r'tier-card warn.*?tier-card-label">Tier 3</span>.*?tier-card-verdict">\s*INCOMPLETE\s*</span>',
+            r'tier-card warn.*?tier-card-label">Tier 3</span>.*?tier-card-verdict">\s*Incomplete\s*</span>',
             html,
             re.DOTALL,
         )
         assert not re.search(
-            r'tier-card pass.*?tier-card-label">Tier 3</span>.*?tier-card-verdict">\s*PASS\s*</span>',
+            r'tier-card pass.*?tier-card-label">Tier 3</span>.*?tier-card-verdict">\s*Passed\s*</span>',
             html,
             re.DOTALL,
         )
@@ -669,7 +669,7 @@ def test_html_production_wrapped_partial_tier3_payload_is_incomplete() -> None:
 
     assert "| Tier 3 | Live agent evaluation | **INCOMPLETE** |" in benchmark
     assert re.search(
-        r'tier-card warn.*?tier-card-label">Tier 3</span>.*?tier-card-verdict">\s*INCOMPLETE\s*</span>',
+        r'tier-card warn.*?tier-card-label">Tier 3</span>.*?tier-card-verdict">\s*Incomplete\s*</span>',
         html,
         re.DOTALL,
     )
@@ -763,7 +763,7 @@ def test_html_selects_executed_tier3_payload_independent_of_result_order() -> No
         markdown = MarkdownReporter(include_timestamp=False).render_all(results)
 
         assert re.search(
-            r'tier-card pass.*?tier-card-label">Tier 3</span>.*?tier-card-verdict">\s*PASS\s*</span>',
+            r'tier-card pass.*?tier-card-label">Tier 3</span>.*?tier-card-verdict">\s*Passed\s*</span>',
             html,
             re.DOTALL,
         )
@@ -967,7 +967,7 @@ def test_failed_tier3_execution_status_overrides_pass_verdict_across_reporters()
     assert "| Tier 3 | Live agent evaluation | **FAIL** |" in benchmark
     assert html_payload is not None and html_payload["verdict"] == "fail"
     assert 'data-publication-status="fail"' in html_output
-    assert re.search(r'tier-card-verdict">\s*FAIL\s*</span>', html_output)
+    assert re.search(r'tier-card-verdict">\s*Changes required\s*</span>', html_output)
     assert json_payload["publication_status"] == "fail"
     assert "**Publication status:** ❌ FAIL" in markdown
     assert "**Verdict:** FAIL" in markdown
@@ -1162,11 +1162,13 @@ def test_html_displays_effective_dimension_verdict(
     markdown = MarkdownReporter(include_timestamp=False).render_all(results)
 
     expected_upper = expected_status.upper()
+    # The HTML report uses one verdict vocabulary; the Markdown keeps PASS/FAIL.
+    expected_words = {"pass": "Passed", "fail": "Changes required", "neutral": "Neutral"}[expected_status]
     assert f"Overall verdict: {expected_upper}" in benchmark
     assert f"| Tier 3 | Live agent evaluation | **{expected_upper}** |" in benchmark
     assert f'data-publication-status="{expected_status}"' in html_output
-    assert re.search(rf'tier-card-verdict">\s*{expected_upper}\s*</span>', html_output)
-    assert f"Verdict at a glance:</strong>\n                {expected_upper}" in html_output
+    assert re.search(rf'tier-card-verdict">\s*{expected_words}\s*</span>', html_output)
+    assert f"Verdict at a glance:</strong>\n                {expected_words}" in html_output
     assert json_payload["publication_status"] == expected_status
     assert f"**Verdict:** {expected_upper}" in markdown
 
@@ -1261,7 +1263,7 @@ def test_all_reporters_tolerate_non_mapping_agent_payload() -> None:
     markdown = MarkdownReporter(include_timestamp=False).render_all([malformed])
 
     assert "| Tier 3 | Live agent evaluation | **INCOMPLETE** |" in benchmark
-    assert re.search(r'tier-card-verdict">\s*INCOMPLETE\s*</span>', html)
+    assert re.search(r'tier-card-verdict">\s*Incomplete\s*</span>', html)
     assert json_payload["tier3"]["agents"] == {"malformed": []}
     assert "## Tier 3: Agent Evaluation" in markdown
 
@@ -1415,7 +1417,7 @@ def test_html_partial_tier3_payload_wrong_types_fail_closed_without_crashing() -
         payload = reporter._tier3_report_data([partial_tier3])
 
         assert re.search(
-            r'tier-card warn.*?tier-card-label">Tier 3</span>.*?tier-card-verdict">\s*INCOMPLETE\s*</span>',
+            r'tier-card warn.*?tier-card-label">Tier 3</span>.*?tier-card-verdict">\s*Incomplete\s*</span>',
             html,
             re.DOTALL,
         )
@@ -1828,7 +1830,14 @@ def test_publication_status_matrix_is_consistent_across_reporters(
     assert html_data["publication"]["status"] == expected_status
     assert html_data["publication"]["eligible"] is eligible
     assert f'data-publication-status="{expected_status}"' in html_output
-    assert f"Publication: {expected_status.title()}" in html_output
+    # Eligibility sits next to the verdict in the report hero.
+    publication_word = {"pass": "Eligible", "fail": "Not eligible", "neutral": "Neutral"}[expected_status]
+    assert re.search(
+        rf'data-publication-status="{expected_status}">.*?Publication eligibility</span>\s*'
+        rf'<span class="status-badge [a-z]+">{publication_word}</span>',
+        html_output,
+        re.DOTALL,
+    )
     assert "**Publication status:**" in markdown
 
 
@@ -3404,7 +3413,7 @@ def test_html_executed_tier3_payload_normalizes_malformed_display_fields() -> No
 
         lossy = field in {"timing", "skill_name", "overall_score"}
         expected_class = "warn" if lossy else "pass"
-        expected_verdict = "INCOMPLETE" if lossy else "PASS"
+        expected_verdict = "Incomplete" if lossy else "Passed"
         assert re.search(
             rf'tier-card {expected_class}.*?tier-card-label">Tier 3</span>.*?tier-card-verdict">\s*'
             rf"{expected_verdict}\s*</span>",
@@ -3482,7 +3491,7 @@ def test_html_invalid_tier3_agent_scores_and_verdicts_fail_closed() -> None:
 
         assert "| Tier 3 | Live agent evaluation | **INCOMPLETE** |" in benchmark
         assert re.search(
-            r'tier-card warn.*?tier-card-label">Tier 3</span>.*?tier-card-verdict">\s*INCOMPLETE\s*</span>',
+            r'tier-card warn.*?tier-card-label">Tier 3</span>.*?tier-card-verdict">\s*Incomplete\s*</span>',
             html,
             re.DOTALL,
         )
@@ -3529,7 +3538,7 @@ def test_html_payloadless_tier3_failure_is_order_independent() -> None:
         fallback = reporter._tier3_report_data(results)
 
         assert re.search(
-            r'tier-card fail.*?tier-card-label">Tier 3</span>.*?tier-card-verdict">\s*FAIL\s*</span>',
+            r'tier-card fail.*?tier-card-label">Tier 3</span>.*?tier-card-verdict">\s*Changes required\s*</span>',
             html,
             re.DOTALL,
         )
@@ -3579,8 +3588,9 @@ def test_html_tier1_dashboard_and_details_exclude_clean_skips() -> None:
     html = HTMLReporter(include_timestamp=False).render_all([completed, skipped])
     tier1 = _html_tab(html, "tier1")
 
-    assert re.search(r"Validators Run</h3>\s*<p[^>]*>1</p>", tier1)
-    assert re.search(r"Passed</h3>\s*<p[^>]*>1</p>", tier1)
+    # A cleanly skipped check is counted as skipped, never as run or passed.
+    assert re.search(r'Checks passed</dt>\s*<dd class="kpi-value"><strong>1</strong> of 1</dd>', tier1)
+    assert '<dd class="kpi-sub">1 of 2 checks ran, 1 skipped</dd>' in tier1
     assert 'data-status="skipped"' in tier1
     assert re.search(r'status-badge warn">\s*Skipped\s*</span>', tier1)
     assert "Skipped: repository checkout unavailable" in tier1
@@ -3641,9 +3651,9 @@ def test_advisory_skip_is_non_blocking_in_html_but_incomplete_for_benchmark_publ
     assert html_data["results"][0]["status"] == "skipped"
     assert html_data["gating"]["would_block"] is False
     html = HTMLReporter(include_timestamp=False).render_all([result])
-    assert re.search(r'tier-card-verdict">\s*SKIPPED\s*</span>', html)
+    assert re.search(r'tier-card-verdict">\s*Skipped\s*</span>', html)
     assert "Live evaluation skipped:</strong> No public provider key" in html
-    assert not re.search(r'tier-card-verdict">\s*NEUTRAL\s*</span>', html)
+    assert not re.search(r'tier-card-verdict">\s*Neutral\s*</span>', html)
     assert "Overall verdict: INCOMPLETE" in benchmark
     assert "Overall verdict: FAIL" not in benchmark
     assert "Tier 3 live evaluation: SKIPPED — No public provider key" in benchmark
@@ -3673,8 +3683,12 @@ def test_advisory_skip_does_not_appear_as_tier1_failure_in_html() -> None:
     assert html_data["summary"]["passed_count"] == 1
     assert html_data["summary"]["failed_count"] == 0
     assert html_data["summary"]["advisory_skipped_count"] == 1
-    assert re.search(r"Validators Run</h3>\s*<p[^>]*>1</p>", tier1)
-    assert re.search(r"Failed</h3>\s*<p[^>]*>0</p>", tier1)
+    # The advisory Tier 3 skip is not a Tier 1 check: one check ran and none failed.
+    assert re.search(
+        r'Checks passed</dt>\s*<dd class="kpi-value"><strong>1</strong> of 1</dd>\s*'
+        r'<dd class="kpi-sub">1 of 1 checks ran</dd>',
+        tier1,
+    )
     assert "AGENT_EVAL" not in tier1
 
 
@@ -3690,7 +3704,7 @@ def test_real_agent_eval_failure_still_fails_required_validation() -> None:
 
     html = HTMLReporter(include_timestamp=False).render_all([result])
     tier3 = _html_tab(html, "tier3")
-    assert re.search(r'tier-card-verdict">\s*FAIL\s*</span>', html)
+    assert re.search(r'tier-card-verdict">\s*Changes required\s*</span>', html)
     assert "Harbor execution failed" in tier3
 
 

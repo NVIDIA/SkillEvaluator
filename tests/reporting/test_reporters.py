@@ -1124,7 +1124,7 @@ class TestGatingSplit:
         report_data = _html_report_data(output)
         assert reports_passed is False
         assert 'data-target-tab="tier2"' in output
-        assert "<strong>0</strong>/1 checks passed" in output
+        assert "<strong>0</strong> of 1 checks passed" in output
         assert report_data["gating"] == {
             "blocking_tiers": ["tier1", "tier2"],
             "advisory_tiers": ["tier3"],
@@ -1217,7 +1217,7 @@ class TestGatingSplit:
 
         assert report_data["quality_scores"]["demo-skill"]["overall_score"] == 72.5
         assert 'data-quality-skill-name="demo-skill"' in output
-        assert "Quality Score: 72.5/100" in output
+        assert "Quality score: 72.5 / 100" in output
         assert "Type: script-based" in output
         assert ">clarity</td>" in output
         assert '<td class="warning-text">1</td>' in output

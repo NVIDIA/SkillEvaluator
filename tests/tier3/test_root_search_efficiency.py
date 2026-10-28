@@ -34,6 +34,8 @@ spec.loader.exec_module(template)
         {"action": "exec_command", "action_input": {"cmd": "LC_ALL=C env find / -name task.py"}},
         {"action": "exec_command", "action_input": {"cmd": "LC_ALL='C' find / -name task.py"}},
         {"action": "exec_command", "action_input": {"cmd": "FOO=1 bash -c 'find / -name task.py'"}},
+        {"action": "exec_command", "action_input": {"cmd": "A=b=c FOO='x y' find / -name task.py"}},
+        {"action": "exec_command", "action_input": {"cmd": "bash -c 'LC_ALL=C find / -name task.py'"}},
         {"action": "exec_command", "action_input": {"cmd": "tree /"}},
         {"action": "Grep", "action_input": {"path": "/", "pattern": "task.py"}},
         {"action": "Glob", "action_input": {"pattern": "/**/task.py"}},
@@ -165,6 +167,9 @@ def test_redirected_wrapped_and_unnamed_root_searches_are_waste(module, command)
         '"LC_ALL=C" find / -name task.py',
         "LC_ALL\\=C find / -name task.py",
         "L'C_ALL'=C find / -name task.py",
+        "FOO=1; 'FOO=2' find / -name task.py",
+        'FOO=1 true && "FOO=2" grep -r task.py /',
+        "LC_ALL=C; LC_ALL\\=C find / -name task.py",
     ],
 )
 def test_scoped_quoted_heredoc_and_redirect_targets_keep_old_credit(module, command):

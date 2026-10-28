@@ -9114,10 +9114,54 @@ def _search_path_is_root(value: str) -> bool:
     return value.startswith("/") and not posixpath.normpath(value).strip("/")
 
 
-def _assignment_written_unquoted(text: str, name: str) -> bool:
-    # Tokens lose their quoting, but the shell only treats an unquoted NAME= as
-    # an assignment; 'NAME=value' or NAME\=value is the command name instead.
-    return re.search(rf"(?:^|[\s;&|()]){re.escape(name)}=", text) is not None
+_ASSIGNMENT_MASK = "\ue00f"
+
+
+def _mask_non_assignment_equals(text: str) -> str:
+    """Replace every ``=`` that does not make its word a shell assignment.
+
+    Tokens lose their quoting, but the shell only reads ``NAME=`` as an
+    assignment when NAME is written unquoted; ``'NAME=value'`` and
+    ``NAME\\=value`` are command names. Only ``=`` characters are replaced,
+    so the masked text tokenizes into the same words as the original.
+    """
+    out = []
+    name: list[str] = []
+    plain = True
+    quote = None
+    index = 0
+    while index < len(text):
+        char = text[index]
+        if quote:
+            if char == quote:
+                quote = None
+            elif char == "\\" and quote == '"' and index + 1 < len(text):
+                out.append(char)
+                index += 1
+                char = text[index]
+            out.append(_ASSIGNMENT_MASK if char == "=" else char)
+        elif char == "\\":
+            plain = False
+            out.append(char)
+            if index + 1 < len(text):
+                index += 1
+                out.append(_ASSIGNMENT_MASK if text[index] == "=" else text[index])
+        elif char in "'\"":
+            quote = char
+            plain = False
+            out.append(char)
+        elif char.isspace() or char in _SHELL_METACHARS:
+            name.clear()
+            plain = True
+            out.append(char)
+        elif char == "=":
+            out.append("=" if plain and _SHELL_NAME_RE.fullmatch("".join(name)) else _ASSIGNMENT_MASK)
+            plain = False
+        else:
+            name.append(char)
+            out.append(char)
+        index += 1
+    return "".join(out)
 
 
 def _tool_searches_root(action: str, args: dict, text: str, depth: int = 0) -> bool:
@@ -9146,11 +9190,16 @@ def _tool_searches_root(action: str, args: dict, text: str, depth: int = 0) -> b
     tokens = _shell_tokens(text)
     if any(_is_heredoc_redirect(token) or token in {"<(", ">("} for token in tokens):
         return False
+    masked_tokens = _shell_tokens(_mask_non_assignment_equals(text))
+    if len(masked_tokens) != len(tokens):
+        masked_tokens = [""] * len(tokens)
     commands: list[list[str]] = [[]]
+    masked_commands: list[list[str]] = [[]]
     skip_redirect_target = False
-    for token in tokens:
+    for token, masked_token in zip(tokens, masked_tokens, strict=True):
         if token in {";", "&&", "||", "|", "&", "(", ")"}:
             commands.append([])
+            masked_commands.append([])
             skip_redirect_target = False
         elif skip_redirect_target:
             skip_redirect_target = False
@@ -9158,13 +9207,14 @@ def _tool_searches_root(action: str, args: dict, text: str, depth: int = 0) -> b
             skip_redirect_target = True
         elif not _ATTACHED_REDIRECT_RE.match(token):
             commands[-1].append(token)
-    for command in commands:
+            masked_commands[-1].append(masked_token)
+    for command, masked_command in zip(commands, masked_commands, strict=True):
         assignments: dict[str, str] = {}
         index = 0
         while (
             index < len(command)
+            and _SHELL_ASSIGNMENT_RE.match(masked_command[index])
             and (assignment := _SHELL_ASSIGNMENT_RE.match(command[index]))
-            and _assignment_written_unquoted(text, assignment.group(1))
         ):
             assignments[assignment.group(1)] = assignment.group(2)
             index += 1

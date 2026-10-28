@@ -46,6 +46,12 @@ All notable changes to SkillEvaluator are documented in this file.
   with eligible free prototyping access. Installation adds extras as needed,
   and the guides separate quality results from full scanner and live-agent
   evidence.
+- The Tier 1 CI image is a multi-stage build with precompiled bytecode. It
+  ships the three locked scanner and SkillEvaluator environments, Gitleaks,
+  `ci/` and the license files, without uv, its cache or the source tree. In
+  local measurements a one-skill scan ran about 1.9x faster and the compressed
+  image grew by about 7%. The image workflow builds once per run with a layer
+  cache that only `main` writes, and a release pushes the image it smoke-tested.
 
 ### Documentation
 

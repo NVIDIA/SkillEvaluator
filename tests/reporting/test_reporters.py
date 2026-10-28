@@ -1114,6 +1114,8 @@ class TestGatingSplit:
 
         assert "Blocking (Tier 1 + Tier 2)" in output
         assert "Advisory (Tier 3 agent-eval)" in output
+        assert output.count("0 critical · 1 high · 0 medium · 0 low") == 2
+        assert "Tier 3 agent-eval findings are advisory and don't block merge." in output
         assert "Advisory (Tier 2" not in output
         assert "Advisory findings (dedup + agent-eval)" not in output
 

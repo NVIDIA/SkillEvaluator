@@ -73,10 +73,16 @@ def report():
         "results": [
             {
                 "validator": "Example",
+                "description": "Example validator",
+                "findings": [],
+                "success_details": [],
+                "legacy": {"errors": [], "warnings": [], "messages": []},
                 "passed": True,
                 "status": "passed",
                 "incomplete_scans": [],
                 "summary": {
+                    "files_scanned": 1,
+                    "checks_performed": 1,
                     "errors": 0,
                     "warnings": 0,
                     "critical_count": 0,
@@ -251,7 +257,10 @@ def run_record():
         "head_repository": {"full_name": "owner/consumer"},
         "pull_requests": [],
         "run_started_at": "2026-10-21T12:00:00Z",
-        "referenced_workflows": [{"path": publisher.EVALUATOR_WORKFLOW + "@" + "c" * 40, "sha": "c" * 40}],
+        "updated_at": "2026-10-21T12:02:00Z",
+        "referenced_workflows": [
+            {"path": "NVIDIA/SkillEvaluator/.github/workflows/evaluate-skills.yml@" + "c" * 40, "sha": "c" * 40}
+        ],
     }
 
 
@@ -261,7 +270,7 @@ class FakeAPI:
         self.branch_sha = branch_sha
 
     def get(self, path):
-        if path.endswith("/actions/runs/123"):
+        if path.endswith("/actions/runs/123/attempts/1"):
             return self.record
         if "/contents/.github/workflows/skill-checks.yml?ref=" in path:
             return {"type": "file", "path": publisher.WORKFLOW_PATH, "sha": "b" * 40}
@@ -286,6 +295,7 @@ class FakeAPI:
         if "/pulls/" in path:
             return {
                 "number": 1,
+                "state": "open",
                 "head": {"sha": self.branch_sha, "repo": {"full_name": "owner/consumer"}},
                 "base": {"repo": {"full_name": "owner/consumer"}},
             }
@@ -302,6 +312,260 @@ def fake_render(directory, _summary, context):
     (directory / "index.html").write_text("trusted renderer", encoding="utf-8")
     (directory / "summary.md").write_text(context["run_url"], encoding="utf-8")
     (directory / "pr-comment.md").write_text("trusted comment", encoding="utf-8")
+
+
+@pytest.mark.parametrize("child", [None, b"not valid JSON", report()])
+def test_rejected_child_evidence_is_not_loaded_or_published(child):
+    payload = summary()
+    payload.update(
+        passed=0, failed=1, incomplete=1, overall_passed=False, overall_status="incomplete", total_validators=0
+    )
+    payload["skills"][0].update(
+        passed=False, overall_status="error", exit_code=1, total_validators=0, error="Rejected child evidence"
+    )
+    files = [("summary.json", payload)]
+    if child is not None:
+        files.append(("skill-001/skillevaluator-tier1.json", child))
+    loaded, reports = publisher.read_artifact(archive(files))
+    assert loaded["skills"][0]["error"] == "Rejected child evidence"
+    assert reports == {}
+
+
+def test_error_row_with_rejected_json_gets_a_native_unavailable_report(tmp_path, monkeypatch):
+    monkeypatch.syspath_prepend(str(Path(__file__).parents[2] / "ci"))
+    payload = summary()
+    payload.update(
+        passed=0, failed=1, incomplete=1, overall_passed=False, overall_status="incomplete", total_validators=0
+    )
+    payload["skills"][0].update(
+        passed=False, overall_status="error", exit_code=1, total_validators=0, error="Rejected child evidence"
+    )
+
+    class ErrorAPI(FakeAPI):
+        def download_artifact(self, _artifact_id):
+            return archive([("summary.json", payload), ("skill-001/skillevaluator-tier1.json", b"not JSON")])
+
+    publisher.publish(
+        ErrorAPI(record={**run_record(), "conclusion": "failure"}),
+        "owner/consumer",
+        123,
+        "https://owner.github.io/consumer",
+        tmp_path / "site",
+        tmp_path / "feedback",
+    )
+    child = tmp_path / "site/runs/123/1/skill-001"
+    assert "Report unavailable" in (child / "skillevaluator-tier1.html").read_text()
+    assert not (child / "skillevaluator-tier1.json").exists()
+    assert "Rejected child evidence" in (tmp_path / "feedback/pr-comment.md").read_text()
+
+
+def test_bad_typed_child_evidence_is_rejected_before_writing_a_receipt(tmp_path):
+    class BadTypedAPI(FakeAPI):
+        def download_artifact(self, _artifact_id):
+            child = report()
+            child["results"][0]["findings"] = "invalid findings"
+            return archive([("summary.json", summary()), ("skill-001/skillevaluator-tier1.json", child)])
+
+    with pytest.raises(publisher.PublicationError, match="invalid retained evidence"):
+        publisher.publish(
+            BadTypedAPI(),
+            "owner/consumer",
+            123,
+            "https://owner.github.io/consumer",
+            tmp_path / "site",
+            tmp_path / "feedback",
+            render=fake_render,
+        )
+    assert not list((tmp_path / "site").rglob("receipt.json"))
+
+
+def test_unexpected_render_failure_cannot_publish_a_passing_receipt(tmp_path, monkeypatch):
+    monkeypatch.syspath_prepend(str(Path(__file__).parents[2] / "ci"))
+
+    class BadDisplayAPI(FakeAPI):
+        def download_artifact(self, _artifact_id):
+            payload = summary()
+            payload["skills"][0]["path"] = "skills/bad\tpath"
+            return archive([("summary.json", payload), ("skill-001/skillevaluator-tier1.json", report())])
+
+    with pytest.raises(publisher.PublicationError, match="native renderer"):
+        publisher.publish(
+            BadDisplayAPI(),
+            "owner/consumer",
+            123,
+            "https://owner.github.io/consumer",
+            tmp_path / "site",
+            tmp_path / "feedback",
+        )
+    assert not list((tmp_path / "site").rglob("receipt.json"))
+
+
+@pytest.mark.parametrize("separator", [",", ", ", "\n"])
+def test_trusted_pins_accept_documented_list_separators(monkeypatch, separator):
+    monkeypatch.setenv("PINS", separator.join(["a" * 40, "b" * 40]) + "\n")
+    assert publisher._trusted_pins("PINS") == {"a" * 40, "b" * 40}
+
+
+@pytest.mark.parametrize("latest_status", ["in_progress", "completed"])
+def test_publication_uses_triggering_attempt_even_after_a_rerun(tmp_path, latest_status):
+    class RerunAPI(FakeAPI):
+        def get(self, path):
+            if path.endswith("/actions/runs/123"):
+                return {**run_record(), "run_attempt": 2, "status": latest_status}
+            result = super().get(path)
+            if path.endswith("/artifacts?per_page=100"):
+                result["artifacts"].append({**result["artifacts"][0], "id": 789, "created_at": "2026-10-21T13:01:00Z"})
+                result["total_count"] = 2
+            return result
+
+    metadata = publisher.publish(
+        RerunAPI(),
+        "owner/consumer",
+        123,
+        "https://owner.github.io/consumer",
+        tmp_path / "site",
+        tmp_path / "feedback",
+        run_attempt=1,
+        render=fake_render,
+    )
+    assert metadata["run_attempt"] == "1"
+    assert metadata["report_url"].endswith("/123/1/")
+    receipt = json.loads((tmp_path / "site/runs/123/1/receipt.json").read_text())
+    assert receipt["artifact_id"] == 456
+
+
+def test_requested_second_attempt_gets_only_its_own_artifact(tmp_path):
+    class SecondAttemptAPI(FakeAPI):
+        def get(self, path):
+            if path.endswith("/actions/runs/123/attempts/2"):
+                return {
+                    **run_record(),
+                    "run_attempt": 2,
+                    "run_started_at": "2026-10-21T13:00:00Z",
+                    "updated_at": "2026-10-21T13:02:00Z",
+                }
+            result = super().get(path)
+            if path.endswith("/artifacts?per_page=100"):
+                result["artifacts"].append(
+                    {
+                        **result["artifacts"][0],
+                        "id": 789,
+                        "name": "skill-evaluator-tier1-attempt-2",
+                        "created_at": "2026-10-21T13:01:00Z",
+                    }
+                )
+                result["total_count"] = 2
+            return result
+
+        def download_artifact(self, artifact_id):
+            assert artifact_id == 789
+            return valid_archive()
+
+    metadata = publisher.publish(
+        SecondAttemptAPI(),
+        "owner/consumer",
+        123,
+        "https://owner.github.io/consumer",
+        tmp_path / "site",
+        tmp_path / "feedback",
+        run_attempt=2,
+        render=fake_render,
+    )
+    assert metadata["run_attempt"] == "2"
+
+
+def test_attempt_artifact_name_cannot_claim_another_attempt():
+    class WrongNameAPI(FakeAPI):
+        def get(self, path):
+            result = super().get(path)
+            result["artifacts"][0]["name"] = "skill-evaluator-tier1-attempt-2"
+            return result
+
+    with pytest.raises(publisher.PublicationError, match="no current report artifact"):
+        publisher._select_artifact(WrongNameAPI(), "owner/consumer", run_record())
+
+
+@pytest.mark.parametrize("repo", [{"full_name": "attacker/fork"}, None])
+def test_fork_and_deleted_fork_from_commit_fallback_get_no_alias_or_comment(repo):
+    class ForkAPI(FakeAPI):
+        def get(self, path):
+            result = super().get(path)
+            if path.endswith("/pulls/1"):
+                result["head"]["repo"] = repo
+            return result
+
+    assert publisher._current_routes(ForkAPI(), "owner/consumer", {**run_record(), "event": "pull_request"}) == ([], "")
+
+
+@pytest.mark.parametrize(
+    "blobs,expected",
+    [
+        ({"a": "1", "d": "2", "e": "1"}, "2"),
+        ({"a": "2", "d": "1", "e": "1"}, "2"),
+        ({"a": "2", "d": "2", "e": "1"}, "2"),
+        ({"a": "2", "d": "3", "e": "1"}, None),
+    ],
+)
+def test_pr_caller_uses_unambiguous_merged_blob_not_pr_head(blobs, expected):
+    class MergeAPI(FakeAPI):
+        def get(self, path):
+            if "/compare/" in path:
+                assert path.endswith("d" * 40 + "..." + "a" * 40)
+                return {"merge_base_commit": {"sha": "e" * 40}}
+            result = super().get(path)
+            if "/contents/" in path:
+                result["sha"] = blobs[path.rsplit("=", 1)[1][0]] * 40
+            return result
+
+    run = {
+        **run_record(),
+        "event": "pull_request",
+        "pull_requests": [{"number": 1, "head": {"sha": "a" * 40}, "base": {"sha": "d" * 40}}],
+    }
+    if expected is None:
+        with pytest.raises(publisher.PublicationError, match="Both branches changed"):
+            publisher._executed_caller_blob(MergeAPI(), "owner/consumer", run)
+    else:
+        assert publisher._executed_caller_blob(MergeAPI(), "owner/consumer", run) == expected * 40
+
+
+def test_pr_caller_does_not_trust_missing_or_current_mutable_base():
+    with pytest.raises(publisher.PublicationError, match="recorded base"):
+        publisher._executed_caller_blob(FakeAPI(), "owner/consumer", {**run_record(), "event": "pull_request"})
+
+
+def test_history_retention_preserves_current_main_and_open_pr_and_prunes_closed(tmp_path):
+    history = []
+    for number in range(1, 6):
+        receipt = {"run_id": number, "run_attempt": 1, "report_url": f"https://example.org/runs/{number}/1/"}
+        history.append(receipt)
+        publisher._dump(tmp_path / f"runs/{number}/1/receipt.json", receipt)
+    publisher._alias(tmp_path, "main/latest", history[0])
+    publisher._alias(tmp_path, "pr/1", history[1])
+    publisher._alias(tmp_path, "pr/2", history[2])
+
+    class ClosedAPI(FakeAPI):
+        def get(self, path):
+            result = super().get(path)
+            result["state"] = "closed" if path.endswith("/2") else "open"
+            return result
+
+    retained = publisher._prune_history(ClosedAPI(), "owner/consumer", tmp_path, history, history[-1], 1)
+    assert [item["run_id"] for item in retained] == [5, 2, 1]
+    assert (tmp_path / "runs/2/1/receipt.json").exists()
+    assert not (tmp_path / "runs/3/1").exists()
+    assert not (tmp_path / "pr/2").exists()
+
+
+def test_history_byte_budget_prunes_only_unprotected_reports(tmp_path, monkeypatch):
+    history = [{"run_id": number, "run_attempt": 1} for number in range(1, 4)]
+    for item in history:
+        publisher._write(tmp_path / f"runs/{item['run_id']}/1/index.html", "x" * 100)
+    monkeypatch.setattr(publisher, "MAX_HISTORY_BYTES", 150)
+    assert publisher._prune_history(FakeAPI(), "owner/consumer", tmp_path, history, history[-1], 100) == [history[-1]]
+    monkeypatch.setattr(publisher, "MAX_HISTORY_BYTES", 50)
+    with pytest.raises(publisher.PublicationError, match="site budget"):
+        publisher._prune_history(FakeAPI(), "owner/consumer", tmp_path, [history[-1]], history[-1], 100)
 
 
 def test_publish_keeps_history_and_updates_only_current_main(tmp_path):
@@ -344,7 +608,11 @@ def test_old_head_is_historical_without_latest_alias(tmp_path):
 
 
 def test_pr_alias_uses_verified_api_head(tmp_path):
-    record = {**run_record(), "event": "pull_request", "pull_requests": [{"number": 1}]}
+    record = {
+        **run_record(),
+        "event": "pull_request",
+        "pull_requests": [{"number": 1, "head": {"sha": "a" * 40}, "base": {"sha": "d" * 40}}],
+    }
     metadata = publisher.publish(
         FakeAPI(record=record),
         "owner/consumer",

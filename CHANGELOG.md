@@ -6,7 +6,7 @@ All notable changes to SkillEvaluator are documented in this file.
 
 ### Added
 
-- Proposed reusable GitHub Actions onboarding for complete Tier 1 checks, with
+- Reusable GitHub Actions onboarding for complete Tier 1 checks, with
   pinned runtime/workflow consumer templates, affected-skill PR selection,
   optional hosted reports and updated PR feedback. The new guide separates
   basic scanning from publisher setup; public image publication and generated
@@ -29,6 +29,14 @@ All notable changes to SkillEvaluator are documented in this file.
 
 ### Changed
 
+- HTML reports use a verdict-led layout with a sidebar and expandable check
+  details. The verdict replaces the pass percentage; checks marked Not
+  applicable are excluded from passed and executed counts. Publication status
+  remains visible on mobile and in print, and blocking/advisory findings retain
+  their separate counts.
+- Dependency audits inspect pinned package versions without installing packages
+  or executing build scripts. Unpinned, URL and other unresolved requirements
+  report incomplete coverage instead of executing package resolution.
 - README and onboarding docs now offer two first-run paths: a lightweight,
   keyless quality check on a bundled skill, or an NVIDIA Build rubric evaluation
   with eligible free prototyping access. Installation adds extras as needed,

@@ -70,6 +70,7 @@ from skillevaluator.reporting.base import (
     is_tier2_validator_name as _is_tier2_validator_name,
 )
 from skillevaluator.reporting.harbor_viewer import normalize_agent_eval_harbor_links
+from skillevaluator.reporting.presentation import success_is_not_applicable
 
 if TYPE_CHECKING:
     from skillevaluator.models import ValidationResult
@@ -1282,16 +1283,7 @@ class PackageLoader(BaseLoader):
 
 def _detail_display_status(detail: Any) -> str:
     """Recognize explicit producer evidence that a check was inapplicable."""
-    evidence = {
-        "version_optional": None,
-        "lint": "No scripts/ or tools/ directory found",
-        "code_file_discovery": "No code files found - code risk analysis is not applicable",
-        "dependency_file_discovery": "No dependency files found - vulnerability audit is not applicable",
-    }
-    if detail.check_name not in evidence:
-        return "pass"
-    expected = evidence[detail.check_name]
-    return "not_applicable" if expected is None or detail.message == expected else "pass"
+    return "not_applicable" if success_is_not_applicable(detail.check_name, detail.message, detail.metadata) else "pass"
 
 
 def _result_display_status(result: ValidationResult) -> str:
@@ -1304,7 +1296,7 @@ def _result_display_status(result: ValidationResult) -> str:
     if result.is_incomplete:
         return "incomplete"
     if is_cleanly_skipped(result):
-        return "skipped"
+        return "not_applicable" if "not applicable" in get_skip_reason(result).casefold() else "skipped"
     if result.passed and not_applicable:
         return "not_applicable"
     return "pass" if result.passed else "fail"

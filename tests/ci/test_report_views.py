@@ -111,11 +111,12 @@ def test_scores_scope_and_json_only_publish(tmp_path):
         summary,
         {"report_url": "https://example.com/reports/run-1", "run_url": "https://github.com/o/r/actions/runs/1"},
     )
-    page = (tmp_path / "index.html").read_text()
+    page = (tmp_path / "details.md").read_text()
     markdown = (tmp_path / "summary.md").read_text()
     comment = (tmp_path / "pr-comment.md").read_text()
-    assert 'href="#skill-001"' in page
-    assert "98.2" in page and "95" in page and "bandit" in page
+    assert "index.html#skill-001" in page
+    assert not (tmp_path / "index.html").exists()
+    assert "98.2" in visible_markdown(page) and "95" in page and "bandit" in page
     assert "Tier 2: Not run" in markdown and "Tier 3: Not run" in comment
     assert "LLM stages: skipped" in page and "Disabled by" in comment
     assert "https://example.com/reports/run-1/index.html" in comment
@@ -144,15 +145,15 @@ def test_failure_finding_location_and_suggestion_are_visible(tmp_path):
     }
     summary, _ = example(tmp_path, result=result)
     views.render_reports(tmp_path, summary, {})
-    for file in ["index.html", "summary.md", "details.md", "pr-comment.md"]:
+    for file in ["summary.md", "details.md", "pr-comment.md"]:
         text = (tmp_path / file).read_text()
         assert "Bad name" in text and "Use kebab" in text and "SKILL" in text
-    page = (tmp_path / "index.html").read_text()
+    page = (tmp_path / "details.md").read_text()
     assert page.index("Needs attention") < page.index("Skills and scores")
     assert page.index("Bad name") < page.index("Skills and scores")
     assert "name: BAD" in page
     assert "Schema rejected the name" in (tmp_path / "details.md").read_text()
-    assert "Additional advisory" in (tmp_path / "index.html").read_text()
+    assert "Additional advisory" in (tmp_path / "details.md").read_text()
 
 
 @pytest.mark.parametrize(
@@ -160,7 +161,7 @@ def test_failure_finding_location_and_suggestion_are_visible(tmp_path):
     [
         (
             {"status": "passed", "passed": True, "success_details": [{"message": "No code - not applicable"}]},
-            "NOT APPLICABLE",
+            "PASS",
         ),
         (
             {
@@ -195,7 +196,7 @@ def test_untrusted_strings_and_urls_cannot_create_markup(tmp_path):
         summary,
         {"run_url": "javascript:alert(1)", "report_url": "data:text/html,x", "image": attack, "commit": attack},
     )
-    page = (tmp_path / "index.html").read_text()
+    page = (tmp_path / "details.md").read_text()
     assert "<script>" not in page and "&lt;script&gt;" in page
     assert 'href="javascript:' not in page and 'href="data:' not in page
     assert "<script>" not in (tmp_path / "summary.md").read_text()
@@ -217,13 +218,13 @@ def test_missing_or_unsafe_evidence_never_gets_green_score(tmp_path, kind):
         path.unlink()
         path.symlink_to(tmp_path / "summary.json")
     views.render_reports(tmp_path, summary, {})
-    page = (tmp_path / "index.html").read_text()
+    page = (tmp_path / "details.md").read_text()
     assert "INCOMPLETE" in page and "98.2" not in page
     assert "Not recorded" in page
     assert "Tier 1: executed for 0/1" in page
 
 
-def test_summary_and_comment_limits_keep_complete_html(tmp_path):
+def test_summary_and_comment_limits_keep_complete_source_evidence(tmp_path):
     summary, data = example(tmp_path)
     data["results"][0]["legacy"] = {"warnings": ["Long finding " + "x" * (600 * 1024)]}
     data["results"][0]["status"] = "failed"
@@ -234,7 +235,7 @@ def test_summary_and_comment_limits_keep_complete_html(tmp_path):
     assert (tmp_path / "summary.md").stat().st_size <= 20 * 1024
     assert (tmp_path / "pr-comment.md").stat().st_size <= views.COMMENT_LIMIT
     assert "Truncated for CI display limits" in (tmp_path / "details.md").read_text()
-    assert "x" * (600 * 1024) in (tmp_path / "index.html").read_text()
+    assert "x" * (600 * 1024) in (tmp_path / "skill-001/skillevaluator-tier1.json").read_text()
     assert "https://example.com/full/index.html" in (tmp_path / "pr-comment.md").read_text()
 
 
@@ -242,7 +243,7 @@ def test_output_symlink_is_rejected(tmp_path):
     summary, _ = example(tmp_path)
     target = tmp_path / "original.txt"
     target.write_text("preserve")
-    (tmp_path / "index.html").symlink_to(target)
+    (tmp_path / "summary.md").symlink_to(target)
     with pytest.raises(ValueError, match="symlink"):
         views.render_reports(tmp_path, summary, {})
     assert target.read_text() == "preserve"
@@ -302,7 +303,7 @@ def test_inconsistent_verdicts_never_display_a_passing_skill(tmp_path, change):
         summary["passed"] = 0
     (tmp_path / "skill-001/skillevaluator-tier1.json").write_text(json.dumps(data))
     views.render_reports(tmp_path, summary, {})
-    page = (tmp_path / "index.html").read_text()
+    page = (tmp_path / "details.md").read_text()
     assert "INCOMPLETE" in page
     if change != "summary_count":
         assert "Summary and child report verdicts" in page
@@ -311,7 +312,7 @@ def test_inconsistent_verdicts_never_display_a_passing_skill(tmp_path, change):
 def test_ci_run_conclusion_is_separate_from_scan_result(tmp_path):
     summary, _ = example(tmp_path)
     views.render_reports(tmp_path, summary, {"ci_conclusion": "failure"})
-    for filename in ["summary.md", "index.html", "pr-comment.md"]:
+    for filename in ["summary.md", "details.md", "pr-comment.md"]:
         text = (tmp_path / filename).read_text()
         assert "CI run conclusion" in text and "failure" in text
         assert "PASSED" in text
@@ -375,8 +376,9 @@ def test_hosted_markdown_uses_published_native_html_index_and_json(tmp_path):
         "stderr.log",
     ]:
         assert filename not in markdown
-        # The downloadable HTML index still supports local artifact navigation.
-        assert f'href="skill-001/{filename}"' in (tmp_path / "index.html").read_text()
+        # Detailed local Markdown links all original report evidence.
+        views.render_reports(tmp_path, summary, {})
+        assert f"skill-001/{filename}" in (tmp_path / "details.md").read_text()
 
 
 def test_truncated_markdown_keeps_table_boundaries_intact():
@@ -543,6 +545,52 @@ def test_compact_configuration_error_is_not_green_and_has_artifact_fallback(tmp_
     assert "No blocking issues found" not in compact
 
 
+def test_comment_retains_run_error_with_all_optional_header_fields(tmp_path):
+    summary = {
+        "total": 0,
+        "passed": 0,
+        "failed": 0,
+        "incomplete": 0,
+        "overall_status": "error",
+        "error": "Deleted SKILL.md left tracked content",
+        "skills": [],
+    }
+    context = {
+        "run_url": "https://github.com/o/r/actions/runs/1",
+        "report_url": "https://example.com/reports/1",
+        "ci_conclusion": "failure",
+        "commit": "a" * 40,
+        "image": "ghcr.io/o/image@sha256:" + "b" * 64,
+    }
+    views.render_reports(tmp_path, summary, context)
+    comment = visible_markdown((tmp_path / "pr-comment.md").read_text())
+    assert summary["error"] in comment
+    assert context["commit"] in comment and context["image"] in comment.replace("\u200b", "")
+    assert "Run error" in comment
+
+
+@pytest.mark.parametrize(
+    "recorded,expected",
+    [
+        ("tools/check.py", "skills/sample/tools/check.py"),
+        ("skills/sample/tools/check.py", "skills/sample/tools/check.py"),
+        ("/workspace/skills/sample/tools/check.py", "skills/sample/tools/check.py"),
+        ("../../outside", None),
+        ("/tmp/foreign", None),
+        ("file\nforged", None),
+    ],
+)
+def test_relative_finding_locations_are_resolved_without_escaping_checkout(tmp_path, recorded, expected):
+    assert views.finding_repository_path("skills/sample", recorded) == expected
+    summary, _ = example(tmp_path, result=failed_result(path=recorded))
+    views.render_reports(tmp_path, summary, {})
+    markdown = visible_markdown((tmp_path / "summary.md").read_text())
+    if expected:
+        assert f"File: {expected}:2" in markdown
+    else:
+        assert "File:" not in markdown
+
+
 def test_compact_lists_at_most_five_affected_skills_with_explicit_remainder(tmp_path):
     summary, data = example(tmp_path, result=failed_result())
     rows = []
@@ -701,7 +749,7 @@ def test_real_noop_marker_reports_no_scan_and_discloses_deleted_skills(tmp_path)
     summary = neutral_selection_summary()
     assert views.is_noop_summary(summary)
     views.render_reports(tmp_path, summary, {"llm_enabled": True})
-    for name in ("summary.md", "details.md", "pr-comment.md", "index.html"):
+    for name in ("summary.md", "details.md", "pr-comment.md"):
         text = (tmp_path / name).read_text()
         assert "NO SKILLS CHANGED" in text
         assert "Validation did not run" in text

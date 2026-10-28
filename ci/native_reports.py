@@ -11,7 +11,10 @@ from __future__ import annotations
 import base64
 import hashlib
 import re
+from functools import lru_cache
+from html import unescape
 from html.parser import HTMLParser
+from importlib import resources
 from pathlib import Path
 
 from skillevaluator.reporting.retained import render_retained_report
@@ -28,12 +31,16 @@ class _InlineCode(HTMLParser):
         self.scripts: list[str] = []
         self.handlers: list[str] = []
         self.current: list[str] | None = None
+        self.external_script = False
 
     def handle_starttag(self, tag, attrs):
         attributes = dict(attrs)
         self.handlers.extend(value for key, value in attrs if key.startswith("on") and value)
-        if tag == "script" and "src" not in attributes:
-            self.current = []
+        if tag == "script":
+            if "src" in attributes:
+                self.external_script = True
+            elif attributes.get("type", "").casefold() not in {"application/json", "application/ld+json"}:
+                self.current = []
 
     def handle_data(self, data):
         if self.current is not None:
@@ -45,15 +52,38 @@ class _InlineCode(HTMLParser):
             self.current = None
 
 
+@lru_cache(maxsize=1)
+def _trusted_inline_code() -> frozenset[str]:
+    """Read executable code from trusted template sources, never report content.
+
+    Retained CI reports support Tier 1 only. Their executable script and event
+    handlers are static; values are carried in escaped data attributes or inert
+    JSON. Dynamic Tier 3 scripts are deliberately outside this allowlist.
+    """
+    templates = resources.files("skillevaluator.reporting").joinpath("templates")
+    source = templates.joinpath("report.html.j2").read_text()
+    # This include contains static UI code; Jinja drops its final newline.
+    source = source.replace(
+        '{% include "report_ui.js.j2" %}', templates.joinpath("report_ui.js.j2").read_text().removesuffix("\n")
+    )
+    scripts = re.findall(r"<script\s*>(.*?)</script\s*>", source, flags=re.DOTALL | re.IGNORECASE)
+    handlers = [match[1:-1] for match in re.findall(r"""\bon\w+\s*=\s*("[^"]*"|'[^']*')""", source)]
+    return frozenset(
+        code
+        for code in [*scripts, *(unescape(handler) for handler in handlers)]
+        if "{{" not in code and "{%" not in code
+    )
+
+
 def constrain_native_html(document: str) -> str:
-    """Permit only this trusted render's exact inline scripts and event handlers."""
+    """Reject executable markup absent from the trusted Tier 1 template."""
     parser = _InlineCode()
     parser.feed(document)
+    code = {*parser.scripts, *parser.handlers}
+    if parser.external_script or not code <= _trusted_inline_code():
+        raise ValueError("Unexpected executable markup in the native report")
     hashes = sorted(
-        {
-            "'sha256-" + base64.b64encode(hashlib.sha256(code.encode()).digest()).decode() + "'"
-            for code in [*parser.scripts, *parser.handlers]
-        }
+        {"'sha256-" + base64.b64encode(hashlib.sha256(code.encode()).digest()).decode() + "'" for code in code}
     )
     policy = (
         "default-src 'none'; script-src 'unsafe-hashes' "
@@ -87,46 +117,62 @@ main{margin-left:210px;max-width:1400px;padding:36px 44px 60px}.eyebrow{text-tra
 """
 
 
-def render_native_reports(reports: Path, summary: dict, context: dict) -> None:
+def render_native_reports(reports: Path, summary: dict, context: dict) -> dict[str, str]:
+    """Write all available views and return per-skill rendering diagnostics."""
     reports = Path(reports)
     if reports.is_symlink() or not reports.is_dir():
         raise ValueError("A regular report directory is required.")
     models = []
+    render_errors = {}
     for row in summary.get("skills", []):
+        if row.get("overall_status") == "error" and re.fullmatch(r"skill-[0-9]{3}", row.get("report_dir", "")):
+            # The publisher intentionally discards rejected child JSON, so its
+            # directory may not exist yet. Create only this validated leaf.
+            (reports / row["report_dir"]).mkdir(exist_ok=True)
         directory = views._directory(reports, row.get("report_dir"))
         data, issue = views._read(directory)
         status = views._skill_status(row, data, issue)
         native_url = None
-        if row.get("overall_status") == "error" and directory is not None:
+        if row.get("overall_status") == "error":
             issue = row.get("error") or "The evaluator did not produce consistent report evidence."
-            data = {}
-            status = "ERROR"
-            document = (
-                '<!doctype html><html lang="en"><head><meta charset="utf-8">'
-                '<meta name="viewport" content="width=device-width,initial-scale=1">'
-                f"<title>Incomplete report · SkillEvaluator</title><style>{_STYLE}</style></head>"
-                '<body><main style="margin-left:0"><a href="../index.html">← All skills</a>'
-                '<h1>Report unavailable</h1><p class="status">Incomplete</p>'
-                f"<p>{views._h(issue)}</p><p>No passing result is claimed.</p></main></body></html>"
-            )
-            views._write(directory / "skillevaluator-tier1.html", constrain_native_html(document))
-            native_url = f"{directory.name}/skillevaluator-tier1.html"
         elif data and directory is not None:
-            document = render_retained_report(
-                data,
-                skill_name=row["path"],
-                context={
-                    **context,
-                    "report_index_url": "../index.html",
-                    "canonical_json_url": "skillevaluator-tier1.json",
-                },
-            )
-            views._write(directory / "skillevaluator-tier1.html", constrain_native_html(document))
-            native_url = f"{directory.name}/skillevaluator-tier1.html"
-        quality = data.get("quality_summary", [])
-        models.append((row, data, issue, status, native_url, quality[0] if len(quality) == 1 else {}))
+            try:
+                document = render_retained_report(
+                    data,
+                    skill_name=row["path"],
+                    # The runner mounts repository-root skills at /workspace.
+                    expected_skill_name=Path(row["path"]).name or "workspace",
+                    context={
+                        **context,
+                        "report_index_url": "../index.html",
+                        "canonical_json_url": "skillevaluator-tier1.json",
+                    },
+                )
+                views._write(directory / "skillevaluator-tier1.html", constrain_native_html(document))
+                native_url = f"{directory.name}/skillevaluator-tier1.html"
+            except (ValueError, TypeError, KeyError) as exc:
+                issue = f"Native report could not be rendered: {exc}"
+        if issue:
+            # One invalid display path or malformed child must not erase the
+            # diagnostics for every other skill. Raw evidence is left untouched.
+            render_errors[row["report_dir"]] = issue
+            data = {}
+            status = "INCOMPLETE"
+            if directory is not None:
+                document = (
+                    '<!doctype html><html lang="en"><head><meta charset="utf-8">'
+                    '<meta name="viewport" content="width=device-width,initial-scale=1">'
+                    f"<title>Incomplete report · SkillEvaluator</title><style>{_STYLE}</style></head>"
+                    '<body><main style="margin-left:0"><a href="../index.html">← All skills</a>'
+                    '<h1>Report unavailable</h1><p class="status">Incomplete</p>'
+                    f"<p>{views._h(issue)}</p><p>No passing result is claimed.</p></main></body></html>"
+                )
+                views._write(directory / "skillevaluator-tier1.html", constrain_native_html(document))
+                native_url = f"{directory.name}/skillevaluator-tier1.html"
+        quality = views._items(data.get("quality_summary"))
+        models.append((row, data, issue, status, native_url, views._dict(quality[0]) if len(quality) == 1 else {}))
     # Retain GitHub's concise native surface and detailed text evidence.
-    views.render_reports(reports, summary, context)
+    views.render_reports(reports, summary, context, render_errors=render_errors)
     h = views._h
     passed = sum(item[3] == "PASS" for item in models)
     incomplete = sum(item[3] in {"INCOMPLETE", "ERROR", "UNKNOWN"} for item in models)
@@ -231,3 +277,4 @@ def render_native_reports(reports: Path, summary: dict, context: dict) -> None:
         '<p><a href="summary.json" download>Download run summary (JSON)</a></p></details></section><footer>Generated by SkillEvaluator · Static checks do not establish live agent behavior.</footer></main></body></html>'
     )
     views._write(reports / "index.html", "\n".join(page))
+    return render_errors

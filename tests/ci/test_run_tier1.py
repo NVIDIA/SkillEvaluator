@@ -501,3 +501,83 @@ def test_invalid_selection_is_error_without_full_scan_fallback(tmp_path, selecti
     assert runner.run(workspace, reports, {"SKILL_PATHS": "skills", **selection}, execute=fake_cli([], calls)) == 1
     summary = json.loads((reports / "summary.json").read_text())
     assert not calls and summary["overall_status"] == "error" and summary["overall_passed"] is False
+
+
+@pytest.mark.parametrize("variable", ["REPORT_URL", "REPORT_RUN_URL", "REPORT_BASE_URL"])
+@pytest.mark.parametrize(
+    "url", ["http://example.com", "https://user:secret@example.com", "https://example.com/\nextra"]
+)
+def test_invalid_report_urls_fail_before_scanning_and_keep_diagnostics(tmp_path, variable, url):
+    workspace = tmp_path / "workspace"
+    skill(workspace, "skills/a")
+    reports, calls = tmp_path / "reports", []
+    assert runner.run(workspace, reports, {variable: url}, execute=fake_cli([], calls)) == 1
+    assert not calls
+    assert "HTTPS" in json.loads((reports / "summary.json").read_text())["error"]
+    assert "HTTPS" in (reports / "summary.md").read_text()
+    assert (reports / "index.html").is_file()
+    assert "user:secret" not in (reports / "pr-comment.md").read_text()
+
+
+def test_completed_results_survive_timeout_and_unstarted_skills_stay_incomplete(tmp_path):
+    workspace = tmp_path / "workspace"
+    for name in ("a", "b", "c"):
+        skill(workspace, f"skills/{name}")
+    reports, calls = tmp_path / "reports", []
+    first = fake_cli([(0, payload())], calls)
+
+    def execute(argv, **kwargs):
+        snapshot = json.loads((reports / "summary.json").read_text())
+        assert snapshot["total"] == 3 and snapshot["overall_passed"] is False
+        assert kwargs["timeout"] <= runner.SCAN_TIMEOUT_SECONDS
+        if not calls:
+            assert snapshot["incomplete"] == 3
+            return first(argv, **kwargs)
+        assert snapshot["passed"] == 1 and snapshot["incomplete"] == 2
+        assert "INCOMPLETE" in (reports / "summary.md").read_text()
+        raise subprocess.TimeoutExpired(argv, kwargs["timeout"])
+
+    assert runner.run(workspace, reports, {}, execute=execute) == 1
+    summary = json.loads((reports / "summary.json").read_text())
+    assert summary["passed"] == 1 and summary["incomplete"] == 2
+    assert "time limit" in summary["skills"][1]["error"]
+    assert "Not evaluated" in summary["skills"][2]["error"]
+    assert (reports / "index.html").is_file()
+
+
+def test_unrelated_root_symlink_does_not_break_full_scan(tmp_path):
+    target = skill(tmp_path, "skills/a")
+    (tmp_path / "skills/README.md").symlink_to(tmp_path / "other.md")
+    assert runner.discover_skills(tmp_path, "skills") == [target]
+
+
+def test_control_character_skill_path_fails_before_scanning(tmp_path):
+    workspace = tmp_path / "workspace"
+    skill(workspace, "skills/a\tbad")
+    calls = []
+    assert runner.run(workspace, tmp_path / "reports", {}, execute=fake_cli([], calls)) == 1
+    assert not calls
+
+
+@pytest.mark.parametrize(
+    "path,expected", [("scripts/check.py", "skills/example/scripts/check.py"), ("../secret", None)]
+)
+def test_relative_annotation_location_is_confined_to_skill(capsys, path, expected):
+    report = {
+        "results": [
+            {
+                "validator": "Security",
+                "passed": False,
+                "status": "failed",
+                "findings": [{"severity": "high", "message": "Unsafe operation", "file_path": path, "line_number": 7}],
+            }
+        ]
+    }
+    runner.log_result(
+        {"path": "skills/example", "overall_status": "failed"}, report, annotations=True, budget={"errors": 0}
+    )
+    command = next(line for line in capsys.readouterr().out.splitlines() if line.startswith("::error"))
+    if expected:
+        assert f"file={expected},line=7" in command
+    else:
+        assert "file=" not in command and "line=" not in command

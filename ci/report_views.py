@@ -9,8 +9,10 @@ import json
 import math
 import re
 import tempfile
-from pathlib import Path
+from pathlib import Path, PurePosixPath
 from urllib.parse import quote, urlsplit
+
+from skillevaluator.reporting.presentation import success_is_not_applicable
 
 SUMMARY_LIMIT = 20 * 1024
 DETAIL_LIMIT = 500 * 1024
@@ -75,15 +77,13 @@ def _status(result: dict) -> str:
         return "FAIL"
     if raw == "passed" and result.get("passed") is True:
         details = [_dict(item) for item in _items(result.get("success_details"))]
-        if details and all(
-            "not applicable" in _text(item.get("message", "")).casefold()
-            or item.get("check") == "version_optional"
-            or (
-                result.get("validator") == "SCRIPT_LINT"
-                and item.get("check") == "lint"
-                and item.get("message") == "No scripts/ or tools/ directory found"
+        if (
+            details
+            and not result.get("findings")
+            and all(
+                success_is_not_applicable(item.get("check"), item.get("message"), item.get("metadata"))
+                for item in details
             )
-            for item in details
         ):
             return "NOT APPLICABLE"
         return "PASS"
@@ -107,13 +107,6 @@ def _skill_status(row: dict, data: dict, issue: str | None) -> str:
     ):
         return "INCOMPLETE"
     return {"passed": "PASS", "failed": "FAIL", "incomplete": "INCOMPLETE"}[raw]
-
-
-def _badge(status: str) -> str:
-    style = {"PASS": "pass", "PASSED": "pass", "FAIL": "fail", "FAILED": "fail", "INCOMPLETE": "warn"}.get(
-        status, "neutral"
-    )
-    return f'<span class="badge {style}">{_h(status)}</span>'
 
 
 def _score(value: object) -> str:
@@ -170,10 +163,6 @@ def _links(
             relative = f"{directory.name}/{name}"
             links.append((label, f"{report_url.rstrip('/')}/{relative}" if report_url else relative))
     return links
-
-
-def _html_links(links: list[tuple[str, str]]) -> str:
-    return " · ".join(f'<a href="{_h(url)}">{_h(label)}</a>' for label, url in links)
 
 
 def _md_links(links: list[tuple[str, str]]) -> str:
@@ -372,19 +361,26 @@ def _render_noop(reports: Path, summary: dict, context: dict) -> None:
     _write(reports / "summary.md", markdown)
     _write(reports / "details.md", markdown)
     _write(reports / "pr-comment.md", markdown)
-    page = (
-        '<!doctype html><html lang="en"><head><meta charset="utf-8">'
-        '<meta name="viewport" content="width=device-width,initial-scale=1">'
-        """<meta http-equiv="Content-Security-Policy" content="default-src 'none'; style-src 'unsafe-inline'; base-uri 'none'; form-action 'none'">"""
-        f"<title>No skills changed</title><style>{_STYLE}</style></head><body><main>"
-        "<h1>NO SKILLS CHANGED</h1><p>Validation did not run.</p>"
-        f"<p>0 of {_h(selection['discovered'])} current skills selected.</p>"
-        "<p>Tier 1: Not run (no skills selected). LLM: Not run. Tier 2: Not run. Tier 3: Not run.</p>"
-        "<h2>Deleted skill directories (not scanned)</h2><ul>"
-        + "".join(f"<li>{_h(value)}</li>" for value in selection["deleted"])
-        + f"</ul><p>{_html_links(links)}</p></main></body></html>"
-    )
-    _write(reports / "index.html", page)
+
+
+def finding_repository_path(skill_path: object, file_path: object) -> str | None:
+    """Map recorded scanner paths to safe repository-relative annotation paths."""
+    if not isinstance(skill_path, str) or not isinstance(file_path, str) or not file_path:
+        return None
+    if any(ord(c) < 32 or ord(c) == 127 for c in skill_path + file_path) or "\\" in skill_path + file_path:
+        return None
+    if file_path.startswith("/workspace/"):
+        path = PurePosixPath(file_path.removeprefix("/workspace/"))
+    else:
+        path = PurePosixPath(file_path)
+        root = PurePosixPath(skill_path)
+        if path.is_absolute() or root.is_absolute() or ".." in root.parts:
+            return None
+        if root != PurePosixPath(".") and not path.is_relative_to(root):
+            path = root / path
+    if path.is_absolute() or ".." in path.parts or ":" in str(path) or str(path) in {"", "."}:
+        return None
+    return str(path)
 
 
 def _first_action(model: dict) -> tuple[str, str, str]:
@@ -425,10 +421,9 @@ def _first_action(model: dict) -> tuple[str, str, str]:
             finding.get("suggestion")
             or "Open the full report and inspect this validator's diagnostics before rerunning."
         )
-        location = _text(finding["file_path"]) if finding.get("file_path") else ""
-        location = location.removeprefix("/workspace/")
+        location = finding_repository_path(row.get("path"), finding.get("file_path")) or ""
         line = finding.get("line_number")
-        if type(line) is int and line > 0:
+        if location and type(line) is int and line > 0:
             location += f":{line}"
         # Only offer a concrete replacement for this exact, known schema failure.
         # Other naming failures and arbitrary findings retain their recorded fix.
@@ -533,28 +528,8 @@ def _compact_summary(models: list[dict], summary: dict, context: dict, *, status
     return _bounded(lines, SUMMARY_LIMIT, footer)
 
 
-_STYLE = """
-:root{font:16px/1.6 system-ui,sans-serif;color:#1d2823;background:#f5f7f5;--green:#527b00}
-*{box-sizing:border-box}body{margin:0}main{max-width:1240px;margin:auto;padding:40px 24px}
-header{border-top:6px solid #76b900;padding:24px;background:white;border-radius:8px}
-h1{font-size:30px;margin:0 0 8px}h2{font-size:23px;margin:32px 0 12px}h3{font-size:19px}
-a{color:#426900}p{margin:8px 0}section,details{background:white;border:1px solid #dce3dc;border-radius:8px;margin:16px 0;padding:20px}
-summary{cursor:pointer;font-weight:650}table{border-collapse:collapse;width:100%;font-size:14px}
-th,td{text-align:left;vertical-align:top;padding:10px;border-bottom:1px solid #e3e8e3;overflow-wrap:anywhere}
-th{background:#f1f5ec}caption{text-align:left;font-weight:600;padding:10px 0}.scroll{overflow-x:auto}
-.badge{display:inline-block;padding:2px 9px;border-radius:5px;font-size:12px;font-weight:750;white-space:nowrap}
-.pass{background:#e9f4d9;color:#345400}.fail{background:#ffe8e5;color:#992c23}.warn{background:#fff2d1;color:#795300}.neutral{background:#edf0ed;color:#465046}
-.meta{color:#536257;font-size:14px;overflow-wrap:anywhere}.notice{border-left:4px solid #76b900;padding:12px;background:#f1f6e9}
-pre{white-space:pre-wrap;overflow-wrap:anywhere;background:#f6f8f5;padding:12px;border-radius:5px;font:13px/1.6 ui-monospace,monospace}
-.evidence td:first-child{width:24%;font-weight:600}small{color:#536257}.stats{font-size:18px;padding:12px 0}
-@media(max-width:650px){main{padding:16px 10px}header,section,details{padding:14px}h1{font-size:25px}
-.scroll table{min-width:620px}.evidence,.evidence tbody,.evidence tr,.evidence td{display:block;width:100%}
-.evidence td:first-child{width:auto;border-bottom:0;padding-bottom:0}.evidence td+td{padding-top:0}}
-"""
-
-
-def render_reports(reports: Path, summary: dict, context: dict) -> None:
-    """Write HTML, a short Actions summary, detailed Markdown and a PR comment.
+def render_reports(reports: Path, summary: dict, context: dict, *, render_errors: dict[str, str] | None = None) -> None:
+    """Write a short Actions summary, detailed Markdown and a PR comment.
 
     Optional context keys: run_url, commit, image, report_url, llm_enabled, ci_conclusion.
     report_url is the hosted directory containing index.html and the artifacts.
@@ -573,6 +548,9 @@ def render_reports(reports: Path, summary: dict, context: dict) -> None:
         row = _dict(row)
         directory = _directory(reports, row.get("report_dir"))
         data, issue = _read(directory)
+        if row.get("overall_status") == "error" or (render_errors or {}).get(row.get("report_dir")):
+            issue = (render_errors or {}).get(row.get("report_dir")) or row.get("error") or "Report unavailable"
+            data = {}
         results = [_dict(item) for item in _items(data.get("results"))]
         quality = [_dict(item) for item in _items(data.get("quality_summary"))]
         models.append(
@@ -609,7 +587,8 @@ def render_reports(reports: Path, summary: dict, context: dict) -> None:
         status = "INCOMPLETE (aggregate gate was recorded as passed; report evidence is missing)"
     llm = _llm_scope(models, context)
     scope = f"Tier 1: executed for {recorded}/{len(models)} skills with validator evidence; result {status}. Tier 2: Not run. Tier 3: Not run."
-    overview = f"{_text(summary.get('total', len(models)))} skills · {_text(summary.get('passed'))} passed · {_text(summary.get('failed'))} failed · {_text(summary.get('incomplete'))} incomplete"
+    displayed = {key: sum(model["skill_status"] == key for model in models) for key in ("PASS", "FAIL", "INCOMPLETE")}
+    overview = f"{len(models)} skills · {displayed['PASS']} passed · {displayed['FAIL']} failed · {displayed['INCOMPLETE']} incomplete"
     counts = f"Errors: {_text(summary.get('total_errors'))} · Warnings: {_text(summary.get('total_warnings'))}"
     hosted = f"{report_url.rstrip('/')}/index.html" if report_url else None
     navigation = ([("Open full report", hosted)] if hosted else []) + (
@@ -638,24 +617,7 @@ def render_reports(reports: Path, summary: dict, context: dict) -> None:
             markdown.append(f"**{label}:** {_md(_text(value)[:4096])}")
     if summary.get("error"):
         markdown.append(f"**Run error:** {_md(summary['error'])}")
-    page = [
-        '<!doctype html><html lang="en"><head><meta charset="utf-8">',
-        '<meta name="viewport" content="width=device-width,initial-scale=1">',
-        "<meta http-equiv=\"Content-Security-Policy\" content=\"default-src 'none'; style-src 'unsafe-inline'; base-uri 'none'; form-action 'none'\">",
-        f"<title>SkillEvaluator evaluation report</title><style>{_STYLE}</style></head><body><main>",
-        f'<header><p class="meta">SKILLEVALUATOR · CI EVIDENCE</p><h1>Skill evaluation report</h1><p class="meta">Tier 1 scan result</p>{_badge(status)}',
-        f'<p class="stats">{_h(overview)}</p><p>{_h(counts)}</p><p>{_html_links(navigation)}</p>',
-        "".join(
-            f'<p class="meta"><strong>{label}:</strong> {_h(value)}</p>'
-            for label, value in metadata
-            if value is not None
-        ),
-        "</header><section><h2>Evaluation scope</h2>",
-        f"<p>{_h(scope)}</p><p>{_h(llm)}</p>",
-        '<p class="notice">Static checks assess the supplied content. Tier 2 similarity and Tier 3 live agent behavior were not evaluated in this Tier 1 run. A not-run tier is not a pass.</p></section>',
-    ]
-    if summary.get("error"):
-        page.append(f"<section><h2>Run error</h2><pre>{_h(summary['error'])}</pre></section>")
+    comment_header = list(markdown)
     attention = []
     for model in models:
         for result in model["results"]:
@@ -674,21 +636,14 @@ def render_reports(reports: Path, summary: dict, context: dict) -> None:
         if model["issue"]:
             attention.append((model, "Report evidence", "INCOMPLETE", model["issue"], None, None))
     if attention:
-        page.append("<section><h2>Needs attention</h2>")
         markdown.append("## Needs attention")
         for model, validator, outcome, reason, location, suggestion in attention:
             label = _text(model["row"].get("path")) + " / " + _text(validator)
-            page.append(f'<p>{_badge(outcome)} <a href="#{model["anchor"]}">{_h(label)}</a></p>')
-            page.append(f"<p>{_h(_text(reason)[:2000])}</p>")
             markdown.append(f"**{_md(label)} ({outcome}):** {_md(_text(reason)[:2000])}")
             if location and location != "Not recorded":
-                page.append(f'<p class="meta">Location: {_h(location)}</p>')
+                markdown.append(f"Location: {_md(location)}")
             if suggestion:
-                page.append(f"<p><strong>Suggested fix:</strong> {_h(_text(suggestion)[:2000])}</p>")
-        page.append("</section>")
-    page.append(
-        '<section><h2>Skills and scores</h2><div class="scroll"><table><thead><tr><th>Skill</th><th>Tier 1</th><th>Quality / 100</th><th>Grade</th><th>Errors</th><th>Warnings</th><th>Evidence</th></tr></thead><tbody>'
-    )
+                markdown.append(f"Suggested fix: {_md(_text(suggestion)[:2000])}")
     markdown.extend(
         [
             "## Skills and scores",
@@ -697,7 +652,7 @@ def render_reports(reports: Path, summary: dict, context: dict) -> None:
         ]
     )
     comments = [
-        *markdown[:10],
+        *comment_header,
         "| Skill | Status | Quality / 100 | Errors | Warnings |",
         "| --- | --- | --- | --- | --- |",
     ]
@@ -708,32 +663,18 @@ def render_reports(reports: Path, summary: dict, context: dict) -> None:
         quality = model["quality"][0] if len(model["quality"]) == 1 else {}
         score, grade = _score(quality.get("overall_score")), _text(quality.get("grade"))
         errors, warnings = data.get("total_errors"), data.get("total_warnings")
-        links = _links(model["directory"])
-        page.append(
-            f'<tr><td><a href="#{model["anchor"]}">{_h(skill)}</a></td><td>{_badge(skill_status)}</td><td>{_h(score)}</td><td>{_h(grade)}</td><td>{_h(errors)}</td><td>{_h(warnings)}</td><td>{_html_links(links)}</td></tr>'
-        )
         markdown.append(f"| {_md(skill)} | {skill_status} | {score} | {_md(grade)} | {_md(errors)} | {_md(warnings)} |")
         comments.append(f"| {_md(skill)} | {skill_status} | {score} / {_md(grade)} | {_md(errors)} | {_md(warnings)} |")
-    page.append(
-        '</tbody></table></div><p class="meta">Quality scores are recorded evaluator outputs, not scanner pass percentages. Not recorded means no score evidence was available.</p></section>'
-    )
     for model in models:
         row = model["row"]
         skill = _text(row.get("path"))
-        page.append(f'<details id="{model["anchor"]}" open><summary>{_h(skill)} — validator details</summary>')
-        links = _links(model["directory"])
-        page.append(f"<p>{_html_links(links)}</p>")
         block = [f"## {_md(skill)}", _md_links(_links(model["directory"], report_url, anchor=model["anchor"]))]
         if row.get("error"):
-            page.append(f"<pre>{_h(row['error'])}</pre>")
             block.append(f"Run error: {_md(row['error'])}")
         if model["issue"]:
-            page.append(f'<p class="notice">{_h(model["issue"])}</p>')
             block.append(_md(model["issue"]))
+            comments.append(f"**{_md(skill)}:** {_md(model['issue'])}")
         for quality in model["quality"]:
-            page.append(
-                "<h3>Recorded quality dimensions</h3><table><tr><th>Dimension</th><th>Score / 100</th><th>Weight</th><th>Issues</th></tr>"
-            )
             block.extend(
                 [
                     "### Recorded quality dimensions",
@@ -744,12 +685,7 @@ def render_reports(reports: Path, summary: dict, context: dict) -> None:
             for name, dimension in _dict(quality.get("dimensions")).items():
                 dimension = _dict(dimension)
                 values = [name, _score(dimension.get("score")), dimension.get("weight"), dimension.get("issues_count")]
-                page.append("<tr>" + "".join(f"<td>{_h(value)}</td>" for value in values) + "</tr>")
                 block.append("| " + " | ".join(_md(value) for value in values) + " |")
-            page.append("</table>")
-        page.append(
-            '<div class="scroll"><table><thead><tr><th>Validator</th><th>Outcome</th><th>Checks recorded</th><th>Errors</th><th>Warnings</th></tr></thead><tbody>'
-        )
         block.extend(
             [
                 "### Validator outcomes",
@@ -760,23 +696,13 @@ def render_reports(reports: Path, summary: dict, context: dict) -> None:
         for result in model["results"]:
             numbers = _dict(result.get("summary"))
             name, outcome = result.get("validator"), _status(result)
-            page.append(
-                f"<tr><td>{_h(name)}</td><td>{_badge(outcome)}</td><td>{_h(numbers.get('checks_performed'))}</td><td>{_h(numbers.get('errors'))}</td><td>{_h(numbers.get('warnings'))}</td></tr>"
-            )
             block.append(
                 f"| {_md(name)} | {outcome} | {_md(numbers.get('checks_performed'))} | {_md(numbers.get('errors'))} | {_md(numbers.get('warnings'))} |"
             )
-        page.append("</tbody></table></div>")
         for result in model["results"]:
-            page.append(
-                f'<details><summary>{_h(result.get("validator"))} — evidence, findings and messages</summary><table class="evidence"><tbody>'
-            )
             block.append(f"### {_md(result.get('validator'))} — evidence")
             for label, value in _evidence(result):
-                page.append(f"<tr><td>{_h(label)}</td><td><pre>{_h(value)}</pre></td></tr>")
                 block.append(f"**{_md(label)}:** {_md(value)}")
-            page.append("</tbody></table></details>")
-        page.append("</details>")
         markdown.extend(block)
         failures = [result for result in model["results"] if _status(result) in {"FAIL", "INCOMPLETE", "UNKNOWN"}]
         for result in failures:
@@ -794,10 +720,6 @@ def render_reports(reports: Path, summary: dict, context: dict) -> None:
                 comments.append(
                     f"Location: {_md(location[:2000])}. Suggested fix: {_md(_text(finding.get('suggestion'))[:2000])}"
                 )
-    page.append(
-        '<p class="meta">Retained evidence is shown as recorded. NOT APPLICABLE requires an explicit source statement; UNKNOWN or INCOMPLETE indicates missing proof. Scanner messages may include advisory warnings even when the configured gate passes.</p></main></body></html>'
-    )
-    _write(reports / "index.html", "".join(page))
     _write(reports / "details.md", _bounded(markdown, DETAIL_LIMIT, footer))
     _write(reports / "summary.md", _compact_summary(models, summary, context, status=status, llm=llm, footer=footer))
     _write(reports / "pr-comment.md", _bounded(comments, COMMENT_LIMIT, footer))

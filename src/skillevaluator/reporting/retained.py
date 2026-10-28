@@ -182,6 +182,8 @@ def retained_results(payload: dict) -> list[ValidationResult]:
         for source, dest in mappings.items():
             if source in row:
                 metadata[dest] = _mapping(row[source], source)
+        if "skillspector_version" in row:
+            metadata["skillspector_version"] = _text(row["skillspector_version"], "skillspector_version")
         if "publication_target_conflict" in row:
             metadata["publication_target_conflict"] = _text(
                 row["publication_target_conflict"], "publication_target_conflict"
@@ -259,16 +261,27 @@ def retained_results(payload: dict) -> list[ValidationResult]:
     return results
 
 
-def render_retained_report(payload: dict, *, skill_name: str, context: dict | None = None) -> str:
+def render_retained_report(
+    payload: dict, *, skill_name: str, expected_skill_name: str | None = None, context: dict | None = None
+) -> str:
     """Render a single skill from retained evidence without inspecting its paths."""
     _require(
-        isinstance(skill_name, str) and 0 < len(skill_name) <= 256 and not any(ord(c) < 32 for c in skill_name),
-        "Invalid explicit skill identity",
+        isinstance(skill_name, str)
+        and 0 < len(skill_name.encode("utf-8")) <= 4096
+        and not any(ord(c) < 32 or ord(c) == 127 for c in skill_name),
+        "Invalid explicit skill display path",
+    )
+    canonical_name = expected_skill_name if expected_skill_name is not None else skill_name
+    _require(
+        isinstance(canonical_name, str)
+        and 0 < len(canonical_name) <= 256
+        and not any(ord(c) < 32 or ord(c) == 127 for c in canonical_name),
+        "Invalid expected skill identity",
     )
     results = retained_results(payload)
     return HTMLReporter(
         include_timestamp=False,
-        expected_skill_name=skill_name,
+        expected_skill_name=canonical_name,
         explicit_skill_name=skill_name,
         ci_context=context,
     ).render_all(results)

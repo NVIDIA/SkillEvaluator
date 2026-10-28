@@ -17,6 +17,7 @@ import io
 import json
 import os
 import re
+import shutil
 import stat
 import sys
 import urllib.error
@@ -30,9 +31,9 @@ MAX_FILES = 1000
 MAX_SKILLS = 100
 MAX_TOTAL_BYTES = 64 * 1024 * 1024
 MAX_FILE_BYTES = 32 * 1024 * 1024
+MAX_HISTORY_BYTES = 512 * 1024 * 1024
 ARTIFACT_NAME = "skill-evaluator-tier1"
 WORKFLOW_PATH = ".github/workflows/skill-checks.yml"
-EVALUATOR_WORKFLOW = "NVIDIA/SkillEvaluator/.github/workflows/evaluate-skills.yml"
 SHA_PATTERN = re.compile(r"[0-9a-f]{40}")
 REPO_PATTERN = re.compile(r"[A-Za-z0-9_.-]+/[A-Za-z0-9_.-]+")
 REPORT_DIRECTORY = re.compile(r"skill-(?:00[1-9]|0[1-9][0-9]|100)")
@@ -313,6 +314,14 @@ def validate_report(report: dict, row: dict) -> None:
         raise PublicationError("A skill summary has contradictory severity counts.")
     if "total_validators" in row and row["total_validators"] != report["total_validators"]:
         raise PublicationError("A skill summary has contradictory validator counts.")
+    # Validate the same typed evidence the renderer consumes before writing an
+    # immutable receipt. Valid-looking rollups alone cannot establish a report.
+    from skillevaluator.reporting.retained import RetainedReportError, retained_results
+
+    try:
+        retained_results(report)
+    except RetainedReportError as exc:
+        raise PublicationError("A per-skill report contains invalid retained evidence.") from exc
 
 
 def read_artifact(payload: bytes) -> tuple[dict, dict[str, dict]]:
@@ -344,19 +353,22 @@ def read_artifact(payload: bytes) -> tuple[dict, dict[str, dict]]:
                         content = handle.read(MAX_FILE_BYTES + 1)
                     if len(content) > MAX_FILE_BYTES:
                         raise PublicationError("A report exceeds its size limit.")
-                    expected[name] = _json(content)
+                    expected[name] = content
     except (zipfile.BadZipFile, RuntimeError, OSError, ValueError) as exc:
         raise PublicationError("The report artifact archive is invalid.") from exc
-    summary = expected.get("summary.json")
+    summary = _json(expected["summary.json"]) if "summary.json" in expected else None
     validate_summary(summary)
     reports = {}
     for row in summary["skills"]:
         directory = row["report_dir"]
+        # A rejected/contradictory child report is diagnostic data, never evidence
+        # to republish. The trusted renderer creates the unavailable-report page.
+        if row["overall_status"] == "error":
+            continue
         document = expected.get(f"{directory}/skillevaluator-tier1.json")
         if document is None:
-            if row["overall_status"] == "error" and not row["passed"]:
-                continue
             raise PublicationError("A required per-skill JSON report is missing.")
+        document = _json(document)
         validate_report(document, row)
         reports[directory] = document
     return summary, reports
@@ -416,7 +428,12 @@ def _render(directory: Path, summary: dict, context: dict) -> None:
     # The import is from the trusted helper directory, never from an artifact.
     from native_reports import render_native_reports
 
-    render_native_reports(directory, summary, context)
+    errors = render_native_reports(directory, summary, context)
+    expected = {row["report_dir"] for row in summary["skills"] if row["overall_status"] == "error"}
+    if set(errors) - expected:
+        raise PublicationError(
+            "The native renderer could not faithfully publish a required report; no receipt was written."
+        )
 
 
 def _validate_run(run: dict, repository: str, run_id: int):
@@ -445,10 +462,57 @@ def _validate_run(run: dict, repository: str, run_id: int):
 
 def _trusted_pins(variable: str) -> set[str]:
     raw = os.environ.get(variable, "")
-    values = raw.split(",")
+    values = re.split(r"[,\n]", raw.strip())
     if not raw or len(values) > 32 or any(SHA_PATTERN.fullmatch(value.strip()) is None for value in values):
-        raise PublicationError("Explicit trusted evaluator and caller revision allowlists are required.")
+        raise PublicationError("Trusted revision allowlists require comma- or newline-separated full commit/blob SHAs.")
     return {value.strip() for value in values}
+
+
+def _caller_blob(api, repository: str, sha: str) -> str:
+    caller = api.get(f"/repos/{repository}/contents/{WORKFLOW_PATH}?ref={sha}")
+    if (
+        not isinstance(caller, dict)
+        or caller.get("type") != "file"
+        or caller.get("path") != WORKFLOW_PATH
+        or not isinstance(caller.get("sha"), str)
+        or SHA_PATTERN.fullmatch(caller["sha"]) is None
+    ):
+        raise PublicationError("The caller workflow lacks a valid Git blob identity.")
+    return caller["sha"]
+
+
+def _executed_caller_blob(api, repository: str, run: dict) -> str:
+    """Reconstruct unambiguous PR merge content from GitHub-recorded revisions.
+
+    The run API exposes the PR head, not GITHUB_WORKFLOW_SHA. Never accept a
+    merge revision asserted by an artifact or the PR's current mutable ref.
+    """
+    head_blob = _caller_blob(api, repository, run["head_sha"])
+    if run["event"] != "pull_request":
+        return head_blob
+    associations = run.get("pull_requests")
+    if not isinstance(associations, list) or len(associations) != 1:
+        raise PublicationError("The PR run lacks an unambiguous recorded base revision; update the branch and rerun.")
+    association = associations[0]
+    base = (association.get("base") or {}).get("sha") if isinstance(association, dict) else None
+    head = (association.get("head") or {}).get("sha") if isinstance(association, dict) else None
+    if not isinstance(base, str) or SHA_PATTERN.fullmatch(base) is None or head != run["head_sha"]:
+        raise PublicationError("The PR run lacks trustworthy recorded merge revisions; update the branch and rerun.")
+    base_blob = _caller_blob(api, repository, base)
+    if head_blob == base_blob:
+        return head_blob
+    comparison = api.get(f"/repos/{repository}/compare/{base}...{head}")
+    ancestor = (comparison.get("merge_base_commit") or {}).get("sha") if isinstance(comparison, dict) else None
+    if not isinstance(ancestor, str) or SHA_PATTERN.fullmatch(ancestor) is None:
+        raise PublicationError("GitHub did not return the caller workflow merge base.")
+    ancestor_blob = _caller_blob(api, repository, ancestor)
+    if head_blob == ancestor_blob:
+        return base_blob
+    if base_blob == ancestor_blob:
+        return head_blob
+    raise PublicationError(
+        "Both branches changed the caller workflow; update the PR branch and rerun before publishing."
+    )
 
 
 def _validate_workflow_provenance(api, repository: str, run: dict) -> None:
@@ -465,13 +529,7 @@ def _validate_workflow_provenance(api, repository: str, run: dict) -> None:
     workflow = f"{evaluator_repository}/.github/workflows/evaluate-skills.yml"
     if sha not in evaluator_pins or reference.get("path") != f"{workflow}@{sha}":
         raise PublicationError("The selected run did not use an approved immutable evaluator workflow.")
-    caller = api.get(f"/repos/{repository}/contents/{WORKFLOW_PATH}?ref={run['head_sha']}")
-    if (
-        not isinstance(caller, dict)
-        or caller.get("type") != "file"
-        or caller.get("path") != WORKFLOW_PATH
-        or caller.get("sha") not in caller_blobs
-    ):
+    if _executed_caller_blob(api, repository, run) not in caller_blobs:
         raise PublicationError("The caller workflow differs from the approved workflow blobs.")
 
 
@@ -494,14 +552,20 @@ def _select_artifact(api, repository: str, run: dict) -> dict:
     ):
         raise PublicationError("The selected run has an unsupported artifact listing.")
     started = _timestamp(run.get("run_started_at"))
+    finished = _timestamp(run.get("updated_at"))
+    if finished < started:
+        raise PublicationError("The selected run attempt has an invalid time interval.")
     candidates = []
     for artifact in listing["artifacts"]:
-        if artifact.get("name") != ARTIFACT_NAME or artifact.get("expired") is not False:
+        if (
+            artifact.get("name") not in {ARTIFACT_NAME, f"{ARTIFACT_NAME}-attempt-{run['run_attempt']}"}
+            or artifact.get("expired") is not False
+        ):
             continue
         identity = artifact.get("workflow_run", {})
         if identity.get("id") != run["id"] or identity.get("head_sha") != run["head_sha"]:
             raise PublicationError("The report artifact does not match the selected run revision.")
-        if _timestamp(artifact.get("created_at")) < started:
+        if not started <= _timestamp(artifact.get("created_at")) <= finished:
             continue
         if (
             not _integer(artifact.get("id"), 1)
@@ -512,7 +576,9 @@ def _select_artifact(api, repository: str, run: dict) -> dict:
         candidates.append(artifact)
     if not candidates:
         raise PublicationError("The selected run attempt has no current report artifact.")
-    return max(candidates, key=lambda item: (item["created_at"], item["id"]))
+    if len(candidates) != 1:
+        raise PublicationError("The selected run attempt has ambiguous report artifacts.")
+    return candidates[0]
 
 
 def _current_routes(api, repository: str, run: dict) -> tuple[list[str], str]:
@@ -532,12 +598,12 @@ def _current_routes(api, repository: str, run: dict) -> tuple[list[str], str]:
         if not _integer(number, 1):
             raise PublicationError("The selected run has an invalid pull request number.")
         pr = api.get(f"/repos/{repository}/pulls/{number}")
-        if pr.get("base", {}).get("repo", {}).get("full_name") != repository:
+        if ((pr.get("base") or {}).get("repo") or {}).get("full_name") != repository:
             continue
-        if pr.get("head", {}).get("repo", {}).get("full_name") != repository:
+        if ((pr.get("head") or {}).get("repo") or {}).get("full_name") != repository:
             continue
         numbers.append(str(number))
-        if pr.get("head", {}).get("sha") == sha:
+        if pr.get("state") == "open" and pr.get("head", {}).get("sha") == sha:
             routes.append(f"pr/{number}")
     return routes, numbers[0] if len(numbers) == 1 else ""
 
@@ -571,10 +637,93 @@ def _history_index(site: Path, history: list[dict]) -> None:
         '<aside class="rail"><div class="brand"><span class="mark"></span>SkillEvaluator</div><p>Evaluation reports</p><a href="#history" aria-current="page">Report history</a></aside><main>'
         '<header><p class="eyebrow">Evaluation reports</p><h1>Report history</h1><p class="muted">Open the latest scan or inspect the evidence recorded for a specific commit.</p></header><section><h2>Latest reports</h2><p>'
         + " · ".join(latest)
-        + '</p></section><section id="history"><h2>Every recorded run</h2><ul>'
+        + '</p></section><section id="history"><h2>Retained runs</h2><ul>'
         + "".join(links)
         + "</ul></section><footer>Generated by SkillEvaluator · Each run retains its original commit and scan evidence.</footer></main></body></html>\n",
     )
+
+
+def _history_identity(record: dict) -> tuple[int, int]:
+    if not isinstance(record, dict) or any(not _integer(record.get(key), 1) for key in ("run_id", "run_attempt")):
+        raise PublicationError("Retained site history has an invalid run identity.")
+    return record["run_id"], record["run_attempt"]
+
+
+def _tree_size(directory: Path) -> int:
+    for ancestor in (directory, *directory.parents):
+        if ancestor.is_symlink():
+            raise PublicationError("Retained reports contain a linked directory.")
+    if not directory.is_dir():
+        raise PublicationError("A retained report directory is missing.")
+    total = 0
+    for path in directory.rglob("*"):
+        if path.is_symlink() or not (path.is_file() or path.is_dir()):
+            raise PublicationError("Retained reports contain linked or special files.")
+        if path.is_file():
+            total += path.stat().st_size
+    return total
+
+
+def _prune_history(api, repository: str, site: Path, history: list[dict], current: dict, keep: int) -> list[dict]:
+    """Bound deployed files while preserving current main and open-PR links.
+
+    Git history is not rewritten. Shallow workflow checkouts download only the
+    retained tree; repository administrators still own Git storage maintenance.
+    """
+    if not _integer(keep, 1) or keep > 1000:
+        raise PublicationError("REPORT_RETENTION_RUNS must be an integer from 1 to 1000.")
+    protected = {_history_identity(current)}
+    main = _read_retained(site / "main/latest/latest.json", None)
+    if main is not None:
+        protected.add(_history_identity(main))
+    pr_root = site / "pr"
+    if pr_root.is_symlink():
+        raise PublicationError("The PR alias directory must not be linked.")
+    if pr_root.is_dir():
+        aliases = list(pr_root.iterdir())
+        if len(aliases) > 1000:
+            raise PublicationError("The retained site has too many pull request aliases.")
+        for directory in aliases:
+            if not directory.name.isdecimal() or directory.is_symlink() or not directory.is_dir():
+                raise PublicationError("The retained site has an unsafe pull request alias.")
+            receipt = _read_retained(directory / "latest.json", None)
+            if receipt is None:
+                raise PublicationError("A retained pull request alias lacks its receipt.")
+            pr = api.get(f"/repos/{repository}/pulls/{int(directory.name)}")
+            if not isinstance(pr, dict) or pr.get("state") not in {"open", "closed"}:
+                raise PublicationError("GitHub did not return a valid pull request retention state.")
+            if pr["state"] == "open":
+                protected.add(_history_identity(receipt))
+            else:
+                _tree_size(directory)
+                shutil.rmtree(directory)
+    records = sorted(history, key=_history_identity, reverse=True)
+    sizes = {}
+    for record in records:
+        identity = _history_identity(record)
+        if identity in sizes:
+            raise PublicationError("The retained site has duplicate run identities.")
+        sizes[identity] = _tree_size(site / "runs" / str(identity[0]) / str(identity[1]))
+    retained = {_history_identity(record) for record in records[:keep]} | protected
+    total = sum(sizes.get(identity, 0) for identity in retained)
+    for record in reversed(records):
+        identity = _history_identity(record)
+        if total <= MAX_HISTORY_BYTES:
+            break
+        if identity in retained and identity not in protected:
+            retained.remove(identity)
+            total -= sizes[identity]
+    if total > MAX_HISTORY_BYTES:
+        raise PublicationError(
+            "Current main/open-PR reports exceed the 512 MiB site budget; use artifacts or reduce scan scope."
+        )
+    for record in records:
+        identity = _history_identity(record)
+        if identity not in retained:
+            directory = site / "runs" / str(identity[0]) / str(identity[1])
+            if directory.exists():
+                shutil.rmtree(directory)
+    return [record for record in records if _history_identity(record) in retained]
 
 
 def _recorded_image(summary: dict, fallback: str) -> str:
@@ -593,11 +742,21 @@ def _recorded_image(summary: dict, fallback: str) -> str:
 
 
 def publish(
-    api, repository: str, run_id: int, base_url: str, site: Path, output: Path, *, render=_render, image=""
+    api,
+    repository: str,
+    run_id: int,
+    base_url: str,
+    site: Path,
+    output: Path,
+    *,
+    run_attempt=1,
+    render=_render,
+    image="",
+    retention_runs=100,
 ) -> dict:
     """Append an immutable report and advance only API-verified current aliases."""
     parsed = urllib.parse.urlsplit(base_url)
-    if not REPO_PATTERN.fullmatch(repository) or not _integer(run_id, 1):
+    if not REPO_PATTERN.fullmatch(repository) or not _integer(run_id, 1) or not _integer(run_attempt, 1):
         raise PublicationError("Repository and report run ID must be explicit valid identities.")
     if (
         parsed.scheme != "https"
@@ -612,8 +771,10 @@ def publish(
         raise PublicationError("The site and output directories must not be symlinks.")
     site.mkdir(parents=True, exist_ok=True)
     output.mkdir(parents=True, exist_ok=True)
-    run = api.get(f"/repos/{repository}/actions/runs/{run_id}")
+    run = api.get(f"/repos/{repository}/actions/runs/{run_id}/attempts/{run_attempt}")
     _validate_run(run, repository, run_id)
+    if run["run_attempt"] != run_attempt:
+        raise PublicationError("GitHub returned a different workflow attempt from the requested one.")
     _validate_workflow_provenance(api, repository, run)
     artifact = _select_artifact(api, repository, run)
     summary, reports = read_artifact(api.download_artifact(artifact["id"]))
@@ -675,6 +836,7 @@ def publish(
         raise PublicationError("Retained site history is invalid.")
     history = [item for item in history if (item.get("run_id"), item.get("run_attempt")) != (run_id, attempt)]
     history.append(receipt)
+    history = _prune_history(api, repository, site, history, receipt, retention_runs)
     _dump(site / "history.json", history)
     _history_index(site, history)
     _write(site / ".nojekyll", "")
@@ -702,8 +864,15 @@ def main() -> int:
         token = os.environ.get("GH_TOKEN", "").strip()
         repository = os.environ.get("GITHUB_REPOSITORY", "")
         raw_id = os.environ.get("REPORT_RUN_ID", "")
-        if not token or not raw_id.isdecimal() or int(raw_id) <= 0:
-            raise PublicationError("GH_TOKEN and a positive REPORT_RUN_ID are required.")
+        raw_attempt = os.environ.get("REPORT_RUN_ATTEMPT", "")
+        if (
+            not token
+            or not raw_id.isdecimal()
+            or int(raw_id) <= 0
+            or not raw_attempt.isdecimal()
+            or int(raw_attempt) <= 0
+        ):
+            raise PublicationError("GH_TOKEN and positive REPORT_RUN_ID and REPORT_RUN_ATTEMPT are required.")
         metadata = publish(
             GitHubAPI(repository, token),
             repository,
@@ -712,6 +881,8 @@ def main() -> int:
             Path(os.environ["SITE_DIR"]),
             Path(os.environ["OUTPUT_DIR"]),
             image=os.environ.get("REPORT_IMAGE", ""),
+            run_attempt=int(raw_attempt),
+            retention_runs=int(os.environ.get("REPORT_RETENTION_RUNS", "100")),
         )
         if os.environ.get("GITHUB_OUTPUT"):
             with Path(os.environ["GITHUB_OUTPUT"]).open("a", encoding="utf-8") as handle:

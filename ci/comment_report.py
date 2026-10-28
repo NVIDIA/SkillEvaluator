@@ -108,20 +108,25 @@ def run_marker(run_id: int, attempt: int) -> str:
     return f"<!-- skillevaluator-tier1-run:{run_id}:{attempt} -->"
 
 
-def _verify_pr(api, repository: str, number: int, sha: str) -> None:
+def _verify_pr(api, repository: str, number: int, sha: str) -> str | None:
     pr = api.get(f"/repos/{repository}/pulls/{number}")
-    if not isinstance(pr, dict) or pr.get("state") != "open":
-        raise FeedbackError("The pull request is no longer open; feedback was not posted.")
+    if not isinstance(pr, dict) or pr.get("state") not in {"open", "closed"}:
+        raise FeedbackError("The pull request lacks a valid state.")
+    if pr["state"] == "closed":
+        return "The pull request is closed."
     head = pr.get("head")
     base = pr.get("base")
     if not isinstance(head, dict) or not isinstance(base, dict):
         raise FeedbackError("The pull request lacks trustworthy repository and revision metadata.")
-    if (
-        head.get("sha") != sha
-        or head.get("repo", {}).get("full_name") != repository
-        or base.get("repo", {}).get("full_name") != repository
-    ):
-        raise FeedbackError("The pull request head changed or belongs to another repository; feedback was not posted.")
+    if not isinstance(head.get("sha"), str) or SHA_PATTERN.fullmatch(head["sha"]) is None:
+        raise FeedbackError("The pull request lacks a valid head revision.")
+    if (head.get("repo") or {}).get("full_name") != repository or (base.get("repo") or {}).get(
+        "full_name"
+    ) != repository:
+        raise FeedbackError("The pull request belongs to another repository; feedback was not posted.")
+    if head.get("sha") != sha:
+        return "The pull request head changed."
+    return None
 
 
 def _owned(comment: dict, bot: str) -> bool:
@@ -210,13 +215,17 @@ def comment_report(api, repository: str, run_id: int, feedback_dir: Path, actor_
     )
     if len(body.encode("utf-8")) > MAX_BODY_BYTES:
         raise FeedbackError("The complete feedback comment exceeds the 60000-byte limit.")
-    _verify_pr(api, repository, number, sha)
+    reason = _verify_pr(api, repository, number, sha)
+    if reason:
+        return {"comment_action": "skipped", "comment_reason": reason}
     owned = _owned_comments(api, repository, number, actor_bot_login)
     if any(_comment_identity(item) > (run_id, attempt) for item in owned):
-        raise FeedbackError("A newer report comment already exists; stale feedback was not posted.")
+        return {"comment_action": "skipped", "comment_reason": "A newer report comment already exists."}
     canonical = max(owned, key=lambda item: item["id"]) if owned else None
     # Recheck immediately before mutation after pagination and receipt validation.
-    _verify_pr(api, repository, number, sha)
+    reason = _verify_pr(api, repository, number, sha)
+    if reason:
+        return {"comment_action": "skipped", "comment_reason": reason}
     if canonical is not None and canonical["body"] == body:
         identifier = canonical["id"]
         action = "unchanged"
@@ -253,7 +262,10 @@ def main() -> int:
         if os.environ.get("GITHUB_OUTPUT"):
             with Path(os.environ["GITHUB_OUTPUT"]).open("a", encoding="utf-8") as handle:
                 handle.write("".join(f"{key}={value}\n" for key, value in result.items()))
-        print("SkillEvaluator PR feedback verified successfully.")
+        if result["comment_action"] == "skipped":
+            print("SkillEvaluator PR feedback skipped: " + result["comment_reason"])
+        else:
+            print("SkillEvaluator PR feedback verified successfully.")
         return 0
     except FeedbackError as exc:
         print("SkillEvaluator PR feedback rejected: " + json.dumps(str(exc)[:1000]), file=sys.stderr)

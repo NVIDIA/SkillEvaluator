@@ -1484,8 +1484,8 @@
         {% if (has_tier2 and 'tier2' in gating.blocking_tiers) or (has_tier3 and 'tier3' in gating.advisory_tiers) %}
         <div class="gate-policy" aria-label="Gate policy for included tiers">
             <strong>Gate policy</strong>
-            {% if has_tier2 and 'tier2' in gating.blocking_tiers %}<span>Blocking (Tier 1 + Tier 2)</span>{% endif %}
-            {% if has_tier3 and 'tier3' in gating.advisory_tiers %}<span>Advisory (Tier 3 agent-eval)</span>{% endif %}
+            <span>Blocking (Tier 1{% if has_tier2 and 'tier2' in gating.blocking_tiers %} + Tier 2{% endif %}): <strong>{{ blocking_critical }} critical · {{ blocking_high }} high · {{ blocking_medium }} medium · {{ blocking_low }} low</strong></span>
+            {% if has_tier3 and 'tier3' in gating.advisory_tiers %}<span>Advisory (Tier 3 agent-eval): <strong>{{ advisory_critical }} critical · {{ advisory_high }} high · {{ advisory_medium }} medium · {{ advisory_low }} low</strong>. Tier 3 agent-eval findings are advisory and don't block merge.</span>{% endif %}
         </div>
         {% endif %}
         <div id="report-evidence" class="workspace-heading"><h2>Findings &amp; evidence</h2><p>Inspect the outcome and supporting checks. Quality scores are separate from the pass / fail decision.</p></div>
@@ -1880,7 +1880,7 @@
                         {% for result in results %}
                         {% set result_is_skipped = result | cleanly_skipped %}
                         {% set result_execution_status = result | execution_status %}
-                        <tr onclick="scrollToValidator({{ loop.index }})" data-status="{{ result_execution_status }}">
+                        <tr data-validator-index="{{ loop.index }}" onclick="scrollToValidator(Number(this.dataset.validatorIndex))" data-status="{{ result_execution_status }}">
                             <td class="name-col">{{ result.validator_name }}</td>
                             <td><span class="status-badge {{ 'warn' if (result_execution_status in ['skipped', 'incomplete', 'not_applicable']) else ('pass' if result.passed else 'fail') }}">{{ 'N/A' if result_execution_status == 'not_applicable' else result_execution_status | title }}</span></td>
                             <td>{{ result.summary.files_scanned }}</td>
@@ -4184,6 +4184,10 @@
                 }
             }
             if (target) {
+                // Findings can live inside collapsed checks, including passing checks.
+                for (let parent = target.parentElement; parent && parent !== card; parent = parent.parentElement) {
+                    if (parent.tagName === 'DETAILS') parent.open = true;
+                }
                 target.scrollIntoView({ behavior: 'smooth', block: 'center' });
                 target.style.boxShadow = '0 0 0 3px var(--secondary-color)';
                 setTimeout(() => { target.style.boxShadow = ''; }, 2000);
@@ -4241,7 +4245,7 @@
             // Show filter banner above the skill list
             const banner = document.getElementById('skill-filter-banner');
             document.getElementById('skill-filter-banner-text').textContent =
-                'Showing ' + affectedSkills.length + ' {{ content_label | lower }}(s) affected by: ' + issueName;
+                'Showing ' + affectedSkills.length + ' item(s) affected by: ' + issueName;
             banner.classList.add('visible');
             // Hide skill empty message if present
             const emptyMsg = document.getElementById('skill-empty-msg');

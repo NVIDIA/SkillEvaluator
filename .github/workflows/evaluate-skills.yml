@@ -43,7 +43,7 @@ jobs:
   tier1:
     name: Tier 1 scan
     runs-on: ubuntu-24.04
-    timeout-minutes: 30
+    timeout-minutes: 60
     steps:
       - uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0
         with:
@@ -75,10 +75,11 @@ jobs:
           LLM_ENABLED: ${{ inputs.llm }}
           LLM_PROVIDER: ${{ inputs.llm-provider }}
           LLM_MODEL: ${{ inputs.llm-model }}
-          LLM_API_KEY: ${{ secrets.LLM_API_KEY }}
+          LLM_API_KEY: ${{ inputs.llm && secrets.LLM_API_KEY || '' }}
           REPORT_BASE_URL: ${{ inputs.report-base-url }}
           REPORT_RUN_URL: ${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}
           REPORT_COMMIT: ${{ github.event.pull_request.head.sha || github.sha }}
+          CALLER_WORKFLOW_SHA: ${{ github.workflow_sha }}
         run: |
           mkdir -p "$RUNNER_TEMP/skill-reports"
           REPORT_IMAGE="$IMAGE"
@@ -87,14 +88,19 @@ jobs:
             REPORT_URL="${REPORT_BASE_URL%/}/runs/$GITHUB_RUN_ID/$GITHUB_RUN_ATTEMPT/"
           fi
           export REPORT_IMAGE REPORT_URL
+          llm_secret_args=()
+          if [ "$LLM_ENABLED" = true ]; then
+            llm_secret_args=(--env LLM_API_KEY)
+          fi
           docker run --rm --user "$(id -u):$(id -g)" \
             --read-only --tmpfs /tmp:rw,nosuid,noexec,size=1g \
-            --tmpfs /audit-tmp:rw,nosuid,exec,mode=1777,size=1g --env TMPDIR=/audit-tmp \
+            --tmpfs /audit-tmp:rw,nosuid,noexec,mode=1777,size=1g --env TMPDIR=/audit-tmp \
             --cap-drop ALL --security-opt no-new-privileges \
             --mount "type=bind,src=$GITHUB_WORKSPACE,dst=/workspace,readonly" \
             --mount "type=bind,src=$RUNNER_TEMP/skill-reports,dst=/reports" \
-            --env SKILL_PATHS --env LLM_ENABLED --env LLM_PROVIDER --env LLM_MODEL --env LLM_API_KEY \
+            --env SKILL_PATHS --env LLM_ENABLED --env LLM_PROVIDER --env LLM_MODEL "${llm_secret_args[@]}" \
             --env SCAN_MODE --env DIFF_BASE_SHA --env DIFF_HEAD_SHA \
+            --env CALLER_WORKFLOW_SHA \
             --env GITHUB_ACTIONS --env REPORT_IMAGE --env REPORT_URL --env REPORT_RUN_URL --env REPORT_COMMIT \
             "$IMAGE"
       - name: Add the result to the workflow summary
@@ -107,9 +113,9 @@ jobs:
           fi
       - name: Upload reports even when validation fails
         if: always()
-        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02
+        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
         with:
-          name: ${{ inputs.artifact-name }}
+          name: ${{ inputs.artifact-name }}-attempt-${{ github.run_attempt }}
           path: ${{ runner.temp }}/skill-reports/
           if-no-files-found: warn
           retention-days: 14

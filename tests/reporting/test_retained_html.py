@@ -192,3 +192,59 @@ def test_explicit_retained_paths_preserve_canonical_finding_location(payload):
     finding = data["skill"]["validators"]["Schema & Repository Governance"]["findings"][0]
     assert finding["file_path"] == "/untrusted/skill/SKILL.md"
     assert finding["line_number"] is None
+
+
+def test_display_path_preserves_canonical_publication_identity_and_bound_waivers():
+    from skillevaluator.publication_evidence import stamp_publication_evidence, tier1_required_checks
+
+    results = []
+    for check in tier1_required_checks(skill_like=True):
+        result = ValidationResult(validator_name=check)
+        result.add_success(check, "Scanned")
+        result.metadata.update(
+            publication_target={
+                "skill_name": "demo",
+                "skill_digest": "sha256:" + "c" * 64,
+                "skill_digest_algorithm": "skill-evaluator-source-tree/2",
+            },
+            benchmark_policy={"tier2_required": False, "tier3_required": False},
+        )
+        stamp_publication_evidence([result], tier=1, check_id=check)
+        results.append(result)
+    payload = json.loads(JSONReporter(include_timestamp=False, expected_skill_name="demo").render_all(results))
+    assert payload["publication"]["status"] == "pass"
+    rendered = render_retained_report(payload, skill_name="skills/demo", expected_skill_name="demo")
+    assert 'data-publication-status="pass"' in rendered
+    assert "skills/demo" in rendered
+    mismatched = render_retained_report(payload, skill_name="skills/demo", expected_skill_name="different-skill")
+    assert 'data-publication-status="incomplete"' in mismatched
+
+
+def test_skillspector_version_survives_json_and_retained_html_roundtrip():
+    result = ValidationResult(validator_name="Security")
+    result.metadata["skillspector_version"] = "2.12.0"
+    payload = json.loads(JSONReporter(include_timestamp=False).render_all([result]))
+    assert payload["results"][0]["skillspector_version"] == "2.12.0"
+    assert retained_results(payload)[0].metadata["skillspector_version"] == "2.12.0"
+    assert "SkillSpector <strong>v2.12.0" in render_retained_report(payload, skill_name="demo")
+
+
+@pytest.mark.parametrize(
+    "check,message,metadata,expected",
+    [
+        ("code_file_discovery", "No code files found - code risk analysis is not applicable", {}, "NOT APPLICABLE"),
+        ("lint", "No scripts/ or tools/ directory found", {}, "NOT APPLICABLE"),
+        ("random-check", "Some rule is not applicable, other rules ran", {}, "PASS"),
+        ("new-check", "No applicable target", {"not_applicable": True}, "NOT APPLICABLE"),
+        ("lint", "No scripts/ or tools/ directory found", {"not_applicable": False}, "PASS"),
+    ],
+)
+def test_html_and_ci_use_the_same_not_applicable_evidence(check, message, metadata, expected):
+    from ci.report_views import _status
+
+    result = ValidationResult(validator_name="Discovery")
+    result.success_details.append(SuccessDetail(check_name=check, message=message, metadata=metadata))
+    recorded = json.loads(JSONReporter(include_timestamp=False).render(result))
+    html_status = HTMLReporter()._env.filters["execution_status"](result)
+    assert html_status.upper().replace("_", " ") == expected
+    assert _status(recorded) == expected

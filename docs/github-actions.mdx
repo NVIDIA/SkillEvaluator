@@ -7,11 +7,9 @@ Add one workflow and choose your skill directories. SkillEvaluator supplies the
 scanner runtime; your repository gets a check result, a short Actions summary
 and downloadable reports.
 
-**Release status:** the reusable workflow and templates in this change are
-proposed for review. A public NVIDIA CI image and release-rendered consumer files
-must be published before this installation path is runnable. Source templates
-contain `RELEASE_WORKFLOW_SHA` and `RELEASE_IMAGE_DIGEST` placeholders; do not use
-those unresolved values in a pipeline.
+**Release availability:** use the consumer files attached to an official CI
+image release. Until that release is available, source templates contain
+`RELEASE_WORKFLOW_SHA` and `RELEASE_IMAGE_DIGEST` placeholders and are not runnable.
 
 ## Basic setup: one workflow
 
@@ -42,7 +40,9 @@ jobs:
 The workflow downloads the public image automatically. You do not build an image,
 install scanners or supply a model API key for static Tier 1. No registry login
 is needed for a public package. Keyless does not mean offline: dependency checks
-can contact vulnerability services.
+can contact vulnerability services. Dependency files are audited without
+installing packages or running their build scripts. Exact package/version pins
+are required; unresolved requirements are reported as incomplete.
 
 `scan-mode: auto` selects skills affected by pull-request changes and evaluates
 all configured skills on pushes and manual runs. Set `scan-mode: all` to check
@@ -53,13 +53,16 @@ are listed as deleted/skipped. Removing `SKILL.md` while leaving tracked files
 behind is an error. Selection follows changed files inside skill directories;
 shared files outside the configured roots are not inferred dependencies. Use
 `scan-mode: all` when those changes should trigger a full evaluation.
-Tier 2 and Tier 3 are not run.
+Tier 2 and Tier 3 are not run. The 100-skill limit is a selection limit, not a
+runtime guarantee. Scans have a time budget and preserve completed results plus
+explicit incomplete entries if it is exhausted.
 
 ## Read the result
 
 Open **Actions → Skill checks**. The summary shows the outcome, affected skills
 and a bounded set of actionable reasons and fixes. Download the
-`skill-evaluator-tier1` artifact for `index.html`, per-skill HTML and JSON,
+`skill-evaluator-tier1-attempt-N` artifact for that run attempt (`N`) to get
+`index.html`, per-skill HTML and JSON,
 detailed Markdown, SARIF and scanner logs. Failed and incomplete scans retain
 their available reports; missing evidence is not a pass. Quality scores and the
 pass/fail decision are separate.
@@ -77,6 +80,12 @@ requires a second workflow, Pages configured for GitHub Actions, a retained
 history branch, publisher permissions, your own report URL and approved
 workflow revisions. Follow the [publisher setup](../ci/README.md#optional-hosted-reports-and-pr-feedback)
 before adding the generated `publish-skill-reports.yml` to your default branch.
+
+**Check visibility first:** reports can contain skill content, source excerpts
+and unmerged PR findings. A private repository does not make its Pages site
+private. Use an explicitly private GitHub Enterprise Cloud Pages site, or keep
+reports in the scan artifact if public hosting is inappropriate. See
+[Pages access control](https://docs.github.com/en/pages/getting-started-with-github-pages/changing-the-visibility-of-your-github-pages-site).
 
 The publisher follows completed **Skill checks** runs, including failures. It
 validates retained JSON, generates HTML and updates its own bot comment after

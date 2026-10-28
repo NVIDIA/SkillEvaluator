@@ -11,17 +11,23 @@ being shown in logs or GitHub annotations.
 from __future__ import annotations
 
 import argparse
-import html
 import json
 import os
-import re
 import subprocess
+import time
 from pathlib import Path
+
+from skillevaluator.reporting.html import _validated_ci_context
 
 try:
     from native_reports import render_native_reports
 except ModuleNotFoundError:
     from ci.native_reports import render_native_reports
+
+try:
+    from report_views import finding_repository_path, render_reports
+except ModuleNotFoundError:
+    from ci.report_views import finding_repository_path, render_reports
 
 try:
     from select_changed_skills import SelectionError, select_changed_skills
@@ -30,6 +36,7 @@ except ModuleNotFoundError:
 
 MAX_SKILLS = 100
 MAX_REPORT_BYTES = 32 * 1024 * 1024
+SCAN_TIMEOUT_SECONDS = 3000
 PROVIDER_KEYS = {"openai": "OPENAI_API_KEY", "anthropic": "ANTHROPIC_API_KEY", "nv_build": "NVIDIA_API_KEY"}
 PROCESS_ENV = {
     "PATH",
@@ -79,11 +86,14 @@ def discover_skills(workspace: Path, roots: str) -> list[Path]:
 
         for directory, directories, files in os.walk(root, followlinks=False, onerror=inaccessible):
             parent = Path(directory)
+            inside_skill = any(parent.is_relative_to(skill) for skill in discovered) or "SKILL.md" in files
             for name in [*directories, *files]:
                 child = parent / name
-                if child.is_symlink():
+                if any(ord(character) < 32 or ord(character) == 127 for character in name):
+                    raise ConfigurationError("Skill paths must not contain control characters.")
+                if child.is_symlink() and (inside_skill or name == "SKILL.md"):
                     raise ConfigurationError("Symlinks are not supported in skill roots or scan content.")
-                if not child.is_dir() and not child.is_file():
+                if inside_skill and not child.is_dir() and not child.is_file():
                     raise ConfigurationError("Only regular files and directories are supported in skill trees.")
             if "SKILL.md" in files:
                 discovered.add(parent)
@@ -123,11 +133,6 @@ def child_environment(environ: dict[str, str]) -> tuple[dict[str, str], bool]:
                 raise ConfigurationError("LLM_MODEL must not contain control characters.")
             env["SKILL_EVAL_LLM_MODEL"] = model
     return env, enabled == "true"
-
-
-def markdown_text(value: str) -> str:
-    value = "".join(character if ord(character) >= 32 else f"\\u{ord(character):04x}" for character in value)
-    return re.sub(r"([\\`*_{}\[\]()#+.!|~-])", r"\\\1", html.escape(value, quote=True))
 
 
 def _write_json(path: Path, payload: dict) -> None:
@@ -240,13 +245,12 @@ def log_result(row: dict, data: dict | None, *, annotations: bool, budget: dict[
             if annotations and result.get("passed") is False and budget["errors"] < 10:
                 budget["errors"] += 1
                 properties = "title=" + annotation_text(str(result.get("validator", "Tier 1")), property_value=True)
-                if location.startswith("/workspace/"):
-                    relative = location.removeprefix("/workspace/")
-                    if ".." not in Path(relative).parts:
-                        properties += ",file=" + annotation_text(relative, property_value=True)
-                        line = finding.get("line_number")
-                        if type(line) is int and line > 0:
-                            properties += f",line={line}"
+                relative = finding_repository_path(row["path"], finding.get("file_path"))
+                if relative:
+                    properties += ",file=" + annotation_text(relative, property_value=True)
+                    line = finding.get("line_number")
+                    if type(line) is int and line > 0:
+                        properties += f",line={line}"
                 print(f"::error {properties}::{annotation_text(message + ' Suggested fix: ' + suggestion)}", flush=True)
         if result.get("status") in {"incomplete", "failed"}:
             for message in result.get("legacy", {}).get("errors", [])[:3]:
@@ -260,10 +264,13 @@ def execution_context(environ: dict[str, str]) -> dict:
         "image": environ.get("REPORT_IMAGE", ""),
         "report_url": environ.get("REPORT_URL", ""),
         "llm_enabled": environ.get("LLM_ENABLED", "false").lower() == "true",
+        "workflow_sha": environ.get("CALLER_WORKFLOW_SHA", ""),
     }
 
 
-def run(workspace: Path, reports: Path, environ: dict[str, str], *, execute=subprocess.run) -> int:
+def run(
+    workspace: Path, reports: Path, environ: dict[str, str], *, execute=subprocess.run, clock=time.monotonic
+) -> int:
     """Run all selected skills; return nonzero on every incomplete or failed run."""
     if reports.is_symlink():
         raise ConfigurationError("The report directory must not be a symlink.")
@@ -276,6 +283,16 @@ def run(workspace: Path, reports: Path, environ: dict[str, str], *, execute=subp
     annotation_budget = {"errors": 0}
     selection = None
     try:
+        try:
+            _validated_ci_context(context)
+            if environ.get("REPORT_BASE_URL"):
+                _validated_ci_context({"report_url": environ["REPORT_BASE_URL"]})
+        except ValueError as exc:
+            # Invalid context must not crash rendering of the configuration error.
+            context = {"llm_enabled": context["llm_enabled"]}
+            raise ConfigurationError(
+                "Report links must be bounded HTTPS URLs without credentials or control characters."
+            ) from exc
         workspace = workspace.resolve(strict=True)
         if reports.is_relative_to(workspace):
             raise ConfigurationError("The report directory must be outside the read-only workspace.")
@@ -324,21 +341,38 @@ def run(workspace: Path, reports: Path, environ: dict[str, str], *, execute=subp
         _write_summary(reports, summary)
         print("NO SKILLS CHANGED: no skill was evaluated between the selected Git commits.", flush=True)
         return 0
-    for index, target in enumerate(selected, 1):
+    rows = [
+        {
+            "path": target.relative_to(workspace).as_posix(),
+            "report_dir": f"skill-{index:03d}",
+            "exit_code": None,
+            "overall_status": "error",
+            "incomplete_scans": [],
+            "passed": False,
+            "error": "Not evaluated: the scan has not reached this skill.",
+        }
+        for index, target in enumerate(selected, 1)
+    ]
+
+    def checkpoint() -> None:
+        summary = _summary(rows)
+        summary.update(selection=selection, execution=context)
+        _write_json(reports / "summary.json", summary)
+        render_reports(reports, summary, context)
+
+    deadline = clock() + SCAN_TIMEOUT_SECONDS
+    checkpoint()
+    for index, (target, row) in enumerate(zip(selected, rows, strict=True), 1):
+        remaining = deadline - clock()
+        if remaining <= 0:
+            break
         print(
             f"SkillEvaluator: evaluating skill {index} of {len(selected)}: {json.dumps(target.relative_to(workspace).as_posix())}",
             flush=True,
         )
         output = reports / f"skill-{index:03d}"
         output.mkdir()
-        row = {
-            "path": target.relative_to(workspace).as_posix(),
-            "report_dir": output.name,
-            "exit_code": None,
-            "overall_status": "error",
-            "incomplete_scans": [],
-            "passed": False,
-        }
+        row["error"] = "Evaluation interrupted before complete evidence was retained."
         argv = [
             "skillevaluator",
             "tier1",
@@ -354,7 +388,9 @@ def run(workspace: Path, reports: Path, environ: dict[str, str], *, execute=subp
         data = None
         try:
             with (output / "stdout.log").open("xb") as stdout, (output / "stderr.log").open("xb") as stderr:
-                process = execute(argv, cwd=workspace, env=env, stdout=stdout, stderr=stderr, check=False)
+                process = execute(
+                    argv, cwd=workspace, env=env, stdout=stdout, stderr=stderr, check=False, timeout=remaining
+                )
             row["exit_code"] = process.returncode
             data = _load_report(output / "skillevaluator-tier1.json")
             for key in (
@@ -381,10 +417,16 @@ def run(workspace: Path, reports: Path, environ: dict[str, str], *, execute=subp
             if not row["passed"] and row["overall_status"] == "passed":
                 row["overall_status"] = "error"
                 row["error"] = "Process exit or validator results contradict the report verdict."
+            else:
+                row.pop("error", None)
+        except subprocess.TimeoutExpired:
+            row["error"] = "Scan time limit reached; this skill did not finish."
+            checkpoint()
+            break
         except (OSError, ValueError, UnicodeError, RecursionError):
             row["error"] = "Evaluator execution failed or its JSON report was missing, unreadable, or invalid."
-        rows.append(row)
         log_result(row, data, annotations=environ.get("GITHUB_ACTIONS") == "true", budget=annotation_budget)
+        checkpoint()
     summary = _summary(rows)
     summary["selection"] = selection
     summary["execution"] = context

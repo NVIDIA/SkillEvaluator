@@ -104,8 +104,11 @@ def test_creates_only_after_rechecking_head_and_verifies_body(tmp_path):
 def test_non_current_or_closed_or_fork_pr_is_never_mutated(tmp_path, options):
     prepare(tmp_path)
     api = FakeAPI(**options)
-    with pytest.raises(feedback.FeedbackError):
-        invoke(api, tmp_path)
+    if "head_repo" in options:
+        with pytest.raises(feedback.FeedbackError):
+            invoke(api, tmp_path)
+    else:
+        assert invoke(api, tmp_path)["comment_action"] == "skipped"
     assert not any(call[0] in {"POST", "PATCH"} for call in api.calls)
 
 
@@ -120,8 +123,7 @@ def test_head_change_during_comment_listing_is_rejected(tmp_path):
             return response
 
     api = ChangingAPI()
-    with pytest.raises(feedback.FeedbackError):
-        invoke(api, tmp_path)
+    assert invoke(api, tmp_path)["comment_action"] == "skipped"
     assert not any(call[0] in {"POST", "PATCH"} for call in api.calls)
 
 
@@ -156,16 +158,14 @@ def test_newer_report_on_any_owned_comment_blocks_stale_result(tmp_path):
             comment(2, feedback.MARKER + feedback.run_marker(122, 1)),
         ]
     )
-    with pytest.raises(feedback.FeedbackError):
-        invoke(api, tmp_path)
+    assert invoke(api, tmp_path)["comment_action"] == "skipped"
     assert not any(call[0] in {"POST", "PATCH"} for call in api.calls)
 
 
 def test_later_attempt_blocks_earlier_attempt(tmp_path):
     prepare(tmp_path)
     api = FakeAPI(comments=[comment(1, feedback.MARKER + feedback.run_marker(123, 2))])
-    with pytest.raises(feedback.FeedbackError):
-        invoke(api, tmp_path)
+    assert invoke(api, tmp_path)["comment_action"] == "skipped"
 
 
 def test_paginates_without_modifying_comments_on_other_pages(tmp_path):

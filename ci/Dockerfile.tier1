@@ -1,23 +1,27 @@
 # Complete Tier 1 runtime for reusable GitHub Actions scans.
-FROM python:3.12-slim-bookworm
+FROM python:3.12-slim-bookworm@sha256:62ed8e07e544e8555c5d93748d5275015136b7f5c52b5e8679b4de339c3779d3
 
-ARG SKILLSPECTOR_COMMIT=c7958a3268d9498644b22edb75d0f051bbc8cbfc
 ENV PIP_NO_INPUT=1 PYTHONDONTWRITEBYTECODE=1 PYTHONUNBUFFERED=1 \
     PYTHON_DOTENV_DISABLED=1 SEMGREP_SEND_METRICS=off SEMGREP_ENABLE_VERSION_CHECK=0 \
     HOME=/tmp/evaluator-home
 
 RUN apt-get update && apt-get install -y --no-install-recommends ca-certificates curl git \
     && rm -rf /var/lib/apt/lists/*
-RUN python -m pip install --no-cache-dir uv==0.11.27
+COPY ci/requirements/uv.txt /opt/scanner-requirements/uv.txt
+RUN python -m pip install --no-cache-dir --require-hashes -r /opt/scanner-requirements/uv.txt
 
 WORKDIR /opt/skillevaluator
 COPY . .
 RUN uv sync --frozen --no-dev --no-editable --extra security --extra llm
 
 # Independent environments avoid conflicting scanner dependency requirements.
-RUN uv venv /opt/semgrep && uv pip install --python /opt/semgrep/bin/python semgrep==1.182.0
+RUN uv venv /opt/semgrep && uv pip install --python /opt/semgrep/bin/python \
+    --require-hashes -r ci/requirements/semgrep.txt
+# Build tooling is locked too: do not resolve an isolated build environment.
 RUN uv venv /opt/skillspector && uv pip install --python /opt/skillspector/bin/python \
-    "git+https://github.com/NVIDIA/SkillSpector.git@${SKILLSPECTOR_COMMIT}"
+    --require-hashes -r ci/requirements/skillspector-build.txt \
+    && uv pip install --python /opt/skillspector/bin/python --no-build-isolation \
+    --require-hashes -r ci/requirements/skillspector.txt
 RUN set -eu; arch="$(dpkg --print-architecture)"; \
     case "$arch" in \
       amd64) asset=x64; checksum=79a3ab579b53f71efd634f3aaf7e04a0fa0cf206b7ed434638d1547a2470a66e ;; \

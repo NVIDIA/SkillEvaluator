@@ -193,6 +193,36 @@ def test_no_target_configuration_error_can_be_published():
     assert publisher.read_artifact(archive([("summary.json", payload)]))[0] == payload
 
 
+def test_site_writes_are_atomic_and_leave_no_partial_file(tmp_path):
+    target = tmp_path / "site/runs/1/1/summary.json"
+    publisher._write(target, "old")
+    with pytest.raises(UnicodeEncodeError):
+        publisher._write(target, "new \ud800")
+    assert target.read_text(encoding="utf-8") == "old"
+    assert [path.name for path in target.parent.iterdir()] == ["summary.json"]
+    publisher._dump(target, {"new": True})
+    assert json.loads(target.read_text(encoding="utf-8")) == {"new": True}
+    assert [path.name for path in target.parent.iterdir()] == ["summary.json"]
+
+
+@pytest.mark.parametrize("linked", ["target", "parent"])
+def test_site_writes_refuse_linked_targets_and_directories(tmp_path, linked):
+    outside = tmp_path / "outside"
+    outside.mkdir()
+    (outside / "index.html").write_text("outside", encoding="utf-8")
+    site = tmp_path / "site"
+    site.mkdir()
+    if linked == "target":
+        (site / "index.html").symlink_to(outside / "index.html")
+        target = site / "index.html"
+    else:
+        (site / "runs").symlink_to(outside, target_is_directory=True)
+        target = site / "runs/index.html"
+    with pytest.raises(publisher.PublicationError, match="symlink"):
+        publisher._write(target, "replaced")
+    assert (outside / "index.html").read_text(encoding="utf-8") == "outside"
+
+
 def test_alias_order_is_run_then_attempt():
     assert publisher.is_newer({"run_id": 5, "run_attempt": 2}, {"run_id": 5, "run_attempt": 1})
     assert not publisher.is_newer({"run_id": 4, "run_attempt": 99}, {"run_id": 5, "run_attempt": 1})

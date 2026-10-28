@@ -17,6 +17,7 @@ import io
 import json
 import os
 import re
+import secrets
 import shutil
 import stat
 import sys
@@ -385,17 +386,20 @@ def is_newer(candidate: dict, existing: dict | None) -> bool:
 
 
 def _write(path: Path, text: str) -> None:
-    current = path.parent
-    while True:
-        if current.is_symlink():
+    """Replace a site file atomically; a failed write leaves the old file intact."""
+    for ancestor in (path, *path.parents):
+        if ancestor.is_symlink():
             raise PublicationError("The site contains a symlink in an output path.")
-        if current == current.parent:
-            break
-        current = current.parent
-    if path.is_symlink():
-        raise PublicationError("The site contains a symlink in an output path.")
     path.parent.mkdir(parents=True, exist_ok=True)
-    path.write_text(text, encoding="utf-8")
+    temporary = path.with_name(f".{path.name}.{secrets.token_hex(8)}.tmp")
+    descriptor = os.open(temporary, os.O_WRONLY | os.O_CREAT | os.O_EXCL | getattr(os, "O_NOFOLLOW", 0), 0o666)
+    try:
+        with os.fdopen(descriptor, "w", encoding="utf-8") as handle:
+            handle.write(text)
+        temporary.replace(path)
+    except BaseException:
+        temporary.unlink(missing_ok=True)
+        raise
 
 
 def _dump(path: Path, data) -> None:

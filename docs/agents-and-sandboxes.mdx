@@ -453,6 +453,12 @@ SkillEvaluator forwards both Python settings to Harbor when they are set;
 it does not enable them automatically. Native Windows local mode remains
 unsupported; use Docker or run local mode inside WSL2.
 
+Verifier scripts run inside the Linux container, so they need LF line
+endings. SkillEvaluator writes generated `test.sh` files and the
+`init-custom-grader` and `init-harbor-task` grader starters with LF on every
+host. Keep LF when you edit them: a CRLF `grader.sh` or `test.sh` fails in the
+container before grading starts.
+
 ### Resource tuning
 
 If an agent's work is heavier than the defaults allow — large builds,

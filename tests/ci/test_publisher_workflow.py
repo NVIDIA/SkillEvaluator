@@ -69,8 +69,21 @@ def test_privileged_publisher_installs_the_reviewed_hash_locked_bootstrap():
     steps = load(".github/workflows/publish-skill-reports.yml")["jobs"]["prepare"]["steps"]
     install = next(step for step in steps if step.get("name") == "Install the trusted native report renderer")
     assert install["working-directory"] == "publisher"
-    assert "python3 -m pip install --require-hashes -r ci/requirements/uv.txt" in install["run"]
-    assert "uv sync --frozen --no-dev --no-editable" in install["run"]
+    lines = [line.strip() for line in install["run"].replace("\\\n", " ").splitlines()]
+    # uv comes from its hash-locked requirement, installed into a private environment.
+    assert lines[0] == 'python3 -m venv "$RUNNER_TEMP/uv"'
+    assert lines[1].startswith('"$RUNNER_TEMP/uv/bin/python" -m pip install ')
+    for flag in ("--require-hashes", "--no-deps", "--only-binary :all:", "-r ci/requirements/uv.txt"):
+        assert flag in lines[1]
+    assert lines[2] == '"$RUNNER_TEMP/uv/bin/uv" sync --frozen --no-dev --no-editable'
+    assert len(lines) == 3
+    # The runner's system Python and pip are never modified.
+    assert "python3 -m pip" not in install["run"]
+    # This job can push to gh-pages, so it never restores a dependency cache that
+    # other default-branch workflows could have written.
+    for step in steps:
+        assert "actions/cache" not in step.get("uses", "")
+        assert "setup-uv" not in step.get("uses", "")
 
 
 def expression(text: str, context: dict) -> bool:

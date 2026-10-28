@@ -20,6 +20,7 @@ from skillevaluator.evidence import evidence_ref_identity
 from skillevaluator.tier3.eval_core.codex_tool_call_normalizer import (
     atif_content_has_text,
     atif_content_text,
+    normalized_tool_call_error_flag,
     normalized_tool_call_is_error,
 )
 from skillevaluator.tier3.eval_core.codex_tool_call_normalizer import (
@@ -1062,8 +1063,10 @@ def extract_tool_calls_as_dicts(traj: dict[str, Any]) -> list[dict[str, Any]]:
                 "action_input": tc.get("arguments") or {},
                 "observation": _tool_call_observation(step, tc),
             }
-            if normalized_tool_call_is_error(step, tc):
-                call["is_error"] = True
+            # Keep Harbor's explicit success flag too: Claude Code results that
+            # exited 0 carry no exit status line.
+            if (is_error := normalized_tool_call_error_flag(step, tc)) is not None:
+                call["is_error"] = is_error
             if status := tc.get("_atif_normalization_status"):
                 call["normalization_status"] = status
             if status := tc.get("_atif_observation_status"):

@@ -42,7 +42,8 @@ All notable changes to SkillEvaluator are documented in this file.
 - Tier 3 security grading preserves ordinary nested `/tmp` cleanup, including
   child operands with trailing slashes, unless the current or an earlier
   execution action contains recognized symlink-creation syntax (`ln -s`,
-  `cp -s`, `os.symlink`, or `fs.symlink`/`fs.symlinkSync`). With that evidence,
+  `cp -s`, `os.symlink`, `Path.symlink_to`, literal Python subprocess argv
+  launching `ln`/`cp`, or `fs.symlink`/`fs.symlinkSync`). With that evidence,
   both graders withhold nested-cleanup exemptions and report critical
   destructive-command findings with a security score of 0.0; unlinking a
   final leaf remains exempt. This conservative signal applies across the
@@ -52,7 +53,14 @@ All notable changes to SkillEvaluator are documented in this file.
   and unresolved or `xargs`-supplied deletion targets remain flagged. Searches,
   script arguments, and unexecuted heredoc data do not supply link evidence;
   Python and Node call syntax is inspected only in executable inline source
-  or a recognized program supplied directly through standard input.
+  or a recognized program supplied directly through standard input. Comments
+  containing apostrophes do not hide actual link calls. Later and multiple
+  heredocs, `cat` pipelines into interpreters, and common shell startup options
+  retain link detection. Plain `;`, `&&`, `||`, and newline sequences apply
+  evidence in command order, so later link creation does not regrade earlier
+  cleanup in the same call. Loops, functions, traps, background jobs and other
+  compound syntax keep conservative whole-action evidence; unrelated link
+  creation can still affect later nested cleanup and remains a policy tradeoff.
 - Tier 3 security grading no longer grants temporary-cleanup exemptions to
   destructive `rm` commands launched through `xargs`, whose additional targets
   may come from standard input or an argument file. Both graders recognize
@@ -71,6 +79,15 @@ All notable changes to SkillEvaluator are documented in this file.
   redirections, no longer produces false destructive-command findings. Targets
   after heredoc and here-string redirections are still checked; the input word
   of a redirection is not treated as a deletion target.
+  Case-arm/subshell terminators and unrelated comments, ANSI-C literals, or
+  heredoc data no longer remove the cleanup exemption. Command substitutions
+  used as redirection words do not hide later deletion targets. Unquoted
+  `/tmp` deletion targets containing variables, command substitutions, or
+  brace expansions (for example standalone `rm -rf /tmp/build-$$`) no longer
+  get the cleanup exemption because their destinations remain unresolved.
+  Operandless `xargs rm` invocations remain detectable when unrelated syntax
+  or parser budgets prevent a complete parse; the fallback uses a bounded
+  command span to avoid excessive backtracking on long actions.
 - Tier 3 error recovery now scores unrecovered command failures as zero and
   includes them in fault counts and failure verdicts/report reasons. Host and
   bundled verifier detection agree and use a result's execution status when it

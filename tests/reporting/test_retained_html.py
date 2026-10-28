@@ -148,6 +148,44 @@ def test_fixed_relative_ci_links_only():
             HTMLReporter(ci_context={key: value})
 
 
+def test_reporters_share_one_environment_and_compile_each_template_once(payload, monkeypatch):
+    from skillevaluator.reporting import html as html_module
+
+    loads = []
+    original = html_module.PackageLoader.get_source
+
+    def counting(self, environment, template):
+        loads.append(template)
+        return original(self, environment, template)
+
+    monkeypatch.setattr(html_module.PackageLoader, "get_source", counting)
+    HTMLReporter._create_environment.cache_clear()
+    results = retained_results(payload)
+    plain = HTMLReporter(include_timestamp=False)
+    ci = HTMLReporter(include_timestamp=False, title="Other", ci_context={"report_index_url": "../index.html"})
+    assert plain._env is ci._env
+    first = plain.render_all(results)
+    ci.render_all(results)
+    assert plain.render_all(results) == first
+    assert sorted(loads) == ["report.html.j2", "report_ui.css.j2", "report_ui.js.j2"]
+
+
+def test_shared_environment_renders_identically_from_many_threads(payload):
+    from concurrent.futures import ThreadPoolExecutor
+
+    HTMLReporter._create_environment.cache_clear()
+
+    def render(index):
+        context = {"report_index_url": "../index.html"} if index % 2 else None
+        return render_retained_report(payload, skill_name="skill", context=context)
+
+    expected = [render(0), render(1)]
+    HTMLReporter._create_environment.cache_clear()
+    with ThreadPoolExecutor(max_workers=8) as pool:
+        documents = list(pool.map(render, range(32)))
+    assert all(document == expected[index % 2] for index, document in enumerate(documents))
+
+
 def test_not_applicable_and_incomplete_presentation_preserves_gate():
     lint = ValidationResult(validator_name="SCRIPT_LINT", validator_description="Scripts")
     lint.success_details.append(SuccessDetail(check_name="lint", message="No scripts/ or tools/ directory found"))

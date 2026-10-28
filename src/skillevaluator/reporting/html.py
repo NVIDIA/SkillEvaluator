@@ -31,6 +31,7 @@ from collections.abc import Iterator
 from dataclasses import dataclass
 from datetime import UTC, datetime
 from decimal import Decimal, InvalidOperation
+from functools import cache
 from importlib import resources
 from pathlib import Path
 from typing import TYPE_CHECKING, Any, ClassVar
@@ -1371,7 +1372,16 @@ class HTMLReporter(ReporterBase):
         self.ci_context = _validated_ci_context(ci_context)
         self._env = self._create_environment()
 
-    def _create_environment(self) -> Environment:
+    @staticmethod
+    @cache
+    def _create_environment() -> Environment:
+        """Return one shared environment, so each template compiles once per process.
+
+        Compiling report.html.j2 costs far more than rendering it. The loader
+        serves fixed package templates and the filters are pure functions, so
+        reporters with different options can share it. Jinja environments are
+        safe to share between threads once they are configured.
+        """
         loader = PackageLoader("skillevaluator.reporting", "templates")
         environment = Environment(loader=loader, autoescape=True)
         environment.filters["cleanly_skipped"] = is_cleanly_skipped

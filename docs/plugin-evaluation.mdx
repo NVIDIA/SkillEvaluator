@@ -307,11 +307,48 @@ skillevaluator tier3 evaluate-plugin ./my-openclaw-plugin --plugin-load wrapper
 - There is no native OpenClaw Harbor agent adapter in this change.
   `--plugin-load native` refers to the existing Claude Code, Codex or OpenCode
   adapters, not an OpenClaw Gateway. Tier 3 with a dataset evaluates the
-  portable members and records missing runtime coverage; runtime-only plugins
-  without evaluable portable components are skipped explicitly, not passed.
+  portable members and records missing runtime coverage. A runtime-only native
+  OpenClaw plugin without evaluable portable components returns **INCOMPLETE**
+  with exit code 1, not a successful optional skip. Requested JSON, HTML,
+  Markdown and SARIF reports are still written, including unsupported runtime
+  coverage; no agent or plugin runtime is started.
 - SkillEvaluator currently accepts bounded UTF-8 **JSON**, not OpenClaw's
   additional JSON5 syntax. It does not validate all evolving OpenClaw
   metadata or reproduce host-version, activation and configuration checks.
+
+#### Repeating compatibility checks against real plugins
+
+The repository includes a bounded, keyless smoke harness for pristine local
+OpenClaw plugin source trees:
+
+```bash
+uv run --extra tier3 python scripts/ci/smoke_openclaw_plugins.py \
+  --plugin kitchen-sink=/path/to/pristine/kitchen-sink \
+  --plugin discord=/path/to/pristine/openclaw/extensions/discord \
+  --plugin slack=/path/to/pristine/openclaw/extensions/slack \
+  --plugin diffs=/path/to/pristine/openclaw/extensions/diffs \
+  --plugin memory-core=/path/to/pristine/openclaw/extensions/memory-core \
+  --plugin memory-lancedb=/path/to/pristine/openclaw/extensions/memory-lancedb \
+  --iterations 50 --output ./openclaw-smoke.json
+```
+
+Use `git archive` exports without local dependencies or build artifacts. The
+harness checks stable identity, agreement between schema inventory, local
+catalog membership and staged member paths, repeatable findings, and explicit
+unsupported runtime coverage. It preserves skill-schema policy findings in
+its output rather than changing the policy to make input plugins pass. The
+JSON contains relative identities, not absolute host paths. Optional
+`--trace-memory` adds Python allocation profiling with additional overhead.
+
+A smoke run against kitchen-sink at
+`52ff787c7100e490246e76aa4edfaab29666acdd` and the Discord, Slack, diffs,
+memory-core and memory-lancedb plugins from OpenClaw `v2026.10.8`
+(`dc2523e5a5c7a309517fd7fa834add938231d526`) completed 300 repeatable
+pipeline observations. This checks compatibility, not native execution,
+semantic deduplication or agent performance. Kitchen-sink's own deterministic
+`npm run check:runtime` probes are a separate native fixture check, not
+SkillEvaluator runtime-coverage evidence. Live portable evaluation uses the
+normal Tier 3 workflow and must retain both arms and actual trial artifacts.
 
 ### Bundle-reference manifest: `agent_plugin.yaml`
 

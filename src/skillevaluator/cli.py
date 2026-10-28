@@ -4317,6 +4317,14 @@ def evaluate_plugin(
             if prepared.skipped or prepared.package_path is None:
                 if prepared.incomplete_skip:
                     # Declared components exist but none could be evaluated: INCOMPLETE, never exit 0.
+                    # Preserve requested reports even when no Harbor run directory exists.
+                    result = _incomplete_plugin_skip_result(plugin_dir, prepared)
+                    if write_reports:
+                        reports_error = _emit_plugin_run_reports(
+                            result, plugin_dir, report_formats=report_formats, output_dir=output_dir, policy=policy
+                        )
+                        if reports_error is not None:
+                            raise reports_error
                     raise click.ClickException(
                         f"{incomplete_reason(prepared.provenance())} (nothing was evaluated). {prepared.skip_reason}"
                     )

@@ -6,6 +6,10 @@ All notable changes to SkillEvaluator are documented in this file.
 
 ### Added
 
+- A repeatable real-source OpenClaw plugin compatibility smoke under
+  `scripts/ci/smoke_openclaw_plugins.py` checks schema/profile/staged-member
+  agreement and explicit runtime limitations without executing plugin code.
+
 - Native OpenClaw plugin manifests (`openclaw.plugin.json`) are detected across
   the plugin workflows. Tier 1 checks `id`, `configSchema`, declared skill roots
   and native package entrypoint boundaries; Tier 2 compares the declared skills;
@@ -196,6 +200,11 @@ All notable changes to SkillEvaluator are documented in this file.
   Docker setup, and custom-backend and MCP environment controls.
 
 ### Fixed
+
+- Runtime-only native OpenClaw plugins now return INCOMPLETE instead of a
+  successful empty Tier 3 skip. Requested reports are written even when no
+  component could be evaluated and no Harbor run directory was created.
+
 
 - Catalog validation now includes nested and lowercase skill manifests, skips
   generated directories, and stops at skill boundaries to avoid validating

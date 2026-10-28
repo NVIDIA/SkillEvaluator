@@ -248,6 +248,7 @@ class PluginEvalPackage:
     # identity): a run of this package can then never certify the plugin root.
     publication_root: Path | None = dataclass_field(default=None, compare=False, hash=False, repr=False)
     publication_target: dict[str, str] | None = dataclass_field(default=None, compare=False, hash=False, repr=False)
+    native_runtime_unavailable: bool = False
 
     def provenance(self) -> dict[str, Any]:
         """Durable record of what a plugin run did and did NOT evaluate.
@@ -282,13 +283,18 @@ class PluginEvalPackage:
                 or provider_only_mcp
                 or mcp_unsupported_config
                 or status_counts.get("missing")
+                or self.native_runtime_unavailable
             ),
             # Offline classification of declared skill/rule refs (same classifier as Tier 1).
             "dependency_status_counts": status_counts,
             # Whether the loose-parts arm can run (native Claude Code; see loose_parts_error for why not).
             "loose_parts_ready": self.loose_parts_error() is None,
         }
-        # Report-only: unsupported component types are listed here, never gated.
+        if self.native_runtime_unavailable:
+            provenance["execution_incomplete"] = (
+                "Native OpenClaw runtime evaluation is unavailable; no portable skills or runnable MCP servers were evaluated"
+            )
+        # Other unsupported component types remain report-only.
         if self.component_coverage is not None:
             provenance["component_coverage"] = self.component_coverage
         if self.context_cost is not None:
@@ -521,6 +527,7 @@ def prepare_plugin_eval_package(
             mcp_unsupported_config=tuple(mcp_unsupported_config),
             dependency_status_counts=dependency_status_counts,
             skipped=True,
+            native_runtime_unavailable=plugin.location.manifest_type == PLUGIN_OPENCLAW_MANIFEST_TYPE,
             skip_reason=_skip_reason(
                 unresolved_skill_refs,
                 unresolved_rule_refs,

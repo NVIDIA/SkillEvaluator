@@ -2712,6 +2712,54 @@ def test_default_collection_exception_cleans_transient_artifacts(
     assert not (run_dirs[0] / "_harbor-tasks").exists()
 
 
+class _InterruptingReporter(_RecordingReporter):
+    """Deliver Ctrl+C on the coordinator thread once the first agent is running."""
+
+    def __init__(self) -> None:
+        super().__init__()
+        self.interrupted = False
+
+    def emit(self, event: Any) -> None:
+        super().emit(event)
+        if not self.interrupted and event.stage.startswith("agent:") and event.state == "running":
+            self.interrupted = True
+            raise KeyboardInterrupt
+
+
+def test_interrupt_cancels_running_agent_and_never_starts_queued_agents(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    launched: list[str] = []
+    observed_cancellation: list[bool] = []
+
+    def run_agent(**kwargs: Any) -> list[str]:
+        launched.append(kwargs["agent"])
+        cancellation_event = kwargs.get("cancellation_event")
+        # Harbor jobs poll this event; the bounded wait keeps a regression from hanging.
+        observed_cancellation.append(cancellation_event is not None and cancellation_event.wait(10))
+        return []
+
+    # The stub configures max_agents=1, so the second agent waits in the queue.
+    runner, skill = _stub_runner(monkeypatch, tmp_path, run_agent=run_agent)
+    reporter = _InterruptingReporter()
+
+    with pytest.raises(KeyboardInterrupt):
+        runner.run_harbor_eval(
+            skill,
+            ["codex", "opencode"],
+            output_dir=tmp_path / "results",
+            progress_reporter=reporter,
+        )
+
+    assert launched == ["codex"]
+    assert observed_cancellation == [True]
+    events = [(event.stage, event.state, event.detail) for event in reporter.events]
+    assert ("agent:codex", "failed", "interrupted before completion") in events
+    assert ("agent:opencode", "running", "with-skill + baseline") not in events
+    assert events[-1] == ("run-finished", "failed", "Tier 3 evaluation interrupted")
+
+
 def test_runtime_preflight_running_event_precedes_slow_preflight_call(
     monkeypatch: pytest.MonkeyPatch,
     tmp_path: Path,

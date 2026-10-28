@@ -213,6 +213,15 @@ All notable changes to SkillEvaluator are documented in this file.
   output is redirected or the search runs inside `sh -c`. Host and bundled
   scoring agree, while scoped searches and slash-valued patterns retain their
   classification.
+
+- Ctrl+C during `tier3 evaluate` now stops the run. The interrupt reached only
+  the coordinating thread, so running Harbor jobs kept going in their own
+  process groups, agents waiting for a `--max-agents` slot still started, and
+  the command appeared to hang until every job finished. Running jobs are now
+  terminated and reaped as on timeout; queued agents, conditions, and
+  `--stop-on-pass` attempts never start; and progress reports the run as
+  interrupted instead of failed unexpectedly.
+
 - PII email scans recognize all RFC 2606 reserved domains, including their
   subdomains, mixed-case forms, trailing dots, and prose ellipses. A local-part
   boundary prevents quadratic rescanning of long excluded addresses. Ordinary

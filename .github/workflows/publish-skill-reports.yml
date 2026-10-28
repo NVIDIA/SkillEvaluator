@@ -50,6 +50,7 @@ jobs:
       pr_number: ${{ steps.publish.outputs.pr_number }}
       is_current: ${{ steps.publish.outputs.is_current }}
       skipped: ${{ steps.publish.outputs.skipped }}
+      committed: ${{ steps.publish.outputs.committed }}
     steps:
       - name: Validate trusted tool identity
         env:
@@ -100,6 +101,7 @@ jobs:
           git -C site config user.email '41898282+github-actions[bot]@users.noreply.github.com'
           # Rebuild against the newest history after a concurrent writer wins.
           # Every run is retained; a busy deployment cannot discard its report.
+          committed=false
           for attempt in 1 2 3 4 5; do
             publisher/.venv/bin/python publisher/ci/publish_reports.py
             git -C site add .
@@ -108,6 +110,7 @@ jobs:
             fi
             git -C site commit -m "Record skill scan $REPORT_RUN_ID"
             if git -C site push origin HEAD:gh-pages; then
+              committed=true
               break
             fi
             if [ "$attempt" -eq 5 ]; then
@@ -117,6 +120,7 @@ jobs:
             git -C site reset --hard origin/gh-pages
             git -C site clean -fd
           done
+          echo "committed=$committed" >> "$GITHUB_OUTPUT"
           cat "$OUTPUT_DIR/summary.md" >> "$GITHUB_STEP_SUMMARY"
       - name: Retain feedback for the comment job
         if: steps.publish.outputs.skipped != 'true'
@@ -128,7 +132,13 @@ jobs:
           retention-days: 14
   deploy:
     needs: prepare
-    if: needs.prepare.outputs.skipped != 'true'
+    # A skipped (stale) publication never deploys. Otherwise skip only an automatic first
+    # attempt that committed nothing new. Manual runs and re-runs always deploy, so a re-run
+    # after a failed deploy still publishes.
+    if: >-
+      needs.prepare.outputs.skipped != 'true' &&
+      (needs.prepare.outputs.committed == 'true' || github.event_name == 'workflow_dispatch' ||
+      github.run_attempt != '1')
     runs-on: ubuntu-24.04
     timeout-minutes: 10
     concurrency:
@@ -159,9 +169,10 @@ jobs:
   comment:
     needs: [prepare, deploy]
     if: >-
-      always() && needs.prepare.result == 'success' &&
+      always() && needs.prepare.result == 'success' && needs.prepare.outputs.skipped != 'true' &&
       needs.prepare.outputs.pr_number != '' && needs.prepare.outputs.is_current == 'true' &&
-      needs.deploy.result == 'success'
+      (needs.deploy.result == 'success' ||
+      (needs.deploy.result == 'skipped' && needs.prepare.outputs.committed == 'false'))
     runs-on: ubuntu-24.04
     timeout-minutes: 10
     concurrency:

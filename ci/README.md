@@ -234,6 +234,14 @@ are unit tested separately; only a run against a real image establishes runtime
 proof. The script does not publish an image, modify a remote repository or
 trigger a GitHub workflow.
 
+## Image layout
+
+`ci/Dockerfile.tier1` is a multi-stage build. The build stages install the
+locked environments with uv. The runtime stage copies only the three virtual
+environments, Gitleaks, `ci/` and the license files; uv, its cache and the
+source tree are not in the published image. Scanner layers come before any
+SkillEvaluator source, so a source edit rebuilds only the small project layer.
+
 ## Updating scanner locks
 
 `ci/requirements/*.in` records direct scanner inputs; the corresponding `.txt`

@@ -7,8 +7,11 @@ import importlib.util
 import io
 import json
 import os
+import re
 import shutil
 import subprocess
+import threading
+import time
 import zipfile
 from pathlib import Path
 from subprocess import CompletedProcess
@@ -22,6 +25,8 @@ MODULE_PATH = Path(__file__).parents[2] / "ci" / "run_tier1.py"
 SPEC = importlib.util.spec_from_file_location("ci_run_tier1", MODULE_PATH)
 runner = importlib.util.module_from_spec(SPEC)
 SPEC.loader.exec_module(runner)
+# Upper bound for cross-thread waits; generous for loaded CI runners.
+WAIT = 60
 
 
 def skill(workspace, path):
@@ -31,7 +36,7 @@ def skill(workspace, path):
     return directory
 
 
-def payload(passed=True, status="passed", incomplete=None):
+def payload(passed=True, status="passed", incomplete=None, findings=1):
     results = [
         ValidationResult(
             validator_name=f"Tier 1 fixture validator {index + 1}",
@@ -41,13 +46,13 @@ def payload(passed=True, status="passed", incomplete=None):
     ]
     for result in results:
         result.metadata["gating"] = {"tier": 1, "blocking": True}
-    if not passed:
+    for number in range(0 if passed else findings):
         results[0].add_finding(
             Finding(
                 category="SCHEMA",
                 severity="high",
                 check_name="fixture_failure",
-                message="Fixture validation failed",
+                message="Fixture validation failed" + (f" ({number + 1})" if number else ""),
                 file_path="SKILL.md",
             )
         )
@@ -56,12 +61,20 @@ def payload(passed=True, status="passed", incomplete=None):
     return json.loads(JSONReporter(include_timestamp=False).render_all(results))
 
 
+def report_dir(output: Path) -> str:
+    """Name the skill report directory behind the private scanner directory the runner passes."""
+    match = re.fullmatch(r"skillevaluator-private-(skill-[0-9]{3})-.+", output.name)
+    assert match, output.name
+    return match.group(1)
+
+
 def fake_cli(responses, calls):
+    # Responses follow skill order, not call order: skills may run in parallel.
     def invoke(argv, **kwargs):
         calls.append((argv, kwargs))
-        exit_code, report = responses[len(calls) - 1]
-        kwargs["stdout"].write(b"::error::untrusted scanner text\n")
         output = Path(argv[argv.index("-o") + 1])
+        exit_code, report = responses[int(report_dir(output).removeprefix("skill-")) - 1]
+        kwargs["stdout"].write(b"::error::untrusted scanner text\n")
         if report is not None:
             (output / "skillevaluator-tier1.json").write_text(json.dumps(report), encoding="utf-8")
         return CompletedProcess(argv, exit_code)
@@ -203,7 +216,7 @@ def test_all_skills_run_after_failure_and_scanner_stdout_is_not_printed(tmp_path
     assert "::error::" not in capsys.readouterr().out
     assert "::error::" in (reports / "skill-001" / "stdout.log").read_text()
     assert "--no-llm" in calls[0][0]
-    assert calls[0][1]["env"]["HOME"] == "/tmp/evaluator-home"
+    assert calls[0][1]["env"]["HOME"].startswith("/tmp/evaluator-home/worker-")
     # The CLI writes no HTML; the native renderer supplies each skill page.
     assert calls[0][0][calls[0][0].index("-r") + 1] == "json,markdown,sarif"
     for child in ("skill-001", "skill-002"):
@@ -361,8 +374,8 @@ def test_invalid_json_is_reported_and_later_skills_still_run(tmp_path):
 
     def invoke(argv, **kwargs):
         completed = original(argv, **kwargs)
-        if len(calls) == 1:
-            output = Path(argv[argv.index("-o") + 1])
+        output = Path(argv[argv.index("-o") + 1])
+        if report_dir(output) == "skill-001":
             (output / "skillevaluator-tier1.json").write_text("not json", encoding="utf-8")
         return completed
 
@@ -382,14 +395,16 @@ def test_process_start_error_does_not_skip_later_skills(tmp_path):
 
     def invoke(argv, **kwargs):
         calls.append(argv)
-        if len(calls) == 1:
-            raise OSError("untrusted failure text")
         output = Path(argv[argv.index("-o") + 1])
+        if report_dir(output) == "skill-001":
+            raise OSError("untrusted failure text")
         (output / "skillevaluator-tier1.json").write_text(json.dumps(payload()), encoding="utf-8")
         return CompletedProcess(argv, 0)
 
     assert runner.run(workspace, reports, {"SKILL_PATHS": "skills"}, execute=invoke) == 1
     assert len(calls) == 2
+    summary = json.loads((reports / "summary.json").read_text())
+    assert [row["passed"] for row in summary["skills"]] == [False, True]
 
 
 def test_static_run_does_not_receive_ambient_model_credentials():
@@ -598,6 +613,7 @@ def test_invalid_report_urls_fail_before_scanning_and_keep_diagnostics(tmp_path,
 
 
 def test_completed_results_survive_timeout_and_unstarted_skills_stay_incomplete(tmp_path):
+    # One worker pins the sequential order: each result is saved before the next skill starts.
     workspace = tmp_path / "workspace"
     for name in ("a", "b", "c"):
         skill(workspace, f"skills/{name}")
@@ -615,7 +631,7 @@ def test_completed_results_survive_timeout_and_unstarted_skills_stay_incomplete(
         assert "INCOMPLETE" in (reports / "summary.md").read_text()
         raise subprocess.TimeoutExpired(argv, kwargs["timeout"])
 
-    assert runner.run(workspace, reports, {}, execute=execute) == 1
+    assert runner.run(workspace, reports, {"SCAN_WORKERS": "1"}, execute=execute) == 1
     summary = json.loads((reports / "summary.json").read_text())
     assert summary["passed"] == 1 and summary["incomplete"] == 2
     assert "time limit" in summary["skills"][1]["error"]
@@ -659,3 +675,224 @@ def test_relative_annotation_location_is_confined_to_skill(capsys, path, expecte
         assert f"file={expected},line=7" in command
     else:
         assert "file=" not in command and "line=" not in command
+
+
+def parallel_cli(responses, calls, *, before=None):
+    """Fake CLI for concurrent runs; ``before(name)`` runs inside the call."""
+    lock = threading.Lock()
+
+    def invoke(argv, **kwargs):
+        output = Path(argv[argv.index("-o") + 1])
+        name = report_dir(output)
+        with lock:
+            calls.append((name, dict(kwargs["env"])))
+        if before:
+            before(name)
+        exit_code, report = responses[name]
+        kwargs["stdout"].write(b"::error::untrusted scanner text\n")
+        (output / "skillevaluator-tier1.json").write_text(json.dumps(report), encoding="utf-8")
+        return CompletedProcess(argv, exit_code)
+
+    return invoke
+
+
+def scan_outputs(reports):
+    names = ["summary.json", "summary.md", "details.md", "pr-comment.md", "index.html"]
+    names += sorted(path.relative_to(reports).as_posix() for path in reports.glob("skill-*/skillevaluator-tier1.html"))
+    return {name: (reports / name).read_text() for name in names}
+
+
+def test_parallel_scan_matches_sequential_rows_logs_annotations_and_reports(tmp_path, capsys):
+    workspace = tmp_path / "workspace"
+    names = [f"skills/s{index}" for index in range(1, 7)]
+    for name in names:
+        skill(workspace, name)
+    failing = {"skill-002", "skill-003", "skill-005"}
+    # Three failing skills with four findings each exceed the 10-annotation budget.
+    responses = {
+        f"skill-{index:03d}": (1, payload(False, "failed", findings=4))
+        if f"skill-{index:03d}" in failing
+        else (0, payload())
+        for index in range(1, 7)
+    }
+    environment = {"SKILL_PATHS": "skills", "GITHUB_ACTIONS": "true"}
+    outputs, logs, finished = {}, {}, {}
+    for workers in ("1", "4"):
+        order = finished[workers] = []
+        done = {name: threading.Event() for name in responses}
+
+        def before(name, workers=workers, order=order, done=done):
+            if workers != "1" and name == "skill-001":
+                # Finish skill 1 last so completion order differs from skill order.
+                assert done["skill-002"].wait(WAIT)
+            order.append(name)
+            done[name].set()
+
+        reports = tmp_path / f"reports-{workers}"
+        result = runner.run(
+            workspace,
+            reports,
+            {**environment, "SCAN_WORKERS": workers},
+            execute=parallel_cli(responses, [], before=before),
+        )
+        assert result == 1
+        outputs[workers] = scan_outputs(reports)
+        logs[workers] = [line for line in capsys.readouterr().out.splitlines() if "at a time" not in line]
+    assert finished["1"] == sorted(responses)
+    assert finished["4"].index("skill-002") < finished["4"].index("skill-001")
+    assert logs["1"] == logs["4"]
+    assert outputs["1"] == outputs["4"]
+    annotations = [line for line in logs["4"] if line.startswith("::error")]
+    assert len(annotations) == 10
+    assert all("file=skills/s2/SKILL.md" in line or "file=skills/s3/SKILL.md" in line for line in annotations[:8])
+    headers = [line for line in logs["4"] if line.startswith("SkillEvaluator: evaluating skill")]
+    assert headers == [
+        f"SkillEvaluator: evaluating skill {index} of 6: {json.dumps(name)}" for index, name in enumerate(names, 1)
+    ]
+
+
+def test_default_scan_runs_four_skills_at_once(tmp_path, capsys):
+    workspace = tmp_path / "workspace"
+    for index in range(5):
+        skill(workspace, f"skills/s{index}")
+    responses = {f"skill-{index:03d}": (0, payload()) for index in range(1, 6)}
+    barrier = threading.Barrier(4, timeout=WAIT)
+    lock = threading.Lock()
+    state = {"active": 0, "peak": 0, "calls": 0}
+
+    def before(name):
+        with lock:
+            state["calls"] += 1
+            state["active"] += 1
+            state["peak"] = max(state["peak"], state["active"])
+            first_wave = state["calls"] <= 4
+        if first_wave:
+            barrier.wait()
+        with lock:
+            state["active"] -= 1
+
+    calls = []
+    assert runner.run(workspace, tmp_path / "reports", {}, execute=parallel_cli(responses, calls, before=before)) == 0
+    assert state["peak"] == 4 and len(calls) == 5
+    assert "SkillEvaluator: scanning 5 skills, up to 4 at a time." in capsys.readouterr().out
+
+
+def test_one_worker_runs_skills_strictly_one_at_a_time(tmp_path):
+    workspace = tmp_path / "workspace"
+    for index in range(3):
+        skill(workspace, f"skills/s{index}")
+    reports = tmp_path / "reports"
+    responses = {f"skill-{index:03d}": (0, payload()) for index in range(1, 4)}
+    seen = []
+
+    def before(name):
+        # The previous skill's result is saved before this one starts.
+        seen.append(json.loads((reports / "summary.json").read_text())["passed"])
+
+    assert (
+        runner.run(workspace, reports, {"SCAN_WORKERS": "1"}, execute=parallel_cli(responses, [], before=before)) == 0
+    )
+    assert seen == [0, 1, 2]
+
+
+def test_each_worker_gets_its_own_home_and_temporary_directory(tmp_path):
+    workspace = tmp_path / "workspace"
+    for index in range(4):
+        skill(workspace, f"skills/s{index}")
+    audit = tmp_path / "audit-tmp"
+    audit.mkdir()
+    responses = {f"skill-{index:03d}": (0, payload()) for index in range(1, 5)}
+    barrier = threading.Barrier(2, timeout=WAIT)
+    pairs = []
+
+    def before(name):
+        barrier.wait()
+        pairs.append(name)
+
+    calls = []
+    environment = {"SCAN_WORKERS": "2", "TMPDIR": str(audit)}
+    assert (
+        runner.run(workspace, tmp_path / "reports", environment, execute=parallel_cli(responses, calls, before=before))
+        == 0
+    )
+    assert len(calls) == 4
+    homes = {env["HOME"] for _, env in calls}
+    assert homes == {"/tmp/evaluator-home/worker-1", "/tmp/evaluator-home/worker-2"}
+    for _, env in calls:
+        worker = env["HOME"].rsplit("-", 1)[1]
+        assert env["TMPDIR"] == str(audit / f"skillevaluator-worker-{worker}")
+        assert Path(env["HOME"]).is_dir() and Path(env["TMPDIR"]).is_dir()
+    # Calls 1-2 and 3-4 ran together, each pair on two different workers.
+    assert calls[0][1]["HOME"] != calls[1][1]["HOME"] and calls[2][1]["HOME"] != calls[3][1]["HOME"]
+
+
+def test_concurrent_timeout_keeps_finished_results_and_starts_no_more_skills(tmp_path, capsys):
+    workspace = tmp_path / "workspace"
+    for name in "abcde":
+        skill(workspace, f"skills/{name}")
+    reports = tmp_path / "reports"
+    now = [0.0]
+    second_started, first_timed_out = threading.Event(), threading.Event()
+    calls = []
+
+    def execute(argv, **kwargs):
+        output = Path(argv[argv.index("-o") + 1])
+        calls.append(report_dir(output))
+        if report_dir(output) == "skill-001":
+            assert second_started.wait(WAIT)
+            now[0] = runner.SCAN_TIMEOUT_SECONDS + 1
+            first_timed_out.set()
+            raise subprocess.TimeoutExpired(argv, kwargs["timeout"])
+        second_started.set()
+        # Skill 2 was already running when the budget ran out; its result counts.
+        assert first_timed_out.wait(WAIT)
+        (output / "skillevaluator-tier1.json").write_text(json.dumps(payload()), encoding="utf-8")
+        return CompletedProcess(argv, 0)
+
+    environment = {"SCAN_WORKERS": "2"}
+    assert runner.run(workspace, reports, environment, execute=execute, clock=lambda: now[0]) == 1
+    assert sorted(calls) == ["skill-001", "skill-002"]
+    summary = json.loads((reports / "summary.json").read_text())
+    assert (summary["passed"], summary["incomplete"]) == (1, 4)
+    rows = summary["skills"]
+    assert "time limit" in rows[0]["error"] and rows[1]["passed"] is True
+    assert all("Not evaluated" in row["error"] for row in rows[2:])
+    output = capsys.readouterr().out
+    assert 'evaluating skill 2 of 5: "skills/b"' in output and "evaluating skill 3" not in output
+    assert "Scan time limit reached; this skill did not finish." in output
+    assert "3 skills were not started" in output
+
+
+def test_checkpoint_saves_a_later_skill_before_an_earlier_one_finishes(tmp_path):
+    workspace = tmp_path / "workspace"
+    skill(workspace, "skills/a")
+    skill(workspace, "skills/b")
+    reports = tmp_path / "reports"
+    responses = {"skill-001": (0, payload()), "skill-002": (0, payload())}
+    snapshots = []
+
+    def before(name):
+        if name != "skill-001":
+            return
+        deadline = time.monotonic() + WAIT
+        while time.monotonic() < deadline:
+            rows = json.loads((reports / "summary.json").read_text())["skills"]
+            if rows[1]["passed"]:
+                snapshots.append(rows)
+                return
+            time.sleep(0.01)
+
+    assert (
+        runner.run(workspace, reports, {"SCAN_WORKERS": "2"}, execute=parallel_cli(responses, [], before=before)) == 0
+    )
+    assert len(snapshots) == 1 and snapshots[0][0]["passed"] is False
+
+
+@pytest.mark.parametrize("value", ["0", "17", "four", "-1", "2.5", "٣"])
+def test_invalid_scan_worker_count_fails_before_scanning(tmp_path, value):
+    workspace = tmp_path / "workspace"
+    skill(workspace, "skills/a")
+    reports, calls = tmp_path / "reports", []
+    assert runner.run(workspace, reports, {"SCAN_WORKERS": value}, execute=fake_cli([], calls)) == 1
+    assert not calls
+    assert "SCAN_WORKERS" in json.loads((reports / "summary.json").read_text())["error"]

@@ -23,6 +23,7 @@ mutable image tag or an unreviewed branch reference.
 | `llm` | `false`; static Tier 1 requires no model key |
 | `artifact-name` | Keep `skill-evaluator-tier1` for the optional publisher |
 | `report-base-url` | Optional own Pages URL, only after hosted publication is configured |
+| `scan-workers` | `4`; skills scanned at once, from 1 to 16. `1` scans one skill at a time |
 
 The runtime discovers exact-case `SKILL.md` files, rejects unsafe paths and
 symlinks, deduplicates overlapping roots and bounds each invocation to 100
@@ -30,6 +31,10 @@ skills. This is a selection cap, not a runtime guarantee: scans have a bounded
 time budget and retain completed results with explicit incomplete entries for
 unprocessed skills. Do not interpret a changed-skill selection as a new
 full-catalog pass.
+Up to `scan-workers` skills are scanned at once, each with its own home and
+temporary directory. Logs, annotations and report rows keep skill order. When
+the time budget runs out, running scans stop and skills not yet started are
+reported as not evaluated.
 With no affected skills, the check succeeds with **No skills changed** and
 records that validation did not run. Fully removed skills are listed as
 deleted/skipped. A removed manifest with tracked files left in its skill

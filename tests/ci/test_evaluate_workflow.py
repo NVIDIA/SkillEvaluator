@@ -13,10 +13,12 @@ import yaml
 ROOT = Path(__file__).parents[2]
 
 
+def _workflow():
+    return yaml.load((ROOT / ".github/workflows/evaluate-skills.yml").read_text(), Loader=yaml.BaseLoader)
+
+
 def _job():
-    return yaml.load((ROOT / ".github/workflows/evaluate-skills.yml").read_text(), Loader=yaml.BaseLoader)["jobs"][
-        "tier1"
-    ]
+    return _workflow()["jobs"]["tier1"]
 
 
 def test_pr_history_mode_and_attempt_artifact_wiring():
@@ -33,6 +35,7 @@ def test_pr_history_mode_and_attempt_artifact_wiring():
     )
     assert env["LLM_API_KEY"] == "${{ inputs.llm && secrets.LLM_API_KEY || '' }}"
     assert env["CALLER_WORKFLOW_SHA"] == "${{ github.workflow_sha }}"
+    assert env["SCAN_WORKERS"] == "${{ inputs.scan-workers }}"
     upload = next(step for step in job["steps"] if step.get("uses", "").startswith("actions/upload-artifact@"))
     assert upload["with"]["name"] == "${{ inputs.artifact-name }}-attempt-${{ github.run_attempt }}"
     assert int(job["timeout-minutes"]) > 50
@@ -69,6 +72,7 @@ def test_real_workflow_shell_preserves_container_boundary_and_secret_selection(t
     assert args[args.index("--cap-drop") + 1] == "ALL"
     assert args[args.index("--security-opt") + 1] == "no-new-privileges"
     assert any("dst=/workspace,readonly" in arg for arg in args)
+    assert args[args.index("SCAN_WORKERS") - 1] == "--env"
     mounts = [args[index + 1] for index, arg in enumerate(args) if arg == "--tmpfs"]
     assert len(mounts) == 2 and all("noexec" in mount for mount in mounts)
     harness = (ROOT / "ci/smoke_image.py").read_text()
@@ -96,3 +100,8 @@ def test_smoke_container_executes_with_the_same_hardening(tmp_path, monkeypatch)
     assert args[args.index("--security-opt") + 1] == "no-new-privileges"
     environment = [args[index + 1] for index, arg in enumerate(args) if arg == "--env"]
     assert {entry.split("=", 1)[0] for entry in environment}.issuperset({"SCAN_MODE", "DIFF_BASE_SHA", "DIFF_HEAD_SHA"})
+
+
+def test_scan_worker_input_defaults_to_four_parallel_scans():
+    workers = _workflow()["on"]["workflow_call"]["inputs"]["scan-workers"]
+    assert (workers["type"], workers["default"]) == ("number", "4")

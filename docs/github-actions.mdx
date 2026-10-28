@@ -55,7 +55,9 @@ shared files outside the configured roots are not inferred dependencies. Use
 `scan-mode: all` when those changes should trigger a full evaluation.
 Tier 2 and Tier 3 are not run. The 100-skill limit is a selection limit, not a
 runtime guarantee. Scans have a time budget and preserve completed results plus
-explicit incomplete entries if it is exhausted.
+explicit incomplete entries if it is exhausted. The workflow scans up to four
+skills at once. Set `scan-workers` (1 to 16) to change this; `1` scans one skill
+at a time. Results and logs keep the same skill order either way.
 
 ## Read the result
 

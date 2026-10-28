@@ -34,6 +34,10 @@ on:
         description: Optional GitHub Pages report site for stable links
         type: string
         default: ''
+      scan-workers:
+        description: Skills scanned at once, 1 to 16; 1 scans one skill at a time
+        type: number
+        default: 4
     secrets:
       LLM_API_KEY:
         required: false
@@ -77,6 +81,7 @@ jobs:
           LLM_MODEL: ${{ inputs.llm-model }}
           LLM_API_KEY: ${{ inputs.llm && secrets.LLM_API_KEY || '' }}
           REPORT_BASE_URL: ${{ inputs.report-base-url }}
+          SCAN_WORKERS: ${{ inputs.scan-workers }}
           REPORT_RUN_URL: ${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}
           REPORT_COMMIT: ${{ github.event.pull_request.head.sha || github.sha }}
           CALLER_WORKFLOW_SHA: ${{ github.workflow_sha }}
@@ -99,7 +104,7 @@ jobs:
             --mount "type=bind,src=$GITHUB_WORKSPACE,dst=/workspace,readonly" \
             --mount "type=bind,src=$RUNNER_TEMP/skill-reports,dst=/reports" \
             --env SKILL_PATHS --env LLM_ENABLED --env LLM_PROVIDER --env LLM_MODEL "${llm_secret_args[@]}" \
-            --env SCAN_MODE --env DIFF_BASE_SHA --env DIFF_HEAD_SHA \
+            --env SCAN_MODE --env DIFF_BASE_SHA --env DIFF_HEAD_SHA --env SCAN_WORKERS \
             --env CALLER_WORKFLOW_SHA \
             --env GITHUB_ACTIONS --env REPORT_IMAGE --env REPORT_URL --env REPORT_RUN_URL --env REPORT_COMMIT \
             "$IMAGE"

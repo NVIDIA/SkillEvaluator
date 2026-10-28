@@ -15,6 +15,11 @@ All notable changes to SkillEvaluator are documented in this file.
   the locked Semgrep, SkillSpector and SkillEvaluator environments, Gitleaks,
   `ci/` and the license files. A release builds it without cached layers and
   pushes the image it smoke-tested.
+- The reusable Tier 1 workflow scans up to four skills at once. The
+  `scan-workers` input (1 to 16) changes this, and `1` scans one skill at a
+  time. Each worker gets its own home and temporary directory. Logs,
+  annotations and report rows keep skill order, and skills not started when the
+  scan time budget runs out are still reported as not evaluated.
 - `--quality-config PATH` on `validate`, `quality-check`, and `tier1` loads the
   deterministic quality check's expected Markdown headings from a YAML file
   instead of the built-in list. Each `expected_headers` entry sets a `heading`

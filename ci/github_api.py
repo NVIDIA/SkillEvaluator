@@ -27,14 +27,19 @@ class _NoRedirect(urllib.request.HTTPRedirectHandler):
         return None
 
 
-def bounded_read(response, limit: int, error: type[Exception] = ValueError) -> bytes:
+def bounded_read(
+    response,
+    limit: int,
+    error: type[Exception] = ValueError,
+    message: str = "The GitHub API response exceeds its size limit.",
+) -> bytes:
     """Read at most ``limit`` bytes, rejecting a larger declared or actual body."""
     declared = response.headers.get("Content-Length")
     if declared and (not declared.isdigit() or int(declared) > limit):
-        raise error("The downloaded artifact or API response exceeds its size limit.")
+        raise error(message)
     payload = response.read(limit + 1)
     if len(payload) > limit:
-        raise error("The downloaded artifact or API response exceeds its size limit.")
+        raise error(message)
     return payload
 
 

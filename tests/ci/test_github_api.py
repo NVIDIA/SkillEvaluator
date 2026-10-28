@@ -108,6 +108,22 @@ def test_declared_oversized_api_response_is_rejected_before_reading(cls, error, 
     assert client(cls, body=b'{"a": 1}').get("/repos/owner/consumer") == {"a": 1}
 
 
+@pytest.mark.parametrize(("cls", "error"), TOOLS)
+def test_oversized_api_response_names_only_the_api_response(cls, error):
+    with pytest.raises(error) as raised:
+        client(cls, body=b"{}", headers={"Content-Length": str(16 * 1024 * 1024 + 1)}).get("/repos/owner/consumer")
+    # The comment helper never downloads artifacts, so its diagnostic must not mention one.
+    assert str(raised.value) == "The GitHub API response exceeds its size limit."
+
+
+@pytest.mark.parametrize("headers", [{"Content-Length": "9"}, {}])
+def test_oversized_artifact_download_names_the_artifact(headers, monkeypatch):
+    monkeypatch.setattr(publisher, "MAX_TOTAL_BYTES", 8)
+    with pytest.raises(publisher.PublicationError) as raised:
+        client(publisher.GitHubAPI, body=b"123456789", headers=headers).download_artifact(456)
+    assert str(raised.value) == "The downloaded artifact exceeds its size limit."
+
+
 def test_publisher_api_responses_use_the_smaller_shared_cap():
     assert publisher.github_api.MAX_API_BYTES == 16 * 1024 * 1024 < publisher.MAX_FILE_BYTES
 

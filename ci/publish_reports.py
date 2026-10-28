@@ -73,6 +73,9 @@ def allowed_download_url(url: str) -> bool:
     )
 
 
+DOWNLOAD_TOO_LARGE = "The downloaded artifact exceeds its size limit."
+
+
 class GitHubAPI(github_api.GitHubAPI):
     error = PublicationError
     json_error = "A required JSON document is invalid."
@@ -81,7 +84,7 @@ class GitHubAPI(github_api.GitHubAPI):
     def download_artifact(self, artifact_id: int) -> bytes:
         try:
             with self._request("GET", f"/repos/{self.repository}/actions/artifacts/{artifact_id}/zip") as response:
-                return github_api.bounded_read(response, MAX_TOTAL_BYTES, PublicationError)
+                return github_api.bounded_read(response, MAX_TOTAL_BYTES, PublicationError, DOWNLOAD_TOO_LARGE)
         except urllib.error.HTTPError as exc:
             if exc.code not in {301, 302, 303, 307, 308}:
                 raise
@@ -93,7 +96,7 @@ class GitHubAPI(github_api.GitHubAPI):
             request = urllib.request.Request(url, headers={"User-Agent": self.user_agent})
             try:
                 with self.opener.open(request, timeout=github_api.TIMEOUT_SECONDS) as response:
-                    return github_api.bounded_read(response, MAX_TOTAL_BYTES, PublicationError)
+                    return github_api.bounded_read(response, MAX_TOTAL_BYTES, PublicationError, DOWNLOAD_TOO_LARGE)
             except urllib.error.HTTPError as exc:
                 if exc.code not in {301, 302, 303, 307, 308}:
                     raise

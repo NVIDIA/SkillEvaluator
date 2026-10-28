@@ -119,8 +119,11 @@ function openFinding(id) {
     target.scrollIntoView({ behavior: reduceMotion ? 'auto' : 'smooth', block: 'center' });
     target.setAttribute('tabindex', '-1');
     target.focus({ preventScroll: true });
+    target.classList.add('finding-flash');
+    setTimeout(function() { target.classList.remove('finding-flash'); }, 2000);
     return false;
 }
-document.addEventListener('DOMContentLoaded', function() {
-    if (/^#[fc]-/.test(location.hash)) openFinding(decodeURIComponent(location.hash.slice(1)));
+// Run after load so the browser's own jump to the fragment does not override it.
+window.addEventListener('load', function() {
+    if (/^#[fc]-/.test(location.hash)) setTimeout(function() { openFinding(decodeURIComponent(location.hash.slice(1))); }, 0);
 });

@@ -2871,3 +2871,13 @@ class HTMLReporter(ReporterBase):
 
     def get_file_extension(self) -> str:
         return ".html"
+
+
+def render_logo(uid: str, size: int = 28, label: str = "SkillEvaluator logo") -> str:
+    """Return the inline SkillEvaluator logo for pages built outside report.html.j2.
+
+    ``uid`` keeps the logo's ids unique on the page. An empty ``label`` marks
+    the logo as decorative, for use next to visible "SkillEvaluator" text.
+    """
+    environment = Environment(loader=PackageLoader("skillevaluator.reporting", "templates"), autoescape=True)
+    return str(environment.get_template("logo.svg.j2").module.se_logo(uid, size, label))

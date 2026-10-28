@@ -182,15 +182,21 @@ def select_changed_skills(workspace: Path, roots: str, base: str, head: str) -> 
     configured = skill_roots(workspace, roots)
     if not isinstance(base, str) or not isinstance(head, str) or not _SHA.fullmatch(base) or not _SHA.fullmatch(head):
         raise SelectionError("Changed selection requires full DIFF_BASE_SHA and DIFF_HEAD_SHA commit IDs.")
-    top = _git(workspace, "rev-parse", "--show-toplevel").decode().strip()
+    requested_base, requested_head = base.lower(), head.lower()
+    # One process resolves everything. The trailing "--" makes Git reject any
+    # argument that is not a revision instead of reading it as a path.
+    resolved = _git(
+        workspace, "rev-parse", "--show-toplevel", base + "^{commit}", head + "^{commit}", "HEAD", "--"
+    ).decode()
+    lines = resolved.split("\n")
+    if len(lines) != 6 or lines[4:] != ["--", ""]:
+        raise SelectionError("Git could not resolve the requested selection; verify checkout history and commits.")
+    top, base, head, checked_out = lines[:4]
     if Path(top).resolve(strict=True) != workspace:
         raise SelectionError("The workspace must be the root of its Git checkout.")
-    requested_base, requested_head = base.lower(), head.lower()
-    base = _git(workspace, "rev-parse", "--verify", base + "^{commit}").decode().strip()
-    head = _git(workspace, "rev-parse", "--verify", head + "^{commit}").decode().strip()
     if base != requested_base or head != requested_head:
         raise SelectionError("DIFF_BASE_SHA and DIFF_HEAD_SHA must identify commits, not tag objects.")
-    if _git(workspace, "rev-parse", "HEAD").decode().strip() != head:
+    if checked_out != head:
         raise SelectionError("The checked-out HEAD does not match DIFF_HEAD_SHA; no scan was substituted.")
     base_ref = base
     try:

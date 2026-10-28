@@ -262,3 +262,37 @@ def test_containing_set_matches_pairwise_directory_matching(seed):
     containing = selector._containing(paths)
     for directory in directories:
         assert (directory in containing) is any(_reference_within(item, directory) for item in paths), directory
+
+
+def test_commits_and_checkout_are_resolved_with_one_rev_parse(repository, monkeypatch):
+    repo, base = repository
+    (repo / "skills/second/SKILL.md").write_text("# Changed\n")
+    head = commit(repo)
+    calls = []
+    real_git = selector._git
+
+    def record(workspace, *arguments):
+        calls.append(arguments)
+        return real_git(workspace, *arguments)
+
+    monkeypatch.setattr(selector, "_git", record)
+    assert select(repo, base, head)["selected"] == ["skills/second"]
+    assert [arguments[0] for arguments in calls].count("rev-parse") == 1
+
+
+def test_annotated_tag_object_is_not_accepted_as_a_commit(repository):
+    repo, base = repository
+    git(repo, "tag", "-a", "fixture-tag", "-m", "fixture tag")
+    tag = git(repo, "rev-parse", "fixture-tag")
+    assert tag != base
+    with pytest.raises(selector.SelectionError, match="not tag objects"):
+        select(repo, tag, base)
+
+
+def test_revision_shaped_file_name_is_not_read_as_a_path(repository):
+    repo, head = repository
+    missing = "1" * 40
+    # An untracked file outside the skill roots, named like the requested revision.
+    (repo / f"{missing}^{{commit}}").write_text("not a revision\n")
+    with pytest.raises(selector.SelectionError, match="could not resolve"):
+        select(repo, missing, head)

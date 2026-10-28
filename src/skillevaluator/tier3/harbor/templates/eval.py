@@ -9154,7 +9154,11 @@ def _tool_searches_root(action: str, args: dict, text: str, depth: int = 0) -> b
             commands[-1].append(token)
     for command in commands:
         assignments: dict[str, str] = {}
-        index = _unwrap_shell_command(command, 0, assignments)
+        index = 0
+        while index < len(command) and (assignment := _SHELL_ASSIGNMENT_RE.match(command[index])):
+            assignments[assignment.group(1)] = assignment.group(2)
+            index += 1
+        index = _unwrap_shell_command(command, index, assignments)
         if index is None or index >= len(command):
             continue
         name = _shell_executable(_resolved_shell_arg(command[index], assignments))

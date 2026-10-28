@@ -97,7 +97,10 @@ Pages is not an inherent requirement for GitHub PR comments.
    evaluator workflow. A differently named manual LLM workflow is not accepted
    automatically. The publisher reads only the attempt's
    `skill-evaluator-tier1-evidence-attempt-N` artifact. A scan from an
-   evaluator revision that does not upload it is rejected; rerun that scan.
+   evaluator revision that does not upload it cannot be published. Re-running
+   that scan reuses its commit and pinned evaluator. Instead, update the scan
+   caller to a release that uploads the artifact, approve that evaluator SHA
+   and the new caller blob (steps 5 and 6), and start a new scan.
 5. Set `trusted-evaluator-shas` to the reviewed evaluator workflow commit. Set
    `tools-ref` to the reviewed immutable commit containing the publisher helpers;
    generated release files supply both. `tools-repository` defaults to

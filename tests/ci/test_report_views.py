@@ -499,6 +499,38 @@ def failed_result(
     }
 
 
+def test_each_result_status_is_computed_once_for_all_views(tmp_path, monkeypatch):
+    summary, data = example(tmp_path, result=failed_result())
+    align_verdict(summary, data, "failed")
+    (tmp_path / "skill-001/skillevaluator-tier1.json").write_text(json.dumps(data))
+    calls = []
+    original = views._status
+    monkeypatch.setattr(views, "_status", lambda result: calls.append(result["validator"]) or original(result))
+    views.render_reports(tmp_path, summary, {})
+    assert calls == ["Schema"]
+    assert "First blocking problem" in (tmp_path / "summary.md").read_text()
+    assert "| Schema | FAIL |" in (tmp_path / "details.md").read_text()
+
+
+def test_given_models_are_rendered_without_rereading_or_changing_them(tmp_path, monkeypatch):
+    summary, data = example(tmp_path, result=failed_result())
+    align_verdict(summary, data, "failed")
+    (tmp_path / "skill-001/skillevaluator-tier1.json").write_text(json.dumps(data))
+    errors = {"skill-001": "Native report could not be rendered: example"}
+    views.render_reports(tmp_path, summary, {}, render_errors=errors)
+    expected = {name: (tmp_path / name).read_text() for name in ("summary.md", "details.md", "pr-comment.md")}
+    models = views.read_skill_models(tmp_path, summary)
+    before = copy.deepcopy(models)
+
+    def unexpected_read(directory):
+        raise AssertionError("render_reports re-read a report it was given")
+
+    monkeypatch.setattr(views, "_read", unexpected_read)
+    views.render_reports(tmp_path, summary, {}, render_errors=errors, models=models)
+    assert {name: (tmp_path / name).read_text() for name in expected} == expected
+    assert models == before
+
+
 def test_compact_all_pass_is_concise_and_rich_evidence_stays_in_details(tmp_path):
     from markdown_it import MarkdownIt
 

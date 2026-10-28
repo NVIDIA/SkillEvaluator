@@ -129,8 +129,10 @@ def render_native_reports(reports: Path, summary: dict, context: dict) -> dict[s
             # The publisher intentionally discards rejected child JSON, so its
             # directory may not exist yet. Create only this validated leaf.
             (reports / row["report_dir"]).mkdir(exist_ok=True)
-        directory = views._directory(reports, row.get("report_dir"))
-        data, issue = views._read(directory)
+    # Read each skill's JSON once; the Markdown views reuse these parsed reports.
+    skills = views.read_skill_models(reports, summary)
+    for skill in skills:
+        row, directory, data, issue = skill["row"], skill["directory"], skill["data"], skill["issue"]
         status = views._skill_status(row, data, issue)
         native_url = None
         if row.get("overall_status") == "error":
@@ -172,7 +174,7 @@ def render_native_reports(reports: Path, summary: dict, context: dict) -> dict[s
         quality = views._items(data.get("quality_summary"))
         models.append((row, data, issue, status, native_url, views._dict(quality[0]) if len(quality) == 1 else {}))
     # Retain GitHub's concise native surface and detailed text evidence.
-    views.render_reports(reports, summary, context, render_errors=render_errors)
+    views.render_reports(reports, summary, context, render_errors=render_errors, models=skills)
     h = views._h
     passed = sum(item[3] == "PASS" for item in models)
     incomplete = sum(item[3] in {"INCOMPLETE", "ERROR", "UNKNOWN"} for item in models)

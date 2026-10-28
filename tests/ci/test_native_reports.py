@@ -222,6 +222,23 @@ def test_csp_does_not_trust_code_found_in_final_render(tmp_path, injection):
         constrain_native_html(document.replace("</body>", injection + "</body>"))
 
 
+def test_each_skill_report_is_read_once_for_all_views(tmp_path, monkeypatch):
+    from ci import native_reports
+
+    summary, _ = _write_fixture(tmp_path, failed=True)
+    shutil.copytree(tmp_path / "skill-001", tmp_path / "skill-002")
+    summary = _summary([summary["skills"][0], {**summary["skills"][0], "report_dir": "skill-002", "path": "skills/b"}])
+    reads = []
+    original = native_reports.views._read
+    monkeypatch.setattr(
+        native_reports.views, "_read", lambda directory: reads.append(directory.name) or original(directory)
+    )
+    render_native_reports(tmp_path, summary, {})
+    assert sorted(reads) == ["skill-001", "skill-002"]
+    assert "Bad name" in (tmp_path / "skill-002/skillevaluator-tier1.html").read_text()
+    assert "2 skills · 0 passed · 2 failed · 0 incomplete" in (tmp_path / "details.md").read_text()
+
+
 def test_failed_and_incomplete_counts_agree_across_all_surfaces(tmp_path):
     summary, _ = _write_fixture(tmp_path, failed=True)
     shutil.copytree(tmp_path / "skill-001", tmp_path / "skill-002")

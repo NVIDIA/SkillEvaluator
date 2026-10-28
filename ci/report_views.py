@@ -140,6 +140,19 @@ def _read(directory: Path | None) -> tuple[dict, str | None]:
         return {}, "JSON report could not be read; evidence is incomplete."
 
 
+def read_skill_models(reports: Path, summary: dict) -> list[dict]:
+    """Read each skill's retained JSON once, so every view of a run shares one parse."""
+    models = []
+    for index, row in enumerate(_items(summary.get("skills")), 1):
+        row = _dict(row)
+        directory = _directory(reports, row.get("report_dir"))
+        data, issue = _read(directory)
+        models.append(
+            {"row": row, "directory": directory, "data": data, "issue": issue, "anchor": f"skill-{index:03d}"}
+        )
+    return models
+
+
 def _links(
     directory: Path | None, report_url: str | None = None, *, anchor: str | None = None
 ) -> list[tuple[str, str]]:
@@ -417,11 +430,15 @@ def _first_action(model: dict) -> tuple[str, str, str]:
             "",
             "Inspect the failed workflow step and report artifacts, then rerun the scan.",
         )
-    failed = [r for r in model["results"] if _status(r) in {"FAIL", "INCOMPLETE", "UNKNOWN"}]
-    failed.sort(key=lambda r: _status(r) == "FAIL")
-    for result in failed:
+    failed = [
+        (result, outcome)
+        for result, outcome in zip(model["results"], model["statuses"], strict=True)
+        if outcome in {"FAIL", "INCOMPLETE", "UNKNOWN"}
+    ]
+    failed.sort(key=lambda item: item[1] == "FAIL")
+    for result, outcome in failed:
         legacy = _dict(result.get("legacy"))
-        if _status(result) in {"INCOMPLETE", "UNKNOWN"}:
+        if outcome in {"INCOMPLETE", "UNKNOWN"}:
             errors = _items(legacy.get("errors"))
             warnings = _items(legacy.get("warnings"))
             reason = errors[0] if errors else result.get("skip_reason")
@@ -480,7 +497,7 @@ def _compact_summary(models: list[dict], summary: dict, context: dict, *, status
     outcomes = [
         "INCOMPLETE"
         if model["skill_status"] == "PASS"
-        and any(_status(r) in {"FAIL", "INCOMPLETE", "UNKNOWN"} for r in model["results"])
+        and any(outcome in {"FAIL", "INCOMPLETE", "UNKNOWN"} for outcome in model["statuses"])
         else model["skill_status"]
         for model in models
     ]
@@ -553,12 +570,21 @@ def _compact_summary(models: list[dict], summary: dict, context: dict, *, status
     return _bounded(lines, SUMMARY_LIMIT, footer)
 
 
-def render_reports(reports: Path, summary: dict, context: dict, *, render_errors: dict[str, str] | None = None) -> None:
+def render_reports(
+    reports: Path,
+    summary: dict,
+    context: dict,
+    *,
+    render_errors: dict[str, str] | None = None,
+    models: list[dict] | None = None,
+) -> None:
     """Write a short Actions summary, detailed Markdown and a PR comment.
 
     Optional context keys: run_url, commit, image, report_url, llm_enabled, ci_conclusion.
     report_url is the hosted directory containing index.html and the artifacts.
     All report payloads are displayed as text, never executable markup.
+    models is the read_skill_models() result when the caller has already read
+    the reports; it is not modified.
     """
     reports = Path(reports)
     if reports.is_symlink() or not reports.is_dir():
@@ -568,27 +594,18 @@ def render_reports(reports: Path, summary: dict, context: dict, *, render_errors
         return
     report_url = _url(context.get("report_url"))
     run_url = _url(context.get("run_url"))
-    models = []
-    for index, row in enumerate(_items(summary.get("skills")), 1):
-        row = _dict(row)
-        directory = _directory(reports, row.get("report_dir"))
-        data, issue = _read(directory)
+    models = [dict(model) for model in (read_skill_models(reports, summary) if models is None else models)]
+    for model in models:
+        row = model["row"]
         if row.get("overall_status") == "error" or (render_errors or {}).get(row.get("report_dir")):
-            issue = (render_errors or {}).get(row.get("report_dir")) or row.get("error") or "Report unavailable"
-            data = {}
-        results = [_dict(item) for item in _items(data.get("results"))]
-        quality = [_dict(item) for item in _items(data.get("quality_summary"))]
-        models.append(
-            {
-                "row": row,
-                "directory": directory,
-                "data": data,
-                "issue": issue,
-                "results": results,
-                "quality": quality,
-                "anchor": f"skill-{index:03d}",
-            }
-        )
+            model["issue"] = (
+                (render_errors or {}).get(row.get("report_dir")) or row.get("error") or "Report unavailable"
+            )
+            model["data"] = {}
+        model["results"] = [_dict(item) for item in _items(model["data"].get("results"))]
+        # Each result's display status is computed once and reused by every view below.
+        model["statuses"] = [_status(result) for result in model["results"]]
+        model["quality"] = [_dict(item) for item in _items(model["data"].get("quality_summary"))]
     for model in models:
         model["skill_status"] = _skill_status(model["row"], model["data"], model["issue"])
         if (
@@ -645,8 +662,7 @@ def render_reports(reports: Path, summary: dict, context: dict, *, render_errors
     comment_header = list(markdown)
     attention = []
     for model in models:
-        for result in model["results"]:
-            outcome = _status(result)
+        for result, outcome in zip(model["results"], model["statuses"], strict=True):
             if outcome not in {"FAIL", "INCOMPLETE", "UNKNOWN"}:
                 continue
             findings = _items(result.get("findings"))
@@ -719,9 +735,9 @@ def render_reports(reports: Path, summary: dict, context: dict, *, render_errors
                 "| --- | --- | --- | --- | --- |",
             ]
         )
-        for result in model["results"]:
+        for result, outcome in zip(model["results"], model["statuses"], strict=True):
             numbers = _dict(result.get("summary"))
-            name, outcome = result.get("validator"), _status(result)
+            name = result.get("validator")
             block.append(
                 f"| {_md(name)} | {outcome} | {_md(numbers.get('checks_performed'))} | {_md(numbers.get('errors'))} | {_md(numbers.get('warnings'))} |"
             )
@@ -735,7 +751,11 @@ def render_reports(reports: Path, summary: dict, context: dict, *, render_errors
                 if details.spent():
                     break
                 markdown.append(f"**{_md(label)}:** {_md(value)}")
-        failures = [result for result in model["results"] if _status(result) in {"FAIL", "INCOMPLETE", "UNKNOWN"}]
+        failures = [
+            result
+            for result, outcome in zip(model["results"], model["statuses"], strict=True)
+            if outcome in {"FAIL", "INCOMPLETE", "UNKNOWN"}
+        ]
         for result in failures:
             findings = _items(result.get("findings"))
             errors = _items(_dict(result.get("legacy")).get("errors"))

@@ -743,7 +743,7 @@ metadata:
 
 # Corporate Email Test
 
-Contact: support@corp.invalid for help.
+Contact: support@corp.company.com for help.
 """)
 
         validator = SecurityValidator()
@@ -764,14 +764,14 @@ Contact: support@corp.invalid for help.
 name: public-author-skill
 description: A public skill with contributor metadata and a body contact leak
 metadata:
-  author: Example Contributor <contributor@contributors.invalid>
+  author: Example Contributor <contributor@contributors.company.com>
 ---
 
 # Public Author Skill
 
 ## Instructions
 
-Contact contributor@contributors.invalid for private support.
+Contact contributor@contributors.company.com for private support.
 
 ## Examples
 
@@ -785,7 +785,7 @@ Run the documented workflow.
         assert not [finding for finding in schema_result.findings if finding.check_name == "author_format"]
         email_findings = [finding for finding in pii_result.findings if finding.check_name == "emails"]
         assert len(email_findings) == 1
-        assert email_findings[0].line_content == "Contact contributor@contributors.invalid for private support."
+        assert email_findings[0].line_content == "Contact contributor@contributors.company.com for private support."
 
     @pytest.mark.parametrize("newline", ["\n", "\r\n"])
     def test_bom_prefixed_frontmatter_author_email_not_flagged_in_security_scan(
@@ -801,14 +801,14 @@ Run the documented workflow.
                 "name: bom-public-author-skill",
                 "description: A public skill with contributor metadata and a body contact leak",
                 "metadata:",
-                "  author: Example Contributor <contributor@contributors.invalid>",
+                "  author: Example Contributor <contributor@contributors.company.com>",
                 "---",
                 "",
                 "# Public Author Skill",
                 "",
                 "## Instructions",
                 "",
-                "Contact contributor@contributors.invalid for private support.",
+                "Contact contributor@contributors.company.com for private support.",
                 "",
                 "## Examples",
                 "",
@@ -824,7 +824,7 @@ Run the documented workflow.
         assert not [finding for finding in schema_result.findings if finding.check_name == "author_format"]
         email_findings = [finding for finding in pii_result.findings if finding.check_name == "emails"]
         assert len(email_findings) == 1
-        assert email_findings[0].line_content == "Contact contributor@contributors.invalid for private support."
+        assert email_findings[0].line_content == "Contact contributor@contributors.company.com for private support."
 
     def test_unrelated_home_roots_not_flagged(self, tmp_path: Path):
         """Unrelated /home roots stay unflagged without an organization allowlist."""
@@ -976,7 +976,7 @@ metadata:
 
 # Service Account Test
 
-Contact: deploy-bot@automation.invalid
+Contact: deploy-bot@automation.company.com
 Workspace: /home/buildbot/releases/current/
 """)
 

@@ -2,6 +2,7 @@
 # SPDX-License-Identifier: Apache-2.0
 """Guard the Tier 1 image layout. Building the image is left to CI."""
 
+import fnmatch
 import re
 import shlex
 from pathlib import Path
@@ -92,3 +93,29 @@ def test_source_edits_rebuild_only_the_last_layers():
     checks = next(index for index, (_, arguments) in enumerate(runtime) if "semgrep --version" in arguments)
     shared = [index for index, (_, arguments) in enumerate(runtime) if arguments.startswith("--from=build ")]
     assert max([*shared, checks]) < overlay
+
+
+def _dockerignored(path: str) -> bool:
+    lines = (ROOT / ".dockerignore").read_text(encoding="utf-8").splitlines()
+    patterns = [line.strip().rstrip("/") for line in lines if line.strip() and not line.startswith("#")]
+    parts = Path(path).parts
+    prefixes = ["/".join(parts[:count]) for count in range(1, len(parts) + 1)]
+    return any(fnmatch.fnmatchcase(prefix, pattern) for pattern in patterns for prefix in prefixes)
+
+
+def test_build_context_drops_unused_trees_but_keeps_image_inputs():
+    copied = [
+        source
+        for keyword, arguments in _instructions()
+        if keyword == "COPY" and not arguments.startswith("--from=")
+        for source in arguments.split()[:-1]
+    ]
+    # The repository's root Dockerfile also builds the wheel from this context.
+    package = ["pyproject.toml", "README.md", "src/skillevaluator/reporting/templates/report.html.j2"]
+    for path in copied + package:
+        assert (ROOT / path).exists(), path
+        assert not _dockerignored(path), path
+    unused = ["tests/ci/test_image_build.py", "docs/github-actions.mdx", "scripts", "fern", ".github", "CHANGELOG.md"]
+    for path in unused:
+        assert (ROOT / path).exists(), path
+        assert _dockerignored(path), path

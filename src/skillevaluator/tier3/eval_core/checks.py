@@ -70,7 +70,7 @@ _SECRET_PATTERNS = [
 ]
 
 _DESTRUCTIVE_PATTERNS = [
-    (re.compile(r"\brm\s+-[^\n;`]*[rf][^\n;`]*\s+(?!/tmp\b|/tmp/)[^\n;`]+"), "rm -rf"),
+    (re.compile(r"\brm\s+-[^\n;`]*[rf][^\n;`]*\s+[^\n;`]+"), "rm -rf"),
     (re.compile(r"\bmkfs(?:\.|\s)"), "mkfs"),
     (re.compile(r"\bdd\s+if="), "dd if="),
     (re.compile(r"\bchmod\s+-?r?\s*777\s+/"), "chmod 777 /"),
@@ -1770,6 +1770,253 @@ def _allowed_workspace_skills(
     return {name for name in allowed if name}
 
 
+def _rm_group_end(text: str, start: int) -> int | None:
+    """Find a substitution's closing parenthesis without expanding its output."""
+    depth = 1
+    quote: str | None = None
+    index = start + 1
+    word_start = True
+    while index < len(text):
+        char = text[index]
+        if char == "\\" and quote != "'":
+            index += 2
+            word_start = False
+            continue
+        if quote:
+            if char == quote:
+                quote = None
+        elif char in "'\"":
+            quote = char
+        elif char == "#" and word_start:
+            end = text.find("\n", index)
+            index = len(text) if end < 0 else end
+            continue
+        elif char == "(":
+            depth += 1
+        elif char == ")":
+            depth -= 1
+            if depth == 0:
+                return index
+        word_start = char in " \t\n" or char in _SHELL_METACHARS
+        index += 1
+    return None
+
+
+def _rm_shell_tokens(command_text: str) -> tuple[list[str], list[str]] | None:
+    """Keep rm operands separate from comments and backtick command payloads."""
+    text = command_text.replace("\r\n", "\n")
+    normalized: list[str] = []
+    payloads: list[str] = []
+    # Data in a heredoc has its own quoting rules and must not break the
+    # surrounding shell. Keep broad rm inspection of script/patch bodies,
+    # but tokenize each body separately only when it contains a candidate.
+    spans = _heredoc_body_spans(text, "bash") if "<<" in text else []
+    if spans is None:
+        return None
+    pieces: list[str] = []
+    previous = 0
+    for start, end in spans:
+        pieces.extend((text[previous:start], "\n"))
+        body = text[start + 1 : end]
+        if re.search(r"\brm\s+-", body):
+            payloads.append(body)
+        previous = end
+    pieces.append(text[previous:])
+    text = "".join(pieces)
+    quote: str | None = None
+    word_start = True
+    nested_syntax = False
+    index = 0
+    while index < len(text):
+        char = text[index]
+        if char == "\\" and quote != "'" and index + 1 < len(text):
+            # A continued line does not end a word or a shell comment boundary.
+            if text[index + 1] != "\n":
+                normalized.append(text[index : index + 2])
+                word_start = False
+            index += 2
+            continue
+        if quote is None and char == "$" and text[index + 1 : index + 2] == "'":
+            # ANSI-C quoted output stays unresolved. Its contents can still
+            # contain script text, but unrelated literals do not taint rm.
+            end = index + 2
+            while end < len(text) and text[end] != "'":
+                end += 2 if text[end] == "\\" else 1
+            if end >= len(text):
+                return None
+            payloads.append(text[index + 2 : end])
+            normalized.append("${__rm_ansi_c}")
+            word_start = False
+            index = end + 1
+            continue
+        if quote != "'" and text.startswith("$(", index):
+            end = _rm_group_end(text, index + 1)
+            if end is None:
+                return None
+            payloads.append(text[index + 2 : end])
+            # A substitution is one shell word even when it contains spaces
+            # or parentheses. Redirections consume the whole word, while rm
+            # operands keep unknown output and never gain an exemption.
+            normalized.append("${__rm_substitution}")
+            word_start = False
+            index = end + 1
+            continue
+        if (quote != "'" and text.startswith("${", index)) or (
+            quote is None and text.startswith("((", index)
+        ):
+            nested_syntax = True
+        if char == "`" and quote != "'":
+            if nested_syntax:
+                return None
+            end = index + 1
+            while end < len(text):
+                if text[end] == "\\":
+                    end += 2
+                elif text[end] == "`":
+                    break
+                else:
+                    end += 1
+            if end >= len(text):
+                return None
+            payloads.append(text[index + 1 : end])
+            # Inspect the payload separately, but keep its unknown output in
+            # any enclosing rm operand instead of granting a /tmp exemption.
+            normalized.append("${__rm_substitution}")
+            word_start = False
+            index = end + 1
+            continue
+        if quote:
+            normalized.append(char)
+            if char == quote:
+                quote = None
+        elif char in "'\"":
+            quote = char
+            normalized.append(char)
+            word_start = False
+        elif char == "#" and word_start:
+            # Expansions and arithmetic have their own quoting/comment rules.
+            # Keep an ambiguous hash as data instead of discarding possibly
+            # executable text or failing unrelated cleanup in the action.
+            if nested_syntax:
+                normalized.append(char)
+                word_start = False
+                index += 1
+                continue
+            end = text.find("\n", index)
+            index = len(text) if end < 0 else end
+            continue
+        elif char == "\n":
+            normalized.append(" ; ")
+            word_start = True
+        else:
+            normalized.append(char)
+            word_start = char in " \t" or char in _SHELL_METACHARS
+        index += 1
+
+    lexer = shlex.shlex(
+        _keep_attached_descriptors(_mark_quoted_syntax("".join(normalized))),
+        posix=True,
+        punctuation_chars=True,
+    )
+    lexer.whitespace_split = True
+    lexer.commenters = ""
+    try:
+        return list(lexer), payloads
+    except ValueError:
+        return None
+
+
+def _rm_targets_fallback(command_text: str, _depth: int) -> bool:
+    """Confine parse failures and budgets to candidate deletion commands.
+
+    Raw separators can cut a quoted word or substitution short; that fragment
+    remains unresolved and keeps a finding. Continued lines are joined first
+    so a deletion target on the next physical line cannot disappear.
+    """
+    text = command_text.replace("\\\r\n", "").replace("\\\n", "")
+    for match in re.finditer(r"\brm\s+-", text):
+        start = max(text.rfind(char, 0, match.start()) for char in "\n;&|") + 1
+        tail = text[start : start + 65_537]
+        separator = re.search(r"[\n;&|]", tail)
+        fragment = tail[:separator.start()] if separator else tail
+        if len(fragment) > 65_536 or fragment == command_text:
+            return True
+        if _rm_targets_outside_tmp(fragment, _depth + 1):
+            return True
+    return False
+
+
+def _rm_targets_outside_tmp(command_text: str, _depth: int = 0) -> bool:
+    """Limit the cleanup exemption to rm operands that remain inside /tmp.
+
+    The destructive-command regex deliberately also visits script and patch
+    text. Inspect its shell words without executing them, including quoted
+    shell payloads, while keeping that broad detection behavior.
+    """
+    if _depth > 3:
+        return True
+    if len(command_text) > 65_536:
+        return _rm_targets_fallback(command_text, _depth)
+    tokenized = _rm_shell_tokens(command_text)
+    if tokenized is None:
+        return _rm_targets_fallback(command_text, _depth)
+    tokens, payloads = tokenized
+    if len(tokens) > 4096:
+        return _rm_targets_fallback(command_text, _depth)
+    for payload in payloads:
+        if re.search(r"\brm\s+-", payload) and _rm_targets_outside_tmp(payload, _depth + 1):
+            return True
+    for index, token in enumerate(tokens):
+        if re.search(r"\brm\s+-", token) and _rm_targets_outside_tmp(token, _depth + 1):
+            return True
+        if not re.search(r"\brm$", token):
+            continue
+
+        destructive = False
+        options_ended = False
+        operands: list[str] = []
+        skip_next = False
+        for raw_arg in tokens[index + 1 :]:
+            if re.fullmatch(r"[;&|(){}]+", raw_arg):
+                break
+            if skip_next:
+                skip_next = False
+                continue
+            # Redirections consume one input word, not the remaining rm targets.
+            if _is_heredoc_redirect(raw_arg) or _REDIRECTION_WORD_RE.fullmatch(raw_arg):
+                skip_next = True
+                continue
+            arg = raw_arg
+            if arg.startswith(_QUOTED_SYNTAX_MARK) and not arg.startswith(_QUOTED_SYNTAX_MARK * 2):
+                arg = arg[1:]
+            arg = arg.replace(_QUOTED_SYNTAX_MARK * 2, _QUOTED_SYNTAX_MARK)
+            if not options_ended and arg == "--":
+                options_ended = True
+            elif not options_ended and arg.startswith("-") and arg != "-":
+                destructive |= arg in {"--recursive", "--force"} or (
+                    not arg.startswith("--") and any(flag in arg[1:] for flag in "rRf")
+                )
+            else:
+                operands.append(arg)
+
+        if not destructive:
+            continue
+        # Nested script strings can end before a dynamic target is appended.
+        if not operands:
+            return True
+        for operand in operands:
+            # Variables and braces can introduce new path components; glob
+            # expansion followed by parents cannot be normalized statically.
+            if any(char in operand for char in "$`{") or (
+                any(char in operand for char in "*?[") and ".." in operand.split("/")
+            ):
+                return True
+            path = posixpath.normpath(operand)
+            if path != "/tmp" and not path.startswith("/tmp/"):
+                return True
+    return False
+
+
 def check_security(
     tool_calls: list[dict[str, Any]],
     agent_text: str = "",
@@ -1849,7 +2096,7 @@ def check_security(
 
         if is_exec_tool:
             for pattern, label in _DESTRUCTIVE_PATTERNS:
-                if pattern.search(action_text_lower):
+                if pattern.search(action_text_lower) and (label != "rm -rf" or _rm_targets_outside_tmp(action_text)):
                     findings.append(
                         _security_finding(
                             finding_type="destructive_command",

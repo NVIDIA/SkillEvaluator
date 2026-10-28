@@ -659,15 +659,15 @@ def _current_routes(api, repository: str, run: dict) -> tuple[list[str], str]:
 
 def _history_index(site: Path, history: list[dict]) -> None:
     try:
-        from native_reports import _STYLE
+        from native_reports import _STYLE, brand_html, verdict_word
     except ModuleNotFoundError:
-        from ci.native_reports import _STYLE
+        from ci.native_reports import _STYLE, brand_html, verdict_word
 
     links = []
     for record in sorted(history, key=lambda item: (item["run_id"], item["run_attempt"]), reverse=True):
         url = html.escape(record["report_url"], quote=True)
         label = html.escape(
-            f"Run {record['run_id']} / attempt {record['run_attempt']} — {record['overall_status']} — {record['head_sha'][:12]}"
+            f"Run {record['run_id']} / attempt {record['run_attempt']} · {verdict_word(record['overall_status'])} · {record['head_sha'][:12]}"
         )
         links.append(f'<li><a href="{url}">{label}</a></li>')
     latest = []
@@ -683,7 +683,7 @@ def _history_index(site: Path, history: list[dict]) -> None:
         '<!doctype html><html lang="en"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1">'
         "<meta http-equiv=\"Content-Security-Policy\" content=\"default-src 'none'; style-src 'unsafe-inline'; base-uri 'none'; form-action 'none'\">"
         f"<title>Report history · SkillEvaluator</title><style>{_STYLE}li{{padding:14px 0;line-height:1.6;overflow-wrap:anywhere}}ul{{padding-left:18px}}</style></head><body>"
-        '<aside class="rail"><div class="brand"><span class="mark"></span>SkillEvaluator</div><p>Evaluation reports</p><a href="#history" aria-current="page">Report history</a></aside><main>'
+        f'<aside class="rail">{brand_html("se-logo-history")}<p>Evaluation reports</p><a href="#history" aria-current="page">Report history</a></aside><main>'
         '<header><p class="eyebrow">Evaluation reports</p><h1>Report history</h1><p class="muted">Open the latest scan or inspect the evidence recorded for a specific commit.</p></header><section><h2>Latest reports</h2><p>'
         + " · ".join(latest)
         + '</p></section><section id="history"><h2>Retained runs</h2><ul>'

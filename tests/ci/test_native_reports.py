@@ -158,8 +158,10 @@ def test_changed_selection_without_work_is_neutral_and_preserves_deleted_directo
     (tmp_path / "summary.json").write_text(raw)
     render_native_reports(tmp_path, summary, {"llm_enabled": True})
     page = (tmp_path / "index.html").read_text()
-    assert 'class="status ">No skills changed</span>' in page
-    assert "Validation did not run." in page
+    # A run with nothing to scan uses the report vocabulary and explains itself once.
+    assert '<span class="status neutral"><span class="sr-only">Verdict: </span>Skipped</span>' in page
+    assert page.count("Validation did not run.") == 1
+    assert "Quality is a content score" not in page
     assert "Tier 1: Not run (no skills selected)" in page
     assert "LLM: Not run" in page
     assert "Deleted skill directories (not scanned)" in page
@@ -182,7 +184,7 @@ def test_skipped_marker_with_inconsistent_evidence_cannot_claim_no_changes(tmp_p
     mutate(summary)
     render_native_reports(tmp_path, summary, {})
     page = (tmp_path / "index.html").read_text()
-    assert 'class="status ">No skills changed</span>' not in page
+    assert "</span>Skipped</span>" not in page
     assert "Validation did not run." not in page
 
 
@@ -269,5 +271,30 @@ def test_failed_and_incomplete_counts_agree_across_all_surfaces(tmp_path):
     for filename in ("summary.md", "details.md", "pr-comment.md"):
         assert "2 skills · 0 passed · 1 failed · 1 incomplete" in (tmp_path / filename).read_text()
     page = (tmp_path / "index.html").read_text()
-    assert "<strong>1</strong><span>Failed</span>" in page
+    assert "<strong>1</strong><span>Changes required</span>" in page
     assert "<strong>1</strong><span>Incomplete</span>" in page
+
+
+def test_index_uses_the_report_vocabulary_logo_and_first_fix(tmp_path):
+    summary, _ = _write_fixture(tmp_path, failed=True)
+    render_native_reports(tmp_path, summary, {})
+    page = (tmp_path / "index.html").read_text()
+    report = (tmp_path / "skill-001/skillevaluator-tier1.html").read_text()
+
+    assert '<span class="status fail"><span class="sr-only">Verdict: </span>Changes required</span>' in page
+    assert '<span class="status fail">Changes required</span>' in page
+    assert 'class="mark"' not in page
+    assert re.search(r'<aside class="rail"><div class="brand"><svg class="se-logo"[^>]*aria-hidden="true"', page)
+    assert "most severe first" not in page
+    # "Needs attention" names the skill report's first fix and links to its card.
+    anchor = re.search(r'href="#(f-[^"]+)" class="fix-link"', report).group(1)
+    assert f'href="skill-001/skillevaluator-tier1.html#{anchor}"' in page
+    assert f'id="{anchor}"' in report
+
+
+def test_index_dark_theme_never_applies_to_print():
+    from ci.native_reports import _STYLE
+
+    assert "@media screen and (prefers-color-scheme:dark)" in _STYLE
+    assert "@media(prefers-color-scheme:dark)" not in _STYLE
+    assert all(int(size) >= 11 for size in re.findall(r"font-size:(\d+)px", _STYLE))

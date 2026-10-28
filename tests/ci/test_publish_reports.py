@@ -1302,3 +1302,24 @@ def test_published_report_preserves_recorded_llm_request(tmp_path, enabled):
         tmp_path / "out",
         render=capture,
     )
+
+
+def test_history_index_uses_the_report_vocabulary_and_logo(tmp_path):
+    def record(run_id, status):
+        return {
+            "run_id": run_id,
+            "run_attempt": 1,
+            "head_sha": f"{run_id:040d}",
+            "report_url": f"https://example.github.io/skills/runs/{run_id}/1/",
+            "overall_status": status,
+        }
+
+    history = [record(1, "passed"), record(2, "failed"), record(3, "incomplete"), record(4, "skipped")]
+    publisher._history_index(tmp_path, history)
+    page = (tmp_path / "index.html").read_text()
+
+    for run_id, word in ((1, "Passed"), (2, "Changes required"), (3, "Incomplete"), (4, "Skipped")):
+        assert f"Run {run_id} / attempt 1 · {word} · " in page
+    assert "— failed —" not in page
+    assert 'class="mark"' not in page
+    assert '<aside class="rail"><div class="brand"><svg class="se-logo"' in page

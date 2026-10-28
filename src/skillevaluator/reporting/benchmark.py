@@ -10,6 +10,7 @@ import re
 import unicodedata
 from collections import Counter
 from datetime import UTC, datetime
+from decimal import ROUND_HALF_UP, Context, Decimal, localcontext
 from pathlib import PurePosixPath, PureWindowsPath
 from typing import TYPE_CHECKING, Any
 
@@ -120,6 +121,9 @@ _PUBLICATION_WWW_PREFIX = re.compile(r"\bwww\.", flags=re.IGNORECASE)
 _TRAILING_PATH_PUNCTUATION = ".,;!?)]}>`'\""
 _LEGACY_AMBIGUOUS_UPLIFT = re.compile(r"\b(?P<score>\d+%)\s+\((?P<change>[+-]\d+%)\)")
 _LEGACY_NUM_HEADER = re.compile(r"\|\s*Dimension\s*\|\s*Num\s*\|", flags=re.IGNORECASE)
+# Score cells round half-up in this isolated context, so a caller's ambient
+# decimal precision or rounding mode cannot change the published numbers.
+_DISPLAY_DECIMAL_CONTEXT = Context(prec=28, rounding=ROUND_HALF_UP)
 
 
 class BenchmarkReporter(ReporterBase):
@@ -451,8 +455,8 @@ class BenchmarkReporter(ReporterBase):
         overall_row = ["Overall"]
         overall_row.extend(
             _score_transition_values(
-                _number(agent.get("baseline")),
-                _number(agent.get("with_skill", agent.get("overall_score"))),
+                agent.get("baseline"),
+                agent.get("with_skill", agent.get("overall_score")),
                 skill_never_activated=_mapping(agent.get("skill_activation")).get("status") == "never_activated",
             )
             for agent in agents.values()
@@ -481,12 +485,14 @@ class BenchmarkReporter(ReporterBase):
                 "",
                 (
                     "**How to read this table:** baseline is the same task attempted without the target skill. "
-                    "Uplift is `skill score - baseline score`, shown in percentage points."
+                    "Scores are rounded to one decimal; threshold-adjacent values use additional precision so "
+                    "their displayed band matches the verdict. Uplift is `skill score - baseline score`, "
+                    "computed from those displayed scores and shown in percentage points."
                 ),
                 "",
                 (
-                    "Example: `47% → 92% (+45 points)` means the skill-assisted run scored 92%, "
-                    "45 percentage points above its 47% no-skill baseline."
+                    "Example: `47.0% → 92.0% (+45.0 points)` means the skill-assisted run scored 92.0%, "
+                    "45.0 percentage points above its 47.0% no-skill baseline."
                 ),
                 "",
             ]
@@ -1154,31 +1160,90 @@ def _agent_dimension(agent: dict[str, Any], dim_id: str) -> dict[str, Any] | Non
 def _score_transition(dimension: dict[str, Any] | None, *, skill_never_activated: bool = False) -> str:
     if not dimension:
         return "Not available"
-    baseline = _number(dimension.get("baseline"))
-    score = _number(dimension.get("with_skill", dimension.get("score")))
-    return _score_transition_values(baseline, score, skill_never_activated=skill_never_activated)
+    return _score_transition_values(
+        dimension.get("baseline"),
+        dimension.get("with_skill", dimension.get("score")),
+        skill_never_activated=skill_never_activated,
+    )
 
 
-def _score_transition_values(
-    baseline: float | None, score: float | None, *, skill_never_activated: bool = False
-) -> str:
-    if score is None:
+def _score_transition_values(baseline: object, score: object, *, skill_never_activated: bool = False) -> str:
+    """Render ``baseline → score (uplift)`` so the visible arithmetic is exact.
+
+    Scores are fractions in [0, 1]. A missing, non-finite, or out-of-range score,
+    or a recorded baseline that is not a valid score, is reported as unavailable
+    rather than clamped or published.
+    """
+    parsed_score = _number(score)
+    if parsed_score is None or not 0 <= parsed_score <= 1:
         return "Not available"
-    skill_label = f"{score:.0%}"
+    parsed_baseline = _number(baseline)
+    if skill_never_activated:
+        # No uplift is shown, so the baseline neither sets the precision nor withholds the score.
+        parsed_baseline = None
+    elif baseline is not None and (parsed_baseline is None or not 0 <= parsed_baseline <= 1):
+        return "Not available"
+    endpoints = (parsed_score,) if parsed_baseline is None else (parsed_baseline, parsed_score)
+    decimal_places = _score_display_decimal_places(*endpoints)
+    displayed_score = _percentage_point_units(parsed_score, decimal_places)
+    skill_label = _format_percentage(displayed_score, decimal_places)
     if skill_never_activated:
         return f"{skill_label} — INCONCLUSIVE: skill never activated; uplift unavailable"
-    if baseline is None:
+    if parsed_baseline is None:
         return f"{skill_label} — baseline not run; uplift unavailable"
-    delta = score - baseline
-    return f"{baseline:.0%} → {skill_label} ({_format_points(delta)})"
+    # Subtract the displayed values, not the raw scores, so a rounding carry can
+    # never publish an uplift that disagrees with the two numbers beside it.
+    displayed_baseline = _percentage_point_units(parsed_baseline, decimal_places)
+    return (
+        f"{_format_percentage(displayed_baseline, decimal_places)} → {skill_label} "
+        f"({_format_points(displayed_score - displayed_baseline, decimal_places)})"
+    )
 
 
-def _format_points(delta: float) -> str:
-    points = delta * 100
-    if math.isclose(points, 0.0, abs_tol=0.05):
-        return "±0 points"
-    sign = "+" if points > 0 else "-"
-    return f"{sign}{abs(points):.0f} points"
+def _score_band(score: float) -> int:
+    """Return the dimension verdict band: 0 for FAIL, 1 for NEUTRAL, 2 for PASS."""
+    if score < DIMENSION_VERDICT_NEUTRAL_THRESHOLD:
+        return 0
+    if score < DIMENSION_VERDICT_PASS_THRESHOLD:
+        return 1
+    return 2
+
+
+def _score_display_decimal_places(*scores: float) -> int:
+    """Return one decimal place, or more when rounding would move a score into another verdict band."""
+    for decimal_places in range(1, 18):
+        scale = 100 * 10**decimal_places
+        if all(
+            _score_band(score) == _score_band(_percentage_point_units(score, decimal_places) / scale)
+            for score in scores
+        ):
+            return decimal_places
+    return 17
+
+
+def _percentage_point_units(score: float, decimal_places: int) -> int:
+    """Round a [0, 1] score half-up to whole units of ``10**-decimal_places`` percentage points."""
+    with localcontext(_DISPLAY_DECIMAL_CONTEXT):
+        scale = Decimal(100 * 10**decimal_places)
+        return int((Decimal(str(score)) * scale).to_integral_value(rounding=ROUND_HALF_UP))
+
+
+def _format_units(value: int, decimal_places: int) -> str:
+    sign = "-" if value < 0 else ""
+    whole, fractional = divmod(abs(value), 10**decimal_places)
+    return f"{sign}{whole}.{fractional:0{decimal_places}d}"
+
+
+def _format_percentage(value: int, decimal_places: int) -> str:
+    return f"{_format_units(value, decimal_places)}%"
+
+
+def _format_points(delta: int, decimal_places: int) -> str:
+    """Format an uplift given in displayed units; an exact zero is shown as ``±0.0 points``."""
+    if delta == 0:
+        return f"±{_format_units(0, decimal_places)} points"
+    sign = "+" if delta > 0 else "-"
+    return f"{sign}{_format_units(abs(delta), decimal_places)} points"
 
 
 def _tier_status(

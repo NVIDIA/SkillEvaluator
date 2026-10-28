@@ -67,6 +67,9 @@ def test_version_two_digest_has_a_stable_known_answer(tmp_path: Path) -> None:
     skill = _skill(tmp_path)
     empty = skill / "empty-author-dir"
     empty.mkdir()
+    # The root's executable bits are part of recipe v2 too; do not inherit
+    # the developer's umask for a platform-independent known-answer fixture.
+    skill.chmod(0o755)
     (skill / "SKILL.md").chmod(0o644)
     (skill / "scripts").chmod(0o755)
     (skill / "scripts" / "run.sh").chmod(0o755)

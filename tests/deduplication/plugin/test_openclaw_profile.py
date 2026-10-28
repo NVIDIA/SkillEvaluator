@@ -240,7 +240,9 @@ def test_relative_plugin_root_and_overlapping_roots_are_deduplicated(
     assert skill.root_relative == "custom/team/skill"
     assert skill.path == Path("plugin/custom/team/skill")
     assert skill.entry is not None
-    assert skill.entry.path == "plugin/custom/team/skill"
+    # Catalog entry paths use native filesystem separators; manifest-relative
+    # identities above remain POSIX on every platform.
+    assert skill.entry.path == str(Path("plugin") / "custom" / "team" / "skill")
     assert budget.entry_count == 1
 
 

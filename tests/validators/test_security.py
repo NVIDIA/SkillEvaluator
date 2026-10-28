@@ -6,6 +6,8 @@
 import json
 import os
 import re
+import subprocess
+import sys
 from pathlib import Path
 from unittest.mock import patch
 
@@ -1060,7 +1062,10 @@ Call us at 555-123-4567 or +1-555-987-6543
         "domain",
         ["example.com", "example.net", "example.org", "test.com", "unit.test", "unit.example", "unit.invalid", "unit.localhost"],
     )
-    @pytest.mark.parametrize("domain_format", ["{domain}", "sub.{domain}", "{domain_upper}", "sub.{domain}."])
+    @pytest.mark.parametrize(
+        "domain_format",
+        ["{domain}", "sub.{domain}", "{domain_upper}", "sub.{domain}.", "{domain}...", "sub.{domain_upper}..."],
+    )
     def test_reserved_domain_emails_are_not_pii(self, tmp_path: Path, domain: str, domain_format: str):
         document = tmp_path / "guide.md"
         domain = domain_format.format(domain=domain, domain_upper=domain.upper())
@@ -1072,9 +1077,12 @@ Call us at 555-123-4567 or +1-555-987-6543
 
     @pytest.mark.parametrize("domain", ["example.com", "example.net", "example.invalid"])
     @pytest.mark.parametrize("fixture_first", [True, False])
-    def test_placeholder_on_same_line_preserves_real_email(self, tmp_path: Path, domain: str, fixture_first: bool):
+    @pytest.mark.parametrize("punctuation", ["", "..."])
+    def test_placeholder_on_same_line_preserves_real_email(
+        self, tmp_path: Path, domain: str, fixture_first: bool, punctuation: str
+    ):
         document = tmp_path / "guide.md"
-        addresses = [f"fixture@{domain}", "contact@company.com"]
+        addresses = [f"fixture@{domain}{punctuation}", "contact@company.com"]
         if not fixture_first:
             addresses.reverse()
         document.write_text("Contact " + " or ".join(addresses) + "\n", encoding="utf-8")
@@ -1103,6 +1111,28 @@ Call us at 555-123-4567 or +1-555-987-6543
 
         assert [finding.metadata["matched_value"] for finding in emails] == [address]
         assert emails[0].severity == Severity.HIGH
+
+    def test_long_placeholder_email_finishes_and_preserves_real_email(self, tmp_path: Path):
+        document = tmp_path / "long-guide.md"
+        document.write_text("x" * 200_000 + "@example.invalid; contact@company.com\n", encoding="utf-8")
+        script = """
+import json
+import sys
+from pathlib import Path
+from skillevaluator.validators.security import SecurityValidator
+result = SecurityValidator().validate_pii_only(Path(sys.argv[1]))
+print(json.dumps([finding.metadata["matched_value"] for finding in result.findings if finding.check_name == "emails"]))
+"""
+        # Isolate the regex so a backtracking regression cannot hang pytest.
+        completed = subprocess.run(
+            [sys.executable, "-c", script, str(document)],
+            capture_output=True,
+            text=True,
+            timeout=30,
+            check=True,
+        )
+
+        assert json.loads(completed.stdout) == ["contact@company.com"]
 
     def test_home_path_exceptions_are_limited_to_portable_paths(self):
         """Home-path handling must not depend on organization-specific roots."""

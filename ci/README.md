@@ -241,6 +241,11 @@ locked environments with uv. The runtime stage copies only the three virtual
 environments, Gitleaks, `ci/` and the license files; uv, its cache and the
 source tree are not in the published image. Scanner layers come before any
 SkillEvaluator source, so a source edit rebuilds only the small project layer.
+The runtime filesystem is read-only, so Python bytecode is compiled at build
+time, including the standard library. The `.pyc` files are hash-based and do
+not embed source timestamps. Installed sources never change inside the image,
+so Python does not re-check them on import. Do not bind-mount replacement
+Python files over single installed modules; rebuild the image instead.
 
 ## Updating scanner locks
 

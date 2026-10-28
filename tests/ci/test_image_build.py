@@ -60,6 +60,17 @@ def test_build_and_runtime_stages_share_one_pinned_base():
     }
 
 
+def test_bytecode_is_compiled_at_build_time_and_never_written_at_runtime():
+    stages = _stages()
+    build_environment = " ".join(_arguments(stages["build"], "ENV")).split()
+    assert {"UV_COMPILE_BYTECODE=1", "PYC_INVALIDATION_MODE=UNCHECKED_HASH"} <= set(build_environment)
+    runtime = stages["runtime"]
+    assert "PYTHONDONTWRITEBYTECODE=1" in " ".join(_arguments(runtime, "ENV")).split()
+    stdlib = [command for command in _arguments(runtime, "RUN") if command.endswith("/usr/local/lib/python3.12")]
+    assert len(stdlib) == 1
+    assert "-m compileall" in stdlib[0] and "--invalidation-mode unchecked-hash" in stdlib[0]
+
+
 def test_source_edits_rebuild_only_the_last_layers():
     stages = _stages()
     build = stages["build"]

@@ -3,7 +3,11 @@
 # the three virtual environments, gitleaks, ci/ and the license files. It has no uv, uv cache or source tree.
 FROM python:3.12-slim-bookworm@sha256:62ed8e07e544e8555c5d93748d5275015136b7f5c52b5e8679b4de339c3779d3 AS build
 
+# The runtime image is read-only, so Python can never cache bytecode there: compile it at install time.
+# Hash-based .pyc files do not embed source mtimes, so unchanged inputs give identical files. Installed
+# sources never change inside the image, so the hashes do not need to be checked on import.
 ENV PIP_NO_INPUT=1 PYTHONDONTWRITEBYTECODE=1 PYTHONUNBUFFERED=1 \
+    UV_COMPILE_BYTECODE=1 PYC_INVALIDATION_MODE=UNCHECKED_HASH \
     UV_NO_CACHE=1 UV_PYTHON_DOWNLOADS=never
 
 RUN apt-get update && apt-get install -y --no-install-recommends ca-certificates curl \
@@ -41,7 +45,7 @@ COPY pyproject.toml uv.lock ./
 RUN uv sync --frozen --no-dev --no-editable --no-install-project --extra security --extra llm
 
 # The project itself goes into /overlay, laid out at its final paths, so a source edit changes one small
-# layer. The console script runs the venv's Python.
+# layer. uv compiles only the files under --prefix, and the console script runs the venv's Python.
 FROM build AS project
 COPY README.md LICENSE NOTICE THIRD_PARTY_NOTICES.md ./
 COPY src ./src
@@ -57,6 +61,8 @@ ENV PIP_NO_INPUT=1 PYTHONDONTWRITEBYTECODE=1 PYTHONUNBUFFERED=1 \
 # git is needed for changed-skill selection. curl and uv stay in the build stage.
 RUN apt-get update && apt-get install -y --no-install-recommends ca-certificates git \
     && rm -rf /var/lib/apt/lists/*
+# The base image ships its standard library without .pyc files. Its own site-packages are unused.
+RUN python -m compileall -q -j 0 --invalidation-mode unchecked-hash -x /site-packages/ /usr/local/lib/python3.12
 
 COPY --from=build /opt/semgrep /opt/semgrep
 COPY --from=build /opt/skillspector /opt/skillspector
@@ -75,7 +81,8 @@ RUN useradd --uid 10001 --create-home --shell /usr/sbin/nologin evaluator \
 COPY --from=project /overlay/ /
 COPY LICENSE NOTICE THIRD_PARTY_NOTICES.md /opt/skillevaluator/
 COPY ci /opt/skillevaluator/ci
-RUN skillevaluator --version
+RUN python -m compileall -q --invalidation-mode unchecked-hash /opt/skillevaluator/ci \
+    && skillevaluator --version
 USER evaluator
 WORKDIR /workspace
 ENTRYPOINT ["python", "/opt/skillevaluator/ci/run_tier1.py"]

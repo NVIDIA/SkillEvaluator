@@ -48,6 +48,23 @@ All notable changes to SkillEvaluator are documented in this file.
   applicable are excluded from passed and executed counts. Publication status
   remains visible on mobile and in print, and blocking/advisory findings retain
   their separate counts.
+- The HTML report opens on the answer. The skill name is the page title, and
+  the header shows one verdict, the date and version, and Download JSON. A
+  summary gives the verdict with a one-line reason, four numbers with one
+  definition of a finding, and a Fix first list of up to five places, most
+  severe first and linked to their evidence. A scanner that did not finish is
+  listed first, and two scanners reporting one location take one entry.
+  Failed checks are listed first, raw check IDs get plain names, and
+  publication eligibility sits next to the verdict.
+- The HTML report, the CI index and the Pages history use one verdict
+  vocabulary: Passed, Changes required, Incomplete, Skipped and Neutral. The
+  CI index names the same first fix as each skill's report and links to it.
+- The SkillEvaluator logo replaces the letter tile and the green square on
+  every report page, the CI index and the Pages history. Colors use one
+  palette built on the logo greens, with WCAG AA text contrast in light and
+  dark themes. The report follows the system theme until the reader picks
+  one, and prints dark text on white paper. No text is smaller than 11 px, and
+  short table cells no longer break mid-word.
 - Dependency audits inspect pinned package versions without installing packages
   or executing build scripts. Unpinned, URL and other unresolved requirements
   report incomplete coverage instead of executing package resolution.

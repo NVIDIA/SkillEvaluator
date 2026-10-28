@@ -68,8 +68,10 @@ and a bounded set of actionable reasons and fixes. Download the
 detailed Markdown, SARIF and scanner logs. The smaller
 `skill-evaluator-tier1-evidence-attempt-N` artifact holds only the JSON that
 the optional report publisher reads. Failed and incomplete scans retain
-their available reports; missing evidence is not a pass. Quality scores and the
-pass/fail decision are separate.
+their available reports; missing evidence is not a pass. A quality score below
+the minimum fails the Quality score check, so it blocks the verdict. The HTML
+index and reports use the verdicts Passed, Changes required, Incomplete and
+Skipped.
 
 Known credential values detected by the PII patterns, NVIDIA API keys, and
 unquoted `KEY=value` and `Bearer` credentials are redacted from CI reports,

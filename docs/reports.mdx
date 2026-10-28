@@ -85,6 +85,34 @@ timestamp is `YYYYMMDDHHMMSS`, so
 `-r json` produces something like `skillevaluator-output-20260709141530.json`
 and never clobbers the previous run.
 
+## HTML report
+
+The HTML report is one self-contained file. It opens on the answer and puts
+the evidence below it:
+
+- **Header.** The skill name is the page title. The header shows one verdict,
+  the date and version, and **Download JSON**.
+- **Summary.** The verdict with a one-line reason, four numbers (checks passed,
+  findings, blocking critical and high findings, quality score with its
+  minimum), and **Fix first**: up to five places to fix, most severe first,
+  each linking to its evidence. When a required scanner did not finish, it is
+  listed first. Two scanners reporting the same file and line take one entry.
+- **Findings and evidence.** Every check with its findings and suggested fixes.
+  Failed checks come first. Checks that report a raw ID, such as
+  `SCRIPT_LINT`, show a plain name with the ID beside it.
+- **Run details.** Scope, the target path, provenance and the gate policy.
+
+A finding is one problem a check reports at one location, with a severity. A
+finding in a failed check blocks the verdict; a finding in a passed check is
+advisory. A quality score below the configured minimum fails the Quality score
+check, so it also blocks the verdict.
+
+Every surface uses the same verdict words: **Passed**, **Changes required**,
+**Incomplete**, **Skipped** and **Neutral**. Publication eligibility is shown
+next to the verdict, because a report can pass its checks and still not be
+eligible for publication. The report follows the system light or dark theme
+until you pick one, and always prints dark text on white paper.
+
 ## BENCHMARK.md
 
 When the target is a skill, `validate` always writes `BENCHMARK.md` to the

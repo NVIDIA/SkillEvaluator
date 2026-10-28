@@ -27,6 +27,10 @@ import zipfile
 from datetime import datetime
 from pathlib import Path, PurePosixPath
 
+try:
+    import github_api
+except ModuleNotFoundError:
+    from ci import github_api
 from skillevaluator.utils.secret_redaction import REDACTED, SENSITIVE_PII_CATEGORIES, Redactor, sensitive_values
 
 MAX_FILES = 1000
@@ -36,9 +40,10 @@ MAX_FILE_BYTES = 32 * 1024 * 1024
 MAX_HISTORY_BYTES = 512 * 1024 * 1024
 ARTIFACT_NAME = "skill-evaluator-tier1"
 WORKFLOW_PATH = ".github/workflows/skill-checks.yml"
-SHA_PATTERN = re.compile(r"[0-9a-f]{40}")
-REPO_PATTERN = re.compile(r"[A-Za-z0-9_.-]+/[A-Za-z0-9_.-]+")
+SHA_PATTERN = github_api.COMMIT_SHA
+REPO_PATTERN = github_api.REPOSITORY
 REPORT_DIRECTORY = re.compile(r"skill-(?:00[1-9]|0[1-9][0-9]|100)")
+REPORT_MEMBER = re.compile(rf"(?:{REPORT_DIRECTORY.pattern})/skillevaluator-tier1\.json")
 
 
 class PublicationError(ValueError):
@@ -64,52 +69,15 @@ def allowed_download_url(url: str) -> bool:
     )
 
 
-class _NoRedirect(urllib.request.HTTPRedirectHandler):
-    def redirect_request(self, _request, _file, _code, _message, _headers, _url):
-        return None
-
-
-def _bounded_read(response, limit: int) -> bytes:
-    declared = response.headers.get("Content-Length")
-    if declared and (not declared.isdigit() or int(declared) > limit):
-        raise PublicationError("The downloaded artifact or API response exceeds its size limit.")
-    payload = response.read(limit + 1)
-    if len(payload) > limit:
-        raise PublicationError("The downloaded artifact or API response exceeds its size limit.")
-    return payload
-
-
-class GitHubAPI:
-    def __init__(self, repository: str, token: str):
-        self.repository = repository
-        self.token = token
-        self.opener = urllib.request.build_opener(_NoRedirect())
-
-    def _request(self, path: str):
-        root = f"/repos/{self.repository}"
-        prefix = root + "/"
-        comparison = re.fullmatch(re.escape(prefix) + r"compare/[0-9a-f]{40}\.\.\.[0-9a-f]{40}", path)
-        if (path != root and not path.startswith(prefix)) or (".." in path and not comparison) or "\\" in path:
-            raise PublicationError("Only this repository's GitHub API endpoints are supported.")
-        request = urllib.request.Request(
-            f"https://api.github.com{path}",
-            headers={
-                "Authorization": f"Bearer {self.token}",
-                "Accept": "application/vnd.github+json",
-                "X-GitHub-Api-Version": "2022-11-28",
-                "User-Agent": "SkillEvaluator-report-publisher",
-            },
-        )
-        return self.opener.open(request, timeout=60)
-
-    def get(self, path: str):
-        with self._request(path) as response:
-            return _json(_bounded_read(response, MAX_FILE_BYTES))
+class GitHubAPI(github_api.GitHubAPI):
+    error = PublicationError
+    json_error = "A required JSON document is invalid."
+    user_agent = "SkillEvaluator-report-publisher"
 
     def download_artifact(self, artifact_id: int) -> bytes:
         try:
-            with self._request(f"/repos/{self.repository}/actions/artifacts/{artifact_id}/zip") as response:
-                return _bounded_read(response, MAX_TOTAL_BYTES)
+            with self._request("GET", f"/repos/{self.repository}/actions/artifacts/{artifact_id}/zip") as response:
+                return github_api.bounded_read(response, MAX_TOTAL_BYTES, PublicationError)
         except urllib.error.HTTPError as exc:
             if exc.code not in {301, 302, 303, 307, 308}:
                 raise
@@ -118,10 +86,10 @@ class GitHubAPI:
         for _ in range(5):
             if not allowed_download_url(url):
                 raise PublicationError("The artifact download redirected to an unsupported host.")
-            request = urllib.request.Request(url, headers={"User-Agent": "SkillEvaluator-report-publisher"})
+            request = urllib.request.Request(url, headers={"User-Agent": self.user_agent})
             try:
-                with self.opener.open(request, timeout=60) as response:
-                    return _bounded_read(response, MAX_TOTAL_BYTES)
+                with self.opener.open(request, timeout=github_api.TIMEOUT_SECONDS) as response:
+                    return github_api.bounded_read(response, MAX_TOTAL_BYTES, PublicationError)
             except urllib.error.HTTPError as exc:
                 if exc.code not in {301, 302, 303, 307, 308}:
                     raise
@@ -130,21 +98,7 @@ class GitHubAPI:
 
 
 def _json(payload: bytes):
-    def object_pairs(pairs):
-        result = {}
-        for key, value in pairs:
-            if key in result:
-                raise PublicationError("Duplicate JSON keys are not supported.")
-            result[key] = value
-        return result
-
-    def invalid_constant(_value):
-        raise PublicationError("Non-finite JSON numbers are not supported.")
-
-    try:
-        return json.loads(payload.decode("utf-8"), object_pairs_hook=object_pairs, parse_constant=invalid_constant)
-    except (ValueError, UnicodeError, RecursionError) as exc:
-        raise PublicationError("A required JSON document is invalid.") from exc
+    return github_api.strict_json(payload, PublicationError, GitHubAPI.json_error)
 
 
 def _integer(value, minimum=0):
@@ -357,7 +311,7 @@ def read_artifact(payload: bytes) -> tuple[dict, dict[str, dict]]:
                 total += entry.file_size
                 if entry.file_size > MAX_FILE_BYTES or total > MAX_TOTAL_BYTES:
                     raise PublicationError("The artifact exceeds its expanded size limit.")
-                if name == "summary.json" or re.fullmatch(r"skill-[0-9]{3}/skillevaluator-tier1\.json", name):
+                if name == "summary.json" or REPORT_MEMBER.fullmatch(name):
                     with archive.open(entry) as handle:
                         content = handle.read(MAX_FILE_BYTES + 1)
                     if len(content) > MAX_FILE_BYTES:
@@ -817,9 +771,7 @@ def _recorded_image(summary: dict, fallback: str) -> str:
     if not isinstance(recorded, str) or not isinstance(fallback, str):
         raise PublicationError("The report's runtime image identity must be a string.")
     selected = recorded or fallback
-    if selected and (
-        len(selected) > 1024 or re.fullmatch(r"ghcr\.io/[a-z0-9][a-z0-9._/-]*@sha256:[0-9a-f]{64}", selected) is None
-    ):
+    if selected and (len(selected) > 1024 or github_api.GHCR_DIGEST.fullmatch(selected) is None):
         raise PublicationError("The report's runtime image identity must be an immutable GHCR digest.")
     return selected
 

@@ -275,7 +275,7 @@ def test_pr_provenance_compares_recorded_revisions_through_real_github_client():
 def test_github_client_still_rejects_untrusted_paths(path):
     api = publisher.GitHubAPI("owner/consumer", "private-token")
     with pytest.raises(publisher.PublicationError):
-        api._request(path)
+        api._request("GET", path)
 
 
 def test_github_client_accepts_repository_root_for_default_branch_lookup():

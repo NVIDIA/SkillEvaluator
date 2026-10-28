@@ -72,7 +72,7 @@ jobs:
       - name: Install the trusted native report renderer
         working-directory: publisher
         run: |
-          python3 -m pip install uv==0.11.27
+          python3 -m pip install --require-hashes -r ci/requirements/uv.txt
           uv sync --frozen --no-dev --no-editable
       - name: Checkout retained report history
         uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0

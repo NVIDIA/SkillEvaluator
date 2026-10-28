@@ -51,3 +51,11 @@ def test_publisher_uses_verified_node24_action_releases():
     assert "actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9" in uses
     assert "actions/upload-pages-artifact@fc324d3547104276b827a68afc52ff2a11cc49c9" in uses
     assert "actions/deploy-pages@368f82528645a54fb793d4d04e342629a3f51346" in uses
+
+
+def test_privileged_publisher_installs_the_reviewed_hash_locked_bootstrap():
+    steps = load(".github/workflows/publish-skill-reports.yml")["jobs"]["prepare"]["steps"]
+    install = next(step for step in steps if step.get("name") == "Install the trusted native report renderer")
+    assert install["working-directory"] == "publisher"
+    assert "python3 -m pip install --require-hashes -r ci/requirements/uv.txt" in install["run"]
+    assert "uv sync --frozen --no-dev --no-editable" in install["run"]

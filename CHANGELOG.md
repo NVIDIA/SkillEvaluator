@@ -70,6 +70,12 @@ All notable changes to SkillEvaluator are documented in this file.
   out only the tool files each job needs and replaces site files atomically.
   It and the PR comment helper share one GitHub client, which rejects sibling
   repository endpoints and NaN or Infinity in JSON for both.
+- CI report rendering is faster. HTML reports share one compiled template
+  instead of recompiling it for every skill, and each skill's JSON is read once
+  per render. `details.md` stops escaping evidence once it reaches its size
+  limit. CI-native per-skill pages no longer embed an unused copy of the report
+  JSON; Download JSON still links the retained `skillevaluator-tier1.json`, and
+  standalone CLI reports still embed it for Export JSON.
 
 ### Documentation
 

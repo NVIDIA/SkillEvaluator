@@ -1056,15 +1056,53 @@ Call us at 555-123-4567 or +1-555-987-6543
         assert "emails" in pii
         assert "ssn" in pii
 
-    def test_email_pattern_exempts_only_placeholder_domains(self):
-        """Email regex domain exemptions are limited to neutral placeholders."""
-        email_pattern = SecurityValidator().pii_patterns["emails"][0]["pattern"]
-        exempt_domain_literals = {
-            f"{name}.{suffix}"
-            for name, suffix in re.findall(r"([a-z][a-z0-9-]*)\\\.(com|org|net)", email_pattern, re.IGNORECASE)
-        }
+    @pytest.mark.parametrize(
+        "domain",
+        ["example.com", "example.net", "example.org", "test.com", "unit.test", "unit.example", "unit.invalid", "unit.localhost"],
+    )
+    @pytest.mark.parametrize("domain_format", ["{domain}", "sub.{domain}", "{domain_upper}", "sub.{domain}."])
+    def test_reserved_domain_emails_are_not_pii(self, tmp_path: Path, domain: str, domain_format: str):
+        document = tmp_path / "guide.md"
+        domain = domain_format.format(domain=domain, domain_upper=domain.upper())
+        document.write_text(f"Fixture identity: fixture@{domain}\n", encoding="utf-8")
 
-        assert exempt_domain_literals == {"example.com", "example.org", "test.com"}
+        result = SecurityValidator().validate_pii_only(document)
+
+        assert not [finding for finding in result.findings if finding.check_name == "emails"]
+
+    @pytest.mark.parametrize("domain", ["example.com", "example.net", "example.invalid"])
+    @pytest.mark.parametrize("fixture_first", [True, False])
+    def test_placeholder_on_same_line_preserves_real_email(self, tmp_path: Path, domain: str, fixture_first: bool):
+        document = tmp_path / "guide.md"
+        addresses = [f"fixture@{domain}", "contact@company.com"]
+        if not fixture_first:
+            addresses.reverse()
+        document.write_text("Contact " + " or ".join(addresses) + "\n", encoding="utf-8")
+
+        result = SecurityValidator().validate_pii_only(document)
+        emails = [finding for finding in result.findings if finding.check_name == "emails"]
+
+        assert [finding.metadata["matched_value"] for finding in emails] == ["contact@company.com"]
+        assert emails[0].severity == Severity.HIGH
+
+    @pytest.mark.parametrize(
+        "domain",
+        [
+            "company.com", "notexample.net", "example.net.company.com", "example.invalid.company.com",
+            "example.com-extra.net", "test.company.com", "example.organic", "company.invalidity",
+            "company.examplecorp", "localhost.company.com", "test.com.company.com",
+        ],
+    )
+    def test_nonplaceholder_email_domains_remain_pii(self, tmp_path: Path, domain: str):
+        document = tmp_path / "guide.md"
+        address = f"contact@{domain}"
+        document.write_text(f"Contact {address}\n", encoding="utf-8")
+
+        result = SecurityValidator().validate_pii_only(document)
+        emails = [finding for finding in result.findings if finding.check_name == "emails"]
+
+        assert [finding.metadata["matched_value"] for finding in emails] == [address]
+        assert emails[0].severity == Severity.HIGH
 
     def test_home_path_exceptions_are_limited_to_portable_paths(self):
         """Home-path handling must not depend on organization-specific roots."""

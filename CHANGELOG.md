@@ -39,6 +39,11 @@ All notable changes to SkillEvaluator are documented in this file.
 
 ### Fixed
 
+- PII email scans recognize all RFC 2606 reserved domains, including their
+  subdomains, mixed-case forms, and trailing dots. Ordinary addresses on the
+  same line and domains that merely resemble placeholders remain detectable
+  ([#244](https://github.com/NVIDIA/SkillEvaluator/issues/244)).
+
 - Tier 3 security grading preserves ordinary nested `/tmp` cleanup, including
   child operands with trailing slashes, unless the current or an earlier
   execution action contains recognized symlink-creation syntax (`ln -s`,

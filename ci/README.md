@@ -135,10 +135,12 @@ aliases are retired. Retained `runs/<run-id>/<attempt>/` paths are immutable; de
 runs cannot replace newer aliases. Current default-branch reports use the
 `main/latest/` route even if the actual default branch has a different name.
 A bot comment is created once and updated in place only for an open,
-current-head, same-repository PR after deployment. Human comments are untouched.
-When an automatic publication commits nothing new to `gh-pages` (the same run
-attempt is already the latest entry), the Pages deploy is skipped. Manual runs
-and re-runs always deploy, so re-running after a failed deploy still publishes.
+current-head, same-repository PR after that publication's own deployment. Human
+comments are untouched. When an automatic publication commits nothing new to
+`gh-pages` because another publisher run already pushed the same run attempt,
+its Pages deploy and PR comment are skipped. The run that pushed it deploys and
+then comments. Manual runs and re-runs always deploy, so re-running after a
+failed deploy still publishes and comments.
 A publication skipped because its PR closed or moved after the scan neither
 deploys nor comments.
 Fork PR scans can run without provider secrets; fork PR bot comments and current

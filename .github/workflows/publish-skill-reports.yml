@@ -176,11 +176,12 @@ jobs:
         uses: actions/deploy-pages@368f82528645a54fb793d4d04e342629a3f51346 # v5.0.1
   comment:
     needs: [prepare, deploy]
+    # Comment only after this run's own deploy. A skipped deploy means another
+    # publisher run pushed this content; that run deploys it and then comments.
     if: >-
       always() && needs.prepare.result == 'success' && needs.prepare.outputs.skipped != 'true' &&
       needs.prepare.outputs.pr_number != '' && needs.prepare.outputs.is_current == 'true' &&
-      (needs.deploy.result == 'success' ||
-      (needs.deploy.result == 'skipped' && needs.prepare.outputs.committed == 'false'))
+      needs.deploy.result == 'success'
     runs-on: ubuntu-24.04
     timeout-minutes: 10
     concurrency:

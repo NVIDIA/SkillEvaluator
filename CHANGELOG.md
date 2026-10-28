@@ -56,11 +56,12 @@ All notable changes to SkillEvaluator are documented in this file.
   0.46 MB, and HTML, SARIF and logs no longer count toward its 64 MiB limit.
   A scan from an evaluator revision that does not upload this artifact cannot
   be published. Re-running it reuses that evaluator, so update the scan caller
-  and the publisher allowlists, then start a new scan. The publisher also
-  skips the Pages deploy when an automatic run commits nothing new, installs uv
-  into a private environment instead of the runner's system Python, checks out
-  only the tool files each job needs and replaces site files atomically. It
-  and the PR comment helper share one GitHub client, which rejects sibling
+  and the publisher allowlists, then start a new scan. When an automatic run
+  commits nothing new, the publisher skips its Pages deploy and PR comment and
+  leaves both to the run that pushed that content. The publisher also installs
+  uv into a private environment instead of the runner's system Python, checks
+  out only the tool files each job needs and replaces site files atomically.
+  It and the PR comment helper share one GitHub client, which rejects sibling
   repository endpoints and NaN or Infinity in JSON for both.
 
 ### Documentation

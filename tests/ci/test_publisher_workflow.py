@@ -144,14 +144,15 @@ def test_deploy_is_skipped_only_when_an_automatic_first_attempt_committed_nothin
     [
         ("true", "success", True),
         ("false", "success", True),
-        ("false", "skipped", True),
+        # The run that pushed this content owns its deploy and its comment.
+        ("false", "skipped", False),
         ("true", "skipped", False),
         ("true", "failure", False),
         ("false", "failure", False),
         ("true", "cancelled", False),
     ],
 )
-def test_comment_needs_a_successful_deploy_for_new_content(committed, deploy, comments):
+def test_comment_waits_for_this_runs_own_successful_deploy(committed, deploy, comments):
     job = load(".github/workflows/publish-skill-reports.yml")["jobs"]["comment"]
     assert expression(job["if"], job_context(committed, deploy=deploy)) is comments
     assert not expression(job["if"], {**job_context(committed, deploy=deploy), "needs.prepare.result": "failure"})
@@ -232,6 +233,22 @@ def test_publish_step_reports_whether_it_pushed_new_content(tmp_path, diffs, pus
     assert load(".github/workflows/publish-skill-reports.yml")["jobs"]["prepare"]["outputs"]["committed"] == (
         "${{ steps.publish.outputs.committed }}"
     )
+
+
+@pytest.mark.parametrize(
+    ("event", "attempt", "deploys"),
+    [("workflow_run", "1", False), ("workflow_dispatch", "1", True), ("workflow_run", "2", True)],
+)
+def test_losing_a_push_race_to_the_same_attempt_never_comments_before_a_deploy(tmp_path, event, attempt, deploys):
+    # Attempt 1's push is rejected because another publisher run pushed this scan
+    # attempt first. After the reset, attempt 2 has nothing left to commit.
+    output, _calls = run_publish_loop(tmp_path, diffs=[1, 0], pushes=[1])
+    assert output == ["committed=false"]
+    jobs = load(".github/workflows/publish-skill-reports.yml")["jobs"]
+    context = job_context("false", event, attempt)
+    assert expression(jobs["deploy"]["if"], context) is deploys
+    deploy = "success" if deploys else "skipped"
+    assert expression(jobs["comment"]["if"], {**context, "needs.deploy.result": deploy}) is deploys
 
 
 def checkout(job: str) -> dict:

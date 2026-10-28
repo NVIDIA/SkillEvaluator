@@ -159,7 +159,9 @@ then.
    A release run builds the image once, smoke-tests that local image and pushes
    the same image. Pushes to `main` also build and smoke-test the image; they
    write the GitHub Actions layer cache that later builds read. Pull request
-   runs read that cache but never write it.
+   runs read that cache but never write it. Release builds do not reuse cached
+   layers, so `git` and `ca-certificates` come from the Debian packages current
+   at release time.
    Build the complete Tier 1 runtime with required external scanners. The base
    image digest, uv bootstrap, scanner runtime dependencies and SkillSpector
    build dependencies are pinned; scanner installs require package hashes.

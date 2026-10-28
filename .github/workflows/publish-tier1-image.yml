@@ -52,8 +52,8 @@ jobs:
           tags: skillevaluator-tier1:verify
           load: true
           provenance: false
-          # Every run reads the layer cache that main writes. Only runs on main write it, so a pull
-          # request cannot replace the layers that main and release builds reuse.
+          # Every verify run reads the layer cache that main writes. Only runs on main write it, so a pull
+          # request cannot replace the layers that later main builds reuse.
           cache-from: type=gha,scope=tier1-image
           cache-to: >-
             ${{ github.event_name != 'pull_request' && github.ref == 'refs/heads/main' &&
@@ -97,6 +97,8 @@ jobs:
       - uses: docker/setup-buildx-action@f87e5991a6d7451dcb8d9637bfbc97413f497069 # v4.4.1
         if: steps.existing.outputs.exists != 'true'
       # Built once: the smoke test below runs this local image and the release step pushes it.
+      # It reuses no cached layers, so apt installs the packages current at release time and no
+      # earlier job's layers reach the release. It still writes the cache that later builds read.
       - name: Build the reviewed release revision
         if: steps.existing.outputs.exists != 'true'
         uses: docker/build-push-action@c3c9e263c25d99ce0380d002d59b67737d91b0dc # v7.4.0
@@ -110,7 +112,7 @@ jobs:
           tags: ${{ env.IMAGE }}:sha-${{ github.sha }}
           load: true
           provenance: false
-          cache-from: type=gha,scope=tier1-image
+          no-cache: true
           cache-to: type=gha,scope=tier1-image,mode=max,ignore-error=true
       - name: Verify the exact image being published
         if: steps.existing.outputs.exists != 'true'

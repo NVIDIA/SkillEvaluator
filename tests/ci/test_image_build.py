@@ -142,7 +142,6 @@ def test_pull_requests_read_but_never_write_the_layer_cache():
     assert "github.event_name != 'pull_request'" in cache_to and "github.ref == 'refs/heads/main'" in cache_to
     assert "'type=gha,scope=tier1-image,mode=max,ignore-error=true' || ''" in cache_to
     (release,) = _build_steps(workflow["jobs"]["publish"])
-    assert release["with"]["cache-from"] == verify["with"]["cache-from"]
     for step in (verify, release):
         assert step["with"]["context"] == "."
         assert step["with"]["file"] == "ci/Dockerfile.tier1"
@@ -152,6 +151,18 @@ def test_pull_requests_read_but_never_write_the_layer_cache():
         triggers = yaml.load(path.read_text(encoding="utf-8"), Loader=yaml.BaseLoader)["on"]
         triggers = [triggers] if isinstance(triggers, str) else triggers
         assert {"pull_request_target", "workflow_run", "issue_comment"}.isdisjoint(triggers), path.name
+
+
+def test_release_builds_reuse_no_cached_layers():
+    # A cached apt layer would ship the git and ca-certificates of whichever main build first wrote it.
+    workflow = _workflow()
+    (verify,) = _build_steps(workflow["jobs"]["verify"])
+    (release,) = _build_steps(workflow["jobs"]["publish"])
+    assert "cache-from" not in release["with"]
+    assert release["with"]["no-cache"] == "true"
+    # The release still refreshes the cache that later verify builds read.
+    assert release["with"]["cache-to"] == "type=gha,scope=tier1-image,mode=max,ignore-error=true"
+    assert verify["with"]["cache-from"] == "type=gha,scope=tier1-image"
 
 
 def test_release_builds_once_and_pushes_the_image_it_verified():

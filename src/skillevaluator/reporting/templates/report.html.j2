@@ -204,7 +204,7 @@
             transition: all 0.2s ease;
         }
         .nav-tab:hover { border-color: var(--secondary-color); color: var(--secondary-color); }
-        .nav-tab.active { background: var(--secondary-color); color: white; border-color: var(--secondary-color); }
+        .nav-tab.active { background: var(--secondary-color); color: var(--on-accent); border-color: var(--secondary-color); }
         .tab-content { display: none; }
         .tab-content.active { display: block; }
         .dashboard {
@@ -287,7 +287,7 @@
             transition: all 0.2s ease;
         }
         .filter-btn:hover { border-color: var(--secondary-color); }
-        .filter-btn.active { background: var(--secondary-color); color: white; border-color: var(--secondary-color); }
+        .filter-btn.active { background: var(--secondary-color); color: var(--on-accent); border-color: var(--secondary-color); }
         .filter-btn.success.active { background: var(--success-color); border-color: var(--success-color); }
         .filter-btn.danger.active { background: var(--danger-color); border-color: var(--danger-color); }
         .table-section { margin: 1.25rem 0; }
@@ -360,7 +360,7 @@
         .validator-collapsible:hover { background: var(--bg-secondary); }
         .validator-collapsible.active {
             background: var(--secondary-color);
-            color: white;
+            color: var(--on-accent);
             border-color: var(--secondary-color);
             border-radius: 8px 8px 0 0;
         }
@@ -455,7 +455,7 @@
             padding: 0.5rem 0.75rem;
             border-radius: 6px;
             background: var(--secondary-color);
-            color: white;
+            color: var(--on-accent);
             border: none;
             cursor: pointer;
             font-size: 0.75rem;
@@ -610,7 +610,7 @@
             transition: all 0.2s ease;
         }
         .view-toggle-btn:hover { border-color: var(--secondary-color); }
-        .view-toggle-btn.active { background: var(--secondary-color); color: white; border-color: var(--secondary-color); }
+        .view-toggle-btn.active { background: var(--secondary-color); color: var(--on-accent); border-color: var(--secondary-color); }
         .results-view { display: none; }
         .results-view.active { display: block; }
         .skills-summary-bar {
@@ -700,7 +700,7 @@
             cursor: pointer;
             transition: all 0.15s ease;
         }
-        .skill-pill:hover { background: var(--secondary-color); color: white; }
+        .skill-pill:hover { background: var(--secondary-color); color: var(--on-accent); }
         /* Pair the skill pill (jumps to finding) with a small quality-score
            link so the two destinations stay distinct: the issue lives in the
            main pill, the quality score lives in the trailing ``Q`` chip. */
@@ -730,7 +730,7 @@
             transition: all 0.15s ease;
             border-left: 1px solid var(--border-color);
         }
-        .quality-pill:hover { background: var(--warning-color); color: white; }
+        .quality-pill:hover { background: var(--warning-color); color: var(--on-warning); }
         .top-issues-active-row { background: var(--bg-secondary) !important; outline: 2px solid var(--secondary-color); outline-offset: -2px; }
 
         /* Contributor Summary */
@@ -834,7 +834,7 @@
         .count-badge {
             display: inline-block;
             background: var(--danger-color);
-            color: white;
+            color: var(--on-danger);
             padding: 0.125rem 0.5rem;
             border-radius: 10px;
             font-size: 0.7rem;
@@ -864,7 +864,7 @@
             transition: all 0.2s ease;
         }
         .severity-filter-btn:hover { border-color: var(--secondary-color); }
-        .severity-filter-btn.active { background: var(--secondary-color); color: white; border-color: var(--secondary-color); }
+        .severity-filter-btn.active { background: var(--secondary-color); color: var(--on-accent); border-color: var(--secondary-color); }
         .severity-filter-btn.active.critical-btn { background: var(--critical-color); border-color: var(--critical-color); }
         .severity-filter-btn.active.high-btn { background: var(--high-color); border-color: var(--high-color); }
 
@@ -1140,9 +1140,9 @@
             border-radius: 999px;
             letter-spacing: 0.05em;
         }
-        .tier-card.pass .tier-card-verdict { background: var(--success-color); color: white; }
-        .tier-card.fail .tier-card-verdict { background: var(--danger-color); color: white; }
-        .tier-card.warn .tier-card-verdict { background: var(--warning-color); color: white; }
+        .tier-card.pass .tier-card-verdict { background: var(--badge-pass-bg); color: var(--badge-pass-tx); border: 1px solid currentColor; }
+        .tier-card.fail .tier-card-verdict { background: var(--badge-fail-bg); color: var(--badge-fail-tx); border: 1px solid currentColor; }
+        .tier-card.warn .tier-card-verdict { background: var(--badge-warn-bg); color: var(--badge-warn-tx); border: 1px solid currentColor; }
         .tier-card.skipped .tier-card-verdict { background: var(--bg-tertiary); color: var(--text-secondary); }
         .tier-card-title {
             font-size: 1.05rem;
@@ -1195,7 +1195,7 @@
             background: var(--bg);
         }
         .tier-card-sev-pill.crit { color: var(--danger-color); border-color: var(--danger-color); }
-        .tier-card-sev-pill.high { color: #d29922; border-color: #d29922; }
+        .tier-card-sev-pill.high { color: var(--high-color); border-color: var(--high-color); }
         .tier-card-sev-pill.med { color: var(--warning-color); border-color: var(--warning-color); }
         .tier-card-sev-pill.low { color: var(--text-secondary); }
         .chart-grid {
@@ -1723,7 +1723,7 @@
                         <div style="display: flex; justify-content: space-between; align-items: center; margin-bottom: 0.75rem;">
                             <div>
                                 <strong style="font-size: 1.1rem;">Quality Score: {{ skill_data.quality.overall_score | round(1) }}/100</strong>
-                                <span style="margin-left: 0.5rem; padding: 2px 8px; border-radius: 4px; font-weight: bold; color: white; background: {% if skill_data.quality.grade in ['A','B'] %}var(--success-color){% elif skill_data.quality.grade == 'C' %}var(--warning-color){% else %}var(--danger-color){% endif %};">{{ skill_data.quality.grade }}</span>
+                                <span style="margin-left: 0.5rem; padding: 2px 8px; border-radius: 4px; font-weight: bold; border: 1px solid currentColor; {% if skill_data.quality.grade in ['A','B'] %}color: var(--badge-pass-tx); background: var(--badge-pass-bg){% elif skill_data.quality.grade == 'C' %}color: var(--badge-warn-tx); background: var(--badge-warn-bg){% else %}color: var(--badge-fail-tx); background: var(--badge-fail-bg){% endif %};">{{ skill_data.quality.grade }}</span>
                             </div>
                             <span style="color: var(--text-secondary); font-size: 0.85rem;">Type: {{ skill_data.quality.skill_type }}</span>
                         </div>
@@ -2171,7 +2171,7 @@
             .t3-next-steps-head h3 { margin:0; color:var(--dark-text); font-size:1rem; }
             .t3-next-steps-conclusion { margin:0 0 0.65rem; color:var(--dark-text); line-height:1.5; }
             .t3-next-steps-list { margin:0; padding-left:1.15rem; color:var(--dark-text); display:grid; gap:0.35rem; }
-            .t3-link-btn { background:var(--secondary-color); border:1px solid var(--secondary-color); color:white; border-radius:7px; padding:0.38rem 0.75rem; font-size:0.78rem; font-weight:800; cursor:pointer; }
+            .t3-link-btn { background:var(--secondary-color); border:1px solid var(--secondary-color); color:var(--on-accent); border-radius:7px; padding:0.38rem 0.75rem; font-size:0.78rem; font-weight:800; cursor:pointer; }
             .t3-link-btn:hover { filter:brightness(0.95); }
             .t3-agent-link { background:transparent; border:0; color:var(--secondary-color); font:inherit; font-weight:800; padding:0; cursor:pointer; text-decoration:underline; text-decoration-thickness:1px; text-underline-offset:2px; }
             .t3-agent-link:hover { color:var(--accent-color); }

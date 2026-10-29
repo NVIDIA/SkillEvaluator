@@ -64,6 +64,9 @@ All notable changes to SkillEvaluator are documented in this file.
   verifier uploads retain shared test files, with step files taking precedence.
   After any command runs, the next upload replaces the tests directory, so
   files or links the agent left there cannot change verification.
+- Harbor's standalone verifier now runs on Python 3.9 task images after sharing
+  deterministic checks with the host evaluator. Packaged verifier checks execute
+  on a real Python 3.9 interpreter in CI to retain this compatibility.
 - Rubric evaluation preserves the original `SKILL.md` text without adding YAML
   separators and includes reachable local Markdown guides under their source
   paths. Required guidance is collected before optional previews, with cycle

@@ -82,7 +82,13 @@ def discover_skills(workspace: Path, roots: str) -> list[Path]:
     discovered: set[Path] = set()
     for raw in configured:
         relative = Path(raw)
-        if relative.is_absolute() or ".." in relative.parts or "\\" in raw or ":" in raw:
+        if (
+            relative.is_absolute()
+            or ".." in relative.parts
+            or "\\" in raw
+            or ":" in raw
+            or any(ord(character) < 32 or ord(character) == 127 for character in raw)
+        ):
             raise ConfigurationError("Skill roots must be relative directories without parent traversal.")
         current = workspace
         for part in relative.parts:

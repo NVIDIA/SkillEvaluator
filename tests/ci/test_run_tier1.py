@@ -141,9 +141,13 @@ def test_any_contradictory_report_becomes_error_row_without_losing_other_skills(
     assert "Report unavailable" in (reports / "skill-001/skillevaluator-tier1.html").read_text()
 
 
-@pytest.mark.parametrize("root", ["/etc", "../skills", "skills/../other", "C:\\skills", "skills\\a"])
+@pytest.mark.parametrize(
+    "root", ["/etc", "../skills", "skills/../other", "C:\\skills", "skills\\a", "sk\tills", "skills/m\x7fskill"]
+)
 def test_rejects_unsafe_roots(tmp_path, root):
-    with pytest.raises(runner.ConfigurationError):
+    skill(tmp_path, "sk\tills/a")
+    skill(tmp_path, "skills/m\x7fskill")
+    with pytest.raises(runner.ConfigurationError, match="without parent traversal"):
         runner.discover_skills(tmp_path, root)
 
 

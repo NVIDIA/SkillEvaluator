@@ -445,6 +445,38 @@ def test_redactor_masks_database_userinfo_when_the_text_ends_inside_it():
     assert connection.text("Hardcoded password in a connection string") == "Hardcoded password in a connection string"
 
 
+def test_retained_markdown_and_sarif_are_rendered_from_redacted_json(tmp_path):
+    workspace, reports = tmp_path / "workspace", tmp_path / "reports"
+    _skill(workspace)
+    value = _fixture_value()
+
+    def fake_cli(argv, **kwargs):
+        target = Path(argv[argv.index("-o") + 1])
+        result = SecurityValidator(use_llm=False).validate_pii_only(Path(argv[2]))
+        result.validator_name = "PII Scan"
+        result.validator_description = "Detect sensitive identifiers"
+        payload = json.loads(JSONReporter(include_timestamp=False).render_all([result]))
+        # Another scanner's context window started inside the value.
+        payload["results"][0]["findings"][0]["line_content"] = value[3:]
+        (target / "skillevaluator-tier1.json").write_text(json.dumps(payload))
+        # The evaluator's own files escape and cut text in ways a literal
+        # search cannot follow.
+        (target / "skillevaluator-tier1.md").write_text("Raw evaluator Markdown " + value.replace("-", "\\-")[:30])
+        (target / "skillevaluator-tier1.sarif.json").write_text(json.dumps({"raw": "Raw evaluator SARIF"}))
+        return subprocess.CompletedProcess(argv, 1)
+
+    assert runner.run(workspace, reports, {"SKILL_PATHS": "skills"}, execute=fake_cli) == 1
+    markdown = (reports / "skill-001/skillevaluator-tier1.md").read_text()
+    sarif = json.loads((reports / "skill-001/skillevaluator-tier1.sarif.json").read_text())
+    if "Raw evaluator" in markdown or not markdown.startswith("# SkillEvaluator Validation Report"):
+        pytest.fail("Retained Markdown was not rendered from the redacted JSON.")
+    assert sarif["version"] == "2.1.0"
+    assert [item["properties"]["checkName"] for item in sarif["runs"][0]["results"]] == ["hardcoded_secrets"]
+    for path in reports.rglob("*"):
+        if path.is_file():
+            _assert_no_fragment(path.read_bytes(), value)
+
+
 @pytest.mark.parametrize("mark", ["\u200b", "\ufeff", "\u00a0"])
 def test_preflight_matches_values_echoed_with_an_invisible_character_marker(tmp_path, mark):
     from ci.secret_redaction import collect_sensitive_values

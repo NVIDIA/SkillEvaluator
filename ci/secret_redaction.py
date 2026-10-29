@@ -11,6 +11,8 @@ import os
 import re
 from pathlib import Path
 
+from skillevaluator.reporting import MarkdownReporter, SARIFReporter
+from skillevaluator.reporting.retained import retained_results
 from skillevaluator.utils.secret_redaction import SENSITIVE_PII_CATEGORIES, Redactor, sensitive_values
 from skillevaluator.utils.secure_fs import SecureRoot
 from skillevaluator.validators.security import SecurityValidator
@@ -92,6 +94,7 @@ def sanitized_outputs(raw: Path, tokens: set[str]) -> dict[str, bytes]:
     sanitized = {}
     total = 0
     redactor = Redactor(tokens)
+    document = None
     with SecureRoot(raw) as root:
         for name in allowed:
             path = raw / name
@@ -106,9 +109,23 @@ def sanitized_outputs(raw: Path, tokens: set[str]) -> dict[str, bytes]:
                     b"Raw scanner log withheld while credential redaction is active. See the structured reports.\n"
                 )
                 continue
+            if name in {"skillevaluator-tier1.md", "skillevaluator-tier1.sarif.json"}:
+                # These files cut and escape text, so a value can survive a
+                # literal search. Render them from the redacted JSON instead.
+                if document is None:
+                    raise ValueError("The evaluator did not produce JSON evidence.")
+                try:
+                    results = retained_results(document)
+                except ValueError:
+                    # The runner rejects this JSON next; keep the other evidence.
+                    continue
+                reporter = MarkdownReporter() if name.endswith(".md") else SARIFReporter()
+                sanitized[name] = reporter.render_all(results).encode("utf-8")
+                continue
             text = content.decode("utf-8")
             if name.endswith(".json"):
-                text = json.dumps(redactor.object(json.loads(text)), ensure_ascii=True, allow_nan=False, indent=2)
+                document = redactor.object(json.loads(text))
+                text = json.dumps(document, ensure_ascii=True, allow_nan=False, indent=2)
             else:
                 text = redactor.text(text)
             sanitized[name] = text.encode("utf-8")

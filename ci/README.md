@@ -18,11 +18,12 @@ mutable image tag or an unreviewed branch reference.
 
 | Input | Basic configuration |
 | --- | --- |
-| `paths` | `skills`; newline-separated repository-relative skill directories or roots |
+| `paths` | `skills`; up to 100 newline-separated repository-relative skill directories or roots |
 | `scan-mode` | `auto`: affected skills on PRs, all configured skills on pushes/manual runs; `all` overrides selection |
 | `llm` | `false`; static Tier 1 requires no model key |
 | `artifact-name` | Keep `skill-evaluator-tier1` for the optional publisher |
 | `report-base-url` | Optional own Pages URL, only after hosted publication is configured |
+| `scan-workers` | `4`; skills scanned at once, from 1 to 16. `1` scans one skill at a time |
 
 The runtime discovers exact-case `SKILL.md` files, rejects unsafe paths and
 symlinks, deduplicates overlapping roots and bounds each invocation to 100
@@ -30,12 +31,19 @@ skills. This is a selection cap, not a runtime guarantee: scans have a bounded
 time budget and retain completed results with explicit incomplete entries for
 unprocessed skills. Do not interpret a changed-skill selection as a new
 full-catalog pass.
+Up to `scan-workers` skills are scanned at once, each with its own private home
+and temporary directory. Logs, annotations and report rows keep skill order. When
+the time budget runs out, running scans stop and skills not yet started are
+reported as not evaluated. Ctrl-C also stops running scans at once, including
+the scanner tools they started.
 With no affected skills, the check succeeds with **No skills changed** and
 records that validation did not run. Fully removed skills are listed as
 deleted/skipped. A removed manifest with tracked files left in its skill
 folder is an error. Selection uses changed files inside discovered skills;
 shared files outside the configured roots are not inferred as dependencies.
 Use `scan-mode: all` when changes to those shared resources require evaluation.
+Changed-skill selection checks out full history without old file contents (a
+blobless clone); full scans fetch only the scanned commit.
 Static scanning is network connected: vulnerability databases may receive
 package metadata. Dependency auditing never installs packages or runs build
 scripts: requirements must provide exact package/version pins. Unpinned, URL,
@@ -49,7 +57,9 @@ incomplete scans and missing or contradictory report evidence fail the job.
 The short `summary.md` is the Actions landing view. `details.md`, original
 per-skill JSON, native HTML, SARIF and scanner logs retain detailed evidence in
 the scan artifact, named `skill-evaluator-tier1-attempt-N` for attempt `N`.
-Artifacts expire after the configured retention period;
+A second, small artifact, `skill-evaluator-tier1-evidence-attempt-N`, holds
+only `summary.json` and each skill's `skillevaluator-tier1.json`. The optional
+publisher downloads only that one. Artifacts expire after the configured retention period;
 hosted history is an optional separate surface. Quality scores are not scanner
 pass percentages or proof of useful live-agent behavior.
 
@@ -93,7 +103,12 @@ Pages is not an inherent requirement for GitHub PR comments.
    **Skill checks**, and artifact name **skill-evaluator-tier1**. The dedicated
    publisher validates this caller and accepts exactly one approved referenced
    evaluator workflow. A differently named manual LLM workflow is not accepted
-   automatically.
+   automatically. The publisher reads only the attempt's
+   `skill-evaluator-tier1-evidence-attempt-N` artifact. A scan from an
+   evaluator revision that does not upload it cannot be published. Re-running
+   that scan reuses its commit and pinned evaluator. Instead, update the scan
+   caller to a release that uploads the artifact, approve that evaluator SHA
+   and the new caller blob (steps 5 and 6), and start a new scan.
 5. Set `trusted-evaluator-shas` to the reviewed evaluator workflow commit. Set
    `tools-ref` to the reviewed immutable commit containing the publisher helpers;
    generated release files supply both. `tools-repository` defaults to
@@ -117,7 +132,9 @@ Pages is not an inherent requirement for GitHub PR comments.
 
 The publisher rebuilds native HTML from bounded, validated JSON using pinned
 trusted tools. It does not execute consumer PR code or trust uploaded HTML as
-site code. Each completion event binds publication to its recorded run attempt;
+site code. Its jobs use sparse checkouts of the tools repository: preparation
+gets the root files, `ci/` and `src/`; the comment job gets only
+`ci/comment_report.py` and `ci/github_api.py`, which use only the standard library. Each completion event binds publication to its recorded run attempt;
 manual backfills must specify that attempt. It retains the newest 100 runs by
 default (`retention-runs`), within a 512 MiB site budget, plus current
 `main/latest/` and open-PR reports. Older unprotected runs are pruned first;
@@ -126,7 +143,14 @@ aliases are retired. Retained `runs/<run-id>/<attempt>/` paths are immutable; de
 runs cannot replace newer aliases. Current default-branch reports use the
 `main/latest/` route even if the actual default branch has a different name.
 A bot comment is created once and updated in place only for an open,
-current-head, same-repository PR after deployment. Human comments are untouched.
+current-head, same-repository PR after that publication's own deployment. Human
+comments are untouched. When an automatic publication commits nothing new to
+`gh-pages` because another publisher run already pushed the same run attempt,
+its Pages deploy and PR comment are skipped. The run that pushed it deploys and
+then comments. Manual runs and re-runs always deploy, so re-running after a
+failed deploy still publishes and comments.
+A publication skipped because its PR closed or moved after the scan neither
+deploys nor comments.
 Fork PR scans can run without provider secrets; fork PR bot comments and current
 PR aliases are not enabled. Comment-only operation and hosting alongside an
 arbitrary existing Pages deployment need further integration work.
@@ -156,6 +180,12 @@ then.
    Tier 1 image** with `publish: true`. Publishing is allowed only from `main`
    in `NVIDIA/SkillEvaluator`; PR runs build and smoke-test without uploading.
    The default `publish: false` builds and verifies without publication.
+   A release run builds the image once, smoke-tests that local image and pushes
+   the same image. Pushes to `main` also build and smoke-test the image; they
+   write the GitHub Actions layer cache that later builds read. Pull request
+   runs read that cache but never write it. Release builds do not reuse cached
+   layers, so `git` and `ca-certificates` come from the Debian packages current
+   at release time.
    Build the complete Tier 1 runtime with required external scanners. The base
    image digest, uv bootstrap, scanner runtime dependencies and SkillSpector
    build dependencies are pinned; scanner installs require package hashes.
@@ -233,6 +263,19 @@ Markdown, SARIF and scanner logs. Failures in the harness's own acceptance check
 are unit tested separately; only a run against a real image establishes runtime
 proof. The script does not publish an image, modify a remote repository or
 trigger a GitHub workflow.
+
+## Image layout
+
+`ci/Dockerfile.tier1` is a multi-stage build. The build stages install the
+locked environments with uv. The runtime stage copies only the three virtual
+environments, Gitleaks, `ci/` and the license files; uv, its cache and the
+source tree are not in the published image. Scanner layers come before any
+SkillEvaluator source, so a source edit rebuilds only the small project layer.
+The runtime filesystem is read-only, so Python bytecode is compiled at build
+time, including the standard library. The `.pyc` files are hash-based and do
+not embed source timestamps. Installed sources never change inside the image,
+so Python does not re-check them on import. Do not bind-mount replacement
+Python files over single installed modules; rebuild the image instead.
 
 ## Updating scanner locks
 

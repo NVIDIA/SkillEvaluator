@@ -10,6 +10,7 @@ from __future__ import annotations
 import copy
 import math
 from dataclasses import fields
+from functools import partial
 from typing import Any
 
 from skillevaluator.models import Finding, SuccessDetail, ValidationResult, ValidationSummary
@@ -52,9 +53,9 @@ def _text(value: Any, field: str, *, optional: bool = False) -> Any:
     return value
 
 
-def _mapping(value: Any, field: str) -> dict:
+def _mapping(value: Any, field: str, *, copy_value: bool = True) -> dict:
     _require(isinstance(value, dict), f"Invalid {field}: expected object")
-    return copy.deepcopy(value)
+    return copy.deepcopy(value) if copy_value else value
 
 
 def _strings(value: Any, field: str) -> list[str]:
@@ -112,10 +113,16 @@ def _typed_metadata(metadata: dict) -> None:
         _require(all(type(value) is bool for value in benchmark.values()), "Invalid benchmark policy")
 
 
-def retained_results(payload: dict) -> list[ValidationResult]:
-    """Rehydrate the JSONReporter's Tier 1 contract using explicit field maps."""
+def retained_results(payload: dict, *, copy_metadata: bool = True) -> list[ValidationResult]:
+    """Rehydrate the JSONReporter's Tier 1 contract using explicit field maps.
+
+    Results own deep copies of the payload's metadata by default. A caller that
+    only validates and discards the results can pass copy_metadata=False; the
+    results then share the payload's mappings, which neither side modifies.
+    """
     _require(isinstance(payload, dict), "Report must be an object")
     _json(payload)
+    mapping = partial(_mapping, copy_value=copy_metadata)
     rows = payload.get("results")
     _require(isinstance(rows, list) and 0 < len(rows) <= 1000, "Report requires nonempty results")
     results = []
@@ -137,7 +144,7 @@ def retained_results(payload: dict) -> list[ValidationResult]:
         _require(bool(name) and name not in seen, "Validator names must be nonempty and unique")
         seen.add(name)
         _require(type(row.get("passed")) is bool, "Result passed must be boolean")
-        summary = _mapping(row.get("summary"), "summary")
+        summary = mapping(row.get("summary"), "summary")
         for field in fields(ValidationSummary):
             _require(type(summary.get(field.name)) is int and summary[field.name] >= 0, f"Invalid summary.{field.name}")
         _require(set(summary) == {f.name for f in fields(ValidationSummary)}, "Unexpected summary fields")
@@ -159,7 +166,7 @@ def retained_results(payload: dict) -> list[ValidationResult]:
                     line_number=line,
                     line_content=_text(item.get("line_content"), "line_content", optional=True),
                     suggestion=_text(item.get("suggestion"), "suggestion", optional=True),
-                    metadata=_mapping(
+                    metadata=mapping(
                         item.get("metadata") if item.get("metadata") is not None else {}, "finding.metadata"
                     ),
                 )
@@ -172,16 +179,16 @@ def retained_results(payload: dict) -> list[ValidationResult]:
                 SuccessDetail(
                     check_name=_text(item.get("check"), "success.check"),
                     message=_text(item.get("message"), "success.message"),
-                    metadata=_mapping(
+                    metadata=mapping(
                         item.get("metadata") if item.get("metadata") is not None else {}, "success.metadata"
                     ),
                 )
             )
-        legacy = _mapping(row.get("legacy"), "legacy")
+        legacy = mapping(row.get("legacy"), "legacy")
         metadata = {}
         for source, dest in mappings.items():
             if source in row:
-                metadata[dest] = _mapping(row[source], source)
+                metadata[dest] = mapping(row[source], source)
         if "skillspector_version" in row:
             metadata["skillspector_version"] = _text(row["skillspector_version"], "skillspector_version")
         if "publication_target_conflict" in row:
@@ -190,10 +197,10 @@ def retained_results(payload: dict) -> list[ValidationResult]:
             )
         for key in ("policy", "quality_config"):
             if key not in metadata and payload.get(key) is not None:
-                metadata[key] = _mapping(payload[key], key)
+                metadata[key] = mapping(payload[key], key)
         # Retain source identity under the exact carrier consumed by reporters.
         if payload.get("evaluated_source") is not None:
-            metadata["evaluated_source"] = _mapping(payload["evaluated_source"], "evaluated_source")
+            metadata["evaluated_source"] = mapping(payload["evaluated_source"], "evaluated_source")
         for key in ("incomplete_scans", "gate_failures"):
             if key in row:
                 metadata[key] = _strings(row[key], key)
@@ -203,7 +210,8 @@ def retained_results(payload: dict) -> list[ValidationResult]:
                 and all(isinstance(x, dict) for x in row["dependency_coverage"]),
                 "Invalid dependency_coverage",
             )
-            metadata["dependency_coverage"] = copy.deepcopy(row["dependency_coverage"])
+            coverage = row["dependency_coverage"]
+            metadata["dependency_coverage"] = copy.deepcopy(coverage) if copy_metadata else coverage
         if "skipped" in row:
             _require(type(row["skipped"]) is bool, "skipped must be boolean")
             metadata["skipped"] = row["skipped"]
@@ -262,9 +270,18 @@ def retained_results(payload: dict) -> list[ValidationResult]:
 
 
 def render_retained_report(
-    payload: dict, *, skill_name: str, expected_skill_name: str | None = None, context: dict | None = None
+    payload: dict,
+    *,
+    skill_name: str,
+    expected_skill_name: str | None = None,
+    context: dict | None = None,
+    scan_root: str | None = None,
 ) -> str:
-    """Render a single skill from retained evidence without inspecting its paths."""
+    """Render a single skill from retained evidence without inspecting its paths.
+
+    *scan_root* is the folder the scanners ran on. It is only compared with
+    recorded finding paths, never opened.
+    """
     _require(
         isinstance(skill_name, str)
         and 0 < len(skill_name.encode("utf-8")) <= 4096
@@ -284,4 +301,5 @@ def render_retained_report(
         expected_skill_name=canonical_name,
         explicit_skill_name=skill_name,
         ci_context=context,
+        scan_root=scan_root,
     ).render_all(results)

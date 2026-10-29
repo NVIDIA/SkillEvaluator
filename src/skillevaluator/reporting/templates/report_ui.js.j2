@@ -94,12 +94,36 @@ filterToAffectedSkills = function(row) {
     applyReportSearch();
 };
 // Printing includes supporting evidence while preserving the reader's disclosure state.
+// Raw scanner output stays collapsed: it only repeats finding cards, which print.
 let reportPrintClosedDetails = [];
 window.addEventListener('beforeprint', function() {
-    reportPrintClosedDetails = Array.from(document.querySelectorAll('details:not([open])'));
+    reportPrintClosedDetails = Array.from(document.querySelectorAll('details:not([open]):not(.raw-output)'));
     reportPrintClosedDetails.forEach(detail => { detail.open = true; });
 });
 window.addEventListener('afterprint', function() {
     reportPrintClosedDetails.forEach(detail => { detail.open = false; });
     reportPrintClosedDetails = [];
+});
+// "Fix first" links open their check or finding: skill view, card expanded,
+// filters cleared. The id goes in the address so the link can be shared.
+function openFinding(id) {
+    const target = document.getElementById(id);
+    if (!target) return true;
+    const card = target.closest('.skill-card');
+    if (card) _openSkillCard(card.dataset.skillName);
+    for (let node = target; node; node = node.parentElement) {
+        if (node.tagName === 'DETAILS') node.open = true;
+    }
+    try { history.replaceState(null, '', '#' + id); } catch (err) { /* A file:// page may refuse; the jump still works. */ }
+    const reduceMotion = window.matchMedia && window.matchMedia('(prefers-reduced-motion: reduce)').matches;
+    target.scrollIntoView({ behavior: reduceMotion ? 'auto' : 'smooth', block: 'center' });
+    target.setAttribute('tabindex', '-1');
+    target.focus({ preventScroll: true });
+    target.classList.add('finding-flash');
+    setTimeout(function() { target.classList.remove('finding-flash'); }, 2000);
+    return false;
+}
+// Run after load so the browser's own jump to the fragment does not override it.
+window.addEventListener('load', function() {
+    if (/^#[fc]-/.test(location.hash)) setTimeout(function() { openFinding(decodeURIComponent(location.hash.slice(1))); }, 0);
 });

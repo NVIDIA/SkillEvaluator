@@ -14,17 +14,20 @@ import json
 import os
 import re
 import sys
-import urllib.request
 from pathlib import Path
+
+try:
+    import github_api
+except ModuleNotFoundError:
+    from ci import github_api
 
 MARKER = "<!-- skillevaluator-tier1-report -->"
 RUN_MARKER = re.compile(r"<!-- skillevaluator-tier1-run:([1-9][0-9]*):([1-9][0-9]*) -->")
-REPOSITORY_PATTERN = re.compile(r"[A-Za-z0-9_.-]+/[A-Za-z0-9_.-]+")
-SHA_PATTERN = re.compile(r"[0-9a-f]{40}")
+REPOSITORY_PATTERN = github_api.REPOSITORY
+SHA_PATTERN = github_api.COMMIT_SHA
 BOT_PATTERN = re.compile(r"[A-Za-z0-9_-]+\[bot\]")
 MAX_BODY_BYTES = 60000
 MAX_METADATA_BYTES = 64 * 1024
-MAX_API_BYTES = 16 * 1024 * 1024
 MAX_PAGES = 10
 
 
@@ -32,60 +35,14 @@ class FeedbackError(ValueError):
     """A fixed diagnostic safe to print without feedback content or credentials."""
 
 
-class _NoRedirect(urllib.request.HTTPRedirectHandler):
-    def redirect_request(self, _request, _file, _code, _message, _headers, _url):
-        return None
-
-
-class GitHubAPI:
-    def __init__(self, repository: str, token: str):
-        self.repository, self.token = repository, token
-        self.opener = urllib.request.build_opener(_NoRedirect())
-
-    def _request(self, method: str, path: str, payload=None):
-        prefix = f"/repos/{self.repository}/"
-        if not path.startswith(prefix) or ".." in path or "\\" in path:
-            raise FeedbackError("Only this repository's GitHub API endpoints are supported.")
-        headers = {
-            "Authorization": f"Bearer {self.token}",
-            "Accept": "application/vnd.github+json",
-            "X-GitHub-Api-Version": "2022-11-28",
-            "User-Agent": "SkillEvaluator-PR-feedback",
-        }
-        data = None
-        if payload is not None:
-            data = json.dumps(payload, ensure_ascii=True, allow_nan=False).encode("utf-8")
-            headers["Content-Type"] = "application/json"
-        request = urllib.request.Request(f"https://api.github.com{path}", data=data, headers=headers, method=method)
-        with self.opener.open(request, timeout=60) as response:
-            raw = response.read(MAX_API_BYTES + 1)
-        if len(raw) > MAX_API_BYTES:
-            raise FeedbackError("The GitHub API response exceeded its size limit.")
-        return _json(raw)
-
-    def get(self, path: str):
-        return self._request("GET", path)
-
-    def post(self, path: str, payload: dict):
-        return self._request("POST", path, payload)
-
-    def patch(self, path: str, payload: dict):
-        return self._request("PATCH", path, payload)
+class GitHubAPI(github_api.GitHubAPI):
+    error = FeedbackError
+    json_error = "Feedback metadata or the GitHub API response is invalid JSON."
+    user_agent = "SkillEvaluator-PR-feedback"
 
 
 def _json(raw: bytes):
-    def pairs(items):
-        value = {}
-        for key, item in items:
-            if key in value:
-                raise FeedbackError("Feedback metadata contains duplicate JSON keys.")
-            value[key] = item
-        return value
-
-    try:
-        return json.loads(raw.decode("utf-8"), object_pairs_hook=pairs)
-    except (UnicodeError, ValueError, RecursionError) as exc:
-        raise FeedbackError("Feedback metadata or the GitHub API response is invalid JSON.") from exc
+    return github_api.strict_json(raw, FeedbackError, GitHubAPI.json_error)
 
 
 def _read(path: Path, limit: int) -> bytes:

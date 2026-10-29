@@ -53,7 +53,8 @@ All notable changes to SkillEvaluator are documented in this file.
   summary gives the verdict with a one-line reason, four numbers with one
   definition of a finding, and a Fix first list of up to five places, most
   severe first and linked to their evidence. A scanner that did not finish is
-  listed first, and two scanners reporting one location take one entry.
+  listed first with its own reason, and two scanners reporting one location
+  take one entry. Scanner diagnostics always show and print.
   Failed checks are listed first, raw check IDs get plain names, and
   publication eligibility sits next to the verdict.
 - The HTML report, the CI index and the Pages history use one verdict

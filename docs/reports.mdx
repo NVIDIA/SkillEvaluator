@@ -96,10 +96,13 @@ the evidence below it:
   findings, blocking critical and high findings, quality score with its
   minimum), and **Fix first**: up to five places to fix, most severe first,
   each linking to its evidence. When a required scanner did not finish, it is
-  listed first. Two scanners reporting the same file and line take one entry.
+  listed first with the scanner's own reason, such as a timeout. Two scanners
+  reporting the same file and line take one entry.
 - **Findings and evidence.** Every check with its findings and suggested fixes.
   Failed checks come first. Checks that report a raw ID, such as
-  `SCRIPT_LINT`, show a plain name with the ID beside it.
+  `SCRIPT_LINT`, show a plain name with the ID beside it. Scanner diagnostics
+  and gate failures are always shown and printed; raw scanner lines that only
+  repeat a finding are folded away.
 - **Run details.** Scope, the target path, provenance and the gate policy.
 
 A finding is one problem a check reports at one location, with a severity. A

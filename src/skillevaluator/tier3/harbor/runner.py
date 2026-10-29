@@ -5563,8 +5563,8 @@ def _run_harbor_eval_impl(
     report_path, report_warning = _render_current_report()
     if report_path is not None:
         results["report_path"] = str(report_path)
-        if report_path.with_name("BENCHMARK.md").is_file():
-            results["benchmark_path"] = str(report_path.with_name("BENCHMARK.md"))
+        if report_path.with_name("tier3-benchmark.md").is_file():
+            results["benchmark_path"] = str(report_path.with_name("tier3-benchmark.md"))
 
     identity_after_report = _run_owned_publication_fields()
     if identity_after_report != identity_before_report:
@@ -5577,13 +5577,13 @@ def _run_harbor_eval_impl(
         report_path, report_warning = _render_current_report()
         if report_path is not None:
             results["report_path"] = str(report_path)
-            if report_path.with_name("BENCHMARK.md").is_file():
-                results["benchmark_path"] = str(report_path.with_name("BENCHMARK.md"))
+            if report_path.with_name("tier3-benchmark.md").is_file():
+                results["benchmark_path"] = str(report_path.with_name("tier3-benchmark.md"))
         elif stale_report_path is not None:
             try:
                 stale_report_path.resolve().relative_to(run_dir.resolve())
                 stale_report_path.unlink(missing_ok=True)
-                stale_report_path.with_name("BENCHMARK.md").unlink(missing_ok=True)
+                stale_report_path.with_name("tier3-benchmark.md").unlink(missing_ok=True)
             except (OSError, RuntimeError, ValueError):
                 pass
     if is_gke_vertex_workload_identity_active(env_mode, agents):

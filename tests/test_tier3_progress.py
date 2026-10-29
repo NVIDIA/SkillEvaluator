@@ -2092,6 +2092,78 @@ def test_runner_persists_compact_feedback_to_result_json(
     assert "agent_eval" not in persisted
 
 
+def _collect_completed_report_input(*, output_dir: Path, **_kwargs: Any) -> dict[str, Any]:
+    from skillevaluator.tier3.harbor.metrics import DEFAULT_METRICS
+
+    for arm in ("with-skill", "without-skill"):
+        directory = output_dir / "codex" / arm
+        directory.mkdir(parents=True)
+        (directory / "summary.json").write_text(
+            json.dumps(
+                {
+                    "scores": dict.fromkeys(DEFAULT_METRICS, 0.8),
+                    "metrics": list(DEFAULT_METRICS),
+                    "num_trials": 1,
+                    "execution_status": "succeeded",
+                    "execution_errors": [],
+                    "expected_attempts": 1,
+                    "scored_attempts": 1,
+                }
+            ),
+            encoding="utf-8",
+        )
+    return {"execution_status": "succeeded", "execution_errors": [], "metrics": list(DEFAULT_METRICS)}
+
+
+def test_runner_persists_scoped_benchmark_path(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    from skillevaluator.evaluation.tier3_report import render_agent_eval_html_report
+
+    def render_without_judge(skill_path: Path, run_dir: Path, **kwargs: Any) -> Path:
+        return render_agent_eval_html_report(skill_path, run_dir, use_llm_judge=False, **kwargs)
+
+    runner, skill = _stub_runner(
+        monkeypatch, tmp_path, collect=_collect_completed_report_input, html_report=render_without_judge
+    )
+    result = runner.run_harbor_eval(skill, ["codex"], output_dir=tmp_path / "results")
+    benchmark = Path(result["run_dir"]) / "tier3-benchmark.md"
+    persisted = json.loads(Path(result["result_path"]).read_text(encoding="utf-8"))
+
+    assert benchmark.is_file()
+    assert result["benchmark_path"] == str(benchmark)
+    assert persisted["benchmark_path"] == str(benchmark)
+    assert not benchmark.with_name("BENCHMARK.md").exists()
+
+
+def test_runner_removes_scoped_benchmark_when_identity_rerender_fails(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    from skillevaluator.evaluation.tier3_report import render_agent_eval_html_report
+
+    def render_then_change_source(skill_path: Path, run_dir: Path, **kwargs: Any) -> Path:
+        if (run_dir / "tier3-benchmark.md").exists():
+            raise OSError("injected rerender failure")
+        report = render_agent_eval_html_report(skill_path, run_dir, use_llm_judge=False, **kwargs)
+        (skill_path / "SKILL.md").write_text("# changed during reporting\n", encoding="utf-8")
+        return report
+
+    runner, skill = _stub_runner(
+        monkeypatch, tmp_path, collect=_collect_completed_report_input, html_report=render_then_change_source
+    )
+    (skill / "SKILL.md").write_text("# evaluated source\n", encoding="utf-8")
+    result = runner.run_harbor_eval(skill, ["codex"], output_dir=tmp_path / "results")
+    run_dir = Path(result["run_dir"])
+
+    assert result["publication_target_conflict"]
+    assert "report_path" not in result
+    assert "benchmark_path" not in result
+    assert not (run_dir / "report.html").exists()
+    assert not (run_dir / "tier3-benchmark.md").exists()
+
+
 def test_runner_persists_run_owned_publication_identity_in_final_result(
     monkeypatch: pytest.MonkeyPatch,
     tmp_path: Path,

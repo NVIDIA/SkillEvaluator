@@ -3965,7 +3965,7 @@ print(json.dumps([finding.metadata["matched_value"] for finding in result.findin
         assert mock_run.call_args_list[1].kwargs["replace_env"] is True
         assert child_env["OPENAI_API_KEY"] == public_key
         assert child_env["OPENAI_BASE_URL"] == "https://integrate.api.nvidia.com/v1"
-        assert child_env["SKILLSPECTOR_PROVIDER"] == "openai"
+        assert child_env["SKILLSPECTOR_PROVIDER"] == "nv_build"
         assert child_env["SKILLSPECTOR_MODEL"] == "nvidia/nemotron-3-super-120b-a12b"
         assert "NVIDIA_API_KEY" not in child_env
         assert "ANTHROPIC_API_KEY" not in child_env
@@ -4000,7 +4000,7 @@ print(json.dumps([finding.metadata["matched_value"] for finding in result.findin
         assert "ANTHROPIC_API_KEY" not in child_env
 
     def test_external_skillspector_receives_public_nvidia_build_openai_contract(self, monkeypatch) -> None:
-        """The external scanner receives the documented OpenAI-compatible contract."""
+        """The external scanner keeps its Build model registry and the OpenAI-compatible credentials."""
         monkeypatch.setenv("SKILL_EVAL_LLM_PROVIDER", "nv_build")
         monkeypatch.setenv("NVIDIA_API_KEY", "public-test-key")
         monkeypatch.delenv("SKILLSPECTOR_PROVIDER", raising=False)
@@ -4010,10 +4010,61 @@ print(json.dumps([finding.metadata["matched_value"] for finding in result.findin
         child_env = _skillspector_child_env()
 
         assert child_env is not None
-        assert child_env["SKILLSPECTOR_PROVIDER"] == "openai"
+        assert child_env["SKILLSPECTOR_PROVIDER"] == "nv_build"
         assert child_env["OPENAI_API_KEY"] == "public-test-key"
         assert child_env["OPENAI_BASE_URL"] == "https://integrate.api.nvidia.com/v1"
         assert "NVIDIA_API_KEY" not in child_env
+
+    def test_explicit_nv_build_skillspector_provider_keeps_build_registry(self, monkeypatch) -> None:
+        """Forcing nv_build keeps SkillSpector's Build registry and forwards only the public key."""
+        monkeypatch.setenv("SKILLSPECTOR_PROVIDER", "nv_build")
+        monkeypatch.setenv("SKILLSPECTOR_MODEL", "openai/gpt-oss-120b")
+        monkeypatch.setenv("NVIDIA_API_KEY", "public-test-key")
+        monkeypatch.setenv("OPENAI_API_KEY", "ambient-openai-key")
+        monkeypatch.setenv("OPENAI_BASE_URL", "https://ambient.example.test/v1")
+        monkeypatch.delenv("SKILL_EVAL_LLM_PROVIDER", raising=False)
+        monkeypatch.delenv("SKILL_EVAL_LLM_MODEL", raising=False)
+
+        child_env = _skillspector_child_env()
+
+        assert child_env["SKILLSPECTOR_PROVIDER"] == "nv_build"
+        assert child_env["SKILLSPECTOR_MODEL"] == "openai/gpt-oss-120b"
+        assert child_env["OPENAI_API_KEY"] == "public-test-key"
+        assert child_env["OPENAI_BASE_URL"] == "https://integrate.api.nvidia.com/v1"
+        assert "NVIDIA_API_KEY" not in child_env
+
+    def test_nv_build_child_environment_applies_skillspector_build_output_cap(self, monkeypatch) -> None:
+        """An installed SkillSpector sizes Build requests from its nv_build registry, not OpenAI defaults."""
+        pytest.importorskip("skillspector")
+        model = "openai/gpt-oss-120b"
+        monkeypatch.setenv("SKILL_EVAL_LLM_PROVIDER", "nv_build")
+        monkeypatch.setenv("SKILL_EVAL_LLM_MODEL", model)
+        monkeypatch.setenv("NVIDIA_API_KEY", "public-test-key")
+        for name in ("SKILLSPECTOR_PROVIDER", "SKILLSPECTOR_MODEL", "SKILLSPECTOR_MODEL_REGISTRY"):
+            monkeypatch.delenv(name, raising=False)
+        script = """
+import sys
+from skillspector.llm_utils import is_llm_available
+from skillspector.model_info import get_max_output_tokens
+from skillspector.providers import get_metadata_provider
+model = sys.argv[1]
+provider = get_metadata_provider()
+assert type(provider).__name__ == "NvBuildProvider", type(provider).__name__
+assert is_llm_available() == (True, None), is_llm_available()
+cap = provider.get_max_output_tokens(model)
+assert cap is not None and get_max_output_tokens(model) <= cap, (cap, get_max_output_tokens(model))
+"""
+        # SkillSpector picks its provider at import time, so probe it in a fresh process.
+        completed = subprocess.run(
+            [sys.executable, "-c", script, model],
+            env=_skillspector_child_env(),
+            capture_output=True,
+            text=True,
+            timeout=120,
+            check=False,
+        )
+
+        assert completed.returncode == 0, completed.stderr
 
     @pytest.mark.parametrize(
         ("provider", "credential", "model", "effort"),

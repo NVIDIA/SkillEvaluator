@@ -309,6 +309,15 @@ All notable changes to SkillEvaluator are documented in this file.
   `quality-check` before any report was written. The schema check reports the
   malformed `metadata`, and the quality score counts `metadata.author` and
   `metadata.tags` as missing, as it already did for other non-mapping values.
+- `--llm` security scans on the `nv_build` provider now run SkillSpector with
+  `SKILLSPECTOR_PROVIDER=nv_build` instead of `openai`, so SkillSpector sizes
+  requests from its NVIDIA Build model registry. A Build model with a smaller
+  output cap, such as `openai/gpt-oss-120b` (16,384 tokens), no longer gets
+  SkillSpector's 32,000-token fallback budget, which can exceed what the
+  endpoint accepts and leave the LLM security stage incomplete. An explicit
+  `SKILLSPECTOR_PROVIDER=nv_build` gets the same mapping. The key still reaches
+  SkillSpector only as `OPENAI_API_KEY`, with `OPENAI_BASE_URL` set to the
+  public Build endpoint.
 
 ## 0.6.0 - 2026-10-20
 

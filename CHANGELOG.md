@@ -34,6 +34,11 @@ All notable changes to SkillEvaluator are documented in this file.
   are formatted with units and percent change, Attempt Details groups each
   case's with/without rows and marks passes that missed the goal, and Error
   Recovery lists only trials with faults, retries or warnings.
+- Reusable GitHub Actions onboarding for complete Tier 1 checks, with
+  pinned runtime/workflow consumer templates, affected-skill PR selection,
+  optional hosted reports and updated PR feedback. The new guide separates
+  basic scanning from publisher setup; public image publication and generated
+  release files require a reviewed manual release before consumer use.
 - `--quality-config PATH` on `validate`, `quality-check`, and `tier1` loads the
   deterministic quality check's expected Markdown headings from a YAML file
   instead of the built-in list. Each `expected_headers` entry sets a `heading`

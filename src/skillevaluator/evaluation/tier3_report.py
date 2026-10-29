@@ -3042,8 +3042,8 @@ def _apply_case_findings(
     use_llm: bool,
 ) -> None:
     """Lead the report with the case-based verdict and fixes; also saves them as what_to_fix.json for the CLI."""
+    from skillevaluator.tier3.case_summary import goal_not_met_count, save_case_findings, what_to_fix
     from skillevaluator.tier3.case_summary import verdict as case_verdict
-    from skillevaluator.tier3.case_summary import what_to_fix
 
     source = engine_result
     if not isinstance(source, dict):
@@ -3053,7 +3053,7 @@ def _apply_case_findings(
         return
     try:
         fixes = what_to_fix(source, run_dir=run_dir, skill_path=skill_path, use_llm=use_llm)
-        (run_dir / "what_to_fix.json").write_text(json.dumps(fixes, indent=2), encoding="utf-8")
+        save_case_findings(run_dir, fixes)
     except Exception:  # advisory: the report keeps its metric-based insights
         logger.debug("Case findings skipped", exc_info=True)
         return
@@ -3072,7 +3072,7 @@ def _apply_case_findings(
         message += (
             f" · biggest skill lift: {lifted} {lifts[lifted]:+.2f}." if lifted != top else " with the biggest lift."
         )
-    if missed := sum(f["attempts_lost"] for f in fixes if f["kind"] == "goal not met"):
+    if missed := goal_not_met_count(source, run_dir=run_dir):
         message += f" {missed} passing with-skill attempt(s) did not meet the goal (goal accuracy 0.00)."
     severity = "pass" if label == "skill helps" and not fixes else "fail" if label == "skill hurts" else "warn"
     effect = {"severity": severity, "title": "Skill effect", "message": message, "source": "deterministic"}

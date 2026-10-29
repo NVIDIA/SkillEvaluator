@@ -6,7 +6,6 @@
 from __future__ import annotations
 
 import io
-import json
 import logging
 import math
 import os
@@ -747,18 +746,22 @@ def _render_feedback_and_suggestions(
 
 
 def _case_first_summary(result: Mapping[str, Any], *, console: Console, skill_path: Path | None) -> bool:
-    from skillevaluator.tier3.case_summary import render_case_summary, what_to_fix
+    from skillevaluator.tier3.case_summary import (
+        load_case_findings,
+        render_case_summary,
+        save_case_findings,
+        what_to_fix,
+    )
 
     run_dir = result.get("run_dir") or result.get("output_dir")
     fixes = None
     if run_dir and Path(str(run_dir)).is_dir():
-        saved = Path(str(run_dir)) / "what_to_fix.json"
         try:
             # The HTML report render writes this first; reuse it so CLI and report show the same fixes.
-            fixes = json.loads(saved.read_text(encoding="utf-8")) if saved.is_file() else None
+            fixes = load_case_findings(Path(str(run_dir)))
             if not isinstance(fixes, list):
                 fixes = what_to_fix(result, run_dir=Path(str(run_dir)), skill_path=skill_path)
-                saved.write_text(json.dumps(fixes, indent=2), encoding="utf-8")
+                save_case_findings(Path(str(run_dir)), fixes)
         except Exception:  # advisory panel: never break the run summary
             logging.getLogger(__name__).debug("What-to-fix skipped", exc_info=True)
     return render_case_summary(result, console=console, fixes=fixes)

@@ -59,5 +59,49 @@ def test_report_says_nothing_to_fix_when_every_case_passes_and_meets_its_goal(tm
     html = render_agent_eval_html_report(tmp_path, run, use_llm_judge=False).read_text(encoding="utf-8")
 
     assert json.loads((run / "what_to_fix.json").read_text()) == []
-    assert "Nothing to fix: every with-skill attempt passed and met its goal" in html
+    assert "Nothing to fix in the available case evidence." in html
     assert "goal not met (0.00)" not in html
+
+
+def test_goal_flags_keep_agent_identity_when_trial_names_repeat(tmp_path) -> None:
+    import re
+    import shutil
+
+    run = _run(tmp_path, goal_accuracy=0.0)
+    shutil.copytree(run / "opencode", run / "z-other")
+    reward_path = run / "z-other" / "with-skill" / "trials" / "case__1" / "reward.json"
+    reward = json.loads(reward_path.read_text())
+    reward["goal_accuracy"] = 1.0
+    reward_path.write_text(json.dumps(reward))
+    source = json.loads((run / "result.json").read_text())
+    source["agents"]["z-other"] = source["agents"]["opencode"]
+    (run / "result.json").write_text(json.dumps(source))
+
+    html = render_agent_eval_html_report(tmp_path, run, use_llm_judge=False).read_text(encoding="utf-8")
+    attempts = html.split('id="t3-attempts-table"', 1)[1].split("</table>", 1)[0]
+    rows = re.findall(r"<tr>(.*?)</tr>", attempts, flags=re.DOTALL)
+    missed = [row for row in rows if "goal not met (0.00)" in row]
+    assert len(missed) == 1
+    assert "opencode" in missed[0] and "With skill" in missed[0]
+
+
+def test_goal_count_includes_passes_in_a_case_with_other_failed_attempts(tmp_path) -> None:
+    run = _run(tmp_path, goal_accuracy=0.0)
+    source = json.loads((run / "result.json").read_text())
+    case = source["agents"]["opencode"]["pass_at_k"]["with_skill"]["cases"]["case"]
+    case["attempts"].append({"attempt": 2, "trial": "case__2", "score": 0.2, "passed": False})
+    (run / "result.json").write_text(json.dumps(source))
+    html = render_agent_eval_html_report(tmp_path, run, use_llm_judge=False).read_text(encoding="utf-8")
+    assert "1 passing with-skill attempt(s) did not meet the goal" in html
+
+
+def test_truncated_attempt_details_do_not_invent_an_attempts_passed_count(tmp_path) -> None:
+    run = _run(tmp_path, goal_accuracy=1.0)
+    for arm in ("with-skill", "without-skill"):
+        summary_path = run / "opencode" / arm / "summary.json"
+        summary = json.loads(summary_path.read_text())
+        summary["pass_at_k"]["attempts_used"] = 4
+        summary["pass_at_k"]["cases"]["case"]["attempt_details_truncated"] = True
+        summary_path.write_text(json.dumps(summary))
+    html = render_agent_eval_html_report(tmp_path, run, use_llm_judge=False).read_text(encoding="utf-8")
+    assert "4 scored; pass details truncated" in html

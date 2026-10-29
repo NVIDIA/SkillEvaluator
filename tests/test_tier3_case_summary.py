@@ -67,10 +67,10 @@ def test_grid_shows_one_row_per_case_with_attempt_marks_per_agent() -> None:
     assert "✗✗ → ✓✓  +100" in rows["c1"] and "- → ✓✗  ?" in rows["c1"]
     assert "- → ✗✓  ?" in rows["c2"] and "✓✓ → ✗⊘  ?" in rows["c2"]
     rates = next(line for line in output.splitlines() if line.startswith("success rate"))
-    assert "0% → 75%  +75 pp" in rates and rates.rstrip().endswith("?")
+    assert "0% → 75%  ?" in rates and rates.rstrip().endswith("?")
     assert output.index("effectiveness") < output.index("security")
     assert output.count("(without → with skill)") == 2 and "change in pass rate" in output
-    assert "skill helps   claude-code +75 pp · codex: 1 attempt(s) did not run" in output
+    assert "inconclusive" in output and "conditions cover different cases" in output
 
 
 def test_verdict_thresholds() -> None:
@@ -297,7 +297,7 @@ def test_how_to_improve_says_nothing_to_fix_only_when_the_list_was_computed_and_
     for fixes, expected in (([], True), (None, False)):
         console = Console(record=True, width=120)
         render_case_summary(result, console=console, fixes=fixes)
-        assert ("How to improve: nothing to fix." in console.export_text()) is expected
+        assert ("How to improve: nothing to fix in the available case evidence." in console.export_text()) is expected
 
 
 def test_passing_attempts_that_miss_the_goal_are_reported_with_a_prompt_fix(tmp_path: Path) -> None:

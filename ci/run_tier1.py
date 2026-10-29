@@ -675,9 +675,10 @@ def run(workspace: Path, reports: Path, environ: dict[str, str], *, execute=None
                     )
                 if logged not in results:
                     return
+                # Drop each report once it is logged; only unlogged ones stay in memory.
                 log_result(
                     rows[logged],
-                    results[logged],
+                    results.pop(logged),
                     annotations=environ.get("GITHUB_ACTIONS") == "true",
                     budget=annotation_budget,
                 )

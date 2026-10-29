@@ -5,6 +5,7 @@
 
 import contextlib
 import errno
+import gc
 import importlib.util
 import io
 import json
@@ -17,6 +18,7 @@ import sys
 import threading
 import time
 import types
+import weakref
 import zipfile
 from pathlib import Path
 from subprocess import CompletedProcess
@@ -1175,3 +1177,33 @@ def test_second_ctrl_c_does_not_leave_the_runner_waiting(tmp_path):
             process.kill()
             process.wait()
         kill_quietly(survivors)
+
+
+def test_each_report_is_released_once_its_result_is_logged(tmp_path, monkeypatch):
+    # Reports can be 32 MiB each; 100 of them must not stay in memory.
+    workspace = tmp_path / "workspace"
+    for index in range(5):
+        skill(workspace, f"skills/s{index}")
+    responses = {f"skill-{index:03d}": (0, payload()) for index in range(1, 6)}
+    load, reports, alive = runner._load_report, [], []
+
+    class Report(dict):
+        pass
+
+    def tracked(path):
+        report = Report(load(path))
+        reports.append(weakref.ref(report))
+        return report
+
+    def before(name):
+        gc.collect()
+        alive.append(sum(report() is not None for report in reports))
+
+    monkeypatch.setattr(runner, "_load_report", tracked)
+    environment = {"SCAN_WORKERS": "1"}
+    assert (
+        runner.run(workspace, tmp_path / "reports", environment, execute=parallel_cli(responses, [], before=before))
+        == 0
+    )
+    # Only the latest result may still be referenced when the next scan starts.
+    assert alive == [0, 1, 1, 1, 1]

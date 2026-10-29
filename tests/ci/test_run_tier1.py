@@ -1271,3 +1271,28 @@ def test_symlinked_worker_directory_fails_before_scanning(tmp_path):
     summary = json.loads((reports / "summary.json").read_text())
     assert summary["overall_status"] == "error"
     assert summary["error"] == "Scan worker directories must be private directories owned by this user."
+
+
+@pytest.mark.parametrize("workers", ["1", "4"])
+def test_unexpected_worker_error_is_a_row_error_and_later_skills_still_run(tmp_path, capsys, workers):
+    workspace = tmp_path / "workspace"
+    for name in ("a", "b", "c"):
+        skill(workspace, f"skills/{name}")
+    reports, calls = tmp_path / "reports", []
+    passing = parallel_cli({"skill-002": (0, payload()), "skill-003": (0, payload())}, calls)
+
+    def execute(argv, **kwargs):
+        if report_dir(Path(argv[argv.index("-o") + 1])) == "skill-001":
+            raise RuntimeError("untrusted worker text")
+        return passing(argv, **kwargs)
+
+    assert runner.run(workspace, reports, {"SCAN_WORKERS": workers}, execute=execute) == 1
+    assert sorted(name for name, _ in calls) == ["skill-002", "skill-003"]
+    rows = json.loads((reports / "summary.json").read_text())["skills"]
+    assert rows[0]["error"] == "Evaluator execution failed unexpectedly; no result is claimed."
+    assert [row["passed"] for row in rows] == [False, True, True]
+    captured = capsys.readouterr()
+    for name in ("a", "b", "c"):
+        assert f'Skill result: "skills/{name}"' in captured.out
+    assert "untrusted worker text" not in captured.out + captured.err
+    assert all("untrusted worker text" not in text for text in scan_outputs(reports).values())

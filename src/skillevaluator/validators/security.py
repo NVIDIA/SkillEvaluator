@@ -2421,6 +2421,22 @@ class SecurityValidator(ValidatorBase):
                 group["occurrences"].append((relative_path, finding_data["line"]))
                 group["confidences"].append(finding_data.get("confidence", "high"))
 
+        from skillevaluator.utils.secret_redaction import (
+            SENSITIVE_PII_CATEGORIES,
+            Redactor,
+            sensitive_values,
+        )
+
+        secret_values = set()
+        sensitive_patterns = [item for item in self._compile_pii_patterns([]) if item[0] in SENSITIVE_PII_CATEGORIES]
+        for group in groups.values():
+            first = group["first"]
+            line = first.get("line_content") or ""
+            secret_values.update(sensitive_values(first["category"], first.get("matched_value") or "", line))
+            for category, pattern, _exceptions, _definition in sensitive_patterns:
+                for match in pattern.finditer(line):
+                    secret_values.update(sensitive_values(category, match.group(), line))
+        redactor = Redactor(secret_values)
         confidence_rank = {"low": 0, "medium": 1, "high": 2}
         for group in groups.values():
             first = group["first"]
@@ -2428,25 +2444,29 @@ class SecurityValidator(ValidatorBase):
             occurrences = group["occurrences"]
             severity = first["severity"].upper()
 
-            message = f"{first['description']}: {value}" if value else first["description"]
+            sensitive = first["category"] in SENSITIVE_PII_CATEGORIES
+            display_value = "[REDACTED]" if sensitive and value else value
+            message = f"{first['description']}: {display_value}" if display_value else first["description"]
+            message = redactor.text(message)
             metadata: dict = {"confidence": max(group["confidences"], key=lambda c: confidence_rank.get(c, 1))}
             if value:
-                metadata["matched_value"] = value
+                metadata["matched_value"] = display_value
                 metadata["occurrence_count"] = len(occurrences)
                 metadata["occurrences"] = [{"file": f, "line": line} for f, line in occurrences]
             if len(occurrences) > 1:
                 message += f" — {len(occurrences)} occurrences ({self._format_occurrences(occurrences)})"
+                message = redactor.text(message)
 
             finding = Finding(
                 category="PII",
                 severity=severity,
                 check_name=first["category"],
                 message=message,
-                file_path=group["first_file"],
+                file_path=redactor.text(group["first_file"]),
                 line_number=first["line"],
-                line_content=first.get("line_content"),
+                line_content=None if sensitive else redactor.text(first.get("line_content") or "") or None,
                 suggestion=first.get("suggestion"),
-                metadata=metadata,
+                metadata=redactor.object(metadata),
             )
             result.add_structured_finding(finding, is_error=severity in ("CRITICAL", "HIGH"))
 

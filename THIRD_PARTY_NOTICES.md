@@ -12,6 +12,20 @@ records the exact resolved dependency set used for this release.
 | Security | Bandit (Apache-2.0), pip-audit (Apache-2.0) |
 | Dashboard | Streamlit (Apache-2.0) |
 
+## Tier 1 CI container
+
+The optional `ci/Dockerfile.tier1` image also installs these standalone scanners;
+they are not included in the SkillEvaluator wheel. Their upstream sources and
+licenses are available at the pinned revisions below. Python package license
+metadata remains in the image's scanner environments; the Gitleaks binary's
+license is retained at `/usr/local/share/licenses/gitleaks/LICENSE`.
+
+| Tool | Pinned source | License |
+| --- | --- | --- |
+| Semgrep | [v1.182.0](https://github.com/semgrep/semgrep/tree/v1.182.0) | LGPL-2.1 |
+| SkillSpector | [c7958a3](https://github.com/NVIDIA/SkillSpector/tree/c7958a3268d9498644b22edb75d0f051bbc8cbfc) | Apache-2.0 |
+| Gitleaks | [v8.30.0](https://github.com/gitleaks/gitleaks/tree/v8.30.0) | MIT |
+
 ## Unicode security data
 
 `src/skillevaluator/publication_text.py` contains Unicode 15.1 general-category

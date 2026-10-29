@@ -3,6 +3,7 @@
 
 """Tests for all reporters in the reporting module."""
 
+import copy
 import json
 import re
 import tempfile
@@ -245,6 +246,47 @@ class TestCLIReporter:
             expected_baseline,
             expected_lift,
         ]
+
+    @pytest.mark.parametrize(("with_skill", "expected_with_skill"), [(None, "n/a"), (0.0, "0.00"), (0.95, "0.95")])
+    @pytest.mark.parametrize(("baseline", "expected_baseline"), [(None, "n/a"), (0.0, "0.00"), (0.95, "0.95")])
+    @pytest.mark.parametrize(("lift", "expected_lift"), [(None, "n/a"), (0.0, "+0.00"), (0.95, "+0.95")])
+    def test_render_agent_eval_score_availability(
+        self, with_skill, expected_with_skill, baseline, expected_baseline, lift, expected_lift
+    ) -> None:
+        result = ValidationResult(validator_name="AGENT_EVAL")
+        result.metadata["agent_eval"] = {
+            "evaluators": {"accuracy": {"with_skill": with_skill, "baseline": baseline, "lift": lift}},
+        }
+
+        output = CLIReporter().render(result)
+        plain_output = re.sub(r"\x1b\[[0-9;]*m", "", output)
+        row = next(line for line in plain_output.splitlines() if "Accuracy" in line)
+
+        assert [cell.strip() for cell in row.split("│")[1:-1]] == [
+            "Accuracy",
+            expected_with_skill,
+            expected_baseline,
+            expected_lift,
+        ]
+
+    @pytest.mark.parametrize(
+        ("scores", "expected_cells"),
+        [
+            ({}, ["n/a", "n/a", "n/a"]),
+            ({"with_skill": 0.0}, ["0.00", "n/a", "n/a"]),
+            ({"baseline": 0.0}, ["n/a", "0.00", "n/a"]),
+            ({"lift": 0.0}, ["n/a", "n/a", "+0.00"]),
+        ],
+    )
+    def test_render_agent_eval_missing_scores_are_unavailable(self, scores, expected_cells) -> None:
+        result = ValidationResult(validator_name="AGENT_EVAL")
+        result.metadata["agent_eval"] = {"evaluators": {"accuracy": scores}}
+
+        output = CLIReporter().render(result)
+        plain_output = re.sub(r"\x1b\[[0-9;]*m", "", output)
+        row = next(line for line in plain_output.splitlines() if "Accuracy" in line)
+
+        assert [cell.strip() for cell in row.split("│")[1:-1]] == ["Accuracy", *expected_cells]
 
     def test_render_failure_escapes_markup_in_finding_fields(self) -> None:
         """Dynamic finding text should not be parsed as Rich markup."""
@@ -1237,6 +1279,66 @@ class TestGatingSplit:
         assert "team-b/shared-skill" in tier2
 
 
+@pytest.mark.parametrize(
+    ("baseline_scores", "expected_baseline", "expected_lift", "markdown_cells"),
+    [
+        ({}, None, None, "0.95 | N/A | N/A"),
+        ({"accuracy": 0.0}, 0.0, 0.95, "0.95 | 0.00 | +0.95"),
+        ({"accuracy": 0.95}, 0.95, 0.0, "0.95 | 0.95 | +0.00"),
+    ],
+)
+def test_emit_reports_preserves_unavailable_evaluator_lift(
+    tmp_path, capsys, baseline_scores, expected_baseline, expected_lift, markdown_cells
+) -> None:
+    agents = {
+        "codex": {
+            "execution_status": "succeeded",
+            "execution_errors": [],
+            "expected_attempts": 1,
+            "scored_attempts": 1,
+            "with_skill": {"accuracy": 0.95},
+            "without_skill": baseline_scores,
+            "rewards": [{"entry_id": "case-1", "accuracy": 0.95}],
+        }
+    }
+    original_agents = copy.deepcopy(agents)
+    payload = build_agent_eval_payload("demo-skill", agents, use_llm_judge=False)
+    assert payload is not None
+    expected_evaluator = {"with_skill": 0.95, "baseline": expected_baseline, "lift": expected_lift}
+    assert payload["evaluators"]["accuracy"] == expected_evaluator
+    assert payload["agents"]["codex"]["evaluators"]["accuracy"] == expected_evaluator
+    assert payload["evaluator_cards"][0]["lift"] == expected_lift
+    original_payload = copy.deepcopy(payload)
+    result = ValidationResult(validator_name="AGENT_EVAL")
+    result.metadata["agent_eval"] = payload
+    # Findings make emit_reports include the detailed CLI evaluator table.
+    result.add_finding(
+        Finding(
+            category="AGENT_EVAL",
+            severity=Severity.LOW,
+            check_name="diagnostic",
+            message="Review evaluation diagnostics.",
+            file_path="SKILL.md",
+        )
+    )
+
+    emit_reports([result], report_formats=("cli", "json", "html"), output_dir=tmp_path, basename="skip-baseline")
+
+    assert "Accuracy" in capsys.readouterr().out
+    json_report = json.loads((tmp_path / "skip-baseline.json").read_text())
+    saved_payload = json_report["tier3"]
+    assert json_report["results"][0]["tier3"]["evaluators"]["accuracy"] == expected_evaluator
+    assert saved_payload["evaluators"]["accuracy"] == expected_evaluator
+    assert saved_payload["agents"]["codex"]["evaluators"]["accuracy"] == expected_evaluator
+    html_report = (tmp_path / "skip-baseline.html").read_text()
+    assert "<!DOCTYPE html>" in html_report
+    assert "demo-skill" in html_report
+    replayed = ValidationResult(validator_name="AGENT_EVAL", metadata={"agent_eval": saved_payload})
+    assert f"| Accuracy | {markdown_cells} |" in MarkdownReporter(include_timestamp=False).render_all([replayed])
+    assert agents == original_agents
+    assert payload == original_payload
+
+
 class TestHTMLReporter:
     """Tests for HTMLReporter."""
 
@@ -1524,7 +1626,7 @@ class TestMarkdownReporter:
         output = MarkdownReporter(include_timestamp=False).render_all([result])
 
         assert "### Evaluator Scores" in output
-        assert "| Accuracy | 0.90 | N/A | +0.00 |" in output
+        assert "| Accuracy | 0.90 | N/A | N/A |" in output
 
     def test_render_tier3_normalized_evidence_uses_distinct_evidence_ids(self) -> None:
         result = _tier3_harbor_result()

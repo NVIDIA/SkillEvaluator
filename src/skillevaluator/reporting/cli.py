@@ -378,9 +378,9 @@ class CLIReporter(ReporterBase):
             table.add_column("Lift", justify="right")
 
             for name, scores in evaluators.items():
-                ws = scores.get("with_skill", 0.0)
-                bl = scores.get("baseline", 0.0)
-                lift = scores.get("lift", 0.0)
+                ws = scores.get("with_skill")
+                bl = scores.get("baseline")
+                lift = scores.get("lift")
                 if lift is None:
                     lift_text = "n/a"
                 else:
@@ -388,7 +388,7 @@ class CLIReporter(ReporterBase):
                     lift_text = f"[{lc}]{lift:+.2f}[/{lc}]"
                 table.add_row(
                     escape_markup(str(name).replace("_", " ").title()),
-                    f"{ws:.2f}",
+                    f"{ws:.2f}" if ws is not None else "n/a",
                     f"{bl:.2f}" if bl is not None else "n/a",
                     lift_text,
                 )

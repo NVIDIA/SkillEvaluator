@@ -15,7 +15,8 @@ import errno
 import os
 import stat
 from dataclasses import dataclass
-from pathlib import Path
+from pathlib import Path, PurePath
+from typing import Literal, NamedTuple
 
 _OPEN_SUPPORTS_DIR_FD = os.open in os.supports_dir_fd
 
@@ -80,6 +81,82 @@ def stat_is_link_or_reparse(metadata: os.stat_result) -> bool:
     """Return whether metadata identifies a symlink or Windows reparse point."""
     reparse_flag = getattr(stat, "FILE_ATTRIBUTE_REPARSE_POINT", 0x400)
     return stat.S_ISLNK(metadata.st_mode) or bool(getattr(metadata, "st_file_attributes", 0) & reparse_flag)
+
+
+def read_bounded(descriptor: int, max_bytes: int, *, truncate: bool = False, relative_path: str = ".") -> bytes:
+    """Read at most ``max_bytes`` bytes from an open descriptor, 64 KiB at a time.
+
+    With ``truncate`` the first ``max_bytes`` bytes are returned and the rest
+    of the file is never read. Otherwise one more byte is requested to detect
+    a larger file, which raises ``SecurePathError`` (``file_size_limit``,
+    naming ``relative_path``) after reading at most ``max_bytes + 1`` bytes.
+    """
+    if max_bytes < 0:
+        raise ValueError("max_bytes must be non-negative")
+    limit = max_bytes if truncate else max_bytes + 1
+    chunks: list[bytes] = []
+    total = 0
+    while total < limit:
+        chunk = os.read(descriptor, min(65_536, limit - total))
+        if not chunk:
+            break
+        chunks.append(chunk)
+        total += len(chunk)
+    if total > max_bytes:
+        raise SecurePathError(
+            "file_size_limit",
+            f"Selected file exceeds the {max_bytes}-byte limit: {relative_path}",
+            relative_path=relative_path,
+            metadata={"actual_bytes": total, "limit_bytes": max_bytes},
+        )
+    return b"".join(chunks)
+
+
+LstatOutcome = Literal["ok", "missing", "not_dir", "link", "error"]
+
+
+class LstatWalk(NamedTuple):
+    """Where :func:`lstat_walk` stopped and what it saw there.
+
+    ``ok``: every component was inspected; ``metadata`` is the last one's
+    (``None`` for an empty path) and its type is left to the caller.
+    ``missing`` (``FileNotFoundError`` or ``NotADirectoryError``) and
+    ``error`` (any other ``OSError``) carry the exception in ``error``;
+    ``link`` (a symlink or reparse point) and ``not_dir`` (a component before
+    the last is not a directory) carry that component's ``metadata``.
+    ``failing_index`` is the index into ``relative.parts`` of the component
+    that stopped the walk.
+    """
+
+    outcome: LstatOutcome
+    metadata: os.stat_result | None
+    failing_index: int | None
+    error: OSError | None = None
+
+
+def lstat_walk(root: Path, relative: PurePath) -> LstatWalk:
+    """Inspect ``root / relative`` one component at a time with ``lstat``, never following a link.
+
+    The walk stops at the first component that is missing, cannot be
+    inspected, is a symlink or reparse point, or (before the last) is not a
+    directory, so nothing below a link is ever inspected.
+    """
+    current = root
+    metadata: os.stat_result | None = None
+    last_index = len(relative.parts) - 1
+    for index, part in enumerate(relative.parts):
+        current = current / part
+        try:
+            metadata = current.lstat()
+        except (FileNotFoundError, NotADirectoryError) as exc:
+            return LstatWalk("missing", None, index, exc)
+        except OSError as exc:
+            return LstatWalk("error", None, index, exc)
+        if stat_is_link_or_reparse(metadata):
+            return LstatWalk("link", metadata, index)
+        if index < last_index and not stat.S_ISDIR(metadata.st_mode):
+            return LstatWalk("not_dir", metadata, index)
+    return LstatWalk("ok", metadata, None)
 
 
 def _absolute_no_resolve(path: Path) -> Path:
@@ -286,24 +363,10 @@ class SecureRoot:
                     relative_path=relative_path.as_posix(),
                     metadata={"actual_bytes": opened.st_size, "limit_bytes": max_bytes},
                 )
-            chunks: list[bytes] = []
-            total = 0
-            while True:
-                chunk = os.read(descriptor, min(65_536, max_bytes + 1 - total))
-                if not chunk:
-                    break
-                chunks.append(chunk)
-                total += len(chunk)
-                if total > max_bytes:
-                    raise SecurePathError(
-                        "file_size_limit",
-                        f"Selected file exceeds the {max_bytes}-byte limit: {relative_path.as_posix()}",
-                        relative_path=relative_path.as_posix(),
-                        metadata={"actual_bytes": total, "limit_bytes": max_bytes},
-                    )
+            raw = read_bounded(descriptor, max_bytes, relative_path=relative_path.as_posix())
             after = os.fstat(descriptor)
             _validate_opened_file(after, relative_path, opened)
-            return b"".join(chunks), opened
+            return raw, opened
         finally:
             os.close(descriptor)
 

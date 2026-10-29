@@ -143,12 +143,11 @@ def slug_from_remote_url(url: str) -> str | None:
     path = path.strip("/")
     if "/-/" in path:  # strip GitLab web suffixes like '/-/tree/main'
         path = path.split("/-/", 1)[0]
-    path = path.removesuffix(".git")
-    slug = path.strip("/")
     # Canonical plugin refs are normalized to lowercase. Git hosting treats the
     # owner/repository portion case-insensitively, so normalize the remote slug
-    # the same way before comparing identities.
-    return slug.lower() or None
+    # the same way before removing the optional suffix and comparing identities.
+    slug = path.strip("/").lower().removesuffix(".git")
+    return slug or None
 
 
 # Remote URL forms whose path names a hosted <owner>/<repo>: https, http, ssh,

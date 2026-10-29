@@ -43,7 +43,7 @@ def normalize_ref(ref: Any) -> str | None:
     if not all(isinstance(value, str) for value in (source, repo, ref_path)):
         return None
     source = source.strip().lower()
-    repo = repo.strip().removesuffix(".git").lower()
+    repo = repo.strip().lower().removesuffix(".git")
     segments = [segment for segment in ref_path.strip().split("/") if segment]
     if not source or not repo or not segments:
         return None

@@ -74,7 +74,7 @@ def test_state_is_empty_and_response_protects_local_artifacts(client: TestClient
 
 
 def test_gzip_assets_decode_exactly_and_keep_boundary_headers(client: TestClient) -> None:
-    for path in ("/", "/app.js", "/style.css"):
+    for path in ("/", "/app.js", "/style.css", "/logo.svg", "/wordmark.svg"):
         identity = client.get(path, headers={"Accept-Encoding": "identity"})
         assert identity.status_code == 200
         assert "content-encoding" not in identity.headers

@@ -122,7 +122,7 @@ include = ["skillevaluator*"]
 [tool.setuptools.package-data]
 "skillevaluator.config" = ["*.yaml", "profiles/*.yaml"]
 "skillevaluator.reporting" = ["templates/*.j2"]
-"skillevaluator.studio" = ["static/*.html", "static/*.css", "static/*.js"]
+"skillevaluator.studio" = ["static/*.html", "static/*.css", "static/*.js", "static/*.svg"]
 "skillevaluator.tier3.harbor" = [
     "templates/*.py",
     "templates/*.sh",

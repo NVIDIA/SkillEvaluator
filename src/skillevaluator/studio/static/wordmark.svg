@@ -1,0 +1,32 @@
+<svg xmlns="http://www.w3.org/2000/svg" width="440" height="128" viewBox="0 0 440 128" role="img" aria-labelledby="se-title se-description" focusable="false">
+  <title id="se-title">SkillEvaluator</title>
+  <desc id="se-description">A progressive evaluation core paired with the SkillEvaluator name on a dark background.</desc>
+  <style>
+    .se-background { fill: #0d1117; stroke: #273129; }
+    .se-panel { fill: #152117; stroke: #304631; }
+    .se-ring-outer { stroke: #39523a; }
+    .se-ring-middle { stroke: #6f9264; }
+    .se-ring-inner { stroke: #dbe8d6; }
+    .se-core { fill: #76b900; stroke: #9bdb34; }
+    .se-check { stroke: #fff; }
+    .se-skill { fill: #fff; }
+    .se-evaluator { fill: #76b900; }
+  </style>
+
+  <rect class="se-background" x=".5" y=".5" width="439" height="127" rx="20" stroke-width="1"/>
+
+  <g aria-hidden="true" transform="translate(16 16) scale(.75)">
+    <rect class="se-panel" x="10.5" y="10.5" width="107" height="107" rx="53.5" stroke-width="1"/>
+    <circle class="se-ring-outer" cx="64" cy="64" r="42" fill="none" stroke-width="5"/>
+    <circle class="se-ring-middle" cx="64" cy="64" r="30" fill="none" stroke-width="5"/>
+    <circle class="se-ring-inner" cx="64" cy="64" r="18" fill="none" stroke-width="5"/>
+    <circle class="se-core" cx="64" cy="64" r="12" stroke-width="1.8"/>
+    <path class="se-check" d="m57.5 64 4.4 4.6 8.8-9.3" fill="none" stroke-width="2.8" stroke-linecap="round" stroke-linejoin="round"/>
+    <circle class="se-core" cx="97" cy="38" r="5" stroke-width="1.4"/>
+    <circle class="se-core" cx="34" cy="82" r="5" stroke-width="1.4"/>
+  </g>
+
+  <text x="132" y="79" font-family="Inter, ui-sans-serif, -apple-system, BlinkMacSystemFont, 'Segoe UI', Helvetica, Arial, sans-serif" font-size="45" font-weight="750" letter-spacing="-1.35">
+    <tspan class="se-skill">Skill</tspan><tspan class="se-evaluator">Evaluator</tspan>
+  </text>
+</svg>

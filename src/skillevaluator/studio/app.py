@@ -207,10 +207,12 @@ def re_safe_filename(name: str) -> str:
 
 async def static(request: Request):
     name = request.path_params.get("name") or "index.html"
-    if name not in {"index.html", "app.js", "style.css"}:
+    if name not in {"index.html", "app.js", "style.css", "logo.svg", "wordmark.svg"}:
         return JSONResponse({"error": "Not found."}, status_code=404)
     path = STATIC / name
-    content_type = {".html": "text/html", ".js": "text/javascript", ".css": "text/css"}[path.suffix]
+    content_type = {".html": "text/html", ".js": "text/javascript", ".css": "text/css", ".svg": "image/svg+xml"}[
+        path.suffix
+    ]
     return Response(path.read_bytes(), media_type=content_type)
 
 

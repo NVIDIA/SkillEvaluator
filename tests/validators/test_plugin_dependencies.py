@@ -23,7 +23,7 @@ from skillevaluator.plugin_dependencies import (
     resolve_repository_identity,
     unverified_groups,
 )
-from skillevaluator.plugin_refs import PLUGIN_REF_SOURCES
+from skillevaluator.plugin_refs import PLUGIN_REF_SOURCES, find_duplicate_refs
 
 REPO = "example-org/example-repo"
 ORIGIN = "https://github.com/Example-Org/example-repo.git"
@@ -59,6 +59,46 @@ def _manifest(plugin: Path, skills: list, rules: list | None = None) -> Path:
         body["rules"] = {"refs": rules}
     (plugin / "agent_plugin.yaml").write_text(json.dumps(body), encoding="utf-8")
     return plugin
+
+
+@requires_git
+@pytest.mark.parametrize("suffix", ["", ".git", ".GIT", ".Git"])
+def test_same_repository_reference_forms_share_suffix_normalization(tmp_path: Path, suffix: str) -> None:
+    repo = _git_repo(tmp_path / "repo")
+    plugin = _manifest(repo / "plugins" / "p", skills=[])
+    _skill(repo / "skills" / "shared")
+    identity = resolve_repository_identity(plugin)
+    repo_name = f"Example-Org/Example-Repo{suffix}"
+    refs = [
+        f"github::{repo_name}::skills::shared",
+        {"source": "github", "repo": repo_name, "path": "skills/shared"},
+    ]
+
+    rows = [classify_ref(ref, kind="skills", plugin_root=plugin, identity=identity) for ref in refs]
+
+    assert [row.state for row in rows] == ["referenced", "referenced"]
+    assert [row.path for row in rows] == ["skills/shared", "skills/shared"]
+    assert len(find_duplicate_refs(refs)) == 1
+    missing_refs = [
+        f"github::{repo_name}::skills::absent",
+        {"source": "github", "repo": repo_name, "path": "skills/absent"},
+    ]
+    missing_rows = [classify_ref(ref, kind="skills", plugin_root=plugin, identity=identity) for ref in missing_refs]
+    assert [row.state for row in missing_rows] == ["missing", "missing"]
+
+
+@requires_git
+@pytest.mark.parametrize("suffix", ["", ".git", ".GIT", ".Git"])
+def test_repository_remote_suffix_matches_reference_identity(tmp_path: Path, suffix: str) -> None:
+    repo = _git_repo(tmp_path / "repo", origin=f"https://github.com/Example-Org/Example-Repo{suffix}")
+    plugin = _manifest(repo / "plugins" / "p", skills=[])
+    _skill(repo / "skills" / "shared")
+    identity = resolve_repository_identity(plugin)
+
+    row = classify_ref(f"github::{REPO}::skills::shared", kind="skills", plugin_root=plugin, identity=identity)
+
+    assert identity.local_slug == REPO
+    assert (row.state, row.path) == ("referenced", "skills/shared")
 
 
 @requires_git

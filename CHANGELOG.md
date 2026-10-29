@@ -172,6 +172,13 @@ All notable changes to SkillEvaluator are documented in this file.
 - Harbor's standalone verifier now runs on Python 3.9 task images after sharing
   deterministic checks with the host evaluator. Packaged verifier checks execute
   on a real Python 3.9 interpreter in CI to retain this compatibility.
+- With `--stop-on-pass`, a retained Harbor agent timeout followed by a matching
+  completed attempt no longer invalidates the scored result. Timeout rewards
+  remain excluded, failure history is retained, and the JSON summaries
+  distinguish scored, recovered, and intentionally skipped attempts. Recovered
+  timeouts are reported under `recovered_trial_failures` and
+  `historical_job_failures` instead of as active failures. Other execution failures and
+  incomplete comparisons still fail validation.
 - Plain removal of recognized regenerable caches no longer receives the Tier 3
   destructive-command penalty. Dynamic commands, mixed targets and other
   destructive operations retain their existing classification in both verifiers.

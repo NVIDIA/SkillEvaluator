@@ -162,6 +162,23 @@ def run_plugin_skill_context_dedup(profile, *, threshold=0.8, model=None, llm_mo
     return results
 
 
+def _security_result(error):
+    result = ValidationResult(validator_name="Context Deduplication")
+    result.add_finding(
+        Finding(
+            "PLUGIN_SECURITY",
+            Severity.HIGH,
+            "unsafe_plugin_filesystem",
+            "Bundle source could not be read safely",
+            file_path=error.relative_path,
+            metadata={"source_error": error.code},
+        )
+    )
+    result.mark_scan_incomplete("bundle-filesystem")
+    result.metadata["security_failure"] = True
+    return result
+
+
 def _catalog_skips(reason):
     return [
         skipped_result(INTER_SKILL_NAME, INTER_SKILL_DESCRIPTION, INTER_SKILL_KEY, reason),
@@ -186,6 +203,10 @@ def run_plugin_dedup_scan(
         return results
     try:
         profile = load_plugin_profile(plugin_root)
+    except SecurePathError as exc:
+        results.append(_security_result(exc))
+        results.extend(_catalog_skips("Unsafe bundle source; catalog comparisons did not run"))
+        return results
     except ValueError as exc:
         failed = ValidationResult(validator_name="Context Deduplication")
         failed.mark_scan_incomplete("bundle-inventory")
@@ -198,6 +219,9 @@ def run_plugin_dedup_scan(
         if run_context
         else [_skip_context("Context comparison disabled")]
     )
+    if any(result.metadata.get("security_failure") for result in results):
+        results.extend(_catalog_skips("Unsafe bundle source; catalog comparisons did not run"))
+        return results
     if catalog is None:
         results.extend(_catalog_skips("No local catalog supplied"))
         return results
@@ -211,6 +235,9 @@ def run_plugin_dedup_scan(
                 profile, local, threshold=similarity_threshold, llm_verdict=llm_verdict, llm_model=llm_model
             )
         )
+    except SecurePathError as exc:
+        results.append(_security_result(exc))
+        results.extend(_catalog_skips("Unsafe bundle source; catalog comparisons did not run"))
     except (ValueError, SimilarityConfigError) as exc:
         reason = llm_failure_diagnostic(exc) if isinstance(exc, SimilarityConfigError) else str(exc)
         results.extend(_catalog_skips(f"Local catalog comparison unavailable: {reason}"))

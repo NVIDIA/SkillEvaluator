@@ -321,6 +321,7 @@ def test_verdict_prompt_accepts_bounded_long_names_and_newlines(modules, tmp_pat
     from skillevaluator.plugin_manifest import locate_plugin_manifest
 
     inv.selected_manifest = locate_plugin_manifest(inv.root)
+    inv.manifest_sha256 = hashlib.sha256((inv.root / "agent_plugin.yaml").read_bytes()).hexdigest()
     monkeypatch.setattr(modules.profile, "plugin_inventory_for_root", lambda _path: inv)
     profile = modules.profile.load_plugin_profile(inv.root)
     cat, _, _ = load_catalog(modules, tmp_path, plugins=[bundle_entry("other")])
@@ -547,3 +548,129 @@ def test_catalog_provider_failure_is_an_explicit_skip(modules, tmp_path, monkeyp
     results = modules.commands.run_plugin_dedup_scan(inv.root, run_context=False, catalog=path)
     summaries = [r.metadata.get("plugin", {}).get("catalog_skill_similarity") for r in results]
     assert any(summary and summary["status"] == "skipped" for summary in summaries)
+
+
+def test_private_catalog_builder_saves_v2_bundle_and_skill_entries(modules, tmp_path, monkeypatch):
+    collection = tmp_path / "collection"
+    first = inventory(collection / "a", skill_paths=("custom/a",), name="same")
+    second = inventory(collection / "b", skill_paths=("skills/b",), name="same")
+    snapshots = {first.root: first, second.root: second}
+    monkeypatch.setattr(modules.profile, "plugin_inventory_for_root", lambda path: snapshots[path])
+    client = FakeEmbedding()
+    catalog = modules.catalog.LocalCatalog.build(collection, client=client)
+    path = tmp_path / "built.json"
+    catalog.save(path)
+    payload = json.loads(path.read_text())
+    assert payload["schema_version"] == 2
+    assert [entry["path"] for entry in payload["plugins"]] == ["a", "b"]
+    assert [entry["name"] for entry in payload["plugins"]] == ["same", "same"]
+    assert [entry["path"] for entry in payload["entries"]] == ["a/custom/a", "b/skills/b"]
+    loaded = modules.catalog.LocalCatalog.load(path, client=client)
+    assert len(loaded.plugins) == len(loaded.skills) == 2
+
+
+def test_private_catalog_build_refuses_entry_overflow_before_embedding(modules, tmp_path, monkeypatch):
+    inv = inventory(tmp_path / "bundle", skill_paths=("skills/a", "skills/b"))
+    monkeypatch.setattr(modules.profile, "plugin_inventory_for_root", lambda _path: inv)
+    client = FakeEmbedding()
+    with pytest.raises(ValueError, match="entry limit"):
+        modules.catalog.LocalCatalog.build(inv.root, client=client, max_entries=2)
+    assert client.calls == []
+
+
+def test_private_catalog_builder_refuses_vector_budget_before_later_batches(modules, tmp_path, monkeypatch):
+    inv = inventory(tmp_path / "bundle", skill_paths=("skills/a", "skills/b"))
+    monkeypatch.setattr(modules.profile, "plugin_inventory_for_root", lambda _path: inv)
+    monkeypatch.setattr(modules.catalog, "MAX_CATALOG_VECTOR_VALUES", 4)
+    monkeypatch.setattr(modules.catalog.core, "EMBEDDING_BATCH_SIZE", 1)
+    client = FakeEmbedding()
+    with pytest.raises(ValueError, match="scalar"):
+        modules.catalog.LocalCatalog.build(inv.root, client=client)
+    assert len(client.calls) == 1
+
+
+def test_private_catalog_builder_bounds_source_bytes_before_embedding(modules, tmp_path, monkeypatch):
+    inv = inventory(tmp_path / "bundle")
+    monkeypatch.setattr(modules.profile, "plugin_inventory_for_root", lambda _path: inv)
+    monkeypatch.setattr(modules.catalog, "MAX_CATALOG_SOURCE_BYTES", 1, raising=False)
+    client = FakeEmbedding()
+    with pytest.raises(ValueError, match="byte"):
+        modules.catalog.LocalCatalog.build(inv.root, client=client)
+    assert client.calls == []
+
+
+def test_private_catalog_save_refuses_unsafe_output_and_invalid_vectors(modules, tmp_path):
+    catalog, _, path = load_catalog(modules, tmp_path, skills=[skill_entry("a")], plugins=[bundle_entry("bundle")])
+    outside = tmp_path / "outside.json"
+    outside.write_text("untouched")
+    linked = tmp_path / "linked.json"
+    linked.symlink_to(outside)
+    with pytest.raises(ValueError):
+        catalog.save(linked)
+    assert outside.read_text() == "untouched"
+    original = path.read_bytes()
+    catalog.skills[0].embedding[0] = float("nan")
+    with pytest.raises(ValueError):
+        catalog.save(path)
+    assert path.read_bytes() == original
+
+
+def test_private_save_keeps_v1_rules_and_skill_entries_compatible(modules, tmp_path):
+    catalog, client, _ = load_catalog(
+        modules, tmp_path, version=1, skills=[skill_entry("rules/a", content_type="rules"), skill_entry("skills/a")]
+    )
+    path = tmp_path / "saved-v1.json"
+    catalog.save(path)
+    registry = EmbeddingRegistry(client)
+    registry.load_catalog(path)
+    assert registry.size == 2
+
+
+def test_private_catalog_build_validates_metadata_before_embedding(modules, tmp_path, monkeypatch):
+    inv = inventory(tmp_path / "bundle")
+    inv.selected_skills[0].frontmatter["name"] = "bad\nname"
+    monkeypatch.setattr(modules.profile, "plugin_inventory_for_root", lambda _path: inv)
+    client = FakeEmbedding()
+    with pytest.raises(ValueError):
+        modules.catalog.LocalCatalog.build(inv.root, client=client)
+    assert client.calls == []
+
+
+def test_disappearing_inventory_after_safe_manifest_is_a_secure_refusal(modules, tmp_path, monkeypatch):
+    from skillevaluator.utils.secure_fs import SecurePathError
+
+    inv = inventory(tmp_path / "bundle")
+    monkeypatch.setattr(modules.profile, "plugin_inventory_for_root", lambda _path: None)
+    with pytest.raises(SecurePathError):
+        modules.profile.load_plugin_profile(inv.root)
+
+
+def test_catalog_builder_does_not_skip_an_unsafe_source_tree(modules, tmp_path, monkeypatch):
+    from skillevaluator.utils.secure_fs import SecurePathError
+
+    inv = inventory(tmp_path / "bundle", complete=False)
+    monkeypatch.setattr(modules.profile, "plugin_inventory_for_root", lambda _path: inv)
+    client = FakeEmbedding()
+    with pytest.raises(SecurePathError):
+        modules.catalog.LocalCatalog.build(inv.root, client=client)
+    assert client.calls == []
+
+
+def test_post_context_source_swap_blocks_catalog_provider_work(modules, tmp_path, monkeypatch):
+    inv = inventory(tmp_path / "bundle", skill_paths=("skills/a",))
+    client = FakeEmbedding()
+    outside = tmp_path / "outside.md"
+    outside.write_text("outside")
+
+    def provider_then_swap(_profile, **_kwargs):
+        client.embed(["simulated context chunk"])
+        (inv.root / "skills/a/link.md").symlink_to(outside)
+        return []
+
+    monkeypatch.setattr(modules.commands, "run_plugin_skill_context_dedup", provider_then_swap)
+    monkeypatch.setattr(modules.commands, "EmbeddingClient", lambda **_kwargs: client)
+    _, _, path = load_catalog(modules, tmp_path, client=client, skills=[skill_entry("other")])
+    results = modules.commands.run_plugin_dedup_scan(inv.root, catalog=path)
+    blocked = [result for result in results if result.metadata.get("security_failure")]
+    assert blocked and all(not result.passed for result in blocked)
+    assert len(client.calls) == 1

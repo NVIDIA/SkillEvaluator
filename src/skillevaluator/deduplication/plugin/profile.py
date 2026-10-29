@@ -5,13 +5,17 @@
 
 from __future__ import annotations
 
+import hashlib
 from dataclasses import dataclass
 from pathlib import Path, PurePosixPath
 from typing import Any
 
 from skillevaluator.constants import DESCRIPTION_MAX_LENGTH
 from skillevaluator.embedding.extractor import ContentEntry
+from skillevaluator.plugin_formats import parse_manifest_text
+from skillevaluator.plugin_manifest import PluginManifestPathError, locate_plugin_manifest
 from skillevaluator.plugin_refs import normalize_ref
+from skillevaluator.utils.secure_fs import SecurePathError
 from skillevaluator.utils.structured_data import require_bounded_string
 
 PLUGIN_NAME_MAX_REPORT_CHARS = 256
@@ -72,13 +76,38 @@ def load_plugin_profile(plugin_root: Path) -> PluginProfile:
     Calling again after provider work intentionally obtains a new snapshot.
     An incomplete discovery never turns into a clean comparison result.
     """
-    inventory = plugin_inventory_for_root(plugin_root)
-    if inventory is None:
+    located = locate_plugin_manifest(plugin_root)
+    if located is None:
         raise ValueError("No supported bundle manifest found")
-    if not inventory.complete or not inventory.tree_complete:
+    try:
+        raw = located.read_text()
+    except PluginManifestPathError as exc:
+        if exc.content_error:
+            raise ValueError("Bundle manifest exceeds readable comparison limits") from exc
+        raise
+    inventory = plugin_inventory_for_root(plugin_root)
+    # Inventory composition converts read failures into findings. Recheck the
+    # original secure identity so a source swap cannot become an advisory skip.
+    try:
+        located.read_text()
+    except PluginManifestPathError as exc:
+        raise SecurePathError("source_changed", "Bundle manifest changed during discovery") from exc
+    if (
+        inventory is None
+        or not inventory.manifest_sha256
+        or inventory.selected_manifest.manifest_filename != located.manifest_filename
+        or inventory.manifest_sha256 != hashlib.sha256(raw.encode("utf-8")).hexdigest()
+    ):
+        raise SecurePathError("source_changed", "Bundle manifest identity changed during discovery")
+    if not inventory.tree_complete:
+        raise SecurePathError("source_scan_incomplete", "Bundle source tree discovery is incomplete")
+    if getattr(inventory.discovery, "unread_files", 0) or any(
+        member.problem in {"unsafe", "unreadable"} for member in inventory.selected_components
+    ):
+        raise SecurePathError("source_read_failed", "Bundle source paths could not be read safely")
+    if not inventory.complete:
         raise ValueError("Bundle inventory is incomplete; comparisons did not run")
-    located = inventory.selected_manifest
-    data: Any = located.parse_for_audit()
+    data: Any = parse_manifest_text(located.manifest_type, raw.removeprefix("\ufeff"))
     if not isinstance(data, dict):
         raise ValueError("Bundle manifest could not be parsed")
     name = require_bounded_string(

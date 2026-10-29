@@ -149,6 +149,107 @@ def _scan_units(skills: list[str], excluded: frozenset[str]) -> list[str]:
     return units
 
 
+def _partition_views(
+    snapshot: Path, destination: Path, files: tuple[PurePosixPath, ...], skills: list[str]
+) -> dict[str, Path]:
+    """Give each source file to its deepest skill, or to the plugin root.
+
+    Readers inspect the complete, already verified snapshot once. Partition
+    roots retain each skill's own manifest and root-relative scanner semantics,
+    while parent scanners cannot rediscover nested skills or borrow their author,
+    license, dependencies, or tests.
+    """
+    units = [".", *sorted(set(skills) - {"."}, key=lambda value: (len(Path(value).parts), value))]
+    views = {unit: destination / f"unit-{index}" / (snapshot / unit).name for index, unit in enumerate(units)}
+    for target in views.values():
+        target.mkdir(parents=True)
+    deepest_first = sorted(views, key=lambda unit: len(PurePosixPath(unit).parts), reverse=True)
+    remaining = CONTENT_DEDUP_MAX_TOTAL_BYTES
+    with SecureRoot(snapshot) as reader:
+        for relative in files:
+            owner = next(unit for unit in deepest_first if relative.is_relative_to(PurePosixPath(unit)))
+            raw, _ = reader.read_bytes(Path(relative), min(CONTENT_DEDUP_MAX_FILE_BYTES, remaining))
+            remaining -= len(raw)
+            output = views[owner] / relative.relative_to(PurePosixPath(owner))
+            output.parent.mkdir(parents=True, exist_ok=True)
+            output.write_bytes(raw)
+    return views
+
+
+def _attribute_scan_result(result: ValidationResult, unit: str, view: Path, root: Path) -> None:
+    """Map partition-local paths and grouped occurrences back to their owner."""
+    if unit != ".":
+        result.metadata["plugin_member"] = unit
+        for finding in result.findings:
+            location = Path(finding.file_path)
+            if finding.file_path and not location.is_absolute() and not finding.file_path.startswith(("<", "[")):
+                finding.file_path = (Path(unit) / location).as_posix()
+            occurrences = finding.metadata.get("occurrences", [])
+            for occurrence in occurrences if isinstance(occurrences, list) else []:
+                if isinstance(occurrence, dict) and isinstance(occurrence.get("file"), str):
+                    file = Path(occurrence["file"])
+                    if not file.is_absolute():
+                        occurrence["file"] = (Path(unit) / file).as_posix()
+    _rebase(result, view, root / unit)
+
+
+def _invoke_scan(runner, target: Path, check: str) -> ValidationResult:
+    """A failed scanner leaves its unit incomplete while later units continue."""
+    try:
+        result = runner(target)
+        if not isinstance(result, ValidationResult):
+            raise TypeError("scanner returned an unsupported result")
+        return result
+    except Exception as exc:
+        result = ValidationResult()
+        result.mark_scan_incomplete(f"plugin-{check}")
+        result.add_finding(
+            Finding(
+                category="PLUGIN_SCHEMA",
+                severity=Severity.MEDIUM,
+                check_name="private_scan_incomplete",
+                message=f"The {check} scanner did not produce a usable result for this scan unit.",
+                file_path=str(target),
+                metadata={"exception_type": type(exc).__name__, "plugin_check": check},
+            )
+        )
+        return result
+
+
+def _run_hygiene(validator, snapshot: Path, views: dict[str, Path], skills: list[str], root: Path) -> ValidationResult:
+    """Resolve links against the full snapshot; audit each unit's own metadata."""
+    result = ValidationResult()
+    # Root traversal already covers ordinary skill directories. Only explicitly
+    # loaded directories that it prunes need another link pass, still using the
+    # complete snapshot so valid links between components remain valid.
+    for unit in _scan_units(skills, SCAN_EXCLUDED_DIRS):
+        links = _invoke_scan(validator._check_dead_links, snapshot / unit, "hygiene-links")
+        _rebase(links, snapshot, root)
+        if not links.passed and not links.is_incomplete:
+            result.metadata["confirmed_failure"] = True
+        result.merge(links)
+    for unit, view in views.items():
+        dependencies = _invoke_scan(validator._audit_dependencies, view, "hygiene-dependencies")
+        tests = _invoke_scan(validator._check_test_presence, view, "hygiene-tests")
+        local = ValidationResult()
+        for subcheck in (dependencies, tests):
+            # Preserve confirmed content failures independently of another
+            # subcheck's missing evidence. Scanner exceptions alone do not set it.
+            if not subcheck.passed and not subcheck.is_incomplete:
+                local.metadata["confirmed_failure"] = True
+            local.merge(subcheck)
+        _attribute_scan_result(local, unit, view, root)
+        if unit != ".":
+            local.errors = [f"[{unit}] {error}" for error in local.errors]
+            local.warnings = [f"[{unit}] {warning}" for warning in local.warnings]
+        for detail in local.success_details:
+            detail.metadata["plugin_member"] = unit
+        result.merge(local)
+    result.metadata.pop("plugin_member", None)
+    result.metadata.update(plugin_check="hygiene", plugin_scan_scope="whole_tree")
+    return result
+
+
 def run_plugin_validation(path: Path, *, options: PrivatePluginChecks | None = None) -> list[ValidationResult]:
     """Assemble a private run; network collectors require independent explicit options."""
     options = options or PrivatePluginChecks()
@@ -194,8 +295,15 @@ def run_plugin_validation(path: Path, *, options: PrivatePluginChecks | None = N
                     copied_manifest = view / inventory.selected_manifest.manifest_filename
                     if hashlib.sha256(copied_manifest.read_bytes()).hexdigest() != inventory.manifest_sha256:
                         raise SecurePathError("source_changed", "Selected manifest changed during staging.")
+                    views = _partition_views(view, Path(scratch) / "scanner-views", source_files, skills)
                     for key, (validator, runner) in _tree_checks().items():
                         if key not in scan_checks:
+                            continue
+                        if key == "hygiene":
+                            result = _run_hygiene(validator, view, views, skills, root)
+                            result.validator_name = validator.name
+                            result.validator_description = validator.description
+                            results.append(result)
                             continue
                         if runner is None:
                             runner = (
@@ -203,26 +311,13 @@ def run_plugin_validation(path: Path, *, options: PrivatePluginChecks | None = N
                                 or getattr(validator, "_validate_single", None)
                                 or validator._validate_single_asset
                             )
-                        excluded = SCAN_EXCLUDED_DIRS - {"__pycache__"} if key == "security" else SCAN_EXCLUDED_DIRS
-                        for unit in _scan_units(skills, excluded):
-                            result = runner(view / unit)
+                        for unit, scan_view in views.items():
+                            result = _invoke_scan(runner, scan_view, key)
                             result.validator_name = validator.name
                             result.validator_description = validator.description
                             result.metadata["plugin_check"] = key
-                            result.metadata["plugin_scan_scope"] = "whole_tree" if unit == "." else "declared_skill"
-                            if unit != ".":
-                                result.metadata["plugin_member"] = unit
-                            if unit != ".":
-                                for finding in result.findings:
-                                    location = Path(finding.file_path)
-                                    if (
-                                        finding.file_path
-                                        and not location.is_absolute()
-                                        and not finding.file_path.startswith(("<", "["))
-                                        and not location.is_relative_to(Path(unit))
-                                    ):
-                                        finding.file_path = (Path(unit) / location).as_posix()
-                            _rebase(result, view, root)
+                            result.metadata["plugin_scan_scope"] = "root_owned" if unit == "." else "declared_skill"
+                            _attribute_scan_result(result, unit, scan_view, root)
                             results.append(result)
                     # Every audited client skill receives its own quality/lint/
                     # version/schema checks; root-owned files are scanned once above.
@@ -251,7 +346,9 @@ def run_plugin_validation(path: Path, *, options: PrivatePluginChecks | None = N
                             _rebase(result, view, root)
                             results.append(result)
                     snapshot_result.metadata.update(
-                        source_files=len(source_files), complete=not snapshot_result.is_incomplete
+                        source_files=len(source_files),
+                        scan_units=list(views),
+                        complete=not snapshot_result.is_incomplete,
                     )
                     results.append(snapshot_result)
             except (SecurePathError, OSError):

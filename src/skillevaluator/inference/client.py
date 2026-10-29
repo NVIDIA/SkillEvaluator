@@ -340,6 +340,41 @@ def _extract_choice_content(response: Any) -> str:
     )
 
 
+# Malformed ``{`` candidates tolerated before recovery gives up. Each failed
+# decode costs time proportional to the reply length.
+_MAX_EMBEDDED_JSON_DECODE_FAILURES = 64
+
+
+def _embedded_json_objects(text: str) -> list[dict[str, Any]]:
+    """Return the complete top-level JSON objects embedded in prose.
+
+    Scanning resumes after each decoded object, so nested objects are not
+    counted separately, and after the failure point of a malformed one, so an
+    object nested inside it is never promoted. Replies the decoder cannot
+    handle (excessive nesting, oversized integers) or with too many malformed
+    candidates yield no objects.
+    """
+    decoder = json.JSONDecoder()
+    objects: list[dict[str, Any]] = []
+    failures = 0
+    cursor = 0
+    while (start := text.find("{", cursor)) != -1:
+        try:
+            value, end = decoder.raw_decode(text, start)
+        except json.JSONDecodeError as exc:
+            failures += 1
+            if failures > _MAX_EMBEDDED_JSON_DECODE_FAILURES:
+                return []
+            cursor = max(exc.pos, start + 1)
+            continue
+        except (RecursionError, ValueError):
+            return []
+        cursor = end
+        if isinstance(value, dict):
+            objects.append(value)
+    return objects
+
+
 class LLMClient:
     """Public-provider client for chat completions.
 
@@ -683,7 +718,13 @@ class LLMClient:
         response_schema: dict[str, Any] | None = None,
         schema_name: str = "judge_response",
     ) -> dict:
-        """Send a completion and parse JSON from the response."""
+        """Send a completion and parse one unambiguous JSON object from the response.
+
+        The whole reply, optionally in a Markdown fence, is parsed first. Models
+        without structured output (Bedrock, or after a schema downgrade) may
+        still wrap the object in prose; exactly one embedded object is then
+        accepted, while several objects remain an error rather than a guess.
+        """
         raw = self.completions(system_prompt, user_prompt, response_schema=response_schema, schema_name=schema_name)
 
         cleaned = raw.strip()
@@ -694,7 +735,11 @@ class LLMClient:
         try:
             return json.loads(cleaned)
         except json.JSONDecodeError as e:
-            raise LLMClientError(f"LLM returned invalid JSON: {e}\nRaw: {raw[:500]}") from e
+            objects = _embedded_json_objects(raw)
+            if len(objects) == 1:
+                return objects[0]
+            detail = f"found {len(objects)} JSON objects; expected exactly one" if objects else str(e)
+            raise LLMClientError(f"LLM returned invalid JSON: {detail}\nRaw: {raw[:500]}") from e
 
     # -- template-method hooks (override in subclasses) -------------------
 

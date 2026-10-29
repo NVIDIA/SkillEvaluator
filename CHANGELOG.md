@@ -55,6 +55,12 @@ All notable changes to SkillEvaluator are documented in this file.
 - PII credential findings mask their values and source lines. GitHub CI stages
   scanner output privately, redacts recognized credential values from retained
   reports and logs, and withholds detailed output when redaction cannot finish.
+- Explicit searches of `/` (`find`, `grep -r`, `rg`, `ag`, `du` and `tree` with a
+  `/` operand, and native search tools rooted at `/`) now count as wasted tool
+  calls whether or not they name the expected skill or script, including when
+  output is redirected or the search runs inside `sh -c`. Host and bundled
+  scoring agree, while scoped searches and slash-valued patterns retain their
+  classification.
 - PII email scans recognize all RFC 2606 reserved domains, including their
   subdomains, mixed-case forms, trailing dots, and prose ellipses. A local-part
   boundary prevents quadratic rescanning of long excluded addresses. Ordinary

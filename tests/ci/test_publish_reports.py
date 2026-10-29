@@ -325,12 +325,34 @@ def run_record():
     }
 
 
+def fork_record(**changes):
+    # GitHub never fills pull_requests for a run from a fork PR.
+    return {
+        **run_record(),
+        "event": "pull_request",
+        "head_branch": "feature/fork",
+        "head_repository": {"full_name": "contributor/consumer"},
+        **changes,
+    }
+
+
+def fork_pull(head_sha="a" * 40, *, base_sha="d" * 40, repo=None):
+    return {
+        "number": 7,
+        "state": "open",
+        "head": {"sha": head_sha, "repo": repo or {"full_name": "contributor/consumer"}},
+        "base": {"sha": base_sha, "repo": {"full_name": "owner/consumer"}},
+    }
+
+
 class FakeAPI:
     def __init__(self, *, branch_sha="a" * 40, record=None):
         self.record = record or run_record()
         self.branch_sha = branch_sha
+        self.paths = []
 
     def get(self, path):
+        self.paths.append(path)
         if path.endswith("/actions/runs/123/attempts/1"):
             return self.record
         if "/contents/.github/workflows/skill-checks.yml?ref=" in path:
@@ -357,9 +379,11 @@ class FakeAPI:
             return {
                 "number": 1,
                 "state": "open",
-                "head": {"sha": self.branch_sha, "repo": {"full_name": "owner/consumer"}},
+                "head": {"sha": self.branch_sha, "repo": self.record.get("head_repository")},
                 "base": {"repo": {"full_name": "owner/consumer"}},
             }
+        if "/pulls?state=open&head=" in path:
+            return [fork_pull(self.branch_sha, repo=self.record.get("head_repository"))]
         if path.endswith("/pulls"):
             return [{"number": 1}]
         raise AssertionError(path)
@@ -593,6 +617,26 @@ def test_pr_caller_uses_unambiguous_merged_blob_not_pr_head(blobs, expected):
 def test_pr_caller_does_not_trust_missing_or_current_mutable_base():
     with pytest.raises(publisher.StalePublication, match="no longer associated"):
         publisher._executed_caller_blob(FakeAPI(), "owner/consumer", {**run_record(), "event": "pull_request"})
+
+
+def test_open_fork_pr_run_is_published_without_alias_or_comment(tmp_path):
+    api = FakeAPI(record=fork_record())
+    metadata = publisher.publish(
+        api,
+        "owner/consumer",
+        123,
+        "https://owner.github.io/consumer",
+        tmp_path / "site",
+        tmp_path / "output",
+        render=fake_render,
+    )
+    assert metadata["pr_number"] == ""
+    assert metadata["is_current"] == "false"
+    assert (tmp_path / "site/runs/123/1/index.html").is_file()
+    assert not (tmp_path / "site/pr").exists()
+    assert [item["run_id"] for item in json.loads((tmp_path / "site/history.json").read_text())] == [123]
+    # The fork PR is found from API run metadata, never from artifact data.
+    assert "/repos/owner/consumer/pulls?state=open&head=contributor:feature%2Ffork&per_page=100" in api.paths
 
 
 def test_history_retention_preserves_current_main_and_open_pr_and_prunes_closed(tmp_path):
@@ -1000,10 +1044,45 @@ def test_explicit_fork_evaluator_identity_is_required(monkeypatch):
     publisher._validate_workflow_provenance(FakeAPI(), "owner/consumer", record)
 
 
-@pytest.mark.parametrize("association", [[], [{"base": {"sha": "d" * 40}, "head": {"sha": "e" * 40}}]])
-def test_stale_or_closed_pr_is_a_skipped_publisher_run(tmp_path, monkeypatch, association):
-    record = {**run_record(), "event": "pull_request", "pull_requests": association}
-    monkeypatch.setattr(publisher, "GitHubAPI", lambda *_args: FakeAPI(record=record))
+class ForkLookupAPI(FakeAPI):
+    def __init__(self, pulls, **kwargs):
+        super().__init__(**kwargs)
+        self.pulls = pulls
+
+    def get(self, path):
+        if "/pulls?state=open&head=" in path:
+            self.paths.append(path)
+            return self.pulls
+        return super().get(path)
+
+
+@pytest.mark.parametrize(
+    "record,pulls,reason",
+    [
+        pytest.param(
+            {**run_record(), "event": "pull_request"},
+            None,
+            "The PR is closed or no longer associated",
+            id="same-repo-pr-merged-after-scan",
+        ),
+        pytest.param(
+            {
+                **run_record(),
+                "event": "pull_request",
+                "pull_requests": [{"base": {"sha": "d" * 40}, "head": {"sha": "e" * 40}}],
+            },
+            None,
+            "The PR head moved",
+            id="same-repo-push-during-scan",
+        ),
+        pytest.param(fork_record(), [], "The fork PR is closed or merged", id="fork-pr-closed-after-scan"),
+        pytest.param(fork_record(), [fork_pull("e" * 40)], "The PR head moved", id="fork-push-during-scan"),
+        pytest.param(fork_record(head_repository=None), None, "fork for this PR run was deleted", id="deleted-fork"),
+    ],
+)
+def test_stale_or_closed_pr_is_a_skipped_publisher_run(tmp_path, monkeypatch, record, pulls, reason):
+    api = ForkLookupAPI(pulls, record=record)
+    monkeypatch.setattr(publisher, "GitHubAPI", lambda *_args: api)
     for key, value in {
         "GH_TOKEN": "dummy-token",
         "GITHUB_REPOSITORY": "owner/consumer",
@@ -1018,7 +1097,42 @@ def test_stale_or_closed_pr_is_a_skipped_publisher_run(tmp_path, monkeypatch, as
     assert publisher.main() == 0
     assert "skipped=true" in (tmp_path / "github-output").read_text()
     assert "skipped" in (tmp_path / "output/summary.md").read_text().lower()
+    assert reason in (tmp_path / "output/summary.md").read_text()
     assert not (tmp_path / "site/runs").exists()
+    # Only a fork run with a known head repository looks up its PR.
+    assert any("/pulls?" in path for path in api.paths) == (pulls is not None)
+
+
+@pytest.mark.parametrize(
+    "record,pulls",
+    [
+        pytest.param({**run_record(), "event": "pull_request", "pull_requests": None}, None, id="same-repo-missing"),
+        pytest.param(
+            {
+                **run_record(),
+                "event": "pull_request",
+                "pull_requests": [{"base": {"sha": "d" * 40}, "head": {"sha": "a" * 40}}] * 2,
+            },
+            None,
+            id="same-repo-two-prs",
+        ),
+        pytest.param(
+            {**run_record(), "event": "pull_request", "pull_requests": [{"base": {"sha": "d" * 40}, "head": {}}]},
+            None,
+            id="same-repo-malformed-head",
+        ),
+        pytest.param(fork_record(pull_requests=None), None, id="fork-missing"),
+        pytest.param(fork_record(head_repository="contributor/consumer"), None, id="fork-malformed-head-repository"),
+        pytest.param(fork_record(head_branch=None), None, id="fork-missing-branch"),
+        pytest.param(fork_record(), {"items": []}, id="fork-malformed-listing"),
+        pytest.param(fork_record(), [fork_pull(), fork_pull()], id="fork-two-prs"),
+        pytest.param(fork_record(), [fork_pull(base_sha="main")], id="fork-malformed-base"),
+    ],
+)
+def test_malformed_pr_association_still_fails(record, pulls):
+    with pytest.raises(publisher.PublicationError) as raised:
+        publisher._validate_workflow_provenance(ForkLookupAPI(pulls, record=record), "owner/consumer", record)
+    assert not isinstance(raised.value, publisher.StalePublication)
 
 
 @pytest.mark.parametrize("enabled", [True, False, None])

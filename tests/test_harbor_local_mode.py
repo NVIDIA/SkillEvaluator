@@ -3346,8 +3346,16 @@ def test_streamed_exec_escalates_after_launcher_exits_with_term_ignoring_descend
     try:
         asyncio.run(exercise())
         child_pid = int(child_pid_path.read_text(encoding="ascii"))
-        with pytest.raises(ProcessLookupError):
-            os.kill(child_pid, 0)
+        # On macOS the group probe can report EPERM after SIGKILL while this
+        # descendant is still finishing its exit. Allow bounded exit completion.
+        deadline = time.monotonic() + 5
+        while True:
+            try:
+                os.kill(child_pid, 0)
+            except ProcessLookupError:
+                break
+            assert time.monotonic() < deadline, "a SIGTERM-ignoring descendant survived cleanup"
+            time.sleep(0.01)
     finally:
         if child_pid is None and child_pid_path.exists():
             child_pid = int(child_pid_path.read_text(encoding="ascii"))

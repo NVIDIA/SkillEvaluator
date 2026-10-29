@@ -43,6 +43,18 @@ All notable changes to SkillEvaluator are documented in this file.
 
 ### Fixed
 
+- Explicit searches of `/` (`find`, `grep -r`, `rg`, `ag`, `du` and `tree` with a
+  `/` operand, and native search tools rooted at `/`) now count as wasted tool
+  calls whether or not they name the expected skill or script, including when
+  output is redirected or the search runs inside `sh -c`. Host and bundled
+  scoring agree, while scoped searches and slash-valued patterns retain their
+  classification.
+- PII email scans recognize all RFC 2606 reserved domains, including their
+  subdomains, mixed-case forms, trailing dots, and prose ellipses. A local-part
+  boundary prevents quadratic rescanning of long excluded addresses. Ordinary
+  addresses on the same line and domains that merely resemble placeholders remain detectable
+  ([#244](https://github.com/NVIDIA/SkillEvaluator/issues/244)).
+
 - Tier 3 security grading preserves ordinary nested `/tmp` cleanup, including
   child operands with trailing slashes, unless the current or an earlier
   execution action contains recognized symlink-creation syntax (`ln -s`,

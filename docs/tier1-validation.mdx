@@ -192,6 +192,8 @@ For `validate`, the default set is `schema`, `version`, `security`, `pii`, `lice
 
     Common placeholders such as `YOUR_API_KEY_HERE`, `example`, `test`, `dummy`, and `placeholder`, along with `@example.com` and `@test.com`, are excluded, as are configured allowed paths.
 
+    A card-shaped number is reported only when it passes the Luhn checksum; all-zero numbers do not. Digits inside a canonical GUID/UUID, such as the COM interface ID `{00000000-0000-0000-C000-000000000046}`, are treated as an identifier unless a payment label (`card_number`, `credit_card`, `cc_no`, `cc_number`, `pan`, and similar) directly precedes the GUID on its line or ends the line before it. Every card-shaped number on a line is checked, so an identifier or non-card number earlier on the line does not hide a card after it.
+
     The home-path check compares detected user paths against the submitter's identity. When no identity is available, that check is skipped and logged — set `SKILLEVALUATOR_SUBMITTER` (or add `author` to `SKILL.md`) to enable it. `SKILLEVALUATOR_SUBMITTER` is combined with `GITHUB_ACTOR`, `USER`, `LOGNAME`, `USERNAME`, the OS login name, and the skill's declared author — every identity that resolves is protected.
   </Accordion>
 
@@ -243,6 +245,8 @@ For `validate`, the default set is `schema`, `version`, `security`, `pii`, `lice
     `Quality score 67.8/100 is below the required 70/100`, retained in the JSON
     result's `gate_failures` list. Improve the skill or explicitly choose the
     required threshold with `--min-score`.
+
+    Correctness reports XML-style tags in any frontmatter value as a HIGH finding (potential prompt injection). A string `argument-hint` may use command-line placeholders such as `<file> [--strict]`, `<plan|apply|verify>`, or `<codec e.g. av1|h264>`. Closing tags, attributes, self-closing tags, and role or control tags such as `<system>`, `<tool_call>`, or `<script>` are still reported there, and every other field keeps the strict check.
 
     The checker detects five skill shapes and applies relevant checks: **script-based** (Python or shell files under `scripts/`), **lib-based** (a Python module containing `__init__.py`), **resource-based** (assets, templates, design-system content, or resources), **guide-only** (documentation without executable or resource content), and **hybrid** (scripts plus library or resource content).
 

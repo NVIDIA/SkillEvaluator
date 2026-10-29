@@ -5060,6 +5060,112 @@ class TestFalsePositivePrevention:
         cc_errors = [e for e in result.errors if "credit" in e.lower() or "card" in e.lower()]
         assert len(cc_errors) == 0, f"Long digit run should not be flagged: {cc_errors}"
 
+    @staticmethod
+    def _card_values(path: Path, text: str) -> list[str]:
+        """Raw credit-card values the PII scan reports for *text* written to *path*."""
+        path.write_text(text, encoding="utf-8")
+        return [
+            finding["matched_value"]
+            for finding in SecurityValidator()._scan_file_for_pii(path)
+            if finding["category"] == "credit_cards"
+        ]
+
+    @pytest.mark.parametrize(
+        "identifier",
+        [
+            "00000000-0000-0000-c000-000000000046",
+            "{00000000-0000-0000-C000-000000000046}",
+            "{00000091-0000-0000-C000-000000000046}",
+            "00000000-0000-0000-0000-000000000000",
+            "45320151-1283-0366-c000-000000000046",
+            "{45320151-1283-0366-c000-000000000046}",
+            "ABCDEFAB-CDEF-ABCD-4532-015112830366",
+            "{ABCDEFAB-CDEF-ABCD-4532-015112830366}",
+            "45320151-1283-0366-4532-015112830366",
+        ],
+    )
+    @pytest.mark.parametrize("template", ['IID_IUNKNOWN_TEXT = "{}"', "{}", "interface_id: {}", "card driver GUID {}"])
+    def test_credit_card_shape_inside_guid_not_flagged(self, tmp_path: Path, identifier: str, template: str):
+        """GUID digit groups (COM interface IDs, nil UUIDs) can pass Luhn without being a card."""
+        (tmp_path / "com.py").write_text(template.format(identifier) + "\n", encoding="utf-8")
+
+        result = SecurityValidator().validate_pii_only(tmp_path)
+
+        assert result.passed
+        assert not any(finding.check_name == "credit_cards" for finding in result.findings)
+
+    @pytest.mark.parametrize(
+        ("filename", "template"),
+        [
+            ("payment.txt", 'card_number="{}"\n'),
+            ("payment.txt", "Credit card: {}\n"),
+            ("payment.txt", 'cc_no: "{}"\n'),
+            ("payment.txt", "cc_number={}\n"),
+            ("payment.txt", "PAN {}\n"),
+            ("payment.json", '{{"credit_card": "{}"}}\n'),
+            ("payment.json", '{{"creditCardNumber": "{}"}}\n'),
+            ("payment.json", '{{\n  "card_number":\n    "{}"\n}}\n'),
+            ("payment.yaml", "card_number: {}\n"),
+            ("payment.yaml", "card_number:\n  {}\n"),
+        ],
+    )
+    @pytest.mark.parametrize(
+        ("identifier", "card_number"),
+        [
+            ("45320151-1283-0366-c000-000000000046", "45320151-1283-0366"),
+            ("{45320151-1283-0366-c000-000000000046}", "45320151-1283-0366"),
+            ("ABCDEFAB-CDEF-ABCD-4532-015112830366", "4532-015112830366"),
+            ("{ABCDEFAB-CDEF-ABCD-4532-015112830366}", "4532-015112830366"),
+        ],
+    )
+    def test_payment_label_overrides_guid_shape(
+        self, tmp_path: Path, filename: str, template: str, identifier: str, card_number: str
+    ):
+        """A payment label directly before a GUID-shaped value keeps the card candidate reportable."""
+        assert self._card_values(tmp_path / filename, template.format(identifier)) == [card_number]
+
+    def test_payment_labelled_guid_shape_blocks_pii_scan(self, tmp_path: Path):
+        (tmp_path / "payment.yaml").write_text("card_number: 45320151-1283-0366-c000-000000000046\n", encoding="utf-8")
+
+        result = SecurityValidator().validate_pii_only(tmp_path)
+
+        assert not result.passed
+        assert [finding.check_name for finding in result.findings] == ["credit_cards"]
+
+    @pytest.mark.parametrize(
+        "template",
+        [
+            'card_number: unavailable; identifier: "{}"\n',
+            'credit_card_id: "{}"\n',
+            "cardholder_guid = {}\n",
+            "card_number: unavailable\nidentifier: {}\n",
+            "pan_id: {}\n",
+        ],
+    )
+    def test_unrelated_payment_label_does_not_taint_guid(self, tmp_path: Path, template: str):
+        text = template.format("45320151-1283-0366-c000-000000000046")
+
+        assert self._card_values(tmp_path / "records.txt", text) == []
+
+    @pytest.mark.parametrize("number", ["0000000000000000", "0000-0000-0000-0000", "0000 0000 0000 0000"])
+    def test_zero_only_number_not_flagged_as_credit_card(self, tmp_path: Path, number: str):
+        assert self._card_values(tmp_path / "data.txt", f"card_number={number}\n") == []
+
+    @pytest.mark.parametrize("card_number", ["4532015112830366", "4532-0151-1283-0366", "4532 0151 1283 0366"])
+    @pytest.mark.parametrize("card_first", [False, True])
+    def test_guid_does_not_hide_adjacent_payment_card(self, tmp_path: Path, card_number: str, card_first: bool):
+        fields = ['identifier="45320151-1283-0366-c000-000000000046"', f'card_number="{card_number}"']
+        if card_first:
+            fields.reverse()
+
+        assert self._card_values(tmp_path / "data.txt", "; ".join(fields) + "\n") == [card_number]
+
+    def test_non_luhn_number_does_not_hide_later_card(self, tmp_path: Path):
+        """Every card-shaped number on a line is checked, not only the first one."""
+        text = "ref 1234-5678-9012-3456 card 4532 0151 1283 0366\n"
+
+        assert self._card_values(tmp_path / "data.txt", text) == ["4532 0151 1283 0366"]
+
     # --- Eval/results/versions directory exclusion (Tier 1) ---
 
     def test_pii_skips_evals_directory(self, tmp_path: Path):
@@ -5187,6 +5293,7 @@ class TestFalsePositivePrevention:
         assert not SecurityValidator._passes_luhn("1234567890123456")
         assert not SecurityValidator._passes_luhn("4532123456789010")
         assert not SecurityValidator._passes_luhn("1111111111111112")
+        assert not SecurityValidator._passes_luhn("0000000000000000")
 
     # --- Skillspector 1.0 field handling tests ---
 

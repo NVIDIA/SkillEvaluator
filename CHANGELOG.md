@@ -199,6 +199,22 @@ All notable changes to SkillEvaluator are documented in this file.
   addresses on the same line and domains that merely resemble placeholders remain detectable
   ([#244](https://github.com/NVIDIA/SkillEvaluator/issues/244)).
 
+- The quality check no longer reports command-line placeholders in a string
+  `argument-hint`, such as `<file> [--strict]` or `<issue_id | symptom>`, as a
+  HIGH "XML tags in frontmatter" finding that failed the skill even with
+  `--min-score 0`. Role and control tags (`<system>`, `<tool_call>`,
+  `<script>`, including suffixed and nested forms), closing tags, attributes,
+  and self-closing tags in `argument-hint` are still reported, and every other
+  frontmatter field keeps the strict check.
+
+- PII scans no longer report card-shaped digits inside a canonical GUID/UUID,
+  such as a COM interface ID or the nil UUID, or an all-zero number as a
+  CRITICAL credit card. A GUID-shaped value directly after a payment label
+  (`card_number:`, `credit_card=`, `cc_no:`, `pan`) on its line or at the end
+  of the previous line is still reported. Every card-shaped number on a line is
+  now checked, so a GUID or non-Luhn number earlier on the line no longer hides
+  a real card number after it.
+
 - Tier 3 security grading preserves ordinary nested `/tmp` cleanup, including
   child operands with trailing slashes, unless the current or an earlier
   execution action contains recognized symlink-creation syntax (`ln -s`,

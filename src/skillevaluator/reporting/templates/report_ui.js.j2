@@ -1,0 +1,105 @@
+/* SPDX-License-Identifier: Apache-2.0 */
+// Search and outcome filters share state so changing one does not discard another.
+let reportSkillStatus = 'all';
+let reportAffectedSkills = null;
+let reportValidatorStatus = 'all';
+function reportPressedButtons() {
+    document.querySelectorAll('.tier-card[data-target-tab]').forEach(card => card.setAttribute('aria-pressed', card.classList.contains('active') ? 'true' : 'false'));
+    document.querySelectorAll('.filter-btn,.severity-filter-btn,.view-toggle-btn').forEach(button => button.setAttribute('aria-pressed', button.classList.contains('active') ? 'true' : 'false'));
+    document.querySelectorAll('.skill-header,.validator-collapsible,.top-issues-header,.contributor-header,.table-toggle').forEach(button => {
+        const content = button.nextElementSibling;
+        if (content) button.setAttribute('aria-expanded', content.classList.contains('active') ? 'true' : 'false');
+    });
+}
+function applyReportSearch() {
+    const input = document.getElementById('report-search');
+    if (!input) return;
+    const query = input.value.trim().toLocaleLowerCase();
+    const bySkill = document.getElementById('results-by-skill');
+    const byValidator = document.getElementById('results-by-validator');
+    let visible = 0, total = 0;
+    [[bySkill, '.skill-card', 'skillStatus', reportSkillStatus], [byValidator, '.validator-card', 'status', reportValidatorStatus]].forEach(([section, selector, key, status]) => {
+        if (!section) return;
+        section.querySelectorAll(selector).forEach(card => {
+            const matchesStatus = status === 'all' || card.dataset[key] === status;
+            const matchesText = !query || card.textContent.toLocaleLowerCase().includes(query);
+            const matchesAffected = section !== bySkill || !reportAffectedSkills || reportAffectedSkills.includes(card.dataset.skillName);
+            const shown = matchesStatus && matchesText && matchesAffected;
+            card.style.display = shown ? '' : 'none';
+            if (section.classList.contains('active')) { total++; if (shown) visible++; }
+        });
+    });
+    document.querySelectorAll('.summary-table tbody tr[data-status]').forEach(row => {
+        row.style.display = (reportValidatorStatus === 'all' || row.dataset.status === reportValidatorStatus) && (!query || row.textContent.toLocaleLowerCase().includes(query)) ? '' : 'none';
+    });
+    const counter = document.getElementById('report-search-count');
+    counter.textContent = visible + ' of ' + total + ' shown';
+    document.getElementById('report-no-matches').hidden = visible !== 0;
+    ['skill-empty-msg','validator-empty-msg'].forEach(id => { const el = document.getElementById(id); if (el) el.style.display = 'none'; });
+    reportPressedButtons();
+}
+const originalFilterSkills = filterSkills;
+filterSkills = function(status) { reportSkillStatus = status; originalFilterSkills(status); applyReportSearch(); };
+const originalFilterValidators = filterValidators;
+filterValidators = function(status) { reportValidatorStatus = status; originalFilterValidators(status); applyReportSearch(); };
+const originalSwitchView = switchView;
+switchView = function(view) { originalSwitchView(view); reportSkillStatus = 'all'; reportValidatorStatus = 'all'; applyReportSearch(); };
+const originalFilterSeverity = filterSeverity;
+filterSeverity = function(level) { originalFilterSeverity(level); reportPressedButtons(); };
+function resetReportFilters() {
+    document.getElementById('report-search').value = '';
+    reportSkillStatus = 'all'; reportValidatorStatus = 'all';
+    originalFilterSkills('all'); originalFilterValidators('all');
+    clearSkillFilter(); filterSeverity('all'); applyReportSearch();
+}
+document.addEventListener('DOMContentLoaded', function() {
+    document.querySelectorAll('.skill-header,.top-issues-header,.contributor-header,.top-issues-table tbody tr[onclick],.skill-pill[onclick],.quality-pill[onclick],.contributor-item-pill[onclick]').forEach(control => {
+        control.tabIndex = 0;
+        control.setAttribute('role','button');
+        control.addEventListener('keydown', function(event) {
+            if ((event.key === 'Enter' || event.key === ' ') && event.target === control) { event.preventDefault(); control.click(); }
+        });
+    });
+    document.addEventListener('click', reportPressedButtons);
+    reportPressedButtons();
+    applyReportSearch();
+});
+// Evidence links intentionally reveal their destination even if a previous search hid it.
+const originalOpenSkillCard = _openSkillCard;
+_openSkillCard = function(name) {
+    reportAffectedSkills = null;
+    document.getElementById('skill-filter-banner')?.classList.remove('visible');
+    const query = document.getElementById('report-search');
+    if (query) query.value = '';
+    reportSkillStatus = 'all';
+    if (document.getElementById('results-by-skill')) {
+        document.querySelectorAll('.results-view').forEach(view => view.classList.remove('active'));
+        document.getElementById('results-by-skill').classList.add('active');
+        document.querySelectorAll('.view-toggle-btn').forEach(button => button.classList.toggle('active', button.id === 'view-skill'));
+        originalFilterSkills('all');
+        filterSeverity('all');
+        applyReportSearch();
+    }
+    return originalOpenSkillCard(name);
+};
+const originalClearSkillFilter = clearSkillFilter;
+clearSkillFilter = function() { reportSkillStatus = 'all'; reportAffectedSkills = null; originalClearSkillFilter(); applyReportSearch(); };
+
+const originalFilterToAffectedSkills = filterToAffectedSkills;
+filterToAffectedSkills = function(row) {
+    reportAffectedSkills = null;
+    originalFilterToAffectedSkills(row);
+    reportAffectedSkills = (row.dataset.affectedSkills || '').split(',').filter(Boolean);
+    document.getElementById('skill-filter-banner')?.classList.add('visible');
+    applyReportSearch();
+};
+// Printing includes supporting evidence while preserving the reader's disclosure state.
+let reportPrintClosedDetails = [];
+window.addEventListener('beforeprint', function() {
+    reportPrintClosedDetails = Array.from(document.querySelectorAll('details:not([open])'));
+    reportPrintClosedDetails.forEach(detail => { detail.open = true; });
+});
+window.addEventListener('afterprint', function() {
+    reportPrintClosedDetails.forEach(detail => { detail.open = false; });
+    reportPrintClosedDetails = [];
+});

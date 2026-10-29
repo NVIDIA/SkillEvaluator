@@ -1225,8 +1225,21 @@
             .tier-cards { grid-template-columns: 1fr; }
         }
     </style>
+<style>{% include "report_ui.css.j2" %}</style>
+<noscript><style>.tab-content,.results-view,.skill-content,.validator-content,.top-issues-content,.contributor-content{display:block!important;max-height:none!important;overflow:visible!important}.filter-group,.view-toggle-section,.report-searchbar,.header-controls{display:none!important}</style></noscript>
 </head>
 <body>
+    {% set ci = ci_context | default({}, true) %}
+    <a class="skip-link" href="#report-workspace">Skip to report</a>
+    <aside class="report-sidebar" aria-label="Report navigation">
+        <a class="sidebar-brand" href="#report-workspace"><span class="brand-mark" aria-hidden="true">S</span><span>SkillEvaluator<small>EVALUATION REPORT</small></span></a>
+        <span class="sidebar-label">THIS REPORT</span>
+        <a href="#report-workspace" class="sidebar-current">Overview</a>
+        <a href="#report-evidence">Findings &amp; evidence</a>
+        <a href="#run-metadata">Run details</a>
+        {% if ci.get('report_index_url') %}<a href="{{ ci.report_index_url }}">All skills ↗</a>{% endif %}
+        <div class="sidebar-footer">Evidence you can inspect.<br>Self-contained report.</div>
+    </aside>
     {% set has_tier3 = tier3 is defined and tier3 %}
     {% set tier3_summary_data = (tier3.get('summary') or {}) if has_tier3 else {} %}
     {% set tier3_provenance_data = (tier3.get('provenance') or {}) if has_tier3 else {} %}
@@ -1239,21 +1252,19 @@
             <div class="logo-section">
                 <h1 class="header-title">SkillEvaluator</h1>
                 <div class="header-subtitle-row">
-                    <p class="header-subtitle">NVIDIA Benchmark for Agent Skills Evaluation</p>
+                    <p class="header-subtitle">Evaluation report</p>
                 </div>
             </div>
             <div class="header-meta">
                 <div class="header-controls">
-                    <button class="theme-toggle" onclick="toggleTheme()" title="Toggle theme">
+                    <button class="theme-toggle" onclick="toggleTheme()" title="Switch color theme" aria-label="Switch color theme">
                         <span id="theme-icon">☀</span><span id="theme-text">Light</span>
                     </button>
+                    {% if ci.get('canonical_json_url') %}<a class="export-btn" href="{{ ci.canonical_json_url }}" download="skillevaluator-report.json">↓ Download JSON</a>{% else %}
                     <button class="export-btn" onclick="exportJSON()" title="Export report as JSON">
-                        <span>↓</span><span>Export report as JSON</span>
-                    </button>
+                        <span>↓</span><span>Download JSON</span>
+                    </button>{% endif %}
                 </div>
-                {% if target_path %}<p class="header-meta-item"><strong>Target:</strong> {% if target_path.startswith('https://') %}<a href="{{ target_path }}" target="_blank" class="header-target-link" title="{{ target_path }}">{{ target_display or target_path }}</a>{% else %}{{ target_path }}{% endif %}</p>{% endif %}
-                {% if profile %}<p class="header-meta-item"><strong>Profile:</strong> <span class="header-profile-badge profile-{{ profile }}">{{ profile }}</span></p>{% endif %}
-                {% if timestamp %}<p class="header-meta-item">Generated: {{ timestamp }}{% if version %} &middot; SkillEvaluator v{{ version }}{% endif %}</p>{% endif %}
                 <span class="header-status-badge {{ 'warn' if has_incomplete else ('pass' if all_passed else 'fail') }}">Process: {{ 'Incomplete' if has_incomplete else ('All Passed' if all_passed else 'Issues Found') }}</span>
                 <span class="header-status-badge {{ 'pass' if publication_status == 'pass' else ('fail' if publication_status == 'fail' else 'warn') }}"
                       data-publication-status="{{ publication_status }}"
@@ -1263,9 +1274,14 @@
             </div>
         </div>
     </div>
-    <div class="container">
+    <main class="container" id="report-workspace">
+        <div class="report-breadcrumb">Evaluation / {{ content_label | default('Skill') }} report</div>
         {% set has_tier1 = tabs | selectattr('id', 'equalto', 'tier1') | list | length > 0 %}
         {% set has_tier2 = tabs | selectattr('id', 'equalto', 'tier2') | list | length > 0 %}
+        {% set ui_t1 = tier1_execution_summary | default({}) %}
+        {% set ui_t1_pass = ui_t1.get('pass', tier1_summary.passed_count if has_tier1 else 0) %}
+        {% set ui_t1_na = ui_t1.get('not_applicable', 0) %}
+        {% set ui_t1_executed = ui_t1_pass + ui_t1.get('fail', tier1_summary.failed_count if has_tier1 else 0) + ui_t1.get('incomplete', 0) %}
         {#-
             Hero title: prefer the friendly ``skills/<name>`` label over the
             full repo / filesystem path so reviewers can scan the report at a
@@ -1274,7 +1290,7 @@
             collapses repository URLs to ``repo / skills/<name>``), then the raw
             title — every step is opportunistic so the hero never goes blank.
         -#}
-        {% set hero_title = friendly_label or (tier3.skill_name if has_tier3 and tier3.skill_name else (target_display or title)) %}
+        {% set hero_title = explicit_skill_name | default(none) or friendly_label or (tier3.skill_name if has_tier3 and tier3.skill_name else (target_display or title)) %}
         {% set hero_score = tier3.overall_score if has_tier3 and tier3.overall_score is not none else none %}
         {% set hero_trials = ((tier3.trials or []) | length) if has_tier3 else 0 %}
         {% set hero_metric_count = ((tier3.metric_ids or tier3.evaluators or {}) | length) if has_tier3 else 0 %}
@@ -1284,7 +1300,7 @@
         <section class="agent-hero">
             <div class="agent-hero-top">
                 <div class="agent-hero-title-block">
-                    <span class="agent-hero-eyebrow">{{ content_label }} under validation</span>
+                    <span class="agent-hero-eyebrow">{{ content_label }} evaluation</span>
                     <h2 class="agent-hero-title">{{ hero_title }}</h2>
                     {#-
                         Show the *full* path/URL only when it actually adds
@@ -1330,9 +1346,10 @@
                 {% endif %}
                 {% else %}
                 <div>
-                    <div class="agent-hero-score {{ 'score-warn' if has_incomplete else ('score-pass' if all_passed else 'score-fail') }}">{{ pass_percentage }}%</div>
+                    <div class="agent-hero-score verdict-text {{ 'score-warn' if has_incomplete else ('score-pass' if all_passed else 'score-fail') }}">{{ 'Incomplete' if has_incomplete else ('Passed' if all_passed else 'Changes required') }}</div>
+                    <p class="verdict-caption">Evaluation outcome</p>
                     <div class="agent-hero-detail">
-                        <div><strong>Validators:</strong> {{ passed_count }}/{{ executed_count }} passed</div>
+                        {% if has_tier1 and not has_tier2 %}<div><strong>Checks passed:</strong> {{ ui_t1_pass }}/{{ ui_t1_executed }}</div>{% if ui_t1_na %}<div><strong>Not applicable:</strong> {{ ui_t1_na }}</div>{% endif %}{% else %}<div><strong>Checks passed:</strong> {{ passed_count }}/{{ executed_count }}</div>{% endif %}
                         {% if skipped_count %}<div><strong>Skipped:</strong> {{ skipped_count }}</div>{% endif %}
                         <div><strong>{{ content_label_plural }}:</strong> {{ passed_skills }}/{{ total_skills }} passed</div>
                         {% if total_issues %}<div><strong>Issues:</strong> {{ total_issues }}</div>{% endif %}
@@ -1373,7 +1390,7 @@
                     </div>
                     <h3 class="tier-card-title">Security &amp; Static Validation</h3>
                     <div class="tier-card-stats">
-                        <span><strong>{{ tier1_summary.passed_count }}</strong>/{{ tier1_summary.executed_count }} validators passed</span>
+                        <span><strong>{{ ui_t1_pass }}</strong>/{{ ui_t1_executed }} validators passed</span>{% if ui_t1_na %}<span><strong>{{ ui_t1_na }}</strong> not applicable</span>{% endif %}
                         {% if tier1_summary.skipped_count %}<span><strong>{{ tier1_summary.skipped_count }}</strong> skipped</span>{% endif %}
                         {% if tier1_summary.issue_count %}<span><strong>{{ tier1_summary.issue_count }}</strong> issue(s)</span>{% endif %}
                         {% if skillspector_versions %}<span title="SkillSpector version that ran the Tier 1 security scan">SkillSpector <strong>v{{ skillspector_versions | join(', v') }}</strong></span>{% endif %}
@@ -1445,6 +1462,41 @@
                 {% endif %}
             </div>
         </section>
+        <div class="scope-strip" aria-label="Evaluation scope">
+            <span><strong>Scope</strong></span>
+            <span>Tier 1 · {{ 'Static validation' if has_tier1 else 'Not run' }}</span>
+            <span>Tier 2 · {{ 'Deduplication' if has_tier2 else 'Not run' }}</span>
+            <span>Tier 3 · {{ 'Live evaluation' if has_tier3 and not tier3_is_skipped else 'Not run' }}</span>
+        </div>
+        <details class="run-metadata" id="run-metadata">
+            <summary>Run details &amp; provenance</summary>
+            <div class="metadata-grid">
+                {% if target_path %}<p class="header-meta-item"><strong>Target:</strong> {% if target_path.startswith('https://') %}<a href="{{ target_path }}" target="_blank" class="header-target-link" title="{{ target_path }}">{{ target_display or target_path }}</a>{% else %}{{ target_path }}{% endif %}</p>{% endif %}
+                {% if profile %}<p class="header-meta-item"><strong>Profile:</strong> <span class="header-profile-badge profile-{{ profile }}">{{ profile }}</span></p>{% endif %}
+                {% if timestamp %}<p class="header-meta-item">Generated: {{ timestamp }}{% if version %} &middot; SkillEvaluator v{{ version }}{% endif %}</p>{% endif %}
+
+                {% if ci.get('run_url') %}<p><strong>CI run</strong><a href="{{ ci.run_url }}" target="_blank" rel="noopener noreferrer">Open run ↗</a></p>{% endif %}
+                {% if ci.get('commit') %}<p><strong>Commit</strong><code>{{ ci.commit }}</code></p>{% endif %}
+                {% if ci.get('image') %}<p><strong>Evaluator image</strong><code>{{ ci.image }}</code></p>{% endif %}
+                {% if ci.get('ci_conclusion') %}<p><strong>CI conclusion</strong>{{ ci.ci_conclusion }}</p>{% endif %}
+            </div>
+        </details>
+        {% if has_tier2 or has_tier3 %}
+        {% set included_tiers = [] %}
+        {% if has_tier1 %}{% set _ = included_tiers.append('tier1') %}{% endif %}
+        {% if has_tier2 %}{% set _ = included_tiers.append('tier2') %}{% endif %}
+        {% if has_tier3 %}{% set _ = included_tiers.append('tier3') %}{% endif %}
+        {% set tier_labels = {'tier1': 'Tier 1', 'tier2': 'Tier 2', 'tier3': 'Tier 3 agent-eval'} %}
+        {% set blocking_labels = [] %}{% set advisory_labels = [] %}
+        {% for tier in gating.blocking_tiers if tier in included_tiers %}{% set _ = blocking_labels.append(tier_labels[tier]) %}{% endfor %}
+        {% for tier in gating.advisory_tiers if tier in included_tiers %}{% set _ = advisory_labels.append(tier_labels[tier]) %}{% endfor %}
+        <div class="gate-policy" aria-label="Gate policy for included tiers">
+            <strong>Gate policy</strong>
+            {% if blocking_labels %}<span>Blocking ({{ blocking_labels | join(' + ') }}): <strong>{{ blocking_critical }} critical · {{ blocking_high }} high · {{ blocking_medium }} medium · {{ blocking_low }} low</strong></span>{% endif %}
+            {% if advisory_labels %}<span>Advisory ({{ advisory_labels | join(' + ') }}): <strong>{{ advisory_critical }} critical · {{ advisory_high }} high · {{ advisory_medium }} medium · {{ advisory_low }} low</strong>.{% if has_tier3 and 'tier3' in gating.advisory_tiers %} Tier 3 agent-eval findings are advisory and don't block merge.{% endif %}</span>{% endif %}
+        </div>
+        {% endif %}
+        <div id="report-evidence" class="workspace-heading"><h2>Findings &amp; evidence</h2><p>Inspect the outcome and supporting checks. Quality scores are separate from the pass / fail decision.</p></div>
         {% for tab in tabs %}
         <div id="tab-{{ tab.id }}" class="tab-content {{ 'active' if loop.first else '' }}">
         {% if tab.id == 'tier1' %}
@@ -1452,98 +1504,22 @@
         {% set skills = tier1_skills %}
         {% set top_issues = tier1_top_issues %}
         {% set contributors = tier1_contributors %}
-        {% set total_validators = tier1_display_summary.total_validators %}
-        {% set passed_count = tier1_display_summary.passed_count %}
+        {% set total_validators = ui_t1_executed %}
+        {% set passed_count = ui_t1_pass %}
         {% set skipped_count = tier1_display_summary.skipped_count %}
-        {% set failed_count = tier1_display_summary.failed_count %}
+        {% set failed_count = ui_t1.get('fail', tier1_display_summary.failed_count) %}
+        {% set incomplete_count = ui_t1.get('incomplete', 0) %}
         {% set total_issues = tier1_display_summary.total_issues %}
-        {% set pass_percentage = tier1_display_summary.pass_percentage %}
+        {% set pass_percentage = ((ui_t1_pass * 100 / ui_t1_executed) | round(1)) if ui_t1_executed else 0 %}
         {% set total_skills = tier1_display_summary.total_skills %}
         {% set passed_skills = tier1_display_summary.passed_skills %}
-        {% set failed_skills = tier1_display_summary.failed_skills %}
-        <div class="dashboard">
-            <div class="dashboard-card">
-                <h3 class="dashboard-card-title">Validators Run</h3>
-                <p class="dashboard-card-value">{{ total_validators }}</p>
-                <p class="dashboard-card-subtitle">Total checks executed</p>
-            </div>
-            <div class="dashboard-card success">
-                <h3 class="dashboard-card-title">Passed</h3>
-                <p class="dashboard-card-value">{{ passed_count }}</p>
-                <p class="dashboard-card-subtitle">{{ pass_percentage }}% success rate</p>
-            </div>
-            {% if skipped_count %}
-            <div class="dashboard-card">
-                <h3 class="dashboard-card-title">Skipped</h3>
-                <p class="dashboard-card-value">{{ skipped_count }}</p>
-                <p class="dashboard-card-subtitle">Not executed</p>
-            </div>
-            {% endif %}
-            <div class="dashboard-card danger">
-                <h3 class="dashboard-card-title">Failed</h3>
-                <p class="dashboard-card-value">{{ failed_count }}</p>
-                <p class="dashboard-card-subtitle">Requires attention</p>
-                {% if blocking_critical > 0 or blocking_high > 0 or blocking_medium > 0 or blocking_low > 0 %}
-                <div class="severity-breakdown-label">Blocking (Tier 1 + Tier 2)</div>
-                <div class="severity-breakdown">
-                    {% if blocking_critical > 0 %}<span class="severity-breakdown-item sev-critical">{{ blocking_critical }} critical</span>{% endif %}
-                    {% if blocking_high > 0 %}<span class="severity-breakdown-item sev-high">{{ blocking_high }} high</span>{% endif %}
-                    {% if blocking_medium > 0 %}<span class="severity-breakdown-item sev-medium">{{ blocking_medium }} medium</span>{% endif %}
-                    {% if blocking_low > 0 %}<span class="severity-breakdown-item sev-low">{{ blocking_low }} low</span>{% endif %}
-                </div>
-                {% endif %}
-                {% if advisory_critical or advisory_high or advisory_medium or advisory_low %}
-                <div class="severity-breakdown-label advisory">Advisory (Tier 3 agent-eval)</div>
-                <div class="severity-breakdown">
-                    {% if advisory_critical > 0 %}<span class="severity-breakdown-item sev-critical">{{ advisory_critical }} critical</span>{% endif %}
-                    {% if advisory_high > 0 %}<span class="severity-breakdown-item sev-high">{{ advisory_high }} high</span>{% endif %}
-                    {% if advisory_medium > 0 %}<span class="severity-breakdown-item sev-medium">{{ advisory_medium }} medium</span>{% endif %}
-                    {% if advisory_low > 0 %}<span class="severity-breakdown-item sev-low">{{ advisory_low }} low</span>{% endif %}
-                </div>
-                <div class="advisory-note">Tier 3 agent-eval findings are advisory and don't block merge.</div>
-                {% endif %}
-            </div>
-            <div class="dashboard-card">
-                <h3 class="dashboard-card-title">Overall Status</h3>
-                <p class="dashboard-card-value"><span class="status-badge {{ 'warn' if has_incomplete else ('pass' if all_passed else 'fail') }}">{{ 'Incomplete' if has_incomplete else ('Passed' if all_passed else 'Failed') }}</span></p>
-                <p class="dashboard-card-subtitle">{{ total_issues }} total issues</p>
-                <div class="progress-bar"><div class="progress-bar-fill" style="width: {{ pass_percentage }}%"></div></div>
-            </div>
-        </div>
-        <div class="view-toggle-section">
-            <span style="font-size: 0.875rem; color: var(--text-secondary); margin-right: 0.5rem;">View by:</span>
-            <button class="view-toggle-btn active" id="view-skill" onclick="switchView('skill')">By {{ content_label }}</button>
-            <button class="view-toggle-btn" id="view-validator" onclick="switchView('validator')">By Validator</button>
-        </div>
-
-        {# ==================== SKILL-CENTRIC VIEW ==================== #}
-        <div id="results-by-skill" class="results-view active">
-            {% if skills %}
-            <div class="filter-group">
-                <button class="filter-btn active" id="skill-filter-all" onclick="filterSkills('all')">All {{ content_label_plural }}</button>
-                <button class="filter-btn success" id="skill-filter-pass" onclick="filterSkills('pass')">Passed Only</button>
-                <button class="filter-btn danger" id="skill-filter-fail" onclick="filterSkills('fail')">Failed Only</button>
-                <button class="bulk-action-btn" onclick="toggleAllSkills(true)">Expand All</button>
-                <button class="bulk-action-btn" onclick="toggleAllSkills(false)">Collapse All</button>
-                <div class="severity-filter-group">
-                    <span style="font-size: 0.75rem; color: var(--text-secondary);">Severity:</span>
-                    <button class="severity-filter-btn active" id="sev-filter-all" onclick="filterSeverity('all')">All</button>
-                    <button class="severity-filter-btn critical-btn" id="sev-filter-critical-high" onclick="filterSeverity('critical-high')">Critical+High</button>
-                    <button class="severity-filter-btn" id="sev-filter-medium" onclick="filterSeverity('medium')">Medium</button>
-                    <button class="severity-filter-btn" id="sev-filter-low" onclick="filterSeverity('low')">Low+Info</button>
-                </div>
-            </div>
-            <div class="skills-summary-bar">
-                <div class="summary-item"><span>Total {{ content_label_plural }}:</span> <strong>{{ total_skills }}</strong></div>
-                <div class="summary-item pass"><span>Passed:</span> <strong>{{ passed_skills }}</strong></div>
-                <div class="summary-item fail"><span>Failed:</span> <strong>{{ failed_skills }}</strong></div>
-            </div>
-
+        {% set incomplete_skills = skills.values() | selectattr('status', 'defined') | selectattr('status', 'equalto', 'incomplete') | list | length %}
+        {% set failed_skills = [tier1_display_summary.failed_skills - incomplete_skills, 0] | max %}
             {# ==================== TOP ISSUES EXECUTIVE SUMMARY ==================== #}
             {% if top_issues %}
-            <div class="top-issues-section">
+            <div class="top-issues-section {{ 'advisory-findings' if all_passed and not has_incomplete else '' }}">
                 <div class="top-issues-header" onclick="toggleTopIssues(this)">
-                    <h3>Top Issues Across All {{ content_label_plural }} ({{ top_issues | length }} unique issue types)</h3>
+                    <h3>{{ 'Advisory findings' if all_passed and not has_incomplete else 'Needs attention' }} · {{ top_issues | length }} finding types</h3>
                     <span class="expand-text">▲</span>
                 </div>
                 <div class="top-issues-content active">
@@ -1558,7 +1534,7 @@
                             </tr>
                         </thead>
                         <tbody>
-                            {% for issue in top_issues[:15] %}
+                            {% for issue in top_issues[:5] %}
                             <tr data-severity="{{ issue.severity }}" data-affected-skills="{{ issue.skills_affected | join(',') }}" data-issue-key="{{ issue.issue_key }}" onclick="filterToAffectedSkills(this)" title="Click to jump to the first occurrence of this issue">
                                 <td style="font-weight: 500;">{{ issue.message }}</td>
                                 <td><span class="metadata-tag">{{ issue.category }}</span></td>
@@ -1581,9 +1557,80 @@
                             {% endfor %}
                         </tbody>
                     </table>
+                    {% if top_issues | length > 5 %}<p class="findings-overflow-note">Showing 5 of {{ top_issues | length }} finding types. Full evidence and suggested fixes are included below.</p>{% endif %}
                 </div>
             </div>
             {% endif %}
+
+        <div class="dashboard">
+            <div class="dashboard-card">
+                <h3 class="dashboard-card-title">Validators Run</h3>
+                <p class="dashboard-card-value">{{ total_validators }}</p>
+                <p class="dashboard-card-subtitle">Included in this report</p>
+            </div>
+            <div class="dashboard-card success">
+                <h3 class="dashboard-card-title">Passed</h3>
+                <p class="dashboard-card-value">{{ passed_count }}</p>
+                <p class="dashboard-card-subtitle">{{ pass_percentage }}% of executed validators</p>
+            </div>
+            {% if ui_t1_na %}<div class="dashboard-card"><h3 class="dashboard-card-title">Not applicable</h3><p class="dashboard-card-value">{{ ui_t1_na }}</p><p class="dashboard-card-subtitle">No matching input to scan</p></div>{% endif %}
+            {% if skipped_count %}
+            <div class="dashboard-card">
+                <h3 class="dashboard-card-title">Skipped</h3>
+                <p class="dashboard-card-value">{{ skipped_count }}</p>
+                <p class="dashboard-card-subtitle">Not executed</p>
+            </div>
+            {% endif %}
+            {% if incomplete_count %}<div class="dashboard-card"><h3 class="dashboard-card-title">Incomplete</h3><p class="dashboard-card-value score-warn">{{ incomplete_count }}</p><p class="dashboard-card-subtitle">Required evidence unavailable</p></div>{% endif %}
+            <div class="dashboard-card danger">
+                <h3 class="dashboard-card-title">Failed</h3>
+                <p class="dashboard-card-value">{{ failed_count }}</p>
+                <p class="dashboard-card-subtitle">Requires attention</p>
+            </div>
+            <div class="dashboard-card">
+                <h3 class="dashboard-card-title">Overall Status</h3>
+                <p class="dashboard-card-value"><span class="status-badge {{ 'warn' if has_incomplete else ('pass' if all_passed else 'fail') }}">{{ 'Incomplete' if has_incomplete else ('Passed' if all_passed else 'Failed') }}</span></p>
+                <p class="dashboard-card-subtitle">{{ total_issues }} total issues</p>
+                <div class="progress-bar"><div class="progress-bar-fill" style="width: {{ pass_percentage }}%"></div></div>
+            </div>
+        </div>
+        <div class="report-searchbar">
+            <label for="report-search">Search evidence</label>
+            <input id="report-search" type="search" placeholder="Find a skill, check, or finding…" oninput="applyReportSearch()" autocomplete="off">
+            <button type="button" class="bulk-action-btn" onclick="resetReportFilters()">Reset filters</button>
+            <span id="report-search-count" role="status" aria-live="polite"></span>
+        </div>
+        <p id="report-no-matches" class="report-no-matches" hidden>No matching evidence. Try a different search or reset filters.</p>
+        <div class="view-toggle-section">
+            <span style="font-size: 0.875rem; color: var(--text-secondary); margin-right: 0.5rem;">View by:</span>
+            <button class="view-toggle-btn active" id="view-skill" onclick="switchView('skill')">By {{ content_label }}</button>
+            <button class="view-toggle-btn" id="view-validator" onclick="switchView('validator')">By Validator</button>
+        </div>
+
+        {# ==================== SKILL-CENTRIC VIEW ==================== #}
+        <div id="results-by-skill" class="results-view active">
+            {% if skills %}
+            <div class="filter-group">
+                <button class="filter-btn active" id="skill-filter-all" onclick="filterSkills('all')">All {{ content_label_plural }}</button>
+                <button class="filter-btn success" id="skill-filter-pass" onclick="filterSkills('pass')">Passed</button>
+                <button class="filter-btn danger" id="skill-filter-fail" onclick="filterSkills('fail')">Failed</button>
+                <button class="filter-btn" id="skill-filter-incomplete" onclick="filterSkills('incomplete')">Incomplete</button>
+                <button class="bulk-action-btn" onclick="toggleAllSkills(true)">Expand All</button>
+                <button class="bulk-action-btn" onclick="toggleAllSkills(false)">Collapse All</button>
+                <div class="severity-filter-group">
+                    <span style="font-size: 0.75rem; color: var(--text-secondary);">Severity:</span>
+                    <button class="severity-filter-btn active" id="sev-filter-all" onclick="filterSeverity('all')">All</button>
+                    <button class="severity-filter-btn critical-btn" id="sev-filter-critical-high" onclick="filterSeverity('critical-high')">Critical+High</button>
+                    <button class="severity-filter-btn" id="sev-filter-medium" onclick="filterSeverity('medium')">Medium</button>
+                    <button class="severity-filter-btn" id="sev-filter-low" onclick="filterSeverity('low')">Low+Info</button>
+                </div>
+            </div>
+            <div class="skills-summary-bar">
+                <div class="summary-item"><span>Total {{ content_label_plural }}:</span> <strong>{{ total_skills }}</strong></div>
+                <div class="summary-item pass"><span>Passed:</span> <strong>{{ passed_skills }}</strong></div>
+                <div class="summary-item fail"><span>Failed:</span> <strong>{{ failed_skills }}</strong></div>
+                {% if incomplete_skills %}<div class="summary-item"><span>Incomplete:</span> <strong>{{ incomplete_skills }}</strong></div>{% endif %}
+            </div>
 
             {# ==================== CONTRIBUTOR SUMMARY ==================== #}
             {% if contributors %}
@@ -1599,7 +1646,7 @@
                                 <th>Contributor</th>
                                 <th>Content Items</th>
                                 <th>Passed</th>
-                                <th>Failed</th>
+                                <th>Not passed</th>
                                 <th>Issues</th>
                                 <th>Items</th>
                             </tr>
@@ -1648,8 +1695,8 @@
             </div>
 
             {% for skill_name, skill_data in skills.items() | sort %}
-            <div class="skill-card" data-skill-status="{{ 'pass' if skill_data.passed else 'fail' }}" data-skill-name="{{ skill_name }}">
-                <div class="skill-header" onclick="toggleSkill(this)">
+            <div class="skill-card" data-skill-status="{{ skill_data.status | default('pass' if skill_data.passed else 'fail') }}" data-skill-name="{{ skill_name }}">
+                <div class="skill-header" role="button" tabindex="0" aria-expanded="{{ 'false' if skill_data.passed else 'true' }}" onclick="toggleSkill(this)">
                     <div class="skill-name">
                         <span class="status-dot {{ 'pass' if skill_data.passed else 'fail' }}"></span>
                         {{ skill_name }}
@@ -1659,9 +1706,10 @@
                         {% set qg = skill_data.quality.grade %}
                         {% set qs_val = skill_data.quality.overall_score %}
                         {% set gc = 'pass' if qg in ['A', 'B'] else ('warn' if qg == 'C' else 'fail') %}
-                        <span class="status-badge {{ gc }}" title="Quality Score">{{ qs_val | round(1) }} ({{ qg }})</span>
+                        <span class="status-badge {{ gc }}" title="Quality score, separate from evaluation outcome">Quality {{ qs_val | round(1) }} / {{ qg }}</span>
                         {% endif %}
-                        <span class="status-badge {{ 'pass' if skill_data.passed else 'fail' }}">{{ 'Pass' if skill_data.passed else 'Fail' }}</span>
+                        {% set skill_status = skill_data.status | default('pass' if skill_data.passed else 'fail') %}
+                        <span class="status-badge {{ 'warn' if skill_status == 'incomplete' else skill_status }}">{{ skill_status | title }}</span>
                         <span style="color: var(--text-secondary);">{{ skill_data.validators | length }} checks</span>
                         {% if not skill_data.passed and skill_data.issue_count is defined and skill_data.issue_count > 0 %}
                         <span class="issue-count-badge">{{ skill_data.issue_count }} issue{{ 's' if skill_data.issue_count != 1 else '' }}</span>
@@ -1679,6 +1727,7 @@
                             </div>
                             <span style="color: var(--text-secondary); font-size: 0.85rem;">Type: {{ skill_data.quality.skill_type }}</span>
                         </div>
+                        <p class="quality-outcome-note">Quality is assessed separately from the evaluation outcome. Required checks must also complete and pass.</p>
                         <table style="width: 100%; font-size: 0.85rem; border-collapse: collapse;">
                             <tr style="border-bottom: 1px solid var(--border-color);">
                                 <th style="text-align: left; padding: 4px 8px;">Dimension</th>
@@ -1714,15 +1763,19 @@
                     {% endif %}
                     <div class="skill-checks-grid">
                         {% for validator_name, validator_data in skill_data.validators.items() | sort %}
-                        <div class="check-result">
-                            <div class="check-header">
-                                <div>
+                        <details class="check-result"{% if not validator_data.passed %} open{% endif %}>
+                            <summary class="check-header">
+                                <span class="check-label">
                                     <span class="check-name">{{ validator_name }}</span>
                                     {% if validator_data.description %}<span class="check-description">{{ validator_data.description }}</span>{% endif %}
-                                </div>
-                                <span class="status-badge {{ 'pass' if validator_data.passed else 'fail' }}">{{ 'Pass' if validator_data.passed else 'Fail' }}</span>
-                            </div>
+                                </span>
+                                {% set check_status = validator_data.status | default('pass' if validator_data.passed else 'fail') %}
+                                <span class="status-badge {{ 'pass' if check_status == 'pass' else ('fail' if check_status == 'fail' else 'warn') }}">{{ 'N/A' if check_status == 'not_applicable' else check_status | title }}</span>
+                            </summary>
                             <div class="check-details">
+                                {% if check_status == 'incomplete' %}<p class="incomplete-notice"><strong>Scan incomplete.</strong> {% if validator_data.incomplete_scans | default([]) %}Required scanner(s): {{ validator_data.incomplete_scans | join(', ') }}.{% endif %} The required evidence is unavailable.</p>{% endif %}
+                                {% for error in validator_data.errors | default([]) %}<p class="scan-diagnostic">{{ error }}</p>{% endfor %}
+                                {% if check_status == 'incomplete' %}{% for warning in validator_data.warnings | default([]) %}<p class="scan-diagnostic">{{ warning }}</p>{% endfor %}{% endif %}
                                 {% if validator_data.passed %}
                                     {% if validator_data.details %}
                                     {% set detail = validator_data.details[0] %}
@@ -1744,13 +1797,13 @@
                                         {% for detail in validator_data.details %}
                                         <li class="check-detail-item">
                                             <span class="detail-icon">{{ icons.checkmark | safe }}</span>
-                                            <span>{{ detail.message }}</span>
+                                            <span>{% if detail.status | default('pass') == 'not_applicable' %}<strong>N/A · </strong>{% endif %}{{ detail.message }}</span>
                                         </li>
                                         {% endfor %}
                                     </ul>
                                     {% endif %}
                                     {% else %}
-                                    <span style="color: var(--success-color); font-size: 0.8rem;">{{ icons.checkmark | safe }} All checks passed</span>
+                                    <span style="color: var(--text-secondary); font-size: 0.8rem;">{{ 'Not applicable to this skill' if check_status == 'not_applicable' else ('Not executed' if check_status == 'skipped' else 'All checks passed') }}</span>
                                     {% endif %}
                                     {% if validator_data.findings %}
                                     <div style="margin-top: 0.75rem; padding-top: 0.75rem; border-top: 1px solid var(--border-color);">
@@ -1800,11 +1853,11 @@
                                     </div>
                                     {% endfor %}
                                     {% else %}
-                                    <span style="color: var(--danger-color); font-size: 0.8rem;">Validation failed - see details above</span>
+                                    <span style="color: var(--danger-color); font-size: 0.8rem;">{{ 'Required scan did not complete. See the diagnostic above.' if check_status == 'incomplete' else 'Validation failed. Inspect the validator details for diagnostic evidence.' }}</span>
                                     {% endif %}
                                 {% endif %}
                             </div>
-                        </div>
+                        </details>
                         {% endfor %}
                     </div>
                 </div>
@@ -1819,8 +1872,9 @@
         <div id="results-by-validator" class="results-view">
         <div class="filter-group">
             <button class="filter-btn active" id="filter-all" onclick="filterValidators('all')">All Validators</button>
-            <button class="filter-btn success" id="filter-pass" onclick="filterValidators('pass')">Passed Only</button>
-            <button class="filter-btn danger" id="filter-fail" onclick="filterValidators('fail')">Failed Only</button>
+            <button class="filter-btn success" id="filter-pass" onclick="filterValidators('pass')">Passed</button>
+            <button class="filter-btn danger" id="filter-fail" onclick="filterValidators('fail')">Failed</button>
+            <button class="filter-btn" id="filter-incomplete" onclick="filterValidators('incomplete')">Incomplete</button>
         </div>
         <div class="table-section">
             <button class="table-toggle active" onclick="toggleTable(this)">
@@ -1833,9 +1887,10 @@
                     <tbody>
                         {% for result in results %}
                         {% set result_is_skipped = result | cleanly_skipped %}
-                        <tr onclick="scrollToValidator({{ loop.index }})" data-status="{{ 'skipped' if result_is_skipped else result.status }}">
+                        {% set result_execution_status = result | execution_status %}
+                        <tr data-validator-index="{{ loop.index }}" onclick="scrollToValidator(Number(this.dataset.validatorIndex))" data-status="{{ result_execution_status }}">
                             <td class="name-col">{{ result.validator_name }}</td>
-                            <td><span class="status-badge {{ 'warn' if (result_is_skipped or result.is_incomplete) else ('pass' if result.passed else 'fail') }}">{{ 'Skipped' if result_is_skipped else ('Incomplete' if result.is_incomplete else ('Pass' if result.passed else 'Fail')) }}</span></td>
+                            <td><span class="status-badge {{ 'warn' if (result_execution_status in ['skipped', 'incomplete', 'not_applicable']) else ('pass' if result.passed else 'fail') }}">{{ 'N/A' if result_execution_status == 'not_applicable' else result_execution_status | title }}</span></td>
                             <td>{{ result.summary.files_scanned }}</td>
                             <td>{{ result.summary.checks_performed }}</td>
                             <td class="{{ 'error-text' if result.summary.errors > 0 else '' }}">{{ result.summary.errors }}</td>
@@ -1849,15 +1904,16 @@
         <div class="section-header">Detailed Results</div>
         {% for result in results %}
         {% set result_is_skipped = result | cleanly_skipped %}
-        <div class="validator-card" id="validator-{{ loop.index }}" data-status="{{ 'skipped' if result_is_skipped else result.status }}">
+                        {% set result_execution_status = result | execution_status %}
+        <div class="validator-card" id="validator-{{ loop.index }}" data-status="{{ result_execution_status }}">
             <button class="validator-collapsible {{ 'active' if (result_is_skipped or not result.passed) else '' }}" onclick="toggleValidator(this)">
                 <div class="collapsible-header">
-                    <span class="status-indicator {{ 'warn' if (result_is_skipped or result.is_incomplete) else ('pass' if result.passed else 'fail') }}"></span>
+                    <span class="status-indicator {{ 'warn' if (result_execution_status in ['skipped', 'incomplete', 'not_applicable']) else ('pass' if result.passed else 'fail') }}"></span>
                     <span>{{ result.validator_name }}</span>
                     {% if result.validator_description %}<span style="opacity:0.6;font-weight:400;font-size:0.8rem;margin-left:0.25rem">— {{ result.validator_description }}</span>{% endif %}
                 </div>
                 <div style="display:flex;align-items:center;gap:0.75rem">
-                    <span class="status-badge {{ 'warn' if (result_is_skipped or result.is_incomplete) else ('pass' if result.passed else 'fail') }}">{{ 'Skipped' if result_is_skipped else ('Incomplete' if result.is_incomplete else ('Pass' if result.passed else 'Fail')) }}</span>
+                    <span class="status-badge {{ 'warn' if (result_execution_status in ['skipped', 'incomplete', 'not_applicable']) else ('pass' if result.passed else 'fail') }}">{{ 'N/A' if result_execution_status == 'not_applicable' else result_execution_status | title }}</span>
                     <span class="expand-text">{{ '▲ Collapse' if (result_is_skipped or not result.passed) else '▼ Expand' }}</span>
                 </div>
             </button>
@@ -3922,7 +3978,7 @@
         {% endif %}
         </div>
         {% endfor %}
-    </div>
+    </main>
     <footer>Generated by <strong>SkillEvaluator</strong> — NVIDIA Benchmark for Agent Skills Evaluation</footer>
     <button id="backToTop" onclick="scrollToTop()" title="Back to Top">↑ Top</button>
     <script id="report-data" type="application/json">{{ report_json | safe }}</script>
@@ -3931,7 +3987,7 @@
             const html = document.documentElement;
             const newTheme = html.getAttribute('data-theme') === 'dark' ? 'light' : 'dark';
             html.setAttribute('data-theme', newTheme);
-            localStorage.setItem('skillevaluator-theme', newTheme);
+            try { localStorage.setItem('skillevaluator-theme', newTheme); } catch (err) { /* Storage is optional for standalone files. */ }
             updateThemeButton(newTheme);
             if (window.rebuildTier3Charts) window.rebuildTier3Charts();
         }
@@ -3940,7 +3996,8 @@
             document.getElementById('theme-text').textContent = theme === 'dark' ? 'Light' : 'Dark';
         }
         function initTheme() {
-            const savedTheme = localStorage.getItem('skillevaluator-theme') || {{ ("'dark'" if tier3 else "'light'") | safe }};
+            let savedTheme = 'light';
+            try { savedTheme = localStorage.getItem('skillevaluator-theme') === 'dark' ? 'dark' : 'light'; } catch (err) { /* Standalone reports work without storage. */ }
             document.documentElement.setAttribute('data-theme', savedTheme);
             updateThemeButton(savedTheme);
             if (window.rebuildTier3Charts) window.rebuildTier3Charts();
@@ -3971,6 +4028,7 @@
             // sync their selected state to whichever tab is now active.
             document.querySelectorAll('.tier-card[data-target-tab]').forEach(card => {
                 card.classList.toggle('active', card.dataset.targetTab === tabId);
+                card.setAttribute('aria-pressed', card.dataset.targetTab === tabId ? 'true' : 'false');
             });
             // Keep the legacy ``btn`` arg working for any caller that still
             // passes a clicked element (e.g. older bookmarks/anchors).
@@ -3984,8 +4042,8 @@
         function filterValidators(status) {
             const cards = document.querySelectorAll('.validator-card');
             const rows = document.querySelectorAll('.summary-table tbody tr');
-            ['all', 'pass', 'fail'].forEach(s => document.getElementById('filter-' + s).classList.remove('active'));
-            document.getElementById('filter-' + status).classList.add('active');
+            ['all', 'pass', 'fail', 'incomplete'].forEach(s => document.getElementById('filter-' + s)?.classList.remove('active'));
+            document.getElementById('filter-' + status)?.classList.add('active');
             let visibleCount = 0;
             cards.forEach(c => {
                 const show = (status === 'all' || c.getAttribute('data-status') === status);
@@ -4052,8 +4110,8 @@
         }
         function filterSkills(status) {
             const cards = document.querySelectorAll('#results-by-skill .skill-card');
-            ['all', 'pass', 'fail'].forEach(s => document.getElementById('skill-filter-' + s).classList.remove('active'));
-            document.getElementById('skill-filter-' + status).classList.add('active');
+            ['all', 'pass', 'fail', 'incomplete'].forEach(s => document.getElementById('skill-filter-' + s)?.classList.remove('active'));
+            document.getElementById('skill-filter-' + status)?.classList.add('active');
             let visibleCount = 0;
             cards.forEach(c => {
                 const show = (status === 'all' || c.getAttribute('data-skill-status') === status);
@@ -4087,7 +4145,7 @@
             });
         }
         function scrollToSkill(skillName) {
-            const card = document.querySelector('.skill-card[data-skill-name="' + skillName + '"]');
+            const card = Array.from(document.querySelectorAll('.skill-card')).find(card => card.dataset.skillName === skillName);
             if (!card) return;
             // Make sure it's visible (clear any active filter)
             card.style.display = '';
@@ -4107,7 +4165,7 @@
         // every "jump into a skill card" entry point so they keep identical
         // visibility / expansion semantics.
         function _openSkillCard(skillName) {
-            const card = document.querySelector('.skill-card[data-skill-name="' + skillName + '"]');
+            const card = Array.from(document.querySelectorAll('.skill-card')).find(card => card.dataset.skillName === skillName);
             if (!card) return null;
             card.style.display = '';
             const content = card.querySelector('.skill-content');
@@ -4134,6 +4192,10 @@
                 }
             }
             if (target) {
+                // Findings can live inside collapsed checks, including passing checks.
+                for (let parent = target.parentElement; parent && parent !== card; parent = parent.parentElement) {
+                    if (parent.tagName === 'DETAILS') parent.open = true;
+                }
                 target.scrollIntoView({ behavior: 'smooth', block: 'center' });
                 target.style.boxShadow = '0 0 0 3px var(--secondary-color)';
                 setTimeout(() => { target.style.boxShadow = ''; }, 2000);
@@ -4170,8 +4232,8 @@
             document.querySelectorAll('.top-issues-table tbody tr').forEach(r => r.classList.remove('top-issues-active-row'));
             row.classList.add('top-issues-active-row');
             // Reset skill status filter to "All"
-            ['all', 'pass', 'fail'].forEach(s => document.getElementById('skill-filter-' + s).classList.remove('active'));
-            document.getElementById('skill-filter-all').classList.add('active');
+            ['all', 'pass', 'fail', 'incomplete'].forEach(s => document.getElementById('skill-filter-' + s)?.classList.remove('active'));
+            document.getElementById('skill-filter-all')?.classList.add('active');
             // Filter skill cards to show only affected ones
             const cards = document.querySelectorAll('#results-by-skill .skill-card');
             cards.forEach(c => {
@@ -4191,7 +4253,7 @@
             // Show filter banner above the skill list
             const banner = document.getElementById('skill-filter-banner');
             document.getElementById('skill-filter-banner-text').textContent =
-                'Showing ' + affectedSkills.length + ' {{ content_label | lower }}(s) affected by: ' + issueName;
+                'Showing ' + affectedSkills.length + ' item(s) affected by: ' + issueName;
             banner.classList.add('visible');
             // Hide skill empty message if present
             const emptyMsg = document.getElementById('skill-empty-msg');
@@ -4208,10 +4270,10 @@
         }
         function clearSkillFilter() {
             document.querySelectorAll('#results-by-skill .skill-card').forEach(c => c.style.display = '');
-            document.getElementById('skill-filter-banner').classList.remove('visible');
+            document.getElementById('skill-filter-banner')?.classList.remove('visible');
             document.querySelectorAll('.top-issues-table tbody tr').forEach(r => r.classList.remove('top-issues-active-row'));
-            ['all', 'pass', 'fail'].forEach(s => document.getElementById('skill-filter-' + s).classList.remove('active'));
-            document.getElementById('skill-filter-all').classList.add('active');
+            ['all', 'pass', 'fail', 'incomplete'].forEach(s => document.getElementById('skill-filter-' + s)?.classList.remove('active'));
+            document.getElementById('skill-filter-all')?.classList.add('active');
             filterSeverity('all');
         }
         function toggleTopIssues(header) {
@@ -4231,7 +4293,7 @@
         var currentSeverityFilter = 'all';
         function filterSeverity(level) {
             currentSeverityFilter = level;
-            ['all', 'critical-high', 'medium', 'low'].forEach(s => document.getElementById('sev-filter-' + s).classList.remove('active'));
+            ['all', 'critical-high', 'medium', 'low'].forEach(s => document.getElementById('sev-filter-' + s)?.classList.remove('active'));
             document.getElementById('sev-filter-' + level).classList.add('active');
             const findings = document.querySelectorAll('.check-finding[data-finding-severity]');
             findings.forEach(f => {
@@ -4254,6 +4316,7 @@
             });
         }
         document.addEventListener('DOMContentLoaded', initTheme);
+        {% include "report_ui.js.j2" %}
     </script>
 </body>
 </html>

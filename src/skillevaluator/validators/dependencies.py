@@ -11,6 +11,7 @@ from __future__ import annotations
 
 import json
 import math
+import re
 import tempfile
 import tomllib
 from pathlib import Path
@@ -119,9 +120,10 @@ class DependencySecurityValidator(ValidatorBase):
         result = ValidationResult()
         result.add_message(f"Auditing {req_file.name}")
 
-        result.merge(self._run_pip_audit_on_file(req_file))
+        audit_result = self._run_pip_audit_on_file(req_file)
+        result.merge(audit_result)
 
-        if self.use_safety and Tools.safety.is_available:
+        if self.use_safety and not audit_result.is_incomplete and Tools.safety.is_available:
             result.merge(self._run_safety(req_file))
 
         return result
@@ -199,7 +201,7 @@ class DependencySecurityValidator(ValidatorBase):
                     try:
                         # Unevaluable markers raise ValueError subclasses such as UndefinedComparison.
                         marker_matches = requirement.marker.evaluate({"extra": extra})
-                    except (ValueError, RecursionError):
+                    except (KeyError, TypeError, ValueError, RecursionError):
                         incomplete(f"{label}: environment marker cannot be evaluated")
                         continue
                     if not marker_matches:
@@ -314,20 +316,93 @@ class DependencySecurityValidator(ValidatorBase):
         return result
 
     def _run_pip_audit_on_file(self, req_file: Path) -> ValidationResult:
-        """Run pip-audit on a requirements file."""
-        result = ValidationResult()
+        """Audit only explicit pins, without installing packages or running build code.
 
+        Parse the untrusted file ourselves so pip cannot follow includes, URLs,
+        local projects, index options, or environment substitutions. Unsupported
+        declarations make coverage incomplete; valid pins are still audited.
+        """
+        result = ValidationResult()
+        result.add_message(f"{req_file.name}: auditing explicit pins only; dependencies are not resolved or installed")
+        try:
+            with SecureRoot(req_file.parent) as root:
+                raw, _ = root.read_bytes(Path(req_file.name), 1024 * 1024)
+            text = raw.decode("utf-8")
+        except (OSError, SecurePathError, UnicodeError):
+            result.add_warning(f"{req_file.name}: cannot read a bounded regular requirements file")
+            result.mark_scan_incomplete("pip-audit")
+            return result
+
+        pins: set[str] = set()
+        # Accept pip-compile's hash continuations, but pass only parsed package
+        # names and versions to the scanner. Never forward arbitrary pip syntax.
+        declarations = re.sub(r"\\\r?\n", " ", text).splitlines()
+        if len(declarations) > 4096:
+            result.add_warning(f"{req_file.name}: dependency declaration limit (4096) exceeded")
+            result.mark_scan_incomplete("pip-audit")
+            return result
+        for index, declaration in enumerate(declarations, 1):
+            declaration = re.split(r"\s+#", declaration, maxsplit=1)[0].strip()
+            if not declaration or declaration.startswith("#"):
+                continue
+            declaration = re.sub(r"\s+--hash=sha(?:256|384|512):[0-9a-fA-F]+(?=\s|$)", "", declaration)
+            try:
+                requirement = Requirement(declaration)
+                specifiers = list(requirement.specifier)
+                if (
+                    requirement.url
+                    or len(specifiers) != 1
+                    or specifiers[0].operator != "=="
+                    or "*" in specifiers[0].version
+                ):
+                    raise InvalidRequirement("unsupported requirement")
+                if requirement.marker and not requirement.marker.evaluate({"extra": ""}):
+                    result.add_message(
+                        f"{req_file.name}: line {index} skipped (marker does not match scanner platform)"
+                    )
+                    continue
+                pins.add(f"{canonicalize_name(requirement.name)}=={Version(specifiers[0].version)}")
+            except (InvalidRequirement, KeyError, TypeError, ValueError, RecursionError):
+                # Do not leak URL credentials or arbitrary source text in diagnostics.
+                result.add_warning(
+                    f"{req_file.name}: line {index} requires an exact package version; "
+                    "URLs, local paths, includes and pip options are not audited"
+                )
+                result.mark_scan_incomplete("pip-audit")
+        if not pins:
+            if not result.is_incomplete:
+                result.add_success(check_name="pip_audit", message=f"{req_file.name}: no applicable pins to audit")
+            return result
         if not Tools.pip_audit.is_available:
             result.add_warning(f"pip-audit not installed. {Tools.pip_audit.get_install_hint()}")
             result.mark_scan_incomplete("pip-audit")
             return result
 
-        tool_result = Tools.pip_audit.run(
-            ["-r", str(req_file), "--format", "json", "--progress-spinner", "off"],
-            timeout=180,
-        )
-
+        with tempfile.TemporaryDirectory(prefix="skillevaluator-requirements-") as temporary:
+            sanitized = Path(temporary) / "requirements.txt"
+            sanitized.write_text("\n".join(sorted(pins)) + "\n", encoding="utf-8")
+            tool_result = Tools.pip_audit.run(
+                ["-r", str(sanitized), "--no-deps", "--disable-pip", "--format", "json", "--progress-spinner", "off"],
+                timeout=180,
+            )
         self._process_pip_audit_result(tool_result, result, req_file.name)
+        inventory = self._validated_pip_audit_report(tool_result.stdout)
+        try:
+            returned = (
+                {(canonicalize_name(dep["name"]), Version(dep["version"])) for dep in inventory[0]}
+                if inventory is not None
+                else set()
+            )
+        except (ValueError, TypeError):
+            returned = set()
+        expected = {
+            (canonicalize_name(Requirement(pin).name), Version(next(iter(Requirement(pin).specifier)).version))
+            for pin in pins
+        }
+        if returned != expected:
+            result.add_warning(f"{req_file.name}: pip-audit did not return evidence for every requested pin")
+            result.mark_scan_incomplete("pip-audit")
+            result.success_details = [detail for detail in result.success_details if detail.check_name != "pip_audit"]
 
         return result
 

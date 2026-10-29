@@ -18,6 +18,7 @@ import os
 import queue
 import re
 import signal
+import stat
 import subprocess
 import tempfile
 import threading
@@ -175,15 +176,22 @@ def scan_workers(environ: dict[str, str]) -> int:
 
 
 def worker_environment(env: dict[str, str], worker: int) -> dict[str, str]:
-    """Give each scan worker its own home and temporary directory."""
+    """Give each scan worker its own private home and temporary directory.
+
+    The paths are fixed, so outside Docker another local user could create
+    them first in a shared /tmp. An existing directory is used only if this
+    user owns it and no one else has access to it.
+    """
     isolated = dict(env)
     isolated["HOME"] = str(Path(env["HOME"]) / f"worker-{worker}")
     isolated["TMPDIR"] = str(Path(env.get("TMPDIR") or tempfile.gettempdir()) / f"skillevaluator-worker-{worker}")
     for name in ("HOME", "TMPDIR"):
         directory = Path(isolated[name])
         directory.mkdir(mode=0o700, parents=True, exist_ok=True)
-        if directory.is_symlink() or not directory.is_dir():
-            raise ConfigurationError("Scan worker directories must be real directories.")
+        info = directory.lstat()
+        private = os.name != "posix" or (info.st_uid == os.getuid() and not info.st_mode & 0o077)
+        if not stat.S_ISDIR(info.st_mode) or not private:
+            raise ConfigurationError("Scan worker directories must be private directories owned by this user.")
     return isolated
 
 

@@ -13,6 +13,7 @@ import os
 import re
 import shutil
 import signal
+import stat
 import subprocess
 import sys
 import threading
@@ -1207,3 +1208,66 @@ def test_each_report_is_released_once_its_result_is_logged(tmp_path, monkeypatch
     )
     # Only the latest result may still be referenced when the next scan starts.
     assert alive == [0, 1, 1, 1, 1]
+
+
+def worker_directory(env, name):
+    return Path(env[name]) / ("worker-1" if name == "HOME" else "skillevaluator-worker-1")
+
+
+@pytest.mark.parametrize("name", ["HOME", "TMPDIR"])
+def test_symlinked_worker_directory_is_rejected(tmp_path, name):
+    env = {"HOME": str(tmp_path / "home"), "TMPDIR": str(tmp_path / "tmp")}
+    directory = worker_directory(env, name)
+    directory.parent.mkdir()
+    (tmp_path / "elsewhere").mkdir(mode=0o700)
+    directory.symlink_to(tmp_path / "elsewhere", target_is_directory=True)
+    with pytest.raises(runner.ConfigurationError):
+        runner.worker_environment(env, 1)
+
+
+@posix_only
+@pytest.mark.parametrize("name", ["HOME", "TMPDIR"])
+def test_existing_worker_directory_open_to_others_is_rejected(tmp_path, name):
+    env = {"HOME": str(tmp_path / "home"), "TMPDIR": str(tmp_path / "tmp")}
+    directory = worker_directory(env, name)
+    directory.mkdir(parents=True)
+    directory.chmod(0o777)
+    with pytest.raises(runner.ConfigurationError):
+        runner.worker_environment(env, 1)
+    assert stat.S_IMODE(directory.stat().st_mode) == 0o777
+
+
+@posix_only
+def test_worker_directory_owned_by_another_user_is_rejected(tmp_path, monkeypatch):
+    env = {"HOME": str(tmp_path / "home"), "TMPDIR": str(tmp_path / "tmp")}
+    uid = os.getuid()
+    monkeypatch.setattr(runner.os, "getuid", lambda: uid + 1)
+    with pytest.raises(runner.ConfigurationError):
+        runner.worker_environment(env, 1)
+
+
+@posix_only
+def test_existing_private_worker_directories_are_reused(tmp_path):
+    env = {"HOME": str(tmp_path / "home"), "TMPDIR": str(tmp_path / "tmp")}
+    for name in ("HOME", "TMPDIR"):
+        worker_directory(env, name).mkdir(mode=0o700, parents=True)
+        (worker_directory(env, name) / "kept").write_text("", encoding="utf-8")
+    isolated = runner.worker_environment(env, 1)
+    for name in ("HOME", "TMPDIR"):
+        assert isolated[name] == str(worker_directory(env, name))
+        assert (worker_directory(env, name) / "kept").is_file()
+
+
+def test_symlinked_worker_directory_fails_before_scanning(tmp_path):
+    workspace = tmp_path / "workspace"
+    skill(workspace, "skills/a")
+    audit = tmp_path / "audit-tmp"
+    audit.mkdir()
+    (tmp_path / "elsewhere").mkdir(mode=0o700)
+    (audit / "skillevaluator-worker-1").symlink_to(tmp_path / "elsewhere", target_is_directory=True)
+    reports, calls = tmp_path / "reports", []
+    assert runner.run(workspace, reports, {"TMPDIR": str(audit)}, execute=fake_cli([], calls)) == 1
+    assert not calls
+    summary = json.loads((reports / "summary.json").read_text())
+    assert summary["overall_status"] == "error"
+    assert summary["error"] == "Scan worker directories must be private directories owned by this user."

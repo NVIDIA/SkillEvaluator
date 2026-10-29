@@ -31,8 +31,8 @@ skills. This is a selection cap, not a runtime guarantee: scans have a bounded
 time budget and retain completed results with explicit incomplete entries for
 unprocessed skills. Do not interpret a changed-skill selection as a new
 full-catalog pass.
-Up to `scan-workers` skills are scanned at once, each with its own home and
-temporary directory. Logs, annotations and report rows keep skill order. When
+Up to `scan-workers` skills are scanned at once, each with its own private home
+and temporary directory. Logs, annotations and report rows keep skill order. When
 the time budget runs out, running scans stop and skills not yet started are
 reported as not evaluated. Ctrl-C also stops running scans at once, including
 the scanner tools they started.

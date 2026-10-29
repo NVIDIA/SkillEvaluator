@@ -17,7 +17,7 @@ All notable changes to SkillEvaluator are documented in this file.
   pushes the image it smoke-tested.
 - The reusable Tier 1 workflow scans up to four skills at once. The
   `scan-workers` input (1 to 16) changes this, and `1` scans one skill at a
-  time. Each worker gets its own home and temporary directory. Logs,
+  time. Each worker gets its own private home and temporary directory. Logs,
   annotations and report rows keep skill order, and skills not started when the
   scan time budget runs out are still reported as not evaluated. A timeout,
   Ctrl-C or an error while saving results ends running scans together with

@@ -23,6 +23,18 @@ MAX_FILES = 10000
 MAX_TOKENS = 4096
 MAX_TOKEN_BYTES = 1024 * 1024
 MAX_LINE_CHARS = 8192
+# The PII patterns need a quoted value. Also collect NVIDIA API keys and the
+# unquoted KEY=value and Bearer forms. Such a value must contain letters and
+# digits, so ordinary words and variable names are not collected. Lengths are
+# bounded to limit backtracking and to stay within the redaction limits.
+NVIDIA_API_KEY = re.compile(r"\bnvapi-[A-Za-z0-9_-]{40,250}")
+UNQUOTED_VALUES = (
+    re.compile(
+        r"(?i)(?:secret|password|passwd|pwd|api[-_]?key|apikey|auth[-_]?token)\w{0,64}\s*[=:]\s*"
+        r"([A-Za-z0-9_+-][A-Za-z0-9_+/=-]{15,255})(?=[\s\"'`;&|,)\]}]|$)"
+    ),
+    re.compile(r"(?i)\bbearer\s+([A-Za-z0-9_+-][A-Za-z0-9_+/=.~-]{15,255})(?=[\s\"'`;&|,)\]}]|$)"),
+)
 
 
 def collect_sensitive_values(skill: Path) -> set[str]:
@@ -63,6 +75,14 @@ def collect_sensitive_values(skill: Path) -> set[str]:
                 for category, pattern, _exceptions, _definition in patterns:
                     for match in pattern.finditer(line):
                         tokens.update(sensitive_values(category, match.group(), line))
+                tokens.update(NVIDIA_API_KEY.findall(line))
+                for pattern in UNQUOTED_VALUES:
+                    tokens.update(
+                        value
+                        for value in pattern.findall(line)
+                        if any(character.isdigit() for character in value)
+                        and any(character.isalpha() for character in value)
+                    )
             if "PRIVATE KEY-----" in text:
                 blocks = re.findall(
                     r"-----BEGIN [^\r\n]*PRIVATE KEY-----[\s\S]*?-----END [^\r\n]*PRIVATE KEY-----", text

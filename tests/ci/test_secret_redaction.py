@@ -477,6 +477,41 @@ def test_retained_markdown_and_sarif_are_rendered_from_redacted_json(tmp_path):
             _assert_no_fragment(path.read_bytes(), value)
 
 
+def test_preflight_collects_unquoted_nvidia_key_and_bearer_values(tmp_path):
+    from ci.secret_redaction import collect_sensitive_values
+
+    skill = _skill(tmp_path)
+    key = "nvapi-" + "kl" * 24
+    bearer = "Tk9" * 8
+    (skill / "source.py").write_text("value = 1\n")
+    (skill / "SKILL.md").write_text(
+        "---\nname: demo\ndescription: A sample formatting skill.\n---\n# Demo\n\n"
+        "```bash\nexport NVIDIA_API_KEY=" + key + "\n"
+        "curl -H 'Authorization: Bearer " + bearer + "' https://api.example.invalid\n```\n"
+    )
+    tokens = collect_sensitive_values(skill)
+    if key not in tokens or bearer not in tokens:
+        pytest.fail("Credential preflight did not identify an unquoted credential.")
+
+
+def test_preflight_does_not_collect_ordinary_words_after_credential_names(tmp_path):
+    from ci.secret_redaction import collect_sensitive_values
+
+    skill = _skill(tmp_path)
+    (skill / "source.py").write_text("value = 1\n")
+    (skill / "SKILL.md").write_text(
+        "---\nname: demo\ndescription: A sample formatting skill.\n---\n# Demo\n\n"
+        "The password: required for the staging environment.\n"
+        "Send the header Authorization: Bearer token_from_the_environment.\n"
+        "export NVIDIA_API_KEY=$NVIDIA_API_KEY_FROM_THE_VAULT\n"
+        "api_key = load_configuration_value(name)\n"
+        "API_KEY_FILE=/run/secrets/provider_key_v2\n"
+        # A long encoded blob is not a key; collecting it would stop the scan.
+        "api_key: " + "Ab1" * 200 + "\n"
+    )
+    assert collect_sensitive_values(skill) == set()
+
+
 @pytest.mark.parametrize("mark", ["\u200b", "\ufeff", "\u00a0"])
 def test_preflight_matches_values_echoed_with_an_invisible_character_marker(tmp_path, mark):
     from ci.secret_redaction import collect_sensitive_values

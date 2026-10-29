@@ -120,8 +120,7 @@ def skill_trees(workspace: Path, roots: list[str]) -> list[Path]:
             inside_skill = any(parent.is_relative_to(skill) for skill in discovered) or "SKILL.md" in files
             for name in [*directories, *files]:
                 child = parent / name
-                # Names in scanned trees also reject DEL (0x7f).
-                if has_control_character(name) or "\x7f" in name:
+                if has_control_character(name):
                     raise ConfigurationError("Skill paths must not contain control characters.")
                 if child.is_symlink() and (inside_skill or name == "SKILL.md"):
                     raise ConfigurationError("Symlinks are not supported in skill roots or scan content.")

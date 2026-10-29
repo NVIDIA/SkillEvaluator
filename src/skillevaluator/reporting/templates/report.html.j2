@@ -2447,7 +2447,7 @@
                 {% if t3_effect %}
                 {% set t3_fix_count = t3_preview_recommendations | length %}
                 <p class="t3-next-steps-conclusion">
-                    {% if t3_fix_count %}{{ t3_fix_count }} issue{{ 's' if t3_fix_count != 1 else '' }} to fix, most attempts lost first:{% else %}Nothing to fix: every with-skill attempt passed and met its goal, and the skill didn't hurt any case.{% endif %}
+                    {% if t3_fix_count %}{{ t3_fix_count }} issue{{ 's' if t3_fix_count != 1 else '' }} to fix, most attempts lost first:{% else %}Nothing to fix in the available case evidence.{% endif %}
                 </p>
                 {% if t3_fix_count %}
                 <ol class="t3-next-steps-list">
@@ -2703,7 +2703,14 @@
                     Higher rates and a positive lift show better observed repeatability on these evaluated cases.
                 </p>
                 <div class="table-scroll" tabindex="0" role="region" aria-label="Pass at K summary table">
-                {% macro t3_attempts_passed(branch) %}{% if branch.case_details_truncated %}{{ branch.attempts_used or 0 }} of {{ branch.max_attempts_possible or 0 }} scored{% else %}{% set ns = namespace(n=0) %}{% for case in (branch.cases or {}).values() %}{% for att in case.attempts or [] %}{% if att.passed %}{% set ns.n = ns.n + 1 %}{% endif %}{% endfor %}{% endfor %}{{ ns.n }} of {{ branch.attempts_used or 0 }}{% endif %}{% endmacro %}
+                {% macro t3_attempts_passed(branch) %}
+                    {% set ns = namespace(n=0, truncated=branch.case_details_truncated or false) %}
+                    {% for case in (branch.cases or {}).values() %}
+                        {% if case.attempt_details_truncated %}{% set ns.truncated = true %}{% endif %}
+                        {% for att in case.attempts or [] %}{% if att.passed %}{% set ns.n = ns.n + 1 %}{% endif %}{% endfor %}
+                    {% endfor %}
+                    {% if ns.truncated %}{{ branch.attempts_used or 0 }} scored; pass details truncated{% else %}{{ ns.n }} of {{ branch.attempts_used or 0 }}{% endif %}
+                {% endmacro %}
                 <table class="summary-table pass-at-k-table" style="width:100%;">
                     <thead><tr>
                         <th>Agent</th><th>Condition</th><th>Pass Rate</th><th>95% Interval</th><th>Cases Passed</th><th>Attempts Passed</th><th>Lift</th>
@@ -2852,7 +2859,7 @@
             {% endif %}
 
             {% set t3_goal_by_trial = {} %}
-            {% for trial in tier3.trials or [] %}{% if trial.scores and trial.scores.goal_accuracy is defined %}{% set _ = t3_goal_by_trial.update({trial.trial_id: trial.scores.goal_accuracy}) %}{% endif %}{% endfor %}
+            {% for trial in tier3.trials or [] %}{% if trial.scores and trial.scores.goal_accuracy is defined %}{% set _ = t3_goal_by_trial.update({(trial.agent, trial.trial_id): trial.scores.goal_accuracy}) %}{% endif %}{% endfor %}
             {% if t3_attempt_rows %}
             <details class="t3-details" id="tier3-attempt-details" open>
                 <summary>Attempt Details</summary>
@@ -2925,7 +2932,7 @@
                             </td>
                             <td>
                                 {% set goal = namespace(missed=0) %}
-                                {% if row.condition == 'With skill' %}{% for att in attempts %}{% if att.get('passed') and t3_goal_by_trial.get(att.get('trial')) == 0 %}{% set goal.missed = goal.missed + 1 %}{% endif %}{% endfor %}{% endif %}
+                                {% if row.condition == 'With skill' %}{% for att in attempts %}{% if att.get('passed') and t3_goal_by_trial.get((row.agent, att.get('trial'))) == 0 %}{% set goal.missed = goal.missed + 1 %}{% endif %}{% endfor %}{% endif %}
                                 {% if passed and goal.missed %}
                                     <span class="t3-pill warning" title="{{ goal.missed }} passing attempt(s) scored goal accuracy 0.00">passed{% if first_pass_attempt is not none %} on scored attempt {{ first_pass_attempt | int }}{% endif %} · goal not met (0.00)</span>
                                 {% elif passed and first_pass_attempt is not none %}

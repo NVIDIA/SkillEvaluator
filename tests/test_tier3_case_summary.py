@@ -67,10 +67,10 @@ def test_grid_shows_one_row_per_case_with_attempt_marks_per_agent() -> None:
     assert "✗✗ → ✓✓  +100" in rows["c1"] and "- → ✓✗  ?" in rows["c1"]
     assert "- → ✗✓  ?" in rows["c2"] and "✓✓ → ✗⊘  ?" in rows["c2"]
     rates = next(line for line in output.splitlines() if line.startswith("success rate"))
-    assert "0% → 75%  +75 pp" in rates and rates.rstrip().endswith("?")
+    assert "0% → 75%  ?" in rates and rates.rstrip().endswith("?")
     assert output.index("effectiveness") < output.index("security")
     assert output.count("(without → with skill)") == 2 and "change in pass rate" in output
-    assert "skill helps   claude-code +75 pp · codex: 1 attempt(s) did not run" in output
+    assert "inconclusive" in output and "conditions cover different cases" in output
 
 
 def test_verdict_thresholds() -> None:
@@ -297,7 +297,7 @@ def test_how_to_improve_says_nothing_to_fix_only_when_the_list_was_computed_and_
     for fixes, expected in (([], True), (None, False)):
         console = Console(record=True, width=120)
         render_case_summary(result, console=console, fixes=fixes)
-        assert ("How to improve: nothing to fix." in console.export_text()) is expected
+        assert ("How to improve: nothing to fix in the available case evidence." in console.export_text()) is expected
 
 
 def test_passing_attempts_that_miss_the_goal_are_reported_with_a_prompt_fix(tmp_path: Path) -> None:
@@ -334,3 +334,232 @@ def test_goal_met_or_unscored_passes_are_not_flagged(tmp_path: Path) -> None:
     _trial(tmp_path, "a", "t1", {})
 
     assert what_to_fix({"agents": agents}, run_dir=tmp_path, use_llm=False) == []
+
+
+def test_never_activated_scores_do_not_claim_a_skill_effect(tmp_path: Path) -> None:
+    agent = _agent({"c": _case(False)}, {"c": _case(True)})
+    agent["skill_activation"] = {"status": "never_activated"}
+    _trial(tmp_path, "a", "t0", _reward(False, "the skill was not loaded"))
+    assert verdict({"a": agent})[0] == "inconclusive"
+    fixes = what_to_fix({"agents": {"a": agent}}, run_dir=tmp_path, use_llm=False)
+    assert all(fix["kind"] != "skill hurts" for fix in fixes)
+    output = render_result({"execution_status": "succeeded", "agents": {"a": agent}})
+    assert "skill hurts" not in output
+    assert "inconclusive" in output
+
+
+def test_truncated_attempts_cannot_produce_a_complete_effect_or_clean_bill(tmp_path: Path) -> None:
+    case = {**_case(True), "attempt_details_total": 2, "attempt_details_truncated": True}
+    agent = _agent({"c": case}, {"c": _case(False, False)})
+    assert verdict({"a": agent})[0] == "inconclusive"
+    console = Console(record=True, width=160)
+    render_case_summary({"agents": {"a": agent}}, console=console, fixes=[])
+    output = console.export_text()
+    assert "inconclusive" in output and "nothing to fix" not in output
+
+
+def test_truncated_case_sample_does_not_claim_baseline_saturation(tmp_path: Path) -> None:
+    agent = _agent({"c": _case(True)}, {"c": _case(True)})
+    agent["pass_at_k"]["without_skill"].update(case_details_truncated=True, total_cases=100)
+    assert verdict({"a": agent})[0] == "inconclusive"
+    assert what_to_fix({"agents": {"a": agent}}, run_dir=tmp_path, use_llm=False) == []
+
+
+def test_new_summary_redacts_known_credentials_and_keeps_case_names_literal(tmp_path: Path, monkeypatch) -> None:
+    secret = "review-fake-environment-credential-7135"
+    monkeypatch.setenv("OPENAI_API_KEY", secret)
+    case_id = f"[bold]case[/bold]-{secret}"
+    agent = _agent({case_id: _case(False)}, {case_id: _case(False)})
+    (tmp_path / "what_to_fix.json").write_text(
+        json.dumps(
+            [
+                {
+                    "case": case_id,
+                    "scope": secret,
+                    "kind": "skill",
+                    "what": secret,
+                    "action": secret,
+                    "evidence": secret,
+                    "attempts_lost": 1,
+                }
+            ]
+        )
+    )
+    output = render_result({"execution_status": "succeeded", "run_dir": str(tmp_path), "agents": {secret: agent}})
+    assert secret not in output
+    assert "[bold]case[/bold]" in output
+
+
+def test_trial_artifact_symlinks_cannot_supply_advice(tmp_path: Path) -> None:
+    outside = tmp_path / "outside"
+    outside.mkdir()
+    (outside / "reward.json").write_text(json.dumps(_reward(True, "outside-private-reason")))
+    (outside / "trajectory.json").write_text(
+        json.dumps({"steps": [{"source": "agent", "message": "outside-private-answer"}]})
+    )
+    run = tmp_path / "run"
+    trials = run / "a" / "with-skill" / "trials"
+    trials.mkdir(parents=True)
+    (trials / "t0").symlink_to(outside, target_is_directory=True)
+    [fix] = what_to_fix({"agents": {"a": _agent({"c": _case(False)}, {})}}, run_dir=run, use_llm=False)
+    assert "outside-private" not in json.dumps(fix)
+    assert fix["evidence"] == ""
+
+
+def test_symlinked_reward_file_cannot_supply_advice(tmp_path: Path) -> None:
+    outside = tmp_path / "outside.json"
+    outside.write_text(json.dumps(_reward(True, "outside-private-reason")))
+    trial = tmp_path / "run" / "a" / "with-skill" / "trials" / "t0"
+    trial.mkdir(parents=True)
+    (trial / "reward.json").symlink_to(outside)
+    [fix] = what_to_fix({"agents": {"a": _agent({"c": _case(False)}, {})}}, run_dir=tmp_path / "run", use_llm=False)
+    assert "outside-private-reason" not in json.dumps(fix)
+
+
+def test_parent_agent_component_cannot_escape_run_directory(tmp_path: Path) -> None:
+    run = tmp_path / "run"
+    run.mkdir()
+    trial = tmp_path / "with-skill" / "trials" / "t0"
+    trial.mkdir(parents=True)
+    (trial / "reward.json").write_text(json.dumps(_reward(True, "outside-private-reason")))
+    [fix] = what_to_fix({"agents": {"..": _agent({"c": _case(False)}, {})}}, run_dir=run, use_llm=False)
+    assert "outside-private-reason" not in json.dumps(fix)
+    assert fix["evidence"] == ""
+
+
+def test_advice_is_redacted_before_it_is_saved(tmp_path: Path, monkeypatch) -> None:
+    secret = "review-fake-credential-in-judge-reason-8745"
+    monkeypatch.setenv("OPENAI_API_KEY", secret)
+    _trial(tmp_path, "a", "t0", _reward(True, secret))
+    fixes = what_to_fix({"agents": {"a": _agent({"c": _case(False)}, {})}}, run_dir=tmp_path, use_llm=False)
+    assert secret not in json.dumps(fixes)
+    assert "<redacted>" in json.dumps(fixes)
+
+
+def test_issue_scope_names_a_subset_of_more_than_two_agents(tmp_path: Path) -> None:
+    agents = {name: _agent({"c": _case(name == "c")}, {}) for name in ("a", "b", "c")}
+    [fix] = what_to_fix({"agents": agents}, run_dir=tmp_path, use_llm=False)
+    assert fix["scope"] == "a, b only"
+
+
+def test_missing_attempts_suppress_the_single_agent_summary_delta() -> None:
+    agent = _agent({"c": _case(True, missing=1)}, {"c": _case(False)})
+    output = render_result({"execution_status": "succeeded", "agents": {"a": agent}})
+    row = next(line for line in output.splitlines() if line.startswith("success rate"))
+    assert "+100" not in row
+
+
+def test_advisory_prompt_redacts_credentials_before_the_model_call(tmp_path: Path, monkeypatch) -> None:
+    from skillevaluator.tier3.eval_core import llm_judge
+
+    secret = "review-fake-advisory-prompt-secret-9375"
+    monkeypatch.setenv("OPENAI_API_KEY", secret)
+    _trial(tmp_path, "a", "t0", _reward(True, secret))
+    skill = tmp_path / "skill"
+    skill.mkdir()
+    (skill / "SKILL.md").write_text(f"# Skill\n\nPrivate setup: {secret}")
+    prompts = []
+
+    def call(prompt, **kwargs):
+        prompts.append(prompt)
+        return '["Improve the skill instructions."]', None
+
+    monkeypatch.setattr(llm_judge, "call_public_llm", call)
+    what_to_fix({"agents": {"a": _agent({"c": _case(False)}, {})}}, run_dir=tmp_path, skill_path=skill)
+    assert len(prompts) == 1 and secret not in prompts[0]
+    assert "\n\nSKILL.md:\n# Skill\n" in prompts[0]
+
+
+def test_long_error_logs_keep_the_root_error_from_the_bounded_tail(tmp_path: Path) -> None:
+    trial = tmp_path / "a" / "with-skill" / "trials" / "c__1"
+    trial.mkdir(parents=True)
+    (trial / "failure.json").write_text(json.dumps({"error": {"type": "AgentExitError", "message": "wrapper failed"}}))
+    (trial / "agent.txt").write_text("irrelevant log output\n" * 10000 + "Error: specific-tail-cause\n")
+    [fix] = what_to_fix({"agents": {"a": _agent({"c": _case(missing=1)}, {})}}, run_dir=tmp_path, use_llm=False)
+    assert "specific-tail-cause" in fix["what"]
+
+
+def test_failed_condition_rebuild_does_not_follow_a_symlinked_trials_directory(tmp_path: Path) -> None:
+    outside = tmp_path / "outside" / "c__1"
+    outside.mkdir(parents=True)
+    (outside / "reward.json").write_text(json.dumps({"overall": 0.9}))
+    agent_dir = tmp_path / "run" / "a"
+    (agent_dir / "with-skill").mkdir(parents=True)
+    (agent_dir / "with-skill" / "trials").symlink_to(outside.parent, target_is_directory=True)
+    agent = _agent({}, {})
+    agent["output_dir"] = str(agent_dir)
+    console = Console(record=True, width=160)
+    assert not render_case_summary({"agents": {"a": agent}}, console=console, fixes=None)
+
+
+def test_different_condition_score_contracts_do_not_claim_a_causal_skill_effect(tmp_path: Path) -> None:
+    for fields in (
+        {"metrics_with_skill": ["security"], "metrics_without_skill": ["accuracy"]},
+        {"score_policy_with_skill": "dimension-mean/v1", "score_policy_without_skill": "legacy-flat/v1"},
+    ):
+        agent = {**_agent({"c": _case(False)}, {"c": _case(True)}), **fields}
+        assert verdict({"a": agent})[0] == "inconclusive"
+        fixes = what_to_fix({"agents": {"a": agent}}, run_dir=tmp_path, use_llm=False)
+        assert all(fix["kind"] != "skill hurts" for fix in fixes)
+        output = render_result({"execution_status": "succeeded", "agents": {"a": agent}})
+        assert "skill hurts" not in output
+        rates = next(line for line in output.splitlines() if line.startswith("success rate"))
+        assert "-100" not in rates
+
+
+def test_disjoint_case_coverage_does_not_produce_an_overall_effect() -> None:
+    agent = _agent(
+        {"shared": _case(True), "with-only": _case(True)}, {"shared": _case(False), "baseline-only": _case(False)}
+    )
+    assert verdict({"a": agent})[0] == "inconclusive"
+
+
+def test_logical_multistep_goal_counts_average_steps_once(tmp_path: Path) -> None:
+    from skillevaluator.tier3.case_summary import goal_not_met_count
+
+    for label, goals, expected in (("missed", [0.0, 0.0], 1), ("mixed", [0.0, 1.0], 0)):
+        run = tmp_path / label
+        trial_id = "case__attempt1"
+        for i, goal in enumerate(goals, 1):
+            _trial(run, "a", f"{trial_id}__step-{i}", {"trial_id": trial_id, "goal_accuracy": goal})
+        case = {"attempts": [{"trial": trial_id, "passed": True, "score": 0.9}]}
+        source = {"agents": {"a": _agent({"case": case}, {"case": _case(False)})}}
+        assert goal_not_met_count(source, run_dir=run) == expected
+        fixes = what_to_fix(source, run_dir=run, use_llm=False)
+        assert sum(f["attempts_lost"] for f in fixes if f["kind"] == "goal not met") == expected
+
+
+def test_failed_conditions_keep_rebuilt_scores_diagnostic(tmp_path: Path) -> None:
+    agent = _agent({"c": _case(True)}, {"c": _case(False)})
+    agent["conditions"] = {
+        "with_skill": {"execution_status": "failed"},
+        "without_skill": {"execution_status": "succeeded"},
+    }
+    assert verdict({"a": agent})[0] == "inconclusive"
+    output = render_result({"execution_status": "failed", "agents": {"a": agent}})
+    assert "skill helps" not in output
+
+
+def test_saved_fixes_do_not_follow_a_symlink(tmp_path: Path) -> None:
+    outside = tmp_path / "outside.json"
+    content = json.dumps(
+        [
+            {
+                "case": "private-external-case",
+                "scope": "private",
+                "kind": "skill",
+                "what": "private",
+                "action": "private",
+                "evidence": "private",
+                "attempts_lost": 1,
+            }
+        ]
+    )
+    outside.write_text(content)
+    run = tmp_path / "run"
+    run.mkdir()
+    (run / "what_to_fix.json").symlink_to(outside)
+    agent = _agent({"c": _case(True)}, {"c": _case(False)})
+    output = render_result({"execution_status": "succeeded", "run_dir": str(run), "agents": {"a": agent}})
+    assert "private-external-case" not in output
+    assert outside.read_text() == content

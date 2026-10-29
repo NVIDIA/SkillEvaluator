@@ -7,16 +7,24 @@ from __future__ import annotations
 
 import json
 import logging
+import os
 import re
+import tempfile
 from collections import Counter
-from collections.abc import Mapping
+from collections.abc import Callable, Mapping
 from difflib import SequenceMatcher
+from itertools import islice
 from pathlib import Path
 from typing import TYPE_CHECKING, Any
 
 from rich.box import SIMPLE
 from rich.table import Table
 from rich.text import Text
+
+from skillevaluator.tier3.harbor.progress import redact_progress_detail, secret_values_from_environment
+from skillevaluator.utils.redaction import redact_sensitive_text
+from skillevaluator.utils.secret_redaction import Redactor
+from skillevaluator.utils.secure_fs import SecurePathError, SecureRoot
 
 if TYPE_CHECKING:
     from rich.console import Console
@@ -33,6 +41,7 @@ _MAX_REASON_CHARS = 220
 _MAX_SKILL_MD_CHARS = 6000
 _MAX_TRIAL_JSON_BYTES = 8 * 1024 * 1024
 _MAX_LOG_TAIL_BYTES = 64 * 1024
+_MAX_TRIAL_PATHS_SCANNED = 4096
 _STDOUT = re.compile(r"\bstdout:\s*(.+?)\s*(?:\bstderr:|$)", re.DOTALL)
 _RESTATED_CHARS = 60
 _ASKS_FOR_INPUT = re.compile(
@@ -53,6 +62,79 @@ _ENV_ERROR = re.compile(
     r"No such file or directory: '[^']+'|Could not find a version that satisfies[^\n\"]{0,80})"
 )
 _JUDGED_METRICS = ("goal_accuracy", "accuracy", "behavior_check")
+
+
+def _never_activated(agent: Mapping[str, Any]) -> bool:
+    activation = agent.get("skill_activation")
+    return isinstance(activation, Mapping) and activation.get("status") == "never_activated"
+
+
+def _details_truncated(agent: Mapping[str, Any]) -> bool:
+    branches = agent.get("pass_at_k")
+    for key, _ in _VARIANTS:
+        branch = branches.get(key) if isinstance(branches, Mapping) else None
+        if not isinstance(branch, Mapping):
+            continue
+        if branch.get("case_details_truncated"):
+            return True
+        cases = branch.get("cases")
+        if isinstance(cases, Mapping) and any(
+            isinstance(case, Mapping) and case.get("attempt_details_truncated") for case in cases.values()
+        ):
+            return True
+    return False
+
+
+def _contract_mismatch(agent: Mapping[str, Any]) -> bool:
+    with_metrics, without_metrics = agent.get("metrics_with_skill"), agent.get("metrics_without_skill")
+    if (
+        isinstance(with_metrics, list | tuple)
+        and isinstance(without_metrics, list | tuple)
+        and set(with_metrics) != set(without_metrics)
+    ):
+        return True
+    with_policy, without_policy = agent.get("score_policy_with_skill"), agent.get("score_policy_without_skill")
+    return bool(with_policy and without_policy and with_policy != without_policy)
+
+
+def _execution_unavailable(agent: Mapping[str, Any]) -> bool:
+    if agent.get("execution_status") not in {None, "succeeded", "complete"}:
+        return True
+    conditions = agent.get("conditions")
+    return isinstance(conditions, Mapping) and any(
+        isinstance(condition := conditions.get(key), Mapping)
+        and condition.get("execution_status") not in {None, "succeeded", "complete"}
+        for key, _ in _VARIANTS
+    )
+
+
+def _comparable(agent: Mapping[str, Any]) -> bool:
+    return not (
+        _never_activated(agent)
+        or _details_truncated(agent)
+        or _contract_mismatch(agent)
+        or _case_mismatch(agent)
+        or _execution_unavailable(agent)
+    ) and all(ERROR not in _marks(case) for key, _ in _VARIANTS for case in _cases(agent, key).values())
+
+
+def _case_mismatch(agent: Mapping[str, Any]) -> bool:
+    case_sets = [
+        {
+            case_id
+            for case_id, case in _cases(agent, key).items()
+            if not isinstance(case, Mapping) or not case.get("extra_case")
+        }
+        for key, _ in _VARIANTS
+    ]
+    return bool(all(case_sets) and case_sets[0] != case_sets[1])
+
+
+def _case_comparable(agent: Mapping[str, Any], with_case: Any, without_case: Any) -> bool:
+    return not (_never_activated(agent) or _contract_mismatch(agent) or _execution_unavailable(agent)) and all(
+        isinstance(case, Mapping) and not case.get("attempt_details_truncated") and ERROR not in _marks(case)
+        for case in (with_case, without_case)
+    )
 
 
 # ---------------------------------------------------------------- per-case data
@@ -92,7 +174,7 @@ def _scored_trials(agent: Mapping[str, Any], key: str) -> dict[str, dict[str, An
     )
     cases: dict[str, dict[str, Any]] = {}
     for trial in sorted(trials.iterdir()):
-        reward = _load_json(trial / "reward.json")
+        reward = _load_json(trial / "reward.json", root=Path(str(output_dir)))
         score = reward.get("overall") if isinstance(reward, Mapping) else None
         if isinstance(score, int | float) and not isinstance(score, bool):
             attempts = cases.setdefault(trial.name.split("__", 1)[0], {"attempts": []})["attempts"]
@@ -145,8 +227,24 @@ def verdict(agents: Mapping[str, Any]) -> tuple[str, str]:
     """Return (label, per-agent detail) using the raw per-attempt success rate."""
     deltas: dict[str, float] = {}
     not_run: dict[str, int] = {}
+    unavailable: list[str] = []
     for name, agent in agents.items():
         if not isinstance(agent, Mapping):
+            continue
+        if _never_activated(agent):
+            unavailable.append(f"{name}: skill never activated; scores are diagnostic only")
+            continue
+        if _details_truncated(agent):
+            unavailable.append(f"{name}: case/attempt details are truncated")
+            continue
+        if _contract_mismatch(agent):
+            unavailable.append(f"{name}: condition score contracts differ")
+            continue
+        if _case_mismatch(agent):
+            unavailable.append(f"{name}: conditions cover different cases")
+            continue
+        if _execution_unavailable(agent):
+            unavailable.append(f"{name}: condition execution is incomplete")
             continue
         missing = sum(_marks(case).count(ERROR) for key, _ in _VARIANTS for case in _cases(agent, key).values())
         if missing:
@@ -160,9 +258,10 @@ def verdict(agents: Mapping[str, Any]) -> tuple[str, str]:
     detail = " · ".join(
         [f"{name} {delta:+.0f} pp" for name, delta in deltas.items()]
         + [f"{name}: {n} attempt(s) did not run" for name, n in not_run.items()]
+        + unavailable
     )
     if not deltas:
-        return ("inconclusive", detail) if not_run else ("", "")
+        return ("inconclusive", detail) if not_run or unavailable else ("", "")
     if all(delta >= _CLEAR_EFFECT_PP for delta in deltas.values()):
         label = "skill helps"
     elif all(delta <= -_CLEAR_EFFECT_PP for delta in deltas.values()):
@@ -203,11 +302,13 @@ def _condition_cell(case: Mapping[str, Any] | None) -> Text:
     return cell
 
 
-def _effect(with_case: Mapping[str, Any] | None, without_case: Mapping[str, Any] | None) -> Text:
+def _effect(
+    with_case: Mapping[str, Any] | None, without_case: Mapping[str, Any] | None, *, comparable: bool = True
+) -> Text:
     """One word per case on what the skill changed: pass rate first, then mean score."""
     with_marks, without_marks = _marks(with_case), _marks(without_case)
     (wp, wn), (op, on) = _attempt_rate(with_marks), _attempt_rate(without_marks)
-    if not wn or not on or ERROR in with_marks + without_marks:
+    if not comparable or not wn or not on or ERROR in with_marks + without_marks:
         return Text("inconclusive", style="yellow")
     if wp * on != op * wn:
         return Text("helps", style="green") if wp * on > op * wn else Text("hurts", style="bold red")
@@ -222,7 +323,13 @@ def _effect(with_case: Mapping[str, Any] | None, without_case: Mapping[str, Any]
 
 
 def _summary_cells(
-    with_value: float | None, without_value: float | None, fmt: str, delta_fmt: str, weak: float | None = None
+    with_value: float | None,
+    without_value: float | None,
+    fmt: str,
+    delta_fmt: str,
+    weak: float | None = None,
+    *,
+    comparable: bool = True,
 ) -> list[Text]:
     def one(value: float | None) -> Text:
         if value is None:
@@ -231,7 +338,7 @@ def _summary_cells(
 
     delta = (
         Text(delta_fmt.format(with_value - without_value), style="dim")
-        if with_value is not None and without_value is not None
+        if comparable and with_value is not None and without_value is not None
         else Text("")
     )
     return [one(with_value), one(without_value), delta]
@@ -263,36 +370,47 @@ def _table(*headers: str | Text) -> Table:
     return table
 
 
-def _condition_grid(agents: Mapping[str, Any], case_ids: list[str], dims: list[str], title: str) -> Table:
+def _condition_grid(
+    agents: Mapping[str, Any], case_ids: list[str], dims: list[str], title: str, safe: Callable[[object], str]
+) -> Table:
     """One agent: a row per case with both conditions side by side and the effect."""
     [agent] = agents.values()
+    comparable = _comparable(agent)
     table = _table(title, "with skill", "without skill", "effect")
     for case_id in case_ids:
         with_case, without_case = _cases(agent, "with_skill").get(case_id), _cases(agent, "without_skill").get(case_id)
         table.add_row(
-            case_id, _condition_cell(with_case), _condition_cell(without_case), _effect(with_case, without_case)
+            Text(safe(case_id)),
+            _condition_cell(with_case),
+            _condition_cell(without_case),
+            _effect(with_case, without_case, comparable=_case_comparable(agent, with_case, without_case)),
         )
     table.add_section()
     rates = _agent_rates(agent)
     table.add_row(
-        Text("success rate", style="bold"),
-        *_summary_cells(_pct(*rates["with_skill"]), _pct(*rates["without_skill"]), "{:.0f}%", "{:+.0f} pp"),
+        Text("success rate (shown)" if _details_truncated(agent) else "success rate", style="bold"),
+        *_summary_cells(
+            _pct(*rates["with_skill"]), _pct(*rates["without_skill"]), "{:.0f}%", "{:+.0f} pp", comparable=comparable
+        ),
     )
     table.add_row(
         Text("quality score (0-1)", style="bold"),
-        *_summary_cells(_quality(agent, "with_skill"), _quality(agent, "without_skill"), "{:.2f}", "{:+.2f}"),
+        *_summary_cells(
+            _quality(agent, "with_skill"), _quality(agent, "without_skill"), "{:.2f}", "{:+.2f}", comparable=comparable
+        ),
     )
     if dims:
         table.add_section()
     for dim in dims:
         table.add_row(
-            Text(f"  {dim}", style="dim"),
+            Text(f"  {safe(dim)}", style="dim"),
             *_summary_cells(
                 _dimension_score(agent, "with_skill", dim),
                 _dimension_score(agent, "without_skill", dim),
                 "{:.2f}",
                 "{:+.2f}",
                 weak=0.6,
+                comparable=comparable,
             ),
         )
     return table
@@ -304,33 +422,45 @@ def _change(text: str, value: float | None) -> Text:
     return Text(f"  {text}", style="green" if value > 0 else "red" if value < 0 else "dim")
 
 
-def _agent_cell(with_case: Mapping[str, Any] | None, without_case: Mapping[str, Any] | None) -> Text:
+def _agent_cell(
+    with_case: Mapping[str, Any] | None, without_case: Mapping[str, Any] | None, *, comparable: bool = True
+) -> Text:
     with_marks, without_marks = _marks(with_case), _marks(without_case)
     cell = _marks_text(without_marks)
     cell.append(" → ", style="dim")
     cell.append_text(_marks_text(with_marks))
     (wp, wn), (op, on) = _attempt_rate(with_marks), _attempt_rate(without_marks)
-    if not wn or not on or ERROR in with_marks + without_marks:
+    if not comparable or not wn or not on or ERROR in with_marks + without_marks:
         return cell.append("  ?", style="yellow")
     delta = 100.0 * (wp / wn - op / on)
     return cell.append_text(_change(f"{delta:+.0f}" if delta else "·", delta))
 
 
-def _arrow_cell(with_value: float | None, without_value: float | None, fmt: str, delta_fmt: str) -> Text:
+def _arrow_cell(
+    with_value: float | None, without_value: float | None, fmt: str, delta_fmt: str, *, comparable: bool = True
+) -> Text:
     cell = Text(" → ".join(fmt.format(v) if v is not None else "-" for v in (without_value, with_value)))
-    if with_value is None or without_value is None:
+    if not comparable or with_value is None or without_value is None:
         return cell
     return cell.append_text(_change(delta_fmt.format(with_value - without_value), with_value - without_value))
 
 
-def _agent_grid(agents: Mapping[str, Any], case_ids: list[str], dims: list[str], title: str) -> Table:
+def _agent_grid(
+    agents: Mapping[str, Any], case_ids: list[str], dims: list[str], title: str, safe: Callable[[object], str]
+) -> Table:
     """Several agents: a row per case, a column per agent, each cell without skill → with skill."""
-    table = _table(title, *(Text.assemble(f"{name}\n", ("(without → with skill)", "dim")) for name in agents))
+    table = _table(title, *(Text.assemble(f"{safe(name)}\n", ("(without → with skill)", "dim")) for name in agents))
     for case_id in case_ids:
         table.add_row(
-            case_id,
+            Text(safe(case_id)),
             *(
-                _agent_cell(_cases(a, "with_skill").get(case_id), _cases(a, "without_skill").get(case_id))
+                _agent_cell(
+                    _cases(a, "with_skill").get(case_id),
+                    _cases(a, "without_skill").get(case_id),
+                    comparable=_case_comparable(
+                        a, _cases(a, "with_skill").get(case_id), _cases(a, "without_skill").get(case_id)
+                    ),
+                )
                 for a in agents.values()
             ),
         )
@@ -339,13 +469,25 @@ def _agent_grid(agents: Mapping[str, Any], case_ids: list[str], dims: list[str],
     for a in agents.values():
         r = _agent_rates(a)
         cell = _arrow_cell(_pct(*r["with_skill"]), _pct(*r["without_skill"]), "{:.0f}%", "{:+.0f} pp")
-        complete = all(ERROR not in _marks(c) for key, _ in _VARIANTS for c in _cases(a, key).values())
+        complete = _comparable(a)
         rates.append(cell if complete else Text(cell.plain.split("  ")[0]).append("  ?", style="yellow"))
-    table.add_row(Text("success rate", style="bold"), *rates)
+    table.add_row(
+        Text(
+            "success rate (shown)" if any(_details_truncated(a) for a in agents.values()) else "success rate",
+            style="bold",
+        ),
+        *rates,
+    )
     table.add_row(
         Text("quality score (0-1)", style="bold"),
         *(
-            _arrow_cell(_quality(a, "with_skill"), _quality(a, "without_skill"), "{:.2f}", "{:+.2f}")
+            _arrow_cell(
+                _quality(a, "with_skill"),
+                _quality(a, "without_skill"),
+                "{:.2f}",
+                "{:+.2f}",
+                comparable=_comparable(a),
+            )
             for a in agents.values()
         ),
     )
@@ -354,13 +496,14 @@ def _agent_grid(agents: Mapping[str, Any], case_ids: list[str], dims: list[str],
         table.add_row(Text("dimensions", style="dim"))
     for dim in dims:
         table.add_row(
-            Text(f"  {dim}", style="dim"),
+            Text(f"  {safe(dim)}", style="dim"),
             *(
                 _arrow_cell(
                     _dimension_score(a, "with_skill", dim),
                     _dimension_score(a, "without_skill", dim),
                     "{:.2f}",
                     "{:+.2f}",
+                    comparable=_comparable(a),
                 )
                 for a in agents.values()
             ),
@@ -368,8 +511,20 @@ def _agent_grid(agents: Mapping[str, Any], case_ids: list[str], dims: list[str],
     return table
 
 
-def render_case_summary(result: Mapping[str, Any], *, console: Console, fixes: list[dict[str, Any]] | None) -> bool:
+def render_case_summary(
+    result: Mapping[str, Any],
+    *,
+    console: Console,
+    fixes: list[dict[str, Any]] | None,
+    safe: Callable[[object], str] | None = None,
+) -> bool:
     """Print the case grid and fixes; False when the result has no per-case rows to show."""
+    if safe is None:
+        secrets = secret_values_from_environment(os.environ)
+
+        def safe(value: object) -> str:
+            return redact_progress_detail(value, secret_values=secrets)
+
     agents = {k: v for k, v in (result.get("agents") or {}).items() if isinstance(v, Mapping)}
     case_ids = _case_ids(agents)
     if not case_ids:
@@ -378,7 +533,7 @@ def render_case_summary(result: Mapping[str, Any], *, console: Console, fixes: l
     if label:
         style = "bold green" if label == "skill helps" else "bold red" if label == "skill hurts" else "bold yellow"
         line = Text(f"{'✔' if label == 'skill helps' else '✖' if label == 'skill hurts' else '•'} {label}", style=style)
-        line.append(f"   {detail}", style="dim")
+        line.append(f"   {safe(detail)}", style="dim")
         console.print(line)
 
     k = next(
@@ -404,7 +559,7 @@ def render_case_summary(result: Mapping[str, Any], *, console: Console, fixes: l
         ),
     )
     grid = _agent_grid if len(agents) > 1 else _condition_grid
-    table = grid(agents, case_ids, names, f"test case (k={k})" if k else "test case")
+    table = grid(agents, case_ids, names, f"test case (k={k})" if k else "test case", safe)
     console.print(table)
     legend = f"{PASS} pass  {FAIL} fail  {ERROR} did not run  {SKIPPED} skipped after a pass"
     if len(agents) > 1:
@@ -419,20 +574,24 @@ def render_case_summary(result: Mapping[str, Any], *, console: Console, fixes: l
         console.print(heading)
         for i, fix in enumerate(fixes, 1):
             head = Text(f" {i}. ", style="bold")
-            head.append(str(fix["case"]), style="bold cyan")
+            head.append(safe(fix["case"]), style="bold cyan")
             lost = f" · lost {fix['attempts_lost']} attempt(s)" if fix["attempts_lost"] else ""
-            head.append(f"  [{fix['kind']}] · {fix['scope']}{lost}", style="dim")
+            head.append(f"  [{safe(fix['kind'])}] · {safe(fix['scope'])}{lost}", style="dim")
             console.print(head)
-            console.print(Text(f"    what happened: {fix['what']}"))
+            console.print(Text(f"    what happened: {safe(fix['what'])}"))
             if fix.get("action"):
-                console.print(Text(f"    fix: {fix['action']}", style="green"))
+                console.print(Text(f"    fix: {safe(fix['action'])}", style="green"))
             if fix.get("evidence"):
-                console.print(Text(f"    evidence: {fix['evidence']}", style="dim"))
+                console.print(Text(f"    evidence: {safe(fix['evidence'])}", style="dim"))
+    elif fixes is not None and any(_details_truncated(a) for a in agents.values()):
+        console.print(
+            Text("How to improve: case/attempt details are incomplete; review the retained artifacts.", style="yellow")
+        )
     elif fixes is not None:
         console.print()
         line = Text("How to improve: ", style="bold")
         line.append(
-            "nothing to fix. Every with-skill attempt passed and met its goal, and the skill didn't hurt any case.",
+            "nothing to fix in the available case evidence.",
             style="green",
         )
         console.print(line)
@@ -440,20 +599,80 @@ def render_case_summary(result: Mapping[str, Any], *, console: Console, fixes: l
     return True
 
 
-def _load_json(path: Path) -> Any:
+def _load_json(path: Path, *, root: Path | None = None) -> Any:
     try:
-        if not path.is_file() or path.stat().st_size > _MAX_TRIAL_JSON_BYTES:
-            return None
-        return json.loads(path.read_text(encoding="utf-8"))
-    except (OSError, ValueError):
+        anchor = root if root is not None else path.parent
+        with SecureRoot(anchor) as reader:
+            raw, _ = reader.read_bytes(path.relative_to(anchor), _MAX_TRIAL_JSON_BYTES)
+        return json.loads(raw)
+    except (OSError, ValueError, SecurePathError):
         return None
+
+
+def load_case_findings(run_dir: Path) -> list[dict[str, Any]] | None:
+    """Read the optional advisory cache without following artifact links."""
+    value = _load_json(run_dir / "what_to_fix.json", root=run_dir)
+    required = {"case", "scope", "kind", "what", "attempts_lost"}
+    if not isinstance(value, list) or any(not isinstance(item, dict) or not required <= item.keys() for item in value):
+        return None
+    return value
+
+
+def save_case_findings(run_dir: Path, fixes: list[dict[str, Any]]) -> None:
+    """Replace the advisory cache atomically, including an existing symlink itself."""
+    temporary = None
+    try:
+        with tempfile.NamedTemporaryFile(
+            mode="w", encoding="utf-8", dir=run_dir, prefix=".what_to_fix.", delete=False
+        ) as handle:
+            temporary = Path(handle.name)
+            json.dump(fixes, handle, indent=2)
+        temporary.replace(run_dir / "what_to_fix.json")
+    finally:
+        if temporary is not None:
+            temporary.unlink(missing_ok=True)
 
 
 def _trial_dir(run_dir: Path, agent: str, variant_dir: str, trial: object) -> Path | None:
-    if not isinstance(trial, str) or not _SAFE_TRIAL.match(trial) or not _SAFE_TRIAL.match(agent):
+    if (
+        not isinstance(trial, str)
+        or not _SAFE_TRIAL.fullmatch(trial)
+        or not _SAFE_TRIAL.fullmatch(agent)
+        or trial in {".", ".."}
+        or agent in {".", ".."}
+    ):
         return None
     path = run_dir / agent / variant_dir / "trials" / trial
+    if any((run_dir / Path(*path.relative_to(run_dir).parts[:i])).is_symlink() for i in range(1, 5)):
+        return None
     return path if path.is_dir() else None
+
+
+def _trial_dirs(run_dir: Path, agent: str, trial: object) -> list[Path]:
+    """Resolve one logical attempt to its persisted physical or native-step artifacts."""
+    direct = _trial_dir(run_dir, agent, "with-skill", trial)
+    if direct is not None:
+        return [direct]
+    if (
+        not isinstance(trial, str)
+        or not _SAFE_TRIAL.fullmatch(trial)
+        or trial in {".", ".."}
+        or not _SAFE_TRIAL.fullmatch(agent)
+        or agent in {".", ".."}
+    ):
+        return []
+    trials = run_dir / agent / "with-skill" / "trials"
+    if not trials.is_dir():
+        return []
+    matched = []
+    for candidate in sorted(islice(trials.iterdir(), _MAX_TRIAL_PATHS_SCANNED)):
+        path = _trial_dir(run_dir, agent, "with-skill", candidate.name)
+        if path is None:
+            continue
+        reward = _load_json(path / "reward.json", root=run_dir)
+        if isinstance(reward, Mapping) and reward.get("trial_id") == trial:
+            matched.append(path)
+    return matched
 
 
 def _short(text: object, limit: int = _MAX_REASON_CHARS) -> str:
@@ -487,8 +706,8 @@ def _failed_reasons(reward: Mapping[str, Any]) -> list[str]:
     return reasons
 
 
-def _env_errors(trial_dir: Path) -> list[str]:
-    trajectory = _load_json(trial_dir / "trajectory.json")
+def _env_errors(trial_dir: Path, run_dir: Path) -> list[str]:
+    trajectory = _load_json(trial_dir / "trajectory.json", root=run_dir)
     steps = trajectory.get("steps") if isinstance(trajectory, Mapping) else None
     found: list[str] = []
     for step in steps if isinstance(steps, list) else []:
@@ -497,8 +716,8 @@ def _env_errors(trial_dir: Path) -> list[str]:
     return [_short(e, 120) for e in dict.fromkeys(found)]
 
 
-def _final_message(trial_dir: Path) -> str:
-    trajectory = _load_json(trial_dir / "trajectory.json")
+def _final_message(trial_dir: Path, run_dir: Path) -> str:
+    trajectory = _load_json(trial_dir / "trajectory.json", root=run_dir)
     steps = trajectory.get("steps") if isinstance(trajectory, Mapping) else None
     for step in reversed(steps if isinstance(steps, list) else []):
         if isinstance(step, Mapping) and step.get("source") == "agent" and str(step.get("message") or "").strip():
@@ -506,14 +725,14 @@ def _final_message(trial_dir: Path) -> str:
     return ""
 
 
-def _root_error_in_logs(trial_dir: Path) -> re.Match[str] | None:
+def _root_error_in_logs(trial_dir: Path, run_dir: Path) -> re.Match[str] | None:
     """Find the agent CLI's own error line in its log (failure.json truncates long messages)."""
     for log in sorted(trial_dir.glob("*.txt")):
         try:
-            with log.open("rb") as handle:
-                handle.seek(max(0, log.stat().st_size - _MAX_LOG_TAIL_BYTES))
-                text = handle.read().decode("utf-8", "replace")
-        except OSError:
+            with SecureRoot(run_dir) as reader:
+                raw, _ = reader.read_bytes(log.relative_to(run_dir), _MAX_TRIAL_JSON_BYTES)
+            text = raw[-_MAX_LOG_TAIL_BYTES:].decode("utf-8", "replace")
+        except (OSError, SecurePathError):
             continue
         plain = "\n".join(line for line in text.splitlines() if not line.lstrip().startswith("{"))
         if match := _ROOT_ERROR.search(plain):
@@ -521,14 +740,14 @@ def _root_error_in_logs(trial_dir: Path) -> re.Match[str] | None:
     return None
 
 
-def _run_error(trial_dir: Path) -> str:
-    failure = _load_json(trial_dir / "failure.json")
+def _run_error(trial_dir: Path, run_dir: Path) -> str:
+    failure = _load_json(trial_dir / "failure.json", root=run_dir)
     error = failure.get("error") if isinstance(failure, Mapping) else None
     if not isinstance(error, Mapping):
         return ""
     message = str(error.get("message") or "")
     # Agent exit errors embed the whole command line; the root cause is the CLI's own error line.
-    root = _root_error_in_logs(trial_dir) or _ROOT_ERROR.search(message)
+    root = _root_error_in_logs(trial_dir, run_dir) or _ROOT_ERROR.search(message)
     detail = root.group(1) if root else message.split("\nstdout:", 1)[0]
     # Setup-command failures embed the script; its stdout carries the actual cause (e.g. a curl error).
     if detail.startswith("Command failed") and (stdout := _STDOUT.search(message)):
@@ -544,39 +763,52 @@ def _diagnose_agent_case(
     wp, wn = _attempt_rate(with_marks)
     bp, bn = _attempt_rate(without_marks)
     errors = with_marks.count(ERROR)
+    not_used = _never_activated(agent)
     failed_trials = []
     for attempt in with_case.get("attempts", []) if isinstance(with_case, Mapping) else []:
         if isinstance(attempt, Mapping) and attempt.get("passed") is not True:
-            trial_dir = _trial_dir(run_dir, agent_name, "with-skill", attempt.get("trial"))
-            if trial_dir is not None:
-                failed_trials.append((attempt.get("score"), trial_dir))
+            failed_trials.extend(
+                (attempt.get("score"), d) for d in _trial_dirs(run_dir, agent_name, attempt.get("trial"))
+            )
     errored_trials = []
     with_trials = run_dir / agent_name / "with-skill" / "trials"
     if errors and with_trials.is_dir() and _SAFE_TRIAL.match(agent_name):
         errored_trials = [
             d
             for d in sorted(with_trials.iterdir())
-            if d.name.split("__", 1)[0] == case_id and (d / "failure.json").is_file()
+            if d.name.split("__", 1)[0] == case_id
+            and _trial_dir(run_dir, agent_name, "with-skill", d.name) is not None
+            and (d / "failure.json").is_file()
         ]
 
     lost = (wn - wp) + errors
-    hurts = bn and wn and bp / bn > wp / wn
-    if not lost and not hurts:
+    hurts = (
+        _case_comparable(agent, with_case, _cases(agent, "without_skill").get(case_id))
+        and bn
+        and wn
+        and bp / bn > wp / wn
+    )
+    if not lost and not hurts and not not_used:
         return _goal_not_met(run_dir, agent_name, case_id, with_case)
-    rewards = [(r, d) for _, d in failed_trials if isinstance(r := _load_json(d / "reward.json"), Mapping)]
+    rewards = [
+        (r, d) for _, d in failed_trials if isinstance(r := _load_json(d / "reward.json", root=run_dir), Mapping)
+    ]
     reasons = Counter(reason for reward, _ in rewards for reason in _failed_reasons(reward))
-    env = list(dict.fromkeys(e for _, d in failed_trials for e in _env_errors(d)))
+    env = list(dict.fromkeys(e for _, d in failed_trials for e in _env_errors(d, run_dir)))
     activations = [_activated(reward) for reward, _ in rewards]
-    finals = [_final_message(d) for _, d in failed_trials]
+    finals = [_final_message(d, run_dir) for _, d in failed_trials]
     evidence_dir = (failed_trials or [(None, d) for d in errored_trials] or [(None, None)])[0][1]
 
-    if hurts and wp < wn:
+    if not_used:
+        kind, what = "skill not used", "the skill never activated; scores are diagnostic only"
+        lost = max(lost, wn)
+    elif hurts and wp < wn:
         kind, what = "skill hurts", f"passes {bp}/{bn} without the skill but {wp}/{wn} with it"
         if reasons:
             what += f"; {reasons.most_common(1)[0][0]}"
         lost = max(lost, round(bp / bn * wn) - wp)
     elif errors and not failed_trials:
-        detail = next((e for d in errored_trials if (e := _run_error(d))), "")
+        detail = next((e for d in errored_trials if (e := _run_error(d, run_dir))), "")
         kind, what = "run error", f"{errors} attempt(s) never produced a score" + (f": {detail}" if detail else "")
     elif finals and all(_ASKS_FOR_INPUT.search(f) for f in finals):
         kind = "missing input"
@@ -598,7 +830,7 @@ def _diagnose_agent_case(
         "attempts_lost": lost,
         "reasons": [r for r, _ in reasons.most_common(6)],
         "env_errors": env[:4],
-        "final_message": _final_message(failed_trials[0][1]) if failed_trials else "",
+        "final_message": _final_message(failed_trials[0][1], run_dir) if failed_trials else "",
         "evidence": _evidence(run_dir, evidence_dir, run_error=kind == "run error"),
     }
 
@@ -611,17 +843,22 @@ def _goal_not_met(
     passed = [a for a in attempts or [] if isinstance(a, Mapping) and a.get("passed") is True]
     misses = []
     for attempt in passed:
-        trial_dir = _trial_dir(run_dir, agent_name, "with-skill", attempt.get("trial"))
-        reward = _load_json(trial_dir / "reward.json") if trial_dir else None
-        if isinstance(reward, Mapping) and _score(reward.get("goal_accuracy")) == 0:
-            misses.append((reward, trial_dir))
+        rows = [
+            (reward, d)
+            for d in _trial_dirs(run_dir, agent_name, attempt.get("trial"))
+            if isinstance(reward := _load_json(d / "reward.json", root=run_dir), Mapping)
+        ]
+        goals = [_score(reward.get("goal_accuracy")) for reward, _ in rows]
+        # Canonical reports average complete step metrics into one logical trial.
+        if goals and all(goal is not None and 0 <= goal <= 1 for goal in goals) and sum(goals) == 0:
+            misses.append(rows[0])
     if not misses:
         return None
     details = misses[0][0].get("details")
     goal = details.get("goal_accuracy") if isinstance(details, Mapping) else None
     goal = goal if isinstance(goal, Mapping) else {}
     outcome = goal.get("end_state") or goal.get("reason") or ""
-    finals = [_final_message(d) for _, d in misses]
+    finals = [_final_message(d, run_dir) for _, d in misses]
     what = "passed on the other metrics but scored goal accuracy 0.00"
     return {
         "case": case_id,
@@ -635,6 +872,20 @@ def _goal_not_met(
         "asks_for_input": all(_ASKS_FOR_INPUT.search(f) for f in finals) or bool(_STOPPED_FOR_INPUT.search(outcome)),
         "evidence": _evidence(run_dir, misses[0][1], run_error=False),
     }
+
+
+def goal_not_met_count(result: Mapping[str, Any], *, run_dir: Path) -> int:
+    """Count every observed passing attempt with goal accuracy zero, independently of the short fix list."""
+    agents = result.get("agents")
+    if not isinstance(agents, Mapping):
+        return 0
+    return sum(
+        issue["attempts_lost"]
+        for name, agent in agents.items()
+        if isinstance(agent, Mapping)
+        for case_id, case in _cases(agent, "with_skill").items()
+        if (issue := _goal_not_met(run_dir, str(name), str(case_id), case)) is not None
+    )
 
 
 def _evidence(run_dir: Path, trial_dir: Path | None, *, run_error: bool) -> str:
@@ -715,6 +966,8 @@ def _llm_actions(
     try:
         from skillevaluator.tier3.eval_core.llm_judge import _extract_json, call_public_llm
 
+        redactor = Redactor(secret_values_from_environment(os.environ))
+        prompt = redact_sensitive_text(redactor.text(prompt))
         content, error = call_public_llm(prompt, max_tokens=4096, timeout=120)
         parsed = _extract_json(content) if content and not error else None
     except Exception:  # advisory: fall back to rule-based actions
@@ -726,7 +979,7 @@ def _llm_actions(
 
 
 def _dataset_entries(run_dir: Path) -> dict[str, Mapping[str, Any]]:
-    snapshot = _load_json(run_dir / "dataset_snapshot.json")
+    snapshot = _load_json(run_dir / "dataset_snapshot.json", root=run_dir)
     entries = snapshot.get("dataset") if isinstance(snapshot, Mapping) else None
     return {str(e["id"]): e for e in entries or [] if isinstance(e, Mapping) and e.get("id") is not None}
 
@@ -796,8 +1049,8 @@ def what_to_fix(
         names = [item["agent"] for item in items]
         merged = dict(items[0])
         merged.update(
-            scope=names[0] + " only"
-            if len(agents) > 1 and len(names) == 1
+            scope=", ".join(names) + " only"
+            if len(agents) > 1 and len(names) < len(agents)
             else "all agents"
             if len(agents) > 1
             else names[0],
@@ -831,13 +1084,26 @@ def what_to_fix(
     by_id = dict(zip((id(i) for i in actionable), actions or [], strict=False))
     for issue in issues:
         issue["action"] = issue.get("action") or by_id.get(id(issue)) or _fallback_action(issue)
-    return issues
+    secrets = secret_values_from_environment(os.environ)
+    return [
+        {
+            key: redact_progress_detail(value, secret_values=secrets)
+            if isinstance(value, str)
+            else [redact_progress_detail(item, secret_values=secrets) for item in value]
+            if isinstance(value, list)
+            else value
+            for key, value in issue.items()
+        }
+        for issue in issues
+    ]
 
 
 def _baseline_saturated(agents: Mapping[str, Mapping[str, Any]]) -> dict[str, Any] | None:
     """Flag agents that pass every case without the skill: the eval cannot show what the skill adds."""
     names = []
     for name, agent in agents.items():
+        if _details_truncated(agent) or _case_mismatch(agent) or _execution_unavailable(agent):
+            continue
         cases = _cases(agent, "without_skill").values()
         passed, total = _agent_rates(agent)["without_skill"]
         if total and passed == total and not any(ERROR in _marks(case) for case in cases):

@@ -121,3 +121,72 @@ def test_new_basis_comparison_is_unavailable_when_rewards_are_incomplete(tmp_pat
     assert agent["lift"] is None
     assert agent["evaluators"]["accuracy"]["lift"] is None
     assert not agent.get("lift_basis")
+
+
+def test_default_dimensions_require_every_applicable_metric_even_with_cached_scores():
+    from skillevaluator.evaluation.tier3_report import _build_agent
+
+    incomplete = dict.fromkeys(DEFAULT_METRICS, 1.0)
+    incomplete.pop("behavior_check")
+    assert "effectiveness" not in dimension_scores(incomplete)
+    for cached in ({}, {"effectiveness": {"score": 1.0, "verdict": "PASS"}}):
+        agent = _build_agent(
+            "codex",
+            {
+                "execution_status": "succeeded",
+                "with_skill": incomplete,
+                "without_skill": dict.fromkeys(DEFAULT_METRICS, 0.4),
+                "dimensions_with_skill": cached,
+            },
+            list(DEFAULT_METRICS),
+            list(DEFAULT_METRICS),
+            None,
+            DEFAULT_SCORE_POLICY,
+        )
+        effectiveness = next(row for row in agent["dimensions"] if row["id"] == "effectiveness")
+        assert effectiveness["with_skill"] is None
+        assert effectiveness["baseline"] == 0.4
+        assert effectiveness["verdict"] is None
+        assert effectiveness["lift"] is None
+        assert agent["with_skill"] is None
+
+
+def test_security_fallback_requires_a_legacy_metric_contract():
+    from skillevaluator.evaluation.tier3_report import _build_agent
+    from skillevaluator.tier3.harbor.metrics import LEGACY_METRICS, LEGACY_SCORE_POLICY, PARTIAL_SCORE_POLICY
+
+    scores = dict.fromkeys(LEGACY_METRICS, 0.7)
+    for contract, policy, expected in (
+        (DEFAULT_METRICS, DEFAULT_SCORE_POLICY, None),
+        (LEGACY_METRICS, LEGACY_SCORE_POLICY, 0.7),
+        (("accuracy",), PARTIAL_SCORE_POLICY, None),
+    ):
+        agent = _build_agent(
+            "codex",
+            {
+                "execution_status": "succeeded",
+                "with_skill": scores,
+                "without_skill": dict.fromkeys(DEFAULT_METRICS, 0.4),
+            },
+            list(contract),
+            list(DEFAULT_METRICS),
+            None,
+            policy,
+        )
+        safety = next(row for row in agent["dimensions"] if row["id"] == "security")
+        assert safety["with_skill"] == expected
+
+
+def test_saved_run_does_not_renormalize_a_missing_metric_without_validated_na(tmp_path):
+    root = _run(tmp_path)
+    for condition in ("with-skill", "without-skill"):
+        for path in (root / "codex" / condition / "trials").glob("*/reward.json"):
+            reward = json.loads(path.read_text())
+            reward["details"].pop("behavior_check")
+            path.write_text(json.dumps(reward))
+    payload = _report(root)
+    agent = payload["agents"]["codex"]
+    assert "behavior_check" not in load_agent_data(root)["codex"]["not_applicable_with_skill"]
+    assert agent["evaluators"]["behavior_check"]["with_skill_status"] == "missing"
+    assert agent["with_skill"] is None
+    assert not any(row["id"] == "effectiveness" and row["with_skill"] is not None for row in agent["dimensions"])

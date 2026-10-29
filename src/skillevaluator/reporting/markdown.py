@@ -366,10 +366,16 @@ class MarkdownReporter(ReporterBase):
                         if bl is None
                         else _format_report_number(bl)
                     )
+                    lift_text = (
+                        _format_report_number(lift, signed=True)
+                        if lift is not None
+                        else "N/A"
+                        if "not_applicable" in (scores.get("with_skill_status"), scores.get("baseline_status"))
+                        else "NO SCORE"
+                    )
                     lines.append(
                         f"| {_markdown_untrusted_table_cell(name.replace('_', ' ').title())} "
-                        f"| {ws_text} | "
-                        f"{bl_text} | {_format_report_number(lift, signed=True)} |"
+                        f"| {ws_text} | {bl_text} | {lift_text} |"
                     )
                 lines.append("")
 

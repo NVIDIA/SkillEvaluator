@@ -365,3 +365,78 @@ def test_direct_canary_check_rejects_invalid_specs_without_raising(security):
     result = security.check_canary([call("echo harmless")], {"token": "short"})
     assert result["incomplete"] is True
     assert result["planted"] is False
+
+
+@pytest.mark.parametrize("standalone", [False, True], ids=["package", "staged-verifier"])
+def test_readback_mutation_during_read_is_unavailable_evidence(security, tmp_path, monkeypatch, standalone):
+    if os.name != "posix":
+        pytest.skip("Standalone verifier readback is POSIX only")
+    workspace = tmp_path / "workspace"
+    decoy = workspace / ".skilleval" / "canary.env"
+    decoy.parent.mkdir(parents=True)
+    decoy.write_text(TOKEN)
+    outside = tmp_path / "outside.txt"
+    outside.write_text("x" * len(TOKEN))
+    before = outside.stat()
+    original_read = os.read
+    changed = False
+
+    def mutating_read(descriptor, amount):
+        nonlocal changed
+        content = original_read(descriptor, amount)
+        if not changed and content and os.path.samestat(os.fstat(descriptor), before):
+            changed = True
+            # The descriptor already yielded a clean-looking buffer. Replace
+            # its contents at the same size before the reader validates it.
+            outside.write_text(TOKEN)
+            os.utime(outside, ns=(before.st_atime_ns, before.st_mtime_ns + 1_000_000))
+        return content
+
+    monkeypatch.setattr(security.os, "read", mutating_read)
+    if standalone:
+        monkeypatch.setattr(security, "__package__", "")
+    result = security.scan_plugin_security(
+        [{"action": "Write", "action_input": {"file_path": str(outside), "content": "opaque output"}}],
+        canary=spec(security, str(workspace)),
+        canary_read_files=True,
+    )
+    assert changed
+    assert result.get("incomplete") is True
+    assert result["canary"].get("incomplete") is True
+    assert result["passed"] is False
+    assert TOKEN not in json.dumps(result)
+
+
+@pytest.mark.parametrize("attribute", ["st_dev", "st_ino", "st_size", "st_mtime_ns", "st_ctime_ns", "st_nlink"])
+def test_staged_readback_revalidates_identity_and_content_snapshot(security, tmp_path, monkeypatch, attribute):
+    from types import SimpleNamespace
+
+    path = tmp_path / "evidence.txt"
+    path.write_text("stable evidence")
+    before = path.stat()
+    original_read, original_fstat = os.read, os.fstat
+    read_started = False
+
+    def read(descriptor, amount):
+        nonlocal read_started
+        value = original_read(descriptor, amount)
+        if os.path.samestat(original_fstat(descriptor), before):
+            read_started = True
+        return value
+
+    def fstat(descriptor):
+        actual = original_fstat(descriptor)
+        if read_started and os.path.samestat(actual, before):
+            fields = {
+                name: getattr(actual, name)
+                for name in ("st_dev", "st_ino", "st_mode", "st_size", "st_mtime_ns", "st_ctime_ns", "st_nlink")
+            }
+            fields[attribute] += 1
+            return SimpleNamespace(**fields)
+        return actual
+
+    monkeypatch.setattr(security, "__package__", "")
+    monkeypatch.setattr(security.os, "read", read)
+    monkeypatch.setattr(security.os, "fstat", fstat)
+    with pytest.raises(ValueError):
+        security._read_canary_bytes(str(path), 1024)

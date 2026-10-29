@@ -10,9 +10,10 @@ gate. Publication continues to use the existing provenance and coverage contract
 
 from __future__ import annotations
 
-from collections.abc import Iterable, Mapping
+from collections.abc import Callable, Iterable, Mapping
 from dataclasses import dataclass, field
 from enum import StrEnum
+from functools import cached_property
 from types import MappingProxyType
 from typing import TYPE_CHECKING
 
@@ -51,11 +52,16 @@ class TierStatus:
 @dataclass(frozen=True)
 class RunStatus:
     headline: Status
-    publication: Status
     tiers: Mapping[int, TierStatus]
     missing: tuple[str, ...]
     advisory: tuple[str, ...]
     _outcomes: Mapping[int, Status] = field(repr=False)
+    _publication: Callable[[], Status] = field(repr=False, compare=False)
+
+    @cached_property
+    def publication(self) -> Status:
+        """Assess publication once, only on surfaces that need its stricter verdict."""
+        return self._publication()
 
     def of(self, result: ValidationResult) -> Status:
         return self._outcomes.get(id(result), result_status(result))
@@ -78,6 +84,8 @@ def _blocking_finding(result: ValidationResult) -> bool:
 
 def result_status(result: ValidationResult) -> Status:
     metadata = result.metadata if isinstance(result.metadata, dict) else {}
+    if _blocking_finding(result) or metadata.get("confirmed_failure") is True:
+        return Status.FAILED
     if is_tier3_result(result):
         payload = metadata.get("agent_eval")
         payload = payload if isinstance(payload, dict) else {}
@@ -134,12 +142,18 @@ def resolve_run_status(results: Iterable[ValidationResult], *, agent_eval=None, 
         tiers[number] = TierStatus(
             number, _combined(outcomes[id(r)] for r in members), any(blocking) if blocking else None, members
         )
-    publication = assess_publication(list(results), agent_eval, expected_skill_name=expected_skill_name)
+
+    def publication_status() -> Status:
+        assessment = assess_publication(list(results), agent_eval, expected_skill_name=expected_skill_name)
+        return {
+            "pass": Status.PASSED,
+            "neutral": Status.NEUTRAL,
+            "fail": Status.FAILED,
+            "incomplete": Status.INCOMPLETE,
+        }[assessment.status]
+
     return RunStatus(
         headline,
-        {"pass": Status.PASSED, "neutral": Status.NEUTRAL, "fail": Status.FAILED, "incomplete": Status.INCOMPLETE}[
-            publication.status
-        ],
         MappingProxyType(tiers),
         tuple(dict.fromkeys(tool for result in results for tool in result.incomplete_scans)),
         tuple(
@@ -150,4 +164,5 @@ def resolve_run_status(results: Iterable[ValidationResult], *, agent_eval=None, 
             and outcomes[id(r)] != Status.PASSED
         ),
         MappingProxyType(outcomes),
+        publication_status,
     )

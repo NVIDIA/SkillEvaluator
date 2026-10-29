@@ -1796,6 +1796,10 @@ def _build_agent(
         info.get("dimensions_with_skill") or {},
         info.get("dimensions_without_skill") or {},
         judge_lift,
+        with_metrics=with_metrics,
+        baseline_metrics=baseline_metrics,
+        with_not_applicable=with_not_applicable,
+        baseline_not_applicable=baseline_not_applicable,
     )
     not_applicable_evaluators = _not_applicable_evaluators(with_metrics, with_scores, with_not_applicable)
     not_applicable_dimensions = _not_applicable_dimensions(dimensions, with_not_applicable)
@@ -2038,20 +2042,27 @@ def _build_dimensions(
     precomputed_with: dict[str, Any],
     precomputed_without: dict[str, Any],
     judge_lift: dict[str, Any] | None = None,
+    *,
+    with_metrics: list[str] | None = None,
+    baseline_metrics: list[str] | None = None,
+    with_not_applicable: list[str] = (),
+    baseline_not_applicable: list[str] = (),
 ) -> list[dict[str, Any]]:
     dimensions: list[dict[str, Any]] = []
     for dim_id in _DIMENSION_IDS:
         cfg = DIMENSION_MAPPING[dim_id]
-        ws = _precomputed_score(precomputed_with, dim_id)
-        if ws is None:
-            ws = _dimension_score(with_scores, cfg)
-        bl = _precomputed_score(precomputed_without, dim_id)
-        if bl is None:
-            bl = _dimension_score(without_scores, cfg)
+        # Cached rows may predate applicability checks. Raw evaluator inputs
+        # determine whether a dimension is complete and what its score is.
+        ws = _dimension_score(with_scores, cfg, active_metrics=with_metrics, not_applicable=with_not_applicable)
+        bl = _dimension_score(
+            without_scores, cfg, active_metrics=baseline_metrics, not_applicable=baseline_not_applicable
+        )
         if ws is None and bl is None:
             continue
         lift = round(ws - bl, 4) if ws is not None and bl is not None else None
-        entry = precomputed_with.get(dim_id) if isinstance(precomputed_with.get(dim_id), dict) else {}
+        entry = (
+            precomputed_with.get(dim_id) if ws is not None and isinstance(precomputed_with.get(dim_id), dict) else {}
+        )
         # Signals (the evaluators that actually fed this dimension) populate the
         # "Signals" column; reasoning bullets and a deterministic verdict fill
         # the "Reasoning"/"Verdict" columns when the engine left them blank.
@@ -2071,9 +2082,12 @@ def _build_dimensions(
             paired_without = {
                 metric: pair.get("without_skill") for metric, pair in pairs.items() if isinstance(pair, dict)
             }
-            comparison_ws = _dimension_score(paired_with, cfg) if len(paired_with) == len(comparison_signals) else None
-            reasoning_baseline = (
-                _dimension_score(paired_without, cfg) if len(paired_without) == len(comparison_signals) else None
+            comparison_not_applicable = [*with_not_applicable, *baseline_not_applicable]
+            comparison_ws = _dimension_score(
+                paired_with, cfg, active_metrics=with_metrics, not_applicable=comparison_not_applicable
+            )
+            reasoning_baseline = _dimension_score(
+                paired_without, cfg, active_metrics=baseline_metrics, not_applicable=comparison_not_applicable
             )
             lift = (
                 round(comparison_ws - reasoning_baseline, 4)
@@ -3288,23 +3302,46 @@ def _pass_threshold_from_policy(attempt_policy: dict[str, Any]) -> float:
 # ---------------------------------------------------------------------------
 
 
-def _dimension_score(scores: dict[str, Any], cfg: dict[str, Any]) -> float | None:
-    value = _weighted(scores, cfg.get("evaluators", []), cfg.get("weights", []))
-    if value is None and cfg.get("fallback_evaluators"):
-        value = _weighted(scores, cfg["fallback_evaluators"], cfg.get("fallback_weights", []))
-    return value
+def _dimension_score(
+    scores: dict[str, Any],
+    cfg: dict[str, Any],
+    *,
+    active_metrics: list[str] | None = None,
+    not_applicable: list[str] = (),
+) -> float | None:
+    """Require every applicable source; only a legacy contract selects fallback sources."""
+    evaluators, weights = cfg.get("evaluators", []), cfg.get("weights", [])
+    if (
+        cfg.get("fallback_evaluators")
+        and active_metrics is not None
+        and not any(evaluator in active_metrics for evaluator in evaluators)
+    ):
+        evaluators, weights = cfg["fallback_evaluators"], cfg.get("fallback_weights", [])
+    if active_metrics is not None and any(evaluator not in active_metrics for evaluator in evaluators):
+        return None
+    return _weighted(scores, evaluators, weights, not_applicable=not_applicable)
 
 
-def _weighted(scores: dict[str, Any], evaluators: list[str], weights: list[float]) -> float | None:
-    num = 0.0
-    den = 0.0
-    for evaluator, weight in zip(evaluators, weights, strict=False):
-        value = _finite_float(scores.get(evaluator))
+def _weighted(
+    scores: dict[str, Any],
+    evaluators: list[str],
+    weights: list[float],
+    *,
+    not_applicable: list[str] = (),
+) -> float | None:
+    numerator = denominator = 0.0
+    if len(evaluators) != len(weights):
+        return None
+    for evaluator, weight in zip(evaluators, weights, strict=True):
+        value = _unit_interval_score(scores.get(evaluator))
+        if value is None and evaluator in not_applicable:
+            continue
         finite_weight = _finite_float(weight)
-        if value is not None and finite_weight is not None:
-            num += value * finite_weight
-            den += finite_weight
-    return (num / den) if den > 0 else None
+        if value is None or finite_weight is None or finite_weight < 0:
+            return None
+        numerator += value * finite_weight
+        denominator += finite_weight
+    return numerator / denominator if denominator > 0 else None
 
 
 def _precomputed_score(precomputed: dict[str, Any], dim_id: str) -> float | None:

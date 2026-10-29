@@ -3861,6 +3861,17 @@ def _read_canary_bytes(path, maximum):
                 content.extend(chunk)
             if len(content) > maximum:
                 raise ValueError("read-back file exceeds bound")
+            after = os.fstat(final)
+            if (
+                not stat.S_ISREG(after.st_mode)
+                or after.st_nlink != 1
+                or not os.path.samestat(metadata, after)
+                or any(
+                    getattr(after, field) != getattr(metadata, field)
+                    for field in ("st_size", "st_mtime_ns", "st_ctime_ns")
+                )
+            ):
+                raise ValueError("read-back file changed identity or contents during reading")
             return bytes(content)
         finally:
             os.close(final)

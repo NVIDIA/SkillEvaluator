@@ -76,3 +76,50 @@ def test_report_surfaces_share_failure_precedence():
     )
     sarif = json.loads(SARIFReporter().render_all([result]))
     assert sarif["runs"][0]["properties"]["status"] == "failed"
+
+
+def test_inconclusive_tier3_cannot_hide_a_confirmed_security_failure():
+    result = failure_and_missing()
+    result.validator_name = "AGENT_EVAL"
+    result.metadata["agent_eval"] = {"verdict": "inconclusive", "summary": {"verdict": "inconclusive"}}
+    status = resolve_run_status([result])
+    assert status.of(result) == Status.FAILED
+    assert status.headline == Status.FAILED
+    assert status.missing == ("scanner",)
+
+
+def test_confirmed_legacy_failure_survives_separate_missing_evidence():
+    result = ValidationResult(validator_name="Code Integrity & Hygiene")
+    result.add_error("Banned dependency found in one audited member")
+    result.metadata["confirmed_failure"] = True
+    result.mark_scan_incomplete("another-member")
+    status = resolve_run_status([result])
+    assert status.headline == Status.FAILED
+    assert status.of(result) == Status.FAILED
+
+
+def test_missing_scanner_process_error_alone_remains_incomplete():
+    result = ValidationResult(validator_name="Scanner")
+    result.add_error("The scanner produced no trustworthy report")
+    result.mark_scan_incomplete("scanner")
+    assert resolve_run_status([result]).headline == Status.INCOMPLETE
+
+
+def test_gate_status_does_not_repeat_publication_payload_analysis(monkeypatch):
+    from types import SimpleNamespace
+
+    from skillevaluator.reporting import run_status
+
+    calls = []
+
+    def assess(*_args, **_kwargs):
+        calls.append(True)
+        return SimpleNamespace(status="incomplete")
+
+    monkeypatch.setattr(run_status, "assess_publication", assess)
+    status = resolve_run_status([ValidationResult(validator_name="Static")])
+    assert status.headline == Status.PASSED
+    assert calls == []
+    assert status.publication == Status.INCOMPLETE
+    assert status.publication == Status.INCOMPLETE
+    assert calls == [True]

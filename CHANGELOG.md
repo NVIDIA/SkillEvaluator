@@ -217,10 +217,13 @@ All notable changes to SkillEvaluator are documented in this file.
 - Ctrl+C during `tier3 evaluate` now stops the run. The interrupt reached only
   the coordinating thread, so running Harbor jobs kept going in their own
   process groups, agents waiting for a `--max-agents` slot still started, and
-  the command appeared to hang until every job finished. Running jobs are now
-  terminated and reaped as on timeout; queued agents, conditions, and
-  `--stop-on-pass` attempts never start; and progress reports the run as
-  interrupted instead of failed unexpectedly.
+  the command appeared to hang until every job finished. Queued agents,
+  conditions, and `--stop-on-pass` attempts now never start. Each running
+  Harbor job receives SIGTERM and up to 30 seconds to stop its trial
+  environments, such as Docker containers, before its process group is
+  killed; a second Ctrl+C skips that wait, and on Windows the task tree is
+  stopped immediately. Progress shows the agents that are stopping and reports
+  the run as interrupted instead of failed unexpectedly.
 
 - PII email scans recognize all RFC 2606 reserved domains, including their
   subdomains, mixed-case forms, trailing dots, and prose ellipses. A local-part

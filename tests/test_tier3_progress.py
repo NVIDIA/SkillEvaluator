@@ -2735,9 +2735,9 @@ def test_interrupt_cancels_running_agent_and_never_starts_queued_agents(
 
     def run_agent(**kwargs: Any) -> list[str]:
         launched.append(kwargs["agent"])
-        cancellation_event = kwargs.get("cancellation_event")
+        cancellation = kwargs.get("cancellation")
         # Harbor jobs poll this event; the bounded wait keeps a regression from hanging.
-        observed_cancellation.append(cancellation_event is not None and cancellation_event.wait(10))
+        observed_cancellation.append(cancellation is not None and cancellation.requested.wait(10))
         return []
 
     # The stub configures max_agents=1, so the second agent waits in the queue.
@@ -2757,6 +2757,52 @@ def test_interrupt_cancels_running_agent_and_never_starts_queued_agents(
     events = [(event.stage, event.state, event.detail) for event in reporter.events]
     assert ("agent:codex", "failed", "interrupted before completion") in events
     assert ("agent:opencode", "running", "with-skill + baseline") not in events
+    assert events[-1] == ("run-finished", "failed", "Tier 3 evaluation interrupted")
+
+
+class _RepeatedInterruptReporter(_RecordingReporter):
+    """Deliver Ctrl+C when the first agent starts and again when it reports stopping."""
+
+    def __init__(self) -> None:
+        super().__init__()
+        self.interrupts = 0
+
+    def emit(self, event: Any) -> None:
+        super().emit(event)
+        if self.interrupts < 2 and event.stage.startswith("agent:") and event.state == "running":
+            self.interrupts += 1
+            raise KeyboardInterrupt
+
+
+def test_second_interrupt_forces_running_agents_to_stop(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    observed: list[tuple[bool, bool]] = []
+
+    def run_agent(**kwargs: Any) -> list[str]:
+        cancellation = kwargs["cancellation"]
+        # A running Harbor job stays in its cleanup grace until it is forced.
+        observed.append((cancellation.requested.wait(10), cancellation.forced.wait(10)))
+        return []
+
+    runner, skill = _stub_runner(monkeypatch, tmp_path, run_agent=run_agent)
+    reporter = _RepeatedInterruptReporter()
+
+    with pytest.raises(KeyboardInterrupt):
+        runner.run_harbor_eval(
+            skill,
+            ["codex"],
+            output_dir=tmp_path / "results",
+            progress_reporter=reporter,
+        )
+
+    assert observed == [(True, True)]
+    assert reporter.interrupts == 2
+    events = [(event.stage, event.state, event.detail) for event in reporter.events]
+    stopping = [detail for stage, state, detail in events if stage == "agent:codex" and state == "running"]
+    assert stopping[-1].startswith("stopping Harbor jobs; press Ctrl+C again")
+    assert ("agent:codex", "failed", "interrupted before completion") in events
     assert events[-1] == ("run-finished", "failed", "Tier 3 evaluation interrupted")
 
 

@@ -106,11 +106,18 @@ using Harbor 0.24:
   a new session can escape process-group cleanup, so the host-side Harbor CLI,
   configuration, and local-mode skills must be trusted. Run untrusted evaluated
   workloads in Docker or another isolated Harbor backend instead of local mode.
-- Ctrl+C stops the whole run. SkillEvaluator terminates and reaps the process
-  group or task tree of every running Harbor job, as it does on timeout, and
-  does not start agents still waiting for a `--max-agents` slot, queued
-  conditions, or remaining `--stop-on-pass` attempts. The progress view marks
-  unfinished stages as interrupted.
+- Ctrl+C stops the whole run. Agents still waiting for a `--max-agents` slot,
+  queued conditions, and remaining `--stop-on-pass` attempts never start. Each
+  running Harbor job receives SIGTERM, which Harbor handles by stopping its
+  trial environments, and has up to 30 seconds to exit before its POSIX process
+  group is killed and reaped. The progress view shows the agents that are
+  stopping; a second Ctrl+C skips the wait. On Windows the Harbor task tree is
+  stopped immediately. A skipped or exceeded wait, or a Windows run, can leave
+  trial containers or in-container agent processes running. Harbor's Docker
+  backends name each Compose project after its trial, so
+  `docker ps --filter label=com.docker.compose.project` lists the candidates;
+  check their project names before removing them with `docker rm -f`. The
+  progress view marks unfinished stages as interrupted.
 - Docker accepts Harbor stdin payloads and isolates main-container execution
   from sidecar operations without placing environment values on Compose argv.
   For NVIDIA Build, the credential reaches the trusted parent over stdin; each

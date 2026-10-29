@@ -31,6 +31,8 @@ All notable changes to SkillEvaluator are documented in this file.
 
 ### Changed
 
+- GitHub onboarding shows the PR comment example directly on the page and
+  explains the two templates and required one-time publisher setup.
 - HTML reports use a verdict-led layout with a sidebar and expandable check
   details. The verdict replaces the pass percentage; checks marked Not
   applicable are excluded from passed and executed counts. Publication status

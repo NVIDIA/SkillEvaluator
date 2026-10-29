@@ -386,6 +386,7 @@ def test_workflows_declare_permissions_or_inherit_the_explicit_scan_caller() -> 
             for template in ("skill-checks.yml", "skill-checks-llm.yml"):
                 caller = yaml.load((ROOT / "ci/templates" / template).read_text(), Loader=yaml.BaseLoader)
                 assert caller["permissions"] == {"contents": "read"}
+                assert all("permissions" not in job for job in caller["jobs"].values())
         else:
             assert workflow.get("permissions") is not None, (
                 f"{workflow_name} inherits the repository default token scope"

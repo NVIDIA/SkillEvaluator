@@ -838,3 +838,14 @@ class TestInsightsJudgeNegativeControls:
 
         assert parsed[0]["claim_type"] == "general"
         assert parsed[0]["evidence_case_ids"] == ["positive-002", "positive-001"]
+
+
+def test_regressed_dimension_reasoning_names_the_weakest_signal() -> None:
+    from skillevaluator.evaluation.dimension_judge import _human_reasoning_bullets
+
+    parts = ["goal_accuracy=0.25", "behavior_check=0.81"]
+    regressed = _human_reasoning_bullets(with_skill=0.53, baseline=0.66, lift=-0.13, parts=parts)
+    improved = _human_reasoning_bullets(with_skill=0.8, baseline=0.4, lift=0.4, parts=parts)
+
+    assert regressed[-1] == "Weakest signal: goal_accuracy 0.25."
+    assert improved[-1] == "Strongest signal: behavior_check 0.81."

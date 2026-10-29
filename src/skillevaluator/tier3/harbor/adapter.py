@@ -2374,6 +2374,7 @@ def _copy_verifier(task_dir: Path) -> None:
     sources = (
         (TEMPLATES_DIR / "eval.py", "Verifier template"),
         (_EVAL_CORE_DIR / "log_converters.py", "log_converters helper"),
+        (_EVAL_CORE_DIR / "atif_helpers.py", "ATIF evidence helpers"),
         (_EVAL_CORE_DIR / "shell_lexing.py", "Shell lexical helper"),
         (_EVAL_CORE_DIR / "script_invocation.py", "Shell invocation helper"),
         (_EVAL_CORE_DIR / "checks.py", "Deterministic grading checks"),

@@ -124,7 +124,8 @@ def test_tier2_cli_reports_preserve_analysis_errors_with_findings(tmp_path: Path
     payload = json.loads((reports / "skillevaluator-tier2.json").read_text(encoding="utf-8"))
     result = payload["results"][0]
     failed_clusters = {"mixed": 1, "errors_only": 2, "finding_only": 0}[outcome]
-    assert result["status"] == ("incomplete" if failed_clusters else "failed")
+    # A confirmed policy finding outranks a separate incomplete analyzer.
+    assert result["status"] == "failed"
     assert result["llm_analysis"]["clusters_total"] == 2
     assert result["llm_analysis"]["clusters_failed"] == failed_clusters
     assert result["llm_analysis"]["clusters_completed"] == 2 - failed_clusters

@@ -71,6 +71,7 @@ from skillevaluator.reporting.base import (
 )
 from skillevaluator.reporting.harbor_viewer import normalize_agent_eval_harbor_links
 from skillevaluator.reporting.presentation import success_is_not_applicable
+from skillevaluator.reporting.run_status import Status, resolve_run_status, result_status
 
 if TYPE_CHECKING:
     from skillevaluator.models import ValidationResult
@@ -1293,7 +1294,10 @@ def _result_display_status(result: ValidationResult) -> str:
         and not result.findings
         and all(_detail_display_status(detail) == "not_applicable" for detail in result.success_details)
     )
-    if result.is_incomplete:
+    outcome = result_status(result)
+    if outcome == Status.FAILED:
+        return "fail"
+    if outcome == Status.INCOMPLETE:
         return "incomplete"
     if is_cleanly_skipped(result):
         return "not_applicable" if "not applicable" in get_skip_reason(result).casefold() else "skipped"
@@ -1514,10 +1518,10 @@ class HTMLReporter(ReporterBase):
                 skill_data["passed"] = False
                 vdata["passed"] = False
 
-            if result.is_incomplete:
-                skill_data["status"] = "incomplete"
-            elif not result.passed and skill_data["status"] != "incomplete":
+            if result_status(result) == Status.FAILED:
                 skill_data["status"] = "fail"
+            elif result_status(result) == Status.INCOMPLETE and skill_data["status"] != "fail":
+                skill_data["status"] = "incomplete"
             skill_data["validators"][vn] = vdata
 
         # Deduplicate findings per validator
@@ -2048,8 +2052,8 @@ class HTMLReporter(ReporterBase):
         executed_count = total - skipped_count
         passed_count = sum(1 for r in results if r.passed and not r.is_incomplete and not is_cleanly_skipped(r))
         advisory_skipped_count = sum(1 for r in results if is_advisory_agent_eval_skip(r))
-        failed_count = sum(1 for r in results if not r.passed and not is_cleanly_skipped(r))
-        incomplete_count = sum(1 for r in results if r.is_incomplete)
+        failed_count = sum(1 for r in results if result_status(r) == Status.FAILED)
+        incomplete_count = sum(1 for r in results if result_status(r) == Status.INCOMPLETE)
         issue_count = 0
         critical = high = medium = low = 0
         for r in results:
@@ -2088,7 +2092,7 @@ class HTMLReporter(ReporterBase):
                 "validator_name": result.validator_name,
                 "validator_description": result.validator_description,
                 "passed": result.passed,
-                "status": "skipped" if skipped else result.status,
+                "status": result_status(result).value,
                 "skipped": skipped,
                 "skip_reason": get_skip_reason(result) if skipped else None,
                 "incomplete_scans": result.incomplete_scans,
@@ -2505,9 +2509,10 @@ class HTMLReporter(ReporterBase):
             ),
         )
 
-        all_passed = all(passes_required_gate(r) for r in results)
-        has_incomplete = any(r.is_incomplete for r in results)
-        overall_status = "incomplete" if has_incomplete else "passed" if all_passed else "failed"
+        run_status = resolve_run_status(results)
+        all_passed = run_status.headline == Status.PASSED
+        has_incomplete = run_status.headline == Status.INCOMPLETE
+        overall_status = run_status.headline.value
         total_errors = sum(r.summary.errors for r in results)
         total_warnings = sum(r.summary.warnings for r in results)
         skipped_count = sum(1 for r in results if is_cleanly_skipped(r))

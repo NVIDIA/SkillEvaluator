@@ -1,0 +1,78 @@
+# SPDX-License-Identifier: Apache-2.0
+# Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+from __future__ import annotations
+
+import json
+
+from skillevaluator.models.result import Finding, Severity, ValidationResult
+from skillevaluator.reporting.run_status import Status, resolve_run_status
+
+
+def failure_and_missing():
+    result = ValidationResult(validator_name="Security")
+    result.add_finding(
+        Finding(
+            category="SECURITY",
+            severity=Severity.HIGH,
+            check_name="blocked",
+            message="Unsafe declaration",
+            file_path="manifest.json",
+        )
+    )
+    result.mark_scan_incomplete("scanner")
+    return result
+
+
+def test_real_failure_outranks_missing_evidence_in_same_result():
+    result = failure_and_missing()
+    status = resolve_run_status([result])
+    assert status.headline == Status.FAILED
+    assert status.of(result) == Status.FAILED
+    assert status.missing == ("scanner",)
+
+
+def test_failure_outranks_missing_evidence_in_another_result():
+    missing = ValidationResult(validator_name="Missing")
+    missing.mark_scan_incomplete("missing-tool")
+    failed = ValidationResult(validator_name="Failed")
+    failed.add_error("failed check")
+    assert resolve_run_status([missing, failed]).headline == Status.FAILED
+    assert resolve_run_status([failed, missing]).headline == Status.FAILED
+
+
+def test_advisory_missing_evidence_does_not_change_exit_gate():
+    missing = ValidationResult(validator_name="Advisory")
+    missing.mark_scan_incomplete("optional-tool")
+    missing.metadata["gating"] = {"tier": 2, "blocking": False}
+    status = resolve_run_status([missing])
+    assert status.headline == Status.PASSED
+    assert status.of(missing) == Status.INCOMPLETE
+    assert status.advisory
+    assert status.publication == Status.INCOMPLETE
+
+
+def test_clean_skip_is_distinct_from_pass():
+    skipped = ValidationResult(validator_name="Skipped", metadata={"skipped": True})
+    status = resolve_run_status([skipped])
+    assert status.of(skipped) == Status.SKIPPED
+    assert status.tiers[1].status == Status.SKIPPED
+
+
+def test_report_surfaces_share_failure_precedence():
+    from skillevaluator.reporting.cli import CLIReporter
+    from skillevaluator.reporting.html import HTMLReporter
+    from skillevaluator.reporting.json_reporter import JSONReporter
+    from skillevaluator.reporting.markdown import MarkdownReporter
+    from skillevaluator.reporting.sarif_reporter import SARIFReporter
+
+    result = failure_and_missing()
+    data = json.loads(JSONReporter().render_all([result]))
+    assert data["overall_status"] == "failed"
+    assert data["results"][0]["status"] == "failed"
+    assert "[FAIL]" in CLIReporter().render_all([result])
+    assert "**Status:** ❌ FAILED" in MarkdownReporter().render_all([result])
+    assert '"status": "failed"' in HTMLReporter().render_all([result]) or "FAILED" in HTMLReporter().render_all(
+        [result]
+    )
+    sarif = json.loads(SARIFReporter().render_all([result]))
+    assert sarif["runs"][0]["properties"]["status"] == "failed"

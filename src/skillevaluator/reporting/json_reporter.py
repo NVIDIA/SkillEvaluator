@@ -25,11 +25,11 @@ from skillevaluator.reporting.base import (
     get_skip_reason,
     is_advisory_agent_eval_skip,
     is_cleanly_skipped,
-    passes_required_gate,
     result_publication_target_conflict_marker,
     result_publication_target_dict,
     select_agent_eval_payload,
 )
+from skillevaluator.reporting.run_status import Status, resolve_run_status, result_status
 from skillevaluator.source_identity import recorded_evaluated_source
 
 if TYPE_CHECKING:
@@ -98,11 +98,12 @@ class JSONReporter(ReporterBase):
         """Render all results to JSON with overall summary."""
         from skillevaluator.reporting.html import HTMLReporter
 
-        all_passed = all(passes_required_gate(r) for r in results)
+        run_status = resolve_run_status(results)
+        all_passed = run_status.headline == Status.PASSED
         skip_count = sum(1 for r in results if is_cleanly_skipped(r))
         advisory_skip_count = sum(1 for r in results if is_advisory_agent_eval_skip(r))
         incomplete_scans = list(dict.fromkeys(tool for result in results for tool in result.incomplete_scans))
-        overall_status = "incomplete" if incomplete_scans else "passed" if all_passed else "failed"
+        overall_status = run_status.headline.value
         total_errors = sum(r.summary.errors for r in results)
         total_warnings = sum(r.summary.warnings for r in results)
 
@@ -263,7 +264,7 @@ class JSONReporter(ReporterBase):
             "validator": result.validator_name,
             "description": result.validator_description,
             "passed": result.passed,
-            "status": "skipped" if skipped else result.status,
+            "status": result_status(result).value,
             "skipped": skipped,
             "skip_reason": get_skip_reason(result) if skipped else None,
             "incomplete_scans": result.incomplete_scans,

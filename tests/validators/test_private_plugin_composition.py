@@ -73,3 +73,40 @@ def test_opt_in_endpoint_missing_evidence_stays_incomplete(tmp_path, monkeypatch
         root, options=PrivatePluginChecks(checks=frozenset({"schema"}), resolve_endpoints=True)
     )
     assert any(r.is_incomplete and r.validator_name == "Private Endpoint Checks" for r in results)
+
+
+def test_declared_skill_in_excluded_directory_receives_all_checks(tmp_path):
+    root = bundle(tmp_path)
+    manifest = root / ".claude-plugin/plugin.json"
+    manifest.write_text(json.dumps({"name": "demo", "skills": ["./evals/client-skill"]}))
+    skill = root / "evals/client-skill"
+    skill.mkdir(parents=True)
+    (skill / "SKILL.md").write_text(
+        "---\nname: client-skill\ndescription: Demo\nmetadata:\n  author: Demo <demo@example.com>\n  version: invalid\n---\n[missing](client-absent.md)\n"
+    )
+    results = run_plugin_validation(root, options=PrivatePluginChecks(checks=frozenset({"version", "hygiene"})))
+    assert any(r.metadata.get("plugin_member") == "evals/client-skill" and r.findings for r in results)
+    assert sum("client-absent.md" in error for r in results for error in r.errors) == 1
+
+
+def test_staged_security_view_keeps_bytecode(tmp_path, monkeypatch):
+    root = bundle(tmp_path)
+    bytecode = root / "__pycache__/module.pyc"
+    bytecode.parent.mkdir()
+    bytecode.write_bytes(b"bytecode")
+    from types import SimpleNamespace
+
+    from skillevaluator.models.result import ValidationResult
+
+    seen = []
+
+    def scan(path):
+        seen.extend(p.relative_to(path).as_posix() for p in path.rglob("*.pyc"))
+        return ValidationResult()
+
+    monkeypatch.setattr(
+        "skillevaluator.tier1.plugin_checks._tree_checks",
+        lambda: {"security": (SimpleNamespace(name="Security", description="test"), scan)},
+    )
+    run_plugin_validation(root, options=PrivatePluginChecks(checks=frozenset({"security"})))
+    assert seen == ["__pycache__/module.pyc"]

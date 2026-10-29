@@ -5,9 +5,10 @@
 
 from __future__ import annotations
 
+import hashlib
 import tempfile
 from dataclasses import dataclass
-from pathlib import Path
+from pathlib import Path, PurePosixPath
 
 from pydantic import BaseModel
 
@@ -105,17 +106,20 @@ def _rebase(result: ValidationResult, old: Path, new: Path) -> None:
         success.metadata = rewrite(success.metadata)
 
 
-def _snapshot(root: Path, destination: Path) -> None:
+def _snapshot(root: Path, destination: Path, skills: list[str]) -> tuple[PurePosixPath, ...]:
     """One bounded copy with inode-pinned, no-follow reads before scanners run.
 
     Scanners receive an immutable task-owned input view and cannot follow source
     links or read an entry swapped between discovery and copying. Refusal never
     falls back to scanning the original filesystem.
     """
+    # Explicit client paths override generic artifact pruning. All reads still
+    # share the same path/byte caps, so an oversized loaded tree is incomplete.
+    required_names = {part for skill in skills for part in Path(skill).parts}
     files = discover_secure_files(
         root,
         selected=lambda _: True,
-        excluded_dirs=SCAN_EXCLUDED_DIRS,
+        excluded_dirs=SCAN_EXCLUDED_DIRS - {"__pycache__"} - required_names,
         max_paths=PLUGIN_TREE_MAX_DISCOVERED_PATHS,
         allow_context_alias=False,
         refuse_selected_dirs=False,
@@ -130,6 +134,19 @@ def _snapshot(root: Path, destination: Path) -> None:
             output = destination / source.relative_path
             output.parent.mkdir(parents=True, exist_ok=True)
             output.write_bytes(raw)
+    return tuple(PurePosixPath(file.relative_path.as_posix()) for file in files)
+
+
+def _scan_units(skills: list[str], excluded: frozenset[str]) -> list[str]:
+    units = ["."]
+    for skill in sorted(skills, key=lambda value: (len(Path(value).parts), value)):
+        target = Path(skill)
+        ancestor = max(
+            (Path(unit) for unit in units if target.is_relative_to(Path(unit))), key=lambda value: len(value.parts)
+        )
+        if any(part in excluded for part in target.relative_to(ancestor).parts):
+            units.append(skill)
+    return units
 
 
 def run_plugin_validation(path: Path, *, options: PrivatePluginChecks | None = None) -> list[ValidationResult]:
@@ -161,6 +178,8 @@ def run_plugin_validation(path: Path, *, options: PrivatePluginChecks | None = N
     results = [schema]
     scan_checks = options.checks & TREE_CHECKS
     skill_checks = options.checks & SKILL_CHECKS
+    source_files = inventory.source_files
+    skills = sorted({m.path for m in inventory.components if m.type == "skill" and m.path and not m.problem})
     if scan_checks or skill_checks:
         snapshot_result = ValidationResult(validator_name="Private Tree Coverage")
         if not inventory.tree_complete:
@@ -171,7 +190,10 @@ def run_plugin_validation(path: Path, *, options: PrivatePluginChecks | None = N
                 with tempfile.TemporaryDirectory(prefix="skillevaluator-private-tree-") as scratch:
                     view = Path(scratch) / root.name
                     view.mkdir()
-                    _snapshot(root, view)
+                    source_files = _snapshot(root, view, skills)
+                    copied_manifest = view / inventory.selected_manifest.manifest_filename
+                    if hashlib.sha256(copied_manifest.read_bytes()).hexdigest() != inventory.manifest_sha256:
+                        raise SecurePathError("source_changed", "Selected manifest changed during staging.")
                     for key, (validator, runner) in _tree_checks().items():
                         if key not in scan_checks:
                             continue
@@ -181,22 +203,43 @@ def run_plugin_validation(path: Path, *, options: PrivatePluginChecks | None = N
                                 or getattr(validator, "_validate_single", None)
                                 or validator._validate_single_asset
                             )
-                        result = runner(view)
-                        result.validator_name = validator.name
-                        result.validator_description = validator.description
-                        result.metadata["plugin_check"] = key
-                        result.metadata["plugin_scan_scope"] = "whole_tree"
-                        _rebase(result, view, root)
-                        results.append(result)
+                        excluded = SCAN_EXCLUDED_DIRS - {"__pycache__"} if key == "security" else SCAN_EXCLUDED_DIRS
+                        for unit in _scan_units(skills, excluded):
+                            result = runner(view / unit)
+                            result.validator_name = validator.name
+                            result.validator_description = validator.description
+                            result.metadata["plugin_check"] = key
+                            result.metadata["plugin_scan_scope"] = "whole_tree" if unit == "." else "declared_skill"
+                            if unit != ".":
+                                result.metadata["plugin_member"] = unit
+                            if unit != ".":
+                                for finding in result.findings:
+                                    location = Path(finding.file_path)
+                                    if (
+                                        finding.file_path
+                                        and not location.is_absolute()
+                                        and not finding.file_path.startswith(("<", "["))
+                                        and not location.is_relative_to(Path(unit))
+                                    ):
+                                        finding.file_path = (Path(unit) / location).as_posix()
+                            _rebase(result, view, root)
+                            results.append(result)
                     # Every audited client skill receives its own quality/lint/
                     # version/schema checks; root-owned files are scanned once above.
-                    skills = sorted(
-                        {m.path for m in inventory.components if m.type == "skill" and m.path and not m.problem}
-                    )
                     validators = _skill_checks()
                     for relative in skills:
                         target = view / relative
                         if not any((target / name).is_file() for name in ("SKILL.md", "skill.md")):
+                            snapshot_result.mark_scan_incomplete("declared-skill-coverage")
+                            snapshot_result.add_finding(
+                                Finding(
+                                    category="PLUGIN_SCHEMA",
+                                    severity=Severity.HIGH,
+                                    check_name="declared_skill_not_scanned",
+                                    message="An inventoried skill is absent from the safe scan view.",
+                                    file_path=str(root / relative),
+                                )
+                            )
                             continue
                         for key, validator in validators.items():
                             if key not in skill_checks:
@@ -207,7 +250,9 @@ def run_plugin_validation(path: Path, *, options: PrivatePluginChecks | None = N
                             result.metadata.update(plugin_check=key, plugin_member=relative)
                             _rebase(result, view, root)
                             results.append(result)
-                    snapshot_result.metadata.update(source_files=len(inventory.source_files), complete=True)
+                    snapshot_result.metadata.update(
+                        source_files=len(source_files), complete=not snapshot_result.is_incomplete
+                    )
                     results.append(snapshot_result)
             except (SecurePathError, OSError):
                 snapshot_result.add_finding(
@@ -224,7 +269,7 @@ def run_plugin_validation(path: Path, *, options: PrivatePluginChecks | None = N
     declarations = inventory.all_mcp_declarations()
     if options.audit_dependencies:
         reader = PluginRootReader(root)
-        inputs = collect_audit_inputs(reader, inventory.source_files, mcp=declarations)
+        inputs = collect_audit_inputs(reader, source_files, mcp=declarations)
         audit = run_dependency_audits(reader, inputs)
         if not inventory.tree_complete:
             audit.mark_scan_incomplete("dependency-source-discovery")

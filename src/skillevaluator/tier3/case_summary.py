@@ -642,7 +642,7 @@ def _evidence(run_dir: Path, trial_dir: Path | None, *, run_error: bool) -> str:
         return ""
     names = ("exception.txt", "failure.json") if run_error else ("trajectory.json",)
     name = next((n for n in names if (trial_dir / n).is_file()), names[-1])
-    return str(trial_dir.relative_to(run_dir) / name)
+    return (trial_dir.relative_to(run_dir) / name).as_posix()
 
 
 def _fallback_action(issue: Mapping[str, Any]) -> str:

@@ -6148,6 +6148,46 @@ def _timeout_recovered_by(failed: dict[str, Any], successful: dict[str, Any]) ->
         return False
 
 
+def _trial_derived_job_stats(stats: Any) -> dict[str, Any]:
+    """Return the job counters Harbor derives from trials, independent of order.
+
+    Harbor fills job-level ``metrics`` and ``pass_at_k`` after aggregating
+    trials, and token or cost totals depend on summation order, so neither is
+    compared.
+    """
+    return {
+        "counts": (
+            stats.n_completed_trials,
+            stats.n_errored_trials,
+            stats.n_running_trials,
+            stats.n_pending_trials,
+            stats.n_cancelled_trials,
+            stats.n_retries,
+        ),
+        "evals": {
+            key: (
+                value.n_trials,
+                value.n_errors,
+                {
+                    name: {reward: sorted(trials) for reward, trials in rewards.items()}
+                    for name, rewards in value.reward_stats.items()
+                },
+                {name: sorted(trials) for name, trials in value.exception_stats.items()},
+            )
+            for key, value in stats.evals.items()
+        },
+    }
+
+
+def _split_recovered_failures(
+    failures: list[dict[str, str]], recovered: list[dict[str, Any]]
+) -> tuple[list[dict[str, str]], list[dict[str, str]]]:
+    """Separate active trial failures from timeouts a later attempt recovered."""
+    recovered_trials = {item["trial"] for item in recovered}
+    active = [item for item in failures if item["trial"] not in recovered_trials]
+    return active, [item for item in failures if item["trial"] in recovered_trials]
+
+
 def _job_stats_match_trials(job_dir: Path) -> bool:
     """Require a terminal native job whose counters agree with every physical trial."""
     try:
@@ -6169,7 +6209,7 @@ def _job_stats_match_trials(job_dir: Path) -> bool:
         if len({t.id for t in trials}) != len(trials):
             return False
         expected = JobStats.from_trial_results(trials, n_total_trials=len(trials), n_retries=job.stats.n_retries)
-        return expected == job.stats
+        return _trial_derived_job_stats(expected) == _trial_derived_job_stats(job.stats)
     except (ImportError, ValueError, TypeError, OSError):
         return False
 
@@ -6591,6 +6631,8 @@ def collect_harbor_results(
         with_runtime_failures: list[dict[str, str]] = []
         with_trial_failures: list[dict[str, str]] = []
         with_job_failure = ""
+        with_recovered: list[dict[str, Any]] = []
+        with_job_recovered = False
         with_execution: dict[str, Any] = {}
         with_overall_score: float | None = None
         with_policy = DEFAULT_SCORE_POLICY
@@ -6710,12 +6752,14 @@ def collect_harbor_results(
                 "job_failure": "" if with_job_recovered else with_job_failure,
                 "historical_job_failure": with_job_failure if with_job_recovered else "",
                 "trial_failures": _public_failure_list(
-                    [item for item in with_trial_failures if item["trial"] not in {r["trial"] for r in with_recovered}]
+                    _split_recovered_failures(with_trial_failures, with_recovered)[0]
                 ),
                 "recovered_trial_failures": _public_failure_list(
-                    [item for item in with_trial_failures if item["trial"] in {r["trial"] for r in with_recovered}]
+                    _split_recovered_failures(with_trial_failures, with_recovered)[1]
                 ),
-                **_failure_list_metadata("trial_failure_details", with_trial_failures),
+                **_failure_list_metadata(
+                    "trial_failure_details", _split_recovered_failures(with_trial_failures, with_recovered)[0]
+                ),
             }
             _write_generated_root_json(agent_dir / "with-skill" / "summary.json", output_dir, with_summary)
             logger.debug(
@@ -6803,6 +6847,8 @@ def collect_harbor_results(
         without_runtime_failures: list[dict[str, str]] = []
         without_trial_failures: list[dict[str, str]] = []
         without_job_failure = ""
+        without_recovered: list[dict[str, Any]] = []
+        without_job_recovered = False
         without_execution: dict[str, Any] = {}
         without_overall_score: float | None = None
         without_policy = DEFAULT_SCORE_POLICY
@@ -6926,20 +6972,15 @@ def collect_harbor_results(
                     "job_failure": "" if without_job_recovered else without_job_failure,
                     "historical_job_failure": without_job_failure if without_job_recovered else "",
                     "trial_failures": _public_failure_list(
-                        [
-                            item
-                            for item in without_trial_failures
-                            if item["trial"] not in {r["trial"] for r in without_recovered}
-                        ]
+                        _split_recovered_failures(without_trial_failures, without_recovered)[0]
                     ),
                     "recovered_trial_failures": _public_failure_list(
-                        [
-                            item
-                            for item in without_trial_failures
-                            if item["trial"] in {r["trial"] for r in without_recovered}
-                        ]
+                        _split_recovered_failures(without_trial_failures, without_recovered)[1]
                     ),
-                    **_failure_list_metadata("trial_failure_details", without_trial_failures),
+                    **_failure_list_metadata(
+                        "trial_failure_details",
+                        _split_recovered_failures(without_trial_failures, without_recovered)[0],
+                    ),
                 }
                 _write_generated_root_json(agent_dir / "without-skill" / "summary.json", output_dir, without_summary)
                 logger.debug(
@@ -7167,6 +7208,12 @@ def collect_harbor_results(
                 )
 
         agent_execution = _aggregate_execution([with_execution, without_execution])
+        with_active_trial_failures, with_recovered_trial_failures = _split_recovered_failures(
+            with_trial_failures, with_recovered
+        )
+        without_active_trial_failures, without_recovered_trial_failures = _split_recovered_failures(
+            without_trial_failures, without_recovered
+        )
         all_results["agents"][agent] = {
             "model": agent_model,
             "model_source": agent_model_source,
@@ -7200,18 +7247,26 @@ def collect_harbor_results(
                 "without_skill": _public_failure_list(without_runtime_failures),
             },
             "trial_failures": {
-                "with_skill": _public_failure_list(with_trial_failures),
-                "without_skill": _public_failure_list(without_trial_failures),
+                "with_skill": _public_failure_list(with_active_trial_failures),
+                "without_skill": _public_failure_list(without_active_trial_failures),
+            },
+            "recovered_trial_failures": {
+                "with_skill": _public_failure_list(with_recovered_trial_failures),
+                "without_skill": _public_failure_list(without_recovered_trial_failures),
             },
             "failure_detail_metadata": {
                 "with_skill_runtime": _failure_list_metadata("details", with_runtime_failures),
                 "without_skill_runtime": _failure_list_metadata("details", without_runtime_failures),
-                "with_skill_trials": _failure_list_metadata("details", with_trial_failures),
-                "without_skill_trials": _failure_list_metadata("details", without_trial_failures),
+                "with_skill_trials": _failure_list_metadata("details", with_active_trial_failures),
+                "without_skill_trials": _failure_list_metadata("details", without_active_trial_failures),
             },
             "job_failures": {
-                "with_skill": with_job_failure,
-                "without_skill": without_job_failure,
+                "with_skill": "" if with_job_recovered else with_job_failure,
+                "without_skill": "" if without_job_recovered else without_job_failure,
+            },
+            "historical_job_failures": {
+                "with_skill": with_job_failure if with_job_recovered else "",
+                "without_skill": without_job_failure if without_job_recovered else "",
             },
             "conditions": {
                 "with_skill": with_execution,

@@ -8,8 +8,10 @@ All notable changes to SkillEvaluator are documented in this file.
 
 - With `--stop-on-pass`, a retained Harbor agent timeout followed by a matching
   completed attempt no longer invalidates the scored result. Timeout rewards
-  remain excluded, failure history is retained, and reports distinguish scored,
-  recovered, and intentionally skipped attempts. Other execution failures and
+  remain excluded, failure history is retained, and the JSON summaries
+  distinguish scored, recovered, and intentionally skipped attempts. Recovered
+  timeouts are reported under `recovered_trial_failures` and
+  `historical_job_failures` instead of as active failures. Other execution failures and
   incomplete comparisons still fail validation.
 
 - Changing finding severities through a policy no longer clears an independent

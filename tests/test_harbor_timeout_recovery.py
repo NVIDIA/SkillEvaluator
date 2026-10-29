@@ -103,7 +103,16 @@ def test_fresh_scored_retry_preserves_timeout_history(tmp_path):
     assert condition["scored_attempts"] == condition["expected_attempts"] == 1
     assert condition["physical_expected_attempts"] == 2
     assert condition["recovered_attempts_total"] == 1
-    assert agent["trial_failures"]["with_skill"]
+    assert agent["trial_failures"]["with_skill"] == []
+    assert agent["recovered_trial_failures"]["with_skill"]
+    assert agent["job_failures"]["with_skill"] == ""
+    assert agent["historical_job_failures"]["with_skill"]
+    assert agent["failure_detail_metadata"]["with_skill_trials"]["details_total"] == 0
+    from skillevaluator.tier3.result_display import render_result
+
+    rendered = render_result(result)
+    assert "AgentTimeoutError" not in rendered
+    assert "errored" not in rendered
     case = agent["pass_at_k"]["with_skill"]["cases"]["case-a"]
     assert case["first_pass_attempt"] == 2
     assert case["attempts_used"] == 1
@@ -260,3 +269,45 @@ def test_runner_does_not_retain_recovered_deadline_as_launch_failure(tmp_path, m
     )
     assert len(calls) == 2
     assert errors == []
+
+
+def test_recovery_ignores_harbor_job_metrics(tmp_path):
+    failed = native_attempt(tmp_path / "attempts", 1, timeout=True)
+    passed = native_attempt(tmp_path / "attempts", 2)
+    for job in (failed, passed):
+        path = job / "result.json"
+        payload = json.loads(path.read_text())
+        for stats in payload["stats"]["evals"].values():
+            stats["metrics"] = [{"mean": 0.0}]
+            stats["pass_at_k"] = {"1": 0.0}
+        path.write_text(json.dumps(payload))
+    assert harbor_timeout_job_recovered(failed, passed)
+    assert collect(tmp_path, failed, passed)["execution_status"] == "succeeded"
+
+
+def test_recovery_does_not_depend_on_directory_order(tmp_path, monkeypatch):
+    attempts = [
+        native_attempt(tmp_path / "attempts", 1, timeout=True),
+        native_attempt(tmp_path / "attempts", 2, timeout=True),
+        native_attempt(tmp_path / "attempts", 3),
+    ]
+    _merge_attempt_jobs(attempts, tmp_path / "jobs" / "demo-opencode-with")
+    original_iterdir = Path.iterdir
+    monkeypatch.setattr(Path, "iterdir", lambda self: iter(sorted(original_iterdir(self), reverse=True)))
+    result = collect_harbor_results(
+        skill_name="demo",
+        agents=["opencode"],
+        output_dir=tmp_path / "results",
+        jobs_dir=tmp_path / "jobs",
+        skip_baseline=True,
+        n_attempts=3,
+        expected_cases=1,
+        expected_case_ids=["case-a"],
+        case_id_by_task_selector={"case-a": "case-a"},
+        stop_on_pass=True,
+    )
+    assert result["execution_status"] == "succeeded", result.get("execution_errors")
+    agent = result["agents"]["opencode"]
+    assert agent["overall_with_skill"] == 1.0
+    assert len(agent["recovered_trial_failures"]["with_skill"]) == 2
+    assert agent["trial_failures"]["with_skill"] == []

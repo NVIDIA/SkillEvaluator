@@ -56,6 +56,14 @@ All notable changes to SkillEvaluator are documented in this file.
 
 ### Fixed
 
+- Local-mode verifier uploads now copy directly to the absent destination,
+  avoiding an unnecessary rollback snapshot of an empty tests directory.
+  Inputs and rewritten scripts are prepared privately before publication,
+  so failed uploads preserve existing verifier files. Missing or invalid
+  sources fail rather than creating an empty verifier directory. Per-step
+  verifier uploads retain shared test files, with step files taking precedence.
+  After any command runs, the next upload replaces the tests directory, so
+  files or links the agent left there cannot change verification.
 - Harbor's standalone verifier now runs on Python 3.9 task images after sharing
   deterministic checks with the host evaluator. Packaged verifier checks execute
   on a real Python 3.9 interpreter in CI to retain this compatibility.

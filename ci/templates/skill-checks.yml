@@ -8,6 +8,8 @@ on:
   workflow_dispatch:
 permissions:
   contents: read
+  # Hosted reports/PR comments: uncomment this, then refresh trusted-caller-blobs.
+  # id-token: write
 jobs:
   skills:
     uses: NVIDIA/SkillEvaluator/.github/workflows/evaluate-skills.yml@RELEASE_WORKFLOW_SHA

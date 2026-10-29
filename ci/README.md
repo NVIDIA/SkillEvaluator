@@ -106,19 +106,23 @@ Pages is not an inherent requirement for GitHub PR comments.
    `NVIDIA/SkillEvaluator`; an explicitly reviewed fork override is available
    for integration testing, not needed for standard onboarding.
 6. Generated release files include the caller blob for their unedited scan
-   template. After **any edits** to that consumer file, compute its exact Git blob:
+   template. For hosting, first uncomment `id-token: write` under `permissions`
+   in `.github/workflows/skill-checks.yml`. This lets GitHub sign the workflow's
+   execution identity; no personal token or cloud account is needed.
+   After **any edits** to that consumer file, compute its exact Git blob:
    `git hash-object .github/workflows/skill-checks.yml`. Put that value in
    `trusted-caller-blobs`. Every later scan-file edit needs review and a new
    approved blob. Preserve older reviewed SHA/blob entries only when needed for
    historical backfill. Both allowlists accept comma- or newline-separated
-   entries; compute trust hashes from your own reviewed configuration. The publisher verifies
-   the caller from recorded PR base/head revisions. Conflicting workflow edits
-   or unavailable historical metadata are rejected: update/rebase the consumer
-   branch and rerun its scan.
+   entries; compute trust hashes from your own reviewed configuration. The
+   publisher verifies a separate GitHub-signed execution receipt and checks the
+   caller at that receipt's immutable workflow revision. It never reconstructs
+   the executed workflow from a pull request's current base or head.
 7. The publisher caller must grant `contents: write`, `actions: read`,
    `pages: write`, `id-token: write` and `pull-requests: write`. Reusable jobs
    narrow these to history preparation, Pages deployment and PR feedback. The
-   scan remains `contents: read`. The automatic GitHub token is sufficient;
+   scan uses `contents: read`, plus `id-token: write` only when hosting is enabled.
+   The automatic GitHub token is sufficient;
    no personal access token or model credential is required for publication.
 
 The publisher rebuilds native HTML from bounded, validated JSON using pinned
@@ -136,6 +140,19 @@ current-head, same-repository PR after deployment. Human comments are untouched.
 Fork PR scans can run without provider secrets; fork PR bot comments and current
 PR aliases are not enabled. Comment-only operation and hosting alongside an
 arbitrary existing Pages deployment need further integration work.
+
+Basic scans do not request identity credentials. If GitHub withholds the signing
+permission (including under fork policies), the scan and downloadable reports
+remain available, but hosting is skipped with a setup message. Historical runs
+without a signed receipt cannot be backfilled. Commit the updated configuration
+and trigger a new scan from that revision; rerunning an old job keeps its old
+workflow. Receipts are separate,
+attempt-specific artifacts and are never copied to the report site. The publisher
+checks their signature, repository, attempt, workflow revisions and issuance
+time; token expiration does not invalidate historical evidence. If GitHub has
+retired the signing key, that evidence can no longer be verified and publication
+stops. The receipt establishes execution identity; the approved complete caller
+workflow and GitHub artifact metadata also remain required.
 
 ## Optional LLM checks
 

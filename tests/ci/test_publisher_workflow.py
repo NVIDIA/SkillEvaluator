@@ -66,4 +66,4 @@ def test_privileged_publisher_installs_the_reviewed_hash_locked_bootstrap():
     install = next(step for step in steps if step.get("name") == "Install the trusted native report renderer")
     assert install["working-directory"] == "publisher"
     assert "python3 -m pip install --require-hashes -r ci/requirements/uv.txt" in install["run"]
-    assert "uv sync --frozen --no-dev --no-editable" in install["run"]
+    assert "uv sync --frozen --no-dev --no-editable --extra publisher" in install["run"]

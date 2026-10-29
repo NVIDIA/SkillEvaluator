@@ -43,7 +43,9 @@ CI release. Do not leave placeholders or substitute `main` or `latest`.
   [GitLab guide](../../docs/gitlab-ci.mdx).
 - **Optional GitHub comments:** the second file needs the
   [one-time hosting and trust setup](../../docs/github-actions.mdx#enable-pr-comments).
-  It does not enable comments merely by being copied.
+  Uncomment `id-token: write` in the scan file for signed execution receipts,
+  then approve that file's new blob. Copying the second file alone does not
+  enable comments.
 - **Optional LLM checks:** configure a provider key in the separate manual
   workflow. The default checks need no model key.
 

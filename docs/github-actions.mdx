@@ -146,7 +146,16 @@ Copy the release-generated `publish-skill-reports.yml` into
 `.github/workflows/`. Replace `YOUR_REPORT_BASE_URL` with your repository's
 Pages URL, for example `https://your-org.github.io/your-repo`.
 
-After choosing your skill folders and other scan options, run:
+In `skill-checks.yml`, uncomment the permission for signed report receipts:
+
+```yaml
+permissions:
+  contents: read
+  id-token: write
+```
+
+GitHub uses this to prove which workflow ran. No personal token or cloud account
+is needed. After choosing your skill folders and other scan options, run:
 
 ```bash
 git hash-object .github/workflows/skill-checks.yml
@@ -200,6 +209,14 @@ For history initialization, permission details and troubleshooting, follow the
     quality threshold and also applies to the rubric when LLM checks are enabled;
     required security, schema and other checks remain independent. Tier 2 and
     Tier 3 are not run.
+  </Accordion>
+  <Accordion title="A scan finished, but hosting was skipped">
+    Check that the scan workflow grants `id-token: write` and refresh
+    `trusted-caller-blobs` after editing that file. Commit the setup and start
+    a new scan; rerunning an old job keeps its original workflow and cannot add
+    a missing receipt. GitHub can withhold this permission under fork
+    policies; the downloadable report remains available. Signing receipts are
+    separate artifacts and are never published on the report site.
   </Accordion>
   <Accordion title="Privacy, dependencies, and optional LLM checks">
     Static Tier 1 needs no model key, but dependency checks can contact

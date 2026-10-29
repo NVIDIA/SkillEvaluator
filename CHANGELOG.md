@@ -31,6 +31,9 @@ All notable changes to SkillEvaluator are documented in this file.
 
 ### Changed
 
+- Hosted GitHub reports verify a separate GitHub-signed execution receipt.
+  Enable `id-token: write` in the scan workflow and refresh its approved blob
+  when adding hosting; ordinary scans keep their existing read-only permissions.
 - Link GitHub and GitLab source templates directly from the README and onboarding
   guides. Keep report, log and PR comment examples in the public repository,
   removing onboarding dependencies on personal demo links.

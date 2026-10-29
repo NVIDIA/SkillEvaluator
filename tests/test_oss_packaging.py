@@ -891,7 +891,7 @@ def test_skillspector_install_instructions_pin_one_release() -> None:
         )
     }
 
-    assert install_specs == {"git+https://github.com/NVIDIA/SkillSpector.git@v2.12.0"}
+    assert install_specs == {"git+https://github.com/NVIDIA/SkillSpector.git@v2.13.1"}
 
 
 def test_ci_sarif_merge_uses_uv_tool_python() -> None:

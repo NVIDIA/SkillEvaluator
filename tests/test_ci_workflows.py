@@ -370,19 +370,27 @@ def test_publish_docs_installs_the_fern_cli_from_the_committed_lockfile() -> Non
     assert "fern/node_modules/.bin/fern" in publish_step["run"], "run the installed CLI, not one from PATH"
 
 
-def test_every_workflow_declares_explicit_permissions() -> None:
+def test_workflows_declare_permissions_or_inherit_the_explicit_scan_caller() -> None:
     """A job-level permissions: block overrides the workflow-level one, so check both.
 
-    This rejects the write-all shorthand and the inherited-default token scope, not
-    every broad grant -- a granular write like `contents: write` is a legitimate
-    choice for a release workflow and is not this test's concern.
+    The callable-only scanner inherits its explicit consumer permissions so
+    hosting can opt into OIDC without requiring that permission for basic scans.
+    All event-triggered workflows still declare their scope; no job uses write-all.
     """
     for workflow_name in _workflow_names():
         workflow = _load(workflow_name)
-        assert workflow.get("permissions") is not None, (
-            f"{workflow_name} inherits the repository default token scope"
-        )
-        for scope, permissions in [("workflow", workflow["permissions"])] + [
+        if workflow_name == "evaluate-skills.yml":
+            assert set(workflow["on"]) == {"workflow_call"}
+            assert "permissions" not in workflow
+            assert all("permissions" not in job for job in workflow["jobs"].values())
+            for template in ("skill-checks.yml", "skill-checks-llm.yml"):
+                caller = yaml.load((ROOT / "ci/templates" / template).read_text(), Loader=yaml.BaseLoader)
+                assert caller["permissions"] == {"contents": "read"}
+        else:
+            assert workflow.get("permissions") is not None, (
+                f"{workflow_name} inherits the repository default token scope"
+            )
+        for scope, permissions in [("workflow", workflow.get("permissions"))] + [
             (f"job {job_id}", job["permissions"]) for job_id, job in workflow["jobs"].items() if "permissions" in job
         ]:
             assert permissions != "write-all", f"{workflow_name}: {scope}"

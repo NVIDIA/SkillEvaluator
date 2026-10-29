@@ -61,7 +61,11 @@ def test_both_tools_share_one_client_and_keep_their_own_diagnostics():
 @pytest.mark.parametrize(("cls", "error"), TOOLS)
 @pytest.mark.parametrize(
     "path",
-    ["/repos/owner/consumer", "/repos/owner/consumer/pulls/1", f"/repos/owner/consumer/compare/{'a' * 40}...{'b' * 40}"],
+    [
+        "/repos/owner/consumer",
+        "/repos/owner/consumer/pulls/1",
+        f"/repos/owner/consumer/compare/{'a' * 40}...{'b' * 40}",
+    ],
 )
 def test_this_repository_endpoints_are_allowed(cls, error, path):
     api = client(cls)

@@ -159,7 +159,9 @@ def test_comment_waits_for_this_runs_own_successful_deploy(committed, deploy, co
 
 
 @pytest.mark.parametrize("committed", ["true", "false"])
-@pytest.mark.parametrize(("event", "attempt"), [("workflow_run", "1"), ("workflow_dispatch", "1"), ("workflow_run", "2")])
+@pytest.mark.parametrize(
+    ("event", "attempt"), [("workflow_run", "1"), ("workflow_dispatch", "1"), ("workflow_run", "2")]
+)
 def test_skipped_stale_publication_never_deploys_or_comments(committed, event, attempt):
     # A stale run can follow an earlier attempt that already wrote pr_number and is_current.
     jobs = load(".github/workflows/publish-skill-reports.yml")["jobs"]

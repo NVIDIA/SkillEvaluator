@@ -66,6 +66,9 @@ def test_independent_copy_can_still_link_split_pieces():
     assert len(clusters) == 1
     assert clusters[0].cross_file
     assert clusters[0].max_similarity < 1.0
+    assert len(clusters[0].members) == 2
+    merged = next(member for member in clusters[0].members if member.split_group is not None)
+    assert merged.text.count("reference") == sum(piece.text.count("reference") for piece in pieces)
 
 
 def test_fenced_headings_are_not_promoted_to_sections_during_split():
@@ -84,3 +87,18 @@ def test_markdown_preamble_ranges_follow_leading_blank_lines():
 def test_oversized_section_preserves_short_final_paragraph():
     chunks = chunk_file(collected("# Guide\n" + "instruction " * 300 + "\n\nIMPORTANT_TAIL: Keep a backup."))
     assert any("IMPORTANT_TAIL: Keep a backup." in c.text for c in chunks)
+
+
+def test_oversized_section_keeps_short_labels_with_their_examples():
+    example = (
+        "Example:\n\n```bash\nskill run --input data.csv\n\nskill run --verbose\n```\n\n"
+        "This example shows how the command reads its input and reports progress.\n\n"
+    )
+    chunks = chunk_file(collected("# Usage\n" + example * 25))
+    assert len(chunks) > 1
+    assert min(len(c.text) for c in chunks) >= 80
+    assert max(len(c.text) for c in chunks) <= 3000
+    assert len({c.split_group for c in chunks}) == 1
+    for chunk in chunks:
+        chunk.embedding = [1.0, 0.0]
+    assert build_clusters(chunks) == []

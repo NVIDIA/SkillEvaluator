@@ -79,7 +79,7 @@ def _bounded_pieces(chunk: ContentChunk) -> list[ContentChunk]:
     if len(chunk.text) <= limit:
         return [chunk]
     pieces: list[ContentChunk] = []
-    group = (chunk.source_file, chunk.start_line, chunk.end_line)
+    group = chunk.split_group or (chunk.source_file, chunk.start_line, chunk.end_line)
     buffer = ""
     buffer_start = 0
 
@@ -177,13 +177,33 @@ def chunk_markdown(
     result: list[ContentChunk] = []
     for section in sections:
         if len(section.text) > CONTENT_DEDUP_MAX_CHUNK_CHARS:
-            # The section already passed the minimum-length filter. Keep its
-            # short paragraphs too; they may contain essential instructions.
-            result.extend(split_into_paragraphs(section, min_chars=1))
+            result.extend(_pack_paragraphs(section, min_chars))
         else:
             result.append(section)
 
     return result
+
+
+def _pack_paragraphs(section: ContentChunk, min_chars: int) -> list[ContentChunk]:
+    """Pack consecutive paragraphs of an oversized section up to the embedding cap.
+
+    Paragraphs shorter than ``min_chars`` stay attached to a neighbour instead of
+    becoming chunks of their own; ``_bounded_pieces`` caps any overflow. Every
+    piece shares the section's split group, so pieces never cluster together.
+    """
+    group = (section.source_file, section.start_line, section.end_line)
+    packed: list[ContentChunk] = []
+    for paragraph in split_into_paragraphs(section, min_chars=1):
+        if packed and (
+            len(packed[-1].text) + 2 + len(paragraph.text) <= CONTENT_DEDUP_MAX_CHUNK_CHARS
+            or len(paragraph.text) < min_chars
+            or len(packed[-1].text) < min_chars
+        ):
+            last = packed[-1]
+            packed[-1] = replace(last, text=f"{last.text}\n\n{paragraph.text}", end_line=paragraph.end_line)
+        else:
+            packed.append(replace(paragraph, split_group=group))
+    return packed
 
 
 def split_into_paragraphs(

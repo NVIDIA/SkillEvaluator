@@ -1072,6 +1072,30 @@ class TestTier3HarborCanonicalPayload:
 class TestGatingSplit:
     """Tests for the CLI-consistent Tier 1/Tier 2 gate and advisory Tier 3."""
 
+    def test_tier2_advisory_policy_keeps_accurate_gate_counts(self) -> None:
+        tier1 = _failed_result("Security Scan")
+        tier2 = _failed_result("Similarity Check")
+        tier2.metadata["gating"] = {"tier": 2, "blocking": False}
+        output = HTMLReporter(
+            include_timestamp=False,
+            tabs=[{"id": "tier1", "label": "Tier 1"}, {"id": "tier2", "label": "Tier 2"}],
+        ).render_all([tier1, tier2])
+        assert "Blocking (Tier 1)" in output
+        assert "Advisory (Tier 2)" in output
+        assert output.count("0 critical · 1 high · 0 medium · 0 low") == 2
+
+    def test_tier3_blocking_policy_keeps_accurate_gate_counts(self) -> None:
+        tier1 = _failed_result("Security Scan")
+        tier3 = _failed_result("AGENT_EVAL")
+        tier3.metadata["gating"] = {"tier": 3, "blocking": True}
+        output = HTMLReporter(
+            include_timestamp=False,
+            tabs=[{"id": "tier1", "label": "Tier 1"}, {"id": "tier3", "label": "Tier 3"}],
+        ).render_all([tier1, tier3])
+        assert "Blocking (Tier 1 + Tier 3 agent-eval)" in output
+        assert "0 critical · 2 high · 0 medium · 0 low" in output
+        assert "Tier 3 agent-eval findings are advisory and don't block merge." not in output
+
     @pytest.mark.parametrize(
         "validator_name",
         [
@@ -1127,6 +1151,14 @@ class TestGatingSplit:
         assert gating["blocking"]["high"] == 1
         assert gating["would_block"] is True
 
+    def test_tier1_report_does_not_claim_combined_tier_policy(self) -> None:
+        output = HTMLReporter(include_timestamp=False).render_all([_failed_result("Security Scan")])
+
+        assert "Blocking (Tier 1 + Tier 2)" not in output
+        assert "Advisory (Tier 3 agent-eval)" not in output
+        assert "Tier 2 · Not run" in output
+        assert "Tier 3 · Not run" in output
+
     def test_tier3_failure_remains_advisory(self) -> None:
         output = HTMLReporter(include_timestamp=False).render_all([_failed_result("AGENT_EVAL")])
 
@@ -1148,6 +1180,8 @@ class TestGatingSplit:
 
         assert "Blocking (Tier 1 + Tier 2)" in output
         assert "Advisory (Tier 3 agent-eval)" in output
+        assert output.count("0 critical · 1 high · 0 medium · 0 low") == 2
+        assert "Tier 3 agent-eval findings are advisory and don't block merge." in output
         assert "Advisory (Tier 2" not in output
         assert "Advisory findings (dedup + agent-eval)" not in output
 

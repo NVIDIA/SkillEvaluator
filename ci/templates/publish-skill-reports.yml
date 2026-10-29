@@ -1,0 +1,37 @@
+# SPDX-License-Identifier: Apache-2.0
+# Optional: requires Pages, a retained gh-pages branch and your own trust settings.
+# Pages reports are public unless the site is explicitly private (GitHub Enterprise Cloud).
+# Reports include source evidence; private repositories should otherwise use scan artifacts.
+# Use the release-generated file; set your own URL and refresh the caller blob after scan-file edits.
+name: Publish skill reports
+on:
+  workflow_run:
+    workflows: [Skill checks]
+    types: [completed]
+  workflow_dispatch:
+    inputs:
+      run-id:
+        description: Completed Skill checks run to publish
+        type: string
+        required: true
+      run-attempt:
+        description: Completed attempt number for that run
+        type: string
+        required: true
+permissions:
+  contents: write
+  actions: read
+  pages: write
+  id-token: write
+  pull-requests: write
+jobs:
+  reports:
+    uses: NVIDIA/SkillEvaluator/.github/workflows/publish-skill-reports.yml@RELEASE_WORKFLOW_SHA
+    with:
+      run-id: ${{ format('{0}', github.event.workflow_run.id || inputs.run-id) }}
+      run-attempt: ${{ format('{0}', github.event.workflow_run.run_attempt || inputs.run-attempt) }}
+      report-base-url: YOUR_REPORT_BASE_URL
+      trusted-evaluator-shas: RELEASE_WORKFLOW_SHA
+      trusted-caller-blobs: YOUR_APPROVED_CALLER_BLOB
+      tools-ref: RELEASE_WORKFLOW_SHA
+      tools-repository: NVIDIA/SkillEvaluator

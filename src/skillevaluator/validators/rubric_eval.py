@@ -23,6 +23,7 @@ import stat
 from collections import Counter, deque
 from pathlib import Path
 from typing import Any
+from urllib.parse import unquote, urlsplit
 
 from skillevaluator.constants import (
     RUBRIC_CRITERIA,
@@ -374,26 +375,53 @@ def _collect_supplementary_content(
         pending = deque([(manifest.relative_to(skill_path).as_posix(), skill_content)])
         seen = {pending[0][0]}
         try:
+            manifest_stat = manifest.lstat()
+            # Path-stat identities are comparable on Windows; the secure reader's
+            # returned CRT fstat identity is not. Cached bytes only choose a read
+            # bound: every alias still passes the secure no-follow reader.
+            seen_payloads = (
+                {(manifest_stat.st_dev, manifest_stat.st_ino): skill_content.encode("utf-8")}
+                if manifest_stat.st_ino
+                else {}
+            )
             with SecureRoot(resolved_root) as reader:
                 while pending:
                     source, content = pending.popleft()
                     for href in markdown_link_targets(content):
+                        try:
+                            destination = unquote(urlsplit(href).path).replace("\\", "/")
+                        except ValueError:
+                            continue
+                        if posixpath.splitext(destination)[1].lower() not in {".md", ".markdown"}:
+                            continue
                         local = normalized_local_path(href, reject_anchors=True)
-                        if local is None or Path(local).suffix.lower() not in {".md", ".markdown"}:
+                        if local is None:
                             continue
                         relative = posixpath.normpath(posixpath.join(posixpath.dirname(source), local))
                         if relative == ".." or relative.startswith("../"):
                             raise _UnsafeRubricInputError(f"linked Markdown escapes the skill root: {relative}")
                         if relative in seen:
                             continue
-                        if len(linked) >= _MAX_LINKED_MARKDOWN_FILES:
+                        if len(seen) - 1 >= _MAX_LINKED_MARKDOWN_FILES:
                             raise _UnsafeRubricInputError(
                                 f"linked Markdown exceeds the maximum of {_MAX_LINKED_MARKDOWN_FILES} documents"
                             )
-                        payload, _ = reader.read_bytes(Path(relative), min(max_bytes_per_file, max_total_bytes - total))
+                        metadata = (resolved_root / relative).lstat()
+                        identity = (metadata.st_dev, metadata.st_ino)
+                        cached = seen_payloads.get(identity) if metadata.st_ino else None
+                        read_limit = (
+                            len(cached) if cached is not None else min(max_bytes_per_file, max_total_bytes - total)
+                        )
+                        payload, _ = reader.read_bytes(Path(relative), read_limit, expected=metadata)
+                        seen.add(relative)
+                        if cached is not None:
+                            if payload != cached:
+                                raise _UnsafeRubricInputError(f"linked Markdown changed while collecting: {relative}")
+                            continue
                         text = payload.decode("utf-8")
                         linked[relative] = text
-                        seen.add(relative)
+                        if metadata.st_ino:
+                            seen_payloads[identity] = payload
                         total += len(payload)
                         pending.append((relative, text))
         except _UnsafeRubricInputError:

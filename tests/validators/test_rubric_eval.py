@@ -418,6 +418,91 @@ class TestLinkedRubricGuidance:
         assert result.metadata["rubric_eval"]["execution_status"] == "failed"
         assert result.metadata["rubric_eval"]["overall_score"] is None
 
+    def test_manifest_case_alias_cycle_does_not_apply_supplementary_size_limit(self, tmp_path):
+        root = _write_skill(tmp_path)
+        (root / "SKILL.md").write_text("[Guide](guide.md)\n" + "x" * 3100)
+        alias = root / "skill.md"
+        if not alias.exists() or not alias.samefile(root / "SKILL.md"):
+            pytest.skip("requires a case-insensitive filesystem")
+        (root / "guide.md").write_text("[Root](skill.md)")
+
+        collected = _collect_supplementary_content(root)
+
+        assert collected["linked_markdown"] == {"guide.md": "[Root](skill.md)"}
+
+    def test_guide_case_aliases_do_not_consume_budget_twice(self, tmp_path):
+        root = _write_skill(tmp_path)
+        (root / "SKILL.md").write_text("[First](GUIDE.md) [Again](guide.md)")
+        (root / "GUIDE.md").write_text("required")
+        alias = root / "guide.md"
+        if not alias.exists() or not alias.samefile(root / "GUIDE.md"):
+            pytest.skip("requires a case-insensitive filesystem")
+
+        collected = _collect_supplementary_content(root, max_total_bytes=8)
+
+        assert collected["linked_markdown"] == {"GUIDE.md": "required"}
+
+    def test_case_sensitive_guides_keep_distinct_evidence(self, tmp_path):
+        root = _write_skill(tmp_path)
+        (root / "SKILL.md").write_text("[Upper](GUIDE.md) [Lower](guide.md)")
+        (root / "GUIDE.md").write_text("UPPER")
+        (root / "guide.md").write_text("lower")
+        if (root / "GUIDE.md").samefile(root / "guide.md"):
+            pytest.skip("requires a case-sensitive filesystem")
+
+        assert _collect_supplementary_content(root)["linked_markdown"] == {"GUIDE.md": "UPPER", "guide.md": "lower"}
+
+    @pytest.mark.parametrize("unsafe_alias", ["ancestor_symlink", "hardlink"])
+    def test_known_manifest_identity_does_not_bypass_unsafe_path_rejection(self, tmp_path, unsafe_alias):
+        root = _write_skill(tmp_path)
+        (root / "SKILL.md").write_text("[Guide](guide.md)")
+        if unsafe_alias == "ancestor_symlink":
+            (root / "guide.md").write_text("[Alias](alias/SKILL.md)")
+            (root / "alias").symlink_to(root, target_is_directory=True)
+        else:
+            (root / "guide.md").write_text("[Alias](COPY.md)")
+            os.link(root / "SKILL.md", root / "COPY.md")
+        with patch.object(RubricJudge, "process") as judge:
+            result = RubricEvalValidator().validate(root)
+
+        judge.assert_not_called()
+        assert result.metadata["rubric_eval"]["execution_status"] == "failed"
+        assert result.metadata["rubric_eval"]["overall_score"] is None
+
+    def test_case_alias_with_changed_manifest_bytes_is_rejected(self, tmp_path):
+        root = _write_skill(tmp_path)
+        source = "[Guide](guide.md)\nOriginal source"
+        manifest = root / "SKILL.md"
+        manifest.write_text(source.replace("Original", "Modified"))
+        if not (root / "skill.md").exists() or not (root / "skill.md").samefile(manifest):
+            pytest.skip("requires a case-insensitive filesystem")
+        (root / "guide.md").write_text("[Root](skill.md)")
+
+        with pytest.raises(_UnsafeRubricInputError, match="changed while collecting"):
+            _collect_supplementary_content(root, manifest=manifest, skill_content=source)
+
+    @pytest.mark.parametrize("href", ["%2Fimages/logo.png", "%2Fassets/data.json", "%2e%2e%5cassets/data.json"])
+    def test_non_markdown_assets_do_not_block_rubric_judging(self, tmp_path, href):
+        root = _write_skill(tmp_path)
+        (root / "SKILL.md").write_text(f"[Asset]({href})")
+        response = json.dumps({"checks": _complete_checks(), "score": 90, "overall_pass": True, "summary": "ok"})
+        with patch.object(RubricJudge, "completions", return_value=response) as provider:
+            result = RubricEvalValidator().validate(root)
+
+        assert result.metadata["rubric_eval"]["execution_status"] == "succeeded"
+        assert result.metadata["rubric_eval"]["overall_score"] == 90
+        assert provider.call_count == 1
+
+    def test_encoded_absolute_markdown_remains_blocked_before_judging(self, tmp_path):
+        root = _write_skill(tmp_path)
+        (root / "SKILL.md").write_text("[Guide](%2Fdocs/GUIDE.md)")
+        with patch.object(RubricJudge, "process") as judge:
+            result = RubricEvalValidator().validate(root)
+
+        judge.assert_not_called()
+        assert result.metadata["rubric_eval"]["execution_status"] == "failed"
+        assert result.metadata["rubric_eval"]["overall_score"] is None
+
     def test_successful_validator_sends_source_and_complete_guidance_to_provider(self, tmp_path):
         root = _write_skill(tmp_path)
         source = "---\nname: demo\ndescription: demo\n---\n[Guide](GUIDE.md)\n"

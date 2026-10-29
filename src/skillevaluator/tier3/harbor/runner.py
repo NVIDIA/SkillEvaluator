@@ -5497,6 +5497,7 @@ def _run_harbor_eval_impl(
             env_mode=env_mode,
             agent_models=model_resolution,
             launch_errors=errors,
+            grading_mode=grading_mode,
         )
     except Exception:
         reporter.emit(ProgressEvent(stage="collection", state="failed", detail="result collection failed"))

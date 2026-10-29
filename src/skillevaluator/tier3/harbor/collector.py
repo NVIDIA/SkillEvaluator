@@ -6862,10 +6862,14 @@ def collect_harbor_results(
     env_mode: str | None = None,
     agent_models: dict[str, dict[str, str]] | None = None,
     launch_errors: list[str] | None = None,
+    grading_mode: str | None = None,
 ) -> dict[str, Any]:
     """Collect results from Harbor jobs into evals/results/<agent>/ structure.
 
     Returns a dict with per-agent scores, lift, and a cross-agent comparison.
+    ``grading_mode`` labels a condition with no scoreable reward with the
+    requested metric set and score policy; observed rewards still declare
+    their own.
     """
     if expected_trials is not None and expected_total_trials is not None and expected_trials != expected_total_trials:
         raise ValueError("Conflicting expected trial counts were provided")
@@ -6877,17 +6881,23 @@ def collect_harbor_results(
         expected_case_ids,
     )
 
+    # Unscored conditions keep the requested grading policy instead of
+    # falling back to the default metric set, which custom_only never grades.
+    fallback_metric_set, fallback_metrics = (
+        (CUSTOM_ONLY_METRIC_SET, ()) if grading_mode == "custom_only" else (DEFAULT_METRIC_SET, DISPLAY_METRICS)
+    )
+    fallback_policy = score_policy_for_metrics(fallback_metrics)
     all_results: dict[str, Any] = {
         "agents": {},
-        "metric_set": DEFAULT_METRIC_SET,
-        "metrics": list(DISPLAY_METRICS),
-        "score_policy": DEFAULT_SCORE_POLICY,
+        "metric_set": fallback_metric_set,
+        "metrics": list(fallback_metrics),
+        "score_policy": fallback_policy,
         "attempt_policy": {
             "max_attempts": n_attempts,
             "pass_threshold": pass_threshold,
             "stop_on_pass": stop_on_pass,
-            "score_definition": score_definition(DISPLAY_METRICS),
-            "score_policy": DEFAULT_SCORE_POLICY,
+            "score_definition": score_definition(fallback_metrics),
+            "score_policy": fallback_policy,
         },
     }
 
@@ -6916,7 +6926,7 @@ def collect_harbor_results(
         with_job_recovered = False
         with_execution: dict[str, Any] = {}
         with_overall_score: float | None = None
-        with_policy = DEFAULT_SCORE_POLICY
+        with_policy = fallback_policy
         with_policy_ambiguous = False
         with_metrics: tuple[str, ...] = ()
         with_summary: dict[str, Any] | None = None
@@ -6958,6 +6968,8 @@ def collect_harbor_results(
             with_mixed_metric_contracts = rewards_have_mixed_metric_contracts(with_rewards)
             with_trial_failures.extend(invalid_score_failures)
             with_scores, with_metric_set, with_metrics = average_metrics(with_logical_rewards)
+            if not with_logical_rewards:
+                with_metric_set, with_metrics = fallback_metric_set, fallback_metrics
             with_not_applicable = not_applicable_metrics(with_logical_rewards, with_metrics)
             with_policy, with_policy_ambiguous = _score_policy_for_rewards(with_logical_rewards, with_metrics)
             all_results["metric_set"] = with_metric_set
@@ -7075,8 +7087,8 @@ def collect_harbor_results(
                     "scores": {},
                     "custom_scores": {},
                     "overall_score": None,
-                    "metric_set": DEFAULT_METRIC_SET,
-                    "metrics": list(DISPLAY_METRICS),
+                    "metric_set": fallback_metric_set,
+                    "metrics": list(fallback_metrics),
                     "dimensions": {},
                     "num_trials": 0,
                     "num_reward_rows": 0,
@@ -7137,7 +7149,7 @@ def collect_harbor_results(
         without_job_recovered = False
         without_execution: dict[str, Any] = {}
         without_overall_score: float | None = None
-        without_policy = DEFAULT_SCORE_POLICY
+        without_policy = fallback_policy
         without_policy_ambiguous = False
         without_metrics: tuple[str, ...] = ()
         without_summary: dict[str, Any] | None = None
@@ -7184,6 +7196,8 @@ def collect_harbor_results(
                 without_mixed_metric_contracts = rewards_have_mixed_metric_contracts(without_rewards)
                 without_trial_failures.extend(invalid_score_failures)
                 without_scores, without_metric_set, without_metrics = average_metrics(without_logical_rewards)
+                if not without_logical_rewards:
+                    without_metric_set, without_metrics = fallback_metric_set, fallback_metrics
                 without_not_applicable = not_applicable_metrics(without_logical_rewards, without_metrics)
                 without_policy, without_policy_ambiguous = _score_policy_for_rewards(
                     without_logical_rewards, without_metrics
@@ -7301,9 +7315,9 @@ def collect_harbor_results(
                         "scores": {},
                         "custom_scores": {},
                         "overall_score": None,
-                        "metric_set": DEFAULT_METRIC_SET,
-                        "metrics": list(DISPLAY_METRICS),
-                        "score_policy": DEFAULT_SCORE_POLICY,
+                        "metric_set": fallback_metric_set,
+                        "metrics": list(fallback_metrics),
+                        "score_policy": fallback_policy,
                         "dimensions": {},
                         "num_trials": 0,
                         "num_reward_rows": 0,
@@ -7340,7 +7354,7 @@ def collect_harbor_results(
                     "custom_scores": {},
                     "overall_score": None,
                     "metrics": [],
-                    "score_policy": DEFAULT_SCORE_POLICY,
+                    "score_policy": fallback_policy,
                     "dimensions": {},
                     "num_trials": 0,
                     "num_reward_rows": 0,

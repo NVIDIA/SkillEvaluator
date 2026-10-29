@@ -213,6 +213,18 @@ All notable changes to SkillEvaluator are documented in this file.
   output is redirected or the search runs inside `sh -c`. Host and bundled
   scoring agree, while scoped searches and slash-valued patterns retain their
   classification.
+
+- Tier 3 `custom_only` runs no longer label a condition without a scoreable
+  reward, for example one whose attempts all failed, with the standard metric
+  set and `skill-evaluator-dimension-mean-v1` policy. That condition's
+  `summary.json`, the agent's recorded metrics and score policies,
+  `attempt_policy.json`, and the report's score definition now carry the
+  `custom-only` metric set and `custom-overall-v1` policy; a Harbor job that
+  never started records the same score policy. A failed custom-only agent is
+  therefore no longer treated as a standard agent. Scores were already cleared
+  for these conditions, and observed rewards still determine their own metric
+  set.
+
 - PII email scans recognize all RFC 2606 reserved domains, including their
   subdomains, mixed-case forms, trailing dots, and prose ellipses. A local-part
   boundary prevents quadratic rescanning of long excluded addresses. Ordinary

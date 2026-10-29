@@ -2956,6 +2956,51 @@ def test_summarize_tier2_lists_duplicate_details() -> None:
     assert any("2 more" in line for line in rendered)
 
 
+def test_summarize_tier2_does_not_blame_an_advisory_llm_refusal() -> None:
+    # A refusal is advisory: when another cluster's analysis failed, the
+    # summary must name that failure, not list the refusal as a duplicate.
+    from skillevaluator.models.result import Finding, Severity, ValidationResult
+    from skillevaluator.reporting.console_ui import summarize_tier2
+
+    def refusal(severity: Severity) -> Finding:
+        return Finding(
+            category="CONTENT_DEDUP",
+            severity=severity,
+            check_name="llm_refused",
+            message="The LLM declined to classify overlapping content within SKILL.md",
+            file_path="SKILL.md",
+        )
+
+    incomplete = ValidationResult(validator_name="Context Deduplication")
+    incomplete.add_finding(refusal(Severity.MEDIUM))
+    incomplete.mark_scan_incomplete("deduplication-llm")
+    incomplete.add_error("LLM analysis did not complete for 1 of 2 content clusters")
+
+    ran, ok, rows, _skip = summarize_tier2([incomplete])
+    assert ran and not ok
+    rendered = ["".join(chunk for chunk, _style in row.segments) for row in rows]
+    assert any("scan failed" in line for line in rendered)
+    assert not any("duplicates found" in line for line in rendered)
+    assert [row.label for row in rows if row.glyph == "✗"] == ["error"]
+    assert any("1 of 2 content clusters" in line for line in rendered)
+    assert not any("declined" in line for line in rendered)
+
+    # A policy that raises the refusal to a blocking severity reports it as a scan failure.
+    blocking = ValidationResult(validator_name="Context Deduplication")
+    blocking.add_finding(refusal(Severity.HIGH))
+
+    _ran, ok, rows, _skip = summarize_tier2([blocking])
+    rendered = ["".join(chunk for chunk, _style in row.segments) for row in rows]
+    assert not ok
+    assert any("scan failed" in line for line in rendered)
+    assert [row.label for row in rows if row.glyph == "✗"] == ["error"]
+
+    advisory = ValidationResult(validator_name="Context Deduplication")
+    advisory.add_finding(refusal(Severity.MEDIUM))
+    _ran, ok, _rows, _skip = summarize_tier2([advisory])
+    assert ok
+
+
 def test_rerun_hint_preserves_run_shaping_flags(monkeypatch) -> None:
     # The FAIL panel's rerun line must echo the user's actual invocation:
     # dropping --min-score (etc.) means following the hint can silently

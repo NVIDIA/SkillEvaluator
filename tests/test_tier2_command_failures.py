@@ -296,3 +296,81 @@ def test_chat_http_diagnostics_after_successful_embedding(tmp_path: Path, monkey
             assert "SKILL_EVAL_LLM_MODEL" in errors[0]
         elif chat_status == 429:
             assert "quota" in errors[0]
+
+
+def test_chat_refusal_is_advisory_in_real_cli_and_reports(tmp_path: Path, monkeypatch) -> None:
+    """A content-filtered chat reply is an advisory finding, not a blocking incomplete scan."""
+    requests = []
+
+    class RefusingChatHandler(BaseHTTPRequestHandler):
+        def do_POST(self):
+            body = json.loads(self.rfile.read(int(self.headers["Content-Length"])))
+            requests.append((self.path, body))
+            if self.path == "/v1/embeddings":
+                payload = {
+                    "data": [
+                        {"index": index, "embedding": [float(dimension == index // 2) for dimension in range(4)]}
+                        for index in range(len(body["input"]))
+                    ]
+                }
+            else:
+                payload = {
+                    "id": "local-completion",
+                    "object": "chat.completion",
+                    "created": 0,
+                    "model": body["model"],
+                    "choices": [
+                        {
+                            "index": 0,
+                            "finish_reason": "content_filter",
+                            "message": {"role": "assistant", "content": "provider-private-token"},
+                        }
+                    ],
+                }
+            response = json.dumps(payload).encode()
+            self.send_response(200)
+            self.send_header("Content-Type", "application/json")
+            self.send_header("Content-Length", str(len(response)))
+            self.end_headers()
+            self.wfile.write(response)
+
+        def log_message(self, _format, *_args):
+            pass
+
+    server = ThreadingHTTPServer(("127.0.0.1", 0), RefusingChatHandler)
+    thread = threading.Thread(target=server.serve_forever, daemon=True)
+    thread.start()
+    skill = tmp_path / "skill"
+    skill.mkdir()
+    (skill / "SKILL.md").write_text("\n".join(f"## Section {letter}\n{letter.lower() * 200}" for letter in "ABCD"))
+    reports = tmp_path / "reports"
+    for purpose in ("LLM", "EMBEDDING"):
+        monkeypatch.setenv(f"SKILL_EVAL_{purpose}_PROVIDER", "openai-compatible")
+        monkeypatch.setenv(f"SKILL_EVAL_{purpose}_BASE_URL", f"http://127.0.0.1:{server.server_port}/v1")
+        monkeypatch.setenv(f"SKILL_EVAL_{purpose}_API_KEY", "local-test-key")
+        monkeypatch.setenv(f"SKILL_EVAL_{purpose}_MODEL", f"local-{purpose.lower()}-model")
+    try:
+        invocation = CliRunner().invoke(cli, ["tier2", str(skill), "-o", str(reports)])
+    finally:
+        server.shutdown()
+        server.server_close()
+        thread.join(timeout=5)
+
+    assert invocation.exit_code == 0, invocation.output
+    # A refusal is not transient, so the same request is not retried.
+    assert len([path for path, _body in requests if path == "/v1/chat/completions"]) == 2
+    payload = json.loads((reports / "skillevaluator-tier2.json").read_text())
+    result = payload["results"][0]
+    assert payload["overall_status"] == "passed"
+    assert result["status"] == "passed"
+    assert [(finding["check_name"], finding["severity"]) for finding in result["findings"]] == [
+        ("llm_refused", "medium"),
+        ("llm_refused", "medium"),
+    ]
+    analysis = result["llm_analysis"]
+    assert (analysis["clusters_completed"], analysis["clusters_refused"], analysis["clusters_failed"]) == (0, 2, 0)
+    assert all(finding["metadata"]["llm_model"] == "local-llm-model" for finding in result["findings"])
+    html = (reports / "skillevaluator-tier2.html").read_text()
+    for output in (invocation.output, json.dumps(payload), html):
+        assert "provider-private-token" not in output
+        assert "local-test-key" not in output

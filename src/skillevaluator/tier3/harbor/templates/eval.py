@@ -23,6 +23,7 @@ RAGAS is used for goal_accuracy and accuracy when available.
 from __future__ import annotations
 
 import contextlib
+import importlib.util
 import io
 import ipaddress
 import json
@@ -94,12 +95,18 @@ except ImportError:  # pragma: no cover -- source-tree import only
     from skillevaluator.evidence import evidence_ref_identity
 
 
-try:
-    import checks as _shared_checks
-except ModuleNotFoundError as exc:
-    # Do not turn an import failure INSIDE a staged checks.py into a package fallback.
-    if exc.name != "checks":
-        raise
+_CHECKS_PATH = _SCRIPT_TESTS_DIR / "checks.py"
+if _CHECKS_PATH.is_file():
+    # A host process may already have an unrelated module named "checks".
+    # Reuse only this bundle's module; otherwise load its exact file without
+    # replacing another caller's module cache. Import errors must propagate.
+    _shared_checks = sys.modules.get("checks")
+    if getattr(_shared_checks, "__file__", None) != str(_CHECKS_PATH):
+        _checks_spec = importlib.util.spec_from_file_location("checks", _CHECKS_PATH)
+        assert _checks_spec and _checks_spec.loader
+        _shared_checks = importlib.util.module_from_spec(_checks_spec)
+        _checks_spec.loader.exec_module(_shared_checks)
+else:  # Source-tree template: the canonical module lives in the package.
     from skillevaluator.tier3.eval_core import checks as _shared_checks
 
 AMBIGUOUS_OUTER_EXEC_OBSERVATION = _shared_checks.AMBIGUOUS_OUTER_EXEC_OBSERVATION

@@ -1196,6 +1196,8 @@ def _load_baseline(ref: str):
 
         previous_path = sys.path.copy()
         previous_modules = {name: sys.modules.pop(name) for name in import_names if name in sys.modules}
+        missing = object()
+        previous_attributes = []
         try:
             sys.path.insert(0, str(directory))
             for name in (*aliases, "checks", "baseline_template"):
@@ -1207,6 +1209,11 @@ def _load_baseline(ref: str):
                 sys.modules[name] = module
                 if name in aliases:
                     sys.modules[aliases[name]] = module
+                    parent_name, child_name = aliases[name].rsplit(".", 1)
+                    parent = sys.modules.get(parent_name)
+                    if parent is not None:
+                        previous_attributes.append((parent, child_name, getattr(parent, child_name, missing)))
+                        setattr(parent, child_name, module)
                 spec.loader.exec_module(module)
                 if name in {"checks", "baseline_template"}:
                     modules.append(module)
@@ -1217,6 +1224,11 @@ def _load_baseline(ref: str):
             for name in import_names:
                 sys.modules.pop(name, None)
             sys.modules.update(previous_modules)
+            for parent, child_name, previous in reversed(previous_attributes):
+                if previous is missing:
+                    delattr(parent, child_name)
+                else:
+                    setattr(parent, child_name, previous)
     return modules
 
 

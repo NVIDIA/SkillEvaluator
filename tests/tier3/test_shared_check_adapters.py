@@ -5,11 +5,16 @@
 from __future__ import annotations
 
 import importlib.util
+import json
+import subprocess
+import sys
+import types
 from pathlib import Path
 
 import pytest
 
 from skillevaluator.tier3.eval_core import checks
+from skillevaluator.tier3.harbor.adapter import _copy_verifier
 
 
 @pytest.fixture(scope="module")
@@ -81,3 +86,31 @@ def test_standalone_security_adapts_trajectory_text(verifier):
         expected_skill="",
     )
     assert standalone == host
+
+
+def test_source_template_ignores_an_unrelated_checks_module(monkeypatch):
+    unrelated = types.ModuleType("checks")
+    monkeypatch.setitem(sys.modules, "checks", unrelated)
+    path = Path(__file__).parents[2] / "src/skillevaluator/tier3/harbor/templates/eval.py"
+    spec = importlib.util.spec_from_file_location("source_template_collision", path)
+    module = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(module)
+    assert module._shared_checks is checks
+    assert sys.modules["checks"] is unrelated
+
+
+def test_staged_template_ignores_an_unrelated_checks_module(tmp_path):
+    _copy_verifier(tmp_path)
+    staged = tmp_path / "tests/skill_evaluator/eval.py"
+    program = (
+        "import json,runpy,sys,types; "
+        "unrelated=types.ModuleType('checks'); sys.modules['checks']=unrelated; "
+        "verifier=runpy.run_path(sys.argv[1]); "
+        "assert sys.modules['checks'] is unrelated; "
+        "print(json.dumps([verifier['_shared_checks'].__file__, "
+        "verifier['_cmd_executes_script']('python calc.py','calc.py')]))"
+    )
+    result = subprocess.run(
+        [sys.executable, "-I", "-c", program, str(staged)], cwd=tmp_path, capture_output=True, text=True, check=True
+    )
+    assert json.loads(result.stdout) == [str(staged.with_name("checks.py")), True]

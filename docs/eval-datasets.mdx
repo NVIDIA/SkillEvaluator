@@ -253,6 +253,7 @@ grading:
 | `harbor.stop_on_pass` | boolean | Stop a case's remaining attempts after the first pass. Requires `n_attempts` > 1. |
 | `harbor.n_concurrent` | integer ≥ 1 | Concurrent trials. |
 | `harbor.max_agents` | integer ≥ 1 | Cap on agents evaluated in one run. |
+| `harbor.max_cases` | integer ≥ 1 | Run only the first N cases in staged order (eval dataset order, or task-directory name order for native Harbor tasks). Unset runs every case. A run that skips cases is not publication evidence. The `--max-cases` CLI flag overrides this value. |
 | `harbor.timeout_multiplier` | finite number > 0 | Scales task timeouts. Values that would overflow Harbor's mandatory lifecycle timeouts are rejected before execution. |
 | `harbor.agent_runtime_preflight` | boolean | Opt-in extra agent-only execution of the first staged task before the measured evaluation. Default: `false`; the CLI flag overrides this value. |
 | `harbor.agent_workdir` | string | Working directory for the agent inside the container. |

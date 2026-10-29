@@ -52,6 +52,8 @@ class EvaluationOptions:
     # the tree that runs the evaluator is not the tree being evaluated.
     evaluated_source: dict[str, str] | None = None
     environment_kwargs: dict[str, str] = field(default_factory=dict)
+    # Appended so legacy positional construction keeps its field order.
+    max_cases: int | None = None
 
     def engine_kwargs(self) -> dict[str, Any]:
         """Return keyword arguments (excluding ``skill_path``) for the engine."""

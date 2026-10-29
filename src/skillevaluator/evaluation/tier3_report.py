@@ -869,6 +869,9 @@ def build_agent_eval_payload(
     }
     if publication_target_conflict in _PUBLICATION_TARGET_CONFLICT_MARKERS:
         summary["publication_target_conflict"] = publication_target_conflict
+    case_selection = _case_selection(run_config)
+    if case_selection is not None:
+        summary["case_selection"] = case_selection
     if harbor_summary:
         summary["harbor_viewer"] = {
             key: harbor_summary[key] for key in ("job_url", "analysis_url") if harbor_summary.get(key)
@@ -972,6 +975,8 @@ def build_agent_eval_payload(
     }
     if publication_target_conflict in _PUBLICATION_TARGET_CONFLICT_MARKERS:
         payload["publication_target_conflict"] = publication_target_conflict
+    if case_selection is not None:
+        payload["case_selection"] = dict(case_selection)
     if harbor_summary:
         payload["harbor_viewer"] = harbor_summary
 
@@ -3647,6 +3652,16 @@ def _agent_model(name: str, info: dict[str, Any], run_config: dict[str, Any] | N
             return str(meta["model"])
     model = info.get("model")
     return str(model) if model else None
+
+
+def _case_selection(run_config: dict[str, Any] | None) -> dict[str, Any] | None:
+    """Return the recorded ``max_cases`` counts so reports can flag a partial run."""
+    if not isinstance(run_config, dict) or "case_selection" not in run_config:
+        return None
+    selection = run_config["case_selection"]
+    if not isinstance(selection, dict):
+        selection = {}
+    return {key: selection.get(key) for key in ("policy", "limit", "total", "selected", "skipped")}
 
 
 def _read_attempt_policy(run_dir: Path) -> dict[str, Any]:

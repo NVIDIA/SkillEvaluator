@@ -520,7 +520,12 @@ dataset iteration, `--skip-baseline` removes the without-skill arm and usually
 cuts the live trial count roughly in half, but that run cannot produce Skill
 Lift. Re-enable the baseline for any result you intend to compare or publish.
 For multi-attempt runs, `--stop-on-pass` can avoid remaining attempts after a
-pass; it is rejected with `--n-attempts 1`. By contrast,
+pass; it is rejected with `--n-attempts 1`. To try a large dataset before
+paying for every case, `--max-cases N` (or `harbor.max_cases`) runs only the
+first N cases in staged order: eval dataset order, or task-directory name
+order for native Harbor tasks. The run records the selection in
+`run_config.json`, its dataset snapshot covers only the cases that ran, and
+reports mark it publication-incomplete when cases were skipped. By contrast,
 `--n-concurrent` and `--max-agents` control parallelism and elapsed time; they
 do not reduce the total planned trials or model work.
 
@@ -552,6 +557,7 @@ The high-signal flags, with defaults:
 | `--pass-threshold` | `0.5` | Score an attempt needs to count as passed |
 | `--n-concurrent` | `4` | Concurrent eval cases per agent |
 | `--max-agents` | selected-agent count | Maximum agents run in parallel |
+| `--max-cases` | every case | Run only the first N eval cases; a run that skips cases is not publication evidence |
 | `--skip-baseline` | off | Skip the without-skill arm; faster, but no Skill Lift |
 | `--stop-on-pass` | off | Stop a case's remaining attempts once one passes |
 | `--agent-runtime-preflight` | off | Add one agent-only execution of the first staged task per agent before the full A/B matrix; `--no-agent-runtime-preflight` overrides a config value that enables it |

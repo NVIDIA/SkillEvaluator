@@ -1090,8 +1090,12 @@ class _MemberCollector:
         if openai.get("apps") is not None:
             self._add_apps(self._json_sources("app", "apps", openai.get("apps"), None, profile=CODEX_PROFILE))
 
-    def _read_member(self, component: PluginMember, rel: PurePosixPath) -> None:
-        text = self._read_lenient(rel)
+    def _read_member(
+        self, component: PluginMember, rel: PurePosixPath, *, lenient: bool = False, strip: bool = False
+    ) -> None:
+        text = self._read_lenient(rel) if lenient else self._read(rel)
+        if text is not None and strip:
+            text = text.strip()
         component.text = text
         if text is None:
             component.problem = "unreadable"
@@ -1127,11 +1131,13 @@ class _MemberCollector:
     def _rule_file(
         self, rel: PurePosixPath, origin: Origin, *, name: str | None = None, support: Support = "evaluated"
     ) -> None:
-        self._read_member(self._add(PluginMember("rule", name or rel.name, origin, rel.as_posix(), support)), rel)
+        self._read_member(
+            self._add(PluginMember("rule", name or rel.name, origin, rel.as_posix(), support)), rel, strip=True
+        )
 
     def _markdown_file(self, component_type: str, rel: PurePosixPath, origin: Origin) -> None:
         component = PluginMember(component_type, rel.stem, origin, rel.as_posix(), _TYPE_SUPPORT[component_type])
-        self._read_member(component, rel)
+        self._read_member(component, rel, lenient=True)
         if isinstance(component.frontmatter.get("name"), str) and component.frontmatter["name"]:
             component.name = component.frontmatter["name"]
         self._add(component)

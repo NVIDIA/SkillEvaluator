@@ -392,3 +392,37 @@ def test_environment_name_scan_depth_limit_is_visible(tmp_path):
     paths, complete = find_environment_files(tmp_path)
     assert paths == []
     assert complete is False
+
+
+@pytest.mark.parametrize(
+    ("kind", "strict"),
+    [("skill", True), ("rule", True), ("mapped_command", True), ("agent", False), ("command", False)],
+)
+def test_member_encoding_preserves_each_original_read_contract(tmp_path, kind, strict):
+    paths = {
+        "skill": "skills/demo/SKILL.md",
+        "rule": "rules/demo.md",
+        "mapped_command": "source.md",
+        "agent": "agents/demo.md",
+        "command": "commands/demo.md",
+    }
+    manifest = {"name": "demo"}
+    if kind == "mapped_command":
+        manifest["commands"] = {"demo": {"source": "./source.md"}}
+    write_tree(tmp_path, {".claude-plugin/plugin.json": manifest, paths[kind]: SKILL.encode() + b"\xff"})
+    result = found(tmp_path)
+    member = next(m for m in result.components if m.type == ("command" if kind == "mapped_command" else kind))
+    assert (member.problem == "unreadable") is strict
+    assert result.complete is not strict
+    if not strict:
+        assert "\ufffd" in member.text
+        assert member.frontmatter["name"] == "demo"
+
+
+def test_rule_frontmatter_uses_the_stripped_staging_text(tmp_path):
+    write_tree(
+        tmp_path,
+        {".claude-plugin/plugin.json": {"name": "demo"}, "rules/demo.md": "\n\n---\nalwaysApply: true\n---\nRule.\n"},
+    )
+    rule = next(m for m in found(tmp_path).components if m.type == "rule")
+    assert rule.frontmatter == {"alwaysApply": True}

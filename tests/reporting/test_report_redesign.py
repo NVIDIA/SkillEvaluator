@@ -59,11 +59,24 @@ class _Outline(HTMLParser):
         super().__init__()
         self.headings: list[int] = []
         self.ids: list[str] = []
+        self.scripts: list[str] = []
+        self._in_script = False
 
     def handle_starttag(self, tag, attrs):
         if re.fullmatch(r"h[1-6]", tag):
             self.headings.append(int(tag[1]))
         self.ids.extend(value for key, value in attrs if key == "id" and value)
+        if tag == "script":
+            self._in_script = True
+            self.scripts.append("")
+
+    def handle_endtag(self, tag):
+        if tag == "script":
+            self._in_script = False
+
+    def handle_data(self, data):
+        if self._in_script:
+            self.scripts[-1] += data
 
 
 def _outline(html: str) -> _Outline:
@@ -369,11 +382,7 @@ def test_tier3_charts_are_redrawn_with_print_colors() -> None:
         use_llm_judge=False,
     )
     html = HTMLReporter(include_timestamp=False).render_all([result])
-    script = next(
-        script
-        for script in re.findall(r"<script>(.*?)</script>", html, flags=re.DOTALL)
-        if "rebuildTier3Charts" in script
-    )
+    script = next(script for script in _outline(html).scripts if "rebuildTier3Charts" in script)
 
     # A canvas keeps the colors it was drawn with, so printing redraws every
     # chart with the light (print) colors and restores the theme afterwards.

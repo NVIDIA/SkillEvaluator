@@ -4,6 +4,39 @@ All notable changes to SkillEvaluator are documented in this file.
 
 ## Unreleased
 
+### Added
+
+- `--quality-config PATH` on `validate`, `quality-check`, and `tier1` loads the
+  deterministic quality check's expected Markdown headings from a YAML file
+  instead of the built-in list. Each `expected_headers` entry sets a `heading`
+  and optional `alternatives`, `points` (default 5), `message`, and
+  `suggestion`; omitted message and suggestion text is generated from the
+  headings. Without the flag, the packaged `quality-default.yaml` reproduces
+  the previous Prerequisites, Limitations, and Troubleshooting checks and
+  wording, so default scores are unchanged. An invalid file (bad YAML or
+  unparseable values, unknown keys, duplicate keys or headings, non-heading
+  values) is rejected before validation starts with exit code 2 and a message
+  naming the file and field, even when `--checks` leaves out `quality`. The JSON report, Markdown report,
+  and BENCHMARK.md record which config produced the quality score as
+  `quality_config` (`packaged` or `custom`, the custom file's name, a
+  `sha256:` digest of the normalized rules, and the `--min-score` pass
+  threshold, which is kept out of the digest).
+
+### Changed
+
+- README and onboarding docs now offer two first-run paths: a lightweight,
+  keyless quality check on a bundled skill, or an NVIDIA Build rubric evaluation
+  with eligible free prototyping access. Installation adds extras as needed,
+  and the guides separate quality results from full scanner and live-agent
+  evidence.
+
+### Documentation
+
+- Give the performance dashboard its own sidebar guide, retain the previous
+  Reports & Results link, and explain matching-judge and activation limits on
+  comparisons. Clarify the independent per-skill quality threshold, Windows
+  Docker setup, and custom-backend and MCP environment controls.
+
 ### Fixed
 
 - With `--stop-on-pass`, a retained Harbor agent timeout followed by a matching
@@ -14,6 +47,89 @@ All notable changes to SkillEvaluator are documented in this file.
   `historical_job_failures` instead of as active failures. Other execution failures and
   incomplete comparisons still fail validation.
 
+- Explicit searches of `/` (`find`, `grep -r`, `rg`, `ag`, `du` and `tree` with a
+  `/` operand, and native search tools rooted at `/`) now count as wasted tool
+  calls whether or not they name the expected skill or script, including when
+  output is redirected or the search runs inside `sh -c`. Host and bundled
+  scoring agree, while scoped searches and slash-valued patterns retain their
+  classification.
+- PII email scans recognize all RFC 2606 reserved domains, including their
+  subdomains, mixed-case forms, trailing dots, and prose ellipses. A local-part
+  boundary prevents quadratic rescanning of long excluded addresses. Ordinary
+  addresses on the same line and domains that merely resemble placeholders remain detectable
+  ([#244](https://github.com/NVIDIA/SkillEvaluator/issues/244)).
+
+- Tier 3 security grading preserves ordinary nested `/tmp` cleanup, including
+  child operands with trailing slashes, unless the current or an earlier
+  execution action contains recognized symlink-creation syntax (`ln -s`,
+  `cp -s`, `os.symlink`, `Path.symlink_to`, literal Python subprocess argv
+  launching `ln`/`cp`, or `fs.symlink`/`fs.symlinkSync`). With that evidence,
+  both graders withhold nested-cleanup exemptions and report critical
+  destructive-command findings with a security score of 0.0; unlinking a
+  final leaf remains exempt. This conservative signal applies across the
+  trace, including after link moves or replacements, without inspecting the
+  filesystem or proving a link's destination or creation success. Unobserved
+  or pre-existing symlinks are not detected by this policy. Lexical path escapes
+  and unresolved or `xargs`-supplied deletion targets remain flagged. Searches,
+  script arguments, and unexecuted heredoc data do not supply link evidence;
+  Python and Node call syntax is inspected only in executable inline source
+  or a recognized program supplied directly through standard input. Comments
+  containing apostrophes do not hide actual link calls. Later and multiple
+  heredocs, `cat` pipelines into interpreters, and common shell startup options
+  retain link detection. Plain `;`, `&&`, `||`, and newline sequences apply
+  evidence in command order, so later link creation does not regrade earlier
+  cleanup in the same call. Loops, functions, traps, background jobs and other
+  compound syntax keep conservative whole-action evidence; unrelated link
+  creation can still affect later nested cleanup and remains a policy tradeoff.
+- Tier 3 security grading no longer grants temporary-cleanup exemptions to
+  destructive `rm` commands launched through `xargs`, whose additional targets
+  may come from standard input or an argument file. Both graders recognize
+  common options and wrappers while preserving separate cleanup commands.
+  Input contents are not evaluated, so this conservative policy also flags
+  legitimate scoped cleanup such as
+  `find /tmp/cache -name '*.pyc' | xargs rm -f` as a critical destructive-command
+  finding with a security score of 0.0.
+- Tier 3 security grading now normalizes deletion targets before exempting
+  temporary-directory cleanup. Paths such as `/tmp/../workspace` and commands
+  mixing temporary and non-temporary targets receive destructive-command
+  findings in both the host checker and bundled Harbor verifier. Destructive
+  `rm` fragments with no parsed target are also flagged, preserving detection
+  of deletions assembled from strings. Temporary cleanup inside backtick
+  command substitutions, or followed by shell comments and file-descriptor
+  redirections, no longer produces false destructive-command findings. Targets
+  after heredoc and here-string redirections are still checked; the input word
+  of a redirection is not treated as a deletion target.
+  Case-arm/subshell terminators and unrelated comments, ANSI-C literals, or
+  heredoc data no longer remove the cleanup exemption. Command substitutions
+  used as redirection words do not hide later deletion targets. Unquoted
+  `/tmp` deletion targets containing variables, command substitutions, or
+  brace expansions (for example standalone `rm -rf /tmp/build-$$`) no longer
+  get the cleanup exemption because their destinations remain unresolved.
+  Operandless `xargs rm` invocations remain detectable when unrelated syntax
+  or parser budgets prevent a complete parse; the fallback uses a bounded
+  command span to avoid excessive backtracking on long actions.
+- Tier 3 error recovery now scores unrecovered command failures as zero and
+  includes them in fault counts and failure verdicts/report reasons. Host and
+  bundled verifier detection agree and use a result's execution status when it
+  has one: a Codex exit code, a whole `exit code N` line, or Harbor marking a
+  Claude Code result as successful. Only results without a status, such as
+  OpenCode's, are judged by their text: tracebacks, `error:` lines, pytest,
+  jest, go test, tsc and npm failures and OpenCode's timeout note count, while
+  `0 errors`, exception handlers, numeric timeout settings and type annotations
+  do not. Exit-1 probes with no other output (`grep`, `rg`, `test`, `diff`,
+  `cmp`, `command -v`, `which`, `git diff --quiet`, including `grep -c` zero
+  counts, `/dev/null` redirects, a leading `cd` or `pwd` and pipelines) remain
+  clean. Recovery matches whole command words after a leading `cd`; beyond the
+  original five-call retry window, only a successful repeat of the same command
+  and arguments counts.
+- Catalog validation now includes nested and lowercase skill manifests, skips
+  generated directories, and stops at skill boundaries to avoid validating
+  bundled templates as separate skills. External linked directories containing
+  skills and unreadable directories appear as failures without stopping other
+  skills; links back into the catalog are ignored. Linked manifests retain
+  direct-target behavior, plugin discovery errors produce findings, and reports
+  and external Tier 3 results preserve catalog-relative paths for skills with
+  the same basename.
 - Changing finding severities through a policy no longer clears an independent
   quality-score threshold failure. A score below `--min-score` still fails,
   and its reason appears in the terminal, HTML, benchmark, and JSON reports.
@@ -21,6 +137,12 @@ All notable changes to SkillEvaluator are documented in this file.
   Harbor, so Docker Desktop finds its `compose` plugin, and passes
   `PYTHONUTF8` and `PYTHONIOENCODING` so Python UTF-8 mode reaches Harbor on
   non-UTF-8 locales.
+- A `SKILL.md` `metadata` value that is not a mapping, such as `true`, `1.5`, a
+  date, or a list or string containing `author` or `tags`, no longer crashes
+  the quality check with a `TypeError`, which aborted `validate`, `tier1`, and
+  `quality-check` before any report was written. The schema check reports the
+  malformed `metadata`, and the quality score counts `metadata.author` and
+  `metadata.tags` as missing, as it already did for other non-mapping values.
 
 ## 0.6.0 - 2026-10-20
 
@@ -258,6 +380,19 @@ All notable changes to SkillEvaluator are documented in this file.
   budget and judge time-budget variables, and the Harbor process environment.
   The CLI reference adds `validate --workers`, the full `--env-mode` list, and
   the exit codes the CLI actually returns (`0`, `1`, `2`).
+- External scanners no longer crash the scan when they print bytes that the
+  selected text codec cannot decode (for example a Windows traceback with a
+  CJK path). Those bytes are replaced, so the captured output is never `None`,
+  and valid output keeps the selected codec and universal-newline handling.
+- The Tier 1 LLM rubric gives reasoning models (DeepSeek R and V4, OpenAI o1,
+  o3, o4 and GPT-5 families, and models named "reasoning") a 32,768-token
+  budget instead of the default 16,384, giving hidden reasoning more room
+  before the rubric JSON is emitted. The budget follows the model each request
+  resolves to, is capped at 16,384 on the Anthropic provider, and an explicit `max_tokens`
+  overrides this default, subject to provider and model limits.
+- `doctor --env-mode docker` and Tier 3 runs on Windows now find the Harbor
+  CLI installed next to the active interpreter as `harbor.exe` or
+  `harbor.cmd`, instead of reporting "harbor CLI not found".
 - `BENCHMARK.md` publication verdicts now require completed Tier 1 and Tier 2
   execution evidence by default (Tier 1 must cover every default check that
   applies to the content type, so a run narrowed with `--checks` cannot

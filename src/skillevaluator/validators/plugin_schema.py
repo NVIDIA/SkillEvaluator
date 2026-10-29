@@ -276,7 +276,20 @@ class PluginSchemaValidator(ValidatorBase):
         from skillevaluator.validators.schema import SchemaValidator
 
         skills_root = root / "skills"
-        skill_dirs = find_bundled_plugin_skills(root)
+        try:
+            skill_dirs = find_bundled_plugin_skills(root)
+        except ValueError as exc:
+            result.add_finding(
+                Finding(
+                    category="PLUGIN_SCHEMA",
+                    severity=Severity.HIGH,
+                    check_name="in_plugin_skill_discovery_error",
+                    message=f"Could not discover bundled skills: {exc}",
+                    file_path=str(skills_root),
+                    suggestion="Inspect the bundled skills directory and ensure its entries are readable and supported.",
+                )
+            )
+            return
         if not skill_dirs:
             return
         names = [skill_dir.relative_to(skills_root).as_posix() for skill_dir in skill_dirs]

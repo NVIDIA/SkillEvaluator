@@ -37,6 +37,7 @@ from skillevaluator.logging_config import get_logger
 from skillevaluator.models.quality import QualityScoreResult
 from skillevaluator.models.result import Finding, Severity, ValidationResult
 from skillevaluator.models.skill import XML_TAG_RE
+from skillevaluator.quality_config import load_quality_config, quality_config_provenance
 from skillevaluator.validators.base import ValidatorBase
 from skillevaluator.validators.frontmatter_parser import FRONTMATTER_PATTERN
 from skillevaluator.validators.markdown import markdown_link_targets
@@ -129,8 +130,10 @@ class QualityScoreValidator(ValidatorBase):
     existing SkillEvaluator SchemaValidator checks.
     """
 
-    def __init__(self, min_score: int = 70) -> None:
+    def __init__(self, min_score: int = 70, quality_config: Path | None = None) -> None:
         self.min_score = min_score
+        self.quality_config = load_quality_config(quality_config)
+        self.quality_config_provenance = quality_config_provenance(quality_config, self.quality_config)
 
     @property
     def name(self) -> str:
@@ -212,8 +215,12 @@ class QualityScoreValidator(ValidatorBase):
     def validate(self, skill_path: Path) -> ValidationResult:
         """Validate a skill directory and produce quality scores."""
         if self._is_skill_directory(skill_path):
-            return self._validate_single_skill(skill_path)
-        return self._validate_folder(skill_path)
+            result = self._validate_single_skill(skill_path)
+        else:
+            result = self._validate_folder(skill_path)
+        # min_score sits beside the digest rather than in it: the digest names the rules, min_score the pass bar.
+        result.metadata["quality_config"] = {**self.quality_config_provenance, "min_score": self.min_score}
+        return result
 
     def _validate_folder(self, root: Path) -> ValidationResult:
         """Validate all skills in a folder, aggregating quality results."""
@@ -668,28 +675,10 @@ class QualityScoreValidator(ValidatorBase):
         elif qs.skill_type == "lib-based":
             self._check_lib_reliability(dim, skill_path)
 
-        # Universal checks
-        if "## Prerequisites" not in content and "## Requirements" not in content:
-            dim.deduct(
-                5,
-                "info",
-                "No prerequisites/requirements documented",
-                "Document dependencies, API keys, or setup needed",
-            )
-        if "## Limitations" not in content:
-            dim.deduct(
-                5,
-                "info",
-                "No limitations documented",
-                "Add '## Limitations' section with known issues/constraints",
-            )
-        if not any(s in content for s in ["## Troubleshooting", "## Common Issues", "## FAQ"]):
-            dim.deduct(
-                5,
-                "info",
-                "No troubleshooting section documented",
-                "Add '## Troubleshooting' with Error/Cause/Solution patterns",
-            )
+        for expected in self.quality_config["expected_headers"]:
+            accepted_headings = [expected["heading"], *expected["alternatives"]]
+            if not any(heading in content for heading in accepted_headings):
+                dim.deduct(expected["points"], "info", expected["message"], expected["suggestion"])
 
     def _check_script_reliability(self, dim, skill_path: Path) -> None:
         no_error_handling = []
@@ -878,7 +867,11 @@ class QualityScoreValidator(ValidatorBase):
     def _check_spec_fields(self, qs: QualityScoreResult, frontmatter: dict | None) -> None:
         if not frontmatter:
             return
-        metadata = frontmatter.get("metadata") or {}
+        metadata = frontmatter.get("metadata")
+        if not isinstance(metadata, dict):
+            # A list, string, or scalar is invalid metadata per the schema; score it
+            # as absent metadata rather than indexing into it.
+            metadata = {}
 
         top_level_fields = {
             "version": 'Semantic version (e.g., "1.0.0")',

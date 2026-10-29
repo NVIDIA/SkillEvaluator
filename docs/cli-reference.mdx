@@ -4,8 +4,9 @@ description: "Run tiers directly, explore expert subcommands, and look up SkillE
 layout: reference
 ---
 
-{/* Maintenance note: this page is generated from the `skillevaluator --help` output.
-    Regenerate the help dump and re-verify every flag table against it each release. */}
+{/* Maintenance note: this page is maintained against the Click command tree and
+    `skillevaluator --help` output. Re-verify every flag table each release;
+    tests/golden/cli_surface.json also records compatibility aliases hidden in help. */}
 
 This page lists every `skillevaluator` command with its full flag set and exact defaults. If you want task-oriented guidance instead, start from the tier guides: [Tier 1: Validation](tier1-validation.mdx), [Tier 2: Deduplication](tier2-deduplication.mdx), and [Tier 3: Live Evaluation](tier3-live-evaluation.mdx).
 
@@ -100,7 +101,8 @@ autopilot. It is separate from these tier-only workflows.
 | --- | --- | --- |
 | `--checks TEXT` | All applicable static checks, including dependency auditing | Comma-separated subset of static checks |
 | `--llm / --no-llm` | Enabled when a provider is configured | Enable or skip rubric, LLM security, and finding verification; explicit `--llm` requires valid provider configuration |
-| `--min-score INTEGER` | `70` | Minimum passing quality and rubric score, from 0 to 100 |
+| `--min-score INTEGER` | `70` | Minimum passing quality and rubric score, from 0 to 100; quality severity overrides cannot waive the minimum |
+| `--quality-config PATH` | packaged `quality-default.yaml` | YAML file that replaces the quality check's expected-heading rules. See [Tier 1: Validation](tier1-validation.mdx#the-checks). |
 | `--profile TEXT` | `SKILLEVALUATOR_PROFILE`, then `external` | Validation policy profile |
 | `--previous-version TEXT` | `SKILLEVALUATOR_PREVIOUS_VERSION`, else unset | Previous version for version checks |
 
@@ -209,7 +211,8 @@ Static checks; LLM-free by default. Tier 1 gates the exit code and always runs.
 | `-c, --continue-on-failure` | off | Run the full pipeline without stopping early; record all issues in the reports. Overrides `--fail-fast`, and for folder validation keeps scanning every skill past a CRITICAL finding. |
 | `--llm, --tier1-llm / --no-llm, --no-tier1-llm` | `no-llm` | Enable LLM-backed security analysis (requires a configured public provider — see [Providers & Credentials](configuration.mdx)). |
 | `--llm-verify` | off | Run a second LLM pass to suppress false-positive findings. |
-| `--min-score INTEGER` | `70` | Minimum quality score (0–100) required to pass when the `quality` check runs. |
+| `--min-score INTEGER` | `70` | Minimum quality score (0–100) required per skill when the `quality` check runs; policy severity overrides cannot waive this gate. |
+| `--quality-config PATH` | packaged `quality-default.yaml` | YAML file that replaces the quality check's expected-heading rules. See [Tier 1: Validation](tier1-validation.mdx#the-checks). |
 
 ### Tier 2 · Deduplication
 
@@ -272,9 +275,13 @@ skillevaluator quality-check ./my-skill
 
 | Flag | Default | Effect |
 | --- | --- | --- |
-| `--min-score INTEGER` | `70` | Minimum score required to pass. |
+| `--min-score INTEGER` | `70` | Minimum composite score required per skill; passing also requires no HIGH or CRITICAL quality findings. |
+| `--quality-config PATH` | packaged `quality-default.yaml` | YAML file with expected section headers and rules for grading. |
 
-Plus the standard report options. Scoring weights and grade bands are documented in [Tier 1: Validation](tier1-validation.mdx).
+Plus the standard report options. A collection's displayed average does not
+replace the minimum required of each skill. Scoring weights, grade bands, the
+independent minimum-score gate, and the `--quality-config` file format are
+documented in [Tier 1: Validation](tier1-validation.mdx).
 
 ## rubric-eval
 
@@ -286,7 +293,7 @@ skillevaluator rubric-eval ./my-skill
 
 | Flag | Default | Effect |
 | --- | --- | --- |
-| `--min-score INTEGER` | `70` | Minimum score required to pass. |
+| `--min-score INTEGER` | `70` | Minimum weighted rubric score required to pass; every criterion must also score at least 7/10. |
 
 Plus the standard report options.
 
@@ -371,6 +378,12 @@ skillevaluator similarity-check ./skills
 | `--max-scalar-comparisons INTEGER` | `128000000` | Maximum comparisons multiplied by embedding dimensions; must be positive. Applies to pairwise scans and catalog queries. |
 
 Plus the standard report options. Classification tiers and catalog rules are in [Tier 2: Deduplication](tier2-deduplication.mdx).
+
+For older scripts, the hidden deprecated aliases `--cache` and `--save-cache`
+still map to `--catalog` and `--save-catalog`, respectively. Use the catalog
+spellings for new commands. A catalog query and a catalog build cannot be
+combined in one invocation, and each alias cannot be supplied alongside its
+replacement.
 
 ## tier3 evaluate
 
@@ -520,7 +533,7 @@ skillevaluator dashboard --no-browser --port 8502
 | `--no-browser` | off | Start the server without opening a browser. |
 
 The server listens on `127.0.0.1`; Ctrl+C stops it. See the
-[dashboard guide](reports.mdx#performance-dashboard) for measurements and
+[dashboard guide](performance-dashboard.mdx) for measurements and
 comparison eligibility.
 
 ## harbor-view

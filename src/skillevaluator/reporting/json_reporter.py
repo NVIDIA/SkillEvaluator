@@ -188,6 +188,17 @@ class JSONReporter(ReporterBase):
         if policy is not None:
             data["policy"] = policy
 
+        quality_config = next(
+            (
+                result.metadata.get("quality_config")
+                for result in results
+                if isinstance(result.metadata.get("quality_config"), dict)
+            ),
+            None,
+        )
+        if quality_config is not None:
+            data["quality_config"] = quality_config
+
         # BENCHMARK.md records which source tree was evaluated, so the report a
         # CI job actually parses has to record it too: a consumer cannot verify
         # a card it never reads. The key is always present, so ``null`` says the

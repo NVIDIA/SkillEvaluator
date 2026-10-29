@@ -49,6 +49,33 @@ def test_top_level_help_shows_branded_header() -> None:
     assert "\x1b[" not in result.output
 
 
+@pytest.mark.parametrize(("min_score", "expected_exit_code"), [(None, 0), (90, 1)])
+def test_quickstart_quality_check_matches_documented_result(
+    tmp_path: Path,
+    min_score: int | None,
+    expected_exit_code: int,
+) -> None:
+    """Keep the bundled first-run result and its threshold behavior reproducible."""
+    skill = Path(__file__).resolve().parents[1] / "src/skillevaluator/tier3/reference_skills/text-analyzer"
+    reports = tmp_path / "reports"
+    args = ["quality-check", str(skill), "-r", "cli", "-r", "json", "-o", str(reports)]
+    if min_score is not None:
+        args.extend(["--min-score", str(min_score)])
+
+    result = CliRunner().invoke(cli, args)
+
+    assert result.exit_code == expected_exit_code, result.output
+    payload = json.loads((reports / "skillevaluator-quality.json").read_text(encoding="utf-8"))
+    assert len(payload["results"]) == 1
+    quality_result = payload["results"][0]
+    assert quality_result["quality"]["overall_score"] == 84.5
+    assert quality_result["quality"]["grade"] == "B"
+    assert len(quality_result["findings"]) == 7
+    assert payload["overall_passed"] is (expected_exit_code == 0)
+    assert payload["publication_status"] == ("incomplete" if expected_exit_code == 0 else "fail")
+    assert "84.5/100" in result.output
+
+
 def test_top_level_help_groups_commands_by_workflow() -> None:
     result = CliRunner().invoke(cli, ["--help"])
 

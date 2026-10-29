@@ -45,8 +45,9 @@ scores for inspection but omits lift comparisons and skill-quality advice for
 that agent. A positive case with failed activation receives a `skill_execution`
 score of zero, even if unrelated commands succeeded. Activation counts exclude
 negative controls; missing or unsupported activation evidence remains unknown.
-When at least one positive trial activates the skill, the usual lift calculation
-applies. This also makes activation failures visible with `--skip-baseline`.
+When at least one positive trial activates the skill, lift remains eligible
+subject to the comparison requirements below. This also makes activation
+failures visible with `--skip-baseline`.
 
 ## Before you start
 
@@ -671,9 +672,11 @@ in [Judge evidence budgets](environment-variables.mdx#judge-evidence-budgets).
   then moves on to the next `LLM_JUDGE_FALLBACK_MODELS` entry, if any.
   Each judge's details in the trial's `skill_evaluator_reward.json` record
   `judge_model_used`, `judge_reasoning_effort`, and `judge_fallback_used`.
-  When the two conditions of a case were judged by different models, the case
-  is left out of that judge's skill lift and counted in `judge_mixed_cases`
-  in `lift.json`.
+  When a case uses different judge models across its two conditions,
+  repeated attempts, or scoring steps of a multi-step task, it is left out of
+  that judge metric's Skill Lift and counted in `judge_mixed_cases` in
+  `lift.json`. The arm scores keep all scored cases; the affected evaluator,
+  dimension, and overall lift use the remaining eligible comparisons.
 - **RAGAS goal scorer.** With the `openai` provider on the canonical
   `https://api.openai.com/v1` endpoint and a judge model that is not a GPT-5 or
   GPT-6 reasoning model, `goal_accuracy` first tries the RAGAS
@@ -774,8 +777,11 @@ agent passes only when every dimension passes. The top-level Tier 3 verdict is:
 | Neutral | No agent passes, but at least one has no dimension below 0.40 |
 | Fail | Every successful agent has a dimension below 0.40 |
 
-Skill Lift is `with-skill overall score - without-skill overall score`. It uses
-the same score units as the two arms; because it is a difference, it ranges
+Skill Lift is `with-skill overall score - without-skill overall score` for
+comparable cases. Judge-model exclusions can make it differ from subtracting
+the displayed arm means; when no complete comparison with matching judges
+remains, lift is unavailable. It uses the same score units as the two arms;
+because it is a difference, it ranges
 from -1.0 to +1.0. Its independent band is **PASS** at +0.05 or above,
 **NEUTRAL** between -0.10 and +0.05, and **FAIL** at -0.10 or below. Lift is
 diagnostic evidence and does not override the every-dimension gate.

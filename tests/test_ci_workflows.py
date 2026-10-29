@@ -182,6 +182,16 @@ def test_full_lane_keeps_the_existing_commands_and_runners() -> None:
     assert "twine==6.2.0" in _runs(jobs["package"])
 
 
+def test_html_parser_compatibility_keeps_old_python_versions_on_a_supported_runner() -> None:
+    job = _load("ci.yml")["jobs"]["html-parser-compatibility"]
+
+    # setup-python publishes these older patch builds for Ubuntu 24.04, not 26.04.
+    assert job["runs-on"] == "ubuntu-24.04"
+    assert job["strategy"]["matrix"]["python-version"] == ["3.12.11", "3.13.5"]
+    python_step = next(step for step in job["steps"] if _action_repository(step.get("uses", "")) == "actions/setup-python")
+    assert python_step["with"]["python-version"] == "${{ matrix.python-version }}"
+
+
 def test_security_keeps_gitleaks_always_on_and_skips_only_nonessential_jobs() -> None:
     security = _load("security.yml")
     jobs = security["jobs"]

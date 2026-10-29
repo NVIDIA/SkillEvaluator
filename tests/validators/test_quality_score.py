@@ -8,6 +8,8 @@ from pathlib import Path
 import pytest
 
 from skillevaluator.models.quality import QualityScoreResult, score_to_grade
+from skillevaluator.quality_config import load_quality_config, quality_config_digest
+from skillevaluator.tier1.commands import run_validation
 from skillevaluator.validators.quality_score import QualityScoreValidator
 
 
@@ -131,6 +133,23 @@ def _finding_messages(skill_dir: Path) -> list[str]:
     return [finding.message for finding in result.findings]
 
 
+def _write_metadata_skill(tmp_path: Path, metadata: str) -> Path:
+    """Write a skill whose frontmatter ``metadata`` is the given raw YAML value."""
+    skill_dir = tmp_path / "odd-metadata"
+    skill_dir.mkdir()
+    (skill_dir / "SKILL.md").write_text(
+        "---\n"
+        "name: odd-metadata\n"
+        "description: A focused skill. Use when testing malformed contributor metadata.\n"
+        f"metadata: {metadata}\n"
+        "---\n\n"
+        "# Odd Metadata\n\n"
+        "## Purpose\n\nThis skill verifies malformed metadata handling.\n\n"
+        "## Instructions\n\n1. Check quality findings.\n\n"
+    )
+    return skill_dir
+
+
 class TestScoreToGrade:
     def test_grade_a(self):
         assert score_to_grade(95.0) == "A"
@@ -249,6 +268,98 @@ class TestQualityScoreValidator:
         assert qs["overall_score"] < 90
         assert qs["skill_type"] == "guide-only"
 
+    def test_expected_headers_use_configured_deductions(self, tmp_path: Path):
+        skill_dir = _write_issue_skill(tmp_path)
+        config_path = tmp_path / "quality.yaml"
+        config_path.write_text(
+            'expected_headers:\n  - heading: "## Limitations"\n    points: 2.0\n'
+            "    message: No limitations documented\n    suggestion: Add limitations\n"
+            '  - heading: "### Security"\n    points: 7.5\n'
+            "    message: No security notes documented\n    suggestion: Add security notes\n",
+            encoding="utf-8",
+        )
+
+        result = QualityScoreValidator(min_score=0, quality_config=config_path).validate(skill_dir)
+
+        missing_header = next(
+            finding for finding in result.findings if finding.message == "No security notes documented"
+        )
+        assert missing_header.metadata["deduction"] == 7.5
+        assert missing_header.suggestion == "Add security notes"
+        assert all(finding.message != "No limitations documented" for finding in result.findings)
+
+    def test_expected_header_matches_heading_text_anywhere_in_content(self, tmp_path: Path):
+        skill_dir = _write_issue_skill(tmp_path, extra_body="\n### Security Notes\n\nReview permissions.\n")
+        config_path = tmp_path / "quality.yaml"
+        config_path.write_text(
+            'expected_headers:\n  - heading: "## Security"\n'
+            "    message: No security notes documented\n    suggestion: Add security notes\n",
+            encoding="utf-8",
+        )
+
+        result = QualityScoreValidator(min_score=0, quality_config=config_path).validate(skill_dir)
+
+        assert all(finding.message != "No security notes documented" for finding in result.findings)
+
+    # Matching is a case-sensitive substring test on the raw SKILL.md text, not a
+    # parsed-heading match. These cases pin that behavior in both directions.
+    @pytest.mark.parametrize(
+        ("extra_body", "satisfied"),
+        [
+            pytest.param("\n## Security\n\nReview permissions.\n", True, id="exact-heading"),
+            pytest.param("\n### Security\n\nReview permissions.\n", True, id="deeper-heading-level"),
+            pytest.param("\n## Security and more\n\nReview permissions.\n", True, id="longer-heading-text"),
+            pytest.param("\n```markdown\n## Security\n```\n", True, id="inside-code-block"),
+            pytest.param("\nSee the ## Security notes below.\n", True, id="inside-prose"),
+            pytest.param("\n# Security\n\nReview permissions.\n", False, id="shallower-heading-level"),
+            pytest.param("\n## security\n\nReview permissions.\n", False, id="different-case"),
+            pytest.param("\n##Security\n\nReview permissions.\n", False, id="no-space-after-hashes"),
+            pytest.param("\nSecurity\n========\n\nReview permissions.\n", False, id="setext-heading"),
+        ],
+    )
+    def test_expected_header_matches_heading_as_text_anywhere(
+        self, tmp_path: Path, extra_body: str, satisfied: bool
+    ):
+        skill_dir = _write_issue_skill(tmp_path, extra_body=extra_body)
+        config_path = tmp_path / "quality.yaml"
+        config_path.write_text(
+            'expected_headers:\n  - heading: "## Security"\n'
+            "    message: No security notes documented\n    suggestion: Add security notes\n",
+            encoding="utf-8",
+        )
+
+        result = QualityScoreValidator(min_score=0, quality_config=config_path).validate(skill_dir)
+
+        messages = [finding.message for finding in result.findings]
+        assert ("No security notes documented" not in messages) is satisfied
+
+    def test_expected_header_accepts_configured_alternative(self, tmp_path: Path):
+        skill_dir = _write_issue_skill(tmp_path)
+        skill_md = skill_dir / "SKILL.md"
+        skill_md.write_text(
+            skill_md.read_text(encoding="utf-8").replace("## Prerequisites", "## Requirements"),
+            encoding="utf-8",
+        )
+
+        result = QualityScoreValidator(min_score=0).validate(skill_dir)
+
+        assert all(
+            finding.message != "No prerequisites/requirements documented" for finding in result.findings
+        )
+
+    @pytest.mark.parametrize("alternative", ["## Common Issues", "## FAQ"])
+    def test_troubleshooting_header_accepts_configured_alternative(self, tmp_path: Path, alternative: str):
+        skill_dir = _write_issue_skill(tmp_path)
+        skill_md = skill_dir / "SKILL.md"
+        skill_md.write_text(
+            skill_md.read_text(encoding="utf-8").replace("## Troubleshooting", alternative),
+            encoding="utf-8",
+        )
+
+        result = QualityScoreValidator(min_score=0).validate(skill_dir)
+
+        assert all(finding.message != "No troubleshooting section documented" for finding in result.findings)
+
     def test_bad_skill_fails_min_score(self, bad_skill):
         v = QualityScoreValidator(min_score=70)
         result = v.validate(bad_skill)
@@ -298,6 +409,28 @@ class TestQualityScoreValidator:
         result = QualityScoreValidator(min_score=0).validate(skill_dir)
 
         assert any("metadata.author" in finding.message for finding in result.findings)
+
+    @pytest.mark.parametrize("metadata", ["[author, tags]", '"author: Test User"', "true", "1.5", "2026-01-01"])
+    def test_non_mapping_metadata_counts_as_missing_fields(self, tmp_path, metadata):
+        """A list, string, or scalar ``metadata`` scores as absent metadata instead of being indexed."""
+        skill_dir = _write_metadata_skill(tmp_path, metadata)
+
+        result = QualityScoreValidator(min_score=0).validate(skill_dir)
+
+        messages = [finding.message for finding in result.findings]
+        assert "SKILL_SPEC recommended field missing: 'metadata.author'" in messages
+        assert "SKILL_SPEC recommended field missing: 'metadata.tags'" in messages
+
+    def test_non_mapping_metadata_is_reported_by_schema_not_a_crash(self, tmp_path):
+        """The quality check must not abort Tier 1 before the schema finding for ``metadata`` is reported."""
+        skill_dir = _write_metadata_skill(tmp_path, "[author, tags]")
+
+        results = run_validation(skill_dir, checks="schema,quality", on_check=lambda _check: None)
+
+        schema, quality = results
+        assert not schema.passed
+        assert any(finding.message.startswith("Field 'metadata':") for finding in schema.findings)
+        assert quality.metadata["quality_scores"]["skill_name"] == "odd-metadata"
 
     def test_xml_tags_in_description_remain_quality_error(self, tmp_path):
         """Real XML/HTML-like tags in descriptions are still flagged."""
@@ -511,6 +644,44 @@ class TestQualityScoreValidator:
         v = QualityScoreValidator()
         assert "Quality" in v.name
         assert "Correctness" in v.description
+
+    def test_result_records_packaged_quality_config(self, tmp_path: Path):
+        skill_dir = _write_issue_skill(tmp_path)
+
+        result = QualityScoreValidator().validate(skill_dir)
+
+        assert result.metadata["quality_config"] == {
+            "source": "packaged",
+            "file": None,
+            "digest": quality_config_digest(load_quality_config()),
+            "min_score": 70,
+        }
+
+    def test_result_records_custom_quality_config_file_name_only(self, tmp_path: Path):
+        skill_dir = _write_issue_skill(tmp_path)
+        config_path = tmp_path / "configs" / "team-quality.yaml"
+        config_path.parent.mkdir()
+        config_path.write_text("expected_headers: []\n", encoding="utf-8")
+
+        result = QualityScoreValidator(min_score=80, quality_config=config_path).validate(skill_dir)
+
+        assert result.metadata["quality_config"] == {
+            "source": "custom",
+            "file": "team-quality.yaml",
+            "digest": quality_config_digest({"expected_headers": []}),
+            "min_score": 80,
+        }
+
+    def test_folder_result_records_quality_config(self, tmp_path: Path):
+        _write_issue_skill(tmp_path)
+        config_path = tmp_path / "team-quality.yaml"
+        config_path.write_text("expected_headers: []\n", encoding="utf-8")
+
+        result = QualityScoreValidator(min_score=0, quality_config=config_path).validate(tmp_path)
+
+        assert result.metadata["quality_config"]["source"] == "custom"
+        assert result.metadata["quality_config"]["file"] == "team-quality.yaml"
+        assert result.metadata["quality_config"]["min_score"] == 0
 
 
 class TestQualityScoreDeterministicContracts:

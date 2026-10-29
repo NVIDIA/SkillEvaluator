@@ -89,7 +89,7 @@ for skills. Its Tier 1 LLM checks still run only when requested.
 Direct `tier1 PATH` and `tier1 validate PATH` print the terminal report and
 write JSON and HTML reports by default. Use `-r cli` for terminal-only output.
 
-Reports for any of these runs are selected with `-r`/`--report` (`cli`, `json`, `html`, `markdown`) and written to `-o`/`--output-dir` (default `reports/`). File naming, `BENCHMARK.md`, and the JSON contract are covered in [Reports & Results](reports.mdx).
+Reports for any of these runs are selected with `-r`/`--report` (`cli`, `json`, `html`, `markdown`, `sarif`) and written to `-o`/`--output-dir` (default `reports/`). File naming, `BENCHMARK.md`, and the JSON contract are covered in [Reports & Results](reports.mdx).
 
 ## Content types
 
@@ -136,6 +136,10 @@ Precedence, highest to lowest: `--policy` overlay, `--profile` flag, `SKILLEVALU
     SCHEMA.author_missing: critical
     LICENSE.*: critical
   ```
+
+  Severity overrides change how findings gate a run; they do not change the
+  quality score or waive its `--min-score` requirement. Even an override of
+  `QUALITY.*: info` leaves a below-minimum quality score failing.
 </Accordion>
 
 <Note>
@@ -231,7 +235,14 @@ For `validate`, the default set is `schema`, `version`, `security`, `pii`, `lice
     | Reliability | 25% | Error handling, prerequisites, limitations, troubleshooting, and implementation safeguards |
     | Efficiency | 15% | Token budget, body length, repetition, instruction clarity, and reference use |
 
-    Grades are A for scores of at least 90, B for at least 80, C for at least 70, D for at least 60, and F below 60. The default `--min-score` is 70.
+    Grades are A for scores of at least 90, B for at least 80, C for at least 70, D for at least 60, and F below 60. The default `--min-score` is 70. Passing requires the score to reach that minimum and no HIGH or CRITICAL quality findings under the active policy.
+
+    The minimum score is an independent gate. Policy severity overrides cannot
+    waive it, and a collection average cannot hide an individual skill below
+    the minimum. A below-minimum result includes a diagnostic such as
+    `Quality score 67.8/100 is below the required 70/100`, retained in the JSON
+    result's `gate_failures` list. Improve the skill or explicitly choose the
+    required threshold with `--min-score`.
 
     The checker detects five skill shapes and applies relevant checks: **script-based** (Python or shell files under `scripts/`), **lib-based** (a Python module containing `__init__.py`), **resource-based** (assets, templates, design-system content, or resources), **guide-only** (documentation without executable or resource content), and **hybrid** (scripts plus library or resource content).
 
@@ -240,6 +251,47 @@ For `validate`, the default set is `schema`, `version`, `security`, `pii`, `lice
     <Tip>
       If a quality score changes unexpectedly, inspect the finding message rather than adding keywords. The checker rewards usable instructions and evidence in their relevant context, not vocabulary alone.
     </Tip>
+
+    **Expected headings.** Reliability deducts points when `SKILL.md` lacks an expected heading. The packaged `quality-default.yaml` expects `## Prerequisites` (or `## Requirements`), `## Limitations`, and `## Troubleshooting` (or `## Common Issues` or `## FAQ`), each worth 5 points. Pass `--quality-config PATH` to `quality-check`, `tier1`, or `validate` to use your own list instead. The file replaces the packaged defaults rather than merging with them, so copy any default entries you want to keep.
+
+    ```yaml title="quality.yaml"
+    expected_headers:
+      - heading: "## Prerequisites"
+        alternatives:
+          - "## Requirements"
+        points: 5
+        message: "No prerequisites/requirements documented"
+        suggestion: "Document dependencies, API keys, or setup needed"
+      - heading: "## Security"
+        points: 8
+        message: "No security notes documented"
+        suggestion: "Add '## Security' describing permissions and data access"
+      - heading: "## Examples"
+    ```
+
+    ```bash title="Score with a custom heading list"
+    skillevaluator quality-check ./my-skill --quality-config quality.yaml
+    skillevaluator tier1 ./my-skill --quality-config quality.yaml
+    skillevaluator validate ./my-skill --quality-config quality.yaml
+    ```
+
+    | Field | Required | Meaning |
+    | --- | --- | --- |
+    | `heading` | Yes | A single ATX Markdown heading, such as `## Security` |
+    | `alternatives` | No | Other headings that satisfy the same entry |
+    | `points` | No (default `5`) | Non-negative number deducted from Reliability when no accepted heading is found |
+    | `message` | No | Finding message reported when the heading is missing. Defaults to `Missing expected heading: '## Examples'`, listing any alternatives |
+    | `suggestion` | No | Fix suggestion attached to the finding. Defaults to `Add a '## Examples' section`, or `Add one of these sections: ...` when there are alternatives |
+
+    The packaged defaults set `message` and `suggestion` explicitly, so their findings keep the original wording.
+
+    An entry is satisfied when the heading or any alternative appears anywhere in `SKILL.md` as text, so `## Security` also matches `### Security Notes` or a heading inside a code block.
+
+    The file is checked before any validation runs. A file that is missing, unreadable, not UTF-8, invalid YAML, has an unknown key (such as `point` instead of `points`), or lists the same heading twice is a usage error: the command exits with code 2 and names the file and the problem. `validate` checks the file even when `--checks` leaves out `quality`.
+
+    ```text title="Example error"
+    Error: Invalid value for '--quality-config': quality.yaml: unknown key(s) in expected_headers[0]: point (allowed: alternatives, heading, message, points, suggestion)
+    ```
   </Accordion>
 
   <Accordion title="rubric-eval — LLM-as-judge (requires a provider)">
@@ -332,9 +384,9 @@ Bundled Python scanners resolve next to the SkillEvaluator interpreter before `P
 | --- | --- |
 | `0` | Success — every gate passed |
 | `1` | Validation failed — a check failed or required scanner evidence is incomplete |
-| `2` | Usage error — an unknown flag, a value outside an option's type or choices, or a target path that does not exist |
+| `2` | Usage error — an unknown flag, a value outside an option's type or choices, a target path that does not exist, or an invalid `--quality-config` file |
 
-Tier 1 checks always gate the exit code inside `validate`. Tier 2 gates when it runs unless `--no-block-on-dedup` is set. Tier 3 is advisory unless `--block-on-agent-eval` is set. The `quality` check passes when the composite score reaches `--min-score` (default `70`). Reports record the effective gate membership for every tier so saved evidence and process status agree.
+Tier 1 checks always gate the exit code inside `validate`. Tier 2 gates when it runs unless `--no-block-on-dedup` is set. Tier 3 is advisory unless `--block-on-agent-eval` is set. The `quality` check requires the composite score to reach `--min-score` (default `70`) as well as no HIGH or CRITICAL quality findings under the active policy. Severity overrides cannot waive the minimum. Reports record the effective gate membership for every tier so saved evidence and process status agree.
 
 `--fail-fast` stops after the first failed check. `-c`/`--continue-on-failure` overrides it, records the full pipeline, and keeps scanning a collection past a CRITICAL finding. Wiring these exit codes into a merge gate — including a complete GitHub Actions recipe — is covered in [Gate Your CI](ci-integration.mdx).
 
@@ -348,7 +400,12 @@ Tier 1 checks always gate the exit code inside `validate`. Tier 2 gates when it 
     Install Bandit and pip-audit with `skillevaluator[security]`. Install Semgrep separately with `brew install semgrep` or `uv tool install semgrep`, and SkillSpector with `uv tool install git+https://github.com/NVIDIA/SkillSpector.git@v2.12.0`. Required scanner failures remain `INCOMPLETE` until the scanner is installed and returns valid evidence.
   </Accordion>
   <Accordion title="An LLM-backed stage fails immediately">
-    Configure a supported provider or omit `--llm`/`--llm-verify`. Use `--no-tier2` (or `--no-dedup`) to disable dedup when a fully key-free Tier 1 run is required.
+    Configure a supported provider or select a keyless Tier 1 run with
+    `skillevaluator tier1 ./my-skill --no-llm` or
+    `skillevaluator validate ./my-skill --tiers 1 --no-llm` (without
+    `--llm-verify`). Direct Tier 1 automatically enables LLM stages when a
+    provider is configured; `--no-llm` explicitly disables them. Top-level
+    `validate --no-dedup` skips Tier 2 but still runs Tier 3 by default.
   </Accordion>
   <Accordion title="No scannable files are found">
     Confirm that the skill contains supported text or code extensions such as `.py`, `.sh`, `.yaml`, `.yml`, `.json`, `.md`, or `.txt`.

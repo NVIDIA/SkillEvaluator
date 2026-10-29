@@ -521,49 +521,17 @@ def test_public_docs_declare_support_and_security_sections() -> None:
 
 def test_public_readme_is_a_concise_docs_landing_page() -> None:
     readme = (REPO_ROOT / "README.md").read_text(encoding="utf-8")
-    quickstart = readme.partition("\n## Quickstart\n")[2].partition("\n## Run the combined pipeline\n")[0]
-    combined_pipeline = readme.partition("\n## Run the combined pipeline\n")[2].partition(
-        "\n## Run from a source checkout\n"
-    )[0]
-    normalized = " ".join(readme.split())
 
-    positioning = (
-        "SkillEvaluator is an open-source, multi-tier framework for evaluating AI agent artifacts, "
-        "starting with agent skills: deterministic quality gates, semantic overlap detection, "
-        "synthetic eval dataset generation, and live agent evaluation."
-    )
-    assert positioning in normalized
+    # Keep the landing-page boundaries and public links without freezing the
+    # prose or requiring every advanced setup path to be duplicated here.
     assert "https://docs.nvidia.com/skills/skillevaluator/" in readme
     assert "https://github.com/NVIDIA/skills" in readme
     assert "https://github.com/NVIDIA/SkillSpector" in readme
     assert "\n## Three-tier overview\n" in readme
     assert "docs/assets/three-tier-overview.svg" in readme
     assert "\n## Quickstart\n" in readme
-    assert "skillevaluator[all] @ git+https://github.com/NVIDIA/SkillEvaluator.git" in readme
-    for tier in (1, 2, 3):
-        assert f"skillevaluator tier{tier} ./my-skill" in quickstart
-        assert f"skillevaluator tier{tier} run" not in quickstart
-    assert "export SKILL_EVAL_LLM_PROVIDER=nv_build" in quickstart
-    assert "export NVIDIA_API_KEY='nvapi-...'" in quickstart
-    assert "export SKILL_EVAL_LLM_PROVIDER=openai" in quickstart
-    assert "export OPENAI_API_KEY='sk-...'" in quickstart
-    assert "set just two variables" in normalized
-    assert "Semgrep, SkillSpector, and Gitleaks" in quickstart
-    assert "skillevaluator doctor --env-mode docker" in quickstart
-    assert "skillevaluator quality-check ./my-skill" in quickstart
-    assert "--catalog ./skill-catalog.json" in quickstart
-    assert "inter-skill comparison did not run" in normalized
-    assert "one starter evaluation case" in normalized
-    assert "Valid existing sources are reused unchanged; invalid ones produce an error" in normalized
-    assert "configured defaults, not automatically updated selections of the latest models" in normalized
-    assert "```bash\nskillevaluator validate ./my-skill\n```" in combined_pipeline
-    assert "with autopilot by default" in combined_pipeline
-    assert "`--full` remains supported but is unnecessary" in combined_pipeline
-    assert "skillevaluator tier3 create-eval-dataset ./my-skill --full" in combined_pipeline
-    assert "--block-on-agent-eval" in combined_pipeline
-    assert "--n-attempts 1" not in combined_pipeline
-    assert "uv run --extra all skillevaluator tier1 ./my-skill" in readme
-    assert "tier3-live-evaluation#plan-for-cost" in readme
+    assert "\n## Run the combined pipeline\n" in readme
+    assert "\n## Run from a source checkout\n" in readme
     assert "\n## Tier 1:" not in readme
     assert "Skill Evaluator" not in readme
     assert "Skillevaluator" not in readme
@@ -899,12 +867,9 @@ def test_launch_docs_address_scanner_and_naming_ambiguities() -> None:
     quickstart = (REPO_ROOT / "docs" / "quickstart.mdx").read_text(encoding="utf-8")
     ci = (REPO_ROOT / "docs" / "ci-integration.mdx").read_text(encoding="utf-8")
     environment = (REPO_ROOT / "docs" / "environment-variables.mdx").read_text(encoding="utf-8")
-    normalized_quickstart = " ".join(quickstart.split())
-
-    assert "brew install semgrep gitleaks" in quickstart
-    assert "uv tool install git+https://github.com/NVIDIA/SkillSpector.git@v2.12.0" in quickstart
+    # Scanner installation lives in the installation guide, linked from the
+    # optional full-static section, rather than blocking the first quality run.
     assert "Semgrep, SkillSpector, and Gitleaks" in quickstart
-    assert "missing scanner evidence leaves the result `INCOMPLETE` and exits `1`" in normalized_quickstart
     assert "most often Gitleaks" not in ci
     assert "Semgrep, SkillSpector, and Gitleaks are all separate executables" in " ".join(ci.split())
     assert "`SKILL_EVAL_*` covers provider and model configuration" in " ".join(environment.split())

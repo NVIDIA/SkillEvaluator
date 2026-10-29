@@ -104,6 +104,7 @@ _PUBLIC_USER_PATH = re.compile(
     rf")[^\s'\"<>]+)",
     flags=re.IGNORECASE,
 )
+_SHA256_DIGEST = re.compile(r"sha256:[0-9a-f]{64}")
 _MARKDOWN_INLINE_SPECIAL = re.compile(r"([\\*_\[\]~])")
 _MARKDOWN_BLOCK_PREFIX = re.compile(r"^(?:#{1,6}|>|[+*-]|\d+[.)])(?=\s|$)")
 # The public benchmark gate rejects a non-PASS card whose visible text contains
@@ -265,6 +266,13 @@ class BenchmarkReporter(ReporterBase):
             )
         else:
             lines.append("- Source digest: not recorded (legacy or unbound result)")
+
+        quality_config = _quality_config_label(results, private_labels)
+        if quality_config:
+            lines.append(f"- Quality config: {quality_config}")
+        quality_min_score = _quality_min_score(results)
+        if quality_min_score is not None:
+            lines.append(f"- Quality min score: {quality_min_score}")
 
         evaluated_at = _evaluated_at(ae)
         lines.append(
@@ -930,6 +938,36 @@ def _evaluation_date(value: str) -> str:
         return parsed.date().isoformat()
     except ValueError:
         return value[:10] if re.fullmatch(r"\d{4}-\d{2}-\d{2}.*", value) else value
+
+
+def _quality_config_label(results: list[ValidationResult], private_labels: tuple[str, ...]) -> str | None:
+    """Return the Tier 1 quality config line, or ``None`` when no QUALITY result recorded one."""
+    for result in results:
+        config = result.metadata.get("quality_config") if isinstance(result.metadata, dict) else None
+        if not isinstance(config, dict):
+            continue
+        source = config.get("source")
+        digest = config.get("digest")
+        if source not in {"packaged", "custom"} or not isinstance(digest, str) or not _SHA256_DIGEST.fullmatch(digest):
+            continue
+        file_name = config.get("file")
+        file_label = (
+            f" ({_publication_safe_inline(file_name, private_labels)})"
+            if source == "custom" and isinstance(file_name, str) and file_name
+            else ""
+        )
+        return f"{source}{file_label}, `{digest}`"
+    return None
+
+
+def _quality_min_score(results: list[ValidationResult]) -> int | float | None:
+    """Return the Tier 1 quality pass threshold, or ``None`` when no QUALITY result recorded one."""
+    for result in results:
+        config = result.metadata.get("quality_config") if isinstance(result.metadata, dict) else None
+        min_score = config.get("min_score") if isinstance(config, dict) else None
+        if isinstance(min_score, (int, float)) and not isinstance(min_score, bool) and math.isfinite(min_score):
+            return min_score
+    return None
 
 
 def _evaluated_source(results: list[ValidationResult]) -> dict[str, str]:

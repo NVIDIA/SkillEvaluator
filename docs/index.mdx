@@ -12,6 +12,51 @@ Agent skills are folders of instructions and supporting files that extend AI age
   SkillEvaluator's support level is **Experimental**: community-supported on a best-effort basis through [GitHub Issues](https://github.com/NVIDIA/SkillEvaluator/issues), with no SLA. See [SUPPORT.md](https://github.com/NVIDIA/SkillEvaluator/blob/main/SUPPORT.md).
 </Note>
 
+<a id="try-it-in-two-minutes" />
+
+## Start with a first result
+
+Choose a deterministic quality check or an LLM-backed rubric review. Both routes
+use the bundled `text-analyzer` skill, so you can run them before preparing your
+own skill. Neither route needs Docker or an agent runtime. Set up your chosen
+agent and sandbox when you move on to [live Tier 3 evaluation](tier3-live-evaluation.mdx).
+
+### Run without an LLM
+
+Install [uv](https://docs.astral.sh/uv/getting-started/installation/) and Git,
+then clone the repository and run the base package:
+
+```bash title="Quality check with no API key"
+git clone --depth 1 https://github.com/NVIDIA/SkillEvaluator.git
+cd SkillEvaluator
+uv run --python 3.13 skillevaluator quality-check src/skillevaluator/tier3/reference_skills/text-analyzer -r cli -r json -o reports/first-quality
+```
+
+Read the score, grade, and findings in the terminal, and open
+`reports/first-quality/skillevaluator-quality.json` for the saved result.
+This checks documentation quality; measuring the skill's effect on an agent
+requires a [live evaluation](tier3-live-evaluation.mdx).
+
+The [keyless Quickstart](quickstart.mdx#run-without-an-llm) explains the result
+and how to check your own skill. The full static security suite has additional
+[scanner requirements](installation.mdx#system-tools), even though it also
+runs without an LLM or API key.
+
+### Use NVIDIA Build
+
+For an LLM-backed rubric review, get an API key from
+[NVIDIA Build](https://build.nvidia.com/), then run from the same checkout:
+
+```bash title="LLM-backed rubric review"
+export SKILL_EVAL_LLM_PROVIDER=nv_build
+export NVIDIA_API_KEY='nvapi-...'
+uv run --python 3.13 --extra llm skillevaluator rubric-eval src/skillevaluator/tier3/reference_skills/text-analyzer -r cli -r json -o reports/first-build
+```
+
+The `llm` extra installs the provider clients for this model call. The
+[NVIDIA Build Quickstart](quickstart.mdx#use-nvidia-build) covers access,
+outputs, and the distinction between rubric scores and observed agent behavior.
+
 ## The three tiers
 
 Each tier answers one question about your skill.
@@ -36,17 +81,6 @@ Every tier is an independent entry point — run any command directly; nothing r
 | [Tier 2](tier2-deduplication.mdx) | `context-optimization-check`, `similarity-check` | An embeddings provider; intra-skill analysis also needs a chat LLM — local OpenAI-compatible endpoints work |
 | [Tier 3](tier3-live-evaluation.mdx) | `create-eval-dataset`, `tier3 evaluate`, `compare` | No credential for keyless templates and report inspection; a provider key for LLM generation and grading; live evaluation also needs the agent CLI with its credential and a Docker, local OS, or cloud sandbox |
 
-## Try it in two minutes
-
-Install with [uv](https://docs.astral.sh/uv/) and run the keyless quality check against your own skill — no API key, Docker, Gitleaks, or repository clone required:
-
-```bash title="No API key required"
-uv tool install --python 3.13 "skillevaluator[all] @ git+https://github.com/NVIDIA/SkillEvaluator.git"
-skillevaluator quality-check ./my-skill
-```
-
-You get a 0–100 quality score with an A–F grade. From there, the [Quickstart](quickstart.mdx) walks through a complete offline Tier 1 run and wiring up a provider for the LLM-backed parts.
-
 ## How a run flows
 
 <Frame background="subtle" caption="The SkillEvaluator three-tier pipeline">
@@ -69,7 +103,7 @@ How to read all three, and the on-disk results contract, live in [Reports & Resu
 
 <CardGroup cols={2}>
   <Card title="Quickstart" icon="rocket" href="quickstart.mdx">
-    First evaluation result in about two minutes, no API key.
+    Run a bundled quality check without an LLM, or use NVIDIA Build for a rubric review.
   </Card>
   <Card title="Gate Your CI" icon="shield" href="ci-integration.mdx">
     Make SkillEvaluator a merge gate — exit codes, a GitHub Actions recipe, and progressive adoption.

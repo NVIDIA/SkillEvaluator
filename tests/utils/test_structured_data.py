@@ -48,6 +48,61 @@ def test_bounded_yaml_can_keep_the_last_duplicate_key_like_frontmatter_readers()
         load_bounded_yaml("name: " + "x" * 70_000, last_key_wins=True)
 
 
+def _merge_alias_dag(levels: int) -> str:
+    lines = ["seed: &a0 {name: safe}"]
+    lines.extend(f"a{i}: &a{i} {{<<: [*a{i - 1}, *a{i - 1}]}}" for i in range(1, levels + 1))
+    return "\n".join(lines)
+
+
+@pytest.mark.parametrize("last_key_wins", [False, True])
+def test_bounded_yaml_rejects_merge_expansion_before_allocating_its_pairs(last_key_wins: bool) -> None:
+    # Only one key survives each merge, but flattening the aliases first copies
+    # over a million pairs. Neither event counts nor the final dict catch it.
+    raw = _merge_alias_dag(20)
+
+    def parse() -> None:
+        with pytest.raises(StructuredDataLimitError, match=r"merge"):
+            load_bounded_yaml(raw, last_key_wins=last_key_wins)
+
+    assert _traced_peak_bytes(parse) < 2_000_000
+
+
+@pytest.mark.parametrize("last_key_wins", [False, True])
+def test_bounded_yaml_preserves_a_merge_with_distinct_keys(last_key_wins: bool) -> None:
+    raw = "defaults: &defaults {enabled: true}\nvalue: {<<: *defaults, name: demo}"
+
+    assert load_bounded_yaml(raw, last_key_wins=last_key_wins) == {
+        "defaults": {"enabled": True},
+        "value": {"enabled": True, "name": "demo"},
+    }
+
+
+def test_bounded_yaml_preserves_merge_precedence_and_duplicate_key_policy() -> None:
+    raw = (
+        "first: &first {name: first, enabled: true}\n"
+        "second: &second {name: second, count: 2}\n"
+        "value: {<<: [*first, *second], count: 3}"
+    )
+
+    assert load_bounded_yaml(raw, last_key_wins=True)["value"] == {
+        "name": "first",
+        "enabled": True,
+        "count": 3,
+    }
+    with pytest.raises(StructuredDataSyntaxError):
+        load_bounded_yaml(raw)
+
+
+@pytest.mark.parametrize("last_key_wins", [False, True])
+def test_bounded_yaml_bounds_total_merge_work_across_individually_small_mappings(last_key_wins: bool) -> None:
+    seed = ", ".join(f"k{i}: {i}" for i in range(128))
+    raw = "seed: &seed {" + seed + "}\n"
+    raw += "\n".join(f"a{i}: {{<<: *seed}}" for i in range(200))
+
+    with pytest.raises(StructuredDataLimitError, match=r"merge"):
+        load_bounded_yaml(raw, last_key_wins=last_key_wins)
+
+
 def test_bounded_json_rejects_deep_nesting_and_non_json_syntax() -> None:
     raw = '{"value":' + ("[" * 1_500) + "0" + ("]" * 1_500) + "}"
     with pytest.raises(StructuredDataLimitError, match=r"depth|complex|limit"):

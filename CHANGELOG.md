@@ -47,6 +47,18 @@ All notable changes to SkillEvaluator are documented in this file.
   deterministic checks with the host evaluator. Packaged verifier checks execute
   on a real Python 3.9 interpreter in CI to retain this compatibility.
 
+- Local Claude Code trials retain Harbor's instruction environment variables so
+  prompts reach `claude --print`. The exception accepts only the legacy
+  `HARBOR_INSTRUCTION` name and Claude Code's UUID-named instruction variable;
+  protected paths, loader controls, and unrelated Harbor variables retain their
+  existing filtering ([#245](https://github.com/NVIDIA/SkillEvaluator/issues/245)).
+
+- Tier 3 reports preserve unavailable evaluator lift as `null` when no baseline
+  ran, rather than reporting a measured zero. CLI evaluator tables display
+  missing or unavailable scores as `n/a` without interrupting JSON and HTML
+  report generation; measured zeroes retain their numeric formatting
+  ([#240](https://github.com/NVIDIA/SkillEvaluator/issues/240)).
+
 - Explicit searches of `/` (`find`, `grep -r`, `rg`, `ag`, `du` and `tree` with a
   `/` operand, and native search tools rooted at `/`) now count as wasted tool
   calls whether or not they name the expected skill or script, including when

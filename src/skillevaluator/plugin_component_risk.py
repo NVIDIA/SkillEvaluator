@@ -1945,6 +1945,14 @@ class _PackageRun:
     floating: bool = False
 
 
+@dataclass(frozen=True)
+class _PackageScan:
+    """Bounded package-risk samples and whether parsing left executable code unanalyzed."""
+
+    packages: tuple[_PackageRun, ...]
+    truncated: bool = False
+
+
 class _ShellFacts:
     """What one shell text (a hook command or a script) does, for the hook risk findings.
 
@@ -1961,6 +1969,7 @@ class _ShellFacts:
         allow_shapes: frozenset[str] = frozenset(),
         downloads: _Downloads | None = None,
         packages: tuple[_PackageRun, ...] = (),
+        package_scan_truncated: bool = False,
         context_outputs: frozenset[str] = frozenset(),
     ) -> None:
         self._text = text
@@ -1969,6 +1978,7 @@ class _ShellFacts:
         self.context_outputs = context_outputs
         self.downloads = downloads if downloads is not None else _Downloads()
         self.packages = packages
+        self.package_scan_truncated = package_scan_truncated
         # HookAnalyzer state: whether these run sites are indexed for cross-hook matching, and (for a script,
         # which many hooks can run) how far the plugin-wide indexes were matched against this text.
         self.indexed = False
@@ -2019,13 +2029,18 @@ def _shell_facts(text: str) -> _ShellFacts:
     ``| bash -c "$(cat)"``) does. Linear in the text.
     """
     commands = [match.group(0) for match in _SHELL_COMMAND_RE.finditer(text)]
-    packages = _package_runs(commands)
+    package_scan = _package_runs(commands)
+    packages = package_scan.packages
     remote_code = _EXEC_FETCHED_RE.search(text) is not None or any(package.remote for package in packages)
     downloads = _Downloads()
     code = _code_text(text)
     decoded = _decoded_escapes(code)
     facts = _ShellFacts(
-        text, allow_shapes=_allow_shapes_of(code, decoded), packages=packages, context_outputs=_context_outputs(decoded)
+        text,
+        allow_shapes=_allow_shapes_of(code, decoded),
+        packages=packages,
+        package_scan_truncated=package_scan.truncated,
+        context_outputs=_context_outputs(decoded),
     )
     if _FETCHER_RE.search(text) is not None:  # every other remote-code shape needs a fetch
         fetched = _fetched_variables(text)
@@ -2471,23 +2486,45 @@ _PACKAGE_RUN_HINT_RE = re.compile(
 # Shell words that start a command list without being the command ('then npx ...', '! npx ...').
 _SHELL_LIST_WORDS = frozenset({"then", "do", "else", "elif", "if", "while", "until", "!", "(", "{"})
 _MAX_SHELL_NESTING = 2
+# shlex token construction is quadratic for one very long word; cap work on a
+# stage explicitly, and surface skipped code as a blocking incomplete scan.
+_MAX_PACKAGE_STAGE_CHARS = 16 * 1024
 
 
-def _package_runs(commands: list[str], depth: int = 0) -> tuple[_PackageRun, ...]:
-    """Package runners and container runs (``npx``, ``pnpm dlx``, ``uvx``, ``docker run``, ...) of unpinned code.
+def _package_runs(commands: list[str], depth: int = 0) -> _PackageScan:
+    """Classify every package launch, retaining bounded samples of the strongest risks.
 
-    Each command is classified like an MCP server command, so hooks get the
-    same rules: wrappers (``env X=1``, ``timeout 30``, ``sudo``, ``cmd /c``) are
-    looked through, a ``bash -c '<program>'`` is read command by command, exact
-    versions and digests are pinned, and a moving tag (``@latest``, ``:main``)
-    is ``floating``. A git or URL spec without a commit is ``remote``.
+    Commands are already byte-bounded. Each stage is parsed whole within an
+    explicit work limit, and the fixed depth limit bounds repeated parsing.
+    Reaching either is reported rather than dropping executable code. The sample cap limits report
+    size only: a later remote or floating package can replace a weaker sample.
     """
     runs: list[_PackageRun] = []
+    truncated = False
+
+    def retain(run: _PackageRun) -> None:
+        if len(runs) < MAX_OUTSIDE_REFS:
+            runs.append(run)
+            return
+        # Remote code is CRITICAL, floating packages HIGH, other unpinned packages MEDIUM.
+        weakest = min(range(len(runs)), key=lambda index: (runs[index].remote, runs[index].floating))
+        if (run.remote, run.floating) > (runs[weakest].remote, runs[weakest].floating):
+            runs[weakest] = run
+
     for command in commands:
-        if not _PACKAGE_RUN_HINT_RE.search(command):
+        command = _code_text(command)
+        # Quotes and escapes can reconstruct the executable (n'p'x, n\px), so the raw
+        # name hint can rule out a runner only when tokenization cannot change its spelling.
+        if not any(char in command for char in "'\"\\") and not _PACKAGE_RUN_HINT_RE.search(command):
             continue
-        for stage in command.split("|"):
-            words = _split_words(stage[:4096])
+        # Keep quoted/escaped pipes inside their word; a quoted shell -c program is
+        # split into its own stages only after the shell's words have been decoded.
+        for match in _SHELL_STAGE_RE.finditer(command):
+            stage = match.group(0)
+            if len(stage) > _MAX_PACKAGE_STAGE_CHARS:
+                truncated = True
+                continue
+            words = _split_words(stage)
             index = 0
             while index < len(words) and (
                 words[index] in _SHELL_LIST_WORDS or _ASSIGNMENT_WORD_RE.match(words[index]) is not None
@@ -2496,18 +2533,26 @@ def _package_runs(commands: list[str], depth: int = 0) -> tuple[_PackageRun, ...
             argv = unwrap_launch_command(words[index:], expand_shell=False)
             if not argv:
                 continue
+            # A second bounded pass changing argv proves the first exhausted its
+            # wrapper limit. Normal runners and retained shell programs are stable.
+            if unwrap_launch_command(argv, expand_shell=False) != argv:
+                truncated = True
+                continue
             program = shell_program(argv)
             if program is not None:
                 if depth < _MAX_SHELL_NESTING:
-                    inner = [match.group(0) for match in _SHELL_COMMAND_RE.finditer(program[:4096])]
-                    runs.extend(_package_runs(inner, depth + 1))
+                    inner = [match.group(0) for match in _SHELL_COMMAND_RE.finditer(program)]
+                    nested = _package_runs(inner, depth + 1)
+                    truncated = truncated or nested.truncated
+                    for run in nested.packages:
+                        retain(run)
+                else:
+                    truncated = True
             else:
                 pin = classify_mcp_pinning({"command": argv[0], "args": argv[1:]})
                 if pin.status == "unpinned":
-                    runs.append(_PackageRun(_bounded(pin.detail, 160), pin.remote, pin.floating))
-            if len(runs) >= MAX_OUTSIDE_REFS:
-                return tuple(runs[:MAX_OUTSIDE_REFS])
-    return tuple(runs)
+                    retain(_PackageRun(_bounded(pin.detail, 160), pin.remote, pin.floating))
+    return _PackageScan(tuple(runs), truncated)
 
 
 def _url_parts(url: str) -> tuple[str, str, int | None, str] | None:
@@ -3406,6 +3451,8 @@ class HookAnalyzer:
                     f"it or another hook runs more than {MAX_RUN_SITES} distinct files, so not every run was "
                     "matched against the plugin's downloads"
                 )
+        if any(fact.package_scan_truncated for fact in facts):
+            unanalyzed.append("it exceeds the package-runner parsing work, shell depth, or launcher depth limit")
         self._auto_approve(facts, site)
         self._context_output(facts, site)
         if site.scope in {"all", "bash", "scoped"} and not found_script and self._names_root(text):

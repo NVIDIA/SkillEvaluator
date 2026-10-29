@@ -83,10 +83,11 @@ def normalize_declared_path(raw: str, root_prefixes: Iterable[str]) -> DeclaredP
     the root, an escape. Absolute paths, home-relative paths, a drive letter in
     any part (``./C:/Users``), and ``..`` segments are escapes; any other colon
     (an NTFS data stream, ``x.md:hidden``) is ``invalid``. A path that starts
-    with a root placeholder records it as ``root_variable``.
+    with a root placeholder records it as ``root_variable``. Whitespace in a
+    filename is literal; trimming it could inspect a different bundled file.
     """
-    text = raw.strip()
-    if not text:
+    text = raw
+    if not text.strip():
         return DeclaredPath(raw, None, "empty")
     if "\x00" in text or len(text) > _MAX_DECLARED_PATH_CHARS:
         return DeclaredPath(raw, None, "invalid")

@@ -451,8 +451,6 @@ def test_auth_scheme_env_reference_is_allowed() -> None:
     assert checks <= {"mcp_field_ignored"}
 
 
-
-
 def test_insecure_tls_env_blocked() -> None:
     findings = validate_mcp_server_declaration(
         "s", {"command": "python", "env": {"NODE_TLS_REJECT_UNAUTHORIZED": "0"}}, "p.json"
@@ -535,10 +533,6 @@ def _write_contained(root: Path, payload: dict) -> Path:
     claude.mkdir(parents=True, exist_ok=True)
     (claude / "plugin.json").write_text(json.dumps(payload), encoding="utf-8")
     return root
-
-
-
-
 
 
 # --------------------------------------------------------------------------- #
@@ -746,8 +740,6 @@ def test_pinning_details_never_echo_a_credential_in_the_spec(config: dict) -> No
         assert _ACCESS_TOKEN not in text and "hunter2pass" not in text
 
 
-
-
 def test_url_userinfo_written_as_references_is_allowed() -> None:
     # The client fills ${VAR} references from the user's environment; the plugin carries no secret.
     findings = validate_mcp_server_declaration("s", {"url": "https://${USER}:${TOKEN}@h.example/mcp"}, "p.json")
@@ -870,3 +862,56 @@ def test_inline_secret_scan_is_linear_on_a_long_jwt_like_run(unit: str) -> None:
     assert looks_like_inline_secret("SETTING", value) is False
     assert validate_mcp_server_declaration("s", {"command": "srv", "args": [value]}, "p.json") is not None
     assert time.perf_counter() - started < 2.0
+
+
+@pytest.mark.parametrize(
+    "config,expected",
+    [
+        ({"command": "${BIN:-sh}", "args": ["-c", "id"]}, "mcp_command_dangerous_form"),
+        (
+            {"command": "claude", "args": ["--permission-mode", "${MODE:-bypassPermissions}"]},
+            "mcp_permission_bypass_flag",
+        ),
+        ({"command": "server", "args": ["${TLS:---insecure}"]}, "mcp_command_disables_tls"),
+        (
+            {"command": "server", "env": {"NODE_TLS_REJECT_UNAUTHORIZED": "${VERIFY:-0}"}},
+            "mcp_insecure_tls_env",
+        ),
+        (
+            {"command": "node", "env": {"NODE_OPTIONS": "${OPTIONS:---require=./startup.js}"}},
+            "mcp_env_code_injection",
+        ),
+    ],
+)
+def test_mcp_security_checks_inspect_shipped_expansion_defaults(config: dict, expected: str) -> None:
+    from skillevaluator.constants import PLUGIN_CODEX_MANIFEST_TYPE
+
+    assert expected in _checks(validate_mcp_server_declaration("s", config, "p.json"))
+    # Codex passes these strings literally; analysis must never read the host environment.
+    assert expected not in _checks(
+        validate_mcp_server_declaration("s", config, "p.json", manifest_type=PLUGIN_CODEX_MANIFEST_TYPE)
+    )
+
+
+def test_unset_and_safe_mcp_launch_references_do_not_invent_a_dangerous_command() -> None:
+    for command in ("${BIN}", "${BIN:-node}"):
+        checks = _checks(validate_mcp_server_declaration("s", {"command": command, "args": ["./server.js"]}, "p.json"))
+        assert "mcp_command_dangerous_form" not in checks
+
+
+@pytest.mark.parametrize(
+    "args",
+    [
+        ["--package", "bad@latest", "exec", "--", "server"],
+        ["--package=good@1.2.3", "--package=bad@latest", "x", "--", "server"],
+        ["--package=bad@latest", "exec", "--package=good@1.2.3", "--", "server"],
+    ],
+)
+def test_npm_packages_before_exec_are_checked(args: list[str]) -> None:
+    from skillevaluator.validators.mcp_static import parse_mcp_runner
+
+    config = {"command": "npm", "args": args}
+    invocation = parse_mcp_runner(config)
+    assert invocation is not None
+    assert "bad@latest" in invocation.specs
+    assert "mcp_command_floating_version" in _checks(validate_mcp_server_declaration("s", config, "p.json"))

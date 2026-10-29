@@ -663,6 +663,8 @@ def _classify_ref(
         or relative_name.anchor
         or not relative_name.parts
         or any(part in {"", ".", ".."} for part in relative_name.parts)
+        or "\x00" in name
+        or "\x00" in ref_kind
         or "\\" in name
         or kind_path.anchor
         or kind_path.parts != (ref_kind,)

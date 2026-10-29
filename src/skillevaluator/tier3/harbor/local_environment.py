@@ -70,6 +70,9 @@ _BLOCKED_COMMAND_ENV_NAMES = frozenset(
     }
 )
 _BLOCKED_COMMAND_ENV_PREFIXES = ("DYLD_", "LD_", "PYTHON")
+# Harbor transports Claude Code prompts through an uppercased UUID-named
+# variable; keep that contract narrow so unrelated Harbor controls stay private.
+_HARBOR_INSTRUCTION_ENV_RE = re.compile(r"HARBOR_(?:INSTRUCTION|CLAUDE_CODE_INSTRUCTION_[0-9A-F]{32})")
 _INNER_ENV_BOOTSTRAP = """
 import json
 import os
@@ -1670,7 +1673,11 @@ class SkillEvaluatorLocalEnvironment(BaseEnvironment):
                 )
             if key in protected or key in {"HOME", "TMPDIR", "PATH", "PWD"}:
                 continue
-            if key.startswith("HARBOR_") and key != "HARBOR_DECLARED_PORTS":
+            if (
+                key.startswith("HARBOR_")
+                and key != "HARBOR_DECLARED_PORTS"
+                and _HARBOR_INSTRUCTION_ENV_RE.fullmatch(key) is None
+            ):
                 continue
             out[key] = value
         return out

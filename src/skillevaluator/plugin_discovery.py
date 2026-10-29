@@ -866,9 +866,9 @@ class _MemberCollector:
     def markdown_components(self, component_type: str, field_name: str, default_dir: str | None) -> None:
         declared_value = self._declared_field(field_name)
         suffixes = self._suffixes(component_type)
-        # Codex loads the default folder when it drops the declared value.
-        codex_default = self.profile.codex_path_rules and not self._declared_replaces(field_name, declared_value)
-        if declared_value is None or codex_default:
+        # Additive formats retain packaged defaults beside explicit declarations.
+        # Codex also loads the default folder when it drops the declared value.
+        if not self._declared_replaces(field_name, declared_value):
             if default_dir is not None and self.reader.kind(PurePosixPath(default_dir)) == "dir":
                 self._markdown_dir(component_type, PurePosixPath(default_dir), "packaged")
             elif default_dir is not None and self.reader.kind(PurePosixPath(default_dir)) == "link":

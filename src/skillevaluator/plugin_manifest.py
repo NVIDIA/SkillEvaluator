@@ -23,6 +23,7 @@ from __future__ import annotations
 import codecs
 import json
 import os
+import re
 import stat
 from dataclasses import dataclass
 from pathlib import Path
@@ -291,9 +292,15 @@ _AGENT_PLUGINS_RELATIVE = Path(PLUGIN_AGENT_PLUGINS_V1_MANIFEST_FILE)
 # The schema host as it appears in the raw bytes of UTF-8 (and ASCII-compatible
 # single-byte), UTF-16, and UTF-32 text. The host has no slash, so it also
 # matches the "https:\/\/agent-plugins.org\/..." spelling that JSON allows.
+_AGENT_PLUGINS_HOST = urlsplit(AGENT_PLUGINS_SCHEMA_PREFIX).netloc
 _AGENT_PLUGINS_HOST_MARKERS: tuple[bytes, ...] = tuple(
-    urlsplit(AGENT_PLUGINS_SCHEMA_PREFIX).netloc.encode(codec)
-    for codec in ("utf-8", "utf-16-le", "utf-16-be", "utf-32-le", "utf-32-be")
+    _AGENT_PLUGINS_HOST.encode(codec) for codec in ("utf-8", "utf-16-le", "utf-16-be", "utf-32-le", "utf-32-be")
+)
+# JSON permits any host character to be Unicode-escaped. Match those spellings
+# directly: each fixed-width alternative starts with a distinct character, so
+# searching rejected JSON takes linear time and constant auxiliary space.
+_AGENT_PLUGINS_ESCAPED_HOST_RE = re.compile(
+    "".join(rf"(?:{re.escape(character)}|\\u(?i:{ord(character):04x}))" for character in _AGENT_PLUGINS_HOST)
 )
 
 
@@ -307,14 +314,18 @@ def agent_plugins_opt_in(raw: bytes) -> bool:
     (:func:`decode_manifest_leniently`) and parsed; a JSON object opts in when
     it declares an Agent Plugins ``$schema``, however much whitespace comes
     first and however its slashes are escaped. JSON that does not parse still
-    counts when its bytes name the schema host in UTF-8, UTF-16, or UTF-32, so
-    its syntax or encoding error is reported rather than hidden.
+    counts when its bytes name the schema host in UTF-8, UTF-16, or UTF-32, or
+    its decoded text names the host with JSON Unicode escapes, so its syntax,
+    encoding, or complexity error is reported rather than hidden.
     """
+    text = decode_manifest_leniently(raw)
     try:
-        return declares_agent_plugins_schema(load_bounded_json(decode_manifest_leniently(raw)))
+        return declares_agent_plugins_schema(load_bounded_json(text))
     except (StructuredDataError, ValueError):
         pass
-    return any(marker in raw for marker in _AGENT_PLUGINS_HOST_MARKERS)
+    return any(marker in raw for marker in _AGENT_PLUGINS_HOST_MARKERS) or bool(
+        _AGENT_PLUGINS_ESCAPED_HOST_RE.search(text)
+    )
 
 
 def agent_plugins_path_opt_in(path: Path) -> bool:

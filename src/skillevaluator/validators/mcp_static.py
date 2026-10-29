@@ -1783,8 +1783,11 @@ def _runner_invocation(argv: list[str]) -> RunnerInvocation | None:
         sub, rest = _subcommand(args, _NPM_GLOBAL_VALUE_FLAGS)
         if sub not in {"exec", "x"}:
             return None
-        # Like every npm command, npm exec reads its options anywhere before "--".
-        return _npm_invocation("npm exec", rest, _NPX_VALUE_FLAGS, options_until_separator=True)
+        # Like every npm command, npm exec reads its options anywhere before "--", including
+        # package options before the subcommand. Keep those next to the exec-local options.
+        before = args[: len(args) - len(rest) - 1]
+        packages = [f"--package={spec}" for spec in _flag_values(before, _PACKAGE_FLAGS)]
+        return _npm_invocation("npm exec", [*packages, *rest], _NPX_VALUE_FLAGS, options_until_separator=True)
     if base == "uvx":
         return _uv_invocation("uvx", args)
     if base == "uv":
@@ -2290,6 +2293,24 @@ def _with_launch_defaults(config: Any) -> Any:
     if isinstance(raw_args, list):
         launch["args"] = expanded[1:]
     return launch
+
+
+def _with_security_defaults(config: dict[str, Any], *, client: McpClient) -> dict[str, Any]:
+    """The shipped command/argument/env defaults the client actually applies, without reading host env.
+
+    Codex passes these strings literally. Other supported clients use the same
+    default interpretation as pinning and endpoint checks. Unset references
+    remain references, so this never invents their unknown values.
+    """
+    if client == "codex":
+        return config
+    normalized = _with_launch_defaults(config)
+    env = config.get("env")
+    if isinstance(env, dict):
+        expanded = {key: expand_url_defaults(value) if isinstance(value, str) else value for key, value in env.items()}
+        if expanded != env:
+            normalized = dict(normalized, env=expanded)
+    return normalized
 
 
 def _classify_launch(config: Any) -> McpPinning:
@@ -3277,12 +3298,13 @@ def validate_mcp_server_declaration(
 
     _check_transport(server, config)
     _check_insecure_tls_config(server, config)
-    _check_env_and_headers(server, config, client=client)
-    _check_overrides(server, config)
+    security_config = _with_security_defaults(config, client=client)
+    _check_env_and_headers(server, security_config, client=client)
+    _check_overrides(server, security_config)
     _check_cursor_references(server, config, client)
 
     if has_command:
-        _check_command(server, config)
+        _check_command(server, security_config)
         _check_pinning(server, config, client=client)
     allowed = HostAllowlist.of(allowed_private_hosts)
     if has_url:

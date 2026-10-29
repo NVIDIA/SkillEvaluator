@@ -322,3 +322,147 @@ def test_a_matcher_regex_is_parsed_once_for_its_scope_and_its_sensitive_tools() 
     assert matcher_scope("(Write|Edit)x?") == "narrow"
     assert matcher_sensitive_tools("(Write|Edit)x?") == ("Write", "Edit", "MultiEdit", "NotebookEdit")
     assert _compiled_matcher.cache_info().misses == 1
+
+
+@pytest.mark.parametrize(
+    "command",
+    [
+        "npx " + " " * 5000 + "bad@latest",
+        "sh -c 'npx " + " " * 5000 + "bad@latest'",
+        "npx --cache=" + "a" * 5000 + " bad@latest",
+    ],
+    ids=["padded-argument", "padded-shell-program", "long-option"],
+)
+def test_package_runner_scan_does_not_silently_slice_commands(command: str) -> None:
+    result = HookAnalyzer(read_script=lambda _: None).analyze(
+        _pre_tool_use({"type": "command", "command": command}), source="h", file="h.json", display="h.json"
+    )
+    checks = {finding.check_name: finding.severity for finding in result.findings}
+    assert checks["plugin_hook_command_floating_version"] == Severity.HIGH
+
+
+@pytest.mark.parametrize(
+    "last,expected,severity",
+    [
+        ("npx bad@latest", "plugin_hook_command_floating_version", Severity.HIGH),
+        ("npx github:user/repo", "plugin_hook_remote_code", Severity.CRITICAL),
+    ],
+)
+def test_package_runner_presentation_cap_keeps_later_stronger_risks(
+    last: str, expected: str, severity: Severity
+) -> None:
+    command = "; ".join(["npx a"] * 5 + [last])
+    result = HookAnalyzer(read_script=lambda _: None).analyze(
+        _pre_tool_use({"type": "command", "command": command}), source="h", file="h.json", display="h.json"
+    )
+    assert {finding.check_name: finding.severity for finding in result.findings}[expected] == severity
+
+
+def test_package_runner_nesting_limit_is_reported_as_unanalyzed() -> None:
+    import shlex
+
+    command = "npx bad@latest"
+    for _ in range(4):
+        command = "sh -c " + shlex.quote(command)
+    result = HookAnalyzer(read_script=lambda _: None).analyze(
+        _pre_tool_use({"type": "command", "command": command}), source="h", file="h.json", display="h.json"
+    )
+    checks = {finding.check_name: finding.severity for finding in result.findings}
+    assert checks["plugin_hook_script_unanalyzed"] == Severity.HIGH
+
+
+def test_package_runner_work_limit_is_reported_as_unanalyzed() -> None:
+    # A very long option can make shell tokenization expensive even in a byte-bounded script.
+    script = "npx --cache=" + "a" * 32768 + " bad@latest"
+    result = HookAnalyzer(read_script=lambda _: script).analyze(
+        _pre_tool_use(_SCRIPT), source="h", file="h.json", display="h.json"
+    )
+    checks = {finding.check_name: finding.severity for finding in result.findings}
+    assert checks["plugin_hook_script_unanalyzed"] == Severity.HIGH
+
+
+@pytest.mark.parametrize(
+    "command,expected,severity",
+    [
+        ("sh -c 'npx bad@latest | cat'", "plugin_hook_command_floating_version", Severity.HIGH),
+        ("sh -c 'cat | npx bad@latest'", "plugin_hook_command_floating_version", Severity.HIGH),
+        ("sh -c 'npx github:user/repo | cat'", "plugin_hook_remote_code", Severity.CRITICAL),
+        (r"npx bad@latest \| cat", "plugin_hook_command_floating_version", Severity.HIGH),
+    ],
+)
+def test_package_runner_pipeline_split_preserves_quoted_shell_programs(
+    command: str, expected: str, severity: Severity
+) -> None:
+    result = HookAnalyzer(read_script=lambda _: None).analyze(
+        _pre_tool_use({"type": "command", "command": command}), source="h", file="h.json", display="h.json"
+    )
+    assert {finding.check_name: finding.severity for finding in result.findings}[expected] == severity
+
+
+@pytest.mark.parametrize(
+    "command,expected,severity",
+    [
+        ("n'p'x bad@latest", "plugin_hook_command_floating_version", Severity.HIGH),
+        (r"n\px bad@latest", "plugin_hook_command_floating_version", Severity.HIGH),
+        ("n'p'x github:user/repo", "plugin_hook_remote_code", Severity.CRITICAL),
+        (r"n\px github:user/repo", "plugin_hook_remote_code", Severity.CRITICAL),
+    ],
+)
+def test_package_runner_hint_does_not_skip_reconstructed_executable_names(
+    command: str, expected: str, severity: Severity
+) -> None:
+    result = HookAnalyzer(read_script=lambda _: None).analyze(
+        _pre_tool_use({"type": "command", "command": command}), source="h", file="h.json", display="h.json"
+    )
+    assert {finding.check_name: finding.severity for finding in result.findings}[expected] == severity
+
+
+@pytest.mark.parametrize("package", ["bad@latest", "github:user/repo"])
+@pytest.mark.parametrize("count", [9, 17])
+def test_package_runner_wrapper_depth_exhaustion_is_reported(package: str, count: int) -> None:
+    command = "env " * count + "npx " + package
+    result = HookAnalyzer(read_script=lambda _: None).analyze(
+        _pre_tool_use({"type": "command", "command": command}), source="h", file="h.json", display="h.json"
+    )
+    assert {finding.check_name: finding.severity for finding in result.findings}[
+        "plugin_hook_script_unanalyzed"
+    ] == Severity.HIGH
+
+
+@pytest.mark.parametrize(
+    "package,expected,severity",
+    [
+        ("bad@latest", "plugin_hook_command_floating_version", Severity.HIGH),
+        ("github:user/repo", "plugin_hook_remote_code", Severity.CRITICAL),
+    ],
+)
+def test_package_runner_at_the_wrapper_depth_bound_is_still_classified(
+    package: str, expected: str, severity: Severity
+) -> None:
+    command = "env " * 8 + "npx " + package
+    result = HookAnalyzer(read_script=lambda _: None).analyze(
+        _pre_tool_use({"type": "command", "command": command}), source="h", file="h.json", display="h.json"
+    )
+    checks = {finding.check_name: finding.severity for finding in result.findings}
+    assert checks[expected] == severity
+    assert "plugin_hook_script_unanalyzed" not in checks
+
+
+def test_package_runner_split_string_wrapper_exhaustion_is_reported() -> None:
+    command = "env -S '" + "env " * 17 + "npx github:user/repo'"
+    result = HookAnalyzer(read_script=lambda _: None).analyze(
+        _pre_tool_use({"type": "command", "command": command}), source="h", file="h.json", display="h.json"
+    )
+    assert {finding.check_name: finding.severity for finding in result.findings}[
+        "plugin_hook_script_unanalyzed"
+    ] == Severity.HIGH
+
+
+def test_quoted_pipe_argument_is_not_a_pipeline() -> None:
+    result = HookAnalyzer(read_script=lambda _: None).analyze(
+        _pre_tool_use({"type": "command", "command": "npx good@1.2.3 'literal|value'"}),
+        source="h",
+        file="h.json",
+        display="h.json",
+    )
+    assert result.findings == []

@@ -19,7 +19,7 @@ from yaml.events import (
     CollectionStartEvent,
     ScalarEvent,
 )
-from yaml.nodes import MappingNode
+from yaml.nodes import MappingNode, Node, SequenceNode
 
 MAX_STRUCTURED_DEPTH = 100
 MAX_STRUCTURED_NODES = 20_000
@@ -40,7 +40,16 @@ class StructuredDataLimitError(StructuredDataError):
     """The input exceeds a parser or object-graph complexity ceiling."""
 
 
-class _UniqueKeySafeLoader(yaml.SafeLoader):
+class _MergeBoundedSafeLoader(yaml.SafeLoader):
+    """Check merge expansion on composed nodes before constructing any values."""
+
+    def compose_document(self) -> Node:
+        node = super().compose_document()
+        _preflight_yaml_merge_work(node)
+        return node
+
+
+class _UniqueKeySafeLoader(_MergeBoundedSafeLoader):
     """SafeLoader variant that rejects ambiguous last-key-wins mappings."""
 
     def construct_mapping(self, node: MappingNode, deep: bool = False) -> dict[object, object]:
@@ -69,6 +78,70 @@ class _UniqueKeySafeLoader(yaml.SafeLoader):
 
 def _limit(message: str) -> StructuredDataLimitError:
     return StructuredDataLimitError(f"Structured data complexity limit exceeded: {message}")
+
+
+def _preflight_yaml_merge_work(root: Node) -> None:
+    """Bound flattened pairs, including duplicate keys that construction discards.
+
+    PyYAML flattens merges into lists before constructing dictionaries. Count
+    the projected lists on the composed node graph with memoized merge sizes;
+    never expand aliases or mutate the nodes used by the real constructor.
+    """
+    mappings: dict[int, tuple[int, list[int]]] = {}
+    seen: set[int] = set()
+    pending = [root]
+    while pending:
+        node = pending.pop()
+        identity = id(node)
+        if identity in seen:
+            continue
+        seen.add(identity)
+        if isinstance(node, MappingNode):
+            own_pairs = 0
+            merges = []
+            for key, value in node.value:
+                pending.extend((key, value))
+                if key.tag != "tag:yaml.org,2002:merge":
+                    own_pairs += 1
+                elif isinstance(value, MappingNode):
+                    merges.append(id(value))
+                elif isinstance(value, SequenceNode):
+                    # Invalid merge operands retain the constructor's syntax
+                    # error; only mapping operands can multiply pair lists.
+                    merges.extend(id(item) for item in value.value if isinstance(item, MappingNode))
+            mappings[identity] = own_pairs, merges
+        elif isinstance(node, SequenceNode):
+            pending.extend(node.value)
+
+    sizes: dict[int, int] = {}
+    active: set[int] = set()
+    total_work = 0
+    for identity in mappings:
+        stack = [(identity, False)]
+        while stack:
+            current, ready = stack.pop()
+            if current in sizes:
+                continue
+            own_pairs, merges = mappings[current]
+            if not ready:
+                if current in active:
+                    raise _limit("cyclic YAML merge")
+                active.add(current)
+                stack.append((current, True))
+                stack.extend((merged, False) for merged in merges)
+                continue
+            active.remove(current)
+            size = own_pairs
+            for merged in merges:
+                size += sizes[merged]
+                if size > MAX_STRUCTURED_COLLECTION_ITEMS:
+                    break
+            if size > MAX_STRUCTURED_COLLECTION_ITEMS:
+                raise _limit(f"YAML merge-expanded mapping size exceeds {MAX_STRUCTURED_COLLECTION_ITEMS}")
+            total_work += size
+            if total_work > MAX_STRUCTURED_NODES:
+                raise _limit(f"YAML merge expansion work exceeds {MAX_STRUCTURED_NODES}")
+            sizes[current] = size
 
 
 def _preflight_yaml(raw: str) -> None:
@@ -141,7 +214,9 @@ def load_bounded_yaml(raw: str, *, last_key_wins: bool = False) -> Any:
     """
     _preflight_yaml(raw)
     try:
-        value = yaml.load(raw, Loader=yaml.SafeLoader if last_key_wins else _UniqueKeySafeLoader)
+        value = yaml.load(raw, Loader=_MergeBoundedSafeLoader if last_key_wins else _UniqueKeySafeLoader)
+    except StructuredDataLimitError:
+        raise
     except (RecursionError, OverflowError) as exc:
         raise _limit("constructor recursion or numeric range") from exc
     except (yaml.YAMLError, ValueError) as exc:

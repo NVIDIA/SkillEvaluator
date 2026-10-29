@@ -14,6 +14,7 @@ import pytest
 
 from skillevaluator.plugin_dependencies import (
     CAUSE_SOURCE,
+    CAUSE_UNSAFE,
     REMOTE_REF_SOURCES,
     RepositoryIdentity,
     classify_plugin_dependencies,
@@ -185,3 +186,24 @@ def test_rule_ref_to_directory_or_hardlink_is_not_a_valid_rule(tmp_path: Path) -
 
     assert folder.state == "missing"
     assert linked.state == "unresolved"
+
+
+@pytest.mark.parametrize(
+    "ref",
+    [
+        "github::example-org/example-repo::skills::bad\x00name",
+        "github::example-org/example-repo::skills\x00::bad",
+        {"source": "github", "repo": REPO, "path": "skills/bad\x00name"},
+    ],
+)
+def test_nul_dependency_paths_are_unresolved_instead_of_raising(tmp_path: Path, ref) -> None:
+    (tmp_path / "skills").mkdir()
+    manifest = {"skills": {"refs": [ref]}}
+    identity = RepositoryIdentity(clone_root=tmp_path, local_slug=REPO)
+
+    resolution = classify_plugin_dependencies(manifest, tmp_path, identity)
+
+    assert len(resolution.skills) == 1
+    assert resolution.skills[0].state == "unresolved"
+    assert resolution.skills[0].cause == CAUSE_UNSAFE
+    assert resolution.skills[0].path is None

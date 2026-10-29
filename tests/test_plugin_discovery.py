@@ -426,3 +426,97 @@ def test_rule_frontmatter_uses_the_stripped_staging_text(tmp_path):
     )
     rule = next(m for m in found(tmp_path).components if m.type == "rule")
     assert rule.frontmatter == {"alwaysApply": True}
+
+
+@pytest.mark.parametrize(
+    ("field_name", "component_type", "default_dir"),
+    [
+        ("agents", "agent", "agents"),
+        ("commands", "command", "commands"),
+        ("outputStyles", "output_style", "output-styles"),
+    ],
+)
+def test_claude_markdown_declarations_supplement_packaged_defaults(tmp_path, field_name, component_type, default_dir):
+    write_tree(
+        tmp_path,
+        {
+            ".claude-plugin/plugin.json": {
+                "name": "demo",
+                field_name: ["./extra/custom.md", f"./{default_dir}/shared.md"],
+            },
+            "extra/custom.md": "Custom member.",
+            f"{default_dir}/shared.md": "Shared member.",
+            f"{default_dir}/privileged.md": "---\npermissionMode: bypassPermissions\n---\nPackaged member.",
+        },
+    )
+    result = found(tmp_path)
+    rows = [member for member in result.components if member.type == component_type]
+    assert result.complete
+    assert {member.path for member in rows} == {
+        "extra/custom.md",
+        f"{default_dir}/shared.md",
+        f"{default_dir}/privileged.md",
+    }
+    assert len(rows) == 3
+    assert next(member for member in rows if member.path.endswith("shared.md")).origin == "declared+packaged"
+    assert next(member for member in rows if member.path.endswith("privileged.md")).frontmatter == {
+        "permissionMode": "bypassPermissions"
+    }
+
+
+@pytest.mark.parametrize("profile", [CODEX_PROFILE, CURSOR_PROFILE])
+def test_replacing_markdown_declarations_still_suppress_packaged_defaults(tmp_path, profile):
+    write_tree(
+        tmp_path,
+        {
+            profile.manifest_path: {"name": "demo", "commands": ["./extra/custom.md"]},
+            "extra/custom.md": "Custom command.",
+            "commands/default.md": "Default command.",
+        },
+    )
+    result = found(tmp_path)
+    assert result.complete
+    assert [member.path for member in result.components if member.type == "command"] == ["extra/custom.md"]
+
+
+def test_claude_inline_command_declarations_keep_packaged_commands(tmp_path):
+    write_tree(
+        tmp_path,
+        {
+            ".claude-plugin/plugin.json": {"name": "demo", "commands": {"inline": {"content": "Inline command."}}},
+            "commands/default.md": "Packaged command.",
+        },
+    )
+    result = found(tmp_path)
+    assert result.complete
+    assert {member.name for member in result.components if member.type == "command"} == {"inline", "default"}
+
+
+@pytest.mark.skipif(os.name == "nt", reason="Windows rejects trailing-whitespace filename aliases.")
+@pytest.mark.parametrize(
+    ("field_name", "component_type", "declared", "safe_file", "selected_file", "member_path"),
+    [
+        ("skills", "skill", "./custom ", "custom/SKILL.md", "custom /SKILL.md", "custom "),
+        ("commands", "command", "./command.md ", "command.md", "command.md ", "command.md "),
+        ("hooks", "hook", "./hooks.json ", "hooks.json", "hooks.json ", "hooks.json "),
+    ],
+)
+def test_codex_declared_path_whitespace_selects_the_literal_target(
+    tmp_path, field_name, component_type, declared, safe_file, selected_file, member_path
+):
+    safe_content = {"hooks": {}, "label": "Safe target"} if field_name == "hooks" else "Safe target."
+    selected_content = {"hooks": {}, "label": "Selected target"} if field_name == "hooks" else "Selected target."
+    write_tree(
+        tmp_path,
+        {
+            ".codex-plugin/plugin.json": {"name": "demo", field_name: declared},
+            safe_file: safe_content,
+            selected_file: selected_content,
+        },
+    )
+    result = found(tmp_path)
+    rows = [member for member in result.components if member.type == component_type]
+    assert result.complete
+    assert len(rows) == 1
+    assert rows[0].path == member_path
+    assert (rows[0].config if field_name == "hooks" else rows[0].text) == selected_content

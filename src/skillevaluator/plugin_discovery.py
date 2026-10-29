@@ -164,7 +164,7 @@ def _section_refs(section: Any) -> list[Any]:
         refs = section
     if not isinstance(refs, list):
         return []
-    return refs[:PLUGIN_COMPONENT_MAX_ITEMS]
+    return refs
 
 
 def _ref_label(ref: Any) -> str:
@@ -259,18 +259,19 @@ class _MemberCollector:
         self._check_item_count(f"'{field_name}'", len(values))
         return values[:PLUGIN_COMPONENT_MAX_ITEMS]
 
-    def _check_item_count(self, what: str, count: int, rel: str | None = None) -> None:
-        """HIGH finding when only the first ``PLUGIN_COMPONENT_MAX_ITEMS`` entries get checked."""
-        if count <= PLUGIN_COMPONENT_MAX_ITEMS:
+    def _check_item_count(
+        self, what: str, count: int, rel: str | None = None, *, limit: int = PLUGIN_COMPONENT_MAX_ITEMS
+    ) -> None:
+        """Expose every bounded-list cut before declarations or directory entries are dropped."""
+        if count <= limit:
             return
         self.inventory.findings.append(
             _plugin_finding(
                 Severity.HIGH,
                 "plugin_component_list_truncated",
-                f"{what} has {count} entries; only the first {PLUGIN_COMPONENT_MAX_ITEMS} are inspected, so the "
-                "rest are loaded without static checks",
+                f"{what} has {count} entries; only the first {limit} are inspected. Discovery is incomplete.",
                 self.reader.display(rel or self.manifest_rel),
-                f"Keep each declared component list or server map to at most {PLUGIN_COMPONENT_MAX_ITEMS} entries.",
+                f"Keep this declaration list or directory scan within its {limit}-entry limit.",
             )
         )
 
@@ -599,7 +600,9 @@ class _MemberCollector:
                 self._declared_skill_dir(resolved.rel)
                 self._flag_dependency_folder_skills(resolved.rel)
         elif self.manifest is not None:
-            for ref in _section_refs(self.manifest.get("skills")):
+            refs = _section_refs(self.manifest.get("skills"))
+            self._check_item_count("Skill references", len(refs))
+            for ref in refs[:PLUGIN_COMPONENT_MAX_ITEMS]:
                 self._add(PluginMember("skill", _ref_label(ref), "declared", None, "evaluated"))
 
         if self.contained and self._declared_replaces("skills", declared_value) and not declared_default:
@@ -626,6 +629,7 @@ class _MemberCollector:
             and self.reader.kind(default_dir) == "missing"
         ):
             self._root_skill()
+        self._check_item_count("Discovered skills", len(manifests))
         for manifest in manifests[:PLUGIN_COMPONENT_MAX_ITEMS]:
             skill_dir = default_dir / manifest.relative_path.parent.as_posix()
             origin: Origin = "declared+packaged" if declared_default else "packaged"
@@ -681,6 +685,9 @@ class _MemberCollector:
         except OSError:
             entries = []
         manifests: list[PurePosixPath] = []
+        self._check_item_count(
+            "Skill directory entries", len(entries), rel_dir.as_posix(), limit=CONTENT_DEDUP_MAX_DISCOVERED_PATHS
+        )
         for entry in entries[:CONTENT_DEDUP_MAX_DISCOVERED_PATHS]:
             if entry.name.startswith(".") or (
                 entry.name in SCAN_EXCLUDED_DIRS and entry.name not in SCAN_ARTIFACT_DIRS
@@ -751,6 +758,7 @@ class _MemberCollector:
                 PluginMember("skill", rel_dir.as_posix(), "declared", rel_dir.as_posix(), "evaluated", problem="unsafe")
             )
             return
+        self._check_item_count("Discovered skills", len(manifests))
         for manifest in manifests[:PLUGIN_COMPONENT_MAX_ITEMS]:
             parent = PurePosixPath(manifest.relative_path.parent.as_posix())
             skill_dir = rel_dir / parent if str(parent) != "." else rel_dir
@@ -808,7 +816,9 @@ class _MemberCollector:
         elif self.manifest is not None and not self.contained:
             # Bundle-reference refs are inventoried by label only; resolving them
             # (and flagging dangling ones) is the dependency-resolution report's job.
-            for ref in _section_refs(section):
+            refs = _section_refs(section)
+            self._check_item_count("Rule references", len(refs))
+            for ref in refs[:PLUGIN_COMPONENT_MAX_ITEMS]:
                 self._add(PluginMember("rule", _ref_label(ref), "declared", None, "evaluated"))
         default_name = self.profile.default_rules_dir
         if default_name is None:
@@ -971,6 +981,7 @@ class _MemberCollector:
             )
             self._broken("command", declared, command_name, "invalid")
             return
+        self._check_item_count("Command folder members", len(direct), rel_dir.as_posix())
         for rel in direct[:PLUGIN_COMPONENT_MAX_ITEMS]:
             component = self._add(PluginMember("command", rel.stem, "declared", rel.as_posix(), "unsupported"))
             self._command_text(component, rel, "", entry)
@@ -995,6 +1006,7 @@ class _MemberCollector:
             if not isinstance(apps, dict) or not apps:
                 self._add(PluginMember("app", name, origin, rel, "unsupported", config=config))
                 continue
+            self._check_item_count("App aliases", len(apps), rel)
             for alias in list(apps)[:PLUGIN_COMPONENT_MAX_ITEMS]:
                 self._add(PluginMember("app", str(alias), origin, rel, "unsupported", config=apps[alias]))
 
@@ -1013,6 +1025,7 @@ class _MemberCollector:
         declared = self.manifest.get("extensions") if self.manifest is not None else None
         namespaces: dict[str, Origin] = {}
         if isinstance(declared, dict):
+            self._check_item_count("Extension namespaces", len(declared))
             for key in list(declared)[:PLUGIN_COMPONENT_MAX_ITEMS]:
                 namespaces[str(key)] = "declared"
         try:
@@ -1021,6 +1034,7 @@ class _MemberCollector:
         except OSError:
             entries = []
         directories: set[str] = set()
+        self._check_item_count("Root directory entries", len(entries), ".", limit=CONTENT_DEDUP_MAX_DISCOVERED_PATHS)
         for entry in entries[:CONTENT_DEDUP_MAX_DISCOVERED_PATHS]:
             if not _NAMESPACE_DIR_RE.match(entry.name) or self.reader.kind(PurePosixPath(entry.name)) != "dir":
                 continue
@@ -1232,6 +1246,8 @@ class _MemberCollector:
                         applied[name] = member
                     elif previous is not None:
                         member.effective = False
+                    else:
+                        applied[name] = member
                     self._add(member)
             else:
                 self._add(PluginMember("lsp", name, origin, rel, "unsupported", config=config))

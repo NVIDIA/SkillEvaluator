@@ -48,6 +48,10 @@ def found(root: Path):
 @pytest.mark.parametrize("profile", [CLAUDE_PROFILE, CODEX_PROFILE, CURSOR_PROFILE, AGENT_PLUGINS_V1_PROFILE])
 def test_all_contained_formats_discover_and_analyze_without_execution(tmp_path, monkeypatch, profile):
     manifest = {"name": "demo", "$schema": AP_SCHEMA} if profile.client_extensions else {"name": "demo"}
+    mcp_config = {"mcpServers": {"s": dict(SERVER)}}
+    if profile.client_extensions:
+        mcp_config["$schema"] = "https://agent-plugins.org/schemas/1.0.0/mcp.schema.json"
+        mcp_config["mcpServers"]["s"]["type"] = "stdio"
     hook_path = "com.cursor/hooks/hooks.json" if profile.client_extensions else "hooks/hooks.json"
     hooks = {
         "hooks": {
@@ -61,7 +65,7 @@ def test_all_contained_formats_discover_and_analyze_without_execution(tmp_path, 
         {
             profile.manifest_path: manifest,
             "skills/demo/SKILL.md": SKILL,
-            profile.default_mcp_files[0]: {"mcpServers": {"s": SERVER}},
+            profile.default_mcp_files[0]: mcp_config,
             hook_path: hooks,
         },
     )
@@ -72,6 +76,7 @@ def test_all_contained_formats_discover_and_analyze_without_execution(tmp_path, 
     monkeypatch.setattr(subprocess, "Popen", forbidden)
     monkeypatch.setattr(socket, "create_connection", forbidden)
     result = found(tmp_path)
+    assert result.complete
     assert {"skill", "hook", "mcp"} <= {m.type for m in result.components}
     assert all(m.declared_by == profile.manifest_path for m in result.components)
     hook = next(m for m in result.components if m.type == "hook")
@@ -307,3 +312,83 @@ def test_real_local_repository_dependency_resolution_keeps_each_state(tmp_path):
     reader = PluginRootReader(plugin)
     collection = collect_mcp_declarations(reader, manifest, contained=False, manifest_rel="agent_plugin.yaml")
     assert collection.effective[0].name == "search" and not collection.effective[0].runnable
+
+
+def test_agent_plugins_mcp_schema_and_missing_transport_remain_visible(tmp_path):
+    write_tree(
+        tmp_path, {"plugin.json": {"$schema": AP_SCHEMA, "name": "demo"}, "mcp.json": {"mcpServers": {"s": SERVER}}}
+    )
+    result = found(tmp_path)
+    assert not result.complete
+    assert {"mcp_config_schema_mismatch", "mcp_transport_missing"} <= {f.check_name for f in result.findings}
+    assert next(m for m in result.components if m.type == "mcp").config == SERVER
+
+
+@pytest.mark.parametrize(
+    "kind",
+    ["packaged_skills", "recursive_skills", "skill_refs", "rule_refs", "app_aliases", "extensions", "command_folder"],
+)
+def test_discovery_limits_never_claim_complete_after_dropping_members(tmp_path, kind):
+    from skillevaluator.constants import PLUGIN_COMPONENT_MAX_ITEMS
+
+    count = PLUGIN_COMPONENT_MAX_ITEMS + 1
+    manifest = {"name": "demo"}
+    path = ".claude-plugin/plugin.json"
+    files = {}
+    member_type = "skill"
+    if kind == "packaged_skills":
+        files = {f"skills/s{i:03}/SKILL.md": SKILL for i in range(count)}
+    elif kind == "recursive_skills":
+        path = ".codex-plugin/plugin.json"
+        manifest["skills"] = "./custom"
+        files = {f"custom/deep/s{i:03}/SKILL.md": SKILL for i in range(count)}
+    elif kind in {"skill_refs", "rule_refs"}:
+        path = "agent_plugin.yaml"
+        section = "skills" if kind == "skill_refs" else "rules"
+        member_type = "skill" if section == "skills" else "rule"
+        manifest[section] = {"refs": [f"github::org/repo::{section}::s{i:03}" for i in range(count)]}
+    elif kind == "app_aliases":
+        path = ".codex-plugin/plugin.json"
+        files = {".app.json": {"apps": {f"a{i:03}": {"id": str(i)} for i in range(count)}}}
+        member_type = "app"
+    elif kind == "extensions":
+        path = "plugin.json"
+        manifest.update({"$schema": AP_SCHEMA, "extensions": {f"com.a{i:03}": {} for i in range(count)}})
+        member_type = "extension"
+    else:
+        manifest["commands"] = {"group": {"source": "./command-set"}}
+        files = {f"command-set/c{i:03}.md": SKILL for i in range(count)}
+        member_type = "command"
+    files[path] = manifest
+    write_tree(tmp_path, files)
+    result = found(tmp_path)
+    assert len([m for m in result.components if m.type == member_type]) == PLUGIN_COMPONENT_MAX_ITEMS
+    assert not result.complete
+    assert any(
+        f.check_name in {"plugin_component_list_truncated", "plugin_component_scan_truncated"} for f in result.findings
+    )
+
+
+@pytest.mark.parametrize(
+    ("first", "later", "effective"),
+    [(5, {"command": "new"}, [False, True]), ({"command": "old"}, 5, [True, False]), (5, 6, [True, False])],
+)
+def test_invalid_lsp_declarations_do_not_override_a_configured_server(tmp_path, first, later, effective):
+    write_tree(
+        tmp_path,
+        {".claude-plugin/plugin.json": {"name": "demo", "lspServers": {"s": later}}, ".lsp.json": {"s": first}},
+    )
+    rows = [m for m in found(tmp_path).components if m.type == "lsp"]
+    assert [m.config for m in rows] == [first, later]
+    assert [m.effective for m in rows] == effective
+
+
+def test_environment_name_scan_depth_limit_is_visible(tmp_path):
+    from skillevaluator.plugin_member_paths import _ENV_SCAN_MAX_DEPTH, find_environment_files
+
+    deep = tmp_path.joinpath(*("nested" for _ in range(_ENV_SCAN_MAX_DEPTH + 1)))
+    deep.mkdir(parents=True)
+    (deep / ".env").write_text("not opened")
+    paths, complete = find_environment_files(tmp_path)
+    assert paths == []
+    assert complete is False

@@ -329,9 +329,10 @@ def is_env_file(name: str) -> bool:
 
 def _scan_env_entries(
     entries: list[os.DirEntry[str]], rel_dir: PurePosixPath, depth: int, hits: list[PurePosixPath], budget: int
-) -> tuple[list[str], int]:
-    """Record ``.env`` hits among one directory's entries; return (subdirectories to visit, budget left)."""
+) -> tuple[list[str], int, bool]:
+    """Return child names, remaining entry budget, and whether every child was inspectable."""
     children: list[str] = []
+    complete = True
     for entry in entries:
         budget -= 1
         if budget < 0:
@@ -339,20 +340,24 @@ def _scan_env_entries(
         try:
             is_dir = entry.is_dir(follow_symlinks=False)
         except OSError:
+            complete = False
             continue
         if not is_dir:
             if is_env_file(entry.name):
                 hits.append(rel_dir / entry.name)
-        elif entry.name not in SCAN_EXCLUDED_DIRS and depth < _ENV_SCAN_MAX_DEPTH:
-            children.append(entry.name)
-    return children, budget
+        elif entry.name not in SCAN_EXCLUDED_DIRS:
+            if depth < _ENV_SCAN_MAX_DEPTH:
+                children.append(entry.name)
+            else:
+                complete = False
+    return children, budget, complete
 
 
 def find_environment_files(root: Path) -> tuple[list[PurePosixPath], bool]:
     """Names-only walk for shipped ``.env`` / ``.env.*`` files; files are never opened.
 
     Returns the hits and whether the walk was complete (``False`` when the entry
-    budget ran out or a directory could not be opened or listed).
+    budget ran out, the depth limit was reached, or a directory could not be inspected).
 
     On POSIX every directory is opened relative to its parent descriptor with
     ``O_NOFOLLOW``, so a directory swapped for a symlink is never listed. The walk
@@ -381,7 +386,8 @@ def find_environment_files(root: Path) -> tuple[list[PurePosixPath], bool]:
                     except OSError:
                         complete = False
                         entries = []
-                    found, budget = _scan_env_entries(entries, rel_dir, depth, hits, budget)
+                    found, budget, inspected = _scan_env_entries(entries, rel_dir, depth, hits, budget)
+                    complete = complete and inspected
                     children = found[::-1]  # pop() visits them in name order
                     stack[-1] = (fd, rel_dir, depth, children)
                 if budget < 0 or not children:
@@ -411,6 +417,7 @@ def find_environment_files(root: Path) -> tuple[list[PurePosixPath], bool]:
         except OSError:
             complete = False
             continue
-        children, budget = _scan_env_entries(entries, rel_dir, depth, hits, budget)
+        children, budget, inspected = _scan_env_entries(entries, rel_dir, depth, hits, budget)
+        complete = complete and inspected
         pending.extend((directory / name, rel_dir / name, depth + 1) for name in children)
     return sorted(hits), complete and budget >= 0

@@ -19,7 +19,11 @@ from skillevaluator.reporting import CLIReporter, HTMLReporter, JSONReporter, Ma
 from skillevaluator.utils.tool_runner import ToolResult, Tools
 from skillevaluator.validators.base import Finding, Severity, ValidationResult
 from skillevaluator.validators.schema import SchemaValidator
-from skillevaluator.validators.security import SecurityValidator, _skillspector_child_env
+from skillevaluator.validators.security import (
+    SecurityValidator,
+    _skillspector_child_env,
+    _skillspector_incomplete_analysis_error,
+)
 
 _SKILLSPECTOR_2_9_6_NO_LLM_REPORT = (
     Path(__file__).parents[1] / "fixtures" / "skillspector-2.9.6-no-llm.json"
@@ -254,6 +258,41 @@ def _skillspector_documentation_only_report() -> dict:
                 }
             )
     _set_universal_analyzer_work(payload)
+    return payload
+
+
+_WHOLE_SCAN_ANALYZERS = ("static_patterns_prompt_injection", "static_patterns_tool_misuse")
+_SC8_BUDGET_ANALYZER = "static_patterns_supply_chain_bytecode_runtime_limit"
+
+
+def _ledger_exception(
+    path: str,
+    reason_code: str = "runtime_limit",
+    *,
+    analyzers: tuple[str, ...] = _WHOLE_SCAN_ANALYZERS,
+    phase: str = "static",
+) -> dict:
+    """Return one non-fatal SkillSpector ledger exception."""
+    return {
+        "outcome": "partial",
+        "phase": phase,
+        "reason_code": reason_code,
+        "message": "Inspection reached its configured runtime limit.",
+        "path": path,
+        "start_line": None,
+        "end_line": None,
+        "fatal": False,
+        "analyzers": list(analyzers),
+    }
+
+
+def _skillspector_partial_report(ledger_exceptions: list[dict]) -> dict:
+    """Return a valid partial report whose only gaps are *ledger_exceptions*."""
+    payload = _skillspector_json_report()
+    payload["risk_assessment"]["recommendation"] = "CAUTION"
+    payload["analysis_completeness"].update(
+        {"is_complete": False, "status": "partial", "ledger_exceptions": ledger_exceptions}
+    )
     return payload
 
 
@@ -1737,6 +1776,111 @@ print(json.dumps([finding.metadata["matched_value"] for finding in result.findin
 
         assert result.status == "incomplete"
         assert any("risk_assessment.recommendation" in error for error in result.errors)
+
+    @patch("skillevaluator.validators.security.Tools")
+    def test_skillspector_partial_scan_names_incomplete_files_by_reason(
+        self,
+        mock_tools,
+        sample_skill_dir: Path,
+    ) -> None:
+        """A truncated incomplete-analysis error still says why every file was cut short."""
+        ledger = [_ledger_exception(f"references/sect-{index}.html") for index in range(6)]
+        # A second analyzer group on the same file must not count the file twice.
+        ledger.append(_ledger_exception("references/sect-0.html", analyzers=("static_yara",)))
+        ledger.append(_ledger_exception("references/base.css", "obfuscated_instruction_text"))
+
+        result = _validate_skillspector_payload(mock_tools, sample_skill_dir, _skillspector_partial_report(ledger))
+
+        assert result.status == "incomplete"
+        assert len(result.errors) == 1
+        analyzers = ",".join(_WHOLE_SCAN_ANALYZERS)
+        assert result.errors[0].startswith(
+            "skillspector JSON field 'analysis_completeness' reports incomplete analysis (status 'partial'): "
+            f"references/sect-0.html [static; runtime_limit; analyzers={analyzers}]; "
+            f"references/sect-1.html [static; runtime_limit; analyzers={analyzers}]; "
+            f"references/sect-2.html [static; runtime_limit; analyzers={analyzers}]; "
+            "and 5 more (incomplete files by reason: runtime_limit 6, obfuscated_instruction_text 1); "
+            "security scan did not complete. "
+            "SkillSpector reached its runtime limit before it finished 6 file(s). When many files are affected, "
+            "the scan most likely used up SkillSpector's whole-scan time budget (600 seconds by default)"
+        )
+        assert "keep large reference material outside the skill" in result.errors[0]
+        assert "a plain rerun may complete" in result.errors[0]
+
+    @patch("skillevaluator.validators.security.Tools")
+    def test_skillspector_sub_analysis_time_budget_does_not_blame_bundle_size(
+        self,
+        mock_tools,
+        sample_skill_dir: Path,
+    ) -> None:
+        """SkillSpector 2.12.0's SC8 bytecode walk can stop at its own budget on a skill without bytecode."""
+        payload = _skillspector_partial_report([_ledger_exception("references", analyzers=(_SC8_BUDGET_ANALYZER,))])
+        supply_chain = next(
+            status
+            for status in payload["analysis_completeness"]["analyzer_statuses"]
+            if status["analyzer_id"] == "static_patterns_supply_chain"
+        )
+        supply_chain.update({"status": "degraded", "planned_work": 1, "completed": 0, "partial": 1})
+        payload["analysis_completeness"]["limitations"] = ["Analyzer static_patterns_supply_chain status: degraded."]
+
+        result = _validate_skillspector_payload(mock_tools, sample_skill_dir, payload)
+
+        assert result.status == "incomplete"
+        assert result.errors == [
+            "skillspector JSON field 'analysis_completeness' reports incomplete analysis (status 'partial'): "
+            f"references [static; runtime_limit; analyzers={_SC8_BUDGET_ANALYZER}]; "
+            "security scan did not complete. "
+            "A SkillSpector sub-analysis stopped at its own time budget on 1 file(s). That budget is separate "
+            "from the whole-scan limit, so reducing bundled content does not change it. Rerun the scan; if the "
+            "limit repeats, update SkillSpector or report the completeness exceptions to the SkillSpector project."
+        ]
+
+    def test_skillspector_runtime_limit_hint_counts_only_whole_scan_files(self) -> None:
+        ledger = [
+            _ledger_exception("SKILL.md", analyzers=(_SC8_BUDGET_ANALYZER,)),
+            *(_ledger_exception(f"references/sect-{index}.html") for index in range(3)),
+        ]
+
+        error = _skillspector_incomplete_analysis_error("partial", ledger)
+
+        assert "SkillSpector reached its runtime limit before it finished 3 file(s)." in error
+        assert "sub-analysis" not in error
+
+    def test_skillspector_incomplete_analysis_error_without_runtime_limit_has_no_hint(self) -> None:
+        ledger = [
+            {**_ledger_exception("scripts/render.py", "static_parse_limit"), "start_line": 12},
+            _ledger_exception(
+                "references/guide.md", "reference_unresolved", analyzers=(), phase="reference_resolution"
+            ),
+        ]
+
+        assert _skillspector_incomplete_analysis_error("partial", ledger) == (
+            "skillspector JSON field 'analysis_completeness' reports incomplete analysis (status 'partial'): "
+            f"scripts/render.py:12 [static; static_parse_limit; analyzers={','.join(_WHOLE_SCAN_ANALYZERS)}]; "
+            "references/guide.md [reference_resolution; reference_unresolved]; security scan did not complete"
+        )
+        # Without ledger exceptions (limitations or counters only) the error is unchanged.
+        assert _skillspector_incomplete_analysis_error("partial", []) == (
+            "skillspector JSON field 'analysis_completeness' reports incomplete analysis (status 'partial'); "
+            "security scan did not complete"
+        )
+
+    def test_skillspector_incomplete_analysis_error_bounds_untrusted_report_text(self) -> None:
+        ledger = [
+            {
+                "fatal": False,
+                "reason_code": "runtime_limit\n- injected",
+                "path": "docs/a\nb.md",
+                "analyzers": ["x" * 500, 7],
+            },
+            {"fatal": False, "reason_code": None, "path": None, "start_line": True},
+        ]
+
+        error = _skillspector_incomplete_analysis_error("partial", ledger)
+
+        assert "\n" not in error
+        assert f"docs/a b.md [runtime_limit - injected; analyzers={'x' * 197}...]; unknown; " in error
+        assert "x" * 198 not in error
 
     @pytest.mark.parametrize(
         ("failure_mode", "expected_error"),

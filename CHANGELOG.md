@@ -219,6 +219,19 @@ All notable changes to SkillEvaluator are documented in this file.
   addresses on the same line and domains that merely resemble placeholders remain detectable
   ([#244](https://github.com/NVIDIA/SkillEvaluator/issues/244)).
 
+- A skill that exceeds a Tier 2 context-deduplication work limit (more than
+  512 content chunks, too much pairwise comparison work, or an LLM-review limit:
+  more than 50 candidate clusters, more than 64 members in one cluster, or an
+  oversized per-cluster or total review prompt) is now reported as
+  **INCOMPLETE** instead of failing with a CRITICAL `chunk_count_limit`,
+  `scalar_comparison_limit`, `llm_cluster_count_limit`,
+  `llm_cluster_member_limit`, `llm_prompt_size_limit`, or
+  `llm_total_prompt_size_limit` finding. Those findings read as duplicate
+  content in the skill and showed `FAILED` with "Publication blocked" in
+  BENCHMARK.md, and a policy severity override could downgrade them into a pass
+  with no duplicate analysis. Exit codes are otherwise unchanged. An execution
+  error names the limit, and the JSON report records it under `work_limit`.
+
 - Tier 3 security grading preserves ordinary nested `/tmp` cleanup, including
   child operands with trailing slashes, unless the current or an earlier
   execution action contains recognized symlink-creation syntax (`ln -s`,

@@ -247,6 +247,7 @@ jobs:
           tests/test_harbor_local_sandbox.py
           tests/test_harbor_local_mode.py
           tests/test_local_mode_contract.py
+          tests/validators/test_rubric_eval.py
           tests/test_tier3_progress.py
           tests/test_tier3_result_display.py
           tests/test_harbor_runtime_preflight.py
@@ -297,6 +298,7 @@ jobs:
           tests/embedding
           tests/deduplication
           tests/validators/test_similarity.py
+          tests/validators/test_rubric_eval.py
           tests/reporting
           tests/test_cli.py
           tests/test_harbor_output_provenance.py

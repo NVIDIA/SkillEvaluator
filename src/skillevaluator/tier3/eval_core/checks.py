@@ -21,14 +21,24 @@ import shlex
 from fnmatch import fnmatchcase
 from typing import Any
 
-from skillevaluator.tier3.eval_core import script_invocation as _script_invocation
-from skillevaluator.tier3.eval_core import shell_lexing as _shell_lexing
-from skillevaluator.tier3.eval_core.codex_tool_call_normalizer import (
-    AMBIGUOUS_OUTER_EXEC_OBSERVATION,
-    UNOBSERVED_INNER_CALL,
-    UNSUPPORTED_NATIVE_CODEX_EXEC,
-)
-from skillevaluator.tier3.eval_core.secret_redaction import redact_secrets_in_log_line
+if __package__:
+    from skillevaluator.tier3.eval_core import script_invocation as _script_invocation
+    from skillevaluator.tier3.eval_core import shell_lexing as _shell_lexing
+    from skillevaluator.tier3.eval_core.codex_tool_call_normalizer import (
+        AMBIGUOUS_OUTER_EXEC_OBSERVATION,
+        UNOBSERVED_INNER_CALL,
+        UNSUPPORTED_NATIVE_CODEX_EXEC,
+    )
+    from skillevaluator.tier3.eval_core.secret_redaction import redact_secrets_in_log_line
+else:  # Standalone verifier: all dependencies are staged siblings.
+    import script_invocation as _script_invocation
+    import shell_lexing as _shell_lexing
+    from codex_tool_call_normalizer import (
+        AMBIGUOUS_OUTER_EXEC_OBSERVATION,
+        UNOBSERVED_INNER_CALL,
+        UNSUPPORTED_NATIVE_CODEX_EXEC,
+    )
+    from secret_redaction import redact_secrets_in_log_line
 
 _ATTACHED_DESCRIPTOR_RE = _shell_lexing._ATTACHED_DESCRIPTOR_RE
 _QUOTED_SYNTAX_MARK = _shell_lexing._QUOTED_SYNTAX_MARK
@@ -3380,7 +3390,9 @@ def _tool_searches_root(action: str, args: dict, text: str, depth: int = 0) -> b
     commands: list[list[str]] = [[]]
     masked_commands: list[list[str]] = [[]]
     skip_redirect_target = False
-    for token, masked_token in zip(tokens, masked_tokens, strict=True):
+    # Both token lists have equal length; indexing also supports task Python 3.9.
+    for token_index, token in enumerate(tokens):
+        masked_token = masked_tokens[token_index]
         if token in {";", "&&", "||", "|", "&", "(", ")"}:
             commands.append([])
             masked_commands.append([])
@@ -3392,7 +3404,8 @@ def _tool_searches_root(action: str, args: dict, text: str, depth: int = 0) -> b
         elif not _ATTACHED_REDIRECT_RE.match(token):
             commands[-1].append(token)
             masked_commands[-1].append(masked_token)
-    for command, masked_command in zip(commands, masked_commands, strict=True):
+    for command_index, command in enumerate(commands):
+        masked_command = masked_commands[command_index]
         assignments: dict[str, str] = {}
         index = 0
         while (

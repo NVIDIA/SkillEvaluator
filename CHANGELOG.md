@@ -43,6 +43,10 @@ All notable changes to SkillEvaluator are documented in this file.
 
 ### Fixed
 
+- Harbor's standalone verifier now runs on Python 3.9 task images after sharing
+  deterministic checks with the host evaluator. Packaged verifier checks execute
+  on a real Python 3.9 interpreter in CI to retain this compatibility.
+
 - Explicit searches of `/` (`find`, `grep -r`, `rg`, `ag`, `du` and `tree` with a
   `/` operand, and native search tools rooted at `/`) now count as wasted tool
   calls whether or not they name the expected skill or script, including when

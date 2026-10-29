@@ -271,6 +271,37 @@
     "doctor": {
       "params": [
         {
+          "choices": [
+            "1",
+            "2",
+            "3",
+            "all"
+          ],
+          "default": "3",
+          "name": "tier",
+          "opts": [
+            "--tier"
+          ],
+          "param_type": "option"
+        },
+        {
+          "name": "checks",
+          "opts": [
+            "--checks"
+          ],
+          "param_type": "option",
+          "type": "text"
+        },
+        {
+          "default": "60.0",
+          "name": "timeout",
+          "opts": [
+            "--timeout"
+          ],
+          "param_type": "option",
+          "type": "float range"
+        },
+        {
           "name": "agents",
           "opts": [
             "--agents",
@@ -675,6 +706,37 @@
     },
     "health-check": {
       "params": [
+        {
+          "choices": [
+            "1",
+            "2",
+            "3",
+            "all"
+          ],
+          "default": "3",
+          "name": "tier",
+          "opts": [
+            "--tier"
+          ],
+          "param_type": "option"
+        },
+        {
+          "name": "checks",
+          "opts": [
+            "--checks"
+          ],
+          "param_type": "option",
+          "type": "text"
+        },
+        {
+          "default": "60.0",
+          "name": "timeout",
+          "opts": [
+            "--timeout"
+          ],
+          "param_type": "option",
+          "type": "float range"
+        },
         {
           "name": "agents",
           "opts": [

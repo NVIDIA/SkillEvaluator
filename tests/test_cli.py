@@ -570,6 +570,132 @@ def test_doctor_verify_models_help_describes_live_catalog_probe(args: list[str])
     assert "authenticated" not in normalized_output
 
 
+@pytest.fixture
+def doctor_calls(monkeypatch: pytest.MonkeyPatch) -> list[dict]:
+    """Record each tier's doctor call instead of probing scanners, providers or backends."""
+    import skillevaluator.doctor as readiness
+    from skillevaluator.tier3 import commands as tier3_commands
+
+    calls: list[dict] = []
+    monkeypatch.setattr(readiness, "doctor", lambda **options: calls.append(options) or 0)
+    monkeypatch.setattr(tier3_commands, "doctor", lambda **options: calls.append({"tier": "3", **options}) or 0)
+    return calls
+
+
+@pytest.mark.parametrize("command", ["doctor", "health-check"])
+def test_doctor_without_tier_keeps_checking_only_live_evaluation(doctor_calls, command) -> None:
+    result = CliRunner().invoke(cli, [command, "-a", "codex", "--env-mode", "docker"])
+
+    assert result.exit_code == 0, result.output
+    assert doctor_calls == [
+        {
+            "tier": "3",
+            "agents": "codex",
+            "env_mode": "docker",
+            "environment_kwarg": (),
+            "verify_models": False,
+            "agent_model": (),
+            "environment_kwargs": {},
+        }
+    ]
+
+
+@pytest.mark.parametrize("command", ["doctor", "health-check"])
+@pytest.mark.parametrize(
+    ("args", "expected"),
+    [
+        (["--tier", "1"], {"tier": "1", "checks": None, "verify_models": False, "timeout": 60.0}),
+        (
+            ["--tier", "1", "--checks", "security,deps", "--timeout", "4"],
+            {"tier": "1", "checks": "security,deps", "verify_models": False, "timeout": 4.0},
+        ),
+        (["--tier", "2", "--timeout", "4"], {"tier": "2", "checks": None, "verify_models": False, "timeout": 4.0}),
+    ],
+)
+def test_doctor_routes_lower_tiers_without_live_evaluation(doctor_calls, command, args, expected) -> None:
+    result = CliRunner().invoke(cli, [command, *args])
+
+    assert result.exit_code == 0, result.output
+    assert doctor_calls == [expected]
+
+
+def test_doctor_verify_models_reaches_tier2_live_probes(doctor_calls) -> None:
+    result = CliRunner().invoke(cli, ["doctor", "--tier", "2", "--verify-models"])
+
+    assert result.exit_code == 0, result.output
+    assert doctor_calls == [{"tier": "2", "checks": None, "verify_models": True, "timeout": 60.0}]
+
+
+@pytest.mark.parametrize("command", ["doctor", "health-check"])
+def test_doctor_all_checks_every_tier_after_a_failure(monkeypatch, command) -> None:
+    import skillevaluator.doctor as readiness
+    from skillevaluator.tier3 import commands as tier3_commands
+
+    tiers: list[str] = []
+    monkeypatch.setattr(readiness, "doctor", lambda **options: tiers.append(options["tier"]) or 1)
+    monkeypatch.setattr(tier3_commands, "doctor", lambda **_options: tiers.append("3") or 0)
+
+    result = CliRunner().invoke(cli, [command, "--tier", "all", "--checks", "pii", "--env-mode", "local"])
+
+    assert result.exit_code == 1, result.output
+    assert tiers == ["1", "2", "3"]
+
+
+@pytest.mark.parametrize(
+    "args",
+    [
+        ["doctor", "--tier", "4"],
+        ["doctor", "--checks", "schema"],
+        ["doctor", "--timeout", "5"],
+        ["doctor", "--tier", "1", "--checks", "unknown"],
+        ["doctor", "--tier", "all", "--checks", "unknown"],
+        ["doctor", "--tier", "2", "--checks", "schema"],
+        ["doctor", "--tier", "1", "--verify-models"],
+        ["doctor", "--tier", "1", "--agents", "codex"],
+        ["doctor", "--tier", "1", "--env-mode", "docker"],
+        ["doctor", "--tier", "2", "--ek", "region=us"],
+        ["doctor", "--tier", "2", "--agent-model", "codex=gpt"],
+        ["doctor", "--tier", "1", "--timeout", "0"],
+        ["doctor", "--tier", "1", "--timeout", "-1"],
+        ["doctor", "--tier", "1", "--timeout", "nan"],
+        ["doctor", "--tier", "1", "--timeout", "inf"],
+        ["doctor", "--tier", "all", "--ek", "malformed"],
+        ["health-check", "--tier", "2", "--verify-models"],
+        ["health-check", "--tier", "1", "-a", "codex"],
+        ["tier3", "doctor", "--tier", "1"],
+        ["tier3", "doctor", "--checks", "schema"],
+        ["tier3", "doctor", "--timeout", "5"],
+    ],
+)
+def test_doctor_rejects_options_for_unselected_tiers_before_any_probe(doctor_calls, args) -> None:
+    result = CliRunner().invoke(cli, args)
+
+    assert result.exit_code == 2, result.output
+    assert doctor_calls == []
+
+
+@pytest.mark.parametrize("command", ["doctor", "health-check"])
+def test_documented_readiness_examples_are_valid(doctor_calls, command) -> None:
+    import shlex
+
+    reference = (Path(__file__).parents[1] / "docs" / "cli-reference.mdx").read_text(encoding="utf-8")
+    section = reference.split(f"\n## {command}\n", 1)[1].split("\n## ", 1)[0]
+    examples = [line for line in section.splitlines() if line.startswith(f"skillevaluator {command}")]
+
+    assert len(examples) >= 2
+    for example in examples:
+        result = CliRunner().invoke(cli, shlex.split(example, comments=True)[1:])
+        assert result.exit_code == 0, f"{example}\n{result.output}"
+
+
+def test_tier3_doctor_stays_live_evaluation_only(doctor_calls) -> None:
+    result = CliRunner().invoke(cli, ["tier3", "doctor", "-a", "codex", "--verify-models"])
+
+    assert result.exit_code == 0, result.output
+    assert [call["tier"] for call in doctor_calls] == ["3"]
+    assert doctor_calls[0]["verify_models"] is True
+
+
 def test_removed_benchmark_authoring_command_is_unavailable() -> None:
     removed_command = "convert" + "-benchmark"
 

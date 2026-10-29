@@ -107,10 +107,16 @@ class EmbeddingClient:
         model: str | None = None,
         base_url: str | None = None,
         api_key: str | None = None,
+        *,
+        max_retries: int | None = None,
+        http_client: Any = None,
     ) -> None:
         self._model = model
         self._base_url = base_url
         self._api_key = api_key
+        # None keeps the SDK defaults; readiness probes pass a bounded client.
+        self._max_retries = max_retries
+        self._http_client = http_client
         self._client: Any = None
         self._provider_config: ProviderConfig | None = None
 
@@ -157,7 +163,12 @@ class EmbeddingClient:
                 "The 'openai' package is required for similarity checks. Install it with: pip install openai"
             ) from exc
 
-        self._client = OpenAI(api_key=config.api_key, base_url=config.base_url)
+        client_kwargs: dict[str, Any] = {"api_key": config.api_key, "base_url": config.base_url}
+        if self._max_retries is not None:
+            client_kwargs["max_retries"] = self._max_retries
+        if self._http_client is not None:
+            client_kwargs["http_client"] = self._http_client
+        self._client = OpenAI(**client_kwargs)
         return self._client
 
     def embed(self, texts: list[str]) -> list[list[float]]:

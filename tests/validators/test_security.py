@@ -185,6 +185,7 @@ def _validate_skillspector_payload(
     payload: dict,
     *,
     exit_code: int = 0,
+    validator: SecurityValidator | None = None,
 ) -> ValidationResult:
     """Run one deterministic SkillSpector payload through the public validation seam."""
     mock_tools.skillspector.is_available = True
@@ -194,7 +195,7 @@ def _validate_skillspector_payload(
         stderr="",
         exit_code=exit_code,
     )
-    return SecurityValidator(use_llm=False).validate_security_only(sample_skill_dir)
+    return (validator or SecurityValidator(use_llm=False)).validate_security_only(sample_skill_dir)
 
 
 def _set_universal_analyzer_work(payload: dict) -> None:
@@ -1596,6 +1597,237 @@ print(json.dumps([finding.metadata["matched_value"] for finding in result.findin
 
         assert result.status == "incomplete"
         assert any("unexpected suppressed findings" in error.lower() for error in result.errors)
+
+    @patch("skillevaluator.validators.security.Tools")
+    def test_requested_skillspector_baseline_accepts_audited_suppressions(
+        self, mock_tools, sample_skill_dir: Path, tmp_path: Path
+    ) -> None:
+        baseline = tmp_path / "approved" / "skillspector-baseline.yaml"
+        baseline.parent.mkdir()
+        baseline.write_text(
+            'version: 2\nrules:\n  - id: "PE5"\n    path: "SKILL.md"\n    reason: "Reviewed"\n',
+            encoding="utf-8",
+        )
+        payload = _skillspector_json_report()
+        payload["suppressed_count"] = 1
+        payload["suppressed"] = [{"id": "PE5", "suppressed": True, "suppression_reason": "Reviewed"}]
+        payload["analysis_completeness"].update({"findings_before_filtering": 1, "findings_after_filtering": 1})
+
+        result = _validate_skillspector_payload(
+            mock_tools,
+            sample_skill_dir,
+            payload,
+            validator=SecurityValidator(use_llm=False, skillspector_baseline=baseline),
+        )
+
+        args = mock_tools.skillspector.run.call_args.args[0]
+        assert args[args.index("--baseline") + 1] == str(baseline.resolve())
+        assert result.status == "passed"
+        state = result.metadata["skillspector_baseline"]
+        assert state["loaded"] is True
+        assert state["status"] == "applied"
+        assert (state["rule_count"], state["fingerprint_count"], state["suppressed_findings"]) == (1, 0, 1)
+        report = json.loads(JSONReporter(include_timestamp=False).render_all([result]))
+        assert report["results"][0]["skillspector_baseline"]["status"] == "applied"
+
+    @patch("skillevaluator.validators.security.Tools")
+    def test_skillspector_baseline_suppressions_do_not_loosen_risk_reconciliation(
+        self, mock_tools, sample_skill_dir: Path, tmp_path: Path
+    ) -> None:
+        """Suppressed rows are not unseen occurrences of the active finding."""
+        baseline = tmp_path / "baseline.yaml"
+        baseline.write_text('version: 2\nrules:\n  - id: "PE5"\n    reason: "Reviewed"\n', encoding="utf-8")
+        issue = {
+            "id": "PI-1",
+            "category": "Prompt Injection",
+            "pattern": "Instruction override",
+            "severity": "HIGH",
+            "finding": "Ignore prior instructions",
+            "location": {"file": "SKILL.md", "start_line": 8},
+        }
+        payload = _skillspector_json_report([issue])
+        payload["risk_assessment"] = {"score": 0, "severity": "LOW", "recommendation": "SAFE"}
+        payload["suppressed_count"] = 3
+        payload["suppressed"] = [{"id": "PE5", "suppressed": True} for _ in range(3)]
+        payload["analysis_completeness"].update({"findings_before_filtering": 4, "findings_after_filtering": 4})
+
+        result = _validate_skillspector_payload(
+            mock_tools,
+            sample_skill_dir,
+            payload,
+            validator=SecurityValidator(use_llm=False, skillspector_baseline=baseline),
+        )
+
+        assert result.status == "incomplete"
+        assert any("risk score understates" in error for error in result.errors)
+
+    @patch("skillevaluator.validators.security.Tools")
+    def test_requested_skillspector_baseline_requires_suppression_accounting(
+        self, mock_tools, sample_skill_dir: Path, tmp_path: Path
+    ) -> None:
+        baseline = tmp_path / "baseline.yaml"
+        baseline.write_text('version: 2\nrules:\n  - id: "PE5"\n    reason: "Reviewed"\n', encoding="utf-8")
+        payload = _skillspector_json_report()
+        del payload["suppressed_count"], payload["suppressed"]
+
+        result = _validate_skillspector_payload(
+            mock_tools,
+            sample_skill_dir,
+            payload,
+            validator=SecurityValidator(use_llm=False, skillspector_baseline=baseline),
+        )
+
+        assert result.status == "incomplete"
+        assert any("does not account for findings suppressed" in error for error in result.errors)
+
+    @pytest.mark.parametrize(("blocking", "status"), [(True, "failed"), (False, "passed")])
+    @patch("skillevaluator.validators.security.Tools")
+    def test_skillspector_fingerprint_version_mismatch_is_reported(
+        self, mock_tools, blocking: bool, status: str, sample_skill_dir: Path, tmp_path: Path
+    ) -> None:
+        baseline = tmp_path / "baseline.yaml"
+        baseline.write_text(
+            'version: 2\nscanner_version: "2.9.0"\nrules: []\nfingerprints:\n'
+            f'  - hash: "sha256:{"0" * 64}"\n    reason: "Reviewed"\n',
+            encoding="utf-8",
+        )
+        issue = {
+            "id": "PI-1",
+            "category": "Prompt Injection",
+            "pattern": "Instruction override",
+            "severity": "HIGH",
+            "finding": "Ignore prior instructions",
+            "location": {"file": "SKILL.md", "start_line": 8},
+        }
+        payload = _skillspector_json_report([issue] if blocking else [])
+
+        result = _validate_skillspector_payload(
+            mock_tools,
+            sample_skill_dir,
+            payload,
+            exit_code=1 if blocking else 0,
+            validator=SecurityValidator(use_llm=False, skillspector_baseline=baseline),
+        )
+
+        state = result.metadata["skillspector_baseline"]
+        assert state["status"] == "fingerprint_version_mismatch"
+        assert (state["baseline_scanner_version"], state["runtime_scanner_version"]) == ("2.9.0", "2.10.0")
+        assert state["active_blocking_findings"] == int(blocking)
+        assert result.status == status
+        # The explanation sits outside SkillSpector's findings, so no baseline entry can hide it.
+        reported = result.errors if blocking else result.warnings
+        assert any("fingerprints were ignored" in line and "SkillSpector 2.10.0" in line for line in reported)
+        assert not any("fingerprints were ignored" in finding.message for finding in result.findings)
+
+    @patch("skillevaluator.validators.security.Tools")
+    def test_rule_only_skillspector_baseline_ignores_scanner_version(
+        self, mock_tools, sample_skill_dir: Path, tmp_path: Path
+    ) -> None:
+        baseline = tmp_path / "baseline.yaml"
+        baseline.write_text(
+            'version: 2\nscanner_version: "2.9.0"\nrules:\n  - id: "PE5"\n    reason: "Reviewed"\n',
+            encoding="utf-8",
+        )
+
+        result = _validate_skillspector_payload(
+            mock_tools,
+            sample_skill_dir,
+            _skillspector_json_report(),
+            validator=SecurityValidator(use_llm=False, skillspector_baseline=baseline),
+        )
+
+        assert result.status == "passed"
+        assert result.metadata["skillspector_baseline"]["status"] == "no_matches"
+        assert any("matched no findings" in message for message in result.messages)
+        assert not result.warnings
+
+    @pytest.mark.parametrize(
+        "content",
+        [
+            'version: 2\nrules:\n  - id: "*"\n    reason: "Too broad"\n',
+            'version: 2\nrules:\n  - id: "PE5"\n    reason: "Fine"\n  - path: "*/*"\n    message: "*?*"\n'
+            '    reason: "Too broad"\n',
+            'version: 2\nrules:\n  - message: "[!a]*"\n    reason: "Too broad"\n',
+            "version: 2\nrules:\n  - just-a-string\n",
+            "- not\n- a mapping\n",
+            "version: [2\n",
+        ],
+    )
+    @patch("skillevaluator.validators.security.Tools")
+    def test_unusable_skillspector_baseline_blocks_the_scan(
+        self, mock_tools, content: str, sample_skill_dir: Path, tmp_path: Path
+    ) -> None:
+        baseline = tmp_path / "baseline.yaml"
+        baseline.write_text(content, encoding="utf-8")
+        mock_tools.skillspector.is_available = True
+
+        result = SecurityValidator(use_llm=False, skillspector_baseline=baseline).validate_security_only(
+            sample_skill_dir
+        )
+
+        assert result.status == "incomplete"
+        assert any("security scan did not run" in error for error in result.errors)
+        mock_tools.skillspector.run.assert_not_called()
+
+    @patch("skillevaluator.validators.security.Tools")
+    def test_missing_skillspector_baseline_blocks_the_scan(
+        self, mock_tools, sample_skill_dir: Path, tmp_path: Path
+    ) -> None:
+        mock_tools.skillspector.is_available = True
+
+        result = SecurityValidator(
+            use_llm=False, skillspector_baseline=tmp_path / "missing.yaml"
+        ).validate_security_only(sample_skill_dir)
+
+        assert result.status == "incomplete"
+        assert any("does not exist" in error for error in result.errors)
+        mock_tools.skillspector.run.assert_not_called()
+
+    @pytest.mark.parametrize(
+        "rule",
+        [
+            {"id": "PE5"},
+            {"rule_id": "PE5"},
+            {"file": "SKILL.md"},
+            {"path": "*SKILL.md"},
+            {"message": "*--privilege[d]*"},
+            {"id": "*", "message": "*[t]elemetry*"},
+        ],
+    )
+    def test_bounded_skillspector_baseline_rules_are_accepted(self, rule: dict, tmp_path: Path) -> None:
+        from skillevaluator.validators.security import _inspect_skillspector_baseline
+
+        baseline = tmp_path / "baseline.yaml"
+        baseline.write_text(json.dumps({"version": 2, "rules": [{**rule, "reason": "Reviewed"}]}), encoding="utf-8")
+
+        state, error = _inspect_skillspector_baseline(baseline)
+
+        assert error is None
+        assert state["rule_count"] == 1
+
+    @patch("skillevaluator.validators.security.Tools")
+    def test_skillspector_baseline_reaches_llm_enrichment_stage(
+        self, mock_tools, sample_skill_dir: Path, tmp_path: Path, monkeypatch
+    ) -> None:
+        baseline = tmp_path / "baseline.yaml"
+        baseline.write_text('version: 2\nrules:\n  - id: "PE5"\n    reason: "Reviewed"\n', encoding="utf-8")
+        monkeypatch.setenv("SKILL_EVAL_LLM_PROVIDER", "nv_build")
+        monkeypatch.setenv("NVIDIA_API_KEY", "test-credential")
+        static = _skillspector_json_report()
+        enriched = _skillspector_json_report(llm_requested=True, llm_available=True)
+        mock_tools.skillspector.is_available = True
+        mock_tools.skillspector.run.side_effect = [
+            ToolResult(success=True, stdout=json.dumps(report), stderr="", exit_code=0) for report in (static, enriched)
+        ]
+
+        result = SecurityValidator(use_llm=True, skillspector_baseline=baseline).validate_security_only(
+            sample_skill_dir
+        )
+
+        assert result.status == "passed", result.errors
+        stages = [call.args[0] for call in mock_tools.skillspector.run.call_args_list]
+        assert ["--no-llm" in args for args in stages] == [True, False]
+        assert all(args[args.index("--baseline") + 1] == str(baseline.resolve()) for args in stages)
 
     @patch("skillevaluator.validators.security.Tools")
     def test_skillspector_2_10_partial_scan_reports_incomplete_before_recommendation(

@@ -184,6 +184,7 @@ def run_validation(
     fail_fast: bool = False,
     continue_on_failure: bool = False,
     on_check: Callable[[str], None] | None = None,
+    skillspector_baseline: Path | None = None,
 ) -> list[ValidationResult]:
     """Run selected Tier 1 validators and return structured results.
 
@@ -202,6 +203,9 @@ def run_validation(
     When *policy* is provided, the schema validator applies the policy's
     audience-aware author rules; finalized severities for all validators are
     applied centrally in :func:`emit_reports` via the policy.
+
+    *skillspector_baseline* is an audited SkillSpector suppression baseline
+    applied to the ``security`` check; it is never discovered from the target.
     """
     enabled = _enabled_checks(checks)
     results: list[ValidationResult] = []
@@ -229,7 +233,7 @@ def run_validation(
         return [_run_result("schema", v.name, v.description, v.validate)]
 
     def _security_results() -> list[ValidationResult]:
-        v = SecurityValidator(use_llm=use_llm, verify_llm=llm_verify)
+        v = SecurityValidator(use_llm=use_llm, verify_llm=llm_verify, skillspector_baseline=skillspector_baseline)
         return [_run_result("security", "Security Scan", v.description, v.validate_security_only)]
 
     def _pii_results() -> list[ValidationResult]:
@@ -364,8 +368,9 @@ def run_security_scan(
     *,
     use_llm: bool = False,
     llm_verify: bool = False,
+    skillspector_baseline: Path | None = None,
 ) -> list[ValidationResult]:
-    validator = SecurityValidator(use_llm=use_llm, verify_llm=llm_verify)
+    validator = SecurityValidator(use_llm=use_llm, verify_llm=llm_verify, skillspector_baseline=skillspector_baseline)
     return [
         _as_result(
             "Security Scan",

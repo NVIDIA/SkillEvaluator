@@ -78,6 +78,19 @@ All notable changes to SkillEvaluator are documented in this file.
 - CI-native per-skill HTML pages link Download JSON to the retained
   `skillevaluator-tier1.json` and do not embed a second copy of the report
   JSON. Standalone CLI HTML reports embed it for Export JSON.
+- `--skillspector-baseline FILE` on `validate`, `tier1`, and `security-scan`
+  applies an audited SkillSpector suppression baseline, so reviewed false
+  positives no longer leave the security check failed or `INCOMPLETE`.
+  Baselines apply only when passed explicitly; one shipped inside the skill is
+  never used, and suppressed findings without a requested baseline still fail
+  closed. A rule with no literal `id`, `path`, or `message` text (such as
+  `id: "*"`) is rejected before the scan. A baseline kept inside the skill is
+  excluded from the scan, including the staged copy used when the skill has
+  `evals/` outputs. JSON reports add `results[].skillspector_baseline` with the
+  outcome (`applied`, `no_matches`, `fingerprint_version_mismatch`, or
+  `not_applied`), scanner versions, and finding counts; fingerprints ignored
+  after a SkillSpector upgrade are reported instead of silently suppressing
+  nothing.
 
 ### Changed
 

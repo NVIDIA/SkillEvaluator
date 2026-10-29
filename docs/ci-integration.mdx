@@ -244,6 +244,7 @@ When the exit code is not enough — dashboards, custom thresholds, badge genera
 | `benchmark_policy` | object | Persisted `tier2_required` and `tier3_required` evidence policy used for the publication decision |
 | `results[].publication_target` | object | Exact NFC filesystem-entry name, versioned source-tree digest, and digest algorithm used to bind split-tier evidence |
 | `results[].publication_evidence` | object | Validated built-in Tier 1 or Tier 2 producer contract: schema version, producer, tier, and canonical check ID |
+| `results[].skillspector_baseline` | object | Present when `--skillspector-baseline` was passed: `status`, scanner versions, and suppressed and active finding counts. See [Audited SkillSpector baselines](tier1-validation.mdx#audited-skillspector-baselines) |
 | `tier3.run_id` | string | Run-owned Tier 3 identity; duplicated in the Tier 3 summary for consistency checks |
 | `severity_counts` | object | Totals for `critical`, `high`, `medium`, `low` |
 | `total_errors`, `total_warnings` | number | Aggregate counts across all validators |

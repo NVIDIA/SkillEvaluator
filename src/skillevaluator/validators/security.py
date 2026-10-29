@@ -499,6 +499,122 @@ def _ignore_artifact_dirs(dirpath: str, names: list[str]) -> set[str]:
     return {n for n in names if n in _SKILLSPECTOR_SCAN_EXCLUDED_DIRS and Path(dirpath, n).is_dir()}
 
 
+def _baseline_glob_has_literal_scope(value: object) -> bool:
+    """Return whether a SkillSpector suppression glob names any literal text.
+
+    Wildcards, negated classes, and multi-character classes match too broadly
+    to bound a rule; a one-character class such as ``[d]`` is a literal.
+    """
+    if not isinstance(value, str):
+        return False
+    pattern = value.strip()
+    index = 0
+    while index < len(pattern):
+        character = pattern[index]
+        if character != "[":
+            if character.isalnum():
+                return True
+            index += 1
+            continue
+        cursor = index + 1
+        negated = cursor < len(pattern) and pattern[cursor] in "!^"
+        if negated:
+            cursor += 1
+        if cursor < len(pattern) and pattern[cursor] == "]":
+            cursor += 1
+        close = pattern.find("]", cursor)
+        if close < 0:
+            # fnmatch treats an unclosed bracket as literal text.
+            return True
+        class_body = pattern[index + 1 : close]
+        if not negated and len(class_body) == 1 and class_body.isalnum():
+            return True
+        index = close + 1
+    return False
+
+
+def _inspect_skillspector_baseline(path: Path) -> tuple[dict, str | None]:
+    """Return the reportable facts of an operator-selected baseline and any blocking error.
+
+    SkillSpector validates the schema itself. SkillEvaluator only rejects a
+    file it cannot read and rules whose globs carry no literal text, because
+    SkillSpector accepts a rule such as ``id: "*"`` that silently suppresses
+    every finding.
+    """
+    state: dict = {
+        "path": str(path),
+        "loaded": False,
+        "status": "not_applied",
+        "schema_version": None,
+        "baseline_scanner_version": None,
+        "runtime_scanner_version": None,
+        "rule_count": 0,
+        "fingerprint_count": 0,
+        "suppressed_findings": None,
+        "active_findings": None,
+        "active_blocking_findings": None,
+        "message": None,
+    }
+    if not path.is_file():
+        return state, f"SkillSpector baseline does not exist or is not a file: {path}"
+    try:
+        raw = yaml.safe_load(path.read_text(encoding="utf-8"))
+    except (OSError, UnicodeError, RecursionError, yaml.YAMLError) as exc:
+        return state, f"SkillSpector baseline {path} could not be parsed ({type(exc).__name__})"
+    if not isinstance(raw, dict):
+        return state, f"SkillSpector baseline {path} must be a YAML or JSON mapping"
+
+    rules = raw.get("rules")
+    fingerprints = raw.get("fingerprints")
+    scanner_version = raw.get("scanner_version")
+    state.update(
+        {
+            "schema_version": raw.get("version"),
+            "baseline_scanner_version": (
+                scanner_version.strip() if isinstance(scanner_version, str) and scanner_version.strip() else None
+            ),
+            "rule_count": len(rules) if isinstance(rules, list) else 0,
+            "fingerprint_count": len(fingerprints) if isinstance(fingerprints, list) else 0,
+        }
+    )
+    unbounded = [
+        index
+        for index, rule in enumerate(rules if isinstance(rules, list) else [])
+        if not isinstance(rule, dict)
+        # Field aliases match SkillSpector's rule loader.
+        or not any(
+            _baseline_glob_has_literal_scope(rule.get(field) or rule.get(alias))
+            for field, alias in (("id", "rule_id"), ("path", "file"), ("message", "message"))
+        )
+    ]
+    if unbounded:
+        noun = "rule" if len(unbounded) == 1 else "rules"
+        return state, (
+            f"SkillSpector baseline {noun} {', '.join(map(str, unbounded))} in {path} must set an id, path, "
+            "or message glob containing literal text; a wildcard-only rule would suppress every finding"
+        )
+    return state, None
+
+
+def _skillspector_baseline_for_scan(original_root: Path, scan_root: Path, baseline: Path | None) -> Path | None:
+    """Point SkillSpector at the staged copy of a baseline that lives inside the skill.
+
+    SkillSpector excludes only the exact file passed to ``--baseline`` from its
+    content scan. On a staged copy, passing the original path would leave the
+    copied baseline in scope, and its reviewed match text would be reported as
+    new findings. Baselines outside the skill, or not copied into the staged
+    tree, keep their original path.
+    """
+    if baseline is None or scan_root == original_root:
+        return baseline
+    try:
+        relative = baseline.relative_to(original_root)
+    except ValueError:
+        return baseline
+    staged_baseline = scan_root / relative
+    return staged_baseline if staged_baseline.is_file() else baseline
+
+
 def _rewrite_path_prefix(value, old: str, new: str):
     """Recursively rewrite ``old`` path prefixes in a parsed JSON structure."""
     if isinstance(value, str):
@@ -569,6 +685,7 @@ class SecurityValidator(ValidatorBase):
         use_llm: bool = False,
         verify_llm: bool = False,
         submitter_usernames: Iterable[str] | None = None,
+        skillspector_baseline: Path | str | None = None,
     ):
         """Initialize with optional LLM analysis for deeper inspection.
 
@@ -581,6 +698,10 @@ class SecurityValidator(ValidatorBase):
                 :data:`HOME_PATH_SUBMITTER_ENV_VARS`) and the OS login name.
                 Pass an explicit value to wire a CI-provided contributor identity
                 or to make tests deterministic.
+            skillspector_baseline: Audited SkillSpector YAML/JSON suppression
+                baseline. Matching findings are removed by SkillSpector before
+                scoring. Baselines are only applied when passed explicitly; one
+                shipped inside the scanned skill is never picked up on its own.
         """
         self._pii_patterns: dict | None = None
         self._submitter_override: set[str] | None = (
@@ -592,6 +713,9 @@ class SecurityValidator(ValidatorBase):
         self._home_check_disabled_warned = False
         self.use_llm = use_llm
         self.verify_llm = verify_llm
+        self.skillspector_baseline = (
+            Path(skillspector_baseline).expanduser().resolve() if skillspector_baseline is not None else None
+        )
 
     @property
     def pii_patterns(self) -> dict:
@@ -766,6 +890,10 @@ class SecurityValidator(ValidatorBase):
         on a temp copy without those outputs. Shipped bytecode remains for
         artifact-integrity analysis, and reported paths map back to the
         original location.
+
+        An explicitly selected baseline is passed to both stages with
+        ``--baseline``. When it lives inside a staged skill, the staged copy is
+        passed instead so SkillSpector excludes the file it actually scans.
         """
         result = ValidationResult()
 
@@ -775,6 +903,15 @@ class SecurityValidator(ValidatorBase):
             )
             result.mark_scan_incomplete("skillspector-llm" if self.use_llm else "skillspector")
             return result
+
+        baseline_state: dict | None = None
+        if self.skillspector_baseline is not None:
+            baseline_state, baseline_error = _inspect_skillspector_baseline(self.skillspector_baseline)
+            if baseline_error is not None:
+                result.metadata["skillspector_baseline"] = baseline_state
+                result.add_error(f"{baseline_error}; security scan did not run")
+                result.mark_scan_incomplete("skillspector-llm" if self.use_llm else "skillspector")
+                return result
 
         original_root = skill_path.resolve()
         scan_root = original_root
@@ -791,6 +928,7 @@ class SecurityValidator(ValidatorBase):
                 result.add_warning(f"Could not stage artifact-free skill copy ({exc}); scanning in place.")
 
         try:
+            baseline = _skillspector_baseline_for_scan(original_root, scan_root, self.skillspector_baseline)
             # The deterministic stage is authoritative and always runs, even
             # when LLM enrichment was requested. Enrichment is additive and
             # cannot erase static findings.
@@ -798,16 +936,21 @@ class SecurityValidator(ValidatorBase):
                 scan_root,
                 original_root=original_root if staged is not None else None,
                 use_llm=False,
+                baseline=baseline,
             )
             if self.use_llm and not result.is_incomplete:
                 enrichment = self._run_skillspector_once(
                     scan_root,
                     original_root=original_root if staged is not None else None,
                     use_llm=True,
+                    baseline=baseline,
                 )
                 result.merge(enrichment)
                 if not enrichment.is_incomplete:
                     self._deduplicate_skillspector_findings(result)
+            if baseline_state is not None:
+                result.metadata["skillspector_baseline"] = baseline_state
+                self._report_skillspector_baseline(result, baseline_state)
             return result
         finally:
             if staged is not None:
@@ -819,11 +962,14 @@ class SecurityValidator(ValidatorBase):
         *,
         original_root: Path | None,
         use_llm: bool,
+        baseline: Path | None = None,
     ) -> ValidationResult:
         """Run one SkillSpector stage and validate its process/report contract."""
         result = ValidationResult()
         stage_name = "skillspector-llm" if use_llm else "skillspector"
         args = ["scan", str(scan_root), "--format", "json"]
+        if baseline is not None:
+            args.extend(["--baseline", str(baseline)])
         if not use_llm:
             args.append("--no-llm")
 
@@ -881,6 +1027,7 @@ class SecurityValidator(ValidatorBase):
             use_llm,
             stage_name,
             result,
+            baseline_requested=baseline is not None,
         ):
             result.mark_scan_incomplete(stage_name)
             return result
@@ -917,8 +1064,14 @@ class SecurityValidator(ValidatorBase):
         use_llm: bool,
         stage_name: str,
         result: ValidationResult,
+        *,
+        baseline_requested: bool = False,
     ) -> bool:
-        """Return whether JSON is a trustworthy SkillSpector findings report."""
+        """Return whether JSON is a trustworthy SkillSpector findings report.
+
+        Suppressed findings are accepted only when SkillEvaluator passed an
+        explicit baseline, and that report must then account for them.
+        """
         if "error" in data and data["error"] is not None:
             result.add_error("skillspector reported an error; security scan did not complete")
             return False
@@ -1736,6 +1889,13 @@ class SecurityValidator(ValidatorBase):
         if isinstance(suppressed, list) and not all(isinstance(item, dict) for item in suppressed):
             result.add_error("skillspector JSON 'suppressed' entries must be objects; security scan did not complete")
             return False
+        if baseline_requested and (suppressed_count is None or suppressed is None):
+            # Without both fields, findings could disappear without a record.
+            result.add_error(
+                "skillspector JSON report does not account for findings suppressed by the requested baseline; "
+                "security scan did not complete"
+            )
+            return False
         normalized_suppressed_count = suppressed_count or 0
         normalized_suppressed = suppressed or []
         if normalized_suppressed_count != len(normalized_suppressed):
@@ -1768,7 +1928,7 @@ class SecurityValidator(ValidatorBase):
                     "security scan did not complete"
                 )
                 return False
-        if normalized_suppressed_count:
+        if normalized_suppressed_count and not baseline_requested:
             result.add_error(
                 "skillspector reported unexpected suppressed findings without a requested baseline; "
                 "security scan did not complete"
@@ -1779,7 +1939,11 @@ class SecurityValidator(ValidatorBase):
             normalized_components,
             uses_report_identities=uses_completeness_schema,
             uses_finding_identity=uses_finding_identity,
-            findings_after_filtering=findings_after_filtering,
+            # Baseline-suppressed findings do not score; counting them as
+            # unseen occurrences would loosen this reconciliation.
+            findings_after_filtering=(
+                findings_after_filtering - normalized_suppressed_count if findings_after_filtering is not None else None
+            ),
             all_findings_serialized=(
                 findings_after_filtering is None
                 or findings_after_filtering == len(issues) + normalized_suppressed_count
@@ -2177,15 +2341,17 @@ class SecurityValidator(ValidatorBase):
             if isinstance(analysis_completeness, dict)
             else None
         )
-        suppressed = data.get("suppressed")
-        serialized_findings = len(issues) + (len(suppressed) if isinstance(suppressed, list) else 0)
+        suppressed_count = len(data["suppressed"]) if isinstance(data.get("suppressed"), list) else 0
+        serialized_findings = len(issues) + suppressed_count
         effective_score = (
             self._minimum_skillspector_risk_score(
                 scanned_issues,
                 report_components,
                 uses_report_identities=uses_report_identities,
                 uses_finding_identity=uses_finding_identity,
-                findings_after_filtering=findings_after_filtering,
+                findings_after_filtering=(
+                    findings_after_filtering - suppressed_count if isinstance(findings_after_filtering, int) else None
+                ),
                 reported_score=reported_score,
                 removed_issues=removed_issues,
                 all_findings_serialized=findings_after_filtering == serialized_findings,
@@ -2288,6 +2454,60 @@ class SecurityValidator(ValidatorBase):
 
         if score > 50:
             result.add_message(f"skillspector risk score: {score}/100 ({severity})")
+
+    @staticmethod
+    def _report_skillspector_baseline(result: ValidationResult, baseline: dict) -> None:
+        """Record whether the requested baseline applied, so an inert one is not silent.
+
+        The diagnostic is added after SkillSpector returns, outside its finding
+        stream, so the baseline cannot suppress it.
+        """
+        runtime_version = result.metadata.get("skillspector_version")
+        if not isinstance(runtime_version, str):
+            # No report was processed; the scan is already incomplete.
+            return
+        suppressed = result.metadata.get("skillspector_suppressed_count", 0)
+        blocking = sum(
+            1
+            for finding in result.findings
+            if (finding.severity if isinstance(finding.severity, Severity) else Severity(str(finding.severity).lower()))
+            in (Severity.CRITICAL, Severity.HIGH)
+        )
+        baseline.update(
+            {
+                "loaded": True,
+                "runtime_scanner_version": runtime_version,
+                "suppressed_findings": suppressed,
+                "active_findings": len(result.findings),
+                "active_blocking_findings": blocking,
+            }
+        )
+        counts = (
+            f"rules={baseline['rule_count']}, fingerprints={baseline['fingerprint_count']}, suppressed={suppressed}"
+        )
+        # SkillSpector compares scanner versions as exact strings and ignores
+        # every fingerprint on a mismatch; rules still apply.
+        if baseline["fingerprint_count"] and baseline["baseline_scanner_version"] != runtime_version:
+            baseline["status"] = "fingerprint_version_mismatch"
+            baseline["message"] = (
+                "SkillSpector baseline fingerprints were ignored: they were generated with SkillSpector "
+                f"{baseline['baseline_scanner_version'] or 'unknown'}, but this scan used {runtime_version} "
+                f"({counts}). Regenerate the fingerprints with SkillSpector {runtime_version}, or replace them "
+                "with narrow reviewed rules."
+            )
+            # Explain remaining blockers without turning a passing scan into a failure.
+            if blocking:
+                result.add_error(baseline["message"])
+            else:
+                result.add_warning(baseline["message"])
+            return
+        if suppressed:
+            baseline["status"] = "applied"
+            baseline["message"] = f"SkillSpector baseline applied ({counts})."
+            return
+        baseline["status"] = "no_matches"
+        baseline["message"] = f"SkillSpector baseline loaded but matched no findings ({counts})."
+        result.add_message(baseline["message"])
 
     @staticmethod
     def _convert_skillspector_issue(issue: dict) -> tuple[Finding, bool]:

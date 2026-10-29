@@ -61,6 +61,61 @@ def test_validate_passes_explicit_previous_version(monkeypatch, tmp_path: Path) 
     assert captured == ["1.2.0"]
 
 
+@pytest.mark.parametrize(
+    "command",
+    [
+        ["validate", "--no-tier3", "--no-dedup", "--no-llm", "--checks", "security"],
+        ["security-scan"],
+        ["tier1", "security-scan"],
+        ["tier1", "--checks", "security", "--no-llm"],
+        ["tier1", "validate", "--checks", "security", "--no-llm"],
+    ],
+    ids=["validate", "security-scan", "tier1-security-scan", "tier1", "tier1-validate"],
+)
+def test_explicit_skillspector_baseline_reaches_the_security_scan(
+    command: list[str], monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    from skillevaluator.models.result import ValidationResult
+    from skillevaluator.validators.security import SecurityValidator
+
+    baseline = tmp_path / "approved-baseline.yaml"
+    baseline.write_text('version: 2\nrules:\n  - id: "PE5"\n    reason: "Reviewed"\n', encoding="utf-8")
+    seen: list[Path | None] = []
+
+    def _run_skillspector(self: SecurityValidator, _path: Path) -> ValidationResult:
+        seen.append(self.skillspector_baseline)
+        return ValidationResult()
+
+    monkeypatch.setattr(SecurityValidator, "_run_skillspector", _run_skillspector)
+    monkeypatch.chdir(tmp_path)
+
+    result = CliRunner().invoke(
+        cli,
+        [
+            *command,
+            str(FIXTURE),
+            "--skillspector-baseline",
+            baseline.name,
+            "-r",
+            "json",
+            "-o",
+            str(tmp_path / "reports"),
+        ],
+    )
+
+    assert result.exit_code == 0, result.output
+    assert seen == [baseline.resolve()]
+
+
+def test_skillspector_baseline_must_name_an_existing_file(tmp_path: Path) -> None:
+    result = CliRunner().invoke(
+        cli, ["security-scan", str(FIXTURE), "--skillspector-baseline", str(tmp_path / "missing.yaml")]
+    )
+
+    assert result.exit_code == 2
+    assert "--skillspector-baseline" in result.output
+
+
 def test_claude_alias_is_canonicalized_and_deduplicated() -> None:
     assert parse_agents("claude, claude-code, opencode, claude") == ["claude-code", "opencode"]
 
@@ -1547,6 +1602,23 @@ def test_catalog_child_argv_carries_the_evaluated_source(tmp_path: Path) -> None
         assert argv[argv.index(option) + 1] == value
     # The child validates one skill, so re-sending --workers would fan out again.
     assert "--workers" not in argv
+
+
+def test_catalog_child_argv_forwards_the_skillspector_baseline(tmp_path: Path) -> None:
+    from skillevaluator.cli import _catalog_child_argv_from_ctx, validate
+
+    skill_dir = tmp_path / "catalog" / "simple"
+    skill_dir.mkdir(parents=True)
+    baseline = tmp_path / "approved-baseline.yaml"
+    baseline.write_text('version: 2\nrules:\n  - id: "PE5"\n    reason: "Reviewed"\n', encoding="utf-8")
+    ctx = validate.make_context(
+        "validate",
+        [str(skill_dir), "--workers", "2", "--skillspector-baseline", str(baseline)],
+    )
+
+    argv = _catalog_child_argv_from_ctx(ctx, skill_dir, tmp_path / "out" / "simple")
+
+    assert argv[argv.index("--skillspector-baseline") + 1] == str(baseline.resolve())
 
 
 def test_catalog_child_argv_forwards_every_validate_option() -> None:

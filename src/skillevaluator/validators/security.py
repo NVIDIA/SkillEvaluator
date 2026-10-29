@@ -46,6 +46,7 @@ from skillevaluator.provider_config import (
     resolve_llm_provider,
     skillspector_reasoning_effort,
 )
+from skillevaluator.skillspector_provenance import sanitize_skillspector_llm_provenance
 from skillevaluator.spdx import is_spdx_only_html_comment
 from skillevaluator.utils.path_security import matches_filesystem_name
 from skillevaluator.utils.tool_runner import Tools, parse_json_output
@@ -402,8 +403,12 @@ def _skillspector_operator_env(environ: Mapping[str, str]) -> dict[str, str]:
     )
 
 
-def _skillspector_provider_env() -> dict[str, str]:
-    """Map public provider settings into an invocation-scoped SkillSpector environment."""
+def _skillspector_provider_env() -> tuple[dict[str, str], str | None]:
+    """Map public provider settings into an invocation-scoped SkillSpector environment.
+
+    Also returns the SkillEvaluator provider the bridge resolved, or ``None``
+    for an explicit ``SKILLSPECTOR_PROVIDER`` passthrough or no provider.
+    """
     source = os.environ
     child_env = _skillspector_process_env(source)
     child_env.update(_skillspector_operator_env(source))
@@ -418,14 +423,14 @@ def _skillspector_provider_env() -> dict[str, str]:
             child_env.update(
                 _copy_selected_environment(source, _SKILLSPECTOR_EXPLICIT_PROVIDER_ENV[skillspector_provider])
             )
-            return child_env
+            return child_env, None
         if skillspector_provider != "nv_build":
             # Unsupported/private providers fail closed through the generic
             # public path without receiving any provider credential.
             child_env["SKILLSPECTOR_PROVIDER"] = "openai"
             if skillspector_model:
                 child_env["SKILLSPECTOR_MODEL"] = skillspector_model
-            return child_env
+            return child_env, None
 
     try:
         resolution_env = dict(source)
@@ -435,11 +440,11 @@ def _skillspector_provider_env() -> dict[str, str]:
                 resolution_env["SKILL_EVAL_LLM_MODEL"] = skillspector_model
         provider = resolve_llm_provider(resolution_env)
     except ProviderConfigurationError:
-        return child_env
+        return child_env, None
 
     mapped_provider = _SKILLSPECTOR_PROVIDER_MAP.get(provider.provider)
     if mapped_provider is None:
-        return child_env
+        return child_env, None
 
     child_env["SKILLSPECTOR_PROVIDER"] = mapped_provider
     # An explicit SKILL_EVAL_LLM_MODEL reaches SkillSpector; the chat default does not.
@@ -457,7 +462,7 @@ def _skillspector_provider_env() -> dict[str, str]:
         if provider.provider == "bedrock":
             child_env.update(_copy_selected_environment(source, _SKILLSPECTOR_AWS_ENV_NAMES))
 
-    return child_env
+    return child_env, provider.provider
 
 
 def _skillspector_default_reasoning_effort(child_env: Mapping[str, str]) -> str | None:
@@ -477,13 +482,18 @@ def _skillspector_default_reasoning_effort(child_env: Mapping[str, str]) -> str 
     return efforts.pop() if len(efforts) == 1 else None
 
 
-def _skillspector_child_env() -> dict[str, str]:
-    """Return the SkillSpector environment plus SkillEvaluator's default reasoning effort."""
-    child_env = _skillspector_provider_env()
+def _skillspector_llm_env() -> tuple[dict[str, str], str | None]:
+    """Return the LLM-stage SkillSpector environment and the bridged SkillEvaluator provider."""
+    child_env, provider_id = _skillspector_provider_env()
     effort = _skillspector_default_reasoning_effort(child_env)
     if effort is not None:
         child_env.setdefault("SKILLSPECTOR_REASONING_EFFORT", effort)
-    return child_env
+    return child_env, provider_id
+
+
+def _skillspector_child_env() -> dict[str, str]:
+    """Return the SkillSpector environment plus SkillEvaluator's default reasoning effort."""
+    return _skillspector_llm_env()[0]
 
 
 def _tree_contains_artifact_dirs(root: Path) -> bool:
@@ -828,11 +838,15 @@ class SecurityValidator(ValidatorBase):
             args.append("--no-llm")
 
         logger.info("Running %s on %s", stage_name, scan_root)
-        child_env = _skillspector_child_env() if use_llm else _skillspector_process_env()
         if use_llm:
+            child_env, provider_id = _skillspector_llm_env()
             # Requested LLM configuration; None leaves the choice to SkillSpector.
             result.metadata["skillspector_model"] = child_env.get("SKILLSPECTOR_MODEL")
             result.metadata["skillspector_reasoning_effort"] = child_env.get("SKILLSPECTOR_REASONING_EFFORT")
+            if provider_id is not None:
+                result.metadata["skillspector_provider_id"] = provider_id
+        else:
+            child_env = _skillspector_process_env()
         tool_result = Tools.skillspector.run(args, timeout=300, env=child_env, replace_env=True)
 
         if tool_result.exit_code not in _SKILLSPECTOR_POLICY_EXIT_CODES:
@@ -886,6 +900,12 @@ class SecurityValidator(ValidatorBase):
             return result
 
         metadata = data.get("metadata") or {}
+        if use_llm:
+            # Kept even when LLM analysis is unconfirmed below, so the report
+            # names the provider and models that were attempted.
+            provenance = sanitize_skillspector_llm_provenance(metadata.get("llm_provenance"))
+            if provenance is not None:
+                result.metadata["skillspector_llm_provenance"] = provenance
         if use_llm and not (metadata.get("llm_requested") is True and metadata.get("llm_available") is True):
             result.add_error(
                 "skillspector-llm did not confirm available LLM analysis; provider or model diagnostics were redacted"

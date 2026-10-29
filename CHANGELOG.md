@@ -19,7 +19,9 @@ All notable changes to SkillEvaluator are documented in this file.
   `scan-workers` input (1 to 16) changes this, and `1` scans one skill at a
   time. Each worker gets its own home and temporary directory. Logs,
   annotations and report rows keep skill order, and skills not started when the
-  scan time budget runs out are still reported as not evaluated.
+  scan time budget runs out are still reported as not evaluated. A timeout,
+  Ctrl-C or an error while saving results ends running scans together with
+  the scanner tools they started.
 - `--quality-config PATH` on `validate`, `quality-check`, and `tier1` loads the
   deterministic quality check's expected Markdown headings from a YAML file
   instead of the built-in list. Each `expected_headers` entry sets a `heading`

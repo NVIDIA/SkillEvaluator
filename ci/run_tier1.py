@@ -12,10 +12,12 @@ many skills are scanned at once; rows, logs and annotations keep skill order.
 from __future__ import annotations
 
 import argparse
+import functools
 import json
 import os
 import queue
 import re
+import signal
 import subprocess
 import tempfile
 import threading
@@ -65,6 +67,10 @@ except ModuleNotFoundError:
 MAX_SKILLS = 100
 MAX_REPORT_BYTES = 32 * 1024 * 1024
 SCAN_TIMEOUT_SECONDS = 3000
+# An interrupted run asks running scans to stop, then kills them after this.
+STOP_GRACE_SECONDS = 5
+# How often a running scan checks whether the run is ending.
+POLL_SECONDS = 0.1
 DEFAULT_SCAN_WORKERS = 4
 MAX_SCAN_WORKERS = 16
 PROVIDER_KEYS = {"openai": "OPENAI_API_KEY", "anthropic": "ANTHROPIC_API_KEY", "nv_build": "NVIDIA_API_KEY"}
@@ -314,6 +320,63 @@ def execution_context(environ: dict[str, str]) -> dict:
     }
 
 
+def _signal_scan(process: subprocess.Popen, *, kill: bool) -> None:
+    """Signal an evaluator's process group, which also holds the scanner tools it started."""
+    if os.name != "posix":
+        if process.poll() is None:
+            if kill:
+                process.kill()
+            else:
+                process.terminate()
+        return
+    try:
+        os.killpg(process.pid, signal.SIGKILL if kill else signal.SIGTERM)
+    except ProcessLookupError:
+        pass
+    except PermissionError:
+        # macOS reports EPERM instead of ESRCH once the group leader has exited.
+        if process.poll() is None:
+            raise
+
+
+def run_scan(
+    argv: list[str], *, abort: threading.Event, timeout: float, check: bool = False, **options
+) -> subprocess.CompletedProcess:
+    """Run one evaluator process like subprocess.run, and end it early when the run aborts.
+
+    Scan worker threads never see Ctrl-C, and Docker sends it only to this
+    runner (PID 1), so the runner ends running scans itself. The evaluator
+    leads its own process group, so a timeout or abort also ends its tools.
+    """
+    process = subprocess.Popen(argv, start_new_session=os.name == "posix", **options)
+    deadline = time.monotonic() + timeout
+    grace_ends = None
+    try:
+        while True:
+            now = time.monotonic()
+            if now >= deadline:
+                raise subprocess.TimeoutExpired(argv, timeout)
+            if abort.is_set() and grace_ends is None:
+                grace_ends = now + STOP_GRACE_SECONDS
+                _signal_scan(process, kill=False)
+            if grace_ends is not None and now >= grace_ends:
+                break
+            try:
+                process.wait(timeout=min(POLL_SECONDS, deadline - now))
+                break
+            except subprocess.TimeoutExpired:
+                pass
+    finally:
+        if process.returncode is None or grace_ends is not None:
+            # Also end scanner tools that outlived an aborted evaluator.
+            _signal_scan(process, kill=True)
+        if process.returncode is None:
+            process.wait()
+    if check and process.returncode:
+        raise subprocess.CalledProcessError(process.returncode, argv)
+    return subprocess.CompletedProcess(argv, process.returncode)
+
+
 def evaluate_skill(
     target: Path,
     output: Path,
@@ -411,10 +474,12 @@ def evaluate_skill(
     return fields, data, False
 
 
-def run(
-    workspace: Path, reports: Path, environ: dict[str, str], *, execute=subprocess.run, clock=time.monotonic
-) -> int:
-    """Run all selected skills; return nonzero on every incomplete or failed run."""
+def run(workspace: Path, reports: Path, environ: dict[str, str], *, execute=None, clock=time.monotonic) -> int:
+    """Run all selected skills; return nonzero on every incomplete or failed run.
+
+    ``execute`` is called like subprocess.run. The default, run_scan, also
+    ends running scans when the run stops early on an interrupt or error.
+    """
     if reports.is_symlink():
         raise ConfigurationError("The report directory must not be a symlink.")
     reports.mkdir(parents=True, exist_ok=True)
@@ -536,6 +601,10 @@ def run(
         pending.put(index)
     events: queue.SimpleQueue[tuple[str, int, tuple | None]] = queue.SimpleQueue()
     stop = threading.Event()
+    # Set when the run stops early on an interrupt or error: running scans end.
+    abort = threading.Event()
+    if execute is None:
+        execute = functools.partial(run_scan, abort=abort)
 
     def work(worker_env: dict[str, str]) -> None:
         # Workers only run processes. The main thread owns rows, logs and
@@ -644,6 +713,11 @@ def run(
                 for saved in unsaved:
                     saved.set()
                 unsaved.clear()
+    except BaseException:
+        # Ctrl-C or an error such as a full report disk: end running scans
+        # now instead of waiting up to the whole scan budget for them.
+        abort.set()
+        raise
     finally:
         stop.set()
         # After an unexpected error, release waiting workers and let them exit.

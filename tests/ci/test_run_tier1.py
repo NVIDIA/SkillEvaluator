@@ -3,15 +3,20 @@
 
 """Test the CI adapter's boundaries; actual scanner coverage is tested by live CI."""
 
+import contextlib
+import errno
 import importlib.util
 import io
 import json
 import os
 import re
 import shutil
+import signal
 import subprocess
+import sys
 import threading
 import time
+import types
 import zipfile
 from pathlib import Path
 from subprocess import CompletedProcess
@@ -922,3 +927,231 @@ def test_invalid_scan_worker_count_fails_before_scanning(tmp_path, value):
     assert runner.run(workspace, reports, {"SCAN_WORKERS": value}, execute=fake_cli([], calls)) == 1
     assert not calls
     assert "SCAN_WORKERS" in json.loads((reports / "summary.json").read_text())["error"]
+
+
+posix_only = pytest.mark.skipif(os.name != "posix", reason="uses a shell script as the evaluator")
+
+
+def scan_shim(tmp_path, *, fast=(), ignore_term=False):
+    """Put a fake ``skillevaluator`` on a PATH and return that PATH.
+
+    A scan records its PID and its background tool's PID in ``scan.pids``,
+    then runs for five minutes. Skills named in ``fast`` pass at once instead.
+    """
+    tool = tmp_path / "bin"
+    tool.mkdir()
+    report = tmp_path / "passing-report.json"
+    report.write_text(json.dumps(payload()), encoding="utf-8")
+    cases = "".join(f'*/{name}) cp "{report}" "$out/skillevaluator-tier1.json"; exit 0 ;;\n' for name in fast)
+    script = tool / "skillevaluator"
+    script.write_text(
+        "#!/bin/sh\n"
+        + ("trap '' TERM\n" if ignore_term else "")
+        + "for out; do :; done\n"
+        + f'case "$2" in\n{cases}*) ;;\nesac\n'
+        + "sleep 300 &\n"
+        + 'echo "$$ $!" > "$out/scan.tmp" && mv "$out/scan.tmp" "$out/scan.pids"\n'
+        + "exec sleep 300\n",
+        encoding="utf-8",
+    )
+    script.chmod(0o755)
+    return f"{tool}{os.pathsep}/usr/bin{os.pathsep}/bin"
+
+
+def scan_pids(output, deadline):
+    pids = output / "scan.pids"
+    while not pids.exists():
+        assert time.monotonic() < deadline, "the scan did not start"
+        time.sleep(0.02)
+    return [int(pid) for pid in pids.read_text().split()]
+
+
+def private_scan_pids(temporary, name, deadline):
+    """Read the PIDs of the scan for report directory ``name`` from its private directory under TMPDIR."""
+    while not (found := sorted(temporary.rglob(f"skillevaluator-private-{name}-*/scan.pids"))):
+        assert time.monotonic() < deadline, "the scan did not start"
+        time.sleep(0.02)
+    return scan_pids(found[0].parent, deadline)
+
+
+def still_running(pids):
+    """Wait up to WAIT for the processes to end; return those still running."""
+    deadline = time.monotonic() + WAIT
+    running = [pid for pid in pids if not ended(pid)]
+    while running and time.monotonic() < deadline:
+        time.sleep(0.05)
+        running = [pid for pid in running if not ended(pid)]
+    return running
+
+
+def ended(pid):
+    try:
+        os.kill(pid, 0)
+    except ProcessLookupError:
+        return True
+    return False
+
+
+def kill_quietly(pids):
+    # Only for processes not seen to end: a PID that ended may be reused.
+    for pid in pids:
+        with contextlib.suppress(OSError):
+            os.kill(pid, signal.SIGKILL)
+
+
+@posix_only
+def test_scan_timeout_also_ends_the_scanner_tools(tmp_path, monkeypatch):
+    path = scan_shim(tmp_path)
+    output = tmp_path / "out"
+    output.mkdir()
+    clock = types.SimpleNamespace(offset=0.0)
+    clock.monotonic = lambda: time.monotonic() + clock.offset
+    monkeypatch.setattr(runner, "time", clock)
+    outcome = {}
+
+    def scan():
+        try:
+            runner.run_scan(
+                ["skillevaluator", "tier1", "skills/a", "-o", str(output)],
+                abort=threading.Event(),
+                timeout=WAIT,
+                env={"PATH": path},
+                stdout=subprocess.DEVNULL,
+                stderr=subprocess.DEVNULL,
+            )
+        except subprocess.TimeoutExpired as exc:
+            outcome["error"] = exc
+
+    thread = threading.Thread(target=scan, daemon=True)
+    thread.start()
+    pids = survivors = scan_pids(output, time.monotonic() + WAIT)
+    try:
+        clock.offset = WAIT
+        thread.join(WAIT)
+        assert not thread.is_alive() and "error" in outcome
+        survivors = still_running(pids)
+        assert not survivors
+    finally:
+        kill_quietly(survivors)
+
+
+@posix_only
+def test_aborted_scan_is_killed_after_the_grace_period(tmp_path, monkeypatch):
+    monkeypatch.setattr(runner, "STOP_GRACE_SECONDS", 0.5)
+    path = scan_shim(tmp_path, ignore_term=True)
+    output = tmp_path / "out"
+    output.mkdir()
+    abort, outcome = threading.Event(), {}
+
+    def scan():
+        outcome["process"] = runner.run_scan(
+            ["skillevaluator", "tier1", "skills/a", "-o", str(output)],
+            abort=abort,
+            timeout=WAIT,
+            env={"PATH": path},
+            stdout=subprocess.DEVNULL,
+            stderr=subprocess.DEVNULL,
+        )
+
+    thread = threading.Thread(target=scan, daemon=True)
+    thread.start()
+    pids = survivors = scan_pids(output, time.monotonic() + WAIT)
+    try:
+        abort.set()
+        thread.join(WAIT)
+        assert not thread.is_alive()
+        # The scan and its tool ignore SIGTERM, so only SIGKILL ends them.
+        assert outcome["process"].returncode == -signal.SIGKILL
+        survivors = still_running(pids)
+        assert not survivors
+    finally:
+        kill_quietly(survivors)
+
+
+@posix_only
+def test_checkpoint_error_ends_running_scans_at_once(tmp_path, monkeypatch):
+    workspace = tmp_path / "workspace"
+    skill(workspace, "skills/fast")
+    skill(workspace, "skills/slow")
+    audit = tmp_path / "audit-tmp"
+    audit.mkdir()
+    reports = tmp_path / "reports"
+    environment = {"PATH": scan_shim(tmp_path, fast=["fast"]), "TMPDIR": str(audit)}
+    render, pids, outcome = runner.render_reports, [], {}
+    survivors = pids
+
+    def render_reports(*args):
+        if (reports / "skill-001" / "skillevaluator-tier1.json").exists():
+            # The slow scan is running when saving the fast result fails.
+            pids.extend(private_scan_pids(audit, "skill-002", time.monotonic() + WAIT))
+            raise OSError(errno.ENOSPC, "No space left on device")
+        render(*args)
+
+    monkeypatch.setattr(runner, "render_reports", render_reports)
+
+    def scan():
+        try:
+            runner.run(workspace, reports, environment)
+        except BaseException as exc:
+            outcome["error"] = exc
+
+    thread = threading.Thread(target=scan, daemon=True)
+    thread.start()
+    try:
+        thread.join(WAIT)
+        assert not thread.is_alive(), "the run waited for a running scan"
+        assert isinstance(outcome["error"], OSError)
+        survivors = still_running(pids)
+        assert pids and not survivors
+    finally:
+        kill_quietly(survivors)
+
+
+def start_runner_with_endless_scans(tmp_path, *, ignore_term=False):
+    """Start the runner alone in its session, as Docker runs it, and wait for two endless scans."""
+    workspace = tmp_path / "workspace"
+    for name in ("a", "b"):
+        skill(workspace, f"skills/{name}")
+    audit = tmp_path / "audit-tmp"
+    audit.mkdir()
+    reports = tmp_path / "reports"
+    environment = {"PATH": scan_shim(tmp_path, ignore_term=ignore_term), "TMPDIR": str(audit)}
+    environment.update(
+        (name, os.environ[name]) for name in ("PYTHONPATH", "PYTHONDONTWRITEBYTECODE") if name in os.environ
+    )
+    with (tmp_path / "runner.log").open("wb") as log:
+        process = subprocess.Popen(
+            [sys.executable, str(MODULE_PATH), "--workspace", str(workspace), "--reports", str(reports)],
+            env=environment,
+            stdout=log,
+            stderr=subprocess.STDOUT,
+            start_new_session=True,
+        )
+    pids = []
+    try:
+        deadline = time.monotonic() + WAIT
+        for name in ("skill-001", "skill-002"):
+            pids += private_scan_pids(audit, name, deadline)
+    except BaseException:
+        process.kill()
+        process.wait()
+        kill_quietly(pids)
+        raise
+    return process, pids
+
+
+@posix_only
+def test_ctrl_c_ends_running_scans_and_their_tools(tmp_path):
+    process, pids = start_runner_with_endless_scans(tmp_path)
+    survivors = pids
+    try:
+        # Docker sends Ctrl-C to the runner (PID 1) only, not to its scans.
+        os.kill(process.pid, signal.SIGINT)
+        assert process.wait(WAIT) == -signal.SIGINT
+        survivors = still_running(pids)
+        assert not survivors
+    finally:
+        if process.poll() is None:
+            process.kill()
+            process.wait()
+        kill_quietly(survivors)

@@ -34,7 +34,8 @@ full-catalog pass.
 Up to `scan-workers` skills are scanned at once, each with its own home and
 temporary directory. Logs, annotations and report rows keep skill order. When
 the time budget runs out, running scans stop and skills not yet started are
-reported as not evaluated.
+reported as not evaluated. Ctrl-C also stops running scans at once, including
+the scanner tools they started.
 With no affected skills, the check succeeds with **No skills changed** and
 records that validation did not run. Fully removed skills are listed as
 deleted/skipped. A removed manifest with tracked files left in its skill

@@ -43,6 +43,12 @@ All notable changes to SkillEvaluator are documented in this file.
 
 ### Fixed
 
+- Tier 3 reports preserve unavailable evaluator lift as `null` when no baseline
+  ran, rather than reporting a measured zero. CLI evaluator tables display
+  missing or unavailable scores as `n/a` without interrupting JSON and HTML
+  report generation; measured zeroes retain their numeric formatting
+  ([#240](https://github.com/NVIDIA/SkillEvaluator/issues/240)).
+
 - Explicit searches of `/` (`find`, `grep -r`, `rg`, `ag`, `du` and `tree` with a
   `/` operand, and native search tools rooted at `/`) now count as wasted tool
   calls whether or not they name the expected skill or script, including when

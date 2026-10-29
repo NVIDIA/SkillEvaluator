@@ -1158,21 +1158,65 @@ def _build(directory: Path) -> None:
 
 def _load_baseline(ref: str):
     """The host checker and the template as they stood at a git ref."""
+    # Newer refs share sibling modules with the standalone verifier. Load those
+    # from the same ref; using today's parser would hide historical score moves.
+    sources = {
+        "checks": "src/skillevaluator/tier3/eval_core/checks.py",
+        "baseline_template": "src/skillevaluator/tier3/harbor/templates/eval.py",
+        **{
+            name: f"src/skillevaluator/tier3/eval_core/{name}.py"
+            for name in (
+                "shell_lexing",
+                "script_invocation",
+                "secret_redaction",
+                "codex_tool_call_normalizer",
+                "log_converters",
+            )
+        },
+        "evidence": "src/skillevaluator/evidence.py",
+    }
+    # Older host checks used absolute imports for these same helper files.
+    aliases = {
+        name: relative.removeprefix("src/").removesuffix(".py").replace("/", ".")
+        for name, relative in sources.items()
+        if name not in {"checks", "baseline_template"}
+    }
+    import_names = {*sources, *aliases.values()}
     modules = []
-    for name, relative in (
-        ("baseline_host", "src/skillevaluator/tier3/eval_core/checks.py"),
-        ("baseline_template", "src/skillevaluator/tier3/harbor/templates/eval.py"),
-    ):
-        source = subprocess.run(
-            ["git", "show", f"{ref}:{relative}"], capture_output=True, text=True, check=True, cwd=REPO_ROOT
-        ).stdout
-        path = Path(tempfile.mkdtemp()) / Path(relative).name
-        path.write_text(source)
-        spec = importlib.util.spec_from_file_location(name, path)
-        assert spec and spec.loader
-        module = importlib.util.module_from_spec(spec)
-        spec.loader.exec_module(module)
-        modules.append(module)
+    with tempfile.TemporaryDirectory(prefix="script-check-baseline-") as temporary:
+        directory = Path(temporary)
+        for name, relative in sources.items():
+            result = subprocess.run(
+                ["git", "show", f"{ref}:{relative}"], capture_output=True, text=True, cwd=REPO_ROOT
+            )
+            if result.returncode and name not in {"checks", "baseline_template"}:
+                continue  # Shared modules did not exist before their extraction.
+            result.check_returncode()
+            (directory / f"{name}.py").write_text(result.stdout)
+
+        previous_path = sys.path.copy()
+        previous_modules = {name: sys.modules.pop(name) for name in import_names if name in sys.modules}
+        try:
+            sys.path.insert(0, str(directory))
+            for name in (*aliases, "checks", "baseline_template"):
+                if not (directory / f"{name}.py").exists():
+                    continue
+                spec = importlib.util.spec_from_file_location(name, directory / f"{name}.py")
+                assert spec and spec.loader
+                module = importlib.util.module_from_spec(spec)
+                sys.modules[name] = module
+                if name in aliases:
+                    sys.modules[aliases[name]] = module
+                spec.loader.exec_module(module)
+                if name in {"checks", "baseline_template"}:
+                    modules.append(module)
+        finally:
+            # Baseline functions retain their module globals after restoration;
+            # the candidate and subsequent runs must keep their own imports.
+            sys.path[:] = previous_path
+            for name in import_names:
+                sys.modules.pop(name, None)
+            sys.modules.update(previous_modules)
     return modules
 
 

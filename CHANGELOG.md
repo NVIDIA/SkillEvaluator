@@ -43,6 +43,12 @@ All notable changes to SkillEvaluator are documented in this file.
 
 ### Fixed
 
+- Local Claude Code trials retain Harbor's instruction environment variables so
+  prompts reach `claude --print`. The exception accepts only the legacy
+  `HARBOR_INSTRUCTION` name and Claude Code's UUID-named instruction variable;
+  protected paths, loader controls, and unrelated Harbor variables retain their
+  existing filtering ([#245](https://github.com/NVIDIA/SkillEvaluator/issues/245)).
+
 - Tier 3 reports preserve unavailable evaluator lift as `null` when no baseline
   ran, rather than reporting a measured zero. CLI evaluator tables display
   missing or unavailable scores as `n/a` without interrupting JSON and HTML

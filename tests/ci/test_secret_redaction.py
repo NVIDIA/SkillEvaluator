@@ -25,7 +25,7 @@ runner = importlib.util.module_from_spec(SPEC)
 SPEC.loader.exec_module(runner)
 
 
-def _secret() -> str:
+def _fixture_value() -> str:
     # Synthetic value, intentionally assembled at runtime; never a credential.
     return "nvapi-" + "Ab9" * 16 + "<&%"
 
@@ -34,14 +34,14 @@ def _skill(workspace: Path) -> Path:
     skill = workspace / "skills" / "demo"
     skill.mkdir(parents=True)
     (skill / "SKILL.md").write_text("---\nname: demo\ndescription: A sample formatting skill.\n---\n# Demo\n")
-    (skill / "source.py").write_text('API_KEY = "' + _secret() + '"\n')
+    (skill / "source.py").write_text('API_KEY = "' + _fixture_value() + '"\n')
     return skill
 
 
 def _assert_no_secret(value: str | bytes) -> None:
     raw = value.encode() if isinstance(value, str) else value
     # Do not render synthetic values in assertion output.
-    for encoding in (_secret(), html.escape(_secret()), quote(_secret(), safe="")):
+    for encoding in (_fixture_value(), html.escape(_fixture_value()), quote(_fixture_value(), safe="")):
         if encoding.encode() in raw:
             pytest.fail("A synthetic credential was present in a shared output.")
 
@@ -64,30 +64,30 @@ def test_runner_and_retained_publisher_never_export_detected_value(tmp_path, cap
     payload = json.loads(JSONReporter(include_timestamp=False).render_all([result]))
     # Another scanner can echo a value that PII also detected.
     finding = payload["results"][0]["findings"][0]
-    finding["message"] += " scanner echoed " + _secret()
-    finding["line_content"] = "truncated source: " + _secret()[:24]
-    finding["metadata"]["nested"] = {"detail": _secret()[:24]}
-    payload["results"][0]["legacy"]["errors"].append("other scanner: " + _secret())
+    finding["message"] += " scanner echoed " + _fixture_value()
+    finding["line_content"] = "truncated source: " + _fixture_value()[:24]
+    finding["metadata"]["nested"] = {"detail": _fixture_value()[:24]}
+    payload["results"][0]["legacy"]["errors"].append("other scanner: " + _fixture_value())
 
     def fake_cli(argv, **kwargs):
         target = Path(argv[argv.index("-o") + 1])
         assert not target.is_relative_to(reports)
-        kwargs["stdout"].write(("raw scanner output " + _secret()[:24]).encode())
-        kwargs["stderr"].write(("raw scanner error " + _secret()).encode())
+        kwargs["stdout"].write(("raw scanner output " + _fixture_value()[:24]).encode())
+        kwargs["stderr"].write(("raw scanner error " + _fixture_value()).encode())
         (target / "skillevaluator-tier1.json").write_text(json.dumps(payload))
         for extension in ("html", "md"):
             (target / f"skillevaluator-tier1.{extension}").write_text(
                 "other scanner "
-                + _secret()
+                + _fixture_value()
                 + " "
-                + html.escape(_secret())
+                + html.escape(_fixture_value())
                 + " "
-                + quote(_secret(), safe="")
+                + quote(_fixture_value(), safe="")
                 + " truncated: "
-                + _secret()[:24]
+                + _fixture_value()[:24]
             )
         (target / "skillevaluator-tier1.sarif.json").write_text(
-            json.dumps({"message": "other scanner " + _secret()[:24]})
+            json.dumps({"message": "other scanner " + _fixture_value()[:24]})
         )
         return subprocess.CompletedProcess(argv, 1)
 
@@ -96,7 +96,7 @@ def test_runner_and_retained_publisher_never_export_detected_value(tmp_path, cap
     for path in reports.rglob("*"):
         if path.is_file():
             _assert_no_secret(path.read_bytes())
-            if _secret()[:24].encode() in path.read_bytes():
+            if _fixture_value()[:24].encode() in path.read_bytes():
                 pytest.fail("A truncated synthetic credential was present in a report.")
 
     from ci import publish_reports
@@ -113,11 +113,11 @@ def test_runner_and_retained_publisher_never_export_detected_value(tmp_path, cap
     # copy. Publisher must sanitize it before writing retained history.
     document = retained["skill-001"]
     old_finding = document["results"][0]["findings"][0]
-    old_finding["metadata"]["matched_value"] = 'API_KEY = "' + _secret() + '"'
-    old_finding["message"] = "Hardcoded credential: " + _secret()
-    old_finding["line_content"] = 'API_KEY = "' + _secret() + '"'
-    document["results"][0]["legacy"]["errors"].append("scanner echoed " + _secret())
-    summary["extra"] = "summary echoed " + _secret()
+    old_finding["metadata"]["matched_value"] = 'API_KEY = "' + _fixture_value() + '"'
+    old_finding["message"] = "Hardcoded credential: " + _fixture_value()
+    old_finding["line_content"] = 'API_KEY = "' + _fixture_value() + '"'
+    document["results"][0]["legacy"]["errors"].append("scanner echoed " + _fixture_value())
+    summary["extra"] = "summary echoed " + _fixture_value()
     old_archive = io.BytesIO()
     with zipfile.ZipFile(old_archive, "w") as zipped:
         zipped.writestr("summary.json", json.dumps(summary))
@@ -171,8 +171,8 @@ def test_interrupted_scan_never_copies_raw_output(tmp_path, capsys):
 
     def interrupted(argv, **kwargs):
         target = Path(argv[argv.index("-o") + 1])
-        kwargs["stdout"].write(_secret().encode())
-        (target / "skillevaluator-tier1.json").write_text(_secret())
+        kwargs["stdout"].write(_fixture_value().encode())
+        (target / "skillevaluator-tier1.json").write_text(_fixture_value())
         raise subprocess.TimeoutExpired(argv, 1)
 
     assert runner.run(workspace, reports, {"SKILL_PATHS": "skills"}, execute=interrupted) == 1
@@ -189,7 +189,7 @@ def test_credential_detected_in_one_skill_is_redacted_from_another_skill(tmp_pat
     other.mkdir()
     (other / "SKILL.md").write_text("---\nname: other\ndescription: A formatting skill.\n---\n# Other\n")
     # This source mentions the same value without a credential assignment.
-    (other / "reference.md").write_text("Reference " + _secret())
+    (other / "reference.md").write_text("Reference " + _fixture_value())
 
     def fake_cli(argv, **kwargs):
         target = Path(argv[argv.index("-o") + 1])
@@ -197,7 +197,7 @@ def test_credential_detected_in_one_skill_is_redacted_from_another_skill(tmp_pat
         result = SecurityValidator(use_llm=False).validate_pii_only(skill)
         result.validator_name = "PII Scan"
         result.validator_description = "Detect sensitive identifiers"
-        result.add_warning("Another scanner echoed " + _secret())
+        result.add_warning("Another scanner echoed " + _fixture_value())
         payload = JSONReporter(include_timestamp=False).render_all([result])
         (target / "skillevaluator-tier1.json").write_text(payload)
         return subprocess.CompletedProcess(argv, int(not result.passed))
@@ -211,10 +211,10 @@ def test_credential_detected_in_one_skill_is_redacted_from_another_skill(tmp_pat
 
 def test_detected_credential_in_skill_path_never_reaches_summary_or_log(tmp_path, capsys):
     workspace, reports = tmp_path / "workspace", tmp_path / "reports"
-    skill = workspace / "skills" / _secret()
+    skill = workspace / "skills" / _fixture_value()
     skill.mkdir(parents=True)
     (skill / "SKILL.md").write_text("---\nname: demo\ndescription: Formats text.\n---\n# Demo\n")
-    (skill / "source.py").write_text('API_KEY = "' + _secret() + '"\n')
+    (skill / "source.py").write_text('API_KEY = "' + _fixture_value() + '"\n')
     assert runner.run(workspace, reports, {"SKILL_PATHS": "skills"}) == 1
     _assert_no_secret(capsys.readouterr().out)
     for path in reports.rglob("*"):
@@ -242,7 +242,7 @@ def test_pii_source_masks_multiple_credentials_in_one_line(tmp_path):
     skill = _skill(tmp_path)
     second = "nvapi-" + "Cd4" * 16
     (skill / "source.py").write_text(
-        'API_KEY = "' + _secret() + '"; PASSWORD = "' + second + '"; contact="user@real-domain.org"\n'
+        'API_KEY = "' + _fixture_value() + '"; PASSWORD = "' + second + '"; contact="user@real-domain.org"\n'
     )
     result = SecurityValidator(use_llm=False).validate_pii_only(skill)
     rendered = JSONReporter(include_timestamp=False).render_all([result])
@@ -337,7 +337,7 @@ def test_optional_provider_key_is_redacted_from_scanner_output(tmp_path, capsys)
 def test_preflight_rejects_extremely_long_lines_before_scanning(tmp_path, capsys):
     workspace, reports = tmp_path / "workspace", tmp_path / "reports"
     skill = _skill(workspace)
-    (skill / "source.py").write_text("connection" * 2000 + _secret() + "\n")
+    (skill / "source.py").write_text("connection" * 2000 + _fixture_value() + "\n")
     called = []
 
     def execute(*_args, **_kwargs):

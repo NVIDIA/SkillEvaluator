@@ -37,6 +37,9 @@ All notable changes to SkillEvaluator are documented in this file.
   `quality_config` (`packaged` or `custom`, the custom file's name, a
   `sha256:` digest of the normalized rules, and the `--min-score` pass
   threshold, which is kept out of the digest).
+- CI-native per-skill HTML pages link Download JSON to the retained
+  `skillevaluator-tier1.json` and do not embed a second copy of the report
+  JSON. Standalone CLI HTML reports embed it for Export JSON.
 
 ### Changed
 
@@ -70,12 +73,9 @@ All notable changes to SkillEvaluator are documented in this file.
   out only the tool files each job needs and replaces site files atomically.
   It and the PR comment helper share one GitHub client, which rejects sibling
   repository endpoints and NaN or Infinity in JSON for both.
-- CI report rendering is faster. HTML reports share one compiled template
-  instead of recompiling it for every skill, and each skill's JSON is read once
-  per render. `details.md` stops escaping evidence once it reaches its size
-  limit. CI-native per-skill pages no longer embed an unused copy of the report
-  JSON; Download JSON still links the retained `skillevaluator-tier1.json`, and
-  standalone CLI reports still embed it for Export JSON.
+- HTML reports rendered in one process share one compiled template
+  environment, so each template compiles once per process instead of once per
+  report.
 
 ### Documentation
 

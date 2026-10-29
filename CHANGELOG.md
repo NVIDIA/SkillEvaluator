@@ -309,6 +309,14 @@ All notable changes to SkillEvaluator are documented in this file.
   `quality-check` before any report was written. The schema check reports the
   malformed `metadata`, and the quality score counts `metadata.author` and
   `metadata.tags` as missing, as it already did for other non-mapping values.
+- `similarity-check --catalog` and `tier2 --catalog` no longer report a skill
+  that is already in the local catalog as an `EXACT_DUPLICATE` of its own
+  entry, which failed the run. The one catalog entry whose path ends the
+  skill's path and whose content fingerprint matches is skipped and recorded
+  under `self_matches_excluded` and `excluded_catalog_paths`. Copies and
+  same-name skills at other paths are still reported. An edited skill whose
+  name, description, or (with `--full-body`) `SKILL.md` changed is still
+  compared with its old entry; build the catalog from the tree you screen.
 
 ## 0.6.0 - 2026-10-20
 

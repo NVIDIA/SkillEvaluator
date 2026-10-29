@@ -245,6 +245,18 @@ existing set — save the collection once and query candidates against it.
   </Step>
 </Steps>
 
+Re-screening a skill that is already in the catalog does not report it as a
+duplicate of its own entry. Catalog paths are relative to the collection the
+catalog was built from, so an entry counts as the candidate's own only when its
+path ends the candidate's path — `alpha` for `./skills/alpha` in a catalog
+built from `./skills` — and its content fingerprint matches what the query
+compares: the name and description, or the whole `SKILL.md` with
+`--full-body`. At most one entry is skipped, and the result records it under
+`excluded_catalog_paths`. Copies and same-name skills at other paths are still
+compared. An edited skill whose compared content changed no longer matches its
+old entry and is compared with it like any other skill; to screen edited
+skills, build the catalog from the same tree you screen.
+
 Catalogs contain finite embedding vectors, relative skill paths, display names,
 descriptions, content fingerprints, and provider, model, mode, and
 endpoint-fingerprint metadata for compatibility checks. They never contain API

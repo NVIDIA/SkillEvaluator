@@ -346,8 +346,43 @@ class EmbeddingRegistry:
         matches.sort(key=lambda m: m.score, reverse=True)
         return matches
 
-    def query_entry(self, entry: ContentEntry, threshold: float) -> list[SimilarityMatch]:
-        """Compare one extracted target entry against every catalog entry."""
+    def catalog_self_entry(self, target: ContentEntry) -> RegistryEntry | None:
+        """Return the catalog entry that records *target* itself, if any.
+
+        Catalog paths are relative to a scan root the catalog does not record.
+        The candidate is the entry with the longest path that ends the target's
+        resolved directory path; it identifies the target only when its content
+        fingerprint, in this registry's mode, also matches. Same-name skills and
+        copies at other paths are distinct skills and stay comparable.
+        """
+        target_parts = Path(target.path).resolve().parts
+        candidate: RegistryEntry | None = None
+        candidate_depth = 0
+        for catalog_entry in self._entries.values():
+            parts = PurePosixPath(catalog_entry.path).parts
+            if (
+                catalog_entry.content_type == target.content_type
+                and len(parts) > candidate_depth
+                and target_parts[-len(parts) :] == parts
+            ):
+                candidate, candidate_depth = catalog_entry, len(parts)
+        if candidate is None:
+            return None
+        text = target.full_text if self._full_body else target.embedding_text
+        return candidate if candidate.content_fingerprint == _fingerprint(text) else None
+
+    def query_entry(
+        self,
+        entry: ContentEntry,
+        threshold: float,
+        *,
+        exclude_entry_id: str | None = None,
+    ) -> list[SimilarityMatch]:
+        """Compare one extracted target entry against every catalog entry.
+
+        ``exclude_entry_id`` skips one catalog entry, such as the target's own
+        record from :meth:`catalog_self_entry`, before thresholds apply.
+        """
         _validate_threshold(threshold)
         catalog_entries = list(self._entries.values())
         vector_dimension = _registry_vector_dimension(catalog_entries, self._vector_dimension)
@@ -361,6 +396,8 @@ class EmbeddingRegistry:
 
         matches: list[SimilarityMatch] = []
         for catalog_entry, unit_vector in zip(catalog_entries, unit_vectors, strict=True):
+            if catalog_entry.entry_id == exclude_entry_id:
+                continue
             score = unit_vector_similarity(query_vector, unit_vector)
             if score >= threshold:
                 if len(matches) >= MAX_SIMILARITY_MATCHES:

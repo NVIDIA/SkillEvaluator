@@ -6,12 +6,14 @@
 from __future__ import annotations
 
 import math
+import shutil
 from pathlib import Path
+from types import SimpleNamespace
 from unittest.mock import MagicMock, patch
 
 import pytest
 
-from skillevaluator.embedding.client import SimilarityConfigError
+from skillevaluator.embedding.client import EmbeddingClient, SimilarityConfigError
 from skillevaluator.embedding.extractor import ContentEntry
 from skillevaluator.embedding.registry import SimilarityMatch
 from skillevaluator.models.result import Severity
@@ -266,6 +268,7 @@ class TestValidateCacheWorkflow:
 
         mock_registry = MagicMock()
         mock_registry.size = 2
+        mock_registry.catalog_self_entry.return_value = None
         mock_registry.query_entry.return_value = []
         mock_registry_cls.return_value = mock_registry
         target = ContentEntry(
@@ -281,7 +284,7 @@ class TestValidateCacheWorkflow:
         result = validator.validate(tmp_path)
 
         mock_registry.load_catalog.assert_called_once_with(cache_file)
-        mock_registry.query_entry.assert_called_once_with(target, 0.75)
+        mock_registry.query_entry.assert_called_once_with(target, 0.75, exclude_entry_id=None)
         assert result.passed
 
     @patch("skillevaluator.validators.similarity.EmbeddingRegistry")
@@ -382,12 +385,14 @@ class TestLocalCatalogWorkflow:
         mock_extract.return_value = target
         registry = mock_registry_cls.return_value
         registry.size = 3
+        registry.catalog_self_entry.return_value = None
         registry.query_entry.return_value = []
 
         result = SimilarityValidator(content_type="skill", catalog_path=catalog).validate(tmp_path / "candidate")
 
         registry.load_catalog.assert_called_once_with(catalog)
-        registry.query_entry.assert_called_once_with(target, 0.75)
+        registry.catalog_self_entry.assert_called_once_with(target)
+        registry.query_entry.assert_called_once_with(target, 0.75, exclude_entry_id=None)
         registry.find_duplicates.assert_not_called()
         assert result.passed
         assert any("3 catalog entries" in detail.message for detail in result.success_details)
@@ -524,3 +529,50 @@ class TestLocalCatalogWorkflow:
 def test_similarity_validator_rejects_invalid_threshold(threshold: float) -> None:
     with pytest.raises(ValueError, match=r"finite.*\[0, 1\]"):
         SimilarityValidator(threshold=threshold)
+
+
+def _keyed_embedding_client(model: str | None = None) -> EmbeddingClient:
+    """Embed alpha and beta skills as orthogonal vectors."""
+
+    def embed_one(text: str) -> list[float]:
+        return [0.0, 1.0] if "beta" in text else [1.0, 0.0]
+
+    client = MagicMock(spec=EmbeddingClient)
+    client.embed.side_effect = lambda texts: [embed_one(text) for text in texts]
+    client.embed_single.side_effect = embed_one
+    client.embed_chunked.side_effect = embed_one
+    client.model = "test-model"
+    client._resolved_config.return_value = SimpleNamespace(
+        provider="nv_build",
+        base_url="https://integrate.api.nvidia.com/v1",
+    )
+    return client
+
+
+class TestCatalogSelfEntry:
+    @patch("skillevaluator.validators.similarity.EmbeddingClient", side_effect=_keyed_embedding_client)
+    def test_rescreening_a_cataloged_skill_skips_only_its_own_entry(self, _mock_client_cls, tmp_path: Path) -> None:
+        skills = tmp_path / "skills"
+        for name in ("alpha", "beta"):
+            (skills / name).mkdir(parents=True)
+            (skills / name / "SKILL.md").write_text(f"---\nname: {name}\ndescription: {name} catalog skill\n---\n")
+        catalog = tmp_path / "catalog.json"
+        assert SimilarityValidator(content_type="skill", save_catalog_path=catalog).validate(skills).passed
+        shutil.copytree(skills / "alpha", skills / "alpha-copy")
+
+        existing = SimilarityValidator(content_type="skill", catalog_path=catalog).validate(skills / "alpha")
+        copy = SimilarityValidator(content_type="skill", catalog_path=catalog).validate(skills / "alpha-copy")
+
+        assert existing.passed
+        assert existing.findings == []
+        compared = next(detail for detail in existing.success_details if detail.check_name == "catalog_compared")
+        assert compared.metadata["self_matches_excluded"] == 1
+        assert compared.metadata["excluded_catalog_paths"] == ["alpha"]
+        assert "against 1 other catalog entries; skipped its own entry 'alpha'" in compared.message
+        assert not copy.passed
+        assert [(finding.check_name, finding.metadata["path_b"]) for finding in copy.findings] == [
+            ("EXACT_DUPLICATE", "alpha")
+        ]
+        compared = next(detail for detail in copy.success_details if detail.check_name == "catalog_compared")
+        assert compared.metadata["self_matches_excluded"] == 0
+        assert compared.metadata["excluded_catalog_paths"] == []

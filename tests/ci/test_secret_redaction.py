@@ -403,6 +403,48 @@ def _publish(tmp_path: Path, monkeypatch, reports: Path) -> tuple[Path, Path]:
     return site, feedback
 
 
+def test_redactor_masks_values_that_upstream_text_cuts_or_escapes():
+    from skillevaluator.utils.secret_redaction import Redactor
+
+    value = "nvapi-" + "Qx7" * 16
+    password = "Rt5" * 4 + "|" + "Wm8`" * 3
+    redactor = Redactor({value, password})
+    cell = html.escape(password, quote=False).replace("|", "&#124;").replace("`", "&#96;")
+    for text in (
+        # A context window that starts inside a value.
+        "window: " + value[3:] + '"\nWEBHOOK = "https://hooks.example.invalid/x"',
+        # A window that starts inside a value and is then cut again.
+        "excerpt " + value[9:41] + "...",
+        json.dumps({"snippet": value[13:]}),
+        "| " + cell + " |",
+    ):
+        safe = redactor.text(text)
+        _assert_no_fragment(safe, value)
+        _assert_no_fragment(safe, password)
+    ordinary = "Dangerous code execution: subprocess.run(cmd, shell=True) in scripts/run.py"
+    assert redactor.text(ordinary) == ordinary
+
+
+def test_redactor_masks_database_userinfo_when_the_text_ends_inside_it():
+    from skillevaluator.utils.secret_redaction import Redactor
+
+    password = "Kp4" * 4
+    for redactor in (Redactor({password}), Redactor(set())):
+        safe = redactor.text('    url = "postgresql://svc:' + password[:10])
+        if password[:6] in safe or "postgresql://" not in safe:
+            pytest.fail("A cut database password was not masked.")
+    ordinary = [
+        "postgresql://db.local:5432/app",
+        'DSN = "postgresql://db.local:5432"',
+        "mysql://reporting@db.local/app",
+        "https://user.example.invalid:8443/path",
+    ]
+    assert [Redactor(set()).text(text) for text in ordinary] == ordinary
+    # The connection string match is not a secret; its words stay readable.
+    connection = Redactor({'conn_string = "Server=db.local;password='})
+    assert connection.text("Hardcoded password in a connection string") == "Hardcoded password in a connection string"
+
+
 @pytest.mark.parametrize("mark", ["\u200b", "\ufeff", "\u00a0"])
 def test_preflight_matches_values_echoed_with_an_invisible_character_marker(tmp_path, mark):
     from ci.secret_redaction import collect_sensitive_values

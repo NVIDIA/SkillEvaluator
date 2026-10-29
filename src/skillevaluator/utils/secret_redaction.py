@@ -23,6 +23,14 @@ SENSITIVE_PII_CATEGORIES = frozenset(
     }
 )
 REDACTED = "[REDACTED]"
+REPEATED_REDACTED = re.compile(f"(?:{re.escape(REDACTED)}){{2,}}")
+# Snippets can cut a database URL before the "@" that ends its credentials,
+# and a short password only matches as a whole value. Mask user:password after
+# a database scheme even when the text ends inside it. A bare port is kept.
+DATABASE_USERINFO = re.compile(
+    r"(?i)\b((?:postgres(?:ql)?|mysql|mariadb|mongodb|rediss?)(?:\+\w+)?://)"
+    r"[^\s/?#@:\"'`<>]*:(?:[^\s/?#@\"'`<>]+(?=@)|(?!\d*$)[^\s/?#@\"'`<>]+$)"
+)
 
 
 def sensitive_values(category: str, matched: str, line: str = "") -> set[str]:
@@ -65,7 +73,7 @@ def _visible_forms(token: str) -> set[str]:
 
 
 def variants(tokens: set[str]) -> tuple[str, ...]:
-    """Include encoded values and truncated prefixes of credential literals."""
+    """Include encoded values and truncated parts of credential literals."""
     encoded: set[str] = set()
     pattern_size = 0
     for token in {form for value in tokens for form in _visible_forms(value)}:
@@ -75,11 +83,14 @@ def variants(tokens: set[str]) -> tuple[str, ...]:
             html.escape(token, quote=False),
             json.dumps(token)[1:-1],
             quote(token, safe=""),
+            html.escape(token, quote=False).replace("|", "&#124;").replace("`", "&#96;"),
         }
         context = (
             "://" in token
             or token.startswith("-----BEGIN ")
             or re.match(r"(?i)^(?:secret|password|passwd|pwd|api[-_]?key|apikey|auth[-_]?token|bearer)\s*[=:]", token)
+            # A connection string match holds ordinary words; its password is collected separately.
+            or token.lower().endswith("password=")
         )
         for value in forms:
             candidates = [value]
@@ -87,6 +98,11 @@ def variants(tokens: set[str]) -> tuple[str, ...]:
                 if len(value) > 512:
                     raise ValueError("A credential is too long for safe partial-value redaction.")
                 candidates.extend(value[:length] for length in range(5, len(value)))
+                # Upstream text can also start inside a value, or start and end
+                # inside it. Match every window of 8 characters and suffixes of 8
+                # to 15, so no fragment of 8 or more characters is left.
+                candidates.extend(value[-length:] for length in range(8, 16))
+                candidates.extend(value[start : start + 8] for start in range(len(value) - 7))
             for candidate in candidates:
                 if candidate not in encoded:
                     pattern_size += len(candidate)
@@ -105,10 +121,19 @@ class Redactor:
         values = variants(tokens)
         if sum(len(value) for value in values) > 1024 * 1024:
             raise ValueError("Credential redaction patterns exceed their limit.")
-        self.pattern = re.compile("|".join(re.escape(value) for value in values)) if values else None
+        # Group values by first character so that windows starting with any
+        # character stay fast to scan. The longest value in a group wins.
+        groups: dict[str, list[str]] = {}
+        for value in values:
+            groups.setdefault(value[0], []).append(re.escape(value[1:]))
+        alternatives = (re.escape(first) + "(?:" + "|".join(rest) + ")" for first, rest in groups.items())
+        self.pattern = re.compile("|".join(alternatives)) if values else None
 
     def text(self, text: str) -> str:
-        return self.pattern.sub(REDACTED, text) if self.pattern else text
+        if self.pattern:
+            # Windows of one value are replaced one at a time; show one marker.
+            text = REPEATED_REDACTED.sub(REDACTED, self.pattern.sub(REDACTED, text))
+        return DATABASE_USERINFO.sub(lambda match: match.group(1) + REDACTED, text)
 
     def object(self, value: object) -> object:
         if isinstance(value, str):

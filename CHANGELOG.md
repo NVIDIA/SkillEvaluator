@@ -62,6 +62,8 @@ All notable changes to SkillEvaluator are documented in this file.
   so failed uploads preserve existing verifier files. Missing or invalid
   sources fail rather than creating an empty verifier directory. Per-step
   verifier uploads retain shared test files, with step files taking precedence.
+  After any command runs, the next upload replaces the tests directory, so
+  files or links the agent left there cannot change verification.
 - Rubric evaluation preserves the original `SKILL.md` text without adding YAML
   separators and includes reachable local Markdown guides under their source
   paths. Required guidance is collected before optional previews, with cycle

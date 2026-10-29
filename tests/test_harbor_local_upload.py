@@ -321,3 +321,53 @@ def test_real_harbor_verifier_reads_shared_and_step_inputs(
             await environment.stop(delete=True)
 
     asyncio.run(exercise())
+
+
+@pytest.mark.parametrize("leftover", ["file", "symlink"])
+def test_upload_after_a_command_replaces_files_left_in_the_target(tmp_path: Path, leftover: str) -> None:
+    environment = _environment(tmp_path)
+    environment._tests.mkdir(parents=True)
+    if leftover == "file":
+        (environment._tests / "grader.py").write_text("print('agent grader')\n", encoding="utf-8")
+    else:
+        try:
+            (environment._tests / "linked.txt").symlink_to(tmp_path / "outside.txt")
+        except OSError as exc:
+            pytest.skip(f"symlinks unavailable: {exc}")
+    environment._exec_since_upload = True
+    shared = tmp_path / "shared"
+    shared.mkdir()
+    (shared / "test.sh").write_text("#!/bin/sh\nexit 0\n", encoding="utf-8")
+    step = tmp_path / "step"
+    step.mkdir()
+    (step / "step.txt").write_text("step input", encoding="utf-8")
+
+    asyncio.run(environment.upload_dir(shared, "/tests"))
+    asyncio.run(environment.upload_dir(step, "/tests"))
+
+    assert sorted(path.name for path in environment._tests.iterdir()) == ["step.txt", "test.sh"]
+
+
+def test_real_command_output_in_tests_dir_does_not_reach_the_verifier(tmp_path: Path) -> None:
+    try:
+        local_sandbox.detect("require")
+    except local_sandbox.SandboxUnavailable as exc:
+        pytest.skip(str(exc))
+    environment = _environment(tmp_path)
+    source = tmp_path / "source"
+    source.mkdir()
+    (source / "test.sh").write_text("#!/bin/sh\nexit 0\n", encoding="utf-8")
+
+    async def exercise():
+        await environment.start()
+        try:
+            result = await environment.exec('printf x > "$HARBOR_TESTS_DIR/conftest.py"')
+            assert result.return_code == 0, result.stderr
+            assert (environment._tests / "conftest.py").exists()
+            await environment.upload_dir(source, "/tests")
+        finally:
+            await environment.stop(delete=False)
+
+    asyncio.run(exercise())
+
+    assert [path.name for path in environment._tests.iterdir()] == ["test.sh"]

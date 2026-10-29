@@ -510,6 +510,7 @@ class SkillEvaluatorLocalEnvironment(BaseEnvironment):
         ] = {}
         self._creation_cleanup_errors: list[set[str]] = []
         self._stop_requested = False
+        self._exec_since_upload = False
         super().__init__(*args, **kwargs)
         base_dir = self._working_dir_override or (self.trial_paths.trial_dir / "local-environment")
         self._root = base_dir.resolve()
@@ -753,8 +754,32 @@ class SkillEvaluatorLocalEnvironment(BaseEnvironment):
                 except OSError as exc:
                     if exc.errno not in {errno.ENOTEMPTY, errno.EEXIST}:
                         raise
-            # Harbor uploads shared tests followed by per-step overlays.
-            copytree_secure(staged, target, dirs_exist_ok=True)
+            # Harbor uploads shared tests and per-step overlays back to back, so
+            # merge only those. After any command the target may hold files or
+            # links the agent wrote, so set the old tree aside and publish fresh.
+            try:
+                metadata = target.lstat()
+            except FileNotFoundError:
+                metadata = None
+            if (
+                self._exec_since_upload
+                and metadata is not None
+                and stat.S_ISDIR(metadata.st_mode)
+                and not stat_is_link_or_reparse(metadata)
+            ):
+                previous = Path(tempfile.mkdtemp(prefix=f".{target.name}-previous-", dir=target.parent))
+                aside = previous / target.name
+                target.rename(aside)
+                try:
+                    copytree_secure(staged, target)
+                except BaseException:
+                    aside.rename(target)
+                    previous.rmdir()
+                    raise
+                shutil.rmtree(previous)
+            else:
+                copytree_secure(staged, target, dirs_exist_ok=True)
+            self._exec_since_upload = False
 
     async def download_file(self, source_path: str, target_path: Path | str) -> None:
         source = self._resolve_path(source_path)
@@ -795,6 +820,7 @@ class SkillEvaluatorLocalEnvironment(BaseEnvironment):
         if self._stop_requested:
             return await blocked("environment shutdown is in progress")
 
+        self._exec_since_upload = True
         rewritten = self._rewrite_command(command)
         try:
             workdir = self._resolve_path(cwd) if cwd else self._workspace

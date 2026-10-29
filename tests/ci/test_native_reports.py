@@ -10,7 +10,7 @@ from html import unescape
 from pathlib import Path
 
 import pytest
-from ci.native_reports import _InlineCode, render_native_reports
+from ci.native_reports import _trusted_inline_code, constrain_native_html, render_native_reports
 from ci.run_tier1 import _summary
 
 from skillevaluator.models import Finding, ValidationResult
@@ -61,13 +61,8 @@ def _csp_hashes(document: str) -> set[str]:
     return set(re.findall(r"'(sha256-[^']+)'", unescape(policy)))
 
 
-def _inline_code_hashes(document: str) -> set[str]:
-    parser = _InlineCode()
-    parser.feed(document)
-    return {
-        "sha256-" + base64.b64encode(hashlib.sha256(code.encode()).digest()).decode()
-        for code in {*parser.scripts, *parser.handlers}
-    }
+def _sha256(code: str) -> str:
+    return "sha256-" + base64.b64encode(hashlib.sha256(code.encode()).digest()).decode()
 
 
 @pytest.mark.parametrize("failed", [False, True])
@@ -84,9 +79,23 @@ def test_native_reports_overwrite_artifact_html_keep_json_and_link_details(tmp_p
     assert "Content-Security-Policy" in native and "sha256-" in native and "unsafe-eval" not in native
     # The page links the canonical JSON instead of embedding an unused copy.
     assert 'id="report-data"' not in native
-    assert _csp_hashes(native) == _inline_code_hashes(native)
     assert "<img src=x onerror=alert(1)>" not in native
     assert "https://example.com/run/skill-001/skillevaluator-tier1.html" in (tmp_path / "details.md").read_text()
+
+
+def test_omitting_embedded_report_json_keeps_the_csp_script_hashes(tmp_path):
+    summary, raw = _write_fixture(tmp_path, failed=True)
+    render_native_reports(tmp_path, summary, {})
+    native = (tmp_path / "skill-001/skillevaluator-tier1.html").read_text(encoding="utf-8")
+    page = re.sub(r'<meta http-equiv="Content-Security-Policy" content="[^"]+">', "", native, count=1)
+    # Put back the block that standalone reports embed, escaped the way HTMLReporter escapes it.
+    embedded = json.dumps(json.loads(raw)).replace("<", "\\u003c").replace(">", "\\u003e").replace("&", "\\u0026")
+    block = f'<script id="report-data" type="application/json">{embedded}</script>'
+    assert page.count("</body>") == 1
+    standalone = page.replace("</body>", block + "</body>")
+    hashes = _csp_hashes(native)
+    assert _csp_hashes(constrain_native_html(standalone)) == _csp_hashes(constrain_native_html(page)) == hashes
+    assert hashes and hashes <= {_sha256(code) for code in _trusted_inline_code()}
 
 
 def test_malformed_retained_evidence_is_not_silently_published(tmp_path):

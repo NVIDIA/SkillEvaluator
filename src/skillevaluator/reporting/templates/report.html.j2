@@ -1274,16 +1274,6 @@
                         <span aria-hidden="true">↓</span><span>Download JSON</span>
                     </button>{% endif %}
                 </div>
-                <span class="header-status-badge {{ 'warn' if has_incomplete else ('pass' if all_passed else 'fail') }}">Process: {{ 'Incomplete' if has_incomplete else ('All Passed' if all_passed else 'Issues Found') }}</span>
-                {% if report_scope == 'tier3' %}
-                <span class="header-status-badge warn" data-publication-status="not-assessed">Publication: Not assessed (Tier 3 only)</span>
-                {% else %}
-                <span class="header-status-badge {{ 'pass' if publication_status == 'pass' else ('fail' if publication_status == 'fail' else 'warn') }}"
-                      data-publication-status="{{ publication_status }}"
-                      {% if publication_reasons %}title="{{ publication_reasons | join(' ') }}"{% endif %}>
-                    Publication: {{ publication_status | title }}
-                </span>
-                {% endif %}
             </div>
         </div>
     </header>
@@ -1370,7 +1360,11 @@
                     </div>
                 {% endif %}
                 {% endif %}
+                    {% if report_scope == 'tier3' %}
+                    <p class="publication-line" data-publication-status="not-assessed"><span class="publication-label">Publication eligibility</span> <span class="status-badge warn">Not assessed (Tier 3 only)</span></p>
+                    {% else %}
                     <p class="publication-line" data-publication-status="{{ publication_status }}"><span class="publication-label">Publication eligibility</span> <span class="status-badge {{ publication_class }}">{{ publication_words.get(publication_status, publication_status | title) }}</span>{% if publication_reasons %} <span class="publication-reasons">{{ publication_reasons | join(' ') }}</span>{% endif %}</p>
+                    {% endif %}
                 </div>
             </div>
             {#-
@@ -1448,7 +1442,7 @@
                 </div>
                 {% endif %}
                 {% if has_tier3 %}
-                {% set tier3_display_verdict = 'SKIPPED' if tier3_is_skipped else tier3_verdict | upper %}
+                {% set tier3_display_verdict = verdict_words['skipped'] if tier3_is_skipped else (advisory_fail_word if tier3_advisory_fail else verdict_words[tier3_verdict if tier3_verdict in ['pass', 'fail', 'neutral'] else 'incomplete']) %}
                 {% set t3_class = 'skipped' if tier3_is_skipped else ('warn' if completed_agent and completed_agent.needs_attention else ('pass' if tier3_verdict == 'pass' else ('fail' if tier3_verdict == 'fail' else 'warn'))) %}
                 <div class="tier-card {{ t3_class }}{% if initial_tab == 'tier3' %} active{% endif %}"
                      role="button"
@@ -2429,10 +2423,11 @@
                 Other execution failures need attention. This is not a whole-run or publication PASS.
                 {% else %}
                 <strong>Verdict at a glance:</strong>
-                {{ tier3_verdict | upper }} with an overall score of
+                {{ advisory_fail_word if tier3_advisory_fail else (verdict_words.get(tier3_verdict) or tier3_verdict | title) }}{% if t3_effect %} · {{ t3_effect.message }}{% else %} with an overall score of
                 {{ "%.2f" | format(hero_score) if hero_score is not none else "N/A" }}.
                 {% if t3_best_name %}Best performing agent is <strong>{{ t3_best_name }}</strong>{% else %}No successfully scored agent is available{% endif %}
                 {% if tier3.get('overall_lift') is not none %} with {{ "%+.2f" | format(tier3.get('overall_lift')) }} skill lift{% endif %}.
+                {% endif %}
                 {% endif %}
                 {% endif %}
             </div>
@@ -2451,7 +2446,7 @@
             <div class="dashboard">
                 <div class="dashboard-card {{ 'success' if tier3_verdict == 'pass' else ('danger' if tier3_verdict == 'fail' else '') }}">
                     <h3 class="dashboard-card-title">{{ 'Quality Verdict' if report_scope == 'tier3' and completed_agent else 'Verdict' }}</h3>
-                    <p class="dashboard-card-value">{{ 'SKIPPED' if tier3_is_skipped else tier3_verdict | upper }}</p>
+                    <p class="dashboard-card-value">{{ verdict_words['skipped'] if tier3_is_skipped else (advisory_fail_word if tier3_advisory_fail else (verdict_words.get(tier3_verdict) or tier3_verdict | title)) }}</p>
                     <p class="dashboard-card-subtitle">{{ 'Completed-agent quality; lift shown separately' if report_scope == 'tier3' and completed_agent else 'Evaluation outcome' }}</p>
                 </div>
                 <div class="dashboard-card">

@@ -1547,6 +1547,7 @@ class HTMLReporter(ReporterBase):
         explicit_skill_name: str | None = None,
         ci_context: dict[str, str] | None = None,
         report_scope: str = "publication",
+        scan_root: str | None = None,
     ) -> None:
         self.include_timestamp = include_timestamp
         self.title = title or "SkillEvaluator Validation Report"

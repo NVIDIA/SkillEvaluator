@@ -59,6 +59,14 @@ All notable changes to SkillEvaluator are documented in this file.
 - Harbor's standalone verifier now runs on Python 3.9 task images after sharing
   deterministic checks with the host evaluator. Packaged verifier checks execute
   on a real Python 3.9 interpreter in CI to retain this compatibility.
+- Rubric evaluation preserves the original `SKILL.md` text without adding YAML
+  separators and includes reachable local Markdown guides under their source
+  paths. Required guidance is collected before optional previews, with cycle
+  detection, secure contained reads, verified file-alias deduplication, a
+  256-document ceiling, and the existing
+  3,000-byte per-file / 30,000-byte supplementary limits. Missing, unsafe, or
+  oversized required guidance stops judging without a score or provider request
+  ([#233](https://github.com/NVIDIA/SkillEvaluator/issues/233)).
 
 - PII credential findings mask their values and source lines. GitHub CI stages
   scanner output privately, redacts recognized credential values from retained

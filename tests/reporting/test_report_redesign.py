@@ -152,6 +152,23 @@ def test_missing_scanner_asks_for_an_install() -> None:
     assert "Install or enable the scanner and run the evaluation again." in summary
 
 
+def test_fix_first_uses_the_scan_root_for_a_repository_root_skill() -> None:
+    risk = ValidationResult(validator_name="Code Risk Analysis", validator_description="Static analysis")
+    risk.add_finding(_finding("high", "subprocess call with shell=True", "/workspace/scripts/fetch.py", 21))
+    scan = ValidationResult(validator_name="Security Scan", validator_description="Detect vulnerabilities")
+    scan.add_finding(_finding("high", "Tool Misuse: subprocess.run(command, shell=True", "scripts/fetch.py", 21))
+
+    items = fix_first_for_results([risk, scan], skill_name=".", expected_skill_name="workspace", scan_root="/workspace")
+    html = HTMLReporter(include_timestamp=False, explicit_skill_name=".", scan_root="/workspace").render_all(
+        [risk, scan]
+    )
+    fix_first = html.split('class="fix-first"', 1)[1].split("</section>", 1)[0]
+
+    # Absolute and relative paths to one file and line take one slot, shown relative to the skill.
+    assert [item["location"] for item in items] == ["scripts/fetch.py:21"]
+    assert re.findall(r"<code>([^<]+)</code>", fix_first) == ["scripts/fetch.py:21"]
+
+
 def test_fix_first_links_open_existing_cards() -> None:
     html = _render(_results())
     ids = set(_outline(html).ids)

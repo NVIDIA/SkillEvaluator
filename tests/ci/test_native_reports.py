@@ -292,6 +292,43 @@ def test_index_uses_the_report_vocabulary_logo_and_first_fix(tmp_path):
     assert f'id="{anchor}"' in report
 
 
+def test_repository_root_skill_lists_each_fix_first_location_once(tmp_path):
+    """Code Risk Analysis records absolute scan paths; other scanners record skill-relative ones."""
+    risk = ValidationResult(validator_name="Code Risk Analysis", validator_description="Static analysis")
+    risk.add_finding(
+        Finding(
+            category="BANDIT",
+            severity="high",
+            check_name="B602",
+            message="subprocess call with shell=True",
+            file_path="/workspace/scripts/fetch.py",
+            line_number=21,
+        )
+    )
+    scan = ValidationResult(validator_name="Security Scan", validator_description="Detect vulnerabilities")
+    scan.add_finding(
+        Finding(
+            category="SECURITY",
+            severity="high",
+            check_name="tool_misuse",
+            message="Tool Misuse: subprocess.run(command, shell=True",
+            file_path="scripts/fetch.py",
+            line_number=21,
+        )
+    )
+    summary, _ = _write_fixture(tmp_path)
+    payload = json.loads(JSONReporter(include_timestamp=False).render_all([risk, scan]))
+    (tmp_path / "skill-001/skillevaluator-tier1.json").write_text(json.dumps(payload))
+    summary["skills"][0].update(path=".", passed=False, overall_status="failed")
+
+    render_native_reports(tmp_path, summary, {})
+    report = (tmp_path / "skill-001/skillevaluator-tier1.html").read_text()
+    fix_first = report.split('class="fix-first"', 1)[1].split("</section>", 1)[0]
+
+    assert re.findall(r"<code>([^<]+)</code>", fix_first) == ["scripts/fetch.py:21"]
+    assert "/workspace/" not in fix_first
+
+
 def test_index_dark_theme_never_applies_to_print():
     from ci.native_reports import _STYLE
 

@@ -1327,9 +1327,17 @@ def plain_check_name(name: object) -> str:
     return text
 
 
-def _skill_relative_path(path: object, skill_name: object) -> str:
-    """Show a location relative to the skill folder instead of the machine path."""
+def _skill_relative_path(path: object, skill_name: object, scan_root: str | None = None) -> str:
+    """Show a location relative to the skill folder instead of the machine path.
+
+    *scan_root* is the folder the scanners ran on, when it is known. Without
+    it, the last part of the skill name marks the skill folder, which cannot
+    work for a skill at the repository root.
+    """
     text = str(path or "")
+    root = (scan_root or "").rstrip("/")
+    if root and text.startswith(f"{root}/"):
+        return text[len(root) + 1 :]
     base = str(skill_name or "").rstrip("/").rsplit("/", 1)[-1]
     marker = f"/{base}/" if base else ""
     if marker and marker in text:
@@ -1380,6 +1388,7 @@ def _fix_first(
     check_anchors: dict[str, dict[str, str]],
     *,
     limit: int = FIX_FIRST_LIMIT,
+    scan_root: str | None = None,
 ) -> list[dict[str, Any]]:
     """Pick the few places to fix first, most severe first, one entry per location.
 
@@ -1414,7 +1423,7 @@ def _fix_first(
                 candidates.append((rank, check_key, item | {"anchor": check_anchors[skill_name][check_name]}))
             for index, finding in enumerate(findings):
                 severity = str(finding.get("severity") or "medium").lower()
-                location = _skill_relative_path(finding.get("file_path"), skill_name)
+                location = _skill_relative_path(finding.get("file_path"), skill_name, scan_root)
                 if location and finding.get("line_number"):
                     location = f"{location}:{finding['line_number']}"
                 occurrences = finding.get("occurrences", 1)
@@ -1536,6 +1545,7 @@ class HTMLReporter(ReporterBase):
         expected_skill_name: str | None = None,
         explicit_skill_name: str | None = None,
         ci_context: dict[str, str] | None = None,
+        scan_root: str | None = None,
     ) -> None:
         self.include_timestamp = include_timestamp
         self.title = title or "SkillEvaluator Validation Report"
@@ -1550,6 +1560,9 @@ class HTMLReporter(ReporterBase):
         self.expected_skill_name = expected_skill_name
         self.explicit_skill_name = explicit_skill_name
         self.ci_context = _validated_ci_context(ci_context)
+        # The folder the scanners ran on, used to show finding locations
+        # relative to the skill in "Fix first".
+        self.scan_root = scan_root
         self._env = self._create_environment()
 
     @staticmethod
@@ -2936,7 +2949,7 @@ class HTMLReporter(ReporterBase):
             if plain_check_name(r.validator_name) != r.validator_name
         }
         tier1_finding_anchors, tier1_check_anchors = _evidence_anchors(tier1_skills)
-        tier1_fix_first = _fix_first(tier1_skills, tier1_finding_anchors, tier1_check_anchors)
+        tier1_fix_first = _fix_first(tier1_skills, tier1_finding_anchors, tier1_check_anchors, scan_root=self.scan_root)
         tier1_failed_checks = [
             plain_check_name(r.validator_name) for r in tier1_results if _result_display_status(r) == "fail"
         ]
@@ -3140,18 +3153,20 @@ def fix_first_for_results(
     *,
     skill_name: str | None = None,
     expected_skill_name: str | None = None,
+    scan_root: str | None = None,
 ) -> list[dict[str, Any]]:
     """Return the Tier 1 "Fix first" entries exactly as the report for *results* lists them.
 
     The CI index uses this so its "Needs attention" line names the same first
-    fix as the skill's own report, with the same anchor.
+    fix as the skill's own report, with the same anchor. Pass the same
+    *scan_root* as the report.
     """
     reporter = HTMLReporter(
         include_timestamp=False, explicit_skill_name=skill_name, expected_skill_name=expected_skill_name
     )
     tier1_results, _tier2, _tier3 = reporter._split_results_by_tier(results)
     skills = reporter._reorganize_by_skill(tier1_results)
-    return _fix_first(skills, *_evidence_anchors(skills))
+    return _fix_first(skills, *_evidence_anchors(skills), scan_root=scan_root)
 
 
 def render_logo(uid: str, size: int = 28, label: str = "SkillEvaluator logo") -> str:

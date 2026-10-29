@@ -270,9 +270,18 @@ def retained_results(payload: dict, *, copy_metadata: bool = True) -> list[Valid
 
 
 def render_retained_report(
-    payload: dict, *, skill_name: str, expected_skill_name: str | None = None, context: dict | None = None
+    payload: dict,
+    *,
+    skill_name: str,
+    expected_skill_name: str | None = None,
+    context: dict | None = None,
+    scan_root: str | None = None,
 ) -> str:
-    """Render a single skill from retained evidence without inspecting its paths."""
+    """Render a single skill from retained evidence without inspecting its paths.
+
+    *scan_root* is the folder the scanners ran on. It is only compared with
+    recorded finding paths, never opened.
+    """
     _require(
         isinstance(skill_name, str)
         and 0 < len(skill_name.encode("utf-8")) <= 4096
@@ -292,4 +301,5 @@ def render_retained_report(
         expected_skill_name=canonical_name,
         explicit_skill_name=skill_name,
         ci_context=context,
+        scan_root=scan_root,
     ).render_all(results)

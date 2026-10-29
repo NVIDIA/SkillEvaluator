@@ -15,7 +15,7 @@ from functools import lru_cache
 from html import unescape
 from html.parser import HTMLParser
 from importlib import resources
-from pathlib import Path
+from pathlib import Path, PurePosixPath
 
 from skillevaluator.reporting.html import VERDICT_WORDS, fix_first_for_results, render_logo
 from skillevaluator.reporting.retained import render_retained_report, retained_results
@@ -24,6 +24,9 @@ try:
     import report_views as views
 except ModuleNotFoundError:
     from ci import report_views as views
+
+# The scan job mounts the repository here, so scanners record finding paths below it.
+WORKSPACE = PurePosixPath("/workspace")
 
 
 class _InlineCode(HTMLParser):
@@ -172,6 +175,8 @@ def render_native_reports(reports: Path, summary: dict, context: dict) -> dict[s
             issue = row.get("error") or "The evaluator did not produce consistent report evidence."
         elif data and directory is not None:
             try:
+                # Finding paths are shown relative to the skill, also for a skill at the repository root.
+                scan_root = (WORKSPACE / row["path"]).as_posix()
                 document = render_retained_report(
                     data,
                     skill_name=row["path"],
@@ -182,6 +187,7 @@ def render_native_reports(reports: Path, summary: dict, context: dict) -> dict[s
                         "report_index_url": "../index.html",
                         "canonical_json_url": "skillevaluator-tier1.json",
                     },
+                    scan_root=scan_root,
                 )
                 views._write(directory / "skillevaluator-tier1.html", constrain_native_html(document))
                 native_url = f"{directory.name}/skillevaluator-tier1.html"
@@ -190,6 +196,7 @@ def render_native_reports(reports: Path, summary: dict, context: dict) -> dict[s
                     retained_results(data),
                     skill_name=row["path"],
                     expected_skill_name=Path(row["path"]).name or "workspace",
+                    scan_root=scan_root,
                 )
                 if fixes:
                     first_fixes[row["report_dir"]] = fixes[0]

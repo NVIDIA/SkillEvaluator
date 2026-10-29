@@ -13,7 +13,7 @@ import zipfile
 from pathlib import Path
 
 import pytest
-import yaml
+from test_verify_provenance import JWKS, signed_receipt
 
 ROOT = Path(__file__).parents[2]
 SPEC = importlib.util.spec_from_file_location("publish_reports", ROOT / "ci/publish_reports.py")
@@ -23,6 +23,10 @@ SPEC.loader.exec_module(publisher)
 
 @pytest.fixture(autouse=True)
 def trusted_workflow_pins(monkeypatch):
+    monkeypatch.syspath_prepend(str(Path(__file__).parents[2] / "ci"))
+    import verify_provenance
+
+    monkeypatch.setattr(verify_provenance, "fetch_signing_keys", lambda: JWKS)
     monkeypatch.setenv("TRUSTED_EVALUATOR_SHA", "c" * 40)
     monkeypatch.setenv("TRUSTED_CALLER_BLOBS", "b" * 40)
 
@@ -268,32 +272,12 @@ def test_redirect_does_not_forward_api_authorization():
     assert requests[1].get_header("Authorization") is None
 
 
-def test_pr_provenance_compares_recorded_revisions_through_real_github_client():
-    api = publisher.GitHubAPI("owner/consumer", "private-token")
-    record = run_record()
-    record["event"] = "pull_request"
-    record["pull_requests"] = [{"base": {"sha": "d" * 40}, "head": {"sha": "a" * 40}}]
-    paths = []
-
-    class Response(io.BytesIO):
-        @property
-        def headers(self):
-            return {}
-
-    class Opener:
-        def open(self, request, timeout):
-            assert timeout == 60
-            paths.append(request.full_url)
-            if "/compare/" in request.full_url:
-                data = {"merge_base_commit": {"sha": "e" * 40}}
-            else:
-                sha = request.full_url.rsplit("?ref=", 1)[1]
-                data = {"type": "file", "path": publisher.WORKFLOW_PATH, "sha": ("b" if sha == "a" * 40 else "f") * 40}
-            return Response(json.dumps(data).encode())
-
-    api.opener = Opener()
+def test_pr_provenance_uses_the_signed_merge_without_mutable_pr_metadata():
+    record = {**run_record(), "event": "pull_request", "pull_requests": []}
+    api = FakeAPI(record=record)
     publisher._validate_workflow_provenance(api, "owner/consumer", record)
-    assert any("/compare/" in path for path in paths)
+    assert f"/repos/owner/consumer/contents/{publisher.WORKFLOW_PATH}?ref=" + "d" * 40 in api.paths
+    assert not any("/compare/" in path or "/pulls" in path for path in api.paths)
 
 
 @pytest.mark.parametrize(
@@ -347,7 +331,7 @@ def run_record():
         "event": "push",
         "head_branch": "main",
         "head_sha": "a" * 40,
-        "repository": {"full_name": "owner/consumer"},
+        "repository": {"full_name": "owner/consumer", "id": 1234},
         "head_repository": {"full_name": "owner/consumer"},
         "pull_requests": [],
         "run_started_at": "2026-10-21T12:00:00Z",
@@ -392,7 +376,7 @@ class FakeAPI:
             return {"type": "file", "path": publisher.WORKFLOW_PATH, "sha": "b" * 40}
         if path.endswith("/artifacts?per_page=100"):
             return {
-                "total_count": 1,
+                "total_count": 2,
                 "artifacts": [
                     {
                         "id": 456,
@@ -401,7 +385,15 @@ class FakeAPI:
                         "size_in_bytes": len(valid_archive()),
                         "created_at": "2026-10-21T12:01:00Z",
                         "workflow_run": {"id": 123, "head_sha": "a" * 40},
-                    }
+                    },
+                    {
+                        "id": 457,
+                        "name": f"skill-evaluator-tier1-provenance-attempt-{self.record['run_attempt']}",
+                        "expired": False,
+                        "size_in_bytes": 4096,
+                        "created_at": self.record["run_started_at"],
+                        "workflow_run": {"id": 123, "head_sha": "a" * 40},
+                    },
                 ],
             }
         if path == "/repos/owner/consumer":
@@ -422,6 +414,8 @@ class FakeAPI:
         raise AssertionError(path)
 
     def download_artifact(self, artifact_id):
+        if artifact_id == 457:
+            return signed_receipt(self.record)
         assert artifact_id == 456
         return valid_archive()
 
@@ -460,7 +454,9 @@ def test_error_row_with_rejected_json_gets_a_native_unavailable_report(tmp_path,
     )
 
     class ErrorAPI(FakeAPI):
-        def download_artifact(self, _artifact_id):
+        def download_artifact(self, artifact_id):
+            if artifact_id == 457:
+                return super().download_artifact(artifact_id)
             return archive([("summary.json", payload), ("skill-001/skillevaluator-tier1.json", b"not JSON")])
 
     publisher.publish(
@@ -479,7 +475,9 @@ def test_error_row_with_rejected_json_gets_a_native_unavailable_report(tmp_path,
 
 def test_bad_typed_child_evidence_is_rejected_before_writing_a_receipt(tmp_path):
     class BadTypedAPI(FakeAPI):
-        def download_artifact(self, _artifact_id):
+        def download_artifact(self, artifact_id):
+            if artifact_id == 457:
+                return super().download_artifact(artifact_id)
             child = report()
             child["results"][0]["findings"] = "invalid findings"
             return archive([("summary.json", summary()), ("skill-001/skillevaluator-tier1.json", child)])
@@ -501,7 +499,9 @@ def test_unexpected_render_failure_cannot_publish_a_passing_receipt(tmp_path, mo
     monkeypatch.syspath_prepend(str(Path(__file__).parents[2] / "ci"))
 
     class BadDisplayAPI(FakeAPI):
-        def download_artifact(self, _artifact_id):
+        def download_artifact(self, artifact_id):
+            if artifact_id == 457:
+                return super().download_artifact(artifact_id)
             payload = summary()
             payload["skills"][0]["path"] = "skills/bad\tpath"
             return archive([("summary.json", payload), ("skill-001/skillevaluator-tier1.json", report())])
@@ -556,12 +556,13 @@ def test_requested_second_attempt_gets_only_its_own_artifact(tmp_path):
     class SecondAttemptAPI(FakeAPI):
         def get(self, path):
             if path.endswith("/actions/runs/123/attempts/2"):
-                return {
+                self.record = {
                     **run_record(),
                     "run_attempt": 2,
                     "run_started_at": "2026-10-21T13:00:00Z",
                     "updated_at": "2026-10-21T13:02:00Z",
                 }
+                return self.record
             result = super().get(path)
             if path.endswith("/artifacts?per_page=100"):
                 result["artifacts"].append(
@@ -576,6 +577,8 @@ def test_requested_second_attempt_gets_only_its_own_artifact(tmp_path):
             return result
 
         def download_artifact(self, artifact_id):
+            if artifact_id == 457:
+                return super().download_artifact(artifact_id)
             assert artifact_id == 789
             return valid_archive()
 
@@ -726,41 +729,12 @@ def test_fork_and_deleted_fork_from_commit_fallback_get_no_alias_or_comment(repo
     assert publisher._current_routes(ForkAPI(), "owner/consumer", {**run_record(), "event": "pull_request"}) == ([], "")
 
 
-@pytest.mark.parametrize(
-    "blobs,expected",
-    [
-        ({"a": "1", "d": "2", "e": "1"}, "2"),
-        ({"a": "2", "d": "1", "e": "1"}, "2"),
-        ({"a": "2", "d": "2", "e": "1"}, "2"),
-        ({"a": "2", "d": "3", "e": "1"}, None),
-    ],
-)
-def test_pr_caller_uses_unambiguous_merged_blob_not_pr_head(blobs, expected):
-    class MergeAPI(FakeAPI):
-        def get(self, path):
-            if "/compare/" in path:
-                assert path.endswith("d" * 40 + "..." + "a" * 40)
-                return {"merge_base_commit": {"sha": "e" * 40}}
-            result = super().get(path)
-            if "/contents/" in path:
-                result["sha"] = blobs[path.rsplit("=", 1)[1][0]] * 40
-            return result
-
-    run = {
-        **run_record(),
-        "event": "pull_request",
-        "pull_requests": [{"number": 1, "head": {"sha": "a" * 40}, "base": {"sha": "d" * 40}}],
-    }
-    if expected is None:
-        with pytest.raises(publisher.PublicationError, match="Both branches changed"):
-            publisher._executed_caller_blob(MergeAPI(), "owner/consumer", run)
-    else:
-        assert publisher._executed_caller_blob(MergeAPI(), "owner/consumer", run) == expected * 40
-
-
-def test_pr_caller_does_not_trust_missing_or_current_mutable_base():
-    with pytest.raises(publisher.StalePublication, match="no longer associated"):
-        publisher._executed_caller_blob(FakeAPI(), "owner/consumer", {**run_record(), "event": "pull_request"})
+@pytest.mark.parametrize("associations", [None, [], [{"base": {"sha": "e" * 40}, "head": {"sha": "f" * 40}}]])
+def test_pr_caller_identity_ignores_current_mutable_associations(associations):
+    record = {**run_record(), "event": "pull_request", "pull_requests": associations}
+    api = FakeAPI(record=record)
+    publisher._validate_workflow_provenance(api, "owner/consumer", record)
+    assert not any("/pulls" in path or "/compare/" in path for path in api.paths)
 
 
 def test_open_fork_pr_run_is_published_without_alias_or_comment(tmp_path):
@@ -779,8 +753,8 @@ def test_open_fork_pr_run_is_published_without_alias_or_comment(tmp_path):
     assert (tmp_path / "site/runs/123/1/index.html").is_file()
     assert not (tmp_path / "site/pr").exists()
     assert [item["run_id"] for item in json.loads((tmp_path / "site/history.json").read_text())] == [123]
-    # The fork PR is found from API run metadata, never from artifact data.
-    assert "/repos/owner/consumer/pulls?state=open&head=contributor:feature%2Ffork&per_page=100" in api.paths
+    # Signed execution identity remains verifiable without mutable PR associations.
+    assert not any("/pulls?" in path for path in api.paths)
 
 
 def test_history_retention_preserves_current_main_and_open_pr_and_prunes_closed(tmp_path):
@@ -927,7 +901,9 @@ def test_recorded_image_provenance_wins_and_legacy_stays_unknown(tmp_path, recor
         document["execution"] = {"image": recorded}
 
     class ImageAPI(FakeAPI):
-        def download_artifact(self, _artifact_id):
+        def download_artifact(self, artifact_id):
+            if artifact_id == 457:
+                return super().download_artifact(artifact_id)
             return archive([("summary.json", document), ("skill-001/skillevaluator-tier1.json", report())])
 
     contexts = []
@@ -961,7 +937,9 @@ def test_recorded_image_provenance_wins_and_legacy_stays_unknown(tmp_path, recor
 )
 def test_invalid_recorded_image_provenance_is_rejected(tmp_path, execution):
     class BadImageAPI(FakeAPI):
-        def download_artifact(self, _artifact_id):
+        def download_artifact(self, artifact_id):
+            if artifact_id == 457:
+                return super().download_artifact(artifact_id)
             return archive(
                 [
                     ("summary.json", {**summary(), "execution": execution}),
@@ -1163,6 +1141,8 @@ def test_no_change_requires_consistent_selection_evidence(change):
 def test_no_change_publication_matches_run_head_and_success(tmp_path, head, conclusion, accepted):
     class NoChangeAPI(FakeAPI):
         def download_artifact(self, artifact_id):
+            if artifact_id == 457:
+                return super().download_artifact(artifact_id)
             assert artifact_id == 456
             payload = skipped_summary()
             payload["selection"]["head"] = head
@@ -1183,49 +1163,21 @@ def test_explicit_fork_evaluator_identity_is_required(monkeypatch):
     record = run_record()
     record["referenced_workflows"][0]["path"] = "example/evaluator/.github/workflows/evaluate-skills.yml@" + "c" * 40
     with pytest.raises(publisher.PublicationError):
-        publisher._validate_workflow_provenance(FakeAPI(), "owner/consumer", record)
+        publisher._validate_workflow_provenance(FakeAPI(record=record), "owner/consumer", record)
     monkeypatch.setenv("EVALUATOR_REPOSITORY", "example/evaluator")
-    publisher._validate_workflow_provenance(FakeAPI(), "owner/consumer", record)
+    publisher._validate_workflow_provenance(FakeAPI(record=record), "owner/consumer", record)
 
 
-class ForkLookupAPI(FakeAPI):
-    def __init__(self, pulls, **kwargs):
-        super().__init__(**kwargs)
-        self.pulls = pulls
+def test_missing_receipt_is_a_skipped_publisher_run(tmp_path, monkeypatch):
+    class LegacyAPI(FakeAPI):
+        def get(self, path):
+            result = super().get(path)
+            if path.endswith("/artifacts?per_page=100"):
+                result["artifacts"] = result["artifacts"][:1]
+                result["total_count"] = 1
+            return result
 
-    def get(self, path):
-        if "/pulls?state=open&head=" in path:
-            self.paths.append(path)
-            return self.pulls
-        return super().get(path)
-
-
-@pytest.mark.parametrize(
-    "record,pulls,reason",
-    [
-        pytest.param(
-            {**run_record(), "event": "pull_request"},
-            None,
-            "The PR is closed or no longer associated",
-            id="same-repo-pr-merged-after-scan",
-        ),
-        pytest.param(
-            {
-                **run_record(),
-                "event": "pull_request",
-                "pull_requests": [{"base": {"sha": "d" * 40}, "head": {"sha": "e" * 40}}],
-            },
-            None,
-            "The PR head moved",
-            id="same-repo-push-during-scan",
-        ),
-        pytest.param(fork_record(), [], "The fork PR is closed or merged", id="fork-pr-closed-after-scan"),
-        pytest.param(fork_record(), [fork_pull("e" * 40)], "The PR head moved", id="fork-push-during-scan"),
-        pytest.param(fork_record(head_repository=None), None, "fork for this PR run was deleted", id="deleted-fork"),
-    ],
-)
-def test_stale_or_closed_pr_is_a_skipped_publisher_run(tmp_path, monkeypatch, record, pulls, reason):
-    api = ForkLookupAPI(pulls, record=record)
+    api = LegacyAPI()
     monkeypatch.setattr(publisher, "GitHubAPI", lambda *_args: api)
     for key, value in {
         "GH_TOKEN": "dummy-token",
@@ -1240,49 +1192,58 @@ def test_stale_or_closed_pr_is_a_skipped_publisher_run(tmp_path, monkeypatch, re
         monkeypatch.setenv(key, value)
     assert publisher.main() == 0
     assert "skipped=true" in (tmp_path / "github-output").read_text()
-    assert "skipped" in (tmp_path / "output/summary.md").read_text().lower()
-    assert reason in (tmp_path / "output/summary.md").read_text()
+    assert "id-token: write" in (tmp_path / "output/summary.md").read_text()
+    assert "trigger a new scan" in (tmp_path / "output/summary.md").read_text()
     assert not (tmp_path / "site/runs").exists()
-    # Only a fork run with a known head repository looks up its PR.
-    assert any("/pulls?" in path for path in api.paths) == (pulls is not None)
 
 
 @pytest.mark.parametrize(
-    "record,pulls",
+    "change",
     [
-        pytest.param({**run_record(), "event": "pull_request", "pull_requests": None}, None, id="same-repo-missing"),
-        pytest.param(
-            {
-                **run_record(),
-                "event": "pull_request",
-                "pull_requests": [{"base": {"sha": "d" * 40}, "head": {"sha": "a" * 40}}] * 2,
-            },
-            None,
-            id="same-repo-two-prs",
-        ),
-        pytest.param(
-            {**run_record(), "event": "pull_request", "pull_requests": [{"base": {"sha": "d" * 40}, "head": {}}]},
-            None,
-            id="same-repo-malformed-head",
-        ),
-        pytest.param(fork_record(pull_requests=None), None, id="fork-missing"),
-        pytest.param(fork_record(head_repository="contributor/consumer"), None, id="fork-malformed-head-repository"),
-        pytest.param(fork_record(head_branch=None), None, id="fork-missing-branch"),
-        pytest.param(fork_record(), {"items": []}, id="fork-malformed-listing"),
-        pytest.param(fork_record(), [fork_pull(), fork_pull()], id="fork-two-prs"),
-        pytest.param(fork_record(), [fork_pull(base_sha="main")], id="fork-malformed-base"),
+        {"workflow_run": {"id": 124, "head_sha": "a" * 40}},
+        {"workflow_run": {"id": 123, "head_sha": "b" * 40}},
+        {"size_in_bytes": 65537},
     ],
 )
-def test_malformed_pr_association_still_fails(record, pulls):
+def test_receipt_artifact_identity_and_size_are_enforced(change):
+    class BadReceiptAPI(FakeAPI):
+        def get(self, path):
+            result = super().get(path)
+            if path.endswith("/artifacts?per_page=100"):
+                result["artifacts"][1].update(change)
+            return result
+
     with pytest.raises(publisher.PublicationError) as raised:
-        publisher._validate_workflow_provenance(ForkLookupAPI(pulls, record=record), "owner/consumer", record)
+        publisher._validate_workflow_provenance(BadReceiptAPI(), "owner/consumer", run_record())
     assert not isinstance(raised.value, publisher.StalePublication)
+
+
+@pytest.mark.parametrize(
+    "change",
+    [
+        {"name": "skill-evaluator-tier1-provenance-attempt-2"},
+        {"expired": True},
+        {"created_at": "2026-10-20T12:00:00Z"},
+    ],
+)
+def test_other_attempt_or_unavailable_receipt_cannot_publish(change):
+    class OtherReceiptAPI(FakeAPI):
+        def get(self, path):
+            result = super().get(path)
+            if path.endswith("/artifacts?per_page=100"):
+                result["artifacts"][1].update(change)
+            return result
+
+    with pytest.raises(publisher.StalePublication):
+        publisher._validate_workflow_provenance(OtherReceiptAPI(), "owner/consumer", run_record())
 
 
 @pytest.mark.parametrize("enabled", [True, False, None])
 def test_published_report_preserves_recorded_llm_request(tmp_path, enabled):
     class RecordedAPI(FakeAPI):
         def download_artifact(self, artifact_id):
+            if artifact_id == 457:
+                return super().download_artifact(artifact_id)
             assert artifact_id == 456
             payload = summary()
             if enabled is not None:

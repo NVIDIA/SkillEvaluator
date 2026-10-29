@@ -107,6 +107,56 @@ def test_smoke_container_executes_with_the_same_hardening(tmp_path, monkeypatch)
     assert {entry.split("=", 1)[0] for entry in environment}.issuperset({"SCAN_MODE", "DIFF_BASE_SHA", "DIFF_HEAD_SHA"})
 
 
-def test_scan_worker_input_defaults_to_four_parallel_scans():
-    workers = _workflow()["on"]["workflow_call"]["inputs"]["scan-workers"]
-    assert (workers["type"], workers["default"]) == ("number", "4")
+def test_quality_threshold_is_wired_into_the_container():
+    workflow = yaml.load((ROOT / ".github/workflows/evaluate-skills.yml").read_text(), Loader=yaml.BaseLoader)
+    assert workflow["on"]["workflow_call"]["inputs"]["min-score"]["default"] == "70"
+    scan = next(step for step in workflow["jobs"]["tier1"]["steps"] if step.get("name") == "Evaluate selected skills")
+    assert scan["env"]["MIN_SCORE"] == "${{ inputs.min-score }}"
+    assert "--env MIN_SCORE" in scan["run"]
+
+
+def test_image_validation_does_not_import_consumer_python_modules(tmp_path):
+    step = next(step for step in _job()["steps"] if step.get("name") == "Validate the immutable image reference")
+    (tmp_path / "re.py").write_text("raise RuntimeError('consumer module executed on the runner')\n")
+    result = subprocess.run(
+        ["bash", "-e", "-o", "pipefail", "-c", step["run"]],
+        cwd=tmp_path,
+        env={**os.environ, "IMAGE": "ghcr.io/example/scanner@sha256:" + "a" * 64},
+        capture_output=True,
+        text=True,
+    )
+    assert result.returncode == 0, result.stderr
+
+
+def test_basic_scan_does_not_require_identity_credentials(tmp_path):
+    workflow = yaml.load((ROOT / ".github/workflows/evaluate-skills.yml").read_text(), Loader=yaml.BaseLoader)
+    job = workflow["jobs"]["tier1"]
+    assert "permissions" not in workflow and "permissions" not in job
+    step = job["steps"][0]
+    assert step["id"] == "provenance"
+    # Run the actual trusted step from a consumer checkout containing shadow modules.
+    for module in ("re", "json", "tempfile"):
+        (tmp_path / f"{module}.py").write_text("raise RuntimeError('consumer module executed')\n")
+    env = {key: value for key, value in os.environ.items() if not key.startswith("ACTIONS_ID_TOKEN_REQUEST_")}
+    result = subprocess.run(
+        ["bash", "-e", "-o", "pipefail", "-c", step["run"]],
+        cwd=tmp_path,
+        env=env,
+        capture_output=True,
+        text=True,
+    )
+    assert result.returncode == 0, result.stderr
+    assert "scan artifacts remain available" in result.stdout
+
+
+def test_signed_receipt_is_separate_and_retained_after_a_failed_scan():
+    steps = _job()["steps"]
+    capture = next(step for step in steps if step.get("id") == "provenance")
+    assert capture["continue-on-error"] == "true"
+    upload = next(step for step in steps if step.get("name") == "Retain the separate hosted-report execution receipt")
+    assert "always()" in upload["if"]
+    assert upload["with"]["name"] == "${{ inputs.artifact-name }}-provenance-attempt-${{ github.run_attempt }}"
+    assert upload["with"]["path"] == "${{ steps.provenance.outputs.directory }}/execution.jwt"
+    scan = next(step for step in steps if step.get("name") == "Evaluate selected skills")
+    assert "provenance" not in scan["run"]
+    assert "ID_TOKEN" not in scan["run"]

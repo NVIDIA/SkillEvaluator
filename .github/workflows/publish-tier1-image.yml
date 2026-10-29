@@ -167,7 +167,7 @@ jobs:
           docker --config "$RUNNER_TEMP/anonymous-docker-config" pull "$published_image"
           python3 ci/render_templates.py --workflow-ref "$GITHUB_SHA" \
             --image "$published_image" --output "$RUNNER_TEMP/onboarding"
-          printf 'Published image: %s. Download **github-actions-onboarding** for pinned consumer workflows.\n' \
+          printf 'Published image: %s. Download **github-actions-onboarding** for pinned GitHub and GitLab configurations.\n' \
             "$published_image" >> "$GITHUB_STEP_SUMMARY"
       - name: Upload pinned onboarding templates
         uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2

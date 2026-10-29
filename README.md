@@ -10,17 +10,33 @@
 
 > 📺 **Livestream:** [Ask the Experts: Evaluating Agent Skills](https://www.youtube.com/watch?v=4rI0zATFxYI)
 
-SkillEvaluator is an open-source tool that checks AI agent skills and measures their effect on an agent's
-task results. Start with a quality check or model-backed feedback, then compare
-live runs with and without a skill.
+SkillEvaluator is an open-source tool that checks AI agent skills and measures their effect on task results:
+start with quality checks, then compare live runs with and without a skill.
 
 Agent skills are folders of instructions and supporting files defined by the
 [Agent Skills specification](https://agentskills.io/). SkillEvaluator is part of
 the [NVIDIA Verified Skills pipeline](https://github.com/NVIDIA/skills).
 
+## Bring skill evaluation to your repository
+
+Automatically check changed skills in GitHub pull requests or GitLab merge
+requests, with Tier 1 quality checks, SkillSpector security scanning and retained
+reports. Choose your skill folders and minimum score. No evaluation code, local
+installation or onboarding CLI is required: [copy a template](ci/templates/README.md).
+
+| Your repository | Source template | Copy destination |
+| --- | --- | --- |
+| GitHub | [Skill checks](ci/templates/skill-checks.yml) | `.github/workflows/skill-checks.yml` |
+| GitLab | [Skill checks](ci/templates/gitlab-skill-checks.yml) | `.gitlab-ci.yml`, or merge into your existing pipeline |
+| GitHub reports and PR comments | [Optional publisher](ci/templates/publish-skill-reports.yml) | Add a second workflow; complete publisher setup |
+
+Source templates contain release placeholders; use the filled-in copies from an
+official CI image release. See [setup and availability](docs/repository-integration.mdx)
+and [public report, log and comment examples](ci/examples/README.md).
+
 ## Quickstart
 
-Choose a starting path. Both use the bundled `text-analyzer` skill; try your own afterward.
+Both paths use the bundled `text-analyzer` skill.
 
 | Start here | Requires | First result |
 | --- | --- | --- |
@@ -35,8 +51,7 @@ git clone --depth 1 https://github.com/NVIDIA/SkillEvaluator.git
 cd SkillEvaluator
 ```
 
-uv provisions Python 3.13 and installs each path's dependencies. Run from this
-checkout. For a standalone CLI, see
+uv provisions Python 3.13 and dependencies. Run from this checkout; for a standalone CLI, see
 [Installation](https://docs.nvidia.com/skills/skillevaluator/installation).
 
 ### Run without an LLM
@@ -47,25 +62,21 @@ uv run --python 3.13 skillevaluator quality-check \
   -r cli -r json -o reports/first-quality
 ```
 
-No API key, external scanner, GPU, or Docker is needed. The example scores
-**84.5/100 (B)** and exits `0`, with seven non-blocking findings. The default
-passing threshold is 70. Read the terminal or saved
-`reports/first-quality/skillevaluator-quality.json` report.
+No API key, scanner, GPU or Docker is needed. The example scores **84.5/100 (B)**,
+exits `0` and saves `reports/first-quality/skillevaluator-quality.json`. The
+passing threshold defaults to 70.
 
 This checks static quality; publication evidence stays `INCOMPLETE`. Security
-coverage needs scanners, and agent impact needs live evaluation. To check your
-own skill, replace the example path with your `SKILL.md` directory. See the
+needs scanners; agent impact needs live evaluation. Replace the example path
+with your skill directory. See the
 [keyless walkthrough](docs/quickstart.mdx#run-without-an-llm).
 
 ### Use NVIDIA Build
 
-NVIDIA Developer Program members can use eligible NVIDIA-hosted endpoints for
-**free prototyping**, subject to current access terms and rate limits. See the
-[official access FAQ](https://docs.api.nvidia.com/nim/docs/product) and your
-NVIDIA Build account for details.
+Eligible NVIDIA Developer Program members can use NVIDIA-hosted endpoints for
+**free prototyping**, subject to [access terms and rate limits](https://docs.api.nvidia.com/nim/docs/product).
 
-1. Sign in or create an account at [build.nvidia.com](https://build.nvidia.com/)
-   and complete any enrollment prompts.
+1. Sign in at [build.nvidia.com](https://build.nvidia.com/) and complete enrollment.
 2. Open a model page, select **Get API Key**, and generate your key.
 3. Set the provider and key in the same terminal, then run the rubric check:
 
@@ -77,14 +88,12 @@ uv run --python 3.13 --extra llm skillevaluator rubric-eval \
   -r cli -r json -o reports/first-build
 ```
 
-The `llm` extra adds model clients. The command sends skill documentation to the
-model and writes feedback to the terminal and
+The command sends skill documentation to the model and saves feedback in
 `reports/first-build/skillevaluator-rubric.json`. No agent runtime or Docker is
-needed. Completed evaluations can still fail rubric thresholds; inspect the findings.
+needed. Completed evaluations can still fail rubric thresholds.
 
-Build supplies model defaults; the same key supports Tier 2 embeddings and
-supported Tier 3 agents. See the [Build walkthrough](docs/quickstart.mdx#use-nvidia-build)
-or [Providers & Credentials](docs/configuration.mdx) for overrides and other providers.
+The same key supports Tier 2 embeddings and supported Tier 3 agents. See the
+[Build walkthrough](docs/quickstart.mdx#use-nvidia-build) or [provider configuration](docs/configuration.mdx).
 
 ## Three-tier overview
 
@@ -106,9 +115,8 @@ Missing required scanner evidence is reported as `INCOMPLETE` and exits nonzero.
 security scanning; [Harbor](https://github.com/harbor-framework/harbor), the
 open-source agent evaluation framework, powers sandboxed agent runs.
 
-Tier 2 reports when inter-skill comparison did not run. Tier 3 reuses valid
-evaluation sources or creates one starter case, then runs with and without the
-skill. Starter cases provide limited coverage. See the
+Tier 2 reports when inter-skill comparison did not run. Tier 3 reuses evaluation
+sources or creates one starter case with limited coverage. See the
 [tier guides](https://docs.nvidia.com/skills/skillevaluator/) for details.
 
 ## Run the combined pipeline
@@ -120,17 +128,14 @@ uv run --python 3.13 --extra all skillevaluator doctor --env-mode docker
 uv run --python 3.13 --extra all skillevaluator validate ./my-skill
 ```
 
-`doctor` checks readiness, not inference success. `validate` runs all tiers
-with autopilot by default for skills; `--full` remains supported but is unnecessary.
-Use `--tiers 1,2` or `--no-tier3` to skip live evaluation, or `--tiers 1` for static
-checks. `--no-autopilot` requires an existing source. Other artifact types retain
-their applicable stages without automatically enabling skill evaluation.
+`doctor` checks readiness, not inference success. `validate` runs all tiers with
+autopilot for skills. Use `--tiers 1,2` to skip live evaluation or `--tiers 1` for
+static checks. `--no-autopilot` requires an existing source. Other artifact types
+retain their applicable stages.
 
-Tier 1 always gates `validate`. Tier 2 gates by default;
-`--no-block-on-dedup` makes its findings advisory. Tier 3 is advisory by default;
-`--block-on-agent-eval` makes its findings gate too. Model and managed-sandbox
-usage depends on the selected provider's terms and can incur charges. Start with
-one agent and a small dataset; see [runtime and cost](docs/tier3-live-evaluation.mdx#plan-for-cost).
+Tier 1 always gates `validate`. Tier 2 gates unless `--no-block-on-dedup` is set;
+Tier 3 gates only with `--block-on-agent-eval`. Model and managed-sandbox usage
+can incur charges; see [runtime and cost](docs/tier3-live-evaluation.mdx#plan-for-cost).
 
 For broader coverage, generate and review additional cases. Templates omit
 negatives unless authored in `EVAL.md`:
@@ -151,15 +156,13 @@ Resources: [paper](https://arxiv.org/abs/2608.20614),
 [DOI](https://doi.org/10.48550/arXiv.2608.20614),
 [BibTeX](https://arxiv.org/bibtex/2608.20614), and the
 [NVIDIA Developer blog](https://developer.nvidia.com/blog/evaluating-ai-agent-skill-performance-with-nvidia-skillevaluator/).
-Cite the paper for methodology and results. For reproducibility, record the
-SkillEvaluator release or commit. See [CITATION.cff](CITATION.cff).
+Cite the paper and record the SkillEvaluator release or commit; see [CITATION.cff](CITATION.cff).
 
 ## Documentation
 
 See [the documentation](https://docs.nvidia.com/skills/skillevaluator/) for
 setup, tier guides, reports, CI integration, CLI reference, and
 [performance dashboard](docs/reports.mdx#performance-dashboard).
-For reusable CI, see [GitHub Actions](docs/github-actions.mdx).
 
 ## Installation and third-party software
 
@@ -178,16 +181,14 @@ Read [CONTRIBUTING.md](CONTRIBUTING.md) and run:
 make lint && make test && make build
 ```
 
-Project governance is described in [GOVERNANCE.md](GOVERNANCE.md). Participation
-is governed by the [Code of Conduct](CODE_OF_CONDUCT.md).
+See [project governance](GOVERNANCE.md) and the [Code of Conduct](CODE_OF_CONDUCT.md).
 
 ## Support
 
-Support level: **Experimental**. SkillEvaluator is community-supported on a
-best-effort basis with no SLA or NVIDIA enterprise support entitlement. Report
-reproducible bugs and feature requests through
+Support level: **Experimental**. Community-supported, best-effort, with no SLA
+or NVIDIA enterprise support entitlement. Report bugs and feature requests through
 [GitHub Issues](https://github.com/NVIDIA/SkillEvaluator/issues); see
-[SUPPORT.md](SUPPORT.md) for details.
+[SUPPORT.md](SUPPORT.md).
 
 ## Security
 

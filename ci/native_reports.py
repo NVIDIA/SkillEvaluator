@@ -246,12 +246,8 @@ def render_native_reports(reports: Path, summary: dict, context: dict) -> dict[s
         f"<title>Skills · SkillEvaluator</title><style>{_STYLE}</style></head><body>",
         f'<aside class="rail">{brand_html("se-logo-index")}<p>Evaluation reports</p><a href="#skills" aria-current="page">All skills</a></aside><main>',
         '<header class="hero"><div><div class="eyebrow">Evaluation report · Tier 1</div><h1>Skill scan results</h1>',
-        f'<span class="status {verdict_class}"><span class="sr-only">Verdict: </span>{verdict}</span>',
-        # A no-op run explains itself once, in the skills section below.
-        "</div>"
-        if no_changes
-        else '<p class="muted">Open a skill to see its findings and the evidence for each check.</p></div>',
-        f'<a class="button" href="{h(run_url)}">View workflow run ↗</a>' if run_url else "",
+        f'<span class="status {verdict_class}">{verdict}</span><p class="muted">Review findings, quality dimensions, and scanner evidence for each skill.</p></div>',
+        f'<a class="button" href="{h(run_url)}">View CI run ↗</a>' if run_url else "",
         '</header><div class="metrics">',
     ]
     for count, label in (
@@ -279,9 +275,10 @@ def render_native_reports(reports: Path, summary: dict, context: dict) -> dict[s
         page.append('<section class="attention"><h2>Needs attention</h2>')
         if summary.get("error"):
             page.append(f"<p>{h(summary['error'])}</p>")
-        for row, _data, issue, _status, url, _quality in attention:
-            fix = first_fixes.get(row["report_dir"]) if not issue else None
-            reason = issue or row.get("error") or (fix or {}).get("message") or "Open the report to inspect the checks."
+        for row, data, issue, _status, url, _quality in attention:
+            reason, _location, _fix = views._first_action(
+                {"row": row, "results": data.get("results", []), "issue": issue}
+            )
             label = f'<a href="{h(url)}">{h(row["path"])}</a>' if url else h(row["path"])
             line = h(str(reason)[:2000])
             if fix and url:

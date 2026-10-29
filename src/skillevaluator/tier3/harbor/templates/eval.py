@@ -2583,7 +2583,9 @@ def judge_goal_accuracy(question, ground_truth, agent_text, tool_summary=""):
                 raise ValueError("RAGAS returned a non-finite goal accuracy score")
             return result
         except Exception as e:
-            logger.info("RAGAS not available (%s), using custom prompt", e)
+            # The documented scorer changed for this trial, so say why where users will see it.
+            detail = _redact_configured_credentials(f"{type(e).__name__}: {e}")[:_JUDGE_ERROR_REASON_LIMIT]
+            logger.warning("RAGAS goal scorer failed (%s); using the custom goal judge", detail)
     return _judge_goal_accuracy_custom(question, ground_truth, agent_text, tool_summary)
 
 
@@ -2609,7 +2611,6 @@ def _judge_goal_accuracy_ragas(question, ground_truth, agent_text, tool_summary)
     import asyncio
 
     from openai import AsyncOpenAI
-    from ragas import SingleTurnSample
     from ragas.llms.base import llm_factory
     from ragas.messages import AIMessage as RagasAI
     from ragas.messages import HumanMessage as RagasHuman
@@ -2626,7 +2627,8 @@ def _judge_goal_accuracy_ragas(question, ground_truth, agent_text, tool_summary)
     if not request_url.endswith(suffix) or not _is_native_openai_chat_url("openai", request_url):
         raise RuntimeError("RAGAS goal accuracy requires the selected canonical OpenAI provider")
     client = AsyncOpenAI(api_key=api_key, base_url=request_url[: -len(suffix)])
-    llm = llm_factory(_selected_judge_model(), client=client)
+    judge_model = _selected_judge_model()
+    llm = llm_factory(judge_model, client=client)
 
     metric = AgentGoalAccuracyWithReference(llm=llm)
     user_input = [
@@ -2634,28 +2636,40 @@ def _judge_goal_accuracy_ragas(question, ground_truth, agent_text, tool_summary)
         RagasAI(content=agent_text),
     ]
 
-    sample = SingleTurnSample(user_input=user_input, reference=ground_truth)
-
     loop = asyncio.new_event_loop()
     try:
+        # Collections metrics take the messages and reference as keywords, not a SingleTurnSample.
         result = loop.run_until_complete(
             asyncio.wait_for(
-                metric.ascore(sample),
+                metric.ascore(user_input=user_input, reference=ground_truth),
                 timeout=_remaining_judge_timeout(_resolve_judge_wall_time_budget()),
             )
         )
     finally:
-        loop.close()
+        try:
+            # The judge deadline alarm can stop the loop mid-score; cancel that work before closing the client.
+            pending = asyncio.all_tasks(loop)
+            for task in pending:
+                task.cancel()
+            if pending:
+                loop.run_until_complete(asyncio.wait_for(asyncio.gather(*pending, return_exceptions=True), 5.0))
+            loop.run_until_complete(asyncio.wait_for(client.close(), timeout=5.0))
+        except Exception as error:
+            # Cleanup must never hide the score or the scorer's own failure.
+            logger.warning("RAGAS judge client close failed: %s", type(error).__name__)
+        finally:
+            loop.close()
 
     score = float(result.value) if hasattr(result, "value") else float(result)
     if not math.isfinite(score):
         raise ValueError("RAGAS returned a non-finite goal accuracy score")
+    provenance = {"provider": "openai", "model": judge_model}
+    _record_judge_call(provenance, judge_model, judge_model)
     return {
         "score": max(0.0, min(1.0, score)),
         "reason": "RAGAS AgentGoalAccuracyWithReference",
         "method": "ragas",
-        "provider": "openai",
-        "model": _selected_judge_model(),
+        **provenance,
     }
 
 

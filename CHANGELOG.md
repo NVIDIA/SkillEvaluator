@@ -309,6 +309,18 @@ All notable changes to SkillEvaluator are documented in this file.
   `quality-check` before any report was written. The schema check reports the
   malformed `metadata`, and the quality score counts `metadata.author` and
   `metadata.tags` as missing, as it already did for other non-mapping values.
+- The Tier 3 `goal_accuracy` RAGAS scorer now produces scores. It passed a
+  `SingleTurnSample` to the RAGAS 0.4 collections metric, which takes the
+  messages and reference as keyword arguments, so it failed before sending any
+  request and every eligible trial (the `openai` provider on the canonical
+  endpoint with a non-reasoning judge such as `gpt-4.1`) fell back to the prompt
+  judge with only an info log. These trials now report `goal_accuracy` with
+  `"method": "ragas"` instead of `"custom"`, plus `judge_model_used`,
+  `judge_reasoning_effort` and `judge_fallback_used`, so scores and lift can
+  differ from earlier runs. A RAGAS failure that falls back to the prompt
+  judge is logged as a warning with the redacted error, and the scorer's
+  OpenAI client is closed after each attempt. Default GPT-5 and GPT-6 judges
+  are unaffected.
 
 ## 0.6.0 - 2026-10-20
 

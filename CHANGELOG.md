@@ -148,6 +148,13 @@ All notable changes to SkillEvaluator are documented in this file.
   Markdown sections are packed by paragraph, so short labels and fragments stay
   attached to their neighbours, source ranges retain blank-line gaps, and findings
   list a split source once.
+- Tier 2 context deduplication no longer fails valid skills with a CRITICAL
+  `scalar_comparison_limit` finding below its 512-chunk ceiling. The fixed
+  25,000,000 scalar-comparison budget stopped 2,048-dimensional embeddings at
+  156 chunks and 1,536-dimensional embeddings at 180. The budget is now
+  267,911,168, so embeddings of up to 2,048 dimensions reach all 512 chunks.
+  Wider embeddings have a lower effective chunk limit (418 chunks at 3,072
+  dimensions, 362 at 4,096), which the finding now reports.
 - Local-mode verifier uploads now copy directly to the absent destination,
   avoiding an unnecessary rollback snapshot of an empty tests directory.
   Inputs and rewritten scripts are prepared privately before publication,

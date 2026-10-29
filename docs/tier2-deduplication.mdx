@@ -296,6 +296,16 @@ you intend to skip Tier 2 entirely.
 | Minimum content chunk | 80 characters | Drops sections and chunks too small to compare usefully; short paragraphs of an oversized section stay attached to a neighbour |
 | Embedding input cap | 3,000 characters | Caps every Markdown, Python, and shell embedding input; oversized Markdown sections are packed at paragraph boundaries |
 | High-confidence duplicate boundary | `0.70` | Maps actionable duplicate verdicts to HIGH rather than MEDIUM |
+| Intra-skill content chunks | 512 | Per-skill ceiling, checked before any embedding request |
+| Intra-skill comparison work | 267,911,168 scalar comparisons | Bounds all-pairs clustering; allows all 512 chunks with embeddings of up to 2,048 dimensions, 418 chunks at 3,072, and 362 at 4,096 |
+
+Intra-skill clustering compares every pair of chunks, so its work is
+`n * (n - 1) / 2 * dimensions`. A skill over the chunk ceiling fails before any
+embedding request. A skill within the ceiling whose embeddings are too wide for
+its chunk count fails after the first embedding batch, which sets the width,
+with a CRITICAL `scalar_comparison_limit` finding that names the effective chunk
+limit for that embedding width. Split the skill, remove repeated material, or
+use a narrower embedding model.
 
 Tier 2 treats skill content and catalog files as untrusted input. Before any
 provider call, it rejects linked roots, linked directories and manifests,

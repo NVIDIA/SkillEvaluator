@@ -9,6 +9,7 @@ Orchestrates the full pipeline: collect → chunk → embed → cluster → LLM 
 from __future__ import annotations
 
 import logging
+import math
 import re
 from collections import Counter
 from concurrent.futures import ThreadPoolExecutor, as_completed
@@ -19,6 +20,7 @@ from skillevaluator.constants import (
     CONTENT_DEDUP_LLM_REASONING_EFFORT,
     CONTENT_DEDUP_MAX_CHUNKS,
     CONTENT_DEDUP_MAX_LLM_CLUSTERS,
+    CONTENT_DEDUP_MAX_SCALAR_COMPARISONS,
     CONTENT_DEDUP_SIMILARITY_THRESHOLD,
     CONTENT_DEDUP_TRIVIAL_DUP_MAX_CHARS,
 )
@@ -45,10 +47,23 @@ logger = logging.getLogger(__name__)
 # config assignment. Used to recognize repeated config/comment snippets.
 _COMMENT_PREFIXES = ("#", ";", "//", "--", "!")
 _CONFIG_KV_RE = re.compile(r"^[\w.\-/]+\s*[=:]\s*\S")
-CONTENT_DEDUP_MAX_SCALAR_COMPARISONS = 25_000_000
 CONTENT_DEDUP_MAX_CLUSTER_MEMBERS = 64
 CONTENT_DEDUP_MAX_LLM_PROMPT_CHARS = 64_000
 CONTENT_DEDUP_MAX_TOTAL_LLM_PROMPT_CHARS = 1_000_000
+
+
+def effective_chunk_limit(vector_dimension: int, max_scalar_comparisons: int | None = None) -> int:
+    """Return the most chunks whose all-pairs comparison fits the scalar-work budget."""
+    if max_scalar_comparisons is None:
+        max_scalar_comparisons = CONTENT_DEDUP_MAX_SCALAR_COMPARISONS
+    if type(vector_dimension) is not int or vector_dimension <= 0:
+        raise ValueError("vector dimension must be a positive integer")
+    if type(max_scalar_comparisons) is not int or max_scalar_comparisons <= 0:
+        raise ValueError("scalar comparison budget must be a positive integer")
+    pair_budget = max_scalar_comparisons // vector_dimension
+    # Largest n with n * (n - 1) / 2 <= pair_budget, in exact integer arithmetic.
+    scalar_limited_chunks = (1 + math.isqrt(1 + 8 * pair_budget)) // 2
+    return min(CONTENT_DEDUP_MAX_CHUNKS, scalar_limited_chunks)
 
 
 def _is_comment_or_config_line(line: str) -> bool:
@@ -222,12 +237,17 @@ class IntraSkillValidator(ValidatorBase):
                 # excess pairwise work before requesting another provider batch.
                 scalar_work = pair_count * (vector_dimension or 0)
                 if scalar_work > self._max_scalar_comparisons:
+                    chunk_limit = effective_chunk_limit(vector_dimension, self._max_scalar_comparisons)
                     result.add_finding(
                         Finding(
                             category="CONTENT_DEDUP",
                             severity=Severity.CRITICAL,
                             check_name="scalar_comparison_limit",
-                            message=f"Tier 2 scalar comparison work exceeds the configured limit ({self._max_scalar_comparisons}).",
+                            message=(
+                                "Tier 2 scalar comparison work exceeds the configured limit "
+                                f"({self._max_scalar_comparisons}); the effective chunk limit is "
+                                f"{chunk_limit} for {vector_dimension}-dimensional embeddings."
+                            ),
                             file_path=report_path,
                             suggestion="Reduce or split the skill content before running Tier 2.",
                             metadata={
@@ -235,6 +255,7 @@ class IntraSkillValidator(ValidatorBase):
                                 "vector_dimension": vector_dimension,
                                 "scalar_work": scalar_work,
                                 "limit": self._max_scalar_comparisons,
+                                "effective_chunk_limit": chunk_limit,
                             },
                         )
                     )

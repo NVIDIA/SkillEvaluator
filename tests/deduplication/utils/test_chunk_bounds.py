@@ -102,3 +102,11 @@ def test_oversized_section_keeps_short_labels_with_their_examples():
     for chunk in chunks:
         chunk.embedding = [1.0, 0.0]
     assert build_clusters(chunks) == []
+
+
+def test_packed_short_tail_keeps_source_range_across_blank_lines():
+    text = "# Guide\n" + "x" * 2990 + "\n" * 100 + "IMPORTANT_TAIL: Keep a backup."
+    chunks = chunk_file(collected(text))
+    tail = next(chunk for chunk in chunks if "IMPORTANT_TAIL" in chunk.text)
+    assert tail.end_line == len(text.splitlines())
+    assert max(len(chunk.text) for chunk in chunks) <= 3000

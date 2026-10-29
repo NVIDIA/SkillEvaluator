@@ -194,13 +194,16 @@ def _pack_paragraphs(section: ContentChunk, min_chars: int) -> list[ContentChunk
     group = (section.source_file, section.start_line, section.end_line)
     packed: list[ContentChunk] = []
     for paragraph in split_into_paragraphs(section, min_chars=1):
+        # Keep the source line gap so the bounding pass can map pieces back to
+        # their actual lines even when paragraphs have several blank lines.
+        separator = "\n" * max(2, paragraph.start_line - packed[-1].end_line) if packed else ""
         if packed and (
-            len(packed[-1].text) + 2 + len(paragraph.text) <= CONTENT_DEDUP_MAX_CHUNK_CHARS
+            len(packed[-1].text) + len(separator) + len(paragraph.text) <= CONTENT_DEDUP_MAX_CHUNK_CHARS
             or len(paragraph.text) < min_chars
             or len(packed[-1].text) < min_chars
         ):
             last = packed[-1]
-            packed[-1] = replace(last, text=f"{last.text}\n\n{paragraph.text}", end_line=paragraph.end_line)
+            packed[-1] = replace(last, text=f"{last.text}{separator}{paragraph.text}", end_line=paragraph.end_line)
         else:
             packed.append(replace(paragraph, split_group=group))
     return packed

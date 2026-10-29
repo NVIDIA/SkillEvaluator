@@ -180,7 +180,7 @@ def test_reporters_share_one_environment_and_compile_each_template_once(payload,
     first = plain.render_all(results)
     ci.render_all(results)
     assert plain.render_all(results) == first
-    assert sorted(loads) == ["report.html.j2", "report_ui.css.j2", "report_ui.js.j2"]
+    assert sorted(loads) == ["logo.svg.j2", "report.html.j2", "report_ui.css.j2", "report_ui.js.j2"]
 
 
 def test_shared_environment_renders_identically_from_many_threads(payload):

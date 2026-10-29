@@ -556,6 +556,29 @@ def test_preflight_matches_values_echoed_with_an_invisible_character_marker(tmp_
         _assert_no_fragment(safe, short)
 
 
+@pytest.mark.parametrize("separator", ["\u2028", "\u0085", "\x0c"])
+def test_preflight_splits_lines_as_the_scanners_do(tmp_path, separator):
+    from ci.secret_redaction import collect_sensitive_values
+
+    from skillevaluator.utils.secret_redaction import Redactor
+    from skillevaluator.validators.unicode_smuggle import UnicodeSmuggleValidator
+
+    skill = _skill(tmp_path)
+    value = "Hj6" * 6 + "Lm3" * 6
+    line = 'API_SECRET = "' + value[:10] + separator + value[10:] + '"'
+    (skill / "source.py").write_text(line + "\n", encoding="utf-8")
+    # The PII scan splits only on newlines, so it still flags the value.
+    result = SecurityValidator(use_llm=False).validate_pii_only(skill)
+    assert any(f.check_name == "hardcoded_secrets" for f in result.findings)
+    tokens = collect_sensitive_values(skill)
+    if value[:10] + separator + value[10:] not in tokens:
+        pytest.fail("Credential preflight split a quoted value at a line separator.")
+    redactor = Redactor(tokens)
+    # YARA echoes the raw line. The Unicode check shows the character as a marker.
+    for echo in (line, UnicodeSmuggleValidator._safe_line_content(line)):
+        _assert_no_fragment(redactor.text(echo), value)
+
+
 def test_invisible_character_in_credential_never_reaches_reports_or_pages(tmp_path, capsys, monkeypatch):
     from skillevaluator.validators.unicode_smuggle import UnicodeSmuggleValidator
 

@@ -67,7 +67,10 @@ def collect_sensitive_values(skill: Path) -> set[str]:
                 if raw.startswith((b"\xff\xfe", b"\xfe\xff"))
                 else raw.decode("utf-8-sig", errors="ignore")
             )
-            for line in text.splitlines():
+            # Split lines as the scanners read them, on newlines only.
+            # str.splitlines() also splits on characters such as U+2028 and
+            # form feed, which can sit inside a quoted credential.
+            for line in re.split(r"\r\n?|\n", text):
                 # Some PII patterns can backtrack heavily on very long input.
                 # Refuse the scan before applying them to unbounded lines.
                 if len(line) > MAX_LINE_CHARS:

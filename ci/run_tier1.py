@@ -606,11 +606,14 @@ def run(workspace: Path, reports: Path, environ: dict[str, str], *, execute=None
     if execute is None:
         execute = functools.partial(run_scan, abort=abort)
 
+    def ending() -> bool:
+        return stop.is_set() or abort.is_set()
+
     def work(worker_env: dict[str, str]) -> None:
         # Workers only run processes. The main thread owns rows, logs and
         # report files, so nothing races and logs keep skill order.
         try:
-            while not stop.is_set():
+            while not ending():
                 try:
                     index = pending.get_nowait()
                 except queue.Empty:
@@ -639,7 +642,11 @@ def run(workspace: Path, reports: Path, environ: dict[str, str], *, execute=None
                 saved = threading.Event()
                 events.put(("finished", index, (outcome, saved)))
                 # Start another skill only after this result is checkpointed.
-                saved.wait()
+                # Once the run is ending no skill starts, and an interrupted
+                # run never checkpoints again, so stop waiting.
+                while not saved.wait(POLL_SECONDS):
+                    if ending():
+                        return
         finally:
             events.put(("exited", -1, None))
 
@@ -679,10 +686,12 @@ def run(workspace: Path, reports: Path, environ: dict[str, str], *, execute=None
             logged += 1
 
     running = 0
+    live: list[threading.Thread] = []
     unsaved: list[threading.Event] = []
     try:
         for thread in threads:
             thread.start()
+            live.append(thread)
             running += 1
         while running:
             batch = [events.get()]
@@ -720,15 +729,20 @@ def run(workspace: Path, reports: Path, environ: dict[str, str], *, execute=None
         raise
     finally:
         stop.set()
-        # After an unexpected error, release waiting workers and let them exit.
         for saved in unsaved:
             saved.set()
-        while running:
-            kind, _, payload = events.get()
-            if kind == "exited":
-                running -= 1
-            elif kind == "finished":
-                payload[1].set()
+        # Workers exit within the stop grace once the run ends. A repeated
+        # Ctrl-C must not leave them behind, so it is raised after they exit.
+        interrupt = None
+        for thread in live:
+            while thread.is_alive():
+                try:
+                    thread.join()
+                except KeyboardInterrupt as exc:
+                    abort.set()
+                    interrupt = exc
+        if interrupt is not None:
+            raise interrupt
     flush_logs(final=True)
     if len(started) < len(rows):
         print(

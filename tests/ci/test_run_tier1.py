@@ -1155,3 +1155,23 @@ def test_ctrl_c_ends_running_scans_and_their_tools(tmp_path):
             process.kill()
             process.wait()
         kill_quietly(survivors)
+
+
+@posix_only
+def test_second_ctrl_c_does_not_leave_the_runner_waiting(tmp_path):
+    # The scans ignore SIGTERM, so the second Ctrl-C arrives while the
+    # runner is still waiting for them to end.
+    process, pids = start_runner_with_endless_scans(tmp_path, ignore_term=True)
+    survivors = pids
+    try:
+        os.kill(process.pid, signal.SIGINT)
+        time.sleep(1)
+        os.kill(process.pid, signal.SIGINT)
+        assert process.wait(WAIT) == -signal.SIGINT
+        survivors = still_running(pids)
+        assert not survivors
+    finally:
+        if process.poll() is None:
+            process.kill()
+            process.wait()
+        kill_quietly(survivors)

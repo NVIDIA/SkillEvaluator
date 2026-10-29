@@ -60,7 +60,8 @@ All notable changes to SkillEvaluator are documented in this file.
   meaningful short tails and actual Python docstring source ranges, and avoids
   counting pieces of one original chunk as duplicates of each other. Oversized
   Markdown sections are packed by paragraph, so short labels and fragments stay
-  attached to their neighbours, and findings list a split source once.
+  attached to their neighbours, source ranges retain blank-line gaps, and findings
+  list a split source once.
 
 - Rubric evaluation preserves the original `SKILL.md` text without adding YAML
   separators and includes reachable local Markdown guides under their source

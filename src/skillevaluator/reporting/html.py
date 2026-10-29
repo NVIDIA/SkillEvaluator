@@ -3175,5 +3175,6 @@ def render_logo(uid: str, size: int = 28, label: str = "SkillEvaluator logo") ->
     ``uid`` keeps the logo's ids unique on the page. An empty ``label`` marks
     the logo as decorative, for use next to visible "SkillEvaluator" text.
     """
-    environment = Environment(loader=PackageLoader("skillevaluator.reporting", "templates"), autoescape=True)
+    # The shared reporter environment compiles the partial once per process.
+    environment = HTMLReporter._create_environment()
     return str(environment.get_template("logo.svg.j2").module.se_logo(uid, size, label))

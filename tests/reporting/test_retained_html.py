@@ -180,6 +180,8 @@ def test_reporters_share_one_environment_and_compile_each_template_once(payload,
     first = plain.render_all(results)
     ci.render_all(results)
     assert plain.render_all(results) == first
+    # Pages built outside report.html.j2, such as the CI index, reuse the same compiled logo.
+    assert html_module.render_logo("one") != html_module.render_logo("two")
     assert sorted(loads) == ["logo.svg.j2", "report.html.j2", "report_ui.css.j2", "report_ui.js.j2"]
 
 

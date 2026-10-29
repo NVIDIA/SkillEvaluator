@@ -157,7 +157,7 @@ def test_standard_report_pair_and_unsafe_companion_destination(tmp_path):
         )
     report = render_agent_eval_html_report(skill, run, include_benchmark=True, use_llm_judge=False)
     assert report.is_file()
-    benchmark = run / "BENCHMARK.md"
+    benchmark = run / "tier3-benchmark.md"
     assert "Publication: **NOT ASSESSED**" in benchmark.read_text()
     assert "## Results at a Glance" in benchmark.read_text()
     benchmark.unlink()

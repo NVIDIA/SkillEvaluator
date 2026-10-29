@@ -627,7 +627,7 @@ def render_agent_eval_html_report(
         if include_benchmark:
             BenchmarkReporter(
                 skill_name=publication_target_name(skill_path) or skill_path.name, report_scope="tier3"
-            ).save([result], target.with_name("BENCHMARK.md"))
+            ).save([result], target.with_name("tier3-benchmark.md"))
     except Exception:
         # Do not advertise half of a newly generated report pair. An unsafe
         # destination that the writer rejected is never followed or removed.

@@ -177,7 +177,7 @@ class BenchmarkReporter(ReporterBase):
         ]
         if self.report_scope == "tier3":
             lines.extend([
-                "Publication: **NOT ASSESSED**. This report covers Tier 3 only; Tiers 1 and 2 were not requested.",
+                "Publication: **NOT ASSESSED**. This report covers Tier 3 only; Tiers 1 and 2 are not covered by this report.",
                 "The verdict describes with-skill quality; lift is a separate baseline comparison.", "",
             ])
         elif status == "PASS":
@@ -542,7 +542,7 @@ class BenchmarkReporter(ReporterBase):
             )
             if self.report_scope == "tier3":
                 if tier != "Tier 3":
-                    status, evidence = "NOT REQUESTED", "Outside this report's Tier 3 scope"
+                    status, evidence = "NOT COVERED", "Outside this report's Tier 3 scope"
                 elif completed := completed_agent_result(ae):
                     status = completed["verdict"].upper()
                     evidence = "Completed-agent quality result; publication not assessed"

@@ -140,6 +140,11 @@ def lstat_walk(root: Path, relative: PurePath) -> LstatWalk:
     The walk stops at the first component that is missing, cannot be
     inspected, is a symlink or reparse point, or (before the last) is not a
     directory, so nothing below a link is ever inspected.
+
+    The caller must verify the root and supply a normalized relative path;
+    this helper does not reject absolute paths or parent traversal. Its
+    observations are best-effort metadata probes, not descriptor-anchored
+    reads or a coherent filesystem snapshot. Use SecureRoot for reads.
     """
     current = root
     metadata: os.stat_result | None = None

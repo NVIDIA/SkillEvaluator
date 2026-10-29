@@ -209,7 +209,10 @@ def test_collected_summaries_and_lift_share_na_case_basis(tmp_path):
 
     arms = {
         "with": [reward("a", accuracy=0.9, behavior_check=None), reward("b", accuracy=None, behavior_check=None)],
-        "without": [reward("a", accuracy=0.6, behavior_check=None, skill_execution=None, skill_efficiency=None), reward("b", accuracy=0.0, behavior_check=None, skill_execution=None, skill_efficiency=None)],
+        "without": [
+            reward("a", accuracy=0.6, behavior_check=None, skill_execution=None, skill_efficiency=None),
+            reward("b", accuracy=0.0, behavior_check=None, skill_execution=None, skill_efficiency=None),
+        ],
     }
     for arm, rows in arms.items():
         job = tmp_path / "jobs" / f"demo-opencode-{arm}"
@@ -223,8 +226,37 @@ def test_collected_summaries_and_lift_share_na_case_basis(tmp_path):
             numeric["overall"] = metrics.overall_score(row)
             (verifier / "reward.json").write_text(json.dumps(numeric))
             (verifier / "skill_evaluator_reward.json").write_text(json.dumps(row))
-        (job / "result.json").write_text(json.dumps({"n_total_trials": len(rows), "stats": {"n_completed_trials": len(rows), "n_errored_trials": 0, "n_running_trials": 0, "n_pending_trials": 0, "n_cancelled_trials": 0, "n_retries": 0, "evals": {"agent__model___harbor-tasks": {"n_trials": len(rows), "n_errors": 0, "reward_stats": {"reward": {"0.1": trial_names}}}}}}))
-    result = collect_harbor_results(skill_name="demo", agents=["opencode"], output_dir=tmp_path / "results", jobs_dir=tmp_path / "jobs", expected_cases=2, expected_case_ids=["a", "b"], expected_trials=2)
+        (job / "result.json").write_text(
+            json.dumps(
+                {
+                    "n_total_trials": len(rows),
+                    "stats": {
+                        "n_completed_trials": len(rows),
+                        "n_errored_trials": 0,
+                        "n_running_trials": 0,
+                        "n_pending_trials": 0,
+                        "n_cancelled_trials": 0,
+                        "n_retries": 0,
+                        "evals": {
+                            "agent__model___harbor-tasks": {
+                                "n_trials": len(rows),
+                                "n_errors": 0,
+                                "reward_stats": {"reward": {"0.1": trial_names}},
+                            }
+                        },
+                    },
+                }
+            )
+        )
+    result = collect_harbor_results(
+        skill_name="demo",
+        agents=["opencode"],
+        output_dir=tmp_path / "results",
+        jobs_dir=tmp_path / "jobs",
+        expected_cases=2,
+        expected_case_ids=["a", "b"],
+        expected_trials=2,
+    )
     agent = result["agents"]["opencode"]
     assert agent["execution_status"] == "succeeded"
     assert agent["not_applicable_metrics"]["without_skill"] == ["skill_execution", "skill_efficiency", "behavior_check"]

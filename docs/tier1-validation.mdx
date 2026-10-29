@@ -177,6 +177,8 @@ For `validate`, the default set is `schema`, `version`, `security`, `pii`, `lice
     ```
 
     The LLM pass requires a configured provider. It enriches the static result but does not replace static findings or make missing scanner evidence pass.
+
+    SkillSpector 2.11.1 and later tags an exact read-only `/etc/passwd` bind mount, such as `docker run -v /etc/passwd:/etc/passwd:ro` or the Podman, `--volume`, and quoted forms, as likely benign but still reports it as a HIGH Credential Access (PE3) finding. SkillEvaluator ignores that finding only when SkillSpector tagged it benign and every `/etc/passwd` on the reported source line is the source or target of such a mount. Writable or implicit-mode mounts, other source or target paths, and reads such as `cat /etc/passwd` still block.
   </Accordion>
 
   <Accordion title="pii — PII, credentials, and local identifiers">

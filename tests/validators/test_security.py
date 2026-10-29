@@ -24,6 +24,10 @@ from skillevaluator.validators.security import SecurityValidator, _skillspector_
 _SKILLSPECTOR_2_9_6_NO_LLM_REPORT = (
     Path(__file__).parents[1] / "fixtures" / "skillspector-2.9.6-no-llm.json"
 )
+_SKILLSPECTOR_2_11_1_PE3_REPORT = Path(__file__).parents[1] / "fixtures" / "skillspector-2.11.1-pe3-no-llm.json"
+# build.sh as scanned for the captured 2.11.1 PE3 report: line 2 is a
+# read-only UID-map mount, line 3 a real credential-file read.
+_SKILLSPECTOR_2_11_1_PE3_BUILD_SH = "#!/bin/sh\ndocker run -v /etc/passwd:/etc/passwd:ro image\ncat /etc/passwd\n"
 _SKILLSPECTOR_2_10_REQUIRED_ANALYZERS = (
     "artifact_integrity",
     "behavioral_ast",
@@ -195,6 +199,20 @@ def _validate_skillspector_payload(
         exit_code=exit_code,
     )
     return SecurityValidator(use_llm=False).validate_security_only(sample_skill_dir)
+
+
+def _passwd_mount_issue(**overrides) -> dict:
+    """Return a benign-tagged SkillSpector PE3 row for scripts/build.sh line 1."""
+    location = {"file": "scripts/build.sh", "start_line": 1, "end_line": None}
+    return {
+        "id": "PE3",
+        "pattern": "Credential Access",
+        "finding": "/etc/passwd",
+        "tags": ["Privilege Escalation", "contextual-triage", "likely-benign-context"],
+        "location": location,
+        "occurrences": [dict(location)],
+        **overrides,
+    }
 
 
 def _set_universal_analyzer_work(payload: dict) -> None:
@@ -2476,6 +2494,8 @@ print(json.dumps([finding.metadata["matched_value"] for finding in result.findin
         # Captured from NVIDIA/SkillSpector v2.11.1 with --no-llm. build.sh:
         # docker run -v /etc/passwd:/etc/passwd:ro image
         # cat /etc/passwd
+        # build.sh is not on disk here, so the tagged mount row cannot be
+        # re-checked against its source and stays reported.
         payload = json.loads((
             Path(__file__).parents[1] / "fixtures" / "skillspector-2.11.1-pe3-no-llm.json"
         ).read_text(encoding="utf-8"))
@@ -2513,6 +2533,244 @@ print(json.dumps([finding.metadata["matched_value"] for finding in result.findin
                 "evidence-types": "compacted identity",
             }[mutation]
             assert any(expected in error for error in result.errors)
+
+    @pytest.mark.parametrize("version", ["2.11.1", "2.12.0", "2.13.2"])
+    @patch("skillevaluator.validators.security.Tools")
+    def test_skillspector_ignores_tagged_read_only_passwd_mount(
+        self,
+        mock_tools,
+        sample_skill_dir: Path,
+        version: str,
+    ) -> None:
+        (sample_skill_dir / "build.sh").write_text(_SKILLSPECTOR_2_11_1_PE3_BUILD_SH, encoding="utf-8")
+        payload = json.loads(_SKILLSPECTOR_2_11_1_PE3_REPORT.read_text(encoding="utf-8"))
+        payload["metadata"]["skillspector_version"] = version
+
+        result = _validate_skillspector_payload(mock_tools, sample_skill_dir, payload)
+
+        assert not result.is_incomplete
+        # The untagged `cat /etc/passwd` on line 3 still blocks.
+        assert [
+            (finding.file_path, finding.line_number)
+            for finding in result.findings
+            if finding.check_name.endswith("(PE3)")
+        ] == [("build.sh", 3)]
+        assert not result.passed
+        assert "skillspector ignored 1 read-only /etc/passwd mount issue(s)" in result.messages
+
+    @pytest.mark.parametrize(
+        "build_sh",
+        [
+            None,
+            "#!/bin/sh\ndocker run -v /etc/passwd:/etc/passwd:rw image\ncat /etc/passwd\n",
+            "#!/bin/sh\ndocker run -v /etc/passwd:/etc/passwd image\ncat /etc/passwd\n",
+            "#!/bin/sh\ndocker run -v /tmp/passwd:/etc/passwd:ro image\ncat /etc/passwd\n",
+            "#!/bin/sh\ndocker run -v /etc/passwd:/tmp/passwd:ro image\ncat /etc/passwd\n",
+            "#!/bin/sh\ndocker run -v /etc/passwd:/etc/passwd:ro image; cat /etc/passwd\ncat /etc/passwd\n",
+            "#!/bin/sh\ncat /etc/passwd\ndocker run -v /etc/passwd:/etc/passwd:ro image\n",
+            b"#!/bin/sh\ndocker run -v /etc/passwd:/etc/passwd:ro image \xff\ncat /etc/passwd\n",
+        ],
+        ids=[
+            "missing-source",
+            "writable",
+            "implicit-mode",
+            "other-source",
+            "other-target",
+            "same-line-read",
+            "moved-line",
+            "non-utf8",
+        ],
+    )
+    @patch("skillevaluator.validators.security.Tools")
+    def test_skillspector_tagged_passwd_mount_requires_exact_source_line(
+        self,
+        mock_tools,
+        sample_skill_dir: Path,
+        build_sh: str | bytes | None,
+    ) -> None:
+        if isinstance(build_sh, bytes):
+            (sample_skill_dir / "build.sh").write_bytes(build_sh)
+        elif build_sh is not None:
+            (sample_skill_dir / "build.sh").write_text(build_sh, encoding="utf-8")
+        payload = json.loads(_SKILLSPECTOR_2_11_1_PE3_REPORT.read_text(encoding="utf-8"))
+
+        result = _validate_skillspector_payload(mock_tools, sample_skill_dir, payload)
+
+        assert not result.is_incomplete
+        assert len([finding for finding in result.findings if finding.check_name.endswith("(PE3)")]) == 2
+        assert not any("read-only /etc/passwd mount" in message for message in result.messages)
+
+    @patch("skillevaluator.validators.security.Tools")
+    def test_skillspector_passwd_mount_source_check_does_not_follow_links(
+        self,
+        mock_tools,
+        sample_skill_dir: Path,
+        tmp_path: Path,
+    ) -> None:
+        outside = tmp_path / "outside-build.sh"
+        outside.write_text(_SKILLSPECTOR_2_11_1_PE3_BUILD_SH, encoding="utf-8")
+        try:
+            (sample_skill_dir / "build.sh").symlink_to(outside)
+        except (NotImplementedError, OSError) as exc:
+            pytest.skip(f"symlinks unavailable: {exc}")
+        payload = json.loads(_SKILLSPECTOR_2_11_1_PE3_REPORT.read_text(encoding="utf-8"))
+
+        result = _validate_skillspector_payload(mock_tools, sample_skill_dir, payload)
+
+        assert len([finding for finding in result.findings if finding.check_name.endswith("(PE3)")]) == 2
+
+    @patch("skillevaluator.validators.security.Tools")
+    def test_skillspector_rescores_after_ignoring_passwd_mount(
+        self,
+        mock_tools,
+        sample_skill_dir: Path,
+    ) -> None:
+        (sample_skill_dir / "build.sh").write_text(
+            "#!/bin/sh\ndocker run -v /etc/passwd:/etc/passwd:ro image\n", encoding="utf-8"
+        )
+        payload = json.loads(_SKILLSPECTOR_2_11_1_PE3_REPORT.read_text(encoding="utf-8"))
+        payload["issues"] = [issue for issue in payload["issues"] if issue["location"]["start_line"] != 3]
+        payload["analysis_completeness"]["findings_before_filtering"] -= 1
+        payload["analysis_completeness"]["findings_after_filtering"] -= 1
+        # A reported score above the policy threshold that only the ignored
+        # mount row supports must not re-add a HIGH aggregate finding.
+        payload["risk_assessment"].update({"score": 60, "severity": "HIGH", "recommendation": "DO_NOT_INSTALL"})
+
+        result = _validate_skillspector_payload(mock_tools, sample_skill_dir, payload, exit_code=1)
+
+        assert result.passed
+        assert not result.errors
+        assert not any(finding.check_name == "skillspector_risk_score" for finding in result.findings)
+        assert "skillspector ignored 1 read-only /etc/passwd mount issue(s)" in result.messages
+
+    @pytest.mark.parametrize(
+        ("content", "line_number"),
+        [
+            ("podman run --rm --volume='/etc/passwd:/etc/passwd:ro' image\n", 1),
+            ('docker run --volume="/etc/passwd:/etc/passwd:ro" image\n', 1),
+            ("docker run --rm \\\n  -v /etc/passwd:/etc/passwd:ro \\\n  image:1.0.0\n", 2),
+            ("DOCKER RUN -V /ETC/PASSWD:/ETC/PASSWD:RO image\r\n", 1),
+        ],
+    )
+    def test_skillspector_passwd_mount_accepts_exact_read_only_forms(
+        self,
+        sample_skill_dir: Path,
+        content: str,
+        line_number: int,
+    ) -> None:
+        scripts = sample_skill_dir / "scripts"
+        scripts.mkdir()
+        (scripts / "build.sh").write_text(content, encoding="utf-8", newline="")
+        location = {"file": "scripts/build.sh", "start_line": line_number, "end_line": None}
+        safe_lines_by_file: dict[str, frozenset[int]] = {}
+
+        for file_path in ("scripts/build.sh", str(sample_skill_dir / "scripts" / "build.sh")):
+            row_location = {**location, "file": file_path}
+            assert SecurityValidator._is_read_only_passwd_mount_issue(
+                _passwd_mount_issue(location=row_location, occurrences=[dict(row_location)]),
+                scanner_version="2.12.0",
+                source_root=sample_skill_dir,
+                safe_lines_by_file=safe_lines_by_file,
+            )
+
+    @pytest.mark.parametrize(
+        ("overrides", "scanner_version"),
+        [
+            pytest.param({}, None, id="missing-version"),
+            pytest.param({}, 2.12, id="non-string-version"),
+            pytest.param({}, "2.10.0", id="aggregated-classification-2.10.0"),
+            pytest.param({}, "2.11.0", id="aggregated-classification-2.11.0"),
+            pytest.param({}, "2.12.0rc1", id="prerelease"),
+            pytest.param({"tags": None}, "2.12.0", id="no-tags"),
+            pytest.param({"tags": []}, "2.12.0", id="empty-tags"),
+            pytest.param({"tags": ["contextual-triage"]}, "2.12.0", id="triage-only"),
+            pytest.param({"tags": ["likely-benign-context"]}, "2.12.0", id="benign-only"),
+            pytest.param(
+                {"tags": ["contextual-triage", "likely-benign-context", {"malformed": True}]},
+                "2.12.0",
+                id="malformed-tag",
+            ),
+            pytest.param({"tags": "contextual-triage likely-benign-context"}, "2.12.0", id="string-tags"),
+            pytest.param({"id": "PE1"}, "2.12.0", id="other-rule"),
+            pytest.param({"pattern": "Sudo Usage"}, "2.12.0", id="other-pattern"),
+            pytest.param({"finding": "/etc/shadow"}, "2.12.0", id="other-finding"),
+            pytest.param(
+                {
+                    "occurrences": [
+                        {"file": "scripts/build.sh", "start_line": 1, "end_line": None},
+                        {"file": "scripts/unsafe.sh", "start_line": 1, "end_line": None},
+                    ]
+                },
+                "2.12.0",
+                id="aggregated-row",
+            ),
+            pytest.param(
+                {"occurrences": [{"file": "scripts/unsafe.sh", "start_line": 1, "end_line": None}]},
+                "2.12.0",
+                id="occurrence-mismatch",
+            ),
+            pytest.param({"occurrences": None}, "2.12.0", id="no-occurrences"),
+            pytest.param(
+                {
+                    "location": {"file": "scripts/build.sh", "start_line": 1, "end_line": 2},
+                    "occurrences": [{"file": "scripts/build.sh", "start_line": 1, "end_line": 2}],
+                },
+                "2.12.0",
+                id="multi-line-row",
+            ),
+            pytest.param(
+                {
+                    "location": {"file": "scripts/build.sh", "start_line": 2, "end_line": None},
+                    "occurrences": [{"file": "scripts/build.sh", "start_line": 2, "end_line": None}],
+                },
+                "2.12.0",
+                id="line-past-end",
+            ),
+            pytest.param(
+                {
+                    "location": {"file": "scripts/../../outside.sh", "start_line": 1, "end_line": None},
+                    "occurrences": [{"file": "scripts/../../outside.sh", "start_line": 1, "end_line": None}],
+                },
+                "2.12.0",
+                id="parent-escape",
+            ),
+            pytest.param(
+                {
+                    "location": {"file": "/outside.sh", "start_line": 1, "end_line": None},
+                    "occurrences": [{"file": "/outside.sh", "start_line": 1, "end_line": None}],
+                },
+                "2.12.0",
+                id="absolute-outside-root",
+            ),
+            pytest.param(
+                {
+                    "location": {"file": "scripts", "start_line": 1, "end_line": None},
+                    "occurrences": [{"file": "scripts", "start_line": 1, "end_line": None}],
+                },
+                "2.12.0",
+                id="directory",
+            ),
+        ],
+    )
+    def test_skillspector_passwd_mount_exemption_fails_closed(
+        self,
+        sample_skill_dir: Path,
+        tmp_path: Path,
+        overrides: dict,
+        scanner_version: object,
+    ) -> None:
+        scripts = sample_skill_dir / "scripts"
+        scripts.mkdir()
+        mount = "docker run --rm -v /etc/passwd:/etc/passwd:ro image\n"
+        (scripts / "build.sh").write_text(mount, encoding="utf-8")
+        (tmp_path / "outside.sh").write_text(mount, encoding="utf-8")
+
+        assert not SecurityValidator._is_read_only_passwd_mount_issue(
+            _passwd_mount_issue(**overrides),
+            scanner_version=scanner_version,
+            source_root=sample_skill_dir,
+            safe_lines_by_file={},
+        )
 
     @pytest.mark.parametrize("skillspector_version", ["2.9.6", "2.10.0"])
     @patch("skillevaluator.validators.security.Tools")

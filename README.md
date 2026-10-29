@@ -30,6 +30,19 @@ SkillSpector. Choose a minimum quality score to fit your team. The ready-to-use
 configuration requires an official CI image release; see
 [repository integration](docs/repository-integration.mdx) for setup and availability.
 
+**Prefer to copy a file?** No local SkillEvaluator installation or onboarding
+CLI is required. Browse the [template catalog](ci/templates/README.md):
+
+| Your repository | Source template | Copy destination |
+| --- | --- | --- |
+| GitHub | [Skill checks](ci/templates/skill-checks.yml) | `.github/workflows/skill-checks.yml` |
+| GitLab | [Skill checks](ci/templates/gitlab-skill-checks.yml) | `.gitlab-ci.yml`, or merge into your existing pipeline |
+| GitHub with hosted reports and PR comments | [Optional publisher](ci/templates/publish-skill-reports.yml) | Add a second workflow and complete the one-time publisher setup |
+
+Source files contain release placeholders; the catalog explains how to get the
+release-generated copies with versions filled in. [Preview reports, logs and
+PR comments](ci/examples/README.md) here in the public repository.
+
 ## Quickstart
 
 Choose a starting path. Both use the bundled `text-analyzer` skill; try your own afterward.

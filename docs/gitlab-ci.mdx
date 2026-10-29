@@ -16,6 +16,13 @@ The shared container includes SkillSpector security scanning.
 
 ## Get started
 
+Open the [GitLab source template](https://github.com/NVIDIA/SkillEvaluator/blob/main/ci/templates/gitlab-skill-checks.yml)
+in the public NVIDIA/SkillEvaluator repository. It is maintained alongside the
+GitHub templates; you do not need a GitLab mirror or a local onboarding CLI.
+The [template catalog](https://github.com/NVIDIA/SkillEvaluator/blob/main/ci/templates/README.md)
+explains how to get the release-generated version with the workflow and image
+versions filled in.
+
 <Steps>
 
 ### Add the reusable job
@@ -66,6 +73,10 @@ its detailed HTML report. JSON, Markdown and SARIF are included.
 <Frame caption="Real demo result: the skill scored 98.2 and failed a 100-point threshold. The score and the scan verdict are separate.">
   <img src="./assets/repository-ci-results-example.png" alt="Example report table showing a failed skill with a quality score of 98.2 and a link to its report" />
 </Frame>
+
+The [public examples](https://github.com/NVIDIA/SkillEvaluator/blob/main/ci/examples/README.md)
+include this report preview and a log excerpt without requiring access to a
+separate demo project.
 
 <Tabs>
   <Tab title="Job log">

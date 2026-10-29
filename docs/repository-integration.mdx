@@ -33,6 +33,22 @@ require copying SkillEvaluator or SkillSpector source code into your repository.
   </Card>
 </CardGroup>
 
+## Copy a template
+
+No local installation or onboarding CLI is required. Both platforms' templates
+live in the public NVIDIA/SkillEvaluator repository. Open the file, copy the
+release-generated version, and set your skill folders and score threshold.
+
+| Your platform | Source template | Put it in your repository |
+| --- | --- | --- |
+| GitHub | [skill-checks.yml](https://github.com/NVIDIA/SkillEvaluator/blob/main/ci/templates/skill-checks.yml) | `.github/workflows/skill-checks.yml` |
+| GitLab | [gitlab-skill-checks.yml](https://github.com/NVIDIA/SkillEvaluator/blob/main/ci/templates/gitlab-skill-checks.yml) | `.gitlab-ci.yml`, or merge into your existing root configuration |
+
+The [template catalog](https://github.com/NVIDIA/SkillEvaluator/blob/main/ci/templates/README.md)
+explains release availability and includes the optional GitHub publisher and
+manual LLM workflow. Source files contain placeholders; official CI releases
+provide copies with the workflow and image versions filled in.
+
 ## What you get
 
 - **Automatic checks:** evaluate changed skills in pull requests or merge requests; run the configured collection on the default branch.
@@ -43,6 +59,9 @@ require copying SkillEvaluator or SkillSpector source code into your repository.
 <Frame caption="A real demo result: one changed skill scored 98.2 but failed a 100-point quality threshold.">
   <img src="./assets/repository-ci-results-example.png" alt="Example report table showing a failed skill with a quality score of 98.2" />
 </Frame>
+
+Browse [report, log and PR comment examples](https://github.com/NVIDIA/SkillEvaluator/blob/main/ci/examples/README.md)
+in the public repository. No demo-repository access is needed.
 
 <Note>
   The first release covers Tier 1. It does not run Tier 2 or Tier 3. An official

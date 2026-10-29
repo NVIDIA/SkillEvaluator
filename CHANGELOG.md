@@ -31,6 +31,9 @@ All notable changes to SkillEvaluator are documented in this file.
 
 ### Changed
 
+- Link GitHub and GitLab source templates directly from the README and onboarding
+  guides. Keep report, log and PR comment examples in the public repository,
+  removing onboarding dependencies on personal demo links.
 - GitHub onboarding shows the PR comment example directly on the page and
   explains the two templates and required one-time publisher setup.
 - HTML reports use a verdict-led layout with a sidebar and expandable check

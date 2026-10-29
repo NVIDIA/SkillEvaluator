@@ -20,8 +20,14 @@ The release bundle provides these two GitHub templates. Copy them into
 
 | You want | Add this file | Setup |
 | --- | --- | --- |
-| Automatic checks and downloadable reports | `skill-checks.yml` | Choose your skill folders and score threshold. |
-| Hosted reports and an updated PR comment | Also add `publish-skill-reports.yml` | Complete the [one-time publisher setup](#enable-pr-comments). |
+| Automatic checks and downloadable reports | [skill-checks.yml](https://github.com/NVIDIA/SkillEvaluator/blob/main/ci/templates/skill-checks.yml) | Choose your skill folders and score threshold. |
+| Hosted reports and an updated PR comment | Also add [publish-skill-reports.yml](https://github.com/NVIDIA/SkillEvaluator/blob/main/ci/templates/publish-skill-reports.yml) | Complete the [one-time publisher setup](#enable-pr-comments). |
+
+These links open the source templates in NVIDIA/SkillEvaluator. The
+[template catalog](https://github.com/NVIDIA/SkillEvaluator/blob/main/ci/templates/README.md)
+explains how to get release-generated copies from an official CI image release.
+You can copy the files directly; no local installation or onboarding CLI is
+required.
 
 The release fills in the workflow and image versions. Both templates use
 GitHub's automatic token; the default checks need no model key or paid LLM.
@@ -92,31 +98,32 @@ The optional publisher posts one bot comment and updates it for new results.
 Reviewers can see the failed skill, its score, and what to fix without opening
 the Actions logs.
 
-<Frame caption="Shortened example from the demo PR. Only the failed row is shown here; the full comment includes all evaluated skills and recorded findings.">
+<Frame caption="Shortened illustrative PR comment. This example is included in the public SkillEvaluator documentation; no demo-repository access is needed.">
 <div style={{ width: "100%", minWidth: 0, padding: "16px" }}>
 
 **github-actions[bot]**
 
 **Tier 1 scan result: FAILED**
 
-6 skills · 5 passed · 1 failed · 0 incomplete
+1 skill · 0 passed · 1 failed · 0 incomplete
 
 | Skill | Status | Quality / 100 |
 | --- | --- | --- |
-| `skills/invalid-skill` | FAIL | 71.8 / C |
+| `skills/glossary-builder` | FAIL | 98.2 / A |
 
-**Problem:** Invalid name format: `INVALID NAME`.
+**Problem:** Quality score 98.2/100 is below the required 100/100.
 
-**Suggested fix:** Use only lowercase letters, numbers, and hyphens.
+**Suggested fix:** Open the skill report and address the quality findings.
 
-[Open full report](https://chrisknvidia.github.io/skill-evaluator-consumer-demo/runs/40470715636/1/index.html)
-· [View workflow run](https://github.com/chrisknvidia/skill-evaluator-consumer-demo/actions/runs/40470715636)
+**Open full report** · **View workflow run**
 
 </div>
 </Frame>
 
-[View the actual bot comment on GitHub](https://github.com/chrisknvidia/skill-evaluator-consumer-demo/pull/1#issuecomment-6334583529).
-This earlier demo evaluated six skills. With `scan-mode: auto`, a pull request
+The last line shows link labels. In a real comment, they open your repository's
+hosted report and workflow run. Browse the
+[public examples](https://github.com/NVIDIA/SkillEvaluator/blob/main/ci/examples/README.md)
+for the report preview and log excerpts. With `scan-mode: auto`, a pull request
 evaluates only affected skills in the configured folders.
 
 ## Enable PR comments

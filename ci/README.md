@@ -8,6 +8,10 @@ The upstream workflow release and public package must be reviewed and published
 before consumers can use this path. Source templates are not runnable while
 `RELEASE_WORKFLOW_SHA` or `RELEASE_IMAGE_DIGEST` remains unresolved.
 
+For manual setup, start with the [copyable template catalog](templates/README.md).
+The [report and feedback examples](examples/README.md) are kept here in the public
+repository. Neither requires a local onboarding CLI or personal-demo access.
+
 ## Consumer contract
 
 Copy the release-generated `skill-checks.yml` to
@@ -105,7 +109,7 @@ Pages is not an inherent requirement for GitHub PR comments.
    `trusted-caller-blobs`. Every later scan-file edit needs review and a new
    approved blob. Preserve older reviewed SHA/blob entries only when needed for
    historical backfill. Both allowlists accept comma- or newline-separated
-   entries; do not copy the personal demo's trust hashes. The publisher verifies
+   entries; compute trust hashes from your own reviewed configuration. The publisher verifies
    the caller from recorded PR base/head revisions. Conflicting workflow edits
    or unavailable historical metadata are rejected: update/rebase the consumer
    branch and rerun its scan.
@@ -148,10 +152,9 @@ then.
 
 1. Review and merge source, wrapper, scanner pins, renderer and reusable
    workflows. Run focused selection/report/trust tests plus practical E2E
-   checks. A personal-fork demo is prior evidence, not proof of this new upstream
-   revision. Its [consumer](https://github.com/chrisknvidia/skill-evaluator-consumer-demo)
-   illustrates the earlier full-path scan and hosted-feedback flow; it does not
-   establish changed-skill selection for a newer release.
+   checks using the candidate revision. The [public examples](examples/README.md)
+   illustrate the report and feedback surfaces; they are not proof that a new
+   release has passed end-to-end verification.
 2. From a reviewed commit on upstream `main`, manually run **Build and publish
    Tier 1 image** with `publish: true`. Publishing is allowed only from `main`
    in `NVIDIA/SkillEvaluator`; PR runs build and smoke-test without uploading.

@@ -127,13 +127,14 @@ def _snapshot(root: Path, destination: Path, skills: list[str]) -> tuple[PurePos
     remaining = CONTENT_DEDUP_MAX_TOTAL_BYTES
     with SecureRoot(root) as reader:
         for source in files:
-            raw, _ = reader.read_bytes(
+            raw, metadata = reader.read_bytes(
                 source.relative_path, min(CONTENT_DEDUP_MAX_FILE_BYTES, remaining), expected=source.metadata
             )
             remaining -= len(raw)
             output = destination / source.relative_path
             output.parent.mkdir(parents=True, exist_ok=True)
             output.write_bytes(raw)
+            output.chmod(metadata.st_mode & 0o777)
     return tuple(PurePosixPath(file.relative_path.as_posix()) for file in files)
 
 
@@ -168,11 +169,12 @@ def _partition_views(
     with SecureRoot(snapshot) as reader:
         for relative in files:
             owner = next(unit for unit in deepest_first if relative.is_relative_to(PurePosixPath(unit)))
-            raw, _ = reader.read_bytes(Path(relative), min(CONTENT_DEDUP_MAX_FILE_BYTES, remaining))
+            raw, metadata = reader.read_bytes(Path(relative), min(CONTENT_DEDUP_MAX_FILE_BYTES, remaining))
             remaining -= len(raw)
             output = views[owner] / relative.relative_to(PurePosixPath(owner))
             output.parent.mkdir(parents=True, exist_ok=True)
             output.write_bytes(raw)
+            output.chmod(metadata.st_mode & 0o777)
     return views
 
 

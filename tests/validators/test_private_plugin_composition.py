@@ -5,6 +5,8 @@ from __future__ import annotations
 import json
 from pathlib import Path
 
+import pytest
+
 from skillevaluator.tier1.plugin_checks import PrivatePluginChecks, run_plugin_validation
 
 
@@ -332,3 +334,44 @@ def test_dead_link_is_confirmed_when_test_discovery_is_incomplete(tmp_path, monk
     hygiene = next(result for result in results if result.validator_name == "Code Integrity & Hygiene")
     assert hygiene.is_incomplete and any("absent.md" in error for error in hygiene.errors)
     assert hygiene.metadata.get("confirmed_failure") is True
+
+
+@pytest.mark.parametrize(
+    "source_mode,expected_mode", [(0o755, 0o755), (0o444, 0o444), (0o4755, 0o755), (0o2755, 0o755)]
+)
+def test_scan_views_preserve_permissions_without_privilege_bits(tmp_path, monkeypatch, source_mode, expected_mode):
+    import os
+    from types import SimpleNamespace
+
+    from skillevaluator.models.result import ValidationResult
+
+    if os.name != "posix":
+        pytest.skip("POSIX file permission semantics")
+    root = bundle(tmp_path)
+    for script in (root / "root-probe.sh", root / "skills/a/probe.sh"):
+        script.write_text("#!/bin/sh\nprintf fixture\n")
+        script.chmod(source_mode)
+    observed = []
+
+    def inspect(path, scope):
+        for script in path.rglob("*probe.sh"):
+            observed.append((scope, script.name, script.stat().st_mode & 0o7777))
+        return ValidationResult()
+
+    tree_validator = SimpleNamespace(name="Security", description="Mode-observing fixture")
+    skill_validator = SimpleNamespace(
+        name="Version", description="Snapshot-observing fixture", validate=lambda path: inspect(path, "snapshot")
+    )
+    monkeypatch.setattr(
+        "skillevaluator.tier1.plugin_checks._tree_checks",
+        lambda: {"security": (tree_validator, lambda path: inspect(path, "partition"))},
+    )
+    monkeypatch.setattr("skillevaluator.tier1.plugin_checks._skill_checks", lambda: {"version": skill_validator})
+    run_plugin_validation(root, options=PrivatePluginChecks(checks=frozenset({"security", "version"})))
+    assert sorted(observed) == sorted(
+        [
+            ("partition", "root-probe.sh", expected_mode),
+            ("partition", "probe.sh", expected_mode),
+            ("snapshot", "probe.sh", expected_mode),
+        ]
+    )

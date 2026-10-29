@@ -1,8 +1,9 @@
-# Reusable GitHub Actions CI
+# Reusable repository CI
 
-This directory supplies the public GitHub CI runtime and consumer
-onboarding templates. Start with [repository integration](../docs/repository-integration.mdx)
-for GitHub Actions or GitLab CI/CD.
+This directory supplies the shared Tier 1 CI runtime and consumer onboarding
+templates. Start with [repository integration](../docs/repository-integration.mdx)
+for GitHub Actions or GitLab CI/CD. The GitLab adapter is in `ci/gitlab/`;
+the image and report generation are shared by both platforms.
 The upstream workflow release and public package must be reviewed and published
 before consumers can use this path. Source templates are not runnable while
 `RELEASE_WORKFLOW_SHA` or `RELEASE_IMAGE_DIGEST` remains unresolved.

@@ -18,6 +18,18 @@ Agent skills are folders of instructions and supporting files defined by the
 [Agent Skills specification](https://agentskills.io/). SkillEvaluator is part of
 the [NVIDIA Verified Skills pipeline](https://github.com/NVIDIA/skills).
 
+## Bring skill evaluation to your repository
+
+Add SkillEvaluator to GitHub or GitLab with a reusable CI configuration and
+point it at your skill directories. Pull requests and merge requests evaluate
+changed skills automatically; the CI job shows the results and retains detailed
+reports. You do not need to write evaluation code or install the scanners.
+
+The first release runs Tier 1 quality and security checks, including
+SkillSpector. Choose a minimum quality score to fit your team. The ready-to-use
+configuration requires an official CI image release; see
+[repository integration](docs/repository-integration.mdx) for setup and availability.
+
 ## Quickstart
 
 Choose a starting path. Both use the bundled `text-analyzer` skill; try your own afterward.
@@ -159,7 +171,7 @@ SkillEvaluator release or commit. See [CITATION.cff](CITATION.cff).
 See [the documentation](https://docs.nvidia.com/skills/skillevaluator/) for
 setup, tier guides, reports, CI integration, CLI reference, and
 [performance dashboard](docs/reports.mdx#performance-dashboard).
-For reusable CI, see [GitHub Actions](docs/github-actions.mdx).
+For reusable CI, see [repository integration](docs/repository-integration.mdx).
 
 ## Installation and third-party software
 

@@ -14,6 +14,10 @@ on:
         description: Newline-separated skill directories or roots containing skills
         type: string
         default: skills
+      min-score:
+        description: Minimum Tier 1 quality score from 0 to 100
+        type: number
+        default: 70
       llm:
         description: Enable additional LLM security, verification, and rubric checks
         type: boolean
@@ -72,6 +76,7 @@ jobs:
           DIFF_BASE_SHA: ${{ github.event.pull_request.base.sha }}
           DIFF_HEAD_SHA: ${{ github.event.pull_request.head.sha || github.sha }}
           SKILL_PATHS: ${{ inputs.paths }}
+          MIN_SCORE: ${{ inputs.min-score }}
           LLM_ENABLED: ${{ inputs.llm }}
           LLM_PROVIDER: ${{ inputs.llm-provider }}
           LLM_MODEL: ${{ inputs.llm-model }}
@@ -98,7 +103,7 @@ jobs:
             --cap-drop ALL --security-opt no-new-privileges \
             --mount "type=bind,src=$GITHUB_WORKSPACE,dst=/workspace,readonly" \
             --mount "type=bind,src=$RUNNER_TEMP/skill-reports,dst=/reports" \
-            --env SKILL_PATHS --env LLM_ENABLED --env LLM_PROVIDER --env LLM_MODEL "${llm_secret_args[@]}" \
+            --env SKILL_PATHS --env MIN_SCORE --env LLM_ENABLED --env LLM_PROVIDER --env LLM_MODEL "${llm_secret_args[@]}" \
             --env SCAN_MODE --env DIFF_BASE_SHA --env DIFF_HEAD_SHA \
             --env CALLER_WORKFLOW_SHA \
             --env GITHUB_ACTIONS --env REPORT_IMAGE --env REPORT_URL --env REPORT_RUN_URL --env REPORT_COMMIT \

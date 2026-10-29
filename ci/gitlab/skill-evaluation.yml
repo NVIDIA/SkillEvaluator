@@ -1,0 +1,66 @@
+# SPDX-License-Identifier: Apache-2.0
+# Reusable GitLab job. Include a reviewed commit and provide SKILL_EVAL_IMAGE.
+# Configure merge-request rules in the root .gitlab-ci.yml; GitLab requires it.
+variables:
+  SKILL_EVAL_PATHS: "skills"
+  SKILL_EVAL_SCAN_MODE: "auto"
+  SKILL_EVAL_MIN_SCORE: "70"
+
+skill-evaluation:
+  stage: test
+  image:
+    name: "$SKILL_EVAL_IMAGE"
+    entrypoint: [""]
+  variables:
+    GIT_DEPTH: "0"
+    LLM_ENABLED: "false"
+  script:
+    - |
+      set -eu
+      artifact_dir="$CI_PROJECT_DIR/skill-evaluator-report"
+      if [ -e "$artifact_dir" ] || [ -L "$artifact_dir" ]; then
+        echo "skill-evaluator-report already exists; choose a clean checkout for the report." >&2
+        exit 1
+      fi
+      reports_dir="$(mktemp -d /tmp/skillevaluator-reports.XXXXXX)"
+      trap 'rm -rf "$reports_dir"' EXIT
+      export SKILL_PATHS="$SKILL_EVAL_PATHS"
+      export MIN_SCORE="$SKILL_EVAL_MIN_SCORE"
+      export REPORT_RUN_URL="${CI_JOB_URL:-}"
+      export REPORT_COMMIT="${CI_COMMIT_SHA:-}"
+      export REPORT_IMAGE="$SKILL_EVAL_IMAGE"
+      case "$SKILL_EVAL_SCAN_MODE" in
+        auto)
+          if [ "${CI_PIPELINE_SOURCE:-}" = "merge_request_event" ]; then
+            export SCAN_MODE=changed
+          else
+            export SCAN_MODE=all
+          fi
+          ;;
+        all|changed) export SCAN_MODE="$SKILL_EVAL_SCAN_MODE" ;;
+        *) echo "SKILL_EVAL_SCAN_MODE must be auto, all, or changed." >&2; exit 1 ;;
+      esac
+      if [ "$SCAN_MODE" = changed ]; then
+        if [ "${CI_PIPELINE_SOURCE:-}" != "merge_request_event" ] || [ "${CI_MERGE_REQUEST_EVENT_TYPE:-detached}" != detached ]; then
+          echo "Changed-skill selection requires a detached merge-request pipeline." >&2
+          exit 1
+        fi
+        export DIFF_BASE_SHA="${CI_MERGE_REQUEST_DIFF_BASE_SHA:-}"
+        export DIFF_HEAD_SHA="${CI_COMMIT_SHA:-}"
+      fi
+      set +e
+      python /opt/skillevaluator/ci/run_tier1.py --workspace "$CI_PROJECT_DIR" --reports "$reports_dir"
+      result=$?
+      set -e
+      mkdir "$artifact_dir"
+      cp -R "$reports_dir/." "$artifact_dir/"
+      exit "$result"
+  artifacts:
+    when: always
+    paths:
+      - skill-evaluator-report/
+    expire_in: 14 days
+  rules:
+    - if: '$CI_PIPELINE_SOURCE == "merge_request_event"'
+    - if: '$CI_COMMIT_BRANCH == $CI_DEFAULT_BRANCH'
+    - if: '$CI_PIPELINE_SOURCE == "web"'

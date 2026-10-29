@@ -96,3 +96,11 @@ def test_smoke_container_executes_with_the_same_hardening(tmp_path, monkeypatch)
     assert args[args.index("--security-opt") + 1] == "no-new-privileges"
     environment = [args[index + 1] for index, arg in enumerate(args) if arg == "--env"]
     assert {entry.split("=", 1)[0] for entry in environment}.issuperset({"SCAN_MODE", "DIFF_BASE_SHA", "DIFF_HEAD_SHA"})
+
+
+def test_quality_threshold_is_wired_into_the_container():
+    workflow = yaml.load((ROOT / ".github/workflows/evaluate-skills.yml").read_text(), Loader=yaml.BaseLoader)
+    assert workflow["on"]["workflow_call"]["inputs"]["min-score"]["default"] == "70"
+    scan = next(step for step in workflow["jobs"]["tier1"]["steps"] if step.get("name") == "Evaluate selected skills")
+    assert scan["env"]["MIN_SCORE"] == "${{ inputs.min-score }}"
+    assert "--env MIN_SCORE" in scan["run"]

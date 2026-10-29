@@ -224,3 +224,20 @@ def test_failed_and_incomplete_counts_agree_across_all_surfaces(tmp_path):
     page = (tmp_path / "index.html").read_text()
     assert "<strong>1</strong><span>Failed</span>" in page
     assert "<strong>1</strong><span>Incomplete</span>" in page
+
+
+def test_native_overview_displays_quality_threshold_failure_not_an_advisory(tmp_path):
+    result = ValidationResult(validator_name="QUALITY", validator_description="Quality score")
+    result.add_finding(Finding(category="QUALITY", severity="medium", check_name="version", message="Optional version missing", file_path="skills/example/SKILL.md"))
+    result.fail_gate("Quality score 98.2/100 is below the required 100/100")
+    payload = json.loads(JSONReporter(include_timestamp=False).render_all([result]))
+    directory = tmp_path / "skill-001"
+    directory.mkdir()
+    (directory / "skillevaluator-tier1.json").write_text(json.dumps(payload))
+    row = {"path": "skills/example", "report_dir": "skill-001", "exit_code": 1, "passed": False}
+    row.update({key: payload[key] for key in ("overall_status", "incomplete_scans", "total_validators", "total_errors", "total_warnings", "severity_counts")})
+    render_native_reports(tmp_path, _summary([row]), {})
+    index = (tmp_path / "index.html").read_text()
+    attention = index.split('<section class="attention">', 1)[1].split("</section>", 1)[0]
+    assert "below the required 100/100" in attention
+    assert "Optional version missing" not in attention

@@ -196,7 +196,7 @@ def render_native_reports(reports: Path, summary: dict, context: dict) -> dict[s
         '<aside class="rail"><div class="brand"><span class="mark"></span>SkillEvaluator</div><p>Evaluation reports</p><a href="#skills" aria-current="page">All skills</a></aside><main>',
         '<header class="hero"><div><div class="eyebrow">Evaluation report · Tier 1</div><h1>Skill scan results</h1>',
         f'<span class="status {verdict_class}">{verdict}</span><p class="muted">Review findings, quality dimensions, and scanner evidence for each skill.</p></div>',
-        f'<a class="button" href="{h(run_url)}">View workflow run ↗</a>' if run_url else "",
+        f'<a class="button" href="{h(run_url)}">View CI run ↗</a>' if run_url else "",
         '</header><div class="metrics">',
     ]
     for count, label in (
@@ -225,14 +225,9 @@ def render_native_reports(reports: Path, summary: dict, context: dict) -> dict[s
         if summary.get("error"):
             page.append(f"<p>{h(summary['error'])}</p>")
         for row, data, issue, _status, url, _quality in attention:
-            reasons = [
-                finding.get("message")
-                for result in data.get("results", [])
-                if not result.get("passed")
-                for finding in result.get("findings", [])
-                if finding.get("message")
-            ]
-            reason = issue or row.get("error") or next(iter(reasons), "Open the report to inspect the required checks.")
+            reason, _location, _fix = views._first_action(
+                {"row": row, "results": data.get("results", []), "issue": issue}
+            )
             label = f'<a href="{h(url)}">{h(row["path"])}</a>' if url else h(row["path"])
             page.append(f"<p><strong>{label}</strong><br>{h(str(reason)[:2000])}</p>")
         page.append("</section>")

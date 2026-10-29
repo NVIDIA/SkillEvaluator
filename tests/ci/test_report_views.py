@@ -781,3 +781,20 @@ def test_noop_requires_complete_consistent_selection_evidence(tmp_path, mutate):
     views.render_reports(tmp_path, summary, {})
     assert "NO SKILLS CHANGED" not in (tmp_path / "summary.md").read_text()
     assert "PASSED" not in compact_header((tmp_path / "summary.md").read_text())
+
+
+def test_quality_threshold_failure_is_not_replaced_by_advisory_finding(tmp_path):
+    result = {
+        "validator": "QUALITY",
+        "status": "failed",
+        "passed": False,
+        "summary": {"errors": 1, "warnings": 1, "checks_performed": 1},
+        "findings": [{"severity": "medium", "message": "Optional version missing", "suggestion": "Add a version"}],
+        "legacy": {"errors": ["Quality score 98.2/100 is below the required 100/100"], "warnings": []},
+        "gate_failures": ["Quality score 98.2/100 is below the required 100/100"],
+    }
+    summary, _ = example(tmp_path, result=result)
+    views.render_reports(tmp_path, summary, {})
+    for filename in ("summary.md", "details.md", "pr-comment.md"):
+        assert "below the required 100/100" in visible_markdown((tmp_path / filename).read_text())
+    assert "Optional version missing" not in visible_markdown((tmp_path / "summary.md").read_text())

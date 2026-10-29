@@ -45,12 +45,14 @@ def render_templates(output: Path, workflow_ref: str, image: str, repository: st
     receipt = {"repository": repository, "workflow_ref": workflow_ref, "image": image, "caller_blob": blob}
     (output / "release.json").write_text(json.dumps(receipt, indent=2) + "\n", encoding="utf-8")
     (output / "README.md").write_text(
-        "# GitHub Actions onboarding\n\n"
+        "# Repository CI onboarding\n\n"
         "Copy skill-checks.yml to .github/workflows/skill-checks.yml and set paths to your skill roots. "
         "The workflow and image pins are already filled in. No API key is needed.\n\n"
         "For optional hosted reports and PR comments, follow ci/README.md in the evaluator repository. "
         "Set YOUR_REPORT_BASE_URL in the publisher template. If you edit skill-checks.yml, update "
-        "trusted-caller-blobs using git hash-object .github/workflows/skill-checks.yml.\n",
+        "trusted-caller-blobs using git hash-object .github/workflows/skill-checks.yml.\n\n"
+        "For GitLab, merge gitlab-skill-checks.yml into your root .gitlab-ci.yml and set "
+        "SKILL_EVAL_PATHS. Its rules must remain in the root file to enable merge-request pipelines.\n",
         encoding="utf-8",
     )
     return receipt

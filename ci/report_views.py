@@ -383,6 +383,23 @@ def finding_repository_path(skill_path: object, file_path: object) -> str | None
     return str(path)
 
 
+def _issue_for_result(result: dict) -> tuple[object, dict]:
+    """Use an explicit failed gate before unrelated advisory findings."""
+    gates = _items(result.get("gate_failures"))
+    findings = [_dict(item) for item in _items(result.get("findings"))]
+    if gates:
+        for finding in findings:
+            message = finding.get("message")
+            if isinstance(message, str) and message and message in _text(gates[0]):
+                return gates[0], finding
+        return gates[0], {}
+    severity = {"critical": 0, "high": 1, "medium": 2, "low": 3, "info": 4}
+    findings.sort(key=lambda item: severity.get(_text(item.get("severity")).lower(), 5))
+    finding = findings[0] if findings else {}
+    errors = _items(_dict(result.get("legacy")).get("errors"))
+    return finding.get("message") or (errors[0] if errors else result.get("skip_reason")), finding
+
+
 def _first_action(model: dict) -> tuple[str, str, str]:
     """Select one recorded problem, preferring unavailable scans over findings."""
     row = model["row"]
@@ -411,12 +428,8 @@ def _first_action(model: dict) -> tuple[str, str, str]:
                 "",
                 "Check this validator's diagnostics and rerun after restoring the missing scan.",
             )
-        findings = [_dict(f) for f in _items(result.get("findings"))]
-        severity = {"critical": 0, "high": 1, "medium": 2, "low": 3, "info": 4}
-        findings.sort(key=lambda f: severity.get(_text(f.get("severity")).lower(), 5))
-        finding = findings[0] if findings else {}
-        errors = _items(legacy.get("errors"))
-        reason = finding.get("message") or (errors[0] if errors else "This validator failed without a recorded reason.")
+        reason, finding = _issue_for_result(result)
+        reason = reason or "This validator failed without a recorded reason."
         fix = (
             finding.get("suggestion")
             or "Open the full report and inspect this validator's diagnostics before rerunning."
@@ -624,10 +637,7 @@ def render_reports(reports: Path, summary: dict, context: dict, *, render_errors
             outcome = _status(result)
             if outcome not in {"FAIL", "INCOMPLETE", "UNKNOWN"}:
                 continue
-            findings = _items(result.get("findings"))
-            finding = _dict(findings[0]) if findings else {}
-            errors = _items(_dict(result.get("legacy")).get("errors"))
-            reason = finding.get("message") or (errors[0] if errors else result.get("skip_reason"))
+            reason, finding = _issue_for_result(result)
             reason = reason or "Execution evidence is incomplete; inspect the validator details."
             location = _text(finding.get("file_path"))
             if finding.get("line_number") is not None:
@@ -706,14 +716,10 @@ def render_reports(reports: Path, summary: dict, context: dict, *, render_errors
         markdown.extend(block)
         failures = [result for result in model["results"] if _status(result) in {"FAIL", "INCOMPLETE", "UNKNOWN"}]
         for result in failures:
-            findings = _items(result.get("findings"))
-            errors = _items(_dict(result.get("legacy")).get("errors"))
-            message = (
-                _dict(findings[0]).get("message") if findings else (errors[0] if errors else "See retained evidence.")
-            )
+            message, finding = _issue_for_result(result)
+            message = message or "See retained evidence."
             comments.append(f"**{_md(skill)} / {_md(result.get('validator'))}:** {_md(_text(message)[:2000])}")
-            if findings:
-                finding = _dict(findings[0])
+            if finding:
                 location = _text(finding.get("file_path"))
                 if finding.get("line_number") is not None:
                     location += ":" + _text(finding["line_number"])

@@ -1,7 +1,8 @@
 # Reusable GitHub Actions CI
 
 This directory supplies the public GitHub CI runtime and consumer
-onboarding templates. Start with the [short GitHub Actions guide](../docs/github-actions.mdx).
+onboarding templates. Start with [repository integration](../docs/repository-integration.mdx)
+for GitHub Actions or GitLab CI/CD.
 The upstream workflow release and public package must be reviewed and published
 before consumers can use this path. Source templates are not runnable while
 `RELEASE_WORKFLOW_SHA` or `RELEASE_IMAGE_DIGEST` remains unresolved.
@@ -173,7 +174,7 @@ then.
    being treated as an absent image.
 4. Select the reviewed immutable reusable-workflow/tools revision and the
    verified image digest. Use `ci/render_templates.py` to generate release
-   copies of the three files in `ci/templates/`, replacing
+   copies of the files in `ci/templates/`, replacing
    `RELEASE_WORKFLOW_SHA` and `RELEASE_IMAGE_DIGEST` with those identities.
    Follow the helper's current `--help` for its CLI. Reject unresolved release
    placeholders or mutable references in generated files. The consumer's Pages

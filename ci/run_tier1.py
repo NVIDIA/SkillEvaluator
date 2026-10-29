@@ -305,6 +305,10 @@ def run(
         if reports.is_relative_to(workspace):
             raise ConfigurationError("The report directory must be outside the read-only workspace.")
         env, llm = child_environment(environ)
+        score = environ.get("MIN_SCORE", "70")
+        if not score.isascii() or not score.isdigit() or len(score) > 3 or int(score) > 100:
+            raise ConfigurationError("MIN_SCORE must be an integer between 0 and 100.")
+        min_score = str(int(score))
         mode = environ.get("SCAN_MODE", "all")
         if mode not in {"all", "changed"}:
             raise ConfigurationError("SCAN_MODE must be all or changed.")
@@ -423,6 +427,8 @@ def run(
                     "--llm" if llm else "--no-llm",
                     "--profile",
                     "external",
+                    "--min-score",
+                    min_score,
                     "-r",
                     "json,html,markdown,sarif",
                     "-o",

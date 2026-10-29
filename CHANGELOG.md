@@ -6,6 +6,8 @@ All notable changes to SkillEvaluator are documented in this file.
 
 ### Added
 
+- Add reusable GitLab CI onboarding and configurable Tier 1 quality thresholds,
+  alongside a shared repository integration guide.
 - Reusable GitHub Actions onboarding for complete Tier 1 checks, with
   pinned runtime/workflow consumer templates, affected-skill PR selection,
   optional hosted reports and updated PR feedback. The new guide separates

@@ -52,7 +52,8 @@ _ASKS_FOR_INPUT = re.compile(
     r"send me (?:these|the following|a few|the details))"
 )
 _STOPPED_FOR_INPUT = re.compile(
-    r"(?i)\b(?:asked|request(?:ed|s)|clarification|does not exist|did not exist|not found|no [^.]{0,40} (?:was |were )?found)\b"
+    r"(?i)\b(?:asked|requested) (?:the user|for|additional|more|further|clarification)|\bclarifying questions?\b|"
+    r"\b(?:does|did) not exist in the workspace|\bnot found in the workspace|\bno [^.]{0,40} in the workspace"
 )
 _SAFE_TRIAL = re.compile(r"^[A-Za-z0-9._-]+$")
 _ENV_ERROR = re.compile(
@@ -575,7 +576,12 @@ def render_case_summary(
         for i, fix in enumerate(fixes, 1):
             head = Text(f" {i}. ", style="bold")
             head.append(safe(fix["case"]), style="bold cyan")
-            lost = f" · lost {fix['attempts_lost']} attempt(s)" if fix["attempts_lost"] else ""
+            n = fix["attempts_lost"]
+            lost = (
+                (f" · {n} attempt(s) missed the goal" if fix["kind"] == "goal not met" else f" · lost {n} attempt(s)")
+                if n
+                else ""
+            )
             head.append(f"  [{safe(fix['kind'])}] · {safe(fix['scope'])}{lost}", style="dim")
             console.print(head)
             console.print(Text(f"    what happened: {safe(fix['what'])}"))
@@ -757,7 +763,7 @@ def _run_error(trial_dir: Path, run_dir: Path) -> str:
 
 def _diagnose_agent_case(
     run_dir: Path, agent_name: str, agent: Mapping[str, Any], case_id: str
-) -> dict[str, Any] | None:
+) -> list[dict[str, Any]]:
     with_case = _cases(agent, "with_skill").get(case_id)
     with_marks, without_marks = _marks(with_case), _marks(_cases(agent, "without_skill").get(case_id))
     wp, wn = _attempt_rate(with_marks)
@@ -788,8 +794,9 @@ def _diagnose_agent_case(
         and wn
         and bp / bn > wp / wn
     )
+    goal = _goal_not_met(run_dir, agent_name, case_id, with_case)
     if not lost and not hurts and not not_used:
-        return _goal_not_met(run_dir, agent_name, case_id, with_case)
+        return [goal] if goal else []
     rewards = [
         (r, d) for _, d in failed_trials if isinstance(r := _load_json(d / "reward.json", root=run_dir), Mapping)
     ]
@@ -822,7 +829,7 @@ def _diagnose_agent_case(
     else:
         kind = "skill"
         what = "; ".join(r for r, _ in reasons.most_common(2)) or "attempts scored below the pass threshold"
-    return {
+    failure = {
         "case": case_id,
         "agent": agent_name,
         "kind": kind,
@@ -833,6 +840,7 @@ def _diagnose_agent_case(
         "final_message": _final_message(failed_trials[0][1], run_dir) if failed_trials else "",
         "evidence": _evidence(run_dir, evidence_dir, run_error=kind == "run error"),
     }
+    return [failure, goal] if goal else [failure]
 
 
 def _goal_not_met(
@@ -1002,6 +1010,7 @@ def _merge_across_cases(issues: list[dict[str, Any]], n_cases: int) -> list[dict
         else:
             seen["cases"].append(issue["case"])
             seen["attempts_lost"] += issue["attempts_lost"]
+            seen["asks_for_input"] = bool(seen.get("asks_for_input") and issue.get("asks_for_input"))
             seen["reasons"] += [r for r in issue["reasons"] if r not in seen["reasons"]]
     for issue in merged.values():
         if len(issue["cases"]) > 1:
@@ -1042,12 +1051,13 @@ def what_to_fix(
     grouped: dict[tuple[str, str], list[dict[str, Any]]] = {}
     for case_id in _case_ids(agents):
         for name, agent in agents.items():
-            if issue := _diagnose_agent_case(run_dir, name, agent, case_id):
+            for issue in _diagnose_agent_case(run_dir, name, agent, case_id):
                 grouped.setdefault((case_id, issue["kind"]), []).append(issue)
     issues = []
     for items in grouped.values():
         names = [item["agent"] for item in items]
         merged = dict(items[0])
+        merged["asks_for_input"] = all(item.get("asks_for_input") for item in items)
         merged.update(
             scope=", ".join(names) + " only"
             if len(agents) > 1 and len(names) < len(agents)

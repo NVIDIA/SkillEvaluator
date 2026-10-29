@@ -563,3 +563,70 @@ def test_saved_fixes_do_not_follow_a_symlink(tmp_path: Path) -> None:
     output = render_result({"execution_status": "succeeded", "run_dir": str(run), "agents": {"a": agent}})
     assert "private-external-case" not in output
     assert outside.read_text() == content
+
+
+def _goal_miss(run_dir: Path, agent: str, trial: str, end_state: str) -> None:
+    _trial(run_dir, agent, trial, {"goal_accuracy": 0.0, "details": {"goal_accuracy": {"end_state": end_state}}})
+
+
+def test_goal_not_met_uses_the_canned_fix_only_when_the_agent_stopped_for_input(tmp_path: Path) -> None:
+    outcomes = {
+        "The agent made HTTP requests to the API and returned the wrong totals.": False,
+        "The agent fixed an import that was not found and wrote the report.": False,
+        "The agent asked the user for the report file.": True,
+        "report.pdf does not exist in the workspace, so nothing was extracted.": True,
+    }
+    for index, (outcome, stopped) in enumerate(outcomes.items()):
+        run_dir = tmp_path / str(index)
+        _goal_miss(run_dir, "a", "x0", outcome)
+
+        [fix] = what_to_fix(
+            {"agents": {"a": _agent({"c1": _case(True, prefix="x")}, {})}}, run_dir=run_dir, use_llm=False
+        )
+
+        assert fix["asks_for_input"] is stopped, outcome
+        assert fix["action"].startswith("The agent stopped to ask for input") is stopped, outcome
+
+
+def test_merged_goal_issue_keeps_the_canned_fix_only_if_every_agent_stopped_for_input(tmp_path: Path) -> None:
+    agents = {name: _agent({"c1": _case(True, prefix=name)}, {}) for name in ("a", "b")}
+    _goal_miss(tmp_path, "a", "a0", "The agent asked for the sprint details.")
+    _goal_miss(tmp_path, "b", "b0", "The agent wrote the wrong section headings.")
+
+    [fix] = what_to_fix({"agents": agents}, run_dir=tmp_path, use_llm=False)
+
+    assert (fix["scope"], fix["asks_for_input"]) == ("all agents", False)
+
+
+def test_case_with_a_failure_also_reports_passes_that_missed_the_goal(tmp_path: Path) -> None:
+    agents = {"a": _agent({"c1": _case(True, False, prefix="m")}, {})}
+    _goal_miss(tmp_path, "a", "m0", "The agent asked for the data.")
+    _trial(tmp_path, "a", "m1", _reward(True, "wrong totals"))
+
+    kinds = {f["kind"] for f in what_to_fix({"agents": agents}, run_dir=tmp_path, use_llm=False)}
+
+    assert kinds == {"skill", "goal not met"}
+
+
+def test_fixes_redact_environment_secrets(tmp_path: Path, monkeypatch) -> None:
+    secret = "review-fake-goal-credential-5521"
+    monkeypatch.setenv("SKILL_EVAL_LLM_API_KEY", secret)
+    agents = {"a": _agent({"c1": _case(True, prefix="s")}, {})}
+    _goal_miss(tmp_path, "a", "s0", f"The agent printed {secret} and asked for the file.")
+
+    [fix] = what_to_fix({"agents": agents}, run_dir=tmp_path, use_llm=False)
+
+    assert secret not in json.dumps(fix)
+    assert "<redacted>" in fix["what"]
+
+
+def test_goal_not_met_heading_counts_attempts_that_missed_the_goal() -> None:
+    result = {"agents": {"a": _agent({"c1": _case(True)}, {"c1": _case(False)})}}
+    fix = {"case": "c1", "kind": "goal not met", "scope": "a", "attempts_lost": 2, "what": "w", "action": "f"}
+    console = Console(record=True, width=120)
+
+    render_case_summary(result, console=console, fixes=[fix])
+
+    text = console.export_text()
+    assert "2 attempt(s) missed the goal" in text
+    assert "lost 2" not in text

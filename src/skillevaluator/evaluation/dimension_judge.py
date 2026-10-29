@@ -392,8 +392,10 @@ def _strongest_signal(parts: list[str], *, weakest: bool = False) -> str | None:
     scored: list[tuple[float, str]] = []
     for entry in parts:
         name, sep, raw = entry.partition("=")
+        if not sep:
+            continue
         try:
-            scored.append((float(raw), name)) if sep else None
+            scored.append((float(raw), name))
         except ValueError:
             continue
     if not scored:

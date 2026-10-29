@@ -24,6 +24,7 @@ contributors making non-trivial edits.
 - `reports.mdx` — report formats, scores, and the results-on-disk contract
 - `performance-dashboard.mdx` — compare saved Tier 3 scores and resource use
 - `benchmark-rollout.mdx` — regenerating and promoting `BENCHMARK.md` cards
+- `github-actions.mdx` — reusable Tier 1 onboarding and optional hosted PR feedback
 - `ci-integration.mdx` — exit codes, GitHub Actions recipe, progressive adoption
 - `cli-reference.mdx` — every command and flag
 - `environment-variables.mdx` — variable-by-variable inventory

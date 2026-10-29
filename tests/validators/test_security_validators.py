@@ -181,14 +181,14 @@ description: Test skill
 ---
 # Test
 """)
-        (skill_dir / "requirements.txt").write_text("requests>=2.28.0\nflask>=2.0.0\n")
+        (skill_dir / "requirements.txt").write_text("requests==2.28.0\nflask==2.0.0\n")
 
         validator = DependencySecurityValidator(use_safety=False)
 
         mock_result = MagicMock()
         mock_result.success = True
         mock_result.exit_code = 0
-        mock_result.stdout = '{"dependencies": [], "fixes": []}'
+        mock_result.stdout = '{"dependencies": [{"name": "requests", "version": "2.28.0", "vulns": []}, {"name": "flask", "version": "2.0.0", "vulns": []}], "fixes": []}'
         mock_result.error_message = None
 
         with (
@@ -252,7 +252,7 @@ description: Test
 ---
 # Test
 """)
-        (skill_dir / "requirements.txt").write_text("requests>=2.28.0\n")
+        (skill_dir / "requirements.txt").write_text("requests==2.28.0\n")
 
         validator = DependencySecurityValidator()
 
@@ -302,9 +302,7 @@ description: Test
             ),
             '{"dependencies": [{"name": "requests", "version": "2.32.0", '
             '"vulns": [{"id": "PYSEC-1", "fix_versions": [], '
-            '"aliases": [{"cvss": {"score": '
-            + "9" * 5000
-            + "}}]}]}]}]}",
+            '"aliases": [{"cvss": {"score": ' + "9" * 5000 + "}}]}]}]}]}",
         ],
         ids=[
             "non-json",
@@ -411,7 +409,7 @@ description: Test
         mock_tool_available,
     ):
         """pip-audit skip entries describe missing coverage, not a completed scan."""
-        (sample_skill_dir / "requirements.txt").write_text("local-package @ file:///tmp/local-package\n")
+        (sample_skill_dir / "requirements.txt").write_text("local-package==1.0\n")
         tool_result = ToolResult(
             success=True,
             stdout=(

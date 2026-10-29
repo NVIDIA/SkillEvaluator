@@ -355,3 +355,107 @@ def test_database_password_is_collected_in_decoded_form():
 
     matched = "postgres://user:encoded%2Fpassword@host.local/db"
     assert "encoded/password" in sensitive_values("database_credentials", matched)
+
+
+def _assert_no_fragment(value: str | bytes, secret: str) -> None:
+    text = value.decode() if isinstance(value, bytes) else value
+    # Upstream text can start, end or be escaped inside a value. No window of
+    # eight characters may remain in any encoding that a report uses.
+    for start in range(len(secret) - 7):
+        window = secret[start : start + 8]
+        forms = {
+            window,
+            html.escape(window),
+            json.dumps(window)[1:-1],
+            quote(window, safe=""),
+            html.escape(window, quote=False).replace("|", "&#124;").replace("`", "&#96;"),
+        }
+        if any(form in text for form in forms):
+            pytest.fail("A fragment of a synthetic credential was present in a shared output.")
+
+
+def _publish(tmp_path: Path, monkeypatch, reports: Path) -> tuple[Path, Path]:
+    spec = importlib.util.spec_from_file_location("publisher_fixtures", ROOT / "tests/ci/test_publish_reports.py")
+    fixtures = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(fixtures)
+    archive = io.BytesIO()
+    with zipfile.ZipFile(archive, "w") as zipped:
+        for path in reports.rglob("*"):
+            if path.is_file():
+                zipped.write(path, path.relative_to(reports).as_posix())
+
+    class ArtifactAPI(fixtures.FakeAPI):
+        def download_artifact(self, _artifact_id):
+            return archive.getvalue()
+
+    monkeypatch.setenv("TRUSTED_EVALUATOR_SHA", "c" * 40)
+    monkeypatch.setenv("TRUSTED_CALLER_BLOBS", "b" * 40)
+    monkeypatch.syspath_prepend(str(ROOT / "ci"))
+    site, feedback = tmp_path / "site", tmp_path / "feedback"
+    fixtures.publisher.publish(
+        ArtifactAPI(record={**fixtures.run_record(), "conclusion": "failure"}),
+        "owner/consumer",
+        123,
+        "https://owner.github.io/consumer",
+        site,
+        feedback,
+    )
+    return site, feedback
+
+
+@pytest.mark.parametrize("mark", ["\u200b", "\ufeff", "\u00a0"])
+def test_preflight_matches_values_echoed_with_an_invisible_character_marker(tmp_path, mark):
+    from ci.secret_redaction import collect_sensitive_values
+
+    from skillevaluator.utils.secret_redaction import Redactor
+    from skillevaluator.validators.unicode_smuggle import UnicodeSmuggleValidator
+
+    skill = _skill(tmp_path)
+    leading, middle = "nvapi-" + "Hj6" * 16, "Lm3" * 4 + "Pq2" * 6
+    short = "Kp4" * 4
+    lines = [
+        'NVIDIA_API_KEY = "' + mark + leading + '"',
+        'DB_PASSWORD = "' + middle[:12] + mark + middle[12:] + '"',
+        # A short password is matched only as a whole value.
+        'conn_string = "Server=db.local;password=' + mark + short + ';"',
+    ]
+    (skill / "source.py").write_text("\n".join(lines) + "\n")
+    redactor = Redactor(collect_sensitive_values(skill))
+    for line in lines:
+        # The Unicode check echoes the line with the character shown as a marker.
+        safe = redactor.text(UnicodeSmuggleValidator._safe_line_content(line))
+        _assert_no_fragment(safe, leading)
+        _assert_no_fragment(safe, middle)
+        _assert_no_fragment(safe, short)
+
+
+def test_invisible_character_in_credential_never_reaches_reports_or_pages(tmp_path, capsys, monkeypatch):
+    from skillevaluator.validators.unicode_smuggle import UnicodeSmuggleValidator
+
+    workspace, reports = tmp_path / "workspace", tmp_path / "reports"
+    skill = _skill(workspace)
+    value = "nvapi-" + "Hj6" * 16
+    (skill / "source.py").write_text('NVIDIA_API_KEY = "\u200b' + value + '"\n')
+
+    def fake_cli(argv, **kwargs):
+        target = Path(argv[argv.index("-o") + 1])
+        results = [
+            SecurityValidator(use_llm=False).validate_pii_only(Path(argv[2])),
+            UnicodeSmuggleValidator().validate(Path(argv[2])),
+        ]
+        for result, name in zip(results, ("PII Scan", "Unicode Smuggling"), strict=True):
+            result.validator_name = name
+            result.validator_description = name
+        assert any(finding.line_content for finding in results[1].findings)
+        (target / "skillevaluator-tier1.json").write_text(JSONReporter(include_timestamp=False).render_all(results))
+        return subprocess.CompletedProcess(argv, 1)
+
+    environment = {"SKILL_PATHS": "skills", "GITHUB_ACTIONS": "true"}
+    assert runner.run(workspace, reports, environment, execute=fake_cli) == 1
+    _assert_no_fragment(capsys.readouterr().out, value)
+    site, feedback = _publish(tmp_path, monkeypatch, reports)
+    for directory in (reports, site, feedback):
+        for path in directory.rglob("*"):
+            if path.is_file():
+                _assert_no_fragment(path.read_bytes(), value)
+    assert (site / "runs/123/1/skill-001/skillevaluator-tier1.html").is_file()

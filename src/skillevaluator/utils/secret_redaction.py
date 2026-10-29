@@ -8,6 +8,7 @@ from __future__ import annotations
 import html
 import json
 import re
+from itertools import groupby
 from urllib.parse import quote, unquote, urlsplit
 
 SENSITIVE_PII_CATEGORIES = frozenset(
@@ -45,11 +46,29 @@ def sensitive_values(category: str, matched: str, line: str = "") -> set[str]:
     return {value for value in values if value}
 
 
+def _invisible(character: str) -> bool:
+    # The Unicode check echoes these characters as U+2423 in line content.
+    return not character.isprintable() and character not in " \t\r\n"
+
+
+def _visible_forms(token: str) -> set[str]:
+    """Add the forms another check can echo for a value with invisible characters."""
+    if not any(_invisible(character) for character in token):
+        return {token}
+    visible = "".join(character for character in token if not _invisible(character))
+    if len(visible) < 8:
+        return {token}
+    forms = {token, visible, "".join("\u2423" if _invisible(character) else character for character in token)}
+    pieces = ("".join(group) for hidden, group in groupby(token, key=_invisible) if not hidden)
+    forms.update(piece for piece in pieces if len(piece) >= 8)
+    return forms
+
+
 def variants(tokens: set[str]) -> tuple[str, ...]:
     """Include encoded values and truncated prefixes of credential literals."""
     encoded: set[str] = set()
     pattern_size = 0
-    for token in tokens:
+    for token in {form for value in tokens for form in _visible_forms(value)}:
         forms = {
             token,
             html.escape(token),

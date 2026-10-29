@@ -19,12 +19,15 @@ import threading
 import time
 from pathlib import Path
 
-from skillevaluator.provider_config import CHAT_DEFAULT_MODELS
+from skillevaluator.provider_config import CHAT_DEFAULT_MODELS, OPENCODE_OPENAI_DEFAULT_MODEL
 from skillevaluator.studio.store import IDENTIFIER, Workspace, copy_source, new_id, now, source_hash, write_json
 
 PROVIDER_KEYS = {"nv_build": "NVIDIA_API_KEY", "openai": "OPENAI_API_KEY", "anthropic": "ANTHROPIC_API_KEY"}
 # Public free prototyping endpoint; catalog checked 2026-10-25.
-DEFAULT_MODELS = CHAT_DEFAULT_MODELS | {"nv_build": "nvidia/nemotron-3.5-lightning-30b-a3b"}
+DEFAULT_MODELS = CHAT_DEFAULT_MODELS | {
+    "nv_build": "nvidia/nemotron-3.5-lightning-30b-a3b",
+    "openai": OPENCODE_OPENAI_DEFAULT_MODEL,
+}
 TERMINAL = {"succeeded", "failed", "cancelled", "interrupted"}
 ANSI = re.compile(r"\x1b\[[0-?]*[ -/]*[@-~]")
 SENSITIVE = re.compile(
@@ -290,6 +293,7 @@ class Studio:
             provider_key = self.keys.get(provider_name) or os.environ.get(PROVIDER_KEYS[provider_name])
         options = self._options(payload, default_model)
         reference = None
+        needs_editor = False
         if action == "improve":
             configuration = payload.get("improvement", {})
             if not isinstance(configuration, dict) or set(configuration) - {
@@ -314,6 +318,10 @@ class Studio:
             ready = improvements.readiness(self.workspace, discovery_id, skill_id)
             if configuration["mode"] != "export" and not ready["eligible"]:
                 raise ValueError(" ".join(ready["reasons"]))
+            feedback = ready["signals_summary"]
+            needs_editor = bool(
+                feedback["findings"] or (configuration["include_agent_observations"] and feedback["observations"])
+            )
             extra = {"skill_id": skill_id, "discovery_job_id": discovery_id, "improvement": configuration}
         if action == "evaluate" and payload.get("validation_of"):
             before_id, before, reference = improvements.validation_reference(
@@ -341,7 +349,7 @@ class Studio:
             (action == "draft" and not options["no_llm"])
             or action == "evaluate"
             or (action == "check" and (options["tier1_llm"] or options["dedup"]))
-            or (action == "improve" and extra["improvement"]["mode"] == "llm")
+            or (action == "improve" and extra["improvement"]["mode"] == "llm" and needs_editor)
         )
         if needs_provider and not provider_key:
             raise ValueError("Set a provider key first. Starter drafts and static scans work without one.")

@@ -6,6 +6,7 @@
 from __future__ import annotations
 
 import json
+import stat
 from pathlib import Path
 from typing import TYPE_CHECKING, Any
 
@@ -62,7 +63,9 @@ def evaluation_run(workspace: Workspace, job_id: str, *, skill_id: str | None = 
 def same_package(left: Path, right: Path) -> bool:
     from skillevaluator.tier3.improve import snapshot_tree
 
-    return snapshot_tree(left, include_generated=True) == snapshot_tree(right, include_generated=True)
+    return stat.S_IMODE(left.stat().st_mode) == stat.S_IMODE(right.stat().st_mode) and snapshot_tree(
+        left, include_generated=True
+    ) == snapshot_tree(right, include_generated=True)
 
 
 def copy_package(source: Path, destination: Path) -> None:
@@ -123,6 +126,28 @@ def proposal(workspace: Workspace, proposal_job_id: str) -> tuple[Path, dict, di
     return folder / "improvement", metadata, result
 
 
+def require_current_verifier(run: Path, source: Path) -> None:
+    """Reject an already-incomparable candidate run before starting an agent."""
+    from tempfile import TemporaryDirectory
+
+    from skillevaluator.tier3.harbor.adapter import _copy_custom_grader, _copy_verifier, _evaluator_tests_dir
+    from skillevaluator.tier3.improve import retained_task_roots, snapshot_tree
+
+    with TemporaryDirectory(prefix="skillevaluator-verifier-") as directory:
+        task = Path(directory)
+        _copy_verifier(task)
+        _copy_custom_grader(task, source, "default")
+        expected = snapshot_tree(_evaluator_tests_dir(task), include_generated=True)
+        for retained in retained_task_roots(run):
+            payload = _evaluator_tests_dir(retained)
+            # Native custom-only tasks may use entirely authored verification.
+            if payload.exists() and snapshot_tree(payload, include_generated=True) != expected:
+                raise ValueError(
+                    "The evaluator changed since the original run. Evaluate the original skill again "
+                    "before testing this proposal so both runs use the same checks."
+                )
+
+
 def validation_reference(
     workspace: Workspace, proposal_job_id: str, candidate_id: str, before_job_id: str | None
 ) -> tuple[str, dict, Path]:
@@ -151,7 +176,9 @@ def validation_reference(
         or not _source_matches(run, native_candidate.name, view["receipt"]["runtime_digest"], identities)
     ):
         raise ValueError("Choose a complete original validation run with the proposal's original runtime source.")
-    return before_job_id, before, job_source(folder, request)
+    source = job_source(folder, request)
+    require_current_verifier(run, source)
+    return before_job_id, before, source
 
 
 def freeze_evaluation(reference: Path, destination: Path) -> None:

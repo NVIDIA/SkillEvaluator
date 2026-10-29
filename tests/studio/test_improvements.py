@@ -119,6 +119,11 @@ def test_readiness_checks_current_identity_and_counts_only_discovery(retained):
     )
     ready = improvements.readiness(workspace, job_id, skill["id"])
     assert ready["eligible"] and ready["signals_summary"] == {"cases": 1, "findings": 1, "observations": 0}
+    current = workspace.directory(skill["id"])
+    original_mode = current.stat().st_mode
+    current.chmod(original_mode ^ 0o010)
+    assert not improvements.readiness(workspace, job_id, skill["id"])["source_matches"]
+    current.chmod(original_mode)
     other = workspace.sample()
     assert not improvements.readiness(workspace, job_id, other["id"])["eligible"]
     cases = [
@@ -191,6 +196,61 @@ def test_native_noop_keeps_original_without_importing_identical_candidate(retain
     assert result["receipt"]["status"] == "unchanged"
     assert result["receipt"]["editor_invoked"] is False
     assert result["candidate_id"] is None and len(workspace.list()) == count
+
+
+@pytest.mark.parametrize(
+    "findings,observations,include,requires_key",
+    [(0, 0, False, False), (0, 1, False, False), (0, 1, True, True), (1, 0, False, True)],
+)
+def test_noop_dispatch_needs_a_key_only_when_editor_has_feedback(
+    retained, monkeypatch, findings, observations, include, requires_key
+):
+    from skillevaluator.studio.jobs import PROVIDER_KEYS
+
+    for name in PROVIDER_KEYS.values():
+        monkeypatch.delenv(name, raising=False)
+    workspace, skill, discovery_id, _source, signals = retained
+    attempt = signals["agents"]["agent"]["cases"][0]["attempts"][0]
+    attempt["findings"] = attempt["findings"][:findings]
+    attempt["agent_observations"] = [{"id": "observation", "text": "Inspect the helper"}] * observations
+    dispatched = []
+
+    def stop_dispatch(*_args, **_kwargs):
+        dispatched.append(True)
+        raise OSError("Controlled dispatch interception")
+
+    monkeypatch.setattr("skillevaluator.studio.jobs.subprocess.Popen", stop_dispatch)
+    service = Studio(workspace.root)
+    with pytest.raises(ValueError, match="provider key" if requires_key else "could not start"):
+        service.start(
+            {
+                "action": "improve",
+                "skill_id": skill["id"],
+                "discovery_job_id": discovery_id,
+                "improvement": {"mode": "llm", "include_agent_observations": include},
+            }
+        )
+    assert bool(dispatched) is not requires_key
+
+
+def test_candidate_preflight_rejects_changed_or_missing_installed_verifier(retained):
+    from skillevaluator.tier3.harbor.adapter import _copy_custom_grader, _copy_verifier, _evaluator_tests_dir
+
+    workspace, skill, job_id, source, _signals = retained
+    run = improvements.evaluation_run(workspace, job_id, skill_id=skill["id"])
+    task = run / "_harbor-tasks/agent/with/case"
+    _copy_verifier(task)
+    _copy_custom_grader(task, source, "default")
+    improvements.require_current_verifier(run, source)
+    verifier = _evaluator_tests_dir(task) / "eval.py"
+    original = verifier.read_bytes()
+    verifier.write_bytes(original + b"\n# older or changed evaluator\n")
+    with pytest.raises(ValueError, match="Evaluate the original skill again"):
+        improvements.require_current_verifier(run, source)
+    verifier.write_bytes(original)
+    (_evaluator_tests_dir(task) / "deterministic_checks.py").unlink()
+    with pytest.raises(ValueError, match="Evaluate the original skill again"):
+        improvements.require_current_verifier(run, source)
 
 
 def test_managed_native_run_never_follows_an_outside_pointer(retained, tmp_path):

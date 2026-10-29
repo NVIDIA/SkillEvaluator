@@ -57,6 +57,8 @@ def test_import_export_and_snapshot_share_the_same_nonsecret_files(workspace: Wo
     folder = workspace.directory(skill["id"])
     (folder / ".env.local").write_text("LOCAL=also-excluded")
     (folder / "credentials.json").write_text('{"token":"also-excluded"}')
+    (folder / "scripts").chmod(0o750)
+    (folder / "empty").mkdir(mode=0o710)
     before = source_hash(folder)
     with zipfile.ZipFile(io.BytesIO(workspace.export(skill["id"]))) as exported:
         assert sorted(exported.namelist()) == skill["files"]
@@ -66,6 +68,8 @@ def test_import_export_and_snapshot_share_the_same_nonsecret_files(workspace: Wo
     assert source_hash(destination) == before
     assert not (destination / ".env.local").exists()
     assert not (destination / "credentials.json").exists()
+    for relative in (".", "scripts", "empty"):
+        assert stat.S_IMODE((destination / relative).stat().st_mode) == stat.S_IMODE((folder / relative).stat().st_mode)
 
 
 @pytest.mark.parametrize(

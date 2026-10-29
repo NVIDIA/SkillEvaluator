@@ -11,6 +11,7 @@ from pathlib import Path
 
 import pytest
 
+from skillevaluator.reporting.dashboard_improvements import load_skill_change
 from skillevaluator.tier3.improve import discovery_packet, prepare_improvement
 
 
@@ -83,22 +84,39 @@ def proposal_for(tmp_path, skill, run, **edit_changes):
     return path
 
 
-def test_deterministic_candidate_preserves_source_and_evaluation(tmp_path, workspace):
+@pytest.mark.parametrize(
+    "replacements", [["correct"], ["café", "correct"], ["correct", "broken"], [f"step-{i}" for i in range(9)]]
+)
+def test_deterministic_candidate_preserves_source_and_evaluation(tmp_path, workspace, replacements):
     skill, run, _ = workspace
     proposal = proposal_for(tmp_path, skill, run)
-    receipt = prepare_improvement(skill, run, tmp_path / "edit", mode="deterministic", edits_path=proposal)
+    value = json.loads(proposal.read_text())
+    template = value["edits"][0]
+    value["edits"] = [
+        {**template, "old_text": old, "new_text": new}
+        for old, new in zip(["broken", *replacements[:-1]], replacements, strict=True)
+    ]
+    proposal.write_text(json.dumps(value))
+    receipt = prepare_improvement(
+        skill, run, tmp_path / "edit", mode="deterministic", edits_path=proposal, max_edits=len(replacements)
+    )
     candidate = Path(receipt["candidate_path"])
     assert candidate.name == skill.name
-    assert (candidate / "SKILL.md").read_text() == "Use correct command.\n"
+    assert (candidate / "SKILL.md").read_text() == f"Use {replacements[-1]} command.\n"
     assert (skill / "SKILL.md").read_text() == "Use broken command.\n"
     assert (candidate / "evals" / "evals.json").read_bytes() == (skill / "evals" / "evals.json").read_bytes()
     assert receipt["source_tree_before"] == receipt["source_tree_after"]
     assert receipt["evals_digest"] == receipt["candidate_evals_digest"]
-    assert receipt["status"] == "candidate_created"
+    changed = replacements[-1] != "broken"
+    assert receipt["status"] == ("candidate_created" if changed else "unchanged")
     assert receipt["comparison_status"] == "not_evaluated"
     assert receipt["evaluated_source_verified"] is True
-    assert "--harbor-keep-jobs" in receipt["next_step"]
-    assert "-Use broken command." in (tmp_path / "edit" / "changes.diff").read_text()
+    assert ("--harbor-keep-jobs" in receipt["next_step"]) == changed
+    diff = (tmp_path / "edit" / "changes.diff").read_text()
+    assert ("-Use broken command." in diff) == changed
+    saved = load_skill_change(tmp_path / "edit")
+    assert saved["diff"] == diff and not saved["issues"]
+    assert saved["receipt"]["changed_files"] == (["SKILL.md"] if changed else [])
 
 
 @pytest.mark.parametrize("split", ["holdout", "heldout", "held-out"])

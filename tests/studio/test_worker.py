@@ -11,10 +11,8 @@ import subprocess
 import sys
 import time
 from pathlib import Path
-from typing import TYPE_CHECKING
 
-if TYPE_CHECKING:
-    import pytest
+import pytest
 
 from skillevaluator.studio.worker import _RedactedStream, run_job
 
@@ -87,6 +85,47 @@ def test_known_request_failure_always_writes_machine_readable_result(tmp_path: P
     assert result["execution_status"] == "failed"
     assert result["summary"]["lift"] is None
     assert result["suggestions"] == []
+
+
+@pytest.mark.parametrize("environment", ["local", "docker"])
+@pytest.mark.parametrize(
+    ("provider", "key_name", "model", "namespace"),
+    [
+        ("nv_build", "NVIDIA_API_KEY", "nvidia/nemotron-3.5-lightning-30b-a3b", "nvidia"),
+        ("openai", "OPENAI_API_KEY", "gpt-5.4-mini", "openai"),
+        ("anthropic", "ANTHROPIC_API_KEY", "claude-opus-5-5", "anthropic"),
+    ],
+)
+def test_catalog_model_reaches_opencode_with_runtime_namespace(
+    tmp_path, monkeypatch, environment, provider, key_name, model, namespace
+):
+    from skillevaluator.evaluation import EvaluationService
+    from skillevaluator.provider_config import resolve_llm_provider
+    from skillevaluator.studio.worker import EventReporter, _evaluate
+    from skillevaluator.tier3.harbor.runner import _model_for_agent
+
+    monkeypatch.setenv("SKILL_EVAL_LLM_PROVIDER", provider)
+    monkeypatch.setenv("SKILL_EVAL_LLM_MODEL", model)
+    monkeypatch.setenv(key_name, "test-credential")
+    for name in ("SKILL_EVAL_LLM_API_KEY", "SKILL_EVAL_LLM_BASE_URL", "SKILL_EVAL_LLM_CREDENTIAL_SOURCE"):
+        monkeypatch.delenv(name, raising=False)
+    captured = []
+    monkeypatch.setattr(EvaluationService, "evaluate", lambda _self, options, **_kw: captured.append(options) or {})
+    monkeypatch.setattr(EvaluationService, "failure_reason", lambda *_args: None)
+    job = _job(tmp_path, "evaluate")
+    _evaluate(
+        {"options": {"agent": "opencode", "env_mode": environment, "model": model}},
+        job / "source",
+        job,
+        EventReporter(job),
+    )
+    options = captured[0]
+    runtime_model = options.agent_model[0].split("=", 1)[1]
+    selected, _ = _model_for_agent(
+        "opencode", cli_model=runtime_model, config_agents={}, provider=resolve_llm_provider()
+    )
+    assert options.model == model
+    assert selected.split("/", 1) == [namespace, model]
 
 
 def test_bad_action_type_also_retains_a_failure_result(tmp_path: Path) -> None:

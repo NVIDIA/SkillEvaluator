@@ -1687,12 +1687,6 @@ class SkillEvaluatorLocalEnvironment(BaseEnvironment):
             ("/installed-agent", self._installed_agent),
         ]
 
-    def _rewrite_command(self, command: str) -> str:
-        rewritten = command
-        for remote, local in self._path_map():
-            rewritten = self._replace_shell_path(rewritten, remote, local)
-        return rewritten
-
     def _rewrite_raw_paths(self, value: str) -> str:
         path_map = dict(self._path_map())
         if not path_map:
@@ -1713,18 +1707,20 @@ class SkillEvaluatorLocalEnvironment(BaseEnvironment):
 
         return pattern.sub(replace, value)
 
-    @staticmethod
-    def _replace_shell_path(command: str, remote: str, local: Path) -> str:
-        """Replace a container path while preserving shell token boundaries."""
+    def _rewrite_command(self, command: str) -> str:
+        """Rewrite original container roots once, preserving shell quoting."""
+        path_map = dict(self._path_map())
+        if not path_map:
+            return command
+        roots = "|".join(re.escape(root) for root in sorted(path_map, key=len, reverse=True))
+        pattern = re.compile(rf"(?<![A-Za-z0-9_.\-/])(?:{roots})(?=$|[/ \t\r\n'\";&|<>])")
         output: list[str] = []
         index = 0
         quote = ""
-        local_text = str(local)
-        shell_boundaries = "/ \t\r\n'\";&|<>"
         while index < len(command):
-            if command.startswith(remote, index) and (
-                index + len(remote) == len(command) or command[index + len(remote)] in shell_boundaries
-            ):
+            match = pattern.match(command, index)
+            if match:
+                local_text = str(path_map[match.group()])
                 if quote == "'":
                     replacement = local_text.replace("'", "'\"'\"'")
                 elif quote == '"':
@@ -1734,7 +1730,7 @@ class SkillEvaluatorLocalEnvironment(BaseEnvironment):
                 else:
                     replacement = shlex.quote(local_text)
                 output.append(replacement)
-                index += len(remote)
+                index = match.end()
                 continue
 
             char = command[index]

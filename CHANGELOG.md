@@ -17,6 +17,11 @@ All notable changes to SkillEvaluator are documented in this file.
   native proposal and validation logic behind an optional Improve flow.
   Generated cases have explicit review states; proposed file changes, evidence,
   source association and per-case comparisons retain their native limits.
+  Guided view uses compact case reviews and contextual next actions. Worker logs
+  and downloads are visible in both views, including specific failure reasons.
+  Model catalog IDs are translated for OpenCode, source snapshots preserve
+  directory permissions, empty-feedback reviews need no key, and candidate
+  tests reject an outdated original evaluator before launching agents.
 
 - Generated single-step Docker cases can declare `artifact_pairs` to retain
   specific original and delivered files before verification. Discovery evidence
@@ -104,6 +109,9 @@ All notable changes to SkillEvaluator are documented in this file.
 
 ### Fixed
 
+- Local agent commands rewrite workspace and log paths once, preserving shell
+  quoting and avoiding duplicate substitution when a host path contains a
+  container directory name. Existing confinement checks remain in force.
 - The Skill changes case picker uses stable agent and case identities when
   switching reports, keeping the selected findings aligned with their case.
 - Native OpenCode traces retain missing status, error and integer exit-code

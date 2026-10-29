@@ -12,7 +12,7 @@ uv run --python 3.13 --extra ui skillevaluator ui
 Open `http://127.0.0.1:7865`. **Guided** view starts with one action at a time:
 add `SKILL.md` or a zip, describe a task, review the proposed test cases, and
 verify each draft’s inputs and expected result, then save and continue to evaluation. Choose **Advanced** for execution settings,
-extra dataset guidance, detailed evidence, and diagnostics. Both names appear
+extra dataset guidance and detailed evidence. Both names appear
 in the view selector at the top of the page.
 Template drafting, structure/quality checks, editing, and export need no key.
 Each test case has a **Remove** action. Save changes to persist removal,
@@ -29,6 +29,11 @@ validation, a proposal, or an evaluation. You can keep editing while it runs. A 
 evaluation can include many test cases; its Advanced settings control how many
 trials run concurrently. Wait for the current task to finish, or stop it in
 Run history before starting another.
+
+**Logs and progress** is available in both views and opens for running or failed
+tasks. Follow the worker output there or select **Download log** to save it.
+Failed runs show the saved failure reason; open any earlier run from Run history
+to inspect its log and results.
 
 Use the appearance control to choose **System**, **Light**, or **Dark**. System
 follows your device. Theme and view preferences are saved in browser storage;
@@ -68,7 +73,7 @@ Under **Evaluate**, optional checks are available in both views:
 - **Check repeated content:** Tier 2 compares chunks within this skill using
   embeddings and reviews likely duplicates with an LLM. It needs an NVIDIA or
   OpenAI key and the `tier2` optional dependencies. It uses in-memory similarity
-  comparison, with no Milvus, catalog, or database setup.
+  comparison, with no external catalog or database setup.
 
 Selected checks run first within **Run evaluation**, followed by the agent's
 test cases on the same frozen skill copy. **Run checks only** is available in
@@ -84,6 +89,9 @@ auditing, rubric scoring, and AI PII verification remain separate CLI options.
 review the explanation and file changes, then **Test proposed copy**. Proposals
 can change `SKILL.md` and helper scripts. The original remains available.
 “No change recommended” is a valid outcome and does not require another run.
+If there is no selected discovery feedback, this review makes no model call and
+needs no key. After an evaluator update, rerun the original before testing a
+proposal so both runs use the same checks.
 
 Generated cases start as drafts. Independently verify their inputs, expected
 results, and listed requirements, then mark each reviewed. Editing its task or

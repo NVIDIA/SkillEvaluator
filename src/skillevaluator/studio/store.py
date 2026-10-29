@@ -56,7 +56,7 @@ def safe_file(root: Path, relative: str) -> Path:
     return path
 
 
-def source_files(path: Path) -> list[Path]:
+def source_files(path: Path, *, include_directories: bool = False) -> list[Path]:
     files = []
     for p in sorted(path.rglob("*")):
         relative = p.relative_to(path)
@@ -70,7 +70,7 @@ def source_files(path: Path) -> list[Path]:
             continue
         if p.is_symlink():
             raise ValueError("Remove symbolic links before using this skill.")
-        if p.is_file():
+        if p.is_file() or (include_directories and p.is_dir()):
             files.append(p)
     return files
 
@@ -87,13 +87,20 @@ def source_hash(path: Path) -> str:
 
 def copy_source(source: Path, destination: Path) -> None:
     """Copy only the same validated, non-secret files we hash and export."""
-    paths = source_files(source)
+    paths = source_files(source, include_directories=True)
     destination.mkdir(parents=True)
+    directories = [(source, destination)]
     for path in paths:
         relative = path.relative_to(source).as_posix()
         target = safe_file(destination, relative)
-        target.parent.mkdir(parents=True, exist_ok=True)
-        shutil.copy2(path, target, follow_symlinks=False)
+        if path.is_dir():
+            target.mkdir(parents=True, exist_ok=True)
+            directories.append((path, target))
+        else:
+            target.parent.mkdir(parents=True, exist_ok=True)
+            shutil.copy2(path, target, follow_symlinks=False)
+    for original, copied in reversed(directories):
+        shutil.copystat(original, copied, follow_symlinks=False)
 
 
 class Workspace:

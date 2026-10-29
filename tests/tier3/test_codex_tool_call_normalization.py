@@ -4,6 +4,8 @@
 from __future__ import annotations
 
 import importlib.util
+import json
+import subprocess
 import sys
 from pathlib import Path
 
@@ -980,29 +982,56 @@ def test_native_codex_exec_evidence_refs_resolve_to_the_outer_call():
     assert [ref["excerpt"] for ref in tool_refs] == ["pwd", "ls"]
 
 
-def test_copied_verifier_imports_its_sibling_codex_normalizer(tmp_path):
+def test_copied_verifier_runs_without_the_installed_package(tmp_path):
     adapter._copy_verifier(tmp_path)
-
     tests_dir = tmp_path / "tests" / adapter._EVALUATOR_TESTS_SUBDIR
-    normalizer = tests_dir / "codex_tool_call_normalizer.py"
-    evidence = tests_dir / "evidence.py"
-    assert normalizer.is_file()
-    assert evidence.is_file()
+    script = """
+import importlib.abc
+import json
+import runpy
+import sys
+from pathlib import Path
 
-    sys.modules.pop("codex_tool_call_normalizer", None)
-    sys.modules.pop("evidence", None)
-    spec = importlib.util.spec_from_file_location("copied_harbor_eval_codex_tools", tests_dir / "eval.py")
-    module = importlib.util.module_from_spec(spec)
-    spec.loader.exec_module(module)
+class NoInstalledPackage(importlib.abc.MetaPathFinder):
+    def find_spec(self, fullname, *args):
+        if fullname == "skillevaluator" or fullname.startswith("skillevaluator."):
+            raise ImportError("Installed package must not supply missing verifier files")
 
-    assert Path(sys.modules["codex_tool_call_normalizer"].__file__).resolve() == normalizer.resolve()
-    assert Path(sys.modules["evidence"].__file__).resolve() == evidence.resolve()
-    assert (
-        module.extract_tool_calls_as_dicts(_trajectory('const r = await tools.exec_command({"cmd":"pwd"});'))[0][
-            "action"
-        ]
-        == "exec_command"
+sys.meta_path.insert(0, NoInstalledPackage())
+root = Path(sys.argv[1])
+verifier = runpy.run_path(str(root / "eval.py"))
+for name in ("codex_tool_call_normalizer", "evidence", "deterministic_checks", "secret_redaction"):
+    assert Path(sys.modules[name].__file__).resolve() == root / (name + ".py")
+trajectory = json.load(sys.stdin)
+calls = verifier["extract_tool_calls_as_dicts"](trajectory)
+print(json.dumps({
+    "calls": calls,
+    "security": verifier["check_security"](trajectory, calls),
+    "efficiency": verifier["check_tool_efficiency"](calls),
+    "recovery": verifier["check_error_recovery"](calls),
+}))
+"""
+    trajectory = _trajectory('const r = await tools.exec_command({"cmd":"pwd"});')
+    result = subprocess.run(
+        [sys.executable, "-I", "-c", script, str(tests_dir)],
+        input=json.dumps(trajectory), text=True, capture_output=True, cwd=tmp_path, check=True,
     )
+    observed = json.loads(result.stdout)
+    calls = _TEMPLATE_MODULE.extract_tool_calls_as_dicts(trajectory)
+    assert observed == {
+        "calls": calls,
+        "security": _TEMPLATE_MODULE.check_security(trajectory, calls),
+        "efficiency": _TEMPLATE_MODULE.check_tool_efficiency(calls),
+        "recovery": check_error_recovery(calls),
+    }
+    # Source-tree fallback cannot conceal an incomplete deployed verifier bundle.
+    (tests_dir / "deterministic_checks.py").unlink()
+    missing = subprocess.run(
+        [sys.executable, "-I", "-c", script, str(tests_dir)],
+        input=json.dumps(trajectory), text=True, capture_output=True, cwd=tmp_path,
+    )
+    assert missing.returncode != 0
+    assert "Installed package must not supply missing verifier files" in missing.stderr
 
 
 def _multimodal_trajectory() -> dict:

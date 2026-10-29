@@ -382,6 +382,15 @@ def _evaluate(request: dict[str, Any], skill: Path, job_dir: Path, reporter: Eve
     for name in ("model", "grading_mode", "timeout_multiplier"):
         if name in options and options[name] not in (None, ""):
             kwargs[name] = options[name]
+    if agent == "opencode" and kwargs.get("model"):
+        from skillevaluator.provider_config import resolve_llm_provider
+
+        # Settings accepts a provider catalog ID; OpenCode needs its own
+        # namespace before that ID, including NVIDIA's publisher prefix.
+        namespace = {"nv_build": "nvidia", "openai": "openai", "anthropic": "anthropic"}[
+            resolve_llm_provider().provider
+        ]
+        kwargs["agent_model"] = (f"opencode={namespace}/{kwargs['model']}",)
     if "timeout_multiplier" in kwargs:
         timeout = kwargs["timeout_multiplier"]
         if isinstance(timeout, bool) or not isinstance(timeout, int | float) or not 0 < timeout <= 20:

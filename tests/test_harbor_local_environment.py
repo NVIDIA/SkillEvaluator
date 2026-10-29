@@ -5,6 +5,7 @@ from __future__ import annotations
 
 import asyncio
 import os
+import shlex
 import shutil
 import stat
 import subprocess
@@ -92,6 +93,30 @@ def test_raw_path_rewrite_ignores_url_and_local_path_suffixes(tmp_path: Path) ->
     rewritten = environment._rewrite_raw_paths(value)
 
     assert rewritten == f'"{local_tests}{os.sep}api" "https://example.invalid/tests/api" "{local_tests}/api"'
+
+
+@pytest.mark.skipif(os.name == "nt", reason="Shell path rewriting requires POSIX")
+@pytest.mark.parametrize("quote", ["", "'", '"'])
+def test_shell_paths_rewrite_once_without_changing_host_paths(tmp_path: Path, quote: str) -> None:
+    root = tmp_path / "workspace" / "logs" / "tests" / "space $cash `literal` 'single' \"double\""
+    environment = SkillEvaluatorLocalEnvironment.__new__(SkillEvaluatorLocalEnvironment)
+    environment._path_map = lambda: [("/logs", root), ("/logs/agent", root / "agent"), ("/workspace", root / "work")]
+    existing = str(root / "existing")
+    command = (
+        f"printf '%s\\n' {quote}/logs/agent/output.txt{quote} {quote}/workspace/input{quote} "
+        f"{shlex.quote(existing)} https://example.invalid/workspace/input /workspace-other/input"
+    )
+    result = subprocess.run(
+        ["bash", "-c", environment._rewrite_command(command)], capture_output=True, text=True, timeout=30
+    )
+    assert result.returncode == 0, result.stderr
+    assert result.stdout.splitlines() == [
+        str(root / "agent/output.txt"),
+        str(root / "work/input"),
+        existing,
+        "https://example.invalid/workspace/input",
+        "/workspace-other/input",
+    ]
 
 
 @pytest.mark.integration

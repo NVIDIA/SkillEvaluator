@@ -289,6 +289,15 @@ All notable changes to SkillEvaluator are documented in this file.
   `quality-check` before any report was written. The schema check reports the
   malformed `metadata`, and the quality score counts `metadata.author` and
   `metadata.tags` as missing, as it already did for other non-mapping values.
+- SkillSpector runs are no longer stopped after a fixed 300 seconds, which
+  ended slow `--llm` security scans, such as those on local models, as
+  `INCOMPLETE` before SkillSpector's own 600-second deadline. Each run now has
+  a 1,200-second watchdog by default; set
+  `SKILLEVALUATOR_SKILLSPECTOR_TIMEOUT_SECONDS` to a positive integer to change
+  it (values above 86400 are capped). `SKILLSPECTOR_MAX_WORKFLOW_SECONDS` is now
+  forwarded to SkillSpector so its own deadline can be raised as well, and the
+  security result records the effective `skillspector_timeout_seconds`
+  ([#155](https://github.com/NVIDIA/SkillEvaluator/issues/155)).
 
 ## 0.6.0 - 2026-10-20
 

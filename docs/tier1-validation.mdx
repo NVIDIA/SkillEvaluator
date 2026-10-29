@@ -399,6 +399,24 @@ Tier 1 checks always gate the exit code inside `validate`. Tier 2 gates when it 
   <Accordion title="A scanner is missing">
     Install Bandit and pip-audit with `skillevaluator[security]`. Install Semgrep separately with `brew install semgrep` or `uv tool install semgrep`, and SkillSpector with `uv tool install git+https://github.com/NVIDIA/SkillSpector.git@v2.12.0`. Required scanner failures remain `INCOMPLETE` until the scanner is installed and returns valid evidence.
   </Accordion>
+  <Accordion title="SkillSpector times out">
+    Each SkillSpector run (the static stage, and the LLM stage with `--llm`)
+    is stopped after 1,200 seconds by default, and the security scan is reported
+    `INCOMPLETE` with `skillspector timed out after 1200 seconds`. SkillSpector
+    also ends a scan at its own 600-second deadline and reports partial
+    analysis, which is `INCOMPLETE` as well. Slow or local LLM providers can
+    need more time. Raise both limits, keeping SkillEvaluator's watchdog higher:
+
+    ```bash
+    export SKILLSPECTOR_MAX_WORKFLOW_SECONDS=1800
+    export SKILLEVALUATOR_SKILLSPECTOR_TIMEOUT_SECONDS=2400
+    skillevaluator validate ./my-skill --tiers 1 --llm
+    ```
+
+    Each stage gets the full watchdog, so a scan that stalls in both stages can
+    take up to twice the value before it is reported. See
+    [Environment Variables](environment-variables.mdx#validation-tier-1).
+  </Accordion>
   <Accordion title="An LLM-backed stage fails immediately">
     Configure a supported provider or select a keyless Tier 1 run with
     `skillevaluator tier1 ./my-skill --no-llm` or

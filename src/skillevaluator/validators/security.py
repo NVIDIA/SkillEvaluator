@@ -59,6 +59,14 @@ from skillevaluator.validators.base import (
 
 logger = get_logger(__name__)
 
+# Watchdog for each SkillSpector subprocess. The default stays above
+# SkillSpector's own 600-second workflow deadline so that deadline, not a kill,
+# normally ends a slow scan. The cap keeps the value inside the range that
+# subprocess waits accept on every platform.
+_DEFAULT_SKILLSPECTOR_TIMEOUT_SECONDS = 1200
+_MAX_SKILLSPECTOR_TIMEOUT_SECONDS = 86400
+_SKILLSPECTOR_TIMEOUT_ENV = "SKILLEVALUATOR_SKILLSPECTOR_TIMEOUT_SECONDS"
+
 _AUTHOR_IDENTITY_RE = re.compile(r"^\S[^<>\n]* <(?P<email>[^<>@\s]+@[^<>\s]+)>$")
 _SKILLSPECTOR_POLICY_EXIT_CODES = frozenset({0, 1})
 _SKILLSPECTOR_STATUSLESS_COMPLETENESS_VERSIONS = {(2, 9, 5), (2, 9, 6)}
@@ -165,6 +173,8 @@ _SKILLSPECTOR_PROCESS_ENV_NAMES = frozenset(
         "PATH",
         "PATHEXT",
         "REQUESTS_CA_BUNDLE",
+        # SkillSpector's own workflow deadline, raised together with the watchdog.
+        "SKILLSPECTOR_MAX_WORKFLOW_SECONDS",
         "SSL_CERT_DIR",
         "SSL_CERT_FILE",
         "SYSTEMROOT",
@@ -383,6 +393,35 @@ def _skillspector_llm_stderr_failed(stderr: str) -> bool:
 
 def _copy_selected_environment(environ: Mapping[str, str], names: Iterable[str]) -> dict[str, str]:
     return {name: environ[name] for name in names if environ.get(name, "").strip()}
+
+
+def _skillspector_timeout_seconds(environ: Mapping[str, str] | None = None) -> int:
+    """Return the SkillSpector subprocess watchdog configured by the operator."""
+    source = os.environ if environ is None else environ
+    raw = source.get(_SKILLSPECTOR_TIMEOUT_ENV, "").strip()
+    if not raw:
+        return _DEFAULT_SKILLSPECTOR_TIMEOUT_SECONDS
+    try:
+        timeout: int | None = int(raw)
+    except ValueError:
+        timeout = None
+    if timeout is None or timeout <= 0:
+        logger.warning(
+            "Ignoring %s=%r: expected a positive integer number of seconds; using %ss",
+            _SKILLSPECTOR_TIMEOUT_ENV,
+            raw,
+            _DEFAULT_SKILLSPECTOR_TIMEOUT_SECONDS,
+        )
+        return _DEFAULT_SKILLSPECTOR_TIMEOUT_SECONDS
+    if timeout > _MAX_SKILLSPECTOR_TIMEOUT_SECONDS:
+        logger.warning(
+            "Capping %s=%r at %ss",
+            _SKILLSPECTOR_TIMEOUT_ENV,
+            raw,
+            _MAX_SKILLSPECTOR_TIMEOUT_SECONDS,
+        )
+        return _MAX_SKILLSPECTOR_TIMEOUT_SECONDS
+    return timeout
 
 
 def _skillspector_process_env(environ: Mapping[str, str] | None = None) -> dict[str, str]:
@@ -833,7 +872,10 @@ class SecurityValidator(ValidatorBase):
             # Requested LLM configuration; None leaves the choice to SkillSpector.
             result.metadata["skillspector_model"] = child_env.get("SKILLSPECTOR_MODEL")
             result.metadata["skillspector_reasoning_effort"] = child_env.get("SKILLSPECTOR_REASONING_EFFORT")
-        tool_result = Tools.skillspector.run(args, timeout=300, env=child_env, replace_env=True)
+        # Read from the parent environment: the isolated child environment omits it.
+        timeout = _skillspector_timeout_seconds()
+        result.metadata["skillspector_timeout_seconds"] = timeout
+        tool_result = Tools.skillspector.run(args, timeout=timeout, env=child_env, replace_env=True)
 
         if tool_result.exit_code not in _SKILLSPECTOR_POLICY_EXIT_CODES:
             detail = tool_result.error_message or (

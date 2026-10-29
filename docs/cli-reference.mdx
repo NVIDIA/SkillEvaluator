@@ -95,6 +95,33 @@ a dataset to repair it.
 `validate PATH` runs all three tiers for skills by default, including Tier 3
 autopilot. It is separate from these tier-only workflows.
 
+### Direct tiers compared with `validate --tiers`
+
+`validate --tiers` narrows the combined pipeline; it does not run a tier on
+its own. Tier 1 always runs and gates the exit code, so `--tiers 2`,
+`--tiers 3`, and `--tiers 2,3` are rejected. Use `tier2 PATH` or
+`tier3 PATH` to run Tier 2 or Tier 3 without Tier 1.
+
+| | Direct workflows | `validate PATH --tiers ...` |
+| --- | --- | --- |
+| Tiers run | Only the named tier | Tier 1 plus any selected tiers |
+| Tier 1 dependency audit | Included in `tier1 PATH` | Opt-in with `--checks`, which replaces the default list, so name every check you want plus `dependency` ([selection rules](tier1-validation.mdx#narrow-to-specific-checks)) |
+| Tier 1 LLM stages | Rubric, LLM security, and verification run when a provider is configured; `--no-llm` skips them | LLM security analysis runs only with `--llm`, and finding verification only with `--llm-verify`; no rubric stage |
+| Reports | `tier1` and `tier2` default to `-r cli,json,html` and write `skillevaluator-tier1.*` or `skillevaluator-tier2.*` under `-o`. `tier3` writes its run under `--results-dir` and does not accept `-r` or `-o` | The compact view writes HTML and JSON as `skillevaluator-output-<timestamp>.*`; skill targets also get `BENCHMARK.md` |
+| Exit code `1` | `tier1`: a check failed or required evidence is incomplete. `tier2`: HIGH or CRITICAL findings or a blocking analysis error. `tier3`: the run did not complete; a `FAIL` verdict alone exits `0` | Tier 1 failed; Tier 2 findings unless `--no-block-on-dedup`; Tier 3 only with `--block-on-agent-eval` |
+
+For `tier2 PATH`, `tier3 PATH`, and `tier1 PATH --llm`, a missing provider is
+a configuration error that exits `1` before any report is written. `tier1 PATH`
+without `--llm` runs keyless. `validate` records Tier 2 and Tier 3 as skipped
+and still writes its reports.
+
+Direct Tier 3 checks provider, option, and runtime configuration before it
+generates a starter case, so a configuration error leaves `evals/` unchanged and
+no paid generation or agent run starts. The exception is `--env-mode` `ack`,
+`cwsandbox`, `langsmith`, `openshift`, and `wandb`: their backend checks contact
+a remote control plane, so they run after the starter case is generated. Usage
+errors, such as an option the workflow does not accept, exit `2`.
+
 ### Direct Tier 1 options
 
 | Flag | Default | Effect |

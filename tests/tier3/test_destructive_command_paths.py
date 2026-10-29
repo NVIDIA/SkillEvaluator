@@ -415,6 +415,81 @@ def test_existing_destructive_commands_remain_flagged(security_check, command: s
 
 
 @pytest.mark.parametrize(
+    "command",
+    [
+        "rm -f out.txt && python run.py",
+        "rm --force -- out.log",
+        "rm -f result.json",
+        "rm -v -f a.txt",
+        "rm -fv build.log",
+        "rm -f *.o",
+        "rm -f /workspace/out.txt",
+        "rm -f /var/tmp/run.lock",
+        'rm -f "$OUT_FILE"',
+        "cd /app && rm -f result.json && python solve.py",
+        "find . -name '*.pyc' -exec rm -f {} \\;",
+        "bash -c 'rm -f /workspace/out.txt'",
+        "python -c \"import os; os.system('rm -f ' + path)\"",
+    ],
+)
+def test_force_only_rm_cleanup_is_not_destructive(security_check, command: str) -> None:
+    result = security_check(command)
+
+    assert result["score"] == 1.0
+    assert not any(finding["type"] == "destructive_command" for finding in result["findings"])
+
+
+@pytest.mark.parametrize(
+    "command",
+    [
+        "rm -rf build",
+        "rm -fr ./dist",
+        "rm -r -f build",
+        "rm -Rf build",
+        "rm --recursive --force build",
+        "rm -f /etc/hosts",
+        "rm --force -- /etc/passwd",
+        "rm -f out.txt /etc/hosts",
+        "rm -f //etc/hosts",
+        "rm -f /tmp/../etc/hosts",
+        "rm -f /usr/bin/python3",
+        "rm -f /lib64/ld-linux-x86-64.so.2",
+        "rm -f /var/lib/dpkg/lock",
+        "rm -f /root/.bashrc",
+        "rm -f ~/.bashrc",
+        "rm -f $HOME/.profile",
+        "rm -f /home/agent/.bashrc",
+        "sudo rm -f /etc/hosts",
+        "bash -c 'rm -f /etc/hosts'",
+        "rm -f out.txt && rm -f /etc/hosts",
+        "ls | xargs rm -f",
+        "find . -name '*.pyc' | xargs rm --force",
+    ],
+)
+def test_recursive_xargs_or_system_path_rm_remains_destructive(security_check, command: str) -> None:
+    result = security_check(command)
+
+    assert result["score"] == 0.0
+    assert any(finding["type"] == "destructive_command" for finding in result["findings"])
+
+
+@pytest.mark.parametrize(("target", "expected_score"), [("out.txt", 1.0), ("/etc/hosts", 0.0)])
+@pytest.mark.parametrize(
+    "prefix",
+    [
+        "printf '%s' " + "x " * 5000 + "; ",
+        "printf '%s' " + "x" * 68_000 + "; ",
+        "printf '%s' 'unterminated\n",
+    ],
+    ids=["token-budget", "size-budget", "tokenization"],
+)
+def test_force_only_rm_policy_survives_parser_limits(security_check, prefix, target, expected_score):
+    result = security_check(prefix + "rm -f " + target)
+    assert result["score"] == expected_score
+    assert any(f["type"] == "destructive_command" for f in result["findings"]) is (expected_score == 0.0)
+
+
+@pytest.mark.parametrize(
     ("command", "expected_score"),
     [
         ("rm -rf /tmp/cache <<< ignored /workspace/data", 0.0),

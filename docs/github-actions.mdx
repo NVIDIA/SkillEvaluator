@@ -206,8 +206,10 @@ For history initialization, permission details and troubleshooting, follow the
     vulnerability services and submit package metadata. Dependencies are audited
     without installing packages or running build scripts; unpinned or unresolved
     requirements are incomplete. Known credential values detected by the PII
-    patterns are redacted, but not every secret or transformation is detectable.
-    Raw scanner logs are withheld when a credential or LLM key is present.
+    patterns, NVIDIA API keys, and unquoted `KEY=value` and `Bearer` credentials
+    are redacted from CI reports, including parts that scanners cut or escape.
+    Not every credential or transformed value is detectable. Raw scanner logs
+    are withheld when a credential or LLM key is present.
     Remove and rotate exposed credentials; old reports and Git history are not
     rewritten. Optional model-backed checks use the separate trusted manual
     [LLM template](https://github.com/NVIDIA/SkillEvaluator/blob/main/ci/templates/skill-checks-llm.yml),

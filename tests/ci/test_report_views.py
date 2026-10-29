@@ -440,6 +440,24 @@ def test_details_markdown_does_not_escape_evidence_past_its_limit(tmp_path, monk
     assert "3 skills · 3 passed · 0 failed · 0 incomplete" in (tmp_path / "summary.md").read_text()
 
 
+def test_details_markdown_drops_a_lone_surrogate_past_its_limit(tmp_path):
+    # JSON reports can carry lone surrogates as \udcXX escapes.
+    summary, data = example(tmp_path)
+    details = [{"check": f"check-{index}", "message": "x" * 180} for index in range(3000)]
+    data["results"][0]["success_details"] = details
+    path = tmp_path / "skill-001/skillevaluator-tier1.json"
+    path.write_text(json.dumps(data), encoding="utf-8")
+    views.render_reports(tmp_path, summary, {})
+    expected = (tmp_path / "details.md").read_text(encoding="utf-8")
+    kept = expected.count("**Evidence: check")
+    assert "Truncated for CI display limits" in expected and kept < len(details)
+    # _bounded() measures the first line it drops, so the surrogate goes one line later.
+    details[kept + 1]["message"] = "bad \udcff name"
+    path.write_text(json.dumps(data), encoding="utf-8")
+    views.render_reports(tmp_path, summary, {})
+    assert (tmp_path / "details.md").read_text(encoding="utf-8") == expected
+
+
 def test_markdown_findings_render_readable_quotes_and_preserve_entity_text(tmp_path):
     from html.parser import HTMLParser
 

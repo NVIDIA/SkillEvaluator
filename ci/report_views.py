@@ -288,7 +288,10 @@ class _Budget:
     def spent(self) -> bool:
         new = self._lines[self._counted :]
         self._counted += len(new)
-        self._left -= sum(len(line.encode("utf-8")) + 1 for line in new)
+        # JSON can carry lone surrogates. _bounded() never encodes a line past
+        # its cut, so counting one here must not raise. surrogatepass gives
+        # the same size for every line _bounded() can encode.
+        self._left -= sum(len(line.encode("utf-8", "surrogatepass")) + 1 for line in new)
         return self._left < 0
 
 

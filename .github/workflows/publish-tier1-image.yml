@@ -1,0 +1,141 @@
+name: Build and publish Tier 1 image
+
+on:
+  pull_request:
+    paths:
+      - ci/**
+      - src/skillevaluator/**
+      - pyproject.toml
+      - uv.lock
+      - .dockerignore
+      - .github/workflows/publish-tier1-image.yml
+  workflow_dispatch:
+    inputs:
+      publish:
+        description: Publish the reviewed main revision to the official GHCR package
+        type: boolean
+        default: false
+
+permissions:
+  contents: read
+
+jobs:
+  verify:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 40
+    steps:
+      - uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0
+        with:
+          persist-credentials: false
+      - name: Build the complete Tier 1 runtime
+        run: |
+          docker build -f ci/Dockerfile.tier1 \
+            --label org.opencontainers.image.revision="$GITHUB_SHA" \
+            -t skillevaluator-tier1:verify .
+      - name: Exercise real scans and changed-skill selection
+        run: python3 ci/smoke_image.py --image skillevaluator-tier1:verify --output "$RUNNER_TEMP/image-verification"
+      - name: Retain integration evidence
+        if: always()
+        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
+        with:
+          name: tier1-image-verification
+          path: ${{ runner.temp }}/image-verification
+          if-no-files-found: error
+          retention-days: 14
+
+  publish:
+    needs: verify
+    outputs:
+      image_digest: ${{ steps.release.outputs.image_digest }}
+    concurrency:
+      group: tier1-image-${{ github.sha }}
+      cancel-in-progress: false
+    if: >-
+      github.event_name == 'workflow_dispatch' && inputs.publish &&
+      github.repository == 'NVIDIA/SkillEvaluator' && github.ref == 'refs/heads/main'
+    runs-on: ubuntu-24.04
+    timeout-minutes: 40
+    permissions:
+      contents: read
+      packages: write
+    env:
+      IMAGE: ghcr.io/nvidia/skillevaluator-tier1
+    steps:
+      - uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0
+        with:
+          persist-credentials: false
+      - name: Check for an existing immutable revision
+        id: existing
+        env:
+          GHCR_TOKEN: ${{ github.token }}
+        run: python3 ci/release_image.py --image "$IMAGE" --revision "$GITHUB_SHA" --output "$GITHUB_OUTPUT"
+      - name: Build the reviewed release revision
+        if: steps.existing.outputs.exists != 'true'
+        run: |
+          docker build -f ci/Dockerfile.tier1 \
+            --label org.opencontainers.image.source=https://github.com/NVIDIA/SkillEvaluator \
+            --label org.opencontainers.image.revision="$GITHUB_SHA" \
+            --label org.opencontainers.image.description='SkillEvaluator complete Tier 1 CI runtime' \
+            -t "$IMAGE:sha-$GITHUB_SHA" .
+      - name: Verify the exact image being published
+        if: steps.existing.outputs.exists != 'true'
+        run: python3 ci/smoke_image.py --image "$IMAGE:sha-$GITHUB_SHA" --output "$RUNNER_TEMP/release-verification"
+      - name: Publish or reuse the immutable revision
+        id: release
+        env:
+          GHCR_TOKEN: ${{ github.token }}
+          EXISTING_IMAGE: ${{ steps.existing.outputs.image_digest }}
+        run: |
+          export DOCKER_CONFIG="$RUNNER_TEMP/publish-docker-config"
+          mkdir -p "$DOCKER_CONFIG"
+          trap 'docker logout ghcr.io >/dev/null 2>&1 || true' EXIT
+          printf '%s' "$GHCR_TOKEN" | docker login ghcr.io -u "$GITHUB_ACTOR" --password-stdin
+          if [ -n "$EXISTING_IMAGE" ]; then
+            docker pull "$EXISTING_IMAGE"
+            existing_revision="$(docker inspect --format='{{index .Config.Labels "org.opencontainers.image.revision"}}' "$EXISTING_IMAGE")"
+            test "$existing_revision" = "$GITHUB_SHA"
+          else
+            # Check again immediately before push. Never move an existing revision tag.
+            python3 ci/release_image.py --image "$IMAGE" --revision "$GITHUB_SHA" --output "$RUNNER_TEMP/pre-push-check"
+            test "$(head -n 1 "$RUNNER_TEMP/pre-push-check")" = 'exists=false'
+            docker push "$IMAGE:sha-$GITHUB_SHA"
+          fi
+          python3 ci/release_image.py --image "$IMAGE" --revision "$GITHUB_SHA" --require --output "$GITHUB_OUTPUT"
+      - name: Retain release verification evidence
+        if: always() && steps.existing.outputs.exists != 'true'
+        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
+        with:
+          name: tier1-release-verification
+          path: ${{ runner.temp }}/release-verification
+          retention-days: 30
+
+  onboarding:
+    needs: publish
+    runs-on: ubuntu-24.04
+    timeout-minutes: 15
+    permissions:
+      contents: read
+    env:
+      IMAGE_DIGEST: ${{ needs.publish.outputs.image_digest }}
+    steps:
+      - uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0
+        with:
+          persist-credentials: false
+      - name: Verify anonymous access and prepare onboarding files
+        run: |
+          published_image="$IMAGE_DIGEST"
+          mkdir -p "$RUNNER_TEMP/anonymous-docker-config"
+          # First publication is private until a package maintainer changes its visibility.
+          # Do not announce consumer onboarding until an unauthenticated pull succeeds.
+          docker --config "$RUNNER_TEMP/anonymous-docker-config" pull "$published_image"
+          python3 ci/render_templates.py --workflow-ref "$GITHUB_SHA" \
+            --image "$published_image" --output "$RUNNER_TEMP/onboarding"
+          printf 'Published image: %s. Download **github-actions-onboarding** for pinned consumer workflows.\n' \
+            "$published_image" >> "$GITHUB_STEP_SUMMARY"
+      - name: Upload pinned onboarding templates
+        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
+        with:
+          name: github-actions-onboarding
+          path: ${{ runner.temp }}/onboarding
+          if-no-files-found: error
+          retention-days: 90

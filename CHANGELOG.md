@@ -14,6 +14,11 @@ All notable changes to SkillEvaluator are documented in this file.
   numeric and nullable fields. Existing prompts remain unchanged when the
   setting is unset.
 
+- Reusable GitHub Actions onboarding for complete Tier 1 checks, with
+  pinned runtime/workflow consumer templates, affected-skill PR selection,
+  optional hosted reports and updated PR feedback. The new guide separates
+  basic scanning from publisher setup; public image publication and generated
+  release files require a reviewed manual release before consumer use.
 - `--quality-config PATH` on `validate`, `quality-check`, and `tier1` loads the
   deterministic quality check's expected Markdown headings from a YAML file
   instead of the built-in list. Each `expected_headers` entry sets a `heading`
@@ -32,6 +37,14 @@ All notable changes to SkillEvaluator are documented in this file.
 
 ### Changed
 
+- HTML reports use a verdict-led layout with a sidebar and expandable check
+  details. The verdict replaces the pass percentage; checks marked Not
+  applicable are excluded from passed and executed counts. Publication status
+  remains visible on mobile and in print, and blocking/advisory findings retain
+  their separate counts.
+- Dependency audits inspect pinned package versions without installing packages
+  or executing build scripts. Unpinned, URL and other unresolved requirements
+  report incomplete coverage instead of executing package resolution.
 - The CLI reference now compares the direct `tier1`, `tier2`, and `tier3`
   workflows with `validate --tiers`: which tiers run, Tier 1 dependency and LLM
   stages, report files, and exit codes. It also states that `--tiers` must
@@ -50,6 +63,24 @@ All notable changes to SkillEvaluator are documented in this file.
   Docker setup, and custom-backend and MCP environment controls.
 
 ### Fixed
+
+- Rubric evaluation preserves the original `SKILL.md` text without adding YAML
+  separators and includes reachable local Markdown guides under their source
+  paths. Required guidance is collected before optional previews, with cycle
+  detection, secure contained reads, verified file-alias deduplication, a
+  256-document ceiling, and the existing
+  3,000-byte per-file / 30,000-byte supplementary limits. Missing, unsafe, or
+  oversized required guidance stops judging without a score or provider request
+  ([#233](https://github.com/NVIDIA/SkillEvaluator/issues/233)).
+
+- PII credential findings mask their values and source lines. GitHub CI stages
+  scanner output privately, redacts recognized credential values from retained
+  reports and logs, and withholds detailed output when redaction cannot finish.
+- Local Claude Code trials retain Harbor's instruction environment variables so
+  prompts reach `claude --print`. The exception accepts only the legacy
+  `HARBOR_INSTRUCTION` name and Claude Code's UUID-named instruction variable;
+  protected paths, loader controls, and unrelated Harbor variables retain their
+  existing filtering ([#245](https://github.com/NVIDIA/SkillEvaluator/issues/245)).
 
 - Tier 3 reports preserve unavailable evaluator lift as `null` when no baseline
   ran, rather than reporting a measured zero. CLI evaluator tables display

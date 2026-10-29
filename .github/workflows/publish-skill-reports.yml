@@ -1,0 +1,193 @@
+name: Publish hosted skill reports
+on:
+  workflow_call:
+    inputs:
+      tools-ref:
+        description: Reviewed immutable evaluator commit containing the report tools
+        type: string
+        required: true
+      tools-repository:
+        description: Repository supplying the reviewed reusable workflows and report tools
+        type: string
+        default: NVIDIA/SkillEvaluator
+      run-id:
+        type: string
+        required: true
+      run-attempt:
+        description: Completed scan attempt that triggered this publication
+        type: string
+        required: true
+      retention-runs:
+        description: Recent runs to keep, plus current main and open-PR reports, within a 512 MiB site budget
+        type: number
+        default: 100
+      report-base-url:
+        type: string
+        required: true
+      trusted-evaluator-shas:
+        description: Approved immutable evaluator workflow revisions, separated by commas or newlines
+        type: string
+        required: true
+      trusted-caller-blobs:
+        description: Approved Git blobs for the consumer scan workflow, separated by commas or newlines
+        type: string
+        required: true
+permissions:
+  contents: read
+jobs:
+  prepare:
+    if: >-
+      (github.event_name == 'workflow_run' || github.event_name == 'workflow_dispatch') &&
+      github.ref == format('refs/heads/{0}', github.event.repository.default_branch)
+    runs-on: ubuntu-24.04
+    timeout-minutes: 15
+    permissions:
+      contents: write
+      actions: read
+      pull-requests: read
+    outputs:
+      report_url: ${{ steps.publish.outputs.report_url }}
+      pr_number: ${{ steps.publish.outputs.pr_number }}
+      is_current: ${{ steps.publish.outputs.is_current }}
+      skipped: ${{ steps.publish.outputs.skipped }}
+    steps:
+      - name: Validate trusted tool identity
+        env:
+          TOOLS_REF: ${{ inputs.tools-ref }}
+          TOOLS_REPOSITORY: ${{ inputs.tools-repository }}
+        run: |
+          python3 - <<'PY'
+          import os, re
+          if not re.fullmatch(r"[0-9a-f]{40}", os.environ["TOOLS_REF"]):
+              raise SystemExit("tools-ref must be a reviewed full commit SHA")
+          if not re.fullmatch(r"[A-Za-z0-9_.-]+/[A-Za-z0-9_.-]+", os.environ["TOOLS_REPOSITORY"]):
+              raise SystemExit("tools-repository must be an owner/repository")
+          PY
+      - name: Checkout trusted report tools
+        uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0
+        with:
+          repository: ${{ inputs.tools-repository }}
+          ref: ${{ inputs.tools-ref }}
+          path: publisher
+          persist-credentials: false
+      - name: Install the trusted native report renderer
+        working-directory: publisher
+        run: |
+          python3 -m pip install --require-hashes -r ci/requirements/uv.txt
+          uv sync --frozen --no-dev --no-editable
+      - name: Checkout retained report history
+        uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0
+        with:
+          ref: gh-pages
+          path: site
+          persist-credentials: false
+      - name: Validate evidence and retain the report
+        id: publish
+        env:
+          GH_TOKEN: ${{ github.token }}
+          REPORT_RUN_ID: ${{ inputs.run-id }}
+          REPORT_RUN_ATTEMPT: ${{ inputs.run-attempt }}
+          REPORT_RETENTION_RUNS: ${{ inputs.retention-runs }}
+          PAGES_BASE_URL: ${{ inputs.report-base-url }}
+          TRUSTED_EVALUATOR_SHA: ${{ inputs.trusted-evaluator-shas }}
+          TRUSTED_CALLER_BLOBS: ${{ inputs.trusted-caller-blobs }}
+          EVALUATOR_REPOSITORY: ${{ inputs.tools-repository }}
+        run: |
+          export SITE_DIR="$GITHUB_WORKSPACE/site" OUTPUT_DIR="$RUNNER_TEMP/report-feedback"
+          # Git invokes gh for just-in-time authentication; no token is stored in Git config.
+          git -C site config credential.helper '!gh auth git-credential'
+          git -C site config user.name 'github-actions[bot]'
+          git -C site config user.email '41898282+github-actions[bot]@users.noreply.github.com'
+          # Rebuild against the newest history after a concurrent writer wins.
+          # Every run is retained; a busy deployment cannot discard its report.
+          for attempt in 1 2 3 4 5; do
+            publisher/.venv/bin/python publisher/ci/publish_reports.py
+            git -C site add .
+            if git -C site diff --cached --quiet; then
+              break
+            fi
+            git -C site commit -m "Record skill scan $REPORT_RUN_ID"
+            if git -C site push origin HEAD:gh-pages; then
+              break
+            fi
+            if [ "$attempt" -eq 5 ]; then
+              exit 1
+            fi
+            git -C site fetch origin gh-pages
+            git -C site reset --hard origin/gh-pages
+            git -C site clean -fd
+          done
+          cat "$OUTPUT_DIR/summary.md" >> "$GITHUB_STEP_SUMMARY"
+      - name: Retain feedback for the comment job
+        if: steps.publish.outputs.skipped != 'true'
+        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
+        with:
+          name: report-feedback
+          overwrite: true
+          path: ${{ runner.temp }}/report-feedback/
+          retention-days: 14
+  deploy:
+    needs: prepare
+    if: needs.prepare.outputs.skipped != 'true'
+    runs-on: ubuntu-24.04
+    timeout-minutes: 10
+    concurrency:
+      group: skill-report-pages-${{ github.repository }}
+      cancel-in-progress: false
+      queue: max
+    permissions:
+      contents: read
+      pages: write
+      id-token: write
+    environment:
+      name: github-pages
+      url: ${{ steps.deployment.outputs.page_url }}
+    steps:
+      - name: Checkout latest retained history
+        uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0
+        with:
+          ref: gh-pages
+          path: site
+          persist-credentials: false
+      - name: Package the static report site
+        uses: actions/upload-pages-artifact@fc324d3547104276b827a68afc52ff2a11cc49c9 # v5.0.0
+        with:
+          path: site
+      - name: Deploy the static report site
+        id: deployment
+        uses: actions/deploy-pages@368f82528645a54fb793d4d04e342629a3f51346 # v5.0.1
+  comment:
+    needs: [prepare, deploy]
+    if: >-
+      always() && needs.prepare.result == 'success' &&
+      needs.prepare.outputs.pr_number != '' && needs.prepare.outputs.is_current == 'true' &&
+      needs.deploy.result == 'success'
+    runs-on: ubuntu-24.04
+    timeout-minutes: 10
+    concurrency:
+      group: skill-report-comment-${{ github.repository }}-${{ needs.prepare.outputs.pr_number }}
+      cancel-in-progress: false
+      queue: max
+    permissions:
+      contents: read
+      actions: read
+      pull-requests: write
+    steps:
+      - name: Checkout trusted comment tools
+        uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0
+        with:
+          repository: ${{ inputs.tools-repository }}
+          ref: ${{ inputs.tools-ref }}
+          path: publisher
+          persist-credentials: false
+      - name: Download this publication's feedback
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: gh run download "$GITHUB_RUN_ID" --repo "$GITHUB_REPOSITORY" --name report-feedback --dir "$RUNNER_TEMP/report-feedback"
+      - name: Update the PR report comment
+        env:
+          GH_TOKEN: ${{ github.token }}
+          FEEDBACK_DIR: ${{ runner.temp }}/report-feedback
+          REPORT_RUN_ID: ${{ inputs.run-id }}
+          ACTOR_BOT_LOGIN: github-actions[bot]
+        run: python3 publisher/ci/comment_report.py

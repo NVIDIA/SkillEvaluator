@@ -1,0 +1,121 @@
+name: Reusable Tier 1 skill checks
+on:
+  workflow_call:
+    inputs:
+      image:
+        description: Published Tier 1 image pinned to a GHCR sha256 digest
+        type: string
+        required: true
+      scan-mode:
+        description: auto scans changed skills on PRs and all skills otherwise; all forces a full scan
+        type: string
+        default: auto
+      paths:
+        description: Newline-separated skill directories or roots containing skills
+        type: string
+        default: skills
+      llm:
+        description: Enable additional LLM security, verification, and rubric checks
+        type: boolean
+        default: false
+      llm-provider:
+        description: openai, anthropic, or nv_build
+        type: string
+        default: openai
+      llm-model:
+        description: Optional provider model override
+        type: string
+        default: ''
+      artifact-name:
+        description: Unique name when calling the workflow more than once
+        type: string
+        default: skill-evaluator-tier1
+      report-base-url:
+        description: Optional GitHub Pages report site for stable links
+        type: string
+        default: ''
+    secrets:
+      LLM_API_KEY:
+        required: false
+permissions:
+  contents: read
+jobs:
+  tier1:
+    name: Tier 1 scan
+    runs-on: ubuntu-24.04
+    timeout-minutes: 60
+    steps:
+      - uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0
+        with:
+          persist-credentials: false
+          fetch-depth: 0
+          ref: ${{ github.event.pull_request.head.sha || github.sha }}
+      - name: Validate the immutable image reference
+        env:
+          IMAGE: ${{ inputs.image }}
+        run: |
+          python3 - <<'PY'
+          import os, re
+          if not re.fullmatch(r"ghcr\.io/[a-z0-9][a-z0-9._/-]*@sha256:[0-9a-f]{64}", os.environ["IMAGE"]):
+              raise SystemExit("image must be a published GHCR image pinned to its sha256 digest")
+          PY
+      - name: Pull the published image without registry credentials
+        env:
+          IMAGE: ${{ inputs.image }}
+        run: |
+          mkdir -p "$RUNNER_TEMP/anonymous-docker-config"
+          docker --config "$RUNNER_TEMP/anonymous-docker-config" pull "$IMAGE"
+      - name: Evaluate selected skills
+        env:
+          IMAGE: ${{ inputs.image }}
+          SCAN_MODE: ${{ inputs.scan-mode == 'auto' && (github.event_name == 'pull_request' && 'changed' || 'all') || inputs.scan-mode }}
+          DIFF_BASE_SHA: ${{ github.event.pull_request.base.sha }}
+          DIFF_HEAD_SHA: ${{ github.event.pull_request.head.sha || github.sha }}
+          SKILL_PATHS: ${{ inputs.paths }}
+          LLM_ENABLED: ${{ inputs.llm }}
+          LLM_PROVIDER: ${{ inputs.llm-provider }}
+          LLM_MODEL: ${{ inputs.llm-model }}
+          LLM_API_KEY: ${{ inputs.llm && secrets.LLM_API_KEY || '' }}
+          REPORT_BASE_URL: ${{ inputs.report-base-url }}
+          REPORT_RUN_URL: ${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}
+          REPORT_COMMIT: ${{ github.event.pull_request.head.sha || github.sha }}
+          CALLER_WORKFLOW_SHA: ${{ github.workflow_sha }}
+        run: |
+          mkdir -p "$RUNNER_TEMP/skill-reports"
+          REPORT_IMAGE="$IMAGE"
+          REPORT_URL=""
+          if [ -n "$REPORT_BASE_URL" ]; then
+            REPORT_URL="${REPORT_BASE_URL%/}/runs/$GITHUB_RUN_ID/$GITHUB_RUN_ATTEMPT/"
+          fi
+          export REPORT_IMAGE REPORT_URL
+          llm_secret_args=()
+          if [ "$LLM_ENABLED" = true ]; then
+            llm_secret_args=(--env LLM_API_KEY)
+          fi
+          docker run --rm --user "$(id -u):$(id -g)" \
+            --read-only --tmpfs /tmp:rw,nosuid,noexec,size=1g \
+            --tmpfs /audit-tmp:rw,nosuid,noexec,mode=1777,size=1g --env TMPDIR=/audit-tmp \
+            --cap-drop ALL --security-opt no-new-privileges \
+            --mount "type=bind,src=$GITHUB_WORKSPACE,dst=/workspace,readonly" \
+            --mount "type=bind,src=$RUNNER_TEMP/skill-reports,dst=/reports" \
+            --env SKILL_PATHS --env LLM_ENABLED --env LLM_PROVIDER --env LLM_MODEL "${llm_secret_args[@]}" \
+            --env SCAN_MODE --env DIFF_BASE_SHA --env DIFF_HEAD_SHA \
+            --env CALLER_WORKFLOW_SHA \
+            --env GITHUB_ACTIONS --env REPORT_IMAGE --env REPORT_URL --env REPORT_RUN_URL --env REPORT_COMMIT \
+            "$IMAGE"
+      - name: Add the result to the workflow summary
+        if: always()
+        run: |
+          if [ -f "$RUNNER_TEMP/skill-reports/summary.md" ]; then
+            cat "$RUNNER_TEMP/skill-reports/summary.md" >> "$GITHUB_STEP_SUMMARY"
+          else
+            printf 'Tier 1 did not complete. Inspect the failed step above.\n' >> "$GITHUB_STEP_SUMMARY"
+          fi
+      - name: Upload reports even when validation fails
+        if: always()
+        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
+        with:
+          name: ${{ inputs.artifact-name }}-attempt-${{ github.run_attempt }}
+          path: ${{ runner.temp }}/skill-reports/
+          if-no-files-found: warn
+          retention-days: 14

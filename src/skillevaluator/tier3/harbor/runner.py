@@ -78,7 +78,12 @@ from skillevaluator.tier3.evals_config import (
     load_evals_config,
     validate_environment_kwargs,
 )
-from skillevaluator.tier3.harbor import CONTAINER_AGENT_IMPORT_PATHS, DOCKER_AGENT_IMPORT_PATHS
+from skillevaluator.tier3.harbor import (
+    CONTAINER_AGENT_IMPORT_PATHS,
+    DOCKER_AGENT_IMPORT_PATHS,
+    LOCAL_CODEX_HOME_DIRNAME,
+    LOCAL_CODEX_SECRETS_DIRNAME,
+)
 from skillevaluator.tier3.harbor.adapter import (
     _RUNTIME_PROCESS_CONTROL_ENV_NAMES,
     _RUNTIME_PROCESS_CONTROL_ENV_PREFIXES,
@@ -132,7 +137,7 @@ from skillevaluator.tier3.harbor.report_data import (
     encode_dataset_snapshot,
     load_staged_harbor_dataset,
 )
-from skillevaluator.tier3.harbor.secure_copy import copytree_secure
+from skillevaluator.tier3.harbor.secure_copy import IgnoreCallback, _absolute_lexical, copytree_secure
 from skillevaluator.tier3.harbor.secure_docker_environment import (
     SECURE_DOCKER_ENV_IMPORT_PATH,
     SECURE_KATA_ENV_IMPORT_PATH,
@@ -3989,12 +3994,44 @@ def _aggregate_trial_name(
     return candidate
 
 
+# Local-mode Codex runtime dirs left under a trial's agent log dir. They hold
+# the Codex credential, so attempt merges omit them instead of publishing them.
+_LOCAL_CODEX_PRIVATE_AGENT_DIRS = frozenset({LOCAL_CODEX_HOME_DIRNAME, LOCAL_CODEX_SECRETS_DIRNAME})
+
+
+def _trial_codex_private_dirs_ignore(job_path: Path) -> IgnoreCallback:
+    """Return a secure-copy ignore callback that drops local Codex runtime dirs.
+
+    Harbor's Codex agent links ``codex-home/auth.json`` to the credential in
+    ``codex-secrets`` and removes both only in a best-effort cleanup, so a
+    timed-out or cancelled trial can leave them behind. The exclusion is limited
+    to the trial agent dir: ``<trial>/agent``, or ``<trial>/steps/<step>/agent``
+    where Harbor's multi-step trials move it after each step. Every other path
+    still passes through the secure copier's link checks.
+    """
+    # copytree_secure reports directories under its own lexical source root.
+    job_root = _absolute_lexical(job_path)
+
+    def ignore(directory: str, names: list[str]) -> set[str]:
+        try:
+            parts = Path(directory).relative_to(job_root).parts
+        except ValueError:
+            return set()
+        is_trial_agent_dir = (len(parts) == 2 and parts[1] == "agent") or (
+            len(parts) == 4 and parts[1] == "steps" and parts[3] == "agent"
+        )
+        return _LOCAL_CODEX_PRIVATE_AGENT_DIRS.intersection(names) if is_trial_agent_dir else set()
+
+    return ignore
+
+
 def _merge_attempt_jobs(job_dirs: list[Path], aggregate_dir: Path) -> None:
     """Merge per-attempt Harbor jobs into the job directory shape collection expects.
 
     Trial directories are copied under attempt-qualified names and the
     per-attempt Harbor ``result.json`` statistics are combined so the merged
-    job still satisfies :func:`validate_harbor_job_result`.
+    job still satisfies :func:`validate_harbor_job_result`. Leftover local
+    Codex credential dirs in trial agent dirs are omitted from the merge.
     """
     from harbor.models.job.result import JobResult, JobStats
     from harbor.models.trial.config import TrialConfig
@@ -4045,7 +4082,12 @@ def _merge_attempt_jobs(job_dirs: list[Path], aggregate_dir: Path) -> None:
                 raise ValueError(f"attempt Harbor job root changed before snapshot: {job_path}") from exc
             if _job_path_is_link_or_reparse(job_path, before) or _job_root_fingerprint(before) != expected_fingerprint:
                 raise ValueError(f"attempt Harbor job root changed before snapshot: {job_path}")
-            copytree_secure(job_path, snapshot, allowed_root=job_resolved)
+            copytree_secure(
+                job_path,
+                snapshot,
+                allowed_root=job_resolved,
+                ignore=_trial_codex_private_dirs_ignore(job_path),
+            )
             try:
                 after = job_path.lstat()
             except OSError as exc:

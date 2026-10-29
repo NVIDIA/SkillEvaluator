@@ -109,9 +109,12 @@ check, so it also blocks the verdict.
 
 The HTML report, the CI index and the Pages history use the same verdict
 words: **Passed**, **Changes required**, **Incomplete**, **Skipped** and
-**Neutral**. Publication eligibility is shown
-next to the verdict, because a report can pass its checks and still not be
-eligible for publication. The report follows the system light or dark theme
+**Neutral**. When no check ran, the verdict is Skipped, not Passed. A tier
+whose gate does not block, such as deduplication with `--no-block-on-dedup` or
+live evaluation without `--block-on-agent-eval`, shows **Failed (advisory)**
+when it fails, because it does not require changes. Publication eligibility is
+shown next to the verdict, because a report can pass its checks and still not
+be eligible for publication. The report follows the system light or dark theme
 until you pick one, and always prints dark text on white paper.
 
 ## BENCHMARK.md

@@ -409,8 +409,9 @@ def test_html_tier2_failure_stays_failed_when_cli_gate_is_nonblocking() -> None:
     html_data = _html_report_data(html)
 
     assert html_data["summary"]["status"] == "passed"
+    # The tier still shows as failed, but a non-blocking gate requires no changes.
     assert re.search(
-        r'tier-card fail.*?tier-card-label">Tier 2</span>.*?tier-card-verdict">\s*Changes required\s*</span>',
+        r'tier-card fail.*?tier-card-label">Tier 2</span>.*?tier-card-verdict">\s*Failed \(advisory\)\s*</span>',
         html,
         re.DOTALL,
     )

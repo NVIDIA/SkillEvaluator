@@ -1284,6 +1284,8 @@ VERDICT_WORDS = {
     "neutral": "Neutral",
 }
 PUBLICATION_WORDS = {"pass": "Eligible", "fail": "Not eligible", "incomplete": "Incomplete", "neutral": "Neutral"}
+# A tier whose gate does not block can fail without requiring changes.
+ADVISORY_FAIL_WORD = "Failed (advisory)"
 # "A 90+, B 80+, C 70+, D 60+, F below 60", from the thresholds the grades use.
 QUALITY_GRADE_LEGEND = ", ".join(
     f"{grade} {threshold}+" if threshold else f"{grade} below {QUALITY_GRADE_THRESHOLDS[index - 1][0]}"
@@ -2859,6 +2861,17 @@ class HTMLReporter(ReporterBase):
         advisory_high = advisory_totals["high"]
         advisory_medium = advisory_totals["medium"]
         advisory_low = advisory_totals["low"]
+        # A tier whose every result is explicitly non-blocking is advisory: its
+        # failure does not require changes, so the report labels it "Failed (advisory)".
+        nonblocking_tiers = [
+            tier_name
+            for tier_name, tier_results in (("tier2", tier2_results), ("tier3", tier3_results))
+            if tier_results
+            and all(
+                isinstance(result.metadata.get("gating"), dict) and result.metadata["gating"].get("blocking") is False
+                for result in tier_results
+            )
+        ]
         gating = {
             "blocking_tiers": blocking_tiers,
             "advisory_tiers": advisory_tiers,
@@ -3103,6 +3116,8 @@ class HTMLReporter(ReporterBase):
             quality_min_score=quality_min_score,
             quality_grade_legend=QUALITY_GRADE_LEGEND,
             verdict_words=VERDICT_WORDS,
+            advisory_fail_word=ADVISORY_FAIL_WORD,
+            nonblocking_tiers=nonblocking_tiers,
             publication_words=PUBLICATION_WORDS,
             tier3_status_reason=publication.tier3.reason,
             tier1_failed_checks=tier1_failed_checks,

@@ -209,6 +209,68 @@ def test_header_shows_one_verdict_and_skill_name_is_the_only_h1() -> None:
     assert re.findall(r"<h1[^>]*>([^<]+)</h1>", html) == ["demo"]
 
 
+def _gated(results: list[ValidationResult], tier: int, *, blocking: bool = True) -> list[ValidationResult]:
+    for result in results:
+        result.metadata["gating"] = {"tier": tier, "blocking": blocking}
+    return results
+
+
+def _header_verdict(html: str) -> list[tuple[str, str]]:
+    header = html.split('<header class="main-header">', 1)[1].split("</header>", 1)[0]
+    return re.findall(
+        r'data-verdict="(\w+)">.*?<span class="sr-only">Verdict: </span>([^<]+)</span>', header, re.DOTALL
+    )
+
+
+def _tier_card_verdicts(html: str) -> list[tuple[str, str]]:
+    return re.findall(r'tier-card-label">(Tier \d)</span>\s*<span class="tier-card-verdict">([^<]+)</span>', html)
+
+
+def test_header_says_skipped_when_no_check_ran() -> None:
+    skipped = []
+    for name in ("Secrets Detection", "PII Scan"):
+        result = ValidationResult(validator_name=name)
+        result.metadata.update(skipped=True, skip_reason="Disabled by --checks")
+        skipped.append(result)
+
+    html = _render(_gated(skipped, 1))
+    summary = html.split('<section class="exec-summary', 1)[1].split("</section>", 1)[0]
+
+    # The header and the summary give the same verdict: nothing ran, so nothing passed.
+    assert _header_verdict(html) == [("skipped", "Skipped")]
+    assert '<span class="verdict-chip warn">Skipped</span>' in summary
+    assert 'data-verdict="pass"' not in html
+
+
+def test_failing_advisory_tier_is_labelled_advisory() -> None:
+    def results(blocking: bool) -> list[ValidationResult]:
+        license_check = ValidationResult(validator_name="License Compliance")
+        license_check.add_success("license", "License found")
+        similarity = ValidationResult(validator_name="Similarity Check")
+        similarity.add_error("Similarity provider failed")
+        return [*_gated([license_check], 1), *_gated([similarity], 2, blocking=blocking)]
+
+    advisory = _render(results(blocking=False))
+    blocking = _render(results(blocking=True))
+
+    # A failing tier whose gate does not block never says "Changes required".
+    assert _header_verdict(advisory) == [("pass", "Passed")]
+    assert _tier_card_verdicts(advisory) == [("Tier 1", "Passed"), ("Tier 2", "Failed (advisory)")]
+    assert _header_verdict(blocking) == [("fail", "Changes required")]
+    assert _tier_card_verdicts(blocking) == [("Tier 1", "Passed"), ("Tier 2", "Changes required")]
+
+
+def test_failing_advisory_tier3_is_labelled_advisory() -> None:
+    agent_eval = ValidationResult(validator_name="AGENT_EVAL")
+    agent_eval.add_error("Harbor execution failed")
+
+    html = HTMLReporter(include_timestamp=False).render_all(_gated([agent_eval], 3, blocking=False))
+
+    assert _tier_card_verdicts(html) == [("Tier 3", "Failed (advisory)")]
+    assert '<span class="sr-only">Tier 3 verdict: </span>Failed (advisory)</span>' in html
+    assert "Changes required" not in html.split("<main", 1)[1].split('id="tab-tier3"', 1)[0]
+
+
 def test_heading_levels_do_not_skip() -> None:
     for results in (_results(), [ValidationResult(validator_name="SCHEMA")]):
         levels = _outline(_render(results)).headings

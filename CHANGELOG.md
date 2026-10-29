@@ -57,8 +57,10 @@ All notable changes to SkillEvaluator are documented in this file.
   Failed checks are listed first, raw check IDs get plain names, and
   publication eligibility sits next to the verdict.
 - The HTML report, the CI index and the Pages history use one verdict
-  vocabulary: Passed, Changes required, Incomplete, Skipped and Neutral. The
-  CI index names the same first fix as each skill's report and links to it.
+  vocabulary: Passed, Changes required, Incomplete, Skipped and Neutral. When
+  no check ran, the header and the summary both say Skipped. A failing tier
+  whose gate does not block shows Failed (advisory). The CI index names the
+  same first fix as each skill's report and links to it.
 - The SkillEvaluator logo replaces the letter tile and the green square on
   every report page, the CI index and the Pages history. Colors use one
   palette built on the logo greens, with WCAG AA text contrast in light and

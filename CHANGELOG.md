@@ -290,6 +290,17 @@ All notable changes to SkillEvaluator are documented in this file.
   malformed `metadata`, and the quality score counts `metadata.author` and
   `metadata.tags` as missing, as it already did for other non-mapping values.
 
+### Security
+
+- Linux local mode now launches Bubblewrap by the absolute path that passed its
+  smoke test instead of a bare `bwrap`. The bare name was looked up on the host
+  `PATH` for every command, from that command's working directory (the
+  writable trial workspace by default), so a relative `PATH` entry such as `.`,
+  an empty entry, or `./node_modules/.bin` let a `bwrap` file created by an
+  earlier sandboxed command run outside the sandbox. A `bwrap` symlink on
+  `PATH` is resolved to its target before the smoke test, and the local-mode
+  isolation message names that resolved path.
+
 ## 0.6.0 - 2026-10-20
 
 ### Added

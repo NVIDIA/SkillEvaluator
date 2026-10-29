@@ -564,7 +564,9 @@ on your machine runs the trials, wrapped in an OS-level sandbox. On Linux that
 is Bubblewrap — kernel namespace isolation, a read-only view of the system,
 writes confined to the run directories, and a network namespace that is
 isolated when the run is airgapped and shared for model egress when network
-is allowed. On macOS it is Seatbelt, which confines reads and writes and —
+is allowed. SkillEvaluator resolves `bwrap` on `PATH` to an absolute path once,
+smoke-tests that binary, and launches the same binary for every command. On
+macOS it is Seatbelt, which confines reads and writes and —
 even when network is allowed — denies inbound connections, socket binding,
 and Unix sockets (except the `mDNSResponder` DNS socket); it cannot provide
 full process isolation, so it is the weaker of the two. Native Windows is

@@ -63,3 +63,26 @@ def test_real_staging_copies_a_standalone_lexer(tmp_path):
         check=True,
     )
     assert json.loads(completed.stdout) == ["cat", "2>", "/dev/null"]
+
+
+def test_staged_invocation_analysis_uses_only_staged_helpers(tmp_path):
+    from skillevaluator.tier3.eval_core import script_invocation
+
+    _copy_verifier(tmp_path)
+    staged = tmp_path / "tests" / "skill_evaluator"
+    assert (staged / "script_invocation.py").read_bytes() == Path(script_invocation.__file__).read_bytes()
+    assert checks._cmd_executes_script is script_invocation._cmd_executes_script
+    program = (
+        "import json,sys; sys.path.insert(0,sys.argv[1]); "
+        "import script_invocation as module; "
+        "commands=['python calc.py','cat calc.py',\"sh -c 'python calc.py'\"]; "
+        "print(json.dumps([module._cmd_executes_script(c,'calc.py') for c in commands]))"
+    )
+    completed = subprocess.run(
+        [sys.executable, "-I", "-S", "-c", program, str(staged)],
+        cwd=tmp_path,
+        capture_output=True,
+        text=True,
+        check=True,
+    )
+    assert json.loads(completed.stdout) == [True, False, True]

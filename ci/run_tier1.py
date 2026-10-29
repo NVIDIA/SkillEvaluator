@@ -32,6 +32,11 @@ except ModuleNotFoundError:
     from ci.native_reports import render_native_reports
 
 try:
+    from publish_reports import PublicationError, validate_report
+except ModuleNotFoundError:
+    from ci.publish_reports import PublicationError, validate_report
+
+try:
     from report_views import finding_repository_path, render_reports
 except ModuleNotFoundError:
     from ci.report_views import finding_repository_path, render_reports
@@ -77,7 +82,13 @@ def discover_skills(workspace: Path, roots: str) -> list[Path]:
     discovered: set[Path] = set()
     for raw in configured:
         relative = Path(raw)
-        if relative.is_absolute() or ".." in relative.parts or "\\" in raw or ":" in raw:
+        if (
+            relative.is_absolute()
+            or ".." in relative.parts
+            or "\\" in raw
+            or ":" in raw
+            or any(ord(character) < 32 or ord(character) == 127 for character in raw)
+        ):
             raise ConfigurationError("Skill roots must be relative directories without parent traversal.")
         current = workspace
         for part in relative.parts:
@@ -458,9 +469,17 @@ def run(
                     for result in data["results"]
                 )
             )
-            if not row["passed"] and row["overall_status"] == "passed":
+            try:
+                # The publisher rejects the whole artifact for one contradictory
+                # report. Check it the same way here so only this skill is lost.
+                validate_report(data, row)
+                consistent = True
+            except PublicationError:
+                consistent = False
+            if not consistent or (not row["passed"] and row["overall_status"] == "passed"):
                 row["overall_status"] = "error"
                 row["incomplete_scans"] = []
+                row["passed"] = False
                 row["error"] = "Process exit or validator results contradict the report verdict."
             else:
                 row.pop("error", None)

@@ -102,9 +102,52 @@ def test_contradictory_passing_report_with_incomplete_scanners_has_publishable_e
     assert children == {}
 
 
-@pytest.mark.parametrize("root", ["/etc", "../skills", "skills/../other", "C:\\skills", "skills\\a"])
+@pytest.mark.parametrize(
+    "exit_code,status,changes",
+    [
+        (1, "failed", {"incomplete_scans": ["semgrep"]}),
+        (0, "failed", {}),
+        (1, "incomplete", {"incomplete_scans": []}),
+        (1, "incomplete", {"incomplete_scans": ["trivy"]}),
+        (0, "incomplete", {}),
+        (0, "passed", {"total_errors": 1}),
+    ],
+)
+def test_any_contradictory_report_becomes_error_row_without_losing_other_skills(tmp_path, exit_code, status, changes):
+    import ci.publish_reports as publisher
+
+    workspace = tmp_path / "workspace"
+    skill(workspace, "skills/a")
+    skill(workspace, "skills/b")
+    report = {**payload(status == "passed", status), **changes}
+    reports = tmp_path / "reports"
+    runner.run(
+        workspace,
+        reports,
+        {"SKILL_PATHS": "skills", "LLM_ENABLED": "false"},
+        execute=fake_cli([(exit_code, report), (0, payload())], []),
+    )
+    summary = json.loads((reports / "summary.json").read_text())
+    assert [row["overall_status"] for row in summary["skills"]] == ["error", "passed"]
+    assert summary["skills"][0]["incomplete_scans"] == []
+    assert summary["skills"][0]["passed"] is False
+    artifact = io.BytesIO()
+    with zipfile.ZipFile(artifact, "w") as archive:
+        for path in sorted(reports.rglob("*.json")):
+            archive.write(path, path.relative_to(reports).as_posix())
+    retained, children = publisher.read_artifact(artifact.getvalue())
+    assert [row["overall_status"] for row in retained["skills"]] == ["error", "passed"]
+    assert list(children) == ["skill-002"]
+    assert "Report unavailable" in (reports / "skill-001/skillevaluator-tier1.html").read_text()
+
+
+@pytest.mark.parametrize(
+    "root", ["/etc", "../skills", "skills/../other", "C:\\skills", "skills\\a", "sk\tills", "skills/m\x7fskill"]
+)
 def test_rejects_unsafe_roots(tmp_path, root):
-    with pytest.raises(runner.ConfigurationError):
+    skill(tmp_path, "sk\tills/a")
+    skill(tmp_path, "skills/m\x7fskill")
+    with pytest.raises(runner.ConfigurationError, match="without parent traversal"):
         runner.discover_skills(tmp_path, root)
 
 
@@ -370,11 +413,12 @@ def test_incomplete_runtime_rollup_is_not_mislabeled_as_inconsistent_evidence(tm
             workspace,
             reports,
             {"SKILL_PATHS": "skills"},
-            execute=fake_cli([(1, payload(True, "incomplete", ["semgrep"]))], []),
+            execute=fake_cli([(1, payload(False, "incomplete", ["semgrep"]))], []),
         )
         == 1
     )
     summary = json.loads((reports / "summary.json").read_text())
+    assert summary["skills"][0]["overall_status"] == "incomplete"
     assert (summary["failed"], summary["incomplete"]) == (1, 1)
     compact = (reports / "summary.md").read_text()
     assert "**Tier 1 scan result: INCOMPLETE**" in compact

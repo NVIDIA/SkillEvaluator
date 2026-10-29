@@ -53,17 +53,19 @@ Artifacts expire after the configured retention period;
 hosted history is an optional separate surface. Quality scores are not scanner
 pass percentages or proof of useful live-agent behavior.
 
-Before scanning, CI collects values matched by the bundled credential patterns
-across the selected skills. Raw scanner files stay in private temporary storage;
-recognized values are removed from retained reports and annotations. When a
-credential or an LLM key is present, raw scanner logs are withheld; the
-structured reports remain available. The preflight is bounded to 10,000 files,
-32 MiB per file, 128 MiB per skill and 8,192 characters per line, with bounded
-redaction values. If it cannot safely inspect or redact the input, the run
-reports an error without publishing detailed scan output. This is not a
-guarantee that every credential or transformed value is detected. Remove and
-rotate exposed credentials; reports and Git history from previous runs are not
-rewritten automatically.
+Before scanning, CI collects values matched by the bundled credential patterns,
+NVIDIA API keys, and unquoted `KEY=value` and `Bearer` credentials across the
+selected skills. Raw scanner files stay in private temporary storage. Recognized
+values, parts of them cut or escaped by a scanner, and database URL passwords
+are removed from retained reports and annotations. Retained Markdown and SARIF
+are rendered from the redacted JSON. When a credential or an LLM key is present,
+raw scanner logs are withheld; the structured reports remain available. The
+preflight is bounded to 10,000 files, 32 MiB per file, 128 MiB per skill and
+8,192 characters per line, with bounded redaction values. If it cannot safely
+inspect or redact the input, the run reports an error without publishing
+detailed scan output. This is not a guarantee that every credential or
+transformed value is detected. Remove and rotate exposed credentials; reports
+and Git history from previous runs are not rewritten automatically.
 
 ## Optional hosted reports and PR feedback
 

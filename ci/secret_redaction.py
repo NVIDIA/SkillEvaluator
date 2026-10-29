@@ -11,6 +11,8 @@ import os
 import re
 from pathlib import Path
 
+from skillevaluator.reporting import MarkdownReporter, SARIFReporter
+from skillevaluator.reporting.retained import retained_results
 from skillevaluator.utils.secret_redaction import SENSITIVE_PII_CATEGORIES, Redactor, sensitive_values
 from skillevaluator.utils.secure_fs import SecureRoot
 from skillevaluator.validators.security import SecurityValidator
@@ -21,6 +23,18 @@ MAX_FILES = 10000
 MAX_TOKENS = 4096
 MAX_TOKEN_BYTES = 1024 * 1024
 MAX_LINE_CHARS = 8192
+# The PII patterns need a quoted value. Also collect NVIDIA API keys and the
+# unquoted KEY=value and Bearer forms. Such a value must contain letters and
+# digits, so ordinary words and variable names are not collected. Lengths are
+# bounded to limit backtracking and to stay within the redaction limits.
+NVIDIA_API_KEY = re.compile(r"\bnvapi-[A-Za-z0-9_-]{40,250}")
+UNQUOTED_VALUES = (
+    re.compile(
+        r"(?i)(?:secret|password|passwd|pwd|api[-_]?key|apikey|auth[-_]?token)\w{0,64}\s*[=:]\s*"
+        r"([A-Za-z0-9_+-][A-Za-z0-9_+/=-]{15,255})(?=[\s\"'`;&|,)\]}]|$)"
+    ),
+    re.compile(r"(?i)\bbearer\s+([A-Za-z0-9_+-][A-Za-z0-9_+/=.~-]{15,255})(?=[\s\"'`;&|,)\]}]|$)"),
+)
 
 
 def collect_sensitive_values(skill: Path) -> set[str]:
@@ -53,7 +67,10 @@ def collect_sensitive_values(skill: Path) -> set[str]:
                 if raw.startswith((b"\xff\xfe", b"\xfe\xff"))
                 else raw.decode("utf-8-sig", errors="ignore")
             )
-            for line in text.splitlines():
+            # Split lines as the scanners read them, on newlines only.
+            # str.splitlines() also splits on characters such as U+2028 and
+            # form feed, which can sit inside a quoted credential.
+            for line in re.split(r"\r\n?|\n", text):
                 # Some PII patterns can backtrack heavily on very long input.
                 # Refuse the scan before applying them to unbounded lines.
                 if len(line) > MAX_LINE_CHARS:
@@ -61,6 +78,14 @@ def collect_sensitive_values(skill: Path) -> set[str]:
                 for category, pattern, _exceptions, _definition in patterns:
                     for match in pattern.finditer(line):
                         tokens.update(sensitive_values(category, match.group(), line))
+                tokens.update(NVIDIA_API_KEY.findall(line))
+                for pattern in UNQUOTED_VALUES:
+                    tokens.update(
+                        value
+                        for value in pattern.findall(line)
+                        if any(character.isdigit() for character in value)
+                        and any(character.isalpha() for character in value)
+                    )
             if "PRIVATE KEY-----" in text:
                 blocks = re.findall(
                     r"-----BEGIN [^\r\n]*PRIVATE KEY-----[\s\S]*?-----END [^\r\n]*PRIVATE KEY-----", text
@@ -92,6 +117,7 @@ def sanitized_outputs(raw: Path, tokens: set[str]) -> dict[str, bytes]:
     sanitized = {}
     total = 0
     redactor = Redactor(tokens)
+    document = None
     with SecureRoot(raw) as root:
         for name in allowed:
             path = raw / name
@@ -106,9 +132,23 @@ def sanitized_outputs(raw: Path, tokens: set[str]) -> dict[str, bytes]:
                     b"Raw scanner log withheld while credential redaction is active. See the structured reports.\n"
                 )
                 continue
+            if name in {"skillevaluator-tier1.md", "skillevaluator-tier1.sarif.json"}:
+                # These files cut and escape text, so a value can survive a
+                # literal search. Render them from the redacted JSON instead.
+                if document is None:
+                    raise ValueError("The evaluator did not produce JSON evidence.")
+                try:
+                    results = retained_results(document)
+                except ValueError:
+                    # The runner rejects this JSON next; keep the other evidence.
+                    continue
+                reporter = MarkdownReporter() if name.endswith(".md") else SARIFReporter()
+                sanitized[name] = reporter.render_all(results).encode("utf-8")
+                continue
             text = content.decode("utf-8")
             if name.endswith(".json"):
-                text = json.dumps(redactor.object(json.loads(text)), ensure_ascii=True, allow_nan=False, indent=2)
+                document = redactor.object(json.loads(text))
+                text = json.dumps(document, ensure_ascii=True, allow_nan=False, indent=2)
             else:
                 text = redactor.text(text)
             sanitized[name] = text.encode("utf-8")

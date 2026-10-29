@@ -37,6 +37,10 @@ All notable changes to SkillEvaluator are documented in this file.
 - Dependency audits inspect pinned package versions without installing packages
   or executing build scripts. Unpinned, URL and other unresolved requirements
   report incomplete coverage instead of executing package resolution.
+- The CLI reference now compares the direct `tier1`, `tier2`, and `tier3`
+  workflows with `validate --tiers`: which tiers run, Tier 1 dependency and LLM
+  stages, report files, and exit codes. It also states that `--tiers` must
+  include Tier 1, so Tier 2 or Tier 3 alone runs through its direct workflow.
 - README and onboarding docs now offer two first-run paths: a lightweight,
   keyless quality check on a bundled skill, or an NVIDIA Build rubric evaluation
   with eligible free prototyping access. Installation adds extras as needed,
@@ -55,6 +59,24 @@ All notable changes to SkillEvaluator are documented in this file.
 - PII credential findings mask their values and source lines. GitHub CI stages
   scanner output privately, redacts recognized credential values from retained
   reports and logs, and withholds detailed output when redaction cannot finish.
+- Local Claude Code trials retain Harbor's instruction environment variables so
+  prompts reach `claude --print`. The exception accepts only the legacy
+  `HARBOR_INSTRUCTION` name and Claude Code's UUID-named instruction variable;
+  protected paths, loader controls, and unrelated Harbor variables retain their
+  existing filtering ([#245](https://github.com/NVIDIA/SkillEvaluator/issues/245)).
+
+- Tier 3 reports preserve unavailable evaluator lift as `null` when no baseline
+  ran, rather than reporting a measured zero. CLI evaluator tables display
+  missing or unavailable scores as `n/a` without interrupting JSON and HTML
+  report generation; measured zeroes retain their numeric formatting
+  ([#240](https://github.com/NVIDIA/SkillEvaluator/issues/240)).
+
+- Explicit searches of `/` (`find`, `grep -r`, `rg`, `ag`, `du` and `tree` with a
+  `/` operand, and native search tools rooted at `/`) now count as wasted tool
+  calls whether or not they name the expected skill or script, including when
+  output is redirected or the search runs inside `sh -c`. Host and bundled
+  scoring agree, while scoped searches and slash-valued patterns retain their
+  classification.
 - PII email scans recognize all RFC 2606 reserved domains, including their
   subdomains, mixed-case forms, trailing dots, and prose ellipses. A local-part
   boundary prevents quadratic rescanning of long excluded addresses. Ordinary

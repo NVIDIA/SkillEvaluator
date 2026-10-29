@@ -67,11 +67,13 @@ detailed Markdown, SARIF and scanner logs. Failed and incomplete scans retain
 their available reports; missing evidence is not a pass. Quality scores and the
 pass/fail decision are separate.
 
-Known credential values detected by the PII patterns are redacted from CI
-reports. When a credential or an LLM key is present, raw scanner logs are
-withheld. This is not a guarantee that every possible credential or
-transformed value will be detected. Remove and rotate exposed credentials;
-previously published reports and Git history are not retroactively redacted.
+Known credential values detected by the PII patterns, NVIDIA API keys, and
+unquoted `KEY=value` and `Bearer` credentials are redacted from CI reports,
+including parts of them that a scanner cuts or escapes. When a credential or an
+LLM key is present, raw scanner logs are withheld. This is not a guarantee that
+every possible credential or transformed value will be detected. Remove and
+rotate exposed credentials; previously published reports and Git history are not
+retroactively redacted.
 
 The dedicated workflow runs independently alongside existing build and test
 workflows. It does not automatically wait for them. GitHub's `needs` connects

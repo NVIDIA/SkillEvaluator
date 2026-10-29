@@ -121,7 +121,7 @@ jobs:
     name: HTML parser compatibility (Python ${{ matrix.python-version }})
     needs: classify-changes
     if: ${{ !cancelled() && needs.classify-changes.outputs.docs_only != 'true' }}
-    # Exact older Python patches have setup-python artifacts for 24.04, not 26.04.
+    # These older Python patch releases have setup-python builds for Ubuntu 24.04.
     runs-on: ubuntu-24.04
     strategy:
       fail-fast: false

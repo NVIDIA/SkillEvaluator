@@ -528,17 +528,44 @@ def _caller_blob(api, repository: str, sha: str) -> str:
     return caller["sha"]
 
 
+def _fork_associations(api, repository: str, run: dict) -> list:
+    """Find an open fork PR from API run metadata; GitHub never records it on the run."""
+    head_repository = run.get("head_repository")
+    if head_repository is None:
+        raise StalePublication("The fork for this PR run was deleted, so the run cannot be verified.")
+    name = head_repository.get("full_name") if isinstance(head_repository, dict) else None
+    if name == repository:
+        raise StalePublication("The PR is closed or no longer associated with this run.")
+    branch = run.get("head_branch")
+    if not isinstance(name, str) or REPO_PATTERN.fullmatch(name) is None or not isinstance(branch, str) or not branch:
+        raise PublicationError("The PR run lacks a valid head repository and branch.")
+    head = urllib.parse.quote(name.split("/", 1)[0], safe="") + ":" + urllib.parse.quote(branch, safe="")
+    pulls = api.get(f"/repos/{repository}/pulls?state=open&head={head}&per_page=100")
+    if not isinstance(pulls, list) or any(not isinstance(pr, dict) for pr in pulls):
+        raise PublicationError("The fork PR run has an unsupported pull request listing.")
+    matches = [
+        pr
+        for pr in pulls
+        if ((pr.get("head") or {}).get("repo") or {}).get("full_name") == name
+        and ((pr.get("base") or {}).get("repo") or {}).get("full_name") == repository
+    ]
+    if not matches:
+        raise StalePublication("The fork PR is closed or merged; no open PR uses this run's fork branch.")
+    return matches
+
+
 def _executed_caller_blob(api, repository: str, run: dict) -> str:
     """Reconstruct unambiguous PR merge content from GitHub-recorded revisions.
 
     The run API exposes the PR head, not GITHUB_WORKFLOW_SHA. Never accept a
     merge revision asserted by an artifact or the PR's current mutable ref.
+    Fork runs have no recorded PR, so the PR API supplies the same revisions.
     """
     if run["event"] != "pull_request":
         return _caller_blob(api, repository, run["head_sha"])
     associations = run.get("pull_requests")
     if associations == []:
-        raise StalePublication("The PR is closed or no longer associated with this run.")
+        associations = _fork_associations(api, repository, run)
     if not isinstance(associations, list) or len(associations) != 1:
         raise PublicationError("The PR run lacks an unambiguous recorded base revision; update the branch and rerun.")
     association = associations[0]

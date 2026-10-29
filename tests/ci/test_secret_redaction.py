@@ -355,3 +355,257 @@ def test_database_password_is_collected_in_decoded_form():
 
     matched = "postgres://user:encoded%2Fpassword@host.local/db"
     assert "encoded/password" in sensitive_values("database_credentials", matched)
+
+
+def _assert_no_fragment(value: str | bytes, secret: str) -> None:
+    text = value.decode() if isinstance(value, bytes) else value
+    # Upstream text can start, end or be escaped inside a value. No window of
+    # eight characters may remain in any encoding that a report uses.
+    for start in range(len(secret) - 7):
+        window = secret[start : start + 8]
+        forms = {
+            window,
+            html.escape(window),
+            json.dumps(window)[1:-1],
+            quote(window, safe=""),
+            html.escape(window, quote=False).replace("|", "&#124;").replace("`", "&#96;"),
+        }
+        if any(form in text for form in forms):
+            pytest.fail("A fragment of a synthetic credential was present in a shared output.")
+
+
+def _publish(tmp_path: Path, monkeypatch, reports: Path) -> tuple[Path, Path]:
+    spec = importlib.util.spec_from_file_location("publisher_fixtures", ROOT / "tests/ci/test_publish_reports.py")
+    fixtures = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(fixtures)
+    archive = io.BytesIO()
+    with zipfile.ZipFile(archive, "w") as zipped:
+        for path in reports.rglob("*"):
+            if path.is_file():
+                zipped.write(path, path.relative_to(reports).as_posix())
+
+    class ArtifactAPI(fixtures.FakeAPI):
+        def download_artifact(self, _artifact_id):
+            return archive.getvalue()
+
+    monkeypatch.setenv("TRUSTED_EVALUATOR_SHA", "c" * 40)
+    monkeypatch.setenv("TRUSTED_CALLER_BLOBS", "b" * 40)
+    monkeypatch.syspath_prepend(str(ROOT / "ci"))
+    site, feedback = tmp_path / "site", tmp_path / "feedback"
+    fixtures.publisher.publish(
+        ArtifactAPI(record={**fixtures.run_record(), "conclusion": "failure"}),
+        "owner/consumer",
+        123,
+        "https://owner.github.io/consumer",
+        site,
+        feedback,
+    )
+    return site, feedback
+
+
+def test_redactor_masks_values_that_upstream_text_cuts_or_escapes():
+    from skillevaluator.utils.secret_redaction import Redactor
+
+    value = "nvapi-" + "Qx7" * 16
+    password = "Rt5" * 4 + "|" + "Wm8`" * 3
+    redactor = Redactor({value, password})
+    cell = html.escape(password, quote=False).replace("|", "&#124;").replace("`", "&#96;")
+    for text in (
+        # A context window that starts inside a value.
+        "window: " + value[3:] + '"\nWEBHOOK = "https://hooks.example.invalid/x"',
+        # A window that starts inside a value and is then cut again.
+        "excerpt " + value[9:41] + "...",
+        json.dumps({"snippet": value[13:]}),
+        "| " + cell + " |",
+    ):
+        safe = redactor.text(text)
+        _assert_no_fragment(safe, value)
+        _assert_no_fragment(safe, password)
+    ordinary = "Dangerous code execution: subprocess.run(cmd, shell=True) in scripts/run.py"
+    assert redactor.text(ordinary) == ordinary
+
+
+def test_redactor_masks_database_userinfo_when_the_text_ends_inside_it():
+    from skillevaluator.utils.secret_redaction import Redactor
+
+    password = "Kp4" * 4
+    for redactor in (Redactor({password}), Redactor(set())):
+        safe = redactor.text('    url = "postgresql://svc:' + password[:10])
+        if password[:6] in safe or "postgresql://" not in safe:
+            pytest.fail("A cut database password was not masked.")
+    ordinary = [
+        "postgresql://db.local:5432/app",
+        'DSN = "postgresql://db.local:5432"',
+        "mysql://reporting@db.local/app",
+        "https://user.example.invalid:8443/path",
+    ]
+    assert [Redactor(set()).text(text) for text in ordinary] == ordinary
+    # The connection string match is not a secret; its words stay readable.
+    connection = Redactor({'conn_string = "Server=db.local;password='})
+    assert connection.text("Hardcoded password in a connection string") == "Hardcoded password in a connection string"
+
+
+def test_redactor_masks_a_short_database_password_when_the_text_starts_inside_it(tmp_path):
+    from ci.secret_redaction import collect_sensitive_values
+
+    from skillevaluator.utils.secret_redaction import Redactor
+
+    skill = _skill(tmp_path)
+    password = "Gh7" * 4 + "Gh"
+    (skill / "source.py").write_text('DATABASE_URL = "postgresql://reporting:' + password + '@db.local/app"\n')
+    redactor = Redactor(collect_sensitive_values(skill))
+    for start in range(1, len(password) - 7):
+        # A context window that starts inside the password cuts off the scheme.
+        safe = redactor.text(password[start:] + '@db.local/app"\nWEBHOOK = "https://hooks.example.invalid/x"')
+        _assert_no_fragment(safe, password)
+        assert "db.local/app" in safe
+    ordinary = "Send the export to reporting@db.local after the run."
+    assert redactor.text(ordinary) == ordinary
+
+
+def test_retained_markdown_and_sarif_are_rendered_from_redacted_json(tmp_path):
+    workspace, reports = tmp_path / "workspace", tmp_path / "reports"
+    _skill(workspace)
+    value = _fixture_value()
+
+    def fake_cli(argv, **kwargs):
+        target = Path(argv[argv.index("-o") + 1])
+        result = SecurityValidator(use_llm=False).validate_pii_only(Path(argv[2]))
+        result.validator_name = "PII Scan"
+        result.validator_description = "Detect sensitive identifiers"
+        payload = json.loads(JSONReporter(include_timestamp=False).render_all([result]))
+        # Another scanner's context window started inside the value.
+        payload["results"][0]["findings"][0]["line_content"] = value[3:]
+        (target / "skillevaluator-tier1.json").write_text(json.dumps(payload))
+        # The evaluator's own files escape and cut text in ways a literal
+        # search cannot follow.
+        (target / "skillevaluator-tier1.md").write_text("Raw evaluator Markdown " + value.replace("-", "\\-")[:30])
+        (target / "skillevaluator-tier1.sarif.json").write_text(json.dumps({"raw": "Raw evaluator SARIF"}))
+        return subprocess.CompletedProcess(argv, 1)
+
+    assert runner.run(workspace, reports, {"SKILL_PATHS": "skills"}, execute=fake_cli) == 1
+    markdown = (reports / "skill-001/skillevaluator-tier1.md").read_text()
+    sarif = json.loads((reports / "skill-001/skillevaluator-tier1.sarif.json").read_text())
+    if "Raw evaluator" in markdown or not markdown.startswith("# SkillEvaluator Validation Report"):
+        pytest.fail("Retained Markdown was not rendered from the redacted JSON.")
+    assert sarif["version"] == "2.1.0"
+    assert [item["properties"]["checkName"] for item in sarif["runs"][0]["results"]] == ["hardcoded_secrets"]
+    for path in reports.rglob("*"):
+        if path.is_file():
+            _assert_no_fragment(path.read_bytes(), value)
+
+
+def test_preflight_collects_unquoted_nvidia_key_and_bearer_values(tmp_path):
+    from ci.secret_redaction import collect_sensitive_values
+
+    skill = _skill(tmp_path)
+    key = "nvapi-" + "kl" * 24
+    bearer = "Tk9" * 8
+    (skill / "source.py").write_text("value = 1\n")
+    (skill / "SKILL.md").write_text(
+        "---\nname: demo\ndescription: A sample formatting skill.\n---\n# Demo\n\n"
+        "```bash\nexport NVIDIA_API_KEY=" + key + "\n"
+        "curl -H 'Authorization: Bearer " + bearer + "' https://api.example.invalid\n```\n"
+    )
+    tokens = collect_sensitive_values(skill)
+    if key not in tokens or bearer not in tokens:
+        pytest.fail("Credential preflight did not identify an unquoted credential.")
+
+
+def test_preflight_does_not_collect_ordinary_words_after_credential_names(tmp_path):
+    from ci.secret_redaction import collect_sensitive_values
+
+    skill = _skill(tmp_path)
+    (skill / "source.py").write_text("value = 1\n")
+    (skill / "SKILL.md").write_text(
+        "---\nname: demo\ndescription: A sample formatting skill.\n---\n# Demo\n\n"
+        "The password: required for the staging environment.\n"
+        "Send the header Authorization: Bearer token_from_the_environment.\n"
+        "export NVIDIA_API_KEY=$NVIDIA_API_KEY_FROM_THE_VAULT\n"
+        "api_key = load_configuration_value(name)\n"
+        "API_KEY_FILE=/run/secrets/provider_key_v2\n"
+        # A long encoded blob is not a key; collecting it would stop the scan.
+        "api_key: " + "Ab1" * 200 + "\n"
+    )
+    assert collect_sensitive_values(skill) == set()
+
+
+@pytest.mark.parametrize("mark", ["\u200b", "\ufeff", "\u00a0"])
+def test_preflight_matches_values_echoed_with_an_invisible_character_marker(tmp_path, mark):
+    from ci.secret_redaction import collect_sensitive_values
+
+    from skillevaluator.utils.secret_redaction import Redactor
+    from skillevaluator.validators.unicode_smuggle import UnicodeSmuggleValidator
+
+    skill = _skill(tmp_path)
+    leading, middle = "nvapi-" + "Hj6" * 16, "Lm3" * 4 + "Pq2" * 6
+    short = "Kp4" * 4
+    lines = [
+        'NVIDIA_API_KEY = "' + mark + leading + '"',
+        'DB_PASSWORD = "' + middle[:12] + mark + middle[12:] + '"',
+        # A short password is matched only as a whole value.
+        'conn_string = "Server=db.local;password=' + mark + short + ';"',
+    ]
+    (skill / "source.py").write_text("\n".join(lines) + "\n")
+    redactor = Redactor(collect_sensitive_values(skill))
+    for line in lines:
+        # The Unicode check echoes the line with the character shown as a marker.
+        safe = redactor.text(UnicodeSmuggleValidator._safe_line_content(line))
+        _assert_no_fragment(safe, leading)
+        _assert_no_fragment(safe, middle)
+        _assert_no_fragment(safe, short)
+
+
+@pytest.mark.parametrize("separator", ["\u2028", "\u0085", "\x0c"])
+def test_preflight_splits_lines_as_the_scanners_do(tmp_path, separator):
+    from ci.secret_redaction import collect_sensitive_values
+
+    from skillevaluator.utils.secret_redaction import Redactor
+    from skillevaluator.validators.unicode_smuggle import UnicodeSmuggleValidator
+
+    skill = _skill(tmp_path)
+    value = "Hj6" * 6 + "Lm3" * 6
+    line = 'API_SECRET = "' + value[:10] + separator + value[10:] + '"'
+    (skill / "source.py").write_text(line + "\n", encoding="utf-8")
+    # The PII scan splits only on newlines, so it still flags the value.
+    result = SecurityValidator(use_llm=False).validate_pii_only(skill)
+    assert any(f.check_name == "hardcoded_secrets" for f in result.findings)
+    tokens = collect_sensitive_values(skill)
+    if value[:10] + separator + value[10:] not in tokens:
+        pytest.fail("Credential preflight split a quoted value at a line separator.")
+    redactor = Redactor(tokens)
+    # YARA echoes the raw line. The Unicode check shows the character as a marker.
+    for echo in (line, UnicodeSmuggleValidator._safe_line_content(line)):
+        _assert_no_fragment(redactor.text(echo), value)
+
+
+def test_invisible_character_in_credential_never_reaches_reports_or_pages(tmp_path, capsys, monkeypatch):
+    from skillevaluator.validators.unicode_smuggle import UnicodeSmuggleValidator
+
+    workspace, reports = tmp_path / "workspace", tmp_path / "reports"
+    skill = _skill(workspace)
+    value = "nvapi-" + "Hj6" * 16
+    (skill / "source.py").write_text('NVIDIA_API_KEY = "\u200b' + value + '"\n')
+
+    def fake_cli(argv, **kwargs):
+        target = Path(argv[argv.index("-o") + 1])
+        results = [
+            SecurityValidator(use_llm=False).validate_pii_only(Path(argv[2])),
+            UnicodeSmuggleValidator().validate(Path(argv[2])),
+        ]
+        for result, name in zip(results, ("PII Scan", "Unicode Smuggling"), strict=True):
+            result.validator_name = name
+            result.validator_description = name
+        assert any(finding.line_content for finding in results[1].findings)
+        (target / "skillevaluator-tier1.json").write_text(JSONReporter(include_timestamp=False).render_all(results))
+        return subprocess.CompletedProcess(argv, 1)
+
+    environment = {"SKILL_PATHS": "skills", "GITHUB_ACTIONS": "true"}
+    assert runner.run(workspace, reports, environment, execute=fake_cli) == 1
+    _assert_no_fragment(capsys.readouterr().out, value)
+    site, feedback = _publish(tmp_path, monkeypatch, reports)
+    for directory in (reports, site, feedback):
+        for path in directory.rglob("*"):
+            if path.is_file():
+                _assert_no_fragment(path.read_bytes(), value)
+    assert (site / "runs/123/1/skill-001/skillevaluator-tier1.html").is_file()

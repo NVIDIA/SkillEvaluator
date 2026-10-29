@@ -32,6 +32,7 @@ from rich.table import Table
 from skillevaluator.constants import (
     DIMENSION_VERDICT_NEUTRAL_THRESHOLD,
     DIMENSION_VERDICT_PASS_THRESHOLD,
+    SOURCE_VALIDATION_CLI_LIMIT,
 )
 from skillevaluator.reporting.base import (
     ReporterBase,
@@ -39,6 +40,8 @@ from skillevaluator.reporting.base import (
     get_skip_reason,
     is_advisory_agent_eval_skip,
     passes_required_gate,
+    source_validation_errors,
+    source_validation_overflow_note,
 )
 from skillevaluator.reporting.harbor_viewer import (
     harbor_evidence_link_text,
@@ -53,6 +56,7 @@ if TYPE_CHECKING:
 
 
 _SKIP_REASON_MAX_CHARS = 1024
+_SOURCE_ERROR_MAX_CHARS = 1024
 
 
 def _related_paths(finding: Finding) -> list[str]:
@@ -66,6 +70,15 @@ def _related_paths(finding: Finding) -> list[str]:
         if isinstance(value, str) and value and value not in paths:
             paths.append(value)
     return paths
+
+
+def _rich_source_error(error: dict[str, str]) -> str:
+    """Return one failed Tier 3 source check as a bounded line inert to Rich markup."""
+    text = f"{error['path']}: {error['message']}" if error["path"] else error["message"]
+    text = " ".join(text.split())
+    if len(text) > _SOURCE_ERROR_MAX_CHARS:
+        text = text[: _SOURCE_ERROR_MAX_CHARS - 1] + "…"
+    return escape_markup(text)
 
 
 def _rich_skip_reason(result: ValidationResult) -> str:
@@ -568,6 +581,14 @@ class CLIReporter(ReporterBase):
                 "Recommendation" if finding.category in ("WHOLE_DUPLICATE", "PARTIAL_OVERLAP", "DUPLICATE") else "Fix"
             )
             console.print(f"     [dim]{label}:[/dim]     {escape_markup(finding.suggestion)}")
+        source_errors = source_validation_errors(finding.metadata)
+        if source_errors:
+            console.print("     [dim]Source validation:[/dim]")
+            for error in source_errors[:SOURCE_VALIDATION_CLI_LIMIT]:
+                console.print(f"       {_rich_source_error(error)}")
+            hidden = len(source_errors) - SOURCE_VALIDATION_CLI_LIMIT
+            if hidden > 0:
+                console.print(f"       [dim]{source_validation_overflow_note(hidden)}[/dim]")
         console.print()
 
     def _print_summary_table(self, results: list[ValidationResult], console: Console) -> None:

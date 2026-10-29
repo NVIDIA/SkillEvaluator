@@ -2110,6 +2110,7 @@
         {% set t3_max_attempts = (t3_attempt_policy.max_attempts or 1) | int %}
         {% set t3_dataset = tier3.dataset or [] %}
         {% set t3_provenance = tier3.provenance or {} %}
+        {% set t3_source_errors = t3_provenance.get('source_validation') or [] %}
         {% set t3_harbor = tier3.get('harbor_viewer') or t3_summary.get('harbor_viewer') or {} %}
         {% set t3_harbor_job_url = t3_harbor.get('job_url') %}
         {% set t3_harbor_analysis_url = t3_harbor.get('analysis_url') %}
@@ -2519,6 +2520,15 @@
                 {% else %}
                 <p class="t3-next-steps-conclusion">No recommendations were generated for this evaluation.</p>
                 {% endif %}
+                {% endif %}
+                {% if (t3_source_errors | length) == 1 %}
+                <p class="t3-next-steps-conclusion">
+                    Source validation error: {% if t3_source_errors[0].path %}{{ t3_source_errors[0].path }}: {% endif %}{{ t3_source_errors[0].message }}
+                </p>
+                {% elif (t3_source_errors | length) > 1 %}
+                <p class="t3-next-steps-conclusion">
+                    {{ t3_source_errors | length }} source validation errors found. Open Full Insights to review the details.
+                </p>
                 {% endif %}
             </div>
 
@@ -3437,6 +3447,18 @@
             {% set t3_recommendations = tier3.recommendations or [] %}
             {% set t3_has_suggestions = (t3_recommendations | length) > 0 or (tier3.suggestions and (tier3.suggestions | length) > 0) %}
 
+            {% if t3_source_errors %}
+            <details class="t3-details" id="tier3-source-validation-errors" open>
+                <summary>Source Validation Errors ({{ t3_source_errors | length }})</summary>
+                <div class="t3-details-body">
+                    <ol class="t3-next-steps-list">
+                        {% for error in t3_source_errors %}
+                        <li>{% if error.path %}{{ error.path }}: {% endif %}{{ error.message }}</li>
+                        {% endfor %}
+                    </ol>
+                </div>
+            </details>
+            {% endif %}
             <p style="color:var(--text-secondary);font-size:0.85rem;margin:0 0 0.85rem;">
                 Insights combine deterministic baselines (best performing agent, weakest dimension, coverage gaps)
                 with additional contextual observations and action items produced by an LLM-as-Judge.
@@ -3546,7 +3568,7 @@
             </details>
             {% endif %}
 
-            {% if not t3_has_conclusions and not t3_has_suggestions %}
+            {% if not t3_source_errors and not t3_has_conclusions and not t3_has_suggestions %}
             <p style="color:var(--text-secondary);">No evaluation insights were generated.</p>
             {% endif %}
         </section>

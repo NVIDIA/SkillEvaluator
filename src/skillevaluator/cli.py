@@ -2244,7 +2244,12 @@ def validate(
             repo_context_exclude_paths=tuple(repo_context_exclude_paths),
         )
         results.append(tier3_result)
-        tier3_ran, tier3_ok, tier3_rows, tier3_skip = summarize_tier3(tier3_result)
+        # An explicit -r cli prints the full report, which already lists the
+        # source errors under the Tier 3 finding; the panel then keeps the count.
+        tier3_ran, tier3_ok, tier3_rows, tier3_skip = summarize_tier3(
+            tier3_result,
+            show_source_details="cli" not in _effective_report_formats(report_formats, quiet=quiet),
+        )
         if autopilot_error and not tier3_ran:
             from skillevaluator.reporting.base import get_skip_reason
 

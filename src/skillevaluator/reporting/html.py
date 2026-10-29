@@ -67,6 +67,7 @@ from skillevaluator.reporting.base import (
     result_publication_target_conflict_marker,
     result_publication_target_dict,
     select_agent_eval_candidate,
+    source_validation_errors,
 )
 from skillevaluator.reporting.base import (
     is_tier2_validator_name as _is_tier2_validator_name,
@@ -979,6 +980,8 @@ def _sanitize_tier3_display_payload(value: dict[str, Any]) -> dict[str, Any]:
     payload["dimension_hints"] = _tier3_text_mapping(payload.get("dimension_hints"))
     evaluator_paths = payload["provenance"].get("evaluator_paths")
     payload["provenance"]["evaluator_paths"] = evaluator_paths if isinstance(evaluator_paths, dict) else {}
+    if "source_validation" in payload["provenance"]:
+        payload["provenance"]["source_validation"] = source_validation_errors(payload["provenance"])
     harbor_viewer = _sanitize_tier3_harbor_viewer(payload.get("harbor_viewer"))
     if harbor_viewer:
         payload["harbor_viewer"] = harbor_viewer

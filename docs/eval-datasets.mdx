@@ -346,6 +346,21 @@ skillevaluator tier3 validate ./my-skill
 Run it in CI or before a long evaluation: it catches an empty dataset, missing
 required fields, duplicate case IDs, and invalid config in seconds.
 
+`validate PATH` also checks the selected Tier 3 source (dataset entries and
+case IDs, `config.yml`, or the native Harbor task layout) before any live run.
+When that check fails, each error names the entry or file and what is wrong,
+for example `entry case-3: Missing required fields: question`:
+
+- The terminal lists the first five errors and how many more there are: under
+  the Tier 3 finding when the full CLI report prints (`-r cli` or `--verbose`),
+  otherwise in the compact Tier 3 panel.
+- The HTML report shows the exact error on the Tier 3 dashboard when there is
+  one, or the error count when there are several. **Full Insights → Source
+  Validation Errors** lists every error in order.
+- The JSON report keeps every error under `tier3.provenance.source_validation`.
+
+Passing checks and warnings are not listed as source errors.
+
 ## Next steps
 
 <CardGroup cols={2}>

@@ -39,7 +39,12 @@ from rich.live import Live
 from rich.panel import Panel
 from rich.text import Text
 
-from skillevaluator.reporting.base import get_skip_reason
+from skillevaluator.constants import SOURCE_VALIDATION_CLI_LIMIT
+from skillevaluator.reporting.base import (
+    get_skip_reason,
+    source_validation_errors,
+    source_validation_overflow_note,
+)
 from skillevaluator.utils.rich_markup import strip_terminal_controls
 
 if TYPE_CHECKING:
@@ -827,8 +832,37 @@ def _tier2_finding_is_scan_failure(finding: object) -> bool:
     return check_name in _TIER2_SCAN_FAILURE_CHECKS or check_name.endswith("_limit") or check_name.endswith("_error")
 
 
-def summarize_tier3(result: ValidationResult) -> tuple[bool, bool, list[TierRow], str]:
-    """Return (ran, passed, rows, skip_reason) for the agent-eval result."""
+def _tier3_source_validation_rows(result: ValidationResult, *, show_details: bool) -> list[TierRow]:
+    """Count the failed Tier 3 source checks and, unless shown elsewhere, preview them."""
+    errors = [error for finding in result.findings for error in source_validation_errors(finding.metadata)]
+    if not errors:
+        return []
+    count = len(errors)
+    summary = f"{count} source validation {'error' if count == 1 else 'errors'}"
+    if show_details and count > SOURCE_VALIDATION_CLI_LIMIT:
+        summary += f" (showing first {SOURCE_VALIDATION_CLI_LIMIT})"
+    rows = [detail_row("validation", summary)]
+    if not show_details:
+        return rows
+    for error in errors[:SOURCE_VALIDATION_CLI_LIMIT]:
+        text = f"{error['path']}: {error['message']}" if error["path"] else error["message"]
+        rows.append(detail_row("source", sanitize_tier3_console_text(text)))
+    if count > SOURCE_VALIDATION_CLI_LIMIT:
+        rows.append(detail_row("", source_validation_overflow_note(count - SOURCE_VALIDATION_CLI_LIMIT)))
+    return rows
+
+
+def summarize_tier3(
+    result: ValidationResult,
+    *,
+    show_source_details: bool = True,
+) -> tuple[bool, bool, list[TierRow], str]:
+    """Return (ran, passed, rows, skip_reason) for the agent-eval result.
+
+    Failed Tier 3 source checks add a count row. ``show_source_details`` also
+    previews the first few; callers turn it off when the full CLI report,
+    which lists them under the finding, is printed as well.
+    """
     metadata = result.metadata if isinstance(result.metadata, dict) else {}
     raw_payload = metadata.get("agent_eval")
     payload = raw_payload if isinstance(raw_payload, dict) else {}
@@ -877,6 +911,7 @@ def summarize_tier3(result: ValidationResult) -> tuple[bool, bool, list[TierRow]
                 glyph_style=f"bold {RED}",
             )
         )
+    rows.extend(_tier3_source_validation_rows(result, show_details=show_source_details))
     return True, ok, rows, ""
 
 

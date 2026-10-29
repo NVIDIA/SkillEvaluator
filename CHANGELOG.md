@@ -52,6 +52,9 @@ All notable changes to SkillEvaluator are documented in this file.
 
 ### Fixed
 
+- PII credential findings mask their values and source lines. GitHub CI stages
+  scanner output privately, redacts recognized credential values from retained
+  reports and logs, and withholds detailed output when redaction cannot finish.
 - PII email scans recognize all RFC 2606 reserved domains, including their
   subdomains, mixed-case forms, trailing dots, and prose ellipses. A local-part
   boundary prevents quadratic rescanning of long excluded addresses. Ordinary

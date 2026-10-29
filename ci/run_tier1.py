@@ -14,10 +14,17 @@ import argparse
 import json
 import os
 import subprocess
+import tempfile
 import time
 from pathlib import Path
 
 from skillevaluator.reporting.html import _validated_ci_context
+from skillevaluator.utils.secret_redaction import Redactor
+
+try:
+    from secret_redaction import collect_sensitive_values, sanitized_outputs
+except ModuleNotFoundError:
+    from ci.secret_redaction import collect_sensitive_values, sanitized_outputs
 
 try:
     from native_reports import render_native_reports
@@ -282,6 +289,7 @@ def run(
     context = execution_context(environ)
     annotation_budget = {"errors": 0}
     selection = None
+    tokens: set[str] = set()
     try:
         try:
             _validated_ci_context(context)
@@ -318,6 +326,30 @@ def run(
                 "selected": [path.relative_to(workspace).as_posix() for path in selected],
                 "deleted": [],
             }
+        deadline = clock() + SCAN_TIMEOUT_SECONDS
+        try:
+            if llm:
+                provider_key = environ.get("LLM_API_KEY", "").strip()
+                if len(provider_key) < 4:
+                    raise ValueError("The provider key is too short for safe redaction.")
+                tokens.add(provider_key)
+            # A credential found in one selected skill can also be echoed by
+            # another. Collect the union before writing or logging any paths.
+            for target in selected:
+                tokens.update(collect_sensitive_values(target))
+                if clock() >= deadline:
+                    raise ValueError("Credential preflight exceeded the scan time limit.")
+            redactor = Redactor(tokens)
+            metadata = json.dumps({"selection": selection, "execution": context}, ensure_ascii=True)
+            if redactor.text(metadata) != metadata:
+                raise ValueError("A credential is present in report context.")
+        except (OSError, ValueError, UnicodeError, RecursionError) as exc:
+            # Neither a path nor a context field is safe to echo on failure.
+            selection = None
+            context = {"llm_enabled": context.get("llm_enabled", False)}
+            raise ConfigurationError(
+                "Credential preflight could not safely prepare the scan; no results were published."
+            ) from exc
     except (ConfigurationError, SelectionError, OSError) as exc:
         message = (
             str(exc)
@@ -360,7 +392,6 @@ def run(
         _write_json(reports / "summary.json", summary)
         render_reports(reports, summary, context)
 
-    deadline = clock() + SCAN_TIMEOUT_SECONDS
     checkpoint()
     for index, (target, row) in enumerate(zip(selected, rows, strict=True), 1):
         remaining = deadline - clock()
@@ -373,24 +404,37 @@ def run(
         output = reports / f"skill-{index:03d}"
         output.mkdir()
         row["error"] = "Evaluation interrupted before complete evidence was retained."
-        argv = [
-            "skillevaluator",
-            "tier1",
-            str(target),
-            "--llm" if llm else "--no-llm",
-            "--profile",
-            "external",
-            "-r",
-            "json,html,markdown,sarif",
-            "-o",
-            str(output),
-        ]
         data = None
         try:
-            with (output / "stdout.log").open("xb") as stdout, (output / "stderr.log").open("xb") as stderr:
-                process = execute(
-                    argv, cwd=workspace, env=env, stdout=stdout, stderr=stderr, check=False, timeout=remaining
-                )
+            remaining = deadline - clock()
+            if remaining <= 0:
+                raise subprocess.TimeoutExpired("skillevaluator", SCAN_TIMEOUT_SECONDS)
+            # Raw scanner files and logs live only in a private temporary
+            # directory, never in the upload directory. Docker mounts /audit-tmp
+            # as tmpfs, so cancellation cannot upload half-written secrets.
+            with tempfile.TemporaryDirectory(prefix="skillevaluator-private-", dir=env.get("TMPDIR")) as temporary:
+                raw = Path(temporary).resolve(strict=True)
+                if raw.is_relative_to(workspace) or raw.is_relative_to(reports):
+                    raise ValueError("A private scanner directory must be outside the workspace and reports.")
+                argv = [
+                    "skillevaluator",
+                    "tier1",
+                    str(target),
+                    "--llm" if llm else "--no-llm",
+                    "--profile",
+                    "external",
+                    "-r",
+                    "json,html,markdown,sarif",
+                    "-o",
+                    str(raw),
+                ]
+                with (raw / "stdout.log").open("xb") as stdout, (raw / "stderr.log").open("xb") as stderr:
+                    process = execute(
+                        argv, cwd=workspace, env=env, stdout=stdout, stderr=stderr, check=False, timeout=remaining
+                    )
+                safe = sanitized_outputs(raw, tokens)
+            for name, content in safe.items():
+                (output / name).write_bytes(content)
             row["exit_code"] = process.returncode
             data = _load_report(output / "skillevaluator-tier1.json")
             for key in (

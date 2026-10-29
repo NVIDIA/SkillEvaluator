@@ -27,6 +27,8 @@ import zipfile
 from datetime import datetime
 from pathlib import Path, PurePosixPath
 
+from skillevaluator.utils.secret_redaction import REDACTED, SENSITIVE_PII_CATEGORIES, Redactor, sensitive_values
+
 MAX_FILES = 1000
 MAX_SKILLS = 100
 MAX_TOTAL_BYTES = 64 * 1024 * 1024
@@ -378,6 +380,44 @@ def read_artifact(payload: bytes) -> tuple[dict, dict[str, dict]]:
         document = _json(document)
         validate_report(document, row)
         reports[directory] = document
+    # Historical trusted runs can predate source-level redaction. Collect raw
+    # PII matches from their bounded JSON, then remove those values from every
+    # retained object before creating history, HTML or PR feedback.
+    tokens: set[str] = set()
+    for report in reports.values():
+        for result in report.get("results", []):
+            for finding in result.get("findings", []):
+                if not isinstance(finding, dict) or finding.get("category") != "PII":
+                    continue
+                category = finding.get("check_name")
+                if category not in SENSITIVE_PII_CATEGORIES:
+                    continue
+                metadata = finding.get("metadata") or {}
+                matched = metadata.get("matched_value") if isinstance(metadata, dict) else None
+                line = finding.get("line_content")
+                if isinstance(matched, str) and matched != REDACTED:
+                    values = sensitive_values(category, matched, line if isinstance(line, str) else "")
+                    # A PEM header does not identify its body, and an incomplete
+                    # assignment can hide the value in another scanner's data.
+                    if category == "private_keys" or (
+                        category in {"hardcoded_secrets", "database_credentials"} and values == {matched}
+                    ):
+                        raise PublicationError("The artifact could not be safely redacted.")
+                    tokens.update(values)
+                elif isinstance(line, str) and line:
+                    tokens.update(sensitive_values(category, line, line))
+                elif matched != REDACTED:
+                    raise PublicationError("The artifact could not be safely redacted.")
+    try:
+        redactor = Redactor(tokens)
+        summary = redactor.object(summary)
+        reports = redactor.object(reports)
+        validate_summary(summary)
+        for row in summary["skills"]:
+            if row["overall_status"] != "error":
+                validate_report(reports[row["report_dir"]], row)
+    except (KeyError, TypeError, ValueError, RecursionError) as exc:
+        raise PublicationError("The artifact could not be safely redacted.") from exc
     return summary, reports
 
 

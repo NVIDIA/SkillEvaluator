@@ -49,6 +49,7 @@ from skillevaluator.reporting.base import (
     tier1_unscanned_publication_paths,
     unrecognized_tier2_results,
 )
+from skillevaluator.reporting.tier3_scope import completed_agent_result, validate_report_scope
 from skillevaluator.source_identity import evaluated_source_revision, recorded_evaluated_source
 from skillevaluator.tier3_environments import HARBOR_ENV_MODES
 
@@ -130,9 +131,12 @@ class BenchmarkReporter(ReporterBase):
         include_timestamp: bool = True,
         max_findings_shown: int = 5,
         skill_name: str | None = None,
+        report_scope: str = "publication",
     ) -> None:
         self.include_timestamp = include_timestamp
         self.max_findings_shown = max_findings_shown
+        validate_report_scope(report_scope, [])
+        self.report_scope = report_scope
         self.skill_name = skill_name
 
     @property
@@ -147,7 +151,9 @@ class BenchmarkReporter(ReporterBase):
         return self.render_all([result])
 
     def render_all(self, results: list[ValidationResult]) -> str:
+        validate_report_scope(self.report_scope, results)
         ae = _agent_eval_payload(results)
+        completed = completed_agent_result(ae)
         publication_target = publication_target_for_results(
             results,
             ae,
@@ -165,10 +171,16 @@ class BenchmarkReporter(ReporterBase):
         lines: list[str] = [
             f"# Skill Benchmark: {skill_name}",
             "",
-            _verdict_callout(status),
+            (f"> **Tier 3 completed-agent result: {completed['verdict'].upper()}**" if completed
+             else "> **Tier 3: No complete agent result**") if self.report_scope == "tier3" else _verdict_callout(status),
             "",
         ]
-        if status == "PASS":
+        if self.report_scope == "tier3":
+            lines.extend([
+                "Publication: **NOT ASSESSED**. This report covers Tier 3 only; Tiers 1 and 2 are not covered by this report.",
+                "The verdict describes with-skill quality; lift is a separate baseline comparison.", "",
+            ])
+        elif status == "PASS":
             self._render_publication_recommendation(lines, results)
         elif status == "FAIL":
             lines.extend(
@@ -201,6 +213,18 @@ class BenchmarkReporter(ReporterBase):
                 ]
             )
 
+        if completed and (self.report_scope == "tier3" or completed["needs_attention"]):
+            lines.append(
+                f"Completed agent: **{_publication_safe_inline(completed['name'], private_labels)}**; "
+                f"score **{completed['score']:.4f}** ({completed['score'] * 100:.2f}%)."
+            )
+            if completed["lift"] is not None:
+                lines.append(f"Same-agent comparable lift: **{completed['lift']:+.4f}** ({completed['lift'] * 100:+.2f} percentage points).")
+            if completed["needs_attention"]:
+                lines.append("**Needs attention:** other execution failures remain. This completed-agent result does not certify the whole run.")
+            if completed["recovered_attempts"]:
+                lines.append(f"Recovered timeout attempts: {completed['recovered_attempts']}; failed history is retained and excluded from scoring.")
+            lines.append("")
         self._render_metadata(
             lines,
             results,
@@ -516,6 +540,14 @@ class BenchmarkReporter(ReporterBase):
                 expected_skill_name=expected_skill_name,
                 expected_publication_target=publication_target,
             )
+            if self.report_scope == "tier3":
+                if tier != "Tier 3":
+                    status, evidence = "NOT COVERED", "Outside this report's Tier 3 scope"
+                elif completed := completed_agent_result(ae):
+                    status = completed["verdict"].upper()
+                    evidence = "Completed-agent quality result; publication not assessed"
+                    if completed["needs_attention"]:
+                        evidence += "; other execution failures need attention"
             lines.append(f"| {tier} | {purpose} | **{status}** | {_md_cell(evidence, private_labels)} |")
         lines.append("")
 

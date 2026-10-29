@@ -1,0 +1,112 @@
+---
+title: "GitHub Actions"
+description: "Add reusable Tier 1 skill checks to your repository, then optionally enable hosted reports and PR feedback."
+---
+
+Add one workflow and choose your skill directories. SkillEvaluator supplies the
+scanner runtime; your repository gets a check result, a short Actions summary
+and downloadable reports.
+
+**Release availability:** use the consumer files attached to an official CI
+image release. Until that release is available, source templates contain
+`RELEASE_WORKFLOW_SHA` and `RELEASE_IMAGE_DIGEST` placeholders and are not runnable.
+
+## Basic setup: one workflow
+
+1. When a CI release is available, download its generated `skill-checks.yml` and
+   copy it to `.github/workflows/skill-checks.yml` in your repository. The release
+   file pins the shared workflow to a reviewed commit and the public container
+   to an immutable digest.
+2. Set `paths` to your skill directory. For multiple roots, use a YAML multiline
+   string. Adapt `branches: [main]` if your default branch has another name.
+3. Commit the file and open a pull request. GitHub Actions must be enabled, and
+   your organization must allow the external reusable workflow and its actions.
+
+The job configuration in the [source template](../ci/templates/skill-checks.yml)
+uses GitHub's [reusable workflow](https://docs.github.com/en/actions/how-tos/reuse-automations/reuse-workflows)
+syntax:
+
+```yaml
+jobs:
+  skills:
+    uses: NVIDIA/SkillEvaluator/.github/workflows/evaluate-skills.yml@RELEASE_WORKFLOW_SHA
+    with:
+      image: ghcr.io/nvidia/skillevaluator-tier1@sha256:RELEASE_IMAGE_DIGEST
+      paths: skills
+      scan-mode: auto
+      llm: false
+```
+
+The workflow downloads the public image automatically. You do not build an image,
+install scanners or supply a model API key for static Tier 1. No registry login
+is needed for a public package. Keyless does not mean offline: dependency checks
+can contact vulnerability services. Dependency files are audited without
+installing packages or running their build scripts. Exact package/version pins
+are required; unresolved requirements are reported as incomplete.
+
+`scan-mode: auto` selects skills affected by pull-request changes and evaluates
+all configured skills on pushes and manual runs. Set `scan-mode: all` to check
+the whole configured collection on every run. A partial selection establishes
+results only for the evaluated skills. A PR with no affected skills succeeds
+with **No skills changed**; it does not claim a scanner pass. Fully deleted skills
+are listed as deleted/skipped. Removing `SKILL.md` while leaving tracked files
+behind is an error. Selection follows changed files inside skill directories;
+shared files outside the configured roots are not inferred dependencies. Use
+`scan-mode: all` when those changes should trigger a full evaluation.
+Tier 2 and Tier 3 are not run. The 100-skill limit is a selection limit, not a
+runtime guarantee. Scans have a time budget and preserve completed results plus
+explicit incomplete entries if it is exhausted.
+
+## Read the result
+
+Open **Actions → Skill checks**. The summary shows the outcome, affected skills
+and a bounded set of actionable reasons and fixes. Download the
+`skill-evaluator-tier1-attempt-N` artifact for that run attempt (`N`) to get
+`index.html`, per-skill HTML and JSON,
+detailed Markdown, SARIF and scanner logs. Failed and incomplete scans retain
+their available reports; missing evidence is not a pass. Quality scores and the
+pass/fail decision are separate.
+
+Known credential values detected by the PII patterns, NVIDIA API keys, and
+unquoted `KEY=value` and `Bearer` credentials are redacted from CI reports,
+including parts of them that a scanner cuts or escapes. When a credential or an
+LLM key is present, raw scanner logs are withheld. This is not a guarantee that
+every possible credential or transformed value will be detected. Remove and
+rotate exposed credentials; previously published reports and Git history are not
+retroactively redacted.
+
+The dedicated workflow runs independently alongside existing build and test
+workflows. It does not automatically wait for them. GitHub's `needs` connects
+jobs in the same workflow; adding the scan to a different pipeline requires
+adapting that workflow and the optional publisher's trust configuration. Make
+the scan check required in branch rules separately if it should block merging.
+
+## Optional: hosted reports and one updated PR comment
+
+The basic file does **not** publish a site or post comments. That experience
+requires a second workflow, Pages configured for GitHub Actions, a retained
+history branch, publisher permissions, your own report URL and approved
+workflow revisions. Follow the [publisher setup](../ci/README.md#optional-hosted-reports-and-pr-feedback)
+before adding the generated `publish-skill-reports.yml` to your default branch.
+
+**Check visibility first:** reports can contain skill content, source excerpts
+and unmerged PR findings. A private repository does not make its Pages site
+private. Use an explicitly private GitHub Enterprise Cloud Pages site, or keep
+reports in the scan artifact if public hosting is inappropriate. See
+[Pages access control](https://docs.github.com/en/pages/getting-started-with-github-pages/changing-the-visibility-of-your-github-pages-site).
+
+The publisher follows completed **Skill checks** runs, including failures. It
+validates retained JSON, generates HTML and updates its own bot comment after
+successful deployment for an eligible current same-repository PR. It does not
+execute PR code with a publisher write token. Existing Pages sites need an
+integration plan: this publisher deploys the whole report site. Fork PR bot
+comments are not enabled.
+
+For optional model-backed Tier 1 checks, use the separate trusted manual
+[LLM workflow template](../ci/templates/skill-checks-llm.yml) and explicitly pass
+a repository `LLM_API_KEY` secret. This adds provider cost and sends the selected
+content to that provider. It is not needed for basic scanning and is not
+included in the dedicated publisher's default workflow allowlist.
+
+See [Gate Your CI](ci-integration.mdx) for CLI integration in other CI systems,
+and the [maintainer guide](../ci/README.md) for release and runtime details.

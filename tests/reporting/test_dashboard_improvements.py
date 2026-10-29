@@ -89,7 +89,7 @@ def test_proposal_links_finding_and_exact_diff_without_claiming_improvement(prop
     edits = json.loads((proposal / "edits.json").read_text())
     edits["edits"][0]["evidence_ids"] = ["invented"]
     _write(proposal / "edits.json", edits)
-    with pytest.raises(ValueError, match="unavailable discovery evidence"):
+    with pytest.raises(ValueError, match="existing failed discovery finding IDs"):
         load_skill_change(proposal)
 
 
@@ -146,6 +146,13 @@ def test_failed_receipt_without_edits_or_evidence_remains_visible(proposal):
     data = load_skill_change(proposal)
     assert data["receipt"]["status"] == "failed"
     assert data["edits"] == [] and data["comparison"] is None
+
+
+@pytest.mark.parametrize("edits", [None, False, 0, "", {}])
+def test_malformed_saved_edits_are_rejected_before_rendering(proposal, edits):
+    _write(proposal / "edits.json", {"edits": edits})
+    with pytest.raises(ValueError, match="edits list"):
+        load_skill_change(proposal)
 
 
 def test_actual_dashboard_form_opens_proposal_and_rejects_invalid_reload(proposal):

@@ -2384,14 +2384,16 @@ def _copy_verifier(task_dir: Path) -> None:
     tests_dir.mkdir(parents=True, exist_ok=True)
     evaluator_dir = _replace_evaluator_tests_dir(task_dir)
     sources = (
-        (TEMPLATES_DIR / "eval.py", "Verifier template"),
-        (_EVAL_CORE_DIR / "log_converters.py", "log_converters helper"),
-        (_EVAL_CORE_DIR / "codex_tool_call_normalizer.py", "Codex tool-call normalizer"),
-        (_EVAL_CORE_DIR.parent.parent / "evidence.py", "Evidence-reference helper"),
+        (TEMPLATES_DIR / "eval.py", "Verifier template", "eval.py"),
+        (_EVAL_CORE_DIR / "checks.py", "Deterministic grading", "deterministic_checks.py"),
+        (_EVAL_CORE_DIR / "secret_redaction.py", "Grading redaction", "secret_redaction.py"),
+        (_EVAL_CORE_DIR / "log_converters.py", "log_converters helper", "log_converters.py"),
+        (_EVAL_CORE_DIR / "codex_tool_call_normalizer.py", "Codex tool-call normalizer", "codex_tool_call_normalizer.py"),
+        (_EVAL_CORE_DIR.parent.parent / "evidence.py", "Evidence-reference helper", "evidence.py"),
     )
-    for src, label in sources:
+    for src, label, filename in sources:
         if src.exists():
-            shutil.copy2(src, evaluator_dir / src.name)
+            shutil.copy2(src, evaluator_dir / filename)
         else:
             logger.warning("%s not found at %s", label, src)
 

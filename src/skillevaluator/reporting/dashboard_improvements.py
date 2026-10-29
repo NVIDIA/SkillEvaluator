@@ -5,13 +5,12 @@
 
 from __future__ import annotations
 
-import difflib
 import hashlib
 from pathlib import Path
 from typing import Any
 
 from skillevaluator.reporting.dashboard_data import _read_native_json, _safe_native_path
-from skillevaluator.tier3.improve import _digest, retained_task_roots, snapshot_tree
+from skillevaluator.tier3.improve import _digest, replay_proposal, retained_task_roots, snapshot_tree
 
 
 def _runtime_digest(path: Path) -> str:
@@ -70,31 +69,17 @@ def load_skill_change(
     if receipt.get("evaluated_source_verified") is not True or packet.get("source_verified") is not True:
         issues.append("The proposal does not record a verified discovery source.")
     edits = proposal["edits"]
+    if not isinstance(edits, list):
+        raise ValueError("Proposal must contain an edits list")
     if edits and not (
         receipt.get("source_digest")
         and receipt["source_digest"] == packet.get("source_digest") == proposal.get("source_digest")
     ):
         raise ValueError("Proposal and discovery source identities differ")
-    pending = dict(packet["skill_files"])
-    for edit in edits:
-        name, old, new = edit["path"], edit["old_text"], edit["new_text"]
-        if name not in pending or not old or pending[name].count(old) != 1:
-            raise ValueError("Proposed replacement does not match its recorded source")
-        if not edit["evidence_ids"] or any(ref not in findings for ref in edit["evidence_ids"]):
-            raise ValueError("Proposed edit cites unavailable discovery evidence")
-        pending[name] = pending[name].replace(old, new, 1)
-    changed = sorted(name for name in pending if pending[name] != packet["skill_files"][name])
-    diff = "".join(
-        "".join(
-            difflib.unified_diff(
-                packet["skill_files"][name].splitlines(keepends=True),
-                pending[name].splitlines(keepends=True),
-                fromfile=f"a/{name}",
-                tofile=f"b/{name}",
-            )
-        )
-        for name in changed
-    )
+    pending, diff = replay_proposal(
+        packet["skill_files"], proposal, source_digest=packet["source_digest"], evidence_ids=findings,
+    ) if edits else ({}, "")
+    changed = sorted(pending)
     skill = receipt.get("evaluated_skill_name")
     if not isinstance(skill, str) or not skill or Path(skill).name != skill or skill in {".", ".."}:
         raise ValueError("Receipt has no valid evaluated skill identity")

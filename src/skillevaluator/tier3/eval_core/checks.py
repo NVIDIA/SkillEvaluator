@@ -20,12 +20,20 @@ from fnmatch import fnmatchcase
 from functools import lru_cache
 from typing import Any
 
-from skillevaluator.tier3.eval_core.codex_tool_call_normalizer import (
-    AMBIGUOUS_OUTER_EXEC_OBSERVATION,
-    UNOBSERVED_INNER_CALL,
-    UNSUPPORTED_NATIVE_CODEX_EXEC,
-)
-from skillevaluator.tier3.eval_core.secret_redaction import redact_secrets_in_log_line
+if __package__:
+    from .codex_tool_call_normalizer import (
+        AMBIGUOUS_OUTER_EXEC_OBSERVATION,
+        UNOBSERVED_INNER_CALL,
+        UNSUPPORTED_NATIVE_CODEX_EXEC,
+    )
+    from .secret_redaction import redact_secrets_in_log_line
+else:  # Copied alongside the standalone Harbor verifier.
+    from codex_tool_call_normalizer import (
+        AMBIGUOUS_OUTER_EXEC_OBSERVATION,
+        UNOBSERVED_INNER_CALL,
+        UNSUPPORTED_NATIVE_CODEX_EXEC,
+    )
+    from secret_redaction import redact_secrets_in_log_line
 
 WASTE_INDICATORS = [
     "--help",
@@ -48,9 +56,8 @@ WASTE_INDICATORS = [
 #      -- a contiguous run of >=20 alphanumerics containing lower, upper AND a
 #      digit. This excludes dictionary words ("task-granularity"), lowercase
 #      hex IDs/hashes ("task-3f9a..."), and short tokens.
-# Mirrors skillevaluator.utils.redaction. Kept byte-for-byte in sync with the standalone
-# Harbor verifier (src/skillevaluator.tier3/harbor/templates/eval.py) -- see the drift guard
-# in tests/unit/skillevaluator.tier3/test_harbor_template_secret_patterns.py.
+# Mirrors skillevaluator.utils.redaction. The standalone Harbor verifier stages
+# this module so both execution paths use these same grading rules.
 # Mixed-case glued body for sk-/nvapi- keys (lower + upper + digit, >=20).
 _GLUED_KEY_BODY = r"(?=[A-Za-z0-9]*[a-z])(?=[A-Za-z0-9]*[A-Z])(?=[A-Za-z0-9]*[0-9])[A-Za-z0-9]{20,}"
 # AWS access key IDs are uppercase + digit only (no lowercase), so they need

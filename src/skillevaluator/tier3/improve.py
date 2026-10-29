@@ -180,23 +180,29 @@ def _evidence_ids(packet: dict[str, Any]) -> set[str]:
     }
 
 
-def _apply_edits(
-    candidate: Path, proposal: Any, *, source_digest: str, evidence_ids: set[str], max_edits: int
-) -> list[dict[str, Any]]:
+def replay_proposal(
+    files: Mapping[str, str], proposal: Any, *, source_digest: str,
+    evidence_ids: Collection[str], max_edits: int | None = None,
+) -> tuple[dict[str, str], str]:
+    """Validate replacements without writes; return changed text and its exact diff."""
     if not isinstance(proposal, dict) or proposal.get("source_digest") != source_digest:
         raise ValueError("Proposal source_digest does not match the original skill")
     edits = proposal.get("edits")
-    if not isinstance(edits, list) or len(edits) > max_edits:
+    if not isinstance(edits, list):
+        raise ValueError("Proposal must contain an edits list")
+    if max_edits is not None and len(edits) > max_edits:
         raise ValueError(f"Proposal must contain an edits list with at most {max_edits} edits")
     if len(json.dumps(proposal).encode()) > MAX_PACKET_BYTES:
         raise ValueError("Proposal exceeds the 1 MiB limit")
-    pending: dict[Path, str] = {}
+    pending = dict(files)
     for edit in edits:
         if not isinstance(edit, dict):
             raise ValueError("Each edit must be an object")
         name = edit.get("path")
         if not isinstance(name, str) or not name or "\\" in name:
             raise ValueError("Edit path must be a relative POSIX file path")
+        if name not in files:
+            raise ValueError("Edits may only target files included in the editor packet")
         relative = PurePosixPath(name)
         if (
             relative.is_absolute()
@@ -204,9 +210,6 @@ def _apply_edits(
             or relative.parts[0].casefold() in EVALUATION_DIRS
         ):
             raise ValueError(f"Edit path is outside the skill-content boundary: {name}")
-        path = candidate / name
-        if not path.is_file() or path.is_symlink() or not path.resolve().is_relative_to(candidate):
-            raise ValueError(f"Edits may only replace text in existing regular skill files: {name}")
         old, new = edit.get("old_text"), edit.get("new_text")
         refs = edit.get("evidence_ids")
         if not isinstance(old, str) or not old or not isinstance(new, str):
@@ -221,16 +224,21 @@ def _apply_edits(
             or any(not isinstance(ref, str) or ref not in evidence_ids for ref in refs)
         ):
             raise ValueError("Each edit must cite existing failed discovery finding IDs or explicitly enabled observation IDs")
-        content = pending[path] if path in pending else path.read_bytes().decode("utf-8")
+        content = pending[name]
         if content.count(old) != 1:
             raise ValueError(f"old_text must match exactly once in {name}")
-        pending[path] = content.replace(old, new, 1)
-    if not pending.get(candidate / "SKILL.md", (candidate / "SKILL.md").read_bytes().decode("utf-8")).strip():
+        pending[name] = content.replace(old, new, 1)
+    if not pending.get("SKILL.md", "").strip():
         raise ValueError("Candidate SKILL.md must not be empty")
-    # Validate every edit before writing any of them.
-    for path, content in pending.items():
-        path.write_bytes(content.encode("utf-8"))
-    return edits
+    changed = {name: content for name, content in sorted(pending.items()) if content != files[name]}
+    diff = "".join(
+        line for name, content in changed.items()
+        for line in difflib.unified_diff(
+            files[name].splitlines(keepends=True), content.splitlines(keepends=True),
+            fromfile=f"a/{name}", tofile=f"b/{name}",
+        )
+    )
+    return changed, diff
 
 
 def prepare_improvement(
@@ -506,6 +514,7 @@ Evidence and original file contents:
             (output / "evidence.json").read_text(encoding="utf-8")
         ) != packet:
             raise ValueError("Editor instructions or evidence changed during proposal generation")
+        diff = ""
         if mode != "export":
             summary = proposal.get("summary") if isinstance(proposal, dict) else None
             if summary is not None or (mode == "llm" and refs):
@@ -513,16 +522,17 @@ Evidence and original file contents:
                     raise ValueError("Proposal summary must be nonempty text")
                 receipt["proposal_summary"] = summary[:2000]
                 receipt["proposal_summary_truncated"] = len(summary) > 2000
-            if (
-                isinstance(proposal, dict)
-                and isinstance(proposal.get("edits"), list)
-                and any(isinstance(edit, dict) and edit.get("path") not in files for edit in proposal["edits"])
-            ):
-                raise ValueError("Edits may only target files included in the editor packet")
-            _apply_edits(candidate, proposal, source_digest=source_digest, evidence_ids=refs, max_edits=max_edits)
-            after = snapshot_tree(candidate)
-            changed = sorted(name for name in before if before[name] != after.get(name))
-            receipt.update(status="candidate_created" if changed else "unchanged", changed_files=changed)
+            changed, diff = replay_proposal(
+                files, proposal, source_digest=source_digest, evidence_ids=refs, max_edits=max_edits,
+            )
+            # Validate every destination before writing any of them.
+            for edit in proposal["edits"]:
+                path = candidate / edit["path"]
+                if not path.is_file() or path.is_symlink() or not path.resolve().is_relative_to(candidate):
+                    raise ValueError(f"Edits may only replace text in existing regular skill files: {edit['path']}")
+            for name, content in changed.items():
+                (candidate / name).write_bytes(content.encode("utf-8"))
+            receipt.update(status="candidate_created" if changed else "unchanged", changed_files=sorted(changed))
             for evaluation_dir in source.iterdir():
                 if evaluation_dir.name.casefold() in EVALUATION_DIRS:
                     copytree_secure(
@@ -530,17 +540,6 @@ Evidence and original file contents:
                     )
             receipt["candidate_ready"] = True
         _write_json(proposal_path, proposal)
-        diff = "".join(
-            "".join(
-                difflib.unified_diff(
-                    files[name].splitlines(keepends=True),
-                    (candidate / name).read_bytes().decode("utf-8").splitlines(keepends=True),
-                    fromfile=f"a/{name}",
-                    tofile=f"b/{name}",
-                )
-            )
-            for name in receipt["changed_files"]
-        )
         (output / "changes.diff").write_text(diff, encoding="utf-8")
         receipt["candidate_digest"] = _digest(snapshot_tree(candidate, include_generated=True))
         receipt["candidate_evals_digest"] = _digest(

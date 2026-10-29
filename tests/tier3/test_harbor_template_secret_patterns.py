@@ -5,12 +5,10 @@
 Regression tests for secret-pattern false positives in the standalone Harbor
 verifier (``src/skillevaluator/tier3/harbor/templates/eval.py``).
 
-This template runs inside the Harbor sandbox with no package import and is
-the copy that actually computed the displayed Security score. Its
-``_SECRET_PATTERNS`` are duplicated from ``skillevaluator.tier3.eval_core.checks`` by design
-(zero-dependency), so it needs its own regression coverage: the ``sk-``/
-``nvapi-`` detectors must only match real keys at a token boundary, not
-substrings of ordinary hyphenated words like ``task-granularity``.
+The standalone verifier uses the staged deterministic grading module without
+importing the installed package. Exercise its security adapter: the ``sk-``/
+``nvapi-`` detectors must match real keys, not ordinary hyphenated words such as
+``task-granularity``.
 """
 
 from __future__ import annotations
@@ -103,42 +101,6 @@ def test_template_glued_id_or_hash_tokens_are_not_secrets(token):
     assert not any(f["type"] == "secret_exposure" for f in result["findings"])
 
 
-# Every security constant duplicated between the standalone verifier and
-# skillevaluator.tier3.eval_core.checks. The verifier must copy these (zero-dependency,
-# runs in-sandbox), so silent drift between the copies is the root-cause class
-# behind the unanchored-regex bug -- guard all of them, not just secrets.
-_SHARED_SECURITY_CONSTANTS = [
-    "_SECRET_PATTERNS",
-    "_DESTRUCTIVE_PATTERNS",
-    "_UNAUTHORIZED_PATHS",
-    "_SENSITIVE_WRITE_PATHS",
-    "_APPLY_PATCH_HEADER_RE",
-    "_APPLY_PATCH_COMMAND_RE",
-    "_APPLY_PATCH_BODY_RE",
-    "_APPLY_PATCH_DEFAULT_WORKDIR",
-    "_APPLY_PATCH_CD_RE",
-    "_HOME_SHORTHAND_RE",
-    "_HOME_DIR_PREFIX_RE",
-    "_PROMPT_INJECTION_PATTERNS",
-    "_EXECUTION_TOOL_HINTS",
-    "_READ_TOOL_HINTS",
-    "_WRITE_TOOL_HINTS",
-    "_NETWORK_CLIENT_FAST_PATTERN",
-    "_NETWORK_CLIENT_PATTERN",
-    "_NETWORK_EXECUTABLES",
-    "_CURL_DATA_FLAGS",
-    "_CURL_UPLOAD_FLAGS",
-    "_WGET_DATA_FLAGS",
-    "_UNSAFE_HTTP_METHODS",
-    "_HTTPIE_BODY_FLAGS",
-    "_CURL_SHORT_OPTS_WITH_ARG",
-    "_INERT_PRINT_COMMANDS",
-    "_SECRET_VAR_NAME_RE",
-    "_MAX_NETWORK_ACTION_CHARS",
-    "WASTE_INDICATORS",
-]
-
-
 def _normalize(value):
     """Make compiled patterns / tuples / sequences comparable across modules."""
     if hasattr(value, "pattern"):  # compiled regex
@@ -148,17 +110,6 @@ def _normalize(value):
     if isinstance(value, (list, tuple)):
         return tuple(_normalize(item) for item in value)
     return value
-
-
-@pytest.mark.parametrize("name", _SHARED_SECURITY_CONSTANTS)
-def test_security_constants_stay_in_sync_with_eval_core(name):
-    from skillevaluator.tier3.eval_core import checks as eval_core_checks
-
-    assert hasattr(eval_template, name), f"template missing {name}"
-    assert hasattr(eval_core_checks, name), f"eval_core.checks missing {name}"
-    assert _normalize(getattr(eval_template, name)) == _normalize(getattr(eval_core_checks, name)), (
-        f"{name} drifted between templates/eval.py and eval_core/checks.py"
-    )
 
 
 @pytest.mark.parametrize(

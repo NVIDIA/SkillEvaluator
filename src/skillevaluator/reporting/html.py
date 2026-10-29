@@ -46,6 +46,7 @@ from skillevaluator.reporting.base import (
     AGENT_EVAL_EXACT_TEXT_KEYS,
     ReporterBase,
     additional_errors,
+    additional_warnings,
     agent_eval_publication_evidence_complete,
     agent_eval_report_serialization_issue,
     agent_eval_report_serialization_limits,
@@ -1290,6 +1291,28 @@ QUALITY_GRADE_LEGEND = ", ".join(
 )
 _SEVERITY_RANK = {"critical": 4, "high": 3, "medium": 2, "low": 1, "info": 0}
 FIX_FIRST_LIMIT = 5
+# How the tool runner and the scanners say that a scanner itself is missing.
+_MISSING_SCANNER = re.compile(r"\bnot installed\b|\bnot found in PATH\b", re.IGNORECASE)
+
+
+def _scan_stop_reason(errors: list[str], warnings: list[str]) -> str:
+    """Return the diagnostic that says why a scan did not finish, or "".
+
+    *errors* and *warnings* are the lines that do not repeat a finding.
+    Errors come first. A line saying a scanner is missing is used only when
+    nothing else explains the gap, because a scanner that ran and failed
+    needs a different fix.
+    """
+    lines = [" ".join(str(line).split()) for line in [*errors, *warnings]]
+    lines = [line for line in lines if line]
+    return next((line for line in lines if not _MISSING_SCANNER.search(line)), lines[0] if lines else "")
+
+
+def _sentence(text: str, limit: int = 200) -> str:
+    """Bound *text* to *limit* characters and end it as a sentence."""
+    if len(text) > limit:
+        text = text[: limit - 1].rstrip() + "\N{HORIZONTAL ELLIPSIS}"
+    return text if text.endswith((".", "!", "?", "\N{HORIZONTAL ELLIPSIS}")) else f"{text}."
 
 
 def plain_check_name(name: object) -> str:
@@ -1358,8 +1381,8 @@ def _fix_first(
 ) -> list[dict[str, Any]]:
     """Pick the few places to fix first, most severe first, one entry per location.
 
-    A check that could not finish comes first, because no pass can be claimed
-    until it runs. Findings then rank by severity, then blocking before
+    A check that could not finish comes first, with the scanner's own reason,
+    because no pass can be claimed until it runs. Findings then rank by severity, then blocking before
     advisory, then occurrences. A failed check with no located finding is
     listed as a high, blocking item so its reason is not lost. Two findings at
     the same file and line (for example one secret reported by two scanners)
@@ -1377,7 +1400,8 @@ def _fix_first(
             check_key = (skill_name, "check", check_name)
             if status == "incomplete":
                 scans = ", ".join(str(scan) for scan in check.get("incomplete_scans") or [])
-                message = f"{label} did not finish" + (f": {scans} unavailable" if scans else "")
+                reason = _scan_stop_reason(check.get("additional_errors") or [], check.get("additional_warnings") or [])
+                message = f"{label} did not finish" + (f": {reason}" if reason else f" ({scans})" if scans else "")
                 item |= {"kind": "incomplete", "severity": "incomplete", "message": message}
                 candidates.append(((2, 0, 1, 0), check_key, item | {"anchor": check_anchors[skill_name][check_name]}))
             elif status == "fail" and not findings:
@@ -1631,6 +1655,9 @@ class HTMLReporter(ReporterBase):
                 "status": display_status,
                 "errors": list(result.errors),
                 "warnings": list(result.warnings),
+                # The lines that do not repeat a finding: scanner diagnostics and gate failures.
+                "additional_errors": additional_errors(result),
+                "additional_warnings": additional_warnings(result),
                 "incomplete_scans": list(result.incomplete_scans),
                 "description": result.validator_description,
                 "details": [],
@@ -2907,6 +2934,24 @@ class HTMLReporter(ReporterBase):
             for f in r.findings
             if (f.severity.value if hasattr(f.severity, "value") else str(f.severity).lower()) in {"critical", "high"}
         )
+        # Why each incomplete Tier 1 check stopped, in the scanner's words. The
+        # summary asks for an install only when every scanner is just missing.
+        tier1_stop_reasons = [
+            (plain_check_name(r.validator_name), _scan_stop_reason(additional_errors(r), additional_warnings(r)))
+            for r in tier1_results
+            if r.is_incomplete
+        ]
+        tier1_scanners_missing = bool(tier1_stop_reasons) and all(
+            _MISSING_SCANNER.search(reason) for _check, reason in tier1_stop_reasons
+        )
+        tier1_scan_stop = next(
+            (
+                f"{check}: {_sentence(reason)}"
+                for check, reason in tier1_stop_reasons
+                if reason and not _MISSING_SCANNER.search(reason)
+            ),
+            "",
+        )
 
         report_data = {
             "title": self.title,
@@ -3062,6 +3107,8 @@ class HTMLReporter(ReporterBase):
             tier3_status_reason=publication.tier3.reason,
             tier1_failed_checks=tier1_failed_checks,
             tier1_incomplete_scans=list(dict.fromkeys(tool for r in tier1_results for tool in r.incomplete_scans)),
+            tier1_scanners_missing=tier1_scanners_missing,
+            tier1_scan_stop=tier1_scan_stop,
             tier1_blocking_findings=tier1_blocking_findings,
             check_names=check_names,
             finding_anchors=tier1_finding_anchors,

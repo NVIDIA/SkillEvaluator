@@ -84,7 +84,7 @@ def test_fix_first_ranks_by_severity_and_lists_each_location_once() -> None:
     assert items[-1]["blocking"] is False
 
 
-def test_fix_first_puts_the_missing_scanner_first_when_incomplete() -> None:
+def test_fix_first_puts_an_unfinished_scan_first_when_incomplete() -> None:
     results = _results()
     secrets = results[1]
     secrets.mark_scan_incomplete("gitleaks")
@@ -92,7 +92,63 @@ def test_fix_first_puts_the_missing_scanner_first_when_incomplete() -> None:
     items = fix_first_for_results(results, skill_name="demo")
 
     assert items[0]["kind"] == "incomplete"
-    assert items[0]["message"] == "Secrets Detection did not finish: gitleaks unavailable"
+    # Without a diagnostic the report names the scanner and claims no cause.
+    assert items[0]["message"] == "Secrets Detection did not finish (gitleaks)"
+
+
+def _timed_out_scan() -> list[ValidationResult]:
+    """A scan that kept one partial finding, then timed out."""
+    scan = ValidationResult(validator_name="Security Scan", validator_description="Detect security vulnerabilities")
+    scan.add_finding(_finding("high", "Tool Misuse: subprocess.run(shell=True)", "scripts/run.py", 7))
+    scan.mark_scan_incomplete("skillspector")
+    scan.add_error("skillspector timed out after 300 seconds; partial results only")
+    clean = ValidationResult(validator_name="License Compliance", validator_description="Licenses")
+    clean.add_success("license", "License found")
+    return [scan, clean]
+
+
+def test_incomplete_scan_with_partial_findings_keeps_its_diagnostic_visible() -> None:
+    html = _render(_timed_out_scan())
+    card = html.split('id="c-demo-security-scan"', 1)[1].split('<div class="check-finding', 1)[0]
+    raw_output = re.findall(r'<details class="raw-output">.*?</details>', card, flags=re.DOTALL)
+    outside_raw_output = re.sub(r'<details class="raw-output">.*?</details>', "", card, flags=re.DOTALL)
+
+    # The reason the scan stopped is shown, and printed, outside the collapsed output.
+    assert '<p class="scan-diagnostic">skillspector timed out after 300 seconds; partial results only</p>' in (
+        outside_raw_output
+    )
+    # Only the line that repeats the finding card folds away.
+    assert len(raw_output) == 1
+    assert "[SECURITY-HIGH] Tool Misuse" in raw_output[0]
+    assert "timed out" not in raw_output[0]
+
+
+def test_incomplete_scan_names_the_diagnostic_instead_of_a_missing_scanner() -> None:
+    results = _timed_out_scan()
+    html = _render(results)
+    summary = html.split('<section class="exec-summary', 1)[1].split("</section>", 1)[0]
+
+    items = fix_first_for_results(results, skill_name="demo")
+
+    assert items[0]["message"] == (
+        "Security Scan did not finish: skillspector timed out after 300 seconds; partial results only"
+    )
+    assert "Security Scan: skillspector timed out after 300 seconds; partial results only." in summary
+    assert "unavailable" not in items[0]["message"]
+    assert "Install or enable" not in summary
+
+
+def test_missing_scanner_asks_for_an_install() -> None:
+    secrets = ValidationResult(validator_name="Secrets Detection", validator_description="Detect secrets")
+    secrets.add_warning("gitleaks not installed - secrets scanning skipped. Install with: brew install gitleaks")
+    secrets.mark_scan_incomplete("gitleaks")
+
+    html = _render([secrets])
+    summary = html.split('<section class="exec-summary', 1)[1].split("</section>", 1)[0]
+    items = fix_first_for_results([secrets], skill_name="demo")
+
+    assert items[0]["message"].startswith("Secrets Detection did not finish: gitleaks not installed")
+    assert "Install or enable the scanner and run the evaluation again." in summary
 
 
 def test_fix_first_links_open_existing_cards() -> None:

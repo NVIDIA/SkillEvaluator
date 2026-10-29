@@ -2437,12 +2437,8 @@ def passes_required_gate(result: ValidationResult) -> bool:
     return bool(result.passed or is_advisory_agent_eval_skip(result))
 
 
-def additional_errors(result: ValidationResult) -> list[str]:
-    """Return errors not already displayed through a structured finding.
-
-    Findings also populate the legacy error list. Keep independent errors,
-    including execution diagnostics, without repeating those mirrored entries.
-    """
+def _finding_legacy_lines(result: ValidationResult) -> set[str]:
+    """Return the legacy error and warning lines that only repeat a structured finding."""
     represented = {finding.to_legacy_string() for finding in result.findings}
     for finding in result.findings:
         # merge_with_prefix puts skill labels before legacy messages but inside
@@ -2453,7 +2449,27 @@ def additional_errors(result: ValidationResult) -> list[str]:
             label, _, location = location.partition("] ")
             prefix += label + "] "
             represented.add(f"{prefix}{finding.tag} {finding.message} in {location}")
+    return represented
+
+
+def additional_errors(result: ValidationResult) -> list[str]:
+    """Return errors not already displayed through a structured finding.
+
+    Findings also populate the legacy error list. Keep independent errors,
+    including execution diagnostics, without repeating those mirrored entries.
+    """
+    represented = _finding_legacy_lines(result)
     return [error for error in result.errors if error not in represented]
+
+
+def additional_warnings(result: ValidationResult) -> list[str]:
+    """Return warnings not already displayed through a structured finding.
+
+    Medium and low findings also populate the legacy warning list. Some
+    scanners report why they did not run as a warning, so keep those lines.
+    """
+    represented = _finding_legacy_lines(result)
+    return [warning for warning in result.warnings if warning not in represented]
 
 
 class ReporterBase(ABC):

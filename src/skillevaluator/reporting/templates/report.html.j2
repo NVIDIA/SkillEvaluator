@@ -1494,7 +1494,10 @@
                     <h2 id="exec-summary-title" class="exec-title"><span class="sr-only">Tier 1 result: </span><span class="verdict-chip {{ t1_class }}">{{ verdict_words[t1_key] }}</span></h2>
                     <p class="exec-reason">
                     {%- if t1_key == 'incomplete' -%}
-                        A required scan did not finish{% if tier1_incomplete_scans %} ({{ tier1_incomplete_scans | join(', ') }}){% endif %}, so no pass is claimed. Install or enable the scanner and run the evaluation again.
+                        A required scan did not finish{% if tier1_incomplete_scans %} ({{ tier1_incomplete_scans | join(', ') }}){% endif %}, so no pass is claimed.
+                        {%- if tier1_scanners_missing %} Install or enable the scanner and run the evaluation again.
+                        {%- elif tier1_scan_stop %} {{ tier1_scan_stop }} Fix what stopped the scan and run the evaluation again.
+                        {%- else %} Find out why the scan stopped and run the evaluation again.{% endif %}
                     {%- elif t1_key == 'fail' -%}
                         {{ failed_count }} of {{ total_validators }} checks failed: {{ tier1_failed_checks[:3] | join(', ') }}{% if tier1_failed_checks | length > 3 %} and {{ tier1_failed_checks | length - 3 }} more{% endif %}.{% if tier1_blocking_findings %} {{ tier1_blocking_findings }} critical or high finding{{ 's' if tier1_blocking_findings != 1 else '' }} in those checks block the verdict.{% endif %}
                     {%- elif t1_key == 'skipped' -%}
@@ -1779,9 +1782,13 @@
                             </summary>
                             <div class="check-details">
                                 {% if check_status == 'incomplete' %}<p class="incomplete-notice"><strong>Scan incomplete.</strong> {% if validator_data.incomplete_scans | default([]) %}Required scanner(s): {{ validator_data.incomplete_scans | join(', ') }}.{% endif %} The required evidence is unavailable.</p>{% endif %}
-                                {#- With located findings below, raw scanner lines are supporting detail. -#}
-                                {% if validator_data.findings and validator_data.errors | default([]) %}<details class="raw-output"><summary>Scanner output ({{ validator_data.errors | length }} line{{ 's' if validator_data.errors | length != 1 else '' }})</summary>{% for error in validator_data.errors %}<p class="scan-diagnostic">{{ error }}</p>{% endfor %}</details>{% else %}{% for error in validator_data.errors | default([]) %}<p class="scan-diagnostic">{{ error }}</p>{% endfor %}{% endif %}
-                                {% if check_status == 'incomplete' %}{% for warning in validator_data.warnings | default([]) %}<p class="scan-diagnostic">{{ warning }}</p>{% endfor %}{% endif %}
+                                {#- Scanner diagnostics and gate failures always show and print. Lines that only
+                                    repeat a finding card below fold into the raw scanner output. -#}
+                                {% set diagnostics = validator_data.additional_errors | default(validator_data.errors | default([])) %}
+                                {% set diagnostic_warnings = validator_data.additional_warnings | default(validator_data.warnings | default([])) if check_status == 'incomplete' else [] %}
+                                {% set finding_lines = (validator_data.errors | default([]) | reject('in', diagnostics) | list) + ((validator_data.warnings | default([]) | reject('in', diagnostic_warnings) | list) if check_status == 'incomplete' else []) %}
+                                {% for line in diagnostics + diagnostic_warnings %}<p class="scan-diagnostic">{{ line }}</p>{% endfor %}
+                                {% if finding_lines %}<details class="raw-output"><summary>Scanner output for the findings below ({{ finding_lines | length }} line{{ 's' if finding_lines | length != 1 else '' }})</summary>{% for line in finding_lines %}<p class="scan-diagnostic">{{ line }}</p>{% endfor %}</details>{% endif %}
                                 {% if validator_data.passed %}
                                     {% if validator_data.details %}
                                     {% set detail = validator_data.details[0] %}

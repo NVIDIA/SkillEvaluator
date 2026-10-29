@@ -94,7 +94,7 @@ filterToAffectedSkills = function(row) {
     applyReportSearch();
 };
 // Printing includes supporting evidence while preserving the reader's disclosure state.
-// Raw scanner output stays collapsed: its located findings print as cards.
+// Raw scanner output stays collapsed: it only repeats finding cards, which print.
 let reportPrintClosedDetails = [];
 window.addEventListener('beforeprint', function() {
     reportPrintClosedDetails = Array.from(document.querySelectorAll('details:not([open]):not(.raw-output)'));

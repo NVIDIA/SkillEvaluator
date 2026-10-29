@@ -44,7 +44,7 @@ def format_character_facts(
                 context = text[max(0, index - context_radius) : index + context_radius + 1]
                 entries.append(
                     f"- line {line}, column {column}: U+{ord(character):04X} "
-                    f"{unicodedata.name(character, 'UNNAMED')}; "
+                    f"{unicodedata.name(character, '<control>')}; "
                     f"escaped context: {json.dumps(context, ensure_ascii=True)}"
                 )
         if character == "\n":

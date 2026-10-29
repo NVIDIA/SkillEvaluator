@@ -27,6 +27,9 @@ class EvaluationOptions:
     agents: str | None = None
     env_mode: str = "docker"
     skip_baseline: bool = False
+    # Baseline-only runs (for example harness calibration) skip the with-skill
+    # arm. Mutually exclusive with ``skip_baseline``.
+    skip_with_skill: bool = False
     n_attempts: int | None = None
     pass_threshold: float | None = None
     stop_on_pass: bool | None = None

@@ -2814,6 +2814,11 @@ def _tier2_workflow(
     help="Create one eval case when no dataset/task source exists, then evaluate.",
 )
 @click.option("--skip-baseline", is_flag=True, help="Skip without-skill baseline.")
+@click.option(
+    "--skip-with-skill",
+    is_flag=True,
+    help="Skip the with-skill arm and run only the without-skill baseline (no lift analysis).",
+)
 @click.option("--n-attempts", type=int, default=None)
 @click.option("--pass-threshold", type=float, default=None)
 @click.option(
@@ -2877,6 +2882,7 @@ def evaluate(
     environment_kwarg: tuple[str, ...],
     autopilot: bool,
     skip_baseline: bool,
+    skip_with_skill: bool,
     n_attempts: int | None,
     pass_threshold: float | None,
     stop_on_pass: bool | None,
@@ -2906,6 +2912,9 @@ def evaluate(
     from skillevaluator.evaluation import EvaluationOptions, EvaluationService
     from skillevaluator.tier3.harbor.progress import create_progress_reporter
 
+    if skip_baseline and skip_with_skill:
+        # Reject before --autopilot can spend a generation call on a run that cannot start.
+        raise click.UsageError("--skip-baseline and --skip-with-skill are mutually exclusive (no arm would run)")
     service = EvaluationService()
     # Resolved before the service is built so a non-canonical value is refused
     # at the boundary rather than after a long live run has already started.
@@ -2925,6 +2934,7 @@ def evaluate(
         env_mode=env_mode,
         environment_kwarg=environment_kwarg,
         skip_baseline=skip_baseline,
+        skip_with_skill=skip_with_skill,
         n_attempts=n_attempts,
         pass_threshold=pass_threshold,
         stop_on_pass=stop_on_pass,

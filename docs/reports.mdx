@@ -350,7 +350,7 @@ completed run directly:
   you ran more than one agent.
 - **`<agent>/lift.json`** and **`<agent>/pass_at_k_lift.json`** — per-metric
   deltas between the two arms; written only when both arms produced scores
-  (a `--skip-baseline` run has neither).
+  (a `--skip-baseline` or `--skip-with-skill` run has neither).
 - **`<agent>/{with-skill,without-skill}/`** — each arm's `summary.json`
   (scores, dimensions, pass@k, trial counts) and a `trials/` directory of
   per-trial artifacts: the trial's `reward.json`, Harbor's `trajectory.json`
@@ -387,7 +387,9 @@ A finished `tier3 evaluate` run prints two tables and closes with a compact
 with its per-arm scores and Skill Lift; **Results by Dimension** rolls those
 signals up into the five dimensions below. A metric the run couldn't score
 renders as `NO SCORE` — it is never coerced to 0.0 — and unscored metrics are
-omitted from the averages, so `overall_score` can be `null` in the JSON. The
+omitted from the averages, so `overall_score` can be `null` in the JSON. In a
+baseline-only run (`--skip-with-skill`) the with-skill and Skill Lift cells read
+`skipped` instead, because that arm never ran. The
 Artifacts panel shows the HTML report path, the output directory, and — only
 when a retained Harbor jobs directory exists — a ready-to-paste `harbor-view`
 command.

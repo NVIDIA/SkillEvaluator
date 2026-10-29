@@ -302,6 +302,17 @@ def _reset_agent_generated_outputs(agent_dir: Path, output_root: Path) -> None:
         _remove_generated_output_path(path, output_root)
 
 
+def _skipped_with_skill_activation() -> dict[str, Any]:
+    """Activation summary for a baseline-only run, which never ran the skill."""
+    return {
+        "status": "not_applicable",
+        "positive_trials": 0,
+        "activated_trials": 0,
+        "unknown_trials": 0,
+        "reason": "With-skill arm was skipped; skill activation was not measured",
+    }
+
+
 def _find_job_dir(jobs_dir: Path, job_name: str) -> Path | None:
     """Find the exact Harbor job directory produced for ``job_name``."""
     candidate = jobs_dir / job_name
@@ -6851,6 +6862,7 @@ def collect_harbor_results(
     jobs_dir: Path,
     *,
     skip_baseline: bool = False,
+    skip_with_skill: bool = False,
     n_attempts: int = 1,
     pass_threshold: float = 0.50,
     stop_on_pass: bool = False,
@@ -6866,7 +6878,11 @@ def collect_harbor_results(
     """Collect results from Harbor jobs into evals/results/<agent>/ structure.
 
     Returns a dict with per-agent scores, lift, and a cross-agent comparison.
+    ``skip_with_skill`` collects only the baseline arm of a baseline-only run:
+    the with-skill arm is recorded as skipped and no lift is computed.
     """
+    if skip_baseline and skip_with_skill:
+        raise ValueError("skip_baseline and skip_with_skill are mutually exclusive (no arm would run)")
     if expected_trials is not None and expected_total_trials is not None and expected_trials != expected_total_trials:
         raise ValueError("Conflicting expected trial counts were provided")
     if expected_trials is None:
@@ -6900,7 +6916,8 @@ def collect_harbor_results(
         agent_dir = output_dir / agent
 
         with_job_name = f"{skill_name}-{agent}-with"
-        with_job_dir = _find_job_dir(jobs_dir, with_job_name)
+        # A skipped arm never adopts a stale job left in a reused jobs directory.
+        with_job_dir = None if skip_with_skill else _find_job_dir(jobs_dir, with_job_name)
 
         with_collected_rewards: list[dict[str, Any]] = []
         with_rewards: list[dict[str, Any]] = []
@@ -7054,7 +7071,7 @@ def collect_harbor_results(
                 len(with_logical_rewards),
                 with_scores,
             )
-        else:
+        elif not skip_with_skill:
             with_job_failure = f"No Harbor job found for {with_job_name}"
             logger.warning("No Harbor job found for %s (with-skill)", with_job_name)
             prefix = f"{agent} with-skill Harbor run failed: "
@@ -7095,9 +7112,12 @@ def collect_harbor_results(
                 n_attempts=n_attempts,
                 job_failure=with_job_failure,
                 runtime_failures=with_runtime_failures,
+                skipped=skip_with_skill,
                 stop_on_pass=stop_on_pass,
                 pass_threshold=pass_threshold,
             )
+        # A skipped with-skill arm still writes its summary: report loading keys
+        # agent presence on it, and its "skipped" status marks a baseline-only run.
         if with_job_dir is None:
             summary_dir = agent_dir / "with-skill"
             summary_dir.mkdir(parents=True, exist_ok=True)
@@ -7120,6 +7140,7 @@ def collect_harbor_results(
                     **with_execution,
                     "job_failure": with_job_failure,
                     "trial_failures": [],
+                    **({"skill_activation": _skipped_with_skill_activation()} if skip_with_skill else {}),
                 },
             )
 
@@ -7156,8 +7177,10 @@ def collect_harbor_results(
                 without_runtime_failures = _extract_agent_runtime_failures(without_job_dir)
                 without_trial_failures = _extract_trial_failures(without_job_dir)
                 preserve_partial = _can_preserve_partial_rewards(without_job_dir, without_trial_failures)
+                # The runner stages unsuffixed task names when only one arm runs.
+                without_arm_suffix = "-without-skill" if not skip_with_skill else ""
                 without_task_entry_ids = (
-                    _staged_task_entry_id_map(output_dir, agent, "without", arm_suffix="-without-skill")
+                    _staged_task_entry_id_map(output_dir, agent, "without", arm_suffix=without_arm_suffix)
                     if case_id_by_task_selector is None
                     else None
                 )
@@ -7165,7 +7188,7 @@ def collect_harbor_results(
                     _extract_rewards(
                         without_job_dir,
                         case_id_by_task_selector,
-                        arm_suffix="-without-skill",
+                        arm_suffix=without_arm_suffix,
                         task_entry_id_map=without_task_entry_ids,
                     )
                     if without_job_ok or preserve_partial
@@ -7188,6 +7211,13 @@ def collect_harbor_results(
                 without_policy, without_policy_ambiguous = _score_policy_for_rewards(
                     without_logical_rewards, without_metrics
                 )
+                if skip_with_skill:
+                    # The baseline is the only scored arm, so it owns the run's metric contract.
+                    all_results["metric_set"] = without_metric_set
+                    all_results["metrics"] = list(without_metrics)
+                    all_results["attempt_policy"]["score_definition"] = _score_definition_for_policy(
+                        without_metrics, without_policy
+                    )
                 without_custom_scores = average_custom_metrics(without_logical_rewards)
                 without_pass = _pass_summary(
                     without_logical_rewards,
@@ -7373,8 +7403,9 @@ def collect_harbor_results(
                         output_dir,
                         without_summary,
                     )
-        all_results["score_policy"] = with_policy
-        all_results["attempt_policy"]["score_policy"] = with_policy
+        scored_policy = without_policy if skip_with_skill else with_policy
+        all_results["score_policy"] = scored_policy
+        all_results["attempt_policy"]["score_policy"] = scored_policy
         if with_job_dir:
             all_results["attempt_policy"]["score_definition"] = _score_definition_for_policy(with_metrics, with_policy)
         policy_conflict = (
@@ -7403,7 +7434,9 @@ def collect_harbor_results(
             with_overall_score = None
             without_overall_score = None
 
-        skill_activation = summarize_skill_activation(with_rewards)
+        skill_activation = (
+            _skipped_with_skill_activation() if skip_with_skill else summarize_skill_activation(with_rewards)
+        )
         lift: dict[str, Any] = {}
         paired_execution_succeeded = (
             with_execution.get("execution_status") == "succeeded"
@@ -7525,7 +7558,7 @@ def collect_harbor_results(
             "overall_without_skill": without_overall_score,
             "metrics_with_skill": list(with_metrics),
             "metrics_without_skill": list(without_metrics),
-            "score_policy_with_skill": with_policy,
+            "score_policy_with_skill": with_policy if not skip_with_skill else None,
             "score_policy_without_skill": without_policy if not skip_baseline else None,
             "custom_with_skill": with_custom_scores,
             "custom_without_skill": without_custom_scores,
@@ -7577,10 +7610,12 @@ def collect_harbor_results(
             "output_dir": str(agent_dir.resolve()),
         }
 
+    # A baseline-only run scores only the without-skill arm.
+    scored_arm = "without_skill" if skip_with_skill else "with_skill"
     scored_policies = {
-        info["score_policy_with_skill"]
+        info[f"score_policy_{scored_arm}"]
         for info in all_results["agents"].values()
-        if info.get("execution_status") == "succeeded" and info.get("score_policy_with_skill")
+        if info.get("execution_status") == "succeeded" and info.get(f"score_policy_{scored_arm}")
     }
     # Custom-only agents publish their grader's own overall and rank against
     # standard agents, so only standard score policies can conflict.
@@ -7597,13 +7632,13 @@ def collect_harbor_results(
         scored_agent = next(
             info
             for info in all_results["agents"].values()
-            if info.get("execution_status") == "succeeded" and info.get("score_policy_with_skill") == score_policy
+            if info.get("execution_status") == "succeeded" and info.get(f"score_policy_{scored_arm}") == score_policy
         )
         selected_metrics = tuple(
             metric
             for metric in DEFAULT_METRICS
-            if metric in scored_agent["with_skill"]
-            or metric in scored_agent.get("not_applicable_metrics", {}).get("with_skill", ())
+            if metric in scored_agent[scored_arm]
+            or metric in scored_agent.get("not_applicable_metrics", {}).get(scored_arm, ())
         )
         all_results["metric_set"] = (
             DEFAULT_METRIC_SET

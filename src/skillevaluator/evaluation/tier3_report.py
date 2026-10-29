@@ -564,10 +564,18 @@ def _validation_result_from_payload(payload: dict[str, Any] | None) -> Validatio
         result.metadata["run_id"] = run_id
     best = payload.get("best_agent") or "n/a"
     if payload.get("execution_status") == "succeeded" and _finite_float(payload.get("overall_score")) is not None:
-        result.add_success(
-            "agent_eval",
-            f"Tier 3 evaluation complete: verdict {str(payload.get('verdict', 'neutral')).upper()}; best agent {best}",
-        )
+        if payload.get("mode") == "baseline_only":
+            result.add_success(
+                "agent_eval",
+                f"Tier 3 baseline calibration complete: best agent {best} "
+                "(no with-skill arm run; no skill lift measured)",
+            )
+        else:
+            result.add_success(
+                "agent_eval",
+                f"Tier 3 evaluation complete: verdict {str(payload.get('verdict', 'neutral')).upper()}; "
+                f"best agent {best}",
+            )
         result.passed = True
     else:
         errors = payload.get("execution_errors") or ["Tier 3 evaluation did not produce a complete scored run"]
@@ -689,13 +697,19 @@ def build_agent_eval_payload(
         metrics_for_condition,
     )
 
+    mode = _evaluation_mode(agents)
+    baseline_only = mode == "baseline_only"
+    # A baseline-only run (--skip-with-skill) scores only its without-skill arm,
+    # which then supplies the metric contract, ranking and overall score.
+    scored_condition = "without_skill" if baseline_only else "with_skill"
+    score_field = "baseline" if baseline_only else "with_skill"
     # Custom-only agents publish their grader's own overall under the custom
     # policy and rank against standard agents. The run-level policy, its
     # conflict checks and the metric-set comparison cover standard agents.
     custom_only_agents = {name for name, info in agents.items() if _is_custom_only_agent(info)}
     policy_agents = {name: info for name, info in agents.items() if name not in custom_only_agents} or agents
-    metrics = metrics_for_agents(policy_agents)
-    policy_metrics = _policy_metrics_from_agents(policy_agents, metrics)
+    metrics = metrics_for_agents(policy_agents, condition=scored_condition)
+    policy_metrics = _policy_metrics_from_agents(policy_agents, metrics, condition=scored_condition)
 
     from skillevaluator.tier3.harbor.metrics import (
         CUSTOM_SCORE_POLICY,
@@ -740,28 +754,34 @@ def build_agent_eval_payload(
             metrics_for_condition(info, "without_skill"),
             model,
             CUSTOM_SCORE_POLICY if name in custom_only_agents else policy["score_policy"],
+            baseline_only=baseline_only,
         )
 
     if not agent_payloads:
         return None
 
     scored_metric_sets = {
-        frozenset(agent["metrics_with_skill"])
+        frozenset(agent[f"metrics_{scored_condition}"])
         for name, agent in agent_payloads.items()
         if name not in custom_only_agents
         and agent["execution_status"] == "succeeded"
-        and agent["with_skill"] is not None
+        and agent[score_field] is not None
     }
     conflicting_metric_sets = len(scored_metric_sets) > 1
     if conflicting_metric_sets and not conflicting_policies:
         policy["score_definition"] = "overall unavailable: incomparable metric sets across agents"
-    best_agent = "" if conflicting_policies or conflicting_metric_sets else _pick_best_agent(agent_payloads)
+    best_agent = (
+        ""
+        if conflicting_policies or conflicting_metric_sets
+        else _pick_best_agent(agent_payloads, score_field=score_field)
+    )
     detail_priority = ([best_agent] if best_agent else []) + [name for name in agent_payloads if name != best_agent]
     for name in detail_priority:
         _attach_agent_report_details(
             agent_payloads[name],
             agents.get(name, {}),
             report_budget,
+            baseline_only=baseline_only,
         )
     best = agent_payloads.get(best_agent, {})
     if suggestions_v2 is None and run_dir is not None:
@@ -793,7 +813,7 @@ def build_agent_eval_payload(
         execution_status = "failed"
         execution_errors.append("Incomparable metric sets across scored agents; overall ranking is unavailable")
     elif policy["score_policy"] not in SUPPORTED_SCORE_POLICIES and any(
-        agent.get("execution_status") == "succeeded" and agent.get("with_skill") is None
+        agent.get("execution_status") == "succeeded" and agent.get(score_field) is None
         for agent in agent_payloads.values()
     ):
         execution_status = "failed"
@@ -801,10 +821,15 @@ def build_agent_eval_payload(
     # Count score-policy errors appended above as displayed diagnostics.
     execution_error_details = _aggregate_execution_error_details(agent_payloads, len(execution_errors))
 
-    raw_overall_score = best.get("with_skill")
+    raw_overall_score = best.get(score_field)
     overall_score = _finite_float(raw_overall_score) if execution_status == "succeeded" else None
     overall_lift = _finite_float(best.get("lift"))
-    verdict = _overall_verdict_from_agents(agent_payloads) if overall_score is not None else VERDICT_NEUTRAL
+    # Baseline calibration scores measure no skill, so they never set a skill verdict.
+    verdict = (
+        _overall_verdict_from_agents(agent_payloads)
+        if overall_score is not None and not baseline_only
+        else VERDICT_NEUTRAL
+    )
 
     metric_ids = list(best.get("evaluators", {}).keys())
     metric_labels = _metric_labels(metric_ids)
@@ -843,6 +868,7 @@ def build_agent_eval_payload(
         "verdict": verdict,
         "skill_activation": best.get("skill_activation", {}),
         "skill_name": skill_name,
+        "mode": mode,
         "best_agent": best_agent,
         "agents_run": list(agent_payloads.keys()),
         "overall_score": round(overall_score, 4) if overall_score is not None else None,
@@ -880,6 +906,13 @@ def build_agent_eval_payload(
         failure_message = "; ".join(execution_errors) or "Tier 3 evaluation did not produce a complete scored run"
         deterministic_conclusions = [{"severity": "fail", "title": "Evaluation incomplete", "message": failure_message}]
         deterministic_suggestions = [failure_message]
+    elif baseline_only:
+        # A deliberate baseline-only run is complete, not failed: state the
+        # calibration result so it is never read as a skill-lift measurement.
+        deterministic_conclusions = _build_baseline_only_conclusions(best_agent, overall_score, best_dimensions)
+        deterministic_suggestions = [
+            "Run without --skip-with-skill to evaluate the with-skill arm and measure skill lift against this baseline."
+        ]
     elif verdict == VERDICT_INCONCLUSIVE:
         deterministic_conclusions = [
             {
@@ -914,6 +947,7 @@ def build_agent_eval_payload(
         "schema_version": _SCHEMA_VERSION,
         "summary": summary,
         "skill_name": skill_name,
+        "mode": mode,
         "verdict": verdict,
         "skill_activation": summary["skill_activation"],
         "best_agent": best_agent,
@@ -953,7 +987,7 @@ def build_agent_eval_payload(
         "recommendations": recommendations,
         "suggestions": list(deterministic_suggestions),
         "suggestions_v2": _attach_harbor_evidence_to_suggestions_v2(
-            [] if _never_activated(best) else (suggestions_v2 or []),
+            [] if _never_activated(best) or baseline_only else (suggestions_v2 or []),
             best_evidence_links,
         ),
         "metric_ids": metric_ids,
@@ -979,7 +1013,9 @@ def build_agent_eval_payload(
         payload,
         deterministic_conclusions=deterministic_conclusions,
         deterministic_suggestions=deterministic_suggestions,
-        use_llm_judge=use_llm_judge and overall_score is not None and not _never_activated(best),
+        # The insights judge reasons about with-skill quality, which a
+        # baseline-only run never measured.
+        use_llm_judge=use_llm_judge and overall_score is not None and not _never_activated(best) and not baseline_only,
     )
     if evidence_links:
         payload["conclusions"] = _attach_harbor_evidence_to_conclusions(
@@ -1488,6 +1524,8 @@ def _replace_with_minimal_payload(payload: dict[str, Any], report_budget: _Repor
 def _policy_metrics_from_agents(
     agents: dict[str, dict[str, Any]],
     metrics: list[str],
+    *,
+    condition: str = "with_skill",
 ) -> tuple[str, ...]:
     from skillevaluator.tier3.harbor.metrics import DEFAULT_METRICS
 
@@ -1495,10 +1533,10 @@ def _policy_metrics_from_agents(
         metric
         for metric in (metrics or DEFAULT_METRICS)
         if any(
-            _condition_quality_available(info, "with_skill")
-            and (_finite_float(scores.get(metric)) is not None or metric in _arm_not_applicable(info, "with_skill"))
+            _condition_quality_available(info, condition)
+            and (_finite_float(scores.get(metric)) is not None or metric in _arm_not_applicable(info, condition))
             for info in agents.values()
-            for scores in (info.get("with_skill"),)
+            for scores in (info.get(condition),)
             if isinstance(scores, dict)
         )
     )
@@ -1824,6 +1862,8 @@ def _build_agent(
     baseline_metrics: list[str],
     model: str | None,
     score_policy: str,
+    *,
+    baseline_only: bool = False,
 ) -> dict[str, Any]:
     from skillevaluator.tier3.harbor.metrics import (
         CUSTOM_SCORE_POLICY,
@@ -1864,12 +1904,13 @@ def _build_agent(
     with_not_applicable = _arm_not_applicable(info, "with_skill") if with_quality_available else []
     baseline_not_applicable = _arm_not_applicable(info, "without_skill") if baseline_quality_available else []
     evaluators = _build_evaluators(
-        with_metrics,
+        baseline_metrics if baseline_only else with_metrics,
         with_scores,
         without_scores,
         lift_data,
         with_not_applicable=with_not_applicable,
         baseline_not_applicable=baseline_not_applicable,
+        baseline_only=baseline_only,
     )
     dimensions = _build_dimensions(
         with_scores,
@@ -1881,9 +1922,17 @@ def _build_agent(
         baseline_metrics=baseline_metrics,
         with_not_applicable=with_not_applicable,
         baseline_not_applicable=baseline_not_applicable,
+        baseline_only=baseline_only,
     )
-    not_applicable_evaluators = _not_applicable_evaluators(with_metrics, with_scores, with_not_applicable)
-    not_applicable_dimensions = _not_applicable_dimensions(dimensions, with_not_applicable)
+    # N/A notes describe the scored arm: the baseline in a baseline-only run.
+    if baseline_only:
+        not_applicable_evaluators = _not_applicable_evaluators(
+            baseline_metrics, without_scores, baseline_not_applicable
+        )
+        not_applicable_dimensions = _not_applicable_dimensions(dimensions, baseline_not_applicable)
+    else:
+        not_applicable_evaluators = _not_applicable_evaluators(with_metrics, with_scores, with_not_applicable)
+        not_applicable_dimensions = _not_applicable_dimensions(dimensions, with_not_applicable)
     if never_activated:
         for evaluator in evaluators.values():
             evaluator["lift"] = None
@@ -2060,6 +2109,8 @@ def _attach_agent_report_details(
     agent_payload: dict[str, Any],
     info: dict[str, Any],
     report_budget: _ReportBudget,
+    *,
+    baseline_only: bool = False,
 ) -> None:
     """Populate bounded diagnostic details after the best agent is known.
 
@@ -2073,11 +2124,13 @@ def _attach_agent_report_details(
     custom_lift = info.get("custom_lift")
     agent_payload["evaluator_cards"] = _evaluator_cards(
         agent_payload.get("evaluators", {}),
-        rewards=info.get("rewards") or [],
+        # Baseline-only cards draw their evidence from the only arm that ran.
+        rewards=(info.get("rewards_baseline") if baseline_only else info.get("rewards")) or [],
         custom_with_skill=custom_with_skill if isinstance(custom_with_skill, dict) else {},
         custom_without_skill=custom_without_skill if isinstance(custom_without_skill, dict) else {},
         custom_lift=custom_lift if isinstance(custom_lift, dict) else {},
         report_budget=report_budget,
+        baseline_only=baseline_only,
     )
     if _never_activated(agent_payload):
         for card in agent_payload["evaluator_cards"]:
@@ -2092,12 +2145,27 @@ def _build_evaluators(
     *,
     with_not_applicable: list[str] = (),
     baseline_not_applicable: list[str] = (),
+    baseline_only: bool = False,
 ) -> dict[str, dict[str, Any]]:
     evaluators = {}
     mixed = lift_data.get("judge_mixed_cases") or {}
     paired = isinstance(lift_data.get("basis"), dict) or lift_data.get("comparison_unavailable") is True
     for metric in metrics:
         ws, bl = _finite_float(with_scores.get(metric)), _finite_float(without_scores.get(metric))
+        baseline_status = (
+            "scored" if bl is not None else ("not_applicable" if metric in baseline_not_applicable else "missing")
+        )
+        if baseline_only:
+            # No with-skill arm ran: the baseline score is the calibration row,
+            # and with-skill/lift stay unavailable rather than becoming 0.0.
+            evaluators[metric] = {
+                "with_skill": None,
+                "baseline": bl,
+                "lift": None,
+                "with_skill_status": "skipped",
+                "baseline_status": baseline_status,
+            }
+            continue
         lift = _lift_value(metric, lift_data)
         if lift is None and ws is not None and bl is not None and metric not in mixed and not paired:
             lift = round(ws - bl, 4)
@@ -2108,9 +2176,7 @@ def _build_evaluators(
             "with_skill_status": "scored"
             if ws is not None
             else ("not_applicable" if metric in with_not_applicable else "missing"),
-            "baseline_status": "scored"
-            if bl is not None
-            else ("not_applicable" if metric in baseline_not_applicable else "missing"),
+            "baseline_status": baseline_status,
         }
     return evaluators
 
@@ -2126,6 +2192,7 @@ def _build_dimensions(
     baseline_metrics: list[str] | None = None,
     with_not_applicable: list[str] = (),
     baseline_not_applicable: list[str] = (),
+    baseline_only: bool = False,
 ) -> list[dict[str, Any]]:
     dimensions: list[dict[str, Any]] = []
     for dim_id in _DIMENSION_IDS:
@@ -2137,6 +2204,10 @@ def _build_dimensions(
             without_scores, cfg, active_metrics=baseline_metrics, not_applicable=baseline_not_applicable
         )
         if ws is None and bl is None:
+            continue
+        if baseline_only:
+            if bl is not None:
+                dimensions.append(_baseline_only_dimension(dim_id, cfg, bl, without_scores, precomputed_without))
             continue
         lift = round(ws - bl, 4) if ws is not None and bl is not None else None
         entry = (
@@ -2210,6 +2281,39 @@ def _build_dimensions(
     return dimensions
 
 
+def _baseline_only_dimension(
+    dim_id: str,
+    cfg: dict[str, Any],
+    bl: float,
+    without_scores: dict[str, Any],
+    precomputed_without: dict[str, Any],
+) -> dict[str, Any]:
+    """Describe one dimension of a baseline-only run (--skip-with-skill).
+
+    The baseline is the measurement here, not a comparison point: it drives the
+    reasoning and band, while with-skill and lift stay unavailable.
+    """
+    entry = precomputed_without.get(dim_id) if isinstance(precomputed_without.get(dim_id), dict) else {}
+    signals = _dimension_signals(entry, without_scores, cfg)
+    explanation = entry.get("explanation")
+    reasoning_bullets = entry.get("reasoning_bullets")
+    if not reasoning_bullets and not explanation:
+        reasoning_bullets, explanation = _deterministic_reasoning(
+            bl, None, None, signals, without_scores, baseline_only=True
+        )
+    return {
+        "id": dim_id,
+        "with_skill": None,
+        "score": None,
+        "baseline": round(bl, 4),
+        "lift": None,
+        "explanation": explanation,
+        "verdict": entry.get("verdict") or _deterministic_verdict(bl),
+        "evaluators": signals,
+        "reasoning_bullets": reasoning_bullets or [],
+    }
+
+
 def _dimension_signals(entry: dict[str, Any], with_scores: dict[str, Any], cfg: dict[str, Any]) -> list[str]:
     """Return the evaluator signals that feed a dimension (Signals column).
 
@@ -2233,6 +2337,8 @@ def _deterministic_reasoning(
     lift: float | None,
     signals: list[str],
     with_scores: dict[str, Any],
+    *,
+    baseline_only: bool = False,
 ) -> tuple[list[str], str]:
     """Build deterministic reasoning bullets for a dimension (SkillEvaluator parity).
 
@@ -2263,6 +2369,9 @@ def _deterministic_reasoning(
         lift=lift,
         parts=parts,
     )
+    if baseline_only:
+        # ``ws`` carries the baseline score; replace the "no baseline" lift note.
+        bullets[1] = "Baseline-only run: no with-skill arm ran, so no skill lift was measured."
     return bullets, " ".join(bullets)
 
 
@@ -2583,8 +2692,14 @@ def _evaluator_card(
     label: str,
     rewards: list[dict[str, Any]],
     report_budget: _ReportBudget,
+    baseline_only: bool = False,
 ) -> dict[str, Any]:
-    ws = _as_float(scores.get("with_skill"))
+    if baseline_only:
+        # No with-skill arm ran: the baseline score sets the card's status band.
+        ws = None
+        headline = _as_float(scores.get("baseline"))
+    else:
+        ws = headline = _as_float(scores.get("with_skill"))
     evidence_sampling: dict[str, Any] = {}
     card = {
         "id": metric,
@@ -2592,7 +2707,7 @@ def _evaluator_card(
         "with_skill": ws,
         "baseline": scores.get("baseline"),
         "lift": scores.get("lift"),
-        "status": "pass" if ws >= 0.8 else ("warn" if ws >= 0.6 else "fail"),
+        "status": "pass" if headline >= 0.8 else ("warn" if headline >= 0.6 else "fail"),
         "evidence": _metric_evidence(metric, rewards, report_budget, evidence_sampling),
     }
     if evidence_sampling:
@@ -2608,12 +2723,17 @@ def _evaluator_cards(
     custom_without_skill: dict[str, Any],
     custom_lift: dict[str, Any],
     report_budget: _ReportBudget,
+    baseline_only: bool = False,
 ) -> list[dict[str, Any]]:
     from skillevaluator.tier3.harbor.metrics import METRIC_DISPLAY
 
     cards: list[dict[str, Any]] = []
+    # Cards cover scored evaluators; a baseline-only run is scored by its baseline arm.
+    headline_field = "baseline" if baseline_only else "with_skill"
     evaluator_items = [
-        (metric, values) for metric, values in evaluators.items() if _finite_float(values.get("with_skill")) is not None
+        (metric, values)
+        for metric, values in evaluators.items()
+        if _finite_float(values.get(headline_field)) is not None
     ]
     for evaluator_index, (metric, scores) in enumerate(evaluator_items):
         if report_budget.cards_remaining <= 0:
@@ -2627,18 +2747,32 @@ def _evaluator_cards(
                 label=METRIC_DISPLAY.get(metric, metric.replace("_", " ").title()),
                 rewards=rewards,
                 report_budget=report_budget,
+                baseline_only=baseline_only,
             )
         )
 
     custom_scores = _discover_custom_metric_scores(
-        custom_with_skill,
+        custom_without_skill if baseline_only else custom_with_skill,
         rewards,
         set(evaluators),
         report_budget.cards_remaining,
         report_budget,
     )
-    for metric, with_skill in custom_scores.items():
+    for metric, score in custom_scores.items():
         report_budget.cards_remaining -= 1
+        if baseline_only:
+            cards.append(
+                _evaluator_card(
+                    metric,
+                    {"with_skill": None, "baseline": score, "lift": None},
+                    label=f"Custom: {metric}",
+                    rewards=rewards,
+                    report_budget=report_budget,
+                    baseline_only=True,
+                )
+            )
+            continue
+        with_skill = score
         baseline = _custom_metric_score(metric, custom_without_skill, [])
         lift = _lift_value(metric, custom_lift)
         if lift is None and baseline is not None:
@@ -3561,11 +3695,11 @@ def _overall_verdict_from_agents(agents: dict[str, dict[str, Any]]) -> str:
     return VERDICT_FAIL
 
 
-def _canonical_agent_rank(agent: dict[str, Any]) -> tuple[float, float] | None:
+def _canonical_agent_rank(agent: dict[str, Any], *, score_field: str = "with_skill") -> tuple[float, float] | None:
     """Return the score/lift tuple used to rank one canonical agent payload."""
     if agent.get("execution_status") != "succeeded":
         return None
-    score = _finite_float(agent.get("with_skill"))
+    score = _finite_float(agent.get(score_field))
     if score is None:
         return None
     return score, _as_float(agent.get("lift"))
@@ -3605,8 +3739,68 @@ def _canonical_agent_rank_from_info(
     return _canonical_agent_rank(agent)
 
 
-def _pick_best_agent(agents: dict[str, dict[str, Any]]) -> str:
-    eligible = {name: rank for name, agent in agents.items() if (rank := _canonical_agent_rank(agent)) is not None}
+def _evaluation_mode(agents: dict[str, dict[str, Any]]) -> str:
+    """Classify the arms a run executed: ``both``, ``with_skill_only`` or ``baseline_only``.
+
+    Read from the collector's deliberate per-arm ``execution_status="skipped"``
+    markers, never inferred from empty scores, which can also mean a failed arm.
+    """
+
+    def arm_statuses(condition: str) -> list[object]:
+        statuses: list[object] = []
+        for info in agents.values():
+            conditions = info.get("conditions")
+            arm = conditions.get(condition) if isinstance(conditions, dict) else None
+            statuses.append(arm.get("execution_status") if isinstance(arm, dict) else None)
+        return statuses
+
+    with_statuses = arm_statuses("with_skill")
+    without_statuses = arm_statuses("without_skill")
+    if with_statuses and all(status == "skipped" for status in with_statuses):
+        return "baseline_only"
+    if without_statuses and all(status in {None, "skipped"} for status in without_statuses):
+        return "with_skill_only"
+    return "both"
+
+
+def _build_baseline_only_conclusions(
+    best_agent: str,
+    overall_score: float,
+    dimensions: list[dict[str, Any]],
+) -> list[dict[str, str]]:
+    """Insights for a baseline-only run: the calibration result, never a lift claim."""
+    conclusions = [
+        {
+            "severity": "pass",
+            "title": "Baseline calibration complete",
+            "message": (
+                f"Baseline-only run (--skip-with-skill): {best_agent} scores {overall_score:.2f} without the "
+                "skill. No with-skill arm was run, so these are baseline calibration scores and no skill lift "
+                "was measured."
+            ),
+        }
+    ]
+    numeric_dims = [d for d in dimensions if _finite_float(d.get("baseline")) is not None]
+    if numeric_dims:
+        weakest = min(numeric_dims, key=lambda d: d["baseline"])
+        conclusions.append(
+            {
+                "severity": "fail" if weakest["baseline"] < 0.4 else "warn",
+                "title": "Weakest baseline dimension",
+                "message": (
+                    f"{weakest.get('id', 'unknown').title()} is lowest at {weakest['baseline']:.2f} without the skill."
+                ),
+            }
+        )
+    return conclusions
+
+
+def _pick_best_agent(agents: dict[str, dict[str, Any]], *, score_field: str = "with_skill") -> str:
+    eligible = {
+        name: rank
+        for name, agent in agents.items()
+        if (rank := _canonical_agent_rank(agent, score_field=score_field)) is not None
+    }
     activated = {name: rank for name, rank in eligible.items() if not _never_activated(agents[name])}
     eligible = activated or eligible
     if not eligible:

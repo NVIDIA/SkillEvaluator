@@ -70,6 +70,13 @@ def _never_activated(agent: Mapping[str, Any]) -> bool:
     return isinstance(activation, Mapping) and activation.get("status") == "never_activated"
 
 
+def _with_skill_skipped(agent: Mapping[str, Any]) -> bool:
+    """A baseline-only run (--skip-with-skill) deliberately never ran the with-skill arm."""
+    conditions = agent.get("conditions")
+    arm = conditions.get("with_skill") if isinstance(conditions, Mapping) else None
+    return isinstance(arm, Mapping) and arm.get("execution_status") == "skipped"
+
+
 def _details_truncated(agent: Mapping[str, Any]) -> bool:
     branches = agent.get("pass_at_k")
     for key, _ in _VARIANTS:
@@ -226,6 +233,10 @@ def _pct(passed: int, total: int) -> float | None:
 
 def verdict(agents: Mapping[str, Any]) -> tuple[str, str]:
     """Return (label, per-agent detail) using the raw per-attempt success rate."""
+    scored = [agent for agent in agents.values() if isinstance(agent, Mapping)]
+    if scored and all(_with_skill_skipped(agent) for agent in scored):
+        # Baseline calibration: no with-skill arm ran, so there is no effect to call.
+        return "baseline only", "no with-skill arm ran (--skip-with-skill), so no skill effect was measured"
     deltas: dict[str, float] = {}
     not_run: dict[str, int] = {}
     unavailable: list[str] = []

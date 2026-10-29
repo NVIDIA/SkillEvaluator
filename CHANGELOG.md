@@ -78,6 +78,17 @@ All notable changes to SkillEvaluator are documented in this file.
 - CI-native per-skill HTML pages link Download JSON to the retained
   `skillevaluator-tier1.json` and do not embed a second copy of the report
   JSON. Standalone CLI HTML reports embed it for Export JSON.
+- `--skip-with-skill` on `tier3 evaluate` and the direct `tier3` workflow runs
+  only the without-skill baseline arm, for example to calibrate a task set or
+  re-measure a baseline after a model change without paying for with-skill
+  trials. Only baseline tasks are staged and launched. The run is reported as
+  a baseline calibration: `mode` is `baseline_only`, the overall score and best
+  agent come from the baseline arm, the with-skill arm is recorded as
+  `skipped`, with-skill scores and lift stay unavailable instead of becoming
+  0.0 (report tables print `skipped`), and the verdict stays NEUTRAL. The flag
+  is mutually exclusive with `--skip-baseline`, keeps the baseline isolation
+  rules, and is not accepted by `validate`, so a baseline-only run cannot pass
+  a Tier 3 gate.
 
 ### Changed
 

@@ -17,11 +17,13 @@ from __future__ import annotations
 import json
 import math
 import os
+import posixpath
 import re
 import stat
-from collections import Counter
+from collections import Counter, deque
 from pathlib import Path
 from typing import Any
+from urllib.parse import unquote, urlsplit
 
 from skillevaluator.constants import (
     RUBRIC_CRITERIA,
@@ -30,11 +32,14 @@ from skillevaluator.constants import (
     RUBRIC_REASONING_EFFORT,
     RUBRIC_REASONING_MAX_TOKENS,
     RUBRIC_REASONING_MODEL_MARKERS,
+    SKILL_MANIFEST_VARIANTS,
 )
 from skillevaluator.inference.client import LLMClient
 from skillevaluator.logging_config import get_logger
 from skillevaluator.models.result import Finding, Severity, ValidationResult
+from skillevaluator.utils.secure_fs import SecureRoot
 from skillevaluator.validators.base import ValidatorBase
+from skillevaluator.validators.markdown import markdown_link_targets, normalized_local_path
 
 logger = get_logger(__name__)
 
@@ -43,6 +48,7 @@ _CRITERION_PASS_SCORE = 7
 _MAX_SKILL_CONTENT_BYTES = 1024 * 1024
 _MAX_SUPPLEMENTARY_FILE_BYTES = 3000
 _MAX_SUPPLEMENTARY_TOTAL_BYTES = 30000
+_MAX_LINKED_MARKDOWN_FILES = 256
 
 
 class _UnsafeRubricInputError(ValueError):
@@ -274,8 +280,13 @@ class RubricJudge(LLMClient):
         if supplementary:
             scripts = supplementary.get("scripts", {})
             references = supplementary.get("references", {})
-            if scripts or references:
+            linked_markdown = supplementary.get("linked_markdown", {})
+            if scripts or references or linked_markdown:
                 extra += "Supplementary Skill Content:\n"
+                if linked_markdown:
+                    extra += "\nLinked Markdown (paths relative to skill root):\n"
+                    for name, content in linked_markdown.items():
+                        extra += f"--- {name} ---\n{content}\n\n"
                 if scripts:
                     extra += "\nScripts (from scripts/ directory):\n"
                     for name, content in scripts.items():
@@ -287,7 +298,7 @@ class RubricJudge(LLMClient):
 
         return (
             f"Skill Name: {skill_name}\n\n"
-            f"SKILL.md Content:\n---\n{skill_content}\n---\n\n"
+            f"SKILL.md Content:\n{skill_content}\n\n"
             f"{extra}"
             f"Evaluation Criteria:\n{criteria_text}\n\n"
             f"For each criterion, evaluate whether the skill meets the requirement.\n"
@@ -339,14 +350,86 @@ def _collect_supplementary_content(
     skill_path: Path,
     max_bytes_per_file: int = _MAX_SUPPLEMENTARY_FILE_BYTES,
     max_total_bytes: int = _MAX_SUPPLEMENTARY_TOTAL_BYTES,
+    *,
+    manifest: Path | None = None,
+    skill_content: str | None = None,
 ) -> dict[str, dict[str, str]]:
-    """Collect contained regular supplementary files using bounded reads."""
+    """Collect complete linked Markdown before optional bounded previews."""
     result: dict[str, dict[str, str]] = {"scripts": {}, "references": {}}
     total = 0
     try:
         resolved_root = skill_path.resolve(strict=True)
     except OSError as exc:
         raise _UnsafeRubricInputError(f"could not resolve skill root {skill_path}: {exc}") from exc
+
+    if manifest is None:
+        manifest = next(
+            (skill_path / name for name in SKILL_MANIFEST_VARIANTS if os.path.lexists(skill_path / name)), None
+        )
+    linked: dict[str, str] = {}
+    if manifest is not None:
+        if skill_content is None:
+            skill_content, _ = _read_bounded_rubric_file(
+                manifest, skill_root=skill_path, max_bytes=_MAX_SKILL_CONTENT_BYTES, truncate=False
+            )
+        pending = deque([(manifest.relative_to(skill_path).as_posix(), skill_content)])
+        seen = {pending[0][0]}
+        try:
+            manifest_stat = manifest.lstat()
+            # Path-stat identities are comparable on Windows; the secure reader's
+            # returned CRT fstat identity is not. Cached bytes only choose a read
+            # bound: every alias still passes the secure no-follow reader.
+            seen_payloads = (
+                {(manifest_stat.st_dev, manifest_stat.st_ino): skill_content.encode("utf-8")}
+                if manifest_stat.st_ino
+                else {}
+            )
+            with SecureRoot(resolved_root) as reader:
+                while pending:
+                    source, content = pending.popleft()
+                    for href in markdown_link_targets(content):
+                        try:
+                            destination = unquote(urlsplit(href).path).replace("\\", "/")
+                        except ValueError:
+                            continue
+                        if posixpath.splitext(destination)[1].lower() not in {".md", ".markdown"}:
+                            continue
+                        local = normalized_local_path(href, reject_anchors=True)
+                        if local is None:
+                            continue
+                        relative = posixpath.normpath(posixpath.join(posixpath.dirname(source), local))
+                        if relative == ".." or relative.startswith("../"):
+                            raise _UnsafeRubricInputError(f"linked Markdown escapes the skill root: {relative}")
+                        if relative in seen:
+                            continue
+                        if len(seen) - 1 >= _MAX_LINKED_MARKDOWN_FILES:
+                            raise _UnsafeRubricInputError(
+                                f"linked Markdown exceeds the maximum of {_MAX_LINKED_MARKDOWN_FILES} documents"
+                            )
+                        metadata = (resolved_root / relative).lstat()
+                        identity = (metadata.st_dev, metadata.st_ino)
+                        cached = seen_payloads.get(identity) if metadata.st_ino else None
+                        read_limit = (
+                            len(cached) if cached is not None else min(max_bytes_per_file, max_total_bytes - total)
+                        )
+                        payload, _ = reader.read_bytes(Path(relative), read_limit, expected=metadata)
+                        seen.add(relative)
+                        if cached is not None:
+                            if payload != cached:
+                                raise _UnsafeRubricInputError(f"linked Markdown changed while collecting: {relative}")
+                            continue
+                        text = payload.decode("utf-8")
+                        linked[relative] = text
+                        if metadata.st_ino:
+                            seen_payloads[identity] = payload
+                        total += len(payload)
+                        pending.append((relative, text))
+        except _UnsafeRubricInputError:
+            raise
+        except (OSError, ValueError) as exc:
+            raise _UnsafeRubricInputError(f"could not collect complete linked Markdown: {exc}") from exc
+        if linked:
+            result["linked_markdown"] = linked
 
     for subdir, exts in [("scripts", ("*.py", "*.sh")), ("references", ("*.md",))]:
         d = skill_path / subdir
@@ -365,6 +448,8 @@ def _collect_supplementary_content(
             raise _UnsafeRubricInputError(f"could not inspect supplementary directory {d}: {exc}") from exc
         for ext in exts:
             for f in sorted(d.glob(ext)):
+                if f.relative_to(skill_path).as_posix() in linked:
+                    continue
                 if total >= max_total_bytes:
                     break
                 read_limit = min(max_bytes_per_file, max_total_bytes - total)
@@ -542,7 +627,7 @@ class RubricEvalValidator(ValidatorBase):
                 max_bytes=_MAX_SKILL_CONTENT_BYTES,
                 truncate=False,
             )
-            supplementary = _collect_supplementary_content(skill_path)
+            supplementary = _collect_supplementary_content(skill_path, manifest=manifest, skill_content=content)
         except _UnsafeRubricInputError as exc:
             return self._record_judge_failure(
                 result,
@@ -551,7 +636,7 @@ class RubricEvalValidator(ValidatorBase):
                 manifest=manifest,
                 message=f"Unsafe rubric input: {exc}",
                 check_name="unsafe_skill_input",
-                suggestion="Replace symlinks and special files with contained regular UTF-8 files",
+                suggestion="Provide complete linked guidance in contained regular UTF-8 files within the rubric input limits",
             )
 
         from rich.console import Console

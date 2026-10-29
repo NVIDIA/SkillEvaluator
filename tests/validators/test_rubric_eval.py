@@ -21,6 +21,7 @@ from skillevaluator.validators.rubric_eval import (
     RubricJudge,
     _collect_supplementary_content,
     _extract_json,
+    _UnsafeRubricInputError,
 )
 
 
@@ -88,6 +89,14 @@ class TestRubricJudge:
         )
         assert "test-skill" in prompt
         assert "This is a test skill" in prompt
+
+    @pytest.mark.parametrize(
+        "content", ["# Test", "---\nname: demo\n---\n# Test\n", "---\r\nname: demo\r\n---\r\n", ""]
+    )
+    def test_user_prompt_preserves_source_without_added_yaml_separators(self, content):
+        prompt = RubricJudge().create_user_prompt(skill_name="demo", skill_content=content)
+
+        assert f"SKILL.md Content:\n{content}\n\nEvaluation Criteria:" in prompt
 
     def test_user_prompt_with_supplementary(self):
         judge = RubricJudge()
@@ -257,6 +266,261 @@ class TestCollectSupplementaryContent:
         (scripts / "big.py").write_text("x" * 10000)
         result = _collect_supplementary_content(skill_dir, max_bytes_per_file=100)
         assert len(result["scripts"]["big.py"]) < 200
+
+
+class TestLinkedRubricGuidance:
+    def test_collects_transitive_guides_with_cycles_and_distinct_source_paths(self, tmp_path):
+        root = _write_skill(tmp_path)
+        (root / "SKILL.md").write_text(
+            "[Guide][g]\n\n[g]: GUIDE.md#intro\n\n"
+            '<a href="guides/a/README.MD">A</a>\n'
+            "[Space](guides/with%20space.markdown?version=1#section)\n"
+            "![Image](missing.md)\n`[Example](missing.md)`\n"
+            "```md\n[Example](missing.md)\n```\n[Web](https://example.com/missing.md)\n"
+            "[Asset](missing.json)\n[Anchor](#intro)"
+        )
+        (root / "guides/a").mkdir(parents=True)
+        (root / "guides/b").mkdir()
+        guide = "Required guidance. [A](guides/a/README.MD#again)"
+        first = "A guidance. [B](../b/README.md?version=1)"
+        second = "B guidance. [Root](../../GUIDE.md) [Skill](../../SKILL.md)"
+        (root / "GUIDE.md").write_text(guide)
+        (root / "guides/a/README.MD").write_text(first)
+        (root / "guides/b/README.md").write_text(second)
+        (root / "guides/with space.markdown").write_text("Space guidance")
+
+        collected = _collect_supplementary_content(root)
+
+        assert collected["linked_markdown"] == {
+            "GUIDE.md": guide,
+            "guides/a/README.MD": first,
+            "guides/b/README.md": second,
+            "guides/with space.markdown": "Space guidance",
+        }
+
+    def test_required_guidance_gets_budget_before_optional_previews(self, tmp_path):
+        root = _write_skill(tmp_path)
+        (root / "SKILL.md").write_text("[Guide](GUIDE.md)")
+        (root / "GUIDE.md").write_text("required")
+        (root / "scripts").mkdir()
+        (root / "scripts/main.py").write_text("optional" * 100)
+
+        collected = _collect_supplementary_content(root, max_bytes_per_file=100, max_total_bytes=8)
+
+        assert collected["linked_markdown"] == {"GUIDE.md": "required"}
+        assert collected["scripts"] == {}
+
+    def test_linked_reference_is_not_duplicated_as_optional_preview(self, tmp_path):
+        root = _write_skill(tmp_path)
+        (root / "SKILL.md").write_text("[Guide](references/guide.md)")
+        (root / "references").mkdir()
+        (root / "references/guide.md").write_text("required")
+
+        collected = _collect_supplementary_content(root, max_total_bytes=8)
+
+        assert collected["linked_markdown"] == {"references/guide.md": "required"}
+        assert collected["references"] == {}
+
+    def test_exact_utf8_budget_preserves_complete_required_document(self, tmp_path):
+        root = _write_skill(tmp_path)
+        (root / "SKILL.md").write_text("[Guide](GUIDE.md)")
+        (root / "GUIDE.md").write_text("π", encoding="utf-8")
+
+        collected = _collect_supplementary_content(root, max_bytes_per_file=2, max_total_bytes=2)
+
+        assert collected["linked_markdown"] == {"GUIDE.md": "π"}
+
+    @pytest.mark.parametrize(("per_file", "total"), [(1, 10), (10, 1)])
+    def test_required_utf8_content_is_never_truncated(self, tmp_path, per_file, total):
+        root = _write_skill(tmp_path)
+        (root / "SKILL.md").write_text("[Guide](GUIDE.md)")
+        (root / "GUIDE.md").write_text("π", encoding="utf-8")
+
+        with pytest.raises(_UnsafeRubricInputError):
+            _collect_supplementary_content(root, max_bytes_per_file=per_file, max_total_bytes=total)
+
+    @pytest.mark.parametrize(
+        "case",
+        [
+            "missing",
+            "escape",
+            "encoded_escape",
+            "invalid_utf8",
+            "oversized",
+            "total_budget",
+            "symlink",
+            "ancestor_symlink",
+            "hardlink",
+            "directory",
+            "fifo",
+        ],
+    )
+    def test_incomplete_required_guidance_stops_before_judge(self, tmp_path, case):
+        root = _write_skill(tmp_path)
+        target = root / "GUIDE.md"
+        link = "GUIDE.md"
+        if case == "escape":
+            link = "../outside.md"
+            (tmp_path / "outside.md").write_text("outside")
+        elif case == "encoded_escape":
+            link = "%2e%2e%5coutside.md"
+            (tmp_path / "outside.md").write_text("outside")
+        elif case == "invalid_utf8":
+            target.write_bytes(b"\xff")
+        elif case == "oversized":
+            target.write_text("x" * 3001)
+        elif case == "total_budget":
+            for index in range(11):
+                (root / f"guide{index}.md").write_text("x" * 3000)
+            (root / "SKILL.md").write_text("\n".join(f"[Guide](guide{i}.md)" for i in range(11)))
+        elif case == "symlink":
+            (root / "actual.md").write_text("guidance")
+            target.symlink_to(root / "actual.md")
+        elif case == "ancestor_symlink":
+            (tmp_path / "outside").mkdir()
+            (tmp_path / "outside/guide.md").write_text("outside")
+            (root / "docs").symlink_to(tmp_path / "outside", target_is_directory=True)
+            link = "docs/guide.md"
+        elif case == "hardlink":
+            (tmp_path / "outside.md").write_text("outside")
+            os.link(tmp_path / "outside.md", target)
+        elif case == "directory":
+            target.mkdir()
+        elif case == "fifo":
+            if not hasattr(os, "mkfifo"):
+                pytest.skip("FIFO creation unavailable")
+            os.mkfifo(target)
+        if case != "total_budget":
+            (root / "SKILL.md").write_text(f"[Guide]({link})")
+
+        with patch.object(RubricJudge, "process") as judge:
+            result = RubricEvalValidator().validate(root)
+
+        judge.assert_not_called()
+        assert not result.passed
+        assert result.metadata["rubric_eval"]["execution_status"] == "failed"
+        assert result.metadata["rubric_eval"]["overall_score"] is None
+        assert any(f.check_name == "unsafe_skill_input" for f in result.findings)
+
+    def test_empty_document_graph_is_bounded_before_judging(self, tmp_path, monkeypatch):
+        from skillevaluator.validators import rubric_eval
+
+        root = _write_skill(tmp_path)
+        (root / "SKILL.md").write_text("[A](A.md) [B](B.md) [C](C.md)")
+        for name in ("A.md", "B.md", "C.md"):
+            (root / name).write_text("")
+        monkeypatch.setattr(rubric_eval, "_MAX_LINKED_MARKDOWN_FILES", 2, raising=False)
+
+        with patch.object(RubricJudge, "process") as judge:
+            result = RubricEvalValidator().validate(root)
+
+        judge.assert_not_called()
+        assert result.metadata["rubric_eval"]["execution_status"] == "failed"
+        assert result.metadata["rubric_eval"]["overall_score"] is None
+
+    def test_manifest_case_alias_cycle_does_not_apply_supplementary_size_limit(self, tmp_path):
+        root = _write_skill(tmp_path)
+        (root / "SKILL.md").write_text("[Guide](guide.md)\n" + "x" * 3100)
+        alias = root / "skill.md"
+        if not alias.exists() or not alias.samefile(root / "SKILL.md"):
+            pytest.skip("requires a case-insensitive filesystem")
+        (root / "guide.md").write_text("[Root](skill.md)")
+
+        collected = _collect_supplementary_content(root)
+
+        assert collected["linked_markdown"] == {"guide.md": "[Root](skill.md)"}
+
+    def test_guide_case_aliases_do_not_consume_budget_twice(self, tmp_path):
+        root = _write_skill(tmp_path)
+        (root / "SKILL.md").write_text("[First](GUIDE.md) [Again](guide.md)")
+        (root / "GUIDE.md").write_text("required")
+        alias = root / "guide.md"
+        if not alias.exists() or not alias.samefile(root / "GUIDE.md"):
+            pytest.skip("requires a case-insensitive filesystem")
+
+        collected = _collect_supplementary_content(root, max_total_bytes=8)
+
+        assert collected["linked_markdown"] == {"GUIDE.md": "required"}
+
+    def test_case_sensitive_guides_keep_distinct_evidence(self, tmp_path):
+        root = _write_skill(tmp_path)
+        (root / "SKILL.md").write_text("[Upper](GUIDE.md) [Lower](guide.md)")
+        (root / "GUIDE.md").write_text("UPPER")
+        (root / "guide.md").write_text("lower")
+        if (root / "GUIDE.md").samefile(root / "guide.md"):
+            pytest.skip("requires a case-sensitive filesystem")
+
+        assert _collect_supplementary_content(root)["linked_markdown"] == {"GUIDE.md": "UPPER", "guide.md": "lower"}
+
+    @pytest.mark.parametrize("unsafe_alias", ["ancestor_symlink", "hardlink"])
+    def test_known_manifest_identity_does_not_bypass_unsafe_path_rejection(self, tmp_path, unsafe_alias):
+        root = _write_skill(tmp_path)
+        (root / "SKILL.md").write_text("[Guide](guide.md)")
+        if unsafe_alias == "ancestor_symlink":
+            (root / "guide.md").write_text("[Alias](alias/SKILL.md)")
+            (root / "alias").symlink_to(root, target_is_directory=True)
+        else:
+            (root / "guide.md").write_text("[Alias](COPY.md)")
+            os.link(root / "SKILL.md", root / "COPY.md")
+        with patch.object(RubricJudge, "process") as judge:
+            result = RubricEvalValidator().validate(root)
+
+        judge.assert_not_called()
+        assert result.metadata["rubric_eval"]["execution_status"] == "failed"
+        assert result.metadata["rubric_eval"]["overall_score"] is None
+
+    @pytest.mark.parametrize("line_ending", [pytest.param("\n", id="lf"), pytest.param("\r\n", id="crlf")])
+    def test_case_alias_with_changed_manifest_bytes_is_rejected(self, tmp_path, line_ending):
+        root = _write_skill(tmp_path)
+        source = "[Guide](guide.md)\nOriginal source".replace("\n", line_ending)
+        manifest = root / "SKILL.md"
+        manifest.write_bytes(source.replace("Original", "Modified").encode("utf-8"))
+        if not (root / "skill.md").exists() or not (root / "skill.md").samefile(manifest):
+            pytest.skip("requires a case-insensitive filesystem")
+        (root / "guide.md").write_text("[Root](skill.md)")
+
+        with pytest.raises(_UnsafeRubricInputError, match="changed while collecting"):
+            _collect_supplementary_content(root, manifest=manifest, skill_content=source)
+
+    @pytest.mark.parametrize("href", ["%2Fimages/logo.png", "%2Fassets/data.json", "%2e%2e%5cassets/data.json"])
+    def test_non_markdown_assets_do_not_block_rubric_judging(self, tmp_path, href):
+        root = _write_skill(tmp_path)
+        (root / "SKILL.md").write_text(f"[Asset]({href})")
+        response = json.dumps({"checks": _complete_checks(), "score": 90, "overall_pass": True, "summary": "ok"})
+        with patch.object(RubricJudge, "completions", return_value=response) as provider:
+            result = RubricEvalValidator().validate(root)
+
+        assert result.metadata["rubric_eval"]["execution_status"] == "succeeded"
+        assert result.metadata["rubric_eval"]["overall_score"] == 90
+        assert provider.call_count == 1
+
+    def test_encoded_absolute_markdown_remains_blocked_before_judging(self, tmp_path):
+        root = _write_skill(tmp_path)
+        (root / "SKILL.md").write_text("[Guide](%2Fdocs/GUIDE.md)")
+        with patch.object(RubricJudge, "process") as judge:
+            result = RubricEvalValidator().validate(root)
+
+        judge.assert_not_called()
+        assert result.metadata["rubric_eval"]["execution_status"] == "failed"
+        assert result.metadata["rubric_eval"]["overall_score"] is None
+
+    @pytest.mark.parametrize("line_ending", [pytest.param("\n", id="lf"), pytest.param("\r\n", id="crlf")])
+    def test_successful_validator_sends_source_and_complete_guidance_to_provider(self, tmp_path, line_ending):
+        root = _write_skill(tmp_path)
+        source = "---\nname: demo\ndescription: demo\n---\n[Guide](GUIDE.md)\n".replace("\n", line_ending)
+        (root / "SKILL.md").write_bytes(source.encode("utf-8"))
+        (root / "GUIDE.md").write_text("Required guidance")
+        response = json.dumps({"checks": _complete_checks(), "score": 90, "overall_pass": True, "summary": "ok"})
+        with patch.object(RubricJudge, "completions", return_value=response) as provider:
+            result = RubricEvalValidator().validate(root)
+
+        assert result.metadata["rubric_eval"]["execution_status"] == "succeeded"
+        assert result.metadata["rubric_eval"]["overall_score"] == 90
+        prompt = provider.call_args.args[1]
+        assert f"SKILL.md Content:\n{source}\n\n" in prompt
+        assert "Linked Markdown (paths relative to skill root):" in prompt
+        assert "--- GUIDE.md ---\nRequired guidance" in prompt
+        assert (root / "SKILL.md").read_bytes() == source.encode("utf-8")
 
 
 class TestRubricEvalValidator:

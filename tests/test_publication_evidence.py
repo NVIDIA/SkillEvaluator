@@ -223,25 +223,29 @@ def test_dependency_publication_is_incomplete_when_one_requirements_scan_fails(
     (skill / "requirements-a.txt").write_text("requests==2.32.0\n", encoding="utf-8")
     (skill / "requirements-b.txt").write_text("urllib3==2.2.2\n", encoding="utf-8")
 
-    tool_results = iter(
-        [
-            ToolResult(
+    def audit_requirements(args: list[str], **_kwargs: object) -> ToolResult:
+        pins = Path(args[args.index("-r") + 1]).read_text(encoding="utf-8").splitlines()
+        if pins == ["requests==2.32.0"]:
+            # A completed audit must contain evidence for the requested pin.
+            return ToolResult(
                 success=True,
-                stdout='{"dependencies": [], "fixes": []}',
+                stdout=json.dumps(
+                    {"dependencies": [{"name": "requests", "version": "2.32.0", "vulns": []}], "fixes": []}
+                ),
                 stderr="",
                 exit_code=0,
-            ),
-            ToolResult(
-                success=False,
-                stdout="",
-                stderr="",
-                exit_code=-1,
-                error_message="pip-audit timed out",
-            ),
-        ]
-    )
+            )
+        assert pins == ["urllib3==2.2.2"]
+        return ToolResult(
+            success=False,
+            stdout="",
+            stderr="",
+            exit_code=-1,
+            error_message="pip-audit timed out",
+        )
+
     monkeypatch.setattr(Tools.pip_audit, "_path", "/usr/bin/pip-audit")
-    monkeypatch.setattr(Tools.pip_audit, "run", lambda *_args, **_kwargs: next(tool_results))
+    monkeypatch.setattr(Tools.pip_audit, "run", audit_requirements)
     monkeypatch.setattr(Tools.safety, "_path", None)
 
     results = run_validation(

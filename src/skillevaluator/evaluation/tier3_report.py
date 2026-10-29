@@ -1884,7 +1884,7 @@ def _build_evaluators(
         evaluators[metric] = {
             "with_skill": ws,
             "baseline": bl,
-            "lift": lift if lift is not None or excluded else 0.0,
+            "lift": lift,
         }
     return evaluators
 

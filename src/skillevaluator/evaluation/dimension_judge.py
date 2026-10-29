@@ -379,31 +379,27 @@ def _human_reasoning_bullets(
 
     bullets = [bullet_score, bullet_lift]
 
-    strongest = _strongest_signal(parts)
-    if strongest:
-        bullets.append(f"Strongest signal: {strongest}.")
+    regressed = lift is not None and baseline is not None and lift <= LIFT_EXPLANATION_FAIL_THRESHOLD
+    signal = _strongest_signal(parts, weakest=regressed)
+    if signal:
+        bullets.append(f"{'Weakest' if regressed else 'Strongest'} signal: {signal}.")
 
     return bullets
 
 
-def _strongest_signal(parts: list[str]) -> str | None:
-    """Return the highest-scoring ``name=value`` part for the strongest-signal bullet."""
-    if not parts:
-        return None
-    best_part: str | None = None
-    best_value = float("-inf")
+def _strongest_signal(parts: list[str], *, weakest: bool = False) -> str | None:
+    """Return the highest- (or lowest-) scoring ``name=value`` part for the signal bullet."""
+    scored: list[tuple[float, str]] = []
     for entry in parts:
-        if "=" not in entry:
-            continue
-        name, raw = entry.split("=", 1)
+        name, sep, raw = entry.partition("=")
         try:
-            value = float(raw)
+            scored.append((float(raw), name)) if sep else None
         except ValueError:
             continue
-        if value > best_value:
-            best_value = value
-            best_part = f"{name} {value:.2f}"
-    return best_part
+    if not scored:
+        return None
+    value, name = (min if weakest else max)(scored, key=lambda item: item[0])
+    return f"{name} {value:.2f}"
 
 
 def compute_dimensions(

@@ -36,6 +36,14 @@ def test_privileged_preparation_has_pr_read_and_queued_deploy_preserves_feedback
     assert "needs.deploy.result == 'success'" in jobs["comment"]["if"]
 
 
+def test_skipped_stale_run_does_not_deploy_or_upload_feedback():
+    jobs = load(".github/workflows/publish-skill-reports.yml")["jobs"]
+    assert jobs["prepare"]["outputs"]["skipped"] == "${{ steps.publish.outputs.skipped }}"
+    assert "needs.prepare.outputs.skipped != 'true'" in jobs["deploy"]["if"]
+    upload = next(step for step in jobs["prepare"]["steps"] if "upload-artifact@" in step.get("uses", ""))
+    assert "steps.publish.outputs.skipped != 'true'" in upload["if"]
+
+
 def test_feedback_artifact_is_reusable_when_only_a_failed_job_is_retried():
     jobs = load(".github/workflows/publish-skill-reports.yml")["jobs"]
     upload = next(step for step in jobs["prepare"]["steps"] if "upload-artifact@" in step.get("uses", ""))

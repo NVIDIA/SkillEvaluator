@@ -1481,11 +1481,19 @@
                 {% if ci.get('ci_conclusion') %}<p><strong>CI conclusion</strong>{{ ci.ci_conclusion }}</p>{% endif %}
             </div>
         </details>
-        {% if (has_tier2 and 'tier2' in gating.blocking_tiers) or (has_tier3 and 'tier3' in gating.advisory_tiers) %}
+        {% if has_tier2 or has_tier3 %}
+        {% set included_tiers = [] %}
+        {% if has_tier1 %}{% set _ = included_tiers.append('tier1') %}{% endif %}
+        {% if has_tier2 %}{% set _ = included_tiers.append('tier2') %}{% endif %}
+        {% if has_tier3 %}{% set _ = included_tiers.append('tier3') %}{% endif %}
+        {% set tier_labels = {'tier1': 'Tier 1', 'tier2': 'Tier 2', 'tier3': 'Tier 3 agent-eval'} %}
+        {% set blocking_labels = [] %}{% set advisory_labels = [] %}
+        {% for tier in gating.blocking_tiers if tier in included_tiers %}{% set _ = blocking_labels.append(tier_labels[tier]) %}{% endfor %}
+        {% for tier in gating.advisory_tiers if tier in included_tiers %}{% set _ = advisory_labels.append(tier_labels[tier]) %}{% endfor %}
         <div class="gate-policy" aria-label="Gate policy for included tiers">
             <strong>Gate policy</strong>
-            <span>Blocking (Tier 1{% if has_tier2 and 'tier2' in gating.blocking_tiers %} + Tier 2{% endif %}): <strong>{{ blocking_critical }} critical · {{ blocking_high }} high · {{ blocking_medium }} medium · {{ blocking_low }} low</strong></span>
-            {% if has_tier3 and 'tier3' in gating.advisory_tiers %}<span>Advisory (Tier 3 agent-eval): <strong>{{ advisory_critical }} critical · {{ advisory_high }} high · {{ advisory_medium }} medium · {{ advisory_low }} low</strong>. Tier 3 agent-eval findings are advisory and don't block merge.</span>{% endif %}
+            {% if blocking_labels %}<span>Blocking ({{ blocking_labels | join(' + ') }}): <strong>{{ blocking_critical }} critical · {{ blocking_high }} high · {{ blocking_medium }} medium · {{ blocking_low }} low</strong></span>{% endif %}
+            {% if advisory_labels %}<span>Advisory ({{ advisory_labels | join(' + ') }}): <strong>{{ advisory_critical }} critical · {{ advisory_high }} high · {{ advisory_medium }} medium · {{ advisory_low }} low</strong>.{% if has_tier3 and 'tier3' in gating.advisory_tiers %} Tier 3 agent-eval findings are advisory and don't block merge.{% endif %}</span>{% endif %}
         </div>
         {% endif %}
         <div id="report-evidence" class="workspace-heading"><h2>Findings &amp; evidence</h2><p>Inspect the outcome and supporting checks. Quality scores are separate from the pass / fail decision.</p></div>

@@ -43,6 +43,10 @@ class PublicationError(ValueError):
     """Publication failed without exposing tokens or untrusted diagnostics."""
 
 
+class StalePublication(PublicationError):
+    """A PR has closed or moved since the selected run completed."""
+
+
 def allowed_download_url(url: str) -> bool:
     parsed = urllib.parse.urlsplit(url)
     host = parsed.hostname or ""
@@ -80,7 +84,10 @@ class GitHubAPI:
         self.opener = urllib.request.build_opener(_NoRedirect())
 
     def _request(self, path: str):
-        if not path.startswith(f"/repos/{self.repository}") or ".." in path or "\\" in path:
+        root = f"/repos/{self.repository}"
+        prefix = root + "/"
+        comparison = re.fullmatch(re.escape(prefix) + r"compare/[0-9a-f]{40}\.\.\.[0-9a-f]{40}", path)
+        if (path != root and not path.startswith(prefix)) or (".." in path and not comparison) or "\\" in path:
             raise PublicationError("Only this repository's GitHub API endpoints are supported.")
         request = urllib.request.Request(
             f"https://api.github.com{path}",
@@ -487,17 +494,26 @@ def _executed_caller_blob(api, repository: str, run: dict) -> str:
     The run API exposes the PR head, not GITHUB_WORKFLOW_SHA. Never accept a
     merge revision asserted by an artifact or the PR's current mutable ref.
     """
-    head_blob = _caller_blob(api, repository, run["head_sha"])
     if run["event"] != "pull_request":
-        return head_blob
+        return _caller_blob(api, repository, run["head_sha"])
     associations = run.get("pull_requests")
+    if associations == []:
+        raise StalePublication("The PR is closed or no longer associated with this run.")
     if not isinstance(associations, list) or len(associations) != 1:
         raise PublicationError("The PR run lacks an unambiguous recorded base revision; update the branch and rerun.")
     association = associations[0]
     base = (association.get("base") or {}).get("sha") if isinstance(association, dict) else None
     head = (association.get("head") or {}).get("sha") if isinstance(association, dict) else None
-    if not isinstance(base, str) or SHA_PATTERN.fullmatch(base) is None or head != run["head_sha"]:
+    if (
+        not isinstance(base, str)
+        or SHA_PATTERN.fullmatch(base) is None
+        or not isinstance(head, str)
+        or SHA_PATTERN.fullmatch(head) is None
+    ):
         raise PublicationError("The PR run lacks trustworthy recorded merge revisions; update the branch and rerun.")
+    if head != run["head_sha"]:
+        raise StalePublication("The PR head moved after this scan.")
+    head_blob = _caller_blob(api, repository, run["head_sha"])
     base_blob = _caller_blob(api, repository, base)
     if head_blob == base_blob:
         return head_blob
@@ -891,6 +907,15 @@ def main() -> int:
                         raise PublicationError("A workflow output contains an unsupported newline.")
                     handle.write(f"{key}={value}\n")
         print("SkillEvaluator static reports prepared successfully.")
+        return 0
+    except StalePublication as exc:
+        output = Path(os.environ["OUTPUT_DIR"])
+        output.mkdir(parents=True, exist_ok=True)
+        _write(output / "summary.md", "## SkillEvaluator report skipped\n\n" + str(exc) + "\n")
+        if os.environ.get("GITHUB_OUTPUT"):
+            with Path(os.environ["GITHUB_OUTPUT"]).open("a", encoding="utf-8") as handle:
+                handle.write("skipped=true\n")
+        print("SkillEvaluator report publication skipped: " + str(exc))
         return 0
     except PublicationError as exc:
         print("SkillEvaluator report publication rejected: " + json.dumps(str(exc)[:1000]), file=sys.stderr)

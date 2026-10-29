@@ -102,7 +102,7 @@ def _paths(output: bytes) -> list[str]:
             or len(path.encode()) > 4096
             or PurePosixPath(path).is_absolute()
             or ".." in PurePosixPath(path).parts
-            or any(ord(character) < 32 for character in path)
+            or any(ord(character) < 32 or ord(character) == 127 for character in path)
         ):
             raise SelectionError("Git returned an unsupported or unsafe path.")
     return paths
@@ -120,7 +120,7 @@ def _roots(workspace: Path, configured: str) -> list[str]:
             or ".." in relative.parts
             or "\\" in value
             or ":" in value
-            or any(ord(character) < 32 for character in value)
+            or any(ord(character) < 32 or ord(character) == 127 for character in value)
         ):
             raise SelectionError("Skill roots must be relative directories without parent traversal.")
         current = workspace

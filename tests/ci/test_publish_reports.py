@@ -235,6 +235,67 @@ def test_redirect_does_not_forward_api_authorization():
     assert requests[1].get_header("Authorization") is None
 
 
+def test_pr_provenance_compares_recorded_revisions_through_real_github_client():
+    api = publisher.GitHubAPI("owner/consumer", "private-token")
+    record = run_record()
+    record["event"] = "pull_request"
+    record["pull_requests"] = [{"base": {"sha": "d" * 40}, "head": {"sha": "a" * 40}}]
+    paths = []
+
+    class Response(io.BytesIO):
+        @property
+        def headers(self):
+            return {}
+
+    class Opener:
+        def open(self, request, timeout):
+            assert timeout == 60
+            paths.append(request.full_url)
+            if "/compare/" in request.full_url:
+                data = {"merge_base_commit": {"sha": "e" * 40}}
+            else:
+                sha = request.full_url.rsplit("?ref=", 1)[1]
+                data = {"type": "file", "path": publisher.WORKFLOW_PATH, "sha": ("b" if sha == "a" * 40 else "f") * 40}
+            return Response(json.dumps(data).encode())
+
+    api.opener = Opener()
+    publisher._validate_workflow_provenance(api, "owner/consumer", record)
+    assert any("/compare/" in path for path in paths)
+
+
+@pytest.mark.parametrize(
+    "path",
+    [
+        "/repos/owner/consumer-other/actions/runs",
+        "/repos/owner/consumer/../other/actions",
+        "/repos/owner/consumer/compare/" + "a" * 40 + "..." + "b" * 40 + "/extra",
+        "/repos/owner/consumer/compare/" + "a" * 40 + "..." + "b" * 39,
+    ],
+)
+def test_github_client_still_rejects_untrusted_paths(path):
+    api = publisher.GitHubAPI("owner/consumer", "private-token")
+    with pytest.raises(publisher.PublicationError):
+        api._request(path)
+
+
+def test_github_client_accepts_repository_root_for_default_branch_lookup():
+    api = publisher.GitHubAPI("owner/consumer", "private-token")
+
+    class Response(io.BytesIO):
+        @property
+        def headers(self):
+            return {}
+
+    class Opener:
+        def open(self, request, timeout):
+            assert request.full_url == "https://api.github.com/repos/owner/consumer"
+            assert timeout == 60
+            return Response(b'{"default_branch":"main"}')
+
+    api.opener = Opener()
+    assert api.get("/repos/owner/consumer")["default_branch"] == "main"
+
+
 def test_signed_download_hosts_are_explicitly_allowlisted():
     assert publisher.allowed_download_url("https://productionresultssa1.blob.core.windows.net/results/a?sig=x")
     assert publisher.allowed_download_url("https://objects.githubusercontent.com/a")
@@ -530,7 +591,7 @@ def test_pr_caller_uses_unambiguous_merged_blob_not_pr_head(blobs, expected):
 
 
 def test_pr_caller_does_not_trust_missing_or_current_mutable_base():
-    with pytest.raises(publisher.PublicationError, match="recorded base"):
+    with pytest.raises(publisher.StalePublication, match="no longer associated"):
         publisher._executed_caller_blob(FakeAPI(), "owner/consumer", {**run_record(), "event": "pull_request"})
 
 
@@ -937,6 +998,27 @@ def test_explicit_fork_evaluator_identity_is_required(monkeypatch):
         publisher._validate_workflow_provenance(FakeAPI(), "owner/consumer", record)
     monkeypatch.setenv("EVALUATOR_REPOSITORY", "example/evaluator")
     publisher._validate_workflow_provenance(FakeAPI(), "owner/consumer", record)
+
+
+@pytest.mark.parametrize("association", [[], [{"base": {"sha": "d" * 40}, "head": {"sha": "e" * 40}}]])
+def test_stale_or_closed_pr_is_a_skipped_publisher_run(tmp_path, monkeypatch, association):
+    record = {**run_record(), "event": "pull_request", "pull_requests": association}
+    monkeypatch.setattr(publisher, "GitHubAPI", lambda *_args: FakeAPI(record=record))
+    for key, value in {
+        "GH_TOKEN": "dummy-token",
+        "GITHUB_REPOSITORY": "owner/consumer",
+        "REPORT_RUN_ID": "123",
+        "REPORT_RUN_ATTEMPT": "1",
+        "PAGES_BASE_URL": "https://owner.github.io/consumer",
+        "SITE_DIR": str(tmp_path / "site"),
+        "OUTPUT_DIR": str(tmp_path / "output"),
+        "GITHUB_OUTPUT": str(tmp_path / "github-output"),
+    }.items():
+        monkeypatch.setenv(key, value)
+    assert publisher.main() == 0
+    assert "skipped=true" in (tmp_path / "github-output").read_text()
+    assert "skipped" in (tmp_path / "output/summary.md").read_text().lower()
+    assert not (tmp_path / "site/runs").exists()
 
 
 @pytest.mark.parametrize("enabled", [True, False, None])

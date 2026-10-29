@@ -416,6 +416,7 @@ def run(
             )
             if not row["passed"] and row["overall_status"] == "passed":
                 row["overall_status"] = "error"
+                row["incomplete_scans"] = []
                 row["error"] = "Process exit or validator results contradict the report verdict."
             else:
                 row.pop("error", None)

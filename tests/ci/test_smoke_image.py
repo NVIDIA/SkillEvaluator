@@ -144,13 +144,30 @@ def test_acceptance_checks_cover_each_real_scan_scenario(tmp_path, case):
 @pytest.mark.parametrize("case", ["all-pass", "invalid-name", "changed-one"])
 @pytest.mark.parametrize(
     "damage",
-    ["missing-sarif", "incomplete-scan", "missing-validators", "wrong-selection", "wrong-verdict", "wrong-exit"],
+    [
+        "missing-sarif",
+        "incomplete-scan",
+        "missing-validators",
+        "wrong-selection",
+        "wrong-verdict",
+        "wrong-exit",
+        "process-exit",
+        "summary-verdict",
+        "summary-passed",
+        "summary-failed",
+        "summary-incomplete",
+        "selection-discovered",
+        "report-dir",
+        "row-incomplete",
+        "report-incomplete",
+    ],
 )
 def test_acceptance_rejects_incomplete_or_contradictory_scan_evidence(tmp_path, case, damage):
     summary = _scan_case(tmp_path, case)
     child = tmp_path / "skill-001"
     path = child / "skillevaluator-tier1.json"
     data = json.loads(path.read_text())
+    process_exit = int(case == "invalid-name")
     if damage == "missing-sarif":
         (child / "skillevaluator-tier1.sarif.json").unlink()
     elif damage == "incomplete-scan":
@@ -163,10 +180,28 @@ def test_acceptance_rejects_incomplete_or_contradictory_scan_evidence(tmp_path, 
         data["overall_passed"] = not data["overall_passed"]
     elif damage == "wrong-exit":
         summary["skills"][0]["exit_code"] = 9
+    elif damage == "process-exit":
+        process_exit = 1 - process_exit
+    elif damage == "summary-verdict":
+        summary["overall_status"] = "passed" if case == "invalid-name" else "failed"
+    elif damage.startswith("summary-"):
+        summary[damage.removeprefix("summary-")] += 1
+    elif damage == "selection-discovered":
+        if case != "changed-one":
+            pytest.skip("Only changed-one checks discovered selection metadata")
+        summary["selection"]["discovered"] = 3
+    elif damage == "report-dir":
+        child.rename(tmp_path / "skill-999")
+        summary["skills"][0]["report_dir"] = "skill-999"
+        path = tmp_path / "skill-999/skillevaluator-tier1.json"
+    elif damage == "row-incomplete":
+        summary["skills"][0]["incomplete_scans"] = ["semgrep"]
+    elif damage == "report-incomplete":
+        data["incomplete_scans"] = ["semgrep"]
     path.write_text(json.dumps(data))
     (tmp_path / "summary.json").write_text(json.dumps(summary))
     with pytest.raises(smoke.SmokeError):
-        smoke.verify_case(tmp_path, case, int(case == "invalid-name"))
+        smoke.verify_case(tmp_path, case, process_exit)
 
 
 def test_failure_fixture_must_retain_expected_invalid_name_finding(tmp_path):

@@ -4,10 +4,12 @@
 """Test the CI adapter's boundaries; actual scanner coverage is tested by live CI."""
 
 import importlib.util
+import io
 import json
 import os
 import shutil
 import subprocess
+import zipfile
 from pathlib import Path
 from subprocess import CompletedProcess
 
@@ -71,6 +73,33 @@ def test_selection_deduplicates_overlapping_roots(tmp_path):
     first = skill(tmp_path, "skills/a")
     second = skill(tmp_path, "skills/b")
     assert runner.discover_skills(tmp_path, "skills\nskills/a\nskills") == [first, second]
+
+
+def test_contradictory_passing_report_with_incomplete_scanners_has_publishable_error_row(tmp_path):
+    import ci.publish_reports as publisher
+
+    workspace = tmp_path / "workspace"
+    skill(workspace, "skills/a")
+    report = payload()
+    report["incomplete_scans"] = ["semgrep"]
+    reports = tmp_path / "reports"
+    exit_code = runner.run(
+        workspace,
+        reports,
+        {"SKILL_PATHS": "skills", "LLM_ENABLED": "false"},
+        execute=fake_cli([(0, report)], []),
+    )
+    summary = json.loads((reports / "summary.json").read_text())
+    assert exit_code == 1
+    assert summary["skills"][0]["overall_status"] == "error"
+    publisher.validate_summary(summary)
+    artifact = io.BytesIO()
+    with zipfile.ZipFile(artifact, "w") as archive:
+        archive.write(reports / "summary.json", "summary.json")
+        archive.write(reports / "skill-001/skillevaluator-tier1.json", "skill-001/skillevaluator-tier1.json")
+    retained, children = publisher.read_artifact(artifact.getvalue())
+    assert retained["skills"][0]["overall_status"] == "error"
+    assert children == {}
 
 
 @pytest.mark.parametrize("root", ["/etc", "../skills", "skills/../other", "C:\\skills", "skills\\a"])

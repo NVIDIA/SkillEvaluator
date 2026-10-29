@@ -70,6 +70,26 @@ def test_unrelated_commit_is_explicit_empty_selection(repository):
     }
 
 
+def test_changed_skill_path_with_del_is_rejected_before_scanning(repository):
+    repo, base = repository
+    path = repo / "skills" / "del\x7fskill"
+    path.mkdir()
+    (path / "SKILL.md").write_text("# skill\n")
+    head = commit(repo)
+    with pytest.raises(selector.SelectionError):
+        select(repo, base, head)
+
+
+def test_configured_root_with_del_is_rejected(repository):
+    repo, _ = repository
+    path = repo / "skills" / "del\x7fskill"
+    path.mkdir()
+    (path / "SKILL.md").write_text("# skill\n")
+    head = commit(repo)
+    with pytest.raises(selector.SelectionError):
+        select(repo, head, head, "skills/del\x7fskill")
+
+
 @pytest.mark.parametrize("operation", ["modify", "delete-file", "rename-file"])
 def test_changes_within_skill_select_only_that_skill(repository, operation):
     repo, base = repository

@@ -1,6 +1,7 @@
 # SPDX-License-Identifier: Apache-2.0
 """Guard selection wiring and execute the consumer shell's Docker contract."""
 
+import importlib.util
 import json
 import os
 import subprocess
@@ -60,6 +61,8 @@ def test_real_workflow_shell_preserves_container_boundary_and_secret_selection(t
     }
     subprocess.run(["bash", "-e", "-o", "pipefail", "-c", scan["run"]], env=env, check=True, capture_output=True)
     args = json.loads(captured.read_text())
+    passed_environment = [args[index + 1] for index, arg in enumerate(args) if arg == "--env"]
+    assert {"SCAN_MODE", "DIFF_BASE_SHA", "DIFF_HEAD_SHA"}.issubset(passed_environment)
     assert ("LLM_API_KEY" in args) is (llm == "true")
     for flag in ("--read-only", "--user", "--cap-drop", "--security-opt"):
         assert flag in args
@@ -71,3 +74,25 @@ def test_real_workflow_shell_preserves_container_boundary_and_secret_selection(t
     harness = (ROOT / "ci/smoke_image.py").read_text()
     for mount in mounts:
         assert mount in harness
+
+
+def test_smoke_container_executes_with_the_same_hardening(tmp_path, monkeypatch):
+    spec = importlib.util.spec_from_file_location("ci_smoke_contract", ROOT / "ci/smoke_image.py")
+    smoke = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(smoke)
+    calls = []
+
+    def capture(argv, **_kwargs):
+        calls.append(argv)
+        return subprocess.CompletedProcess(argv, 0)
+
+    monkeypatch.setattr(smoke.subprocess, "run", capture)
+    workspace = tmp_path / "workspace"
+    workspace.mkdir()
+    assert smoke._container("example:local", workspace, tmp_path / "case", "changed-one", "a" * 40, "b" * 40) == 0
+    args = calls[0]
+    assert "--read-only" in args
+    assert args[args.index("--cap-drop") + 1] == "ALL"
+    assert args[args.index("--security-opt") + 1] == "no-new-privileges"
+    environment = [args[index + 1] for index, arg in enumerate(args) if arg == "--env"]
+    assert {entry.split("=", 1)[0] for entry in environment}.issuperset({"SCAN_MODE", "DIFF_BASE_SHA", "DIFF_HEAD_SHA"})

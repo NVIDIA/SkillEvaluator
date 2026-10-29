@@ -1007,3 +1007,50 @@ class TestRubricEvalValidator:
         assert result.metadata["rubric_eval"]["execution_status"] == "failed"
         assert result.metadata["rubric_eval"]["overall_score"] is None
         assert result.metadata["rubric_eval"]["overall_pass"] is False
+
+    @pytest.mark.parametrize(
+        ("served_by", "expected_model"), [(None, "claude-opus-5-5"), ("claude-opus-4-8", "claude-opus-4-8")]
+    )
+    def test_json_report_names_the_model_that_scored(
+        self, tmp_path, monkeypatch: pytest.MonkeyPatch, served_by: str | None, expected_model: str
+    ):
+        """A score from the server-side fallback model is labeled with that model, not the configured one."""
+        pytest.importorskip("anthropic")
+        httpx = pytest.importorskip("httpx")
+        from skillevaluator.reporting import JSONReporter
+
+        monkeypatch.setenv("SKILL_EVAL_LLM_PROVIDER", "anthropic")
+        monkeypatch.setenv("SKILL_EVAL_LLM_MODEL", "claude-opus-5-5")
+        monkeypatch.setenv("ANTHROPIC_API_KEY", "test-key")
+        for name in ("SKILL_EVAL_LLM_BASE_URL", "ANTHROPIC_BASE_URL"):
+            monkeypatch.delenv(name, raising=False)
+        content = [{"type": "text", "text": json.dumps({"checks": _complete_checks(), "summary": "ok"})}]
+        if served_by:
+            content.insert(0, {"type": "fallback", "from": {"model": "claude-opus-5-5"}, "to": {"model": served_by}})
+
+        def handler(request):
+            return httpx.Response(
+                200,
+                json={
+                    "id": "msg_test",
+                    "type": "message",
+                    "role": "assistant",
+                    "model": "claude-opus-5-5",
+                    "content": content,
+                    "stop_reason": "end_turn",
+                    "stop_sequence": None,
+                    "usage": {"input_tokens": 1, "output_tokens": 1},
+                },
+            )
+
+        validator = RubricEvalValidator()
+        with httpx.Client(transport=httpx.MockTransport(handler)) as http_client:
+            validator._judge = RubricJudge(http_client=http_client)
+            result = validator.validate(_write_skill(tmp_path))
+
+        data = json.loads(JSONReporter(include_timestamp=False).render_all([result]))
+        assert data["rubric_eval"]["execution_status"] == "succeeded"
+        assert data["rubric_eval"]["llm_provider"] == "anthropic"
+        assert data["rubric_eval"]["llm_model_used"] == expected_model
+        (success,) = data["results"][0]["success_details"]
+        assert success["metadata"]["llm_model_used"] == expected_model

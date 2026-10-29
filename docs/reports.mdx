@@ -642,7 +642,11 @@ For CI and tooling, two JSON entry points matter:
 
 Both paths speak the same dialect: standalone `tier3 evaluate` and
 `validate --tier3` share one HTML renderer for `report.html`, and both embed
-the Tier 3 payload at schema version `2.0`.
+the Tier 3 payload at schema version `2.0`. In that payload, conclusions and
+recommendations written by the LLM carry `source: "llm"` and name the model
+that wrote them as `model`. On the native Claude API this can be the
+server-side refusal fallback, Claude Opus 4.8, rather than the configured
+model.
 
 Exit codes and a ready-made JSON gating recipe live in
 [Gate Your CI](ci-integration.mdx).

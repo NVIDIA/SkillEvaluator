@@ -78,6 +78,14 @@ All notable changes to SkillEvaluator are documented in this file.
 - CI-native per-skill HTML pages link Download JSON to the retained
   `skillevaluator-tier1.json` and do not embed a second copy of the report
   JSON. Standalone CLI HTML reports embed it for Export JSON.
+- Rubric evaluation JSON reports name the provider and model that gave each
+  score as `llm_provider` and `llm_model_used` in the skill's `rubric_eval`
+  success detail and, for a single skill, also in `rubric_eval`. Tier 3
+  conclusions and recommendations written by the LLM, and LLM-written
+  dimensions returned by `compute_dimensions`, record the model that wrote
+  them as `model`. On the native Claude API this is `claude-opus-4-8`, not the
+  configured model, when the server-side refusal fallback answered a Claude
+  5.5 or later request.
 
 ### Changed
 

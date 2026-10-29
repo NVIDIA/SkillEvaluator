@@ -22,6 +22,7 @@ import io
 import json
 import os
 import re
+import threading
 import urllib.error
 from collections.abc import Callable
 from dataclasses import replace
@@ -328,6 +329,19 @@ def _checked_content(content: str, stop_reason: object, refusal: object = None) 
     return content
 
 
+def _anthropic_fallback_model(response: Any) -> str | None:
+    """Return the model a server-side fallback block says served the reply, if any."""
+    served_model = None
+    for block in getattr(response, "content", None) or []:
+        if getattr(block, "type", None) != "fallback":
+            continue
+        served = getattr(block, "to", None)
+        model = served.get("model") if isinstance(served, dict) else getattr(served, "model", None)
+        if isinstance(model, str) and model:
+            served_model = model
+    return served_model
+
+
 def _extract_choice_content(response: Any) -> str:
     choices = getattr(response, "choices", None) or []
     first_choice = choices[0] if choices else None
@@ -404,12 +418,28 @@ class LLMClient:
         self._client: Any = None
         self._provider_config: ProviderConfig | None = None
         self.last_failure: str | None = None
+        # Per thread, because one client can serve concurrent calls.
+        self._call_state = threading.local()
 
     # -- public read-only properties for introspection --------------------
 
     @property
     def model(self) -> str:
         return self._model or self._resolved_config().model
+
+    @property
+    def provider(self) -> str:
+        return self._resolved_config().provider
+
+    @property
+    def model_used(self) -> str | None:
+        """Return the model that answered this thread's last :meth:`completions` call.
+
+        This is the configured model, or the server-side fallback model when
+        it answered a native Anthropic request. ``None`` before a call
+        succeeds and after a call fails.
+        """
+        return getattr(self._call_state, "model_used", None)
 
     @property
     def base_url(self) -> str | None:
@@ -560,15 +590,19 @@ class LLMClient:
     ) -> str:
         """Send a chat completion request and return the response text.
 
-        Raises :class:`LLMClientError` when the response is empty.
+        Raises :class:`LLMClientError` when the response is empty. On success
+        :attr:`model_used` names the model that answered.
         """
+        self._call_state.model_used = None
         config = self._resolved_config()
         client = self._get_client()
         target_key = SchemaTargetKey(config.provider, config.base_url or "", config.model)
         max_tokens = self._request_max_tokens(config)
         reasoning_effort = self.reasoning_effort
+        answered_by = config.model
 
         def _invoke_provider() -> str:
+            nonlocal answered_by
             use_schema = response_schema is not None and target_key not in _SCHEMA_UNSUPPORTED_TARGETS
             if config.provider == "anthropic":
 
@@ -600,6 +634,8 @@ class LLMClient:
                     target_key=target_key,
                     use_schema=use_schema,
                 )
+                # A refusal answered by the server-side fallback names it here.
+                answered_by = _anthropic_fallback_model(response) or config.model
                 content = "".join(
                     str(block.text) for block in response.content if getattr(block, "type", None) == "text"
                 )
@@ -673,7 +709,9 @@ class LLMClient:
                     raise
             return _extract_choice_content(response)
 
-        return retry_call_with_backoff(_invoke_provider, config=self._retry_config)
+        content = retry_call_with_backoff(_invoke_provider, config=self._retry_config)
+        self._call_state.model_used = answered_by
+        return content
 
     def extract_json_from_response(
         self,

@@ -311,6 +311,8 @@ For `validate`, the default set is `schema`, `version`, `security`, `pii`, `lice
 
     Each criterion is scored from 0 to 10. The local evaluator, not the model's boolean, treats 7 or higher as passing. The overall score is an importance-weighted mean, and the rubric passes only when that score reaches `--min-score` and every criterion passes.
 
+    The JSON report names the provider and model that gave each score as `llm_provider` and `llm_model_used` in the skill's `rubric_eval` success detail and, for a single skill, also in the `rubric_eval` object. On the native Claude API, a Claude 5.5 or later model's refusal can be answered by the server-side fallback, Claude Opus 4.8; the report then names `claude-opus-4-8`, not the configured model.
+
     ```bash title="Rubric evaluation"
     skillevaluator rubric-eval ./my-skill --min-score 70
     ```

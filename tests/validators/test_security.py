@@ -6,6 +6,8 @@
 import json
 import os
 import re
+import subprocess
+import sys
 from pathlib import Path
 from unittest.mock import patch
 
@@ -743,7 +745,7 @@ metadata:
 
 # Corporate Email Test
 
-Contact: support@corp.invalid for help.
+Contact: support@corp.company.com for help.
 """)
 
         validator = SecurityValidator()
@@ -764,14 +766,14 @@ Contact: support@corp.invalid for help.
 name: public-author-skill
 description: A public skill with contributor metadata and a body contact leak
 metadata:
-  author: Example Contributor <contributor@contributors.invalid>
+  author: Example Contributor <contributor@contributors.company.com>
 ---
 
 # Public Author Skill
 
 ## Instructions
 
-Contact contributor@contributors.invalid for private support.
+Contact contributor@contributors.company.com for private support.
 
 ## Examples
 
@@ -785,7 +787,7 @@ Run the documented workflow.
         assert not [finding for finding in schema_result.findings if finding.check_name == "author_format"]
         email_findings = [finding for finding in pii_result.findings if finding.check_name == "emails"]
         assert len(email_findings) == 1
-        assert email_findings[0].line_content == "Contact contributor@contributors.invalid for private support."
+        assert email_findings[0].line_content == "Contact contributor@contributors.company.com for private support."
 
     @pytest.mark.parametrize("newline", ["\n", "\r\n"])
     def test_bom_prefixed_frontmatter_author_email_not_flagged_in_security_scan(
@@ -801,14 +803,14 @@ Run the documented workflow.
                 "name: bom-public-author-skill",
                 "description: A public skill with contributor metadata and a body contact leak",
                 "metadata:",
-                "  author: Example Contributor <contributor@contributors.invalid>",
+                "  author: Example Contributor <contributor@contributors.company.com>",
                 "---",
                 "",
                 "# Public Author Skill",
                 "",
                 "## Instructions",
                 "",
-                "Contact contributor@contributors.invalid for private support.",
+                "Contact contributor@contributors.company.com for private support.",
                 "",
                 "## Examples",
                 "",
@@ -824,7 +826,7 @@ Run the documented workflow.
         assert not [finding for finding in schema_result.findings if finding.check_name == "author_format"]
         email_findings = [finding for finding in pii_result.findings if finding.check_name == "emails"]
         assert len(email_findings) == 1
-        assert email_findings[0].line_content == "Contact contributor@contributors.invalid for private support."
+        assert email_findings[0].line_content == "Contact contributor@contributors.company.com for private support."
 
     def test_unrelated_home_roots_not_flagged(self, tmp_path: Path):
         """Unrelated /home roots stay unflagged without an organization allowlist."""
@@ -976,7 +978,7 @@ metadata:
 
 # Service Account Test
 
-Contact: deploy-bot@automation.invalid
+Contact: deploy-bot@automation.company.com
 Workspace: /home/buildbot/releases/current/
 """)
 
@@ -1056,15 +1058,81 @@ Call us at 555-123-4567 or +1-555-987-6543
         assert "emails" in pii
         assert "ssn" in pii
 
-    def test_email_pattern_exempts_only_placeholder_domains(self):
-        """Email regex domain exemptions are limited to neutral placeholders."""
-        email_pattern = SecurityValidator().pii_patterns["emails"][0]["pattern"]
-        exempt_domain_literals = {
-            f"{name}.{suffix}"
-            for name, suffix in re.findall(r"([a-z][a-z0-9-]*)\\\.(com|org|net)", email_pattern, re.IGNORECASE)
-        }
+    @pytest.mark.parametrize(
+        "domain",
+        ["example.com", "example.net", "example.org", "test.com", "unit.test", "unit.example", "unit.invalid", "unit.localhost"],
+    )
+    @pytest.mark.parametrize(
+        "domain_format",
+        ["{domain}", "sub.{domain}", "{domain_upper}", "sub.{domain}.", "{domain}...", "sub.{domain_upper}..."],
+    )
+    def test_reserved_domain_emails_are_not_pii(self, tmp_path: Path, domain: str, domain_format: str):
+        document = tmp_path / "guide.md"
+        domain = domain_format.format(domain=domain, domain_upper=domain.upper())
+        document.write_text(f"Fixture identity: fixture@{domain}\n", encoding="utf-8")
 
-        assert exempt_domain_literals == {"example.com", "example.org", "test.com"}
+        result = SecurityValidator().validate_pii_only(document)
+
+        assert not [finding for finding in result.findings if finding.check_name == "emails"]
+
+    @pytest.mark.parametrize("domain", ["example.com", "example.net", "example.invalid"])
+    @pytest.mark.parametrize("fixture_first", [True, False])
+    @pytest.mark.parametrize("punctuation", ["", "..."])
+    def test_placeholder_on_same_line_preserves_real_email(
+        self, tmp_path: Path, domain: str, fixture_first: bool, punctuation: str
+    ):
+        document = tmp_path / "guide.md"
+        addresses = [f"fixture@{domain}{punctuation}", "contact@company.com"]
+        if not fixture_first:
+            addresses.reverse()
+        document.write_text("Contact " + " or ".join(addresses) + "\n", encoding="utf-8")
+
+        result = SecurityValidator().validate_pii_only(document)
+        emails = [finding for finding in result.findings if finding.check_name == "emails"]
+
+        assert [finding.metadata["matched_value"] for finding in emails] == ["contact@company.com"]
+        assert emails[0].severity == Severity.HIGH
+
+    @pytest.mark.parametrize(
+        "domain",
+        [
+            "company.com", "notexample.net", "example.net.company.com", "example.invalid.company.com",
+            "example.com-extra.net", "test.company.com", "example.organic", "company.invalidity",
+            "company.examplecorp", "localhost.company.com", "test.com.company.com",
+        ],
+    )
+    def test_nonplaceholder_email_domains_remain_pii(self, tmp_path: Path, domain: str):
+        document = tmp_path / "guide.md"
+        address = f"contact@{domain}"
+        document.write_text(f"Contact {address}\n", encoding="utf-8")
+
+        result = SecurityValidator().validate_pii_only(document)
+        emails = [finding for finding in result.findings if finding.check_name == "emails"]
+
+        assert [finding.metadata["matched_value"] for finding in emails] == [address]
+        assert emails[0].severity == Severity.HIGH
+
+    def test_long_placeholder_email_finishes_and_preserves_real_email(self, tmp_path: Path):
+        document = tmp_path / "long-guide.md"
+        document.write_text("x" * 200_000 + "@example.invalid; contact@company.com\n", encoding="utf-8")
+        script = """
+import json
+import sys
+from pathlib import Path
+from skillevaluator.validators.security import SecurityValidator
+result = SecurityValidator().validate_pii_only(Path(sys.argv[1]))
+print(json.dumps([finding.metadata["matched_value"] for finding in result.findings if finding.check_name == "emails"]))
+"""
+        # Isolate the regex so a backtracking regression cannot hang pytest.
+        completed = subprocess.run(
+            [sys.executable, "-c", script, str(document)],
+            capture_output=True,
+            text=True,
+            timeout=30,
+            check=True,
+        )
+
+        assert json.loads(completed.stdout) == ["contact@company.com"]
 
     def test_home_path_exceptions_are_limited_to_portable_paths(self):
         """Home-path handling must not depend on organization-specific roots."""

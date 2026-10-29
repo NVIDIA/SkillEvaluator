@@ -45,6 +45,7 @@ from skillevaluator.tier3.harbor import (
 from skillevaluator.tier3.harbor import stream_redaction as stream_redaction_module
 from skillevaluator.tier3.harbor.local_agents import (
     NVIDIA_BUILD_AGENT_IMPORT_PATHS,
+    SkillEvaluatorLocalClaudeCode,
     SkillEvaluatorLocalOpenCode,
     SkillEvaluatorNvidiaBuildClaudeCode,
     SkillEvaluatorNvidiaBuildCodex,
@@ -1804,7 +1805,10 @@ def test_nested_background_shell_is_blocked_before_process_survives(tmp_path: Pa
 
 
 @pytest.mark.skipif(os.name == "nt", reason=_NATIVE_WINDOWS_LOCAL_REASON)
-def test_task_env_is_hidden_from_launcher_but_reaches_inner_command(tmp_path: Path) -> None:
+@pytest.mark.parametrize(
+    "name", ["SAFE_TASK_VALUE", "HARBOR_INSTRUCTION", "HARBOR_CLAUDE_CODE_INSTRUCTION_0123456789ABCDEF0123456789ABCDEF"]
+)
+def test_task_env_is_hidden_from_launcher_but_reaches_inner_command(tmp_path: Path, name: str) -> None:
     environment = _local_environment(tmp_path)
     captured_env = tmp_path / "launcher-env.json"
     launcher = tmp_path / "capture-launcher.py"
@@ -1829,14 +1833,115 @@ def test_task_env_is_hidden_from_launcher_but_reaches_inner_command(tmp_path: Pa
 
     environment._sandbox = CaptureLauncher()
 
-    result = asyncio.run(environment.exec('printf %s "$SAFE_TASK_VALUE"', env={"SAFE_TASK_VALUE": "inner-only"}))
+    instruction = "inner-only\nKeep 'quotes', \"double quotes\", $(printf literal), `printf literal`, and π."
+    result = asyncio.run(environment.exec(f'printf %s "${name}"', env={name: instruction}))
 
     assert result.return_code == 0, result.stderr
-    assert result.stdout == "inner-only"
+    assert result.stdout == instruction
     capture = json.loads(captured_env.read_text(encoding="utf-8"))
     launcher_env = capture["environment"]
-    assert "SAFE_TASK_VALUE" not in launcher_env
+    assert name not in launcher_env
     assert capture["payload_files"] == []
+
+
+@pytest.mark.parametrize(
+    "name",
+    [
+        "HARBOR_INSTRUCTION",
+        "HARBOR_CLAUDE_CODE_INSTRUCTION_0123456789ABCDEF0123456789ABCDEF",
+    ],
+)
+def test_local_instruction_env_preserves_protected_paths(tmp_path: Path, name: str) -> None:
+    environment = _local_environment(tmp_path)
+    supplied = {
+        name: "Read /workspace/SKILL.md",
+        "HARBOR_WORKSPACE_DIR": "/outside",
+        "HARBOR_GRADER": "/outside/grader.py",
+        "HOME": "/outside",
+        "TMPDIR": "/outside",
+        "PATH": "/outside",
+        "HARBOR_DECLARED_PORTS": "8000",
+    }
+
+    child_env = environment._exec_env(supplied)
+
+    assert child_env[name] == f"Read {environment._workspace / 'SKILL.md'}"
+    assert child_env["HARBOR_WORKSPACE_DIR"] == str(environment._workspace)
+    assert child_env["HARBOR_GRADER"] == str(environment._tests / "grader.py")
+    assert child_env["HOME"] == str(environment._home)
+    assert child_env["TMPDIR"] == str(environment._tmp)
+    assert "/outside" not in child_env["PATH"]
+    assert child_env["HARBOR_DECLARED_PORTS"] == "8000"
+
+
+@pytest.mark.parametrize(
+    "name",
+    [
+        "HARBOR_UNKNOWN",
+        "HARBOR_INSTRUCTION_EXTRA",
+        "HARBOR_CLAUDE_CODE_INSTRUCTION_",
+        "HARBOR_CLAUDE_CODE_INSTRUCTION_ABCDEF",
+        "HARBOR_CLAUDE_CODE_INSTRUCTION_" + "A" * 31,
+        "HARBOR_CLAUDE_CODE_INSTRUCTION_" + "A" * 33,
+        "HARBOR_CLAUDE_CODE_INSTRUCTION_" + "G" * 32,
+        "HARBOR_CLAUDE_CODE_INSTRUCTION_" + "a" * 32,
+        "HARBOR_OTHER_INSTRUCTION_" + "A" * 32,
+        "HARBOR_CLAUDE_CODE_INSTRUCTION_" + "A" * 32 + "_PATH",
+        "HARBOR_CLAUDE_CODE_INSTRUCTION_" + "A" * 32 + "\n",
+    ],
+)
+def test_local_instruction_env_does_not_allow_unrecognized_harbor_values(tmp_path: Path, name: str) -> None:
+    environment = _local_environment(tmp_path)
+
+    assert name not in environment._exec_env({name: "untrusted"})
+
+
+@pytest.mark.skipif(os.name == "nt", reason=_NATIVE_WINDOWS_LOCAL_REASON)
+@pytest.mark.parametrize("sandbox_mode", ["off", pytest.param("require", marks=pytest.mark.integration)])
+def test_harbor_claude_run_delivers_instruction_to_local_cli(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path, sandbox_mode: str
+) -> None:
+    """Run the pinned Harbor producer and local subprocess boundary without a model call."""
+    environment = _initialized_local_environment(tmp_path)
+    environment._runtime_agent = "claude-code"
+    environment._sandbox_mode = sandbox_mode
+    if sandbox_mode == "require":
+        try:
+            local_sandbox.detect("require")
+        except local_sandbox.SandboxUnavailable as exc:
+            pytest.skip(str(exc))
+    monkeypatch.setenv("ANTHROPIC_API_KEY", "test-only")
+    monkeypatch.setenv("ANTHROPIC_BASE_URL", "https://provider.example/v1")
+    instruction = (
+        "Explain argparse's nargs='?' in two lines.\nKeep \"quotes\", $(touch injected), `touch injected`, and π."
+    )
+    agent = SkillEvaluatorLocalClaudeCode(logs_dir=tmp_path / "agent", model_name="anthropic/test-model")
+
+    async def exercise() -> None:
+        await environment.start()
+        try:
+            cli = environment._home / ".local" / "bin" / "claude"
+            cli.parent.mkdir(parents=True, exist_ok=True)
+            cli.write_text(
+                f"#!{sys.executable}\n"
+                "import json, os, sys\n"
+                "json.dump({'prompt': sys.stdin.read(), 'argv': sys.argv[1:], "
+                "'instruction_env': [key for key in os.environ if key.startswith('HARBOR_') and '_INSTRUCTION_' in key]}, sys.stdout)\n",
+                encoding="utf-8",
+            )
+            cli.chmod(0o755)
+            await agent.run(instruction, environment=environment, context=object())
+        finally:
+            await environment.stop(delete=False)
+
+    asyncio.run(exercise())
+
+    observed = json.loads((environment.trial_paths.agent_dir / "claude-code.txt").read_text())
+    assert observed["prompt"] == instruction
+    assert "--print" in observed["argv"]
+    assert "--permission-mode=auto" in observed["argv"]
+    assert observed["instruction_env"] == []
+    assert not (environment._workspace / "injected").exists()
 
 
 @pytest.mark.skipif(os.name == "nt", reason=_NATIVE_WINDOWS_LOCAL_REASON)
@@ -3346,8 +3451,16 @@ def test_streamed_exec_escalates_after_launcher_exits_with_term_ignoring_descend
     try:
         asyncio.run(exercise())
         child_pid = int(child_pid_path.read_text(encoding="ascii"))
-        with pytest.raises(ProcessLookupError):
-            os.kill(child_pid, 0)
+        # On macOS the group probe can report EPERM after SIGKILL while this
+        # descendant is still finishing its exit. Allow bounded exit completion.
+        deadline = time.monotonic() + 5
+        while True:
+            try:
+                os.kill(child_pid, 0)
+            except ProcessLookupError:
+                break
+            assert time.monotonic() < deadline, "a SIGTERM-ignoring descendant survived cleanup"
+            time.sleep(0.01)
     finally:
         if child_pid is None and child_pid_path.exists():
             child_pid = int(child_pid_path.read_text(encoding="ascii"))
@@ -3907,7 +4020,9 @@ def test_runtime_injection_env_is_blocked_before_launcher(name: str, tmp_path: P
 
     with pytest.MonkeyPatch.context() as patch:
         patch.setattr(asyncio, "create_subprocess_exec", unexpected_launch)
-        result = asyncio.run(environment.exec("true", env={name: "attacker-controlled"}))
+        result = asyncio.run(
+            environment.exec("true", env={name: "attacker-controlled", "HARBOR_INSTRUCTION": "task prompt"})
+        )
 
     assert result.return_code == 126
     assert name in (result.stderr or "")

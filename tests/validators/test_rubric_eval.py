@@ -469,11 +469,12 @@ class TestLinkedRubricGuidance:
         assert result.metadata["rubric_eval"]["execution_status"] == "failed"
         assert result.metadata["rubric_eval"]["overall_score"] is None
 
-    def test_case_alias_with_changed_manifest_bytes_is_rejected(self, tmp_path):
+    @pytest.mark.parametrize("line_ending", [pytest.param("\n", id="lf"), pytest.param("\r\n", id="crlf")])
+    def test_case_alias_with_changed_manifest_bytes_is_rejected(self, tmp_path, line_ending):
         root = _write_skill(tmp_path)
-        source = "[Guide](guide.md)\nOriginal source"
+        source = "[Guide](guide.md)\nOriginal source".replace("\n", line_ending)
         manifest = root / "SKILL.md"
-        manifest.write_text(source.replace("Original", "Modified"))
+        manifest.write_bytes(source.replace("Original", "Modified").encode("utf-8"))
         if not (root / "skill.md").exists() or not (root / "skill.md").samefile(manifest):
             pytest.skip("requires a case-insensitive filesystem")
         (root / "guide.md").write_text("[Root](skill.md)")
@@ -503,10 +504,11 @@ class TestLinkedRubricGuidance:
         assert result.metadata["rubric_eval"]["execution_status"] == "failed"
         assert result.metadata["rubric_eval"]["overall_score"] is None
 
-    def test_successful_validator_sends_source_and_complete_guidance_to_provider(self, tmp_path):
+    @pytest.mark.parametrize("line_ending", [pytest.param("\n", id="lf"), pytest.param("\r\n", id="crlf")])
+    def test_successful_validator_sends_source_and_complete_guidance_to_provider(self, tmp_path, line_ending):
         root = _write_skill(tmp_path)
-        source = "---\nname: demo\ndescription: demo\n---\n[Guide](GUIDE.md)\n"
-        (root / "SKILL.md").write_text(source)
+        source = "---\nname: demo\ndescription: demo\n---\n[Guide](GUIDE.md)\n".replace("\n", line_ending)
+        (root / "SKILL.md").write_bytes(source.encode("utf-8"))
         (root / "GUIDE.md").write_text("Required guidance")
         response = json.dumps({"checks": _complete_checks(), "score": 90, "overall_pass": True, "summary": "ok"})
         with patch.object(RubricJudge, "completions", return_value=response) as provider:
@@ -518,7 +520,7 @@ class TestLinkedRubricGuidance:
         assert f"SKILL.md Content:\n{source}\n\n" in prompt
         assert "Linked Markdown (paths relative to skill root):" in prompt
         assert "--- GUIDE.md ---\nRequired guidance" in prompt
-        assert (root / "SKILL.md").read_text() == source
+        assert (root / "SKILL.md").read_bytes() == source.encode("utf-8")
 
 
 class TestRubricEvalValidator:

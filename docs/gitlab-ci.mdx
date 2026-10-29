@@ -124,8 +124,10 @@ Skill result: "skills/glossary-builder" — FAILED
     The threshold applies to the quality score; security, schema and other
     required checks remain independent gates. The first version runs Tier 1
     only. This integration does not host reports or post merge-request comments
-    automatically. Known values detected by credential patterns are redacted,
-    but not every secret or transformation is detectable. Raw scanner logs are
+    automatically. Known values detected by credential patterns, NVIDIA API
+    keys, and unquoted `KEY=value` and `Bearer` credentials are redacted,
+    including parts of them that a scanner cuts or escapes, but not every
+    secret or transformation is detectable. Raw scanner logs are
     withheld when a credential is present. Remove and rotate exposed
     credentials; previous artifacts and Git history are not rewritten.
   </Accordion>

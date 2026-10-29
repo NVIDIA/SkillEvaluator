@@ -573,7 +573,7 @@ def test_windows_hardlink_read_requires_explicit_script_opt_in(tmp_path: Path) -
     target.write_bytes(b"echo safe")
     os.link(target, tmp_path / "linked.sh")
     with secure_fs.SecureRoot(tmp_path) as root:
-        with pytest.raises(secure_fs.SecurePathError, match="hard.link"):
+        with pytest.raises(secure_fs.SecurePathError, match=r"hard.link"):
             root.read_bytes(Path("linked.sh"), 1024)
         content, metadata = root.read_bytes(Path("linked.sh"), 1024, allow_hardlinks=True)
         assert content == b"echo safe"

@@ -311,3 +311,17 @@ def parse_manifest_text(manifest_type: str, text: str) -> Any:
     if manifest_syntax(manifest_type) == "json":
         return load_bounded_json(text)
     return load_bounded_yaml(text)
+
+
+def normalized_component_manifest(manifest_type: str, data: dict[str, Any] | None) -> dict[str, Any] | None:
+    """Keep only declarations defined by this manifest's component dialect.
+
+    Claude and bundle manifests retain their existing fields. Other clients
+    must not accidentally load fields that belong to another format.
+    """
+    if not isinstance(data, dict):
+        return None
+    if manifest_type in {PLUGIN_CONTAINED_MANIFEST_TYPE, PLUGIN_MANIFEST_TYPE}:
+        return data
+    profile = profile_for(manifest_type)
+    return {key: value for key, value in data.items() if key in profile.component_fields}

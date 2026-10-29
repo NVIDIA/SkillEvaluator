@@ -40,6 +40,8 @@ details.check-result>summary{cursor:pointer;list-style:none;margin-bottom:0}deta
 /* Severity tags: one token pair per level. The [data-theme] selectors outrank the base template's hard-coded dark colors. */
 .severity-critical,[data-theme="dark"] .severity-critical{background:var(--sev-critical-bg);color:var(--sev-critical-tx)}.severity-high,[data-theme="dark"] .severity-high{background:var(--sev-high-bg);color:var(--sev-high-tx)}.severity-medium,[data-theme="dark"] .severity-medium{background:var(--sev-medium-bg);color:var(--sev-medium-tx)}.severity-low,[data-theme="dark"] .severity-low{background:var(--sev-low-bg);color:var(--sev-low-tx)}.severity-info,[data-theme="dark"] .severity-info{background:var(--sev-info-bg);color:var(--sev-info-tx)}
 .severity-tag,.status-badge,.metadata-tag,.count-badge,.skill-pill,.quality-pill,.tier-card-verdict,.tier-card-sev-pill{white-space:nowrap}
+/* Confidence badges: the type floor, and the palette's AA pairs in both themes. */
+.confidence-badge{font-size:11px}.confidence-badge.high-conf,[data-theme="dark"] .confidence-badge.high-conf{background:var(--badge-fail-bg);color:var(--badge-fail-tx)}.confidence-badge.medium-conf,[data-theme="dark"] .confidence-badge.medium-conf{background:var(--badge-warn-bg);color:var(--badge-warn-tx)}.confidence-badge.low-conf,[data-theme="dark"] .confidence-badge.low-conf{background:var(--sev-low-bg);color:var(--sev-low-tx);border-color:var(--border-color)}
 .count-badge.medium-count{background:var(--warning-color);color:var(--on-warning)}.count-badge.low-count{background:var(--low-color);color:var(--on-accent)}
 
 /* Header, hero, executive summary and Fix first. */

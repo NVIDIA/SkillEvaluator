@@ -408,6 +408,39 @@ def test_no_workspace_font_size_is_below_eleven_pixels() -> None:
     assert min(sizes) >= 11
 
 
+def _px(value: str, unit: str) -> float:
+    return float(value) * (16 if unit == "rem" else 1)
+
+
+def test_template_text_under_eleven_pixels_is_overridden_or_unused() -> None:
+    """Every small size in report.html.j2 is unused or raised to 11 px by the workspace stylesheet."""
+    template = (TEMPLATES / "report.html.j2").read_text(encoding="utf-8")
+    workspace = (TEMPLATES / "report_ui.css.j2").read_text(encoding="utf-8")
+    styles = "\n".join(re.findall(r"<style[^>]*>(.*?)</style>", template, flags=re.DOTALL))
+    markup = re.sub(r"<style[^>]*>.*?</style>", "", template, flags=re.DOTALL)
+    size = r"font-size:\s*(\d*\.?\d+)(px|rem)\b"
+    raised = {
+        re.findall(r"\.([\w-]+)", part)[-1]
+        for _media, selector, body in _rules(workspace)
+        if any(_px(value, unit) >= 11 for value, unit in re.findall(size, body))
+        for part in selector.split(",")
+        if re.search(r"\.[\w-]+", part)
+    }
+    too_small = set()
+    for _media, selector, body in _rules(styles):
+        if not any(_px(value, unit) < 11 for value, unit in re.findall(size, body)):
+            continue
+        for part in selector.split(","):
+            name = re.findall(r"\.([\w-]+)", part)[-1]
+            if name not in raised and re.search(rf'class="[^"]*(?<![\w-]){re.escape(name)}(?![\w-])', markup):
+                too_small.add(name)
+    inline = [_px(value, unit) for value, unit in re.findall(r'style="[^"]*?' + size, markup)]
+
+    assert not too_small
+    assert inline
+    assert min(inline) >= 11
+
+
 def test_short_table_cells_do_not_break_mid_word() -> None:
     css = (TEMPLATES / "report_ui.css.j2").read_text(encoding="utf-8")
 

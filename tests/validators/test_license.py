@@ -268,6 +268,21 @@ license: {declared_license}
     return skill_dir
 
 
+def create_skill_with_declared_license(tmp_path: Path, name: str, declared_license: str) -> Path:
+    """Create a skill whose only license signal is its SKILL.md license field."""
+    skill_dir = tmp_path / name
+    skill_dir.mkdir()
+    (skill_dir / "SKILL.md").write_text(f"""---
+name: {name}
+description: Skill with a declared license expression
+license: "{declared_license}"
+---
+
+# Declared License Expression
+""")
+    return skill_dir
+
+
 # =============================================================================
 # BASIC VALIDATION TESTS
 # =============================================================================
@@ -510,6 +525,164 @@ in the Software without restriction.
         assert result.metadata.get("license_status") == "unknown"
         assert any(f.check_name == "unknown_license" for f in result.findings)
         assert all(f.check_name != "frontmatter_license_mismatch" for f in result.findings)
+
+    @pytest.mark.parametrize(
+        "declared_license",
+        [
+            "CC-BY-4.0 AND Apache-2.0",
+            "CC-BY-4.0 OR Apache-2.0",
+            "(MIT OR Apache-2.0)",
+            "(MIT OR Apache-2.0) AND BSD-3-Clause",
+            "MIT OR CC-BY-4.0 AND Apache-2.0",
+            "(MIT)",
+            "Apache-2.0 WITH LLVM-exception",
+        ],
+    )
+    def test_valid_spdx_expression_of_allowed_licenses_passes(self, tmp_path: Path, declared_license: str):
+        """Parentheses, mixed operators and listed WITH exceptions keep an allowed expression allowed."""
+        skill_dir = create_skill_with_declared_license(tmp_path, "spdx-allowed", declared_license)
+
+        result = LicenseValidator(strict_mode=True).validate(skill_dir)
+
+        assert result.passed
+        assert result.metadata.get("license") == declared_license
+        assert result.metadata.get("license_status") == "allowed"
+
+    @pytest.mark.parametrize(
+        "declared_license",
+        [
+            "GPL-2.0",
+            "LGPL-2.1",
+            "GPL-3.0+",
+            "GPL-2.0+",
+            "AGPL-3.0+",
+            "LGPL-2.1+",
+            "LGPL-2.1-only",
+            "LGPL-3.0-or-later",
+            "MPL-2.0+",
+            "MIT OR GPL-3.0+",
+            "GPL-2.0-only WITH Classpath-exception-2.0",
+        ],
+    )
+    def test_version_forms_of_blocked_licenses_are_blocked(self, tmp_path: Path, declared_license: str):
+        """`+`, `-only` and `-or-later` forms of a blocked license must not pass as unknown."""
+        skill_dir = create_skill_with_declared_license(tmp_path, "spdx-blocked", declared_license)
+
+        result = LicenseValidator().validate(skill_dir)
+
+        assert not result.passed
+        assert result.metadata.get("license_status") == "blocked"
+        assert any(f.check_name == "blocked_license" for f in result.findings)
+
+    def test_or_later_frontmatter_is_not_hidden_by_apache_license_file(self, tmp_path: Path):
+        """GPL-3.0+ next to an allowed LICENSE file is blocked, not reviewed as unknown."""
+        skill_dir = create_skill_with_declared_license_and_file(
+            tmp_path,
+            "gpl-or-later-with-apache-file",
+            "GPL-3.0+",
+            APACHE_2_LICENSE_TEXT,
+        )
+
+        result = LicenseValidator().validate(skill_dir)
+
+        assert not result.passed
+        assert result.metadata.get("license_status") == "blocked"
+        assert any(f.check_name == "blocked_license" for f in result.findings)
+
+    def test_unlisted_with_exception_needs_review(self, tmp_path: Path):
+        """An exception that is not in the allowlist does not inherit Apache-2.0's allowed status."""
+        skill_dir = create_skill_with_declared_license(
+            tmp_path,
+            "spdx-unlisted-exception",
+            "Apache-2.0 WITH Commons-Clause",
+        )
+
+        lenient = LicenseValidator().validate(skill_dir)
+        strict = LicenseValidator(strict_mode=True).validate(skill_dir)
+
+        assert lenient.metadata.get("license_status") == "unknown"
+        assert any("'Apache-2.0 WITH Commons-Clause' not in allowlist" in warning for warning in lenient.warnings)
+        assert not strict.passed
+        assert any(f.check_name == "unknown_license" for f in strict.findings)
+
+    @pytest.mark.parametrize(
+        ("declared_license", "reason"),
+        [
+            ("(MIT OR Apache-2.0", "unbalanced parenthesis"),
+            ("MIT OR Apache-2.0)", "unbalanced parenthesis"),
+            ("MIT AND", "missing license identifier after 'AND'"),
+            ("OR MIT", "missing license identifier before 'OR'"),
+            ("MIT OR OR Apache-2.0", "missing license identifier before 'OR'"),
+            ("(MIT OR Apache-2.0) BSD-3-Clause", "missing operator before 'BSD-3-Clause'"),
+            ("MIT WITH", "missing exception identifier after 'WITH'"),
+            ("(MIT OR Apache-2.0) WITH LLVM-exception", "WITH must follow a single license identifier"),
+        ],
+    )
+    def test_malformed_spdx_expression_is_rejected(self, tmp_path: Path, declared_license: str, reason: str):
+        """Malformed expressions fail instead of being allowed or sent to manual review."""
+        skill_dir = create_skill_with_declared_license(tmp_path, "spdx-malformed", declared_license)
+
+        result = LicenseValidator().validate(skill_dir)
+
+        assert not result.passed
+        assert result.metadata.get("license_status") == "unsupported"
+        finding = next(f for f in result.findings if f.check_name == "unsupported_license_expression")
+        assert finding.message == f"License expression '{declared_license}' is not valid SPDX syntax: {reason}"
+
+    @pytest.mark.parametrize(
+        ("declared_license", "status"),
+        [
+            ("MIT License", "allowed"),
+            ("The MIT License", "allowed"),
+            ("MIT XOR Apache-2.0", "unknown"),
+            ("LicenseRef-Example-with-attribution", "unknown"),
+            ("MIT License (MIT)", "unknown"),
+            ("Apache 2.0 (with exceptions)", "unknown"),
+            ("(MIT", "unknown"),
+            ("mit or (apache-2.0", "unknown"),
+        ],
+    )
+    def test_license_names_without_operators_are_not_syntax_errors(
+        self, tmp_path: Path, declared_license: str, status: str
+    ):
+        """Values without an upper-case SPDX operator stay free-text names for name matching or review."""
+        skill_dir = create_skill_with_declared_license(tmp_path, "free-text-license", declared_license)
+
+        result = LicenseValidator().validate(skill_dir)
+
+        assert result.passed
+        assert result.metadata.get("license_status") == status
+        assert all(f.check_name != "unsupported_license_expression" for f in result.findings)
+
+    def test_expression_including_license_file_id_is_consistent(self, tmp_path: Path):
+        """A LICENSE file naming one license of the declared expression is not a conflict."""
+        skill_dir = create_skill_with_declared_license_and_file(
+            tmp_path,
+            "dual-license-apache-file",
+            "MIT OR Apache-2.0",
+            APACHE_2_LICENSE_TEXT,
+        )
+
+        result = LicenseValidator(strict_mode=True).validate(skill_dir)
+
+        assert result.passed
+        assert result.metadata.get("license_status") == "allowed"
+        assert all(f.check_name != "frontmatter_license_mismatch" for f in result.findings)
+
+    def test_expression_excluding_license_file_id_fails_closed(self, tmp_path: Path):
+        """An allowed expression that omits the allowed LICENSE file's id conflicts, as a single id does."""
+        skill_dir = create_skill_with_declared_license_and_file(
+            tmp_path,
+            "mit-and-cc-vs-apache-body",
+            "MIT AND CC-BY-4.0",
+            APACHE_2_LICENSE_TEXT,
+        )
+
+        result = LicenseValidator().validate(skill_dir)
+
+        assert not result.passed
+        assert result.metadata.get("license_status") == "conflict"
+        assert any(f.check_name == "frontmatter_license_mismatch" for f in result.findings)
 
     def test_workflow_frontmatter_detection(self, workflow_with_license: Path):
         """Test detection of license in workflow frontmatter."""
@@ -756,6 +929,75 @@ description: Skill whose SPDX header is MIT OR MIT-0
         assert result.passed
         assert result.metadata.get("license_status") == "allowed"
         assert "MIT OR MIT-0" in (result.metadata.get("license") or "")
+
+    @pytest.mark.parametrize(
+        ("filename", "content", "expected"),
+        [
+            (
+                "reference.md",
+                "| Check | Header |\n| --- | --- |\n| License | `// SPDX-License-Identifier: GPL-3.0` |\n",
+                "GPL-3.0",
+            ),
+            ("notes.md", "Add `SPDX-License-Identifier: MIT OR GPL-3.0` to each file.\n", "MIT OR GPL-3.0"),
+            ("script.py", "# SPDX-License-Identifier: MIT # trailing comment\n", "MIT"),
+            ("script.js", "// SPDX-License-Identifier: MIT;\n", "MIT"),
+            (
+                "script.js",
+                "/* SPDX-License-Identifier: GPL-2.0-only WITH Classpath-exception-2.0 */\n",
+                "GPL-2.0-only WITH Classpath-exception-2.0",
+            ),
+            ("script.sh", "# SPDX-License-Identifier: MIT | GPL-3.0\n", "MIT | GPL-3.0"),
+        ],
+    )
+    def test_spdx_header_value_stops_at_enclosing_delimiters(
+        self, tmp_path: Path, filename: str, content: str, expected: str
+    ):
+        """Markdown code/table delimiters and a trailing `;` end the value; a bare `|` does not."""
+        source = tmp_path / filename
+        source.write_text(content)
+
+        assert LicenseValidator._extract_spdx_from_file(source) == expected
+
+    def test_spdx_header_in_markdown_table_is_blocked(self, tmp_path: Path):
+        """A table cell's closing backtick and `|` must not hide GPL-3.0 as an unknown id."""
+        skill_dir = tmp_path / "spdx-md-table"
+        skill_dir.mkdir()
+        (skill_dir / "SKILL.md").write_text("""---
+name: spdx-md-table
+description: Skill whose SPDX header is in a Markdown table
+---
+
+# SPDX table
+""")
+        (skill_dir / "reference.md").write_text(
+            "| File | License |\n| --- | --- |\n| tool.py | `SPDX-License-Identifier: MIT OR GPL-3.0` |\n"
+        )
+
+        result = LicenseValidator().validate(skill_dir)
+
+        assert not result.passed
+        assert result.metadata.get("license_status") == "blocked"
+        assert result.metadata.get("license") == "MIT OR GPL-3.0"
+        assert any(f.check_name == "blocked_license" for f in result.findings)
+
+    def test_malformed_spdx_header_is_rejected(self, tmp_path: Path):
+        """An unbalanced header expression is not allowed after its parenthesis is dropped."""
+        skill_dir = tmp_path / "spdx-malformed-header"
+        skill_dir.mkdir()
+        (skill_dir / "SKILL.md").write_text("""---
+name: spdx-malformed-header
+description: Skill whose SPDX header has an unbalanced parenthesis
+---
+
+# SPDX malformed
+""")
+        (skill_dir / "script.py").write_text("# SPDX-License-Identifier: (MIT OR Apache-2.0\n")
+
+        result = LicenseValidator().validate(skill_dir)
+
+        assert not result.passed
+        assert result.metadata.get("license_status") == "unsupported"
+        assert any(f.check_name == "unsupported_license_expression" for f in result.findings)
 
 
 # =============================================================================

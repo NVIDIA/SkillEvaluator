@@ -218,6 +218,22 @@ All notable changes to SkillEvaluator are documented in this file.
   boundary prevents quadratic rescanning of long excluded addresses. Ordinary
   addresses on the same line and domains that merely resemble placeholders remain detectable
   ([#244](https://github.com/NVIDIA/SkillEvaluator/issues/244)).
+- The license check now parses SPDX license expressions instead of splitting
+  them on operators. Expressions with unbalanced parentheses, such as
+  `(MIT OR Apache-2.0`, were allowed, and dangling or repeated operators were
+  only sent to review; both now fail with a HIGH
+  `unsupported_license_expression` finding. A malformed value without an
+  upper-case `AND`, `OR` or `WITH`, such as `mit or (apache-2.0`, is reviewed
+  as an unknown license name instead of being allowed, and `(MIT)` is allowed
+  as MIT. The `+`, `-only` and `-or-later` forms of blocked licenses, such as
+  `GPL-3.0+`, `AGPL-3.0+` and `LGPL-2.1-only`, are blocked instead of passing
+  as unknown licenses. `Apache-2.0 WITH LLVM-exception` is allowed through a
+  new `allowed_license_exceptions` list, while an unlisted exception such as
+  `Commons-Clause` still needs review. An allowed frontmatter expression that
+  leaves out the allowed license found in a LICENSE file is now a conflict, as
+  a single identifier already was. SPDX headers inside Markdown inline code or
+  table cells no longer keep the closing backtick or `|`, and a trailing `;` is
+  dropped. Names such as `MIT License` are matched as before.
 
 - Tier 3 security grading preserves ordinary nested `/tmp` cleanup, including
   child operands with trailing slashes, unless the current or an earlier

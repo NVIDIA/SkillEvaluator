@@ -10,6 +10,7 @@
 # Keys:
 # - allowed_licenses: Permissive licenses that are safe to ingest
 # - blocked_licenses: Restrictive/proprietary licenses that should be rejected
+# - allowed_license_exceptions: SPDX exceptions allowed after WITH on an allowed license
 # - license_patterns: Regex patterns to detect licenses from LICENSE file content
 # - spdx_header_pattern: Pattern to match SPDX-License-Identifier headers in source files
 
@@ -51,6 +52,18 @@ allowed_licenses:
   # Python-specific
   - PSF-2.0         # Python Software Foundation
   - Python-2.0
+
+# =============================================================================
+# ALLOWED LICENSE EXCEPTIONS
+# =============================================================================
+# SPDX exceptions only add permissions to the license they follow, so
+# "Apache-2.0 WITH LLVM-exception" is allowed. Any other exception after an
+# allowed license needs manual review, and a blocked license stays blocked
+# whatever exception follows it.
+
+allowed_license_exceptions:
+  - LLVM-exception
+  - Swift-exception
 
 # =============================================================================
 # BLOCKED LICENSES (Restrictive/Copyleft/Proprietary)

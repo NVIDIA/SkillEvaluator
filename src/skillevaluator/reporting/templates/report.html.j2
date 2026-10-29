@@ -3821,13 +3821,27 @@
             function labelForDimension(dim) {
                 return dim.replace(/_/g, " ").replace(/\b\w/g, function(c){ return c.toUpperCase(); });
             }
+            // While printing, charts use the light theme's colors: paper is white
+            // whatever theme is on screen, and a canvas does not restyle itself.
+            var printing = false;
             function cssColors() {
-                var s = getComputedStyle(document.documentElement);
-                return {
+                var root = document.documentElement;
+                var theme = root.getAttribute("data-theme");
+                // beforeprint fires while screen styles still apply, so read the light values.
+                if (printing && theme === "dark") root.setAttribute("data-theme", "light");
+                var s = getComputedStyle(root);
+                var colors = {
                     grid: s.getPropertyValue("--chart-grid").trim() || "rgba(0,0,0,0.1)",
                     tick: s.getPropertyValue("--chart-tick").trim() || "#64748b",
                     label: s.getPropertyValue("--chart-label").trim() || "#0f172a"
                 };
+                if (printing && theme === "dark") root.setAttribute("data-theme", theme);
+                return colors;
+            }
+            // A chart drawn for print must be complete when the page is captured.
+            function chartOptions(options) {
+                if (printing) options.animation = false;
+                return options;
             }
             function agentEntries() {
                 return Object.entries(tier3Data.agents || {});
@@ -3924,11 +3938,11 @@
                                 };
                             })
                         },
-                        options: {
+                        options: chartOptions({
                             responsive: true,
                             scales: { r: { min: 0, max: 1, ticks: { stepSize: 0.2, color: colors.tick, backdropColor: "transparent" }, grid: { color: colors.grid }, angleLines: { color: colors.grid }, pointLabels: { color: colors.label, font: { size: 11 } } } },
                             plugins: { legend: { labels: { color: colors.label } } }
-                        }
+                        })
                     }));
                 }
                 var metricBar = document.getElementById("tier3-metric-bar");
@@ -3941,11 +3955,11 @@
                                 return { label: item[0], data: agentDimensionData(item[1]), backgroundColor: palette[idx % palette.length] + "cc", borderRadius: 4 };
                             })
                         },
-                        options: {
+                        options: chartOptions({
                             responsive: true,
                             scales: { y: { min: 0, max: 1, ticks: { stepSize: 0.2, color: colors.tick }, grid: { color: colors.grid } }, x: { ticks: { color: colors.label, maxRotation: 45 }, grid: { display: false } } },
                             plugins: { legend: { labels: { color: colors.label } } }
-                        }
+                        })
                     }));
                 }
                 var tokenChart = document.getElementById("tier3-token-chart");
@@ -3962,11 +3976,11 @@
                                 { label: "Cached (included in prompt)", data: tokenAgents.map(function(a){ return tokenTotals[a].cachedComplete ? tokenTotals[a].cached : null; }), backgroundColor: "#8b5cf6cc", borderRadius: 3 }
                             ]
                         },
-                        options: {
+                        options: chartOptions({
                             responsive: true,
                             scales: { x: { ticks: { color: colors.tick }, grid: { color: colors.grid } }, y: { beginAtZero: true, ticks: { color: colors.label }, grid: { display: false } } },
                             plugins: { legend: { labels: { color: colors.label } } }
-                        }
+                        })
                     }));
                 }
                 var stepsChart = document.getElementById("tier3-steps-chart");
@@ -3976,16 +3990,29 @@
                         charts.push(new Chart(stepsChart, {
                             type: "bar",
                             data: stepsData,
-                            options: {
+                            options: chartOptions({
                                 responsive: true,
                                 scales: { x: { ticks: { color: colors.tick, maxRotation: 45 }, grid: { color: colors.grid } }, y: { ticks: { color: colors.label }, grid: { display: false } } },
                                 plugins: { legend: { labels: { color: colors.label } } }
-                            }
+                            })
                         }));
                     }
                 }
             };
             document.addEventListener("DOMContentLoaded", function(){ window.rebuildTier3Charts(); });
+            function redrawForPrint(isPrinting) {
+                if (printing === isPrinting) return;
+                printing = isPrinting;
+                window.rebuildTier3Charts();
+            }
+            window.addEventListener("beforeprint", function(){ redrawForPrint(true); });
+            window.addEventListener("afterprint", function(){ redrawForPrint(false); });
+            if (window.matchMedia) {
+                var printQuery = window.matchMedia("print");
+                var onPrintChange = function(event){ redrawForPrint(event.matches); };
+                if (printQuery.addEventListener) printQuery.addEventListener("change", onPrintChange);
+                else if (printQuery.addListener) printQuery.addListener(onPrintChange);
+            }
         })();
         </script>
 

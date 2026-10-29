@@ -6,6 +6,7 @@ from html.parser import HTMLParser
 from itertools import pairwise
 from pathlib import Path
 
+from skillevaluator.evaluation.tier3_report import build_agent_eval_payload
 from skillevaluator.models import Finding, ValidationResult
 from skillevaluator.reporting.html import HTMLReporter, fix_first_for_results, plain_check_name
 
@@ -333,6 +334,37 @@ def test_theme_toggle_has_a_fixed_name_and_reports_the_dark_state() -> None:
     assert "toggle.setAttribute('aria-pressed', theme === 'dark' ? 'true' : 'false')" in html
     assert "getElementById('theme-text').textContent" not in html
     assert "matchMedia('(prefers-color-scheme: dark)')" in html
+
+
+def test_tier3_charts_are_redrawn_with_print_colors() -> None:
+    result = ValidationResult(validator_name="AGENT_EVAL")
+    result.metadata["agent_eval"] = build_agent_eval_payload(
+        "example",
+        {
+            "agent": {
+                "execution_status": "succeeded",
+                "expected_attempts": 1,
+                "scored_attempts": 1,
+                "with_skill": {"security": 1.0},
+                "rewards": [{"entry_id": "case-1", "security": 1.0}],
+            }
+        },
+        use_llm_judge=False,
+    )
+    html = HTMLReporter(include_timestamp=False).render_all([result])
+    script = next(
+        script
+        for script in re.findall(r"<script>(.*?)</script>", html, flags=re.DOTALL)
+        if "rebuildTier3Charts" in script
+    )
+
+    # A canvas keeps the colors it was drawn with, so printing redraws every
+    # chart with the light (print) colors and restores the theme afterwards.
+    assert 'window.addEventListener("beforeprint", function(){ redrawForPrint(true); });' in script
+    assert 'window.addEventListener("afterprint", function(){ redrawForPrint(false); });' in script
+    assert 'window.matchMedia("print")' in script
+    assert 'if (printing && theme === "dark") root.setAttribute("data-theme", "light");' in script
+    assert script.count("new Chart(") == script.count("options: chartOptions({") == 4
 
 
 def _rules(css: str):

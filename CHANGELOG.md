@@ -65,8 +65,8 @@ All notable changes to SkillEvaluator are documented in this file.
   every report page, the CI index and the Pages history. Colors use one
   palette built on the logo greens, with WCAG AA text contrast in light and
   dark themes. The report follows the system theme until the reader picks
-  one, and prints dark text on white paper. No text is smaller than 11 px, and
-  short table cells no longer break mid-word.
+  one, and prints dark text on white paper, Tier 3 charts included. No text is
+  smaller than 11 px, and short table cells no longer break mid-word.
 - Dependency audits inspect pinned package versions without installing packages
   or executing build scripts. Unpinned, URL and other unresolved requirements
   report incomplete coverage instead of executing package resolution.

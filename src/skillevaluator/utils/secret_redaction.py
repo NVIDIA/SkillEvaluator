@@ -72,11 +72,26 @@ def _visible_forms(token: str) -> set[str]:
     return forms
 
 
+def _password_tails(token: str) -> set[str]:
+    """Return the ends of a short URL password, each with the "@" after it."""
+    try:
+        password = urlsplit(token).password if "://" in token else None
+    except ValueError:
+        return set()
+    # Upstream text can start inside the password and cut off the scheme, so
+    # DATABASE_USERINFO does not match. A password shorter than 16 characters
+    # has no partial values, but the "@" after it still marks its end.
+    if not password or len(password) >= 16:
+        return set()
+    return {password[start:] + "@" for start in range(1, len(password) - 7)}
+
+
 def variants(tokens: set[str]) -> tuple[str, ...]:
     """Include encoded values and truncated parts of credential literals."""
     encoded: set[str] = set()
     pattern_size = 0
-    for token in {form for value in tokens for form in _visible_forms(value)}:
+    tails = {tail for value in tokens for tail in _password_tails(value)}
+    for token in {form for value in tokens for form in _visible_forms(value)} | tails:
         forms = {
             token,
             html.escape(token),
@@ -86,7 +101,9 @@ def variants(tokens: set[str]) -> tuple[str, ...]:
             html.escape(token, quote=False).replace("|", "&#124;").replace("`", "&#96;"),
         }
         context = (
-            "://" in token
+            # A password tail is matched only as a whole value.
+            token in tails
+            or "://" in token
             or token.startswith("-----BEGIN ")
             or re.match(r"(?i)^(?:secret|password|passwd|pwd|api[-_]?key|apikey|auth[-_]?token|bearer)\s*[=:]", token)
             # A connection string match holds ordinary words; its password is collected separately.

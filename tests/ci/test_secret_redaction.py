@@ -445,6 +445,24 @@ def test_redactor_masks_database_userinfo_when_the_text_ends_inside_it():
     assert connection.text("Hardcoded password in a connection string") == "Hardcoded password in a connection string"
 
 
+def test_redactor_masks_a_short_database_password_when_the_text_starts_inside_it(tmp_path):
+    from ci.secret_redaction import collect_sensitive_values
+
+    from skillevaluator.utils.secret_redaction import Redactor
+
+    skill = _skill(tmp_path)
+    password = "Gh7" * 4 + "Gh"
+    (skill / "source.py").write_text('DATABASE_URL = "postgresql://reporting:' + password + '@db.local/app"\n')
+    redactor = Redactor(collect_sensitive_values(skill))
+    for start in range(1, len(password) - 7):
+        # A context window that starts inside the password cuts off the scheme.
+        safe = redactor.text(password[start:] + '@db.local/app"\nWEBHOOK = "https://hooks.example.invalid/x"')
+        _assert_no_fragment(safe, password)
+        assert "db.local/app" in safe
+    ordinary = "Send the export to reporting@db.local after the run."
+    assert redactor.text(ordinary) == ordinary
+
+
 def test_retained_markdown_and_sarif_are_rendered_from_redacted_json(tmp_path):
     workspace, reports = tmp_path / "workspace", tmp_path / "reports"
     _skill(workspace)

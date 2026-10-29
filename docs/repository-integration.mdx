@@ -14,7 +14,7 @@ for specialized skill security scanning.
 ## How it works
 
 ```mermaid
-flowchart LR
+flowchart TD
     repo["Skill changes"] --> runtime["CI runs SkillEvaluator<br/>with SkillSpector"]
     runtime --> report["Results and reports"]
     classDef step fill:#f3f9e8,stroke:#76b900,color:#1f2b16,stroke-width:2px

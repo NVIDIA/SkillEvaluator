@@ -84,6 +84,19 @@ def test_gitlab_job_rejects_merged_results_for_changed_selection(tmp_path):
     assert "detached merge-request" in result.stderr
 
 
+def test_gitlab_job_all_mode_supports_merged_result_pipelines(tmp_path):
+    result, evidence = _run_template(
+        tmp_path,
+        {
+            "CI_PIPELINE_SOURCE": "merge_request_event",
+            "CI_MERGE_REQUEST_EVENT_TYPE": "merged_result",
+            "SKILL_EVAL_SCAN_MODE": "all",
+        },
+    )
+    assert result.returncode == 0
+    assert evidence == ["all", "", "", "80"]
+
+
 def test_gitlab_job_does_not_overwrite_existing_report_directory(tmp_path):
     result, evidence = _run_template(tmp_path, {}, existing_report=True)
     assert result.returncode != 0

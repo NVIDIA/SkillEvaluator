@@ -71,6 +71,9 @@ navigation:
       - page: "BENCHMARK.md Rollout and Backfill"
         path: ../docs/benchmark-rollout.mdx
         slug: benchmark-rollout
+      - page: GitHub Actions
+        path: ../docs/github-actions.mdx
+        slug: github-actions
       - page: Gate Your CI
         path: ../docs/ci-integration.mdx
         slug: ci-integration

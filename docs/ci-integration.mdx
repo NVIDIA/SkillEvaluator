@@ -3,7 +3,14 @@ title: Gate Your CI
 description: Make SkillEvaluator a merge gate — exit codes, a copy-paste GitHub Actions workflow, collection validation, progressive adoption, and machine-readable results.
 ---
 
-Turn SkillEvaluator into a merge gate for your skill repository. The recommended gate runs entirely offline — no API key, no network calls beyond installing the tools — so you can adopt it in any CI system today and layer LLM-backed checks on later.
+Turn SkillEvaluator into a merge gate for your skill repository. Tier 1 needs
+no model API key; full scanner-backed checks can still contact vulnerability
+services. Adopt the CLI in any CI system and add model-backed checks separately.
+
+For the prebuilt runtime and one-file consumer setup, see
+[GitHub Actions](github-actions.mdx). The recipe below installs tools explicitly;
+its PR-comment step is separate from the reusable publisher's hosted-feedback
+setup.
 
 ## Exit codes
 

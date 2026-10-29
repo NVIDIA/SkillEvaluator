@@ -1,0 +1,48 @@
+# Complete Tier 1 runtime for reusable GitHub Actions scans.
+FROM python:3.12-slim-bookworm@sha256:62ed8e07e544e8555c5d93748d5275015136b7f5c52b5e8679b4de339c3779d3
+
+ENV PIP_NO_INPUT=1 PYTHONDONTWRITEBYTECODE=1 PYTHONUNBUFFERED=1 \
+    PYTHON_DOTENV_DISABLED=1 SEMGREP_SEND_METRICS=off SEMGREP_ENABLE_VERSION_CHECK=0 \
+    HOME=/tmp/evaluator-home
+
+RUN apt-get update && apt-get install -y --no-install-recommends ca-certificates curl git \
+    && rm -rf /var/lib/apt/lists/*
+COPY ci/requirements/uv.txt /opt/scanner-requirements/uv.txt
+RUN python -m pip install --no-cache-dir --require-hashes -r /opt/scanner-requirements/uv.txt
+
+WORKDIR /opt/skillevaluator
+COPY . .
+RUN uv sync --frozen --no-dev --no-editable --extra security --extra llm
+
+# Independent environments avoid conflicting scanner dependency requirements.
+RUN uv venv /opt/semgrep && uv pip install --python /opt/semgrep/bin/python \
+    --require-hashes -r ci/requirements/semgrep.txt
+# Build tooling is locked too: do not resolve an isolated build environment.
+RUN uv venv /opt/skillspector && uv pip install --python /opt/skillspector/bin/python \
+    --require-hashes -r ci/requirements/skillspector-build.txt \
+    && uv pip install --python /opt/skillspector/bin/python --no-build-isolation \
+    --require-hashes -r ci/requirements/skillspector.txt
+RUN set -eu; arch="$(dpkg --print-architecture)"; \
+    case "$arch" in \
+      amd64) asset=x64; checksum=79a3ab579b53f71efd634f3aaf7e04a0fa0cf206b7ed434638d1547a2470a66e ;; \
+      arm64) asset=arm64; checksum=b4cbbb6ddf7d1b2a603088cd03a4e3f7ce48ee7fd449b51f7de6ee2906f5fa2f ;; \
+      *) exit 1 ;; \
+    esac; \
+    curl --fail --location --retry 3 "https://github.com/gitleaks/gitleaks/releases/download/v8.30.0/gitleaks_8.30.0_linux_${asset}.tar.gz" -o /tmp/gitleaks.tar.gz; \
+    printf '%s  %s\n' "$checksum" /tmp/gitleaks.tar.gz | sha256sum --check; \
+    tar -xzf /tmp/gitleaks.tar.gz -C /usr/local/bin gitleaks; \
+    mkdir -p /usr/local/share/licenses/gitleaks; \
+    tar -xzf /tmp/gitleaks.tar.gz -C /usr/local/share/licenses/gitleaks LICENSE; \
+    rm /tmp/gitleaks.tar.gz
+
+ENV PATH="/opt/skillevaluator/.venv/bin:/opt/semgrep/bin:/opt/skillspector/bin:${PATH}"
+RUN skillevaluator --version && bandit --version && pip-audit --version \
+    && semgrep --version && skillspector --version && gitleaks version \
+    && /opt/skillspector/bin/python -c 'import yara'
+RUN useradd --uid 10001 --create-home --shell /usr/sbin/nologin evaluator \
+    && rm -rf /tmp/evaluator-home \
+    && mkdir -p /workspace /reports /tmp/evaluator-home \
+    && chown evaluator:evaluator /reports /tmp/evaluator-home
+USER evaluator
+WORKDIR /workspace
+ENTRYPOINT ["python", "/opt/skillevaluator/ci/run_tier1.py"]

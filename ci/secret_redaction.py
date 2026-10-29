@@ -1,0 +1,117 @@
+# SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+# SPDX-License-Identifier: Apache-2.0
+# ruff: noqa: INP001 -- shared standalone CI helper.
+
+"""Collect known credential matches and sanitize private scanner output."""
+
+from __future__ import annotations
+
+import json
+import os
+import re
+from pathlib import Path
+
+from skillevaluator.utils.secret_redaction import SENSITIVE_PII_CATEGORIES, Redactor, sensitive_values
+from skillevaluator.utils.secure_fs import SecureRoot
+from skillevaluator.validators.security import SecurityValidator
+
+MAX_FILE_BYTES = 32 * 1024 * 1024
+MAX_TOTAL_BYTES = 128 * 1024 * 1024
+MAX_FILES = 10000
+MAX_TOKENS = 4096
+MAX_TOKEN_BYTES = 1024 * 1024
+MAX_LINE_CHARS = 8192
+
+
+def collect_sensitive_values(skill: Path) -> set[str]:
+    """Find credential literals using the same patterns as the PII scanner.
+
+    We scan matches even in comments or configured exceptions: another scanner
+    can still quote those values. Never put collected values into a report.
+    """
+    validator = SecurityValidator(use_llm=False)
+    patterns = [item for item in validator._compile_pii_patterns([]) if item[0] in SENSITIVE_PII_CATEGORIES]
+    tokens: set[str] = set()
+    total = 0
+    files = []
+
+    def inaccessible(_error):
+        raise ValueError("The credential preflight could not read a directory.")
+
+    for directory, _directories, names in os.walk(skill, followlinks=False, onerror=inaccessible):
+        files.extend(Path(directory) / name for name in names)
+        if len(files) > MAX_FILES:
+            raise ValueError("The credential preflight exceeded its file limit.")
+    with SecureRoot(skill) as root:
+        for path in files:
+            raw, _ = root.read_bytes(path.relative_to(skill), MAX_FILE_BYTES)
+            total += len(raw)
+            if total > MAX_TOTAL_BYTES:
+                raise ValueError("The credential preflight exceeded its size limit.")
+            text = (
+                raw.decode("utf-16", errors="ignore")
+                if raw.startswith((b"\xff\xfe", b"\xfe\xff"))
+                else raw.decode("utf-8-sig", errors="ignore")
+            )
+            for line in text.splitlines():
+                # Some PII patterns can backtrack heavily on very long input.
+                # Refuse the scan before applying them to unbounded lines.
+                if len(line) > MAX_LINE_CHARS:
+                    raise ValueError("The credential preflight exceeded its line length limit.")
+                for category, pattern, _exceptions, _definition in patterns:
+                    for match in pattern.finditer(line):
+                        tokens.update(sensitive_values(category, match.group(), line))
+            if "PRIVATE KEY-----" in text:
+                blocks = re.findall(
+                    r"-----BEGIN [^\r\n]*PRIVATE KEY-----[\s\S]*?-----END [^\r\n]*PRIVATE KEY-----", text
+                )
+                if not blocks:
+                    raise ValueError("A private key could not be safely redacted.")
+                for block in blocks:
+                    tokens.add(block)
+                    tokens.update(line.strip() for line in block.splitlines()[1:-1] if line.strip())
+            if len(tokens) > MAX_TOKENS or any(len(token.encode("utf-8")) > MAX_TOKEN_BYTES for token in tokens):
+                raise ValueError("The credential preflight exceeded its redaction limit.")
+    # Replacing a very short secret throughout a report can corrupt schema keys
+    # and identities. Fail closed rather than risk emitting it or a false verdict.
+    if any(len(token) < 4 for token in tokens):
+        raise ValueError("A credential value is too short for safe report redaction.")
+    return tokens
+
+
+def sanitized_outputs(raw: Path, tokens: set[str]) -> dict[str, bytes]:
+    """Read and sanitize bounded outputs before writing any shared artifact."""
+    allowed = (
+        "skillevaluator-tier1.json",
+        "skillevaluator-tier1.html",
+        "skillevaluator-tier1.md",
+        "skillevaluator-tier1.sarif.json",
+        "stdout.log",
+        "stderr.log",
+    )
+    sanitized = {}
+    total = 0
+    redactor = Redactor(tokens)
+    with SecureRoot(raw) as root:
+        for name in allowed:
+            path = raw / name
+            if not path.exists() and not path.is_symlink():
+                continue
+            content, _ = root.read_bytes(Path(name), MAX_FILE_BYTES)
+            total += len(content)
+            if total > MAX_TOTAL_BYTES:
+                raise ValueError("Scanner output exceeded its redaction limit.")
+            if tokens and name in {"stdout.log", "stderr.log"}:
+                sanitized[name] = (
+                    b"Raw scanner log withheld while credential redaction is active. See the structured reports.\n"
+                )
+                continue
+            text = content.decode("utf-8")
+            if name.endswith(".json"):
+                text = json.dumps(redactor.object(json.loads(text)), ensure_ascii=True, allow_nan=False, indent=2)
+            else:
+                text = redactor.text(text)
+            sanitized[name] = text.encode("utf-8")
+    if "skillevaluator-tier1.json" not in sanitized:
+        raise ValueError("The evaluator did not produce JSON evidence.")
+    return sanitized

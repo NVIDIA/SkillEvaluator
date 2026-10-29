@@ -22,6 +22,11 @@ Every live evaluation runs in one of three grading modes:
 | `default_plus_custom` | Standard grading runs first, then your grader adds domain-specific `custom_metrics` alongside it | You want the standard view **plus** your own checks — the safe extension point |
 | `custom_only` | Your grader alone defines the score; the standard dimension rows stay visible but show `NO SCORE` | Success can only be measured by your own logic |
 
+In `default_plus_custom` mode, your grader also runs after a standard-grader failure
+when usable result artifacts remain. Valid custom checks are retained as diagnostics;
+the evaluation stays failed and unscored. They do not replace missing model judgments
+or contribute to lift, pass@k, or improvement acceptance.
+
 Set the mode with `--grading-mode` on `tier3 evaluate` (or on `validate`
 together with `--tier3`), or persist it in `evals/config.yml`:
 

@@ -431,7 +431,7 @@ def get_read_calls(traj):
     for tc in get_all_tool_calls(traj):
         fn = tc["fn"].lower()
         if fn in ("read", "read_file"):
-            path = tc["args"].get("path", tc["args"].get("file_path", ""))
+            path = tc["args"].get("path", tc["args"].get("file_path", tc["args"].get("filePath", "")))
             if path:
                 paths.append(str(path))
         elif fn in ("bash", "execute"):
@@ -516,7 +516,7 @@ _DEFAULT_BEHAVIOR_CHECK_BUDGET = 8000
 _DEFAULT_TOOL_HISTORY_HEADROOM = 4000
 _MIN_BEHAVIOR_HISTORY_HEADROOM = 1600
 _SECTION_COMPACT_TOOL_HISTORY = "COMPACT TOOL HISTORY"
-_SECTION_FILE_CHANGES = "FILE CHANGES"
+_SECTION_FILE_CHANGES = "FILE CHANGES (attempts, newest first)"
 _SECTION_FINAL_RESPONSE = "FINAL RESPONSE"
 _SECTION_USER_REQUEST = "USER REQUEST"
 
@@ -597,7 +597,7 @@ def _append_section_with_budget(parts, title, body, max_chars, section_limit=Non
 
 
 def _tool_file_path(args):
-    for key in ("file_path", "path", "filename", "target_file"):
+    for key in ("file_path", "path", "filename", "target_file", "filePath"):
         value = args.get(key)
         if value:
             return str(value)
@@ -605,8 +605,9 @@ def _tool_file_path(args):
 
 
 def _tool_write_body(args):
+    """Retain labeled tool arguments; patches are not reconstructed file contents."""
     snippets = []
-    for key in ("content", "new_string", "patch", "code"):
+    for key in ("content", "new_string", "patch", "code", "patchText"):
         value = args.get(key)
         if value:
             snippets.append(f"{key}:\n{value}")
@@ -636,6 +637,7 @@ def _tool_name_looks_like_write(fn_lower):
 
 
 def _collect_file_change_evidence(traj):
+    """Return newest-first tool arguments and results, not reconstructed files."""
     changes = []
     for step in traj.get("steps", []):
         if step.get("source") != "agent":
@@ -671,7 +673,50 @@ def _collect_file_change_evidence(traj):
             if obs:
                 entry_parts.append(f"Tool returned: {_truncate_for_behavior(obs, 500)}")
             changes.append("\n".join(entry_parts))
-    return changes
+    return list(reversed(changes))
+
+
+def _behavior_execution_evidence(traj: dict[str, Any], budget: int) -> str:
+    """Bounded actual tool calls, with explicit coverage rather than implied absence."""
+    execution_names = _BEHAVIOR_EXEC_TOOLS | {"shell_command"}
+    calls = [
+        (step, tc) for step, tc in iter_tool_calls(traj)
+        if step.get("source") == "agent"
+        if any(str(tc.get("function_name") or "").lower().rsplit(separator, 1)[-1] in execution_names
+               for separator in _TOOL_NAME_SEPARATORS)
+        or tc.get("_atif_normalization_status")
+    ]
+    if not calls or budget <= 0:
+        return ""
+    total = len(calls)
+    heading = (
+        "EXECUTION TOOL EVIDENCE (chronological; calls/returns do not prove task success)\n"
+        "Coverage: {shown}/{total} calls shown; {omitted} omitted; {clipped} clipped. "
+        "Other read/write history may also be incomplete.\n"
+    )
+    overhead = len(heading.format(shown=total, total=total, omitted=total, clipped=total))
+    shown = min(total, max(0, (budget - overhead) // 160))
+    if not shown:
+        return heading.format(shown=0, total=total, omitted=total, clipped=0)[:budget]
+    row_budget = (budget - overhead) // shown
+    rows, clipped = [], 0
+    for position in range(shown):
+        index = position * (total - 1) // (shown - 1) if shown > 1 else 0
+        step, tc = calls[index]
+        args = tc.get("arguments") or {}
+        args = args if isinstance(args, dict) else {}
+        command = _redact_evidence_text(str(args.get("command") or args.get("cmd") or args.get("code") or "[command unavailable]"))
+        status = tc.get("_atif_normalization_status") or tc.get("_atif_observation_status") or ""
+        if (error := normalized_tool_call_error_flag(step, tc)) is not None:
+            status = f"{status} is_error={error}"
+        full_identity = _redact_evidence_text(f"step={step.get('step_id', '?')} call={tc.get('tool_call_id', '?')} {status}")
+        identity = _truncate_for_behavior(full_identity, min(100, row_budget // 3))
+        excerpt = _truncate_for_behavior(command, min(256, row_budget - len(identity) - 70))
+        observed = _redact_evidence_text(_tool_call_observation(step, tc)) or "[no attributable observation text]"
+        observed_excerpt = _truncate_for_behavior(observed, min(500, row_budget - len(identity) - len(excerpt) - 12))
+        clipped += int(identity != full_identity or excerpt != command or observed_excerpt != observed)
+        rows.append(f"{identity}\n{excerpt}\nreturn: {observed_excerpt}")
+    return heading.format(shown=shown, total=total, omitted=total-shown, clipped=clipped) + "\n\n".join(rows)
 
 
 def build_behavior_evidence(
@@ -695,12 +740,21 @@ def build_behavior_evidence(
                 effective_final_limit + _MIN_BEHAVIOR_HISTORY_HEADROOM,
             )
 
-    parts = []
+    total_budget = max_chars
+    execution = _behavior_execution_evidence(traj, max_chars // 2)
+    parts = [execution] if execution else []
+    max_chars -= len(execution) + 2 if execution else 0
     remaining = max_chars
 
     file_changes = "\n\n".join(_collect_file_change_evidence(traj))
     final = _get_final_response(traj)
     history = build_conversation_summary(traj, question)
+    recent_obs = _late_observation_excerpts(traj, _BUNDLE_ITEM_CHARS, include_commands=True)
+    if recent_obs:
+        history = (
+            "RECENT TOOL RESULTS (newest first)\n"
+            + "\n---\n".join(recent_obs[:_BUNDLE_ACCURACY_MAX_OBS]) + "\n\n" + history
+        )
     user_needed = (
         min(800, len(_SECTION_USER_REQUEST) + len(question.strip()) + 2) if question and question.strip() else 0
     )
@@ -761,7 +815,7 @@ def build_behavior_evidence(
 
     remaining = _append_section_with_budget(parts, _SECTION_COMPACT_TOOL_HISTORY, history, remaining)
 
-    return "\n\n".join(parts)[:max_chars]
+    return "\n\n".join(parts)[:total_budget]
 
 
 _METRIC_EVIDENCE_REF_METRICS = ("accuracy", "goal_accuracy", "behavior_check")
@@ -1080,7 +1134,7 @@ def _clip(text, limit):
     return text if len(text) <= limit else text[:limit] + " …[clipped]"
 
 
-def _late_observation_excerpts(traj, limit):
+def _late_observation_excerpts(traj, limit, *, include_commands=False):
     out = []
     for step in reversed(traj.get("steps", [])):
         if step.get("source") != "agent":
@@ -1088,11 +1142,25 @@ def _late_observation_excerpts(traj, limit):
         for result in reversed((step.get("observation") or {}).get("results") or []):
             content = atif_content_text(result.get("content")).strip()
             if content:
-                out.append(_clip(content, limit))
+                if not include_commands:
+                    out.append(_clip(content, limit))
+                    continue
+                call_id = result.get("source_call_id")
+                call = next(
+                    (tc for tc in step.get("tool_calls", []) if call_id and tc.get("tool_call_id") == call_id),
+                    None,
+                )
+                context = ""
+                if call:
+                    context = _truncate_for_behavior(
+                        f"\nTool call: {call.get('function_name', 'unknown')} {json.dumps(call.get('arguments', {}))}",
+                        min(600, limit // 2),
+                    )
+                out.append(_truncate_for_behavior(content, limit - len(context)) + context)
     return out
 
 
-def _assemble(sections, budget):
+def _assemble(sections, budget, *, clip_sections=False):
     parts = []
     used = 0
     dropped = 0
@@ -1103,7 +1171,7 @@ def _assemble(sections, budget):
         if used + len(block) <= budget:
             parts.append(block)
             used += len(block) + 2
-        elif title == _SECTION_FINAL_RESPONSE and budget - used > 0:
+        elif (title == _SECTION_FINAL_RESPONSE or clip_sections) and budget - used > 0:
             avail = budget - used
             later_blocks = [len(f"{t}\n{b}") + 2 for t, b in non_empty[idx + 1 :]]
             if later_blocks and avail >= 160:
@@ -1267,10 +1335,11 @@ def build_metric_evidence_bundles(traj, question, *, ground_truth="", expected_b
     acc_text, acc_drop, acc_trunc = _assemble(
         [
             (_SECTION_FINAL_RESPONSE, final),
-            ("PRODUCED FILES / WRITES", file_changes),
+            ("EDIT ATTEMPTS (newest)", file_changes),
             ("KEY OBSERVATIONS", "\n---\n".join(late_obs[:_BUNDLE_ACCURACY_MAX_OBS])),
         ],
         budgets["accuracy"],
+        clip_sections=True,
     )
     bundles["accuracy"] = {
         "prompt_evidence": _prepend_facts(acc_text or _clip(get_agent_text(traj), budgets["accuracy"])),
@@ -1282,13 +1351,15 @@ def build_metric_evidence_bundles(traj, question, *, ground_truth="", expected_b
         },
         "verified": facts,
     }
+    goal_obs = _late_observation_excerpts(traj, _BUNDLE_ITEM_CHARS, include_commands=True)
     goal_text, goal_drop, goal_trunc = _assemble(
         [
             (_SECTION_FINAL_RESPONSE, final),
-            ("END-STATE FILE CHANGES", file_changes),
-            ("RECENT TOOL RESULTS (newest first)", "\n---\n".join(late_obs[:_BUNDLE_GOAL_MAX_OBS])),
+            ("RECENT TOOL RESULTS (newest first)", "\n---\n".join(goal_obs[:_BUNDLE_GOAL_MAX_OBS])),
+            ("EDIT ATTEMPTS (newest)", file_changes),
         ],
         budgets["goal_accuracy"],
+        clip_sections=True,
     )
     bundles["goal_accuracy"] = {
         "prompt_evidence": _prepend_facts(goal_text or _clip(get_agent_text(traj), budgets["goal_accuracy"])),
@@ -3391,21 +3462,14 @@ def _command_reads_skill_md_arg(command, cmd_idx, assignments):
 _SHELL_EXPANSION_CHARS = frozenset("{*?[$`")
 
 
-def _failed_single_skill_read(call):
-    """A shell failure only proves the skill read failed for an isolated read.
-
-    Compound commands, multi-file reads and operands that the shell may expand
-    into several files can print SKILL.md successfully before another file or
-    operation fails.
-    """
-    if call.get("is_error") is not True:
-        return False
-    tokens = _shell_tokens(_command_text(call))
+def _single_skill_read_operand(cmd):
+    """Recognize one viewer operand without interpreting shell expansion."""
+    tokens = _shell_tokens(cmd)
     if not tokens or any(token in _SHELL_SEPARATORS for token in tokens):
-        return False
+        return None
     command = tokens[0].rsplit("/", 1)[-1].lower()
     if command not in {"cat", "nl", "bat", "less", "more"}:
-        return False
+        return None
     files = []
     options_ended = False
     for arg in tokens[1:]:
@@ -3414,19 +3478,20 @@ def _failed_single_skill_read(call):
             options_ended = True
         elif options_ended or arg == "-" or not arg.startswith("-"):
             files.append(arg)
-    return len(files) == 1 and not _SHELL_EXPANSION_CHARS.intersection(files[0]) and _skill_md_arg(files[0], {})
+    return files[0] if len(files) == 1 and _skill_md_arg(files[0], {}) else None
 
 
-def _cmd_reads_skill_md(cmd) -> bool:
-    """True if a shell command reads a SKILL.md via a file-view utility.
+def _failed_single_skill_read(call):
+    """A shell failure only proves failure for one nonexpanding read operand."""
+    operand = _single_skill_read_operand(_command_text(call))
+    return call.get("is_error") is True and operand is not None and not _SHELL_EXPANSION_CHARS.intersection(operand)
 
-    Requires both a read verb (cat/sed/head/...) AND a ``SKILL.md`` filename
-    reference. The bare word ``SKILL`` is not enough: search commands such as
-    ``grep SKILL config.json`` or ``sed -n '/SKILL/p' config.json`` match the
-    word but never open a SKILL.md, and must not be credited as skill reads.
-    """
+
+def _shell_skill_md_reads(cmd) -> list[str]:
+    """Return read operands, without borrowing identity from other commands."""
     tokens = _shell_tokens(cmd)
-    assignments = {}
+    assignments: dict[str, str] = {}
+    paths: list[str] = []
     idx = 0
     while idx < len(tokens):
         if tokens[idx] in _SHELL_SEPARATORS:
@@ -3448,11 +3513,17 @@ def _cmd_reads_skill_md(cmd) -> bool:
 
         if cmd_idx < len(command):
             executable = command[cmd_idx].rsplit("/", 1)[-1].lower()
-            if executable in _FILE_READ_VERBS and _command_reads_skill_md_arg(command, cmd_idx, assignments):
-                return True
+            if executable in _FILE_READ_VERBS:
+                paths.extend(
+                    arg for arg in _command_input_args(command, cmd_idx, assignments) if _skill_md_arg(arg, {})
+                )
 
         idx = end + 1
-    return False
+    return paths
+
+
+def _cmd_reads_skill_md(cmd) -> bool:
+    return bool(_shell_skill_md_reads(cmd))
 
 
 _SCRIPT_INTERPRETERS = {"ash", "bash", "dash", "ksh", "mksh", "node", "perl", "python", "python3", "ruby", "sh", "zsh"}
@@ -3535,7 +3606,7 @@ def _path_with_shell_cwd(value, current_directory):
     value = str(value)
     if not current_directory or not value or value.startswith(("/", "\\")) or re.match(r"^[A-Za-z]:[\\/]", value):
         return value
-    return f"{current_directory.rstrip('/\\')}/{value}"
+    return current_directory.rstrip("/\\") + "/" + value
 
 
 def _possibly_references_target_directory(value, target_skill):
@@ -4465,6 +4536,53 @@ def _skill_name_from_ref(ref):
     return ""
 
 
+def _skill_read_sources(call: dict[str, Any]) -> list[tuple[str, str]]:
+    """Attribute identity to a read operand; an empty name means unknown.
+
+    Frontmatter can identify a document from an isolated read's output. It
+    does not establish ownership by any particular installed skill directory.
+    """
+    action = str(call.get("action", ""))
+    shell = _is_execution_action(action)
+    if shell:
+        if _failed_single_skill_read(call):
+            return []
+        command = _command_text(call)
+        paths = _shell_skill_md_reads(command)
+        isolated = _single_skill_read_operand(command) is not None and len(paths) == 1
+    elif "read" in action.lower() and call.get("is_error") is not True:
+        path = _extract_path(call)
+        paths = [path] if _skill_md_arg(path, {}) else []
+        isolated = True
+    else:
+        return []
+    observation = str(call.get("observation", ""))
+    content = re.sub(r"\Astatus=[^\n]*\nexit_code=-?\d+\n", "", observation)
+    frontmatter = re.match(r"\s*---\s*\n(.*?)\n---(?:\n|$)", content, re.DOTALL) if isolated else None
+    declared = re.search(r"(?m)^name:\s*['\"]?([\w.-]+)['\"]?\s*$", frontmatter[1]) if frontmatter else None
+    sources = []
+    for path in paths:
+        name = _skill_name_from_ref(path)
+        if name in {".", ".."} or _SHELL_EXPANSION_CHARS.intersection(path):
+            name = ""
+        # An outer success can hide a failed read followed by another command.
+        diagnostic = shell and re.search(
+            r"(?m)^(?:cat|sed|head|tail|awk|less|more|nl|bat):[^\n]*" + re.escape(path) + r"['\"]?:", observation
+        )
+        sources.append((path, "" if diagnostic else declared[1] if declared else name))
+    return sources
+
+
+def _unknown_skill_read_result(paths: list[str]) -> dict[str, Any]:
+    return {
+        "passed": None,
+        "score": 0.5,
+        "supported": False,
+        "reason": "SKILL.md read identity or success could not be attributed",
+        "details": {"unattributed_reads": paths},
+    }
+
+
 def _allowed_workspace_skills(expected_skill, workspace_skill_names, workspace_mode, acceptable_skills=None):
     allowed = set(_accepted_skill_names(expected_skill, acceptable_skills))
     if workspace_mode == "group":
@@ -4716,8 +4834,18 @@ def _unsupported_native_codex_result(reason):
 
 
 def check_activation(tool_calls, expected_skill, skill_tool_names=None, acceptable_skills=None):
+    """Check whether the agent activated the expected skill.
+
+    Supports multiple activation patterns:
+      1. Claude Code ``Skill`` tool (via *skill_tool_names*)
+      2. ``read_file`` / ``read`` with path containing expected_skill + SKILL.md
+      3. ``bash cat`` of SKILL.md
+      4. Frontmatter identity from an isolated read output
+    """
     if not expected_skill:
         return {"passed": True, "score": 1.0, "reason": "No expected_skill -- skipped"}
+
+    # Check 1: Claude Code Skill tool
     if skill_tool_names:
         for s in skill_tool_names:
             match = _classify_skill_match(str(s), expected_skill, acceptable_skills, fuzzy=True)
@@ -4731,83 +4859,44 @@ def check_activation(tool_calls, expected_skill, skill_tool_names=None, acceptab
                     "reason": reason,
                     "details": {**_skill_match_details(expected_skill, acceptable_skills), **match},
                 }
-    read_calls = [tc for tc in tool_calls if "read" in tc["action"].lower() and tc.get("is_error") is not True]
-    for call in read_calls:
-        path_arg = _extract_path(call)
-        if "SKILL.md" not in path_arg:
-            continue
-        skill_name = _skill_name_from_ref(path_arg) or path_arg
-        match = _classify_skill_match(skill_name, expected_skill, acceptable_skills, fuzzy=skill_name == path_arg)
-        if match:
-            reason = f"Read SKILL.md for '{expected_skill}'"
-            if match["match_type"] == "acceptable_alternate":
-                reason = f"Read SKILL.md for acceptable alternate '{match['matched_skill']}'"
-            return {
-                "passed": True,
-                "score": match["score"],
-                "reason": reason,
-                "details": {**_skill_match_details(expected_skill, acceptable_skills), **match, "path": path_arg},
-            }
+
+    # Read identity must come from that read, not unrelated command/output text.
+    unknown_reads: list[str] = []
     for call in tool_calls:
-        if _is_execution_action(call["action"]) and not _failed_single_skill_read(call):
-            cmd = _command_text(call)
-            if _cmd_reads_skill_md(cmd):
-                match = _classify_skill_match(cmd, expected_skill, acceptable_skills, fuzzy=True)
-                if not match:
-                    match = _classify_skill_match(
-                        str(call.get("observation", "")),
-                        expected_skill,
-                        acceptable_skills,
-                        fuzzy=True,
-                    )
-                if match:
-                    score = min(0.75, float(match["score"]))
-                    reason = "Read SKILL.md via shell read command"
-                    if match["match_type"] == "acceptable_alternate":
-                        reason = f"Read acceptable alternate SKILL.md via shell read command: {match['matched_skill']}"
-                    return {
-                        "passed": True,
-                        "score": score,
-                        "reason": reason,
-                        "details": {**_skill_match_details(expected_skill, acceptable_skills), **match},
-                    }
+        shell = _is_execution_action(str(call.get("action", "")))
+        for path, name in _skill_read_sources(call):
+            if not name:
+                unknown_reads.append(path)
+                continue
+            match = _classify_skill_match(name, expected_skill, acceptable_skills, fuzzy=shell)
+            if match:
+                reason = (
+                    "Read SKILL.md via shell read command" if shell else f"Read SKILL.md for '{match['matched_skill']}'"
+                )
+                return {
+                    "passed": True,
+                    "score": min(0.75, float(match["score"])) if shell else match["score"],
+                    "reason": reason,
+                    "details": {**_skill_match_details(expected_skill, acceptable_skills), **match, "path": path},
+                }
+
     if _has_unsupported_native_codex_call(tool_calls):
         return _unsupported_native_codex_result(
             "Skill activation could not be evaluated because a native Codex exec wrapper was unsupported"
         )
-    for tc in tool_calls:
-        action = str(tc.get("action", ""))
-        cmd = _command_text(tc)
-        has_skill_read_evidence = ("read" in action.lower() and "SKILL.md" in str(tc.get("action_input", ""))) or (
-            _is_execution_action(action) and _cmd_reads_skill_md(cmd)
-        )
-        if not has_skill_read_evidence or (
-            tc.get("is_error") is True
-            and (not _is_execution_action(action) or _failed_single_skill_read(tc))
-        ):
-            continue
-        obs = str(tc.get("observation", "")).lower()
-        if "skill.md" in obs:
-            match = _classify_skill_match(obs, expected_skill, acceptable_skills, fuzzy=True)
-            if match:
-                score = min(0.75, float(match["score"]))
-                reason = "SKILL.md found in tool observation"
-                if match["match_type"] == "acceptable_alternate":
-                    reason = f"Acceptable alternate SKILL.md found in tool observation: {match['matched_skill']}"
-                return {
-                    "passed": True,
-                    "score": score,
-                    "reason": reason,
-                    "details": {**_skill_match_details(expected_skill, acceptable_skills), **match},
-                }
+    if unknown_reads:
+        return _unknown_skill_read_result(unknown_reads)
+
+    # An explicit activation of another skill is still negative evidence.
     if skill_tool_names:
         return {"passed": False, "score": 0.0, "reason": f"Activated different skill(s): {skill_tool_names}"}
+
     return {
         "passed": False,
         "score": 0.0,
         "reason": (
             f"No evidence of target skill use in trajectory for '{expected_skill}'. "
-            "Checked Skill tool calls, SKILL.md reads, bash cat commands, and tool observations."
+            "Checked Skill tool calls and attributable SKILL.md reads."
         ),
         "details": _skill_match_details(expected_skill, acceptable_skills),
     }
@@ -7886,51 +7975,38 @@ def check_routing(
     workspace_mode="isolated",
     acceptable_skills=None,
 ):
+    """Check the agent read only expected/allowed workspace skill docs."""
     unsupported_native_codex_call = _has_unsupported_native_codex_call(tool_calls)
-    read_calls = [tc for tc in tool_calls if "read" in tc["action"].lower() and tc.get("is_error") is not True]
-    skills_read, wrong_skills = [], []
+    skills_read: list[str] = []
+    wrong_skills: list[str] = []
+    unknown_reads: list[str] = []
     matched_expected = False
     matched_alternate = False
-    matched_alternates = []
+    matched_alternates: list[str] = []
     allowed_skills = _allowed_workspace_skills(
         expected_skill,
         workspace_skill_names,
         workspace_mode,
         acceptable_skills,
     )
-    for call in read_calls:
-        path = _extract_path(call)
-        if "SKILL.md" not in path:
-            continue
-        skills_read.append(path)
-        skill_name = _skill_name_from_ref(path)
-        match = _classify_skill_match(skill_name, expected_skill, acceptable_skills)
-        if match and match["match_type"] == "expected":
-            matched_expected = True
-        elif match and match["match_type"] == "acceptable_alternate":
-            matched_alternate = True
-            matched_alternates.append(str(match["matched_skill"]))
-        if skill_name and skill_name not in allowed_skills:
-            wrong_skills.append(path)
+
     for call in tool_calls:
-        action = call["action"].lower()
-        cmd = _command_text(call)
-        if not (_is_execution_action(action) and _cmd_reads_skill_md(cmd)) or _failed_single_skill_read(call):
-            continue
-        skills_read.append(cmd)
-        skill_name = _skill_name_from_ref(cmd)
-        match = _classify_skill_match(skill_name, expected_skill, acceptable_skills, fuzzy=not skill_name)
-        if not match:
-            match = _classify_skill_match(
-                str(call.get("observation", "")), expected_skill, acceptable_skills, fuzzy=True
-            )
-        if match and match["match_type"] == "expected":
-            matched_expected = True
-        elif match and match["match_type"] == "acceptable_alternate":
-            matched_alternate = True
-            matched_alternates.append(str(match["matched_skill"]))
-        if skill_name and skill_name not in allowed_skills and not match:
-            wrong_skills.append(cmd)
+        shell = _is_execution_action(str(call.get("action", "")))
+        for path, name in _skill_read_sources(call):
+            skills_read.append(path)
+            if not name:
+                unknown_reads.append(path)
+                continue
+            match = _classify_skill_match(name, expected_skill, acceptable_skills, fuzzy=shell)
+            if match and match["match_type"] == "expected":
+                matched_expected = True
+            elif match and match["match_type"] == "acceptable_alternate":
+                matched_alternate = True
+                matched_alternates.append(str(match["matched_skill"]))
+            if name not in allowed_skills and not match:
+                wrong_skills.append(path)
+
+    # Claude Code Skill tool activations also count
     if skill_tool_names:
         for s in skill_tool_names:
             skills_read.append(f"Skill({s})")
@@ -7942,6 +8018,7 @@ def check_routing(
                 matched_alternates.append(str(match["matched_skill"]))
             if str(s) not in allowed_skills and not match:
                 wrong_skills.append(f"Skill({s})")
+
     if not skills_read:
         if unsupported_native_codex_call:
             return _unsupported_native_codex_result(
@@ -7953,6 +8030,7 @@ def check_routing(
             "reason": "Agent did not read any SKILL.md",
             "details": _skill_match_details(expected_skill, acceptable_skills),
         }
+
     if wrong_skills:
         return {
             "passed": False,
@@ -7966,10 +8044,15 @@ def check_routing(
                 "matched_alternates": sorted(set(matched_alternates)),
             },
         }
+
     if unsupported_native_codex_call:
         return _unsupported_native_codex_result(
             "Skill routing could not be evaluated because a native Codex exec wrapper was unsupported"
         )
+
+    if unknown_reads:
+        return _unknown_skill_read_result(unknown_reads)
+
     if matched_alternate and not matched_expected:
         return {
             "passed": True,
@@ -7982,6 +8065,7 @@ def check_routing(
                 "matched_alternates": sorted(set(matched_alternates)),
             },
         }
+
     if workspace_mode == "group":
         return {
             "passed": True,
@@ -7993,6 +8077,7 @@ def check_routing(
                 "skills_read": skills_read,
             },
         }
+
     return {
         "passed": True,
         "score": 1.0,
@@ -8002,7 +8087,7 @@ def check_routing(
 
 
 def check_error_recovery(tool_calls, expected_script=None):
-    """Detect error-retry patterns and attribute fault to skill vs agent."""
+    """Detect observed error-retry patterns without inferring their cause."""
     if not tool_calls:
         return {
             "passed": True,
@@ -8012,6 +8097,7 @@ def check_error_recovery(tool_calls, expected_script=None):
             "corrections": [],
             "skill_faults": 0,
             "agent_faults": 0,
+            "unattributed_failures": 0,
         }
 
     exec_actions = {"bash", "execute", "run_code", "run"}
@@ -8041,6 +8127,7 @@ def check_error_recovery(tool_calls, expected_script=None):
             "corrections": [],
             "skill_faults": 0,
             "agent_faults": 0,
+            "unattributed_failures": 0,
         }
 
     # Only complete status lines are execution evidence; source code and prose
@@ -8074,7 +8161,8 @@ def check_error_recovery(tool_calls, expected_script=None):
         r"|\bbash tool terminated command after exceeding timeout\b",
         re.IGNORECASE | re.MULTILINE,
     )
-    skill_fault_kw = [
+    # Preserve the legacy friction penalty; these diagnostics do not establish cause.
+    legacy_high_penalty_keywords = [
         "no such file",
         "filenotfounderror",
         "not found",
@@ -8195,6 +8283,8 @@ def check_error_recovery(tool_calls, expected_script=None):
     def _is_failure(tc):
         obs = str(tc.get("observation", ""))
         exit_code = _exit_status(tc)
+        if tc.get("is_error") is True and exit_code != 1:
+            return True
         if exit_code is not None:
             return exit_code != 0 and not (exit_code == 1 and _is_quiet_negative_probe(tc, obs))
         # Only results without an exit status are judged by their text.
@@ -8225,13 +8315,15 @@ def check_error_recovery(tool_calls, expected_script=None):
     corrections = []
     failures = []
     seen = set()
+    legacy_high_penalty_failures = 0
 
     for i, (orig_idx, call) in enumerate(exec_calls):
         if orig_idx in seen or not failed[i]:
             continue
         cmd = _cmd_text(call)
         obs = str(call.get("observation", ""))
-        fault = "skill" if any(k in obs.lower() for k in skill_fault_kw) else "agent"
+        legacy_high_penalty_failures += any(k in obs.lower() for k in legacy_high_penalty_keywords)
+        fault = "unattributed"
         # Record every observed failure, whether or not it is later recovered.
         # Previously only recovered failures (corrections) were tracked, so an
         # unrecovered failure was silently scored as first-attempt clean.
@@ -8267,8 +8359,6 @@ def check_error_recovery(tool_calls, expected_script=None):
                 break
 
     first_attempt_clean = len(failures) == 0
-    skill_faults = sum(1 for f in failures if f["fault"] == "skill")
-    agent_faults = sum(1 for f in failures if f["fault"] == "agent")
     unrecovered_failures = [f for f in failures if not f["recovered"]]
 
     if first_attempt_clean:
@@ -8277,23 +8367,24 @@ def check_error_recovery(tool_calls, expected_script=None):
         score = 0.0
         unrecovered_cmds = ", ".join(f["failed_cmd"][:60] for f in unrecovered_failures[:3])
         reason = f"{len(unrecovered_failures)} unrecovered failure(s): {unrecovered_cmds}"
-    elif skill_faults > 0:
-        score = max(0.0, 1.0 - (skill_faults * 0.25))
-        reason = f"{skill_faults} skill defect(s), {agent_faults} agent error(s)"
+    elif legacy_high_penalty_failures > 0:
+        score = max(0.0, 1.0 - (legacy_high_penalty_failures * 0.25))
+        reason = f"{len(failures)} recovered execution failure(s); cause not established"
     else:
-        score = max(0.5, 1.0 - (agent_faults * 0.1))
-        reason = f"{agent_faults} agent error(s), no skill defects"
+        score = max(0.5, 1.0 - (len(failures) * 0.1))
+        reason = f"{len(failures)} recovered execution failure(s); cause not established"
 
     return {
-        "passed": first_attempt_clean or (skill_faults == 0 and not unrecovered_failures),
+        "passed": first_attempt_clean or (legacy_high_penalty_failures == 0 and not unrecovered_failures),
         "score": round(score, 4),
         "reason": reason,
         "first_attempt_clean": first_attempt_clean,
         "corrections": corrections,
         "failures": failures,
         "unrecovered_failures": unrecovered_failures,
-        "skill_faults": skill_faults,
-        "agent_faults": agent_faults,
+        "skill_faults": 0,
+        "agent_faults": 0,
+        "unattributed_failures": len(failures),
     }
 
 
@@ -8739,6 +8830,12 @@ def _judge_goal_accuracy_custom(question, ground_truth, agent_text, tool_summary
 Step 1: What was the user's goal?
 Step 2: What end state did the agent reach?
 Step 3: Compare the end state to the expected outcome.
+
+Score the observed final outcome, not how smoothly the agent reached it. Recovered
+command failures do not reduce goal achievement unless the request explicitly
+requires first-attempt success or the attempts violated a stated constraint.
+A command that failed to execute is not evidence that its proposed file was
+created or incorrect. Ground factual claims in observed outputs and artifacts.
 
 USER REQUEST:
 {question}

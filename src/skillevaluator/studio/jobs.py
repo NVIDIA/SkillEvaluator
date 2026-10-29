@@ -141,7 +141,7 @@ class Studio:
                 else "Local mode needs Seatbelt on macOS or bubblewrap on Linux.",
             },
             "agents": agents,
-            "optimizer": False,
+            "optimizer": True,
         }
         self._capabilities_at = time.monotonic()
         return self._capabilities
@@ -261,15 +261,74 @@ class Studio:
         return options
 
     def start(self, payload: dict) -> dict:
+        from skillevaluator.studio import improvements
+
         action = payload.get("action")
-        if not isinstance(action, str) or action not in {"draft", "validate", "check", "evaluate"}:
-            raise ValueError("Choose draft, validate, check or evaluate.")
+        if not isinstance(action, str) or action not in {
+            "draft",
+            "validate",
+            "check",
+            "evaluate",
+            "improve",
+            "compare_improvement",
+        }:
+            raise ValueError("Choose a supported Studio action.")
+        extra = {}
+        if action == "compare_improvement":
+            _root, proposal_metadata, _result = improvements.proposal(self.workspace, payload.get("proposal_job_id"))
+            if not _result.get("candidate_id"):
+                raise ValueError("This proposal has no changed candidate to evaluate.")
+            payload = {**payload, "skill_id": proposal_metadata["skill_id"]}
+            extra = {key: payload.get(key) for key in ("proposal_job_id", "before_job_id", "after_job_id")}
+            extra["outcome_metrics"] = improvements.outcome_metrics(payload.get("outcome_metrics", []))
+            improvements.evaluation_run(self.workspace, extra["before_job_id"], skill_id=proposal_metadata["skill_id"])
+            improvements.evaluation_run(self.workspace, extra["after_job_id"], skill_id=_result.get("candidate_id"))
         skill_id = payload.get("skill_id", "")
         skill = self.workspace.describe(skill_id)
         with self.lock:
             provider_name, default_model = self.provider_name, self.model
             provider_key = self.keys.get(provider_name) or os.environ.get(PROVIDER_KEYS[provider_name])
         options = self._options(payload, default_model)
+        reference = None
+        if action == "improve":
+            configuration = payload.get("improvement", {})
+            if not isinstance(configuration, dict) or set(configuration) - {
+                "mode",
+                "include_agent_observations",
+                "edits",
+            }:
+                raise ValueError("Choose an improvement mode and supported proposal settings.")
+            configuration = {"mode": "llm", "include_agent_observations": False, **configuration}
+            if (
+                not isinstance(configuration["mode"], str)
+                or configuration["mode"] not in {"export", "llm", "deterministic"}
+                or not isinstance(configuration["include_agent_observations"], bool)
+            ):
+                raise ValueError("Choose export, LLM or reviewed deterministic edits.")
+            if ("edits" in configuration) != (configuration["mode"] == "deterministic"):
+                raise ValueError("Reviewed proposal JSON is required only for deterministic edits.")
+            if len(json.dumps(configuration).encode()) > 1024 * 1024:
+                raise ValueError("The reviewed proposal exceeds 1 MiB.")
+            discovery_id = payload.get("discovery_job_id")
+            improvements.evaluation_run(self.workspace, discovery_id, skill_id=skill_id)
+            ready = improvements.readiness(self.workspace, discovery_id, skill_id)
+            if configuration["mode"] != "export" and not ready["eligible"]:
+                raise ValueError(" ".join(ready["reasons"]))
+            extra = {"skill_id": skill_id, "discovery_job_id": discovery_id, "improvement": configuration}
+        if action == "evaluate" and payload.get("validation_of"):
+            before_id, before, reference = improvements.validation_reference(
+                self.workspace, payload["validation_of"], skill_id, payload.get("before_job_id")
+            )
+            if provider_name != before.get("provider"):
+                raise ValueError(
+                    "Reconnect the original run's provider before testing this proposal. Its model and evaluation settings will be replayed."
+                )
+            options = self._options({"options": before["options"]}, default_model)
+            extra = {
+                "validation_of": payload["validation_of"],
+                "before_job_id": before_id,
+                "outcome_metrics": improvements.outcome_metrics(payload.get("outcome_metrics", [])),
+            }
         selected_checks = options["tier1"] or options["dedup"]
         if selected_checks and action not in {"check", "evaluate"}:
             raise ValueError("Extra checks are available with skill checks or agent evaluation.")
@@ -282,6 +341,7 @@ class Studio:
             (action == "draft" and not options["no_llm"])
             or action == "evaluate"
             or (action == "check" and (options["tier1_llm"] or options["dedup"]))
+            or (action == "improve" and extra["improvement"]["mode"] == "llm")
         )
         if needs_provider and not provider_key:
             raise ValueError("Set a provider key first. Starter drafts and static scans work without one.")
@@ -314,8 +374,15 @@ class Studio:
             folder = self.workspace.jobs / job_id
             folder.mkdir(mode=0o700)
             source_name = re.sub(r"[^a-z0-9-]+", "-", skill["name"].lower()).strip("-")[:64] or "uploaded-skill"
+            if reference is not None:
+                source_name = reference.name
             source = folder / "source" / source_name
-            copy_source(self.workspace.directory(skill_id), source)
+            if action == "improve" or reference is not None or skill.get("proposal_job_id"):
+                improvements.copy_package(self.workspace.directory(skill_id), source)
+            else:
+                copy_source(self.workspace.directory(skill_id), source)
+            if reference is not None:
+                improvements.freeze_evaluation(reference, source)
             from skillevaluator.tier3.dataset_utils import find_eval_file
 
             frozen_dataset = find_eval_file(source)
@@ -329,6 +396,7 @@ class Studio:
                     "results_dir": str(folder / "results"),
                     "guidance": guidance,
                     "options": options,
+                    **extra,
                 },
             )
             metadata = {
@@ -343,6 +411,7 @@ class Studio:
                 "dataset_hash": frozen_dataset_hash,
                 "provider": provider_name,
                 "options": options,
+                **{key: value for key, value in extra.items() if key != "improvement"},
             }
             write_json(folder / "metadata.json", metadata)
             env = os.environ.copy()

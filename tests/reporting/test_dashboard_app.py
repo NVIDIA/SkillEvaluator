@@ -117,7 +117,7 @@ def test_dashboard_renders_numeric_performance_and_paired_comparison(tmp_path: P
     path = _write_report(tmp_path / "run-1.json")
     app = _app([path, path])
     assert not app.exception
-    assert [tab.label for tab in app.tabs] == ["Performance", "With vs without skill"]
+    assert [tab.label for tab in app.tabs] == ["Performance", "With vs without skill", "Skill changes"]
     performance = app.dataframe[0].value
     comparison = app.dataframe[1].value
     assert len(performance) == 2

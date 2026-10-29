@@ -80,11 +80,16 @@ def test_claude_failed_read_cannot_receive_perfect_execution_credit(grader: tupl
     assert scorer.check_routing(calls, "demo-skill")["score"] == 0.0
 
 
-def test_successful_skill_content_can_discuss_errors(grader: tuple[ModuleType, ModuleType]) -> None:
+@pytest.mark.parametrize(
+    "content",
+    (
+        "# Demo skill\nError: File does not exist. Handle this by retrying.",
+        "# Demo skill\ncat: /skills/demo-skill/SKILL.md: Permission denied\nHandle this by retrying.",
+    ),
+)
+def test_successful_skill_content_can_discuss_errors(grader: tuple[ModuleType, ModuleType], content: str) -> None:
     extractor, scorer = grader
-    calls = extractor.extract_tool_calls_as_dicts(
-        _claude_read(is_error=False, content="# Demo skill\nError: File does not exist. Handle this by retrying.")
-    )
+    calls = extractor.extract_tool_calls_as_dicts(_claude_read(is_error=False, content=content))
 
     assert scorer.score_skill_execution(calls, "demo-skill")["score"] == 1.0
     assert scorer.check_routing(calls, "demo-skill")["score"] == 1.0
@@ -388,3 +393,60 @@ def test_single_cat_read_with_options(grader: tuple[ModuleType, ModuleType], opt
     assert scorer.check_activation(calls, "demo-skill")["score"] == (0.0 if is_error else 0.75)
     assert scorer.check_workflow_order(calls, expected_skill="demo-skill")["score"] == (0.0 if is_error else 1.0)
     assert scorer.check_routing(calls, "demo-skill")["score"] == (0.0 if is_error else 1.0)
+
+
+@pytest.mark.parametrize(
+    "command",
+    (
+        "cat /incoming/other/SKILL.md; ls /skills/demo-skill/scripts",
+        "cat /incoming/other/SKILL.md; echo demo-skill SKILL.md",
+        "cat /incoming/other/SKILL.md > /skills/demo-skill/SKILL.md",
+    ),
+)
+def test_unrelated_read_cannot_borrow_skill_identity(grader, command: str) -> None:
+    _, scorer = grader
+    call = {
+        "action": "Bash",
+        "action_input": {"command": command},
+        "observation": "---\nname: other\n---\nSee demo-skill/SKILL.md for another workflow.",
+    }
+    assert scorer.check_activation([call], "demo-skill")["passed"] is False
+    assert scorer.check_routing([call], "demo-skill")["passed"] is False
+
+
+@pytest.mark.parametrize(
+    "command",
+    (
+        "cat $d/SKILL.md; ls /skills/demo-skill/scripts",
+        "for d in */; do echo $d; cat $d/SKILL.md; done; ls /skills/demo-skill/scripts",
+        "cat /incoming/*/SKILL.md; echo demo-skill SKILL.md",
+        "cat SKILL.md; echo demo-skill SKILL.md",
+    ),
+)
+def test_unresolved_read_cannot_borrow_compound_output(grader, command: str) -> None:
+    _, scorer = grader
+    call = {
+        "action": "Bash",
+        "action_input": {"command": command},
+        "observation": "---\nname: demo-skill\n---\nSKILL.md",
+    }
+    for check in (scorer.check_activation, scorer.check_routing):
+        result = check([call], "demo-skill")
+        assert result["passed"] is None
+        assert result["supported"] is False
+
+
+def test_failed_read_followed_by_success_does_not_prove_activation(grader, tmp_path: Path) -> None:
+    extractor, scorer = grader
+    missing = tmp_path / "demo-skill" / "SKILL.md"
+    command = f"cat {shlex.quote(str(missing))}; echo done"
+    result = subprocess.run(["bash", "-c", command], capture_output=True, text=True)
+    assert result.returncode == 0
+    assert str(missing) in result.stderr
+    calls = extractor.extract_tool_calls_as_dicts(
+        _claude_tool_result(
+            name="Bash", arguments={"command": command}, is_error=False, content=result.stdout + result.stderr
+        )
+    )
+    assert scorer.check_activation(calls, "demo-skill")["passed"] is not True
+    assert scorer.check_routing(calls, "demo-skill")["passed"] is not True

@@ -111,8 +111,9 @@ The dataset file can be named `evals.json`, `evals.jsonl`, `evals.yaml`, or
 
 ## Generate a dataset
 
-`create-eval-dataset` writes `evals/evals.json` for you, grounded in your
-`SKILL.md` name, description, body, and script filenames:
+`create-eval-dataset` writes draft cases to `evals/evals.json`, grounded in
+bounded skill, script, and reference contents. Independently verify the inputs,
+fixtures, and expected outcomes before treating these drafts as a benchmark:
 
 ```bash title="Generate the full bucket dataset"
 skillevaluator create-eval-dataset ./my-skill --full
@@ -120,17 +121,17 @@ skillevaluator create-eval-dataset ./my-skill --full
 
 | Flag | Effect |
 | --- | --- |
-| `--full` | Generate the full bucket set instead of one. LLM mode targets four cases; `--no-llm` template mode emits three cases unless `EVAL.md` includes a negative prompt. |
+| `--full` | Generate up to four source-grounded draft cases instead of one. Template mode emits three cases unless `EVAL.md` includes a negative prompt. |
 | `--no-llm` | Use local templates only — no API key required. |
 | `--dry-run` | Preview without writing. |
 | `--force` | Overwrite existing `evals/evals.json`. |
 | `--prompt PATH` | Use a developer guidance file instead of auto-detected `evals/EVAL.md`. |
-| `--refine` | Refine cases using existing or collected trajectories. |
+| `--refine` | Record observations and optional proposals from trajectories; preserve existing questions and grading criteria. |
 | `--from-results PATH` | With `--refine`: read trajectories from a specific results directory. |
 | `--results-dir DIRECTORY` | With `--refine`: external results root to search first. |
 
 Without an LLM provider configured, generation automatically falls back to the
-same templates `--no-llm` uses, so the command always succeeds. Exact defaults
+same templates `--no-llm` uses. Exact defaults
 for every flag are in the
 [CLI Reference](cli-reference.mdx#create-eval-dataset).
 
@@ -145,8 +146,9 @@ requirements for the live evaluation. Use `validate PATH --no-autopilot` to
 require an existing source instead of generating one.
 
 <Warning>
-  `--force` overwrites `evals/evals.json` without a backup. `--refine` implies
-  overwrite too — it produces the final version of the dataset.
+  `--force` overwrites `evals/evals.json` without a backup. With an existing
+  dataset, `--refine` preserves it and writes `evals/refinement.json`, even when
+  combined with `--force`.
 </Warning>
 
 ### The four case buckets
@@ -189,23 +191,25 @@ is exactly the regression the eval should catch.
 
 ### Refine from real runs
 
-`--refine` grounds the dataset in real agent behavior. It looks for existing
-trajectories from a previous evaluation (checking `--from-results` or the
-latest resolved results first); if none exist, it runs the `claude-code` agent
-via Harbor to collect one, then rewrites `expected_output` and assertions from
-what the agent actually did:
+`--refine` looks for trajectories from a previous evaluation, checking
+`--from-results` or the latest resolved results first. For an existing dataset,
+it writes observations and unvalidated proposals to `evals/refinement.json`;
+questions, expected outputs, and assertions remain unchanged. Observed agent
+answers do not establish ground truth:
 
 ```bash title="Agent-refined generation"
 skillevaluator create-eval-dataset ./my-skill --full --refine
 ```
 
-Collecting a fresh trajectory needs Docker, the `tier3` extra, and a configured
-provider. Refining from existing results does not need the `tier3` extra: case
+Existing datasets, explicitly selected results, and dry runs never launch an
+agent to fill missing evidence. Only a new dataset without trajectories may
+collect them through Harbor, which needs Docker, the `tier3` extra, and a
+configured provider. Reading existing results does not need the `tier3` extra: case
 IDs are read from each trial's `reward.json` or Harbor `result.json`, and
 multimodal trajectory messages are read as text, with image and audio parts
-shown as `[image]` and `[audio]` markers. With `--no-llm`, refinement still
-works — it applies template-based updates from the trajectory instead of an LLM
-rewrite.
+shown as `[image]` and `[audio]` markers. With `--no-llm`, refinement records
+observations without requesting proposals from an LLM. Independently validate
+any proposed change before updating the authored dataset.
 
 ## Run policy: evals/config.yml
 
@@ -288,6 +292,48 @@ documents. An eval entry's `files` string or list selects only those paths
 (relative to `evals/`) for its `/workspace/input/`. An explicit empty list or
 `null` stages no fixture. For backward compatibility, an entry that omits
 `files` receives the entire shared `evals/files/` directory.
+
+### Declared original and delivered files
+
+For a generated single-step Linux task running with `--env-mode docker`, add
+`artifact_pairs` to a case to retain specific files for improvement diagnostics:
+
+```json
+{
+  "id": "retry-tests",
+  "question": "Fix retry handling while preserving the existing tests.",
+  "artifact_pairs": [
+    {
+      "id": "retry-tests",
+      "original": "project/test_retry.py",
+      "delivered": "/workspace/output/project/test_retry.py"
+    }
+  ]
+}
+```
+
+`original` is relative to the case's staged `/workspace/input/` fixtures, so
+this example needs `evals/files/project/test_retry.py` when using the default
+fixture selection. `delivered` must be an explicit file below
+`/workspace/output/` or `/workspace/work/`. Declare at most eight distinct pairs;
+files are limited to 128 KiB each. Missing or unsafe originals fail task staging.
+Other backends and native or multi-step tasks currently reject this option.
+
+Harbor captures declared delivered files after agent execution and before
+verification. The secure Docker reader rejects links (including linked parent
+directories), hardlinks, special files, and oversized files. A failed capture is
+reported as unavailable evidence; it cannot become a successful comparison.
+
+Each saved trial's `artifact_evidence.json` contains file hashes, byte lengths,
+raw byte equality, and redacted text and diffs capped at 4,096 characters each.
+Binary or non-UTF-8 files are reported without text comparisons. Improvement
+signals and dataset refinement include these records only for eligible
+with-skill discovery attempts. They cover **only the declared files**: equal
+bytes establish byte equality, while a changed file or a partial diff does not
+by itself prove that tests were preserved or weakened. This evidence does not
+change scores or bypass improvement acceptance checks.
+
+### Custom environments
 
 **`evals/environment/`** customizes the container itself:
 

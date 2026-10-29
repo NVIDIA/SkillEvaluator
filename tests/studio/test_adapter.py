@@ -107,7 +107,7 @@ def test_native_lift_is_preserved_instead_of_recomputed(tmp_path: Path) -> None:
     assert result["summary"]["precision"] is None
     assert result["suggestions"] == []
     assert result["suggestions_status"] == "not_generated"
-    assert result["optimizer"]["available"] is False
+    assert result["optimizer"]["available"] is True
     assert [trial["id"] for trial in result["cases"][0]["arms"]["without_skill"]] == ["run-b"]
 
 
@@ -184,7 +184,8 @@ def test_contained_native_trials_keep_failures_final_response_and_evidence(tmp_p
     assert unknown["arms"]["without_skill"][0]["status"] == "failed"
     assert result["suggestions"][0]["mode"] == "passing_next_steps"
     assert all(not Path(item["path"]).is_absolute() for item in result["artifacts"])
-    assert result["notes"] == []
+    assert result["improvement_signals"] is None
+    assert len(result["notes"]) == 1 and result["notes"][0].startswith("Improvement evidence is unavailable:")
 
 
 def test_artifact_reader_refuses_symlink_and_nonfinite_values(tmp_path: Path) -> None:
@@ -278,3 +279,24 @@ def test_atif_tool_call_message_is_not_presented_as_a_final_response() -> None:
     }
     _, trial = normalize_trial({"overall": 1}, agent="opencode", arm="with_skill", trajectory=trajectory)
     assert trial["final_response"] is None
+
+
+def test_native_resource_measurements_survive_redaction_without_exposing_tokens() -> None:
+    from skillevaluator.tier3.harbor.resource_usage import resource_comparison
+
+    measured = resource_comparison(
+        [{"entry_id": "case", "tokens": {"prompt": 10, "completion": 2}}],
+        [{"entry_id": "case", "tokens": {"prompt": 20, "completion": 3}}],
+        with_complete=True,
+        baseline_complete=True,
+    )
+    projected = json_safe(
+        {
+            "resources": measured,
+            "aggregate": {"resources.tokens.delta": {"before": 2, "after": -11, "delta": -13}},
+            "tokens": {"opaque": "do-not-display"},
+        }
+    )
+    assert projected["resources"]["tokens"] == measured["tokens"]
+    assert projected["aggregate"]["resources.tokens.delta"]["delta"] == -13
+    assert projected["tokens"] == "<redacted>"

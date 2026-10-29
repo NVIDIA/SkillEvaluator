@@ -199,6 +199,8 @@ def test_mixed_agent_advice_links_only_eligible_traces_and_keeps_full_diagnostic
         "activated": _agent(activated=True, score=0.4),
         "best": _agent(activated=True, score=0.8),
     }
+    # Exercise evidence links for a genuine weak dimension, not generic healthy advice.
+    agents["best"]["with_skill"]["accuracy"] = agents["best"]["rewards"][0]["accuracy"] = 0.4
     for name, agent in agents.items():
         if name == "best" and not best_has_trace:
             continue
@@ -246,6 +248,8 @@ def test_mixed_agent_advice_links_only_eligible_traces_and_keeps_full_diagnostic
 def test_ungrounded_llm_recommendations_keep_positional_trace_links(monkeypatch) -> None:
     agent = _agent(activated=True, score=0.6)
     template = agent["rewards"][0]
+    # One deterministic recommendation plus two LLM recommendations exercises positional offsets.
+    agent["with_skill"]["accuracy"] = template["accuracy"] = 0.4
     agent["rewards"] = [
         {
             **template,

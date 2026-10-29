@@ -459,6 +459,28 @@ def test_best_agent_compares_standard_and_custom_only_agent_overall_scores() -> 
     assert payload["overall_score"] == 0.9
 
 
+def test_failed_custom_only_outcome_never_gets_a_healthy_dimension_suggestion() -> None:
+    payload = build_agent_eval_payload(
+        "recipe-audit",
+        {
+            "opencode": {
+                "execution_status": "succeeded",
+                "expected_attempts": 1,
+                "scored_attempts": 1,
+                "with_skill": {},
+                "metrics_with_skill": [],
+                "overall_with_skill": 0.0,
+                "rewards": [{"entry_id": "recipe", "metric_set": "custom-only", "overall": 0.0,
+                             "custom_metrics": {"recipe_validity": 0.0}}],
+            }
+        },
+        use_llm_judge=False,
+    )
+    assert payload["overall_score"] == 0.0
+    assert any(item["title"] == "Cases needing review" for item in payload["conclusions"])
+    assert not payload["suggestions"]
+
+
 def test_case_grounded_harbor_links_win_over_positional_fallback() -> None:
     evidence_links = [
         {"url": "https://harbor.example.test/case-1", "entry_id": "case-1", "label": "case-1"},

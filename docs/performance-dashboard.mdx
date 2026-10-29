@@ -68,6 +68,29 @@ or non-best agent details, also leaves comparisons available, with a notice.
 Truncation that drops trials or other trial artifacts, or that is not
 explained, keeps comparisons unavailable.
 
+## Review skill changes
+
+Open **Skill changes** and enter the directory produced by `tier3 improve`.
+Choose **Load skill changes** to see the editor decision, each edit's cited
+discovery finding and the exact proposed diff. Exported, unchanged and failed
+proposals remain distinct from candidates awaiting evaluation.
+
+To inspect validation, also enter the original and candidate retained run
+directories. Optional comma-separated **Outcome metrics** have the same meaning
+as CLI `--outcome-metric`: they label outcome gains without changing the strict
+native verdict. The view uses the canonical comparison and shows per-case
+changes, metric declines, original/candidate models, run summaries, lift, activation and individual attempt
+evidence. Discovery and heldout cases can differ; they are connected through
+the proposed source, not matching case names.
+
+Source association requires the retained candidate to match its receipt and
+every validation task to contain the corresponding runtime skill. Fingerprints
+include file contents and executable permissions but exclude evaluation files.
+Missing or differing source stays **unverified**, even when scores improve.
+Activation records that the skill was loaded; it does not establish that a
+changed helper ran or caused a gain. The view runs no agents, graders or editors.
+Choose **Load skill changes** again to refresh this snapshot.
+
 ## Reload reports
 
 The dashboard reads each input once and reuses it while you filter or switch

@@ -11,11 +11,35 @@ All notable changes to SkillEvaluator are documented in this file.
   and dataset checks, optionally include Tier 1 scans/AI security review and
   within-skill duplication, launch existing local/Docker evaluations, inspect
   per-case evidence, remove saved test cases, and export skills or optionally
-  make manual candidate copies. Guided
+  propose and test separate whole-skill candidate copies. Guided
   and Advanced views retain the same data with different detail levels.
   Public provider keys remain session/environment values. The UI keeps
-  automatic optimization unavailable until an optimizer adapter exists.
+  native proposal and validation logic behind an optional Improve flow.
+  Generated cases have explicit review states; proposed file changes, evidence,
+  source association and per-case comparisons retain their native limits.
 
+- Generated single-step Docker cases can declare `artifact_pairs` to retain
+  specific original and delivered files before verification. Discovery evidence
+  includes bounded, redacted file comparisons with explicit availability and
+  truncation limits; byte differences alone do not establish semantic changes.
+- A read-only **Skill changes** dashboard view connects cited discovery findings
+  to proposed edits and before/after validation results with their agent models. It preserves native
+  verdicts alongside outcome gains and metric declines, and checks every retained
+  task's runtime source before associating results with a proposal.
+- `tier3 improve` stages reviewable skill candidates from retained discovery
+  findings using export, LLM, deterministic edits, or a trusted local command.
+  `tier3 compare-improvement` reports per-case and aggregate changes, distinguishes
+  observed outcome gains from score gains, and abstains on incomplete or changed
+  evaluation evidence. Creating a candidate alone does not establish improvement.
+  Partial failures remain available above the CLI summary cutoff; optional
+  `--include-agent-observations` adds unverified discovery reports for source
+  checks without changing scores or treating successful tasks as failures.
+  Comparisons separately name outcome gains and other metric declines. Frozen
+  evaluation fixtures retain all bytes, including intentional cache-like files.
+  Both `heldout` and `held-out` spellings are protected as holdout feedback.
+  Failure evidence retains bounded, redacted grader diagnostics separately from
+  display summaries, with explicit truncation flags. Proposal instructions require
+  source-grounded explanations that account for recovery and contrary checks.
 - `--quality-config PATH` on `validate`, `quality-check`, and `tier1` loads the
   deterministic quality check's expected Markdown headings from a YAML file
   instead of the built-in list. Each `expected_headers` entry sets a `heading`
@@ -34,6 +58,37 @@ All notable changes to SkillEvaluator are documented in this file.
 
 ### Changed
 
+- Skill improvement and dataset refinement retain bounded tool calls and matched
+  returns, prioritize failure details, and distinguish final claims from observed
+  execution. Complete calls share unused space before clipping. Opt-in agent observations redact configured credentials before
+  clipping. Holdout and baseline artifacts remain outside improvement context.
+- Activation and routing attribute skill reads to their actual file operands or
+  isolated document identity. Unrelated command text cannot establish skill use;
+  unresolved reads remain explicitly unknown.
+- Skill Improver records a bounded decision summary for LLM proposals, including
+  no-change decisions, and distinguishes skipped editors from attempted calls.
+  Unchanged candidates no longer recommend another evaluation of identical content.
+  Long explanations remain in the proposal and are explicitly shortened in the
+  receipt without invalidating otherwise valid edits or no-change decisions.
+- Behavior judging retains bounded execution-call evidence before long reports
+  consume the prompt budget, with matched returns and explicit coverage limits.
+- Tier 3 evidence recognizes OpenCode `filePath` and `patchText` arguments and
+  keeps recent edit attempts alongside terminal tool results within existing
+  evidence budgets. Patches remain labeled attempts, with tool outcomes retained.
+- Error-recovery diagnostics retain observed failures and retries without
+  attributing their cause to the skill or agent from error-message keywords.
+  Existing friction scores are unchanged. Goal judging explicitly separates
+  recovered command failures from the final task outcome and retains bounded
+  recent tool results with matching command context instead of discarding an
+  oversized results section wholesale.
+- Explicit custom-grader errors remain failed, unscored attempts instead of
+  contributing placeholder zeros. Improvement evidence also rejects unqualified
+  generated drafts. Empty suggestion lists remain empty; reports no longer
+  manufacture next steps or infer healthy performance from absent dimensions.
+- Dataset authoring includes bounded skill, script, reference, and guidance
+  content with provenance. Generated cases are explicitly drafts; trajectory
+  refinement records observations and proposals without rewriting existing
+  questions or grading expectations.
 - README and onboarding docs now offer two first-run paths: a lightweight,
   keyless quality check on a bundled skill, or an NVIDIA Build rubric evaluation
   with eligible free prototyping access. Installation adds extras as needed,
@@ -49,12 +104,25 @@ All notable changes to SkillEvaluator are documented in this file.
 
 ### Fixed
 
+- The Skill changes case picker uses stable agent and case identities when
+  switching reports, keeping the selected findings aligned with their case.
+- Native OpenCode traces retain missing status, error and integer exit-code
+  evidence from uniquely matched raw log calls. Existing turns, output and token
+  metrics stay intact; ambiguous, mismatched or already annotated calls remain
+  unchanged, and loader diagnostics report supplementation. Actual exit metadata
+  precedes status text quoted in stdout. Explicit tool-error flags remain failures
+  even without recognizable diagnostic text; ordinary quiet exit-1 probes retain
+  their existing exception.
+- Combined Tier 3 grading retains custom-check diagnostics after a standard-grader
+  failure while keeping the evaluation failed and excluded from performance scores.
+- Pin the sandboxed OpenCode CLI to `1.18.33` through the existing Harbor
+  version option so evaluation runs do not silently adopt a new agent release.
 - Tier 3 error recovery now scores unrecovered command failures as zero and
   includes them in fault counts and failure verdicts/report reasons. Host and
   bundled verifier detection agree and use a result's execution status when it
   has one: a Codex exit code, a whole `exit code N` line, or Harbor marking a
-  Claude Code result as successful. Only results without a status, such as
-  OpenCode's, are judged by their text: tracebacks, `error:` lines, pytest,
+  Claude Code result as successful. Only results without a status are judged
+  by their text: tracebacks, `error:` lines, pytest,
   jest, go test, tsc and npm failures and OpenCode's timeout note count, while
   `0 errors`, exception handlers, numeric timeout settings and type annotations
   do not. Exit-1 probes with no other output (`grep`, `rg`, `test`, `diff`,

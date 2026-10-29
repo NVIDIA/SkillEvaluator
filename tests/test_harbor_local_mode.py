@@ -2682,7 +2682,8 @@ def test_streamed_timeout_callback_matches_result_and_contains_descendants(tmp_p
     assert result.return_code == 124
     assert callback_stdout == result.stdout
     assert callback_stderr == result.stderr
-    assert callback_stderr == "stderr-before-timeout\nTimed out"
+    assert callback_stderr.startswith("stderr-before-timeout\n")
+    assert callback_stderr.endswith("Timed out")  # Bash may also report the terminated background job.
     assert secret not in callback_stdout
     child_pid = int(child_pid_path.read_text(encoding="ascii"))
     with pytest.raises(ProcessLookupError):

@@ -937,11 +937,13 @@ def _run_generated_test_sh(task_dir: Path, env: dict[str, str]) -> subprocess.Co
 
 
 @pytest.mark.parametrize("grading_mode", ["default", "default_plus_custom"])
-def test_generated_standard_grading_scripts_stop_after_evaluator_failure(
+@pytest.mark.parametrize("custom_exit", [0, 3])
+def test_generated_grading_scripts_preserve_failure_while_allowing_custom_diagnostics(
     tmp_path: Path,
     grading_mode: str,
+    custom_exit: int,
 ) -> None:
-    """Halt generated grading scripts immediately when standard evaluator fails."""
+    """Combined mode runs custom checks without turning a failed judge into success."""
     task_dir = tmp_path / grading_mode
     _write_test_sh(task_dir, grading_mode=grading_mode, custom_grader=grading_mode == "default_plus_custom")
     tests_dir = task_dir / "tests"
@@ -950,14 +952,15 @@ def test_generated_standard_grading_scripts_stop_after_evaluator_failure(
     (evaluator_dir / "eval.py").write_text("raise SystemExit(7)\n", encoding="utf-8")
     marker = task_dir / "custom-ran"
     (evaluator_dir / "custom_grader_runner.py").write_text(
-        "from pathlib import Path\nPath(" + repr(str(marker)) + ").write_text('ran')\n",
+        "from pathlib import Path\nPath(" + repr(str(marker)) + f").write_text('ran')\nraise SystemExit({custom_exit})\n",
         encoding="utf-8",
     )
 
     completed = _run_generated_test_sh(task_dir, {"HARBOR_TESTS_DIR": str(tests_dir)})
 
-    assert completed.returncode == 7
-    assert not marker.exists()
+    expected_exit = (custom_exit or 7) if grading_mode == "default_plus_custom" else 7
+    assert completed.returncode == expected_exit
+    assert marker.exists() is (grading_mode == "default_plus_custom")
 
 
 def test_generated_custom_only_script_accepts_overall_only_custom_reward(tmp_path: Path) -> None:

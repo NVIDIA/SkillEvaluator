@@ -410,7 +410,14 @@ def run_job(job_dir: Path) -> int:
         if not isinstance(request, dict):
             raise ValueError("request.json must contain an object")
         requested_action = request.get("action")
-        if not isinstance(requested_action, str) or requested_action not in {"draft", "validate", "check", "evaluate"}:
+        if not isinstance(requested_action, str) or requested_action not in {
+            "draft",
+            "validate",
+            "check",
+            "evaluate",
+            "improve",
+            "compare_improvement",
+        }:
             raise ValueError("Unknown Studio action")
         action = requested_action
         options = request.get("options")
@@ -424,12 +431,43 @@ def run_job(job_dir: Path) -> int:
             result = _draft(request, skill, job_dir, reporter)
         elif action == "validate":
             result = _validate(skill)
+        elif action in {"improve", "compare_improvement"}:
+            from skillevaluator.studio import improvements
+            from skillevaluator.studio.store import Workspace
+
+            workspace = Workspace(job_dir.parent.parent)
+            result = (
+                improvements.prepare(workspace, request, skill, job_dir)
+                if action == "improve"
+                else improvements.comparison(workspace, request)
+            )
         else:
             optional_checks = _optional_checks(request, skill, reporter)
             if optional_checks is not None:
                 _write_result(job_dir / "optional-checks.json", optional_checks, reporter)
             if action == "evaluate":
                 result = _evaluate(request, skill, job_dir, reporter)
+                if request.get("validation_of"):
+                    from skillevaluator.studio import improvements
+                    from skillevaluator.studio.store import Workspace
+
+                    _write_result(job_dir / "result.json", result, reporter)
+                    comparison_request = {
+                        "proposal_job_id": request["validation_of"],
+                        "before_job_id": request["before_job_id"],
+                        "after_job_id": job_dir.name,
+                        "outcome_metrics": request.get("outcome_metrics", []),
+                    }
+                    try:
+                        compared = improvements.comparison(Workspace(job_dir.parent.parent), comparison_request)
+                        _write_result(job_dir / "improvement-comparison.json", compared, reporter)
+                        result["improvement_comparison"] = compared
+                    except (OSError, ValueError, KeyError, TypeError, RuntimeError) as exc:
+                        result["improvement_comparison"] = {
+                            "kind": "improvement_comparison",
+                            "error": str(exc),
+                            "execution_status": "failed",
+                        }
             elif optional_checks is None:
                 result = _check(skill)
             else:
@@ -452,14 +490,21 @@ def run_job(job_dir: Path) -> int:
     except (Exception, KeyboardInterrupt) as exc:
         interrupted = isinstance(exc, KeyboardInterrupt)
         exit_code = 130 if interrupted else 1
-        kind = {"draft": "dataset", "validate": "validation", "check": "check", "evaluate": "evaluation"}.get(
-            action, "error"
-        )
+        kind = {
+            "draft": "dataset",
+            "validate": "validation",
+            "check": "check",
+            "evaluate": "evaluation",
+            "improve": "improvement",
+            "compare_improvement": "improvement_comparison",
+        }.get(action, "error")
         result = {
             "kind": kind,
             "execution_status": "interrupted" if interrupted else "failed",
             "error": "Run interrupted before completion." if interrupted else f"{type(exc).__name__}: {exc}",
         }
+        if action == "improve" and (job_dir / "improvement" / "receipt.json").is_file():
+            result["receipt"] = read_json(job_dir / "improvement" / "receipt.json", root=job_dir)
         if kind == "evaluation":
             result.update(
                 {

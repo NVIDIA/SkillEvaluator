@@ -2165,6 +2165,15 @@ def _write_task_toml(
     agent_workdir: str | None = None,
     arm_suffix: str = "",
 ) -> None:
+    from skillevaluator.tier3.artifact_evidence import PAIR_NAMESPACE, validate_artifact_pairs
+
+    artifact_pairs = validate_artifact_pairs(entry)
+    artifact_lines = "".join(
+        "\n[[artifacts]]\n"
+        f"source = {_toml_quote(pair['delivered'])}\n"
+        f"destination = {_toml_quote(PAIR_NAMESPACE + '/' + pair['id'] + '/delivered')}\n"
+        for pair in artifact_pairs
+    )
     entry_id = entry.get("id", "unknown")
     expected_skill = entry.get("expected_skill") or "none"
     if not isinstance(entry_id, str):
@@ -2183,6 +2192,7 @@ def _write_task_toml(
 
     task_name = f"nvidia/skillevaluator-{entry_id}{arm_suffix}"
     content = f"""schema_version = "1.3"
+{artifact_lines}
 
 [task]
 name = {_toml_quote(task_name)}
@@ -2331,8 +2341,10 @@ def _write_test_sh(task_dir: Path, *, grading_mode: str, custom_grader: bool) ->
     elif grading_mode == "default_plus_custom" and custom_grader:
         script = (
             prefix
-            + 'python3 -I "${evaluator_dir}/eval.py"\n'
+            + "default_status=0\n"
+            + 'python3 -I "${evaluator_dir}/eval.py" || default_status=$?\n'
             + 'python3 -I "${evaluator_dir}/custom_grader_runner.py" --mode default_plus_custom\n'
+            + 'exit "$default_status"\n'
         )
     else:
         script = prefix + 'python3 -I "${evaluator_dir}/eval.py"\n'
@@ -5758,6 +5770,8 @@ def _stage_native_harbor_tasks_into(
         )
         _ensure_native_skills_dir(task_dir)
         entry = entries_by_id.get(entry_id)
+        if entry and entry.get("artifact_pairs"):
+            raise ValueError("Artifact pairs currently require generated single-step tasks; native tasks are unsupported")
         if grading_mode in ("default", "default_plus_custom") and entry is None:
             raise ValueError(f"Native Harbor task '{entry_id}' has no matching entry in evals/evals.json")
 
@@ -6196,6 +6210,9 @@ def _generate_harbor_tasks_into(
             baseline_aliases_prevalidated=baseline_aliases_prevalidated,
         )
 
+        from skillevaluator.tier3.artifact_evidence import stage_artifact_pairs
+
+        stage_artifact_pairs(task_dir, normalized_entry)
         task_dirs.append(case_id)
         task_paths.append(task_dir)
         logger.debug("Generated task: %s (has_skill=%s)", case_id, with_skill)

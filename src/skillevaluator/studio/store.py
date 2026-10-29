@@ -60,9 +60,13 @@ def source_files(path: Path) -> list[Path]:
     files = []
     for p in sorted(path.rglob("*")):
         relative = p.relative_to(path)
-        if any(part in {".git", "__pycache__", ".venv", "node_modules"} for part in relative.parts):
+        fixture = len(relative.parts) > 2 and tuple(p.casefold() for p in relative.parts[:2]) in {
+            ("eval", "files"),
+            ("evals", "files"),
+        }
+        if not fixture and any(part in {".git", "__pycache__", ".venv", "node_modules"} for part in relative.parts):
             continue
-        if p.name.startswith(".env") or p.name in {"credentials.json", "auth.json"}:
+        if not fixture and (p.name.startswith(".env") or p.name in {"credentials.json", "auth.json"}):
             continue
         if p.is_symlink():
             raise ValueError("Remove symbolic links before using this skill.")
@@ -220,9 +224,20 @@ class Workspace:
                 if entry.flag_bits & 1:
                     raise ValueError("Upload an unencrypted zip archive.")
             skills = [e for e in entries if not e.is_dir() and PurePosixPath(e.filename).name == "SKILL.md"]
-            if len(skills) != 1:
+            if not skills:
                 raise ValueError("The zip must contain exactly one SKILL.md. Export a single skill folder.")
-            prefix = PurePosixPath(skills[0].filename).parent
+            manifest = min(skills, key=lambda e: len(PurePosixPath(e.filename).parts))
+            prefix = PurePosixPath(manifest.filename).parent
+            for entry in skills:
+                path = PurePosixPath(entry.filename)
+                if entry is manifest:
+                    continue
+                if not path.is_relative_to(prefix) or tuple(
+                    p.casefold() for p in path.relative_to(prefix).parts[:2]
+                ) not in {("eval", "files"), ("evals", "files")}:
+                    raise ValueError(
+                        "The zip must contain exactly one skill; nested SKILL.md files are allowed only in evaluation fixtures."
+                    )
             seen = set()
             for entry in entries:
                 if entry.is_dir():
@@ -232,7 +247,8 @@ class Workspace:
                     ignored.append(entry.filename)
                     continue
                 relative = path.relative_to(prefix)
-                if (
+                fixture = tuple(p.casefold() for p in relative.parts[:2]) in {("eval", "files"), ("evals", "files")}
+                if not fixture and (
                     any(p in {".git", "__pycache__", ".venv", "node_modules"} for p in relative.parts)
                     or relative.name.startswith(".env")
                     or relative.name in {"credentials.json", "auth.json"}
@@ -250,7 +266,13 @@ class Workspace:
                 if len(content) > MAX_EXPANDED:
                     raise ValueError("The expanded file is too large.")
                 target.write_bytes(content)
-                target.chmod(0o700 if entry.external_attr >> 16 & 0o111 else 0o600)
+                target.chmod((entry.external_attr >> 16 & 0o777) or 0o600)
+            for entry in entries:
+                path = PurePosixPath(entry.filename)
+                if entry.is_dir() and path.is_relative_to(prefix) and path != prefix:
+                    target = safe_file(destination, path.relative_to(prefix).as_posix())
+                    if target.is_dir() and (mode := entry.external_attr >> 16 & 0o777):
+                        target.chmod(mode)
         return ignored
 
     def update(self, skill_id: str, content: str) -> dict:
@@ -276,6 +298,8 @@ class Workspace:
                 or not CASE_IDENTIFIER.fullmatch(case["id"])
             ):
                 raise ValueError("Each case needs a unique ID using letters, numbers, hyphens, underscores or dots.")
+            if case.get("authoring_status") == "qualified" and case.get("unresolved_requirements"):
+                raise ValueError("Resolve each case's requirements before qualifying its expected result.")
             if case["id"] in seen:
                 raise ValueError(f"Duplicate case ID: {case['id']}")
             seen.add(case["id"])
@@ -312,6 +336,30 @@ class Workspace:
             },
         )
         return self.update(candidate_id, content)
+
+    def import_candidate(self, skill_id: str, package: Path, *, proposal_job_id: str, discovery_job_id: str) -> dict:
+        from skillevaluator.studio.improvements import copy_package
+
+        parent = self.describe(skill_id)
+        candidate_id = new_id()
+        root = self.skills / candidate_id
+        try:
+            copy_package(package, root / "skill")
+            write_json(
+                root / "metadata.json",
+                {
+                    "name": parent["name"],
+                    "created_at": now(),
+                    "parent_id": skill_id,
+                    "proposal_job_id": proposal_job_id,
+                    "discovery_job_id": discovery_job_id,
+                    "ignored_files": [],
+                },
+            )
+            return self.describe(candidate_id)
+        except Exception:
+            shutil.rmtree(root, ignore_errors=True)
+            raise
 
     def export(self, skill_id: str) -> bytes:
         folder = self.directory(skill_id)

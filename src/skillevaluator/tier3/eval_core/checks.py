@@ -650,21 +650,14 @@ def _command_reads_skill_md_arg(command: list[str], cmd_idx: int, assignments: d
 _SHELL_EXPANSION_CHARS = frozenset("{*?[$`")
 
 
-def _failed_single_skill_read(call):
-    """A shell failure only proves the skill read failed for an isolated read.
-
-    Compound commands, multi-file reads and operands that the shell may expand
-    into several files can print SKILL.md successfully before another file or
-    operation fails.
-    """
-    if call.get("is_error") is not True:
-        return False
-    tokens = _shell_tokens(_command_text(call))
+def _single_skill_read_operand(cmd):
+    """Recognize one viewer operand without interpreting shell expansion."""
+    tokens = _shell_tokens(cmd)
     if not tokens or any(token in _SHELL_SEPARATORS for token in tokens):
-        return False
+        return None
     command = tokens[0].rsplit("/", 1)[-1].lower()
     if command not in {"cat", "nl", "bat", "less", "more"}:
-        return False
+        return None
     files = []
     options_ended = False
     for arg in tokens[1:]:
@@ -673,19 +666,20 @@ def _failed_single_skill_read(call):
             options_ended = True
         elif options_ended or arg == "-" or not arg.startswith("-"):
             files.append(arg)
-    return len(files) == 1 and not _SHELL_EXPANSION_CHARS.intersection(files[0]) and _skill_md_arg(files[0], {})
+    return files[0] if len(files) == 1 and _skill_md_arg(files[0], {}) else None
 
 
-def _cmd_reads_skill_md(cmd) -> bool:
-    """True if a shell command reads a SKILL.md via a file-view utility.
+def _failed_single_skill_read(call):
+    """A shell failure only proves failure for one nonexpanding read operand."""
+    operand = _single_skill_read_operand(_command_text(call))
+    return call.get("is_error") is True and operand is not None and not _SHELL_EXPANSION_CHARS.intersection(operand)
 
-    Requires both a read verb (cat/sed/head/...) AND a ``SKILL.md`` filename
-    reference. The bare word ``SKILL`` is not enough: search commands such as
-    ``grep SKILL config.json`` or ``sed -n '/SKILL/p' config.json`` match the
-    word but never open a SKILL.md, and must not be credited as skill reads.
-    """
+
+def _shell_skill_md_reads(cmd) -> list[str]:
+    """Return read operands, without borrowing identity from other commands."""
     tokens = _shell_tokens(cmd)
     assignments: dict[str, str] = {}
+    paths: list[str] = []
     idx = 0
     while idx < len(tokens):
         if tokens[idx] in _SHELL_SEPARATORS:
@@ -707,11 +701,17 @@ def _cmd_reads_skill_md(cmd) -> bool:
 
         if cmd_idx < len(command):
             executable = command[cmd_idx].rsplit("/", 1)[-1].lower()
-            if executable in _FILE_READ_VERBS and _command_reads_skill_md_arg(command, cmd_idx, assignments):
-                return True
+            if executable in _FILE_READ_VERBS:
+                paths.extend(
+                    arg for arg in _command_input_args(command, cmd_idx, assignments) if _skill_md_arg(arg, {})
+                )
 
         idx = end + 1
-    return False
+    return paths
+
+
+def _cmd_reads_skill_md(cmd) -> bool:
+    return bool(_shell_skill_md_reads(cmd))
 
 
 _SCRIPT_INTERPRETERS = {"ash", "bash", "dash", "ksh", "mksh", "node", "perl", "python", "python3", "ruby", "sh", "zsh"}
@@ -794,7 +794,7 @@ def _path_with_shell_cwd(value: str, current_directory: str | None) -> str:
     value = str(value)
     if not current_directory or not value or value.startswith(("/", "\\")) or re.match(r"^[A-Za-z]:[\\/]", value):
         return value
-    return f"{current_directory.rstrip('/\\')}/{value}"
+    return current_directory.rstrip("/\\") + "/" + value
 
 
 def _possibly_references_target_directory(value: Any, target_skill: str) -> bool:
@@ -1757,6 +1757,53 @@ def _skill_name_from_ref(ref: str) -> str:
     return ""
 
 
+def _skill_read_sources(call: dict[str, Any]) -> list[tuple[str, str]]:
+    """Attribute identity to a read operand; an empty name means unknown.
+
+    Frontmatter can identify a document from an isolated read's output. It
+    does not establish ownership by any particular installed skill directory.
+    """
+    action = str(call.get("action", ""))
+    shell = _is_execution_action(action)
+    if shell:
+        if _failed_single_skill_read(call):
+            return []
+        command = _command_text(call)
+        paths = _shell_skill_md_reads(command)
+        isolated = _single_skill_read_operand(command) is not None and len(paths) == 1
+    elif "read" in action.lower() and call.get("is_error") is not True:
+        path = _extract_path(call)
+        paths = [path] if _skill_md_arg(path, {}) else []
+        isolated = True
+    else:
+        return []
+    observation = str(call.get("observation", ""))
+    content = re.sub(r"\Astatus=[^\n]*\nexit_code=-?\d+\n", "", observation)
+    frontmatter = re.match(r"\s*---\s*\n(.*?)\n---(?:\n|$)", content, re.DOTALL) if isolated else None
+    declared = re.search(r"(?m)^name:\s*['\"]?([\w.-]+)['\"]?\s*$", frontmatter[1]) if frontmatter else None
+    sources = []
+    for path in paths:
+        name = _skill_name_from_ref(path)
+        if name in {".", ".."} or _SHELL_EXPANSION_CHARS.intersection(path):
+            name = ""
+        # An outer success can hide a failed read followed by another command.
+        diagnostic = shell and re.search(
+            r"(?m)^(?:cat|sed|head|tail|awk|less|more|nl|bat):[^\n]*" + re.escape(path) + r"['\"]?:", observation
+        )
+        sources.append((path, "" if diagnostic else declared[1] if declared else name))
+    return sources
+
+
+def _unknown_skill_read_result(paths: list[str]) -> dict[str, Any]:
+    return {
+        "passed": None,
+        "score": 0.5,
+        "supported": False,
+        "reason": "SKILL.md read identity or success could not be attributed",
+        "details": {"unattributed_reads": paths},
+    }
+
+
 def _allowed_workspace_skills(
     expected_skill: str,
     workspace_skill_names: list[str] | None,
@@ -2033,7 +2080,7 @@ def check_activation(
       1. Claude Code ``Skill`` tool (via *skill_tool_names*)
       2. ``read_file`` / ``read`` with path containing expected_skill + SKILL.md
       3. ``bash cat`` of SKILL.md
-      4. Skill referenced in any tool-call observation text
+      4. Frontmatter identity from an isolated read output
     """
     if not expected_skill:
         return {"passed": True, "score": 1.0, "reason": "No expected_skill -- skipped"}
@@ -2053,83 +2100,34 @@ def check_activation(
                     "details": {**_skill_match_details(expected_skill, acceptable_skills), **match},
                 }
 
-    # Check 2: read_file / read with SKILL.md in path
-    read_calls = [tc for tc in tool_calls if "read" in tc["action"].lower() and tc.get("is_error") is not True]
-    for call in read_calls:
-        path_arg = _extract_path(call)
-        if "SKILL.md" not in path_arg:
-            continue
-        skill_name = _skill_name_from_ref(path_arg) or path_arg
-        match = _classify_skill_match(skill_name, expected_skill, acceptable_skills, fuzzy=skill_name == path_arg)
-        if match:
-            reason = f"Read SKILL.md for '{expected_skill}'"
-            if match["match_type"] == "acceptable_alternate":
-                reason = f"Read SKILL.md for acceptable alternate '{match['matched_skill']}'"
-            return {
-                "passed": True,
-                "score": match["score"],
-                "reason": reason,
-                "details": {**_skill_match_details(expected_skill, acceptable_skills), **match, "path": path_arg},
-            }
-
-    # Check 3: shell read of SKILL.md (cat/sed/head/...)
-    exec_calls = [tc for tc in tool_calls if _is_execution_action(str(tc["action"])) and not _failed_single_skill_read(tc)]
-    for call in exec_calls:
-        cmd = _command_text(call)
-        if _cmd_reads_skill_md(cmd):
-            match = _classify_skill_match(cmd, expected_skill, acceptable_skills, fuzzy=True)
-            if not match:
-                match = _classify_skill_match(
-                    str(call.get("observation", "")),
-                    expected_skill,
-                    acceptable_skills,
-                    fuzzy=True,
-                )
+    # Read identity must come from that read, not unrelated command/output text.
+    unknown_reads: list[str] = []
+    for call in tool_calls:
+        shell = _is_execution_action(str(call.get("action", "")))
+        for path, name in _skill_read_sources(call):
+            if not name:
+                unknown_reads.append(path)
+                continue
+            match = _classify_skill_match(name, expected_skill, acceptable_skills, fuzzy=shell)
             if match:
-                score = min(0.75, float(match["score"]))
-                reason = "Read SKILL.md via shell read command"
-                if match["match_type"] == "acceptable_alternate":
-                    reason = f"Read acceptable alternate SKILL.md via shell read command: {match['matched_skill']}"
+                reason = (
+                    "Read SKILL.md via shell read command" if shell else f"Read SKILL.md for '{match['matched_skill']}'"
+                )
                 return {
                     "passed": True,
-                    "score": score,
+                    "score": min(0.75, float(match["score"])) if shell else match["score"],
                     "reason": reason,
-                    "details": {**_skill_match_details(expected_skill, acceptable_skills), **match},
+                    "details": {**_skill_match_details(expected_skill, acceptable_skills), **match, "path": path},
                 }
 
     if _has_unsupported_native_codex_call(tool_calls):
         return _unsupported_native_codex_result(
             "Skill activation could not be evaluated because a native Codex exec wrapper was unsupported"
         )
+    if unknown_reads:
+        return _unknown_skill_read_result(unknown_reads)
 
-    # Check 4: Skill referenced in tool observation
-    for tc in tool_calls:
-        action = str(tc.get("action", ""))
-        cmd = _command_text(tc)
-        has_skill_read_evidence = ("read" in action.lower() and "SKILL.md" in str(tc.get("action_input", ""))) or (
-            _is_execution_action(action) and _cmd_reads_skill_md(cmd)
-        )
-        if not has_skill_read_evidence or (
-            tc.get("is_error") is True
-            and (not _is_execution_action(action) or _failed_single_skill_read(tc))
-        ):
-            continue
-        obs = str(tc.get("observation", "")).lower()
-        if "skill.md" in obs:
-            match = _classify_skill_match(obs, expected_skill, acceptable_skills, fuzzy=True)
-            if match:
-                score = min(0.75, float(match["score"]))
-                reason = "SKILL.md found in tool observation"
-                if match["match_type"] == "acceptable_alternate":
-                    reason = f"Acceptable alternate SKILL.md found in tool observation: {match['matched_skill']}"
-                return {
-                    "passed": True,
-                    "score": score,
-                    "reason": reason,
-                    "details": {**_skill_match_details(expected_skill, acceptable_skills), **match},
-                }
-
-    # Check 5: Any Skill tool activation at all (wrong skill)
+    # An explicit activation of another skill is still negative evidence.
     if skill_tool_names:
         return {"passed": False, "score": 0.0, "reason": f"Activated different skill(s): {skill_tool_names}"}
 
@@ -2138,7 +2136,7 @@ def check_activation(
         "score": 0.0,
         "reason": (
             f"No evidence of target skill use in trajectory for '{expected_skill}'. "
-            "Checked Skill tool calls, SKILL.md reads, bash cat commands, and tool observations."
+            "Checked Skill tool calls and attributable SKILL.md reads."
         ),
         "details": _skill_match_details(expected_skill, acceptable_skills),
     }
@@ -5192,11 +5190,11 @@ def check_error_recovery(
     tool_calls: list[dict[str, Any]],
     expected_script: str | None = None,
 ) -> dict[str, Any]:
-    """Detect error-retry patterns and attribute fault to skill vs agent.
+    """Detect observed error-retry patterns without inferring their cause.
 
     Scans bash/execute tool calls for commands that failed (non-zero exit or
     error keywords in observation) followed by a similar command that
-    succeeded.  Returns per-correction details with fault attribution.
+    succeeded. Returns per-correction evidence with unattributed causes.
     """
     if not tool_calls:
         return {
@@ -5207,6 +5205,7 @@ def check_error_recovery(
             "corrections": [],
             "skill_faults": 0,
             "agent_faults": 0,
+            "unattributed_failures": 0,
         }
 
     exec_actions = {"bash", "execute", "run_code", "run"}
@@ -5236,6 +5235,7 @@ def check_error_recovery(
             "corrections": [],
             "skill_faults": 0,
             "agent_faults": 0,
+            "unattributed_failures": 0,
         }
 
     # Only complete status lines are execution evidence; source code and prose
@@ -5269,7 +5269,8 @@ def check_error_recovery(
         r"|\bbash tool terminated command after exceeding timeout\b",
         re.IGNORECASE | re.MULTILINE,
     )
-    skill_fault_keywords = [
+    # Preserve the legacy friction penalty; these diagnostics do not establish cause.
+    legacy_high_penalty_keywords = [
         "no such file",
         "filenotfounderror",
         "not found",
@@ -5390,6 +5391,8 @@ def check_error_recovery(
     def _is_failure(tc: dict[str, Any]) -> bool:
         obs = str(tc.get("observation", ""))
         exit_code = _exit_status(tc)
+        if tc.get("is_error") is True and exit_code != 1:
+            return True
         if exit_code is not None:
             return exit_code != 0 and not (exit_code == 1 and _is_quiet_negative_probe(tc, obs))
         # Only results without an exit status are judged by their text.
@@ -5413,10 +5416,6 @@ def check_error_recovery(
         program1, program2 = (re.sub(r"[\d.]+$", "", words[0].rsplit("/", 1)[-1]) for words in (words1, words2))
         return (bool(program1) and program1 == program2) or words1[0] in words2 or words2[0] in words1
 
-    def _is_skill_fault(error_obs: str) -> bool:
-        obs_lower = error_obs.lower()
-        return any(kw in obs_lower for kw in skill_fault_keywords)
-
     failed = [_is_failure(call) for _, call in exec_calls]
     # A benign negative query is not a successful retry of an earlier error.
     succeeded = [not failed[i] and _exit_status(call) in (None, 0) for i, (_, call) in enumerate(exec_calls)]
@@ -5424,6 +5423,7 @@ def check_error_recovery(
     corrections: list[dict[str, Any]] = []
     failures: list[dict[str, Any]] = []
     seen_fail_indices: set[int] = set()
+    legacy_high_penalty_failures = 0
 
     for i, (orig_idx, call) in enumerate(exec_calls):
         if orig_idx in seen_fail_indices:
@@ -5433,7 +5433,8 @@ def check_error_recovery(
 
         cmd = _cmd_text(call)
         obs = str(call.get("observation", ""))
-        fault = "skill" if _is_skill_fault(obs) else "agent"
+        legacy_high_penalty_failures += any(kw in obs.lower() for kw in legacy_high_penalty_keywords)
+        fault = "unattributed"
         # Record every observed failure, whether or not it is later recovered.
         # Previously only recovered failures (corrections) were tracked, so an
         # unrecovered failure was silently scored as first-attempt clean.
@@ -5470,8 +5471,6 @@ def check_error_recovery(
                 break
 
     first_attempt_clean = len(failures) == 0
-    skill_faults = sum(1 for f in failures if f["fault"] == "skill")
-    agent_faults = sum(1 for f in failures if f["fault"] == "agent")
     unrecovered_failures = [f for f in failures if not f["recovered"]]
 
     if first_attempt_clean:
@@ -5481,23 +5480,24 @@ def check_error_recovery(
         score = 0.0
         unrecovered_cmds = ", ".join(f["failed_cmd"][:60] for f in unrecovered_failures[:3])
         reason = f"{len(unrecovered_failures)} unrecovered failure(s): {unrecovered_cmds}"
-    elif skill_faults > 0:
-        score = max(0.0, 1.0 - (skill_faults * 0.25))
-        reason = f"{skill_faults} skill defect(s), {agent_faults} agent error(s)"
+    elif legacy_high_penalty_failures > 0:
+        score = max(0.0, 1.0 - (legacy_high_penalty_failures * 0.25))
+        reason = f"{len(failures)} recovered execution failure(s); cause not established"
     else:
-        score = max(0.5, 1.0 - (agent_faults * 0.1))
-        reason = f"{agent_faults} agent error(s), no skill defects"
+        score = max(0.5, 1.0 - (len(failures) * 0.1))
+        reason = f"{len(failures)} recovered execution failure(s); cause not established"
 
     return {
-        "passed": first_attempt_clean or (skill_faults == 0 and not unrecovered_failures),
+        "passed": first_attempt_clean or (legacy_high_penalty_failures == 0 and not unrecovered_failures),
         "score": round(score, 4),
         "reason": reason,
         "first_attempt_clean": first_attempt_clean,
         "corrections": corrections,
         "failures": failures,
         "unrecovered_failures": unrecovered_failures,
-        "skill_faults": skill_faults,
-        "agent_faults": agent_faults,
+        "skill_faults": 0,
+        "agent_faults": 0,
+        "unattributed_failures": len(failures),
     }
 
 
@@ -5568,10 +5568,9 @@ def check_routing(
 ) -> dict[str, Any]:
     """Check the agent read only expected/allowed workspace skill docs."""
     unsupported_native_codex_call = _has_unsupported_native_codex_call(tool_calls)
-    read_calls = [tc for tc in tool_calls if "read" in tc["action"].lower() and tc.get("is_error") is not True]
-
     skills_read: list[str] = []
     wrong_skills: list[str] = []
+    unknown_reads: list[str] = []
     matched_expected = False
     matched_alternate = False
     matched_alternates: list[str] = []
@@ -5582,42 +5581,21 @@ def check_routing(
         acceptable_skills,
     )
 
-    for call in read_calls:
-        path = _extract_path(call)
-        if "SKILL.md" not in path:
-            continue
-
-        skills_read.append(path)
-        skill_name = _skill_name_from_ref(path)
-        match = _classify_skill_match(skill_name, expected_skill, acceptable_skills)
-        if match and match["match_type"] == "expected":
-            matched_expected = True
-        elif match and match["match_type"] == "acceptable_alternate":
-            matched_alternate = True
-            matched_alternates.append(str(match["matched_skill"]))
-        if skill_name and skill_name not in allowed_skills:
-            wrong_skills.append(path)
-
     for call in tool_calls:
-        action = call["action"].lower()
-        cmd = _command_text(call)
-        if not (_is_execution_action(action) and _cmd_reads_skill_md(cmd)) or _failed_single_skill_read(call):
-            continue
-
-        skills_read.append(cmd)
-        skill_name = _skill_name_from_ref(cmd)
-        match = _classify_skill_match(skill_name, expected_skill, acceptable_skills, fuzzy=not skill_name)
-        if not match:
-            match = _classify_skill_match(
-                str(call.get("observation", "")), expected_skill, acceptable_skills, fuzzy=True
-            )
-        if match and match["match_type"] == "expected":
-            matched_expected = True
-        elif match and match["match_type"] == "acceptable_alternate":
-            matched_alternate = True
-            matched_alternates.append(str(match["matched_skill"]))
-        if skill_name and skill_name not in allowed_skills and not match:
-            wrong_skills.append(cmd)
+        shell = _is_execution_action(str(call.get("action", "")))
+        for path, name in _skill_read_sources(call):
+            skills_read.append(path)
+            if not name:
+                unknown_reads.append(path)
+                continue
+            match = _classify_skill_match(name, expected_skill, acceptable_skills, fuzzy=shell)
+            if match and match["match_type"] == "expected":
+                matched_expected = True
+            elif match and match["match_type"] == "acceptable_alternate":
+                matched_alternate = True
+                matched_alternates.append(str(match["matched_skill"]))
+            if name not in allowed_skills and not match:
+                wrong_skills.append(path)
 
     # Claude Code Skill tool activations also count
     if skill_tool_names:
@@ -5662,6 +5640,9 @@ def check_routing(
         return _unsupported_native_codex_result(
             "Skill routing could not be evaluated because a native Codex exec wrapper was unsupported"
         )
+
+    if unknown_reads:
+        return _unknown_skill_read_result(unknown_reads)
 
     if matched_alternate and not matched_expected:
         return {

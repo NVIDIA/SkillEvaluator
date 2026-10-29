@@ -19,11 +19,12 @@ cases twice: once with the skill installed
 (the with-skill arm) and, unless you pass `--skip-baseline`, once without it
 (the baseline arm). Both arms execute inside a selected
 [Harbor](https://github.com/harbor-framework/harbor) environment. Harbor is the
-open-source agent evaluation framework that runs the trial, so the only
-experimental variable is the skill itself. **Skill Lift** is the signed
-difference between the two arms — the direct measurement of what your skill
-contributes. With multiple attempts per case, **pass@k** adds a reliability
-signal alongside it.
+open-source agent evaluation framework that runs the trial. Keep tasks, models,
+graders, and runtime settings identical across arms. **Skill Lift** is the signed
+difference between their scores. A gain in skill-use or routing scores does not
+establish better task outcomes; use independent artifact or behavior checks to
+measure those. Multiple attempts expose variation; **pass@k** means at least one
+of the attempts passed, not that every attempt passed.
 
 With `default` or `default_plus_custom` grading, reports lead with five
 human-readable dimensions:
@@ -88,7 +89,7 @@ using Harbor 0.24:
   `tier3 evaluate` fail the prerequisite check until you reinstall the extra.
 - Codex runs with `reasoning_effort=high`, the effort Harbor 0.22 used by
   default, so results stay comparable across Harbor upgrades.
-- Harbor installs Codex 0.161.0 and Claude Code 2.1.292 rather than the latest
+- Harbor installs Codex 0.161.0, Claude Code 2.1.292, and OpenCode 1.18.33 rather than the latest
   release, so a new CLI release does not change results. Claude Code runs
   Claude 5.5 and later models with `reasoning_effort=medium`. Local mode uses
   your installed CLIs and checks that they are new enough for the model.
@@ -332,6 +333,137 @@ agents and arms. [Reports & Results](reports.mdx) explains everything the run
 wrote and how to interpret it.
 
 </Steps>
+
+## Improve a skill from retained evidence
+
+Skill Improver turns a completed evaluation into a reviewable candidate. It
+preserves the original skill and freezes evaluation files; it does not rerun,
+accept, or publish the candidate. Run the original evaluation with
+`--harbor-keep-jobs`: the retained task and job files are required to verify the
+evaluated source, grader, and runtime settings. Start by inspecting an evidence export:
+
+```bash
+skillevaluator tier3 improve ./my-skill \
+  --result ./runs/original/RUN_ID --output-dir ./improvements/export
+```
+
+Pass an explicit run directory or `result.json`, not a moving latest-run alias.
+Automatic editing requires complete retained evidence and a source skill that
+matches the evaluated target and its retained files. Cases marked `selection`,
+`validation`, `val`, `holdout`, `heldout`, `held-out`, or `test` are excluded from editor feedback.
+Unspecified or unknown splits count as developer-selected discovery data;
+label your reserved cases before evaluation. An export from incomplete or
+unverified evidence is diagnostic only; repair or rerun the original evaluation
+with retention before proposing edits.
+
+Each failed finding includes a redacted `diagnostic.text` excerpt from its retained
+grader detail, separate from the short display reason. Excerpts are bounded to
+16 KiB of JSON-encoded text; `diagnostic.truncated` explicitly marks omissions.
+These diagnostics can expose nested check errors, but remain grader observations,
+not established causes. Review the proposed source explanation, actual skill use,
+and later recovery before accepting an edit. A clipped diagnostic is not evidence
+that the last visible line caused the failure.
+
+Cases explicitly marked `draft_requires_oracle_review` also block automatic edits
+and comparison acceptance. Independently qualify their inputs and expectations,
+mark the authored cases `qualified`, then run a new original evaluation with
+retention. Never rewrite a captured dataset snapshot to remove this guard.
+
+| Mode | How edits are proposed |
+| --- | --- |
+| `export` (default) | Write `evidence.json`, `instructions.md`, and an empty `edits.json` for review or another tool. |
+| `llm` | Use the configured public LLM provider; `--model` optionally selects the editor model. |
+| `deterministic` | Apply a reviewed exact-match proposal from `--edits FILE`. |
+| `agent-command` | Run `--agent-command "COMMAND ARGUMENTS"` without a shell. The command reads instructions on stdin and writes proposal JSON to `SKILL_IMPROVER_EDITS`; `SKILL_IMPROVER_EVIDENCE` names the evidence file. |
+
+An agent command is **trusted local code with host filesystem and inherited
+environment access**. It is not sandboxed by the evaluation backend. The receipt
+records this boundary and whether the command was invoked.
+
+All editing modes use the same proposal format:
+
+```json
+{
+  "source_digest": "COPY_FROM_EVIDENCE_JSON",
+  "summary": "Evidence-based explanation of the proposed change or decision to abstain",
+  "edits": [{
+    "path": "SKILL.md",
+    "old_text": "Exact existing text occurring once",
+    "new_text": "Replacement text",
+    "reason": "How this addresses the observed skill defect",
+    "evidence_ids": ["COPY_A_FAILED_DISCOVERY_FINDING_ID"]
+  }]
+}
+```
+
+An empty edits list is valid. By default, every edit must cite an existing failed
+discovery finding; a low score alone does not establish that the skill is defective.
+Per-case evidence retains partial failures even above the CLI's summary cutoff.
+Routing and execution-friction scores are diagnostics: an agent can complete
+the task without using a skill, and a failed command does not establish who
+caused the failure. Check the independent outcome and observed evidence before
+turning either signal into an edit.
+Behavior judging retains bounded execution calls and available tool returns before
+long reports consume the evidence budget. Coverage text identifies omitted or
+clipped calls; it does not prove success or provide a complete read/write history.
+LLM proposals must include a nonempty `summary`, including the reason and missing
+evidence when no edit is proposed. This field remains optional for supplied
+deterministic and agent-command proposals. The receipt displays its first 2000
+characters in `proposal_summary`, marks shortening with `proposal_summary_truncated`,
+and records whether an editor invocation was attempted in `editor_invoked`. The full
+explanation stays in `edits.json` within the existing proposal size limit. It is
+unverified model rationale, not an acceptance verdict.
+An unchanged result recommends keeping the original, without requesting
+another evaluation of identical content.
+Both `evals/` and legacy `eval/` stay outside the editor packet and cannot be
+edited. Without failed discovery findings, LLM and agent-command modes return
+an unchanged candidate without invoking an editor.
+
+Add `--include-agent-observations` to include a bounded final agent report from
+each discovery trial. An agent may complete a task while reporting a broken
+helper it worked around. These observations have separate IDs and are explicitly
+unverified: the editor must check them against the source before proposing a
+repair. They do not change scores or turn a successful task into a failure.
+This option can invoke an editor without failed scores; acceptance still requires
+fresh runs demonstrating an outcome gain or independently verified reduced rework.
+
+```bash
+skillevaluator tier3 improve ./my-skill --mode deterministic \
+  --result ./runs/original/RUN_ID --edits ./improvements/export/edits.json \
+  --output-dir ./improvements/candidate-1
+```
+
+Review `changes.diff` and `receipt.json`. Successful edit modes attach the frozen
+evaluation files to `candidate/my-skill`; an export alone is not ready to
+evaluate. LLM mode also saves `editor-response.txt`, capped at 1 MiB; invalid or
+oversized responses fail without applying edits. Run the candidate with **all original agent, model, judge, backend,
+baseline, and grading settings**, including `--harbor-keep-jobs`. Previous CLI
+overrides are not automatically replayed. Add those original options to the
+candidate command, then compare the explicit retained runs:
+
+```bash
+skillevaluator tier3 evaluate ./improvements/candidate-1/candidate/my-skill \
+  --harbor-keep-jobs
+
+skillevaluator tier3 compare-improvement ./runs/original/RUN_ID \
+  ./runs/candidate/RUN_ID --outcome-metric objective_outcome \
+  --output-dir ./improvements/comparison
+```
+
+Use `--outcome-metric` only for an independent outcome check supplied by your
+grader; it is not automatically created. The comparison exposes per-case
+changes, findings, lift, and recorded costs, including regressions and unchanged
+results. Incomplete or incompatible evidence produces `abstain`; proxy-only
+gains produce `signal_improvement`. Verdicts use per-case with-skill scores;
+baseline and lift changes remain visible but do not determine the verdict.
+Any measured score decrease produces `regression`. Multi-step runs currently
+produce `abstain`. Each case separately lists gains and regressions in your chosen
+outcome checks, plus declines in other metrics. A correct artifact can therefore
+remain visible alongside a lower execution score without relaxing the verdict.
+Even an `outcome_improvement` describes only the observed
+sample, not a causal or statistically significant gain. Use selection cases to choose a candidate and a reserved
+holdout comparison to assess generalization; this workflow does not manage
+those runs or establish statistical reliability for you.
 
 ## How a run works
 

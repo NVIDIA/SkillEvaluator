@@ -293,20 +293,6 @@ def test_findings_best_agent_matches_canonical_dimension_ranking_and_suggestion_
     assert custom_artifact["suggestion_mode"] == "not_generated"
 
 
-def test_passing_suggestions_count_mixed_current_and_legacy_logical_trials():
-    suggestions = report._passing_skill_suggestions(
-        [],
-        [
-            {"trial_id": "current-attempt"},
-            {"trial_id": "current-attempt"},
-            {"entry_id": "legacy-one"},
-            {"entry_id": "legacy-two"},
-        ],
-    )
-
-    assert any("currently 3" in suggestion for suggestion in suggestions)
-
-
 def test_generate_suggestions_prompt_includes_refs_and_uses_larger_budget(monkeypatch):
     captured = {}
 
@@ -338,6 +324,21 @@ def test_generate_suggestions_structured_returns_objects(monkeypatch):
     findings = report._extract_findings([_reward(0.1)])
     objs = report._generate_suggestions_structured("demo", findings, [_reward(0.1)])
     assert objs and objs[0]["dimension"] == "goal_accuracy" and "suggestion" in objs[0]
+
+
+def test_generate_suggestions_preserves_evidence_supported_no_change(monkeypatch):
+    captured = {}
+
+    def no_change(prompt, **_kwargs):
+        captured["prompt"] = prompt
+        return "[]", None
+
+    monkeypatch.setattr("skillevaluator.tier3.eval_core.llm_judge.call_public_llm", no_change)
+    findings = report._extract_findings([_reward(0.1)])
+
+    assert report._generate_suggestions_structured("demo", findings, [_reward(0.1)]) == []
+    assert "up to 4 evidence-supported suggestions" in captured["prompt"]
+    assert "Return [] if no change is justified" in captured["prompt"]
 
 
 def test_findings_artifact_includes_suggestions_v2(tmp_path):

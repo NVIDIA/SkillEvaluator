@@ -249,6 +249,7 @@ def _extract_findings(
     *,
     canonical_scores: dict[str, Any] | None = None,
     rewards_complete: bool = True,
+    passing_score: float = 0.8,
 ) -> list[dict[str, Any]]:
     """Extract actionable findings from reward.json details across trials."""
     findings: list[dict[str, Any]] = []
@@ -311,7 +312,7 @@ def _extract_findings(
                 _seen.add(k)
                 _refs.append(r)
 
-        if avg_score >= 0.8:
+        if avg_score >= passing_score:
             reasons = _collect_pass_reasons(metric, trials)
             findings.append(
                 {
@@ -705,7 +706,7 @@ ERROR RECOVERY ISSUES:
 EVIDENCE REFERENCES (cite the relevant compact reference exactly in your suggestions):
 {evidence_block}
 
-Based on these results, provide exactly 3-4 specific, actionable suggestions for the skill developer to improve their skill. Focus on:
+Based on these results, provide up to 4 evidence-supported suggestions for the skill developer. Return [] if no change is justified. Do not invent problems to fill a quota. Focus on:
 1. What the developer should fix in their skill (SKILL.md, scripts, config)
 2. What they should add to evals/environment/ (Dockerfile, docker-compose) if tools are missing
 3. Documentation gaps that caused agent failures
@@ -748,8 +749,7 @@ Respond with ONLY a JSON array of objects {{"suggestion": "...", "dimension": "<
                             "evidence_refs": [],
                         }
                     )
-            if result:
-                return result
+            return result
         if isinstance(parsed, dict) and "suggestions" in parsed:
             return [
                 {
@@ -824,45 +824,6 @@ def _fallback_suggestions(findings: list[dict[str, Any]]) -> list[str]:
                 )
             else:
                 suggestions.append(f"{f['label']} scored {f['score']:.2f}: {reason}")
-    return suggestions[:4]
-
-
-def _passing_skill_suggestions(
-    findings: list[dict[str, Any]],
-    rewards: list[dict[str, Any]],
-) -> list[str]:
-    """Generate improvement suggestions even when all metrics pass."""
-    suggestions: list[str] = []
-    num_trials = len(report_data.logical_trial_reward_groups(rewards))
-
-    lowest = min(findings, key=lambda f: f["score"]) if findings else None
-    if lowest and lowest["score"] < 0.95:
-        suggestions.append(
-            f"Strengthen {lowest['label'].split('(')[0].strip()} "
-            f"(scored {lowest['score']:.2f}) — review the reasons above and "
-            f"refine expected_behavior or ground_truth in evals.json to better "
-            f"match what agents actually do."
-        )
-
-    suggestions.append(
-        "Add evals/environment/Dockerfile if the skill depends on CLI tools, "
-        "databases, or APIs — this ensures consistent results across agents "
-        "and CI environments."
-    )
-
-    if num_trials < 4:
-        suggestions.append(
-            f"Expand evals.json with more test cases (currently {num_trials}). "
-            "Use 'skillevaluator create-eval-dataset --full' to generate the full bucket set "
-            "strategy covering explicit, implicit, contextual, and negative cases."
-        )
-
-    suggestions.append(
-        "Run with additional agents ('skillevaluator evaluate <skill> --agents "
-        "claude-code,codex,opencode --env-mode docker') to verify the skill works across "
-        "different coding agents."
-    )
-
     return suggestions[:4]
 
 
@@ -1161,7 +1122,7 @@ def display_findings_report(
 
     structured = _generate_suggestions_structured(skill_name, findings, rewards)
     suggestions = [s["suggestion"] for s in structured]
-    suggestion_mode = "remediation" if suggestions else "passing_next_steps"
+    suggestion_mode = "remediation" if suggestions else "no_supported_change"
 
     if suggestions:
         rendered_messages.update(str(suggestion).strip() for suggestion in suggestions if str(suggestion).strip())
@@ -1170,12 +1131,7 @@ def display_findings_report(
         for i, suggestion in enumerate(suggestions, 1):
             body.append(f"    {i}. {strip_terminal_controls(str(suggestion))}\n", style="white")
     else:
-        body.append("  \U0001f4a1 NEXT STEPS\n", style="bold cyan")
-        suggestions = _passing_skill_suggestions(findings, rewards)
-        rendered_messages.update(str(suggestion).strip() for suggestion in suggestions if str(suggestion).strip())
-        suggestions = add_evidence_links_to_suggestions(suggestions, rewards)
-        for i, suggestion in enumerate(suggestions, 1):
-            body.append(f"    {i}. {strip_terminal_controls(str(suggestion))}\n", style="white")
+        body.append("  No evidence-supported change suggested.\n", style="dim")
     rendered_messages.update(str(suggestion).strip() for suggestion in suggestions if str(suggestion).strip())
 
     for agent, (agent_findings, _agent_rewards) in agent_reports.items():

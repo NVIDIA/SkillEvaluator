@@ -13,8 +13,8 @@
   const number = (value, digits = 3) => finite(value) ? value.toFixed(digits).replace(/\.?0+$/, "") : "Not available";
   const scalar = (value) => finite(value) ? number(value) : value == null ? "Not available" : typeof value === "string" ? value : "See retained report";
   const time = (value) => value ? new Date(value).toLocaleString(undefined, {month:"short",day:"numeric",hour:"2-digit",minute:"2-digit"}) : "Time not recorded";
-  const actionNames = {draft:"Dataset draft",validate:"Dataset validation",check:"Skill checks",evaluate:"Agent evaluation"};
-  const ui = {state:null,skillId:null,stage:"skill",view:"workspace",draft:null,draftMode:null,datasetDirty:false,guidance:{task:"",success:"",avoid:""},generation:null,jobId:null,selectedCase:0,arm:"with_skill",attempt:0,detail:"checks",pollTimer:null,toastTimer:null,busy:new Set(),evalOptions:{env_mode:"local",n_attempts:1,n_concurrent:1,skip_baseline:false,agent:"",model:"",timeout_multiplier:3,grading_mode:"default",tier1:false,tier1_llm:false,dedup:false},candidateContent:null,pasteContent:"",addingSkill:false,returnFocus:null,caseRevision:0,draftStartRevision:null,pendingDraft:null};
+  const actionNames = {draft:"Dataset draft",validate:"Dataset validation",check:"Skill checks",evaluate:"Agent evaluation",improve:"Proposing changes",compare_improvement:"Comparing results"};
+  const ui = {state:null,skillId:null,stage:"skill",view:"workspace",draft:null,draftMode:null,datasetDirty:false,guidance:{task:"",success:"",avoid:""},generation:null,jobId:null,selectedCase:0,arm:"with_skill",attempt:0,detail:"checks",pollTimer:null,toastTimer:null,busy:new Set(),evalOptions:{env_mode:"local",n_attempts:1,n_concurrent:1,skip_baseline:false,agent:"",model:"",timeout_multiplier:3,grading_mode:"default",tier1:false,tier1_llm:false,dedup:false},candidateContent:null,pasteContent:"",addingSkill:false,returnFocus:null,caseRevision:0,draftStartRevision:null,pendingDraft:null,improvement:{}};
   const selectedSkill = () => ui.state?.skills?.find((s) => s.id === ui.skillId) || null;
   const jobById = (id) => ui.state?.jobs?.find((job) => job.id === id);
   const selectedJob = () => jobById(ui.jobId);
@@ -82,12 +82,21 @@
     ui.toastTimer = setTimeout(() => { toast.hidden = true; }, error ? 10000 : 5500);
   }
 
+  function showActionError(message, button) {
+    const scope=button?.closest("form,section,article,.draft-actions") || $("#workspace-content");
+    if(!scope)return;
+    let error=scope.querySelector("[data-action-error]");
+    if(!error){error=document.createElement("p");error.className="banner error section-gap";error.dataset.actionError="";error.setAttribute("role","alert");scope.append(error);}
+    error.textContent=message;error.hidden=!message;
+  }
+
   async function doAction(key, task, button) {
     if (ui.busy.has(key)) return;
     ui.busy.add(key);
+    button?.closest("form,section,article,.draft-actions")?.querySelector("[data-action-error]")?.remove();
     if (button) {button.disabled = true;button.setAttribute("aria-busy","true");}
     try { return await task(); }
-    catch (error) { notify(error.message || "The action could not be completed.", true); }
+    catch (error) { const message=error.message || "The action could not be completed.";showActionError(message,button);notify(message,true); }
     finally {ui.busy.delete(key);if(button?.isConnected){button.disabled=false;button.removeAttribute("aria-busy");}}
   }
 
@@ -153,6 +162,7 @@
     ui.caseRevision=0;ui.draftStartRevision=null;ui.pendingDraft=null;
     ui.guidance = {task:"",success:"",avoid:""};
     ui.candidateContent = null;
+    ui.improvement={};
     ui.jobId = latestJob(id)?.id || null;
     ui.selectedCase = 0;
     ui.attempt = 0;
@@ -167,6 +177,7 @@
     ui.stage = stage;
     ui.view = "workspace";
     renderAll();
+    if(stage==="improve")loadImprovement();
     $("#workspace-content").scrollIntoView({block:"nearest"});
   }
 
@@ -194,6 +205,7 @@
 
   function renderAll() {
     if (!ui.state) return;
+    const focused=document.activeElement?.id;
     renderChrome();
     if (ui.view === "runs") {renderHistory();return;}
     const content = $("#workspace-content");
@@ -202,6 +214,7 @@
     if (ui.stage === "evaluate") content.innerHTML = renderEvaluate();
     if (ui.stage === "improve") content.innerHTML = renderImprove();
     renderJobRegion();
+    if(focused)document.getElementById(focused)?.focus({preventScroll:true});
   }
 
   function skillContext(skill) {
@@ -226,7 +239,19 @@
 
   function renderCaseEditor(record,i) {
     const c=record.value,checks=c.expected_behavior ?? c.assertions ?? [],behavior=Array.isArray(checks)?checks.join("\n"):String(checks);
-    return `<article class="case-editor${record.selected?"":" excluded"}" data-case-index="${i}"><div class="case-editor-head"><label class="check-label"><input type="checkbox" data-case-field="selected" data-index="${i}"${record.selected?" checked":""}>Include this case</label><div class="case-card-actions"><code class="advanced-only">${esc(c.id || `Case ${i+1}`)}</code><button class="text-button case-remove" type="button" data-action="remove-case" data-index="${i}" aria-label="Remove test case ${i+1}">Remove</button></div></div><label class="compact-label" for="case-question-${i}">Task</label><textarea id="case-question-${i}" data-case-field="question" data-index="${i}" rows="2">${esc(c.question ?? c.prompt ?? "")}</textarea><label class="compact-label" for="case-truth-${i}">Expected result</label><textarea id="case-truth-${i}" data-case-field="ground_truth" data-index="${i}" rows="2">${esc(c.ground_truth ?? c.expected_output ?? "")}</textarea><div class="advanced-only"><label class="compact-label" for="case-behavior-${i}">Behavior checks <span class="optional">one per line</span></label><textarea id="case-behavior-${i}" data-case-field="expected_behavior" data-index="${i}" rows="3">${esc(behavior)}</textarea></div><label class="check-label${c.expected_skill===null?"":" advanced-only"}"><input type="checkbox" data-case-field="inactive" data-index="${i}"${c.expected_skill===null?" checked":""}>This skill should not activate for this task</label><details class="advanced-only"><summary>Native case details</summary><pre class="raw-object">${esc(json(c))}</pre></details></article>`;
+    const reviewed=c.authoring_status==="qualified",requirements=Array.isArray(c.unresolved_requirements)&&c.unresolved_requirements.length?c.unresolved_requirements:(Array.isArray(c.reviewed_requirements)?c.reviewed_requirements:[]);
+    const splits=[["discovery","Use to suggest changes"],["holdout","Reserve for validation"]];
+    if(c.split&&!splits.some(([value])=>value===c.split))splits.push([c.split,`Imported role: ${c.split}`]);
+    return `<article class="case-editor${record.selected?"":" excluded"}" data-case-index="${i}">
+      <div class="case-editor-head"><label class="check-label"><input type="checkbox" data-case-field="selected" data-index="${i}"${record.selected?" checked":""}>Include case ${i+1}</label><div class="case-card-actions"><span class="badge ${reviewed?"good":"attention"}" data-review-badge>${reviewed?"Reviewed":"Needs review"}</span><button class="text-button case-remove" type="button" data-action="remove-case" data-index="${i}" aria-label="Remove test case ${i+1}">Remove</button></div></div>
+      <label class="compact-label" for="case-question-${i}">Task</label><textarea id="case-question-${i}" data-case-field="question" data-index="${i}" rows="2">${esc(c.question ?? c.prompt ?? "")}</textarea>
+      <label class="compact-label" for="case-truth-${i}">Expected result</label><textarea id="case-truth-${i}" data-case-field="ground_truth" data-index="${i}" rows="2">${esc(c.ground_truth ?? c.expected_output ?? "")}</textarea>
+      <details class="case-checks"${checks.length?" open":""}><summary>What should we check?${checks.length?` (${checks.length})`:""}</summary><label class="sr-only" for="case-behavior-${i}">Behavior checks, one per line</label><textarea id="case-behavior-${i}" data-case-field="expected_behavior" data-index="${i}" rows="2">${esc(behavior)}</textarea></details>
+      ${requirements.length?`<div class="note attention section-gap"><strong>${reviewed?"Reviewed requirements":"Also verify before using this case"}</strong><ul>${requirements.map(item=>`<li>${esc(typeof item==="string"?item:json(item))}</li>`).join("")}</ul></div>`:""}
+      <label class="check-label case-review"><input type="checkbox" data-case-field="reviewed" data-index="${i}"${reviewed?" checked":""}><span>I verified the inputs${requirements.length?", expected result, and listed requirements":" and expected result"}.</span></label>
+      <div class="advanced-only"><label for="case-split-${i}">Case purpose</label><select id="case-split-${i}" data-case-field="split" data-index="${i}">${splits.map(([value,label])=>`<option value="${esc(value)}"${(c.split || "discovery")===value?" selected":""}>${esc(label)}</option>`).join("")}</select><p class="field-hint">Reserved cases test the change; their feedback is kept out of proposals.</p></div>
+      <label class="check-label${c.expected_skill===null?"":" advanced-only"}"><input type="checkbox" data-case-field="inactive" data-index="${i}"${c.expected_skill===null?" checked":""}>This skill should not activate for this task</label><details class="advanced-only"><summary>Case details</summary><pre class="raw-object">${esc(json(c))}</pre></details>
+    </article>`;
   }
 
   function renderEvaluate() {
@@ -277,7 +302,7 @@
     const r=job.result,s=r.summary || {},cases=r.cases || [];
     ui.selectedCase=Math.min(Math.max(0,ui.selectedCase),Math.max(0,cases.length-1));
     const count=cases.filter(caseAttention).length;
-    return `<section aria-label="Evaluation results"><div class="result-header"><div><p class="eyebrow">RETAINED EVALUATION RESULTS</p><h2>${cases.length} ${cases.length===1?"case":"cases"} with retained evidence.</h2><p>${esc(r.execution_status || job.status)} · ${count} ${count===1?"case needs":"cases need"} a closer look · ${time(job.started_at)} · ${esc(s.scored_attempts ?? "Unknown")} / ${esc(s.expected_attempts ?? "unknown")} attempts scored</p><p class="fine-print">${esc(actionNames[job.action] || job.action)}</p></div><div class="button-row"><button class="button secondary small" data-action="download-result" data-id="${esc(job.id)}">Download report (.json)</button><button class="button secondary small" data-stage="improve">Improve skill (optional)</button></div></div><div class="result-summary advanced-only"><div><small>SCORING COVERAGE</small><strong>${esc(s.scored_attempts ?? "Unknown")} / ${esc(s.expected_attempts ?? "unknown")} attempts scored</strong><p>Failed or unscored attempts remain visible.</p></div><div><small>LIFT UNDER THIS RUBRIC</small><strong>${finite(s.lift) ? `${s.lift>0?"+":""}${number(s.lift,4)}` : "Not available"}</strong><p>With skill ${esc(scalar(s.with_skill))} · baseline ${esc(scalar(s.without_skill))}</p></div><div><small>INTERPRETATION</small><strong>Read the case evidence.</strong><p>Lift alone does not establish a better task result or justify an edit.</p></div></div>${cases.length ? `<div class="result-grid"><aside class="surface result-cases" aria-label="Evaluation cases"><h3>Test cases</h3>${cases.map((c,i) => `<button class="case-row${i===ui.selectedCase?" active":""}${caseAttention(c)?" attention":""}" data-action="select-case" data-index="${i}"${i===ui.selectedCase?' aria-current="true"':""}><strong>${esc(c.id || `Unidentified case ${i+1}`)}</strong><p>${esc((c.question || "No task text retained.").slice(0,125))}${(c.question || "").length>125?"…":""}</p><span class="badge${caseAttention(c)?" attention":" good"}">${caseAttention(c)?"Review evidence":"Scored evidence"}</span></button>`).join("")}</aside><article class="surface case-detail" id="case-detail">${renderCaseDetail(cases[ui.selectedCase])}</article></div>` : '<div class="note attention">No case-level trials were normalized for this result. Inspect the retained report and logs. No missing outcome is counted as a pass.</div>'}${r.suggestions?.length ? `<section class="surface suggestions"><h3>Reported findings and suggestions</h3><p class="fine-print">These are the evaluator’s reported recommendations. They are not validated skill edits.</p>${r.suggestions.map((item)=>`<div class="suggestion-item">${esc(typeof item==="string"?item:json(item))}</div>`).join("")}</section>` : ""}${r.artifacts?.length ? `<div class="artifact-links advanced-only">${r.artifacts.map((a)=>`<a href="/api/jobs/${encodeURIComponent(job.id)}/download?file=${encodeURIComponent(a.path)}">${esc(a.name || a.path)}</a>`).join("")}</div>` : ""}<details class="section-gap advanced-only"><summary>Result provenance and complete normalized data</summary><div><p class="fine-print">Source ${esc(job.source_hash || "not recorded")}<br>Dataset ${esc(job.dataset_hash || "not recorded")}</p><pre class="raw-object">${esc(json(r))}</pre></div></details></section>`;
+    return `<section aria-label="Evaluation results"><div class="result-header"><div><p class="eyebrow">RETAINED EVALUATION RESULTS</p><h2>${cases.length} ${cases.length===1?"case":"cases"} with retained evidence.</h2><p>${esc(r.execution_status || job.status)} · ${count} ${count===1?"case needs":"cases need"} a closer look · ${time(job.started_at)} · ${esc(s.scored_attempts ?? "Unknown")} / ${esc(s.expected_attempts ?? "unknown")} attempts scored</p><p class="fine-print">${esc(actionNames[job.action] || job.action)}</p></div><div class="button-row"><button class="button secondary small" data-action="download-result" data-id="${esc(job.id)}">Download report (.json)</button><button class="button secondary small" data-action="improve-from-run" data-id="${esc(job.id)}">Improve skill (optional)</button></div></div><div class="result-summary advanced-only"><div><small>SCORING COVERAGE</small><strong>${esc(s.scored_attempts ?? "Unknown")} / ${esc(s.expected_attempts ?? "unknown")} attempts scored</strong><p>Failed or unscored attempts remain visible.</p></div><div><small>LIFT UNDER THIS RUBRIC</small><strong>${finite(s.lift) ? `${s.lift>0?"+":""}${number(s.lift,4)}` : "Not available"}</strong><p>With skill ${esc(scalar(s.with_skill))} · baseline ${esc(scalar(s.without_skill))}</p></div><div><small>INTERPRETATION</small><strong>Read the case evidence.</strong><p>Lift alone does not establish a better task result or justify an edit.</p></div></div>${cases.length ? `<div class="result-grid"><aside class="surface result-cases" aria-label="Evaluation cases"><h3>Test cases</h3>${cases.map((c,i) => `<button class="case-row${i===ui.selectedCase?" active":""}${caseAttention(c)?" attention":""}" data-action="select-case" data-index="${i}"${i===ui.selectedCase?' aria-current="true"':""}><strong>${esc(c.id || `Unidentified case ${i+1}`)}</strong><p>${esc((c.question || "No task text retained.").slice(0,125))}${(c.question || "").length>125?"…":""}</p><span class="badge${caseAttention(c)?" attention":" good"}">${caseAttention(c)?"Review evidence":"Scored evidence"}</span></button>`).join("")}</aside><article class="surface case-detail" id="case-detail">${renderCaseDetail(cases[ui.selectedCase])}</article></div>` : '<div class="note attention">No case-level trials were normalized for this result. Inspect the retained report and logs. No missing outcome is counted as a pass.</div>'}${r.suggestions?.length ? `<section class="surface suggestions"><h3>Reported findings and suggestions</h3><p class="fine-print">These are the evaluator’s reported recommendations. They are not validated skill edits.</p>${r.suggestions.map((item)=>`<div class="suggestion-item">${esc(typeof item==="string"?item:json(item))}</div>`).join("")}</section>` : ""}${r.artifacts?.length ? `<div class="artifact-links advanced-only">${r.artifacts.map((a)=>`<a href="/api/jobs/${encodeURIComponent(job.id)}/download?file=${encodeURIComponent(a.path)}">${esc(a.name || a.path)}</a>`).join("")}</div>` : ""}<details class="section-gap advanced-only"><summary>Result provenance and complete normalized data</summary><div><p class="fine-print">Source ${esc(job.source_hash || "not recorded")}<br>Dataset ${esc(job.dataset_hash || "not recorded")}</p><pre class="raw-object">${esc(json(r))}</pre></div></details></section>`;
   }
 
   function renderCaseDetail(c) {
@@ -289,20 +314,156 @@
     return `<div class="case-detail-head"><h3>${esc(c.id || "Case identity not retained")}</h3>${trial ? badgeStatus(trial.status) : '<span class="badge attention">No retained attempt</span>'}</div><p class="case-question">${esc(c.question || "No task text retained.")}</p><div class="arm-tabs" role="group" aria-label="Comparison arm"><button class="${ui.arm==="with_skill"?"active":""}" data-action="select-arm" data-arm="with_skill" aria-pressed="${ui.arm==="with_skill"}">With skill · ${withTrials.length}</button><button class="${ui.arm==="without_skill"?"active":""}" data-action="select-arm" data-arm="without_skill" aria-pressed="${ui.arm==="without_skill"}">Baseline · ${withoutTrials.length}</button></div>${trials.length>1?`<div class="trial-picker"><label for="trial-picker">Attempt</label><select id="trial-picker">${trials.map((t,i)=>`<option value="${i}"${ui.attempt===i?" selected":""}>${i+1} · ${esc(trialLabel(t))}</option>`).join("")}</select></div>`:""}<div class="detail-tabs" role="group" aria-label="Evidence view">${[ ["checks","Checks"],["response","Response"],["trajectory","Evidence"] ].map(([id,label])=>`<button class="${ui.detail===id?"active":""}${id==="trajectory"?" advanced-only":""}" data-action="select-detail" data-detail="${id}" aria-pressed="${ui.detail===id}">${label}</button>`).join("")}</div>${trial ? renderTrial(trial) : `<div class="note attention">No ${ui.arm==="with_skill"?"skill-enabled":"baseline"} attempt is retained for this case. A missing result is not zero and is not a pass.</div>`}`;
   }
 
+  function renderNativeEvidence(trial) {
+    const job=selectedJob()?.result?.kind==="evaluation"?selectedJob():latestJob(ui.skillId,"evaluate");
+    const group=job?.result?.improvement_signals?.agents?.[trial.agent];
+    const c=group?.cases?.find(c=>c.entry_id===trial.case_id),attempts=c?.[trial.arm==="without_skill"?"baseline_attempts":"attempts"];
+    const attempt=attempts?.find(a=>a.trial_id===(trial.physical_trial_id || trial.id));
+    if(!attempt)return "";
+    const findings=attempt.findings || [],execution=attempt.execution_evidence,artifacts=attempt.artifact_evidence;
+    return `<details class="section-gap"><summary>Evidence for improving this case</summary><p class="fine-print">${esc(c.split || "discovery")} case · ${esc(attempt.skill_activation?.reason || "Skill use was not established.")}</p>${findings.map(f=>`<details><summary>${esc(f.label || f.metric || "Finding")}</summary><p>${esc((f.reasons || []).join(" "))}</p>${f.diagnostic?.text?`<pre class="raw-object">${esc(f.diagnostic.text)}</pre>${f.diagnostic.truncated?'<p class="fine-print">Diagnostic shortened; omissions are not evidence of success.</p>':""}`:""}</details>`).join("")}${execution?`<details><summary>Observed tool calls and results</summary><pre class="raw-object">${esc(execution.summary || execution.reason || "Execution evidence is unavailable.")}</pre></details>`:""}${artifacts?`<details><summary>Original and delivered files</summary><p class="fine-print">Only declared files are compared. Changed bytes do not establish a correct result.</p><pre class="raw-object">${esc(json(artifacts))}</pre></details>`:""}${attempt.missing_scores?.length?`<p class="note attention">Missing checks: ${esc(attempt.missing_scores.join(", "))}</p>`:""}</details>`;
+  }
+
   function renderTrial(trial) {
     const id=trial.id ? `<p class="fine-print advanced-only">Trial <code>${esc(trial.id)}</code></p>` : '<p class="fine-print">Trial identity was not retained.</p>';
     const error=trial.error?`<div class="banner error">${esc(typeof trial.error==="string"?trial.error:json(trial.error))}</div>`:"";
     if(ui.detail==="response") return `${error}${trial.final_response ? `<pre class="response-view" tabindex="0" aria-label="Complete retained agent response">${esc(trial.final_response)}</pre>` : '<div class="note">No final response was retained for this attempt.</div>'}<div class="section-gap">${id}</div>`;
     if(ui.detail==="trajectory") return `${error}<p class="simple-only note">Switch to <button class="text-button" data-action="advanced-mode">Advanced</button> for detailed evidence.</p><p class="fine-print advanced-only">Retained evidence from this attempt. Complete trajectories may be available in the report artifacts below.</p>${trial.evidence?.length ? trial.evidence.map((e)=>`<pre class="raw-object advanced-only">${esc(typeof e==="string"?e:json(e))}</pre>`).join("") : '<div class="note section-gap">No structured trajectory evidence was provided by this result. Inspect the saved artifacts and logs.</div>'}<div class="section-gap">${id}</div>`;
     const checks=trial.checks || [],metrics=Object.entries(trial.metrics || {}).filter(([,v])=>finite(v)||v===null);
-    return `${error}${trial.status!=="scored"?'<div class="note attention">This attempt was not scored. Missing values are not counted as success or failure.</div>':""}<p class="simple-only fine-print">${checks.length} reported checks · ${checks.filter(c=>["fail","failed","error"].includes(String(c.status).toLowerCase())).length} failed. <button class="text-button" data-action="advanced-mode">Show all details</button></p>${checks.length ? checks.map((check)=>`<div class="check-result${["pass","passed","valid","succeeded"].includes(String(check.status).toLowerCase())?" advanced-only":""}"><div class="check-result-head"><strong>${esc(check.name || "Unnamed check")}</strong>${badgeStatus(check.status)}</div>${check.reason?`<p>${esc(check.reason)}</p>`:""}${check.evidence?.length ? `<pre class="check-evidence advanced-only">${esc(check.evidence.map((e)=>typeof e==="string"?e:json(e)).join("\n\n"))}</pre>`:""}</div>`).join("") : '<div class="note">No requirement-level checks were provided. The reported metrics below do not establish exact output compliance on their own.</div>'}${metrics.length ? `<h4 class="section-gap advanced-only">Reported metrics</h4><dl class="metric-list advanced-only">${metrics.map(([name,value])=>`<div><dt>${esc(name.replaceAll("_"," "))}</dt><dd>${number(value)}</dd></div>`).join("")}</dl>`:""}<div class="note section-gap advanced-only"><strong>Skill attribution</strong><br>No causal skill diagnosis or validated edit is supplied by these scores alone.</div><div class="section-gap">${id}</div>`;
+    return `${error}${trial.status!=="scored"?'<div class="note attention">This attempt was not scored. Missing values are not counted as success or failure.</div>':""}<p class="simple-only fine-print">${checks.length} reported checks · ${checks.filter(c=>["fail","failed","error"].includes(String(c.status).toLowerCase())).length} failed. <button class="text-button" data-action="advanced-mode">Show all details</button></p>${checks.length ? checks.map((check)=>`<div class="check-result${["pass","passed","valid","succeeded"].includes(String(check.status).toLowerCase())?" advanced-only":""}"><div class="check-result-head"><strong>${esc(check.name || "Unnamed check")}</strong>${badgeStatus(check.status)}</div>${check.reason?`<p>${esc(check.reason)}</p>`:""}${check.evidence?.length ? `<pre class="check-evidence advanced-only">${esc(check.evidence.map((e)=>typeof e==="string"?e:json(e)).join("\n\n"))}</pre>`:""}</div>`).join("") : '<div class="note">No requirement-level checks were provided. The reported metrics below do not establish exact output compliance on their own.</div>'}${metrics.length ? `<h4 class="section-gap advanced-only">Reported metrics</h4><dl class="metric-list advanced-only">${metrics.map(([name,value])=>`<div><dt>${esc(name.replaceAll("_"," "))}</dt><dd>${number(value)}</dd></div>`).join("")}</dl>`:""}${renderNativeEvidence(trial)}<div class="note section-gap advanced-only"><strong>Skill attribution</strong><br>No causal skill diagnosis or validated edit is supplied by these scores alone.</div><div class="section-gap">${id}</div>`;
+  }
+
+  function improvementContext() {
+    const skill=selectedSkill(),original=skill?.proposal_job_id?ui.state.skills.find(s=>s.id===skill.parent_id):skill;
+    return {skill,original,proposal:jobById(ui.improvement.proposalId===undefined?skill?.proposal_job_id:ui.improvement.proposalId)};
+  }
+
+  function evaluationRuns(skillId) {
+    return (ui.state.jobs || []).filter(j=>j.skill_id===skillId&&j.action==="evaluate"&&j.status==="succeeded").sort((a,b)=>String(b.started_at).localeCompare(String(a.started_at)));
+  }
+
+  function runOptions(jobs,selected) {
+    return jobs.map(job=>`<option value="${esc(job.id)}"${job.id===selected?" selected":""}>${esc(time(job.started_at))} · ${esc(job.options?.agent || "Evaluation")} · ${esc(job.id.slice(0,8))}</option>`).join("");
+  }
+
+  async function loadImprovement() {
+    const skillId=ui.skillId,state=ui.improvement,{skill,original}=improvementContext();
+    if(!original)return;
+    const requestToken=Symbol();state.requestToken=requestToken;state.loading=true;state.error=null;renderAll();
+    try {
+      const proposals=(ui.state.jobs || []).filter(j=>j.skill_id===original.id&&j.action==="improve").sort((a,b)=>String(b.started_at).localeCompare(String(a.started_at)));
+      if(state.proposalId===undefined)state.proposalId=state.discoveryId?(proposals.find(j=>j.discovery_job_id===state.discoveryId)?.id || null):(skill.proposal_job_id || proposals[0]?.id || null);
+      if(state.proposalId)await fetchJob(state.proposalId);
+      const proposal=jobById(state.proposalId);
+      const shown=selectedJob();
+      state.discoveryId ||= proposal?.discovery_job_id || (shown?.skill_id===original.id&&shown.action==="evaluate"?shown.id:null) || evaluationRuns(original.id)[0]?.id || null;
+      const originalSelection=!state.beforeId;
+      state.beforeId ||= state.discoveryId;
+      if(state.discoveryId){
+        await fetchJob(state.discoveryId);
+        const discoveryId=state.discoveryId;
+        const readiness=await api(`/api/jobs/${encodeURIComponent(discoveryId)}/improvement?skill_id=${encodeURIComponent(original.id)}`);
+        if(state.requestToken!==requestToken||state.discoveryId!==discoveryId)return;
+        state.readiness=readiness;
+      } else state.readiness=null;
+      if(proposal?.result?.candidate_id){
+        const candidate=await api(`/api/skills/${encodeURIComponent(proposal.result.candidate_id)}`);
+        if(state.requestToken!==requestToken)return;
+        updateSkill(candidate);
+        const validations=evaluationRuns(candidate.id);
+        state.afterId ||= validations.find(j=>j.validation_of===proposal.id)?.id || validations[0]?.id || null;
+        if(state.afterId)await fetchJob(state.afterId);
+      }
+      const comparison=(ui.state.jobs || []).filter(j=>j.action==="compare_improvement"&&j.proposal_job_id===state.proposalId).sort((a,b)=>String(b.started_at).localeCompare(String(a.started_at)))[0];
+      if(comparison&&state.loadedProposalId!==state.proposalId){
+        await fetchJob(comparison.id);
+        if(state.requestToken!==requestToken)return;
+        state.comparisonId=comparison.id;state.beforeId=comparison.before_job_id;state.afterId=comparison.after_job_id;
+        state.outcomeMetrics=(comparison.outcome_metrics || []).join(", ");
+      } else if(originalSelection&&state.afterId){
+        const validation=jobById(state.afterId);state.beforeId=validation?.before_job_id || state.beforeId;
+        state.outcomeMetrics=(validation?.outcome_metrics || []).join(", ");
+      }
+      if(proposal?.result)state.loadedProposalId=state.proposalId;
+    } catch(error){if(state.requestToken===requestToken)state.error=error.message;}
+    finally {if(state.requestToken===requestToken){state.loading=false;if(ui.skillId===skillId&&ui.improvement===state)renderAll();}}
   }
 
   function renderImprove() {
-    const skill=selectedSkill(),original=skill.parent_id?ui.state.skills.find((s)=>s.id===skill.parent_id):skill;
-    const candidates=ui.state.skills.filter((s)=>s.parent_id===original?.id);
-    const content=ui.candidateContent ?? skill.content ?? "";
-    return `<p class="section-label advanced-only">KEEP THE ORIGINAL. TEST THE CHANGE.</p><div class="candidate-grid"><section class="surface candidate-editor"><div class="panel-heading"><div><h2>Improve your skill (optional).</h2><p>Keep your results, or edit and evaluate a separate candidate copy.</p></div><span class="badge attention">Manual edit</span></div><form id="candidate-form"><label for="candidate-content">Candidate SKILL.md</label><textarea id="candidate-content" class="code-input" rows="16" spellcheck="false" required>${esc(content)}</textarea><p class="field-hint">The skill’s assets and saved dataset are copied with the document. Existing originals and their results are retained.</p><div class="form-actions"><button class="text-button" type="button" data-action="reset-candidate">Reset draft</button><button class="button ${skill.parent_id?"secondary":"primary"}" type="submit">Create candidate copy →</button></div></form></section><aside class="surface candidate-explainer"><p class="note attention">Edits are manual. A candidate needs its own evaluation before you decide to keep it.</p><h4 class="section-gap">Saved candidate copies</h4><div class="revision-list">${candidates.length?candidates.map((c)=>`<div class="revision-row"><strong>${esc(c.name)}</strong><p>${time(c.created_at)} · source ${esc((c.source_hash || "").slice(0,12))}</p><div class="button-row"><button class="button secondary small" data-action="open-candidate" data-id="${esc(c.id)}">Open candidate</button><a class="button secondary small" href="/api/skills/${encodeURIComponent(c.id)}/export">Download skill (.zip)</a></div></div>`).join(""):'<p class="fine-print">No candidate copies yet. Keeping the original is a valid outcome.</p>'}</div></aside></div>${skill.parent_id ? renderComparison(original,skill) : ""}<div id="job-region"></div>`;
+    const {skill,original,proposal}=improvementContext(),state=ui.improvement;
+    if(!original)return '<div class="surface empty-state"><h2>Add a skill first.</h2><button class="button primary" data-stage="skill">Add skill</button></div>';
+    const receipt=proposal?.result?.receipt,view=proposal?.result?.proposal_view,changed=receipt?.changed_files || [];
+    const runs=evaluationRuns(original.id),ready=state.readiness,working=(ui.state.jobs || []).some(j=>activeStatus(j.status));
+    const validation=jobById(state.afterId),comparisonJob=jobById(state.comparisonId);
+    const selectedMetrics=JSON.stringify((state.outcomeMetrics || "").split(",").map(s=>s.trim()).filter(Boolean).sort());
+    const matches=job=>Boolean(job)&&job.before_job_id===state.beforeId&&JSON.stringify([...(job.outcome_metrics || [])].sort())===selectedMetrics;
+    const comparisonResult=comparisonJob?.proposal_job_id===proposal?.id&&comparisonJob?.after_job_id===state.afterId&&matches(comparisonJob)?comparisonJob.result:validation?.validation_of===proposal?.id&&matches(validation)?validation.result?.improvement_comparison:null;
+    const comparison=comparisonResult?.proposal_view;
+    const summary=receipt?.proposal_summary || (receipt?.status==="unchanged"?"The available evidence did not support a skill change.":"Review the proposed edits and their supporting findings before testing.");
+    let content;
+    if(state.loading&&!receipt)content='<section class="surface panel" aria-busy="true"><h2>Checking the evaluation…</h2><p class="muted help-caption">Looking for evidence that can support a change.</p><div class="loading-placeholder" aria-hidden="true"></div></section>';
+    else if(!runs.length&&!receipt)content='<section class="surface panel"><h2>Start with an evaluation.</h2><p class="muted help-caption">A proposal needs results from your skill’s test cases.</p><div class="form-actions"><button class="button primary" data-stage="evaluate">Evaluate skill →</button></div></section>';
+    else if(!receipt)content=`<section class="surface panel"><p class="section-label">IMPROVE · OPTIONAL</p><h2>Let the results guide the next change.</h2><p class="muted help-caption">Review a proposed copy of your skill, then test it. Keeping the original is always an option.</p><label for="improve-discovery">Use this evaluation</label><select id="improve-discovery">${runOptions(runs,state.discoveryId)}</select>${ready&&!ready.eligible?`<div class="note attention section-gap"><strong>One thing to resolve first</strong><ul>${(ready.reasons || []).map(reason=>`<li>${esc(reason)}</li>`).join("")}</ul><div class="button-row"><button class="text-button" data-stage="cases">Review test cases</button><button class="text-button" data-stage="evaluate">Run a new evaluation</button></div></div>`:`<p class="field-hint">${ready?"The retained evidence is ready for a proposal.":"Select an evaluation to check its evidence."}</p>`}<div class="form-actions"><span class="fine-print">${esc(providerLabel(ui.state.provider?.name))}</span><button class="button primary" data-action="propose-change"${!ready?.eligible||working?" disabled":""}>${ui.state.provider?.configured?"Propose changes":"Connect a model"} →</button></div></section>`;
+    else if(receipt.status==="unchanged")content=`<section class="surface panel"><p class="section-label">REVIEW COMPLETE</p><h2>No change recommended.</h2><p class="muted help-caption">Keep the original. A proposal does not have to make an edit.</p>${renderProposalSummary(summary)}<div class="form-actions"><button class="button primary" data-action="original-results">Back to results</button></div></section>`;
+    else if(receipt.status==="exported")content='<section class="surface panel"><h2>Evidence is ready to review.</h2><p class="muted help-caption">This export contains findings and editing instructions. It has not changed or tested the skill.</p><div class="form-actions"><button class="button primary" data-action="new-proposal">Propose a change →</button></div></section>';
+    else if(receipt.status==="failed"||!receipt.candidate_ready)content=`<section class="surface panel"><h2>A proposal could not be prepared.</h2><p class="muted help-caption">${esc(receipt.error || proposal?.error || "Review the details below, then try again.")}</p><div class="form-actions"><button class="button primary" data-action="new-proposal">Review evaluation</button></div></section>`;
+    else content=`<section class="surface proposal-review"><div class="proposal-heading"><div><p class="section-label">PROPOSED COPY</p><h2>${changed.length} ${changed.length===1?"file":"files"} to review.</h2><p class="muted">Your original skill is kept.</p></div><span class="badge attention">${comparison?"Test results below":"Not yet validated"}</span></div><div class="change-story"><section><h3>Why this change</h3>${renderProposalSummary(summary)}</section><section><h3>What changes</h3><p class="fine-print">${changed.map(name=>`<code>${esc(name)}</code>`).join(" · ")}</p><details class="change-diff"><summary>Review file changes</summary><pre tabindex="0" aria-label="Proposed file changes">${String(view?.diff || "No file diff was retained.").split("\n").map(line=>`<span class="${line.startsWith("+")&&!line.startsWith("+++")?"diff-add":line.startsWith("-")&&!line.startsWith("---")?"diff-remove":""}">${esc(line)}\n</span>`).join("")}</pre></details>${renderProposalEvidence(view)}</section><section><h3>What the tests show</h3>${view?.issues?.length?`<div class="note attention"><strong>Proposal evidence needs review</strong><ul>${view.issues.map(issue=>`<li>${esc(issue)}</li>`).join("")}</ul></div>`:""}${comparison?renderImprovementOutcome(comparison):comparisonResult?.error?`<p class="banner error" role="alert">Comparison could not complete: ${esc(comparisonResult.error)}</p>`:`<p class="muted">${validation?.status==="succeeded"?"Compare the selected runs to review the result.":"The proposed copy still needs testing against the original."}</p>`}${!comparison?`<div class="form-actions"><span class="fine-print">Uses the selected original run’s cases and settings.</span><button class="button primary" data-action="${validation?.status==="succeeded"?"compare-proposal":"validate-proposal"}"${working||!proposal.result.candidate_id?" disabled":""}>${working?"A task is running…":validation?.status==="succeeded"?"Compare results →":"Test proposed copy →"}</button></div>`:`<div class="button-row section-gap"><a class="button secondary" href="/api/skills/${encodeURIComponent(proposal.result.candidate_id)}/export">Download proposed skill (.zip)</a><button class="text-button" data-action="original-results">Keep original</button></div>`}</section></div></section>`;
+    const manual=skill.proposal_job_id?"":renderManualEditor(skill);
+    return `<div class="improve-flow">${content}${state.error?`<p class="banner error section-gap" role="alert">${esc(state.error)}</p>`:""}<div id="job-region"></div>${runs.length?renderImprovementAdvanced(original,proposal):""}${manual}</div>`;
+  }
+
+  function renderProposalSummary(summary) {
+    return summary.length>240?`<p class="proposal-summary">${esc(summary.slice(0,240))}…</p><details><summary>Read full explanation</summary><p class="proposal-summary">${esc(summary)}</p></details>`:`<p class="proposal-summary">${esc(summary)}</p>`;
+  }
+
+  function renderProposalEvidence(view) {
+    if(!view?.edits?.length)return "";
+    return `<details class="section-gap"><summary>Evidence behind these edits</summary>${view.edits.map(edit=>`<div class="evidence-item"><strong>${esc(edit.path)}</strong><p>${esc(edit.reason || edit.explanation || "See the linked findings.")}</p>${(edit.evidence_ids || []).map(id=>{const finding=view.findings?.[id];return `<details><summary>${esc(finding?.case || "Finding")} · ${esc(finding?.label || finding?.metric || finding?.id || id)}</summary><p>${esc(finding?.kind==="agent_observation"?`Unverified agent report: ${finding.text || "No report text retained."}`:finding?.reasons?.join(" ") || finding?.reason || finding?.message || "No short explanation retained.")}</p>${finding?.kind==="agent_observation"&&finding.truncated?'<p class="fine-print">This unverified report was shortened.</p>':""}${finding?.diagnostic?.text?`<pre class="raw-object">${esc(finding.diagnostic.text)}</pre>${finding.diagnostic.truncated?'<p class="fine-print">This diagnostic was shortened.</p>':""}`:""}</details>`;}).join("")}</div>`).join("")}</details>`;
+  }
+
+  function renderImprovementOutcome(view) {
+    const comparison=view.comparison,verified=view.association==="Verified runtime source match"&&!view.issues?.length;
+    const labels={outcome_improvement:["Observed outcome gain","An explicitly selected outcome check improved in these tests."],signal_improvement:["Scores increased","A better task outcome has not been established."],regression:["Some results got worse","Review the declines before deciding whether to use this copy."],no_demonstrated_benefit:["No demonstrated benefit","These tests did not establish a gain from the proposed copy."],abstain:["Not enough comparable evidence","Resolve the issues below before drawing a conclusion."]};
+    const [title,description]=!verified?["Results are not verified for this change","The saved runs could not both be matched to this proposal."]:labels[comparison?.verdict] || ["Not evaluated","Test the proposed copy to compare results."];
+    const good=verified&&comparison?.verdict==="outcome_improvement",issues=[...(view.issues || []),...(comparison?.issues || [])];
+    const cases=Object.entries(comparison?.agents || {}).flatMap(([agent,data])=>(data.cases || []).map(c=>({...c,agent})));
+    const holdout=cases.length&&cases.every(c=>["holdout","heldout","held-out","validation","val","test","selection"].includes(c.split));
+    return `<div class="comparison-verdict ${good?"positive":""}"><strong>${esc(title)}</strong><p>${esc(description)}</p></div>${issues.length?`<ul class="issue-list">${[...new Set(issues)].map(issue=>`<li>${esc(issue)}</li>`).join("")}</ul>`:""}${cases.length?`<p class="fine-print comparison-scope">${holdout?"Reserved validation cases":"Includes cases available during discovery"} · ${cases.length} ${cases.length===1?"case":"cases"}. These observations do not establish a general improvement.</p><div class="comparison-cases">${cases.map(c=>`<details><summary><span>${esc(c.entry_id)}</span><span class="badge ${c.status==="regressed"?"bad":""}">${esc(c.status || "Not assessed")}</span></summary><p class="fine-print">${esc(c.agent)} · ${esc(c.attempts)} attempts · ${esc(c.split || "discovery")}</p><div class="table-scroll"><table><caption class="sr-only">Original and proposed scores for ${esc(c.entry_id)}</caption><thead><tr><th scope="col">Check</th><th scope="col">Original</th><th scope="col">Proposed</th></tr></thead><tbody>${Object.entries(c.metrics || {}).map(([name,m])=>`<tr><th scope="row">${esc(name.replaceAll("_"," "))}${(comparison.outcome_metrics || []).includes(name)?' <span class="fine-print">(outcome)</span>':""}</th><td>${esc(scalar(m.before))}</td><td>${esc(scalar(m.after))}${m.delta<0?' <span class="decline">↓</span>':""}</td></tr>`).join("")}</tbody></table></div></details>`).join("")}</div>`:""}<details class="advanced-only section-gap"><summary>Source checks and full comparison</summary><p>${esc(view.association)}</p><pre class="raw-object">${esc(json(comparison))}</pre></details>`;
+  }
+
+  function renderImprovementAdvanced(original,proposal) {
+    const state=ui.improvement,candidateId=proposal?.result?.candidate_id;
+    return `<details id="improve-settings" class="surface panel section-gap advanced-only"${state.advancedOpen?" open":""}><summary>Proposal and validation settings</summary><div class="section-gap"><label class="check-label"><input id="improve-observations" type="checkbox"${state.observations?" checked":""}>Include agent observations</label><p class="field-hint">Agent reports remain unverified. Only eligible discovery evidence reaches the proposer; scanning and repeated-content checks are separate.</p><p class="fine-print">Editor: ${esc(providerLabel(ui.state.provider?.name))} · ${esc(ui.state.provider?.model)} <button class="text-button" data-action="settings">Change model</button></p><div class="button-row"><button class="button secondary small" data-action="export-evidence"${!state.discoveryId?" disabled":""}>Export evidence only</button>${proposal?'<button class="text-button" data-action="new-proposal">Start another proposal</button>':""}</div><label for="improve-edits">Import reviewed edits (.json)</label><input id="improve-edits" type="file" accept=".json,application/json"><p class="field-hint">Uses the native edit format with exact replacements and finding references. No model call.</p>${proposal?.result?`<button class="text-button" data-action="download-result" data-id="${esc(proposal.id)}">Download proposal report (.json)</button>`:""}${candidateId?`<div class="section-gap"><label for="improve-before">Original validation run</label><select id="improve-before">${runOptions(evaluationRuns(original.id),state.beforeId)}</select><label for="improve-after">Proposed-copy validation run</label><select id="improve-after"><option value="">Choose a completed run</option>${runOptions(evaluationRuns(candidateId),state.afterId)}</select><label for="improve-outcomes">Independent outcome checks <span class="optional">optional, comma-separated</span></label><input id="improve-outcomes" value="${esc(state.outcomeMetrics || "")}" placeholder="For example: helper_contract"><p class="field-hint">Name independently defined grader checks. Leaving this blank reports score gains only.</p><div class="button-row"><button class="button secondary" data-action="compare-proposal"${!state.afterId?" disabled":""}>Compare selected runs</button><button class="text-button" data-action="validate-proposal">Test again</button></div></div>`:""}</div></details>`;
+  }
+
+  function renderManualEditor(skill) {
+    const content=ui.candidateContent ?? skill.content;
+    return `<details class="surface panel section-gap advanced-only"><summary>Edit SKILL.md yourself</summary><form id="candidate-form"><label for="candidate-content">Candidate SKILL.md</label><textarea id="candidate-content" class="code-input" rows="12" required>${esc(content)}</textarea><p class="field-hint">Creates a separate copy with the saved assets and test cases.</p><div class="form-actions"><button class="button secondary" type="submit">Create manual copy</button></div></form></details>${skill.parent_id&&!skill.proposal_job_id?renderComparison(ui.state.skills.find(s=>s.id===skill.parent_id),skill):""}`;
+  }
+
+  async function proposeChange(mode="llm",edits) {
+    const {original}=improvementContext(),state=ui.improvement;
+    if(mode==="llm"&&!ui.state.provider?.configured){openSettings();return;}
+    const job=await api("/api/jobs",{method:"POST",body:{skill_id:original.id,action:"improve",discovery_job_id:state.discoveryId,improvement:{mode,include_agent_observations:Boolean(state.observations),...(edits?{edits}:{})}}});
+    state.proposalId=job.id;state.comparisonId=null;state.afterId=null;state.error=null;
+    ui.state.jobs.push(job);ui.jobId=job.id;renderAll();schedulePoll();
+  }
+
+  async function validateProposal() {
+    const {proposal}=improvementContext(),state=ui.improvement,selectedAtStart=ui.skillId;
+    if(!proposal?.result?.candidate_id)throw new Error("Prepare a changed candidate first.");
+    const before=await fetchJob(state.beforeId || state.discoveryId);
+    const candidate=await api(`/api/skills/${encodeURIComponent(proposal.result.candidate_id)}`);updateSkill(candidate);
+    if(ui.skillId!==selectedAtStart||ui.improvement!==state)throw new Error("The selected skill changed. Start the test again from the proposal you want.");
+    if(hasUnsavedEdits())throw new Error("Save your edits before testing a proposed copy.");
+    const job=await startJob("evaluate",before.options || {},null,{skill_id:candidate.id,validation_of:proposal.id,before_job_id:before.id,outcome_metrics:(state.outcomeMetrics || "").split(",").map(s=>s.trim()).filter(Boolean)});
+    state.afterId=job.id;state.comparisonId=null;renderAll();
+  }
+
+  async function compareProposal() {
+    const {proposal}=improvementContext(),state=ui.improvement;
+    const job=await api("/api/jobs",{method:"POST",body:{skill_id:proposal.result.candidate_id,action:"compare_improvement",proposal_job_id:proposal.id,before_job_id:state.beforeId,after_job_id:state.afterId,outcome_metrics:(state.outcomeMetrics || "").split(",").map(s=>s.trim()).filter(Boolean)}});
+    ui.state.jobs.push(job);ui.jobId=job.id;state.comparisonId=job.id;renderAll();schedulePoll();
   }
 
   function renderComparison(original,candidate) {
@@ -336,20 +497,21 @@
     const region=$("#job-region");
     if(!region)return;
     const job=selectedJob();
-    if(!job||job.skill_id!==ui.skillId){region.innerHTML="";return;}
+    if(!job||(job.skill_id!==ui.skillId&&!(ui.stage==="improve"&&job.proposal_job_id===ui.improvement.proposalId))){region.innerHTML="";return;}
     const detailsOpen=region.querySelector(".job-details")?.open;
+    const summarized=ui.stage==="improve"&&job.status==="succeeded"&&(["improvement","improvement_comparison"].includes(job.result?.kind)||job.result?.improvement_comparison);
     const log=region.querySelector(".job-log");
     const nearBottom=!log||log.scrollHeight-log.scrollTop-log.clientHeight<30;
     const quality=job.result?.optional_checks?null:job.result?.kind==="check"?job.result.passed:job.result?.kind==="validation"?job.result.valid:null;
     const fallback=job.result?.kind==="dataset"&&job.result.generation_mode==="template"&&job.options?.no_llm===false;
-    region.innerHTML=`<section class="surface job-surface${job.action==="draft"&&job.status==="succeeded"&&!fallback&&ui.pendingDraft!==job.id?" advanced-only":""}" aria-label="Current job"><div class="job-head"><h3>${activeStatus(job.status)?'<span class="spinner" aria-hidden="true"></span> ':""}${esc(actionNames[job.action] || job.action)}</h3><div class="button-row">${badgeStatus(job.action==="check"&&job.status==="succeeded"&&job.result?.optional_checks?job.result.optional_checks.status:job.status)}${activeStatus(job.status)?`<button class="button danger small" data-action="cancel-job" data-id="${esc(job.id)}"${job.status==="stopping"?" disabled":""}>${job.status==="stopping"?"Stopping…":"Cancel"}</button>`:""}</div></div><div class="job-meta advanced-only"><span>${time(job.started_at)}</span><span>${esc(job.id)}</span></div>${job.error?`<div class="banner error section-gap">${esc(typeof job.error==="string"?job.error:json(job.error))}</div>`:""}${job.result?.optional_checks?renderOptionalChecks(job.result.optional_checks):""}${quality!==null?`<div class="note ${quality?"success":"attention"} section-gap"><strong>${job.result.kind==="validation"?(quality?"Dataset validation passed.":"Dataset has validation issues."):(quality?"Skill quality checks passed.":"Skill checks completed with findings.")}</strong> ${quality?"Inspect the retained details before an agent run.":"Process completion does not mean the quality checks passed."}</div>${renderQuality(job.result)}${job.result.issues?.length?`<ul class="issue-list${quality?" advanced-only":""}">${job.result.issues.map((issue,i)=>`<li class="${quality||i>2?"advanced-only":""}">${esc(typeof issue==="string"?issue:issue.message || json(issue))}</li>`).join("")}</ul>${!quality&&job.result.issues.length>3?`<button class="text-button simple-only" data-action="advanced-mode">View all ${job.result.issues.length} findings</button>`:""}`:""}`:""}${job.result?.kind==="dataset"?`<div class="note${fallback?" attention":""} section-gap"><strong>${fallback?"Model drafting failed; showing starter cases.":"Draft created · review required."}</strong> ${fallback?"See Advanced for details.":job.result.generation_mode==="template"?"Starter template cases; review before saving.":"Model-assisted cases; review before saving."}${ui.pendingDraft===job.id?'<div class="button-row section-gap"><button class="button secondary small" data-action="review-ready-draft">Review new draft</button></div>':""}</div>`:""}<details class="job-details section-gap advanced-only"${detailsOpen||activeStatus(job.status)?" open":""}><summary>Logs and progress</summary><div><pre class="job-log" tabindex="0" aria-label="Job logs">${esc((job.logs || []).join("\n") || "Waiting for worker output…")}</pre>${job.events?.length?`<ul class="events-list">${job.events.slice(-5).map((event)=>`<li><span aria-hidden="true">·</span><span>${esc(event.message || event.detail || event.type || event.event || json(event))}</span></li>`).join("")}</ul>`:""}</div></details>${job.result&&job.result.kind!=="evaluation"?`<details class="job-details advanced-only"><summary>Complete result</summary><div><pre class="raw-object">${esc(json(job.result))}</pre><button class="button secondary small" data-action="download-result" data-id="${esc(job.id)}">Download report (.json)</button></div></details>`:""}</section>`;
+    region.innerHTML=`<section class="surface job-surface${summarized||(job.action==="draft"&&job.status==="succeeded"&&!fallback&&ui.pendingDraft!==job.id)?" advanced-only":""}" aria-label="Current job"><div class="job-head"><h3>${activeStatus(job.status)?'<span class="spinner" aria-hidden="true"></span> ':""}${esc(actionNames[job.action] || job.action)}</h3><div class="button-row">${badgeStatus(job.action==="check"&&job.status==="succeeded"&&job.result?.optional_checks?job.result.optional_checks.status:job.status)}${activeStatus(job.status)?`<button class="button danger small" data-action="cancel-job" data-id="${esc(job.id)}"${job.status==="stopping"?" disabled":""}>${job.status==="stopping"?"Stopping…":"Cancel"}</button>`:""}</div></div><div class="job-meta advanced-only"><span>${time(job.started_at)}</span><span>${esc(job.id)}</span></div>${job.error?`<div class="banner error section-gap">${esc(typeof job.error==="string"?job.error:json(job.error))}</div>`:""}${job.result?.optional_checks?renderOptionalChecks(job.result.optional_checks):""}${quality!==null?`<div class="note ${quality?"success":"attention"} section-gap"><strong>${job.result.kind==="validation"?(quality?"Dataset validation passed.":"Dataset has validation issues."):(quality?"Skill quality checks passed.":"Skill checks completed with findings.")}</strong> ${quality?"Inspect the retained details before an agent run.":"Process completion does not mean the quality checks passed."}</div>${renderQuality(job.result)}${job.result.issues?.length?`<ul class="issue-list${quality?" advanced-only":""}">${job.result.issues.map((issue,i)=>`<li class="${quality||i>2?"advanced-only":""}">${esc(typeof issue==="string"?issue:issue.message || json(issue))}</li>`).join("")}</ul>${!quality&&job.result.issues.length>3?`<button class="text-button simple-only" data-action="advanced-mode">View all ${job.result.issues.length} findings</button>`:""}`:""}`:""}${job.result?.kind==="dataset"?`<div class="note${fallback?" attention":""} section-gap"><strong>${fallback?"Model drafting failed; showing starter cases.":"Draft created · review required."}</strong> ${fallback?"See Advanced for details.":job.result.generation_mode==="template"?"Starter template cases; review before saving.":"Model-assisted cases; review before saving."}${ui.pendingDraft===job.id?'<div class="button-row section-gap"><button class="button secondary small" data-action="review-ready-draft">Review new draft</button></div>':""}</div>`:""}<details class="job-details section-gap advanced-only"${detailsOpen||activeStatus(job.status)?" open":""}><summary>Logs and progress</summary><div><pre class="job-log" tabindex="0" aria-label="Job logs">${esc((job.logs || []).join("\n") || "Waiting for worker output…")}</pre>${job.events?.length?`<ul class="events-list">${job.events.slice(-5).map((event)=>`<li><span aria-hidden="true">·</span><span>${esc(event.message || event.detail || event.type || event.event || json(event))}</span></li>`).join("")}</ul>`:""}</div></details>${job.result&&job.result.kind!=="evaluation"?`<details class="job-details advanced-only"><summary>Complete result</summary><div><pre class="raw-object">${esc(json(job.result))}</pre><button class="button secondary small" data-action="download-result" data-id="${esc(job.id)}">Download report (.json)</button></div></details>`:""}</section>`;
     const nextLog=region.querySelector(".job-log");
     if(nearBottom&&nextLog)nextLog.scrollTop=nextLog.scrollHeight;
   }
 
-  async function startJob(action,options={},button) {
-    const skill=selectedSkill();
-    const revisionAtSubmit=ui.datasetDirty?null:ui.caseRevision;
+  async function startJob(action,options={},button,extra={}) {
+    const skill=extra.skill_id?ui.state.skills.find(s=>s.id===extra.skill_id):selectedSkill();
+    const revisionAtSubmit=ui.datasetDirty?null:ui.caseRevision,selectedAtSubmit=ui.skillId;
     if(!skill)throw new Error("Add a skill first.");
     if(action==="evaluate"){
       if(!skill.cases?.length&&!usesNativeTasks(skill,options)){setStage("cases");throw new Error(skill.native_custom_only?"Choose custom-only grading for the native task package, or save reviewed JSON cases.":"Save at least one reviewed case before evaluating.");}
@@ -360,12 +522,15 @@
     if(options.dedup&&ui.state.provider?.name==="anthropic"){openSettings();throw new Error("Repeated-content checks need NVIDIA or OpenAI embeddings. Choose one in model settings.");}
     if(action==="check"&&(options.tier1_llm||options.dedup)&&!ui.state.provider?.configured){openSettings();throw new Error("Connect a model for AI security review or repeated-content checks. The standard skill scan works without a key.");}
     if(action==="draft"&&!options.no_llm&&!ui.state.provider?.configured){openSettings();throw new Error("Connect a provider for a model-assisted draft, or choose Template.");}
-    const job=await api("/api/jobs",{method:"POST",body:{skill_id:skill.id,action,guidance:action==="draft"?ui.guidance:undefined,options}});
-    ui.state.jobs.push(job);ui.jobId=job.id;
+    const job=await api("/api/jobs",{method:"POST",body:{skill_id:skill.id,action,guidance:action==="draft"?ui.guidance:undefined,options,...extra}});
+    ui.state.jobs.push(job);
+    if(ui.skillId!==selectedAtSubmit){renderChrome();schedulePoll();return job;}
+    if(extra.validation_of){ui.skillId=skill.id;ui.draft=null;ui.candidateContent=null;}
+    ui.jobId=job.id;
     if(action==="draft")ui.draftStartRevision=revisionAtSubmit;
     $("#announcer").textContent=`${actionNames[action] || action} started.`;
     if(action==="draft")ui.stage="cases";
-    if(action==="evaluate")ui.stage="evaluate";
+    if(action==="evaluate")ui.stage=extra.validation_of?"improve":"evaluate";
     renderAll();schedulePoll();
     return job;
   }
@@ -395,7 +560,7 @@
     });
     renderChrome();
     if(ui.view==="runs")renderHistory();
-    else if(finished)renderAll();
+    else if(finished){if(ui.stage==="improve")await loadImprovement();else renderAll();}
     else renderJobRegion();
     schedulePoll();
   }
@@ -472,7 +637,7 @@
     if(action==="refresh"){doAction("refresh",()=>refreshState(),button);return;}
     if(action==="new-skill"){if(!allowSkillSwitch())return;selectSkill(null,false);ui.addingSkill=true;ui.stage="skill";ui.view="workspace";renderAll();return;}
     if(action==="sample"){if(!allowSkillSwitch())return;doAction("sample",async()=>{const skill=await api("/api/sample",{method:"POST",body:{}});updateSkill(skill);selectSkill(skill.id,false);ui.stage="cases";renderAll();notify("Working sample loaded. Its checks and evaluations run only when you start them.");},button);return;}
-    if(action==="add-case"){const records=draftRecords();records.push({selected:true,value:{id:`${selectedSkill().name}-${Date.now()}`,prompt:"",expected_skill:selectedSkill().name,expected_script:null,ground_truth:"",expected_behavior:[]}});ui.datasetDirty=true;ui.caseRevision++;renderAll();$$("[data-case-field=question]").at(-1)?.focus();return;}
+    if(action==="add-case"){const records=draftRecords();records.push({selected:true,value:{id:`${selectedSkill().name}-${Date.now()}`,prompt:"",expected_skill:selectedSkill().name,expected_script:null,ground_truth:"",expected_behavior:[],authoring_status:"draft_requires_oracle_review"}});ui.datasetDirty=true;ui.caseRevision++;renderAll();$$("[data-case-field=question]").at(-1)?.focus();return;}
     if(action==="remove-case"){
       const records=draftRecords(),index=Number(button.dataset.index);
       if(!Number.isInteger(index)||index<0||index>=records.length)return;
@@ -482,15 +647,25 @@
     }
     if(action==="run-selected-checks"){const form=$("#evaluate-form");if(!form)return;readEvalOptions(form);const {tier1,tier1_llm,dedup}=ui.evalOptions;doAction("selected-checks",()=>{if(!tier1&&!dedup)throw new Error("Select at least one extra check.");return startJob("check",{tier1,tier1_llm,dedup},button);},button);return;}
     if(action==="save-cases"){doAction("save-cases",async()=>{await saveCases();renderAll();},button);return;}
-    if(action==="continue-evaluate"){const skillId=ui.skillId;doAction("save-cases",async()=>{if(ui.datasetDirty)await saveCases();if(ui.skillId!==skillId)return;if(ui.datasetDirty){renderAll();return;}if(!selectedSkill().cases?.length)throw new Error("Save at least one reviewed case first.");if(ui.stage==="cases"&&ui.view==="workspace")setStage("evaluate");},button);return;}
+    if(action==="continue-evaluate"){const skillId=ui.skillId;doAction("save-cases",async()=>{if(ui.datasetDirty)await saveCases();if(ui.skillId!==skillId)return;if(ui.datasetDirty){renderAll();return;}if(selectedSkill().cases?.some(c=>c.authoring_status==="draft_requires_oracle_review"))throw new Error("Verify the inputs and expected result for each draft case, then mark it reviewed.");if(!selectedSkill().cases?.length)throw new Error("Save at least one reviewed case first.");if(ui.stage==="cases"&&ui.view==="workspace")setStage("evaluate");},button);return;}
     if(action==="cancel-job"){doAction(`cancel-${button.dataset.id}`,async()=>{const job=await api(`/api/jobs/${encodeURIComponent(button.dataset.id)}`,{method:"DELETE"});const i=ui.state.jobs.findIndex((j)=>j.id===job.id);ui.state.jobs[i]=job;notify(activeStatus(job.status)?"Cancellation requested. Waiting for the worker to stop.":`Run ${job.status}.`);if(ui.view==="runs")renderHistory();else renderJobRegion();schedulePoll();},button);return;}
-    if(action==="open-job"){doAction(`open-${button.dataset.id}`,async()=>{const job=await fetchJob(button.dataset.id);const switching=ui.skillId!==job.skill_id;if(switching&&!allowSkillSwitch())return;if(!switching&&job.action==="draft"&&job.result?.kind==="dataset"&&ui.datasetDirty&&!window.confirm("Replace your unsaved case edits with this completed draft? Saved cases stay unchanged until you Save cases."))return;if(switching)selectSkill(job.skill_id,false);ui.jobId=job.id;ui.view="workspace";ui.stage=job.action==="draft"?"cases":"evaluate";if(job.action==="draft"&&job.result?.kind==="dataset")applyDraft(job);renderAll();schedulePoll();},button);return;}
+    if(action==="open-job"){doAction(`open-${button.dataset.id}`,async()=>{const job=await fetchJob(button.dataset.id);const switching=ui.skillId!==job.skill_id;if(switching&&!allowSkillSwitch())return;if(!switching&&job.action==="draft"&&job.result?.kind==="dataset"&&ui.datasetDirty&&!window.confirm("Replace your unsaved case edits with this completed draft? Saved cases stay unchanged until you Save cases."))return;if(switching)selectSkill(job.skill_id,false);ui.jobId=job.id;ui.view="workspace";ui.stage=["improve","compare_improvement"].includes(job.action)||job.validation_of?"improve":job.action==="draft"?"cases":"evaluate";if(job.action==="draft"&&job.result?.kind==="dataset")applyDraft(job);
+      if(job.action==="improve")ui.improvement={proposalId:job.id,discoveryId:job.discovery_job_id};
+      if(job.action==="compare_improvement")ui.improvement={proposalId:job.proposal_job_id,discoveryId:jobById(job.proposal_job_id)?.discovery_job_id,comparisonId:job.id,beforeId:job.before_job_id,afterId:job.after_job_id,outcomeMetrics:(job.outcome_metrics || []).join(", "),loadedProposalId:job.proposal_job_id};
+      if(job.validation_of)ui.improvement={proposalId:job.validation_of,beforeId:job.before_job_id,afterId:job.id,outcomeMetrics:(job.outcome_metrics || []).join(", "),loadedProposalId:job.validation_of};
+      renderAll();if(ui.stage==="improve")await loadImprovement();schedulePoll();},button);return;}
     if(action==="download-result"){doAction("download-result",async()=>downloadResult(await fetchJob(button.dataset.id)),button);return;}
     if(action==="select-case"){ui.selectedCase=Number(button.dataset.index);ui.attempt=0;renderEvaluationResults();return;}
     if(action==="select-arm"){ui.arm=button.dataset.arm;ui.attempt=0;renderEvaluationResults();return;}
     if(action==="select-detail"){ui.detail=button.dataset.detail;renderEvaluationResults();return;}
     if(action==="review-ready-draft"){const job=jobById(ui.pendingDraft);if(!job?.result)return;if(ui.datasetDirty&&!window.confirm("Replace your current case edits with the completed draft? Saved cases stay unchanged until you Save cases."))return;applyDraft(job);ui.stage="cases";renderAll();return;}
     if(action==="keep-current-cases"){ui.pendingDraft=null;renderAll();notify("Your current cases are kept. The generated draft is still available in Run history.");return;}
+    if(action==="improve-from-run"){const job=jobById(button.dataset.id);ui.improvement=job?.validation_of?{proposalId:job.validation_of,beforeId:job.before_job_id,afterId:job.id,outcomeMetrics:(job.outcome_metrics || []).join(", "),loadedProposalId:job.validation_of}:{discoveryId:button.dataset.id,beforeId:button.dataset.id};setStage("improve");return;}
+    if(action==="propose-change"||action==="export-evidence"){doAction("propose",()=>proposeChange(action==="export-evidence"?"export":"llm"),button);return;}
+    if(action==="new-proposal"){ui.improvement.proposalId=null;ui.improvement.comparisonId=null;ui.improvement.afterId=null;ui.jobId=ui.improvement.discoveryId;renderAll();return;}
+    if(action==="validate-proposal"){doAction("validate-proposal",validateProposal,button);return;}
+    if(action==="compare-proposal"){doAction("compare-proposal",compareProposal,button);return;}
+    if(action==="original-results"){const {original}=improvementContext(),id=ui.improvement.discoveryId;if(!allowSkillSwitch())return;selectSkill(original.id,false);ui.jobId=id;ui.stage="evaluate";renderAll();return;}
     if(action==="reset-candidate"){ui.candidateContent=null;renderAll();return;}
     if(action==="open-candidate"){if(button.dataset.id===ui.skillId){setStage("evaluate");return;}if(!allowSkillSwitch())return;doAction("open-candidate",async()=>{selectSkill(button.dataset.id,false);if(ui.jobId)await fetchJob(ui.jobId);await loadComparisonJobs();ui.stage="evaluate";ui.view="workspace";renderAll();schedulePoll();},button);return;}
   });
@@ -535,21 +710,44 @@
       const record=draftRecords()[Number(input.dataset.index)];if(!record)return;
       const field=input.dataset.caseField;
       if(field==="selected"){record.selected=input.checked;input.closest(".case-editor")?.classList.toggle("excluded",!input.checked);}
+      else if(field==="reviewed"){
+        record.value.authoring_status=input.checked?"qualified":"draft_requires_oracle_review";
+        if(input.checked&&Array.isArray(record.value.unresolved_requirements)&&record.value.unresolved_requirements.length){record.value.reviewed_requirements=record.value.unresolved_requirements;record.value.unresolved_requirements=[];}
+        if(!input.checked&&record.value.reviewed_requirements?.length){record.value.unresolved_requirements=record.value.reviewed_requirements;delete record.value.reviewed_requirements;}
+      }
       else if(field==="inactive"){record.value.expected_skill=input.checked?null:selectedSkill().name;if(input.checked)record.value.expected_script=null;}
       else if(field==="question"){record.value.prompt=input.value;record.value.question=input.value;}
       else if(field==="ground_truth"){record.value.ground_truth=input.value;record.value.expected_output=input.value;}
       else if(field==="expected_behavior"){const values=input.value.split("\n").map((s)=>s.trim()).filter(Boolean);record.value.expected_behavior=values;record.value.assertions=values;}
       else record.value[field]=input.value;
+      if(!["selected","reviewed","split"].includes(field)){
+        record.value.authoring_status="draft_requires_oracle_review";
+        if(record.value.reviewed_requirements?.length){record.value.unresolved_requirements=record.value.reviewed_requirements;delete record.value.reviewed_requirements;}
+      }
+      const card=input.closest(".case-editor"),review=card?.querySelector("[data-case-field=reviewed]"),badge=card?.querySelector("[data-review-badge]");
+      const qualified=record.value.authoring_status==="qualified";
+      if(review)review.checked=qualified;
+      if(badge){badge.textContent=qualified?"Reviewed":"Needs review";badge.className=`badge ${qualified?"good":"attention"}`;}
       ui.datasetDirty=true;ui.caseRevision++;const dirty=$("#dataset-dirty");if(dirty){dirty.textContent="Unsaved changes";dirty.className="unsaved";}const next=$("[data-action=continue-evaluate]");if(next){next.textContent="Save and continue →";}
     }
     if(input.id.startsWith("guidance-"))ui.guidance[input.name]=input.value;
+    if(input.id==="improve-outcomes")ui.improvement.outcomeMetrics=input.value;
     if(input.id==="candidate-content")ui.candidateContent=input.value;
     if(input.id==="skill-text")ui.pasteContent=input.value;
     if(input.closest("#evaluate-form")){readEvalOptions($("#evaluate-form"));const count=$("#run-count");if(count)count.innerHTML=renderRunCount(selectedSkill()?.cases?.length||0);const readiness=$("#case-readiness-note");if(readiness)readiness.innerHTML=renderCaseReadiness(selectedSkill());}
   });
 
+  document.addEventListener("toggle",event=>{
+    if(event.target.id==="improve-settings"&&event.target.isConnected)ui.improvement.advancedOpen=event.target.open;
+  },true);
+
   document.addEventListener("change",(event)=>{
     const input=event.target;
+    if(input.id==="improve-discovery"){ui.improvement.discoveryId=input.value;ui.improvement.beforeId=input.value;ui.improvement.readiness=null;ui.improvement.error=null;loadImprovement();return;}
+    if(input.id==="improve-before"){ui.improvement.beforeId=input.value;ui.improvement.comparisonId=null;renderAll();return;}
+    if(input.id==="improve-after"){ui.improvement.afterId=input.value;ui.improvement.comparisonId=null;doAction("load-validation",async()=>{if(input.value)await fetchJob(input.value);renderAll();});return;}
+    if(input.id==="improve-observations"){ui.improvement.observations=input.checked;return;}
+    if(input.id==="improve-edits"){doAction("import-edits",async()=>{const file=input.files?.[0];if(!file)return;if(file.size>1024*1024)throw new Error("Choose an edit proposal smaller than 1 MB.");const skillId=ui.skillId,proposal=JSON.parse(await file.text());if(ui.skillId!==skillId)throw new Error("The selected skill changed. Choose the proposal again.");await proposeChange("deterministic",proposal);},input);return;}
     if(input.id==="theme-select"){applyTheme(input.value,true);return;}
     if(input.name==="display_mode"){applyMode(input.value,true);return;}
     if(input.id==="provider-name"){

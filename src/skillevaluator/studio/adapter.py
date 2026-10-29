@@ -81,7 +81,45 @@ def json_safe(value: Any, *, secret_values: tuple[str, ...] = ()) -> Any:
             return str(item)
         return str(item)
 
-    return clean(redact_sensitive_data(clean(value)))
+    original = clean(value)
+    redacted = clean(redact_sensitive_data(original))
+
+    def retain_measurements(source: Any, target: Any) -> None:
+        if isinstance(source, dict) and isinstance(target, dict):
+            for key, item in source.items():
+                if key not in target:
+                    continue
+                # Native comparison counters are measurements, never credentials.
+                if (
+                    key.startswith("resources.tokens.")
+                    and isinstance(item, dict)
+                    and set(item) == {"before", "after", "delta"}
+                    and all(v is None or finite_number(v) is not None for v in item.values())
+                ):
+                    target[key] = item
+                elif (
+                    key == "tokens"
+                    and isinstance(item, dict)
+                    and set(item) == {"with_skill", "baseline", "delta"}
+                    and (item["delta"] is None or finite_number(item["delta"]) is not None)
+                ):
+                    measures = [item[arm] for arm in ("with_skill", "baseline")]
+                    if all(
+                        isinstance(m, dict)
+                        and set(m) == {"status", "measured_trials", "trials", "total"}
+                        and m["status"] in {"complete", "unavailable"}
+                        and all(v is None or finite_number(v) is not None for k, v in m.items() if k != "status")
+                        for m in measures
+                    ):
+                        target[key] = item
+                elif key in target:
+                    retain_measurements(item, target[key])
+        elif isinstance(source, list) and isinstance(target, list):
+            for left, right in zip(source, target, strict=True):
+                retain_measurements(left, right)
+
+    retain_measurements(original, redacted)
+    return redacted
 
 
 def read_json(path: Path, *, root: Path, max_bytes: int = MAX_JSON_BYTES) -> Any:
@@ -424,6 +462,17 @@ def normalize_evaluation(raw: Mapping[str, Any], *, job_dir: Path, skill_path: P
     lift = only_agent.get("lift")
     overall_lift = lift.get("overall") if isinstance(lift, Mapping) else None
     succeeded = raw.get("execution_status") == "succeeded"
+    signals = None
+    if run_dir is not None:
+        from skillevaluator.tier3.improvement_signals import load_signals
+
+        try:
+            packet = load_signals(run_dir)
+            signals = {key: packet[key] for key in ("schema_version", "dataset_digest", "evidence_issues", "agents")}
+        except (OSError, ValueError, KeyError, TypeError, RuntimeError) as exc:
+            notices.append(
+                f"Improvement evidence is unavailable: {type(exc).__name__}. Retained native reports remain available."
+            )
     return {
         "kind": "evaluation",
         "execution_status": raw.get("execution_status", "unknown"),
@@ -443,9 +492,10 @@ def normalize_evaluation(raw: Mapping[str, Any], *, job_dir: Path, skill_path: P
         "suggestions": suggestions,
         "suggestions_status": "available" if found_suggestions else "not_generated",
         "optimizer": {
-            "available": False,
-            "reason": "Automatic candidate editing and acceptance are not available in this version.",
+            "available": True,
+            "reason": "Evidence-backed proposals are available in Improve. Candidates require fresh evaluation and native comparison.",
         },
+        "improvement_signals": signals,
         "artifacts": artifacts,
         "notes": list(dict.fromkeys(notices)),
         "raw": dict(raw),

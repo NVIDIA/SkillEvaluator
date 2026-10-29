@@ -11,7 +11,7 @@ uv run --python 3.13 --extra ui skillevaluator ui
 
 Open `http://127.0.0.1:7865`. **Guided** view starts with one action at a time:
 add `SKILL.md` or a zip, describe a task, review the proposed test cases, and
-save and continue to evaluation. Choose **Advanced** for execution settings,
+verify each draft’s inputs and expected result, then save and continue to evaluation. Choose **Advanced** for execution settings,
 extra dataset guidance, detailed evidence, and diagnostics. Both names appear
 in the view selector at the top of the page.
 Template drafting, structure/quality checks, editing, and export need no key.
@@ -25,7 +25,7 @@ your original file. You can add and switch between several skills, and
 **Run history** keeps their saved results.
 
 One background task runs at a time across the app: a draft, a check, dataset
-validation, or an evaluation. You can keep editing while it runs. A single
+validation, a proposal, or an evaluation. You can keep editing while it runs. A single
 evaluation can include many test cases; its Advanced settings control how many
 trials run concurrently. Wait for the current task to finish, or stop it in
 Run history before starting another.
@@ -80,13 +80,30 @@ Install the existing `security` extra for Bandit and see
 [Tier 1 setup](tier1-validation.mdx) for the external scanners. Dependency CVE
 auditing, rubric scoring, and AI PII verification remain separate CLI options.
 
-**Improve** is optional; evaluation results can be reviewed and downloaded
-without creating a candidate. The workbench can create a separate manually
-edited candidate and show retained original/candidate runs. It labels these as
-observations; automatic skill edits
-and optimizer acceptance are unavailable until an optimizer adapter is supplied.
-Template drafts and edits are not measured improvements. The existing
-`skillevaluator dashboard` remains the saved-report comparison surface.
+**Improve** is optional. Choose a saved evaluation, select **Propose changes**,
+review the explanation and file changes, then **Test proposed copy**. Proposals
+can change `SKILL.md` and helper scripts. The original remains available.
+“No change recommended” is a valid outcome and does not require another run.
+
+Generated cases start as drafts. Independently verify their inputs, expected
+results, and listed requirements, then mark each reviewed. Editing its task or
+expectations resets that review. Run a new evaluation after reviewing cases;
+previous captured datasets are never rewritten. In Advanced, reserve cases for
+validation so their feedback stays outside proposals.
+
+Testing a proposed copy replays the selected original run’s cases, model and
+settings, then compares the retained results. The view distinguishes observed
+outcome gains, score-only gains, regressions, no demonstrated benefit, and
+insufficient evidence. It also checks that the runs used the original and
+proposed files. These observations do not establish general improvement.
+Independent outcome-check names and alternative validation runs are selected
+explicitly in Advanced. Lift alone never establishes a better task outcome.
+
+Advanced also supports evidence exports, importing reviewed native edits without
+a model call, and manual document copies. Proposal creation uses the configured
+public LLM provider; it does not execute an external editor command. Scanning and
+repeated-content results stay separate from the Tier 3 proposal evidence.
+The existing `skillevaluator dashboard` remains available for saved reports.
 
 Browser assets ship in the Python package: no Node build, CDN, hosted frontend,
 database, or proprietary service is required. The UI itself binds only to loopback.

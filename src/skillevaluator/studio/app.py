@@ -154,6 +154,16 @@ async def job(request: Request):
     return JSONResponse(await run_in_threadpool(method, request.path_params["job_id"]))
 
 
+async def improvement_readiness(request: Request):
+    from skillevaluator.studio.improvements import readiness
+
+    service = studio(request)
+    result = await run_in_threadpool(
+        readiness, service.workspace, request.path_params["job_id"], request.query_params.get("skill_id")
+    )
+    return JSONResponse(service.scrub(result))
+
+
 async def download(request: Request):
     service = studio(request)
     root = service._job_path(request.path_params["job_id"])
@@ -168,7 +178,7 @@ async def download(request: Request):
         or path.name in {"request.json", "metadata.json", "config.json", "auth.json", "credentials.json"}
     ):
         raise ValueError("This file is not a downloadable report artifact.")
-    allowed = {".json", ".jsonl", ".html", ".md", ".txt", ".log", ".png", ".pdf"}
+    allowed = {".json", ".jsonl", ".html", ".md", ".txt", ".log", ".png", ".pdf", ".diff"}
     if not path.is_file() or path.suffix.lower() not in allowed or path.stat().st_size > 16 * 1024 * 1024:
         raise ValueError("This report artifact is unavailable or too large.")
     if path.suffix.lower() in {".png", ".pdf"}:
@@ -231,6 +241,7 @@ def create_app(data_dir: Path | None = None) -> Starlette:
             Route("/api/jobs", create_job, methods=["POST"]),
             Route("/api/jobs/{job_id}", job, methods=["GET", "DELETE"]),
             Route("/api/jobs/{job_id}/download", download),
+            Route("/api/jobs/{job_id}/improvement", improvement_readiness),
             Route("/", static),
             Route("/{name}", static),
         ],

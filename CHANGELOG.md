@@ -155,6 +155,13 @@ All notable changes to SkillEvaluator are documented in this file.
 - CI quality thresholds apply to every parallel scan worker. Report overviews
   and detailed reports surface failed quality gates ahead of advisory findings,
   with links to the check that needs attention.
+- Tier 3 `--stop-on-pass` (or `harbor.stop_on_pass: true`) no longer ignores
+  `--n-concurrent`. Every case and attempt previously ran one at a time, so
+  large evaluations took several times longer than the configured concurrency
+  allowed. Up to `n_concurrent` cases now run at once per agent. A case's
+  attempts still run one after another and stop after its first pass, the
+  with-skill and without-skill arms still run one after the other, and the
+  merged arm results keep dataset order.
 - Tier 2 caps every intra-skill embedding chunk at 3,000 characters, preserves
   meaningful short tails and actual Python docstring source ranges, and avoids
   counting pieces of one original chunk as duplicates of each other. Oversized

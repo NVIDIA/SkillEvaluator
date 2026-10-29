@@ -2407,9 +2407,7 @@ def test_advisory_tier3_skip_with_unusual_text_is_not_a_failure(tmp_path: Path, 
 
     benchmark = BenchmarkReporter(skill_name="demo", include_timestamp=False).render_all(results)
     json_payload = json.loads(JSONReporter(include_timestamp=False, expected_skill_name="demo").render_all(results))
-    html_data = _html_report_data(
-        HTMLReporter(include_timestamp=False, expected_skill_name="demo").render_all(results)
-    )
+    html_data = _html_report_data(HTMLReporter(include_timestamp=False, expected_skill_name="demo").render_all(results))
     markdown = MarkdownReporter(include_timestamp=False, expected_skill_name="demo").render_all(results)
     benchmark_path = tmp_path / "BENCHMARK.md"
     benchmark_path.write_text(benchmark, encoding="utf-8")

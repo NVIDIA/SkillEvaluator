@@ -1330,15 +1330,13 @@ def _agent_eval_publication_aggregates_consistent(
     raw_agents_run: list[list[str]] = []
     for container in (payload, summary):
         agents_run = container.get("agents_run")
-        if (
-            not isinstance(agents_run, list)
-            or any(not isinstance(name, str) for name in agents_run)
-        ):
+        if not isinstance(agents_run, list) or any(not isinstance(name, str) for name in agents_run):
             return False
         raw_agents_run.append(agents_run)
-    if raw_agents_run[0] != raw_agents_run[1] or [
-        publication_semantic_text(name).strip() for name in raw_agents_run[0]
-    ] != expected_agents:
+    if (
+        raw_agents_run[0] != raw_agents_run[1]
+        or [publication_semantic_text(name).strip() for name in raw_agents_run[0]] != expected_agents
+    ):
         return False
 
     best_agent = agents[best_name]

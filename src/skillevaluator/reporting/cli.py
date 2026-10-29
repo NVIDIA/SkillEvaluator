@@ -389,7 +389,11 @@ class CLIReporter(ReporterBase):
                 bl = scores.get("baseline")
                 lift = scores.get("lift")
                 if lift is None:
-                    lift_text = "n/a"
+                    lift_text = (
+                        "N/A"
+                        if "not_applicable" in (scores.get("with_skill_status"), scores.get("baseline_status"))
+                        else "NO SCORE"
+                    )
                 else:
                     lc = "green" if lift > 0.01 else ("red" if lift < -0.01 else "dim")
                     lift_text = f"[{lc}]{lift:+.2f}[/{lc}]"

@@ -3533,7 +3533,7 @@
                         <td>{{ "%.2f" | format(scores.with_skill) if scores.with_skill is not none else ("N/A" if scores.with_skill_status == "not_applicable" else "NO SCORE") }}</td>
                         <td>{{ "%.2f" | format(scores.baseline) if scores.baseline is not none else ("N/A" if scores.baseline_status == "not_applicable" else "NO SCORE") }}</td>
                         <td style="color:{{ 'var(--success-color)' if scores.lift is not none and scores.lift >= tier3_lift_pass_threshold else ('var(--danger-color)' if scores.lift is not none and scores.lift <= tier3_lift_fail_threshold else 'var(--text-secondary)') }};font-weight:600;">
-                            {{ "%+.2f" | format(scores.lift) if scores.lift is not none else "N/A" }}
+                            {{ "%+.2f" | format(scores.lift) if scores.lift is not none else ("N/A" if "not_applicable" in [scores.with_skill_status, scores.baseline_status] else "NO SCORE") }}
                         </td>
                     </tr>
                     {% endfor %}

@@ -123,3 +123,25 @@ def test_gate_status_does_not_repeat_publication_payload_analysis(monkeypatch):
     assert status.publication == Status.INCOMPLETE
     assert status.publication == Status.INCOMPLETE
     assert calls == [True]
+
+
+def test_cli_and_markdown_distinguish_explicit_na_from_missing_scores():
+    from skillevaluator.reporting.cli import CLIReporter
+    from skillevaluator.reporting.markdown import MarkdownReporter
+
+    result = ValidationResult(validator_name="AGENT_EVAL")
+    result.metadata["agent_eval"] = {
+        "evaluators": {
+            "accuracy": {
+                "with_skill": None,
+                "baseline": None,
+                "lift": None,
+                "with_skill_status": "not_applicable",
+                "baseline_status": "missing",
+            }
+        }
+    }
+    terminal = CLIReporter().render(result)
+    assert "N/A" in terminal and "NO SCORE" in terminal
+    markdown = MarkdownReporter().render_all([result])
+    assert "| Accuracy | N/A | NO SCORE | N/A |" in markdown

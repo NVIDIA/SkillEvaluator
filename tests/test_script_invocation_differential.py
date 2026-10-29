@@ -53,3 +53,48 @@ def test_invalid_git_baseline_does_not_change_imports():
         differential._load_baseline("refs/invalid/missing-baseline")
     assert sys.path == previous_path
     assert sys.modules.get("checks") is previous_checker
+
+
+def test_package_and_flat_import_eras_use_their_own_helpers(tmp_path, monkeypatch):
+    """Two real refs cover both intermediate package imports and flat staging."""
+
+    def git(*args):
+        return subprocess.check_output(
+            ["git", "-c", "user.name=Baseline test", "-c", "user.email=baseline@example.invalid", *args],
+            cwd=tmp_path,
+            text=True,
+        ).strip()
+
+    git("init", "--quiet")
+    core = tmp_path / "src/skillevaluator/tier3/eval_core"
+    templates = tmp_path / "src/skillevaluator/tier3/harbor/templates"
+    core.mkdir(parents=True)
+    templates.mkdir(parents=True)
+    (templates / "eval.py").write_text("from checks import _cmd_executes_script\n")
+    (core / "checks.py").write_text(
+        "from skillevaluator.tier3.eval_core import script_invocation\n"
+        "_cmd_executes_script = script_invocation._cmd_executes_script\n"
+    )
+    parser = core / "script_invocation.py"
+    parser.write_text("def _cmd_executes_script(command, script): return True\n")
+    git("add", "src")
+    git("commit", "--quiet", "-m", "package imports")
+    package_ref = git("rev-parse", "HEAD")
+    (core / "checks.py").write_text(
+        "import script_invocation\n_cmd_executes_script = script_invocation._cmd_executes_script\n"
+    )
+    parser.write_text("def _cmd_executes_script(command, script): return False\n")
+    git("add", "src")
+    git("commit", "--quiet", "-m", "flat imports")
+    flat_ref = git("rev-parse", "HEAD")
+    monkeypatch.setattr(differential, "REPO_ROOT", tmp_path)
+    candidate = differential.host_checks._script_invocation
+    monkeypatch.setattr(candidate, "_cmd_executes_script", lambda *_args: None)
+    from skillevaluator.tier3 import eval_core
+
+    for ref, expected in [(package_ref, True), (flat_ref, False), (package_ref, True)]:
+        host, template = differential._load_baseline(ref)
+        assert host._cmd_executes_script("python calc.py", "calc.py") is expected
+        assert template._cmd_executes_script("python calc.py", "calc.py") is expected
+        assert eval_core.script_invocation is candidate
+        assert candidate._cmd_executes_script("python calc.py", "calc.py") is None

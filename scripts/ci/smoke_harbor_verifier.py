@@ -27,10 +27,12 @@ def check_staged(directory: Path) -> None:
     for source in directory.glob("*.py"):
         compile(source.read_text(encoding="utf-8"), str(source), "exec")
     verifier = runpy.run_path(str(directory / "eval.py"))
-    for name in ("checks", "shell_lexing", "script_invocation", "secret_redaction"):
+    shared_checks = verifier["_shared_checks"]
+    assert Path(shared_checks.__file__).resolve() == directory / "checks.py"
+    for name in ("shell_lexing", "script_invocation", "secret_redaction"):
         assert Path(sys.modules[name].__file__).resolve() == directory / (name + ".py")
     assert verifier["_shell_tokens"] is sys.modules["shell_lexing"]._shell_tokens
-    assert verifier["check_error_recovery"] is sys.modules["checks"].check_error_recovery
+    assert verifier["check_error_recovery"] is shared_checks.check_error_recovery
     assert verifier["_shell_tokens"]("cat 2>/dev/null") == ["cat", "2>", "/dev/null"]
     for command, expected in [
         ("python scripts/calc.py", True),

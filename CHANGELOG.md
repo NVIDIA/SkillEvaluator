@@ -310,6 +310,15 @@ All notable changes to SkillEvaluator are documented in this file.
   `quality-check` before any report was written. The schema check reports the
   malformed `metadata`, and the quality score counts `metadata.author` and
   `metadata.tags` as missing, as it already did for other non-mapping values.
+- The Tier 1 SkillSpector scan of a skill that references PNG or JPEG images,
+  such as a logo shown with `![Logo](assets/logo.png)`, is no longer
+  `INCOMPLETE` only because SkillSpector's text pattern analyzers cannot read
+  images and report the analysis as `partial`. That gap is now a warning when
+  the report shows no other gap and each image is a regular, non-executable
+  file, not reached through a symlink, whose bytes are a well-formed PNG or
+  JPEG. Other content given an image name, other image formats, and every
+  other partial reason still leave the scan `INCOMPLETE`. SkillSpector's own
+  High `AE1` findings for images it could not inspect are unchanged.
 
 ## 0.6.0 - 2026-10-20
 

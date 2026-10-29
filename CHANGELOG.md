@@ -134,106 +134,12 @@ All notable changes to SkillEvaluator are documented in this file.
 
 ### Fixed
 
-- Local-mode verifier uploads now copy directly to the absent destination,
-  avoiding an unnecessary rollback snapshot of an empty tests directory.
-  Inputs and rewritten scripts are prepared privately before publication,
-  so failed uploads preserve existing verifier files. Missing or invalid
-  sources fail rather than creating an empty verifier directory. Per-step
-  verifier uploads retain shared test files, with step files taking precedence.
-  After any command runs, the next upload replaces the tests directory, so
-  files or links the agent left there cannot change verification.
-- Harbor's standalone verifier now runs on Python 3.9 task images after sharing
-  deterministic checks with the host evaluator. Packaged verifier checks execute
-  on a real Python 3.9 interpreter in CI to retain this compatibility.
-- Plain removal of recognized regenerable caches no longer receives the Tier 3
-  destructive-command penalty. Dynamic commands, mixed targets and other
-  destructive operations retain their existing classification in both verifiers.
+- Tier 2 caps every intra-skill embedding chunk at 3,000 characters, preserves
+  meaningful short tails and actual Python docstring source ranges, and avoids
+  counting pieces of one original chunk as duplicates of each other. Oversized
+  Markdown sections are packed by paragraph, so short labels and fragments stay
+  attached to their neighbours, and findings list a split source once.
 
-- Rubric evaluation preserves the original `SKILL.md` text without adding YAML
-  separators and includes reachable local Markdown guides under their source
-  paths. Required guidance is collected before optional previews, with cycle
-  detection, secure contained reads, verified file-alias deduplication, a
-  256-document ceiling, and the existing
-  3,000-byte per-file / 30,000-byte supplementary limits. Missing, unsafe, or
-  oversized required guidance stops judging without a score or provider request
-  ([#233](https://github.com/NVIDIA/SkillEvaluator/issues/233)).
-
-- PII credential findings mask their values and source lines. GitHub CI stages
-  scanner output privately, redacts recognized credential values from retained
-  reports and logs, and withholds detailed output when redaction cannot finish.
-- Local Claude Code trials retain Harbor's instruction environment variables so
-  prompts reach `claude --print`. The exception accepts only the legacy
-  `HARBOR_INSTRUCTION` name and Claude Code's UUID-named instruction variable;
-  protected paths, loader controls, and unrelated Harbor variables retain their
-  existing filtering ([#245](https://github.com/NVIDIA/SkillEvaluator/issues/245)).
-
-- Tier 3 reports preserve unavailable evaluator lift as `null` when no baseline
-  ran, rather than reporting a measured zero. CLI evaluator tables display
-  missing or unavailable scores as `n/a` without interrupting JSON and HTML
-  report generation; measured zeroes retain their numeric formatting
-  ([#240](https://github.com/NVIDIA/SkillEvaluator/issues/240)).
-
-- Explicit searches of `/` (`find`, `grep -r`, `rg`, `ag`, `du` and `tree` with a
-  `/` operand, and native search tools rooted at `/`) now count as wasted tool
-  calls whether or not they name the expected skill or script, including when
-  output is redirected or the search runs inside `sh -c`. Host and bundled
-  scoring agree, while scoped searches and slash-valued patterns retain their
-  classification.
-- PII email scans recognize all RFC 2606 reserved domains, including their
-  subdomains, mixed-case forms, trailing dots, and prose ellipses. A local-part
-  boundary prevents quadratic rescanning of long excluded addresses. Ordinary
-  addresses on the same line and domains that merely resemble placeholders remain detectable
-  ([#244](https://github.com/NVIDIA/SkillEvaluator/issues/244)).
-
-- Tier 3 security grading preserves ordinary nested `/tmp` cleanup, including
-  child operands with trailing slashes, unless the current or an earlier
-  execution action contains recognized symlink-creation syntax (`ln -s`,
-  `cp -s`, `os.symlink`, `Path.symlink_to`, literal Python subprocess argv
-  launching `ln`/`cp`, or `fs.symlink`/`fs.symlinkSync`). With that evidence,
-  both graders withhold nested-cleanup exemptions and report critical
-  destructive-command findings with a security score of 0.0; unlinking a
-  final leaf remains exempt. This conservative signal applies across the
-  trace, including after link moves or replacements, without inspecting the
-  filesystem or proving a link's destination or creation success. Unobserved
-  or pre-existing symlinks are not detected by this policy. Lexical path escapes
-  and unresolved or `xargs`-supplied deletion targets remain flagged. Searches,
-  script arguments, and unexecuted heredoc data do not supply link evidence;
-  Python and Node call syntax is inspected only in executable inline source
-  or a recognized program supplied directly through standard input. Comments
-  containing apostrophes do not hide actual link calls. Later and multiple
-  heredocs, `cat` pipelines into interpreters, and common shell startup options
-  retain link detection. Plain `;`, `&&`, `||`, and newline sequences apply
-  evidence in command order, so later link creation does not regrade earlier
-  cleanup in the same call. Loops, functions, traps, background jobs and other
-  compound syntax keep conservative whole-action evidence; unrelated link
-  creation can still affect later nested cleanup and remains a policy tradeoff.
-- Tier 3 security grading no longer grants temporary-cleanup exemptions to
-  destructive `rm` commands launched through `xargs`, whose additional targets
-  may come from standard input or an argument file. Both graders recognize
-  common options and wrappers while preserving separate cleanup commands.
-  Input contents are not evaluated, so this conservative policy also flags
-  legitimate scoped cleanup such as
-  `find /tmp/cache -name '*.pyc' | xargs rm -f` as a critical destructive-command
-  finding with a security score of 0.0.
-- Tier 3 security grading now normalizes deletion targets before exempting
-  temporary-directory cleanup. Paths such as `/tmp/../workspace` and commands
-  mixing temporary and non-temporary targets receive destructive-command
-  findings in both the host checker and bundled Harbor verifier. Destructive
-  `rm` fragments with no parsed target are also flagged, preserving detection
-  of deletions assembled from strings. Temporary cleanup inside backtick
-  command substitutions, or followed by shell comments and file-descriptor
-  redirections, no longer produces false destructive-command findings. Targets
-  after heredoc and here-string redirections are still checked; the input word
-  of a redirection is not treated as a deletion target.
-  Case-arm/subshell terminators and unrelated comments, ANSI-C literals, or
-  heredoc data no longer remove the cleanup exemption. Command substitutions
-  used as redirection words do not hide later deletion targets. Unquoted
-  `/tmp` deletion targets containing variables, command substitutions, or
-  brace expansions (for example standalone `rm -rf /tmp/build-$$`) no longer
-  get the cleanup exemption because their destinations remain unresolved.
-  Operandless `xargs rm` invocations remain detectable when unrelated syntax
-  or parser budgets prevent a complete parse; the fallback uses a bounded
-  command span to avoid excessive backtracking on long actions.
 - Tier 3 error recovery now scores unrecovered command failures as zero and
   includes them in fault counts and failure verdicts/report reasons. Host and
   bundled verifier detection agree and use a result's execution status when it

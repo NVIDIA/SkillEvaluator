@@ -9,7 +9,7 @@ similarity >= threshold to at least one other member in the group.
 
 from __future__ import annotations
 
-from dataclasses import dataclass, field
+from dataclasses import dataclass, field, replace
 from itertools import combinations
 from typing import TYPE_CHECKING
 
@@ -61,6 +61,28 @@ class UnionFind:
         return groups
 
 
+def _merge_split_pieces(members: list[ContentChunk]) -> list[ContentChunk]:
+    """Report pieces of one split source chunk once, with their merged range."""
+    merged: list[ContentChunk] = []
+    positions: dict[tuple[str, int, int], int] = {}
+    for chunk in members:
+        group = chunk.split_group
+        if group is None:
+            merged.append(chunk)
+        elif group in positions:
+            first = merged[positions[group]]
+            merged[positions[group]] = replace(
+                first,
+                text=f"{first.text}\n\n{chunk.text}",
+                start_line=min(first.start_line, chunk.start_line),
+                end_line=max(first.end_line, chunk.end_line),
+            )
+        else:
+            positions[group] = len(merged)
+            merged.append(chunk)
+    return merged
+
+
 def build_clusters(
     chunks: list[ContentChunk],
     threshold: float = CONTENT_DEDUP_SIMILARITY_THRESHOLD,
@@ -69,6 +91,10 @@ def build_clusters(
     n = len(chunks)
     if n < 2:
         return []
+
+    def siblings(i: int, j: int) -> bool:
+        group = chunks[i].split_group
+        return group is not None and group == chunks[j].split_group
 
     uf = UnionFind(n)
     pair_scores: dict[tuple[int, int], float] = {}
@@ -79,7 +105,7 @@ def build_clusters(
             chunks[j].embedding,
         )
         pair_scores[(i, j)] = score
-        if score >= threshold:
+        if score >= threshold and not siblings(i, j):
             uf.union(i, j)
 
     clusters: list[ContentCluster] = []
@@ -87,8 +113,8 @@ def build_clusters(
         if len(indices) < 2:
             continue
 
-        members = [chunks[i] for i in indices]
-        scores = [pair_scores.get((min(i, j), max(i, j)), 0.0) for i, j in combinations(indices, 2)]
+        members = _merge_split_pieces([chunks[i] for i in indices])
+        scores = [pair_scores[(i, j)] for i, j in combinations(indices, 2) if not siblings(i, j)]
 
         clusters.append(
             ContentCluster(

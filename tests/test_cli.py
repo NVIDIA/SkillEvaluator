@@ -196,6 +196,48 @@ def test_similarity_cli_handles_pinned_openclaw_compatibility_layout(tmp_path: P
     ]
 
 
+def test_tier2_clis_scan_contained_agent_directory_alias_once(tmp_path: Path, monkeypatch) -> None:
+    collection = tmp_path / "skills"
+    skill = collection / "agent-alias"
+    canonical = skill / ".claude"
+    canonical.mkdir(parents=True)
+    (skill / "SKILL.md").write_text(
+        "---\nname: agent-alias\ndescription: Share one canonical directory across coding agents\n---\n\n"
+        "# Agent Alias\n\nRead the canonical agent directory before changing any project files in this skill.\n"
+    )
+    (canonical / "shared.md").write_text(
+        "# Shared context\n\nSHARED_CANARY: use these same instructions for every coding agent that loads this skill.\n"
+    )
+    try:
+        (skill / ".agents").symlink_to(canonical.name, target_is_directory=True)
+    except OSError as exc:
+        pytest.skip(f"symlinks unavailable: {exc}")
+    second = collection / "second-skill"
+    second.mkdir()
+    (second / "SKILL.md").write_text("---\nname: second-skill\ndescription: Exercise an unrelated workflow\n---\n")
+
+    embedded_texts: list[str] = []
+
+    def embed_orthogonally(_self, texts: list[str]) -> list[list[float]]:
+        vectors: list[list[float]] = []
+        for text in texts:
+            vector = [0.0] * 64
+            vector[len(embedded_texts)] = 1.0
+            embedded_texts.append(text)
+            vectors.append(vector)
+        return vectors
+
+    monkeypatch.setattr("skillevaluator.embedding.client.EmbeddingClient.embed", embed_orthogonally)
+
+    similarity = CliRunner().invoke(cli, ["similarity-check", str(collection), "--type", "skill"])
+    context = CliRunner().invoke(cli, ["context-optimization-check", str(skill), "--threshold", "1.0"])
+
+    assert similarity.exit_code == 0, similarity.output
+    assert context.exit_code == 0, context.output
+    assert "symbolic link or reparse point" not in click.unstyle(context.output)
+    assert sum("SHARED_CANARY" in text for text in embedded_texts) == 1
+
+
 @pytest.mark.parametrize(
     ("command", "runner_path"),
     [

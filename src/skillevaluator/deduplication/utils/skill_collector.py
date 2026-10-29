@@ -29,7 +29,11 @@ from skillevaluator.constants import (
     CONTENT_DEDUP_SCANNABLE_EXTENSIONS,
 )
 from skillevaluator.utils.path_security import matches_filesystem_name
-from skillevaluator.utils.tier2_paths import is_contained_compatibility_alias
+from skillevaluator.utils.tier2_paths import (
+    contained_directory_alias_target,
+    is_contained_compatibility_alias,
+    is_link_or_reparse,
+)
 from skillevaluator.validators.frontmatter_parser import FRONTMATTER_PATTERN
 
 logger = logging.getLogger(__name__)
@@ -440,6 +444,8 @@ def _collect_files_anchored(
 
     candidates: list[_CandidateFile] = []
     declared_total_bytes = 0
+    regular_directories: set[str] = set()
+    directory_aliases: dict[Path, tuple[str, str]] = {}
 
     def _raise_traversal_error(error: OSError) -> None:
         raise error
@@ -457,18 +463,34 @@ def _collect_files_anchored(
                 rel_path = directory.relative_to(root).as_posix()
                 if matches_filesystem_name(directory, excluded):
                     logger.debug("Skipping excluded path: %s", rel_path)
+                    # A pruned regular directory is still a valid alias
+                    # target; its contents stay excluded either way.
+                    if not is_link_or_reparse(directory):
+                        regular_directories.add(rel_path)
                     continue
                 # ``os.walk(..., followlinks=False)`` does not follow normal
                 # symlinks, but Windows directory junctions are separate
-                # reparse points and may still be traversed. Reject every
-                # retained redirect before allowing the walk to recurse.
+                # reparse points and may still be traversed. Never descend
+                # into a retained redirect: an unselected, contained alias
+                # such as ``.agents -> .claude`` is recorded for validation
+                # after the walk; every other redirect is rejected here.
                 if _is_link_or_reparse(directory, rel_path):
-                    raise SkillCollectionError(
-                        "unsafe_path",
-                        f"Refusing symbolic link or reparse point: {rel_path}",
-                        rel_path=rel_path,
-                        suggestion="Replace the link with a regular directory stored inside the skill directory.",
+                    target = (
+                        None
+                        if directory.suffix.lower() in CONTENT_DEDUP_SCANNABLE_EXTENSIONS
+                        else contained_directory_alias_target(directory, directory.relative_to(root))
                     )
+                    if target is None:
+                        raise SkillCollectionError(
+                            "unsafe_path",
+                            f"Refusing symbolic link or reparse point: {rel_path}",
+                            rel_path=rel_path,
+                            suggestion="Replace the link with a regular directory stored inside the skill directory.",
+                        )
+                    directory_aliases[directory] = (rel_path, target)
+                    yield directory
+                    continue
+                regular_directories.add(rel_path)
                 kept.append(name)
             dirnames[:] = kept
             for name in kept:
@@ -496,6 +518,17 @@ def _collect_files_anchored(
                 "limit": CONTENT_DEDUP_MAX_DISCOVERED_PATHS,
             },
         )
+    for alias_rel_path, target in directory_aliases.values():
+        if target not in regular_directories:
+            raise SkillCollectionError(
+                "unsafe_path",
+                (
+                    "Refusing symbolic link or reparse point whose target is not a regular directory "
+                    f"in the skill: {alias_rel_path} -> {target}"
+                ),
+                rel_path=alias_rel_path,
+                suggestion="Point the link at a regular directory stored inside the skill directory.",
+            )
     discovered_paths.sort()
     discovered_names_by_parent: dict[Path, set[str]] = {}
     for discovered_path in discovered_paths:
@@ -516,6 +549,10 @@ def _collect_files_anchored(
         rel_path = relative.as_posix()
         if _is_excluded(rel_parts, excluded):
             logger.debug("Skipping excluded path: %s", rel_path)
+            continue
+
+        if file_path in directory_aliases:
+            logger.debug("Skipping directory alias in favor of regular target: %s", rel_path)
             continue
 
         if _is_link_or_reparse(file_path, rel_path):

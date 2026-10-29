@@ -298,12 +298,19 @@ you intend to skip Tier 2 entirely.
 | High-confidence duplicate boundary | `0.70` | Maps actionable duplicate verdicts to HIGH rather than MEDIUM |
 
 Tier 2 treats skill content and catalog files as untrusted input. Before any
-provider call, it rejects linked roots, linked directories and manifests,
-hard-linked selected files, non-regular files, paths outside the verified scan
-root, and all file redirects except the exact contained
-`CLAUDE.md -> AGENTS.md` compatibility alias. That alias is validated but never
-followed; its exactly named, independently discovered, single-link regular
-sibling target is scanned once. Explicit limits bound
+provider call, it rejects linked roots and manifests, hard-linked selected
+files, non-regular files, paths outside the verified scan root, and all
+redirects except two kinds of contained compatibility alias. The exact
+`CLAUDE.md -> AGENTS.md` file alias is validated but never followed; its exactly
+named, independently discovered, single-link regular sibling target is scanned
+once. A directory alias such as `.agents -> .claude` is accepted only when its
+name is not a scanned file type, its raw link text is relative with `..` only
+as leading segments, the target stays below the scan root and is neither the
+root nor one of the alias's own parent directories, and the same walk finds
+that target as a regular directory. The alias is never followed, so the target
+directory is scanned once. Absolute links and Windows junctions, broken links,
+links that escape the root, and aliases that point at another link remain
+rejected. Explicit limits bound
 discovered paths, file counts, per-file and total input bytes, content chunks,
 candidate clusters, catalog size and entry count, vector length, returned
 matches, and pairwise scalar work. Catalog loading also rejects duplicate JSON
@@ -343,7 +350,8 @@ handling terms before sending confidential skill content to a hosted endpoint.
     | Duplicate sections occur in one file | Reports the relevant headings and line ranges |
     | Skill contains an exactly named, single-link regular `AGENTS.md` plus `CLAUDE.md -> AGENTS.md` | Validates and skips the alias, then scans `AGENTS.md` once |
     | Skill carries large generated snapshots (`evals`, `.evals`, `results`, `.results`, `versions`, `.versions`) | Excluded directories are pruned during traversal, so their contents never count toward the discovered-path limit |
-    | A directory is a Windows junction or other reparse point | Rejected during the walk, like symbolic links |
+    | Skill contains a relative directory alias such as `.agents -> .claude` whose target is a regular directory in the same skill | Skips the alias without following it, then scans the target directory once |
+    | A directory is a Windows junction, other reparse point, or a symbolic link that does not qualify as a contained alias | Rejected during the walk, before descent |
     | Embedding or chat-LLM analysis is incomplete | Reports an error; does not claim a clean result |
   </Accordion>
   <Accordion title="Inter-skill analysis">
@@ -354,6 +362,7 @@ handling terms before sending confidential skill content to a hosted endpoint.
     | Catalog path is missing | Returns an error and does not rebuild it silently |
     | Candidate lacks a root `SKILL.md` | Rejects the catalog query |
     | A skill contains an exactly named, single-link regular `AGENTS.md` plus `CLAUDE.md -> AGENTS.md` | Validates and skips the unrelated compatibility alias while discovering `SKILL.md` |
+    | The collection contains a relative directory alias such as `.agents -> .claude` whose target is a regular directory in the same collection | Skips the alias without following it, so manifests in the target are discovered once |
     | Candidate matches multiple catalog entries | Reports matches in descending similarity order |
     | Provider, endpoint, model, mode, or vector length differs | Rejects the catalog; query with matching settings or rebuild it |
     | Catalog is malformed, non-finite, or oversized | Rejects it before comparison |

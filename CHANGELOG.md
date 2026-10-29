@@ -206,6 +206,17 @@ All notable changes to SkillEvaluator are documented in this file.
   output is redirected or the search runs inside `sh -c`. Host and bundled
   scoring agree, while scoped searches and slash-valued patterns retain their
   classification.
+
+- Tier 2 `similarity-check` and `context-optimization-check` no longer abort
+  with a "symlink or reparse point" error when a skill or collection aliases
+  one agent directory to another, such as `.agents -> .claude`. A directory
+  link whose name is not a scanned file type and whose relative target is a
+  regular directory found by the same scan is skipped without being followed,
+  so the target directory is scanned once. Absolute links and Windows
+  junctions, broken or escaping links, links to the scan root or one of the
+  alias's parent directories, `..` after a named component, and aliases that
+  point at another link remain rejected.
+
 - PII email scans recognize all RFC 2606 reserved domains, including their
   subdomains, mixed-case forms, trailing dots, and prose ellipses. A local-part
   boundary prevents quadratic rescanning of long excluded addresses. Ordinary

@@ -121,10 +121,11 @@ All notable changes to SkillEvaluator are documented in this file.
   workflows with `validate --tiers`: which tiers run, Tier 1 dependency and LLM
   stages, report files, and exit codes. It also states that `--tiers` must
   include Tier 1, so Tier 2 or Tier 3 alone runs through its direct workflow.
-- Install instructions, the CI recipe and the missing-scanner hint now pin
-  SkillSpector to `v2.13.1` instead of `v2.12.0`. With `v2.12.0`, the Tier 1
-  security check could be `INCOMPLETE` or fail for skills with no real issue:
-  valid Python and Perl helpers were recorded as only partially inspected
+- Install instructions, the CI recipe, the missing-scanner hint and the Tier 1
+  CI image's scanner lock now pin SkillSpector to `v2.13.1` instead of
+  `v2.12.0`. With `v2.12.0`, the Tier 1 security check could be `INCOMPLETE`
+  or fail for skills with no real issue: valid Python and Perl helpers were
+  recorded as only partially inspected
   (`static_parse_limit` or `obfuscated_instruction_text`,
   [NVIDIA/SkillSpector#777](https://github.com/NVIDIA/SkillSpector/pull/777)),
   the bytecode check could hit its time budget while waiting behind other

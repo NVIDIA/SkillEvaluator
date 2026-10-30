@@ -936,8 +936,8 @@ shellingham==1.5.4 \
 six==1.17.0 \
     --hash=sha256:4721f391ed90541fddacab5acf947aa0d3dc7d27b2e1e8eda2be8970586c3274 \
     --hash=sha256:ff70335d468e7eb6ec65b95b99d3a2836546063f63acc5171de367e834932a81
-skillspector @ https://github.com/NVIDIA/SkillSpector/archive/c7958a3268d9498644b22edb75d0f051bbc8cbfc.tar.gz \
-    --hash=sha256:ea6f4e5d40d9ba0d73a801515772962f1c7cc8ab8932a4de41a573b46411070d
+skillspector @ https://github.com/NVIDIA/SkillSpector/archive/f3b25697d76256998ca9d42c198d256258d4c035.tar.gz \
+    --hash=sha256:387d54edc3e5750960a4a76f14f5ac75aa85ee487526736b0008df9dd8908dec
 sniffio==1.3.1 \
     --hash=sha256:2f6da418d1f1e0fddd844478f41680e794e6051915791a034ff65e5f100525a2 \
     --hash=sha256:f4324edc670a0f49750a81b895f35c3adb843cca46f0530f79fc1babb23789dc

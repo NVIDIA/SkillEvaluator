@@ -877,6 +877,12 @@ def test_launch_docs_address_scanner_and_naming_ambiguities() -> None:
     assert "are not interchangeable" in environment
 
 
+SKILLSPECTOR_RELEASE = "v2.13.1"
+# Tag commit of SKILLSPECTOR_RELEASE. The Tier 1 CI image installs this commit's
+# source archive, so it must move together with the install instructions.
+SKILLSPECTOR_RELEASE_COMMIT = "f3b25697d76256998ca9d42c198d256258d4c035"
+
+
 def test_skillspector_install_instructions_pin_one_release() -> None:
     sources = [
         REPO_ROOT / "README.md",
@@ -890,8 +896,24 @@ def test_skillspector_install_instructions_pin_one_release() -> None:
             r"git\+https://github\.com/NVIDIA/SkillSpector\.git[^\s`\"]*", path.read_text(encoding="utf-8")
         )
     }
+    ci_locks = sorted((REPO_ROOT / "ci" / "requirements").glob("skillspector*.*"))
+    archive_refs = {
+        ref
+        for path in ci_locks
+        for ref in re.findall(
+            r"github\.com/NVIDIA/SkillSpector/archive/([^\s/]+)\.tar\.gz", path.read_text(encoding="utf-8")
+        )
+    }
+    notices = (REPO_ROOT / "THIRD_PARTY_NOTICES.md").read_text(encoding="utf-8")
+    notice_rows = re.findall(
+        r"^\| SkillSpector \| \[([^\]]+)\]\(https://github\.com/NVIDIA/SkillSpector/tree/([^)\s]+)\) \|",
+        notices,
+        flags=re.MULTILINE,
+    )
 
-    assert install_specs == {"git+https://github.com/NVIDIA/SkillSpector.git@v2.13.1"}
+    assert install_specs == {f"git+https://github.com/NVIDIA/SkillSpector.git@{SKILLSPECTOR_RELEASE}"}
+    assert archive_refs == {SKILLSPECTOR_RELEASE_COMMIT}
+    assert notice_rows == [(SKILLSPECTOR_RELEASE_COMMIT[:7], SKILLSPECTOR_RELEASE_COMMIT)]
 
 
 def test_ci_sarif_merge_uses_uv_tool_python() -> None:

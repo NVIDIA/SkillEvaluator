@@ -1659,7 +1659,23 @@ def _judge_aware_lift(
     recorded = recorded if isinstance(recorded, dict) else {}
     from skillevaluator.tier3.harbor.metrics import not_applicable_list
 
-    paired_contract = isinstance(recorded.get("basis"), dict) or any(
+    basis = recorded.get("basis")
+    aggregate_only = all(
+        key not in info for key in ("rewards", "rewards_baseline", "rewards_complete", "rewards_baseline_complete")
+    )
+    unchanged_basis = (
+        isinstance(basis, dict)
+        and type(basis.get("excluded_case_entries")) is int
+        and basis["excluded_case_entries"] == 0
+        and basis.get("excluded_cases") == []
+        and basis.get("excluded_metrics") == []
+        and basis.get("excluded_cases_truncated") is False
+    )
+    # Live collector results can contain only aggregate metric maps. With no
+    # exclusions their comparison is recomputed from those maps below. Saved
+    # runs always carry explicit reward-completeness fields, so missing saved
+    # evidence never takes this aggregate-only path.
+    paired_contract = (isinstance(basis, dict) and not (aggregate_only and unchanged_basis)) or any(
         not_applicable_list(info.get(f"_not_applicable_hint_{arm}")) or _arm_not_applicable(info, arm)
         for arm in ("with_skill", "without_skill")
     )
@@ -1773,6 +1789,34 @@ def _judge_aware_lift(
     return rebuilt
 
 
+def _mixed_logical_overall_lift(conditions: list[list[dict[str, Any]]]) -> dict[str, float] | None:
+    """Compare complete mixed rewards only when both arms scored the same case contracts."""
+    from skillevaluator.tier3.harbor.collector import _average_overall, _entry_id
+    from skillevaluator.tier3.harbor.metrics import metric_is_not_applicable, metric_set_for_reward
+
+    cohorts = []
+    for rewards in conditions:
+        by_case: dict[str, set[tuple[Any, ...]]] = {}
+        for reward in rewards:
+            case = _entry_id(reward)
+            if case in {"", "unknown"}:
+                return None
+            _, metrics = metric_set_for_reward(reward)
+            contract = (
+                metrics,
+                tuple(metric for metric in metrics if metric_is_not_applicable(reward, metric)),
+                bool(reward.get("_logical_mixed_contracts")),
+            )
+            by_case.setdefault(case, set()).add(contract)
+        cohorts.append(by_case)
+    if not cohorts[0] or cohorts[0] != cohorts[1]:
+        return None
+    with_score, baseline_score = (_average_overall(rewards) for rewards in conditions)
+    if with_score is None or baseline_score is None:
+        return None
+    return {"with_skill": with_score, "without_skill": baseline_score, "delta": round(with_score - baseline_score, 4)}
+
+
 def _build_agent(
     name: str,
     info: dict[str, Any],
@@ -1802,6 +1846,11 @@ def _build_agent(
         not never_activated and set(with_metrics) == set(baseline_metrics) and len(condition_policies) == 1
     )
     lift_data = info.get("lift") if isinstance(info.get("lift"), dict) else {}
+    comparison_unavailable = (
+        info.get("comparison_unavailable") is True
+        or info.get("comparison_complete") is False
+        or lift_data.get("comparison_unavailable") is True
+    )
     with_quality_available = _condition_quality_available(info, "with_skill")
     baseline_quality_available = _condition_quality_available(info, "without_skill")
     if not with_quality_available:
@@ -1937,11 +1986,9 @@ def _build_agent(
                 4,
             )
     if judge_lift is not None:
-        overall_lift = (
-            _lift_value("overall", judge_lift)
-            if comparable_scores and not (with_mixed_contract or baseline_mixed_contract)
-            else None
-        )
+        overall_lift = _lift_value("overall", judge_lift) if comparable_scores else None
+    if comparison_unavailable:
+        overall_lift = None
 
     trials = _normalize_trials(info.get("rewards") or [], with_metrics)
     baseline_trials = _normalize_trials(info.get("rewards_baseline") or [], baseline_metrics)

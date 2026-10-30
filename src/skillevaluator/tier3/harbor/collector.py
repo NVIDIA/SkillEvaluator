@@ -5054,9 +5054,12 @@ def _shared_metric_scorer(
     fallback: set[str],
     expected_id_set: set[str] | None,
 ) -> Callable[[dict[str, Any]], float | None]:
-    """Score a trial as the mean of the metrics both arms scored for its case."""
+    """Apply the trial's score policy to the metrics both arms can compare."""
 
     def score(reward: dict[str, Any]) -> float | None:
+        own_score = _overall_score(reward)
+        if own_score is None:
+            return None
         _, metrics = metric_set_for_reward(reward)
         if not metrics:
             return own_score
@@ -5070,10 +5073,9 @@ def _shared_metric_scorer(
         if reward.get("_logical_attempt_sentinel") is _LOGICAL_ATTEMPT_SENTINEL and reward.get(
             "_logical_mixed_contracts"
         ):
-            # A custom-only attempt, or one whose steps mix metric contracts, has only its overall.
-            return _overall_score(reward)
-        shared = shared_by_case.get(_entry_id(reward, expected_id_set), fallback)
-        values: list[float] = []
+            # A mixed-step overall cannot be reconstructed on a smaller basis.
+            return None
+        scores: dict[str, float] = {}
         for metric in metrics:
             if metric not in shared:
                 continue
@@ -5118,8 +5120,12 @@ def _shared_metric_pass_lift(
     control_scored = _case_scored_metrics(control_rewards, expected_id_set)
     paired_cases = set(treatment_scored) & set(control_scored)
     shared_by_case = {case: treatment_scored[case] & control_scored[case] for case in paired_cases}
+    judge_mixed = _judge_mixed_cases(treatment_rewards, control_rewards, expected_id_set)
+    for metric, cases in judge_mixed.items():
+        for case in cases & paired_cases:
+            shared_by_case[case].discard(metric)
     fallback = set().union(*treatment_scored.values()) & set().union(*control_scored.values())
-    one_arm_only = set().union(*(treatment_scored[case] ^ control_scored[case] for case in paired_cases))
+    excluded_metrics = set(judge_mixed).union(*(treatment_scored[case] ^ control_scored[case] for case in paired_cases))
     scorer = _shared_metric_scorer(shared_by_case, fallback, expected_id_set)
     summaries = [
         _pass_summary(
@@ -5142,11 +5148,12 @@ def _shared_metric_pass_lift(
         "passed_cases_delta": int(treatment.get("passed_cases", 0)) - int(control.get("passed_cases", 0)),
         "paired_comparison": _paired_pass_comparison(treatment, control),
         "basis": PASS_LIFT_BASIS_SHARED_METRICS,
-        # Metrics only one arm scored (for example the skill metrics of the arm with the skill).
+        # Metrics one arm did not score, or whose judge models differed on some cases.
         "excluded_metrics": [
-            *(metric for metric in DISPLAY_METRICS if metric in one_arm_only),
-            *sorted(one_arm_only - set(DISPLAY_METRICS)),
+            *(metric for metric in DISPLAY_METRICS if metric in excluded_metrics),
+            *sorted(excluded_metrics - set(DISPLAY_METRICS)),
         ],
+        **({"judge_mixed_cases": {metric: len(cases) for metric, cases in judge_mixed.items()}} if judge_mixed else {}),
         "with_skill_passed_cases": int(treatment.get("passed_cases", 0)),
         "without_skill_passed_cases": int(control.get("passed_cases", 0)),
         "total_cases": int(treatment.get("total_cases", 0)),

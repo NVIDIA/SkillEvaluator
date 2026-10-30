@@ -74,6 +74,7 @@ from skillevaluator.reporting.base import (
 from skillevaluator.reporting.harbor_viewer import normalize_agent_eval_harbor_links
 from skillevaluator.reporting.presentation import success_is_not_applicable
 from skillevaluator.reporting.run_status import Status, resolve_run_status, result_status
+from skillevaluator.reporting.tier3_scope import completed_agent_result, validate_report_scope
 
 if TYPE_CHECKING:
     from skillevaluator.models import ValidationResult
@@ -3089,7 +3090,8 @@ class HTMLReporter(ReporterBase):
             publication_status=publication.status,
             publication_reasons=publication.reasons,
             tier3_effective_status=(
-                completed_agent["verdict"] if self.report_scope == "tier3" and completed_agent
+                completed_agent["verdict"]
+                if self.report_scope == "tier3" and completed_agent
                 else publication.tier3.status
             ),
             total_validators=total_validators,

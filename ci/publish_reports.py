@@ -157,7 +157,9 @@ def validate_summary(summary: dict) -> None:
             raise PublicationError("A skill's verdict contradicts its process evidence.")
         if not row["passed"] and row["overall_status"] == "passed":
             raise PublicationError("A failed skill cannot claim a passing status.")
-        if bool(row["incomplete_scans"]) != (row["overall_status"] == "incomplete"):
+        if (row["overall_status"] == "incomplete" and not row["incomplete_scans"]) or (
+            row["incomplete_scans"] and row["overall_status"] not in {"failed", "incomplete"}
+        ):
             raise PublicationError("A skill's status contradicts its scanner completeness evidence.")
         if row["overall_status"] != "error":
             if any(not _integer(row.get(key)) for key in ("total_validators", "total_errors", "total_warnings")):
@@ -203,6 +205,8 @@ def validate_summary(summary: dict) -> None:
         if skipped
         else "passed"
         if expected
+        else "failed"
+        if any(row["overall_status"] == "failed" for row in rows)
         else "incomplete"
         if incomplete
         else "failed"
@@ -238,6 +242,15 @@ def validate_report(report: dict, row: dict) -> None:
         report.get("incomplete_scans")
     ):
         raise PublicationError("A per-skill report contains invalid completeness evidence.")
+    # Establish statuses from the typed findings and scanner evidence, rather
+    # than trusting matching rollups supplied by an untrusted artifact.
+    from skillevaluator.reporting.retained import RetainedReportError, retained_results
+    from skillevaluator.reporting.run_status import resolve_run_status
+
+    try:
+        retained = retained_results(report, copy_metadata=False)
+    except RetainedReportError as exc:
+        raise PublicationError("A per-skill report contains invalid retained evidence.") from exc
     incomplete = []
     totals = {"errors": 0, "warnings": 0, "critical_count": 0, "high_count": 0, "medium_count": 0, "low_count": 0}
     for result in results:
@@ -245,7 +258,7 @@ def validate_report(report: dict, row: dict) -> None:
         if type(result.get("passed")) is not bool or status not in {"passed", "failed", "incomplete", "skipped"}:
             raise PublicationError("A validator has an invalid verdict.")
         scans = result.get("incomplete_scans")
-        if not _scanner_list(scans) or (status == "incomplete") != bool(scans):
+        if not _scanner_list(scans):
             raise PublicationError("A validator has contradictory scanner completeness evidence.")
         if result["passed"] != (status in {"passed", "skipped"}):
             raise PublicationError("A validator has contradictory pass and status fields.")
@@ -257,7 +270,7 @@ def validate_report(report: dict, row: dict) -> None:
             totals[key] += counts[key]
     incomplete = list(dict.fromkeys(incomplete))
     all_passed = all(result["passed"] for result in results)
-    status = "incomplete" if incomplete else "passed" if all_passed else "failed"
+    status = resolve_run_status(retained).headline.value
     if (report["overall_passed"], report["overall_status"], report["incomplete_scans"]) != (
         all_passed,
         status,

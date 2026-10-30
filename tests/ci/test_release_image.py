@@ -88,6 +88,7 @@ def test_release_shell_never_pushes_an_existing_or_unverified_tag(tmp_path, scen
     docker.write_text(
         "#!/bin/sh\n"
         'printf "%s\\n" "$*" >> "$COMMAND_LOG"\n'
+        'if [ "$1" = login ]; then cat >/dev/null; fi\n'
         'if [ "$1" = inspect ]; then\n'
         '  if [ "$SCENARIO" = wrong-revision ]; then printf "bad-revision\\n"; else printf "%s\\n" "$GITHUB_SHA"; fi\n'
         "fi\n"

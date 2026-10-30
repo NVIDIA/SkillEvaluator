@@ -77,10 +77,10 @@ def test_render_explicit_identity_never_inspects_artifact_paths(payload):
     assert "name_consistency" in rendered
 
 
-def test_incomplete_remains_incomplete(payload):
-    payload["results"][0]["incomplete_scans"] = ["semgrep"]
-    payload["results"][0]["status"] = "incomplete"
-    payload["overall_status"] = "incomplete"
+def test_incomplete_remains_incomplete():
+    result = ValidationResult(validator_name="Security", metadata={"incomplete_scans": ["semgrep"]})
+    result.add_error("Scanner execution did not complete")
+    payload = json.loads(JSONReporter(include_timestamp=False).render_all([result]))
     rows = retained_results(payload)
     assert rows[0].is_incomplete
     assert not json.loads(JSONReporter(include_timestamp=False).render_all(rows))["overall_passed"]

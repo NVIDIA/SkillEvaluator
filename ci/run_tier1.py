@@ -246,6 +246,8 @@ def _summary(skills: list[dict], error: str | None = None) -> dict:
         "overall_passed": bool(skills) and passed == len(skills) and error is None,
         "overall_status": "error"
         if error
+        else "failed"
+        if any(item["overall_status"] == "failed" for item in skills)
         else "incomplete"
         if incomplete
         else "passed"

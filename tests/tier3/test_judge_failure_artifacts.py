@@ -158,7 +158,13 @@ def test_character_facts_keep_numeric_dataset_answers_scoreable(tmp_path, monkey
     assert "evaluation_errors" not in rich
     assert numeric == original_reward
     assert numeric["accuracy"] == numeric["goal_accuracy"] == 0.0
-    assert overall_score(numeric) is not None
+    assert overall_score(rich) == numeric["overall"]
+    # Numeric transport omits N/A metrics; only the rich sidecar establishes
+    # their applicability. A numeric reward alone must remain unscoreable.
+    assert overall_score(numeric) is None
+    collected = dict(numeric)
+    collector._merge_reward_sidecars(collected, verifier.VERIFIER_DIR)
+    assert overall_score(collected) == numeric["overall"]
 
 
 def test_verifier_main_fails_closed_after_collecting_every_required_judge(

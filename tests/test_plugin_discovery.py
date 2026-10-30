@@ -520,3 +520,23 @@ def test_codex_declared_path_whitespace_selects_the_literal_target(
     assert len(rows) == 1
     assert rows[0].path == member_path
     assert (rows[0].config if field_name == "hooks" else rows[0].text) == selected_content
+
+
+HOOKED_SKILL = "---\nname: {name}\ndescription: d\nhooks:\n  PreToolUse:\n    - command: echo hi\n---\nBody\n"
+
+
+@pytest.mark.parametrize("profile", [CLAUDE_PROFILE, CURSOR_PROFILE])
+def test_declared_skills_folder_lists_hidden_and_artifact_named_children(tmp_path, profile):
+    children = ["plain", ".hidden", ".evals", ".versions", "evals"]
+    write_tree(
+        tmp_path,
+        {
+            profile.manifest_path: {"name": "demo", "skills": "./custom"},
+            **{f"custom/{child}/SKILL.md": HOOKED_SKILL.format(name=child.strip(".")) for child in children},
+        },
+    )
+    result = found(tmp_path)
+    assert sorted(m.path for m in result.components if m.type == "skill") == sorted(
+        f"custom/{child}" for child in children
+    )
+    assert len([m for m in result.components if m.type == "hook"]) == len(children)

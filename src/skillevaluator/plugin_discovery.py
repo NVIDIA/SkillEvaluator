@@ -698,10 +698,8 @@ class _MemberCollector:
             "Skill directory entries", len(entries), rel_dir.as_posix(), limit=CONTENT_DEDUP_MAX_DISCOVERED_PATHS
         )
         for entry in entries[:CONTENT_DEDUP_MAX_DISCOVERED_PATHS]:
-            if entry.name.startswith(".") or (
-                entry.name in SCAN_EXCLUDED_DIRS and entry.name not in SCAN_ARTIFACT_DIRS
-            ):
-                continue  # hidden folders, VCS, virtualenv, package, and bytecode caches
+            if entry.name in SCAN_EXCLUDED_DIRS and entry.name not in SCAN_ARTIFACT_DIRS:
+                continue  # VCS, virtualenv, package, and bytecode caches (hidden skill folders load)
             child = PurePosixPath(entry.name) if str(rel_dir) == "." else rel_dir / entry.name
             if str(rel_dir) == "." and entry.name == DEFAULT_SKILLS_DIR:
                 continue  # the default skills/ scan covers it

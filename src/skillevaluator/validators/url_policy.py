@@ -48,6 +48,9 @@ _ENV_EXPANSION_RE = re.compile(
 _MAX_DEFAULT_PASSES = 8
 # What is left of an Authorization-style value once its references are removed: 'Bearer ${TOKEN}'.
 _AUTH_SCHEME_ONLY_RE = re.compile(r"(?i)^\s*(?:bearer|basic|token)?\s*$")
+# What is left of an Authorization header with any scheme once its references are removed: 'ApiKey ${KEY}',
+# 'Bot ${TOKEN}'. The blank after the scheme word is where the reference was.
+_AUTH_HEADER_SCHEME_ONLY_RE = re.compile(r"^\s*[A-Za-z][A-Za-z0-9!#$%&'*+.^_`|~-]*\s+$")
 # env keys that name a credential -- their value must be a reference, never a literal.
 # The auth/bearer/token alternatives are suffix-anchored so benign config keys that
 # merely contain those substrings -- AUTH_TYPE, OAUTH_CLIENT_ID, BEARER_FORMAT,
@@ -58,10 +61,10 @@ _SECRET_KEY_RE = re.compile(
     r"|bearer[_-]?token|auth[_-](?:key|token|secret|pass(?:word)?)"
     r"|token(?:[_-](?:secret|key|value|id))?$)"
 )
-# Inline HTTP auth-scheme credential carried in a value (e.g. an Authorization
-# header): "Bearer <token>" / "Basic <base64>" with a real payload. Anchored with a
-# minimum payload length so a "${ENV}" reference or benign prose never matches; this
-# keeps Authorization-style inline secrets covered without keying on the header name.
+# Inline HTTP auth-scheme credential carried in a value under any key: "Bearer <token>" /
+# "Basic <base64>" with a real payload. Anchored with a minimum payload length so a
+# "${ENV}" reference or benign prose never matches. An Authorization header with any
+# other scheme ('Token <hex>', 'ApiKey <base64>') is covered by its name (_QUERY_CREDENTIAL_KEYS).
 _INLINE_AUTH_SCHEME_RE = re.compile(r"(?i)^(?:bearer|basic)\s+[A-Za-z0-9+/._=~-]{12,}$")
 # Known inline-secret value shapes. Only ``search`` truthiness is used.
 #
@@ -105,10 +108,11 @@ _CREDENTIAL_KEYS_EXACT = frozenset(
         "credentials",
     }
 )
-# Keys that name a credential in a URL query or an HTTP header (Google's 'key=', a signed URL's 'sig='), but
-# are often a setting as a flag or env name ('--key primary', '--pass 2', '--signature sha256'). There the value
-# must also look like secret material.
-_QUERY_CREDENTIAL_KEYS = frozenset({"key", "sig", "signature", "pass", "pwd"})
+# Keys that name a credential in a URL query or an HTTP header (Google's 'key=', a signed URL's 'sig=', the
+# Authorization header whatever its scheme), but are often a setting as a flag or env name ('--key primary',
+# '--pass 2', '--signature sha256'). There the value must also look like secret material.
+_AUTHORIZATION_KEYS = frozenset({"authorization", "proxy-authorization"})
+_QUERY_CREDENTIAL_KEYS = frozenset({"key", "sig", "signature", "pass", "pwd"}) | _AUTHORIZATION_KEYS
 # A last key word that makes a credential noun a setting about the credential, not the credential:
 # PASSWORD_POLICY, DB_PASSWORD_FILE, SECRET_NAME, API_KEY_PATH, PASSWORD_MIN_LENGTH.
 _NON_CREDENTIAL_QUALIFIERS = frozenset(
@@ -257,7 +261,7 @@ def is_credential_key(key: str, *, query: bool = False) -> bool:
     A key whose last word makes it a setting (``PASSWORD_POLICY``,
     ``DB_PASSWORD_FILE``) does not. With ``query`` (a URL query parameter or an
     HTTP header name) the short keys ``key``, ``sig``, ``signature``, ``pass``,
-    and ``pwd`` count too.
+    and ``pwd`` count too, and so do ``Authorization`` and ``Proxy-Authorization``.
     """
     text = str(key).strip().lstrip("-")
     if text.lower() in _CREDENTIAL_KEYS_EXACT or (query and text.lower() in _QUERY_CREDENTIAL_KEYS):
@@ -272,8 +276,10 @@ def looks_like_inline_secret(key: str, value: str, *, query: bool = True) -> boo
     """True when a keyed value is an inline credential rather than a reference.
 
     A value shaped like a secret counts under any key, including an inline
-    ``Bearer``/``Basic`` credential (so Authorization-style headers are covered
-    without keying on the header name). A non-empty literal counts under a
+    ``Bearer``/``Basic`` credential. An ``Authorization`` header (``query``)
+    names a credential whatever its scheme (``Token <hex>``, ``ApiKey ...``, a
+    raw value); a scheme word followed by references (``ApiKey ${KEY}``) is not
+    one. A non-empty literal counts under a
     credential-named key (:func:`is_credential_key`) unless it is a setting: a
     boolean, an auth mode such as ``basic``, or a path. A short key such as
     ``KEY`` or ``--pass`` counts only with a value that looks like key material
@@ -297,7 +303,9 @@ def looks_like_inline_secret(key: str, value: str, *, query: bool = True) -> boo
             break
         # Judge only what the plugin ships: the literal text around the references and their defaults.
         literal = env_defaults_text(text)
-        if _AUTH_SCHEME_ONLY_RE.match(literal):
+        if _AUTH_SCHEME_ONLY_RE.match(literal) or (
+            _is_authorization_key(key) and _AUTH_HEADER_SCHEME_ONLY_RE.match(literal)
+        ):
             return False
         text = literal.strip()
     if not text or is_env_reference(text):
@@ -345,6 +353,11 @@ def looks_like_random_secret(key: str, value: str) -> bool:
 def _key_words(key: str) -> list[str]:
     """Lower-case words of an env name, header, flag, or camelCase key (``clientSecret`` -> client, secret)."""
     return [word.lower() for word in _KEY_WORD_RE.findall(str(key))]
+
+
+def _is_authorization_key(key: str) -> bool:
+    """``Authorization`` or ``Proxy-Authorization``, in any case."""
+    return str(key).strip().lower() in _AUTHORIZATION_KEYS
 
 
 def _is_query_credential_key(key: str) -> bool:

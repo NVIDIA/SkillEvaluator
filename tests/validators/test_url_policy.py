@@ -9,14 +9,17 @@ import json
 import subprocess
 import sys
 import textwrap
+from pathlib import Path
 
 import pytest
+from tests.validators.plugin_analysis_support import analyze_plugin
 
 from skillevaluator.validators.url_policy import (
     MAX_REPORT_CHARS,
     UrlCredentials,
     UserinfoRule,
     has_secret_shape,
+    is_credential_key,
     is_env_reference,
     looks_like_inline_secret,
     redact_secrets,
@@ -391,3 +394,72 @@ def test_deeply_nested_defaults_do_not_exhaust_the_stack() -> None:
 
     assert looks_like_inline_secret("API_KEY", nested)
     assert url_credentials(f"https://h.example/mcp?token={nested}", userinfo_rule="literal").query_keys == ("token",)
+
+
+# --------------------------------------------------------------------------- #
+# Authorization headers with any scheme                                        #
+# --------------------------------------------------------------------------- #
+@pytest.mark.parametrize(
+    ("key", "value", "secret"),
+    [
+        ("Authorization", "Token " + "9944b091" * 5, True),
+        ("authorization", "token " + "abc123" * 4, True),
+        ("Authorization", "ApiKey " + "c2VjcmV0" * 3, True),
+        ("Authorization", "Bot " + "x1" * 10, True),
+        ("Proxy-Authorization", "Token " + "ab12" * 5, True),
+        ("Authorization", "raw" + "0123456789" * 2, True),
+        ("Authorization", "ApiKey ${API_KEY:-" + "literal0123" + "}", True),
+        ("Authorization", "Bearer ${TOKEN}", False),
+        ("Authorization", "Token ${TOKEN}", False),
+        ("Authorization", "ApiKey ${API_KEY}", False),
+        ("Authorization", "Bot ${BOT_TOKEN}", False),
+        ("Proxy-Authorization", "Basic ${env:PROXY_AUTH}", False),
+        ("Authorization", "${AUTH_HEADER}", False),
+        ("Authorization", "Bearer", False),
+    ],
+)
+def test_an_authorization_header_names_a_credential_whatever_its_scheme(key: str, value: str, secret: bool) -> None:
+    """Regression: only 'Bearer' and 'Basic' payloads counted, so 'Authorization: Token <hex>' was no credential."""
+    assert is_credential_key(key, query=True)
+    assert looks_like_inline_secret(key, value, query=True) is secret
+
+
+def test_an_authorization_env_name_needs_a_value_shaped_like_key_material() -> None:
+    assert not is_credential_key("AUTHORIZATION")
+    assert not looks_like_inline_secret("AUTHORIZATION", "required", query=False)
+    assert looks_like_inline_secret("AUTHORIZATION", "Token" + "9944b091" * 5, query=False)
+
+
+def _write_plugin(root: Path, mcp_server: dict[str, object], hook: dict[str, object]) -> Path:
+    files = {
+        ".claude-plugin/plugin.json": {"name": "demo", "version": "1.0.0", "description": "URL credential probe"},
+        ".mcp.json": {"mcpServers": {"remote": mcp_server}},
+        "hooks/hooks.json": {"hooks": {"PostToolUse": [{"matcher": "Write", "hooks": [hook]}]}},
+    }
+    for rel, content in files.items():
+        (root / rel).parent.mkdir(parents=True, exist_ok=True)
+        (root / rel).write_text(json.dumps(content), encoding="utf-8")
+    return root
+
+
+@pytest.mark.parametrize(
+    ("header", "value"),
+    [
+        ("Authorization", "Token " + "9944b091" * 5),
+        ("Authorization", "ApiKey " + "c2VjcmV0" * 3),
+        ("Proxy-Authorization", "Token " + "ab12" * 5),
+    ],
+)
+def test_mcp_and_hook_authorization_headers_with_any_scheme_are_inline_secrets(
+    tmp_path: Path, header: str, value: str
+) -> None:
+    headers = {header: value}
+    root = _write_plugin(
+        tmp_path / "demo",
+        {"type": "http", "url": "https://api.example.com/mcp", "headers": headers},
+        {"type": "http", "url": "https://hooks.example.com/x", "headers": headers},
+    )
+
+    checks = {finding.check_name for finding in analyze_plugin(root).findings}
+
+    assert {"mcp_inline_secret", "plugin_hook_inline_secret"} <= checks

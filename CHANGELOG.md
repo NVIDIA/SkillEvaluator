@@ -6,6 +6,34 @@ All notable changes to SkillEvaluator are documented in this file.
 
 ### Added
 
+- `tier3 evaluate` now leads with a case-first summary: a verdict line and one
+  row per `evals.json` case. With one agent, each row shows, for with and
+  without the skill, the pass count, per-attempt marks (`✓` pass, `✗` fail,
+  `⊘` did not run, `·` skipped after a pass) and mean score, plus an effect
+  column (`helps`, `hurts`, `both fail`, `better score`, `worse score`,
+  `no change`, `inconclusive`). With several agents, each agent gets a column
+  showing without-skill → with-skill marks and the pass-rate change. Success
+  rate, quality score, and dimensions follow. A "How to improve" list follows,
+  ranked by attempts lost and capped at three; each item names the case,
+  agent, issue type (`skill`, `skill not used`, `skill hurts`, `environment`,
+  `run error`, `eval case`, `missing input`, `goal not met`), one action, and an evidence
+  path, and is also written to `what_to_fix.json` in the run directory. When
+  nothing needs fixing it prints a one-line "nothing to fix" instead. The
+  verdict is `inconclusive` when attempts did not run. The per-evaluator and
+  per-dimension tables and metric findings moved behind the new `--verbose`
+  flag and remain in `report.html`.
+- `goal not met` flags with-skill attempts that pass on the aggregate score
+  while the judge scored goal accuracy 0.00 (for example, the agent only asked
+  for details).
+- `report.html` leads with the same case-based findings: "Verdict at a glance"
+  adds the per-case result, the highest-scoring agent versus the biggest skill
+  lift, and the goal-not-met count; "Conclusion & Next Steps" and the Insights
+  recommendations list the `what_to_fix.json` fixes (or "Nothing to fix").
+  Data fixes elsewhere: Pass@K shows attempts passed, a regressed passing
+  dimension reads "PASS · regressed" with its weakest signal, resource totals
+  are formatted with units and percent change, Attempt Details groups each
+  case's with/without rows and marks passes that missed the goal, and Error
+  Recovery lists only trials with faults, retries or warnings.
 - Reusable GitHub Actions onboarding for complete Tier 1 checks, with
   pinned runtime/workflow consumer templates, affected-skill PR selection,
   optional hosted reports and updated PR feedback. The new guide separates
@@ -106,6 +134,17 @@ All notable changes to SkillEvaluator are documented in this file.
 
 ### Fixed
 
+- Local-mode verifier uploads now copy directly to the absent destination,
+  avoiding an unnecessary rollback snapshot of an empty tests directory.
+  Inputs and rewritten scripts are prepared privately before publication,
+  so failed uploads preserve existing verifier files. Missing or invalid
+  sources fail rather than creating an empty verifier directory. Per-step
+  verifier uploads retain shared test files, with step files taking precedence.
+  After any command runs, the next upload replaces the tests directory, so
+  files or links the agent left there cannot change verification.
+- Harbor's standalone verifier now runs on Python 3.9 task images after sharing
+  deterministic checks with the host evaluator. Packaged verifier checks execute
+  on a real Python 3.9 interpreter in CI to retain this compatibility.
 - Rubric evaluation preserves the original `SKILL.md` text without adding YAML
   separators and includes reachable local Markdown guides under their source
   paths. Required guidance is collected before optional previews, with cycle

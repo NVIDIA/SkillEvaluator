@@ -1133,9 +1133,11 @@ def test_contradictory_tier3_truth_fields_fail_closed_across_reporters(
     ("dimension_score", "expected_status"),
     [(0.45, "neutral"), (0.10, "fail")],
 )
+@pytest.mark.parametrize("with_skill_effect", [False, True])
 def test_html_displays_effective_dimension_verdict(
     dimension_score: float,
     expected_status: str,
+    with_skill_effect: bool,
 ) -> None:
     tier1 = ValidationResult(validator_name="SCHEMA")
     tier1.add_success("schema", "Schema passed")
@@ -1143,6 +1145,9 @@ def test_html_displays_effective_dimension_verdict(
     tier2.add_success("similarity_check", "Similarity scan completed")
     tier3 = _complete_tier3_result("DIMENSIONS", score=0.9, runtime_seconds=1.0)
     payload = tier3.metadata["agent_eval"]
+    effect_message = "Per-case evidence identifies the skill effect."
+    if with_skill_effect:
+        payload["conclusions"] = [{"title": "Skill effect", "message": effect_message, "severity": "info"}]
     agent = payload["agents"]["codex"]
     baseline = agent["baseline"]
     agent["with_skill"] = dimension_score
@@ -1170,6 +1175,12 @@ def test_html_displays_effective_dimension_verdict(
     assert f'data-publication-status="{expected_status}"' in html_output
     assert re.search(rf'tier-card-verdict">\s*{expected_words}\s*</span>', html_output)
     assert f"Verdict at a glance:</strong>\n                {expected_words}" in html_output
+    if with_skill_effect:
+        assert f"{expected_words} · {effect_message}" in html_output
+        overview = html_output.split('class="t3-overview-lead"', 1)[1].split("</div>", 1)[0]
+        assert "with an overall score of" not in overview
+    else:
+        assert f"{expected_words} with an overall score of" in html_output
     assert json_payload["publication_status"] == expected_status
     assert f"**Verdict:** {expected_upper}" in markdown
 

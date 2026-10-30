@@ -64,7 +64,7 @@ def test_resources_flow_from_harbor_artifacts_to_json_and_html(tmp_path, missing
     html = HTMLReporter(target_path=str(tmp_path)).render_all([result])
     assert "Measured Agent Resources" in html
     assert "Agent execution seconds" in html
-    assert "-2.00" in html
-    assert "N/A" in html if missing_tokens else "-10.00" in html
+    assert "-2.0 s (-" in html
+    assert "N/A" in html if missing_tokens else "-10 (-" in html
     output = json.loads(JSONReporter().render_all([result]))
     assert "resources" in json.dumps(output)

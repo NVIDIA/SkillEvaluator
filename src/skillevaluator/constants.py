@@ -640,3 +640,12 @@ class ExitCode:
     VALIDATION_FAILED = 1
     CONFIG_ERROR = 2
     RUNTIME_ERROR = 3
+
+
+# Passive plugin format declarations; not consulted by public dispatch.
+PLUGIN_AGENT_PLUGINS_V1_MANIFEST_FILE = PLUGIN_CONTAINED_MANIFEST_FILE
+PLUGIN_AGENT_PLUGINS_V1_MANIFEST_TYPE = "agent_plugins_v1"
+PLUGIN_CODEX_MANIFEST_DIR = ".codex-plugin"
+PLUGIN_CODEX_MANIFEST_TYPE = "codex_plugin_json"
+PLUGIN_CURSOR_MANIFEST_DIR = ".cursor-plugin"
+PLUGIN_CURSOR_MANIFEST_TYPE = "cursor_plugin_json"

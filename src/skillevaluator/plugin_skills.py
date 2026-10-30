@@ -20,6 +20,7 @@ from skillevaluator.utils.secure_fs import (
     SecureFile,
     SecurePathError,
     discover_secure_files,
+    lstat_walk,
 )
 
 
@@ -45,8 +46,9 @@ def discover_openclaw_skill_manifests(
     the plugin root, ready for anchored reads through ``SecureRoot(plugin_root)``.
     This function does not read skill content or import/execute plugin code.
 
-    Invalid declarations or limit arguments raise ``ValueError``; unsafe paths,
-    missing roots, and exhausted traversal limits raise ``SecurePathError``.
+    Invalid declarations or limit arguments raise ``ValueError``; unsafe paths
+    and exhausted traversal limits raise ``SecurePathError``. Missing declared
+    roots are skipped, matching OpenClaw; Tier 1 reports their missing paths.
     """
     if type(max_roots) is not int or max_roots < 0:
         raise ValueError("max_roots must be a non-negative integer")
@@ -86,18 +88,39 @@ def discover_openclaw_skill_manifests(
         visited.add(relative)
         if len(relative.parts) > max_depth:
             raise SecurePathError("directory_depth_limit", "OpenClaw skills directory exceeds the depth limit")
-        if reader.kind(relative) != "dir":
-            raise SecurePathError("unsafe_path", f"OpenClaw skills directory is missing or unsafe: {relative}")
+        kind = reader.kind(relative)
+        if kind == "missing" and relative in declared_roots and lstat_walk(reader.root, relative).outcome == "missing":
+            # kind() also maps non-directory ancestors to "missing". Only a
+            # genuinely absent declaration is optional, never a wrong-type path.
+            continue
+        if kind != "dir":
+            raise SecurePathError("unsafe_path", f"OpenClaw skills directory changed or is unsafe: {relative}")
         remaining = max_paths - discovered_paths
         if remaining < 1:
-            raise SecurePathError("path_count_limit", "OpenClaw skills exceed the discovery path limit")
+            raise SecurePathError(
+                "path_count_limit",
+                f"OpenClaw skills exceed the discovery path limit of {max_paths} entries.",
+                relative_path=relative.as_posix(),
+                metadata={"actual": discovered_paths + 1, "limit": max_paths},
+            )
         entries.clear()
-        files = discover_secure_files(
-            plugin_root / relative.as_posix(),
-            selected=selected,
-            max_paths=remaining,
-            max_depth=1,
-        )
+        paths_before_walk = discovered_paths
+        try:
+            files = discover_secure_files(
+                plugin_root / relative.as_posix(),
+                selected=selected,
+                max_paths=remaining,
+                max_depth=1,
+            )
+        except SecurePathError as exc:
+            if exc.code != "path_count_limit":
+                raise
+            raise SecurePathError(
+                "path_count_limit",
+                f"OpenClaw skills exceed the discovery path limit of {max_paths} entries.",
+                relative_path=(relative / exc.relative_path).as_posix(),
+                metadata={"actual": paths_before_walk + exc.metadata.get("actual", remaining + 1), "limit": max_paths},
+            ) from exc
         preferred = preferred_skill_manifests(files)
         if preferred:
             file = preferred[0]

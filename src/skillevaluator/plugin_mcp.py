@@ -57,6 +57,7 @@ from skillevaluator.validators.mcp_static import (
     CODEX_UNAPPLIED_MCP_FIELDS,
     McpPinning,
     classify_mcp_pinning,
+    openclaw_ssl_verification_enabled,
     validate_mcp_server_declaration,
 )
 from skillevaluator.validators.url_policy import looks_like_inline_secret, safe_url
@@ -608,7 +609,13 @@ def _normalize_dialect(
             # when cwd is omitted. Harbor cannot preserve that working dir;
             # retain it so existing staging refuses rather than runs elsewhere.
             if normalized.get("command"):
-                normalized["cwd"] = normalized.get("cwd", normalized.get("workingDirectory", "."))
+                # OpenClaw absolutizes string cwd/workingDirectory before its
+                # launch config chooses between them. An empty cwd therefore
+                # becomes the root and still wins over a nonempty legacy alias.
+                cwd = config.get("cwd")
+                if not isinstance(cwd, str):
+                    cwd = config.get("workingDirectory")
+                normalized["cwd"] = (cwd or ".") if isinstance(cwd, str) else "."
             elif "workingDirectory" in normalized:
                 normalized["cwd"] = normalized["workingDirectory"]
             # A command wins over HTTP aliases. For URL servers the canonical
@@ -656,6 +663,10 @@ def _normalize_dialect(
                 "workingDirectory",
                 "enabled",
             }
+            # Verified TLS is already the runtime default, not dropped config.
+            # Share canonical/legacy precedence with the fail-closed TLS guard.
+            if openclaw_ssl_verification_enabled(config):
+                portable.update({"sslVerify", "ssl_verify"})
             declaration.unapplied = tuple(sorted(key for key in config if key not in portable))
         raw_type = normalized.get("type")
         if isinstance(raw_type, str) and raw_type.strip() in _HTTP_TYPE_ALIASES:

@@ -280,18 +280,28 @@ skillevaluator tier3 evaluate-plugin ./my-openclaw-plugin --plugin-load wrapper
   directly, or nested skills; discovery stops below a skill's own `SKILL.md`.
   Dot-prefixed child directories and `node_modules` are not descended into;
   an explicitly declared root itself may still have one of those names. The
-  normal bounded, contained, no-follow path checks and bundled-skill gates apply. Another client's default folders can still appear as static-only
+  normal bounded, contained, no-follow path checks and bundled-skill gates apply.
+  A root `SKILL.md` selected through `.` is inventoried, but the plugin root is
+  never copied as a portable member skill: that would expose runtime metadata,
+  environment files and evaluation data. Declare a separate skill directory
+  for portable Tier 3 evaluation. Another client's default folders can still appear as static-only
   cross-client inventory, but do not become OpenClaw members.
 - Inline `mcpServers` receive the shared static policy and portable staging
   checks. This does not reproduce OpenClaw's enablement, operator overrides,
   MCP App rendering or tool policy. OpenClaw stdio servers remain unsupported
   in Tier 3 because their plugin-root working directory cannot be preserved by
-  the existing adapters; it is never silently dropped. Explicitly disabled
-  servers are not staged. Portable URL servers can use the existing MCP path,
+  the existing adapters; it is never silently dropped. A plugin-declared
+  `enabled: false` does not disable a native MCP server; only an operator
+  `mcp.servers.<name>.enabled: false` override omits it. Operator overrides are
+  not reproduced here. Portable URL servers can use the existing MCP path,
   subject to its configuration and coverage limits. Canonical `transport` wins
   over legacy `type`, `streamable-http` maps to Harbor HTTP, and a URL server
   without a transport retains OpenClaw's SSE default. Host-only auth, TLS and
   other options are named as unapplied gaps and make the run partial. Effective
+  `sslVerify: true` (including its legacy alias) is the verified-TLS default,
+  not an unapplied gap. Native MCP URL strings are used verbatim: `${VAR}`
+  and `${VAR:-default}` expansion is not supported for these endpoints and
+  blocks portable staging. Effective
   `sslVerify: false` (including its legacy alias) and literal enterprise client
   secrets block static validation and staging. Unsupported host metadata and
   configuration defaults are not forwarded into the generated wrapper manifest.
@@ -299,7 +309,10 @@ skillevaluator tier3 evaluate-plugin ./my-openclaw-plugin --plugin-load wrapper
   [`package.json#openclaw`](https://docs.openclaw.ai/plugins/manifest/package-json)
   (`extensions`, `runtimeExtensions`, `setupEntry`, `runtimeSetupEntry`) are
   inventoried and boundary-checked without importing, installing or running
-  plugin code. Runtime registrations (tools, hooks, channels, providers and
+  plugin code. Published packages may omit source entry files when valid
+  paired runtime entries or upstream-compatible inferred JavaScript builds
+  exist; source containment and runtime file checks remain required.
+  Runtime registrations (tools, hooks, channels, providers and
   services), configuration behavior and `requiresPlugins` resolution are **not
   evaluated**. Every native OpenClaw manifest retains an unsupported
   **OpenClaw runtime** coverage row, even if it has portable skills or no

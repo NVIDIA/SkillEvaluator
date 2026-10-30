@@ -1514,6 +1514,21 @@ class ClaudeCodeAdapter(HarnessAdapter):
             for key in ("version", "skills", "commands", "agents", "outputStyles", "userConfig"):
                 if key in source.manifest:
                     value = source.manifest[key]
+                    if key == "skills" and source.manifest_rel != ".claude-plugin/plugin.json":
+                        # Foreign formats (including OpenClaw) allow undotted
+                        # roots; Claude Code rejects the entire manifest for them.
+                        # Normalize only contained paths, retaining shape and any
+                        # invalid declaration rather than silently dropping it.
+                        paths = value if isinstance(value, list) else [value]
+                        normalized = []
+                        for raw in paths:
+                            declared = normalize_declared_path(raw, ()) if isinstance(raw, str) else None
+                            normalized.append(
+                                f"./{declared.rel.as_posix()}"
+                                if declared is not None and declared.rel is not None and not declared.dot_relative
+                                else raw
+                            )
+                        value = normalized if isinstance(value, list) else normalized[0]
                     manifest[key] = json.loads(json.dumps(value)) if isinstance(value, dict | list) else value
         return manifest
 

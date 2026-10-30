@@ -16,7 +16,8 @@ All notable changes to SkillEvaluator are documented in this file.
   Tier 3 can evaluate portable skills and supported MCP declarations through the
   existing harnesses. Reports retain explicit unsupported OpenClaw runtime
   coverage instead of claiming tools, hooks, channels or providers were loaded.
-  No OpenClaw Gateway runtime adapter is included.
+  No OpenClaw Gateway runtime adapter is included. Runtime-only plugins return
+  INCOMPLETE with the requested reports instead of a successful optional skip.
 
 - `--quality-config PATH` on `validate`, `quality-check`, and `tier1` loads the
   deterministic quality check's expected Markdown headings from a YAML file
@@ -200,11 +201,6 @@ All notable changes to SkillEvaluator are documented in this file.
   Docker setup, and custom-backend and MCP environment controls.
 
 ### Fixed
-
-- Runtime-only native OpenClaw plugins now return INCOMPLETE instead of a
-  successful empty Tier 3 skip. Requested reports are written even when no
-  component could be evaluated and no Harbor run directory was created.
-
 
 - Catalog validation now includes nested and lowercase skill manifests, skips
   generated directories, and stops at skill boundaries to avoid validating

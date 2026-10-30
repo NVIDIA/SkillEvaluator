@@ -329,7 +329,7 @@ def test_discovery_path_budget_is_shared_across_declared_roots(tmp_path: Path, m
     for name in ("one", "two"):
         _skill(plugin, f"custom/{name}", name=name)
         (plugin / f"custom/{name}/notes.txt").write_text("notes", encoding="utf-8")
-    monkeypatch.setattr(profile_module, "SIMILARITY_MAX_DISCOVERED_PATHS", 3)
+    monkeypatch.setattr(profile_module, "CONTENT_DEDUP_MAX_DISCOVERED_PATHS", 3)
 
     with pytest.raises(SecurePathError) as failure:
         load_plugin_profile(plugin)

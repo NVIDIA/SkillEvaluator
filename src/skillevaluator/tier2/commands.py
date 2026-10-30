@@ -12,6 +12,7 @@ from skillevaluator.constants import (
     CONTENT_DEDUP_MAX_LLM_CLUSTERS,
     MAX_PLUGIN_DEDUP_LLM_CALLS,
     MAX_PLUGIN_DEDUP_SKILLS,
+    PLUGIN_OPENCLAW_MANIFEST_TYPE,
     SIMILARITY_DEFAULT_MAX_ENTRIES,
     SIMILARITY_DEFAULT_MAX_SCALAR_COMPARISONS,
     SIMILARITY_DEFAULT_THRESHOLD,
@@ -20,6 +21,9 @@ from skillevaluator.deduplication.intra_skill.intra_skill_validator import Intra
 from skillevaluator.deduplication.result_status import mark_advisory_skip, mark_security_failure
 from skillevaluator.embedding.limits import validate_max_entries, validate_max_scalar_comparisons
 from skillevaluator.models.result import Finding, Severity, ValidationResult
+from skillevaluator.plugin_formats import parse_manifest_text
+from skillevaluator.plugin_manifest import locate_plugin_manifest
+from skillevaluator.plugin_skills import discover_openclaw_skill_manifests
 from skillevaluator.publication_evidence import stamp_publication_evidence
 from skillevaluator.publication_identity import finalize_publication_target, publication_target_from_path
 from skillevaluator.tier1.commands import emit_reports
@@ -188,6 +192,18 @@ def _plugin_work_limit_result(actual_skills: int) -> ValidationResult:
     )
 
 
+def _openclaw_skill_dirs(plugin_root: Path) -> list[Path] | None:
+    """Return native declared skill directories, or None for legacy formats."""
+    located = locate_plugin_manifest(plugin_root)
+    if located is None or located.manifest_type != PLUGIN_OPENCLAW_MANIFEST_TYPE:
+        return None
+    data = parse_manifest_text(located.manifest_type, located.read_text())
+    if not isinstance(data, dict):
+        raise ValueError("OpenClaw plugin manifest is not a mapping")
+    manifests = discover_openclaw_skill_manifests(plugin_root, data)
+    return [plugin_root / manifest.relative_path.parent for manifest in manifests]
+
+
 def run_plugin_skill_context_dedup(
     plugin_root: Path,
     *,
@@ -206,20 +222,24 @@ def run_plugin_skill_context_dedup(
         validator_description="Detect redundant content within each bundled plugin skill",
     )
     aggregate.metadata["advisory_tier2"] = True
-    if skill_dirs is None:
-        from skillevaluator.utils.helpers import find_bundled_plugin_skills
+    try:
+        native_dirs = _openclaw_skill_dirs(plugin_root)
+        if native_dirs is not None:
+            # Legacy caller inventories cannot add undeclared native skills.
+            skill_dirs = native_dirs
+        elif skill_dirs is None:
+            from skillevaluator.utils.helpers import find_bundled_plugin_skills
 
-        try:
             skill_dirs = find_bundled_plugin_skills(plugin_root)
-        except ValueError as exc:
-            return [_unsafe_plugin_result(exc)]
+    except ValueError as exc:
+        return [_unsafe_plugin_result(exc)]
     if not skill_dirs:
         aggregate.add_success("context_dedup", "No bundled skills to deduplicate")
         return [aggregate]
     if len(skill_dirs) > MAX_PLUGIN_DEDUP_SKILLS:
         return [_plugin_work_limit_result(len(skill_dirs))]
 
-    skills_root = plugin_root / "skills"
+    skills_root = plugin_root if native_dirs is not None else plugin_root / "skills"
     # Share the plugin-wide LLM allowance across skills without exceeding the
     # per-skill cluster limit the validator accepts; a plugin with few skills
     # would otherwise hand one skill more than that limit.
@@ -449,19 +469,21 @@ def run_plugin_dedup_scan(
 
     results = [_make_advisory(IntraPluginValidator().validate(plugin_root))]
     try:
-        skill_manifests = find_bundled_plugin_skill_manifests(plugin_root)
+        skill_dirs = _openclaw_skill_dirs(plugin_root)
+        if skill_dirs is None:
+            skill_manifests = find_bundled_plugin_skill_manifests(plugin_root)
+            skill_dirs = [plugin_root / "skills" / manifest.relative_path.parent for manifest in skill_manifests]
     except ValueError as exc:
         results.append(_unsafe_plugin_result(exc))
         return results
     if run_context:
-        skills_root = plugin_root / "skills"
         results.extend(
             run_plugin_skill_context_dedup(
                 plugin_root,
                 threshold=threshold,
                 model=model,
                 llm_model=llm_model,
-                skill_dirs=[skills_root / manifest.relative_path.parent for manifest in skill_manifests],
+                skill_dirs=skill_dirs,
             )
         )
     else:

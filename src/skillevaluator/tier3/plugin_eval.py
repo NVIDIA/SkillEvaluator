@@ -534,6 +534,7 @@ def prepare_plugin_eval_package(
                 mcp.provider_only,
                 [name for name, gaps in mcp.gaps.items() if gaps[0].startswith("plugin_files")],
                 unrooted_mcp=[name for name, gaps in mcp.gaps.items() if gaps[0] == "plugin_files_unrooted"],
+                openclaw_stdio_mcp=[name for name, gaps in mcp.gaps.items() if "openclaw_stdio_cwd" in gaps],
             ),
             **report_only,
         )
@@ -665,11 +666,17 @@ def _resolve_member_skills(
     treated as paths.
     """
     contained_skills = (
-        _inventory_skill_dirs(plugin.inventory, plugin.plugin_root, allow_root=plugin.profile.explicit_skills_only)
+        _inventory_skill_dirs(plugin.inventory, plugin.plugin_root)
         if plugin.stage_from_inventory
         else tuple(path.resolve() for path in find_bundled_plugin_skills(plugin.plugin_dir))
     )
     extra_skills = tuple(dict.fromkeys(path.expanduser().resolve() for path in include_skills))
+    # The plugin root is inventory-only, not a skill-owned directory. Copying
+    # it as a member would bypass native env/evaluator-data exclusions and the
+    # reduced wrapper manifest. Resolve aliases before applying the same guard
+    # to explicit --include-skills; that flag must not reintroduce the root.
+    if plugin.plugin_root.resolve() in extra_skills:
+        raise ValueError("The plugin root must not be staged as a member skill; include a non-root skill directory.")
     if plugin.contained:
         # A contained manifest's 'skills' key is a directory pointer (e.g.
         # "./skills/"), not a canonical ref list, so there are no remote skill refs.
@@ -1437,6 +1444,12 @@ def _mcp_coverage_row(component: Component, contained: bool, mcp: _McpCoverage) 
             reason += f"; {note} (run reported INCOMPLETE)"
         return _natively_staged(coverage_row(component, "staged", reason), list(mcp.plugin_file_agents))
     if component.name in mcp.unsupported:
+        if "openclaw_stdio_cwd" in mcp.split.gaps.get(component.name, ()):
+            return coverage_row(
+                component,
+                "unsupported",
+                _OPENCLAW_STDIO_CWD_REASON + "; not started (run reported INCOMPLETE)",
+            )
         # Not runnable: _split_mcp_servers keeps plugin-file launches out of the toml.
         return coverage_row(
             component,
@@ -1567,29 +1580,28 @@ def write_plugin_provenance(run_dir: Path, provenance: dict[str, Any]) -> Path |
         return None
 
 
-def _stageable_component(component: Component, component_type: str, *, allow_root: bool = False) -> bool:
+def _stageable_component(component: Component, component_type: str) -> bool:
     return (
         component.type == component_type
         and component.support == "evaluated"
         and component.problem is None
         and component.declared_by is None
-        and component.path not in ({None, ""} if allow_root else {None, "", "."})
+        and component.path not in {None, "", "."}
     )
 
 
-def _inventory_skill_dirs(
-    inventory: PluginInventory, plugin_root: Path, *, allow_root: bool = False
-) -> tuple[Path, ...]:
+def _inventory_skill_dirs(inventory: PluginInventory, plugin_root: Path) -> tuple[Path, ...]:
     """Skill directories the selected manifest declares or packages (newer formats).
 
     The inventory classified every path without following links, so each
-    directory is a regular directory inside the plugin root.
+    directory is a regular directory inside the plugin root. The root itself
+    stays inventory-only: it is not a skill-owned tree safe to copy as a member.
     """
     return tuple(
         dict.fromkeys(
             (plugin_root / component.path).resolve()
             for component in inventory.components
-            if _stageable_component(component, "skill", allow_root=allow_root) and component.path
+            if _stageable_component(component, "skill") and component.path
         )
     )
 
@@ -2360,8 +2372,8 @@ def _normalize_mcp_entries(
             continue
         # Validated above: the effective declarations are some of the stageable ones.
         config = declaration.config
-        if manifest_type == PLUGIN_OPENCLAW_MANIFEST_TYPE and config.get("enabled") is False:
-            continue  # OpenClaw does not run an explicitly disabled server.
+        # Native OpenClaw manifests do not implement an enabled switch here;
+        # only the operator's mcp.servers override can disable a bundle server.
         entry: dict[str, Any] = {"name": declaration.name.strip()}
         # env/headers are declared config the eval runtime cannot apply (Harbor's
         # per-server MCPServerConfig has no such field). Record their presence so a
@@ -2411,7 +2423,9 @@ class _McpSplit:
     ``gaps`` maps every server some arm cannot fully apply to what is missing:
     ``plugin_files`` (launches from plugin files; only a copied plugin tree can
     start it, and ``plugin_file`` holds the rewritten launch), ``plugin_files_unrooted``
-    (relative paths or ``cwd`` nothing can start), ``env``/``headers`` and other
+    (relative paths or ``cwd`` nothing can start), ``openclaw_stdio_cwd``
+    (native OpenClaw stdio working directories no adapter preserves),
+    ``env``/``headers`` and other
     declared fields the wrapper runtime drops, and ``user_config`` (a
     ``${user_config.*}`` value only Claude Code fills in). ``probe_targets`` are
     the runnable URL servers for the opt-in ``--probe-mcp`` host probe.
@@ -2540,7 +2554,12 @@ def _split_mcp_servers(
             user_config[name] = keys
             server_gaps.append("user_config")
         server = _runnable_server(raw)
-        if _launches_from_plugin_files(raw, root_prefixes=root_prefixes):
+        if manifest_type == PLUGIN_OPENCLAW_MANIFEST_TYPE and raw.get("command"):
+            # Native stdio launches have an implicit plugin-root working
+            # directory or an explicit override. No existing adapter preserves it;
+            # rewriting command paths cannot make that launch faithful.
+            server_gaps.insert(0, "openclaw_stdio_cwd")
+        elif _launches_from_plugin_files(raw, root_prefixes=root_prefixes):
             # Staged verbatim, this server could not start in a wrapper arm, yet it
             # would count as runnable: a plugin whose only component it is would run
             # a "complete" evaluation with a meaningless zero lift instead of an
@@ -2581,6 +2600,9 @@ def _user_config_defaults(manifest: dict[str, Any]) -> set[str]:
     return {str(key) for key, spec in declared.items() if isinstance(spec, dict) and "default" in spec}
 
 
+_OPENCLAW_STDIO_CWD_REASON = "OpenClaw stdio MCP servers are not supported in Tier 3 because their plugin-root working directory cannot be preserved"
+
+
 def _skip_reason(
     unresolved_skill_refs: tuple[str, ...],
     unresolved_rule_refs: tuple[str, ...],
@@ -2588,12 +2610,14 @@ def _skip_reason(
     unsupported_mcp: list[str] | tuple[str, ...] = (),
     *,
     unrooted_mcp: list[str] | tuple[str, ...] = (),
+    openclaw_stdio_mcp: list[str] | tuple[str, ...] = (),
 ) -> str:
     """Why nothing was evaluated, with advice for each kind of component that is actually present.
 
     ``unsupported_mcp`` names the servers launched from unstaged plugin files;
     ``unrooted_mcp`` the ones among them that no copied plugin can start either
-    (relative paths or a relative ``cwd``).
+    (relative paths or a relative ``cwd``). ``openclaw_stdio_mcp`` names native
+    OpenClaw stdio launches whose working directory no adapter preserves.
     """
     parts: list[str] = []
     advice: list[str] = []
@@ -2612,6 +2636,9 @@ def _skip_reason(
             "A provider-only MCP server (a name and provider, with no command or url) is not run in Phase 1; "
             "declare a command or url to test it locally."
         )
+    if openclaw_stdio_mcp:
+        parts.append(f"{len(openclaw_stdio_mcp)} unsupported OpenClaw stdio MCP server(s)")
+        advice.append(_OPENCLAW_STDIO_CWD_REASON + ".")
     if unsupported_mcp:
         # In a skipped package these are only plugin-file launches: a server with
         # just unapplied env/headers is still runnable, so it never reaches here.

@@ -200,11 +200,17 @@ def test_openclaw_stdio_cwd_is_not_silently_dropped(tmp_path: Path, server: dict
     assert any(r["type"] == "mcp" and r["name"] == "local" and r["state"] == "unsupported" for r in rows)
 
 
-def test_disabled_openclaw_mcp_server_is_not_staged(tmp_path: Path) -> None:
+def test_manifest_enabled_false_openclaw_mcp_server_is_staged(tmp_path: Path) -> None:
     root = _plugin(tmp_path / "plugin", mcpServers={"remote": {"url": "https://mcp.example.com/mcp", "enabled": False}})
+    evals = root / "evals"
+    evals.mkdir()
+    (evals / "evals.json").write_text('[{"id":"one","prompt":"Use remote","expected_output":"ok"}]', encoding="utf-8")
     package = prepare_plugin_eval_package(root, stage_root=tmp_path / "stage")
-    assert not package.runnable_mcp_servers
-    assert package.skipped
+    assert package.runnable_mcp_servers == ("remote",)
+    assert not package.skipped
+    assert not package.provenance()["partial"]
+    rows = package.provenance()["component_coverage"]["components"]
+    assert any(r["type"] == "mcp" and r["name"] == "remote" and r["state"] == "staged" for r in rows)
 
 
 @pytest.mark.parametrize("fields", [{"id": ""}, {"id": None}, {"configSchema": None}, {"skills": "portable"}])
@@ -272,10 +278,15 @@ def test_explicit_plugin_root_supports_container_and_single_skill(tmp_path: Path
     evals = tmp_path / "evals.json"
     evals.write_text('[{"id":"one","prompt":"Use alpha","expected_output":"ok"}]', encoding="utf-8")
     package = prepare_plugin_eval_package(root, stage_root=tmp_path / "stage", evals_source=evals)
-    assert not package.skipped
-    assert package.include_skills == ((root / path).resolve(),)
     rows = package.provenance()["component_coverage"]["components"]
-    assert any(r["type"] == "skill" and r["path"] == path and r["state"] == "staged" for r in rows)
+    if path == ".":
+        assert package.skipped and package.incomplete_skip
+        assert package.include_skills == ()
+        assert any(r["type"] == "skill" and r["path"] == "." and r["state"] == "not_staged" for r in rows)
+    else:
+        assert not package.skipped
+        assert package.include_skills == ((root / path).resolve(),)
+        assert any(r["type"] == "skill" and r["path"] == path and r["state"] == "staged" for r in rows)
 
 
 def test_terminal_boundaries_and_artifact_named_members_match_all_tiers(tmp_path: Path) -> None:

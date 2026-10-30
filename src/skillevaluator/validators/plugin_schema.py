@@ -352,7 +352,8 @@ class PluginSchemaValidator(ValidatorBase):
 
         # A manifest error must not hide problems in skills bundled alongside it.
         replaced_by = self._skills_dir_replaced_by(manifest_type, contained_data)
-        self._validate_in_plugin_skills(root, result, replaced_by=replaced_by)
+        if replaced_by is None:
+            self._validate_in_plugin_skills(root, result)
         if validated_manifest is not None:
             self._resolve_dependencies(located, validated_manifest, result)
         elif manifest_type == PLUGIN_CONTAINED_MANIFEST_TYPE and contained_data is not None:
@@ -365,7 +366,20 @@ class PluginSchemaValidator(ValidatorBase):
             additional,
             manifest_valid=manifest_valid,
         )
-        self._validate_inventory_skills(inventory, root, result)
+        validated_default_paths = None
+        if replaced_by is not None:
+            # Inventory membership, not the spelling of a declared root, decides
+            # which skills the selected client evaluates. Keep their retained
+            # secure identities and full severity; only the rest are advisory.
+            validated_default_paths = self._validate_in_plugin_skills(
+                root, result, replaced_by=replaced_by, inventory=inventory
+            )
+        self._validate_inventory_skills(inventory, root, result, validated_default_paths=validated_default_paths)
+        if replaced_by is not None:
+            from skillevaluator.plugin_components import attribute_findings
+
+            attribute_findings(inventory.components, result.findings, root)
+            result.metadata["plugin"]["component_inventory"] = inventory.component_inventory()
         return result
 
     @staticmethod
@@ -1244,9 +1258,21 @@ class PluginSchemaValidator(ValidatorBase):
                 selected_value = rows[0].get(field_name)
                 other_value = row.get(field_name)
                 if selected_value and other_value and selected_value != other_value:
+                    openclaw_identity = field_name == "name" and PLUGIN_OPENCLAW_MANIFEST_TYPE in {
+                        location.manifest_type,
+                        candidate.manifest_type,
+                    }
+                    selected_field = rows[0]["identity_field"] if field_name == "name" else field_name
+                    additional_field = row["identity_field"] if field_name == "name" else field_name
+                    field_metadata = {"field": "id" if openclaw_identity else field_name}
+                    if openclaw_identity:
+                        field_metadata.update(selected_field=selected_field, additional_field=additional_field)
+                    selected_declaration = (
+                        f"{selected_field} {selected_value!r}" if openclaw_identity else f"{selected_value!r}"
+                    )
                     conflicts.append(
                         {
-                            "field": field_name,
+                            **field_metadata,
                             "selected": selected_value,
                             "additional": other_value,
                             "manifest_filename": candidate.manifest_filename,
@@ -1256,14 +1282,18 @@ class PluginSchemaValidator(ValidatorBase):
                         _schema_finding(
                             "plugin_manifest_conflict",
                             message=(
-                                f"{candidate.manifest_filename} declares {field_name} {other_value!r}, but the "
-                                f"selected manifest {location.manifest_filename} declares {selected_value!r}; "
+                                f"{candidate.manifest_filename} declares {additional_field} {other_value!r}, but the "
+                                f"selected manifest {location.manifest_filename} declares {selected_declaration}; "
                                 "clients that load different manifests see different plugins"
                             ),
                             file_path=candidate.declared_path,
-                            suggestion=f"Keep the plugin {field_name} identical in every manifest.",
+                            suggestion=(
+                                "Keep the OpenClaw id equal to the plugin name in the other manifests."
+                                if openclaw_identity
+                                else f"Keep the plugin {field_name} identical in every manifest."
+                            ),
                             severity=Severity.MEDIUM,
-                            metadata={"field": field_name, "manifest_filename": candidate.manifest_filename},
+                            metadata={**field_metadata, "manifest_filename": candidate.manifest_filename},
                         )
                     )
         plugin_meta = result.metadata.setdefault("plugin", {})
@@ -1449,6 +1479,7 @@ class PluginSchemaValidator(ValidatorBase):
             "selected": selected,
             "status": "selected" if selected else "parsed",
             "name": _field("id" if manifest_type == PLUGIN_OPENCLAW_MANIFEST_TYPE else "name"),
+            "identity_field": "id" if manifest_type == PLUGIN_OPENCLAW_MANIFEST_TYPE else "name",
             "version": _field("version"),
         }
         spec_version = agent_plugins_schema_version(data.get("$schema")) if isinstance(data, dict) else None
@@ -1460,9 +1491,10 @@ class PluginSchemaValidator(ValidatorBase):
     def _skills_dir_replaced_by(manifest_type: str, data: dict[str, Any] | None) -> str | None:
         """The format label when the selected manifest's declared ``skills`` replace ``skills/``.
 
-        Cursor and Codex load only the declared skill folders when ``skills`` is
-        set (Codex only when it accepts the path). Skills found only in
-        ``skills/`` are then not part of that client's plugin.
+        OpenClaw always loads only explicit members. Cursor and Codex load only
+        declared folders when ``skills`` is set (Codex only when it accepts the
+        path). The inventory decides which ``skills/`` members still load; the
+        other folders are checked as advisories.
         """
         if manifest_type not in PLUGIN_CONTAINED_MANIFEST_TYPES or not isinstance(data, dict):
             return None
@@ -1470,7 +1502,9 @@ class PluginSchemaValidator(ValidatorBase):
 
         profile = profile_for(manifest_type)
         value = (normalized_component_manifest(manifest_type, data) or {}).get("skills")
-        if not profile.explicit_skills_only and not declared_value_replaces_default(profile, "skills", value):
+        if profile.explicit_skills_only:
+            return profile.label
+        if not declared_value_replaces_default(profile, "skills", value):
             return None
         for raw in value if isinstance(value, list) else [value]:
             if isinstance(raw, str):
@@ -1480,16 +1514,22 @@ class PluginSchemaValidator(ValidatorBase):
         return profile.label
 
     def _validate_in_plugin_skills(
-        self, root: Path, result: ValidationResult, *, replaced_by: str | None = None
-    ) -> None:
+        self,
+        root: Path,
+        result: ValidationResult,
+        *,
+        replaced_by: str | None = None,
+        inventory: PluginInventory | None = None,
+    ) -> set[str]:
         """Validate skills bundled under ``<root>/skills/``.
 
         When the selected format's declared ``skills`` replace ``skills/``
-        (``replaced_by``), these skills are not loaded by that client, so their
-        findings are advisory (MEDIUM at most); Claude Code still loads them
-        from any plugin folder. A ``SKILL.md`` inside a folder that Tier 1
-        scans skip (``evals/``, ``results/``, ``versions/`` within a skill) is
-        HIGH, because clients that search ``skills/`` recursively load it.
+        (``replaced_by``), evaluated inventory members keep full severity. Only
+        nonmembers are advisory (MEDIUM at most); Claude Code still loads them
+        from any plugin folder. A ``SKILL.md`` inside a folder that Tier 1 scans
+        skip (``evals/``, ``results/``, ``versions/`` within a skill) is HIGH,
+        because clients that search ``skills/`` recursively load it. Return the
+        checked root-relative paths so the inventory pass does not repeat them.
         """
         skills_dir = root / DEFAULT_SKILLS_DIR
         from skillevaluator.utils.helpers import (
@@ -1509,7 +1549,7 @@ class PluginSchemaValidator(ValidatorBase):
                     suggestion="Replace linked/junction bundled skill directories with regular contained directories.",
                 )
             )
-            return
+            return set()
         skill_names = [manifest.relative_path.parent.as_posix() for manifest in skill_manifests]
         skill_dirs = [skills_dir / manifest.relative_path.parent for manifest in skill_manifests]
         plugin_meta = result.metadata.setdefault("plugin", {})
@@ -1519,17 +1559,32 @@ class PluginSchemaValidator(ValidatorBase):
         self._report_unscanned_skills(find_unscanned_plugin_skill_manifests(root, DEFAULT_SKILLS_DIR), root, result)
         self._report_dependency_folder_skills(root, result)
         if not skill_manifests:
-            return
+            return set()
         from skillevaluator.validators.schema import SchemaValidator
 
         validator = SchemaValidator(policy=self.policy)
         advisory = (
-            f"advisory: the {replaced_by} declares its own skill folders and does not load skills/"
+            f"advisory: the {replaced_by} declares its own skill folders and does not load this skills/ folder"
             if replaced_by
             else None
         )
+        evaluated = (
+            {
+                component.path
+                for component in inventory.components
+                if component.type == "skill" and component.support == "evaluated" and component.problem is None
+            }
+            if inventory is not None
+            else set()
+        )
+        validated: set[str] = set()
         for skill_dir, skill_name, manifest in zip(skill_dirs, skill_names, skill_manifests, strict=True):
-            self._validate_one_skill(validator, skill_dir, skill_name, manifest, result, advisory=advisory)
+            path = skill_dir.relative_to(root).as_posix()
+            self._validate_one_skill(
+                validator, skill_dir, skill_name, manifest, result, advisory=None if path in evaluated else advisory
+            )
+            validated.add(path)
+        return validated
 
     @staticmethod
     def _report_dependency_folder_skills(root: Path, result: ValidationResult) -> None:
@@ -1649,14 +1704,23 @@ class PluginSchemaValidator(ValidatorBase):
                 message=f"Bundled skill '{skill_name}' passed skill schema validation",
             )
 
-    def _validate_inventory_skills(self, inventory: PluginInventory, root: Path, result: ValidationResult) -> None:
-        """Schema-validate every inventoried skill folder outside ``skills/``.
+    def _validate_inventory_skills(
+        self,
+        inventory: PluginInventory,
+        root: Path,
+        result: ValidationResult,
+        *,
+        validated_default_paths: set[str] | None = None,
+    ) -> None:
+        """Schema-validate inventoried skill folders not already checked at full severity.
 
         Cursor, Codex, and Claude Code load the skill folders a manifest
         declares (Cursor's own example is ``"skills": "./my-skills/"``), and
         Cursor loads a root ``SKILL.md``. These get the same skill schema checks
         as the skills in ``skills/``, which :meth:`_validate_in_plugin_skills`
-        already covered.
+        already covered unless declared roots replace the default scan. In
+        that case every evaluated member under ``skills/`` not already in
+        ``validated_default_paths`` is checked here too.
         """
         from skillevaluator.utils.helpers import find_skill_manifest_in
         from skillevaluator.validators.schema import SchemaValidator
@@ -1668,7 +1732,11 @@ class PluginSchemaValidator(ValidatorBase):
             path = component.path
             if component.type != "skill" or component.problem is not None or path is None:
                 continue
-            if path == DEFAULT_SKILLS_DIR or path.startswith(f"{DEFAULT_SKILLS_DIR}/") or path in seen:
+            if path in seen or (validated_default_paths is not None and path in validated_default_paths):
+                continue
+            if (path == DEFAULT_SKILLS_DIR or path.startswith(f"{DEFAULT_SKILLS_DIR}/")) and (
+                validated_default_paths is None or component.support != "evaluated"
+            ):
                 continue
             seen.add(path)
             skill_dir = root if path == "." else root / path

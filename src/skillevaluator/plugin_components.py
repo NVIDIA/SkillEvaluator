@@ -1069,7 +1069,7 @@ class _ResolvedPath(NamedTuple):
     """A declared component path that can be loaded (:meth:`_Builder._resolve_component`)."""
 
     rel: PurePosixPath  # contained root-relative path
-    kind: str  # "file" or "dir"
+    kind: str  # "file", "dir", or an optional missing source entry
 
 
 class _Builder:
@@ -1172,34 +1172,91 @@ class _Builder:
                 )
             )
             return
+        entries: dict[str, list[Any]] = {}
+
+        def invalid(message: str) -> None:
+            self.inventory.findings.append(
+                _plugin_finding(
+                    Severity.HIGH,
+                    "plugin_openclaw_package_invalid",
+                    message,
+                    self.reader.display(package_path),
+                    "Declare contained entrypoint paths, with runtime entries paired with their source entries.",
+                )
+            )
+
         for field_name in ("extensions", "runtimeExtensions", "setupEntry", "runtimeSetupEntry"):
             if field_name not in metadata:
                 continue
             value = metadata[field_name]
             array_field = field_name in {"extensions", "runtimeExtensions"}
             if (array_field and not isinstance(value, list)) or (not array_field and not isinstance(value, str)):
-                self.inventory.findings.append(
-                    _plugin_finding(
-                        Severity.HIGH,
-                        "plugin_openclaw_package_invalid",
-                        f"openclaw.{field_name} must be {'an array' if array_field else 'a string'}",
-                        self.reader.display(package_path),
-                        "Declare an array of contained entrypoint paths.",
-                    )
-                )
+                invalid(f"openclaw.{field_name} must be {'an array' if array_field else 'a string'}")
                 continue
-            for raw in self._declared_values(field_name, value):
-                resolved = self._resolve_component("extension", f"openclaw.{field_name}", raw, kinds=("file",))
-                if resolved is not None:
-                    self._add(
-                        Component(
-                            "extension",
-                            f"openclaw.{field_name}: {raw}",
-                            "declared",
-                            resolved.rel.as_posix(),
-                            "unsupported",
-                        )
-                    )
+            entries[field_name] = self._declared_values(field_name, value)
+
+        extensions, runtimes = metadata.get("extensions", []), metadata.get("runtimeExtensions", [])
+        paired_extensions = isinstance(extensions, list) and isinstance(runtimes, list)
+        if paired_extensions and runtimes and len(runtimes) != len(extensions):
+            invalid("openclaw.runtimeExtensions length must match openclaw.extensions length")
+            paired_extensions = False
+        if "runtimeSetupEntry" in metadata and "setupEntry" not in metadata:
+            invalid("openclaw.runtimeSetupEntry requires openclaw.setupEntry")
+
+        # An explicit runtime must exist even if source or inferred output also exists.
+        resolved_runtime = {
+            (field_name, index): self._openclaw_entry(field_name, raw)
+            for field_name in ("runtimeExtensions", "runtimeSetupEntry")
+            for index, raw in enumerate(entries.get(field_name, []))
+        }
+        for source_field, runtime_field in (("extensions", "runtimeExtensions"), ("setupEntry", "runtimeSetupEntry")):
+            for index, raw in enumerate(entries.get(source_field, [])):
+                runtime = resolved_runtime.get((runtime_field, index))
+                if source_field == "extensions" and not paired_extensions:
+                    runtime = None
+                # Upstream's package-entrypoints.ts searches dist/, dist/src/, then
+                # sibling JS, preserving .mts/.cts output preference. Never bypass
+                # an explicit runtime, nor an unsafe earlier inferred candidate.
+                infer = runtime_field not in metadata or (runtime_field == "runtimeExtensions" and runtimes == [])
+                if infer and isinstance(raw, str):
+                    declared = normalize_declared_path(raw, self.profile.manifest_path_prefixes)
+                    if declared.rel is not None:
+                        for candidate in self._openclaw_built_entries(declared.rel):
+                            if self.reader.kind(candidate) == "missing":
+                                continue
+                            runtime = self._openclaw_entry(f"{runtime_field} (inferred)", candidate.as_posix())
+                            break
+                # Published packages may omit source, but boundary/type/link/special
+                # checks still apply. Only a valid existing runtime excuses absence.
+                self._openclaw_entry(source_field, raw, allow_missing=runtime is not None)
+
+    @staticmethod
+    def _openclaw_built_entries(source: PurePosixPath) -> list[PurePosixPath]:
+        """Bounded candidates matching OpenClaw's listBuiltRuntimeEntryCandidates."""
+        suffix = source.suffix.lower()
+        if suffix not in {".ts", ".tsx", ".mts", ".cts"}:
+            return []
+        stem = source.with_suffix("").as_posix()
+        dist_stem = f"dist/{stem.removeprefix('src/')}"
+        bases = [dist_stem, *([f"dist/{stem}"] if stem.startswith("src/") else []), stem]
+        suffixes = (
+            (".mjs", ".js", ".cjs")
+            if suffix == ".mts"
+            else ((".cjs", ".js", ".mjs") if suffix == ".cts" else (".js", ".mjs", ".cjs"))
+        )
+        return [PurePosixPath(base + extension) for base in bases for extension in suffixes]
+
+    def _openclaw_entry(self, field_name: str, raw: Any, *, allow_missing: bool = False) -> _ResolvedPath | None:
+        resolved = self._resolve_component(
+            "extension", f"openclaw.{field_name}", raw, kinds=("file", "missing") if allow_missing else ("file",)
+        )
+        if resolved is not None:
+            self._add(
+                Component(
+                    "extension", f"openclaw.{field_name}: {raw}", "declared", resolved.rel.as_posix(), "unsupported"
+                )
+            )
+        return resolved
 
     # -- inventory bookkeeping --------------------------------------------- #
     @property
@@ -1368,7 +1425,7 @@ class _Builder:
             )
             return declared, "invalid"
         kind = self.reader.kind(declared.rel)
-        if kind == "missing":
+        if kind == "missing" and "missing" not in kinds:
             self.inventory.findings.append(
                 _path_problem_finding(self.reader, field_name, declared, self.manifest_rel, "missing")
             )

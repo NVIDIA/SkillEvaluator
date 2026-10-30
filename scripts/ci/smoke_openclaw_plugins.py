@@ -85,6 +85,8 @@ def inspect_plugin(root: Path) -> dict[str, Any]:
         runtime = [row for row in coverage if row["type"] == "extension"]
         if not runtime or any(row["state"] != "unsupported" for row in runtime):
             raise AssertionError("Portable staging must never claim native OpenClaw runtime execution")
+        if package.skipped and not package.incomplete_skip:
+            raise AssertionError("A skipped native OpenClaw evaluation must be INCOMPLETE, not an optional success")
         if expected and package.skipped:
             raise AssertionError("A plugin with portable skills was unexpectedly skipped")
         if not expected and not data.get("mcpServers") and not package.skipped:
@@ -93,6 +95,7 @@ def inspect_plugin(root: Path) -> dict[str, Any]:
         if not set(expected).issubset(staged_skills):
             raise AssertionError("Portable member coverage is missing staged skills")
         skipped = package.skipped
+        incomplete_skip = package.incomplete_skip
     return {
         "plugin_id": profile.name,
         "manifest_type": location.manifest_type,
@@ -101,6 +104,7 @@ def inspect_plugin(root: Path) -> dict[str, Any]:
         "tier1_findings": dict(sorted(Counter(f.check_name for f in schema.findings).items())),
         "tier2_profile_members": list(profile.members),
         "portable_tier3_skipped": skipped,
+        "portable_tier3_incomplete_skip": incomplete_skip,
         "runtime_components_unsupported": len(runtime),
         "native_runtime_executed": False,
     }

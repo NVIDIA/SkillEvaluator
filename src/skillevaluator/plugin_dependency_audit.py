@@ -60,6 +60,33 @@ _NPM_NAME = re.compile(r"(?:@[a-zA-Z0-9~][a-zA-Z0-9._~-]*/)?[a-zA-Z0-9~][a-zA-Z0
 _IMAGE = re.compile(r"[a-zA-Z0-9][a-zA-Z0-9._/:@+-]{0,511}\Z")
 
 
+class _PythonAuditResult(ValidationResult):
+    """Keep the public Python collector's legacy CVEs as structured evidence."""
+
+    def add_finding(
+        self,
+        finding_or_tag: Finding | str | None = None,
+        severity: Severity | None = None,
+        message: str | None = None,
+        *,
+        tag: str | None = None,
+        **kwargs: Any,
+    ) -> None:
+        legacy_tag = finding_or_tag if isinstance(finding_or_tag, str) else tag if finding_or_tag is None else None
+        if legacy_tag is not None:
+            if severity is None or message is None:
+                raise ValueError("Legacy Python findings require severity and message")
+            finding_or_tag = Finding(
+                category=legacy_tag,
+                severity=severity,
+                check_name="python-vulnerability",
+                message=report_value(message),
+                file_path="",
+                metadata={"ecosystem": "python"},
+            )
+        super().add_finding(finding_or_tag, severity, message, **kwargs)
+
+
 @dataclass(frozen=True)
 class AuditSource:
     """Normalized exact versions belonging to one declared source."""
@@ -711,7 +738,7 @@ def run_dependency_audits(
                             != {(name, Version(version)) for name, version in pins.items()}
                         ):
                             raise ValueError("missing pin evidence")
-                        batch = ValidationResult()
+                        batch = _PythonAuditResult()
                         validator._process_pip_audit_result(run, batch, source.source)
                         if batch.is_incomplete:
                             raise ValueError("untrustworthy Python evidence")

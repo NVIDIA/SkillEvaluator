@@ -375,3 +375,132 @@ def test_scan_views_preserve_permissions_without_privilege_bits(tmp_path, monkey
             ("snapshot", "probe.sh", expected_mode),
         ]
     )
+
+
+def test_audit_only_includes_declared_skill_sources_without_staging(tmp_path, monkeypatch):
+    from types import SimpleNamespace
+
+    from skillevaluator.plugin_dependency_audit import run_dependency_audits
+    from skillevaluator.utils.tool_runner import ToolResult
+
+    root = bundle(tmp_path)
+    (root / ".claude-plugin/plugin.json").write_text(json.dumps({"name": "demo", "skills": ["./evals/client-skill"]}))
+    skill = root / "evals/client-skill"
+    skill.mkdir(parents=True)
+    (skill / "SKILL.md").write_text("---\nname: client-skill\ndescription: Demo\n---\n# Demo\n")
+    (skill / "requirements.txt").write_text("bundled==1.0\n")
+    (root / "requirements.txt").write_text("root==1.0\n")
+    unused = root / "results/unused"
+    unused.mkdir(parents=True)
+    (unused / "requirements.txt").write_text("unused==1.0\n")
+
+    def scan(args, **kwargs):
+        requirements = Path(args[args.index("-r") + 1]).read_text().splitlines()
+        return ToolResult(
+            True,
+            json.dumps(
+                {
+                    "dependencies": [
+                        {
+                            "name": pin.split("==")[0],
+                            "version": pin.split("==")[1],
+                            "vulns": [{"id": "CVE-fixture", "fix_versions": [], "severity": "high"}],
+                        }
+                        for pin in requirements
+                    ]
+                }
+            ),
+            "",
+            1,
+        )
+
+    scanner = SimpleNamespace(is_available=True, run=scan)
+    monkeypatch.setattr(
+        "skillevaluator.tier1.plugin_checks.run_dependency_audits",
+        lambda reader, inputs: run_dependency_audits(reader, inputs, tools={"pip_audit": scanner}),
+    )
+
+    def forbidden(*_args, **_kwargs):
+        pytest.fail("Audit-only execution staged a tree or initialized unrelated scanners")
+
+    for name in ("_snapshot", "_tree_checks", "_skill_checks"):
+        monkeypatch.setattr(f"skillevaluator.tier1.plugin_checks.{name}", forbidden)
+    results = run_plugin_validation(root, options=PrivatePluginChecks(checks=frozenset(), audit_dependencies=True))
+    audit = results[-1]
+    assert not audit.is_incomplete
+    assert {finding.file_path for finding in audit.findings} == {
+        str(root / "requirements.txt"),
+        str(skill / "requirements.txt"),
+    }
+    summary = audit.metadata["plugin"]["cve_summary"]["ecosystems"]["python"]
+    assert summary["sources"] == summary["audited"] == 2
+
+
+@pytest.mark.parametrize("checks", [frozenset(), frozenset({"schema"})])
+@pytest.mark.parametrize("problem", ["symlink", "paths"])
+def test_audit_source_refusal_is_incomplete_even_without_tree_scanners(tmp_path, monkeypatch, checks, problem):
+    from skillevaluator.models.result import ValidationResult
+
+    root = bundle(tmp_path / "bundle")
+    (root / ".claude-plugin/plugin.json").write_text(json.dumps({"name": "demo", "skills": ["./evals/client-skill"]}))
+    skill = root / "evals/client-skill"
+    skill.mkdir(parents=True)
+    (skill / "SKILL.md").write_text("---\nname: client-skill\ndescription: Demo\n---\n# Demo\n")
+    if problem == "symlink":
+        outside = tmp_path / "outside.txt"
+        outside.write_text("private fixture")
+        (skill / "link.txt").symlink_to(outside)
+    else:
+        monkeypatch.setattr("skillevaluator.tier1.plugin_checks.PLUGIN_TREE_MAX_DISCOVERED_PATHS", 1)
+    monkeypatch.setattr(
+        "skillevaluator.tier1.plugin_checks.run_dependency_audits",
+        lambda _reader, _inputs: ValidationResult(validator_name="Fixture Audit"),
+    )
+    results = run_plugin_validation(root, options=PrivatePluginChecks(checks=checks, audit_dependencies=True))
+    audit = results[-1]
+    assert audit.validator_name == "Fixture Audit"
+    assert audit.is_incomplete and not audit.passed
+
+
+@pytest.mark.parametrize("large_file", ["unrelated_asset", "supported_lockfile"])
+def test_audit_only_preserves_consumer_specific_byte_limits(tmp_path, monkeypatch, large_file):
+    from types import SimpleNamespace
+
+    from skillevaluator.plugin_dependency_audit import run_dependency_audits
+    from skillevaluator.utils.tool_runner import ToolResult
+
+    root = bundle(tmp_path)
+    if large_file == "unrelated_asset":
+        with (root / "asset.bin").open("wb") as asset:
+            asset.truncate(9 * 1024 * 1024)
+        (root / "requirements.txt").write_text("foo==1.0\n")
+        ecosystem = "python"
+    else:
+        payload = {"lockfileVersion": 3, "packages": {"node_modules/foo": {"version": "1.2.3"}}}
+        (root / "package-lock.json").write_text(json.dumps(payload) + " " * (1024 * 1024))
+        ecosystem = "npm"
+
+    def scan(args, **kwargs):
+        if "-r" in args:
+            payload = {"dependencies": [{"name": "foo", "version": "1.0", "vulns": []}]}
+        else:
+            payload = {
+                "auditReportVersion": 2,
+                "vulnerabilities": {},
+                "metadata": {
+                    "vulnerabilities": {"info": 0, "low": 0, "moderate": 0, "high": 0, "critical": 0, "total": 0},
+                    "dependencies": {"total": 1},
+                },
+            }
+        return ToolResult(True, json.dumps(payload), "", 0)
+
+    scanner = SimpleNamespace(is_available=True, run=scan)
+    monkeypatch.setattr(
+        "skillevaluator.tier1.plugin_checks.run_dependency_audits",
+        lambda reader, inputs: run_dependency_audits(reader, inputs, tools={"pip_audit": scanner, "npm": scanner}),
+    )
+    results = run_plugin_validation(root, options=PrivatePluginChecks(checks=frozenset(), audit_dependencies=True))
+    audit = results[-1]
+    assert not audit.is_incomplete and audit.passed
+    summary = audit.metadata["plugin"]["cve_summary"]["ecosystems"][ecosystem]
+    assert summary["sources"] == summary["audited"] == 1

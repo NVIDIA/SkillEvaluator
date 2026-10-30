@@ -22,7 +22,7 @@ from skillevaluator.models.result import Finding, Severity, ValidationResult
 from skillevaluator.plugin_dependency_audit import collect_audit_inputs, collect_endpoint_targets, run_dependency_audits
 from skillevaluator.plugin_inventory import plugin_inventory_for_root
 from skillevaluator.plugin_paths import PluginRootReader
-from skillevaluator.utils.secure_fs import SecurePathError, SecureRoot, discover_secure_files
+from skillevaluator.utils.secure_fs import SecureFile, SecurePathError, SecureRoot, discover_secure_files
 from skillevaluator.validators.claude_plugin_validate import (
     ClaudePluginValidateParity,
     skillevaluator_manifest_fields,
@@ -106,17 +106,12 @@ def _rebase(result: ValidationResult, old: Path, new: Path) -> None:
         success.metadata = rewrite(success.metadata)
 
 
-def _snapshot(root: Path, destination: Path, skills: list[str]) -> tuple[PurePosixPath, ...]:
-    """One bounded copy with inode-pinned, no-follow reads before scanners run.
-
-    Scanners receive an immutable task-owned input view and cannot follow source
-    links or read an entry swapped between discovery and copying. Refusal never
-    falls back to scanning the original filesystem.
-    """
-    # Explicit client paths override generic artifact pruning. All reads still
-    # share the same path/byte caps, so an oversized loaded tree is incomplete.
+def _scan_sources(root: Path, skills: list[str]) -> list[SecureFile]:
+    """One bounded no-follow listing for staging and independent source audits."""
+    # Explicit client paths override generic artifact pruning. Both callers
+    # share path admission; each consumer retains its own bounded read budget.
     required_names = {part for skill in skills for part in Path(skill).parts}
-    files = discover_secure_files(
+    return discover_secure_files(
         root,
         selected=lambda _: True,
         excluded_dirs=SCAN_EXCLUDED_DIRS - {"__pycache__"} - required_names,
@@ -124,6 +119,16 @@ def _snapshot(root: Path, destination: Path, skills: list[str]) -> tuple[PurePos
         allow_context_alias=False,
         refuse_selected_dirs=False,
     )
+
+
+def _snapshot(root: Path, destination: Path, skills: list[str]) -> tuple[PurePosixPath, ...]:
+    """One bounded copy with inode-pinned, no-follow reads before scanners run.
+
+    Scanners receive an immutable task-owned input view and cannot follow source
+    links or read an entry swapped between discovery and copying. Refusal never
+    falls back to scanning the original filesystem.
+    """
+    files = _scan_sources(root, skills)
     remaining = CONTENT_DEDUP_MAX_TOTAL_BYTES
     with SecureRoot(root) as reader:
         for source in files:
@@ -282,6 +287,7 @@ def run_plugin_validation(path: Path, *, options: PrivatePluginChecks | None = N
     scan_checks = options.checks & TREE_CHECKS
     skill_checks = options.checks & SKILL_CHECKS
     source_files = inventory.source_files
+    source_complete = inventory.tree_complete
     skills = sorted({m.path for m in inventory.components if m.type == "skill" and m.path and not m.problem})
     if scan_checks or skill_checks:
         snapshot_result = ValidationResult(validator_name="Private Tree Coverage")
@@ -354,6 +360,7 @@ def run_plugin_validation(path: Path, *, options: PrivatePluginChecks | None = N
                     )
                     results.append(snapshot_result)
             except (SecurePathError, OSError):
+                source_complete = False
                 snapshot_result.add_finding(
                     Finding(
                         category="PLUGIN_SCHEMA",
@@ -367,10 +374,21 @@ def run_plugin_validation(path: Path, *, options: PrivatePluginChecks | None = N
                 results.append(snapshot_result)
     declarations = inventory.all_mcp_declarations()
     if options.audit_dependencies:
+        if not (scan_checks or skill_checks) and source_complete:
+            try:
+                files = _scan_sources(root, skills)
+                manifest = inventory.selected_manifest.secure_file
+                with SecureRoot(root) as source_reader:
+                    source_reader.read_bytes(
+                        manifest.relative_path, CONTENT_DEDUP_MAX_TOTAL_BYTES, expected=manifest.metadata
+                    )
+                source_files = tuple(PurePosixPath(file.rel_path) for file in files)
+            except (SecurePathError, OSError):
+                source_files, source_complete = (), False
         reader = PluginRootReader(root)
         inputs = collect_audit_inputs(reader, source_files, mcp=declarations)
         audit = run_dependency_audits(reader, inputs)
-        if not inventory.tree_complete:
+        if not source_complete:
             audit.mark_scan_incomplete("dependency-source-discovery")
         results.append(audit)
     if options.resolve_endpoints:

@@ -113,7 +113,7 @@ vocabulary.
 
 | Extension | Chunking strategy |
 | --- | --- |
-| `.md`, `.mdc` | Heading-based sections; sections over 3,000 characters are split at eligible paragraph boundaries when possible; chunks under 80 characters are dropped |
+| `.md`, `.mdc` | Heading-based sections; eligible sections over 3,000 characters are split into bounded pieces, preferring paragraph and line boundaries |
 | `.py` | Module docstrings plus class and function signatures with their docstrings; implementation bodies are not included |
 | `.sh` | Function bodies and comment blocks of at least three consecutive comment lines |
 | Other extensions | Skipped |
@@ -122,6 +122,16 @@ Valid mapping frontmatter is removed from Markdown before chunking. Malformed,
 empty, or non-mapping frontmatter remains part of the analyzed text. Every
 retained chunk keeps its source file and line range, so findings point you to
 the exact overlapping sections.
+
+Each embedding input is capped at 3,000 characters, including long table rows,
+Python docstrings, and shell functions. Oversized Markdown sections are packed
+paragraph by paragraph up to the cap, and paragraphs under 80 characters stay
+attached to a neighbouring paragraph rather than becoming chunks of their own.
+Pieces split from one section, docstring, or function do not count as
+duplicates of each other. An independent copy can still join a duplicate
+cluster, and the finding then lists the split source once with its merged line
+range. Python pieces retain the enclosing source range because cleaned
+docstrings and function signatures are not contiguous text.
 
 ### Verdicts and what to do about them
 
@@ -283,8 +293,8 @@ you intend to skip Tier 2 entirely.
 | Inter-skill reporting threshold | `0.75` | Reports `SIMILAR` and stronger matches |
 | Intra-skill clustering threshold | `0.80` | Selects candidate chunk pairs for clustering |
 | Full-body chunking | 512 tokens, 64-token overlap | Chunked average pooling for `--full-body` embeddings |
-| Minimum content chunk | 80 characters | Drops fragments too small to compare usefully |
-| Large Markdown section split point | 3,000 characters | Splits oversized sections at eligible paragraph boundaries |
+| Minimum content chunk | 80 characters | Drops sections and chunks too small to compare usefully; short paragraphs of an oversized section stay attached to a neighbour |
+| Embedding input cap | 3,000 characters | Caps every Markdown, Python, and shell embedding input; oversized Markdown sections are packed at paragraph boundaries |
 | High-confidence duplicate boundary | `0.70` | Maps actionable duplicate verdicts to HIGH rather than MEDIUM |
 
 Tier 2 treats skill content and catalog files as untrusted input. Before any

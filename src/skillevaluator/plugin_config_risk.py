@@ -26,6 +26,7 @@ from skillevaluator.plugin_paths import PluginRootReader, _plugin_finding
 from skillevaluator.plugin_permissions import OverrideIssue, allowed_tools_flag_issues, is_broad_allow_rule
 from skillevaluator.utils.secure_fs import SecurePathError
 from skillevaluator.validators.mcp_static import (
+    _parses_shell_operators,
     env_override_issues,
     env_tls_and_secret_issues,
     permission_flag_issues,
@@ -72,10 +73,17 @@ def _lsp_command_findings(name: str, server: dict[str, Any], file_path: str) -> 
     get the same findings, worded for an LSP server. Without a shell, ``;`` or
     ``|`` inside an argument is passed to the server literally and is not
     flagged (the MCP argv rule); an argument that is only an operator or
-    carries command substitution is a LOW note, not the MCP CRITICAL.
+    carries command substitution is a LOW note, not the MCP CRITICAL. A
+    command-line wrapper that parses operators itself (``cmd /c``,
+    ``powershell -Command``) keeps the MCP CRITICAL: there ``&`` or ``|`` does
+    chain another program.
     """
     if not isinstance(server.get("command"), str):
         return []
+    args = server.get("args")
+    parsed = _parses_shell_operators(
+        [server["command"], *(str(arg) for arg in args)] if isinstance(args, list) else [server["command"]]
+    )
     raw: list[Finding] = []
     validate_mcp_command(name, server, file_path, raw)
     validate_mcp_pinning(name, server, file_path, raw)
@@ -84,7 +92,7 @@ def _lsp_command_findings(name: str, server: dict[str, Any], file_path: str) -> 
     for finding in raw:
         check = f"plugin_lsp_{finding.check_name.removeprefix('mcp_')}"
         severity, message, suggestion = finding.severity, finding.message.removeprefix(prefix), finding.suggestion
-        if check == "plugin_lsp_command_shell_metacharacters":
+        if check == "plugin_lsp_command_shell_metacharacters" and not parsed:
             if any(item.check_name == check for item in findings):
                 continue
             severity = Severity.LOW
@@ -162,12 +170,14 @@ def _settings_findings(config: dict[str, Any], rel: str, display: str) -> list[F
                 }
             )
             if broad:
+                # Each rule is bounded and redacted like a quoted --allowedTools rule ('Bash(npx --token=... *)').
+                quoted = [report_text(rule, 60) for rule in broad[:MAX_QUOTED_ENTRIES]]
                 findings.append(
                     _plugin_finding(
                         Severity.HIGH,
                         "plugin_settings_broad_allow",
                         f"shipped settings '{rel}' pre-approves unrestricted tools or interpreter Bash rules "
-                        f"that run any command {broad[:MAX_QUOTED_ENTRIES]}",
+                        f"that run any command {quoted}",
                         display,
                         "Remove blanket allow rules such as Bash / Bash(*) / Bash(python3:*); scope permissions "
                         "to exact commands.",
@@ -321,33 +331,56 @@ def analyze_settings(config: Any, path: str, display: str, *, name: str | None =
     return findings
 
 
+_MAX_CODEX_BYPASS_FINDINGS = 64
+
+
 def analyze_codex_settings(config: Any, path: str, display: str) -> list[Finding]:
-    """Check project/profile approval and sandbox settings without loading Codex."""
+    """Check project/profile approval and sandbox settings without loading Codex.
+
+    Every ``[profiles.*]`` table is read (the file is already byte-bounded); at
+    most ``_MAX_CODEX_BYPASS_FINDINGS`` settings are listed one by one, and one
+    more HIGH finding counts the rest.
+    """
     if not isinstance(config, dict):
         return []
     findings: list[Finding] = []
     tables = [("", config)]
     profiles = config.get("profiles")
     if isinstance(profiles, dict):
-        tables.extend((f"profiles.{key}.", value) for key, value in list(profiles.items())[:64])
-    for prefix, table in tables:
-        if not isinstance(table, dict):
-            continue
-        for key, value in (("approval_policy", "never"), ("sandbox_mode", "danger-full-access")):
-            if isinstance(table.get(key), str) and table[key].strip().lower() == value:
-                effect = (
-                    "turns off every approval prompt" if key == "approval_policy" else "turns off the command sandbox"
-                )
-                findings.append(
-                    _plugin_finding(
-                        Severity.HIGH,
-                        "plugin_settings_bypass_permissions",
-                        f"shipped Codex config {path!r} sets {prefix}{key} = {value!r}, which {effect}",
-                        display,
-                        f"Remove {prefix}{key}; let the user choose Codex's approval policy and sandbox.",
-                        metadata={"plugin_component": {"type": "settings", "name": path}},
-                    )
-                )
+        tables.extend((f"profiles.{key}.", value) for key, value in profiles.items())
+    bypasses = [
+        (prefix, key, value)
+        for prefix, table in tables
+        if isinstance(table, dict)
+        for key, value in (("approval_policy", "never"), ("sandbox_mode", "danger-full-access"))
+        if isinstance(table.get(key), str) and table[key].strip().lower() == value
+    ]
+    metadata = {"plugin_component": {"type": "settings", "name": path}}
+    for prefix, key, value in bypasses[:_MAX_CODEX_BYPASS_FINDINGS]:
+        effect = "turns off every approval prompt" if key == "approval_policy" else "turns off the command sandbox"
+        findings.append(
+            _plugin_finding(
+                Severity.HIGH,
+                "plugin_settings_bypass_permissions",
+                f"shipped Codex config {path!r} sets {prefix}{key} = {value!r}, which {effect}",
+                display,
+                f"Remove {prefix}{key}; let the user choose Codex's approval policy and sandbox.",
+                metadata={"plugin_component": dict(metadata["plugin_component"])},
+            )
+        )
+    if len(bypasses) > _MAX_CODEX_BYPASS_FINDINGS:
+        findings.append(
+            _plugin_finding(
+                Severity.HIGH,
+                "plugin_settings_bypass_permissions",
+                f"shipped Codex config {path!r} sets approval_policy = 'never' or sandbox_mode = "
+                f"'danger-full-access' in {len(bypasses) - _MAX_CODEX_BYPASS_FINDINGS} more places (not listed)",
+                display,
+                "Remove every approval_policy = 'never' and sandbox_mode = 'danger-full-access' setting; let the "
+                "user choose Codex's approval policy and sandbox.",
+                metadata=metadata,
+            )
+        )
     findings.extend(
         _override_findings(_agent_cli_flag_issues(config), display, where=path, component=("settings", path))
     )

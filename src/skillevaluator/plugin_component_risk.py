@@ -2202,12 +2202,28 @@ def _stage_runs_stdin(stage: str, depth: int = 0) -> bool:
         return True
     match = _STAGE_INTERPRETER_RE.match(stage)
     if match is None:
-        return False
+        return _wrapped_stage_runs_stdin(stage, depth)
     head = match.group("interpreter")
     if _XARGS_RE.search(head):
         return True  # xargs hands the downloaded text to the interpreter as arguments
     name = head.split()[-1].strip("\"'").replace("\\", "/").rsplit("/", 1)[-1].lower().strip("${}")
     return _program_from_stdin(_interpreter_family(name), _stage_arguments(stage[match.end() :][:2048]), depth)
+
+
+_STAGE_PROGRAM_RE = re.compile(rf"(?:{_SHELL_VARIABLE}|{_EXECUTORS})", re.IGNORECASE)
+
+
+def _wrapped_stage_runs_stdin(stage: str, depth: int) -> bool:
+    """Whether a stage whose wrapper takes an option value (``| sudo -u root bash``, ``| nice -n 10 sh -s``,
+    ``| env -u HISTFILE bash``) runs its standard input; the wrappers are removed as for MCP launch commands."""
+    words = _stage_arguments(stage.lstrip().removeprefix("&")[:2048])
+    program = unwrap_launch_command(words, expand_shell=False)
+    if not program or program == words:
+        return False
+    name = program[0].replace("\\", "/").rsplit("/", 1)[-1]
+    if _STAGE_PROGRAM_RE.fullmatch(name) is None:
+        return False
+    return _program_from_stdin(_interpreter_family(name.lower().strip("${}")), program[1:], depth)
 
 
 # A redirection operator at the start of an unquoted word: '>', '>>', '2>', '&>', '>&2', '<&0', '{fd}>', '<<<'.

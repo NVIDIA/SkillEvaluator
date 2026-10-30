@@ -151,10 +151,13 @@ def slug_from_remote_url(url: str) -> str | None:
 
 
 # Remote URL forms whose path names a hosted <owner>/<repo>: https, http, ssh,
-# git, and SCP-style ``[user@]host:owner/repo``. A local path or file:// URL
-# names no hosted repository, so it never proves identity.
+# git, and SCP-style ``[user@]host:owner/repo``. As in git, a colon before the
+# first slash (or backslash) makes a remote SCP-style, so an SSH config alias
+# (``gh:owner/repo``) counts; a single-letter drive prefix (``C:``) does not.
+# A local path or file:// URL names no hosted repository, so it never proves
+# identity.
 _HOSTED_REMOTE_RE = re.compile(
-    r"^(?:(?:https?|ssh|git(?:\+ssh)?)://[^/]+/.+|(?:[^/@:\s]+@[^/:\s]+|[^/@:\s]+\.[^/@:\s]+):(?!/).+)$",
+    r"^(?:(?:https?|ssh|git(?:\+ssh)?)://[^/]+/.+|(?:[^/@:\s]+@[^/:\s]+|[^/\\@:\s]{2,}):(?!/).+)$",
     re.IGNORECASE,
 )
 

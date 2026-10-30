@@ -130,6 +130,12 @@ def test_repository_identity_runs_two_git_commands(tmp_path: Path, monkeypatch: 
         # An SCP-style remote without a user gave the slug "github.com:example-org/example-repo", so every
         # same-repository ref was "external" and a missing one passed.
         ("github.com:Example-Org/example-repo.git", REPO),
+        # git reads any "host:path" with no slash before the colon as SSH, so an SSH config alias names a
+        # hosted repository; it was reported as a local path, leaving every same-repository ref unresolved.
+        ("work-github:Example-Org/example-repo.git", REPO),
+        ("gh:Example-Org/example-repo.git", REPO),
+        ("C:/srv/git/example-repo.git", None),
+        ("C:\\srv\\git\\example-repo.git", None),
         ("ssh://git@github.com/Example-Org/example-repo.git", REPO),
         # http:// and git:// origins name their repository as well as https:// does.
         ("http://github.com/Example-Org/example-repo.git", REPO),

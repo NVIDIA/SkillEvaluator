@@ -23,6 +23,7 @@ well-known names only: DNS resolution and HTTP redirects are never evaluated.
 
 from __future__ import annotations
 
+import bisect
 import contextlib
 import ipaddress
 import itertools
@@ -55,6 +56,7 @@ from skillevaluator.validators.url_policy import (
     is_credential_key,
     looks_like_inline_secret,
     looks_like_random_secret,
+    looks_like_secret_material,
     redact_secrets,
     report_text,
     safe_url,
@@ -184,7 +186,19 @@ def _credential_flag_name(token: str) -> str | None:
     if not token.startswith("-"):
         return None
     flag = token.lstrip("-").split("=", 1)[0]
-    return flag if flag and is_credential_key(flag, query=True) else None
+    return flag if flag and (is_credential_key(flag, query=True) or flag.lower() in _CREDS_FLAGS) else None
+
+
+# Registry login flags whose value is 'user:password' (podman, skopeo, buildah '--creds').
+_CREDS_FLAGS = frozenset({"creds"})
+
+
+def _flag_value_is_credential(flag: str, value: str) -> bool:
+    """Whether the value of credential flag ``flag`` is an inline credential (``--creds`` judges its password)."""
+    if flag.lower() in _CREDS_FLAGS:
+        password = value.partition(":")[2]
+        return bool(password) and looks_like_inline_secret("password", password, query=False)
+    return looks_like_inline_secret(flag, value, query=False)
 
 
 def _inline_credentials(words: list[str]) -> list[tuple[int, str | None]]:
@@ -209,11 +223,45 @@ def _inline_credentials(words: list[str]) -> list[tuple[int, str | None]]:
                 value, value_index = words[index + 1], index + 1
             else:
                 value, value_index = "", -1
-            if value and looks_like_inline_secret(flag, value, query=False):
+            if value and _flag_value_is_credential(flag, value):
                 found.append((value_index, flag))
-        elif index != value_index and has_secret_shape(env_defaults_text(word)):
+        elif index != value_index and (
+            has_secret_shape(env_defaults_text(word)) or _authorization_credential(word) or _url_credentials(word)
+        ):
             found.append((index, None))
     return found
+
+
+# A URL inside a command word ('https://user:pw@host/sse', '--url=https://host/?token=...').
+_URL_IN_TEXT_RE = re.compile(r"\b[A-Za-z][A-Za-z0-9+.\-]{0,31}://[^\s'\"`<>]{1,2048}")
+# An HTTP header written into a command word ('Authorization: Token abc', '--header=Proxy-Authorization: ...').
+# The value is the scheme and the credential after it, up to a quote or the next word.
+_AUTHORIZATION_TEXT_RE = re.compile(
+    r"(?i)(?:^|[\s=\"'])(?:proxy-)?authorization\s*:\s*(?P<value>[^\s\"']+(?:[ \t]+[^\s\"']+)?)"
+)
+_AUTHORIZATION_HEADERS = frozenset({"authorization", "proxy-authorization"})
+
+
+def _url_credentials(word: str) -> bool:
+    """Whether a command word holds a URL with credentials in its userinfo, query, or fragment (as hook commands)."""
+    return any(url_credentials(match.group(0), userinfo_rule="secret") for match in _URL_IN_TEXT_RE.finditer(word))
+
+
+def _authorization_value_credential(value: str) -> bool:
+    """Whether an ``Authorization`` value carries a literal credential after its scheme (``Token abc``, ``Bot x``).
+
+    Only the text the plugin ships counts: ``Token ${T}`` and a scheme alone do not.
+    """
+    words = env_defaults_text(value).split(None, 1)
+    if len(words) == 2:
+        return any(char.isalnum() for char in words[1])
+    return bool(words) and (has_secret_shape(words[0]) or looks_like_secret_material(words[0]))
+
+
+def _authorization_credential(word: str) -> bool:
+    """Whether a command word writes an ``Authorization`` header with a literal credential."""
+    match = _AUTHORIZATION_TEXT_RE.search(word)
+    return match is not None and _authorization_value_credential(match.group("value"))
 
 
 # --------------------------------------------------------------------------- #
@@ -323,12 +371,25 @@ def mcp_finding(
         category=CATEGORY,
         severity=severity,
         check_name=check_name,
-        message=(f"mcpServers['{name}']: {message}" if name else message),
+        message=(f"{mcp_message_prefix(name)}{message}" if name else message),
         file_path=file_path,
         suggestion=suggestion,
         # Machine-readable server attribution for the plugin component inventory.
         metadata=({"mcp_server": name} if isinstance(name, str) else {}),
     )
+
+
+def _shown_name(name: Any) -> str:
+    """A server name (or other key) for messages: credentials redacted, at most 64 characters."""
+    return _shown(name if isinstance(name, str) else repr(name), limit=64)
+
+
+def mcp_message_prefix(name: Any) -> str:
+    """The ``mcpServers['<name>']: `` prefix of a named server's finding messages (name redacted and bounded).
+
+    Callers that reword these findings (LSP servers) strip this exact prefix.
+    """
+    return f"mcpServers['{_shown_name(name)}']: "
 
 
 @dataclass
@@ -377,6 +438,14 @@ def _whatwg_hostname(url: str) -> str | None:
         return None
 
 
+def _url_path_segments(url: str) -> list[str]:
+    """The percent-decoded path segments of ``url``, read from its raw text (no userinfo, query, or fragment)."""
+    text = re.split(r"[?#]", without_userinfo(url), maxsplit=1)[0]
+    _scheme, slashes, rest = text.partition("//")
+    path = rest.partition("/")[2] if slashes else text
+    return [unquote(segment) for segment in path.split("/") if segment]
+
+
 def _check_url_inline_secrets(
     server: _ServerFindings, display: str, label: str, *, text: str, ambiguous: bool = False
 ) -> bool:
@@ -403,6 +472,14 @@ def _check_url_inline_secrets(
             f"{label} embeds inline userinfo credentials: {redacted_url(display)!r} (userinfo withheld); only "
             "${ENV} references are allowed",
             'Remove user:password@ from the URL; pass credentials by reference (e.g. header "${MY_TOKEN}").',
+        )
+    if any(has_secret_shape(segment) for segment in _url_path_segments(whatwg_url(text))):
+        server.report(
+            Severity.CRITICAL,
+            "mcp_url_inline_secret",
+            f"{label} path carries a segment shaped like a token: {redacted_url(display)!r}; only ${{ENV}} "
+            "references are allowed",
+            "Do not put credentials in the URL path; send them in a header that references a secret.",
         )
     for part, keys in (
         ("query", [key for reading in readings for key in reading.query_keys]),
@@ -444,6 +521,30 @@ _COMMAND_LINE_PARSERS: dict[str, frozenset[str]] = {
     "powershell": frozenset({"-c", "-command", "-commandwithargs"}),
     "pwsh": frozenset({"-c", "-command", "-commandwithargs"}),
 }
+_POWERSHELL_SWITCH_RE = re.compile(r"^--?(?P<name>[a-z]+)$")
+
+
+def _powershell_switch(token: str) -> str | None:
+    """``"command"`` or ``"encoded"`` for a PowerShell switch that runs an inline program, else ``None``.
+
+    PowerShell accepts any prefix of a switch name it can resolve, so ``-Comm``
+    is ``-Command``; ``-e``, ``-ec``, and ``-enc`` are ``-EncodedCommand``.
+    """
+    match = _POWERSHELL_SWITCH_RE.match(token.strip().lower())
+    name = match.group("name") if match else ""
+    if name and ("command".startswith(name) or "commandwithargs".startswith(name) or name == "cwa"):
+        return "command"
+    if name == "ec" or (name and "encodedcommand".startswith(name)):
+        return "encoded"
+    return None
+
+
+def _command_line_switch(base: str, token: str) -> bool:
+    """Whether ``token`` is a switch of command-line parser ``base`` that takes the rest as a command line."""
+    if base in ("powershell", "pwsh"):
+        return _powershell_switch(token) == "command"
+    switches = _COMMAND_LINE_PARSERS.get(base)
+    return switches is not None and token.lower() in switches
 
 
 def _parses_shell_operators(argv: list[str]) -> bool:
@@ -451,8 +552,17 @@ def _parses_shell_operators(argv: list[str]) -> bool:
     if not argv:
         return False
     inner = unwrap_launch_command(_launch_argv(argv[0], argv[1:]), expand_shell=False, stop_at=_COMMAND_LINE_PARSERS)
-    switches = _COMMAND_LINE_PARSERS.get(_command_basename(inner[0])) if inner else None
-    return switches is not None and any(token.lower() in switches for token in inner[1:])
+    base = _command_basename(inner[0]) if inner else ""
+    return any(_command_line_switch(base, token) for token in inner[1:])
+
+
+def _powershell_encoded_command(argv: list[str]) -> bool:
+    """Whether ``argv`` runs PowerShell with ``-EncodedCommand``: a base64 program that cannot be read statically."""
+    return (
+        bool(argv)
+        and _command_basename(argv[0]) in ("powershell", "pwsh")
+        and any(_powershell_switch(token) == "encoded" for token in argv[1:])
+    )
 
 
 def _interpreter_inline_code(argv: list[str]) -> str | None:
@@ -479,6 +589,120 @@ def _interpreter_inline_code(argv: list[str]) -> str | None:
             return argv[index + 1] if index + 1 < len(argv) else None
         index += 2 if token in _INTERPRETER_VALUE_OPTIONS else 1
     return None
+
+
+# 'su -c <line>' runs the line through the target user's shell.
+_SU_COMMAND_OPTIONS = frozenset({"-c", "--command", "--session-command"})
+
+
+def _inner_shell_argv(argv: list[str]) -> list[str] | None:
+    """The shell argv that ``argv`` starts with an inline program, also behind a launcher outside the known wrappers.
+
+    ``uv run bash -c``, ``wsl bash -c``, ``wsl -e sh -c``, and ``taskset 0x1 bash -c``
+    start a shell; ``su -c <line> user`` runs the line in the user's shell. Any
+    shell word followed by its ``-c`` counts (fail closed).
+    """
+    for index, word in enumerate(argv):
+        base = _command_basename(word)
+        if base in _SHELL_INTERPRETERS and _shell_inline(argv[index:])[0]:
+            return argv[index:]
+        if base == "su":
+            for position, option in enumerate(argv[index + 1 :], start=index + 1):
+                name, equals, value = option.partition("=")
+                if name in _SU_COMMAND_OPTIONS:
+                    line = value if equals else (argv[position + 1] if position + 1 < len(argv) else "")
+                    return [word, "-c", line]
+    return None
+
+
+# Package runner options whose value is the registry, index, or links page packages come from (npm, pnpm, uv, pip).
+_REGISTRY_URL_OPTIONS = frozenset(
+    {"--registry", "--index-url", "--index", "--default-index", "--extra-index-url", "-i", "--find-links", "-f"}
+)
+_PACKAGE_RUNNERS = frozenset({"npx", "bunx", "pnpx", "bun", "pnpm", "yarn", "npm", "uvx", "uv", "pipx", "pip", "pip3"})
+
+
+def _plaintext_registry_urls(argv: list[str]) -> list[tuple[str, str]]:
+    """``(option, url)`` for each registry or index URL of a package runner that uses plaintext http.
+
+    A loopback host (a local registry mirror) does not cross a network and is not reported, as for MCP URLs.
+    """
+    if not argv or _command_basename(argv[0]) not in _PACKAGE_RUNNERS:
+        return []
+    found: list[tuple[str, str]] = []
+    for index, word in enumerate(argv[1:], start=1):
+        name, equals, value = word.partition("=")
+        if name not in _REGISTRY_URL_OPTIONS:
+            continue
+        if not equals:
+            value = argv[index + 1] if index + 1 < len(argv) else ""
+        # uv's '--index name=url' names the index before its URL.
+        for match in _URL_IN_TEXT_RE.finditer(value):
+            url = match.group(0)
+            if url_scheme(url) != "http":
+                continue
+            with contextlib.suppress(ValueError):
+                endpoint = classify_endpoint_host(urlparse(whatwg_url(url)).hostname or "")
+                if endpoint is not None and endpoint.is_loopback:
+                    continue
+            found.append((name, url))
+    return found
+
+
+# npx and npm exec run the value of '-c'/'--call' through npm's script shell; pnpm dlx '-c'/'--shell-mode' runs
+# its command in a shell.
+_NPM_CALL_OPTIONS = frozenset({"-c", "--call"})
+_PNPM_SHELL_MODE_OPTIONS = frozenset({"-c", "--shell-mode"})
+
+
+def _npm_call_value(args: list[str], *, until_positional: bool) -> str | None:
+    """The value of npm's ``-c``/``--call`` among a runner's options (npm exec reads them anywhere before ``--``)."""
+    index = 0
+    while index < len(args):
+        word = args[index]
+        index += 1
+        if word == "--":
+            return None
+        if word == "-" or not word.startswith("-"):
+            if until_positional:
+                return None
+            continue
+        name, equals, value = word.partition("=")
+        if name in _NPM_CALL_OPTIONS:
+            return value if equals else (args[index] if index < len(args) else "")
+        if not equals and (
+            name in _NPX_VALUE_FLAGS
+            or (name not in _NPM_SWITCHES and index < len(args) and not args[index].startswith("-"))
+        ):
+            index += 1  # an option value, as _npm_invocation reads it
+    return None
+
+
+def _runner_shell_line(argv: list[str]) -> tuple[str, str] | None:
+    """``(runner, line)`` when a package runner runs a shell command line.
+
+    ``npx -c <line>``, ``npm exec --call <line>`` (also ``npm x``), and
+    ``pnpm dlx --shell-mode <command>`` (``-c`` may also come before ``dlx``).
+    """
+    if not argv:
+        return None
+    base, args = _command_basename(argv[0]), argv[1:]
+    line: str | None = None
+    if base == "npx":
+        line = _npm_call_value(args, until_positional=True)
+    elif base == "npm":
+        sub, _rest = _subcommand(args, _NPM_GLOBAL_VALUE_FLAGS)
+        line = _npm_call_value(args, until_positional=False) if sub in {"exec", "x"} else None
+        base = "npm exec"
+    elif base == "pnpm":
+        sub, rest = _subcommand(args, _DLX_VALUE_FLAGS)
+        if sub == "dlx":
+            before = args[: len(args) - len(rest) - 1]
+            options = [*before, *rest[: _skip_options(rest, _DLX_VALUE_FLAGS)]]
+            if any(word.partition("=")[0] in _PNPM_SHELL_MODE_OPTIONS for word in options):
+                line = _first_positional(rest, _DLX_VALUE_FLAGS) or ""
+        base = "pnpm dlx"
+    return None if line is None else (base, line)
 
 
 def validate_mcp_command(name: str, config: dict[str, Any], file_path: str, findings: list[Finding]) -> None:
@@ -529,6 +753,9 @@ def _check_command(server: _ServerFindings, config: dict[str, Any]) -> None:
     # always allowed. The tokens that hold one are never shown in any finding.
     arg_list = [str(a) for a in args] if isinstance(args, list) else []
     command_credentials = _inline_credentials(_split_command_line([command]))
+    if not command_credentials and _authorization_credential(command):
+        # 'mcp-remote https://host/sse --header "Authorization: Token abc"' written as one string.
+        command_credentials = [(0, None)]
     arg_credentials = _inline_credentials(arg_list)
     tokens = [command, *arg_list]
     # Positions in tokens: the command, then each argument.
@@ -538,10 +765,14 @@ def _check_command(server: _ServerFindings, config: dict[str, Any]) -> None:
     # 'sudo sh -c', 'cmd /c sh -c'). A shell's '-c' program and an interpreter's inline program ('python -c',
     # 'node -e') are code, so their text is checked like a shell line.
     launched = unwrap_launch_command(_launch_argv(command, arg_list), expand_shell=False)
-    runs_shell_program, shell_text_program = (
-        _shell_inline(launched) if launched and _command_basename(launched[0]) in _SHELL_INTERPRETERS else (False, None)
-    )
-    programs = [program for program in (shell_text_program, _interpreter_inline_code(launched)) if program]
+    shell_argv = _inner_shell_argv(launched)
+    runs_shell_program, shell_text_program = _shell_inline(shell_argv) if shell_argv else (False, None)
+    runner_shell = _runner_shell_line(launched)
+    programs = [
+        program
+        for program in (shell_text_program, _interpreter_inline_code(launched), runner_shell and runner_shell[1])
+        if program
+    ]
     # MCP clients start the server argv-style, without a shell, so an operator inside one argument ('foo|bar',
     # a PEP 440 range '>=1.2,<2') is plain text. Operators count in 'command' itself (a shell line smuggled into
     # the executable), in the arguments of a command-line wrapper that does parse them ('cmd /c', PowerShell),
@@ -603,9 +834,32 @@ def _check_command(server: _ServerFindings, config: dict[str, Any]) -> None:
             'Pass the secret by reference (e.g. "${MY_TOKEN}"); never inline a raw credential in args.',
         )
 
+    if _powershell_encoded_command(launched):
+        server.report(
+            Severity.CRITICAL,
+            "mcp_command_dangerous_form",
+            f"command runs PowerShell with -EncodedCommand ({_shown(launched[0])!r}); its base64 program cannot be "
+            "read statically",
+            "Invoke the server binary directly instead of passing PowerShell an encoded program.",
+        )
+    for option, url in _plaintext_registry_urls(launched):
+        server.report(
+            Severity.HIGH,
+            "mcp_command_insecure_registry",
+            f"package runner option {_shown(option, 40)!r} fetches packages over plaintext http: {safe_url(url)!r}; "
+            "anyone on the network path can replace the package and its integrity metadata",
+            "Use an https:// registry or package index URL.",
+        )
+    if runner_shell is not None:
+        server.report(
+            Severity.CRITICAL,
+            "mcp_command_dangerous_form",
+            f"command runs a shell command line through {runner_shell[0]!r}; this executes an arbitrary program string",
+            "Run the package's own binary instead of passing the runner a shell command line.",
+        )
     # Shell interpreter invoked with an inline program string ('sh -c "..."', 'bash -lc', 'env sh -c', 'sudo sh -c').
-    if runs_shell_program:
-        shell, wrapper = launched[0], _launch_argv(command, arg_list)[0]
+    if runs_shell_program and shell_argv:
+        shell, wrapper = shell_argv[0], _launch_argv(command, arg_list)[0]
         through = "" if wrapper == shell else f" through {_shown(wrapper)!r}"
         server.report(
             Severity.CRITICAL,
@@ -668,9 +922,10 @@ def _resolve_url_references(server: _ServerFindings, url: str, label: str, clien
     expanded, unresolved = _expand_url_defaults(url)
     shown = redacted_url(url)
     if client == "codex":
+        controls = _env_controls_endpoint(_URL_EXPANSION_RE.sub("${UNSET}", url))
         effect = (
             "reads it as a relative URL and never connects to the server"
-            if _env_controls_endpoint(_URL_EXPANSION_RE.sub("${UNSET}", url))
+            if controls
             else "sends the '${...}' text literally, so the variable is never filled in"
         )
         server.report(
@@ -680,7 +935,11 @@ def _resolve_url_references(server: _ServerFindings, url: str, label: str, clien
             f"MCP URLs; Codex {effect}",
             "Write the full https:// endpoint in a Codex plugin; '${VAR:-default}' expansion is a Claude Code feature.",
         )
+        if not controls:
+            # The scheme, host, and port are written out: the endpoint checks still apply.
+            return expanded
         _check_url_inline_secrets(server, url, label, text=expanded)
+        _check_literal_scheme(server, url, label, shown)
         return None
     if unresolved and _env_controls_endpoint(expanded):
         variables = ", ".join(dict.fromkeys(unresolved))
@@ -692,8 +951,23 @@ def _resolve_url_references(server: _ServerFindings, url: str, label: str, clien
             'Give the variable a safe default ("${VAR:-https://host/mcp}") or document the value users must set.',
         )
         _check_url_inline_secrets(server, url, label, text=expanded)
+        _check_literal_scheme(server, expanded, label, shown)
         return None
     return expanded
+
+
+def _check_literal_scheme(server: _ServerFindings, url: str, label: str, shown: str) -> None:
+    """The scheme rules for a URL whose host or port comes from a reference, when its scheme is written out."""
+    probe = whatwg_url(_URL_EXPANSION_RE.sub(_ENV_MARKER, url))
+    scheme = url_scheme(probe)
+    if not scheme or _ENV_MARKER in scheme or scheme in ALLOWED_MCP_URL_SCHEMES:
+        return
+    try:
+        host = urlparse(probe).hostname
+    except ValueError:
+        host = None
+    # A host the reference decides is unknown, so only a written-out loopback host is exempt from plaintext.
+    _check_url_scheme(server, scheme, label, shown, host=None if host and _ENV_MARKER in host else host)
 
 
 def _check_oauth_urls(
@@ -747,6 +1021,12 @@ def _check_endpoint_url(
             f"{label} could not be parsed (malformed authority)",
             "Use a valid host[:port] authority, e.g. https://host:443/path.",
         )
+        # The credential rule reads the raw text. A '[' or ']' in the userinfo does not stop WHATWG clients:
+        # they split the authority at its last '@' and connect to the host after it.
+        _check_url_inline_secrets(server, display, label, text=url)
+        with contextlib.suppress(ValueError):
+            host = urlparse(without_userinfo(whatwg_url(url))).hostname
+            _check_endpoint(server, host, allowed_private_hosts, label=label, shown=shown)
         return
     problems = url_ambiguities(url)
     if problems:
@@ -807,7 +1087,13 @@ def _check_endpoint_url(
             f"{label} {shown!r} has no scheme, so MCP clients cannot connect to it",
             "Write the full endpoint with its scheme, e.g. https://host/mcp.",
         )
-    elif scheme in _DANGEROUS_URL_SCHEMES:
+    else:
+        _check_url_scheme(server, scheme, label, shown, host=_safe_hostname(parsed))
+
+
+def _check_url_scheme(server: _ServerFindings, scheme: str, label: str, shown: str, *, host: str | None) -> None:
+    """Report a dangerous, plaintext, or not-allowed (non-empty, not https/wss) scheme of one URL field."""
+    if scheme in _DANGEROUS_URL_SCHEMES:
         server.report(
             Severity.CRITICAL,
             "mcp_url_dangerous_scheme",
@@ -817,7 +1103,7 @@ def _check_endpoint_url(
     elif scheme in _INSECURE_URL_SCHEMES:
         # Same rule as HTTP hooks: plaintext to this machine's loopback interface does not cross a network
         # (a local desktop app's MCP server); the MEDIUM loopback finding above still reports it.
-        endpoint = classify_endpoint_host(_safe_hostname(parsed) or "")
+        endpoint = classify_endpoint_host(host or "")
         if endpoint is None or not endpoint.is_loopback:
             server.report(
                 Severity.HIGH,
@@ -894,8 +1180,11 @@ def _check_secret_values(server: _ServerFindings, section: str, block: dict[Any,
                 "Do not disable TLS verification via environment variables.",
             )
         # A header name such as 'Key' names a credential the way a query key does; an env name 'KEY' needs a
-        # value shaped like key material.
-        if looks_like_inline_secret(key, value, query=section == "headers"):
+        # value shaped like key material. An Authorization header carries one after any scheme ('Token abc').
+        authorization = section == "headers" and str(key).strip().lower() in _AUTHORIZATION_HEADERS
+        if looks_like_inline_secret(key, value, query=section == "headers") or (
+            authorization and _authorization_value_credential(value)
+        ):
             server.report(
                 Severity.CRITICAL,
                 "mcp_inline_secret",
@@ -917,10 +1206,11 @@ def _check_transport(server: _ServerFindings, config: dict[str, Any]) -> None:
     if raw is None:
         return
     if not isinstance(raw, str) or raw.strip().lower() not in ALLOWED_MCP_TRANSPORTS:
+        shown = repr(_shown(raw)) if isinstance(raw, str) else f"of type {type(raw).__name__}"
         server.report(
             Severity.HIGH,
             "mcp_transport_invalid",
-            f"transport {raw!r} is not one of {sorted(ALLOWED_MCP_TRANSPORTS)}",
+            f"transport {shown} is not one of {sorted(ALLOWED_MCP_TRANSPORTS)}",
             f"Set transport to one of: {', '.join(sorted(ALLOWED_MCP_TRANSPORTS))}.",
         )
         return
@@ -1256,6 +1546,21 @@ _DOCKER_VALUE_FLAGS = frozenset(
         "--volumes-from",
         "-w",
         "--workdir",
+        # Hidden Docker aliases and options added since.
+        *("--dns-opt", "--net-alias", "--umask"),
+        # podman run value options (podman-run(1)).
+        *("--pod", "--pod-id-file", "--arch", "--os", "--variant", "--creds", "--authfile", "--cert-dir"),
+        *("--decryption-key", "--secret", "--uidmap", "--gidmap", "--subuidname", "--subgidname", "--timeout"),
+        *("--tz", "--unsetenv", "--requires", "--sdnotify", "--seccomp-policy", "--passwd-entry", "--group-entry"),
+        *("--personality", "--preserve-fd", "--cgroup-conf", "--cgroups", "--chrootdirs", "--conmon-pidfile"),
+        *("--env-merge", "--health-on-failure", "--health-startup-cmd", "--health-startup-interval"),
+        *("--health-startup-retries", "--health-startup-success", "--health-startup-timeout", "--hostuser"),
+        *("--hosts-file", "--image-volume", "--init-path", "--rdt-class", "--retry", "--retry-delay"),
+        *("--shm-size-systemd", "--signature-policy", "--systemd"),
+        # nerdctl run image verification options.
+        *("--verify", "--cosign-key", "--cosign-certificate-identity", "--cosign-certificate-identity-regexp"),
+        *("--cosign-certificate-oidc-issuer", "--cosign-certificate-oidc-issuer-regexp", "--ipfs-address"),
+        "--pidfile",
     }
 )
 _CONTAINER_RUNTIMES = frozenset({"docker", "podman", "nerdctl"})
@@ -1412,8 +1717,7 @@ def unwrap_launch_command(tokens: list[str], *, expand_shell: bool = True, stop_
         if base in stops:
             return current
         if base in _COMMAND_LINE_PARSERS:
-            switches = _COMMAND_LINE_PARSERS[base]
-            switch = next((index for index, token in enumerate(rest) if token.lower() in switches), None)
+            switch = next((index for index, token in enumerate(rest) if _command_line_switch(base, token)), None)
             if switch is None:
                 return current
             line = rest[switch + 1 :]
@@ -2490,9 +2794,11 @@ def _parse_legacy_ipv4(text: str) -> ipaddress.IPv4Address | None:
         lowered = part.lower()
         try:
             if lowered.startswith("0x"):
-                if len(lowered) == 2:
+                # The URL Standard reads a bare "0x" part as 0.
+                digits = lowered[2:]
+                if digits.strip("0123456789abcdef"):
                     return None
-                numbers.append(int(lowered, 0))
+                numbers.append(int(digits or "0", 16))
             elif len(lowered) > 1 and lowered.startswith("0"):
                 numbers.append(int(lowered, 8))
             elif lowered.isdigit():
@@ -2884,40 +3190,53 @@ def _join_continuations(text: str) -> str:
     return _LINE_CONTINUATION_RE.sub(lambda match: " " * len(match.group()), text)
 
 
-def _command_before(text: str, start: int, command_re: re.Pattern[str]) -> bool:
-    """Whether ``command_re`` matches before ``start`` in the same shell command of ``text``.
+class _ShellCommands:
+    """The shell commands of one string (backslash-newlines joined), read once for any number of option hits.
 
     ``echo codex done; grep -a never f`` puts the codex word in another command,
     so it does not make ``-a never`` a Codex option. A backslash-continued line and
-    a redirection (``codex exec 2>&1 -a never``) stay in the same command.
+    a redirection (``codex exec 2>&1 -a never``) stay in the same command. The
+    command breaks and the first command word of each command are found once, so
+    a string with many hits is still read in linear time.
     """
-    text = _join_continuations(text)
-    begin = 0
-    for match in _COMMAND_BREAK_RE.finditer(text, 0, start):
-        begin = match.end()
-    return command_re.search(text, begin, start) is not None
 
+    def __init__(self, text: str) -> None:
+        self.text = _join_continuations(text)
+        self._break_ends = [match.end() for match in _COMMAND_BREAK_RE.finditer(self.text)]
+        self._first_word_ends: dict[tuple[int, re.Pattern[str]], int | None] = {}
 
-def _codex_hit(text: str, start: int) -> bool:
-    """Whether a codex command comes before ``start`` in the same shell command of ``text``."""
-    return _command_before(text, start, _CODEX_COMMAND_RE)
+    def command_before(self, start: int, command_re: re.Pattern[str]) -> bool:
+        """Whether ``command_re`` matches before ``start`` in the shell command that holds ``start``."""
+        index = bisect.bisect_right(self._break_ends, start) - 1
+        begin = self._break_ends[index] if index >= 0 else 0
+        key = (begin, command_re)
+        if key not in self._first_word_ends:
+            match = command_re.search(self.text, begin)
+            self._first_word_ends[key] = None if match is None else match.end()
+        end = self._first_word_ends[key]
+        return end is not None and end <= start
+
+    def codex_hit(self, start: int) -> bool:
+        """Whether a codex command comes before ``start`` in the same shell command."""
+        return self.command_before(start, _CODEX_COMMAND_RE)
 
 
 def _flag_hits(path: str, node: Any) -> Iterator[tuple[str, str, _OptionRisk]]:
     """Yield ``(json_path, flag, risk)`` for permission flags in a string or split across argv tokens."""
     if isinstance(node, str):
-        node = _join_continuations(node)
+        commands = _ShellCommands(node)
+        node = commands.text
         for match in _BYPASS_FLAG_RE.finditer(node):
             yield path, match.group(1).lower(), _BYPASS
         for pattern, values in _OPTION_VALUE_RES:
             for match in pattern.finditer(node):
                 flag, risk = values[match.group("value").lower()]
-                if not risk.codex_only or _codex_hit(node, match.start()):
+                if not risk.codex_only or commands.codex_hit(match.start()):
                     yield path, flag, risk
         for flag, pattern in _BYPASS_CONFIG_TEXT_RES:
-            if any(_codex_hit(node, match.start()) for match in pattern.finditer(node)):
+            if any(commands.codex_hit(match.start()) for match in pattern.finditer(node)):
                 yield path, flag, _CODEX_BYPASS
-        if any(_command_before(node, hit.start(), _GEMINI_COMMAND_RE) for hit in _GEMINI_YES_RE.finditer(node)):
+        if any(commands.command_before(hit.start(), _GEMINI_COMMAND_RE) for hit in _GEMINI_YES_RE.finditer(node)):
             yield path, "gemini -y", _BYPASS
     elif isinstance(node, list):
         yield from _argv_flag_hits(path, node, codex=False)
@@ -3257,7 +3576,8 @@ def validate_mcp_server_declaration(
             mcp_finding(
                 Severity.HIGH,
                 "mcp_name_invalid",
-                f"MCP server name {name!r} must start with an alphanumeric and use only letters, digits, '.', '_', '-'",
+                f"MCP server name {_shown_name(name)!r} must start with an alphanumeric and use only letters, "
+                "digits, '.', '_', '-'",
                 file_path,
                 "Rename the MCP server to a valid identifier.",
             )

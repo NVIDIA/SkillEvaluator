@@ -1034,3 +1034,124 @@ def test_bracket_in_userinfo_keeps_credential_and_endpoint_checks(url: str, expe
         findings = validate_mcp_server_declaration("s", config, "p.json")
         assert {"mcp_url_malformed_authority", expected} <= _checks(findings)
         assert all("hunt[er2" not in finding.message for finding in findings)
+
+
+# A random-looking value built at run time, so the source holds no secret-looking literal.
+_HEADER_TOKEN = "9f8e7d6c" * 4
+
+
+@pytest.mark.parametrize(
+    "arg",
+    [
+        "https://robot:Pa55-w0rd-x@mcp.example.com/sse",
+        "https://mcp.example.com/sse?access_token=hunter2hunter2",
+        "https://mcp.example.com/sse?password=correcthorse",
+        "--url=https://robot:Pa55-w0rd-x@mcp.example.com/sse",
+    ],
+)
+def test_url_argument_with_inline_credentials_is_blocked(arg: str) -> None:
+    for config in (
+        {"command": "npx", "args": ["-y", "mcp-remote@0.1.29", arg]},
+        {"command": f"npx -y mcp-remote@0.1.29 {arg}"},
+    ):
+        findings = validate_mcp_server_declaration("s", config, "p.json")
+        assert "mcp_command_inline_secret" in _checks(findings)
+        assert all("Pa55-w0rd-x" not in f.message and "hunter2" not in f.message for f in findings)
+
+
+@pytest.mark.parametrize(
+    "arg",
+    [
+        "https://mcp.example.com/sse",
+        "https://x-access-token:${GITHUB_TOKEN}@mcp.example.com/sse",
+        "https://mcp.example.com/sse?token=${MCP_TOKEN}",
+    ],
+)
+def test_url_argument_without_inline_credentials_passes(arg: str) -> None:
+    config = {"command": "npx", "args": ["-y", "mcp-remote@0.1.29", arg]}
+    assert "mcp_command_inline_secret" not in _checks(validate_mcp_server_declaration("s", config, "p.json"))
+
+
+@pytest.mark.parametrize("header", ["Authorization", "authorization", "Proxy-Authorization"])
+@pytest.mark.parametrize("scheme", ["Bearer", "Token", "token", "Bot"])
+def test_authorization_header_literal_under_any_scheme_is_blocked(header: str, scheme: str) -> None:
+    config = {"url": "https://mcp.example.com/mcp", "headers": {header: f"{scheme} {_HEADER_TOKEN}"}}
+    assert "mcp_inline_secret" in _checks(validate_mcp_server_declaration("s", config, "p.json"))
+
+
+@pytest.mark.parametrize("value", ["Token ${MCP_TOKEN}", "Bot ${BOT_TOKEN}", "${AUTH_HEADER}", "Basic ${U}:${P}"])
+def test_authorization_header_reference_is_allowed(value: str) -> None:
+    config = {"url": "https://mcp.example.com/mcp", "headers": {"Authorization": value}}
+    assert "mcp_inline_secret" not in _checks(validate_mcp_server_declaration("s", config, "p.json"))
+
+
+@pytest.mark.parametrize(
+    "config",
+    [
+        {
+            "command": "npx",
+            "args": ["mcp-remote@0.1.29", "https://h/sse", "--header", f"Authorization: Bearer {_HEADER_TOKEN}"],
+        },
+        {
+            "command": "npx",
+            "args": ["mcp-remote@0.1.29", "https://h/sse", f"--header=Authorization: Token {_HEADER_TOKEN}"],
+        },
+        {"command": f'npx mcp-remote@0.1.29 https://h/sse --header "Authorization: Token {_HEADER_TOKEN}"'},
+    ],
+)
+def test_authorization_header_in_command_words_is_blocked(config: dict) -> None:
+    findings = validate_mcp_server_declaration("s", config, "p.json")
+    assert "mcp_command_inline_secret" in _checks(findings)
+    assert all(_HEADER_TOKEN not in finding.message for finding in findings)
+
+
+@pytest.mark.parametrize(
+    "config",
+    [
+        {
+            "command": "npx",
+            "args": ["mcp-remote@0.1.29", "https://h/sse", "--header", "Authorization: Bearer ${TOKEN}"],
+        },
+        {"command": 'npx mcp-remote@0.1.29 https://h/sse --header "Authorization: Bearer ${TOKEN}" --debug'},
+    ],
+)
+def test_authorization_header_reference_in_command_words_passes(config: dict) -> None:
+    assert "mcp_command_inline_secret" not in _checks(validate_mcp_server_declaration("s", config, "p.json"))
+
+
+@pytest.mark.parametrize(
+    "args",
+    [
+        ["run", "-i", "--rm", "--dns-opt", "ndots:1", "ghcr.io/acme/mcp:latest"],
+        ["run", "-i", "--rm", "--net-alias", "mcp", "ghcr.io/acme/mcp:latest"],
+        ["run", "-i", "--rm", "--umask", "0022", "ghcr.io/acme/mcp:latest"],
+    ],
+)
+def test_docker_value_options_do_not_hide_the_image(args: list[str]) -> None:
+    from skillevaluator.validators.mcp_static import mcp_container_image
+
+    config = {"command": "docker", "args": args}
+    assert mcp_container_image(config) == "ghcr.io/acme/mcp:latest"
+    assert "mcp_command_floating_version" in _checks(validate_mcp_server_declaration("s", config, "p.json"))
+
+
+@pytest.mark.parametrize("option", ["--pod", "--arch", "--os", "--authfile", "--creds"])
+def test_podman_value_options_do_not_hide_the_image(option: str) -> None:
+    from skillevaluator.validators.mcp_static import mcp_container_image
+
+    config = {"command": "podman", "args": ["run", "-i", "--rm", option, "value", "ghcr.io/acme/mcp:latest"]}
+    assert mcp_container_image(config) == "ghcr.io/acme/mcp:latest"
+
+
+@pytest.mark.parametrize("creds", [["--creds", "robot:Pa55word"], ["--creds=robot:Pa55word"]])
+def test_registry_creds_flag_is_an_inline_credential(creds: list[str]) -> None:
+    config = {"command": "podman", "args": ["run", "-i", "--rm", *creds, "ghcr.io/acme/mcp@sha256:" + "a" * 64]}
+    findings = validate_mcp_server_declaration("s", config, "p.json")
+    assert "mcp_command_inline_secret" in _checks(findings)
+    assert all("Pa55word" not in finding.message for finding in findings)
+
+
+@pytest.mark.parametrize("creds", ["${REG_USER}:${REG_PASS}", "robot:${REG_PASS}", "robot"])
+def test_registry_creds_flag_with_a_referenced_password_passes(creds: str) -> None:
+    config = {"command": "podman", "args": ["run", "--creds", creds, "ghcr.io/acme/mcp@sha256:" + "a" * 64]}
+    assert "mcp_command_inline_secret" not in _checks(validate_mcp_server_declaration("s", config, "p.json"))

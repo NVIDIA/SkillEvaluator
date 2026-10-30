@@ -55,6 +55,7 @@ from skillevaluator.validators.url_policy import (
     is_credential_key,
     looks_like_inline_secret,
     looks_like_random_secret,
+    looks_like_secret_material,
     redact_secrets,
     report_text,
     safe_url,
@@ -184,7 +185,19 @@ def _credential_flag_name(token: str) -> str | None:
     if not token.startswith("-"):
         return None
     flag = token.lstrip("-").split("=", 1)[0]
-    return flag if flag and is_credential_key(flag, query=True) else None
+    return flag if flag and (is_credential_key(flag, query=True) or flag.lower() in _CREDS_FLAGS) else None
+
+
+# Registry login flags whose value is 'user:password' (podman, skopeo, buildah '--creds').
+_CREDS_FLAGS = frozenset({"creds"})
+
+
+def _flag_value_is_credential(flag: str, value: str) -> bool:
+    """Whether the value of credential flag ``flag`` is an inline credential (``--creds`` judges its password)."""
+    if flag.lower() in _CREDS_FLAGS:
+        password = value.partition(":")[2]
+        return bool(password) and looks_like_inline_secret("password", password, query=False)
+    return looks_like_inline_secret(flag, value, query=False)
 
 
 def _inline_credentials(words: list[str]) -> list[tuple[int, str | None]]:
@@ -209,11 +222,45 @@ def _inline_credentials(words: list[str]) -> list[tuple[int, str | None]]:
                 value, value_index = words[index + 1], index + 1
             else:
                 value, value_index = "", -1
-            if value and looks_like_inline_secret(flag, value, query=False):
+            if value and _flag_value_is_credential(flag, value):
                 found.append((value_index, flag))
-        elif index != value_index and has_secret_shape(env_defaults_text(word)):
+        elif index != value_index and (
+            has_secret_shape(env_defaults_text(word)) or _authorization_credential(word) or _url_credentials(word)
+        ):
             found.append((index, None))
     return found
+
+
+# A URL inside a command word ('https://user:pw@host/sse', '--url=https://host/?token=...').
+_URL_IN_TEXT_RE = re.compile(r"\b[A-Za-z][A-Za-z0-9+.\-]{0,31}://[^\s'\"`<>]{1,2048}")
+# An HTTP header written into a command word ('Authorization: Token abc', '--header=Proxy-Authorization: ...').
+# The value is the scheme and the credential after it, up to a quote or the next word.
+_AUTHORIZATION_TEXT_RE = re.compile(
+    r"(?i)(?:^|[\s=\"'])(?:proxy-)?authorization\s*:\s*(?P<value>[^\s\"']+(?:[ \t]+[^\s\"']+)?)"
+)
+_AUTHORIZATION_HEADERS = frozenset({"authorization", "proxy-authorization"})
+
+
+def _url_credentials(word: str) -> bool:
+    """Whether a command word holds a URL with credentials in its userinfo, query, or fragment (as hook commands)."""
+    return any(url_credentials(match.group(0), userinfo_rule="secret") for match in _URL_IN_TEXT_RE.finditer(word))
+
+
+def _authorization_value_credential(value: str) -> bool:
+    """Whether an ``Authorization`` value carries a literal credential after its scheme (``Token abc``, ``Bot x``).
+
+    Only the text the plugin ships counts: ``Token ${T}`` and a scheme alone do not.
+    """
+    words = env_defaults_text(value).split(None, 1)
+    if len(words) == 2:
+        return any(char.isalnum() for char in words[1])
+    return bool(words) and (has_secret_shape(words[0]) or looks_like_secret_material(words[0]))
+
+
+def _authorization_credential(word: str) -> bool:
+    """Whether a command word writes an ``Authorization`` header with a literal credential."""
+    match = _AUTHORIZATION_TEXT_RE.search(word)
+    return match is not None and _authorization_value_credential(match.group("value"))
 
 
 # --------------------------------------------------------------------------- #
@@ -545,6 +592,9 @@ def _check_command(server: _ServerFindings, config: dict[str, Any]) -> None:
     # always allowed. The tokens that hold one are never shown in any finding.
     arg_list = [str(a) for a in args] if isinstance(args, list) else []
     command_credentials = _inline_credentials(_split_command_line([command]))
+    if not command_credentials and _authorization_credential(command):
+        # 'mcp-remote https://host/sse --header "Authorization: Token abc"' written as one string.
+        command_credentials = [(0, None)]
     arg_credentials = _inline_credentials(arg_list)
     tokens = [command, *arg_list]
     # Positions in tokens: the command, then each argument.
@@ -942,8 +992,11 @@ def _check_secret_values(server: _ServerFindings, section: str, block: dict[Any,
                 "Do not disable TLS verification via environment variables.",
             )
         # A header name such as 'Key' names a credential the way a query key does; an env name 'KEY' needs a
-        # value shaped like key material.
-        if looks_like_inline_secret(key, value, query=section == "headers"):
+        # value shaped like key material. An Authorization header carries one after any scheme ('Token abc').
+        authorization = section == "headers" and str(key).strip().lower() in _AUTHORIZATION_HEADERS
+        if looks_like_inline_secret(key, value, query=section == "headers") or (
+            authorization and _authorization_value_credential(value)
+        ):
             server.report(
                 Severity.CRITICAL,
                 "mcp_inline_secret",
@@ -1304,6 +1357,21 @@ _DOCKER_VALUE_FLAGS = frozenset(
         "--volumes-from",
         "-w",
         "--workdir",
+        # Hidden Docker aliases and options added since.
+        *("--dns-opt", "--net-alias", "--umask"),
+        # podman run value options (podman-run(1)).
+        *("--pod", "--pod-id-file", "--arch", "--os", "--variant", "--creds", "--authfile", "--cert-dir"),
+        *("--decryption-key", "--secret", "--uidmap", "--gidmap", "--subuidname", "--subgidname", "--timeout"),
+        *("--tz", "--unsetenv", "--requires", "--sdnotify", "--seccomp-policy", "--passwd-entry", "--group-entry"),
+        *("--personality", "--preserve-fd", "--cgroup-conf", "--cgroups", "--chrootdirs", "--conmon-pidfile"),
+        *("--env-merge", "--health-on-failure", "--health-startup-cmd", "--health-startup-interval"),
+        *("--health-startup-retries", "--health-startup-success", "--health-startup-timeout", "--hostuser"),
+        *("--hosts-file", "--image-volume", "--init-path", "--rdt-class", "--retry", "--retry-delay"),
+        *("--shm-size-systemd", "--signature-policy", "--systemd"),
+        # nerdctl run image verification options.
+        *("--verify", "--cosign-key", "--cosign-certificate-identity", "--cosign-certificate-identity-regexp"),
+        *("--cosign-certificate-oidc-issuer", "--cosign-certificate-oidc-issuer-regexp", "--ipfs-address"),
+        "--pidfile",
     }
 )
 _CONTAINER_RUNTIMES = frozenset({"docker", "podman", "nerdctl"})

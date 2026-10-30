@@ -389,7 +389,7 @@ skillevaluator validate ./my-skill \
   --skillspector-baseline ./my-skill/config/skillspector-baseline.yaml
 ```
 
-Prefer narrow rules. Every field a rule sets must match the finding: `id` and `path` are globs, `message` is a case-insensitive glob matched against the finding text, and `reason` is required.
+Prefer narrow rules. Every field a rule sets must match the finding. `id` (the rule ID), `path` (the file), and `message` (the finding text) are all case-insensitive globs, and `reason` is required.
 
 ```yaml title="config/skillspector-baseline.yaml"
 version: 2
@@ -400,7 +400,7 @@ rules:
     reason: "Reviewed: the diagnostics container needs host device access."
 ```
 
-The bracket class `[d]` matches the letter `d`, so the rule still matches `--privileged`, but the baseline file does not contain the literal text that triggers the finding. SkillEvaluator rejects a rule whose `id`, `path`, and `message` contain no literal text, such as `id: "*"`, because it would suppress every finding.
+The bracket class `[d]` matches the letter `d`, so the rule still matches `--privileged`, but the baseline file does not contain the literal text that triggers the finding. SkillEvaluator rejects a rule whose `id`, `path`, and `message` contain no literal text, such as `id: "*"`, because it would suppress every finding. Before the scan it also rejects a version 2 rule or fingerprint without a `reason`, and `rules` or `fingerprints` that are not lists. SkillSpector checks the rest of the schema. If it rejects the baseline, it exits with code 2, the security check is `INCOMPLETE`, and the error suggests checking the file with `skillspector scan <skill> --baseline <file>`.
 
 To waive individual findings exactly, generate fingerprints with SkillSpector. The command records every current finding, so review each entry before you commit the file:
 
@@ -412,7 +412,17 @@ skillspector baseline ./my-skill --no-llm \
 
 Fingerprints bind to the scanned file content and to the SkillSpector version that generated them. After a source edit, the affected findings are reported again. After a scanner upgrade, SkillSpector ignores every fingerprint, and SkillEvaluator reports `fingerprint_version_mismatch` with both versions: as an error when blocking findings remain, otherwise as a warning. Rules keep working across scanner versions.
 
-A baseline stored inside the skill is excluded from the scan, including when SkillEvaluator scans a staged copy without `evals/` outputs. For a folder of skills, the same baseline applies to each skill, and rule paths are relative to each skill. For a single-skill target, JSON reports record the outcome under `results[].skillspector_baseline`: `status` (`applied`, `no_matches`, `fingerprint_version_mismatch`, or `not_applied`), the baseline and runtime scanner versions, rule and fingerprint counts, and the suppressed, active, and active blocking finding counts. See the [SkillSpector suppression reference](https://github.com/NVIDIA/SkillSpector/blob/main/docs/SUPPRESSION.md) for the full baseline schema.
+A baseline stored inside the skill is excluded from the scan, including when SkillEvaluator scans a staged copy without `evals/` outputs. For a folder of skills, the same baseline applies to each skill, and rule paths are relative to each skill.
+
+For a single-skill target, when SkillSpector is installed, JSON reports record the outcome under `results[].skillspector_baseline`:
+
+- `status`: `applied`, `no_matches`, `fingerprint_version_mismatch`, or `not_applied`.
+- `file` and `digest`: the baseline's file name and a `sha256:` digest of its bytes. The local path is not recorded.
+- The baseline and runtime scanner versions, and the rule and fingerprint counts.
+- The suppressed, active, and active blocking finding counts, taken from SkillSpector's report before any `--llm-verify` downgrade or policy severity override.
+- `message`: the outcome or the reason the baseline was rejected.
+
+The field is absent for folder targets. It keeps the fingerprint mismatch message even when a later `--llm-verify` downgrade or policy severity override rebuilds the error and warning lists. See the [SkillSpector suppression reference](https://github.com/NVIDIA/SkillSpector/blob/main/docs/SUPPRESSION.md) for the full baseline schema.
 
 ## Exit behavior and scoring
 

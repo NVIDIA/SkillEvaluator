@@ -84,11 +84,13 @@ All notable changes to SkillEvaluator are documented in this file.
   Baselines apply only when passed explicitly; one shipped inside the skill is
   never used, and suppressed findings without a requested baseline still fail
   closed. A rule with no literal `id`, `path`, or `message` text (such as
-  `id: "*"`) is rejected before the scan. A baseline kept inside the skill is
+  `id: "*"`), or a version 2 rule or fingerprint without a `reason`, is
+  rejected before the scan. A baseline kept inside the skill is
   excluded from the scan, including the staged copy used when the skill has
   `evals/` outputs. JSON reports add `results[].skillspector_baseline` with the
   outcome (`applied`, `no_matches`, `fingerprint_version_mismatch`, or
-  `not_applied`), scanner versions, and finding counts; fingerprints ignored
+  `not_applied`), the baseline file name and `sha256:` digest (never its
+  local path), scanner versions, and finding counts; fingerprints ignored
   after a SkillSpector upgrade are reported instead of silently suppressing
   nothing.
 

@@ -12,6 +12,7 @@ Regression source: a real skill dir with 798MB / 53k artifact files took
 ~25 minutes to validate and reported 270 artifact-only secret findings.
 """
 
+import hashlib
 import json
 import os
 import re
@@ -301,8 +302,12 @@ class TestSkillspectorFilteredCopy:
         expected = seen["scanned"] / relative if passes_staged_copy else baseline.resolve()
         assert seen["baseline"] == expected
         assert seen["baseline_is_file"] is True
-        # Reports name the file the operator supplied, not the temporary copy.
-        assert result.metadata["skillspector_baseline"]["path"] == str(baseline.resolve())
+        # Reports identify the file the operator supplied without exposing a local path.
+        state = result.metadata["skillspector_baseline"]
+        assert state["file"] == "skillspector-baseline.yaml"
+        assert state["digest"] == f"sha256:{hashlib.sha256(baseline.read_bytes()).hexdigest()}"
+        assert "path" not in state
+        assert str(skill_with_artifacts) not in json.dumps(state)
 
     @patch.object(Tools.skillspector, "_path", "/usr/bin/skillspector")
     @patch.object(Tools.skillspector, "run")

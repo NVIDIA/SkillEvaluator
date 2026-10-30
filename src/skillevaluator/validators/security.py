@@ -14,6 +14,7 @@ from __future__ import annotations
 
 import contextlib
 import getpass
+import hashlib
 import io
 import json
 import math
@@ -61,6 +62,9 @@ logger = get_logger(__name__)
 
 _AUTHOR_IDENTITY_RE = re.compile(r"^\S[^<>\n]* <(?P<email>[^<>@\s]+@[^<>\s]+)>$")
 _SKILLSPECTOR_POLICY_EXIT_CODES = frozenset({0, 1})
+# SkillSpector maps an unreadable or invalid --baseline file to exit code 2.
+_SKILLSPECTOR_INPUT_ERROR_EXIT_CODE = 2
+_SKILLSPECTOR_BASELINE_SCHEMA_VERSION = 2
 _SKILLSPECTOR_STATUSLESS_COMPLETENESS_VERSIONS = {(2, 9, 5), (2, 9, 6)}
 _SKILLSPECTOR_FINDING_IDENTITY_VERSION = (2, 11, 1)
 _SKILLSPECTOR_COMPLETENESS_SCHEMA_VERSION = (2, 10, 0)
@@ -533,16 +537,27 @@ def _baseline_glob_has_literal_scope(value: object) -> bool:
     return False
 
 
+def _is_non_empty_text(value: object) -> bool:
+    """Return whether a parsed YAML value is a string with visible text."""
+    return isinstance(value, str) and bool(value.strip())
+
+
 def _inspect_skillspector_baseline(path: Path) -> tuple[dict, str | None]:
     """Return the reportable facts of an operator-selected baseline and any blocking error.
 
-    SkillSpector validates the schema itself. SkillEvaluator only rejects a
-    file it cannot read and rules whose globs carry no literal text, because
-    SkillSpector accepts a rule such as ``id: "*"`` that silently suppresses
-    every finding.
+    SkillSpector validates the full schema itself. SkillEvaluator rejects a
+    file it cannot read, the cheap schema errors SkillSpector would otherwise
+    report only as an opaque exit code, and rules whose globs carry no literal
+    text, because SkillSpector accepts a rule such as ``id: "*"`` that silently
+    suppresses every finding.
+
+    Only the file name and a content digest are recorded, so reports and
+    errors do not leak local paths.
     """
+    name = path.name
     state: dict = {
-        "path": str(path),
+        "file": name,
+        "digest": None,
         "loaded": False,
         "status": "not_applied",
         "schema_version": None,
@@ -556,30 +571,36 @@ def _inspect_skillspector_baseline(path: Path) -> tuple[dict, str | None]:
         "message": None,
     }
     if not path.is_file():
-        return state, f"SkillSpector baseline does not exist or is not a file: {path}"
+        return state, f"SkillSpector baseline {name} does not exist or is not a file"
     try:
-        raw = yaml.safe_load(path.read_text(encoding="utf-8"))
+        content = path.read_bytes()
+        state["digest"] = f"sha256:{hashlib.sha256(content).hexdigest()}"
+        raw = yaml.safe_load(content.decode("utf-8"))
     except (OSError, UnicodeError, RecursionError, yaml.YAMLError) as exc:
-        return state, f"SkillSpector baseline {path} could not be parsed ({type(exc).__name__})"
+        return state, f"SkillSpector baseline {name} could not be parsed ({type(exc).__name__})"
     if not isinstance(raw, dict):
-        return state, f"SkillSpector baseline {path} must be a YAML or JSON mapping"
+        return state, f"SkillSpector baseline {name} must be a YAML or JSON mapping"
 
+    version = raw.get("version")
     rules = raw.get("rules")
     fingerprints = raw.get("fingerprints")
     scanner_version = raw.get("scanner_version")
     state.update(
         {
-            "schema_version": raw.get("version"),
-            "baseline_scanner_version": (
-                scanner_version.strip() if isinstance(scanner_version, str) and scanner_version.strip() else None
-            ),
+            "schema_version": version if isinstance(version, int | str) and not isinstance(version, bool) else None,
+            "baseline_scanner_version": scanner_version.strip() if _is_non_empty_text(scanner_version) else None,
             "rule_count": len(rules) if isinstance(rules, list) else 0,
             "fingerprint_count": len(fingerprints) if isinstance(fingerprints, list) else 0,
         }
     )
+    for field, value in (("rules", rules), ("fingerprints", fingerprints)):
+        if value is not None and not isinstance(value, list):
+            return state, f"SkillSpector baseline {name} field '{field}' must be a list"
+    rule_list = rules or []
+    fingerprint_list = fingerprints or []
     unbounded = [
         index
-        for index, rule in enumerate(rules if isinstance(rules, list) else [])
+        for index, rule in enumerate(rule_list)
         if not isinstance(rule, dict)
         # Field aliases match SkillSpector's rule loader.
         or not any(
@@ -590,9 +611,24 @@ def _inspect_skillspector_baseline(path: Path) -> tuple[dict, str | None]:
     if unbounded:
         noun = "rule" if len(unbounded) == 1 else "rules"
         return state, (
-            f"SkillSpector baseline {noun} {', '.join(map(str, unbounded))} in {path} must set an id, path, "
+            f"SkillSpector baseline {noun} {', '.join(map(str, unbounded))} in {name} must set an id, path, "
             "or message glob containing literal text; a wildcard-only rule would suppress every finding"
         )
+    if version == _SKILLSPECTOR_BASELINE_SCHEMA_VERSION:
+        # SkillSpector rejects a version 2 entry without a reason.
+        unexplained = [
+            f"rule {index}" for index, rule in enumerate(rule_list) if not _is_non_empty_text(rule.get("reason"))
+        ]
+        unexplained += [
+            f"fingerprint {index}"
+            for index, entry in enumerate(fingerprint_list)
+            if not isinstance(entry, dict) or not _is_non_empty_text(entry.get("reason"))
+        ]
+        if unexplained:
+            return state, (
+                f"SkillSpector baseline {name} has no reason for {', '.join(unexplained)}; "
+                "a version 2 baseline needs a non-empty reason on every rule and fingerprint"
+            )
     return state, None
 
 
@@ -908,6 +944,7 @@ class SecurityValidator(ValidatorBase):
         if self.skillspector_baseline is not None:
             baseline_state, baseline_error = _inspect_skillspector_baseline(self.skillspector_baseline)
             if baseline_error is not None:
+                baseline_state["message"] = baseline_error
                 result.metadata["skillspector_baseline"] = baseline_state
                 result.add_error(f"{baseline_error}; security scan did not run")
                 result.mark_scan_incomplete("skillspector-llm" if self.use_llm else "skillspector")
@@ -986,6 +1023,16 @@ class SecurityValidator(ValidatorBase):
                 f"{stage_name} failed with unexpected exit code {tool_result.exit_code}: "
                 "scanner diagnostics were redacted"
             )
+            if (
+                baseline is not None
+                and tool_result.error_message is None
+                and tool_result.exit_code == _SKILLSPECTOR_INPUT_ERROR_EXIT_CODE
+            ):
+                detail += (
+                    f". SkillSpector exits {_SKILLSPECTOR_INPUT_ERROR_EXIT_CODE} when it rejects its input, "
+                    "including an invalid --baseline file; check the baseline with "
+                    "`skillspector scan <skill> --baseline <file>`"
+                )
             result.add_error(detail)
             result.mark_scan_incomplete(stage_name)
             return result
@@ -2465,6 +2512,10 @@ class SecurityValidator(ValidatorBase):
         runtime_version = result.metadata.get("skillspector_version")
         if not isinstance(runtime_version, str):
             # No report was processed; the scan is already incomplete.
+            baseline["message"] = (
+                "SkillSpector did not return a usable report, so the baseline outcome is unknown; "
+                "see the security check errors."
+            )
             return
         suppressed = result.metadata.get("skillspector_suppressed_count", 0)
         blocking = sum(

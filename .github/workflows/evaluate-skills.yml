@@ -14,6 +14,10 @@ on:
         description: Newline-separated skill directories or roots containing skills
         type: string
         default: skills
+      min-score:
+        description: Minimum Tier 1 quality score from 0 to 100
+        type: number
+        default: 70
       llm:
         description: Enable additional LLM security, verification, and rubric checks
         type: boolean
@@ -41,8 +45,8 @@ on:
     secrets:
       LLM_API_KEY:
         required: false
-permissions:
-  contents: read
+# Inherit the caller's permissions: basic scans need only contents: read.
+# Hosted reports additionally opt in to id-token: write in the caller.
 jobs:
   tier1:
     name: Tier 1 scan
@@ -51,6 +55,51 @@ jobs:
     env:
       SCAN_MODE: ${{ inputs.scan-mode == 'auto' && (github.event_name == 'pull_request' && 'changed' || 'all') || inputs.scan-mode }}
     steps:
+      - name: Capture the optional hosted-report execution receipt
+        id: provenance
+        continue-on-error: true
+        run: |
+          python3 -I - <<'PY'
+          import json, os, re, tempfile, urllib.parse, urllib.request
+
+          url = os.environ.get("ACTIONS_ID_TOKEN_REQUEST_URL")
+          credential = os.environ.get("ACTIONS_ID_TOKEN_REQUEST_TOKEN")
+          if not url or not credential:
+              print("Hosted-report receipt is disabled; scan artifacts remain available.")
+              raise SystemExit(0)
+
+          class NoRedirect(urllib.request.HTTPRedirectHandler):
+              def redirect_request(self, *args, **kwargs):
+                  return None
+
+          try:
+              parsed = urllib.parse.urlsplit(url)
+              if (parsed.scheme != "https" or not parsed.hostname
+                  or not parsed.hostname.endswith(".actions.githubusercontent.com")
+                  or parsed.port not in (None, 443) or parsed.username or parsed.password
+                  or parsed.fragment):
+                  raise ValueError("Unexpected GitHub identity endpoint")
+              audience = "urn:skillevaluator:report-provenance:v1"
+              url += ("&" if parsed.query else "?") + "audience=" + urllib.parse.quote(audience, safe="")
+              request = urllib.request.Request(url, headers={"Authorization": "Bearer " + credential})
+              with urllib.request.build_opener(NoRedirect()).open(request, timeout=30) as response:
+                  payload = response.read(65537)
+              if len(payload) > 65536:
+                  raise ValueError("Oversized identity response")
+              token = json.loads(payload)["value"]
+              if (not isinstance(token, str) or len(token) > 32768
+                  or not re.fullmatch(r"[A-Za-z0-9_-]+\.[A-Za-z0-9_-]+\.[A-Za-z0-9_-]+", token)):
+                  raise ValueError("Invalid identity response")
+              directory = tempfile.mkdtemp(prefix="skill-provenance-", dir=os.environ["RUNNER_TEMP"])
+              descriptor = os.open(os.path.join(directory, "execution.jwt"), os.O_WRONLY | os.O_CREAT | os.O_EXCL, 0o600)
+              with os.fdopen(descriptor, "w") as handle:
+                  handle.write(token)
+              with open(os.environ["GITHUB_OUTPUT"], "a") as handle:
+                  handle.write("directory=" + directory + "\n")
+              print("Captured the signed execution receipt for hosted reports.")
+          except (OSError, ValueError, KeyError, TypeError):
+              raise SystemExit("Could not capture the hosted-report receipt. Scan artifacts remain available; hosting will be skipped.") from None
+          PY
       - uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0
         with:
           persist-credentials: false
@@ -63,7 +112,7 @@ jobs:
         env:
           IMAGE: ${{ inputs.image }}
         run: |
-          python3 - <<'PY'
+          python3 -I - <<'PY'
           import os, re
           if not re.fullmatch(r"ghcr\.io/[a-z0-9][a-z0-9._/-]*@sha256:[0-9a-f]{64}", os.environ["IMAGE"]):
               raise SystemExit("image must be a published GHCR image pinned to its sha256 digest")
@@ -80,6 +129,7 @@ jobs:
           DIFF_BASE_SHA: ${{ github.event.pull_request.base.sha }}
           DIFF_HEAD_SHA: ${{ github.event.pull_request.head.sha || github.sha }}
           SKILL_PATHS: ${{ inputs.paths }}
+          MIN_SCORE: ${{ inputs.min-score }}
           LLM_ENABLED: ${{ inputs.llm }}
           LLM_PROVIDER: ${{ inputs.llm-provider }}
           LLM_MODEL: ${{ inputs.llm-model }}
@@ -107,7 +157,7 @@ jobs:
             --cap-drop ALL --security-opt no-new-privileges \
             --mount "type=bind,src=$GITHUB_WORKSPACE,dst=/workspace,readonly" \
             --mount "type=bind,src=$RUNNER_TEMP/skill-reports,dst=/reports" \
-            --env SKILL_PATHS --env LLM_ENABLED --env LLM_PROVIDER --env LLM_MODEL "${llm_secret_args[@]}" \
+            --env SKILL_PATHS --env MIN_SCORE --env LLM_ENABLED --env LLM_PROVIDER --env LLM_MODEL "${llm_secret_args[@]}" \
             --env SCAN_MODE --env DIFF_BASE_SHA --env DIFF_HEAD_SHA --env SCAN_WORKERS \
             --env CALLER_WORKFLOW_SHA \
             --env GITHUB_ACTIONS --env REPORT_IMAGE --env REPORT_URL --env REPORT_RUN_URL --env REPORT_COMMIT \
@@ -127,6 +177,14 @@ jobs:
           name: ${{ inputs.artifact-name }}-attempt-${{ github.run_attempt }}
           path: ${{ runner.temp }}/skill-reports/
           if-no-files-found: warn
+          retention-days: 14
+      - name: Retain the separate hosted-report execution receipt
+        if: ${{ always() && steps.provenance.outputs.directory != '' }}
+        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
+        with:
+          name: ${{ inputs.artifact-name }}-provenance-attempt-${{ github.run_attempt }}
+          path: ${{ steps.provenance.outputs.directory }}/execution.jwt
+          if-no-files-found: error
           retention-days: 14
       # The optional report publisher downloads only this JSON evidence, not the full reports.
       - name: Upload publisher evidence even when validation fails

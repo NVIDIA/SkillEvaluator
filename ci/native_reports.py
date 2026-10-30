@@ -251,7 +251,7 @@ def render_native_reports(reports: Path, summary: dict, context: dict) -> dict[s
         "</div>"
         if no_changes
         else '<p class="muted">Open a skill to see its findings and the evidence for each check.</p></div>',
-        f'<a class="button" href="{h(run_url)}">View workflow run ↗</a>' if run_url else "",
+        f'<a class="button" href="{h(run_url)}">View CI run ↗</a>' if run_url else "",
         '</header><div class="metrics">',
     ]
     for count, label in (

@@ -8,6 +8,8 @@ All notable changes to SkillEvaluator are documented in this file.
 
 ### Added
 
+- Add reusable GitLab CI onboarding and configurable Tier 1 quality thresholds,
+  alongside a shared repository integration guide.
 - Opt-in `SKILL_EVAL_JUDGE_CHARACTER_FACTS=1` adds bounded, escaped Unicode
   character facts to Tier 3 accuracy, goal-accuracy, and behavior-check prompts
   without normalizing the evidence. The operator setting is verifier-only;
@@ -81,6 +83,14 @@ All notable changes to SkillEvaluator are documented in this file.
 
 ### Changed
 
+- Hosted GitHub reports verify a separate GitHub-signed execution receipt.
+  Enable `id-token: write` in the scan workflow and refresh its approved blob
+  when adding hosting; ordinary scans keep their existing read-only permissions.
+- Link GitHub and GitLab source templates directly from the README and onboarding
+  guides. Keep report, log and PR comment examples in the public repository,
+  removing onboarding dependencies on personal demo links.
+- GitHub onboarding shows the PR comment example directly on the page and
+  explains the two templates and required one-time publisher setup.
 - HTML reports use a verdict-led layout with a sidebar and expandable check
   details. The verdict replaces the pass percentage; checks marked Not
   applicable are excluded from passed and executed counts. Publication status
@@ -144,6 +154,9 @@ All notable changes to SkillEvaluator are documented in this file.
 
 ### Fixed
 
+- CI quality thresholds apply to every parallel scan worker. Report overviews
+  and detailed reports surface failed quality gates ahead of advisory findings,
+  with links to the check that needs attention.
 - Tier 2 caps every intra-skill embedding chunk at 3,000 characters, preserves
   meaningful short tails and actual Python docstring source ranges, and avoids
   counting pieces of one original chunk as duplicates of each other. Oversized

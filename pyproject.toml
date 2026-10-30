@@ -77,6 +77,10 @@ security = [
     "bandit>=1.9.4",
     "pip-audit>=2.10.0",
 ]
+# Verify GitHub-signed execution receipts for the optional CI report publisher.
+publisher = [
+    "pyjwt[crypto]>=2.13.0",
+]
 # Optional local UI for comparing saved reports; never imported by base commands.
 dashboard = [
     # server.allowedHosts, which limits the dashboard to loopback host names, needs 1.61.
@@ -87,6 +91,7 @@ all = [
     "skillevaluator[tier2,tier3,security]",
 ]
 dev = [
+    "skillevaluator[publisher]",
     # PyPA build backs the `make build` target.
     "build>=1.2",
     "httpx>=0.27",

@@ -1395,8 +1395,9 @@ def _fix_first(
 
     A check that could not finish comes first, with the scanner's own reason,
     because no pass can be claimed until it runs. Findings then rank by severity, then blocking before
-    advisory, then occurrences. A failed check with no located finding is
-    listed as a high, blocking item so its reason is not lost. Two findings at
+    advisory, then occurrences. A failed check's independent error, or its
+    failure without a located finding, is listed as a high, blocking item so
+    its reason is not lost. Two findings at
     the same file and line (for example one secret reported by two scanners)
     take one slot.
     """
@@ -1407,6 +1408,7 @@ def _fix_first(
             label = plain_check_name(check_name)
             status = check.get("status") or ("pass" if check.get("passed") else "fail")
             findings = check.get("findings") or []
+            independent_errors = [str(error) for error in check.get("additional_errors") or [] if str(error).strip()]
             blocking = not check.get("passed", True)
             item = {"check": label, "skill": skill_name, "location": "", "blocking": True}
             check_key = (skill_name, "check", check_name)
@@ -1416,8 +1418,8 @@ def _fix_first(
                 message = f"{label} did not finish" + (f": {reason}" if reason else f" ({scans})" if scans else "")
                 item |= {"kind": "incomplete", "severity": "incomplete", "message": message}
                 candidates.append(((2, 0, 1, 0), check_key, item | {"anchor": check_anchors[skill_name][check_name]}))
-            elif status == "fail" and not findings:
-                errors = [str(error) for error in check.get("errors") or [] if str(error).strip()]
+            elif status == "fail" and (independent_errors or not findings):
+                errors = independent_errors or [str(error) for error in check.get("errors") or [] if str(error).strip()]
                 message = errors[0] if errors else f"{label} failed without a located finding"
                 item |= {"kind": "check", "severity": "high", "message": message}
                 rank = (1, _SEVERITY_RANK["high"], 1, 1)

@@ -428,11 +428,12 @@ class _Probe:
 
 
 def _lstat(path: Path) -> tuple[Any, str | None]:
+    """``(metadata, None)``, ``(None, None)`` when the path is not there, or ``(None, error)``."""
     try:
         return path.lstat(), None
     except (FileNotFoundError, NotADirectoryError):
         return None, None
-    except OSError as exc:
+    except (OSError, ValueError) as exc:
         return None, str(exc)
 
 

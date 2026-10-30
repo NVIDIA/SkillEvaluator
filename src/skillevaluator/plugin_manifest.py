@@ -615,26 +615,42 @@ def find_claude_marketplace(
     return None
 
 
-def _source_folder_problem(marketplace: ClaudeMarketplace, folder: str) -> str | None:
-    """Why a listed plugin's local source folder is unusable (no-follow), or ``None``."""
+def _source_folder_problem(marketplace: ClaudeMarketplace, folder: str) -> tuple[str, str | None] | None:
+    """Why a listed plugin's local source folder is unusable (no-follow), or ``None``.
+
+    Returns ``(problem, cause)``. ``cause`` is ``None`` when the folder is not
+    there (the dependency is ``missing``), or the
+    :mod:`~skillevaluator.plugin_dependencies` cause that leaves it
+    ``unresolved``: a link on the way, a path that cannot be inspected, or an
+    unsafe source.
+    """
+    from skillevaluator.plugin_dependencies import CAUSE_ERROR, CAUSE_LINK, CAUSE_UNSAFE, _lstat
+
+    if "\x00" in folder:
+        return "its source contains a NUL character", CAUSE_UNSAFE
     current = marketplace.root
+    metadata: os.stat_result | None = None
     for part in Path(folder).parts:
         if part in {".", ""}:
             continue
         if part == "..":
-            return f"its source '{folder}' leaves the marketplace root"
+            return f"its source '{folder}' leaves the marketplace root", None
         current = current / part
-        try:
-            metadata = current.lstat()
-        except OSError:
-            return f"its source folder '{folder}' does not exist"
+        metadata, error = _lstat(current)
+        if error is not None:
+            return f"its source folder '{folder}' cannot be inspected: {error}", CAUSE_ERROR
+        if metadata is None:
+            return f"its source folder '{folder}' does not exist", None
         if stat_is_link_or_reparse(metadata):
-            return f"its source '{folder}' passes through a link"
-    try:
-        if not stat.S_ISDIR(current.lstat().st_mode):
-            return f"its source '{folder}' is not a folder"
-    except OSError:
-        return f"its source folder '{folder}' does not exist"
+            return f"its source '{folder}' passes through a link", CAUSE_LINK
+    if metadata is None:
+        metadata, error = _lstat(current)
+        if error is not None:
+            return f"its source folder '{folder}' cannot be inspected: {error}", CAUSE_ERROR
+        if metadata is None:
+            return f"its source folder '{folder}' does not exist", None
+    if not stat.S_ISDIR(metadata.st_mode):
+        return f"its source '{folder}' is not a folder", None
     return None
 
 
@@ -644,7 +660,8 @@ def classify_claude_dependency(name: str, marketplace_name: str | None, marketpl
     ``referenced`` when the plugin's marketplace lists it, ``missing`` when that
     marketplace does not (or lists it with a local source folder that is not
     there), ``external`` when it names another marketplace, and ``unresolved``
-    when no marketplace that lists this plugin was found.
+    when no marketplace that lists this plugin was found, or the listed source
+    folder can be reached only through a link or cannot be inspected.
     """
     from skillevaluator.plugin_dependencies import DependencyRow
 
@@ -679,5 +696,10 @@ def classify_claude_dependency(name: str, marketplace_name: str | None, marketpl
     if folder:
         problem = _source_folder_problem(marketplace, folder)
         if problem is not None:
-            return DependencyRow(ref, "missing", folder, f"marketplace '{where}) lists it, but {problem}")
+            reason, cause = problem
+            if cause is None:
+                return DependencyRow(ref, "missing", folder, f"marketplace '{where}) lists it, but {reason}")
+            return DependencyRow(
+                ref, "unresolved", None, f"marketplace '{where}) lists it, but {reason}; advisory only", cause=cause
+            )
     return DependencyRow(ref, "referenced", folder or None, f"listed in marketplace '{where})")

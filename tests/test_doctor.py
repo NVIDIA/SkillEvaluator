@@ -7,7 +7,8 @@ from __future__ import annotations
 
 import json
 import subprocess
-from types import SimpleNamespace
+import sys
+from types import ModuleType, SimpleNamespace
 
 import httpx
 import pytest
@@ -198,9 +199,9 @@ def test_tier1_unreported_version_warns_without_failing(scanners) -> None:
     assert readiness.doctor(tier="1", checks="code") == 0
 
 
-@pytest.mark.parametrize("timeout", [0, -1, float("nan"), float("inf")])
-def test_readiness_rejects_a_non_finite_or_non_positive_timeout(timeout) -> None:
-    with pytest.raises(ValueError, match="finite and positive"):
+@pytest.mark.parametrize("timeout", [0, -1, float("nan"), float("inf"), 3600.5, 1e300])
+def test_readiness_rejects_a_timeout_outside_the_supported_range(timeout) -> None:
+    with pytest.raises(ValueError, match="finite, positive and at most 3600 seconds"):
         readiness.readiness_rows(tier="1", timeout=timeout)
 
 
@@ -284,15 +285,69 @@ def test_tier2_without_the_extra_reports_it_missing(monkeypatch) -> None:
     assert "tier2" in rows["Tier 2 extra"][1]
 
 
-def test_tier2_live_probe_sends_one_bounded_request_per_model(provider_api) -> None:
-    rows = _rows(tier="2", verify_models=True, timeout=4)
+def _request_timeouts(requests: list[httpx.Request]) -> list[dict[str, float]]:
+    return [request.extensions["timeout"] for request in requests]
+
+
+# 5.0 equals httpx's default client timeout, which the provider SDKs would
+# replace with their own 600-second default unless the bound is passed through.
+@pytest.mark.parametrize("timeout", [4.0, 5.0])
+def test_tier2_live_probe_sends_one_bounded_request_per_model(provider_api, timeout) -> None:
+    rows = _rows(tier="2", verify_models=True, timeout=timeout)
 
     assert rows["Embedding model"] == ("pass", "returned a 2-dimension vector")
     assert rows["Deduplication model"] == ("pass", "returned a chat completion")
     assert [request.url.path for request in provider_api.requests] == ["/v1/embeddings", "/v1/chat/completions"]
-    assert all(request.extensions["timeout"]["read"] == 4 for request in provider_api.requests)
+    bound = dict.fromkeys(("connect", "read", "write", "pool"), timeout)
+    assert _request_timeouts(provider_api.requests) == [bound, bound]
     chat = json.loads(provider_api.requests[1].content)
     assert chat["model"] == rows["LLM provider"][1].split(" / ", 1)[1]
+
+
+def test_tier2_anthropic_chat_probe_is_bounded_by_the_timeout(provider_api, monkeypatch) -> None:
+    monkeypatch.setenv("SKILL_EVAL_LLM_PROVIDER", "anthropic")
+    monkeypatch.setenv("SKILL_EVAL_EMBEDDING_PROVIDER", "nv_build")
+    monkeypatch.setenv("ANTHROPIC_API_KEY", "sk-ant-secret-canary")
+    provider_api.responses["messages"] = httpx.Response(
+        200,
+        json={
+            "id": "probe",
+            "type": "message",
+            "role": "assistant",
+            "model": "m",
+            "content": [{"type": "text", "text": "OK"}],
+            "stop_reason": "end_turn",
+            "stop_sequence": None,
+            "usage": {"input_tokens": 1, "output_tokens": 1},
+        },
+    )
+
+    rows = _rows(tier="2", verify_models=True, timeout=5.0)
+
+    assert rows["Deduplication model"] == ("pass", "returned a chat completion")
+    assert [request.url.path for request in provider_api.requests] == ["/v1/embeddings", "/v1/messages"]
+    bound = dict.fromkeys(("connect", "read", "write", "pool"), 5.0)
+    assert _request_timeouts(provider_api.requests) == [bound, bound]
+
+
+def test_tier2_bedrock_chat_probe_passes_the_timeout_to_litellm(provider_api, monkeypatch) -> None:
+    monkeypatch.setenv("SKILL_EVAL_LLM_PROVIDER", "bedrock")
+    monkeypatch.setenv("SKILL_EVAL_EMBEDDING_PROVIDER", "nv_build")
+    calls: list[dict] = []
+
+    def completion(**kwargs):
+        calls.append(kwargs)
+        return SimpleNamespace(choices=[SimpleNamespace(message=SimpleNamespace(content="OK"))])
+
+    # Bedrock goes through litellm rather than the shared HTTP client.
+    fake_litellm = ModuleType("litellm")
+    fake_litellm.completion = completion
+    monkeypatch.setitem(sys.modules, "litellm", fake_litellm)
+
+    rows = _rows(tier="2", verify_models=True, timeout=5.0)
+
+    assert rows["Deduplication model"] == ("pass", "returned a chat completion")
+    assert [call["timeout"] for call in calls] == [5.0]
 
 
 @pytest.mark.parametrize("status", [401, 500])

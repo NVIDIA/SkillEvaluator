@@ -110,13 +110,17 @@ class EmbeddingClient:
         *,
         max_retries: int | None = None,
         http_client: Any = None,
+        timeout: float | None = None,
     ) -> None:
         self._model = model
         self._base_url = base_url
         self._api_key = api_key
-        # None keeps the SDK defaults; readiness probes pass a bounded client.
+        # None keeps the SDK defaults. The SDK ignores an http_client's own
+        # timeout when it equals httpx's 5-second default, so readiness probes
+        # pass their bound explicitly.
         self._max_retries = max_retries
         self._http_client = http_client
+        self._timeout = timeout
         self._client: Any = None
         self._provider_config: ProviderConfig | None = None
 
@@ -168,6 +172,8 @@ class EmbeddingClient:
             client_kwargs["max_retries"] = self._max_retries
         if self._http_client is not None:
             client_kwargs["http_client"] = self._http_client
+        if self._timeout is not None:
+            client_kwargs["timeout"] = self._timeout
         self._client = OpenAI(**client_kwargs)
         return self._client
 

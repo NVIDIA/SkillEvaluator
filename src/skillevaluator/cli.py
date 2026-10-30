@@ -24,7 +24,7 @@ from skillevaluator.constants import (
     SIMILARITY_DEFAULT_MAX_SCALAR_COMPARISONS,
     SIMILARITY_MAX_ENTRIES,
 )
-from skillevaluator.doctor import DEFAULT_PROBE_TIMEOUT_SEC
+from skillevaluator.doctor import DEFAULT_PROBE_TIMEOUT_SEC, MAX_PROBE_TIMEOUT_SEC
 from skillevaluator.logging_config import setup_logging
 from skillevaluator.models.result import ValidationResult
 from skillevaluator.quality_config import QualityConfigError, load_quality_config
@@ -3197,27 +3197,31 @@ _DOCTOR_OPTION_TIERS = {
 }
 
 
-def _doctor_tier_options(func):
+def _doctor_tier_options(*, timeout_help: str):
     """Add the tier selection and Tier 1/2 options shared by doctor and health-check."""
-    func = click.option(
-        "--timeout",
-        default=DEFAULT_PROBE_TIMEOUT_SEC,
-        show_default=True,
-        type=_FiniteFloatRange(min=0, min_open=True),
-        help="Seconds allowed for each Tier 1 scanner probe and Tier 2 live request.",
-    )(func)
-    func = click.option(
-        "--checks",
-        default=None,
-        help="Tier 1 checks whose scanners to probe, named as in validate --checks (default: validate's checks).",
-    )(func)
-    return click.option(
-        "--tier",
-        type=click.Choice(_DOCTOR_TIERS),
-        default="3",
-        show_default=True,
-        help="Readiness to check: 1 scanners, 2 embedding and LLM providers, 3 live evaluation, or all.",
-    )(func)
+
+    def decorate(func):
+        func = click.option(
+            "--timeout",
+            default=DEFAULT_PROBE_TIMEOUT_SEC,
+            show_default=True,
+            type=_FiniteFloatRange(min=0, min_open=True, max=MAX_PROBE_TIMEOUT_SEC),
+            help=timeout_help,
+        )(func)
+        func = click.option(
+            "--checks",
+            default=None,
+            help="Tier 1 checks whose scanners to probe, named as in validate --checks (default: validate's checks).",
+        )(func)
+        return click.option(
+            "--tier",
+            type=click.Choice(_DOCTOR_TIERS),
+            default="3",
+            show_default=True,
+            help="Readiness to check: 1 scanners, 2 embedding and LLM providers, 3 live evaluation, or all.",
+        )(func)
+
+    return decorate
 
 
 def _tier3_doctor_options(func):
@@ -3255,10 +3259,18 @@ def _run_doctor(
 ) -> int:
     """Validate every option before any probe, then check each selected tier in order."""
     selected_tiers = ("1", "2", "3") if tier == "all" else (tier,)
+
+    def explicit(name: str) -> bool:
+        return ctx.get_parameter_source(name) not in (None, click.core.ParameterSource.DEFAULT)
+
     for name, tiers in _DOCTOR_OPTION_TIERS.items():
-        source = ctx.get_parameter_source(name)
-        if source not in (None, click.core.ParameterSource.DEFAULT) and tiers.isdisjoint(selected_tiers):
+        if explicit(name) and tiers.isdisjoint(selected_tiers):
             raise click.UsageError(f"--{name.replace('_', '-')} does not apply to --tier {tier}.")
+    if explicit("timeout") and selected_tiers == ("2",) and not verify_models:
+        # Tier 2 stays offline unless --verify-models sends live requests, so
+        # there is nothing for --timeout to bound.
+        condition = " without --verify-models" if "verify_models" in ctx.params else ""
+        raise click.UsageError(f"--timeout does not apply to --tier 2{condition}.")
     if "1" in selected_tiers:
         unknown = sorted(set(enabled_check_lineup(checks)) - RECOGNIZED_CHECKS)
         if unknown:
@@ -3293,7 +3305,9 @@ def _run_doctor(
 
 
 @cli.command()
-@_doctor_tier_options
+@_doctor_tier_options(
+    timeout_help="Seconds allowed for each Tier 1 scanner probe and, with --verify-models, each Tier 2 live request."
+)
 @_tier3_doctor_options
 @click.option(
     "--verify-models",
@@ -3323,7 +3337,7 @@ def tier3_doctor_command(ctx: click.Context, **options: Any) -> None:
 
 
 @cli.command("health-check")
-@_doctor_tier_options
+@_doctor_tier_options(timeout_help="Seconds allowed for each Tier 1 scanner probe.")
 @click.option(
     "-a",
     "--agents",

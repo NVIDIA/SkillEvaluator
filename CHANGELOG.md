@@ -84,14 +84,15 @@ All notable changes to SkillEvaluator are documented in this file.
   Bandit, Semgrep, Gitleaks, and pip-audit for `dependency`. Each row shows the
   resolved path, any executable override, and the version from a bounded,
   shell-free probe. A scanner fails when it is missing, its override is
-  malformed, its probe fails or exceeds `--timeout` (default 60 seconds), or it
-  is older than Bandit 1.9.4 or Gitleaks 8. Tier 2 resolves the embedding and
-  LLM providers offline. `doctor --tier 2 --verify-models` also sends one
-  embedding request and one chat request, without retries, and reports only
-  the HTTP status and a remedy. `--tier all` checks every tier, and a failed
-  tier does not stop the next. Without `--tier`, both commands still check
-  Tier 3 only. An option for an unselected tier is a usage error.
-  `tier3 doctor` remains Tier 3-only.
+  malformed, its probe fails or exceeds `--timeout` (default 60 seconds, at
+  most 3600), or it is older than Bandit 1.9.4 or Gitleaks 8. Tier 2 resolves
+  the embedding and LLM providers offline. `doctor --tier 2 --verify-models`
+  also sends one embedding request and one chat request, each bounded by
+  `--timeout` and sent without retries, and reports only the HTTP status and a
+  remedy. `--tier all` checks every tier, and a failed tier does not stop the
+  next. Without `--tier`, both commands still check Tier 3 only. An option for
+  an unselected tier, or `--timeout` for an offline Tier 2 check, is a usage
+  error. `tier3 doctor` remains Tier 3-only.
 
 ### Changed
 

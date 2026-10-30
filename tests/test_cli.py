@@ -609,7 +609,7 @@ def test_doctor_without_tier_keeps_checking_only_live_evaluation(doctor_calls, c
             ["--tier", "1", "--checks", "security,deps", "--timeout", "4"],
             {"tier": "1", "checks": "security,deps", "verify_models": False, "timeout": 4.0},
         ),
-        (["--tier", "2", "--timeout", "4"], {"tier": "2", "checks": None, "verify_models": False, "timeout": 4.0}),
+        (["--tier", "2"], {"tier": "2", "checks": None, "verify_models": False, "timeout": 60.0}),
     ],
 )
 def test_doctor_routes_lower_tiers_without_live_evaluation(doctor_calls, command, args, expected) -> None:
@@ -619,11 +619,44 @@ def test_doctor_routes_lower_tiers_without_live_evaluation(doctor_calls, command
     assert doctor_calls == [expected]
 
 
-def test_doctor_verify_models_reaches_tier2_live_probes(doctor_calls) -> None:
-    result = CliRunner().invoke(cli, ["doctor", "--tier", "2", "--verify-models"])
+@pytest.mark.parametrize(("args", "timeout"), [([], 60.0), (["--timeout", "5"], 5.0)])
+def test_doctor_verify_models_reaches_tier2_live_probes(doctor_calls, args, timeout) -> None:
+    result = CliRunner().invoke(cli, ["doctor", "--tier", "2", "--verify-models", *args])
 
     assert result.exit_code == 0, result.output
-    assert doctor_calls == [{"tier": "2", "checks": None, "verify_models": True, "timeout": 60.0}]
+    assert doctor_calls == [{"tier": "2", "checks": None, "verify_models": True, "timeout": timeout}]
+
+
+@pytest.mark.parametrize(
+    ("args", "message"),
+    [
+        (["doctor", "--tier", "2", "--timeout", "5"], "--timeout does not apply to --tier 2 without --verify-models."),
+        (["health-check", "--tier", "2", "--timeout", "5"], "--timeout does not apply to --tier 2."),
+    ],
+)
+def test_doctor_timeout_needs_a_live_tier2_request(doctor_calls, args, message) -> None:
+    result = CliRunner().invoke(cli, args)
+
+    assert result.exit_code == 2, result.output
+    assert message in " ".join(result.output.split())
+    assert doctor_calls == []
+
+
+@pytest.mark.parametrize("command", ["doctor", "health-check"])
+def test_doctor_timeout_still_bounds_tier1_under_tier_all(doctor_calls, command) -> None:
+    result = CliRunner().invoke(cli, [command, "--tier", "all", "--timeout", "5", "--env-mode", "local"])
+
+    assert result.exit_code == 0, result.output
+    assert [(call["tier"], call.get("timeout")) for call in doctor_calls] == [("1", 5.0), ("2", 5.0), ("3", None)]
+
+
+def test_health_check_timeout_help_covers_only_tier1() -> None:
+    result = CliRunner().invoke(cli, ["health-check", "--help"])
+
+    assert result.exit_code == 0, result.output
+    normalized = " ".join(result.output.split())
+    assert "Seconds allowed for each Tier 1 scanner probe." in normalized
+    assert "live request" not in normalized
 
 
 @pytest.mark.parametrize("command", ["doctor", "health-check"])
@@ -659,6 +692,11 @@ def test_doctor_all_checks_every_tier_after_a_failure(monkeypatch, command) -> N
         ["doctor", "--tier", "1", "--timeout", "-1"],
         ["doctor", "--tier", "1", "--timeout", "nan"],
         ["doctor", "--tier", "1", "--timeout", "inf"],
+        ["doctor", "--tier", "1", "--checks", "code", "--timeout", "1e300"],
+        ["doctor", "--tier", "1", "--timeout", "3601"],
+        ["doctor", "--tier", "2", "--timeout", "5"],
+        ["doctor", "--tier", "3", "--timeout", "5"],
+        ["health-check", "--tier", "2", "--timeout", "5"],
         ["doctor", "--tier", "all", "--ek", "malformed"],
         ["health-check", "--tier", "2", "--verify-models"],
         ["health-check", "--tier", "1", "-a", "codex"],

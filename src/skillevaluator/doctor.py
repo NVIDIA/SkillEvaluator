@@ -26,6 +26,9 @@ from skillevaluator.utils.rich_markup import escape_markup
 Row = tuple[str, str, str]
 
 DEFAULT_PROBE_TIMEOUT_SEC = 60.0
+# A huge timeout overflows the subprocess timer, and no readiness probe needs
+# more than an hour.
+MAX_PROBE_TIMEOUT_SEC = 3600.0
 
 # Tier 1 checks that run an external scanner, with the ``Tools`` entries they
 # launch, in the order the checks run them.
@@ -125,10 +128,11 @@ def _live_row(name: str, probe: Callable[[], str], diagnose: Callable[[Exception
     return (name, "pass", detail)
 
 
-def _probe_embedding(http_client: Any) -> str:
+def _probe_embedding(http_client: Any, timeout: float) -> str:
     from skillevaluator.embedding.client import EmbeddingClient
 
-    vector = EmbeddingClient(max_retries=0, http_client=http_client).embed_single(_PROBE_TEXT)
+    client = EmbeddingClient(max_retries=0, http_client=http_client, timeout=timeout)
+    vector = client.embed_single(_PROBE_TEXT)
     return f"returned a {len(vector)}-dimension vector"
 
 
@@ -141,7 +145,7 @@ def _embedding_failure(exc: Exception) -> str:
     return f"Embedding request failed ({type(exc).__name__})."
 
 
-def _probe_chat(http_client: Any) -> str:
+def _probe_chat(http_client: Any, timeout: float) -> str:
     from skillevaluator.constants import CONTENT_DEDUP_LLM_REASONING_EFFORT
     from skillevaluator.inference.client import LLMClient
 
@@ -150,6 +154,7 @@ def _probe_chat(http_client: Any) -> str:
         reasoning_effort=CONTENT_DEDUP_LLM_REASONING_EFFORT,
         max_retries=0,
         http_client=http_client,
+        timeout=timeout,
     )
     client.completions("Reply with the single word OK.", _PROBE_TEXT)
     return "returned a chat completion"
@@ -182,12 +187,17 @@ def _tier2_rows(*, verify_models: bool, timeout: float) -> list[Row]:
 
     import httpx
 
-    # One shared client bounds every request; the SDK clients never retry.
+    # Each SDK client gets the timeout explicitly and never retries; the shared
+    # HTTP client only scopes the connections to this check.
     with httpx.Client(timeout=timeout) as http_client:
         if "Embedding provider" in resolved:
-            rows.append(_live_row("Embedding model", lambda: _probe_embedding(http_client), _embedding_failure))
+            rows.append(
+                _live_row("Embedding model", lambda: _probe_embedding(http_client, timeout), _embedding_failure)
+            )
         if "LLM provider" in resolved:
-            rows.append(_live_row("Deduplication model", lambda: _probe_chat(http_client), llm_failure_diagnostic))
+            rows.append(
+                _live_row("Deduplication model", lambda: _probe_chat(http_client, timeout), llm_failure_diagnostic)
+            )
     return rows
 
 
@@ -207,8 +217,8 @@ def readiness_rows(
     """
     if tier not in {"1", "2"}:
         raise ValueError("Expected tier 1 or 2")
-    if not math.isfinite(timeout) or timeout <= 0:
-        raise ValueError("Timeout must be finite and positive")
+    if not math.isfinite(timeout) or not 0 < timeout <= MAX_PROBE_TIMEOUT_SEC:
+        raise ValueError(f"Timeout must be finite, positive and at most {MAX_PROBE_TIMEOUT_SEC:g} seconds")
     rows: list[Row] = [("CLI package", "pass", f"skillevaluator {__version__}")]
     if tier == "1":
         rows.extend(_tier1_rows(checks, timeout))

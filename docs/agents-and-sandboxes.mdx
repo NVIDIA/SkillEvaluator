@@ -615,7 +615,10 @@ cleaner experiment.
 `doctor` and `health-check` run the same readiness checks and exit nonzero when
 any check fails, so either can gate a script or CI job. Warnings from
 `doctor --verify-models` are nonblocking because the catalog result is
-inconclusive rather than a definitive rejection.
+inconclusive rather than a definitive rejection. Both commands check Tier 3 by
+default. `--tier 1` checks the Tier 1 scanners, `--tier 2` the embedding and LLM
+providers, and `--tier all` every tier; see the
+[CLI Reference](cli-reference.mdx#doctor).
 
 ### doctor
 

@@ -63,7 +63,7 @@ for skills. Its Tier 1 LLM checks still run only when requested.
   skillevaluator validate ./my-skill --tiers 1
   ```
 
-  With `skillevaluator[security]`, Semgrep, SkillSpector, and Gitleaks installed, every required scanner produces evidence and the run is deterministic — the same input yields the same exit code, with nothing leaving your machine.
+  With `skillevaluator[security]`, Semgrep, SkillSpector, and Gitleaks installed, every required scanner produces evidence and the run is deterministic — the same input yields the same exit code, with nothing leaving your machine. Run `skillevaluator doctor --tier 1` first to confirm that each scanner resolves and reports a supported version.
 
   ### Narrow to specific checks
 
@@ -397,7 +397,7 @@ Tier 1 checks always gate the exit code inside `validate`. Tier 2 gates when it 
     Install it with `brew install gitleaks` or download a binary from the official [Gitleaks releases](https://github.com/gitleaks/gitleaks/releases).
   </Accordion>
   <Accordion title="A scanner is missing">
-    Install Bandit and pip-audit with `skillevaluator[security]`. Install Semgrep separately with `brew install semgrep` or `uv tool install semgrep`, and SkillSpector with `uv tool install git+https://github.com/NVIDIA/SkillSpector.git@v2.12.0`. Required scanner failures remain `INCOMPLETE` until the scanner is installed and returns valid evidence.
+    Install Bandit and pip-audit with `skillevaluator[security]`. Install Semgrep separately with `brew install semgrep` or `uv tool install semgrep`, and SkillSpector with `uv tool install git+https://github.com/NVIDIA/SkillSpector.git@v2.12.0`. Required scanner failures remain `INCOMPLETE` until the scanner is installed and returns valid evidence. `skillevaluator doctor --tier 1` lists every scanner the selected checks need, with its resolved path and version.
   </Accordion>
   <Accordion title="An LLM-backed stage fails immediately">
     Configure a supported provider or select a keyless Tier 1 run with

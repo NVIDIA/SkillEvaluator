@@ -159,6 +159,11 @@ class ExternalTool:
         """Get full path to tool binary."""
         return self._path
 
+    @property
+    def configuration_error(self) -> str | None:
+        """Return why an explicit executable override was rejected, if it was."""
+        return self._configuration_error
+
     def get_install_hint(self) -> str:
         """Get installation hint for this tool."""
         if self._configuration_error:

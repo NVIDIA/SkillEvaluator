@@ -107,6 +107,23 @@ class TestEmbed:
 
         mock_cls.assert_called_once_with(api_key="test-key", base_url="https://api.openai.com/v1")
 
+    def test_explicit_retry_http_client_and_timeout_reach_the_sdk(self, monkeypatch: pytest.MonkeyPatch) -> None:
+        monkeypatch.setenv("SKILL_EVAL_LLM_PROVIDER", "openai")
+        monkeypatch.setenv("SKILL_EVAL_EMBEDDING_PROVIDER", "openai")
+        monkeypatch.setenv("OPENAI_API_KEY", "test-key")
+        http_client = object()
+
+        with patch("openai.OpenAI", return_value=MagicMock()) as mock_cls:
+            EmbeddingClient(max_retries=0, http_client=http_client, timeout=5.0)._get_client()
+
+        mock_cls.assert_called_once_with(
+            api_key="test-key",
+            base_url="https://api.openai.com/v1",
+            max_retries=0,
+            http_client=http_client,
+            timeout=5.0,
+        )
+
     def test_embed_returns_vectors(self, monkeypatch: pytest.MonkeyPatch) -> None:
         monkeypatch.setenv("NVIDIA_API_KEY", "test-key")
         client = EmbeddingClient()

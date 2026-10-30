@@ -195,6 +195,8 @@ uv tool install git+https://github.com/NVIDIA/SkillSpector.git@v2.12.0
 On other systems, install Gitleaks with `go install github.com/gitleaks/gitleaks/v8@latest` or a binary from the [Gitleaks releases](https://github.com/gitleaks/gitleaks/releases). Semgrep and SkillSpector must be on `PATH`, or configured with `SKILLEVALUATOR_SEMGREP_PATH` and `SKILLEVALUATOR_SKILLSPECTOR_PATH`. RHEL 8 and compatible enterprise Linux systems can supply compatible executables independently of the SkillEvaluator Python environment.
 
 Docker is required only for Tier 3 Docker-mode evaluation. Agent CLIs and their credentials are user-supplied — see [Agents & Sandboxes](agents-and-sandboxes.mdx).
+
+`skillevaluator health-check --tier 1` reports the path and version of each installed scanner and exits non-zero when one is missing, misconfigured, or older than the supported release. Add `--checks security,code-integrity,dependency` to include pip-audit.
 </Note>
 
 ## Verify your install

@@ -20,7 +20,7 @@ import posixpath
 import re
 from collections.abc import Iterable
 from dataclasses import dataclass, field, replace
-from pathlib import PurePosixPath
+from pathlib import Path, PurePosixPath
 from typing import Any, Literal
 
 from skillevaluator.constants import PLUGIN_COMPONENT_MAX_ITEMS, PLUGIN_CONFIG_MAX_BYTES
@@ -514,7 +514,9 @@ def _launch_cwd(cwd: Any, *, relative_cwd: bool) -> PurePosixPath | None:
     return _lexical_plugin_path(text)
 
 
-def _server_launch_files(config: dict[str, Any], *, relative_cwd: bool) -> list[tuple[PurePosixPath, bool]]:
+def _server_launch_files(
+    config: dict[str, Any], *, relative_cwd: bool, root: Path | None = None
+) -> list[tuple[PurePosixPath, bool]]:
     """Plugin-root-relative paths an MCP server launch runs or reads, in order, each with whether it is the ``cwd``.
 
     ``command`` and ``args`` name plugin files through a root variable
@@ -535,7 +537,7 @@ def _server_launch_files(config: dict[str, Any], *, relative_cwd: bool) -> list[
     base = _launch_cwd(config.get("cwd"), relative_cwd=relative_cwd)
     if base is None:
         return paths
-    if _in_unscanned_folder(base):
+    if _in_unscanned_folder(base, root):
         return [*paths, (base, True)]  # everything the server runs from there is in the skipped folder
     for value in values:
         path = _launch_path(value)
@@ -565,8 +567,8 @@ def _unscanned_server_files(
         return []
     seen: set[str] = set()
     findings: list[Finding] = []
-    for rel, is_cwd in _server_launch_files(config, relative_cwd=profile.mcp_dialect == "codex"):
-        folder = _unscanned_folder(rel)
+    for rel, is_cwd in _server_launch_files(config, relative_cwd=profile.mcp_dialect == "codex", root=reader.root):
+        folder = _unscanned_folder(rel, reader.root)
         if folder is None or rel.as_posix() in seen:
             continue
         parts = rel.parts

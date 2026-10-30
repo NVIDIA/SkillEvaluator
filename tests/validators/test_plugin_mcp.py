@@ -76,6 +76,17 @@ def test_backslash_after_root_variable_names_unscanned_server_code(tmp_path: Pat
     assert "node_modules/" in unscanned[0].message
 
 
+@pytest.mark.parametrize("launch", [{"command": "node", "args": ["${CLAUDE_PLUGIN_ROOT}/Node_Modules/evil/index.js"]}])
+def test_case_variant_pruned_folder_names_unscanned_server_code(tmp_path: Path, launch: dict[str, Any]) -> None:
+    """Regression: server code under a differently cased pruned folder was not reported on
+    case-insensitive filesystems, where whole-tree scans prune that spelling too."""
+    (tmp_path / "Node_Modules" / "evil").mkdir(parents=True)
+    collection = _collect(tmp_path, None, {".mcp.json": {"mcpServers": {"srv": launch}}})
+    unscanned = [f for f in collection.server_findings if f.check_name == "plugin_component_path_unscanned"]
+    case_insensitive = (tmp_path / "node_modules").exists()
+    assert len(unscanned) == (1 if case_insensitive else 0)
+
+
 def _password() -> str:
     return "pw-" + "test-value"
 

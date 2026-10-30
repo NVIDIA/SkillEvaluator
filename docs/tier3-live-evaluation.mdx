@@ -704,8 +704,10 @@ in [Judge evidence budgets](environment-variables.mdx#judge-evidence-budgets).
   `https://api.openai.com/v1` endpoint and a judge model that is not a GPT-5 or
   GPT-6 reasoning model, `goal_accuracy` first tries the RAGAS
   `AgentGoalAccuracyWithReference` scorer through its own client, without the
-  schema or retry handling above but within the same time budget. If RAGAS is
-  unavailable or fails, the prompt judge runs instead.
+  schema or retry handling above but within the same time budget. A RAGAS
+  score is recorded with `"method": "ragas"` and the judge-model fields above.
+  If RAGAS is unavailable or fails, the verifier log shows a warning with the
+  redacted error, and the prompt judge runs instead (`"method": "custom"`).
 - **Transient failures.** HTTP 429, 500, 502, 503, and 504 responses,
   connection errors, timeouts, and Bedrock throttling or service-unavailable
   errors are retried transparently with jittered exponential backoff. A

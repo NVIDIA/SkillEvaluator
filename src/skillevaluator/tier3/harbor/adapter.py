@@ -3513,7 +3513,6 @@ def _custom_compose_path(environment_dir: Path) -> Path | None:
 
 _VERIFIER_DEPS = "ragas~=0.4.0 langchain-community<0.4.2 openai>=1.0 anthropic>=0.40 boto3>=1.34 idna>=3.10,<4"
 _VERIFIER_IMPORT_SMOKE = (
-    "from ragas import SingleTurnSample; "
     "from ragas.llms.base import llm_factory; "
     "from ragas.messages import AIMessage, HumanMessage; "
     "from ragas.metrics.collections import AgentGoalAccuracyWithReference"

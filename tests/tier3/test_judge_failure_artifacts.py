@@ -8,6 +8,7 @@ from __future__ import annotations
 import asyncio
 import importlib.util
 import json
+import logging
 import math
 import os
 import shutil
@@ -18,6 +19,7 @@ import time
 import urllib.error
 from pathlib import Path
 from types import ModuleType, SimpleNamespace
+from typing import ClassVar
 
 import pytest
 
@@ -343,45 +345,72 @@ def test_required_judge_restores_alarm_handler_after_teardown_interrupt(
     assert signal.getitimer(signal.ITIMER_REAL)[0] == 0
 
 
-def test_ragas_goal_judge_obeys_the_required_judge_time_budget(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
-    """Ensure Ragas goal scorer returns before its Harbor budget expires."""
-    verifier = _load_verifier(tmp_path)
+_RAGAS_TEST_KEY = "test-key-fake"
+
+
+def _use_ragas_eligible_judge(monkeypatch: pytest.MonkeyPatch) -> None:
+    """Select a canonical OpenAI non-reasoning judge, which routes goal_accuracy to Ragas."""
     monkeypatch.setenv("SKILL_EVAL_LLM_PROVIDER", "openai")
-    monkeypatch.setenv("OPENAI_API_KEY", "test-key-fake")
-    monkeypatch.delenv("OPENAI_BASE_URL", raising=False)
-    monkeypatch.delenv("SKILL_EVAL_LLM_BASE_URL", raising=False)
-    monkeypatch.setattr(verifier, "_ragas_goal_accuracy_enabled", lambda: True)
-    monkeypatch.setattr(verifier, "_JUDGE_WALL_TIME_BUDGET_SEC", 0.01)
+    monkeypatch.setenv("OPENAI_API_KEY", _RAGAS_TEST_KEY)
+    monkeypatch.setenv("LLM_JUDGE_MODEL", "gpt-4.1")
+    for name in (
+        "SKILL_EVAL_JUDGE_MODEL",
+        "SKILL_EVAL_LLM_MODEL",
+        "LLM_JUDGE_FALLBACK_MODELS",
+        "OPENAI_BASE_URL",
+        "SKILL_EVAL_LLM_BASE_URL",
+        # Character facts select the prompt goal judge instead of Ragas.
+        "SKILL_EVAL_JUDGE_CHARACTER_FACTS",
+    ):
+        monkeypatch.delenv(name, raising=False)
+
+
+class _FakeAsyncOpenAI:
+    """Record how the Ragas scorer builds and closes its OpenAI client."""
+
+    instances: ClassVar[list[_FakeAsyncOpenAI]] = []
+    close_error: ClassVar[Exception | None] = None
+
+    def __init__(self, **kwargs):
+        self.kwargs = kwargs
+        self.closed = 0
+        type(self).instances.append(self)
+
+    async def close(self) -> None:
+        self.closed += 1
+        if self.close_error is not None:
+            raise self.close_error
+
+
+def _install_fake_ragas(monkeypatch: pytest.MonkeyPatch, metric: type) -> type[_FakeAsyncOpenAI]:
+    """Install the Ragas 0.4 modules and OpenAI client the verifier imports, with ``metric`` as the scorer."""
 
     class FakeMessage:
-        """Mock message object for Ragas sample input."""
+        """Mock message object for Ragas input."""
 
         def __init__(self, content: str):
             self.content = content
 
-    class FakeMetric:
-        """Mock metric object for Ragas async evaluation."""
+    class RejectedSample:
+        """Collections metrics do not take a sample object."""
 
-        def __init__(self, llm):
-            self.llm = llm
+        def __init__(self, **_kwargs):
+            raise AssertionError("Ragas collections metrics take keywords, not a SingleTurnSample")
 
-        async def ascore(self, _sample):
-            await asyncio.sleep(0.05)
-            return SimpleNamespace(value=1.0)
-
+    client = type("FakeAsyncOpenAI", (_FakeAsyncOpenAI,), {"instances": []})
     fake_ragas = ModuleType("ragas")
-    fake_ragas.SingleTurnSample = lambda **_kwargs: object()
+    fake_ragas.SingleTurnSample = RejectedSample
     fake_ragas_llms = ModuleType("ragas.llms")
     fake_ragas_llms_base = ModuleType("ragas.llms.base")
-    fake_ragas_llms_base.llm_factory = lambda *_args, **_kwargs: object()
+    fake_ragas_llms_base.llm_factory = lambda model, *, client: SimpleNamespace(model=model, client=client)
     fake_ragas_messages = ModuleType("ragas.messages")
     fake_ragas_messages.AIMessage = FakeMessage
     fake_ragas_messages.HumanMessage = FakeMessage
     fake_ragas_metrics = ModuleType("ragas.metrics")
     fake_ragas_collections = ModuleType("ragas.metrics.collections")
-    fake_ragas_collections.AgentGoalAccuracyWithReference = FakeMetric
+    fake_ragas_collections.AgentGoalAccuracyWithReference = metric
     fake_openai = ModuleType("openai")
-    fake_openai.AsyncOpenAI = lambda **_kwargs: object()
+    fake_openai.AsyncOpenAI = client
     for name, module in {
         "ragas": fake_ragas,
         "ragas.llms": fake_ragas_llms,
@@ -392,6 +421,105 @@ def test_ragas_goal_judge_obeys_the_required_judge_time_budget(tmp_path: Path, m
         "openai": fake_openai,
     }.items():
         monkeypatch.setitem(sys.modules, name, module)
+    return client
+
+
+def test_ragas_goal_scorer_uses_the_collections_keyword_contract(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """An eligible OpenAI judge scores goal_accuracy with Ragas instead of silently using the custom judge."""
+    verifier = _load_verifier(tmp_path)
+    _use_ragas_eligible_judge(monkeypatch)
+    calls: list[tuple[str, list[str], str]] = []
+
+    class CollectionsMetric:
+        """Mirror Ragas 0.4 AgentGoalAccuracyWithReference.ascore(user_input, reference)."""
+
+        def __init__(self, llm):
+            self.llm = llm
+
+        async def ascore(self, user_input, reference):
+            calls.append((self.llm.model, [message.content for message in user_input], reference))
+            return SimpleNamespace(value=1.0)
+
+    client = _install_fake_ragas(monkeypatch, CollectionsMetric)
+    monkeypatch.setattr(
+        verifier,
+        "_judge_goal_accuracy_custom",
+        lambda *_args, **_kwargs: pytest.fail("Ragas must score without falling back to the custom judge"),
+    )
+
+    assert verifier._ragas_goal_accuracy_enabled()
+    result = verifier._call_required_judge(
+        "goal_accuracy", verifier.judge_goal_accuracy, "question", "ground truth", "agent response"
+    )
+
+    assert calls == [("gpt-4.1", ["question", "agent response"], "ground truth")]
+    assert result["score"] == 1.0
+    assert result["method"] == "ragas"
+    assert (result["provider"], result["model"]) == ("openai", "gpt-4.1")
+    assert result["judge_model_used"] == "gpt-4.1"
+    assert result["judge_fallback_used"] is False
+    assert [instance.kwargs["base_url"] for instance in client.instances] == ["https://api.openai.com/v1"]
+    assert [instance.closed for instance in client.instances] == [1]
+
+
+@pytest.mark.parametrize("close_fails", [False, True], ids=["close-ok", "close-fails"])
+def test_ragas_goal_scorer_failure_warns_and_closes_its_client(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, caplog: pytest.LogCaptureFixture, close_fails: bool
+) -> None:
+    """A Ragas failure is logged as a redacted warning, and the client is closed before the custom judge runs."""
+    verifier = _load_verifier(tmp_path)
+    _use_ragas_eligible_judge(monkeypatch)
+
+    class FailingMetric:
+        """Fail the way a provider error surfaces through Ragas."""
+
+        def __init__(self, llm):
+            self.llm = llm
+
+        async def ascore(self, **_kwargs):
+            raise RuntimeError(f"Error code: 401 - Incorrect API key provided: {_RAGAS_TEST_KEY}")
+
+    client = _install_fake_ragas(monkeypatch, FailingMetric)
+    if close_fails:
+        client.close_error = OSError("socket close failed")
+    custom_result = {"score": 0.0, "reason": "custom judgment", "method": "custom"}
+
+    def custom_judge(*_args, **_kwargs):
+        assert [instance.closed for instance in client.instances] == [1]
+        return custom_result
+
+    monkeypatch.setattr(verifier, "_judge_goal_accuracy_custom", custom_judge)
+
+    with caplog.at_level(logging.WARNING, logger=verifier.logger.name):
+        result = verifier.judge_goal_accuracy("question", "ground truth", "agent response")
+
+    assert result == custom_result
+    warnings = [record.getMessage() for record in caplog.records if record.levelno == logging.WARNING]
+    fallback_warning = "RAGAS goal scorer failed (RuntimeError: Error code: 401"
+    assert any(message.startswith(fallback_warning) for message in warnings), warnings
+    assert ("RAGAS judge client close failed: OSError" in warnings) is close_fails
+    assert all(_RAGAS_TEST_KEY not in message for message in warnings)
+
+
+def test_ragas_goal_judge_obeys_the_required_judge_time_budget(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    """Ensure Ragas goal scorer returns before its Harbor budget expires."""
+    verifier = _load_verifier(tmp_path)
+    _use_ragas_eligible_judge(monkeypatch)
+    monkeypatch.setattr(verifier, "_JUDGE_WALL_TIME_BUDGET_SEC", 0.01)
+
+    class FakeMetric:
+        """Mock metric object for Ragas async evaluation."""
+
+        def __init__(self, llm):
+            self.llm = llm
+
+        async def ascore(self, **_kwargs):
+            await asyncio.sleep(0.05)
+            return SimpleNamespace(value=1.0)
+
+    _install_fake_ragas(monkeypatch, FakeMetric)
     monkeypatch.setattr(
         verifier.urllib.request,
         "urlopen",

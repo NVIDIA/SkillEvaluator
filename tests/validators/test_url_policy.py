@@ -425,6 +425,58 @@ def test_redact_secrets_takes_linear_time_on_long_runs() -> None:
 # --------------------------------------------------------------------------- #
 # One credential rule for MCP server URLs and HTTP hook URLs                   #
 # --------------------------------------------------------------------------- #
+def _write_plugin(root: Path, mcp_server: dict[str, object], hook: dict[str, object]) -> Path:
+    files = {
+        ".claude-plugin/plugin.json": {"name": "demo", "version": "1.0.0", "description": "URL credential probe"},
+        ".mcp.json": {"mcpServers": {"remote": mcp_server}},
+        "hooks/hooks.json": {"hooks": {"PostToolUse": [{"matcher": "Write", "hooks": [hook]}]}},
+    }
+    for rel, content in files.items():
+        (root / rel).parent.mkdir(parents=True, exist_ok=True)
+        (root / rel).write_text(json.dumps(content), encoding="utf-8")
+    return root
+
+
+@pytest.mark.parametrize(
+    ("url", "flagged"),
+    [
+        ("https://api.example.com/x?key=rawFAKEvalue0123", True),
+        ("https://api.example.com/x?sig=v2", True),
+        ("https://api.example.com/x?key=${API_KEY}", False),
+        ("https://api.example.com/x?token=true", False),
+        ("https://api.example.com/x?password_policy=strict", False),
+        ("https://api.example.com/x?q=sk-" + "a1B2" * 5, True),
+        (f"https://api.example.com/x?{_TOKEN}", True),
+        ("https://api.example.com/x#/cb?access_token=abc123", True),
+        ("https://api.example.com/x?page=2", False),
+        ("https://admin:hunter2@api.example.com/x", True),
+        ("https://user:${PW}@api.example.com/x", True),
+        ("https://admin:hunter2\\@api.example.com/x", True),
+        (f"https://{_HEX_USER}\\@api.example.com/x", True),
+        ("https://169.254.169.254\\@api.example.com/x", False),
+    ],
+)
+def test_mcp_and_hook_urls_get_the_same_credential_verdict(tmp_path: Path, url: str, flagged: bool) -> None:
+    root = _write_plugin(tmp_path / "demo", {"type": "http", "url": url}, {"type": "http", "url": url})
+
+    checks = {finding.check_name for finding in analyze_plugin(root).findings}
+
+    assert ("mcp_url_inline_secret" in checks, "plugin_hook_inline_secret" in checks) == (flagged, flagged)
+
+
+def test_reference_only_userinfo_is_a_credential_for_a_hook_url_only(tmp_path: Path) -> None:
+    """An HTTP hook's client sends any userinfo as Basic auth; an MCP server URL may hold references there."""
+    url = "https://${USER}:${PW}@api.example.com/x"
+    root = _write_plugin(tmp_path / "demo", {"type": "http", "url": url}, {"type": "http", "url": url})
+
+    checks = {finding.check_name for finding in analyze_plugin(root).findings}
+
+    assert "mcp_url_inline_secret" not in checks and "plugin_hook_inline_secret" in checks
+
+
+# --------------------------------------------------------------------------- #
+# Nested env defaults                                                          #
+# --------------------------------------------------------------------------- #
 
 
 @pytest.mark.parametrize(
@@ -480,18 +532,6 @@ def test_an_authorization_env_name_needs_a_value_shaped_like_key_material() -> N
     assert not is_credential_key("AUTHORIZATION")
     assert not looks_like_inline_secret("AUTHORIZATION", "required", query=False)
     assert looks_like_inline_secret("AUTHORIZATION", "Token" + "9944b091" * 5, query=False)
-
-
-def _write_plugin(root: Path, mcp_server: dict[str, object], hook: dict[str, object]) -> Path:
-    files = {
-        ".claude-plugin/plugin.json": {"name": "demo", "version": "1.0.0", "description": "URL credential probe"},
-        ".mcp.json": {"mcpServers": {"remote": mcp_server}},
-        "hooks/hooks.json": {"hooks": {"PostToolUse": [{"matcher": "Write", "hooks": [hook]}]}},
-    }
-    for rel, content in files.items():
-        (root / rel).parent.mkdir(parents=True, exist_ok=True)
-        (root / rel).write_text(json.dumps(content), encoding="utf-8")
-    return root
 
 
 @pytest.mark.parametrize(

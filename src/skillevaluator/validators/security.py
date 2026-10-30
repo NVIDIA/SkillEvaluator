@@ -20,12 +20,14 @@ import math
 import os
 import re
 import shutil
+import struct
 import tempfile
 import tokenize
 import unicodedata
+import zlib
 from collections import Counter
 from collections.abc import Iterable, Mapping
-from pathlib import Path
+from pathlib import Path, PurePosixPath
 
 import yaml
 from yaml.events import ScalarEvent
@@ -48,6 +50,7 @@ from skillevaluator.provider_config import (
 )
 from skillevaluator.spdx import is_spdx_only_html_comment
 from skillevaluator.utils.path_security import matches_filesystem_name
+from skillevaluator.utils.secure_fs import SecurePathError, SecureRoot
 from skillevaluator.utils.tool_runner import Tools, parse_json_output
 from skillevaluator.validators.base import (
     Finding,
@@ -550,6 +553,340 @@ def _skillspector_scoring_match_identity(
     return ("finding", finding) if finding else ("row", index)
 
 
+# SkillSpector's static pattern analyzers read text, so each records a referenced
+# PNG or JPEG image as a nonfatal, whole-file limitation and the analysis becomes
+# ``partial``; see :func:`_skillspector_passive_raster_note`.
+_PASSIVE_RASTER_SUFFIXES = frozenset({".png", ".jpg", ".jpeg"})
+_PASSIVE_RASTER_REASONS = frozenset({"binary_content", "opaque_content"})
+_PASSIVE_RASTER_ANALYZER_RE = re.compile(r"static_patterns_[a-z0-9]+(?:_[a-z0-9]+)*")
+# An image is not a passive asset when it sits in a directory whose files an
+# agent runs or loads as instructions (at any depth), or under a top-level
+# configuration, nested-skill or agent-settings directory.
+_PASSIVE_RASTER_CONTROL_DIRS = frozenset(
+    {"agents", "commands", "hooks", "prompts", "rules", "scripts", "team-rules", "tools", "workflows"}
+)
+_PASSIVE_RASTER_CONTROL_ROOTS = frozenset(
+    {".agents", ".claude", ".codex", ".continue", ".cursor", ".gemini", ".mcp", ".windsurf", "config", "skills"}
+)
+_PASSIVE_RASTER_MAX_FILES = 256
+_PASSIVE_RASTER_MAX_BYTES = 128 * 1024 * 1024
+_PNG_SIGNATURE = b"\x89PNG\r\n\x1a\n"
+# Bit depths the PNG specification allows for each colour type.
+_PNG_BIT_DEPTHS = {0: {1, 2, 4, 8, 16}, 2: {8, 16}, 3: {1, 2, 4, 8}, 4: {8, 16}, 6: {8, 16}}
+# JPEG start-of-frame markers SOF0-SOF3, SOF5-SOF7, SOF9-SOF11 and SOF13-SOF15.
+_JPEG_FRAME_MARKERS = frozenset({0xC0, 0xC1, 0xC2, 0xC3, 0xC5, 0xC6, 0xC7, 0xC9, 0xCA, 0xCB, 0xCD, 0xCE, 0xCF})
+_JPEG_FILL_BYTES = re.compile(rb"\xff+")
+# Where entropy-coded data ends: the first marker, after any fill bytes, other
+# than a stuffed 0xFF00 byte or a restart marker (RST0-RST7). The lookbehind
+# starts each match at the first 0xFF of a run, which keeps the search linear.
+_JPEG_SCAN_END = re.compile(rb"(?<!\xff)\xff+[^\x00\xd0-\xd7\xff]")
+
+
+def _is_png(data: bytes) -> bool:
+    """Whether *data* has the chunk structure of a PNG image.
+
+    The chunk stream must be whole, with every CRC valid: IHDR first, with a
+    nonzero size and a valid bit depth and colour type; a palette exactly when
+    the colour type needs or allows one, before the image data; one contiguous
+    run of IDAT chunks that starts a zlib stream; and IEND last, with nothing
+    after it. Unknown critical chunks and chunk types with the reserved bit set
+    are rejected. This corroborates the file type without decoding the image,
+    so ancillary chunks can still carry arbitrary bytes.
+    """
+    if not data.startswith(_PNG_SIGNATURE):
+        return False
+    view = memoryview(data)
+    offset = len(_PNG_SIGNATURE)
+    depth = colour = palette_entries = 0
+    idat_head = b""
+    idat_state = 0  # 0: no IDAT yet, 1: inside the IDAT run, 2: after it
+    while offset + 12 <= len(data):
+        (length,) = struct.unpack_from(">I", data, offset)
+        kind = data[offset + 4 : offset + 8]
+        end = offset + 12 + length
+        if end > len(data) or not kind.isalpha() or kind[2] & 0x20:
+            return False
+        (crc,) = struct.unpack_from(">I", data, end - 4)
+        if zlib.crc32(view[offset + 4 : end - 4]) != crc or (offset == len(_PNG_SIGNATURE)) != (kind == b"IHDR"):
+            return False
+        if kind == b"IHDR":
+            if length != 13:
+                return False
+            width, height, depth, colour, compression, filtering, interlace = struct.unpack_from(
+                ">IIBBBBB", data, offset + 8
+            )
+            if (
+                not 0 < width < 1 << 31
+                or not 0 < height < 1 << 31
+                or depth not in _PNG_BIT_DEPTHS.get(colour, ())
+                or compression != 0
+                or filtering != 0
+                or interlace not in (0, 1)
+            ):
+                return False
+        elif kind == b"PLTE":
+            if palette_entries or idat_state or not 0 < length <= 768 or length % 3 or colour in (0, 4):
+                return False
+            palette_entries = length // 3
+        elif kind == b"IDAT":
+            if idat_state == 2:
+                return False
+            idat_state = 1
+            idat_head = (idat_head + data[offset + 8 : offset + 8 + min(length, 2)])[:2]
+        elif kind == b"IEND":
+            # The zlib header names deflate with a window of at most 32 KiB,
+            # its check bits are valid, and it sets no preset dictionary.
+            return (
+                length == 0
+                and end == len(data)
+                and len(idat_head) == 2
+                and idat_head[0] & 0x0F == 8
+                and idat_head[0] >> 4 <= 7
+                and int.from_bytes(idat_head, "big") % 31 == 0
+                and not idat_head[1] & 0x20
+                and (colour != 3 or 0 < palette_entries <= 1 << depth)
+            )
+        elif not kind[0] & 0x20:
+            return False  # An unknown critical chunk.
+        elif idat_state:
+            idat_state = 2
+        offset = end
+    return False
+
+
+def _jpeg_tables_are_valid(marker: int, payload: bytes) -> bool:
+    """Whether a DQT (0xDB), DHT (0xC4) or DAC (0xCC) segment payload holds whole, valid tables."""
+    if marker == 0xCC:
+        return bool(payload) and len(payload) % 2 == 0
+    cursor = 0
+    while cursor < len(payload):
+        table_class, table_id = payload[cursor] >> 4, payload[cursor] & 0x0F
+        if marker == 0xDB:
+            cursor += 1 + 64 * (table_class + 1)
+            valid = table_class <= 1
+        else:
+            symbols = sum(payload[cursor + 1 : cursor + 17])
+            cursor += 17 + symbols
+            valid = table_class <= 1 and 0 < symbols <= 256
+        if not valid or table_id > 3 or cursor > len(payload):
+            return False
+    return bool(payload)
+
+
+def _is_jpeg(data: bytes) -> bool:
+    """Whether *data* has the marker structure of a JPEG image.
+
+    The file must run from SOI to EOI, its last bytes, through well-formed
+    marker segments: one frame header (SOF); valid quantization (DQT) and
+    entropy-coding (DHT or DAC) tables before the first scan; and scans (SOS)
+    whose components belong to the frame, each followed by entropy-coded
+    data. Reserved markers and markers out of place are rejected. This
+    corroborates the file type without decoding the image, so APPn and COM
+    segments can still carry arbitrary bytes.
+    """
+    if len(data) < 20 or not data.startswith(b"\xff\xd8") or not data.endswith(b"\xff\xd9"):
+        return False
+    frame: set[int] = set()
+    has_quantization = has_entropy_tables = False
+    entropy_bytes = 0
+    offset = 2
+    while offset < len(data):
+        if data[offset] != 0xFF:
+            return False
+        fill = _JPEG_FILL_BYTES.match(data, offset)
+        offset = fill.end() if fill else offset
+        if offset >= len(data):
+            return False
+        marker = data[offset]
+        offset += 1
+        if marker == 0xD9:
+            return offset == len(data) and entropy_bytes > 0
+        if marker < 0xC0 or 0xD0 <= marker <= 0xD8 or offset + 2 > len(data):
+            return False
+        (length,) = struct.unpack_from(">H", data, offset)
+        payload = data[offset + 2 : offset + length]
+        offset += length
+        if length < 2 or offset > len(data):
+            return False
+        if marker in (0xDB, 0xC4, 0xCC):
+            if not _jpeg_tables_are_valid(marker, payload):
+                return False
+            has_quantization = has_quantization or marker == 0xDB
+            has_entropy_tables = has_entropy_tables or marker != 0xDB
+        elif marker in _JPEG_FRAME_MARKERS:
+            count = payload[5] if len(payload) > 5 else 0
+            if frame or not 1 <= count <= 4 or len(payload) != 6 + 3 * count or payload[0] not in (8, 12):
+                return False
+            if not int.from_bytes(payload[1:3], "big") or not int.from_bytes(payload[3:5], "big"):
+                return False
+            for component in range(6, len(payload), 3):
+                identifier, sampling, table = payload[component : component + 3]
+                if identifier in frame or not 1 <= sampling >> 4 <= 4 or not 1 <= sampling & 0x0F <= 4 or table > 3:
+                    return False
+                frame.add(identifier)
+        elif marker == 0xDA:
+            count = payload[0] if payload else 0
+            if not (frame and has_quantization and has_entropy_tables and 1 <= count <= len(frame)):
+                return False
+            if len(payload) != 4 + 2 * count:
+                return False
+            scanned = payload[1 : 1 + 2 * count : 2]
+            selectors = payload[2 : 2 + 2 * count : 2]
+            start, stop, approximation = payload[-3:]
+            if (
+                len(set(scanned)) != count
+                or not set(scanned) <= frame
+                or any(selector >> 4 > 3 or selector & 0x0F > 3 for selector in selectors)
+                or not start <= stop <= 63
+                or approximation >> 4 > 13
+                or approximation & 0x0F > 13
+            ):
+                return False
+            scan_end = _JPEG_SCAN_END.search(data, offset)
+            if scan_end is None:
+                return False
+            entropy_bytes += scan_end.start() - offset
+            offset = scan_end.start()
+        elif marker == 0xDD and length != 4:
+            return False
+    return False
+
+
+def _skillspector_passive_raster_note(
+    ledger_exceptions: list[dict],
+    analyzer_statuses: list[dict],
+    counts: Mapping[str, int],
+    limitations: list[str],
+    scope_exclusions: object,
+    components: object,
+    scanned_root: Path | None,
+) -> str | None:
+    """A note for a ``partial`` SkillSpector analysis whose only gaps are referenced images, else ``None``.
+
+    SkillSpector's ``static_patterns_*`` analyzers read text. A PNG or JPEG
+    image that a skill references (``![logo](assets/logo.png)``) is recorded as
+    one nonfatal, whole-file ``static`` ledger exception (``opaque_content`` or
+    ``binary_content``) naming those analyzers, and the analysis is reported as
+    ``partial``. Every other analyzer still inspected every file.
+
+    That gap is accepted only when it accounts exactly for the report: each
+    named analyzer is ``degraded`` by one ``partial`` work item per image and
+    completed the rest, every other analyzer completed, the uninspected-file
+    counts and limitations match, no scope exclusion is fatal, and each image
+    is a non-executable component outside the directories that agents run,
+    load as instructions or read as configuration
+    (:data:`_PASSIVE_RASTER_CONTROL_DIRS`, :data:`_PASSIVE_RASTER_CONTROL_ROOTS`).
+    Each file under *scanned_root* must also be a regular, single-link,
+    non-executable file, reached without following a link, whose bytes have the
+    structure of a PNG or JPEG matching its suffix (:func:`_is_png`,
+    :func:`_is_jpeg`), within :data:`_PASSIVE_RASTER_MAX_FILES` files and
+    :data:`_PASSIVE_RASTER_MAX_BYTES` bytes. A binary payload named
+    ``logo.png``, another reason, a fatal or line-scoped exception, or any
+    accounting mismatch keeps the scan INCOMPLETE.
+    """
+    if (
+        scanned_root is None
+        or not ledger_exceptions
+        or not isinstance(components, list)
+        or not isinstance(scope_exclusions, list)
+        or any(not isinstance(row, dict) or row.get("fatal") is not False for row in scope_exclusions)
+    ):
+        return None
+    named: Counter[str] = Counter()
+    rows: set[tuple[str, str]] = set()
+    for exception in ledger_exceptions:
+        path = exception.get("path")
+        reason = exception.get("reason_code")
+        analyzers = exception.get("analyzers")
+        if (
+            exception.get("outcome") != "partial"
+            or exception.get("phase") != "static"
+            or exception.get("fatal") is not False
+            or exception.get("start_line") is not None
+            or exception.get("end_line") is not None
+            or not isinstance(reason, str)
+            or reason not in _PASSIVE_RASTER_REASONS
+            or not isinstance(path, str)
+            or PurePosixPath(path).suffix.lower() not in _PASSIVE_RASTER_SUFFIXES
+            or not isinstance(analyzers, list)
+            or not analyzers
+        ):
+            return None
+        for analyzer in analyzers:
+            if (
+                not isinstance(analyzer, str)
+                or not _PASSIVE_RASTER_ANALYZER_RE.fullmatch(analyzer)
+                or (path, analyzer) in rows
+            ):
+                return None
+            rows.add((path, analyzer))
+            named[analyzer] += 1
+    paths = sorted({path for path, _analyzer in rows})
+    total = counts["total_components"]
+    uninspected = counts["partially_inspected_files"] + counts["entirely_uninspected_files"]
+    if len(paths) > _PASSIVE_RASTER_MAX_FILES or uninspected != len(paths):
+        return None
+
+    universal = _SKILLSPECTOR_COMMON_UNIVERSAL_ANALYZERS | {"artifact_integrity"} | set(named)
+    accounted: set[str] = set()
+    for status in analyzer_statuses:
+        analyzer_id = status.get("analyzer_id")
+        state = status.get("status")
+        if analyzer_id not in universal:
+            if state not in {"completed", "not_applicable", "disabled"}:
+                return None
+            continue
+        gaps = named.get(analyzer_id, 0)
+        if (
+            analyzer_id in accounted
+            or state != ("degraded" if gaps else "completed")
+            or status.get("planned_work") != total
+            or status.get("completed") != total - gaps
+            or status.get("partial") != gaps
+        ):
+            return None
+        accounted.add(analyzer_id)
+    allowed_limitations = {f"Analyzer {analyzer} status: degraded." for analyzer in named}
+    if accounted != universal or any(limitation not in allowed_limitations for limitation in limitations):
+        return None
+
+    components_by_path: dict[str, list[dict]] = {}
+    for component in components:
+        if isinstance(component, dict) and isinstance(component.get("path"), str):
+            components_by_path.setdefault(component["path"], []).append(component)
+    budget = _PASSIVE_RASTER_MAX_BYTES
+    try:
+        with SecureRoot(scanned_root) as root:
+            for path in paths:
+                matches = components_by_path.get(path, [])
+                parts = path.split("/")
+                directories = [part.casefold() for part in parts[:-1]]
+                if (
+                    len(matches) != 1
+                    or matches[0].get("executable") is not False
+                    or "\\" in path
+                    or not _is_filesystem_safe_path_text(path)
+                    or any(part in {"", ".", ".."} or Path(part).anchor for part in parts)
+                    or (directories and directories[0] in _PASSIVE_RASTER_CONTROL_ROOTS)
+                    or not _PASSIVE_RASTER_CONTROL_DIRS.isdisjoint(directories)
+                ):
+                    return None
+                data, metadata = root.read_bytes(Path(*parts), budget)
+                is_image = _is_png(data) if path.lower().endswith(".png") else _is_jpeg(data)
+                if metadata.st_mode & 0o111 or not is_image:
+                    return None
+                budget -= len(data)
+    except (OSError, SecurePathError):
+        return None
+
+    shown = ", ".join(paths[:5]) + (f" and {len(paths) - 5} more" if len(paths) > 5 else "")
+    return (
+        f"SkillSpector's text pattern analyzers could not read {len(paths)} referenced image file(s) "
+        f"({shown}); each is a regular, non-executable file with PNG or JPEG structure outside agent-control "
+        "directories, so the scan is not marked incomplete. The image content itself was not assessed"
+    )
+
+
 class SecurityValidator(ValidatorBase):
     """Scans skills for security vulnerabilities and PII leakage.
 
@@ -805,6 +1142,18 @@ class SecurityValidator(ValidatorBase):
                     original_root=original_root if staged is not None else None,
                     use_llm=True,
                 )
+                # Both stages run the same static analyzers, so a note such as
+                # an accepted image gap can repeat word for word; keep one copy.
+                finding_messages = {finding.to_legacy_string() for finding in enrichment.findings}
+                repeated = {
+                    warning
+                    for warning in enrichment.warnings
+                    if warning in result.warnings and warning not in finding_messages
+                }
+                if repeated:
+                    kept = [warning for warning in enrichment.warnings if warning not in repeated]
+                    enrichment.summary.warnings -= len(enrichment.warnings) - len(kept)
+                    enrichment.warnings = kept
                 result.merge(enrichment)
                 if not enrichment.is_incomplete:
                     self._deduplicate_skillspector_findings(result)
@@ -881,6 +1230,7 @@ class SecurityValidator(ValidatorBase):
             use_llm,
             stage_name,
             result,
+            scanned_root=original_root if original_root is not None else scan_root,
         ):
             result.mark_scan_incomplete(stage_name)
             return result
@@ -917,8 +1267,17 @@ class SecurityValidator(ValidatorBase):
         use_llm: bool,
         stage_name: str,
         result: ValidationResult,
+        *,
+        scanned_root: Path | None = None,
     ) -> bool:
-        """Return whether JSON is a trustworthy SkillSpector findings report."""
+        """Return whether JSON is a trustworthy SkillSpector findings report.
+
+        A ``partial`` analysis makes the scan INCOMPLETE unless its only gaps are
+        referenced PNG or JPEG images that the files under *scanned_root* confirm
+        (:func:`_skillspector_passive_raster_note`); that is a warning instead.
+        *scanned_root* is the directory the report's relative paths start from.
+        """
+        partial_reported = False
         if "error" in data and data["error"] is not None:
             result.add_error("skillspector reported an error; security scan did not complete")
             return False
@@ -1437,11 +1796,24 @@ class SecurityValidator(ValidatorBase):
                             "security scan did not complete"
                         )
                         return False
-                    result.add_error(
-                        "skillspector JSON field 'analysis_completeness' reports incomplete analysis "
-                        f"(status '{completeness_status}'); security scan did not complete"
+                    partial_reported = True
+                    raster_note = _skillspector_passive_raster_note(
+                        ledger_exceptions,
+                        analyzer_statuses,
+                        counts,
+                        limitations,
+                        analysis_completeness.get("scope_exclusions", []),
+                        data.get("components"),
+                        scanned_root,
                     )
-                    result.mark_scan_incomplete(stage_name)
+                    if raster_note is not None:
+                        result.add_warning(raster_note)
+                    else:
+                        result.add_error(
+                            "skillspector JSON field 'analysis_completeness' reports incomplete analysis "
+                            f"(status '{completeness_status}'); security scan did not complete"
+                        )
+                        result.mark_scan_incomplete(stage_name)
 
         status = data.get("status")
         if status is not None and not isinstance(status, str):
@@ -1508,7 +1880,7 @@ class SecurityValidator(ValidatorBase):
             return False
         recommendation = risk.get("recommendation")
         expected_recommendation = _SKILLSPECTOR_RECOMMENDATION_BY_SEVERITY[severity]
-        if result.is_incomplete and severity == "LOW":
+        if (result.is_incomplete or partial_reported) and severity == "LOW":
             expected_recommendation = "CAUTION"
         if not isinstance(recommendation, str) or recommendation != expected_recommendation:
             result.add_error(

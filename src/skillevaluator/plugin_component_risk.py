@@ -2230,11 +2230,19 @@ def _stage_runs_stdin(stage: str, depth: int = 0) -> bool:
 
 
 _STAGE_PROGRAM_RE = re.compile(rf"(?:{_SHELL_VARIABLE}|{_EXECUTORS})", re.IGNORECASE)
+# A stage that starts with a launch wrapper, which may take an option value the interpreter pattern does not read.
+_STAGE_WRAPPER_RE = re.compile(
+    rf"&?(?:\s|\\\r?\n)*+[\"']?(?:[{_PATH_CHARS}]{{0,128}}/)?"
+    r"(?:sudo|doas|env|nice|nohup|setsid|stdbuf|time|timeout|exec|command|busybox)[\"']?(?:\s|\\\r?\n)",
+    re.IGNORECASE,
+)
 
 
 def _wrapped_stage_runs_stdin(stage: str, depth: int) -> bool:
     """Whether a stage whose wrapper takes an option value (``| sudo -u root bash``, ``| nice -n 10 sh -s``,
     ``| env -u HISTFILE bash``) runs its standard input; the wrappers are removed as for MCP launch commands."""
+    if _STAGE_WRAPPER_RE.match(stage) is None:
+        return False
     words = _stage_arguments(stage.lstrip().removeprefix("&")[:2048])
     program = unwrap_launch_command(words, expand_shell=False)
     if not program or program == words:

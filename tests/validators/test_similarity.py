@@ -552,16 +552,19 @@ def _keyed_embedding_client(model: str | None = None) -> EmbeddingClient:
 class TestCatalogSelfEntry:
     @patch("skillevaluator.validators.similarity.EmbeddingClient", side_effect=_keyed_embedding_client)
     def test_rescreening_a_cataloged_skill_skips_only_its_own_entry(self, _mock_client_cls, tmp_path: Path) -> None:
-        skills = tmp_path / "skills"
+        skills = tmp_path / "repo" / "skills"
         for name in ("alpha", "beta"):
             (skills / name).mkdir(parents=True)
             (skills / name / "SKILL.md").write_text(f"---\nname: {name}\ndescription: {name} catalog skill\n---\n")
         catalog = tmp_path / "catalog.json"
         assert SimilarityValidator(content_type="skill", save_catalog_path=catalog).validate(skills).passed
-        shutil.copytree(skills / "alpha", skills / "alpha-copy")
+        # Verbatim copies that would pass Tier 1 (directory named after the skill), outside the catalog tree.
+        copies = [
+            Path(shutil.copytree(skills / "alpha", tmp_path / location / "alpha"))
+            for location in ("candidates", "other-repo/skills")
+        ]
 
         existing = SimilarityValidator(content_type="skill", catalog_path=catalog).validate(skills / "alpha")
-        copy = SimilarityValidator(content_type="skill", catalog_path=catalog).validate(skills / "alpha-copy")
 
         assert existing.passed
         assert existing.findings == []
@@ -569,10 +572,12 @@ class TestCatalogSelfEntry:
         assert compared.metadata["self_matches_excluded"] == 1
         assert compared.metadata["excluded_catalog_paths"] == ["alpha"]
         assert "against 1 other catalog entries; skipped its own entry 'alpha'" in compared.message
-        assert not copy.passed
-        assert [(finding.check_name, finding.metadata["path_b"]) for finding in copy.findings] == [
-            ("EXACT_DUPLICATE", "alpha")
-        ]
-        compared = next(detail for detail in copy.success_details if detail.check_name == "catalog_compared")
-        assert compared.metadata["self_matches_excluded"] == 0
-        assert compared.metadata["excluded_catalog_paths"] == []
+        for copy_dir in copies:
+            copy = SimilarityValidator(content_type="skill", catalog_path=catalog).validate(copy_dir)
+            assert not copy.passed
+            assert [(finding.check_name, finding.metadata["path_b"]) for finding in copy.findings] == [
+                ("EXACT_DUPLICATE", "alpha")
+            ]
+            compared = next(detail for detail in copy.success_details if detail.check_name == "catalog_compared")
+            assert compared.metadata["self_matches_excluded"] == 0
+            assert compared.metadata["excluded_catalog_paths"] == []

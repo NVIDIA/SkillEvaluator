@@ -311,12 +311,16 @@ All notable changes to SkillEvaluator are documented in this file.
   `metadata.tags` as missing, as it already did for other non-mapping values.
 - `similarity-check --catalog` and `tier2 --catalog` no longer report a skill
   that is already in the local catalog as an `EXACT_DUPLICATE` of its own
-  entry, which failed the run. The one catalog entry whose path ends the
-  skill's path and whose content fingerprint matches is skipped and recorded
-  under `self_matches_excluded` and `excluded_catalog_paths`. Copies and
-  same-name skills at other paths are still reported. An edited skill whose
-  name, description, or (with `--full-body`) `SKILL.md` changed is still
-  compared with its old entry; build the catalog from the tree you screen.
+  entry, which failed the run. An entry is skipped as the skill's own only when
+  its content fingerprint matches, its path ends the skill's path, and more
+  than half of up to eight other catalog skills are present unchanged at their
+  recorded paths around it. The skip is recorded under
+  `self_matches_excluded` and `excluded_catalog_paths`. Verbatim copies and
+  same-name skills outside the catalog's tree are still reported; a copy of
+  most of the tree, such as a second checkout, counts as the same tree. An
+  edited skill whose name, description, or (with `--full-body`) `SKILL.md`
+  changed is still compared with its old entry; build the catalog from the tree
+  you screen.
 
 ## 0.6.0 - 2026-10-20
 

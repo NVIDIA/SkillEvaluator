@@ -131,8 +131,9 @@ class SimilarityValidator(ValidatorBase):
                 if target is None:
                     result.add_error("Catalog comparison requires a skill directory with a root SKILL.md")
                     return result
-                # A catalog built from a collection that contains the target
-                # records the target itself; never report it as its own duplicate.
+                # A catalog built from the tree that holds the target records the
+                # target itself; never report it as its own duplicate. Copies
+                # outside that tree keep their catalog matches.
                 self_entry = registry.catalog_self_entry(target)
                 matches = registry.query_entry(
                     target,
@@ -144,7 +145,7 @@ class SimilarityValidator(ValidatorBase):
                 if self_entry is not None:
                     compared_message = (
                         f"Compared '{target.name}' against {registry.size - 1} other catalog entries; "
-                        f"skipped its own entry '{self_entry.path}' (same path and content)"
+                        f"skipped its own entry '{self_entry.path}' (same path and content in the catalog's tree)"
                     )
                 result.add_success(
                     "catalog_compared",

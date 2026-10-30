@@ -10,6 +10,7 @@ import hashlib
 import json
 import math
 import os
+import re
 import shutil
 import socket
 import subprocess
@@ -590,11 +591,16 @@ def test_catalog_query_match_limit_fails_closed(tmp_path: Path, monkeypatch) -> 
         registry.query_entry(target, 0.75)
 
 
+_SKILL_NAMES = ("alpha", "beta", "gamma", "delta", "epsilon")
+
+
 def _keyed_client() -> EmbeddingClient:
-    """Embed alpha and beta skills as orthogonal vectors, whatever else their text says."""
+    """Embed each known skill name as its own unit vector, whatever else its text says."""
 
     def embed_one(text: str) -> list[float]:
-        return [0.0, 1.0] if "beta" in text else [1.0, 0.0]
+        words = set(re.findall(r"[a-z]+", text))
+        key = next((name for name in _SKILL_NAMES[1:] if name in words), _SKILL_NAMES[0])
+        return [1.0 if name == key else 0.0 for name in _SKILL_NAMES]
 
     client = _client()
     client.embed.side_effect = lambda texts: [embed_one(text) for text in texts]
@@ -613,14 +619,47 @@ def _saved_catalog(tmp_path: Path, scan_root: Path, *, full_body: bool = False) 
     return registry
 
 
+def _write_skills(write_skill, root: Path, *names: str) -> Path:
+    for name in names:
+        write_skill(root, name, f"{name.title()} catalog skill")
+    return root
+
+
+def _target(skill_dir: Path) -> ContentEntry:
+    target = extract_from_skill(skill_dir)
+    assert target is not None
+    return target
+
+
+def _copy_alpha_to(relative: str):
+    def build(tmp_path: Path, skills: Path) -> Path:
+        return Path(shutil.copytree(skills / "alpha", tmp_path / relative))
+
+    return build
+
+
+def _new_nested_alpha(tmp_path: Path, skills: Path) -> Path:
+    # A new skill in the catalog tree with the same name and description but its own body.
+    nested = skills / "team" / "alpha"
+    nested.mkdir(parents=True)
+    (nested / "SKILL.md").write_text("---\nname: alpha\ndescription: Alpha catalog skill\n---\n\n# team alpha\n")
+    return nested
+
+
+def _filesystem_is_case_insensitive(directory: Path) -> bool:
+    probe = directory / "case-probe"
+    probe.write_text("")
+    try:
+        return (directory / "CASE-PROBE").exists()
+    finally:
+        probe.unlink()
+
+
 class TestCatalogSelfEntry:
     def test_existing_skill_skips_only_its_own_entry(self, tmp_path: Path, write_skill) -> None:
-        skills = tmp_path / "skills"
-        write_skill(skills, "alpha", "Alpha catalog skill")
-        write_skill(skills, "beta", "Beta catalog skill")
+        skills = _write_skills(write_skill, tmp_path / "repo" / "skills", "alpha", "beta")
         registry = _saved_catalog(tmp_path, skills)
-        target = extract_from_skill(skills / "alpha")
-        assert target is not None
+        target = _target(skills / "alpha")
 
         self_entry = registry.catalog_self_entry(target)
 
@@ -629,27 +668,110 @@ class TestCatalogSelfEntry:
         assert [match.classification for match in registry.query_entry(target, 0.75)] == ["EXACT_DUPLICATE"]
         assert registry.query_entry(target, 0.75, exclude_entry_id=self_entry.entry_id) == []
 
-    def test_identical_copy_at_another_path_is_still_reported(self, tmp_path: Path, write_skill) -> None:
-        skills = tmp_path / "skills"
-        write_skill(skills, "alpha", "Alpha catalog skill")
-        write_skill(skills, "beta", "Beta catalog skill")
-        registry = _saved_catalog(tmp_path, skills)
-        shutil.copytree(skills / "alpha", skills / "alpha-copy")
-        target = extract_from_skill(skills / "alpha-copy")
-        assert target is not None
+    @pytest.mark.parametrize("full_body", [False, True])
+    def test_another_checkout_of_the_catalog_tree_skips_its_own_entry(
+        self, tmp_path: Path, write_skill, full_body: bool
+    ) -> None:
+        build_skills = _write_skills(write_skill, tmp_path / "build" / "skills", "alpha", "beta", "gamma")
+        registry = _saved_catalog(tmp_path, build_skills, full_body=full_body)
+        shutil.copytree(tmp_path / "build", tmp_path / "ci")
+
+        self_entry = registry.catalog_self_entry(_target(tmp_path / "ci" / "skills" / "alpha"))
+
+        assert self_entry is not None
+        assert self_entry.path == "alpha"
+
+    @pytest.mark.parametrize("full_body", [False, True])
+    @pytest.mark.parametrize(
+        "make_target",
+        [
+            _copy_alpha_to("candidates/alpha"),
+            _copy_alpha_to("other-repo/skills/alpha"),
+            _copy_alpha_to("repo/skills/alpha-copy"),
+            _new_nested_alpha,
+        ],
+        ids=["candidates-copy", "other-repo-copy", "renamed-copy", "new-nested-same-name"],
+    )
+    def test_copies_and_same_name_skills_outside_the_catalog_tree_are_still_reported(
+        self, tmp_path: Path, write_skill, full_body: bool, make_target
+    ) -> None:
+        skills = _write_skills(write_skill, tmp_path / "repo" / "skills", "alpha", "beta")
+        registry = _saved_catalog(tmp_path, skills, full_body=full_body)
+        target = _target(make_target(tmp_path, skills))
         assert target.name == "alpha"
 
         assert registry.catalog_self_entry(target) is None
         matches = registry.query_entry(target, 0.75)
         assert [(match.path_b, match.classification) for match in matches] == [("alpha", "EXACT_DUPLICATE")]
 
+    def test_copies_of_a_few_catalog_skills_are_not_a_catalog_tree(self, tmp_path: Path, write_skill) -> None:
+        skills = _write_skills(write_skill, tmp_path / "repo" / "skills", *_SKILL_NAMES)
+        registry = _saved_catalog(tmp_path, skills)
+        for name in ("alpha", "beta"):
+            shutil.copytree(skills / name, tmp_path / "candidates" / name)
+
+        assert registry.catalog_self_entry(_target(tmp_path / "candidates" / "alpha")) is None
+
+    def test_catalog_tree_with_a_minority_of_edited_skills_still_skips(self, tmp_path: Path, write_skill) -> None:
+        skills = _write_skills(write_skill, tmp_path / "repo" / "skills", *_SKILL_NAMES)
+        registry = _saved_catalog(tmp_path, skills)
+        # Three of the four other catalog skills are still present unchanged.
+        manifest = skills / "beta" / "SKILL.md"
+        manifest.write_text(manifest.read_text().replace("catalog skill", "catalog skill, revised"))
+
+        self_entry = registry.catalog_self_entry(_target(skills / "alpha"))
+
+        assert self_entry is not None
+        assert self_entry.path == "alpha"
+
+    def test_catalog_without_another_skill_entry_never_skips(self, tmp_path: Path, write_skill) -> None:
+        skills = _write_skills(write_skill, tmp_path / "repo" / "skills", "alpha")
+        registry = _saved_catalog(tmp_path, skills)
+
+        assert registry.catalog_self_entry(_target(skills / "alpha")) is None
+
+    def test_skills_nested_in_the_target_are_not_catalog_tree_evidence(self, tmp_path: Path, write_skill) -> None:
+        skills = _write_skills(write_skill, tmp_path / "repo" / "skills", "alpha", "beta")
+        _write_skills(write_skill, skills / "alpha", "gamma", "delta")
+        registry = _saved_catalog(tmp_path, skills)
+        candidate = Path(shutil.copytree(skills / "alpha", tmp_path / "candidates" / "alpha"))
+
+        assert registry.catalog_self_entry(_target(candidate)) is None
+        assert registry.catalog_self_entry(_target(skills / "alpha")) is not None
+
+    def test_linked_catalog_skill_is_not_catalog_tree_evidence(self, tmp_path: Path, write_skill) -> None:
+        skills = _write_skills(write_skill, tmp_path / "repo" / "skills", "alpha", "beta")
+        registry = _saved_catalog(tmp_path, skills)
+        candidate = Path(shutil.copytree(skills / "alpha", tmp_path / "candidates" / "alpha"))
+        try:
+            (tmp_path / "candidates" / "beta").symlink_to(skills / "beta", target_is_directory=True)
+        except OSError as exc:
+            pytest.skip(f"symlinks unavailable: {exc}")
+
+        assert registry.catalog_self_entry(_target(candidate)) is None
+
+    def test_catalog_tree_evidence_reads_a_bounded_sample(self, tmp_path: Path, write_skill, monkeypatch) -> None:
+        others = [f"skill-{index:02d}" for index in range(12)]
+        skills = _write_skills(write_skill, tmp_path / "repo" / "skills", "alpha", *others)
+        registry = _saved_catalog(tmp_path, skills)
+        target = _target(skills / "alpha")
+        reads: list[str] = []
+
+        def counting_extract(skill_dir: Path) -> ContentEntry | None:
+            reads.append(skill_dir.name)
+            return extract_from_skill(skill_dir)
+
+        monkeypatch.setattr(registry_module, "extract_from_skill", counting_extract)
+
+        assert registry.catalog_self_entry(target) is not None
+        assert reads == others[: registry_module.SELF_ENTRY_SAMPLE_SIZE]
+
     def test_longest_catalog_path_identifies_the_target(self, tmp_path: Path, write_skill) -> None:
         repo = tmp_path / "repo"
-        write_skill(repo / "skills", "alpha", "Alpha catalog skill")
-        write_skill(repo / "vendor" / "skills", "alpha", "Alpha catalog skill")
+        _write_skills(write_skill, repo / "skills", "alpha")
+        _write_skills(write_skill, repo / "vendor" / "skills", "alpha")
         registry = _saved_catalog(tmp_path, repo)
-        target = extract_from_skill(repo / "vendor" / "skills" / "alpha")
-        assert target is not None
+        target = _target(repo / "vendor" / "skills" / "alpha")
 
         self_entry = registry.catalog_self_entry(target)
 
@@ -675,22 +797,29 @@ class TestCatalogSelfEntry:
         new_text: str,
         is_self: bool,
     ) -> None:
-        skills = tmp_path / "skills"
-        alpha = write_skill(skills, "alpha", "Alpha catalog skill")
-        write_skill(skills, "beta", "Beta catalog skill")
+        skills = _write_skills(write_skill, tmp_path / "skills", "alpha", "beta")
         registry = _saved_catalog(tmp_path, skills, full_body=full_body)
-        manifest = alpha / "SKILL.md"
+        manifest = skills / "alpha" / "SKILL.md"
         manifest.write_text(manifest.read_text().replace(old_text, new_text))
-        target = extract_from_skill(alpha)
-        assert target is not None
 
-        assert (registry.catalog_self_entry(target) is not None) is is_self
+        assert (registry.catalog_self_entry(_target(skills / "alpha")) is not None) is is_self
 
     def test_scan_root_entry_never_identifies_a_target(self, tmp_path: Path, write_skill) -> None:
         # A catalog built from one skill root records it as ".", which carries no path evidence.
         alpha = write_skill(tmp_path / "skills", "alpha", "Alpha catalog skill")
         registry = _saved_catalog(tmp_path, alpha)
-        target = extract_from_skill(alpha)
-        assert target is not None
 
-        assert registry.catalog_self_entry(target) is None
+        assert registry.catalog_self_entry(_target(alpha)) is None
+
+    def test_differently_cased_target_path(self, tmp_path: Path, write_skill) -> None:
+        skills = _write_skills(write_skill, tmp_path / "skills", "alpha", "beta")
+        registry = _saved_catalog(tmp_path, skills)
+        if _filesystem_is_case_insensitive(tmp_path):
+            # The same directory, spelled differently, is still the catalog's own entry.
+            self_entry = registry.catalog_self_entry(_target(skills / "ALPHA"))
+            assert self_entry is not None
+            assert self_entry.path == "alpha"
+        else:
+            # A separate directory that differs only in case is a copy.
+            shutil.copytree(skills / "alpha", skills / "ALPHA")
+            assert registry.catalog_self_entry(_target(skills / "ALPHA")) is None

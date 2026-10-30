@@ -29,6 +29,9 @@ def normalize_ref(ref: Any) -> str | None:
         segments = [segment.strip() for segment in value.split("::")]
         if len(segments) == 4 and all(segments):
             source, repo, dependency_type, name = segments
+            # Drop empty name segments ("shared/", "t//shared") as the selector form does,
+            # so both spellings of one dependency share one canonical id.
+            name = "/".join(part for part in name.split("/") if part) or name
             return f"{source.lower()}::{repo.lower().removesuffix('.git')}::{dependency_type.lower()}::{name}"
         return value
 

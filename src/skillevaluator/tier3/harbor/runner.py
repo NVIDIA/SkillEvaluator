@@ -1214,9 +1214,7 @@ def _backend_may_forward(name: str) -> bool:
     upper = name.upper()
     if upper in _HARBOR_BASE_ENV_VARS or upper in _BACKEND_ALLOWED_SHARED_HOST_ENV:
         return True
-    other_backend_secret = any(
-        upper in names and is_sensitive_key(upper) for names in _HARBOR_ENV_MODE_VARS.values()
-    )
+    other_backend_secret = any(upper in names and is_sensitive_key(upper) for names in _HARBOR_ENV_MODE_VARS.values())
     return not (
         upper in _OPERATOR_OWNED_AGENT_ENV
         or upper in _RUNTIME_ENV_HOST_CONTROL_NAMES
@@ -1869,9 +1867,9 @@ def build_harbor_run_command(
         command.extend(["--override-storage-mb", str(override_storage_mb)])
     for name, value in sorted((verifier_env or {}).items()):
         str_val = str(value)
-        if (is_operator_owned_or_provider_secret(name) or _is_sensitive_environment_kwarg_name(name)) and not re.fullmatch(
-            r"\$\{[A-Za-z_][A-Za-z0-9_]*\}", str_val
-        ):
+        if (
+            is_operator_owned_or_provider_secret(name) or _is_sensitive_environment_kwarg_name(name)
+        ) and not re.fullmatch(r"\$\{[A-Za-z_][A-Za-z0-9_]*\}", str_val):
             raise ValueError(
                 f"Sensitive key detected in verifier_env: {name}. "
                 "Credentials and operator-owned settings must use ${VAR} placeholder indirection."
@@ -3373,7 +3371,9 @@ def _agent_import_path(provider: ProviderConfig, agent: str, env_mode: str) -> s
     try:
         compatible = issubclass(import_symbol(selected), import_symbol(required))
     except (ImportError, TypeError, ValueError) as exc:
-        raise ValueError(f"Custom execution backend '{env_mode}' agent wrapper {selected} could not be checked: {exc}") from None
+        raise ValueError(
+            f"Custom execution backend '{env_mode}' agent wrapper {selected} could not be checked: {exc}"
+        ) from None
     if not compatible:
         raise ValueError(
             f"Custom execution backend '{env_mode}' runs {agent} with {selected}, but the {provider.provider} "
@@ -4926,9 +4926,8 @@ def _run_harbor_eval_impl(
         disposition = credential_probe_disposition(selected_provider, probe, env_mode=env_mode)
         if probe.ok and disposition == CredentialProbeDisposition.DEGRADED:
             safe_detail = "model catalog access does not verify runtime credentials for this endpoint"
-        elif (
-            disposition == CredentialProbeDisposition.DEGRADED
-            and is_unverified_gke_vertex_auth_probe(selected_provider, probe, env_mode=env_mode)
+        elif disposition == CredentialProbeDisposition.DEGRADED and is_unverified_gke_vertex_auth_probe(
+            selected_provider, probe, env_mode=env_mode
         ):
             safe_detail = GKE_HOST_UNVERIFIED_VERTEX_AUTH_DETAIL
         credential_validation_targets.append(

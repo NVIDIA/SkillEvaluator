@@ -20,7 +20,7 @@ import shutil
 import stat
 import sys
 import unicodedata
-from collections.abc import Iterable, Mapping
+from collections.abc import Callable, Iterable, Mapping, Sequence
 from dataclasses import dataclass
 from dataclasses import field as dataclass_field
 from fractions import Fraction
@@ -31,6 +31,7 @@ from skillevaluator.tier3.eval_core.atif_helpers import extract_tool_calls_as_di
 from skillevaluator.tier3.eval_core.checks import check_negative_case
 from skillevaluator.tier3.eval_core.codex_tool_call_normalizer import atif_content_text
 from skillevaluator.tier3.harbor.activation import summarize_skill_activation
+from skillevaluator.tier3.harbor.lift_basis import pair_metric_scores
 from skillevaluator.tier3.harbor.metrics import (
     CUSTOM_ONLY_METRIC_SET,
     CUSTOM_SCORE_POLICY,
@@ -49,8 +50,12 @@ from skillevaluator.tier3.harbor.metrics import (
     custom_metric_name_is_publishable,
     dimension_scores,
     extract_custom_metrics,
+    mark_not_applicable,
+    metric_is_not_applicable,
     metric_set_for_reward,
     metric_value,
+    not_applicable_counts,
+    not_applicable_metrics,
     overall_score,
     overall_score_from_metrics,
     rewards_have_mixed_metric_contracts,
@@ -3144,6 +3149,7 @@ def _standard_aggregate_matches_harbor_strategy(
     strategy: str | None = None,
 ) -> bool:
     """Match FINAL, missing-as-zero MEAN, or either when the strategy is unknown."""
+    root_metrics = tuple(metric for metric in root_metrics if not metric_is_not_applicable(root_rewards, metric))
     root_values = {metric: metric_value(root_rewards, metric) for metric in root_metrics}
     if any(value is None for value in root_values.values()):
         return False
@@ -3292,7 +3298,9 @@ def _constituent_default_reward_failure(result: dict[str, Any], trial_root: Path
         if not expected_metrics:
             continue
         if all(
-            not _reward_claims_metric(rewards, metric) or metric_value(rewards, metric) is not None
+            not _reward_claims_metric(rewards, metric)
+            or metric_value(rewards, metric) is not None
+            or metric_is_not_applicable(rewards, metric)
             for metric in expected_metrics
         ):
             continue
@@ -3349,12 +3357,68 @@ def _constituent_custom_metric_failure(result: dict[str, Any]) -> str:
     return ""
 
 
+def _restore_constituent_not_applicable(
+    data: dict[str, Any], result: dict[str, Any], trial_root: Path
+) -> dict[str, Any]:
+    """Restore absent N/A metrics only when every declared step has bounded sidecar evidence.
+
+    The returned validation view preserves Harbor's authoritative numeric values.
+    Missing or unsafe sidecars cannot turn absent metrics into applicable scores.
+    """
+    names = _valid_step_result_names(result.get("step_results"))
+    if not names:
+        return result
+    candidates, failure = _failed_judge_sidecar_paths(trial_root)
+    if failure:
+        return result
+    by_name: dict[str, dict[str, Any]] = {}
+    for name, path, metadata in candidates:
+        sidecar, failure = _read_failed_judge_sidecar(path, trial_dir=trial_root, expected=metadata)
+        if failure or sidecar is None or str(sidecar.get("evaluation_status") or "").casefold() in {"error", "failed"}:
+            return result
+        by_name[name] = sidecar
+    if any(name not in by_name for name in names):
+        return result
+    root_verifier = result.get("verifier_result")
+    original = root_verifier.get("rewards") if isinstance(root_verifier, dict) else None
+    if not isinstance(original, dict):
+        return result
+    restored = [
+        metric
+        for metric in _standard_reward_metrics(original)
+        if metric not in original and all(metric_is_not_applicable(by_name[name], metric) for name in names)
+    ]
+    if not restored:
+        return result
+    root_rewards = dict(original)
+    steps = []
+    for _name, step in zip(names, result["step_results"], strict=True):
+        verifier = step.get("verifier_result")
+        rewards = verifier.get("rewards") if isinstance(verifier, dict) else None
+        if not isinstance(rewards, dict):
+            return result
+        rewards = dict(rewards)
+        for metric in restored:
+            # A conflicting numeric value remains authoritative and prevents restoration.
+            if metric in rewards and not metric_is_not_applicable(rewards, metric):
+                return result
+            mark_not_applicable(rewards, metric)
+        steps.append({**step, "verifier_result": {**verifier, "rewards": rewards}})
+    for metric in restored:
+        mark_not_applicable(root_rewards, metric)
+        if metric not in data:
+            mark_not_applicable(data, metric)
+    return {**result, "verifier_result": {**root_verifier, "rewards": root_rewards}, "step_results": steps}
+
+
 def _merge_constituent_default_reward_failure(
     data: dict[str, Any],
     result: dict[str, Any],
     trial_root: Path | None = None,
 ) -> None:
     """Make an aggregate unscoreable when one of its constituents is invalid."""
+    if trial_root is not None:
+        result = _restore_constituent_not_applicable(data, result, trial_root)
     reasons = (
         _constituent_default_reward_failure(result, trial_root),
         _constituent_custom_metric_failure(result),
@@ -4514,6 +4578,7 @@ def _logical_attempt_rewards(rewards: list[dict[str, Any]]) -> list[dict[str, An
             "_trial_root_name": root,
             "_started_at": first.get("_started_at"),
             "_logical_attempt_sentinel": _LOGICAL_ATTEMPT_SENTINEL,
+            "_logical_mixed_contracts": rewards_have_mixed_metric_contracts(rows),
         }
         if first.get("_trusted_task_selector") is not None:
             logical_reward["_trusted_task_selector"] = first["_trusted_task_selector"]
@@ -4527,6 +4592,8 @@ def _logical_attempt_rewards(rewards: list[dict[str, Any]]) -> list[dict[str, An
         for metric in metrics:
             if metric in standard_scores:
                 logical_reward[metric] = standard_scores[metric]
+        for metric in not_applicable_metrics(rows, metrics):
+            mark_not_applicable(logical_reward, metric)
         logical_reward.update(custom_scores)
         if custom_scores:
             logical_reward["custom_metrics"] = custom_scores
@@ -4844,18 +4911,25 @@ def _pass_summary(
     expected_cases: int | None,
     expected_case_ids: list[str] | None = None,
     recovered_attempts: list[dict[str, Any]] | None = None,
+    scorer: Callable[[dict[str, Any]], float | None] | None = None,
 ) -> dict[str, Any]:
-    """Summarize pass@k using SkillEvaluator continuous reward scores."""
+    """Summarize pass@k using SkillEvaluator continuous reward scores.
+
+    *scorer* replaces the trial's own overall score; the cross-arm pass
+    comparison uses it to score both arms on the metrics both scored.
+    """
+    score_of = scorer or _overall_score
     expected_ids = _validated_expected_case_ids(expected_case_ids)
     expected_id_set = set(expected_ids) if expected_ids else None
-    grouped: dict[str, list[dict[str, Any]]] = {}
+    grouped: dict[str, list[tuple[dict[str, Any], float]]] = {}
     for reward in _logical_attempt_rewards(rewards):
-        if _overall_score(reward) is None:
+        overall = score_of(reward)
+        if overall is None:
             continue
-        grouped.setdefault(_entry_id(reward, expected_id_set), []).append(reward)
+        grouped.setdefault(_entry_id(reward, expected_id_set), []).append((reward, overall))
 
     cases: dict[str, Any] = {}
-    pairing_cases: dict[str, dict[str, bool]] = {}
+    pairing_cases: dict[str, dict[str, Any]] = {}
     passed_cases = 0
     attempts_used = 0
     extra_case_ids: list[str] = []
@@ -4871,15 +4945,14 @@ def _pass_summary(
     for entry_id in case_order:
         attempts = grouped.get(entry_id, [])
         attempt_rows: list[dict[str, Any]] = []
+        attempt_passes: list[dict[str, bool]] = []
         best_score: float | None = None
         first_pass_attempt: int | None = None
-        for idx, reward in enumerate(sorted(attempts, key=_attempt_sort_key), start=1):
+        for idx, (reward, overall) in enumerate(sorted(attempts, key=lambda item: _attempt_sort_key(item[0])), start=1):
             idx = _attempt_ordinal(reward) or idx
-            overall = _overall_score(reward)
-            if overall is None:
-                continue
             score = round(overall, 4)
             passed = score >= pass_threshold
+            attempt_passes.append({"passed": passed})
             if passed and first_pass_attempt is None:
                 first_pass_attempt = idx
             best_score = score if best_score is None else max(best_score, score)
@@ -4909,7 +4982,12 @@ def _pass_summary(
         skipped = unscored if stop_on_pass and case_passed else 0
         missing = 0 if skipped else unscored
 
-        pairing_cases[entry_id] = {"passed": case_passed, "extra_case": not is_expected_case}
+        # Every attempt, also past the published caps: pass^k counts all k of them.
+        pairing_cases[entry_id] = {
+            "passed": case_passed,
+            "extra_case": not is_expected_case,
+            "attempts": attempt_passes,
+        }
         if entry_id in published_case_ids:
             cases[entry_id] = {
                 "passed": case_passed,
@@ -4958,6 +5036,131 @@ def _pass_summary(
         "case_details_limit": PUBLISHED_CASE_DETAILS_MAX,
         "cases": cases,
         "_pairing_cases": pairing_cases,
+    }
+
+
+PASS_LIFT_BASIS_SHARED_METRICS = "shared_metrics"
+
+
+def _case_scored_metrics(rewards: list[dict[str, Any]], expected_id_set: set[str] | None) -> dict[str, set[str]]:
+    """The metrics each case scored with a number in at least one attempt."""
+    scored: dict[str, set[str]] = {}
+    for reward in _logical_attempt_rewards(rewards):
+        _, metrics = metric_set_for_reward(reward)
+        if metrics:
+            case_metrics = scored.setdefault(_entry_id(reward, expected_id_set), set())
+            case_metrics.update(metric for metric in metrics if metric_value(reward, metric) is not None)
+    return scored
+
+
+def _shared_metric_scorer(
+    shared_by_case: Mapping[str, set[str]],
+    fallback: set[str],
+    expected_id_set: set[str] | None,
+) -> Callable[[dict[str, Any]], float | None]:
+    """Apply the trial's score policy to the metrics both arms can compare."""
+
+    def score(reward: dict[str, Any]) -> float | None:
+        own_score = _overall_score(reward)
+        if own_score is None:
+            return None
+        _, metrics = metric_set_for_reward(reward)
+        if not metrics:
+            return own_score
+        shared = shared_by_case.get(_entry_id(reward, expected_id_set), fallback)
+        not_applicable = {metric for metric in metrics if metric_is_not_applicable(reward, metric)}
+        excluded = set(metrics) - shared - not_applicable
+        if not excluded:
+            # Complete unchanged bases retain historical policies and Harbor's
+            # authoritative logical overall, including mixed-step rewards.
+            return own_score
+        if reward.get("_logical_attempt_sentinel") is _LOGICAL_ATTEMPT_SENTINEL and reward.get(
+            "_logical_mixed_contracts"
+        ):
+            # A mixed-step overall cannot be reconstructed on a smaller basis.
+            return None
+        scores: dict[str, float] = {}
+        for metric in metrics:
+            if metric not in shared:
+                continue
+            value = metric_value(reward, metric)
+            if value is not None:
+                scores[metric] = value
+            elif metric not in not_applicable:
+                return None
+        policy, _ = _score_policy_for_rewards([reward], metrics)
+        if policy == LEGACY_SCORE_POLICY:
+            return round(sum(scores.values()) / len(scores), 4) if scores else None
+        if policy == score_policy_for_metrics(metrics):
+            return overall_score_from_metrics(scores, metrics, not_applicable=not_applicable | excluded)
+        return None
+
+    return score
+
+
+def _shared_metric_pass_lift(
+    treatment_rewards: list[dict[str, Any]],
+    control_rewards: list[dict[str, Any]],
+    *,
+    n_attempts: int,
+    pass_threshold: float,
+    stop_on_pass: bool,
+    expected_cases: int | None,
+    expected_case_ids: list[str] | None,
+) -> dict[str, Any]:
+    """Compare two arms' pass@k on the metrics both arms scored.
+
+    An arm without the skill under test records ``skill_execution`` and
+    ``skill_efficiency`` as not applicable. Its own pass flags leave them out,
+    while the skill arm's include them, so comparing each arm's own pass rate
+    credits skill activation alone. Here each case is scored on the metrics both
+    arms scored for it (a case only one arm has uses the metrics both arms
+    scored anywhere), so the delta, the paired counts and McNemar compare the
+    same metrics. Each arm's own pass@k is unchanged.
+    """
+    expected_ids = _validated_expected_case_ids(expected_case_ids)
+    expected_id_set = set(expected_ids) if expected_ids else None
+    treatment_scored = _case_scored_metrics(treatment_rewards, expected_id_set)
+    control_scored = _case_scored_metrics(control_rewards, expected_id_set)
+    paired_cases = set(treatment_scored) & set(control_scored)
+    shared_by_case = {case: treatment_scored[case] & control_scored[case] for case in paired_cases}
+    judge_mixed = _judge_mixed_cases(treatment_rewards, control_rewards, expected_id_set)
+    for metric, cases in judge_mixed.items():
+        for case in cases & paired_cases:
+            shared_by_case[case].discard(metric)
+    fallback = set().union(*treatment_scored.values()) & set().union(*control_scored.values())
+    excluded_metrics = set(judge_mixed).union(*(treatment_scored[case] ^ control_scored[case] for case in paired_cases))
+    scorer = _shared_metric_scorer(shared_by_case, fallback, expected_id_set)
+    summaries = [
+        _pass_summary(
+            rewards,
+            n_attempts=n_attempts,
+            pass_threshold=pass_threshold,
+            stop_on_pass=stop_on_pass,
+            expected_cases=expected_cases,
+            expected_case_ids=expected_case_ids,
+            scorer=scorer,
+        )
+        for rewards in (treatment_rewards, control_rewards)
+    ]
+    treatment, control = summaries
+    return {
+        "with_skill": treatment.get("rate", 0.0),
+        "without_skill": control.get("rate", 0.0),
+        "delta": _pass_rate_delta(treatment, control),
+        "count_derived_delta": _count_derived_pass_rate_delta(treatment, control),
+        "passed_cases_delta": int(treatment.get("passed_cases", 0)) - int(control.get("passed_cases", 0)),
+        "paired_comparison": _paired_pass_comparison(treatment, control),
+        "basis": PASS_LIFT_BASIS_SHARED_METRICS,
+        # Metrics one arm did not score, or whose judge models differed on some cases.
+        "excluded_metrics": [
+            *(metric for metric in DISPLAY_METRICS if metric in excluded_metrics),
+            *sorted(excluded_metrics - set(DISPLAY_METRICS)),
+        ],
+        **({"judge_mixed_cases": {metric: len(cases) for metric, cases in judge_mixed.items()}} if judge_mixed else {}),
+        "with_skill_passed_cases": int(treatment.get("passed_cases", 0)),
+        "without_skill_passed_cases": int(control.get("passed_cases", 0)),
+        "total_cases": int(treatment.get("total_cases", 0)),
     }
 
 
@@ -5060,6 +5263,23 @@ def _metric_average_excluding(
     return average_metrics(kept)[0].get(metric)
 
 
+def _judge_mixed_cases(
+    with_rewards: list[dict[str, Any]], without_rewards: list[dict[str, Any]], expected_case_ids: set[str] | None
+) -> dict[str, set[str]]:
+    """Map each judge metric to the cases whose two arms were judged by different models."""
+    mixed: dict[str, set[str]] = {}
+    for metric in _LLM_JUDGE_METRICS:
+        with_models = _judge_models_by_case(with_rewards, metric, expected_case_ids)
+        without_models = _judge_models_by_case(without_rewards, metric, expected_case_ids)
+        if cases := {
+            case_id
+            for case_id in with_models.keys() & without_models.keys()
+            if len(with_models[case_id] | without_models[case_id]) > 1
+        }:
+            mixed[metric] = cases
+    return mixed
+
+
 def _compute_lift(
     with_scores: dict[str, float],
     without_scores: dict[str, float],
@@ -5067,9 +5287,16 @@ def _compute_lift(
     without_rewards: list[dict[str, Any]] | None = None,
     expected_case_ids: list[str] | None = None,
     *,
+    with_not_applicable: list[str] | tuple[str, ...] = (),
+    without_not_applicable: list[str] | tuple[str, ...] = (),
     score_policy: str | None = None,
 ) -> dict[str, Any]:
     """Compute skill lift (with-skill minus without-skill) per metric.
+
+    A metric that an arm recorded as not applicable in every trial is absent
+    from that arm's scores, so it gets no per-metric lift row. The overall lift
+    is then the mean over the metrics both arms scored, with the same
+    denominator on each side. Any other missing metric still suppresses it.
 
     With the per-trial rewards, a case whose arms were judged by different
     models (a judge fallback in one arm) is left out of that judge metric's
@@ -5080,23 +5307,30 @@ def _compute_lift(
     paired_scores: dict[str, tuple[float, float]] = {}
     mixed_counts: dict[str, int] = {}
     expected_set = set(expected_case_ids) if expected_case_ids else None
+    mixed_by_metric = (
+        _judge_mixed_cases(with_rewards, without_rewards, expected_set) if with_rewards and without_rewards else {}
+    )
+    paired = None
+    if with_rewards is not None and without_rewards is not None:
+        active = set().union(*(set(metric_set_for_reward(row)[1]) for row in [*with_rewards, *without_rewards]))
+        paired = pair_metric_scores(
+            [(_entry_id(row, expected_set), row) for row in with_rewards],
+            [(_entry_id(row, expected_set), row) for row in without_rewards],
+            arms=("with_skill", "without_skill"),
+            metrics=[metric for metric in DISPLAY_METRICS if metric in active],
+            expected_case_ids=expected_case_ids or (),
+            judge_mixed_cases=mixed_by_metric,
+        )
+        with_scores, without_scores = paired.treatment, paired.control
+        with_not_applicable = [*with_not_applicable, *not_applicable_metrics(with_rewards), *paired.not_comparable]
+        without_not_applicable = [
+            *without_not_applicable,
+            *not_applicable_metrics(without_rewards),
+            *paired.not_comparable,
+        ]
+        mixed_counts = dict(paired.judge_mixed)
     for metric in (m for m in DISPLAY_METRICS if m in with_scores and m in without_scores):
-        w = with_scores[metric]
-        wo = without_scores[metric]
-        if metric in _LLM_JUDGE_METRICS and with_rewards and without_rewards:
-            with_models = _judge_models_by_case(with_rewards, metric, expected_set)
-            without_models = _judge_models_by_case(without_rewards, metric, expected_set)
-            mixed = {
-                case_id
-                for case_id in with_models.keys() & without_models.keys()
-                if len(with_models[case_id] | without_models[case_id]) > 1
-            }
-            if mixed:
-                mixed_counts[metric] = len(mixed)
-                w = _metric_average_excluding(with_rewards, metric, mixed, expected_set)
-                wo = _metric_average_excluding(without_rewards, metric, mixed, expected_set)
-                if w is None or wo is None:
-                    continue
+        w, wo = with_scores[metric], without_scores[metric]
         paired_scores[metric] = (w, wo)
         delta = round(w - wo, 4)
         lift[metric] = {
@@ -5108,13 +5342,27 @@ def _compute_lift(
     metrics = tuple(paired_scores)
     overall_with: float | None = None
     overall_without: float | None = None
-    if metrics in {DISPLAY_METRICS, LEGACY_METRICS} and score_policy == LEGACY_SCORE_POLICY:
-        # Historical artifacts keep their recorded six-metric mean.
+    active = _lift_overall_active_metrics(
+        metrics,
+        {metric: scores[0] for metric, scores in paired_scores.items()},
+        {metric: scores[1] for metric, scores in paired_scores.items()},
+        with_not_applicable,
+        without_not_applicable,
+    )
+    if active is not None and score_policy == LEGACY_SCORE_POLICY:
+        # Historical artifacts keep their recorded metric mean, over the metrics both arms scored.
         overall_with = sum(paired_scores[m][0] for m in metrics) / len(metrics)
         overall_without = sum(paired_scores[m][1] for m in metrics) / len(metrics)
-    elif metrics in {DISPLAY_METRICS, LEGACY_METRICS} and score_policy in {None, score_policy_for_metrics(metrics)}:
-        overall_with = overall_score_from_metrics({m: paired_scores[m][0] for m in metrics}, metrics)
-        overall_without = overall_score_from_metrics({m: paired_scores[m][1] for m in metrics}, metrics)
+    elif active is not None and score_policy in {None, score_policy_for_metrics(active)}:
+        # The arms' score policy over the metrics both scored; a metric N/A on either side drops out of
+        # its dimension on both sides, so the two overalls share one denominator.
+        skipped = tuple(metric for metric in active if metric not in paired_scores)
+        overall_with = overall_score_from_metrics(
+            {m: paired_scores[m][0] for m in metrics}, active, not_applicable=skipped
+        )
+        overall_without = overall_score_from_metrics(
+            {m: paired_scores[m][1] for m in metrics}, active, not_applicable=skipped
+        )
     if overall_with is not None and overall_without is not None:
         lift["overall"] = {
             "with_skill": round(overall_with, 4),
@@ -5123,7 +5371,31 @@ def _compute_lift(
         }
     if mixed_counts:
         lift["judge_mixed_cases"] = mixed_counts
+    if paired is not None:
+        lift["basis"] = paired.basis
     return lift
+
+
+def _lift_overall_active_metrics(
+    metrics: tuple[str, ...],
+    with_scores: dict[str, float],
+    without_scores: dict[str, float],
+    with_not_applicable: list[str] | tuple[str, ...],
+    without_not_applicable: list[str] | tuple[str, ...],
+) -> tuple[str, ...] | None:
+    """Return the active metric set when each of its metrics is scored by both arms or explained by N/A."""
+    if not metrics:
+        return None
+    for active in (DISPLAY_METRICS, LEGACY_METRICS):
+        if not set(metrics).issubset(active):
+            continue
+        if all(
+            (metric in with_scores or metric in with_not_applicable)
+            and (metric in without_scores or metric in without_not_applicable)
+            for metric in active
+        ):
+            return active
+    return None
 
 
 def _average_overall(rewards: list[dict[str, Any]]) -> float | None:
@@ -5144,10 +5416,17 @@ def _score_policy_for_rewards(rewards: list[dict[str, Any]], metrics: tuple[str,
             decisive_policies.add(recorded.strip())
             continue
         if metrics == DEFAULT_METRICS:
-            values = [metric_value(reward, metric) for metric in metrics]
+            # A metric the reward records as N/A is left out of both formulas.
+            not_applicable = [
+                metric
+                for metric in metrics
+                if metric_value(reward, metric) is None and metric_is_not_applicable(reward, metric)
+            ]
+            values = [metric_value(reward, metric) for metric in metrics if metric not in not_applicable]
             persisted = reward.get("overall")
             if (
-                all(value is not None for value in values)
+                values
+                and all(value is not None for value in values)
                 and isinstance(persisted, int | float)
                 and not isinstance(persisted, bool)
             ):
@@ -5155,7 +5434,7 @@ def _score_policy_for_rewards(rewards: list[dict[str, Any]], metrics: tuple[str,
                     stored = float(persisted)
                 except OverflowError:
                     stored = float("nan")
-                current = overall_score_from_metrics(reward, metrics)
+                current = overall_score_from_metrics(reward, metrics, not_applicable=not_applicable)
                 historical = round(sum(value for value in values if value is not None) / len(values), 4)
                 if math.isfinite(stored) and current is not None:
                     stored = round(stored, 4)
@@ -5190,11 +5469,13 @@ def _aggregate_condition_overall(
     *,
     score_policy: str | None = None,
     mixed_metric_contracts: bool = False,
+    not_applicable: Sequence[str] = (),
 ) -> float | None:
     """Aggregate a condition consistently with lift and canonical reports.
 
     Mixed metric contracts use the logical attempt overall: the standard-metric
     mean covers only standard rows and would overstate pass@k's attempt score.
+    Metrics N/A in every attempt (*not_applicable*) drop out of the score policy.
     """
     if (
         mixed_metric_contracts
@@ -5202,7 +5483,7 @@ def _aggregate_condition_overall(
         or (score_policy is not None and score_policy != score_policy_for_metrics(metrics))
     ):
         return _average_overall(rewards)
-    score = overall_score_from_metrics(scores, metrics)
+    score = overall_score_from_metrics(scores, metrics, not_applicable=not_applicable)
     return round(score, 4) if score is not None else None
 
 
@@ -6639,6 +6920,7 @@ def collect_harbor_results(
         with_policy_ambiguous = False
         with_metrics: tuple[str, ...] = ()
         with_summary: dict[str, Any] | None = None
+        with_not_applicable: list[str] = []
 
         with_arm_suffix = "-with-skill" if not skip_baseline else ""
         if with_job_dir:
@@ -6676,6 +6958,7 @@ def collect_harbor_results(
             with_mixed_metric_contracts = rewards_have_mixed_metric_contracts(with_rewards)
             with_trial_failures.extend(invalid_score_failures)
             with_scores, with_metric_set, with_metrics = average_metrics(with_logical_rewards)
+            with_not_applicable = not_applicable_metrics(with_logical_rewards, with_metrics)
             with_policy, with_policy_ambiguous = _score_policy_for_rewards(with_logical_rewards, with_metrics)
             all_results["metric_set"] = with_metric_set
             all_results["metrics"] = list(with_metrics)
@@ -6717,6 +7000,7 @@ def collect_harbor_results(
                     with_logical_rewards,
                     score_policy=with_policy,
                     mixed_metric_contracts=with_mixed_metric_contracts,
+                    not_applicable=with_not_applicable,
                 )
                 if with_execution["execution_status"] == "succeeded"
                 else None
@@ -6742,7 +7026,9 @@ def collect_harbor_results(
                 "metric_set": with_metric_set,
                 "metrics": list(with_metrics),
                 "score_policy": with_policy,
-                "dimensions": dimension_scores(with_scores),
+                "dimensions": dimension_scores(with_scores, with_not_applicable),
+                "not_applicable_metrics": with_not_applicable,
+                "not_applicable_counts": not_applicable_counts(with_logical_rewards, with_metrics),
                 "num_trials": len(with_logical_rewards),
                 "num_reward_rows": len(with_collected_rewards),
                 "mixed_metric_contracts": with_mixed_metric_contracts,
@@ -6855,6 +7141,7 @@ def collect_harbor_results(
         without_policy_ambiguous = False
         without_metrics: tuple[str, ...] = ()
         without_summary: dict[str, Any] | None = None
+        without_not_applicable: list[str] = []
         without_job_dir: Path | None = None
         if not skip_baseline:
             without_job_name = f"{skill_name}-{agent}-without"
@@ -6897,6 +7184,7 @@ def collect_harbor_results(
                 without_mixed_metric_contracts = rewards_have_mixed_metric_contracts(without_rewards)
                 without_trial_failures.extend(invalid_score_failures)
                 without_scores, without_metric_set, without_metrics = average_metrics(without_logical_rewards)
+                without_not_applicable = not_applicable_metrics(without_logical_rewards, without_metrics)
                 without_policy, without_policy_ambiguous = _score_policy_for_rewards(
                     without_logical_rewards, without_metrics
                 )
@@ -6938,6 +7226,7 @@ def collect_harbor_results(
                         without_logical_rewards,
                         score_policy=without_policy,
                         mixed_metric_contracts=without_mixed_metric_contracts,
+                        not_applicable=without_not_applicable,
                     )
                     if without_execution["execution_status"] == "succeeded"
                     else None
@@ -6963,7 +7252,9 @@ def collect_harbor_results(
                     "metric_set": without_metric_set,
                     "metrics": list(without_metrics),
                     "score_policy": without_policy,
-                    "dimensions": dimension_scores(without_scores),
+                    "dimensions": dimension_scores(without_scores, without_not_applicable),
+                    "not_applicable_metrics": without_not_applicable,
+                    "not_applicable_counts": not_applicable_counts(without_logical_rewards, without_metrics),
                     "num_trials": len(without_logical_rewards),
                     "num_reward_rows": len(without_collected_rewards),
                     "mixed_metric_contracts": without_mixed_metric_contracts,
@@ -7127,6 +7418,8 @@ def collect_harbor_results(
                 without_logical_rewards,
                 expected_case_ids,
                 score_policy=with_policy,
+                with_not_applicable=with_not_applicable,
+                without_not_applicable=without_not_applicable,
             )
             # The policy and scored metric set must match before comparing
             # overall scores; shared per-metric deltas remain useful separately.
@@ -7136,7 +7429,11 @@ def collect_harbor_results(
                 and with_overall_score is not None
                 and without_overall_score is not None
             ):
-                if "judge_mixed_cases" not in lift:
+                if (
+                    "judge_mixed_cases" not in lift
+                    and not lift.get("basis", {}).get("excluded_case_entries")
+                    and not lift.get("basis", {}).get("excluded_metrics")
+                ):
                     lift["overall"] = {
                         "with_skill": with_overall_score,
                         "without_skill": without_overall_score,
@@ -7168,14 +7465,15 @@ def collect_harbor_results(
 
         pass_lift: dict[str, Any] = {}
         if lift_eligible and set(with_metrics) == set(without_metrics) and with_pass and without_pass:
-            pass_lift = {
-                "with_skill": with_pass.get("rate", 0.0),
-                "without_skill": without_pass.get("rate", 0.0),
-                "delta": _pass_rate_delta(with_pass, without_pass),
-                "count_derived_delta": _count_derived_pass_rate_delta(with_pass, without_pass),
-                "passed_cases_delta": int(with_pass.get("passed_cases", 0)) - int(without_pass.get("passed_cases", 0)),
-                "paired_comparison": _paired_pass_comparison(with_pass, without_pass),
-            }
+            pass_lift = _shared_metric_pass_lift(
+                with_logical_rewards,
+                without_logical_rewards,
+                n_attempts=n_attempts,
+                pass_threshold=pass_threshold,
+                stop_on_pass=stop_on_pass,
+                expected_cases=expected_cases,
+                expected_case_ids=expected_case_ids,
+            )
             _write_generated_root_json(agent_dir / "pass_at_k_lift.json", output_dir, pass_lift)
 
         security_attribution: dict[str, Any] = {}
@@ -7231,8 +7529,9 @@ def collect_harbor_results(
             "score_policy_without_skill": without_policy if not skip_baseline else None,
             "custom_with_skill": with_custom_scores,
             "custom_without_skill": without_custom_scores,
-            "dimensions_with_skill": dimension_scores(with_scores),
-            "dimensions_without_skill": dimension_scores(without_scores),
+            "not_applicable_metrics": {"with_skill": with_not_applicable, "without_skill": without_not_applicable},
+            "dimensions_with_skill": dimension_scores(with_scores, with_not_applicable),
+            "dimensions_without_skill": dimension_scores(without_scores, without_not_applicable),
             "skill_activation": skill_activation,
             "lift": lift,
             "custom_lift": custom_lift,
@@ -7300,7 +7599,12 @@ def collect_harbor_results(
             for info in all_results["agents"].values()
             if info.get("execution_status") == "succeeded" and info.get("score_policy_with_skill") == score_policy
         )
-        selected_metrics = tuple(metric for metric in DEFAULT_METRICS if metric in scored_agent["with_skill"])
+        selected_metrics = tuple(
+            metric
+            for metric in DEFAULT_METRICS
+            if metric in scored_agent["with_skill"]
+            or metric in scored_agent.get("not_applicable_metrics", {}).get("with_skill", ())
+        )
         all_results["metric_set"] = (
             DEFAULT_METRIC_SET
             if "security" in selected_metrics

@@ -18,11 +18,51 @@ from harbor.models.job.result import JobResult, JobStats
 from harbor.models.trial.result import TrialResult
 
 from skillevaluator.tier3.harbor.collector import (
+    _pass_summary,
+    _shared_metric_scorer,
     _timeout_recovered_by,
     collect_harbor_results,
     harbor_timeout_job_recovered,
 )
 from skillevaluator.tier3.harbor.runner import _merge_attempt_jobs
+
+
+@pytest.mark.parametrize(
+    ("shared_value", "skill_value", "threshold", "passed"),
+    [(0.0, 1.0, 0.5, False), (1.0, 0.0, 0.8, True)],
+)
+def test_pass_summary_recovery_uses_shared_score_and_physical_ordinal(shared_value, skill_value, threshold, passed):
+    shared = {"security", "accuracy", "goal_accuracy", "behavior_check"}
+    reward = {
+        "entry_id": "case-a",
+        "_trial_name": "case-a__attempt2",
+        "_attempt_ordinal": 2,
+        "security": 1.0,
+        "accuracy": shared_value,
+        "goal_accuracy": shared_value,
+        "behavior_check": shared_value,
+        "skill_execution": skill_value,
+        "skill_efficiency": skill_value,
+    }
+    summary = _pass_summary(
+        [reward],
+        n_attempts=3,
+        pass_threshold=threshold,
+        stop_on_pass=True,
+        expected_cases=1,
+        expected_case_ids=["case-a"],
+        recovered_attempts=[{"case_id": "case-a", "attempt": 1}],
+        scorer=_shared_metric_scorer({"case-a": shared}, shared, {"case-a"}),
+    )
+    case = summary["cases"]["case-a"]
+    assert case["passed"] is passed
+    assert case["first_pass_attempt"] == (2 if passed else None)
+    assert case["attempts"] == [
+        {"attempt": 2, "trial": "case-a__attempt2", "score": 1.0 if passed else 0.3333, "passed": passed}
+    ]
+    assert case["attempts_used"] == case["attempts_recovered"] == 1
+    assert case["attempts_skipped"] == int(passed)
+    assert case["attempts_missing"] == int(not passed)
 
 
 def native_attempt(root: Path, attempt: int, *, timeout: bool = False, reward: float = 1.0) -> Path:

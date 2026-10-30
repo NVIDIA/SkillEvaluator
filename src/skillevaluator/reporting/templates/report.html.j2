@@ -1506,15 +1506,17 @@
                     <p class="exec-reason">
                     {%- if t1_key == 'incomplete' -%}
                         A required scan did not finish{% if tier1_incomplete_scans %} ({{ tier1_incomplete_scans | join(', ') }}){% endif %}, so no pass is claimed.
-                        {%- if tier1_scanners_missing %} Install or enable the scanner and run the evaluation again.
-                        {%- elif tier1_scan_stop %} {{ tier1_scan_stop }} Fix what stopped the scan and run the evaluation again.
-                        {%- else %} Find out why the scan stopped and run the evaluation again.{% endif %}
                     {%- elif t1_key == 'fail' -%}
                         {{ failed_count }} of {{ total_validators }} checks failed: {{ tier1_failed_checks[:3] | join(', ') }}{% if tier1_failed_checks | length > 3 %} and {{ tier1_failed_checks | length - 3 }} more{% endif %}.{% if tier1_blocking_findings %} {{ tier1_blocking_findings }} critical or high finding{{ 's' if tier1_blocking_findings != 1 else '' }} in those checks block the verdict.{% endif %}
                     {%- elif t1_key == 'skipped' -%}
                         No Tier 1 check ran, so there is no result to report.
                     {%- else -%}
                         All {{ total_validators }} checks that apply passed.{% if tier1_summary.issue_count %} {{ tier1_summary.issue_count }} advisory finding{{ 's do' if tier1_summary.issue_count != 1 else ' does' }} not block.{% endif %}
+                    {%- endif -%}
+                    {%- if tier1_incomplete_scans -%}
+                        {%- if tier1_scanners_missing %} Install or enable the scanner and run the evaluation again.
+                        {%- elif tier1_scan_stop %} {{ tier1_scan_stop }} Fix what stopped the scan and run the evaluation again.
+                        {%- else %} Find out why the scan stopped and run the evaluation again.{% endif %}
                     {%- endif -%}
                     </p>
                 </div>
@@ -2721,6 +2723,14 @@
             {# Pass@K is hoisted to the top of Trials so the rate sits immediately above
                the Trial Charts and per-case Attempt Details that explain it.
                Hiding it from Overview keeps the first-page beginner narrative focused. #}
+            {% if tier3.not_applicable_evaluators %}
+            <section class="dashboard-card" aria-label="Not applicable evaluators">
+                <h3>Not applicable evaluators</h3>
+                <ul>{% for item in tier3.not_applicable_evaluators %}<li><strong>{{ item.label or item.id }}</strong>: {{ item.reason }}</li>{% endfor %}</ul>
+                <p>N/A scores are excluded from applicable score totals. Missing evidence remains unscored.</p>
+            </section>
+            {% endif %}
+
             {% if tier3.pass_at_k and tier3.pass_at_k.with_skill %}
             <details class="t3-details" id="tier3-pass-at-k" open>
                 <summary>Pass@{{ t3_max_attempts }} Summary</summary>
@@ -3596,10 +3606,10 @@
                     {% for name, scores in tier3.evaluators.items() %}
                     <tr>
                         <td><strong>{{ name | replace("_", " ") | title }}</strong></td>
-                        <td>{{ "%.2f" | format(scores.with_skill) if scores.with_skill is not none else "N/A" }}</td>
-                        <td>{{ "%.2f" | format(scores.baseline) if scores.baseline is not none else "N/A" }}</td>
+                        <td>{{ "%.2f" | format(scores.with_skill) if scores.with_skill is not none else ("N/A" if scores.with_skill_status == "not_applicable" else "NO SCORE") }}</td>
+                        <td>{{ "%.2f" | format(scores.baseline) if scores.baseline is not none else ("N/A" if scores.baseline_status == "not_applicable" else "NO SCORE") }}</td>
                         <td style="color:{{ 'var(--success-color)' if scores.lift is not none and scores.lift >= tier3_lift_pass_threshold else ('var(--danger-color)' if scores.lift is not none and scores.lift <= tier3_lift_fail_threshold else 'var(--text-secondary)') }};font-weight:600;">
-                            {{ "%+.2f" | format(scores.lift) if scores.lift is not none else "N/A" }}
+                            {{ "%+.2f" | format(scores.lift) if scores.lift is not none else ("N/A" if "not_applicable" in [scores.with_skill_status, scores.baseline_status] else "NO SCORE") }}
                         </td>
                     </tr>
                     {% endfor %}

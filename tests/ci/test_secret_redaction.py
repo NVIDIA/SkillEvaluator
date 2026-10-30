@@ -130,12 +130,17 @@ def test_runner_and_retained_publisher_never_export_detected_value(tmp_path, cap
     spec.loader.exec_module(fixtures)
 
     class ArtifactAPI(fixtures.FakeAPI):
-        def download_artifact(self, _artifact_id):
+        def download_artifact(self, artifact_id):
+            if artifact_id == 457:
+                return super().download_artifact(artifact_id)
             return old_archive.getvalue()
 
     monkeypatch.setenv("TRUSTED_EVALUATOR_SHA", "c" * 40)
     monkeypatch.setenv("TRUSTED_CALLER_BLOBS", "b" * 40)
     monkeypatch.syspath_prepend(str(ROOT / "ci"))
+    import verify_provenance
+
+    monkeypatch.setattr(verify_provenance, "fetch_signing_keys", lambda: fixtures.JWKS)
     site, feedback = tmp_path / "site", tmp_path / "feedback"
     fixtures.publisher.publish(
         ArtifactAPI(record={**fixtures.run_record(), "conclusion": "failure"}),
@@ -385,12 +390,17 @@ def _publish(tmp_path: Path, monkeypatch, reports: Path) -> tuple[Path, Path]:
                 zipped.write(path, path.relative_to(reports).as_posix())
 
     class ArtifactAPI(fixtures.FakeAPI):
-        def download_artifact(self, _artifact_id):
+        def download_artifact(self, artifact_id):
+            if artifact_id == 457:
+                return super().download_artifact(artifact_id)
             return archive.getvalue()
 
     monkeypatch.setenv("TRUSTED_EVALUATOR_SHA", "c" * 40)
     monkeypatch.setenv("TRUSTED_CALLER_BLOBS", "b" * 40)
     monkeypatch.syspath_prepend(str(ROOT / "ci"))
+    import verify_provenance
+
+    monkeypatch.setattr(verify_provenance, "fetch_signing_keys", lambda: fixtures.JWKS)
     site, feedback = tmp_path / "site", tmp_path / "feedback"
     fixtures.publisher.publish(
         ArtifactAPI(record={**fixtures.run_record(), "conclusion": "failure"}),

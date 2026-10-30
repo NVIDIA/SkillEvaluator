@@ -9,7 +9,7 @@ import os
 import stat
 from collections.abc import Collection
 from contextlib import suppress
-from pathlib import Path
+from pathlib import Path, PurePosixPath
 from typing import TYPE_CHECKING
 
 if TYPE_CHECKING:
@@ -62,6 +62,44 @@ def is_contained_compatibility_alias(path: Path, *, sibling_names: Collection[st
         and getattr(target_metadata, "st_nlink", 1) == 1
         and not target_attributes & reparse_flag
     )
+
+
+def contained_directory_alias_target(path: Path, relative: Path) -> str | None:
+    """Return the in-root target that an unselected directory alias names, or ``None``.
+
+    ``relative`` is the alias path below the scan root. Only the raw link text
+    is read; the alias is never followed. The text must be relative, may climb
+    only through the alias's own (already traversed) parent directories, and
+    must then name a path below the root that is neither the root nor an
+    ancestor of the alias. The returned POSIX-style relative path is an identity
+    claim only: callers skip the alias and accept it only when the same walk
+    independently enumerates that path as a regular directory.
+    """
+    try:
+        metadata = path.lstat()
+        target_text = os.readlink(path)  # noqa: PTH115 - validate the raw link text without following it
+    except (OSError, ValueError):
+        return None
+    if getattr(metadata, "st_nlink", 1) != 1 or not target_text or "\x00" in target_text:
+        return None
+    target = Path(target_text)
+    if target.anchor:
+        return None
+
+    parts = target.parts
+    ascent = 0
+    while ascent < len(parts) and parts[ascent] == "..":
+        ascent += 1
+    descent = parts[ascent:]
+    base = relative.parent.parts
+    # A ``..`` after a named component could climb out of a linked directory,
+    # making the lexical claim differ from the physical target.
+    if ascent > len(base) or not descent or ".." in descent:
+        return None
+    normalized = PurePosixPath(*base[: len(base) - ascent], *descent)
+    if PurePosixPath(relative.as_posix()).is_relative_to(normalized):
+        return None
+    return normalized.as_posix()
 
 
 def paths_refer_to_same_location(left: Path, right: Path) -> bool:
@@ -143,6 +181,7 @@ def sanitize_tier2_results(results: list[ValidationResult], *paths: Path | None)
 
 
 __all__ = [
+    "contained_directory_alias_target",
     "is_contained_compatibility_alias",
     "is_link_or_reparse",
     "paths_refer_to_same_location",

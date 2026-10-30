@@ -227,6 +227,97 @@ class TestCollectFiles:
         assert exc_info.value.check_name == "unsafe_path"
         assert exc_info.value.rel_path == "CLAUDE.md"
 
+    def test_contained_agent_directory_alias_is_skipped_and_target_is_collected_once(
+        self,
+        skill_root: Path,
+    ) -> None:
+        canonical = skill_root / ".claude"
+        canonical.mkdir()
+        (canonical / "shared.md").write_text("# Shared agent instructions\n")
+        try:
+            (skill_root / ".agents").symlink_to(canonical.name, target_is_directory=True)
+        except OSError as exc:
+            pytest.skip(f"symlinks unavailable: {exc}")
+
+        result = collect_files(skill_root)
+
+        assert [item.rel_path for item in result] == [".claude/shared.md"]
+
+    def test_directory_alias_counts_toward_path_budget(self, skill_root: Path, monkeypatch) -> None:
+        canonical = skill_root / ".claude"
+        canonical.mkdir()
+        (canonical / "shared.md").write_text("# Shared agent instructions\n")
+        try:
+            (skill_root / ".agents").symlink_to(canonical.name, target_is_directory=True)
+        except OSError as exc:
+            pytest.skip(f"symlinks unavailable: {exc}")
+        monkeypatch.setattr(skill_collector, "CONTENT_DEDUP_MAX_DISCOVERED_PATHS", 2)
+
+        with pytest.raises(SkillCollectionError) as exc_info:
+            collect_files(skill_root)
+
+        assert exc_info.value.check_name == "path_count_limit"
+        assert exc_info.value.metadata == {"actual": 3, "limit": 2}
+
+    def test_directory_alias_to_pruned_regular_directory_is_skipped(self, skill_root: Path) -> None:
+        (skill_root / "SKILL.md").write_text("# Skill\n")
+        (skill_root / "evals").mkdir()
+        (skill_root / "evals" / "snapshot.md").write_text("# Generated snapshot\n")
+        try:
+            (skill_root / "latest-evals").symlink_to("evals", target_is_directory=True)
+        except OSError as exc:
+            pytest.skip(f"symlinks unavailable: {exc}")
+
+        result = collect_files(skill_root)
+
+        assert [item.rel_path for item in result] == ["SKILL.md"]
+
+    def test_rejects_directory_alias_chain(self, skill_root: Path) -> None:
+        canonical = skill_root / ".canonical"
+        canonical.mkdir()
+        (canonical / "shared.md").write_text("# Shared agent instructions\n")
+        try:
+            (skill_root / ".claude").symlink_to(canonical.name, target_is_directory=True)
+            (skill_root / ".agents").symlink_to(".claude", target_is_directory=True)
+        except OSError as exc:
+            pytest.skip(f"symlinks unavailable: {exc}")
+
+        with pytest.raises(SkillCollectionError) as exc_info:
+            collect_files(skill_root)
+
+        assert exc_info.value.check_name == "unsafe_path"
+        assert exc_info.value.rel_path == ".agents"
+        assert ".agents -> .claude" in str(exc_info.value)
+
+    @pytest.mark.parametrize("alias_name", ["guide.md", "helper.PY"])
+    def test_rejects_directory_alias_with_scannable_name(self, skill_root: Path, alias_name: str) -> None:
+        canonical = skill_root / "canonical"
+        canonical.mkdir()
+        try:
+            (skill_root / alias_name).symlink_to(canonical.name, target_is_directory=True)
+        except OSError as exc:
+            pytest.skip(f"symlinks unavailable: {exc}")
+
+        with pytest.raises(SkillCollectionError) as exc_info:
+            collect_files(skill_root)
+
+        assert exc_info.value.check_name == "unsafe_path"
+        assert exc_info.value.rel_path == alias_name
+
+    @pytest.mark.parametrize("target", ["missing", ".", "..", "../outside"])
+    def test_rejects_directory_alias_without_contained_regular_target(self, skill_root: Path, target: str) -> None:
+        (skill_root.parent / "outside").mkdir()
+        try:
+            (skill_root / ".agents").symlink_to(target, target_is_directory=True)
+        except OSError as exc:
+            pytest.skip(f"symlinks unavailable: {exc}")
+
+        with pytest.raises(SkillCollectionError) as exc_info:
+            collect_files(skill_root)
+
+        assert exc_info.value.check_name == "unsafe_path"
+        assert exc_info.value.rel_path == ".agents"
+
 
 class TestCollectFilesSafety:
     @pytest.mark.skipif(os.name != "posix", reason="descriptor-anchored availability is a POSIX-specific contract")

@@ -249,6 +249,9 @@ CONTENT_DEDUP_SIMILARITY_THRESHOLD = 0.80
 
 CONTENT_DEDUP_MIN_CHUNK_CHARS = 80
 
+# Bound each provider embedding input, including dense tables and long lines.
+CONTENT_DEDUP_MAX_CHUNK_CHARS = 3000
+
 # Upper bound (in characters) for treating a repeated chunk as a "trivial"
 # duplicate. Short, single-file blocks dominated by comment/config-style lines
 # (e.g. a recurring `# default pts-tolerance is 60 ms.` config snippet) are

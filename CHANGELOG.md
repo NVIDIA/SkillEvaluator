@@ -214,6 +214,18 @@ All notable changes to SkillEvaluator are documented in this file.
   output is redirected or the search runs inside `sh -c`. Host and bundled
   scoring agree, while scoped searches and slash-valued patterns retain their
   classification.
+
+- Tier 1 security scans no longer fail a skill for an exact read-only
+  `/etc/passwd` bind mount such as `docker run -v /etc/passwd:/etc/passwd:ro`.
+  SkillSpector 2.11.1 and later tags this mount as likely benign but still
+  reports a HIGH Credential Access (PE3) finding. That finding is now ignored
+  only when it carries both benign-context tags and every `/etc/passwd` on the
+  reported source line, read without following links, is the source or target
+  of such a mount. The aggregate risk score is recomputed without it. Writable
+  or implicit-mode mounts, other paths, same-line reads such as
+  `cat /etc/passwd`, aggregated rows, and earlier SkillSpector versions still
+  block.
+
 - PII email scans recognize all RFC 2606 reserved domains, including their
   subdomains, mixed-case forms, trailing dots, and prose ellipses. A local-part
   boundary prevents quadratic rescanning of long excluded addresses. Ordinary

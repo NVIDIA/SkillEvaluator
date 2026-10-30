@@ -134,6 +134,12 @@ All notable changes to SkillEvaluator are documented in this file.
 
 ### Fixed
 
+- Tier 2 caps every intra-skill embedding chunk at 3,000 characters, preserves
+  meaningful short tails and actual Python docstring source ranges, and avoids
+  counting pieces of one original chunk as duplicates of each other. Oversized
+  Markdown sections are packed by paragraph, so short labels and fragments stay
+  attached to their neighbours, source ranges retain blank-line gaps, and findings
+  list a split source once.
 - Local-mode verifier uploads now copy directly to the absent destination,
   avoiding an unnecessary rollback snapshot of an empty tests directory.
   Inputs and rewritten scripts are prepared privately before publication,

@@ -26,6 +26,9 @@ MAX_STRUCTURED_NODES = 20_000
 MAX_STRUCTURED_COLLECTION_ITEMS = 1_024
 MAX_YAML_ALIAS_REFERENCES = 1_024
 MAX_STRUCTURED_SCALAR_CHARS = 65_536
+# About 4,215 decimal digits: Python formats ints up to 4,300 digits by default.
+MAX_STRUCTURED_INT_BITS = 14_000
+_YAML_MERGE_TAG = "tag:yaml.org,2002:merge"
 
 
 class StructuredDataError(ValueError):
@@ -50,30 +53,39 @@ class _MergeBoundedSafeLoader(yaml.SafeLoader):
 
 
 class _UniqueKeySafeLoader(_MergeBoundedSafeLoader):
-    """SafeLoader variant that rejects ambiguous last-key-wins mappings."""
+    """SafeLoader variant that rejects a mapping repeating one of its own keys.
 
-    def construct_mapping(self, node: MappingNode, deep: bool = False) -> dict[object, object]:
-        if not isinstance(node, MappingNode):
-            raise ConstructorError(None, None, "expected a mapping node", node.start_mark)
-        self.flatten_mapping(node)
-        mapping: dict[object, object] = {}
-        for key_node, value_node in node.value:
-            key = self.construct_object(key_node, deep=deep)
-            try:
-                duplicate = key in mapping
-            except TypeError as exc:
-                raise ConstructorError(
-                    "while constructing a mapping", node.start_mark, "unhashable key", key_node.start_mark
-                ) from exc
-            if duplicate:
-                raise ConstructorError(
-                    "while constructing a mapping",
-                    node.start_mark,
-                    "duplicate mapping key",
-                    key_node.start_mark,
-                )
-            mapping[key] = self.construct_object(value_node, deep=deep)
-        return mapping
+    A merged key is not a duplicate: as in YAML 1.1, the mapping's own keys
+    override merged ones and an earlier merge source overrides a later one.
+    """
+
+    def __init__(self, stream: str) -> None:
+        super().__init__(stream)
+        self._own_keys_checked: set[int] = set()
+
+    def flatten_mapping(self, node: MappingNode) -> None:
+        # Flattening puts the merged pairs in front of the node's own pairs, so
+        # check the own keys before the first flattening, which can come from a
+        # mapping that merges this node before the node itself is constructed.
+        if id(node) not in self._own_keys_checked:
+            self._own_keys_checked.add(id(node))
+            seen: set[object] = set()
+            for key_node, _ in node.value:
+                if key_node.tag == _YAML_MERGE_TAG:
+                    continue
+                key = self.construct_object(key_node)
+                try:
+                    duplicate = key in seen
+                except TypeError as exc:
+                    raise ConstructorError(
+                        "while constructing a mapping", node.start_mark, "unhashable key", key_node.start_mark
+                    ) from exc
+                if duplicate:
+                    raise ConstructorError(
+                        "while constructing a mapping", node.start_mark, "duplicate mapping key", key_node.start_mark
+                    )
+                seen.add(key)
+        super().flatten_mapping(node)
 
 
 def _limit(message: str) -> StructuredDataLimitError:
@@ -101,7 +113,7 @@ def _preflight_yaml_merge_work(root: Node) -> None:
             merges = []
             for key, value in node.value:
                 pending.extend((key, value))
-                if key.tag != "tag:yaml.org,2002:merge":
+                if key.tag != _YAML_MERGE_TAG:
                     own_pairs += 1
                 elif isinstance(value, MappingNode):
                     merges.append(id(value))
@@ -204,6 +216,10 @@ def _validate_graph(
             stack.extend((item, depth + 1) for item in current)
         elif isinstance(current, (str, bytes, bytearray)) and len(current) > MAX_STRUCTURED_SCALAR_CHARS:
             raise _limit(f"scalar length exceeds {MAX_STRUCTURED_SCALAR_CHARS}")
+        elif isinstance(current, int) and current.bit_length() > MAX_STRUCTURED_INT_BITS:
+            # Hexadecimal, binary, octal and sexagesimal YAML integers skip the
+            # decimal digit limit of int(), and str() would then raise.
+            raise _limit(f"integer size exceeds {MAX_STRUCTURED_INT_BITS} bits")
 
 
 def load_bounded_yaml(raw: str, *, last_key_wins: bool = False) -> Any:
@@ -219,7 +235,9 @@ def load_bounded_yaml(raw: str, *, last_key_wins: bool = False) -> Any:
         raise
     except (RecursionError, OverflowError) as exc:
         raise _limit("constructor recursion or numeric range") from exc
-    except (yaml.YAMLError, ValueError) as exc:
+    except (yaml.YAMLError, ValueError, IndexError, KeyError, AttributeError, TypeError) as exc:
+        # SafeLoader's scalar constructors raise the lookup and attribute errors
+        # for explicitly tagged values such as ``!!int ""`` or ``!!bool nope``.
         raise StructuredDataSyntaxError("Input is not valid YAML") from exc
     _validate_graph(value)
     return value

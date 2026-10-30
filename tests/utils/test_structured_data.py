@@ -84,13 +84,32 @@ def test_bounded_yaml_preserves_merge_precedence_and_duplicate_key_policy() -> N
         "value: {<<: [*first, *second], count: 3}"
     )
 
-    assert load_bounded_yaml(raw, last_key_wins=True)["value"] == {
-        "name": "first",
-        "enabled": True,
-        "count": 3,
-    }
+    # Own keys override merged ones and an earlier merge source wins, so
+    # neither overlap is a duplicate key, in either mode.
+    for last_key_wins in (False, True):
+        assert load_bounded_yaml(raw, last_key_wins=last_key_wins)["value"] == {
+            "name": "first",
+            "enabled": True,
+            "count": 3,
+        }
     with pytest.raises(StructuredDataSyntaxError):
-        load_bounded_yaml(raw)
+        load_bounded_yaml(raw + "\nrepeated: {<<: *first, count: 1, count: 2}")
+
+
+def test_bounded_yaml_lets_own_keys_override_a_merge_in_unique_key_mode() -> None:
+    raw = "defaults: &defaults\n  timeout: 10\n  retries: 2\nservice:\n  <<: *defaults\n  timeout: 30\n"
+
+    assert load_bounded_yaml(raw)["service"] == {"timeout": 30, "retries": 2}
+
+
+def test_bounded_yaml_checks_own_keys_of_a_mapping_flattened_as_a_merge_source_first() -> None:
+    # The outer mapping flattens ``inner`` (merging ``base`` into it) before
+    # ``inner`` itself is constructed; its own keys still decide duplicates.
+    raw = "base: &base {timeout: 10}\nouter: {inner: &inner {<<: *base, timeout: 30}, <<: *inner}"
+
+    assert load_bounded_yaml(raw)["outer"] == {"inner": {"timeout": 30}, "timeout": 30}
+    with pytest.raises(StructuredDataSyntaxError):
+        load_bounded_yaml("base: &base {a: 1}\nouter: {inner: &inner {<<: *base, b: 1, b: 2}, <<: *inner}")
 
 
 @pytest.mark.parametrize("last_key_wins", [False, True])
@@ -297,3 +316,51 @@ def test_bounded_json_limit_overrides_apply_to_the_preflight_and_the_parsed_grap
     assert len(load_bounded_json(nested, max_nodes=1_201)) == 600
     with pytest.raises(StructuredDataLimitError, match=r"node or edge count exceeds 1200"):
         load_bounded_json(nested, max_nodes=1_200)
+
+
+@pytest.mark.parametrize("last_key_wins", [False, True])
+def test_bounded_yaml_bounds_a_set_like_a_mapping(last_key_wins: bool) -> None:
+    # A !!set is written as a mapping, so the composed-node preflight bounds it.
+    assert load_bounded_yaml("skills: !!set {a, b}", last_key_wins=last_key_wins) == {"skills": {"a", "b"}}
+    raw = "skills: !!set\n" + "".join(f"  ? k{i}\n" for i in range(1_025))
+
+    with pytest.raises(StructuredDataLimitError, match=r"mapping size exceeds 1024"):
+        load_bounded_yaml(raw, last_key_wins=last_key_wins)
+
+
+@pytest.mark.parametrize(
+    "scalar",
+    ["0x" + "f" * 4_000, "0b" + "1" * 16_000, "0" + "7" * 6_000, "1" + ":59" * 3_000],
+    ids=["hex", "binary", "octal", "sexagesimal"],
+)
+def test_bounded_yaml_rejects_integers_too_large_to_format(scalar: str) -> None:
+    with pytest.raises(StructuredDataLimitError, match=r"integer size exceeds"):
+        load_bounded_yaml(f"version: {scalar}")
+
+
+def test_bounded_yaml_accepts_an_integer_at_the_size_limit() -> None:
+    value = load_bounded_yaml("version: 0x" + "f" * 3_500)["version"]
+
+    assert value.bit_length() == 14_000
+    assert len(str(value)) == 4_215
+
+
+@pytest.mark.parametrize("last_key_wins", [False, True])
+@pytest.mark.parametrize(
+    "raw",
+    [
+        'version: !!int ""',
+        'version: !!int "-"',
+        'version: !!int "+"',
+        'version: !!int "_"',
+        'version: !!float ""',
+        'version: !!float "__"',
+        'enabled: !!bool ""',
+        "enabled: !!bool nope",
+        'released: !!timestamp ""',
+        "released: !!timestamp later",
+    ],
+)
+def test_bounded_yaml_reports_invalid_tagged_scalars_as_syntax_errors(raw: str, last_key_wins: bool) -> None:
+    with pytest.raises(StructuredDataSyntaxError, match=r"not valid YAML"):
+        load_bounded_yaml(raw, last_key_wins=last_key_wins)

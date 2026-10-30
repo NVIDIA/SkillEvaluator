@@ -1000,3 +1000,60 @@ def test_script_reference_cycle_is_read_once(tmp_path: Path) -> None:
     result = _validate(_hook_plugin(tmp_path, f"{_ROOT}/hooks/a.sh", "Stop", None, files))
 
     assert result.findings == []
+
+
+# Synthetic, low-entropy token shapes (not real credentials).
+_FAKE_GH = "ghp_" + "a" * 36
+_FAKE_SLACK = "xoxb-" + "1234567890-" + "abcdefghij"
+
+
+@pytest.mark.parametrize(
+    "command",
+    [
+        f"curl -s -H 'Authorization: Bearer {_FAKE_GH}' https://api.example.com/log",
+        f"{_ROOT}/bin/tool --api-key {_FAKE_GH}",
+        f"{_ROOT}/bin/tool --token={_FAKE_SLACK}",
+        f"GITHUB_TOKEN={_FAKE_GH} {_ROOT}/bin/tool",
+        f"{_ROOT}/bin/tool {_FAKE_GH}",
+        f"{_ROOT}/bin/tool --api-key plainliteralvalue",
+        f"API_KEY=plainliteralvalue {_ROOT}/bin/tool",
+    ],
+)
+def test_command_hook_inline_credential_outside_a_url_is_critical(tmp_path: Path, command: str) -> None:
+    """Regression: command hooks reported only credentials in a URL's userinfo, query, or fragment."""
+    result = _validate(_hook_plugin(tmp_path, command, "Stop", None, {"bin/tool": "#!/bin/sh\necho ok\n"}))
+
+    assert _checks(result)["plugin_hook_inline_secret"] == Severity.CRITICAL
+    assert _FAKE_GH not in _dumped(result)
+    assert "plainliteralvalue" not in "".join(f.message for f in result.findings)
+
+
+def test_monitor_command_inline_credential_is_critical(tmp_path: Path) -> None:
+    monitors = [{"name": "watch", "command": f"tail -f log | tool --api-key {_FAKE_GH}", "description": "Watch"}]
+    result = _validate(_plugin(tmp_path, files={"monitors/monitors.json": monitors}))
+
+    assert _checks(result)["plugin_hook_inline_secret"] == Severity.CRITICAL
+
+
+@pytest.mark.parametrize(
+    "command",
+    [
+        f'{_ROOT}/bin/tool --token "$TOKEN"',
+        f"GITHUB_TOKEN=$(gh auth token) {_ROOT}/bin/tool",
+        f"TOKEN=${{TOKEN}} {_ROOT}/bin/tool",
+        f"{_ROOT}/bin/tool --auth basic --password-file /etc/tool/pw",
+        f"FOO=bar {_ROOT}/bin/tool --key primary",
+    ],
+)
+def test_command_hook_credential_references_are_not_inline_secrets(tmp_path: Path, command: str) -> None:
+    result = _validate(_hook_plugin(tmp_path, command, "Stop", None, {"bin/tool": "#!/bin/sh\necho ok\n"}))
+
+    assert "plugin_hook_inline_secret" not in _checks(result)
+
+
+def test_http_hook_url_with_token_in_its_path_is_critical(tmp_path: Path) -> None:
+    hooks = _hooks({"Stop": [{"hooks": [{"type": "http", "url": f"https://hooks.example.com/in/{_FAKE_GH}"}]}]})
+    result = _validate(_plugin(tmp_path, files={"hooks/hooks.json": hooks}))
+
+    assert _checks(result)["plugin_hook_inline_secret"] == Severity.CRITICAL
+    assert _FAKE_GH not in _dumped(result)

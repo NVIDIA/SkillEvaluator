@@ -64,6 +64,7 @@ from skillevaluator.validators.mcp_static import (
     TRUTHY_VALUES,
     EndpointClass,
     HostAllowlist,
+    _inline_credentials,
     _split_words,
     classify_endpoint_host,
     classify_mcp_pinning,
@@ -72,6 +73,7 @@ from skillevaluator.validators.mcp_static import (
 )
 from skillevaluator.validators.url_policy import (
     DEFAULT_PORTS,
+    has_secret_shape,
     is_env_reference,
     looks_like_inline_secret,
     safe_url,
@@ -2749,6 +2751,37 @@ def _command_url_credentials(text: str) -> bool:
     return any(url_credentials(match.group(0), userinfo_rule="secret") for match in _URL_IN_TEXT_RE.finditer(text))
 
 
+def _command_inline_credential(tokens: list[str]) -> bool:
+    """Whether hook command words carry a credential outside a URL: the value of a credential-named flag
+    (``--api-key x``, the MCP command-argument rule), a word shaped like a token or an inline ``Bearer``
+    credential (``-H "Authorization: Bearer ghp_..."``), or a literal assigned to a credential-named variable
+    (``GITHUB_TOKEN=x tool``). References (``$TOKEN``, ``${TOKEN}``) and command substitutions never count."""
+    words: list[str] = []
+    for token in tokens:
+        words.append(token)
+        if any(char.isspace() for char in token.strip()):  # a quoted command string, split once more
+            words.extend(_split_words(token))
+    if _inline_credentials(words):
+        return True
+    for word in words:
+        assignment = _ASSIGNMENT_WORD_RE.match(word)
+        if assignment is None:
+            continue
+        name, value = word[: assignment.end() - 1], word[assignment.end() :]
+        if "$(" not in value and "`" not in value and looks_like_inline_secret(name, value, query=False):
+            return True
+    return False
+
+
+def _url_path_secret(url: str) -> bool:
+    """Whether a URL's path has a segment shaped like a token (``https://hooks.example/ghp_...``)."""
+    try:
+        path = urlsplit(url).path
+    except ValueError:
+        return False
+    return any(has_secret_shape(unquote(segment)) for segment in path.split("/") if segment)
+
+
 def _header_secret(key: str, value: str) -> bool:
     """Inline credential in an HTTP hook header (``$VAR`` interpolation is allowed)."""
     stripped = value.strip()
@@ -3555,13 +3588,13 @@ class HookAnalyzer:
                 "their ${CLAUDE_PLUGIN_ROOT} path, and keep their number and size small; review the script, "
                 "then override with severity_overrides PLUGIN_SCHEMA.plugin_hook_script_unanalyzed if intended.",
             )
-        if _command_url_credentials(text):
+        if _command_url_credentials(text) or _command_inline_credential(tokens):
             site.report(
                 "inline_secret",
                 Severity.CRITICAL,
                 "plugin_hook_inline_secret",
-                "the command embeds a credential in a URL (user:password@, or a credential query or fragment "
-                "parameter)",
+                "the command embeds a credential (in a URL's user:password@ or a credential query or fragment "
+                "parameter, a credential-named flag or variable, or a token-shaped argument)",
                 "Remove the credential from the hook command; read it from an environment variable or a "
                 "credential helper when the hook runs.",
             )
@@ -3731,12 +3764,17 @@ class HookAnalyzer:
         # Read from the URL text, so credentials are flagged even when the authority is malformed. Both
         # readings count: any userinfo Claude Code would send, and a literal password or token in the
         # raw text (committed with the plugin even when a backslash moves it out of the client's userinfo).
-        if url_credentials(client_url, userinfo_rule="any") or url_credentials(record.url, userinfo_rule="secret"):
+        if (
+            url_credentials(client_url, userinfo_rule="any")
+            or url_credentials(record.url, userinfo_rule="secret")
+            or _url_path_secret(client_url)
+        ):
             site.report(
                 "inline_secret",
                 Severity.CRITICAL,
                 "plugin_hook_inline_secret",
-                "the http handler url embeds credentials (user:password, or a credential query or fragment parameter)",
+                "the http handler url embeds credentials (user:password, a credential query or fragment parameter, "
+                "or a token in its path)",
                 "Remove credentials from the URL; pass them through headers with $VAR interpolation and "
                 "allowedEnvVars.",
             )

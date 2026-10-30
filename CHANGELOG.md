@@ -304,6 +304,12 @@ All notable changes to SkillEvaluator are documented in this file.
   Harbor, so Docker Desktop finds its `compose` plugin, and passes
   `PYTHONUTF8` and `PYTHONIOENCODING` so Python UTF-8 mode reaches Harbor on
   non-UTF-8 locales.
+- On native Windows, generated Tier 3 `test.sh` files and the grader starters
+  from `init-custom-grader` and `init-harbor-task` are now written with LF line
+  endings. They were written with CRLF, which broke the `#!/bin/bash` shebang
+  and `set -euo pipefail` in the Linux container, so the verifier failed
+  before grading. The repository's `.gitattributes` also keeps `*.sh` files LF
+  in Windows checkouts.
 - A `SKILL.md` `metadata` value that is not a mapping, such as `true`, `1.5`, a
   date, or a list or string containing `author` or `tags`, no longer crashes
   the quality check with a `TypeError`, which aborted `validate`, `tier1`, and

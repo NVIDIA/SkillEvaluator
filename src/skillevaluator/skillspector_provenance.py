@@ -86,7 +86,9 @@ SKILLSPECTOR_LLM_PROVENANCE_MAX_SEED = (1 << 63) - 1
 _LABEL_RE = re.compile(r"[A-Za-z0-9][A-Za-z0-9._:/+\-]{0,255}")
 _SETTING_RE = re.compile(r"[A-Za-z0-9][A-Za-z0-9 ._:/+\-]{0,255}")
 _SOURCE_REVISION_RE = re.compile(r"[0-9a-f]{7,64}")
-_CREDENTIAL_PREFIXES = ("sk-", "nvapi-", "ghp_", "glpat-", "bearer-")
+# Token prefixes rejected at the start of a label, in addition to the shapes
+# that the shared ``contains_credential_value`` check matches anywhere.
+_CREDENTIAL_PREFIXES = ("sk-", "nvapi-", "ghp_", "glpat-", "bearer-", "hf_", "npm_", "pypi-")
 
 
 def _bounded_text(value: object, *, max_length: int) -> str | None:
@@ -156,11 +158,13 @@ def _sanitize_control(name: str, value: object, *, expected_adapter_support: boo
         forwarded = _scalar(value.get("forwarded_to_client"))
     except ValueError:
         return None
-    if source != "environment" and (requested is not None or forwarded is not None):
+    if (source == "environment") != (requested is not None):
         return None
-    if source == "environment" and requested is None:
-        return None
-    if forwarded is not None and (not adapter_support or forwarded != requested):
+    # SkillSpector reads the forwarded value from the provider request
+    # payload, separately from the request, so a client default or override
+    # can differ from ``requested`` or appear without one. Only adapters that
+    # support the control report it.
+    if forwarded is not None and not adapter_support:
         return None
     return {
         "requested": requested,

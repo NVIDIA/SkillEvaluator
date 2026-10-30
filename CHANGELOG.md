@@ -85,10 +85,12 @@ All notable changes to SkillEvaluator are documented in this file.
   determinism evidence. The Security result in the JSON report carries it as
   `skillspector_llm_provenance`, next to `skillspector_provider_id`, the
   SkillEvaluator provider the scan was bridged from (for example `nv_build`,
-  which SkillSpector runs as its `openai` adapter). The HTML report lists it
-  in a collapsible Tier 1 LLM Provenance table. The record is kept even when
-  SkillSpector does not confirm LLM analysis, so the report shows what was
-  attempted. Records that do not match SkillSpector's provenance contract or
+  which SkillSpector runs as its `openai` adapter). The HTML report, including
+  CI pages rendered from the retained Tier 1 JSON, lists it in a collapsible
+  Tier 1 LLM Provenance table. The record is also kept when the LLM stage
+  fails or SkillSpector does not confirm LLM analysis, as long as
+  SkillSpector's JSON output carries a valid record, so the report shows what
+  was attempted. Records that do not match SkillSpector's provenance contract or
   that contain endpoint- or credential-shaped values are left out, and older
   SkillSpector releases produce no record.
 

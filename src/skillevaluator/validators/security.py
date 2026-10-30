@@ -382,6 +382,16 @@ def _skillspector_llm_stderr_failed(stderr: str) -> bool:
     return any(marker in normalized for marker in _SKILLSPECTOR_LLM_FAILURE_MARKERS)
 
 
+def _skillspector_report_llm_provenance(report: object) -> dict | None:
+    """Return the validated ``metadata.llm_provenance`` of a SkillSpector JSON report, if any."""
+    if not isinstance(report, Mapping):
+        return None
+    metadata = report.get("metadata")
+    if not isinstance(metadata, Mapping):
+        return None
+    return sanitize_skillspector_llm_provenance(metadata.get("llm_provenance"))
+
+
 def _copy_selected_environment(environ: Mapping[str, str], names: Iterable[str]) -> dict[str, str]:
     return {name: environ[name] for name in names if environ.get(name, "").strip()}
 
@@ -406,8 +416,10 @@ def _skillspector_operator_env(environ: Mapping[str, str]) -> dict[str, str]:
 def _skillspector_provider_env() -> tuple[dict[str, str], str | None]:
     """Map public provider settings into an invocation-scoped SkillSpector environment.
 
-    Also returns the SkillEvaluator provider the bridge resolved, or ``None``
-    for an explicit ``SKILLSPECTOR_PROVIDER`` passthrough or no provider.
+    Also returns the SkillEvaluator provider the bridge resolved. It is ``None``
+    when ``SKILLSPECTOR_PROVIDER`` selects a SkillSpector adapter directly or
+    names an unsupported provider, and when no provider resolves.
+    ``SKILLSPECTOR_PROVIDER=nv_build`` is bridged and returns ``nv_build``.
     """
     source = os.environ
     child_env = _skillspector_process_env(source)
@@ -848,6 +860,18 @@ class SecurityValidator(ValidatorBase):
         else:
             child_env = _skillspector_process_env()
         tool_result = Tools.skillspector.run(args, timeout=300, env=child_env, replace_env=True)
+        try:
+            data = parse_json_output(tool_result.stdout)
+        except (RecursionError, ValueError):
+            data = None
+        if use_llm:
+            # Recorded before the completeness checks below, so a failed or
+            # unconfirmed LLM stage still names the provider and models it
+            # attempted. Only a record that passes the strict provenance
+            # contract is kept, and it never makes the stage complete.
+            provenance = _skillspector_report_llm_provenance(data)
+            if provenance is not None:
+                result.metadata["skillspector_llm_provenance"] = provenance
 
         if tool_result.exit_code not in _SKILLSPECTOR_POLICY_EXIT_CODES:
             detail = tool_result.error_message or (
@@ -865,10 +889,6 @@ class SecurityValidator(ValidatorBase):
             result.mark_scan_incomplete(stage_name)
             return result
 
-        try:
-            data = parse_json_output(tool_result.stdout)
-        except (RecursionError, ValueError):
-            data = None
         if data is None:
             result.add_error(
                 f"{stage_name} did not return valid JSON (exit code {tool_result.exit_code}); "
@@ -900,12 +920,6 @@ class SecurityValidator(ValidatorBase):
             return result
 
         metadata = data.get("metadata") or {}
-        if use_llm:
-            # Kept even when LLM analysis is unconfirmed below, so the report
-            # names the provider and models that were attempted.
-            provenance = sanitize_skillspector_llm_provenance(metadata.get("llm_provenance"))
-            if provenance is not None:
-                result.metadata["skillspector_llm_provenance"] = provenance
         if use_llm and not (metadata.get("llm_requested") is True and metadata.get("llm_available") is True):
             result.add_error(
                 "skillspector-llm did not confirm available LLM analysis; provider or model diagnostics were redacted"

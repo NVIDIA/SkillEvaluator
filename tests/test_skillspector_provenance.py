@@ -96,6 +96,58 @@ def test_llm_stage_without_executed_analyzers_is_not_applicable() -> None:
     assert canonical["determinism"]["reason"] == "LLM analysis was not executed for this scan."
 
 
+@pytest.mark.parametrize(
+    ("control", "update"),
+    [
+        # A client default the provider request carried although nothing was requested.
+        pytest.param(
+            "temperature",
+            {"requested": None, "source": "provider_default", "forwarded_to_client": 1.0},
+            id="client-injected-default",
+        ),
+        # A client override of the requested value.
+        pytest.param(
+            "temperature",
+            {"requested": 0.0, "source": "environment", "forwarded_to_client": 1.0},
+            id="client-overrode-request",
+        ),
+        pytest.param("reasoning_effort", {"forwarded_to_client": "high"}, id="forwarded-differs-from-request"),
+    ],
+)
+def test_controls_the_client_forwarded_on_its_own_are_kept(control: str, update: dict) -> None:
+    record = _provenance()
+    record["sampling"][control].update(update)
+
+    canonical = sanitize_skillspector_llm_provenance(record)
+
+    assert canonical is not None
+    assert canonical["sampling"][control] == record["sampling"][control]
+
+
+def _anthropic_record() -> dict:
+    record = _provenance()
+    record["provider"].update(
+        configured_adapter="anthropic",
+        resolved_adapter="anthropic",
+        effective_adapter="anthropic",
+        effective_adapters=["anthropic"],
+    )
+    record["sampling"]["seed"]["adapter_support"] = False
+    return record
+
+
+def test_adapter_without_seed_support_is_accepted() -> None:
+    record = _anthropic_record()
+
+    assert sanitize_skillspector_llm_provenance(record) == record
+
+
+def _forward_seed_on_anthropic(record: dict) -> None:
+    record.clear()
+    record.update(_anthropic_record())
+    record["sampling"]["seed"]["forwarded_to_client"] = 7
+
+
 def _set_schema_version(value: object) -> Callable[[dict], None]:
     return lambda record: record.update(schema_version=value)
 
@@ -113,6 +165,9 @@ def _set_schema_version(value: object) -> Callable[[dict], None]:
         pytest.param(lambda record: _set_model(record, "user@example.test"), id="email-model"),
         pytest.param(lambda record: _set_model(record, "sk-" + "a" * 24), id="api-key-model"),
         pytest.param(lambda record: _set_model(record, "AI" + "za" + "A" * 35), id="google-key-model"),
+        pytest.param(lambda record: _set_model(record, "hf" + "_" + "a" * 34), id="hugging-face-token-model"),
+        pytest.param(lambda record: _set_model(record, "npm" + "_" + "a" * 36), id="npm-token-model"),
+        pytest.param(lambda record: _set_model(record, "pypi" + "-" + "A" * 90), id="pypi-token-model"),
         pytest.param(lambda record: _set_model(record, "model <b>"), id="markup-model"),
         pytest.param(lambda record: _set_model(record, None), id="missing-model"),
         pytest.param(
@@ -133,9 +188,18 @@ def _set_schema_version(value: object) -> Callable[[dict], None]:
             lambda record: record["sampling"]["seed"].update(adapter_support=False),
             id="adapter-support-mismatch",
         ),
+        pytest.param(_forward_seed_on_anthropic, id="forwarded-without-adapter-support"),
         pytest.param(
-            lambda record: record["sampling"]["reasoning_effort"].update(forwarded_to_client="high"),
-            id="forwarded-differs",
+            lambda record: record["sampling"]["temperature"].update(forwarded_to_client=2.0),
+            id="forwarded-temperature-out-of-range",
+        ),
+        pytest.param(
+            lambda record: record["sampling"]["seed"].update(forwarded_to_client=True),
+            id="forwarded-boolean-seed",
+        ),
+        pytest.param(
+            lambda record: record["sampling"]["reasoning_effort"].update(forwarded_to_client="sk-" + "a" * 24),
+            id="forwarded-credential",
         ),
         pytest.param(
             lambda record: record["sampling"]["seed"].update(requested=7),

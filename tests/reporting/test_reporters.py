@@ -1881,7 +1881,7 @@ class TestSkillSpectorProvenanceReporting:
         assert credential not in html
         assert credential not in json.dumps(data)
         assert "skillspector_llm_provenance" not in data["results"][0]
-        assert "No valid LLM provenance was reported" in _html_tab(html, "tier1")
+        assert "No valid LLM provenance was recorded for this scan." in _html_tab(html, "tier1")
         assert _html_report_data(html)["skillspector_provenance"] == [{"provider_id": "nv_build", "provenance": None}]
 
     def test_reports_without_provenance_add_nothing(self) -> None:

@@ -11,8 +11,12 @@ rows only; rows of overridden or additional client views stay audit records.
 
 from __future__ import annotations
 
+import json
+import os
+import re
+import stat
 from collections.abc import Mapping, Sequence
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from pathlib import Path, PurePosixPath
 from typing import TYPE_CHECKING, Any
 
@@ -281,3 +285,217 @@ def _member_text(reader: PluginRootReader, manifest: Mapping[str, Any], member: 
         return reader.read_text(PurePosixPath(member.path), CONTENT_DEDUP_MAX_FILE_BYTES)
     except (SecurePathError, OSError) as exc:
         raise PreparationError(f"Refusing unsafe or unreadable plugin {member.type} '{member.path}': {exc}") from exc
+
+
+#: Upper bound on combined evaluation cases (bounded work before any agent runs).
+MAX_DATASET_CASES = 1000
+_EVALUATOR_DIRS = frozenset({"evals", "eval"})
+_MEMBER_LAYOUTS = (("evals", "evals"), ("eval", "dataset"))
+
+
+@dataclass(frozen=True)
+class WrapperSkill:
+    """The generated skill the existing engine evaluates for a prepared plugin."""
+
+    name: str
+    path: Path
+    #: Case id -> the plugin-root-relative dataset file it came from (provenance, not the wrapper path).
+    case_sources: Mapping[str, str] = field(default_factory=dict)
+
+
+def wrapper_skill_name(plugin_name: str) -> str:
+    return f"plugin-{native.plugin_slug(plugin_name)}"
+
+
+def stage_wrapper_skill(
+    package: PreparedRuntimePackage,
+    destination: Path,
+    *,
+    evals_source: Path | None = None,
+    max_cases: int = MAX_DATASET_CASES,
+) -> WrapperSkill:
+    """Write the wrapper skill and its combined dataset at ``destination`` (all or nothing).
+
+    Member skills are copied without their evaluation directories, so datasets,
+    answers, and fixtures are visible to the verifier only. An explicit
+    ``evals_source`` replaces the member datasets. Case ids are deterministic
+    and unique; fixtures that collide across members are refused.
+    """
+    import shutil
+    import tempfile
+
+    from skillevaluator.tier3.harbor.secure_copy import UnsafeStagingError, copytree_secure
+
+    if os.path.lexists(destination):
+        raise PreparationError(f"wrapper destination already exists: {destination}")
+    name = wrapper_skill_name(package.plugin_name)
+    temp = Path(tempfile.mkdtemp(prefix=f".{destination.name}-", dir=destination.parent))
+    try:
+        entries, sources, fixtures = _collect_dataset(package, evals_source)
+        if not entries:
+            raise PreparationError("plugin has no evaluation dataset: pass an eval source or add member evals")
+        if len(entries) > max_cases:
+            raise PreparationError(f"plugin dataset has {len(entries)} cases, over the {max_cases}-case limit")
+        evals_dir = temp / "evals"
+        evals_dir.mkdir()
+        (evals_dir / "evals.json").write_text(json.dumps(entries, indent=2), encoding="utf-8")
+        for rel, source in fixtures.items():
+            target = evals_dir / "files" / rel
+            target.parent.mkdir(parents=True, exist_ok=True)
+            target.write_bytes(source)
+        for member in package.skills:
+            member_dir = package.native_source.plugin_root / str(member.path)
+            try:
+                copytree_secure(member_dir, temp / "skills" / member_dir.name, ignore=_evaluator_ignore(member_dir))
+            except (UnsafeStagingError, OSError) as exc:
+                raise PreparationError(f"Refusing to stage member skill '{member.name}': {exc}") from exc
+        (temp / "SKILL.md").write_text(_wrapper_markdown(name, package), encoding="utf-8")
+        temp.rename(destination)
+    except BaseException:
+        shutil.rmtree(temp, ignore_errors=True)
+        raise
+    return WrapperSkill(name, destination, sources)
+
+
+def _evaluator_ignore(member_dir: Path):
+    def ignore(directory: str, contents: list[str]) -> list[str]:
+        if Path(directory) != member_dir:
+            return []
+        return [entry for entry in contents if entry in _EVALUATOR_DIRS]
+
+    return ignore
+
+
+def _wrapper_markdown(name: str, package: PreparedRuntimePackage) -> str:
+    description = package.description or f"Use the {package.plugin_name} plugin."
+    lines = [
+        "---",
+        f"name: {name}",
+        f"description: {json.dumps(description)}",
+        "---",
+        f"# {package.plugin_name}",
+        "",
+    ]
+    for member in package.skills:
+        lines.append(f"- `skills/{Path(str(member.path)).name}/SKILL.md`: {member.name}")
+    for rule_name, text in package.native_source.rules:
+        lines.extend(["", f"## Rule: {rule_name}", "", text.strip()])
+    return "\n".join(lines).rstrip() + "\n"
+
+
+def _collect_dataset(
+    package: PreparedRuntimePackage, evals_source: Path | None
+) -> tuple[list[dict[str, Any]], dict[str, str], dict[str, bytes]]:
+    seen: set[str] = set()
+    entries: list[dict[str, Any]] = []
+    sources: dict[str, str] = {}
+    fixtures: dict[str, bytes] = {}
+    owners: dict[str, str] = {}
+    root = package.native_source.plugin_root
+    if evals_source is not None:
+        dataset = _dataset_file(evals_source, (("", "evals"),)) if evals_source.is_dir() else evals_source
+        if dataset is None:
+            raise PreparationError(f"no evaluation dataset in {evals_source}")
+        for index, entry in enumerate(_read_dataset(dataset), start=1):
+            case_id = _unique_id(_safe_id(str(entry.get("id") or f"case-{index:03d}")), seen)
+            entries.append({**entry, "id": case_id, "plugin_eval_target": package.plugin_name})
+            sources[case_id] = str(dataset)
+        _read_fixtures(dataset.parent / "files", "eval source", fixtures, owners)
+        return entries, sources, fixtures
+    for member in package.skills:
+        member_dir = root / str(member.path)
+        dataset = _dataset_file(member_dir, _MEMBER_LAYOUTS)
+        if dataset is None:
+            continue
+        skill = member_dir.name
+        for index, entry in enumerate(_read_dataset(dataset), start=1):
+            case_id = _unique_id(_safe_id(f"{skill}-{entry.get('id') or f'case-{index:03d}'}"), seen)
+            combined = {**entry, "id": case_id, "plugin_eval_source_skill": skill}
+            combined.setdefault("expected_skill", skill)
+            combined["plugin_eval_target"] = package.plugin_name
+            entries.append(combined)
+            sources[case_id] = dataset.relative_to(root).as_posix()
+        _read_fixtures(dataset.parent / "files", skill, fixtures, owners)
+    return entries, sources, fixtures
+
+
+def _dataset_file(directory: Path, layouts: Sequence[tuple[str, str]]) -> Path | None:
+    from skillevaluator.tier3.dataset_utils import DATASET_EXTENSIONS
+
+    for folder, stem in layouts:
+        for extension in DATASET_EXTENSIONS:
+            candidate = directory / folder / f"{stem}{extension}"
+            if os.path.lexists(candidate):
+                return candidate
+    return None
+
+
+def _read_regular(path: Path) -> bytes:
+    try:
+        metadata = path.lstat()
+    except OSError as exc:
+        raise PreparationError(f"cannot inspect {path}: {exc}") from exc
+    if stat.S_ISLNK(metadata.st_mode):
+        raise PreparationError(f"Refusing linked evaluation file: {path}")
+    if not stat.S_ISREG(metadata.st_mode) or metadata.st_nlink != 1:
+        raise PreparationError(f"Refusing non-regular evaluation file: {path}")
+    if metadata.st_size > CONTENT_DEDUP_MAX_FILE_BYTES:
+        raise PreparationError(f"evaluation file exceeds the {CONTENT_DEDUP_MAX_FILE_BYTES}-byte limit: {path}")
+    fd = os.open(path, os.O_RDONLY | getattr(os, "O_NOFOLLOW", 0))
+    with os.fdopen(fd, "rb") as handle:
+        data = handle.read(CONTENT_DEDUP_MAX_FILE_BYTES + 1)
+    if len(data) > CONTENT_DEDUP_MAX_FILE_BYTES:
+        raise PreparationError(f"evaluation file grew past the size limit while reading: {path}")
+    return data
+
+
+def _read_dataset(path: Path) -> list[dict[str, Any]]:
+    from skillevaluator.tier3.dataset_utils import normalize_dataset_entries
+    from skillevaluator.utils.structured_data import StructuredDataError, load_bounded_json, load_bounded_yaml
+
+    text = _read_regular(path).decode("utf-8", errors="strict")
+    suffix = path.suffix.casefold()
+    try:
+        if suffix == ".jsonl":
+            data: Any = [load_bounded_json(line) for raw in text.splitlines() if (line := raw.strip())]
+        elif suffix == ".json":
+            data = load_bounded_json(text)
+        else:
+            data = load_bounded_yaml(text)
+        return normalize_dataset_entries(data)
+    except (StructuredDataError, ValueError, TypeError) as exc:
+        raise PreparationError(f"invalid evaluation dataset {path}: {exc}") from exc
+
+
+def _read_fixtures(files_dir: Path, owner: str, fixtures: dict[str, bytes], owners: dict[str, str]) -> None:
+    if not os.path.lexists(files_dir):
+        return
+    if files_dir.is_symlink() or not files_dir.is_dir():
+        raise PreparationError(f"Refusing linked or non-directory fixtures: {files_dir}")
+    for directory, dirnames, filenames in os.walk(files_dir, followlinks=False):
+        dirnames.sort()
+        for entry in [*dirnames, *sorted(filenames)]:
+            path = Path(directory) / entry
+            if path.is_symlink():
+                raise PreparationError(f"Refusing linked fixture: {path}")
+        for filename in sorted(filenames):
+            path = Path(directory) / filename
+            rel = path.relative_to(files_dir).as_posix()
+            data = _read_regular(path)
+            if rel in fixtures and fixtures[rel] != data:
+                raise PreparationError(
+                    f"fixture collision on 'files/{rel}': '{owners[rel]}' and '{owner}' provide different content"
+                )
+            fixtures[rel], owners[rel] = data, owners.get(rel, owner)
+
+
+def _safe_id(raw: str) -> str:
+    return re.sub(r"[^A-Za-z0-9_.-]+", "-", raw).strip("-._") or "plugin-eval-case"
+
+
+def _unique_id(base: str, seen: set[str]) -> str:
+    candidate, suffix = base, 2
+    while candidate in seen:
+        candidate, suffix = f"{base}-{suffix}", suffix + 1
+    seen.add(candidate)
+    return candidate

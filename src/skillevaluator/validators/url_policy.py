@@ -837,10 +837,11 @@ def safe_url(url: str) -> str:
     SDKs) reads it, so the report names the host a client would actually contact.
     The userinfo of the raw text is removed first (:func:`without_userinfo`), so
     text the URL holds as its userinfo is never shown, even where a backslash
-    makes a client read it as the host. A token in the path is redacted like any
-    other report text (:func:`report_text`).
+    makes a client read it as the host, or where fewer than two slashes follow
+    the scheme (``https:/user:pw@host``). A token in the path is redacted like
+    any other report text (:func:`report_text`).
     """
-    text = without_userinfo(url)
+    text = without_userinfo(_with_authority_slashes(url))
     try:
         parsed = urlparse(whatwg_url(text))
         host = parsed.hostname or ""
@@ -851,6 +852,21 @@ def safe_url(url: str) -> str:
         return _unparsed_url(text)
     display_host = f"[{host}]" if ":" in host else host
     return report_text(f"{parsed.scheme}://{display_host}{port}{parsed.path}")
+
+
+def _with_authority_slashes(url: str) -> str:
+    """A special-scheme ``url`` trimmed as WHATWG trims it, with the run of ``/`` and ``\\`` after the scheme as ``//``.
+
+    A WHATWG client reads ``https:/user:pw@host`` and ``https:\\user:pw@host``
+    as ``https://user:pw@host``; written this way, :func:`without_userinfo` and
+    :func:`_unparsed_url` find that authority. Any other ``url`` comes back as is.
+    """
+    text = _TAB_OR_NEWLINE_RE.sub("", url.strip(_C0_CONTROL_OR_SPACE))
+    scheme = url_scheme(text)
+    if scheme not in _WHATWG_SPECIAL_SCHEMES:
+        return url
+    rest = text[len(scheme) + 1 :].lstrip("/\\")
+    return f"{text[: len(scheme) + 1]}//{rest}"
 
 
 def _unparsed_url(url: str) -> str:

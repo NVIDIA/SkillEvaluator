@@ -191,6 +191,23 @@ def test_safe_url_never_shows_userinfo_that_a_backslash_turns_into_the_host(url:
     assert safe_url(url) == shown
 
 
+@pytest.mark.parametrize(
+    ("url", "shown"),
+    [
+        ("wss:/ops:hunter2@relay.example:70000/mcp", "wss://relay.example:70000/mcp"),
+        ("https:/ops:hunter2@mcp.example:bad/mcp", "https://mcp.example:bad/mcp"),
+        ("https:\\/ops:hunter2@mcp.example:bad/mcp", "https://mcp.example:bad/mcp"),
+        ("https:/\\ops:hunter2@[::1/mcp", "https://[::1/mcp"),
+        ("https:/ops:hunter2\\@evil.example:bad/x", "https://evil.example:bad/x"),
+        ("https:/ops:hunter2\\@evil.example/x", "https://evil.example/x"),
+        ("https:/ops:hunter2@mcp.example/mcp", "https://mcp.example/mcp"),
+    ],
+)
+def test_safe_url_never_keeps_userinfo_written_with_fewer_than_two_slashes(url: str, shown: str) -> None:
+    """Regression: a malformed URL with one '/' or '\\' after the scheme was shown whole, password included."""
+    assert safe_url(url) == shown
+
+
 def test_safe_url_is_bounded() -> None:
     assert len(safe_url("https://h.example/" + "a" * 10_000)) <= MAX_REPORT_CHARS
 

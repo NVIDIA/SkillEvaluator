@@ -368,3 +368,33 @@ def test_tool_only_trajectory_retains_latest_verification_failure(monkeypatch, i
     assert len(evidence) <= {"accuracy": accuracy_budget, "goal_accuracy": goal_budget}[metric]
     assert bundle["omitted"]["truncated"] is True
     assert bundle["omitted"]["count"] > 0
+
+
+def test_behavior_bundle_reports_final_response_cap_loss() -> None:
+    # Regression test: a final answer longer than the behavior evidence
+    # final-response section limit loses its middle to that cap even when the
+    # whole bundle fits the total budget. The omission accounting used to
+    # compare two renderings that shared the cap, so the loss was reported
+    # as truncated=False.
+    marker = "MIGRATE_UNIQUE_COVERAGE_FIRST"
+    answer = "A" * 2000 + marker + "B" * 2000
+    traj = {"steps": [{"source": "agent", "message": answer}]}
+
+    for module in (atif_helpers, _load_harbor_template_module()):
+        bundle = module.build_metric_evidence_bundles(traj, "Explain the migration.")["behavior_check"]
+        assert marker not in bundle["prompt_evidence"]
+        assert bundle["omitted"]["truncated"] is True
+        assert bundle["omitted"]["count"] >= 1
+        assert bundle["omitted"]["reason"]
+
+
+def test_behavior_bundle_complete_evidence_is_not_reported_truncated() -> None:
+    # Control case: when nothing is dropped, the accounting must still say so.
+    traj = {"steps": [{"source": "agent", "message": "Short final answer."}]}
+
+    for module in (atif_helpers, _load_harbor_template_module()):
+        bundle = module.build_metric_evidence_bundles(traj, "What happened?")["behavior_check"]
+        assert "Short final answer." in bundle["prompt_evidence"]
+        assert bundle["omitted"]["truncated"] is False
+        assert bundle["omitted"]["count"] == 0
+        assert bundle["omitted"]["reason"] == ""

@@ -38,7 +38,7 @@ def agent_plugins_schema_version(value: Any, *, kind: str = "plugin") -> str | N
     """
     if not isinstance(value, str):
         return None
-    match = _AGENT_PLUGINS_SCHEMA_RE.match(value)
+    match = _AGENT_PLUGINS_SCHEMA_RE.fullmatch(value)
     if match is None or match.group("kind") != kind:
         return None
     return match.group("version")

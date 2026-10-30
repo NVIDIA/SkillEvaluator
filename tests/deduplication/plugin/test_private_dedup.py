@@ -356,7 +356,9 @@ def test_context_scalar_limit_stops_after_first_provider_batch(tmp_path, monkeyp
     monkeypatch.setattr(core, "CONTENT_DEDUP_EMBEDDING_BATCH_SIZE", 2)
     monkeypatch.setattr(core, "CONTENT_DEDUP_MAX_SCALAR_COMPARISONS", 1)
     result = core.IntraSkillValidator().validate(root)
-    assert result.findings[0].check_name == "scalar_comparison_limit"
+    assert result.status == "incomplete"
+    assert result.findings == []
+    assert result.metadata["work_limit"]["check_name"] == "scalar_comparison_limit"
     assert len(client.calls) == 1
 
 
@@ -410,7 +412,9 @@ def test_private_cluster_allowance_keeps_default_skill_behavior(tmp_path, monkey
     default = core.IntraSkillValidator().validate(root)
     constrained = core.IntraSkillValidator(max_llm_clusters=1).validate(root)
     assert default.passed
-    assert constrained.findings[0].check_name == "llm_cluster_count_limit"
+    assert constrained.status == "incomplete"
+    assert constrained.findings == []
+    assert constrained.metadata["work_limit"] == {"check_name": "llm_cluster_count_limit", "actual": 2, "limit": 1}
 
 
 def test_context_prompt_limit_refuses_llm_before_external_work(tmp_path, monkeypatch):
@@ -427,7 +431,9 @@ def test_context_prompt_limit_refuses_llm_before_external_work(tmp_path, monkeyp
 
     monkeypatch.setattr(core, "LLMClient", forbidden)
     result = core.IntraSkillValidator().validate(root)
-    assert result.findings[0].check_name == "llm_prompt_size_limit"
+    assert result.status == "incomplete"
+    assert result.findings == []
+    assert result.metadata["work_limit"]["check_name"] == "llm_prompt_size_limit"
 
 
 def test_clustering_normalizes_once_and_checks_aggregate_scalar_work(monkeypatch):

@@ -363,6 +363,10 @@ class JSONReporter(ReporterBase):
         llm_analysis = result.metadata.get("llm_analysis")
         if isinstance(llm_analysis, dict):
             data["llm_analysis"] = llm_analysis
+        # A Tier 2 work limit makes the scan incomplete; record which limit stopped it.
+        work_limit = result.metadata.get("work_limit")
+        if isinstance(work_limit, dict):
+            data["work_limit"] = work_limit
 
         return data
 

@@ -111,6 +111,47 @@ def test_detected_duplicate_remains_failed_not_incomplete(tmp_path: Path, monkey
     assert actual.findings[0].category == "DUPLICATE"
 
 
+def test_work_limit_is_incomplete_in_cli_and_reports(tmp_path: Path, monkeypatch) -> None:
+    """A skill over a Tier 2 work limit reads INCOMPLETE, never a failed duplicate scan."""
+    from skillevaluator.deduplication.intra_skill import intra_skill_validator
+    from skillevaluator.reporting import BenchmarkReporter
+
+    monkeypatch.setattr(intra_skill_validator, "CONTENT_DEDUP_MAX_CHUNKS", 1)
+    skill = tmp_path / "skill"
+    skill.mkdir()
+    (skill / "SKILL.md").write_text("## Section A\n" + "a" * 200 + "\n## Section B\n" + "b" * 200)
+    reports = tmp_path / "reports"
+    for purpose in ("LLM", "EMBEDDING"):
+        # The limit trips before any provider request; port 9 is never contacted.
+        monkeypatch.setenv(f"SKILL_EVAL_{purpose}_PROVIDER", "openai-compatible")
+        monkeypatch.setenv(f"SKILL_EVAL_{purpose}_BASE_URL", "http://127.0.0.1:9/v1")
+        monkeypatch.setenv(f"SKILL_EVAL_{purpose}_API_KEY", "local-test-key")
+        monkeypatch.setenv(f"SKILL_EVAL_{purpose}_MODEL", "local-test-model")
+
+    invocation = CliRunner().invoke(cli, ["tier2", str(skill), "-r", "cli,json,markdown", "-o", str(reports)])
+
+    assert invocation.exit_code == 1, invocation.output
+    assert "context-deduplication did not complete" in invocation.output
+    payload = json.loads((reports / "skillevaluator-tier2.json").read_text())
+    assert payload["overall_status"] == "incomplete"
+    result = payload["results"][0]
+    assert result["status"] == "incomplete"
+    assert result["incomplete_scans"] == ["context-deduplication"]
+    assert result["findings"] == []
+    assert result["summary"]["critical_count"] == 0
+    assert result["work_limit"] == {"check_name": "chunk_count_limit", "file_path": "SKILL.md", "actual": 2, "limit": 1}
+    markdown = (reports / "skillevaluator-tier2.md").read_text()
+    assert "**Status:** ⚠️ INCOMPLETE" in markdown
+    assert "Tier 2 scan incomplete: the skill produced more than 1 content chunks" in markdown
+
+    benchmark = BenchmarkReporter(include_timestamp=False).render_all(commands.run_context_optimization_check(skill))
+    assert (
+        "| Tier 2 | Semantic deduplication | **INCOMPLETE** | Missing trustworthy evidence from context-deduplication |"
+        in benchmark
+    )
+    assert "**FAILED**" not in benchmark
+
+
 def test_http_410_is_incomplete_in_real_cli_and_reports(tmp_path: Path, monkeypatch) -> None:
     """Exercise the actual SDK against a local HTTP service, without external calls."""
     requests = []

@@ -284,3 +284,17 @@ def test_evidence_failure_is_recorded_and_publication_still_runs(tmp_path: Path,
     )
     assert published and outcome.publication_error is None
     assert "unreadable" in outcome.provenance["native_evidence_error"]
+
+
+def test_sampled_errors_are_never_retried() -> None:
+    sampled = {
+        "execution_status": "failed",
+        "execution_errors": ["AgentSetupNetworkError: dns"],
+        "execution_error_details_total": 3,
+        "execution_error_details_truncated": True,
+    }
+    assert px.setup_only_failure(sampled) is None
+    assert px.setup_only_failure({**sampled, "execution_error_details_truncated": False}) is None
+    assert px.setup_only_failure(
+        {**sampled, "execution_error_details_total": 1, "execution_error_details_truncated": False}
+    )

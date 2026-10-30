@@ -124,6 +124,9 @@ def setup_only_failure(result: Mapping[str, Any]) -> str | None:
         return None
     errors = result.get("error") or result.get("execution_errors") or []
     errors = [errors] if isinstance(errors, str) else [str(error) for error in errors]
+    total = result.get("execution_error_details_total")
+    if result.get("execution_error_details_truncated") or (isinstance(total, int) and total > len(errors)):
+        return None  # The result shows a sample of its errors; the hidden ones may not be setup failures.
     if errors and all(SETUP_RETRY_EXCEPTION in error for error in errors):
         return errors[0][:300]
     return None

@@ -33,6 +33,7 @@ import os
 import random
 import re
 import signal
+import ssl
 import sys
 import threading
 import time
@@ -1313,7 +1314,38 @@ def _anthropic_url():
     return _validate_http_url(url)
 
 
-_RETRIABLE_HTTP_CODES = frozenset({429, 500, 502, 503, 504})
+# 501 Not Implemented and 505 HTTP Version Not Supported do not change on a retry.
+_NON_RETRIABLE_5XX_CODES = frozenset({501, 505})
+
+
+def _is_retriable_http_status(status):
+    """408, 429, and every 5xx except 501 and 505 (same rule as ``skillevaluator.inference.retry``)."""
+    if not isinstance(status, int) or isinstance(status, bool):
+        return False
+    return status in (408, 429) or (500 <= status <= 599 and status not in _NON_RETRIABLE_5XX_CODES)
+
+
+def _is_certificate_failure(error):
+    """Return whether ``error`` is, or wraps, a failed TLS certificate check; a retry cannot fix it."""
+    pending = [error]
+    seen = set()
+    while pending and len(seen) < 32:
+        current = pending.pop()
+        if not isinstance(current, BaseException) or id(current) in seen:
+            continue
+        if isinstance(current, ssl.SSLCertVerificationError):
+            return True
+        seen.add(id(current))
+        if isinstance(current, urllib.error.URLError):
+            pending.append(current.reason)
+        kwargs = getattr(current, "kwargs", None)
+        if isinstance(kwargs, dict):
+            pending.append(kwargs.get("error"))
+        pending.extend(current.args)
+        pending.extend((current.__cause__, current.__context__))
+    return False
+
+
 _DEFAULT_MAX_RETRIES = 3
 _DEFAULT_BASE_DELAY = 1.0
 _DEFAULT_MAX_DELAY = 30.0
@@ -1455,7 +1487,8 @@ def _urlopen_with_retry(request, timeout=90):
             if (
                 attempt >= retry_config.max_retries
                 or (not is_http and not is_network)
-                or (is_http and error.code not in _RETRIABLE_HTTP_CODES)
+                or (is_http and not _is_retriable_http_status(error.code))
+                or _is_certificate_failure(error)
             ):
                 raise
 
@@ -1703,14 +1736,12 @@ def _classify_bedrock_retry_error(error):
                 break
 
     if http_status is not None or error_code:
-        is_retriable = (
-            http_status in _RETRIABLE_HTTP_CODES or http_status == 408 or error_code in _RETRIABLE_BEDROCK_ERROR_CODES
-        )
+        is_retriable = _is_retriable_http_status(http_status) or error_code in _RETRIABLE_BEDROCK_ERROR_CODES
         status_label = f"HTTP {http_status}" if http_status is not None else error_code
         return is_retriable, status_label, retry_after_str
 
     type_name = type(error).__name__
-    is_network = (
+    is_network = not _is_certificate_failure(error) and (
         isinstance(error, (ConnectionError, TimeoutError, OSError)) or type_name in _RETRIABLE_BOTOCORE_EXCEPTION_NAMES
     )
     return is_network, type_name, None

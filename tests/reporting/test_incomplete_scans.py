@@ -23,6 +23,18 @@ def _plain(output: str) -> str:
     return " ".join(output.split())
 
 
+def _assert_html_verdict_is_incomplete(output: str) -> None:
+    """The header verdict and the summary verdict both say Incomplete, and nothing says Passed."""
+    header = output.split('<header class="main-header">', 1)[1].split("</header>", 1)[0]
+    summary = output.split('<section class="exec-summary', 1)[1].split("</section>", 1)[0]
+
+    assert 'data-verdict="incomplete"' in header
+    assert '<span class="sr-only">Verdict: </span>Incomplete</span>' in header
+    assert '<span class="verdict-chip warn">Incomplete</span>' in summary
+    assert 'data-verdict="pass"' not in output
+    assert "verdict-chip pass" not in output
+
+
 def _incomplete_result() -> ValidationResult:
     result = ValidationResult(
         validator_name="Security Scan",
@@ -77,12 +89,24 @@ class TestIncompleteScanReporting:
         assert "skillspector timed out after 300 seconds" in output
         assert "✅ PASSED" not in output
 
-    def test_html_marks_incomplete_and_never_all_passed(self):
+    def test_html_marks_incomplete_and_never_claims_a_pass(self):
         output = HTMLReporter(include_timestamp=False).render_all([_incomplete_result()])
 
-        assert "Incomplete" in output
+        _assert_html_verdict_is_incomplete(output)
         assert "skillspector" in output
-        assert "All Passed" not in output
+
+    def test_html_incomplete_check_among_passing_checks_is_incomplete(self):
+        passing = []
+        for name in ("License Compliance", "PII Scan"):
+            result = ValidationResult(validator_name=name, validator_description="d")
+            result.add_success(check_name=name, message="No issues")
+            passing.append(result)
+
+        output = HTMLReporter(include_timestamp=False, explicit_skill_name="demo").render_all(
+            [passing[0], _incomplete_result(), passing[1]]
+        )
+
+        _assert_html_verdict_is_incomplete(output)
 
     def test_benchmark_blocks_publication_on_incomplete_evidence(self):
         output = BenchmarkReporter(include_timestamp=False).render_all([_incomplete_result()])

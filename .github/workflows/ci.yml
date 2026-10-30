@@ -225,6 +225,15 @@ jobs:
               "$venv/bin/skillevaluator" doctor --agents opencode --env-mode docker >/dev/null
             "$venv/bin/python" -c 'import io; from skillevaluator.tier3.harbor.progress import PlainProgressReporter,ProgressEvent,Tier3RunPlan; s=io.StringIO(); r=PlainProgressReporter(stream=s,refresh_interval=60); r.start(Tier3RunPlan(skill_name="wheel-smoke",environment="docker",agents=("opencode",))); r.emit(ProgressEvent(stage="configuration",state="complete")); r.close(); assert "configuration: complete" in s.getvalue()'
           done
+      - name: Run the installed verifier with Python 3.9
+        shell: bash
+        run: |
+          task_python="$RUNNER_TEMP/skillevaluator-verifier-39/bin/python"
+          uv venv --python 3.9 "$RUNNER_TEMP/skillevaluator-verifier-39"
+          uv pip install --python "$task_python" idna==3.11
+          cd "$RUNNER_TEMP"
+          "$RUNNER_TEMP/skillevaluator-wheel-3.12/bin/python" \
+            "$GITHUB_WORKSPACE/scripts/ci/smoke_harbor_verifier.py" --python "$task_python"
 
   tier3-macos:
     name: Tier 3 macOS contract and progress
@@ -320,6 +329,9 @@ jobs:
           tests/test_tier3_compare.py
           tests/test_tier3_progress.py
           tests/utils/test_secure_fs_selected_reads.py
+          tests/utils/test_secure_fs_platform.py
+          tests/utils/test_secure_fs_bounded.py
+          tests/test_plugin_discovery.py
           tests/test_oss_packaging.py
 
   native-windows-local-mode:

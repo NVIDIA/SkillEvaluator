@@ -8,19 +8,23 @@ from __future__ import annotations
 import argparse
 import hashlib
 import json
-import re
 from pathlib import Path
+
+try:
+    import github_api
+except ModuleNotFoundError:
+    from ci import github_api
 
 TEMPLATES = Path(__file__).parent / "templates"
 IMAGE_PLACEHOLDER = "ghcr.io/nvidia/skillevaluator-tier1@sha256:RELEASE_IMAGE_DIGEST"
 
 
 def render_templates(output: Path, workflow_ref: str, image: str, repository: str = "NVIDIA/SkillEvaluator") -> dict:
-    if not re.fullmatch(r"[0-9a-f]{40}", workflow_ref):
+    if not github_api.COMMIT_SHA.fullmatch(workflow_ref):
         raise ValueError("A full reviewed workflow commit SHA is required.")
-    if not re.fullmatch(r"ghcr\.io/[a-z0-9][a-z0-9._/-]*@sha256:[0-9a-f]{64}", image):
+    if not github_api.GHCR_DIGEST.fullmatch(image):
         raise ValueError("A published GHCR image digest is required.")
-    if not re.fullmatch(r"[A-Za-z0-9_.-]+/[A-Za-z0-9_.-]+", repository):
+    if not github_api.REPOSITORY.fullmatch(repository):
         raise ValueError("A GitHub owner/repository is required.")
     if output.exists():
         raise ValueError("Use a new output directory to preserve previous release files.")

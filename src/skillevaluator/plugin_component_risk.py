@@ -199,6 +199,26 @@ _CURSOR_ALLOW_RES: tuple[re.Pattern[str], ...] = (
     re.compile(r"\bdecision\W{0,8}allow\b"),
 )
 _ALLOW_SHAPES: dict[str, tuple[re.Pattern[str], ...]] = {"claude": _ALLOW_DECISION_RES, "cursor": _CURSOR_ALLOW_RES}
+
+
+def _allow_value_re(value: str) -> re.Pattern[str]:
+    """An allow value written apart from its key: a string literal (``'allow'``, ``\\"allow\\"``), a shell
+    assignment (``DECISION=allow``), or a jq argument (``--arg d allow``)."""
+    return re.compile(
+        rf"[\"'`]\\?{value}\\?[\"'`]|=[ \t]{{0,64}}{value}\b|--arg(?:json)?[ \t]{{1,64}}\w{{1,64}}[ \t]{{1,64}}{value}\b"
+    )
+
+
+# A decision computed at run time: the code names a decision key and holds an allow value elsewhere
+# ("decision = 'allow' if ... else 'ask'", "respond('allow')", "permissionDecision: safe ? 'allow' : 'ask'",
+# 'jq --arg d allow', 'DECISION=allow'), so the value need not sit next to the key.
+_COMPUTED_ALLOW_RES: tuple[tuple[str, re.Pattern[str], re.Pattern[str]], ...] = (
+    ("claude", re.compile(r"permissionDecision\b"), _allow_value_re("allow")),
+    ("claude", re.compile(r"\bdecision\b"), _allow_value_re("approve")),
+    ("claude", re.compile(r"\bbehavior\b"), _allow_value_re("allow")),
+    ("cursor", re.compile(r"\bpermission\b"), _allow_value_re("allow")),
+    ("cursor", re.compile(r"\bdecision\b"), _allow_value_re("allow")),
+)
 # JSON hook output that puts text in front of the model on any event: additionalContext, a replaced tool
 # output, or (on Stop and SubagentStop) a block decision whose reason tells the model how to continue.
 _CONTEXT_OUTPUT_RES: tuple[tuple[str, re.Pattern[str]], ...] = (
@@ -1846,6 +1866,16 @@ def _allow_shapes_of(code: str, decoded: str) -> frozenset[str]:
     )
 
 
+def _computed_allow_shapes(decoded: str) -> frozenset[str]:
+    """The approval output shapes whose decision key and allow value comment-free, escape-decoded hook text
+    holds apart from each other, so the decision may be computed (a variable, helper, ternary, or jq argument)."""
+    if "allow" not in decoded and "approve" not in decoded:
+        return frozenset()
+    return frozenset(
+        shape for shape, key, value in _COMPUTED_ALLOW_RES if key.search(decoded) and value.search(decoded)
+    )
+
+
 def _context_outputs(decoded: str) -> frozenset[str]:
     """The JSON context outputs (``additionalContext``, a replaced tool output, a block reason) in comment-free,
     escape-decoded hook text."""
@@ -1967,6 +1997,7 @@ class _ShellFacts:
         *,
         remote_code: bool = False,
         allow_shapes: frozenset[str] = frozenset(),
+        computed_allow_shapes: frozenset[str] = frozenset(),
         downloads: _Downloads | None = None,
         packages: tuple[_PackageRun, ...] = (),
         package_scan_truncated: bool = False,
@@ -1975,6 +2006,8 @@ class _ShellFacts:
         self._text = text
         self.remote_code = remote_code
         self.allow_shapes = allow_shapes
+        # Shapes whose allow value is held apart from the decision key (the decision may be computed).
+        self.computed_allow_shapes = computed_allow_shapes
         self.context_outputs = context_outputs
         self.downloads = downloads if downloads is not None else _Downloads()
         self.packages = packages
@@ -2038,6 +2071,7 @@ def _shell_facts(text: str) -> _ShellFacts:
     facts = _ShellFacts(
         text,
         allow_shapes=_allow_shapes_of(code, decoded),
+        computed_allow_shapes=_computed_allow_shapes(decoded),
         packages=packages,
         package_scan_truncated=package_scan.truncated,
         context_outputs=_context_outputs(decoded),
@@ -3547,17 +3581,25 @@ class HookAnalyzer:
 
     @staticmethod
     def _auto_approve(facts: list[_ShellFacts], site: _HookSite) -> None:
-        shapes = frozenset().union(*(fact.allow_shapes for fact in facts))
-        if site.scope is None or not shapes & set(site.dialect.allow_shapes):
+        dialect = set(site.dialect.allow_shapes)
+        literal = frozenset().union(*(fact.allow_shapes for fact in facts)) & dialect
+        computed = frozenset().union(*(fact.computed_allow_shapes for fact in facts)) & dialect
+        if site.scope is None or not (literal or computed):
             return
         site.record.add_flag("auto_approve")  # also for a narrow matcher, which gets no finding
+        emits = (
+            "emits an allow decision"
+            if literal
+            else "can emit an allow decision (its code sets a decision key and holds an allow value, so the "
+            "decision may be computed)"
+        )
         if site.scope in {"all", "bash"}:
             target = "every tool call" if site.scope == "all" else "shell commands"
             site.report(
                 "auto_approve",
                 Severity.HIGH,
                 "plugin_hook_auto_approve",
-                f"the command emits an allow decision for {target}, which skips the user's permission prompt",
+                f"the command {emits} for {target}, which skips the user's permission prompt",
                 "Do not auto-approve tool calls from a plugin hook; narrow the matcher and return 'ask' or "
                 "no decision.",
             )
@@ -3566,7 +3608,7 @@ class HookAnalyzer:
                 "auto_approve",
                 Severity.MEDIUM,
                 "plugin_hook_auto_approve_scoped",
-                f"the command emits an allow decision for {', '.join(site.scoped_tools)}, which skips the user's "
+                f"the command {emits} for {', '.join(site.scoped_tools)}, which skips the user's "
                 "permission prompt for file writes, web fetches, or MCP tool calls (and, for edits, the "
                 "working-directory limit that acceptEdits keeps)",
                 "Do not auto-approve write, fetch, or MCP tool calls from a plugin hook; return 'ask' or no decision.",

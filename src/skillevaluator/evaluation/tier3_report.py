@@ -1846,6 +1846,11 @@ def _build_agent(
         not never_activated and set(with_metrics) == set(baseline_metrics) and len(condition_policies) == 1
     )
     lift_data = info.get("lift") if isinstance(info.get("lift"), dict) else {}
+    comparison_unavailable = (
+        info.get("comparison_unavailable") is True
+        or info.get("comparison_complete") is False
+        or lift_data.get("comparison_unavailable") is True
+    )
     with_quality_available = _condition_quality_available(info, "with_skill")
     baseline_quality_available = _condition_quality_available(info, "without_skill")
     if not with_quality_available:
@@ -1982,6 +1987,8 @@ def _build_agent(
             )
     if judge_lift is not None:
         overall_lift = _lift_value("overall", judge_lift) if comparable_scores else None
+    if comparison_unavailable:
+        overall_lift = None
 
     trials = _normalize_trials(info.get("rewards") or [], with_metrics)
     baseline_trials = _normalize_trials(info.get("rewards_baseline") or [], baseline_metrics)

@@ -6,6 +6,8 @@ from __future__ import annotations
 
 import json
 
+import pytest
+
 from skillevaluator.evaluation.tier3_report import build_agent_eval_payload
 from skillevaluator.tier3.harbor.metrics import (
     DEFAULT_METRIC_SET,
@@ -98,6 +100,54 @@ def test_saved_run_retains_validated_na_and_recomputes_tampered_basis(tmp_path):
     assert not any(card["id"] == "behavior_check" for card in agent["evaluator_cards"])
     assert any(item["id"] == "behavior_check" for item in agent["not_applicable_evaluators"])
     assert agent["lift"] == 0.1
+
+
+def test_matching_saved_basis_and_metric_lifts_cannot_authorize_a_tampered_overall(tmp_path):
+    from skillevaluator.tier3.harbor.collector import _compute_lift
+
+    root = _run(tmp_path)
+    loaded = load_agent_data(root)["codex"]
+    assert loaded["rewards_complete"] is loaded["rewards_baseline_complete"] is True
+    cached = _compute_lift(
+        loaded["with_skill"],
+        loaded["without_skill"],
+        loaded["rewards"],
+        loaded["rewards_baseline"],
+        score_policy=DEFAULT_SCORE_POLICY,
+    )
+    assert cached["overall"]["delta"] == 0.1
+    # The basis and every per-metric value remain exactly as rebuilt from the
+    # complete rewards. Only the cached headline delta has been changed.
+    cached["overall"]["delta"] = 0.99
+    (root / "codex/lift.json").write_text(json.dumps(cached))
+    assert _report(root)["agents"]["codex"]["lift"] == 0.1
+
+
+@pytest.mark.parametrize(
+    "unavailable",
+    [
+        {"comparison_unavailable": True},
+        {"comparison_complete": False},
+        {"lift": {"comparison_unavailable": True}},
+    ],
+)
+def test_explicit_unavailable_comparison_suppresses_aggregate_overall_lift(unavailable):
+    from skillevaluator.evaluation.tier3_report import _build_agent
+
+    agent = _build_agent(
+        "codex",
+        {
+            "execution_status": "succeeded",
+            "with_skill": dict.fromkeys(DEFAULT_METRICS, 0.8),
+            "without_skill": dict.fromkeys(DEFAULT_METRICS, 0.6),
+            **unavailable,
+        },
+        list(DEFAULT_METRICS),
+        list(DEFAULT_METRICS),
+        None,
+        DEFAULT_SCORE_POLICY,
+    )
+    assert agent["lift"] is None
 
 
 def test_numeric_contradictions_override_tampered_aggregate_na_markers(tmp_path):

@@ -22,10 +22,15 @@ from skillevaluator.constants import (
     CONTENT_DEDUP_SIMILARITY_THRESHOLD,
     CONTENT_DEDUP_TRIVIAL_DUP_MAX_CHARS,
 )
-from skillevaluator.deduplication.intra_skill.llm_analyzer import analyze_cluster, verdict_to_severity
+from skillevaluator.deduplication.intra_skill.llm_analyzer import (
+    SYSTEM_PROMPT,
+    analyze_cluster,
+    build_user_prompt,
+    verdict_to_severity,
+)
 from skillevaluator.deduplication.intra_skill.semantic_clustering import ContentCluster, build_clusters
 from skillevaluator.deduplication.utils.chunker import ContentChunk, chunk_file
-from skillevaluator.deduplication.utils.skill_collector import SkillCollectionError, collect_files
+from skillevaluator.deduplication.utils.skill_collector import CollectedFile, SkillCollectionError, collect_files
 from skillevaluator.embedding.client import EmbeddingClient, SimilarityConfigError, validate_embedding_vector
 from skillevaluator.inference import LLMClient, LLMClientError
 from skillevaluator.inference.diagnostics import llm_failure_diagnostic, safe_llm_labels
@@ -41,6 +46,9 @@ logger = logging.getLogger(__name__)
 _COMMENT_PREFIXES = ("#", ";", "//", "--", "!")
 _CONFIG_KV_RE = re.compile(r"^[\w.\-/]+\s*[=:]\s*\S")
 CONTENT_DEDUP_MAX_SCALAR_COMPARISONS = 25_000_000
+CONTENT_DEDUP_MAX_CLUSTER_MEMBERS = 64
+CONTENT_DEDUP_MAX_LLM_PROMPT_CHARS = 64_000
+CONTENT_DEDUP_MAX_TOTAL_LLM_PROMPT_CHARS = 1_000_000
 
 
 def _is_comment_or_config_line(line: str) -> bool:
@@ -93,12 +101,28 @@ class IntraSkillValidator(ValidatorBase):
         threshold: float = CONTENT_DEDUP_SIMILARITY_THRESHOLD,
         embedding_model: str | None = None,
         llm_model: str | None = None,
+        max_llm_clusters: int | None = None,
+        _max_scalar_comparisons: int | None = None,
+        _max_total_prompt_chars: int | None = None,
     ) -> None:
         self._threshold = threshold
         # None defers to provider resolution (SKILL_EVAL_EMBEDDING_MODEL);
         # pinning SIMILARITY_DEFAULT_MODEL here would override the env var.
         self._embedding_model = embedding_model
         self._llm_model = llm_model
+        max_llm_clusters = CONTENT_DEDUP_MAX_LLM_CLUSTERS if max_llm_clusters is None else max_llm_clusters
+        if type(max_llm_clusters) is not int or not 1 <= max_llm_clusters <= CONTENT_DEDUP_MAX_LLM_CLUSTERS:
+            raise ValueError(f"max_llm_clusters must be within [1, {CONTENT_DEDUP_MAX_LLM_CLUSTERS}]")
+        self._max_llm_clusters = max_llm_clusters
+        self._max_scalar_comparisons = (
+            CONTENT_DEDUP_MAX_SCALAR_COMPARISONS if _max_scalar_comparisons is None else _max_scalar_comparisons
+        )
+        self._max_total_prompt_chars = (
+            CONTENT_DEDUP_MAX_TOTAL_LLM_PROMPT_CHARS if _max_total_prompt_chars is None else _max_total_prompt_chars
+        )
+        for value in (self._max_scalar_comparisons, self._max_total_prompt_chars):
+            if type(value) is not int or value < 1:
+                raise ValueError("Private comparison budgets must be positive integers")
 
     @property
     def name(self) -> str:
@@ -108,7 +132,7 @@ class IntraSkillValidator(ValidatorBase):
     def description(self) -> str:
         return "Detect redundant content within a skill directory"
 
-    def validate(self, skill_path: Path) -> ValidationResult:
+    def validate(self, skill_path: Path, *, _collected_files: list[CollectedFile] | None = None) -> ValidationResult:
         """Run context deduplication on a single skill directory."""
         report_path = skill_path.name or "."
         result = ValidationResult(
@@ -119,7 +143,7 @@ class IntraSkillValidator(ValidatorBase):
         # Step 1: Collect files
         logger.info("Collecting files from %s...", safe_path_label(skill_path))
         try:
-            collected = collect_files(skill_path)
+            collected = collect_files(skill_path) if _collected_files is None else _collected_files
         except SkillCollectionError as e:
             result.add_finding(
                 Finding(
@@ -182,53 +206,39 @@ class IntraSkillValidator(ValidatorBase):
             client = EmbeddingClient(model=self._embedding_model)
             texts = [c.text for c in all_chunks]
 
-            all_embeddings: list[list[float]] = []
+            vector_dimension: int | None = None
+            pair_count = len(all_chunks) * (len(all_chunks) - 1) // 2
             for i in range(0, len(texts), CONTENT_DEDUP_EMBEDDING_BATCH_SIZE):
                 batch = texts[i : i + CONTENT_DEDUP_EMBEDDING_BATCH_SIZE]
-                logger.info(
-                    "  Embedding batch %d/%d (%d chunks)...",
-                    i // CONTENT_DEDUP_EMBEDDING_BATCH_SIZE + 1,
-                    (len(texts) - 1) // CONTENT_DEDUP_EMBEDDING_BATCH_SIZE + 1,
-                    len(batch),
-                )
-                all_embeddings.extend(client.embed(batch))
-
-            if len(all_embeddings) != len(all_chunks):
-                raise SimilarityConfigError(
-                    f"Embedding provider returned {len(all_embeddings)} vectors for {len(all_chunks)} chunks."
-                )
-            vector_dimension: int | None = None
-            for chunk, emb in zip(all_chunks, all_embeddings, strict=True):
-                vector_dimension = validate_embedding_vector(
-                    emb,
-                    vector_dimension,
-                    context="Embedding provider",
-                )
-                chunk.embedding = emb
-
-            pair_count = len(all_chunks) * (len(all_chunks) - 1) // 2
-            scalar_work = pair_count * (vector_dimension or 0)
-            if scalar_work > CONTENT_DEDUP_MAX_SCALAR_COMPARISONS:
-                result.add_finding(
-                    Finding(
-                        category="CONTENT_DEDUP",
-                        severity=Severity.CRITICAL,
-                        check_name="scalar_comparison_limit",
-                        message=(
-                            "Tier 2 scalar comparison work exceeds the configured limit "
-                            f"({CONTENT_DEDUP_MAX_SCALAR_COMPARISONS})."
-                        ),
-                        file_path=report_path,
-                        suggestion="Reduce or split the skill content before running Tier 2.",
-                        metadata={
-                            "pair_count": pair_count,
-                            "vector_dimension": vector_dimension,
-                            "scalar_work": scalar_work,
-                            "limit": CONTENT_DEDUP_MAX_SCALAR_COMPARISONS,
-                        },
+                vectors = client.embed(batch)
+                if len(vectors) != len(batch):
+                    raise SimilarityConfigError(
+                        f"Embedding provider returned {len(vectors)} vectors for {len(batch)} chunks in a batch."
                     )
-                )
-                return result
+                for chunk, vector in zip(all_chunks[i : i + len(batch)], vectors, strict=True):
+                    vector_dimension = validate_embedding_vector(vector, vector_dimension, context="Embedding provider")
+                    chunk.embedding = vector
+                # The first validated response establishes the dimension. Refuse
+                # excess pairwise work before requesting another provider batch.
+                scalar_work = pair_count * (vector_dimension or 0)
+                if scalar_work > self._max_scalar_comparisons:
+                    result.add_finding(
+                        Finding(
+                            category="CONTENT_DEDUP",
+                            severity=Severity.CRITICAL,
+                            check_name="scalar_comparison_limit",
+                            message=f"Tier 2 scalar comparison work exceeds the configured limit ({self._max_scalar_comparisons}).",
+                            file_path=report_path,
+                            suggestion="Reduce or split the skill content before running Tier 2.",
+                            metadata={
+                                "pair_count": pair_count,
+                                "vector_dimension": vector_dimension,
+                                "scalar_work": scalar_work,
+                                "limit": self._max_scalar_comparisons,
+                            },
+                        )
+                    )
+                    return result
 
             logger.info("Embedding complete")
 
@@ -242,16 +252,16 @@ class IntraSkillValidator(ValidatorBase):
         clusters = build_clusters(all_chunks, self._threshold)
         logger.info("Found %d cluster(s)", len(clusters))
 
-        if len(clusters) > CONTENT_DEDUP_MAX_LLM_CLUSTERS:
+        if len(clusters) > self._max_llm_clusters:
             result.add_finding(
                 Finding(
                     category="CONTENT_DEDUP",
                     severity=Severity.CRITICAL,
                     check_name="llm_cluster_count_limit",
-                    message=f"Tier 2 found more than {CONTENT_DEDUP_MAX_LLM_CLUSTERS} clusters requiring LLM review.",
+                    message=f"Tier 2 found more than {self._max_llm_clusters} clusters requiring LLM review.",
                     file_path=report_path,
                     suggestion="Reduce duplicated content or split the skill before rerunning Tier 2.",
-                    metadata={"actual": len(clusters), "limit": CONTENT_DEDUP_MAX_LLM_CLUSTERS},
+                    metadata={"actual": len(clusters), "limit": self._max_llm_clusters},
                 )
             )
             return result
@@ -262,6 +272,29 @@ class IntraSkillValidator(ValidatorBase):
                 f"No redundant content detected (threshold: {self._threshold})",
             )
             return result
+
+        total_prompt_chars = 0
+        for cluster in clusters:
+            prompt_chars = len(SYSTEM_PROMPT) + len(build_user_prompt(cluster))
+            total_prompt_chars += prompt_chars
+            limits = (
+                (len(cluster.members), CONTENT_DEDUP_MAX_CLUSTER_MEMBERS, "llm_cluster_member_limit"),
+                (prompt_chars, CONTENT_DEDUP_MAX_LLM_PROMPT_CHARS, "llm_prompt_size_limit"),
+                (total_prompt_chars, self._max_total_prompt_chars, "llm_total_prompt_size_limit"),
+            )
+            for actual, limit, check in limits:
+                if actual > limit:
+                    result.add_finding(
+                        Finding(
+                            "CONTENT_DEDUP",
+                            Severity.CRITICAL,
+                            check,
+                            "Tier 2 LLM review exceeds a bounded work limit.",
+                            file_path=report_path,
+                            metadata={"actual": actual, "limit": limit},
+                        )
+                    )
+                    return result
 
         # Step 5: LLM analysis for each cluster (concurrent)
         logger.info("Running LLM analysis on %d cluster(s) concurrently...", len(clusters))

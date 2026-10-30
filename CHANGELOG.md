@@ -4,8 +4,6 @@ All notable changes to SkillEvaluator are documented in this file.
 
 ## Unreleased
 
-## 0.7.0 - 2026-10-30
-
 ### Added
 
 - Add reusable GitLab CI onboarding and configurable Tier 1 quality thresholds,

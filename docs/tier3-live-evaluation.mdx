@@ -610,6 +610,29 @@ neither `trajectory.json` nor a supported log yields any steps, the reward
 records `No trajectory or reconstructible agent log`. Custom graders read
 `trajectory.json` directly and do not get this rebuild.
 
+### Character-sensitive judging
+
+Set `SKILL_EVAL_JUDGE_CHARACTER_FACTS=1` in the evaluator's host environment to
+append character facts to the `accuracy`, `goal_accuracy`, and `behavior_check`
+prompts. For example, a literal U+00A0 (NO-BREAK SPACE) in code can look like an
+ordinary U+0020 space even when the task treats them differently. The metadata
+identifies non-ASCII whitespace and Unicode format (`Cf`) characters by code
+point, Unicode name, position, and ASCII-escaped context. Their presence alone
+does not indicate an error; the task determines which characters are permitted.
+
+The original prompt and evidence remain intact. Metadata is added separately,
+after evidence selection and compaction, with up to 20 occurrences per field
+and 20 code points of context on either side. Additional occurrences are counted.
+The metadata adds prompt tokens beyond the evidence budgets below.
+Line and column positions are one-based Unicode code points in that field; only
+LF advances the line number. Metadata cannot recover characters removed by
+earlier processing, and does not identify all invisible or look-alike characters.
+
+The option is disabled by default. Enabling it selects the prompt-based goal
+judge instead of the optional RAGAS route, so keep this setting consistent when
+comparing scores. Facts can help a judge interpret evidence but do not guarantee
+correct judgments. Prefer executable checks for requirements they can verify.
+
 ### Evidence budgets
 
 Each LLM judge sees a bounded evidence bundle drawn from the trajectory rather

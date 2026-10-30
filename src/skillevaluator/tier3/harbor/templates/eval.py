@@ -69,30 +69,29 @@ except ImportError:  # pragma: no cover -- older task bundles
 
 
 try:
-    from codex_tool_call_normalizer import (
-        atif_content_has_text,
-        atif_content_text,
-        iter_normalized_tool_calls,
-        normalized_tool_call_error_flag,
-        normalized_tool_call_is_error,
-        normalized_tool_call_observation,
-        normalized_tool_call_wrapper_observation,
-    )
+    import codex_tool_call_normalizer as _tool_normalizer
 except ImportError:  # pragma: no cover -- source-tree import only
-    from skillevaluator.tier3.eval_core.codex_tool_call_normalizer import (
-        atif_content_has_text,
-        atif_content_text,
-        iter_normalized_tool_calls,
-        normalized_tool_call_error_flag,
-        normalized_tool_call_is_error,
-        normalized_tool_call_observation,
-        normalized_tool_call_wrapper_observation,
-    )
+    from skillevaluator.tier3.eval_core import codex_tool_call_normalizer as _tool_normalizer
+
+atif_content_has_text = _tool_normalizer.atif_content_has_text
+atif_content_text = _tool_normalizer.atif_content_text
+iter_normalized_tool_calls = _tool_normalizer.iter_normalized_tool_calls
+normalized_tool_call_error_flag = _tool_normalizer.normalized_tool_call_error_flag
+normalized_tool_call_is_error = _tool_normalizer.normalized_tool_call_is_error
+normalized_tool_call_observation = _tool_normalizer.normalized_tool_call_observation
+normalized_tool_call_wrapper_observation = _tool_normalizer.normalized_tool_call_wrapper_observation
 
 try:
-    from evidence import evidence_ref_identity
+    import evidence as _evidence
 except ImportError:  # pragma: no cover -- source-tree import only
-    from skillevaluator.evidence import evidence_ref_identity
+    from skillevaluator import evidence as _evidence
+
+evidence_ref_identity = _evidence.evidence_ref_identity
+
+try:
+    from character_facts import append_character_facts, character_facts_enabled
+except ImportError:  # pragma: no cover -- source-tree import only
+    from skillevaluator.tier3.eval_core.character_facts import append_character_facts, character_facts_enabled
 
 
 _CHECKS_PATH = _SCRIPT_TESTS_DIR / "checks.py"
@@ -400,6 +399,7 @@ _WRITE_TOOL_HINTS = _shared_checks._WRITE_TOOL_HINTS
 # Fifteen compatibility adapters preserve existing argument names, positional
 # options, trajectory input, and output shape.
 
+
 def _action_args(tc):
     return _shared_checks._action_args(tc)
 
@@ -425,9 +425,7 @@ def _tool_mentions_skill(tc, expected_skill):
 
 
 def _classify_skill_match(observed, expected_skill, acceptable_skills=None, fuzzy=False):
-    return _shared_checks._classify_skill_match(
-        observed, expected_skill, acceptable_skills, fuzzy=fuzzy
-    )
+    return _shared_checks._classify_skill_match(observed, expected_skill, acceptable_skills, fuzzy=fuzzy)
 
 
 def _cmd_references_exact_target(cmd, target_skill, _depth=0):
@@ -456,9 +454,7 @@ def check_activation(tool_calls, expected_skill, skill_tool_names=None, acceptab
 
 
 def check_negative_case(tool_calls, skill_under_test, skill_tool_names=None):
-    return _shared_checks.check_negative_case(
-        tool_calls, skill_under_test, skill_tool_names=skill_tool_names
-    )
+    return _shared_checks.check_negative_case(tool_calls, skill_under_test, skill_tool_names=skill_tool_names)
 
 
 def check_routing(
@@ -490,9 +486,7 @@ def check_security(traj, tool_calls, expected_skill=None, acceptable_skills=None
         tool_calls,
         get_agent_text(traj),
         user_text="\n".join(
-            atif_content_text(step.get("message"))
-            for step in traj.get("steps", [])
-            if step.get("source") == "user"
+            atif_content_text(step.get("message")) for step in traj.get("steps", []) if step.get("source") == "user"
         ),
         expected_skill=expected_skill or "",
         acceptable_skills=acceptable_skills,
@@ -625,931 +619,95 @@ def redact_secrets_in_log_line(line, *, extra_secret_values=None):
 # ── ATIF Helpers ─────────────────────────────────────────────────────────────
 
 
-iter_tool_calls = iter_normalized_tool_calls
-_tool_call_observation = normalized_tool_call_observation
-_tool_call_wrapper_observation = normalized_tool_call_wrapper_observation
-
-
-def get_all_tool_calls(traj):
-    calls = []
-    for step, tc in iter_tool_calls(traj):
-        fn = tc.get("function_name") or ""
-        args = tc.get("arguments") or {}
-        calls.append(
-            {
-                "fn": fn,
-                "args": args,
-                "args_text": json.dumps(args).lower(),
-                "obs": _tool_call_observation(step, tc).lower(),
-            }
-        )
-    return calls
-
-
-def get_skill_tool_calls(traj):
-    skills = []
-    for step, tc in iter_tool_calls(traj):
-        if (tc.get("function_name") or "").lower() != "skill":
-            continue
-        if normalized_tool_call_is_error(step, tc):
-            continue
-        args = tc.get("arguments") or {}
-        name = args.get("skill", args.get("name", ""))
-        if name:
-            skills.append(str(name))
-    return skills
-
-
-def get_read_calls(traj):
-    paths = []
-    for tc in get_all_tool_calls(traj):
-        fn = tc["fn"].lower()
-        if fn in ("read", "read_file"):
-            path = tc["args"].get("path", tc["args"].get("file_path", ""))
-            if path:
-                paths.append(str(path))
-        elif fn in ("bash", "execute"):
-            cmd = tc["args"].get("command", "")
-            if "cat " in str(cmd) and "SKILL" in str(cmd).upper():
-                paths.append(str(cmd))
-    return paths
-
-
-def get_bash_commands(traj):
-    cmds = []
-    for _, tc in iter_tool_calls(traj):
-        fn = (tc.get("function_name") or "").lower()
-        if fn in ("bash", "execute", "run_code", "run"):
-            cmd = (tc.get("arguments") or {}).get("command", "") or (tc.get("arguments") or {}).get("code", "")
-            if cmd:
-                cmds.append(str(cmd))
-    return cmds
-
-
-def get_agent_text(traj):
-    parts = []
-    for step in traj.get("steps", []):
-        if step.get("source") == "agent":
-            msg = atif_content_text(step.get("message"))
-            if msg.strip():
-                parts.append(msg)
-    return "\n".join(parts)
-
-
-def extract_tool_calls_as_dicts(traj):
-    result = []
-    for step in traj.get("steps", []):
-        if step.get("source") != "agent":
-            continue
-        for _, tc in iter_tool_calls({"steps": [step]}):
-            call = {
-                "action": tc.get("function_name", ""),
-                "action_input": tc.get("arguments") or {},
-                "observation": _tool_call_observation(step, tc),
-            }
-            # Keep Harbor's explicit success flag too: Claude Code results that
-            # exited 0 carry no exit status line.
-            if (is_error := normalized_tool_call_error_flag(step, tc)) is not None:
-                call["is_error"] = is_error
-            if status := tc.get("_atif_normalization_status"):
-                call["normalization_status"] = status
-            if status := tc.get("_atif_observation_status"):
-                call["observation_status"] = status
-            if wrapper_observation := _tool_call_wrapper_observation(step, tc):
-                call["wrapper_observation"] = wrapper_observation
-            result.append(call)
-    return result
-
-
-def build_conversation_summary(traj, question):
-    parts = [f"User: {question}"]
-    for step in traj.get("steps", []):
-        if step.get("source") != "agent":
-            continue
-        reasoning = step.get("reasoning_content") or ""
-        if reasoning:
-            parts.append(f"Agent reasoning: {str(reasoning)[:200]}")
-        for _, tc in iter_tool_calls({"steps": [step]}):
-            fn = tc.get("function_name", "")
-            args = tc.get("arguments") or {}
-            parts.append(f"Agent called: {fn}({json.dumps(args)[:200]})")
-        obs = step.get("observation") or {}
-        for r in obs.get("results") or []:
-            content = atif_content_text(r.get("content"))
-            if content:
-                parts.append(f"Tool returned: {content[:400]}")
-        msg = atif_content_text(step.get("message"))
-        if msg.strip() and not step.get("tool_calls"):
-            parts.append(f"Agent: {msg[:1500]}")
-    return "\n".join(parts)
-
-
-_BEHAVIOR_EVIDENCE_MAX_CHARS = 4000
-_DEFAULT_BEHAVIOR_FINAL_RESPONSE_LIMIT = 800
-_DEFAULT_BEHAVIOR_CHECK_BUDGET = 8000
-_DEFAULT_TOOL_HISTORY_HEADROOM = 4000
-_MIN_BEHAVIOR_HISTORY_HEADROOM = 1600
-_SECTION_COMPACT_TOOL_HISTORY = "COMPACT TOOL HISTORY"
-_SECTION_FILE_CHANGES = "FILE CHANGES"
-_SECTION_FINAL_RESPONSE = "FINAL RESPONSE"
-_SECTION_USER_REQUEST = "USER REQUEST"
-
-
-def _env_positive_int(name, default):
-    """Parse a positive integer from environment variable *name* or return *default*."""
-    raw = os.environ.get(name, "").strip()
-    if raw:
-        try:
-            return max(1, int(raw))
-        except ValueError:
-            pass
-    return default
-
-
-def _behavior_final_response_limit():
-    """Return the configured behavior final response section limit or default."""
-    return _env_positive_int("SKILL_EVAL_BEHAVIOR_FINAL_RESPONSE_LIMIT", _DEFAULT_BEHAVIOR_FINAL_RESPONSE_LIMIT)
-
-
-def _behavior_check_budget():
-    """Return the configured behavior check evidence budget or reconciled default."""
-    final_limit = _behavior_final_response_limit()
-    base_budget = _env_positive_int("SKILL_EVAL_BEHAVIOR_CHECK_BUDGET", _DEFAULT_BEHAVIOR_CHECK_BUDGET)
-    return max(base_budget, final_limit + _DEFAULT_TOOL_HISTORY_HEADROOM)
-
-
-_BEHAVIOR_WRITE_TOOLS = {
-    "write",
-    "write_file",
-    "edit",
-    "edit_file",
-    "multiedit",
-    "notebookedit",
-    "apply_patch",
-}
-_BEHAVIOR_EXEC_TOOLS = {"bash", "execute", "exec_command", "run_code", "run", "shell", "command"}
-_BEHAVIOR_WRITE_COMMAND_MARKERS = ("tee ", "apply_patch")
-_BEHAVIOR_WRITE_REDIRECT_RE = re.compile(r"(?:^|[\s;])(?:>|>>)\s*(?![&0-9])[^&\s;|]+")
-_BEHAVIOR_PYTHON_WRITE_RE = re.compile(
-    r"\b(?:write_text|write_bytes)\s*\(|\bopen\s*\([^)]*,\s*['\"][wa]",
-    re.IGNORECASE,
-)
-_TOOL_NAME_SEPARATORS = (".", ":", "/", "__")
-
-
-def _get_final_response(traj):
-    for step in reversed(traj.get("steps", [])):
-        if step.get("source") == "agent":
-            content = step.get("message")
-            if atif_content_has_text(content):
-                return atif_content_text(content)
-    return ""
-
-
-def _truncate_for_behavior(text, limit):
-    if limit <= 0:
-        return ""
-    if len(text) <= limit:
-        return text
-    marker = "\n...[truncated]...\n"
-    if limit <= len(marker) + 1:
-        return text[:limit]
-    head = max(1, (limit - len(marker)) * 2 // 3)
-    tail = max(1, limit - len(marker) - head)
-    return f"{text[:head]}{marker}{text[-tail:]}"
-
-
-def _append_section_with_budget(parts, title, body, max_chars, section_limit=None):
-    budget = max_chars if section_limit is None else min(max_chars, section_limit)
-    if budget <= len(title) + 2 or not str(body).strip():
-        return max_chars
-    section = f"{title}\n{_truncate_for_behavior(str(body).strip(), budget - len(title) - 2)}"
-    if not section.strip():
-        return max_chars
-    parts.append(section)
-    return max(0, max_chars - len(section) - 2)
-
-
-def _tool_file_path(args):
-    for key in ("file_path", "path", "filename", "target_file"):
-        value = args.get(key)
-        if value:
-            return str(value)
-    return ""
-
-
-def _tool_write_body(args):
-    snippets = []
-    for key in ("content", "new_string", "patch", "code"):
-        value = args.get(key)
-        if value:
-            snippets.append(f"{key}:\n{value}")
-    edits = args.get("edits")
-    if isinstance(edits, list):
-        for idx, edit in enumerate(edits[:5], start=1):
-            if isinstance(edit, dict):
-                new_string = edit.get("new_string") or edit.get("replacement")
-                if new_string:
-                    snippets.append(f"edit {idx} new_string:\n{new_string}")
-    return "\n\n".join(str(s) for s in snippets if str(s).strip())
-
-
-def _command_looks_like_write(command):
-    lower = command.lower()
-    return any(marker in lower for marker in _BEHAVIOR_WRITE_COMMAND_MARKERS) or bool(
-        _BEHAVIOR_WRITE_REDIRECT_RE.search(command) or _BEHAVIOR_PYTHON_WRITE_RE.search(command)
-    )
-
-
-def _tool_name_looks_like_write(fn_lower):
-    candidates = {fn_lower}
-    for separator in _TOOL_NAME_SEPARATORS:
-        if separator in fn_lower:
-            candidates.add(fn_lower.rsplit(separator, 1)[-1])
-    return any(candidate in _BEHAVIOR_WRITE_TOOLS for candidate in candidates)
-
-
-def _collect_file_change_evidence(traj):
-    changes = []
-    for step in traj.get("steps", []):
-        if step.get("source") != "agent":
-            continue
-        for _, tc in iter_tool_calls({"steps": [step]}):
-            fn = str(tc.get("function_name") or "")
-            fn_lower = fn.lower()
-            args = tc.get("arguments") or {}
-            if not isinstance(args, dict):
-                args = {}
-
-            body = ""
-            is_write_call = False
-            file_path = _tool_file_path(args)
-            if _tool_name_looks_like_write(fn_lower):
-                is_write_call = True
-                body = _tool_write_body(args)
-            elif fn_lower in _BEHAVIOR_EXEC_TOOLS:
-                command = str(args.get("command") or args.get("cmd") or args.get("code") or "")
-                if _command_looks_like_write(command):
-                    is_write_call = True
-                    body = f"command:\n{command}"
-
-            if not is_write_call or (not body and not file_path):
-                continue
-
-            obs = _tool_call_observation(step, tc)
-            entry_parts = [f"Agent called: {fn}"]
-            if file_path:
-                entry_parts.append(f"Path: {file_path}")
-            if body:
-                entry_parts.append(_truncate_for_behavior(body, 1800))
-            if obs:
-                entry_parts.append(f"Tool returned: {_truncate_for_behavior(obs, 500)}")
-            changes.append("\n".join(entry_parts))
-    return changes
-
-
-def build_behavior_evidence(
-    traj,
-    question,
-    max_chars=None,
-    final_response_limit=None,
-):
-    """Build compact, behavior-check-specific evidence from an ATIF trajectory."""
-    effective_final_limit = (
-        _behavior_final_response_limit() if final_response_limit is None else max(1, int(final_response_limit))
-    )
-
-    if max_chars is None:
-        raw_budget = os.environ.get("SKILL_EVAL_BEHAVIOR_CHECK_BUDGET", "").strip()
-        if raw_budget:
-            max_chars = _behavior_check_budget()
-        else:
-            max_chars = max(
-                _BEHAVIOR_EVIDENCE_MAX_CHARS,
-                effective_final_limit + _MIN_BEHAVIOR_HISTORY_HEADROOM,
-            )
-
-    parts = []
-    remaining = max_chars
-
-    file_changes = "\n\n".join(_collect_file_change_evidence(traj))
-    final = _get_final_response(traj)
-    history = build_conversation_summary(traj, question)
-    user_needed = (
-        min(800, len(_SECTION_USER_REQUEST) + len(question.strip()) + 2) if question and question.strip() else 0
-    )
-    history_needed = len(_SECTION_COMPACT_TOOL_HISTORY) + len(history.strip()) + 2 if history and history.strip() else 0
-    tail_needed = user_needed + (2 if user_needed and history_needed else 0) + history_needed
-
-    if file_changes:
-        file_section_limit = None
-        if final and final.strip():
-            reserved_tail = min(_MIN_BEHAVIOR_HISTORY_HEADROOM, max_chars // 4, tail_needed)
-            reserved_final = min(
-                effective_final_limit,
-                len(_SECTION_FINAL_RESPONSE) + len(final.strip()) + 2,
-                max(1, max_chars - min(_MIN_BEHAVIOR_HISTORY_HEADROOM, max_chars // 2)),
-            )
-            if (
-                len(_SECTION_FILE_CHANGES) + len(file_changes.strip()) + 2 + reserved_final + reserved_tail + 4
-                > remaining
-            ):
-                file_section_limit = max(
-                    min(800, remaining // 3),
-                    remaining - reserved_final - reserved_tail - 4,
-                )
-        remaining = _append_section_with_budget(
-            parts,
-            _SECTION_FILE_CHANGES,
-            file_changes,
-            remaining,
-            section_limit=file_section_limit,
-        )
-
-    if final:
-        if max_chars > effective_final_limit:
-            reserved_headroom = min(
-                _MIN_BEHAVIOR_HISTORY_HEADROOM,
-                remaining // 2,
-                tail_needed,
-                max(800, remaining - effective_final_limit),
-            )
-        else:
-            reserved_headroom = min(_MIN_BEHAVIOR_HISTORY_HEADROOM, remaining // 2, tail_needed)
-        bounded_final_limit = min(effective_final_limit, max(1, remaining - reserved_headroom))
-        remaining = _append_section_with_budget(
-            parts,
-            _SECTION_FINAL_RESPONSE,
-            final,
-            remaining,
-            section_limit=bounded_final_limit,
-        )
-
-    remaining = _append_section_with_budget(
-        parts,
-        _SECTION_USER_REQUEST,
-        question,
-        remaining,
-        section_limit=800,
-    )
-
-    remaining = _append_section_with_budget(parts, _SECTION_COMPACT_TOOL_HISTORY, history, remaining)
-
-    return "\n\n".join(parts)[:max_chars]
-
-
-_METRIC_EVIDENCE_REF_METRICS = ("accuracy", "goal_accuracy", "behavior_check")
-_METRIC_EVIDENCE_EXCERPT_CHARS = 300
-_METRIC_EVIDENCE_MAX_TOOL_REFS = 20
-_METRIC_EVIDENCE_MAX_FILE_REFS = 12
-_EXPECTED_ARTIFACT_PATH_RE = re.compile(
-    r"(?<![A-Za-z0-9_.-])/(?:logs/agent|workspace/output|output)"
-    r"[A-Za-z0-9._/+=:@-]*[A-Za-z0-9_./+=:@-]"
-)
-
-
-def _redact_evidence_text(text):
-    redacted = redact_secrets_in_log_line(
-        str(text or ""),
-        extra_secret_values=[
-            os.environ.get("NVIDIA_API_KEY", ""),
-        ],
-    )
-    return redacted.replace("\x00", "").strip()
-
-
-def _evidence_excerpt(text, limit=_METRIC_EVIDENCE_EXCERPT_CHARS):
-    return _truncate_for_behavior(_redact_evidence_text(text), limit)
-
-
-def _evidence_ref(*, source, kind, label, json_pointer=None, path=None, excerpt="", status=None, evidence_id=None):
-    ref = {
-        "source": source,
-        "kind": kind,
-        "label": _evidence_excerpt(label, 160),
-    }
-    if json_pointer:
-        ref["json_pointer"] = json_pointer
-    if path:
-        ref["path"] = _evidence_excerpt(path)
-    if excerpt:
-        ref["excerpt"] = _evidence_excerpt(excerpt)
-    if status:
-        ref["status"] = status
-    if evidence_id:
-        ref["evidence_id"] = evidence_id
-    return ref
-
-
-def _dedupe_evidence_refs(refs):
-    seen = set()
-    deduped = []
-    for ref in refs:
-        key = (
-            str(ref.get("source") or ""),
-            evidence_ref_identity(ref),
-            str(ref.get("kind") or ""),
-        )
-        if key in seen:
-            continue
-        seen.add(key)
-        deduped.append(ref)
-    return deduped
-
-
-def _final_response_ref(traj):
-    steps = traj.get("steps", [])
-    for step_idx in range(len(steps) - 1, -1, -1):
-        step = steps[step_idx]
-        if step.get("source") != "agent":
-            continue
-        content = step.get("message")
-        if atif_content_has_text(content):
-            msg = atif_content_text(content)
-            return [
-                _evidence_ref(
-                    source="trajectory.json",
-                    json_pointer=f"/steps/{step_idx}",
-                    kind="final_response",
-                    label="Final response",
-                    excerpt=msg,
-                )
-            ]
-    return []
-
-
-def _tool_call_ref(step_idx, tc, *, kind):
-    fn = str(tc.get("function_name") or "")
-    args = tc.get("arguments") or {}
-    if not isinstance(args, dict):
-        args = {}
-    command = ""
-    if fn.lower() in _BEHAVIOR_EXEC_TOOLS:
-        command = str(args.get("command") or args.get("cmd") or args.get("code") or "")
-    path = _tool_file_path(args)
-    if not path and command:
-        path = _first_expected_artifact_path(command)
-    excerpt = command or path or json.dumps(args, sort_keys=True)
-    label_detail = command or path or fn
-    json_pointer = f"/steps/{step_idx}/tool_calls/{tc['_atif_raw_tool_index']}"
-    inner_index = tc.get("_atif_inner_tool_index")
-    return _evidence_ref(
-        source="trajectory.json",
-        json_pointer=json_pointer,
-        kind=kind,
-        label=f"{fn}: {label_detail}" if label_detail else fn,
-        path=path or None,
-        excerpt=excerpt,
-        evidence_id=f"{json_pointer}/normalized/{inner_index}" if inner_index is not None else None,
-    )
-
-
-def _tool_call_refs(traj):
-    refs = []
-    for step_idx, step in enumerate(traj.get("steps", [])):
-        if step.get("source") != "agent":
-            continue
-        for _, tc in iter_tool_calls({"steps": [step]}):
-            if len(refs) >= _METRIC_EVIDENCE_MAX_TOOL_REFS:
-                return refs
-            refs.append(_tool_call_ref(step_idx, tc, kind="tool_call"))
-    return refs
-
-
-def _tool_observation_refs(traj):
-    refs = []
-    for step_idx, step in enumerate(traj.get("steps", [])):
-        if step.get("source") != "agent":
-            continue
-        for result_idx, result in enumerate((step.get("observation") or {}).get("results") or []):
-            if len(refs) >= _METRIC_EVIDENCE_MAX_TOOL_REFS:
-                return refs
-            content = atif_content_text(result.get("content"))
-            if not content.strip():
-                continue
-            call_id = str(result.get("source_call_id") or f"result-{result_idx}")
-            refs.append(
-                _evidence_ref(
-                    source="trajectory.json",
-                    json_pointer=f"/steps/{step_idx}/observation/results/{result_idx}",
-                    kind="tool_observation",
-                    label=f"Tool observation: {call_id}",
-                    excerpt=content,
-                )
-            )
-    return refs
-
-
-def _file_change_refs(traj):
-    refs = []
-    for step_idx, step in enumerate(traj.get("steps", [])):
-        if step.get("source") != "agent":
-            continue
-        for _, tc in iter_tool_calls({"steps": [step]}):
-            if len(refs) >= _METRIC_EVIDENCE_MAX_FILE_REFS:
-                return refs
-            fn = str(tc.get("function_name") or "")
-            fn_lower = fn.lower()
-            args = tc.get("arguments") or {}
-            if not isinstance(args, dict):
-                args = {}
-            command = str(args.get("command") or args.get("cmd") or args.get("code") or "")
-            is_write = _tool_name_looks_like_write(fn_lower) or (
-                fn_lower in _BEHAVIOR_EXEC_TOOLS and _command_looks_like_write(command)
-            )
-            if not is_write:
-                continue
-            refs.append(_tool_call_ref(step_idx, tc, kind="file_change"))
-    return refs
-
-
-def _first_expected_artifact_path(text):
-    match = _EXPECTED_ARTIFACT_PATH_RE.search(str(text or ""))
-    if not match:
-        return ""
-    return match.group(0).rstrip(".,;:)]}'\"")
-
-
-def _expected_artifact_refs(ground_truth, expected_behavior):
-    refs = []
-    sources = []
-    if ground_truth:
-        sources.append(("/ground_truth", "ground_truth", str(ground_truth)))
-    for idx, behavior in enumerate(expected_behavior):
-        if str(behavior or "").strip():
-            sources.append((f"/expected_behavior/{idx}", "expected_behavior", str(behavior)))
-
-    for pointer, source_kind, text in sources:
-        for match in _EXPECTED_ARTIFACT_PATH_RE.finditer(text):
-            path = match.group(0).rstrip(".,;:)]}'\"")
-            refs.append(
-                _evidence_ref(
-                    source="evals.json",
-                    json_pointer=pointer,
-                    kind="expected_artifact",
-                    label=f"Expected artifact: {path}",
-                    path=path,
-                    excerpt=text,
-                    status="not_checked",
-                )
-            )
-            if source_kind == "expected_behavior":
-                break
-    return _dedupe_evidence_refs(refs)
-
-
-def _expected_behavior_refs(expected_behavior):
-    return [
-        _evidence_ref(
-            source="evals.json",
-            json_pointer=f"/expected_behavior/{idx}",
-            kind="expected_behavior",
-            label=f"Expected behavior {idx + 1}",
-            excerpt=str(behavior),
-        )
-        for idx, behavior in enumerate(expected_behavior)
-        if str(behavior or "").strip()
-    ]
-
-
-def _ground_truth_ref(ground_truth):
-    if not str(ground_truth or "").strip():
-        return []
-    return [
-        _evidence_ref(
-            source="evals.json",
-            json_pointer="/ground_truth",
-            kind="ground_truth",
-            label="Expected answer",
-            excerpt=ground_truth,
-        )
-    ]
-
-
-def build_metric_evidence_refs(traj, question, *, ground_truth="", expected_behavior=None):
-    """Build compact source refs for LLM-judged metrics."""
-    _ = question
-    if not isinstance(expected_behavior, list):
-        expected_behavior = []
-
-    final_refs = _final_response_ref(traj)
-    tool_refs = _tool_call_refs(traj)
-    observation_refs = _tool_observation_refs(traj)
-    file_refs = _file_change_refs(traj)
-    ground_truth_refs = _ground_truth_ref(ground_truth)
-    behavior_refs = _expected_behavior_refs(expected_behavior)
-    artifact_refs = _expected_artifact_refs(ground_truth, expected_behavior)
-
-    return {
-        "accuracy": _dedupe_evidence_refs([*ground_truth_refs, *final_refs]),
-        "goal_accuracy": _dedupe_evidence_refs(
-            [
-                *ground_truth_refs,
-                *tool_refs,
-                *observation_refs,
-                *final_refs,
-                *artifact_refs,
-            ]
-        ),
-        "behavior_check": _dedupe_evidence_refs(
-            [
-                *behavior_refs,
-                *file_refs,
-                *final_refs,
-                *artifact_refs,
-            ]
-        ),
-    }
-
-
-def attach_metric_evidence_refs(details, evidence_refs):
-    """Attach evidence refs to existing metric detail dictionaries in place."""
-    for metric in _METRIC_EVIDENCE_REF_METRICS:
-        refs = evidence_refs.get(metric) or []
-        if not refs:
-            continue
-        existing = details.get(metric)
-        if isinstance(existing, dict):
-            existing["evidence_refs"] = refs
-        else:
-            details[metric] = {"value": existing, "evidence_refs": refs}
-    return details
-
-
-# ── Metric Evidence Bundles ───────────────────────────────────────────────────
-
-_BUNDLE_ITEM_CHARS = 1500
-_DEFAULT_ACCURACY_BUDGET = 8000
-_DEFAULT_GOAL_ACCURACY_BUDGET = 12000
-_BUNDLE_BUDGETS = {
-    "accuracy": _DEFAULT_ACCURACY_BUDGET,
-    "goal_accuracy": _DEFAULT_GOAL_ACCURACY_BUDGET,
-    "behavior_check": _DEFAULT_BEHAVIOR_CHECK_BUDGET,
-}
-_BUNDLE_ACCURACY_MAX_OBS = 6
-_BUNDLE_GOAL_MAX_OBS = 12
-
-
-def _accuracy_budget():
-    """Return the configured accuracy evidence budget or default."""
-    return _env_positive_int("SKILL_EVAL_ACCURACY_BUDGET", _DEFAULT_ACCURACY_BUDGET)
-
-
-def _goal_accuracy_budget():
-    """Return the configured goal accuracy evidence budget or default."""
-    return _env_positive_int("SKILL_EVAL_GOAL_ACCURACY_BUDGET", _DEFAULT_GOAL_ACCURACY_BUDGET)
-
-
-def _bundle_budgets():
-    """Return effective bundle budgets taking into account runtime overrides."""
-    return {
-        "accuracy": _accuracy_budget(),
-        "goal_accuracy": _goal_accuracy_budget(),
-        "behavior_check": _behavior_check_budget(),
-    }
-
-
-def _clip(text, limit):
-    text = str(text or "")
-    return text if len(text) <= limit else text[:limit] + " …[clipped]"
-
-
-def _late_observation_excerpts(traj, limit):
-    out = []
-    for step in reversed(traj.get("steps", [])):
-        if step.get("source") != "agent":
-            continue
-        for result in reversed((step.get("observation") or {}).get("results") or []):
-            content = atif_content_text(result.get("content")).strip()
-            if content:
-                out.append(_clip(content, limit))
-    return out
-
-
-def _assemble(sections, budget):
-    parts = []
-    used = 0
-    dropped = 0
-    truncated = False
-    non_empty = [(title, str(body or "").strip()) for title, body in sections if str(body or "").strip()]
-    for idx, (title, body) in enumerate(non_empty):
-        block = f"{title}\n{body}"
-        if used + len(block) <= budget:
-            parts.append(block)
-            used += len(block) + 2
-        elif title == _SECTION_FINAL_RESPONSE and budget - used > 0:
-            avail = budget - used
-            later_blocks = [len(f"{t}\n{b}") + 2 for t, b in non_empty[idx + 1 :]]
-            if later_blocks and avail >= 160:
-                reserve_later = min(avail // 2, *later_blocks)
-                if avail - reserve_later > len(title) + 16:
-                    avail -= reserve_later
-            header = f"{title}\n"
-            clip_suffix = " …[clipped]"
-            if avail > len(header) + len(clip_suffix):
-                clipped_body = _clip(body, avail - len(header) - len(clip_suffix))
-                clipped_block = f"{header}{clipped_body}"
-            elif avail > len(header):
-                clipped_block = f"{header}{body[: avail - len(header)]}"
-            else:
-                clipped_block = block[:avail]
-            parts.append(clipped_block)
-            used += len(clipped_block) + 2
-            dropped += 1
-            truncated = True
-        else:
-            dropped += 1
-            truncated = True
-    return "\n\n".join(parts), dropped, truncated
-
-
-_BACKTICK_TOKEN_RE = re.compile(r"`([^`]{4,})`")
-_VERIFIED_FACTS_MAX = 12
-_VERIFIED_FACT_LINE_MAX = 200
-
-
-def build_verified_facts(traj, expected_behavior, ground_truth):
-    """Derive deterministic facts from the trajectory vs expected tokens.
-
-    Each fact: {"claim": str, "observed": bool, "step_id": int|None, "evidence": str}.
-    Only emits facts for tokens extractable from *expected_behavior* and *ground_truth*
-    via artifact-path regex or backtick-quoted snippets. No fuzzy matching, no prose.
-    """
-    if not isinstance(expected_behavior, list):
-        expected_behavior = []
-
-    tokens = []  # list of (claim, match_mode) where mode is "path" or "ci"
-    seen_claims = set()
-
-    sources = list(expected_behavior) + ([ground_truth] if ground_truth else [])
-    for source in sources:
-        text = str(source or "")
-        # a. artifact paths
-        for match in _EXPECTED_ARTIFACT_PATH_RE.finditer(text):
-            claim = match.group(0).rstrip(".,;:)]}'\"")
-            if claim and claim not in seen_claims:
-                seen_claims.add(claim)
-                tokens.append((claim, "path"))
-        # b. backtick-quoted snippets >= 4 chars (strip backticks)
-        for match in _BACKTICK_TOKEN_RE.finditer(text):
-            claim = match.group(1)
-            if claim and claim not in seen_claims:
-                seen_claims.add(claim)
-                tokens.append((claim, "ci"))
-
-    if not tokens:
-        return []
-
-    steps = traj.get("steps", [])
-    facts = []
-
-    for claim, mode in tokens:
-        if len(facts) >= _VERIFIED_FACTS_MAX:
-            break
-        observed = False
-        step_id = None
-        evidence = ""
-
-        for idx, step in enumerate(steps):
-            if step.get("source") != "agent":
-                continue
-            for _, tc in iter_tool_calls({"steps": [step]}):
-                args = tc.get("arguments") or {}
-                if not isinstance(args, dict):
-                    continue
-                command = str(args.get("command") or args.get("cmd") or args.get("code") or "")
-                file_arg = _tool_file_path(args)
-                write_body = _tool_write_body(args)
-
-                candidate_texts = [command, file_arg, write_body]
-                for candidate in candidate_texts:
-                    if not candidate:
-                        continue
-                    needle = claim
-                    haystack = candidate
-                    if mode == "ci":
-                        needle = claim.lower()
-                        haystack = candidate.lower()
-                    if needle in haystack:
-                        observed = True
-                        step_id = idx
-                        evidence = command or file_arg or write_body
-                        evidence = evidence[:160]
-                        break
-                if observed:
-                    break
-            if observed:
-                break
-
-        facts.append(
-            {
-                "claim": claim,
-                "observed": observed,
-                "step_id": step_id,
-                "evidence": evidence,
-            }
-        )
-
-    return facts
-
-
-def _build_verified_facts_section(facts):
-    """Build the VERIFIED FACTS header string to prepend to prompt_evidence."""
-    if not facts:
-        return ""
-    lines = ["VERIFIED FACTS (deterministic):"]
-    for fact in facts:
-        claim = fact["claim"]
-        if fact["observed"]:
-            sid = fact["step_id"]
-            ev = fact["evidence"]
-            line = f"- [OBSERVED step {sid}] {claim}"
-            if ev:
-                line = f"{line} :: {ev}"
-            if len(line) > _VERIFIED_FACT_LINE_MAX:
-                line = line[:_VERIFIED_FACT_LINE_MAX]
-        else:
-            line = f"- [NOT OBSERVED] {claim}"
-            if len(line) > _VERIFIED_FACT_LINE_MAX:
-                line = line[:_VERIFIED_FACT_LINE_MAX]
-        lines.append(line)
-    return "\n".join(lines)
-
-
-def build_metric_evidence_bundles(traj, question, *, ground_truth="", expected_behavior=None):
-    if not isinstance(expected_behavior, list):
-        expected_behavior = []
-    refs = build_metric_evidence_refs(traj, question, ground_truth=ground_truth, expected_behavior=expected_behavior)
-
-    # Compute verified facts once; prepend the same section to all metrics
-    facts = build_verified_facts(traj, expected_behavior, ground_truth)
-    facts_section = _build_verified_facts_section(facts)
-
-    final = _get_final_response(traj)
-    file_changes = "\n\n".join(_collect_file_change_evidence(traj))
-    late_obs = _late_observation_excerpts(traj, _BUNDLE_ITEM_CHARS)
-
-    def _prepend_facts(text):
-        if not facts_section:
-            return text
-        if text:
-            return f"{facts_section}\n\n{text}"
-        return facts_section
-
-    bundles = {}
-    budgets = _bundle_budgets()
-    acc_text, acc_drop, acc_trunc = _assemble(
-        [
-            (_SECTION_FINAL_RESPONSE, final),
-            ("PRODUCED FILES / WRITES", file_changes),
-            ("KEY OBSERVATIONS", "\n---\n".join(late_obs[:_BUNDLE_ACCURACY_MAX_OBS])),
-        ],
-        budgets["accuracy"],
-    )
-    bundles["accuracy"] = {
-        "prompt_evidence": _prepend_facts(acc_text or _clip(get_agent_text(traj), budgets["accuracy"])),
-        "evidence_refs": refs["accuracy"],
-        "omitted": {
-            "count": acc_drop,
-            "truncated": acc_trunc,
-            "reason": "low-relevance sections dropped to fit budget" if acc_trunc else "",
-        },
-        "verified": facts,
-    }
-    goal_text, goal_drop, goal_trunc = _assemble(
-        [
-            (_SECTION_FINAL_RESPONSE, final),
-            ("END-STATE FILE CHANGES", file_changes),
-            ("RECENT TOOL RESULTS (newest first)", "\n---\n".join(late_obs[:_BUNDLE_GOAL_MAX_OBS])),
-        ],
-        budgets["goal_accuracy"],
-    )
-    bundles["goal_accuracy"] = {
-        "prompt_evidence": _prepend_facts(goal_text or _clip(get_agent_text(traj), budgets["goal_accuracy"])),
-        "evidence_refs": refs["goal_accuracy"],
-        "omitted": {
-            "count": goal_drop,
-            "truncated": goal_trunc,
-            "reason": "older/low-relevance tool results dropped to fit budget" if goal_trunc else "",
-        },
-        "verified": facts,
-    }
-    facts_overhead = len(facts_section) + 2 if facts_section else 0
-    bc_budget = max(1, budgets["behavior_check"] - facts_overhead)
-    bc_text = build_behavior_evidence(traj, question, max_chars=bc_budget)
-    bc_full = build_behavior_evidence(traj, question, max_chars=10**9)
-    bc_trunc = len(bc_full) > len(bc_text)
-    bundles["behavior_check"] = {
-        "prompt_evidence": _prepend_facts(bc_text),
-        "evidence_refs": refs["behavior_check"],
-        "omitted": {
-            "count": 1 if bc_trunc else 0,
-            "truncated": bc_trunc,
-            "reason": "lower-priority behavior history truncated to fit budget" if bc_trunc else "",
-        },
-        "verified": facts,
-    }
-    return bundles
+# Host and container evidence use the same implementation. The staged file
+# takes precedence only when it exists beside this evaluator-owned verifier.
+_ATIF_HELPERS_PATH = _SCRIPT_TESTS_DIR / "atif_helpers.py"
+if _ATIF_HELPERS_PATH.is_file():
+    import importlib.util
+
+    _atif_spec = importlib.util.spec_from_file_location("_skillevaluator_shared_atif", _ATIF_HELPERS_PATH)
+    assert _atif_spec and _atif_spec.loader
+    _shared_atif = importlib.util.module_from_spec(_atif_spec)
+    _atif_spec.loader.exec_module(_shared_atif)
+else:
+    from skillevaluator.tier3.eval_core import atif_helpers as _shared_atif
+
+# Retain template helper names used by graders and differential tools.
+iter_tool_calls = _shared_atif.iter_tool_calls
+_tool_call_observation = _shared_atif._tool_call_observation
+_tool_call_wrapper_observation = _shared_atif._tool_call_wrapper_observation
+get_all_tool_calls = _shared_atif.get_all_tool_calls
+get_skill_tool_calls = _shared_atif.get_skill_tool_calls
+get_read_calls = _shared_atif.get_read_calls
+get_bash_commands = _shared_atif.get_bash_commands
+get_agent_text = _shared_atif.get_agent_text
+extract_tool_calls_as_dicts = _shared_atif.extract_tool_calls_as_dicts
+build_conversation_summary = _shared_atif.build_conversation_summary
+_BEHAVIOR_EVIDENCE_MAX_CHARS = _shared_atif._BEHAVIOR_EVIDENCE_MAX_CHARS
+_DEFAULT_BEHAVIOR_FINAL_RESPONSE_LIMIT = _shared_atif._DEFAULT_BEHAVIOR_FINAL_RESPONSE_LIMIT
+_DEFAULT_BEHAVIOR_CHECK_BUDGET = _shared_atif._DEFAULT_BEHAVIOR_CHECK_BUDGET
+_DEFAULT_TOOL_HISTORY_HEADROOM = _shared_atif._DEFAULT_TOOL_HISTORY_HEADROOM
+_MIN_BEHAVIOR_HISTORY_HEADROOM = _shared_atif._MIN_BEHAVIOR_HISTORY_HEADROOM
+_SECTION_COMPACT_TOOL_HISTORY = _shared_atif._SECTION_COMPACT_TOOL_HISTORY
+_SECTION_FILE_CHANGES = _shared_atif._SECTION_FILE_CHANGES
+_SECTION_FINAL_RESPONSE = _shared_atif._SECTION_FINAL_RESPONSE
+_SECTION_USER_REQUEST = _shared_atif._SECTION_USER_REQUEST
+_env_positive_int = _shared_atif._env_positive_int
+_behavior_final_response_limit = _shared_atif._behavior_final_response_limit
+_behavior_check_budget = _shared_atif._behavior_check_budget
+_BEHAVIOR_WRITE_TOOLS = _shared_atif._BEHAVIOR_WRITE_TOOLS
+_BEHAVIOR_EXEC_TOOLS = _shared_atif._BEHAVIOR_EXEC_TOOLS
+_BEHAVIOR_WRITE_COMMAND_MARKERS = _shared_atif._BEHAVIOR_WRITE_COMMAND_MARKERS
+_BEHAVIOR_WRITE_REDIRECT_RE = _shared_atif._BEHAVIOR_WRITE_REDIRECT_RE
+_BEHAVIOR_PYTHON_WRITE_RE = _shared_atif._BEHAVIOR_PYTHON_WRITE_RE
+_TOOL_NAME_SEPARATORS = _shared_atif._TOOL_NAME_SEPARATORS
+_get_final_response = _shared_atif.get_final_response
+_truncate_for_behavior = _shared_atif._truncate_for_behavior
+_append_section_with_budget = _shared_atif._append_section_with_budget
+_tool_file_path = _shared_atif._tool_file_path
+_tool_write_body = _shared_atif._tool_write_body
+_command_looks_like_write = _shared_atif._command_looks_like_write
+_tool_name_looks_like_write = _shared_atif._tool_name_looks_like_write
+_collect_file_change_evidence = _shared_atif._collect_file_change_evidence
+build_behavior_evidence = _shared_atif.build_behavior_evidence
+_METRIC_EVIDENCE_REF_METRICS = _shared_atif._METRIC_EVIDENCE_REF_METRICS
+_METRIC_EVIDENCE_EXCERPT_CHARS = _shared_atif._METRIC_EVIDENCE_EXCERPT_CHARS
+_METRIC_EVIDENCE_MAX_TOOL_REFS = _shared_atif._METRIC_EVIDENCE_MAX_TOOL_REFS
+_METRIC_EVIDENCE_MAX_FILE_REFS = _shared_atif._METRIC_EVIDENCE_MAX_FILE_REFS
+_EXPECTED_ARTIFACT_PATH_RE = _shared_atif._EXPECTED_ARTIFACT_PATH_RE
+_redact_evidence_text = _shared_atif._redact_evidence_text
+_evidence_excerpt = _shared_atif._evidence_excerpt
+_evidence_ref = _shared_atif._evidence_ref
+_dedupe_evidence_refs = _shared_atif._dedupe_evidence_refs
+_final_response_ref = _shared_atif._final_response_ref
+_tool_call_ref = _shared_atif._tool_call_ref
+_tool_call_refs = _shared_atif._tool_call_refs
+_tool_observation_refs = _shared_atif._tool_observation_refs
+_file_change_refs = _shared_atif._file_change_refs
+_first_expected_artifact_path = _shared_atif._first_expected_artifact_path
+_expected_artifact_refs = _shared_atif._expected_artifact_refs
+_expected_behavior_refs = _shared_atif._expected_behavior_refs
+_ground_truth_ref = _shared_atif._ground_truth_ref
+build_metric_evidence_refs = _shared_atif.build_metric_evidence_refs
+attach_metric_evidence_refs = _shared_atif.attach_metric_evidence_refs
+_BUNDLE_ITEM_CHARS = _shared_atif._BUNDLE_ITEM_CHARS
+_DEFAULT_ACCURACY_BUDGET = _shared_atif._DEFAULT_ACCURACY_BUDGET
+_DEFAULT_GOAL_ACCURACY_BUDGET = _shared_atif._DEFAULT_GOAL_ACCURACY_BUDGET
+_BUNDLE_BUDGETS = _shared_atif._BUNDLE_BUDGETS
+_BUNDLE_ACCURACY_MAX_OBS = _shared_atif._BUNDLE_ACCURACY_MAX_OBS
+_BUNDLE_GOAL_MAX_OBS = _shared_atif._BUNDLE_GOAL_MAX_OBS
+_accuracy_budget = _shared_atif._accuracy_budget
+_goal_accuracy_budget = _shared_atif._goal_accuracy_budget
+_bundle_budgets = _shared_atif._bundle_budgets
+_clip = _shared_atif._clip
+_late_observation_excerpts = _shared_atif._late_observation_excerpts
+_assemble = _shared_atif._assemble
+_BACKTICK_TOKEN_RE = _shared_atif._BACKTICK_TOKEN_RE
+_VERIFIED_FACTS_MAX = _shared_atif._VERIFIED_FACTS_MAX
+_VERIFIED_FACT_LINE_MAX = _shared_atif._VERIFIED_FACT_LINE_MAX
+build_verified_facts = _shared_atif.build_verified_facts
+_build_verified_facts_section = _shared_atif._build_verified_facts_section
+build_metric_evidence_bundles = _shared_atif.build_metric_evidence_bundles
 
 
 def _slice_with_middle_marker(text, budget, marker, *, max_head=None, fallback_tail=False):
@@ -3333,8 +2491,8 @@ BEHAVIOR_CHECK_JSON_SCHEMA = {
 
 
 def judge_accuracy(question, ground_truth, agent_text, *, skill_identification_applicable=True):
-    if not ground_truth:
-        return {"score": 1.0, "reason": "No ground_truth -- skipped"}
+    if not _has_judge_reference(ground_truth):
+        return _judge_not_applicable(_NO_GROUND_TRUTH_REASON)
     prompt = """You are an expert evaluator for AI agent responses. Evaluate by checking \
 each criterion below against the expected answer. For each criterion, determine true (satisfied) or false (not satisfied).
 
@@ -3367,6 +2525,7 @@ SELECTED EVIDENCE (final response + produced artifacts; low-relevance steps may 
         prompt = prompt.replace('"SKILL_IDENTIFIED": true', '"SKILL_IDENTIFIED": false')
     # Adjust the rubric before interpolation so task/evidence text stays intact.
     prompt = prompt.format(question=question, ground_truth=ground_truth, agent_text=agent_text)
+    prompt = append_character_facts(prompt, question=question, ground_truth=ground_truth, agent_text=agent_text)
 
     def validate_payload(parsed):
         error = _accuracy_payload_error(parsed)
@@ -3414,8 +2573,8 @@ SELECTED EVIDENCE (final response + produced artifacts; low-relevance steps may 
 
 
 def judge_goal_accuracy(question, ground_truth, agent_text, tool_summary=""):
-    if not ground_truth:
-        return {"score": 1.0, "reason": "No ground_truth -- skipped"}
+    if not _has_judge_reference(ground_truth):
+        return _judge_not_applicable(_NO_GROUND_TRUTH_REASON)
 
     if _ragas_goal_accuracy_enabled():
         try:
@@ -3433,6 +2592,9 @@ def _ragas_goal_accuracy_enabled():
 
     Reasoning judges reject the sampling settings RAGAS sends, so they use the prompt judge.
     """
+    # The prompt judge can append metadata outside the original evidence.
+    if character_facts_enabled():
+        return False
     if _public_provider() != "openai" or _is_openai_reasoning_model(_selected_judge_model()):
         return False
     try:
@@ -3520,6 +2682,9 @@ END-STATE EVIDENCE:
 Did the agent achieve the expected goal?
 Respond with ONLY a JSON object:
 {{"user_goal": "...", "end_state": "...", "achieved": true/false, "score": 1.0, "reason": "..."}}"""
+    prompt = append_character_facts(
+        prompt, question=question, ground_truth=ground_truth, tool_summary=tool_summary, agent_text=agent_text
+    )
 
     parsed, error, provenance = _call_validated_json_judge(
         prompt,
@@ -3566,16 +2731,17 @@ _BEHAVIOR_RETRY_REMINDER = (
 
 
 def judge_behavior_check(conversation_text, expected_behaviors):
-    if not expected_behaviors:
-        return {"score": 1.0, "reason": "No expected_behavior defined", "results": []}
+    if not _has_judge_reference(expected_behaviors):
+        return _judge_not_applicable(_NO_EXPECTED_BEHAVIOR_REASON, results=[])
 
     behaviors_text = "\n".join(f"{i + 1}. {b}" for i, b in enumerate(expected_behaviors))
+    conversation = _compact_behavior_conversation(conversation_text)
 
     prompt = f"""You are evaluating whether an AI agent followed expected behaviors during a task. \
 Analyze the full conversation and determine if each expected behavior was observed.
 
 CONVERSATION:
-{_compact_behavior_conversation(conversation_text)}
+{conversation}
 
 EXPECTED BEHAVIORS:
 {behaviors_text}
@@ -3584,6 +2750,7 @@ For each behavior, set "passed" to true (observed) or false (not observed) with 
 
 Respond with ONLY a JSON object:
 {{"results": [{{"step": 1, "passed": true, "reason": "..."}}, ...], "score": 0.67, "summary": "brief summary"}}"""
+    prompt = append_character_facts(prompt, conversation=conversation, expected_behaviors=behaviors_text)
 
     content, error = call_public_llm(
         prompt,
@@ -3685,17 +2852,28 @@ def _finite_reward_number(value):
     return numeric if math.isfinite(numeric) else None
 
 
-def _normalize_required_judge_result(metric, result):
+def _normalize_required_judge_result(metric, result, *, allow_not_applicable=False):
     if isinstance(result, dict):
         normalized = dict(result)
-        status_is_error = str(result.get("status", "")).casefold() == "error"
+        status = str(result.get("status", "")).casefold()
+        status_is_error = status == "error"
+        if status == NOT_APPLICABLE_STATUS and allow_not_applicable:
+            # Only the verifier decides N/A (the case has no reference input);
+            # the score is always null so it can never be averaged as 0 or 1.
+            normalized["score"] = None
+            normalized["status"] = NOT_APPLICABLE_STATUS
+            normalized["reason"] = _bounded_judge_text(result.get("reason")) or f"{metric} is not applicable"
+            return normalized
         score_is_valid = _finite_reward_number(result.get("score")) is not None
-        if not status_is_error and score_is_valid:
+        if not status_is_error and status != NOT_APPLICABLE_STATUS and score_is_valid:
             return normalized
         supplied_reason = str(result.get("reason") or "").strip()
-        reason = supplied_reason if status_is_error else f"Required {metric} judge returned an invalid score"
-        if supplied_reason and not status_is_error:
-            reason = f"{reason}: {supplied_reason}"
+        if status == NOT_APPLICABLE_STATUS:
+            reason = f"Required {metric} judge reported not_applicable although the eval case defines its reference"
+        else:
+            reason = supplied_reason if status_is_error else f"Required {metric} judge returned an invalid score"
+            if supplied_reason and not status_is_error:
+                reason = f"{reason}: {supplied_reason}"
     else:
         normalized = {}
         reason = f"Required {metric} judge returned an invalid result"
@@ -3706,7 +2884,7 @@ def _normalize_required_judge_result(metric, result):
     return normalized
 
 
-def _call_required_judge(metric, judge, *args, **kwargs):
+def _call_required_judge(metric, judge, *args, allow_not_applicable=False, **kwargs):
     """Run a required LLM judge under a bounded wall-time deadline and normalize its result.
 
     The result records the model that produced it (``judge_model_used``), the
@@ -3753,12 +2931,122 @@ def _call_required_judge(metric, judge, *args, **kwargs):
     finally:
         _ACTIVE_JUDGE_DEADLINE.reset(token)
         _ACTIVE_JUDGE_CALLS.reset(calls_token)
-    normalized = _normalize_required_judge_result(metric, result)
+    normalized = _normalize_required_judge_result(metric, result, allow_not_applicable=allow_not_applicable)
     if calls:
         normalized["judge_model_used"] = calls[-1]["model"]
         normalized["judge_reasoning_effort"] = calls[-1]["reasoning_effort"]
         normalized["judge_fallback_used"] = any(call["fallback_used"] for call in calls)
     return normalized
+
+
+NOT_APPLICABLE_STATUS = "not_applicable"
+
+
+_NO_GROUND_TRUTH_REASON = "N/A: no ground_truth defined for this eval case"
+
+
+_NO_EXPECTED_BEHAVIOR_REASON = "N/A: no expected_behavior defined for this eval case"
+
+
+_JUDGED_METRICS = {
+    "accuracy": ("ground_truth", _NO_GROUND_TRUTH_REASON),
+    "goal_accuracy": ("ground_truth", _NO_GROUND_TRUTH_REASON),
+    "behavior_check": ("expected_behavior", _NO_EXPECTED_BEHAVIOR_REASON),
+}
+
+
+SKILL_METRICS_NOT_APPLICABLE_REASON = (
+    "N/A: this arm has no skill under test installed, so there is no skill to discover, run or route to"
+)
+
+
+_SCORE_POLICY_DIMENSIONS = (
+    ("security",),
+    ("accuracy",),
+    ("skill_execution",),
+    ("goal_accuracy", "behavior_check"),
+    ("skill_efficiency",),
+)
+
+
+def _judge_not_applicable(reason, **metadata):
+    """Return a scoreless result for a judge that has nothing to judge against."""
+    return {**metadata, "score": None, "status": NOT_APPLICABLE_STATUS, "reason": reason}
+
+
+def _has_judge_reference(value):
+    """Return whether a ground_truth / expected_behavior value gives a judge something to check."""
+    if value is None:
+        return False
+    if isinstance(value, str):
+        return bool(value.strip())
+    if isinstance(value, (list, tuple)):
+        return any(_has_judge_reference(item) for item in value)
+    if isinstance(value, (bool, int, float)):
+        # 0, 0.0 and False are real reference answers, not a missing one.
+        return True
+    return bool(value)
+
+
+def skill_metrics_applicable(
+    has_skill,
+    should_trigger,
+    expected_skill,
+    acceptable_skills=None,
+    *,
+    evaluated_skill=None,
+    workspace_skill_names=None,
+):
+    """Return whether an arm can be scored on ``skill_execution`` and ``skill_efficiency``.
+
+    The arm that carries the skill or plugin always can. An arm without it (the
+    no-skill or no-plugin baseline) can only when it stages a skill the case
+    could activate: an acceptable alternate in a skill workspace. Otherwise both metrics are not
+    applicable, so skill activation alone cannot earn lift.
+    """
+    if has_skill is not False:
+        return True
+    staged = {str(name).strip().lower() for name in workspace_skill_names or [] if str(name).strip()}
+    if not staged:
+        return False
+    if should_trigger is False:
+        candidates = [evaluated_skill or expected_skill]
+    else:
+        candidates = [expected_skill, *(acceptable_skills or [])]
+    return any(str(name).strip().lower() in staged for name in candidates if name and str(name).strip())
+
+
+def _skill_metric_not_applicable():
+    """Scoreless ``skill_execution`` / ``skill_efficiency`` result for an arm without the skill."""
+    return {"score": None, "status": NOT_APPLICABLE_STATUS, "reason": SKILL_METRICS_NOT_APPLICABLE_REASON}
+
+
+def _reward_overall(result, details):
+    """The score policy's mean of the five dimensions, leaving out judged metrics recorded as N/A.
+
+    An N/A metric is left out of its dimension, and a dimension with no scored
+    metric is left out of the mean.
+    """
+
+    def scored(metric):
+        return not (
+            metric != "security"
+            and result.get(metric) is None
+            and isinstance(details.get(metric), dict)
+            and details[metric].get("status") == NOT_APPLICABLE_STATUS
+        )
+
+    dimensions = []
+    for metrics in _SCORE_POLICY_DIMENSIONS:
+        values = [float(result[metric]) for metric in metrics if scored(metric)]
+        if values:
+            dimensions.append(round(sum(values) / len(values), 4))
+    return round(sum(dimensions) / len(dimensions), 4)
+
+
+def _format_log_score(value):
+    numeric = _finite_reward_number(value)
+    return f"{numeric:.2f}" if numeric is not None else "N/A"
 
 
 def _numeric_reward_payload(result, overall):
@@ -3795,23 +3083,6 @@ def main():
     entry = json.loads(ENTRY_PATH.read_text(encoding="utf-8"))
     traj, traj_meta = load_trajectory_with_fallback(ATIF_PATH, ATIF_PATH.parent)
 
-    if not traj:
-        result = {
-            "security": 0,
-            "skill_execution": 0,
-            "skill_efficiency": 0,
-            "accuracy": 0,
-            "goal_accuracy": 0,
-            "behavior_check": 0,
-            "metric_set": DEFAULT_METRIC_SET,
-            "score_policy": DEFAULT_SCORE_POLICY,
-            "error": "No trajectory or reconstructible agent log",
-            "trajectory_source": traj_meta.get("source"),
-            "trajectory_detail": traj_meta.get("warning") or traj_meta.get("note"),
-        }
-        write_reward_outputs(result, 0.0)
-        return
-
     expected_skill = entry.get("expected_skill") or ""
     expected_script = entry.get("expected_script") or ""
     should_trigger = resolve_should_trigger(entry)
@@ -3824,6 +3095,49 @@ def main():
     workspace_skill_names = entry.get("workspace_skill_names", [])
     if not isinstance(workspace_skill_names, list):
         workspace_skill_names = []
+
+    skill_metrics_on = skill_metrics_applicable(
+        entry.get("has_skill", True),
+        should_trigger,
+        expected_skill,
+        acceptable_skills,
+        evaluated_skill=evaluated_skill,
+        workspace_skill_names=workspace_skill_names,
+    )
+
+    if not traj:
+        # Without a trajectory every metric the case defines fails, but a judge
+        # without its reference input stays N/A exactly as on the judged path,
+        # so one crashed trial cannot turn an arm's N/A judge metric into 0.0.
+        judge_scores = {}
+        judge_details = {}
+        for metric, (field, na_reason) in _JUDGED_METRICS.items():
+            if _has_judge_reference(entry.get(field)):
+                judge_scores[metric] = 0
+            else:
+                judge_scores[metric] = None
+                judge_details[metric] = _judge_not_applicable(na_reason)
+        skill_scores = {"skill_execution": 0, "skill_efficiency": 0}
+        if not skill_metrics_on:
+            skill_scores = {"skill_execution": None, "skill_efficiency": None}
+            judge_details.update(
+                skill_execution=_skill_metric_not_applicable(),
+                skill_efficiency=_skill_metric_not_applicable(),
+            )
+        result = {
+            "security": 0,
+            **skill_scores,
+            **judge_scores,
+            "metric_set": DEFAULT_METRIC_SET,
+            "score_policy": DEFAULT_SCORE_POLICY,
+            "error": "No trajectory or reconstructible agent log",
+            "trajectory_source": traj_meta.get("source"),
+            "trajectory_detail": traj_meta.get("warning") or traj_meta.get("note"),
+        }
+        if judge_details:
+            result["details"] = judge_details
+        write_reward_outputs(result, 0.0)
+        return
 
     tool_calls = extract_tool_calls_as_dicts(traj)
     skill_tools = get_skill_tool_calls(traj)
@@ -3849,21 +3163,28 @@ def main():
     details["security"] = security_result
 
     # ── Eval 2: skill_execution ──────────────────────────────────────────
-    skill_execution_result = score_skill_execution(
-        tool_calls,
-        expected_skill,
-        expected_script,
-        should_trigger,
-        evaluated_skill=evaluated_skill,
-        require_evaluated_skill=True,
-        skill_tool_names=skill_tools,
-        acceptable_skills=acceptable_skills,
-    )
-    se_score = skill_execution_result["score"]
-    details["skill_execution"] = skill_execution_result["details"]
+    if skill_metrics_on:
+        skill_execution_result = score_skill_execution(
+            tool_calls,
+            expected_skill,
+            expected_script,
+            should_trigger,
+            evaluated_skill=evaluated_skill,
+            require_evaluated_skill=True,
+            skill_tool_names=skill_tools,
+            acceptable_skills=acceptable_skills,
+        )
+        se_score = skill_execution_result["score"]
+        details["skill_execution"] = skill_execution_result["details"]
+    else:
+        se_score = None
+        details["skill_execution"] = _skill_metric_not_applicable()
 
     # ── Eval 3: skill_efficiency ─────────────────────────────────────────
-    if not should_trigger or not expected_skill:
+    if not skill_metrics_on:
+        sef_score = None
+        details["skill_efficiency"] = _skill_metric_not_applicable()
+    elif not should_trigger or not expected_skill:
         sef_score = 1.0
         details["skill_efficiency"] = {"message": "Skipped (negative or no expected_skill)"}
     elif not tool_calls:
@@ -3900,6 +3221,7 @@ def main():
         ground_truth,
         bundles["accuracy"]["prompt_evidence"],
         skill_identification_applicable=should_trigger and bool(expected_skill),
+        allow_not_applicable=not _has_judge_reference(ground_truth),
     )
     acc_score = acc_result["score"]
     details["accuracy"] = acc_result
@@ -3912,6 +3234,7 @@ def main():
         ground_truth,
         bundles["goal_accuracy"]["prompt_evidence"],
         tool_summary="",
+        allow_not_applicable=not _has_judge_reference(ground_truth),
     )
     ga_score = ga_result["score"]
     details["goal_accuracy"] = ga_result
@@ -3922,6 +3245,7 @@ def main():
         judge_behavior_check,
         bundles["behavior_check"]["prompt_evidence"],
         expected_behavior,
+        allow_not_applicable=not _has_judge_reference(expected_behavior),
     )
     bc_score = bc_result["score"]
     details["behavior_check"] = bc_result
@@ -3963,26 +3287,14 @@ def main():
         logger.error("Required LLM judging failed for: %s", ", ".join(sorted(judge_errors)))
         raise SystemExit(1)
 
-    dimensions = (
-        security_score,
-        acc_score,
-        se_score,
-        round((ga_score + bc_score) / 2, 4),
-        sef_score,
-    )
-    overall = round(sum(dimensions) / len(dimensions), 4)
+    overall = _reward_overall(result, details)
 
     write_reward_outputs(result, overall)
 
     logger.info(
-        "Scores: security=%.2f skill_exec=%.2f efficiency=%.2f accuracy=%.2f goal=%.2f behavior=%.2f overall=%.2f",
-        security_score,
-        se_score,
-        sef_score,
-        acc_score,
-        ga_score,
-        bc_score,
-        overall,
+        "Scores: security=%s skill_exec=%s efficiency=%s accuracy=%s goal=%s behavior=%s overall=%s",
+        *(_format_log_score(result[metric]) for metric in DISPLAY_METRICS),
+        _format_log_score(overall),
     )
 
 

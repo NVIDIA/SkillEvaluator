@@ -14,12 +14,12 @@ from __future__ import annotations
 import ast
 import logging
 import re
-from dataclasses import dataclass, field
+from dataclasses import dataclass, field, replace
 from typing import TYPE_CHECKING
 
 from markdown_it import MarkdownIt
 
-from skillevaluator.constants import CONTENT_DEDUP_MIN_CHUNK_CHARS
+from skillevaluator.constants import CONTENT_DEDUP_MAX_CHUNK_CHARS, CONTENT_DEDUP_MIN_CHUNK_CHARS
 from skillevaluator.spdx import is_spdx_only_html_comment
 
 if TYPE_CHECKING:
@@ -42,6 +42,8 @@ class ContentChunk:
     text: str
     source_format: str  # "markdown" | "python" | "shell"
     embedding: list[float] = field(default_factory=list)
+    # Pieces of one source chunk must not create duplicate findings with each other.
+    split_group: tuple[str, int, int] | None = None
 
     @property
     def char_count(self) -> int:
@@ -55,12 +57,63 @@ def chunk_file(
     """Route to the appropriate chunker based on file extension."""
     ext = collected.extension
     if ext in {".md", ".mdc"}:
-        return chunk_markdown(collected, min_chars)
-    if ext == ".py":
-        return chunk_python(collected, min_chars)
-    if ext == ".sh":
-        return chunk_shell(collected, min_chars)
-    return []
+        chunks = chunk_markdown(collected, min_chars)
+    elif ext == ".py":
+        chunks = chunk_python(collected, min_chars)
+    elif ext == ".sh":
+        chunks = chunk_shell(collected, min_chars)
+    else:
+        return []
+    return [piece for chunk in chunks for piece in _bounded_pieces(chunk)]
+
+
+def _bounded_pieces(chunk: ContentChunk) -> list[ContentChunk]:
+    """Cap provider inputs, keeping meaningful tails and source containment.
+
+    The minimum-length filter applies to the original chunk. Its final short
+    piece still contains evidence and must not disappear during splitting.
+    Python text joins signatures and cleaned docstrings rather than contiguous
+    source lines, so every piece retains the enclosing AST node's range.
+    """
+    limit = CONTENT_DEDUP_MAX_CHUNK_CHARS
+    if len(chunk.text) <= limit:
+        return [chunk]
+    pieces: list[ContentChunk] = []
+    group = chunk.split_group or (chunk.source_file, chunk.start_line, chunk.end_line)
+    buffer = ""
+    buffer_start = 0
+
+    def add(text: str, first: int, last: int) -> None:
+        if not text.strip():
+            return
+        start = min(chunk.start_line + first, chunk.end_line)
+        end = min(chunk.start_line + last, chunk.end_line)
+        if chunk.source_format == "python":
+            start, end = chunk.start_line, chunk.end_line
+        pieces.append(
+            replace(chunk, text=text.strip(), start_line=start, end_line=end, embedding=[], split_group=group)
+        )
+
+    def flush(last: int) -> None:
+        nonlocal buffer
+        if buffer:
+            add(buffer, buffer_start, last)
+            buffer = ""
+
+    lines = chunk.text.splitlines(keepends=True)
+    for offset, line in enumerate(lines):
+        if len(line) > limit:
+            flush(max(0, offset - 1))
+            for index in range(0, len(line), limit):
+                add(line[index : index + limit], offset, offset)
+        else:
+            if len(buffer) + len(line) > limit:
+                flush(max(0, offset - 1))
+            if not buffer:
+                buffer_start = offset
+            buffer += line
+    flush(len(lines) - 1)
+    return pieces
 
 
 def chunk_markdown(
@@ -85,15 +138,15 @@ def chunk_markdown(
         match = None if i in fenced_lines else HEADING_PATTERN.match(line)
         if match:
             if current_lines:
-                text = "".join(current_lines).strip()
-                if len(text) >= min_chars and not (
-                    current_heading == "(preamble)" and is_spdx_only_html_comment(text)
-                ):
+                raw_text = "".join(current_lines)
+                text = raw_text.strip()
+                leading_lines = raw_text[: len(raw_text) - len(raw_text.lstrip())].count("\n")
+                if len(text) >= min_chars and not (current_heading == "(preamble)" and is_spdx_only_html_comment(text)):
                     sections.append(
                         ContentChunk(
                             source_file=collected.rel_path,
                             heading=current_heading,
-                            start_line=current_start,
+                            start_line=current_start + leading_lines,
                             end_line=i - 1,
                             text=text,
                             source_format="markdown",
@@ -106,15 +159,15 @@ def chunk_markdown(
             current_lines.append(line)
 
     if current_lines:
-        text = "".join(current_lines).strip()
-        if len(text) >= min_chars and not (
-            current_heading == "(preamble)" and is_spdx_only_html_comment(text)
-        ):
+        raw_text = "".join(current_lines)
+        text = raw_text.strip()
+        leading_lines = raw_text[: len(raw_text) - len(raw_text.lstrip())].count("\n")
+        if len(text) >= min_chars and not (current_heading == "(preamble)" and is_spdx_only_html_comment(text)):
             sections.append(
                 ContentChunk(
                     source_file=collected.rel_path,
                     heading=current_heading,
-                    start_line=current_start,
+                    start_line=current_start + leading_lines,
                     end_line=collected.line_offset + len(lines),
                     text=text,
                     source_format="markdown",
@@ -123,12 +176,37 @@ def chunk_markdown(
 
     result: list[ContentChunk] = []
     for section in sections:
-        if len(section.text) > 3000:
-            result.extend(split_into_paragraphs(section, min_chars))
+        if len(section.text) > CONTENT_DEDUP_MAX_CHUNK_CHARS:
+            result.extend(_pack_paragraphs(section, min_chars))
         else:
             result.append(section)
 
     return result
+
+
+def _pack_paragraphs(section: ContentChunk, min_chars: int) -> list[ContentChunk]:
+    """Pack consecutive paragraphs of an oversized section up to the embedding cap.
+
+    Paragraphs shorter than ``min_chars`` stay attached to a neighbour instead of
+    becoming chunks of their own; ``_bounded_pieces`` caps any overflow. Every
+    piece shares the section's split group, so pieces never cluster together.
+    """
+    group = (section.source_file, section.start_line, section.end_line)
+    packed: list[ContentChunk] = []
+    for paragraph in split_into_paragraphs(section, min_chars=1):
+        # Keep the source line gap so the bounding pass can map pieces back to
+        # their actual lines even when paragraphs have several blank lines.
+        separator = "\n" * max(2, paragraph.start_line - packed[-1].end_line) if packed else ""
+        if packed and (
+            len(packed[-1].text) + len(separator) + len(paragraph.text) <= CONTENT_DEDUP_MAX_CHUNK_CHARS
+            or len(paragraph.text) < min_chars
+            or len(packed[-1].text) < min_chars
+        ):
+            last = packed[-1]
+            packed[-1] = replace(last, text=f"{last.text}{separator}{paragraph.text}", end_line=paragraph.end_line)
+        else:
+            packed.append(replace(paragraph, split_group=group))
+    return packed
 
 
 def split_into_paragraphs(
@@ -182,12 +260,13 @@ def chunk_python(
 
     module_doc = ast.get_docstring(tree)
     if module_doc and len(module_doc) >= min_chars:
+        doc_node = tree.body[0]
         chunks.append(
             ContentChunk(
                 source_file=collected.rel_path,
                 heading="(module docstring)",
-                start_line=1,
-                end_line=module_doc.count("\n") + 2,
+                start_line=doc_node.lineno,
+                end_line=doc_node.end_lineno or doc_node.lineno,
                 text=module_doc,
                 source_format="python",
             )

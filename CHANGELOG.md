@@ -12,6 +12,16 @@ All notable changes to SkillEvaluator are documented in this file.
   with `skill_workspace.decoy_manifest` in `evals/config.yml`; selected content
   is verified and shared between paired arms without selecting again.
   Explicit helper skills and existing workspace defaults remain unchanged.
+- Add reusable GitLab CI onboarding and configurable Tier 1 quality thresholds,
+  alongside a shared repository integration guide.
+- Opt-in `SKILL_EVAL_JUDGE_CHARACTER_FACTS=1` adds bounded, escaped Unicode
+  character facts to Tier 3 accuracy, goal-accuracy, and behavior-check prompts
+  without normalizing the evidence. The operator setting is verifier-only;
+  enabling it selects the prompt-based goal judge instead of the optional RAGAS
+  route. Metadata uses the same text rendering as the judge prompts, including
+  numeric and nullable fields. Existing prompts remain unchanged when the
+  setting is unset.
+
 - `tier3 evaluate` now leads with a case-first summary: a verdict line and one
   row per `evals.json` case. With one agent, each row shows, for with and
   without the skill, the pass count, per-attempt marks (`✓` pass, `✗` fail,
@@ -77,6 +87,14 @@ All notable changes to SkillEvaluator are documented in this file.
 
 ### Changed
 
+- Hosted GitHub reports verify a separate GitHub-signed execution receipt.
+  Enable `id-token: write` in the scan workflow and refresh its approved blob
+  when adding hosting; ordinary scans keep their existing read-only permissions.
+- Link GitHub and GitLab source templates directly from the README and onboarding
+  guides. Keep report, log and PR comment examples in the public repository,
+  removing onboarding dependencies on personal demo links.
+- GitHub onboarding shows the PR comment example directly on the page and
+  explains the two templates and required one-time publisher setup.
 - HTML reports use a verdict-led layout with a sidebar and expandable check
   details. The verdict replaces the pass percentage; checks marked Not
   applicable are excluded from passed and executed counts. Publication status
@@ -140,6 +158,15 @@ All notable changes to SkillEvaluator are documented in this file.
 
 ### Fixed
 
+- CI quality thresholds apply to every parallel scan worker. Report overviews
+  and detailed reports surface failed quality gates ahead of advisory findings,
+  with links to the check that needs attention.
+- Tier 2 caps every intra-skill embedding chunk at 3,000 characters, preserves
+  meaningful short tails and actual Python docstring source ranges, and avoids
+  counting pieces of one original chunk as duplicates of each other. Oversized
+  Markdown sections are packed by paragraph, so short labels and fragments stay
+  attached to their neighbours, source ranges retain blank-line gaps, and findings
+  list a split source once.
 - Local-mode verifier uploads now copy directly to the absent destination,
   avoiding an unnecessary rollback snapshot of an empty tests directory.
   Inputs and rewritten scripts are prepared privately before publication,
@@ -151,6 +178,13 @@ All notable changes to SkillEvaluator are documented in this file.
 - Harbor's standalone verifier now runs on Python 3.9 task images after sharing
   deterministic checks with the host evaluator. Packaged verifier checks execute
   on a real Python 3.9 interpreter in CI to retain this compatibility.
+- With `--stop-on-pass`, a retained Harbor agent timeout followed by a matching
+  completed attempt no longer invalidates the scored result. Timeout rewards
+  remain excluded, failure history is retained, and the JSON summaries
+  distinguish scored, recovered, and intentionally skipped attempts. Recovered
+  timeouts are reported under `recovered_trial_failures` and
+  `historical_job_failures` instead of as active failures. Other execution failures and
+  incomplete comparisons still fail validation.
 - Plain removal of recognized regenerable caches no longer receives the Tier 3
   destructive-command penalty. Dynamic commands, mixed targets and other
   destructive operations retain their existing classification in both verifiers.

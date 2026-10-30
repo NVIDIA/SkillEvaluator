@@ -106,6 +106,7 @@ from skillevaluator.tier3.harbor.collector import (
     _score_definition_for_policy,
     collect_harbor_results,
     harbor_job_passed,
+    harbor_timeout_job_recovered,
     validate_harbor_job_result,
 )
 from skillevaluator.tier3.harbor.gke_environment import (
@@ -1216,9 +1217,7 @@ def _backend_may_forward(name: str) -> bool:
     upper = name.upper()
     if upper in _HARBOR_BASE_ENV_VARS or upper in _BACKEND_ALLOWED_SHARED_HOST_ENV:
         return True
-    other_backend_secret = any(
-        upper in names and is_sensitive_key(upper) for names in _HARBOR_ENV_MODE_VARS.values()
-    )
+    other_backend_secret = any(upper in names and is_sensitive_key(upper) for names in _HARBOR_ENV_MODE_VARS.values())
     return not (
         upper in _OPERATOR_OWNED_AGENT_ENV
         or upper in _RUNTIME_ENV_HOST_CONTROL_NAMES
@@ -1871,9 +1870,9 @@ def build_harbor_run_command(
         command.extend(["--override-storage-mb", str(override_storage_mb)])
     for name, value in sorted((verifier_env or {}).items()):
         str_val = str(value)
-        if (is_operator_owned_or_provider_secret(name) or _is_sensitive_environment_kwarg_name(name)) and not re.fullmatch(
-            r"\$\{[A-Za-z_][A-Za-z0-9_]*\}", str_val
-        ):
+        if (
+            is_operator_owned_or_provider_secret(name) or _is_sensitive_environment_kwarg_name(name)
+        ) and not re.fullmatch(r"\$\{[A-Za-z_][A-Za-z0-9_]*\}", str_val):
             raise ValueError(
                 f"Sensitive key detected in verifier_env: {name}. "
                 "Credentials and operator-owned settings must use ${VAR} placeholder indirection."
@@ -2909,7 +2908,7 @@ def _judge_model_config(
         model = provider.model
         source = "SKILL_EVAL_LLM_MODEL" if os.environ.get("SKILL_EVAL_LLM_MODEL", "").strip() else "provider default"
         override_applied = False
-    return {
+    configuration = {
         "enabled": True,
         "provider": provider.provider,
         "model": model,
@@ -2917,6 +2916,9 @@ def _judge_model_config(
         "override_applied": override_applied,
         "reasoning_effort": effective_reasoning_effort(provider.provider, model, JUDGE_REASONING_EFFORT),
     }
+    if character_facts := provider_env.get("SKILL_EVAL_JUDGE_CHARACTER_FACTS"):
+        configuration["character_facts"] = character_facts
+    return configuration
 
 
 def _job_judge_override(provider_env: Mapping[str, str], grading_mode: str) -> tuple[str, str] | None:
@@ -3443,7 +3445,9 @@ def _agent_import_path(provider: ProviderConfig, agent: str, env_mode: str) -> s
     try:
         compatible = issubclass(import_symbol(selected), import_symbol(required))
     except (ImportError, TypeError, ValueError) as exc:
-        raise ValueError(f"Custom execution backend '{env_mode}' agent wrapper {selected} could not be checked: {exc}") from None
+        raise ValueError(
+            f"Custom execution backend '{env_mode}' agent wrapper {selected} could not be checked: {exc}"
+        ) from None
     if not compatible:
         raise ValueError(
             f"Custom execution backend '{env_mode}' runs {agent} with {selected}, but the {provider.provider} "
@@ -4348,7 +4352,7 @@ def _run_stop_on_pass_variant(
     environment_kwargs: Mapping[str, Any] | None = None,
 ) -> list[str]:
     """Run each case one attempt at a time, stopping its attempts on first pass."""
-    errors: list[str] = []
+    errors: list[tuple[Path, str]] = []
     attempt_job_dirs: list[Path] = []
     for task_name in task_names:
         for attempt in range(1, n_attempts + 1):
@@ -4376,12 +4380,21 @@ def _run_stop_on_pass_variant(
             job_dir = jobs_dir / job_name
             attempt_job_dirs.append(job_dir)
             if not ok:
-                errors.append(f"{agent} {variant}-skill Harbor run failed: {task_name} attempt {attempt}: {detail}")
+                errors.append(
+                    (job_dir, f"{agent} {variant}-skill Harbor run failed: {task_name} attempt {attempt}: {detail}")
+                )
                 continue
+            errors = [
+                (failed_dir, detail)
+                for failed_dir, detail in errors
+                if not detail.endswith(": Harbor job did not complete successfully: 1 errored")
+                or not failed_dir.is_dir()
+                or not harbor_timeout_job_recovered(failed_dir, job_dir)
+            ]
             if _job_passed(job_dir, pass_threshold):
                 break
     _merge_attempt_jobs(attempt_job_dirs, jobs_dir / f"{skill_name}-{agent}-{variant}")
-    return errors
+    return [detail for _, detail in errors]
 
 
 def _run_agent_pair(
@@ -5023,9 +5036,8 @@ def _run_harbor_eval_impl(
         disposition = credential_probe_disposition(selected_provider, probe, env_mode=env_mode)
         if probe.ok and disposition == CredentialProbeDisposition.DEGRADED:
             safe_detail = "model catalog access does not verify runtime credentials for this endpoint"
-        elif (
-            disposition == CredentialProbeDisposition.DEGRADED
-            and is_unverified_gke_vertex_auth_probe(selected_provider, probe, env_mode=env_mode)
+        elif disposition == CredentialProbeDisposition.DEGRADED and is_unverified_gke_vertex_auth_probe(
+            selected_provider, probe, env_mode=env_mode
         ):
             safe_detail = GKE_HOST_UNVERIFIED_VERTEX_AUTH_DETAIL
         credential_validation_targets.append(

@@ -31,7 +31,6 @@ from skillevaluator.reporting.base import (
     agent_eval_publication_evaluated_at,
     agent_eval_publication_evidence_complete,
     agent_eval_publication_run_id,
-    assess_publication,
     assess_tier3_evidence,
     get_skip_reason,
     is_advisory_agent_eval_skip,
@@ -49,6 +48,7 @@ from skillevaluator.reporting.base import (
     tier1_unscanned_publication_paths,
     unrecognized_tier2_results,
 )
+from skillevaluator.reporting.run_status import resolve_run_status
 from skillevaluator.reporting.tier3_scope import completed_agent_result, validate_report_scope
 from skillevaluator.source_identity import evaluated_source_revision, recorded_evaluated_source
 from skillevaluator.tier3_environments import HARBOR_ENV_MODES
@@ -171,15 +171,23 @@ class BenchmarkReporter(ReporterBase):
         lines: list[str] = [
             f"# Skill Benchmark: {skill_name}",
             "",
-            (f"> **Tier 3 completed-agent result: {completed['verdict'].upper()}**" if completed
-             else "> **Tier 3: No complete agent result**") if self.report_scope == "tier3" else _verdict_callout(status),
+            (
+                f"> **Tier 3 completed-agent result: {completed['verdict'].upper()}**"
+                if completed
+                else "> **Tier 3: No complete agent result**"
+            )
+            if self.report_scope == "tier3"
+            else _verdict_callout(status),
             "",
         ]
         if self.report_scope == "tier3":
-            lines.extend([
-                "Publication: **NOT ASSESSED**. This report covers Tier 3 only; Tiers 1 and 2 are not covered by this report.",
-                "The verdict describes with-skill quality; lift is a separate baseline comparison.", "",
-            ])
+            lines.extend(
+                [
+                    "Publication: **NOT ASSESSED**. This report covers Tier 3 only; Tiers 1 and 2 are not covered by this report.",
+                    "The verdict describes with-skill quality; lift is a separate baseline comparison.",
+                    "",
+                ]
+            )
         elif status == "PASS":
             self._render_publication_recommendation(lines, results)
         elif status == "FAIL":
@@ -219,11 +227,17 @@ class BenchmarkReporter(ReporterBase):
                 f"score **{completed['score']:.4f}** ({completed['score'] * 100:.2f}%)."
             )
             if completed["lift"] is not None:
-                lines.append(f"Same-agent comparable lift: **{completed['lift']:+.4f}** ({completed['lift'] * 100:+.2f} percentage points).")
+                lines.append(
+                    f"Same-agent comparable lift: **{completed['lift']:+.4f}** ({completed['lift'] * 100:+.2f} percentage points)."
+                )
             if completed["needs_attention"]:
-                lines.append("**Needs attention:** other execution failures remain. This completed-agent result does not certify the whole run.")
+                lines.append(
+                    "**Needs attention:** other execution failures remain. This completed-agent result does not certify the whole run."
+                )
             if completed["recovered_attempts"]:
-                lines.append(f"Recovered timeout attempts: {completed['recovered_attempts']}; failed history is retained and excluded from scoring.")
+                lines.append(
+                    f"Recovered timeout attempts: {completed['recovered_attempts']}; failed history is retained and excluded from scoring."
+                )
             lines.append("")
         self._render_metadata(
             lines,
@@ -808,7 +822,7 @@ def _overall_status(
     # benchmark's uppercase vocabulary while every reporter shares one
     # publication assessment implementation.
     del benchmark_policy
-    return assess_publication(results, ae, expected_skill_name=expected_skill_name).status.upper()
+    return resolve_run_status(results, agent_eval=ae, expected_skill_name=expected_skill_name).publication.verdict
 
 
 def _is_blocking_publication_skip(

@@ -21,6 +21,8 @@ MAX_GIT_BYTES = 16 * 1024 * 1024
 MAX_FILES = 100_000
 MAX_DISCOVERED_SKILLS = 10_000
 MAX_SELECTED_SKILLS = 100
+MAX_ROOTS = 100
+MAX_ROOTS_TEXT = 16384
 GIT_TIMEOUT = 30
 _SHA = re.compile(r"(?:[0-9a-fA-F]{40}|[0-9a-fA-F]{64})")
 
@@ -31,6 +33,44 @@ class SelectionError(ValueError):
     def __init__(self, message: str, *, selection: dict | None = None):
         super().__init__(message)
         self.selection = selection
+
+
+def has_control_character(text: str) -> bool:
+    """The one control-character rule for configured roots and Git paths, DEL included."""
+    return any(ord(character) < 32 or ord(character) == 127 for character in text)
+
+
+def skill_root(workspace: Path, value: str, error: type[ValueError] = SelectionError) -> str:
+    """Validate one workspace-relative skill root and return its normalized form.
+
+    The Tier 1 runner and changed-skill selection share these rules. A root may
+    be missing, since a pull request can delete it, but never a non-directory.
+    """
+    relative = PurePosixPath(value)
+    if (
+        relative.is_absolute()
+        or ".." in relative.parts
+        or "\\" in value
+        or ":" in value
+        or has_control_character(value)
+    ):
+        raise error("Skill roots must be relative directories without parent traversal.")
+    current = workspace
+    for part in relative.parts:
+        current /= part
+        if current.is_symlink():
+            raise error("Symlinks are not supported in skill roots.")
+    if current.exists() and not current.is_dir():
+        raise error("A configured skill root is not a directory.")
+    return relative.as_posix()
+
+
+def skill_roots(workspace: Path, configured: str, error: type[ValueError] = SelectionError) -> list[str]:
+    """Parse SKILL_PATHS into 1 to 100 unique, sorted and validated roots."""
+    values = [line.strip() for line in configured.splitlines() if line.strip()]
+    if not values or len(values) > MAX_ROOTS or len(configured) > MAX_ROOTS_TEXT:
+        raise error("SKILL_PATHS must specify between 1 and 100 bounded relative directories.")
+    return sorted({skill_root(workspace, value, error) for value in values})
 
 
 def _git(workspace: Path, *arguments: str) -> bytes:
@@ -102,40 +142,27 @@ def _paths(output: bytes) -> list[str]:
             or len(path.encode()) > 4096
             or PurePosixPath(path).is_absolute()
             or ".." in PurePosixPath(path).parts
-            or any(ord(character) < 32 or ord(character) == 127 for character in path)
+            or has_control_character(path)
         ):
             raise SelectionError("Git returned an unsupported or unsafe path.")
     return paths
 
 
-def _roots(workspace: Path, configured: str) -> list[str]:
-    values = [line.strip() for line in configured.splitlines() if line.strip()]
-    if not values or len(values) > 100 or len(configured) > 16384:
-        raise SelectionError("SKILL_PATHS must specify between 1 and 100 bounded relative directories.")
-    roots = set()
-    for value in values:
-        relative = PurePosixPath(value)
-        if (
-            relative.is_absolute()
-            or ".." in relative.parts
-            or "\\" in value
-            or ":" in value
-            or any(ord(character) < 32 or ord(character) == 127 for character in value)
-        ):
-            raise SelectionError("Skill roots must be relative directories without parent traversal.")
-        current = workspace
-        for part in relative.parts:
-            current /= part
-            if current.is_symlink():
-                raise SelectionError("Symlinks are not supported in skill roots.")
-        if current.exists() and not current.is_dir():
-            raise SelectionError("A configured skill root is not a directory.")
-        roots.add(relative.as_posix())
-    return sorted(roots)
+def _containing(paths: list[str]) -> set[str]:
+    """Return every path plus each directory that contains one, including ".".
 
-
-def _within(path: str, directory: str) -> bool:
-    return directory in {".", path} or path.startswith(directory + "/")
+    ``directory in _containing(paths)`` answers "is any path inside directory"
+    with one lookup instead of comparing every directory with every path.
+    """
+    found: set[str] = set()
+    for path in paths:
+        current = path
+        # A known entry already has all of its ancestors in the set.
+        while current not in found:
+            found.add(current)
+            slash = current.rfind("/")
+            current = current[:slash] if slash > 0 else "."
+    return found
 
 
 def _manifests(paths: list[str]) -> set[str]:
@@ -152,18 +179,24 @@ def select_changed_skills(workspace: Path, roots: str, base: str, head: str) -> 
     The unique merge base defines the PR delta. No network fetch or full-scan fallback is performed.
     """
     workspace = workspace.resolve(strict=True)
-    configured = _roots(workspace, roots)
+    configured = skill_roots(workspace, roots)
     if not isinstance(base, str) or not isinstance(head, str) or not _SHA.fullmatch(base) or not _SHA.fullmatch(head):
         raise SelectionError("Changed selection requires full DIFF_BASE_SHA and DIFF_HEAD_SHA commit IDs.")
-    top = _git(workspace, "rev-parse", "--show-toplevel").decode().strip()
+    requested_base, requested_head = base.lower(), head.lower()
+    # One process resolves everything. The trailing "--" makes Git reject any
+    # argument that is not a revision instead of reading it as a path.
+    resolved = _git(
+        workspace, "rev-parse", "--show-toplevel", base + "^{commit}", head + "^{commit}", "HEAD", "--"
+    ).decode()
+    lines = resolved.split("\n")
+    if len(lines) != 6 or lines[4:] != ["--", ""]:
+        raise SelectionError("Git could not resolve the requested selection; verify checkout history and commits.")
+    top, base, head, checked_out = lines[:4]
     if Path(top).resolve(strict=True) != workspace:
         raise SelectionError("The workspace must be the root of its Git checkout.")
-    requested_base, requested_head = base.lower(), head.lower()
-    base = _git(workspace, "rev-parse", "--verify", base + "^{commit}").decode().strip()
-    head = _git(workspace, "rev-parse", "--verify", head + "^{commit}").decode().strip()
     if base != requested_base or head != requested_head:
         raise SelectionError("DIFF_BASE_SHA and DIFF_HEAD_SHA must identify commits, not tag objects.")
-    if _git(workspace, "rev-parse", "HEAD").decode().strip() != head:
+    if checked_out != head:
         raise SelectionError("The checked-out HEAD does not match DIFF_HEAD_SHA; no scan was substituted.")
     base_ref = base
     try:
@@ -185,8 +218,9 @@ def select_changed_skills(workspace: Path, roots: str, base: str, head: str) -> 
         )
     before_files = _paths(_git(workspace, "ls-tree", "-r", "-z", "--name-only", base, "--", *configured))
     after_files = _paths(_git(workspace, "ls-tree", "-r", "-z", "--name-only", head, "--", *configured))
+    before_tree = _containing(before_files)
     for root in configured:
-        if not (workspace / root).is_dir() and not any(_within(path, root) for path in before_files):
+        if not (workspace / root).is_dir() and root not in before_tree:
             raise SelectionError("A configured skill root is missing from both the checkout and base revision.")
     before = _manifests(before_files)
     after = _manifests(after_files)
@@ -209,8 +243,9 @@ def select_changed_skills(workspace: Path, roots: str, base: str, head: str) -> 
         )
     )
     removed = sorted(before - after)
-    deleted = [directory for directory in removed if not any(_within(path, directory) for path in after_files)]
-    selected = sorted(directory for directory in after if any(_within(path, directory) for path in changed))
+    after_tree, changed_tree = _containing(after_files), _containing(changed)
+    deleted = [directory for directory in removed if directory not in after_tree]
+    selected = sorted(directory for directory in after if directory in changed_tree)
     selection = {
         "mode": "changed",
         "base": base,

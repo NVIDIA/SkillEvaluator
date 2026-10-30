@@ -554,6 +554,10 @@ AGENT_EVAL_DATASET_REQUIRED_FIELDS = [
 
 AGENT_EVAL_DATASET_FORMATS = {".json", ".jsonl", ".yaml", ".yml"}
 
+# Terminal views preview this many failed Tier 3 source checks; the JSON and
+# HTML reports keep all of them.
+SOURCE_VALIDATION_CLI_LIMIT = 5
+
 
 # =============================================================================
 # TIER 3 DIMENSION MAPPING (BENCHMARK.md / reporting)

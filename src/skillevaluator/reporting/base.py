@@ -2470,6 +2470,44 @@ def additional_warnings(result: ValidationResult) -> list[str]:
     return [warning for warning in result.warnings if warning not in represented]
 
 
+_SOURCE_VALIDATION_ERROR_STATUSES = frozenset({"missing", "error"})
+
+
+def source_validation_errors(metadata: object) -> list[dict[str, str]]:
+    """Return the failed Tier 3 source checks recorded in ``metadata``, in order.
+
+    Tier 3 source preflight stores its checks under ``source_validation`` as
+    ``{"path", "status", "message"}`` items. Paths and messages come from the
+    skill's own eval files (entry IDs, parser errors), so callers still escape
+    them for their medium. Malformed items and checks that passed or only
+    warned are left out.
+    """
+    raw_checks = metadata.get("source_validation") if isinstance(metadata, dict) else None
+    if not isinstance(raw_checks, list):
+        return []
+    errors: list[dict[str, str]] = []
+    for check in raw_checks:
+        if not isinstance(check, dict):
+            continue
+        path = check.get("path", "")
+        status = check.get("status", "error")
+        message = check.get("message")
+        if (
+            isinstance(path, str)
+            and status in _SOURCE_VALIDATION_ERROR_STATUSES
+            and isinstance(message, str)
+            and message.strip()
+        ):
+            errors.append({"path": path, "status": status, "message": message})
+    return errors
+
+
+def source_validation_overflow_note(hidden: int) -> str:
+    """Return the note that follows a terminal preview of Tier 3 source errors."""
+    noun = "error" if hidden == 1 else "errors"
+    return f"{hidden} more {noun}: see Full Insights in the HTML report."
+
+
 class ReporterBase(ABC):
     """Abstract base class for validation result reporters.
 

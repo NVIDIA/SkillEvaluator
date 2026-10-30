@@ -509,6 +509,39 @@ and incomplete arms produce null totals or deltas (`N/A` in HTML). Resource
 deltas require matching case counts and complete measurements in both arms;
 they do not measure evaluator tokens, setup time, price, or statistical savings.
 
+### Failure reasons and per-trial rows
+
+Each evaluator card lists its per-trial evidence by eval case with the
+grader's reason, and a failing card (with-skill score below 0.60) opens the
+list. A case that scored below 0.80 also quotes a short excerpt of the
+offending command or artifact when the grader recorded one. When the attempts
+of one case disagree, the lowest-scoring attempt's reason is shown. In the
+**Per-Evaluator Drill-Down** table, hover a dotted-underlined score below 0.80
+to read the reason for that trial.
+
+Reasons are built from each trial's `reward.json` `details`, joining up to
+three distinct parts from the grader's `reason` or `message`, failing findings
+and behavior results, failed rubric criteria (except criteria the grader
+excluded from the score), failed named checks, and the security attribution
+note. The report redacts the values of configured credential environment
+variables and recognizable credential patterns in reasons and excerpts. It
+caps drill-down reasons at 240 characters and excerpts at 300.
+Secret detectors record their pattern rather than the matched text, so their
+findings show a reason but no excerpt.
+
+Reasons and excerpts are the first details dropped when a report is large. The
+HTML page adds them only while its data stays within the page's preview limit
+and says how many it left out, so they never displace the overview, dimension
+scores or evaluator cards. The JSON download keeps them unless the embedded
+payload reaches its 2 MiB limit; it then drops them before any other detail
+and records the count as `failure_reasons` under `report_truncation.omitted`.
+
+The drill-down has one row per trial for each agent and condition, with a
+**Condition** column (`With skill` or `Without skill`); baseline rows are
+listed even when they have no matching with-skill case. The **Steps per Eval
+Case by Agent and Condition** chart plots one series per agent and condition.
+A case with missing or partial step telemetry is a gap, not a zero.
+
 ### pass@k
 
 pass@k is the reliability signal, reported separately from the dimension

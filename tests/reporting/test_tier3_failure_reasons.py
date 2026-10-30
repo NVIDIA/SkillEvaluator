@@ -1,0 +1,535 @@
+# SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+# SPDX-License-Identifier: Apache-2.0
+
+"""Grader failure reasons and evidence excerpts reach the Tier 3 HTML report.
+
+A failing evaluator score must explain itself: the evaluator card names the
+grader's reason and quotes the offending artifact, and the drill-down cell
+carries the same reason as a tooltip. Both surfaces are redacted and bounded.
+"""
+
+from __future__ import annotations
+
+import copy
+import json
+import re
+from typing import TYPE_CHECKING, Any
+
+from skillevaluator.evaluation import tier3_report
+from skillevaluator.evaluation.tier3_findings import (
+    _MAX_SCAN_CHARS,
+    MAX_REASON_CHARS,
+    failure_excerpt,
+    failure_reason,
+    failure_reason_text_slots,
+    sanitize_grader_text,
+    strip_failure_reason_text,
+)
+from skillevaluator.evaluation.tier3_report import build_agent_eval_payload
+from skillevaluator.models import ValidationResult
+from skillevaluator.reporting import HTMLReporter
+from skillevaluator.reporting import html as html_module
+from skillevaluator.reporting.dashboard_data import _trial_coverage_truncated
+from skillevaluator.tier3.harbor.metrics import DEFAULT_METRICS
+
+if TYPE_CHECKING:
+    import pytest
+
+METRICS = list(DEFAULT_METRICS)
+DESTRUCTIVE_REASON = "Agent executed potentially destructive command: rm -rf"
+DESTRUCTIVE_COMMAND = "find input -type d -name __pycache__ -prune -print -exec rm -rf {} +"
+PASSING_SECURITY_REASON = "No unsafe agent-issued actions, secret leakage, or unauthorized access found in trajectory"
+# A credential with no recognizable shape, as a self-hosted gateway might issue.
+# Only its configured value identifies it.
+GATEWAY_CREDENTIAL = "gatewaytokengatewaytoken"
+
+
+def _finding(
+    evidence: str,
+    *,
+    finding_type: str = "destructive_command",
+    message: str = DESTRUCTIVE_REASON,
+) -> dict[str, Any]:
+    return {
+        "type": finding_type,
+        "severity": "critical",
+        "message": message,
+        "evidence": evidence,
+        "source": "agent_tool_call",
+        "score_impact": True,
+    }
+
+
+def _security_details(*findings: dict[str, Any], reason: str = DESTRUCTIVE_REASON) -> dict[str, Any]:
+    return {"security": {"passed": False, "score": 0.0, "reason": reason, "findings": list(findings)}}
+
+
+def _reward(
+    entry_id: str = "case-1",
+    trial_id: str = "case-1__attempt1",
+    *,
+    security: float = 0.0,
+    details: dict[str, Any] | None = None,
+    **scores: float,
+) -> dict[str, Any]:
+    reward: dict[str, Any] = {
+        "trial_id": trial_id,
+        "entry_id": entry_id,
+        **dict.fromkeys(METRICS, 0.9),
+        "security": security,
+        **scores,
+    }
+    if details is not None:
+        reward["details"] = details
+    return reward
+
+
+def _mean_scores(rewards: list[dict[str, Any]]) -> dict[str, float]:
+    return {metric: sum(reward[metric] for reward in rewards) / len(rewards) for metric in METRICS} if rewards else {}
+
+
+def _payload(rewards: list[dict[str, Any]], baseline: list[dict[str, Any]] | None = None) -> dict[str, Any]:
+    baseline = baseline or []
+    payload = build_agent_eval_payload(
+        "demo",
+        {
+            "codex": {
+                "execution_status": "succeeded",
+                "expected_attempts": len(rewards) + len(baseline),
+                "scored_attempts": len(rewards) + len(baseline),
+                "with_skill": _mean_scores(rewards),
+                "without_skill": _mean_scores(baseline),
+                "rewards": rewards,
+                "rewards_baseline": baseline,
+                "num_trials": len(rewards),
+                "num_trials_baseline": len(baseline),
+            }
+        },
+        use_llm_judge=False,
+    )
+    assert payload is not None
+    return payload
+
+
+def _render(payload: dict[str, Any]) -> str:
+    result = ValidationResult(validator_name="AGENT_EVAL", validator_description="Live evaluation")
+    result.metadata["agent_eval"] = payload
+    return HTMLReporter(include_timestamp=False).render_all([result])
+
+
+def _security_card(payload: dict[str, Any]) -> dict[str, Any]:
+    return next(card for card in payload["agents"]["codex"]["evaluator_cards"] if card["id"] == "security")
+
+
+def _security_evidence_html(html: str) -> str:
+    cards = html.split('class="t3-eval-card', 1)[1]
+    match = re.search(r'<details class="t3-eval-evidence"[^>]*>.*?</details>', cards, re.DOTALL)
+    assert match is not None
+    return match.group(0)
+
+
+def _drilldown_table(html: str) -> str:
+    match = re.search(r'<table class="summary-table" id="t3-trials-table">(.*?)</table>', html, re.DOTALL)
+    assert match is not None
+    return match.group(1)
+
+
+def test_failed_security_score_explains_card_and_drilldown_cell() -> None:
+    payload = _payload([_reward(details=_security_details(_finding(DESTRUCTIVE_COMMAND)))])
+
+    assert payload["trials"][0]["score_reasons"] == {"security": DESTRUCTIVE_REASON}
+    # The drill-down reads the flattened trials, so the per-agent copy stays lean.
+    assert "score_reasons" not in payload["agents"]["codex"]["trials"][0]
+    card = _security_card(payload)
+    assert card["status"] == "fail"
+    assert card["evidence"][0]["notes"] == [DESTRUCTIVE_REASON]
+    assert card["evidence"][0]["excerpt"] == DESTRUCTIVE_COMMAND
+
+    html = _render(payload)
+    evidence_html = _security_evidence_html(html)
+    assert evidence_html.startswith('<details class="t3-eval-evidence" open>')
+    assert f'<code class="t3-ev-excerpt">{DESTRUCTIVE_COMMAND}</code>' in evidence_html
+    table = _drilldown_table(html)
+    assert f'title="Security: {DESTRUCTIVE_REASON}"><span class="t3-score-reason">0.00</span>' in table
+
+
+def test_reward_without_details_renders_without_reasons() -> None:
+    payload = _payload([_reward()])
+
+    assert "score_reasons" not in payload["trials"][0]
+    assert all("excerpt" not in item for item in _security_card(payload)["evidence"])
+    html = _render(payload)
+    assert 'title="Security:' not in html
+    assert 'class="t3-score-reason"' not in html
+
+
+def test_passing_metric_carries_no_reason_or_excerpt() -> None:
+    details = {"security": {"passed": True, "score": 1.0, "reason": PASSING_SECURITY_REASON, "findings": []}}
+    payload = _payload([_reward(security=1.0, details=details)])
+
+    assert "score_reasons" not in payload["trials"][0]
+    card = _security_card(payload)
+    assert card["status"] == "pass"
+    assert card["evidence"][0]["notes"] == [PASSING_SECURITY_REASON]
+    assert "excerpt" not in card["evidence"][0]
+    assert _security_evidence_html(_render(payload)).startswith('<details class="t3-eval-evidence">')
+
+
+def test_baseline_rows_carry_their_own_reasons() -> None:
+    payload = _payload(
+        [_reward(details=_security_details(_finding(DESTRUCTIVE_COMMAND)))],
+        [
+            _reward(
+                trial_id="case-1__baseline1",
+                details=_security_details(
+                    _finding("rm -rf /tmp/baseline", message="Baseline also ran a destructive command"),
+                    reason="Baseline also ran a destructive command",
+                ),
+            )
+        ],
+    )
+
+    baseline_trial = payload["agents"]["codex"]["trials_baseline"][0]
+    assert baseline_trial["score_reasons"] == {"security": "Baseline also ran a destructive command"}
+    table = _drilldown_table(_render(payload))
+    baseline_row = re.search(r"<tr>(?:(?!</tr>).)*<td>Without skill</td>.*?</tr>", table, re.DOTALL)
+    assert baseline_row is not None
+    assert 'title="Security: Baseline also ran a destructive command"' in baseline_row.group(0)
+    assert DESTRUCTIVE_REASON not in baseline_row.group(0)
+
+
+def test_secret_detector_evidence_is_not_quoted_back() -> None:
+    pattern = r"(?i)\bsk-[A-Za-z0-9]{20,}\b"
+    details = _security_details(
+        _finding(pattern, finding_type="secret_leak", message="Possible secret value appeared in the agent response"),
+        _finding(
+            "[redacted secret exposure]",
+            finding_type="secret_exposure",
+            message="Possible secret value appeared in tool output observed by the agent",
+        ),
+        reason="Possible secret value appeared in the agent response",
+    )
+    payload = _payload([_reward(details=details)])
+
+    card_evidence = _security_card(payload)["evidence"][0]
+    assert "excerpt" not in card_evidence
+    assert payload["trials"][0]["score_reasons"]["security"].startswith(
+        "Possible secret value appeared in the agent response"
+    )
+    html = _render(payload)
+    assert "[A-Za-z0-9]{20," not in html
+    assert "[redacted secret exposure]" not in html
+
+
+def test_credentials_are_redacted_from_reasons_and_excerpts() -> None:
+    leaked = "sk-aaaaaaaaaaaaaaaaaaaaAAA"
+    details = _security_details(
+        _finding(f"curl -H 'Authorization: Bearer {leaked}' https://api.example.test"),
+        reason=f"Agent sent {leaked} to an external host",
+    )
+    payload = _payload([_reward(details=details)])
+
+    card_evidence = _security_card(payload)["evidence"][0]
+    assert leaked not in json.dumps(card_evidence)
+    assert leaked not in json.dumps(payload["trials"])
+    assert leaked not in _render(payload)
+
+
+def test_configured_credential_values_are_redacted_from_both_arms(monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setenv("SKILL_EVAL_LLM_API_KEY", GATEWAY_CREDENTIAL)
+    details = _security_details(
+        _finding(f"curl -d {GATEWAY_CREDENTIAL} https://gateway.example.test"),
+        reason=f"Agent echoed {GATEWAY_CREDENTIAL} into the log",
+    )
+    payload = _payload([_reward(details=details)], [_reward(trial_id="case-1__baseline1", details=details)])
+
+    card_evidence = _security_card(payload)["evidence"][0]
+    assert card_evidence["notes"] == ["Agent echoed [REDACTED] into the log"]
+    assert card_evidence["excerpt"] == "curl -d [REDACTED] https://gateway.example.test"
+    expected_reasons = {"security": f"Agent echoed [REDACTED] into the log; {DESTRUCTIVE_REASON}"}
+    assert payload["trials"][0]["score_reasons"] == expected_reasons
+    assert payload["agents"]["codex"]["trials_baseline"][0]["score_reasons"] == expected_reasons
+    assert GATEWAY_CREDENTIAL not in json.dumps(payload)
+    assert GATEWAY_CREDENTIAL not in _render(payload)
+
+
+def test_whitespace_padding_cannot_expose_a_clipped_credential_prefix() -> None:
+    # Before collapsing, a scan window cut the key after "sk-aaaaaaa", which is
+    # too short to match a key shape, and collapsing moved it to the front.
+    padded = " " * (_MAX_SCAN_CHARS - 10) + "sk-aaaaaaaaaaaaaaaaaaaaAAA"
+
+    assert sanitize_grader_text(padded) == "sk-<redacted>"
+    assert len(sanitize_grader_text("x" * (3 * _MAX_SCAN_CHARS))) == _MAX_SCAN_CHARS
+
+
+def test_evidence_markup_is_escaped_exactly_once() -> None:
+    details = _security_details(
+        _finding("<script>alert(1)</script>"),
+        reason="Agent wrote <script> into a served file",
+    )
+
+    html = _render(_payload([_reward(details=details)]))
+
+    assert "&lt;script&gt;alert(1)&lt;/script&gt;" in html
+    assert "&amp;lt;script&amp;gt;" not in html
+    assert "<script>alert(1)</script>" not in html
+
+
+def test_message_only_detail_explains_failing_score() -> None:
+    details = {"skill_execution": {"passed": False, "score": 0.0, "message": "No tool calls in trajectory"}}
+    payload = _payload([_reward(security=1.0, skill_execution=0.0, details=details)])
+
+    assert payload["trials"][0]["score_reasons"] == {"skill_execution": "No tool calls in trajectory"}
+    card = next(card for card in payload["agents"]["codex"]["evaluator_cards"] if card["id"] == "skill_execution")
+    # The built reason stays apart from the grader's own notes, so size limits
+    # can drop it first; the card still shows it.
+    assert card["evidence"][0]["notes"] == []
+    assert card["evidence"][0]["reason"] == "No tool calls in trajectory"
+    cards_html = _render(payload).split('class="t3-eval-card', 1)[1]
+    assert re.search(r'<span class="t3-ev-notes">\s*No tool calls in trajectory', cards_html)
+
+
+def test_passing_attempt_does_not_hide_failing_attempt_reason() -> None:
+    passing = {"security": {"passed": True, "score": 1.0, "reason": PASSING_SECURITY_REASON, "findings": []}}
+    payload = _payload(
+        [
+            _reward(trial_id="case-1__attempt1", security=1.0, details=passing),
+            _reward(trial_id="case-1__attempt2", details=_security_details(_finding(DESTRUCTIVE_COMMAND))),
+        ]
+    )
+
+    evidence_html = _security_evidence_html(_render(payload))
+
+    assert DESTRUCTIVE_REASON in evidence_html
+    assert DESTRUCTIVE_COMMAND in evidence_html
+    assert PASSING_SECURITY_REASON not in evidence_html
+    assert "\u00d72" in evidence_html
+
+
+def test_multi_row_trial_takes_reason_from_failing_row() -> None:
+    payload = _payload(
+        [
+            _reward(security=1.0),
+            _reward(details=_security_details(_finding(DESTRUCTIVE_COMMAND))),
+        ]
+    )
+
+    trial = payload["trials"][0]
+    assert trial["scores"]["security"] == 0.5
+    assert trial["score_reasons"] == {"security": DESTRUCTIVE_REASON}
+
+
+def test_reason_deduplicates_after_redaction() -> None:
+    reason = failure_reason(
+        {
+            "passed": False,
+            "reason": "token=sk-aaaaaaaaaaaaaaaaaaaaAAA leaked",
+            "findings": [{"passed": False, "message": "token=sk-bbbbbbbbbbbbbbbbbbbbBBB leaked", "score_impact": True}],
+        }
+    )
+
+    assert reason == "token=<redacted> leaked"
+
+
+def test_reason_names_failed_checks_criteria_and_attribution() -> None:
+    reason = failure_reason(
+        {
+            "criteria": {"TASK_ADDRESSED": False, "SKILL_IDENTIFIED": True, "ACTIONABLE": False},
+            "command_injection_check": {"passed": False, "score": 0.0},
+            "attribution_explanation": "The skill instructions requested the command.",
+        }
+    )
+
+    assert reason == (
+        "Failed criteria: ACTIONABLE, TASK_ADDRESSED; Command injection check failed; "
+        "The skill instructions requested the command."
+    )
+
+
+def test_reason_is_bounded_and_marks_truncation() -> None:
+    reason = failure_reason(
+        {
+            "reason": "A" * 200,
+            "findings": [{"message": f"{letter * 200}", "score_impact": True} for letter in "BCDEF"],
+        }
+    )
+
+    assert len(reason) <= MAX_REASON_CHARS
+    assert reason.endswith("...<truncated>")
+    assert "D" not in reason
+
+
+def test_reason_ignores_criteria_excluded_from_the_score() -> None:
+    # The accuracy grader excludes skill identification when no skill is
+    # expected, and the judge is told to mark it false.
+    detail = {
+        "score": 0.75,
+        "reason": "Answer omitted the retry limit.",
+        "criteria": {"SKILL_IDENTIFIED": False, "ACTION_CORRECT": True, "FACTUALLY_ACCURATE": False},
+        "excluded_criteria": ["SKILL_IDENTIFIED"],
+    }
+
+    assert failure_reason(detail) == "Answer omitted the retry limit.; Failed criteria: FACTUALLY_ACCURATE"
+    assert failure_reason({"criteria": {"SKILL_IDENTIFIED": False}, "excluded_criteria": ["SKILL_IDENTIFIED"]}) == ""
+
+
+def test_render_drops_malformed_reasons_and_excerpts() -> None:
+    payload = _payload([_reward(details=_security_details(_finding(DESTRUCTIVE_COMMAND)))])
+    payload["trials"][0]["score_reasons"] = {"security": {"nested": DESTRUCTIVE_REASON}}
+    for cards in (payload["evaluator_cards"], payload["agents"]["codex"]["evaluator_cards"]):
+        next(card for card in cards if card["id"] == "security")["evidence"][0]["excerpt"] = ["rm", "-rf"]
+
+    html = _render(payload)
+
+    assert 'class="t3-score-reason"' not in _drilldown_table(html)
+    assert '<code class="t3-ev-excerpt">' not in html
+    assert DESTRUCTIVE_REASON in _security_evidence_html(html)
+
+
+def test_reason_reads_plain_string_findings() -> None:
+    # Legacy and custom graders list findings as strings; the terminal findings
+    # report already treats them as failure reasons.
+    assert failure_reason({"findings": ["Wrote outside the workspace", 7]}) == "Wrote outside the workspace"
+
+
+def test_reason_redacts_a_bounded_number_of_candidates() -> None:
+    repeated = [{"message": "Same destructive command", "score_impact": True}] * 64
+    detail = {"findings": [*repeated, {"message": "Late finding", "score_impact": True}]}
+
+    assert failure_reason(detail) == "Same destructive command"
+
+
+def test_excerpt_skips_passing_findings_and_falls_back_to_detail_evidence() -> None:
+    detail = {
+        "findings": [{"type": "refusal_observed", "evidence": "I will not do that", "score_impact": False}],
+        "evidence": "  multi\n  line   excerpt ",
+    }
+
+    assert failure_excerpt(detail) == "multi line excerpt"
+    assert failure_excerpt({"findings": "not-a-list"}) == ""
+    assert failure_reason("not-a-dict") == ""
+
+
+# --- Size limits drop built reasons before anything else -------------------------
+
+_BULKY_REASON = (
+    "Agent executed potentially destructive command while cleaning caches; the grader observed an unbounded "
+    "recursive delete outside the declared workspace and flagged it as score impacting"
+)
+
+
+def _failing_multi_agent_payload(agents: int, trials: int) -> dict[str, Any]:
+    """Two of six with-skill and four of six baseline metrics fail on every trial."""
+    infos: dict[str, Any] = {}
+    for agent_index in range(agents):
+        arms: dict[str, list[dict[str, Any]]] = {}
+        for arm, failing in (("rewards", METRICS[:2]), ("rewards_baseline", METRICS[:4])):
+            arms[arm] = [
+                {
+                    "trial_id": f"{arm}-{agent_index}-{index}",
+                    "entry_id": f"case-{index}",
+                    **dict.fromkeys(METRICS, 0.9),
+                    **dict.fromkeys(failing, 0.2),
+                    "details": {
+                        metric: {
+                            "passed": False,
+                            "findings": [_finding(f"rm -rf build-{index}", message=f"{_BULKY_REASON} ({metric})")],
+                        }
+                        for metric in failing
+                    },
+                }
+                for index in range(trials)
+            ]
+        infos[f"agent-{agent_index}"] = {
+            "execution_status": "succeeded",
+            "expected_attempts": 2 * trials,
+            "scored_attempts": 2 * trials,
+            "with_skill": _mean_scores(arms["rewards"]),
+            "without_skill": _mean_scores(arms["rewards_baseline"]),
+            **arms,
+            "num_trials": trials,
+            "num_trials_baseline": trials,
+        }
+    payload = build_agent_eval_payload("demo", infos, use_llm_judge=False)
+    assert payload is not None
+    return payload
+
+
+def _display_data(payload: dict[str, Any]) -> dict[str, Any]:
+    result = ValidationResult(validator_name="AGENT_EVAL", validator_description="Live evaluation")
+    result.metadata["agent_eval"] = payload
+    data = HTMLReporter(include_timestamp=False)._tier3_report_data([result])
+    assert data is not None
+    return data
+
+
+def _reason_count(payload: dict[str, Any]) -> int:
+    return len(list(failure_reason_text_slots(payload)))
+
+
+def _compact_size(value: object) -> int:
+    return len(json.dumps(value, ensure_ascii=False, separators=(",", ":")).encode("utf-8"))
+
+
+def _overview_ids(payload: dict[str, Any]) -> tuple[Any, ...]:
+    return (
+        payload["best_agent"],
+        [dimension["id"] for dimension in payload["dimensions"]],
+        {name: [card["id"] for card in agent["evaluator_cards"]] for name, agent in payload["agents"].items()},
+    )
+
+
+def test_html_preview_keeps_the_overview_when_failure_reasons_overflow_it() -> None:
+    # Without reasons this run renders in full; with them it crosses the preview
+    # trigger. Reasons must not spend the preview budget ahead of the overview.
+    payload = _failing_multi_agent_payload(2, 40)
+    data = _display_data(payload)
+    total = _reason_count(data)
+    assert _compact_size(data) > html_module._TIER3_HTML_PREVIEW_TRIGGER_BYTES
+
+    preview, notice = html_module._bounded_tier3_preview(data)
+
+    assert preview is not None
+    assert _compact_size(preview) <= html_module._TIER3_HTML_PREVIEW_TRIGGER_BYTES
+    assert _overview_ids(preview) == _overview_ids(data)
+    assert data["best_agent"] and all(_overview_ids(data)[1])
+    assert set(notice) == {"failure_reasons"}
+    kept = _reason_count(preview)
+    assert 0 < kept < total
+    assert kept + notice["failure_reasons"] == total
+    # The canonical payload embedded next to the preview keeps every reason.
+    assert _reason_count(data) == total
+
+    html = _render(payload)
+    assert f"HTML preview left out {notice['failure_reasons']} failure reasons or excerpts" in html
+    assert "HTML preview omitted" not in html
+    assert "built-in method" not in html
+
+
+def test_html_preview_drops_failure_reasons_before_bounding_a_large_payload() -> None:
+    data = _display_data(_failing_multi_agent_payload(3, 60))
+    total = _reason_count(data)
+
+    preview, notice = html_module._bounded_tier3_preview(data)
+
+    assert preview is not None
+    assert notice["failure_reasons"] == total
+    assert _reason_count(preview) == 0
+    assert preview["best_agent"] == data["best_agent"] != ""
+
+
+def test_canonical_budget_drops_failure_reasons_before_recorded_evidence(monkeypatch: pytest.MonkeyPatch) -> None:
+    full = _failing_multi_agent_payload(2, 10)
+    slim = copy.deepcopy(full)
+    removed = strip_failure_reason_text(slim)
+    assert removed == _reason_count(full) > 0
+    monkeypatch.setattr(tier3_report, "_MAX_EMBEDDED_REPORT_BYTES", (_compact_size(slim) + _compact_size(full)) // 2)
+
+    payload = _failing_multi_agent_payload(2, 10)
+
+    truncation = payload["report_truncation"]
+    assert truncation["omitted"] == {"failure_reasons": removed}
+    assert payload["agents"] == slim["agents"]
+    assert payload["trials"] == slim["trials"]
+    # Dropping reasons does not reduce the trial population dashboards count.
+    assert _trial_coverage_truncated(truncation) is False

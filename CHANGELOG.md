@@ -143,6 +143,13 @@ All notable changes to SkillEvaluator are documented in this file.
   environment, so each template compiles once per process instead of once per
   report.
 
+- The Tier 3 per-evaluator drill-down and steps chart now include baseline
+  (without-skill) trials. The drill-down adds a Condition column and shows
+  metrics that only baseline rows scored; the steps chart plots one series per
+  agent and condition. Cases with missing or partial step telemetry stay gaps
+  instead of zeros or partial averages. The token chart remains with-skill
+  only; Measured Agent Resources compares token totals across both arms.
+
 ### Documentation
 
 - Give the performance dashboard its own sidebar guide, retain the previous
@@ -310,6 +317,23 @@ All notable changes to SkillEvaluator are documented in this file.
   `quality-check` before any report was written. The schema check reports the
   malformed `metadata`, and the quality score counts `metadata.author` and
   `metadata.tags` as missing, as it already did for other non-mapping values.
+
+- Tier 3 HTML reports now explain failing evaluator scores. A failing
+  evaluator card opens its per-trial evidence, shows the grader's reason
+  (or, when the grader recorded none, its message, findings, or failed
+  criteria), and quotes a short excerpt of the offending command or artifact.
+  A failing cell in the per-evaluator drill-down shows the reason as a
+  tooltip. When attempts of one case disagree, the card shows the
+  lowest-scoring attempt's reason, so a passing attempt no longer hides a
+  failure. Grader reasons and excerpts are credential-redacted, including
+  the values of configured credential environment variables. Criteria the
+  grader excluded from the score are not listed as failed. Drill-down
+  reasons and excerpts are capped at 240 and 300 characters, and
+  secret-detector findings never quote their detection pattern back.
+  Large reports drop these reasons before any other detail, so they never
+  displace the HTML overview or recorded evidence.
+- The Tier 3 HTML size notice no longer prints `<built-in method items ...>`
+  in place of the number of items the preview omitted.
 
 ## 0.6.0 - 2026-10-20
 

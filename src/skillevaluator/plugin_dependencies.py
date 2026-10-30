@@ -163,16 +163,22 @@ _HOSTED_REMOTE_RE = re.compile(
 
 
 def origin_remote_url(clone_root: Path) -> str | None:
-    """The raw ``origin`` URL of the git repository at ``clone_root``, or ``None`` when there is none."""
+    """The raw ``origin`` URL of the git repository at ``clone_root``, or ``None`` when there is none.
+
+    git prints the URL as UTF-8 whatever the locale, so it is decoded as UTF-8
+    (not the Windows ANSI code page ``text=True`` would use, which cannot decode
+    some non-ASCII origins).
+    """
     try:
         url = subprocess.check_output(
             ["git", "remote", "get-url", "origin"],
             cwd=str(clone_root),
             stderr=subprocess.DEVNULL,
-            text=True,
+            encoding="utf-8",
+            errors="replace",
             timeout=30,
         ).strip()
-    except (subprocess.SubprocessError, OSError):
+    except (subprocess.SubprocessError, OSError, ValueError):
         return None
     return url or None
 

@@ -253,3 +253,34 @@ def test_nul_dependency_paths_are_unresolved_instead_of_raising(tmp_path: Path, 
     assert resolution.skills[0].state == "unresolved"
     assert resolution.skills[0].cause == CAUSE_UNSAFE
     assert resolution.skills[0].path is None
+
+
+@requires_git
+@pytest.mark.parametrize(
+    ("origin", "slug", "reason"),
+    [
+        ("https://git.example.org/\u00e9quipe/catalog.git", "\u00e9quipe/catalog", None),
+        # UTF-8 "\u041d" ends in 0x9D, which the cp1252 code page cannot decode.
+        ("C:/Users/\u041d\u0430\u0442\u0430\u043b\u044c\u044f/src/catalog", None, "is a local path"),
+    ],
+)
+def test_origin_url_is_decoded_as_utf8_whatever_the_locale(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, origin: str, slug: str | None, reason: str | None
+) -> None:
+    """On Windows ``text=True`` decodes with the ANSI code page; git prints the URL as UTF-8."""
+    repo = _git_repo(tmp_path / "repo", origin=origin)
+    real_check_output = subprocess.check_output
+
+    def windows_default_check_output(args, *more, **kwargs):
+        if kwargs.get("text") and "encoding" not in kwargs:
+            kwargs["encoding"] = "cp1252"
+        return real_check_output(args, *more, **kwargs)
+
+    monkeypatch.setattr(subprocess, "check_output", windows_default_check_output)
+
+    identity = resolve_repository_identity(repo, repo_root=repo)
+
+    assert identity.local_slug == slug
+    assert (reason is None) == (identity.reason is None)
+    if reason is not None:
+        assert reason in identity.reason

@@ -122,7 +122,8 @@ def run_verifier_main(directory: Path) -> dict[str, float]:
         reward = json.loads((rewards / "reward.json").read_text(encoding="utf-8"))
         rich = json.loads((rewards / "skill_evaluator_reward.json").read_text(encoding="utf-8"))
         overall = float((rewards / "reward.txt").read_text(encoding="utf-8"))
-    dimensions = ("security", "skill_execution", "skill_efficiency", "accuracy", "goal_accuracy", "behavior_check")
+    # Judge-scored dimensions are not applicable without judge credentials, so they are omitted.
+    dimensions = ("security", "skill_execution", "skill_efficiency")
     assert reward == dict.fromkeys((*dimensions, "overall"), 1.0), reward
     assert overall == 1.0, overall
     assert rich["trajectory_source"] == "trajectory.json", rich

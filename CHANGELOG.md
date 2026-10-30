@@ -4,6 +4,8 @@ All notable changes to SkillEvaluator are documented in this file.
 
 ## Unreleased
 
+## 0.7.0 - 2026-10-30
+
 ### Added
 
 - Opt-in `SKILL_EVAL_JUDGE_CHARACTER_FACTS=1` adds bounded, escaped Unicode

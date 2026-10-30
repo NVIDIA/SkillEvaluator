@@ -915,3 +915,43 @@ def test_npm_packages_before_exec_are_checked(args: list[str]) -> None:
     assert invocation is not None
     assert "bad@latest" in invocation.specs
     assert "mcp_command_floating_version" in _checks(validate_mcp_server_declaration("s", config, "p.json"))
+
+
+@pytest.mark.parametrize(
+    "host,address,kind",
+    [
+        ("0x7f.0x.0x.1", "127.0.0.1", "private"),
+        ("0x7f.0.0.1", "127.0.0.1", "private"),
+        ("0177.0.0.1", "127.0.0.1", "private"),
+        ("2130706433", "127.0.0.1", "private"),
+        ("127.1", "127.0.0.1", "private"),
+        ("0xa.0x.0x.1", "10.0.0.1", "private"),
+        ("0xc0.0xa8.0x.1", "192.168.0.1", "private"),
+        ("0xa9.0xfe.0x.0x17", "169.254.0.23", "metadata"),
+        ("0x", "0.0.0.0", "private"),
+        ("0x.0x.0", "0.0.0.0", "private"),
+        ("[::ffff:127.0.0.1]", "::ffff:7f00:1", "private"),
+        ("[64:ff9b::a9fe:a9fe]", "64:ff9b::a9fe:a9fe", "metadata"),
+    ],
+)
+def test_encoded_ipv4_hosts_are_classified_like_a_whatwg_client(host: str, address: str, kind: str) -> None:
+    import ipaddress
+
+    from skillevaluator.validators.mcp_static import classify_endpoint_host
+
+    endpoint = classify_endpoint_host(host)
+    assert endpoint is not None
+    assert endpoint.kind == kind
+    assert endpoint.address == ipaddress.ip_address(address)
+
+
+@pytest.mark.parametrize("host", ["0x-1.0.0.1", "0x+7f.0.0.1", "0xg.0.0.1", "0x7f..1"])
+def test_malformed_hex_ipv4_parts_are_not_addresses(host: str) -> None:
+    from skillevaluator.validators.mcp_static import classify_endpoint_host
+
+    assert classify_endpoint_host(host) is None
+
+
+def test_bare_hex_prefix_ipv4_host_in_url_is_private() -> None:
+    findings = validate_mcp_server_declaration("s", {"url": "https://0x7f.0x.0x.1:8080/mcp"}, "p.json")
+    assert "mcp_endpoint_private" in _checks(findings)

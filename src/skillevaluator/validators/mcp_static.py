@@ -2490,9 +2490,11 @@ def _parse_legacy_ipv4(text: str) -> ipaddress.IPv4Address | None:
         lowered = part.lower()
         try:
             if lowered.startswith("0x"):
-                if len(lowered) == 2:
+                # The URL Standard reads a bare "0x" part as 0.
+                digits = lowered[2:]
+                if digits.strip("0123456789abcdef"):
                     return None
-                numbers.append(int(lowered, 0))
+                numbers.append(int(digits or "0", 16))
             elif len(lowered) > 1 and lowered.startswith("0"):
                 numbers.append(int(lowered, 8))
             elif lowered.isdigit():

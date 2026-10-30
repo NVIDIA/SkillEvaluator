@@ -30,6 +30,7 @@ from skillevaluator.tier3.eval_core.atif_helpers import (
     _behavior_final_response_limit,
     _truncate_for_behavior,
 )
+from skillevaluator.tier3.eval_core.character_facts import append_character_facts
 
 logger = logging.getLogger(__name__)
 
@@ -785,6 +786,7 @@ def judge_accuracy(
         ).replace("Compute score = count(true) / 5.", "Compute score = count(true among the other four criteria) / 4.")
     # Adjust the rubric before interpolation so task/evidence text stays intact.
     prompt = prompt.format(question=question, ground_truth=ground_truth, agent_text=agent_text)
+    prompt = append_character_facts(prompt, question=question, ground_truth=ground_truth, agent_text=agent_text)
 
     def validate_payload(parsed: Any) -> str | None:
         error = _accuracy_payload_error(parsed)
@@ -891,6 +893,9 @@ def judge_goal_accuracy(
         ground_truth=ground_truth,
         tool_summary=tool_summary,
         agent_text=agent_text,
+    )
+    prompt = append_character_facts(
+        prompt, question=question, ground_truth=ground_truth, tool_summary=tool_summary, agent_text=agent_text
     )
     kwargs.setdefault("response_schema", GOAL_ACCURACY_JSON_SCHEMA)
     kwargs.setdefault("schema_name", "goal_accuracy_judgment")
@@ -1050,10 +1055,12 @@ def judge_behavior_check(
 
     behaviors_text = "\n".join(f"{i + 1}. {b}" for i, b in enumerate(expected_behaviors))
 
+    conversation = _compact_behavior_conversation(conversation_text)
     prompt = BEHAVIOR_CHECK_PROMPT.format(
-        conversation=_compact_behavior_conversation(conversation_text),
+        conversation=conversation,
         behaviors=behaviors_text,
     )
+    prompt = append_character_facts(prompt, conversation=conversation, expected_behaviors=behaviors_text)
     kwargs.setdefault("max_tokens", BEHAVIOR_JUDGE_MAX_TOKENS)
     kwargs.setdefault("response_schema", BEHAVIOR_CHECK_JSON_SCHEMA)
     kwargs.setdefault("schema_name", "behavior_check_judgment")

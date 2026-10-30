@@ -237,3 +237,50 @@ def test_sandbox_census_alone_never_reports_loaded(tmp_path: Path) -> None:
     _trial(tmp_path, plan, init=None)
     evidence = px.collect_native_evidence(hooks, tmp_path / "jobs", "w")["claude-code"]
     assert evidence["loaded"] == [] and evidence["trials"] == 1
+
+
+def test_jobs_kept_for_evidence_are_removed_for_every_attempt(tmp_path: Path) -> None:
+    package = _prepared(tmp_path / "plugin")
+    work = tmp_path / "work"
+    work.mkdir()
+    made: list[Path] = []
+
+    def evaluate(options):
+        jobs = tmp_path / f"jobs-{len(made)}"
+        jobs.mkdir()
+        made.append(jobs)
+        if len(made) == 1:
+            return {
+                "execution_status": "failed",
+                "error": ["AgentSetupNetworkError: dns"],
+                "harbor_jobs_dir": str(jobs),
+            }
+        return {"execution_status": "succeeded", "harbor_jobs_dir": str(jobs)}
+
+    options = EvaluationOptions(skill_path=tmp_path, agents="claude-code")
+    outcome = px.evaluate_prepared_plugin(package, options, work_dir=work, load="native", evaluate=evaluate)
+    assert outcome.attempts == 2 and outcome.status == "succeeded"
+    assert not any(path.exists() for path in made)
+
+
+def test_evidence_failure_is_recorded_and_publication_still_runs(tmp_path: Path, monkeypatch) -> None:
+    package = _prepared(tmp_path / "plugin")
+    work = tmp_path / "work"
+    work.mkdir()
+    published: list[px.PrivateRunOutcome] = []
+
+    def broken(*_args, **_kwargs):
+        raise OSError("unreadable")
+
+    monkeypatch.setattr(px, "collect_native_evidence", broken)
+    options = EvaluationOptions(skill_path=tmp_path, agents="claude-code")
+    outcome = px.evaluate_prepared_plugin(
+        package,
+        options,
+        work_dir=work,
+        load="native",
+        evaluate=lambda _o: {"execution_status": "succeeded", "harbor_jobs_dir": str(tmp_path)},
+        publish=published.append,
+    )
+    assert published and outcome.publication_error is None
+    assert "unreadable" in outcome.provenance["native_evidence_error"]

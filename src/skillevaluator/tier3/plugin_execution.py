@@ -232,17 +232,30 @@ def evaluate_prepared_plugin(
         "incomplete_reasons": list(package.incomplete_reasons),
         "complete": package.complete,
     }
+    if evaluate is None:
+        from skillevaluator.evaluation.service import EvaluationService
+
+        evaluate = EvaluationService().evaluate
+    engine = evaluate
     retained: list[Path] = []
 
-    def publish_with_evidence(outcome: PrivateRunOutcome) -> None:
-        jobs = outcome.result.get("harbor_jobs_dir")
-        if hooks is not None and jobs:
+    def evaluate_attempt(attempt_options: EvaluationOptions) -> dict[str, Any]:
+        result = engine(attempt_options)
+        if jobs := result.get("harbor_jobs_dir"):
             retained.append(Path(jobs))
-            outcome.provenance["native_evidence"] = collect_native_evidence(hooks, Path(jobs), wrapper.name)
+        return result
+
+    def publish_with_evidence(outcome: PrivateRunOutcome) -> None:
+        if hooks is not None and retained:
+            try:
+                outcome.provenance["native_evidence"] = collect_native_evidence(hooks, retained[-1], wrapper.name)
+            except Exception as exc:
+                outcome.provenance["native_evidence_error"] = f"{type(exc).__name__}: {exc}"[:600]
         if publish is not None:
             publish(outcome)
 
     def cleanup() -> None:
+        # Jobs kept only to read native evidence are removed; ones the caller asked to keep stay.
         if not options.harbor_keep_jobs:
             for jobs in retained:
                 shutil.rmtree(jobs, ignore_errors=True)
@@ -254,7 +267,7 @@ def evaluate_prepared_plugin(
         replace(options, skill_path=wrapper.path, results_dir=results_dir, harbor_keep_jobs=keep_jobs),
         hooks=hooks,
         provenance=provenance,
-        evaluate=evaluate,
+        evaluate=evaluate_attempt,
         publish=publish_with_evidence,
         cleanup=cleanup,
     )

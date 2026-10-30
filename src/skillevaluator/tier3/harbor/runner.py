@@ -4276,12 +4276,22 @@ def _run_stop_on_pass_variant(
     agent_import_path: str | None = None,
     verifier_env: Mapping[str, str] | None = None,
     environment_kwargs: Mapping[str, Any] | None = None,
+    n_concurrent: int = 1,
 ) -> list[str]:
-    """Run each case one attempt at a time, stopping its attempts on first pass."""
-    errors: list[tuple[Path, str]] = []
-    attempt_job_dirs: list[Path] = []
-    for task_name in task_names:
+    """Run up to ``n_concurrent`` cases at once, stopping each case's attempts on first pass.
+
+    A case launches its next attempt only after the previous one scored, so
+    attempts of one case stay sequential. Attempt jobs are merged in dataset
+    order rather than completion order, keeping the aggregate deterministic.
+    """
+    stop_launching = threading.Event()
+
+    def _run_case(task_name: str) -> tuple[list[str], list[Path]]:
+        case_errors: list[tuple[Path, str]] = []
+        case_job_dirs: list[Path] = []
         for attempt in range(1, n_attempts + 1):
+            if stop_launching.is_set():
+                break
             job_name = f"{skill_name}-{agent}-{variant}-{task_name}-attempt{attempt:03d}"
             ok, detail = _run_harbor(
                 dataset=dataset,
@@ -4304,23 +4314,54 @@ def _run_stop_on_pass_variant(
                 include_task_names=[task_name],
             )
             job_dir = jobs_dir / job_name
-            attempt_job_dirs.append(job_dir)
+            case_job_dirs.append(job_dir)
             if not ok:
-                errors.append(
+                case_errors.append(
                     (job_dir, f"{agent} {variant}-skill Harbor run failed: {task_name} attempt {attempt}: {detail}")
                 )
                 continue
-            errors = [
+            # A recovered timeout matches only an earlier attempt of the same
+            # task, so filtering this case's own errors is enough.
+            case_errors = [
                 (failed_dir, detail)
-                for failed_dir, detail in errors
+                for failed_dir, detail in case_errors
                 if not detail.endswith(": Harbor job did not complete successfully: 1 errored")
                 or not failed_dir.is_dir()
                 or not harbor_timeout_job_recovered(failed_dir, job_dir)
             ]
             if _job_passed(job_dir, pass_threshold):
                 break
+        return [detail for _, detail in case_errors], case_job_dirs
+
+    def _run_case_or_stop(task_name: str) -> tuple[list[str], list[Path]]:
+        try:
+            return _run_case(task_name)
+        except BaseException:
+            # As in a serial loop, an unexpected failure stops later launches.
+            stop_launching.set()
+            raise
+
+    errors: list[str] = []
+    attempt_job_dirs: list[Path] = []
+    if task_names:
+        with ThreadPoolExecutor(max_workers=min(n_concurrent, len(task_names))) as executor:
+            futures = [executor.submit(_run_case_or_stop, task_name) for task_name in task_names]
+            try:
+                # Surface an unexpected case failure without waiting on earlier cases.
+                for future in as_completed(futures):
+                    future.result()
+            except BaseException:
+                # Queued cases never start; running cases finish only their current attempt.
+                stop_launching.set()
+                for future in futures:
+                    future.cancel()
+                raise
+        for future in futures:
+            case_errors, case_job_dirs = future.result()
+            errors.extend(case_errors)
+            attempt_job_dirs.extend(case_job_dirs)
     _merge_attempt_jobs(attempt_job_dirs, jobs_dir / f"{skill_name}-{agent}-{variant}")
-    return [detail for _, detail in errors]
+    return errors
 
 
 def _run_agent_pair(
@@ -4351,8 +4392,9 @@ def _run_agent_pair(
     if baseline is not None:
         jobs.append(("without", baseline))
     if stop_on_pass:
-        # A later attempt is launched only after the previous one scored, so
-        # stop-on-pass runs each condition sequentially, one attempt at a time.
+        # A case's later attempt is launched only after its previous one
+        # scored. Up to n_concurrent cases run at once, and the conditions run
+        # one after another, so each gets the full per-agent budget.
         sequential_errors: list[str] = []
         for variant, dataset in jobs:
             sequential_errors.extend(
@@ -4375,6 +4417,7 @@ def _run_agent_pair(
                     agent_import_path=agent_import_path,
                     verifier_env=verifier_env,
                     environment_kwargs=environment_kwargs,
+                    n_concurrent=n_concurrent,
                 )
             )
         return sequential_errors

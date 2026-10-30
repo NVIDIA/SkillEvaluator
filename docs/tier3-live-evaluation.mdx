@@ -564,6 +564,13 @@ The high-signal flags, with defaults:
 | `--copy-repo` | off | Copy the surrounding repository into the task environment |
 | `--include-skills` | none | Stage additional skill directories; requires `--skill-workspace-mode group` |
 
+With `--stop-on-pass`, `--n-concurrent` still limits concurrent eval cases per
+agent. Each case's attempts run one after another and stop after the first
+passing score. The with-skill and without-skill arms run one after the other,
+and each uses the full `--n-concurrent` budget. For example, two agents with
+`--n-concurrent 4` run up to eight trials at once, fewer when fewer cases
+remain.
+
 Every `tier3 evaluate` flag, including resource overrides and Dockerfile
 modes, is in the [CLI Reference](cli-reference.mdx).
 

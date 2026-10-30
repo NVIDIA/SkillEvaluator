@@ -21,8 +21,9 @@ from types import ModuleType, SimpleNamespace
 
 import pytest
 
+from skillevaluator.tier3.dataset_utils import load_dataset_entries
 from skillevaluator.tier3.harbor import collector, report
-from skillevaluator.tier3.harbor.adapter import _EVALUATOR_TESTS_SUBDIR, _write_test_sh
+from skillevaluator.tier3.harbor.adapter import _EVALUATOR_TESTS_SUBDIR, _write_entry_json, _write_test_sh
 from skillevaluator.tier3.harbor.metrics import (
     DEFAULT_METRIC_SET,
     DEFAULT_SCORE_POLICY,
@@ -96,6 +97,74 @@ def _load_verifier(tmp_path: Path) -> ModuleType:
         encoding="utf-8",
     )
     return module
+
+
+@pytest.mark.parametrize(
+    ("filename", "contents"),
+    [
+        ("evals.json", '[{"question": "What is 6*7?", "ground_truth": 42}]'),
+        ("evals.yaml", '- prompt: "What is 6*7?"\n  expected_output: 42\n'),
+    ],
+)
+def test_character_facts_keep_numeric_dataset_answers_scoreable(tmp_path, monkeypatch, filename, contents):
+    verifier = _load_verifier(tmp_path)
+    dataset_path = tmp_path / filename
+    dataset_path.write_text(contents, encoding="utf-8")
+    entry = load_dataset_entries(dataset_path)[0]
+    assert type(entry["ground_truth"]) is int
+    _write_entry_json(tmp_path, entry, has_skill=False, evaluated_skill="demo")
+    assert json.loads(verifier.ENTRY_PATH.read_text())["ground_truth"] == 42
+    verifier.ATIF_PATH.write_text(json.dumps({"steps": [{"source": "agent", "message": "4\u00a02"}]}), encoding="utf-8")
+    payload = json.dumps(
+        {
+            "criteria": dict.fromkeys(
+                ["SKILL_IDENTIFIED", "ACTION_CORRECT", "FACTUALLY_ACCURATE", "TASK_ADDRESSED", "ACTIONABLE"], False
+            ),
+            "score": 0.0,
+            "reason": "test verdict",
+            "achieved": False,
+            "user_goal": "test",
+            "end_state": "test",
+        }
+    )
+    prompts = {}
+
+    def accuracy_call(prompt, **_kwargs):
+        prompts["accuracy"] = prompt
+        return payload, None
+
+    def goal_call(prompt, **_kwargs):
+        prompts["goal_accuracy"] = prompt
+        return payload, None, {}
+
+    monkeypatch.setattr(verifier, "call_public_llm", accuracy_call)
+    monkeypatch.setattr(verifier, "_call_public_llm_with_provenance", goal_call)
+    monkeypatch.setattr(verifier, "_public_provider", lambda: "anthropic")
+    monkeypatch.delenv("SKILL_EVAL_JUDGE_CHARACTER_FACTS", raising=False)
+    verifier.main()
+    original_prompts = prompts.copy()
+    original_reward = json.loads(verifier.REWARD_JSON.read_text())
+    assert set(prompts) == {"accuracy", "goal_accuracy"}
+    prompts.clear()
+    monkeypatch.setenv("SKILL_EVAL_JUDGE_CHARACTER_FACTS", "1")
+    verifier.main()
+    assert set(prompts) == {"accuracy", "goal_accuracy"}
+    for name, prompt in prompts.items():
+        assert prompt.startswith(original_prompts[name] + "\n\nCharacter facts")
+        assert "U+00A0 NO-BREAK SPACE" in prompt
+    rich = json.loads(verifier.SKILL_EVALUATOR_REWARD_JSON.read_text())
+    numeric = json.loads(verifier.REWARD_JSON.read_text())
+    assert "evaluation_status" not in rich
+    assert "evaluation_errors" not in rich
+    assert numeric == original_reward
+    assert numeric["accuracy"] == numeric["goal_accuracy"] == 0.0
+    assert overall_score(rich) == numeric["overall"]
+    # Numeric transport omits N/A metrics; only the rich sidecar establishes
+    # their applicability. A numeric reward alone must remain unscoreable.
+    assert overall_score(numeric) is None
+    collected = dict(numeric)
+    collector._merge_reward_sidecars(collected, verifier.VERIFIER_DIR)
+    assert overall_score(collected) == numeric["overall"]
 
 
 def test_verifier_main_fails_closed_after_collecting_every_required_judge(

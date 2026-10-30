@@ -24,6 +24,7 @@ def load_license_config() -> dict:
         dict containing:
         - allowed_licenses: List of SPDX identifiers for permissive licenses
         - blocked_licenses: List of SPDX identifiers for restrictive licenses
+        - allowed_license_exceptions: List of SPDX exceptions allowed after WITH
         - license_patterns: Dict mapping license IDs to detection patterns
         - proprietary_indicators: List of strings indicating proprietary content
         - spdx_detection: Config for SPDX header scanning

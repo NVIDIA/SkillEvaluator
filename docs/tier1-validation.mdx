@@ -197,6 +197,8 @@ For `validate`, the default set is `schema`, `version`, `security`, `pii`, `lice
 
   <Accordion title="license — compliance">
     Looks for license evidence in frontmatter, common license files, and SPDX headers. Detected identifiers are normalized and matched against the packaged permissive allowlist and restrictive blocklist. Missing or unknown licenses are reported for review; blocked licenses fail according to the active profile (CRITICAL under the default `external` profile).
+
+    Frontmatter values and SPDX headers can be SPDX license expressions with `AND`, `OR`, `WITH`, and parentheses, such as `MIT OR Apache-2.0`. An expression passes only when every license in it is allowed, and any blocked license fails it. The `+`, `-only`, and `-or-later` forms of a blocked license, such as `GPL-3.0+` or `LGPL-2.1-only`, and deprecated ids such as `GPL-2.0-with-classpath-exception` are blocked too. A `WITH` exception keeps an allowed license allowed only when it is in the packaged `allowed_license_exceptions` list (`LLVM-exception`, `Swift-exception`); other exceptions are reported for review. An expression that uses an upper-case `AND`, `OR`, or `WITH` but has unbalanced parentheses or a missing or repeated operator fails with an `unsupported_license_expression` finding. A value without those operators, such as `MIT License` or `MIT License (MIT)`, is treated as a license name: it is matched by name as before or reported for review. A blocked license fails the value even when it does not parse, so `GPL-3.0 (or later)` and `(GPL-3.0 OR MIT` are blocked.
   </Accordion>
 
   <Accordion title="code-integrity — code risk, secrets, and hygiene">

@@ -1790,6 +1790,7 @@ def _build_agent(
         not never_activated and set(with_metrics) == set(baseline_metrics) and len(condition_policies) == 1
     )
     lift_data = info.get("lift") if isinstance(info.get("lift"), dict) else {}
+    recorded_lift_data = lift_data
     with_quality_available = _condition_quality_available(info, "with_skill")
     baseline_quality_available = _condition_quality_available(info, "without_skill")
     if not with_quality_available:
@@ -1924,12 +1925,45 @@ def _build_agent(
                 sum(w - b for w, b in zip(with_values, baseline_values, strict=True)) / len(with_metrics),
                 4,
             )
-    if judge_lift is not None:
-        overall_lift = (
-            _lift_value("overall", judge_lift)
-            if comparable_scores and not (with_mixed_contract or baseline_mixed_contract)
-            else None
+    recorded_overall_lift = _lift_value("overall", recorded_lift_data)
+    recorded_has_basis = isinstance(recorded_lift_data.get("basis"), dict)
+    completeness_is_explicit = "rewards_complete" in info or "rewards_baseline_complete" in info
+    comparison_unavailable = (
+        info.get("comparison_unavailable") is True
+        or info.get("comparison_complete") is False
+        or (
+            (recorded_has_basis or with_mixed_contract or baseline_mixed_contract)
+            and (info.get("rewards_complete") is False or info.get("rewards_baseline_complete") is False)
         )
+        or recorded_lift_data.get("comparison_unavailable") is True
+    )
+    rebuilt_overall_lift = _lift_value("overall", judge_lift) if judge_lift is not None else None
+    rebuilt_basis = judge_lift.get("basis") if judge_lift is not None else None
+    recorded_basis_matches = recorded_has_basis and recorded_lift_data.get("basis") == rebuilt_basis
+    recorded_metrics_match = all(
+        _lift_value(metric, recorded_lift_data) == _lift_value(metric, judge_lift or {})
+        for metric in with_metrics
+        if _lift_value(metric, recorded_lift_data) is not None
+    )
+    if comparison_unavailable:
+        overall_lift = None
+    elif (
+        recorded_has_basis
+        and comparable_scores
+        and recorded_overall_lift is not None
+        and (
+            not completeness_is_explicit
+            or (rebuilt_overall_lift is not None and recorded_basis_matches and recorded_metrics_match)
+        )
+    ):
+        overall_lift = recorded_overall_lift
+    elif judge_lift is not None:
+        if (with_mixed_contract or baseline_mixed_contract) and (
+            not completeness_is_explicit or rebuilt_overall_lift is not None
+        ):
+            pass
+        else:
+            overall_lift = rebuilt_overall_lift if comparable_scores else None
 
     trials = _normalize_trials(info.get("rewards") or [], with_metrics)
     baseline_trials = _normalize_trials(info.get("rewards_baseline") or [], baseline_metrics)

@@ -1592,9 +1592,7 @@ def _rm_shell_tokens(command_text: str) -> tuple[list[str], list[str]] | None:
             word_start = False
             index = end + 1
             continue
-        if (quote != "'" and text.startswith("${", index)) or (
-            quote is None and text.startswith("((", index)
-        ):
+        if (quote != "'" and text.startswith("${", index)) or (quote is None and text.startswith("((", index)):
             nested_syntax = True
         if char == "`" and quote != "'":
             if nested_syntax:
@@ -1693,6 +1691,7 @@ def _rm_wrapped_command_index(words: list[str], start: int) -> int | None:
 
 def _rm_xargs_context(tokens: list[str], rm_index: int) -> bool | None:
     """True for an xargs child rm, False for its option values/help, else unknown."""
+
     def boundary(token: str) -> bool:
         return token in _SHELL_SEPARATORS or bool(re.fullmatch(r"[;&|(){}]+", token))
 
@@ -1734,13 +1733,26 @@ def _rm_xargs_context(tokens: list[str], rm_index: int) -> bool | None:
                 return False
             if option.startswith("--"):
                 name, equals, _ = option.partition("=")
-                if name in {"--arg-file", "--delimiter", "--max-args", "--max-chars", "--max-procs",
-                            "--process-slot-var"}:
+                if name in {
+                    "--arg-file",
+                    "--delimiter",
+                    "--max-args",
+                    "--max-chars",
+                    "--max-procs",
+                    "--process-slot-var",
+                }:
                     cursor += 1 if equals else 2
                 elif name in {"--replace", "--eof", "--max-lines"}:
                     cursor += 1  # These long options accept only attached optional values.
-                elif option in {"--null", "--no-run-if-empty", "--interactive", "--verbose", "--exit",
-                                "--open-tty", "--show-limits"}:
+                elif option in {
+                    "--null",
+                    "--no-run-if-empty",
+                    "--interactive",
+                    "--verbose",
+                    "--exit",
+                    "--open-tty",
+                    "--show-limits",
+                }:
                     cursor += 1
                 else:
                     return target >= cursor
@@ -1988,9 +2000,12 @@ def _rm_symlink_call_seen(executable: str, source: str) -> bool:
                 if call.func.attr not in {"run", "call", "check_call", "check_output", "Popen"} or not call.args:
                     continue
                 argv = call.args[0]
-                if isinstance(argv, (ast.List, ast.Tuple)) and argv.elts and all(
-                    isinstance(arg, ast.Constant) and isinstance(arg.value, str) for arg in argv.elts
-                ) and _rm_symbolic_link_command([arg.value for arg in argv.elts], 0):
+                if (
+                    isinstance(argv, (ast.List, ast.Tuple))
+                    and argv.elts
+                    and all(isinstance(arg, ast.Constant) and isinstance(arg.value, str) for arg in argv.elts)
+                    and _rm_symbolic_link_command([arg.value for arg in argv.elts], 0)
+                ):
                     return True
             return False
     strings = r"'(?:\\.|[^'\\])*'|\"(?:\\.|[^\"\\])*\""
@@ -2012,7 +2027,7 @@ def _rm_symlink_fallback(command_text: str) -> bool:
     start = 0
     index = 0
     while index <= len(shell):
-        char = shell[index:index + 1]
+        char = shell[index : index + 1]
         if char == "\\" and quote != "'":
             index += 2
             continue
@@ -2028,7 +2043,11 @@ def _rm_symlink_fallback(command_text: str) -> bool:
                 parsed = _rm_shell_tokens(shell[start:index])
                 if parsed and parsed[0]:
                     command = _rm_wrapped_command_index(parsed[0], 0)
-                    if command is not None and command < len(parsed[0]) and _rm_symbolic_link_command(parsed[0], command):
+                    if (
+                        command is not None
+                        and command < len(parsed[0])
+                        and _rm_symbolic_link_command(parsed[0], command)
+                    ):
                         return True
             start = index + 1
         index += 1
@@ -2089,11 +2108,7 @@ def _rm_symlink_creation_seen(command_text: str, _depth: int = 0) -> bool:
 
 def _rm_tmp_operand_is_exempt(operand: str, *, symlink_seen: bool) -> bool:
     """Preserve lexical /tmp cleanup unless the trace gives link evidence."""
-    if (
-        not operand.startswith("/")
-        or operand.startswith("//")
-        or any(char in operand for char in "$`{")
-    ):
+    if not operand.startswith("/") or operand.startswith("//") or any(char in operand for char in "$`{"):
         return False
     if not symlink_seen:
         if any(char in operand for char in "*?[") and ".." in operand.split("/"):
@@ -2124,11 +2139,13 @@ def _rm_xargs_fallback(command_text: str) -> bool:
     """Retain detection on parser/budget failures with bounded linear work."""
     candidate = command_text.replace("\\\r\n", "").replace("\\\n", "")
     candidate = candidate.translate({ord("'"): None, ord('"'): None, ord("\\"): None})
-    return bool(re.search(
-        r"\bxargs\b[^\n;&|]{0,512}\brm\s+(?:--(?:recursive|force)\b|-\S*[rRf])",
-        candidate,
-        re.IGNORECASE,
-    ))
+    return bool(
+        re.search(
+            r"\bxargs\b[^\n;&|]{0,512}\brm\s+(?:--(?:recursive|force)\b|-\S*[rRf])",
+            candidate,
+            re.IGNORECASE,
+        )
+    )
 
 
 def _rm_targets_fallback(command_text: str, _depth: int, *, _symlink_seen: bool = False) -> bool:
@@ -2145,7 +2162,7 @@ def _rm_targets_fallback(command_text: str, _depth: int, *, _symlink_seen: bool 
         start = max(text.rfind(char, 0, match.start()) for char in "\n;&|") + 1
         tail = text[start : start + 65_537]
         separator = re.search(r"[\n;&|]", tail)
-        fragment = tail[:separator.start()] if separator else tail
+        fragment = tail[: separator.start()] if separator else tail
         if len(fragment) > 65_536 or fragment == command_text:
             return True
         if _rm_targets_outside_tmp(fragment, _depth + 1, _symlink_seen=_symlink_seen):
@@ -2174,7 +2191,7 @@ def _rm_sequential_commands(command_text: str, tokens: list[str]) -> list[str] |
         elif char in "'\"":
             quote = char
         elif char in "(){}|&`":
-            if command_text[index:index + 2] not in {"&&", "||"}:
+            if command_text[index : index + 2] not in {"&&", "||"}:
                 return None
             commands.append(command_text[start:index])
             index += 2
@@ -2208,8 +2225,14 @@ def _rm_targets_outside_tmp(
     if _depth > 3:
         return _rm_xargs_fallback(command_text) if _xargs_only else True
     if len(command_text) > 65_536:
-        return _rm_xargs_fallback(command_text) if _xargs_only else _rm_targets_fallback(
-            command_text, _depth, _symlink_seen=_symlink_seen or _rm_symlink_creation_seen(command_text),
+        return (
+            _rm_xargs_fallback(command_text)
+            if _xargs_only
+            else _rm_targets_fallback(
+                command_text,
+                _depth,
+                _symlink_seen=_symlink_seen or _rm_symlink_creation_seen(command_text),
+            )
         )
     if _xargs_only and "xargs" not in command_text.casefold():
         if "\\" not in command_text and "'" not in command_text and '"' not in command_text:
@@ -2220,13 +2243,25 @@ def _rm_targets_outside_tmp(
             return False
     tokenized = _rm_shell_tokens(command_text)
     if tokenized is None:
-        return _rm_xargs_fallback(command_text) if _xargs_only else _rm_targets_fallback(
-            command_text, _depth, _symlink_seen=_symlink_seen or _rm_symlink_creation_seen(command_text),
+        return (
+            _rm_xargs_fallback(command_text)
+            if _xargs_only
+            else _rm_targets_fallback(
+                command_text,
+                _depth,
+                _symlink_seen=_symlink_seen or _rm_symlink_creation_seen(command_text),
+            )
         )
     tokens, payloads = tokenized
     if len(tokens) > 4096:
-        return _rm_xargs_fallback(command_text) if _xargs_only else _rm_targets_fallback(
-            command_text, _depth, _symlink_seen=_symlink_seen or _rm_symlink_creation_seen(command_text),
+        return (
+            _rm_xargs_fallback(command_text)
+            if _xargs_only
+            else _rm_targets_fallback(
+                command_text,
+                _depth,
+                _symlink_seen=_symlink_seen or _rm_symlink_creation_seen(command_text),
+            )
         )
     commands = _rm_sequential_commands(command_text, tokens)
     if commands is not None and len(commands) > 1:
@@ -2239,20 +2274,30 @@ def _rm_targets_outside_tmp(
     # Within compounds, loops, functions, traps and background work, textual
     # order cannot establish execution order. Keep the conservative policy.
     command_index = _rm_wrapped_command_index(tokens, 0)
-    inline_shell = command_index is not None and command_index < len(tokens) and (
-        _shell_executable(tokens[command_index]) in _SHELL_COMMAND_INTERPRETERS
-        and _rm_inline_code(_shell_executable(tokens[command_index]), tokens, command_index) is not None
+    inline_shell = (
+        command_index is not None
+        and command_index < len(tokens)
+        and (
+            _shell_executable(tokens[command_index]) in _SHELL_COMMAND_INTERPRETERS
+            and _rm_inline_code(_shell_executable(tokens[command_index]), tokens, command_index) is not None
+        )
     )
     if commands is None or not inline_shell:
         _symlink_seen |= _rm_symlink_creation_seen(command_text)
     for payload in payloads:
         if re.search(r"\brm\s+-", payload) and _rm_targets_outside_tmp(
-            payload, _depth + 1, _xargs_only=_xargs_only, _symlink_seen=_symlink_seen,
+            payload,
+            _depth + 1,
+            _xargs_only=_xargs_only,
+            _symlink_seen=_symlink_seen,
         ):
             return True
     for index, token in enumerate(tokens):
         if re.search(r"\brm\s+-", token) and _rm_targets_outside_tmp(
-            token, _depth + 1, _xargs_only=_xargs_only, _symlink_seen=_symlink_seen,
+            token,
+            _depth + 1,
+            _xargs_only=_xargs_only,
+            _symlink_seen=_symlink_seen,
         ):
             return True
         if not re.search(r"\brm$", token):
@@ -2391,9 +2436,14 @@ def check_security(
                     continue
                 if (
                     pattern.search(action_text_lower)
-                    or (label == "rm -rf" and _rm_targets_outside_tmp(
-                        action_text, _xargs_only=True, _symlink_seen=symlink_seen,
-                    ))
+                    or (
+                        label == "rm -rf"
+                        and _rm_targets_outside_tmp(
+                            action_text,
+                            _xargs_only=True,
+                            _symlink_seen=symlink_seen,
+                        )
+                    )
                 ) and (label != "rm -rf" or _rm_targets_outside_tmp(action_text, _symlink_seen=symlink_seen)):
                     findings.append(
                         _security_finding(

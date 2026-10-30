@@ -1510,7 +1510,7 @@
                         {%- elif tier1_scan_stop %} {{ tier1_scan_stop }} Fix what stopped the scan and run the evaluation again.
                         {%- else %} Find out why the scan stopped and run the evaluation again.{% endif %}
                     {%- elif t1_key == 'fail' -%}
-                        {{ failed_count }} of {{ total_validators }} checks failed: {{ tier1_failed_checks[:3] | join(', ') }}{% if tier1_failed_checks | length > 3 %} and {{ tier1_failed_checks | length - 3 }} more{% endif %}.{% if tier1_blocking_findings %} {{ tier1_blocking_findings }} critical or high finding{{ 's' if tier1_blocking_findings != 1 else '' }} in those checks block the verdict.{% endif %}
+                        {{ failed_count }} of {{ total_validators }} checks failed: {{ tier1_failed_checks[:3] | join(', ') }}{% if tier1_failed_checks | length > 3 %} and {{ tier1_failed_checks | length - 3 }} more{% endif %}.{% if tier1_blocking_findings %} {{ tier1_blocking_findings }} critical or high finding{{ 's' if tier1_blocking_findings != 1 else '' }} in those checks block the verdict.{% endif %}{% if tier1_incomplete_scans and tier1_scan_stop %} {{ tier1_scan_stop }}{% endif %}
                     {%- elif t1_key == 'skipped' -%}
                         No Tier 1 check ran, so there is no result to report.
                     {%- else -%}

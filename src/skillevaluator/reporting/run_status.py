@@ -73,7 +73,7 @@ def _blocking_finding(result: ValidationResult) -> bool:
             return True
         # Folder merges prefix legacy errors and place those same labels inside
         # finding paths. Respect fail-on-medium/low in either representation.
-        location, prefix = finding.location, ""
+        location, prefix = finding.location or "", ""
         while location.startswith("[") and "] " in location:
             label, _, location = location.partition("] ")
             prefix += label + "] "

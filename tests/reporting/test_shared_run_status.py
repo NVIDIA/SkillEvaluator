@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import json
+import re
 
 from skillevaluator.models.result import Finding, Severity, ValidationResult
 from skillevaluator.reporting.run_status import Status, resolve_run_status
@@ -67,9 +68,12 @@ def test_report_surfaces_share_failure_precedence():
 
     result = failure_and_missing()
     data = json.loads(JSONReporter().render_all([result]))
-    assert data["overall_status"] == "failed"
-    assert data["results"][0]["status"] == "failed"
-    assert "[FAIL]" in CLIReporter().render_all([result])
+    # JSON keeps the publisher-validated completeness contract.
+    assert data["overall_status"] == "incomplete"
+    assert data["overall_passed"] is False
+    assert data["results"][0]["status"] == "incomplete"
+    text = re.sub(r"\x1b\[[0-9;]*m", "", CLIReporter().render_all([result]))
+    assert "[FAIL]" in text
     assert "**Status:** ❌ FAILED" in MarkdownReporter().render_all([result])
     assert '"status": "failed"' in HTMLReporter().render_all([result]) or "FAILED" in HTMLReporter().render_all(
         [result]

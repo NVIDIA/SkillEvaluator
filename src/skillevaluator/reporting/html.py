@@ -1406,7 +1406,11 @@ def _fix_first(
         for check_name in sorted(skills[skill_name].get("validators", {})):
             check = skills[skill_name]["validators"][check_name]
             label = plain_check_name(check_name)
-            status = check.get("status") or ("pass" if check.get("passed") else "fail")
+            status = (
+                "incomplete"
+                if check.get("incomplete_scans")
+                else check.get("status") or ("pass" if check.get("passed") else "fail")
+            )
             findings = check.get("findings") or []
             blocking = not check.get("passed", True)
             item = {"check": label, "skill": skill_name, "location": "", "blocking": True}
@@ -3088,7 +3092,8 @@ class HTMLReporter(ReporterBase):
             publication_status=publication.status,
             publication_reasons=publication.reasons,
             tier3_effective_status=(
-                completed_agent["verdict"] if self.report_scope == "tier3" and completed_agent
+                completed_agent["verdict"]
+                if self.report_scope == "tier3" and completed_agent
                 else publication.tier3.status
             ),
             total_validators=total_validators,

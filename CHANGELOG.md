@@ -170,8 +170,9 @@ All notable changes to SkillEvaluator are documented in this file.
   After any command runs, the next upload replaces the tests directory, so
   files or links the agent left there cannot change verification.
 - Harbor's standalone verifier now runs on Python 3.9 task images after sharing
-  deterministic checks with the host evaluator. Packaged verifier checks execute
-  on a real Python 3.9 interpreter in CI to retain this compatibility.
+  deterministic checks with the host evaluator, and honours HTTP-date
+  `Retry-After` headers there. CI scores a sample trajectory with the packaged
+  verifier on a real Python 3.9 interpreter to retain this compatibility.
 - Plain removal of recognized regenerable caches no longer receives the Tier 3
   destructive-command penalty. Dynamic commands, mixed targets and other
   destructive operations retain their existing classification in both verifiers.

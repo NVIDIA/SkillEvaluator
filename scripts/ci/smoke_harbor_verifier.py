@@ -13,6 +13,7 @@ from __future__ import annotations
 import argparse
 import importlib.util
 import json
+import os
 import runpy
 import subprocess
 import sys
@@ -66,7 +67,69 @@ def check_staged(directory: Path) -> None:
     ]:
         call = {"action": "bash", "action_input": {"command": command}}
         assert verifier["check_security"]({"steps": []}, [call])["passed"] is passed, command
-    print(json.dumps({"python": sys.version.split()[0], "verifier": str(directory), "results": results}))
+    # HTTP-date Retry-After values need a timezone that exists on Python 3.9.
+    assert verifier["_parse_retry_after"]("Thu, 01 Jan 1970 00:00:00 GMT", 7.0) == 0.0
+    assert verifier["_parse_retry_after"]("Fri, 31 Dec 9999 23:59:59 GMT", 7.0) > 7.0
+    reward = run_verifier_main(directory)
+    print(
+        json.dumps({"python": sys.version.split()[0], "verifier": str(directory), "results": results, "reward": reward})
+    )
+
+
+def run_verifier_main(directory: Path) -> dict[str, float]:
+    """Score a small trajectory the way test.sh runs eval.py, without judge credentials."""
+    entry = {
+        "id": "smoke",
+        "expected_skill": "calculator",
+        "evaluated_skill": "calculator",
+        "expected_script": "scripts/calc.py",
+        "question": "What is 1 + 1?",
+    }
+    tool_calls = [
+        {"tool_call_id": "c1", "function_name": "Read", "arguments": {"file_path": "/skills/calculator/SKILL.md"}},
+        {"tool_call_id": "c2", "function_name": "Bash", "arguments": {"command": "python scripts/calc.py 1 + 1"}},
+    ]
+    results = [{"source_call_id": "c1", "content": "calculator"}, {"source_call_id": "c2", "content": "2"}]
+    trajectory = {
+        "steps": [
+            {"source": "user", "message": entry["question"]},
+            {"source": "agent", "message": "", "tool_calls": tool_calls, "observation": {"results": results}},
+            {"source": "agent", "message": "1 + 1 = 2"},
+        ]
+    }
+    with tempfile.TemporaryDirectory(prefix="harbor-verifier-main-") as temporary:
+        root = Path(temporary)
+        logs, tests, rewards = root / "logs", root / "tests", root / "logs" / "verifier"
+        (logs / "agent").mkdir(parents=True)
+        tests.mkdir()
+        (tests / "entry.json").write_text(json.dumps(entry), encoding="utf-8")
+        (logs / "agent" / "trajectory.json").write_text(json.dumps(trajectory), encoding="utf-8")
+        environment = {
+            "PATH": os.environ.get("PATH", os.defpath),
+            "HARBOR_LOGS_DIR": str(logs),
+            "HARBOR_TESTS_DIR": str(tests),
+        }
+        completed = subprocess.run(
+            [sys.executable, "-I", str(directory / "eval.py")],
+            cwd=root,
+            env=environment,
+            capture_output=True,
+            text=True,
+            encoding="utf-8",
+            check=False,
+        )
+        assert completed.returncode == 0, completed.stdout[-4000:] + completed.stderr[-4000:]
+        reward = json.loads((rewards / "reward.json").read_text(encoding="utf-8"))
+        rich = json.loads((rewards / "skill_evaluator_reward.json").read_text(encoding="utf-8"))
+        overall = float((rewards / "reward.txt").read_text(encoding="utf-8"))
+    dimensions = ("security", "skill_execution", "skill_efficiency", "accuracy", "goal_accuracy", "behavior_check")
+    assert reward == dict.fromkeys((*dimensions, "overall"), 1.0), reward
+    assert overall == 1.0, overall
+    assert rich["trajectory_source"] == "trajectory.json", rich
+    execution = rich["details"]["skill_execution"]
+    assert execution["activation"]["details"]["matched_skill"] == "calculator", execution
+    assert execution["script_execution"]["passed"] is True, execution
+    return reward
 
 
 def main() -> None:

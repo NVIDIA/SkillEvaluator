@@ -311,6 +311,29 @@ All notable changes to SkillEvaluator are documented in this file.
   malformed `metadata`, and the quality score counts `metadata.author` and
   `metadata.tags` as missing, as it already did for other non-mapping values.
 
+- Tier 1 `security` no longer fails a skill, rules, workflows, or plugin
+  artifact on SkillSpector agent-threat matches in files no agent reads or
+  runs, such as UI strings, test fixtures, documentation, notebooks, images,
+  and lockfiles. Findings stay blocking on agent control paths (instructions,
+  references, executables, agent configuration, MCP and plugin manifests) and
+  on any file those reference by path, file name, skill or plugin root
+  variable or placeholder (`${CLAUDE_SKILL_DIR}`, `$SKILL_DIR`, `$SKILL_ROOT`,
+  `${CLAUDE_PLUGIN_ROOT}`, `{baseDir}`, `<skill-dir>`), install path, or
+  import, without regard to case. An issue that SkillSpector reports for
+  several files is suppressed only when every one of its occurrences is
+  outside agent control paths. Supply-chain findings, YARA malware
+  signatures, and artifact-integrity findings for a misleading extension or
+  embedded NUL bytes still apply on every path, and a file named as a raster
+  image keeps its findings unless its content is an image. A location or
+  occurrence that is missing or escapes the artifact through `..` or a
+  symlink keeps its finding. Malformed occurrences, a report that serializes
+  fewer occurrences than it counted, an unloadable manifest, and an
+  unfinished reference walk keep every affected finding. Suppressed issues
+  are left out of the aggregate risk-score gate, counted in a `filtered`
+  summary row, and recorded in the JSON report's `skillspector_applicability`
+  block. `security-scan` and targets of `unknown` type keep the unrestricted
+  scan.
+
 ## 0.6.0 - 2026-10-20
 
 ### Added

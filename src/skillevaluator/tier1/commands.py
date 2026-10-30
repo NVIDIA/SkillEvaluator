@@ -62,6 +62,10 @@ progress_console = Console(stderr=True)
 
 ValidatorRunner = Callable[[Path], ValidationResult]
 
+_AGENT_ARTIFACT_CONTENT_TYPES = frozenset(
+    {CONTENT_TYPE_SKILL, CONTENT_TYPE_RULES, CONTENT_TYPE_WORKFLOWS, CONTENT_TYPE_PLUGIN}
+)
+
 DEFAULT_CHECKS = (
     "schema",
     "version",
@@ -229,7 +233,15 @@ def run_validation(
         return [_run_result("schema", v.name, v.description, v.validate)]
 
     def _security_results() -> list[ValidationResult]:
-        v = SecurityValidator(use_llm=use_llm, verify_llm=llm_verify)
+        # Agent-security findings are scoped to agent control paths only for a
+        # detected agent artifact; an unknown layout keeps the unrestricted
+        # scan that ``security-scan`` runs.
+        v = SecurityValidator(
+            use_llm=use_llm,
+            verify_llm=llm_verify,
+            content_type=content_type if content_type in _AGENT_ARTIFACT_CONTENT_TYPES else None,
+            skillspector_reference_root=target_path if content_type == CONTENT_TYPE_PLUGIN else None,
+        )
         return [_run_result("security", "Security Scan", v.description, v.validate_security_only)]
 
     def _pii_results() -> list[ValidationResult]:

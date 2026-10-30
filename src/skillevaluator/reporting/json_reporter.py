@@ -323,6 +323,12 @@ class JSONReporter(ReporterBase):
         if isinstance(coverage, list):
             data["dependency_coverage"] = coverage
 
+        # Tier 1 SkillSpector file-role scoping: retained and suppressed issue
+        # counts, and the raw versus applicable aggregate risk score.
+        skillspector_applicability = result.metadata.get("skillspector_applicability")
+        if isinstance(skillspector_applicability, dict):
+            data["skillspector_applicability"] = skillspector_applicability
+
         qs = result.metadata.get("quality_scores")
         if qs:
             data["quality"] = qs

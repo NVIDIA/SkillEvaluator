@@ -16,6 +16,7 @@ render validation results in various formats.
 
 from __future__ import annotations
 
+import hashlib
 from dataclasses import dataclass, field
 from enum import StrEnum
 
@@ -129,6 +130,45 @@ class Finding:
             return f"[{self.category}-{self.severity.value.upper()}]"
         return f"[{self.category}-{str(self.severity).upper()}]"
 
+    @staticmethod
+    def _normalize_identity_text(value: object) -> str:
+        """Normalize human text without coupling identity to formatting."""
+        return " ".join(("" if value is None else str(value)).casefold().split())
+
+    @property
+    def finding_id(self) -> str:
+        """Return a deterministic semantic identity independent of location.
+
+        File and line belong to an occurrence. Excluding them lets reporters
+        group the same check across paths and validators while retaining every
+        concrete occurrence in the reconciliation contract. Severity is also
+        excluded, so a policy override or verifier downgrade keeps the ID.
+        """
+        identity = "\x1f".join(
+            (
+                self._normalize_identity_text(self.category),
+                self._normalize_identity_text(self.check_name),
+                self._normalize_identity_text(self.message),
+                self._normalize_identity_text(self.suggestion),
+            )
+        )
+        digest = hashlib.sha256(identity.encode("utf-8"), usedforsecurity=False).hexdigest()[:20]
+        return f"SEF-{digest}"
+
+    @property
+    def occurrence_id(self) -> str:
+        """Return a deterministic identity for this concrete location."""
+        identity = "\x1f".join(
+            (
+                self.finding_id,
+                ("" if self.file_path is None else str(self.file_path)).replace("\\", "/"),
+                str(self.line_number) if self.line_number is not None else "",
+                self._normalize_identity_text(self.line_content),
+            )
+        )
+        digest = hashlib.sha256(identity.encode("utf-8"), usedforsecurity=False).hexdigest()[:20]
+        return f"SEO-{digest}"
+
     @property
     def location(self) -> str:
         """Return formatted location like 'file.py:42'."""
@@ -145,6 +185,8 @@ class Finding:
         """Convert to dictionary for JSON serialization."""
         severity_value = self.severity.value if isinstance(self.severity, Severity) else str(self.severity).lower()
         return {
+            "finding_id": self.finding_id,
+            "occurrence_id": self.occurrence_id,
             "category": self.category,
             "severity": severity_value,
             "check_name": self.check_name,

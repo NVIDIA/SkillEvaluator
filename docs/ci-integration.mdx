@@ -246,9 +246,39 @@ When the exit code is not enough — dashboards, custom thresholds, badge genera
 | `results[].publication_evidence` | object | Validated built-in Tier 1 or Tier 2 producer contract: schema version, producer, tier, and canonical check ID |
 | `tier3.run_id` | string | Run-owned Tier 3 identity; duplicated in the Tier 3 summary for consistency checks |
 | `severity_counts` | object | Totals for `critical`, `high`, `medium`, `low` |
-| `total_errors`, `total_warnings` | number | Aggregate counts across all validators |
-| `skills` | array | Per-skill `{ name, passed, issue_count }` |
+| `total_errors`, `total_warnings` | number | Raw error and warning records across all validators; a finding that two validators report counts twice |
+| `finding_counts` | object | Reconciled counts: `raw_occurrences`, `distinct_occurrences`, `unique_findings`, `duplicates_removed`, `occurrences_grouped`, `raw_by_severity`, `unique_by_severity` |
+| `finding_groups` | array | One entry per unique finding: `finding_id`, highest `severity`, `message`, `validators`, and every location in `occurrences[]` with its `occurrence_id` |
+| `message_counts` | object | `independent_errors` and `independent_warnings`: error and warning strings with no finding behind them, such as `gate_failures` and scanner or execution errors (strings that mirror a finding are not counted); `informational`: informational messages, not counting the `[OK]` line recorded for each passed check |
+| `results[].findings[].finding_id`, `results[].findings[].occurrence_id` | string | Stable finding and location identities (see below) |
+| `skills` | array | Per-skill `{ name, passed, issue_count }`; `issue_count` counts raw finding records |
 | `quality_summary` | array | Quality details with `overall_score` (0–100) and `grade` (A–F); a folder target reports the collection average plus a `skill_count` |
+
+Every finding carries two stable IDs. `finding_id` (`SEF-` plus 20 hex
+characters) hashes the finding's category, check name, message, and suggestion,
+ignoring case and extra whitespace. It does not change when the finding moves
+to another line or file, or when a policy changes its severity, so you can
+track a finding across runs. `occurrence_id` (`SEO-…`) adds the file path,
+line number, and line content, so it identifies one location.
+`finding_groups` groups findings by `finding_id` across validators, and each
+result in `results[]` carries its own `finding_counts`. Identical findings in
+different files or skills share one `finding_id`, so they count as one unique
+finding with one occurrence per location. When the CI templates redact a
+detected credential from a report, they recompute the IDs and groups from the
+redacted text, so no ID is derived from a removed value; such a finding's IDs
+differ from a local run's.
+
+The Markdown summary and the HTML report count findings the same way: each
+unique finding once, at its highest severity. Markdown's Total Issues also
+shows distinct occurrences, raw records, and the `independent_errors` and
+`independent_warnings`, so a run that fails a gate or leaves a scan
+incomplete without any finding is not reported as zero issues. In HTML, the
+tier cards, the Tier 1 Findings and Blocking critical + high numbers, the
+verdict sentence, the skill finding badges and the gate policy line count
+unique findings, and the Findings number shows the same breakdown beneath it
+when it differs from the unique count. `total_errors`, `total_warnings`,
+`severity_counts`, `skills[].issue_count` and contributor totals still count
+raw records.
 
 `overall_status` and `overall_passed` describe the configured command gate. They
 can be green when an advisory tier did not run, so do not use them as a

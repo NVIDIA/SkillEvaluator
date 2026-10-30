@@ -79,6 +79,25 @@ All notable changes to SkillEvaluator are documented in this file.
   `skillevaluator-tier1.json` and do not embed a second copy of the report
   JSON. Standalone CLI HTML reports embed it for Export JSON.
 
+- Every finding now has stable IDs for tracking across runs and validators.
+  `finding_id` (`SEF-…`) is derived from the finding's category, check,
+  message, and suggestion, so it survives line moves, whitespace or case
+  changes, and severity overrides; `occurrence_id` (`SEO-…`) adds the file,
+  line, and line content. Identical findings in different files or skills
+  share one `finding_id`, so they count as one unique finding with one
+  occurrence per location. When CI redacts a detected credential from a
+  report, it recomputes the IDs from the redacted text, so no ID is derived
+  from a removed value. The JSON report and the HTML report's embedded data
+  add `finding_counts` (raw records, distinct occurrences, unique findings,
+  and duplicates removed), `finding_groups` (each unique finding with its
+  validators and every location), and `message_counts` (error and warning
+  strings with no finding behind them, such as failed gates and scanner or
+  execution errors, plus informational messages other than the `[OK]` line
+  recorded for each passed check); each JSON result also carries its own
+  `finding_counts`. Markdown adds a Finding Reconciliation table, most severe
+  first, and per-finding IDs. `total_errors`, `total_warnings`, and
+  `severity_counts` are unchanged.
+
 ### Changed
 
 - Hosted GitHub reports verify a separate GitHub-signed execution receipt.
@@ -142,6 +161,21 @@ All notable changes to SkillEvaluator are documented in this file.
 - HTML reports rendered in one process share one compiled template
   environment, so each template compiles once per process instead of once per
   report.
+
+- The Markdown summary and the HTML report's summary now count findings the
+  same way: each unique finding once, at its highest severity, however many
+  lines, files, skills or validators report it. Markdown's Total Issues adds
+  distinct occurrences, raw records, and errors and warnings with no finding
+  behind them, such as failed gates and incomplete scans; its severity
+  breakdown counts unique findings. In HTML, the tier cards, the Tier 1
+  Findings and Blocking critical + high numbers, the verdict sentence, the
+  skill finding badges and the gate policy line count unique findings, and
+  the Findings number shows the same occurrence, raw-record and no-finding
+  counts beneath it when they differ from the unique count. Both formats used
+  to add up raw records, so a finding reported on several lines or by two
+  validators counted more than once. The JSON `skills[].issue_count`,
+  contributor totals, `total_errors`, `total_warnings` and `severity_counts`
+  still count raw records.
 
 ### Documentation
 

@@ -30,6 +30,12 @@ from skillevaluator.reporting.base import (
     is_cleanly_skipped,
     select_agent_eval_payload,
 )
+from skillevaluator.reporting.finding_summary import (
+    describe_issue_counts,
+    groups_by_display_priority,
+    summarize_findings,
+    summarize_messages,
+)
 from skillevaluator.reporting.harbor_viewer import (
     harbor_evidence_link_text,
     normalize_harbor_viewer_for_display,
@@ -202,6 +208,8 @@ class MarkdownReporter(ReporterBase):
     def render_all(self, results: list[ValidationResult]) -> str:
         """Render all results to Markdown with summary."""
         lines = []
+        finding_summary = summarize_findings(results)
+        message_summary = summarize_messages(results)
 
         # Header
         lines.append("# SkillEvaluator Validation Report")
@@ -275,25 +283,44 @@ class MarkdownReporter(ReporterBase):
         if advisory_skip_count:
             lines.append(f"| ⏭️ Advisory skips | {advisory_skip_count} |")
 
-        total_errors = sum(r.summary.errors for r in results)
-        total_warnings = sum(r.summary.warnings for r in results)
-        critical = sum(r.summary.critical_count for r in results)
-        high = sum(r.summary.high_count for r in results)
-        medium = sum(r.summary.medium_count for r in results)
-
-        severity_breakdown = []
-        if critical > 0:
-            severity_breakdown.append(f"{critical} critical")
-        if high > 0:
-            severity_breakdown.append(f"{high} high")
-        if medium > 0:
-            severity_breakdown.append(f"{medium} medium")
-
-        issue_str = f"{total_errors + total_warnings}"
-        if severity_breakdown:
-            issue_str += f" ({', '.join(severity_breakdown)})"
+        # The breakdown qualifies the unique count, so it counts unique findings
+        # at their highest severity rather than raw validator records.
+        unique_by_severity = finding_summary["unique_by_severity"]
+        severity_breakdown = [
+            f"{unique_by_severity[severity]} {severity}"
+            for severity in ("critical", "high", "medium")
+            if unique_by_severity[severity] > 0
+        ]
+        issue_str = describe_issue_counts(
+            finding_summary,
+            message_summary,
+            unique_suffix=f" ({', '.join(severity_breakdown)})" if severity_breakdown else "",
+            raw_records=True,
+        )
         lines.append(f"| Total Issues | {issue_str} |")
+        lines.append(f"| Duplicate Occurrences Reconciled | {finding_summary['duplicates_removed']} |")
         lines.append("")
+
+        if finding_summary["groups"]:
+            lines.append("## Finding Reconciliation")
+            lines.append("")
+            lines.append("| Finding ID | Severity | Finding | Occurrences | Validators |")
+            lines.append("|------------|----------|---------|-------------|------------|")
+            # The table is capped, so list the most severe findings first.
+            shown_groups = groups_by_display_priority(finding_summary)[: self.max_findings_shown]
+            for group in shown_groups:
+                # Finding text and validator names are untrusted report input.
+                lines.append(
+                    f"| `{group['finding_id']}` "
+                    f"| {_markdown_untrusted_table_cell(str(group['severity']).upper())} "
+                    f"| {_markdown_untrusted_table_cell(group['message'])} "
+                    f"| {group['occurrence_count']} "
+                    f"| {_markdown_untrusted_table_cell(', '.join(group['validators']))} |"
+                )
+            remaining_groups = len(finding_summary["groups"]) - len(shown_groups)
+            if remaining_groups > 0:
+                lines.append(f"| ... | | *{remaining_groups} more unique findings* | | |")
+            lines.append("")
 
         # Quality Score summary (if any QUALITY results present)
         quality_results = [r for r in results if r.metadata.get("quality_scores")]
@@ -585,6 +612,8 @@ class MarkdownReporter(ReporterBase):
         lines.append(f"**{index}. {finding.message}**")
         lines.append(f"- File: `{finding.location}`")
         lines.append(f"- Check: `{finding.check_name}`")
+        lines.append(f"- Finding ID: `{finding.finding_id}`")
+        lines.append(f"- Occurrence ID: `{finding.occurrence_id}`")
         related_paths = _related_paths(finding)
         if related_paths:
             lines.append(f"- Related paths: {' <-> '.join(f'`{path}`' for path in related_paths)}")

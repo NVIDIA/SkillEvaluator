@@ -1530,6 +1530,7 @@
                         <dt>Findings</dt>
                         <dd class="kpi-value"><strong>{{ tier1_summary.issue_count or 0 }}</strong></dd>
                         <dd class="kpi-sub sev-line">{% for level in ['critical', 'high', 'medium', 'low'] %}{% if tier1_summary[level] %}<span class="sev-item"><span class="sev-dot {{ level }}" aria-hidden="true"></span>{{ tier1_summary[level] }} {{ level }}</span> {% endif %}{% endfor %}{% if not tier1_summary.issue_count %}None reported{% endif %}</dd>
+                        {% if tier1_summary.issue_detail %}<dd class="kpi-sub kpi-issue-detail">{{ tier1_summary.issue_detail }}</dd>{% endif %}
                     </div>
                     <div class="kpi">
                         <dt>Blocking critical + high</dt>
@@ -1550,7 +1551,7 @@
                         {% endif %}
                     </div>
                 </dl>
-                <p class="kpi-legend">A finding is one problem a check reports at one location, with a severity from critical to low. Findings in a failed check block the verdict; findings in a passed check are advisory.</p>
+                <p class="kpi-legend">A finding is one problem a check reports, with a severity from critical to low. The same problem reported on several lines or in several files or {{ content_label_plural | lower }} counts once; each location is an occurrence. Findings in a failed check block the verdict; findings in a passed check are advisory.</p>
                 {% if fix_first %}
                 <div class="fix-first">
                     <h3>{{ 'Worth a look' if t1_key == 'pass' else 'Fix first' }}</h3>
@@ -1563,7 +1564,7 @@
                         </li>
                         {% endfor %}
                     </ol>
-                    {% if tier1_summary.issue_count > fix_first | selectattr('kind', 'equalto', 'finding') | list | length %}<p class="fix-more">The other findings are listed under their checks below.</p>{% endif %}
+                    {% if tier1_summary.occurrence_count > fix_first | selectattr('kind', 'equalto', 'finding') | list | length %}<p class="fix-more">The other findings are listed under their checks below.</p>{% endif %}
                 </div>
                 {% endif %}
             </section>
@@ -1733,7 +1734,8 @@
                         <span class="status-badge {{ 'warn' if skill_status == 'incomplete' else skill_status }}">{{ verdict_words.get(skill_status, skill_status | title) }}</span>
                         <span style="color: var(--text-secondary);">{{ skill_data.validators | length }} checks</span>
                         {% if not skill_data.passed and skill_data.issue_count is defined and skill_data.issue_count > 0 %}
-                        <span class="issue-count-badge">{{ skill_data.issue_count }} finding{{ 's' if skill_data.issue_count != 1 else '' }}</span>
+                        {% set skill_findings = skill_data.finding_count if skill_data.finding_count is defined else skill_data.issue_count %}
+                        <span class="issue-count-badge">{{ skill_findings }} finding{{ 's' if skill_findings != 1 else '' }}</span>
                         {% endif %}
                         <span class="expand-text">{{ '▲' if not skill_data.passed else '▼' }}</span>
                     </div>

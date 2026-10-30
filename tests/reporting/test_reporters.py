@@ -592,6 +592,383 @@ class TestJSONReporter:
         assert reporter.name == "json"
 
 
+def _repeated_finding_results() -> list[ValidationResult]:
+    """Same semantic finding across validators and concrete locations."""
+    results = [
+        ValidationResult(validator_name="SECURITY", validator_description="Security"),
+        ValidationResult(validator_name="CODE_RISK", validator_description="Code risk"),
+    ]
+    for result, line_number in ((results[0], 8), (results[0], 12), (results[1], 8)):
+        result.add_finding(
+            Finding(
+                category="SECURITY",
+                severity=Severity.HIGH,
+                check_name="unsafe-command",
+                message="Unsafe command execution",
+                file_path="scripts/run.py",
+                line_number=line_number,
+                suggestion="Use an argument vector.",
+            )
+        )
+    results[0].add_message("Scanned executable helpers")
+    return results
+
+
+def _exec_summary(html: str) -> str:
+    """Return the Tier 1 executive summary: verdict, KPIs and Fix first."""
+    return html.split('<section class="exec-summary', 1)[1].split("</section>", 1)[0]
+
+
+def _findings_kpi(html: str) -> tuple[str, str]:
+    """Return the Findings KPI value and its reconciliation detail line ("" when absent)."""
+    summary = _exec_summary(html)
+    value = re.search(r'<dt>Findings</dt>\s*<dd class="kpi-value"><strong>(\d+)</strong></dd>', summary)
+    assert value is not None
+    detail = re.search(r'<dd class="kpi-sub kpi-issue-detail">([^<]*)</dd>', summary)
+    return value.group(1), detail.group(1) if detail else ""
+
+
+def test_finding_identity_is_semantic_and_occurrence_identity_is_location_bound() -> None:
+    first = Finding(
+        category="SECURITY",
+        severity=Severity.HIGH,
+        check_name="unsafe-command",
+        message="Unsafe  command execution",
+        file_path="scripts/run.py",
+        line_number=8,
+        suggestion="Use an argument vector.",
+    )
+    second = Finding(
+        category="security",
+        severity=Severity.MEDIUM,
+        check_name="unsafe-command",
+        message=" Unsafe command execution ",
+        file_path="scripts/run.py",
+        line_number=12,
+        suggestion="Use an argument vector.",
+    )
+
+    assert first.finding_id == second.finding_id
+    assert re.fullmatch(r"SEF-[0-9a-f]{20}", first.finding_id)
+    assert first.occurrence_id != second.occurrence_id
+    assert re.fullmatch(r"SEO-[0-9a-f]{20}", first.occurrence_id)
+    # IDs are part of the serialized finding and stable across processes.
+    assert first.to_dict()["finding_id"] == first.finding_id
+    assert first.to_dict()["occurrence_id"] == first.occurrence_id
+    assert first.finding_id == "SEF-cca71f6c36db0948f02b"
+
+
+def test_occurrence_identity_distinguishes_line_zero_from_no_line() -> None:
+    common = {
+        "category": "SECURITY",
+        "severity": Severity.HIGH,
+        "check_name": "unsafe-command",
+        "message": "Unsafe command execution",
+        "file_path": "scripts/run.py",
+    }
+
+    assert Finding(**common, line_number=0).occurrence_id != Finding(**common, line_number=None).occurrence_id
+
+
+def test_finding_reconciliation_contract_matches_json_markdown_and_html(monkeypatch) -> None:
+    results = _repeated_finding_results()
+
+    original_to_dict = Finding.to_dict
+    to_dict_calls = 0
+
+    def counting_to_dict(finding):
+        nonlocal to_dict_calls
+        to_dict_calls += 1
+        return original_to_dict(finding)
+
+    monkeypatch.setattr(Finding, "to_dict", counting_to_dict)
+
+    json_data = json.loads(JSONReporter(include_timestamp=False).render_all(results))
+    assert to_dict_calls == 3
+    markdown = MarkdownReporter(include_timestamp=False).render_all(results)
+    html = HTMLReporter(include_timestamp=False).render_all(results)
+    html_data = _html_report_data(html)
+
+    expected = {
+        "raw_occurrences": 3,
+        "distinct_occurrences": 2,
+        "unique_findings": 1,
+        "duplicates_removed": 1,
+        "occurrences_grouped": 1,
+        "raw_by_severity": {"critical": 0, "high": 3, "medium": 0, "low": 0, "info": 0},
+        "unique_by_severity": {"critical": 0, "high": 1, "medium": 0, "low": 0, "info": 0},
+    }
+    assert json_data["finding_counts"] == expected
+    assert html_data["finding_counts"] == expected
+    # Error strings that mirror findings are not counted again.
+    assert json_data["message_counts"] == {
+        "informational": 1,
+        "independent_errors": 0,
+        "independent_warnings": 0,
+    }
+    assert html_data["message_counts"] == json_data["message_counts"]
+    # Raw totals stay available for existing consumers.
+    assert json_data["total_errors"] == 3
+    assert [result["finding_counts"]["raw_occurrences"] for result in json_data["results"]] == [2, 1]
+
+    group = json_data["finding_groups"][0]
+    assert group["finding_id"].startswith("SEF-")
+    assert group["occurrence_count"] == 2
+    assert group["validators"] == ["CODE_RISK", "SECURITY"]
+    assert [item["line_number"] for item in group["occurrences"]] == [8, 12]
+    assert html_data["finding_groups"] == json_data["finding_groups"]
+    assert json_data["results"][0]["findings"][0]["finding_id"] == group["finding_id"]
+    assert json_data["results"][0]["findings"][0]["metadata"] is None
+    assert html_data["results"][0]["findings"][0]["finding_id"] == group["finding_id"]
+    assert html_data["summary"]["total_issues"] == 1
+    # A display entry that merges two lines keeps both occurrence IDs.
+    merged_entry = next(iter(html_data["skills"].values()))["validators"]["SECURITY"]["findings"][0]
+    assert merged_entry["occurrences"] == 2
+    assert "occurrence_id" not in merged_entry
+    assert sorted(merged_entry["occurrence_ids"]) == sorted(item["occurrence_id"] for item in group["occurrences"])
+
+    # The severity breakdown qualifies the unique count, so it is not raw.
+    assert "| Total Issues | 1 unique finding (1 high) / 2 occurrences / 3 raw records |" in markdown
+    assert "| Duplicate Occurrences Reconciled | 1 |" in markdown
+    assert "Messages (" not in markdown
+    assert f"| `{group['finding_id']}` | HIGH | Unsafe command execution | 2 |" in markdown
+    assert f"- Occurrence ID: `{group['occurrences'][0]['occurrence_id']}`" in markdown
+    # The HTML summary counts the way Markdown does: one unique high finding,
+    # with its occurrences and raw records beside it.
+    assert _findings_kpi(html) == ("1", "1 unique finding / 2 occurrences / 3 raw records / 1 duplicate reconciled")
+    summary = _exec_summary(html)
+    assert '<span class="sev-dot high" aria-hidden="true"></span>1 high</span>' in summary
+    assert re.search(r'Blocking critical \+ high</dt>\s*<dd class="kpi-value"><strong[^>]*>1</strong>', summary)
+    assert "1 critical or high finding in those checks" in summary
+    assert "each location is an occurrence" in summary
+    # Fix first lists one place; the second occurrence is under its check.
+    assert "The other findings are listed under their checks below." in summary
+    assert '<span class="issue-count-badge">1 finding</span>' in html
+
+
+def test_tier1_dashboard_reconciles_only_tier1_findings() -> None:
+    results = [*_repeated_finding_results(), _similarity_result(severity=Severity.HIGH)]
+
+    html = HTMLReporter(include_timestamp=False).render_all(results)
+    html_data = _html_report_data(html)
+
+    # The embedded summary covers every tier; the Tier 1 card and KPI cover Tier 1 only.
+    assert html_data["summary"]["total_issues"] == 2
+    assert html_data["finding_counts"]["raw_occurrences"] == 4
+    assert _findings_kpi(html) == ("1", "1 unique finding / 2 occurrences / 3 raw records / 1 duplicate reconciled")
+    tier_cards = html.split('class="tier-cards', 1)[1].split('<section class="exec-summary', 1)[0]
+    assert re.search(r"<strong>1</strong> finding</span>", tier_cards)
+    assert '<span class="tier-card-sev-pill high">1 high</span>' in tier_cards
+    assert re.search(r"<strong>1</strong> duplicate\(s\)</span>", tier_cards)
+    # The gate policy counts each tier's unique findings.
+    gate_policy = html.split('class="gate-policy"', 1)[1].split("</div>", 1)[0]
+    assert "0 critical · 2 high · 0 medium · 0 low" in gate_policy
+
+
+def test_tier1_dashboard_counts_only_tier1_errors_without_findings() -> None:
+    tier2 = _similarity_result(severity=Severity.HIGH)
+    tier2.add_error("Similarity provider request failed")
+    results = [*_repeated_finding_results(), tier2]
+
+    html = HTMLReporter(include_timestamp=False).render_all(results)
+
+    assert _findings_kpi(html) == ("1", "1 unique finding / 2 occurrences / 3 raw records / 1 duplicate reconciled")
+    assert "without a finding" not in _html_tab(html, "tier1")
+    assert _html_report_data(html)["summary"]["total_issues"] == 3
+
+
+def _gate_only_result() -> ValidationResult:
+    result = ValidationResult(validator_name="QUALITY", validator_description="Quality")
+    result.fail_gate("Quality score 42 is below the required minimum 70")
+    return result
+
+
+def _incomplete_scan_error_result() -> ValidationResult:
+    result = ValidationResult(validator_name="SECRETS", validator_description="Secrets")
+    result.add_error("gitleaks crashed before writing its report")
+    result.mark_scan_incomplete("gitleaks")
+    return result
+
+
+def _incomplete_scan_warning_result() -> ValidationResult:
+    result = ValidationResult(validator_name="CODE_RISK", validator_description="Code risk")
+    result.add_warning("bandit not installed.")
+    result.mark_scan_incomplete("bandit")
+    return result
+
+
+@pytest.mark.parametrize(
+    ("build_result", "verdict", "expected_text", "expected_messages"),
+    [
+        (_gate_only_result, "fail", "1 error without a finding", (1, 0)),
+        (_incomplete_scan_error_result, "incomplete", "1 error without a finding", (1, 0)),
+        (_incomplete_scan_warning_result, "incomplete", "1 warning without a finding", (0, 1)),
+    ],
+    ids=["gate-only", "incomplete-scan-error", "incomplete-scan-warning"],
+)
+def test_issue_counts_include_errors_and_warnings_without_findings(
+    build_result, verdict: str, expected_text: str, expected_messages: tuple[int, int]
+) -> None:
+    # A failed gate or an incomplete scan without any finding is not zero issues.
+    results = [build_result()]
+
+    json_data = json.loads(JSONReporter(include_timestamp=False).render_all(results))
+    markdown = MarkdownReporter(include_timestamp=False).render_all(results)
+    html = HTMLReporter(include_timestamp=False).render_all(results)
+    html_data = _html_report_data(html)
+
+    independent_errors, independent_warnings = expected_messages
+    assert json_data["finding_counts"]["unique_findings"] == 0
+    assert json_data["message_counts"] == {
+        "informational": 0,
+        "independent_errors": independent_errors,
+        "independent_warnings": independent_warnings,
+    }
+    assert html_data["message_counts"] == json_data["message_counts"]
+    assert html_data["summary"]["total_issues"] == 1
+    assert f"| Total Issues | {expected_text} |" in markdown
+    summary = _exec_summary(html)
+    assert f'<span class="verdict-chip {"warn" if verdict == "incomplete" else verdict}">' in summary
+    assert _findings_kpi(html) == ("0", expected_text)
+    assert "None reported" in summary
+
+
+def test_issue_counts_put_errors_without_findings_after_unique_findings() -> None:
+    results = _repeated_finding_results()
+    results[0].fail_gate("Security policy requires a clean scan")
+
+    markdown = MarkdownReporter(include_timestamp=False).render_all(results)
+    html = HTMLReporter(include_timestamp=False).render_all(results)
+
+    assert (
+        "| Total Issues | 1 unique finding (1 high) / 2 occurrences / 3 raw records; 1 error without a finding |"
+    ) in markdown
+    assert _findings_kpi(html) == (
+        "1",
+        "1 unique finding / 2 occurrences / 3 raw records / 1 duplicate reconciled; 1 error without a finding",
+    )
+    assert _html_report_data(html)["summary"]["total_issues"] == 2
+
+
+def test_findings_kpi_has_no_detail_line_when_every_record_is_unique() -> None:
+    result = ValidationResult(validator_name="SECURITY", validator_description="Security")
+    for line_number, message in ((3, "Unsafe command execution"), (9, "Hard-coded token")):
+        result.add_finding(
+            Finding(
+                category="SECURITY",
+                severity=Severity.HIGH,
+                check_name="unsafe-command",
+                message=message,
+                file_path="scripts/run.py",
+                line_number=line_number,
+            )
+        )
+
+    html = HTMLReporter(include_timestamp=False).render_all([result])
+
+    assert _findings_kpi(html) == ("2", "")
+    assert '<span class="issue-count-badge">2 findings</span>' in html
+
+
+def test_same_finding_in_several_skills_counts_once_with_one_occurrence_per_skill() -> None:
+    collection = ValidationResult(validator_name="SCHEMA", validator_description="Schema")
+    for skill in ("alpha", "beta", "gamma"):
+        per_skill = ValidationResult(validator_name="SCHEMA", validator_description="Schema")
+        per_skill.add_finding(
+            Finding("SCHEMA", Severity.HIGH, "missing-description", "Missing description field", "SKILL.md", 1)
+        )
+        collection.merge_with_prefix(per_skill, skill)
+    results = [collection]
+
+    json_data = json.loads(JSONReporter(include_timestamp=False).render_all(results))
+    markdown = MarkdownReporter(include_timestamp=False).render_all(results)
+    html = HTMLReporter(include_timestamp=False).render_all(results)
+
+    # Identical findings in different skills share one finding_id.
+    assert json_data["finding_counts"]["unique_findings"] == 1
+    assert json_data["finding_counts"]["distinct_occurrences"] == 3
+    assert [item["file_path"] for item in json_data["finding_groups"][0]["occurrences"]] == [
+        "[alpha] SKILL.md",
+        "[beta] SKILL.md",
+        "[gamma] SKILL.md",
+    ]
+    assert "| Total Issues | 1 unique finding (1 high) / 3 occurrences / 3 raw records |" in markdown
+    assert _findings_kpi(html) == ("1", "1 unique finding / 3 occurrences / 3 raw records")
+    # Each skill still has its own finding, and JSON skills[] keeps raw records.
+    assert html.count('<span class="issue-count-badge">1 finding</span>') == 3
+    assert sorted((skill["name"], skill["issue_count"]) for skill in json_data["skills"]) == [
+        ("alpha", 1),
+        ("beta", 1),
+        ("gamma", 1),
+    ]
+
+
+def test_markdown_reconciliation_table_lists_the_most_severe_findings_first() -> None:
+    result = ValidationResult(validator_name="SECURITY", validator_description="Security")
+    lows = [
+        Finding("SECURITY", Severity.LOW, "style", f"Low finding {index}", "SKILL.md", index + 1) for index in range(12)
+    ]
+    # Pick a critical finding that falls past the 10-row cap in finding_id order.
+    critical = next(
+        finding
+        for finding in (
+            Finding("SECURITY", Severity.CRITICAL, "secret", f"Hard-coded AWS key {index}", "config.py", 4)
+            for index in range(1000)
+        )
+        if sum(low.finding_id < finding.finding_id for low in lows) >= 10
+    )
+    for finding in [*lows, critical]:
+        result.add_finding(finding)
+    finding_ids = sorted(finding.finding_id for finding in result.findings)
+    assert finding_ids.index(critical.finding_id) >= 10
+
+    markdown = MarkdownReporter(include_timestamp=False).render_all([result])
+    json_data = json.loads(JSONReporter(include_timestamp=False).render_all([result]))
+
+    table = markdown.split("## Finding Reconciliation", 1)[1].split("\n\n", 2)[1]
+    rows = [line for line in table.splitlines() if line.startswith("| `SEF-")]
+    assert len(rows) == 10
+    assert rows[0].startswith(f"| `{critical.finding_id}` | CRITICAL | {critical.message} |")
+    assert "*3 more unique findings*" in table
+    # Machine output stays ordered by finding_id.
+    assert [group["finding_id"] for group in json_data["finding_groups"]] == finding_ids
+
+
+def test_message_counts_leave_out_passed_check_lines() -> None:
+    result = ValidationResult(validator_name="SECURITY", validator_description="Security")
+    result.add_success("no-secrets", "No secrets found")
+    result.add_success("no-shell", "No shell commands")
+    result.add_message("Scanned 4 files")
+
+    json_data = json.loads(JSONReporter(include_timestamp=False).render_all([result]))
+
+    assert json_data["message_counts"] == {"informational": 1, "independent_errors": 0, "independent_warnings": 0}
+
+
+def test_markdown_finding_reconciliation_escapes_untrusted_text() -> None:
+    result = ValidationResult(validator_name="SECURITY | @maintainers", validator_description="Security")
+    result.add_finding(
+        Finding(
+            category="SECURITY",
+            severity=Severity.HIGH,
+            check_name="unsafe-command",
+            message="bad | <img src=x onerror=alert(1)> [click](https://example.com) @maintainers",
+            file_path="scripts/run.py",
+            line_number=3,
+        )
+    )
+
+    markdown = MarkdownReporter(include_timestamp=False).render_all([result])
+
+    row = next(line for line in markdown.splitlines() if line.startswith(f"| `{result.findings[0].finding_id}`"))
+    assert len(row.strip("|").split("|")) == 5
+    assert "<img" not in row
+    assert "&lt;img" in row
+    assert "](" not in row
+    assert "@maintainers" not in row
+    assert "&#64;maintainers" in row
+
+
 class TestSARIFReporter:
     """Tests for SARIFReporter."""
 

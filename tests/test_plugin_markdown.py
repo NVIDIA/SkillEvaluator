@@ -96,3 +96,17 @@ def test_byte_order_mark_and_missing_closer():
     assert unclosed.frontmatter == {}
     assert unclosed.frontmatter_error is None
     assert parse_markdown("Plain body\n---\nname: x\n---\n").frontmatter == {}
+
+
+def test_crlf_lenient_retry_keeps_flow_list_grants(tmp_path):
+    skill = (
+        "---\r\nname: deploy\r\ndescription: Deploy: runs the script\r\nallowed-tools: [Bash, Read]\r\n---\r\nGo.\r\n"
+    )
+    parsed = parse_markdown(skill)
+    assert parsed.frontmatter["allowed-tools"] == ["Bash", "Read"]
+    assert parsed.description == "Deploy: runs the script"
+
+    write_tree(tmp_path, {CLAUDE_PROFILE.manifest_path: {"name": "demo"}})
+    (tmp_path / "skills" / "deploy").mkdir(parents=True)
+    (tmp_path / "skills" / "deploy" / "SKILL.md").write_bytes(skill.encode("utf-8"))
+    assert checks(analyze_plugin(tmp_path).findings)["plugin_skill_unrestricted_bash"] == Severity.HIGH

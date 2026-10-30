@@ -97,12 +97,13 @@ def parse_markdown(text: str) -> _Markdown:
 
     The block is split the way Claude Code splits it: after a leading BOM, an
     opening ``---`` line, up to the first ``---`` that follows, even when it
-    begins a longer line such as ``----`` or ``--- # end``.
+    begins a longer line such as ``----`` or ``--- # end``. CRLF line endings
+    in the block become LF, so the lenient retry still sees each value whole.
     """
     match = _FRONTMATTER_RE.match(text.removeprefix("\ufeff"))
     if match is None:
         return _Markdown(None, None, text.strip(), {})
-    raw = match.group(1)
+    raw = match.group(1).replace("\r\n", "\n")
     body = match.string[match.end() :].strip()
     try:
         data = _load_frontmatter(raw)

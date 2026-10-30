@@ -2619,6 +2619,15 @@ class SecurityValidator(ValidatorBase):
     # and a version is never followed by ``/``, so CIDR blocks stay reported.
     _USER_AGENT_PRODUCT_PREFIX_PATTERN = re.compile(r"[A-Za-z][A-Za-z0-9]*\\?/\Z")
     _REDUCED_USER_AGENT_VERSION_PATTERN = re.compile(r"\d{1,3}\.0\.0\.0")
+    # A canonical 8-4-4-4-12 GUID/UUID, such as a COM interface ID. Its digit
+    # groups can form a Luhn-valid 16-digit run without being a card number.
+    _UUID_PATTERN = re.compile(r"(?i)(?<!\w)[0-9a-f]{8}(?:-[0-9a-f]{4}){3}-[0-9a-f]{12}(?!\w)")
+    # A payment label that directly precedes a value (``card_number: "``,
+    # ``credit_card=``, ``cc_no: ``, ``PAN ``), anchored to the end of the prefix.
+    _PAYMENT_LABEL_PATTERN = re.compile(
+        r"(?i)(?<![a-z0-9])(?:(?:credit[_ -]?)?card(?:[_ -]?(?:number|num|no))?|cc[_ -]?(?:number|num|no)|pan)"
+        r"(?![a-z0-9])[\"']?(?:\s*[:=]\s*[\"']?|\s+[\"']?)\Z"
+    )
 
     @staticmethod
     def _is_near_zero_gps(line: str) -> bool:
@@ -2679,7 +2688,8 @@ class SecurityValidator(ValidatorBase):
         """Validate a number string using the Luhn algorithm.
 
         Returns True if the digit string passes the Luhn check, meaning it
-        could be a valid credit card number.
+        could be a valid credit card number. An all-zero string has a zero
+        checksum but is never a card number, so it does not pass.
         """
         total = 0
         for i, ch in enumerate(reversed(digits)):
@@ -2689,7 +2699,35 @@ class SecurityValidator(ValidatorBase):
                 if n > 9:
                     n -= 9
             total += n
-        return total % 10 == 0
+        return total > 0 and total % 10 == 0
+
+    @classmethod
+    def _is_card_number_candidate(cls, match: re.Match, line: str, previous_line: str = "") -> bool:
+        """Return whether a card-shaped match on *line* can be a payment card number.
+
+        The digits must pass the Luhn check. Digits inside a canonical GUID/UUID
+        (optionally in braces) are an identifier, not a card, unless a payment
+        label directly precedes the GUID on its line or ends *previous_line*
+        (a YAML block value). Both prefixes are bounded so long lines stay linear.
+        """
+        if not cls._passes_luhn(re.sub(r"[\s-]", "", match.group())):
+            return False
+        # A GUID is 36 characters, so one that contains the match lies in this window.
+        guid = next(
+            (
+                found
+                for found in cls._UUID_PATTERN.finditer(line, max(0, match.start() - 36), match.end() + 36)
+                if found.start() <= match.start() and match.end() <= found.end()
+            ),
+            None,
+        )
+        if guid is None:
+            return True
+        value_start = guid.start()
+        if value_start and line[value_start - 1] == "{" and line[guid.end() : guid.end() + 1] == "}":
+            value_start -= 1
+        prefix = f"{previous_line[-100:]}\n{line[max(0, value_start - 100) : value_start]}"
+        return cls._PAYMENT_LABEL_PATTERN.search(prefix) is not None
 
     @staticmethod
     def _is_frontmatter_delimiter(line: str) -> bool:
@@ -2807,17 +2845,18 @@ class SecurityValidator(ValidatorBase):
                 matches = [match for match in matches if not self._is_version_literal(match, line)]
                 if not matches:
                     continue
+            if category == "credit_cards":
+                # Check every candidate: a GUID or non-Luhn number must not hide a later card.
+                previous_line = lines[line_num - 2] if line_num > 1 else ""
+                matches = [match for match in matches if self._is_card_number_candidate(match, line, previous_line)]
+                if not matches:
+                    continue
             match = matches[0]
 
             # /home/<root>/ is PII only when <root> is the author/submitter
             # username; unrelated roots are skipped.
             if category == "home_paths" and not self._is_personal_home_path(match, protected_usernames):
                 continue
-
-            if category == "credit_cards":
-                digits = re.sub(r"[\s-]", "", match.group())
-                if not self._passes_luhn(digits):
-                    continue
 
             confidence = self._estimate_confidence(category, line)
             if category == "gps_coordinates" and self._is_near_zero_gps(line):

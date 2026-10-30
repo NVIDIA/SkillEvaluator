@@ -45,6 +45,17 @@ from skillevaluator.validators.markdown import markdown_link_targets
 logger = get_logger(__name__)
 
 _WORD_CHAR = r"A-Za-z0-9_"
+# Role and control tags that stay reportable in ``argument-hint`` even when they
+# look like a CLI placeholder, including suffixed forms (``<system_prompt>``,
+# ``<toolCall>``) and nested ones (``<system<payload>>``).
+_ARGUMENT_CONTROL_TAG_RE = re.compile(
+    r"<(?:(?:system|developer|assistant|tool|instructions?|prompt|override|rules|policy)"
+    r"[A-Za-z0-9_-]*|user|context|script)(?=[\s<>:])",
+    re.IGNORECASE,
+)
+# A complete CLI placeholder such as ``<file>``, ``<plan|apply>`` or
+# ``<codec e.g. av1|h264>``: no attribute, line break, nested tag or self-closing slash.
+_ARGUMENT_PLACEHOLDER_RE = re.compile(r"<(?![^<>]*/\s*>)[A-Za-z][^<>=\r\n]*>")
 _URL_EDGE_C0_OR_SPACE_RE = re.compile(r"^[\x00-\x20]+|[\x00-\x20]+$")
 _ERROR_HANDLING_RE = re.compile(
     r"\b(?:errors?|exceptions?|invalid|fail(?:s|ed|ure|ures|ing)?|"
@@ -428,7 +439,14 @@ class QualityScoreValidator(ValidatorBase):
         for key, val in fm.items():
             if key in ("name", "description"):
                 continue
-            if XML_TAG_RE.search(str(val)):
+            value = str(val)
+            # A string argument-hint documents CLI placeholders (``<file> [--strict]``).
+            # Check control tags on the raw value first: masking an inner placeholder
+            # could otherwise erase an enclosing tag such as ``<system<payload>>``.
+            if key == "argument-hint" and isinstance(val, str) and not _ARGUMENT_CONTROL_TAG_RE.search(value):
+                # "[]" cannot form a new tag when masking nested syntax such as ``<R<NNN>>``.
+                value = _ARGUMENT_PLACEHOLDER_RE.sub("[]", value)
+            if XML_TAG_RE.search(value):
                 dim.deduct(
                     15,
                     "error",

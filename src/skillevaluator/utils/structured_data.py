@@ -29,6 +29,7 @@ MAX_STRUCTURED_SCALAR_CHARS = 65_536
 # About 4,215 decimal digits: Python formats ints up to 4,300 digits by default.
 MAX_STRUCTURED_INT_BITS = 14_000
 _YAML_MERGE_TAG = "tag:yaml.org,2002:merge"
+_YAML_VALUE_TAG = "tag:yaml.org,2002:value"
 
 
 class StructuredDataError(ValueError):
@@ -73,6 +74,9 @@ class _UniqueKeySafeLoader(_MergeBoundedSafeLoader):
             for key_node, _ in node.value:
                 if key_node.tag == _YAML_MERGE_TAG:
                     continue
+                if key_node.tag == _YAML_VALUE_TAG:
+                    # A plain ``=`` key; flatten_mapping makes it a string too.
+                    key_node.tag = "tag:yaml.org,2002:str"
                 key = self.construct_object(key_node)
                 try:
                     duplicate = key in seen

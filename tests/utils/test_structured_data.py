@@ -319,6 +319,14 @@ def test_bounded_json_limit_overrides_apply_to_the_preflight_and_the_parsed_grap
 
 
 @pytest.mark.parametrize("last_key_wins", [False, True])
+def test_bounded_yaml_reads_a_plain_equals_key_as_a_string(last_key_wins: bool) -> None:
+    assert load_bounded_yaml("=: 1\nother: {=: 2, <<: {b: 3}}", last_key_wins=last_key_wins) == {
+        "=": 1,
+        "other": {"=": 2, "b": 3},
+    }
+
+
+@pytest.mark.parametrize("last_key_wins", [False, True])
 def test_bounded_yaml_bounds_a_set_like_a_mapping(last_key_wins: bool) -> None:
     # A !!set is written as a mapping, so the composed-node preflight bounds it.
     assert load_bounded_yaml("skills: !!set {a, b}", last_key_wins=last_key_wins) == {"skills": {"a", "b"}}

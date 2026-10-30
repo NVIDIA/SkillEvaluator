@@ -17,6 +17,7 @@ from pathlib import Path
 from skillevaluator.constants import (
     CONTENT_DEDUP_EMBEDDING_BATCH_SIZE,
     CONTENT_DEDUP_LLM_REASONING_EFFORT,
+    CONTENT_DEDUP_LLM_REFUSED_CHECK,
     CONTENT_DEDUP_MAX_CHUNKS,
     CONTENT_DEDUP_MAX_LLM_CLUSTERS,
     CONTENT_DEDUP_SIMILARITY_THRESHOLD,
@@ -32,7 +33,7 @@ from skillevaluator.deduplication.intra_skill.semantic_clustering import Content
 from skillevaluator.deduplication.utils.chunker import ContentChunk, chunk_file
 from skillevaluator.deduplication.utils.skill_collector import CollectedFile, SkillCollectionError, collect_files
 from skillevaluator.embedding.client import EmbeddingClient, SimilarityConfigError, validate_embedding_vector
-from skillevaluator.inference import LLMClient, LLMClientError
+from skillevaluator.inference import LLMClient, LLMClientError, LLMClientRefusedError
 from skillevaluator.inference.diagnostics import llm_failure_diagnostic, safe_llm_labels
 from skillevaluator.models.result import Finding, Severity, ValidationResult
 from skillevaluator.utils.tier2_paths import safe_path_label
@@ -317,6 +318,11 @@ class IntraSkillValidator(ValidatorBase):
                 verdict = analyze_cluster(llm, cluster)
                 logger.info("  [thread] Verdict: %s (confidence: %.2f)", verdict.verdict, verdict.confidence)
                 return (cluster, verdict, None)
+            except LLMClientRefusedError:
+                # The model declined to classify this content. That says nothing
+                # about duplication and the same model usually refuses again, so
+                # it carries neither a verdict nor a failure diagnostic.
+                return (cluster, None, None)
             except Exception as exc:
                 # A provider exception or malformed model response is missing
                 # evidence, not a duplicate-content finding. Never log raw bodies.
@@ -332,14 +338,25 @@ class IntraSkillValidator(ValidatorBase):
 
         failures = Counter(diagnostic for _, _, diagnostic in cluster_results if diagnostic is not None)
         failed_count = sum(failures.values())
+        refused_count = sum(1 for _, verdict, diagnostic in cluster_results if verdict is None and diagnostic is None)
         result.metadata["llm_analysis"] = {
             "provider": provider,
             "model": model,
             "clusters_total": len(clusters),
-            "clusters_completed": len(clusters) - failed_count,
+            "clusters_completed": len(clusters) - failed_count - refused_count,
+            "clusters_refused": refused_count,
             "clusters_failed": failed_count,
             "failures": [{"count": count, "diagnostic": diagnostic} for diagnostic, count in sorted(failures.items())],
         }
+        if refused_count:
+            logger.warning(
+                "LLM declined to classify %d of %d content clusters (provider: %s; model: %s); "
+                "reported as advisory findings.",
+                refused_count,
+                len(clusters),
+                provider,
+                model,
+            )
         if failures:
             result.mark_scan_incomplete("deduplication-llm")
             summary = (
@@ -351,8 +368,39 @@ class IntraSkillValidator(ValidatorBase):
             logger.error("%s %s", summary, details)
 
         # Process results
-        for cluster, verdict, _ in cluster_results:
+        for cluster, verdict, diagnostic in cluster_results:
+            if diagnostic is not None:
+                continue
+
+            distinct_files = sorted({c.source_file for c in cluster.members})
+
+            locations = []
+            for c in cluster.members:
+                locations.append(f'"{c.heading}" in {c.source_file} (lines {c.start_line}-{c.end_line})')
+            location_text = "\n  vs ".join(locations)
+            if len(distinct_files) == 1:
+                scope = f"within {distinct_files[0]}"
+            else:
+                scope = f"across {' and '.join(distinct_files)}"
+
             if verdict is None:
+                # Report the refused overlap so the author can review it, but
+                # as an advisory: it is not evidence of duplicate content.
+                result.add_finding(
+                    Finding(
+                        category="CONTENT_DEDUP",
+                        severity=Severity.MEDIUM,
+                        check_name=CONTENT_DEDUP_LLM_REFUSED_CHECK,
+                        message=f"The LLM declined to classify overlapping content {scope}:\n  {location_text}",
+                        file_path=cluster.members[0].source_file,
+                        line_number=cluster.members[0].start_line,
+                        suggestion=(
+                            "Review this overlap manually, or rerun Tier 2 with another chat model "
+                            "(--llm-model or SKILL_EVAL_LLM_MODEL)."
+                        ),
+                        metadata={"source_files": distinct_files, "llm_provider": provider, "llm_model": model},
+                    )
+                )
                 continue
 
             severity = verdict_to_severity(verdict)
@@ -369,25 +417,12 @@ class IntraSkillValidator(ValidatorBase):
             if severity in (Severity.HIGH, Severity.MEDIUM) and _is_trivial_intra_file_duplicate(cluster):
                 severity = Severity.LOW
 
-            distinct_files = sorted({c.source_file for c in cluster.members})
-
-            locations = []
-            for c in cluster.members:
-                locations.append(f'"{c.heading}" in {c.source_file} (lines {c.start_line}-{c.end_line})')
-            location_text = "\n  vs ".join(locations)
-
-            if len(distinct_files) == 1:
-                message = f"Duplicate content found within {distinct_files[0]}:\n  {location_text}"
-            else:
-                files_str = " and ".join(distinct_files)
-                message = f"Duplicate content found across {files_str}:\n  {location_text}"
-
             result.add_finding(
                 Finding(
                     category=verdict.verdict,
                     severity=severity,
                     check_name=verdict.verdict.lower(),
-                    message=message,
+                    message=f"Duplicate content found {scope}:\n  {location_text}",
                     file_path=cluster.members[0].source_file,
                     line_number=cluster.members[0].start_line,
                     suggestion=verdict.suggestion,

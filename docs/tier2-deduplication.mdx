@@ -153,6 +153,15 @@ If chat-LLM analysis fails for a candidate cluster, Tier 2 reports the
 incomplete analysis as a blocking error rather than treating the content as
 clean.
 
+A model that declines to classify a cluster (a safety refusal, which some
+models return for security-themed skill content) is reported differently. The
+refusal is no evidence of duplication, and the same model usually refuses
+again on a rerun, so Tier 2 records a MEDIUM `llm_refused` finding that names
+the overlapping sections and does not block. Review that overlap by hand, or
+rerun with another chat model (`--llm-model` or `SKILL_EVAL_LLM_MODEL`). To make
+a refusal block `validate`, raise `CONTENT_DEDUP.llm_refused` to `high` in a
+[policy overlay](tier1-validation.mdx#validation-profiles-and-policies).
+
 ## Compare skills across a collection
 
 `similarity-check` recursively discovers skill manifests, embeds each skill's
@@ -345,6 +354,7 @@ handling terms before sending confidential skill content to a hosted endpoint.
     | Skill carries large generated snapshots (`evals`, `.evals`, `results`, `.results`, `versions`, `.versions`) | Excluded directories are pruned during traversal, so their contents never count toward the discovered-path limit |
     | A directory is a Windows junction or other reparse point | Rejected during the walk, like symbolic links |
     | Embedding or chat-LLM analysis is incomplete | Reports an error; does not claim a clean result |
+    | The chat LLM declines to classify a cluster | Reports an advisory MEDIUM `llm_refused` finding for that cluster's sections |
   </Accordion>
   <Accordion title="Inter-skill analysis">
     | Scenario | Behavior |

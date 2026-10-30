@@ -15,7 +15,7 @@ from skillevaluator.deduplication.intra_skill.intra_skill_validator import Intra
 from skillevaluator.deduplication.intra_skill.semantic_clustering import ContentCluster
 from skillevaluator.deduplication.utils.chunker import ContentChunk
 from skillevaluator.embedding.client import SimilarityConfigError
-from skillevaluator.inference import LLMClientError, LLMVerdict
+from skillevaluator.inference import LLMClientError, LLMClientRefusedError, LLMVerdict
 from skillevaluator.models.result import Severity
 
 
@@ -413,6 +413,121 @@ class TestIntraSkillValidatorValidate:
         assert result.metadata["llm_analysis"]["clusters_completed"] == 1
         assert result.metadata["llm_analysis"]["clusters_failed"] == 1
         assert "1 of 2 content clusters" in result.errors[0]
+
+    @patch("skillevaluator.deduplication.intra_skill.intra_skill_validator.analyze_cluster")
+    @patch("skillevaluator.deduplication.intra_skill.intra_skill_validator.LLMClient")
+    @patch("skillevaluator.deduplication.intra_skill.intra_skill_validator.EmbeddingClient")
+    def test_llm_refusal_is_an_advisory_finding(self, mock_embed, _mock_llm, mock_analyze, tmp_path: Path) -> None:
+        """A safety refusal says nothing about duplication, so it must not block the skill."""
+        skill_dir = tmp_path / "skill"
+        skill_dir.mkdir()
+        (skill_dir / "SKILL.md").write_text("## Section A\n" + "a" * 200 + "\n## Section B\n" + "b" * 200)
+        mock_embed.return_value.embed.return_value = [[1.0, 0.0], [1.0, 0.0]]
+        mock_analyze.side_effect = LLMClientRefusedError("private provider refusal text")
+
+        result = IntraSkillValidator().validate(skill_dir)
+
+        assert result.passed is True
+        assert result.status != "incomplete"
+        assert result.incomplete_scans == []
+        assert result.errors == []
+        [finding] = result.findings
+        assert (finding.category, finding.check_name, finding.severity) == (
+            "CONTENT_DEDUP",
+            "llm_refused",
+            Severity.MEDIUM,
+        )
+        # The author can find the refused overlap without rerunning the scan.
+        assert (finding.file_path, finding.line_number) == ("SKILL.md", 1)
+        assert finding.metadata["source_files"] == ["SKILL.md"]
+        assert finding.message == (
+            "The LLM declined to classify overlapping content within SKILL.md:\n"
+            '  "## Section A" in SKILL.md (lines 1-2)\n'
+            '  vs "## Section B" in SKILL.md (lines 3-4)'
+        )
+        assert "SKILL_EVAL_LLM_MODEL" in finding.suggestion
+        assert "private provider refusal text" not in str(finding.to_dict())
+        analysis = result.metadata["llm_analysis"]
+        assert (analysis["clusters_completed"], analysis["clusters_refused"], analysis["clusters_failed"]) == (0, 1, 0)
+        assert analysis["failures"] == []
+
+    @patch("skillevaluator.deduplication.intra_skill.intra_skill_validator.analyze_cluster")
+    @patch("skillevaluator.deduplication.intra_skill.intra_skill_validator.LLMClient")
+    @patch("skillevaluator.deduplication.intra_skill.intra_skill_validator.EmbeddingClient")
+    def test_llm_refusal_beside_a_failed_cluster_keeps_the_scan_incomplete(
+        self, mock_embed, _mock_llm, mock_analyze, tmp_path: Path
+    ) -> None:
+        skill = tmp_path / "skill"
+        skill.mkdir()
+        (skill / "SKILL.md").write_text("\n".join(f"## Section {letter}\n{letter.lower() * 200}" for letter in "ABCD"))
+        mock_embed.return_value.embed.return_value = [[1.0, 0.0], [1.0, 0.0], [0.0, 1.0], [0.0, 1.0]]
+
+        def analyze(_client, cluster):
+            if any("Section A" in member.heading for member in cluster.members):
+                raise LLMClientRefusedError("declined")
+            raise RuntimeError("private provider response")
+
+        mock_analyze.side_effect = analyze
+        result = IntraSkillValidator().validate(skill)
+
+        # Only the provider failure is missing coverage; the refusal stays advisory.
+        assert result.status == "incomplete"
+        assert result.incomplete_scans == ["deduplication-llm"]
+        assert [finding.check_name for finding in result.findings] == ["llm_refused"]
+        assert result.summary.medium_count == 1
+        analysis = result.metadata["llm_analysis"]
+        assert (analysis["clusters_completed"], analysis["clusters_refused"], analysis["clusters_failed"]) == (0, 1, 1)
+        assert "1 of 2 content clusters" in result.errors[0]
+
+    @patch("skillevaluator.deduplication.intra_skill.intra_skill_validator.analyze_cluster")
+    @patch("skillevaluator.deduplication.intra_skill.intra_skill_validator.LLMClient")
+    @patch("skillevaluator.deduplication.intra_skill.intra_skill_validator.EmbeddingClient")
+    def test_llm_refusal_beside_a_duplicate_keeps_the_duplicate_blocking(
+        self, mock_embed, _mock_llm, mock_analyze, tmp_path: Path
+    ) -> None:
+        skill = tmp_path / "skill"
+        skill.mkdir()
+        (skill / "SKILL.md").write_text("## Section A\n" + "a" * 200 + "\n## Section B\n" + "b" * 200)
+        (skill / "guide.md").write_text("## Section C\n" + "c" * 200 + "\n## Section D\n" + "d" * 200)
+        mock_embed.return_value.embed.return_value = [[1.0, 0.0], [0.0, 1.0], [1.0, 0.0], [0.0, 1.0]]
+
+        def analyze(_client, cluster):
+            if any("Section A" in member.heading for member in cluster.members):
+                return LLMVerdict("DUPLICATE", 0.9, "Same content", "Remove one")
+            raise LLMClientRefusedError("declined")
+
+        mock_analyze.side_effect = analyze
+        result = IntraSkillValidator().validate(skill)
+
+        assert result.status == "failed"
+        assert result.incomplete_scans == []
+        assert {(finding.check_name, finding.severity) for finding in result.findings} == {
+            ("duplicate", Severity.HIGH),
+            ("llm_refused", Severity.MEDIUM),
+        }
+        refusal = next(finding for finding in result.findings if finding.check_name == "llm_refused")
+        assert refusal.message.startswith(
+            "The LLM declined to classify overlapping content across SKILL.md and guide.md:"
+        )
+        assert refusal.metadata["source_files"] == ["SKILL.md", "guide.md"]
+
+    @patch("skillevaluator.deduplication.intra_skill.intra_skill_validator.analyze_cluster")
+    @patch("skillevaluator.deduplication.intra_skill.intra_skill_validator.LLMClient")
+    @patch("skillevaluator.deduplication.intra_skill.intra_skill_validator.EmbeddingClient")
+    def test_policy_can_make_an_llm_refusal_blocking(self, mock_embed, _mock_llm, mock_analyze, tmp_path: Path) -> None:
+        from skillevaluator.validators.policy import ValidationPolicy, apply_policy
+
+        skill_dir = tmp_path / "skill"
+        skill_dir.mkdir()
+        (skill_dir / "SKILL.md").write_text("## Section A\n" + "a" * 200 + "\n## Section B\n" + "b" * 200)
+        mock_embed.return_value.embed.return_value = [[1.0, 0.0], [1.0, 0.0]]
+        mock_analyze.side_effect = LLMClientRefusedError("declined")
+        result = IntraSkillValidator().validate(skill_dir)
+
+        apply_policy([result], ValidationPolicy(severity_overrides={"CONTENT_DEDUP.llm_refused": Severity.HIGH}))
+
+        assert result.passed is False
+        assert result.findings[0].severity == Severity.HIGH
 
     @patch("skillevaluator.deduplication.intra_skill.intra_skill_validator.LLMClient")
     @patch("skillevaluator.deduplication.intra_skill.intra_skill_validator.EmbeddingClient")

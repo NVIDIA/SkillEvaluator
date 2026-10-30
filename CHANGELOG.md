@@ -225,9 +225,12 @@ All notable changes to SkillEvaluator are documented in this file.
   `unsupported_license_expression` finding. A malformed value without an
   upper-case `AND`, `OR` or `WITH`, such as `mit or (apache-2.0`, is reviewed
   as an unknown license name instead of being allowed, and `(MIT)` is allowed
-  as MIT. The `+`, `-only` and `-or-later` forms of blocked licenses, such as
-  `GPL-3.0+`, `AGPL-3.0+` and `LGPL-2.1-only`, are blocked instead of passing
-  as unknown licenses. `Apache-2.0 WITH LLVM-exception` is allowed through a
+  as MIT. A blocked license still fails a value that does not parse, such as
+  `GPL-3.0 (or later)` or `(GPL-3.0 OR MIT`. The `+`, `-only` and `-or-later`
+  forms of blocked licenses, such as `GPL-3.0+`, `AGPL-3.0+` and
+  `LGPL-2.1-only`, and deprecated ids such as
+  `GPL-2.0-with-classpath-exception` are blocked instead of passing as unknown
+  licenses. `Apache-2.0 WITH LLVM-exception` is allowed through a
   new `allowed_license_exceptions` list, while an unlisted exception such as
   `Commons-Clause` still needs review. An allowed frontmatter expression that
   leaves out the allowed license found in a LICENSE file is now a conflict, as

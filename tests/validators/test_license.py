@@ -562,10 +562,13 @@ in the Software without restriction.
             "MPL-2.0+",
             "MIT OR GPL-3.0+",
             "GPL-2.0-only WITH Classpath-exception-2.0",
+            "GPL-2.0-with-classpath-exception",
+            "GPL-2.0-with-GCC-exception",
+            "GPL-3.0-with-autoconf-exception",
         ],
     )
     def test_version_forms_of_blocked_licenses_are_blocked(self, tmp_path: Path, declared_license: str):
-        """`+`, `-only` and `-or-later` forms of a blocked license must not pass as unknown."""
+        """`+`, `-only`, `-or-later` and deprecated `-with-*-exception` forms must not pass as unknown."""
         skill_dir = create_skill_with_declared_license(tmp_path, "spdx-blocked", declared_license)
 
         result = LicenseValidator().validate(skill_dir)
@@ -573,6 +576,39 @@ in the Software without restriction.
         assert not result.passed
         assert result.metadata.get("license_status") == "blocked"
         assert any(f.check_name == "blocked_license" for f in result.findings)
+
+    @pytest.mark.parametrize(
+        ("declared_license", "blocked", "syntax_error"),
+        [
+            ("GPL-3.0 (or later)", "GPL-3.0", None),
+            ("LGPL-2.1 (or any later version)", "LGPL-2.1", None),
+            ("(gpl-3.0 or mit", "gpl-3.0", None),
+            ("mit or (gpl-3.0", "gpl-3.0", None),
+            ("mit or gpl-3.0)", "gpl-3.0", None),
+            ("MIT AND (GPL-3.0", "GPL-3.0", "unbalanced parenthesis"),
+            ("(GPL-3.0 OR MIT", "GPL-3.0", "unbalanced parenthesis"),
+        ],
+    )
+    def test_blocked_license_in_malformed_value_is_blocked(
+        self, tmp_path: Path, declared_license: str, blocked: str, syntax_error: str | None
+    ):
+        """A blocked license fails a value that does not parse, instead of being reviewed or unsupported."""
+        skill_dir = create_skill_with_declared_license(tmp_path, "malformed-blocked", declared_license)
+
+        result = LicenseValidator().validate(skill_dir)
+
+        assert not result.passed
+        assert result.metadata.get("license_status") == "blocked"
+        finding = next(f for f in result.findings if f.check_name == "blocked_license")
+        assert finding.message == f"License '{blocked}' is not allowed (restrictive/copyleft)"
+        assert not result.warnings
+        syntax_messages = [message for message in result.messages if "is not valid SPDX syntax" in message]
+        if syntax_error:
+            assert syntax_messages == [
+                f"License expression '{declared_license}' is not valid SPDX syntax: {syntax_error}"
+            ]
+        else:
+            assert not syntax_messages
 
     def test_or_later_frontmatter_is_not_hidden_by_apache_license_file(self, tmp_path: Path):
         """GPL-3.0+ next to an allowed LICENSE file is blocked, not reviewed as unknown."""

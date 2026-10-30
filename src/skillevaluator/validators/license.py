@@ -12,7 +12,7 @@ Validates license compliance for Skills, Rules, and Workflows using multi-tier d
 from __future__ import annotations
 
 import re
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 from functools import cached_property
 from itertools import islice
 from pathlib import Path
@@ -61,11 +61,16 @@ def _strip_spdx_capture(raw: str, line_prefix: str = "") -> str:
 
 @dataclass(slots=True, frozen=True)
 class _LicenseExpression:
-    """License names and ``WITH`` exceptions of a license value, or its syntax error."""
+    """License names and ``WITH`` exceptions of a license value, or its syntax error.
+
+    ``names`` holds every name written in the value, whatever its position and
+    even when the value does not parse, so the blocked check stays fail-closed.
+    """
 
     licenses: tuple[str, ...] = ()
     exceptions: tuple[tuple[str, str], ...] = ()
     error: str | None = None
+    names: tuple[str, ...] = ()
 
 
 def _parse_license_expression(value: str) -> _LicenseExpression:
@@ -78,6 +83,8 @@ def _parse_license_expression(value: str) -> _LicenseExpression:
     value uses an SPDX operator (upper case, as the SPDX specification writes
     them); otherwise the whole value is one free-text name, such as
     ``MIT License (MIT)``, and goes to manual review like other unknown names.
+    The names between operators and parentheses are kept in ``names`` either
+    way, so a blocked license in ``GPL-3.0 (or later)`` still blocks the value.
     """
     items: list[tuple[str, str]] = []
     words: list[str] = []
@@ -93,10 +100,12 @@ def _parse_license_expression(value: str) -> _LicenseExpression:
     if words:
         items.append(("name", " ".join(words)))
 
+    names = tuple(text for kind, text in items if kind == "name")
     expression = _parse_expression_items(items)
     if expression.error and not any(text in _SPDX_OPERATORS for _kind, text in items):
-        return _LicenseExpression((value.strip(),))
-    return expression
+        whole = value.strip()
+        return _LicenseExpression((whole,), names=(whole, *names))
+    return replace(expression, names=names)
 
 
 def _parse_expression_items(items: list[tuple[str, str]]) -> _LicenseExpression:
@@ -407,20 +416,19 @@ class LicenseValidator(ValidatorBase):
         """Classify a license value as allowed, blocked, unknown, or unsupported syntax."""
         if not license_id:
             return "unknown"
-        expression = _parse_license_expression(license_id)
-        if expression.error:
-            return "unsupported"
-        return self._license_policy(expression)[0]
+        return self._license_policy(_parse_license_expression(license_id))[0]
 
     def _license_policy(self, expression: _LicenseExpression) -> tuple[str, str | None]:
         """Return the policy status of a parsed expression and the name that decided it.
 
-        Any blocked name blocks the expression. It is allowed only when every
-        license is allowed and every ``WITH`` exception is a listed exception.
+        Any blocked name blocks the expression, even one that is not valid SPDX
+        syntax. Otherwise a syntax error makes it unsupported. It is allowed only
+        when every license is allowed and every ``WITH`` exception is listed.
         """
-        names = [*expression.licenses, *(exception for _license_id, exception in expression.exceptions)]
-        if blocked := next((name for name in names if self._is_blocked_license(name)), None):
+        if blocked := next((name for name in expression.names if self._is_blocked_license(name)), None):
             return "blocked", blocked
+        if expression.error:
+            return "unsupported", None
         for name in expression.licenses:
             if self._normalize_license_id(name) not in self._normalized_allowlist:
                 return "unknown", name
@@ -430,11 +438,18 @@ class LicenseValidator(ValidatorBase):
         return "allowed", None
 
     def _is_blocked_license(self, license_id: str) -> bool:
-        """Return True for a blocked id or its ``-only``/``-or-later``/``+`` variant."""
+        """Return True for a blocked id or one of its SPDX variants.
+
+        Variants are the ``-only``/``-or-later``/``+`` forms and the deprecated
+        ids with a built-in exception, such as ``GPL-2.0-with-classpath-exception``.
+        """
         normalized = self._normalize_license_id(license_id)
-        return (
-            normalized in self._normalized_blocklist
-            or _SPDX_VERSION_VARIANT_SUFFIX.sub("", normalized) in self._normalized_blocklist
+        base, separator, exception = normalized.partition("-with-")
+        if not (separator and exception.endswith("-exception")):
+            base = normalized
+        return any(
+            candidate in self._normalized_blocklist
+            for candidate in (normalized, base, _SPDX_VERSION_VARIANT_SUFFIX.sub("", base))
         )
 
     def _record_unrecognized_license_file(
@@ -669,24 +684,24 @@ class LicenseValidator(ValidatorBase):
             result.add_warning("License detection returned empty identifier")
             return
 
+        # Fail closed: one blocked name blocks the value, even a malformed one;
+        # findings for a compound value name the license or exception that decided it.
         expression = _parse_license_expression(license_id)
-        if expression.error:
-            self._set_license_metadata(result, detection, "unsupported")
-            self._add_unsupported_license_expression_finding(result, license_id, detection.file_path, expression.error)
-            return
-
-        # Fail closed: one blocked name blocks the expression; findings for a
-        # compound expression name the license or exception that decided it.
         status, name = self._license_policy(expression)
-        subject = name if name and (len(expression.licenses) > 1 or expression.exceptions) else license_id
         self._set_license_metadata(result, detection, status)
         if status == "allowed":
             result.add_message(f"License: {license_id} (ALLOWED - permissive)")
         elif status == "blocked":
+            subject = name if name and len(expression.names) > 1 else license_id
             if subject != license_id:
                 result.add_message(f"SPDX expression '{license_id}' includes blocked license '{subject}'")
+            if expression.error:
+                result.add_message(f"License expression '{license_id}' is not valid SPDX syntax: {expression.error}")
             self._add_blocked_license_finding(result, subject, detection.file_path)
+        elif expression.error:
+            self._add_unsupported_license_expression_finding(result, license_id, detection.file_path, expression.error)
         else:
+            subject = name if name and (len(expression.licenses) > 1 or expression.exceptions) else license_id
             self._handle_unknown_license(result, subject, detection.file_path)
 
     @staticmethod

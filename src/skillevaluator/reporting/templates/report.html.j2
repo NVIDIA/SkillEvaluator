@@ -1506,15 +1506,17 @@
                     <p class="exec-reason">
                     {%- if t1_key == 'incomplete' -%}
                         A required scan did not finish{% if tier1_incomplete_scans %} ({{ tier1_incomplete_scans | join(', ') }}){% endif %}, so no pass is claimed.
-                        {%- if tier1_scanners_missing %} Install or enable the scanner and run the evaluation again.
-                        {%- elif tier1_scan_stop %} {{ tier1_scan_stop }} Fix what stopped the scan and run the evaluation again.
-                        {%- else %} Find out why the scan stopped and run the evaluation again.{% endif %}
                     {%- elif t1_key == 'fail' -%}
                         {{ failed_count }} of {{ total_validators }} checks failed: {{ tier1_failed_checks[:3] | join(', ') }}{% if tier1_failed_checks | length > 3 %} and {{ tier1_failed_checks | length - 3 }} more{% endif %}.{% if tier1_blocking_findings %} {{ tier1_blocking_findings }} critical or high finding{{ 's' if tier1_blocking_findings != 1 else '' }} in those checks block the verdict.{% endif %}
                     {%- elif t1_key == 'skipped' -%}
                         No Tier 1 check ran, so there is no result to report.
                     {%- else -%}
                         All {{ total_validators }} checks that apply passed.{% if tier1_summary.issue_count %} {{ tier1_summary.issue_count }} advisory finding{{ 's do' if tier1_summary.issue_count != 1 else ' does' }} not block.{% endif %}
+                    {%- endif -%}
+                    {%- if tier1_incomplete_scans -%}
+                        {%- if tier1_scanners_missing %} Install or enable the scanner and run the evaluation again.
+                        {%- elif tier1_scan_stop %} {{ tier1_scan_stop }} Fix what stopped the scan and run the evaluation again.
+                        {%- else %} Find out why the scan stopped and run the evaluation again.{% endif %}
                     {%- endif -%}
                     </p>
                 </div>

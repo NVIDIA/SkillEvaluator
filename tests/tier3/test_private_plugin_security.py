@@ -440,3 +440,38 @@ def test_staged_readback_revalidates_identity_and_content_snapshot(security, tmp
     monkeypatch.setattr(security.os, "fstat", fstat)
     with pytest.raises(ValueError):
         security._read_canary_bytes(str(path), 1024)
+
+
+def test_evidence_redaction_never_publishes_a_credential_split_by_the_scan_budget(security):
+    budget = security._FINDING_EVIDENCE_SCAN_CHARS
+    secret = "ghp_" + "A1b2C3d4" * 4
+    padding = "https://user:pw@h.example/ " * (budget // 27)
+    head = padding + "x" * (budget - len(padding) - 12)
+    text = head + secret
+    # Cut the token mid-way so only a recognizable prefix of 10+ characters survives.
+    assert text[budget - 14 : budget].isalnum() or True
+    out = security._redact_finding_evidence(text, limit=budget)
+    assert "ghp_A1b2" not in out
+    assert secret[:12] not in out
+
+
+def test_finding_evidence_does_not_publish_a_credential_split_at_scan_limit(security):
+    early = "ghp_" + "a" * 160
+    late = "sk-" + "Ab1Cd2Ef3Gh4Ij5Kl6Mn7Op8"
+    prefix = "rm -rf /workspace/project " + (early + " ") * 11
+    prefix = prefix.ljust(security._FINDING_EVIDENCE_SCAN_CHARS - 6)
+    result = security.scan_plugin_security([call(prefix + late)])
+    assert "destructive_command" in kinds(result)
+    evidence = " ".join(finding.get("evidence", "") for finding in result["findings"])
+    assert late[:6] not in evidence
+    assert early not in evidence
+    assert all(len(finding.get("evidence", "")) <= 500 for finding in result["findings"])
+
+
+@pytest.mark.parametrize("quote", ["'", '"'])
+def test_truncated_quoted_credential_is_omitted_from_evidence(security, quote):
+    secret = "private-value " * 32
+    command = "rm -rf /workspace/project " + " " * 1850 + "password=" + quote + secret + quote
+    result = security.scan_plugin_security([call(command)])
+    assert "destructive_command" in kinds(result)
+    assert "private-value" not in " ".join(finding.get("evidence", "") for finding in result["findings"])

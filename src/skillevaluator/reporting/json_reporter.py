@@ -308,6 +308,9 @@ class JSONReporter(ReporterBase):
             },
         }
 
+        if result.metadata.get("confirmed_failure") is True:
+            data["confirmed_failure"] = True
+
         skillspector_version = result.metadata.get("skillspector_version")
         if isinstance(skillspector_version, str):
             data["skillspector_version"] = skillspector_version

@@ -297,6 +297,8 @@ def validate_report(report: dict, row: dict) -> None:
         raise PublicationError("A skill summary has contradictory severity counts.")
     if "total_validators" in row and row["total_validators"] != report["total_validators"]:
         raise PublicationError("A skill summary has contradictory validator counts.")
+
+
 def read_artifact(payload: bytes) -> tuple[dict, dict[str, dict]]:
     """Validate every member, but deserialize only expected JSON without extraction."""
     if len(payload) > MAX_TOTAL_BYTES:

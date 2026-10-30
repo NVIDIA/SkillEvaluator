@@ -126,7 +126,16 @@ _TOKEN_PREFIX_RE = re.compile(
 
 def _redact_finding_evidence(text: Any, limit: int = 500) -> str:
     """Return *text* as finding evidence with credentials masked, cut to *limit* characters."""
-    redacted = _redact_network_evidence(str(text)[:_FINDING_EVIDENCE_SCAN_CHARS])
+    full = str(text)
+    raw = full[:_FINDING_EVIDENCE_SCAN_CHARS]
+    if len(full) > len(raw) and not full[len(raw)].isspace():
+        # The budget may have cut a credential in half, which no recognizer can
+        # mask. Drop the incomplete trailing span and any unterminated quote.
+        raw = re.sub(r"\S+\Z", "", raw)
+    for quote in "\"'":
+        if len(full) > len(raw) and raw.count(quote) % 2:
+            raw = raw[: raw.rindex(quote)]
+    redacted = _redact_network_evidence(raw)
     redacted = _URL_USERINFO_RE.sub(r"\1<redacted>@", redacted)
     redacted = _AUTH_HEADER_RE.sub(r"\1<redacted>", redacted)
     redacted = _CREDENTIAL_FLAG_RE.sub(r"\1<redacted>", redacted)

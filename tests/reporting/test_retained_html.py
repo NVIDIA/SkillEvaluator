@@ -135,6 +135,28 @@ def test_retained_confirmed_failure_marker_requires_failing_diagnostics():
         retained_results(emitted)
 
 
+def test_retained_finding_failure_cannot_claim_a_passing_result(payload):
+    payload["results"][0]["passed"] = True
+    payload["overall_passed"] = True
+    payload["overall_status"] = "passed"
+    with pytest.raises(RetainedReportError, match="Result verdict contradicts evidence"):
+        retained_results(payload)
+
+
+def test_advisory_skip_keeps_required_gate_but_is_outside_retained_tier1_contract():
+    from skillevaluator.evaluation.tier3_report import advisory_skip_result
+    from skillevaluator.reporting.base import is_cleanly_skipped, passes_required_gate
+
+    result = advisory_skip_result("Live evaluation runtime unavailable", skill_name="skill")
+    assert result.passed is False
+    assert is_cleanly_skipped(result) and passes_required_gate(result)
+    emitted = json.loads(JSONReporter(include_timestamp=False).render_all([result]))
+    assert emitted["overall_passed"] is True
+    assert emitted["results"][0]["status"] == "skipped"
+    with pytest.raises(RetainedReportError, match="Only retained Tier 1 reports are supported"):
+        retained_results(emitted)
+
+
 @pytest.mark.parametrize(
     "mutate",
     [

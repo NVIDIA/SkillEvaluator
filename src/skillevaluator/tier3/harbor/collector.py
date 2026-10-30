@@ -4920,11 +4920,12 @@ def _pass_summary(
     score_of = scorer or _overall_score
     expected_ids = _validated_expected_case_ids(expected_case_ids)
     expected_id_set = set(expected_ids) if expected_ids else None
-    grouped: dict[str, list[dict[str, Any]]] = {}
+    grouped: dict[str, list[tuple[dict[str, Any], float]]] = {}
     for reward in _logical_attempt_rewards(rewards):
-        if score_of(reward) is None:
+        overall = score_of(reward)
+        if overall is None:
             continue
-        grouped.setdefault(_entry_id(reward, expected_id_set), []).append(reward)
+        grouped.setdefault(_entry_id(reward, expected_id_set), []).append((reward, overall))
 
     cases: dict[str, Any] = {}
     pairing_cases: dict[str, dict[str, Any]] = {}
@@ -4946,10 +4947,7 @@ def _pass_summary(
         attempt_passes: list[dict[str, bool]] = []
         best_score: float | None = None
         first_pass_attempt: int | None = None
-        for idx, reward in enumerate(sorted(attempts, key=_attempt_sort_key), start=1):
-            overall = score_of(reward)
-            if overall is None:
-                continue
+        for idx, (reward, overall) in enumerate(sorted(attempts, key=lambda item: _attempt_sort_key(item[0])), start=1):
             score = round(overall, 4)
             passed = score >= pass_threshold
             attempt_passes.append({"passed": passed})
@@ -5066,8 +5064,9 @@ def _shared_metric_scorer(
         if not metrics:
             return own_score
         shared = shared_by_case.get(_entry_id(reward, expected_id_set), fallback)
-        skipped = [metric for metric in metrics if metric not in shared or metric_is_not_applicable(reward, metric)]
-        if all(metric in shared or metric_is_not_applicable(reward, metric) for metric in metrics):
+        not_applicable = {metric for metric in metrics if metric_is_not_applicable(reward, metric)}
+        excluded = set(metrics) - shared - not_applicable
+        if not excluded:
             # Complete unchanged bases retain historical policies and Harbor's
             # authoritative logical overall, including mixed-step rewards.
             return own_score
@@ -5083,13 +5082,13 @@ def _shared_metric_scorer(
             value = metric_value(reward, metric)
             if value is not None:
                 scores[metric] = value
-            elif not metric_is_not_applicable(reward, metric):
+            elif metric not in not_applicable:
                 return None
         policy, _ = _score_policy_for_rewards([reward], metrics)
         if policy == LEGACY_SCORE_POLICY:
             return round(sum(scores.values()) / len(scores), 4) if scores else None
         if policy == score_policy_for_metrics(metrics):
-            return overall_score_from_metrics(scores, metrics, not_applicable=skipped)
+            return overall_score_from_metrics(scores, metrics, not_applicable=not_applicable | excluded)
         return None
 
     return score

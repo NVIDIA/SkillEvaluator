@@ -1411,7 +1411,7 @@ def _fix_first(
             blocking = not check.get("passed", True)
             item = {"check": label, "skill": skill_name, "location": "", "blocking": True}
             check_key = (skill_name, "check", check_name)
-            if status == "incomplete":
+            if status == "incomplete" or check.get("incomplete_scans"):
                 scans = ", ".join(str(scan) for scan in check.get("incomplete_scans") or [])
                 reason = _scan_stop_reason(check.get("additional_errors") or [], check.get("additional_warnings") or [])
                 message = f"{label} did not finish" + (f": {reason}" if reason else f" ({scans})" if scans else "")

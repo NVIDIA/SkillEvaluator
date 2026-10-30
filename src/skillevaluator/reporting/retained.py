@@ -14,7 +14,7 @@ from functools import partial
 from typing import Any
 
 from skillevaluator.models import Finding, SuccessDetail, ValidationResult, ValidationSummary
-from skillevaluator.reporting.base import is_tier2_result, is_tier3_result, passes_required_gate
+from skillevaluator.reporting.base import is_cleanly_skipped, is_tier2_result, is_tier3_result, passes_required_gate
 from skillevaluator.reporting.html import HTMLReporter
 from skillevaluator.reporting.run_status import resolve_run_status, result_status
 
@@ -256,6 +256,12 @@ def retained_results(payload: dict, *, copy_metadata: bool = True) -> list[Valid
                     _require(type(quality[key]) in (int, float) and 0 <= quality[key] <= 100, "Invalid quality score")
         expected_status = result_status(result).value
         _require(row.get("status", expected_status) == expected_status, "Result status contradicts evidence")
+        verdict_consistent = (
+            is_cleanly_skipped(result)
+            if expected_status == "skipped"
+            else result.passed == (expected_status == "passed")
+        )
+        _require(verdict_consistent, "Result verdict contradicts evidence")
         results.append(result)
     if "overall_passed" in payload:
         _require(

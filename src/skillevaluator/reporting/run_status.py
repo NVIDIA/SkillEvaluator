@@ -64,7 +64,8 @@ class RunStatus:
         return self._publication()
 
     def of(self, result: ValidationResult) -> Status:
-        return self._outcomes.get(id(result), result_status(result))
+        outcome = self._outcomes.get(id(result))
+        return outcome if outcome is not None else result_status(result)
 
 
 def _blocking_finding(result: ValidationResult) -> bool:
@@ -73,7 +74,7 @@ def _blocking_finding(result: ValidationResult) -> bool:
             return True
         # Folder merges prefix legacy errors and place those same labels inside
         # finding paths. Respect fail-on-medium/low in either representation.
-        location, prefix = finding.location, ""
+        location, prefix = finding.location or "", ""
         while location.startswith("[") and "] " in location:
             label, _, location = location.partition("] ")
             prefix += label + "] "
@@ -97,7 +98,7 @@ def result_status(result: ValidationResult) -> Status:
         if "inconclusive" in verdicts:
             return Status.INCOMPLETE
     if result.is_incomplete:
-        return Status.FAILED if _blocking_finding(result) else Status.INCOMPLETE
+        return Status.INCOMPLETE
     if is_cleanly_skipped(result):
         return Status.SKIPPED if passes_required_gate(result) else Status.FAILED
     return Status.PASSED if result.passed else Status.FAILED

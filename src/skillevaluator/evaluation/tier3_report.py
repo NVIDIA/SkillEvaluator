@@ -1750,16 +1750,18 @@ def _judge_aware_lift(
                 **rebuilt.get("judge_mixed_cases", {}),
                 **{metric: mixed[metric] for metric in unsupported},
             }
-        elif not rebuilt.get("judge_mixed_cases") and any(
+        if any(
             _condition_has_mixed_metric_contracts(info, flag=flag, rewards=rewards)
             for flag, rewards in (
                 ("mixed_metric_contracts_with_skill", "rewards"),
                 ("mixed_metric_contracts_without_skill", "rewards_baseline"),
             )
         ):
-            logical_overall = _mixed_logical_overall_lift(conditions)
-            if logical_overall is not None:
-                rebuilt["overall"] = logical_overall
+            rebuilt.pop("overall", None)
+            if not rebuilt.get("judge_mixed_cases"):
+                logical_overall = _mixed_logical_overall_lift(conditions)
+                if logical_overall is not None:
+                    rebuilt["overall"] = logical_overall
         return rebuilt
     rebuilt_mixed = rebuilt.get("judge_mixed_cases", {})
     unsupported_exclusions = {metric for metric, count in mixed.items() if rebuilt_mixed.get(metric, 0) < count}

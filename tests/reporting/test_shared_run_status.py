@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import json
+import re
 
 from skillevaluator.models.result import Finding, Severity, ValidationResult
 from skillevaluator.reporting.run_status import Status, resolve_run_status
@@ -69,7 +70,8 @@ def test_report_surfaces_share_failure_precedence():
     data = json.loads(JSONReporter().render_all([result]))
     assert data["overall_status"] == "failed"
     assert data["results"][0]["status"] == "failed"
-    assert "[FAIL]" in CLIReporter().render_all([result])
+    terminal = re.sub(r"\x1b\[[0-9;]*m", "", CLIReporter().render_all([result]))
+    assert "[FAIL]" in terminal
     assert "**Status:** ❌ FAILED" in MarkdownReporter().render_all([result])
     assert '"status": "failed"' in HTMLReporter().render_all([result]) or "FAILED" in HTMLReporter().render_all(
         [result]
@@ -103,6 +105,49 @@ def test_missing_scanner_process_error_alone_remains_incomplete():
     result.add_error("The scanner produced no trustworthy report")
     result.mark_scan_incomplete("scanner")
     assert resolve_run_status([result]).headline == Status.INCOMPLETE
+
+
+def test_resolved_results_are_classified_once(monkeypatch):
+    from skillevaluator.reporting import run_status
+
+    classified = []
+    classify = run_status.result_status
+
+    def track(result):
+        classified.append(result)
+        return classify(result)
+
+    monkeypatch.setattr(run_status, "result_status", track)
+    result = ValidationResult(validator_name="Static")
+    status = resolve_run_status([result])
+    assert status.of(result) == Status.PASSED
+    assert status.of(result) == Status.PASSED
+    assert classified == [result]
+
+
+def test_unknown_results_are_classified_from_their_current_state():
+    status = resolve_run_status([])
+    result = ValidationResult(validator_name="Unknown")
+    assert status.of(result) == Status.PASSED
+    result.add_error("Failed after the run status was resolved")
+    assert status.of(result) == Status.FAILED
+
+
+def test_incomplete_results_scan_blocking_findings_once(monkeypatch):
+    from skillevaluator.reporting import run_status
+
+    scanned = []
+    blocking_finding = run_status._blocking_finding
+
+    def track(result):
+        scanned.append(result)
+        return blocking_finding(result)
+
+    monkeypatch.setattr(run_status, "_blocking_finding", track)
+    result = ValidationResult(validator_name="Scanner")
+    result.mark_scan_incomplete("scanner")
+    assert run_status.result_status(result) == Status.INCOMPLETE
+    assert scanned == [result]
 
 
 def test_gate_status_does_not_repeat_publication_payload_analysis(monkeypatch):

@@ -200,6 +200,27 @@ def test_shared_metric_pass_comparison_excludes_only_mismatched_judge_metrics():
     assert comparison["excluded_metrics"] == ["accuracy"]
 
 
+def test_pass_summary_scores_each_logical_attempt_once_without_changing_results():
+    from skillevaluator.tier3.harbor.collector import _pass_summary
+
+    rows = [
+        {**reward("a", accuracy=0.0), "_trial_name": "a__attempt2", "_attempt_ordinal": 2},
+        {**reward("a"), "_trial_name": "a__attempt1", "_attempt_ordinal": 1},
+        reward("b", accuracy=None),
+    ]
+    calls = []
+
+    def score(row):
+        calls.append(row)
+        return metrics.overall_score(row)
+
+    options = {"n_attempts": 2, "pass_threshold": 0.9, "expected_cases": 2, "expected_case_ids": ["a", "b"]}
+    expected = _pass_summary(rows, **options)
+    actual = _pass_summary(rows, scorer=score, **options)
+    assert actual == expected
+    assert calls == rows
+
+
 def test_template_required_judge_accepts_only_verifier_authorized_na():
     from skillevaluator.tier3.harbor.templates import eval as verifier
 

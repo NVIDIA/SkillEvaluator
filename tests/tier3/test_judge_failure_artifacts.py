@@ -699,10 +699,10 @@ def test_verifier_main_keeps_accuracy_fail_closed_after_retry_exhaustion(
     assert "accuracy" not in numeric
 
 
-def test_verifier_main_keeps_documented_neutral_judge_skips_scoreable(
+def test_verifier_main_keeps_absent_references_scoreless_in_numeric_rewards(
     tmp_path: Path,
 ) -> None:
-    """Keep documented neutral judge skips scoreable with default passing scores."""
+    """Keep N/A facts in the sidecar and require them when interpreting numeric rewards."""
     verifier = _load_verifier(tmp_path)
     entry = json.loads(verifier.ENTRY_PATH.read_text(encoding="utf-8"))
     entry["ground_truth"] = ""
@@ -714,12 +714,12 @@ def test_verifier_main_keeps_documented_neutral_judge_skips_scoreable(
     rich = json.loads(verifier.SKILL_EVALUATOR_REWARD_JSON.read_text(encoding="utf-8"))
     numeric = json.loads(verifier.REWARD_JSON.read_text(encoding="utf-8"))
     assert "evaluation_status" not in rich
-    assert {metric: numeric[metric] for metric in ("accuracy", "goal_accuracy", "behavior_check")} == {
-        "accuracy": 1.0,
-        "goal_accuracy": 1.0,
-        "behavior_check": 1.0,
-    }
-    assert overall_score(numeric) == 1.0
+    for metric in ("accuracy", "goal_accuracy", "behavior_check"):
+        assert metric not in numeric
+        assert rich[metric] is None
+        assert rich["details"][metric]["status"] == "not_applicable"
+    assert overall_score(rich) == 1.0
+    assert overall_score(numeric) is None
 
 
 @pytest.mark.parametrize("failure_kind", ["missing-score", "exception"])

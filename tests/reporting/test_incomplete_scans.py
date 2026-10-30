@@ -122,3 +122,12 @@ class TestIncompleteScanReporting:
         output = _plain(CLIReporter().render_all([result]))
         assert "did not complete" not in output
         assert "INCOMPLETE" not in output
+
+
+def test_status_handles_sanitized_finding_without_location():
+    from skillevaluator.models import Finding, Severity
+    from skillevaluator.reporting.run_status import result_status
+
+    result = ValidationResult(validator_name="Security Scan")
+    result.add_finding(Finding(category="X", severity=Severity.LOW, check_name="c", message="m", file_path=None))
+    assert result_status(result).value == "passed"

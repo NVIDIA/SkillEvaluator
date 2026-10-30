@@ -101,10 +101,6 @@ def build_clusters(
         raise ValueError("Content scalar comparison work exceeds the configured limit")
     units = [normalize_embedding_vector(chunk.embedding, dimension, allow_zero=True) for chunk in chunks]
 
-    def siblings(i: int, j: int) -> bool:
-        group = chunks[i].split_group
-        return group is not None and group == chunks[j].split_group
-
     uf = UnionFind(n)
     pair_scores: dict[tuple[int, int], float] = {}
 

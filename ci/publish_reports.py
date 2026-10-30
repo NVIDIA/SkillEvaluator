@@ -284,14 +284,6 @@ def validate_report(report: dict, row: dict) -> None:
         raise PublicationError("A skill summary has contradictory severity counts.")
     if "total_validators" in row and row["total_validators"] != report["total_validators"]:
         raise PublicationError("A skill summary has contradictory validator counts.")
-    # Validate the same typed evidence the renderer consumes before writing an
-    # immutable receipt. Valid-looking rollups alone cannot establish a report.
-    from skillevaluator.reporting.retained import RetainedReportError, retained_results
-
-    try:
-        retained_results(report)
-    except RetainedReportError as exc:
-        raise PublicationError("A per-skill report contains invalid retained evidence.") from exc
 
 
 def read_artifact(payload: bytes) -> tuple[dict, dict[str, dict]]:

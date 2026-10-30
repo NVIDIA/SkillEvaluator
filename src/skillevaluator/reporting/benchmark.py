@@ -31,7 +31,6 @@ from skillevaluator.reporting.base import (
     agent_eval_publication_evaluated_at,
     agent_eval_publication_evidence_complete,
     agent_eval_publication_run_id,
-    assess_publication,
     assess_tier3_evidence,
     get_skip_reason,
     is_advisory_agent_eval_skip,
@@ -49,7 +48,7 @@ from skillevaluator.reporting.base import (
     tier1_unscanned_publication_paths,
     unrecognized_tier2_results,
 )
-from skillevaluator.reporting.tier3_scope import completed_agent_result, validate_report_scope
+from skillevaluator.reporting.run_status import resolve_run_status
 from skillevaluator.source_identity import evaluated_source_revision, recorded_evaluated_source
 from skillevaluator.tier3_environments import HARBOR_ENV_MODES
 
@@ -808,7 +807,7 @@ def _overall_status(
     # benchmark's uppercase vocabulary while every reporter shares one
     # publication assessment implementation.
     del benchmark_policy
-    return assess_publication(results, ae, expected_skill_name=expected_skill_name).status.upper()
+    return resolve_run_status(results, agent_eval=ae, expected_skill_name=expected_skill_name).publication.verdict
 
 
 def _is_blocking_publication_skip(

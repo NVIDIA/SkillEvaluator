@@ -19,6 +19,7 @@ from urllib.parse import quote
 
 from skillevaluator import __version__
 from skillevaluator.reporting.base import ReporterBase
+from skillevaluator.reporting.run_status import resolve_run_status
 
 if TYPE_CHECKING:
     from skillevaluator.models import Finding, ValidationResult
@@ -298,6 +299,7 @@ class SARIFReporter(ReporterBase):
                 }
             },
             "results": sarif_results,
+            "properties": {"status": resolve_run_status(results).headline.value},
         }
         if self.include_timestamp or _collect_incomplete_scans(results):
             run["invocations"] = [_build_invocation(results)]

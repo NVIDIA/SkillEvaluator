@@ -87,6 +87,76 @@ def test_incomplete_remains_incomplete(payload):
     assert "incomplete" in render_retained_report(payload, skill_name="skill").lower()
 
 
+@pytest.mark.parametrize("same_validator", [False, True])
+def test_confirmed_failure_precedes_incompleteness_in_retained_roundtrip(payload, same_validator):
+    rows = retained_results(payload)
+    result = rows[0] if same_validator else rows[1]
+    result.metadata["incomplete_scans"] = ["semgrep"]
+    result.add_error("Scanner execution did not complete")
+    emitted = json.loads(JSONReporter(include_timestamp=False).render_all(rows))
+    assert emitted["overall_status"] == "failed"
+    assert emitted["incomplete_scans"] == ["semgrep"]
+    reconstructed = retained_results(emitted)
+    assert json.loads(JSONReporter(include_timestamp=False).render_all(reconstructed))["results"] == emitted["results"]
+
+
+@pytest.mark.parametrize("status", ["passed", "incomplete"])
+def test_retained_evidence_rejects_status_that_hides_confirmed_failure(payload, status):
+    payload["results"][0]["incomplete_scans"] = ["semgrep"]
+    payload["results"][0]["status"] = status
+    with pytest.raises(RetainedReportError, match="Result status contradicts evidence"):
+        retained_results(payload)
+
+
+def test_confirmed_legacy_failure_survives_retained_roundtrip():
+    result = ValidationResult(validator_name="Code Integrity & Hygiene")
+    result.add_error("Banned dependency found in one audited member")
+    result.metadata["confirmed_failure"] = True
+    result.mark_scan_incomplete("another-member")
+    emitted = json.loads(JSONReporter(include_timestamp=False).render_all([result]))
+    assert emitted["results"][0]["confirmed_failure"] is True
+    reconstructed = retained_results(emitted)
+    assert reconstructed[0].metadata["confirmed_failure"] is True
+    assert json.loads(JSONReporter(include_timestamp=False).render_all(reconstructed))["overall_status"] == "failed"
+
+
+@pytest.mark.parametrize("value", [1, "true", [], None])
+def test_retained_confirmed_failure_marker_must_be_boolean(payload, value):
+    payload["results"][0]["confirmed_failure"] = value
+    with pytest.raises(RetainedReportError, match="confirmed_failure must be boolean"):
+        retained_results(payload)
+
+
+def test_retained_confirmed_failure_marker_requires_failing_diagnostics():
+    result = ValidationResult(validator_name="Security", passed=False)
+    emitted = json.loads(JSONReporter(include_timestamp=False).render_all([result]))
+    emitted["results"][0]["confirmed_failure"] = True
+    with pytest.raises(RetainedReportError, match="Confirmed failure requires failing diagnostics"):
+        retained_results(emitted)
+
+
+def test_retained_finding_failure_cannot_claim_a_passing_result(payload):
+    payload["results"][0]["passed"] = True
+    payload["overall_passed"] = True
+    payload["overall_status"] = "passed"
+    with pytest.raises(RetainedReportError, match="Result verdict contradicts evidence"):
+        retained_results(payload)
+
+
+def test_advisory_skip_keeps_required_gate_but_is_outside_retained_tier1_contract():
+    from skillevaluator.evaluation.tier3_report import advisory_skip_result
+    from skillevaluator.reporting.base import is_cleanly_skipped, passes_required_gate
+
+    result = advisory_skip_result("Live evaluation runtime unavailable", skill_name="skill")
+    assert result.passed is False
+    assert is_cleanly_skipped(result) and passes_required_gate(result)
+    emitted = json.loads(JSONReporter(include_timestamp=False).render_all([result]))
+    assert emitted["overall_passed"] is True
+    assert emitted["results"][0]["status"] == "skipped"
+    with pytest.raises(RetainedReportError, match="Only retained Tier 1 reports are supported"):
+        retained_results(emitted)
+
+
 @pytest.mark.parametrize(
     "mutate",
     [

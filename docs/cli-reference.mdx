@@ -253,7 +253,7 @@ Embedding + LLM dedup; on by default, skips gracefully without a provider key.
 ### Tier 3 · Live Agent Evaluation
 
 <Note>
-The following flags are forwarded to the live-eval engine when Tier 3 is enabled, which is the default for skills. They do not re-enable a stage excluded by `--tiers` or `--no-tier3`. The Dockerfile-, workspace-, resource-, and progress-tuning flags (`--custom-dockerfile-mode`, `--skill-workspace-mode`, the `--override-*` flags, and `--progress`) are not forwardable — use the standalone [tier3 evaluate](#tier3-evaluate) command for those.
+The following flags are forwarded to the live-eval engine when Tier 3 is enabled, which is the default for skills. They do not re-enable a stage excluded by `--tiers` or `--no-tier3`. The Dockerfile-, workspace-, resource-, and progress-tuning flags (`--custom-dockerfile-mode`, `--skill-workspace-mode`, the `--override-*` flags, `--progress`, and `--progress-interval`) are not forwardable — use the standalone [tier3 evaluate](#tier3-evaluate) command for those.
 </Note>
 
 | Flag | Default | Effect |
@@ -455,6 +455,7 @@ Use `skillevaluator tier3 PATH` for the complete workflow with automatic missing
 | `--evaluated-source-revision TEXT` | unset | Immutable revision of the evaluated source: a full Git object id, or a `sha256`/`sha384`/`sha512` digest. A short prefix is refused. |
 | `--evaluator-container-revision TEXT` | unset | Digest-pinned evaluator image reference recorded beside the evaluated source. |
 | `--progress [auto\|rich\|plain\|off]` | `auto` | Progress display for the run: `rich` live view, `plain` line output, or `off`. |
+| `--progress-interval SECONDS` | mode default | Seconds between progress heartbeats, from `0.05` to `86400`: how often the `rich` view refreshes elapsed times and how often `plain` output repeats a `still running` line for active stages. Defaults to 1 second for `rich` and 60 seconds for `plain`, including `auto` with redirected or CI output. |
 
 Without a `--model`/`--agent-model` override, agent execution uses
 `gpt-6.1-sol` for OpenAI (OpenCode: `openai/gpt-5.6-sol` unless

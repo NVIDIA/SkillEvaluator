@@ -620,6 +620,65 @@ def test_live_eval_progress_is_presentation_only(monkeypatch: pytest.MonkeyPatch
     assert "progress" not in captured["options"].engine_kwargs()
 
 
+@pytest.mark.parametrize("command", [("evaluate",), ("tier3", "evaluate")])
+@pytest.mark.parametrize(("interval_args", "expected"), [((), 60.0), (("--progress-interval", "12.5"), 12.5)])
+def test_live_eval_progress_interval_configures_reporter(
+    monkeypatch: pytest.MonkeyPatch,
+    command: tuple[str, ...],
+    interval_args: tuple[str, ...],
+    expected: float,
+) -> None:
+    from skillevaluator.evaluation import EvaluationService
+    from skillevaluator.tier3.harbor.progress import PlainProgressReporter
+
+    captured: dict[str, object] = {}
+
+    def _fake_evaluate(self, options, *, progress_reporter=None):
+        captured["options"] = options
+        captured["reporter"] = progress_reporter
+        return {"execution_status": "succeeded", "execution_errors": []}
+
+    monkeypatch.setattr(EvaluationService, "evaluate", _fake_evaluate, raising=True)
+    result = CliRunner().invoke(
+        cli,
+        [
+            *command,
+            str(Path(__file__).parent / "fixtures" / "skills" / "simple"),
+            "--progress",
+            "plain",
+            *interval_args,
+        ],
+    )
+
+    assert result.exit_code == 0, result.output
+    assert isinstance(captured["reporter"], PlainProgressReporter)
+    assert captured["reporter"]._refresh_interval == expected
+    assert "progress_interval" not in captured["options"].engine_kwargs()
+
+
+@pytest.mark.parametrize("value", ["nan", "inf", "0.01", "86401", "-1"])
+def test_live_eval_rejects_invalid_progress_interval(monkeypatch: pytest.MonkeyPatch, value: str) -> None:
+    from skillevaluator.evaluation import EvaluationService
+
+    def _unexpected_evaluate(self, options, *, progress_reporter=None):
+        raise AssertionError("evaluation must not start with an invalid progress interval")
+
+    monkeypatch.setattr(EvaluationService, "evaluate", _unexpected_evaluate, raising=True)
+    result = CliRunner().invoke(
+        cli,
+        [
+            "evaluate",
+            str(Path(__file__).parent / "fixtures" / "skills" / "simple"),
+            "--progress-interval",
+            value,
+        ],
+    )
+
+    assert result.exit_code == 2, result.output
+    assert "Invalid value for '--progress-interval'" in result.output
+    assert "must be finite and within [0.05, 86400] seconds" in result.output
+
+
 _EVALUATED_REPOSITORY = "NVIDIA/NVFlare"
 _EVALUATED_COMMIT = "2263a2ebdab903e87f7e7c0a001d22c3a926a9cf"
 _EVALUATOR_CONTAINER = "ghcr.io/nvidia/skillevaluator@sha256:" + "0117bc2e" * 8

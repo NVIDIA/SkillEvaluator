@@ -310,6 +310,13 @@ All notable changes to SkillEvaluator are documented in this file.
   `quality-check` before any report was written. The schema check reports the
   malformed `metadata`, and the quality score counts `metadata.author` and
   `metadata.tags` as missing, as it already did for other non-mapping values.
+- Tier 3 plain progress output, which `--progress auto` selects for CI and
+  redirected logs, now repeats its `still running` heartbeat every 60 seconds
+  instead of every second, so long runs no longer add thousands of identical
+  lines per hour. The interactive Rich view still refreshes every second. A
+  new `--progress-interval SECONDS` option on `tier3 evaluate` and `tier3 PATH`
+  sets the interval explicitly for either view (0.05 to 86400 seconds;
+  non-finite values are rejected).
 
 ## 0.6.0 - 2026-10-20
 

@@ -123,6 +123,19 @@ def _validate_similarity_threshold(_ctx: click.Context, _param: click.Parameter,
     return value
 
 
+def _validate_progress_interval(_ctx: click.Context, _param: click.Parameter, value: float | None) -> float | None:
+    if value is None:
+        return None
+    from skillevaluator.tier3.harbor.progress import MAX_REFRESH_INTERVAL_SECONDS, MIN_REFRESH_INTERVAL_SECONDS
+
+    # NaN passes every range comparison, so check finiteness explicitly.
+    if not math.isfinite(value) or not MIN_REFRESH_INTERVAL_SECONDS <= value <= MAX_REFRESH_INTERVAL_SECONDS:
+        raise click.BadParameter(
+            f"must be finite and within [{MIN_REFRESH_INTERVAL_SECONDS:g}, {MAX_REFRESH_INTERVAL_SECONDS:g}] seconds"
+        )
+    return value
+
+
 # Heading + intro for the grouped Tier 3 options in ``validate --help``.
 _RUN_GROUP = "Run & Reports"
 _RUN_GROUP_DESC = "Applies to the whole run: target typing, policy profile, reports, tier selection."
@@ -2866,6 +2879,14 @@ def _tier2_workflow(
     help="Tier 3 progress presentation (auto uses Rich on a TTY and plain lines otherwise).",
 )
 @click.option(
+    "--progress-interval",
+    type=float,
+    default=None,
+    metavar="SECONDS",
+    callback=_validate_progress_interval,
+    help="Seconds between Tier 3 progress heartbeats (defaults to 1 for Rich and 60 for plain/CI output).",
+)
+@click.option(
     "--verbose",
     is_flag=True,
     help="Also print per-evaluator and per-dimension tables and the metric findings report.",
@@ -2900,6 +2921,7 @@ def evaluate(
     evaluated_source_revision: str | None,
     evaluator_container_revision: str | None,
     progress: str,
+    progress_interval: float | None,
     verbose: bool,
 ) -> None:
     """Run Tier 3 live agent evaluation."""
@@ -2989,7 +3011,11 @@ def evaluate(
                         padding=(0, 1),
                     )
                 )
-        progress_reporter = create_progress_reporter(progress, stream=click.get_text_stream("stderr"))
+        progress_reporter = create_progress_reporter(
+            progress,
+            stream=click.get_text_stream("stderr"),
+            refresh_interval=progress_interval,
+        )
         engine_result = service.evaluate(options, progress_reporter=progress_reporter)
         failure = service.failure_reason(engine_result)
         display_result = engine_result

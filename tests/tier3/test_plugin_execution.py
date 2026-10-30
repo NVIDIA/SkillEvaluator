@@ -5,6 +5,7 @@
 
 from __future__ import annotations
 
+import json
 from pathlib import Path
 
 import pytest
@@ -191,5 +192,48 @@ def test_native_evidence_is_read_before_cleanup_and_never_inferred_from_staging(
     assert outcome.publication_error is None, outcome.publication_error
     evidence = outcome.provenance["native_evidence"]["claude-code"]
     assert evidence["trials"] == 1
-    assert "loaded" not in str(evidence.get("loaded", []))
+    assert evidence["loaded"] == []
     assert not jobs.exists() and list(work.iterdir()) == []
+
+
+def _staged_claude_hooks(tmp_path: Path):
+    from skillevaluator.tier3 import plugin_native
+
+    package = _prepared(tmp_path / "plugin")
+    decisions = plugin_native.resolve_plugin_load("native", ["claude-code"], env_mode="docker")
+    hooks = px.NativeRuntimeHooks(package.native_source, decisions)
+    task = tmp_path / "task"
+    (task / "environment").mkdir(parents=True)
+    (task / "environment" / "Dockerfile").write_text("FROM x\n", encoding="utf-8")
+    hooks.stage_with_arm("claude-code", [task])
+    plan = hooks.stagings["claude-code"].bundle.census_plan()
+    return hooks, plan
+
+
+def _trial(tmp_path: Path, plan, *, init: dict | None):
+    from skillevaluator.tier3 import plugin_native
+
+    logs = tmp_path / "jobs" / "w-claude-code-with" / "trial-1" / "agent"
+    logs.mkdir(parents=True)
+    census = {"agent": "claude-code", "mode": "native", "listed": plan["declared"], "loaded": [], "not_loaded": []}
+    (logs / plugin_native.LOAD_CENSUS_FILENAME).write_text(json.dumps(census), encoding="utf-8")
+    if init is not None:
+        (logs / "claude-code.txt").write_text(json.dumps(init) + "\n", encoding="utf-8")
+
+
+def test_claude_init_event_confirms_listed_plugin_skills(tmp_path: Path) -> None:
+    hooks, plan = _staged_claude_hooks(tmp_path)
+    plugin = plan["harness"]["plugin"]
+    skills = [f"{plugin}:{d['name']}" for d in plan["declared"] if d["type"] == "skill"]
+    assert skills
+    init = {"type": "system", "subtype": "init", "plugins": [{"name": plugin}], "skills": skills}
+    _trial(tmp_path, plan, init=init)
+    evidence = px.collect_native_evidence(hooks, tmp_path / "jobs", "w")["claude-code"]
+    assert {f"{plugin}:{e['name']}" for e in evidence["loaded"] if e["type"] == "skill"} == set(skills)
+
+
+def test_sandbox_census_alone_never_reports_loaded(tmp_path: Path) -> None:
+    hooks, plan = _staged_claude_hooks(tmp_path)
+    _trial(tmp_path, plan, init=None)
+    evidence = px.collect_native_evidence(hooks, tmp_path / "jobs", "w")["claude-code"]
+    assert evidence["loaded"] == [] and evidence["trials"] == 1

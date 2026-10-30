@@ -269,6 +269,12 @@ All notable changes to SkillEvaluator are documented in this file.
   direct-target behavior, plugin discovery errors produce findings, and reports
   and external Tier 3 results preserve catalog-relative paths for skills with
   the same basename.
+- Tier 3 runs now write a Tier 3-scoped `tier3-benchmark.md` alongside HTML,
+  named so publication tooling does not treat it as a `BENCHMARK.md` card. It
+  states that Tiers 1 and 2 are not covered by the report, separates the Tier 3
+  result from an unassessed publication decision, and displays a completed
+  agent's score and comparable lift when another agent fails. Failure warnings and the full publication checks remain unchanged.
+
 - Changing finding severities through a policy no longer clears an independent
   quality-score threshold failure. A score below `--min-score` still fails,
   and its reason appears in the terminal, HTML, benchmark, and JSON reports.

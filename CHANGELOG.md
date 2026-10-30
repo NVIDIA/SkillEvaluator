@@ -6,6 +6,14 @@ All notable changes to SkillEvaluator are documented in this file.
 
 ### Added
 
+- Opt-in `SKILL_EVAL_JUDGE_CHARACTER_FACTS=1` adds bounded, escaped Unicode
+  character facts to Tier 3 accuracy, goal-accuracy, and behavior-check prompts
+  without normalizing the evidence. The operator setting is verifier-only;
+  enabling it selects the prompt-based goal judge instead of the optional RAGAS
+  route. Metadata uses the same text rendering as the judge prompts, including
+  numeric and nullable fields. Existing prompts remain unchanged when the
+  setting is unset.
+
 - `tier3 evaluate` now leads with a case-first summary: a verdict line and one
   row per `evals.json` case. With one agent, each row shows, for with and
   without the skill, the pass count, per-attempt marks (`✓` pass, `✗` fail,

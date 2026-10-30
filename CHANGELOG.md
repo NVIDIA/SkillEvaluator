@@ -38,7 +38,18 @@ All notable changes to SkillEvaluator are documented in this file.
   pinned runtime/workflow consumer templates, affected-skill PR selection,
   optional hosted reports and updated PR feedback. The new guide separates
   basic scanning from publisher setup; public image publication and generated
-  release files require a reviewed manual release before consumer use.
+  release files require a reviewed manual release before consumer use. The
+  Tier 1 image is a multi-stage build with precompiled bytecode that ships only
+  the locked Semgrep, SkillSpector and SkillEvaluator environments, Gitleaks,
+  `ci/` and the license files. A release builds it without cached layers and
+  pushes the image it smoke-tested.
+- The reusable Tier 1 workflow scans up to four skills at once. The
+  `scan-workers` input (1 to 16) changes this, and `1` scans one skill at a
+  time. Each worker gets its own private home and temporary directory. Logs,
+  annotations and report rows keep skill order, and skills not started when the
+  scan time budget runs out are still reported as not evaluated. A timeout,
+  Ctrl-C or an error while saving results ends running scans together with
+  the scanner tools they started.
 - `--quality-config PATH` on `validate`, `quality-check`, and `tier1` loads the
   deterministic quality check's expected Markdown headings from a YAML file
   instead of the built-in list. Each `expected_headers` entry sets a `heading`
@@ -54,6 +65,9 @@ All notable changes to SkillEvaluator are documented in this file.
   `quality_config` (`packaged` or `custom`, the custom file's name, a
   `sha256:` digest of the normalized rules, and the `--min-score` pass
   threshold, which is kept out of the digest).
+- CI-native per-skill HTML pages link Download JSON to the retained
+  `skillevaluator-tier1.json` and do not embed a second copy of the report
+  JSON. Standalone CLI HTML reports embed it for Export JSON.
 
 ### Changed
 
@@ -62,6 +76,26 @@ All notable changes to SkillEvaluator are documented in this file.
   applicable are excluded from passed and executed counts. Publication status
   remains visible on mobile and in print, and blocking/advisory findings retain
   their separate counts.
+- The HTML report opens on the answer. The skill name is the page title, and
+  the header shows one verdict, the date and version, and Download JSON. A
+  summary gives the verdict with a one-line reason, four numbers with one
+  definition of a finding, and a Fix first list of up to five places, most
+  severe first and linked to their evidence. A scanner that did not finish is
+  listed first with its own reason, and two scanners reporting one location
+  take one entry. Scanner diagnostics always show and print.
+  Failed checks are listed first, raw check IDs get plain names, and
+  publication eligibility sits next to the verdict.
+- The HTML report, the CI index and the Pages history use one verdict
+  vocabulary: Passed, Changes required, Incomplete, Skipped and Neutral. When
+  no check ran, the header and the summary both say Skipped. A failing tier
+  whose gate does not block shows Failed (advisory). The CI index names the
+  same first fix as each skill's report and links to it.
+- The SkillEvaluator logo replaces the letter tile and the green square on
+  every report page, the CI index and the Pages history. Colors use one
+  palette built on the logo greens, with WCAG AA text contrast in light and
+  dark themes. The report follows the system theme until the reader picks
+  one, and prints dark text on white paper, Tier 3 charts included. No text is
+  smaller than 11 px, and short table cells no longer break mid-word.
 - Dependency audits inspect pinned package versions without installing packages
   or executing build scripts. Unpinned, URL and other unresolved requirements
   report incomplete coverage instead of executing package resolution.
@@ -74,6 +108,22 @@ All notable changes to SkillEvaluator are documented in this file.
   with eligible free prototyping access. Installation adds extras as needed,
   and the guides separate quality results from full scanner and live-agent
   evidence.
+- The optional GitHub report publisher downloads only a small
+  `skill-evaluator-tier1-evidence-attempt-N` artifact holding `summary.json`
+  and each skill's JSON. At 99 skills the download drops from 4.2 MB to
+  0.46 MB, and HTML, SARIF and logs no longer count toward its 64 MiB limit.
+  A scan from an evaluator revision that does not upload this artifact cannot
+  be published. Re-running it reuses that evaluator, so update the scan caller
+  and the publisher allowlists, then start a new scan. When an automatic run
+  commits nothing new, the publisher skips its Pages deploy and PR comment and
+  leaves both to the run that pushed that content. The publisher also installs
+  uv into a private environment instead of the runner's system Python, checks
+  out only the tool files each job needs and replaces site files atomically.
+  It and the PR comment helper share one GitHub client, which rejects sibling
+  repository endpoints and NaN or Infinity in JSON for both.
+- HTML reports rendered in one process share one compiled template
+  environment, so each template compiles once per process instead of once per
+  report.
 
 ### Documentation
 

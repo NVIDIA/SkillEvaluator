@@ -371,7 +371,7 @@ def mcp_finding(
         category=CATEGORY,
         severity=severity,
         check_name=check_name,
-        message=(f"mcpServers['{_shown_name(name)}']: {message}" if name else message),
+        message=(f"{mcp_message_prefix(name)}{message}" if name else message),
         file_path=file_path,
         suggestion=suggestion,
         # Machine-readable server attribution for the plugin component inventory.
@@ -382,6 +382,14 @@ def mcp_finding(
 def _shown_name(name: Any) -> str:
     """A server name (or other key) for messages: credentials redacted, at most 64 characters."""
     return _shown(name if isinstance(name, str) else repr(name), limit=64)
+
+
+def mcp_message_prefix(name: Any) -> str:
+    """The ``mcpServers['<name>']: `` prefix of a named server's finding messages (name redacted and bounded).
+
+    Callers that reword these findings (LSP servers) strip this exact prefix.
+    """
+    return f"mcpServers['{_shown_name(name)}']: "
 
 
 @dataclass

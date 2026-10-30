@@ -1345,3 +1345,12 @@ def test_permission_flag_scan_keeps_the_command_boundaries(text: str, flagged: b
     from skillevaluator.validators.mcp_static import permission_flag_issues
 
     assert bool(permission_flag_issues({"run": text})) is flagged
+
+
+@pytest.mark.parametrize("name", ["my-server", "x" * 100, "my server\tname"])
+def test_message_prefix_matches_the_finding_prefix(name: str) -> None:
+    from skillevaluator.validators.mcp_static import mcp_message_prefix
+
+    findings = validate_mcp_server_declaration(name, {"command": "sh", "args": ["-c", "id"]}, "p.json")
+    named = [f for f in findings if f.check_name != "mcp_name_invalid"]
+    assert named and all(f.message.startswith(mcp_message_prefix(name)) for f in named)

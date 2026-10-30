@@ -202,10 +202,12 @@ All notable changes to SkillEvaluator are documented in this file.
   existing `evals/` directory. Staging still changes modes without following
   links where the platform supports it; elsewhere it re-checks that the entry
   is not a link first and refuses it if it is.
+
 - Local-mode sandbox errors now include Bubblewrap's own failure line when its
   startup probe fails, note that `pivot_root: Operation not permitted` can mean
   an enclosing container's seccomp profile blocks Bubblewrap, and suggest
   `SKILLEVALUATOR_LOCAL_SANDBOX=prefer` alongside `off`.
+
 - PII email scans recognize all RFC 2606 reserved domains, including their
   subdomains, mixed-case forms, trailing dots, and prose ellipses. A local-part
   boundary prevents quadratic rescanning of long excluded addresses. Ordinary

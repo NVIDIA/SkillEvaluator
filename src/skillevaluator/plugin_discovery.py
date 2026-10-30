@@ -64,6 +64,7 @@ from skillevaluator.plugin_paths import (
     _unscanned_packaged_finding,
     _unscanned_path_finding,
     normalize_declared_path,
+    reported_ref,
 )
 from skillevaluator.plugin_refs import normalize_ref
 from skillevaluator.utils.secure_fs import SecurePathError
@@ -252,8 +253,8 @@ class _MemberCollector:
         return component
 
     def _broken(self, component_type: str, declared: DeclaredPath | None, raw: Any, problem: str) -> None:
-        path = declared.rel.as_posix() if declared is not None and declared.rel is not None else None
-        name = raw if isinstance(raw, str) else repr(raw)
+        path = reported_ref(declared.rel.as_posix()) if declared is not None and declared.rel is not None else None
+        name = reported_ref(raw if isinstance(raw, str) else repr(raw))
         self._add(PluginMember(component_type, name, "declared", path, _TYPE_SUPPORT[component_type], problem=problem))
 
     def _declared_field(self, field_name: str) -> Any:
@@ -329,12 +330,12 @@ class _MemberCollector:
                     _plugin_finding(
                         Severity.MEDIUM,
                         "plugin_component_path_invalid",
-                        f"'{field_name}' entry {report_text(repr(raw), 80)} is not a path; Codex ignores the value, "
+                        f"'{field_name}' entry {report_text(reported_ref(repr(raw)), 80)} is not a path; Codex ignores the value, "
                         "loads the default location, and still installs the plugin",
                         self.reader.display(self.manifest_rel),
                         f"Write '{field_name}' as a './'-relative path (or a list of them), or remove it to use the "
                         "default location.",
-                        metadata={"plugin_component_ref": repr(raw)},
+                        metadata={"plugin_component_ref": reported_ref(repr(raw))},
                     )
                 )
                 return None, "dropped"
@@ -377,12 +378,12 @@ class _MemberCollector:
                 _plugin_finding(
                     Severity.HIGH,
                     "plugin_component_path_invalid",
-                    f"'{field_name}' entry {raw!r} must name a {wrong_kind} file; "
+                    f"'{field_name}' entry {reported_ref(raw)!r} must name a {wrong_kind} file; "
                     f"{profile.label.removesuffix(' plugin')} rejects the whole manifest otherwise and does not "
                     "load the plugin",
                     self.reader.display(self.manifest_rel),
                     f"List each {wrong_kind} file by its own './'-relative path, as the {profile.reference} requires.",
-                    metadata={"plugin_component_ref": raw},
+                    metadata={"plugin_component_ref": reported_ref(raw)},
                 )
             )
             return declared, "invalid"
@@ -983,7 +984,7 @@ class _MemberCollector:
                 _plugin_finding(
                     Severity.MEDIUM,
                     "plugin_command_folder_empty",
-                    f"commands[{command_name!r}].source {declared.raw!r} is a folder with no Markdown (.md) file "
+                    f"commands[{command_name!r}].source {reported_ref(declared.raw)!r} is a folder with no Markdown (.md) file "
                     "directly in it, so Claude Code loads no command from it",
                     self.manifest_display,
                     "Point the source at the command's .md file, or put the command files directly in the folder.",

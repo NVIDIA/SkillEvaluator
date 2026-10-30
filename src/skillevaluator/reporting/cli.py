@@ -388,10 +388,14 @@ class CLIReporter(ReporterBase):
                 ws = scores.get("with_skill")
                 bl = scores.get("baseline")
                 lift = scores.get("lift")
+                # A baseline-only run (--skip-with-skill) never ran the with-skill arm.
+                with_skipped = scores.get("with_skill_status") == "skipped"
                 if lift is None:
                     lift_text = (
                         "N/A"
                         if "not_applicable" in (scores.get("with_skill_status"), scores.get("baseline_status"))
+                        else "skipped"
+                        if with_skipped
                         else "NO SCORE"
                     )
                 else:
@@ -403,6 +407,8 @@ class CLIReporter(ReporterBase):
                     if ws is not None
                     else "N/A"
                     if scores.get("with_skill_status") == "not_applicable"
+                    else "skipped"
+                    if with_skipped
                     else "NO SCORE",
                     f"{bl:.2f}"
                     if bl is not None

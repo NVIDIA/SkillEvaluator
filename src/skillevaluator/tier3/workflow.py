@@ -118,6 +118,8 @@ def _preflight_options(skill_path: Path, params: dict[str, Any]) -> dict[str, An
         _workspace_skills,
     )
 
+    if params.get("skip_baseline") and params.get("skip_with_skill"):
+        raise ValueError("--skip-baseline and --skip-with-skill are mutually exclusive (no arm would run)")
     provider = resolve_llm_provider()
     config, config_path = load_evals_config(skill_path)
     effective = deepcopy(config)

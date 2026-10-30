@@ -370,12 +370,17 @@ def mcp_finding(
         category=CATEGORY,
         severity=severity,
         check_name=check_name,
-        message=(f"mcpServers['{name}']: {message}" if name else message),
+        message=(f"mcpServers['{_shown_name(name)}']: {message}" if name else message),
         file_path=file_path,
         suggestion=suggestion,
         # Machine-readable server attribution for the plugin component inventory.
         metadata=({"mcp_server": name} if isinstance(name, str) else {}),
     )
+
+
+def _shown_name(name: Any) -> str:
+    """A server name (or other key) for messages: credentials redacted, at most 64 characters."""
+    return _shown(name if isinstance(name, str) else repr(name), limit=64)
 
 
 @dataclass
@@ -1192,10 +1197,11 @@ def _check_transport(server: _ServerFindings, config: dict[str, Any]) -> None:
     if raw is None:
         return
     if not isinstance(raw, str) or raw.strip().lower() not in ALLOWED_MCP_TRANSPORTS:
+        shown = repr(_shown(raw)) if isinstance(raw, str) else f"of type {type(raw).__name__}"
         server.report(
             Severity.HIGH,
             "mcp_transport_invalid",
-            f"transport {raw!r} is not one of {sorted(ALLOWED_MCP_TRANSPORTS)}",
+            f"transport {shown} is not one of {sorted(ALLOWED_MCP_TRANSPORTS)}",
             f"Set transport to one of: {', '.join(sorted(ALLOWED_MCP_TRANSPORTS))}.",
         )
         return
@@ -3548,7 +3554,8 @@ def validate_mcp_server_declaration(
             mcp_finding(
                 Severity.HIGH,
                 "mcp_name_invalid",
-                f"MCP server name {name!r} must start with an alphanumeric and use only letters, digits, '.', '_', '-'",
+                f"MCP server name {_shown_name(name)!r} must start with an alphanumeric and use only letters, "
+                "digits, '.', '_', '-'",
                 file_path,
                 "Rename the MCP server to a valid identifier.",
             )

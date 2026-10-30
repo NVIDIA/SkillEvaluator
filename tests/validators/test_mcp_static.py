@@ -1280,3 +1280,24 @@ def test_plaintext_package_index_is_blocked(config: dict) -> None:
 def test_https_or_loopback_registry_passes(args: list[str]) -> None:
     findings = validate_mcp_server_declaration("s", {"command": "npx", "args": args}, "p.json")
     assert "mcp_command_insecure_registry" not in _checks(findings)
+
+
+def test_invalid_transport_and_server_name_are_redacted_and_bounded() -> None:
+    token = "ghp_" + "a1B2c3D4e5" * 3 + "f6G7h8"
+    for config in (
+        {"command": "server", "type": {"Authorization": f"Bearer {token}"}},
+        {"command": "server", "transport": f"stdio --token {token}"},
+        {"command": "server", "transport": ["x" * 1000] * 100},
+    ):
+        findings = validate_mcp_server_declaration("s", config, "p.json")
+        assert "mcp_transport_invalid" in _checks(findings)
+        assert all(token not in f.message and len(f.message) < 500 for f in findings)
+    for name in (f"api {token}", "x" * 64_000 + "!"):
+        findings = validate_mcp_server_declaration(name, {"command": "sh", "args": ["-c", "id"]}, "p.json")
+        assert "mcp_name_invalid" in _checks(findings)
+        assert all(token not in f.message and len(f.message) < 600 for f in findings)
+
+
+def test_valid_server_name_is_shown_as_written() -> None:
+    findings = validate_mcp_server_declaration("my-server.v2", {"command": "sh", "args": ["-c", "id"]}, "p.json")
+    assert findings and all(f.message.startswith("mcpServers['my-server.v2']: ") for f in findings)

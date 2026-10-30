@@ -73,3 +73,34 @@ def test_smoke_records_incomplete_skip_in_observation(tmp_path: Path) -> None:
     observed = smoke.inspect_plugin(_plugin(tmp_path / "plugin", {}))
     assert observed["portable_tier3_skipped"] is True
     assert observed["portable_tier3_incomplete_skip"] is True
+
+
+@pytest.mark.parametrize("declared_root", [".", "./"])
+@pytest.mark.parametrize("portable", [False, True])
+def test_smoke_distinguishes_inventory_only_root_from_portable_members(
+    tmp_path: Path,
+    declared_root: str,
+    portable: bool,
+) -> None:
+    root = _plugin(tmp_path / "plugin", {})
+    skill = (
+        "---\nname: root-guidance\ndescription: Offline guidance.\nmetadata:\n"
+        "  author: Example <example@example.com>\n---\n# Instructions\nRead guidance.\n"
+    )
+    (root / "SKILL.md").write_text(skill, encoding="utf-8")
+    manifest = root / "openclaw.plugin.json"
+    data = json.loads(manifest.read_text())
+    data["skills"] = [declared_root]
+    if portable:
+        member = root / "portable/alpha"
+        member.mkdir(parents=True)
+        (member / "SKILL.md").write_text(skill.replace("root-guidance", "alpha"), encoding="utf-8")
+        data["skills"].append("portable")
+    manifest.write_text(json.dumps(data), encoding="utf-8")
+    observed = smoke.inspect_plugin(root)
+    expected = ["portable/alpha"] if portable else []
+    assert observed["declared_skill_paths"] == [".", *expected]
+    assert observed["portable_tier3_skill_paths"] == expected
+    assert observed["portable_tier3_skipped"] is (not portable)
+    assert observed["portable_tier3_incomplete_skip"] is (not portable)
+    assert observed["native_runtime_executed"] is False

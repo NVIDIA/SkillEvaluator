@@ -58,6 +58,9 @@ def inspect_plugin(root: Path) -> dict[str, Any]:
     inventoried = sorted(row["path"] for row in components if row["type"] == "skill" and row["support"] == "evaluated")
     if inventoried != expected:
         raise AssertionError("Tier 1 and Tier 2 disagree about declared skill membership")
+    # A root SKILL.md remains inventoried, but copying the whole plugin as a
+    # portable member would expose runtime metadata and evaluator data.
+    portable_expected = [path for path in expected if path != "."]
     with tempfile.TemporaryDirectory(prefix="openclaw-portable-smoke-") as temp:
         temporary = Path(temp)
         dataset = temporary / "evals.json"
@@ -79,7 +82,7 @@ def inspect_plugin(root: Path) -> dict[str, Any]:
         )
         package = prepare_plugin_eval_package(root, stage_root=temporary / "stage", evals_source=dataset)
         staged = sorted(path.relative_to(root.resolve()).as_posix() for path in package.include_skills)
-        if staged != expected:
+        if staged != portable_expected:
             raise AssertionError("Tier 3 staged membership differs from the native declared skills")
         coverage = package.provenance()["component_coverage"]["components"]
         runtime = [row for row in coverage if row["type"] == "extension"]
@@ -87,12 +90,12 @@ def inspect_plugin(root: Path) -> dict[str, Any]:
             raise AssertionError("Portable staging must never claim native OpenClaw runtime execution")
         if package.skipped and not package.incomplete_skip:
             raise AssertionError("A skipped native OpenClaw evaluation must be INCOMPLETE, not an optional success")
-        if expected and package.skipped:
+        if portable_expected and package.skipped:
             raise AssertionError("A plugin with portable skills was unexpectedly skipped")
-        if not expected and not data.get("mcpServers") and not package.skipped:
+        if not portable_expected and not data.get("mcpServers") and not package.skipped:
             raise AssertionError("A runtime-only plugin must not silently pass as evaluated")
         staged_skills = {row["path"] for row in coverage if row["type"] == "skill" and row["state"] == "staged"}
-        if not set(expected).issubset(staged_skills):
+        if not set(portable_expected).issubset(staged_skills):
             raise AssertionError("Portable member coverage is missing staged skills")
         skipped = package.skipped
         incomplete_skip = package.incomplete_skip
@@ -100,6 +103,7 @@ def inspect_plugin(root: Path) -> dict[str, Any]:
         "plugin_id": profile.name,
         "manifest_type": location.manifest_type,
         "declared_skill_paths": expected,
+        "portable_tier3_skill_paths": staged,
         "tier1_schema_passed": schema.passed,
         "tier1_findings": dict(sorted(Counter(f.check_name for f in schema.findings).items())),
         "tier2_profile_members": list(profile.members),

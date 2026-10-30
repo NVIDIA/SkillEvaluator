@@ -386,6 +386,230 @@ def test_bounded_harbor_process_failure_reaps_descendants(
     assert not child_marker.exists()
 
 
+@pytest.mark.skipif(os.name != "posix", reason="requires POSIX process-group verification")
+def test_bounded_harbor_process_cancellation_reaps_descendants(tmp_path: Path) -> None:
+    child_pid_path = tmp_path / "cancelled-child-pid"
+    child_marker = tmp_path / "cancelled-child-survived"
+    child_script = (
+        "import pathlib,signal,time;"
+        "signal.signal(signal.SIGTERM, signal.SIG_IGN);"
+        "time.sleep(1);"
+        f"pathlib.Path({str(child_marker)!r}).write_text('survived')"
+    )
+    parent_script = (
+        "import pathlib,subprocess,sys,time;"
+        f"child=subprocess.Popen([{sys.executable!r},'-c',{child_script!r}]);"
+        f"pathlib.Path({str(child_pid_path)!r}).write_text(str(child.pid));"
+        "time.sleep(30)"
+    )
+    cancellation = runner._HarborRunCancellation()
+
+    def cancel_once_child_started() -> None:
+        deadline = time.monotonic() + 10
+        while not child_pid_path.exists() and time.monotonic() < deadline:
+            time.sleep(0.01)
+        cancellation.requested.set()
+
+    canceller = threading.Thread(target=cancel_once_child_started, daemon=True)
+    canceller.start()
+    with pytest.raises(runner._HarborRunCancelledError):
+        runner._run_bounded_harbor_process(
+            [sys.executable, "-c", parent_script],
+            env=dict(os.environ),
+            cwd=Path.cwd(),
+            stdin_text=None,
+            timeout_seconds=None,
+            max_output_bytes=4096,
+            diagnostic_tail_chars=128,
+            secret_values=set(),
+            cancellation=cancellation,
+        )
+    canceller.join(timeout=5)
+
+    child_pid = int(child_pid_path.read_text(encoding="ascii"))
+    deadline = time.monotonic() + 5
+    while time.monotonic() < deadline:
+        try:
+            os.kill(child_pid, 0)
+        except ProcessLookupError:
+            break
+        time.sleep(0.01)
+    else:
+        with contextlib.suppress(ProcessLookupError):
+            os.kill(child_pid, signal.SIGKILL)
+        pytest.fail("Harbor descendant survived cancellation")
+    time.sleep(1.05)
+    assert not child_marker.exists()
+
+
+def _sigterm_handling_harbor_script(ready_path: Path, *, on_sigterm: list[str]) -> str:
+    """Stand-in Harbor CLI that reports readiness and handles SIGTERM itself."""
+    handler = "".join(f"    {line}\n" for line in on_sigterm)
+    return (
+        "import pathlib,signal,sys,time\n"
+        "def stop(*_):\n"
+        f"{handler}"
+        "signal.signal(signal.SIGTERM, stop)\n"
+        f"pathlib.Path({str(ready_path)!r}).write_text('ready')\n"
+        "time.sleep(120)\n"
+    )
+
+
+def _cancel_when_ready(
+    ready_path: Path,
+    cancellation: runner._HarborRunCancellation,
+    *,
+    force_after_seconds: float | None = None,
+) -> threading.Thread:
+    def cancel() -> None:
+        deadline = time.monotonic() + 30
+        while not ready_path.exists() and time.monotonic() < deadline:
+            time.sleep(0.01)
+        cancellation.requested.set()
+        if force_after_seconds is not None:
+            time.sleep(force_after_seconds)
+            cancellation.forced.set()
+
+    canceller = threading.Thread(target=cancel, daemon=True)
+    canceller.start()
+    return canceller
+
+
+@pytest.mark.skipif(os.name != "posix", reason="requires POSIX SIGTERM delivery")
+def test_bounded_harbor_process_cancellation_lets_harbor_finish_cleanup(tmp_path: Path) -> None:
+    # Harbor maps SIGTERM to KeyboardInterrupt and then stops its trial
+    # environments. Cancellation must wait for that instead of killing the
+    # group after the short timeout grace.
+    ready_path = tmp_path / "ready"
+    cleanup_marker = tmp_path / "cleanup-finished"
+    script = _sigterm_handling_harbor_script(
+        ready_path,
+        on_sigterm=[
+            "time.sleep(0.5)",
+            f"pathlib.Path({str(cleanup_marker)!r}).write_text('done')",
+            "sys.exit(0)",
+        ],
+    )
+    cancellation = runner._HarborRunCancellation()
+    canceller = _cancel_when_ready(ready_path, cancellation)
+
+    with pytest.raises(runner._HarborRunCancelledError) as exc_info:
+        runner._run_bounded_harbor_process(
+            [sys.executable, "-c", script],
+            env=dict(os.environ),
+            cwd=tmp_path,
+            stdin_text=None,
+            timeout_seconds=None,
+            max_output_bytes=4096,
+            diagnostic_tail_chars=128,
+            secret_values=set(),
+            cancellation=cancellation,
+        )
+    canceller.join(timeout=5)
+
+    assert cleanup_marker.read_text(encoding="utf-8") == "done"
+    assert not getattr(exc_info.value, "__notes__", [])
+
+
+@pytest.mark.skipif(os.name != "posix", reason="requires POSIX SIGTERM delivery")
+@pytest.mark.parametrize("ending", ["forced", "grace-expired"])
+def test_bounded_harbor_process_cancellation_kills_harbor_that_ignores_sigterm(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+    ending: str,
+) -> None:
+    ready_path = tmp_path / "ready"
+    script = _sigterm_handling_harbor_script(ready_path, on_sigterm=["pass"])
+    if ending == "forced":
+        # A second Ctrl+C must not wait out the cleanup grace period.
+        monkeypatch.setattr(runner, "_HARBOR_RUN_CANCEL_GRACE_SECONDS", 300.0)
+        force_after_seconds: float | None = 0.2
+    else:
+        monkeypatch.setattr(runner, "_HARBOR_RUN_CANCEL_GRACE_SECONDS", 0.3)
+        force_after_seconds = None
+    cancellation = runner._HarborRunCancellation()
+    canceller = _cancel_when_ready(ready_path, cancellation, force_after_seconds=force_after_seconds)
+    started = time.monotonic()
+
+    with pytest.raises(runner._HarborRunCancelledError) as exc_info:
+        runner._run_bounded_harbor_process(
+            [sys.executable, "-c", script],
+            env=dict(os.environ),
+            cwd=tmp_path,
+            stdin_text=None,
+            timeout_seconds=None,
+            max_output_bytes=4096,
+            diagnostic_tail_chars=128,
+            secret_values=set(),
+            cancellation=cancellation,
+        )
+    canceller.join(timeout=5)
+
+    # The stand-in sleeps for 120 s, so returning sooner proves SIGKILL.
+    assert time.monotonic() - started < 60
+    assert not getattr(exc_info.value, "__notes__", [])
+
+
+def test_bounded_harbor_process_never_launches_after_cancellation(monkeypatch: pytest.MonkeyPatch) -> None:
+    launched: list[object] = []
+    monkeypatch.setattr(runner.subprocess, "Popen", lambda *args, **_kwargs: launched.append(args))
+    cancellation = runner._HarborRunCancellation()
+    cancellation.requested.set()
+
+    with pytest.raises(runner._HarborRunCancelledError):
+        runner._run_bounded_harbor_process(
+            [sys.executable, "-c", "pass"],
+            env=dict(os.environ),
+            cwd=Path.cwd(),
+            stdin_text=None,
+            timeout_seconds=None,
+            max_output_bytes=4096,
+            diagnostic_tail_chars=128,
+            secret_values=set(),
+            cancellation=cancellation,
+        )
+
+    assert launched == []
+
+
+def test_run_harbor_checks_cancellation_before_refreshing_credentials(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    refreshed: list[object] = []
+
+    def refresh(*args: object, **kwargs: object) -> None:
+        refreshed.append((args, kwargs))
+
+    def launch(*_args: object, **_kwargs: object) -> None:
+        pytest.fail("Harbor launched after cancellation")
+
+    monkeypatch.setattr(runner, "refresh_host_vertex_adc_environment", refresh)
+    monkeypatch.setattr(runner, "_run_bounded_harbor_process", launch)
+    cancellation = runner._HarborRunCancellation()
+    cancellation.requested.set()
+
+    with pytest.raises(runner._HarborRunCancelledError):
+        runner._run_harbor(
+            dataset=tmp_path / "dataset",
+            agent="opencode",
+            job_name="demo-opencode-with",
+            env_mode="docker",
+            model="nvidia/openai/gpt-oss-120b",
+            jobs_dir=tmp_path / "jobs",
+            run_env={},
+            n_attempts=1,
+            n_concurrent=1,
+            timeout_multiplier=1.0,
+            override_cpus=None,
+            override_memory_mb=None,
+            override_storage_mb=None,
+            cancellation=cancellation,
+        )
+
+    assert refreshed == []
+
+
 @pytest.mark.skipif(os.name != "nt", reason="requires Windows taskkill tree verification")
 @pytest.mark.parametrize("failure_mode", ["output", "timeout"])
 def test_bounded_harbor_process_failure_reaps_windows_descendants(
@@ -751,6 +975,54 @@ def test_stop_on_pass_preserves_nvidia_build_agent_import_path(
     assert launches[0]["verifier_env"] == {
         "SKILL_EVAL_JUDGE_MODEL": "${SKILL_EVAL_JUDGE_MODEL}",
     }
+
+
+@pytest.mark.parametrize("stop_on_pass", [False, True])
+def test_agent_pair_launches_nothing_after_cancellation(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+    stop_on_pass: bool,
+) -> None:
+    cancellation = runner._HarborRunCancellation()
+    launched: list[str] = []
+
+    def _run_harbor(**kwargs: object) -> tuple[bool, str]:
+        assert kwargs["cancellation"] is cancellation
+        # Mirrors the gate at the top of the real _run_harbor.
+        cancellation.raise_if_requested()
+        launched.append(str(kwargs["job_name"]))
+        # Ctrl+C arrives while the first Harbor job runs.
+        cancellation.requested.set()
+        raise runner._HarborRunCancelledError("interrupted")
+
+    monkeypatch.setattr(runner, "_run_harbor", _run_harbor)
+    monkeypatch.setattr(runner, "_job_passed", lambda *_args, **_kwargs: False)
+    monkeypatch.setattr(runner, "_merge_attempt_jobs", lambda *_args, **_kwargs: None)
+
+    with pytest.raises(runner._HarborRunCancelledError):
+        runner._run_agent_pair(
+            skill_name="demo",
+            agent="opencode",
+            model="nvidia/openai/gpt-oss-120b",
+            env_mode="docker",
+            with_skill=tmp_path / "with",
+            baseline=tmp_path / "without",
+            jobs_dir=tmp_path / "jobs",
+            run_env={},
+            n_attempts=2,
+            n_concurrent=1,
+            timeout_multiplier=1.0,
+            override_cpus=None,
+            override_memory_mb=None,
+            override_storage_mb=None,
+            expected_trials=2,
+            stop_on_pass=stop_on_pass,
+            task_names=["case-001"],
+            cancellation=cancellation,
+        )
+
+    assert len(launched) == 1
+    assert "-with" in launched[0]
 
 
 _UNSAFE_LINK = r"symlink|reparse"

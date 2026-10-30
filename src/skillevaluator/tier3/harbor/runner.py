@@ -25,7 +25,7 @@ import threading
 import time
 import tomllib
 from collections.abc import Iterable, Iterator, Mapping, Sequence
-from concurrent.futures import FIRST_COMPLETED, ThreadPoolExecutor, as_completed, wait
+from concurrent.futures import FIRST_COMPLETED, Future, ThreadPoolExecutor, as_completed, wait
 from contextlib import ExitStack, contextmanager, suppress
 from dataclasses import dataclass, field, replace
 from datetime import UTC, datetime
@@ -784,6 +784,11 @@ _HARBOR_RUN_DIAGNOSTIC_TAIL_CHARS = 16 * 1024
 _HARBOR_RUN_OUTPUT_READ_BYTES = 64 * 1024
 _HARBOR_RUN_POLL_SECONDS = 0.01
 _HARBOR_RUN_TERMINATE_SECONDS = 0.1
+# Harbor turns SIGTERM into KeyboardInterrupt and then stops its trial
+# environments (for example removing Docker containers). An interrupted run
+# waits this long for that cleanup before it kills the process group.
+_HARBOR_RUN_CANCEL_GRACE_SECONDS = 30.0
+_HARBOR_RUN_CANCEL_POLL_SECONDS = 0.1
 _HARBOR_RUN_REAP_SECONDS = 5.0
 
 
@@ -796,6 +801,32 @@ class _BoundedHarborProcessResult:
 
 class _HarborRunTimeoutError(RuntimeError):
     """Raised after timed-out Harbor orchestration cleanup completes."""
+
+
+class _HarborRunCancelledError(BaseException):
+    """Raised on a worker thread once an interrupted run's Harbor job is contained.
+
+    Like ``KeyboardInterrupt``, it bypasses ``except Exception`` handlers that
+    record ordinary job failures, so a cancelled run stops instead of moving on
+    to its next attempt or condition.
+    """
+
+
+@dataclass(frozen=True, eq=False)
+class _HarborRunCancellation:
+    """Cross-thread stop request for the Harbor jobs of an interrupted run.
+
+    Ctrl+C reaches only the coordinating thread. Setting ``requested`` stops new
+    Harbor launches and sends running jobs SIGTERM with a cleanup grace period;
+    setting ``forced`` (a second Ctrl+C) ends that grace period early.
+    """
+
+    requested: threading.Event = field(default_factory=threading.Event)
+    forced: threading.Event = field(default_factory=threading.Event)
+
+    def raise_if_requested(self) -> None:
+        if self.requested.is_set():
+            raise _HarborRunCancelledError("Tier 3 evaluation was interrupted before this Harbor job started")
 
 
 def _redact_harbor_diagnostic(detail: object, *, secret_values: set[str]) -> str:
@@ -3480,16 +3511,44 @@ def _verified_windows_taskkill_path() -> Path:
     return resolved_candidate
 
 
-def _terminate_harbor_process_tree(process: subprocess.Popen[bytes]) -> None:
-    """Terminate the POSIX process group or Windows task tree and reap Harbor."""
+def _wait_for_harbor_leader(
+    process: subprocess.Popen[bytes],
+    timeout_seconds: float,
+    *,
+    end_grace: threading.Event | None,
+) -> None:
+    """Wait up to ``timeout_seconds`` for Harbor to exit, or until ``end_grace`` is set."""
+    deadline = time.monotonic() + timeout_seconds
+    while (remaining := deadline - time.monotonic()) > 0:
+        if end_grace is not None and end_grace.is_set():
+            return
+        try:
+            process.wait(timeout=min(remaining, _HARBOR_RUN_CANCEL_POLL_SECONDS))
+        except subprocess.TimeoutExpired:
+            continue
+        return
+
+
+def _terminate_harbor_process_tree(
+    process: subprocess.Popen[bytes],
+    *,
+    grace_seconds: float = _HARBOR_RUN_TERMINATE_SECONDS,
+    end_grace: threading.Event | None = None,
+) -> None:
+    """Terminate the POSIX process group or Windows task tree and reap Harbor.
+
+    On POSIX the group receives SIGTERM, then SIGKILL once the leader exits or
+    ``grace_seconds`` pass, whichever is first; a set ``end_grace`` skips the
+    rest of the grace period. Windows has no SIGTERM that Harbor handles, so
+    its task tree is always stopped with ``taskkill /T /F``.
+    """
     if os.name == "posix":
         # POSIX process groups do not own a descendant that deliberately calls
         # setsid(2). The host-side Harbor CLI/configuration is therefore a
         # trusted boundary; untrusted task execution belongs in an isolated
         # backend rather than SkillEvaluator's experimental local mode.
         _signal_harbor_process_group(process, signal.SIGTERM)
-        with suppress(subprocess.TimeoutExpired):
-            process.wait(timeout=_HARBOR_RUN_TERMINATE_SECONDS)
+        _wait_for_harbor_leader(process, grace_seconds, end_grace=end_grace)
         # Always signal the original group after the grace period. The leader
         # may already have exited while a descendant retained the output pipe.
         _signal_harbor_process_group(process, signal.SIGKILL)
@@ -3541,14 +3600,23 @@ def _run_bounded_harbor_process(
     max_output_bytes: int,
     diagnostic_tail_chars: int,
     secret_values: set[str],
+    cancellation: _HarborRunCancellation | None = None,
 ) -> _BoundedHarborProcessResult:
-    """Run Harbor with bounded merged output and optional cleanup deadline."""
+    """Run Harbor with bounded merged output and optional cleanup deadline.
+
+    A requested ``cancellation`` prevents the launch, or stops a running
+    process tree, and then raises :class:`_HarborRunCancelledError`. A running
+    job gets SIGTERM and up to ``_HARBOR_RUN_CANCEL_GRACE_SECONDS`` to stop its
+    environments before the group is killed, unless the cancellation is forced.
+    """
     if timeout_seconds is not None and timeout_seconds <= 0:
         raise ValueError("Harbor run timeout must be positive")
     if max_output_bytes <= 0:
         raise ValueError("Harbor output byte limit must be positive")
     if diagnostic_tail_chars <= 0:
         raise ValueError("Harbor diagnostic tail limit must be positive")
+    if cancellation is not None:
+        cancellation.raise_if_requested()
 
     creation_flags = getattr(subprocess, "CREATE_NEW_PROCESS_GROUP", 0) if os.name == "nt" else 0
     process = subprocess.Popen(
@@ -3649,6 +3717,9 @@ def _run_bounded_harbor_process(
                 break
             if reader_done.is_set() and process.poll() is not None:
                 break
+            if cancellation is not None and cancellation.requested.is_set():
+                # The BaseException handler below stops the process tree.
+                raise _HarborRunCancelledError("Tier 3 evaluation was interrupted; Harbor job stopped")
             if deadline is None:
                 reader_done.wait(_HARBOR_RUN_POLL_SECONDS)
                 continue
@@ -3688,7 +3759,16 @@ def _run_bounded_harbor_process(
         cleanup_error: BaseException | None = None
         if process.poll() is None or not reader_done.is_set():
             try:
-                _terminate_harbor_process_tree(process)
+                if cancellation is not None and isinstance(primary_error, _HarborRunCancelledError):
+                    # Let Harbor's SIGTERM handling stop its trial environments
+                    # instead of leaving containers or agent processes behind.
+                    _terminate_harbor_process_tree(
+                        process,
+                        grace_seconds=_HARBOR_RUN_CANCEL_GRACE_SECONDS,
+                        end_grace=cancellation.forced,
+                    )
+                else:
+                    _terminate_harbor_process_tree(process)
             except BaseException as exc:
                 cleanup_error = exc
         if not reader_started:
@@ -3728,7 +3808,12 @@ def _run_harbor(
     expected_trials: int | None = None,
     expected_total_trials: int | None = None,
     include_task_names: list[str] | None = None,
+    cancellation: _HarborRunCancellation | None = None,
 ) -> tuple[bool, str]:
+    if cancellation is not None:
+        # Check before the credential refresh as well as at launch, so a queued
+        # condition or attempt makes no token request after an interrupt.
+        cancellation.raise_if_requested()
     base_url = (
         (verifier_env or {}).get("OPENAI_BASE_URL")
         or run_env.get("OPENAI_BASE_URL")
@@ -3804,6 +3889,7 @@ def _run_harbor(
                 max_output_bytes=_HARBOR_RUN_OUTPUT_MAX_BYTES,
                 diagnostic_tail_chars=_HARBOR_RUN_DIAGNOSTIC_TAIL_CHARS,
                 secret_values=secret_values,
+                cancellation=cancellation,
             )
     except _HarborRunTimeoutError as exc:
         if adc_timeout is not None:
@@ -4276,6 +4362,7 @@ def _run_stop_on_pass_variant(
     agent_import_path: str | None = None,
     verifier_env: Mapping[str, str] | None = None,
     environment_kwargs: Mapping[str, Any] | None = None,
+    cancellation: _HarborRunCancellation | None = None,
 ) -> list[str]:
     """Run each case one attempt at a time, stopping its attempts on first pass."""
     errors: list[tuple[Path, str]] = []
@@ -4302,6 +4389,7 @@ def _run_stop_on_pass_variant(
                 environment_kwargs=environment_kwargs,
                 expected_trials=1,
                 include_task_names=[task_name],
+                cancellation=cancellation,
             )
             job_dir = jobs_dir / job_name
             attempt_job_dirs.append(job_dir)
@@ -4346,6 +4434,7 @@ def _run_agent_pair(
     task_names: list[str] | None = None,
     verifier_env: Mapping[str, str] | None = None,
     environment_kwargs: Mapping[str, Any] | None = None,
+    cancellation: _HarborRunCancellation | None = None,
 ) -> list[str]:
     jobs = [("with", with_skill)]
     if baseline is not None:
@@ -4375,6 +4464,7 @@ def _run_agent_pair(
                     agent_import_path=agent_import_path,
                     verifier_env=verifier_env,
                     environment_kwargs=environment_kwargs,
+                    cancellation=cancellation,
                 )
             )
         return sequential_errors
@@ -4408,6 +4498,7 @@ def _run_agent_pair(
                 verifier_env=verifier_env,
                 environment_kwargs=environment_kwargs,
                 expected_trials=expected_trials,
+                cancellation=cancellation,
             ): variant
             for (variant, dataset), condition_concurrency in zip(jobs, job_concurrency, strict=True)
         }
@@ -4475,21 +4566,25 @@ class _RunProgressLifecycle:
     def close(self) -> None:
         self._reporter.close()
 
-    def fail_unfinished(self) -> None:
-        """Fail every open stage and finish the run without masking its error."""
+    def fail_unfinished(self, *, interrupted: bool = False) -> None:
+        """Fail every open stage and finish the run without masking its error.
+
+        ``interrupted`` reports Ctrl+C or cancellation rather than an unexpected failure.
+        """
+        stage_detail = "interrupted before completion" if interrupted else "unexpected failure interrupted this stage"
         for stage in tuple(self._active_stages):
             self.emit(
                 ProgressEvent(
                     stage=stage,
                     state="failed",
-                    detail="unexpected failure interrupted this stage",
+                    detail=stage_detail,
                 )
             )
         self.emit(
             ProgressEvent(
                 stage="run-finished",
                 state="failed",
-                detail="Tier 3 evaluation failed unexpectedly",
+                detail="Tier 3 evaluation interrupted" if interrupted else "Tier 3 evaluation failed unexpectedly",
                 output_dir=self._output_dir,
                 result_path=self._existing_file(self._result_path),
                 report_path=self._existing_file(self._report_path),
@@ -5397,6 +5492,8 @@ def _run_harbor_eval_impl(
         )
     errors: list[str] = []
     started_agents: SimpleQueue[str] = SimpleQueue()
+    # Ctrl+C reaches only this thread; workers observe it through this object.
+    cancellation = _HarborRunCancellation()
 
     def _execute_agent(agent: str) -> list[str]:
         started_agents.put(agent)
@@ -5422,6 +5519,7 @@ def _run_harbor_eval_impl(
             task_names=task_selectors,
             verifier_env=job_judge_verifier_env,
             environment_kwargs=effective_environment_kwargs,
+            cancellation=cancellation,
         )
 
     active_agents: set[str] = set()
@@ -5437,39 +5535,80 @@ def _run_harbor_eval_impl(
             variants = "with-skill" if skip_baseline else "with-skill + baseline"
             reporter.emit(ProgressEvent(stage=f"agent:{agent}", state="running", detail=variants))
 
+    futures: dict[Future[list[str]], str] = {}
+
+    def _join_interrupted_agents() -> None:
+        """Wait while running agents stop their Harbor jobs after an interrupt.
+
+        A second Ctrl+C ends the cleanup grace period; a third one propagates.
+        """
+        stopping_reported = False
+        while True:
+            try:
+                running = [future for future in futures if not future.done()]
+                if not running:
+                    return
+                if not stopping_reported:
+                    stopping_reported = True
+                    for agent in sorted(futures[future] for future in running):
+                        reporter.emit(
+                            ProgressEvent(
+                                stage=f"agent:{agent}",
+                                state="running",
+                                detail=(
+                                    "stopping Harbor jobs; press Ctrl+C again to skip up to "
+                                    f"{_HARBOR_RUN_CANCEL_GRACE_SECONDS:g}s of environment cleanup"
+                                ),
+                            )
+                        )
+                wait(running, timeout=_HARBOR_RUN_CANCEL_POLL_SECONDS)
+            except KeyboardInterrupt:
+                if cancellation.forced.is_set():
+                    raise
+                cancellation.forced.set()
+
     with ThreadPoolExecutor(max_workers=min(max_agents, len(agents))) as executor:
-        futures = {executor.submit(_execute_agent, agent): agent for agent in agents}
-        pending = set(futures)
-        while pending:
-            _emit_started_agents()
-            done, pending = wait(pending, timeout=0.1, return_when=FIRST_COMPLETED)
-            _emit_started_agents()
-            for future in done:
-                agent = futures[future]
-                active_agents.discard(agent)
-                try:
-                    agent_errors = future.result()
-                except Exception as exc:
-                    reporter.emit(
-                        ProgressEvent(
-                            stage=f"agent:{agent}",
-                            state="failed",
-                            detail="agent worker failed unexpectedly",
+        try:
+            futures = {executor.submit(_execute_agent, agent): agent for agent in agents}
+            pending = set(futures)
+            while pending:
+                _emit_started_agents()
+                done, pending = wait(pending, timeout=0.1, return_when=FIRST_COMPLETED)
+                _emit_started_agents()
+                for future in done:
+                    agent = futures[future]
+                    active_agents.discard(agent)
+                    try:
+                        agent_errors = future.result()
+                    except Exception as exc:
+                        reporter.emit(
+                            ProgressEvent(
+                                stage=f"agent:{agent}",
+                                state="failed",
+                                detail="agent worker failed unexpectedly",
+                            )
                         )
-                    )
-                    unexpected_worker_error = unexpected_worker_error or exc
-                    continue
-                errors.extend(agent_errors)
-                if agent_errors:
-                    reporter.emit(
-                        ProgressEvent(
-                            stage=f"agent:{agent}",
-                            state="failed",
-                            detail="one or more Harbor jobs failed; inspect retained artifacts",
+                        unexpected_worker_error = unexpected_worker_error or exc
+                        continue
+                    errors.extend(agent_errors)
+                    if agent_errors:
+                        reporter.emit(
+                            ProgressEvent(
+                                stage=f"agent:{agent}",
+                                state="failed",
+                                detail="one or more Harbor jobs failed; inspect retained artifacts",
+                            )
                         )
-                    )
-                else:
-                    reporter.emit(ProgressEvent(stage=f"agent:{agent}", state="complete"))
+                    else:
+                        reporter.emit(ProgressEvent(stage=f"agent:{agent}", state="complete"))
+        except BaseException:
+            # Without this, the executor exit would wait for every running
+            # Harbor job to finish and would still start queued agents. Cancel
+            # the queue first so a worker that stops never picks up another agent.
+            executor.shutdown(wait=False, cancel_futures=True)
+            cancellation.requested.set()
+            _join_interrupted_agents()
+            raise
 
     if unexpected_worker_error is not None:
         for agent in sorted(active_agents):
@@ -5710,14 +5849,14 @@ def run_harbor_eval(*args: Any, **kwargs: Any) -> dict[str, Any]:
             )
         lifecycle.finish_result(result)
         return result
-    except BaseException:
+    except BaseException as exc:
         _finalize_harbor_artifacts(
             run_dir_value=lifecycle.output_dir,
             keep_requested=bool(kwargs.get("keep_harbor_jobs", False)),
             result=None,
         )
         try:
-            lifecycle.fail_unfinished()
+            lifecycle.fail_unfinished(interrupted=isinstance(exc, (KeyboardInterrupt, _HarborRunCancelledError)))
         except BaseException:
             logger.debug("Tier 3 progress terminalization failed", exc_info=True)
         raise

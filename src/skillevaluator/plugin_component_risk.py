@@ -3744,13 +3744,19 @@ class HookAnalyzer:
                 "Set 'url' to the https:// endpoint that receives the hook input.",
             )
             return
-        record.target = safe_url(url)
         record.url = url.strip()
         # Claude Code posts the hook with a WHATWG URL parser (Node), which reads a
         # backslash as '/' and drops tabs and line breaks. Every check below reads
         # the URL that way; text that urllib reads differently is itself invalid.
         client_url = whatwg_url(url)
         problems = url_ambiguities(url, percent_in_host=True)
+        # Messages name the host Claude Code posts to ('https://169.254.169.254\\@host/' goes to the metadata
+        # host), unless the userinfo of either reading carries a credential, which is never shown.
+        userinfo_secret = (
+            url_credentials(client_url, userinfo_rule="any").userinfo
+            or url_credentials(record.url, userinfo_rule="secret").userinfo
+        )
+        record.target = safe_url(client_url if problems and not userinfo_secret else url)
         if problems:
             site.report(
                 "invalid_url",

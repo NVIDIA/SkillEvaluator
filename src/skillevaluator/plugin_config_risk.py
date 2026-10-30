@@ -29,6 +29,7 @@ from skillevaluator.validators.mcp_static import (
     _parses_shell_operators,
     env_override_issues,
     env_tls_and_secret_issues,
+    mcp_message_prefix,
     permission_flag_issues,
     validate_mcp_command,
     validate_mcp_pinning,
@@ -87,7 +88,7 @@ def _lsp_command_findings(name: str, server: dict[str, Any], file_path: str) -> 
     raw: list[Finding] = []
     validate_mcp_command(name, server, file_path, raw)
     validate_mcp_pinning(name, server, file_path, raw)
-    prefix = f"mcpServers['{name}']: "
+    prefix = mcp_message_prefix(name)
     findings: list[Finding] = []
     for finding in raw:
         check = f"plugin_lsp_{finding.check_name.removeprefix('mcp_')}"
@@ -105,7 +106,7 @@ def _lsp_command_findings(name: str, server: dict[str, Any], file_path: str) -> 
             _plugin_finding(
                 severity,
                 check,
-                f"lspServers['{name}']: {_lsp_wording(message)}",
+                f"lspServers{prefix.removeprefix('mcpServers')}{_lsp_wording(message)}",
                 file_path,
                 _lsp_wording(suggestion) if suggestion else suggestion,
                 metadata={"plugin_component": {"type": "lsp", "name": name}},

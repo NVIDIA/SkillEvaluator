@@ -41,6 +41,16 @@ def test_lsp_plain_argv_operator_stays_low() -> None:
     assert _severities(findings, "plugin_lsp_command_shell_metacharacters") == [Severity.LOW]
 
 
+@pytest.mark.parametrize("name", ["py", "x" * 100, "py\tserver"])
+def test_lsp_rewording_strips_the_mcp_prefix_for_any_name(name: str) -> None:
+    """Regression: MCP messages now bound and redact the server name, so stripping the raw-name prefix left
+    "lspServers['...']: mcpServers['...']: " in messages for long or unusual LSP server names."""
+    findings = analyze_lsp_server(name, {"command": "bash", "args": ["-c", "pyright-langserver --stdio"]}, ".lsp.json")
+    messages = [finding.message for finding in findings if finding.check_name.startswith("plugin_lsp_")]
+    assert messages
+    assert all(message.startswith("lspServers['") and "mcpServers[" not in message for message in messages)
+
+
 def test_settings_broad_allow_quotes_rules_bounded_and_redacted() -> None:
     """Regression: the broad-allow message quoted each rule raw, so a long rule made a huge message and a
     credential in a rule was copied into the finding."""

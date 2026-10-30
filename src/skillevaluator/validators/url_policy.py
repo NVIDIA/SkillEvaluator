@@ -49,8 +49,9 @@ _MAX_DEFAULT_PASSES = 8
 # What is left of an Authorization-style value once its references are removed: 'Bearer ${TOKEN}'.
 _AUTH_SCHEME_ONLY_RE = re.compile(r"(?i)^\s*(?:bearer|basic|token)?\s*$")
 # What is left of an Authorization header with any scheme once its references are removed: 'ApiKey ${KEY}',
-# 'Bot ${TOKEN}'. The blank after the scheme word is where the reference was.
-_AUTH_HEADER_SCHEME_ONLY_RE = re.compile(r"^\s*[A-Za-z][A-Za-z0-9!#$%&'*+.^_`|~-]*\s+$")
+# 'Bot ${TOKEN}', 'Basic ${USER}:${PASS}'. The blank after the scheme word is where the references were, and
+# only separators may stand between them.
+_AUTH_HEADER_SCHEME_ONLY_RE = re.compile(r"^\s*(?:[A-Za-z][A-Za-z0-9!#$%&'*+.^_`|~-]*\s+)?[^A-Za-z0-9]*$")
 # env keys that name a credential -- their value must be a reference, never a literal.
 # The auth/bearer/token alternatives are suffix-anchored so benign config keys that
 # merely contain those substrings -- AUTH_TYPE, OAUTH_CLIENT_ID, BEARER_FORMAT,

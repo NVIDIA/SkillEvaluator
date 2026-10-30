@@ -520,6 +520,10 @@ def test_deeply_nested_defaults_do_not_exhaust_the_stack() -> None:
         ("Proxy-Authorization", "Basic ${env:PROXY_AUTH}", False),
         ("Authorization", "${AUTH_HEADER}", False),
         ("Authorization", "Bearer", False),
+        ("Authorization", "Basic ${USER}:${PASS}", False),
+        ("Authorization", "${USER}:${PASS}", False),
+        ("Authorization", "Bearer ${A}.${B}", False),
+        ("Authorization", "Basic ${USER}:" + "literal0123", True),
     ],
 )
 def test_an_authorization_header_names_a_credential_whatever_its_scheme(key: str, value: str, secret: bool) -> None:

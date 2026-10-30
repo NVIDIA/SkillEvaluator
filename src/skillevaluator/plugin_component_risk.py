@@ -1750,6 +1750,23 @@ _SCRIPT_INTERPRETER_RE = re.compile(
 _SCRIPT_FILE_RE = re.compile(r"[\w.-]{1,128}\.(?:sh|bash|zsh|py|js|mjs|cjs|ts|rb|pl|php|ps1)")
 
 
+def _bare_words(words: Iterable[str]) -> list[str]:
+    """Command words without shell punctuation attached to them: ``(cd`` is ``cd``, and ``./x.sh)`` and
+    ``"${CLAUDE_PLUGIN_ROOT}/x.sh";`` (quotes already removed) name ``./x.sh`` and ``${CLAUDE_PLUGIN_ROOT}/x.sh``;
+    a word of only punctuation (``(``, ``;``) is dropped."""
+    bare = (word.lstrip("(").rstrip(");&") for word in words)
+    return [word for word in bare if word]
+
+
+def _cd_target(words: list[str], index: int) -> int:
+    """The index of the directory a ``cd`` / ``pushd`` at ``words[index]`` changes to, past its options
+    (``cd -P``, ``cd --``); ``len(words)`` when it names none."""
+    target = index + 1
+    while target < len(words) and len(words[target]) > 1 and words[target].startswith("-"):
+        target += 1
+    return target
+
+
 def _relative_word(word: str, *, program: bool) -> bool:
     """Whether ``word`` names a file by a path relative to the working directory.
 
@@ -1781,7 +1798,7 @@ def _relative_run_paths(text: str, refs: tuple[str, ...] = _PLUGIN_ROOT_REFS) ->
     plugin_cwd = False
     for command in _SHELL_COMMAND_RE.finditer(text):
         for stage in command.group(0).split("|"):
-            words = _split_words(stage)
+            words = _bare_words(_split_words(stage))
             index = 0
             while index < len(words) and (
                 words[index] in _RELATIVE_WRAPPER_WORDS or _ASSIGNMENT_WORD_RE.match(words[index]) is not None
@@ -1790,8 +1807,8 @@ def _relative_run_paths(text: str, refs: tuple[str, ...] = _PLUGIN_ROOT_REFS) ->
             if index >= len(words):
                 continue
             if words[index] in {"cd", "pushd"}:
-                target = words[index + 1].strip("\"'") if index + 1 < len(words) else ""
-                plugin_cwd = _root_ref(target, refs) is not None
+                target = _cd_target(words, index)
+                plugin_cwd = target < len(words) and _root_ref(words[target].strip("\"'"), refs) is not None
                 continue
             if plugin_cwd:
                 continue
@@ -3136,15 +3153,17 @@ class HookAnalyzer:
         :meth:`_root_aliases`) and root default chains read as the plain placeholder."""
         words: list[str] = []
         for token in tokens:
-            words.append(token)
-            if any(char.isspace() for char in token.strip()):
-                words.extend(_split_words(token))  # 'bash -c "cd ${CLAUDE_PLUGIN_ROOT} && ./approve.sh"'
+            words.extend(_bare_words([token]))
+            if any(char.isspace() for char in token.strip()):  # a quoted command string, split once more
+                words.extend(_bare_words(_split_words(token)))
         aliases = aliases or {}
         paths: list[PurePosixPath] = []
         cwd: PurePosixPath | None = None
         for index, word in enumerate(words):
             if word in {"cd", "pushd"} and index + 1 < len(words):
-                cwd = self._root_directory(self._rooted(words[index + 1], aliases))
+                target = _cd_target(words, index)
+                if target < len(words):
+                    cwd = self._root_directory(self._rooted(words[target], aliases))
                 continue
             paths.extend(self._script_paths(self._rooted(word, aliases), cwd))
         return list(dict.fromkeys(paths))

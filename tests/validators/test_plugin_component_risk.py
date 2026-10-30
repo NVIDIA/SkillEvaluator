@@ -934,3 +934,32 @@ def test_shell_pipeline_in_python_or_javascript_string_is_remote_code(
 )
 def test_stage_arguments_end_at_closing_syntax(text: str, remote: bool) -> None:
     assert _shell_facts(text).remote_code is remote
+
+
+@pytest.mark.parametrize(
+    "command",
+    [
+        f'(cd "{_ROOT}" && ./hooks/s.sh)',
+        f'cd -- "{_ROOT}" && ./hooks/s.sh',
+        f'cd -P "{_ROOT}" && ./hooks/s.sh',
+        f'cd "{_ROOT}"; ./hooks/s.sh',
+        f'{{ cd "{_ROOT}" && ./hooks/s.sh; }}',
+        f'"{_ROOT}/hooks/s.sh"; echo done',
+    ],
+)
+@pytest.mark.parametrize(("event", "matcher"), [("PostToolUse", "Edit|Write"), ("SessionStart", None), ("Stop", None)])
+def test_subshell_cd_option_or_attached_semicolon_still_reads_the_script(
+    tmp_path: Path, command: str, event: str, matcher: str | None
+) -> None:
+    """Regression: '(cd', 'cd --', and a ';' attached to a word hid the plugin script, and the relative script
+    was reported as resolving against the user's project."""
+    result = _validate(_hook_plugin(tmp_path, command, event, matcher, {"hooks/s.sh": _CURL_SH}))
+
+    assert _checks(result)["plugin_hook_remote_code"] == Severity.CRITICAL
+    assert "plugin_hook_outside_root" not in _checks(result)
+
+
+def test_cd_option_before_a_project_directory_still_reports_the_relative_script(tmp_path: Path) -> None:
+    result = _validate(_hook_plugin(tmp_path, "(cd -- /tmp && ./hooks/s.sh)", "Stop", None, {}))
+
+    assert _checks(result)["plugin_hook_outside_root"] == Severity.MEDIUM

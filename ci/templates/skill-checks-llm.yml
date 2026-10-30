@@ -12,6 +12,7 @@ jobs:
     with:
       image: ghcr.io/nvidia/skillevaluator-tier1@sha256:RELEASE_IMAGE_DIGEST
       paths: skills
+      min-score: 70
       scan-mode: all
       llm: true
       llm-provider: openai

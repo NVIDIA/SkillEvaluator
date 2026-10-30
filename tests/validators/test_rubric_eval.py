@@ -1009,12 +1009,17 @@ class TestRubricEvalValidator:
         assert result.metadata["rubric_eval"]["overall_pass"] is False
 
     @pytest.mark.parametrize(
-        ("served_by", "expected_model"), [(None, "claude-opus-5-5"), ("claude-opus-4-8", "claude-opus-4-8")]
+        ("answered_by", "with_fallback_block"),
+        [("claude-opus-5-5", False), ("claude-opus-4-8", True), ("claude-opus-4-8", False)],
+        ids=["configured-model", "fallback-in-this-call", "sticky-fallback-turn"],
     )
     def test_json_report_names_the_model_that_scored(
-        self, tmp_path, monkeypatch: pytest.MonkeyPatch, served_by: str | None, expected_model: str
+        self, tmp_path, monkeypatch: pytest.MonkeyPatch, answered_by: str, with_fallback_block: bool
     ):
-        """A score from the server-side fallback model is labeled with that model, not the configured one."""
+        """A score from the server-side fallback model is labeled with that model, not the configured one.
+
+        A turn served by sticky routing carries no fallback block; only its top-level model names the fallback.
+        """
         pytest.importorskip("anthropic")
         httpx = pytest.importorskip("httpx")
         from skillevaluator.reporting import JSONReporter
@@ -1025,8 +1030,15 @@ class TestRubricEvalValidator:
         for name in ("SKILL_EVAL_LLM_BASE_URL", "ANTHROPIC_BASE_URL"):
             monkeypatch.delenv(name, raising=False)
         content = [{"type": "text", "text": json.dumps({"checks": _complete_checks(), "summary": "ok"})}]
-        if served_by:
-            content.insert(0, {"type": "fallback", "from": {"model": "claude-opus-5-5"}, "to": {"model": served_by}})
+        usage = {"input_tokens": 1, "output_tokens": 1}
+        if with_fallback_block:
+            content.insert(0, {"type": "fallback", "from": {"model": "claude-opus-5-5"}, "to": {"model": answered_by}})
+            usage["iterations"] = [
+                {"type": "message", "model": "claude-opus-5-5"},
+                {"type": "fallback_message", "model": answered_by},
+            ]
+        elif answered_by != "claude-opus-5-5":
+            usage["iterations"] = [{"type": "fallback_message", "model": answered_by}]
 
         def handler(request):
             return httpx.Response(
@@ -1035,11 +1047,11 @@ class TestRubricEvalValidator:
                     "id": "msg_test",
                     "type": "message",
                     "role": "assistant",
-                    "model": "claude-opus-5-5",
+                    "model": answered_by,
                     "content": content,
                     "stop_reason": "end_turn",
                     "stop_sequence": None,
-                    "usage": {"input_tokens": 1, "output_tokens": 1},
+                    "usage": usage,
                 },
             )
 
@@ -1051,6 +1063,6 @@ class TestRubricEvalValidator:
         data = json.loads(JSONReporter(include_timestamp=False).render_all([result]))
         assert data["rubric_eval"]["execution_status"] == "succeeded"
         assert data["rubric_eval"]["llm_provider"] == "anthropic"
-        assert data["rubric_eval"]["llm_model_used"] == expected_model
+        assert data["rubric_eval"]["llm_model_used"] == answered_by
         (success,) = data["results"][0]["success_details"]
-        assert success["metadata"]["llm_model_used"] == expected_model
+        assert success["metadata"]["llm_model_used"] == answered_by

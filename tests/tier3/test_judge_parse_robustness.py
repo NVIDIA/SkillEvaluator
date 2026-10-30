@@ -747,13 +747,16 @@ def judge_env(monkeypatch):
     return monkeypatch
 
 
-def _anthropic_body(text, *, stop_reason="end_turn", served_by=None):
+def _anthropic_body(text, *, stop_reason="end_turn", served_by=None, model=None):
     content = []
     if served_by:
         content.append({"type": "fallback", "from": {"model": "requested"}, "to": {"model": served_by}})
     if text:
         content.append({"type": "text", "text": text})
-    return {"content": content, "stop_reason": stop_reason}
+    body = {"content": content, "stop_reason": stop_reason}
+    if model:
+        body["model"] = model
+    return body
 
 
 def _replay(monkeypatch, replies):
@@ -797,11 +800,20 @@ def test_template_anthropic_gateway_gets_effort_without_server_side_fallback(jud
     assert "fallbacks" not in payload
 
 
-def test_template_required_judge_records_the_model_that_answered(judge_env):
+@pytest.mark.parametrize(
+    "reply",
+    [
+        _anthropic_body(VALID_GOAL_RESPONSE, served_by="claude-opus-4-8", model="claude-opus-4-8"),
+        # A turn served by sticky routing carries no fallback block.
+        _anthropic_body(VALID_GOAL_RESPONSE, model="claude-opus-4-8"),
+    ],
+    ids=["fallback-in-this-call", "sticky-fallback-turn"],
+)
+def test_template_required_judge_records_the_model_that_answered(judge_env, reply):
     judge_env.setenv("SKILL_EVAL_LLM_PROVIDER", "anthropic")
     judge_env.setenv("ANTHROPIC_API_KEY", "test-key")
     judge_env.setenv("LLM_JUDGE_MODEL", "claude-opus-5-5")
-    _replay(judge_env, [_anthropic_body(VALID_GOAL_RESPONSE, served_by="claude-opus-4-8")])
+    _replay(judge_env, [reply])
 
     result = eval_template._call_required_judge(
         "goal_accuracy", eval_template._judge_goal_accuracy_custom, "q", "gt", "agent", ""
@@ -811,6 +823,19 @@ def test_template_required_judge_records_the_model_that_answered(judge_env):
     assert result["judge_model_used"] == "claude-opus-4-8"
     assert result["judge_reasoning_effort"] == "medium"
     assert result["judge_fallback_used"] is True
+
+
+def test_template_anthropic_reply_model_is_ignored_without_server_side_fallback(judge_env):
+    judge_env.setenv("ANTHROPIC_API_KEY", "test-key")
+    judge_env.setenv("ANTHROPIC_BASE_URL", "https://gateway.example")
+    _replay(judge_env, [_anthropic_body("Done", model="gateway-deployment-name")])
+    provenance = {"provider": "anthropic", "model": "claude-opus-5-5"}
+
+    assert eval_template._call_anthropic("prompt", "claude-opus-5-5", 4096, 0.0, provenance=provenance) == (
+        "Done",
+        None,
+    )
+    assert provenance["model"] == "claude-opus-5-5"
 
 
 def test_template_anthropic_refusal_tries_the_configured_fallback_model(judge_env):

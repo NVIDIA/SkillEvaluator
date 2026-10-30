@@ -1639,10 +1639,18 @@ def _call_anthropic(prompt, model, max_tokens, temperature, response_schema=None
     if body.get("stop_reason") == "refusal":
         raise _JudgeRefusedError("judge model declined the request (stop_reason=refusal)")
     blocks = [block for block in body.get("content", []) if isinstance(block, dict)]
+    served_model = None
     for block in blocks:
         served = block.get("to") if block.get("type") == "fallback" else None
-        if provenance is not None and isinstance(served, dict) and isinstance(served.get("model"), str):
-            provenance["model"] = served["model"]
+        if isinstance(served, dict) and isinstance(served.get("model"), str) and served["model"]:
+            served_model = served["model"]
+    # A turn served by sticky routing, which sends repeats of a fallen-back
+    # request straight to the fallback model, carries no fallback block; the
+    # top-level model then names the model that wrote the reply.
+    if served_model is None and server_side_fallback and isinstance(body.get("model"), str) and body["model"]:
+        served_model = body["model"]
+    if provenance is not None and served_model is not None:
+        provenance["model"] = served_model
     content = "".join(str(block.get("text", "")) for block in blocks if block.get("type") == "text")
     return content.strip(), None
 

@@ -83,9 +83,9 @@ All notable changes to SkillEvaluator are documented in this file.
   success detail and, for a single skill, also in `rubric_eval`. Tier 3
   conclusions and recommendations written by the LLM, and LLM-written
   dimensions returned by `compute_dimensions`, record the model that wrote
-  them as `model`. On the native Claude API this is `claude-opus-4-8`, not the
-  configured model, when the server-side refusal fallback answered a Claude
-  5.5 or later request.
+  them as `model`. On the native Claude API this is the model the reply
+  names: the server-side refusal fallback model, not the configured model,
+  when the fallback answered a Claude 5.5 or later request.
 
 ### Changed
 
@@ -222,6 +222,13 @@ All notable changes to SkillEvaluator are documented in this file.
   output is redirected or the search runs inside `sh -c`. Host and bundled
   scoring agree, while scoped searches and slash-valued patterns retain their
   classification.
+
+- On the native Claude API, the Tier 3 judges' `judge_model_used` names the
+  server-side fallback model when the API serves a repeated request straight
+  from that model. Such a reply has no `fallback` content block, so the label
+  now comes from the reply's own `model` field instead of the configured
+  model.
+
 - PII email scans recognize all RFC 2606 reserved domains, including their
   subdomains, mixed-case forms, trailing dots, and prose ellipses. A local-part
   boundary prevents quadratic rescanning of long excluded addresses. Ordinary

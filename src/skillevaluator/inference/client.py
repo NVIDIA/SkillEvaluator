@@ -329,14 +329,25 @@ def _checked_content(content: str, stop_reason: object, refusal: object = None) 
     return content
 
 
-def _anthropic_fallback_model(response: Any) -> str | None:
-    """Return the model a server-side fallback block says served the reply, if any."""
+def _anthropic_served_model(response: Any, *, requested_fallback: bool) -> str | None:
+    """Return the model that wrote an Anthropic reply when it can differ from the requested one.
+
+    A server-side ``fallback`` block names the model that took over. A turn
+    served by sticky routing, which sends repeats of a fallen-back request
+    straight to the fallback model, carries no block. For a request that asked
+    for server-side fallback, the top-level ``model`` then names the model
+    that wrote the reply. ``None`` means the requested model answered.
+    """
     served_model = None
     for block in getattr(response, "content", None) or []:
         if getattr(block, "type", None) != "fallback":
             continue
         served = getattr(block, "to", None)
         model = served.get("model") if isinstance(served, dict) else getattr(served, "model", None)
+        if isinstance(model, str) and model:
+            served_model = model
+    if served_model is None and requested_fallback:
+        model = getattr(response, "model", None)
         if isinstance(model, str) and model:
             served_model = model
     return served_model
@@ -605,6 +616,7 @@ class LLMClient:
             nonlocal answered_by
             use_schema = response_schema is not None and target_key not in _SCHEMA_UNSUPPORTED_TARGETS
             if config.provider == "anthropic":
+                requests_fallback = is_claude_5_5_or_later(config.model) and _is_native_anthropic_endpoint(config)
 
                 def _anthropic_kwargs(include_schema: bool) -> dict[str, Any]:
                     call_kwargs: dict[str, Any] = {
@@ -621,7 +633,7 @@ class LLMClient:
                         output_config["effort"] = reasoning_effort
                     if output_config:
                         call_kwargs["output_config"] = output_config
-                    if is_claude_5_5_or_later(config.model) and _is_native_anthropic_endpoint(config):
+                    if requests_fallback:
                         # Server-side fallback (beta): a safety-classifier refusal is retried on
                         # the fallback model within the same call. Older SDKs lack typed fields.
                         call_kwargs["extra_headers"] = {"anthropic-beta": ANTHROPIC_SERVER_SIDE_FALLBACK_BETA}
@@ -634,8 +646,7 @@ class LLMClient:
                     target_key=target_key,
                     use_schema=use_schema,
                 )
-                # A refusal answered by the server-side fallback names it here.
-                answered_by = _anthropic_fallback_model(response) or config.model
+                answered_by = _anthropic_served_model(response, requested_fallback=requests_fallback) or config.model
                 content = "".join(
                     str(block.text) for block in response.content if getattr(block, "type", None) == "text"
                 )

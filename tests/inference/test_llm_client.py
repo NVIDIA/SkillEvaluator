@@ -1145,6 +1145,49 @@ class TestModelProvenance:
         assert client.model == "claude-opus-5-5"
         assert client.model_used == ANTHROPIC_REFUSAL_FALLBACK_MODEL
 
+    @pytest.mark.parametrize(
+        ("base_url", "expected_model"),
+        [(None, ANTHROPIC_REFUSAL_FALLBACK_MODEL), ("https://gateway.example", "claude-opus-5-5")],
+        ids=["native-sticky-turn", "gateway-without-fallback"],
+    )
+    def test_model_used_reads_the_reply_model_only_when_fallback_was_requested(
+        self, monkeypatch: pytest.MonkeyPatch, base_url: str | None, expected_model: str
+    ) -> None:
+        """A sticky-served turn has no fallback block; its top-level model names the model that wrote it."""
+        pytest.importorskip("anthropic")
+        httpx = pytest.importorskip("httpx")
+        _use_provider(monkeypatch, "anthropic", "claude-opus-5-5")
+        if base_url:
+            monkeypatch.setenv("ANTHROPIC_BASE_URL", base_url)
+        sent: list[dict] = []
+
+        def handler(request):
+            sent.append(json.loads(request.content))
+            return httpx.Response(
+                200,
+                json={
+                    "id": "msg_test",
+                    "type": "message",
+                    "role": "assistant",
+                    "model": ANTHROPIC_REFUSAL_FALLBACK_MODEL,
+                    "content": [{"type": "text", "text": "Done"}],
+                    "stop_reason": "end_turn",
+                    "stop_sequence": None,
+                    "usage": {
+                        "input_tokens": 1,
+                        "output_tokens": 1,
+                        "iterations": [{"type": "fallback_message", "model": ANTHROPIC_REFUSAL_FALLBACK_MODEL}],
+                    },
+                },
+            )
+
+        with httpx.Client(transport=httpx.MockTransport(handler)) as http_client:
+            client = LLMClient(http_client=http_client)
+            assert client.completions("system", "user") == "Done"
+
+        assert ("fallbacks" in sent[0]) is (base_url is None)
+        assert client.model_used == expected_model
+
     def test_model_used_is_kept_per_thread(self, monkeypatch: pytest.MonkeyPatch) -> None:
         _use_provider(monkeypatch, "openai", CHAT_DEFAULT_OPENAI)
         mock_openai = MagicMock()

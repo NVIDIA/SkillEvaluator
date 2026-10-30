@@ -112,6 +112,7 @@ def _preflight_options(skill_path: Path, params: dict[str, Any]) -> dict[str, An
         load_evals_config,
     )
     from skillevaluator.tier3.harbor.runner import (
+        _decoy_workspace_skills,
         _model_for_agent,
         _resolve_agent_runtime_plan,
         _resolve_runtime_env,
@@ -153,7 +154,15 @@ def _preflight_options(skill_path: Path, params: dict[str, Any]) -> dict[str, An
     include_values = [*workspace.get("include", []), *cli_includes]
     if include_values and workspace.get("mode", "isolated") != "group":
         raise ValueError("include_skills requires skill_workspace.mode=group")
-    _workspace_skills(params["skill_path"].resolve(), include_values)
+    if "decoy_manifest" in workspace:
+        _decoy_workspace_skills(
+            params["skill_path"],
+            workspace,
+            workspace.get("mode", "isolated"),
+            cli_includes,
+        )
+    else:
+        _workspace_skills(params["skill_path"].resolve(), include_values)
 
     agents = resolve_agents(params["agents"], provider=provider.provider)
     if not agents:

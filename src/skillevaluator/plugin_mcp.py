@@ -19,7 +19,7 @@ from __future__ import annotations
 import posixpath
 import re
 from collections.abc import Iterable
-from dataclasses import dataclass, field
+from dataclasses import dataclass, field, replace
 from pathlib import PurePosixPath
 from typing import Any, Literal
 
@@ -59,7 +59,13 @@ from skillevaluator.validators.mcp_static import (
     classify_mcp_pinning,
     validate_mcp_server_declaration,
 )
-from skillevaluator.validators.url_policy import looks_like_inline_secret, safe_url
+from skillevaluator.validators.url_policy import (
+    looks_like_inline_secret,
+    redact_secrets,
+    report_text,
+    safe_url,
+    url_scheme,
+)
 
 McpSource = Literal["inline", "mcp_json", "path_ref", "agent_plugin_yaml"]
 _MCP_BUNDLE_SUFFIXES = (".mcpb", ".dxt")
@@ -126,15 +132,16 @@ class McpCollection:
     def effective(self) -> list[McpDeclaration]:
         """Declarations after Claude Code's merge: a later same-name server replaces an earlier one.
 
-        ``agent_plugin.yaml`` ``mcp`` entries are a list keyed by ``(name, provider)``
-        and are kept as declared.
+        A server from a config file that is not a loadable server object does
+        not replace one (see :func:`_replaces`). ``agent_plugin.yaml`` ``mcp``
+        entries are a list keyed by ``(name, provider)`` and are kept as declared.
         """
         merged: dict[str, McpDeclaration] = {}
         listed: list[McpDeclaration] = []
         for declaration in self.declarations:
             if declaration.source == "agent_plugin_yaml":
                 listed.append(declaration)
-            else:
+            elif _replaces(declaration, merged.get(declaration.name)):
                 merged[declaration.name] = declaration
         return [*merged.values(), *listed]
 
@@ -147,6 +154,23 @@ class McpCollection:
         """Record a declared config source that cannot be loaded, with the finding that says why."""
         self.findings.append(finding)
         self.broken_sources.append((ref, path, problem))
+
+
+def _replaces(declaration: McpDeclaration, previous: McpDeclaration | None) -> bool:
+    """Whether ``declaration`` replaces an earlier same-name ``previous`` in Claude Code's merge.
+
+    Claude Code checks each server of a config file (``.mcp.json``, a ``.json``
+    path in ``mcpServers``) on its own and drops one that fails before it merges
+    the file, so a config-file server with no non-empty ``command`` or ``url``
+    string (``"oops"``, ``{"command": 5}``) leaves the earlier one in place. An
+    inline map is merged before it is checked, so its server always replaces.
+    """
+    if previous is None or declaration.source not in {"mcp_json", "path_ref"}:
+        return True
+    config = declaration.config
+    return isinstance(config, dict) and any(
+        isinstance(config.get(key), str) and config[key] for key in ("command", "url")
+    )
 
 
 def mcp_pinning_summary(declarations: Iterable[McpDeclaration]) -> dict[str, Any]:
@@ -397,6 +421,8 @@ def _flag_duplicate_names(reader: PluginRootReader, collection: McpCollection) -
         if declaration.source == "agent_plugin_yaml":
             continue
         previous = seen.get(declaration.name)
+        if not _replaces(declaration, previous):
+            continue  # Claude Code drops the invalid server and keeps the earlier one
         if previous is not None:
             collection.findings.append(
                 _plugin_finding(
@@ -428,7 +454,7 @@ def _merged_default_mcp_note(reader: PluginRootReader, default_rel: PurePosixPat
     )
 
 
-# A root placeholder followed by a plugin path, anywhere in a command or argument.
+# A root placeholder followed by a plugin path, anywhere in a command or argument (backslashes read as '/').
 _ROOT_VARIABLE_PATH_RE = re.compile(
     r"\$\{?(?:CLAUDE_PLUGIN_ROOT|PLUGIN_ROOT|CURSOR_PLUGIN_ROOT)\}?/([^\s\"'`;|&<>()]+)"
 )
@@ -457,8 +483,11 @@ def _lexical_plugin_path(candidate: str) -> PurePosixPath | None:
 
 
 def _rooted_launch_paths(value: str) -> list[PurePosixPath]:
-    """Plugin files a launch value names from the plugin root: after a root variable, or with a leading ``./``."""
-    candidates = [match.group(1) for match in _ROOT_VARIABLE_PATH_RE.finditer(value)]
+    """Plugin files a launch value names from the plugin root: after a root variable, or with a leading ``./``.
+
+    A backslash is a path separator, as on Windows (``${CLAUDE_PLUGIN_ROOT}\\node_modules\\srv\\index.js``).
+    """
+    candidates = [match.group(1) for match in _ROOT_VARIABLE_PATH_RE.finditer(value.replace("\\", "/"))]
     path = _launch_path(value)
     if path.startswith("./"):
         candidates.append(path[2:])
@@ -689,30 +718,42 @@ def _collect_path_ref(
     # Codex drops a path it does not accept and loads the default .mcp.json instead.
     dropped = contained and profile.codex_path_rules and not codex_accepts_path(raw)
     declared = normalize_declared_path(raw, profile.manifest_path_prefixes)
+    # Findings and the inventory name the reference without the credentials it may carry.
+    shown = _reported_ref(raw)
+    reported = (
+        declared
+        if shown == raw
+        else replace(
+            declared,
+            raw=shown,
+            rel=None if declared.rel is None else PurePosixPath(_reported_ref(declared.rel.as_posix())),
+        )
+    )
     if declared.problem is not None or declared.rel is None:
         problem = "escape" if declared.problem == "escape" else "invalid"
         finding = _path_problem_finding(
-            reader, "mcpServers", declared, manifest_rel, problem, reference=profile.reference
+            reader, "mcpServers", reported, manifest_rel, problem, reference=profile.reference
         )
         if dropped:
             collection.findings.append(finding)
         else:
-            collection.add_broken_source(finding, raw, None, problem)
+            collection.add_broken_source(finding, shown, None, problem)
         return
     rel = declared.rel
     path = rel.as_posix()
+    shown_path = reported.rel.as_posix() if reported.rel is not None else path
 
     def fail(finding: Finding, problem: str = "invalid") -> None:
-        collection.add_broken_source(finding, raw, path, problem)
+        collection.add_broken_source(finding, shown, shown_path, problem)
 
     if dropped:
-        collection.findings.append(_style_finding(reader, "mcpServers", declared, manifest_rel, profile=profile))
+        collection.findings.append(_style_finding(reader, "mcpServers", reported, manifest_rel, profile=profile))
         return
     if profile.require_dot_relative and not declared.dot_relative:
-        collection.findings.append(_style_finding(reader, "mcpServers", declared, manifest_rel, profile=profile))
+        collection.findings.append(_style_finding(reader, "mcpServers", reported, manifest_rel, profile=profile))
     if contained and declared.root_variable is not None:
-        collection.findings.append(_root_variable_finding(reader, "mcpServers", declared, manifest_rel, profile))
-    if (unscanned := _unscanned_path_finding(reader, "mcpServers", declared, manifest_rel)) is not None:
+        collection.findings.append(_root_variable_finding(reader, "mcpServers", reported, manifest_rel, profile))
+    if (unscanned := _unscanned_path_finding(reader, "mcpServers", reported, manifest_rel)) is not None:
         collection.findings.append(unscanned)
     suffix = rel.suffix.lower()
     if suffix not in {".json", *_MCP_BUNDLE_SUFFIXES}:
@@ -720,26 +761,26 @@ def _collect_path_ref(
             _plugin_finding(
                 Severity.HIGH,
                 "mcp_config_path_invalid",
-                f"mcpServers path {raw!r} must name a .json config file or an .mcpb/.dxt bundle",
+                f"mcpServers path {shown!r} must name a .json config file or an .mcpb/.dxt bundle",
                 reader.display(manifest_rel),
                 "Point mcpServers at a JSON file such as './.mcp.json'.",
                 category=MCP_CATEGORY,
-                metadata={"plugin_component_ref": raw},
+                metadata={"plugin_component_ref": shown},
             )
         )
         return
     kind = reader.kind(rel)
     if kind == "missing":
-        fail(_path_problem_finding(reader, "mcpServers", declared, manifest_rel, "missing"), "missing")
+        fail(_path_problem_finding(reader, "mcpServers", reported, manifest_rel, "missing"), "missing")
         return
     if kind in {"link", "special"}:
-        fail(_path_problem_finding(reader, "mcpServers", declared, manifest_rel, "unsafe", rel), "unsafe")
+        fail(_path_problem_finding(reader, "mcpServers", reported, manifest_rel, "unsafe", rel), "unsafe")
         return
     if kind != "file":
-        fail(_path_problem_finding(reader, "mcpServers", declared, manifest_rel, "invalid"))
+        fail(_path_problem_finding(reader, "mcpServers", reported, manifest_rel, "invalid"))
         return
     if suffix in _MCP_BUNDLE_SUFFIXES:
-        collection.bundles.append((raw, path))
+        collection.bundles.append((shown, path))
         collection.findings.append(
             _plugin_finding(
                 Severity.MEDIUM,
@@ -752,7 +793,23 @@ def _collect_path_ref(
             )
         )
         return
-    _load_mcp_file(reader, collection, rel, "path_ref", raw)
+    _load_mcp_file(reader, collection, rel, "path_ref", shown)
+
+
+def _reported_ref(raw: str) -> str:
+    """A declared ``mcpServers`` reference as findings and the inventory show it, without its credentials.
+
+    A reference with a URL scheme (``ws://user:token@host/srv.mcpb``, the
+    one-slash ``https:/user:pw@host/...``) is shown as :func:`safe_url` shows
+    it: no userinfo, query, or fragment. Any other (``//user:pw@host/...``,
+    ``./servers.json?token=...``) has its credentials redacted. A reference
+    that carries none is returned as written.
+    """
+    scheme = url_scheme(raw.strip())
+    if scheme is not None and len(scheme) > 1:  # one letter is a Windows drive ('C:\\...')
+        return safe_url(raw)
+    redacted = redact_secrets(raw)
+    return raw if redacted == raw else report_text(redacted)
 
 
 def _collect_url_ref(reader: PluginRootReader, collection: McpCollection, raw: str, manifest_rel: str) -> None:

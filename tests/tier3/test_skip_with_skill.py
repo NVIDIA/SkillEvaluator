@@ -564,6 +564,9 @@ def test_cli_summary_marks_the_with_skill_arm_skipped(tmp_path: Path) -> None:
     assert "baseline only" in verdict_line
     assert "no skill effect was measured" in verdict_line
     assert "contracts differ" not in rendered
+    # Per-case rows show no effect rather than "inconclusive" for an arm that never ran.
+    assert "inconclusive" not in rendered
+    assert re.search(r"case-001\s+-\s+1/1 .*\s+-\s*$", rendered, re.MULTILINE)
     security_dimension = next(line for line in rendered.splitlines() if line.strip("│ ").startswith("Security"))
     assert "skipped" in security_dimension
 

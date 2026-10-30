@@ -388,6 +388,7 @@ def _condition_grid(
     """One agent: a row per case with both conditions side by side and the effect."""
     [agent] = agents.values()
     comparable = _comparable(agent)
+    with_skill_skipped = _with_skill_skipped(agent)
     table = _table(title, "with skill", "without skill", "effect")
     for case_id in case_ids:
         with_case, without_case = _cases(agent, "with_skill").get(case_id), _cases(agent, "without_skill").get(case_id)
@@ -395,7 +396,10 @@ def _condition_grid(
             Text(safe(case_id)),
             _condition_cell(with_case),
             _condition_cell(without_case),
-            _effect(with_case, without_case, comparable=_case_comparable(agent, with_case, without_case)),
+            # No with-skill arm ran (--skip-with-skill), so there is no effect to call.
+            Text("-", style="dim")
+            if with_skill_skipped
+            else _effect(with_case, without_case, comparable=_case_comparable(agent, with_case, without_case)),
         )
     table.add_section()
     rates = _agent_rates(agent)

@@ -98,7 +98,7 @@ If none is set, LLM-backed commands fail with a configuration error. If more tha
 
 ### SkillSpector bridge
 
-The `--llm` security analysis runs [SkillSpector](https://github.com/NVIDIA/SkillSpector), which has its own provider environment. SkillEvaluator bridges your configured provider into that invocation with an isolated subprocess environment: only the selected provider's settings, the SkillSpector model settings below, and a small set of basic process variables are forwarded, so ambient credentials for other providers never reach SkillSpector. `SKILLSPECTOR_TEMPERATURE` is not forwarded, because current reasoning models reject a custom temperature. The `nv_build` provider is bridged through SkillSpector's OpenAI-compatible path, pointing `OPENAI_BASE_URL` at the public NVIDIA Build endpoint.
+The `--llm` security analysis runs [SkillSpector](https://github.com/NVIDIA/SkillSpector), which has its own provider environment. SkillEvaluator bridges your configured provider into that invocation with an isolated subprocess environment: only the selected provider's settings, the SkillSpector model and deadline settings below, and a small set of basic process variables are forwarded, so ambient credentials for other providers never reach SkillSpector. `SKILLSPECTOR_TEMPERATURE` is not forwarded, because current reasoning models reject a custom temperature. The `nv_build` provider is bridged through SkillSpector's OpenAI-compatible path, pointing `OPENAI_BASE_URL` at the public NVIDIA Build endpoint.
 
 | Variable | Default | Effect |
 | --- | --- | --- |
@@ -107,6 +107,7 @@ The `--llm` security analysis runs [SkillSpector](https://github.com/NVIDIA/Skil
 | `SKILLSPECTOR_MODEL_<SLOT>` | unset | Per-analyzer model override, such as `SKILLSPECTOR_MODEL_META_ANALYZER`. Forwarded as set. |
 | `SKILLSPECTOR_MODEL_REGISTRY` | unset | Path to a complete custom SkillSpector model registry, for model IDs the bundled registry does not list. Forwarded as set. |
 | `SKILLSPECTOR_REASONING_EFFORT` | `medium` for GPT-6 models, else unset | Reasoning effort for every SkillSpector analyzer. Your value wins. SkillEvaluator sets it only when every SkillSpector model, including `SKILLSPECTOR_MODEL_<SLOT>` overrides, is a GPT-6 model, so never for Claude. |
+| `SKILLSPECTOR_MAX_WORKFLOW_SECONDS` | SkillSpector default (600) | SkillSpector's own deadline for one scan, in seconds. Forwarded as set to both the static and the LLM stage. When it expires, SkillSpector reports partial analysis and the security scan is `INCOMPLETE`. Keep it below `SKILLEVALUATOR_SKILLSPECTOR_TIMEOUT_SECONDS`. |
 
 ## Embeddings
 
@@ -129,6 +130,7 @@ These variables tune the static and security checks. The check-by-check guide is
 | `SKILLEVALUATOR_BANDIT_PATH` | auto-discovered | Absolute path to the Bandit executable. |
 | `SKILLEVALUATOR_SEMGREP_PATH` | auto-discovered | Absolute path to the Semgrep executable. |
 | `SKILLEVALUATOR_SKILLSPECTOR_PATH` | auto-discovered | Absolute path to the SkillSpector executable. |
+| `SKILLEVALUATOR_SKILLSPECTOR_TIMEOUT_SECONDS` | `1200` | Watchdog for each SkillSpector run, in seconds. The static stage and, with `--llm`, the LLM stage each get the full value. A run that exceeds it is stopped and the security scan is `INCOMPLETE`. Set a positive integer; values above `86400` are capped, and other values fall back to the default with a warning. Keep it above `SKILLSPECTOR_MAX_WORKFLOW_SECONDS` so SkillSpector's own deadline ends a slow scan first. The effective value is recorded as `skillspector_timeout_seconds` in the security result. |
 | `SKILLEVALUATOR_SCHEMA_ALLOWED_DIRS` | — | Extra allowed skill-root directory names (comma- or whitespace-separated), e.g. `data,fixtures`. Additive only — names extend the built-in allowlist and never replace it. |
 | `SKILLEVALUATOR_SUBMITTER` | auto-detected | Explicit submitter identity for the home-path PII check. It is combined with `GITHUB_ACTOR`, `USER`, `LOGNAME`, `USERNAME`, the OS login name, and the skill's declared author — every identity that resolves is protected. If none resolves, the home-path check is disabled with a warning. |
 | `SKILLEVALUATOR_PREVIOUS_VERSION` | — | The previously published skill version that the default version check compares against. Without this value or `--previous-version`, the check validates the current version's format but does not enforce an increase. |

@@ -19,7 +19,7 @@ from skillevaluator.reporting import CLIReporter, HTMLReporter, JSONReporter, Ma
 from skillevaluator.utils.tool_runner import ToolResult, Tools
 from skillevaluator.validators.base import Finding, Severity, ValidationResult
 from skillevaluator.validators.schema import SchemaValidator
-from skillevaluator.validators.security import SecurityValidator, _skillspector_child_env
+from skillevaluator.validators.security import SecurityValidator, _skillspector_child_env, _skillspector_timeout_seconds
 
 _SKILLSPECTOR_2_9_6_NO_LLM_REPORT = (
     Path(__file__).parents[1] / "fixtures" / "skillspector-2.9.6-no-llm.json"
@@ -4288,6 +4288,87 @@ print(json.dumps([finding.metadata["matched_value"] for finding in result.findin
         assert result.metadata["skillspector_model"] == "gpt-6.1-sol"
         assert result.metadata["skillspector_reasoning_effort"] == "medium"
         assert result.metadata["skillspector_version"] == "2.10.0"
+
+    @pytest.mark.parametrize(
+        ("value", "expected", "warned"),
+        (
+            (None, 1200, False),
+            ("", 1200, False),
+            ("  ", 1200, False),
+            ("900", 900, False),
+            (" 2400 ", 2400, False),
+            ("86400", 86400, False),
+            ("86401", 86400, True),
+            ("10000000", 86400, True),
+            ("0", 1200, True),
+            ("-1", 1200, True),
+            ("1.5", 1200, True),
+            ("not-a-number", 1200, True),
+        ),
+    )
+    def test_skillspector_timeout_configuration(self, value: str | None, expected: int, warned: bool) -> None:
+        environ = {} if value is None else {"SKILLEVALUATOR_SKILLSPECTOR_TIMEOUT_SECONDS": value}
+
+        with patch("skillevaluator.validators.security.logger") as mock_logger:
+            assert _skillspector_timeout_seconds(environ) == expected
+
+        assert mock_logger.warning.called is warned
+
+    def test_skillspector_stages_use_configured_timeout_and_workflow_deadline(
+        self,
+        monkeypatch,
+        sample_skill_dir: Path,
+    ) -> None:
+        """Both stages get the operator watchdog, and SkillSpector gets its own deadline."""
+        monkeypatch.setenv("SKILL_EVAL_LLM_PROVIDER", "openai")
+        monkeypatch.setenv("OPENAI_API_KEY", "provider-test-key")
+        monkeypatch.setenv("SKILLEVALUATOR_SKILLSPECTOR_TIMEOUT_SECONDS", "2400")
+        monkeypatch.setenv("SKILLSPECTOR_MAX_WORKFLOW_SECONDS", "1800")
+        monkeypatch.delenv("SKILLSPECTOR_PROVIDER", raising=False)
+        reports = (_skillspector_json_report(), _skillspector_json_report(llm_requested=True, llm_available=True))
+
+        with (
+            patch.object(Tools.skillspector, "_path", "/usr/bin/skillspector"),
+            patch.object(
+                Tools.skillspector,
+                "run",
+                side_effect=[
+                    ToolResult(success=True, stdout=json.dumps(report), stderr="", exit_code=0) for report in reports
+                ],
+            ) as mock_run,
+        ):
+            result = SecurityValidator(use_llm=True).validate_security_only(sample_skill_dir)
+
+        assert len(mock_run.call_args_list) == 2
+        for call in mock_run.call_args_list:
+            assert call.kwargs["timeout"] == 2400
+            assert call.kwargs["replace_env"] is True
+            assert call.kwargs["env"]["SKILLSPECTOR_MAX_WORKFLOW_SECONDS"] == "1800"
+            assert "SKILLEVALUATOR_SKILLSPECTOR_TIMEOUT_SECONDS" not in call.kwargs["env"]
+        assert result.metadata["skillspector_timeout_seconds"] == 2400
+
+    @patch("skillevaluator.validators.security.Tools")
+    def test_skillspector_static_stage_defaults_to_1200_second_timeout(
+        self,
+        mock_tools,
+        monkeypatch,
+        sample_skill_dir: Path,
+    ) -> None:
+        monkeypatch.delenv("SKILLEVALUATOR_SKILLSPECTOR_TIMEOUT_SECONDS", raising=False)
+        monkeypatch.delenv("SKILLSPECTOR_MAX_WORKFLOW_SECONDS", raising=False)
+        mock_tools.skillspector.is_available = True
+        mock_tools.skillspector.run.return_value = ToolResult(
+            success=True,
+            stdout=json.dumps(_skillspector_json_report()),
+            stderr="",
+            exit_code=0,
+        )
+
+        result = SecurityValidator(use_llm=False).validate_security_only(sample_skill_dir)
+
+        assert mock_tools.skillspector.run.call_args.kwargs["timeout"] == 1200
+        assert "SKILLSPECTOR_MAX_WORKFLOW_SECONDS" not in mock_tools.skillspector.run.call_args.kwargs["env"]
+        assert result.metadata["skillspector_timeout_seconds"] == 1200
 
     def test_partial_llm_verdicts_are_reported_as_partial(self, tmp_path: Path) -> None:
         """A verifier response covering only some findings must not claim full confirmation."""

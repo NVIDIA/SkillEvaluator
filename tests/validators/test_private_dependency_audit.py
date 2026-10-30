@@ -12,6 +12,7 @@ from types import SimpleNamespace
 
 import pytest
 
+from skillevaluator.models.result import Severity
 from skillevaluator.plugin_mcp import McpDeclaration
 from skillevaluator.plugin_paths import PluginRootReader
 from skillevaluator.utils.tool_runner import ToolResult
@@ -400,3 +401,71 @@ def test_container_malformed_registry_port_is_never_contacted(audit, tmp_path):
     )
     assert result.is_incomplete
     assert not scanner.calls
+
+
+@pytest.mark.parametrize("ecosystem", ["npm", "container"])
+@pytest.mark.parametrize("critical_first", [False, True])
+def test_aggregate_audit_cap_retains_critical_source_and_marks_truncation(audit, tmp_path, ecosystem, critical_first):
+    reader = PluginRootReader(tmp_path)
+    if ecosystem == "npm":
+        inputs = audit.AuditInputs(
+            npm_sources=[
+                audit.AuditSource("npm", "first/package.json", (("first", "1.0.0"),)),
+                audit.AuditSource("npm", "second/package.json", (("second", "1.0.0"),)),
+            ]
+        )
+    else:
+        inputs = audit.AuditInputs(
+            images=[
+                audit.ImageDeclaration("first:1.0.0", "first/Dockerfile"),
+                audit.ImageDeclaration("second:1.0.0", "second/Dockerfile"),
+            ]
+        )
+
+    def report(args, files):
+        name = (
+            next(iter(json.loads(files["package.json"])["dependencies"]))
+            if ecosystem == "npm"
+            else args[0].removeprefix("registry:").split(":")[0]
+        )
+        critical = (name == "first") == critical_first
+        severity, count = ("critical", 1) if critical else ("low", 200)
+        if ecosystem == "npm":
+            payload = npm_clean()
+            payload["metadata"]["vulnerabilities"].update({severity: 1, "total": 1})
+            payload["vulnerabilities"] = {
+                name: {"via": [{"name": name, "source": index + 1, "severity": severity} for index in range(count)]}
+            }
+            return payload
+        return {
+            "matches": [
+                {
+                    "vulnerability": {"id": f"CVE-{name}-{index}", "severity": severity},
+                    "artifact": {"name": name, "version": "1.0.0"},
+                }
+                for index in range(count)
+            ]
+        }
+
+    scanner = FakeTool(report, exit_code=1 if ecosystem == "npm" else 0)
+    result = audit.run_dependency_audits(
+        reader,
+        inputs,
+        python=False,
+        npm=ecosystem == "npm",
+        container=ecosystem == "container",
+        tools=toolset(**{"npm" if ecosystem == "npm" else "grype": scanner}),
+    )
+    assert result.is_incomplete and not result.passed
+    assert len(result.findings) <= 200
+    critical = [finding for finding in result.findings if finding.severity == Severity.CRITICAL]
+    assert len(critical) == 1
+    expected_source = "first" if critical_first else "second"
+    expected_file = "package.json" if ecosystem == "npm" else "Dockerfile"
+    assert critical[0].file_path == str(tmp_path / expected_source / expected_file)
+    summary = result.metadata["plugin"]["cve_summary"]["ecosystems"][ecosystem]
+    assert summary["status"] == "incomplete"
+    assert summary["findings_truncated"] is True
+    assert summary["sources"] == summary["audited"] == 2
+    assert summary["vulnerabilities"] == 201
+    assert "vulnerability finding bound exceeded" in summary["errors"]

@@ -403,11 +403,18 @@ def test_container_malformed_registry_port_is_never_contacted(audit, tmp_path):
     assert not scanner.calls
 
 
-@pytest.mark.parametrize("ecosystem", ["npm", "container"])
+@pytest.mark.parametrize("ecosystem", ["python", "npm", "container"])
 @pytest.mark.parametrize("critical_first", [False, True])
 def test_aggregate_audit_cap_retains_critical_source_and_marks_truncation(audit, tmp_path, ecosystem, critical_first):
     reader = PluginRootReader(tmp_path)
-    if ecosystem == "npm":
+    if ecosystem == "python":
+        inputs = audit.AuditInputs(
+            python_sources=[
+                audit.AuditSource("python", "first/requirements.txt", (("first", "1.0.0"),)),
+                audit.AuditSource("python", "second/requirements.txt", (("second", "1.0.0"),)),
+            ]
+        )
+    elif ecosystem == "npm":
         inputs = audit.AuditInputs(
             npm_sources=[
                 audit.AuditSource("npm", "first/package.json", (("first", "1.0.0"),)),
@@ -424,12 +431,27 @@ def test_aggregate_audit_cap_retains_critical_source_and_marks_truncation(audit,
 
     def report(args, files):
         name = (
-            next(iter(json.loads(files["package.json"])["dependencies"]))
+            files["requirements.txt"].split("==")[0]
+            if ecosystem == "python"
+            else next(iter(json.loads(files["package.json"])["dependencies"]))
             if ecosystem == "npm"
             else args[0].removeprefix("registry:").split(":")[0]
         )
         critical = (name == "first") == critical_first
         severity, count = ("critical", 1) if critical else ("low", 200)
+        if ecosystem == "python":
+            return {
+                "dependencies": [
+                    {
+                        "name": name,
+                        "version": "1.0.0",
+                        "vulns": [
+                            {"id": f"CVE-{name}-{index}", "severity": severity, "fix_versions": []}
+                            for index in range(count)
+                        ],
+                    }
+                ]
+            }
         if ecosystem == "npm":
             payload = npm_clean()
             payload["metadata"]["vulnerabilities"].update({severity: 1, "total": 1})
@@ -447,21 +469,21 @@ def test_aggregate_audit_cap_retains_critical_source_and_marks_truncation(audit,
             ]
         }
 
-    scanner = FakeTool(report, exit_code=1 if ecosystem == "npm" else 0)
+    scanner = FakeTool(report, exit_code=0 if ecosystem == "container" else 1)
     result = audit.run_dependency_audits(
         reader,
         inputs,
-        python=False,
+        python=ecosystem == "python",
         npm=ecosystem == "npm",
         container=ecosystem == "container",
-        tools=toolset(**{"npm" if ecosystem == "npm" else "grype": scanner}),
+        tools=toolset(**{{"python": "pip_audit", "npm": "npm", "container": "grype"}[ecosystem]: scanner}),
     )
     assert result.is_incomplete and not result.passed
     assert len(result.findings) <= 200
     critical = [finding for finding in result.findings if finding.severity == Severity.CRITICAL]
     assert len(critical) == 1
     expected_source = "first" if critical_first else "second"
-    expected_file = "package.json" if ecosystem == "npm" else "Dockerfile"
+    expected_file = {"python": "requirements.txt", "npm": "package.json", "container": "Dockerfile"}[ecosystem]
     assert critical[0].file_path == str(tmp_path / expected_source / expected_file)
     summary = result.metadata["plugin"]["cve_summary"]["ecosystems"][ecosystem]
     assert summary["status"] == "incomplete"
@@ -469,3 +491,69 @@ def test_aggregate_audit_cap_retains_critical_source_and_marks_truncation(audit,
     assert summary["sources"] == summary["audited"] == 2
     assert summary["vulnerabilities"] == 201
     assert "vulnerability finding bound exceeded" in summary["errors"]
+
+
+@pytest.mark.parametrize(
+    "vulnerability,severity",
+    [
+        ({"id": "CVE-2026-0001", "severity": "high", "fix_versions": ["2.0"]}, Severity.HIGH),
+        ({"id": "CVE-2026-0002", "severity": "medium", "fix_versions": []}, Severity.MEDIUM),
+        ({"id": "GHSA-fixture-0001", "fix_versions": []}, Severity.HIGH),
+        (
+            {"id": "CVE-2026-0003", "fix_versions": [], "aliases": [{"cvss": {"score": 9.8}}]},
+            Severity.CRITICAL,
+        ),
+    ],
+)
+def test_python_advisories_are_structured_counted_and_attributed(audit, tmp_path, vulnerability, severity):
+    reader, paths = source(tmp_path, {"requirements.txt": "foo==1.0\n"})
+    report = {"dependencies": [{"name": "foo", "version": "1.0", "vulns": [vulnerability]}], "fixes": []}
+    result = audit.run_dependency_audits(
+        reader, audit.collect_audit_inputs(reader, paths), tools=toolset(pip_audit=FakeTool(report, 1))
+    )
+    assert not result.is_incomplete
+    assert result.passed is (severity == Severity.MEDIUM)
+    assert len(result.findings) == 1
+    finding = result.findings[0]
+    assert finding.severity == severity
+    assert finding.file_path == str(tmp_path / "requirements.txt")
+    assert finding.metadata["ecosystem"] == "python"
+    assert vulnerability["id"] in finding.message
+    assert all(version in finding.message for version in vulnerability["fix_versions"])
+    legacy = result.warnings if severity == Severity.MEDIUM else result.errors
+    assert any(vulnerability["id"] in message for message in legacy)
+    summary = result.metadata["plugin"]["cve_summary"]["ecosystems"]["python"]
+    assert summary["status"] == "audited"
+    assert summary["sources"] == summary["audited"] == summary["vulnerabilities"] == 1
+
+
+def test_python_valid_empty_advisory_report_stays_complete(audit, tmp_path):
+    reader, paths = source(tmp_path, {"requirements.txt": "foo==1.0\n"})
+    report = {"dependencies": [{"name": "foo", "version": "1.0", "vulns": []}], "fixes": []}
+    result = audit.run_dependency_audits(
+        reader, audit.collect_audit_inputs(reader, paths), tools=toolset(pip_audit=FakeTool(report))
+    )
+    assert result.passed and not result.is_incomplete
+    assert not result.findings
+    summary = result.metadata["plugin"]["cve_summary"]["ecosystems"]["python"]
+    assert summary["sources"] == summary["audited"] == 1
+    assert summary["vulnerabilities"] == 0
+
+
+@pytest.mark.parametrize(
+    "vulnerability",
+    [
+        {"id": "CVE-2026-0001", "severity": True, "fix_versions": []},
+        {"id": "CVE-2026-0001", "fix_versions": None},
+        {"id": "CVE-2026-0001", "fix_versions": [], "aliases": [{"cvss": {"score": "9.8"}}]},
+    ],
+)
+def test_malformed_python_advisory_never_becomes_clean(audit, tmp_path, vulnerability):
+    reader, paths = source(tmp_path, {"requirements.txt": "foo==1.0\n"})
+    report = {"dependencies": [{"name": "foo", "version": "1.0", "vulns": [vulnerability]}]}
+    result = audit.run_dependency_audits(
+        reader, audit.collect_audit_inputs(reader, paths), tools=toolset(pip_audit=FakeTool(report, 1))
+    )
+    assert result.is_incomplete and not result.passed
+    summary = result.metadata["plugin"]["cve_summary"]["ecosystems"]["python"]
+    assert summary["status"] == "incomplete" and summary["audited"] == 0

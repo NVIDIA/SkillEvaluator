@@ -27,6 +27,7 @@ from skillevaluator.tier3.plugin_native import (
 
 if TYPE_CHECKING:
     from skillevaluator.evaluation.options import EvaluationOptions
+    from skillevaluator.tier3.plugin_prepare import PreparedRuntimePackage
 
 
 class PrivateRuntimeHooks(Protocol):
@@ -175,3 +176,65 @@ def run_private_evaluation(
             except Exception as exc:
                 outcome.cleanup_error = f"{type(exc).__name__}: {exc}"[:600]
     return outcome
+
+
+def evaluate_prepared_plugin(
+    package: PreparedRuntimePackage,
+    options: EvaluationOptions,
+    *,
+    work_dir: Path,
+    load: str = "wrapper",
+    evals_source: Path | None = None,
+    evaluate: Callable[[EvaluationOptions], dict[str, Any]] | None = None,
+    publish: Callable[[PrivateRunOutcome], None] | None = None,
+) -> PrivateRunOutcome:
+    """Evaluate a prepared plugin through the existing engine and remove the operation-owned staging.
+
+    Results are written under the plugin's own ``evals/results`` (or the
+    caller's ``results_dir``), never beneath the temporary wrapper, so they
+    survive cleanup. Agents whose decision is native load the plugin through
+    their harness in the with arm only; the baseline arm stays ordinary.
+    """
+    import shutil
+    import tempfile
+    from dataclasses import replace
+
+    from skillevaluator.tier3.plugin_native import resolve_plugin_load
+    from skillevaluator.tier3.plugin_prepare import stage_wrapper_skill
+
+    if not package.runnable:
+        raise PluginLoadError("plugin has no runnable skill, rule, MCP server, or text component")
+    agents = [agent.strip() for agent in (options.agents or "").split(",") if agent.strip()]
+    if load != "wrapper" and not agents:
+        raise PluginLoadError("native plugin loading needs explicit agents")
+    decisions = resolve_plugin_load(load, agents, env_mode=options.env_mode) if agents else {}
+    temp = Path(tempfile.mkdtemp(prefix="skilleval-plugin-", dir=work_dir))
+    try:
+        wrapper = stage_wrapper_skill(package, temp / "skill", evals_source=evals_source)
+    except BaseException:
+        shutil.rmtree(temp, ignore_errors=True)
+        raise
+    results_dir = options.results_dir or package.native_source.plugin_root / "evals" / "results"
+    hooks = NativeRuntimeHooks(package.native_source, decisions) if any(d.native for d in decisions.values()) else None
+    provenance = {
+        "plugin": package.plugin_name,
+        "source": {
+            "root": package.identity.root,
+            "manifest": package.identity.manifest,
+            "manifest_sha256": package.identity.manifest_sha256,
+        },
+        "wrapper_skill": wrapper.name,
+        "case_sources": dict(wrapper.case_sources),
+        "load_decisions": {agent: decision.to_dict() for agent, decision in decisions.items()},
+        "audit": [vars(row) for row in package.audit],
+        "incomplete_reasons": list(package.incomplete_reasons),
+        "complete": package.complete,
+    }
+    return run_private_evaluation(
+        replace(options, skill_path=wrapper.path, results_dir=results_dir),
+        hooks=hooks,
+        provenance=provenance,
+        evaluate=evaluate,
+        publish=publish,
+        cleanup=lambda: shutil.rmtree(temp),
+    )

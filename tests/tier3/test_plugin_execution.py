@@ -107,3 +107,65 @@ def test_ordinary_runs_have_no_active_runtime() -> None:
 
     assert runner._private_runtime_hooks() is None
     assert runner._private_with_agent_import_path("claude-code", None) is None
+
+
+def _prepared(root: Path):
+    import json
+
+    from skillevaluator.plugin_inventory import plugin_inventory_for_root
+    from skillevaluator.tier3.plugin_prepare import prepare_runtime_package
+
+    files = {
+        ".claude-plugin/plugin.json": {"name": "demo"},
+        "skills/a/SKILL.md": "---\nname: a\ndescription: A.\n---\nBody.\n",
+        "skills/a/evals/evals.json": [{"id": "one", "prompt": "do it"}],
+    }
+    for rel, value in files.items():
+        (root / rel).parent.mkdir(parents=True, exist_ok=True)
+        (root / rel).write_text(value if isinstance(value, str) else json.dumps(value), encoding="utf-8")
+    inventory = plugin_inventory_for_root(root)
+    assert inventory is not None
+    return prepare_runtime_package(inventory)
+
+
+def test_prepared_plugin_runs_wrapper_with_durable_results_and_removes_staging(tmp_path: Path) -> None:
+    package = _prepared(tmp_path / "plugin")
+    work = tmp_path / "work"
+    work.mkdir()
+    seen: dict = {}
+
+    def evaluate(options):
+        seen["skill"] = options.skill_path
+        seen["results"] = options.results_dir
+        seen["exists"] = (options.skill_path / "evals" / "evals.json").is_file()
+        return dict(OK)
+
+    outcome = px.evaluate_prepared_plugin(package, _options(tmp_path), work_dir=work, evaluate=evaluate)
+    assert outcome.status == "succeeded" and seen["exists"]
+    assert seen["results"] == tmp_path / "plugin" / "evals" / "results"
+    assert outcome.provenance["case_sources"] == {"a-one": "skills/a/evals/evals.json"}
+    assert outcome.provenance["source"]["manifest_sha256"] == package.identity.manifest_sha256
+    assert not seen["skill"].exists() and list(work.iterdir()) == []
+
+
+def test_native_hooks_stage_only_the_with_arm_of_native_agents(tmp_path: Path) -> None:
+    from skillevaluator.tier3.plugin_native import resolve_plugin_load
+
+    package = _prepared(tmp_path / "plugin")
+    decisions = resolve_plugin_load("native", ["claude-code"], env_mode="docker")
+    hooks = px.NativeRuntimeHooks(package.native_source, decisions)
+    task = tmp_path / "task"
+    (task / "environment").mkdir(parents=True)
+    (task / "environment" / "Dockerfile").write_text("FROM python:3.12-slim", encoding="utf-8")
+    hooks.stage_with_arm("claude-code", [task])
+    dockerfile = (task / "environment" / "Dockerfile").read_text(encoding="utf-8")
+    assert dockerfile.startswith("FROM python:3.12-slim\n") and "COPY" in dockerfile
+    assert (task / "environment" / "skilleval").is_dir()
+    assert hooks.with_agent_import_path("codex", None) is None
+    hooks.stage_with_arm("codex", [tmp_path / "missing"])
+
+
+def test_native_load_without_agents_is_refused(tmp_path: Path) -> None:
+    package = _prepared(tmp_path / "plugin")
+    with pytest.raises(px.PluginLoadError, match="explicit agents"):
+        px.evaluate_prepared_plugin(package, _options(tmp_path), work_dir=tmp_path, load="native", evaluate=dict)

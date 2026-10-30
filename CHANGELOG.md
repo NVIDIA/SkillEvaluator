@@ -6,11 +6,50 @@ All notable changes to SkillEvaluator are documented in this file.
 
 ### Added
 
+- `tier3 evaluate` now leads with a case-first summary: a verdict line and one
+  row per `evals.json` case. With one agent, each row shows, for with and
+  without the skill, the pass count, per-attempt marks (`✓` pass, `✗` fail,
+  `⊘` did not run, `·` skipped after a pass) and mean score, plus an effect
+  column (`helps`, `hurts`, `both fail`, `better score`, `worse score`,
+  `no change`, `inconclusive`). With several agents, each agent gets a column
+  showing without-skill → with-skill marks and the pass-rate change. Success
+  rate, quality score, and dimensions follow. A "How to improve" list follows,
+  ranked by attempts lost and capped at three; each item names the case,
+  agent, issue type (`skill`, `skill not used`, `skill hurts`, `environment`,
+  `run error`, `eval case`, `missing input`, `goal not met`), one action, and an evidence
+  path, and is also written to `what_to_fix.json` in the run directory. When
+  nothing needs fixing it prints a one-line "nothing to fix" instead. The
+  verdict is `inconclusive` when attempts did not run. The per-evaluator and
+  per-dimension tables and metric findings moved behind the new `--verbose`
+  flag and remain in `report.html`.
+- `goal not met` flags with-skill attempts that pass on the aggregate score
+  while the judge scored goal accuracy 0.00 (for example, the agent only asked
+  for details).
+- `report.html` leads with the same case-based findings: "Verdict at a glance"
+  adds the per-case result, the highest-scoring agent versus the biggest skill
+  lift, and the goal-not-met count; "Conclusion & Next Steps" and the Insights
+  recommendations list the `what_to_fix.json` fixes (or "Nothing to fix").
+  Data fixes elsewhere: Pass@K shows attempts passed, a regressed passing
+  dimension reads "PASS · regressed" with its weakest signal, resource totals
+  are formatted with units and percent change, Attempt Details groups each
+  case's with/without rows and marks passes that missed the goal, and Error
+  Recovery lists only trials with faults, retries or warnings.
 - Reusable GitHub Actions onboarding for complete Tier 1 checks, with
   pinned runtime/workflow consumer templates, affected-skill PR selection,
   optional hosted reports and updated PR feedback. The new guide separates
   basic scanning from publisher setup; public image publication and generated
-  release files require a reviewed manual release before consumer use.
+  release files require a reviewed manual release before consumer use. The
+  Tier 1 image is a multi-stage build with precompiled bytecode that ships only
+  the locked Semgrep, SkillSpector and SkillEvaluator environments, Gitleaks,
+  `ci/` and the license files. A release builds it without cached layers and
+  pushes the image it smoke-tested.
+- The reusable Tier 1 workflow scans up to four skills at once. The
+  `scan-workers` input (1 to 16) changes this, and `1` scans one skill at a
+  time. Each worker gets its own private home and temporary directory. Logs,
+  annotations and report rows keep skill order, and skills not started when the
+  scan time budget runs out are still reported as not evaluated. A timeout,
+  Ctrl-C or an error while saving results ends running scans together with
+  the scanner tools they started.
 - `--quality-config PATH` on `validate`, `quality-check`, and `tier1` loads the
   deterministic quality check's expected Markdown headings from a YAML file
   instead of the built-in list. Each `expected_headers` entry sets a `heading`
@@ -26,6 +65,9 @@ All notable changes to SkillEvaluator are documented in this file.
   `quality_config` (`packaged` or `custom`, the custom file's name, a
   `sha256:` digest of the normalized rules, and the `--min-score` pass
   threshold, which is kept out of the digest).
+- CI-native per-skill HTML pages link Download JSON to the retained
+  `skillevaluator-tier1.json` and do not embed a second copy of the report
+  JSON. Standalone CLI HTML reports embed it for Export JSON.
 
 ### Changed
 
@@ -34,6 +76,26 @@ All notable changes to SkillEvaluator are documented in this file.
   applicable are excluded from passed and executed counts. Publication status
   remains visible on mobile and in print, and blocking/advisory findings retain
   their separate counts.
+- The HTML report opens on the answer. The skill name is the page title, and
+  the header shows one verdict, the date and version, and Download JSON. A
+  summary gives the verdict with a one-line reason, four numbers with one
+  definition of a finding, and a Fix first list of up to five places, most
+  severe first and linked to their evidence. A scanner that did not finish is
+  listed first with its own reason, and two scanners reporting one location
+  take one entry. Scanner diagnostics always show and print.
+  Failed checks are listed first, raw check IDs get plain names, and
+  publication eligibility sits next to the verdict.
+- The HTML report, the CI index and the Pages history use one verdict
+  vocabulary: Passed, Changes required, Incomplete, Skipped and Neutral. When
+  no check ran, the header and the summary both say Skipped. A failing tier
+  whose gate does not block shows Failed (advisory). The CI index names the
+  same first fix as each skill's report and links to it.
+- The SkillEvaluator logo replaces the letter tile and the green square on
+  every report page, the CI index and the Pages history. Colors use one
+  palette built on the logo greens, with WCAG AA text contrast in light and
+  dark themes. The report follows the system theme until the reader picks
+  one, and prints dark text on white paper, Tier 3 charts included. No text is
+  smaller than 11 px, and short table cells no longer break mid-word.
 - Dependency audits inspect pinned package versions without installing packages
   or executing build scripts. Unpinned, URL and other unresolved requirements
   report incomplete coverage instead of executing package resolution.
@@ -46,6 +108,22 @@ All notable changes to SkillEvaluator are documented in this file.
   with eligible free prototyping access. Installation adds extras as needed,
   and the guides separate quality results from full scanner and live-agent
   evidence.
+- The optional GitHub report publisher downloads only a small
+  `skill-evaluator-tier1-evidence-attempt-N` artifact holding `summary.json`
+  and each skill's JSON. At 99 skills the download drops from 4.2 MB to
+  0.46 MB, and HTML, SARIF and logs no longer count toward its 64 MiB limit.
+  A scan from an evaluator revision that does not upload this artifact cannot
+  be published. Re-running it reuses that evaluator, so update the scan caller
+  and the publisher allowlists, then start a new scan. When an automatic run
+  commits nothing new, the publisher skips its Pages deploy and PR comment and
+  leaves both to the run that pushed that content. The publisher also installs
+  uv into a private environment instead of the runner's system Python, checks
+  out only the tool files each job needs and replaces site files atomically.
+  It and the PR comment helper share one GitHub client, which rejects sibling
+  repository endpoints and NaN or Infinity in JSON for both.
+- HTML reports rendered in one process share one compiled template
+  environment, so each template compiles once per process instead of once per
+  report.
 
 ### Documentation
 
@@ -62,6 +140,20 @@ All notable changes to SkillEvaluator are documented in this file.
   Markdown sections are packed by paragraph, so short labels and fragments stay
   attached to their neighbours, source ranges retain blank-line gaps, and findings
   list a split source once.
+- Local-mode verifier uploads now copy directly to the absent destination,
+  avoiding an unnecessary rollback snapshot of an empty tests directory.
+  Inputs and rewritten scripts are prepared privately before publication,
+  so failed uploads preserve existing verifier files. Missing or invalid
+  sources fail rather than creating an empty verifier directory. Per-step
+  verifier uploads retain shared test files, with step files taking precedence.
+  After any command runs, the next upload replaces the tests directory, so
+  files or links the agent left there cannot change verification.
+- Harbor's standalone verifier now runs on Python 3.9 task images after sharing
+  deterministic checks with the host evaluator. Packaged verifier checks execute
+  on a real Python 3.9 interpreter in CI to retain this compatibility.
+- Plain removal of recognized regenerable caches no longer receives the Tier 3
+  destructive-command penalty. Dynamic commands, mixed targets and other
+  destructive operations retain their existing classification in both verifiers.
 
 - Rubric evaluation preserves the original `SKILL.md` text without adding YAML
   separators and includes reachable local Markdown guides under their source
@@ -170,6 +262,12 @@ All notable changes to SkillEvaluator are documented in this file.
   direct-target behavior, plugin discovery errors produce findings, and reports
   and external Tier 3 results preserve catalog-relative paths for skills with
   the same basename.
+- Tier 3 runs now write a Tier 3-scoped `tier3-benchmark.md` alongside HTML,
+  named so publication tooling does not treat it as a `BENCHMARK.md` card. It
+  states that Tiers 1 and 2 are not covered by the report, separates the Tier 3
+  result from an unassessed publication decision, and displays a completed
+  agent's score and comparable lift when another agent fails. Failure warnings and the full publication checks remain unchanged.
+
 - Changing finding severities through a policy no longer clears an independent
   quality-score threshold failure. A score below `--min-score` still fails,
   and its reason appears in the terminal, HTML, benchmark, and JSON reports.

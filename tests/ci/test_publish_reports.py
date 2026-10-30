@@ -119,6 +119,28 @@ def test_only_json_is_loaded_and_html_is_ignored():
     assert list(reports) == ["skill-001"]
 
 
+def test_incomplete_scanner_cannot_invent_a_confirmed_failure():
+    from skillevaluator.models import ValidationResult
+    from skillevaluator.reporting.json_reporter import JSONReporter
+
+    result = ValidationResult(validator_name="Security", metadata={"incomplete_scans": ["semgrep"]})
+    result.add_error("Scanner execution did not complete")
+    data = json.loads(JSONReporter(include_timestamp=False).render_all([result]))
+    data["results"][0]["status"] = "failed"
+    data["overall_status"] = "failed"
+    row = {
+        **summary()["skills"][0],
+        "overall_status": "failed",
+        "passed": False,
+        "exit_code": 1,
+        "incomplete_scans": ["semgrep"],
+        "total_errors": data["total_errors"],
+        "severity_counts": data["severity_counts"],
+    }
+    with pytest.raises(publisher.PublicationError):
+        publisher.validate_report(data, row)
+
+
 @pytest.mark.parametrize(
     "name", ["../summary.json", "/summary.json", "a/../../summary.json", "C:\\summary.json", "a\\summary.json"]
 )

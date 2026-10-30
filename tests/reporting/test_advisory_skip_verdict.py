@@ -1373,7 +1373,7 @@ def test_markdown_renders_canonical_missing_baseline_as_not_available() -> None:
 
     markdown = MarkdownReporter(include_timestamp=False).render_all([tier3])
 
-    assert "| Accuracy | 0.90 | N/A | N/A |" in markdown
+    assert "| Accuracy | 0.90 | NO SCORE | NO SCORE |" in markdown
 
 
 @pytest.mark.parametrize(

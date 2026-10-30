@@ -48,9 +48,7 @@ def _write_job(
                 "details": {judge_metric: {"score": accuracy, "judge_model_used": judge}} if judge else {},
             }
             if activated is not None:
-                rich["details"]["skill_execution"] = {
-                    "activation": {"passed": activated, "score": float(activated)}
-                }
+                rich["details"]["skill_execution"] = {"activation": {"passed": activated, "score": float(activated)}}
             _write_json(verifier / "reward.json", scores if native else rich)
             if native:
                 _write_json(verifier / "skill_evaluator_reward.json", rich)
@@ -221,6 +219,11 @@ def test_report_handles_incomplete_judge_evidence(tmp_path: Path, missing_eviden
     collected, run = _collect(tmp_path, all_mixed=missing_evidence == "partial_judge_metadata")
     reward = next((run / "codex" / "with-skill" / "trials").glob("*/reward.json"))
     if missing_evidence == "reward":
+        # Legacy artifacts without an explicit case basis retain their bounded judge fallback.
+        lift_path = run / "codex" / "lift.json"
+        legacy_lift = json.loads(lift_path.read_text())
+        legacy_lift.pop("basis", None)
+        _write_json(lift_path, legacy_lift)
         reward.unlink()
     else:
         for reward in (run / "codex").glob("*/trials/*/reward.json"):
@@ -271,6 +274,11 @@ def test_capped_report_uses_recorded_lift_when_available(
     assert lift["overall"]["delta"] == dimension_lift / 5
     if not recorded_lift:
         (run / "codex" / "lift.json").unlink()
+    else:
+        # This compatibility test covers pre-basis runs; explicit-basis runs require full rewards.
+        legacy_lift = dict(lift)
+        legacy_lift.pop("basis", None)
+        _write_json(run / "codex" / "lift.json", legacy_lift)
     report = _report(run)
     agent = report["agents"]["codex"]
     assert len(agent["trials"]) == 512

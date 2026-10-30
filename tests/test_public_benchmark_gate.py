@@ -172,6 +172,85 @@ def test_gate_accepts_redesigned_public_card(tmp_path: Path) -> None:
 
 
 @pytest.mark.parametrize(
+    "cell",
+    [
+        # Whole-number cells from earlier releases stay valid when their arithmetic holds.
+        "47% → 92% (+45 points)",
+        "47.0% → 92.0% (+45.0 points)",
+        "94.8% → 58.4% (-36.4 points)",
+        "40.00% → 49.95% (+9.95 points)",
+        "50.0% → 50.0% (±0.0 points)",
+        "0.0% → 100.0% (+100.0 points)",
+        "92.0% — baseline not run; uplift unavailable",
+        "49.95% — INCONCLUSIVE: skill never activated; uplift unavailable",
+        "Not available",
+    ],
+)
+def test_gate_accepts_consistent_score_cells(tmp_path: Path, cell: str) -> None:
+    benchmark = tmp_path / "BENCHMARK.md"
+    benchmark.write_text(_valid_benchmark().replace("47% → 92% (+45 points)", cell), encoding="utf-8")
+
+    _files, offenders = benchmark_gate.find_offenders([benchmark])
+
+    assert offenders == []
+
+
+@pytest.mark.parametrize(
+    ("cell", "reason"),
+    [
+        # Whole-percent rounding of 0.5842 → 0.9479 published this contradictory cell.
+        ("58% → 95% (+36 points)", "score transition uplift does not match displayed scores"),
+        ("47% → 92% (+44 points)", "score transition uplift does not match displayed scores"),
+        ("47% → 92% (-45 points)", "score transition uplift does not match displayed scores"),
+        ("47% -> 92% (+44 points)", "score transition uplift does not match displayed scores"),
+        ("47% &rarr; 92% (+44 points)", "score transition uplift does not match displayed scores"),
+        ("94.8% → 58.4% (\u221236.3 points)", "score transition uplift does not match displayed scores"),
+        (
+            "47.0000000000000000000000000001% → 92% (+45 points)",
+            "score transition uplift does not match displayed scores",
+        ),
+        ("50% → 50% (+0 points)", "score transition uplift does not match displayed scores"),
+        ("50% → 50% (-0 points)", "score transition uplift does not match displayed scores"),
+        ("49% → 50% (±0 points)", "score transition uplift does not match displayed scores"),
+        ("-1% → 92% (+93 points)", "malformed score transition"),
+        ("-0% → 92% (+92 points)", "malformed score transition"),
+        ("101% → 92% (-9 points)", "malformed score transition"),
+    ],
+)
+def test_gate_rejects_inconsistent_or_out_of_range_score_transitions(
+    tmp_path: Path,
+    cell: str,
+    reason: str,
+) -> None:
+    benchmark = tmp_path / "BENCHMARK.md"
+    benchmark.write_text(_valid_benchmark().replace("47% → 92% (+45 points)", cell), encoding="utf-8")
+
+    _files, offenders = benchmark_gate.find_offenders([benchmark])
+
+    assert [(offender.line, offender.reason) for offender in offenders] == [(23, reason)]
+
+
+def test_gate_checks_score_transitions_only_in_results_table_cells(tmp_path: Path) -> None:
+    # Finding and label text is untrusted and may quote arbitrary numbers; only
+    # the reporter-owned Results at a Glance cells carry score transitions.
+    benchmark = tmp_path / "BENCHMARK.md"
+    benchmark.write_text(
+        _valid_benchmark()
+        .replace(
+            "| Measure | Codex (Baseline → Skill Uplift) |",
+            "| Measure 58% → 95% (+36 points) | Codex (Baseline → Skill Uplift) |",
+        )
+        .replace("## Tier Status", "Quoted note: 58% → 95% (+36 points)\n\n## Tier Status")
+        + "\n- Finding: skill text claims 58% → 95% (+36 points)\n",
+        encoding="utf-8",
+    )
+
+    _files, offenders = benchmark_gate.find_offenders([benchmark])
+
+    assert offenders == []
+
+
+@pytest.mark.parametrize(
     "evaluation_date",
     ["2026-02-30", "2026-13-01", "0000-01-01", "9999-99-99"],
 )
@@ -859,6 +938,25 @@ def test_real_reporter_cards_pass_publication_gate(tmp_path: Path, verdict: str)
     _files, offenders = benchmark_gate.find_offenders([benchmark])
 
     assert f"Overall verdict: {verdict}" in rendered
+    assert offenders == []
+
+
+def test_real_reporter_rounding_boundary_card_passes_publication_gate(tmp_path: Path) -> None:
+    tier3 = _tier3_result("PASS")
+    agent = tier3.metadata["agent_eval"]["agents"]["codex"]
+    agent["baseline"] = 0.5842
+    agent["with_skill"] = 0.9479
+    agent["dimensions"][0].update(baseline=0.5842, with_skill=0.9479, lift=0.9479 - 0.5842)
+    agent["dimensions"][1].update(baseline=0.5002, with_skill=0.7006, lift=0.7006 - 0.5002)
+
+    rendered = BenchmarkReporter(include_timestamp=True).render_all([_tier1_result(), _tier2_result(), tier3])
+    benchmark = tmp_path / "BENCHMARK.md"
+    benchmark.write_text(rendered, encoding="utf-8")
+    _files, offenders = benchmark_gate.find_offenders([benchmark])
+
+    assert "| Overall | 58.4% → 94.8% (+36.4 points) |" in rendered
+    assert "| Security | 58.4% → 94.8% (+36.4 points) |" in rendered
+    assert "| Correctness | 50.0% → 70.1% (+20.1 points) |" in rendered
     assert offenders == []
 
 

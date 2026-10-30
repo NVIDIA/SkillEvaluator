@@ -71,7 +71,7 @@ def test_benchmark_never_activated_scores_do_not_reconstruct_uplift(baseline: bo
     scores = {"Overall": agent["with_skill"], **{d["id"].title(): d["with_skill"] for d in agent["dimensions"]}}
     assert len(rows) == len(DIMENSION_MAPPING) + 1
     for measure, cells in rows.items():
-        assert f"{scores[measure]:.0%}" in cells[0]
+        assert f"{scores[measure]:.1%}" in cells[0]
         assert "INCONCLUSIVE: skill never activated" in cells[0]
         assert "uplift unavailable" in cells[0]
         assert "points" not in cells[0]

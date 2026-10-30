@@ -17,6 +17,7 @@ import sys
 import unicodedata
 from dataclasses import dataclass
 from datetime import UTC, date, datetime, timedelta
+from decimal import Context, Decimal, localcontext
 from functools import lru_cache
 from html import unescape
 from html.parser import HTMLParser
@@ -94,6 +95,15 @@ LINE_RULES = (
         "legacy Num score column",
         re.compile(r"\|\s*Dimension\s*\|\s*Num\s*\|", flags=re.IGNORECASE),
     ),
+)
+
+# A `baseline% → score% (uplift points)` transition in a Results at a Glance
+# cell. The uplift must equal the exact difference of the two displayed scores,
+# whatever their precision, so consistent whole-number cells from earlier
+# releases still pass.
+_SCORE_TRANSITION = re.compile(
+    r"(?<![\d.])(?P<baseline>-?\d+(?:\.\d+)?)%\s*(?:→|->)\s*(?P<score>-?\d+(?:\.\d+)?)%\s*"
+    r"\((?P<delta>[+±-]\d+(?:\.\d+)?) points?\)"
 )
 
 _AGENT_MODEL_STATE = re.compile(
@@ -769,9 +779,53 @@ def scan_file(path: Path, *, require_source_provenance: bool = False) -> list[Of
     _check_required_headings(path, text, offenders)
     _check_metadata_semantics(path, text, offenders, require_source_provenance=require_source_provenance)
     _check_verdict_tier_consistency(path, text, offenders, require_source_provenance=require_source_provenance)
+    _check_score_transitions(path, text, offenders)
     _check_untrusted_structural_headings(path, text, offenders)
     _check_html_rendering_safety(path, text, offenders)
     return offenders
+
+
+def _check_score_transitions(path: Path, text: str, offenders: list[Offender]) -> None:
+    """Check the score transitions in Results at a Glance table body cells.
+
+    The reporter writes only its own numbers into these cells, so untrusted
+    finding or label text elsewhere on the card cannot trip this check.
+    """
+    for _start_line, section_tokens in _section_occurrences(text, "Results at a Glance"):
+        in_body_cell = False
+        for token in section_tokens:
+            if token.type in {"td_open", "td_close"}:
+                in_body_cell = token.type == "td_open"
+                continue
+            if not in_body_cell or token.type != "inline" or token.map is None:
+                continue
+            cell = _semantic_text(" ".join(_inline_visible_lines(token, include_code=True)))
+            problems = {
+                problem
+                for match in _SCORE_TRANSITION.finditer(cell)
+                if (problem := _score_transition_problem(match)) is not None
+            }
+            offenders.extend(Offender(path, token.map[0] + 1, problem) for problem in sorted(problems))
+
+
+def _score_transition_problem(match: re.Match[str]) -> str | None:
+    """Return why a score transition is malformed or inconsistent, or ``None`` when it is exact."""
+    raw_baseline, raw_score, raw_delta = match.group("baseline", "score", "delta")
+    # Enough precision for an exact difference of any two matched decimals.
+    with localcontext(Context(prec=len(match.group(0)))):
+        baseline = Decimal(raw_baseline)
+        score = Decimal(raw_score)
+        magnitude = Decimal(raw_delta[1:])
+        difference = score - baseline
+    if "-" in raw_baseline + raw_score or baseline > 100 or score > 100:
+        return "malformed score transition"
+    # A zero uplift is written as an unsigned ±0; a sign claims a direction.
+    if raw_delta[0] == "±":
+        return None if magnitude == 0 and difference == 0 else "score transition uplift does not match displayed scores"
+    expected = magnitude if raw_delta[0] == "+" else -magnitude
+    if magnitude == 0 or difference != expected:
+        return "score transition uplift does not match displayed scores"
+    return None
 
 
 def _check_required_headings(path: Path, text: str, offenders: list[Offender]) -> None:

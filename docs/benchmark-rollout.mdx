@@ -116,7 +116,9 @@ diff -u \
 Expected presentation changes include:
 
 - the verdict and recommendation moving to the top;
-- `Baseline → Skill Uplift` cells with uplift labeled in percentage points;
+- `Baseline → Skill Uplift` cells with uplift labeled in percentage points,
+  scores shown to one decimal place (more near a verdict threshold), and uplift
+  computed from the displayed scores;
 - removal of the `Num` column;
 - explicit `NOT RUN`, `SKIPPED`, and `INCOMPLETE` tier states;
 - collapsible methodology and non-blocking observations;
@@ -172,7 +174,12 @@ The linter rejects configured known leak patterns such as retired product
 identities, any validation-profile metadata line, common absolute home paths,
 ambiguous legacy uplift cells, the old `Num` column, missing metadata/decision
 sections, and a publication `PASS` without completed required Tier 1, Tier 2,
-or Tier 3 evidence.
+or Tier 3 evidence. It also rejects a Results at a Glance cell whose uplift is
+not exactly the displayed skill score minus the displayed baseline, or whose
+scores fall outside 0–100%. Whole-number cells from earlier releases still
+pass when their arithmetic holds; a card whose whole-number rounding produced a
+contradiction such as `58% → 95% (+36 points)`, or a signed zero such as
+`50% → 50% (+0 points)`, fails until it is regenerated.
 Structural H1/H2 headings must be undecorated, root-level Markdown; raw HTML,
 formatted, quoted, and list-nested headings are rejected as ambiguous. Decision
 text is checked using its rendered form, including line breaks and image alt

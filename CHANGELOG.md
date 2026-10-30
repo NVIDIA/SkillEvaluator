@@ -214,6 +214,19 @@ All notable changes to SkillEvaluator are documented in this file.
   output is redirected or the search runs inside `sh -c`. Host and bundled
   scoring agree, while scoped searches and slash-valued patterns retain their
   classification.
+
+- `BENCHMARK.md` score transitions round half-up to one decimal place, keep
+  extra decimals for a score near a dimension verdict threshold so it is never
+  shown in a higher band (`49.95%`, not `50.0%`), and derive uplift from the
+  displayed scores. Whole-percent rounding of each value separately had
+  published contradictions such as `58% → 95% (+36 points)` and
+  `50% → 50% (+0 points)`. Scores outside 0–1 and invalid recorded baselines
+  are shown as `Not available` instead of being published. The public
+  benchmark gate (`scripts/ci/check_public_benchmarks.py`) now rejects a
+  Results at a Glance cell whose uplift does not equal the displayed difference
+  or whose scores are outside 0–100%; consistent whole-number cards from
+  earlier releases still pass.
+
 - PII email scans recognize all RFC 2606 reserved domains, including their
   subdomains, mixed-case forms, trailing dots, and prose ellipses. A local-part
   boundary prevents quadratic rescanning of long excluded addresses. Ordinary

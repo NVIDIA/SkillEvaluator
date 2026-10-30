@@ -13,8 +13,10 @@ from dataclasses import dataclass, field, replace
 from itertools import combinations
 from typing import TYPE_CHECKING
 
-from skillevaluator.constants import CONTENT_DEDUP_SIMILARITY_THRESHOLD
-from skillevaluator.embedding.client import EmbeddingClient
+from skillevaluator.constants import CONTENT_DEDUP_MAX_CHUNKS, CONTENT_DEDUP_SIMILARITY_THRESHOLD
+from skillevaluator.embedding.client import normalize_embedding_vector, unit_vector_similarity
+
+CONTENT_DEDUP_MAX_SCALAR_COMPARISONS = 25_000_000
 
 if TYPE_CHECKING:
     from skillevaluator.deduplication.utils.chunker import ContentChunk
@@ -92,6 +94,13 @@ def build_clusters(
     if n < 2:
         return []
 
+    if n > CONTENT_DEDUP_MAX_CHUNKS:
+        raise ValueError("Content chunk count exceeds the configured limit")
+    dimension = len(chunks[0].embedding)
+    if n * (n - 1) // 2 * dimension > CONTENT_DEDUP_MAX_SCALAR_COMPARISONS:
+        raise ValueError("Content scalar comparison work exceeds the configured limit")
+    units = [normalize_embedding_vector(chunk.embedding, dimension, allow_zero=True) for chunk in chunks]
+
     def siblings(i: int, j: int) -> bool:
         group = chunks[i].split_group
         return group is not None and group == chunks[j].split_group
@@ -100,10 +109,7 @@ def build_clusters(
     pair_scores: dict[tuple[int, int], float] = {}
 
     for i, j in combinations(range(n), 2):
-        score = EmbeddingClient.cosine_similarity(
-            chunks[i].embedding,
-            chunks[j].embedding,
-        )
+        score = unit_vector_similarity(units[i], units[j])
         pair_scores[(i, j)] = score
         if score >= threshold and not siblings(i, j):
             uf.union(i, j)

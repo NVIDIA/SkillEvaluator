@@ -78,6 +78,14 @@ All notable changes to SkillEvaluator are documented in this file.
 - CI-native per-skill HTML pages link Download JSON to the retained
   `skillevaluator-tier1.json` and do not embed a second copy of the report
   JSON. Standalone CLI HTML reports embed it for Export JSON.
+- Tier 1 schema validation accepts a list for `metadata.domain` in `SKILL.md`
+  (for example `domain: [backend, ai-ml]`) instead of reporting a HIGH
+  `Input should be a valid string` finding that also stopped the remaining
+  schema checks for that skill. A single string is still accepted.
+  The parsed value is now always a list: entries are trimmed and deduplicated
+  in order, and a missing, null, or blank value becomes an empty list. Lists
+  longer than 16 entries and non-string, blank, or over-128-character entries
+  are rejected.
 
 ### Changed
 

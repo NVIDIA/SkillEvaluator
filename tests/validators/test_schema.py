@@ -10,6 +10,7 @@ from pathlib import Path
 
 import pytest
 
+from skillevaluator.models.skill import SkillMetadata
 from skillevaluator.validators.schema import SchemaValidator
 
 
@@ -329,7 +330,9 @@ metadata:
     - python
   frameworks:
     - pytest
-  domain: testing
+  domain:
+    - testing
+    - quality
 ---
 
 # Complete Metadata Skill
@@ -351,6 +354,65 @@ metadata:
         result = validator.validate(skill_dir)
 
         assert result.passed, f"Expected complete metadata skill to pass. Errors: {result.errors}"
+        assert result.metadata["frontmatter"].metadata.domain == ["testing", "quality"]
+
+    @pytest.mark.parametrize(
+        ("metadata", "expected"),
+        [
+            pytest.param({"domain": "backend"}, ["backend"], id="scalar"),
+            pytest.param({"domain": ["backend", "ai-ml"]}, ["backend", "ai-ml"], id="list"),
+            pytest.param(
+                {"domain": [" backend ", "ai-ml", "backend"]},
+                ["backend", "ai-ml"],
+                id="strip-and-stable-dedupe",
+            ),
+            pytest.param({}, [], id="missing"),
+            pytest.param({"domain": None}, [], id="null"),
+            pytest.param({"domain": []}, [], id="empty"),
+            pytest.param({"domain": ""}, [], id="blank-scalar"),
+            pytest.param({"domain": "   "}, [], id="whitespace-scalar"),
+        ],
+    )
+    def test_metadata_domain_normalization(self, metadata: dict[str, object], expected: list[str]):
+        assert SkillMetadata(**metadata).domain == expected
+
+    @pytest.mark.parametrize(
+        ("domain", "message"),
+        [
+            pytest.param(["backend", 1], "domain values must be strings", id="non-string"),
+            pytest.param(["backend", "   "], "domain values must not be blank", id="blank-list-entry"),
+            pytest.param(["backend"] * 17, "domain must contain at most 16 values", id="too-many-raw-items"),
+            pytest.param("x" * 129, "domain values must be at most 128 characters", id="too-long"),
+            pytest.param({"name": "backend"}, "domain must be a string or list of strings", id="mapping"),
+        ],
+    )
+    def test_metadata_domain_rejects_invalid_values(self, domain: object, message: str):
+        with pytest.raises(ValueError, match=message):
+            SkillMetadata(domain=domain)
+
+    def test_invalid_metadata_domain_reports_field_finding(self, tmp_path: Path):
+        """An invalid domain entry is reported against metadata.domain."""
+        skill_dir = tmp_path / "bad-domain"
+        skill_dir.mkdir()
+        (skill_dir / "SKILL.md").write_text(
+            "---\n"
+            "name: bad-domain\n"
+            "description: A skill with an invalid domain list entry\n"
+            "metadata:\n"
+            "  author: Test User <testuser@example.com>\n"
+            "  domain:\n"
+            "    - backend\n"
+            "    - 42\n"
+            "---\n\n# Bad Domain\n"
+        )
+
+        result = SchemaValidator().validate(skill_dir)
+
+        assert not result.passed
+        findings = [f for f in result.findings if f.check_name == "frontmatter_field"]
+        assert len(findings) == 1
+        assert findings[0].metadata["field"] == "metadata.domain"
+        assert "domain values must be strings" in findings[0].message
 
     # =========================================================================
     # agentskills.io spec + validate_skill_md.py CI checks

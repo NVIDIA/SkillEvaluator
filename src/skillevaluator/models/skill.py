@@ -30,6 +30,10 @@ XML_TAG_RE = re.compile(r"</?[A-Za-z][A-Za-z0-9_-]*(?:\s[^<>]*)?/?>|</?[A-Za-z][
 _SEMVER_COMPONENT = r"(?:0|[1-9][0-9]{0,8})"
 SEMVER_RE = re.compile(rf"^{_SEMVER_COMPONENT}\.{_SEMVER_COMPONENT}\.{_SEMVER_COMPONENT}$", re.ASCII)
 
+#: Bounds for metadata.domain, which accepts a single string or a list of strings.
+DOMAIN_MAX_ITEMS = 16
+DOMAIN_MAX_LENGTH = 128
+
 
 class SkillMetadata(BaseModel):
     """Metadata object for SKILL.md frontmatter.
@@ -49,7 +53,10 @@ class SkillMetadata(BaseModel):
     tags: list[str] | None = Field(default=None, description="Categorization tags")
     languages: list[str] | None = Field(default=None, description="Programming languages")
     frameworks: list[str] | None = Field(default=None, description="Frameworks used")
-    domain: str | None = Field(default=None, description="Domain category (e.g., backend, ai-ml)")
+    domain: list[str] = Field(
+        default_factory=list,
+        description="Domain categories (e.g., backend, ai-ml)",
+    )
 
     @field_validator("tags", "languages", "frameworks", mode="before")
     @classmethod
@@ -62,6 +69,39 @@ class SkillMetadata(BaseModel):
         if isinstance(v, list):
             return [str(item) for item in v]
         return v
+
+    @field_validator("domain", mode="before")
+    @classmethod
+    def normalize_domain(cls, v: Any) -> list[str]:
+        """Normalize a scalar domain to a list and validate list entries."""
+        if v is None:
+            return []
+        if isinstance(v, str):
+            if not v.strip():
+                # A blank scalar such as ``domain: ""`` means "no domain".
+                return []
+            values = [v]
+        else:
+            values = v
+        if not isinstance(values, list):
+            raise ValueError("domain must be a string or list of strings")
+        if len(values) > DOMAIN_MAX_ITEMS:
+            raise ValueError(f"domain must contain at most {DOMAIN_MAX_ITEMS} values")
+
+        normalized: list[str] = []
+        seen: set[str] = set()
+        for value in values:
+            if not isinstance(value, str):
+                raise ValueError("domain values must be strings")
+            value = value.strip()
+            if not value:
+                raise ValueError("domain values must not be blank")
+            if len(value) > DOMAIN_MAX_LENGTH:
+                raise ValueError(f"domain values must be at most {DOMAIN_MAX_LENGTH} characters")
+            if value not in seen:
+                normalized.append(value)
+                seen.add(value)
+        return normalized
 
     @field_validator("author")
     @classmethod

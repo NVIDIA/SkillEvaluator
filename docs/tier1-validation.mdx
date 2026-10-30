@@ -163,6 +163,7 @@ For `validate`, the default set is `schema`, `version`, `security`, `pii`, `lice
     - Recognized skill-root subdirectories are `agents/`, `references/`, `scripts/`, `assets/`, `evals/`, `tests/`, `tools/`, and `config/`; anything else gets a LOW advisory finding. Extend the set per repository with `SKILLEVALUATOR_SCHEMA_ALLOWED_DIRS` (comma-separated names are added to the defaults, never replace them).
     - `SKILL.md` should stay at or below 500 lines; larger files receive an advisory finding.
     - The default profile expects `metadata.author` in `Name <email@host>` form but does not require a particular email domain.
+    - `metadata.domain` accepts one category string or a list of them, such as `domain: [backend, ai-ml]`. Values are trimmed and deduplicated in order; a blank or null scalar means no domain. A list with more than 16 entries, or a non-string, blank, or over-128-character entry, is a HIGH `Field 'metadata.domain'` finding.
 
     **To fix common findings:** rename the directory to match `name`, remove forbidden fields, and move the skill under `skills/`.
   </Accordion>

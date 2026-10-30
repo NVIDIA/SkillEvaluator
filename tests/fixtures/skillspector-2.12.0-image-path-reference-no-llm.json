@@ -2,7 +2,7 @@
   "skill": {
     "name": "raster-demo",
     "source": "/tmp/raster-demo",
-    "scanned_at": "2026-10-29T13:29:55.129561+00:00"
+    "scanned_at": "2026-10-30T06:27:19.676005+00:00"
   },
   "risk_assessment": {
     "score": 37,
@@ -36,7 +36,7 @@
       "type": "other",
       "lines": 2,
       "executable": false,
-      "size_bytes": 48,
+      "size_bytes": 155,
       "source_url": null,
       "source_identity": null,
       "source_digest": null
@@ -46,7 +46,7 @@
   "issues": [
     {
       "id": "AE1",
-      "finding_id": "finding-90d1bb7bc41c45b19de4b6a18bd676ac",
+      "finding_id": "finding-a90937f2836046268e0e3754acc2310b",
       "category": "analysis-evasion",
       "pattern": "Incomplete referenced artifact analysis",
       "severity": "HIGH",
@@ -203,7 +203,7 @@
     },
     {
       "id": "AE1",
-      "finding_id": "finding-eb14ada9581248c4b8ccff0f2f295f4e",
+      "finding_id": "finding-ce3eb4dd8a9d42e0946321f931cdf2ab",
       "category": "analysis-evasion",
       "pattern": "Incomplete referenced artifact analysis",
       "severity": "HIGH",

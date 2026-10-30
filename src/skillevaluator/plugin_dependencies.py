@@ -84,7 +84,8 @@ MAX_PLUGIN_MANIFEST_TEXT_CHARS = 16_384
 # staging limit still reaches the missing-dependency gate.
 MAX_CLASSIFIED_REFS = 1_024
 
-# Reported ref labels are truncated so a pathological ref cannot bloat reports.
+# Reported ref labels, and every ref-derived part of a reason, are truncated so a
+# pathological ref cannot bloat reports.
 MAX_REF_LABEL_CHARS = 512
 
 
@@ -330,6 +331,11 @@ def _ref_label_from(ref: Any, canonical: str | None) -> str:
     if name:
         return name
     raise ValueError("Plugin reference must be a canonical string or scalar selector object")
+
+
+def _clip(text: str) -> str:
+    """``text`` cut to :data:`MAX_REF_LABEL_CHARS` characters, ending in ``...`` when cut."""
+    return text if len(text) <= MAX_REF_LABEL_CHARS else text[: MAX_REF_LABEL_CHARS - 3] + "..."
 
 
 def is_within(path: Path, root: Path) -> bool:
@@ -635,10 +641,9 @@ def _classify_ref(
         leaf = ref_name(ref)
     except ValueError as exc:
         return DependencyRow(
-            "<invalid reference>", "unresolved", None, f"invalid reference: {exc}", cause=CAUSE_MALFORMED
+            "<invalid reference>", "unresolved", None, f"invalid reference: {_clip(str(exc))}", cause=CAUSE_MALFORMED
         )
-    if len(label) > MAX_REF_LABEL_CHARS:
-        label = label[: MAX_REF_LABEL_CHARS - 3] + "..."
+    label = _clip(label)
 
     parsed = _split_canonical(canonical)
     if parsed is None:
@@ -651,7 +656,9 @@ def _classify_ref(
         )
     source, repo, ref_kind, name = parsed
     if source not in REMOTE_REF_SOURCES:
-        return DependencyRow(label, "unresolved", None, f"unsupported reference source '{source}'", cause=CAUSE_SOURCE)
+        return DependencyRow(
+            label, "unresolved", None, f"unsupported reference source '{_clip(source)}'", cause=CAUSE_SOURCE
+        )
     if identity.local_slug is None:
         return DependencyRow(
             label,
@@ -665,7 +672,7 @@ def _classify_ref(
             label,
             "external",
             None,
-            f"references repository '{repo}', not this repository '{identity.local_slug}'; "
+            f"references repository '{_clip(repo)}', not this repository '{identity.local_slug}'; "
             f"not fetched or verified offline{_bundled_hint(leaf, hints)}",
         )
 
@@ -685,7 +692,7 @@ def _classify_ref(
         or "\\" in ref_kind
     ):
         return DependencyRow(
-            label, "unresolved", None, f"unsafe reference path '{ref_kind}/{name}'", cause=CAUSE_UNSAFE
+            label, "unresolved", None, f"unsafe reference path '{_clip(f'{ref_kind}/{name}')}'", cause=CAUSE_UNSAFE
         )
     excluded = next(
         (part for part in (ref_kind, *relative_name.parts) if part.casefold() in _EXCLUDED_REF_SEGMENTS), None
@@ -695,7 +702,7 @@ def _classify_ref(
             label,
             "unresolved",
             None,
-            f"unsafe reference path '{ref_kind}/{name}': '{excluded}' never holds plugin content",
+            f"unsafe reference path '{_clip(f'{ref_kind}/{name}')}': '{excluded}' never holds plugin content",
             cause=CAUSE_UNSAFE,
         )
 
@@ -710,30 +717,31 @@ def _classify_ref(
             label,
             "unresolved",
             None,
-            f"'{ref_kind}' is not a recognized {kind} content root ({', '.join(allowed_roots)})",
+            f"'{_clip(ref_kind)}' is not a recognized {kind} content root ({', '.join(allowed_roots)})",
             cause=CAUSE_CONTENT_ROOT,
         )
 
     probe = probe_repository_path(identity.clone_root, relative, want_skill_dir=kind == "skills", listings=listings)
     repo_path = relative.as_posix()
+    shown, detail = _clip(repo_path), _clip(probe.detail)
     if probe.outcome in {"absent", "wrong_type"}:
         component = "skill" if kind == "skills" else "rule"
         return DependencyRow(
             label,
             "missing",
             None,
-            f"same-repository {component} not found at '{repo_path}' ({probe.detail}){_bundled_hint(leaf, hints)}",
+            f"same-repository {component} not found at '{shown}' ({detail}){_bundled_hint(leaf, hints)}",
         )
     if probe.outcome == "link":
         return DependencyRow(
             label,
             "unresolved",
             None,
-            f"refusing to follow a link while resolving '{repo_path}': {probe.detail}; advisory only",
+            f"refusing to follow a link while resolving '{shown}': {detail}; advisory only",
             cause=CAUSE_LINK,
         )
     if probe.outcome == "error":
-        return DependencyRow(label, "unresolved", None, probe.detail, cause=CAUSE_ERROR)
+        return DependencyRow(label, "unresolved", None, detail, cause=CAUSE_ERROR)
 
     if target.is_relative_to(plugin_real):
         return DependencyRow(

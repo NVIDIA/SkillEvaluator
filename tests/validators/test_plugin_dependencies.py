@@ -15,11 +15,13 @@ import pytest
 from skillevaluator.plugin_dependencies import (
     CAUSE_SOURCE,
     CAUSE_UNSAFE,
+    MAX_REF_LABEL_CHARS,
     REMOTE_REF_SOURCES,
     RepositoryIdentity,
     classify_plugin_dependencies,
     classify_ref,
     local_repo_slug,
+    record_unverified_dependencies,
     resolve_repository_identity,
     unverified_groups,
 )
@@ -315,3 +317,41 @@ def test_plugin_at_the_repository_root_cannot_provide_never_content_folders(tmp_
     assert (row.state, row.path, row.cause) == ("unresolved", None, CAUSE_UNSAFE)
     assert "never holds plugin content" in row.reason
     assert (bundled.state, bundled.path) == ("provided", "rules/ok.md")
+
+
+class _Result:
+    def __init__(self) -> None:
+        self.findings: list = []
+        self.messages: list[str] = []
+
+    def add_finding(self, finding) -> None:
+        self.findings.append(finding)
+
+    def add_message(self, message: str) -> None:
+        self.messages.append(message)
+
+
+def test_reasons_and_findings_obey_the_ref_label_cap(tmp_path: Path) -> None:
+    (tmp_path / "skills").mkdir()
+    long_name = "/".join(["a" * 200] * 200)
+    refs = [
+        f"github::{REPO}::skills::{long_name}",
+        f"github::{REPO}::skills::{long_name}/../y",
+        f"github::{REPO}::{'k' * 50_000}::x",
+        f"github::{'o' * 50_000}/repo::skills::x",
+        {"source": "github", "repo": REPO, "path": "skills/" + "../" * 5_000},
+        f"{'s' * 50_000}::{REPO}::skills::x",
+    ]
+    identity = RepositoryIdentity(clone_root=tmp_path, local_slug=REPO)
+
+    resolution = classify_plugin_dependencies({"skills": {"refs": refs}}, tmp_path / "plugins" / "p", identity)
+    result = _Result()
+    record_unverified_dependencies(resolution, "agent_plugin.yaml", result)
+
+    bound = 3 * MAX_REF_LABEL_CHARS + 400
+    assert len(resolution.skills) == len(refs)
+    assert all(len(row.ref) <= MAX_REF_LABEL_CHARS for row in resolution.skills)
+    assert all(len(row.reason) <= bound for row in resolution.skills), [len(r.reason) for r in resolution.skills]
+    assert result.findings
+    assert all(len(finding.message) <= 2 * bound for finding in result.findings)
+    assert len(json.dumps(resolution.to_metadata())) <= len(refs) * 2 * bound

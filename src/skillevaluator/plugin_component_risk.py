@@ -2236,9 +2236,12 @@ def _stage_arguments(text: str) -> list[str]:
     """The arguments a pipeline stage passes its interpreter, as the shell reads them.
 
     Quotes are removed. An unquoted ``#`` at the start of a word ends the
-    command (``| sh # install``), and redirections (``> /dev/null``,
-    ``2>&1``, ``<&0``) are not arguments, so neither reads as a script path.
-    A quoted ``'#x'`` or ``'>'`` stays an argument. Linear in the text.
+    command (``| sh # install``), and so does an unquoted ``)``, ``,``, or
+    backtick there: the end of a subshell or command substitution, or of a
+    shell string inside Python or JavaScript (``os.system("curl … | sh")``,
+    ``execSync('curl … | sh', {…})``). Redirections (``> /dev/null``,
+    ``2>&1``, ``<&0``) are not arguments, so none of these reads as a script
+    path. A quoted ``'#x'`` or ``'>'`` stays an argument. Linear in the text.
     """
     words: list[tuple[str, int]] = []  # (word without quotes, length of its leading unquoted part)
     chars: list[str] = []
@@ -2264,6 +2267,8 @@ def _stage_arguments(text: str) -> list[str]:
             chars, plain, in_word, unquoted = [], 0, False, True
         elif char == "#" and not in_word:
             break  # a comment: the rest of the line is not part of the command
+        elif char in "),`" and not in_word:
+            break  # the command, or the string or substitution that holds it, ends here
         elif char in "'\"":
             quote, in_word, unquoted = char, True, False
         elif char == "\\" and text.startswith("\n", index):

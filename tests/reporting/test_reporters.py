@@ -29,6 +29,8 @@ from skillevaluator.reporting import (
 )
 from skillevaluator.tier1.commands import emit_reports
 
+_SKILLSPECTOR_2_12_LLM_PROVENANCE = Path(__file__).parents[1] / "fixtures" / "skillspector-2.12.0-llm-provenance.json"
+
 _PUBLICATION_TARGET = {
     "skill_name": "demo",
     "skill_digest": "sha256:" + "c" * 64,
@@ -1827,6 +1829,71 @@ class TestSkillSpectorVersionReporting:
 
         assert "SkillSpector <strong>v" not in html
         assert _html_report_data(html)["skillspector_versions"] == []
+
+
+class TestSkillSpectorProvenanceReporting:
+    @staticmethod
+    def _security_result(provenance: dict | None, provider_id: str | None = "nv_build") -> ValidationResult:
+        result = ValidationResult(validator_name="Security Scan", validator_description="Detect security issues")
+        if provenance is not None:
+            result.metadata["skillspector_llm_provenance"] = provenance
+        if provider_id is not None:
+            result.metadata["skillspector_provider_id"] = provider_id
+        return result
+
+    def test_json_report_exports_canonical_provenance(self) -> None:
+        provenance = json.loads(_SKILLSPECTOR_2_12_LLM_PROVENANCE.read_text(encoding="utf-8"))
+        result = self._security_result({**provenance, "prompt": "do-not-export"})
+
+        data = json.loads(JSONReporter(include_timestamp=False).render_all([result]))
+
+        exported = data["results"][0]
+        assert exported["skillspector_llm_provenance"] == provenance
+        assert exported["skillspector_provider_id"] == "nv_build"
+        assert "do-not-export" not in json.dumps(data)
+
+    def test_html_tier1_tab_lists_provenance(self) -> None:
+        provenance = json.loads(_SKILLSPECTOR_2_12_LLM_PROVENANCE.read_text(encoding="utf-8"))
+        result = self._security_result(provenance)
+
+        html = HTMLReporter(include_timestamp=False, target_path="skills/example").render_all([result])
+        tier1 = _html_tab(html, "tier1")
+
+        assert "Tier 1 LLM Provenance" in tier1
+        assert tier1.count("<td><code>gpt-6.1-sol</code></td>") == 5
+        assert "semantic_security_discovery" in tier1
+        assert "<td>nv_build</td>" in tier1
+        assert "<code>c0ffee000000</code>" in tier1
+        assert "nondeterministic / best_effort_controls_forwarded" in tier1
+        assert _html_report_data(html)["skillspector_provenance"] == [
+            {"provider_id": "nv_build", "provenance": provenance}
+        ]
+
+    def test_reports_drop_unsafe_provenance_but_keep_provider(self) -> None:
+        credential = "AI" + "za" + "A" * 35
+        provenance = json.loads(_SKILLSPECTOR_2_12_LLM_PROVENANCE.read_text(encoding="utf-8"))
+        provenance["analyzers"][0]["model"] = credential
+        result = self._security_result(provenance)
+
+        html = HTMLReporter(include_timestamp=False).render_all([result])
+        data = json.loads(JSONReporter(include_timestamp=False).render_all([result]))
+
+        assert credential not in html
+        assert credential not in json.dumps(data)
+        assert "skillspector_llm_provenance" not in data["results"][0]
+        assert "No valid LLM provenance was recorded for this scan." in _html_tab(html, "tier1")
+        assert _html_report_data(html)["skillspector_provenance"] == [{"provider_id": "nv_build", "provenance": None}]
+
+    def test_reports_without_provenance_add_nothing(self) -> None:
+        result = self._security_result(None, provider_id=None)
+
+        html = HTMLReporter(include_timestamp=False).render_all([result])
+        data = json.loads(JSONReporter(include_timestamp=False).render_all([result]))
+
+        assert "Tier 1 LLM Provenance" not in html
+        assert _html_report_data(html)["skillspector_provenance"] == []
+        assert "skillspector_llm_provenance" not in data["results"][0]
+        assert "skillspector_provider_id" not in data["results"][0]
 
 
 class TestHTMLReporterHeroHelpers:

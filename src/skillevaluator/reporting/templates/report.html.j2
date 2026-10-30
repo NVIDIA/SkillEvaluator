@@ -1614,6 +1614,53 @@
                 </div>
             </div>
             {% endif %}
+            {# SkillSpector LLM provenance from --llm runs, validated by skillspector_provenance.py. #}
+            {% if skillspector_provenance %}
+            <div class="top-issues-section">
+                <div class="top-issues-header" onclick="toggleTopIssues(this)">
+                    <h3>Tier 1 LLM Provenance</h3>
+                    <span class="expand-text">&#9660;</span>
+                </div>
+                <div class="top-issues-content">
+                    <p style="margin: 0.75rem 1rem; color: var(--text-secondary); font-size: 0.85rem;">Provider, model, SkillSpector revision, and determinism evidence for the LLM security analysis.</p>
+                    <table class="top-issues-table">
+                        <thead>
+                            <tr>
+                                <th>Provider</th>
+                                <th>Adapter</th>
+                                <th>Analyzer</th>
+                                <th>Model</th>
+                                <th>Revision</th>
+                                <th>Determinism</th>
+                            </tr>
+                        </thead>
+                        <tbody>
+                            {% for record in skillspector_provenance %}
+                            {% set provenance = record.provenance %}
+                            {% if provenance %}
+                            {% for analyzer in provenance.analyzers %}
+                            {% set source_revision = analyzer.analyzer_revision.source_revision %}
+                            <tr>
+                                <td>{{ record.provider_id or 'not recorded' }}</td>
+                                <td>{{ provenance.provider.effective_adapter }}</td>
+                                <td>{{ analyzer.analyzer_id }}</td>
+                                <td><code>{{ analyzer.model }}</code></td>
+                                <td><code>{{ analyzer.analyzer_revision.value }}</code>{% if source_revision and source_revision.value != 'unknown' %} <code>{{ source_revision.value[:12] }}</code>{% endif %}</td>
+                                <td>{{ provenance.determinism.classification }} / {{ provenance.determinism.control_status }}</td>
+                            </tr>
+                            {% endfor %}
+                            {% else %}
+                            <tr>
+                                <td>{{ record.provider_id or 'not recorded' }}</td>
+                                <td colspan="5">No valid LLM provenance was recorded for this scan.</td>
+                            </tr>
+                            {% endif %}
+                            {% endfor %}
+                        </tbody>
+                    </table>
+                </div>
+            </div>
+            {% endif %}
 
         <div class="report-searchbar">
             <label for="report-search">Search evidence</label>

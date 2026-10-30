@@ -19,11 +19,12 @@ from skillevaluator.reporting import CLIReporter, HTMLReporter, JSONReporter, Ma
 from skillevaluator.utils.tool_runner import ToolResult, Tools
 from skillevaluator.validators.base import Finding, Severity, ValidationResult
 from skillevaluator.validators.schema import SchemaValidator
-from skillevaluator.validators.security import SecurityValidator, _skillspector_child_env
+from skillevaluator.validators.security import SecurityValidator, _skillspector_child_env, _skillspector_llm_env
 
 _SKILLSPECTOR_2_9_6_NO_LLM_REPORT = (
     Path(__file__).parents[1] / "fixtures" / "skillspector-2.9.6-no-llm.json"
 )
+_SKILLSPECTOR_2_12_LLM_PROVENANCE = Path(__file__).parents[1] / "fixtures" / "skillspector-2.12.0-llm-provenance.json"
 _SKILLSPECTOR_2_10_REQUIRED_ANALYZERS = (
     "artifact_integrity",
     "behavioral_ast",
@@ -4288,6 +4289,208 @@ print(json.dumps([finding.metadata["matched_value"] for finding in result.findin
         assert result.metadata["skillspector_model"] == "gpt-6.1-sol"
         assert result.metadata["skillspector_reasoning_effort"] == "medium"
         assert result.metadata["skillspector_version"] == "2.10.0"
+
+    @staticmethod
+    def _scan_with_skillspector_reports(skill_dir: Path, reports: list[dict], *, use_llm: bool) -> ValidationResult:
+        with (
+            patch.object(Tools.skillspector, "_path", "/usr/bin/skillspector"),
+            patch.object(
+                Tools.skillspector,
+                "run",
+                side_effect=[
+                    ToolResult(success=True, stdout=json.dumps(report), stderr="", exit_code=0) for report in reports
+                ],
+            ),
+        ):
+            return SecurityValidator(use_llm=use_llm).validate_security_only(skill_dir)
+
+    @staticmethod
+    def _llm_report_with_provenance(provenance: dict, *, llm_available: bool = True) -> dict:
+        report = _skillspector_json_report(llm_requested=True, llm_available=llm_available)
+        report["metadata"]["llm_provenance"] = provenance
+        return report
+
+    def test_llm_stage_records_skillspector_provenance_and_bridged_provider(
+        self,
+        monkeypatch,
+        sample_skill_dir: Path,
+    ) -> None:
+        monkeypatch.setenv("SKILL_EVAL_LLM_PROVIDER", "nv_build")
+        monkeypatch.setenv("NVIDIA_API_KEY", "provider-test-key")
+        for name in ("SKILLSPECTOR_PROVIDER", "SKILLSPECTOR_MODEL", "SKILLSPECTOR_REASONING_EFFORT"):
+            monkeypatch.delenv(name, raising=False)
+        provenance = json.loads(_SKILLSPECTOR_2_12_LLM_PROVENANCE.read_text(encoding="utf-8"))
+        reported = {**provenance, "prompt": "do-not-export"}
+
+        result = self._scan_with_skillspector_reports(
+            sample_skill_dir,
+            [_skillspector_json_report(), self._llm_report_with_provenance(reported)],
+            use_llm=True,
+        )
+
+        assert result.status != "incomplete"
+        assert result.metadata["skillspector_llm_provenance"] == provenance
+        # SkillSpector runs NVIDIA Build as its openai adapter; the bridged provider disambiguates.
+        assert result.metadata["skillspector_llm_provenance"]["provider"]["configured_adapter"] == "openai"
+        assert result.metadata["skillspector_provider_id"] == "nv_build"
+
+    def test_explicit_skillspector_provider_records_no_bridged_provider(
+        self,
+        monkeypatch,
+        sample_skill_dir: Path,
+    ) -> None:
+        monkeypatch.setenv("SKILLSPECTOR_PROVIDER", "openai")
+        monkeypatch.setenv("OPENAI_API_KEY", "explicit-openai-key")
+        provenance = json.loads(_SKILLSPECTOR_2_12_LLM_PROVENANCE.read_text(encoding="utf-8"))
+
+        result = self._scan_with_skillspector_reports(
+            sample_skill_dir,
+            [_skillspector_json_report(), self._llm_report_with_provenance(provenance)],
+            use_llm=True,
+        )
+
+        assert result.metadata["skillspector_llm_provenance"] == provenance
+        assert "skillspector_provider_id" not in result.metadata
+
+    @pytest.mark.parametrize(
+        ("skillspector_provider", "expected_provider_id"),
+        [
+            ("anthropic", None),
+            ("bedrock", None),
+            ("openai", None),
+            ("private-gateway", None),
+            # nv_build is bridged through SkillEvaluator's provider resolution.
+            ("nv_build", "nv_build"),
+        ],
+    )
+    def test_skillspector_provider_setting_decides_recorded_provider_id(
+        self,
+        monkeypatch,
+        skillspector_provider: str,
+        expected_provider_id: str | None,
+    ) -> None:
+        monkeypatch.setenv("SKILLSPECTOR_PROVIDER", skillspector_provider)
+        monkeypatch.setenv("NVIDIA_API_KEY", "provider-test-key")
+        for name in ("SKILL_EVAL_LLM_PROVIDER", "SKILL_EVAL_LLM_MODEL", "SKILLSPECTOR_MODEL"):
+            monkeypatch.delenv(name, raising=False)
+
+        _child_env, provider_id = _skillspector_llm_env()
+
+        assert provider_id == expected_provider_id
+
+    def test_unconfirmed_llm_analysis_keeps_attempted_provenance(
+        self,
+        monkeypatch,
+        sample_skill_dir: Path,
+    ) -> None:
+        monkeypatch.setenv("SKILL_EVAL_LLM_PROVIDER", "openai")
+        monkeypatch.setenv("OPENAI_API_KEY", "provider-test-key")
+        monkeypatch.delenv("SKILLSPECTOR_PROVIDER", raising=False)
+        provenance = json.loads(_SKILLSPECTOR_2_12_LLM_PROVENANCE.read_text(encoding="utf-8"))
+
+        result = self._scan_with_skillspector_reports(
+            sample_skill_dir,
+            [_skillspector_json_report(), self._llm_report_with_provenance(provenance, llm_available=False)],
+            use_llm=True,
+        )
+
+        assert result.status == "incomplete"
+        assert result.metadata["skillspector_llm_provenance"] == provenance
+        assert result.metadata["skillspector_provider_id"] == "openai"
+
+    @pytest.mark.parametrize(
+        ("exit_code", "stderr", "report_errors"),
+        [
+            pytest.param(0, "WARNING: LLM analysis failed: provider returned HTTP 401", None, id="stderr-llm-failure"),
+            pytest.param(0, "", ["semantic analyzer failed"], id="report-errors"),
+            pytest.param(2, "", None, id="unexpected-exit-code"),
+        ],
+    )
+    def test_failed_llm_stage_keeps_attempted_provenance(
+        self,
+        monkeypatch,
+        sample_skill_dir: Path,
+        exit_code: int,
+        stderr: str,
+        report_errors: list[str] | None,
+    ) -> None:
+        monkeypatch.setenv("SKILL_EVAL_LLM_PROVIDER", "nv_build")
+        monkeypatch.setenv("NVIDIA_API_KEY", "provider-test-key")
+        for name in ("SKILLSPECTOR_PROVIDER", "SKILLSPECTOR_MODEL", "SKILLSPECTOR_REASONING_EFFORT"):
+            monkeypatch.delenv(name, raising=False)
+        provenance = json.loads(_SKILLSPECTOR_2_12_LLM_PROVENANCE.read_text(encoding="utf-8"))
+        llm_report = self._llm_report_with_provenance(provenance)
+        if report_errors is not None:
+            llm_report["errors"] = report_errors
+        static_run = ToolResult(success=True, stdout=json.dumps(_skillspector_json_report()), stderr="", exit_code=0)
+        llm_run = ToolResult(success=True, stdout=json.dumps(llm_report), stderr=stderr, exit_code=exit_code)
+
+        with (
+            patch.object(Tools.skillspector, "_path", "/usr/bin/skillspector"),
+            patch.object(Tools.skillspector, "run", side_effect=[static_run, llm_run]),
+        ):
+            result = SecurityValidator(use_llm=True).validate_security_only(sample_skill_dir)
+
+        # The attempted provider and models stay visible; the stage stays incomplete.
+        assert result.status == "incomplete"
+        assert result.metadata["incomplete_scans"] == ["skillspector-llm"]
+        assert result.metadata["skillspector_llm_provenance"] == provenance
+        assert result.metadata["skillspector_provider_id"] == "nv_build"
+
+    def test_failed_llm_stage_without_json_records_no_provenance(
+        self,
+        monkeypatch,
+        sample_skill_dir: Path,
+    ) -> None:
+        monkeypatch.setenv("SKILL_EVAL_LLM_PROVIDER", "openai")
+        monkeypatch.setenv("OPENAI_API_KEY", "provider-test-key")
+        monkeypatch.delenv("SKILLSPECTOR_PROVIDER", raising=False)
+        static_run = ToolResult(success=True, stdout=json.dumps(_skillspector_json_report()), stderr="", exit_code=0)
+        llm_run = ToolResult(success=True, stdout="Traceback (most recent call last):", stderr="", exit_code=2)
+
+        with (
+            patch.object(Tools.skillspector, "_path", "/usr/bin/skillspector"),
+            patch.object(Tools.skillspector, "run", side_effect=[static_run, llm_run]),
+        ):
+            result = SecurityValidator(use_llm=True).validate_security_only(sample_skill_dir)
+
+        assert result.status == "incomplete"
+        assert "skillspector_llm_provenance" not in result.metadata
+        assert result.metadata["skillspector_provider_id"] == "openai"
+
+    def test_unsafe_llm_provenance_is_omitted_without_failing_the_scan(
+        self,
+        monkeypatch,
+        sample_skill_dir: Path,
+    ) -> None:
+        monkeypatch.setenv("SKILL_EVAL_LLM_PROVIDER", "openai")
+        monkeypatch.setenv("OPENAI_API_KEY", "provider-test-key")
+        monkeypatch.delenv("SKILLSPECTOR_PROVIDER", raising=False)
+        provenance = json.loads(_SKILLSPECTOR_2_12_LLM_PROVENANCE.read_text(encoding="utf-8"))
+        provenance["analyzers"][0]["model"] = "https://gateway.example.test/v1"
+
+        result = self._scan_with_skillspector_reports(
+            sample_skill_dir,
+            [_skillspector_json_report(), self._llm_report_with_provenance(provenance)],
+            use_llm=True,
+        )
+
+        assert result.status != "incomplete"
+        assert "skillspector_llm_provenance" not in result.metadata
+        assert "gateway.example.test" not in json.dumps(result.metadata)
+
+    def test_static_scan_records_no_llm_provenance(self, sample_skill_dir: Path) -> None:
+        provenance = json.loads(_SKILLSPECTOR_2_12_LLM_PROVENANCE.read_text(encoding="utf-8"))
+        provenance["provider"].update({"effective_adapter": "not_applicable", "effective_adapters": []})
+        provenance["sampling"]["reasoning_effort"]["forwarded_to_client"] = None
+        provenance["determinism"].update({"classification": "not_applicable", "control_status": "not_applied"})
+        static_report = _skillspector_json_report()
+        static_report["metadata"]["llm_provenance"] = provenance
+
+        result = self._scan_with_skillspector_reports(sample_skill_dir, [static_report], use_llm=False)
+
+        assert "skillspector_llm_provenance" not in result.metadata
+        assert "skillspector_provider_id" not in result.metadata
 
     def test_partial_llm_verdicts_are_reported_as_partial(self, tmp_path: Path) -> None:
         """A verifier response covering only some findings must not claim full confirmation."""

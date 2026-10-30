@@ -1,0 +1,114 @@
+{
+  "schema_version": 1,
+  "provider": {
+    "configured_adapter": "openai",
+    "resolved_adapter": "openai",
+    "effective_adapter": "openai",
+    "effective_adapters": [
+      "openai"
+    ],
+    "service": "unknown",
+    "routing": {
+      "deployment_override": null,
+      "deployment_source": "not_applicable",
+      "api_version": null,
+      "api_version_source": "not_applicable"
+    }
+  },
+  "analyzers": [
+    {
+      "analyzer_id": "mcp_tool_poisoning",
+      "model": "gpt-6.1-sol",
+      "model_source": "resolved_configuration",
+      "analyzer_revision": {
+        "value": "2.12.0",
+        "source": "skillspector_package",
+        "source_revision": {
+          "value": "c0ffee0000000000000000000000000000000000",
+          "source": "package_vcs_metadata"
+        }
+      }
+    },
+    {
+      "analyzer_id": "semantic_developer_intent",
+      "model": "gpt-6.1-sol",
+      "model_source": "resolved_configuration",
+      "analyzer_revision": {
+        "value": "2.12.0",
+        "source": "skillspector_package",
+        "source_revision": {
+          "value": "c0ffee0000000000000000000000000000000000",
+          "source": "package_vcs_metadata"
+        }
+      }
+    },
+    {
+      "analyzer_id": "semantic_quality_policy",
+      "model": "gpt-6.1-sol",
+      "model_source": "resolved_configuration",
+      "analyzer_revision": {
+        "value": "2.12.0",
+        "source": "skillspector_package",
+        "source_revision": {
+          "value": "c0ffee0000000000000000000000000000000000",
+          "source": "package_vcs_metadata"
+        }
+      }
+    },
+    {
+      "analyzer_id": "semantic_security_discovery",
+      "model": "gpt-6.1-sol",
+      "model_source": "resolved_configuration",
+      "analyzer_revision": {
+        "value": "2.12.0",
+        "source": "skillspector_package",
+        "source_revision": {
+          "value": "c0ffee0000000000000000000000000000000000",
+          "source": "package_vcs_metadata"
+        }
+      }
+    },
+    {
+      "analyzer_id": "meta_analyzer",
+      "model": "gpt-6.1-sol",
+      "model_source": "resolved_configuration",
+      "analyzer_revision": {
+        "value": "2.12.0",
+        "source": "skillspector_package",
+        "source_revision": {
+          "value": "c0ffee0000000000000000000000000000000000",
+          "source": "package_vcs_metadata"
+        }
+      }
+    }
+  ],
+  "sampling": {
+    "temperature": {
+      "requested": null,
+      "source": "provider_default",
+      "forwarded_to_client": null,
+      "adapter_support": true,
+      "provider_support": "unknown"
+    },
+    "seed": {
+      "requested": null,
+      "source": "unset",
+      "forwarded_to_client": null,
+      "adapter_support": true,
+      "provider_support": "unknown"
+    },
+    "reasoning_effort": {
+      "requested": "medium",
+      "source": "environment",
+      "forwarded_to_client": "medium",
+      "adapter_support": true,
+      "provider_support": "unknown"
+    }
+  },
+  "determinism": {
+    "classification": "nondeterministic",
+    "control_status": "best_effort_controls_forwarded",
+    "provider_guarantee": false,
+    "reason": "Optional controls do not guarantee identical provider output."
+  }
+}

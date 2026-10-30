@@ -161,7 +161,6 @@ All notable changes to SkillEvaluator are documented in this file.
   Harbor's agent setup timeout, so an install that keeps failing still fails
   the trial. Platform probe and transport errors are not retried, and local
   mode still checks the installed CLI once.
-
 - Tier 2 caps every intra-skill embedding chunk at 3,000 characters, preserves
   meaningful short tails and actual Python docstring source ranges, and avoids
   counting pieces of one original chunk as duplicates of each other. Oversized

@@ -24,6 +24,7 @@ import tempfile
 import threading
 import time
 import tomllib
+import unicodedata
 from collections.abc import Iterable, Iterator, Mapping, Sequence
 from concurrent.futures import FIRST_COMPLETED, ThreadPoolExecutor, as_completed, wait
 from contextlib import ExitStack, contextmanager, suppress
@@ -63,6 +64,8 @@ from skillevaluator.provider_config import (
 )
 from skillevaluator.publication_identity import (
     PUBLICATION_ANY_DEPTH_EXCLUDED_NAMES,
+    publication_source_digest,
+    publication_source_link_is_generated,
     publication_source_path_is_excluded,
     publication_target_from_path,
 )
@@ -3238,6 +3241,77 @@ def _workspace_skills(skill_path: Path, values: list[str | Path]) -> list[Path]:
     return resolved
 
 
+def _decoy_workspace_skills(
+    skill_path: Path,
+    workspace_config: Mapping[str, Any],
+    workspace_mode: str,
+    include_skills: list[str | Path] | None = None,
+    reference_skills_dir: Path | None = None,
+) -> tuple[list[Path], list[Path], dict[str, Any] | None]:
+    """Resolve one frozen selection without changing manual workspace policy."""
+    from skillevaluator.embedding.extractor import extract_from_skill
+    from skillevaluator.tier3.decoys import load_decoy_manifest
+
+    raw_manifest = workspace_config.get("decoy_manifest")
+    include_values = [*workspace_config.get("include", []), *(include_skills or [])]
+    if (include_values or raw_manifest is not None) and workspace_mode != "group":
+        field = "skill_workspace.decoy_manifest" if raw_manifest is not None else "include_skills"
+        raise ValueError(f"{field} requires skill_workspace.mode=group")
+    manual_skills = _workspace_skills(skill_path.resolve(), include_values)
+    if raw_manifest is None:
+        return manual_skills, [], None
+    manifest_path = Path(raw_manifest).expanduser()
+    if not manifest_path.is_absolute():
+        manifest_path = skill_path.parent / manifest_path
+    selected, manifest = load_decoy_manifest(skill_path, manifest_path)
+
+    def name_key(value: str) -> str:
+        return unicodedata.normalize("NFC", value).casefold()
+
+    reserved = [skill_path, *manual_skills]
+    if reference_skills_dir is not None and reference_skills_dir.is_dir():
+        reserved.extend(path for path in reference_skills_dir.iterdir() if _is_skill_dir(path))
+    directory_names = {name_key(path.name) for path in reserved}
+    skill_names: set[str] = set()
+    for path in reserved:
+        entry = extract_from_skill(path)
+        if entry is not None:
+            skill_names.add(name_key(entry.name))
+    for path, record in zip(selected, manifest["selected"], strict=True):
+        if name_key(path.name) in directory_names or name_key(record["skill_name"]) in skill_names:
+            raise ValueError(f"Selected decoy '{path.name}' collides with another workspace skill name")
+        directory_names.add(name_key(path.name))
+        skill_names.add(name_key(record["skill_name"]))
+    return manual_skills, selected, manifest
+
+
+@contextmanager
+def _private_decoy_workspace_snapshot(selected: list[Path], manifest: Mapping[str, Any]) -> Iterator[list[Path]]:
+    """Keep the same verified source bytes available to every paired task."""
+    with tempfile.TemporaryDirectory(prefix="skillevaluator-decoys-snapshot-") as root_text:
+        root = Path(root_text)
+        snapshots: list[Path] = []
+        for source, record in zip(selected, manifest["selected"], strict=True):
+            expected = record["source_digest"]
+            if publication_source_digest(source) != expected:
+                raise ValueError(f"Selected decoy '{source.name}' changed before snapshot creation")
+
+            def ignore_generated(directory: str, names: list[str], source: Path = source) -> list[str]:
+                return [
+                    name
+                    for name in names
+                    if publication_source_path_is_excluded(source, Path(directory) / name)
+                    or publication_source_link_is_generated(source, Path(directory) / name)
+                ]
+
+            snapshot = root / source.name
+            copytree_secure(source, snapshot, allowed_root=source, ignore=ignore_generated)
+            if publication_source_digest(snapshot) != expected or publication_source_digest(source) != expected:
+                raise ValueError(f"Selected decoy '{source.name}' changed while its snapshot was created")
+            snapshots.append(snapshot)
+        yield snapshots
+
+
 def _task_timeout_plan(task_roots: list[Path], timeout_multiplier: float) -> float | None:
     """Return the largest staged agent timeout after applying Harbor scaling."""
     timeouts: list[float] = []
@@ -4573,6 +4647,9 @@ def _run_harbor_eval_impl(
     repo_context_exclude_paths: Sequence[Path] = (),
     _evaluator_skill_path: Path | None = None,
     _snapshot_publication_target: dict[str, str] | None = None,
+    _decoy_workspace_paths: list[Path] | None = None,
+    _decoy_workspace_source_paths: list[Path] | None = None,
+    _decoy_manifest: dict[str, Any] | None = None,
     _monotonic_start: float | None = None,
 ) -> dict[str, Any]:
     """Run a public Harbor evaluation with and without the target skill."""
@@ -4602,6 +4679,35 @@ def _run_harbor_eval_impl(
             try:
                 snapshot_publication_target = publication_target_from_path(skill_path)
                 evaluator_skill_path = snapshot_stack.enter_context(private_evaluator_skill_snapshot(skill_path))
+                snapshot_config, _ = load_evals_config(evaluator_skill_path)
+                snapshot_workspace = snapshot_config.get("skill_workspace", {})
+                if "decoy_manifest" in snapshot_workspace:
+                    manual, selected, manifest = _decoy_workspace_skills(
+                        skill_path,
+                        snapshot_workspace,
+                        skill_workspace_mode or snapshot_workspace.get("mode", "isolated"),
+                        include_skills,
+                        reference_skills_dir,
+                    )
+                    assert manifest is not None
+                    source_paths = [*manual, *selected]
+                    results_root = Path(output_dir) if output_dir is not None else skill_path / "evals" / "results"
+                    validate_output_provenance_key_location(
+                        skill_path,
+                        results_root,
+                        reference_skills_dir=reference_skills_dir,
+                        workspace_skill_paths=source_paths,
+                    )
+                    validate_results_root_location(
+                        skill_path,
+                        results_root,
+                        reference_skills_dir=reference_skills_dir,
+                        workspace_skill_paths=source_paths,
+                    )
+                    frozen = snapshot_stack.enter_context(_private_decoy_workspace_snapshot(selected, manifest))
+                    forwarded["_decoy_workspace_paths"] = [*manual, *frozen]
+                    forwarded["_decoy_workspace_source_paths"] = source_paths
+                    forwarded["_decoy_manifest"] = manifest
                 if publication_target_from_path(skill_path) != snapshot_publication_target:
                     raise ValueError("Publication source changed while its private evaluator snapshot was created")
             except (OSError, ValueError) as exc:
@@ -4688,6 +4794,10 @@ def _run_harbor_eval_impl(
     if workspace_mode not in {"isolated", "group"}:
         reporter.emit(ProgressEvent(stage="configuration", state="failed", detail="invalid workspace mode"))
         return {"error": ["skill_workspace.mode must be isolated or group"]}
+    if "decoy_manifest" in workspace_config and workspace_mode != "group":
+        detail = "skill_workspace.decoy_manifest requires skill_workspace.mode=group"
+        reporter.emit(ProgressEvent(stage="configuration", state="failed", detail=detail))
+        return {"error": [detail]}
     if not skip_baseline and harbor_config.get("pre_agent_setup"):
         detail = (
             "harbor.pre_agent_setup/setup_commands cannot run in a paired evaluation; "
@@ -5012,12 +5122,21 @@ def _run_harbor_eval_impl(
     job_judge_verifier_env = _job_judge_verifier_env(provider_env, grading_mode)
     job_judge_subprocess_env = _job_judge_subprocess_env(provider_env, grading_mode)
 
+    if _decoy_manifest is not None:
+        run_config["skill_workspace"] = {
+            "mode": workspace_mode,
+            "decoy_manifest": _decoy_manifest,
+        }
     include_values = [*workspace_config.get("include", []), *(include_skills or [])]
     if include_values and workspace_mode != "group":
         reporter.emit(ProgressEvent(stage="with-skill-tasks", state="failed", detail="invalid included skills"))
         return {"error": ["include_skills requires skill_workspace.mode=group"]}
     try:
-        workspace_skills = _workspace_skills(skill_path.resolve(), include_values if workspace_mode == "group" else [])
+        workspace_skills = (
+            _decoy_workspace_paths
+            if _decoy_workspace_paths is not None
+            else _workspace_skills(skill_path.resolve(), include_values if workspace_mode == "group" else [])
+        )
     except ValueError as exc:
         reporter.emit(ProgressEvent(stage="with-skill-tasks", state="failed", detail=str(exc)))
         return {"error": [str(exc)]}
@@ -5029,13 +5148,13 @@ def _run_harbor_eval_impl(
             skill_path,
             root,
             reference_skills_dir=reference_skills_dir,
-            workspace_skill_paths=workspace_skills,
+            workspace_skill_paths=_decoy_workspace_source_paths or workspace_skills,
         )
         validate_results_root_location(
             skill_path,
             root,
             reference_skills_dir=reference_skills_dir,
-            workspace_skill_paths=workspace_skills,
+            workspace_skill_paths=_decoy_workspace_source_paths or workspace_skills,
         )
     except ValueError as exc:
         reporter.emit(ProgressEvent(stage="with-skill-tasks", state="failed", detail=str(exc)))
@@ -5292,7 +5411,7 @@ def _run_harbor_eval_impl(
         skill_path,
         staged_task_paths,
         reference_skills_dir=reference_skills_dir,
-        workspace_skill_paths=workspace_skills,
+        workspace_skill_paths=_decoy_workspace_source_paths or workspace_skills,
     ):
         publication_target_conflict = {
             "run_start": dict(publication_target) if publication_target is not None else None,

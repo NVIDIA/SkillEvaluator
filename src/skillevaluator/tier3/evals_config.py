@@ -60,7 +60,7 @@ HARBOR_TASK_SOURCES = {"auto", "evals_json", "native_harbor"}
 MAX_HARBOR_TIMEOUT_MULTIPLIER = sys.float_info.max / 600.0
 _AGENT_KEYS = {"model"}
 _RESOURCE_KEYS = {"cpus", "memory_mb", "storage_mb"}
-_SKILL_WORKSPACE_KEYS = {"mode", "include"}
+_SKILL_WORKSPACE_KEYS = {"mode", "include", "decoy_manifest"}
 _GRADING_KEYS = {"mode"}
 _ENV_NAME_RE = re.compile(r"^[A-Za-z_][A-Za-z0-9_]*$")
 _GKE_INFRASTRUCTURE_KWARGS: frozenset[str] = frozenset(
@@ -742,6 +742,10 @@ def _skill_workspace(value: Any, config_path: Path) -> dict[str, Any]:
         out["mode"] = _enum(value["mode"], SKILL_WORKSPACE_MODES, config_path, "skill_workspace.mode")
     if "include" in value:
         out["include"] = _string_list(value["include"], config_path, "skill_workspace.include")
+    if "decoy_manifest" in value:
+        out["decoy_manifest"] = _non_empty_string(
+            value["decoy_manifest"], config_path, "skill_workspace.decoy_manifest"
+        )
     return out
 
 
@@ -770,4 +774,3 @@ def load_allowed_runtime_env(skill_path: Path) -> dict[str, str]:
     except Exception:
         pass
     return {}
-

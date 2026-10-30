@@ -262,6 +262,7 @@ grading:
 | `harbor.agents.<name>.model` | string | Per-agent model override; whitespace is trimmed. `claude` is accepted as an alias of `claude-code`, but configuring both spellings in one config is an error. |
 | `skill_workspace.mode` | `isolated`, `group` | Whether sibling skills are visible — see [Agents & Sandboxes](agents-and-sandboxes.mdx). |
 | `skill_workspace.include` | list of paths | Extra skills staged into a `group` workspace. |
+| `skill_workspace.decoy_manifest` | path | Optional frozen selection from `tier3 select-decoys`; requires `group` mode. Relative paths resolve against the target skill's parent directory, as with `include`. Selected source hashes are checked before evaluation. See [Workspace modes](agents-and-sandboxes.mdx#select-a-reproducible-decoy-set). |
 | `grading.mode` | `default`, `default_plus_custom`, `custom_only` | Grading pipeline — see [Custom Graders & Tasks](custom-graders.mdx). Legacy spellings `aces_default` and `aces_plus_custom` are accepted and normalized to `default` and `default_plus_custom`. |
 
 Environment constructor kwargs are deliberately not accepted in this

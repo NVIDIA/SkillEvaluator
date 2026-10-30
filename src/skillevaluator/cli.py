@@ -3298,6 +3298,10 @@ tier3.add_command(compare, "compare")
 tier3.add_command(view, "view")
 tier3.add_command(doctor, "doctor")
 
+from skillevaluator.tier3.decoy_commands import select_decoys_command
+
+tier3.add_command(select_decoys_command, "select-decoys")
+
 from skillevaluator.tier3.workflow import build_tier3_workflow
 
 tier3.workflow = build_tier3_workflow(evaluate)

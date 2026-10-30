@@ -31,6 +31,7 @@ commands referenced below.
 | [dedup-scan](#dedup-scan) | Alias of `context-optimization-check` | Embeddings + LLM provider key |
 | [similarity-check](#similarity-check) | Detect duplicate content across a collection | Embeddings provider key |
 | [tier3 evaluate](#tier3-evaluate) | Run Tier 3 live agent evaluation | Provider key plus a credential the selected agents can use (one `NVIDIA_API_KEY` covers both on NVIDIA Build), backend (Docker by default) |
+| [tier3 select-decoys](#tier3-select-decoys) | Save a reproducible set of neighboring skills for group evaluation | Local description-embedding catalog, skill collection, embeddings provider key |
 | [create-eval-dataset](#create-eval-dataset) | Generate synthetic eval datasets | LLM provider key (none with `--no-llm`) |
 | [init-custom-grader](#init-custom-grader) | Scaffold a bring-your-own-grader starter | Nothing |
 | [init-harbor-task](#init-harbor-task) | Scaffold a bring-your-own-task Harbor starter | Nothing |
@@ -159,9 +160,11 @@ pipeline.
 | --- | --- |
 | `tier1` | `validate`, `quality-check`, `rubric-eval`, `security-scan`, `pii-scan`, `lint-scripts` |
 | `tier2` | `context-optimization-check`, `dedup-scan`, `similarity-check` |
-| `tier3` | `evaluate`, `create-eval-dataset`, `init-custom-grader`, `init-harbor-task`, `doctor`, `view`, `compare`, `validate`, `harbor-view` |
+| `tier3` | `evaluate`, `select-decoys`, `create-eval-dataset`, `init-custom-grader`, `init-harbor-task`, `doctor`, `view`, `compare`, `validate`, `harbor-view` |
 
-`health-check` and [models](#models) are top-level only. Two expert commands are advertised **only** inside the `tier3` group: [tier3 evaluate](#tier3-evaluate), documented with its full flag set below, and `tier3 validate`:
+`health-check` and [models](#models) are top-level only. The expert commands
+[tier3 evaluate](#tier3-evaluate), [tier3 select-decoys](#tier3-select-decoys),
+and `tier3 validate` are advertised **only** inside the `tier3` group:
 
 ### tier3 validate
 
@@ -411,6 +414,36 @@ still map to `--catalog` and `--save-catalog`, respectively. Use the catalog
 spellings for new commands. A catalog query and a catalog build cannot be
 combined in one invocation, and each alias cannot be supplied alongside its
 replacement.
+
+## tier3 select-decoys
+
+Choose neighboring skills from a local description-embedding catalog and save
+a frozen JSON manifest for group evaluation. This command makes an embedding
+request for the target; it does not launch an agent or modify the run policy.
+
+```bash title="Save a group-workspace selection"
+skillevaluator tier3 select-decoys ./skills/my-skill \
+  --catalog ./skill-catalog.json --catalog-root ./skills \
+  --count 4 --output ./skills/my-skill/evals/decoys.json
+```
+
+| Flag | Default | Effect |
+| --- | --- | --- |
+| `--catalog FILE` | required | Skill-only catalog with at most 1,000 entries, saved by `similarity-check --save-catalog` without `--full-body`. |
+| `--catalog-root DIRECTORY` | required | Local collection root corresponding to catalog-relative skill paths. |
+| `--count INTEGER` | `4` | Number of eligible skills to select, from `1` to `1000`; fails if fewer are available. |
+| `--exclude PATH` | none | Exclude a catalog-relative skill path; repeatable. |
+| `--model TEXT` | configured embedding model | Embedding model override; must match the catalog. |
+| `-o, --output FILE` | required | Selection manifest to write, outside the collection or inside the target's `evals/` directory. |
+
+The manifest records the catalog hash and embedding identity, selected paths
+and scores, target manifest hash, and selected source hashes. Set
+`skill_workspace.mode: group` and `skill_workspace.decoy_manifest` in
+`evals/config.yml` to consume it. The manifest path is relative to the target
+skill's parent directory. Evaluation validates and reuses the selection
+without contacting the embedding provider. See
+[Select a reproducible decoy set](agents-and-sandboxes.mdx#select-a-reproducible-decoy-set)
+for a complete example and the limits of similarity-based selection.
 
 ## tier3 evaluate
 

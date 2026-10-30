@@ -610,6 +610,52 @@ Use group mode when the skill delegates to companion skills and evaluating it
 alone would be unfair; keep the default otherwise — a smaller workspace is a
 cleaner experiment.
 
+### Select a reproducible decoy set
+
+`tier3 select-decoys` ranks real skills from a local description-embedding
+catalog and saves a selection manifest. Selection accepts skill-only catalogs
+with at most 1,000 entries. Build the catalog without `--full-body` and use the
+same embedding provider and model for selection:
+
+```bash title="Select four neighboring skills"
+skillevaluator similarity-check ./skills --save-catalog ./skill-catalog.json
+skillevaluator tier3 select-decoys ./skills/my-skill \
+  --catalog ./skill-catalog.json --catalog-root ./skills \
+  --count 4 --exclude required-helper \
+  --output ./skills/my-skill/evals/decoys.json
+```
+
+Opt in through the target skill's run policy. Manifest paths, like included
+skill paths, are relative to the target skill's parent directory:
+
+```yaml title="skills/my-skill/evals/config.yml"
+schema_version: 1
+skill_workspace:
+  mode: group
+  decoy_manifest: my-skill/evals/decoys.json
+  include:
+    - required-helper
+```
+
+Selection excludes the target and duplicate candidates, orders equal scores by
+catalog-relative path, and fails if too few eligible skills remain. Required
+helpers stay explicit in `include`; the selector does not infer prerequisites.
+A collision between a selected skill and an explicitly included skill is an
+error.
+
+The manifest records catalog and model identity, scores, the target manifest
+hash, and selected skill source hashes. Evaluation verifies the hashes and
+uses one snapshot of the selected skills in both arms; it makes no embedding
+request and does not select again. Regenerate after moving the collection,
+editing the target's `SKILL.md`, or changing selected skill content. External
+workspace skills retain the existing publication-evidence limitations.
+
+Similarity is a heuristic for plausible alternatives, not evidence of actual
+routing confusion. Skill Lift remains conditional on the chosen workspace;
+a neighboring skill may legitimately substitute for the target. Review the
+selection before running the evaluation, and keep the manifest with the run
+policy when comparing results.
+
 ## Readiness checks
 
 `doctor` and `health-check` run the same readiness checks and exit nonzero when

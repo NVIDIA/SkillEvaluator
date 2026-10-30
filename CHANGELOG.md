@@ -208,6 +208,13 @@ All notable changes to SkillEvaluator are documented in this file.
   report generation; measured zeroes retain their numeric formatting
   ([#240](https://github.com/NVIDIA/SkillEvaluator/issues/240)).
 
+- Tier 3 HTML reports no longer label a recorded baseline as missing. When an
+  agent or dimension has a baseline score but no comparable lift, for example
+  because the arms used different score policies or no case kept matching judge
+  models, the dimension grid, agent scorecards, and Skill Lift card now say
+  "comparison unavailable" instead of "no baseline". Rows with no baseline
+  score, such as `--skip-baseline` runs, keep "no baseline".
+
 - Explicit searches of `/` (`find`, `grep -r`, `rg`, `ag`, `du` and `tree` with a
   `/` operand, and native search tools rooted at `/`) now count as wasted tool
   calls whether or not they name the expected skill or script, including when

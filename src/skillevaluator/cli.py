@@ -456,9 +456,7 @@ def _resolve_report_output_location(target_path: Path, output_dir: Path) -> Path
             if output_is_real_directory and is_generated_output_root(output_dir):
                 return output_dir
         except (OSError, RuntimeError, ValueError) as exc:
-            raise click.ClickException(
-                f"Cannot safely reserve default report output directory: {output_dir}"
-            ) from exc
+            raise click.ClickException(f"Cannot safely reserve default report output directory: {output_dir}") from exc
 
     if output_is_default:
         relocated = target_path.with_name(f"{target_path.name}-reports")
@@ -501,8 +499,7 @@ def _reject_copy_repo_root_output(
     try:
         context_roots = [(resolve_repo_context_root(target_path), "repository root")]
         context_roots.extend(
-            (included_skill.resolve(strict=True), "runtime source root")
-            for included_skill in include_skills
+            (included_skill.resolve(strict=True), "runtime source root") for included_skill in include_skills
         )
     except (OSError, RuntimeError, ValueError) as exc:
         raise click.ClickException(f"Cannot validate {mode_label} report output directory: {output_dir}") from exc
@@ -2355,9 +2352,9 @@ def validate(
         )
     if tier3_result is not None and block_on_agent_eval_effective:
         effective_gate_results.append(tier3_result)
-    from skillevaluator.reporting.base import passes_required_gate
+    from skillevaluator.reporting.run_status import Status, resolve_run_status
 
-    gate_failed = not all(passes_required_gate(result) for result in effective_gate_results)
+    gate_failed = resolve_run_status(effective_gate_results).headline != Status.PASSED
     if quiet:
         _finish_pipeline_view(
             view,

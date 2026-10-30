@@ -350,6 +350,13 @@ _SENSITIVE_WRITE_PATHS = [
     "/etc/sudoers.d",
 ]
 
+# A force-only rm deletes the same files as a plain rm, so it is destructive
+# only when a target lies under one of these top-level system or home
+# directories. /var/tmp is scratch space and stays exempt.
+_RM_FORCE_PROTECTED_ROOTS = frozenset(
+    {"bin", "boot", "etc", "home", "lib", "lib32", "lib64", "libx32", "root", "sbin", "usr", "var"}
+)
+
 # apply_patch writes every file named by an "*** Add File: ", "*** Update File: ",
 # "*** Delete File: ", or "*** Move to: " header, so each header path is a write
 # target. Codex trims every patch line (Rust str::trim), so any whitespace except
@@ -2135,6 +2142,21 @@ def _rm_tmp_operand_is_exempt(operand: str, *, symlink_seen: bool) -> bool:
     return inside_tmp
 
 
+def _rm_force_operand_is_protected(operand: str) -> bool:
+    """Flag force-only deletion of system or home paths, resolved lexically.
+
+    Home shorthands map under /home and relative targets resolve against the
+    container WORKDIR, as apply_patch paths do. Unresolved targets are treated
+    like those of a plain rm.
+    """
+    components = _normalized_write_path(operand, _APPLY_PATCH_DEFAULT_WORKDIR).split("/")[1:]
+    root = components[0]
+    if not root or any(char in root for char in "*?["):
+        # "/" or a glob at the top level ("/*", "/e*/hosts") can name any protected root.
+        return True
+    return root in _RM_FORCE_PROTECTED_ROOTS and components[:2] != ["var", "tmp"]
+
+
 def _rm_xargs_fallback(command_text: str) -> bool:
     """Retain detection on parser/budget failures with bounded linear work."""
     candidate = command_text.replace("\\\r\n", "").replace("\\\n", "")
@@ -2307,7 +2329,8 @@ def _rm_targets_outside_tmp(
         if xargs_context is False:
             continue
 
-        destructive = False
+        recursive = False
+        force = False
         options_ended = False
         operands: list[str] = []
         skip_next = False
@@ -2328,18 +2351,26 @@ def _rm_targets_outside_tmp(
             if not options_ended and arg == "--":
                 options_ended = True
             elif not options_ended and arg.startswith("-") and arg != "-":
-                destructive |= arg in {"--recursive", "--force"} or (
-                    not arg.startswith("--") and any(flag in arg[1:] for flag in "rRf")
-                )
+                if arg.startswith("--"):
+                    recursive |= arg == "--recursive"
+                    force |= arg == "--force"
+                else:
+                    recursive |= "r" in arg[1:] or "R" in arg[1:]
+                    force |= "f" in arg[1:]
             else:
                 operands.append(arg)
 
-        if not destructive:
+        if not recursive and not force:
             continue
         if xargs_context:
             # xargs can append or replace targets with paths absent from this trace.
             return True
         if _xargs_only:
+            continue
+        if not recursive:
+            # Without recursion, -f only silences prompts and missing-file errors.
+            if any(_rm_force_operand_is_protected(operand) for operand in operands):
+                return True
             continue
         # Nested script strings can end before a dynamic target is appended.
         if not operands:

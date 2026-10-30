@@ -220,6 +220,16 @@ All notable changes to SkillEvaluator are documented in this file.
   addresses on the same line and domains that merely resemble placeholders remain detectable
   ([#244](https://github.com/NVIDIA/SkillEvaluator/issues/244)).
 
+- Tier 3 security grading no longer treats `rm -f` or `rm --force` without
+  `-r`, `-R`, or `--recursive` as a destructive command. Routine cleanup such as
+  `rm -f out.txt && python run.py` or `find . -name '*.pyc' -exec rm -f {} \;`
+  received a critical destructive-command finding and a security score of 0.0
+  in both graders, which could fail the Security dimension and the Tier 3
+  verdict. Force-only deletion keeps the finding when a literal target resolves
+  under `/bin`, `/boot`, `/etc`, `/home`, `/lib*`, `/root`, `/sbin`, `/usr`, or
+  `/var` (except `/var/tmp`), or under `~` or `$HOME`. Recursive deletion and
+  `xargs rm -f` are graded as before.
+
 - Tier 3 security grading preserves ordinary nested `/tmp` cleanup, including
   child operands with trailing slashes, unless the current or an earlier
   execution action contains recognized symlink-creation syntax (`ln -s`,

@@ -130,6 +130,7 @@ errors, such as an option the workflow does not accept, exit `2`.
 | `--llm / --no-llm` | Enabled when a provider is configured | Enable or skip rubric, LLM security, and finding verification; explicit `--llm` requires valid provider configuration |
 | `--min-score INTEGER` | `70` | Minimum passing quality and rubric score, from 0 to 100; quality severity overrides cannot waive the minimum |
 | `--quality-config PATH` | packaged `quality-default.yaml` | YAML file that replaces the quality check's expected-heading rules. See [Tier 1: Validation](tier1-validation.mdx#the-checks). |
+| `--pii-waivers PATH` | none | Reviewed, expiring PII waivers applied by the `pii` check. See [PII waivers](tier1-validation.mdx#pii-waivers). |
 | `--profile TEXT` | `SKILLEVALUATOR_PROFILE`, then `external` | Validation policy profile |
 | `--previous-version TEXT` | `SKILLEVALUATOR_PREVIOUS_VERSION`, else unset | Previous version for version checks |
 
@@ -240,6 +241,7 @@ Static checks; LLM-free by default. Tier 1 gates the exit code and always runs.
 | `--llm-verify` | off | Run a second LLM pass to suppress false-positive findings. |
 | `--min-score INTEGER` | `70` | Minimum quality score (0–100) required per skill when the `quality` check runs; policy severity overrides cannot waive this gate. |
 | `--quality-config PATH` | packaged `quality-default.yaml` | YAML file that replaces the quality check's expected-heading rules. See [Tier 1: Validation](tier1-validation.mdx#the-checks). |
+| `--pii-waivers PATH` | none | Reviewed, expiring PII waivers applied by the `pii` check; forwarded to each skill of a catalog run. See [PII waivers](tier1-validation.mdx#pii-waivers). |
 
 ### Tier 2 · Deduplication
 
@@ -350,6 +352,7 @@ skillevaluator pii-scan ./my-skill
 | Flag | Default | Effect |
 | --- | --- | --- |
 | `--llm-verify` | off | Use LLM verification to reduce false positives. |
+| `--pii-waivers PATH` | none | Apply reviewed, expiring PII waivers from this YAML file. See [PII waivers](tier1-validation.mdx#pii-waivers). |
 
 Plus the standard report options.
 

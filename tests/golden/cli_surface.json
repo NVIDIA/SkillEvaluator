@@ -942,6 +942,14 @@
           "type": "boolean"
         },
         {
+          "name": "pii_waivers",
+          "opts": [
+            "--pii-waivers"
+          ],
+          "param_type": "option",
+          "type": "file"
+        },
+        {
           "choices": [
             "cli",
             "json",
@@ -1334,6 +1342,14 @@
               "type": "boolean"
             },
             {
+              "name": "pii_waivers",
+              "opts": [
+                "--pii-waivers"
+              ],
+              "param_type": "option",
+              "type": "file"
+            },
+            {
               "choices": [
                 "cli",
                 "json",
@@ -1580,6 +1596,14 @@
               "type": "file"
             },
             {
+              "name": "pii_waivers",
+              "opts": [
+                "--pii-waivers"
+              ],
+              "param_type": "option",
+              "type": "file"
+            },
+            {
               "name": "profile",
               "opts": [
                 "--profile"
@@ -1670,6 +1694,14 @@
             "name": "quality_config",
             "opts": [
               "--quality-config"
+            ],
+            "param_type": "option",
+            "type": "file"
+          },
+          {
+            "name": "pii_waivers",
+            "opts": [
+              "--pii-waivers"
             ],
             "param_type": "option",
             "type": "file"
@@ -3211,6 +3243,14 @@
           "name": "quality_config",
           "opts": [
             "--quality-config"
+          ],
+          "param_type": "option",
+          "type": "file"
+        },
+        {
+          "name": "pii_waivers",
+          "opts": [
+            "--pii-waivers"
           ],
           "param_type": "option",
           "type": "file"

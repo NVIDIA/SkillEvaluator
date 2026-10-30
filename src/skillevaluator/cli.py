@@ -19,6 +19,7 @@ import click
 
 from skillevaluator import __version__
 from skillevaluator.cli_help import GroupedOption, RichGroup
+from skillevaluator.config import load_pii_patterns
 from skillevaluator.constants import (
     SIMILARITY_DEFAULT_MAX_ENTRIES,
     SIMILARITY_DEFAULT_MAX_SCALAR_COMPARISONS,
@@ -65,6 +66,12 @@ from skillevaluator.utils.tier2_paths import (
     is_link_or_reparse,
     paths_refer_to_same_location,
     sanitize_tier2_results,
+)
+from skillevaluator.validators.pii_waivers import (
+    PIIWaiverError,
+    configured_pii_categories,
+    load_pii_waivers,
+    today_utc,
 )
 
 CONTEXT_SETTINGS = {"help_option_names": ["-h", "--help"]}
@@ -115,6 +122,25 @@ class _QualityConfigPath(click.Path):
 
 
 QUALITY_CONFIG_PATH = _QualityConfigPath()
+
+
+class _PIIWaiversPath(click.Path):
+    """A ``--pii-waivers`` file, validated while arguments are parsed."""
+
+    def __init__(self) -> None:
+        super().__init__(exists=True, dir_okay=False, path_type=Path)
+
+    def convert(self, value, param, ctx):
+        path = super().convert(value, param, ctx)
+        try:
+            load_pii_waivers(path, configured_pii_categories(load_pii_patterns()), today=today_utc())
+        except PIIWaiverError as exc:
+            self.fail(f"{path}: {exc}", param, ctx)
+        return path
+
+
+PII_WAIVERS_PATH = _PIIWaiversPath()
+_PII_WAIVERS_HELP = "Apply reviewed, expiring PII waivers from this YAML file to the PII check."
 
 
 def _validate_similarity_threshold(_ctx: click.Context, _param: click.Parameter, value: float) -> float:
@@ -1113,6 +1139,8 @@ def _catalog_child_argv_from_ctx(
         argv.extend(["--min-score", str(min_score)])
     if params.get("quality_config"):
         argv.extend(["--quality-config", str(Path(params["quality_config"]).resolve())])
+    if params.get("pii_waivers"):
+        argv.extend(["--pii-waivers", str(Path(params["pii_waivers"]).resolve())])
     if params.get("external"):
         argv.append("--external")
     if params.get("policy_path"):
@@ -1649,6 +1677,14 @@ def _print_run_banner(target_path: Path, content_type: str, profile: str | None)
     help="Override the packaged quality-default.yaml with a custom YAML file.",
 )
 @click.option(
+    "--pii-waivers",
+    type=PII_WAIVERS_PATH,
+    default=None,
+    cls=GroupedOption,
+    help_group=_TIER1_GROUP,
+    help=_PII_WAIVERS_HELP,
+)
+@click.option(
     "--profile",
     default=None,
     cls=GroupedOption,
@@ -1900,6 +1936,7 @@ def validate(
     llm_verify: bool,
     min_score: int,
     quality_config: Path | None,
+    pii_waivers: Path | None,
     profile: str | None,
     external: bool,
     policy_path: Path | None,
@@ -2126,6 +2163,7 @@ def validate(
         llm_verify=llm_verify,
         min_score=min_score,
         quality_config=quality_config,
+        pii_waivers=pii_waivers,
         previous_version=previous_version,
         policy=policy,
         content_type=resolved_type,
@@ -2446,12 +2484,19 @@ def security_scan(
 @cli.command("pii-scan")
 @_target_argument
 @click.option("--llm-verify", is_flag=True, help="Use LLM verification to reduce false positives.")
+@click.option("--pii-waivers", type=PII_WAIVERS_PATH, default=None, help=_PII_WAIVERS_HELP)
 @_report_options
-def pii_scan(target_path: Path, llm_verify: bool, report_formats: tuple[str, ...], output_dir: Path) -> None:
+def pii_scan(
+    target_path: Path,
+    llm_verify: bool,
+    pii_waivers: Path | None,
+    report_formats: tuple[str, ...],
+    output_dir: Path,
+) -> None:
     """Scan for PII and local identifiers."""
     output_dir = _resolve_file_report_output_location(target_path.resolve(), output_dir, report_formats)
     if not emit_reports(
-        run_pii_scan(target_path, llm_verify=llm_verify),
+        run_pii_scan(target_path, llm_verify=llm_verify, pii_waivers=pii_waivers),
         report_formats=report_formats,
         output_dir=output_dir,
         basename=report_basename("pii"),
@@ -2675,6 +2720,7 @@ def _workflow_report_options(func):
     default=None,
     help="Override the packaged quality-default.yaml with a custom YAML file.",
 )
+@click.option("--pii-waivers", type=PII_WAIVERS_PATH, default=None, help=_PII_WAIVERS_HELP)
 @click.option("--profile", default=None, help="Validation policy profile [default: external].")
 @click.option("--previous-version", default=None, help="Previous version for version checks.")
 @_workflow_report_options
@@ -2684,6 +2730,7 @@ def _tier1_workflow(
     llm: bool | None,
     min_score: int,
     quality_config: Path | None,
+    pii_waivers: Path | None,
     profile: str | None,
     previous_version: str | None,
     report_formats: tuple[str, ...],
@@ -2703,6 +2750,7 @@ def _tier1_workflow(
         llm=llm,
         min_score=min_score,
         quality_config=quality_config,
+        pii_waivers=pii_waivers,
         profile=policy,
         previous_version=previous_version,
     )

@@ -178,6 +178,7 @@ def run_validation(
     llm_verify: bool = False,
     min_score: int = 70,
     quality_config: Path | None = None,
+    pii_waivers: Path | None = None,
     previous_version: str | None = None,
     policy: ValidationPolicy | None = None,
     content_type: str | None = None,
@@ -202,6 +203,8 @@ def run_validation(
     When *policy* is provided, the schema validator applies the policy's
     audience-aware author rules; finalized severities for all validators are
     applied centrally in :func:`emit_reports` via the policy.
+
+    *pii_waivers* is an optional PII waiver file applied by the ``pii`` check.
     """
     enabled = _enabled_checks(checks)
     results: list[ValidationResult] = []
@@ -233,7 +236,7 @@ def run_validation(
         return [_run_result("security", "Security Scan", v.description, v.validate_security_only)]
 
     def _pii_results() -> list[ValidationResult]:
-        v = SecurityValidator(use_llm=False, verify_llm=llm_verify)
+        v = SecurityValidator(use_llm=False, verify_llm=llm_verify, pii_waiver_path=pii_waivers)
         return [_run_result("pii", "PII Scan", "Detect PII and local identifiers", v.validate_pii_only)]
 
     def _code_integrity_results() -> list[ValidationResult]:
@@ -377,8 +380,13 @@ def run_security_scan(
     ]
 
 
-def run_pii_scan(target_path: Path, *, llm_verify: bool = False) -> list[ValidationResult]:
-    validator = SecurityValidator(use_llm=False, verify_llm=llm_verify)
+def run_pii_scan(
+    target_path: Path,
+    *,
+    llm_verify: bool = False,
+    pii_waivers: Path | None = None,
+) -> list[ValidationResult]:
+    validator = SecurityValidator(use_llm=False, verify_llm=llm_verify, pii_waiver_path=pii_waivers)
     return [
         _as_result(
             "PII Scan",

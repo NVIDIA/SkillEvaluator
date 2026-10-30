@@ -893,6 +893,141 @@ def test_cli_rejects_invalid_quality_config_as_usage_error(
     assert "Traceback" not in output
 
 
+_PII_WAIVER_COMMANDS = {
+    "pii-scan": (["pii-scan"], "skillevaluator-pii.json"),
+    "tier1-pii-scan": (["tier1", "pii-scan"], "skillevaluator-pii.json"),
+    "tier1": (["tier1", "--checks", "pii", "--no-llm"], "skillevaluator-tier1.json"),
+    "validate": (
+        ["validate", "--no-tier3", "--no-llm", "--no-tier2", "--checks", "pii"],
+        "skillevaluator-output-*.json",
+    ),
+}
+
+
+def _pii_waiver_run(tmp_path: Path, monkeypatch: pytest.MonkeyPatch, command: str, *extra_args: str):
+    """Run a PII-scanning command on a copy of the fixture with one non-placeholder address in it."""
+    from skillevaluator.validators.pii_waivers import pii_evidence_sha256
+
+    skill = tmp_path / "simple"
+    shutil.copytree(FIXTURE, skill)
+    (skill / "contact.md").write_text("# Contact\nWrite to boss@company.com for access.\n", encoding="utf-8")
+    waiver = {
+        "id": "PII-001",
+        "category": "emails",
+        "file": "simple/contact.md",
+        "line": 2,
+        "evidence_sha256": pii_evidence_sha256("emails", "boss@company.com"),
+        "reason": "Public support address of the documented service",
+        "owner": "docs-team",
+        "created": "2026-01-01",
+        "expires": "2099-12-31",
+    }
+    (tmp_path / "pii-waivers.yaml").write_text(json.dumps({"version": 1, "waivers": [waiver]}), encoding="utf-8")
+    monkeypatch.chdir(tmp_path)
+    args, report_glob = _PII_WAIVER_COMMANDS[command]
+
+    result = CliRunner().invoke(cli, [*args, "simple", "--report", "json", "--output-dir", "out", *extra_args])
+
+    (report_path,) = (tmp_path / "out").glob(report_glob)
+    report = json.loads(report_path.read_text(encoding="utf-8"))
+    checks = [finding["check_name"] for entry in report["results"] for finding in entry["findings"]]
+    return result, checks
+
+
+@pytest.mark.parametrize("command", list(_PII_WAIVER_COMMANDS))
+def test_pii_waivers_option_applies_reviewed_waivers(
+    command: str,
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    result, checks = _pii_waiver_run(tmp_path, monkeypatch, command, "--pii-waivers", "pii-waivers.yaml")
+
+    assert result.exit_code == 0, result.output
+    assert "emails" not in checks
+    assert "applied-pii-waiver" in checks
+
+
+@pytest.mark.parametrize("command", list(_PII_WAIVER_COMMANDS))
+def test_pii_scan_without_waivers_still_fails(command: str, monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> None:
+    result, checks = _pii_waiver_run(tmp_path, monkeypatch, command)
+
+    assert result.exit_code != 0
+    assert "emails" in checks
+    assert "applied-pii-waiver" not in checks
+
+
+@pytest.mark.parametrize("command", list(_PII_WAIVER_COMMANDS))
+def test_cli_rejects_invalid_pii_waivers_as_usage_error(command: str, tmp_path: Path) -> None:
+    waivers = tmp_path / "pii-waivers.yaml"
+    waivers.write_text("version: 1\nwaivers:\n  - id: PII-001\n    category: emails\n", encoding="utf-8")
+    args, _report = _PII_WAIVER_COMMANDS[command]
+
+    result = CliRunner().invoke(cli, [*args, str(FIXTURE), "--pii-waivers", str(waivers)])
+
+    output = _plain_text(result.output)
+    assert result.exit_code == 2, result.output
+    assert "Invalid value for '--pii-waivers'" in output
+    assert "waivers[0] is missing: file, line" in output
+    assert "Traceback" not in output
+
+
+@pytest.mark.parametrize("workers", [None, "2"], ids=["serial", "parallel"])
+def test_catalog_validate_reports_each_waiver_only_in_its_own_skill(
+    workers: str | None,
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    """One waiver file serves the catalog; no child may report its siblings' waivers as stale."""
+    from skillevaluator.validators.pii_waivers import pii_evidence_sha256
+
+    names = ("one", "two", "three")
+    waivers = []
+    for index, name in enumerate(names, 1):
+        skill = tmp_path / "catalog" / name
+        shutil.copytree(FIXTURE, skill)
+        manifest = skill / "SKILL.md"
+        manifest.write_text(
+            manifest.read_text(encoding="utf-8").replace("name: simple", f"name: {name}"), encoding="utf-8"
+        )
+        address = f"{name}@company.com"
+        (skill / "contact.md").write_text(f"# Contact\nWrite to {address} for access.\n", encoding="utf-8")
+        waivers.append(
+            {
+                "id": f"PII-00{index}",
+                "category": "emails",
+                "file": f"catalog/{name}/contact.md",
+                "line": 2,
+                "evidence_sha256": pii_evidence_sha256("emails", address),
+                "reason": "Public support address of the documented service",
+                "owner": "docs-team",
+                "created": "2026-01-01",
+                "expires": "2099-12-31",
+            }
+        )
+    (tmp_path / "pii-waivers.yaml").write_text(json.dumps({"version": 1, "waivers": waivers}), encoding="utf-8")
+    monkeypatch.chdir(tmp_path)
+    args = ["validate", "--no-tier3", "--no-llm", "--no-tier2", "--checks", "pii", "--pii-waivers", "pii-waivers.yaml"]
+    if workers:
+        args += ["--workers", workers]
+
+    result = CliRunner().invoke(cli, [*args, "catalog", "--report", "json", "--output-dir", "out"])
+
+    assert result.exit_code == 0, result.output
+    for index, name in enumerate(names, 1):
+        (report_path,) = (tmp_path / "out" / name).glob("skillevaluator-output-*.json")
+        report = json.loads(report_path.read_text(encoding="utf-8"))
+        dispositions = [
+            (finding["check_name"], finding["metadata"]["waiver_id"], finding["file_path"])
+            for entry in report["results"]
+            for finding in entry["findings"]
+            if finding["category"] == "PII_WAIVER"
+        ]
+        assert dispositions == [("applied-pii-waiver", f"PII-00{index}", "contact.md")], name
+    summary = json.loads((tmp_path / "out" / "catalog-summary.json").read_text(encoding="utf-8"))
+    assert summary["severity_totals"]["low"] == 0
+    assert summary["passed"] == 3
+
+
 def test_standalone_tier2_rejects_in_skill_report_output_before_validation(
     monkeypatch: pytest.MonkeyPatch,
     tmp_path: Path,

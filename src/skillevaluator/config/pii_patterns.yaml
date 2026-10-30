@@ -13,7 +13,8 @@
 # - suggestion (optional): how to fix the issue
 # - exceptions (optional): per-pattern exception list
 
-# Personal file paths
+# Personal file paths. Proton's fixed per-game profile pfx/drive_c/users/steamuser/
+# names no person and is skipped in code (SecurityValidator._is_proton_virtual_profile).
 personal_paths:
   - pattern: "/Users/[^/\\s]+/"
     severity: high

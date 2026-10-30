@@ -390,6 +390,95 @@ description: A skill documenting REST API endpoints
             f"API routes should not trigger personal path detection. Findings: {path_findings}"
         )
 
+    @pytest.mark.parametrize(
+        ("file_name", "content"),
+        [
+            pytest.param(
+                "SKILL.md",
+                "- Saves: `~/.steam/debian-installation/steamapps/compatdata/1086940/pfx/drive_c/users/steamuser/"
+                "AppData/Local/Larian Studios/Baldur's Gate 3/PlayerProfiles/Public/Savegames/Story/test.lsv`\n",
+                id="markdown-code-span",
+            ),
+            pytest.param(
+                "SKILL.md",
+                "Config lives under ~/.local/share/Steam/steamapps/compatdata/1643320/pfx/drive_c/users/"
+                "steamuser/AppData/Local/Stalker2.\n",
+                id="markdown-prose",
+            ),
+            pytest.param(
+                "collect.sh",
+                'find "${HOME}/.local/share/Steam/steamapps/compatdata/${STEAM_APPID}/pfx/drive_c/'
+                'users/steamuser/Documents/Benchmark Results" -name "*.csv"\n',
+                id="shell-quoted-argument",
+            ),
+            pytest.param(
+                "collect.sh",
+                'save_root="${compat_data}/pfx/drive_c/users/steamuser/AppData/Local/Game/Saves"\n',
+                id="shell-assignment",
+            ),
+            pytest.param(
+                "collect.py",
+                'SAVES = compat_data / "pfx/drive_c/users/steamuser/AppData/Local/Game"\n',
+                id="python-relative-literal",
+            ),
+            pytest.param("notes.txt", "pfx\\drive_c/Users/steamuser/Documents/save.dat\n", id="backslash-prefix"),
+            pytest.param("notes.txt", "[save](PFX/Drive_C/uSeRs/StEaMuSeR/save.dat)\n", id="mixed-case-link"),
+        ],
+    )
+    def test_proton_virtual_profile_is_not_a_personal_path(self, tmp_path: Path, file_name: str, content: str):
+        """Proton names every player's Windows profile ``steamuser``; that path identifies no one."""
+        (tmp_path / file_name).write_text(content, encoding="utf-8")
+
+        result = SecurityValidator(submitter_usernames=[]).validate_pii_only(tmp_path)
+
+        assert [f for f in result.findings if f.check_name == "personal_paths"] == []
+
+    @pytest.mark.parametrize(
+        ("content", "reported"),
+        [
+            pytest.param(
+                "pfx/drive_c/users/steamuser/AppData and /Users/alice/Documents\n",
+                "/Users/alice/",
+                id="native-path-on-same-line",
+            ),
+            pytest.param("/Users/steamuser/Documents/save.dat\n", "/Users/steamuser/", id="native-macos-user"),
+            pytest.param("notpfx/drive_c/users/steamuser/save.dat\n", "/users/steamuser/", id="pfx-not-a-component"),
+            pytest.param("~/.wine/drive_c/users/steamuser/save.dat\n", "/users/steamuser/", id="wine-prefix"),
+            pytest.param("pfx/drive_c/users/labuser/save.dat\n", "/users/labuser/", id="other-user"),
+            pytest.param("pfx/drive_c/users/steamuser/../alice/notes\n", "/users/steamuser/", id="traversal"),
+            pytest.param(
+                "pfx/drive_c/users/steamuser/My Games/../../alice/notes.txt\n",
+                "/users/steamuser/",
+                id="space-before-traversal",
+            ),
+            pytest.param(
+                '"pfx/drive_c/users/steamuser/Assassin\'s Creed/../../alice/notes.txt"\n',
+                "/users/steamuser/",
+                id="quote-before-traversal",
+            ),
+            pytest.param(
+                "pfx/drive_c/users/steamuser/%2e%2e%2falice/notes\n", "/users/steamuser/", id="encoded-traversal"
+            ),
+            pytest.param("pfx/drive_c/users/\u017fteamuser/save.dat\n", "/users/\u017fteamuser/", id="lookalike"),
+            pytest.param("C:\\Users\\steamuser\\Documents\\save.dat\n", "C:\\Users\\steamuser", id="windows-path"),
+        ],
+    )
+    def test_paths_that_are_not_the_proton_profile_stay_reported(self, tmp_path: Path, content: str, reported: str):
+        (tmp_path / "notes.md").write_text(content, encoding="utf-8")
+
+        result = SecurityValidator(submitter_usernames=[]).validate_pii_only(tmp_path)
+
+        assert [f.metadata["matched_value"] for f in result.findings if f.check_name == "personal_paths"] == [reported]
+
+    def test_unrelated_home_path_does_not_hide_a_personal_home_path_on_the_line(self, tmp_path: Path):
+        """An unrelated home directory is dropped, not a reason to skip the line."""
+        (tmp_path / "notes.md").write_text("cp /home/runner/out.txt /home/alice/backup/\n", encoding="utf-8")
+
+        result = SecurityValidator(submitter_usernames=["alice"]).validate_pii_only(tmp_path)
+
+        home_paths = [f.metadata["matched_value"] for f in result.findings if f.check_name == "home_paths"]
+        assert home_paths == ["/home/alice/"]
+
     def test_detects_non_placeholder_email(self, tmp_path: Path):
         """Test detection of a non-placeholder email address."""
         skill_dir = tmp_path / "email-skill"

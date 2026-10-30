@@ -256,15 +256,17 @@ _INTERPRETER = (
 # 'source' or '.' as a command (at the start of a statement), never '.' as an argument ('jq . file').
 _SOURCE_COMMAND = r"(?:(?:^|[;&|(\n`{\"'])[ \t]{0,64}|\b(?:then|do|else)[ \t]{1,64})(?:source|\.)"
 # One shell command: quoted strings, escapes, and single pipes stay inside it; ';', '&', '&&', '||', and
-# newlines end it.
-_SHELL_COMMAND_RE = re.compile(r"""(?:'[^']*'|"(?:[^"\\]|\\.)*"|\\.|\|(?!\|)&?|[^'"\\|;&\n])+""", re.DOTALL)
+# newlines end it, except a newline after a trailing '|' (or '\'), where the shell continues the pipeline.
+_SHELL_COMMAND_RE = re.compile(
+    r"""(?:'[^']*'|"(?:[^"\\]|\\.)*"|\\.|\|(?!\|)&?(?:[ \t]*+\r?\n)*+|[^'"\\|;&\n])+""", re.DOTALL
+)
 _FETCHER_RE = re.compile(rf"\b{_FETCHERS}\b", re.IGNORECASE)
 # A pipeline stage that starts with an interpreter: '| sh', '| sudo bash', '|& /usr/bin/env python3'.
-_STAGE_INTERPRETER_RE = re.compile(rf"&?\s*(?P<interpreter>{_INTERPRETER})", re.IGNORECASE)
+_STAGE_INTERPRETER_RE = re.compile(rf"&?(?:\s|\\\r?\n)*+(?P<interpreter>{_INTERPRETER})", re.IGNORECASE)
 _XARGS_RE = re.compile(r"\bxargs\b", re.IGNORECASE)
 # A pipeline stage that sources its standard input: '| source /dev/stdin', '| . /dev/fd/0'.
 _STAGE_SOURCE_STDIN_RE = re.compile(
-    r"&?\s*(?:source|\.)\s+[\"']?(?:/dev/stdin|/dev/fd/0|/proc/self/fd/0|-)[\"']?(?:\s|$)"
+    r"&?(?:\s|\\\r?\n)*+(?:source|\.)\s+[\"']?(?:/dev/stdin|/dev/fd/0|/proc/self/fd/0|-)[\"']?(?:\s|$)"
 )
 # bash -c "$(curl ...)", sh <(wget ...), eval "$(curl ...)", source <(curl ...), . <(curl ...)
 _SUBSTITUTION_RE = re.compile(
@@ -2264,6 +2266,8 @@ def _stage_arguments(text: str) -> list[str]:
             break  # a comment: the rest of the line is not part of the command
         elif char in "'\"":
             quote, in_word, unquoted = char, True, False
+        elif char == "\\" and text.startswith("\n", index):
+            index += 1  # a line continuation joins the lines
         elif char == "\\":
             in_word, unquoted = True, False
             if index < len(text):

@@ -342,6 +342,7 @@ def test_llm_maps_only_explicit_provider_and_credentials(tmp_path):
         "LLM_PROVIDER": "nv_build",
         "LLM_API_KEY": "test-key",
         "LLM_MODEL": "test-model",
+        "MIN_SCORE": "85",
         "OPENAI_API_KEY": "ambient-key",
         "SKILLSPECTOR_PROVIDER": "untrusted-ambient-provider",
         "SKILL_EVAL_LLM_BASE_URL": "https://unexpected.invalid",
@@ -349,6 +350,7 @@ def test_llm_maps_only_explicit_provider_and_credentials(tmp_path):
     assert runner.run(workspace, tmp_path / "reports", environment, execute=fake_cli([(0, payload())], calls)) == 0
     argv, kwargs = calls[0]
     assert "--llm" in argv
+    assert argv[argv.index("--min-score") + 1] == "85"
     assert kwargs["env"]["NVIDIA_API_KEY"] == "test-key"
     assert kwargs["env"]["SKILL_EVAL_LLM_PROVIDER"] == "nv_build"
     assert kwargs["env"]["SKILL_EVAL_LLM_MODEL"] == "test-model"
@@ -728,6 +730,40 @@ def test_relative_annotation_location_is_confined_to_skill(capsys, path, expecte
         assert f"file={expected},line=7" in command
     else:
         assert "file=" not in command and "line=" not in command
+
+
+@pytest.mark.parametrize("score", ["0", "75", "100"])
+@pytest.mark.parametrize("workers", ["1", "4"])
+def test_quality_threshold_is_forwarded_to_evaluator(tmp_path, score, workers):
+    workspace = tmp_path / "workspace"
+    skill(workspace, "skills/a")
+    skill(workspace, "skills/b")
+    calls = []
+    assert runner.run(
+        workspace,
+        tmp_path / "reports",
+        {"SKILL_PATHS": "skills", "MIN_SCORE": score, "SCAN_WORKERS": workers},
+        execute=fake_cli([(0, payload()), (0, payload())], calls),
+    ) == 0
+    assert len(calls) == 2
+    for argv, _env in calls:
+        assert argv[argv.index("--min-score") + 1] == score
+
+
+@pytest.mark.parametrize("score", ["-1", "101", "12.5", "abc", "\uff17\uff10", ""])
+def test_invalid_quality_threshold_fails_without_running_scanner(tmp_path, score):
+    workspace = tmp_path / "workspace"
+    skill(workspace, "skills/a")
+    calls = []
+    assert runner.run(
+        workspace,
+        tmp_path / "reports",
+        {"SKILL_PATHS": "skills", "MIN_SCORE": score},
+        execute=fake_cli([(0, payload())], calls),
+    ) == 1
+    assert not calls
+    summary = json.loads((tmp_path / "reports/summary.json").read_text())
+    assert summary["overall_status"] == "error"
 
 
 def parallel_cli(responses, calls, *, before=None):

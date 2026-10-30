@@ -98,6 +98,23 @@ def test_fix_first_ranks_by_severity_and_lists_each_location_once() -> None:
     assert items[-1]["blocking"] is False
 
 
+def test_quality_gate_stays_actionable_with_advisory_findings() -> None:
+    quality = ValidationResult(validator_name="QUALITY", validator_description="Quality dimensions")
+    quality.add_finding(_finding("medium", "Optional version missing", "SKILL.md"))
+    reason = "Quality score 98.2/100 is below the required 100/100"
+    quality.fail_gate(reason)
+
+    items = fix_first_for_results([quality], skill_name="demo")
+    assert items[0]["kind"] == "check"
+    assert items[0]["message"] == reason
+    assert items[0]["anchor"].startswith("c-")
+    html = _render([quality])
+    fix_first = html.split('class="fix-first"', 1)[1].split("</section>", 1)[0]
+    assert reason in fix_first
+    assert f'href="#{items[0]["anchor"]}"' in fix_first
+    assert f'id="{items[0]["anchor"]}"' in html
+
+
 def test_fix_first_puts_an_unfinished_scan_first_when_incomplete() -> None:
     results = _results()
     secrets = results[1]

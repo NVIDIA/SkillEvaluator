@@ -1017,6 +1017,7 @@ _FAKE_SLACK = "xoxb-" + "1234567890-" + "abcdefghij"
         f"{_ROOT}/bin/tool {_FAKE_GH}",
         f"{_ROOT}/bin/tool --api-key plainliteralvalue",
         f"API_KEY=plainliteralvalue {_ROOT}/bin/tool",
+        f"export GITHUB_TOKEN={_FAKE_GH}; {_ROOT}/bin/tool",
     ],
 )
 def test_command_hook_inline_credential_outside_a_url_is_critical(tmp_path: Path, command: str) -> None:
@@ -1043,6 +1044,10 @@ def test_monitor_command_inline_credential_is_critical(tmp_path: Path) -> None:
         f"TOKEN=${{TOKEN}} {_ROOT}/bin/tool",
         f"{_ROOT}/bin/tool --auth basic --password-file /etc/tool/pw",
         f"FOO=bar {_ROOT}/bin/tool --key primary",
+        f'{_ROOT}/bin/tool --token "$(gh auth token)"',
+        f"{_ROOT}/bin/tool --api-key=`cat ~/.config/tool/key`",
+        'curl -s -H "Authorization: Bearer $(gh auth token)" https://api.example.com/log',
+        f"export GITHUB_TOKEN=${{GITHUB_TOKEN:-}}; {_ROOT}/bin/tool",
     ],
 )
 def test_command_hook_credential_references_are_not_inline_secrets(tmp_path: Path, command: str) -> None:

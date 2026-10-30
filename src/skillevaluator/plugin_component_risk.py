@@ -2751,16 +2751,22 @@ def _command_url_credentials(text: str) -> bool:
     return any(url_credentials(match.group(0), userinfo_rule="secret") for match in _URL_IN_TEXT_RE.finditer(text))
 
 
+# A command substitution, from its start to the end of the word: the shell fills it in when the hook runs.
+_WORD_SUBSTITUTION_RE = re.compile(r"\\?(?:\$\(|`).*", re.DOTALL)
+
+
 def _command_inline_credential(tokens: list[str]) -> bool:
     """Whether hook command words carry a credential outside a URL: the value of a credential-named flag
     (``--api-key x``, the MCP command-argument rule), a word shaped like a token or an inline ``Bearer``
     credential (``-H "Authorization: Bearer ghp_..."``), or a literal assigned to a credential-named variable
-    (``GITHUB_TOKEN=x tool``). References (``$TOKEN``, ``${TOKEN}``) and command substitutions never count."""
+    (``GITHUB_TOKEN=x tool``). References (``$TOKEN``, ``${TOKEN}``) and command substitutions
+    (``--token "$(gh auth token)"``) never count, and shell punctuation attached to a word (``;``) is no part of it."""
     words: list[str] = []
     for token in tokens:
         words.append(token)
         if any(char.isspace() for char in token.strip()):  # a quoted command string, split once more
             words.extend(_split_words(token))
+    words = [_WORD_SUBSTITUTION_RE.sub("${_}", word.rstrip(";&")) for word in words]
     if _inline_credentials(words):
         return True
     for word in words:
@@ -2768,7 +2774,7 @@ def _command_inline_credential(tokens: list[str]) -> bool:
         if assignment is None:
             continue
         name, value = word[: assignment.end() - 1], word[assignment.end() :]
-        if "$(" not in value and "`" not in value and looks_like_inline_secret(name, value, query=False):
+        if looks_like_inline_secret(name, value, query=False):
             return True
     return False
 

@@ -310,6 +310,14 @@ All notable changes to SkillEvaluator are documented in this file.
   `quality-check` before any report was written. The schema check reports the
   malformed `metadata`, and the quality score counts `metadata.author` and
   `metadata.tags` as missing, as it already did for other non-mapping values.
+- Tier 3 `--stop-on-pass` runs with local-mode Codex no longer fail to finalize
+  when Harbor's best-effort Codex cleanup is skipped, for example after a
+  timeout or cancellation. Merging the per-attempt jobs now omits the leftover
+  `codex-home` and `codex-secrets` directories in each trial's `agent/` or
+  `steps/<step>/agent/` directory. Their linked `auth.json` made the merge fail
+  closed, and a regular-file `auth.json` was copied into the merged job with
+  the Codex credential. Symlink and hard-link checks still apply everywhere
+  else, including to the same names at any other depth.
 
 ## 0.6.0 - 2026-10-20
 

@@ -1481,6 +1481,152 @@ def test_merge_attempt_jobs_ignores_tmpdir_inside_attempt_job(
     assert not list(tmp_path.glob(".aggregate-merge-*"))
 
 
+# Synthetic, low-entropy credential so secret scanners do not flag the fixture.
+_LOCAL_CODEX_KEY = "sk-codex-codex-codex"
+_LOCAL_CODEX_AUTH = json.dumps({"OPENAI_API_KEY": _LOCAL_CODEX_KEY})
+
+
+# Single-step trials keep agent logs in <trial>/agent. Harbor's multi-step
+# trials move them into <trial>/steps/<step>/agent after each step.
+@pytest.mark.parametrize("step_root", [".", "steps/step-1"])
+@pytest.mark.parametrize("auth_layout", ["secrets-link", "host-link", "regular-file"])
+@pytest.mark.parametrize("descriptor_backend", [False, True])
+def test_merge_attempt_jobs_omits_leftover_local_codex_credential_dirs(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    step_root: str,
+    auth_layout: str,
+    descriptor_backend: bool,
+) -> None:
+    secure_copy = importlib.import_module("skillevaluator.tier3.harbor.secure_copy")
+    if descriptor_backend and not secure_copy._DESCRIPTOR_BACKEND:
+        pytest.skip("descriptor-relative copying unavailable")
+    monkeypatch.setattr(secure_copy, "_DESCRIPTOR_BACKEND", descriptor_backend)
+    job_dir = tmp_path / "attempt-001"
+    trial_name = "case-001__trial"
+    _write_current_harbor_attempt(job_dir, trial_name=trial_name, root_completed=1)
+    trial_dir = job_dir / trial_name
+    # Harbor's Codex agent writes (or uploads the host's) auth.json into
+    # codex-secrets and links codex-home/auth.json to it. Local mode keeps both
+    # under the trial agent dir, and a skipped best-effort cleanup leaves them.
+    agent_dir = trial_dir / step_root / "agent"
+    codex_home = agent_dir / "codex-home"
+    codex_secrets = agent_dir / "codex-secrets"
+    codex_home.mkdir(parents=True)
+    codex_secrets.mkdir()
+    secret_auth = codex_secrets / "auth.json"
+    secret_auth.write_text(_LOCAL_CODEX_AUTH, encoding="utf-8")
+    auth = codex_home / "auth.json"
+    if auth_layout == "regular-file":
+        auth.write_text(_LOCAL_CODEX_AUTH, encoding="utf-8")
+    else:
+        link_target = secret_auth
+        if auth_layout == "host-link":
+            link_target = tmp_path / "host-auth.json"
+            link_target.write_text(_LOCAL_CODEX_AUTH, encoding="utf-8")
+        try:
+            auth.symlink_to(link_target)
+        except OSError as exc:  # pragma: no cover - filesystem policy
+            pytest.skip(f"file symlinks unavailable: {exc}")
+    (codex_home / "config.toml").write_text("private config\n", encoding="utf-8")
+    retained = {
+        "agent/trajectory.json": '{"messages": []}',
+        "agent/codex.txt": "codex output\n",
+        "verifier/reward.json": '{"reward": 1.0}',
+        "artifacts/output.txt": "expected output\n",
+        # The same names outside the trial agent dir are ordinary evidence.
+        "artifacts/agent/codex-home/example.txt": "authored artifact\n",
+        "artifacts/agent/codex-secrets/example.txt": "authored artifact\n",
+    }
+    for relative, contents in retained.items():
+        path = trial_dir / step_root / relative
+        path.parent.mkdir(parents=True, exist_ok=True)
+        path.write_text(contents, encoding="utf-8")
+    aggregate_dir = tmp_path / "aggregate"
+
+    runner._merge_attempt_jobs([job_dir], aggregate_dir)
+
+    merged_trial = aggregate_dir / f"{job_dir.name}__{trial_name}"
+    merged_step = merged_trial / step_root
+    assert not (merged_step / "agent" / "codex-home").exists()
+    assert not (merged_step / "agent" / "codex-secrets").exists()
+    for relative, contents in retained.items():
+        assert (merged_step / relative).read_text(encoding="utf-8") == contents
+    leaked = [
+        path.relative_to(aggregate_dir).as_posix()
+        for path in aggregate_dir.rglob("*")
+        if path.is_file() and _LOCAL_CODEX_KEY in path.read_text(encoding="utf-8", errors="ignore")
+    ]
+    assert leaked == []
+    merged_result = json.loads((merged_trial / "result.json").read_text(encoding="utf-8"))
+    assert merged_result["verifier_result"]["rewards"] == {"reward": 1.0}
+    # The source attempt is left as it was; only the aggregate omits the dirs.
+    assert auth.is_symlink() is (auth_layout != "regular-file")
+    assert auth.read_text(encoding="utf-8") == _LOCAL_CODEX_AUTH
+    assert secret_auth.read_text(encoding="utf-8") == _LOCAL_CODEX_AUTH
+    assert (codex_home / "config.toml").read_text(encoding="utf-8") == "private config\n"
+
+
+def test_merge_attempt_jobs_codex_exclusions_track_local_codex_runtime_dirs() -> None:
+    from harbor.models.trial.paths import EnvironmentPaths
+
+    from skillevaluator.tier3.harbor.local_agents import (
+        SkillEvaluatorLocalCodex,
+        SkillEvaluatorLocalNvidiaBuildCodex,
+    )
+
+    for agent_class in (SkillEvaluatorLocalCodex, SkillEvaluatorLocalNvidiaBuildCodex):
+        runtime_dirs = (agent_class._REMOTE_CODEX_HOME, agent_class._REMOTE_CODEX_SECRETS_DIR)
+        assert {path.parent for path in runtime_dirs} == {EnvironmentPaths.agent_dir}
+        assert {path.name for path in runtime_dirs} == runner._LOCAL_CODEX_PRIVATE_AGENT_DIRS
+
+
+@pytest.mark.parametrize(
+    "relative_auth",
+    [
+        "agent/auth.json",
+        "codex-home/auth.json",
+        "codex-secrets/auth.json",
+        "agent/codex-home-other/auth.json",
+        "agent/codex-secrets-other/auth.json",
+        "artifacts/agent/codex-home/auth.json",
+        "artifacts/agent/codex-secrets/auth.json",
+        "steps/codex-home/auth.json",
+        "steps/agent/codex-home/auth.json",
+        "steps/step-1/codex-home/auth.json",
+        "steps/step-1/agent/codex-home-other/auth.json",
+        "steps/step-1/artifacts/agent/codex-home/auth.json",
+        "steps/step-1/nested/agent/codex-home/auth.json",
+        "agent/steps/step-1/agent/codex-home/auth.json",
+        "other/step-1/agent/codex-home/auth.json",
+    ],
+)
+def test_merge_attempt_jobs_rejects_auth_links_outside_trial_codex_dirs(
+    tmp_path: Path,
+    relative_auth: str,
+) -> None:
+    job_dir = tmp_path / "attempt-001"
+    auth = job_dir / "case-001__trial" / relative_auth
+    auth.parent.mkdir(parents=True)
+    host_auth = tmp_path / "host-auth.json"
+    host_auth.write_text("private\n", encoding="utf-8")
+    try:
+        auth.symlink_to(host_auth)
+    except OSError as exc:  # pragma: no cover - filesystem policy
+        pytest.skip(f"file symlinks unavailable: {exc}")
+    aggregate_dir = tmp_path / "aggregate"
+    aggregate_dir.mkdir()
+    marker = aggregate_dir / "keep.txt"
+    marker.write_text("old aggregate", encoding="utf-8")
+
+    with pytest.raises(ValueError, match=_UNSAFE_LINK):
+        runner._merge_attempt_jobs([job_dir], aggregate_dir)
+
+    assert sorted(path.name for path in aggregate_dir.iterdir()) == ["keep.txt"]
+    assert marker.read_text(encoding="utf-8") == "old aggregate"
+    assert host_auth.read_text(encoding="utf-8") == "private\n"
+
+
 def test_merge_attempt_jobs_preserves_existing_aggregate_on_unsafe_source(tmp_path: Path) -> None:
     outside = tmp_path / "outside"
     outside.mkdir()

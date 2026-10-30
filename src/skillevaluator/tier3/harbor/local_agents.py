@@ -28,6 +28,7 @@ from harbor.models.trial.paths import EnvironmentPaths
 from harbor.utils.env import parse_bool_env_value
 
 from skillevaluator.provider_config import is_claude_5_5_or_later, is_gpt6_model
+from skillevaluator.tier3.harbor import LOCAL_CODEX_HOME_DIRNAME, LOCAL_CODEX_SECRETS_DIRNAME
 from skillevaluator.tier3.harbor.installed_agents import SkillEvaluatorClaudeCode as _InstalledClaudeCode
 from skillevaluator.tier3.harbor.installed_agents import SkillEvaluatorCodex
 from skillevaluator.tier3.harbor.nvidia_build_bridge import (
@@ -426,8 +427,8 @@ class SkillEvaluatorGatewayCodex(SkillEvaluatorCodex):
 class SkillEvaluatorLocalCodex(SkillEvaluatorGatewayCodex):
     """Use the installed local CLI with per-trial state and gateway routing."""
 
-    _REMOTE_CODEX_HOME = PurePosixPath(EnvironmentPaths.agent_dir / "codex-home")
-    _REMOTE_CODEX_SECRETS_DIR = PurePosixPath(EnvironmentPaths.agent_dir / "codex-secrets")
+    _REMOTE_CODEX_HOME = PurePosixPath(EnvironmentPaths.agent_dir / LOCAL_CODEX_HOME_DIRNAME)
+    _REMOTE_CODEX_SECRETS_DIR = PurePosixPath(EnvironmentPaths.agent_dir / LOCAL_CODEX_SECRETS_DIRNAME)
 
     async def install(self, environment: BaseEnvironment) -> None:
         result = await self.exec_as_agent(environment, command="codex --version")

@@ -35,6 +35,13 @@ CONTAINER_AGENT_IMPORT_PATHS = {
     "claude-code": "skillevaluator.tier3.harbor.local_agents:SkillEvaluatorClaudeCode",
 }
 
+# Per-trial runtime dirs local-mode Codex creates under Harbor's agent log dir.
+# ``codex-secrets/auth.json`` holds the credential (written from OPENAI_API_KEY
+# or uploaded from a host auth.json) and ``codex-home/auth.json`` links to it.
+# Both are private runtime state, never retained trial evidence.
+LOCAL_CODEX_HOME_DIRNAME = "codex-home"
+LOCAL_CODEX_SECRETS_DIRNAME = "codex-secrets"
+
 # Docker wrappers retain Harbor's installers while avoiding redundant Node/npm
 # packages on the branches that bootstrap their own runtime. Claude Code uses the
 # container wrapper, which builds on that installer fix and adds Vertex AI
@@ -83,6 +90,8 @@ __all__ = [
     "HARBOR_ENV_MODES",
     "HARBOR_NATIVE_ENV_MODES",
     "LOCAL_AGENT_IMPORT_PATHS",
+    "LOCAL_CODEX_HOME_DIRNAME",
+    "LOCAL_CODEX_SECRETS_DIRNAME",
     "LOCAL_ENV_IMPORT_PATH",
     "LOCAL_HARBOR_AGENTS",
     "canonical_agent_name",

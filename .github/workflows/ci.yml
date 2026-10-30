@@ -115,7 +115,7 @@ jobs:
           version: "0.11.27"
       - run: uv sync --all-extras --locked --python 3.13
       - name: Run tests
-        run: uv run pytest -q
+        run: uv run pytest -q -n auto
 
   html-parser-compatibility:
     name: HTML parser compatibility (Python ${{ matrix.python-version }})

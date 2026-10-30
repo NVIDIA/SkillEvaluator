@@ -55,7 +55,9 @@ shared files outside the configured roots are not inferred dependencies. Use
 `scan-mode: all` when those changes should trigger a full evaluation.
 Tier 2 and Tier 3 are not run. The 100-skill limit is a selection limit, not a
 runtime guarantee. Scans have a time budget and preserve completed results plus
-explicit incomplete entries if it is exhausted.
+explicit incomplete entries if it is exhausted. The workflow scans up to four
+skills at once. Set `scan-workers` (1 to 16) to change this; `1` scans one skill
+at a time. Results and logs keep the same skill order either way.
 
 ## Read the result
 
@@ -63,9 +65,13 @@ Open **Actions → Skill checks**. The summary shows the outcome, affected skill
 and a bounded set of actionable reasons and fixes. Download the
 `skill-evaluator-tier1-attempt-N` artifact for that run attempt (`N`) to get
 `index.html`, per-skill HTML and JSON,
-detailed Markdown, SARIF and scanner logs. Failed and incomplete scans retain
-their available reports; missing evidence is not a pass. Quality scores and the
-pass/fail decision are separate.
+detailed Markdown, SARIF and scanner logs. The smaller
+`skill-evaluator-tier1-evidence-attempt-N` artifact holds only the JSON that
+the optional report publisher reads. Failed and incomplete scans retain
+their available reports; missing evidence is not a pass. A quality score below
+the minimum fails the Quality score check, so it blocks the verdict. The HTML
+index and reports use the verdicts Passed, Changes required, Incomplete and
+Skipped.
 
 Known credential values detected by the PII patterns, NVIDIA API keys, and
 unquoted `KEY=value` and `Bearer` credentials are redacted from CI reports,

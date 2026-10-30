@@ -329,6 +329,9 @@ jobs:
           tests/test_tier3_compare.py
           tests/test_tier3_progress.py
           tests/utils/test_secure_fs_selected_reads.py
+          tests/utils/test_secure_fs_platform.py
+          tests/utils/test_secure_fs_bounded.py
+          tests/test_plugin_discovery.py
           tests/test_oss_packaging.py
 
   native-windows-local-mode:

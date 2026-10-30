@@ -663,6 +663,10 @@ _TRUNCATED = "...<truncated>"
 def report_text(value: str, limit: int = MAX_REPORT_CHARS) -> str:
     """Report text: whitespace collapsed, URL ``user:password@`` removed, credentials redacted, length bounded.
 
+    URL userinfo goes after ``//`` and after a special scheme (``https:``,
+    ``wss:``, ...) followed by any run of ``/`` or ``\\``, which WHATWG clients
+    read as an authority too.
+
     Userinfo is removed from the whole text; only a window of twice the limit is
     redacted (the result keeps at most ``limit`` characters), because the
     redaction patterns can take quadratic time on long unbroken input. A token
@@ -672,6 +676,8 @@ def report_text(value: str, limit: int = MAX_REPORT_CHARS) -> str:
     inline-credential checks know (``ghp_…``, ``glpat-…``, ``xoxe-…``, ...) is.
     """
     text = _URL_USERINFO_RE.sub("//", " ".join(value.split()))
+    # A special scheme followed by fewer than two '/' ('https:/user:pw@host') introduces userinfo too.
+    text = _SLASHLESS_USERINFO_RE.sub(r"\1", text)
     window = text[: 2 * limit]
     cut = len(window) < len(text)
     if cut:
@@ -725,10 +731,11 @@ _ECHOED_QUOTED_CREDENTIAL_RE = re.compile(
     r"(?i)(\b(?>[A-Z0-9_]*?(?:TOKEN|SECRET|PASSW(?:OR)?D|API_?KEY|ACCESS_?KEY|PRIVATE_?KEY))[A-Z0-9_]*+"
     r"(?:['\"]\]?)?[ \t]*+[=:][ \t]*+(['\"]))(?!\$)[^'\"\r\n]*+(?=\2)"
 )
-# A WHATWG client reads 'https:user:pw@host' (a special scheme with no slashes) as user information too. The user
-# information stops at the next such scheme, so each scheme is read once ('https:' repeated stays linear).
+# A WHATWG client skips any run of '/' and '\' after a special scheme, so it reads 'https:user:pw@host',
+# 'https:/user:pw@host', and 'https:\user:pw@host' as user information too. The user information stops at the
+# next such scheme, so each scheme is read once ('https:' repeated stays linear).
 _SLASHLESS_USERINFO_RE = re.compile(
-    r"(?i)(?<![a-z0-9+.\-])((?:https?|wss?|ftp):)(?![/\\])"
+    r"(?i)(?<![a-z0-9+.\-])((?:https?|wss?|ftp):[/\\]*+)"
     r"(?:(?!(?:https?|wss?|ftp):)[^\s/\\?#@{}'\"<>])*+@"
 )
 # 'user:password@host/path' with no scheme, starting a word (a container image with registry credentials). The
@@ -741,7 +748,7 @@ _SCHEMELESS_USERINFO_RE = re.compile(r"""(?<![^\s'"=])([^\s/@:'"=]++:)[^\s/@:'"]
 def redact_secrets(text: str) -> str:
     """``text`` (a command token, spec, or line, or a quoted code snippet) with its credentials removed.
 
-    URL userinfo (also in ``https:user:pw@host``) and queries are dropped (a
+    URL userinfo (also in ``https:user:pw@host`` and ``https:/user:pw@host``) and queries are dropped (a
     fragment such as a git ref stays), the password of a scheme-less
     ``user:pw@host/path`` is redacted, and known secret shapes (``ghp_...``,
     ``sk-...``, a JWT), ``Bearer <token>``, the value after a credential-named

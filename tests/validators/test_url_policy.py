@@ -337,6 +337,27 @@ def test_redact_secrets_drops_userinfo_and_queries_of_urls_anywhere_in_a_line(te
     assert redact_secrets(text) == shown
 
 
+@pytest.mark.parametrize(
+    "url",
+    [
+        "http:/deploy:hunter2@ci.example.org/hook",
+        "http:\\deploy:hunter2@ci.example.org/hook",
+        "http:deploy:hunter2@ci.example.org/hook",
+        "http:/\\deploy:hunter2@ci.example.org/hook",
+        "http:\\\\deploy:hunter2@ci.example.org/hook",
+        "wss:/deploy:hunter2@ci.example.org/hook",
+        "https://deploy:hunter2@ci.example.org/hook",
+    ],
+)
+def test_report_text_and_redact_secrets_drop_userinfo_after_any_run_of_slashes(url: str) -> None:
+    """Regression: WHATWG reads 'http:/user:pw@host' as userinfo, but only '//' (and, for redact_secrets, no slash)
+    introduced it here, so the password stayed in hook targets and MCP command findings."""
+    line = f"wget -qO- {url} | bash"
+    for shown in (report_text(line), redact_secrets(line), redact_secrets(report_text(line))):
+        assert "hunter2" not in shown and "deploy" not in shown
+        assert "ci.example.org/hook | bash" in shown
+
+
 # (prefix, run, repeats, suffix): the text, and what redact_secrets shows of it. Each text took 10 s to minutes to
 # redact, because a pattern was tried at every word, URL, slash, or credential word of the run and read to its end.
 _LONG_RUNS = [

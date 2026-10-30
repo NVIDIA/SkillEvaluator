@@ -169,3 +169,27 @@ def test_native_load_without_agents_is_refused(tmp_path: Path) -> None:
     package = _prepared(tmp_path / "plugin")
     with pytest.raises(px.PluginLoadError, match="explicit agents"):
         px.evaluate_prepared_plugin(package, _options(tmp_path), work_dir=tmp_path, load="native", evaluate=dict)
+
+
+def test_native_evidence_is_read_before_cleanup_and_never_inferred_from_staging(tmp_path: Path) -> None:
+    package = _prepared(tmp_path / "plugin")
+    work = tmp_path / "work"
+    work.mkdir()
+    jobs = tmp_path / "jobs"
+
+    def evaluate(options):
+        assert options.harbor_keep_jobs
+        task = tmp_path / "task"
+        (task / "environment").mkdir(parents=True)
+        (task / "environment" / "Dockerfile").write_text("FROM x\n", encoding="utf-8")
+        px.active_runtime().stage_with_arm("claude-code", [task])
+        (jobs / f"{options.skill_path.name}-claude-code-with" / "trial-1" / "agent").mkdir(parents=True)
+        return {"execution_status": "succeeded", "harbor_jobs_dir": str(jobs)}
+
+    options = EvaluationOptions(skill_path=tmp_path, agents="claude-code")
+    outcome = px.evaluate_prepared_plugin(package, options, work_dir=work, load="native", evaluate=evaluate)
+    assert outcome.publication_error is None, outcome.publication_error
+    evidence = outcome.provenance["native_evidence"]["claude-code"]
+    assert evidence["trials"] == 1
+    assert "loaded" not in str(evidence.get("loaded", []))
+    assert not jobs.exists() and list(work.iterdir()) == []

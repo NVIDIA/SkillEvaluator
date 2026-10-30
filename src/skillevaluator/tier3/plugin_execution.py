@@ -200,7 +200,7 @@ def evaluate_prepared_plugin(
     from dataclasses import replace
 
     from skillevaluator.tier3.plugin_native import resolve_plugin_load
-    from skillevaluator.tier3.plugin_prepare import stage_wrapper_skill
+    from skillevaluator.tier3.plugin_prepare import stage_wrapper_skill, wrapper_skill_name
 
     if not package.runnable:
         raise PluginLoadError("plugin has no runnable skill, rule, MCP server, or text component")
@@ -210,7 +210,9 @@ def evaluate_prepared_plugin(
     decisions = resolve_plugin_load(load, agents, env_mode=options.env_mode) if agents else {}
     temp = Path(tempfile.mkdtemp(prefix="skilleval-plugin-", dir=work_dir))
     try:
-        wrapper = stage_wrapper_skill(package, temp / "skill", evals_source=evals_source)
+        wrapper = stage_wrapper_skill(
+            package, temp / wrapper_skill_name(package.plugin_name), evals_source=evals_source
+        )
     except BaseException:
         shutil.rmtree(temp, ignore_errors=True)
         raise
@@ -230,11 +232,68 @@ def evaluate_prepared_plugin(
         "incomplete_reasons": list(package.incomplete_reasons),
         "complete": package.complete,
     }
+    retained: list[Path] = []
+
+    def publish_with_evidence(outcome: PrivateRunOutcome) -> None:
+        jobs = outcome.result.get("harbor_jobs_dir")
+        if hooks is not None and jobs:
+            retained.append(Path(jobs))
+            outcome.provenance["native_evidence"] = collect_native_evidence(hooks, Path(jobs), wrapper.name)
+        if publish is not None:
+            publish(outcome)
+
+    def cleanup() -> None:
+        if not options.harbor_keep_jobs:
+            for jobs in retained:
+                shutil.rmtree(jobs, ignore_errors=True)
+        shutil.rmtree(temp)
+
+    # Native evidence lives in the Harbor jobs, so they are kept until it is read.
+    keep_jobs = options.harbor_keep_jobs or hooks is not None
     return run_private_evaluation(
-        replace(options, skill_path=wrapper.path, results_dir=results_dir),
+        replace(options, skill_path=wrapper.path, results_dir=results_dir, harbor_keep_jobs=keep_jobs),
         hooks=hooks,
         provenance=provenance,
         evaluate=evaluate,
-        publish=publish,
-        cleanup=lambda: shutil.rmtree(temp),
+        publish=publish_with_evidence,
+        cleanup=cleanup,
     )
+
+
+_MAX_AGENT_LOG_BYTES = 8 * 1024 * 1024
+
+
+def collect_native_evidence(hooks: NativeRuntimeHooks, jobs_dir: Path, skill_name: str) -> dict[str, Any]:
+    """Per-agent load evidence of the native with arms, read from the retained Harbor jobs.
+
+    A trial without a census file contributes only its staging plan, so a
+    component is never reported loaded from staging alone; Claude Code's own
+    ``system/init`` event confirms or refutes what the census listed.
+    """
+    from skillevaluator.tier3 import plugin_native as native
+
+    evidence: dict[str, Any] = {}
+    for agent, staging in sorted(hooks.stagings.items()):
+        plan = staging.bundle.census_plan()
+        declared = plan["declared"]
+        job = jobs_dir / f"{skill_name}-{agent}-with"
+        trials = sorted(p for p in job.iterdir() if (p / "agent").is_dir()) if job.is_dir() else []
+        censuses = [_trial_census(native, agent, trial / "agent", declared, plan) for trial in trials]
+        summary = native.summarize_censuses(agent, "native", censuses, staged_hook_ids=plan["hook_ids"])
+        evidence[agent] = {**summary, "trials": len(censuses), "job": job.name}
+    return evidence
+
+
+def _trial_census(native: Any, agent: str, logs: Path, declared: Any, plan: Mapping[str, Any]) -> dict[str, Any]:
+    raw = native.read_census_file(logs / native.LOAD_CENSUS_FILENAME)
+    if raw is None:
+        return {**native.fallback_census(agent, "native", declared), "fallback": True}
+    census = native.restrict_census(raw, declared, agent=agent)
+    harness = plan.get("harness") or {}
+    log = logs / "claude-code.txt"
+    if agent == "claude-code" and harness.get("plugin") and log.is_file() and not log.is_symlink():
+        with log.open("rb") as handle:
+            text = handle.read(_MAX_AGENT_LOG_BYTES).decode("utf-8", errors="replace")
+        if (init := native.claude_init_event(text)) is not None:
+            census = native.apply_claude_init_evidence(census, declared, init, plugin=harness["plugin"])
+    return census

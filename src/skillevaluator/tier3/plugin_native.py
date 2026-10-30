@@ -2309,6 +2309,20 @@ def normalize_census(raw: Any) -> dict[str, Any] | None:
     return census
 
 
+def _read_regular_text(path: Path, max_bytes: int) -> str:
+    """Read a single-link regular file without following a link, refusing more than ``max_bytes``."""
+    from skillevaluator.utils.secure_fs import read_bounded
+
+    descriptor = os.open(path, os.O_RDONLY | getattr(os, "O_NOFOLLOW", 0) | getattr(os, "O_NONBLOCK", 0))
+    try:
+        metadata = os.fstat(descriptor)
+        if not stat.S_ISREG(metadata.st_mode) or metadata.st_nlink != 1:
+            raise SecurePathError(f"not a single-link regular file: {path}")
+        return read_bounded(descriptor, max_bytes).decode("utf-8")
+    finally:
+        os.close(descriptor)
+
+
 def read_census_file(path: Path) -> dict[str, Any] | None:
     """Read one trial's census with a bounded, no-follow, regular-file read.
 
@@ -2316,10 +2330,8 @@ def read_census_file(path: Path) -> dict[str, Any] | None:
     any ``loaded`` entry in it is read as ``listed``. Harness evidence is added
     on the host (see :func:`apply_claude_init_evidence`).
     """
-    from skillevaluator.utils.secure_fs import secure_read_path_text
-
     try:
-        text = secure_read_path_text(path, MAX_CENSUS_BYTES)
+        text = _read_regular_text(path, MAX_CENSUS_BYTES)
     except (SecurePathError, OSError, ValueError):
         return None
     try:

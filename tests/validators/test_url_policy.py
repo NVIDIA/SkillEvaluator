@@ -280,6 +280,11 @@ def test_ids_that_contain_a_short_token_prefix_have_no_secret_shape(value: str) 
     "token",
     [
         "sk-" + "abcdefghijklmnop1234",
+        "sk-" + "ant-api03-" + "Ab0_" * 10,
+        "sk-" + "ant-admin01-" + "Ab0-" * 10,
+        "sk-" + "proj-" + "Ab0_" * 10,
+        "sk-" + "svcacct-" + "Ab0-" * 10,
+        "sk-" + "admin-" + "Ab0_" * 10,
         "xoxb-" + "1234567890-abcdefghij",
         "xoxe-1-" + "My0xLTEtMTIzNDU2Nzg5MC0xMjM0",
         "hf_" + "AbCdEfGhIjKlMnOpQrStUvWxYz012345",
@@ -291,6 +296,15 @@ def test_ids_that_contain_a_short_token_prefix_have_no_secret_shape(value: str) 
 def test_every_canonical_token_shape_is_a_secret_and_is_redacted(token: str) -> None:
     assert has_secret_shape(token) and has_secret_shape(f"key={token}")
     assert token not in report_text(f"run --flag {token} --next")
+
+
+@pytest.mark.parametrize("prefix", ["ant-api03-", "ant-admin01-", "proj-", "svcacct-", "admin-"])
+def test_current_openai_and_anthropic_keys_have_a_secret_shape(prefix: str) -> None:
+    """Regression: 'sk-' needed 16 letters or digits right after it, so 'sk-proj-...' and 'sk-ant-...' did not count."""
+    token = "sk-" + prefix + "Ab0_" * 10
+    assert url_credentials(f"https://h.example/mcp?q={token}", userinfo_rule="literal").query_keys == ("q",)
+    assert token not in redact_secrets(f"node server.js {token}")
+    assert not has_secret_shape("sk-" + prefix + "short")
 
 
 @pytest.mark.parametrize("prefix", ["ghp_", "gho_", "ghu_", "ghs_", "ghr_"])

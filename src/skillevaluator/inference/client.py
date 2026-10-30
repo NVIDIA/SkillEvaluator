@@ -340,6 +340,73 @@ def _extract_choice_content(response: Any) -> str:
     )
 
 
+# Bracket depth beyond which an embedded span is not decoded. Verdicts are
+# shallow, and the cap keeps the decoder well away from the recursion limit.
+_MAX_EMBEDDED_JSON_NESTING = 128
+_JSON_CONTAINER_START = re.compile(r"[{\[]")
+
+
+def _balanced_json_span_end(text: str, start: int) -> int | None:
+    """Return the exclusive end of the string-aware ``{...}``/``[...]`` span at *start*.
+
+    ``None`` means the span never closes, closes with a mismatched bracket, or
+    nests deeper than ``_MAX_EMBEDDED_JSON_NESTING``.
+    """
+    closers: list[str] = []
+    in_string = False
+    escaped = False
+    for index in range(start, len(text)):
+        ch = text[index]
+        if in_string:
+            if escaped:
+                escaped = False
+            elif ch == "\\":
+                escaped = True
+            elif ch == '"':
+                in_string = False
+        elif ch == '"':
+            in_string = True
+        elif ch in "{[":
+            closers.append("}" if ch == "{" else "]")
+            if len(closers) > _MAX_EMBEDDED_JSON_NESTING:
+                return None
+        elif ch in "}]":
+            if not closers or closers.pop() != ch:
+                return None
+            if not closers:
+                return index + 1
+    return None
+
+
+def _embedded_json_objects(text: str) -> list[dict[str, Any]]:
+    """Return the complete top-level JSON objects embedded in prose.
+
+    Each ``{`` or ``[`` starts a string-aware balanced span that is decoded as a
+    whole and then skipped, so nothing nested inside a span is ever promoted:
+    not the members of a valid object or array, and not an object inside a
+    span that fails to decode. Decoded arrays are not counted, so chunk
+    citations such as ``[1]`` stay harmless. A span that never closes, closes
+    with a mismatched bracket or nests too deeply ends the scan, because its
+    extent is unknown. Spans never overlap, so the work stays linear in the
+    reply length.
+    """
+    objects: list[dict[str, Any]] = []
+    cursor = 0
+    while (match := _JSON_CONTAINER_START.search(text, cursor)) is not None:
+        start = match.start()
+        end = _balanced_json_span_end(text, start)
+        if end is None:
+            break
+        try:
+            value = json.loads(text[start:end])
+        except (RecursionError, ValueError):
+            value = None
+        if isinstance(value, dict):
+            objects.append(value)
+        cursor = end
+    return objects
+
+
 class LLMClient:
     """Public-provider client for chat completions.
 
@@ -683,18 +750,28 @@ class LLMClient:
         response_schema: dict[str, Any] | None = None,
         schema_name: str = "judge_response",
     ) -> dict:
-        """Send a completion and parse JSON from the response."""
+        """Send a completion and parse one unambiguous JSON object from the response.
+
+        The whole reply, optionally in a Markdown fence, is parsed first. Models
+        without structured output (Bedrock, or after a schema downgrade) may
+        still wrap the object in prose; exactly one embedded object is then
+        accepted, while several objects remain an error rather than a guess.
+        """
         raw = self.completions(system_prompt, user_prompt, response_schema=response_schema, schema_name=schema_name)
 
         cleaned = raw.strip()
         if cleaned.startswith("```"):
-            cleaned = cleaned.split("\n", 1)[1]
+            cleaned = cleaned.partition("\n")[2]
             cleaned = cleaned.rsplit("```", 1)[0].strip()
 
         try:
             return json.loads(cleaned)
-        except json.JSONDecodeError as e:
-            raise LLMClientError(f"LLM returned invalid JSON: {e}\nRaw: {raw[:500]}") from e
+        except (RecursionError, ValueError) as e:
+            objects = _embedded_json_objects(raw)
+            if len(objects) == 1:
+                return objects[0]
+            detail = f"found {len(objects)} JSON objects; expected exactly one" if objects else str(e)
+            raise LLMClientError(f"LLM returned invalid JSON: {detail}\nRaw: {raw[:500]}") from e
 
     # -- template-method hooks (override in subclasses) -------------------
 

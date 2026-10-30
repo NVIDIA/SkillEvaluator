@@ -748,6 +748,15 @@ class TestCompletions:
         assert client._resolved_config().api_key == "explicit-user-key"
 
 
+def _extract_json_reply(monkeypatch: pytest.MonkeyPatch, content: str) -> dict:
+    monkeypatch.setenv("SKILL_EVAL_LLM_PROVIDER", "nv_build")
+    monkeypatch.setenv("NVIDIA_API_KEY", "test-key")
+    mock_openai = MagicMock()
+    mock_openai.chat.completions.create.return_value.choices = [MagicMock(message=MagicMock(content=content))]
+    with patch("openai.OpenAI", return_value=mock_openai):
+        return LLMClient().extract_json_from_response("system", "user")
+
+
 class TestExtractJsonFromResponse:
     def test_parses_plain_json(self, monkeypatch: pytest.MonkeyPatch) -> None:
         monkeypatch.setenv("SKILL_EVAL_LLM_PROVIDER", "nv_build")
@@ -772,6 +781,111 @@ class TestExtractJsonFromResponse:
             client = LLMClient()
             result = client.extract_json_from_response("system", "user")
         assert result == {"key": "value"}
+
+    def test_recovers_one_object_surrounded_by_prose(self, monkeypatch: pytest.MonkeyPatch) -> None:
+        content = (
+            "The chunks overlap, but one summarizes what the other explains.\n\n"
+            '{"verdict": "INTENTIONAL_DETAIL", "confidence": 0.82, '
+            '"rationale": "Summary and detail.", "suggestion": "Keep both sections."}'
+            "\n\nLet me know if you need more detail."
+        )
+
+        assert _extract_json_reply(monkeypatch, content) == {
+            "verdict": "INTENTIONAL_DETAIL",
+            "confidence": 0.82,
+            "rationale": "Summary and detail.",
+            "suggestion": "Keep both sections.",
+        }
+
+    def test_recovers_fenced_object_after_prose_preamble(self, monkeypatch: pytest.MonkeyPatch) -> None:
+        content = 'Here is the result:\n```json\n{"key": "value"}\n```'
+
+        assert _extract_json_reply(monkeypatch, content) == {"key": "value"}
+
+    def test_recovers_single_line_fenced_object(self, monkeypatch: pytest.MonkeyPatch) -> None:
+        assert _extract_json_reply(monkeypatch, '```{"verdict": "DUPLICATE"}```') == {"verdict": "DUPLICATE"}
+
+    def test_bracketed_citations_are_not_counted(self, monkeypatch: pytest.MonkeyPatch) -> None:
+        content = 'Chunks [1] and [2] repeat the same steps.\n{"key": "value"}'
+
+        assert _extract_json_reply(monkeypatch, content) == {"key": "value"}
+
+    def test_nested_object_is_not_counted_as_a_second_object(self, monkeypatch: pytest.MonkeyPatch) -> None:
+        assert _extract_json_reply(monkeypatch, 'Result:\n{"outer": {"key": "value"}}') == {"outer": {"key": "value"}}
+
+    def test_prose_braces_that_are_not_json_are_skipped(self, monkeypatch: pytest.MonkeyPatch) -> None:
+        content = 'Compare {skill_name} with ${HOME} first.\n{"key": "value"}'
+
+        assert _extract_json_reply(monkeypatch, content) == {"key": "value"}
+
+    def test_multiple_embedded_objects_raise(self, monkeypatch: pytest.MonkeyPatch) -> None:
+        with pytest.raises(LLMClientError, match="found 2 JSON objects; expected exactly one"):
+            _extract_json_reply(monkeypatch, 'First: {"key": "one"}\nSecond: {"key": "two"}')
+
+    @pytest.mark.parametrize(
+        "container",
+        [
+            pytest.param(
+                '{"verdict": "RELATED_BUT_DISTINCT", "detail": {"verdict": "DUPLICATE"} "rationale": "x"}',
+                id="missing-comma-after-nested-object",
+            ),
+            pytest.param(
+                '{"verdict": "RELATED_BUT_DISTINCT" "detail": {"verdict": "DUPLICATE"}}',
+                id="missing-comma-before-nested-key",
+            ),
+            pytest.param(
+                '{"verdict": "RELATED_BUT_DISTINCT", {"verdict": "DUPLICATE"}}',
+                id="nested-object-where-key-expected",
+            ),
+            pytest.param('{verdict: {"verdict": "DUPLICATE"}}', id="unquoted-key"),
+            pytest.param('{"verdict": "RELATED_BUT_DISTINCT", "detail": {"verdict": "DUPLICATE"}', id="never-closes"),
+            pytest.param('[oops, {"verdict": "DUPLICATE"}]', id="malformed-array"),
+            pytest.param('[{"verdict": "DUPLICATE"}]', id="valid-array"),
+        ],
+    )
+    def test_object_inside_another_container_is_not_promoted(
+        self, monkeypatch: pytest.MonkeyPatch, container: str
+    ) -> None:
+        with pytest.raises(LLMClientError, match="invalid JSON"):
+            _extract_json_reply(monkeypatch, "Result: " + container)
+
+    @pytest.mark.parametrize("prefix", [pytest.param("", id="whole-reply"), pytest.param("Result: ", id="in-prose")])
+    @pytest.mark.parametrize(
+        "payload",
+        [
+            pytest.param('{"a":' * 100_000 + "1" + "}" * 100_000, id="nesting-beyond-recursion-limit"),
+            pytest.param('{"a": ' + "1" * 5_000 + "}", id="integer-beyond-digit-limit"),
+        ],
+    )
+    def test_undecodable_object_fails_closed(self, monkeypatch: pytest.MonkeyPatch, prefix: str, payload: str) -> None:
+        with pytest.raises(LLMClientError, match="invalid JSON"):
+            _extract_json_reply(monkeypatch, prefix + payload)
+
+    def test_undecodable_object_blocks_a_later_object(self, monkeypatch: pytest.MonkeyPatch) -> None:
+        payload = '{"a":' * 100_000 + "1" + "}" * 100_000
+
+        with pytest.raises(LLMClientError, match="invalid JSON"):
+            _extract_json_reply(monkeypatch, "Result: " + payload + ' {"key": "value"}')
+
+    def test_many_malformed_spans_are_skipped(self, monkeypatch: pytest.MonkeyPatch) -> None:
+        assert _extract_json_reply(monkeypatch, "{x} " * 5_000 + '{"key": "value"}') == {"key": "value"}
+
+    def test_bedrock_prompt_only_reply_with_preamble_is_recovered(self, monkeypatch: pytest.MonkeyPatch) -> None:
+        from skillevaluator.deduplication.intra_skill.llm_analyzer import VERDICT_JSON_SCHEMA
+
+        _use_provider(monkeypatch, "bedrock", CHAT_DEFAULT_BEDROCK)
+        reply = (
+            "Both chunks list the same setup steps.\n"
+            '{"verdict": "DUPLICATE", "confidence": 0.9, "rationale": "Same steps.", "suggestion": "Keep one copy."}'
+        )
+
+        with patch("litellm.completion", return_value=_openai_choice_response(reply)) as completion:
+            result = LLMClient().extract_json_from_response(
+                "system", "user", response_schema=VERDICT_JSON_SCHEMA, schema_name="dedup_verdict"
+            )
+
+        assert result["verdict"] == "DUPLICATE"
+        assert "response_format" not in completion.call_args.kwargs
 
     def test_invalid_json_raises(self, monkeypatch: pytest.MonkeyPatch) -> None:
         monkeypatch.setenv("SKILL_EVAL_LLM_PROVIDER", "nv_build")

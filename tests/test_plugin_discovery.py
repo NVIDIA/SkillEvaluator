@@ -540,3 +540,19 @@ def test_declared_skills_folder_lists_hidden_and_artifact_named_children(tmp_pat
         f"custom/{child}" for child in children
     )
     assert len([m for m in result.components if m.type == "hook"]) == len(children)
+
+
+def test_codex_drops_a_commands_map_and_loads_the_default_folder(tmp_path):
+    write_tree(
+        tmp_path,
+        {
+            CODEX_PROFILE.manifest_path: {
+                "name": "demo",
+                "commands": {"ship": {"content": "Ship it", "allowedTools": ["Bash"]}},
+            },
+            "commands/default.md": "Run the default.\n",
+        },
+    )
+    result = found(tmp_path)
+    assert [(m.name, m.origin) for m in result.components if m.type == "command"] == [("default", "packaged")]
+    assert [(f.check_name, f.severity) for f in result.findings] == [("plugin_component_path_invalid", Severity.MEDIUM)]

@@ -882,7 +882,7 @@ class _MemberCollector:
                 self._list_dir(component_type, PurePosixPath(default_dir), suffixes)
             if declared_value is None:
                 return
-        if component_type == "command" and isinstance(declared_value, dict):
+        if component_type == "command" and isinstance(declared_value, dict) and not self.profile.codex_path_rules:
             self._command_map(declared_value)
             return
         for raw in self._declared_values(field_name, declared_value):

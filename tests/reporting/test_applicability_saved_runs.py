@@ -123,6 +123,77 @@ def test_new_basis_comparison_is_unavailable_when_rewards_are_incomplete(tmp_pat
     assert not agent.get("lift_basis")
 
 
+def test_incomplete_saved_full_metric_basis_cannot_fall_back_to_aggregate_scores(tmp_path):
+    root = _run(tmp_path)
+    for condition in ("with-skill", "without-skill"):
+        directory = root / "codex" / condition
+        scores = dict.fromkeys(DEFAULT_METRICS, 1.0)
+        summary = json.loads((directory / "summary.json").read_text())
+        summary.update(scores=scores, not_applicable_metrics=[], dimensions=dimension_scores(scores))
+        (directory / "summary.json").write_text(json.dumps(summary))
+        for path in (directory / "trials").glob("*/reward.json"):
+            row = json.loads(path.read_text())
+            row.update(scores, details={})
+            path.write_text(json.dumps(row))
+    (root / "codex/lift.json").write_text(
+        json.dumps(
+            {
+                "overall": {"delta": 0.99},
+                "basis": {
+                    "excluded_case_entries": 0,
+                    "excluded_cases": [],
+                    "excluded_metrics": [],
+                    "excluded_cases_truncated": False,
+                },
+            }
+        )
+    )
+    (root / "codex/with-skill/trials/b/reward.json").unlink()
+    assert _report(root)["agents"]["codex"]["lift"] is None
+
+
+def test_complete_mixed_saved_run_rebuilds_logical_lift_and_rejects_different_case_cohorts(tmp_path):
+    from skillevaluator.tier3.harbor.metrics import CUSTOM_ONLY_METRIC_SET
+
+    for condition, standard_score in (("with-skill", 1.0), ("without-skill", 0.6)):
+        directory = tmp_path / "codex" / condition
+        directory.mkdir(parents=True)
+        scores = dict.fromkeys(DEFAULT_METRICS, standard_score)
+        summary = {
+            "scores": scores,
+            "metrics": list(DEFAULT_METRICS),
+            "score_policy": DEFAULT_SCORE_POLICY,
+            "num_trials": 2,
+            "num_reward_rows": 2,
+            "mixed_metric_contracts": True,
+            "execution_status": "succeeded",
+            "overall_score": standard_score / 2,
+        }
+        (directory / "summary.json").write_text(json.dumps(summary))
+        rows = [
+            {**scores, "entry_id": "a", "trial_id": "a", "metric_set": DEFAULT_METRIC_SET},
+            {"entry_id": "b", "trial_id": "b", "metric_set": CUSTOM_ONLY_METRIC_SET, "overall": 0.0},
+        ]
+        for row in rows:
+            trial = directory / "trials" / row["entry_id"]
+            trial.mkdir(parents=True)
+            (trial / "reward.json").write_text(json.dumps(row))
+    (tmp_path / "codex/lift.json").write_text(
+        json.dumps(
+            {
+                "overall": {"delta": 0.99},
+                "basis": {"pairing": "same_cases_per_metric"},
+            }
+        )
+    )
+    assert _report(tmp_path)["agents"]["codex"]["lift"] == 0.2
+    path = tmp_path / "codex/without-skill/trials/b/reward.json"
+    row = json.loads(path.read_text())
+    row["entry_id"] = "different-case"
+    path.write_text(json.dumps(row))
+    assert _report(tmp_path)["agents"]["codex"]["lift"] is None
+
+
 def test_default_dimensions_require_every_applicable_metric_even_with_cached_scores():
     from skillevaluator.evaluation.tier3_report import _build_agent
 

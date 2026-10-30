@@ -2865,6 +2865,11 @@ def _tier2_workflow(
     show_default=True,
     help="Tier 3 progress presentation (auto uses Rich on a TTY and plain lines otherwise).",
 )
+@click.option(
+    "--verbose",
+    is_flag=True,
+    help="Also print per-evaluator and per-dimension tables and the metric findings report.",
+)
 def evaluate(
     skill_path: Path,
     agents: str | None,
@@ -2895,6 +2900,7 @@ def evaluate(
     evaluated_source_revision: str | None,
     evaluator_container_revision: str | None,
     progress: str,
+    verbose: bool,
 ) -> None:
     """Run Tier 3 live agent evaluation."""
     from skillevaluator.evaluation import EvaluationOptions, EvaluationService
@@ -2999,7 +3005,7 @@ def evaluate(
         if isinstance(display_result, dict):
             from skillevaluator.tier3.result_display import render_evaluation_result
 
-            render_evaluation_result(display_result, console=console)
+            render_evaluation_result(display_result, console=console, verbose=verbose, skill_path=skill_path)
         if failure:
             raise click.exceptions.Exit(1)
     except (click.ClickException, click.exceptions.Exit):

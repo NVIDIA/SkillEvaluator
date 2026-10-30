@@ -3,6 +3,7 @@
 
 import importlib.util
 import os
+import random
 import shutil
 import subprocess
 from pathlib import Path
@@ -240,3 +241,116 @@ def test_unrelated_histories_do_not_fall_back_to_full_scan(repository):
     head = commit(repo)
     with pytest.raises(selector.SelectionError, match="common merge base"):
         select(repo, base, head)
+
+
+def _reference_within(path, directory):
+    # The pairwise rule that _containing replaces.
+    return directory in {".", path} or path.startswith(directory + "/")
+
+
+@pytest.mark.parametrize("seed", range(20))
+def test_containing_set_matches_pairwise_directory_matching(seed):
+    generator = random.Random(seed)
+    names = ["a", "b", "ab", "a b", "SKILL.md", "[x]", "a.b"]
+
+    def path():
+        return "/".join(generator.choice(names) for _ in range(generator.randint(1, 4)))
+
+    paths = sorted({path() for _ in range(generator.randint(0, 30))})
+    directories = {".", *(path() for _ in range(40))}
+    directories |= {item.rsplit("/", 1)[0] for item in paths if "/" in item}
+    containing = selector._containing(paths)
+    for directory in directories:
+        assert (directory in containing) is any(_reference_within(item, directory) for item in paths), directory
+
+
+def test_commits_and_checkout_are_resolved_with_one_rev_parse(repository, monkeypatch):
+    repo, base = repository
+    (repo / "skills/second/SKILL.md").write_text("# Changed\n")
+    head = commit(repo)
+    calls = []
+    real_git = selector._git
+
+    def record(workspace, *arguments):
+        calls.append(arguments)
+        return real_git(workspace, *arguments)
+
+    monkeypatch.setattr(selector, "_git", record)
+    assert select(repo, base, head)["selected"] == ["skills/second"]
+    assert [arguments[0] for arguments in calls].count("rev-parse") == 1
+
+
+def test_annotated_tag_object_is_not_accepted_as_a_commit(repository):
+    repo, base = repository
+    git(repo, "tag", "-a", "fixture-tag", "-m", "fixture tag")
+    tag = git(repo, "rev-parse", "fixture-tag")
+    assert tag != base
+    with pytest.raises(selector.SelectionError, match="not tag objects"):
+        select(repo, tag, base)
+
+
+def test_revision_shaped_file_name_is_not_read_as_a_path(repository):
+    repo, head = repository
+    missing = "1" * 40
+    # An untracked file outside the skill roots, named like the requested revision.
+    (repo / f"{missing}^{{commit}}").write_text("not a revision\n")
+    with pytest.raises(selector.SelectionError, match="could not resolve"):
+        select(repo, missing, head)
+
+
+def _clone(source, target, *options):
+    subprocess.run(
+        [
+            "git",
+            "-c",
+            "protocol.file.allow=always",
+            "clone",
+            "-q",
+            "--no-checkout",
+            *options,
+            source.as_uri(),
+            str(target),
+        ],
+        check=True,
+        env={**os.environ, "GIT_CONFIG_GLOBAL": os.devnull, "GIT_CONFIG_NOSYSTEM": "1"},
+        capture_output=True,
+    )
+
+
+def test_blobless_clone_selects_like_a_full_clone_without_fetching_blobs(repository, tmp_path):
+    # The workflow checks out changed mode with filter: blob:none; selection must
+    # need only commits, trees and the checked-out files.
+    repo, base = repository
+    (repo / "skills/first skill/SKILL.md").write_text("# Changed first skill\n")
+    (repo / "skills/second/notes.md").write_text("new file\n")
+    head = commit(repo)
+    git(repo, "config", "uploadpack.allowFilter", "true")
+    clone = tmp_path / "blobless"
+    _clone(repo, clone, "--filter=blob:none")
+    subprocess.run(
+        ["git", "-C", str(clone), "-c", "protocol.file.allow=always", "checkout", "-q", "--detach", head],
+        check=True,
+        env={**os.environ, "GIT_CONFIG_GLOBAL": os.devnull, "GIT_CONFIG_NOSYSTEM": "1"},
+        capture_output=True,
+    )
+    # Only the base commit has this manifest content, so a blobless clone lacks it.
+    old_blob = git(repo, "rev-parse", f"{base}:skills/first skill/SKILL.md")
+    missing = git(clone, "rev-list", "--objects", "--missing=print", base)
+    assert f"?{old_blob}" in missing.splitlines()
+    full = select(repo, base, head)
+    partial = select(clone, base, head)
+    assert partial["selected"] == full["selected"] == ["skills/first skill", "skills/second"]
+    assert partial == full
+    # Selection runs Git with protocol.allow=never, so the old blob stays missing.
+    assert f"?{old_blob}" in git(clone, "rev-list", "--objects", "--missing=print", base).splitlines()
+
+
+def test_shallow_clone_fails_changed_selection_instead_of_scanning_everything(repository, tmp_path):
+    repo, base = repository
+    (repo / "skills/second/SKILL.md").write_text("# Changed\n")
+    head = commit(repo)
+    clone = tmp_path / "shallow"
+    _clone(repo, clone, "--depth=1")
+    git(clone, "checkout", "-q", "--detach", head)
+    with pytest.raises(selector.SelectionError):
+        select(clone, base, head)

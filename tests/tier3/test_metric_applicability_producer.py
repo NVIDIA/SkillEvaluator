@@ -143,6 +143,63 @@ def test_shared_metric_pass_comparison_does_not_credit_activation_alone():
     assert comparison["excluded_metrics"] == ["skill_execution", "skill_efficiency"]
 
 
+def test_shared_metric_pass_comparison_preserves_canonical_policy_when_nothing_is_excluded():
+    from skillevaluator.tier3.harbor.collector import _shared_metric_pass_lift
+
+    treatment = reward(accuracy=0.0, skill_efficiency=0.0)
+    control = reward(accuracy=0.0, goal_accuracy=0.0, behavior_check=0.0)
+    assert metrics.overall_score(treatment) == metrics.overall_score(control) == 0.6
+    comparison = _shared_metric_pass_lift(
+        [treatment],
+        [control],
+        n_attempts=1,
+        pass_threshold=0.65,
+        stop_on_pass=False,
+        expected_cases=1,
+        expected_case_ids=["a"],
+    )
+    assert comparison["with_skill"] == comparison["without_skill"] == 0.0
+    assert comparison["delta"] == 0.0
+
+
+def test_shared_metric_pass_comparison_renormalizes_dimensions_after_activation_exclusion():
+    from skillevaluator.tier3.harbor.collector import _shared_metric_pass_lift
+
+    comparison = _shared_metric_pass_lift(
+        [reward(accuracy=0.0)],
+        [reward(accuracy=0.0, skill_execution=None, skill_efficiency=None)],
+        n_attempts=1,
+        pass_threshold=0.7,
+        stop_on_pass=False,
+        expected_cases=1,
+        expected_case_ids=["a"],
+    )
+    # Shared Security=1, Correctness=0, Effectiveness=1 average to 2/3.
+    assert comparison["with_skill"] == comparison["without_skill"] == 0.0
+
+
+def test_shared_metric_pass_comparison_excludes_only_mismatched_judge_metrics():
+    from skillevaluator.tier3.harbor.collector import _shared_metric_pass_lift
+
+    treatment = reward(accuracy=1.0)
+    control = reward(accuracy=0.0)
+    treatment["details"]["accuracy"] = {"judge_model_used": "fallback"}
+    control["details"]["accuracy"] = {"judge_model_used": "primary"}
+    comparison = _shared_metric_pass_lift(
+        [treatment],
+        [control],
+        n_attempts=1,
+        pass_threshold=0.9,
+        stop_on_pass=False,
+        expected_cases=1,
+        expected_case_ids=["a"],
+    )
+    assert comparison["with_skill"] == comparison["without_skill"] == 1.0
+    assert comparison["delta"] == 0.0
+    assert comparison["judge_mixed_cases"] == {"accuracy": 1}
+    assert comparison["excluded_metrics"] == ["accuracy"]
+
+
 def test_template_required_judge_accepts_only_verifier_authorized_na():
     from skillevaluator.tier3.harbor.templates import eval as verifier
 

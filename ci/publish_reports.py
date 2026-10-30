@@ -17,6 +17,7 @@ import io
 import json
 import os
 import re
+import secrets
 import shutil
 import stat
 import sys
@@ -27,6 +28,10 @@ import zipfile
 from datetime import datetime
 from pathlib import Path, PurePosixPath
 
+try:
+    import github_api
+except ModuleNotFoundError:
+    from ci import github_api
 from skillevaluator.utils.secret_redaction import REDACTED, SENSITIVE_PII_CATEGORIES, Redactor, sensitive_values
 
 MAX_FILES = 1000
@@ -35,10 +40,14 @@ MAX_TOTAL_BYTES = 64 * 1024 * 1024
 MAX_FILE_BYTES = 32 * 1024 * 1024
 MAX_HISTORY_BYTES = 512 * 1024 * 1024
 ARTIFACT_NAME = "skill-evaluator-tier1"
+# The scan uploads this small artifact next to the full one. It holds only the
+# JSON read here, so HTML and logs never count against the download limits.
+EVIDENCE_ARTIFACT = f"{ARTIFACT_NAME}-evidence"
 WORKFLOW_PATH = ".github/workflows/skill-checks.yml"
-SHA_PATTERN = re.compile(r"[0-9a-f]{40}")
-REPO_PATTERN = re.compile(r"[A-Za-z0-9_.-]+/[A-Za-z0-9_.-]+")
+SHA_PATTERN = github_api.COMMIT_SHA
+REPO_PATTERN = github_api.REPOSITORY
 REPORT_DIRECTORY = re.compile(r"skill-(?:00[1-9]|0[1-9][0-9]|100)")
+REPORT_MEMBER = re.compile(rf"(?:{REPORT_DIRECTORY.pattern})/skillevaluator-tier1\.json")
 
 
 class PublicationError(ValueError):
@@ -64,52 +73,18 @@ def allowed_download_url(url: str) -> bool:
     )
 
 
-class _NoRedirect(urllib.request.HTTPRedirectHandler):
-    def redirect_request(self, _request, _file, _code, _message, _headers, _url):
-        return None
+DOWNLOAD_TOO_LARGE = "The downloaded artifact exceeds its size limit."
 
 
-def _bounded_read(response, limit: int) -> bytes:
-    declared = response.headers.get("Content-Length")
-    if declared and (not declared.isdigit() or int(declared) > limit):
-        raise PublicationError("The downloaded artifact or API response exceeds its size limit.")
-    payload = response.read(limit + 1)
-    if len(payload) > limit:
-        raise PublicationError("The downloaded artifact or API response exceeds its size limit.")
-    return payload
-
-
-class GitHubAPI:
-    def __init__(self, repository: str, token: str):
-        self.repository = repository
-        self.token = token
-        self.opener = urllib.request.build_opener(_NoRedirect())
-
-    def _request(self, path: str):
-        root = f"/repos/{self.repository}"
-        prefix = root + "/"
-        comparison = re.fullmatch(re.escape(prefix) + r"compare/[0-9a-f]{40}\.\.\.[0-9a-f]{40}", path)
-        if (path != root and not path.startswith(prefix)) or (".." in path and not comparison) or "\\" in path:
-            raise PublicationError("Only this repository's GitHub API endpoints are supported.")
-        request = urllib.request.Request(
-            f"https://api.github.com{path}",
-            headers={
-                "Authorization": f"Bearer {self.token}",
-                "Accept": "application/vnd.github+json",
-                "X-GitHub-Api-Version": "2022-11-28",
-                "User-Agent": "SkillEvaluator-report-publisher",
-            },
-        )
-        return self.opener.open(request, timeout=60)
-
-    def get(self, path: str):
-        with self._request(path) as response:
-            return _json(_bounded_read(response, MAX_FILE_BYTES))
+class GitHubAPI(github_api.GitHubAPI):
+    error = PublicationError
+    json_error = "A required JSON document is invalid."
+    user_agent = "SkillEvaluator-report-publisher"
 
     def download_artifact(self, artifact_id: int) -> bytes:
         try:
-            with self._request(f"/repos/{self.repository}/actions/artifacts/{artifact_id}/zip") as response:
-                return _bounded_read(response, MAX_TOTAL_BYTES)
+            with self._request("GET", f"/repos/{self.repository}/actions/artifacts/{artifact_id}/zip") as response:
+                return github_api.bounded_read(response, MAX_TOTAL_BYTES, PublicationError, DOWNLOAD_TOO_LARGE)
         except urllib.error.HTTPError as exc:
             if exc.code not in {301, 302, 303, 307, 308}:
                 raise
@@ -118,10 +93,10 @@ class GitHubAPI:
         for _ in range(5):
             if not allowed_download_url(url):
                 raise PublicationError("The artifact download redirected to an unsupported host.")
-            request = urllib.request.Request(url, headers={"User-Agent": "SkillEvaluator-report-publisher"})
+            request = urllib.request.Request(url, headers={"User-Agent": self.user_agent})
             try:
-                with self.opener.open(request, timeout=60) as response:
-                    return _bounded_read(response, MAX_TOTAL_BYTES)
+                with self.opener.open(request, timeout=github_api.TIMEOUT_SECONDS) as response:
+                    return github_api.bounded_read(response, MAX_TOTAL_BYTES, PublicationError, DOWNLOAD_TOO_LARGE)
             except urllib.error.HTTPError as exc:
                 if exc.code not in {301, 302, 303, 307, 308}:
                     raise
@@ -130,21 +105,7 @@ class GitHubAPI:
 
 
 def _json(payload: bytes):
-    def object_pairs(pairs):
-        result = {}
-        for key, value in pairs:
-            if key in result:
-                raise PublicationError("Duplicate JSON keys are not supported.")
-            result[key] = value
-        return result
-
-    def invalid_constant(_value):
-        raise PublicationError("Non-finite JSON numbers are not supported.")
-
-    try:
-        return json.loads(payload.decode("utf-8"), object_pairs_hook=object_pairs, parse_constant=invalid_constant)
-    except (ValueError, UnicodeError, RecursionError) as exc:
-        raise PublicationError("A required JSON document is invalid.") from exc
+    return github_api.strict_json(payload, PublicationError, GitHubAPI.json_error)
 
 
 def _integer(value, minimum=0):
@@ -196,7 +157,9 @@ def validate_summary(summary: dict) -> None:
             raise PublicationError("A skill's verdict contradicts its process evidence.")
         if not row["passed"] and row["overall_status"] == "passed":
             raise PublicationError("A failed skill cannot claim a passing status.")
-        if bool(row["incomplete_scans"]) != (row["overall_status"] == "incomplete"):
+        if (row["overall_status"] == "incomplete" and not row["incomplete_scans"]) or (
+            row["incomplete_scans"] and row["overall_status"] not in {"failed", "incomplete"}
+        ):
             raise PublicationError("A skill's status contradicts its scanner completeness evidence.")
         if row["overall_status"] != "error":
             if any(not _integer(row.get(key)) for key in ("total_validators", "total_errors", "total_warnings")):
@@ -242,6 +205,8 @@ def validate_summary(summary: dict) -> None:
         if skipped
         else "passed"
         if expected
+        else "failed"
+        if any(row["overall_status"] == "failed" for row in rows)
         else "incomplete"
         if incomplete
         else "failed"
@@ -277,6 +242,15 @@ def validate_report(report: dict, row: dict) -> None:
         report.get("incomplete_scans")
     ):
         raise PublicationError("A per-skill report contains invalid completeness evidence.")
+    # Establish statuses from the typed findings and scanner evidence, rather
+    # than trusting matching rollups supplied by an untrusted artifact.
+    from skillevaluator.reporting.retained import RetainedReportError, retained_results
+    from skillevaluator.reporting.run_status import resolve_run_status
+
+    try:
+        retained = retained_results(report, copy_metadata=False)
+    except RetainedReportError as exc:
+        raise PublicationError("A per-skill report contains invalid retained evidence.") from exc
     incomplete = []
     totals = {"errors": 0, "warnings": 0, "critical_count": 0, "high_count": 0, "medium_count": 0, "low_count": 0}
     for result in results:
@@ -284,7 +258,7 @@ def validate_report(report: dict, row: dict) -> None:
         if type(result.get("passed")) is not bool or status not in {"passed", "failed", "incomplete", "skipped"}:
             raise PublicationError("A validator has an invalid verdict.")
         scans = result.get("incomplete_scans")
-        if not _scanner_list(scans) or (status == "incomplete") != bool(scans):
+        if not _scanner_list(scans):
             raise PublicationError("A validator has contradictory scanner completeness evidence.")
         if result["passed"] != (status in {"passed", "skipped"}):
             raise PublicationError("A validator has contradictory pass and status fields.")
@@ -296,7 +270,7 @@ def validate_report(report: dict, row: dict) -> None:
             totals[key] += counts[key]
     incomplete = list(dict.fromkeys(incomplete))
     all_passed = all(result["passed"] for result in results)
-    status = "incomplete" if incomplete else "passed" if all_passed else "failed"
+    status = resolve_run_status(retained).headline.value
     if (report["overall_passed"], report["overall_status"], report["incomplete_scans"]) != (
         all_passed,
         status,
@@ -323,16 +297,6 @@ def validate_report(report: dict, row: dict) -> None:
         raise PublicationError("A skill summary has contradictory severity counts.")
     if "total_validators" in row and row["total_validators"] != report["total_validators"]:
         raise PublicationError("A skill summary has contradictory validator counts.")
-    # Validate the same typed evidence the renderer consumes before writing an
-    # immutable receipt. Valid-looking rollups alone cannot establish a report.
-    from skillevaluator.reporting.retained import RetainedReportError, retained_results
-
-    try:
-        retained_results(report)
-    except RetainedReportError as exc:
-        raise PublicationError("A per-skill report contains invalid retained evidence.") from exc
-
-
 def read_artifact(payload: bytes) -> tuple[dict, dict[str, dict]]:
     """Validate every member, but deserialize only expected JSON without extraction."""
     if len(payload) > MAX_TOTAL_BYTES:
@@ -357,7 +321,7 @@ def read_artifact(payload: bytes) -> tuple[dict, dict[str, dict]]:
                 total += entry.file_size
                 if entry.file_size > MAX_FILE_BYTES or total > MAX_TOTAL_BYTES:
                     raise PublicationError("The artifact exceeds its expanded size limit.")
-                if name == "summary.json" or re.fullmatch(r"skill-[0-9]{3}/skillevaluator-tier1\.json", name):
+                if name == "summary.json" or REPORT_MEMBER.fullmatch(name):
                     with archive.open(entry) as handle:
                         content = handle.read(MAX_FILE_BYTES + 1)
                     if len(content) > MAX_FILE_BYTES:
@@ -431,17 +395,20 @@ def is_newer(candidate: dict, existing: dict | None) -> bool:
 
 
 def _write(path: Path, text: str) -> None:
-    current = path.parent
-    while True:
-        if current.is_symlink():
+    """Replace a site file atomically; a failed write leaves the old file intact."""
+    for ancestor in (path, *path.parents):
+        if ancestor.is_symlink():
             raise PublicationError("The site contains a symlink in an output path.")
-        if current == current.parent:
-            break
-        current = current.parent
-    if path.is_symlink():
-        raise PublicationError("The site contains a symlink in an output path.")
     path.parent.mkdir(parents=True, exist_ok=True)
-    path.write_text(text, encoding="utf-8")
+    temporary = path.with_name(f".{path.name}.{secrets.token_hex(8)}.tmp")
+    descriptor = os.open(temporary, os.O_WRONLY | os.O_CREAT | os.O_EXCL | getattr(os, "O_NOFOLLOW", 0), 0o666)
+    try:
+        with os.fdopen(descriptor, "w", encoding="utf-8") as handle:
+            handle.write(text)
+        temporary.replace(path)
+    except BaseException:
+        temporary.unlink(missing_ok=True)
+        raise
 
 
 def _dump(path: Path, data) -> None:
@@ -638,12 +605,10 @@ def _select_artifact(api, repository: str, run: dict) -> dict:
     finished = _timestamp(run.get("updated_at"))
     if finished < started:
         raise PublicationError("The selected run attempt has an invalid time interval.")
+    name = f"{EVIDENCE_ARTIFACT}-attempt-{run['run_attempt']}"
     candidates = []
     for artifact in listing["artifacts"]:
-        if (
-            artifact.get("name") not in {ARTIFACT_NAME, f"{ARTIFACT_NAME}-attempt-{run['run_attempt']}"}
-            or artifact.get("expired") is not False
-        ):
+        if artifact.get("name") != name or artifact.get("expired") is not False:
             continue
         identity = artifact.get("workflow_run", {})
         if identity.get("id") != run["id"] or identity.get("head_sha") != run["head_sha"]:
@@ -658,7 +623,11 @@ def _select_artifact(api, repository: str, run: dict) -> dict:
             raise PublicationError("The selected report artifact exceeds its size limit.")
         candidates.append(artifact)
     if not candidates:
-        raise PublicationError("The selected run attempt has no current report artifact.")
+        raise PublicationError(
+            f"The selected run attempt has no current report evidence artifact named {name}. "
+            "The scan may have stopped before writing reports, the artifact may have expired, "
+            "or the scan used an evaluator revision that does not upload it."
+        )
     if len(candidates) != 1:
         raise PublicationError("The selected run attempt has ambiguous report artifacts.")
     return candidates[0]
@@ -693,15 +662,15 @@ def _current_routes(api, repository: str, run: dict) -> tuple[list[str], str]:
 
 def _history_index(site: Path, history: list[dict]) -> None:
     try:
-        from native_reports import _STYLE
+        from native_reports import _STYLE, brand_html, verdict_word
     except ModuleNotFoundError:
-        from ci.native_reports import _STYLE
+        from ci.native_reports import _STYLE, brand_html, verdict_word
 
     links = []
     for record in sorted(history, key=lambda item: (item["run_id"], item["run_attempt"]), reverse=True):
         url = html.escape(record["report_url"], quote=True)
         label = html.escape(
-            f"Run {record['run_id']} / attempt {record['run_attempt']} — {record['overall_status']} — {record['head_sha'][:12]}"
+            f"Run {record['run_id']} / attempt {record['run_attempt']} · {verdict_word(record['overall_status'])} · {record['head_sha'][:12]}"
         )
         links.append(f'<li><a href="{url}">{label}</a></li>')
     latest = []
@@ -717,7 +686,7 @@ def _history_index(site: Path, history: list[dict]) -> None:
         '<!doctype html><html lang="en"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1">'
         "<meta http-equiv=\"Content-Security-Policy\" content=\"default-src 'none'; style-src 'unsafe-inline'; base-uri 'none'; form-action 'none'\">"
         f"<title>Report history · SkillEvaluator</title><style>{_STYLE}li{{padding:14px 0;line-height:1.6;overflow-wrap:anywhere}}ul{{padding-left:18px}}</style></head><body>"
-        '<aside class="rail"><div class="brand"><span class="mark"></span>SkillEvaluator</div><p>Evaluation reports</p><a href="#history" aria-current="page">Report history</a></aside><main>'
+        f'<aside class="rail">{brand_html("se-logo-history")}<p>Evaluation reports</p><a href="#history" aria-current="page">Report history</a></aside><main>'
         '<header><p class="eyebrow">Evaluation reports</p><h1>Report history</h1><p class="muted">Open the latest scan or inspect the evidence recorded for a specific commit.</p></header><section><h2>Latest reports</h2><p>'
         + " · ".join(latest)
         + '</p></section><section id="history"><h2>Retained runs</h2><ul>'
@@ -817,9 +786,7 @@ def _recorded_image(summary: dict, fallback: str) -> str:
     if not isinstance(recorded, str) or not isinstance(fallback, str):
         raise PublicationError("The report's runtime image identity must be a string.")
     selected = recorded or fallback
-    if selected and (
-        len(selected) > 1024 or re.fullmatch(r"ghcr\.io/[a-z0-9][a-z0-9._/-]*@sha256:[0-9a-f]{64}", selected) is None
-    ):
+    if selected and (len(selected) > 1024 or github_api.GHCR_DIGEST.fullmatch(selected) is None):
         raise PublicationError("The report's runtime image identity must be an immutable GHCR digest.")
     return selected
 

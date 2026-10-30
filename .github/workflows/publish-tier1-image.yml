@@ -9,6 +9,17 @@ on:
       - uv.lock
       - .dockerignore
       - .github/workflows/publish-tier1-image.yml
+  # Builds on main seed the layer cache that pull requests read.
+  push:
+    branches:
+      - main
+    paths:
+      - ci/**
+      - src/skillevaluator/**
+      - pyproject.toml
+      - uv.lock
+      - .dockerignore
+      - .github/workflows/publish-tier1-image.yml
   workflow_dispatch:
     inputs:
       publish:
@@ -21,17 +32,32 @@ permissions:
 
 jobs:
   verify:
+    # A release dispatch builds, verifies and pushes one image in the publish job instead.
+    if: >-
+      ${{ !(github.event_name == 'workflow_dispatch' && inputs.publish &&
+      github.repository == 'NVIDIA/SkillEvaluator' && github.ref == 'refs/heads/main') }}
     runs-on: ubuntu-24.04
     timeout-minutes: 40
     steps:
       - uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0
         with:
           persist-credentials: false
+      - uses: docker/setup-buildx-action@f87e5991a6d7451dcb8d9637bfbc97413f497069 # v4.4.1
       - name: Build the complete Tier 1 runtime
-        run: |
-          docker build -f ci/Dockerfile.tier1 \
-            --label org.opencontainers.image.revision="$GITHUB_SHA" \
-            -t skillevaluator-tier1:verify .
+        uses: docker/build-push-action@c3c9e263c25d99ce0380d002d59b67737d91b0dc # v7.4.0
+        with:
+          context: .
+          file: ci/Dockerfile.tier1
+          labels: org.opencontainers.image.revision=${{ github.sha }}
+          tags: skillevaluator-tier1:verify
+          load: true
+          provenance: false
+          # Every verify run reads the layer cache that main writes. Only runs on main write it, so a pull
+          # request cannot replace the layers that later main builds reuse.
+          cache-from: type=gha,scope=tier1-image
+          cache-to: >-
+            ${{ github.event_name != 'pull_request' && github.ref == 'refs/heads/main' &&
+            'type=gha,scope=tier1-image,mode=max,ignore-error=true' || '' }}
       - name: Exercise real scans and changed-skill selection
         run: python3 ci/smoke_image.py --image skillevaluator-tier1:verify --output "$RUNNER_TEMP/image-verification"
       - name: Retain integration evidence
@@ -44,7 +70,6 @@ jobs:
           retention-days: 14
 
   publish:
-    needs: verify
     outputs:
       image_digest: ${{ steps.release.outputs.image_digest }}
     concurrency:
@@ -69,14 +94,26 @@ jobs:
         env:
           GHCR_TOKEN: ${{ github.token }}
         run: python3 ci/release_image.py --image "$IMAGE" --revision "$GITHUB_SHA" --output "$GITHUB_OUTPUT"
+      - uses: docker/setup-buildx-action@f87e5991a6d7451dcb8d9637bfbc97413f497069 # v4.4.1
+        if: steps.existing.outputs.exists != 'true'
+      # Built once: the smoke test below runs this local image and the release step pushes it.
+      # It reuses no cached layers, so apt installs the packages current at release time and no
+      # earlier job's layers reach the release. It still writes the cache that later builds read.
       - name: Build the reviewed release revision
         if: steps.existing.outputs.exists != 'true'
-        run: |
-          docker build -f ci/Dockerfile.tier1 \
-            --label org.opencontainers.image.source=https://github.com/NVIDIA/SkillEvaluator \
-            --label org.opencontainers.image.revision="$GITHUB_SHA" \
-            --label org.opencontainers.image.description='SkillEvaluator complete Tier 1 CI runtime' \
-            -t "$IMAGE:sha-$GITHUB_SHA" .
+        uses: docker/build-push-action@c3c9e263c25d99ce0380d002d59b67737d91b0dc # v7.4.0
+        with:
+          context: .
+          file: ci/Dockerfile.tier1
+          labels: |
+            org.opencontainers.image.source=https://github.com/NVIDIA/SkillEvaluator
+            org.opencontainers.image.revision=${{ github.sha }}
+            org.opencontainers.image.description=SkillEvaluator complete Tier 1 CI runtime
+          tags: ${{ env.IMAGE }}:sha-${{ github.sha }}
+          load: true
+          provenance: false
+          no-cache: true
+          cache-to: type=gha,scope=tier1-image,mode=max,ignore-error=true
       - name: Verify the exact image being published
         if: steps.existing.outputs.exists != 'true'
         run: python3 ci/smoke_image.py --image "$IMAGE:sha-$GITHUB_SHA" --output "$RUNNER_TEMP/release-verification"

@@ -452,10 +452,10 @@ def test_windows_walker_refuses_redirects_and_closes_every_handle(
 ) -> None:
     root = tmp_path / "skill"
     root.mkdir()
-    (root / "SKILL.md").write_text("skill")
+    (root / "SKILL.md").write_text("skill", encoding="utf-8")
     outside = tmp_path / "outside"
     outside.mkdir()
-    (outside / "secret.md").write_text("secret")
+    (outside / "secret.md").write_text("secret", encoding="utf-8")
     make_link(root, outside)
     handles = _TreeBackedWindowsHandles(monkeypatch)
 

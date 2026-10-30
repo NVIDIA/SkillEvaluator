@@ -145,7 +145,7 @@ MAX_HOOK_HANDLERS = 512
 # script cannot be read and is reported as unanalyzed (never scanned in part).
 MAX_SCRIPT_BYTES = CONTENT_DEDUP_MAX_FILE_BYTES
 MAX_SCRIPT_READS = 32
-# File names a script mentions that are checked as possible second-level scripts; more is a finding.
+# File names a script mentions that are checked as possible scripts it runs; more is a finding.
 MAX_SCRIPT_REFERENCES = 256
 # Distinct files one shell text runs that are matched against downloads; past it the hook is unanalyzed.
 MAX_RUN_SITES = 2048
@@ -2804,7 +2804,7 @@ class _ScriptEvidence:
     """What one plugin script a hook runs does; each script is read and scanned once."""
 
     facts: _ShellFacts
-    # Root-relative paths of other plugin scripts this one names; followed one more level.
+    # Root-relative paths of other plugin scripts this one names; followed in turn, within the read budget.
     references: tuple[PurePosixPath, ...] = ()
     # Why not every script this one names is followed (it names too many files).
     note: str | None = None
@@ -2985,8 +2985,8 @@ class HookAnalyzer:
     At most ``MAX_SCRIPT_READS`` scripts are read (missing paths do not count).
     A script's text is scanned whole, and the plugin scripts it runs (named by
     ``${CLAUDE_PLUGIN_ROOT}/...``, ``$(dirname "$0")/...``, or a script file
-    name, but not in a comment or an ``echo`` / ``test``) are followed one more
-    level. A hook whose script is unreadable or past that cap, whose texts run
+    name, but not in a comment or an ``echo`` / ``test``) are followed in turn,
+    to any depth. A hook whose script is unreadable or past that cap, whose texts run
     more than ``MAX_RUN_SITES`` files while the plugin downloads something, or an
     approval hook that names the plugin root but runs no script that could be
     read, is flagged ``script_unanalyzed``; a config past the ``MAX_HOOK_*``
@@ -3179,30 +3179,30 @@ class HookAnalyzer:
     def _script_evidence(
         self, tokens: list[str], aliases: dict[str, str] | None = None
     ) -> tuple[list[_ShellFacts], list[str], bool]:
-        """Facts of the plugin scripts a command runs (and of the scripts they name, one level), why any of
-        them was not analyzed, and whether any script was found at all."""
+        """Facts of the plugin scripts a command runs (and of the scripts those name, in turn), why any of
+        them was not analyzed, and whether any script the command names was found at all.
+
+        Scripts are followed breadth first until none is left; :data:`MAX_SCRIPT_READS` bounds the reads, and
+        a script past it is reported as not analyzed.
+        """
         facts: list[_ShellFacts] = []
         unanalyzed: list[str] = []
-        first = self._first_level_paths(tokens, aliases)
-        seen = set(first)
-        second: list[PurePosixPath] = []
+        queue = self._first_level_paths(tokens, aliases)
+        first = len(queue)
+        seen = set(queue)
         found = False
-        for rel in first:
+        for index, rel in enumerate(queue):  # the queue grows as scripts name others
             evidence = self._evidence(rel, unanalyzed)
             if evidence is None:
                 continue
-            found = True
+            found = found or index < first
             facts.append(evidence.facts)
             if evidence.note:
                 unanalyzed.append(evidence.note)
             for reference in evidence.references:
                 if reference not in seen:
                     seen.add(reference)
-                    second.append(reference)
-        for rel in second:
-            evidence = self._evidence(rel, unanalyzed)
-            if evidence is not None:
-                facts.append(evidence.facts)
+                    queue.append(reference)
         return facts, unanalyzed, found or bool(unanalyzed)
 
     def _evidence(self, rel: PurePosixPath, unanalyzed: list[str]) -> _ScriptEvidence | None:

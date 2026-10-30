@@ -282,7 +282,7 @@ def test_skill_config_cannot_control_evaluator_or_judge_routing(name: str) -> No
 
 @pytest.mark.parametrize(
     "name",
-    ["LLM_JUDGE_MODEL", "SKILL_EVAL_JUDGE_MODEL", "LLM_JUDGE_FALLBACK_MODELS"],
+    ["LLM_JUDGE_MODEL", "SKILL_EVAL_JUDGE_MODEL", "LLM_JUDGE_FALLBACK_MODELS", "SKILL_EVAL_JUDGE_CHARACTER_FACTS"],
 )
 @pytest.mark.parametrize("provider_name", ["openai", "openai-compatible", "anthropic", "bedrock", "nv_build"])
 @pytest.mark.parametrize(
@@ -1163,6 +1163,7 @@ def test_run_harbor_eval_stages_per_agent_credential_trees(
     monkeypatch.setenv("LLM_JUDGE_MODEL", "legacy-judge-model")
     monkeypatch.setenv("SKILL_EVAL_JUDGE_MODEL", "judge-model")
     monkeypatch.setenv("LLM_JUDGE_FALLBACK_MODELS", "fallback-one,fallback-two")
+    monkeypatch.setenv("SKILL_EVAL_JUDGE_CHARACTER_FACTS", "1")
 
     monkeypatch.setattr(runner, "resolve_llm_provider", lambda: provider)
     monkeypatch.setattr(
@@ -1271,9 +1272,11 @@ def test_run_harbor_eval_stages_per_agent_credential_trees(
         assert "LLM_JUDGE_MODEL" not in runtime_env
         assert "SKILL_EVAL_JUDGE_MODEL" not in runtime_env
         assert "LLM_JUDGE_FALLBACK_MODELS" not in runtime_env
+        assert "SKILL_EVAL_JUDGE_CHARACTER_FACTS" not in runtime_env
         assert "LLM_JUDGE_MODEL" not in verifier_env
         assert "SKILL_EVAL_JUDGE_MODEL" not in verifier_env
         assert verifier_env["LLM_JUDGE_FALLBACK_MODELS"] == "${LLM_JUDGE_FALLBACK_MODELS}"
+        assert verifier_env["SKILL_EVAL_JUDGE_CHARACTER_FACTS"] == "${SKILL_EVAL_JUDGE_CHARACTER_FACTS}"
     assert launched["opencode"][0].endswith("_harbor-tasks/opencode/with")
     assert launched["claude-code"][1].endswith("_harbor-tasks/claude-code/without")
     assert launched_task_selectors == {"opencode": ["case-001"], "claude-code": ["case-001"]}
@@ -1282,11 +1285,13 @@ def test_run_harbor_eval_stages_per_agent_credential_trees(
     assert launched["opencode"][2]["LLM_JUDGE_MODEL"] == "legacy-judge-model"
     assert launched["opencode"][2]["SKILL_EVAL_JUDGE_MODEL"] == "legacy-judge-model"
     assert launched["opencode"][2]["LLM_JUDGE_FALLBACK_MODELS"] == "fallback-one,fallback-two"
+    assert launched["opencode"][2]["SKILL_EVAL_JUDGE_CHARACTER_FACTS"] == "1"
     assert "ANTHROPIC_API_KEY" not in launched["opencode"][2]
     assert "OPENAI_API_KEY" not in launched["opencode"][2]
     assert launched["claude-code"][2]["NVIDIA_API_KEY"] == "provider-key"
     assert launched["opencode"][3] == {
         "LLM_JUDGE_FALLBACK_MODELS": "${LLM_JUDGE_FALLBACK_MODELS}",
+        "SKILL_EVAL_JUDGE_CHARACTER_FACTS": "${SKILL_EVAL_JUDGE_CHARACTER_FACTS}",
         "LLM_JUDGE_MODEL": "${LLM_JUDGE_MODEL}",
         "SKILL_EVAL_JUDGE_MODEL": "${LLM_JUDGE_MODEL}",
     }
@@ -1298,6 +1303,7 @@ def test_run_harbor_eval_stages_per_agent_credential_trees(
         "source": "LLM_JUDGE_MODEL",
         "override_applied": True,
         "reasoning_effort": None,
+        "character_facts": "1",
         "catalog_verification": "degraded",
     }
 
@@ -1305,7 +1311,7 @@ def test_run_harbor_eval_stages_per_agent_credential_trees(
 @pytest.mark.parametrize("grading_mode", ["default", "default_plus_custom"])
 @pytest.mark.parametrize(
     "judge_alias",
-    ["LLM_JUDGE_MODEL", "SKILL_EVAL_JUDGE_MODEL", "LLM_JUDGE_FALLBACK_MODELS"],
+    ["LLM_JUDGE_MODEL", "SKILL_EVAL_JUDGE_MODEL", "LLM_JUDGE_FALLBACK_MODELS", "SKILL_EVAL_JUDGE_CHARACTER_FACTS"],
 )
 @pytest.mark.parametrize("judge_scope", ["task", "step"])
 def test_native_runtime_rejects_task_owned_judge_selection_through_real_staging(

@@ -147,6 +147,9 @@ _SKILLSPECTOR_SEVERITY_POINTS = {"CRITICAL": 50, "HIGH": 25, "MEDIUM": 10, "LOW"
 _SKILLSPECTOR_EXECUTABLE_MULTIPLIER = 1.3
 _SKILLSPECTOR_RISK_SCORE_FLOORS_BY_RULE_ID = {"SC8": 51}
 _SKILLSPECTOR_DIMINISHING_WEIGHTS = (1.0, 0.5, 0.25)
+# Ledger exceptions quoted in an incomplete-analysis error, and the length of each quoted field.
+_SKILLSPECTOR_INCOMPLETE_EXAMPLES = 3
+_SKILLSPECTOR_REPORT_TEXT_MAX_CHARS = 200
 _SKILLSPECTOR_SCAN_EXCLUDED_DIRS = SCAN_EXCLUDED_DIRS - {"__pycache__"}
 _SKILLSPECTOR_PROVIDER_MAP = {
     "anthropic": "anthropic",
@@ -548,6 +551,106 @@ def _skillspector_scoring_match_identity(
         return "row", index
     finding = str(issue.get("finding") or "").strip()[:100]
     return ("finding", finding) if finding else ("row", index)
+
+
+def _skillspector_report_text(value: object) -> str | None:
+    """Return untrusted report text as one bounded line, or ``None`` when it is not text."""
+    if not isinstance(value, str):
+        return None
+    # Control, format and separator characters (newlines included) become spaces.
+    text = "".join(
+        " " if unicodedata.category(character)[0] in {"C", "Z"} else character
+        for character in value[: _SKILLSPECTOR_REPORT_TEXT_MAX_CHARS + 1]
+    ).strip()
+    if len(text) > _SKILLSPECTOR_REPORT_TEXT_MAX_CHARS:
+        text = f"{text[: _SKILLSPECTOR_REPORT_TEXT_MAX_CHARS - 3]}..."
+    return text or None
+
+
+def _skillspector_ledger_exception_label(exception: Mapping[str, object]) -> str:
+    """Describe one ledger exception as ``path[:line] [phase; reason; analyzers=...]``."""
+    location = _skillspector_report_text(exception.get("path")) or "unknown"
+    start_line = exception.get("start_line")
+    if isinstance(start_line, int) and not isinstance(start_line, bool):
+        location = f"{location}:{start_line}"
+    context = [text for key in ("phase", "reason_code") if (text := _skillspector_report_text(exception.get(key)))]
+    analyzers = exception.get("analyzers")
+    if isinstance(analyzers, list) and (
+        analyzer_text := _skillspector_report_text(",".join(name for name in analyzers if isinstance(name, str)))
+    ):
+        context.append(f"analyzers={analyzer_text}")
+    return f"{location} [{'; '.join(context)}]" if context else location
+
+
+def _skillspector_incomplete_files_by_reason(ledger_exceptions: Iterable[Mapping[str, object]]) -> str:
+    """Count distinct files per ledger reason code, most common first."""
+    paths_by_reason: dict[str, set[str]] = {}
+    for exception in ledger_exceptions:
+        reason = _skillspector_report_text(exception.get("reason_code")) or "unknown"
+        path = exception.get("path")
+        paths_by_reason.setdefault(reason, set()).add(path if isinstance(path, str) else "")
+    counts = Counter({reason: len(paths) for reason, paths in paths_by_reason.items()})
+    return ", ".join(f"{reason} {count}" for reason, count in counts.most_common())
+
+
+def _skillspector_runtime_limit_hint(ledger_exceptions: Iterable[Mapping[str, object]]) -> str | None:
+    """Explain how to clear ``runtime_limit`` ledger exceptions, or ``None`` when there are none."""
+    scan_limited: set[str] = set()
+    budget_limited: set[str] = set()
+    for exception in ledger_exceptions:
+        if exception.get("reason_code") != "runtime_limit":
+            continue
+        path = exception.get("path")
+        analyzers = exception.get("analyzers")
+        # A sub-analysis that stops at its own time budget is reported as
+        # "<analyzer>_runtime_limit" (for example the SC8 bytecode walk). That
+        # budget is independent of the whole-scan deadline.
+        if (
+            isinstance(analyzers, list)
+            and analyzers
+            and all(isinstance(name, str) and name.endswith("_runtime_limit") for name in analyzers)
+        ):
+            budget_limited.add(path if isinstance(path, str) else "")
+        else:
+            scan_limited.add(path if isinstance(path, str) else "")
+    if scan_limited:
+        # These rows come from SkillSpector's whole-scan deadline or from a shorter
+        # stage budget such as bundle discovery, and the report does not say which,
+        # so the hint names no specific limit.
+        return (
+            f"SkillSpector reached a runtime limit before it finished {len(scan_limited)} file(s). "
+            "When many files are affected, the skill most likely bundles more content than SkillSpector can "
+            "inspect within its time budgets, so a skill that bundles a large corpus (vendored documents, "
+            "generated figures, renderer scripts) hits the same limit on every rerun; keep large reference "
+            "material outside the skill and point to it. When only a few files are affected on a busy machine, "
+            "a plain rerun may complete."
+        )
+    if budget_limited:
+        return (
+            f"A SkillSpector sub-analysis stopped at its own time budget on {len(budget_limited)} file(s). "
+            "That budget is separate from the whole-scan limit, so reducing bundled content does not change it. "
+            "Rerun the scan; if the limit repeats, update SkillSpector or report the completeness exceptions "
+            "to the SkillSpector project."
+        )
+    return None
+
+
+def _skillspector_incomplete_analysis_error(status: str, ledger_exceptions: list[dict]) -> str:
+    """Describe a partial SkillSpector analysis with example gaps and, for runtime limits, a remedy."""
+    message = f"skillspector JSON field 'analysis_completeness' reports incomplete analysis (status '{status}')"
+    if ledger_exceptions:
+        shown = ledger_exceptions[:_SKILLSPECTOR_INCOMPLETE_EXAMPLES]
+        message = f"{message}: {'; '.join(_skillspector_ledger_exception_label(row) for row in shown)}"
+        remaining = len(ledger_exceptions) - len(shown)
+        if remaining:
+            # A few examples cannot show why hundreds of files were cut short.
+            message = (
+                f"{message}; and {remaining} more "
+                f"(incomplete files by reason: {_skillspector_incomplete_files_by_reason(ledger_exceptions)})"
+            )
+    message = f"{message}; security scan did not complete"
+    hint = _skillspector_runtime_limit_hint(ledger_exceptions)
+    return f"{message}. {hint}" if hint else message
 
 
 class SecurityValidator(ValidatorBase):
@@ -1437,10 +1540,7 @@ class SecurityValidator(ValidatorBase):
                             "security scan did not complete"
                         )
                         return False
-                    result.add_error(
-                        "skillspector JSON field 'analysis_completeness' reports incomplete analysis "
-                        f"(status '{completeness_status}'); security scan did not complete"
-                    )
+                    result.add_error(_skillspector_incomplete_analysis_error(completeness_status, ledger_exceptions))
                     result.mark_scan_incomplete(stage_name)
 
         status = data.get("status")

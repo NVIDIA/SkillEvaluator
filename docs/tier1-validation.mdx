@@ -422,12 +422,16 @@ Tier 1 checks always gate the exit code inside `validate`. Tier 2 gates when it 
 
     For `runtime_limit`, the error also says what to do:
 
-    - **Whole-scan limit.** SkillSpector stops a scan at its own deadline, 600
-      seconds by default. A skill that bundles a large corpus, such as vendored
+    - **Scan time budget.** Rows that name regular analyzers, or no analyzer,
+      mean SkillSpector ran out of time for the bundle: at its own whole-scan
+      deadline (600 seconds by default) or at a shorter stage budget such as
+      bundle discovery. A skill that bundles a large corpus, such as vendored
       documents, generated figures or renderer scripts, hits the same limit on
       every rerun. Keep large reference material outside the skill and point to
       it. A plain rerun helps only when a few files are affected on a busy
-      machine.
+      machine. If SkillEvaluator's own SkillSpector timeout stops the run before
+      SkillSpector's deadline, the error is
+      `skillspector timed out after N seconds` instead, with no list of files.
     - **Sub-analysis budget.** Analyzers named `<analyzer>_runtime_limit`, such as
       `static_patterns_supply_chain_bytecode_runtime_limit`, stopped at a time
       budget of their own, so bundle size does not matter. Releases before

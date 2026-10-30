@@ -614,13 +614,16 @@ def _skillspector_runtime_limit_hint(ledger_exceptions: Iterable[Mapping[str, ob
         else:
             scan_limited.add(path if isinstance(path, str) else "")
     if scan_limited:
+        # These rows come from SkillSpector's whole-scan deadline or from a shorter
+        # stage budget such as bundle discovery, and the report does not say which,
+        # so the hint names no specific limit.
         return (
-            f"SkillSpector reached its runtime limit before it finished {len(scan_limited)} file(s). "
-            "When many files are affected, the scan most likely used up SkillSpector's whole-scan time budget "
-            "(600 seconds by default), so a skill that bundles a large corpus (vendored documents, generated "
-            "figures, renderer scripts) hits the same limit on every rerun; keep large reference material "
-            "outside the skill and point to it. When only a few files are affected on a busy machine, a plain "
-            "rerun may complete."
+            f"SkillSpector reached a runtime limit before it finished {len(scan_limited)} file(s). "
+            "When many files are affected, the skill most likely bundles more content than SkillSpector can "
+            "inspect within its time budgets, so a skill that bundles a large corpus (vendored documents, "
+            "generated figures, renderer scripts) hits the same limit on every rerun; keep large reference "
+            "material outside the skill and point to it. When only a few files are affected on a busy machine, "
+            "a plain rerun may complete."
         )
     if budget_limited:
         return (

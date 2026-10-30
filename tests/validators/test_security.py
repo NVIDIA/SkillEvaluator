@@ -261,7 +261,7 @@ def _skillspector_documentation_only_report() -> dict:
     return payload
 
 
-_WHOLE_SCAN_ANALYZERS = ("static_patterns_prompt_injection", "static_patterns_tool_misuse")
+_REGULAR_ANALYZERS = ("static_patterns_prompt_injection", "static_patterns_tool_misuse")
 _SC8_BUDGET_ANALYZER = "static_patterns_supply_chain_bytecode_runtime_limit"
 
 
@@ -269,7 +269,7 @@ def _ledger_exception(
     path: str,
     reason_code: str = "runtime_limit",
     *,
-    analyzers: tuple[str, ...] = _WHOLE_SCAN_ANALYZERS,
+    analyzers: tuple[str, ...] = _REGULAR_ANALYZERS,
     phase: str = "static",
 ) -> dict:
     """Return one non-fatal SkillSpector ledger exception."""
@@ -293,6 +293,39 @@ def _skillspector_partial_report(ledger_exceptions: list[dict]) -> dict:
     payload["analysis_completeness"].update(
         {"is_complete": False, "status": "partial", "ledger_exceptions": ledger_exceptions}
     )
+    return payload
+
+
+def _skillspector_partially_inspected_report(ledger_exceptions: list[dict], *, inspected: tuple[str, ...]) -> dict:
+    """Return a partial report whose inventory, counters and analyzer accounting match *ledger_exceptions*.
+
+    Files in *inspected* are fully inspected. Every ledger path is a partially inspected file, and every
+    analyzer a ledger row names is degraded on exactly those files.
+    """
+    payload = _skillspector_partial_report(ledger_exceptions)
+    partial_paths = list(dict.fromkeys(row["path"] for row in ledger_exceptions))
+    payload["components"] = [{"path": path, "executable": False} for path in (*inspected, *partial_paths)]
+    _set_universal_analyzer_work(payload)
+    completeness = payload["analysis_completeness"]
+    total = len(payload["components"])
+    completeness.update(
+        {
+            "total_components": total,
+            "scanned_components": len(inspected),
+            "fully_inspected_files": len(inspected),
+            "partially_inspected_files": len(partial_paths),
+            "coverage_percent": round(len(inspected) / total * 100, 1),
+        }
+    )
+    paths_by_analyzer: dict[str, set[str]] = {}
+    for row in ledger_exceptions:
+        for analyzer_id in row["analyzers"]:
+            paths_by_analyzer.setdefault(analyzer_id, set()).add(row["path"])
+    assert set(paths_by_analyzer) <= _SKILLSPECTOR_UNIVERSAL_ANALYZERS
+    for status in completeness["analyzer_statuses"]:
+        if partial := len(paths_by_analyzer.get(status["analyzer_id"], ())):
+            status.update({"status": "degraded", "completed": total - partial, "partial": partial})
+            completeness["limitations"].append(f"Analyzer {status['analyzer_id']} status: degraded.")
     return payload
 
 
@@ -1788,12 +1821,13 @@ print(json.dumps([finding.metadata["matched_value"] for finding in result.findin
         # A second analyzer group on the same file must not count the file twice.
         ledger.append(_ledger_exception("references/sect-0.html", analyzers=("static_yara",)))
         ledger.append(_ledger_exception("references/base.css", "obfuscated_instruction_text"))
+        payload = _skillspector_partially_inspected_report(ledger, inspected=("SKILL.md",))
 
-        result = _validate_skillspector_payload(mock_tools, sample_skill_dir, _skillspector_partial_report(ledger))
+        result = _validate_skillspector_payload(mock_tools, sample_skill_dir, payload)
 
         assert result.status == "incomplete"
         assert len(result.errors) == 1
-        analyzers = ",".join(_WHOLE_SCAN_ANALYZERS)
+        analyzers = ",".join(_REGULAR_ANALYZERS)
         assert result.errors[0].startswith(
             "skillspector JSON field 'analysis_completeness' reports incomplete analysis (status 'partial'): "
             f"references/sect-0.html [static; runtime_limit; analyzers={analyzers}]; "
@@ -1801,8 +1835,8 @@ print(json.dumps([finding.metadata["matched_value"] for finding in result.findin
             f"references/sect-2.html [static; runtime_limit; analyzers={analyzers}]; "
             "and 5 more (incomplete files by reason: runtime_limit 6, obfuscated_instruction_text 1); "
             "security scan did not complete. "
-            "SkillSpector reached its runtime limit before it finished 6 file(s). When many files are affected, "
-            "the scan most likely used up SkillSpector's whole-scan time budget (600 seconds by default)"
+            "SkillSpector reached a runtime limit before it finished 6 file(s). When many files are affected, "
+            "the skill most likely bundles more content than SkillSpector can inspect within its time budgets"
         )
         assert "keep large reference material outside the skill" in result.errors[0]
         assert "a plain rerun may complete" in result.errors[0]
@@ -1835,16 +1869,21 @@ print(json.dumps([finding.metadata["matched_value"] for finding in result.findin
             "limit repeats, update SkillSpector or report the completeness exceptions to the SkillSpector project."
         ]
 
-    def test_skillspector_runtime_limit_hint_counts_only_whole_scan_files(self) -> None:
+    def test_skillspector_runtime_limit_hint_counts_only_scan_budget_files(self) -> None:
         ledger = [
             _ledger_exception("SKILL.md", analyzers=(_SC8_BUDGET_ANALYZER,)),
             *(_ledger_exception(f"references/sect-{index}.html") for index in range(3)),
+            # A stage budget such as bundle discovery names no analyzer; bundle size still matters.
+            _ledger_exception("references", analyzers=(), phase="discovery"),
         ]
 
         error = _skillspector_incomplete_analysis_error("partial", ledger)
 
-        assert "SkillSpector reached its runtime limit before it finished 3 file(s)." in error
+        assert "SkillSpector reached a runtime limit before it finished 4 file(s)." in error
+        assert "keep large reference material outside the skill" in error
         assert "sub-analysis" not in error
+        # The report does not say which budget ran out, so the hint names no specific deadline.
+        assert "seconds" not in error
 
     def test_skillspector_incomplete_analysis_error_without_runtime_limit_has_no_hint(self) -> None:
         ledger = [
@@ -1856,7 +1895,7 @@ print(json.dumps([finding.metadata["matched_value"] for finding in result.findin
 
         assert _skillspector_incomplete_analysis_error("partial", ledger) == (
             "skillspector JSON field 'analysis_completeness' reports incomplete analysis (status 'partial'): "
-            f"scripts/render.py:12 [static; static_parse_limit; analyzers={','.join(_WHOLE_SCAN_ANALYZERS)}]; "
+            f"scripts/render.py:12 [static; static_parse_limit; analyzers={','.join(_REGULAR_ANALYZERS)}]; "
             "references/guide.md [reference_resolution; reference_unresolved]; security scan did not complete"
         )
         # Without ledger exceptions (limitations or counters only) the error is unchanged.

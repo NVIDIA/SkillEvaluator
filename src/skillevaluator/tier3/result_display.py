@@ -776,8 +776,41 @@ def _render_feedback_and_suggestions(
     )
 
 
-def render_evaluation_result(result: Mapping[str, Any], *, console: Console) -> None:
-    """Render persisted engine truth, aggregating only canonical score components."""
+def _case_first_summary(result: Mapping[str, Any], *, console: Console, skill_path: Path | None) -> bool:
+    from skillevaluator.tier3.case_summary import (
+        load_case_findings,
+        render_case_summary,
+        save_case_findings,
+        what_to_fix,
+    )
+
+    run_dir = result.get("run_dir") or result.get("output_dir")
+    fixes = None
+    if run_dir and Path(str(run_dir)).is_dir():
+        try:
+            # The HTML report render writes this first; reuse it so CLI and report show the same fixes.
+            fixes = load_case_findings(Path(str(run_dir)))
+            if not isinstance(fixes, list):
+                fixes = what_to_fix(result, run_dir=Path(str(run_dir)), skill_path=skill_path)
+                save_case_findings(Path(str(run_dir)), fixes)
+        except Exception:  # advisory panel: never break the run summary
+            logging.getLogger(__name__).debug("What-to-fix skipped", exc_info=True)
+    return render_case_summary(result, console=console, fixes=fixes)
+
+
+def render_evaluation_result(
+    result: Mapping[str, Any],
+    *,
+    console: Console,
+    verbose: bool = True,
+    skill_path: Path | None = None,
+) -> None:
+    """Render persisted engine truth, aggregating only canonical score components.
+
+    The case-first summary always leads; ``verbose`` adds the per-evaluator and
+    per-dimension tables and the metric findings report, which are also shown
+    when the result has no per-case rows.
+    """
     secret_values = secret_values_from_environment(os.environ)
 
     def safe(value: object) -> str:
@@ -800,7 +833,11 @@ def render_evaluation_result(result: Mapping[str, Any], *, console: Console) -> 
     )
     if incomplete:
         rendered_feedback_messages = _render_incomplete_execution(result=result, console=console, safe=safe)
+    has_cases = False
     if isinstance(agents, Mapping) and agents and not incomplete:
+        has_cases = _case_first_summary(result, console=console, skill_path=skill_path)
+    detailed = verbose or not has_cases
+    if isinstance(agents, Mapping) and agents and not incomplete and detailed:
         metrics = _display_metrics(result, agents)
         for agent, raw in agents.items():
             data = raw if isinstance(raw, Mapping) else {}
@@ -852,32 +889,39 @@ def render_evaluation_result(result: Mapping[str, Any], *, console: Console) -> 
     if not incomplete and (rendered_errors or warnings):
         status_style = "bold red" if rendered_errors else "bold yellow"
         console.print(Text(f"Tier 3 Evaluation: {display_status.upper()}", style=status_style))
-        findings = Text()
-        if rendered_errors:
-            findings.append("Failures\n", style="bold red")
-            for error in dict.fromkeys(rendered_errors):
-                findings.append(f"  - {safe(error)}\n")
-        if warnings:
-            findings.append("Warnings\n", style="bold yellow")
+        if not detailed:
             for warning in warnings:
-                findings.append(f"  - {safe(warning)}\n")
-        console.print(
-            Panel(
-                findings,
-                title="[bold]Findings[/bold]",
-                border_style="red" if rendered_errors else "yellow",
-                padding=(1, 1),
+                console.print(Text(f"  warning: {safe(warning)}", style="yellow"))
+            if rendered_errors:
+                console.print(f"  {len(dict.fromkeys(rendered_errors))} failure detail(s): --verbose or report.html")
+        else:
+            findings = Text()
+            if rendered_errors:
+                findings.append("Failures\n", style="bold red")
+                for error in dict.fromkeys(rendered_errors):
+                    findings.append(f"  - {safe(error)}\n")
+            if warnings:
+                findings.append("Warnings\n", style="bold yellow")
+                for warning in warnings:
+                    findings.append(f"  - {safe(warning)}\n")
+            console.print(
+                Panel(
+                    findings,
+                    title="[bold]Findings[/bold]",
+                    border_style="red" if rendered_errors else "yellow",
+                    padding=(1, 1),
+                )
             )
-        )
 
     # Keep payload-only insights while filtering exact items already printed by
     # the detailed per-evaluator report.
-    _render_feedback_and_suggestions(
-        console=console,
-        result=result,
-        safe=safe,
-        excluded_messages=rendered_feedback_messages,
-    )
+    if detailed or incomplete:
+        _render_feedback_and_suggestions(
+            console=console,
+            result=result,
+            safe=safe,
+            excluded_messages=rendered_feedback_messages,
+        )
 
     artifact_rows: list[tuple[str, str]] = []
     report_path = result.get("report_path")

@@ -218,8 +218,8 @@ class TestCLIReporter:
     @pytest.mark.parametrize(
         ("baseline", "lift", "expected_baseline", "expected_lift"),
         [
-            (0.6, None, "0.60", "n/a"),
-            (None, None, "n/a", "n/a"),
+            (0.6, None, "0.60", "NO SCORE"),
+            (None, None, "NO SCORE", "NO SCORE"),
             (0.6, 0.2, "0.60", "+0.20"),
             (0.9, -0.1, "0.90", "-0.10"),
         ],
@@ -247,9 +247,9 @@ class TestCLIReporter:
             expected_lift,
         ]
 
-    @pytest.mark.parametrize(("with_skill", "expected_with_skill"), [(None, "n/a"), (0.0, "0.00"), (0.95, "0.95")])
-    @pytest.mark.parametrize(("baseline", "expected_baseline"), [(None, "n/a"), (0.0, "0.00"), (0.95, "0.95")])
-    @pytest.mark.parametrize(("lift", "expected_lift"), [(None, "n/a"), (0.0, "+0.00"), (0.95, "+0.95")])
+    @pytest.mark.parametrize(("with_skill", "expected_with_skill"), [(None, "NO SCORE"), (0.0, "0.00"), (0.95, "0.95")])
+    @pytest.mark.parametrize(("baseline", "expected_baseline"), [(None, "NO SCORE"), (0.0, "0.00"), (0.95, "0.95")])
+    @pytest.mark.parametrize(("lift", "expected_lift"), [(None, "NO SCORE"), (0.0, "+0.00"), (0.95, "+0.95")])
     def test_render_agent_eval_score_availability(
         self, with_skill, expected_with_skill, baseline, expected_baseline, lift, expected_lift
     ) -> None:
@@ -272,10 +272,10 @@ class TestCLIReporter:
     @pytest.mark.parametrize(
         ("scores", "expected_cells"),
         [
-            ({}, ["n/a", "n/a", "n/a"]),
-            ({"with_skill": 0.0}, ["0.00", "n/a", "n/a"]),
-            ({"baseline": 0.0}, ["n/a", "0.00", "n/a"]),
-            ({"lift": 0.0}, ["n/a", "n/a", "+0.00"]),
+            ({}, ["NO SCORE", "NO SCORE", "NO SCORE"]),
+            ({"with_skill": 0.0}, ["0.00", "NO SCORE", "NO SCORE"]),
+            ({"baseline": 0.0}, ["NO SCORE", "0.00", "NO SCORE"]),
+            ({"lift": 0.0}, ["NO SCORE", "NO SCORE", "+0.00"]),
         ],
     )
     def test_render_agent_eval_missing_scores_are_unavailable(self, scores, expected_cells) -> None:
@@ -1282,7 +1282,7 @@ class TestGatingSplit:
 @pytest.mark.parametrize(
     ("baseline_scores", "expected_baseline", "expected_lift", "markdown_cells"),
     [
-        ({}, None, None, "0.95 | N/A | N/A"),
+        ({}, None, None, "0.95 | NO SCORE | NO SCORE"),
         ({"accuracy": 0.0}, 0.0, 0.95, "0.95 | 0.00 | +0.95"),
         ({"accuracy": 0.95}, 0.95, 0.0, "0.95 | 0.95 | +0.00"),
     ],
@@ -1304,7 +1304,13 @@ def test_emit_reports_preserves_unavailable_evaluator_lift(
     original_agents = copy.deepcopy(agents)
     payload = build_agent_eval_payload("demo-skill", agents, use_llm_judge=False)
     assert payload is not None
-    expected_evaluator = {"with_skill": 0.95, "baseline": expected_baseline, "lift": expected_lift}
+    expected_evaluator = {
+        "with_skill": 0.95,
+        "baseline": expected_baseline,
+        "lift": expected_lift,
+        "with_skill_status": "scored",
+        "baseline_status": "missing" if expected_baseline is None else "scored",
+    }
     assert payload["evaluators"]["accuracy"] == expected_evaluator
     assert payload["agents"]["codex"]["evaluators"]["accuracy"] == expected_evaluator
     assert payload["evaluator_cards"][0]["lift"] == expected_lift
@@ -1626,7 +1632,7 @@ class TestMarkdownReporter:
         output = MarkdownReporter(include_timestamp=False).render_all([result])
 
         assert "### Evaluator Scores" in output
-        assert "| Accuracy | 0.90 | N/A | N/A |" in output
+        assert "| Accuracy | 0.90 | NO SCORE | NO SCORE |" in output
 
     def test_render_tier3_normalized_evidence_uses_distinct_evidence_ids(self) -> None:
         result = _tier3_harbor_result()

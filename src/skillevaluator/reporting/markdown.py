@@ -28,7 +28,6 @@ from skillevaluator.reporting.base import (
     get_skip_reason,
     is_advisory_agent_eval_skip,
     is_cleanly_skipped,
-    passes_required_gate,
     select_agent_eval_payload,
 )
 from skillevaluator.reporting.harbor_viewer import (
@@ -36,6 +35,7 @@ from skillevaluator.reporting.harbor_viewer import (
     normalize_harbor_viewer_for_display,
     safe_url,
 )
+from skillevaluator.reporting.run_status import Status, resolve_run_status, result_status
 
 if TYPE_CHECKING:
     from skillevaluator.models import Finding, ValidationResult
@@ -208,8 +208,9 @@ class MarkdownReporter(ReporterBase):
         lines.append("")
 
         # Overall status
-        all_passed = all(passes_required_gate(r) for r in results)
-        has_incomplete = any(r.is_incomplete for r in results)
+        run_status = resolve_run_status(results)
+        all_passed = run_status.headline == Status.PASSED
+        has_incomplete = run_status.headline == Status.INCOMPLETE
         skip_count = sum(1 for r in results if is_cleanly_skipped(r))
         advisory_skip_count = sum(1 for r in results if is_advisory_agent_eval_skip(r))
         executed_count = len(results) - skip_count
@@ -266,7 +267,7 @@ class MarkdownReporter(ReporterBase):
         lines.append(f"| Validators Run | {executed_count} |")
         lines.append(f"| ✅ Passed | {passed_count} |")
         lines.append(
-            f"| ❌ Failed | {sum(1 for r in results if r.status == 'failed' and not is_advisory_agent_eval_skip(r))} |"
+            f"| ❌ Failed | {sum(1 for r in results if result_status(r) == Status.FAILED and not is_advisory_agent_eval_skip(r))} |"
         )
         lines.append(f"| ⚠️ Incomplete | {sum(1 for r in results if r.is_incomplete)} |")
         if skip_count:
@@ -348,13 +349,33 @@ class MarkdownReporter(ReporterBase):
                 for name, scores in evaluators.items():
                     if not isinstance(name, str) or not isinstance(scores, dict):
                         continue
-                    ws = scores.get("with_skill", 0.0)
-                    bl = scores.get("baseline", 0.0)
-                    lift = scores.get("lift", 0.0)
+                    ws = scores.get("with_skill")
+                    bl = scores.get("baseline")
+                    lift = scores.get("lift")
+                    ws_text = (
+                        "N/A"
+                        if scores.get("with_skill_status") == "not_applicable" and ws is None
+                        else "NO SCORE"
+                        if ws is None
+                        else _format_report_number(ws)
+                    )
+                    bl_text = (
+                        "N/A"
+                        if scores.get("baseline_status") == "not_applicable" and bl is None
+                        else "NO SCORE"
+                        if bl is None
+                        else _format_report_number(bl)
+                    )
+                    lift_text = (
+                        _format_report_number(lift, signed=True)
+                        if lift is not None
+                        else "N/A"
+                        if "not_applicable" in (scores.get("with_skill_status"), scores.get("baseline_status"))
+                        else "NO SCORE"
+                    )
                     lines.append(
                         f"| {_markdown_untrusted_table_cell(name.replace('_', ' ').title())} "
-                        f"| {_format_report_number(ws)} | "
-                        f"{_format_report_number(bl)} | {_format_report_number(lift, signed=True)} |"
+                        f"| {ws_text} | {bl_text} | {lift_text} |"
                     )
                 lines.append("")
 
@@ -437,7 +458,7 @@ class MarkdownReporter(ReporterBase):
         qs = result.metadata.get("quality_scores")
 
         clean_skip = is_cleanly_skipped(result)
-        if result.is_incomplete:
+        if result_status(result) == Status.INCOMPLETE:
             status_emoji = "⚠️ INCOMPLETE"
             lines.append(f"### {status_emoji} {result.validator_name}")
         elif clean_skip:

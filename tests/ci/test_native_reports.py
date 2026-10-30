@@ -254,10 +254,10 @@ def test_failed_and_incomplete_counts_agree_across_all_surfaces(tmp_path):
     summary, _ = _write_fixture(tmp_path, failed=True)
     shutil.copytree(tmp_path / "skill-001", tmp_path / "skill-002")
     payload_path = tmp_path / "skill-002/skillevaluator-tier1.json"
-    payload = json.loads(payload_path.read_text())
-    payload["results"][0]["incomplete_scans"] = ["scanner"]
-    payload["results"][0]["status"] = "incomplete"
-    payload.update(overall_status="incomplete", incomplete_scans=["scanner"])
+    incomplete = ValidationResult(validator_name="Scanner", validator_description="Scanner execution")
+    incomplete.add_error("Scanner execution did not complete")
+    incomplete.mark_scan_incomplete("scanner")
+    payload = json.loads(JSONReporter(include_timestamp=False).render_all([incomplete]))
     payload_path.write_text(json.dumps(payload))
     second = {
         **summary["skills"][0],
@@ -265,9 +265,15 @@ def test_failed_and_incomplete_counts_agree_across_all_surfaces(tmp_path):
         "path": "skills/incomplete",
         "overall_status": "incomplete",
         "incomplete_scans": ["scanner"],
+        "total_errors": payload["total_errors"],
+        "total_warnings": payload["total_warnings"],
+        "severity_counts": payload["severity_counts"],
     }
     summary = _summary([summary["skills"][0], second])
     render_native_reports(tmp_path, summary, {})
+    incomplete_report = (tmp_path / "skill-002/skillevaluator-tier1.html").read_text()
+    assert "Scanner execution did not complete" in incomplete_report
+    assert "Report unavailable" not in incomplete_report
     for filename in ("summary.md", "details.md", "pr-comment.md"):
         assert "2 skills · 0 passed · 1 failed · 1 incomplete" in (tmp_path / filename).read_text()
     page = (tmp_path / "index.html").read_text()

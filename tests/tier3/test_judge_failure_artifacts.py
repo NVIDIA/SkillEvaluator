@@ -158,7 +158,13 @@ def test_character_facts_keep_numeric_dataset_answers_scoreable(tmp_path, monkey
     assert "evaluation_errors" not in rich
     assert numeric == original_reward
     assert numeric["accuracy"] == numeric["goal_accuracy"] == 0.0
-    assert overall_score(numeric) is not None
+    assert overall_score(rich) == numeric["overall"]
+    # Numeric transport omits N/A metrics; only the rich sidecar establishes
+    # their applicability. A numeric reward alone must remain unscoreable.
+    assert overall_score(numeric) is None
+    collected = dict(numeric)
+    collector._merge_reward_sidecars(collected, verifier.VERIFIER_DIR)
+    assert overall_score(collected) == numeric["overall"]
 
 
 def test_verifier_main_fails_closed_after_collecting_every_required_judge(
@@ -699,10 +705,10 @@ def test_verifier_main_keeps_accuracy_fail_closed_after_retry_exhaustion(
     assert "accuracy" not in numeric
 
 
-def test_verifier_main_keeps_documented_neutral_judge_skips_scoreable(
+def test_verifier_main_keeps_absent_references_scoreless_in_numeric_rewards(
     tmp_path: Path,
 ) -> None:
-    """Keep documented neutral judge skips scoreable with default passing scores."""
+    """Keep N/A facts in the sidecar and require them when interpreting numeric rewards."""
     verifier = _load_verifier(tmp_path)
     entry = json.loads(verifier.ENTRY_PATH.read_text(encoding="utf-8"))
     entry["ground_truth"] = ""
@@ -714,12 +720,12 @@ def test_verifier_main_keeps_documented_neutral_judge_skips_scoreable(
     rich = json.loads(verifier.SKILL_EVALUATOR_REWARD_JSON.read_text(encoding="utf-8"))
     numeric = json.loads(verifier.REWARD_JSON.read_text(encoding="utf-8"))
     assert "evaluation_status" not in rich
-    assert {metric: numeric[metric] for metric in ("accuracy", "goal_accuracy", "behavior_check")} == {
-        "accuracy": 1.0,
-        "goal_accuracy": 1.0,
-        "behavior_check": 1.0,
-    }
-    assert overall_score(numeric) == 1.0
+    for metric in ("accuracy", "goal_accuracy", "behavior_check"):
+        assert metric not in numeric
+        assert rich[metric] is None
+        assert rich["details"][metric]["status"] == "not_applicable"
+    assert overall_score(rich) == 1.0
+    assert overall_score(numeric) is None
 
 
 @pytest.mark.parametrize("failure_kind", ["missing-score", "exception"])

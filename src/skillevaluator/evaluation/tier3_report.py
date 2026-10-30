@@ -942,6 +942,8 @@ def build_agent_eval_payload(
         "dimensions": best_dimensions,
         "dimension_hints": dict(DIMENSION_HINTS),
         "evaluators": best.get("evaluators", {}),
+        "not_applicable_evaluators": best.get("not_applicable_evaluators", []),
+        "not_applicable_dimensions": best.get("not_applicable_dimensions", []),
         "evaluator_cards": best.get("evaluator_cards", []),
         "cases": best.get("cases", []),
         "trials": canonical_trials,
@@ -1493,7 +1495,8 @@ def _policy_metrics_from_agents(
         metric
         for metric in (metrics or DEFAULT_METRICS)
         if any(
-            _condition_quality_available(info, "with_skill") and _finite_float(scores.get(metric)) is not None
+            _condition_quality_available(info, "with_skill")
+            and (_finite_float(scores.get(metric)) is not None or metric in _arm_not_applicable(info, "with_skill"))
             for info in agents.values()
             for scores in (info.get("with_skill"),)
             if isinstance(scores, dict)
@@ -1575,6 +1578,68 @@ def _condition_quality_available(info: dict[str, Any], condition: str) -> bool:
     return status not in {"failed", "unknown", "skipped"}
 
 
+def _arm_not_applicable(info: dict[str, Any], condition: str) -> list[str]:
+    """Return only all-N/A facts validated against complete scored reward groups."""
+    from skillevaluator.tier3.harbor.metrics import not_applicable_list, not_applicable_metrics, score_value
+
+    rewards_key = "rewards" if condition == "with_skill" else "rewards_baseline"
+    scores = info.get(condition) or {}
+    if info.get(f"not_applicable_validated_{condition}") is True:
+        return [
+            metric
+            for metric in not_applicable_list(info.get(f"not_applicable_{condition}"))
+            if score_value(scores.get(metric)) is None
+        ]
+    if info.get(f"{rewards_key}_complete") is True:
+        return [
+            metric
+            for metric in not_applicable_metrics(info.get(rewards_key) or [])
+            if score_value(scores.get(metric)) is None
+        ]
+    return []
+
+
+def _not_applicable_evaluators(
+    metrics: list[str],
+    with_scores: dict[str, Any],
+    not_applicable: list[str],
+) -> list[dict[str, str]]:
+    """Evaluators with no with-skill score because no eval case gave them a reference."""
+    from skillevaluator.tier3.harbor.metrics import METRIC_DISPLAY, NOT_APPLICABLE_REASONS
+
+    return [
+        {
+            "id": metric,
+            "label": METRIC_DISPLAY.get(metric, metric.replace("_", " ").title()),
+            "reason": NOT_APPLICABLE_REASONS.get(metric, "Not applicable to these eval cases"),
+        }
+        for metric in metrics
+        if metric in not_applicable and _finite_float(with_scores.get(metric)) is None
+    ]
+
+
+def _not_applicable_dimensions(
+    dimensions: list[dict[str, Any]],
+    not_applicable: list[str],
+) -> list[dict[str, str]]:
+    """Dimensions left unscored because every source evaluator was not applicable."""
+    from skillevaluator.tier3.harbor.metrics import METRIC_DISPLAY, dimension_is_not_applicable
+
+    scored = {dimension.get("id") for dimension in dimensions}
+    out: list[dict[str, str]] = []
+    for dim_id in _DIMENSION_IDS:
+        if dim_id in scored or not dimension_is_not_applicable(dim_id, not_applicable):
+            continue
+        labels = ", ".join(METRIC_DISPLAY.get(metric, metric) for metric in DIMENSION_MAPPING[dim_id]["evaluators"])
+        out.append(
+            {
+                "id": dim_id,
+                "reason": f"Not applicable: {labels} had nothing to judge against in any eval case",
+            }
+        )
+    return out
+
+
 def _judge_aware_lift(
     info: dict[str, Any],
     with_scores: dict[str, Any],
@@ -1592,6 +1657,28 @@ def _judge_aware_lift(
 
     recorded = info.get("lift")
     recorded = recorded if isinstance(recorded, dict) else {}
+    from skillevaluator.tier3.harbor.metrics import not_applicable_list
+
+    basis = recorded.get("basis")
+    aggregate_only = all(
+        key not in info for key in ("rewards", "rewards_baseline", "rewards_complete", "rewards_baseline_complete")
+    )
+    unchanged_basis = (
+        isinstance(basis, dict)
+        and type(basis.get("excluded_case_entries")) is int
+        and basis["excluded_case_entries"] == 0
+        and basis.get("excluded_cases") == []
+        and basis.get("excluded_metrics") == []
+        and basis.get("excluded_cases_truncated") is False
+    )
+    # Live collector results can contain only aggregate metric maps. With no
+    # exclusions their comparison is recomputed from those maps below. Saved
+    # runs always carry explicit reward-completeness fields, so missing saved
+    # evidence never takes this aggregate-only path.
+    paired_contract = (isinstance(basis, dict) and not (aggregate_only and unchanged_basis)) or any(
+        not_applicable_list(info.get(f"_not_applicable_hint_{arm}")) or _arm_not_applicable(info, arm)
+        for arm in ("with_skill", "without_skill")
+    )
     recorded_mixed = recorded.get("judge_mixed_cases")
     mixed = (
         {
@@ -1603,13 +1690,17 @@ def _judge_aware_lift(
         else {}
     )
     recorded_counts = mixed.copy()
-    if not mixed and not any(
-        _reward_judge_models(row, metric)
-        for rows in (info.get("rewards"), info.get("rewards_baseline"))
-        if isinstance(rows, list)
-        for row in rows
-        if isinstance(row, dict)
-        for metric in _LLM_JUDGE_METRICS
+    if (
+        not paired_contract
+        and not mixed
+        and not any(
+            _reward_judge_models(row, metric)
+            for rows in (info.get("rewards"), info.get("rewards_baseline"))
+            if isinstance(rows, list)
+            for row in rows
+            if isinstance(row, dict)
+            for metric in _LLM_JUDGE_METRICS
+        )
     ):
         return None
     conditions: list[list[dict[str, Any]]] = []
@@ -1638,7 +1729,40 @@ def _judge_aware_lift(
         {metric: value for metric, raw in scores.items() if (value := _unit_interval_score(raw)) is not None}
         for scores in (with_scores, without_scores)
     ]
-    rebuilt = _compute_lift(*clean_scores, *conditions, score_policy=score_policy)
+    if paired_contract and not complete:
+        return {"comparison_unavailable": True}
+    rebuilt = _compute_lift(
+        *clean_scores,
+        *conditions,
+        score_policy=score_policy,
+        with_not_applicable=_arm_not_applicable(info, "with_skill"),
+        without_not_applicable=_arm_not_applicable(info, "without_skill"),
+    )
+    if paired_contract and complete:
+        unsupported = {
+            metric for metric, count in mixed.items() if rebuilt.get("judge_mixed_cases", {}).get(metric, 0) < count
+        }
+        for metric in unsupported:
+            rebuilt.pop(metric, None)
+        if unsupported:
+            rebuilt.pop("overall", None)
+            rebuilt["judge_mixed_cases"] = {
+                **rebuilt.get("judge_mixed_cases", {}),
+                **{metric: mixed[metric] for metric in unsupported},
+            }
+        if any(
+            _condition_has_mixed_metric_contracts(info, flag=flag, rewards=rewards)
+            for flag, rewards in (
+                ("mixed_metric_contracts_with_skill", "rewards"),
+                ("mixed_metric_contracts_without_skill", "rewards_baseline"),
+            )
+        ):
+            rebuilt.pop("overall", None)
+            if not rebuilt.get("judge_mixed_cases"):
+                logical_overall = _mixed_logical_overall_lift(conditions)
+                if logical_overall is not None:
+                    rebuilt["overall"] = logical_overall
+        return rebuilt
     rebuilt_mixed = rebuilt.get("judge_mixed_cases", {})
     unsupported_exclusions = {metric for metric, count in mixed.items() if rebuilt_mixed.get(metric, 0) < count}
     for metric, count in rebuilt_mixed.items():
@@ -1663,6 +1787,34 @@ def _judge_aware_lift(
     if unsupported_exclusions:
         rebuilt.pop("overall", None)
     return rebuilt
+
+
+def _mixed_logical_overall_lift(conditions: list[list[dict[str, Any]]]) -> dict[str, float] | None:
+    """Compare complete mixed rewards only when both arms scored the same case contracts."""
+    from skillevaluator.tier3.harbor.collector import _average_overall, _entry_id
+    from skillevaluator.tier3.harbor.metrics import metric_is_not_applicable, metric_set_for_reward
+
+    cohorts = []
+    for rewards in conditions:
+        by_case: dict[str, set[tuple[Any, ...]]] = {}
+        for reward in rewards:
+            case = _entry_id(reward)
+            if case in {"", "unknown"}:
+                return None
+            _, metrics = metric_set_for_reward(reward)
+            contract = (
+                metrics,
+                tuple(metric for metric in metrics if metric_is_not_applicable(reward, metric)),
+                bool(reward.get("_logical_mixed_contracts")),
+            )
+            by_case.setdefault(case, set()).add(contract)
+        cohorts.append(by_case)
+    if not cohorts[0] or cohorts[0] != cohorts[1]:
+        return None
+    with_score, baseline_score = (_average_overall(rewards) for rewards in conditions)
+    if with_score is None or baseline_score is None:
+        return None
+    return {"with_skill": with_score, "without_skill": baseline_score, "delta": round(with_score - baseline_score, 4)}
 
 
 def _build_agent(
@@ -1694,6 +1846,11 @@ def _build_agent(
         not never_activated and set(with_metrics) == set(baseline_metrics) and len(condition_policies) == 1
     )
     lift_data = info.get("lift") if isinstance(info.get("lift"), dict) else {}
+    comparison_unavailable = (
+        info.get("comparison_unavailable") is True
+        or info.get("comparison_complete") is False
+        or lift_data.get("comparison_unavailable") is True
+    )
     with_quality_available = _condition_quality_available(info, "with_skill")
     baseline_quality_available = _condition_quality_available(info, "without_skill")
     if not with_quality_available:
@@ -1704,14 +1861,29 @@ def _build_agent(
     judge_lift = _judge_aware_lift(info, with_scores, without_scores, score_policy)
     if judge_lift is not None:
         lift_data = judge_lift
-    evaluators = _build_evaluators(with_metrics, with_scores, without_scores, lift_data)
+    with_not_applicable = _arm_not_applicable(info, "with_skill") if with_quality_available else []
+    baseline_not_applicable = _arm_not_applicable(info, "without_skill") if baseline_quality_available else []
+    evaluators = _build_evaluators(
+        with_metrics,
+        with_scores,
+        without_scores,
+        lift_data,
+        with_not_applicable=with_not_applicable,
+        baseline_not_applicable=baseline_not_applicable,
+    )
     dimensions = _build_dimensions(
         with_scores,
         without_scores,
         info.get("dimensions_with_skill") or {},
         info.get("dimensions_without_skill") or {},
         judge_lift,
+        with_metrics=with_metrics,
+        baseline_metrics=baseline_metrics,
+        with_not_applicable=with_not_applicable,
+        baseline_not_applicable=baseline_not_applicable,
     )
+    not_applicable_evaluators = _not_applicable_evaluators(with_metrics, with_scores, with_not_applicable)
+    not_applicable_dimensions = _not_applicable_dimensions(dimensions, with_not_applicable)
     if never_activated:
         for evaluator in evaluators.values():
             evaluator["lift"] = None
@@ -1727,19 +1899,41 @@ def _build_agent(
     overall_ws = None
     overall_bl = None
     if score_policy == LEGACY_SCORE_POLICY:
-        overall_ws = _complete_metric_mean(with_scores, with_metrics) if with_quality_available else None
-        overall_bl = _complete_metric_mean(without_scores, baseline_metrics) if baseline_quality_available else None
+        overall_ws = (
+            _complete_metric_mean(with_scores, [m for m in with_metrics if m not in with_not_applicable])
+            if with_quality_available
+            else None
+        )
+        overall_bl = (
+            _complete_metric_mean(without_scores, [m for m in baseline_metrics if m not in baseline_not_applicable])
+            if baseline_quality_available
+            else None
+        )
         if overall_ws is None and not with_scores and with_quality_available:
             overall_ws = _unit_interval_score(info.get("overall_with_skill"))
         if overall_bl is None and not without_scores and baseline_quality_available:
             overall_bl = _unit_interval_score(info.get("overall_without_skill"))
     elif score_policy == DEFAULT_SCORE_POLICY:
-        overall_ws = overall_score_from_metrics(with_scores, DEFAULT_METRICS) if with_quality_available else None
-        overall_bl = overall_score_from_metrics(without_scores, DEFAULT_METRICS) if baseline_quality_available else None
-    elif score_policy == PARTIAL_SCORE_POLICY:
-        overall_ws = overall_score_from_metrics(with_scores, tuple(with_metrics)) if with_quality_available else None
+        overall_ws = (
+            overall_score_from_metrics(with_scores, DEFAULT_METRICS, not_applicable=with_not_applicable)
+            if with_quality_available
+            else None
+        )
         overall_bl = (
-            overall_score_from_metrics(without_scores, tuple(baseline_metrics)) if baseline_quality_available else None
+            overall_score_from_metrics(without_scores, DEFAULT_METRICS, not_applicable=baseline_not_applicable)
+            if baseline_quality_available
+            else None
+        )
+    elif score_policy == PARTIAL_SCORE_POLICY:
+        overall_ws = (
+            overall_score_from_metrics(with_scores, tuple(with_metrics), not_applicable=with_not_applicable)
+            if with_quality_available
+            else None
+        )
+        overall_bl = (
+            overall_score_from_metrics(without_scores, tuple(baseline_metrics), not_applicable=baseline_not_applicable)
+            if baseline_quality_available
+            else None
         )
         if overall_ws is None:
             overall_ws = _mean(with_dimension_values)
@@ -1792,11 +1986,9 @@ def _build_agent(
                 4,
             )
     if judge_lift is not None:
-        overall_lift = (
-            _lift_value("overall", judge_lift)
-            if comparable_scores and not (with_mixed_contract or baseline_mixed_contract)
-            else None
-        )
+        overall_lift = _lift_value("overall", judge_lift) if comparable_scores else None
+    if comparison_unavailable:
+        overall_lift = None
 
     trials = _normalize_trials(info.get("rewards") or [], with_metrics)
     baseline_trials = _normalize_trials(info.get("rewards_baseline") or [], baseline_metrics)
@@ -1834,6 +2026,15 @@ def _build_agent(
         "scored_attempts": _as_nonnegative_int(info.get("scored_attempts")),
         "conditions": info.get("conditions", {}) if isinstance(info.get("conditions"), dict) else {},
         "evaluators": evaluators,
+        "not_applicable_evaluators": not_applicable_evaluators,
+        "not_applicable_dimensions": not_applicable_dimensions,
+        "not_applicable_metrics": {"with_skill": with_not_applicable, "without_skill": baseline_not_applicable},
+        "lift_basis": judge_lift.get("basis")
+        if judge_lift
+        and not never_activated
+        and info.get("rewards_complete") is True
+        and info.get("rewards_baseline_complete") is True
+        else None,
         "evaluator_cards": [],
         "dimensions": dimensions,
         "with_skill": overall_ws,
@@ -1888,23 +2089,28 @@ def _build_evaluators(
     with_scores: dict[str, Any],
     without_scores: dict[str, Any],
     lift_data: dict[str, Any],
+    *,
+    with_not_applicable: list[str] = (),
+    baseline_not_applicable: list[str] = (),
 ) -> dict[str, dict[str, Any]]:
-    evaluators: dict[str, dict[str, Any]] = {}
-    mixed = lift_data.get("judge_mixed_cases")
-    mixed = mixed if isinstance(mixed, dict) else {}
+    evaluators = {}
+    mixed = lift_data.get("judge_mixed_cases") or {}
+    paired = isinstance(lift_data.get("basis"), dict) or lift_data.get("comparison_unavailable") is True
     for metric in metrics:
-        ws = _finite_float(with_scores.get(metric))
-        if ws is None:
-            continue
-        bl = _finite_float(without_scores.get(metric))
+        ws, bl = _finite_float(with_scores.get(metric)), _finite_float(without_scores.get(metric))
         lift = _lift_value(metric, lift_data)
-        excluded = metric in mixed
-        if lift is None and bl is not None and not excluded:
+        if lift is None and ws is not None and bl is not None and metric not in mixed and not paired:
             lift = round(ws - bl, 4)
         evaluators[metric] = {
             "with_skill": ws,
             "baseline": bl,
             "lift": lift,
+            "with_skill_status": "scored"
+            if ws is not None
+            else ("not_applicable" if metric in with_not_applicable else "missing"),
+            "baseline_status": "scored"
+            if bl is not None
+            else ("not_applicable" if metric in baseline_not_applicable else "missing"),
         }
     return evaluators
 
@@ -1915,20 +2121,27 @@ def _build_dimensions(
     precomputed_with: dict[str, Any],
     precomputed_without: dict[str, Any],
     judge_lift: dict[str, Any] | None = None,
+    *,
+    with_metrics: list[str] | None = None,
+    baseline_metrics: list[str] | None = None,
+    with_not_applicable: list[str] = (),
+    baseline_not_applicable: list[str] = (),
 ) -> list[dict[str, Any]]:
     dimensions: list[dict[str, Any]] = []
     for dim_id in _DIMENSION_IDS:
         cfg = DIMENSION_MAPPING[dim_id]
-        ws = _precomputed_score(precomputed_with, dim_id)
-        if ws is None:
-            ws = _dimension_score(with_scores, cfg)
-        bl = _precomputed_score(precomputed_without, dim_id)
-        if bl is None:
-            bl = _dimension_score(without_scores, cfg)
+        # Cached rows may predate applicability checks. Raw evaluator inputs
+        # determine whether a dimension is complete and what its score is.
+        ws = _dimension_score(with_scores, cfg, active_metrics=with_metrics, not_applicable=with_not_applicable)
+        bl = _dimension_score(
+            without_scores, cfg, active_metrics=baseline_metrics, not_applicable=baseline_not_applicable
+        )
         if ws is None and bl is None:
             continue
         lift = round(ws - bl, 4) if ws is not None and bl is not None else None
-        entry = precomputed_with.get(dim_id) if isinstance(precomputed_with.get(dim_id), dict) else {}
+        entry = (
+            precomputed_with.get(dim_id) if ws is not None and isinstance(precomputed_with.get(dim_id), dict) else {}
+        )
         # Signals (the evaluators that actually fed this dimension) populate the
         # "Signals" column; reasoning bullets and a deterministic verdict fill
         # the "Reasoning"/"Verdict" columns when the engine left them blank.
@@ -1936,8 +2149,10 @@ def _build_dimensions(
         explanation = entry.get("explanation")
         reasoning_bullets = entry.get("reasoning_bullets")
         comparison_signals = _dimension_signals({}, with_scores, cfg)
-        excluded = judge_lift is not None and any(
-            metric in judge_lift.get("judge_mixed_cases", {}) for metric in comparison_signals
+        excluded = judge_lift is not None and (
+            isinstance(judge_lift.get("basis"), dict)
+            or judge_lift.get("comparison_unavailable") is True
+            or any(metric in judge_lift.get("judge_mixed_cases", {}) for metric in comparison_signals)
         )
         reasoning_baseline = bl
         if excluded and judge_lift is not None:
@@ -1946,9 +2161,12 @@ def _build_dimensions(
             paired_without = {
                 metric: pair.get("without_skill") for metric, pair in pairs.items() if isinstance(pair, dict)
             }
-            comparison_ws = _dimension_score(paired_with, cfg) if len(paired_with) == len(comparison_signals) else None
-            reasoning_baseline = (
-                _dimension_score(paired_without, cfg) if len(paired_without) == len(comparison_signals) else None
+            comparison_not_applicable = [*with_not_applicable, *baseline_not_applicable]
+            comparison_ws = _dimension_score(
+                paired_with, cfg, active_metrics=with_metrics, not_applicable=comparison_not_applicable
+            )
+            reasoning_baseline = _dimension_score(
+                paired_without, cfg, active_metrics=baseline_metrics, not_applicable=comparison_not_applicable
             )
             lift = (
                 round(comparison_ws - reasoning_baseline, 4)
@@ -1961,9 +2179,18 @@ def _build_dimensions(
                 ws, reasoning_baseline, lift, signals, with_scores
             )
         if excluded:
-            note = "Cases scored by different judge models are excluded from lift."
+            judge_exclusion = any(metric in judge_lift.get("judge_mixed_cases", {}) for metric in comparison_signals)
+            note = (
+                "Cases scored by different judge models are excluded from lift."
+                if judge_exclusion
+                else "Lift compares only the cases both arms scored on the same metrics."
+            )
             if lift is None:
-                reasoning_bullets[1] = "Lift unavailable: no complete comparison with matching judge models."
+                reasoning_bullets[1] = (
+                    "Lift unavailable: no complete comparison with matching judge models."
+                    if judge_exclusion
+                    else "Lift unavailable: no complete shared comparison for this dimension."
+                )
             reasoning_bullets.append(note)
             explanation = " ".join(reasoning_bullets)
         verdict = entry.get("verdict") or _deterministic_verdict(ws)
@@ -2385,7 +2612,9 @@ def _evaluator_cards(
     from skillevaluator.tier3.harbor.metrics import METRIC_DISPLAY
 
     cards: list[dict[str, Any]] = []
-    evaluator_items = list(evaluators.items())
+    evaluator_items = [
+        (metric, values) for metric, values in evaluators.items() if _finite_float(values.get("with_skill")) is not None
+    ]
     for evaluator_index, (metric, scores) in enumerate(evaluator_items):
         if report_budget.cards_remaining <= 0:
             report_budget.omit("evaluator_cards", len(evaluator_items) - evaluator_index)
@@ -2506,6 +2735,9 @@ def _normalize_trials(rewards: list[dict[str, Any]], metrics: list[str]) -> list
             "scores": scores,
             "overall": _complete_mean([overall_score(item) for item in group]) if group_is_consistent else None,
         }
+        from skillevaluator.tier3.harbor.metrics import not_applicable_metrics
+
+        trial["not_applicable_metrics"] = not_applicable_metrics(group, metrics)
         seconds = _finite_float(reward.get("_agent_seconds"))
         if not is_multi_row and seconds is not None and seconds >= 0:
             trial["agent_seconds"] = seconds
@@ -3219,23 +3451,46 @@ def _pass_threshold_from_policy(attempt_policy: dict[str, Any]) -> float:
 # ---------------------------------------------------------------------------
 
 
-def _dimension_score(scores: dict[str, Any], cfg: dict[str, Any]) -> float | None:
-    value = _weighted(scores, cfg.get("evaluators", []), cfg.get("weights", []))
-    if value is None and cfg.get("fallback_evaluators"):
-        value = _weighted(scores, cfg["fallback_evaluators"], cfg.get("fallback_weights", []))
-    return value
+def _dimension_score(
+    scores: dict[str, Any],
+    cfg: dict[str, Any],
+    *,
+    active_metrics: list[str] | None = None,
+    not_applicable: list[str] = (),
+) -> float | None:
+    """Require every applicable source; only a legacy contract selects fallback sources."""
+    evaluators, weights = cfg.get("evaluators", []), cfg.get("weights", [])
+    if (
+        cfg.get("fallback_evaluators")
+        and active_metrics is not None
+        and not any(evaluator in active_metrics for evaluator in evaluators)
+    ):
+        evaluators, weights = cfg["fallback_evaluators"], cfg.get("fallback_weights", [])
+    if active_metrics is not None and any(evaluator not in active_metrics for evaluator in evaluators):
+        return None
+    return _weighted(scores, evaluators, weights, not_applicable=not_applicable)
 
 
-def _weighted(scores: dict[str, Any], evaluators: list[str], weights: list[float]) -> float | None:
-    num = 0.0
-    den = 0.0
-    for evaluator, weight in zip(evaluators, weights, strict=False):
-        value = _finite_float(scores.get(evaluator))
+def _weighted(
+    scores: dict[str, Any],
+    evaluators: list[str],
+    weights: list[float],
+    *,
+    not_applicable: list[str] = (),
+) -> float | None:
+    numerator = denominator = 0.0
+    if len(evaluators) != len(weights):
+        return None
+    for evaluator, weight in zip(evaluators, weights, strict=True):
+        value = _unit_interval_score(scores.get(evaluator))
+        if value is None and evaluator in not_applicable:
+            continue
         finite_weight = _finite_float(weight)
-        if value is not None and finite_weight is not None:
-            num += value * finite_weight
-            den += finite_weight
-    return (num / den) if den > 0 else None
+        if value is None or finite_weight is None or finite_weight < 0:
+            return None
+        numerator += value * finite_weight
+        denominator += finite_weight
+    return numerator / denominator if denominator > 0 else None
 
 
 def _precomputed_score(precomputed: dict[str, Any], dim_id: str) -> float | None:

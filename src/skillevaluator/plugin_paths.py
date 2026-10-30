@@ -317,7 +317,7 @@ def _path_problem_finding(
             "plugin_component_path_unsafe",
             f"'{field_name}' path {raw!r} is (or passes through) a symlink, hard link, or special file; "
             "it was not followed",
-            reader.display(rel if rel is not None else manifest_rel),
+            reader.display(PurePosixPath(reported_ref(rel.as_posix())) if rel is not None else manifest_rel),
             "Replace links with regular files and directories contained in the plugin root.",
             metadata=metadata,
         )

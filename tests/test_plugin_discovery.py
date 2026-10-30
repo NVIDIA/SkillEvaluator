@@ -19,7 +19,7 @@ from skillevaluator.plugin_discovery import discover_plugin_members
 from skillevaluator.plugin_formats import AGENT_PLUGINS_V1_PROFILE, CLAUDE_PROFILE, CODEX_PROFILE, CURSOR_PROFILE
 from skillevaluator.plugin_manifest import PluginManifestPathError, locate_plugin_manifest
 from skillevaluator.plugin_mcp import collect_mcp_declarations
-from skillevaluator.plugin_paths import PluginRootReader
+from skillevaluator.plugin_paths import DeclaredPath, PluginRootReader, _path_problem_finding
 from skillevaluator.utils.secure_fs import SecurePathError, SecureRoot
 from skillevaluator.validators.mcp_static import validate_mcp_server_declaration
 
@@ -592,3 +592,16 @@ def test_declared_component_references_never_show_their_credentials(
     )
     # The manifest record keeps the source as written; findings and inventory rows are what reports show.
     assert pw not in repr((result.findings, result.components))
+
+
+def test_unsafe_declared_path_location_never_shows_its_credentials(tmp_path: Path) -> None:
+    """Regression: an unreadable declared path (Windows rejects '?' in file names) named the declared value,
+    credential included, as the finding's location."""
+    pw = _credential()
+    reader = PluginRootReader(tmp_path)
+    declared = DeclaredPath(f"styles?token={pw}", PurePosixPath(f"styles?token={pw}"))
+    finding = _path_problem_finding(
+        reader, "outputStyles", declared, ".claude-plugin/plugin.json", "unsafe", declared.rel
+    )
+    assert finding.check_name == "plugin_component_path_unsafe"
+    assert pw not in repr(finding)

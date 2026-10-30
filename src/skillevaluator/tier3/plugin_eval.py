@@ -75,6 +75,7 @@ from skillevaluator.constants import (
     PLUGIN_CURSOR_MANIFEST_TYPE,
     PLUGIN_MANIFEST_RELATIVE_PATHS,
     PLUGIN_NAME_MAX_REPORT_CHARS,
+    PLUGIN_OPENCLAW_MANIFEST_TYPE,
     SCAN_EXCLUDED_DIRS,
 )
 from skillevaluator.models.result import Severity
@@ -113,10 +114,12 @@ from skillevaluator.plugin_dependencies import ref_name as _ref_name
 from skillevaluator.plugin_dependencies import ref_source as _ref_source
 from skillevaluator.plugin_formats import (
     CLAUDE_PROFILE,
+    manifest_identity,
     manifest_syntax,
     normalized_component_manifest,
     parse_manifest_text,
     profile_for,
+    validate_manifest_fields,
 )
 from skillevaluator.plugin_mcp import mcp_pinning_summary
 from skillevaluator.publication_identity import publication_target_from_path
@@ -245,6 +248,7 @@ class PluginEvalPackage:
     # identity): a run of this package can then never certify the plugin root.
     publication_root: Path | None = dataclass_field(default=None, compare=False, hash=False, repr=False)
     publication_target: dict[str, str] | None = dataclass_field(default=None, compare=False, hash=False, repr=False)
+    native_runtime_unavailable: bool = False
 
     def provenance(self) -> dict[str, Any]:
         """Durable record of what a plugin run did and did NOT evaluate.
@@ -279,13 +283,18 @@ class PluginEvalPackage:
                 or provider_only_mcp
                 or mcp_unsupported_config
                 or status_counts.get("missing")
+                or self.native_runtime_unavailable
             ),
             # Offline classification of declared skill/rule refs (same classifier as Tier 1).
             "dependency_status_counts": status_counts,
             # Whether the loose-parts arm can run (native Claude Code; see loose_parts_error for why not).
             "loose_parts_ready": self.loose_parts_error() is None,
         }
-        # Report-only: unsupported component types are listed here, never gated.
+        if self.native_runtime_unavailable:
+            provenance["execution_incomplete"] = (
+                "Native OpenClaw runtime evaluation is unavailable; no portable skills or runnable MCP servers were evaluated"
+            )
+        # Other unsupported component types remain report-only.
         if self.component_coverage is not None:
             provenance["component_coverage"] = self.component_coverage
         if self.context_cost is not None:
@@ -518,12 +527,14 @@ def prepare_plugin_eval_package(
             mcp_unsupported_config=tuple(mcp_unsupported_config),
             dependency_status_counts=dependency_status_counts,
             skipped=True,
+            native_runtime_unavailable=plugin.location.manifest_type == PLUGIN_OPENCLAW_MANIFEST_TYPE,
             skip_reason=_skip_reason(
                 unresolved_skill_refs,
                 unresolved_rule_refs,
                 mcp.provider_only,
                 [name for name, gaps in mcp.gaps.items() if gaps[0].startswith("plugin_files")],
                 unrooted_mcp=[name for name, gaps in mcp.gaps.items() if gaps[0] == "plugin_files_unrooted"],
+                openclaw_stdio_mcp=[name for name, gaps in mcp.gaps.items() if "openclaw_stdio_cwd" in gaps],
             ),
             **report_only,
         )
@@ -622,7 +633,13 @@ def _locate_plugin(plugin_path: Path, *, allowed_private_hosts: tuple[str, ...] 
     location = _manifest_location(plugin_path)
     manifest_text = location.read_text()
     manifest = _load_manifest_text(manifest_text, location.path, location.manifest_type)
-    name = _plugin_name(manifest, location.root)
+    if location.manifest_type == PLUGIN_OPENCLAW_MANIFEST_TYPE:
+        errors = [
+            issue for issue in validate_manifest_fields(location.manifest_type, manifest) if issue.level == "error"
+        ]
+        if errors:
+            raise ValueError(f"Invalid OpenClaw manifest: {errors[0].message}")
+    name = _plugin_name(manifest, location.root, manifest_type=location.manifest_type)
     description = _plugin_description(manifest, name)
     inventory = build_plugin_inventory(
         location.secure_file.root,
@@ -654,6 +671,12 @@ def _resolve_member_skills(
         else tuple(path.resolve() for path in find_bundled_plugin_skills(plugin.plugin_dir))
     )
     extra_skills = tuple(dict.fromkeys(path.expanduser().resolve() for path in include_skills))
+    # The plugin root is inventory-only, not a skill-owned directory. Copying
+    # it as a member would bypass native env/evaluator-data exclusions and the
+    # reduced wrapper manifest. Resolve aliases before applying the same guard
+    # to explicit --include-skills; that flag must not reintroduce the root.
+    if plugin.plugin_root.resolve() in extra_skills:
+        raise ValueError("The plugin root must not be staged as a member skill; include a non-root skill directory.")
     if plugin.contained:
         # A contained manifest's 'skills' key is a directory pointer (e.g.
         # "./skills/"), not a canonical ref list, so there are no remote skill refs.
@@ -778,7 +801,11 @@ def _stage_package_files(
     _stage_agent_plugin_manifest(
         package_path / "agent_plugin.yaml",
         plugin.manifest_text,
-        plugin.manifest,
+        # Unsupported host metadata is not needed by a portable wrapper and
+        # must not leak config defaults or future credential fields to agents.
+        {"name": plugin.name, "description": plugin.description}
+        if plugin.location.manifest_type == PLUGIN_OPENCLAW_MANIFEST_TYPE
+        else plugin.manifest,
         contained_form=plugin.contained,
     )
     _write_plugin_skill_md(
@@ -1117,6 +1144,12 @@ def _other_type_row(component: Component, staging: _ArmStaging | None, agents: S
     from skillevaluator.plugin_components import is_skill_frontmatter_hook
 
     kind = component.type
+    if kind == "extension" and (component.name == "OpenClaw runtime" or component.name.startswith("openclaw.")):
+        return coverage_row(
+            component,
+            "unsupported",
+            "OpenClaw runtime is not loaded: native tools, hooks, channels, providers and services are inventoried only; this run evaluates portable components, not OpenClaw behavior",
+        )
     if is_skill_frontmatter_hook(component):
         others = [agent for agent in agents if agent != "claude-code"]
         ignored = f"{', '.join(others)} {'ignores' if len(others) == 1 else 'ignore'} them"
@@ -1309,7 +1342,7 @@ def _skill_row(
     *member_names* are the directory names exactly one staged member skill has; a
     resolved ref or a nested bundled skill records its staged name only when it is one.
     """
-    if component.path == ".":
+    if component.path == "." and plugin_root.resolve() not in member_skills:
         return coverage_row(
             component,
             "not_staged",
@@ -1328,7 +1361,7 @@ def _skill_row(
         )
     if (plugin_root / component.path).resolve() in member_skills:
         # A nested skill (``skills/release/notes-writer``) is staged, loaded, and activated by its directory name.
-        member = PurePosixPath(component.path).name
+        member = plugin_root.name if component.path == "." else PurePosixPath(component.path).name
         return coverage_row(
             component,
             "staged",
@@ -1398,6 +1431,8 @@ def _mcp_coverage_row(component: Component, contained: bool, mcp: _McpCoverage) 
             reason += (
                 "; its env/headers or ${user_config.*} values are not applied by the runtime (run reported INCOMPLETE)"
             )
+            if gaps := mcp.split.gaps.get(component.name):
+                reason += "; unapplied configuration: " + ", ".join(gaps)
         return coverage_row(component, "staged", reason)
     if mcp.plugin_file_agents and component.name in mcp.split.plugin_file_names:
         reason = (
@@ -1409,6 +1444,12 @@ def _mcp_coverage_row(component: Component, contained: bool, mcp: _McpCoverage) 
             reason += f"; {note} (run reported INCOMPLETE)"
         return _natively_staged(coverage_row(component, "staged", reason), list(mcp.plugin_file_agents))
     if component.name in mcp.unsupported:
+        if "openclaw_stdio_cwd" in mcp.split.gaps.get(component.name, ()):
+            return coverage_row(
+                component,
+                "unsupported",
+                _OPENCLAW_STDIO_CWD_REASON + "; not started (run reported INCOMPLETE)",
+            )
         # Not runnable: _split_mcp_servers keeps plugin-file launches out of the toml.
         return coverage_row(
             component,
@@ -1553,7 +1594,8 @@ def _inventory_skill_dirs(inventory: PluginInventory, plugin_root: Path) -> tupl
     """Skill directories the selected manifest declares or packages (newer formats).
 
     The inventory classified every path without following links, so each
-    directory is a regular directory inside the plugin root.
+    directory is a regular directory inside the plugin root. The root itself
+    stays inventory-only: it is not a skill-owned tree safe to copy as a member.
     """
     return tuple(
         dict.fromkeys(
@@ -1606,10 +1648,10 @@ def _load_manifest_text(raw_text: str, manifest_path: Path, manifest_type: str) 
     return data
 
 
-def _plugin_name(manifest: dict[str, Any], plugin_dir: Path) -> str:
+def _plugin_name(manifest: dict[str, Any], plugin_dir: Path, *, manifest_type: str = "") -> str:
     """The plugin's own name. Plugin names are not skill names: Claude Code sets no length limit and Codex loads
     long names, so Tier 1 passes them and this bound is the report bound, not the 64-character skill limit."""
-    raw_name = manifest.get("name")
+    raw_name = manifest_identity(manifest_type, manifest)
     if raw_name is None or (isinstance(raw_name, str) and not raw_name.strip()):
         raw_name = plugin_dir.name
     return require_bounded_string(raw_name, "Plugin manifest name", max_chars=PLUGIN_NAME_MAX_REPORT_CHARS).strip()
@@ -2330,6 +2372,8 @@ def _normalize_mcp_entries(
             continue
         # Validated above: the effective declarations are some of the stageable ones.
         config = declaration.config
+        # Native OpenClaw manifests do not implement an enabled switch here;
+        # only the operator's mcp.servers override can disable a bundle server.
         entry: dict[str, Any] = {"name": declaration.name.strip()}
         # env/headers are declared config the eval runtime cannot apply (Harbor's
         # per-server MCPServerConfig has no such field). Record their presence so a
@@ -2379,7 +2423,9 @@ class _McpSplit:
     ``gaps`` maps every server some arm cannot fully apply to what is missing:
     ``plugin_files`` (launches from plugin files; only a copied plugin tree can
     start it, and ``plugin_file`` holds the rewritten launch), ``plugin_files_unrooted``
-    (relative paths or ``cwd`` nothing can start), ``env``/``headers`` and other
+    (relative paths or ``cwd`` nothing can start), ``openclaw_stdio_cwd``
+    (native OpenClaw stdio working directories no adapter preserves),
+    ``env``/``headers`` and other
     declared fields the wrapper runtime drops, and ``user_config`` (a
     ``${user_config.*}`` value only Claude Code fills in). ``probe_targets`` are
     the runnable URL servers for the opt-in ``--probe-mcp`` host probe.
@@ -2508,7 +2554,12 @@ def _split_mcp_servers(
             user_config[name] = keys
             server_gaps.append("user_config")
         server = _runnable_server(raw)
-        if _launches_from_plugin_files(raw, root_prefixes=root_prefixes):
+        if manifest_type == PLUGIN_OPENCLAW_MANIFEST_TYPE and raw.get("command"):
+            # Native stdio launches have an implicit plugin-root working
+            # directory or an explicit override. No existing adapter preserves it;
+            # rewriting command paths cannot make that launch faithful.
+            server_gaps.insert(0, "openclaw_stdio_cwd")
+        elif _launches_from_plugin_files(raw, root_prefixes=root_prefixes):
             # Staged verbatim, this server could not start in a wrapper arm, yet it
             # would count as runnable: a plugin whose only component it is would run
             # a "complete" evaluation with a meaningless zero lift instead of an
@@ -2549,6 +2600,9 @@ def _user_config_defaults(manifest: dict[str, Any]) -> set[str]:
     return {str(key) for key, spec in declared.items() if isinstance(spec, dict) and "default" in spec}
 
 
+_OPENCLAW_STDIO_CWD_REASON = "OpenClaw stdio MCP servers are not supported in Tier 3 because their plugin-root working directory cannot be preserved"
+
+
 def _skip_reason(
     unresolved_skill_refs: tuple[str, ...],
     unresolved_rule_refs: tuple[str, ...],
@@ -2556,12 +2610,14 @@ def _skip_reason(
     unsupported_mcp: list[str] | tuple[str, ...] = (),
     *,
     unrooted_mcp: list[str] | tuple[str, ...] = (),
+    openclaw_stdio_mcp: list[str] | tuple[str, ...] = (),
 ) -> str:
     """Why nothing was evaluated, with advice for each kind of component that is actually present.
 
     ``unsupported_mcp`` names the servers launched from unstaged plugin files;
     ``unrooted_mcp`` the ones among them that no copied plugin can start either
-    (relative paths or a relative ``cwd``).
+    (relative paths or a relative ``cwd``). ``openclaw_stdio_mcp`` names native
+    OpenClaw stdio launches whose working directory no adapter preserves.
     """
     parts: list[str] = []
     advice: list[str] = []
@@ -2580,6 +2636,9 @@ def _skip_reason(
             "A provider-only MCP server (a name and provider, with no command or url) is not run in Phase 1; "
             "declare a command or url to test it locally."
         )
+    if openclaw_stdio_mcp:
+        parts.append(f"{len(openclaw_stdio_mcp)} unsupported OpenClaw stdio MCP server(s)")
+        advice.append(_OPENCLAW_STDIO_CWD_REASON + ".")
     if unsupported_mcp:
         # In a skipped package these are only plugin-file launches: a server with
         # just unapplied env/headers is still runnable, so it never reaches here.

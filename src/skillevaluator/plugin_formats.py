@@ -53,6 +53,8 @@ from skillevaluator.constants import (
     PLUGIN_CURSOR_MANIFEST_DIR,
     PLUGIN_CURSOR_MANIFEST_TYPE,
     PLUGIN_MANIFEST_TYPE,
+    PLUGIN_OPENCLAW_MANIFEST_FILE,
+    PLUGIN_OPENCLAW_MANIFEST_TYPE,
 )
 from skillevaluator.utils.structured_data import load_bounded_json, load_bounded_yaml
 
@@ -165,6 +167,8 @@ class FormatProfile:
     skills_immediate_children_only: bool = False
     # Declared skill folders are searched at any depth (Codex), not one level.
     skills_recursive: bool = False
+    # OpenClaw loads only manifest-declared skill roots; skills/ is not implicit.
+    explicit_skills_only: bool = False
     # A root SKILL.md is a single-skill plugin when no skills are declared or bundled.
     root_skill_fallback: bool = False
     default_rules_dir: str | None = None
@@ -189,7 +193,7 @@ class FormatProfile:
     # Reference text used in finding suggestions.
     reference: str = "plugin manifest reference"
     # MCP config dialect: how server entries are normalized before the static policy.
-    mcp_dialect: Literal["claude", "codex", "agent_plugins"] = "claude"
+    mcp_dialect: Literal["claude", "codex", "agent_plugins", "openclaw"] = "claude"
 
 
 _CLAUDE_COMPONENT_FIELDS = frozenset(
@@ -318,9 +322,25 @@ CODEX_PROFILE = FormatProfile(
     reference="Codex plugin packaging reference (developers.openai.com/plugins)",
 )
 
+# Native OpenClaw metadata, read without importing or installing plugin code.
+# https://docs.openclaw.ai/plugins/manifest and /plugins/manifest/package-json
+# id is the stable identifier; name is only a human-readable display label.
+OPENCLAW_PROFILE = FormatProfile(
+    manifest_type=PLUGIN_OPENCLAW_MANIFEST_TYPE,
+    label="OpenClaw plugin",
+    manifest_path=PLUGIN_OPENCLAW_MANIFEST_FILE,
+    component_fields=frozenset({"skills", "mcpServers"}),
+    skills_recursive=True,
+    explicit_skills_only=True,
+    mcp_dialect="openclaw",
+    stage_from_inventory=True,
+    reference="OpenClaw plugin manifest reference (docs.openclaw.ai/plugins/manifest)",
+)
+
+
 PROFILES: dict[str, FormatProfile] = {
     profile.manifest_type: profile
-    for profile in (CLAUDE_PROFILE, AGENT_PLUGINS_V1_PROFILE, CODEX_PROFILE, CURSOR_PROFILE)
+    for profile in (CLAUDE_PROFILE, AGENT_PLUGINS_V1_PROFILE, CODEX_PROFILE, CURSOR_PROFILE, OPENCLAW_PROFILE)
 }
 
 
@@ -1988,11 +2008,41 @@ def _validate_codex_overlay(data: dict[str, Any]) -> list[ManifestIssue]:
     return issues
 
 
+def _validate_openclaw(data: dict[str, Any]) -> list[ManifestIssue]:
+    """Validate the cold manifest contract, not dynamically registered runtime APIs.
+
+    Unknown metadata is intentionally retained: OpenClaw extends its manifest
+    independently of this evaluator. JSON Schema contents are not executed or
+    resolved here, and configSchema is not a Claude settings/permissions file.
+    """
+    issues: list[ManifestIssue] = []
+    label = "OpenClaw plugin manifest"
+    _check_string(data, "id", issues, required=True, non_empty=True, label=label)
+    if not isinstance(data.get("configSchema"), dict):
+        issues.append(_issue("configSchema", "type", f"{label} requires a configSchema object."))
+    for key in ("name", "description", "version"):
+        _check_string(data, key, issues, label=label)
+    for key in ("skills", "channels", "providers", "cliBackends", "requiresPlugins"):
+        if key in data and (
+            not isinstance(data[key], list) or any(not isinstance(item, str) or not item.strip() for item in data[key])
+        ):
+            issues.append(_issue(key, "type", f"{label} field '{key}' must be an array of non-empty strings."))
+    if "mcpServers" in data and not isinstance(data["mcpServers"], dict):
+        issues.append(_issue("mcpServers", "type", f"{label} field 'mcpServers' must be an object."))
+    return issues
+
+
+def manifest_identity(manifest_type: str, data: dict[str, Any]) -> Any:
+    """The stable plugin identity (OpenClaw's id, not its optional display name)."""
+    return data.get("id" if manifest_type == PLUGIN_OPENCLAW_MANIFEST_TYPE else "name")
+
+
 _VALIDATORS: dict[str, Callable[[dict[str, Any]], list[ManifestIssue]]] = {
     PLUGIN_CONTAINED_MANIFEST_TYPE: _validate_claude,
     PLUGIN_AGENT_PLUGINS_V1_MANIFEST_TYPE: _validate_agent_plugins,
     PLUGIN_CODEX_MANIFEST_TYPE: _validate_codex,
     PLUGIN_CURSOR_MANIFEST_TYPE: _validate_cursor,
+    PLUGIN_OPENCLAW_MANIFEST_TYPE: _validate_openclaw,
 }
 
 

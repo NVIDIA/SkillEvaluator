@@ -4,7 +4,7 @@
 """Bounded, local plugin profiles for local-catalog Tier 2 comparisons.
 
 A profile holds only what the local catalog Checks B and C-inter need: the
-manifest name and description, the member skill names, the bundled skill
+manifest identity and description, the member skill names, the bundled skill
 manifests, and a credential-free source identity (the SHA-256 of the manifest
 bytes). Every read goes through the no-follow, root-contained plugin manifest
 locator and the bounded embedding extractor; nothing is fetched remotely.
@@ -19,11 +19,13 @@ from pathlib import Path, PurePosixPath
 from typing import Any
 
 from skillevaluator.constants import (
+    CONTENT_DEDUP_MAX_DISCOVERED_PATHS,
     DESCRIPTION_MAX_LENGTH,
     PLUGIN_AGENT_PLUGINS_V1_MANIFEST_TYPE,
     PLUGIN_CATALOG_MAX_MEMBER_CHARS,
     PLUGIN_CATALOG_MAX_MEMBERS,
     PLUGIN_NAME_MAX_REPORT_CHARS,
+    PLUGIN_OPENCLAW_MANIFEST_TYPE,
     SCAN_EXCLUDED_DIRS,
     SIMILARITY_MAX_DISCOVERED_PATHS,
 )
@@ -42,6 +44,8 @@ from skillevaluator.plugin_manifest import (
     manifest_root_for,
     manifest_type_for_relative_path,
 )
+from skillevaluator.plugin_paths import normalize_declared_path
+from skillevaluator.plugin_skills import discover_openclaw_skill_manifests
 from skillevaluator.utils.helpers import find_bundled_plugin_skill_manifests
 from skillevaluator.utils.secure_fs import SecureFile, SecurePathError, SecureRoot, discover_secure_files
 from skillevaluator.utils.structured_data import StructuredDataError, require_bounded_string
@@ -65,17 +69,20 @@ class PluginSkillLimitError(PluginProfileError):
 
 @dataclass(frozen=True)
 class BundledSkill:
-    """One live skill under ``<plugin>/skills`` and its bounded manifest fields."""
+    """One live bundled skill and its bounded manifest fields."""
 
     rel: str
     path: Path
     entry: ContentEntry | None
     skip_reason: str | None = None
+    root_relative_prefix: str = "skills"
+    # Paths a skill-only catalog built from a declared native root records.
+    catalog_relative_paths: tuple[str, ...] = ()
 
     @property
     def root_relative(self) -> str:
         """Plugin-root-relative identity, matching Tier 1 ``bundled_skills``."""
-        return f"skills/{self.rel}"
+        return self.rel if self.root_relative_prefix == "." else f"{self.root_relative_prefix}/{self.rel}"
 
 
 @dataclass(frozen=True)
@@ -128,12 +135,12 @@ def _ref_member_name(ref: Any) -> str | None:
     return leaf or None
 
 
-def _load_manifest_data(plugin_root: Path, budget: ExtractionBudget | None) -> tuple[dict[str, Any], str, str]:
+def _load_manifest_data(plugin_root: Path, budget: ExtractionBudget | None) -> tuple[dict[str, Any], str, str, str]:
     located = locate_plugin_manifest(plugin_root)
     if located is None:
         raise PluginProfileError(
             "No plugin manifest (agent_plugin.yaml/.yml, a .claude-plugin/, .codex-plugin/, or .cursor-plugin/ "
-            "plugin.json, or an Agent Plugins root plugin.json) found"
+            "plugin.json, an Agent Plugins root plugin.json, or openclaw.plugin.json) found"
         )
     raw = located.read_text()
     if budget is not None:
@@ -145,7 +152,19 @@ def _load_manifest_data(plugin_root: Path, budget: ExtractionBudget | None) -> t
     if not isinstance(data, dict):
         raise PluginProfileError("Plugin manifest is not a mapping")
     fingerprint = hashlib.sha256(raw.encode("utf-8")).hexdigest()
-    return data, located.manifest_filename, fingerprint
+    return data, located.manifest_filename, fingerprint, located.manifest_type
+
+
+def _openclaw_skill_manifests(plugin_root: Path, data: dict[str, Any]) -> list[SecureFile]:
+    """Apply Tier 2 bounds and profile errors to shared native discovery."""
+    try:
+        return discover_openclaw_skill_manifests(
+            plugin_root, data, max_roots=MAX_PLUGIN_MEMBERS, max_paths=CONTENT_DEDUP_MAX_DISCOVERED_PATHS
+        )
+    except SecurePathError:
+        raise
+    except ValueError as exc:
+        raise PluginProfileError(str(exc)) from exc
 
 
 def _bundled_skills(
@@ -154,19 +173,24 @@ def _bundled_skills(
     max_skills: int | None,
     budget: ExtractionBudget | None,
     skill_manifests: Sequence[SecureFile] | None,
+    root_relative_prefix: str = "skills",
+    catalog_roots: Sequence[PurePosixPath] = (),
 ) -> tuple[BundledSkill, ...]:
     manifests = find_bundled_plugin_skill_manifests(plugin_root) if skill_manifests is None else skill_manifests
     if max_skills is not None and len(manifests) > max_skills:
         raise PluginSkillLimitError(len(manifests), max_skills)
     if not manifests:
         return ()
-    skills_root = plugin_root / "skills"
+    skills_root = plugin_root / root_relative_prefix
     bundled: list[BundledSkill] = []
     # One anchored root reads every manifest, each against its discovery identity.
     with SecureRoot(skills_root) as secure_root:
         for manifest in manifests:
             folder = manifest.relative_path.parent
             rel = folder.as_posix()
+            catalog_relative_paths = tuple(
+                sorted({folder.relative_to(root).as_posix() for root in catalog_roots if folder.is_relative_to(root)})
+            )
             # Without a collection budget (one plugin, at most ``max_skills``
             # manifests) each manifest is bounded on its own.
             manifest_budget = ExtractionBudget() if budget is None else budget
@@ -177,10 +201,28 @@ def _bundled_skills(
             except ValueError as exc:
                 # Tier 1 owns malformed skill metadata; this comparison skips it.
                 # Its bytes were already reserved in the budget before the read.
-                bundled.append(BundledSkill(rel=rel, path=skills_root / folder, entry=None, skip_reason=str(exc)))
+                bundled.append(
+                    BundledSkill(
+                        rel=rel,
+                        path=skills_root / folder,
+                        entry=None,
+                        skip_reason=str(exc),
+                        root_relative_prefix=root_relative_prefix,
+                        catalog_relative_paths=catalog_relative_paths,
+                    )
+                )
                 continue
             reason = None if entry is not None else "SKILL.md lacks a name or description in its frontmatter"
-            bundled.append(BundledSkill(rel=rel, path=skills_root / folder, entry=entry, skip_reason=reason))
+            bundled.append(
+                BundledSkill(
+                    rel=rel,
+                    path=skills_root / folder,
+                    entry=entry,
+                    skip_reason=reason,
+                    root_relative_prefix=root_relative_prefix,
+                    catalog_relative_paths=catalog_relative_paths,
+                )
+            )
     return tuple(bundled)
 
 
@@ -197,21 +239,28 @@ def load_plugin_profile(
     manifest and every bundled skill manifest count, including one that cannot
     be parsed. ``skill_manifests`` are the plugin's bundled skill manifests
     (from :func:`find_bundled_plugin_skill_manifests`) when the caller has
-    already discovered them. Raises :class:`PluginManifestPathError` (or
+    already discovered them. Native OpenClaw profiles instead rediscover only
+    their explicitly declared roots, recursively stopping at skill boundaries;
+    legacy ``skills/`` inventories cannot add implicit or cross-client skills.
+    Raises :class:`PluginManifestPathError` (or
     ``SecurePathError``) for unsafe inputs, ``ValueError`` for unsafe bundled
     skill discovery or an exhausted budget, and :class:`PluginProfileError`
     when the manifest cannot supply a profile.
     """
-    data, manifest, fingerprint = _load_manifest_data(plugin_root, budget)
+    data, manifest, fingerprint, manifest_type = _load_manifest_data(plugin_root, budget)
+    is_openclaw = manifest_type == PLUGIN_OPENCLAW_MANIFEST_TYPE
 
-    raw_name = data.get("name")
-    if raw_name is None or (isinstance(raw_name, str) and not raw_name.strip()):
+    # OpenClaw's name is display text; id alone is the stable plugin identity.
+    raw_name = data.get("id" if is_openclaw else "name")
+    if not is_openclaw and (raw_name is None or (isinstance(raw_name, str) and not raw_name.strip())):
         raw_name = plugin_root.resolve().name
     try:
         # Plugin names are not skill names: Claude Code and Codex load names longer than 64 characters.
         name = require_bounded_string(raw_name, "Plugin name", max_chars=PLUGIN_NAME_MAX_REPORT_CHARS).strip()
     except ValueError as exc:
         raise PluginProfileError(f"Invalid plugin name: {exc}") from exc
+    if is_openclaw and not isinstance(data.get("configSchema"), dict):
+        raise PluginProfileError("OpenClaw configSchema must be an object")
 
     raw_description = data.get("description")
     description: str | None = None
@@ -227,7 +276,7 @@ def load_plugin_profile(
 
     members: set[str] = set()
     skills_section = data.get("skills")
-    refs = skills_section.get("refs") if isinstance(skills_section, dict) else None
+    refs = skills_section.get("refs") if not is_openclaw and isinstance(skills_section, dict) else None
     if isinstance(refs, list):
         if len(refs) > MAX_PLUGIN_MEMBERS:
             raise PluginProfileError(f"Plugin skills.refs exceeds the {MAX_PLUGIN_MEMBERS}-item limit")
@@ -236,9 +285,30 @@ def load_plugin_profile(
             if leaf:
                 members.add(_member_name(leaf))
 
-    bundled = _bundled_skills(plugin_root, max_skills=max_skills, budget=budget, skill_manifests=skill_manifests)
+    catalog_roots = []
+    if is_openclaw:
+        # Legacy inventories are relative to skills/ and cannot establish which
+        # roots OpenClaw declares. Rediscover those roots rather than admitting
+        # implicit or cross-client skills from a caller-supplied inventory.
+        skill_manifests = _openclaw_skill_manifests(plugin_root, data)
+        # Shared discovery validated every declaration before this normalization.
+        catalog_roots = [
+            declared.rel
+            for raw in data.get("skills", [])
+            if (declared := normalize_declared_path(raw, ())).rel is not None
+        ]
+    bundled = _bundled_skills(
+        plugin_root,
+        max_skills=max_skills,
+        budget=budget,
+        skill_manifests=skill_manifests,
+        root_relative_prefix="." if is_openclaw else "skills",
+        catalog_roots=catalog_roots,
+    )
     for skill in bundled:
         label = skill.entry.name if skill.entry is not None else PurePosixPath(skill.rel).name
+        if is_openclaw and not label and skill.root_relative == ".":
+            label = plugin_root.name
         if label.strip():
             members.add(_member_name(label))
     if len(members) > MAX_PLUGIN_MEMBERS:

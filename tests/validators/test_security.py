@@ -2422,7 +2422,9 @@ print(json.dumps([finding.metadata["matched_value"] for finding in result.findin
         assert result.is_incomplete
         assert not any(detail.check_name == "skillspector" for detail in result.success_details)
 
-    @pytest.mark.parametrize("version", ["2.9.5-safe", "2.9.6", "2.11.1-safe"])
+    # 2.13.1-safe is the documented install pin, captured with --no-llm from
+    # tests/fixtures/skills/simple (a SKILL.md and a Python helper).
+    @pytest.mark.parametrize("version", ["2.9.5-safe", "2.9.6", "2.11.1-safe", "2.13.1-safe"])
     @patch("skillevaluator.validators.security.Tools")
     def test_skillspector_accepts_captured_no_llm_report(
         self,

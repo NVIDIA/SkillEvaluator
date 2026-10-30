@@ -152,7 +152,9 @@ Duplicate findings map to severities by confidence:
 The chat LLM answers each cluster with one JSON verdict. A reply that wraps
 exactly one JSON object in prose or a Markdown fence is accepted, which matters
 on Bedrock and other endpoints that answer with prompt-only JSON. A reply with
-no complete object or with more than one counts as a failed analysis.
+no complete object or with more than one counts as a failed analysis. An object
+nested inside an array or inside a malformed container is never used as the
+verdict.
 
 If chat-LLM analysis fails for a candidate cluster, Tier 2 reports the
 incomplete analysis as a blocking error rather than treating the content as

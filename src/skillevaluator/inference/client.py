@@ -340,38 +340,70 @@ def _extract_choice_content(response: Any) -> str:
     )
 
 
-# Malformed ``{`` candidates tolerated before recovery gives up. Each failed
-# decode costs time proportional to the reply length.
-_MAX_EMBEDDED_JSON_DECODE_FAILURES = 64
+# Bracket depth beyond which an embedded span is not decoded. Verdicts are
+# shallow, and the cap keeps the decoder well away from the recursion limit.
+_MAX_EMBEDDED_JSON_NESTING = 128
+_JSON_CONTAINER_START = re.compile(r"[{\[]")
+
+
+def _balanced_json_span_end(text: str, start: int) -> int | None:
+    """Return the exclusive end of the string-aware ``{...}``/``[...]`` span at *start*.
+
+    ``None`` means the span never closes, closes with a mismatched bracket, or
+    nests deeper than ``_MAX_EMBEDDED_JSON_NESTING``.
+    """
+    closers: list[str] = []
+    in_string = False
+    escaped = False
+    for index in range(start, len(text)):
+        ch = text[index]
+        if in_string:
+            if escaped:
+                escaped = False
+            elif ch == "\\":
+                escaped = True
+            elif ch == '"':
+                in_string = False
+        elif ch == '"':
+            in_string = True
+        elif ch in "{[":
+            closers.append("}" if ch == "{" else "]")
+            if len(closers) > _MAX_EMBEDDED_JSON_NESTING:
+                return None
+        elif ch in "}]":
+            if not closers or closers.pop() != ch:
+                return None
+            if not closers:
+                return index + 1
+    return None
 
 
 def _embedded_json_objects(text: str) -> list[dict[str, Any]]:
     """Return the complete top-level JSON objects embedded in prose.
 
-    Scanning resumes after each decoded object, so nested objects are not
-    counted separately, and after the failure point of a malformed one, so an
-    object nested inside it is never promoted. Replies the decoder cannot
-    handle (excessive nesting, oversized integers) or with too many malformed
-    candidates yield no objects.
+    Each ``{`` or ``[`` starts a string-aware balanced span that is decoded as a
+    whole and then skipped, so nothing nested inside a span is ever promoted:
+    not the members of a valid object or array, and not an object inside a
+    span that fails to decode. Decoded arrays are not counted, so chunk
+    citations such as ``[1]`` stay harmless. A span that never closes, closes
+    with a mismatched bracket or nests too deeply ends the scan, because its
+    extent is unknown. Spans never overlap, so the work stays linear in the
+    reply length.
     """
-    decoder = json.JSONDecoder()
     objects: list[dict[str, Any]] = []
-    failures = 0
     cursor = 0
-    while (start := text.find("{", cursor)) != -1:
+    while (match := _JSON_CONTAINER_START.search(text, cursor)) is not None:
+        start = match.start()
+        end = _balanced_json_span_end(text, start)
+        if end is None:
+            break
         try:
-            value, end = decoder.raw_decode(text, start)
-        except json.JSONDecodeError as exc:
-            failures += 1
-            if failures > _MAX_EMBEDDED_JSON_DECODE_FAILURES:
-                return []
-            cursor = max(exc.pos, start + 1)
-            continue
+            value = json.loads(text[start:end])
         except (RecursionError, ValueError):
-            return []
-        cursor = end
+            value = None
         if isinstance(value, dict):
             objects.append(value)
+        cursor = end
     return objects
 
 
@@ -729,12 +761,12 @@ class LLMClient:
 
         cleaned = raw.strip()
         if cleaned.startswith("```"):
-            cleaned = cleaned.split("\n", 1)[1]
+            cleaned = cleaned.partition("\n")[2]
             cleaned = cleaned.rsplit("```", 1)[0].strip()
 
         try:
             return json.loads(cleaned)
-        except json.JSONDecodeError as e:
+        except (RecursionError, ValueError) as e:
             objects = _embedded_json_objects(raw)
             if len(objects) == 1:
                 return objects[0]

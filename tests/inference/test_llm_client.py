@@ -802,6 +802,14 @@ class TestExtractJsonFromResponse:
 
         assert _extract_json_reply(monkeypatch, content) == {"key": "value"}
 
+    def test_recovers_single_line_fenced_object(self, monkeypatch: pytest.MonkeyPatch) -> None:
+        assert _extract_json_reply(monkeypatch, '```{"verdict": "DUPLICATE"}```') == {"verdict": "DUPLICATE"}
+
+    def test_bracketed_citations_are_not_counted(self, monkeypatch: pytest.MonkeyPatch) -> None:
+        content = 'Chunks [1] and [2] repeat the same steps.\n{"key": "value"}'
+
+        assert _extract_json_reply(monkeypatch, content) == {"key": "value"}
+
     def test_nested_object_is_not_counted_as_a_second_object(self, monkeypatch: pytest.MonkeyPatch) -> None:
         assert _extract_json_reply(monkeypatch, 'Result:\n{"outer": {"key": "value"}}') == {"outer": {"key": "value"}}
 
@@ -814,12 +822,34 @@ class TestExtractJsonFromResponse:
         with pytest.raises(LLMClientError, match="found 2 JSON objects; expected exactly one"):
             _extract_json_reply(monkeypatch, 'First: {"key": "one"}\nSecond: {"key": "two"}')
 
-    def test_object_inside_malformed_container_is_not_promoted(self, monkeypatch: pytest.MonkeyPatch) -> None:
-        content = 'Result: {"verdict": "RELATED_BUT_DISTINCT", "detail": {"verdict": "DUPLICATE"} "rationale": "x"}'
-
+    @pytest.mark.parametrize(
+        "container",
+        [
+            pytest.param(
+                '{"verdict": "RELATED_BUT_DISTINCT", "detail": {"verdict": "DUPLICATE"} "rationale": "x"}',
+                id="missing-comma-after-nested-object",
+            ),
+            pytest.param(
+                '{"verdict": "RELATED_BUT_DISTINCT" "detail": {"verdict": "DUPLICATE"}}',
+                id="missing-comma-before-nested-key",
+            ),
+            pytest.param(
+                '{"verdict": "RELATED_BUT_DISTINCT", {"verdict": "DUPLICATE"}}',
+                id="nested-object-where-key-expected",
+            ),
+            pytest.param('{verdict: {"verdict": "DUPLICATE"}}', id="unquoted-key"),
+            pytest.param('{"verdict": "RELATED_BUT_DISTINCT", "detail": {"verdict": "DUPLICATE"}', id="never-closes"),
+            pytest.param('[oops, {"verdict": "DUPLICATE"}]', id="malformed-array"),
+            pytest.param('[{"verdict": "DUPLICATE"}]', id="valid-array"),
+        ],
+    )
+    def test_object_inside_another_container_is_not_promoted(
+        self, monkeypatch: pytest.MonkeyPatch, container: str
+    ) -> None:
         with pytest.raises(LLMClientError, match="invalid JSON"):
-            _extract_json_reply(monkeypatch, content)
+            _extract_json_reply(monkeypatch, "Result: " + container)
 
+    @pytest.mark.parametrize("prefix", [pytest.param("", id="whole-reply"), pytest.param("Result: ", id="in-prose")])
     @pytest.mark.parametrize(
         "payload",
         [
@@ -827,17 +857,18 @@ class TestExtractJsonFromResponse:
             pytest.param('{"a": ' + "1" * 5_000 + "}", id="integer-beyond-digit-limit"),
         ],
     )
-    def test_undecodable_embedded_object_fails_closed(self, monkeypatch: pytest.MonkeyPatch, payload: str) -> None:
+    def test_undecodable_object_fails_closed(self, monkeypatch: pytest.MonkeyPatch, prefix: str, payload: str) -> None:
+        with pytest.raises(LLMClientError, match="invalid JSON"):
+            _extract_json_reply(monkeypatch, prefix + payload)
+
+    def test_undecodable_object_blocks_a_later_object(self, monkeypatch: pytest.MonkeyPatch) -> None:
+        payload = '{"a":' * 100_000 + "1" + "}" * 100_000
+
         with pytest.raises(LLMClientError, match="invalid JSON"):
             _extract_json_reply(monkeypatch, "Result: " + payload + ' {"key": "value"}')
 
-    def test_recovery_stops_after_bounded_malformed_candidates(self, monkeypatch: pytest.MonkeyPatch) -> None:
-        limit = client_mod._MAX_EMBEDDED_JSON_DECODE_FAILURES
-        obj = '{"key": "value"}'
-
-        assert _extract_json_reply(monkeypatch, "{x} " * limit + obj) == {"key": "value"}
-        with pytest.raises(LLMClientError, match="invalid JSON"):
-            _extract_json_reply(monkeypatch, "{x} " * (limit + 1) + obj)
+    def test_many_malformed_spans_are_skipped(self, monkeypatch: pytest.MonkeyPatch) -> None:
+        assert _extract_json_reply(monkeypatch, "{x} " * 5_000 + '{"key": "value"}') == {"key": "value"}
 
     def test_bedrock_prompt_only_reply_with_preamble_is_recovered(self, monkeypatch: pytest.MonkeyPatch) -> None:
         from skillevaluator.deduplication.intra_skill.llm_analyzer import VERDICT_JSON_SCHEMA

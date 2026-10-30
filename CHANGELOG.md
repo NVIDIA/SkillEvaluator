@@ -310,12 +310,14 @@ All notable changes to SkillEvaluator are documented in this file.
   malformed `metadata`, and the quality score counts `metadata.author` and
   `metadata.tags` as missing, as it already did for other non-mapping values.
 - Tier 2 deduplication no longer fails a content cluster when the model wraps
-  its JSON verdict in prose or puts a fenced block after a short preamble.
-  Such replies come from prompt-only JSON, which Bedrock always uses and other
-  providers fall back to after rejecting the structured-output schema; they
-  previously failed with `LLM returned invalid JSON` and left Tier 2
-  incomplete. Exactly one embedded JSON object is accepted. Replies with
-  several objects are still rejected instead of guessed.
+  its JSON verdict in prose, puts a fenced block after a short preamble, or
+  writes the fenced block on one line. Such replies come from prompt-only JSON,
+  which Bedrock always uses and other providers fall back to after rejecting
+  the structured-output schema; they previously failed with
+  `LLM returned invalid JSON` (or an `IndexError` for the one-line fence) and
+  left Tier 2 incomplete. Exactly one embedded JSON object is accepted. Replies
+  with several objects are still rejected instead of guessed, and an object
+  inside an array or a malformed container is never used as the verdict.
 
 ## 0.6.0 - 2026-10-20
 

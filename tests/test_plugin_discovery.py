@@ -556,3 +556,39 @@ def test_codex_drops_a_commands_map_and_loads_the_default_folder(tmp_path):
     result = found(tmp_path)
     assert [(m.name, m.origin) for m in result.components if m.type == "command"] == [("default", "packaged")]
     assert [(f.check_name, f.severity) for f in result.findings] == [("plugin_component_path_invalid", Severity.MEDIUM)]
+
+
+def _credential() -> str:
+    return "pw-" + "test-value"
+
+
+@pytest.mark.parametrize(
+    ("manifest_rel", "fields"),
+    [
+        (
+            ".claude-plugin/plugin.json",
+            {
+                "skills": "https://user:{pw}@host.example/skills",
+                "commands": ["ws://user:{pw}@host.example/x"],
+                "agents": ["//user:{pw}@host.example/a.md"],
+                "hooks": "./hooks.json?token={pw}",
+                "outputStyles": "styles?token={pw}",
+            },
+        ),
+        (".codex-plugin/plugin.json", {"skills": {"url": "https://user:{pw}@host.example/skills"}}),
+    ],
+)
+def test_declared_component_references_never_show_their_credentials(
+    tmp_path: Path, manifest_rel: str, fields: dict
+) -> None:
+    """Regression: component-path findings and inventory rows quoted the declared value as written, so a
+    reference carrying userinfo or a query credential copied it into reports (only mcpServers was redacted)."""
+    pw = _credential()
+    declared = json.loads(json.dumps(fields).replace("{pw}", pw))
+    write_tree(tmp_path, {manifest_rel: {"name": "demo", **declared}})
+    result = found(tmp_path)
+    assert {name for name in fields if any(f"'{name}'" in finding.message for finding in result.findings)} == set(
+        fields
+    )
+    # The manifest record keeps the source as written; findings and inventory rows are what reports show.
+    assert pw not in repr((result.findings, result.components))

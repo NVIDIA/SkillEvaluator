@@ -76,25 +76,25 @@ def test_redos_matchers_are_classified_quickly() -> None:
         "(" * 17 + ".*" + ")*" * 17 + "!",
         "(?:.?){64}" * 25,
     ]
-    start = time.perf_counter()
+    start = time.process_time()
     scopes = [matcher_scope(pattern) for pattern in patterns]
-    assert time.perf_counter() - start < 2.0
+    assert time.process_time() - start < 2.0
     assert scopes[:3] == ["bash", "bash", "narrow"]
     assert scopes[3:] == ["all", "all"]  # fail closed: nested too deep, over the work budget
 
 
 def test_remote_code_scan_is_linear_on_padded_scripts() -> None:
-    start = time.perf_counter()
+    start = time.process_time()
     for payload in ("curl ", "iex ", "bash $(", "python3.", "curl -o a | ", "'"):
         _shell_facts((payload * (MAX_SCRIPT_BYTES // len(payload)))[: MAX_SCRIPT_BYTES - 10])
-    assert time.perf_counter() - start < 3.0
+    assert time.process_time() - start < 3.0
 
 
 def test_escape_decoding_is_linear_on_a_long_backslash_run() -> None:
     # A run of backslashes with no \u or \x after it used to be rescanned from every backslash (quadratic).
-    start = time.perf_counter()
+    start = time.process_time()
     assert _allow_shapes("# " + "\\" * 65536) == frozenset()
-    assert time.perf_counter() - start < 1.0
+    assert time.process_time() - start < 1.0
     # Escapes are still decoded, also behind several backslashes, so an escaped 'allow' still counts.
     assert _allow_shapes('echo {"permissionDecision": "\\u0061llow"}') == {"claude"}
     assert _allow_shapes('echo {\\"permissionDecision\\": \\"\\\\u0061llow\\"}') == {"claude"}
@@ -106,10 +106,10 @@ def test_a_hook_script_of_backslashes_at_the_scan_limit_is_scanned_quickly(tmp_p
     command = {"type": "command", "command": "sh ${CLAUDE_PLUGIN_ROOT}/scripts/check.sh"}
     root = _plugin(tmp_path, {"hooks/hooks.json": _pre_tool_use(command), "scripts/check.sh": script})
 
-    start = time.perf_counter()
+    start = time.process_time()
     checks = _checks(_validate(root))
 
-    assert time.perf_counter() - start < 10.0
+    assert time.process_time() - start < 10.0
     assert "plugin_hook_script_unanalyzed" not in checks
 
 

@@ -37,6 +37,7 @@ from skillevaluator.constants import (
 )
 from skillevaluator.models.result import Finding, Severity
 from skillevaluator.plugin_formats import CLAUDE_PROFILE, DEFAULT_SKILLS_DIR, FormatProfile
+from skillevaluator.utils.path_security import matches_filesystem_name
 from skillevaluator.utils.secure_fs import (
     MAX_SECURE_DIRECTORY_DEPTH,
     SecurePathError,
@@ -329,7 +330,27 @@ _UNSCANNED_FOLDERS_TEXT = "evals/, results/, versions/, node_modules/, .venv/, .
 _UNSCANNED_SUGGESTION = "Move the component out of dependency, VCS, evaluation-output, and version-snapshot folders."
 
 
-def _unscanned_folder(rel: PurePosixPath) -> str | None:
+_SCAN_EXCLUDED_BY_CASEFOLD = {name.casefold(): name for name in SCAN_EXCLUDED_DIRS}
+
+
+def scan_excluded_name(name: str, path: Path | None) -> str | None:
+    """The :data:`~skillevaluator.constants.SCAN_EXCLUDED_DIRS` name a folder is pruned as, or ``None``.
+
+    Whole-tree discovery also prunes a differently cased spelling (``EVALS``,
+    ``Node_Modules``) when the filesystem makes it the same folder as the
+    excluded name (:func:`~skillevaluator.utils.path_security.matches_filesystem_name`),
+    which is every spelling on a case-insensitive filesystem. ``path`` is the
+    folder on disk; without it only the exact name matches.
+    """
+    if name in SCAN_EXCLUDED_DIRS:
+        return name
+    canonical = _SCAN_EXCLUDED_BY_CASEFOLD.get(name.casefold())
+    if canonical is None or path is None or not matches_filesystem_name(path, (canonical,)):
+        return None
+    return canonical
+
+
+def _unscanned_folder(rel: PurePosixPath, root: Path | None = None) -> str | None:
     """The first folder of a plugin-root-relative path that Tier 1 whole-tree scans skip, or ``None``.
 
     The security, secret, and Unicode scans prune every
@@ -338,21 +359,24 @@ def _unscanned_folder(rel: PurePosixPath) -> str | None:
     ``node_modules/``, ``.venv/``, ``.git/``, and ``__pycache__/``. Only an
     ``evals``/``results``/``versions`` folder at the first level of
     ``skills/`` (``skills/evals/``) is scanned anyway, because bundled-skill
-    discovery scans it as a skill.
+    discovery scans it as a skill. With the plugin ``root``, a differently
+    cased spelling that the filesystem makes the same folder counts too
+    (:func:`scan_excluded_name`).
     """
     parts = rel.parts
     for index, part in enumerate(parts):
-        if part not in SCAN_EXCLUDED_DIRS:
+        excluded = scan_excluded_name(part, root.joinpath(*parts[: index + 1]) if root is not None else None)
+        if excluded is None:
             continue
-        if part in SCAN_ARTIFACT_DIRS and index == 1 and parts[0] == DEFAULT_SKILLS_DIR:
+        if excluded in SCAN_ARTIFACT_DIRS and index == 1 and parts[0] == DEFAULT_SKILLS_DIR:
             continue
         return part
     return None
 
 
-def _in_unscanned_folder(rel: PurePosixPath) -> bool:
+def _in_unscanned_folder(rel: PurePosixPath, root: Path | None = None) -> bool:
     """Whether a plugin-root-relative path is inside a folder that Tier 1 whole-tree scans skip."""
-    return _unscanned_folder(rel) is not None
+    return _unscanned_folder(rel, root) is not None
 
 
 def _unscanned_path_finding(
@@ -367,7 +391,7 @@ def _unscanned_path_finding(
     loads from there would never be scanned.
     """
     rel = declared.rel
-    folder = _unscanned_folder(rel) if rel is not None else None
+    folder = _unscanned_folder(rel, reader.root) if rel is not None else None
     if folder is None:
         return None
     return _plugin_finding(
@@ -393,8 +417,8 @@ def _unscanned_packaged_finding(
     that is itself inside such a folder already has its declared-path finding
     (:func:`_unscanned_path_finding`), so its files get no second one.
     """
-    folder = _unscanned_folder(rel)
-    if folder is None or _in_unscanned_folder(folder_rel):
+    folder = _unscanned_folder(rel, reader.root)
+    if folder is None or _in_unscanned_folder(folder_rel, reader.root):
         return None
     label = component_type.replace("_", " ")
     return _plugin_finding(

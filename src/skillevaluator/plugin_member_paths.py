@@ -20,7 +20,7 @@ from skillevaluator.constants import (
 )
 from skillevaluator.models.result import Finding, Severity
 from skillevaluator.plugin_formats import DEFAULT_SKILLS_DIR
-from skillevaluator.plugin_paths import PluginRootReader, _plugin_finding
+from skillevaluator.plugin_paths import PluginRootReader, _plugin_finding, scan_excluded_name
 from skillevaluator.utils.secure_fs import (
     MAX_SECURE_DIRECTORY_DEPTH,
     SecureFile,
@@ -122,27 +122,33 @@ def find_bundled_plugin_skill_manifests(plugin_root: Path, skills_dir: str = "sk
     return sorted(manifests, key=lambda manifest: manifest.relative_path.parent)
 
 
-def find_unscanned_plugin_skill_manifests(plugin_root: Path, skills_dir: str = "skills") -> list[PurePosixPath]:
-    """Return plugin-root-relative ``SKILL.md`` paths that bundled-skill discovery skips.
+def find_unscanned_plugin_skill_manifests(
+    plugin_root: Path, skills_dir: str = "skills"
+) -> tuple[list[PurePosixPath], bool]:
+    """Plugin-root-relative ``SKILL.md`` paths that bundled-skill discovery skips, and whether the search finished.
 
     These sit in a scan-excluded folder (``evals``, ``results``, ``versions``,
-    or a dotted form) inside the skills folder ``skills_dir`` (``skills`` or a
-    declared one), below the first level. Tier 1 does not scan them, but a
-    client that searches a skills folder recursively (Codex) loads them. The
-    walk reads names only, never follows links, and is bounded like discovery.
+    or a dotted form, in any spelling discovery prunes:
+    :func:`~skillevaluator.plugin_paths.scan_excluded_name`) inside the skills
+    folder ``skills_dir`` (``skills`` or a declared one), below the first
+    level. Tier 1 does not scan them, but a client that searches a skills
+    folder recursively (Codex) loads them. The walk reads names only, never
+    follows links, and is bounded like discovery: it is not finished when it
+    stops at its entry budget or at the directory depth limit.
     """
     try:
         skills_root = _plugin_skills_root(plugin_root, skills_dir)
     except ValueError:
-        return []  # reported by bundled-skill discovery
+        return [], True  # reported by bundled-skill discovery
     if skills_root is None:
-        return []
+        return [], True
     base = PurePosixPath(skills_dir)
     found: list[PurePosixPath] = []
     budget = CONTENT_DEDUP_MAX_DISCOVERED_PATHS
+    complete = True
     # (directory, path relative to the skills folder, inside a skipped folder)
     pending: list[tuple[Path, PurePosixPath, bool]] = [(skills_root, PurePosixPath(), False)]
-    while pending and budget > 0:
+    while pending:
         directory, relative, skipped = pending.pop()
         try:
             with os.scandir(directory) as iterator:
@@ -151,8 +157,8 @@ def find_unscanned_plugin_skill_manifests(plugin_root: Path, skills_dir: str = "
             continue
         for entry in entries:
             budget -= 1
-            if budget <= 0:
-                break
+            if budget < 0:
+                return sorted(found), False
             try:
                 is_dir = entry.is_dir(follow_symlinks=False)
             except OSError:
@@ -162,12 +168,33 @@ def find_unscanned_plugin_skill_manifests(plugin_root: Path, skills_dir: str = "
                 if skipped and entry.name in SKILL_MANIFEST_VARIANTS:
                     found.append(base / child)
                 continue
-            if entry.name in SCAN_EXCLUDED_DIRS and entry.name not in SCAN_ARTIFACT_DIRS:
+            excluded = scan_excluded_name(entry.name, Path(entry.path))
+            if excluded is not None and excluded not in SCAN_ARTIFACT_DIRS:
                 continue  # VCS, virtualenv, package, and bytecode caches
-            if len(child.parts) < MAX_SECURE_DIRECTORY_DEPTH:
-                artifact = entry.name in SCAN_ARTIFACT_DIRS and len(child.parts) > 1
-                pending.append((Path(entry.path), child, skipped or artifact))
-    return sorted(found)
+            if len(child.parts) >= MAX_SECURE_DIRECTORY_DEPTH:
+                complete = False
+                continue
+            artifact = excluded in SCAN_ARTIFACT_DIRS and len(child.parts) > 1
+            pending.append((Path(entry.path), child, skipped or artifact))
+    return sorted(found), complete
+
+
+def unscanned_skill_scan_incomplete_finding(reader: PluginRootReader, skills_dir: PurePosixPath) -> Finding:
+    """LOW when the search for skills inside evaluation-output and snapshot folders stopped early.
+
+    :func:`find_unscanned_plugin_skill_manifests` stopped at its entry budget
+    or the directory depth limit, so a client may load skills it never saw.
+    """
+    return _plugin_finding(
+        Severity.LOW,
+        "plugin_skill_scan_incomplete",
+        f"the search for skills inside evaluation-output and snapshot folders (evals/, results/, versions/) in "
+        f"'{skills_dir.as_posix()}/' stopped at its {CONTENT_DEDUP_MAX_DISCOVERED_PATHS}-entry or "
+        f"{MAX_SECURE_DIRECTORY_DEPTH}-folder depth limit; a client may load skills from the rest",
+        reader.display(skills_dir),
+        "Move evaluation output and version snapshots out of the declared skills folder.",
+        metadata={"path": skills_dir.as_posix()},
+    )
 
 
 def _unscanned_skill_finding(reader: PluginRootReader, manifest_rel: PurePosixPath) -> Finding:
@@ -192,6 +219,7 @@ def _unscanned_skill_finding(reader: PluginRootReader, manifest_rel: PurePosixPa
 
 
 _DEPENDENCY_DIRS = SCAN_EXCLUDED_DIRS - SCAN_ARTIFACT_DIRS
+_DEPENDENCY_DIRS_CASEFOLDED = frozenset(name.casefold() for name in _DEPENDENCY_DIRS)
 
 
 _DEPENDENCY_DIRS_TEXT = "node_modules/, .venv/, .git/, __pycache__/"
@@ -240,10 +268,11 @@ def find_dependency_folder_skills(
     found: list[PurePosixPath] = []
     budget = PLUGIN_TREE_MAX_DISCOVERED_PATHS
     # Breadth first, so the folders clients load first are searched first.
-    # (directory, path relative to the skills folder, whether its subfolders are searched)
-    pending: list[tuple[Path, PurePosixPath, bool]] = [(start, PurePosixPath(), True)]
+    # (directory, path relative to the skills folder, the same path with each folder discovery prunes
+    # under its excluded name, whether its subfolders are searched)
+    pending: list[tuple[Path, PurePosixPath, tuple[str, ...], bool]] = [(start, PurePosixPath(), (), True)]
     while pending:
-        directory, relative, descend = pending.pop(0)
+        directory, relative, pruned_as, descend = pending.pop(0)
         try:
             with os.scandir(directory) as iterator:
                 entries = sorted(iterator, key=lambda entry: entry.name)
@@ -259,16 +288,19 @@ def find_dependency_folder_skills(
             except OSError:
                 continue
             if stat.S_ISREG(metadata.st_mode):
-                if entry.name in SKILL_MANIFEST_VARIANTS and _loaded_dependency_skill(child.parts, recursive=recursive):
+                if entry.name in SKILL_MANIFEST_VARIANTS and _loaded_dependency_skill(
+                    (*pruned_as, entry.name), recursive=recursive
+                ):
                     found.append(base / child)
                 continue
             if not descend or not stat.S_ISDIR(metadata.st_mode) or stat_is_link_or_reparse(metadata):
                 continue
+            name = scan_excluded_name(entry.name, Path(entry.path)) or entry.name
             searched = recursive and not entry.name.startswith(".") and len(child.parts) < MAX_SECURE_DIRECTORY_DEPTH
-            if searched or (not relative.parts and entry.name in _DEPENDENCY_DIRS):
+            if searched or (not relative.parts and name in _DEPENDENCY_DIRS):
                 # A first-level dependency folder is a skill folder (its own SKILL.md); only a
                 # recursive client searches below it, and never below a hidden one.
-                pending.append((Path(entry.path), child, searched))
+                pending.append((Path(entry.path), child, (*pruned_as, name), searched))
     return sorted(found), True
 
 
@@ -283,7 +315,7 @@ def dependency_folder_skill_findings(
     """
     findings: list[Finding] = []
     for rel in found[:PLUGIN_COMPONENT_MAX_ITEMS]:
-        folder = next(part for part in rel.parts if part in _DEPENDENCY_DIRS)
+        folder = next(part for part in rel.parts if part.casefold() in _DEPENDENCY_DIRS_CASEFOLDED)
         findings.append(
             _plugin_finding(
                 Severity.HIGH,

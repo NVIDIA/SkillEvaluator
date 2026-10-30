@@ -593,6 +593,14 @@ Full semantics for each variable are in
 verifies the sandbox backend and the installed agent CLIs before you commit to
 a run.
 
+When Bubblewrap is installed but fails its startup probe, the error includes
+Bubblewrap's own failure line. Inside a container,
+`pivot_root: Operation not permitted` can mean the container's seccomp profile
+blocks Bubblewrap; only the options the container was launched with can change
+that. On such a host, use `--env-mode docker` where a Docker daemon is
+available, or set `SKILLEVALUATOR_LOCAL_SANDBOX=prefer` (advisory-only
+guardrails) or `off` for skills you fully trust.
+
 ## Workspace modes
 
 SkillEvaluator stages the agent's workspace itself, in both arms, so the

@@ -825,6 +825,24 @@ def _destination_metadata(parent_descriptor: int, name: str) -> os.stat_result |
         return None
 
 
+def _chmod_named_entry(parent_descriptor: int, name: str, mode: int) -> None:
+    """Change a named entry's mode without following a final link where supported.
+
+    CPython has no ``lchmod`` on Linux and maps ``dir_fd`` plus ``follow_symlinks=False``
+    to ``fchmodat(AT_SYMLINK_NOFOLLOW)``, which glibc before 2.32 (and newer glibc
+    without ``/proc``) rejects, surfacing as ``ValueError``.  Callers refuse links
+    beforehand and re-check identity afterwards; the plain call is used only after
+    a fresh no-follow stat still finds a non-link entry.
+    """
+
+    try:
+        os.chmod(name, mode, dir_fd=parent_descriptor, follow_symlinks=False)
+    except (NotImplementedError, ValueError):
+        if _is_link(os.stat(name, dir_fd=parent_descriptor, follow_symlinks=False)):
+            raise UnsafeStagingError("refusing to change the mode of a staging symlink or reparse point") from None
+        os.chmod(name, mode, dir_fd=parent_descriptor)
+
+
 def _remove_tree_at(
     parent_descriptor: int,
     name: str,
@@ -843,7 +861,7 @@ def _remove_tree_at(
             raise UnsafeStagingError("refusing to remove an unsafe staging entry")
         os.unlink(name, dir_fd=parent_descriptor)
         return
-    os.chmod(name, 0o700, dir_fd=parent_descriptor, follow_symlinks=False)
+    _chmod_named_entry(parent_descriptor, name, 0o700)
     writable = os.stat(name, dir_fd=parent_descriptor, follow_symlinks=False)
     if _is_link(writable) or (writable.st_dev, writable.st_ino) != (metadata.st_dev, metadata.st_ino):
         raise UnsafeStagingError("staging directory changed while making it removable")
@@ -1303,7 +1321,7 @@ def _prepare_moved_backup(
     ):
         raise UnsafeStagingError(f"destination changed while it was moved to backup: {backup_path}")
     private_mode = 0o700 if kind == "directory" else 0o600
-    os.chmod(backup_name, private_mode, dir_fd=parent_descriptor, follow_symlinks=False)
+    _chmod_named_entry(parent_descriptor, backup_name, private_mode)
     private = os.stat(backup_name, dir_fd=parent_descriptor, follow_symlinks=False)
     if (
         _is_link(private)

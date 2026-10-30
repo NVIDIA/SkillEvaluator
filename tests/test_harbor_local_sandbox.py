@@ -49,7 +49,7 @@ class TestDetect:
         monkeypatch.setattr(local_sandbox.platform, "system", lambda: "Linux")
         monkeypatch.setattr(local_sandbox.shutil, "which", lambda _name: "/usr/bin/bwrap")
         monkeypatch.setattr(local_sandbox, "_userns_enabled", lambda: True)
-        monkeypatch.setattr(local_sandbox, "_bwrap_smoke_test", lambda _bwrap: True)
+        monkeypatch.setattr(local_sandbox, "_bwrap_smoke_result", lambda _bwrap: (True, ""))
         sandbox = local_sandbox.detect("require")
         assert sandbox.plan.backend == "bubblewrap"
         assert sandbox.plan.strength == "kernel"
@@ -114,6 +114,74 @@ class TestDetect:
     def test_invalid_mode_rejected(self) -> None:
         with pytest.raises(ValueError):
             local_sandbox.detect("bogus")
+
+    def test_smoke_failure_detail_reaches_the_reason(self, monkeypatch: pytest.MonkeyPatch) -> None:
+        monkeypatch.setattr(local_sandbox.platform, "system", lambda: "Linux")
+        monkeypatch.setattr(local_sandbox.shutil, "which", lambda _name: "/usr/bin/bwrap")
+        monkeypatch.setattr(local_sandbox, "_userns_enabled", lambda: True)
+        monkeypatch.setattr(
+            local_sandbox,
+            "_bwrap_smoke_result",
+            lambda _bwrap: (False, "bwrap: pivot_root: Operation not permitted"),
+        )
+
+        sandbox = local_sandbox.detect("prefer")
+
+        # Without bubblewrap's own line every container-policy failure reads like
+        # the sysctl causes detect() names for the other branches.
+        assert "pivot_root: Operation not permitted" in sandbox.plan.reason
+        assert "seccomp" in sandbox.plan.reason
+
+    def test_other_pivot_root_failure_does_not_claim_seccomp(self, monkeypatch: pytest.MonkeyPatch) -> None:
+        monkeypatch.setattr(local_sandbox.platform, "system", lambda: "Linux")
+        monkeypatch.setattr(local_sandbox.shutil, "which", lambda _name: "/usr/bin/bwrap")
+        monkeypatch.setattr(local_sandbox, "_userns_enabled", lambda: True)
+        monkeypatch.setattr(
+            local_sandbox,
+            "_bwrap_smoke_result",
+            lambda _bwrap: (False, "bwrap: pivot_root: Invalid argument"),
+        )
+
+        with pytest.raises(local_sandbox.SandboxUnavailable) as excinfo:
+            local_sandbox.detect("require")
+
+        message = str(excinfo.value)
+        assert "pivot_root: Invalid argument" in message
+        assert "seccomp" not in message
+
+    def test_require_mode_remediation_offers_prefer_and_off(self, monkeypatch: pytest.MonkeyPatch) -> None:
+        monkeypatch.setattr(local_sandbox.platform, "system", lambda: "Linux")
+        monkeypatch.setattr(local_sandbox.shutil, "which", lambda _name: None)
+
+        with pytest.raises(local_sandbox.SandboxUnavailable) as excinfo:
+            local_sandbox.detect("require")
+
+        message = str(excinfo.value)
+        # "off" drops every guardrail; "prefer" keeps the advisory ones and must
+        # be offered alongside it.
+        assert f"{local_sandbox.SANDBOX_MODE_ENV}=prefer" in message
+        assert f"{local_sandbox.SANDBOX_MODE_ENV}=off" in message
+
+    def test_smoke_result_reports_launch_failure_detail(self) -> None:
+        ok, detail = local_sandbox._bwrap_smoke_result("/nonexistent/bwrap")
+
+        assert ok is False
+        assert detail
+
+    def test_smoke_result_returns_last_stderr_line(self, monkeypatch: pytest.MonkeyPatch) -> None:
+        completed = subprocess.CompletedProcess(
+            args=["bwrap"],
+            returncode=1,
+            stdout=b"",
+            stderr=b"warning: ignored\nbwrap: pivot_root: Operation not permitted\n",
+        )
+        monkeypatch.setattr(local_sandbox.subprocess, "run", lambda *_args, **_kwargs: completed)
+
+        assert local_sandbox._bwrap_smoke_result("/usr/bin/bwrap") == (
+            False,
+            "bwrap: pivot_root: Operation not permitted",
+        )
+        assert local_sandbox._bwrap_smoke_test("/usr/bin/bwrap") is False
 
     def test_bwrap_smoke_argv_binds_lib_dirs(self) -> None:
         # Regression: the smoke test must bind the ELF-interpreter dirs, not just

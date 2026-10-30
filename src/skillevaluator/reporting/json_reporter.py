@@ -327,6 +327,12 @@ class JSONReporter(ReporterBase):
         if qs:
             data["quality"] = qs
 
+        # Whether an explicitly requested SkillSpector baseline was applied, so
+        # CI can tell an inert baseline from one that matched nothing.
+        skillspector_baseline = result.metadata.get("skillspector_baseline")
+        if isinstance(skillspector_baseline, dict):
+            data["skillspector_baseline"] = dict(skillspector_baseline)
+
         # Tier 3: Agent evaluation data
         ae = result.metadata.get("agent_eval")
         if ae:

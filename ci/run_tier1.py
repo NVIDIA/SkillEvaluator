@@ -5,16 +5,23 @@
 """Run complete Tier 1 checks on configured repository skills and retain evidence.
 
 Raw scanner output belongs in artifacts. Structured findings are escaped before
-being shown in logs or GitHub annotations.
+being shown in logs or GitHub annotations. SCAN_WORKERS (default 4) bounds how
+many skills are scanned at once; rows, logs and annotations keep skill order.
 """
 
 from __future__ import annotations
 
 import argparse
+import functools
 import json
 import os
+import queue
+import re
+import signal
+import stat
 import subprocess
 import tempfile
+import threading
 import time
 from pathlib import Path
 
@@ -42,13 +49,31 @@ except ModuleNotFoundError:
     from ci.report_views import finding_repository_path, render_reports
 
 try:
-    from select_changed_skills import SelectionError, select_changed_skills
+    from select_changed_skills import (
+        SelectionError,
+        has_control_character,
+        select_changed_skills,
+        skill_root,
+        skill_roots,
+    )
 except ModuleNotFoundError:
-    from ci.select_changed_skills import SelectionError, select_changed_skills
+    from ci.select_changed_skills import (
+        SelectionError,
+        has_control_character,
+        select_changed_skills,
+        skill_root,
+        skill_roots,
+    )
 
 MAX_SKILLS = 100
 MAX_REPORT_BYTES = 32 * 1024 * 1024
 SCAN_TIMEOUT_SECONDS = 3000
+# An interrupted run asks running scans to stop, then kills them after this.
+STOP_GRACE_SECONDS = 5
+# How often a running scan checks whether the run is ending.
+POLL_SECONDS = 0.1
+DEFAULT_SCAN_WORKERS = 4
+MAX_SCAN_WORKERS = 16
 PROVIDER_KEYS = {"openai": "OPENAI_API_KEY", "anthropic": "ANTHROPIC_API_KEY", "nv_build": "NVIDIA_API_KEY"}
 PROCESS_ENV = {
     "PATH",
@@ -74,28 +99,16 @@ class ConfigurationError(ValueError):
 
 
 def discover_skills(workspace: Path, roots: str) -> list[Path]:
-    """Discover a bounded unique set; any linked scan content is rejected."""
+    """Discover a bounded unique set from SKILL_PATHS; linked scan content is rejected."""
     workspace = workspace.resolve(strict=True)
-    configured = [line.strip() for line in roots.splitlines() if line.strip()]
-    if not configured:
-        raise ConfigurationError("SKILL_PATHS must contain at least one relative directory.")
+    return skill_trees(workspace, skill_roots(workspace, roots, ConfigurationError))
+
+
+def skill_trees(workspace: Path, roots: list[str]) -> list[Path]:
+    """Walk validated relative roots and return the skills found under them."""
     discovered: set[Path] = set()
-    for raw in configured:
-        relative = Path(raw)
-        if (
-            relative.is_absolute()
-            or ".." in relative.parts
-            or "\\" in raw
-            or ":" in raw
-            or any(ord(character) < 32 or ord(character) == 127 for character in raw)
-        ):
-            raise ConfigurationError("Skill roots must be relative directories without parent traversal.")
-        current = workspace
-        for part in relative.parts:
-            current /= part
-            if current.is_symlink():
-                raise ConfigurationError("Symlinks are not supported in skill roots or scan content.")
-        root = workspace / relative
+    for relative in roots:
+        root = workspace / skill_root(workspace, relative, ConfigurationError)
         if not root.is_dir() or not root.resolve(strict=True).is_relative_to(workspace):
             raise ConfigurationError("A configured skill root is missing or outside the workspace.")
 
@@ -107,7 +120,7 @@ def discover_skills(workspace: Path, roots: str) -> list[Path]:
             inside_skill = any(parent.is_relative_to(skill) for skill in discovered) or "SKILL.md" in files
             for name in [*directories, *files]:
                 child = parent / name
-                if any(ord(character) < 32 or ord(character) == 127 for character in name):
+                if has_control_character(name):
                     raise ConfigurationError("Skill paths must not contain control characters.")
                 if child.is_symlink() and (inside_skill or name == "SKILL.md"):
                     raise ConfigurationError("Symlinks are not supported in skill roots or scan content.")
@@ -153,6 +166,34 @@ def child_environment(environ: dict[str, str]) -> tuple[dict[str, str], bool]:
     return env, enabled == "true"
 
 
+def scan_workers(environ: dict[str, str]) -> int:
+    """Read the bound on concurrent skill scans; 1 scans one skill at a time."""
+    value = environ.get("SCAN_WORKERS", "").strip() or str(DEFAULT_SCAN_WORKERS)
+    if not re.fullmatch(r"[0-9]{1,2}", value) or not 1 <= int(value) <= MAX_SCAN_WORKERS:
+        raise ConfigurationError(f"SCAN_WORKERS must be a whole number from 1 to {MAX_SCAN_WORKERS}.")
+    return int(value)
+
+
+def worker_environment(env: dict[str, str], worker: int) -> dict[str, str]:
+    """Give each scan worker its own private home and temporary directory.
+
+    The paths are fixed, so outside Docker another local user could create
+    them first in a shared /tmp. An existing directory is used only if this
+    user owns it and no one else has access to it.
+    """
+    isolated = dict(env)
+    isolated["HOME"] = str(Path(env["HOME"]) / f"worker-{worker}")
+    isolated["TMPDIR"] = str(Path(env.get("TMPDIR") or tempfile.gettempdir()) / f"skillevaluator-worker-{worker}")
+    for name in ("HOME", "TMPDIR"):
+        directory = Path(isolated[name])
+        directory.mkdir(mode=0o700, parents=True, exist_ok=True)
+        info = directory.lstat()
+        private = os.name != "posix" or (info.st_uid == os.getuid() and not info.st_mode & 0o077)
+        if not stat.S_ISDIR(info.st_mode) or not private:
+            raise ConfigurationError("Scan worker directories must be private directories owned by this user.")
+    return isolated
+
+
 def _write_json(path: Path, payload: dict) -> None:
     temporary = path.with_suffix(path.suffix + ".tmp")
     with temporary.open("x", encoding="utf-8") as handle:
@@ -189,7 +230,8 @@ def _load_report(path: Path) -> dict:
         raise ValueError("The evaluator JSON report has invalid severity counts.")
     from skillevaluator.reporting.retained import retained_results
 
-    retained_results(data)
+    # Validation only: the results are discarded, so skip copying their metadata.
+    retained_results(data, copy_metadata=False)
     return data
 
 
@@ -286,10 +328,166 @@ def execution_context(environ: dict[str, str]) -> dict:
     }
 
 
-def run(
-    workspace: Path, reports: Path, environ: dict[str, str], *, execute=subprocess.run, clock=time.monotonic
-) -> int:
-    """Run all selected skills; return nonzero on every incomplete or failed run."""
+def _signal_scan(process: subprocess.Popen, *, kill: bool) -> None:
+    """Signal an evaluator's process group, which also holds the scanner tools it started."""
+    if os.name != "posix":
+        if process.poll() is None:
+            if kill:
+                process.kill()
+            else:
+                process.terminate()
+        return
+    try:
+        os.killpg(process.pid, signal.SIGKILL if kill else signal.SIGTERM)
+    except ProcessLookupError:
+        pass
+    except PermissionError:
+        # macOS reports EPERM instead of ESRCH once the group leader has exited.
+        if process.poll() is None:
+            raise
+
+
+def run_scan(
+    argv: list[str], *, abort: threading.Event, timeout: float, check: bool = False, **options
+) -> subprocess.CompletedProcess:
+    """Run one evaluator process like subprocess.run, and end it early when the run aborts.
+
+    Scan worker threads never see Ctrl-C, and Docker sends it only to this
+    runner (PID 1), so the runner ends running scans itself. The evaluator
+    leads its own process group, so a timeout or abort also ends its tools.
+    """
+    process = subprocess.Popen(argv, start_new_session=os.name == "posix", **options)
+    deadline = time.monotonic() + timeout
+    grace_ends = None
+    try:
+        while True:
+            now = time.monotonic()
+            if now >= deadline:
+                raise subprocess.TimeoutExpired(argv, timeout)
+            if abort.is_set() and grace_ends is None:
+                grace_ends = now + STOP_GRACE_SECONDS
+                _signal_scan(process, kill=False)
+            if grace_ends is not None and now >= grace_ends:
+                break
+            try:
+                process.wait(timeout=min(POLL_SECONDS, deadline - now))
+                break
+            except subprocess.TimeoutExpired:
+                pass
+    finally:
+        if process.returncode is None or grace_ends is not None:
+            # Also end scanner tools that outlived an aborted evaluator.
+            _signal_scan(process, kill=True)
+        if process.returncode is None:
+            process.wait()
+    if check and process.returncode:
+        raise subprocess.CalledProcessError(process.returncode, argv)
+    return subprocess.CompletedProcess(argv, process.returncode)
+
+
+def evaluate_skill(
+    target: Path,
+    output: Path,
+    *,
+    workspace: Path,
+    env: dict[str, str],
+    llm: bool,
+    timeout: float,
+    execute,
+    tokens: set[str],
+) -> tuple[dict, dict | None, bool]:
+    """Run one evaluator process; return row fields, its report and whether time ran out.
+
+    Scan workers call this concurrently. Raw scanner output stays in a private
+    directory under the worker's TMPDIR; only redacted files reach the skill's
+    own report directory. An ``error`` field of None means the row has no error.
+    """
+    fields: dict = {"error": "Evaluation interrupted before complete evidence was retained."}
+    data = None
+    try:
+        output.mkdir()
+        # Raw scanner files and logs live only in a private temporary
+        # directory, never in the upload directory. Docker mounts /audit-tmp
+        # as tmpfs, so cancellation cannot upload half-written secrets. The
+        # name carries the report directory so concurrent scans are traceable.
+        with tempfile.TemporaryDirectory(
+            prefix=f"skillevaluator-private-{output.name}-", dir=env.get("TMPDIR")
+        ) as temporary:
+            raw = Path(temporary).resolve(strict=True)
+            if raw.is_relative_to(workspace) or raw.is_relative_to(output.parent):
+                raise ValueError("A private scanner directory must be outside the workspace and reports.")
+            argv = [
+                "skillevaluator",
+                "tier1",
+                str(target),
+                "--llm" if llm else "--no-llm",
+                "--profile",
+                "external",
+                # native_reports renders each skill's HTML from the retained JSON
+                # and replaces any CLI copy, so the CLI does not render it.
+                "-r",
+                "json,markdown,sarif",
+                "-o",
+                str(raw),
+            ]
+            with (raw / "stdout.log").open("xb") as stdout, (raw / "stderr.log").open("xb") as stderr:
+                process = execute(
+                    argv, cwd=workspace, env=env, stdout=stdout, stderr=stderr, check=False, timeout=timeout
+                )
+            safe = sanitized_outputs(raw, tokens)
+        for name, content in safe.items():
+            (output / name).write_bytes(content)
+        fields["exit_code"] = process.returncode
+        data = _load_report(output / "skillevaluator-tier1.json")
+        for key in (
+            "overall_status",
+            "incomplete_scans",
+            "total_validators",
+            "total_errors",
+            "total_warnings",
+            "severity_counts",
+        ):
+            fields[key] = data[key]
+        fields["passed"] = (
+            process.returncode == 0
+            and data["overall_passed"] is True
+            and data["overall_status"] == "passed"
+            and not data["incomplete_scans"]
+            and all(
+                result.get("passed") is True
+                and result.get("status") not in {"incomplete", "failed"}
+                and not result.get("incomplete_scans")
+                for result in data["results"]
+            )
+        )
+        try:
+            # The publisher rejects the whole artifact for one contradictory
+            # report. Check it the same way here so only this skill is lost.
+            validate_report(data, fields)
+            consistent = True
+        except PublicationError:
+            consistent = False
+        if not consistent or (not fields["passed"] and fields["overall_status"] == "passed"):
+            fields["overall_status"] = "error"
+            fields["incomplete_scans"] = []
+            fields["passed"] = False
+            fields["error"] = "Process exit or validator results contradict the report verdict."
+        else:
+            fields["error"] = None
+    except subprocess.TimeoutExpired:
+        fields["error"] = "Scan time limit reached; this skill did not finish."
+        return fields, None, True
+    except (OSError, ValueError, UnicodeError, RecursionError):
+        fields["error"] = "Evaluator execution failed or its JSON report was missing, unreadable, or invalid."
+    return fields, data, False
+
+
+def run(workspace: Path, reports: Path, environ: dict[str, str], *, execute=None, clock=time.monotonic) -> int:
+    """Run all selected skills; return nonzero on every incomplete or failed run.
+
+    ``execute`` is called like subprocess.run. The default, run_scan, also
+    ends running scans when the run stops early on an interrupt or error.
+    """
     if reports.is_symlink():
         raise ConfigurationError("The report directory must not be a symlink.")
     reports.mkdir(parents=True, exist_ok=True)
@@ -316,6 +514,7 @@ def run(
         if reports.is_relative_to(workspace):
             raise ConfigurationError("The report directory must be outside the read-only workspace.")
         env, llm = child_environment(environ)
+        workers = scan_workers(environ)
         mode = environ.get("SCAN_MODE", "all")
         if mode not in {"all", "changed"}:
             raise ConfigurationError("SCAN_MODE must be all or changed.")
@@ -326,7 +525,7 @@ def run(
             )
             if selected:
                 # Validate scan trees without adding nested unchanged targets.
-                discover_skills(workspace, "\n".join(path.relative_to(workspace).as_posix() for path in selected))
+                skill_trees(workspace, [path.relative_to(workspace).as_posix() for path in selected])
         else:
             selected = discover_skills(workspace, roots)
             selection = {
@@ -361,6 +560,7 @@ def run(
             raise ConfigurationError(
                 "Credential preflight could not safely prepare the scan; no results were published."
             ) from exc
+        environments = [worker_environment(env, slot) for slot in range(1, min(workers, len(selected)) + 1)]
     except (ConfigurationError, SelectionError, OSError) as exc:
         message = (
             str(exc)
@@ -404,93 +604,160 @@ def run(
         render_reports(reports, summary, context)
 
     checkpoint()
-    for index, (target, row) in enumerate(zip(selected, rows, strict=True), 1):
-        remaining = deadline - clock()
-        if remaining <= 0:
-            break
+    pending: queue.SimpleQueue[int] = queue.SimpleQueue()
+    for index in range(len(rows)):
+        pending.put(index)
+    events: queue.SimpleQueue[tuple[str, int, tuple | None]] = queue.SimpleQueue()
+    stop = threading.Event()
+    # Set when the run stops early on an interrupt or error: running scans end.
+    abort = threading.Event()
+    if execute is None:
+        execute = functools.partial(run_scan, abort=abort)
+
+    def ending() -> bool:
+        return stop.is_set() or abort.is_set()
+
+    def work(worker_env: dict[str, str]) -> None:
+        # Workers only run processes. The main thread owns rows, logs and
+        # report files, so nothing races and logs keep skill order.
+        try:
+            while not ending():
+                try:
+                    index = pending.get_nowait()
+                except queue.Empty:
+                    return
+                remaining = deadline - clock()
+                if remaining <= 0:
+                    stop.set()
+                    return
+                events.put(("started", index, None))
+                try:
+                    outcome = evaluate_skill(
+                        selected[index],
+                        reports / rows[index]["report_dir"],
+                        workspace=workspace,
+                        env=worker_env,
+                        llm=llm,
+                        timeout=remaining,
+                        execute=execute,
+                        tokens=tokens,
+                    )
+                except Exception:
+                    outcome = ({"error": "Evaluator execution failed unexpectedly; no result is claimed."}, None, False)
+                if outcome[2]:
+                    # The budget is spent: running scans end at the deadline.
+                    stop.set()
+                saved = threading.Event()
+                events.put(("finished", index, (outcome, saved)))
+                # Start another skill only after this result is checkpointed.
+                # Once the run is ending no skill starts, and an interrupted
+                # run never checkpoints again, so stop waiting.
+                while not saved.wait(POLL_SECONDS):
+                    if ending():
+                        return
+        finally:
+            events.put(("exited", -1, None))
+
+    threads = [
+        threading.Thread(target=work, args=(worker_env,), name=f"skill-scan-{slot}")
+        for slot, worker_env in enumerate(environments, 1)
+    ]
+    if len(threads) > 1:
+        print(f"SkillEvaluator: scanning {len(rows)} skills, up to {len(threads)} at a time.", flush=True)
+    started: set[int] = set()
+    announced: set[int] = set()
+    results: dict[int, dict | None] = {}
+    logged = 0
+
+    def flush_logs(*, final: bool = False) -> None:
+        # Print each skill's lines in skill order, whatever order scans end in,
+        # so logs and the annotation budget match a sequential run.
+        nonlocal logged
+        while logged < len(rows):
+            if logged in started:
+                if logged not in announced:
+                    announced.add(logged)
+                    print(
+                        f"SkillEvaluator: evaluating skill {logged + 1} of {len(rows)}: {json.dumps(rows[logged]['path'])}",
+                        flush=True,
+                    )
+                if logged not in results:
+                    return
+                # Drop each report once it is logged; only unlogged ones stay in memory.
+                log_result(
+                    rows[logged],
+                    results.pop(logged),
+                    annotations=environ.get("GITHUB_ACTIONS") == "true",
+                    budget=annotation_budget,
+                )
+            elif not final:
+                return
+            logged += 1
+
+    running = 0
+    live: list[threading.Thread] = []
+    unsaved: list[threading.Event] = []
+    try:
+        for thread in threads:
+            thread.start()
+            live.append(thread)
+            running += 1
+        while running:
+            batch = [events.get()]
+            while True:
+                try:
+                    batch.append(events.get_nowait())
+                except queue.Empty:
+                    break
+            for kind, index, payload in batch:
+                if kind == "exited":
+                    running -= 1
+                elif kind == "started":
+                    started.add(index)
+                    rows[index]["error"] = "Evaluation interrupted before complete evidence was retained."
+                else:
+                    (fields, data, _), saved = payload
+                    for key, value in fields.items():
+                        if key == "error" and value is None:
+                            rows[index].pop("error", None)
+                        else:
+                            rows[index][key] = value
+                    results[index] = data
+                    unsaved.append(saved)
+            flush_logs()
+            if unsaved:
+                # One checkpoint covers every result in the batch.
+                checkpoint()
+                for saved in unsaved:
+                    saved.set()
+                unsaved.clear()
+    except BaseException:
+        # Ctrl-C or an error such as a full report disk: end running scans
+        # now instead of waiting up to the whole scan budget for them.
+        abort.set()
+        raise
+    finally:
+        stop.set()
+        for saved in unsaved:
+            saved.set()
+        # Workers exit within the stop grace once the run ends. A repeated
+        # Ctrl-C must not leave them behind, so it is raised after they exit.
+        interrupt = None
+        for thread in live:
+            while thread.is_alive():
+                try:
+                    thread.join()
+                except KeyboardInterrupt as exc:
+                    abort.set()
+                    interrupt = exc
+        if interrupt is not None:
+            raise interrupt
+    flush_logs(final=True)
+    if len(started) < len(rows):
         print(
-            f"SkillEvaluator: evaluating skill {index} of {len(selected)}: {json.dumps(target.relative_to(workspace).as_posix())}",
+            f"SkillEvaluator: scan time limit reached; {len(rows) - len(started)} skills were not started.",
             flush=True,
         )
-        output = reports / f"skill-{index:03d}"
-        output.mkdir()
-        row["error"] = "Evaluation interrupted before complete evidence was retained."
-        data = None
-        try:
-            remaining = deadline - clock()
-            if remaining <= 0:
-                raise subprocess.TimeoutExpired("skillevaluator", SCAN_TIMEOUT_SECONDS)
-            # Raw scanner files and logs live only in a private temporary
-            # directory, never in the upload directory. Docker mounts /audit-tmp
-            # as tmpfs, so cancellation cannot upload half-written secrets.
-            with tempfile.TemporaryDirectory(prefix="skillevaluator-private-", dir=env.get("TMPDIR")) as temporary:
-                raw = Path(temporary).resolve(strict=True)
-                if raw.is_relative_to(workspace) or raw.is_relative_to(reports):
-                    raise ValueError("A private scanner directory must be outside the workspace and reports.")
-                argv = [
-                    "skillevaluator",
-                    "tier1",
-                    str(target),
-                    "--llm" if llm else "--no-llm",
-                    "--profile",
-                    "external",
-                    "-r",
-                    "json,html,markdown,sarif",
-                    "-o",
-                    str(raw),
-                ]
-                with (raw / "stdout.log").open("xb") as stdout, (raw / "stderr.log").open("xb") as stderr:
-                    process = execute(
-                        argv, cwd=workspace, env=env, stdout=stdout, stderr=stderr, check=False, timeout=remaining
-                    )
-                safe = sanitized_outputs(raw, tokens)
-            for name, content in safe.items():
-                (output / name).write_bytes(content)
-            row["exit_code"] = process.returncode
-            data = _load_report(output / "skillevaluator-tier1.json")
-            for key in (
-                "overall_status",
-                "incomplete_scans",
-                "total_validators",
-                "total_errors",
-                "total_warnings",
-                "severity_counts",
-            ):
-                row[key] = data[key]
-            row["passed"] = (
-                process.returncode == 0
-                and data["overall_passed"] is True
-                and data["overall_status"] == "passed"
-                and not data["incomplete_scans"]
-                and all(
-                    result.get("passed") is True
-                    and result.get("status") not in {"incomplete", "failed"}
-                    and not result.get("incomplete_scans")
-                    for result in data["results"]
-                )
-            )
-            try:
-                # The publisher rejects the whole artifact for one contradictory
-                # report. Check it the same way here so only this skill is lost.
-                validate_report(data, row)
-                consistent = True
-            except PublicationError:
-                consistent = False
-            if not consistent or (not row["passed"] and row["overall_status"] == "passed"):
-                row["overall_status"] = "error"
-                row["incomplete_scans"] = []
-                row["passed"] = False
-                row["error"] = "Process exit or validator results contradict the report verdict."
-            else:
-                row.pop("error", None)
-        except subprocess.TimeoutExpired:
-            row["error"] = "Scan time limit reached; this skill did not finish."
-            checkpoint()
-            break
-        except (OSError, ValueError, UnicodeError, RecursionError):
-            row["error"] = "Evaluator execution failed or its JSON report was missing, unreadable, or invalid."
-        log_result(row, data, annotations=environ.get("GITHUB_ACTIONS") == "true", budget=annotation_budget)
-        checkpoint()
     summary = _summary(rows)
     summary["selection"] = selection
     summary["execution"] = context

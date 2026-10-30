@@ -37,3 +37,10 @@ condition = "AND"
 targetRules = ["generic-api-key"]
 regexes = ['''^us\.anthropic\.claude-opus-5$''']
 paths = ['''^tests/validators/test_security\.py$''']
+
+[[allowlists]]
+description = "Synthetic HTTP hook credential used by static risk tests"
+condition = "AND"
+targetRules = ["generic-api-key"]
+regexes = ["^abcd1234secret$"]
+paths = ["^tests/validators/test_plugin_component_risk[.]py$"]

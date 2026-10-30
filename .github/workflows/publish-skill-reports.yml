@@ -50,6 +50,7 @@ jobs:
       pr_number: ${{ steps.publish.outputs.pr_number }}
       is_current: ${{ steps.publish.outputs.is_current }}
       skipped: ${{ steps.publish.outputs.skipped }}
+      committed: ${{ steps.publish.outputs.committed }}
     steps:
       - name: Validate trusted tool identity
         env:
@@ -70,11 +71,19 @@ jobs:
           ref: ${{ inputs.tools-ref }}
           path: publisher
           persist-credentials: false
+          # Cone mode also keeps every root file, including the package build inputs.
+          sparse-checkout: |
+            ci
+            src
       - name: Install the trusted native report renderer
         working-directory: publisher
+        # No dependency cache is restored: other default-branch workflows can write
+        # this job's cache scope, and uv does not recheck files from its cache.
         run: |
-          python3 -m pip install --require-hashes -r ci/requirements/uv.txt
-          uv sync --frozen --no-dev --no-editable
+          python3 -m venv "$RUNNER_TEMP/uv"
+          "$RUNNER_TEMP/uv/bin/python" -m pip install --disable-pip-version-check \
+            --require-hashes --no-deps --only-binary :all: -r ci/requirements/uv.txt
+          "$RUNNER_TEMP/uv/bin/uv" sync --frozen --no-dev --no-editable
       - name: Checkout retained report history
         uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0
         with:
@@ -100,6 +109,7 @@ jobs:
           git -C site config user.email '41898282+github-actions[bot]@users.noreply.github.com'
           # Rebuild against the newest history after a concurrent writer wins.
           # Every run is retained; a busy deployment cannot discard its report.
+          committed=false
           for attempt in 1 2 3 4 5; do
             publisher/.venv/bin/python publisher/ci/publish_reports.py
             git -C site add .
@@ -108,6 +118,7 @@ jobs:
             fi
             git -C site commit -m "Record skill scan $REPORT_RUN_ID"
             if git -C site push origin HEAD:gh-pages; then
+              committed=true
               break
             fi
             if [ "$attempt" -eq 5 ]; then
@@ -117,6 +128,7 @@ jobs:
             git -C site reset --hard origin/gh-pages
             git -C site clean -fd
           done
+          echo "committed=$committed" >> "$GITHUB_OUTPUT"
           cat "$OUTPUT_DIR/summary.md" >> "$GITHUB_STEP_SUMMARY"
       - name: Retain feedback for the comment job
         if: steps.publish.outputs.skipped != 'true'
@@ -128,7 +140,13 @@ jobs:
           retention-days: 14
   deploy:
     needs: prepare
-    if: needs.prepare.outputs.skipped != 'true'
+    # A skipped (stale) publication never deploys. Otherwise skip only an automatic first
+    # attempt that committed nothing new. Manual runs and re-runs always deploy, so a re-run
+    # after a failed deploy still publishes.
+    if: >-
+      needs.prepare.outputs.skipped != 'true' &&
+      (needs.prepare.outputs.committed == 'true' || github.event_name == 'workflow_dispatch' ||
+      github.run_attempt != '1')
     runs-on: ubuntu-24.04
     timeout-minutes: 10
     concurrency:
@@ -158,8 +176,10 @@ jobs:
         uses: actions/deploy-pages@368f82528645a54fb793d4d04e342629a3f51346 # v5.0.1
   comment:
     needs: [prepare, deploy]
+    # Comment only after this run's own deploy. A skipped deploy means another
+    # publisher run pushed this content; that run deploys it and then comments.
     if: >-
-      always() && needs.prepare.result == 'success' &&
+      always() && needs.prepare.result == 'success' && needs.prepare.outputs.skipped != 'true' &&
       needs.prepare.outputs.pr_number != '' && needs.prepare.outputs.is_current == 'true' &&
       needs.deploy.result == 'success'
     runs-on: ubuntu-24.04
@@ -180,6 +200,10 @@ jobs:
           ref: ${{ inputs.tools-ref }}
           path: publisher
           persist-credentials: false
+          sparse-checkout: |
+            ci/comment_report.py
+            ci/github_api.py
+          sparse-checkout-cone-mode: false
       - name: Download this publication's feedback
         env:
           GH_TOKEN: ${{ github.token }}

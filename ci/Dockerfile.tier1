@@ -1,27 +1,31 @@
 # Complete Tier 1 runtime for reusable GitHub Actions scans.
-FROM python:3.12-slim-bookworm@sha256:62ed8e07e544e8555c5d93748d5275015136b7f5c52b5e8679b4de339c3779d3
+# The build stages install the locked environments. The runtime stage copies only what scans use:
+# the three virtual environments, gitleaks, ci/ and the license files. It has no uv, uv cache or source tree.
+FROM python:3.12-slim-bookworm@sha256:62ed8e07e544e8555c5d93748d5275015136b7f5c52b5e8679b4de339c3779d3 AS build
 
+# The runtime image is read-only, so Python can never cache bytecode there: compile it at install time.
+# Hash-based .pyc files do not embed source mtimes, so unchanged inputs give identical files. Installed
+# sources never change inside the image, so the hashes do not need to be checked on import.
 ENV PIP_NO_INPUT=1 PYTHONDONTWRITEBYTECODE=1 PYTHONUNBUFFERED=1 \
-    PYTHON_DOTENV_DISABLED=1 SEMGREP_SEND_METRICS=off SEMGREP_ENABLE_VERSION_CHECK=0 \
-    HOME=/tmp/evaluator-home
+    UV_COMPILE_BYTECODE=1 PYC_INVALIDATION_MODE=UNCHECKED_HASH \
+    UV_NO_CACHE=1 UV_PYTHON_DOWNLOADS=never
 
-RUN apt-get update && apt-get install -y --no-install-recommends ca-certificates curl git \
+RUN apt-get update && apt-get install -y --no-install-recommends ca-certificates curl \
     && rm -rf /var/lib/apt/lists/*
 COPY ci/requirements/uv.txt /opt/scanner-requirements/uv.txt
 RUN python -m pip install --no-cache-dir --require-hashes -r /opt/scanner-requirements/uv.txt
 
-WORKDIR /opt/skillevaluator
-COPY . .
-RUN uv sync --frozen --no-dev --no-editable --extra security --extra llm
-
+# Scanner layers come before any SkillEvaluator source, so a source edit does not rebuild them.
 # Independent environments avoid conflicting scanner dependency requirements.
+COPY ci/requirements/semgrep.txt /opt/scanner-requirements/semgrep.txt
 RUN uv venv /opt/semgrep && uv pip install --python /opt/semgrep/bin/python \
-    --require-hashes -r ci/requirements/semgrep.txt
+    --require-hashes -r /opt/scanner-requirements/semgrep.txt
 # Build tooling is locked too: do not resolve an isolated build environment.
+COPY ci/requirements/skillspector-build.txt ci/requirements/skillspector.txt /opt/scanner-requirements/
 RUN uv venv /opt/skillspector && uv pip install --python /opt/skillspector/bin/python \
-    --require-hashes -r ci/requirements/skillspector-build.txt \
+    --require-hashes -r /opt/scanner-requirements/skillspector-build.txt \
     && uv pip install --python /opt/skillspector/bin/python --no-build-isolation \
-    --require-hashes -r ci/requirements/skillspector.txt
+    --require-hashes -r /opt/scanner-requirements/skillspector.txt
 RUN set -eu; arch="$(dpkg --print-architecture)"; \
     case "$arch" in \
       amd64) asset=x64; checksum=79a3ab579b53f71efd634f3aaf7e04a0fa0cf206b7ed434638d1547a2470a66e ;; \
@@ -35,14 +39,50 @@ RUN set -eu; arch="$(dpkg --print-architecture)"; \
     tar -xzf /tmp/gitleaks.tar.gz -C /usr/local/share/licenses/gitleaks LICENSE; \
     rm /tmp/gitleaks.tar.gz
 
+# Locked SkillEvaluator dependencies. They need only the project metadata and the lock.
+WORKDIR /opt/skillevaluator
+COPY pyproject.toml uv.lock ./
+RUN uv sync --frozen --no-dev --no-editable --no-install-project --extra security --extra llm
+
+# The project itself goes into /overlay, laid out at its final paths, so a source edit changes one small
+# layer. uv compiles only the files under --prefix, and the console script runs the venv's Python.
+FROM build AS project
+COPY README.md LICENSE NOTICE THIRD_PARTY_NOTICES.md ./
+COPY src ./src
+RUN uv pip install --python /opt/skillevaluator/.venv/bin/python --no-deps \
+    --prefix /overlay/opt/skillevaluator/.venv .
+
+FROM python:3.12-slim-bookworm@sha256:62ed8e07e544e8555c5d93748d5275015136b7f5c52b5e8679b4de339c3779d3
+
+ENV PIP_NO_INPUT=1 PYTHONDONTWRITEBYTECODE=1 PYTHONUNBUFFERED=1 \
+    PYTHON_DOTENV_DISABLED=1 SEMGREP_SEND_METRICS=off SEMGREP_ENABLE_VERSION_CHECK=0 \
+    HOME=/tmp/evaluator-home
+
+# git is needed for changed-skill selection. curl and uv stay in the build stage.
+RUN apt-get update && apt-get install -y --no-install-recommends ca-certificates git \
+    && rm -rf /var/lib/apt/lists/*
+# The base image ships its standard library without .pyc files. Its own site-packages are unused.
+RUN python -m compileall -q -j 0 --invalidation-mode unchecked-hash -x /site-packages/ /usr/local/lib/python3.12
+
+COPY --from=build /opt/semgrep /opt/semgrep
+COPY --from=build /opt/skillspector /opt/skillspector
+COPY --from=build /usr/local/bin/gitleaks /usr/local/bin/gitleaks
+COPY --from=build /usr/local/share/licenses/gitleaks /usr/local/share/licenses/gitleaks
+COPY --from=build /opt/skillevaluator/.venv /opt/skillevaluator/.venv
 ENV PATH="/opt/skillevaluator/.venv/bin:/opt/semgrep/bin:/opt/skillspector/bin:${PATH}"
-RUN skillevaluator --version && bandit --version && pip-audit --version \
-    && semgrep --version && skillspector --version && gitleaks version \
-    && /opt/skillspector/bin/python -c 'import yara'
+RUN bandit --version && pip-audit --version && semgrep --version && skillspector --version \
+    && gitleaks version && /opt/skillspector/bin/python -c 'import yara'
 RUN useradd --uid 10001 --create-home --shell /usr/sbin/nologin evaluator \
     && rm -rf /tmp/evaluator-home \
     && mkdir -p /workspace /reports /tmp/evaluator-home \
     && chown evaluator:evaluator /reports /tmp/evaluator-home
+
+# Source-dependent layers come last.
+COPY --from=project /overlay/ /
+COPY LICENSE NOTICE THIRD_PARTY_NOTICES.md /opt/skillevaluator/
+COPY ci /opt/skillevaluator/ci
+RUN python -m compileall -q --invalidation-mode unchecked-hash /opt/skillevaluator/ci \
+    && skillevaluator --version
 USER evaluator
 WORKDIR /workspace
 ENTRYPOINT ["python", "/opt/skillevaluator/ci/run_tier1.py"]

@@ -31,6 +31,7 @@ from collections.abc import Iterator
 from dataclasses import dataclass
 from datetime import UTC, datetime
 from decimal import Decimal, InvalidOperation
+from functools import cache
 from importlib import resources
 from pathlib import Path
 from typing import TYPE_CHECKING, Any, ClassVar
@@ -39,12 +40,13 @@ from urllib.parse import urlparse
 from jinja2 import BaseLoader, Environment
 
 from skillevaluator import __version__
-from skillevaluator.constants import TIER3_LIFT_FAIL_THRESHOLD, TIER3_LIFT_PASS_THRESHOLD
+from skillevaluator.constants import QUALITY_GRADE_THRESHOLDS, TIER3_LIFT_FAIL_THRESHOLD, TIER3_LIFT_PASS_THRESHOLD
 from skillevaluator.publication_evidence import result_publication_evidence_dict
 from skillevaluator.reporting.base import (
     AGENT_EVAL_EXACT_TEXT_KEYS,
     ReporterBase,
     additional_errors,
+    additional_warnings,
     agent_eval_publication_evidence_complete,
     agent_eval_report_serialization_issue,
     agent_eval_report_serialization_limits,
@@ -71,6 +73,7 @@ from skillevaluator.reporting.base import (
 )
 from skillevaluator.reporting.harbor_viewer import normalize_agent_eval_harbor_links
 from skillevaluator.reporting.presentation import success_is_not_applicable
+from skillevaluator.reporting.tier3_scope import completed_agent_result, validate_report_scope
 
 if TYPE_CHECKING:
     from skillevaluator.models import ValidationResult
@@ -1261,6 +1264,194 @@ def _adaptive_interval_percent(interval: object) -> str:
     return f"{_bound(lower)}\N{EN DASH}{_bound(upper)}"
 
 
+# Plain-language names for checks that report a raw upper-case ID. The report
+# shows the plain name with the raw ID beside it.
+_PLAIN_CHECK_NAMES = {
+    "QUALITY": "Quality score",
+    "SCRIPT_LINT": "Script lint",
+    "SCHEMA": "Schema",
+    "RUBRIC_EVAL": "Rubric evaluation",
+    "AGENT_EVAL": "Live agent evaluation",
+    "DEDUPLICATION": "Duplicate detection",
+}
+_RAW_CHECK_ID = re.compile(r"[A-Z][A-Z0-9_]*")
+# One verdict vocabulary for every surface: the HTML report, the CI index and
+# the Pages history. Keys are the report's verdict keys.
+VERDICT_WORDS = {
+    "pass": "Passed",
+    "fail": "Changes required",
+    "incomplete": "Incomplete",
+    "skipped": "Skipped",
+    "neutral": "Neutral",
+}
+PUBLICATION_WORDS = {"pass": "Eligible", "fail": "Not eligible", "incomplete": "Incomplete", "neutral": "Neutral"}
+# A tier whose gate does not block can fail without requiring changes.
+ADVISORY_FAIL_WORD = "Failed (advisory)"
+# "A 90+, B 80+, C 70+, D 60+, F below 60", from the thresholds the grades use.
+QUALITY_GRADE_LEGEND = ", ".join(
+    f"{grade} {threshold}+" if threshold else f"{grade} below {QUALITY_GRADE_THRESHOLDS[index - 1][0]}"
+    for index, (threshold, grade) in enumerate(QUALITY_GRADE_THRESHOLDS)
+)
+_SEVERITY_RANK = {"critical": 4, "high": 3, "medium": 2, "low": 1, "info": 0}
+FIX_FIRST_LIMIT = 5
+# How the tool runner and the scanners say that a scanner itself is missing.
+_MISSING_SCANNER = re.compile(r"\bnot installed\b|\bnot found in PATH\b", re.IGNORECASE)
+
+
+def _scan_stop_reason(errors: list[str], warnings: list[str]) -> str:
+    """Return the diagnostic that says why a scan did not finish, or "".
+
+    *errors* and *warnings* are the lines that do not repeat a finding.
+    Errors come first. A line saying a scanner is missing is used only when
+    nothing else explains the gap, because a scanner that ran and failed
+    needs a different fix.
+    """
+    lines = [" ".join(str(line).split()) for line in [*errors, *warnings]]
+    lines = [line for line in lines if line]
+    return next((line for line in lines if not _MISSING_SCANNER.search(line)), lines[0] if lines else "")
+
+
+def _sentence(text: str, limit: int = 200) -> str:
+    """Bound *text* to *limit* characters and end it as a sentence."""
+    if len(text) > limit:
+        text = text[: limit - 1].rstrip() + "\N{HORIZONTAL ELLIPSIS}"
+    return text if text.endswith((".", "!", "?", "\N{HORIZONTAL ELLIPSIS}")) else f"{text}."
+
+
+def plain_check_name(name: object) -> str:
+    """Return a readable name for a check that reports a raw ID such as ``SCRIPT_LINT``."""
+    text = str(name or "")
+    if text in _PLAIN_CHECK_NAMES:
+        return _PLAIN_CHECK_NAMES[text]
+    if _RAW_CHECK_ID.fullmatch(text):
+        return text.replace("_", " ").capitalize()
+    return text
+
+
+def _skill_relative_path(path: object, skill_name: object, scan_root: str | None = None) -> str:
+    """Show a location relative to the skill folder instead of the machine path.
+
+    *scan_root* is the folder the scanners ran on, when it is known. Without
+    it, the last part of the skill name marks the skill folder, which cannot
+    work for a skill at the repository root.
+    """
+    text = str(path or "")
+    root = (scan_root or "").rstrip("/")
+    if root and text.startswith(f"{root}/"):
+        return text[len(root) + 1 :]
+    base = str(skill_name or "").rstrip("/").rsplit("/", 1)[-1]
+    marker = f"/{base}/" if base else ""
+    if marker and marker in text:
+        return text.split(marker, 1)[1]
+    return text
+
+
+def _anchor_slug(*parts: object) -> str:
+    slug = re.sub(r"[^a-z0-9]+", "-", " ".join(str(part) for part in parts).lower()).strip("-")
+    return slug or "item"
+
+
+def _evidence_anchors(
+    skills: dict[str, dict[str, Any]],
+) -> tuple[dict[str, dict[str, list[str]]], dict[str, dict[str, str]]]:
+    """Give every check and finding card in the skill view a stable, unique id.
+
+    Returns ``(findings, checks)``: ``findings[skill][check]`` lists one id per
+    finding card in template order, and ``checks[skill][check]`` is the id of
+    the check itself. Ids are readable slugs, so a link to a finding survives
+    a re-render of the same evidence.
+    """
+    used: set[str] = set()
+
+    def unique(base: str) -> str:
+        candidate, suffix = base, 2
+        while candidate in used:
+            candidate, suffix = f"{base}-{suffix}", suffix + 1
+        used.add(candidate)
+        return candidate
+
+    findings: dict[str, dict[str, list[str]]] = {}
+    checks: dict[str, dict[str, str]] = {}
+    for skill_name in sorted(skills):
+        for check_name in sorted(skills[skill_name].get("validators", {})):
+            check = skills[skill_name]["validators"][check_name]
+            base = _anchor_slug(skill_name, check_name)
+            checks.setdefault(skill_name, {})[check_name] = unique(f"c-{base}")
+            findings.setdefault(skill_name, {})[check_name] = [
+                unique(f"f-{base}-{index}") for index in range(1, len(check.get("findings") or []) + 1)
+            ]
+    return findings, checks
+
+
+def _fix_first(
+    skills: dict[str, dict[str, Any]],
+    finding_anchors: dict[str, dict[str, list[str]]],
+    check_anchors: dict[str, dict[str, str]],
+    *,
+    limit: int = FIX_FIRST_LIMIT,
+    scan_root: str | None = None,
+) -> list[dict[str, Any]]:
+    """Pick the few places to fix first, most severe first, one entry per location.
+
+    A check that could not finish comes first, with the scanner's own reason,
+    because no pass can be claimed until it runs. Findings then rank by severity, then blocking before
+    advisory, then occurrences. A failed check with no located finding is
+    listed as a high, blocking item so its reason is not lost. Two findings at
+    the same file and line (for example one secret reported by two scanners)
+    take one slot.
+    """
+    candidates: list[tuple[tuple[int, ...], tuple, dict[str, Any]]] = []
+    for skill_name in sorted(skills):
+        for check_name in sorted(skills[skill_name].get("validators", {})):
+            check = skills[skill_name]["validators"][check_name]
+            label = plain_check_name(check_name)
+            status = check.get("status") or ("pass" if check.get("passed") else "fail")
+            findings = check.get("findings") or []
+            blocking = not check.get("passed", True)
+            item = {"check": label, "skill": skill_name, "location": "", "blocking": True}
+            check_key = (skill_name, "check", check_name)
+            if status == "incomplete":
+                scans = ", ".join(str(scan) for scan in check.get("incomplete_scans") or [])
+                reason = _scan_stop_reason(check.get("additional_errors") or [], check.get("additional_warnings") or [])
+                message = f"{label} did not finish" + (f": {reason}" if reason else f" ({scans})" if scans else "")
+                item |= {"kind": "incomplete", "severity": "incomplete", "message": message}
+                candidates.append(((2, 0, 1, 0), check_key, item | {"anchor": check_anchors[skill_name][check_name]}))
+            elif status == "fail" and not findings:
+                errors = [str(error) for error in check.get("errors") or [] if str(error).strip()]
+                message = errors[0] if errors else f"{label} failed without a located finding"
+                item |= {"kind": "check", "severity": "high", "message": message}
+                rank = (1, _SEVERITY_RANK["high"], 1, 1)
+                candidates.append((rank, check_key, item | {"anchor": check_anchors[skill_name][check_name]}))
+            for index, finding in enumerate(findings):
+                severity = str(finding.get("severity") or "medium").lower()
+                location = _skill_relative_path(finding.get("file_path"), skill_name, scan_root)
+                if location and finding.get("line_number"):
+                    location = f"{location}:{finding['line_number']}"
+                occurrences = finding.get("occurrences", 1)
+                occurrences = min(occurrences, 9999) if isinstance(occurrences, int) else 1
+                rank = (1, _SEVERITY_RANK.get(severity, _SEVERITY_RANK["medium"]), int(blocking), occurrences)
+                key = (skill_name, "file", location) if location else (skill_name, check_name, finding.get("message"))
+                entry = {
+                    "kind": "finding",
+                    "severity": severity,
+                    "message": str(finding.get("message") or ""),
+                    "check": label,
+                    "skill": skill_name,
+                    "location": location,
+                    "blocking": blocking,
+                    "anchor": finding_anchors[skill_name][check_name][index],
+                }
+                candidates.append((rank, key, entry))
+    items: list[dict[str, Any]] = []
+    seen: set[tuple] = set()
+    # sorted() is stable, so ties keep skill, check and evidence order.
+    for _rank, key, entry in sorted(candidates, key=lambda candidate: candidate[0], reverse=True):
+        if key not in seen:
+            seen.add(key)
+            items.append(entry)
+    return items[:limit]
+
+
 class PackageLoader(BaseLoader):
     """Custom Jinja2 loader that loads templates from package resources."""
 
@@ -1355,6 +1546,8 @@ class HTMLReporter(ReporterBase):
         expected_skill_name: str | None = None,
         explicit_skill_name: str | None = None,
         ci_context: dict[str, str] | None = None,
+        report_scope: str = "publication",
+        scan_root: str | None = None,
     ) -> None:
         self.include_timestamp = include_timestamp
         self.title = title or "SkillEvaluator Validation Report"
@@ -1366,12 +1559,26 @@ class HTMLReporter(ReporterBase):
         # in the report header so reviewers can tell which audience the
         # validation gate was applied for.
         self.profile = profile
+        validate_report_scope(report_scope, [])
+        self.report_scope = report_scope
         self.expected_skill_name = expected_skill_name
         self.explicit_skill_name = explicit_skill_name
         self.ci_context = _validated_ci_context(ci_context)
+        # The folder the scanners ran on, used to show finding locations
+        # relative to the skill in "Fix first".
+        self.scan_root = scan_root
         self._env = self._create_environment()
 
-    def _create_environment(self) -> Environment:
+    @staticmethod
+    @cache
+    def _create_environment() -> Environment:
+        """Return one shared environment, so each template compiles once per process.
+
+        Compiling report.html.j2 costs far more than rendering it. The loader
+        serves fixed package templates and the filters are pure functions, so
+        reporters with different options can share it. Jinja environments are
+        safe to share between threads once they are configured.
+        """
         loader = PackageLoader("skillevaluator.reporting", "templates")
         environment = Environment(loader=loader, autoescape=True)
         environment.filters["cleanly_skipped"] = is_cleanly_skipped
@@ -1467,6 +1674,9 @@ class HTMLReporter(ReporterBase):
                 "status": display_status,
                 "errors": list(result.errors),
                 "warnings": list(result.warnings),
+                # The lines that do not repeat a finding: scanner diagnostics and gate failures.
+                "additional_errors": additional_errors(result),
+                "additional_warnings": additional_warnings(result),
                 "incomplete_scans": list(result.incomplete_scans),
                 "description": result.validator_description,
                 "details": [],
@@ -1782,7 +1992,8 @@ class HTMLReporter(ReporterBase):
         ``issue_key`` (matching the row it rolls up to) so the template can
         deep-link from the executive summary directly to the finding card.
 
-        Returns a list of dicts sorted by total_count descending.
+        Returns a list of dicts, most severe first; the occurrence count only
+        breaks ties within a severity.
         """
         sev_order = {"critical": 4, "high": 3, "medium": 2, "low": 1, "info": 0}
         issue_map: dict[tuple, dict[str, Any]] = {}
@@ -1821,7 +2032,11 @@ class HTMLReporter(ReporterBase):
                             "issue_key": issue_key,
                         }
 
-        return sorted(issue_map.values(), key=lambda x: x["total_count"], reverse=True)
+        return sorted(
+            issue_map.values(),
+            key=lambda issue: (sev_order.get(issue["severity"], 0), issue["total_count"]),
+            reverse=True,
+        )
 
     @staticmethod
     def _extract_contributors(
@@ -2480,8 +2695,10 @@ class HTMLReporter(ReporterBase):
         return self.render_all([result])
 
     def render_all(self, results: list[ValidationResult]) -> str:
+        validate_report_scope(self.report_scope, results)
         tier1_results, tier2_results, tier3_results = self._split_results_by_tier(results)
         tier3_data = self._tier3_report_data(tier3_results)
+        completed_agent = completed_agent_result(tier3_data)
         # Preserve the raw policy/provenance assessment, then let the emitted
         # payload make the decision only more conservative. Display shaping
         # must never invent a successful run or erase a persisted waiver.
@@ -2663,6 +2880,17 @@ class HTMLReporter(ReporterBase):
         advisory_high = advisory_totals["high"]
         advisory_medium = advisory_totals["medium"]
         advisory_low = advisory_totals["low"]
+        # A tier whose every result is explicitly non-blocking is advisory: its
+        # failure does not require changes, so the report labels it "Failed (advisory)".
+        nonblocking_tiers = [
+            tier_name
+            for tier_name, tier_results in (("tier2", tier2_results), ("tier3", tier3_results))
+            if tier_results
+            and all(
+                isinstance(result.metadata.get("gating"), dict) and result.metadata["gating"].get("blocking") is False
+                for result in tier_results
+            )
+        ]
         gating = {
             "blocking_tiers": blocking_tiers,
             "advisory_tiers": advisory_tiers,
@@ -2710,6 +2938,53 @@ class HTMLReporter(ReporterBase):
         _attach_quality_scores(skills_by_name)
         _attach_quality_scores(tier1_skills)
 
+        # The quality gate's minimum, shown next to every score it applies to.
+        quality_min_score = next(
+            (
+                r.metadata["quality_config"]["min_score"]
+                for r in results
+                if isinstance(r.metadata, dict)
+                and isinstance(r.metadata.get("quality_config"), dict)
+                and isinstance(r.metadata["quality_config"].get("min_score"), int | float)
+            ),
+            None,
+        )
+        check_names = {
+            r.validator_name: plain_check_name(r.validator_name)
+            for r in results
+            if plain_check_name(r.validator_name) != r.validator_name
+        }
+        tier1_finding_anchors, tier1_check_anchors = _evidence_anchors(tier1_skills)
+        tier1_fix_first = _fix_first(tier1_skills, tier1_finding_anchors, tier1_check_anchors, scan_root=self.scan_root)
+        tier1_failed_checks = [
+            plain_check_name(r.validator_name) for r in tier1_results if _result_display_status(r) == "fail"
+        ]
+        tier1_blocking_findings = sum(
+            1
+            for r in tier1_results
+            if not passes_required_gate(r)
+            for f in r.findings
+            if (f.severity.value if hasattr(f.severity, "value") else str(f.severity).lower()) in {"critical", "high"}
+        )
+        # Why each incomplete Tier 1 check stopped, in the scanner's words. The
+        # summary asks for an install only when every scanner is just missing.
+        tier1_stop_reasons = [
+            (plain_check_name(r.validator_name), _scan_stop_reason(additional_errors(r), additional_warnings(r)))
+            for r in tier1_results
+            if r.is_incomplete
+        ]
+        tier1_scanners_missing = bool(tier1_stop_reasons) and all(
+            _MISSING_SCANNER.search(reason) for _check, reason in tier1_stop_reasons
+        )
+        tier1_scan_stop = next(
+            (
+                f"{check}: {_sentence(reason)}"
+                for check, reason in tier1_stop_reasons
+                if reason and not _MISSING_SCANNER.search(reason)
+            ),
+            "",
+        )
+
         report_data = {
             "title": self.title,
             "timestamp": timestamp,
@@ -2755,12 +3030,16 @@ class HTMLReporter(ReporterBase):
             },
             "skillspector_versions": tier1_skillspector_versions,
         }
-        report_json = (
-            json.dumps(report_data, indent=2, allow_nan=False)
-            .replace("<", "\\u003c")
-            .replace(">", "\\u003e")
-            .replace("&", "\\u0026")
-        )
+        # CI-native pages link Download JSON to the retained canonical file, so
+        # nothing on them reads an embedded copy. Only standalone reports embed it.
+        report_json = None
+        if not self.ci_context.get("canonical_json_url"):
+            report_json = (
+                json.dumps(report_data, indent=2, allow_nan=False)
+                .replace("<", "\\u003c")
+                .replace(">", "\\u003e")
+                .replace("&", "\\u0026")
+            )
 
         # Dynamically add Tier 3 tab when agent eval data is present
         active_tabs = list(self.tabs)
@@ -2783,6 +3062,8 @@ class HTMLReporter(ReporterBase):
         template = self._env.get_template("report.html.j2")
         cl = self.content_label
         return template.render(
+            report_scope=self.report_scope,
+            completed_agent=completed_agent,
             title=self.title,
             ci_context=self.ci_context,
             explicit_skill_name=self.explicit_skill_name,
@@ -2801,7 +3082,10 @@ class HTMLReporter(ReporterBase):
             overall_status=overall_status,
             publication_status=publication.status,
             publication_reasons=publication.reasons,
-            tier3_effective_status=publication.tier3.status,
+            tier3_effective_status=(
+                completed_agent["verdict"] if self.report_scope == "tier3" and completed_agent
+                else publication.tier3.status
+            ),
             total_validators=total_validators,
             executed_count=executed_count,
             passed_count=passed_count,
@@ -2853,7 +3137,55 @@ class HTMLReporter(ReporterBase):
             tier2_results=tier2_results,
             tier3_lift_pass_threshold=TIER3_LIFT_PASS_THRESHOLD,
             tier3_lift_fail_threshold=TIER3_LIFT_FAIL_THRESHOLD,
+            quality_min_score=quality_min_score,
+            quality_grade_legend=QUALITY_GRADE_LEGEND,
+            verdict_words=VERDICT_WORDS,
+            advisory_fail_word=ADVISORY_FAIL_WORD,
+            nonblocking_tiers=nonblocking_tiers,
+            publication_words=PUBLICATION_WORDS,
+            tier3_status_reason=publication.tier3.reason,
+            tier1_failed_checks=tier1_failed_checks,
+            tier1_incomplete_scans=list(dict.fromkeys(tool for r in tier1_results for tool in r.incomplete_scans)),
+            tier1_scanners_missing=tier1_scanners_missing,
+            tier1_scan_stop=tier1_scan_stop,
+            tier1_blocking_findings=tier1_blocking_findings,
+            check_names=check_names,
+            finding_anchors=tier1_finding_anchors,
+            check_anchors=tier1_check_anchors,
+            fix_first=tier1_fix_first,
         )
 
     def get_file_extension(self) -> str:
         return ".html"
+
+
+def fix_first_for_results(
+    results: list[ValidationResult],
+    *,
+    skill_name: str | None = None,
+    expected_skill_name: str | None = None,
+    scan_root: str | None = None,
+) -> list[dict[str, Any]]:
+    """Return the Tier 1 "Fix first" entries exactly as the report for *results* lists them.
+
+    The CI index uses this so its "Needs attention" line names the same first
+    fix as the skill's own report, with the same anchor. Pass the same
+    *scan_root* as the report.
+    """
+    reporter = HTMLReporter(
+        include_timestamp=False, explicit_skill_name=skill_name, expected_skill_name=expected_skill_name
+    )
+    tier1_results, _tier2, _tier3 = reporter._split_results_by_tier(results)
+    skills = reporter._reorganize_by_skill(tier1_results)
+    return _fix_first(skills, *_evidence_anchors(skills), scan_root=scan_root)
+
+
+def render_logo(uid: str, size: int = 28, label: str = "SkillEvaluator logo") -> str:
+    """Return the inline SkillEvaluator logo for pages built outside report.html.j2.
+
+    ``uid`` keeps the logo's ids unique on the page. An empty ``label`` marks
+    the logo as decorative, for use next to visible "SkillEvaluator" text.
+    """
+    # The shared reporter environment compiles the partial once per process.
+    environment = HTMLReporter._create_environment()
+    return str(environment.get_template("logo.svg.j2").module.se_logo(uid, size, label))

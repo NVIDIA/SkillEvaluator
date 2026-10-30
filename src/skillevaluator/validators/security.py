@@ -2589,6 +2589,48 @@ class SecurityValidator(ValidatorBase):
         return root.lower() in protected_usernames
 
     _GPS_ZERO_PATTERN = re.compile(r"[-+]?0+\.0+[,\s]+[-+]?0+\.0+")
+    # Geospatial cues. A strong cue names a geographic coordinate system, a map
+    # link (an RFC 5870 ``geo:`` URI or a Google, Apple, OpenStreetMap, or Bing
+    # map URL), or a GeoJSON object: a geometry ``"type"``, a ``Feature``,
+    # ``FeatureCollection`` or ``GeometryCollection`` ``"type"``, or a
+    # ``"geometry": {`` member, which comes before ``"coordinates"`` when keys
+    # are sorted. GeoJSON member names and these object types are
+    # case-sensitive, so ``"type": "feature"`` in other JSON is not a cue. A soft
+    # cue (location, office, address) also labels technical data such as
+    # ``calibration_location_offset``, so it does not override a technical label
+    # on the same line. Map hosts are matched with bounded TLD forms so long
+    # lines stay linear.
+    _GPS_STRONG_CONTEXT_PATTERN = re.compile(
+        r"(?i)\b(?:gps|geolocation|geospatial|latitude|longitude|lat|lon|lng|latlng|latlong?|lonlat|lnglat"
+        r"|wgs[- ]?84|degrees?)\b|[°º]"
+        r"|\bgeo:"
+        r"|\bmaps\.google\.|\bgoogle(?:\.[a-z]{2,3}){1,2}/maps\b|\bmaps\.apple\.com\b|\bopenstreetmap\.org\b"
+        r"|\bbing\.com/maps\b"
+        r"|[\"']type[\"']\s*:\s*[\"'](?:(?:multi)?(?:point|linestring|polygon)"
+        r"|(?-i:Feature(?:Collection)?|GeometryCollection))[\"']"
+        r"|[\"'](?-i:geometry)[\"']\s*:\s*\{"
+    )
+    _GPS_SOFT_CONTEXT_PATTERN = re.compile(r"(?i)\b(?:location|office|address)\b")
+    _TECHNICAL_COORDINATE_CONTEXT_PATTERN = re.compile(
+        r"(?i)\b(?:texture|uv|pixel|screen|canvas|image|normalized|cartesian|robot(?:ic(?:s)?)?|local|world|camera"
+        r"|pose|joint|model|object|viewport|mesh|vertex|clip|device)[ -]+coordinates?\b"
+    )
+    _TECHNICAL_VECTOR_CONTEXT_PATTERN = re.compile(
+        r"(?i)\b(?:quaternion|pose(?:[ _-]?translation)?|waypoint|vector|calibration|roi|scale)s?\b"
+        r"|\bcoordinates?\s*=|(?:^|\s)(?:x\s+y|u\s+v)(?:\s|$)"
+    )
+    _SCIENTIFIC_LITERAL_PATTERN = re.compile(r"(?<![\w.])[-+]?(?:\d+(?:\.\d*)?|\.\d+)[eE][-+]?\d+")
+    # A timestamp or digest label that directly precedes a value
+    # (``timestamp_microseconds: ``, ``"sha256": "``, ``checksum=``). An
+    # underscore separates words, so snake_case prefixes such as
+    # ``event_timestamp:`` and ``"created_at_epoch":`` count as labels.
+    _NON_PAYMENT_NUMBER_CONTEXT_PATTERN = re.compile(
+        r"(?i)(?:(?<![A-Za-z0-9])(?:timestamp(?:[_ -]?(?:microseconds?|micros?|us|nanoseconds?|nanos?|ns))?"
+        r"|unix(?:[_ -]?time)?|epoch(?:[_ -]?(?:microseconds?|nanoseconds?))?"
+        r"|(?:microseconds?|nanoseconds?)(?:[_ -]?timestamp)?)\b"
+        r"|(?<![A-Za-z0-9])(?:md5|sha(?:1|224|256|384|512)|hash|digest|checksum)\b)"
+        r"[\"']?(?:\s*[:=]\s*[\"']?|\s+[\"']?)\Z"
+    )
     # Match version/tag as identifier tokens, including separator and camel-case styles.
     # Plain substrings such as ``conversion`` and ``staging`` are not version labels.
     _VERSION_LABEL_PATTERN = re.compile(
@@ -2624,6 +2666,52 @@ class SecurityValidator(ValidatorBase):
     def _is_near_zero_gps(line: str) -> bool:
         """Check if a GPS match contains only near-zero coordinates (Null Island)."""
         return bool(SecurityValidator._GPS_ZERO_PATTERN.search(line))
+
+    @classmethod
+    def _is_numeric_pii_false_positive(cls, category: str, match: re.Match, line: str) -> bool:
+        """Return whether a card or phone candidate on *line* is technical data."""
+        if category == "credit_cards":
+            # A Luhn-valid timestamp or digest is not payment data. Only a label
+            # directly before this number counts, so a timestamp field does not
+            # hide a card number in a later field on the same line.
+            label_start = max(0, match.start() - 100)
+            return cls._NON_PAYMENT_NUMBER_CONTEXT_PATTERN.search(line, label_start, match.start()) is not None
+
+        if category == "phone_numbers":
+            # International phone syntax can begin at the ``+00`` exponent of a
+            # scientific-notation value and run into the next column. Only a
+            # candidate that starts inside such a literal is dropped, so a real
+            # phone number elsewhere on the line is still reported.
+            window = (max(0, match.start() - 64), match.start() + 64)
+            return any(
+                literal.start() <= match.start() < literal.end()
+                for literal in cls._SCIENTIFIC_LITERAL_PATTERN.finditer(line, *window)
+            )
+
+        return False
+
+    @classmethod
+    def _lacks_geospatial_context(cls, line: str, context: str) -> bool:
+        """Return whether GPS-shaped pairs on *line* have no geospatial cue.
+
+        Precise vectors, poses, quaternions, and waypoints have the same shape
+        as coordinates, so a pair needs a cue. *context* is the file name, up to
+        two lines before *line*, and *line*. Keys and file names often use
+        snake_case, so underscores separate words.
+        """
+        local = line.replace("_", " ")
+        nearby = context.replace("_", " ")
+        if cls._GPS_STRONG_CONTEXT_PATTERN.search(local):
+            return False
+        if cls._TECHNICAL_COORDINATE_CONTEXT_PATTERN.search(local) or cls._TECHNICAL_VECTOR_CONTEXT_PATTERN.search(
+            local
+        ):
+            return cls._GPS_STRONG_CONTEXT_PATTERN.search(nearby) is None
+        if cls._GPS_SOFT_CONTEXT_PATTERN.search(local):
+            return False
+        if cls._TECHNICAL_COORDINATE_CONTEXT_PATTERN.search(nearby):
+            return True
+        return not (cls._GPS_STRONG_CONTEXT_PATTERN.search(nearby) or cls._GPS_SOFT_CONTEXT_PATTERN.search(nearby))
 
     @classmethod
     def _is_version_literal(cls, match: re.Match, line: str) -> bool:
@@ -2792,6 +2880,14 @@ class SecurityValidator(ValidatorBase):
         protected_usernames = protected_usernames or set()
         author_emails = author_emails or {}
         comment_lines = comment_lines if comment_lines is not None else _comment_line_numbers(file_path, lines)
+        line_exceptions = exceptions
+        excepted_card_digits: frozenset[str] = frozenset()
+        if category == "credit_cards":
+            # Known test card numbers are compared with each candidate, in any
+            # grouping, so one on a line does not hide a different card number.
+            numeric_exceptions = {exc for exc in exceptions if re.fullmatch(r"[0-9\s-]*[0-9][0-9\s-]*", exc)}
+            excepted_card_digits = frozenset(re.sub(r"[\s-]", "", exc) for exc in numeric_exceptions)
+            line_exceptions = [exc for exc in exceptions if exc not in numeric_exceptions]
         for line_num, line in enumerate(lines, 1):
             if line_num in comment_lines:
                 continue
@@ -2801,8 +2897,20 @@ class SecurityValidator(ValidatorBase):
                 scan_line = re.sub(re.escape(author_email), "author@example.com", line, count=1, flags=re.IGNORECASE)
 
             matches = list(regex.finditer(scan_line))
-            if not matches or any(exc in line for exc in exceptions):
+            if excepted_card_digits:
+                matches = [
+                    match for match in matches if re.sub(r"[\s-]", "", match.group()) not in excepted_card_digits
+                ]
+            if not matches or any(exc in line for exc in line_exceptions):
                 continue
+            if category in ("credit_cards", "phone_numbers"):
+                matches = [match for match in matches if not self._is_numeric_pii_false_positive(category, match, line)]
+                if not matches:
+                    continue
+            if category == "gps_coordinates":
+                context = "\n".join((file_path.name, *lines[max(0, line_num - 3) : line_num]))
+                if self._lacks_geospatial_context(line, context):
+                    continue
             if category == "ip_addresses":
                 matches = [match for match in matches if not self._is_version_literal(match, line)]
                 if not matches:

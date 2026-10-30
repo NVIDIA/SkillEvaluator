@@ -4958,6 +4958,83 @@ class TestFalsePositivePrevention:
         gps_errors = [f for f in result.errors + result.warnings if "gps" in f.lower() or "coordinate" in f.lower()]
         assert len(gps_errors) == 0, f"Low-precision pairs should not be flagged: {gps_errors}"
 
+    @pytest.mark.parametrize(
+        "technical_value",
+        [
+            "waypoint = [0.387236, 0.247973, 0.666778]",
+            "waypoints: [[0.387236, 0.247973], [0.412345, 0.256789]]",
+            "quaternion = [0.707107, 0.000000, 0.707107, 0.000000]",
+            "pose_translation = (37.123456, -12.654321, 4.000000)",
+            "calibration_pair: 12.345678, 45.678901",
+            "coordinates = [0.123456, 0.654321]",
+            "coordinates: [0.123456, 0.654321]",
+            "long vector = 0.123456, 0.654321",
+            "37.123456, -12.654321",
+            '{"type": "feature", "weights": [0.123456, 0.654321]}',
+        ],
+    )
+    def test_gps_shape_requires_geospatial_context(self, tmp_path: Path, technical_value: str):
+        """Precise vectors and unlabeled decimal pairs are not location PII without a geospatial cue."""
+        (tmp_path / "values.txt").write_text(f"{technical_value}\n", encoding="utf-8")
+
+        result = SecurityValidator().validate_pii_only(tmp_path)
+
+        assert not any(finding.check_name == "gps_coordinates" for finding in result.findings)
+
+    @pytest.mark.parametrize(
+        ("filename", "contents"),
+        [
+            ("values.txt", "Location data formats\nquaternion = [0.707107, 0.000000, 0.707107, 0.000000]\n"),
+            ("values.txt", "calibration_location_offset = [0.123456, 0.654321]\n"),
+            ("values.txt", "Pixel coordinates of the office logo\n0.123456, 0.654321\n"),
+            ("robotics_coordinates.txt", "Pick location\n0.123456, 0.654321\n"),
+            ("mesh.json", '{"type": "Mesh", "coordinates": [0.123456, 0.654321]}\n'),
+        ],
+    )
+    def test_gps_technical_context_outweighs_soft_location_cue(self, tmp_path: Path, filename: str, contents: str):
+        """Technical coordinate labels win over location, office, or address wording."""
+        (tmp_path / filename).write_text(contents, encoding="utf-8")
+
+        result = SecurityValidator().validate_pii_only(tmp_path)
+
+        assert not any(finding.check_name == "gps_coordinates" for finding in result.findings)
+
+    @pytest.mark.parametrize(
+        ("filename", "contents"),
+        [
+            ("values.txt", "lng pair: 37.7749, -122.4194\n"),
+            ("values.txt", "LatLng(37.7749, -122.4194)\n"),
+            ("values.yaml", "gps_coordinates: 37.7749,-122.4194\n"),
+            ("values.yaml", "latitude_longitude: 37.7749,-122.4194\n"),
+            ("location.json", '"coordinates": [37.7749, -122.4194]\n'),
+            ("gps_points.txt", "37.7749, -122.4194\n"),
+            ("values.txt", "Head office\n\n37.7749, -122.4194\n"),
+            ("values.txt", "GPS coordinates\nwaypoint = [37.7749, -122.4194]\n"),
+            ("point.json", '{"type": "Point", "coordinates": [-122.4194, 37.7749]}\n'),
+            ("feature.json", '{\n  "type": "Point",\n  "coordinates": [\n    -122.4194, 37.7749\n  ]\n}\n'),
+            ("sorted.json", '{"geometry": {\n  "coordinates": [-122.4194, 37.7749],\n  "type": "Point"}}\n'),
+            ("values.json", '{\n  "type": "Feature",\n  "bbox": [-122.4194, 37.7749, -122.4094, 37.7849]\n}\n'),
+            # Map links, RFC 5870 geo URIs, and combined lat/lon keys are geospatial cues.
+            ("SKILL.md", "Open https://www.google.com/maps/@37.774929,-122.419416,17z to find my house\n"),
+            ("values.txt", "https://www.google.co.uk/maps/@37.7749,-122.4194,15z\n"),
+            ("values.txt", "https://maps.google.com/?q=37.7749,-122.4194\n"),
+            ("values.txt", "https://maps.apple.com/?ll=37.774929,-122.419416\n"),
+            ("values.txt", "https://www.bing.com/maps?cp=37.7749, -122.4194\n"),
+            ("values.txt", "geo:37.774929,-122.419416\n"),
+            ("values.yaml", "latlong: 37.774929, -122.419416\n"),
+            ("values.yaml", "latlon: 37.774929, -122.419416\n"),
+            ("values.yaml", "lonlat: -122.419416, 37.774929\n"),
+            ("values.yaml", "lnglat: -122.419416, 37.774929\n"),
+        ],
+    )
+    def test_gps_coordinates_with_geospatial_context_still_flagged(self, tmp_path: Path, filename: str, contents: str):
+        """A geospatial cue on the line, two lines above, or in the file name keeps the finding."""
+        (tmp_path / filename).write_text(contents, encoding="utf-8")
+
+        result = SecurityValidator().validate_pii_only(tmp_path)
+
+        assert any(finding.check_name == "gps_coordinates" for finding in result.findings)
+
     # --- Phone number false positives ---
 
     def test_phone_bare_ten_digit_run_not_flagged(self, tmp_path: Path):
@@ -4988,7 +5065,118 @@ class TestFalsePositivePrevention:
             f"Formatted phone number should still be flagged: {all_findings}"
         )
 
+    def test_phone_scientific_notation_matrix_not_flagged(self, tmp_path: Path):
+        """The exponent of a scientific-notation value is not an international phone prefix."""
+        (tmp_path / "matrix.txt").write_text(
+            "1.000000e+00 0.000000e+00 0.000000e+00 1.234567e-01\n+1.000000e+00 -2.500000E+03\n",
+            encoding="utf-8",
+        )
+
+        result = SecurityValidator().validate_pii_only(tmp_path)
+
+        assert not any(finding.check_name == "phone_numbers" for finding in result.findings)
+
+    def test_phone_after_scientific_notation_still_flagged(self, tmp_path: Path):
+        """Dropping a candidate inside a scientific literal keeps a real phone later on the line."""
+        (tmp_path / "notes.txt").write_text(
+            "scale 1.000000e+00 0.000000e+00, support +44 20 7946 0958\n",
+            encoding="utf-8",
+        )
+
+        result = SecurityValidator().validate_pii_only(tmp_path)
+
+        phones = [
+            finding.metadata["matched_value"] for finding in result.findings if finding.check_name == "phone_numbers"
+        ]
+        assert phones == ["+44 20 7946 0958"]
+
     # --- Credit card false positives ---
+
+    @pytest.mark.parametrize(
+        "technical_value",
+        [
+            "timestamp_microseconds: 1707938736269577",
+            "epoch nanoseconds = 1707938736269577",
+            '{"unix_time": 1707938736269577}',
+            "sha256: 1707938736269577",
+            "checksum=1707938736269577",
+            "sha256 1707938736269577",
+            '"sha256" "1707938736269577"',
+            f"sha256={'a' * 24}1707938736269577{'b' * 24}",
+            "build id_1707938736269577",
+            "1707938736269577_suffix",
+            # A snake_case prefix still names a timestamp or digest field.
+            "event_timestamp: 1707938736269577",
+            '"created_at_epoch": 1707938736269577',
+            "file_sha256: 1707938736269577",
+        ],
+    )
+    def test_credit_card_shape_in_timestamp_or_hash_context_not_flagged(self, tmp_path: Path, technical_value: str):
+        """A Luhn-valid timestamp, digest, or identifier is not a blocking card number."""
+        (tmp_path / "data.txt").write_text(f"{technical_value}\n", encoding="utf-8")
+
+        result = SecurityValidator().validate_pii_only(tmp_path)
+
+        assert result.passed
+        assert not any(finding.check_name == "credit_cards" for finding in result.findings)
+
+    @pytest.mark.parametrize(
+        ("contents", "card"),
+        [
+            ("timestamp_microseconds: 1707938736269577 card_number: 4532015112830366", "4532015112830366"),
+            ("known=4111111111111111; card_number=4532015112830366", "4532015112830366"),
+            ("Use 4111-1111-1111-1111 or 4532 0151 1283 0366", "4532 0151 1283 0366"),
+            ("checksum verified; card: 4532015112830366", "4532015112830366"),
+            # Markdown underscore emphasis is not an identifier joining the number to a word.
+            ("Use _4532015112830366_ at checkout", "4532015112830366"),
+            ("Use __4532015112830366__ at checkout", "4532015112830366"),
+            # Letters outside ASCII do not hide a card written directly next to them.
+            ("カード番号は4532015112830366です", "4532015112830366"),
+            ("我的卡号是4532015112830366。", "4532015112830366"),
+            ("카드번호는4532015112830366입니다", "4532015112830366"),
+            ("หมายเลขบัตร4532015112830366", "4532015112830366"),
+        ],
+    )
+    def test_credit_card_next_to_technical_or_test_value_still_flagged(self, tmp_path: Path, contents: str, card: str):
+        """A timestamp label, test card, emphasis, or non-ASCII letter excludes no card number next to it."""
+        data_file = tmp_path / "data.txt"
+        data_file.write_text(f"{contents}\n", encoding="utf-8")
+
+        result = SecurityValidator().validate_pii_only(tmp_path)
+
+        assert not result.passed
+        assert [finding.check_name for finding in result.findings].count("credit_cards") == 1
+        # Reports may redact card values, so check the scanner's own candidate.
+        candidates = SecurityValidator()._scan_file_for_pii(data_file)
+        assert [item["matched_value"] for item in candidates if item["category"] == "credit_cards"] == [card]
+
+    @pytest.mark.parametrize("card", ["4111 1111 1111 1111", "5500 0000 0000 0004", "4111111111111111"])
+    def test_known_test_card_in_any_grouping_not_flagged(self, tmp_path: Path, card: str):
+        """Known test card numbers are excepted whether written with spaces, dashes, or no separators."""
+        (tmp_path / "data.txt").write_text(f"Sandbox card: {card}\n", encoding="utf-8")
+
+        result = SecurityValidator().validate_pii_only(tmp_path)
+
+        assert not any(finding.check_name == "credit_cards" for finding in result.findings)
+
+    @pytest.mark.parametrize(
+        "contents",
+        [
+            "Cards: 4111111111111111, 4242424242424242",
+            "Sandbox cards: 378282246310005 and 5555555555554444",
+            "Test cards: 4111-1111-1111-1111 / 5555-5555-5555-4444",
+            "Visa 4012 8888 8888 1881, Mastercard 5105-1051-0510-5100, Discover 6011111111111117",
+            "Debit 4000056655665556, 2-series 2223003122003222, JCB 3530111333300000",
+        ],
+    )
+    def test_line_of_published_test_cards_not_flagged(self, tmp_path: Path, contents: str):
+        """Payment docs that list several published test cards on one line pass the gate."""
+        (tmp_path / "SKILL.md").write_text(f"{contents}\n", encoding="utf-8")
+
+        result = SecurityValidator().validate_pii_only(tmp_path)
+
+        assert result.passed
+        assert not any(finding.check_name == "credit_cards" for finding in result.findings)
 
     def test_credit_card_non_luhn_number_not_flagged(self, tmp_path: Path):
         """16-digit numbers that fail Luhn should not be flagged as credit cards."""

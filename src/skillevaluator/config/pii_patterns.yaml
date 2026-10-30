@@ -91,6 +91,8 @@ phone_numbers:
       - "&id="
       - "Id="
 
+  # A candidate that starts inside a scientific-notation value, such as the
+  # "+00" exponent of "1.000000e+00", is discarded in security.py.
   - pattern: '\+\d{1,3}[\s.-]?\(?\d{1,4}\)?[\s.-]?\d{1,4}[\s.-]?\d{1,9}'
     severity: medium
     description: International phone number
@@ -207,14 +209,23 @@ private_keys:
 
 # Credit card numbers (less common but high severity)
 # Note: Matches are post-validated with the Luhn algorithm in security.py.
-# Numbers that fail Luhn are silently discarded (not valid card numbers).
-# The lookbehind/lookahead reject matches embedded in a longer digit run or
-# immediately preceded by a decimal point -- this prevents floating-point
-# eval scores like "score": 0.8603333333333333 in JSON dumps from being
-# misread as 16-digit card numbers (the 16-digit window 8603333333333333
-# happens to pass Luhn).
+# Numbers that fail Luhn are silently discarded (not valid card numbers), and
+# so are numbers directly after a timestamp or digest label such as
+# "timestamp_microseconds:" or "sha256:"; passing Luhn alone is not payment
+# evidence. Numeric exceptions below are compared with each candidate's digits,
+# so a test card on a line does not hide a different card number next to it.
+# The lookbehind/lookahead reject matches embedded in a longer ASCII
+# alphanumeric token (a hex digest, or an identifier such as id_1707938736269577
+# where an underscore joins the number to a letter or digit) or immediately
+# preceded by a decimal point -- this prevents floating-point eval scores like
+# "score": 0.8603333333333333 in JSON dumps from being misread as 16-digit card
+# numbers (the 16-digit window 8603333333333333 happens to pass Luhn). An
+# underscore next to a space or punctuation, as in Markdown emphasis
+# (_4532015112830366_ or __4532015112830366__), does not hide a card. The
+# classes are ASCII on purpose: Chinese, Japanese, and Korean prose often puts
+# a number directly between letters, and such a card is still reported.
 credit_cards:
-  - pattern: '(?<![\d.])[0-9]{4}[\s-]?[0-9]{4}[\s-]?[0-9]{4}[\s-]?[0-9]{4}(?!\d)'
+  - pattern: '(?<![A-Za-z0-9.])(?<![A-Za-z0-9]_)[0-9]{4}[\s-]?[0-9]{4}[\s-]?[0-9]{4}[\s-]?[0-9]{4}(?![A-Za-z0-9])(?!_[A-Za-z0-9])'
     severity: critical
     description: Possible credit card number
     suggestion: "Remove credit card number - use placeholder like 4111-1111-1111-1111"
@@ -231,12 +242,23 @@ credit_cards:
       - "test card"
       - "test number"
       - "for testing"
-      # Well-known test card numbers (full, not prefix substrings)
+      # Well-known, publicly documented test card numbers (full, not prefix
+      # substrings). Each excepts only a candidate with the same digits, in any
+      # grouping. The 15-digit Amex number never matches the 16-digit pattern
+      # above; it is kept for a future 15-digit pattern.
       - "4111111111111111"
       - "4111-1111-1111-1111"
       - "5500000000000004"
       - "5500-0000-0000-0004"
       - "378282246310005"
+      - "4242424242424242"
+      - "4000056655665556"
+      - "4012888888881881"
+      - "5555555555554444"
+      - "5105105105105100"
+      - "2223003122003222"
+      - "6011111111111117"
+      - "3530111333300000"
 
 # Cryptocurrency addresses
 crypto_addresses:
@@ -264,6 +286,12 @@ mac_addresses:
 # pairs that pepper technical/API reference docs (normalized ROI floats like
 # "0.5, 0.7", scale factors like "1.5, 2.0", etc.) while still flagging genuine
 # location data. The exact-pole forms (90.0 / 180.0) are kept as-is.
+# A match also needs a geospatial cue (GPS, latitude/longitude, lat/lng,
+# latlong/lonlat keys, WGS 84, degrees, a GeoJSON geometry type, a geo: URI, a
+# map link such as google.com/maps or maps.apple.com, or location/office/address)
+# on its line, on one of the two lines before it, or in the file name, so
+# precise vectors, poses, quaternions, calibration values, and waypoints are not
+# reported.
 gps_coordinates:
   - pattern: '[-+]?([1-8]?\d\.\d{4,}|90\.0+)[,\s]+[-+]?(180\.0+|((1[0-7]\d)|([1-9]?\d))\.\d{4,})'
     severity: medium

@@ -30,6 +30,12 @@ The pinned CLI releases apply wherever Harbor installs the agent: Docker and
 the remote environments. [Local mode](#local-mode) runs the CLI already on your
 machine instead.
 
+In Docker and Kata, SkillEvaluator reruns a Claude Code or Codex install that
+fails, for example on a dropped download or a package mirror error. It makes up
+to three attempts, waiting 2 and then 4 seconds, all within Harbor's agent setup
+timeout, so an install that keeps failing still fails the trial. Claude Code on
+GKE, and Codex behind an OpenAI-compatible gateway, are retried the same way.
+
 The `claude` alias is canonicalized to `claude-code` everywhere an agent
 name can appear — `-a/--agents`, `--agent-model`, and `harbor.agents` in
 `evals/config.yml` — so both spellings always name the same agent.

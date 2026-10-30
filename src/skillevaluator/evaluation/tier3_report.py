@@ -19,6 +19,7 @@ from __future__ import annotations
 
 import contextlib
 import json
+import logging
 import math
 from dataclasses import dataclass, field
 from itertools import islice
@@ -41,6 +42,8 @@ from skillevaluator.constants import (
 from skillevaluator.evidence import evidence_ref_identity
 from skillevaluator.models.result import Finding, Severity, ValidationResult
 from skillevaluator.source_identity import resolve_evaluated_source
+
+logger = logging.getLogger(__name__)
 
 # Verdict labels mirror SkillEvaluator's AGENT_EVAL_VERDICT_* values so the ported
 # reporters classify the overall outcome identically.
@@ -598,6 +601,8 @@ def render_agent_eval_html_report(
         raise ValueError(f"No agent results found in {run_dir}")
 
     canonical_payload = result.metadata.get("agent_eval")
+    if isinstance(canonical_payload, dict):
+        _apply_case_findings(canonical_payload, engine_result, run_dir, skill_path, use_llm=use_llm_judge)
     if engine_result is not None and isinstance(canonical_payload, dict):
         # Persist only the compact feedback contract needed by the CLI. The
         # complete canonical payload remains in the HTML report and can be much
@@ -3028,6 +3033,72 @@ def _recommendation_category_from(text: str) -> str:
     return _RECO_CATEGORY_HINTS.get(first, "Action")
 
 
+def _apply_case_findings(
+    payload: dict[str, Any],
+    engine_result: dict[str, Any] | None,
+    run_dir: Path,
+    skill_path: Path,
+    *,
+    use_llm: bool,
+) -> None:
+    """Lead the report with the case-based verdict and fixes; also saves them as what_to_fix.json for the CLI."""
+    from skillevaluator.tier3.case_summary import goal_not_met_count, save_case_findings, what_to_fix
+    from skillevaluator.tier3.case_summary import verdict as case_verdict
+
+    source = engine_result
+    if not isinstance(source, dict):
+        with contextlib.suppress(OSError, ValueError):
+            source = json.loads((run_dir / "result.json").read_text(encoding="utf-8"))
+    if not isinstance(source, dict) or not isinstance(source.get("agents"), dict):
+        return
+    try:
+        fixes = what_to_fix(source, run_dir=run_dir, skill_path=skill_path, use_llm=use_llm)
+        save_case_findings(run_dir, fixes)
+    except Exception:  # advisory: the report keeps its metric-based insights
+        logger.debug("Case findings skipped", exc_info=True)
+        return
+    label, detail = case_verdict(source["agents"])
+    if not label:
+        return
+    message = f"per-case result: {label} ({detail})."
+    agents = payload.get("agents") if isinstance(payload.get("agents"), dict) else {}
+    scores = {
+        n: v for n, a in agents.items() if isinstance(a, dict) and (v := _finite_float(a.get("with_skill"))) is not None
+    }
+    lifts = {n: v for n, a in agents.items() if isinstance(a, dict) and (v := _finite_float(a.get("lift"))) is not None}
+    if len(scores) > 1 and lifts:
+        top, lifted = max(scores, key=scores.__getitem__), max(lifts, key=lifts.__getitem__)
+        message += f" Highest score: {top} {scores[top]:.2f}"
+        message += (
+            f" · biggest skill lift: {lifted} {lifts[lifted]:+.2f}." if lifted != top else " with the biggest lift."
+        )
+    if missed := goal_not_met_count(source, run_dir=run_dir):
+        message += f" {missed} passing with-skill attempt(s) did not meet the goal (goal accuracy 0.00)."
+    severity = "pass" if label == "skill helps" and not fixes else "fail" if label == "skill hurts" else "warn"
+    effect = {"severity": severity, "title": "Skill effect", "message": message, "source": "deterministic"}
+    payload["conclusions"] = [effect, *(payload.get("conclusions") or [])]
+    # Evidence stays plain text: report links are limited to validated Harbor viewer URLs.
+    payload["recommendations"] = [
+        {
+            "title": f"{fix['case']} · {fix['scope']}",
+            "category": fix["kind"],
+            "message": " ".join(
+                part
+                for part in (
+                    f"{fix['what'].rstrip('.')}.",
+                    f"Fix: {fix['action']}" if fix.get("action") else "",
+                    f"Evidence: {fix['evidence']}" if fix.get("evidence") else "",
+                )
+                if part
+            ),
+            "severity": "fail" if fix["kind"] == "skill hurts" else "warn",
+            "source": "deterministic",
+        }
+        for fix in fixes
+    ]
+    payload["suggestions"] = [fix["action"] for fix in fixes if fix.get("action")]
+
+
 def _recommendation_title_from(text: str) -> str:
     """Short title for a deterministic recommendation (first sentence, truncated)."""
     if not isinstance(text, str):
@@ -3050,14 +3121,18 @@ def _build_conclusions(
             best = agents[best_name]
             best_score = _finite_float(best.get("with_skill")) or 0.0
             lift = _finite_float(best.get("lift"))
+            message = f"{best_name} leads with overall score {best_score:.2f}" + (
+                f" and lift {lift:+.2f}." if lift is not None else "."
+            )
+            lifts = {name: value for name, a in agents.items() if (value := _finite_float(a.get("lift"))) is not None}
+            top_lift = max(lifts, key=lifts.__getitem__) if lifts else None
+            if top_lift and top_lift != best_name and lift is not None and lifts[top_lift] > lift:
+                message += f" Biggest skill lift: {top_lift} {lifts[top_lift]:+.2f}."
             conclusions.append(
                 {
                     "severity": "pass" if best_score >= pass_threshold else "warn",
                     "title": "Best performing agent",
-                    "message": (
-                        f"{best_name} leads with overall score {best_score:.2f}"
-                        + (f" and lift {lift:+.2f}." if lift is not None else ".")
-                    ),
+                    "message": message,
                 }
             )
 

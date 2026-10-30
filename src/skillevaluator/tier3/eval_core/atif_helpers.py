@@ -1034,15 +1034,25 @@ def build_metric_evidence_bundles(
     facts_overhead = len(facts_section) + 2 if facts_section else 0
     bc_budget = max(1, budgets["behavior_check"] - facts_overhead)
     bc_text = build_behavior_evidence(traj, question, max_chars=bc_budget)
-    bc_full = build_behavior_evidence(traj, question, max_chars=10**9)
-    bc_trunc = len(bc_full) > len(bc_text)
+    # Compare against a rendering with neither limit applied. The budgeted
+    # rendering also caps the final-response section at its own limit
+    # (independent of max_chars), so comparing two budget renderings shares
+    # that cap and misses content the cap dropped from the middle of a long
+    # final answer: the bundle then reported truncated=False for evidence
+    # that was not complete.
+    bc_full = build_behavior_evidence(traj, question, max_chars=10**9, final_response_limit=10**9)
+    bc_trunc = bc_full != bc_text
     bundles["behavior_check"] = {
         "prompt_evidence": _prepend_facts(bc_text),
         "evidence_refs": refs["behavior_check"],
         "omitted": {
             "count": 1 if bc_trunc else 0,
             "truncated": bc_trunc,
-            "reason": "lower-priority behavior history truncated to fit budget" if bc_trunc else "",
+            "reason": (
+                "behavior evidence shortened to fit the evidence budget or section limits"
+                if bc_trunc
+                else ""
+            ),
         },
         "verified": facts,
     }

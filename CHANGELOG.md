@@ -134,6 +134,13 @@ All notable changes to SkillEvaluator are documented in this file.
 
 ### Fixed
 
+- Tier 3 behavior-check evidence bundles now report truncation truthfully.
+  The omission check compared two renderings that both capped the final
+  response section (800 characters by default), so a long final answer could
+  lose its middle to that cap while the bundle claimed `truncated: false`.
+  The comparison now runs against a rendering with neither the evidence
+  budget nor the final-response section limit applied, in both the host
+  evaluator and the standalone Harbor verifier.
 - Local-mode verifier uploads now copy directly to the absent destination,
   avoiding an unnecessary rollback snapshot of an empty tests directory.
   Inputs and rewritten scripts are prepared privately before publication,

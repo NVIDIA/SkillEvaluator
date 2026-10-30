@@ -747,6 +747,7 @@ class _MemberCollector:
         from skillevaluator.plugin_member_paths import (
             find_bundled_plugin_skill_manifests,
             find_unscanned_plugin_skill_manifests,
+            unscanned_skill_scan_incomplete_finding,
         )
 
         try:
@@ -772,8 +773,11 @@ class _MemberCollector:
             name = parent.as_posix() if str(parent) != "." else rel_dir.name
             component = self._add(PluginMember("skill", name, "declared", skill_dir.as_posix(), "evaluated"))
             self._read_member(component, skill_dir / manifest.relative_path.name)
-        for manifest_rel in find_unscanned_plugin_skill_manifests(self.reader.root, rel_dir.as_posix()):
+        found, complete = find_unscanned_plugin_skill_manifests(self.reader.root, rel_dir.as_posix())
+        for manifest_rel in found:
             self._flag_unscanned_skill(rel_dir, manifest_rel)
+        if not complete and rel_dir.parts[:1] != (DEFAULT_SKILLS_DIR,):
+            self.inventory.findings.append(unscanned_skill_scan_incomplete_finding(self.reader, rel_dir))
 
     def _flag_unscanned_skill(self, rel_dir: PurePosixPath, manifest_rel: PurePosixPath) -> None:
         """HIGH for a skill deep in a skill's own artifact folder that Codex loads from declared folder ``rel_dir``.
@@ -783,7 +787,7 @@ class _MemberCollector:
         """
         if rel_dir.parts[:1] == (DEFAULT_SKILLS_DIR,):
             return
-        if _in_unscanned_folder(manifest_rel.parent):
+        if _in_unscanned_folder(manifest_rel.parent, self.reader.root):
             self.inventory.findings.append(_unscanned_skill_finding(self.reader, manifest_rel))
 
     def _flag_dependency_folder_skills(self, rel_dir: PurePosixPath) -> None:

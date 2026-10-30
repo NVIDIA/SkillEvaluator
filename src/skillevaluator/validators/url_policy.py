@@ -44,8 +44,14 @@ _ENV_EXPANSION_RE = re.compile(
     r"|\$\{user_config\.(?P<user_config>[A-Za-z0-9_.-]+)\}"
     r"|\$(?P<bare>[A-Za-z_][A-Za-z0-9_]*)"
 )
+# How many layers of nested defaults ('${A:-${B:-x}}') looks_like_inline_secret unwraps; each pass unwraps one.
+_MAX_DEFAULT_PASSES = 8
 # What is left of an Authorization-style value once its references are removed: 'Bearer ${TOKEN}'.
 _AUTH_SCHEME_ONLY_RE = re.compile(r"(?i)^\s*(?:bearer|basic|token)?\s*$")
+# What is left of an Authorization header with any scheme once its references are removed: 'ApiKey ${KEY}',
+# 'Bot ${TOKEN}', 'Basic ${USER}:${PASS}'. The blank after the scheme word is where the references were, and
+# only separators may stand between them.
+_AUTH_HEADER_SCHEME_ONLY_RE = re.compile(r"^\s*(?:[A-Za-z][A-Za-z0-9!#$%&'*+.^_`|~-]*\s+)?[^A-Za-z0-9]*$")
 # env keys that name a credential -- their value must be a reference, never a literal.
 # The auth/bearer/token alternatives are suffix-anchored so benign config keys that
 # merely contain those substrings -- AUTH_TYPE, OAUTH_CLIENT_ID, BEARER_FORMAT,
@@ -56,12 +62,15 @@ _SECRET_KEY_RE = re.compile(
     r"|bearer[_-]?token|auth[_-](?:key|token|secret|pass(?:word)?)"
     r"|token(?:[_-](?:secret|key|value|id))?$)"
 )
-# Inline HTTP auth-scheme credential carried in a value (e.g. an Authorization
-# header): "Bearer <token>" / "Basic <base64>" with a real payload. Anchored with a
-# minimum payload length so a "${ENV}" reference or benign prose never matches; this
-# keeps Authorization-style inline secrets covered without keying on the header name.
+# Inline HTTP auth-scheme credential carried in a value under any key: "Bearer <token>" /
+# "Basic <base64>" with a real payload. Anchored with a minimum payload length so a
+# "${ENV}" reference or benign prose never matches. An Authorization header with any
+# other scheme ('Token <hex>', 'ApiKey <base64>') is covered by its name (_QUERY_CREDENTIAL_KEYS).
 _INLINE_AUTH_SCHEME_RE = re.compile(r"(?i)^(?:bearer|basic)\s+[A-Za-z0-9+/._=~-]{12,}$")
 # Known inline-secret value shapes. Only ``search`` truthiness is used.
+#
+# 'sk-' is a legacy OpenAI key, or a current one with a typed prefix: Anthropic 'sk-ant-api03-' and
+# 'sk-ant-admin01-', OpenAI 'sk-proj-', 'sk-svcacct-', and 'sk-admin-'.
 #
 # The short prefixes 'sk-', 'hf_', and 'npm_' also end ordinary words and ids
 # ('task-<hex>', 'disk-<hex>', 'pnpm_...'), so they match only where a word
@@ -75,7 +84,7 @@ _INLINE_AUTH_SCHEME_RE = re.compile(r"(?i)^(?:bearer|basic)\s+[A-Za-z0-9+/._=~-]
 # tried at every ``eyJ`` and scanned to the end of the run each time, which is
 # quadratic on a long ``eyJeyJ...`` value (about 1 s per 64 KB value).
 _SECRET_VALUE_RE = re.compile(
-    r"((?<![A-Za-z0-9_-])sk-[A-Za-z0-9]{16,}"
+    r"((?<![A-Za-z0-9_-])sk-(?:[A-Za-z0-9]{16,}|(?:ant-[a-z]+\d*|proj|svcacct|admin)-[A-Za-z0-9_-]{20,})"
     r"|gh[pousr]_[A-Za-z0-9]{20,}"
     r"|github_pat_[A-Za-z0-9_]{22,}"
     r"|glpat-[A-Za-z0-9_-]{20,}"
@@ -103,10 +112,11 @@ _CREDENTIAL_KEYS_EXACT = frozenset(
         "credentials",
     }
 )
-# Keys that name a credential in a URL query or an HTTP header (Google's 'key=', a signed URL's 'sig='), but
-# are often a setting as a flag or env name ('--key primary', '--pass 2', '--signature sha256'). There the value
-# must also look like secret material.
-_QUERY_CREDENTIAL_KEYS = frozenset({"key", "sig", "signature", "pass", "pwd"})
+# Keys that name a credential in a URL query or an HTTP header (Google's 'key=', a signed URL's 'sig=', the
+# Authorization header whatever its scheme), but are often a setting as a flag or env name ('--key primary',
+# '--pass 2', '--signature sha256'). There the value must also look like secret material.
+_AUTHORIZATION_KEYS = frozenset({"authorization", "proxy-authorization"})
+_QUERY_CREDENTIAL_KEYS = frozenset({"key", "sig", "signature", "pass", "pwd"}) | _AUTHORIZATION_KEYS
 # A last key word that makes a credential noun a setting about the credential, not the credential:
 # PASSWORD_POLICY, DB_PASSWORD_FILE, SECRET_NAME, API_KEY_PATH, PASSWORD_MIN_LENGTH.
 _NON_CREDENTIAL_QUALIFIERS = frozenset(
@@ -255,7 +265,7 @@ def is_credential_key(key: str, *, query: bool = False) -> bool:
     A key whose last word makes it a setting (``PASSWORD_POLICY``,
     ``DB_PASSWORD_FILE``) does not. With ``query`` (a URL query parameter or an
     HTTP header name) the short keys ``key``, ``sig``, ``signature``, ``pass``,
-    and ``pwd`` count too.
+    and ``pwd`` count too, and so do ``Authorization`` and ``Proxy-Authorization``.
     """
     text = str(key).strip().lstrip("-")
     if text.lower() in _CREDENTIAL_KEYS_EXACT or (query and text.lower() in _QUERY_CREDENTIAL_KEYS):
@@ -270,8 +280,10 @@ def looks_like_inline_secret(key: str, value: str, *, query: bool = True) -> boo
     """True when a keyed value is an inline credential rather than a reference.
 
     A value shaped like a secret counts under any key, including an inline
-    ``Bearer``/``Basic`` credential (so Authorization-style headers are covered
-    without keying on the header name). A non-empty literal counts under a
+    ``Bearer``/``Basic`` credential. An ``Authorization`` header (``query``)
+    names a credential whatever its scheme (``Token <hex>``, ``ApiKey ...``, a
+    raw value); a scheme word followed by references (``ApiKey ${KEY}``) is not
+    one. A non-empty literal counts under a
     credential-named key (:func:`is_credential_key`) unless it is a setting: a
     boolean, an auth mode such as ``basic``, or a path. A short key such as
     ``KEY`` or ``--pass`` counts only with a value that looks like key material
@@ -282,16 +294,26 @@ def looks_like_inline_secret(key: str, value: str, *, query: bool = True) -> boo
     ``query`` says the key is a URL query parameter or an HTTP header name, where
     ``key=`` or ``sig=`` names a credential on its own; pass ``False`` for an env
     name or a command flag.
+
+    Each pass unwraps one layer of nested defaults (``${A:-${B:-x}}``); after
+    ``_MAX_DEFAULT_PASSES`` the text left, references and all, is judged as a
+    literal, so deep nesting cannot hide a value or exhaust the stack.
     """
     text = value.strip()
-    if not text or is_env_reference(text):
-        return False
-    if _ENV_EXPANSION_RE.search(text):
+    for _pass in range(_MAX_DEFAULT_PASSES):
+        if not text or is_env_reference(text):
+            return False
+        if not _ENV_EXPANSION_RE.search(text):
+            break
         # Judge only what the plugin ships: the literal text around the references and their defaults.
         literal = env_defaults_text(text)
-        if _AUTH_SCHEME_ONLY_RE.match(literal):
+        if _AUTH_SCHEME_ONLY_RE.match(literal) or (
+            _is_authorization_key(key) and _AUTH_HEADER_SCHEME_ONLY_RE.match(literal)
+        ):
             return False
-        return looks_like_inline_secret(key, literal, query=query)
+        text = literal.strip()
+    if not text or is_env_reference(text):
+        return False
     if has_secret_shape(text):
         return True
     if is_credential_key(str(key), query=query):
@@ -335,6 +357,11 @@ def looks_like_random_secret(key: str, value: str) -> bool:
 def _key_words(key: str) -> list[str]:
     """Lower-case words of an env name, header, flag, or camelCase key (``clientSecret`` -> client, secret)."""
     return [word.lower() for word in _KEY_WORD_RE.findall(str(key))]
+
+
+def _is_authorization_key(key: str) -> bool:
+    """``Authorization`` or ``Proxy-Authorization``, in any case."""
+    return str(key).strip().lower() in _AUTHORIZATION_KEYS
 
 
 def _is_query_credential_key(key: str) -> bool:
@@ -637,6 +664,10 @@ _TRUNCATED = "...<truncated>"
 def report_text(value: str, limit: int = MAX_REPORT_CHARS) -> str:
     """Report text: whitespace collapsed, URL ``user:password@`` removed, credentials redacted, length bounded.
 
+    URL userinfo goes after ``//`` and after a special scheme (``https:``,
+    ``wss:``, ...) followed by any run of ``/`` or ``\\``, which WHATWG clients
+    read as an authority too.
+
     Userinfo is removed from the whole text; only a window of twice the limit is
     redacted (the result keeps at most ``limit`` characters), because the
     redaction patterns can take quadratic time on long unbroken input. A token
@@ -646,6 +677,8 @@ def report_text(value: str, limit: int = MAX_REPORT_CHARS) -> str:
     inline-credential checks know (``ghp_…``, ``glpat-…``, ``xoxe-…``, ...) is.
     """
     text = _URL_USERINFO_RE.sub("//", " ".join(value.split()))
+    # A special scheme followed by fewer than two '/' ('https:/user:pw@host') introduces userinfo too.
+    text = _SLASHLESS_USERINFO_RE.sub(r"\1", text)
     window = text[: 2 * limit]
     cut = len(window) < len(text)
     if cut:
@@ -699,10 +732,11 @@ _ECHOED_QUOTED_CREDENTIAL_RE = re.compile(
     r"(?i)(\b(?>[A-Z0-9_]*?(?:TOKEN|SECRET|PASSW(?:OR)?D|API_?KEY|ACCESS_?KEY|PRIVATE_?KEY))[A-Z0-9_]*+"
     r"(?:['\"]\]?)?[ \t]*+[=:][ \t]*+(['\"]))(?!\$)[^'\"\r\n]*+(?=\2)"
 )
-# A WHATWG client reads 'https:user:pw@host' (a special scheme with no slashes) as user information too. The user
-# information stops at the next such scheme, so each scheme is read once ('https:' repeated stays linear).
+# A WHATWG client skips any run of '/' and '\' after a special scheme, so it reads 'https:user:pw@host',
+# 'https:/user:pw@host', and 'https:\user:pw@host' as user information too. The user information stops at the
+# next such scheme, so each scheme is read once ('https:' repeated stays linear).
 _SLASHLESS_USERINFO_RE = re.compile(
-    r"(?i)(?<![a-z0-9+.\-])((?:https?|wss?|ftp):)(?![/\\])"
+    r"(?i)(?<![a-z0-9+.\-])((?:https?|wss?|ftp):[/\\]*+)"
     r"(?:(?!(?:https?|wss?|ftp):)[^\s/\\?#@{}'\"<>])*+@"
 )
 # 'user:password@host/path' with no scheme, starting a word (a container image with registry credentials). The
@@ -715,7 +749,7 @@ _SCHEMELESS_USERINFO_RE = re.compile(r"""(?<![^\s'"=])([^\s/@:'"=]++:)[^\s/@:'"]
 def redact_secrets(text: str) -> str:
     """``text`` (a command token, spec, or line, or a quoted code snippet) with its credentials removed.
 
-    URL userinfo (also in ``https:user:pw@host``) and queries are dropped (a
+    URL userinfo (also in ``https:user:pw@host`` and ``https:/user:pw@host``) and queries are dropped (a
     fragment such as a git ref stays), the password of a scheme-less
     ``user:pw@host/path`` is redacted, and known secret shapes (``ghp_...``,
     ``sk-...``, a JWT), ``Bearer <token>``, the value after a credential-named
@@ -804,10 +838,11 @@ def safe_url(url: str) -> str:
     SDKs) reads it, so the report names the host a client would actually contact.
     The userinfo of the raw text is removed first (:func:`without_userinfo`), so
     text the URL holds as its userinfo is never shown, even where a backslash
-    makes a client read it as the host. A token in the path is redacted like any
-    other report text (:func:`report_text`).
+    makes a client read it as the host, or where fewer than two slashes follow
+    the scheme (``https:/user:pw@host``). A token in the path is redacted like
+    any other report text (:func:`report_text`).
     """
-    text = without_userinfo(url)
+    text = without_userinfo(_with_authority_slashes(url))
     try:
         parsed = urlparse(whatwg_url(text))
         host = parsed.hostname or ""
@@ -818,6 +853,21 @@ def safe_url(url: str) -> str:
         return _unparsed_url(text)
     display_host = f"[{host}]" if ":" in host else host
     return report_text(f"{parsed.scheme}://{display_host}{port}{parsed.path}")
+
+
+def _with_authority_slashes(url: str) -> str:
+    """A special-scheme ``url`` trimmed as WHATWG trims it, with the run of ``/`` and ``\\`` after the scheme as ``//``.
+
+    A WHATWG client reads ``https:/user:pw@host`` and ``https:\\user:pw@host``
+    as ``https://user:pw@host``; written this way, :func:`without_userinfo` and
+    :func:`_unparsed_url` find that authority. Any other ``url`` comes back as is.
+    """
+    text = _TAB_OR_NEWLINE_RE.sub("", url.strip(_C0_CONTROL_OR_SPACE))
+    scheme = url_scheme(text)
+    if scheme not in _WHATWG_SPECIAL_SCHEMES:
+        return url
+    rest = text[len(scheme) + 1 :].lstrip("/\\")
+    return f"{text[: len(scheme) + 1]}//{rest}"
 
 
 def _unparsed_url(url: str) -> str:

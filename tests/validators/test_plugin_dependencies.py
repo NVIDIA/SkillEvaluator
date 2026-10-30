@@ -15,11 +15,13 @@ import pytest
 from skillevaluator.plugin_dependencies import (
     CAUSE_SOURCE,
     CAUSE_UNSAFE,
+    MAX_REF_LABEL_CHARS,
     REMOTE_REF_SOURCES,
     RepositoryIdentity,
     classify_plugin_dependencies,
     classify_ref,
     local_repo_slug,
+    record_unverified_dependencies,
     resolve_repository_identity,
     unverified_groups,
 )
@@ -130,6 +132,12 @@ def test_repository_identity_runs_two_git_commands(tmp_path: Path, monkeypatch: 
         # An SCP-style remote without a user gave the slug "github.com:example-org/example-repo", so every
         # same-repository ref was "external" and a missing one passed.
         ("github.com:Example-Org/example-repo.git", REPO),
+        # git reads any "host:path" with no slash before the colon as SSH, so an SSH config alias names a
+        # hosted repository; it was reported as a local path, leaving every same-repository ref unresolved.
+        ("work-github:Example-Org/example-repo.git", REPO),
+        ("gh:Example-Org/example-repo.git", REPO),
+        ("C:/srv/git/example-repo.git", None),
+        ("C:\\srv\\git\\example-repo.git", None),
         ("ssh://git@github.com/Example-Org/example-repo.git", REPO),
         # http:// and git:// origins name their repository as well as https:// does.
         ("http://github.com/Example-Org/example-repo.git", REPO),
@@ -247,3 +255,103 @@ def test_nul_dependency_paths_are_unresolved_instead_of_raising(tmp_path: Path, 
     assert resolution.skills[0].state == "unresolved"
     assert resolution.skills[0].cause == CAUSE_UNSAFE
     assert resolution.skills[0].path is None
+
+
+@requires_git
+@pytest.mark.parametrize(
+    ("origin", "slug", "reason"),
+    [
+        ("https://git.example.org/\u00e9quipe/catalog.git", "\u00e9quipe/catalog", None),
+        # UTF-8 "\u041d" ends in 0x9D, which the cp1252 code page cannot decode.
+        ("C:/Users/\u041d\u0430\u0442\u0430\u043b\u044c\u044f/src/catalog", None, "is a local path"),
+    ],
+)
+def test_origin_url_is_decoded_as_utf8_whatever_the_locale(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, origin: str, slug: str | None, reason: str | None
+) -> None:
+    """On Windows ``text=True`` decodes with the ANSI code page; git prints the URL as UTF-8."""
+    repo = _git_repo(tmp_path / "repo", origin=origin)
+    real_check_output = subprocess.check_output
+
+    def windows_default_check_output(args, *more, **kwargs):
+        if kwargs.get("text") and "encoding" not in kwargs:
+            kwargs["encoding"] = "cp1252"
+        return real_check_output(args, *more, **kwargs)
+
+    monkeypatch.setattr(subprocess, "check_output", windows_default_check_output)
+
+    identity = resolve_repository_identity(repo, repo_root=repo)
+
+    assert identity.local_slug == slug
+    assert (reason is None) == (identity.reason is None)
+    if reason is not None:
+        assert reason in identity.reason
+
+
+@pytest.mark.parametrize(
+    "ref",
+    [
+        f"github::{REPO}::.git::config",
+        {"source": "github", "repo": REPO, "path": ".git/config"},
+        f"github::{REPO}::.git::HEAD",
+        f"github::{REPO}::.GIT::config",
+        f"github::{REPO}::node_modules::pkg/index.js",
+        f"github::{REPO}::rules::.git/config",
+    ],
+)
+def test_plugin_at_the_repository_root_cannot_provide_never_content_folders(tmp_path: Path, ref) -> None:
+    """Inside a repository-root plugin every path is in the plugin, so .git/config was "provided"."""
+    (tmp_path / ".git").mkdir()
+    (tmp_path / ".git" / "config").write_text("[core]\n", encoding="utf-8")
+    (tmp_path / ".git" / "HEAD").write_text("ref: refs/heads/main\n", encoding="utf-8")
+    (tmp_path / "node_modules" / "pkg").mkdir(parents=True)
+    (tmp_path / "node_modules" / "pkg" / "index.js").write_text("x\n", encoding="utf-8")
+    (tmp_path / "rules" / ".git").mkdir(parents=True)
+    (tmp_path / "rules" / ".git" / "config").write_text("[core]\n", encoding="utf-8")
+    (tmp_path / "rules" / "ok.md").write_text("rule\n", encoding="utf-8")
+    identity = RepositoryIdentity(clone_root=tmp_path, local_slug=REPO)
+
+    row = classify_ref(ref, kind="rules", plugin_root=tmp_path, identity=identity)
+    bundled = classify_ref(f"github::{REPO}::rules::ok.md", kind="rules", plugin_root=tmp_path, identity=identity)
+
+    assert (row.state, row.path, row.cause) == ("unresolved", None, CAUSE_UNSAFE)
+    assert "never holds plugin content" in row.reason
+    assert (bundled.state, bundled.path) == ("provided", "rules/ok.md")
+
+
+class _Result:
+    def __init__(self) -> None:
+        self.findings: list = []
+        self.messages: list[str] = []
+
+    def add_finding(self, finding) -> None:
+        self.findings.append(finding)
+
+    def add_message(self, message: str) -> None:
+        self.messages.append(message)
+
+
+def test_reasons_and_findings_obey_the_ref_label_cap(tmp_path: Path) -> None:
+    (tmp_path / "skills").mkdir()
+    long_name = "/".join(["a" * 200] * 200)
+    refs = [
+        f"github::{REPO}::skills::{long_name}",
+        f"github::{REPO}::skills::{long_name}/../y",
+        f"github::{REPO}::{'k' * 50_000}::x",
+        f"github::{'o' * 50_000}/repo::skills::x",
+        {"source": "github", "repo": REPO, "path": "skills/" + "../" * 5_000},
+        f"{'s' * 50_000}::{REPO}::skills::x",
+    ]
+    identity = RepositoryIdentity(clone_root=tmp_path, local_slug=REPO)
+
+    resolution = classify_plugin_dependencies({"skills": {"refs": refs}}, tmp_path / "plugins" / "p", identity)
+    result = _Result()
+    record_unverified_dependencies(resolution, "agent_plugin.yaml", result)
+
+    bound = 3 * MAX_REF_LABEL_CHARS + 400
+    assert len(resolution.skills) == len(refs)
+    assert all(len(row.ref) <= MAX_REF_LABEL_CHARS for row in resolution.skills)
+    assert all(len(row.reason) <= bound for row in resolution.skills), [len(r.reason) for r in resolution.skills]
+    assert result.findings
+    assert all(len(finding.message) <= 2 * bound for finding in result.findings)
+    assert len(json.dumps(resolution.to_metadata())) <= len(refs) * 2 * bound

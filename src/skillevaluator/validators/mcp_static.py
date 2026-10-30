@@ -507,6 +507,30 @@ _COMMAND_LINE_PARSERS: dict[str, frozenset[str]] = {
     "powershell": frozenset({"-c", "-command", "-commandwithargs"}),
     "pwsh": frozenset({"-c", "-command", "-commandwithargs"}),
 }
+_POWERSHELL_SWITCH_RE = re.compile(r"^--?(?P<name>[a-z]+)$")
+
+
+def _powershell_switch(token: str) -> str | None:
+    """``"command"`` or ``"encoded"`` for a PowerShell switch that runs an inline program, else ``None``.
+
+    PowerShell accepts any prefix of a switch name it can resolve, so ``-Comm``
+    is ``-Command``; ``-e``, ``-ec``, and ``-enc`` are ``-EncodedCommand``.
+    """
+    match = _POWERSHELL_SWITCH_RE.match(token.strip().lower())
+    name = match.group("name") if match else ""
+    if name and ("command".startswith(name) or "commandwithargs".startswith(name) or name == "cwa"):
+        return "command"
+    if name == "ec" or (name and "encodedcommand".startswith(name)):
+        return "encoded"
+    return None
+
+
+def _command_line_switch(base: str, token: str) -> bool:
+    """Whether ``token`` is a switch of command-line parser ``base`` that takes the rest as a command line."""
+    if base in ("powershell", "pwsh"):
+        return _powershell_switch(token) == "command"
+    switches = _COMMAND_LINE_PARSERS.get(base)
+    return switches is not None and token.lower() in switches
 
 
 def _parses_shell_operators(argv: list[str]) -> bool:
@@ -514,8 +538,17 @@ def _parses_shell_operators(argv: list[str]) -> bool:
     if not argv:
         return False
     inner = unwrap_launch_command(_launch_argv(argv[0], argv[1:]), expand_shell=False, stop_at=_COMMAND_LINE_PARSERS)
-    switches = _COMMAND_LINE_PARSERS.get(_command_basename(inner[0])) if inner else None
-    return switches is not None and any(token.lower() in switches for token in inner[1:])
+    base = _command_basename(inner[0]) if inner else ""
+    return any(_command_line_switch(base, token) for token in inner[1:])
+
+
+def _powershell_encoded_command(argv: list[str]) -> bool:
+    """Whether ``argv`` runs PowerShell with ``-EncodedCommand``: a base64 program that cannot be read statically."""
+    return (
+        bool(argv)
+        and _command_basename(argv[0]) in ("powershell", "pwsh")
+        and any(_powershell_switch(token) == "encoded" for token in argv[1:])
+    )
 
 
 def _interpreter_inline_code(argv: list[str]) -> str | None:
@@ -542,6 +575,120 @@ def _interpreter_inline_code(argv: list[str]) -> str | None:
             return argv[index + 1] if index + 1 < len(argv) else None
         index += 2 if token in _INTERPRETER_VALUE_OPTIONS else 1
     return None
+
+
+# 'su -c <line>' runs the line through the target user's shell.
+_SU_COMMAND_OPTIONS = frozenset({"-c", "--command", "--session-command"})
+
+
+def _inner_shell_argv(argv: list[str]) -> list[str] | None:
+    """The shell argv that ``argv`` starts with an inline program, also behind a launcher outside the known wrappers.
+
+    ``uv run bash -c``, ``wsl bash -c``, ``wsl -e sh -c``, and ``taskset 0x1 bash -c``
+    start a shell; ``su -c <line> user`` runs the line in the user's shell. Any
+    shell word followed by its ``-c`` counts (fail closed).
+    """
+    for index, word in enumerate(argv):
+        base = _command_basename(word)
+        if base in _SHELL_INTERPRETERS and _shell_inline(argv[index:])[0]:
+            return argv[index:]
+        if base == "su":
+            for position, option in enumerate(argv[index + 1 :], start=index + 1):
+                name, equals, value = option.partition("=")
+                if name in _SU_COMMAND_OPTIONS:
+                    line = value if equals else (argv[position + 1] if position + 1 < len(argv) else "")
+                    return [word, "-c", line]
+    return None
+
+
+# Package runner options whose value is the registry, index, or links page packages come from (npm, pnpm, uv, pip).
+_REGISTRY_URL_OPTIONS = frozenset(
+    {"--registry", "--index-url", "--index", "--default-index", "--extra-index-url", "-i", "--find-links", "-f"}
+)
+_PACKAGE_RUNNERS = frozenset({"npx", "bunx", "pnpx", "bun", "pnpm", "yarn", "npm", "uvx", "uv", "pipx", "pip", "pip3"})
+
+
+def _plaintext_registry_urls(argv: list[str]) -> list[tuple[str, str]]:
+    """``(option, url)`` for each registry or index URL of a package runner that uses plaintext http.
+
+    A loopback host (a local registry mirror) does not cross a network and is not reported, as for MCP URLs.
+    """
+    if not argv or _command_basename(argv[0]) not in _PACKAGE_RUNNERS:
+        return []
+    found: list[tuple[str, str]] = []
+    for index, word in enumerate(argv[1:], start=1):
+        name, equals, value = word.partition("=")
+        if name not in _REGISTRY_URL_OPTIONS:
+            continue
+        if not equals:
+            value = argv[index + 1] if index + 1 < len(argv) else ""
+        # uv's '--index name=url' names the index before its URL.
+        for match in _URL_IN_TEXT_RE.finditer(value):
+            url = match.group(0)
+            if url_scheme(url) != "http":
+                continue
+            with contextlib.suppress(ValueError):
+                endpoint = classify_endpoint_host(urlparse(whatwg_url(url)).hostname or "")
+                if endpoint is not None and endpoint.is_loopback:
+                    continue
+            found.append((name, url))
+    return found
+
+
+# npx and npm exec run the value of '-c'/'--call' through npm's script shell; pnpm dlx '-c'/'--shell-mode' runs
+# its command in a shell.
+_NPM_CALL_OPTIONS = frozenset({"-c", "--call"})
+_PNPM_SHELL_MODE_OPTIONS = frozenset({"-c", "--shell-mode"})
+
+
+def _npm_call_value(args: list[str], *, until_positional: bool) -> str | None:
+    """The value of npm's ``-c``/``--call`` among a runner's options (npm exec reads them anywhere before ``--``)."""
+    index = 0
+    while index < len(args):
+        word = args[index]
+        index += 1
+        if word == "--":
+            return None
+        if word == "-" or not word.startswith("-"):
+            if until_positional:
+                return None
+            continue
+        name, equals, value = word.partition("=")
+        if name in _NPM_CALL_OPTIONS:
+            return value if equals else (args[index] if index < len(args) else "")
+        if not equals and (
+            name in _NPX_VALUE_FLAGS
+            or (name not in _NPM_SWITCHES and index < len(args) and not args[index].startswith("-"))
+        ):
+            index += 1  # an option value, as _npm_invocation reads it
+    return None
+
+
+def _runner_shell_line(argv: list[str]) -> tuple[str, str] | None:
+    """``(runner, line)`` when a package runner runs a shell command line.
+
+    ``npx -c <line>``, ``npm exec --call <line>`` (also ``npm x``), and
+    ``pnpm dlx --shell-mode <command>`` (``-c`` may also come before ``dlx``).
+    """
+    if not argv:
+        return None
+    base, args = _command_basename(argv[0]), argv[1:]
+    line: str | None = None
+    if base == "npx":
+        line = _npm_call_value(args, until_positional=True)
+    elif base == "npm":
+        sub, _rest = _subcommand(args, _NPM_GLOBAL_VALUE_FLAGS)
+        line = _npm_call_value(args, until_positional=False) if sub in {"exec", "x"} else None
+        base = "npm exec"
+    elif base == "pnpm":
+        sub, rest = _subcommand(args, _DLX_VALUE_FLAGS)
+        if sub == "dlx":
+            before = args[: len(args) - len(rest) - 1]
+            options = [*before, *rest[: _skip_options(rest, _DLX_VALUE_FLAGS)]]
+            if any(word.partition("=")[0] in _PNPM_SHELL_MODE_OPTIONS for word in options):
+                line = _first_positional(rest, _DLX_VALUE_FLAGS) or ""
+        base = "pnpm dlx"
+    return None if line is None else (base, line)
 
 
 def validate_mcp_command(name: str, config: dict[str, Any], file_path: str, findings: list[Finding]) -> None:
@@ -604,10 +751,14 @@ def _check_command(server: _ServerFindings, config: dict[str, Any]) -> None:
     # 'sudo sh -c', 'cmd /c sh -c'). A shell's '-c' program and an interpreter's inline program ('python -c',
     # 'node -e') are code, so their text is checked like a shell line.
     launched = unwrap_launch_command(_launch_argv(command, arg_list), expand_shell=False)
-    runs_shell_program, shell_text_program = (
-        _shell_inline(launched) if launched and _command_basename(launched[0]) in _SHELL_INTERPRETERS else (False, None)
-    )
-    programs = [program for program in (shell_text_program, _interpreter_inline_code(launched)) if program]
+    shell_argv = _inner_shell_argv(launched)
+    runs_shell_program, shell_text_program = _shell_inline(shell_argv) if shell_argv else (False, None)
+    runner_shell = _runner_shell_line(launched)
+    programs = [
+        program
+        for program in (shell_text_program, _interpreter_inline_code(launched), runner_shell and runner_shell[1])
+        if program
+    ]
     # MCP clients start the server argv-style, without a shell, so an operator inside one argument ('foo|bar',
     # a PEP 440 range '>=1.2,<2') is plain text. Operators count in 'command' itself (a shell line smuggled into
     # the executable), in the arguments of a command-line wrapper that does parse them ('cmd /c', PowerShell),
@@ -669,9 +820,32 @@ def _check_command(server: _ServerFindings, config: dict[str, Any]) -> None:
             'Pass the secret by reference (e.g. "${MY_TOKEN}"); never inline a raw credential in args.',
         )
 
+    if _powershell_encoded_command(launched):
+        server.report(
+            Severity.CRITICAL,
+            "mcp_command_dangerous_form",
+            f"command runs PowerShell with -EncodedCommand ({_shown(launched[0])!r}); its base64 program cannot be "
+            "read statically",
+            "Invoke the server binary directly instead of passing PowerShell an encoded program.",
+        )
+    for option, url in _plaintext_registry_urls(launched):
+        server.report(
+            Severity.HIGH,
+            "mcp_command_insecure_registry",
+            f"package runner option {_shown(option, 40)!r} fetches packages over plaintext http: {safe_url(url)!r}; "
+            "anyone on the network path can replace the package and its integrity metadata",
+            "Use an https:// registry or package index URL.",
+        )
+    if runner_shell is not None:
+        server.report(
+            Severity.CRITICAL,
+            "mcp_command_dangerous_form",
+            f"command runs a shell command line through {runner_shell[0]!r}; this executes an arbitrary program string",
+            "Run the package's own binary instead of passing the runner a shell command line.",
+        )
     # Shell interpreter invoked with an inline program string ('sh -c "..."', 'bash -lc', 'env sh -c', 'sudo sh -c').
-    if runs_shell_program:
-        shell, wrapper = launched[0], _launch_argv(command, arg_list)[0]
+    if runs_shell_program and shell_argv:
+        shell, wrapper = shell_argv[0], _launch_argv(command, arg_list)[0]
         through = "" if wrapper == shell else f" through {_shown(wrapper)!r}"
         server.report(
             Severity.CRITICAL,
@@ -1528,8 +1702,7 @@ def unwrap_launch_command(tokens: list[str], *, expand_shell: bool = True, stop_
         if base in stops:
             return current
         if base in _COMMAND_LINE_PARSERS:
-            switches = _COMMAND_LINE_PARSERS[base]
-            switch = next((index for index, token in enumerate(rest) if token.lower() in switches), None)
+            switch = next((index for index, token in enumerate(rest) if _command_line_switch(base, token)), None)
             if switch is None:
                 return current
             line = rest[switch + 1 :]

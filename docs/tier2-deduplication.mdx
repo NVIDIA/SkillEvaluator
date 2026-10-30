@@ -245,6 +245,31 @@ existing set — save the collection once and query candidates against it.
   </Step>
 </Steps>
 
+Re-screening a skill that is already in the catalog does not report it as a
+duplicate of its own entry. A catalog does not record the directory it was
+built from, so an entry is skipped as the candidate's own only when all of
+these hold:
+
+- Its content fingerprint matches what the query compares: the name and
+  description, or the whole `SKILL.md` with `--full-body`.
+- Its path ends the candidate's path — `alpha` for `./skills/alpha` in a
+  catalog built from `./skills` — which locates the catalog's tree around the
+  candidate.
+- Of up to eight other catalog skills, checked in path order, more than half
+  are present unchanged at their recorded paths in that tree, without
+  symlinks. Skills that contain the candidate or are nested inside it are not
+  checked, because a copied folder carries them too.
+
+At most one entry is skipped, and the result records it under
+`excluded_catalog_paths`. A catalog with no other skill entry never skips one.
+A verbatim copy elsewhere — in a staging folder, another repository, or a new
+folder of the same repository — is still compared and reported, unless it sits
+in a copy of most of the catalog's tree, such as a second checkout of the same
+repository, which counts as the same tree. An edited skill whose compared
+content changed no longer matches its old entry and is compared with it like
+any other skill; to screen edited skills, build the catalog from the same tree
+you screen.
+
 Catalogs contain finite embedding vectors, relative skill paths, display names,
 descriptions, content fingerprints, and provider, model, mode, and
 endpoint-fingerprint metadata for compatibility checks. They never contain API

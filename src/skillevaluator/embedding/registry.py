@@ -49,12 +49,13 @@ from skillevaluator.embedding.extractor import (
     MAX_MANIFEST_BYTES,
     ContentEntry,
     discover_and_extract,
+    extract_from_skill,
 )
 from skillevaluator.embedding.limits import validate_max_entries, validate_max_scalar_comparisons
 from skillevaluator.logging_config import get_logger
 from skillevaluator.models.result import Severity
 from skillevaluator.utils.path_security import canonicalize_trusted_root_alias
-from skillevaluator.utils.tier2_paths import safe_path_label
+from skillevaluator.utils.tier2_paths import is_link_or_reparse, safe_path_label
 
 logger = get_logger(__name__)
 
@@ -67,6 +68,10 @@ EMBEDDING_BATCH_SIZE = 64
 MAX_DESCRIPTION_EMBEDDING_TEXT_CHARS = 16_384
 MAX_FULL_BODY_EMBEDDING_TEXT_BYTES = MAX_MANIFEST_BYTES
 MAX_SIMILARITY_MATCHES = 1_000
+# At most this many other catalog skills are read under a target's inferred
+# scan root before its own entry is skipped; more than half must be present
+# there unchanged. Each read is bounded by MAX_MANIFEST_BYTES.
+SELF_ENTRY_SAMPLE_SIZE = 8
 _SHA256_PATTERN = re.compile(r"^[0-9a-f]{64}$")
 _ENDPOINT_FINGERPRINT_PATTERN = re.compile(r"^sha256:[0-9a-f]{64}$")
 _CATALOG_CONTENT_TYPES = {
@@ -346,8 +351,86 @@ class EmbeddingRegistry:
         matches.sort(key=lambda m: m.score, reverse=True)
         return matches
 
-    def query_entry(self, entry: ContentEntry, threshold: float) -> list[SimilarityMatch]:
-        """Compare one extracted target entry against every catalog entry."""
+    def catalog_self_entry(self, target: ContentEntry) -> RegistryEntry | None:
+        """Return the catalog entry that records *target* itself, if any.
+
+        Catalog paths are relative to a scan root the catalog does not record,
+        so an entry counts as the target only with positive evidence that the
+        target sits at that path in the tree the catalog was built from:
+
+        - its content fingerprint matches the target in this registry's mode;
+        - its path ends the target's resolved directory path, which infers the
+          scan root (the longest such path wins; a case-only difference counts
+          when both spellings name the same directory); and
+        - more than half of up to ``SELF_ENTRY_SAMPLE_SIZE`` other catalog skill
+          entries (path order, none containing or inside the target's own path)
+          are present under that root at their recorded paths, through no
+          links, with matching fingerprints.
+
+        A root (``.``) entry, a catalog with no other skill entry, and copies or
+        same-name skills outside such a tree never match, so they stay
+        comparable.
+        """
+        if target.content_type != CONTENT_TYPE_SKILL:
+            return None
+        target_dir = Path(target.path).resolve()
+        fingerprint = self._entry_fingerprint(target)
+        skills = sorted(
+            (entry for entry in self._entries.values() if entry.content_type == CONTENT_TYPE_SKILL),
+            key=lambda entry: entry.path,
+        )
+        candidate: RegistryEntry | None = None
+        candidate_depth = 0
+        scan_root: Path | None = None
+        for catalog_entry in skills:
+            parts = PurePosixPath(catalog_entry.path).parts
+            if catalog_entry.content_fingerprint != fingerprint or len(parts) <= candidate_depth:
+                continue
+            inferred_root = _inferred_scan_root(target_dir, parts)
+            if inferred_root is not None:
+                candidate, candidate_depth, scan_root = catalog_entry, len(parts), inferred_root
+        if candidate is None or scan_root is None or not self._holds_catalog_tree(scan_root, candidate, skills):
+            return None
+        return candidate
+
+    def _holds_catalog_tree(self, scan_root: Path, own: RegistryEntry, skills: list[RegistryEntry]) -> bool:
+        """Return whether *scan_root* holds more than half of the sampled other catalog skills unchanged."""
+        own_parts = PurePosixPath(own.path).parts
+        sampled = present = 0
+        for catalog_entry in skills:
+            parts = PurePosixPath(catalog_entry.path).parts
+            shared = min(len(parts), len(own_parts))
+            if parts[:shared] == own_parts[:shared]:
+                # The entry itself, the scan root, an ancestor, or a skill nested
+                # in the target: a copy of the target's subtree carries these too.
+                continue
+            sampled += 1
+            directory = _unlinked_directory(scan_root, parts)
+            if directory is not None:
+                with suppress(ValueError, OSError):
+                    found = extract_from_skill(directory)
+                    if found is not None and self._entry_fingerprint(found) == catalog_entry.content_fingerprint:
+                        present += 1
+            if sampled == SELF_ENTRY_SAMPLE_SIZE:
+                break
+        return present * 2 > sampled
+
+    def _entry_fingerprint(self, entry: ContentEntry) -> str:
+        """Fingerprint *entry* the way this registry's mode records catalog entries."""
+        return _fingerprint(entry.full_text if self._full_body else entry.embedding_text)
+
+    def query_entry(
+        self,
+        entry: ContentEntry,
+        threshold: float,
+        *,
+        exclude_entry_id: str | None = None,
+    ) -> list[SimilarityMatch]:
+        """Compare one extracted target entry against every catalog entry.
+
+        ``exclude_entry_id`` skips one catalog entry, such as the target's own
+        record from :meth:`catalog_self_entry`, before thresholds apply.
+        """
         _validate_threshold(threshold)
         catalog_entries = list(self._entries.values())
         vector_dimension = _registry_vector_dimension(catalog_entries, self._vector_dimension)
@@ -361,6 +444,8 @@ class EmbeddingRegistry:
 
         matches: list[SimilarityMatch] = []
         for catalog_entry, unit_vector in zip(catalog_entries, unit_vectors, strict=True):
+            if catalog_entry.entry_id == exclude_entry_id:
+                continue
             score = unit_vector_similarity(query_vector, unit_vector)
             if score >= threshold:
                 if len(matches) >= MAX_SIMILARITY_MATCHES:
@@ -531,6 +616,36 @@ class EmbeddingRegistry:
 
 def _fingerprint(text: str) -> str:
     return hashlib.sha256(text.encode("utf-8")).hexdigest()
+
+
+def _inferred_scan_root(target_dir: Path, entry_parts: tuple[str, ...]) -> Path | None:
+    """Return the scan root that places *target_dir* at the catalog path *entry_parts*, if any."""
+    depth = len(entry_parts)
+    if depth == 0 or depth >= len(target_dir.parts):
+        return None
+    scan_root = Path(*target_dir.parts[:-depth])
+    tail = target_dir.parts[-depth:]
+    if tail == entry_parts:
+        return scan_root
+    if tuple(part.casefold() for part in tail) != tuple(part.casefold() for part in entry_parts):
+        return None
+    # A case-insensitive filesystem may spell the target differently from the
+    # catalog; accept that only when both spellings name the same directory.
+    directory = _unlinked_directory(scan_root, entry_parts)
+    with suppress(OSError):
+        if directory is not None and os.path.samestat(directory.lstat(), target_dir.lstat()):
+            return scan_root
+    return None
+
+
+def _unlinked_directory(root: Path, parts: tuple[str, ...]) -> Path | None:
+    """Return ``root/parts`` when every component below *root* is a directory and none is a link."""
+    current = root
+    for part in parts:
+        current = current / part
+        if is_link_or_reparse(current) or not current.is_dir():
+            return None
+    return current
 
 
 def _client_provider(client: EmbeddingClient) -> str:

@@ -151,7 +151,9 @@ _SKILLSPECTOR_SCAN_EXCLUDED_DIRS = SCAN_EXCLUDED_DIRS - {"__pycache__"}
 _SKILLSPECTOR_PROVIDER_MAP = {
     "anthropic": "anthropic",
     "bedrock": "bedrock",
-    "nv_build": "openai",
+    # SkillSpector's nv_build registry holds the Build models' output caps; with
+    # no nv_build credential in the child, its requests use the OPENAI_* fallback.
+    "nv_build": "nv_build",
     "openai": "openai",
     "openai-compatible": "openai",
 }

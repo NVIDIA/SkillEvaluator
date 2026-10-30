@@ -3238,6 +3238,41 @@ def _workspace_skills(skill_path: Path, values: list[str | Path]) -> list[Path]:
     return resolved
 
 
+def _limit_staged_cases(
+    task_selectors: list[str],
+    case_id_by_task_selector: Mapping[str, str],
+    staged_task_paths: Iterable[Path],
+    *,
+    max_cases: int,
+) -> dict[str, Any]:
+    """Remove staged cases after the first ``max_cases`` and describe the selection.
+
+    Harbor discovers local dataset tasks from their directories, so pruning the
+    unselected task directories from every agent's with-skill and baseline
+    datasets limits what runs. This happens before the dataset snapshot and the
+    collector's expected cases are derived, so both describe exactly the cases
+    that ran. The staged ``dataset.toml`` is not read by ``harbor run`` and is
+    left as staged.
+    """
+    selected = task_selectors[:max_cases]
+    skipped = set(task_selectors[max_cases:])
+    for task_path in staged_task_paths:
+        if task_path.name not in skipped:
+            continue
+        if task_path.is_dir() and not task_path.is_symlink():
+            shutil.rmtree(task_path)
+        else:
+            task_path.unlink(missing_ok=True)
+    return {
+        "policy": "first_n",
+        "limit": max_cases,
+        "total": len(task_selectors),
+        "selected": len(selected),
+        "skipped": len(task_selectors) - len(selected),
+        "selected_ids": [case_id_by_task_selector[selector] for selector in selected],
+    }
+
+
 def _task_timeout_plan(task_roots: list[Path], timeout_multiplier: float) -> float | None:
     """Return the largest staged agent timeout after applying Harbor scaling."""
     timeouts: list[float] = []
@@ -4550,6 +4585,7 @@ def _run_harbor_eval_impl(
     stop_on_pass: bool | None = None,
     n_concurrent: int | None = None,
     max_agents: int | None = None,
+    max_cases: int | None = None,
     model: str | None = None,
     agent_models: dict[str, str | list[str]] | None = None,
     custom_dockerfile_mode: str | None = None,
@@ -4629,6 +4665,7 @@ def _run_harbor_eval_impl(
     stop_on_pass = stop_on_pass if stop_on_pass is not None else harbor_config.get("stop_on_pass", False)
     n_concurrent = n_concurrent if n_concurrent is not None else harbor_config.get("n_concurrent", 4)
     max_agents = max_agents if max_agents is not None else harbor_config.get("max_agents", len(agents))
+    max_cases = max_cases if max_cases is not None else harbor_config.get("max_cases")
     timeout_multiplier = (
         timeout_multiplier if timeout_multiplier is not None else harbor_config.get("timeout_multiplier", 1.0)
     )
@@ -4672,6 +4709,9 @@ def _run_harbor_eval_impl(
     if not isinstance(max_agents, int) or max_agents < 1:
         reporter.emit(ProgressEvent(stage="configuration", state="failed", detail="invalid agent concurrency"))
         return {"error": ["max_agents must be >= 1"]}
+    if max_cases is not None and (isinstance(max_cases, bool) or not isinstance(max_cases, int) or max_cases < 1):
+        reporter.emit(ProgressEvent(stage="configuration", state="failed", detail="invalid case limit"))
+        return {"error": ["max_cases must be >= 1"]}
     try:
         timeout_multiplier = _validated_timeout_multiplier(timeout_multiplier)
     except ValueError as exc:
@@ -5002,6 +5042,8 @@ def _run_harbor_eval_impl(
         # source tree that was evaluated, not the evaluator build that ran it.
         "evaluated_source": normalized_evaluated_source(evaluated_source),
     }
+    if max_cases is not None:
+        run_config["harbor"]["max_cases"] = max_cases
     verifier_env = {**configured_runtime_env, **provider_env}
     staged_verifier_env = {
         name: f"${{{name}}}"
@@ -5287,6 +5329,34 @@ def _run_harbor_eval_impl(
     except (OSError, ValueError) as exc:
         reporter.emit(ProgressEvent(stage=staging_failure_stage, state="failed", detail=str(exc)))
         return _persist_pre_execution_failure([str(exc)])
+
+    if max_cases is not None:
+        all_task_selectors = expected_task_selectors or []
+        all_case_ids = expected_case_id_by_task_selector or {}
+        try:
+            case_selection = _limit_staged_cases(
+                all_task_selectors,
+                all_case_ids,
+                staged_task_paths,
+                max_cases=max_cases,
+            )
+        except OSError as exc:
+            reporter.emit(ProgressEvent(stage="case-selection", state="failed", detail=str(exc)))
+            return _persist_pre_execution_failure([str(exc)])
+        expected_task_selectors = all_task_selectors[:max_cases]
+        expected_case_id_by_task_selector = {selector: all_case_ids[selector] for selector in expected_task_selectors}
+        staged_task_paths = [path for path in staged_task_paths if path.name in expected_case_id_by_task_selector]
+        run_config["case_selection"] = case_selection
+        reporter.emit(
+            ProgressEvent(
+                stage="case-selection",
+                state="complete",
+                detail=(
+                    f"running the first {case_selection['selected']} of {case_selection['total']} cases "
+                    f"(max_cases={max_cases})"
+                ),
+            )
+        )
 
     if not _runtime_context_is_bound_to_publication_target(
         skill_path,

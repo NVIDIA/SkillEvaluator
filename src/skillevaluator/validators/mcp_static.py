@@ -377,6 +377,14 @@ def _whatwg_hostname(url: str) -> str | None:
         return None
 
 
+def _url_path_segments(url: str) -> list[str]:
+    """The percent-decoded path segments of ``url``, read from its raw text (no userinfo, query, or fragment)."""
+    text = re.split(r"[?#]", without_userinfo(url), maxsplit=1)[0]
+    _scheme, slashes, rest = text.partition("//")
+    path = rest.partition("/")[2] if slashes else text
+    return [unquote(segment) for segment in path.split("/") if segment]
+
+
 def _check_url_inline_secrets(
     server: _ServerFindings, display: str, label: str, *, text: str, ambiguous: bool = False
 ) -> bool:
@@ -403,6 +411,14 @@ def _check_url_inline_secrets(
             f"{label} embeds inline userinfo credentials: {redacted_url(display)!r} (userinfo withheld); only "
             "${ENV} references are allowed",
             'Remove user:password@ from the URL; pass credentials by reference (e.g. header "${MY_TOKEN}").',
+        )
+    if any(has_secret_shape(segment) for segment in _url_path_segments(whatwg_url(text))):
+        server.report(
+            Severity.CRITICAL,
+            "mcp_url_inline_secret",
+            f"{label} path carries a segment shaped like a token: {redacted_url(display)!r}; only ${{ENV}} "
+            "references are allowed",
+            "Do not put credentials in the URL path; send them in a header that references a secret.",
         )
     for part, keys in (
         ("query", [key for reading in readings for key in reading.query_keys]),
@@ -668,9 +684,10 @@ def _resolve_url_references(server: _ServerFindings, url: str, label: str, clien
     expanded, unresolved = _expand_url_defaults(url)
     shown = redacted_url(url)
     if client == "codex":
+        controls = _env_controls_endpoint(_URL_EXPANSION_RE.sub("${UNSET}", url))
         effect = (
             "reads it as a relative URL and never connects to the server"
-            if _env_controls_endpoint(_URL_EXPANSION_RE.sub("${UNSET}", url))
+            if controls
             else "sends the '${...}' text literally, so the variable is never filled in"
         )
         server.report(
@@ -680,7 +697,11 @@ def _resolve_url_references(server: _ServerFindings, url: str, label: str, clien
             f"MCP URLs; Codex {effect}",
             "Write the full https:// endpoint in a Codex plugin; '${VAR:-default}' expansion is a Claude Code feature.",
         )
+        if not controls:
+            # The scheme, host, and port are written out: the endpoint checks still apply.
+            return expanded
         _check_url_inline_secrets(server, url, label, text=expanded)
+        _check_literal_scheme(server, url, label, shown)
         return None
     if unresolved and _env_controls_endpoint(expanded):
         variables = ", ".join(dict.fromkeys(unresolved))
@@ -692,8 +713,23 @@ def _resolve_url_references(server: _ServerFindings, url: str, label: str, clien
             'Give the variable a safe default ("${VAR:-https://host/mcp}") or document the value users must set.',
         )
         _check_url_inline_secrets(server, url, label, text=expanded)
+        _check_literal_scheme(server, expanded, label, shown)
         return None
     return expanded
+
+
+def _check_literal_scheme(server: _ServerFindings, url: str, label: str, shown: str) -> None:
+    """The scheme rules for a URL whose host or port comes from a reference, when its scheme is written out."""
+    probe = whatwg_url(_URL_EXPANSION_RE.sub(_ENV_MARKER, url))
+    scheme = url_scheme(probe)
+    if not scheme or _ENV_MARKER in scheme or scheme in ALLOWED_MCP_URL_SCHEMES:
+        return
+    try:
+        host = urlparse(probe).hostname
+    except ValueError:
+        host = None
+    # A host the reference decides is unknown, so only a written-out loopback host is exempt from plaintext.
+    _check_url_scheme(server, scheme, label, shown, host=None if host and _ENV_MARKER in host else host)
 
 
 def _check_oauth_urls(
@@ -747,6 +783,12 @@ def _check_endpoint_url(
             f"{label} could not be parsed (malformed authority)",
             "Use a valid host[:port] authority, e.g. https://host:443/path.",
         )
+        # The credential rule reads the raw text. A '[' or ']' in the userinfo does not stop WHATWG clients:
+        # they split the authority at its last '@' and connect to the host after it.
+        _check_url_inline_secrets(server, display, label, text=url)
+        with contextlib.suppress(ValueError):
+            host = urlparse(without_userinfo(whatwg_url(url))).hostname
+            _check_endpoint(server, host, allowed_private_hosts, label=label, shown=shown)
         return
     problems = url_ambiguities(url)
     if problems:
@@ -807,7 +849,13 @@ def _check_endpoint_url(
             f"{label} {shown!r} has no scheme, so MCP clients cannot connect to it",
             "Write the full endpoint with its scheme, e.g. https://host/mcp.",
         )
-    elif scheme in _DANGEROUS_URL_SCHEMES:
+    else:
+        _check_url_scheme(server, scheme, label, shown, host=_safe_hostname(parsed))
+
+
+def _check_url_scheme(server: _ServerFindings, scheme: str, label: str, shown: str, *, host: str | None) -> None:
+    """Report a dangerous, plaintext, or not-allowed (non-empty, not https/wss) scheme of one URL field."""
+    if scheme in _DANGEROUS_URL_SCHEMES:
         server.report(
             Severity.CRITICAL,
             "mcp_url_dangerous_scheme",
@@ -817,7 +865,7 @@ def _check_endpoint_url(
     elif scheme in _INSECURE_URL_SCHEMES:
         # Same rule as HTTP hooks: plaintext to this machine's loopback interface does not cross a network
         # (a local desktop app's MCP server); the MEDIUM loopback finding above still reports it.
-        endpoint = classify_endpoint_host(_safe_hostname(parsed) or "")
+        endpoint = classify_endpoint_host(host or "")
         if endpoint is None or not endpoint.is_loopback:
             server.report(
                 Severity.HIGH,

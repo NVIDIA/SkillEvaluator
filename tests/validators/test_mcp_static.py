@@ -955,3 +955,82 @@ def test_malformed_hex_ipv4_parts_are_not_addresses(host: str) -> None:
 def test_bare_hex_prefix_ipv4_host_in_url_is_private() -> None:
     findings = validate_mcp_server_declaration("s", {"url": "https://0x7f.0x.0x.1:8080/mcp"}, "p.json")
     assert "mcp_endpoint_private" in _checks(findings)
+
+
+# A token shape built at run time, so the source holds no secret-looking literal.
+_PATH_TOKEN = "ghp_" + "a1B2c3D4e5" * 3 + "f6G7h8"
+
+
+@pytest.mark.parametrize(
+    "url",
+    [
+        f"https://mcp.example.com/api/{_PATH_TOKEN}/mcp",
+        f"${{BASE:-https://mcp.example.com}}/s/{_PATH_TOKEN}/mcp",
+        f"https://mcp.example.com/{_PATH_TOKEN.replace('_', '%5F')}",
+    ],
+)
+def test_token_shaped_url_path_segment_is_an_inline_secret(url: str) -> None:
+    findings = validate_mcp_server_declaration("s", {"url": url}, "p.json")
+    assert "mcp_url_inline_secret" in _checks(findings)
+    assert all(_PATH_TOKEN not in finding.message for finding in findings)
+
+
+@pytest.mark.parametrize("url", ["https://mcp.example.com/api/v1/mcp", "https://mcp.example.com/${TENANT}/mcp"])
+def test_ordinary_url_path_is_not_an_inline_secret(url: str) -> None:
+    assert "mcp_url_inline_secret" not in _checks(validate_mcp_server_declaration("s", {"url": url}, "p.json"))
+
+
+@pytest.mark.parametrize(
+    "url,expected",
+    [
+        ("http://${MCP_HOST}/mcp", "mcp_url_insecure_scheme"),
+        ("http://${UNSET}mcp.example.com/mcp", "mcp_url_insecure_scheme"),
+        ("http://mcp.example.com:${PORT}/mcp", "mcp_url_insecure_scheme"),
+        ("ws://${H}/mcp", "mcp_url_insecure_scheme"),
+        ("file://${HOME}/.ssh/id_rsa", "mcp_url_dangerous_scheme"),
+        ("ftp://${H}/x", "mcp_url_dangerous_scheme"),
+        ("ssh://${H}/x", "mcp_url_scheme_not_allowed"),
+    ],
+)
+def test_written_scheme_is_checked_when_a_reference_decides_the_host(url: str, expected: str) -> None:
+    for config in ({"url": url}, {"url": "https://ok.example/mcp", "oauth": {"authServerMetadataUrl": url}}):
+        checks = _checks(validate_mcp_server_declaration("s", config, "p.json"))
+        assert {"mcp_url_env_unchecked", expected} <= checks
+
+
+@pytest.mark.parametrize("url", ["https://${MCP_HOST}/mcp", "http://localhost:${PORT}/mcp", "${MCP_URL}"])
+def test_reference_decided_endpoint_with_a_safe_or_unknown_scheme_is_only_advisory(url: str) -> None:
+    findings = validate_mcp_server_declaration("s", {"url": url}, "p.json")
+    assert {f.check_name for f in findings if f.severity != Severity.LOW} == set()
+    assert "mcp_url_env_unchecked" in _checks(findings)
+
+
+@pytest.mark.parametrize(
+    "url,expected",
+    [
+        ("http://169.254.169.254/latest/${X}", {"mcp_endpoint_metadata", "mcp_url_insecure_scheme"}),
+        ("file:///etc/${X}", {"mcp_url_dangerous_scheme"}),
+        ("http://${H}/mcp", {"mcp_url_insecure_scheme"}),
+    ],
+)
+def test_codex_url_with_a_reference_keeps_its_endpoint_checks(url: str, expected: set[str]) -> None:
+    from skillevaluator.constants import PLUGIN_CODEX_MANIFEST_TYPE
+
+    findings = validate_mcp_server_declaration("s", {"url": url}, "p.json", manifest_type=PLUGIN_CODEX_MANIFEST_TYPE)
+    assert {"mcp_url_env_not_expanded", *expected} <= _checks(findings)
+    assert len(findings) == len({(f.check_name, f.message) for f in findings})
+
+
+@pytest.mark.parametrize(
+    "url,expected",
+    [
+        ("https://admin:hunt[er2@api.example.com/mcp", "mcp_url_inline_secret"),
+        ("https://x[@169.254.169.254/latest", "mcp_endpoint_metadata"),
+        ("https://u[@10.0.0.5/mcp", "mcp_endpoint_private"),
+    ],
+)
+def test_bracket_in_userinfo_keeps_credential_and_endpoint_checks(url: str, expected: str) -> None:
+    for config in ({"url": url}, {"url": "https://ok.example/mcp", "oauth": {"authServerMetadataUrl": url}}):
+        findings = validate_mcp_server_declaration("s", config, "p.json")
+        assert {"mcp_url_malformed_authority", expected} <= _checks(findings)
+        assert all("hunt[er2" not in finding.message for finding in findings)

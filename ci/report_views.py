@@ -19,6 +19,7 @@ DETAIL_LIMIT = 500 * 1024
 SUMMARY_SKILL_LIMIT = 5
 COMMENT_LIMIT = 50 * 1024
 REPORT_LIMIT = 32 * 1024 * 1024
+_CONTROL_CHARACTERS = dict.fromkeys(range(32), " ")
 
 
 def _dict(value: object) -> dict:
@@ -42,7 +43,7 @@ def _h(value: object) -> str:
 
 
 def _md(value: object) -> str:
-    text = "".join(c if ord(c) >= 32 else " " for c in _text(value))
+    text = _text(value).translate(_CONTROL_CHARACTERS)
     # Break GitHub mention tokens while retaining readable author and finding text.
     text = text.replace("@", "@\u200b")
     escaped = re.sub(r"([\\`*_{}\[\]()#+.!|~-])", r"\\\1", text)
@@ -137,6 +138,19 @@ def _read(directory: Path | None) -> tuple[dict, str | None]:
         return data, None
     except (OSError, ValueError):
         return {}, "JSON report could not be read; evidence is incomplete."
+
+
+def read_skill_models(reports: Path, summary: dict) -> list[dict]:
+    """Read each skill's retained JSON once, so every view of a run shares one parse."""
+    models = []
+    for index, row in enumerate(_items(summary.get("skills")), 1):
+        row = _dict(row)
+        directory = _directory(reports, row.get("report_dir"))
+        data, issue = _read(directory)
+        models.append(
+            {"row": row, "directory": directory, "data": data, "issue": issue, "anchor": f"skill-{index:03d}"}
+        )
+    return models
 
 
 def _links(
@@ -234,8 +248,12 @@ def _markdown_blocks(lines: list[str]) -> list[str]:
     return blocks
 
 
+def _reserve(footer: str) -> int:
+    return len(footer.encode("utf-8")) + 160
+
+
 def _bounded(blocks: list[str], limit: int, footer: str) -> str:
-    reserve = len(footer.encode("utf-8")) + 160
+    reserve = _reserve(footer)
     parts = []
     size = 0
     truncated = False
@@ -252,6 +270,29 @@ def _bounded(blocks: list[str], limit: int, footer: str) -> str:
         )
     parts.append(footer)
     return "\n\n".join(parts) + "\n"
+
+
+class _Budget:
+    """Tell when _bounded() will drop every further line, so callers can stop building them.
+
+    Each block costs at least one byte more than its lines, so the running sum
+    of line sizes plus one is a lower bound. Once that bound passes the limit,
+    _bounded() truncates within the lines already collected, whatever follows.
+    """
+
+    def __init__(self, lines: list[str], limit: int, footer: str) -> None:
+        self._lines = lines
+        self._counted = 0
+        self._left = limit - _reserve(footer)
+
+    def spent(self) -> bool:
+        new = self._lines[self._counted :]
+        self._counted += len(new)
+        # JSON can carry lone surrogates. _bounded() never encodes a line past
+        # its cut, so counting one here must not raise. surrogatepass gives
+        # the same size for every line _bounded() can encode.
+        self._left -= sum(len(line.encode("utf-8", "surrogatepass")) + 1 for line in new)
+        return self._left < 0
 
 
 def _write(path: Path, content: str) -> None:
@@ -409,11 +450,15 @@ def _first_action(model: dict) -> tuple[str, str, str]:
             "",
             "Inspect the failed workflow step and report artifacts, then rerun the scan.",
         )
-    failed = [r for r in model["results"] if _status(r) in {"FAIL", "INCOMPLETE", "UNKNOWN"}]
-    failed.sort(key=lambda r: _status(r) == "FAIL")
-    for result in failed:
+    failed = [
+        (result, outcome)
+        for result, outcome in zip(model["results"], model["statuses"], strict=True)
+        if outcome in {"FAIL", "INCOMPLETE", "UNKNOWN"}
+    ]
+    failed.sort(key=lambda item: item[1] == "FAIL")
+    for result, outcome in failed:
         legacy = _dict(result.get("legacy"))
-        if _status(result) in {"INCOMPLETE", "UNKNOWN"}:
+        if outcome in {"INCOMPLETE", "UNKNOWN"}:
             errors = _items(legacy.get("errors"))
             warnings = _items(legacy.get("warnings"))
             reason = errors[0] if errors else result.get("skip_reason")
@@ -468,7 +513,7 @@ def _compact_summary(models: list[dict], summary: dict, context: dict, *, status
     outcomes = [
         "INCOMPLETE"
         if model["skill_status"] == "PASS"
-        and any(_status(r) in {"FAIL", "INCOMPLETE", "UNKNOWN"} for r in model["results"])
+        and any(outcome in {"FAIL", "INCOMPLETE", "UNKNOWN"} for outcome in model["statuses"])
         else model["skill_status"]
         for model in models
     ]
@@ -541,12 +586,21 @@ def _compact_summary(models: list[dict], summary: dict, context: dict, *, status
     return _bounded(lines, SUMMARY_LIMIT, footer)
 
 
-def render_reports(reports: Path, summary: dict, context: dict, *, render_errors: dict[str, str] | None = None) -> None:
+def render_reports(
+    reports: Path,
+    summary: dict,
+    context: dict,
+    *,
+    render_errors: dict[str, str] | None = None,
+    models: list[dict] | None = None,
+) -> None:
     """Write a short Actions summary, detailed Markdown and a PR comment.
 
     Optional context keys: run_url, commit, image, report_url, llm_enabled, ci_conclusion.
     report_url is the hosted directory containing index.html and the artifacts.
     All report payloads are displayed as text, never executable markup.
+    models is the read_skill_models() result when the caller has already read
+    the reports; it is not modified.
     """
     reports = Path(reports)
     if reports.is_symlink() or not reports.is_dir():
@@ -556,27 +610,18 @@ def render_reports(reports: Path, summary: dict, context: dict, *, render_errors
         return
     report_url = _url(context.get("report_url"))
     run_url = _url(context.get("run_url"))
-    models = []
-    for index, row in enumerate(_items(summary.get("skills")), 1):
-        row = _dict(row)
-        directory = _directory(reports, row.get("report_dir"))
-        data, issue = _read(directory)
+    models = [dict(model) for model in (read_skill_models(reports, summary) if models is None else models)]
+    for model in models:
+        row = model["row"]
         if row.get("overall_status") == "error" or (render_errors or {}).get(row.get("report_dir")):
-            issue = (render_errors or {}).get(row.get("report_dir")) or row.get("error") or "Report unavailable"
-            data = {}
-        results = [_dict(item) for item in _items(data.get("results"))]
-        quality = [_dict(item) for item in _items(data.get("quality_summary"))]
-        models.append(
-            {
-                "row": row,
-                "directory": directory,
-                "data": data,
-                "issue": issue,
-                "results": results,
-                "quality": quality,
-                "anchor": f"skill-{index:03d}",
-            }
-        )
+            model["issue"] = (
+                (render_errors or {}).get(row.get("report_dir")) or row.get("error") or "Report unavailable"
+            )
+            model["data"] = {}
+        model["results"] = [_dict(item) for item in _items(model["data"].get("results"))]
+        # Each result's display status is computed once and reused by every view below.
+        model["statuses"] = [_status(result) for result in model["results"]]
+        model["quality"] = [_dict(item) for item in _items(model["data"].get("quality_summary"))]
     for model in models:
         model["skill_status"] = _skill_status(model["row"], model["data"], model["issue"])
         if (
@@ -633,8 +678,7 @@ def render_reports(reports: Path, summary: dict, context: dict, *, render_errors
     comment_header = list(markdown)
     attention = []
     for model in models:
-        for result in model["results"]:
-            outcome = _status(result)
+        for result, outcome in zip(model["results"], model["statuses"], strict=True):
             if outcome not in {"FAIL", "INCOMPLETE", "UNKNOWN"}:
                 continue
             reason, finding = _issue_for_result(result)
@@ -675,6 +719,7 @@ def render_reports(reports: Path, summary: dict, context: dict, *, render_errors
         errors, warnings = data.get("total_errors"), data.get("total_warnings")
         markdown.append(f"| {_md(skill)} | {skill_status} | {score} | {_md(grade)} | {_md(errors)} | {_md(warnings)} |")
         comments.append(f"| {_md(skill)} | {skill_status} | {score} / {_md(grade)} | {_md(errors)} | {_md(warnings)} |")
+    details = _Budget(markdown, DETAIL_LIMIT, footer)
     for model in models:
         row = model["row"]
         skill = _text(row.get("path"))
@@ -703,18 +748,27 @@ def render_reports(reports: Path, summary: dict, context: dict, *, render_errors
                 "| --- | --- | --- | --- | --- |",
             ]
         )
-        for result in model["results"]:
+        for result, outcome in zip(model["results"], model["statuses"], strict=True):
             numbers = _dict(result.get("summary"))
-            name, outcome = result.get("validator"), _status(result)
+            name = result.get("validator")
             block.append(
                 f"| {_md(name)} | {outcome} | {_md(numbers.get('checks_performed'))} | {_md(numbers.get('errors'))} | {_md(numbers.get('warnings'))} |"
             )
-        for result in model["results"]:
-            block.append(f"### {_md(result.get('validator'))} — evidence")
-            for label, value in _evidence(result):
-                block.append(f"**{_md(label)}:** {_md(value)}")
         markdown.extend(block)
-        failures = [result for result in model["results"] if _status(result) in {"FAIL", "INCOMPLETE", "UNKNOWN"}]
+        # details.md keeps only a prefix that fits. Skip escaping evidence it would drop.
+        for result in model["results"]:
+            if details.spent():
+                break
+            markdown.append(f"### {_md(result.get('validator'))} — evidence")
+            for label, value in _evidence(result):
+                if details.spent():
+                    break
+                markdown.append(f"**{_md(label)}:** {_md(value)}")
+        failures = [
+            result
+            for result, outcome in zip(model["results"], model["statuses"], strict=True)
+            if outcome in {"FAIL", "INCOMPLETE", "UNKNOWN"}
+        ]
         for result in failures:
             message, finding = _issue_for_result(result)
             message = message or "See retained evidence."

@@ -38,6 +38,10 @@ on:
         description: Optional GitHub Pages report site for stable links
         type: string
         default: ''
+      scan-workers:
+        description: Skills scanned at once, 1 to 16; 1 scans one skill at a time
+        type: number
+        default: 4
     secrets:
       LLM_API_KEY:
         required: false
@@ -48,6 +52,8 @@ jobs:
     name: Tier 1 scan
     runs-on: ubuntu-24.04
     timeout-minutes: 60
+    env:
+      SCAN_MODE: ${{ inputs.scan-mode == 'auto' && (github.event_name == 'pull_request' && 'changed' || 'all') || inputs.scan-mode }}
     steps:
       - name: Capture the optional hosted-report execution receipt
         id: provenance
@@ -97,7 +103,10 @@ jobs:
       - uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0
         with:
           persist-credentials: false
-          fetch-depth: 0
+          # Changed mode needs commits and trees for the merge base, not old
+          # file contents. Full scans need only the checked-out commit.
+          fetch-depth: ${{ env.SCAN_MODE != 'changed' && 1 || 0 }}
+          filter: ${{ env.SCAN_MODE == 'changed' && 'blob:none' || '' }}
           ref: ${{ github.event.pull_request.head.sha || github.sha }}
       - name: Validate the immutable image reference
         env:
@@ -117,7 +126,6 @@ jobs:
       - name: Evaluate selected skills
         env:
           IMAGE: ${{ inputs.image }}
-          SCAN_MODE: ${{ inputs.scan-mode == 'auto' && (github.event_name == 'pull_request' && 'changed' || 'all') || inputs.scan-mode }}
           DIFF_BASE_SHA: ${{ github.event.pull_request.base.sha }}
           DIFF_HEAD_SHA: ${{ github.event.pull_request.head.sha || github.sha }}
           SKILL_PATHS: ${{ inputs.paths }}
@@ -127,6 +135,7 @@ jobs:
           LLM_MODEL: ${{ inputs.llm-model }}
           LLM_API_KEY: ${{ inputs.llm && secrets.LLM_API_KEY || '' }}
           REPORT_BASE_URL: ${{ inputs.report-base-url }}
+          SCAN_WORKERS: ${{ inputs.scan-workers }}
           REPORT_RUN_URL: ${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}
           REPORT_COMMIT: ${{ github.event.pull_request.head.sha || github.sha }}
           CALLER_WORKFLOW_SHA: ${{ github.workflow_sha }}
@@ -149,7 +158,7 @@ jobs:
             --mount "type=bind,src=$GITHUB_WORKSPACE,dst=/workspace,readonly" \
             --mount "type=bind,src=$RUNNER_TEMP/skill-reports,dst=/reports" \
             --env SKILL_PATHS --env MIN_SCORE --env LLM_ENABLED --env LLM_PROVIDER --env LLM_MODEL "${llm_secret_args[@]}" \
-            --env SCAN_MODE --env DIFF_BASE_SHA --env DIFF_HEAD_SHA \
+            --env SCAN_MODE --env DIFF_BASE_SHA --env DIFF_HEAD_SHA --env SCAN_WORKERS \
             --env CALLER_WORKFLOW_SHA \
             --env GITHUB_ACTIONS --env REPORT_IMAGE --env REPORT_URL --env REPORT_RUN_URL --env REPORT_COMMIT \
             "$IMAGE"
@@ -176,4 +185,15 @@ jobs:
           name: ${{ inputs.artifact-name }}-provenance-attempt-${{ github.run_attempt }}
           path: ${{ steps.provenance.outputs.directory }}/execution.jwt
           if-no-files-found: error
+          retention-days: 14
+      # The optional report publisher downloads only this JSON evidence, not the full reports.
+      - name: Upload publisher evidence even when validation fails
+        if: always()
+        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
+        with:
+          name: ${{ inputs.artifact-name }}-evidence-attempt-${{ github.run_attempt }}
+          path: |
+            ${{ runner.temp }}/skill-reports/summary.json
+            ${{ runner.temp }}/skill-reports/skill-*/skillevaluator-tier1.json
+          if-no-files-found: warn
           retention-days: 14

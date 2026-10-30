@@ -73,7 +73,13 @@ jobs:
 
 Open **Actions → Skill checks** for the result and suggested next step. Download
 `skill-evaluator-tier1-attempt-N` for `index.html`, per-skill HTML and JSON,
-Markdown, SARIF and available scanner logs.
+Markdown, SARIF and available scanner logs. Failed and incomplete scans retain
+their available reports. The smaller `skill-evaluator-tier1-evidence-attempt-N`
+artifact contains only the JSON used by the optional report publisher.
+
+The HTML index and reports use four verdicts: **Passed**, **Changes required**,
+**Incomplete** and **Skipped**. A quality score below your minimum fails the
+Quality score check and blocks the verdict.
 
 <Frame caption="Example: a Tier 1 report shows the verdict and quality score separately. This example was captured from a GitLab demo using the same report renderer.">
   <img src="./assets/repository-ci-results-example.png" alt="Example results table showing a failed skill, its quality score, and a link to its report" />
@@ -200,7 +206,10 @@ For history initialization, permission details and troubleshooting, follow the
     while leaving tracked files is an error. Shared files outside skill roots are
     not inferred dependencies; use `all` when they should trigger a full scan.
     The 100-skill cap is a selection limit, not a runtime guarantee. Timed-out
-    scans retain completed results and mark the remainder incomplete.
+    scans retain completed results and mark the remainder incomplete. The workflow
+    scans up to four skills at once. Set `scan-workers` from 1 to 16 to change
+    this; `1` scans one skill at a time. Results and logs keep the same skill
+    order either way.
   </Accordion>
   <Accordion title="Control whether it blocks merging">
     The workflow runs independently of existing workflows; it does not wait for

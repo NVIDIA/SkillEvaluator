@@ -235,6 +235,8 @@ For `validate`, the default set is `schema`, `version`, `security`, `pii`, `lice
     | Reliability | 25% | Error handling, prerequisites, limitations, troubleshooting, and implementation safeguards |
     | Efficiency | 15% | Token budget, body length, repetition, instruction clarity, and reference use |
 
+    The 5,000-token budget for `SKILL.md` is a recommendation, not a hard limit. A larger `SKILL.md` gets a MEDIUM `quality_efficiency` finding and a 15-point Efficiency deduction. The finding does not fail the check by itself, but the deduction can still take the score below `--min-score`.
+
     Grades are A for scores of at least 90, B for at least 80, C for at least 70, D for at least 60, and F below 60. The default `--min-score` is 70. Passing requires the score to reach that minimum and no HIGH or CRITICAL quality findings under the active policy.
 
     The minimum score is an independent gate. Policy severity overrides cannot

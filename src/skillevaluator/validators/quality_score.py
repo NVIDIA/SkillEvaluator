@@ -757,10 +757,12 @@ class QualityScoreValidator(ValidatorBase):
         if inst_start > 3:
             qs.instructions_tokens = len(content[inst_start:]) // 4
 
+        # The token budget is a recommendation: exceeding it is advisory (MEDIUM),
+        # and the deduction still counts toward the --min-score gate.
         if qs.total_tokens > QUALITY_RECOMMENDED_MAX_TOKENS:
             dim.deduct(
                 15,
-                "error",
+                "warning",
                 (
                     f"Large skill ({qs.total_tokens} tokens, recommended max <{QUALITY_RECOMMENDED_MAX_TOKENS}). "
                     f"Per agentskills.io, SKILL.md should be concise (~500 lines) — "

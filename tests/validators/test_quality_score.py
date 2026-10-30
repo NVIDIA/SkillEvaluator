@@ -581,8 +581,8 @@ class TestQualityScoreValidator:
             "README.md" in finding.message and "references" in finding.message.lower() for finding in result.findings
         )
 
-    def test_large_skill_is_high_severity(self, tmp_path):
-        """Large skills (>5000 tokens) should produce HIGH severity findings."""
+    def test_large_skill_is_advisory(self, tmp_path):
+        """The recommended 5000-token maximum is advisory, not a blocking finding."""
         from skillevaluator.models.result import Severity
 
         skill_dir = tmp_path / "large-skill"
@@ -604,11 +604,13 @@ class TestQualityScoreValidator:
             f for f in result.findings if "Large skill" in f.message or "large skill" in f.message.lower()
         ]
         assert len(large_findings) >= 1, "Expected a finding about large skill size"
-        assert large_findings[0].severity == Severity.HIGH
+        assert large_findings[0].severity == Severity.MEDIUM
         assert "recommended max <5000" in large_findings[0].message
         assert "long or unfocused top-level descriptions" in large_findings[0].message
         assert "Keep required sections concise" in large_findings[0].suggestion
         assert "references/" in large_findings[0].suggestion
+        assert result.passed, result.errors
+        assert not result.gate_failures
 
     def test_above_6000_tokens_uses_same_5000_recommendation(self, tmp_path):
         """Skills above 6000 tokens should still use the single >5000 recommendation."""
@@ -631,7 +633,7 @@ class TestQualityScoreValidator:
         result = v.validate(skill_dir)
         large_findings = [f for f in result.findings if "large skill" in f.message.lower()]
         assert len(large_findings) >= 1, "Expected a finding about large skill size"
-        assert large_findings[0].severity == Severity.HIGH
+        assert large_findings[0].severity == Severity.MEDIUM
         assert "recommended max <5000" in large_findings[0].message
         assert "recommend <6000" not in large_findings[0].message
         assert "Very large skill" not in large_findings[0].message

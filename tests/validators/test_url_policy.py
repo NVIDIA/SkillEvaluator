@@ -18,6 +18,7 @@ from skillevaluator.validators.url_policy import (
     UserinfoRule,
     has_secret_shape,
     is_env_reference,
+    looks_like_inline_secret,
     redact_secrets,
     report_text,
     safe_url,
@@ -369,3 +370,24 @@ def test_redact_secrets_takes_linear_time_on_long_runs() -> None:
 # --------------------------------------------------------------------------- #
 # One credential rule for MCP server URLs and HTTP hook URLs                   #
 # --------------------------------------------------------------------------- #
+
+
+@pytest.mark.parametrize(
+    ("key", "value", "secret"),
+    [
+        ("API_KEY", "${A:-${B:-${C:-}}}", False),
+        ("API_KEY", "${A:-${B:-rawFAKEvalue0123}}", True),
+        ("PAGE", "${A:-${B:-2}}", False),
+    ],
+)
+def test_nested_defaults_are_unwrapped(key: str, value: str, secret: bool) -> None:
+    assert looks_like_inline_secret(key, value) is secret
+
+
+def test_deeply_nested_defaults_do_not_exhaust_the_stack() -> None:
+    """Regression: each nested '${A:-...}' layer was one recursive call, so about 1,000 layers raised RecursionError."""
+    depth = 1200
+    nested = "${A:-" * depth + "x" + "}" * depth
+
+    assert looks_like_inline_secret("API_KEY", nested)
+    assert url_credentials(f"https://h.example/mcp?token={nested}", userinfo_rule="literal").query_keys == ("token",)

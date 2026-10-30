@@ -44,6 +44,8 @@ _ENV_EXPANSION_RE = re.compile(
     r"|\$\{user_config\.(?P<user_config>[A-Za-z0-9_.-]+)\}"
     r"|\$(?P<bare>[A-Za-z_][A-Za-z0-9_]*)"
 )
+# How many layers of nested defaults ('${A:-${B:-x}}') looks_like_inline_secret unwraps; each pass unwraps one.
+_MAX_DEFAULT_PASSES = 8
 # What is left of an Authorization-style value once its references are removed: 'Bearer ${TOKEN}'.
 _AUTH_SCHEME_ONLY_RE = re.compile(r"(?i)^\s*(?:bearer|basic|token)?\s*$")
 # env keys that name a credential -- their value must be a reference, never a literal.
@@ -282,16 +284,24 @@ def looks_like_inline_secret(key: str, value: str, *, query: bool = True) -> boo
     ``query`` says the key is a URL query parameter or an HTTP header name, where
     ``key=`` or ``sig=`` names a credential on its own; pass ``False`` for an env
     name or a command flag.
+
+    Each pass unwraps one layer of nested defaults (``${A:-${B:-x}}``); after
+    ``_MAX_DEFAULT_PASSES`` the text left, references and all, is judged as a
+    literal, so deep nesting cannot hide a value or exhaust the stack.
     """
     text = value.strip()
-    if not text or is_env_reference(text):
-        return False
-    if _ENV_EXPANSION_RE.search(text):
+    for _pass in range(_MAX_DEFAULT_PASSES):
+        if not text or is_env_reference(text):
+            return False
+        if not _ENV_EXPANSION_RE.search(text):
+            break
         # Judge only what the plugin ships: the literal text around the references and their defaults.
         literal = env_defaults_text(text)
         if _AUTH_SCHEME_ONLY_RE.match(literal):
             return False
-        return looks_like_inline_secret(key, literal, query=query)
+        text = literal.strip()
+    if not text or is_env_reference(text):
+        return False
     if has_secret_shape(text):
         return True
     if is_credential_key(str(key), query=query):

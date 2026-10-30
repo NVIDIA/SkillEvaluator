@@ -79,6 +79,19 @@ All notable changes to SkillEvaluator are documented in this file.
   `skillevaluator-tier1.json` and do not embed a second copy of the report
   JSON. Standalone CLI HTML reports embed it for Export JSON.
 
+- The Tier 3 verifier saves every LLM judge attempt to `judge_attempts.json`
+  next to the trial's `skill_evaluator_reward.json`, rewritten after each
+  attempt so it also explains a judge that failed. Each entry records the
+  metric, attempt number, method (`llm`, `ragas` or `salvage`), judge model,
+  status, and the problem with a rejected reply, plus the prompt and reply
+  with long text shortened. A `behavior_check` score rebuilt from a truncated
+  reply adds a `salvage` entry. Configured credentials, common key shapes,
+  URL userinfo, `Authorization`, API-key, token and `Cookie` header values,
+  and the values of credential flags such as `--token` and
+  `curl -u user:password` are masked. Rewards record
+  `judge_contract: skill-evaluator-judges-v2`, a reserved name that custom
+  graders cannot use.
+
 ### Changed
 
 - Hosted GitHub reports verify a separate GitHub-signed execution receipt.
@@ -142,6 +155,25 @@ All notable changes to SkillEvaluator are documented in this file.
 - HTML reports rendered in one process share one compiled template
   environment, so each template compiles once per process instead of once per
   report.
+
+- Tier 3 `accuracy` grades the outcome only. The `SKILL_IDENTIFIED` criterion,
+  which capped a correct answer from the no-skill baseline at 0.8 on positive
+  cases, is replaced by `FORMAT_FOLLOWED`: the response follows any output
+  format the question explicitly requires. Skill use is still scored by
+  `skill_execution`. Every case and both arms use the same five criteria, so
+  rewards no longer record `excluded_criteria` or the
+  `applicable-accuracy-criteria/v1` policy; reports still read older rewards
+  that do. `judge_accuracy` still accepts the `skill_identification_applicable`
+  keyword but ignores it. Expect baseline accuracy to rise and accuracy lift to
+  fall for the same runs.
+- Tier 3 LLM judges return verdicts only, and the verifier computes every
+  score: `accuracy` is passing criteria divided by five, `goal_accuracy` is
+  `1.0` when the goal was achieved and `0.0` otherwise, and `behavior_check` is
+  the share of expected behaviors observed. A `score` field in a reply is
+  ignored, and the prompts no longer ask for one. An invalid reply is retried
+  once with the exact problem, for example `steps not judged: [2]`, instead of
+  a generic format reminder. The prompt examples are valid replies for the task
+  at hand, and the goal prompt no longer shows an empty tool-call section.
 
 ### Documentation
 
@@ -310,6 +342,16 @@ All notable changes to SkillEvaluator are documented in this file.
   `quality-check` before any report was written. The schema check reports the
   malformed `metadata`, and the quality score counts `metadata.author` and
   `metadata.tags` as missing, as it already did for other non-mapping values.
+
+- The prompt-based `goal_accuracy` judge, which runs whenever the RAGAS scorer
+  does not (including with the default NVIDIA Build provider), used the reply's
+  `score` field over its `achieved` verdict, so `achieved: false` with
+  `score: 1.0` scored 1.0. Other judge replies were also accepted when they
+  should have been retried: an `accuracy` reply with only a numeric total
+  (clamped into 0 to 1, so `99` scored 1.0), a `behavior_check` reply that
+  judged one step twice and skipped another, and a RAGAS goal score other than
+  `0.0` or `1.0`. Each is now rejected and retried, and a RAGAS score that is
+  not binary falls back to the prompt judge.
 
 ## 0.6.0 - 2026-10-20
 

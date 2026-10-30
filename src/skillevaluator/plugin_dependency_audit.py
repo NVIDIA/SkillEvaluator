@@ -634,6 +634,20 @@ def run_dependency_audits(
                 )
             )
 
+    def retain_findings(findings: list[Finding], ecosystem: str) -> None:
+        # The allowance belongs to the complete run, including earlier sources
+        # and ecosystems. Later critical evidence must displace lower severity
+        # rows rather than disappear behind a full report.
+        for finding in findings:
+            finding.metadata.setdefault("ecosystem", ecosystem)
+        order = {severity: index for index, severity in enumerate(Severity)}
+        ranked = sorted([*result.findings, *findings], key=lambda finding: order[finding.severity])
+        result.findings = ranked[:MAX_FINDINGS]
+        omitted = {(finding.metadata["ecosystem"], finding.file_path) for finding in ranked[MAX_FINDINGS:]}
+        for omitted_ecosystem, source in sorted(omitted):
+            summary[omitted_ecosystem]["findings_truncated"] = True
+            incomplete(omitted_ecosystem, source, "vulnerability finding bound exceeded")
+
     for error in inputs.errors:
         if enabled[error.ecosystem]:
             incomplete(error.ecosystem, error.source, error.reason)
@@ -745,10 +759,7 @@ def run_dependency_audits(
                         findings = _npm_report(_report(run, (0, 1)), pins, reader.display(source.source), run.exit_code)
                 row["audited"] += len(pins)
                 row["vulnerabilities"] += len(findings)
-                for finding in findings[: max(0, MAX_FINDINGS - len(result.findings))]:
-                    result.add_finding(finding)
-                if len(findings) > MAX_FINDINGS:
-                    incomplete(ecosystem, source.source, "vulnerability finding bound exceeded")
+                retain_findings(findings, ecosystem)
             except (OSError, UnicodeError, ValueError, TypeError, AttributeError, KeyError, RecursionError):
                 incomplete(
                     ecosystem, source.source, "scanner returned incomplete or untrustworthy vulnerability evidence"
@@ -812,10 +823,7 @@ def run_dependency_audits(
                         )
                     row["audited"] += 1
                     row["vulnerabilities"] += len(findings)
-                    for finding in findings[: max(0, MAX_FINDINGS - len(result.findings))]:
-                        result.add_finding(finding)
-                    if len(findings) > MAX_FINDINGS:
-                        incomplete("container", declaration.source, "vulnerability finding bound exceeded")
+                    retain_findings(findings, "container")
                     audited = True
                     break
                 except (OSError, UnicodeError, ValueError, TypeError, AttributeError, KeyError, RecursionError):
@@ -824,4 +832,5 @@ def run_dependency_audits(
                 incomplete(
                     "container", declaration.source, "no container scanner produced trustworthy vulnerability evidence"
                 )
+    result.recalculate_from_findings()
     return result

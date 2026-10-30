@@ -48,7 +48,7 @@ from pathlib import Path
 from typing import Any
 from urllib.parse import urlparse
 
-from skillevaluator.constants import SKILL_MANIFEST_VARIANTS
+from skillevaluator.constants import SCAN_EXCLUDED_DIRS, SKILL_MANIFEST_VARIANTS
 from skillevaluator.plugin_refs import PLUGIN_REF_SOURCES, normalize_ref
 from skillevaluator.plugin_states import DEPENDENCY_STATES
 from skillevaluator.utils.helpers import resolve_git_root
@@ -71,6 +71,11 @@ CONTENT_ROOTS: dict[str, tuple[str, ...]] = {
     "skills": ("skills", "team-skills"),
     "rules": ("rules", "team-rules"),
 }
+
+# Folders that never hold plugin content (.git, node_modules, ...). A ref through
+# one is unsafe wherever it points, inside the plugin root too: a plugin at the
+# repository root would otherwise "provide" .git/config.
+_EXCLUDED_REF_SEGMENTS = frozenset(name.casefold() for name in SCAN_EXCLUDED_DIRS)
 
 MAX_PLUGIN_MANIFEST_ITEMS = 256
 MAX_PLUGIN_MANIFEST_TEXT_CHARS = 16_384
@@ -682,11 +687,23 @@ def _classify_ref(
         return DependencyRow(
             label, "unresolved", None, f"unsafe reference path '{ref_kind}/{name}'", cause=CAUSE_UNSAFE
         )
+    excluded = next(
+        (part for part in (ref_kind, *relative_name.parts) if part.casefold() in _EXCLUDED_REF_SEGMENTS), None
+    )
+    if excluded is not None:
+        return DependencyRow(
+            label,
+            "unresolved",
+            None,
+            f"unsafe reference path '{ref_kind}/{name}': '{excluded}' never holds plugin content",
+            cause=CAUSE_UNSAFE,
+        )
 
     relative = Path(ref_kind) / relative_name
     target = identity.clone_root / relative
     # Outside the plugin root a ref may only reach a recognized content root
-    # (never .git/, secrets/, ...); inside it, any bundled path is eligible.
+    # (never .git/, secrets/, ...); inside it, any bundled path outside the
+    # excluded folders above is eligible.
     allowed_roots = CONTENT_ROOTS[kind]
     if ref_kind not in allowed_roots and not target.is_relative_to(plugin_real):
         return DependencyRow(
@@ -864,7 +881,10 @@ _CAUSE_ADVICE = {
         "whose path is <kind>/<name>)."
     ),
     CAUSE_SOURCE: "Use a supported reference source (github, gitlab, or git).",
-    CAUSE_UNSAFE: "Name the component by its path below its content folder, without '..', '.' or backslashes.",
+    CAUSE_UNSAFE: (
+        "Name the component by its path below its content folder, without '..', '.', backslashes, or folders "
+        "such as .git or node_modules."
+    ),
     CAUSE_CONTENT_ROOT: (
         "Point the reference at skills/ or team-skills/ (skills), or rules/ or team-rules/ (rules), or at a "
         "path inside the plugin."

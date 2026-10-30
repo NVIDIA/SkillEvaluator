@@ -284,3 +284,34 @@ def test_origin_url_is_decoded_as_utf8_whatever_the_locale(
     assert (reason is None) == (identity.reason is None)
     if reason is not None:
         assert reason in identity.reason
+
+
+@pytest.mark.parametrize(
+    "ref",
+    [
+        f"github::{REPO}::.git::config",
+        {"source": "github", "repo": REPO, "path": ".git/config"},
+        f"github::{REPO}::.git::HEAD",
+        f"github::{REPO}::.GIT::config",
+        f"github::{REPO}::node_modules::pkg/index.js",
+        f"github::{REPO}::rules::.git/config",
+    ],
+)
+def test_plugin_at_the_repository_root_cannot_provide_never_content_folders(tmp_path: Path, ref) -> None:
+    """Inside a repository-root plugin every path is in the plugin, so .git/config was "provided"."""
+    (tmp_path / ".git").mkdir()
+    (tmp_path / ".git" / "config").write_text("[core]\n", encoding="utf-8")
+    (tmp_path / ".git" / "HEAD").write_text("ref: refs/heads/main\n", encoding="utf-8")
+    (tmp_path / "node_modules" / "pkg").mkdir(parents=True)
+    (tmp_path / "node_modules" / "pkg" / "index.js").write_text("x\n", encoding="utf-8")
+    (tmp_path / "rules" / ".git").mkdir(parents=True)
+    (tmp_path / "rules" / ".git" / "config").write_text("[core]\n", encoding="utf-8")
+    (tmp_path / "rules" / "ok.md").write_text("rule\n", encoding="utf-8")
+    identity = RepositoryIdentity(clone_root=tmp_path, local_slug=REPO)
+
+    row = classify_ref(ref, kind="rules", plugin_root=tmp_path, identity=identity)
+    bundled = classify_ref(f"github::{REPO}::rules::ok.md", kind="rules", plugin_root=tmp_path, identity=identity)
+
+    assert (row.state, row.path, row.cause) == ("unresolved", None, CAUSE_UNSAFE)
+    assert "never holds plugin content" in row.reason
+    assert (bundled.state, bundled.path) == ("provided", "rules/ok.md")

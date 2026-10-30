@@ -2135,7 +2135,11 @@ def _rm_force_operand_is_protected(operand: str) -> bool:
     like those of a plain rm.
     """
     components = _normalized_write_path(operand, _APPLY_PATCH_DEFAULT_WORKDIR).split("/")[1:]
-    return components[0] in _RM_FORCE_PROTECTED_ROOTS and components[:2] != ["var", "tmp"]
+    root = components[0]
+    if not root or any(char in root for char in "*?["):
+        # "/" or a glob at the top level ("/*", "/e*/hosts") can name any protected root.
+        return True
+    return root in _RM_FORCE_PROTECTED_ROOTS and components[:2] != ["var", "tmp"]
 
 
 def _rm_xargs_fallback(command_text: str) -> bool:

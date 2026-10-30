@@ -2390,6 +2390,7 @@
 
         {# ---------- Overview ---------- #}
         <section class="t3-page active" id="tier3-page-overview">
+            {% set t3_effect = (tier3.conclusions or []) | selectattr('title', 'equalto', 'Skill effect') | first %}
             <div class="t3-overview-lead">
                 {% if tier3_is_skipped %}
                 <strong>Live evaluation skipped:</strong> {{ tier3_skip_message }}
@@ -2404,10 +2405,11 @@
                 Other execution failures need attention. This is not a whole-run or publication PASS.
                 {% else %}
                 <strong>Verdict at a glance:</strong>
-                {{ tier3_verdict | upper }} with an overall score of
+                {{ tier3_verdict | upper }}{% if t3_effect %} · {{ t3_effect.message }}{% else %} with an overall score of
                 {{ "%.2f" | format(hero_score) if hero_score is not none else "N/A" }}.
                 {% if t3_best_name %}Best performing agent is <strong>{{ t3_best_name }}</strong>{% else %}No successfully scored agent is available{% endif %}
                 {% if tier3.get('overall_lift') is not none %} with {{ "%+.2f" | format(tier3.get('overall_lift')) }} skill lift{% endif %}.
+                {% endif %}
                 {% endif %}
                 {% endif %}
             </div>
@@ -2454,6 +2456,24 @@
                     <h3>Conclusion &amp; Next Steps</h3>
                     <button class="t3-link-btn" type="button" onclick="showTier3SubTab('suggestions', document.querySelector('.t3-subtab[data-tier3-tab=&quot;suggestions&quot;]'))">Open Full Insights</button>
                 </div>
+                {% if t3_effect %}
+                {% set t3_fix_count = t3_preview_recommendations | length %}
+                <p class="t3-next-steps-conclusion">
+                    {% if t3_fix_count %}{{ t3_fix_count }} issue{{ 's' if t3_fix_count != 1 else '' }} to fix, most attempts lost first:{% else %}Nothing to fix in the available case evidence.{% endif %}
+                </p>
+                {% if t3_fix_count %}
+                <ol class="t3-next-steps-list">
+                    {% for reco in t3_preview_recommendations[:3] %}
+                    <li>
+                        <strong>{{ reco.title }}</strong> [{{ reco.category }}]: {{ reco.message }}
+                        {% if reco.evidence and reco.evidence.url %}
+                        <a class="t3-evidence-link" href="{{ reco.evidence.url }}" target="_blank" rel="noopener">View {{ reco.evidence.label or 'evidence' }}</a>
+                        {% endif %}
+                    </li>
+                    {% endfor %}
+                </ol>
+                {% endif %}
+                {% else %}
                 {% if t3_preview_conclusion %}
                 <p class="t3-next-steps-conclusion">
                     {{ t3_preview_conclusion.message if t3_preview_conclusion.message is defined and t3_preview_conclusion.message else t3_preview_conclusion }}
@@ -2478,6 +2498,7 @@
                 </ol>
                 {% else %}
                 <p class="t3-next-steps-conclusion">No recommendations were generated for this evaluation.</p>
+                {% endif %}
                 {% endif %}
             </div>
 
@@ -2514,7 +2535,8 @@
                         <td style="color:{{ 'var(--success-color)' if dim.lift is not none and dim.lift >= tier3_lift_pass_threshold else ('var(--danger-color)' if dim.lift is not none and dim.lift <= tier3_lift_fail_threshold else 'var(--text-secondary)') }};font-weight:600;">
                             {{ "%+.2f" | format(dim.lift) if dim.lift is not none else "N/A" }}
                         </td>
-                        <td><span class="t3-pill {{ 'ok' if dim.verdict == 'PASS' else ('critical' if dim.verdict == 'FAIL' else 'warning') }}">{{ dim.verdict }}</span></td>
+                        {% set dim_regressed = dim.verdict == 'PASS' and dim.lift is not none and dim.lift <= tier3_lift_fail_threshold %}
+                        <td><span class="t3-pill {{ 'warning' if dim_regressed else ('ok' if dim.verdict == 'PASS' else ('critical' if dim.verdict == 'FAIL' else 'warning')) }}">{{ dim.verdict }}{{ ' · regressed' if dim_regressed else '' }}</span></td>
                         <td>
                             {% for metric_id in dim.evaluators or [] %}
                             <span class="metadata-tag">{{ t3_metric_labels.get(metric_id, metric_id | replace("_", " ") | title) }}</span>
@@ -2693,9 +2715,17 @@
                     Higher rates and a positive lift show better observed repeatability on these evaluated cases.
                 </p>
                 <div class="table-scroll" tabindex="0" role="region" aria-label="Pass at K summary table">
+                {% macro t3_attempts_passed(branch) %}
+                    {% set ns = namespace(n=0, truncated=branch.case_details_truncated or false) %}
+                    {% for case in (branch.cases or {}).values() %}
+                        {% if case.attempt_details_truncated %}{% set ns.truncated = true %}{% endif %}
+                        {% for att in case.attempts or [] %}{% if att.passed %}{% set ns.n = ns.n + 1 %}{% endif %}{% endfor %}
+                    {% endfor %}
+                    {% if ns.truncated %}{{ branch.attempts_used or 0 }} scored; pass details truncated{% else %}{{ ns.n }} of {{ branch.attempts_used or 0 }}{% endif %}
+                {% endmacro %}
                 <table class="summary-table pass-at-k-table" style="width:100%;">
                     <thead><tr>
-                        <th>Agent</th><th>Condition</th><th>Pass Rate</th><th>95% Interval</th><th>Cases Passed</th><th>Scored Attempts</th><th>Lift</th>
+                        <th>Agent</th><th>Condition</th><th>Pass Rate</th><th>95% Interval</th><th>Cases Passed</th><th>Attempts Passed</th><th>Lift</th>
                     </tr></thead>
                     <tbody>
                     {% for name, agent in t3_agents.items() %}
@@ -2713,7 +2743,7 @@
                             <td>{{ "%.0f%%" | format((wp.rate or 0.0) * 100) }}</td>
                             <td>{% if wi %}{{ wi | adaptive_interval_percent }}{% else %}—{% endif %}</td>
                             <td>{{ wp.passed_cases or 0 }} of {{ wp.total_cases or 0 }}</td>
-                            <td>{{ wp.attempts_used or 0 }} of {{ wp.max_attempts_possible or 0 }}</td>
+                            <td>{{ t3_attempts_passed(wp) }}</td>
                             <td style="color:{{ 'var(--success-color)' if (lf.delta or 0) >= tier3_lift_pass_threshold else ('var(--danger-color)' if (lf.delta or 0) <= tier3_lift_fail_threshold else 'var(--text-secondary)') }};font-weight:600;">
                                 {% if lf.delta is defined %}{{ "%+.0f%%" | format((lf.delta or 0.0) * 100) }}{% else %}—{% endif %}
                             </td>
@@ -2726,7 +2756,7 @@
                             <td>{{ "%.0f%%" | format((bp.rate or 0.0) * 100) }}</td>
                             <td>{% if bi %}{{ bi | adaptive_interval_percent }}{% else %}—{% endif %}</td>
                             <td>{{ bp.passed_cases or 0 }} of {{ bp.total_cases or 0 }}</td>
-                            <td>{{ bp.attempts_used or 0 }} of {{ bp.max_attempts_possible or 0 }}</td>
+                            <td>{{ t3_attempts_passed(bp) }}</td>
                             <td>baseline</td>
                         </tr>
                         {% endif %}
@@ -2783,9 +2813,10 @@
                     {% for field, label in [('tokens', 'Prompt + completion tokens (cache included)'), ('agent_seconds', 'Agent execution seconds')] %}
                     {% set measured = agent.resources[field] %}
                     <tr><td>{{ name }}</td><td>{{ label }}</td>
-                        <td>{{ '%.2f' | format(measured.with_skill.total) if measured.with_skill.total is not none else 'N/A' }}</td>
-                        <td>{{ '%.2f' | format(measured.baseline.total) if measured.baseline.total is not none else 'N/A' }}</td>
-                        <td>{{ '%+.2f' | format(measured.delta) if measured.delta is not none else 'N/A' }}</td>
+                        {% set unit_fmt = '{:,.1f} s' if field == 'agent_seconds' else '{:,.0f}' %}
+                        <td>{{ unit_fmt.format(measured.with_skill.total) if measured.with_skill.total is not none else 'N/A' }}</td>
+                        <td>{{ unit_fmt.format(measured.baseline.total) if measured.baseline.total is not none else 'N/A' }}</td>
+                        <td>{% if measured.delta is not none %}{{ ('+' if measured.delta >= 0 else '') ~ unit_fmt.format(measured.delta) }}{% if measured.baseline.total %} ({{ '%+.0f' | format(measured.delta / measured.baseline.total * 100) }}%){% endif %}{% else %}N/A{% endif %}</td>
                         <td>{{ measured.with_skill.measured_trials }}/{{ measured.with_skill.trials }} / {{ measured.baseline.measured_trials }}/{{ measured.baseline.trials }}</td>
                     </tr>
                     {% endfor %}
@@ -2827,16 +2858,20 @@
             {% if t3_agents %}
                 {% for agent_name, agent in t3_agents.items() %}
                     {% set pak = agent.pass_at_k or {} %}
-                    {% for cond_label, branch in [('With skill', pak.with_skill), ('Without skill', pak.without_skill)] %}
-                        {% if branch is mapping and branch.get('cases') %}
-                            {% for case_id, case_data in branch.cases.items() %}
-                                {% set _ = t3_attempt_rows.append({'agent': agent_name, 'condition': cond_label, 'case_id': case_id, 'case': case_data}) %}
-                            {% endfor %}
-                        {% endif %}
+                    {% set t3_branches = [('With skill', pak.with_skill), ('Without skill', pak.without_skill)] | selectattr('1', 'mapping') | selectattr('1.cases') | list %}
+                    {% set t3_case_ids = [] %}
+                    {% for cond_label, branch in t3_branches %}{% for case_id in branch.cases %}{% if case_id not in t3_case_ids %}{% set _ = t3_case_ids.append(case_id) %}{% endif %}{% endfor %}{% endfor %}
+                    {# Agent -> case -> condition, so each case's with/without rows sit together. #}
+                    {% for case_id in t3_case_ids | sort %}
+                        {% for cond_label, branch in t3_branches if case_id in branch.cases %}
+                            {% set _ = t3_attempt_rows.append({'agent': agent_name, 'condition': cond_label, 'case_id': case_id, 'case': branch.cases[case_id]}) %}
+                        {% endfor %}
                     {% endfor %}
                 {% endfor %}
             {% endif %}
 
+            {% set t3_goal_by_trial = {} %}
+            {% for trial in tier3.trials or [] %}{% if trial.scores and trial.scores.goal_accuracy is defined %}{% set _ = t3_goal_by_trial.update({(trial.agent, trial.trial_id): trial.scores.goal_accuracy}) %}{% endif %}{% endfor %}
             {% if t3_attempt_rows %}
             <details class="t3-details" id="tier3-attempt-details" open>
                 <summary>Attempt Details</summary>
@@ -2908,7 +2943,11 @@
                                 {% endif %}
                             </td>
                             <td>
-                                {% if passed and first_pass_attempt is not none %}
+                                {% set goal = namespace(missed=0) %}
+                                {% if row.condition == 'With skill' %}{% for att in attempts %}{% if att.get('passed') and t3_goal_by_trial.get((row.agent, att.get('trial'))) == 0 %}{% set goal.missed = goal.missed + 1 %}{% endif %}{% endfor %}{% endif %}
+                                {% if passed and goal.missed %}
+                                    <span class="t3-pill warning" title="{{ goal.missed }} passing attempt(s) scored goal accuracy 0.00">passed{% if first_pass_attempt is not none %} on scored attempt {{ first_pass_attempt | int }}{% endif %} · goal not met (0.00)</span>
+                                {% elif passed and first_pass_attempt is not none %}
                                     <span class="t3-pill ok">passed on scored attempt {{ first_pass_attempt | int }}</span>
                                 {% elif passed %}
                                     <span class="t3-pill ok">passed</span>
@@ -3037,7 +3076,12 @@
                     <table class="summary-table">
                         <thead><tr><th>Agent</th><th>Case</th><th>First Attempt</th><th>Faults</th><th>Details</th></tr></thead>
                         <tbody>
-                        {% for trial in t3_recovery_trials %}
+                        {% set t3_fault_trials = [] %}
+                        {% for trial in t3_recovery_trials %}{% set recovery = trial.error_recovery or {} %}{% if recovery.skill_faults or recovery.agent_faults or recovery.first_attempt == 'retries needed' or recovery.details or trial.warnings %}{% set _ = t3_fault_trials.append(trial) %}{% endif %}{% endfor %}
+                        {% if not t3_fault_trials %}
+                            <tr><td colspan="5" style="color:var(--text-secondary);">No faults, retries or warnings recorded in {{ t3_recovery_trials | length }} trial{{ 's' if t3_recovery_trials | length != 1 else '' }}.</td></tr>
+                        {% endif %}
+                        {% for trial in t3_fault_trials %}
                             {% set recovery = trial.error_recovery or {} %}
                             <tr>
                                 <td><strong>{{ trial.agent or '(default)' }}</strong></td>

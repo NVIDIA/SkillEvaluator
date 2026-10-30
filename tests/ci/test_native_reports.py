@@ -290,3 +290,65 @@ def test_native_overview_displays_quality_threshold_failure_not_an_advisory(tmp_
     attention = index.split('<section class="attention">', 1)[1].split("</section>", 1)[0]
     assert "below the required 100/100" in attention
     assert "Optional version missing" not in attention
+
+
+def test_index_uses_the_report_vocabulary_logo_and_first_fix(tmp_path):
+    summary, _ = _write_fixture(tmp_path, failed=True)
+    render_native_reports(tmp_path, summary, {})
+    page = (tmp_path / "index.html").read_text()
+    report = (tmp_path / "skill-001/skillevaluator-tier1.html").read_text()
+
+    assert '<span class="status fail"><span class="sr-only">Verdict: </span>Changes required</span>' in page
+    assert '<span class="status fail">Changes required</span>' in page
+    assert 'class="mark"' not in page
+    assert re.search(r'<aside class="rail"><div class="brand"><svg class="se-logo"[^>]*aria-hidden="true"', page)
+    assert "most severe first" not in page
+    # "Needs attention" names the skill report's first fix and links to its card.
+    anchor = re.search(r'href="#(f-[^"]+)" class="fix-link"', report).group(1)
+    assert f'href="skill-001/skillevaluator-tier1.html#{anchor}"' in page
+    assert f'id="{anchor}"' in report
+
+
+def test_repository_root_skill_lists_each_fix_first_location_once(tmp_path):
+    """Code Risk Analysis records absolute scan paths; other scanners record skill-relative ones."""
+    risk = ValidationResult(validator_name="Code Risk Analysis", validator_description="Static analysis")
+    risk.add_finding(
+        Finding(
+            category="BANDIT",
+            severity="high",
+            check_name="B602",
+            message="subprocess call with shell=True",
+            file_path="/workspace/scripts/fetch.py",
+            line_number=21,
+        )
+    )
+    scan = ValidationResult(validator_name="Security Scan", validator_description="Detect vulnerabilities")
+    scan.add_finding(
+        Finding(
+            category="SECURITY",
+            severity="high",
+            check_name="tool_misuse",
+            message="Tool Misuse: subprocess.run(command, shell=True",
+            file_path="scripts/fetch.py",
+            line_number=21,
+        )
+    )
+    summary, _ = _write_fixture(tmp_path)
+    payload = json.loads(JSONReporter(include_timestamp=False).render_all([risk, scan]))
+    (tmp_path / "skill-001/skillevaluator-tier1.json").write_text(json.dumps(payload))
+    summary["skills"][0].update(path=".", passed=False, overall_status="failed")
+
+    render_native_reports(tmp_path, summary, {})
+    report = (tmp_path / "skill-001/skillevaluator-tier1.html").read_text()
+    fix_first = report.split('class="fix-first"', 1)[1].split("</section>", 1)[0]
+
+    assert re.findall(r"<code>([^<]+)</code>", fix_first) == ["scripts/fetch.py:21"]
+    assert "/workspace/" not in fix_first
+
+
+def test_index_dark_theme_never_applies_to_print():
+    from ci.native_reports import _STYLE
+
+    assert "@media screen and (prefers-color-scheme:dark)" in _STYLE
+    assert "@media(prefers-color-scheme:dark)" not in _STYLE
+    assert all(int(size) >= 11 for size in re.findall(r"font-size:(\d+)px", _STYLE))

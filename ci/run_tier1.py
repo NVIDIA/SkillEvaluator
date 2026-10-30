@@ -392,6 +392,7 @@ def evaluate_skill(
     workspace: Path,
     env: dict[str, str],
     llm: bool,
+    min_score: str,
     timeout: float,
     execute,
     tokens: set[str],
@@ -423,6 +424,8 @@ def evaluate_skill(
                 "--llm" if llm else "--no-llm",
                 "--profile",
                 "external",
+                "--min-score",
+                min_score,
                 # native_reports renders each skill's HTML from the retained JSON
                 # and replaces any CLI copy, so the CLI does not render it.
                 "-r",
@@ -518,6 +521,7 @@ def run(workspace: Path, reports: Path, environ: dict[str, str], *, execute=None
         if not score.isascii() or not score.isdigit() or len(score) > 3 or int(score) > 100:
             raise ConfigurationError("MIN_SCORE must be an integer between 0 and 100.")
         min_score = str(int(score))
+        workers = scan_workers(environ)
         mode = environ.get("SCAN_MODE", "all")
         if mode not in {"all", "changed"}:
             raise ConfigurationError("SCAN_MODE must be all or changed.")
@@ -641,6 +645,7 @@ def run(workspace: Path, reports: Path, environ: dict[str, str], *, execute=None
                         workspace=workspace,
                         env=worker_env,
                         llm=llm,
+                        min_score=min_score,
                         timeout=remaining,
                         execute=execute,
                         tokens=tokens,
@@ -761,79 +766,6 @@ def run(workspace: Path, reports: Path, environ: dict[str, str], *, execute=None
             f"SkillEvaluator: scan time limit reached; {len(rows) - len(started)} skills were not started.",
             flush=True,
         )
-        output = reports / f"skill-{index:03d}"
-        output.mkdir()
-        row["error"] = "Evaluation interrupted before complete evidence was retained."
-        data = None
-        try:
-            remaining = deadline - clock()
-            if remaining <= 0:
-                raise subprocess.TimeoutExpired("skillevaluator", SCAN_TIMEOUT_SECONDS)
-            # Raw scanner files and logs live only in a private temporary
-            # directory, never in the upload directory. Docker mounts /audit-tmp
-            # as tmpfs, so cancellation cannot upload half-written secrets.
-            with tempfile.TemporaryDirectory(prefix="skillevaluator-private-", dir=env.get("TMPDIR")) as temporary:
-                raw = Path(temporary).resolve(strict=True)
-                if raw.is_relative_to(workspace) or raw.is_relative_to(reports):
-                    raise ValueError("A private scanner directory must be outside the workspace and reports.")
-                argv = [
-                    "skillevaluator",
-                    "tier1",
-                    str(target),
-                    "--llm" if llm else "--no-llm",
-                    "--profile",
-                    "external",
-                    "--min-score",
-                    min_score,
-                    "-r",
-                    "json,html,markdown,sarif",
-                    "-o",
-                    str(raw),
-                ]
-                with (raw / "stdout.log").open("xb") as stdout, (raw / "stderr.log").open("xb") as stderr:
-                    process = execute(
-                        argv, cwd=workspace, env=env, stdout=stdout, stderr=stderr, check=False, timeout=remaining
-                    )
-                safe = sanitized_outputs(raw, tokens)
-            for name, content in safe.items():
-                (output / name).write_bytes(content)
-            row["exit_code"] = process.returncode
-            data = _load_report(output / "skillevaluator-tier1.json")
-            for key in (
-                "overall_status",
-                "incomplete_scans",
-                "total_validators",
-                "total_errors",
-                "total_warnings",
-                "severity_counts",
-            ):
-                row[key] = data[key]
-            row["passed"] = (
-                process.returncode == 0
-                and data["overall_passed"] is True
-                and data["overall_status"] == "passed"
-                and not data["incomplete_scans"]
-                and all(
-                    result.get("passed") is True
-                    and result.get("status") not in {"incomplete", "failed"}
-                    and not result.get("incomplete_scans")
-                    for result in data["results"]
-                )
-            )
-            if not row["passed"] and row["overall_status"] == "passed":
-                row["overall_status"] = "error"
-                row["incomplete_scans"] = []
-                row["error"] = "Process exit or validator results contradict the report verdict."
-            else:
-                row.pop("error", None)
-        except subprocess.TimeoutExpired:
-            row["error"] = "Scan time limit reached; this skill did not finish."
-            checkpoint()
-            break
-        except (OSError, ValueError, UnicodeError, RecursionError):
-            row["error"] = "Evaluator execution failed or its JSON report was missing, unreadable, or invalid."
-        log_result(row, data, annotations=environ.get("GITHUB_ACTIONS") == "true", budget=annotation_budget)
-        checkpoint()
     summary = _summary(rows)
     summary["selection"] = selection
     summary["execution"] = context

@@ -13,6 +13,7 @@ import zipfile
 from pathlib import Path
 
 import pytest
+import yaml
 from test_verify_provenance import JWKS, signed_receipt
 
 ROOT = Path(__file__).parents[2]
@@ -533,7 +534,7 @@ def test_publication_uses_triggering_attempt_even_after_a_rerun(tmp_path, latest
             result = super().get(path)
             if path.endswith("/artifacts?per_page=100"):
                 result["artifacts"].append({**result["artifacts"][0], "id": 789, "created_at": "2026-10-21T13:01:00Z"})
-                result["total_count"] = 2
+                result["total_count"] = len(result["artifacts"])
             return result
 
     metadata = publisher.publish(
@@ -681,7 +682,9 @@ def test_scan_evidence_upload_holds_exactly_what_the_publisher_reads(tmp_path):
         "tier1"
     ]["steps"]
     uploads = [step for step in steps if step.get("uses", "").startswith("actions/upload-artifact@")]
-    full, evidence = uploads
+    assert len(uploads) == 3
+    full = next(step for step in uploads if step["with"]["name"] == "${{ inputs.artifact-name }}-attempt-${{ github.run_attempt }}")
+    evidence = next(step for step in uploads if step["with"]["name"] == "${{ inputs.artifact-name }}-evidence-attempt-${{ github.run_attempt }}")
     assert evidence["uses"] == full["uses"] and evidence["if"] == full["if"] == "always()"
     assert evidence["with"]["name"] == "${{ inputs.artifact-name }}-evidence-attempt-${{ github.run_attempt }}"
     assert evidence["with"]["retention-days"] == full["with"]["retention-days"]

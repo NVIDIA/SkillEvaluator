@@ -8,6 +8,42 @@ All notable changes to SkillEvaluator are documented in this file.
 
 - Add reusable GitLab CI onboarding and configurable Tier 1 quality thresholds,
   alongside a shared repository integration guide.
+- Opt-in `SKILL_EVAL_JUDGE_CHARACTER_FACTS=1` adds bounded, escaped Unicode
+  character facts to Tier 3 accuracy, goal-accuracy, and behavior-check prompts
+  without normalizing the evidence. The operator setting is verifier-only;
+  enabling it selects the prompt-based goal judge instead of the optional RAGAS
+  route. Metadata uses the same text rendering as the judge prompts, including
+  numeric and nullable fields. Existing prompts remain unchanged when the
+  setting is unset.
+
+- `tier3 evaluate` now leads with a case-first summary: a verdict line and one
+  row per `evals.json` case. With one agent, each row shows, for with and
+  without the skill, the pass count, per-attempt marks (`✓` pass, `✗` fail,
+  `⊘` did not run, `·` skipped after a pass) and mean score, plus an effect
+  column (`helps`, `hurts`, `both fail`, `better score`, `worse score`,
+  `no change`, `inconclusive`). With several agents, each agent gets a column
+  showing without-skill → with-skill marks and the pass-rate change. Success
+  rate, quality score, and dimensions follow. A "How to improve" list follows,
+  ranked by attempts lost and capped at three; each item names the case,
+  agent, issue type (`skill`, `skill not used`, `skill hurts`, `environment`,
+  `run error`, `eval case`, `missing input`, `goal not met`), one action, and an evidence
+  path, and is also written to `what_to_fix.json` in the run directory. When
+  nothing needs fixing it prints a one-line "nothing to fix" instead. The
+  verdict is `inconclusive` when attempts did not run. The per-evaluator and
+  per-dimension tables and metric findings moved behind the new `--verbose`
+  flag and remain in `report.html`.
+- `goal not met` flags with-skill attempts that pass on the aggregate score
+  while the judge scored goal accuracy 0.00 (for example, the agent only asked
+  for details).
+- `report.html` leads with the same case-based findings: "Verdict at a glance"
+  adds the per-case result, the highest-scoring agent versus the biggest skill
+  lift, and the goal-not-met count; "Conclusion & Next Steps" and the Insights
+  recommendations list the `what_to_fix.json` fixes (or "Nothing to fix").
+  Data fixes elsewhere: Pass@K shows attempts passed, a regressed passing
+  dimension reads "PASS · regressed" with its weakest signal, resource totals
+  are formatted with units and percent change, Attempt Details groups each
+  case's with/without rows and marks passes that missed the goal, and Error
+  Recovery lists only trials with faults, retries or warnings.
 - Reusable GitHub Actions onboarding for complete Tier 1 checks, with
   pinned runtime/workflow consumer templates, affected-skill PR selection,
   optional hosted reports and updated PR feedback. The new guide separates
@@ -116,6 +152,9 @@ All notable changes to SkillEvaluator are documented in this file.
 
 ### Fixed
 
+- CI quality thresholds apply to every parallel scan worker. Report overviews
+  and detailed reports surface failed quality gates ahead of advisory findings,
+  with links to the check that needs attention.
 - Tier 2 caps every intra-skill embedding chunk at 3,000 characters, preserves
   meaningful short tails and actual Python docstring source ranges, and avoids
   counting pieces of one original chunk as duplicates of each other. Oversized

@@ -76,41 +76,10 @@ def allowed_download_url(url: str) -> bool:
 DOWNLOAD_TOO_LARGE = "The downloaded artifact exceeds its size limit."
 
 
-def _bounded_read(response, limit: int) -> bytes:
-    declared = response.headers.get("Content-Length")
-    if declared and (not declared.isdigit() or int(declared) > limit):
-        raise PublicationError("The downloaded artifact or API response exceeds its size limit.")
-    payload = response.read(limit + 1)
-    if len(payload) > limit:
-        raise PublicationError("The downloaded artifact or API response exceeds its size limit.")
-    return payload
-
-
-class GitHubAPI:
-    def __init__(self, repository: str, token: str):
-        self.repository = repository
-        self.token = token
-        self.opener = urllib.request.build_opener(_NoRedirect())
-
-    def _request(self, path: str):
-        root = f"/repos/{self.repository}"
-        prefix = root + "/"
-        if (path != root and not path.startswith(prefix)) or ".." in path or "\\" in path:
-            raise PublicationError("Only this repository's GitHub API endpoints are supported.")
-        request = urllib.request.Request(
-            f"https://api.github.com{path}",
-            headers={
-                "Authorization": f"Bearer {self.token}",
-                "Accept": "application/vnd.github+json",
-                "X-GitHub-Api-Version": "2022-11-28",
-                "User-Agent": "SkillEvaluator-report-publisher",
-            },
-        )
-        return self.opener.open(request, timeout=60)
-
-    def get(self, path: str):
-        with self._request(path) as response:
-            return _json(_bounded_read(response, MAX_FILE_BYTES))
+class GitHubAPI(github_api.GitHubAPI):
+    error = PublicationError
+    json_error = "A required JSON document is invalid."
+    user_agent = "SkillEvaluator-report-publisher"
 
     def download_artifact(self, artifact_id: int) -> bytes:
         try:
@@ -579,17 +548,17 @@ def _select_artifact(api, repository: str, run: dict, *, provenance=False) -> di
     finished = _timestamp(run.get("updated_at"))
     if finished < started:
         raise PublicationError("The selected run attempt has an invalid time interval.")
-    names = (
-        {f"{ARTIFACT_NAME}-provenance-attempt-{run['run_attempt']}"}
+    name = (
+        f"{ARTIFACT_NAME}-provenance-attempt-{run['run_attempt']}"
         if provenance
-        else {ARTIFACT_NAME, f"{ARTIFACT_NAME}-attempt-{run['run_attempt']}"}
+        else f"{EVIDENCE_ARTIFACT}-attempt-{run['run_attempt']}"
     )
     size_limit = 64 * 1024 if provenance else MAX_TOTAL_BYTES
     candidates = []
     for artifact in listing["artifacts"]:
         if not isinstance(artifact, dict):
             raise PublicationError("The selected run has malformed artifact metadata.")
-        if artifact.get("name") not in names or artifact.get("expired") is not False:
+        if artifact.get("name") != name or artifact.get("expired") is not False:
             continue
         identity = artifact.get("workflow_run", {})
         if identity.get("id") != run["id"] or identity.get("head_sha") != run["head_sha"]:
@@ -611,7 +580,11 @@ def _select_artifact(api, repository: str, run: dict, *, provenance=False) -> di
                 "approve its updated caller blob, then trigger a new scan. "
                 "Downloadable scan reports remain in Actions."
             )
-        raise PublicationError("The selected run attempt has no current report artifact.")
+        raise PublicationError(
+            f"The selected run attempt has no current report evidence artifact named {name}. "
+            "The scan may have stopped before writing reports, the artifact may have expired, "
+            "or the scan used an evaluator revision that does not upload it."
+        )
     if len(candidates) != 1:
         raise PublicationError("The selected run attempt has ambiguous report artifacts.")
     return candidates[0]

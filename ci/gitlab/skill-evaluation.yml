@@ -26,7 +26,11 @@ skill-evaluation:
       trap 'rm -rf "$reports_dir"' EXIT
       export SKILL_PATHS="$SKILL_EVAL_PATHS"
       export MIN_SCORE="$SKILL_EVAL_MIN_SCORE"
-      export REPORT_RUN_URL="${CI_JOB_URL:-}"
+      # Report links must be HTTPS; an instance served over HTTP gets no job link.
+      case "${CI_JOB_URL:-}" in
+        https://*) export REPORT_RUN_URL="$CI_JOB_URL" ;;
+        *) export REPORT_RUN_URL="" ;;
+      esac
       export REPORT_COMMIT="${CI_COMMIT_SHA:-}"
       export REPORT_IMAGE="$SKILL_EVAL_IMAGE"
       case "$SKILL_EVAL_SCAN_MODE" in

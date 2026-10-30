@@ -70,7 +70,7 @@ def test_real_workflow_shell_preserves_container_boundary_and_secret_selection(t
     subprocess.run(["bash", "-e", "-o", "pipefail", "-c", scan["run"]], env=env, check=True, capture_output=True)
     args = json.loads(captured.read_text())
     passed_environment = [args[index + 1] for index, arg in enumerate(args) if arg == "--env"]
-    assert {"SCAN_MODE", "DIFF_BASE_SHA", "DIFF_HEAD_SHA"}.issubset(passed_environment)
+    assert {"SCAN_MODE", "DIFF_BASE_SHA", "DIFF_HEAD_SHA", "MIN_SCORE", "SCAN_WORKERS"}.issubset(passed_environment)
     assert ("LLM_API_KEY" in args) is (llm == "true")
     for flag in ("--read-only", "--user", "--cap-drop", "--security-opt"):
         assert flag in args
@@ -160,3 +160,8 @@ def test_signed_receipt_is_separate_and_retained_after_a_failed_scan():
     scan = next(step for step in steps if step.get("name") == "Evaluate selected skills")
     assert "provenance" not in scan["run"]
     assert "ID_TOKEN" not in scan["run"]
+
+
+def test_scan_worker_input_defaults_to_four_parallel_scans():
+    workers = _workflow()["on"]["workflow_call"]["inputs"]["scan-workers"]
+    assert (workers["type"], workers["default"]) == ("number", "4")

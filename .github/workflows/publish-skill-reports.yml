@@ -80,8 +80,10 @@ jobs:
         # No dependency cache is restored: other default-branch workflows can write
         # this job's cache scope, and uv does not recheck files from its cache.
         run: |
-          python3 -m pip install --require-hashes -r ci/requirements/uv.txt
-          uv sync --frozen --no-dev --no-editable --extra publisher
+          python3 -m venv "$RUNNER_TEMP/uv"
+          "$RUNNER_TEMP/uv/bin/python" -m pip install --disable-pip-version-check \
+            --require-hashes --no-deps --only-binary :all: -r ci/requirements/uv.txt
+          "$RUNNER_TEMP/uv/bin/uv" sync --frozen --no-dev --no-editable --extra publisher
       - name: Checkout retained report history
         uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0
         with:

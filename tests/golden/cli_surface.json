@@ -647,6 +647,16 @@
             "--progress"
           ],
           "param_type": "option"
+        },
+        {
+          "default": "False",
+          "is_flag": true,
+          "name": "verbose",
+          "opts": [
+            "--verbose"
+          ],
+          "param_type": "option",
+          "type": "boolean"
         }
       ]
     },
@@ -2541,6 +2551,16 @@
                 "--progress"
               ],
               "param_type": "option"
+            },
+            {
+              "default": "False",
+              "is_flag": true,
+              "name": "verbose",
+              "opts": [
+                "--verbose"
+              ],
+              "param_type": "option",
+              "type": "boolean"
             }
           ]
         },
@@ -3047,6 +3067,16 @@
               "--progress"
             ],
             "param_type": "option"
+          },
+          {
+            "default": "False",
+            "is_flag": true,
+            "name": "verbose",
+            "opts": [
+              "--verbose"
+            ],
+            "param_type": "option",
+            "type": "boolean"
           }
         ]
       }

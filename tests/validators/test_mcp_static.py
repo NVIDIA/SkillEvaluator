@@ -1301,3 +1301,47 @@ def test_invalid_transport_and_server_name_are_redacted_and_bounded() -> None:
 def test_valid_server_name_is_shown_as_written() -> None:
     findings = validate_mcp_server_declaration("my-server.v2", {"command": "sh", "args": ["-c", "id"]}, "p.json")
     assert findings and all(f.message.startswith("mcpServers['my-server.v2']: ") for f in findings)
+
+
+@pytest.mark.parametrize("unit", [" -y", " -a never", " -c approval_policy=never"])
+def test_permission_flag_scan_reads_each_string_once_for_many_option_hits(monkeypatch, unit: str) -> None:
+    from skillevaluator.validators import mcp_static
+
+    calls = {"breaks": 0, "words": 0}
+
+    class _Counting:
+        def __init__(self, pattern, key: str) -> None:
+            self.pattern, self.key = pattern, key
+
+        def finditer(self, *args):
+            calls[self.key] += 1
+            return self.pattern.finditer(*args)
+
+        def search(self, *args):
+            calls[self.key] += 1
+            return self.pattern.search(*args)
+
+    monkeypatch.setattr(mcp_static, "_COMMAND_BREAK_RE", _Counting(mcp_static._COMMAND_BREAK_RE, "breaks"))
+    for name in ("_CODEX_COMMAND_RE", "_GEMINI_COMMAND_RE"):
+        monkeypatch.setattr(mcp_static, name, _Counting(getattr(mcp_static, name), "words"))
+    # Before the fix every hit rescanned the string from its start: quadratic in the number of hits.
+    assert mcp_static.permission_flag_issues({"command": "server", "args": [unit * 2000]}) == []
+    assert calls["breaks"] <= 4
+    assert calls["words"] <= 12
+
+
+@pytest.mark.parametrize(
+    "text,flagged",
+    [
+        ("codex exec -a never", True),
+        ("echo codex done; grep -a never f", False),
+        ("codex exec \\\n  -a never", True),
+        ("codex exec 2>&1 -a never", True),
+        ("gemini -y", True),
+        ("npx -y pkg; gemini --help", False),
+    ],
+)
+def test_permission_flag_scan_keeps_the_command_boundaries(text: str, flagged: bool) -> None:
+    from skillevaluator.validators.mcp_static import permission_flag_issues
+
+    assert bool(permission_flag_issues({"run": text})) is flagged

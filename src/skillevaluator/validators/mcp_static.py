@@ -23,6 +23,7 @@ well-known names only: DNS resolution and HTTP redirects are never evaluated.
 
 from __future__ import annotations
 
+import bisect
 import contextlib
 import ipaddress
 import itertools
@@ -3181,40 +3182,53 @@ def _join_continuations(text: str) -> str:
     return _LINE_CONTINUATION_RE.sub(lambda match: " " * len(match.group()), text)
 
 
-def _command_before(text: str, start: int, command_re: re.Pattern[str]) -> bool:
-    """Whether ``command_re`` matches before ``start`` in the same shell command of ``text``.
+class _ShellCommands:
+    """The shell commands of one string (backslash-newlines joined), read once for any number of option hits.
 
     ``echo codex done; grep -a never f`` puts the codex word in another command,
     so it does not make ``-a never`` a Codex option. A backslash-continued line and
-    a redirection (``codex exec 2>&1 -a never``) stay in the same command.
+    a redirection (``codex exec 2>&1 -a never``) stay in the same command. The
+    command breaks and the first command word of each command are found once, so
+    a string with many hits is still read in linear time.
     """
-    text = _join_continuations(text)
-    begin = 0
-    for match in _COMMAND_BREAK_RE.finditer(text, 0, start):
-        begin = match.end()
-    return command_re.search(text, begin, start) is not None
 
+    def __init__(self, text: str) -> None:
+        self.text = _join_continuations(text)
+        self._break_ends = [match.end() for match in _COMMAND_BREAK_RE.finditer(self.text)]
+        self._first_word_ends: dict[tuple[int, re.Pattern[str]], int | None] = {}
 
-def _codex_hit(text: str, start: int) -> bool:
-    """Whether a codex command comes before ``start`` in the same shell command of ``text``."""
-    return _command_before(text, start, _CODEX_COMMAND_RE)
+    def command_before(self, start: int, command_re: re.Pattern[str]) -> bool:
+        """Whether ``command_re`` matches before ``start`` in the shell command that holds ``start``."""
+        index = bisect.bisect_right(self._break_ends, start) - 1
+        begin = self._break_ends[index] if index >= 0 else 0
+        key = (begin, command_re)
+        if key not in self._first_word_ends:
+            match = command_re.search(self.text, begin)
+            self._first_word_ends[key] = None if match is None else match.end()
+        end = self._first_word_ends[key]
+        return end is not None and end <= start
+
+    def codex_hit(self, start: int) -> bool:
+        """Whether a codex command comes before ``start`` in the same shell command."""
+        return self.command_before(start, _CODEX_COMMAND_RE)
 
 
 def _flag_hits(path: str, node: Any) -> Iterator[tuple[str, str, _OptionRisk]]:
     """Yield ``(json_path, flag, risk)`` for permission flags in a string or split across argv tokens."""
     if isinstance(node, str):
-        node = _join_continuations(node)
+        commands = _ShellCommands(node)
+        node = commands.text
         for match in _BYPASS_FLAG_RE.finditer(node):
             yield path, match.group(1).lower(), _BYPASS
         for pattern, values in _OPTION_VALUE_RES:
             for match in pattern.finditer(node):
                 flag, risk = values[match.group("value").lower()]
-                if not risk.codex_only or _codex_hit(node, match.start()):
+                if not risk.codex_only or commands.codex_hit(match.start()):
                     yield path, flag, risk
         for flag, pattern in _BYPASS_CONFIG_TEXT_RES:
-            if any(_codex_hit(node, match.start()) for match in pattern.finditer(node)):
+            if any(commands.codex_hit(match.start()) for match in pattern.finditer(node)):
                 yield path, flag, _CODEX_BYPASS
-        if any(_command_before(node, hit.start(), _GEMINI_COMMAND_RE) for hit in _GEMINI_YES_RE.finditer(node)):
+        if any(commands.command_before(hit.start(), _GEMINI_COMMAND_RE) for hit in _GEMINI_YES_RE.finditer(node)):
             yield path, "gemini -y", _BYPASS
     elif isinstance(node, list):
         yield from _argv_flag_hits(path, node, codex=False)

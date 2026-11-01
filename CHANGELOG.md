@@ -18,6 +18,10 @@ All notable changes to SkillEvaluator are documented in this file.
   coverage instead of claiming tools, hooks, channels or providers were loaded.
   No OpenClaw Gateway runtime adapter is included. Runtime-only plugins return
   INCOMPLETE with the requested reports instead of a successful optional skip.
+  Declared-root catalog identities use portable paths across Python/Windows
+  versions; malformed declaration data stays an advisory deduplication skip
+  without weakening filesystem guards. Native Claude Code projection preserves
+  the source client's ignored Codex paths rather than enabling extra skills.
 
 - `--quality-config PATH` on `validate`, `quality-check`, and `tier1` loads the
   deterministic quality check's expected Markdown headings from a YAML file

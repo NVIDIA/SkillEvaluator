@@ -188,8 +188,17 @@ def _bundled_skills(
         for manifest in manifests:
             folder = manifest.relative_path.parent
             rel = folder.as_posix()
+            # Catalog roots are portable POSIX identities, not host filesystem
+            # paths. Python 3.13 no longer compares different path flavours.
+            catalog_folder = PurePosixPath(rel)
             catalog_relative_paths = tuple(
-                sorted({folder.relative_to(root).as_posix() for root in catalog_roots if folder.is_relative_to(root)})
+                sorted(
+                    {
+                        catalog_folder.relative_to(root).as_posix()
+                        for root in catalog_roots
+                        if catalog_folder.is_relative_to(root)
+                    }
+                )
             )
             # Without a collection budget (one plugin, at most ``max_skills``
             # manifests) each manifest is bounded on its own.

@@ -896,6 +896,9 @@ Environment references follow the client that loads the manifest:
   `${...}` in the scheme or host as a relative URL and never connects, and
   sends a reference in the path or query as literal text (HIGH
   `mcp_url_env_not_expanded`).
+- OpenClaw also uses native plugin MCP URL strings verbatim. It does not
+  expand `${NAME}` or `${NAME:-default}` in these endpoints; such references
+  receive HIGH `mcp_url_env_not_expanded` and block portable staging.
 - `$NAME`, `${NAME}`, `${NAME:-}`, and Cursor's `${env:NAME}` are references,
   never inline secrets. A non-empty default ships with the plugin, so it is
   checked like any literal value. `${env:NAME}` gets LOW
@@ -1462,7 +1465,7 @@ stages a server.
     | `mcp_url_dangerous_scheme` | CRITICAL | `file`, `javascript`, `data`, `gopher`, `ftp`, or `ftps` |
     | `mcp_url_scheme_missing` | HIGH | No scheme (`mcp.example.com/mcp`), so clients cannot connect |
     | `mcp_url_insecure_scheme` | HIGH | Plaintext `http` or `ws`, including a remote `.mcpb` or `.dxt` bundle URL. Plaintext to a loopback host (`localhost`, `127.0.0.0/8`, `[::1]`) is exempt, as for HTTP hooks; it still gets MEDIUM `mcp_endpoint_private` |
-    | `mcp_url_env_not_expanded` | HIGH | A Codex plugin's MCP URL uses `${...}`, which Codex does not expand |
+    | `mcp_url_env_not_expanded` | HIGH | A Codex or OpenClaw plugin's MCP URL uses `${...}`, which the client does not expand |
     | `mcp_url_env_unchecked` | LOW | A reference with no default decides the URL's scheme or host, so the endpoint cannot be checked statically |
     | `mcp_url_scheme_not_allowed` | HIGH | Any other scheme than `https` or `wss` |
     | `mcp_url_malformed_authority`, `mcp_url_no_host` | HIGH | A URL that cannot be parsed, a malformed host or port, or no host, or a URL that WHATWG clients (Node, Rust) and Python read differently: a backslash, whitespace before the path, Unicode whitespace or a control character anywhere (only leading or trailing ASCII whitespace is allowed), an invisible format character such as a zero-width space, or no `//` or extra slashes after the scheme. A plain space in the path is not ambiguous. The endpoint checks, and the URL their messages show, use the host those clients connect to |

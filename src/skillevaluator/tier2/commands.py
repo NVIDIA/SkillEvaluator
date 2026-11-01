@@ -18,6 +18,7 @@ from skillevaluator.constants import (
     SIMILARITY_DEFAULT_THRESHOLD,
 )
 from skillevaluator.deduplication.intra_skill.intra_skill_validator import IntraSkillValidator
+from skillevaluator.deduplication.plugin.profile import PluginProfileError
 from skillevaluator.deduplication.result_status import mark_advisory_skip, mark_security_failure
 from skillevaluator.embedding.limits import validate_max_entries, validate_max_scalar_comparisons
 from skillevaluator.models.result import Finding, Severity, ValidationResult
@@ -28,6 +29,7 @@ from skillevaluator.publication_evidence import stamp_publication_evidence
 from skillevaluator.publication_identity import finalize_publication_target, publication_target_from_path
 from skillevaluator.tier1.commands import emit_reports
 from skillevaluator.utils.secure_fs import SecurePathError
+from skillevaluator.utils.structured_data import StructuredDataError
 from skillevaluator.validators.similarity import SimilarityValidator
 
 
@@ -192,15 +194,37 @@ def _plugin_work_limit_result(actual_skills: int) -> ValidationResult:
     )
 
 
+def _plugin_context_profile_skip(reason: PluginProfileError) -> ValidationResult:
+    """Leave malformed declarations to Tier 1 without claiming a filesystem failure."""
+    result = ValidationResult(
+        validator_name="Context Deduplication",
+        validator_description="Detect redundant content within each bundled plugin skill",
+    )
+    return mark_advisory_skip(
+        result, f"Plugin manifest could not supply bundled skills for context deduplication: {reason}"
+    )
+
+
 def _openclaw_skill_dirs(plugin_root: Path) -> list[Path] | None:
-    """Return native declared skill directories, or None for legacy formats."""
+    """Return native declared skills, distinguishing malformed data from unsafe reads."""
     located = locate_plugin_manifest(plugin_root)
     if located is None or located.manifest_type != PLUGIN_OPENCLAW_MANIFEST_TYPE:
         return None
-    data = parse_manifest_text(located.manifest_type, located.read_text())
+    # Secure reads and their byte limits are not declaration/parse errors.
+    raw = located.read_text()
+    try:
+        data = parse_manifest_text(located.manifest_type, raw)
+    except StructuredDataError as exc:
+        raise PluginProfileError("OpenClaw plugin manifest could not be parsed within structured-data limits") from exc
     if not isinstance(data, dict):
-        raise ValueError("OpenClaw plugin manifest is not a mapping")
-    manifests = discover_openclaw_skill_manifests(plugin_root, data)
+        raise PluginProfileError("OpenClaw plugin manifest is not a mapping")
+    try:
+        manifests = discover_openclaw_skill_manifests(plugin_root, data)
+    except SecurePathError:
+        # Includes unsafe declared paths, unreadable roots, and traversal limits.
+        raise
+    except ValueError as exc:
+        raise PluginProfileError(str(exc)) from exc
     return [plugin_root / manifest.relative_path.parent for manifest in manifests]
 
 
@@ -231,6 +255,8 @@ def run_plugin_skill_context_dedup(
             from skillevaluator.utils.helpers import find_bundled_plugin_skills
 
             skill_dirs = find_bundled_plugin_skills(plugin_root)
+    except PluginProfileError as exc:
+        return [_plugin_context_profile_skip(exc)]
     except ValueError as exc:
         return [_unsafe_plugin_result(exc)]
     if not skill_dirs:
@@ -361,7 +387,6 @@ def run_plugin_catalog_checks(
         skipped_result,
     )
     from skillevaluator.deduplication.plugin.profile import (
-        PluginProfileError,
         PluginSkillLimitError,
         load_plugin_profile,
     )
@@ -468,15 +493,20 @@ def run_plugin_dedup_scan(
     from skillevaluator.utils.helpers import find_bundled_plugin_skill_manifests
 
     results = [_make_advisory(IntraPluginValidator().validate(plugin_root))]
+    context_skip = None
     try:
         skill_dirs = _openclaw_skill_dirs(plugin_root)
         if skill_dirs is None:
             skill_manifests = find_bundled_plugin_skill_manifests(plugin_root)
             skill_dirs = [plugin_root / "skills" / manifest.relative_path.parent for manifest in skill_manifests]
+    except PluginProfileError as exc:
+        context_skip = _plugin_context_profile_skip(exc)
     except ValueError as exc:
         results.append(_unsafe_plugin_result(exc))
         return results
-    if run_context:
+    if context_skip is not None:
+        results.append(context_skip)
+    elif run_context:
         results.extend(
             run_plugin_skill_context_dedup(
                 plugin_root,

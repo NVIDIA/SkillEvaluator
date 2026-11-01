@@ -391,6 +391,117 @@ _MAX_NETWORK_ACTION_CHARS = 65_536
 _NETWORK_CLIENT_FAST_PATTERN = re.compile(r"(?i)\b(?:curl|wget|https?)(?:\.exe)?\b")
 _NETWORK_CLIENT_PATTERN = _NETWORK_CLIENT_FAST_PATTERN
 _NETWORK_EXECUTABLES = ("curl", "wget", "http", "https")
+# Commands that run a later word as a command in another root, container,
+# host, user, or network route. Any network client they start is flagged, even
+# when its own arguments upload nothing. "ip" covers "ip netns exec" and
+# "ip vrf exec".
+_NETWORK_COMMAND_RUNNERS = frozenset(
+    {
+        "bwrap",
+        "chroot",
+        "crictl",
+        "docker",
+        "firejail",
+        "incus",
+        "ip",
+        "kubectl",
+        "lxc",
+        "lxc-attach",
+        "machinectl",
+        "nerdctl",
+        "nsenter",
+        "oc",
+        "pkexec",
+        "podman",
+        "proxychains",
+        "proxychains4",
+        "runuser",
+        "sg",
+        "ssh",
+        "sshpass",
+        "su",
+        "systemd-nspawn",
+        "systemd-run",
+        "torsocks",
+        "unshare",
+    }
+)
+# Commands that print only an executable's name or path, as in "$(which curl)".
+# Text printers such as echo and printf print every later word too, so they are
+# resolved separately.
+_EXECUTABLE_LOOKUP_COMMANDS = frozenset({"command", "readlink", "realpath", "type", "whereis", "which"})
+_COMMAND_SUBSTITUTION_RE = re.compile(r"\$\(([^()`]*)\)|`([^`]*)`")
+# Commands that read piped or redirected input as text and never run a later
+# word as a command, as in "env | grep -i http" or "grep -c https < access.log".
+# A client named after one of them does not receive that input as a request
+# body. Every other command, such as find -exec, strace, or uv run, may pass
+# its input on to the client it starts.
+_STDIN_TEXT_CONSUMERS = frozenset(
+    {
+        "ack",
+        "ag",
+        "awk",
+        "base64",
+        "cat",
+        "column",
+        "comm",
+        "cut",
+        "diff",
+        "egrep",
+        "fgrep",
+        "fold",
+        "gawk",
+        "grep",
+        "head",
+        "jq",
+        "less",
+        "mawk",
+        "more",
+        "nl",
+        "od",
+        "paste",
+        "rev",
+        "rg",
+        "sed",
+        "sort",
+        "strings",
+        "tac",
+        "tail",
+        "tee",
+        "tr",
+        "uniq",
+        "wc",
+        "xxd",
+        "yq",
+        "zgrep",
+    }
+)
+# Commands that run the rest of their words as a command after their own
+# options, as in "strace -f ssh host curl URL", "flock /tmp/l docker exec c
+# curl URL", or "watch ssh host curl URL". A command runner named after one of
+# them starts the client in another host, container, root, user, or network
+# route.
+_PASS_THROUGH_WRAPPERS = frozenset(
+    {
+        "chrt",
+        "cpulimit",
+        "eatmydata",
+        "fakeroot",
+        "faketime",
+        "flock",
+        "ionice",
+        "ltrace",
+        "numactl",
+        "parallel",
+        "prlimit",
+        "setarch",
+        "strace",
+        "taskset",
+        "unbuffer",
+        "valgrind",
+        "watch",
+    }
+)
 _SECRET_VAR_NAME_RE = re.compile(
     r"^\$(?:\{[A-Za-z_0-9]*(?i:token|key|secret|password)[A-Za-z_0-9]*\}|[A-Za-z_0-9]*(?i:token|key|secret|password)[A-Za-z_0-9]*)"
 )
@@ -980,6 +1091,159 @@ def _redact_network_evidence(action_text: str) -> str:
     return redacted
 
 
+def _resolve_network_client_lookups(cmd_text: str) -> str:
+    """Replace ``$(which curl)``-style substitutions with the command they name.
+
+    A lookup such as ``which``, ``command -v`` or ``type -P`` prints the path
+    of a network client, a command runner such as ``ssh`` or ``docker``, or a
+    pass-through wrapper such as ``strace``, so the substitution in command
+    position runs that command and is replaced with its name. A text printer
+    such as ``echo`` or ``printf`` also prints the words after that name, which
+    become the command's arguments, so ``$(echo curl -d @.env URL)`` is replaced
+    with ``curl -d @.env URL``. Only the substitution's first command is read,
+    without its redirections, so ``$(which curl | head -1)`` and
+    ``$(command -v curl 2>/dev/null)`` name curl too. Nested lookups such as
+    ``$(readlink -f $(which curl))`` resolve from the innermost substitution
+    outward, one level per pass.
+    """
+
+    def _client(match: re.Match[str]) -> str:
+        body = match.group(1) if match.group(1) is not None else match.group(2)
+        words: list[str] = []
+        skip_target = False
+        for token in _network_shell_tokens(body):
+            if token in _SHELL_SEPARATORS:
+                break
+            if skip_target:
+                skip_target = False
+                continue
+            if token in ("<", "<<", "<<<", ">", ">>"):
+                skip_target = True
+                if words and words[-1].isdigit():
+                    words.pop()
+                continue
+            words.append(token)
+        if len(words) < 2:
+            return match.group(0)
+        lookup = _shell_executable(words[0])
+        prints_text = lookup in _INERT_PRINT_COMMANDS
+        if not prints_text and lookup not in _EXECUTABLE_LOOKUP_COMMANDS:
+            return match.group(0)
+        for i in range(1, len(words)):
+            name = _shell_executable(words[i]).removesuffix(".exe")
+            if name in _NETWORK_EXECUTABLES or name in _NETWORK_COMMAND_RUNNERS or name in _PASS_THROUGH_WRAPPERS:
+                return " ".join(words[i:]) if prints_text else name
+        return match.group(0)
+
+    for _ in range(4):
+        resolved = _COMMAND_SUBSTITUTION_RE.sub(_client, cmd_text)
+        if resolved == cmd_text:
+            break
+        cmd_text = resolved
+    return cmd_text
+
+
+def _network_executable(token: str, assignments: dict[str, str], names: dict[str, str] | None = None) -> str:
+    """Name a command word's executable, resolving ``$CURL`` through earlier assignments.
+
+    ``names`` caches the result per word while ``assignments`` stays the same,
+    so a word such as ``$X`` that appears many times is resolved once.
+    """
+    if names is not None and token in names:
+        return names[token]
+    value = _resolved_shell_arg(token, assignments) if "$" in token else token
+    name = _shell_executable(value).removesuffix(".exe")
+    if names is not None:
+        names[token] = name
+    return name
+
+
+def _network_client_uploads(executable: str, args: list[str], stdin_piped: bool) -> bool:
+    """Check one curl, wget or HTTPie invocation's arguments for upload indicators."""
+    for arg in args:
+        if _has_unquoted_secret_var(arg):
+            return True
+        if _has_literal_secret(arg):
+            return True
+
+    if executable == "curl":
+        i = 0
+        while i < len(args):
+            arg = args[i]
+            clean = arg.strip("\"'")
+            if clean.casefold() in {"-head", "-follow", "-speed"}:
+                i += 1
+                continue
+            if clean.startswith("--"):
+                opt_name, has_eq, opt_val = clean.partition("=")
+                if opt_name in _CURL_DATA_FLAGS or opt_name in _CURL_UPLOAD_FLAGS:
+                    return True
+                if opt_name == "--request":
+                    method = opt_val if has_eq else (args[i + 1].strip("\"'") if i + 1 < len(args) else "")
+                    if method.casefold() in _UNSAFE_HTTP_METHODS:
+                        return True
+            elif clean.startswith("-") and len(clean) > 1:
+                chars = clean[1:]
+                c_idx = 0
+                while c_idx < len(chars):
+                    ch = chars[c_idx]
+                    if ch in ("d", "T", "F"):
+                        return True
+                    if ch == "X":
+                        val = chars[c_idx + 1 :].removeprefix("=")
+                        if not val and i + 1 < len(args):
+                            val = args[i + 1].strip("\"'")
+                        if val.casefold() in _UNSAFE_HTTP_METHODS:
+                            return True
+                        break
+                    if ch in _CURL_SHORT_OPTS_WITH_ARG:
+                        val = chars[c_idx + 1 :]
+                        if not val and i + 1 < len(args):
+                            i += 1
+                        break
+                    c_idx += 1
+            i += 1
+
+    elif executable == "wget":
+        i = 0
+        while i < len(args):
+            arg = args[i]
+            clean = arg.strip("\"'")
+            if clean.startswith("--"):
+                opt_name, has_eq, opt_val = clean.partition("=")
+                if opt_name in _WGET_DATA_FLAGS:
+                    return True
+                if opt_name == "--method":
+                    method = opt_val if has_eq else (args[i + 1].strip("\"'") if i + 1 < len(args) else "")
+                    if method.casefold() in _UNSAFE_HTTP_METHODS:
+                        return True
+            i += 1
+
+    elif executable in {"http", "https"}:
+        cleaned_args = [a.strip("\"'") for a in args]
+        if stdin_piped and "--ignore-stdin" not in cleaned_args:
+            return True
+        i = 0
+        while i < len(args):
+            arg = args[i]
+            clean = arg.strip("\"'")
+            if (
+                clean in ("<", "<<", "<<<") or clean.startswith(("<", "<<", "<<<"))
+            ) and "--ignore-stdin" not in cleaned_args:
+                return True
+            if clean.casefold() in _UNSAFE_HTTP_METHODS:
+                return True
+            if clean.startswith("--raw"):
+                opt_name, _, _ = clean.partition("=")
+                if opt_name == "--raw":
+                    return True
+            if _is_httpie_body_item(arg):
+                return True
+            i += 1
+
+    return False
+
+
 def _is_network_exfiltration_command(cmd_text: str, _depth: int = 0) -> bool:
     """Inspect a shell command for network client exfiltration indicators."""
     if not cmd_text or _depth > 3:
@@ -996,11 +1260,21 @@ def _is_network_exfiltration_command(cmd_text: str, _depth: int = 0) -> bool:
         if _is_network_exfiltration_command(sub, _depth=_depth + 1):
             return True
 
-    tokens = _network_shell_tokens(cmd_text)
-    if not tokens:
-        return False
+    resolved_text = _resolve_network_client_lookups(cmd_text)
+    if _network_tokens_exfiltrate(_network_shell_tokens(resolved_text), _depth):
+        return True
+    # A resolved lookup can only add a finding, so the command is also checked
+    # as written. There "x=$(echo curl -T .env); $x URL" still reads the printed
+    # "curl -T .env" as a command, which the resolved "x=curl -T .env" does not.
+    return resolved_text != cmd_text and _network_tokens_exfiltrate(_network_shell_tokens(cmd_text), _depth)
 
+
+def _network_tokens_exfiltrate(tokens: list[str], _depth: int) -> bool:
+    """Inspect a tokenized shell command for network client exfiltration indicators."""
     assignments: dict[str, str] = {}
+    # Executable names of words resolved since assignments last changed, so a
+    # word such as "$X" repeated across a long action is resolved once.
+    word_names: dict[str, str] = {}
     idx = 0
     stdin_piped = False
 
@@ -1023,17 +1297,21 @@ def _is_network_exfiltration_command(cmd_text: str, _depth: int = 0) -> bool:
             if not assignment:
                 break
             assignments[assignment.group(1)] = assignment.group(2)
+            word_names.clear()
             cmd_idx += 1
 
         unwrapped_idx = _unwrap_shell_command(command, cmd_idx, assignments)
         if unwrapped_idx is None:
             return True
+        if unwrapped_idx != cmd_idx:
+            # A skipped wrapper such as "env NAME=value" may have assigned.
+            word_names.clear()
         cmd_idx = unwrapped_idx
 
         if cmd_idx >= len(command):
             continue
 
-        executable = _shell_executable(command[cmd_idx]).removesuffix(".exe")
+        executable = _network_executable(command[cmd_idx], assignments, word_names)
 
         if executable in _SHELL_COMMAND_INTERPRETERS:
             c_payload = _shell_c_payload(command, cmd_idx, assignments)
@@ -1056,100 +1334,51 @@ def _is_network_exfiltration_command(cmd_text: str, _depth: int = 0) -> bool:
                     return True
             continue
 
-        if executable not in _NETWORK_EXECUTABLES:
-            if executable in _INERT_PRINT_COMMANDS:
-                continue
-            for sub_idx in range(cmd_idx + 1, len(command)):
-                tok = command[sub_idx].strip("\"'")
-                if not tok or "://" in tok or tok.startswith("-"):
-                    continue
-                sub_exe = _shell_executable(tok).removesuffix(".exe")
-                if sub_exe in _NETWORK_EXECUTABLES:
-                    return True
+        if executable in _DECLARATION_BUILTINS:
+            for token in command[cmd_idx + 1 :]:
+                assignment = _SHELL_ASSIGNMENT_RE.match(token.strip("\"'"))
+                if assignment:
+                    assignments[assignment.group(1)] = assignment.group(2)
+                    word_names.clear()
             continue
 
-        args = command[cmd_idx + 1 :]
-
-        for arg in args:
-            if _has_unquoted_secret_var(arg):
+        if executable in _NETWORK_EXECUTABLES:
+            if _network_client_uploads(executable, command[cmd_idx + 1 :], stdin_piped):
                 return True
-            if _has_literal_secret(arg):
+            continue
+
+        if executable in _INERT_PRINT_COMMANDS:
+            continue
+
+        # Other commands may run a later word as a command, as find -exec and
+        # poetry run do, or only name a client as data, as in apt-get install
+        # -y curl, which curl, grep -rn http src/, or prose in a here-document.
+        # Every client named later is read with its own upload rules, as when
+        # it runs directly. The first word naming each client is enough: a
+        # later word naming the same client sees a suffix of the same
+        # arguments. Piped or redirected stdin stays with a text consumer such
+        # as grep, so it is not the client's request body; any other command
+        # may pass it on. A command runner, or one named after a pass-through
+        # wrapper such as strace or flock, starts the client elsewhere, so any
+        # client it names is flagged.
+        keeps_stdin = executable not in _STDIN_TEXT_CONSUMERS
+        runs_elsewhere = executable in _NETWORK_COMMAND_RUNNERS
+        seen_clients: set[str] = set()
+        for sub_idx in range(cmd_idx + 1, len(command)):
+            client = _network_executable(command[sub_idx], assignments, word_names)
+            if executable in _PASS_THROUGH_WRAPPERS and client in _NETWORK_COMMAND_RUNNERS:
+                runs_elsewhere = True
+                continue
+            if client not in _NETWORK_EXECUTABLES or client in seen_clients:
+                continue
+            if runs_elsewhere:
                 return True
-
-        if executable == "curl":
-            i = 0
-            while i < len(args):
-                arg = args[i]
-                clean = arg.strip("\"'")
-                if clean.casefold() in {"-head", "-follow", "-speed"}:
-                    i += 1
-                    continue
-                if clean.startswith("--"):
-                    opt_name, has_eq, opt_val = clean.partition("=")
-                    if opt_name in _CURL_DATA_FLAGS or opt_name in _CURL_UPLOAD_FLAGS:
-                        return True
-                    if opt_name == "--request":
-                        method = opt_val if has_eq else (args[i + 1].strip("\"'") if i + 1 < len(args) else "")
-                        if method.casefold() in _UNSAFE_HTTP_METHODS:
-                            return True
-                elif clean.startswith("-") and len(clean) > 1:
-                    chars = clean[1:]
-                    c_idx = 0
-                    while c_idx < len(chars):
-                        ch = chars[c_idx]
-                        if ch in ("d", "T", "F"):
-                            return True
-                        if ch == "X":
-                            val = chars[c_idx + 1 :].removeprefix("=")
-                            if not val and i + 1 < len(args):
-                                val = args[i + 1].strip("\"'")
-                            if val.casefold() in _UNSAFE_HTTP_METHODS:
-                                return True
-                            break
-                        if ch in _CURL_SHORT_OPTS_WITH_ARG:
-                            val = chars[c_idx + 1 :]
-                            if not val and i + 1 < len(args):
-                                i += 1
-                            break
-                        c_idx += 1
-                i += 1
-
-        elif executable == "wget":
-            i = 0
-            while i < len(args):
-                arg = args[i]
-                clean = arg.strip("\"'")
-                if clean.startswith("--"):
-                    opt_name, has_eq, opt_val = clean.partition("=")
-                    if opt_name in _WGET_DATA_FLAGS:
-                        return True
-                    if opt_name == "--method":
-                        method = opt_val if has_eq else (args[i + 1].strip("\"'") if i + 1 < len(args) else "")
-                        if method.casefold() in _UNSAFE_HTTP_METHODS:
-                            return True
-                i += 1
-
-        elif executable in {"http", "https"}:
-            cleaned_args = [a.strip("\"'") for a in args]
-            if stdin_piped and "--ignore-stdin" not in cleaned_args:
+            seen_clients.add(client)
+            client_args = command[sub_idx + 1 :]
+            if not keeps_stdin:
+                client_args = [token for token in client_args if token not in ("<", "<<", "<<<")]
+            if _network_client_uploads(client, client_args, stdin_piped and keeps_stdin):
                 return True
-            i = 0
-            while i < len(args):
-                arg = args[i]
-                clean = arg.strip("\"'")
-                if (
-                    clean in ("<", "<<", "<<<") or clean.startswith(("<", "<<", "<<<"))
-                ) and "--ignore-stdin" not in cleaned_args:
-                    return True
-                if clean.casefold() in _UNSAFE_HTTP_METHODS:
-                    return True
-                if clean.startswith("--raw"):
-                    opt_name, _, _ = clean.partition("=")
-                    if opt_name == "--raw":
-                        return True
-                if _is_httpie_body_item(arg):
-                    return True
-                i += 1
 
     return False
 

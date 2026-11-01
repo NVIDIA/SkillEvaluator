@@ -503,6 +503,25 @@ def test_ragas_goal_scorer_failure_warns_and_closes_its_client(
     assert all(_RAGAS_TEST_KEY not in message for message in warnings)
 
 
+def test_ragas_goal_scorer_setup_failure_closes_its_client(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    """A failure while building the scorer, before any score request, must not leak the client."""
+    verifier = _load_verifier(tmp_path)
+    _use_ragas_eligible_judge(monkeypatch)
+
+    class BrokenMetric:
+        """Fail at construction, as an incompatible Ragas release would."""
+
+        def __init__(self, **_kwargs):
+            raise TypeError("incompatible Ragas release")
+
+    client = _install_fake_ragas(monkeypatch, BrokenMetric)
+    custom_result = {"score": 0.0, "reason": "custom judgment", "method": "custom"}
+    monkeypatch.setattr(verifier, "_judge_goal_accuracy_custom", lambda *_args, **_kwargs: custom_result)
+
+    assert verifier.judge_goal_accuracy("question", "ground truth", "agent response") == custom_result
+    assert [instance.closed for instance in client.instances] == [1]
+
+
 def test_ragas_goal_judge_obeys_the_required_judge_time_budget(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
     """Ensure Ragas goal scorer returns before its Harbor budget expires."""
     verifier = _load_verifier(tmp_path)

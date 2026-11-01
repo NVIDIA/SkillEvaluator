@@ -2627,17 +2627,16 @@ def _judge_goal_accuracy_ragas(question, ground_truth, agent_text, tool_summary)
     if not request_url.endswith(suffix) or not _is_native_openai_chat_url("openai", request_url):
         raise RuntimeError("RAGAS goal accuracy requires the selected canonical OpenAI provider")
     client = AsyncOpenAI(api_key=api_key, base_url=request_url[: -len(suffix)])
-    judge_model = _selected_judge_model()
-    llm = llm_factory(judge_model, client=client)
-
-    metric = AgentGoalAccuracyWithReference(llm=llm)
-    user_input = [
-        RagasHuman(content=question),
-        RagasAI(content=agent_text),
-    ]
-
     loop = asyncio.new_event_loop()
     try:
+        # Build the scorer inside the try so a setup failure still closes the client.
+        judge_model = _selected_judge_model()
+        llm = llm_factory(judge_model, client=client)
+        metric = AgentGoalAccuracyWithReference(llm=llm)
+        user_input = [
+            RagasHuman(content=question),
+            RagasAI(content=agent_text),
+        ]
         # Collections metrics take the messages and reference as keywords, not a SingleTurnSample.
         result = loop.run_until_complete(
             asyncio.wait_for(

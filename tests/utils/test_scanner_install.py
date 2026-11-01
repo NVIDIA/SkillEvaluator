@@ -142,22 +142,47 @@ class TestOptionalSemgrep:
 
 
 class TestManagedGitleaks:
-    def test_install_verifies_checksum_and_refresh_finds_binary(self, runtime_dir, monkeypatch):
+    def test_missing_binary_installs_on_first_run_and_is_reused(self, runtime_dir, monkeypatch):
         payload = _gitleaks_tarball()
         key = ("linux", "x64")
         monkeypatch.setattr(scanner_install, "gitleaks_platform", lambda: key)
+        monkeypatch.setattr(tool_runner, "gitleaks_platform", lambda: key)
         monkeypatch.setattr(scanner_install, "_GITLEAKS_SHA256", {key: hashlib.sha256(payload).hexdigest()})
+        binary = runtime_dir / "gitleaks" / scanner_install.GITLEAKS_VERSION / "gitleaks"
         with patch.object(tool_runner, "resolve_tool_path", _resolver({})):
             tool = ExternalTool("Gitleaks", "gitleaks", managed=True)
-            assert not tool.is_available
-            with patch("urllib.request.urlopen", return_value=io.BytesIO(payload)) as urlopen:
-                assert scanner_install.install_gitleaks() is None
-            tool.refresh()
-        assert urlopen.call_args.args[0] == scanner_install.gitleaks_url(key)
-        binary = runtime_dir / "gitleaks" / scanner_install.GITLEAKS_VERSION / "gitleaks"
+        assert tool.is_available
         assert tool.path == str(binary)
         assert tool.resolution_source == "managed"
+        assert not binary.exists()
+        with patch("urllib.request.urlopen", return_value=io.BytesIO(payload)) as urlopen:
+            result = tool.run(["version"])
+            tool.run(["version"])
+        assert result.success
+        assert urlopen.call_count == 1
+        assert urlopen.call_args.args[0] == scanner_install.gitleaks_url(key)
         assert os.access(binary, os.X_OK)
+
+    @pytest.mark.usefixtures("runtime_dir")
+    def test_failed_first_run_install_is_reported_not_launched(self, monkeypatch):
+        monkeypatch.setattr(scanner_install, "gitleaks_platform", lambda: ("linux", "x64"))
+        monkeypatch.setattr(tool_runner, "gitleaks_platform", lambda: ("linux", "x64"))
+        with patch.object(tool_runner, "resolve_tool_path", _resolver({})):
+            tool = ExternalTool("Gitleaks", "gitleaks", managed=True)
+        with (
+            patch("urllib.request.urlopen", side_effect=OSError("network unreachable")),
+            patch("subprocess.run") as run,
+        ):
+            result = tool.run(["version"])
+        assert not result.success
+        assert result.error_message == "Gitleaks download failed: network unreachable"
+        run.assert_not_called()
+
+    @pytest.mark.usefixtures("runtime_dir")
+    def test_unsupported_platform_is_unavailable(self, monkeypatch):
+        monkeypatch.setattr(tool_runner, "gitleaks_platform", lambda: None)
+        with patch.object(tool_runner, "resolve_tool_path", _resolver({})):
+            assert not ExternalTool("Gitleaks", "gitleaks", managed=True).is_available
 
     def test_checksum_mismatch_installs_nothing(self, runtime_dir, monkeypatch):
         monkeypatch.setattr(scanner_install, "gitleaks_platform", lambda: ("linux", "x64"))

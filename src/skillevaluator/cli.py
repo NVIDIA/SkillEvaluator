@@ -798,35 +798,19 @@ def _offer_local_runtime_install(agents: list[str]) -> None:
 
 
 def _offer_scanner_install() -> None:
-    """Before Tier 1, offer the one-time pinned Gitleaks download when it is missing."""
-    import sys
-
-    from skillevaluator.utils.scanner_install import (
-        GITLEAKS_VERSION,
-        gitleaks_platform,
-        install_gitleaks,
-        managed_gitleaks_path,
-    )
+    """Before Tier 1, install the pinned, checksum-verified Gitleaks binary when it is missing."""
+    from skillevaluator.utils.scanner_install import GITLEAKS_VERSION, ensure_gitleaks
     from skillevaluator.utils.tool_runner import Tools
 
-    target = managed_gitleaks_path()
-    if Tools.gitleaks.is_available or gitleaks_platform() is None or target is None:
+    path = Tools.gitleaks.path
+    if Tools.gitleaks.resolution_source != "managed" or path is None or Path(path).is_file():
         return
-    console.print("[yellow]Secrets Detection needs Gitleaks, and it is not installed.[/yellow]")
-    if not sys.stdin.isatty():
-        console.print(f"  [dim]{Tools.gitleaks.get_install_hint()}[/dim]", highlight=False)
-        return
-    if not click.confirm(
-        f"  Download Gitleaks {GITLEAKS_VERSION} (checksum-verified) into {target.parent}?", default=True
-    ):
-        return
-    with console.status("Downloading Gitleaks…"):
-        error = install_gitleaks()
-    Tools.gitleaks.refresh()
-    if error or not Tools.gitleaks.is_available:
-        console.print(f"  [red]✗ {error or 'Gitleaks install failed'}[/red]", highlight=False)
+    with console.status(f"Installing Gitleaks {GITLEAKS_VERSION}…"):
+        error = ensure_gitleaks()
+    if error:
+        console.print(f"[red]✗ {error}[/red]", highlight=False)
     else:
-        console.print("  [green]✓ gitleaks installed[/green]")
+        console.print(f"[dim]✓ Gitleaks {GITLEAKS_VERSION} installed (checksum-verified)[/dim]", highlight=False)
 
 
 def _run_agent_eval_or_skip(

@@ -15,14 +15,16 @@ import shutil
 import subprocess
 import sys
 import tempfile
-from collections.abc import Mapping
+from collections.abc import Callable, Mapping
 from dataclasses import dataclass
 from pathlib import Path
 
 from skillevaluator.logging_config import get_logger
 from skillevaluator.models.result import Severity
 from skillevaluator.utils.scanner_install import (
+    ensure_gitleaks,
     ensure_skillspector_wheel,
+    gitleaks_platform,
     managed_gitleaks_path,
     managed_skillspector_wheel,
 )
@@ -148,6 +150,7 @@ class ExternalTool:
         self.resolution_source = "automatic"
         self._configuration_error: str | None = None
         self._uv_run: tuple[str, tuple[str, ...]] | None = None
+        self._ensure: tuple[str, Callable[[], str | None]] | None = None
         override_env = self.override_env
         name = self.name
 
@@ -176,11 +179,13 @@ class ExternalTool:
             if uv is not None and wheel is not None:
                 self._path = uv
                 self._uv_run = (uv, ("tool", "run", "--quiet", "--from", str(wheel), "skillspector"))
+                self._ensure = (uv, ensure_skillspector_wheel)
                 self.resolution_source = "uv tool run"
         elif self.command == "gitleaks":
             binary = managed_gitleaks_path()
-            if binary is not None and binary.is_file() and os.access(binary, os.X_OK):
+            if binary is not None and gitleaks_platform() is not None:
                 self._path = str(binary)
+                self._ensure = (self._path, ensure_gitleaks)
                 self.resolution_source = "managed"
 
     def _launch_args(self) -> tuple[str, ...]:
@@ -258,7 +263,7 @@ class ExternalTool:
             )
 
         launch_args = self._launch_args()
-        if launch_args and (error := ensure_skillspector_wheel()):
+        if self._ensure is not None and self._path == self._ensure[0] and (error := self._ensure[1]()):
             return ToolResult(success=False, stdout="", stderr="", exit_code=-1, error_message=error)
 
         cmd = [self._path, *launch_args, *args]

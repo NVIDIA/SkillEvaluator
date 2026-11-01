@@ -188,7 +188,7 @@ Tier 1 provisions the external security scanners in their own environments, so t
 
 - **SkillSpector:** when no executable is found, Tier 1 downloads the 2.12.0 release wheel once into the SkillEvaluator runtime folder, verifies its SHA-256 checksum, and runs it with `uv tool run`. The first run needs uv and network access; later runs use the uv cache.
 - **Semgrep:** optional. When it is installed, Code Risk Analysis adds its rules to Bandit; when it is not, the check notes it was skipped. Set `SKILLEVALUATOR_REQUIRE_SEMGREP=1` to report a missing Semgrep as `INCOMPLETE` (the Tier 1 CI image does).
-- **Gitleaks:** `tier1` and `validate` offer a one-time download of the pinned 8.30.0 release into the SkillEvaluator runtime folder, verified against its SHA-256 checksum. Without a terminal (CI), they print the install command instead.
+- **Gitleaks:** on first use, SkillEvaluator downloads the pinned 8.30.0 release into its runtime folder and verifies its SHA-256 checksum. There is no prompt, so CI runs install it too. Linux and macOS only.
 
 Installed executables take precedence. To use your own, put them on `PATH` or set `SKILLEVALUATOR_SEMGREP_PATH` and `SKILLEVALUATOR_SKILLSPECTOR_PATH`:
 
@@ -219,7 +219,7 @@ skillevaluator health-check
 uv installs tools to `~/.local/bin`, which may not be on PATH yet. Run `uv tool update-shell` and open a new terminal.
 </Accordion>
 <Accordion title="Validation reports INCOMPLETE and exits non-zero">
-A required scanner could not run. Check that uv is on `PATH` and GitHub and PyPI are reachable (SkillSpector), or rerun in a terminal to accept the Gitleaks download, or install the scanner named in the report. Missing required evidence leaves validation `INCOMPLETE` and non-zero.
+A required scanner could not run. Check that uv is on `PATH` and GitHub and PyPI are reachable (SkillSpector), or that GitHub is reachable for the Gitleaks download, or install the scanner named in the report. Missing required evidence leaves validation `INCOMPLETE` and non-zero.
 </Accordion>
 </AccordionGroup>
 

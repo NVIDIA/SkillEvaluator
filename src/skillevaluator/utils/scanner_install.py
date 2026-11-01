@@ -123,6 +123,14 @@ def managed_gitleaks_path() -> Path | None:
     return _runtime_path("gitleaks", GITLEAKS_VERSION, "gitleaks")
 
 
+def ensure_gitleaks() -> str | None:
+    """Make sure the verified Gitleaks binary is installed; return an error or None."""
+    target = managed_gitleaks_path()
+    if target is not None and target.is_file() and os.access(target, os.X_OK):
+        return None
+    return install_gitleaks()
+
+
 def install_gitleaks() -> str | None:
     """Download, verify and install the pinned Gitleaks binary; return an error or None."""
     key = gitleaks_platform()

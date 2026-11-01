@@ -28,6 +28,7 @@ from skillevaluator.logging_config import setup_logging
 from skillevaluator.models.result import ValidationResult
 from skillevaluator.quality_config import QualityConfigError, load_quality_config
 from skillevaluator.reporting.console_ui import (
+    TierRow,
     ValidateView,
     ViewProgressReporter,
     check_ticker_row,
@@ -456,9 +457,7 @@ def _resolve_report_output_location(target_path: Path, output_dir: Path) -> Path
             if output_is_real_directory and is_generated_output_root(output_dir):
                 return output_dir
         except (OSError, RuntimeError, ValueError) as exc:
-            raise click.ClickException(
-                f"Cannot safely reserve default report output directory: {output_dir}"
-            ) from exc
+            raise click.ClickException(f"Cannot safely reserve default report output directory: {output_dir}") from exc
 
     if output_is_default:
         relocated = target_path.with_name(f"{target_path.name}-reports")
@@ -501,8 +500,7 @@ def _reject_copy_repo_root_output(
     try:
         context_roots = [(resolve_repo_context_root(target_path), "repository root")]
         context_roots.extend(
-            (included_skill.resolve(strict=True), "runtime source root")
-            for included_skill in include_skills
+            (included_skill.resolve(strict=True), "runtime source root") for included_skill in include_skills
         )
     except (OSError, RuntimeError, ValueError) as exc:
         raise click.ClickException(f"Cannot validate {mode_label} report output directory: {output_dir}") from exc
@@ -769,6 +767,66 @@ def _evaluated_source_from_options(
         if value and not any(field in identity for field in accepted):
             raise click.BadParameter(f"expected {expected}.", param_hint=option)
     return identity or None
+
+
+def _offer_local_runtime_install(agents: list[str]) -> None:
+    """Before a local-mode run, offer to install each missing agent CLI (pinned, managed root)."""
+    import shlex
+    import sys
+
+    from skillevaluator.tier3.harbor.local_runtime import (
+        install_local_runtime,
+        managed_install_argv,
+        missing_local_runtimes,
+    )
+
+    for agent in missing_local_runtimes(agents):
+        argv = managed_install_argv(agent)
+        console.print(f"[yellow]Local mode needs the {agent} CLI, and it is not installed.[/yellow]")
+        console.print(f"  [dim]{shlex.join(argv)}[/dim]", highlight=False, soft_wrap=True)
+        if not sys.stdin.isatty():
+            console.print("  [dim]Run the command above, or use --env-mode docker.[/dim]")
+            continue
+        if not click.confirm(f"  Install it into {argv[4]}?", default=True):
+            continue
+        with console.status(f"Installing {agent}…"):
+            error = install_local_runtime(agent)
+        if error:
+            console.print(f"  [red]✗ {error}[/red]", highlight=False)
+        else:
+            console.print(f"  [green]✓ {agent} installed[/green]")
+
+
+def _offer_scanner_install() -> None:
+    """Before Tier 1, offer the one-time pinned Gitleaks download when it is missing."""
+    import sys
+
+    from skillevaluator.utils.scanner_install import (
+        GITLEAKS_VERSION,
+        gitleaks_platform,
+        install_gitleaks,
+        managed_gitleaks_path,
+    )
+    from skillevaluator.utils.tool_runner import Tools
+
+    target = managed_gitleaks_path()
+    if Tools.gitleaks.is_available or gitleaks_platform() is None or target is None:
+        return
+    console.print("[yellow]Secrets Detection needs Gitleaks, and it is not installed.[/yellow]")
+    if not sys.stdin.isatty():
+        console.print(f"  [dim]{Tools.gitleaks.get_install_hint()}[/dim]", highlight=False)
+        return
+    if not click.confirm(
+        f"  Download Gitleaks {GITLEAKS_VERSION} (checksum-verified) into {target.parent}?", default=True
+    ):
+        return
+    with console.status("Downloading Gitleaks…"):
+        error = install_gitleaks()
+    Tools.gitleaks.refresh()
+    if error or not Tools.gitleaks.is_available:
+        console.print(f"  [red]✗ {error or 'Gitleaks install failed'}[/red]", highlight=False)
+    else:
+        console.print("  [green]✓ gitleaks installed[/green]")
 
 
 def _run_agent_eval_or_skip(
@@ -1482,6 +1540,7 @@ def _finish_pipeline_view(
     agent_eval: bool,
 ) -> None:
     """Render the quiet-mode verdict panel and report footer."""
+    from skillevaluator.reporting.console_ui import MUTED as MUTED_STYLE
     from skillevaluator.reporting.console_ui import Verdict, _is_skipped, first_fix
 
     ext = {"html": ".html", "json": ".json", "markdown": ".md", "sarif": ".sarif.json"}
@@ -1507,19 +1566,29 @@ def _finish_pipeline_view(
         return
 
     failed = [result for result in tier_gate_results if not result.passed and not _is_skipped(result)]
-    if failed:
-        first = failed[0].validator_name or "validation"
-        extra = f" (+{len(failed) - 1} more)" if len(failed) > 1 else ""
-        tier_no = (failed[0].metadata.get("gating") or {}).get("tier")
-        tier_label = f" in Tier {tier_no}" if tier_no is not None else ""
-        headline = f"{first}{extra} failed{tier_label}"
-    else:
-        headline = "validation failed"
+    by_tier: dict[object, list] = {}
+    for result in failed:
+        by_tier.setdefault((result.metadata.get("gating") or {}).get("tier"), []).append(result)
+    parts = []
+    for tier_no, results in by_tier.items():
+        broken = sum(1 for r in results if not r.is_incomplete)
+        counts = [
+            f"{broken} failed" if broken else "",
+            f"{len(results) - broken} didn't run" if broken < len(results) else "",
+        ]
+        label = f"Tier {tier_no}: " if tier_no is not None else ""
+        parts.append(label + ", ".join(c for c in counts if c))
+    headline = " · ".join(parts) or "validation failed"
+    if len(failed) == 1:
+        only = failed[0]
+        tier_no = (only.metadata.get("gating") or {}).get("tier")
+        state = "didn't run" if only.is_incomplete else "failed"
+        headline = f"{only.validator_name or 'validation'} {state}" + (
+            f" in Tier {tier_no}" if tier_no is not None else ""
+        )
     rerun = _rerun_hint(target_path, agent_eval)
-    view.finish(
-        Verdict(passed=False, headline=headline, fix=first_fix(tier_gate_results), rerun=rerun),
-        links,
-    )
+    fix = [("see what to fix above, then rerun", MUTED_STYLE)] if failed else first_fix(tier_gate_results)
+    view.finish(Verdict(passed=False, headline=headline, fix=fix, rerun=rerun), links)
 
 
 def _print_tier_banner(title: str) -> None:
@@ -2095,6 +2164,11 @@ def validate(
     # for the later Tier 3 skip result and continue through Tier 1/2.
     autopilot_error: str | None = None
     autopilot_dataset_note: str | None = None
+    if run_tier3 and env_mode == "local":
+        from skillevaluator.tier3.commands import parse_agents
+
+        _offer_local_runtime_install(parse_agents(agents))
+    _offer_scanner_install()
     view.start()
     if autopilot:
         # Generation now precedes Tier 1, so surface it on the first live block
@@ -2209,10 +2283,25 @@ def validate(
             [*tier3_config_rows, stage_hint_row("status", "running with-skill and baseline trials…")],
         )
 
-        def _on_engine_tail(lines: list[str]) -> None:
-            view.tier_progress(tier3_index, [*tier3_config_rows, *engine_feed_rows(lines)])
+        live_case_rows: list[TierRow] = []
+        engine_tail: list[str] = []
 
-        reporter = ViewProgressReporter(_on_engine_tail) if quiet else None
+        def _show_tier3_progress() -> None:
+            view.tier_progress(tier3_index, [*tier3_config_rows, *live_case_rows, *engine_feed_rows(engine_tail)])
+
+        def _on_engine_tail(lines: list[str]) -> None:
+            engine_tail[:] = lines
+            _show_tier3_progress()
+
+        def _on_case_rows(rows: list[TierRow]) -> None:
+            live_case_rows[:] = rows
+            _show_tier3_progress()
+
+        reporter = (
+            ViewProgressReporter(_on_engine_tail, on_cases=_on_case_rows, pass_threshold=pass_threshold)
+            if quiet
+            else None
+        )
         repo_context_exclude_paths = [output_dir] if report_output_required else []
         catalog_report_root = click.get_current_context().meta.get("skillevaluator_catalog_report_root")
         if isinstance(catalog_report_root, Path) and not paths_refer_to_same_location(
@@ -2700,6 +2789,7 @@ def _tier1_workflow(
         policy = resolve_policy(profile=profile)
     except (FileNotFoundError, ValueError) as exc:
         raise click.ClickException(str(exc)) from exc
+    _offer_scanner_install()
     results = run_tier1_workflow(
         skill_path,
         checks=checks,
@@ -2953,6 +3043,10 @@ def evaluate(
     try:
         if env_mode == "local":
             from rich.panel import Panel
+
+            from skillevaluator.tier3.commands import parse_agents
+
+            _offer_local_runtime_install(parse_agents(agents))
             from rich.text import Text
 
             console.print(

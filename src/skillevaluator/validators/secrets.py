@@ -233,6 +233,7 @@ regexes = [
                     message=message,
                     file_path=file_path,
                     line_number=line,
+                    suggestion=f"Remove the secret from {file_path}, revoke it, and read it from an environment variable",
                 ),
                 is_error=severity.is_error(),
             )

@@ -149,8 +149,10 @@ def sanitized_outputs(raw: Path, tokens: set[str]) -> dict[str, bytes]:
             text = content.decode("utf-8")
             if name.endswith(".json"):
                 document = redactor.object(json.loads(text))
-                if tokens and isinstance(document, dict):
-                    # IDs hashed from the unredacted text could confirm a guessed value.
+                if isinstance(document, dict):
+                    # IDs hashed from the unredacted text could confirm a guessed
+                    # value. Refresh even without collected tokens: the redactor
+                    # also masks database userinfo that no token names.
                     refresh_finding_identities(document)
                 text = json.dumps(document, ensure_ascii=True, allow_nan=False, indent=2)
             else:

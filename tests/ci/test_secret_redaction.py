@@ -231,6 +231,66 @@ def test_redacted_report_does_not_keep_ids_hashed_from_the_credential(tmp_path):
     assert document["results"][1]["finding_counts"]["raw_occurrences"] == 1
 
 
+def _database_url_line() -> str:
+    # Synthetic driver-qualified URL; the PII collector does not name its password.
+    return 'DATABASE_URL = "postgresql+psycopg2://admin:' + "hunter" + '22@db.example.net/app"'
+
+
+def test_ids_are_refreshed_when_only_database_userinfo_is_masked(tmp_path, monkeypatch):
+    # The redactor masks database userinfo even when no token was collected.
+    # IDs hashed from the unmasked line would let a reader confirm a guess.
+    workspace, reports = tmp_path / "workspace", tmp_path / "reports"
+    skill = workspace / "skills" / "demo"
+    skill.mkdir(parents=True)
+    (skill / "SKILL.md").write_text("---\nname: demo\ndescription: A sample formatting skill.\n---\n# Demo\n")
+    (skill / "config.py").write_text(_database_url_line() + "\n")
+    assert runner.collect_sensitive_values(skill) == set()
+    scan = ValidationResult(validator_name="SkillSpector", validator_description="Static analysis")
+    quoted = Finding(
+        "SECURITY",
+        Severity.HIGH,
+        "hardcoded-database-url",
+        "Database URL with credentials",
+        "config.py",
+        1,
+        line_content=_database_url_line(),
+    )
+    scan.add_finding(quoted)
+    raw_report = JSONReporter(include_timestamp=False).render_all([scan])
+
+    def fake_cli(argv, **kwargs):
+        (Path(argv[argv.index("-o") + 1]) / "skillevaluator-tier1.json").write_text(raw_report)
+        return subprocess.CompletedProcess(argv, 1)
+
+    assert runner.run(workspace, reports, {"SKILL_PATHS": "skills", "GITHUB_ACTIONS": "true"}, execute=fake_cli) == 1
+    shared = (reports / "skill-001/skillevaluator-tier1.json").read_text(encoding="utf-8")
+    assert "admin:hunter" not in shared
+    assert quoted.occurrence_id not in shared
+    document = json.loads(shared)
+    assert "[REDACTED]@db.example.net" in document["results"][0]["findings"][0]["line_content"]
+    _assert_finding_ids_match_text(document)
+
+    # A retained report from an older run still quotes the URL with the IDs
+    # hashed from it; the publisher masks it and refreshes the IDs.
+    from ci import publish_reports
+
+    stale = json.loads(shared)
+    stale_finding = stale["results"][0]["findings"][0]
+    stale_finding["line_content"] = _database_url_line()
+    stale_finding["occurrence_id"] = quoted.occurrence_id
+    stale["finding_groups"][0]["occurrences"][0]["occurrence_id"] = quoted.occurrence_id
+    stale["finding_groups"][0]["occurrences"][0]["line_content"] = _database_url_line()
+    archive = io.BytesIO()
+    with zipfile.ZipFile(archive, "w") as zipped:
+        zipped.writestr("summary.json", (reports / "summary.json").read_text(encoding="utf-8"))
+        zipped.writestr("skill-001/skillevaluator-tier1.json", json.dumps(stale))
+    _summary, retained = publish_reports.read_artifact(archive.getvalue())
+    published = json.dumps(retained)
+    assert "admin:hunter" not in published
+    assert quoted.occurrence_id not in published
+    _assert_finding_ids_match_text(retained["skill-001"])
+
+
 def test_refreshing_ids_keeps_the_shape_of_reports_written_before_ids() -> None:
     from skillevaluator.reporting.finding_summary import refresh_finding_identities
 

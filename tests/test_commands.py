@@ -2951,8 +2951,9 @@ def test_summarize_tier2_lists_duplicate_details() -> None:
     rendered = ["".join(chunk for chunk, _style in row.segments) for row in rows]
     assert any("duplicates found" in line for line in rendered)
     assert any("Sections 'Setup 0'" in line for line in rendered)
-    duplicate_rows = [row for row in rows if row.label == "duplicate"]
+    duplicate_rows = [row for row in rows if row.glyph in {"1", "2", "3"}]
     assert len(duplicate_rows) == 3
+    assert any(row.label == "what to fix" for row in rows)
     assert any("2 more" in line for line in rendered)
 
 

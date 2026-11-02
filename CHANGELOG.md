@@ -92,6 +92,11 @@ All notable changes to SkillEvaluator are documented in this file.
 
 ### Changed
 
+- The compact `validate` view lists every Tier 3 test case with and without
+  the skill, updates the list while trials run, and ends each tier with a short
+  "what to fix" list: the problem, then the action. A required scanner that
+  could not run counts as "didn't run", not as a failed check.
+
 - Hosted GitHub reports verify a separate GitHub-signed execution receipt.
   Enable `id-token: write` in the scan workflow and refresh its approved blob
   when adding hosting; ordinary scans keep their existing read-only permissions.

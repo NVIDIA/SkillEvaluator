@@ -23,11 +23,20 @@ def _skill_dirs(target: Path) -> list[Path]:
 def emit_harness_compatibility(
     target: Path, harness: str, profiles_dir: Path | None, json_report: Path | None = None
 ) -> dict[str, list[HarnessResult]]:
-    """Print one row per harness for each skill and add ``harness_compatibility`` to the JSON report."""
+    """Evaluate each skill and add ``harness_compatibility`` to the JSON report."""
     try:
         results = {str(skill): evaluate_harnesses(skill, harness, profiles_dir) for skill in _skill_dirs(target)}
     except ValueError as exc:
         raise click.UsageError(str(exc)) from exc
+    if json_report is not None and json_report.exists():
+        data = json.loads(json_report.read_text(encoding="utf-8"))
+        data["harness_compatibility"] = {skill: [r.to_dict() for r in rows] for skill, rows in results.items()}
+        json_report.write_text(json.dumps(data, indent=2), encoding="utf-8")
+    return results
+
+
+def render_harness_compatibility(results: dict[str, list[HarnessResult]]) -> None:
+    """Print one row per harness for each skill."""
     console = Console()
     for skill, rows in results.items():
         table = Table(
@@ -43,8 +52,3 @@ def emit_harness_compatibility(
             reason = "; ".join(f"{f['message']} [{f['id']}]" for f in row.findings if f["effect"] != "advisory") or "-"
             table.add_row(row.harness, row.status, reason, f"{row.version}, {row.verified_date}")
         console.print(table)
-    if json_report is not None and json_report.exists():
-        data = json.loads(json_report.read_text(encoding="utf-8"))
-        data["harness_compatibility"] = {skill: [r.to_dict() for r in rows] for skill, rows in results.items()}
-        json_report.write_text(json.dumps(data, indent=2), encoding="utf-8")
-    return results

@@ -2366,10 +2366,11 @@ def validate(
         sarif_repository_root=sarif_repository_root,
     )
     _record_validate_json_report(f"{report_basename_value}.json" if "json" in effective_formats else None)
+    harness_rows = None
     if harness and resolved_type == CONTENT_TYPE_SKILL:
         from skillevaluator.harness.report import emit_harness_compatibility
 
-        emit_harness_compatibility(
+        harness_rows = emit_harness_compatibility(
             target_path,
             harness,
             harness_profiles,
@@ -2420,6 +2421,11 @@ def validate(
             target_path=target_path,
             agent_eval=agent_eval,
         )
+    if harness_rows:
+        from skillevaluator.harness.report import render_harness_compatibility
+
+        # Printed after the pipeline view so its live display does not redraw over the table.
+        render_harness_compatibility(harness_rows)
     if gate_failed:
         raise click.ClickException("validation failed")
 

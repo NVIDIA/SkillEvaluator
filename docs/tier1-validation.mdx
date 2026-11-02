@@ -188,7 +188,9 @@ For `validate`, the default set is `schema`, `version`, `security`, `pii`, `lice
     | Agent configuration | Kept | top-level `config/`, `.claude/`, `.codex/`, `.cursor/`, and other agent settings directories, plugin `.app.json` |
     | MCP and plugin manifests | Kept | `.mcp.json`, `mcp.yaml`, `agent_plugin.yaml`, `plugin.json` in `.claude-plugin/`, `.codex-plugin/`, or `.cursor-plugin/` |
     | Referenced file | Kept | any file a kept file names by path, by file name alone (`helper.md` for `lib/helper.md`), by skill or plugin root variable, or by import, followed transitively |
-    | Ordinary file | Suppressed | other source and UI code, `tests/`, `docs/`, notebooks, images, lockfiles, other data |
+    | Ordinary file | Suppressed | source and UI files that SkillSpector does not mark executable (such as `.cpp`, `.tsx`, `.html`, and CSS), test fixtures, `docs/`, notebooks, images, lockfiles, other data |
+
+    SkillSpector marks `.py`, `.js`, and `.ts` files executable wherever they are, including test suites under `tests/` and UI code under `web/`. Those files are agent executables and seed the reference walk, so their findings stay blocking, and so do the findings of any fixture or other file they name.
 
     The reference walk recognizes these forms, without regard to case:
 

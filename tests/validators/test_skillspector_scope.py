@@ -925,6 +925,31 @@ class TestReferenceReachability:
         assert not result.passed
         assert result.findings[0].metadata["file_role"] == "agent_reference"
 
+    @pytest.mark.parametrize("with_test_suite", [True, False])
+    def test_executable_test_suite_keeps_the_fixture_it_names(self, tmp_path: Path, with_test_suite: bool) -> None:
+        """SkillSpector marks ``.py`` tests executable, so the fixtures they name stay blocking."""
+        scan_root = tmp_path / "skill"
+        _write(scan_root, "SKILL.md", "Summarize the latest log.\n")
+        _write(scan_root, "tests/fixtures/attack.txt")
+        issues = [_issue("tests/fixtures/attack.txt")]
+        components = []
+        if with_test_suite:
+            _write(scan_root, "tests/test_guard.py", 'FIXTURE = FIXTURES / "attack.txt"\n' + _INJECTION)
+            issues.append(_issue("tests/test_guard.py"))
+            components = [{"path": "tests/test_guard.py", "type": "python", "executable": True}]
+
+        result = _process(scan_root, issues, components=components)
+
+        if with_test_suite:
+            assert not result.passed
+            assert {finding.file_path: finding.metadata["file_role"] for finding in result.findings} == {
+                "tests/fixtures/attack.txt": "agent_reference",
+                "tests/test_guard.py": "agent_executable",
+            }
+        else:
+            assert result.passed
+            assert result.metadata["skillspector_applicability"]["suppressed_by_file_role"] == {"test_fixture": 1}
+
     def test_src_layout_entrypoint_reference_retains_source_finding(self, tmp_path: Path) -> None:
         scan_root = tmp_path / "skill"
         _write(scan_root, "src/pkg/cli.cpp")

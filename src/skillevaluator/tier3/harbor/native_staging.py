@@ -100,7 +100,7 @@ def _declared_unsupported_paths(source: NativePluginSource) -> set[str]:
 
 def _plugin_tree_ignore(source: NativePluginSource, excluded_roots: Sequence[Path] = ()):
     from skillevaluator.tier3.harbor.adapter import _runtime_skill_copy_ignore
-    from skillevaluator.tier3.plugin_prepare import _EVALUATOR_DIRS
+    from skillevaluator.tier3.plugin_prepare import is_evaluator_dir
 
     root = source.plugin_root.resolve()
     declared = _declared_unsupported_paths(source)
@@ -124,7 +124,7 @@ def _plugin_tree_ignore(source: NativePluginSource, excluded_roots: Sequence[Pat
             if rel in declared:
                 ignored.add(name)
             # Both supported dataset layouts contain verifier-only expected outputs.
-            if name.casefold() in _EVALUATOR_DIRS and (current / "SKILL.md").is_file():
+            if is_evaluator_dir(current / name) and (current / "SKILL.md").is_file():
                 ignored.add(name)
         return sorted(ignored)
 

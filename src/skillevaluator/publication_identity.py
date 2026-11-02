@@ -626,20 +626,32 @@ def _manifest_digest(
     return digest.hexdigest()
 
 
-def publication_source_digest(target_path: Path) -> str | None:
+def publication_source_digest(target_path: Path, *, ignore_empty_directories: bool = False) -> str | None:
     """Return the canonical digest of one stable, safe source snapshot.
 
     Directories use a descriptor-anchored manifest on supported POSIX systems
     and checked pre/post metadata elsewhere. Both detect incidental mid-scan
     mutation. Symlinks, reparse points, hard-linked regular files, special
     files, mount crossings, invalid Unicode paths, and NFC path collisions fail
-    closed by returning ``None``.
+    closed by returning ``None``. ``ignore_empty_directories`` omits non-root
+    directories that contain no recorded file, such as a parent created only
+    to hold excluded generated output.
     """
     try:
         target = _absolute_lexical(target_path.expanduser())
         metadata = target.lstat()
         _validate_entry(metadata, target, None)
         entries = _descriptor_manifest(target) if _DESCRIPTOR_BACKEND else _fallback_manifest(target)
+        if ignore_empty_directories:
+            ancestors = {
+                entry.parts[:depth]
+                for entry in entries
+                if entry.kind != "directory"
+                for depth in range(1, len(entry.parts))
+            }
+            entries = tuple(
+                entry for entry in entries if entry.kind != "directory" or not entry.parts or entry.parts in ancestors
+            )
         return _manifest_digest(entries)
     except (
         OSError,

@@ -816,7 +816,7 @@ def _is_skill_evals_path(path: Path, skill_root: Path) -> bool:
 
 def _runtime_skill_copy_ignore(skill_root: Path, excluded_roots: Sequence[Path] = ()):
     """Build a root-aware ignore callback for an agent-visible skill copy."""
-    from skillevaluator.tier3.plugin_prepare import _EVALUATOR_DIRS
+    from skillevaluator.tier3.plugin_prepare import is_evaluator_dir
 
     resolved_root = skill_root.resolve()
     excluded_roots = _skill_scoped_excluded_roots(skill_root, excluded_roots)
@@ -835,7 +835,7 @@ def _runtime_skill_copy_ignore(skill_root: Path, excluded_roots: Sequence[Path] 
         current = Path(directory)
         ignored: set[str] = set()
         if current.resolve() == resolved_root or _skill_manifest(current) is not None:
-            ignored.update(name for name in contents if name.casefold() in _EVALUATOR_DIRS)
+            ignored.update(name for name in contents if is_evaluator_dir(current / name))
         for name in contents:
             candidate = current / name
             if (
@@ -4097,7 +4097,7 @@ def _remove_staged_path(path: Path) -> None:
 
 def _sanitize_staged_runtime_skills(skills_dir: Path) -> None:
     """Remove evaluator-only roots from authored or evaluator-copied skill bundles."""
-    from skillevaluator.tier3.plugin_prepare import _EVALUATOR_DIRS
+    from skillevaluator.tier3.plugin_prepare import is_evaluator_dir
 
     if not skills_dir.exists():
         return
@@ -4106,7 +4106,7 @@ def _sanitize_staged_runtime_skills(skills_dir: Path) -> None:
         skill_root = manifest.parent
         if not skill_root.is_dir():
             continue
-        eval_roots.update(child for child in skill_root.iterdir() if child.name.casefold() in _EVALUATOR_DIRS)
+        eval_roots.update(child for child in skill_root.iterdir() if is_evaluator_dir(child))
     for eval_root in sorted(eval_roots, key=lambda path: len(path.parts), reverse=True):
         if os.path.lexists(eval_root):
             _remove_staged_path(eval_root)

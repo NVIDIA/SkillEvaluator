@@ -4370,7 +4370,18 @@ def _native_plugin_agent_import_paths() -> frozenset[str]:
     """The private native plugin-loading wrappers, which build on the agents allowed on every backend."""
     from skillevaluator.tier3.plugin_native import NATIVE_AGENT_IMPORT_PATHS, PRIVATE_AGENT_IMPORT_PATHS
 
-    return frozenset((*NATIVE_AGENT_IMPORT_PATHS.values(), *PRIVATE_AGENT_IMPORT_PATHS.values()))
+    # Wrappers over the host-only local agents stay out: they run on the host,
+    # like the local agents the backend gate already refuses.
+    return frozenset(
+        (
+            *NATIVE_AGENT_IMPORT_PATHS.values(),
+            *(
+                value
+                for (_, base), value in PRIVATE_AGENT_IMPORT_PATHS.items()
+                if not (base or "").startswith("skillevaluator.tier3.harbor.local_agents:SkillEvaluatorLocal")
+            ),
+        )
+    )
 
 
 def _private_agent_paths(
@@ -5437,6 +5448,11 @@ def _run_harbor_eval_impl(
     except ValueError as exc:
         reporter.emit(ProgressEvent(stage="configuration", state="failed", detail="invalid staged timeout"))
         return _persist_pre_execution_failure([str(exc)])
+    try:
+        private_agent_paths = _private_agent_paths(agents, agent_import_paths, env_mode)
+    except ValueError as exc:
+        reporter.emit(ProgressEvent(stage="configuration", state="failed", detail="unsupported private agent route"))
+        return _persist_pre_execution_failure([str(exc)])
     reporter.start(
         Tier3RunPlan(
             skill_name=skill_path.name,
@@ -5515,7 +5531,6 @@ def _run_harbor_eval_impl(
         )
     errors: list[str] = []
     started_agents: SimpleQueue[str] = SimpleQueue()
-    private_agent_paths = _private_agent_paths(agents, agent_import_paths, env_mode)
 
     def _execute_agent(agent: str) -> list[str]:
         started_agents.put(agent)

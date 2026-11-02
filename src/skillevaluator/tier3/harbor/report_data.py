@@ -749,6 +749,9 @@ def load_agent_data(
                         **_execution_error_details(data, len(condition_errors)),
                         "expected_attempts": _nonnegative_counter(data.get("expected_attempts")),
                         "scored_attempts": _nonnegative_counter(data.get("scored_attempts")),
+                        "recovered_attempts_total": _nonnegative_counter(data.get("recovered_attempts_total")),
+                        "recovered_attempts": data.get("recovered_attempts", []),
+                        "recovered_trial_failures": data.get("recovered_trial_failures", []),
                     }
                     count_key = "num_trials" if variant == "with-skill" else "num_trials_baseline"
                     num_trials = data.get("num_trials")

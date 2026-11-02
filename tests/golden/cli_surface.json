@@ -479,6 +479,14 @@
           "type": "integer"
         },
         {
+          "name": "max_cases",
+          "opts": [
+            "--max-cases"
+          ],
+          "param_type": "option",
+          "type": "integer range"
+        },
+        {
           "name": "model",
           "opts": [
             "--model"
@@ -2383,6 +2391,14 @@
               "type": "integer"
             },
             {
+              "name": "max_cases",
+              "opts": [
+                "--max-cases"
+              ],
+              "param_type": "option",
+              "type": "integer range"
+            },
+            {
               "name": "model",
               "opts": [
                 "--model"
@@ -2899,6 +2915,14 @@
             "type": "integer"
           },
           {
+            "name": "max_cases",
+            "opts": [
+              "--max-cases"
+            ],
+            "param_type": "option",
+            "type": "integer range"
+          },
+          {
             "name": "model",
             "opts": [
               "--model"
@@ -3396,6 +3420,14 @@
           ],
           "param_type": "option",
           "type": "integer"
+        },
+        {
+          "name": "max_cases",
+          "opts": [
+            "--max-cases"
+          ],
+          "param_type": "option",
+          "type": "integer range"
         },
         {
           "name": "n_attempts",

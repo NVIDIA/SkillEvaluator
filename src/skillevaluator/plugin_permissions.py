@@ -44,7 +44,9 @@ class _ConfigWalk:
     """Bounded, iterative walk yielding ``(json_path, node)`` for a config value.
 
     ``complete`` turns False when the walk stops at ``_MAX_SCAN_NODES`` with nodes
-    still unvisited.
+    still unvisited. With ``skip_doc_keys``, prose under a documentation key
+    (``description``, ``notes``, ``help``, ...) is skipped; a table under one is
+    walked.
     """
 
     def __init__(self, value: Any, *, skip_doc_keys: bool = True) -> None:
@@ -64,12 +66,21 @@ class _ConfigWalk:
             yield path, node
             if isinstance(node, dict):
                 for key, child in node.items():
-                    if self.skip_doc_keys and str(key).lower() in _DOC_KEYS:
+                    if self.skip_doc_keys and str(key).lower() in _DOC_KEYS and _is_prose(child):
                         continue
                     stack.append((f"{path}.{key}" if path else str(key), child))
             elif isinstance(node, list):
                 for index, child in enumerate(node):
                     stack.append((f"{path}[{index}]", child))
+
+
+def _is_prose(value: Any) -> bool:
+    """Text under a documentation key: a string, or a list of strings.
+
+    A table or object under such a key is config (a server named ``notes`` or
+    ``help``), so the walk still reads it.
+    """
+    return isinstance(value, str) or (isinstance(value, list) and all(isinstance(item, str) for item in value))
 
 
 def iter_config_strings(value: Any, *, skip_doc_keys: bool = True) -> Iterator[tuple[str, str]]:
@@ -85,7 +96,8 @@ _bounded = report_text
 _TOOL_RULE_RE = re.compile(r"\s*([A-Za-z_][\w-]*)\s*(?:\((.*)\))?\s*", re.DOTALL)
 
 
-_DANGEROUS_BASH_PREFIXES: tuple[str, ...] = (
+# Claude Code's interpreter prefixes, shared by its Bash and PowerShell dangerous-allow-rule checks.
+_INTERPRETER_PREFIXES: tuple[str, ...] = (
     "python",
     "python3",
     "python2",
@@ -105,6 +117,11 @@ _DANGEROUS_BASH_PREFIXES: tuple[str, ...] = (
     "bash",
     "sh",
     "ssh",
+)
+
+
+_DANGEROUS_BASH_PREFIXES: tuple[str, ...] = (
+    *_INTERPRETER_PREFIXES,
     "zsh",
     "fish",
     "eval",
@@ -112,6 +129,41 @@ _DANGEROUS_BASH_PREFIXES: tuple[str, ...] = (
     "env",
     "xargs",
     "sudo",
+)
+
+
+# PowerShell launchers and code-running cmdlets (each also as ``<name>.exe``), as Claude Code lists them.
+_DANGEROUS_POWERSHELL_PREFIXES: tuple[str, ...] = (
+    *_INTERPRETER_PREFIXES,
+    "pwsh",
+    "powershell",
+    "cmd",
+    "wsl",
+    "iex",
+    "invoke-expression",
+    "icm",
+    "invoke-command",
+    "start-process",
+    "saps",
+    "start",
+    "start-job",
+    "sajb",
+    "start-threadjob",
+    "invoke-wmimethod",
+    "iwmi",
+    "invoke-cimmethod",
+    "icim",
+    "wmic",
+    "register-objectevent",
+    "register-engineevent",
+    "register-wmievent",
+    "register-scheduledjob",
+    "new-pssession",
+    "nsn",
+    "enter-pssession",
+    "etsn",
+    "add-type",
+    "new-object",
 )
 
 
@@ -152,23 +204,27 @@ def parse_tool_list(value: Any) -> list[str] | None:
 
 
 def bash_rule_risk(entry: str) -> str | None:
-    """Classify one ``Bash`` tool or permission rule the way Claude Code classifies its allow rules.
+    """Classify one shell-tool (``Bash`` or ``PowerShell``) rule the way Claude Code classifies its allow rules.
 
-    ``"unrestricted"``: ``Bash`` with no content, empty content, or only ``*``
-    and whitespace (``Bash()``, ``Bash(*)``, ``Bash(**)``), plus the legacy
-    ``Bash(:*)`` / ``Bash(*:*)``. ``"interpreter"``: an interpreter or wrapper
-    prefix that runs any command (``Bash(python3:*)``, ``Bash(sh -c *)``,
-    ``Bash(env *)``, ``Bash(npm run:*)``). ``None`` for a scoped rule or another
-    tool.
+    ``"unrestricted"``: the tool with no content, empty content, or only ``*``
+    and whitespace (``Bash()``, ``Bash(*)``, ``PowerShell(**)``), plus the
+    legacy ``Bash(:*)`` / ``Bash(*:*)``. ``"interpreter"``: an interpreter or
+    wrapper prefix that runs any command (``Bash(python3:*)``, ``Bash(sh -c
+    *)``, ``Bash(env *)``, ``Bash(npm run:*)``; for PowerShell also its
+    launchers such as ``PowerShell(pwsh *)``, ``PowerShell(iex *)``, and
+    ``PowerShell(cmd.exe *)``). ``None`` for a scoped rule or another tool.
     """
     match = _TOOL_RULE_RE.fullmatch(entry)
-    if match is None or match.group(1).lower() != "bash":
+    tool = match.group(1).lower() if match is not None else None
+    if match is None or tool not in {"bash", "powershell"}:
         return None
     content = match.group(2)
     if content is None or not content.strip(" \t\n\r*"):
         return "unrestricted"
     if "".join(content.split()) in {":*", "*:*"}:
         return "unrestricted"
+    if tool == "powershell":
+        return "interpreter" if _dangerous_powershell_prefix(content) else None
     return "interpreter" if _dangerous_bash_prefix(content) else None
 
 
@@ -188,8 +244,23 @@ def _dangerous_bash_prefix(content: str) -> bool:
     return False
 
 
+def _dangerous_powershell_prefix(content: str) -> bool:
+    """Claude Code's dangerous-prefix test for PowerShell rule content: each prefix also as ``<word>.exe``."""
+    rule = content.strip().lower()
+    if rule == "*":
+        return True
+    for prefix in _DANGEROUS_POWERSHELL_PREFIXES:
+        first, space, rest = prefix.partition(" ")
+        for name in (prefix, f"{first}.exe{space}{rest}"):
+            if rule in {name, f"{name}:*", f"{name}*", f"{name} *"}:
+                return True
+            if rule.startswith(f"{name} -") and rule.endswith("*"):
+                return True
+    return False
+
+
 def is_unrestricted_bash(entry: str) -> bool:
-    """A ``Bash`` grant that runs any command: unrestricted, or an interpreter or wrapper prefix."""
+    """A ``Bash`` or ``PowerShell`` grant that runs any command: unrestricted, or an interpreter or wrapper prefix."""
     return bash_rule_risk(entry) is not None
 
 

@@ -107,7 +107,7 @@ The `--llm` security analysis runs [SkillSpector](https://github.com/NVIDIA/Skil
 | `SKILLSPECTOR_MODEL_<SLOT>` | unset | Per-analyzer model override, such as `SKILLSPECTOR_MODEL_META_ANALYZER`. Forwarded as set. |
 | `SKILLSPECTOR_MODEL_REGISTRY` | unset | Path to a complete custom SkillSpector model registry, for model IDs the bundled registry does not list. Forwarded as set. |
 | `SKILLSPECTOR_REASONING_EFFORT` | `medium` for GPT-6 models, else unset | Reasoning effort for every SkillSpector analyzer. Your value wins. SkillEvaluator sets it only when every SkillSpector model, including `SKILLSPECTOR_MODEL_<SLOT>` overrides, is a GPT-6 model, so never for Claude. |
-| `SKILLSPECTOR_MAX_WORKFLOW_SECONDS` | SkillSpector default (600) | SkillSpector's own deadline for one scan, in seconds. Forwarded as set to both the static and the LLM stage. When it expires, SkillSpector reports partial analysis and the security scan is `INCOMPLETE`. Keep it below `SKILLEVALUATOR_SKILLSPECTOR_TIMEOUT_SECONDS`. |
+| `SKILLSPECTOR_MAX_WORKFLOW_SECONDS` | SkillSpector default (1080 in v2.13.3) | SkillSpector's own deadline for one scan, in seconds. Forwarded as set to both the static and the LLM stage. When it expires, SkillSpector reports partial analysis and the security scan is `INCOMPLETE`. Keep it below `SKILLEVALUATOR_SKILLSPECTOR_TIMEOUT_SECONDS`. |
 
 ## Embeddings
 

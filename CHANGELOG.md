@@ -291,7 +291,7 @@ All notable changes to SkillEvaluator are documented in this file.
   `metadata.tags` as missing, as it already did for other non-mapping values.
 - SkillSpector runs are no longer stopped after a fixed 300 seconds, which
   ended slow `--llm` security scans, such as those on local models, as
-  `INCOMPLETE` before SkillSpector's own 600-second deadline. Each run now has
+  `INCOMPLETE` before SkillSpector's own scan deadline (1,080 seconds in v2.13.3). Each run now has
   a 1,200-second watchdog by default; set
   `SKILLEVALUATOR_SKILLSPECTOR_TIMEOUT_SECONDS` to a positive integer to change
   it (values above 86400 are capped). `SKILLSPECTOR_MAX_WORKFLOW_SECONDS` is now

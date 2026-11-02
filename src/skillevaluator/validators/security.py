@@ -60,7 +60,7 @@ from skillevaluator.validators.base import (
 logger = get_logger(__name__)
 
 # Watchdog for each SkillSpector subprocess. The default stays above
-# SkillSpector's own 600-second workflow deadline so that deadline, not a kill,
+# SkillSpector's own workflow deadline (1,080 seconds in v2.13.3) so that deadline, not a kill,
 # normally ends a slow scan. The cap keeps the value inside the range that
 # subprocess waits accept on every platform.
 _DEFAULT_SKILLSPECTOR_TIMEOUT_SECONDS = 1200

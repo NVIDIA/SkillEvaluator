@@ -6,6 +6,8 @@ All notable changes to SkillEvaluator are documented in this file.
 
 ### Added
 
+- Support Python 3.14 alongside Python 3.12 and 3.13, including installation
+  guidance and CI coverage for tests and built packages.
 - Add reusable GitLab CI onboarding and configurable Tier 1 quality thresholds,
   alongside a shared repository integration guide.
 - Opt-in `SKILL_EVAL_JUDGE_CHARACTER_FACTS=1` adds bounded, escaped Unicode
@@ -78,6 +80,45 @@ All notable changes to SkillEvaluator are documented in this file.
 - CI-native per-skill HTML pages link Download JSON to the retained
   `skillevaluator-tier1.json` and do not embed a second copy of the report
   JSON. Standalone CLI HTML reports embed it for Export JSON.
+- Tier 3 runs can be limited to the first N eval cases with the opt-in
+  `--max-cases N` flag on `validate`, `tier3`, and `tier3 evaluate`, or the
+  `harbor.max_cases` key in `evals/config.yml`; the CLI value wins. Unset, every
+  case runs as before. Cases are taken in staged order (dataset order, or
+  task-directory name order for native Harbor tasks) and the same subset runs
+  for every agent's with-skill and baseline arms. The dataset snapshot and
+  expected-case checks cover only the cases that ran, `run_config.json` records
+  the selection as `case_selection`, and a run that skipped cases is reported
+  as publication-incomplete in JSON, HTML, and BENCHMARK.md.
+- `doctor` and `health-check` take `--tier 1|2|3|all`, so Tier 1 and Tier 2
+  readiness can be checked before a run instead of surfacing mid-validation.
+  Tier 1 reports each scanner that the `--checks` selection runs: SkillSpector,
+  Bandit, Semgrep, Gitleaks, and pip-audit for `dependency`. Each row shows the
+  resolved path, any executable override, and the version from a bounded,
+  shell-free probe. A scanner fails when it is missing, its override is
+  malformed, its probe fails or exceeds `--timeout` (default 60 seconds, at
+  most 3600), or it is older than Bandit 1.9.4 or Gitleaks 8. Tier 2 resolves
+  the embedding and LLM providers offline. `doctor --tier 2 --verify-models`
+  also sends one embedding request and one chat request, each bounded by
+  `--timeout` and sent without retries, and reports only the HTTP status and a
+  remedy. `--tier all` checks every tier, and a failed tier does not stop the
+  next. Without `--tier`, both commands still check Tier 3 only. An option for
+  an unselected tier, or `--timeout` for an offline Tier 2 check, is a usage
+  error. `tier3 doctor` remains Tier 3-only.
+
+- Tier 1 `--llm` security scans of a single skill keep the LLM provenance that
+  SkillSpector v2.12.0 and later report: the provider adapter, the model and
+  SkillSpector revision behind each LLM analyzer, and the sampling and
+  determinism evidence. The Security result in the JSON report carries it as
+  `skillspector_llm_provenance`, next to `skillspector_provider_id`, the
+  SkillEvaluator provider the scan was bridged from (for example `nv_build`,
+  which SkillSpector runs as its `openai` adapter). The HTML report, including
+  CI pages rendered from the retained Tier 1 JSON, lists it in a collapsible
+  Tier 1 LLM Provenance table. The record is also kept when the LLM stage
+  fails or SkillSpector does not confirm LLM analysis, as long as
+  SkillSpector's JSON output carries a valid record, so the report shows what
+  was attempted. Records that do not match SkillSpector's provenance contract or
+  that contain endpoint- or credential-shaped values are left out, and older
+  SkillSpector releases produce no record.
 
 ### Changed
 
@@ -121,6 +162,23 @@ All notable changes to SkillEvaluator are documented in this file.
   workflows with `validate --tiers`: which tiers run, Tier 1 dependency and LLM
   stages, report files, and exit codes. It also states that `--tiers` must
   include Tier 1, so Tier 2 or Tier 3 alone runs through its direct workflow.
+- Install instructions, the CI recipe, the missing-scanner hint and the Tier 1
+  CI image's scanner lock now pin SkillSpector to `v2.13.3` instead of
+  `v2.12.0`. With `v2.12.0`, the Tier 1 security check could be `INCOMPLETE`
+  or fail for skills with no real issue: valid Python and Perl helpers were
+  recorded as only partially inspected
+  (`static_parse_limit` or `obfuscated_instruction_text`,
+  [NVIDIA/SkillSpector#777](https://github.com/NVIDIA/SkillSpector/pull/777)),
+  the bytecode check could hit its time budget while waiting behind other
+  analyzers (`runtime_limit`,
+  [NVIDIA/SkillSpector#828](https://github.com/NVIDIA/SkillSpector/pull/828)),
+  and visible text between HTML comments raised High P2 hidden-instruction
+  findings
+  ([NVIDIA/SkillSpector#452](https://github.com/NVIDIA/SkillSpector/pull/452)).
+  An existing SkillSpector install keeps its version until you rerun the
+  install command. `v2.13.3` still does not return structured output for
+  Claude 5.5 models, so set `SKILLSPECTOR_MODEL` as before when
+  `SKILL_EVAL_LLM_MODEL` names one.
 - README and onboarding docs now offer two first-run paths: a lightweight,
   keyless quality check on a bundled skill, or an NVIDIA Build rubric evaluation
   with eligible free prototyping access. Installation adds extras as needed,
@@ -152,6 +210,9 @@ All notable changes to SkillEvaluator are documented in this file.
 
 ### Fixed
 
+- On Windows, repository root and source-link detection no longer break for
+  repositories in non-ASCII folders: Git output is decoded as UTF-8 instead of
+  the locale code page.
 - CI quality thresholds apply to every parallel scan worker. Report overviews
   and detailed reports surface failed quality gates ahead of advisory findings,
   with links to the check that needs attention.
@@ -161,6 +222,14 @@ All notable changes to SkillEvaluator are documented in this file.
   Markdown sections are packed by paragraph, so short labels and fragments stay
   attached to their neighbours, source ranges retain blank-line gaps, and findings
   list a split source once.
+- A chat model that declines to classify a Tier 2 content cluster (a safety
+  refusal, which some models return for security-themed skill content) no
+  longer marks the scan incomplete and fails `validate` under the default
+  `--block-on-dedup`. Tier 2 now reports the refusal as an advisory MEDIUM
+  `llm_refused` finding that names the overlapping sections, and the JSON
+  report's `llm_analysis` counts it in `clusters_refused`. Other chat-LLM
+  failures still leave the scan incomplete. Raise `CONTENT_DEDUP.llm_refused`
+  in a policy overlay to keep refusals blocking.
 - Local-mode verifier uploads now copy directly to the absent destination,
   avoiding an unnecessary rollback snapshot of an empty tests directory.
   Inputs and rewritten scripts are prepared privately before publication,
@@ -208,17 +277,52 @@ All notable changes to SkillEvaluator are documented in this file.
   report generation; measured zeroes retain their numeric formatting
   ([#240](https://github.com/NVIDIA/SkillEvaluator/issues/240)).
 
+- Tier 3 HTML reports no longer label a recorded baseline as missing. When an
+  agent or dimension has a baseline score but no comparable lift, for example
+  because the arms used different score policies or no case kept matching judge
+  models, the dimension grid, agent scorecards, and Skill Lift card now say
+  "comparison unavailable" instead of "no baseline". Rows with no baseline
+  score, such as `--skip-baseline` runs, keep "no baseline".
+
 - Explicit searches of `/` (`find`, `grep -r`, `rg`, `ag`, `du` and `tree` with a
   `/` operand, and native search tools rooted at `/`) now count as wasted tool
   calls whether or not they name the expected skill or script, including when
   output is redirected or the search runs inside `sh -c`. Host and bundled
   scoring agree, while scoped searches and slash-valued patterns retain their
   classification.
+
+- Tier 3 `claude-code` trials no longer hang until the agent timeout after the
+  agent has already answered. Claude Code moves a shell command that outlasts
+  its Bash timeout to the background, and a headless run waits for background
+  commands before it exits, so a command that never finishes (for example a
+  `grep -r /` search for a missing skill) held the trial open and the case was
+  recorded as an unscored agent timeout. Generated and native tasks now set
+  `CLAUDE_CODE_DISABLE_BACKGROUND_TASKS=1` in the task environment for every
+  env mode, so each command finishes in its turn or is stopped at Claude Code's
+  Bash timeout (2 minutes unless the agent requests a longer one). Neither
+  `harbor.runtime_env` nor a native task's `[environment.env]` can turn
+  background tasks back on, and other agents ignore the variable. A skill whose
+  single commands need longer can raise Claude Code's default with
+  `BASH_DEFAULT_TIMEOUT_MS` in `harbor.runtime_env`.
+
 - PII email scans recognize all RFC 2606 reserved domains, including their
   subdomains, mixed-case forms, trailing dots, and prose ellipses. A local-part
   boundary prevents quadratic rescanning of long excluded addresses. Ordinary
   addresses on the same line and domains that merely resemble placeholders remain detectable
   ([#244](https://github.com/NVIDIA/SkillEvaluator/issues/244)).
+
+- A skill that exceeds a Tier 2 context-deduplication work limit (more than
+  512 content chunks, too much pairwise comparison work, or an LLM-review limit:
+  more than 50 candidate clusters, more than 64 members in one cluster, or an
+  oversized per-cluster or total review prompt) is now reported as
+  **INCOMPLETE** instead of failing with a CRITICAL `chunk_count_limit`,
+  `scalar_comparison_limit`, `llm_cluster_count_limit`,
+  `llm_cluster_member_limit`, `llm_prompt_size_limit`, or
+  `llm_total_prompt_size_limit` finding. Those findings read as duplicate
+  content in the skill and showed `FAILED` with "Publication blocked" in
+  BENCHMARK.md, and a policy severity override could downgrade them into a pass
+  with no duplicate analysis. Exit codes are otherwise unchanged. An execution
+  error names the limit, and the JSON report records it under `work_limit`.
 
 - Tier 3 security grading preserves ordinary nested `/tmp` cleanup, including
   child operands with trailing slashes, unless the current or an earlier
@@ -304,6 +408,12 @@ All notable changes to SkillEvaluator are documented in this file.
   Harbor, so Docker Desktop finds its `compose` plugin, and passes
   `PYTHONUTF8` and `PYTHONIOENCODING` so Python UTF-8 mode reaches Harbor on
   non-UTF-8 locales.
+- On native Windows, generated Tier 3 `test.sh` files and the grader starters
+  from `init-custom-grader` and `init-harbor-task` are now written with LF line
+  endings. They were written with CRLF, which broke the `#!/bin/bash` shebang
+  and `set -euo pipefail` in the Linux container, so the verifier failed
+  before grading. The repository's `.gitattributes` also keeps `*.sh` files LF
+  in Windows checkouts.
 - A `SKILL.md` `metadata` value that is not a mapping, such as `true`, `1.5`, a
   date, or a list or string containing `author` or `tags`, no longer crashes
   the quality check with a `TypeError`, which aborted `validate`, `tier1`, and
@@ -315,14 +425,52 @@ All notable changes to SkillEvaluator are documented in this file.
   `INCOMPLETE` only because SkillSpector's text pattern analyzers cannot read
   images and report the analysis as `partial`. That gap is now a warning when
   the report shows no other gap and no fatal scope exclusion, and each image
-  is a regular, non-executable file, not reached through a symlink and not in
-  a directory that agents run, load as instructions or read as configuration,
-  whose bytes have the chunk or marker structure of a PNG or JPEG. The
-  structure check corroborates the file type without decoding the image, so
-  ancillary PNG chunks and JPEG APPn or COM segments are not inspected. Other
+  is a regular, single-link (not hard-linked), non-executable file whose bytes
+  have the chunk or marker structure of a PNG or JPEG, is not reached through
+  a symlink, and is not in a directory that agents run, load as instructions
+  or read as configuration. The gap is accepted for at most 256 images and
+  128 MiB of image data in total. The structure check corroborates the file
+  type without decoding the image or proving that it renders. PNG IDAT
+  compressed data and ancillary chunks, and JPEG entropy-coded data and APPn
+  or COM segments, are not inspected and can still carry other bytes. Other
   image formats, files without that structure, and every other partial reason
-  still leave the scan `INCOMPLETE`. SkillSpector's own High `AE1` findings
-  for images it could not inspect are unchanged.
+  still leave the scan `INCOMPLETE`. SkillSpector's own High `AE1` findings for
+  images it could not inspect are unchanged.
+- A `SKILL.md` over the recommended 5,000-token budget now gets a MEDIUM
+  `quality_efficiency` finding instead of a HIGH one. The HIGH finding failed
+  the quality check, and with it `validate`, `tier1`, and `quality-check`, even
+  when the quality score met `--min-score`. The 15-point Efficiency deduction is
+  unchanged, so a large skill still fails when its score falls below the
+  minimum.
+- `--llm` security scans on the `nv_build` provider now run SkillSpector with
+  `SKILLSPECTOR_PROVIDER=nv_build` instead of `openai`, so SkillSpector sizes
+  requests from its NVIDIA Build model registry. A Build model with a smaller
+  output cap, such as `openai/gpt-oss-120b` (16,384 tokens), no longer gets
+  SkillSpector's 32,000-token fallback budget, which can exceed what the
+  endpoint accepts and leave the LLM security stage incomplete. An explicit
+  `SKILLSPECTOR_PROVIDER=nv_build` gets the same mapping. The key still reaches
+  SkillSpector only as `OPENAI_API_KEY`, with `OPENAI_BASE_URL` set to the
+  public Build endpoint.
+- SkillSpector runs are no longer stopped after a fixed 300 seconds, which ended
+  slow `--llm` security scans, such as those on local models, as `INCOMPLETE`
+  before SkillSpector's own scan deadline (1,080 seconds in v2.13.3). Each run
+  now has a 1,200-second watchdog by default; set
+  `SKILLEVALUATOR_SKILLSPECTOR_TIMEOUT_SECONDS` to a positive integer to change
+  it (values above 86400 are capped). `SKILLSPECTOR_MAX_WORKFLOW_SECONDS` is now
+  forwarded to SkillSpector so its own deadline can be raised as well, and the
+  security result records the effective `skillspector_timeout_seconds`
+  ([#155](https://github.com/NVIDIA/SkillEvaluator/issues/155)).
+
+### Security
+
+- Linux local mode now launches Bubblewrap by the absolute path that passed its
+  smoke test instead of a bare `bwrap`. The bare name was looked up on the host
+  `PATH` for every command, from that command's working directory (the
+  writable trial workspace by default), so a relative `PATH` entry such as `.`,
+  an empty entry, or `./node_modules/.bin` let a `bwrap` file created by an
+  earlier sandboxed command run outside the sandbox. A `bwrap` symlink on
+  `PATH` is resolved to its target before the smoke test, and the local-mode
+  isolation message names that resolved path.
 
 ## 0.6.0 - 2026-10-20
 

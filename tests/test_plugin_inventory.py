@@ -300,6 +300,33 @@ def test_cross_client_only_grants_are_advisory_with_loading_client(tmp_path):
     assert "loaded only by" in grants[0].message
 
 
+@pytest.mark.parametrize(
+    ("grant", "quoted", "shell"),
+    [
+        ("PowerShell(iex *)", "'PowerShell(iex *)' (an interpreter", "PowerShell"),
+        ("Bash", "unrestricted 'Bash'", "Bash"),
+    ],
+)
+def test_inert_codex_only_grant_names_the_granted_shell_tool(tmp_path, grant, quoted, shell):
+    """Regression: an inert PowerShell grant was reworded as unrestricted 'Bash'."""
+    tree(
+        tmp_path,
+        {
+            ".claude-plugin/plugin.json": {"name": "demo", "skills": "./custom"},
+            "custom/group/hidden/SKILL.md": SKILL.replace("demo", "hidden").replace("Bash", grant),
+        },
+    )
+    result = inventory(tmp_path)
+    grants = [finding for finding in result.findings if finding.check_name == "plugin_skill_unrestricted_bash"]
+    assert len(grants) == 1
+    assert grants[0].metadata.get("inert_grant")
+    assert grants[0].severity == Severity.LOW
+    assert f"pre-approves {quoted}" in grants[0].message
+    assert f"(it has no {shell} tool)" in grants[0].message
+    if shell != "Bash":
+        assert "Bash" not in grants[0].message
+
+
 def test_selected_claude_defaults_retain_grants_beside_inline_commands(tmp_path):
     tree(
         tmp_path,

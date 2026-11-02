@@ -189,8 +189,9 @@ All notable changes to SkillEvaluator are documented in this file.
 - The Tier 3 per-evaluator drill-down and steps chart now include baseline
   (without-skill) trials. The drill-down adds a Condition column and shows
   metrics that only baseline rows scored; the steps chart plots one series per
-  agent and condition. Cases with missing or partial step telemetry stay gaps
-  instead of zeros or partial averages. The token chart remains with-skill
+  agent and condition from every trial, for up to 200 eval cases. Cases with
+  missing or partial step telemetry stay gaps instead of zeros or partial
+  averages. The token chart remains with-skill
   only; Measured Agent Resources compares token totals across both arms.
 
 ### Documentation
@@ -419,18 +420,6 @@ All notable changes to SkillEvaluator are documented in this file.
   `SKILLSPECTOR_PROVIDER=nv_build` gets the same mapping. The key still reaches
   SkillSpector only as `OPENAI_API_KEY`, with `OPENAI_BASE_URL` set to the
   public Build endpoint.
-
-### Security
-
-- Linux local mode now launches Bubblewrap by the absolute path that passed its
-  smoke test instead of a bare `bwrap`. The bare name was looked up on the host
-  `PATH` for every command, from that command's working directory (the
-  writable trial workspace by default), so a relative `PATH` entry such as `.`,
-  an empty entry, or `./node_modules/.bin` let a `bwrap` file created by an
-  earlier sandboxed command run outside the sandbox. A `bwrap` symlink on
-  `PATH` is resolved to its target before the smoke test, and the local-mode
-  isolation message names that resolved path.
-
 - Tier 3 HTML reports now explain failing evaluator scores. A failing
   evaluator card opens its per-trial evidence, shows the grader's reason
   (or, when the grader recorded none, its message, findings, or failed
@@ -447,6 +436,17 @@ All notable changes to SkillEvaluator are documented in this file.
   displace the HTML overview or recorded evidence.
 - The Tier 3 HTML size notice no longer prints `<built-in method items ...>`
   in place of the number of items the preview omitted.
+
+### Security
+
+- Linux local mode now launches Bubblewrap by the absolute path that passed its
+  smoke test instead of a bare `bwrap`. The bare name was looked up on the host
+  `PATH` for every command, from that command's working directory (the
+  writable trial workspace by default), so a relative `PATH` entry such as `.`,
+  an empty entry, or `./node_modules/.bin` let a `bwrap` file created by an
+  earlier sandboxed command run outside the sandbox. A `bwrap` symlink on
+  `PATH` is resolved to its target before the smoke test, and the local-mode
+  isolation message names that resolved path.
 
 ## 0.6.0 - 2026-10-20
 

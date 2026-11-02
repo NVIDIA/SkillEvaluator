@@ -530,8 +530,9 @@ three distinct parts from the grader's `reason` or `message`, failing findings
 and behavior results, failed rubric criteria (except criteria the grader
 excluded from the score), failed named checks, and the security attribution
 note. The report redacts the values of configured credential environment
-variables and recognizable credential patterns in reasons and excerpts. It
-caps drill-down reasons at 240 characters and excerpts at 300.
+variables and recognizable credential patterns in reasons and excerpts, keeping
+line breaks so a masked `key: value` pair ends at its line. It caps drill-down
+reasons at 240 characters and excerpts at 300.
 Secret detectors record their pattern rather than the matched text, so their
 findings show a reason but no excerpt.
 
@@ -544,9 +545,14 @@ and records the count as `failure_reasons` under `report_truncation.omitted`.
 
 The drill-down has one row per trial for each agent and condition, with a
 **Condition** column (`With skill` or `Without skill`); baseline rows are
-listed even when they have no matching with-skill case. The **Steps per Eval
-Case by Agent and Condition** chart plots one series per agent and condition.
-A case with missing or partial step telemetry is a gap, not a zero.
+listed even when they have no matching with-skill case, and a metric only
+baseline rows scored still gets a column. When the HTML preview is bounded, it
+keeps 64 with-skill rows across all agents and 64 baseline rows per agent, and a
+note under the filter says how many rows it left out. The **Steps per Eval
+Case by Agent and Condition** chart plots one series per agent and condition
+from every trial, not only the rows the preview keeps, for up to 200 eval
+cases; a note says how many more cases the JSON download holds. A case with
+missing or partial step telemetry is a gap, not a zero.
 
 ### pass@k
 

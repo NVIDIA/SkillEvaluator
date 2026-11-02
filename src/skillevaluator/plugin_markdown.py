@@ -31,6 +31,10 @@ _LENIENT_SPECIAL_RE = re.compile(r"[{}\[\]*&#!|>%@`]|: ")
 _LEADING_TABS_RE = re.compile(r"^\t+", re.MULTILINE)
 
 
+# Claude Code's frontmatter split: the block ends at the first ``---`` after the opening line, even mid-line.
+_FRONTMATTER_RE = re.compile(r"---\s*\n([\s\S]*?)---\s*\n?")
+
+
 def _quote_lenient_values(raw: str) -> str:
     """Quote the plain frontmatter values strict YAML rejects, the way Claude Code retries a failed parse.
 
@@ -90,23 +94,25 @@ def parse_markdown(text: str) -> _Markdown:
     parser limit (a 65,536-character value, 1,024 list or mapping items) gives
     no fields and a ``frontmatter_error``: Claude Code still reads it, so its
     grants are unknown and the caller must fail closed.
+
+    The block is split the way Claude Code splits it: after a leading BOM, an
+    opening ``---`` line, up to the first ``---`` that follows, even when it
+    begins a longer line such as ``----`` or ``--- # end``. CRLF line endings
+    in the block become LF, so the lenient retry still sees each value whole.
     """
-    lines = text.splitlines()
-    if not lines or lines[0].strip() != "---":
+    match = _FRONTMATTER_RE.match(text.removeprefix("\ufeff"))
+    if match is None:
         return _Markdown(None, None, text.strip(), {})
-    for index in range(1, len(lines)):
-        if lines[index].strip() == "---":
-            raw = "\n".join(lines[1:index])
-            body = "\n".join(lines[index + 1 :]).strip()
-            try:
-                data = _load_frontmatter(raw)
-            except StructuredDataLimitError as exc:
-                return _Markdown(None, None, body, {}, frontmatter_error=str(exc))
-            except (StructuredDataError, ValueError, RecursionError):
-                return _Markdown(None, None, body, {})
-            if not isinstance(data, dict):
-                return _Markdown(None, None, body, {})
-            name = data.get("name") if isinstance(data.get("name"), str) else None
-            description = data.get("description") if isinstance(data.get("description"), str) else None
-            return _Markdown(name, description, body, data)
-    return _Markdown(None, None, text.strip(), {})
+    raw = match.group(1).replace("\r\n", "\n")
+    body = match.string[match.end() :].strip()
+    try:
+        data = _load_frontmatter(raw)
+    except StructuredDataLimitError as exc:
+        return _Markdown(None, None, body, {}, frontmatter_error=str(exc))
+    except (StructuredDataError, ValueError, RecursionError):
+        return _Markdown(None, None, body, {})
+    if not isinstance(data, dict):
+        return _Markdown(None, None, body, {})
+    name = data.get("name") if isinstance(data.get("name"), str) else None
+    description = data.get("description") if isinstance(data.get("description"), str) else None
+    return _Markdown(name, description, body, data)

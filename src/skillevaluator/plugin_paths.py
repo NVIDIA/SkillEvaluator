@@ -37,6 +37,7 @@ from skillevaluator.constants import (
 )
 from skillevaluator.models.result import Finding, Severity
 from skillevaluator.plugin_formats import CLAUDE_PROFILE, DEFAULT_SKILLS_DIR, FormatProfile
+from skillevaluator.utils.path_security import matches_filesystem_name
 from skillevaluator.utils.secure_fs import (
     MAX_SECURE_DIRECTORY_DEPTH,
     SecurePathError,
@@ -45,6 +46,7 @@ from skillevaluator.utils.secure_fs import (
     lstat_walk,
     stat_is_link_or_reparse,
 )
+from skillevaluator.validators.url_policy import redact_secrets, report_text, safe_url, url_scheme
 
 # The category of every plugin schema and component finding; a policy overlay changes a severity with
 # PLUGIN_SCHEMA.<check>.
@@ -261,6 +263,22 @@ def _plugin_finding(
     )
 
 
+def reported_ref(raw: str) -> str:
+    """A declared component reference as findings and the inventory show it, without its credentials.
+
+    A reference with a URL scheme (``ws://user:token@host/srv.mcpb``, the
+    one-slash ``https:/user:pw@host/...``) is shown as :func:`safe_url` shows
+    it: no userinfo, query, or fragment. Any other (``//user:pw@host/...``,
+    ``./servers.json?token=...``) has its credentials redacted. A reference
+    that carries none is returned as written.
+    """
+    scheme = url_scheme(raw.strip())
+    if scheme is not None and len(scheme) > 1:  # one letter is a Windows drive ('C:\\...')
+        return safe_url(raw)
+    redacted = redact_secrets(raw)
+    return raw if redacted == raw else report_text(redacted)
+
+
 def _path_problem_finding(
     reader: PluginRootReader,
     field_name: str,
@@ -272,7 +290,7 @@ def _path_problem_finding(
     reference: str = CLAUDE_PROFILE.reference,
 ) -> Finding:
     """HIGH finding for a declared component path that is missing, escapes, or is unsafe."""
-    raw = declared.raw
+    raw = reported_ref(declared.raw)
     # Lets the inventory attribute the finding to the (broken) component it names.
     metadata = {"plugin_component_ref": raw}
     if problem == "escape":
@@ -299,7 +317,7 @@ def _path_problem_finding(
             "plugin_component_path_unsafe",
             f"'{field_name}' path {raw!r} is (or passes through) a symlink, hard link, or special file; "
             "it was not followed",
-            reader.display(rel if rel is not None else manifest_rel),
+            reader.display(PurePosixPath(reported_ref(rel.as_posix())) if rel is not None else manifest_rel),
             "Replace links with regular files and directories contained in the plugin root.",
             metadata=metadata,
         )
@@ -329,7 +347,27 @@ _UNSCANNED_FOLDERS_TEXT = "evals/, results/, versions/, node_modules/, .venv/, .
 _UNSCANNED_SUGGESTION = "Move the component out of dependency, VCS, evaluation-output, and version-snapshot folders."
 
 
-def _unscanned_folder(rel: PurePosixPath) -> str | None:
+_SCAN_EXCLUDED_BY_CASEFOLD = {name.casefold(): name for name in SCAN_EXCLUDED_DIRS}
+
+
+def scan_excluded_name(name: str, path: Path | None) -> str | None:
+    """The :data:`~skillevaluator.constants.SCAN_EXCLUDED_DIRS` name a folder is pruned as, or ``None``.
+
+    Whole-tree discovery also prunes a differently cased spelling (``EVALS``,
+    ``Node_Modules``) when the filesystem makes it the same folder as the
+    excluded name (:func:`~skillevaluator.utils.path_security.matches_filesystem_name`),
+    which is every spelling on a case-insensitive filesystem. ``path`` is the
+    folder on disk; without it only the exact name matches.
+    """
+    if name in SCAN_EXCLUDED_DIRS:
+        return name
+    canonical = _SCAN_EXCLUDED_BY_CASEFOLD.get(name.casefold())
+    if canonical is None or path is None or not matches_filesystem_name(path, (canonical,)):
+        return None
+    return canonical
+
+
+def _unscanned_folder(rel: PurePosixPath, root: Path | None = None) -> str | None:
     """The first folder of a plugin-root-relative path that Tier 1 whole-tree scans skip, or ``None``.
 
     The security, secret, and Unicode scans prune every
@@ -338,21 +376,24 @@ def _unscanned_folder(rel: PurePosixPath) -> str | None:
     ``node_modules/``, ``.venv/``, ``.git/``, and ``__pycache__/``. Only an
     ``evals``/``results``/``versions`` folder at the first level of
     ``skills/`` (``skills/evals/``) is scanned anyway, because bundled-skill
-    discovery scans it as a skill.
+    discovery scans it as a skill. With the plugin ``root``, a differently
+    cased spelling that the filesystem makes the same folder counts too
+    (:func:`scan_excluded_name`).
     """
     parts = rel.parts
     for index, part in enumerate(parts):
-        if part not in SCAN_EXCLUDED_DIRS:
+        excluded = scan_excluded_name(part, root.joinpath(*parts[: index + 1]) if root is not None else None)
+        if excluded is None:
             continue
-        if part in SCAN_ARTIFACT_DIRS and index == 1 and parts[0] == DEFAULT_SKILLS_DIR:
+        if excluded in SCAN_ARTIFACT_DIRS and index == 1 and parts[0] == DEFAULT_SKILLS_DIR:
             continue
         return part
     return None
 
 
-def _in_unscanned_folder(rel: PurePosixPath) -> bool:
+def _in_unscanned_folder(rel: PurePosixPath, root: Path | None = None) -> bool:
     """Whether a plugin-root-relative path is inside a folder that Tier 1 whole-tree scans skip."""
-    return _unscanned_folder(rel) is not None
+    return _unscanned_folder(rel, root) is not None
 
 
 def _unscanned_path_finding(
@@ -367,17 +408,18 @@ def _unscanned_path_finding(
     loads from there would never be scanned.
     """
     rel = declared.rel
-    folder = _unscanned_folder(rel) if rel is not None else None
+    folder = _unscanned_folder(rel, reader.root) if rel is not None else None
     if folder is None:
         return None
+    shown = reported_ref(declared.raw)
     return _plugin_finding(
         Severity.HIGH,
         "plugin_component_path_unscanned",
-        f"'{field_name}' path {declared.raw!r} is inside '{folder}/', a folder that Tier 1 whole-tree scans skip "
+        f"'{field_name}' path {shown!r} is inside '{folder}/', a folder that Tier 1 whole-tree scans skip "
         f"({_UNSCANNED_FOLDERS_TEXT}), so the client loads files that are never security-scanned",
         reader.display(manifest_rel),
         _UNSCANNED_SUGGESTION,
-        metadata={"plugin_component_ref": declared.raw},
+        metadata={"plugin_component_ref": shown},
     )
 
 
@@ -393,8 +435,8 @@ def _unscanned_packaged_finding(
     that is itself inside such a folder already has its declared-path finding
     (:func:`_unscanned_path_finding`), so its files get no second one.
     """
-    folder = _unscanned_folder(rel)
-    if folder is None or _in_unscanned_folder(folder_rel):
+    folder = _unscanned_folder(rel, reader.root)
+    if folder is None or _in_unscanned_folder(folder_rel, reader.root):
         return None
     label = component_type.replace("_", " ")
     return _plugin_finding(
@@ -423,12 +465,13 @@ def _style_finding(
     (HIGH, the plugin does not load); Codex drops the value and loads the
     format's default location instead (MEDIUM).
     """
+    shown = reported_ref(declared.raw)
     if declared.rel is not None and str(declared.rel) == "." and declared.dot_relative:
         problem = "names the plugin root itself"
         fix = "Name the component folder or file, for example './skills/'."
     else:
         problem = "does not start with './'"
-        fix = f"Write the path as './{declared.rel.as_posix() if declared.rel else declared.raw}'."
+        fix = f"Write the path as './{reported_ref(declared.rel.as_posix()) if declared.rel else shown}'."
     if profile.rejects_undotted_paths:
         severity = Severity.HIGH
         outcome = f"{profile.label.removesuffix(' plugin')} rejects the whole manifest and does not load the plugin"
@@ -438,10 +481,10 @@ def _style_finding(
     return _plugin_finding(
         severity,
         "plugin_component_path_style",
-        f"'{field_name}' path {declared.raw!r} {problem}; {outcome}",
+        f"'{field_name}' path {shown!r} {problem}; {outcome}",
         reader.display(manifest_rel),
         fix,
-        metadata={"plugin_component_ref": declared.raw},
+        metadata={"plugin_component_ref": shown},
     )
 
 
@@ -449,16 +492,17 @@ def _root_variable_finding(
     reader: PluginRootReader, field_name: str, declared: DeclaredPath, manifest_rel: str, profile: FormatProfile
 ) -> Finding:
     """MEDIUM for a component path that starts with a root variable the client documents only elsewhere (Cursor)."""
+    shown = reported_ref(declared.raw)
     return _plugin_finding(
         Severity.MEDIUM,
         "plugin_component_path_root_variable",
-        f"'{field_name}' path {declared.raw!r} starts with {declared.root_variable}. The {profile.label} reference "
+        f"'{field_name}' path {shown!r} starts with {declared.root_variable}. The {profile.label} reference "
         "documents root variables for hook commands and MCP server fields, not for manifest component paths, so "
         "the client may not expand it there and may not load this component. SkillEvaluator still checks the files "
         "it names",
         reader.display(manifest_rel),
-        f"Write the path relative to the plugin root, for example './{declared.rel.as_posix() if declared.rel else ''}'.",
-        metadata={"plugin_component_ref": declared.raw},
+        f"Write the path relative to the plugin root, for example './{reported_ref(declared.rel.as_posix()) if declared.rel else ''}'.",
+        metadata={"plugin_component_ref": shown},
     )
 
 

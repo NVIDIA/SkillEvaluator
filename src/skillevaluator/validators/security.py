@@ -20,12 +20,14 @@ import math
 import os
 import re
 import shutil
+import struct
 import tempfile
 import tokenize
 import unicodedata
+import zlib
 from collections import Counter
 from collections.abc import Iterable, Mapping
-from pathlib import Path
+from pathlib import Path, PurePosixPath
 
 import yaml
 from yaml.events import ScalarEvent
@@ -46,9 +48,11 @@ from skillevaluator.provider_config import (
     resolve_llm_provider,
     skillspector_reasoning_effort,
 )
+from skillevaluator.skillspector_provenance import sanitize_skillspector_llm_provenance
 from skillevaluator.spdx import is_spdx_only_html_comment
 from skillevaluator.utils.path_security import matches_filesystem_name
 from skillevaluator.utils.scanner_install import prepare_skillspector
+from skillevaluator.utils.secure_fs import SecurePathError, SecureRoot
 from skillevaluator.utils.tool_runner import Tools, parse_json_output
 from skillevaluator.validators.base import (
     Finding,
@@ -59,6 +63,14 @@ from skillevaluator.validators.base import (
 )
 
 logger = get_logger(__name__)
+
+# Watchdog for each SkillSpector subprocess. The default stays above
+# SkillSpector's own workflow deadline (1,080 seconds in v2.13.3) so that deadline, not a kill,
+# normally ends a slow scan. The cap keeps the value inside the range that
+# subprocess waits accept on every platform.
+_DEFAULT_SKILLSPECTOR_TIMEOUT_SECONDS = 1200
+_MAX_SKILLSPECTOR_TIMEOUT_SECONDS = 86400
+_SKILLSPECTOR_TIMEOUT_ENV = "SKILLEVALUATOR_SKILLSPECTOR_TIMEOUT_SECONDS"
 
 _AUTHOR_IDENTITY_RE = re.compile(r"^\S[^<>\n]* <(?P<email>[^<>@\s]+@[^<>\s]+)>$")
 _SKILLSPECTOR_POLICY_EXIT_CODES = frozenset({0, 1})
@@ -74,6 +86,22 @@ _SKILLSPECTOR_DOCS_ONLY_NOT_APPLICABLE_ANALYZERS = frozenset(
         "mcp_least_privilege",
         "meta_analyzer",
     }
+)
+# SkillSpector 2.11.1+ classifies each occurrence separately, so benign-context
+# tags describe the reported row instead of a compacted sibling.
+_SKILLSPECTOR_OCCURRENCE_TRIAGE_VERSION = (2, 11, 1)
+_SKILLSPECTOR_BENIGN_CONTEXT_TAGS = frozenset({"contextual-triage", "likely-benign-context"})
+_SKILLSPECTOR_PASSWD_MOUNT_SOURCE_LIMIT_BYTES = 1024 * 1024
+_PASSWD_PATH_PATTERN = re.compile(r"/etc/passwd", re.IGNORECASE)
+# SkillSpector's own bounded grammar for an exact read-only UID-map mount.
+_READ_ONLY_PASSWD_VOLUME_PATTERN = re.compile(
+    r"\b(?:docker|podman)\s+run\b"
+    r"(?:(?:\\\r?\n)|[^\n;&|]){0,1000}?"
+    r"(?:-v|--volume)(?:=|\s+)"
+    r"(?P<quote>['\"]?)"
+    r"(?P<source>/etc/passwd):(?P<target>/etc/passwd):ro"
+    r"(?P=quote)(?=$|[\s\\])",
+    re.IGNORECASE | re.MULTILINE,
 )
 
 
@@ -168,6 +196,8 @@ _SKILLSPECTOR_PROCESS_ENV_NAMES = frozenset(
         "PATH",
         "PATHEXT",
         "REQUESTS_CA_BUNDLE",
+        # SkillSpector's own workflow deadline, raised together with the watchdog.
+        "SKILLSPECTOR_MAX_WORKFLOW_SECONDS",
         "SSL_CERT_DIR",
         "SSL_CERT_FILE",
         "SYSTEMROOT",
@@ -384,8 +414,47 @@ def _skillspector_llm_stderr_failed(stderr: str) -> bool:
     return any(marker in normalized for marker in _SKILLSPECTOR_LLM_FAILURE_MARKERS)
 
 
+def _skillspector_report_llm_provenance(report: object) -> dict | None:
+    """Return the validated ``metadata.llm_provenance`` of a SkillSpector JSON report, if any."""
+    if not isinstance(report, Mapping):
+        return None
+    metadata = report.get("metadata")
+    if not isinstance(metadata, Mapping):
+        return None
+    return sanitize_skillspector_llm_provenance(metadata.get("llm_provenance"))
+
+
 def _copy_selected_environment(environ: Mapping[str, str], names: Iterable[str]) -> dict[str, str]:
     return {name: environ[name] for name in names if environ.get(name, "").strip()}
+
+
+def _skillspector_timeout_seconds(environ: Mapping[str, str] | None = None) -> int:
+    """Return the SkillSpector subprocess watchdog configured by the operator."""
+    source = os.environ if environ is None else environ
+    raw = source.get(_SKILLSPECTOR_TIMEOUT_ENV, "").strip()
+    if not raw:
+        return _DEFAULT_SKILLSPECTOR_TIMEOUT_SECONDS
+    try:
+        timeout: int | None = int(raw)
+    except ValueError:
+        timeout = None
+    if timeout is None or timeout <= 0:
+        logger.warning(
+            "Ignoring %s=%r: expected a positive integer number of seconds; using %ss",
+            _SKILLSPECTOR_TIMEOUT_ENV,
+            raw,
+            _DEFAULT_SKILLSPECTOR_TIMEOUT_SECONDS,
+        )
+        return _DEFAULT_SKILLSPECTOR_TIMEOUT_SECONDS
+    if timeout > _MAX_SKILLSPECTOR_TIMEOUT_SECONDS:
+        logger.warning(
+            "Capping %s=%r at %ss",
+            _SKILLSPECTOR_TIMEOUT_ENV,
+            raw,
+            _MAX_SKILLSPECTOR_TIMEOUT_SECONDS,
+        )
+        return _MAX_SKILLSPECTOR_TIMEOUT_SECONDS
+    return timeout
 
 
 def _skillspector_process_env(environ: Mapping[str, str] | None = None) -> dict[str, str]:
@@ -405,8 +474,14 @@ def _skillspector_operator_env(environ: Mapping[str, str]) -> dict[str, str]:
     )
 
 
-def _skillspector_provider_env() -> dict[str, str]:
-    """Map public provider settings into an invocation-scoped SkillSpector environment."""
+def _skillspector_provider_env() -> tuple[dict[str, str], str | None]:
+    """Map public provider settings into an invocation-scoped SkillSpector environment.
+
+    Also returns the SkillEvaluator provider the bridge resolved. It is ``None``
+    when ``SKILLSPECTOR_PROVIDER`` selects a SkillSpector adapter directly or
+    names an unsupported provider, and when no provider resolves.
+    ``SKILLSPECTOR_PROVIDER=nv_build`` is bridged and returns ``nv_build``.
+    """
     source = os.environ
     child_env = _skillspector_process_env(source)
     child_env.update(_skillspector_operator_env(source))
@@ -421,14 +496,14 @@ def _skillspector_provider_env() -> dict[str, str]:
             child_env.update(
                 _copy_selected_environment(source, _SKILLSPECTOR_EXPLICIT_PROVIDER_ENV[skillspector_provider])
             )
-            return child_env
+            return child_env, None
         if skillspector_provider != "nv_build":
             # Unsupported/private providers fail closed through the generic
             # public path without receiving any provider credential.
             child_env["SKILLSPECTOR_PROVIDER"] = "openai"
             if skillspector_model:
                 child_env["SKILLSPECTOR_MODEL"] = skillspector_model
-            return child_env
+            return child_env, None
 
     try:
         resolution_env = dict(source)
@@ -438,11 +513,11 @@ def _skillspector_provider_env() -> dict[str, str]:
                 resolution_env["SKILL_EVAL_LLM_MODEL"] = skillspector_model
         provider = resolve_llm_provider(resolution_env)
     except ProviderConfigurationError:
-        return child_env
+        return child_env, None
 
     mapped_provider = _SKILLSPECTOR_PROVIDER_MAP.get(provider.provider)
     if mapped_provider is None:
-        return child_env
+        return child_env, None
 
     child_env["SKILLSPECTOR_PROVIDER"] = mapped_provider
     # An explicit SKILL_EVAL_LLM_MODEL reaches SkillSpector; the chat default does not.
@@ -460,7 +535,7 @@ def _skillspector_provider_env() -> dict[str, str]:
         if provider.provider == "bedrock":
             child_env.update(_copy_selected_environment(source, _SKILLSPECTOR_AWS_ENV_NAMES))
 
-    return child_env
+    return child_env, provider.provider
 
 
 def _skillspector_default_reasoning_effort(child_env: Mapping[str, str]) -> str | None:
@@ -480,13 +555,18 @@ def _skillspector_default_reasoning_effort(child_env: Mapping[str, str]) -> str 
     return efforts.pop() if len(efforts) == 1 else None
 
 
-def _skillspector_child_env() -> dict[str, str]:
-    """Return the SkillSpector environment plus SkillEvaluator's default reasoning effort."""
-    child_env = _skillspector_provider_env()
+def _skillspector_llm_env() -> tuple[dict[str, str], str | None]:
+    """Return the LLM-stage SkillSpector environment and the bridged SkillEvaluator provider."""
+    child_env, provider_id = _skillspector_provider_env()
     effort = _skillspector_default_reasoning_effort(child_env)
     if effort is not None:
         child_env.setdefault("SKILLSPECTOR_REASONING_EFFORT", effort)
-    return child_env
+    return child_env, provider_id
+
+
+def _skillspector_child_env() -> dict[str, str]:
+    """Return the SkillSpector environment plus SkillEvaluator's default reasoning effort."""
+    return _skillspector_llm_env()[0]
 
 
 def _tree_contains_artifact_dirs(root: Path) -> bool:
@@ -551,6 +631,356 @@ def _skillspector_scoring_match_identity(
         return "row", index
     finding = str(issue.get("finding") or "").strip()[:100]
     return ("finding", finding) if finding else ("row", index)
+
+
+# SkillSpector's static pattern analyzers read text, so each records a referenced
+# PNG or JPEG image as a nonfatal, whole-file limitation and the analysis becomes
+# ``partial``; see :func:`_skillspector_passive_raster_note`.
+_PASSIVE_RASTER_SUFFIXES = frozenset({".png", ".jpg", ".jpeg"})
+_PASSIVE_RASTER_REASONS = frozenset({"binary_content", "opaque_content"})
+_PASSIVE_RASTER_ANALYZER_RE = re.compile(r"static_patterns_[a-z0-9]+(?:_[a-z0-9]+)*")
+# An image is not a passive asset when it sits in a directory whose files an
+# agent runs or loads as instructions (at any depth), or under a top-level
+# configuration, nested-skill or agent-settings directory.
+_PASSIVE_RASTER_CONTROL_DIRS = frozenset(
+    {"agents", "commands", "hooks", "prompts", "rules", "scripts", "team-rules", "tools", "workflows"}
+)
+_PASSIVE_RASTER_CONTROL_ROOTS = frozenset(
+    {".agents", ".claude", ".codex", ".continue", ".cursor", ".gemini", ".mcp", ".windsurf", "config", "skills"}
+)
+_PASSIVE_RASTER_MAX_FILES = 256
+_PASSIVE_RASTER_MAX_BYTES = 128 * 1024 * 1024
+_PNG_SIGNATURE = b"\x89PNG\r\n\x1a\n"
+# Bit depths the PNG specification allows for each colour type.
+_PNG_BIT_DEPTHS = {0: {1, 2, 4, 8, 16}, 2: {8, 16}, 3: {1, 2, 4, 8}, 4: {8, 16}, 6: {8, 16}}
+# JPEG start-of-frame markers SOF0-SOF3, SOF5-SOF7, SOF9-SOF11 and SOF13-SOF15.
+_JPEG_FRAME_MARKERS = frozenset({0xC0, 0xC1, 0xC2, 0xC3, 0xC5, 0xC6, 0xC7, 0xC9, 0xCA, 0xCB, 0xCD, 0xCE, 0xCF})
+_JPEG_FILL_BYTES = re.compile(rb"\xff+")
+# Where entropy-coded data ends: the first marker, after any fill bytes, other
+# than a stuffed 0xFF00 byte or a restart marker (RST0-RST7). The lookbehind
+# starts each match at the first 0xFF of a run, which keeps the search linear.
+_JPEG_SCAN_END = re.compile(rb"(?<!\xff)\xff+[^\x00\xd0-\xd7\xff]")
+# A non-marker byte or a stuffed 0xFF00 is entropy-coded content; fill bytes
+# and restart markers by themselves do not supply scan data.
+_JPEG_SCAN_DATA = re.compile(rb"(?<!\xff)[^\xff]|\xff\x00")
+
+
+def _is_png(data: bytes) -> bool:
+    """Whether *data* has the chunk structure of a PNG image.
+
+    The chunk stream must be whole, with every CRC valid: IHDR first, with a
+    nonzero size and a valid bit depth and colour type; a palette exactly when
+    the colour type needs or allows one, before the image data; one contiguous
+    run of IDAT chunks that starts a zlib stream; and IEND last, with nothing
+    after it. Unknown critical chunks and chunk types with the reserved bit set
+    are rejected. This corroborates the file type without decoding the image.
+    The compressed IDAT data beyond its two-byte zlib header and ancillary
+    chunks are not inspected, so both can still carry arbitrary bytes.
+    """
+    if not data.startswith(_PNG_SIGNATURE):
+        return False
+    view = memoryview(data)
+    offset = len(_PNG_SIGNATURE)
+    depth = colour = palette_entries = 0
+    idat_head = b""
+    idat_state = 0  # 0: no IDAT yet, 1: inside the IDAT run, 2: after it
+    while offset + 12 <= len(data):
+        (length,) = struct.unpack_from(">I", data, offset)
+        kind = data[offset + 4 : offset + 8]
+        end = offset + 12 + length
+        if end > len(data) or not kind.isalpha() or kind[2] & 0x20:
+            return False
+        (crc,) = struct.unpack_from(">I", data, end - 4)
+        if zlib.crc32(view[offset + 4 : end - 4]) != crc or (offset == len(_PNG_SIGNATURE)) != (kind == b"IHDR"):
+            return False
+        if kind == b"IHDR":
+            if length != 13:
+                return False
+            width, height, depth, colour, compression, filtering, interlace = struct.unpack_from(
+                ">IIBBBBB", data, offset + 8
+            )
+            if (
+                not 0 < width < 1 << 31
+                or not 0 < height < 1 << 31
+                or depth not in _PNG_BIT_DEPTHS.get(colour, ())
+                or compression != 0
+                or filtering != 0
+                or interlace not in (0, 1)
+            ):
+                return False
+        elif kind == b"PLTE":
+            if palette_entries or idat_state or not 0 < length <= 768 or length % 3 or colour in (0, 4):
+                return False
+            palette_entries = length // 3
+        elif kind == b"IDAT":
+            if idat_state == 2:
+                return False
+            idat_state = 1
+            idat_head = (idat_head + data[offset + 8 : offset + 8 + min(length, 2)])[:2]
+        elif kind == b"IEND":
+            # The zlib header names deflate with a window of at most 32 KiB,
+            # its check bits are valid, and it sets no preset dictionary.
+            return (
+                length == 0
+                and end == len(data)
+                and len(idat_head) == 2
+                and idat_head[0] & 0x0F == 8
+                and idat_head[0] >> 4 <= 7
+                and int.from_bytes(idat_head, "big") % 31 == 0
+                and not idat_head[1] & 0x20
+                and (colour != 3 or 0 < palette_entries <= 1 << depth)
+            )
+        elif not kind[0] & 0x20:
+            return False  # An unknown critical chunk.
+        elif idat_state:
+            idat_state = 2
+        offset = end
+    return False
+
+
+def _jpeg_tables_are_valid(marker: int, payload: bytes) -> bool:
+    """Whether a DQT (0xDB), DHT (0xC4) or DAC (0xCC) segment payload holds whole, valid tables."""
+    if marker == 0xCC:
+        return bool(payload) and len(payload) % 2 == 0
+    cursor = 0
+    while cursor < len(payload):
+        table_class, table_id = payload[cursor] >> 4, payload[cursor] & 0x0F
+        if marker == 0xDB:
+            cursor += 1 + 64 * (table_class + 1)
+            valid = table_class <= 1
+        else:
+            symbols = sum(payload[cursor + 1 : cursor + 17])
+            cursor += 17 + symbols
+            valid = table_class <= 1 and 0 < symbols <= 256
+        if not valid or table_id > 3 or cursor > len(payload):
+            return False
+    return bool(payload)
+
+
+def _is_jpeg(data: bytes) -> bool:
+    """Whether *data* has the marker structure of a JPEG image.
+
+    The file must run from SOI to EOI, its last bytes, through well-formed
+    marker segments: one frame header (SOF); valid quantization (DQT) and
+    entropy-coding (DHT or DAC) tables before the first scan; and scans (SOS)
+    whose components belong to the frame, each followed by entropy-coded
+    data. Reserved markers and markers out of place are rejected. This
+    corroborates the file type without decoding the image. Entropy-coded
+    data and APPn or COM segments are not inspected and can still carry
+    arbitrary bytes.
+    """
+    if len(data) < 20 or not data.startswith(b"\xff\xd8") or not data.endswith(b"\xff\xd9"):
+        return False
+    frame: set[int] = set()
+    has_quantization = has_entropy_tables = False
+    entropy_bytes = 0
+    offset = 2
+    while offset < len(data):
+        if data[offset] != 0xFF:
+            return False
+        fill = _JPEG_FILL_BYTES.match(data, offset)
+        offset = fill.end() if fill else offset
+        if offset >= len(data):
+            return False
+        marker = data[offset]
+        offset += 1
+        if marker == 0xD9:
+            return offset == len(data) and entropy_bytes > 0
+        if marker < 0xC0 or 0xD0 <= marker <= 0xD8 or offset + 2 > len(data):
+            return False
+        (length,) = struct.unpack_from(">H", data, offset)
+        payload = data[offset + 2 : offset + length]
+        offset += length
+        if length < 2 or offset > len(data):
+            return False
+        if marker in (0xDB, 0xC4, 0xCC):
+            if not _jpeg_tables_are_valid(marker, payload):
+                return False
+            has_quantization = has_quantization or marker == 0xDB
+            has_entropy_tables = has_entropy_tables or marker != 0xDB
+        elif marker in _JPEG_FRAME_MARKERS:
+            count = payload[5] if len(payload) > 5 else 0
+            if frame or not 1 <= count <= 4 or len(payload) != 6 + 3 * count or payload[0] not in (8, 12):
+                return False
+            if not int.from_bytes(payload[1:3], "big") or not int.from_bytes(payload[3:5], "big"):
+                return False
+            for component in range(6, len(payload), 3):
+                identifier, sampling, table = payload[component : component + 3]
+                if identifier in frame or not 1 <= sampling >> 4 <= 4 or not 1 <= sampling & 0x0F <= 4 or table > 3:
+                    return False
+                frame.add(identifier)
+        elif marker == 0xDA:
+            count = payload[0] if payload else 0
+            if not (frame and has_quantization and has_entropy_tables and 1 <= count <= len(frame)):
+                return False
+            if len(payload) != 4 + 2 * count:
+                return False
+            scanned = payload[1 : 1 + 2 * count : 2]
+            selectors = payload[2 : 2 + 2 * count : 2]
+            start, stop, approximation = payload[-3:]
+            if (
+                len(set(scanned)) != count
+                or not set(scanned) <= frame
+                or any(selector >> 4 > 3 or selector & 0x0F > 3 for selector in selectors)
+                or not start <= stop <= 63
+                or approximation >> 4 > 13
+                or approximation & 0x0F > 13
+            ):
+                return False
+            scan_end = _JPEG_SCAN_END.search(data, offset)
+            if scan_end is None:
+                return False
+            if not _JPEG_SCAN_DATA.search(data, offset, scan_end.start()):
+                return False
+            entropy_bytes += scan_end.start() - offset
+            offset = scan_end.start()
+        elif marker == 0xDD:
+            if length != 4:
+                return False
+        elif marker != 0xFE and not 0xE0 <= marker <= 0xEF:
+            return False  # Reserved extensions and segments outside this single-frame format.
+    return False
+
+
+def _skillspector_passive_raster_note(
+    ledger_exceptions: list[dict],
+    analyzer_statuses: list[dict],
+    counts: Mapping[str, int],
+    limitations: list[str],
+    scope_exclusions: object,
+    components: object,
+    scanned_root: Path | None,
+) -> str | None:
+    """A note for a ``partial`` SkillSpector analysis whose only gaps are referenced images, else ``None``.
+
+    SkillSpector's ``static_patterns_*`` analyzers read text. A PNG or JPEG
+    image that a skill references (``![logo](assets/logo.png)``) is recorded as
+    one nonfatal, whole-file ``static`` ledger exception (``opaque_content`` or
+    ``binary_content``) naming those analyzers, and the analysis is reported as
+    ``partial``. Every other analyzer still inspected every file.
+
+    That gap is accepted only when it accounts exactly for the report: each
+    named analyzer is ``degraded`` by one ``partial`` work item per image and
+    completed the rest, every other analyzer completed, the uninspected-file
+    counts and limitations match, no scope exclusion is fatal, and each image
+    is a non-executable component outside the directories that agents run,
+    load as instructions or read as configuration
+    (:data:`_PASSIVE_RASTER_CONTROL_DIRS`, :data:`_PASSIVE_RASTER_CONTROL_ROOTS`).
+    Each file under *scanned_root* must also be a regular, single-link,
+    non-executable file, reached without following a link, whose bytes have the
+    structure of a PNG or JPEG matching its suffix (:func:`_is_png`,
+    :func:`_is_jpeg`), within :data:`_PASSIVE_RASTER_MAX_FILES` files and
+    :data:`_PASSIVE_RASTER_MAX_BYTES` bytes. A binary payload named
+    ``logo.png`` without PNG structure, another reason, a fatal or line-scoped
+    exception, or any accounting mismatch keeps the scan INCOMPLETE. Compressed
+    image data is not decoded or assessed, including arbitrary payload bytes
+    behind an otherwise well-formed header.
+    """
+    if (
+        scanned_root is None
+        or not ledger_exceptions
+        or not isinstance(components, list)
+        or not isinstance(scope_exclusions, list)
+        or any(not isinstance(row, dict) or row.get("fatal") is not False for row in scope_exclusions)
+    ):
+        return None
+    named: Counter[str] = Counter()
+    rows: set[tuple[str, str]] = set()
+    for exception in ledger_exceptions:
+        path = exception.get("path")
+        reason = exception.get("reason_code")
+        analyzers = exception.get("analyzers")
+        if (
+            exception.get("outcome") != "partial"
+            or exception.get("phase") != "static"
+            or exception.get("fatal") is not False
+            or exception.get("start_line") is not None
+            or exception.get("end_line") is not None
+            or not isinstance(reason, str)
+            or reason not in _PASSIVE_RASTER_REASONS
+            or not isinstance(path, str)
+            or PurePosixPath(path).suffix.lower() not in _PASSIVE_RASTER_SUFFIXES
+            or not isinstance(analyzers, list)
+            or not analyzers
+        ):
+            return None
+        for analyzer in analyzers:
+            if (
+                not isinstance(analyzer, str)
+                or not _PASSIVE_RASTER_ANALYZER_RE.fullmatch(analyzer)
+                or (path, analyzer) in rows
+            ):
+                return None
+            rows.add((path, analyzer))
+            named[analyzer] += 1
+    paths = sorted({path for path, _analyzer in rows})
+    total = counts["total_components"]
+    uninspected = counts["partially_inspected_files"] + counts["entirely_uninspected_files"]
+    if (
+        len(paths) > _PASSIVE_RASTER_MAX_FILES
+        or uninspected != len(paths)
+        or counts["findings_before_filtering"] != counts["findings_after_filtering"]
+    ):
+        return None
+
+    universal = _SKILLSPECTOR_COMMON_UNIVERSAL_ANALYZERS | {"artifact_integrity"} | set(named)
+    accounted: set[str] = set()
+    for status in analyzer_statuses:
+        analyzer_id = status.get("analyzer_id")
+        state = status.get("status")
+        if analyzer_id not in universal:
+            if state not in {"completed", "not_applicable", "disabled"}:
+                return None
+            continue
+        gaps = named.get(analyzer_id, 0)
+        if (
+            analyzer_id in accounted
+            or state != ("degraded" if gaps else "completed")
+            or status.get("planned_work") != total
+            or status.get("completed") != total - gaps
+            or status.get("partial") != gaps
+        ):
+            return None
+        accounted.add(analyzer_id)
+    allowed_limitations = {f"Analyzer {analyzer} status: degraded." for analyzer in named}
+    if accounted != universal or any(limitation not in allowed_limitations for limitation in limitations):
+        return None
+
+    components_by_path: dict[str, list[dict]] = {}
+    for component in components:
+        if isinstance(component, dict) and isinstance(component.get("path"), str):
+            components_by_path.setdefault(component["path"], []).append(component)
+    budget = _PASSIVE_RASTER_MAX_BYTES
+    try:
+        with SecureRoot(scanned_root) as root:
+            for path in paths:
+                matches = components_by_path.get(path, [])
+                parts = path.split("/")
+                directories = [part.casefold() for part in parts[:-1]]
+                if (
+                    len(matches) != 1
+                    or matches[0].get("executable") is not False
+                    or "\\" in path
+                    or not _is_filesystem_safe_path_text(path)
+                    or any(part in {"", ".", ".."} or Path(part).anchor for part in parts)
+                    or (directories and directories[0] in _PASSIVE_RASTER_CONTROL_ROOTS)
+                    or not _PASSIVE_RASTER_CONTROL_DIRS.isdisjoint(directories)
+                ):
+                    return None
+                data, metadata = root.read_bytes(Path(*parts), budget)
+                is_image = _is_png(data) if path.lower().endswith(".png") else _is_jpeg(data)
+                if metadata.st_mode & 0o111 or not is_image:
+                    return None
+                budget -= len(data)
+    except (OSError, SecurePathError):
+        return None
+
+    shown = ", ".join(paths[:5]) + (f" and {len(paths) - 5} more" if len(paths) > 5 else "")
+    return (
+        f"SkillSpector's text pattern analyzers could not read {len(paths)} referenced image file(s) "
+        f"({shown}); each is a regular, non-executable file with PNG or JPEG structure outside agent-control "
+        "directories, so the scan is not marked incomplete. The image content itself was not assessed"
+    )
 
 
 class SecurityValidator(ValidatorBase):
@@ -808,6 +1238,18 @@ class SecurityValidator(ValidatorBase):
                     original_root=original_root if staged is not None else None,
                     use_llm=True,
                 )
+                # Both stages run the same static analyzers, so a note such as
+                # an accepted image gap can repeat word for word; keep one copy.
+                finding_messages = {finding.to_legacy_string() for finding in enrichment.findings}
+                repeated = {
+                    warning
+                    for warning in enrichment.warnings
+                    if warning in result.warnings and warning not in finding_messages
+                }
+                if repeated:
+                    kept = [warning for warning in enrichment.warnings if warning not in repeated]
+                    enrichment.summary.warnings -= len(enrichment.warnings) - len(kept)
+                    enrichment.warnings = kept
                 result.merge(enrichment)
                 if not enrichment.is_incomplete:
                     self._deduplicate_skillspector_findings(result)
@@ -831,12 +1273,31 @@ class SecurityValidator(ValidatorBase):
             args.append("--no-llm")
 
         logger.info("Running %s on %s", stage_name, scan_root)
-        child_env = _skillspector_child_env() if use_llm else _skillspector_process_env()
         if use_llm:
+            child_env, provider_id = _skillspector_llm_env()
             # Requested LLM configuration; None leaves the choice to SkillSpector.
             result.metadata["skillspector_model"] = child_env.get("SKILLSPECTOR_MODEL")
             result.metadata["skillspector_reasoning_effort"] = child_env.get("SKILLSPECTOR_REASONING_EFFORT")
-        tool_result = Tools.skillspector.run(args, timeout=300, env=child_env, replace_env=True)
+            if provider_id is not None:
+                result.metadata["skillspector_provider_id"] = provider_id
+        else:
+            child_env = _skillspector_process_env()
+        # Read from the parent environment: the isolated child environment omits it.
+        timeout = _skillspector_timeout_seconds()
+        result.metadata["skillspector_timeout_seconds"] = timeout
+        tool_result = Tools.skillspector.run(args, timeout=timeout, env=child_env, replace_env=True)
+        try:
+            data = parse_json_output(tool_result.stdout)
+        except (RecursionError, ValueError):
+            data = None
+        if use_llm:
+            # Recorded before the completeness checks below, so a failed or
+            # unconfirmed LLM stage still names the provider and models it
+            # attempted. Only a record that passes the strict provenance
+            # contract is kept, and it never makes the stage complete.
+            provenance = _skillspector_report_llm_provenance(data)
+            if provenance is not None:
+                result.metadata["skillspector_llm_provenance"] = provenance
 
         if tool_result.exit_code not in _SKILLSPECTOR_POLICY_EXIT_CODES:
             error_message = tool_result.error_message
@@ -862,10 +1323,6 @@ class SecurityValidator(ValidatorBase):
             result.mark_scan_incomplete(stage_name)
             return result
 
-        try:
-            data = parse_json_output(tool_result.stdout)
-        except (RecursionError, ValueError):
-            data = None
         if data is None:
             result.add_error(
                 f"{stage_name} did not return valid JSON (exit code {tool_result.exit_code}); "
@@ -893,6 +1350,7 @@ class SecurityValidator(ValidatorBase):
             use_llm,
             stage_name,
             result,
+            scanned_root=original_root if original_root is not None else scan_root,
         ):
             result.mark_scan_incomplete(stage_name)
             return result
@@ -929,8 +1387,17 @@ class SecurityValidator(ValidatorBase):
         use_llm: bool,
         stage_name: str,
         result: ValidationResult,
+        *,
+        scanned_root: Path | None = None,
     ) -> bool:
-        """Return whether JSON is a trustworthy SkillSpector findings report."""
+        """Return whether JSON is a trustworthy SkillSpector findings report.
+
+        A ``partial`` analysis makes the scan INCOMPLETE unless its only gaps are
+        referenced PNG or JPEG images that the files under *scanned_root* confirm
+        (:func:`_skillspector_passive_raster_note`); that is a warning instead.
+        *scanned_root* is the directory the report's relative paths start from.
+        """
+        partial_reported = False
         if "error" in data and data["error"] is not None:
             result.add_error("skillspector reported an error; security scan did not complete")
             return False
@@ -1449,11 +1916,24 @@ class SecurityValidator(ValidatorBase):
                             "security scan did not complete"
                         )
                         return False
-                    result.add_error(
-                        "skillspector JSON field 'analysis_completeness' reports incomplete analysis "
-                        f"(status '{completeness_status}'); security scan did not complete"
+                    partial_reported = True
+                    raster_note = _skillspector_passive_raster_note(
+                        ledger_exceptions,
+                        analyzer_statuses,
+                        counts,
+                        limitations,
+                        analysis_completeness.get("scope_exclusions", []),
+                        data.get("components"),
+                        scanned_root,
                     )
-                    result.mark_scan_incomplete(stage_name)
+                    if raster_note is not None:
+                        result.add_warning(raster_note)
+                    else:
+                        result.add_error(
+                            "skillspector JSON field 'analysis_completeness' reports incomplete analysis "
+                            f"(status '{completeness_status}'); security scan did not complete"
+                        )
+                        result.mark_scan_incomplete(stage_name)
 
         status = data.get("status")
         if status is not None and not isinstance(status, str):
@@ -1520,7 +2000,7 @@ class SecurityValidator(ValidatorBase):
             return False
         recommendation = risk.get("recommendation")
         expected_recommendation = _SKILLSPECTOR_RECOMMENDATION_BY_SEVERITY[severity]
-        if result.is_incomplete and severity == "LOW":
+        if (result.is_incomplete or partial_reported) and severity == "LOW":
             expected_recommendation = "CAUTION"
         if not isinstance(recommendation, str) or recommendation != expected_recommendation:
             result.add_error(
@@ -1632,9 +2112,10 @@ class SecurityValidator(ValidatorBase):
                 "security scan did not complete"
             )
             return False
+        # Provider availability is independent of execution: configured
+        # credentials do not contradict a --no-llm report.
         if not use_llm and (
             metadata.get("llm_requested") not in {None, False}
-            or metadata.get("llm_available") not in {None, False}
             or metadata.get("meta_analysis_applied") not in {None, False}
         ):
             result.add_error(
@@ -2141,10 +2622,14 @@ class SecurityValidator(ValidatorBase):
         self._store_skillspector_metadata(data, result)
 
         issues = data.get("issues", [])
+        report_metadata = data.get("metadata") if isinstance(data.get("metadata"), dict) else {}
+        raw_version = report_metadata.get("skillspector_version")
         scanned_issues = []
         removed_issues = []
         skipped_generated = 0
         skipped_spdx_comments = 0
+        skipped_passwd_mounts = 0
+        passwd_mount_lines: dict[str, frozenset[int]] = {}
         has_critical_or_high = False
         for issue in issues:
             if not isinstance(issue, dict):
@@ -2157,6 +2642,15 @@ class SecurityValidator(ValidatorBase):
                 removed_issues.append(issue)
                 skipped_spdx_comments += 1
                 continue
+            if self._is_read_only_passwd_mount_issue(
+                issue,
+                scanner_version=raw_version,
+                source_root=source_root,
+                safe_lines_by_file=passwd_mount_lines,
+            ):
+                removed_issues.append(issue)
+                skipped_passwd_mounts += 1
+                continue
             scanned_issues.append(issue)
             finding, is_error = self._convert_skillspector_issue(issue)
             if is_error:
@@ -2167,11 +2661,11 @@ class SecurityValidator(ValidatorBase):
             result.add_message(f"skillspector ignored {skipped_generated} generated artifact issue(s)")
         if skipped_spdx_comments:
             result.add_message(f"skillspector ignored {skipped_spdx_comments} SPDX-only HTML comment issue(s)")
+        if skipped_passwd_mounts:
+            result.add_message(f"skillspector ignored {skipped_passwd_mounts} read-only /etc/passwd mount issue(s)")
 
         reported_score = data["risk_assessment"]["score"]
         report_components = data.get("components") if isinstance(data.get("components"), list) else []
-        report_metadata = data.get("metadata") if isinstance(data.get("metadata"), dict) else {}
-        raw_version = report_metadata.get("skillspector_version")
         uses_report_identities = (
             isinstance(raw_version, str)
             and SEMVER_RE.fullmatch(raw_version) is not None
@@ -2202,7 +2696,7 @@ class SecurityValidator(ValidatorBase):
                 removed_issues=removed_issues,
                 all_findings_serialized=findings_after_filtering == serialized_findings,
             )
-            if skipped_generated or skipped_spdx_comments
+            if skipped_generated or skipped_spdx_comments or skipped_passwd_mounts
             else reported_score
         )
         if effective_score > 50 and not has_critical_or_high:
@@ -2263,6 +2757,99 @@ class SecurityValidator(ValidatorBase):
             str(issue.get("code_snippet") or ""),
             allow_frontmatter_separator=True,
         )
+
+    @staticmethod
+    def _is_read_only_passwd_mount_issue(
+        issue: dict,
+        *,
+        scanner_version: object,
+        source_root: Path | None,
+        safe_lines_by_file: dict[str, frozenset[int]],
+    ) -> bool:
+        """Suppress only a benign-tagged PE3 on an exact read-only passwd mount.
+
+        SkillSpector tags ``docker run -v /etc/passwd:/etc/passwd:ro`` (and its
+        Podman, ``--volume`` and quoted forms) as likely benign context but
+        still reports it as a HIGH Credential Access finding. Trust those tags
+        only where each occurrence is classified separately, and re-check the
+        reported source line: every ``/etc/passwd`` on it must be the source or
+        target of an exact read-only mount. Writable or implicit-mode mounts,
+        other paths, same-line reads such as ``cat /etc/passwd``, aggregated
+        rows, unsafe or unreadable locations, and older scanners stay reported.
+        """
+        tags = issue.get("tags")
+        if (
+            issue.get("id") != "PE3"
+            or issue.get("pattern") != "Credential Access"
+            or issue.get("finding") != "/etc/passwd"
+            or not isinstance(tags, list)
+            or not all(isinstance(tag, str) for tag in tags)
+            or not _SKILLSPECTOR_BENIGN_CONTEXT_TAGS.issubset(tags)
+            or not isinstance(scanner_version, str)
+            or SEMVER_RE.fullmatch(scanner_version) is None
+            or tuple(int(part) for part in scanner_version.split(".")) < _SKILLSPECTOR_OCCURRENCE_TRIAGE_VERSION
+            or source_root is None
+        ):
+            return False
+
+        location = issue.get("location")
+        occurrences = issue.get("occurrences")
+        if not isinstance(location, dict) or not isinstance(occurrences, list) or len(occurrences) != 1:
+            return False
+        occurrence = occurrences[0]
+        if not isinstance(occurrence, dict) or any(
+            occurrence.get(field) != location.get(field) for field in ("file", "start_line", "end_line")
+        ):
+            return False
+        file_path = location.get("file")
+        line_number = location.get("start_line")
+        if (
+            not isinstance(file_path, str)
+            or not _is_filesystem_safe_path_text(file_path)
+            or isinstance(line_number, bool)
+            or not isinstance(line_number, int)
+            or location.get("end_line") not in (None, line_number)
+        ):
+            return False
+
+        if file_path not in safe_lines_by_file:
+            safe_lines_by_file[file_path] = SecurityValidator._read_only_passwd_mount_lines(source_root, file_path)
+        return line_number in safe_lines_by_file[file_path]
+
+    @staticmethod
+    def _read_only_passwd_mount_lines(source_root: Path, file_path: str) -> frozenset[int]:
+        """Return lines whose every ``/etc/passwd`` belongs to an exact read-only mount.
+
+        The file is read once, without following links, from beneath the scan
+        root. Unreadable, oversized, non-UTF-8, or out-of-root files yield no
+        lines, which keeps their findings reported.
+        """
+        root = Path(os.path.abspath(source_root))  # noqa: PTH100 - do not follow untrusted path links
+        relative = Path(file_path)
+        try:
+            if relative.is_absolute():
+                relative = relative.relative_to(root)
+            with SecureRoot(root) as secure_root:
+                raw, _metadata = secure_root.read_bytes(relative, _SKILLSPECTOR_PASSWD_MOUNT_SOURCE_LIMIT_BYTES)
+            content = raw.decode("utf-8")
+        except (OSError, SecurePathError, UnicodeError, ValueError):
+            return frozenset()
+
+        mount_path_starts = {
+            volume.start(group)
+            for volume in _READ_ONLY_PASSWD_VOLUME_PATTERN.finditer(content)
+            for group in ("source", "target")
+        }
+        safe_lines = set()
+        offset = 0
+        # str.splitlines() uses the same logical line breaks as SkillSpector's
+        # reported line numbers.
+        for line_number, line in enumerate(content.splitlines(keepends=True), start=1):
+            passwd_starts = [offset + match.start() for match in _PASSWD_PATH_PATTERN.finditer(line)]
+            if passwd_starts and all(start in mount_path_starts for start in passwd_starts):
+                safe_lines.add(line_number)
+            offset += len(line)
+        return frozenset(safe_lines)
 
     @staticmethod
     def _store_skillspector_metadata(data: dict, result: ValidationResult) -> None:

@@ -227,6 +227,11 @@ class ExternalTool:
             self._version = match.group(0) if match else ""
         return self._version or None
 
+    @property
+    def configuration_error(self) -> str | None:
+        """Return why an explicit executable override was rejected, if it was."""
+        return self._configuration_error
+
     def get_install_hint(self) -> str:
         """Get installation hint for this tool."""
         if self._configuration_error:

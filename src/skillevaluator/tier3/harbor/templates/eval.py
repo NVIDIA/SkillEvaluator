@@ -1374,13 +1374,13 @@ def _parse_retry_after(header_value, fallback_delay):
     except ValueError:
         pass
     try:
-        from datetime import UTC, datetime
+        from datetime import datetime, timezone
         from email.utils import parsedate_to_datetime
 
         target = parsedate_to_datetime(clean_val)
         if target.tzinfo is None:
-            target = target.replace(tzinfo=UTC)
-        now = datetime.now(UTC)
+            target = target.replace(tzinfo=timezone.utc)  # noqa: UP017 - datetime.UTC needs Python 3.11; task images may run 3.9
+        now = datetime.now(timezone.utc)  # noqa: UP017
         return max(0.0, (target - now).total_seconds())
     except Exception:
         return fallback_delay

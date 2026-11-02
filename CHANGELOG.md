@@ -210,6 +210,8 @@ All notable changes to SkillEvaluator are documented in this file.
 
 ### Fixed
 
+- Use public, commit-pinned README image URLs so the wordmark and three-tier
+  diagram can render in PyPI package descriptions as well as on GitHub.
 - On Windows, repository root and source-link detection no longer break for
   repositories in non-ASCII folders. Git's repository path is decoded as a file
   name and its remote URL and branch as UTF-8, instead of with the locale code

@@ -221,11 +221,16 @@ private_keys:
 # "score": 0.8603333333333333 in JSON dumps from being misread as 16-digit card
 # numbers (the 16-digit window 8603333333333333 happens to pass Luhn). An
 # underscore next to a space or punctuation, as in Markdown emphasis
-# (_4532015112830366_ or __4532015112830366__), does not hide a card. The
-# classes are ASCII on purpose: Chinese, Japanese, and Korean prose often puts
-# a number directly between letters, and such a card is still reported.
+# (_4532015112830366_ or __4532015112830366__), does not hide a card, and
+# neither does a backslash escape such as \n or \t in a JSON, YAML, or code
+# string, or a percent-encoded byte such as %3D in a URL. The classes are ASCII
+# on purpose: Chinese, Japanese, and Korean prose often puts a number directly
+# between letters, and such a card is still reported. They are scoped
+# case-sensitive with (?-i:...), because the scanner compiles every pattern
+# with IGNORECASE, under which [A-Za-z] also matches non-ASCII letters such as
+# the dotless i and the Kelvin sign.
 credit_cards:
-  - pattern: '(?<![A-Za-z0-9.])(?<![A-Za-z0-9]_)[0-9]{4}[\s-]?[0-9]{4}[\s-]?[0-9]{4}[\s-]?[0-9]{4}(?![A-Za-z0-9])(?!_[A-Za-z0-9])'
+  - pattern: '(?:(?<=\\(?-i:[abfnrtv]))|(?<=%(?-i:[0-9A-Fa-f]{2}))|(?<!(?-i:[A-Za-z0-9.])))(?<!(?-i:[A-Za-z0-9])_)[0-9]{4}[\s-]?[0-9]{4}[\s-]?[0-9]{4}[\s-]?[0-9]{4}(?!(?-i:[A-Za-z0-9]))(?!_(?-i:[A-Za-z0-9]))'
     severity: critical
     description: Possible credit card number
     suggestion: "Remove credit card number - use placeholder like 4111-1111-1111-1111"
@@ -287,11 +292,12 @@ mac_addresses:
 # "0.5, 0.7", scale factors like "1.5, 2.0", etc.) while still flagging genuine
 # location data. The exact-pole forms (90.0 / 180.0) are kept as-is.
 # A match also needs a geospatial cue (GPS, latitude/longitude, lat/lng,
-# latlong/lonlat keys, WGS 84, degrees, a GeoJSON geometry type, a geo: URI, a
-# map link such as google.com/maps or maps.apple.com, or location/office/address)
-# on its line, on one of the two lines before it, or in the file name, so
-# precise vectors, poses, quaternions, calibration values, and waypoints are not
-# reported.
+# latlong/lonlat keys, WGS 84, a GeoJSON geometry type, a geo: URI, a map link
+# such as google.com/maps or maps.apple.com, or location/office/address/degrees,
+# including plural, snake_case, and camelCase forms) on its line, on one of the
+# two lines before it, or in the file name, or must sit inside a GeoJSON
+# geometry's "coordinates" array, so precise vectors, poses, quaternions,
+# calibration values, and waypoints are not reported.
 gps_coordinates:
   - pattern: '[-+]?([1-8]?\d\.\d{4,}|90\.0+)[,\s]+[-+]?(180\.0+|((1[0-7]\d)|([1-9]?\d))\.\d{4,})'
     severity: medium

@@ -5245,6 +5245,13 @@ class TestFalsePositivePrevention:
             ("values.txt", "Pixel coordinates of the office logo\n0.123456, 0.654321\n"),
             ("robotics_coordinates.txt", "Pick location\n0.123456, 0.654321\n"),
             ("mesh.json", '{"type": "Mesh", "coordinates": [0.123456, 0.654321]}\n'),
+            # Degrees describe rotations and joint limits too, so they are a soft cue.
+            (
+                "values.txt",
+                "Rotate the gripper 90 degrees about Y:\nquaternion = [0.707107, 0.000000, 0.707107, 0.000000]\n",
+            ),
+            ("values.txt", "pose (yaw in degrees): 12.345678, 45.678901\n"),
+            ("values.txt", "Joint limits are +/-170\u00b0\nwaypoint = [12.345678, 45.678901]\n"),
         ],
     )
     def test_gps_technical_context_outweighs_soft_location_cue(self, tmp_path: Path, filename: str, contents: str):
@@ -5281,6 +5288,25 @@ class TestFalsePositivePrevention:
             ("values.yaml", "latlon: 37.774929, -122.419416\n"),
             ("values.yaml", "lonlat: -122.419416, 37.774929\n"),
             ("values.yaml", "lnglat: -122.419416, 37.774929\n"),
+            # Plural cue words label lists of locations.
+            ("values.yaml", "locations:\n  - 37.774929, -122.419416\n"),
+            ("values.yaml", "store_locations:\n  - 37.774929, -122.419416\n"),
+            ("values.txt", "Our offices\n37.774929, -122.419416\n"),
+            ("values.txt", "latitudes_longitudes: 37.774929, -122.419416\n"),
+            ("locations.json", "[37.774929, -122.419416]\n"),
+            # camelCase JSON keys carry the same cue words.
+            ("data.json", '{"homeLocation": [37.774929, -122.419416]}\n'),
+            ("data.json", '{"officeAddress": "37.774929, -122.419416"}\n'),
+            ("data.json", '{"gpsCoords": [37.774929, -122.419416]}\n'),
+            ("data.json", '{"lastKnownGps": [37.774929, -122.419416]}\n'),
+            # A strong cue nearby outweighs a technical coordinate label nearby.
+            ("world_coordinates.md", "GPS position of the office:\n37.7749, -122.4194\n"),
+            ("gps_world_coordinates.txt", "37.7749, -122.4194\n"),
+            ("values.txt", "Camera coordinates and GPS position below\n37.7749, -122.4194\n"),
+            # Degrees alone remain a cue when no technical label is present.
+            ("values.txt", "Coordinates in decimal degrees: 37.774929, -122.419416\n"),
+            # Vector labels count only on the pair's own line, so an office cue still applies.
+            ("values.txt", "Robot waypoints near the office:\n0.123456, 0.654321\n"),
         ],
     )
     def test_gps_coordinates_with_geospatial_context_still_flagged(self, tmp_path: Path, filename: str, contents: str):
@@ -5290,6 +5316,47 @@ class TestFalsePositivePrevention:
         result = SecurityValidator().validate_pii_only(tmp_path)
 
         assert any(finding.check_name == "gps_coordinates" for finding in result.findings)
+
+    @pytest.mark.parametrize(
+        ("contents", "expected_lines"),
+        [
+            (
+                '{\n  "type": "Polygon",\n  "coordinates": [\n    [\n      [-122.4194, 37.7749],\n'
+                "      [-122.4094, 37.7849],\n      [-122.3994, 37.7749],\n      [-122.4194, 37.7749]\n"
+                "    ]\n  ]\n}\n",
+                [5, 6, 7, 8],
+            ),
+            (
+                '{\n  "type": "FeatureCollection",\n  "features": [\n    {\n      "type": "Feature",\n'
+                '      "properties": {},\n      "geometry": {\n        "type": "MultiPolygon",\n'
+                '        "coordinates": [\n          [\n            [\n              [-122.4194, 37.7749],\n'
+                "              [-122.4094, 37.7849]\n            ]\n          ]\n        ]\n      }\n    }\n  ]\n}\n",
+                [12, 13],
+            ),
+            # Sorted keys put "type" after "coordinates".
+            (
+                '{\n  "coordinates": [\n    [\n      [\n        [-122.4194, 37.7749],\n'
+                '        [-122.4094, 37.7849]\n      ]\n    ]\n  ],\n  "type": "MultiLineString"\n}\n',
+                [5, 6],
+            ),
+            # A non-geographic "type" does not make its coordinates location data.
+            (
+                '{\n  "type": "Mesh",\n  "coordinates": [\n    [\n      [\n'
+                "        [0.123456, 0.654321],\n        [0.234567, 0.765432]\n      ]\n    ]\n  ]\n}\n",
+                [],
+            ),
+        ],
+    )
+    def test_gps_pretty_printed_geojson_geometry_positions_flagged(
+        self, tmp_path: Path, contents: str, expected_lines: list[int]
+    ):
+        """Every position inside a GeoJSON geometry's coordinates array is cued, however deep it is nested."""
+        geojson_file = tmp_path / "area.json"
+        geojson_file.write_text(contents, encoding="utf-8")
+
+        candidates = SecurityValidator()._scan_file_for_pii(geojson_file)
+
+        assert [item["line"] for item in candidates if item["category"] == "gps_coordinates"] == expected_lines
 
     # --- Phone number false positives ---
 
@@ -5365,6 +5432,11 @@ class TestFalsePositivePrevention:
             "event_timestamp: 1707938736269577",
             '"created_at_epoch": 1707938736269577',
             "file_sha256: 1707938736269577",
+            # Short unit suffixes after epoch and unix_time name microsecond epochs.
+            "epoch_us: 1707938736269577",
+            '"epoch_us": 1707938736269577',
+            "epoch_micros: 1707938736269577",
+            "unix_time_us: 1707938736269577",
         ],
     )
     def test_credit_card_shape_in_timestamp_or_hash_context_not_flagged(self, tmp_path: Path, technical_value: str):
@@ -5391,6 +5463,15 @@ class TestFalsePositivePrevention:
             ("我的卡号是4532015112830366。", "4532015112830366"),
             ("카드번호는4532015112830366입니다", "4532015112830366"),
             ("หมายเลขบัตร4532015112830366", "4532015112830366"),
+            # IGNORECASE must not let the ASCII class match the dotless i or the Kelvin sign.
+            ("Kart numaras\u01314532015112830366", "4532015112830366"),
+            ("Ref \u212a4532015112830366", "4532015112830366"),
+            # A backslash escape or a percent-encoded byte is a separator, not part of a token.
+            ('{"prompt": "Charge this card:\\n4532015112830366\\nExp 12/27"}', "4532015112830366"),
+            ('{"input": "Card\\t4532015112830366"}', "4532015112830366"),
+            ('prompt: "Pay with\\r4532015112830366 now"', "4532015112830366"),
+            ('msg = "Card:\\n4532 0151 1283 0366"', "4532 0151 1283 0366"),
+            ("https://pay.acme.io/charge?q=card%3D4532015112830366", "4532015112830366"),
         ],
     )
     def test_credit_card_next_to_technical_or_test_value_still_flagged(self, tmp_path: Path, contents: str, card: str):

@@ -163,12 +163,10 @@ def validate_inventory_schema(inventory: PluginInventory) -> ValidationResult:
     if not inventory.complete:
         result.mark_scan_incomplete("plugin-inventory")
     result.metadata["plugin"] = {
+        **inventory.metadata(),
         "root": str(inventory.root),
         "manifest_sha256": inventory.manifest_sha256,
         "manifest_declarations": declarations,
-        "component_inventory": inventory.component_inventory(),
-        "mcp": inventory.mcp_summary(),
-        "context_cost": inventory.context_cost(),
     }
     inventory_metadata = result.metadata["plugin"]
     dependencies = dependency_records(inventory)

@@ -27,6 +27,7 @@ from skillevaluator.tier3.plugin_native import (
 
 if TYPE_CHECKING:
     from skillevaluator.evaluation.options import EvaluationOptions
+    from skillevaluator.tier3.plugin_comparisons import ComparisonOptions
     from skillevaluator.tier3.plugin_evidence import EvidenceOptions, RuntimeEvidenceObserver
     from skillevaluator.tier3.plugin_prepare import PreparedRuntimePackage
 
@@ -370,6 +371,7 @@ def evaluate_prepared_plugin(
     publish: Callable[[PrivateRunOutcome], None] | None = None,
     evidence_options: EvidenceOptions | None = None,
     observer_factory: Callable[..., RuntimeEvidenceObserver] | None = None,
+    comparison_options: ComparisonOptions | None = None,
 ) -> PrivateRunOutcome:
     """Evaluate a prepared plugin through the existing engine and remove the operation-owned staging.
 
@@ -392,6 +394,13 @@ def evaluate_prepared_plugin(
     agents = parse_agents(options.agents)
     if load != "wrapper" and not agents:
         raise PluginLoadError("native plugin loading needs explicit agents")
+    if comparison_options is not None:
+        from skillevaluator.tier3.plugin_comparisons import ComparisonOptions, ComparisonRuntime
+
+        if not isinstance(comparison_options, ComparisonOptions):
+            raise ValueError("comparison_options must be private ComparisonOptions")
+        if not agents:
+            raise PluginLoadError("private comparisons need explicit agents")
     decisions = apply_native_refusals(
         load, resolve_plugin_load(load, agents, env_mode=options.env_mode), package.native_source
     )
@@ -405,10 +414,15 @@ def evaluate_prepared_plugin(
         raise
     results_dir = options.results_dir or package.native_source.plugin_root / "evals" / "results"
     hooks = NativeRuntimeHooks(package.native_source, decisions, package=package)
+    comparison_runtime = None
     try:
         hooks.observer = (observer_factory or RuntimeEvidenceObserver)(
             package, wrapper, hooks, evidence_options or EvidenceOptions()
         )
+        if comparison_options is not None:
+            comparison_runtime = ComparisonRuntime(
+                hooks, package, comparison_options, agents, baseline=not options.skip_baseline
+            )
     except BaseException:
         shutil.rmtree(temp, ignore_errors=True)
         raise
@@ -440,6 +454,8 @@ def evaluate_prepared_plugin(
         if hooks.observer is not None:
             observed = hooks.observer.provenance()
             outcome.provenance.update(runtime_evidence=observed, mcp_proof=observed["mcp_proof"])
+        if comparison_runtime is not None:
+            outcome.provenance["private_comparisons"] = comparison_runtime.provenance()
         if publish is not None:
             publish(outcome)
 
@@ -448,7 +464,7 @@ def evaluate_prepared_plugin(
 
     return run_private_evaluation(
         replace(options, skill_path=wrapper.path, results_dir=results_dir),
-        hooks=hooks,
+        hooks=comparison_runtime or hooks,
         provenance=provenance,
         evaluate=evaluate,
         publish=publish_with_evidence,

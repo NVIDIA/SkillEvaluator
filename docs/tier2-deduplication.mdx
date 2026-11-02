@@ -153,6 +153,15 @@ If chat-LLM analysis fails for a candidate cluster, Tier 2 reports the
 incomplete analysis as a blocking error rather than treating the content as
 clean.
 
+The same applies when a skill exceeds a work limit on content that was
+already collected: the content-chunk or comparison-work limit, or a limit on
+the LLM review (candidate clusters, members in one cluster, or prompt size per
+cluster or in total). Tier 2 stops and reports the scan as **INCOMPLETE**, not
+as a duplicate-content finding, with an execution error that names the limit;
+the JSON report records it under `work_limit`. A policy severity override
+cannot turn the incomplete scan into a pass. Split the skill or remove repeated
+material, then rerun.
+
 ## Compare skills across a collection
 
 `similarity-check` recursively discovers skill manifests, embeds each skill's
@@ -345,6 +354,7 @@ handling terms before sending confidential skill content to a hosted endpoint.
     | Skill carries large generated snapshots (`evals`, `.evals`, `results`, `.results`, `versions`, `.versions`) | Excluded directories are pruned during traversal, so their contents never count toward the discovered-path limit |
     | A directory is a Windows junction or other reparse point | Rejected during the walk, like symbolic links |
     | Embedding or chat-LLM analysis is incomplete | Reports an error; does not claim a clean result |
+    | Skill exceeds the content-chunk, comparison-work, or LLM-review limit (candidate clusters, cluster members, or prompt size) | Stops before the remaining analysis and reports the scan as incomplete; no duplicate-content finding is added |
   </Accordion>
   <Accordion title="Inter-skill analysis">
     | Scenario | Behavior |

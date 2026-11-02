@@ -451,6 +451,9 @@ All notable changes to SkillEvaluator are documented in this file.
 
 ### Security
 
+- Refresh locked AnyIO, certifi, and PyJWT dependencies used by source and CI
+  installations, and update Streamlit and Pillow for the optional dashboard.
+  Published package dependency ranges are unchanged.
 - Plugin inventories and findings now redact credentials embedded in declared
   component paths, including invalid or unsafe references, before recording
   their names, locations and metadata.

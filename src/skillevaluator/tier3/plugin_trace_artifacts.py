@@ -14,7 +14,11 @@ from itertools import islice
 from pathlib import Path
 from typing import Any
 
-from skillevaluator.tier3.harbor.collector import _materialized_trial_trajectory, _read_bounded_text
+from skillevaluator.tier3.harbor.collector import (
+    _materialized_trial_trajectory,
+    _read_bounded_text,
+    _safe_trial_path_component,
+)
 from skillevaluator.utils.secure_fs import stat_is_link_or_reparse
 
 
@@ -435,6 +439,63 @@ class TrialTrace:
     call_servers: Mapping[str, str]
 
 
+def _harness_sources(trial_root: Path, trajectory: dict[str, Any] | None) -> list[tuple[Path, dict[str, Any] | None]]:
+    """Partition a materialized native multi-step trajectory by its authorized sources.
+
+    A physical steps layout makes the materializer require authoritative
+    ``step_results`` and reject a root trajectory. Only after that succeeds
+    are its generated step names trusted as sibling harness-log locations.
+    Single-step trajectories cannot select log paths through authored extras.
+    """
+    if trajectory is None or not _is_real_directory(trial_root / "steps"):
+        return [(trial_root, trajectory)]
+    extra = trajectory.get("extra")
+    multi = extra.get("harbor_multi_step") if isinstance(extra, Mapping) else None
+    names = multi.get("step_names") if isinstance(multi, Mapping) else None
+    if not isinstance(names, list) or any(_safe_trial_path_component(name) != name for name in names):
+        return [(trial_root, None)]
+    groups: dict[str, list[Any]] = {name: [] for name in names}
+    for step in trajectory.get("steps", []):
+        extra = step.get("extra") if isinstance(step, Mapping) else None
+        name = extra.get("harbor_step_name") if isinstance(extra, Mapping) else None
+        if name not in groups:
+            return [(trial_root, None)]
+        groups[name].append(step)
+    return [(trial_root / "steps" / name, {**trajectory, "steps": groups[name]}) for name in names]
+
+
+def _scope_harness_call_ids(trajectory: dict[str, Any], prefix: str) -> dict[str, Any]:
+    """Keep independent step sessions' reused call IDs distinct in the merged document."""
+    updated = []
+    for step in trajectory["steps"]:
+        if not isinstance(step, Mapping):
+            updated.append(step)
+            continue
+        scoped = dict(step)
+        calls = step.get("tool_calls")
+        if isinstance(calls, list):
+            scoped["tool_calls"] = [
+                {**call, "tool_call_id": prefix + call["tool_call_id"]}
+                if isinstance(call, Mapping) and isinstance(call.get("tool_call_id"), str)
+                else call
+                for call in calls
+            ]
+        observation = step.get("observation")
+        results = observation.get("results") if isinstance(observation, Mapping) else None
+        if isinstance(results, list):
+            scoped["observation"] = {
+                **observation,
+                "results": [
+                    {**result, "source_call_id": prefix + result["source_call_id"]}
+                    if isinstance(result, Mapping) and isinstance(result.get("source_call_id"), str)
+                    else result
+                    for result in results
+                ],
+            }
+        updated.append(scoped)
+    return {**trajectory, "steps": updated}
+
+
 class TrialTraceArtifacts:
     """Read one whole-trial trajectory and harness logs once per logical root."""
 
@@ -444,8 +505,23 @@ class TrialTraceArtifacts:
     def trace(self, trial_root: Path) -> TrialTrace:
         if trial_root not in self._traces:
             trajectory = _plugin_signal_trajectory(trial_root)
-            servers, statuses = _codex_mcp_calls(trial_root, trajectory)
-            errors = _opencode_call_errors(trial_root)
-            statuses.update(dict.fromkeys(errors, "error"))
-            self._traces[trial_root] = TrialTrace(_with_harness_statuses(trajectory, statuses, errors), servers)
+            sources = _harness_sources(trial_root, trajectory)
+            servers, steps = {}, []
+            for index, (source_root, source) in enumerate(sources):
+                if source is None:
+                    trajectory = None
+                    break
+                local_servers, statuses = _codex_mcp_calls(source_root, source)
+                errors = _opencode_call_errors(source_root)
+                statuses.update(dict.fromkeys(errors, "error"))
+                marked = _with_harness_statuses(source, statuses, errors)
+                if source_root != trial_root:
+                    prefix = f"harbor-step:{index}:"
+                    marked = _scope_harness_call_ids(marked, prefix)
+                    local_servers = {prefix + call_id: server for call_id, server in local_servers.items()}
+                servers.update(local_servers)
+                steps.extend(marked["steps"])
+            if trajectory is not None:
+                trajectory = {**trajectory, "steps": steps}
+            self._traces[trial_root] = TrialTrace(trajectory, servers)
         return self._traces[trial_root]

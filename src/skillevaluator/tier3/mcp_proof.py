@@ -425,16 +425,17 @@ def _capped_client(
     max_bytes: int,
     connect_timeout: float,
     read_timeout: float,
-    on_too_large: Callable[[str], None] | None = None,
+    on_failure: Callable[[str], None] | None = None,
 ):
     """An httpx client that never follows redirects, ignores proxy/.netrc settings, and caps bodies.
 
     Its TCP connections go only to ``addresses`` (the endpoint policy's checked
     addresses) and only for ``url``'s host and port. TLS still verifies the
     certificate against the host name, and requests keep their ``Host`` header.
-    A body over ``max_bytes`` raises, and ``on_too_large`` is told first: the
-    ``mcp`` client catches that error and would otherwise wait for a reply
-    until the total timeout.
+    Responses must use identity encoding so HTTPX cannot inflate a compressed
+    body above the byte cap. An unsafe response raises, and ``on_failure`` is
+    told first: the ``mcp`` client catches transport errors and would otherwise
+    wait for a reply until the total timeout.
     """
     import httpcore
     import httpx
@@ -472,7 +473,7 @@ def _capped_client(
         async def sleep(self, seconds: float) -> None:
             await self._inner.sleep(seconds)
 
-    class _ResponseTooLarge(httpx.HTTPError):
+    class _ResponseRefused(httpx.HTTPError):
         pass
 
     class _CappedStream(httpx.AsyncByteStream):
@@ -485,9 +486,9 @@ def _capped_client(
                 total += len(chunk)
                 if total > max_bytes:
                     message = f"response exceeded {max_bytes} bytes"
-                    if on_too_large is not None:
-                        on_too_large(message)
-                    raise _ResponseTooLarge(message)
+                    if on_failure is not None:
+                        on_failure(message)
+                    raise _ResponseRefused(message)
                 yield chunk
 
         async def aclose(self) -> None:
@@ -507,7 +508,16 @@ def _capped_client(
             )
 
         async def handle_async_request(self, request: httpx.Request) -> httpx.Response:
+            request.headers["Accept-Encoding"] = "identity"
             response = await self._inner.handle_async_request(request)
+            encoding = response.headers.get("content-encoding", "identity").strip().casefold()
+            if encoding != "identity":
+                # Inspect headers before exposing the stream to HTTPX's decoder.
+                await response.aclose()
+                message = "response content encoding must be identity"
+                if on_failure is not None:
+                    on_failure(message)
+                raise _ResponseRefused(message)
             return httpx.Response(
                 status_code=response.status_code,
                 headers=response.headers,
@@ -518,8 +528,10 @@ def _capped_client(
         async def aclose(self) -> None:
             await self._inner.aclose()
 
+    client_headers = httpx.Headers(headers)
+    client_headers["Accept-Encoding"] = "identity"
     return httpx.AsyncClient(
-        headers=headers,
+        headers=client_headers,
         timeout=httpx.Timeout(read_timeout, connect=connect_timeout),
         follow_redirects=False,
         trust_env=False,
@@ -617,7 +629,7 @@ async def _probe_session(
             max_bytes=MAX_RESPONSE_BYTES,
             connect_timeout=CONNECT_TIMEOUT_S,
             read_timeout=READ_TIMEOUT_S,
-            on_too_large=abort.fail,
+            on_failure=abort.fail,
         )
 
     listed: Any = None
@@ -803,19 +815,19 @@ MCP_LOAD_KEY = "mcp_load"
 
 def _census_load(
     engine_result: Mapping[str, Any] | None,
-) -> tuple[set[str], dict[str, str], dict[str, tuple[int, int]]]:
+) -> tuple[set[str], dict[str, str], dict[str, tuple[int, int, int]]]:
     """What the load census says about each MCP server, over every agent.
 
     Returns ``(servers some agent's harness loaded in every trial, server ->
     why an agent did not load it in some trial, server -> (trials that loaded
-    or listed it, trials whose census said either way))``. The census summary
+    it, trials whose census said either way, trials with unknown load state))``. The census summary
     keeps a component's weakest trial, so one flaky trial puts a server in
     ``not_loaded``; the per-trial counts (the with-plugin arm's ``mcp_load``
     tally) tell a flaky load from a server that never loaded.
     """
     loaded: set[str] = set()
     not_loaded: dict[str, str] = {}
-    trials: dict[str, tuple[int, int]] = {}
+    trials: dict[str, tuple[int, int, int]] = {}
     agents = engine_result.get("agents") if isinstance(engine_result, Mapping) else None
     for agent_name, agent in agents.items() if isinstance(agents, Mapping) else ():
         if not isinstance(agent, Mapping):
@@ -835,12 +847,13 @@ def _census_load(
         for server, counts in tally.items() if isinstance(tally, Mapping) else ():
             if not isinstance(server, str) or not isinstance(counts, Mapping):
                 continue
-            found, seen = counts.get("loaded"), counts.get("trials")
-            if not all(isinstance(value, int) and not isinstance(value, bool) for value in (found, seen)):
+            # Historical tallies omitted unknown and described only known load states.
+            found, seen, unknown = counts.get("loaded"), counts.get("trials"), counts.get("unknown", 0)
+            if not all(isinstance(value, int) and not isinstance(value, bool) for value in (found, seen, unknown)):
                 continue
-            if 0 <= found <= seen:
-                before = trials.get(server, (0, 0))
-                trials[server] = (before[0] + found, before[1] + seen)
+            if 0 <= found <= seen and unknown >= 0:
+                before = trials.get(server, (0, 0, 0))
+                trials[server] = (before[0] + found, before[1] + seen, before[2] + unknown)
     return loaded, not_loaded, trials
 
 
@@ -891,13 +904,13 @@ def apply_in_agent_mcp_proof(mcp_proof: Mapping[str, Any], engine_result: Mappin
         server = str(name)
         counts = calls.get(server) or dict.fromkeys(_COUNT_KEYS, 0)
         status = entry.get("status")
-        found, seen = load_trials.get(server, (0, 0))
+        found, seen, unknown = load_trials.get(server, (0, 0, 0))
         missed_some = status in _AGENT_REPLACEABLE and server in not_loaded and server not in loaded
         if counts["succeeded"] > 0:
             if status != STATUS_USED_SUCCESSFULLY:
                 entry["status"] = STATUS_USED_SUCCESSFULLY
                 entry["detail"] = _with_host_detail(_calls_detail(counts), entry)
-        elif missed_some and found == 0:
+        elif missed_some and found == 0 and unknown == 0:
             agent_detail = f"not loaded in the with-plugin arm ({not_loaded[server]})"
             if counts["total"]:
                 agent_detail = f"{agent_detail}; {_calls_detail(counts)}"
@@ -911,6 +924,8 @@ def apply_in_agent_mcp_proof(mcp_proof: Mapping[str, Any], engine_result: Mappin
                 if missed
                 else f"not loaded in a with-plugin trial that was not scored ({not_loaded[server]})"
             )
+            if unknown:
+                note += f"; {unknown} with-plugin trial(s) have unknown load state"
             if counts["total"] > 0:
                 entry["status"] = STATUS_CALLED_NO_SUCCESS
                 note = f"{_calls_detail(counts)}; {note}"

@@ -1237,6 +1237,53 @@ print(json.dumps([finding.metadata["matched_value"] for finding in result.findin
         assert any("exit code 2" in error for error in result.errors)
         assert not any(detail.check_name == "skillspector" for detail in result.success_details)
 
+    @pytest.mark.parametrize("use_llm", [False, True], ids=["static", "llm"])
+    @pytest.mark.parametrize(
+        ("elapsed_seconds", "completed"),
+        [(364.404, True), (1080, True), (1201, False)],
+        ids=["reported-skill", "workflow-budget", "over-stage-budget"],
+    )
+    def test_skillspector_stage_timeout_allows_workflow_but_remains_bounded(
+        self,
+        monkeypatch,
+        sample_skill_dir: Path,
+        use_llm: bool,
+        elapsed_seconds: float,
+        completed: bool,
+    ) -> None:
+        """A completed scan must survive the wrapper through the 1,080-second workflow budget."""
+        monkeypatch.delenv("SKILLEVALUATOR_SKILLSPECTOR_TIMEOUT_SECONDS", raising=False)
+        monkeypatch.delenv("SKILLSPECTOR_MAX_WORKFLOW_SECONDS", raising=False)
+        monkeypatch.setenv("SKILL_EVAL_LLM_PROVIDER", "openai")
+        monkeypatch.setenv("OPENAI_API_KEY", "provider-test-key")
+        monkeypatch.setenv("SKILLSPECTOR_MODEL", "gpt-5.4")
+        monkeypatch.delenv("SKILLSPECTOR_PROVIDER", raising=False)
+
+        def complete_scan(command, *, timeout, **_kwargs):
+            is_llm = "--no-llm" not in command
+            # Only the stage under test is slow; an LLM run first completes its static scan.
+            stage_seconds = elapsed_seconds if is_llm == use_llm else 1
+            if stage_seconds >= timeout:
+                raise subprocess.TimeoutExpired(command, timeout)
+            report = _skillspector_json_report(llm_requested=is_llm, llm_available=is_llm)
+            return subprocess.CompletedProcess(command, 0, stdout=json.dumps(report), stderr="")
+
+        with (
+            patch.object(Tools.skillspector, "_path", "/usr/bin/skillspector"),
+            patch("skillevaluator.utils.tool_runner.subprocess.run", side_effect=complete_scan),
+        ):
+            result = SecurityValidator(use_llm=use_llm).validate_security_only(sample_skill_dir)
+
+        if completed:
+            assert result.passed, result.errors
+            assert not result.is_incomplete
+            if use_llm:
+                assert result.metadata["skillspector_model"] == "gpt-5.4"
+        else:
+            assert result.is_incomplete
+            assert result.incomplete_scans == ["skillspector-llm" if use_llm else "skillspector"]
+            assert any("timed out" in error for error in result.errors)
+
     @patch("skillevaluator.validators.security.Tools")
     def test_skillspector_runner_failure_fails_closed(self, mock_tools, sample_skill_dir: Path):
         """A timeout or launch failure cannot become a warning-only clean scan."""

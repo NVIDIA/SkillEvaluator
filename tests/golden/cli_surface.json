@@ -271,6 +271,37 @@
     "doctor": {
       "params": [
         {
+          "choices": [
+            "1",
+            "2",
+            "3",
+            "all"
+          ],
+          "default": "3",
+          "name": "tier",
+          "opts": [
+            "--tier"
+          ],
+          "param_type": "option"
+        },
+        {
+          "name": "checks",
+          "opts": [
+            "--checks"
+          ],
+          "param_type": "option",
+          "type": "text"
+        },
+        {
+          "default": "60.0",
+          "name": "timeout",
+          "opts": [
+            "--timeout"
+          ],
+          "param_type": "option",
+          "type": "float range"
+        },
+        {
           "name": "agents",
           "opts": [
             "--agents",
@@ -479,6 +510,14 @@
           "type": "integer"
         },
         {
+          "name": "max_cases",
+          "opts": [
+            "--max-cases"
+          ],
+          "param_type": "option",
+          "type": "integer range"
+        },
+        {
           "name": "model",
           "opts": [
             "--model"
@@ -675,6 +714,37 @@
     },
     "health-check": {
       "params": [
+        {
+          "choices": [
+            "1",
+            "2",
+            "3",
+            "all"
+          ],
+          "default": "3",
+          "name": "tier",
+          "opts": [
+            "--tier"
+          ],
+          "param_type": "option"
+        },
+        {
+          "name": "checks",
+          "opts": [
+            "--checks"
+          ],
+          "param_type": "option",
+          "type": "text"
+        },
+        {
+          "default": "60.0",
+          "name": "timeout",
+          "opts": [
+            "--timeout"
+          ],
+          "param_type": "option",
+          "type": "float range"
+        },
         {
           "name": "agents",
           "opts": [
@@ -2383,6 +2453,14 @@
               "type": "integer"
             },
             {
+              "name": "max_cases",
+              "opts": [
+                "--max-cases"
+              ],
+              "param_type": "option",
+              "type": "integer range"
+            },
+            {
               "name": "model",
               "opts": [
                 "--model"
@@ -2966,6 +3044,14 @@
             "type": "integer"
           },
           {
+            "name": "max_cases",
+            "opts": [
+              "--max-cases"
+            ],
+            "param_type": "option",
+            "type": "integer range"
+          },
+          {
             "name": "model",
             "opts": [
               "--model"
@@ -3463,6 +3549,14 @@
           ],
           "param_type": "option",
           "type": "integer"
+        },
+        {
+          "name": "max_cases",
+          "opts": [
+            "--max-cases"
+          ],
+          "param_type": "option",
+          "type": "integer range"
         },
         {
           "name": "n_attempts",

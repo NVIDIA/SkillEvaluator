@@ -17,6 +17,7 @@ from pathlib import Path
 from skillevaluator.constants import (
     CONTENT_DEDUP_EMBEDDING_BATCH_SIZE,
     CONTENT_DEDUP_LLM_REASONING_EFFORT,
+    CONTENT_DEDUP_LLM_REFUSED_CHECK,
     CONTENT_DEDUP_MAX_CHUNKS,
     CONTENT_DEDUP_MAX_LLM_CLUSTERS,
     CONTENT_DEDUP_SIMILARITY_THRESHOLD,
@@ -32,7 +33,7 @@ from skillevaluator.deduplication.intra_skill.semantic_clustering import Content
 from skillevaluator.deduplication.utils.chunker import ContentChunk, chunk_file
 from skillevaluator.deduplication.utils.skill_collector import CollectedFile, SkillCollectionError, collect_files
 from skillevaluator.embedding.client import EmbeddingClient, SimilarityConfigError, validate_embedding_vector
-from skillevaluator.inference import LLMClient, LLMClientError
+from skillevaluator.inference import LLMClient, LLMClientError, LLMClientRefusedError
 from skillevaluator.inference.diagnostics import llm_failure_diagnostic, safe_llm_labels
 from skillevaluator.models.result import Finding, Severity, ValidationResult
 from skillevaluator.utils.tier2_paths import safe_path_label
@@ -49,6 +50,9 @@ CONTENT_DEDUP_MAX_SCALAR_COMPARISONS = 25_000_000
 CONTENT_DEDUP_MAX_CLUSTER_MEMBERS = 64
 CONTENT_DEDUP_MAX_LLM_PROMPT_CHARS = 64_000
 CONTENT_DEDUP_MAX_TOTAL_LLM_PROMPT_CHARS = 1_000_000
+
+# Scan label recorded when a work limit stops duplicate analysis early.
+_WORK_LIMIT_SCAN = "context-deduplication"
 
 
 def _is_comment_or_config_line(line: str) -> bool:
@@ -93,6 +97,25 @@ def _is_trivial_intra_file_duplicate(cluster: ContentCluster) -> bool:
     return all(_chunk_is_short_config(member) for member in cluster.members)
 
 
+def _mark_work_limit_incomplete(
+    result: ValidationResult,
+    check_name: str,
+    message: str,
+    suggestion: str,
+    **details: object,
+) -> None:
+    """Record a tripped work limit as incomplete coverage, not a duplicate finding.
+
+    The scan stopped before duplicate analysis finished, so it can neither
+    report nor rule out duplicated content. A finding would misreport the skill
+    and could be waived by a policy severity override; the incomplete status
+    cannot. ``metadata["work_limit"]`` keeps the limit for JSON reports.
+    """
+    result.mark_scan_incomplete(_WORK_LIMIT_SCAN)
+    result.metadata["work_limit"] = {"check_name": check_name, **details}
+    result.add_error(f"Tier 2 scan incomplete: {message} {suggestion}")
+
+
 class IntraSkillValidator(ValidatorBase):
     """Detect redundant content within a skill directory."""
 
@@ -134,7 +157,6 @@ class IntraSkillValidator(ValidatorBase):
 
     def validate(self, skill_path: Path, *, _collected_files: list[CollectedFile] | None = None) -> ValidationResult:
         """Run context deduplication on a single skill directory."""
-        report_path = skill_path.name or "."
         result = ValidationResult(
             validator_name=self.name,
             validator_description=self.description,
@@ -175,16 +197,15 @@ class IntraSkillValidator(ValidatorBase):
             file_chunks = chunk_file(f)
             prospective_count = len(all_chunks) + len(file_chunks)
             if prospective_count > CONTENT_DEDUP_MAX_CHUNKS:
-                result.add_finding(
-                    Finding(
-                        category="CONTENT_DEDUP",
-                        severity=Severity.CRITICAL,
-                        check_name="chunk_count_limit",
-                        message=f"Tier 2 produced more than {CONTENT_DEDUP_MAX_CHUNKS} content chunks.",
-                        file_path=f.rel_path,
-                        suggestion="Reduce or split the skill content before running Tier 2.",
-                        metadata={"actual": prospective_count, "limit": CONTENT_DEDUP_MAX_CHUNKS},
-                    )
+                _mark_work_limit_incomplete(
+                    result,
+                    "chunk_count_limit",
+                    f"the skill produced more than {CONTENT_DEDUP_MAX_CHUNKS} content chunks "
+                    f"(the limit was reached in {f.rel_path}).",
+                    "Reduce or split the skill content before running Tier 2.",
+                    file_path=f.rel_path,
+                    actual=prospective_count,
+                    limit=CONTENT_DEDUP_MAX_CHUNKS,
                 )
                 return result
             all_chunks.extend(file_chunks)
@@ -222,21 +243,15 @@ class IntraSkillValidator(ValidatorBase):
                 # excess pairwise work before requesting another provider batch.
                 scalar_work = pair_count * (vector_dimension or 0)
                 if scalar_work > self._max_scalar_comparisons:
-                    result.add_finding(
-                        Finding(
-                            category="CONTENT_DEDUP",
-                            severity=Severity.CRITICAL,
-                            check_name="scalar_comparison_limit",
-                            message=f"Tier 2 scalar comparison work exceeds the configured limit ({self._max_scalar_comparisons}).",
-                            file_path=report_path,
-                            suggestion="Reduce or split the skill content before running Tier 2.",
-                            metadata={
-                                "pair_count": pair_count,
-                                "vector_dimension": vector_dimension,
-                                "scalar_work": scalar_work,
-                                "limit": self._max_scalar_comparisons,
-                            },
-                        )
+                    _mark_work_limit_incomplete(
+                        result,
+                        "scalar_comparison_limit",
+                        f"scalar comparison work of {scalar_work} exceeds the limit of {self._max_scalar_comparisons}.",
+                        "Reduce or split the skill content before running Tier 2.",
+                        pair_count=pair_count,
+                        vector_dimension=vector_dimension,
+                        scalar_work=scalar_work,
+                        limit=self._max_scalar_comparisons,
                     )
                     return result
 
@@ -253,16 +268,14 @@ class IntraSkillValidator(ValidatorBase):
         logger.info("Found %d cluster(s)", len(clusters))
 
         if len(clusters) > self._max_llm_clusters:
-            result.add_finding(
-                Finding(
-                    category="CONTENT_DEDUP",
-                    severity=Severity.CRITICAL,
-                    check_name="llm_cluster_count_limit",
-                    message=f"Tier 2 found more than {self._max_llm_clusters} clusters requiring LLM review.",
-                    file_path=report_path,
-                    suggestion="Reduce duplicated content or split the skill before rerunning Tier 2.",
-                    metadata={"actual": len(clusters), "limit": self._max_llm_clusters},
-                )
+            _mark_work_limit_incomplete(
+                result,
+                "llm_cluster_count_limit",
+                f"{len(clusters)} content clusters require LLM review, more than the limit of "
+                f"{self._max_llm_clusters}.",
+                "Reduce duplicated content or split the skill before rerunning Tier 2.",
+                actual=len(clusters),
+                limit=self._max_llm_clusters,
             )
             return result
 
@@ -278,21 +291,34 @@ class IntraSkillValidator(ValidatorBase):
             prompt_chars = len(SYSTEM_PROMPT) + len(build_user_prompt(cluster))
             total_prompt_chars += prompt_chars
             limits = (
-                (len(cluster.members), CONTENT_DEDUP_MAX_CLUSTER_MEMBERS, "llm_cluster_member_limit"),
-                (prompt_chars, CONTENT_DEDUP_MAX_LLM_PROMPT_CHARS, "llm_prompt_size_limit"),
-                (total_prompt_chars, self._max_total_prompt_chars, "llm_total_prompt_size_limit"),
+                (
+                    len(cluster.members),
+                    CONTENT_DEDUP_MAX_CLUSTER_MEMBERS,
+                    "llm_cluster_member_limit",
+                    "a content cluster has {actual} members, more than the limit of {limit} for LLM review.",
+                ),
+                (
+                    prompt_chars,
+                    CONTENT_DEDUP_MAX_LLM_PROMPT_CHARS,
+                    "llm_prompt_size_limit",
+                    "an LLM review prompt of {actual} characters exceeds the limit of {limit}.",
+                ),
+                (
+                    total_prompt_chars,
+                    self._max_total_prompt_chars,
+                    "llm_total_prompt_size_limit",
+                    "LLM review prompts total {actual} characters, more than the limit of {limit}.",
+                ),
             )
-            for actual, limit, check in limits:
+            for actual, limit, check, message in limits:
                 if actual > limit:
-                    result.add_finding(
-                        Finding(
-                            "CONTENT_DEDUP",
-                            Severity.CRITICAL,
-                            check,
-                            "Tier 2 LLM review exceeds a bounded work limit.",
-                            file_path=report_path,
-                            metadata={"actual": actual, "limit": limit},
-                        )
+                    _mark_work_limit_incomplete(
+                        result,
+                        check,
+                        message.format(actual=actual, limit=limit),
+                        "Reduce duplicated content or split the skill before rerunning Tier 2.",
+                        actual=actual,
+                        limit=limit,
                     )
                     return result
 
@@ -317,6 +343,11 @@ class IntraSkillValidator(ValidatorBase):
                 verdict = analyze_cluster(llm, cluster)
                 logger.info("  [thread] Verdict: %s (confidence: %.2f)", verdict.verdict, verdict.confidence)
                 return (cluster, verdict, None)
+            except LLMClientRefusedError:
+                # The model declined to classify this content. That says nothing
+                # about duplication and the same model usually refuses again, so
+                # it carries neither a verdict nor a failure diagnostic.
+                return (cluster, None, None)
             except Exception as exc:
                 # A provider exception or malformed model response is missing
                 # evidence, not a duplicate-content finding. Never log raw bodies.
@@ -332,14 +363,25 @@ class IntraSkillValidator(ValidatorBase):
 
         failures = Counter(diagnostic for _, _, diagnostic in cluster_results if diagnostic is not None)
         failed_count = sum(failures.values())
+        refused_count = sum(1 for _, verdict, diagnostic in cluster_results if verdict is None and diagnostic is None)
         result.metadata["llm_analysis"] = {
             "provider": provider,
             "model": model,
             "clusters_total": len(clusters),
-            "clusters_completed": len(clusters) - failed_count,
+            "clusters_completed": len(clusters) - failed_count - refused_count,
+            "clusters_refused": refused_count,
             "clusters_failed": failed_count,
             "failures": [{"count": count, "diagnostic": diagnostic} for diagnostic, count in sorted(failures.items())],
         }
+        if refused_count:
+            logger.warning(
+                "LLM declined to classify %d of %d content clusters (provider: %s; model: %s); "
+                "reported as advisory findings.",
+                refused_count,
+                len(clusters),
+                provider,
+                model,
+            )
         if failures:
             result.mark_scan_incomplete("deduplication-llm")
             summary = (
@@ -351,8 +393,39 @@ class IntraSkillValidator(ValidatorBase):
             logger.error("%s %s", summary, details)
 
         # Process results
-        for cluster, verdict, _ in cluster_results:
+        for cluster, verdict, diagnostic in cluster_results:
+            if diagnostic is not None:
+                continue
+
+            distinct_files = sorted({c.source_file for c in cluster.members})
+
+            locations = []
+            for c in cluster.members:
+                locations.append(f'"{c.heading}" in {c.source_file} (lines {c.start_line}-{c.end_line})')
+            location_text = "\n  vs ".join(locations)
+            if len(distinct_files) == 1:
+                scope = f"within {distinct_files[0]}"
+            else:
+                scope = f"across {' and '.join(distinct_files)}"
+
             if verdict is None:
+                # Report the refused overlap so the author can review it, but
+                # as an advisory: it is not evidence of duplicate content.
+                result.add_finding(
+                    Finding(
+                        category="CONTENT_DEDUP",
+                        severity=Severity.MEDIUM,
+                        check_name=CONTENT_DEDUP_LLM_REFUSED_CHECK,
+                        message=f"The LLM declined to classify overlapping content {scope}:\n  {location_text}",
+                        file_path=cluster.members[0].source_file,
+                        line_number=cluster.members[0].start_line,
+                        suggestion=(
+                            "Review this overlap manually, or rerun Tier 2 with another chat model "
+                            "(--llm-model or SKILL_EVAL_LLM_MODEL)."
+                        ),
+                        metadata={"source_files": distinct_files, "llm_provider": provider, "llm_model": model},
+                    )
+                )
                 continue
 
             severity = verdict_to_severity(verdict)
@@ -369,25 +442,12 @@ class IntraSkillValidator(ValidatorBase):
             if severity in (Severity.HIGH, Severity.MEDIUM) and _is_trivial_intra_file_duplicate(cluster):
                 severity = Severity.LOW
 
-            distinct_files = sorted({c.source_file for c in cluster.members})
-
-            locations = []
-            for c in cluster.members:
-                locations.append(f'"{c.heading}" in {c.source_file} (lines {c.start_line}-{c.end_line})')
-            location_text = "\n  vs ".join(locations)
-
-            if len(distinct_files) == 1:
-                message = f"Duplicate content found within {distinct_files[0]}:\n  {location_text}"
-            else:
-                files_str = " and ".join(distinct_files)
-                message = f"Duplicate content found across {files_str}:\n  {location_text}"
-
             result.add_finding(
                 Finding(
                     category=verdict.verdict,
                     severity=severity,
                     check_name=verdict.verdict.lower(),
-                    message=message,
+                    message=f"Duplicate content found {scope}:\n  {location_text}",
                     file_path=cluster.members[0].source_file,
                     line_number=cluster.members[0].start_line,
                     suggestion=verdict.suggestion,

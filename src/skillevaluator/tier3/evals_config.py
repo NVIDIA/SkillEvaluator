@@ -43,6 +43,7 @@ _HARBOR_KEYS = {
     "stop_on_pass",
     "n_concurrent",
     "max_agents",
+    "max_cases",
     "timeout_multiplier",
     "agent_runtime_preflight",
     "agent_workdir",
@@ -209,6 +210,8 @@ def _validate_config(raw: dict[str, Any], config_path: Path) -> dict[str, Any]:
             harbor["n_concurrent"] = _int_at_least(harbor_raw["n_concurrent"], 1, config_path, "harbor.n_concurrent")
         if "max_agents" in harbor_raw:
             harbor["max_agents"] = _int_at_least(harbor_raw["max_agents"], 1, config_path, "harbor.max_agents")
+        if "max_cases" in harbor_raw:
+            harbor["max_cases"] = _int_at_least(harbor_raw["max_cases"], 1, config_path, "harbor.max_cases")
         if "timeout_multiplier" in harbor_raw:
             harbor["timeout_multiplier"] = _float_greater_than(
                 harbor_raw["timeout_multiplier"],

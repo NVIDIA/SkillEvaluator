@@ -46,6 +46,7 @@ from skillevaluator.provider_config import (
     resolve_llm_provider,
     skillspector_reasoning_effort,
 )
+from skillevaluator.skillspector_provenance import sanitize_skillspector_llm_provenance
 from skillevaluator.spdx import is_spdx_only_html_comment
 from skillevaluator.utils.path_security import matches_filesystem_name
 from skillevaluator.utils.tool_runner import Tools, parse_json_output
@@ -58,6 +59,14 @@ from skillevaluator.validators.base import (
 )
 
 logger = get_logger(__name__)
+
+# Watchdog for each SkillSpector subprocess. The default stays above
+# SkillSpector's own workflow deadline (1,080 seconds in v2.13.3) so that deadline, not a kill,
+# normally ends a slow scan. The cap keeps the value inside the range that
+# subprocess waits accept on every platform.
+_DEFAULT_SKILLSPECTOR_TIMEOUT_SECONDS = 1200
+_MAX_SKILLSPECTOR_TIMEOUT_SECONDS = 86400
+_SKILLSPECTOR_TIMEOUT_ENV = "SKILLEVALUATOR_SKILLSPECTOR_TIMEOUT_SECONDS"
 
 _AUTHOR_IDENTITY_RE = re.compile(r"^\S[^<>\n]* <(?P<email>[^<>@\s]+@[^<>\s]+)>$")
 _SKILLSPECTOR_POLICY_EXIT_CODES = frozenset({0, 1})
@@ -151,7 +160,9 @@ _SKILLSPECTOR_SCAN_EXCLUDED_DIRS = SCAN_EXCLUDED_DIRS - {"__pycache__"}
 _SKILLSPECTOR_PROVIDER_MAP = {
     "anthropic": "anthropic",
     "bedrock": "bedrock",
-    "nv_build": "openai",
+    # SkillSpector's nv_build registry holds the Build models' output caps; with
+    # no nv_build credential in the child, its requests use the OPENAI_* fallback.
+    "nv_build": "nv_build",
     "openai": "openai",
     "openai-compatible": "openai",
 }
@@ -165,6 +176,8 @@ _SKILLSPECTOR_PROCESS_ENV_NAMES = frozenset(
         "PATH",
         "PATHEXT",
         "REQUESTS_CA_BUNDLE",
+        # SkillSpector's own workflow deadline, raised together with the watchdog.
+        "SKILLSPECTOR_MAX_WORKFLOW_SECONDS",
         "SSL_CERT_DIR",
         "SSL_CERT_FILE",
         "SYSTEMROOT",
@@ -381,8 +394,47 @@ def _skillspector_llm_stderr_failed(stderr: str) -> bool:
     return any(marker in normalized for marker in _SKILLSPECTOR_LLM_FAILURE_MARKERS)
 
 
+def _skillspector_report_llm_provenance(report: object) -> dict | None:
+    """Return the validated ``metadata.llm_provenance`` of a SkillSpector JSON report, if any."""
+    if not isinstance(report, Mapping):
+        return None
+    metadata = report.get("metadata")
+    if not isinstance(metadata, Mapping):
+        return None
+    return sanitize_skillspector_llm_provenance(metadata.get("llm_provenance"))
+
+
 def _copy_selected_environment(environ: Mapping[str, str], names: Iterable[str]) -> dict[str, str]:
     return {name: environ[name] for name in names if environ.get(name, "").strip()}
+
+
+def _skillspector_timeout_seconds(environ: Mapping[str, str] | None = None) -> int:
+    """Return the SkillSpector subprocess watchdog configured by the operator."""
+    source = os.environ if environ is None else environ
+    raw = source.get(_SKILLSPECTOR_TIMEOUT_ENV, "").strip()
+    if not raw:
+        return _DEFAULT_SKILLSPECTOR_TIMEOUT_SECONDS
+    try:
+        timeout: int | None = int(raw)
+    except ValueError:
+        timeout = None
+    if timeout is None or timeout <= 0:
+        logger.warning(
+            "Ignoring %s=%r: expected a positive integer number of seconds; using %ss",
+            _SKILLSPECTOR_TIMEOUT_ENV,
+            raw,
+            _DEFAULT_SKILLSPECTOR_TIMEOUT_SECONDS,
+        )
+        return _DEFAULT_SKILLSPECTOR_TIMEOUT_SECONDS
+    if timeout > _MAX_SKILLSPECTOR_TIMEOUT_SECONDS:
+        logger.warning(
+            "Capping %s=%r at %ss",
+            _SKILLSPECTOR_TIMEOUT_ENV,
+            raw,
+            _MAX_SKILLSPECTOR_TIMEOUT_SECONDS,
+        )
+        return _MAX_SKILLSPECTOR_TIMEOUT_SECONDS
+    return timeout
 
 
 def _skillspector_process_env(environ: Mapping[str, str] | None = None) -> dict[str, str]:
@@ -402,8 +454,14 @@ def _skillspector_operator_env(environ: Mapping[str, str]) -> dict[str, str]:
     )
 
 
-def _skillspector_provider_env() -> dict[str, str]:
-    """Map public provider settings into an invocation-scoped SkillSpector environment."""
+def _skillspector_provider_env() -> tuple[dict[str, str], str | None]:
+    """Map public provider settings into an invocation-scoped SkillSpector environment.
+
+    Also returns the SkillEvaluator provider the bridge resolved. It is ``None``
+    when ``SKILLSPECTOR_PROVIDER`` selects a SkillSpector adapter directly or
+    names an unsupported provider, and when no provider resolves.
+    ``SKILLSPECTOR_PROVIDER=nv_build`` is bridged and returns ``nv_build``.
+    """
     source = os.environ
     child_env = _skillspector_process_env(source)
     child_env.update(_skillspector_operator_env(source))
@@ -418,14 +476,14 @@ def _skillspector_provider_env() -> dict[str, str]:
             child_env.update(
                 _copy_selected_environment(source, _SKILLSPECTOR_EXPLICIT_PROVIDER_ENV[skillspector_provider])
             )
-            return child_env
+            return child_env, None
         if skillspector_provider != "nv_build":
             # Unsupported/private providers fail closed through the generic
             # public path without receiving any provider credential.
             child_env["SKILLSPECTOR_PROVIDER"] = "openai"
             if skillspector_model:
                 child_env["SKILLSPECTOR_MODEL"] = skillspector_model
-            return child_env
+            return child_env, None
 
     try:
         resolution_env = dict(source)
@@ -435,11 +493,11 @@ def _skillspector_provider_env() -> dict[str, str]:
                 resolution_env["SKILL_EVAL_LLM_MODEL"] = skillspector_model
         provider = resolve_llm_provider(resolution_env)
     except ProviderConfigurationError:
-        return child_env
+        return child_env, None
 
     mapped_provider = _SKILLSPECTOR_PROVIDER_MAP.get(provider.provider)
     if mapped_provider is None:
-        return child_env
+        return child_env, None
 
     child_env["SKILLSPECTOR_PROVIDER"] = mapped_provider
     # An explicit SKILL_EVAL_LLM_MODEL reaches SkillSpector; the chat default does not.
@@ -457,7 +515,7 @@ def _skillspector_provider_env() -> dict[str, str]:
         if provider.provider == "bedrock":
             child_env.update(_copy_selected_environment(source, _SKILLSPECTOR_AWS_ENV_NAMES))
 
-    return child_env
+    return child_env, provider.provider
 
 
 def _skillspector_default_reasoning_effort(child_env: Mapping[str, str]) -> str | None:
@@ -477,13 +535,18 @@ def _skillspector_default_reasoning_effort(child_env: Mapping[str, str]) -> str 
     return efforts.pop() if len(efforts) == 1 else None
 
 
-def _skillspector_child_env() -> dict[str, str]:
-    """Return the SkillSpector environment plus SkillEvaluator's default reasoning effort."""
-    child_env = _skillspector_provider_env()
+def _skillspector_llm_env() -> tuple[dict[str, str], str | None]:
+    """Return the LLM-stage SkillSpector environment and the bridged SkillEvaluator provider."""
+    child_env, provider_id = _skillspector_provider_env()
     effort = _skillspector_default_reasoning_effort(child_env)
     if effort is not None:
         child_env.setdefault("SKILLSPECTOR_REASONING_EFFORT", effort)
-    return child_env
+    return child_env, provider_id
+
+
+def _skillspector_child_env() -> dict[str, str]:
+    """Return the SkillSpector environment plus SkillEvaluator's default reasoning effort."""
+    return _skillspector_llm_env()[0]
 
 
 def _tree_contains_artifact_dirs(root: Path) -> bool:
@@ -828,12 +891,31 @@ class SecurityValidator(ValidatorBase):
             args.append("--no-llm")
 
         logger.info("Running %s on %s", stage_name, scan_root)
-        child_env = _skillspector_child_env() if use_llm else _skillspector_process_env()
         if use_llm:
+            child_env, provider_id = _skillspector_llm_env()
             # Requested LLM configuration; None leaves the choice to SkillSpector.
             result.metadata["skillspector_model"] = child_env.get("SKILLSPECTOR_MODEL")
             result.metadata["skillspector_reasoning_effort"] = child_env.get("SKILLSPECTOR_REASONING_EFFORT")
-        tool_result = Tools.skillspector.run(args, timeout=300, env=child_env, replace_env=True)
+            if provider_id is not None:
+                result.metadata["skillspector_provider_id"] = provider_id
+        else:
+            child_env = _skillspector_process_env()
+        # Read from the parent environment: the isolated child environment omits it.
+        timeout = _skillspector_timeout_seconds()
+        result.metadata["skillspector_timeout_seconds"] = timeout
+        tool_result = Tools.skillspector.run(args, timeout=timeout, env=child_env, replace_env=True)
+        try:
+            data = parse_json_output(tool_result.stdout)
+        except (RecursionError, ValueError):
+            data = None
+        if use_llm:
+            # Recorded before the completeness checks below, so a failed or
+            # unconfirmed LLM stage still names the provider and models it
+            # attempted. Only a record that passes the strict provenance
+            # contract is kept, and it never makes the stage complete.
+            provenance = _skillspector_report_llm_provenance(data)
+            if provenance is not None:
+                result.metadata["skillspector_llm_provenance"] = provenance
 
         if tool_result.exit_code not in _SKILLSPECTOR_POLICY_EXIT_CODES:
             detail = tool_result.error_message or (
@@ -851,10 +933,6 @@ class SecurityValidator(ValidatorBase):
             result.mark_scan_incomplete(stage_name)
             return result
 
-        try:
-            data = parse_json_output(tool_result.stdout)
-        except (RecursionError, ValueError):
-            data = None
         if data is None:
             result.add_error(
                 f"{stage_name} did not return valid JSON (exit code {tool_result.exit_code}); "

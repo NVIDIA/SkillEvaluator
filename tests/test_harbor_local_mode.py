@@ -12,6 +12,7 @@ import errno
 import json
 import logging
 import os
+import re
 import shlex
 import signal
 import socket
@@ -2723,7 +2724,7 @@ def test_exec_timeout_terminates_background_descendants(tmp_path: Path) -> None:
     command = (
         "printf stdout-before-timeout; printf stderr-before-timeout >&2; "
         "printf started > timeout-child-started; "
-        "(sleep 15; printf survived > timeout-child-survived) & "
+        "(sleep 15 && printf survived > timeout-child-survived) & "
         "printf '%s' \"$!\" > timeout-child-pid; wait"
     )
     environment._local_command_guardrail_reason = lambda *_args: ""  # type: ignore[method-assign]
@@ -2787,7 +2788,11 @@ def test_streamed_timeout_callback_matches_result_and_contains_descendants(tmp_p
     assert result.return_code == 124
     assert callback_stdout == result.stdout
     assert callback_stderr == result.stderr
-    assert callback_stderr == "stderr-before-timeout\nTimed out"
+    # macOS bash can report a background job's SIGTERM during group cleanup.
+    assert re.fullmatch(
+        r"stderr-before-timeout\n(?:bash: line \d+: +\d+ Terminated: 15 +\( sleep 30 \)\n)?Timed out",
+        callback_stderr,
+    )
     assert secret not in callback_stdout
     child_pid = int(child_pid_path.read_text(encoding="ascii"))
     with pytest.raises(ProcessLookupError):
@@ -3131,7 +3136,8 @@ def test_exec_cancellation_terminates_background_descendants(tmp_path: Path) -> 
     child_pid_path = environment._workspace / "cancel-child-pid"
     marker = environment._workspace / "cancel-child-survived"
     command = (
-        "(printf ready > cancel-child-ready; sleep 30; "
+        # An interrupted sleep must not itself count as a surviving child.
+        "(printf ready > cancel-child-ready; sleep 30 && "
         "printf survived > cancel-child-survived) & "
         "printf '%s' \"$!\" > cancel-child-pid; wait"
     )
@@ -3199,7 +3205,8 @@ def test_streamed_exec_cancellation_reaps_descendants(
         with environment.scoped_output_callback(on_output):
             task = asyncio.create_task(
                 environment.exec(
-                    'printf "%s\\n" "$CANCEL_TOKEN"; (sleep 30) & printf \'%s\' "$!" > stream-cancel-child-pid; wait',
+                    # Callback readiness must follow the complete PID write, not just file creation.
+                    '(sleep 30) & printf \'%s\' "$!" > stream-cancel-child-pid; printf "%s\\n" "$CANCEL_TOKEN"; wait',
                     env={"CANCEL_TOKEN": secret},
                 )
             )

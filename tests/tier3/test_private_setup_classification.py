@@ -21,7 +21,6 @@ from skillevaluator.tier3.harbor.local_agents import AgentSetupNetworkError, Set
 from skillevaluator.tier3.plugin_native import (
     NATIVE_AGENT_IMPORT_PATHS,
     PRIVATE_AGENT_IMPORT_PATHS,
-    PluginLoadError,
     private_agent_import_path,
 )
 
@@ -50,9 +49,9 @@ def test_native_wrapper_is_not_wrapped_twice(key: tuple, path: str) -> None:
     assert issubclass(import_symbol(path), SetupNetworkErrorAgent)
 
 
-def test_unknown_private_wrapper_does_not_silently_replace_custom_routing() -> None:
-    with pytest.raises(PluginLoadError, match="no setup error wrapper"):
-        private_agent_import_path("codex", "custom.module:MyAgent")
+def test_unknown_private_wrapper_keeps_custom_routing() -> None:
+    # Classification is best-effort: a custom backend's own agent keeps its launch path.
+    assert private_agent_import_path("codex", "custom.module:MyAgent") == "custom.module:MyAgent"
 
 
 class _ProcessEnvironment:

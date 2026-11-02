@@ -4371,12 +4371,12 @@ def _native_plugin_agent_import_paths() -> frozenset[str]:
     from skillevaluator.tier3.loose_parts import LOOSE_PARTS_AGENT_IMPORT_PATHS
     from skillevaluator.tier3.plugin_native import NATIVE_AGENT_IMPORT_PATHS, PRIVATE_AGENT_IMPORT_PATHS
 
+    # Host-only wrappers remain outside the container backend allowlist.
     return frozenset(
-        (
-            *NATIVE_AGENT_IMPORT_PATHS.values(),
-            *PRIVATE_AGENT_IMPORT_PATHS.values(),
-            *LOOSE_PARTS_AGENT_IMPORT_PATHS.values(),
-        )
+        value
+        for paths in (NATIVE_AGENT_IMPORT_PATHS, PRIVATE_AGENT_IMPORT_PATHS, LOOSE_PARTS_AGENT_IMPORT_PATHS)
+        for (_, base), value in paths.items()
+        if not (base or "").startswith("skillevaluator.tier3.harbor.local_agents:SkillEvaluatorLocal")
     )
 
 
@@ -5536,6 +5536,11 @@ def _run_harbor_eval_impl(
         )
     except ValueError as exc:
         reporter.emit(ProgressEvent(stage="configuration", state="failed", detail="invalid staged timeout"))
+        return _persist_pre_execution_failure([str(exc)])
+    try:
+        private_agent_paths = _private_agent_paths(agents, agent_import_paths, env_mode)
+    except ValueError as exc:
+        reporter.emit(ProgressEvent(stage="configuration", state="failed", detail="unsupported private agent route"))
         return _persist_pre_execution_failure([str(exc)])
     reporter.start(
         Tier3RunPlan(

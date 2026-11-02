@@ -145,7 +145,9 @@ def test_invalid_fixture_reference_is_refused_before_task_generation(tmp_path: P
     assert not (tmp_path / "out").exists()
 
 
-def test_prepared_mcp_env_and_headers_reach_real_native_bundle(tmp_path: Path) -> None:
+def test_prepared_mcp_env_and_headers_reach_real_native_bundle(tmp_path: Path, monkeypatch) -> None:
+    monkeypatch.setenv("SKILLEVALUATOR_ALLOWED_MCP_SECRETS", "API_BASE,MCP_TOKEN")
+    monkeypatch.setenv("SKILLEVALUATOR_ALLOWED_MCP_HOSTS", "example.invalid")
     servers = {
         "stdio": {"command": "npx", "args": ["example-server"], "env": {"API_BASE": "${API_BASE}", "MODE": "ci"}},
         "http": {"url": "https://example.invalid/mcp", "headers": {"Authorization": "Bearer ${MCP_TOKEN}"}},
@@ -224,7 +226,8 @@ def test_source_tree_identity_guards_analysis_and_staging(tmp_path: Path, change
     assert not (tmp_path / "out").exists()
 
 
-def test_generated_results_do_not_invalidate_source_tree_identity(tmp_path: Path) -> None:
+@pytest.mark.parametrize("authored_evals_dir", [True, False])
+def test_generated_results_do_not_invalidate_source_tree_identity(tmp_path: Path, authored_evals_dir: bool) -> None:
     root = _tree(
         tmp_path / "plugin",
         {
@@ -233,9 +236,11 @@ def test_generated_results_do_not_invalidate_source_tree_identity(tmp_path: Path
             "skills/a/evals/evals.json": [{"prompt": "task"}],
         },
     )
-    (root / "evals").mkdir()
+    if authored_evals_dir:
+        (root / "evals").mkdir()
     inventory = _inventory(root)
     package = prepare_runtime_package(inventory)
+    # Without an authored evals/, the default results root creates it mid-run.
     _tree(root, {"evals/results/report.json": {"generated": True}, "BENCHMARK.md": "generated"})
     verify_source_identity(package, inventory)
     stage_wrapper_skill(package, tmp_path / "out")

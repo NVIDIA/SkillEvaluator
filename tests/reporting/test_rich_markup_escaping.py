@@ -727,10 +727,10 @@ def test_validate_view_strips_terminal_controls(
     output = capsys.readouterr().out
     _assert_no_controls_or_emoji(output)
     assert f" skill: {HOSTILE_VISIBLE} " in output  # header pill
-    assert f"SECURITY — {HOSTILE_VISIBLE}" in output  # failed check row
+    assert "1 security" in output and HOSTILE_VISIBLE in " ".join(output.split())  # what-to-fix item
     assert f"{'dataset':<12}{HOSTILE_VISIBLE}" in output
     assert f"{'skipped':<12}{HOSTILE_VISIBLE}" in output
-    assert f"fix     {HOSTILE_VISIBLE}" in output
+    assert "fix     see what to fix above, then rerun" in output
     assert f"skillevaluator validate {Path('skills') / HOSTILE_PATH_PART_VISIBLE}" in output  # rerun hint
     assert f"{'report':<12}{Path('reports') / (HOSTILE_PATH_PART_VISIBLE + '.html')}" in output
 

@@ -29,6 +29,7 @@ from skillevaluator.logging_config import setup_logging
 from skillevaluator.models.result import ValidationResult
 from skillevaluator.quality_config import QualityConfigError, load_quality_config
 from skillevaluator.reporting.console_ui import (
+    TierRow,
     ValidateView,
     ViewProgressReporter,
     check_ticker_row,
@@ -1544,7 +1545,7 @@ def _finish_pipeline_view(
     agent_eval: bool,
 ) -> None:
     """Render the quiet-mode verdict panel and report footer."""
-    from skillevaluator.reporting.console_ui import Verdict, _is_skipped, first_fix
+    from skillevaluator.reporting.console_ui import MUTED, Verdict, _is_skipped, first_fix
 
     ext = {"html": ".html", "json": ".json", "markdown": ".md", "sarif": ".sarif.json"}
     links: list[tuple[str, str]] = [
@@ -1569,19 +1570,29 @@ def _finish_pipeline_view(
         return
 
     failed = [result for result in tier_gate_results if not result.passed and not _is_skipped(result)]
-    if failed:
-        first = failed[0].validator_name or "validation"
-        extra = f" (+{len(failed) - 1} more)" if len(failed) > 1 else ""
-        tier_no = (failed[0].metadata.get("gating") or {}).get("tier")
-        tier_label = f" in Tier {tier_no}" if tier_no is not None else ""
-        headline = f"{first}{extra} failed{tier_label}"
+    if len(failed) == 1:
+        only = failed[0]
+        tier_no = (only.metadata.get("gating") or {}).get("tier")
+        state = "didn't run" if only.is_incomplete else "failed"
+        headline = f"{only.validator_name or 'validation'} {state}" + (
+            f" in Tier {tier_no}" if tier_no is not None else ""
+        )
     else:
-        headline = "validation failed"
+        by_tier: dict[object, list] = {}
+        for result in failed:
+            by_tier.setdefault((result.metadata.get("gating") or {}).get("tier"), []).append(result)
+        parts = []
+        for tier_no, results in by_tier.items():
+            broken = sum(1 for r in results if not r.is_incomplete)
+            counts = [
+                f"{broken} failed" if broken else "",
+                f"{len(results) - broken} didn't run" if broken < len(results) else "",
+            ]
+            parts.append((f"Tier {tier_no}: " if tier_no is not None else "") + ", ".join(c for c in counts if c))
+        headline = " · ".join(parts) or "validation failed"
     rerun = _rerun_hint(target_path, agent_eval)
-    view.finish(
-        Verdict(passed=False, headline=headline, fix=first_fix(tier_gate_results), rerun=rerun),
-        links,
-    )
+    fix = [("see what to fix above, then rerun", MUTED)] if failed else first_fix(tier_gate_results)
+    view.finish(Verdict(passed=False, headline=headline, fix=fix, rerun=rerun), links)
 
 
 def _print_tier_banner(title: str) -> None:
@@ -2283,10 +2294,29 @@ def validate(
             [*tier3_config_rows, stage_hint_row("status", "running with-skill and baseline trials…")],
         )
 
-        def _on_engine_tail(lines: list[str]) -> None:
-            view.tier_progress(tier3_index, [*tier3_config_rows, *engine_feed_rows(lines)])
+        from threading import Lock
 
-        reporter = ViewProgressReporter(_on_engine_tail) if quiet else None
+        live_case_rows: list[TierRow] = []
+        engine_tail: list[str] = []
+        progress_lock = Lock()  # case rows refresh from a polling thread, engine lines from the runner
+
+        def _show_tier3_progress() -> None:
+            with progress_lock:
+                view.tier_progress(tier3_index, [*tier3_config_rows, *live_case_rows, *engine_feed_rows(engine_tail)])
+
+        def _on_engine_tail(lines: list[str]) -> None:
+            engine_tail[:] = lines
+            _show_tier3_progress()
+
+        def _on_case_rows(rows: list[TierRow]) -> None:
+            live_case_rows[:] = rows
+            _show_tier3_progress()
+
+        reporter = (
+            ViewProgressReporter(_on_engine_tail, on_cases=_on_case_rows, pass_threshold=pass_threshold)
+            if quiet
+            else None
+        )
         repo_context_exclude_paths = [output_dir] if report_output_required else []
         catalog_report_root = click.get_current_context().meta.get("skillevaluator_catalog_report_root")
         if isinstance(catalog_report_root, Path) and not paths_refer_to_same_location(

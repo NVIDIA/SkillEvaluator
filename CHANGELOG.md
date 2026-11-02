@@ -85,9 +85,11 @@ All notable changes to SkillEvaluator are documented in this file.
   success detail and, for a single skill, also in `rubric_eval`. Tier 3
   conclusions and recommendations written by the LLM, and LLM-written
   dimensions returned by `compute_dimensions`, record the model that wrote
-  them as `model`. On the native Claude API this is the model the reply
-  names: the server-side refusal fallback model, not the configured model,
-  when the fallback answered a Claude 5.5 or later request.
+  them as `model`. For a Claude 5.5 or later model on the native Claude API
+  this is the model the reply names: the server-side refusal fallback model,
+  not the configured model, when the fallback answered. Otherwise it is the
+  configured model, unless a server-side `fallback` block in the reply names
+  another model.
 
 - Tier 3 runs can be limited to the first N eval cases with the opt-in
   `--max-cases N` flag on `validate`, `tier3`, and `tier3 evaluate`, or the
@@ -281,7 +283,10 @@ All notable changes to SkillEvaluator are documented in this file.
   server-side fallback model when the API serves a repeated request straight
   from that model. Such a reply has no `fallback` content block, so the label
   now comes from the reply's own `model` field instead of the configured
-  model.
+  model. `judge_fallback_used` is then `true`, and Skill Lift treats such a
+  case like an in-call fallback: when another condition, attempt or step of
+  the case was judged by the configured model, the case leaves that judge
+  metric's lift and is counted in `judge_mixed_cases`.
 
 - Tier 3 `claude-code` trials no longer hang until the agent timeout after the
   agent has already answered. Claude Code moves a shell command that outlasts

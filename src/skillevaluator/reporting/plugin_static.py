@@ -226,8 +226,14 @@ class _Projection:
             return "unavailable"
         try:
             parsed = urlsplit(value)
-            host = parsed.hostname or ""
-            return urlunsplit((parsed.scheme, host, parsed.path, "", ""))
+            host = parsed.hostname
+            port = parsed.port
+            if parsed.scheme not in {"http", "https"} or not host or any(char.isspace() for char in parsed.netloc):
+                return "unavailable"
+            authority = f"[{host}]" if ":" in host else host
+            if port is not None:
+                authority += f":{port}"
+            return urlunsplit((parsed.scheme, authority, parsed.path, "", ""))
         except ValueError:
             return "unavailable"
 

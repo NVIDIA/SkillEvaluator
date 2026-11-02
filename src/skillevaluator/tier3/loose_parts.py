@@ -313,6 +313,7 @@ class _Placement:
     overrides: tuple[tuple[str, Path], ...] = ()
     override_digests: tuple[tuple[str, str], ...] = ()
     exclude: tuple[str, ...] = ()
+    root_template: str | None = None
 
     @property
     def name(self) -> str:
@@ -708,14 +709,23 @@ def _to_loose(value: Any) -> Any:
     return value
 
 
-def _canonical_roots(value: Any) -> Any:
-    """The hashing normalization: the loose directories written back as the variables they replaced."""
-    if isinstance(value, str):
-        return value.replace(LOOSE_ROOT, _ROOT_VAR).replace(LOOSE_DATA, _DATA_VAR)
+def _canonical_roots(value: Any, template: Any) -> Any:
+    """Undo only the loose arm's recorded substitutions, at their original fields."""
+    if isinstance(template, str):
+        replaced = _to_loose(template)
+        if replaced != template:
+            if value != replaced:
+                raise ValueError("The staged loose field does not contain its recorded root substitution")
+            return template
     if isinstance(value, list):
-        return [_canonical_roots(item) for item in value]
+        original = template if isinstance(template, list) else []
+        return [
+            _canonical_roots(item, original[index] if index < len(original) else None)
+            for index, item in enumerate(value)
+        ]
     if isinstance(value, dict):
-        return {key: _canonical_roots(item) for key, item in value.items()}
+        original = template if isinstance(template, dict) else {}
+        return {key: _canonical_roots(item, original.get(key)) for key, item in value.items()}
     return value
 
 
@@ -810,7 +820,17 @@ class _Builder:
         if _ROOT_VAR_RE.search(text) or _DATA_VAR_RE.search(text):
             self.root_text[piece_id] = PLUGIN_ROOT_IN_TEXT
 
-    def _place(self, piece_id: str, kind: str, source: str | None, *, full: str, loose: str, **extra: Any) -> None:
+    def _place(
+        self,
+        piece_id: str,
+        kind: str,
+        source: str | None,
+        *,
+        full: str,
+        loose: str,
+        root_template: Any = None,
+        **extra: Any,
+    ) -> None:
         full_overrides = tuple(
             (staged, original)
             for staged, original in self.rewrites.items()
@@ -827,7 +847,16 @@ class _Builder:
         self.full.append(
             _Placement(piece_id, kind, full, source, overrides=full_overrides, override_digests=expected, **extra)
         )
-        self.loose.append(_Placement(piece_id, kind, loose, source, **extra))
+        self.loose.append(
+            _Placement(
+                piece_id,
+                kind,
+                loose,
+                source,
+                root_template=json.dumps(root_template) if root_template is not None else None,
+                **extra,
+            )
+        )
 
     def _frontmatter_rewrites(self) -> dict[str, Path]:
         """Staged plugin-arm file -> its source, for each file the plugin arm rewrites to census-wrap frontmatter hooks.
@@ -902,12 +931,13 @@ class _Builder:
             for server in (*self.source.mcp_servers, *self.source.plugin_file_mcp_servers)
         }
         for entry in entries.values():
-            self._note_references(entry)
+            for key, value in entry.items():
+                self._note_references(value, exact_operand=key in {"command", "args"})
         loose_entries = {name: _to_loose(entry) for name, entry in entries.items()}
         self.bundle.generated[f"{LOOSE_BUNDLE_DIR}/mcp.json"] = (
             json.dumps({"mcpServers": loose_entries}, indent=2) + "\n"
         )
-        for name in entries:
+        for name, entry in entries.items():
             self.checks.append(
                 CensusCheck(
                     "mcp", name, "contains", LOOSE_MCP_CONFIG, needle=json.dumps(name), label="--mcp-config listing"
@@ -920,6 +950,7 @@ class _Builder:
                 full=f"{_PLUGIN_BUNDLE}/.mcp.json",
                 loose=f"{_LOOSE_BUNDLE}/mcp.json",
                 key=name,
+                root_template=entry,
             )
         return list(entries)
 
@@ -971,6 +1002,7 @@ class _Builder:
                 full=f"{_PLUGIN_BUNDLE}/hooks/hooks.json",
                 loose=f"{_LOOSE_BUNDLE}/settings.json",
                 key=hook.name,
+                root_template=_hook_groups(wrapped.config, hook.name),
             )
         if not staged:
             return staged
@@ -984,6 +1016,7 @@ class _Builder:
                 full=f"{_PLUGIN_BUNDLE}/hooks/hooks.json",
                 loose=f"{_LOOSE_BUNDLE}/settings.json",
                 key="",
+                root_template=_hook_groups({"hooks": events}, ""),
             )
         self._note_references(events)
         settings = {"hooks": _to_loose(events)}
@@ -1078,10 +1111,45 @@ class _Builder:
             )
         return self.source.plugin_root / rel
 
-    def _note_references(self, value: Any) -> None:
+    def _note_references(self, value: Any, *, exact_operand: bool = False) -> None:
         for text in _strings(value):
+            if exact_operand:
+                prefix = next(
+                    (
+                        root
+                        for root in (_ROOT_VAR, "$CLAUDE_PLUGIN_ROOT")
+                        if text == root or text.startswith(root + "/")
+                    ),
+                    None,
+                )
+                if prefix is not None:
+                    raw = text[len(prefix) :]
+                    rel = posixpath.normpath(raw.strip("/")) if raw.strip("/") else "."
+                    # MCP command/args values are complete operands, so spaces,
+                    # colons and commas can belong to an authored filename.
+                    # A dynamic or shell expression needs the full root instead.
+                    match = _ROOT_PATH_RE.match(text)
+                    ambiguous = "$" in raw or (
+                        rel != ".."
+                        and not rel.startswith("../")
+                        and self.reader.kind(PurePosixPath(rel)) == "missing"
+                        and match is not None
+                        and (match.group(1) or "") != raw
+                    )
+                    self.references.append("" if ambiguous else raw)
+                    continue
             for match in _ROOT_PATH_RE.finditer(text):
-                self.references.append(match.group(1) or "")
+                suffix = text[match.end() :]
+                ambiguous = bool(suffix) and (
+                    suffix[0].isspace()
+                    or (
+                        suffix[0] in ":,"
+                        and not any(suffix[1:].startswith(root) for root in (_ROOT_VAR, "$CLAUDE_PLUGIN_ROOT"))
+                    )
+                )
+                # Quoted shell paths may contain spaces after the regex's
+                # prefix. Copying the root keeps those files available too.
+                self.references.append("" if ambiguous else match.group(1) or "")
 
     def _scripts(self) -> None:
         """Copy every plugin file a staged hook or MCP server references through the plugin root."""
@@ -1287,8 +1355,10 @@ def _sha256(data: bytes) -> str:
     return hashlib.sha256(data).hexdigest()
 
 
-def _canonical_json(value: Any) -> bytes:
-    return json.dumps(_canonical_roots(value), sort_keys=True, separators=(",", ":"), ensure_ascii=False).encode()
+def _canonical_json(value: Any, root_template: str | None = None) -> bytes:
+    if root_template is not None:
+        value = _canonical_roots(value, json.loads(root_template))
+    return json.dumps(value, sort_keys=True, separators=(",", ":"), ensure_ascii=False).encode()
 
 
 def _read_regular(path: Path) -> bytes | None:
@@ -1398,10 +1468,18 @@ def _piece_digest(env_dir: Path, placement: _Placement, cache: dict[str, Any]) -
         config = _load_json(env_dir, placement.path, cache)
         servers = config.get("mcpServers") if isinstance(config, Mapping) else None
         entry = servers.get(placement.key) if isinstance(servers, Mapping) else None
-        return _structured_piece_digest(env_dir / placement.path, entry) if isinstance(entry, Mapping) else None
+        return (
+            _structured_piece_digest(env_dir / placement.path, entry, placement.root_template)
+            if isinstance(entry, Mapping)
+            else None
+        )
     if placement.kind == "hook":
         groups = _hook_groups(_load_json(env_dir, placement.path, cache), placement.key or "")
-        return _structured_piece_digest(env_dir / placement.path, groups) if groups is not None else None
+        return (
+            _structured_piece_digest(env_dir / placement.path, groups, placement.root_template)
+            if groups is not None
+            else None
+        )
     target = env_dir / placement.path
     for staged, expected in placement.override_digests:
         emitted = _read_regular(env_dir / staged)
@@ -1433,7 +1511,7 @@ def _piece_digest(env_dir: Path, placement: _Placement, cache: dict[str, Any]) -
     return _sha256(data + f"\nmode:{mode:o}".encode()) if data is not None else None
 
 
-def _structured_piece_digest(path: Path, payload: Any) -> str | None:
+def _structured_piece_digest(path: Path, payload: Any, root_template: str | None = None) -> str | None:
     """Config layout may differ across arms; its effective payload and rwx bits must match."""
     try:
         metadata = path.lstat()
@@ -1441,7 +1519,11 @@ def _structured_piece_digest(path: Path, payload: Any) -> str | None:
         return None
     if not stat.S_ISREG(metadata.st_mode) or metadata.st_nlink != 1:
         return None
-    return _sha256(_canonical_json(payload) + f"\nmode:{stat.S_IMODE(metadata.st_mode) & 0o777:o}".encode())
+    try:
+        canonical = _canonical_json(payload, root_template)
+    except ValueError:
+        return None
+    return _sha256(canonical + f"\nmode:{stat.S_IMODE(metadata.st_mode) & 0o777:o}".encode())
 
 
 def compare_content_hashes(hashes_by_arm: Mapping[str, Mapping[str, str]]) -> dict[str, Any]:

@@ -74,6 +74,7 @@ def arm_observations(
     stop_on_pass: bool,
     pass_threshold: float,
     job_failure: str = "",
+    recovered_attempts: Sequence[dict[str, Any]] = (),
 ) -> ArmObservations:
     """Use the collector's existing score and attempt rules on cached logical records."""
     expected = set(expected_case_ids)
@@ -96,7 +97,10 @@ def arm_observations(
             usage.pop("first_turn_prompt_tokens", None)
         score = collector._overall_score(reward) if case else None
         if case:
-            attempts[case].append((collector._attempt_ordinal(reward), score))
+            ordinal = collector._attempt_ordinal(reward) or collector._positive_attempt_ordinal(
+                getattr(record, "attempt_ordinal", None)
+            )
+            attempts[case].append((ordinal, score))
         else:
             complete = False
         observation = TrialObservation(
@@ -115,6 +119,7 @@ def arm_observations(
         "n_attempts": n_attempts,
         "stop_on_pass": stop_on_pass,
         "pass_threshold": pass_threshold,
+        "recovered_attempts": list(recovered_attempts),
     }
     summary = collector._pass_summary(rewards, expected_cases=len(expected_case_ids), **common)
     execution = collector._condition_execution_summary(
@@ -320,12 +325,20 @@ class ComparisonRuntime:
             arms, conditions, failure_details, evidence = {}, {}, {}, {}
             for arm, job in self.jobs.get(agent, {}).items():
                 records = arm_rows.get(arm, ())
+                rewards = [dict(record.reward) for record in records if isinstance(record.reward, Mapping)]
+                recovered = (
+                    collector._recovered_timeout_attempts(job, rewards, n_attempts=self.n_attempts)
+                    if self.stop_on_pass and job.is_dir()
+                    else []
+                )
                 ok, reason = collector.validate_harbor_job_result(
                     job / "result.json",
                     expected_trials=None if self.stop_on_pass else len(self.expected_case_ids) * self.n_attempts,
                 )
+                trial_failures = collector._extract_trial_failures(job) if recovered else []
+                job_recovered = collector._recovered_job_failure(job, trial_failures, recovered) if recovered else False
                 failure = self.launch_errors[agent].get(VARIANTS[arm], "") or (
-                    "" if ok else collector._published_job_failure(reason)
+                    "" if ok or job_recovered else collector._published_job_failure(reason)
                 )
                 observed = arm_observations(
                     records,
@@ -334,18 +347,26 @@ class ComparisonRuntime:
                     stop_on_pass=self.stop_on_pass,
                     pass_threshold=self.pass_threshold,
                     job_failure=failure,
+                    recovered_attempts=recovered,
                 )
                 arms[arm] = observed
-                conditions[arm] = {
-                    "execution_status": observed.execution_status,
-                    "expected_attempts": len(self.expected_case_ids) * self.n_attempts,
-                    "scored_attempts": len(observed.trials),
-                }
+                conditions[arm] = collector._condition_execution_summary(
+                    [dict(trial.reward) for trial in observed.trials],
+                    expected_case_ids=list(self.expected_case_ids),
+                    expected_cases=len(self.expected_case_ids),
+                    n_attempts=self.n_attempts,
+                    stop_on_pass=self.stop_on_pass,
+                    pass_threshold=self.pass_threshold,
+                    job_failure=failure,
+                    recovered_attempts=recovered,
+                )
                 if arm in {ARM_SUM_OF_PARTS, ARM_LOOSE_PARTS}:
                     roots, limited = _trial_roots(job) if job.is_dir() else ([], False)
+                    recovered_names = {row["trial"] for row in recovered}
                     failures = [
                         {"trial": collector._published_trial_label(root.name), "reason": reason}
                         for root in roots
+                        if collector._published_trial_label(root.name) not in recovered_names
                         if (reason := collector._trial_failure_reason(root))
                     ]
                     metadata = collector._failure_list_metadata("details", failures)

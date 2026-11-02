@@ -8,6 +8,8 @@ import importlib
 import json
 from copy import deepcopy
 
+import pytest
+
 from skillevaluator.models.result import Finding, Severity, ValidationResult
 from skillevaluator.reporting import (
     BenchmarkReporter,
@@ -284,7 +286,14 @@ def test_projection_reduction_happens_once_for_six_adapters(monkeypatch):
     assert calls == [4]
 
 
-def test_huge_cyclic_and_hostile_static_metadata_is_bounded_and_sanitized():
+@pytest.mark.parametrize("force_color", [False, True])
+def test_huge_cyclic_and_hostile_static_metadata_is_bounded_and_sanitized(monkeypatch, force_color):
+    monkeypatch.setenv("TERM", "xterm" if force_color else "dumb")
+    monkeypatch.delenv("NO_COLOR", raising=False)
+    if force_color:
+        monkeypatch.setenv("FORCE_COLOR", "1")
+    else:
+        monkeypatch.delenv("FORCE_COLOR", raising=False)
     results = bundle()
     hostile = (
         '<img src=x onerror=alert(1)> [bold]oops[/bold] API_KEY="'
@@ -300,10 +309,18 @@ def test_huge_cyclic_and_hostile_static_metadata_is_bounded_and_sanitized():
     projection = api().project_plugin_static(results)
     payload = projection.payload()
     assert payload["truncated"] is True
-    assert len(json.dumps(payload, ensure_ascii=False).encode("utf-8")) <= api().MAX_OUTPUT_BYTES
+    serialized = json.dumps(payload, ensure_ascii=False)
+    assert "\\u001b" not in serialized and "private-test-secret" not in serialized and "\ud800" not in serialized
+    assert len(serialized.encode("utf-8")) <= api().MAX_OUTPUT_BYTES
     document = renderers().render_plugin_static_reports(results, reporters=reporters())
     for name, text in document.items():
-        assert "private-test-secret" not in text and "\x1b" not in text and "\ud800" not in text, name
+        assert "private-test-secret" not in text and "\ud800" not in text, name
+        if name == "cli":
+            original, fragment = text.split("\n\nPlugin static evidence\n", 1)
+            assert ("\x1b[" in original) is force_color
+        else:
+            fragment = text
+        assert "\x1b" not in fragment, name
         if name in {"html", "markdown", "benchmark"}:
             assert "<img src=x onerror=alert(1)>" not in text
 
@@ -545,3 +562,26 @@ def test_terminal_control_removal_cannot_reassemble_a_credential_in_static_views
     assert secret not in json.dumps(api().project_plugin_static(results).payload())
     for document in renderers().render_plugin_static_reports(results, reporters=reporters()).values():
         assert secret not in document
+
+
+@pytest.mark.parametrize(
+    "url,expected",
+    [
+        ("https://user:password@example.com:8443/check?token=secret#fragment", "https://example.com:8443/check"),
+        ("http://example.com:8080/check", "http://example.com:8080/check"),
+        ("https://[2606:4700::1111]:8443/check?token=secret", "https://[2606:4700::1111]:8443/check"),
+        ("https://user:password@[2606:4700::1111]/check#fragment", "https://[2606:4700::1111]/check"),
+        ("https://example.com:wrong/check", "unavailable"),
+        ("https://example.com:65536/check", "unavailable"),
+        ("https:///check", "unavailable"),
+    ],
+)
+def test_endpoint_and_redirect_urls_preserve_valid_authorities_without_credentials(url, expected):
+    results = bundle()
+    endpoint = results[2].metadata["endpoint_resolution"]["endpoints"][0]
+    endpoint["url"] = url
+    endpoint["redirect"]["url"] = url
+    payload = api().project_plugin_static(results).payload()
+    section = next(row for row in payload["sections"] if row["key"] == "endpoints")
+    assert section["rows"][0][2] == expected
+    assert section["rows"][0][5] == expected

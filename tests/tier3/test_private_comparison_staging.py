@@ -73,7 +73,8 @@ def test_structured_config_and_directory_permissions_are_part_of_capability_pari
     assert placement.id in result["mismatches"]
 
 
-def test_hook_json_permissions_are_part_of_capability_parity(tmp_path):
+def test_hook_json_permissions_are_part_of_capability_parity(tmp_path, monkeypatch):
+    monkeypatch.setenv("SKILLEVALUATOR_ALLOWED_MCP_SECRETS", "RELTOOLS_TOKEN")
     from tests.tier3.private_loose_fixtures import make_plugin, native_source
 
     parts = loose_parts.build_loose_parts(
@@ -97,7 +98,8 @@ def test_empty_emitted_task_set_stays_unknown(tmp_path):
     assert parts.content_report_for_tasks({})["equal_across_arms"] is not True
 
 
-def test_census_normalization_cannot_hide_changed_emitted_frontmatter(tmp_path):
+def test_census_normalization_cannot_hide_changed_emitted_frontmatter(tmp_path, monkeypatch):
+    monkeypatch.setenv("SKILLEVALUATOR_ALLOWED_MCP_SECRETS", "RELTOOLS_TOKEN")
     from tests.tier3.private_loose_fixtures import make_plugin, native_source, write
 
     plugin = make_plugin(tmp_path / "plugins")
@@ -248,3 +250,126 @@ def test_private_and_native_route_classes_keep_the_same_loose_backend(route, exp
     from skillevaluator.tier3.harbor.loose_agents import _LoosePartsClaudeCodeMixin
 
     assert issubclass(_LoosePartsClaudeCodeMixin, SetupNetworkErrorAgent)
+
+
+@pytest.mark.parametrize(
+    "root,variable", [(loose_parts.LOOSE_ROOT, "CLAUDE_PLUGIN_ROOT"), (loose_parts.LOOSE_DATA, "CLAUDE_PLUGIN_DATA")]
+)
+def test_full_mcp_literal_loose_directory_is_not_normalized_as_equal(tmp_path, monkeypatch, root, variable):
+    monkeypatch.setenv("SKILLEVALUATOR_ALLOWED_MCP_SECRETS", "CLAUDE_PLUGIN_DATA")
+    prepared = source(tmp_path / "plugin")
+    prepared = replace(
+        prepared,
+        plugin_file_mcp_servers=(
+            {"name": "tool", "command": "node", "args": ["${CLAUDE_PLUGIN_ROOT}/run.js", "${" + variable + "}/output"]},
+        ),
+    )
+    parts = loose_parts.build_loose_parts(prepared)
+    tasks = {}
+    for arm in ("with_skill", "sum_of_parts", "loose_parts"):
+        task = tmp_path / arm
+        parts.stage_arm(arm, task / "environment")
+        tasks[arm] = [task]
+    assert parts.content_report_for_tasks(tasks)["equal_across_arms"] is True
+    placement = next(item for item in parts._full if item.kind == "mcp")
+    config = tasks["with_skill"][0] / "environment" / placement.path
+    payload = json.loads(config.read_text())
+    payload["mcpServers"][placement.key]["args"][1] = root + "/output"
+    config.write_text(json.dumps(payload))
+    result = parts.content_report_for_tasks(tasks)
+    assert result["equal_across_arms"] is False
+    assert "mcp:tool" in result["mismatches"]
+
+
+def test_mcp_literal_root_text_outside_substituted_field_is_preserved(tmp_path):
+    prepared = source(tmp_path / "plugin")
+    prepared = replace(
+        prepared,
+        plugin_file_mcp_servers=(
+            {
+                "name": "tool",
+                "command": "node",
+                "args": ["${CLAUDE_PLUGIN_ROOT}/run.js", loose_parts.LOOSE_ROOT + "/label"],
+            },
+        ),
+    )
+    parts = loose_parts.build_loose_parts(prepared)
+    tasks = {}
+    for arm in ("with_skill", "sum_of_parts", "loose_parts"):
+        task = tmp_path / arm
+        parts.stage_arm(arm, task / "environment")
+        tasks[arm] = [task]
+    assert parts.content_report_for_tasks(tasks)["equal_across_arms"] is True
+    placement = next(item for item in parts._loose if item.kind == "mcp")
+    config = tasks["loose_parts"][0] / "environment" / placement.path
+    payload = json.loads(config.read_text())
+    payload["mcpServers"][placement.key]["args"][1] = "${CLAUDE_PLUGIN_ROOT}/label"
+    config.write_text(json.dumps(payload))
+    result = parts.content_report_for_tasks(tasks)
+    assert result["equal_across_arms"] is False
+    assert "mcp:tool" in result["mismatches"]
+
+
+def test_full_hook_literal_loose_directory_is_not_normalized_as_equal(tmp_path, monkeypatch):
+    monkeypatch.setenv("SKILLEVALUATOR_ALLOWED_MCP_SECRETS", "RELTOOLS_TOKEN")
+    from tests.tier3.private_loose_fixtures import make_plugin, native_source
+
+    parts = loose_parts.build_loose_parts(
+        native_source(make_plugin(tmp_path / "plugins"), tmp_path / "stage").native_source
+    )
+    tasks = {}
+    for arm in ("with_skill", "sum_of_parts", "loose_parts"):
+        task = tmp_path / arm
+        parts.stage_arm(arm, task / "environment")
+        tasks[arm] = [task]
+    assert parts.content_report_for_tasks(tasks)["equal_across_arms"] is True
+    placement = next(item for item in parts._full if item.kind == "hook")
+    config = tasks["with_skill"][0] / "environment" / placement.path
+    config.write_text(config.read_text().replace("${CLAUDE_PLUGIN_ROOT}", loose_parts.LOOSE_ROOT))
+    result = parts.content_report_for_tasks(tasks)
+    assert result["equal_across_arms"] is False
+    assert placement.id in result["mismatches"]
+
+
+@pytest.mark.parametrize("script_name", ["run server.js", "run:server.js", "run,server.js"])
+def test_mcp_argument_preserves_exact_referenced_filename_and_detects_missing_copy(tmp_path, script_name):
+    prepared = source(tmp_path / "plugin")
+    (prepared.plugin_root / "run.js").rename(prepared.plugin_root / script_name)
+    prepared = replace(
+        prepared,
+        plugin_file_mcp_servers=(
+            {"name": "tool", "command": "node", "args": ["${CLAUDE_PLUGIN_ROOT}/" + script_name]},
+        ),
+    )
+    parts = loose_parts.build_loose_parts(prepared)
+    tasks = {}
+    for arm in ("with_skill", "sum_of_parts", "loose_parts"):
+        task = tmp_path / arm
+        parts.stage_arm(arm, task / "environment")
+        tasks[arm] = [task]
+    copied = tasks["loose_parts"][0] / "environment/skilleval" / loose_parts.LOOSE_BUNDLE_DIR / "root" / script_name
+    assert copied.read_bytes() == b"console.log('ok');\n"
+    assert copied.stat().st_mode & 0o777 == 0o755
+    assert parts.content_report_for_tasks(tasks)["equal_across_arms"] is True
+    copied.unlink()
+    result = parts.content_report_for_tasks(tasks)
+    assert result["equal_across_arms"] is False
+    assert any(piece.startswith("script:") for piece in result["mismatches"])
+
+
+def test_loose_mcp_reverted_root_substitution_cannot_match_full_template(tmp_path):
+    parts = loose_parts.build_loose_parts(source(tmp_path / "plugin"))
+    tasks = {}
+    for arm in ("with_skill", "sum_of_parts", "loose_parts"):
+        task = tmp_path / arm
+        parts.stage_arm(arm, task / "environment")
+        tasks[arm] = [task]
+    assert parts.content_report_for_tasks(tasks)["equal_across_arms"] is True
+    placement = next(item for item in parts._loose if item.kind == "mcp")
+    config = tasks["loose_parts"][0] / "environment" / placement.path
+    payload = json.loads(config.read_text())
+    payload["mcpServers"][placement.key]["args"] = ["${CLAUDE_PLUGIN_ROOT}/run.js"]
+    config.write_text(json.dumps(payload))
+    result = parts.content_report_for_tasks(tasks)
+    assert result["equal_across_arms"] is False
+    assert "mcp:tool" in result["mismatches"]

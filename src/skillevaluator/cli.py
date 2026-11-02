@@ -939,6 +939,42 @@ _TIER_BANNERS = {
 }
 
 
+def _offer_local_runtime_install(raw_agents: str | None) -> None:
+    """Before a local-mode run, offer to install each missing agent CLI (pinned, managed root)."""
+    import shlex
+    import sys
+
+    from skillevaluator.provider_config import ProviderConfigurationError, resolve_llm_provider
+    from skillevaluator.tier3.commands import resolve_agents
+    from skillevaluator.tier3.harbor.local_runtime import (
+        install_local_runtime,
+        managed_install_argv,
+        managed_runtime_prefix,
+        missing_local_runtimes,
+    )
+
+    # Without a provider Tier 3 cannot run, so there is nothing to install yet; Tier 3 reports why.
+    try:
+        agents = resolve_agents(raw_agents, provider=resolve_llm_provider().provider)
+    except (ProviderConfigurationError, ValueError):
+        return
+    for agent in missing_local_runtimes(agents):
+        argv = managed_install_argv(agent)
+        console.print(f"[yellow]Local mode needs the {agent} CLI, and it is not installed.[/yellow]")
+        console.print(f"  [dim]{shlex.join(argv)}[/dim]", highlight=False, soft_wrap=True)
+        if not sys.stdin.isatty():
+            console.print("  [dim]Run the command above, or use --env-mode docker.[/dim]")
+            continue
+        if not click.confirm(f"  Install it into {managed_runtime_prefix(agent)}?", default=True):
+            continue
+        with console.status(f"Installing {agent}…"):
+            error = install_local_runtime(agent)
+        if error:
+            console.print(f"  [red]✗ {error}[/red]", highlight=False)
+        else:
+            console.print(f"  [green]✓ {agent} installed[/green]")
+
+
 def _ensure_autopilot_dataset(skill_path: Path, *, quiet: bool = False, progress: str = "auto") -> str | None:
     """Ensure an evaluation source exists, generating one when missing.
 
@@ -2124,6 +2160,9 @@ def validate(
         _print_run_banner(target_path, resolved_type, getattr(policy, "profile", None))
         _print_tier_banner(_TIER_BANNERS["tier1"])
 
+    if run_tier3 and env_mode == "local":
+        _offer_local_runtime_install(agents)
+
     # Autopilot source generation must precede every tier's publication-target
     # capture so one combined report cannot bind otherwise valid tier evidence
     # to different source trees. Generation remains advisory: retain any error
@@ -3015,6 +3054,7 @@ def evaluate(
     )
     try:
         if env_mode == "local":
+            _offer_local_runtime_install(agents)
             from rich.panel import Panel
             from rich.text import Text
 

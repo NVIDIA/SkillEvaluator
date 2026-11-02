@@ -6,124 +6,10 @@ All notable changes to SkillEvaluator are documented in this file.
 
 ### Added
 
-- `doctor` and `health-check` take `--tier 1|2|3|all`, so Tier 1 and Tier 2
-  readiness can be checked before a run instead of surfacing mid-validation.
-  Tier 1 reports each scanner that the `--checks` selection runs: SkillSpector,
-  Bandit, Semgrep, Gitleaks, and pip-audit for `dependency`. Each row shows the
-  resolved path, any executable override, and the version from a bounded,
-  shell-free probe. A scanner fails when it is missing, its override is
-  malformed, its probe fails or exceeds `--timeout` (default 60 seconds, at
-  most 3600), or it is older than Bandit 1.9.4 or Gitleaks 8. Tier 2 resolves
-  the embedding and LLM providers offline. `doctor --tier 2 --verify-models`
-  also sends one embedding request and one chat request, each bounded by
-  `--timeout` and sent without retries. Probe diagnostics keep provider
-  response bodies out of the report. `--tier all` checks every tier, and a failed tier does not stop the
-  next. Without `--tier`, both commands still check Tier 3 only. An option for
-  an unselected tier, or `--timeout` for an offline Tier 2 check, is a usage
-  error. `tier3 doctor` remains Tier 3-only.
+- In local mode (`--env-mode local`), a missing Claude Code, Codex, or OpenCode
+  CLI is offered as a pinned npm install into the SkillEvaluator runtime folder;
+  without a terminal, the command is printed instead.
 
-- `--skip-with-skill` on `tier3 evaluate` and the direct `tier3` workflow runs
-  only the without-skill baseline arm, for example to calibrate a task set or
-  re-measure a baseline after a model change without paying for with-skill
-  trials. Only baseline tasks are staged and launched. The run is reported as
-  a baseline calibration: `mode` is `baseline_only`, the overall score and best
-  agent come from the baseline arm, the with-skill arm is recorded as
-  `skipped`, with-skill scores and lift stay unavailable instead of becoming
-  0.0 (report tables print `skipped`), and the verdict stays NEUTRAL. The flag
-  is mutually exclusive with `--skip-baseline`, keeps the baseline isolation
-  rules, and is not accepted by `validate`, so a baseline-only run cannot pass
-  a Tier 3 gate.
-
-### Fixed
-
-- Use public, commit-pinned README image URLs so the wordmark and three-tier
-  diagram can render in PyPI package descriptions as well as on GitHub.
-- Repository-root detection decodes Git's raw path bytes as filesystem names,
-  preserving non-ASCII and non-UTF-8 paths. Remote URLs and branch names
-  remain UTF-8.
-
-- Hook conditions retain both PowerShell and Bash broad-prefix checks, so
-  launchers such as `iex`, `sudo` and `env` keep their HIGH auto-approval
-  findings.
-
-- A chat model that declines to classify a Tier 2 content cluster (a safety
-  refusal, which some models return for security-themed skill content) no
-  longer marks the scan incomplete and fails `validate` under the default
-  `--block-on-dedup`. Tier 2 now reports the refusal as an advisory MEDIUM
-  `llm_refused` finding that names the overlapping sections, and the JSON
-  report's `llm_analysis` counts it in `clusters_refused`. Other chat-LLM
-  failures still leave the scan incomplete. Raise `CONTENT_DEDUP.llm_refused`
-  in a policy overlay to keep refusals blocking.
-
-- Tier 1 security scans no longer fail a skill for an exact read-only
-  `/etc/passwd` bind mount such as `docker run -v /etc/passwd:/etc/passwd:ro`.
-  SkillSpector 2.11.1 and later tags this mount as likely benign but still
-  reports a HIGH Credential Access (PE3) finding. That finding is now ignored
-  only when it carries both benign-context tags and every `/etc/passwd` on the
-  reported source line, read without following links, is the source or target
-  of such a mount. The aggregate risk score is recomputed without it. Writable
-  or implicit-mode mounts, other paths, same-line reads such as
-  `cat /etc/passwd`, aggregated rows, and earlier SkillSpector versions still
-  block. Captured SkillSpector 2.13.3 reports cover both mount operands and a
-  separate blocking read, and partial LLM-response inspection stays incomplete.
-  Static reports are accepted when a provider is available but LLM analysis
-  was neither requested nor applied; availability alone is not execution.
-
-- The Tier 1 SkillSpector scan of a skill that references PNG or JPEG images,
-  such as a logo shown with `![Logo](assets/logo.png)`, is no longer
-  `INCOMPLETE` only because SkillSpector's text pattern analyzers cannot read
-  images and report the analysis as `partial`. That gap is now a warning when
-  the report shows no other gap and no fatal scope exclusion, and each image
-  is a regular, single-link (not hard-linked), non-executable file whose bytes
-  have the chunk or marker structure of a PNG or JPEG, is not reached through
-  a symlink, and is not in a directory that agents run, load as instructions
-  or read as configuration. The gap is accepted for at most 256 images and
-  128 MiB of image data in total. The structure check corroborates the file
-  type without decoding the image or proving that it renders. PNG IDAT
-  compressed data and ancillary chunks, and JPEG entropy-coded data and APPn
-  or COM segments, are not inspected and can still carry other bytes. Other
-  image formats, files without that structure, and every other partial reason
-  still leave the scan `INCOMPLETE`. SkillSpector's own High `AE1` findings for
-  images it could not inspect are unchanged.
-
-- Tier 3 plain progress output, which `--progress auto` selects for CI and
-  redirected logs, now repeats its `still running` heartbeat every 60 seconds
-  instead of every second, so long runs no longer add thousands of identical
-  lines per hour. The interactive Rich view still refreshes every second. A
-  new `--progress-interval SECONDS` option on `tier3 evaluate` and `tier3 PATH`
-  sets the interval explicitly for either view (0.05 to 86400 seconds;
-  non-finite values are rejected).
-
-- SkillSpector runs are no longer stopped after a fixed 300 seconds, which ended
-  slow `--llm` security scans, such as those on local models, as `INCOMPLETE`
-  before SkillSpector's own scan deadline (1,080 seconds in v2.13.3). Each run
-  now has a 1,200-second watchdog by default; set
-  `SKILLEVALUATOR_SKILLSPECTOR_TIMEOUT_SECONDS` to a positive integer to change
-  it (values above 86400 are capped). `SKILLSPECTOR_MAX_WORKFLOW_SECONDS` is now
-  forwarded to SkillSpector so its own deadline can be raised as well, and the
-  security result records the effective `skillspector_timeout_seconds`
-  ([#155](https://github.com/NVIDIA/SkillEvaluator/issues/155)).
-
-## 0.7.0 - 2026-11-02
-
-### Added
-
-- Custom execution backends. An installed package can add an `--env-mode`
-  through the `skillevaluator.env_modes` entry-point group, naming an
-  `EnvironmentBackendSpec` with a Harbor environment class plus the `--ek`
-  kwargs, host variables, prerequisite hook, and optional agent wrappers that
-  backend accepts. Custom execution backends follow the same kwarg and
-  `runtime_env` policy as Harbor-native backends, may not forward agent,
-  provider, or other backends' credentials, cannot replace a built-in mode or
-  share a name with another installed package, are not named on published
-  benchmark cards, and can be turned off with
-  `SKILLEVALUATOR_DISABLE_CUSTOM_BACKENDS=1`.
-- The lightweight `publisher` install extra adds the dependencies for verifying
-  GitHub-signed execution receipts without installing the Tier 3 runtime.
-- Private Python helpers add bounded plugin manifest discovery, component
-  inventories, hook/MCP/LSP/settings and permission checks, context estimates,
-  dependency and endpoint audits, and local catalog comparisons. Private
-  runtime helpers collect canary and hook evidence for explicit callers.
 - Support Python 3.14 alongside Python 3.12 and 3.13, including installation
   guidance and CI coverage for tests and built packages.
 - Add reusable GitLab CI onboarding and configurable Tier 1 quality thresholds,
@@ -144,8 +30,7 @@ All notable changes to SkillEvaluator are documented in this file.
   `no change`, `inconclusive`). With several agents, each agent gets a column
   showing without-skill → with-skill marks and the pass-rate change. Success
   rate, quality score, and dimensions follow. A "How to improve" list follows,
-  capped at three. It puts run errors last and ranks each group by attempts
-  lost; each item names the case,
+  ranked by attempts lost and capped at three; each item names the case,
   agent, issue type (`skill`, `skill not used`, `skill hurts`, `environment`,
   `run error`, `eval case`, `missing input`, `goal not met`), one action, and an evidence
   path, and is also written to `what_to_fix.json` in the run directory. When
@@ -208,14 +93,29 @@ All notable changes to SkillEvaluator are documented in this file.
   expected-case checks cover only the cases that ran, `run_config.json` records
   the selection as `case_selection`, and a run that skipped cases is reported
   as publication-incomplete in JSON, HTML, and BENCHMARK.md.
+- `doctor` and `health-check` take `--tier 1|2|3|all`, so Tier 1 and Tier 2
+  readiness can be checked before a run instead of surfacing mid-validation.
+  Tier 1 reports each scanner that the `--checks` selection runs: SkillSpector,
+  Bandit, Semgrep, Gitleaks, and pip-audit for `dependency`. Each row shows the
+  resolved path, any executable override, and the version from a bounded,
+  shell-free probe. A scanner fails when it is missing, its override is
+  malformed, its probe fails or exceeds `--timeout` (default 60 seconds, at
+  most 3600), or it is older than Bandit 1.9.4 or Gitleaks 8. Tier 2 resolves
+  the embedding and LLM providers offline. `doctor --tier 2 --verify-models`
+  also sends one embedding request and one chat request, each bounded by
+  `--timeout` and sent without retries, and reports only the HTTP status and a
+  remedy. `--tier all` checks every tier, and a failed tier does not stop the
+  next. Without `--tier`, both commands still check Tier 3 only. An option for
+  an unselected tier, or `--timeout` for an offline Tier 2 check, is a usage
+  error. `tier3 doctor` remains Tier 3-only.
 
 - Tier 1 `--llm` security scans of a single skill keep the LLM provenance that
   SkillSpector v2.12.0 and later report: the provider adapter, the model and
   SkillSpector revision behind each LLM analyzer, and the sampling and
   determinism evidence. The Security result in the JSON report carries it as
   `skillspector_llm_provenance`, next to `skillspector_provider_id`, the
-  SkillEvaluator provider the scan was bridged from (for example `nv_build`).
-  The HTML report, including
+  SkillEvaluator provider the scan was bridged from (for example `nv_build`,
+  which SkillSpector runs as its `openai` adapter). The HTML report, including
   CI pages rendered from the retained Tier 1 JSON, lists it in a collapsible
   Tier 1 LLM Provenance table. The record is also kept when the LLM stage
   fails or SkillSpector does not confirm LLM analysis, as long as
@@ -223,9 +123,27 @@ All notable changes to SkillEvaluator are documented in this file.
   was attempted. Records that do not match SkillSpector's provenance contract or
   that contain endpoint- or credential-shaped values are left out, and older
   SkillSpector releases produce no record.
+- `--skip-with-skill` on `tier3 evaluate` and the direct `tier3` workflow runs
+  only the without-skill baseline arm, for example to calibrate a task set or
+  re-measure a baseline after a model change without paying for with-skill
+  trials. Only baseline tasks are staged and launched. The run is reported as
+  a baseline calibration: `mode` is `baseline_only`, the overall score and best
+  agent come from the baseline arm, the with-skill arm is recorded as
+  `skipped`, with-skill scores and lift stay unavailable instead of becoming
+  0.0 (report tables print `skipped`), and the verdict stays NEUTRAL. The flag
+  is mutually exclusive with `--skip-baseline`, keeps the baseline isolation
+  rules, and is not accepted by `validate`, so a baseline-only run cannot pass
+  a Tier 3 gate.
 
 ### Changed
 
+- Shared LLM calls and the Harbor verifier retry HTTP 408, 429, and every 5xx
+  response except 501 and 505, including proxy 520–524 and overload 529 errors.
+  TLS certificate verification failures stop immediately. The host Bedrock
+  path preserves the underlying status and certificate failure through
+  LiteLLM wrappers, so generic 500/503 errors do not cause extra attempts.
+  This applies to ordinary skill evaluations and other host LLM calls as well
+  as plugin evaluations; retry limits and scoring formulas are unchanged.
 - Hosted GitHub reports verify a separate GitHub-signed execution receipt.
   Enable `id-token: write` in the scan workflow and refresh its approved blob
   when adding hosting; ordinary scans keep their existing read-only permissions.
@@ -314,47 +232,12 @@ All notable changes to SkillEvaluator are documented in this file.
 
 ### Fixed
 
-- Tier 3 reports preserve judge-model exclusions when calculating dimension and
-  overall lift. Native multi-step results also retain the judge provenance needed
-  for those comparisons, so fallback judges cannot turn a regression into an
-  apparent improvement. Judge-free cases retain valid lift, bounded report loads
-  use the collector's recorded comparisons, and FINAL-strategy trials use only
-  the final step's judges. The CLI displays unavailable comparisons as `n/a`.
-  Dashboard score differences preserve the same matching-judge lift, including
-  unavailable comparisons.
-- The LLM judge treats a schema option reported as `unavailable` as a schema
-  rejection and retries without it, so OpenAI-compatible endpoints such as
-  DeepSeek, which answer `response_format: json_schema` with HTTP 400 and
-  "This response_format type is unavailable now", can score Tier 3 instead
-  of failing every judge call (fixes #207).
-- External scanners no longer crash the scan when they print bytes that the
-  selected text codec cannot decode (for example a Windows traceback with a
-  CJK path). Those bytes are replaced, so the captured output is never `None`,
-  and valid output keeps the selected codec and universal-newline handling.
-- The Tier 1 LLM rubric gives reasoning models (DeepSeek R and V4, OpenAI o1,
-  o3, o4 and GPT-5 families, and models named "reasoning") a 32,768-token
-  budget instead of the default 16,384, giving hidden reasoning more room
-  before the rubric JSON is emitted. The budget follows the model each request
-  resolves to, is capped at 16,384 on the Anthropic provider, and an explicit
-  `max_tokens` overrides this default, subject to provider and model limits.
-- `doctor --env-mode docker` and Tier 3 runs on Windows now find the Harbor
-  CLI installed next to the active interpreter as `harbor.exe` or
-  `harbor.cmd`, instead of reporting "harbor CLI not found".
-- Tier 3 records `accuracy` and `goal_accuracy` as N/A when an eval case has
-  no reference answer, and `behavior_check` as N/A when it has no expected
-  behavior, without calling those judges. `skill_execution` and
-  `skill_efficiency` are N/A in a baseline arm with no skill it could activate;
-  staged acceptable alternatives keep them applicable. Scores and lift exclude
-  explicitly marked N/A metrics, while Security remains required and missing
-  or failed evidence stays incomplete. Pass-rate lift uses the metrics shared
-  by both arms, so activation alone cannot create lift.
-
+- Use public, commit-pinned README image URLs so the wordmark and three-tier
+  diagram can render in PyPI package descriptions as well as on GitHub.
 - On Windows, repository root and source-link detection no longer break for
-  repositories in non-ASCII folders: Git output is decoded as UTF-8 instead of
-  the locale code page.
-- Private plugin risk checks preserve PowerShell semantics in hook conditions,
-  grants, findings and remediation; denying Bash no longer hides a PowerShell
-  grant.
+  repositories in non-ASCII folders. Git's repository path is decoded as a file
+  name and its remote URL and branch as UTF-8, instead of with the locale code
+  page.
 - CI quality thresholds apply to every parallel scan worker. Report overviews
   and detailed reports surface failed quality gates ahead of advisory findings,
   with links to the check that needs attention.
@@ -364,6 +247,14 @@ All notable changes to SkillEvaluator are documented in this file.
   Markdown sections are packed by paragraph, so short labels and fragments stay
   attached to their neighbours, source ranges retain blank-line gaps, and findings
   list a split source once.
+- A chat model that declines to classify a Tier 2 content cluster (a safety
+  refusal, which some models return for security-themed skill content) no
+  longer marks the scan incomplete and fails `validate` under the default
+  `--block-on-dedup`. Tier 2 now reports the refusal as an advisory MEDIUM
+  `llm_refused` finding that names the overlapping sections, and the JSON
+  report's `llm_analysis` counts it in `clusters_refused`. Other chat-LLM
+  failures still leave the scan incomplete. Raise `CONTENT_DEDUP.llm_refused`
+  in a policy overlay to keep refusals blocking.
 - Local-mode verifier uploads now copy directly to the absent destination,
   avoiding an unnecessary rollback snapshot of an empty tests directory.
   Inputs and rewritten scripts are prepared privately before publication,
@@ -438,6 +329,20 @@ All notable changes to SkillEvaluator are documented in this file.
   background tasks back on, and other agents ignore the variable. A skill whose
   single commands need longer can raise Claude Code's default with
   `BASH_DEFAULT_TIMEOUT_MS` in `harbor.runtime_env`.
+
+- Tier 1 security scans no longer fail a skill for an exact read-only
+  `/etc/passwd` bind mount such as `docker run -v /etc/passwd:/etc/passwd:ro`.
+  SkillSpector 2.11.1 and later tags this mount as likely benign but still
+  reports a HIGH Credential Access (PE3) finding. That finding is now ignored
+  only when it carries both benign-context tags and every `/etc/passwd` on the
+  reported source line, read without following links, is the source or target
+  of such a mount. The aggregate risk score is recomputed without it. Writable
+  or implicit-mode mounts, other paths, same-line reads such as
+  `cat /etc/passwd`, aggregated rows, and earlier SkillSpector versions still
+  block. Captured SkillSpector 2.13.3 reports cover both mount operands and a
+  separate blocking read, and partial LLM-response inspection stays incomplete.
+  Static reports are accepted when a provider is available but LLM analysis
+  was neither requested nor applied; availability alone is not execution.
 
 - PII email scans recognize all RFC 2606 reserved domains, including their
   subdomains, mixed-case forms, trailing dots, and prose ellipses. A local-part
@@ -554,6 +459,22 @@ All notable changes to SkillEvaluator are documented in this file.
   `quality-check` before any report was written. The schema check reports the
   malformed `metadata`, and the quality score counts `metadata.author` and
   `metadata.tags` as missing, as it already did for other non-mapping values.
+- The Tier 1 SkillSpector scan of a skill that references PNG or JPEG images,
+  such as a logo shown with `![Logo](assets/logo.png)`, is no longer
+  `INCOMPLETE` only because SkillSpector's text pattern analyzers cannot read
+  images and report the analysis as `partial`. That gap is now a warning when
+  the report shows no other gap and no fatal scope exclusion, and each image
+  is a regular, single-link (not hard-linked), non-executable file whose bytes
+  have the chunk or marker structure of a PNG or JPEG, is not reached through
+  a symlink, and is not in a directory that agents run, load as instructions
+  or read as configuration. The gap is accepted for at most 256 images and
+  128 MiB of image data in total. The structure check corroborates the file
+  type without decoding the image or proving that it renders. PNG IDAT
+  compressed data and ancillary chunks, and JPEG entropy-coded data and APPn
+  or COM segments, are not inspected and can still carry other bytes. Other
+  image formats, files without that structure, and every other partial reason
+  still leave the scan `INCOMPLETE`. SkillSpector's own High `AE1` findings for
+  images it could not inspect are unchanged.
 - A `SKILL.md` over the recommended 5,000-token budget now gets a MEDIUM
   `quality_efficiency` finding instead of a HIGH one. The HIGH finding failed
   the quality check, and with it `validate`, `tier1`, and `quality-check`, even
@@ -569,15 +490,25 @@ All notable changes to SkillEvaluator are documented in this file.
   `SKILLSPECTOR_PROVIDER=nv_build` gets the same mapping. The key still reaches
   SkillSpector only as `OPENAI_API_KEY`, with `OPENAI_BASE_URL` set to the
   public Build endpoint.
+- Tier 3 plain progress output, which `--progress auto` selects for CI and
+  redirected logs, now repeats its `still running` heartbeat every 60 seconds
+  instead of every second, so long runs no longer add thousands of identical
+  lines per hour. The interactive Rich view still refreshes every second. A
+  new `--progress-interval SECONDS` option on `tier3 evaluate` and `tier3 PATH`
+  sets the interval explicitly for either view (0.05 to 86400 seconds;
+  non-finite values are rejected).
+- SkillSpector runs are no longer stopped after a fixed 300 seconds, which ended
+  slow `--llm` security scans, such as those on local models, as `INCOMPLETE`
+  before SkillSpector's own scan deadline (1,080 seconds in v2.13.3). Each run
+  now has a 1,200-second watchdog by default; set
+  `SKILLEVALUATOR_SKILLSPECTOR_TIMEOUT_SECONDS` to a positive integer to change
+  it (values above 86400 are capped). `SKILLSPECTOR_MAX_WORKFLOW_SECONDS` is now
+  forwarded to SkillSpector so its own deadline can be raised as well, and the
+  security result records the effective `skillspector_timeout_seconds`
+  ([#155](https://github.com/NVIDIA/SkillEvaluator/issues/155)).
 
 ### Security
 
-- Refresh locked AnyIO, certifi, and PyJWT dependencies used by source and CI
-  installations, and update Streamlit and Pillow for the optional dashboard.
-  Published package dependency ranges are unchanged.
-- Plugin inventories and findings now redact credentials embedded in declared
-  component paths, including invalid or unsafe references, before recording
-  their names, locations and metadata.
 - Linux local mode now launches Bubblewrap by the absolute path that passed its
   smoke test instead of a bare `bwrap`. The bare name was looked up on the host
   `PATH` for every command, from that command's working directory (the
@@ -587,19 +518,20 @@ All notable changes to SkillEvaluator are documented in this file.
   `PATH` is resolved to its target before the smoke test, and the local-mode
   isolation message names that resolved path.
 
-### Development
-
-- The staged Harbor verifier reuses the shared log-secret redactor, guarded
-  by the Python 3.9 verifier smoke check.
-- Python 3.13 and 3.14 CI test jobs run in parallel with `pytest -n auto`;
-  the Python 3.12 coverage job remains serial.
-- Streamed-execution cleanup tests wait for descendant processes to exit
-  before asserting termination, avoiding a race on macOS.
-
 ## 0.6.0 - 2026-10-20
 
 ### Added
 
+- Custom execution backends. An installed package can add an `--env-mode`
+  through the `skillevaluator.env_modes` entry-point group, naming an
+  `EnvironmentBackendSpec` with a Harbor environment class plus the `--ek`
+  kwargs, host variables, prerequisite hook, and optional agent wrappers that
+  backend accepts. Custom execution backends follow the same kwarg and
+  `runtime_env` policy as Harbor-native backends, may not forward agent,
+  provider, or other backends' credentials, cannot replace a built-in mode or
+  share a name with another installed package, are not named on published
+  benchmark cards, and can be turned off with
+  `SKILLEVALUATOR_DISABLE_CUSTOM_BACKENDS=1`.
 - Optional `skillevaluator dashboard` tables for comparing saved Tier 3 reports
   and retained runs across skills, models, harnesses, recorded harness
   features, and skill conditions. Paired with/without differences cover score,
@@ -675,7 +607,9 @@ All notable changes to SkillEvaluator are documented in this file.
 - `run_config.json` records the judge reasoning effort, and each standard
   judge's details record `judge_model_used`, `judge_reasoning_effort` and
   `judge_fallback_used`. Skill lift leaves out a case whose two conditions were
-  judged by different models and counts it in `judge_mixed_cases`.
+  judged by different models and counts it in `judge_mixed_cases`. Dashboard
+  score differences preserve this matching-judge lift, including unavailable
+  comparisons.
 - Removed the unused `CONTENT_DEDUP_LLM_*` constants and `LLM_VERIFY_MODEL`; an
   LLM client built from explicit credentials uses the provider default model.
 - Tier 3 pins the agent CLIs Harbor installs: Codex 0.161.0 and Claude Code
@@ -736,6 +670,17 @@ All notable changes to SkillEvaluator are documented in this file.
 
 ### Fixed
 
+- Tier 3 reports preserve judge-model exclusions when calculating dimension and
+  overall lift. Native multi-step results also retain the judge provenance needed
+  for those comparisons, so fallback judges cannot turn a regression into an
+  apparent improvement. Judge-free cases retain valid lift, bounded report loads
+  use the collector's recorded comparisons, and FINAL-strategy trials use only
+  the final step's judges. The CLI displays unavailable comparisons as `n/a`.
+- The LLM judge treats a schema option reported as `unavailable` as a schema
+  rejection and retries without it, so OpenAI-compatible endpoints such as
+  DeepSeek, which answer `response_format: json_schema` with HTTP 400 and
+  "This response_format type is unavailable now", can score Tier 3 instead
+  of failing every judge call (fixes #207).
 - Tier 3 reports an inconclusive result when every observed positive with-skill
   trial has zero activation, and omits skill-lift comparisons for that agent.
   Activation counts are reported separately; negative controls and missing
@@ -809,6 +754,19 @@ All notable changes to SkillEvaluator are documented in this file.
   budget and judge time-budget variables, and the Harbor process environment.
   The CLI reference adds `validate --workers`, the full `--env-mode` list, and
   the exit codes the CLI actually returns (`0`, `1`, `2`).
+- External scanners no longer crash the scan when they print bytes that the
+  selected text codec cannot decode (for example a Windows traceback with a
+  CJK path). Those bytes are replaced, so the captured output is never `None`,
+  and valid output keeps the selected codec and universal-newline handling.
+- The Tier 1 LLM rubric gives reasoning models (DeepSeek R and V4, OpenAI o1,
+  o3, o4 and GPT-5 families, and models named "reasoning") a 32,768-token
+  budget instead of the default 16,384, giving hidden reasoning more room
+  before the rubric JSON is emitted. The budget follows the model each request
+  resolves to, is capped at 16,384 on the Anthropic provider, and an explicit `max_tokens`
+  overrides this default, subject to provider and model limits.
+- `doctor --env-mode docker` and Tier 3 runs on Windows now find the Harbor
+  CLI installed next to the active interpreter as `harbor.exe` or
+  `harbor.cmd`, instead of reporting "harbor CLI not found".
 - `BENCHMARK.md` publication verdicts now require completed Tier 1 and Tier 2
   execution evidence by default (Tier 1 must cover every default check that
   applies to the content type, so a run narrowed with `--checks` cannot

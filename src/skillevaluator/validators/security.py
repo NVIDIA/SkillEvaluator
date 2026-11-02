@@ -547,7 +547,7 @@ def _combine_skillspector_applicability(blocks: list[dict]) -> dict:
         by_role.update(block["suppressed_by_file_role"])
     return {
         "artifact_type": blocks[0]["artifact_type"],
-        "reported_issues": sum(block["reported_issues"] for block in blocks),
+        "kept_issues": sum(block["kept_issues"] for block in blocks),
         "suppressed_inapplicable_issues": sum(block["suppressed_inapplicable_issues"] for block in blocks),
         "suppressed_by_file_role": dict(sorted(by_role.items())),
         "raw_risk_score": max(block["raw_risk_score"] for block in blocks),
@@ -2389,7 +2389,7 @@ class SecurityValidator(ValidatorBase):
         if self.content_type is not None:
             result.metadata["skillspector_applicability"] = {
                 "artifact_type": self.content_type,
-                "reported_issues": len(scanned_issues),
+                "kept_issues": len(scanned_issues),
                 "suppressed_inapplicable_issues": skipped_inapplicable,
                 "suppressed_by_file_role": dict(sorted(skipped_by_role.items())),
                 "raw_risk_score": reported_score,

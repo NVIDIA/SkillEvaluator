@@ -271,7 +271,7 @@ class TestTier1Applicability:
         assert result.findings == []
         assert result.metadata["skillspector_applicability"] == {
             "artifact_type": "skill",
-            "reported_issues": 0,
+            "kept_issues": 0,
             "suppressed_inapplicable_issues": 6,
             "suppressed_by_file_role": {
                 "documentation": 1,
@@ -308,6 +308,8 @@ class TestTier1Applicability:
         }
         assert {finding.metadata["applicability"] for finding in result.findings} == {"agent-control-path"}
         assert {finding.metadata["artifact_type"] for finding in result.findings} == {"skill"}
+        assert result.metadata["skillspector_applicability"]["kept_issues"] == 4
+        assert "reported_issues" not in result.metadata["skillspector_applicability"]
 
     def test_explicit_security_scan_is_unrestricted(self, tmp_path: Path) -> None:
         scan_root = tmp_path / "skill"
@@ -1435,7 +1437,7 @@ class TestSecurityValidatorScope:
         assert result.passed
         assert result.metadata["skillspector_applicability"] == {
             "artifact_type": "skill",
-            "reported_issues": 0,
+            "kept_issues": 0,
             "suppressed_inapplicable_issues": 4,
             "suppressed_by_file_role": {"notebook": 2, "ui_source": 2},
             "raw_risk_score": 60,

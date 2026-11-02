@@ -712,6 +712,87 @@ def test_repeated_pii_finding_id_survives_line_moves(tmp_path) -> None:
     assert repeated.occurrence_id != moved.occurrence_id
 
 
+def test_occurrence_identity_uses_forward_slashes() -> None:
+    common = {
+        "category": "SECURITY",
+        "severity": Severity.HIGH,
+        "check_name": "unsafe-command",
+        "message": "Unsafe command execution",
+        "line_number": 3,
+    }
+
+    windows = Finding(**common, file_path="scripts\\run.py")
+    posix = Finding(**common, file_path="scripts/run.py")
+
+    assert windows.occurrence_id == posix.occurrence_id
+
+
+def test_occurrences_with_and_without_a_line_number_sort_without_error() -> None:
+    from skillevaluator.reporting.finding_summary import summarize_findings
+
+    result = ValidationResult(validator_name="SECURITY", validator_description="Security")
+    for line_number in (None, 3):
+        result.add_finding(
+            Finding(
+                category="SECURITY",
+                severity=Severity.HIGH,
+                check_name="unsafe-command",
+                message="Unsafe command execution",
+                file_path="scripts/run.py",
+                line_number=line_number,
+            )
+        )
+
+    summary = summarize_findings([result])
+
+    assert summary["unique_findings"] == 1
+    assert summary["distinct_occurrences"] == 2
+    assert [item["line_number"] for item in summary["groups"][0]["occurrences"]] == [None, 3]
+    data = json.loads(JSONReporter(include_timestamp=False).render_all([result]))
+    assert data["finding_groups"][0]["occurrence_count"] == 2
+    assert "1 unique finding (1 high) / 2 occurrences" in MarkdownReporter().render_all([result])
+    assert _findings_kpi(HTMLReporter(include_timestamp=False).render_all([result]))[0] == "1"
+
+
+def _unsafe_command(severity: Severity, line_number: int) -> Finding:
+    return Finding(
+        category="SECURITY",
+        severity=severity,
+        check_name="unsafe-command",
+        message="Unsafe command execution",
+        file_path="scripts/run.py",
+        line_number=line_number,
+        suggestion="Use an argument vector.",
+    )
+
+
+def test_reconciled_finding_keeps_its_highest_severity_in_every_format() -> None:
+    # JSON merges per-result summaries; HTML and Markdown summarize all
+    # results at once. Both paths must keep the higher severity.
+    medium = ValidationResult(validator_name="SECURITY", validator_description="Security")
+    medium.add_finding(_unsafe_command(Severity.MEDIUM, 8))
+    high = ValidationResult(validator_name="CODE_RISK", validator_description="Code risk")
+    high.add_finding(_unsafe_command(Severity.HIGH, 8))
+    results = [medium, high]
+
+    data = json.loads(JSONReporter(include_timestamp=False).render_all(results))
+    html_data = _html_report_data(HTMLReporter(include_timestamp=False).render_all(results))
+    for document in (data, html_data):
+        assert [group["severity"] for group in document["finding_groups"]] == ["high"]
+        assert document["finding_counts"]["unique_by_severity"]["high"] == 1
+        assert document["finding_counts"]["unique_by_severity"]["medium"] == 0
+    assert "| Total Issues | 1 unique finding (1 high) / 1 occurrence / 2 raw records |" in (
+        MarkdownReporter().render_all(results)
+    )
+
+    # One validator reporting the finding as medium, then high, blocks as high.
+    single = ValidationResult(validator_name="SECURITY", validator_description="Security")
+    single.add_finding(_unsafe_command(Severity.MEDIUM, 8))
+    single.add_finding(_unsafe_command(Severity.HIGH, 12))
+    summary = _exec_summary(HTMLReporter(include_timestamp=False).render_all([single]))
+    assert re.search(r'Blocking critical \+ high</dt>\s*<dd class="kpi-value"><strong[^>]*>1</strong>', summary)
+
+
 def test_finding_reconciliation_contract_matches_json_markdown_and_html(monkeypatch) -> None:
     results = _repeated_finding_results()
 

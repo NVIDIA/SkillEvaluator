@@ -6,6 +6,13 @@ All notable changes to SkillEvaluator are documented in this file.
 
 ### Added
 
+- Tier 1 `schema` now reports harness-portability issues: duplicate frontmatter
+  keys (HIGH), a UTF-8 BOM, a symlinked or nested `SKILL.md`, descriptions over
+  1,024 UTF-16 units (MEDIUM), `SKILL.md` size tiers (32 KiB LOW, 50 KiB MEDIUM,
+  256,000 bytes HIGH), fields outside the agentskills.io spec, and a missing
+  "Use when ..." trigger in the first 60 characters (LOW). The `skill.md`
+  naming finding now explains the macOS/Linux difference.
+
 - Add reusable GitLab CI onboarding and configurable Tier 1 quality thresholds,
   alongside a shared repository integration guide.
 - Opt-in `SKILL_EVAL_JUDGE_CHARACTER_FACTS=1` adds bounded, escaped Unicode

@@ -411,6 +411,24 @@ Tier 1 checks always gate the exit code inside `validate`. Tier 2 gates when it 
   <Accordion title="SkillSpector reports incomplete analysis for a valid helper script">
     SkillSpector releases before v2.13.1 can stop inspecting a valid Python or Perl helper early and record a `static_parse_limit`, `obfuscated_instruction_text`, or `runtime_limit` ledger exception. The security check is then `INCOMPLETE`, often with a High **Incomplete referenced artifact analysis (AE1)** finding at each line that names the helper. Check the installed release with `skillspector --version` and upgrade with `uv tool install git+https://github.com/NVIDIA/SkillSpector.git@v2.13.3`. If the exception remains after the upgrade, investigate it like any other incomplete scan.
   </Accordion>
+  <Accordion title="SkillSpector times out">
+    Each SkillSpector run (the static stage, and the LLM stage with `--llm`)
+    is stopped after 1,200 seconds by default, and the security scan is reported
+    `INCOMPLETE` with `skillspector timed out after 1200 seconds`. SkillSpector
+    also ends a scan at its own deadline (1,080 seconds by default in v2.13.3) and reports partial
+    analysis, which is `INCOMPLETE` as well. Slow or local LLM providers can
+    need more time. Raise both limits, keeping SkillEvaluator's watchdog higher:
+
+    ```bash
+    export SKILLSPECTOR_MAX_WORKFLOW_SECONDS=1800
+    export SKILLEVALUATOR_SKILLSPECTOR_TIMEOUT_SECONDS=2400
+    skillevaluator validate ./my-skill --tiers 1 --llm
+    ```
+
+    Each stage gets the full watchdog, so a scan that stalls in both stages can
+    take up to twice the value before it is reported. See
+    [Environment Variables](environment-variables.mdx#validation-tier-1).
+  </Accordion>
   <Accordion title="An LLM-backed stage fails immediately">
     Configure a supported provider or select a keyless Tier 1 run with
     `skillevaluator tier1 ./my-skill --no-llm` or

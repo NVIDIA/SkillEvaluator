@@ -1296,9 +1296,51 @@ def test_extended_codex_rejected_allsettled_record_is_an_error():
         False,
         True,
     ]
+    assert [codex_tool_call_normalizer.normalized_tool_call_error_flag(step, call) for step, call in yielded] == [
+        False,
+        True,
+    ]
     assert [codex_tool_call_normalizer.normalized_tool_call_observation(step, call) for step, call in yielded] == [
         json.dumps(record, separators=(",", ":")) for record in _ALL_SETTLED_SPREAD_RECORDS
     ]
+
+
+@pytest.mark.parametrize("extractor", _EXTRACTORS)
+def test_extended_codex_extracted_records_carry_is_error(extractor):
+    source = _ALL_SETTLED_SOURCE + "results.forEach((r,i)=>text({i,...r}));"
+    calls = extractor(_trajectory(source, _record_observation(_ALL_SETTLED_SPREAD_RECORDS)))
+
+    assert [call.get("is_error") for call in calls] == [False, True]
+
+
+def test_extended_codex_record_status_wins_over_outer_failure():
+    source = _ALL_SETTLED_SOURCE + "results.forEach((r,i)=>text({i,...r}));"
+    trajectory = {
+        "steps": [
+            {
+                "source": "agent",
+                "tool_calls": [
+                    {
+                        "tool_call_id": "outer-call",
+                        "function_name": "exec",
+                        "arguments": {"input": source},
+                    }
+                ],
+                "observation": {
+                    "results": [
+                        {
+                            "source_call_id": "outer-call",
+                            "content": _record_observation(_ALL_SETTLED_SPREAD_RECORDS),
+                            "extra": {"tool_result_is_error": True},
+                        }
+                    ]
+                },
+            }
+        ]
+    }
+    calls = extract_tool_calls_as_dicts(trajectory)
+
+    assert [call.get("is_error") for call in calls] == [False, True]
 
 
 @pytest.mark.parametrize("extractor", _EXTRACTORS)

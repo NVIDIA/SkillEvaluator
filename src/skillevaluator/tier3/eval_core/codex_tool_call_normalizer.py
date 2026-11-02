@@ -1122,6 +1122,7 @@ def _codex_exec_records(observation: str, record_format: tuple, count: int) -> l
 _upstream_normalize_tool_call = normalize_tool_call
 _upstream_normalized_tool_call_observation = normalized_tool_call_observation
 _upstream_normalized_tool_call_is_error = normalized_tool_call_is_error
+_upstream_normalized_tool_call_error_flag = normalized_tool_call_error_flag
 
 
 def _normalize_tool_call_with_records(tool_call: dict[str, Any]) -> list[dict[str, Any]]:
@@ -1195,14 +1196,30 @@ def _normalized_tool_call_observation_with_records(step: dict[str, Any], tool_ca
     return _upstream_normalized_tool_call_observation(step, tool_call)
 
 
+def _normalized_tool_call_error_flag_with_records(
+    step: dict[str, Any], tool_call: dict[str, Any]
+) -> bool | None:
+    """Report a call's own record outcome before falling back to the upstream flag."""
+    if (
+        tool_call.get("_atif_observation_status") == MAPPED_OUTER_EXEC_OBSERVATION
+        and _RECORD_IS_ERROR in tool_call
+    ):
+        return bool(tool_call[_RECORD_IS_ERROR])
+    return _upstream_normalized_tool_call_error_flag(step, tool_call)
+
+
 def _normalized_tool_call_is_error_with_records(step: dict[str, Any], tool_call: dict[str, Any]) -> bool:
     """Also report the explicit failure of a call's own record: a rejected promise."""
-    if tool_call.get("_atif_observation_status") == MAPPED_OUTER_EXEC_OBSERVATION and tool_call.get(_RECORD_IS_ERROR):
-        return True
+    if (
+        tool_call.get("_atif_observation_status") == MAPPED_OUTER_EXEC_OBSERVATION
+        and _RECORD_IS_ERROR in tool_call
+    ):
+        return bool(tool_call[_RECORD_IS_ERROR])
     return _upstream_normalized_tool_call_is_error(step, tool_call)
 
 
 normalize_tool_call = _normalize_tool_call_with_records
 iter_normalized_tool_calls = _iter_normalized_tool_calls_with_records  # noqa: F811
 normalized_tool_call_observation = _normalized_tool_call_observation_with_records
+normalized_tool_call_error_flag = _normalized_tool_call_error_flag_with_records
 normalized_tool_call_is_error = _normalized_tool_call_is_error_with_records

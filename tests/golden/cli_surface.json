@@ -698,6 +698,14 @@
           "param_type": "option"
         },
         {
+          "name": "progress_interval",
+          "opts": [
+            "--progress-interval"
+          ],
+          "param_type": "option",
+          "type": "float"
+        },
+        {
           "default": "False",
           "is_flag": true,
           "name": "verbose",
@@ -2651,6 +2659,14 @@
               "param_type": "option"
             },
             {
+              "name": "progress_interval",
+              "opts": [
+                "--progress-interval"
+              ],
+              "param_type": "option",
+              "type": "float"
+            },
+            {
               "default": "False",
               "is_flag": true,
               "name": "verbose",
@@ -3183,6 +3199,14 @@
               "--progress"
             ],
             "param_type": "option"
+          },
+          {
+            "name": "progress_interval",
+            "opts": [
+              "--progress-interval"
+            ],
+            "param_type": "option",
+            "type": "float"
           },
           {
             "default": "False",

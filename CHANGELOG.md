@@ -463,6 +463,13 @@ All notable changes to SkillEvaluator are documented in this file.
   `SKILLSPECTOR_PROVIDER=nv_build` gets the same mapping. The key still reaches
   SkillSpector only as `OPENAI_API_KEY`, with `OPENAI_BASE_URL` set to the
   public Build endpoint.
+- Tier 3 plain progress output, which `--progress auto` selects for CI and
+  redirected logs, now repeats its `still running` heartbeat every 60 seconds
+  instead of every second, so long runs no longer add thousands of identical
+  lines per hour. The interactive Rich view still refreshes every second. A
+  new `--progress-interval SECONDS` option on `tier3 evaluate` and `tier3 PATH`
+  sets the interval explicitly for either view (0.05 to 86400 seconds;
+  non-finite values are rejected).
 - SkillSpector runs are no longer stopped after a fixed 300 seconds, which ended
   slow `--llm` security scans, such as those on local models, as `INCOMPLETE`
   before SkillSpector's own scan deadline (1,080 seconds in v2.13.3). Each run

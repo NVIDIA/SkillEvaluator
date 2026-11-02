@@ -117,6 +117,25 @@ jobs:
       - name: Run tests
         run: uv run pytest -q -n auto
 
+  test-python-314:
+    name: Tests (Python 3.14)
+    needs: classify-changes
+    if: ${{ !cancelled() && needs.classify-changes.outputs.docs_only != 'true' }}
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7.0.0
+        with:
+          persist-credentials: false
+      - uses: actions/setup-python@ece7cb06caefa5fff74198d8649806c4678c61a1 # v6.3.0
+        with:
+          python-version: "3.14"
+      - uses: astral-sh/setup-uv@d31148d669074a8d0a63714ba94f3201e7020bc3 # v8.3.0
+        with:
+          version: "0.11.27"
+      - run: uv sync --all-extras --locked --python 3.14
+      - name: Run tests
+        run: uv run pytest -q -n auto
+
   html-parser-compatibility:
     name: HTML parser compatibility (Python ${{ matrix.python-version }})
     needs: classify-changes
@@ -205,12 +224,12 @@ jobs:
         run: python scripts/check_oss_boundary.py --root . --allowlist config/oss_boundary_allowlist.json --archive dist/*.whl --archive dist/*.tar.gz
       - name: Validate distribution metadata
         run: uvx --from twine==6.2.0 twine check --strict dist/*
-      - name: Install and smoke-test the wheel on Python 3.12 and 3.13
+      - name: Install and smoke-test the wheel on Python 3.12, 3.13, and 3.14
         shell: bash
         run: |
           wheel="$(find "$PWD/dist" -maxdepth 1 -type f -name 'skillevaluator-*.whl' -print -quit)"
           test -n "$wheel"
-          for python_version in 3.12 3.13; do
+          for python_version in 3.12 3.13 3.14; do
             venv="$RUNNER_TEMP/skillevaluator-wheel-${python_version}"
             uv venv --python "$python_version" "$venv"
             uv pip install --python "$venv/bin/python" "${wheel}[tier3]"

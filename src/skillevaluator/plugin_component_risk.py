@@ -64,6 +64,7 @@ from skillevaluator.validators.mcp_static import (
     TRUTHY_VALUES,
     EndpointClass,
     HostAllowlist,
+    _inline_credentials,
     _split_words,
     classify_endpoint_host,
     classify_mcp_pinning,
@@ -72,6 +73,7 @@ from skillevaluator.validators.mcp_static import (
 )
 from skillevaluator.validators.url_policy import (
     DEFAULT_PORTS,
+    has_secret_shape,
     is_env_reference,
     looks_like_inline_secret,
     safe_url,
@@ -145,7 +147,7 @@ MAX_HOOK_HANDLERS = 512
 # script cannot be read and is reported as unanalyzed (never scanned in part).
 MAX_SCRIPT_BYTES = CONTENT_DEDUP_MAX_FILE_BYTES
 MAX_SCRIPT_READS = 32
-# File names a script mentions that are checked as possible second-level scripts; more is a finding.
+# File names a script mentions that are checked as possible scripts it runs; more is a finding.
 MAX_SCRIPT_REFERENCES = 256
 # Distinct files one shell text runs that are matched against downloads; past it the hook is unanalyzed.
 MAX_RUN_SITES = 2048
@@ -199,6 +201,26 @@ _CURSOR_ALLOW_RES: tuple[re.Pattern[str], ...] = (
     re.compile(r"\bdecision\W{0,8}allow\b"),
 )
 _ALLOW_SHAPES: dict[str, tuple[re.Pattern[str], ...]] = {"claude": _ALLOW_DECISION_RES, "cursor": _CURSOR_ALLOW_RES}
+
+
+def _allow_value_re(value: str) -> re.Pattern[str]:
+    """An allow value written apart from its key: a string literal (``'allow'``, ``\\"allow\\"``), a shell
+    assignment (``DECISION=allow``), or a jq argument (``--arg d allow``)."""
+    return re.compile(
+        rf"[\"'`]\\?{value}\\?[\"'`]|=[ \t]{{0,64}}{value}\b|--arg(?:json)?[ \t]{{1,64}}\w{{1,64}}[ \t]{{1,64}}{value}\b"
+    )
+
+
+# A decision computed at run time: the code names a decision key and holds an allow value elsewhere
+# ("decision = 'allow' if ... else 'ask'", "respond('allow')", "permissionDecision: safe ? 'allow' : 'ask'",
+# 'jq --arg d allow', 'DECISION=allow'), so the value need not sit next to the key.
+_COMPUTED_ALLOW_RES: tuple[tuple[str, re.Pattern[str], re.Pattern[str]], ...] = (
+    ("claude", re.compile(r"permissionDecision\b"), _allow_value_re("allow")),
+    ("claude", re.compile(r"\bdecision\b"), _allow_value_re("approve")),
+    ("claude", re.compile(r"\bbehavior\b"), _allow_value_re("allow")),
+    ("cursor", re.compile(r"\bpermission\b"), _allow_value_re("allow")),
+    ("cursor", re.compile(r"\bdecision\b"), _allow_value_re("allow")),
+)
 # JSON hook output that puts text in front of the model on any event: additionalContext, a replaced tool
 # output, or (on Stop and SubagentStop) a block decision whose reason tells the model how to continue.
 _CONTEXT_OUTPUT_RES: tuple[tuple[str, re.Pattern[str]], ...] = (
@@ -236,15 +258,17 @@ _INTERPRETER = (
 # 'source' or '.' as a command (at the start of a statement), never '.' as an argument ('jq . file').
 _SOURCE_COMMAND = r"(?:(?:^|[;&|(\n`{\"'])[ \t]{0,64}|\b(?:then|do|else)[ \t]{1,64})(?:source|\.)"
 # One shell command: quoted strings, escapes, and single pipes stay inside it; ';', '&', '&&', '||', and
-# newlines end it.
-_SHELL_COMMAND_RE = re.compile(r"""(?:'[^']*'|"(?:[^"\\]|\\.)*"|\\.|\|(?!\|)&?|[^'"\\|;&\n])+""", re.DOTALL)
+# newlines end it, except a newline after a trailing '|' (or '\'), where the shell continues the pipeline.
+_SHELL_COMMAND_RE = re.compile(
+    r"""(?:'[^']*'|"(?:[^"\\]|\\.)*"|\\.|\|(?!\|)&?(?:[ \t]*+\r?\n)*+|[^'"\\|;&\n])+""", re.DOTALL
+)
 _FETCHER_RE = re.compile(rf"\b{_FETCHERS}\b", re.IGNORECASE)
 # A pipeline stage that starts with an interpreter: '| sh', '| sudo bash', '|& /usr/bin/env python3'.
-_STAGE_INTERPRETER_RE = re.compile(rf"&?\s*(?P<interpreter>{_INTERPRETER})", re.IGNORECASE)
+_STAGE_INTERPRETER_RE = re.compile(rf"&?(?:\s|\\\r?\n)*+(?P<interpreter>{_INTERPRETER})", re.IGNORECASE)
 _XARGS_RE = re.compile(r"\bxargs\b", re.IGNORECASE)
 # A pipeline stage that sources its standard input: '| source /dev/stdin', '| . /dev/fd/0'.
 _STAGE_SOURCE_STDIN_RE = re.compile(
-    r"&?\s*(?:source|\.)\s+[\"']?(?:/dev/stdin|/dev/fd/0|/proc/self/fd/0|-)[\"']?(?:\s|$)"
+    r"&?(?:\s|\\\r?\n)*+(?:source|\.)\s+[\"']?(?:/dev/stdin|/dev/fd/0|/proc/self/fd/0|-)[\"']?(?:\s|$)"
 )
 # bash -c "$(curl ...)", sh <(wget ...), eval "$(curl ...)", source <(curl ...), . <(curl ...)
 _SUBSTITUTION_RE = re.compile(
@@ -1728,6 +1752,23 @@ _SCRIPT_INTERPRETER_RE = re.compile(
 _SCRIPT_FILE_RE = re.compile(r"[\w.-]{1,128}\.(?:sh|bash|zsh|py|js|mjs|cjs|ts|rb|pl|php|ps1)")
 
 
+def _bare_words(words: Iterable[str]) -> list[str]:
+    """Command words without shell punctuation attached to them: ``(cd`` is ``cd``, and ``./x.sh)`` and
+    ``"${CLAUDE_PLUGIN_ROOT}/x.sh";`` (quotes already removed) name ``./x.sh`` and ``${CLAUDE_PLUGIN_ROOT}/x.sh``;
+    a word of only punctuation (``(``, ``;``) is dropped."""
+    bare = (word.lstrip("(").rstrip(");&") for word in words)
+    return [word for word in bare if word]
+
+
+def _cd_target(words: list[str], index: int) -> int:
+    """The index of the directory a ``cd`` / ``pushd`` at ``words[index]`` changes to, past its options
+    (``cd -P``, ``cd --``); ``len(words)`` when it names none."""
+    target = index + 1
+    while target < len(words) and len(words[target]) > 1 and words[target].startswith("-"):
+        target += 1
+    return target
+
+
 def _relative_word(word: str, *, program: bool) -> bool:
     """Whether ``word`` names a file by a path relative to the working directory.
 
@@ -1759,7 +1800,7 @@ def _relative_run_paths(text: str, refs: tuple[str, ...] = _PLUGIN_ROOT_REFS) ->
     plugin_cwd = False
     for command in _SHELL_COMMAND_RE.finditer(text):
         for stage in command.group(0).split("|"):
-            words = _split_words(stage)
+            words = _bare_words(_split_words(stage))
             index = 0
             while index < len(words) and (
                 words[index] in _RELATIVE_WRAPPER_WORDS or _ASSIGNMENT_WORD_RE.match(words[index]) is not None
@@ -1768,8 +1809,8 @@ def _relative_run_paths(text: str, refs: tuple[str, ...] = _PLUGIN_ROOT_REFS) ->
             if index >= len(words):
                 continue
             if words[index] in {"cd", "pushd"}:
-                target = words[index + 1].strip("\"'") if index + 1 < len(words) else ""
-                plugin_cwd = _root_ref(target, refs) is not None
+                target = _cd_target(words, index)
+                plugin_cwd = target < len(words) and _root_ref(words[target].strip("\"'"), refs) is not None
                 continue
             if plugin_cwd:
                 continue
@@ -1843,6 +1884,16 @@ def _allow_shapes_of(code: str, decoded: str) -> frozenset[str]:
         shape
         for shape, patterns in _ALLOW_SHAPES.items()
         if any(pattern.search(candidate) for candidate in texts for pattern in patterns)
+    )
+
+
+def _computed_allow_shapes(decoded: str) -> frozenset[str]:
+    """The approval output shapes whose decision key and allow value comment-free, escape-decoded hook text
+    holds apart from each other, so the decision may be computed (a variable, helper, ternary, or jq argument)."""
+    if "allow" not in decoded and "approve" not in decoded:
+        return frozenset()
+    return frozenset(
+        shape for shape, key, value in _COMPUTED_ALLOW_RES if key.search(decoded) and value.search(decoded)
     )
 
 
@@ -1967,6 +2018,7 @@ class _ShellFacts:
         *,
         remote_code: bool = False,
         allow_shapes: frozenset[str] = frozenset(),
+        computed_allow_shapes: frozenset[str] = frozenset(),
         downloads: _Downloads | None = None,
         packages: tuple[_PackageRun, ...] = (),
         package_scan_truncated: bool = False,
@@ -1975,6 +2027,8 @@ class _ShellFacts:
         self._text = text
         self.remote_code = remote_code
         self.allow_shapes = allow_shapes
+        # Shapes whose allow value is held apart from the decision key (the decision may be computed).
+        self.computed_allow_shapes = computed_allow_shapes
         self.context_outputs = context_outputs
         self.downloads = downloads if downloads is not None else _Downloads()
         self.packages = packages
@@ -2038,6 +2092,7 @@ def _shell_facts(text: str) -> _ShellFacts:
     facts = _ShellFacts(
         text,
         allow_shapes=_allow_shapes_of(code, decoded),
+        computed_allow_shapes=_computed_allow_shapes(decoded),
         packages=packages,
         package_scan_truncated=package_scan.truncated,
         context_outputs=_context_outputs(decoded),
@@ -2168,12 +2223,36 @@ def _stage_runs_stdin(stage: str, depth: int = 0) -> bool:
         return True
     match = _STAGE_INTERPRETER_RE.match(stage)
     if match is None:
-        return False
+        return _wrapped_stage_runs_stdin(stage, depth)
     head = match.group("interpreter")
     if _XARGS_RE.search(head):
         return True  # xargs hands the downloaded text to the interpreter as arguments
     name = head.split()[-1].strip("\"'").replace("\\", "/").rsplit("/", 1)[-1].lower().strip("${}")
     return _program_from_stdin(_interpreter_family(name), _stage_arguments(stage[match.end() :][:2048]), depth)
+
+
+_STAGE_PROGRAM_RE = re.compile(rf"(?:{_SHELL_VARIABLE}|{_EXECUTORS})", re.IGNORECASE)
+# A stage that starts with a launch wrapper, which may take an option value the interpreter pattern does not read.
+_STAGE_WRAPPER_RE = re.compile(
+    rf"&?(?:\s|\\\r?\n)*+[\"']?(?:[{_PATH_CHARS}]{{0,128}}/)?"
+    r"(?:sudo|doas|env|nice|nohup|setsid|stdbuf|time|timeout|exec|command|busybox)[\"']?(?:\s|\\\r?\n)",
+    re.IGNORECASE,
+)
+
+
+def _wrapped_stage_runs_stdin(stage: str, depth: int) -> bool:
+    """Whether a stage whose wrapper takes an option value (``| sudo -u root bash``, ``| nice -n 10 sh -s``,
+    ``| env -u HISTFILE bash``) runs its standard input; the wrappers are removed as for MCP launch commands."""
+    if _STAGE_WRAPPER_RE.match(stage) is None:
+        return False
+    words = _stage_arguments(stage.lstrip().removeprefix("&")[:2048])
+    program = unwrap_launch_command(words, expand_shell=False)
+    if not program or program == words:
+        return False
+    name = program[0].replace("\\", "/").rsplit("/", 1)[-1]
+    if _STAGE_PROGRAM_RE.fullmatch(name) is None:
+        return False
+    return _program_from_stdin(_interpreter_family(name.lower().strip("${}")), program[1:], depth)
 
 
 # A redirection operator at the start of an unquoted word: '>', '>>', '2>', '&>', '>&2', '<&0', '{fd}>', '<<<'.
@@ -2184,9 +2263,12 @@ def _stage_arguments(text: str) -> list[str]:
     """The arguments a pipeline stage passes its interpreter, as the shell reads them.
 
     Quotes are removed. An unquoted ``#`` at the start of a word ends the
-    command (``| sh # install``), and redirections (``> /dev/null``,
-    ``2>&1``, ``<&0``) are not arguments, so neither reads as a script path.
-    A quoted ``'#x'`` or ``'>'`` stays an argument. Linear in the text.
+    command (``| sh # install``), and so does an unquoted ``)``, ``,``, or
+    backtick there: the end of a subshell or command substitution, or of a
+    shell string inside Python or JavaScript (``os.system("curl … | sh")``,
+    ``execSync('curl … | sh', {…})``). Redirections (``> /dev/null``,
+    ``2>&1``, ``<&0``) are not arguments, so none of these reads as a script
+    path. A quoted ``'#x'`` or ``'>'`` stays an argument. Linear in the text.
     """
     words: list[tuple[str, int]] = []  # (word without quotes, length of its leading unquoted part)
     chars: list[str] = []
@@ -2212,8 +2294,12 @@ def _stage_arguments(text: str) -> list[str]:
             chars, plain, in_word, unquoted = [], 0, False, True
         elif char == "#" and not in_word:
             break  # a comment: the rest of the line is not part of the command
+        elif char in "),`" and not in_word:
+            break  # the command, or the string or substitution that holds it, ends here
         elif char in "'\"":
             quote, in_word, unquoted = char, True, False
+        elif char == "\\" and text.startswith("\n", index):
+            index += 1  # a line continuation joins the lines
         elif char == "\\":
             in_word, unquoted = True, False
             if index < len(text):
@@ -2665,6 +2751,43 @@ def _command_url_credentials(text: str) -> bool:
     return any(url_credentials(match.group(0), userinfo_rule="secret") for match in _URL_IN_TEXT_RE.finditer(text))
 
 
+# A command substitution, from its start to the end of the word: the shell fills it in when the hook runs.
+_WORD_SUBSTITUTION_RE = re.compile(r"\\?(?:\$\(|`).*", re.DOTALL)
+
+
+def _command_inline_credential(tokens: list[str]) -> bool:
+    """Whether hook command words carry a credential outside a URL: the value of a credential-named flag
+    (``--api-key x``, the MCP command-argument rule), a word shaped like a token or an inline ``Bearer``
+    credential (``-H "Authorization: Bearer ghp_..."``), or a literal assigned to a credential-named variable
+    (``GITHUB_TOKEN=x tool``). References (``$TOKEN``, ``${TOKEN}``) and command substitutions
+    (``--token "$(gh auth token)"``) never count, and shell punctuation attached to a word (``;``) is no part of it."""
+    words: list[str] = []
+    for token in tokens:
+        words.append(token)
+        if any(char.isspace() for char in token.strip()):  # a quoted command string, split once more
+            words.extend(_split_words(token))
+    words = [_WORD_SUBSTITUTION_RE.sub("${_}", word.rstrip(";&")) for word in words]
+    if _inline_credentials(words):
+        return True
+    for word in words:
+        assignment = _ASSIGNMENT_WORD_RE.match(word)
+        if assignment is None:
+            continue
+        name, value = word[: assignment.end() - 1], word[assignment.end() :]
+        if looks_like_inline_secret(name, value, query=False):
+            return True
+    return False
+
+
+def _url_path_secret(url: str) -> bool:
+    """Whether a URL's path has a segment shaped like a token (``https://hooks.example/ghp_...``)."""
+    try:
+        path = urlsplit(url).path
+    except ValueError:
+        return False
+    return any(has_secret_shape(unquote(segment)) for segment in path.split("/") if segment)
+
+
 def _header_secret(key: str, value: str) -> bool:
     """Inline credential in an HTTP hook header (``$VAR`` interpolation is allowed)."""
     stripped = value.strip()
@@ -2720,7 +2843,7 @@ class _ScriptEvidence:
     """What one plugin script a hook runs does; each script is read and scanned once."""
 
     facts: _ShellFacts
-    # Root-relative paths of other plugin scripts this one names; followed one more level.
+    # Root-relative paths of other plugin scripts this one names; followed in turn, within the read budget.
     references: tuple[PurePosixPath, ...] = ()
     # Why not every script this one names is followed (it names too many files).
     note: str | None = None
@@ -2901,8 +3024,8 @@ class HookAnalyzer:
     At most ``MAX_SCRIPT_READS`` scripts are read (missing paths do not count).
     A script's text is scanned whole, and the plugin scripts it runs (named by
     ``${CLAUDE_PLUGIN_ROOT}/...``, ``$(dirname "$0")/...``, or a script file
-    name, but not in a comment or an ``echo`` / ``test``) are followed one more
-    level. A hook whose script is unreadable or past that cap, whose texts run
+    name, but not in a comment or an ``echo`` / ``test``) are followed in turn,
+    to any depth. A hook whose script is unreadable or past that cap, whose texts run
     more than ``MAX_RUN_SITES`` files while the plugin downloads something, or an
     approval hook that names the plugin root but runs no script that could be
     read, is flagged ``script_unanalyzed``; a config past the ``MAX_HOOK_*``
@@ -3077,15 +3200,17 @@ class HookAnalyzer:
         :meth:`_root_aliases`) and root default chains read as the plain placeholder."""
         words: list[str] = []
         for token in tokens:
-            words.append(token)
-            if any(char.isspace() for char in token.strip()):
-                words.extend(_split_words(token))  # 'bash -c "cd ${CLAUDE_PLUGIN_ROOT} && ./approve.sh"'
+            words.extend(_bare_words([token]))
+            if any(char.isspace() for char in token.strip()):  # a quoted command string, split once more
+                words.extend(_bare_words(_split_words(token)))
         aliases = aliases or {}
         paths: list[PurePosixPath] = []
         cwd: PurePosixPath | None = None
         for index, word in enumerate(words):
             if word in {"cd", "pushd"} and index + 1 < len(words):
-                cwd = self._root_directory(self._rooted(words[index + 1], aliases))
+                target = _cd_target(words, index)
+                if target < len(words):
+                    cwd = self._root_directory(self._rooted(words[target], aliases))
                 continue
             paths.extend(self._script_paths(self._rooted(word, aliases), cwd))
         return list(dict.fromkeys(paths))
@@ -3093,30 +3218,30 @@ class HookAnalyzer:
     def _script_evidence(
         self, tokens: list[str], aliases: dict[str, str] | None = None
     ) -> tuple[list[_ShellFacts], list[str], bool]:
-        """Facts of the plugin scripts a command runs (and of the scripts they name, one level), why any of
-        them was not analyzed, and whether any script was found at all."""
+        """Facts of the plugin scripts a command runs (and of the scripts those name, in turn), why any of
+        them was not analyzed, and whether any script the command names was found at all.
+
+        Scripts are followed breadth first until none is left; :data:`MAX_SCRIPT_READS` bounds the reads, and
+        a script past it is reported as not analyzed.
+        """
         facts: list[_ShellFacts] = []
         unanalyzed: list[str] = []
-        first = self._first_level_paths(tokens, aliases)
-        seen = set(first)
-        second: list[PurePosixPath] = []
+        queue = self._first_level_paths(tokens, aliases)
+        first = len(queue)
+        seen = set(queue)
         found = False
-        for rel in first:
+        for index, rel in enumerate(queue):  # the queue grows as scripts name others
             evidence = self._evidence(rel, unanalyzed)
             if evidence is None:
                 continue
-            found = True
+            found = found or index < first
             facts.append(evidence.facts)
             if evidence.note:
                 unanalyzed.append(evidence.note)
             for reference in evidence.references:
                 if reference not in seen:
                     seen.add(reference)
-                    second.append(reference)
-        for rel in second:
-            evidence = self._evidence(rel, unanalyzed)
-            if evidence is not None:
-                facts.append(evidence.facts)
+                    queue.append(reference)
         return facts, unanalyzed, found or bool(unanalyzed)
 
     def _evidence(self, rel: PurePosixPath, unanalyzed: list[str]) -> _ScriptEvidence | None:
@@ -3469,13 +3594,13 @@ class HookAnalyzer:
                 "their ${CLAUDE_PLUGIN_ROOT} path, and keep their number and size small; review the script, "
                 "then override with severity_overrides PLUGIN_SCHEMA.plugin_hook_script_unanalyzed if intended.",
             )
-        if _command_url_credentials(text):
+        if _command_url_credentials(text) or _command_inline_credential(tokens):
             site.report(
                 "inline_secret",
                 Severity.CRITICAL,
                 "plugin_hook_inline_secret",
-                "the command embeds a credential in a URL (user:password@, or a credential query or fragment "
-                "parameter)",
+                "the command embeds a credential (in a URL's user:password@ or a credential query or fragment "
+                "parameter, a credential-named flag or variable, or a token-shaped argument)",
                 "Remove the credential from the hook command; read it from an environment variable or a "
                 "credential helper when the hook runs.",
             )
@@ -3547,17 +3672,25 @@ class HookAnalyzer:
 
     @staticmethod
     def _auto_approve(facts: list[_ShellFacts], site: _HookSite) -> None:
-        shapes = frozenset().union(*(fact.allow_shapes for fact in facts))
-        if site.scope is None or not shapes & set(site.dialect.allow_shapes):
+        dialect = set(site.dialect.allow_shapes)
+        literal = frozenset().union(*(fact.allow_shapes for fact in facts)) & dialect
+        computed = frozenset().union(*(fact.computed_allow_shapes for fact in facts)) & dialect
+        if site.scope is None or not (literal or computed):
             return
         site.record.add_flag("auto_approve")  # also for a narrow matcher, which gets no finding
+        emits = (
+            "emits an allow decision"
+            if literal
+            else "can emit an allow decision (its code sets a decision key and holds an allow value, so the "
+            "decision may be computed)"
+        )
         if site.scope in {"all", "bash"}:
             target = "every tool call" if site.scope == "all" else "shell commands"
             site.report(
                 "auto_approve",
                 Severity.HIGH,
                 "plugin_hook_auto_approve",
-                f"the command emits an allow decision for {target}, which skips the user's permission prompt",
+                f"the command {emits} for {target}, which skips the user's permission prompt",
                 "Do not auto-approve tool calls from a plugin hook; narrow the matcher and return 'ask' or "
                 "no decision.",
             )
@@ -3566,7 +3699,7 @@ class HookAnalyzer:
                 "auto_approve",
                 Severity.MEDIUM,
                 "plugin_hook_auto_approve_scoped",
-                f"the command emits an allow decision for {', '.join(site.scoped_tools)}, which skips the user's "
+                f"the command {emits} for {', '.join(site.scoped_tools)}, which skips the user's "
                 "permission prompt for file writes, web fetches, or MCP tool calls (and, for edits, the "
                 "working-directory limit that acceptEdits keeps)",
                 "Do not auto-approve write, fetch, or MCP tool calls from a plugin hook; return 'ask' or no decision.",
@@ -3617,13 +3750,19 @@ class HookAnalyzer:
                 "Set 'url' to the https:// endpoint that receives the hook input.",
             )
             return
-        record.target = safe_url(url)
         record.url = url.strip()
         # Claude Code posts the hook with a WHATWG URL parser (Node), which reads a
         # backslash as '/' and drops tabs and line breaks. Every check below reads
         # the URL that way; text that urllib reads differently is itself invalid.
         client_url = whatwg_url(url)
         problems = url_ambiguities(url, percent_in_host=True)
+        # Messages name the host Claude Code posts to ('https://169.254.169.254\\@host/' goes to the metadata
+        # host), unless the userinfo of either reading carries a credential, which is never shown.
+        userinfo_secret = (
+            url_credentials(client_url, userinfo_rule="any").userinfo
+            or url_credentials(record.url, userinfo_rule="secret").userinfo
+        )
+        record.target = safe_url(client_url if problems and not userinfo_secret else url)
         if problems:
             site.report(
                 "invalid_url",
@@ -3637,12 +3776,17 @@ class HookAnalyzer:
         # Read from the URL text, so credentials are flagged even when the authority is malformed. Both
         # readings count: any userinfo Claude Code would send, and a literal password or token in the
         # raw text (committed with the plugin even when a backslash moves it out of the client's userinfo).
-        if url_credentials(client_url, userinfo_rule="any") or url_credentials(record.url, userinfo_rule="secret"):
+        if (
+            url_credentials(client_url, userinfo_rule="any")
+            or url_credentials(record.url, userinfo_rule="secret")
+            or _url_path_secret(client_url)
+        ):
             site.report(
                 "inline_secret",
                 Severity.CRITICAL,
                 "plugin_hook_inline_secret",
-                "the http handler url embeds credentials (user:password, or a credential query or fragment parameter)",
+                "the http handler url embeds credentials (user:password, a credential query or fragment parameter, "
+                "or a token in its path)",
                 "Remove credentials from the URL; pass them through headers with $VAR interpolation and "
                 "allowedEnvVars.",
             )

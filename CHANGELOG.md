@@ -221,6 +221,9 @@ All notable changes to SkillEvaluator are documented in this file.
 
 ### Fixed
 
+- Reusable Tier 1 CI always requires Semgrep in scanner subprocesses, so local
+  optional-scanner defaults cannot hide missing CI code-scanning coverage.
+
 - On Windows, repository root and source-link detection no longer break for
   repositories in non-ASCII folders. Git's repository path is decoded as a file
   name and its remote URL and branch as UTF-8, instead of with the locale code

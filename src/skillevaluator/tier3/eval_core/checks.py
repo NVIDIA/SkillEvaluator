@@ -394,42 +394,52 @@ _NETWORK_EXECUTABLES = ("curl", "wget", "http", "https")
 # Commands that run a later word as a command in another root, container,
 # host, user, or network route. Any network client they start is flagged, even
 # when its own arguments upload nothing. "ip" covers "ip netns exec" and
-# "ip vrf exec".
+# "ip vrf exec". The set is fixed: any other command that starts a client only
+# gets that client's own upload rules.
 _NETWORK_COMMAND_RUNNERS = frozenset(
     {
+        "apptainer",
+        "autossh",
+        "buildah",
         "bwrap",
         "chroot",
         "crictl",
+        "ctr",
+        "distrobox",
         "docker",
+        "docker-compose",
         "firejail",
+        "flatpak-spawn",
         "incus",
         "ip",
         "kubectl",
         "lxc",
         "lxc-attach",
         "machinectl",
+        "mosh",
         "nerdctl",
         "nsenter",
         "oc",
         "pkexec",
         "podman",
+        "podman-compose",
+        "proot",
         "proxychains",
         "proxychains4",
         "runuser",
+        "schroot",
         "sg",
+        "singularity",
         "ssh",
         "sshpass",
         "su",
         "systemd-nspawn",
         "systemd-run",
+        "toolbox",
         "torsocks",
         "unshare",
     }
 )
-# Commands that print only an executable's name or path, as in "$(which curl)".
-# Text printers such as echo and printf print every later word too, so they are
-# resolved separately.
-_EXECUTABLE_LOOKUP_COMMANDS = frozenset({"command", "readlink", "realpath", "type", "whereis", "which"})
 _COMMAND_SUBSTITUTION_RE = re.compile(r"\$\(([^()`]*)\)|`([^`]*)`")
 # Commands that read piped or redirected input as text and never run a later
 # word as a command, as in "env | grep -i http" or "grep -c https < access.log".
@@ -1094,10 +1104,13 @@ def _redact_network_evidence(action_text: str) -> str:
 def _resolve_network_client_lookups(cmd_text: str) -> str:
     """Replace ``$(which curl)``-style substitutions with the command they name.
 
-    A lookup such as ``which``, ``command -v`` or ``type -P`` prints the path
-    of a network client, a command runner such as ``ssh`` or ``docker``, or a
-    pass-through wrapper such as ``strace``, so the substitution in command
-    position runs that command and is replaced with its name. A text printer
+    A substitution whose first command names a network client, a command
+    runner such as ``ssh`` or ``docker``, or a pass-through wrapper such as
+    ``strace`` is replaced with that name. This covers lookups such as
+    ``which``, ``command -v`` or ``type -P``, a lookup behind a wrapper such as
+    ``$(env which curl)``, and any other producer such as ``$(ls
+    /usr/bin/curl)`` or ``$(find /usr -name curl)``, so in command position
+    the substitution runs that command, as it does in bash. A text printer
     such as ``echo`` or ``printf`` also prints the words after that name, which
     become the command's arguments, so ``$(echo curl -d @.env URL)`` is replaced
     with ``curl -d @.env URL``. Only the substitution's first command is read,
@@ -1125,10 +1138,7 @@ def _resolve_network_client_lookups(cmd_text: str) -> str:
             words.append(token)
         if len(words) < 2:
             return match.group(0)
-        lookup = _shell_executable(words[0])
-        prints_text = lookup in _INERT_PRINT_COMMANDS
-        if not prints_text and lookup not in _EXECUTABLE_LOOKUP_COMMANDS:
-            return match.group(0)
+        prints_text = _shell_executable(words[0]) in _INERT_PRINT_COMMANDS
         for i in range(1, len(words)):
             name = _shell_executable(words[i]).removesuffix(".exe")
             if name in _NETWORK_EXECUTABLES or name in _NETWORK_COMMAND_RUNNERS or name in _PASS_THROUGH_WRAPPERS:
@@ -1146,12 +1156,19 @@ def _resolve_network_client_lookups(cmd_text: str) -> str:
 def _network_executable(token: str, assignments: dict[str, str], names: dict[str, str] | None = None) -> str:
     """Name a command word's executable, resolving ``$CURL`` through earlier assignments.
 
-    ``names`` caches the result per word while ``assignments`` stays the same,
-    so a word such as ``$X`` that appears many times is resolved once.
+    A value with several words, as in ``SSH="ssh -i key host"; $SSH curl URL``,
+    names the executable by its first word. ``names`` caches the result per
+    word while ``assignments`` stays the same, so a word such as ``$X`` that
+    appears many times is resolved once.
     """
     if names is not None and token in names:
         return names[token]
-    value = _resolved_shell_arg(token, assignments) if "$" in token else token
+    value = token
+    if "$" in token:
+        value = _resolved_shell_arg(token, assignments)
+        if value != token:
+            words = value.strip("\"'").split(None, 1)
+            value = words[0] if words else ""
     name = _shell_executable(value).removesuffix(".exe")
     if names is not None:
         names[token] = name
@@ -1269,6 +1286,66 @@ def _is_network_exfiltration_command(cmd_text: str, _depth: int = 0) -> bool:
     return resolved_text != cmd_text and _network_tokens_exfiltrate(_network_shell_tokens(cmd_text), _depth)
 
 
+_NETWORK_INPUT_REDIRECTS = ("<", "<<", "<<<")
+
+
+def _network_redirection(command: list[str], idx: int) -> tuple[int, bool] | None:
+    """Return the index after a redirection at ``idx`` and whether it redirects stdin.
+
+    ``< .env``, ``0< .env``, ``2> /dev/null`` and ``<<< "$x"`` are each a
+    redirection operator token, with an optional descriptor before it, and
+    its target. ``None`` means ``idx`` does not start a redirection.
+    """
+    descriptor = ""
+    if command[idx].isdigit() and idx + 1 < len(command):
+        descriptor = command[idx]
+        idx += 1
+    if command[idx] not in (*_NETWORK_INPUT_REDIRECTS, ">", ">>"):
+        return None
+    return idx + 2, command[idx] in _NETWORK_INPUT_REDIRECTS and descriptor in ("", "0")
+
+
+def _compound_keywords(command: list[str]) -> tuple[int, bool]:
+    """Count the compound commands a simple command opens and say whether it closes one.
+
+    ``while read -r l`` and ``do if true`` each open one, and ``done < .env``,
+    ``fi`` and ``}`` close one.
+    """
+    opens = 0
+    for word in command:
+        if word in _COMPOUND_OPENERS:
+            opens += 1
+        elif word not in _COMMAND_POSITION_LEADERS:
+            break
+    return opens, bool(command) and command[0] in _COMPOUND_CLOSERS
+
+
+def _compound_reads_input(tokens: list[str]) -> bool:
+    """Say whether a loop, ``if`` or ``{ ...; }`` group in the action reads piped or redirected input.
+
+    ``cat .env | while read -r l; do ...; done`` pipes into the compound, and
+    ``{ ...; } < .env`` or ``done < .env`` redirects its input. Every command
+    inside such a compound inherits that input.
+    """
+    piped = False
+    idx = 0
+    while idx < len(tokens):
+        if tokens[idx] in _SHELL_SEPARATORS:
+            piped = tokens[idx] == "|"
+            idx += 1
+            continue
+        end = idx
+        while end < len(tokens) and tokens[end] not in _SHELL_SEPARATORS:
+            end += 1
+        opens, closes = _compound_keywords(tokens[idx:end])
+        if opens and piped:
+            return True
+        if closes and any(token in _NETWORK_INPUT_REDIRECTS for token in tokens[idx + 1 : end]):
+            return True
+        idx = end
+    return False
+
+
 def _network_tokens_exfiltrate(tokens: list[str], _depth: int) -> bool:
     """Inspect a tokenized shell command for network client exfiltration indicators."""
     assignments: dict[str, str] = {}
@@ -1277,6 +1354,10 @@ def _network_tokens_exfiltrate(tokens: list[str], _depth: int) -> bool:
     word_names: dict[str, str] = {}
     idx = 0
     stdin_piped = False
+    # Input piped or redirected into a loop, if or { ...; } group reaches every
+    # command inside it, as in "while read -r l; do http URL; done < .env".
+    compound_input = _compound_reads_input(tokens)
+    compound_depth = 0
 
     while idx < len(tokens):
         if tokens[idx] in _SHELL_SEPARATORS:
@@ -1290,8 +1371,19 @@ def _network_tokens_exfiltrate(tokens: list[str], _depth: int) -> bool:
         command = tokens[idx:end]
         idx = end
 
+        opens, closes = _compound_keywords(command)
+        compound_depth = max(compound_depth + opens - closes, 0)
+        command_stdin = stdin_piped or (compound_input and compound_depth > 0)
+
         cmd_idx = 0
         while cmd_idx < len(command):
+            # A leading redirection such as "< .env http URL" is not the
+            # command word. Redirected input is the command's stdin.
+            redirection = _network_redirection(command, cmd_idx)
+            if redirection is not None:
+                cmd_idx, reads_input = redirection
+                command_stdin = command_stdin or reads_input
+                continue
             clean_tok = command[cmd_idx].strip("\"'")
             assignment = _SHELL_ASSIGNMENT_RE.match(clean_tok)
             if not assignment:
@@ -1312,12 +1404,19 @@ def _network_tokens_exfiltrate(tokens: list[str], _depth: int) -> bool:
             continue
 
         executable = _network_executable(command[cmd_idx], assignments, word_names)
+        # A "$VAR" or backtick command word may not be what the recorded
+        # assignments say: a prefix assignment, one after || or &&, one later
+        # unset, or one inside an if branch. Its resolved name only adds
+        # checks; it never skips the command as a printer or declaration, and
+        # never drops its stdin as a text consumer.
+        dynamic = "$" in command[cmd_idx] or "`" in command[cmd_idx]
 
         if executable in _SHELL_COMMAND_INTERPRETERS:
             c_payload = _shell_c_payload(command, cmd_idx, assignments)
             if c_payload and _is_network_exfiltration_command(c_payload, _depth=_depth + 1):
                 return True
-            continue
+            if not dynamic:
+                continue
 
         if executable == "eval":
             raw_args = command[cmd_idx + 1 :]
@@ -1332,9 +1431,10 @@ def _network_tokens_exfiltrate(tokens: list[str], _depth: int) -> bool:
                     eval_payload = " ".join(_resolved_shell_arg(arg, assignments) for arg in raw_args)
                 if eval_payload and _is_network_exfiltration_command(eval_payload, _depth=_depth + 1):
                     return True
-            continue
+            if not dynamic:
+                continue
 
-        if executable in _DECLARATION_BUILTINS:
+        if executable in _DECLARATION_BUILTINS and not dynamic:
             for token in command[cmd_idx + 1 :]:
                 assignment = _SHELL_ASSIGNMENT_RE.match(token.strip("\"'"))
                 if assignment:
@@ -1343,25 +1443,39 @@ def _network_tokens_exfiltrate(tokens: list[str], _depth: int) -> bool:
             continue
 
         if executable in _NETWORK_EXECUTABLES:
-            if _network_client_uploads(executable, command[cmd_idx + 1 :], stdin_piped):
+            if _network_client_uploads(executable, command[cmd_idx + 1 :], command_stdin):
                 return True
-            continue
+            if not dynamic:
+                continue
 
-        if executable in _INERT_PRINT_COMMANDS:
+        if executable in _INERT_PRINT_COMMANDS and not dynamic:
             continue
 
         # Other commands may run a later word as a command, as find -exec and
         # poetry run do, or only name a client as data, as in apt-get install
         # -y curl, which curl, grep -rn http src/, or prose in a here-document.
         # Every client named later is read with its own upload rules, as when
-        # it runs directly. The first word naming each client is enough: a
-        # later word naming the same client sees a suffix of the same
-        # arguments. Piped or redirected stdin stays with a text consumer such
-        # as grep, so it is not the client's request body; any other command
-        # may pass it on. A command runner, or one named after a pass-through
-        # wrapper such as strace or flock, starts the client elsewhere, so any
-        # client it names is flagged.
-        keeps_stdin = executable not in _STDIN_TEXT_CONSUMERS
+        # it runs directly. A later word naming the same client sees a suffix
+        # of the same arguments, so it is skipped once an earlier word's check
+        # covered it; an HTTPie word whose arguments include --ignore-stdin
+        # does not cover a later one, which may not see that flag. Piped or
+        # redirected stdin stays with a text consumer such as grep, so it is
+        # not the client's request body; any other command may pass it on. A
+        # command runner, or one named after a pass-through wrapper such as
+        # strace or flock, starts the client elsewhere, so any client named
+        # after it is flagged. After a compound keyword, as in "do grep -c
+        # http", the word after the keywords is the one that reads stdin.
+        lead = cmd_idx
+        while lead + 1 < len(command) and (
+            command[lead] in _COMPOUND_OPENERS or command[lead] in _COMMAND_POSITION_LEADERS
+        ):
+            lead += 1
+        reader = command[lead]
+        keeps_stdin = (
+            "$" in reader
+            or "`" in reader
+            or _network_executable(reader, assignments, word_names) not in _STDIN_TEXT_CONSUMERS
+        )
         runs_elsewhere = executable in _NETWORK_COMMAND_RUNNERS
         seen_clients: set[str] = set()
         for sub_idx in range(cmd_idx + 1, len(command)):
@@ -1369,15 +1483,18 @@ def _network_tokens_exfiltrate(tokens: list[str], _depth: int) -> bool:
             if executable in _PASS_THROUGH_WRAPPERS and client in _NETWORK_COMMAND_RUNNERS:
                 runs_elsewhere = True
                 continue
-            if client not in _NETWORK_EXECUTABLES or client in seen_clients:
+            if client not in _NETWORK_EXECUTABLES:
                 continue
             if runs_elsewhere:
                 return True
-            seen_clients.add(client)
+            if client in seen_clients:
+                continue
             client_args = command[sub_idx + 1 :]
             if not keeps_stdin:
-                client_args = [token for token in client_args if token not in ("<", "<<", "<<<")]
-            if _network_client_uploads(client, client_args, stdin_piped and keeps_stdin):
+                client_args = [token for token in client_args if token not in _NETWORK_INPUT_REDIRECTS]
+            if client not in ("http", "https") or "--ignore-stdin" not in (a.strip("\"'") for a in client_args):
+                seen_clients.add(client)
+            if _network_client_uploads(client, client_args, command_stdin and keeps_stdin):
                 return True
 
     return False

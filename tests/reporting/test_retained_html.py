@@ -365,6 +365,43 @@ def test_skillspector_version_survives_json_and_retained_html_roundtrip():
     assert "SkillSpector <strong>v2.12.0" in render_retained_report(payload, skill_name="demo")
 
 
+_SKILLSPECTOR_2_12_LLM_PROVENANCE = Path(__file__).parents[1] / "fixtures" / "skillspector-2.12.0-llm-provenance.json"
+
+
+def test_skillspector_llm_provenance_survives_json_and_retained_html_roundtrip():
+    provenance = json.loads(_SKILLSPECTOR_2_12_LLM_PROVENANCE.read_text(encoding="utf-8"))
+    result = ValidationResult(validator_name="Security")
+    result.metadata.update({"skillspector_llm_provenance": provenance, "skillspector_provider_id": "nv_build"})
+    payload = json.loads(JSONReporter(include_timestamp=False).render_all([result]))
+
+    metadata = retained_results(payload)[0].metadata
+    rendered = render_retained_report(payload, skill_name="demo")
+
+    assert metadata["skillspector_llm_provenance"] == provenance
+    assert metadata["skillspector_provider_id"] == "nv_build"
+    assert "Tier 1 LLM Provenance" in rendered
+    assert "<td>nv_build</td>" in rendered
+
+
+def test_retained_report_omits_non_canonical_llm_provenance():
+    provenance = json.loads(_SKILLSPECTOR_2_12_LLM_PROVENANCE.read_text(encoding="utf-8"))
+    provenance["analyzers"][0]["model"] = "https://gateway.example.test/v1"
+    payload = json.loads(
+        JSONReporter(include_timestamp=False).render_all([ValidationResult(validator_name="Security")])
+    )
+    payload["results"][0].update(
+        {"skillspector_llm_provenance": provenance, "skillspector_provider_id": "private-gateway"}
+    )
+
+    metadata = retained_results(payload)[0].metadata
+    rendered = render_retained_report(payload, skill_name="demo")
+
+    assert "skillspector_llm_provenance" not in metadata
+    assert "skillspector_provider_id" not in metadata
+    assert "Tier 1 LLM Provenance" not in rendered
+    assert "gateway.example.test" not in rendered
+
+
 @pytest.mark.parametrize(
     "check,message,metadata,expected",
     [

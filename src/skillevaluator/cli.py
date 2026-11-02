@@ -24,6 +24,7 @@ from skillevaluator.constants import (
     SIMILARITY_DEFAULT_MAX_SCALAR_COMPARISONS,
     SIMILARITY_MAX_ENTRIES,
 )
+from skillevaluator.doctor import DEFAULT_PROBE_TIMEOUT_SEC, MAX_PROBE_TIMEOUT_SEC
 from skillevaluator.logging_config import setup_logging
 from skillevaluator.models.result import ValidationResult
 from skillevaluator.quality_config import QualityConfigError, load_quality_config
@@ -48,6 +49,7 @@ from skillevaluator.reporting.naming import report_basename
 # imported lazily inside the command callbacks. This keeps `import skillevaluator.cli`
 # and the CLI surface available on a base install without those extras.
 from skillevaluator.tier1.commands import (
+    RECOGNIZED_CHECKS,
     console,
     emit_reports,
     enabled_check_lineup,
@@ -72,6 +74,16 @@ CONTEXT_SETTINGS = {"help_option_names": ["-h", "--help"]}
 
 
 ENV_MODE_CHOICE = click.Choice(list(all_env_modes()))
+
+
+class _FiniteFloatRange(click.FloatRange):
+    """Click float range that also rejects NaN and infinities."""
+
+    def convert(self, value, param, ctx):
+        converted = super().convert(value, param, ctx)
+        if not math.isfinite(converted):
+            self.fail(f"{value!r} is not a finite number", param, ctx)
+        return converted
 
 
 class _AliasChoice(click.Choice):
@@ -121,6 +133,19 @@ QUALITY_CONFIG_PATH = _QualityConfigPath()
 def _validate_similarity_threshold(_ctx: click.Context, _param: click.Parameter, value: float) -> float:
     if not math.isfinite(value) or not 0.0 <= value <= 1.0:
         raise click.BadParameter("must be finite and within [0, 1]")
+    return value
+
+
+def _validate_progress_interval(_ctx: click.Context, _param: click.Parameter, value: float | None) -> float | None:
+    if value is None:
+        return None
+    from skillevaluator.tier3.harbor.progress import MAX_REFRESH_INTERVAL_SECONDS, MIN_REFRESH_INTERVAL_SECONDS
+
+    # NaN passes every range comparison, so check finiteness explicitly.
+    if not math.isfinite(value) or not MIN_REFRESH_INTERVAL_SECONDS <= value <= MAX_REFRESH_INTERVAL_SECONDS:
+        raise click.BadParameter(
+            f"must be finite and within [{MIN_REFRESH_INTERVAL_SECONDS:g}, {MAX_REFRESH_INTERVAL_SECONDS:g}] seconds"
+        )
     return value
 
 
@@ -2858,6 +2883,11 @@ def _tier2_workflow(
     help="Create one eval case when no dataset/task source exists, then evaluate.",
 )
 @click.option("--skip-baseline", is_flag=True, help="Skip without-skill baseline.")
+@click.option(
+    "--skip-with-skill",
+    is_flag=True,
+    help="Skip the with-skill arm and run only the without-skill baseline (no lift analysis).",
+)
 @click.option("--n-attempts", type=int, default=None)
 @click.option("--pass-threshold", type=float, default=None)
 @click.option(
@@ -2916,6 +2946,14 @@ def _tier2_workflow(
     help="Tier 3 progress presentation (auto uses Rich on a TTY and plain lines otherwise).",
 )
 @click.option(
+    "--progress-interval",
+    type=float,
+    default=None,
+    metavar="SECONDS",
+    callback=_validate_progress_interval,
+    help="Seconds between Tier 3 progress heartbeats (defaults to 1 for Rich and 60 for plain/CI output).",
+)
+@click.option(
     "--verbose",
     is_flag=True,
     help="Also print per-evaluator and per-dimension tables and the metric findings report.",
@@ -2927,6 +2965,7 @@ def evaluate(
     environment_kwarg: tuple[str, ...],
     autopilot: bool,
     skip_baseline: bool,
+    skip_with_skill: bool,
     n_attempts: int | None,
     pass_threshold: float | None,
     stop_on_pass: bool | None,
@@ -2951,12 +2990,16 @@ def evaluate(
     evaluated_source_revision: str | None,
     evaluator_container_revision: str | None,
     progress: str,
+    progress_interval: float | None,
     verbose: bool,
 ) -> None:
     """Run Tier 3 live agent evaluation."""
     from skillevaluator.evaluation import EvaluationOptions, EvaluationService
     from skillevaluator.tier3.harbor.progress import create_progress_reporter
 
+    if skip_baseline and skip_with_skill:
+        # Reject before --autopilot can spend a generation call on a run that cannot start.
+        raise click.UsageError("--skip-baseline and --skip-with-skill are mutually exclusive (no arm would run)")
     service = EvaluationService()
     # Resolved before the service is built so a non-canonical value is refused
     # at the boundary rather than after a long live run has already started.
@@ -2976,6 +3019,7 @@ def evaluate(
         env_mode=env_mode,
         environment_kwarg=environment_kwarg,
         skip_baseline=skip_baseline,
+        skip_with_skill=skip_with_skill,
         n_attempts=n_attempts,
         pass_threshold=pass_threshold,
         stop_on_pass=stop_on_pass,
@@ -3041,7 +3085,11 @@ def evaluate(
                         padding=(0, 1),
                     )
                 )
-        progress_reporter = create_progress_reporter(progress, stream=click.get_text_stream("stderr"))
+        progress_reporter = create_progress_reporter(
+            progress,
+            stream=click.get_text_stream("stderr"),
+            refresh_interval=progress_interval,
+        )
         engine_result = service.evaluate(options, progress_reporter=progress_reporter)
         failure = service.failure_reason(engine_result)
         display_result = engine_result
@@ -3223,53 +3271,161 @@ def dashboard_command(paths: tuple[Path, ...], port: int | None, no_browser: boo
     raise SystemExit(launch_dashboard(paths, port=port, no_browser=no_browser))
 
 
+_DOCTOR_TIERS = ("1", "2", "3", "all")
+# Options that apply only to some tiers. An explicit value for a tier that was
+# not selected is rejected instead of being silently ignored.
+_DOCTOR_OPTION_TIERS = {
+    "checks": frozenset({"1"}),
+    "timeout": frozenset({"1", "2"}),
+    "verify_models": frozenset({"2", "3"}),
+    "agents": frozenset({"3"}),
+    "env_mode": frozenset({"3"}),
+    "environment_kwarg": frozenset({"3"}),
+    "agent_model": frozenset({"3"}),
+}
+
+
+def _doctor_tier_options(*, timeout_help: str):
+    """Add the tier selection and Tier 1/2 options shared by doctor and health-check."""
+
+    def decorate(func):
+        func = click.option(
+            "--timeout",
+            default=DEFAULT_PROBE_TIMEOUT_SEC,
+            show_default=True,
+            type=_FiniteFloatRange(min=0, min_open=True, max=MAX_PROBE_TIMEOUT_SEC),
+            help=timeout_help,
+        )(func)
+        func = click.option(
+            "--checks",
+            default=None,
+            help="Tier 1 checks whose scanners to probe, named as in validate --checks (default: validate's checks).",
+        )(func)
+        return click.option(
+            "--tier",
+            type=click.Choice(_DOCTOR_TIERS),
+            default="3",
+            show_default=True,
+            help="Readiness to check: 1 scanners, 2 embedding and LLM providers, 3 live evaluation, or all.",
+        )(func)
+
+    return decorate
+
+
+def _tier3_doctor_options(func):
+    """Add the Tier 3 options shared by doctor and tier3 doctor."""
+    func = click.option("--agent-model", multiple=True, help="Per-agent model override, AGENT=MODEL.")(func)
+    func = click.option(
+        "--environment-kwarg",
+        "--ek",
+        multiple=True,
+        help="Harbor environment constructor kwarg, KEY=VALUE. Repeat for multiple values; never pass secrets.",
+    )(func)
+    func = click.option("--env-mode", default="docker", show_default=True, type=ENV_MODE_CHOICE, metavar="MODE")(func)
+    return click.option(
+        "-a",
+        "--agents",
+        default=None,
+        help=(
+            "Comma-separated Harbor agents (claude aliases claude-code). Default follows the provider: "
+            "NVIDIA Build=opencode, OpenAI=codex, Anthropic=claude-code."
+        ),
+    )(func)
+
+
+def _run_doctor(
+    ctx: click.Context,
+    *,
+    tier: str,
+    agents: str | None,
+    env_mode: str,
+    environment_kwarg: tuple[str, ...],
+    checks: str | None = None,
+    timeout: float = DEFAULT_PROBE_TIMEOUT_SEC,
+    agent_model: tuple[str, ...] = (),
+    verify_models: bool = False,
+) -> int:
+    """Validate every option before any probe, then check each selected tier in order."""
+    selected_tiers = ("1", "2", "3") if tier == "all" else (tier,)
+
+    def explicit(name: str) -> bool:
+        return ctx.get_parameter_source(name) not in (None, click.core.ParameterSource.DEFAULT)
+
+    for name, tiers in _DOCTOR_OPTION_TIERS.items():
+        if explicit(name) and tiers.isdisjoint(selected_tiers):
+            raise click.UsageError(f"--{name.replace('_', '-')} does not apply to --tier {tier}.")
+    if explicit("timeout") and selected_tiers == ("2",) and not verify_models:
+        # Tier 2 stays offline unless --verify-models sends live requests, so
+        # there is nothing for --timeout to bound.
+        condition = " without --verify-models" if "verify_models" in ctx.params else ""
+        raise click.UsageError(f"--timeout does not apply to --tier 2{condition}.")
+    if "1" in selected_tiers:
+        unknown = sorted(set(enabled_check_lineup(checks)) - RECOGNIZED_CHECKS)
+        if unknown:
+            raise click.BadParameter(f"unknown Tier 1 check(s): {', '.join(unknown)}", param_hint="'--checks'")
+    parsed_environment_kwargs = (
+        _parse_environment_kwargs_cli(environment_kwarg, env_mode=env_mode) if "3" in selected_tiers else {}
+    )
+
+    # Tiers are independent: a failed tier never hides the readiness of the next.
+    exit_codes = []
+    for selected in selected_tiers:
+        if selected == "3":
+            from skillevaluator.tier3.commands import doctor as tier3_doctor
+
+            exit_codes.append(
+                tier3_doctor(
+                    agents=agents,
+                    env_mode=env_mode,
+                    environment_kwarg=environment_kwarg,
+                    verify_models=verify_models,
+                    agent_model=agent_model,
+                    environment_kwargs=parsed_environment_kwargs,
+                )
+            )
+        else:
+            from skillevaluator.doctor import doctor as lower_tier_doctor
+
+            exit_codes.append(
+                lower_tier_doctor(tier=selected, checks=checks, verify_models=verify_models, timeout=timeout)
+            )
+    return 1 if any(exit_codes) else 0
+
+
 @cli.command()
+@_doctor_tier_options(
+    timeout_help="Seconds allowed for each Tier 1 scanner probe and, with --verify-models, each Tier 2 live request."
+)
+@_tier3_doctor_options
 @click.option(
-    "-a",
-    "--agents",
-    default=None,
+    "--verify-models",
+    is_flag=True,
     help=(
-        "Comma-separated Harbor agents (claude aliases claude-code). Default follows the provider: "
-        "NVIDIA Build=opencode, OpenAI=codex, Anthropic=claude-code."
+        "Make live credential-bearing requests: Tier 3 checks resolved agent-model catalog reachability; "
+        "Tier 2 sends one embedding and one chat request."
     ),
 )
-@click.option("--env-mode", default="docker", show_default=True, type=ENV_MODE_CHOICE, metavar="MODE")
-@click.option(
-    "--environment-kwarg",
-    "--ek",
-    multiple=True,
-    help="Harbor environment constructor kwarg, KEY=VALUE. Repeat for multiple values; never pass secrets.",
-)
-@click.option("--agent-model", multiple=True, help="Per-agent model override, AGENT=MODEL.")
+@click.pass_context
+def doctor(ctx: click.Context, **options: Any) -> None:
+    """Check live-evaluation readiness, or select another tier with --tier."""
+    raise SystemExit(_run_doctor(ctx, **options))
+
+
+@click.command("doctor", cls=cli.command_class, context_settings=CONTEXT_SETTINGS)
+@_tier3_doctor_options
 @click.option(
     "--verify-models",
     is_flag=True,
     help="Check resolved agent-model catalog reachability with a live credential-bearing request.",
 )
-def doctor(
-    agents: str | None,
-    env_mode: str,
-    environment_kwarg: tuple[str, ...],
-    agent_model: tuple[str, ...],
-    verify_models: bool,
-) -> None:
+@click.pass_context
+def tier3_doctor_command(ctx: click.Context, **options: Any) -> None:
     """Check live-evaluation runtime readiness."""
-    from skillevaluator.tier3.commands import doctor as tier3_doctor
-
-    parsed_environment_kwargs = _parse_environment_kwargs_cli(environment_kwarg, env_mode=env_mode)
-    raise SystemExit(
-        tier3_doctor(
-            agents=agents,
-            env_mode=env_mode,
-            environment_kwarg=environment_kwarg,
-            verify_models=verify_models,
-            agent_model=agent_model,
-            environment_kwargs=parsed_environment_kwargs,
-        )
-    )
+    raise SystemExit(_run_doctor(ctx, tier="3", **options))
 
 
 @cli.command("health-check")
+@_doctor_tier_options(timeout_help="Seconds allowed for each Tier 1 scanner probe.")
 @click.option(
     "-a",
     "--agents",
@@ -3283,21 +3439,10 @@ def doctor(
     multiple=True,
     help="Harbor environment constructor kwarg, KEY=VALUE. Repeat for multiple values; never pass secrets.",
 )
-def health_check(agents: str | None, env_mode: str, environment_kwarg: tuple[str, ...]) -> None:
-    """Quick readiness check for the CLI and selected live-eval backend."""
-    from skillevaluator.tier3.commands import doctor as tier3_doctor
-
-    parsed_environment_kwargs = _parse_environment_kwargs_cli(environment_kwarg, env_mode=env_mode)
-    raise SystemExit(
-        tier3_doctor(
-            agents=agents,
-            env_mode=env_mode,
-            environment_kwarg=environment_kwarg,
-            verify_models=False,
-            agent_model=(),
-            environment_kwargs=parsed_environment_kwargs,
-        )
-    )
+@click.pass_context
+def health_check(ctx: click.Context, **options: Any) -> None:
+    """Quick readiness check for the CLI and selected live-eval backend, or another tier with --tier."""
+    raise SystemExit(_run_doctor(ctx, **options))
 
 
 @tier3.command("validate")
@@ -3348,7 +3493,7 @@ tier3.add_command(init_custom_grader, "init-custom-grader")
 tier3.add_command(init_harbor_task, "init-harbor-task")
 tier3.add_command(compare, "compare")
 tier3.add_command(view, "view")
-tier3.add_command(doctor, "doctor")
+tier3.add_command(tier3_doctor_command, "doctor")
 
 from skillevaluator.tier3.workflow import build_tier3_workflow
 

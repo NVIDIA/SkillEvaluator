@@ -6,6 +6,8 @@ All notable changes to SkillEvaluator are documented in this file.
 
 ### Added
 
+- Support Python 3.14 alongside Python 3.12 and 3.13, including installation
+  guidance and CI coverage for tests and built packages.
 - Add reusable GitLab CI onboarding and configurable Tier 1 quality thresholds,
   alongside a shared repository integration guide.
 - Opt-in `SKILL_EVAL_JUDGE_CHARACTER_FACTS=1` adds bounded, escaped Unicode
@@ -78,6 +80,15 @@ All notable changes to SkillEvaluator are documented in this file.
 - CI-native per-skill HTML pages link Download JSON to the retained
   `skillevaluator-tier1.json` and do not embed a second copy of the report
   JSON. Standalone CLI HTML reports embed it for Export JSON.
+- Tier 3 runs can be limited to the first N eval cases with the opt-in
+  `--max-cases N` flag on `validate`, `tier3`, and `tier3 evaluate`, or the
+  `harbor.max_cases` key in `evals/config.yml`; the CLI value wins. Unset, every
+  case runs as before. Cases are taken in staged order (dataset order, or
+  task-directory name order for native Harbor tasks) and the same subset runs
+  for every agent's with-skill and baseline arms. The dataset snapshot and
+  expected-case checks cover only the cases that ran, `run_config.json` records
+  the selection as `case_selection`, and a run that skipped cases is reported
+  as publication-incomplete in JSON, HTML, and BENCHMARK.md.
 
 ### Changed
 
@@ -248,6 +259,19 @@ All notable changes to SkillEvaluator are documented in this file.
   boundary prevents quadratic rescanning of long excluded addresses. Ordinary
   addresses on the same line and domains that merely resemble placeholders remain detectable
   ([#244](https://github.com/NVIDIA/SkillEvaluator/issues/244)).
+
+- A skill that exceeds a Tier 2 context-deduplication work limit (more than
+  512 content chunks, too much pairwise comparison work, or an LLM-review limit:
+  more than 50 candidate clusters, more than 64 members in one cluster, or an
+  oversized per-cluster or total review prompt) is now reported as
+  **INCOMPLETE** instead of failing with a CRITICAL `chunk_count_limit`,
+  `scalar_comparison_limit`, `llm_cluster_count_limit`,
+  `llm_cluster_member_limit`, `llm_prompt_size_limit`, or
+  `llm_total_prompt_size_limit` finding. Those findings read as duplicate
+  content in the skill and showed `FAILED` with "Publication blocked" in
+  BENCHMARK.md, and a policy severity override could downgrade them into a pass
+  with no duplicate analysis. Exit codes are otherwise unchanged. An execution
+  error names the limit, and the JSON report records it under `work_limit`.
 
 - Tier 3 security grading preserves ordinary nested `/tmp` cleanup, including
   child operands with trailing slashes, unless the current or an earlier

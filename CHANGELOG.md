@@ -135,6 +135,12 @@ All notable changes to SkillEvaluator are documented in this file.
   rules, and is not accepted by `validate`, so a baseline-only run cannot pass
   a Tier 3 gate.
 
+- Tier 1 sets up SkillSpector 2.13.3 and Gitleaks 8.30.0 on first use from
+  pinned, SHA-256-verified releases, without a prompt; Semgrep is optional
+  unless `SKILLEVALUATOR_REQUIRE_SEMGREP=1`. `--skip <check>` on `validate` and
+  `tier1` leaves a check out and reports it as skipped. A `scanners` row and the
+  JSON report record which scanner versions ran.
+
 ### Changed
 
 - Shared LLM calls and the Harbor verifier retry HTTP 408, 429, and every 5xx

@@ -169,3 +169,46 @@ def test_reporter_pushes_case_rows_once_run_dir_is_known(tmp_path):
     assert "cases       1 test case · k=2" in _text(pushed[-1])
     assert "with skill  · pdf-001    0 passed · 0 failed · 1 to go" in _text(pushed[-1])
     assert "without" not in _text(pushed[-1])
+
+
+def test_setup_fix_names_failed_download_and_recovery():
+    from skillevaluator.models.result import ValidationResult
+    from skillevaluator.reporting.console_ui import _setup_fix
+
+    secrets = ValidationResult(
+        validator_name="Secrets Detection", passed=False, metadata={"incomplete_scans": ["gitleaks"]}
+    )
+    secrets.warnings.append(
+        "couldn't download Gitleaks 8.30.0 (connection refused). Install with: brew install gitleaks"
+    )
+    item = _setup_fix([secrets])
+    assert item.problem == "secrets didn't run: couldn't download Gitleaks 8.30.0 (connection refused)"
+    assert item.actions == [
+        "check network access to github.com, then rerun",
+        "or install it yourself: brew install gitleaks",
+        "or skip it: --skip secrets",
+    ]
+
+
+def test_setup_fix_names_failed_skillspector_setup():
+    from skillevaluator.models.result import ValidationResult
+    from skillevaluator.reporting.console_ui import _setup_fix
+
+    security = ValidationResult(
+        validator_name="Security Scan",
+        passed=False,
+        metadata={"incomplete_scans": ["skillspector"]},
+    )
+    security.errors.append(
+        "couldn't set up SkillSpector 2.13.3 (network is unreachable (os error 101)). "
+        "Install with: uv tool install skillspector.whl"
+    )
+    item = _setup_fix([security])
+    assert item.problem == (
+        "security didn't run: couldn't set up SkillSpector 2.13.3 (network is unreachable (os error 101))"
+    )
+    assert item.actions == [
+        "check network access to github.com and pypi.org, then rerun",
+        "or install it yourself: uv tool install skillspector.whl",
+        "or skip it: --skip security",
+    ]

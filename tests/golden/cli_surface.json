@@ -271,6 +271,37 @@
     "doctor": {
       "params": [
         {
+          "choices": [
+            "1",
+            "2",
+            "3",
+            "all"
+          ],
+          "default": "3",
+          "name": "tier",
+          "opts": [
+            "--tier"
+          ],
+          "param_type": "option"
+        },
+        {
+          "name": "checks",
+          "opts": [
+            "--checks"
+          ],
+          "param_type": "option",
+          "type": "text"
+        },
+        {
+          "default": "60.0",
+          "name": "timeout",
+          "opts": [
+            "--timeout"
+          ],
+          "param_type": "option",
+          "type": "float range"
+        },
+        {
           "name": "agents",
           "opts": [
             "--agents",
@@ -430,6 +461,16 @@
           "name": "skip_baseline",
           "opts": [
             "--skip-baseline"
+          ],
+          "param_type": "option",
+          "type": "boolean"
+        },
+        {
+          "default": "False",
+          "is_flag": true,
+          "name": "skip_with_skill",
+          "opts": [
+            "--skip-with-skill"
           ],
           "param_type": "option",
           "type": "boolean"
@@ -683,6 +724,37 @@
     },
     "health-check": {
       "params": [
+        {
+          "choices": [
+            "1",
+            "2",
+            "3",
+            "all"
+          ],
+          "default": "3",
+          "name": "tier",
+          "opts": [
+            "--tier"
+          ],
+          "param_type": "option"
+        },
+        {
+          "name": "checks",
+          "opts": [
+            "--checks"
+          ],
+          "param_type": "option",
+          "type": "text"
+        },
+        {
+          "default": "60.0",
+          "name": "timeout",
+          "opts": [
+            "--timeout"
+          ],
+          "param_type": "option",
+          "type": "float range"
+        },
         {
           "name": "agents",
           "opts": [
@@ -2347,6 +2419,16 @@
               "type": "boolean"
             },
             {
+              "default": "False",
+              "is_flag": true,
+              "name": "skip_with_skill",
+              "opts": [
+                "--skip-with-skill"
+              ],
+              "param_type": "option",
+              "type": "boolean"
+            },
+            {
               "name": "n_attempts",
               "opts": [
                 "--n-attempts"
@@ -2866,6 +2948,16 @@
             "name": "skip_baseline",
             "opts": [
               "--skip-baseline"
+            ],
+            "param_type": "option",
+            "type": "boolean"
+          },
+          {
+            "default": "False",
+            "is_flag": true,
+            "name": "skip_with_skill",
+            "opts": [
+              "--skip-with-skill"
             ],
             "param_type": "option",
             "type": "boolean"

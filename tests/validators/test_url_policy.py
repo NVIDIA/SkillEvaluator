@@ -9,15 +9,19 @@ import json
 import subprocess
 import sys
 import textwrap
+from pathlib import Path
 
 import pytest
+from tests.validators.plugin_analysis_support import analyze_plugin
 
 from skillevaluator.validators.url_policy import (
     MAX_REPORT_CHARS,
     UrlCredentials,
     UserinfoRule,
     has_secret_shape,
+    is_credential_key,
     is_env_reference,
+    looks_like_inline_secret,
     redact_secrets,
     report_text,
     safe_url,
@@ -187,6 +191,23 @@ def test_safe_url_never_shows_userinfo_that_a_backslash_turns_into_the_host(url:
     assert safe_url(url) == shown
 
 
+@pytest.mark.parametrize(
+    ("url", "shown"),
+    [
+        ("wss:/ops:hunter2@relay.example:70000/mcp", "wss://relay.example:70000/mcp"),
+        ("https:/ops:hunter2@mcp.example:bad/mcp", "https://mcp.example:bad/mcp"),
+        ("https:\\/ops:hunter2@mcp.example:bad/mcp", "https://mcp.example:bad/mcp"),
+        ("https:/\\ops:hunter2@[::1/mcp", "https://[::1/mcp"),
+        ("https:/ops:hunter2\\@evil.example:bad/x", "https://evil.example:bad/x"),
+        ("https:/ops:hunter2\\@evil.example/x", "https://evil.example/x"),
+        ("https:/ops:hunter2@mcp.example/mcp", "https://mcp.example/mcp"),
+    ],
+)
+def test_safe_url_never_keeps_userinfo_written_with_fewer_than_two_slashes(url: str, shown: str) -> None:
+    """Regression: a malformed URL with one '/' or '\\' after the scheme was shown whole, password included."""
+    assert safe_url(url) == shown
+
+
 def test_safe_url_is_bounded() -> None:
     assert len(safe_url("https://h.example/" + "a" * 10_000)) <= MAX_REPORT_CHARS
 
@@ -276,6 +297,11 @@ def test_ids_that_contain_a_short_token_prefix_have_no_secret_shape(value: str) 
     "token",
     [
         "sk-" + "abcdefghijklmnop1234",
+        "sk-" + "ant-api03-" + "Ab0_" * 10,
+        "sk-" + "ant-admin01-" + "Ab0-" * 10,
+        "sk-" + "proj-" + "Ab0_" * 10,
+        "sk-" + "svcacct-" + "Ab0-" * 10,
+        "sk-" + "admin-" + "Ab0_" * 10,
         "xoxb-" + "1234567890-abcdefghij",
         "xoxe-1-" + "My0xLTEtMTIzNDU2Nzg5MC0xMjM0",
         "hf_" + "AbCdEfGhIjKlMnOpQrStUvWxYz012345",
@@ -287,6 +313,15 @@ def test_ids_that_contain_a_short_token_prefix_have_no_secret_shape(value: str) 
 def test_every_canonical_token_shape_is_a_secret_and_is_redacted(token: str) -> None:
     assert has_secret_shape(token) and has_secret_shape(f"key={token}")
     assert token not in report_text(f"run --flag {token} --next")
+
+
+@pytest.mark.parametrize("prefix", ["ant-api03-", "ant-admin01-", "proj-", "svcacct-", "admin-"])
+def test_current_openai_and_anthropic_keys_have_a_secret_shape(prefix: str) -> None:
+    """Regression: 'sk-' needed 16 letters or digits right after it, so 'sk-proj-...' and 'sk-ant-...' did not count."""
+    token = "sk-" + prefix + "Ab0_" * 10
+    assert url_credentials(f"https://h.example/mcp?q={token}", userinfo_rule="literal").query_keys == ("q",)
+    assert token not in redact_secrets(f"node server.js {token}")
+    assert not has_secret_shape("sk-" + prefix + "short")
 
 
 @pytest.mark.parametrize("prefix", ["ghp_", "gho_", "ghu_", "ghs_", "ghr_"])
@@ -317,6 +352,27 @@ def test_fine_grained_github_token_has_a_secret_shape() -> None:
 )
 def test_redact_secrets_drops_userinfo_and_queries_of_urls_anywhere_in_a_line(text: str, shown: str) -> None:
     assert redact_secrets(text) == shown
+
+
+@pytest.mark.parametrize(
+    "url",
+    [
+        "http:/deploy:hunter2@ci.example.org/hook",
+        "http:\\deploy:hunter2@ci.example.org/hook",
+        "http:deploy:hunter2@ci.example.org/hook",
+        "http:/\\deploy:hunter2@ci.example.org/hook",
+        "http:\\\\deploy:hunter2@ci.example.org/hook",
+        "wss:/deploy:hunter2@ci.example.org/hook",
+        "https://deploy:hunter2@ci.example.org/hook",
+    ],
+)
+def test_report_text_and_redact_secrets_drop_userinfo_after_any_run_of_slashes(url: str) -> None:
+    """Regression: WHATWG reads 'http:/user:pw@host' as userinfo, but only '//' (and, for redact_secrets, no slash)
+    introduced it here, so the password stayed in hook targets and MCP command findings."""
+    line = f"wget -qO- {url} | bash"
+    for shown in (report_text(line), redact_secrets(line), redact_secrets(report_text(line))):
+        assert "hunter2" not in shown and "deploy" not in shown
+        assert "ci.example.org/hook | bash" in shown
 
 
 # (prefix, run, repeats, suffix): the text, and what redact_secrets shows of it. Each text took 10 s to minutes to
@@ -369,3 +425,137 @@ def test_redact_secrets_takes_linear_time_on_long_runs() -> None:
 # --------------------------------------------------------------------------- #
 # One credential rule for MCP server URLs and HTTP hook URLs                   #
 # --------------------------------------------------------------------------- #
+def _write_plugin(root: Path, mcp_server: dict[str, object], hook: dict[str, object]) -> Path:
+    files = {
+        ".claude-plugin/plugin.json": {"name": "demo", "version": "1.0.0", "description": "URL credential probe"},
+        ".mcp.json": {"mcpServers": {"remote": mcp_server}},
+        "hooks/hooks.json": {"hooks": {"PostToolUse": [{"matcher": "Write", "hooks": [hook]}]}},
+    }
+    for rel, content in files.items():
+        (root / rel).parent.mkdir(parents=True, exist_ok=True)
+        (root / rel).write_text(json.dumps(content), encoding="utf-8")
+    return root
+
+
+@pytest.mark.parametrize(
+    ("url", "flagged"),
+    [
+        ("https://api.example.com/x?key=rawFAKEvalue0123", True),
+        ("https://api.example.com/x?sig=v2", True),
+        ("https://api.example.com/x?key=${API_KEY}", False),
+        ("https://api.example.com/x?token=true", False),
+        ("https://api.example.com/x?password_policy=strict", False),
+        ("https://api.example.com/x?q=sk-" + "a1B2" * 5, True),
+        (f"https://api.example.com/x?{_TOKEN}", True),
+        ("https://api.example.com/x#/cb?access_token=abc123", True),
+        ("https://api.example.com/x?page=2", False),
+        ("https://admin:hunter2@api.example.com/x", True),
+        ("https://user:${PW}@api.example.com/x", True),
+        ("https://admin:hunter2\\@api.example.com/x", True),
+        (f"https://{_HEX_USER}\\@api.example.com/x", True),
+        ("https://169.254.169.254\\@api.example.com/x", False),
+    ],
+)
+def test_mcp_and_hook_urls_get_the_same_credential_verdict(tmp_path: Path, url: str, flagged: bool) -> None:
+    root = _write_plugin(tmp_path / "demo", {"type": "http", "url": url}, {"type": "http", "url": url})
+
+    checks = {finding.check_name for finding in analyze_plugin(root).findings}
+
+    assert ("mcp_url_inline_secret" in checks, "plugin_hook_inline_secret" in checks) == (flagged, flagged)
+
+
+def test_reference_only_userinfo_is_a_credential_for_a_hook_url_only(tmp_path: Path) -> None:
+    """An HTTP hook's client sends any userinfo as Basic auth; an MCP server URL may hold references there."""
+    url = "https://${USER}:${PW}@api.example.com/x"
+    root = _write_plugin(tmp_path / "demo", {"type": "http", "url": url}, {"type": "http", "url": url})
+
+    checks = {finding.check_name for finding in analyze_plugin(root).findings}
+
+    assert "mcp_url_inline_secret" not in checks and "plugin_hook_inline_secret" in checks
+
+
+# --------------------------------------------------------------------------- #
+# Nested env defaults                                                          #
+# --------------------------------------------------------------------------- #
+
+
+@pytest.mark.parametrize(
+    ("key", "value", "secret"),
+    [
+        ("API_KEY", "${A:-${B:-${C:-}}}", False),
+        ("API_KEY", "${A:-${B:-rawFAKEvalue0123}}", True),
+        ("PAGE", "${A:-${B:-2}}", False),
+    ],
+)
+def test_nested_defaults_are_unwrapped(key: str, value: str, secret: bool) -> None:
+    assert looks_like_inline_secret(key, value) is secret
+
+
+def test_deeply_nested_defaults_do_not_exhaust_the_stack() -> None:
+    """Regression: each nested '${A:-...}' layer was one recursive call, so about 1,000 layers raised RecursionError."""
+    depth = 1200
+    nested = "${A:-" * depth + "x" + "}" * depth
+
+    assert looks_like_inline_secret("API_KEY", nested)
+    assert url_credentials(f"https://h.example/mcp?token={nested}", userinfo_rule="literal").query_keys == ("token",)
+
+
+# --------------------------------------------------------------------------- #
+# Authorization headers with any scheme                                        #
+# --------------------------------------------------------------------------- #
+@pytest.mark.parametrize(
+    ("key", "value", "secret"),
+    [
+        ("Authorization", "Token " + "9944b091" * 5, True),
+        ("authorization", "token " + "abc123" * 4, True),
+        ("Authorization", "ApiKey " + "c2VjcmV0" * 3, True),
+        ("Authorization", "Bot " + "x1" * 10, True),
+        ("Proxy-Authorization", "Token " + "ab12" * 5, True),
+        ("Authorization", "raw" + "0123456789" * 2, True),
+        ("Authorization", "ApiKey ${API_KEY:-" + "literal0123" + "}", True),
+        ("Authorization", "Bearer ${TOKEN}", False),
+        ("Authorization", "Token ${TOKEN}", False),
+        ("Authorization", "ApiKey ${API_KEY}", False),
+        ("Authorization", "Bot ${BOT_TOKEN}", False),
+        ("Proxy-Authorization", "Basic ${env:PROXY_AUTH}", False),
+        ("Authorization", "${AUTH_HEADER}", False),
+        ("Authorization", "Bearer", False),
+        ("Authorization", "Basic ${USER}:${PASS}", False),
+        ("Authorization", "${USER}:${PASS}", False),
+        ("Authorization", "Bearer ${A}.${B}", False),
+        ("Authorization", "Basic ${USER}:" + "literal0123", True),
+    ],
+)
+def test_an_authorization_header_names_a_credential_whatever_its_scheme(key: str, value: str, secret: bool) -> None:
+    """Regression: only 'Bearer' and 'Basic' payloads counted, so 'Authorization: Token <hex>' was no credential."""
+    assert is_credential_key(key, query=True)
+    assert looks_like_inline_secret(key, value, query=True) is secret
+
+
+def test_an_authorization_env_name_needs_a_value_shaped_like_key_material() -> None:
+    assert not is_credential_key("AUTHORIZATION")
+    assert not looks_like_inline_secret("AUTHORIZATION", "required", query=False)
+    assert looks_like_inline_secret("AUTHORIZATION", "Token" + "9944b091" * 5, query=False)
+
+
+@pytest.mark.parametrize(
+    ("header", "value"),
+    [
+        ("Authorization", "Token " + "9944b091" * 5),
+        ("Authorization", "ApiKey " + "c2VjcmV0" * 3),
+        ("Proxy-Authorization", "Token " + "ab12" * 5),
+    ],
+)
+def test_mcp_and_hook_authorization_headers_with_any_scheme_are_inline_secrets(
+    tmp_path: Path, header: str, value: str
+) -> None:
+    headers = {header: value}
+    root = _write_plugin(
+        tmp_path / "demo",
+        {"type": "http", "url": "https://api.example.com/mcp", "headers": headers},
+        {"type": "http", "url": "https://hooks.example.com/x", "headers": headers},
+    )
+
+    checks = {finding.check_name for finding in analyze_plugin(root).findings}
+
+    assert {"mcp_inline_secret", "plugin_hook_inline_secret"} <= checks

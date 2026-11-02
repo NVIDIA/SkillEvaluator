@@ -28,6 +28,8 @@ _CRITERIA = {
     "FORMAT_FOLLOWED": True,
 }
 VALID_ACCURACY_RESPONSE = json.dumps({"criteria": _CRITERIA, "reason": "valid retry"})
+# Five valid criteria, so a reply built on it can fail only on what follows.
+_VALID_CRITERIA_PREFIX = '{"criteria": ' + json.dumps(_CRITERIA) + ", "
 VALID_GOAL_RESPONSE = json.dumps(
     {
         "user_goal": "complete the task",
@@ -502,10 +504,9 @@ def _judge_goal_with_response(
         pytest.param("[]", id="list"),
         pytest.param("{}", id="empty-object"),
         pytest.param('prefix [{"score": 1.0}] suffix', id="prose-wrapped-list"),
-        pytest.param('{"score": true}', id="boolean-score"),
-        pytest.param('{"score": true, "score": 0.5}', id="duplicate-score"),
-        pytest.param('{"score": NaN}', id="nan-score"),
-        pytest.param('{"score": Infinity}', id="infinite-score"),
+        pytest.param(_VALID_CRITERIA_PREFIX + '"score": true, "score": 0.5}', id="duplicate-score"),
+        pytest.param(_VALID_CRITERIA_PREFIX + '"score": NaN}', id="nan-score"),
+        pytest.param(_VALID_CRITERIA_PREFIX + '"score": Infinity}', id="infinite-score"),
         pytest.param('{"criteria": {"SKILL_IDENTIFIED": true}}', id="incomplete-criteria"),
         pytest.param(
             json.dumps({"criteria": {**_CRITERIA, "ACTIONABLE": "true"}}),
@@ -878,26 +879,26 @@ def test_behavior_retries_overflowed_numeric_metadata_once_and_recovers(judge_mo
         pytest.param("[]", id="list"),
         pytest.param("{}", id="empty-object"),
         pytest.param(
-            'prefix [{"results": [{"passed": true}], "score": 1.0}] suffix',
+            'prefix [{"results": [{"step": 1, "passed": true}], "score": 1.0}] suffix',
             id="prose-wrapped-list",
         ),
         pytest.param('{"results": "wrong", "score": 0}', id="non-list-results"),
         pytest.param('{"results": [1], "score": 0}', id="non-object-result"),
-        pytest.param('{"results": [{"passed": 1}], "score": 1}', id="non-boolean-passed"),
+        pytest.param('{"results": [{"step": 1, "passed": 1}], "score": 1}', id="non-boolean-passed"),
         pytest.param(
-            '{"results": [{"passed": 1, "passed": true}], "score": 1}',
+            '{"results": [{"step": 1, "passed": 1, "passed": true}], "score": 1}',
             id="duplicate-passed",
         ),
         pytest.param('{"results": [], "score": 0}', id="incomplete-results"),
         pytest.param(
-            '{"results": [{"passed": false}, {"passed": false}], "score": 0}',
+            '{"results": [{"step": 1, "passed": false}, {"step": 2, "passed": false}], "score": 0}',
             id="extra-results",
         ),
         pytest.param('{"results": [], "score": true}', id="boolean-score"),
         pytest.param('{"results": [], "score": NaN}', id="nan-score"),
         pytest.param('{"results": [], "score": Infinity}', id="infinite-score"),
         pytest.param(
-            '{"results": [{"passed": true}], "score": NaN}',
+            '{"results": [{"step": 1, "passed": true}], "score": NaN}',
             id="valid-results-with-nan-score",
         ),
     ],
@@ -984,7 +985,7 @@ def test_behavior_retries_nonstandard_constant_in_metadata_then_errors(
     monkeypatch,
 ) -> None:
     calls: list[str] = []
-    content = '{"results":[{"passed":true,"metadata":-Infinity}]}'
+    content = '{"results":[{"step":1,"passed":true,"metadata":-Infinity}]}'
     monkeypatch.setattr(
         judge_module,
         "call_public_llm",
@@ -1056,7 +1057,7 @@ def test_behavior_salvage_rejects_noncompletable_current_entry(
     monkeypatch,
     unfinished_entry: str,
 ) -> None:
-    malformed = '{"results":[{"passed":true},' + unfinished_entry
+    malformed = '{"results":[{"step":1,"passed":true},' + unfinished_entry
     calls: list[str] = []
     monkeypatch.setattr(
         judge_module,
@@ -1100,7 +1101,7 @@ def test_behavior_salvage_accepts_append_only_completable_current_entry(
 
 
 def test_behavior_retries_ambiguous_multiple_documents_then_errors(judge_module, monkeypatch) -> None:
-    content = '{"results":[{"passed":false}]} {"results":[{"passed":true}]}'
+    content = '{"results":[{"step":1,"passed":false}]} {"results":[{"step":1,"passed":true}]}'
     calls: list[str] = []
     monkeypatch.setattr(
         judge_module,
@@ -1116,7 +1117,7 @@ def test_behavior_retries_ambiguous_multiple_documents_then_errors(judge_module,
 
 
 def test_behavior_deep_nesting_is_scoreless_instead_of_raising(judge_module, monkeypatch) -> None:
-    content = '{"results":[{"passed":true,"metadata":' + "[" * 10_000 + "0" + "]" * 10_000 + "}]}"
+    content = '{"results":[{"step":1,"passed":true,"metadata":' + "[" * 10_000 + "0" + "]" * 10_000 + "}]}"
     calls: list[str] = []
     monkeypatch.setattr(
         judge_module,
@@ -1135,15 +1136,27 @@ def test_behavior_deep_nesting_is_scoreless_instead_of_raising(judge_module, mon
     "malformed",
     [
         pytest.param(
-            '{"metadata":' + "[" * 900 + "0" + "]" * 900 + ',"results":[{"passed":true},{"passed":false',
+            '{"metadata":'
+            + "[" * 900
+            + "0"
+            + "]" * 900
+            + ',"results":[{"step":1,"passed":true},{"step":2,"passed":false',
             id="top-level-field",
         ),
         pytest.param(
-            '{"results":[{"passed":true,"metadata":' + "[" * 900 + "0" + "]" * 900 + '},{"passed":false',
+            '{"results":[{"step":1,"passed":true,"metadata":'
+            + "[" * 900
+            + "0"
+            + "]" * 900
+            + '},{"step":2,"passed":false',
             id="complete-entry",
         ),
         pytest.param(
-            '{"results":[{"passed":true},{"passed":false,"metadata":' + "[" * 900 + "0" + "]" * 900 + ',"reason":"cut',
+            '{"results":[{"step":1,"passed":true},{"step":2,"passed":false,"metadata":'
+            + "[" * 900
+            + "0"
+            + "]" * 900
+            + ',"reason":"cut',
             id="current-partial-entry",
         ),
     ],
@@ -1171,15 +1184,15 @@ def test_behavior_salvage_rejects_excessive_nesting(
     "malformed",
     [
         pytest.param(
-            '{"metadata":NaN,"results":[{"passed":true},{"passed":false',
+            '{"metadata":NaN,"results":[{"step":1,"passed":true},{"step":2,"passed":false',
             id="top-level-field",
         ),
         pytest.param(
-            '{"results":[{"passed":true,"metadata":Infinity},{"passed":false',
+            '{"results":[{"step":1,"passed":true,"metadata":Infinity},{"step":2,"passed":false',
             id="complete-entry",
         ),
         pytest.param(
-            '{"results":[{"passed":true},{"passed":false,"metadata":-Infinity,"reason":"cut',
+            '{"results":[{"step":1,"passed":true},{"step":2,"passed":false,"metadata":-Infinity,"reason":"cut',
             id="current-partial-entry",
         ),
     ],
@@ -1206,51 +1219,53 @@ def test_behavior_salvage_rejects_nonstandard_constants(
 @pytest.mark.parametrize(
     "malformed",
     [
-        pytest.param('{"results":null,"metadata":[{"passed":true}]', id="unrelated-array"),
-        pytest.param('{"metadata":{"results":[{"passed":true}]', id="nested-results"),
-        pytest.param('{"results":[{"passed":true} {"passed":false', id="missing-comma"),
+        pytest.param('{"results":null,"metadata":[{"step":1,"passed":true}]', id="unrelated-array"),
+        pytest.param('{"metadata":{"results":[{"step":1,"passed":true}]', id="nested-results"),
+        pytest.param('{"results":[{"step":1,"passed":true} {"step":2,"passed":false', id="missing-comma"),
         pytest.param(
-            '{"results":[{"passed":true},{"passed":truX}]}',
+            '{"results":[{"step":1,"passed":true},{"step":2,"passed":truX}]}',
             id="closed-invalid-token",
         ),
         pytest.param(
-            '{"results":[{"passed":true},{"passed":false,}]}',
+            '{"results":[{"step":1,"passed":true},{"step":2,"passed":false,}]}',
             id="closed-trailing-comma",
         ),
-        pytest.param('{"score":true,"results":[{"passed":true},{"passed":false', id="boolean-score"),
-        pytest.param('{"score":"0.5","results":[{"passed":true},{"passed":false', id="string-score"),
-        pytest.param('{"score":NaN,"results":[{"passed":true},{"passed":false', id="nan-score"),
-        pytest.param('{"score":Infinity,"results":[{"passed":true},{"passed":false', id="infinite-score"),
+        pytest.param('{"score":true,"results":[{"step":1,"passed":true},{"step":2,"passed":false', id="boolean-score"),
+        pytest.param('{"score":"0.5","results":[{"step":1,"passed":true},{"step":2,"passed":false', id="string-score"),
+        pytest.param('{"score":NaN,"results":[{"step":1,"passed":true},{"step":2,"passed":false', id="nan-score"),
         pytest.param(
-            '[{"results":[{"passed":true},{"passed":false',
+            '{"score":Infinity,"results":[{"step":1,"passed":true},{"step":2,"passed":false', id="infinite-score"
+        ),
+        pytest.param(
+            '[{"results":[{"step":1,"passed":true},{"step":2,"passed":false',
             id="array-wrapper",
         ),
         pytest.param(
-            '[] {"results":[{"passed":true},{"passed":false',
+            '[] {"results":[{"step":1,"passed":true},{"step":2,"passed":false',
             id="complete-array-prefix",
         ),
         pytest.param(
-            '}] {"results":[{"passed":true},{"passed":false',
+            '}] {"results":[{"step":1,"passed":true},{"step":2,"passed":false',
             id="structural-prefix",
         ),
         pytest.param(
-            '{"score":true,"score":0.5,"results":[{"passed":true},{"passed":false',
+            '{"score":true,"score":0.5,"results":[{"step":1,"passed":true},{"step":2,"passed":false',
             id="duplicate-score",
         ),
         pytest.param(
-            '{"results":[{"passed":1,"passed":true},{"passed":false',
+            '{"results":[{"step":1,"passed":1,"passed":true},{"step":2,"passed":false',
             id="duplicate-passed",
         ),
         pytest.param(
-            '{"results":\N{NO-BREAK SPACE}[{"passed":true},{"passed":false',
+            '{"results":\N{NO-BREAK SPACE}[{"step":1,"passed":true},{"step":2,"passed":false',
             id="non-json-nbsp",
         ),
         pytest.param(
-            '{"results":\f[{"passed":true},{"passed":false',
+            '{"results":\f[{"step":1,"passed":true},{"step":2,"passed":false',
             id="non-json-form-feed",
         ),
         pytest.param(
-            '{"results":\v[{"passed":true},{"passed":false',
+            '{"results":\v[{"step":1,"passed":true},{"step":2,"passed":false',
             id="non-json-vertical-tab",
         ),
     ],

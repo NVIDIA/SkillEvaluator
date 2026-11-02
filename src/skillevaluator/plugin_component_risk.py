@@ -1641,10 +1641,11 @@ def _condition_scope(condition: str, shell_tools: tuple[str, ...] = ("Bash",)) -
         return None
     tool, content = match.group(1), match.group(2)
     if tool in shell_tools:
-        # A PowerShell rule is read as one (its launchers run any command); other shell-tool names as Bash.
-        shell = _shell_tool(tool)
-        rule = shell if content is None else f"{shell}({content})"
-        return ("bash", ()) if bash_rule_risk(rule) is not None else ("narrow", ())
+        # A PowerShell rule is also read as one (its launchers, such as iex, run any command), on top of the
+        # Bash reading that catches prefixes every shell runs (sudo, env, xargs); other shell-tool names as Bash.
+        readings = {_shell_tool(tool), "Bash"}
+        broad = any(bash_rule_risk(name if content is None else f"{name}({content})") is not None for name in readings)
+        return ("bash", ()) if broad else ("narrow", ())
     if tool in _SENSITIVE_TOOLS or tool.startswith("mcp__"):
         label = "mcp__server__tool" if tool.startswith("mcp__") else tool
         return "scoped", (_SENSITIVE_TOOL_LABELS.get(label, tool),)

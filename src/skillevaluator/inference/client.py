@@ -386,6 +386,7 @@ class LLMClient:
         retry_base_delay: float | None = None,
         retry_max_delay: float | None = None,
         http_client: Any = None,
+        timeout: float | None = None,
     ) -> None:
         self._model = model
         self._base_url = base_url
@@ -401,6 +402,11 @@ class LLMClient:
             max_delay=retry_max_delay if retry_max_delay is not None else retry_cfg.max_delay,
         )
         self._http_client = http_client
+        # Seconds for each provider request, Bedrock's litellm call included;
+        # None keeps the provider default. The OpenAI and Anthropic SDKs ignore
+        # an http_client's timeout that equals httpx's 5-second default, so the
+        # bound is passed explicitly instead of inherited from the client.
+        self._timeout = timeout
         self._client: Any = None
         self._provider_config: ProviderConfig | None = None
         self.last_failure: str | None = None
@@ -518,6 +524,8 @@ class LLMClient:
                 client_kwargs["base_url"] = config.base_url
             if self._http_client is not None:
                 client_kwargs["http_client"] = self._http_client
+            if self._timeout is not None:
+                client_kwargs["timeout"] = self._timeout
             self._client = Anthropic(**client_kwargs)
             return self._client
 
@@ -535,6 +543,8 @@ class LLMClient:
         }
         if self._http_client is not None:
             client_kwargs["http_client"] = self._http_client
+        if self._timeout is not None:
+            client_kwargs["timeout"] = self._timeout
         client = OpenAI(**client_kwargs)
         if (
             config.base_url is not None
@@ -620,6 +630,7 @@ class LLMClient:
                     aws_region_name=config.region,
                     **_temperature_kwargs(config.model, self._temperature),
                     **({"max_tokens": max_tokens} if max_tokens is not None else {}),
+                    **({"timeout": self._timeout} if self._timeout is not None else {}),
                 )
                 return _extract_choice_content(response)
 

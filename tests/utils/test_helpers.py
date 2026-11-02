@@ -3,6 +3,7 @@
 
 """Tests for skillevaluator.utils module."""
 
+import os
 import subprocess
 import sys
 from pathlib import Path
@@ -10,12 +11,14 @@ from unittest.mock import patch
 
 import pytest
 
+from skillevaluator.tier3.results_location import git_root_for
 from skillevaluator.utils import find_skills_in_directory, get_skill_name_from_path
 from skillevaluator.utils.helpers import (
     _ssh_to_https,
     resolve_git_remote_url,
     resolve_git_root,
 )
+from skillevaluator.utils.path_security import find_git_repo_root
 
 
 class TestFindSkillsInDirectory:
@@ -192,6 +195,16 @@ def _cp1252_locale_check_output(*args, **kwargs):
     return _REAL_CHECK_OUTPUT(*args, **kwargs)
 
 
+_REAL_RUN = subprocess.run
+
+
+def _cp1252_locale_run(*args, **kwargs):
+    """Run the real command, decoding text output as a Windows cp1252 locale would."""
+    if kwargs.get("text") and kwargs.get("encoding") is None:
+        kwargs["encoding"] = "cp1252"
+    return _REAL_RUN(*args, **kwargs)
+
+
 def _fake_git_output(outputs: dict[str, bytes]):
     """Return a check_output stand-in that emits raw git bytes decoded like a cp1252 locale."""
 
@@ -233,7 +246,7 @@ class TestResolveGitRoot:
     @pytest.mark.skipif(sys.platform == "win32", reason="non-UTF-8 path bytes are a POSIX filesystem case")
     def test_non_utf8_root_bytes_round_trip(self, tmp_path: Path, monkeypatch) -> None:
         """Undecodable path bytes are kept losslessly instead of raising or being replaced."""
-        raw_root = str(tmp_path.resolve()).encode("utf-8") + b"/repo-\xff"
+        raw_root = os.fsencode(str(tmp_path.resolve())) + b"/repo-\xff"
         monkeypatch.setattr(
             subprocess, "check_output", _fake_git_output({"rev-parse --show-toplevel": raw_root + b"\n"})
         )
@@ -241,7 +254,19 @@ class TestResolveGitRoot:
         root = resolve_git_root(tmp_path)
 
         assert root is not None
-        assert str(root).encode("utf-8", "surrogateescape") == raw_root
+        assert os.fsencode(str(root)) == raw_root
+
+
+@pytest.mark.parametrize("lookup", [resolve_git_root, find_git_repo_root, git_root_for], ids=lambda f: f.__name__)
+def test_every_git_root_lookup_names_a_non_ascii_root(tmp_path: Path, monkeypatch, lookup) -> None:
+    """Each repository-root lookup decodes git's path bytes as file names, not with the locale code page."""
+    repo_root = tmp_path / "café-skills"
+    _init_git_repo(repo_root, "git@github.com:example/project.git")
+    (repo_root / "skills").mkdir()
+    monkeypatch.setattr(subprocess, "check_output", _cp1252_locale_check_output)
+    monkeypatch.setattr(subprocess, "run", _cp1252_locale_run)
+
+    assert lookup(repo_root / "skills") == repo_root.resolve()
 
 
 class TestResolveGitRemoteUrl:

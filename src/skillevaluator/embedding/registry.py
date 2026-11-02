@@ -287,7 +287,7 @@ class EmbeddingRegistry:
 
         Each plugin with a description contributes one plugin entry (name and
         description embedding, member skill names, manifest source fingerprint).
-        Every bundled ``skills/**/SKILL.md`` whose frontmatter has a name and
+        Every bundled skill manifest whose frontmatter has a name and
         description contributes one skill entry. A plugin whose manifest cannot
         supply a profile is left out and recorded by relative path in
         ``invalid_plugins``; unsafe inputs still fail the whole build.
@@ -353,7 +353,7 @@ class EmbeddingRegistry:
             for skill in profile.bundled_skills:
                 if skill.entry is None:
                     continue
-                skill_path = (PurePosixPath(plugin_path) / "skills" / skill.rel).as_posix()
+                skill_path = (PurePosixPath(plugin_path) / skill.root_relative).as_posix()
                 pending_skills.append(
                     (
                         RegistryEntry(

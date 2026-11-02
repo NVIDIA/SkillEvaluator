@@ -28,6 +28,7 @@ from __future__ import annotations
 
 from collections import Counter
 from dataclasses import dataclass
+from pathlib import PurePosixPath
 from typing import TYPE_CHECKING, Any
 
 from skillevaluator.constants import (
@@ -125,12 +126,13 @@ class _SelfSkillIdentity:
     """Catalog entries that positively identify one bundled skill of the plugin under test.
 
     In a catalog with plugin entries, a skill entry is this skill only at
-    ``<prefix>/skills/<rel>`` under a catalog plugin entry that identifies this
+    ``<prefix>/<root_relative>`` under a catalog plugin entry that identifies this
     plugin (see :func:`self_plugin_entries`). A skill-only catalog carries no
     plugin identity, so an entry is this skill only when it has the same
     content fingerprint at a path a catalog built from this plugin records:
     ``<rel>`` (built from ``skills/``) or ``skills/<rel>`` (built from the
-    plugin root). A same-named or identical skill anywhere else is a distinct
+    plugin root), or a path relative to an explicitly declared native root.
+    A same-named or identical skill anywhere else is a distinct
     skill and is compared.
     """
 
@@ -147,12 +149,10 @@ class _SelfSkillIdentity:
     ) -> _SelfSkillIdentity:
         relative = skill.root_relative
         if catalog_has_plugins:
-            return cls(
-                paths=frozenset(relative if prefix == "." else f"{prefix}/{relative}" for prefix in self_prefixes)
-            )
+            return cls(paths=frozenset((PurePosixPath(prefix) / relative).as_posix() for prefix in self_prefixes))
         text = skill.entry.embedding_text if skill.entry is not None else ""
         return cls(
-            paths=frozenset({skill.rel, relative}),
+            paths=frozenset({skill.rel, relative, *skill.catalog_relative_paths}),
             fingerprint=content_fingerprint(text),
         )
 

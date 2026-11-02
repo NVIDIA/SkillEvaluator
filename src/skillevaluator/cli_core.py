@@ -24,6 +24,7 @@ from skillevaluator.constants import (
     PLUGIN_AGENT_PLUGINS_V1_MANIFEST_FILE,
     PLUGIN_AGENT_PLUGINS_V1_MANIFEST_TYPE,
     PLUGIN_MANIFEST_FILES,
+    PLUGIN_OPENCLAW_MANIFEST_FILE,
     RULES_FILE_EXTENSION,
     SKILL_MANIFEST_FILE,
     SKILL_MANIFEST_VARIANTS,
@@ -145,7 +146,7 @@ def _may_mark_content(name: str) -> bool:
         or name == WORKFLOWS_MANIFEST_FILE
         or name in _STRUCTURE_MARKER_NAMES
         or name.endswith(RULES_FILE_EXTENSION)
-        or folded == PLUGIN_AGENT_PLUGINS_V1_MANIFEST_FILE
+        or folded in {PLUGIN_AGENT_PLUGINS_V1_MANIFEST_FILE, PLUGIN_OPENCLAW_MANIFEST_FILE}
         or folded in NATIVE_MANIFEST_DIRS_FOLDED
     )
 
@@ -180,7 +181,7 @@ def _root_markers(path: Path) -> _RootMarkers | None:
                 if name in _STRUCTURE_MARKER_NAMES:
                     if not non_directory and not stat_is_link_or_reparse(metadata):
                         structure_dirs.add(name)
-                elif name in PLUGIN_MANIFEST_FILES and non_directory:
+                elif (name in PLUGIN_MANIFEST_FILES or folded == PLUGIN_OPENCLAW_MANIFEST_FILE) and non_directory:
                     plugin = True
                 elif folded == PLUGIN_AGENT_PLUGINS_V1_MANIFEST_FILE:
                     # A regular root plugin.json marks a plugin when it declares

@@ -156,6 +156,8 @@ PLUGIN_AGENT_PLUGINS_V1_MANIFEST_FILE = PLUGIN_CONTAINED_MANIFEST_FILE
 PLUGIN_CODEX_MANIFEST_TYPE = "codex_plugin_json"
 PLUGIN_CURSOR_MANIFEST_TYPE = "cursor_plugin_json"
 PLUGIN_AGENT_PLUGINS_V1_MANIFEST_TYPE = "agent_plugins_v1"
+PLUGIN_OPENCLAW_MANIFEST_FILE = "openclaw.plugin.json"
+PLUGIN_OPENCLAW_MANIFEST_TYPE = "openclaw_plugin_json"
 # Root-relative manifest paths in discovery precedence order, with the manifest
 # type each one selects. When a root holds more than one, the first one wins
 # and the others are recorded as additional manifest declarations.
@@ -166,6 +168,7 @@ PLUGIN_MANIFEST_PRECEDENCE: tuple[tuple[str, str], ...] = (
     (PLUGIN_AGENT_PLUGINS_V1_MANIFEST_FILE, PLUGIN_AGENT_PLUGINS_V1_MANIFEST_TYPE),
     (f"{PLUGIN_CODEX_MANIFEST_DIR}/{PLUGIN_CONTAINED_MANIFEST_FILE}", PLUGIN_CODEX_MANIFEST_TYPE),
     (f"{PLUGIN_CURSOR_MANIFEST_DIR}/{PLUGIN_CONTAINED_MANIFEST_FILE}", PLUGIN_CURSOR_MANIFEST_TYPE),
+    (PLUGIN_OPENCLAW_MANIFEST_FILE, PLUGIN_OPENCLAW_MANIFEST_TYPE),
 )
 PLUGIN_MANIFEST_RELATIVE_PATHS: tuple[str, ...] = tuple(path for path, _type in PLUGIN_MANIFEST_PRECEDENCE)
 # Vendor directories whose ``plugin.json`` roots a contained plugin at the
@@ -182,6 +185,7 @@ PLUGIN_CONTAINED_MANIFEST_TYPES = frozenset(
         PLUGIN_AGENT_PLUGINS_V1_MANIFEST_TYPE,
         PLUGIN_CODEX_MANIFEST_TYPE,
         PLUGIN_CURSOR_MANIFEST_TYPE,
+        PLUGIN_OPENCLAW_MANIFEST_TYPE,
     }
 )
 # Static plugin component inventory bounds (Tier 1 and Tier 3 coverage).

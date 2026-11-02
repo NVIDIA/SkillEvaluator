@@ -56,7 +56,14 @@ from skillevaluator.plugin_components import (
     parse_markdown,
     summarize_coverage,
 )
-from skillevaluator.plugin_formats import CLAUDE_PROFILE
+from skillevaluator.plugin_formats import (
+    CLAUDE_PROFILE,
+    CODEX_PROFILE,
+    CURSOR_PROFILE,
+    OPENCLAW_PROFILE,
+    codex_accepts_path,
+    declared_value_replaces_default,
+)
 from skillevaluator.plugin_states import COVERAGE_STATE_RANK, EVALUATED_COVERAGE_STATES, NOT_LOADED_STATE
 from skillevaluator.tier3.toml_utils import toml_quote
 from skillevaluator.tier3_environments import PLUGIN_LOAD_CHOICES
@@ -1511,15 +1518,47 @@ class ClaudeCodeAdapter(HarnessAdapter):
         """
         manifest: dict[str, Any] = {"name": self.plugin_name(source), "description": source.description}
         if source.contained:
-            for key in ("version", "skills", "commands", "agents", "outputStyles", "userConfig"):
+            for key in ("version", "commands", "agents", "outputStyles", "userConfig"):
                 if key in source.manifest:
                     value = source.manifest[key]
                     manifest[key] = json.loads(json.dumps(value)) if isinstance(value, dict | list) else value
+        manifest.update(self._skill_manifest_fields(source))
         return manifest
 
+    def _skill_manifest_fields(self, source: NativePluginSource) -> dict[str, Any]:
+        """Project skill declarations once for both the manifest and native discovery.
+
+        Only OpenClaw and Cursor load undotted roots as written. Codex drops
+        rejected paths instead; when none remain, omitting the field preserves
+        its default skills/ discovery without activating uninventoried folders.
+        Native Claude declarations, including invalid ones, are not repaired.
+        """
+        if not source.contained or "skills" not in source.manifest:
+            return {}
+        value = source.manifest["skills"]
+        if source.manifest_rel == CODEX_PROFILE.manifest_path:
+            if not declared_value_replaces_default(CODEX_PROFILE, "skills", value):
+                return {}
+            if isinstance(value, list):
+                value = [raw for raw in value if codex_accepts_path(raw)]
+        elif source.manifest_rel in {OPENCLAW_PROFILE.manifest_path, CURSOR_PROFILE.manifest_path}:
+            # Normalize contained paths only, retaining scalar/list shape and
+            # invalid declarations rather than silently making them valid.
+            paths = value if isinstance(value, list) else [value]
+            normalized = []
+            for raw in paths:
+                declared = normalize_declared_path(raw, ()) if isinstance(raw, str) else None
+                normalized.append(
+                    f"./{declared.rel.as_posix()}"
+                    if declared is not None and declared.rel is not None and not declared.dot_relative
+                    else raw
+                )
+            value = normalized if isinstance(value, list) else normalized[0]
+        return {"skills": json.loads(json.dumps(value)) if isinstance(value, dict | list) else value}
+
     def _declared_skill_dirs(self, source: NativePluginSource) -> list[PurePosixPath]:
-        """Root-relative skill directories the staged ``plugin.json`` declares (it keeps a contained ``skills``)."""
-        return declared_plugin_paths(source.manifest.get("skills")) if source.contained else []
+        """Root-relative skill directories declared by the projected Claude manifest."""
+        return declared_plugin_paths(self._skill_manifest_fields(source).get("skills"))
 
     def staged_skills(self, source: NativePluginSource) -> list[tuple[str, str, Path | None]]:
         """Every skill the staged plugin loads: ``(census name, plugin-relative dir, copy source or None)``.

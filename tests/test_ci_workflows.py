@@ -182,6 +182,27 @@ def test_full_lane_keeps_the_existing_commands_and_runners() -> None:
     assert "twine==6.2.0" in _runs(jobs["package"])
 
 
+def test_html_parser_compatibility_preserves_old_patches_on_a_supported_runner() -> None:
+    job = _load("ci.yml")["jobs"]["html-parser-compatibility"]
+
+    # setup-python has these old-patch builds for Ubuntu 24.04, not 26.04.
+    # Updating the patches would silently stop testing the old HTMLParser API.
+    assert job["runs-on"] == "ubuntu-24.04"
+    assert job["needs"] == "classify-changes"
+    assert job["if"] == FULL_LANE_IF
+    assert job["strategy"]["fail-fast"] == "false"
+    assert job["strategy"]["matrix"]["python-version"] == ["3.12.11", "3.13.5"]
+    setup_python = next(
+        step for step in job["steps"] if _action_repository(step.get("uses", "")) == "actions/setup-python"
+    )
+    assert setup_python["with"]["python-version"] == "${{ matrix.python-version }}"
+    commands = _runs(job)
+    assert 'uv sync --extra dev --locked --python "${{ matrix.python-version }}"' in commands
+    assert 'uv run --python "${{ matrix.python-version }}" pytest -q' in commands
+    assert "tests/validators/test_markdown.py" in commands
+    assert "tests/test_cli_html_parser_compat.py" in commands
+
+
 def test_security_keeps_gitleaks_always_on_and_skips_only_nonessential_jobs() -> None:
     security = _load("security.yml")
     jobs = security["jobs"]

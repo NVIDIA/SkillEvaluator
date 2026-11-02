@@ -40,6 +40,7 @@ from skillevaluator.constants import (
     PLUGIN_AGENT_PLUGINS_V1_MANIFEST_TYPE,
     PLUGIN_CODEX_MANIFEST_TYPE,
     PLUGIN_CURSOR_MANIFEST_TYPE,
+    PLUGIN_OPENCLAW_MANIFEST_TYPE,
 )
 from skillevaluator.models.plugin import MCP_NAME_PATTERN
 from skillevaluator.models.result import Finding, Severity
@@ -142,11 +143,12 @@ _INSECURE_TLS_FLAGS: frozenset[str] = frozenset(
 # NAME is unset), and Cursor documents '${env:NAME}'. Only these braced forms are expanded inside a URL.
 _URL_EXPANSION_RE = re.compile(r"\$\{(?P<cursor>env:)?(?P<name>[A-Za-z_][A-Za-z0-9_]*)(?::-(?P<default>[^}]*))?\}")
 # The MCP client that loads a manifest format decides how environment references in its MCP config expand.
-McpClient = Literal["claude", "codex", "cursor", "agent_plugins"]
+McpClient = Literal["claude", "codex", "cursor", "agent_plugins", "openclaw"]
 _CLIENT_BY_MANIFEST: dict[str, McpClient] = {
     PLUGIN_CODEX_MANIFEST_TYPE: "codex",
     PLUGIN_CURSOR_MANIFEST_TYPE: "cursor",
     PLUGIN_AGENT_PLUGINS_V1_MANIFEST_TYPE: "agent_plugins",
+    PLUGIN_OPENCLAW_MANIFEST_TYPE: "openclaw",
 }
 # Codex MCP fields that carry auth or environment the evaluation runtime does not apply (Tier 3 then reports
 # the server INCOMPLETE).
@@ -657,24 +659,27 @@ def _resolve_url_references(server: _ServerFindings, url: str, label: str, clien
     Claude Code (and, leniently, Cursor and Agent Plugins clients) expand
     ``${NAME:-default}``: the default the plugin ships is checked like any URL.
     A reference without a default that decides the scheme or host leaves the
-    endpoint to the user, which is a LOW advisory. Codex does not expand
-    references in plugin MCP URLs at all (it reads the text as a relative URL
-    and never connects), which is HIGH.
+    endpoint to the user, which is a LOW advisory. Codex and OpenClaw use
+    plugin MCP URLs verbatim, without expanding references, which is HIGH.
     """
     expanded, unresolved = _expand_url_defaults(url)
     shown = redacted_url(url)
-    if client == "codex":
+    if client in {"codex", "openclaw"}:
         effect = (
             "reads it as a relative URL and never connects to the server"
             if _env_controls_endpoint(_URL_EXPANSION_RE.sub("${UNSET}", url))
             else "sends the '${...}' text literally, so the variable is never filled in"
         )
+        client_name = "OpenClaw" if client == "openclaw" else "Codex"
+        client_plugin = "an OpenClaw" if client == "openclaw" else "a Codex"
+        detail = "uses the URL verbatim, without filling in environment variables" if client == "openclaw" else effect
         server.report(
             Severity.HIGH,
             "mcp_url_env_not_expanded",
-            f"{label} {shown!r} uses '${{...}}' environment expansion, which Codex does not apply to plugin "
-            f"MCP URLs; Codex {effect}",
-            "Write the full https:// endpoint in a Codex plugin; '${VAR:-default}' expansion is a Claude Code feature.",
+            f"{label} {shown!r} uses '${{...}}' environment expansion, which {client_name} does not apply to plugin "
+            f"MCP URLs; {client_name} {detail}",
+            f"Write the full https:// endpoint in {client_plugin} plugin; "
+            "'${VAR:-default}' expansion is a Claude Code feature.",
         )
         _check_url_inline_secrets(server, url, label, text=expanded)
         return None
@@ -865,6 +870,8 @@ def _check_env_and_headers(server: _ServerFindings, config: dict[str, Any], *, c
     if isinstance(oauth, dict):
         # A literal client secret in the OAuth block ships with the plugin like any other credential.
         _check_secret_values(server, "oauth", oauth, tls_env=False)
+    if client == "openclaw" and isinstance(config.get("enterprise"), dict):
+        _check_secret_values(server, "enterprise", config["enterprise"], tls_env=False)
     if client == "codex":
         for field_name in CODEX_UNAPPLIED_MCP_FIELDS:
             if config.get(field_name):
@@ -955,8 +962,24 @@ def _check_transport(server: _ServerFindings, config: dict[str, Any]) -> None:
         )
 
 
-def _check_insecure_tls_config(server: _ServerFindings, config: dict[str, Any]) -> None:
+def openclaw_ssl_verification_enabled(config: dict[str, Any]) -> bool:
+    """Effective OpenClaw TLS policy: canonical boolean, legacy boolean, then verified TLS by default."""
+    canonical = config.get("sslVerify")
+    legacy = config.get("ssl_verify")
+    return canonical if isinstance(canonical, bool) else legacy if isinstance(legacy, bool) else True
+
+
+def _check_insecure_tls_config(
+    server: _ServerFindings, config: dict[str, Any], *, client: McpClient = "claude"
+) -> None:
     """Reject config keys that turn off TLS/certificate verification."""
+    if client == "openclaw" and not openclaw_ssl_verification_enabled(config):
+        server.report(
+            Severity.CRITICAL,
+            "mcp_insecure_tls_config",
+            "OpenClaw sslVerify disables certificate verification",
+            "Keep TLS certificate verification enabled; use a valid certificate chain.",
+        )
     if config.get("insecure") is True:
         server.report(
             Severity.CRITICAL,
@@ -3333,7 +3356,7 @@ def validate_mcp_server_declaration(
         )
 
     _check_transport(server, config)
-    _check_insecure_tls_config(server, config)
+    _check_insecure_tls_config(server, config, client=client)
     _check_env_and_headers(server, config, client=client)
     _check_overrides(server, config)
     _check_cursor_references(server, config, client)

@@ -39,6 +39,7 @@ from skillevaluator.constants import (
     PLUGIN_MANIFEST_FILES,
     PLUGIN_MANIFEST_PRECEDENCE,
     PLUGIN_NATIVE_MANIFEST_DIRS,
+    PLUGIN_OPENCLAW_MANIFEST_FILE,
     SCAN_EXCLUDED_DIRS,
 )
 from skillevaluator.plugin_formats import (
@@ -380,7 +381,7 @@ def manifest_relative_path(path: Path) -> Path | None:
     name = path.name.casefold()
     if name == PLUGIN_CONTAINED_MANIFEST_FILE and path.parent.name.casefold() in NATIVE_MANIFEST_DIRS_FOLDED:
         return Path(path.parent.name) / path.name
-    if name == PLUGIN_AGENT_PLUGINS_V1_MANIFEST_FILE:
+    if name in {PLUGIN_AGENT_PLUGINS_V1_MANIFEST_FILE, PLUGIN_OPENCLAW_MANIFEST_FILE}:
         return Path(path.name)
     return None
 

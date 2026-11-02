@@ -1059,7 +1059,12 @@ def _analyze_allowed_tools(
                     file_path,
                     f"Scope allowed-tools to the exact commands it needs, such as {_SCOPED_SHELL_EXAMPLES[shell]}.",
                     component=component,
-                    extra=claude_only_extra,
+                    # The inert-grant rewrite (a file Claude Code does not load either) names the same grant and tool.
+                    extra=(
+                        {**claude_only_extra, "shell_grant": _bash_grant_label(tool), "shell_tool": shell}
+                        if claude_only_extra
+                        else None
+                    ),
                 )
             )
             break

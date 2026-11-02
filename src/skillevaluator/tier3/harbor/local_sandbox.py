@@ -155,6 +155,7 @@ class SandboxPlan:
     backend: str  # "bubblewrap" | "seatbelt" | "none"
     strength: str  # "kernel" | "kernel-macos" | "advisory-only"
     reason: str  # human-readable, surfaced in run summaries
+    executable: str | None = None  # absolute Linux launcher that passed detect()'s smoke test
 
 
 def require_supported_platform() -> str:
@@ -194,6 +195,7 @@ class Sandbox:
         if self.plan.backend == "bubblewrap":
             return _bwrap_argv(
                 argv,
+                bwrap=self.plan.executable or "bwrap",
                 workdir=workdir,
                 write_roots=write_roots,
                 home=home,
@@ -266,8 +268,14 @@ def detect(mode: str = "require") -> Sandbox:
 
     if system == "Linux":
         bwrap = shutil.which("bwrap")
+        if bwrap:
+            # Launch the absolute binary that passed the smoke test. A bare
+            # "bwrap" is looked up again on the host PATH at every exec, with
+            # cwd set to the writable workspace, so a relative PATH entry could
+            # pick up a launcher planted there by an earlier sandboxed command.
+            bwrap = str(Path(bwrap).resolve())
         if bwrap and _userns_enabled() and _bwrap_smoke_test(bwrap):
-            return Sandbox(SandboxPlan("bubblewrap", "kernel", f"bubblewrap at {bwrap}"))
+            return Sandbox(SandboxPlan("bubblewrap", "kernel", f"bubblewrap at {bwrap}", bwrap))
         if not bwrap:
             reason = "bubblewrap not installed (install the bubblewrap package)"
         elif not _userns_enabled():
@@ -480,6 +488,7 @@ def _seatbelt_smoke_test() -> bool:
 def _bwrap_argv(
     argv: list[str],
     *,
+    bwrap: str = "bwrap",
     workdir: Path,
     write_roots: list[Path] | tuple[Path, ...],
     home: Path,
@@ -497,7 +506,7 @@ def _bwrap_argv(
     the subprocess, and ``--clearenv`` would discard it.
     """
     wrapper = [
-        "bwrap",
+        bwrap,
         "--unshare-all",  # user, ipc, pid, uts, cgroup, AND net (loopback only)
         "--die-with-parent",
         "--new-session",  # blocks TIOCSTI terminal-injection escapes

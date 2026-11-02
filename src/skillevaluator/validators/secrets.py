@@ -130,9 +130,11 @@ tags = ["nvidia", "api-key"]
             )
 
             if tool_result.error_message:
-                result.add_warning(tool_result.error_message)
+                hint = Tools.gitleaks.get_install_hint() if tool_result.error_message.startswith("couldn't ") else ""
+                result.add_warning(f"{tool_result.error_message}. {hint}".rstrip(". "))
                 result.mark_scan_incomplete("gitleaks")
                 return result
+            result.record_scanner("gitleaks", Tools.gitleaks.version)
 
             # The custom findings code disambiguates findings from Gitleaks'
             # default exit 1, which is also used for operational failures.

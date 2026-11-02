@@ -107,10 +107,10 @@ Each tier is independent. Add the relevant extra to your checkout command:
 | Tier 2: Deduplication | Does guidance repeat or overlap? | `uv run --extra tier2 skillevaluator tier2 ./my-skill` | Embeddings and chat; add `--catalog ./skill-catalog.json` for inter-skill comparison |
 | Tier 3: Live Evaluation | Does the skill help the agent? | `uv run --extra tier3 skillevaluator tier3 ./my-skill` | Provider access, a supported agent, and a running sandbox (Docker by default) |
 
-Full static Tier 1 needs Semgrep, SkillSpector, and Gitleaks in addition to the
-`security` extra. Follow [scanner installation](docs/installation.mdx#system-tools).
-`--no-llm` disables model-backed stages; it does not remove scanner requirements.
-Missing required scanner evidence is reported as `INCOMPLETE` and exits nonzero.
+Tier 1 fetches pinned, verified SkillSpector and Gitleaks releases when they
+are missing; Semgrep is optional. See [scanners](docs/installation.mdx#system-tools).
+`--no-llm` does not remove scanner requirements; a scanner that cannot run is
+`INCOMPLETE` and exits nonzero.
 [SkillSpector](https://github.com/NVIDIA/SkillSpector) provides specialized skill
 security scanning; [Harbor](https://github.com/harbor-framework/harbor), the
 open-source agent evaluation framework, powers sandboxed agent runs.

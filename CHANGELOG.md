@@ -6,6 +6,10 @@ All notable changes to SkillEvaluator are documented in this file.
 
 ### Added
 
+- In local mode (`--env-mode local`), a missing Claude Code, Codex, or OpenCode
+  CLI is offered as a pinned npm install into the SkillEvaluator runtime folder;
+  without a terminal, the command is printed instead.
+
 - Support Python 3.14 alongside Python 3.12 and 3.13, including installation
   guidance and CI coverage for tests and built packages.
 - Add reusable GitLab CI onboarding and configurable Tier 1 quality thresholds,

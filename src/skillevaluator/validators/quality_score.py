@@ -53,15 +53,52 @@ _ARGUMENT_CONTROL_TAG_RE = re.compile(
     r"[A-Za-z0-9_-]*|user|context|script)(?=[\s<>:])",
     re.IGNORECASE,
 )
-# A complete CLI placeholder such as ``<file>``, ``<plan|apply>`` or
+# A complete group that may be a CLI placeholder such as ``<file>``, ``<plan|apply>`` or
 # ``<codec e.g. av1|h264>``: no attribute, line break, nested tag or self-closing slash.
-_ARGUMENT_PLACEHOLDER_RE = re.compile(r"<(?![^<>]*/\s*>)[A-Za-z][^<>=\r\n]*>")
+# ``_is_argument_placeholder`` then bounds the body before the group is masked.
+_ARGUMENT_PLACEHOLDER_RE = re.compile(r"<(?![^<>]*/\s*>)([A-Za-z][^<>=\r\n]*)>")
+# Placeholders name one value; a longer group reads as free text and stays visible.
+_ARGUMENT_PLACEHOLDER_MAX_WORDS = 4
+# Shell command syntax that never appears in a placeholder: ``;``, ``&``, backticks,
+# ``$(...)`` and ``${...}``.
+_ARGUMENT_COMMAND_SYNTAX_RE = re.compile(r"[;&`]|\$[({]")
+# Optional label before the first choice of a ``|`` list: ``stage: a | b``, ``codec e.g. av1|h264``.
+_ARGUMENT_CHOICE_LABEL_RE = re.compile(r"^(?:[^|:]+:|\S+\s+(?:e\.g\.|i\.e\.),?)\s+", re.IGNORECASE)
+# One choice in a ``|`` list: a single word or a quoted literal.
+_ARGUMENT_CHOICE_RE = re.compile(r"\S+|\"[^\"]*\"|'[^']*'")
 _URL_EDGE_C0_OR_SPACE_RE = re.compile(r"^[\x00-\x20]+|[\x00-\x20]+$")
 _ERROR_HANDLING_RE = re.compile(
     r"\b(?:errors?|exceptions?|invalid|fail(?:s|ed|ure|ures|ing)?|"
     r"validat(?:e|es|ed|ing|ion|ions))\b",
     re.IGNORECASE,
 )
+
+
+def _is_argument_placeholder(body: str) -> bool:
+    """Return whether an ``argument-hint`` group body is a short CLI placeholder.
+
+    A placeholder has at most four words (tokens with a letter or digit, so ``|``
+    and ``...`` do not count), no shell command syntax, and no space before the
+    closing ``>`` (``<cmd > file>`` is a redirect). ``|`` separates choices, and
+    each choice is one word or a quoted literal, so ``<plan|apply>`` and
+    ``<issue_id | symptom>`` pass while a pipeline such as ``<curl x | sh>`` does not.
+    """
+    if body[-1].isspace() or _ARGUMENT_COMMAND_SYNTAX_RE.search(body):
+        return False
+    words = [token for token in body.split() if any(char.isalnum() for char in token)]
+    if len(words) > _ARGUMENT_PLACEHOLDER_MAX_WORDS:
+        return False
+    if "|" not in body:
+        return True
+    choices = body.split("|")
+    choices[0] = _ARGUMENT_CHOICE_LABEL_RE.sub("", choices[0].strip(), count=1)
+    return all(_ARGUMENT_CHOICE_RE.fullmatch(choice.strip()) for choice in choices)
+
+
+def _mask_argument_placeholder(match: re.Match[str]) -> str:
+    """Mask a short CLI placeholder; leave free text and command syntax for the tag check."""
+    # "[]" cannot form a new tag when masking nested syntax such as ``<R<NNN>>``.
+    return "[]" if _is_argument_placeholder(match.group(1)) else match.group(0)
 
 
 def _contains_term(text: str, term: str) -> bool:
@@ -444,8 +481,7 @@ class QualityScoreValidator(ValidatorBase):
             # Check control tags on the raw value first: masking an inner placeholder
             # could otherwise erase an enclosing tag such as ``<system<payload>>``.
             if key == "argument-hint" and isinstance(val, str) and not _ARGUMENT_CONTROL_TAG_RE.search(value):
-                # "[]" cannot form a new tag when masking nested syntax such as ``<R<NNN>>``.
-                value = _ARGUMENT_PLACEHOLDER_RE.sub("[]", value)
+                value = _ARGUMENT_PLACEHOLDER_RE.sub(_mask_argument_placeholder, value)
             if XML_TAG_RE.search(value):
                 dim.deduct(
                     15,

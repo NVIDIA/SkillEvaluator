@@ -289,7 +289,10 @@ All notable changes to SkillEvaluator are documented in this file.
   `--min-score 0`. Role and control tags (`<system>`, `<tool_call>`,
   `<script>`, including suffixed and nested forms), closing tags, attributes,
   and self-closing tags in `argument-hint` are still reported, and every other
-  frontmatter field keeps the strict check.
+  frontmatter field keeps the strict check. A group longer than four words, or
+  one with shell command syntax (`;`, `&`, a backtick, `$(`, `${`, a pipeline
+  such as `<curl x | sh>`, or a redirect), is not treated as a placeholder and
+  is still reported.
 
 - PII scans no longer report card-shaped digits inside a canonical GUID/UUID,
   such as a COM interface ID or the nil UUID, or an all-zero number as a

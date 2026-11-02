@@ -971,13 +971,19 @@ def test_cli_rejects_invalid_pii_waivers_as_usage_error(command: str, tmp_path: 
     assert "Traceback" not in output
 
 
+@pytest.mark.parametrize("symlinked", [False, True], ids=["file", "symlinked-file"])
 @pytest.mark.parametrize("workers", [None, "2"], ids=["serial", "parallel"])
 def test_catalog_validate_reports_each_waiver_only_in_its_own_skill(
     workers: str | None,
+    symlinked: bool,
     monkeypatch: pytest.MonkeyPatch,
     tmp_path: Path,
 ) -> None:
-    """One waiver file serves the catalog; no child may report its siblings' waivers as stale."""
+    """One waiver file serves the catalog; no child may report its siblings' waivers as stale.
+
+    A symlinked waiver file keeps the link's directory as the base of its entries
+    in every child, serial or parallel.
+    """
     from skillevaluator.validators.pii_waivers import pii_evidence_sha256
 
     names = ("one", "two", "three")
@@ -1004,7 +1010,17 @@ def test_catalog_validate_reports_each_waiver_only_in_its_own_skill(
                 "expires": "2099-12-31",
             }
         )
-    (tmp_path / "pii-waivers.yaml").write_text(json.dumps({"version": 1, "waivers": waivers}), encoding="utf-8")
+    waiver_text = json.dumps({"version": 1, "waivers": waivers})
+    if symlinked:
+        shared = tmp_path.parent / f"{tmp_path.name}-shared"
+        shared.mkdir()
+        (shared / "pii-waivers.yaml").write_text(waiver_text, encoding="utf-8")
+        try:
+            (tmp_path / "pii-waivers.yaml").symlink_to(shared / "pii-waivers.yaml")
+        except OSError as exc:
+            pytest.skip(f"cannot create a symlink here: {exc}")
+    else:
+        (tmp_path / "pii-waivers.yaml").write_text(waiver_text, encoding="utf-8")
     monkeypatch.chdir(tmp_path)
     args = ["validate", "--no-tier3", "--no-llm", "--no-tier2", "--checks", "pii", "--pii-waivers", "pii-waivers.yaml"]
     if workers:

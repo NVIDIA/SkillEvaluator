@@ -1142,7 +1142,9 @@ def _catalog_child_argv_from_ctx(
     if params.get("quality_config"):
         argv.extend(["--quality-config", str(Path(params["quality_config"]).resolve())])
     if params.get("pii_waivers"):
-        argv.extend(["--pii-waivers", str(Path(params["pii_waivers"]).resolve())])
+        # Not resolved: a waiver file's entries are relative to the directory the file (or the
+        # symlink to it) is in, so a child must see the same path the parent was given.
+        argv.extend(["--pii-waivers", str(Path(params["pii_waivers"]).absolute())])
     if params.get("external"):
         argv.append("--external")
     if params.get("policy_path"):

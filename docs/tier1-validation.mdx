@@ -415,7 +415,7 @@ A waiver applies only while the check, file, line, and value all match. When the
 | `expired-pii-waiver` | MEDIUM | The waiver is past `expires`; the finding is reported again. |
 | `invalid-pii-waiver-file` | HIGH | The file could not be applied, so no waiver from it was used. |
 
-A run judges only the waivers whose file lies in a skill or folder it scanned; a waiver for a deleted file there is stale. A run on one skill, and each skill of a catalog run, reports the waivers for that skill's files and leaves the other waivers in the file unjudged. Waiver findings name the file the way the PII findings of the same report do, for example `[support] SKILL.md` in a folder run; the waiver's own `file` value is in the `waiver_file` metadata.
+A run judges only the waivers whose file lies in a skill or folder it scanned; a waiver for a deleted file there is stale. A run on one skill, and each skill of a catalog run, reports the waivers for that skill's files and leaves the other waivers in the file unjudged. Waiver findings name the file the way the PII findings of the same report do, for example `[support] SKILL.md` in a folder run; the waiver's own `file` value is in the `waiver_file` metadata. They do not repeat the waiver's `evidence_sha256`, because the run may now mask that value.
 
 The command line rejects a malformed waiver file before the run starts, with exit code 2 and the problem named: unknown or missing fields, duplicate ids or keys, unknown or credential check names, and malformed paths, digests, or dates. Waivers apply only to the `pii` check; findings from other checks for the same value, such as Gitleaks secrets, are unaffected.
 

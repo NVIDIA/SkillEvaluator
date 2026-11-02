@@ -334,8 +334,10 @@ class PIIWaiverSet:
         An invalid file is one HIGH finding. Otherwise each waiver whose file the
         scan covered is reported as applied, expired, or stale, at the path the
         PII findings of the same report use; ``metadata["waiver_file"]`` keeps
-        the waiver's own ``file``. Waivers for files outside the scan are not
-        judged. Returns ``(finding, is_error)`` pairs; only an invalid file is
+        the waiver's own ``file``. The metadata never holds the waiver's digest:
+        the scan may now mask that value (for example, it became part of a
+        credential), and the waiver file already holds it. Waivers for files
+        outside the scan are not judged. Returns ``(finding, is_error)`` pairs; only an invalid file is
         an error.
         """
         if self.error is not None:
@@ -365,7 +367,6 @@ class PIIWaiverSet:
                 "waiver_id": waiver.waiver_id,
                 "waiver_file": waiver.file,
                 "pii_category": waiver.category,
-                "evidence_sha256": waiver.evidence_sha256,
                 "owner": waiver.owner,
                 "reason": waiver.reason,
                 "created": waiver.created.isoformat(),

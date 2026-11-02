@@ -101,7 +101,9 @@ def test_matching_waiver_suppresses_the_finding_and_stays_visible(skill: Path, t
     assert "PII waivers suppressed 1 reviewed PII value(s)" in result.messages
     rendered = JSONReporter(include_timestamp=False).render(result)
     assert ADDRESS not in rendered
-    assert pii_evidence_sha256("emails", ADDRESS) in rendered
+    # The waiver file holds the digest; the report identifies the waiver by id and file only.
+    assert "evidence_sha256" not in applied.metadata
+    assert pii_evidence_sha256("emails", ADDRESS) not in rendered
 
 
 @pytest.mark.parametrize(
@@ -406,6 +408,33 @@ def test_masked_values_carry_no_digest(skill: Path, content: str, check: str) ->
 
     assert finding.metadata["matched_value"] == "[REDACTED]"
     assert "evidence_sha256" not in finding.metadata
+
+
+@pytest.mark.parametrize(
+    ("contact", "config"),
+    [
+        pytest.param(f"Write to {ADDRESS} for access.", f'password = "{ADDRESS}"\n', id="credential-elsewhere"),
+        pytest.param(f'password = "{ADDRESS}"', None, id="value-became-a-credential"),
+    ],
+)
+@pytest.mark.parametrize("expires_in", [30, -1], ids=["applied-or-stale", "expired"])
+def test_waiver_findings_carry_no_digest(
+    skill: Path,
+    tmp_path: Path,
+    contact: str,
+    config: str | None,
+    expires_in: int,
+) -> None:
+    """Once a waived value is masked anywhere, a digest in the report would let readers test guesses offline."""
+    (skill / "contact.md").write_text(f"# Contact\n{contact}\n", encoding="utf-8")
+    if config is not None:
+        (skill / "config.py").write_text(config, encoding="utf-8")
+    expires = (today_utc() + timedelta(days=expires_in)).isoformat()
+
+    result = _scan(skill, _write_waivers(tmp_path, _waiver(expires=expires)))
+
+    assert _waiver_checks(result)
+    assert pii_evidence_sha256("emails", ADDRESS) not in JSONReporter(include_timestamp=False).render(result)
 
 
 @pytest.mark.parametrize("category", sorted(SENSITIVE_PII_CATEGORIES))

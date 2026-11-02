@@ -242,7 +242,7 @@ class ExternalTool:
             "pip-audit": bundled_scanner_hint,
             "safety": "Optional secondary scanner; install separately with: uv tool install safety",
             "bandit": bundled_scanner_hint,
-            "semgrep": ("Optional; install separately with: brew install semgrep (macOS) or uv tool install semgrep"),
+            "semgrep": "Optional; install separately with: brew install semgrep (macOS) or uv tool install semgrep",
             "skillspector": f"Install with: uv tool install {SKILLSPECTOR_WHEEL_URL}",
             "skillevaluator": (
                 'Install with: uv tool install "skillevaluator[all] @ git+https://github.com/NVIDIA/SkillEvaluator.git"'

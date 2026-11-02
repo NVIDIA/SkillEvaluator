@@ -1538,8 +1538,7 @@ def _finish_pipeline_view(
     agent_eval: bool,
 ) -> None:
     """Render the quiet-mode verdict panel and report footer."""
-    from skillevaluator.reporting.console_ui import MUTED as MUTED_STYLE
-    from skillevaluator.reporting.console_ui import Verdict, _is_skipped, first_fix
+    from skillevaluator.reporting.console_ui import MUTED, Verdict, _is_skipped, first_fix
 
     ext = {"html": ".html", "json": ".json", "markdown": ".md", "sarif": ".sarif.json"}
     links: list[tuple[str, str]] = [
@@ -1569,19 +1568,6 @@ def _finish_pipeline_view(
         return
 
     failed = [result for result in tier_gate_results if not result.passed and not _is_skipped(result)]
-    by_tier: dict[object, list] = {}
-    for result in failed:
-        by_tier.setdefault((result.metadata.get("gating") or {}).get("tier"), []).append(result)
-    parts = []
-    for tier_no, results in by_tier.items():
-        broken = sum(1 for r in results if not r.is_incomplete)
-        counts = [
-            f"{broken} failed" if broken else "",
-            f"{len(results) - broken} didn't run" if broken < len(results) else "",
-        ]
-        label = f"Tier {tier_no}: " if tier_no is not None else ""
-        parts.append(label + ", ".join(c for c in counts if c))
-    headline = " · ".join(parts) or "validation failed"
     if len(failed) == 1:
         only = failed[0]
         tier_no = (only.metadata.get("gating") or {}).get("tier")
@@ -1589,8 +1575,21 @@ def _finish_pipeline_view(
         headline = f"{only.validator_name or 'validation'} {state}" + (
             f" in Tier {tier_no}" if tier_no is not None else ""
         )
+    else:
+        by_tier: dict[object, list] = {}
+        for result in failed:
+            by_tier.setdefault((result.metadata.get("gating") or {}).get("tier"), []).append(result)
+        parts = []
+        for tier_no, results in by_tier.items():
+            broken = sum(1 for r in results if not r.is_incomplete)
+            counts = [
+                f"{broken} failed" if broken else "",
+                f"{len(results) - broken} didn't run" if broken < len(results) else "",
+            ]
+            parts.append((f"Tier {tier_no}: " if tier_no is not None else "") + ", ".join(c for c in counts if c))
+        headline = " · ".join(parts) or "validation failed"
     rerun = _rerun_hint(target_path, agent_eval)
-    fix = [("see what to fix above, then rerun", MUTED_STYLE)] if failed else first_fix(tier_gate_results)
+    fix = [("see what to fix above, then rerun", MUTED)] if failed else first_fix(tier_gate_results)
     view.finish(Verdict(passed=False, headline=headline, fix=fix, rerun=rerun), links)
 
 
@@ -2303,11 +2302,15 @@ def validate(
             [*tier3_config_rows, stage_hint_row("status", "running with-skill and baseline trials…")],
         )
 
+        from threading import Lock
+
         live_case_rows: list[TierRow] = []
         engine_tail: list[str] = []
+        progress_lock = Lock()  # case rows refresh from a polling thread, engine lines from the runner
 
         def _show_tier3_progress() -> None:
-            view.tier_progress(tier3_index, [*tier3_config_rows, *live_case_rows, *engine_feed_rows(engine_tail)])
+            with progress_lock:
+                view.tier_progress(tier3_index, [*tier3_config_rows, *live_case_rows, *engine_feed_rows(engine_tail)])
 
         def _on_engine_tail(lines: list[str]) -> None:
             engine_tail[:] = lines

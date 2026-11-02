@@ -773,6 +773,12 @@ _SKILL_ROOT_PATTERN = _root_variable_pattern(
 )
 
 
+# Whitespace before ``from`` may not include a newline. With ``\s*`` an
+# attempt at every line start of a blank-line run scanned to the end of the
+# run, which made long whitespace runs quadratic.
+_FROM_IMPORT_PATTERN = re.compile(r"(?m)^[^\S\n]*from\s+(\.*[A-Za-z_]\w*(?:\.[A-Za-z_]\w*)*|\.+)\s+import\s+([^\n;]+)")
+
+
 def _expanded_python_imports(raw_text: str, text: str, *, is_python: bool) -> list[str] | None:
     """Return ``module.name`` forms for ``from module import name`` statements.
 
@@ -799,10 +805,7 @@ def _expanded_python_imports(raw_text: str, text: str, *, is_python: bool) -> li
                 if imported_name.name != "*"
             )
         return expanded_imports
-    for import_match in re.finditer(
-        r"(?m)^\s*from\s+(\.*[A-Za-z_]\w*(?:\.[A-Za-z_]\w*)*|\.+)\s+import\s+([^\n;]+)",
-        text,
-    ):
+    for import_match in _FROM_IMPORT_PATTERN.finditer(text):
         module_name = import_match.group(1)
         for imported_name in import_match.group(2).strip("() ").split(","):
             imported_name = imported_name.strip().split()[0] if imported_name.strip() else ""

@@ -903,6 +903,17 @@ class TestReferenceReachability:
         assert result.passed
         assert result.metadata["skillspector_applicability"]["suppressed_by_file_role"] == {"ordinary_data": 1}
 
+    @pytest.mark.parametrize("separator", ["\n", " \n", "\r\n"])
+    def test_import_fallback_does_not_cross_lines(self, separator: str) -> None:
+        # A match attempt that crosses lines made a whitespace run quadratic:
+        # about 1 MB of blank lines took minutes. Each attempt now stays on
+        # the line of its ``from``.
+        blank_run = separator * (1_000_000 // len(separator))
+        text = f"{blank_run}\t from .lib import helper\n"
+
+        assert scope_module._FROM_IMPORT_PATTERN.search(f"{separator * 3}from x import y").start() == 3 * len(separator)
+        assert scope_module._expanded_python_imports(text, text, is_python=False) == [".lib.helper"]
+
     @pytest.mark.parametrize(
         ("variant", "tokens", "expected"),
         [

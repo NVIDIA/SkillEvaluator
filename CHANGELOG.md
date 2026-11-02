@@ -4,6 +4,8 @@ All notable changes to SkillEvaluator are documented in this file.
 
 ## Unreleased
 
+## 0.7.0 - 2026-11-02
+
 ### Added
 
 - Support Python 3.14 alongside Python 3.12 and 3.13, including installation
@@ -371,6 +373,9 @@ All notable changes to SkillEvaluator are documented in this file.
 
 ### Security
 
+- Plugin inventories and findings now redact credentials embedded in declared
+  component paths, including invalid or unsafe references, before recording
+  their names, locations and metadata.
 - Linux local mode now launches Bubblewrap by the absolute path that passed its
   smoke test instead of a bare `bwrap`. The bare name was looked up on the host
   `PATH` for every command, from that command's working directory (the

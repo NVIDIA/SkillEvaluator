@@ -19,7 +19,7 @@ from skillevaluator.plugin_discovery import discover_plugin_members
 from skillevaluator.plugin_formats import AGENT_PLUGINS_V1_PROFILE, CLAUDE_PROFILE, CODEX_PROFILE, CURSOR_PROFILE
 from skillevaluator.plugin_manifest import PluginManifestPathError, locate_plugin_manifest
 from skillevaluator.plugin_mcp import collect_mcp_declarations
-from skillevaluator.plugin_paths import PluginRootReader
+from skillevaluator.plugin_paths import DeclaredPath, PluginRootReader, _path_problem_finding
 from skillevaluator.utils.secure_fs import SecurePathError, SecureRoot
 from skillevaluator.validators.mcp_static import validate_mcp_server_declaration
 
@@ -556,3 +556,52 @@ def test_codex_drops_a_commands_map_and_loads_the_default_folder(tmp_path):
     result = found(tmp_path)
     assert [(m.name, m.origin) for m in result.components if m.type == "command"] == [("default", "packaged")]
     assert [(f.check_name, f.severity) for f in result.findings] == [("plugin_component_path_invalid", Severity.MEDIUM)]
+
+
+def _credential() -> str:
+    return "pw-" + "test-value"
+
+
+@pytest.mark.parametrize(
+    ("manifest_rel", "fields"),
+    [
+        (
+            ".claude-plugin/plugin.json",
+            {
+                "skills": "https://user:{pw}@host.example/skills",
+                "commands": ["ws://user:{pw}@host.example/x"],
+                "agents": ["//user:{pw}@host.example/a.md"],
+                "hooks": "./hooks.json?token={pw}",
+                "outputStyles": "styles?token={pw}",
+            },
+        ),
+        (".codex-plugin/plugin.json", {"skills": {"url": "https://user:{pw}@host.example/skills"}}),
+    ],
+)
+def test_declared_component_references_never_show_their_credentials(
+    tmp_path: Path, manifest_rel: str, fields: dict
+) -> None:
+    """Regression: component-path findings and inventory rows quoted the declared value as written, so a
+    reference carrying userinfo or a query credential copied it into reports (only mcpServers was redacted)."""
+    pw = _credential()
+    declared = json.loads(json.dumps(fields).replace("{pw}", pw))
+    write_tree(tmp_path, {manifest_rel: {"name": "demo", **declared}})
+    result = found(tmp_path)
+    assert {name for name in fields if any(f"'{name}'" in finding.message for finding in result.findings)} == set(
+        fields
+    )
+    # The manifest record keeps the source as written; findings and inventory rows are what reports show.
+    assert pw not in repr((result.findings, result.components))
+
+
+def test_unsafe_declared_path_location_never_shows_its_credentials(tmp_path: Path) -> None:
+    """Regression: an unreadable declared path (Windows rejects '?' in file names) named the declared value,
+    credential included, as the finding's location."""
+    pw = _credential()
+    reader = PluginRootReader(tmp_path)
+    declared = DeclaredPath(f"styles?token={pw}", PurePosixPath(f"styles?token={pw}"))
+    finding = _path_problem_finding(
+        reader, "outputStyles", declared, ".claude-plugin/plugin.json", "unsafe", declared.rel
+    )
+    assert finding.check_name == "plugin_component_path_unsafe"
+    assert pw not in repr(finding)

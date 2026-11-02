@@ -307,10 +307,12 @@ printf "%s" "$score" > "$REWARD_TXT"
 
 
 def _write_grader_file(path: Path, *, language: str) -> None:
+    # LF only: graders run inside a Linux container, and Windows' default CRLF
+    # breaks the shebang and `set -euo pipefail`.
     if language == "shell":
-        path.write_text(_shell_grader_template(), encoding="utf-8")
+        path.write_text(_shell_grader_template(), encoding="utf-8", newline="\n")
     else:
-        path.write_text(_python_grader_template(), encoding="utf-8")
+        path.write_text(_python_grader_template(), encoding="utf-8", newline="\n")
     path.chmod(0o755)
 
 
@@ -628,7 +630,7 @@ WORKDIR /workspace
         grader_path = tests_dir / ("grader.sh" if language == "shell" else "grader.py")
         _write_grader_file(grader_path, language=language)
         test_sh = tests_dir / "test.sh"
-        test_sh.write_text(_native_test_sh(language), encoding="utf-8")
+        test_sh.write_text(_native_test_sh(language), encoding="utf-8", newline="\n")
         test_sh.chmod(0o755)
         (private_harbor / "README.md").write_text(
             """# SkillEvaluator BYOT Harbor Tasks

@@ -2339,7 +2339,9 @@ def _write_test_sh(task_dir: Path, *, grading_mode: str, custom_grader: bool) ->
     else:
         script = prefix + 'python3 -I "${evaluator_dir}/eval.py"\n'
     test_sh = tests_dir / "test.sh"
-    test_sh.write_text(script, encoding="utf-8")
+    # LF only: the script runs inside a Linux container, and Windows' default
+    # CRLF turns the shebang into "#!/bin/bash\r".
+    test_sh.write_text(script, encoding="utf-8", newline="\n")
     test_sh.chmod(0o755)
 
 

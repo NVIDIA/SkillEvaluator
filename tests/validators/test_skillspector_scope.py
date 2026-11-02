@@ -169,6 +169,12 @@ class TestFileRoles:
             ("README.md", "documentation"),
             (".github/workflows/ci.yml", "repository_metadata"),
             (".gitignore", "repository_metadata"),
+            # Top-level files outside these exceptions are agent references.
+            (".env", "repository_metadata"),
+            (".prompt", "repository_metadata"),
+            ("GUIDE.rst", "documentation"),
+            (".cursorrules", "agent_instruction"),
+            ("notes.txt", "agent_reference"),
             ("data/samples.csv", "ordinary_data"),
         ],
     )

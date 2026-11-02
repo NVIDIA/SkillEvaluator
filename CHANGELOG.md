@@ -114,8 +114,8 @@ All notable changes to SkillEvaluator are documented in this file.
   SkillSpector revision behind each LLM analyzer, and the sampling and
   determinism evidence. The Security result in the JSON report carries it as
   `skillspector_llm_provenance`, next to `skillspector_provider_id`, the
-  SkillEvaluator provider the scan was bridged from (for example `nv_build`,
-  which SkillSpector runs as its `openai` adapter). The HTML report, including
+  SkillEvaluator provider the scan was bridged from (for example `nv_build`).
+  The HTML report, including
   CI pages rendered from the retained Tier 1 JSON, lists it in a collapsible
   Tier 1 LLM Provenance table. The record is also kept when the LLM stage
   fails or SkillSpector does not confirm LLM analysis, as long as
@@ -252,6 +252,9 @@ All notable changes to SkillEvaluator are documented in this file.
 - On Windows, repository root and source-link detection no longer break for
   repositories in non-ASCII folders: Git output is decoded as UTF-8 instead of
   the locale code page.
+- Private plugin risk checks preserve PowerShell semantics in hook conditions,
+  grants, findings and remediation; denying Bash no longer hides a PowerShell
+  grant.
 - CI quality thresholds apply to every parallel scan worker. Report overviews
   and detailed reports surface failed quality gates ahead of advisory findings,
   with links to the check that needs attention.
@@ -486,6 +489,8 @@ All notable changes to SkillEvaluator are documented in this file.
 
 ### Development
 
+- The staged Harbor verifier reuses the shared log-secret redactor, guarded
+  by the Python 3.9 verifier smoke check.
 - Python 3.13 and 3.14 CI test jobs run in parallel with `pytest -n auto`;
   the Python 3.12 coverage job remains serial.
 - Streamed-execution cleanup tests wait for descendant processes to exit

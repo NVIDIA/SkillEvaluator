@@ -2501,8 +2501,10 @@ def _call_validated_json_judge(prompt, validate, call, extract, *, metric="judge
         for attempt, text, model in reversed(unparsed_replies):
             candidate = salvage(text)
             if candidate is not None:
-                # Both attempts were saved as rejected; this entry shows that the
-                # score comes from the part of *attempt*'s reply that was rebuilt.
+                # The LLM attempts were saved with their own status (rejected,
+                # or error if the retry failed in transport); this entry shows
+                # that the score comes from the part of *attempt*'s reply that
+                # was rebuilt.
                 _record_judge_attempt(
                     metric,
                     attempt,

@@ -612,6 +612,38 @@ def test_salvaged_behavior_score_is_saved_as_a_salvage_attempt(tmp_path: Path) -
     assert json.loads(salvaged["reply"])["results"] == [{"step": 1, "passed": True, "reason": "ran the script"}]
 
 
+def test_salvage_after_a_failed_retry_keeps_each_attempt_status(tmp_path: Path) -> None:
+    # The first reply is cut off and the retry fails in transport: the LLM
+    # attempts keep their own status, and the salvage entry is numbered like
+    # the truncated attempt it was rebuilt from.
+    verifier = _stage_verifier(tmp_path)
+    truncated = '{"results":[{"step":1,"passed":true,"reason":"ran the script"},{"step":2,"passed":tr'
+    calls: list[str] = []
+    route = _routed(calls, accuracy=_ACCURACY_RESPONSE, goal=_GOAL_RESPONSE, behavior=truncated)
+    behavior_calls: list[str] = []
+
+    def call(prompt: str, **kwargs: Any):
+        if "EXPECTED BEHAVIORS" in prompt:
+            behavior_calls.append(prompt)
+            return (truncated, None) if len(behavior_calls) == 1 else (None, "request timed out")
+        return route(prompt, **kwargs)
+
+    verifier.call_public_llm = call
+    verifier._call_public_llm_with_provenance = lambda prompt, **kwargs: (*call(prompt, **kwargs), {})
+
+    verifier.main()
+
+    rich = json.loads(verifier.SKILL_EVALUATOR_REWARD_JSON.read_text(encoding="utf-8"))
+    assert rich["behavior_check"] == 0.5
+    attempts = [attempt for attempt in _attempts(verifier.VERIFIER_DIR) if attempt["metric"] == "behavior_check"]
+    assert [(attempt["attempt"], attempt["method"], attempt["status"]) for attempt in attempts] == [
+        (1, "llm", "rejected"),
+        (2, "llm", "error"),
+        (1, "salvage", "accepted"),
+    ]
+    assert attempts[1]["problem"] == "request timed out"
+
+
 def test_judge_evidence_write_failure_never_changes_the_score(tmp_path: Path, monkeypatch) -> None:
     verifier = _stage_verifier(tmp_path)
     calls: list[str] = []

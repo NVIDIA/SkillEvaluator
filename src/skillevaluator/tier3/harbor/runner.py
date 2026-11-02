@@ -115,6 +115,7 @@ from skillevaluator.tier3.harbor.gke_environment import (
     is_gke_workload_identity_allowed,
 )
 from skillevaluator.tier3.harbor.kubeconfig import _resolve_single_kubeconfig
+from skillevaluator.tier3.harbor.local_runtime import PINNED_RUNTIME_VERSIONS
 from skillevaluator.tier3.harbor.metrics import DEFAULT_METRICS, score_policy_for_metrics
 from skillevaluator.tier3.harbor.progress import (
     MIN_EXACT_SECRET_CHARS,
@@ -1322,8 +1323,8 @@ _HARBOR_LAUNCH_ENV = MappingProxyType({"HARBOR_TELEMETRY": "0", "PYTHON_DOTENV_D
 # releases SkillEvaluator was validated with, so trials do not change when a
 # new CLI ships. Local mode runs the operator's installed CLI instead, and its
 # wrappers check a minimum version for the selected model.
-_CODEX_VERSION = "0.161.0"
-_CLAUDE_CODE_VERSION = "2.1.292"
+_CODEX_VERSION = PINNED_RUNTIME_VERSIONS["codex"]
+_CLAUDE_CODE_VERSION = PINNED_RUNTIME_VERSIONS["claude-code"]
 # Harbor 0.22's Codex agent ran with ``model_reasoning_effort=high``; later
 # releases defer to Codex's own default. Pin the effort SkillEvaluator was
 # validated with so scores and cost stay comparable across Harbor upgrades.

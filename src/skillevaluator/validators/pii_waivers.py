@@ -43,6 +43,7 @@ from __future__ import annotations
 
 import hashlib
 import re
+import unicodedata
 from collections.abc import Callable, Collection, Mapping
 from dataclasses import dataclass, field
 from datetime import UTC, date, datetime, timedelta
@@ -128,7 +129,13 @@ def _file_field(item: dict, location: str) -> str:
     if not isinstance(value, str) or not value or "\\" in value:
         raise PIIWaiverError(f"{location}.file must be a relative path with forward slashes")
     path = PurePosixPath(value)
-    if path.is_absolute() or path.as_posix() != value or value == "." or ".." in path.parts:
+    if (
+        path.is_absolute()
+        or path.as_posix() != value
+        or value == "."
+        or ".." in path.parts
+        or any(unicodedata.category(character) == "Cc" for character in value)
+    ):
         raise PIIWaiverError(f"{location}.file must be a normalized relative path inside the waiver file's directory")
     return value
 
@@ -253,7 +260,7 @@ class PIIWaiverSet:
         located = self._base() / relative
         try:
             return located.parent.resolve() / located.name
-        except (OSError, RuntimeError):
+        except (OSError, RuntimeError, ValueError):
             return None
 
     def cover(self, unit: Path) -> None:

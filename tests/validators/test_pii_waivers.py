@@ -11,7 +11,7 @@ and a waiver file that does not load must apply nothing and fail the scan.
 from __future__ import annotations
 
 import json
-from datetime import timedelta
+from datetime import date, timedelta
 from pathlib import Path
 
 import pytest
@@ -19,7 +19,7 @@ import yaml
 
 from skillevaluator.reporting import JSONReporter, SARIFReporter
 from skillevaluator.utils.secret_redaction import SENSITIVE_PII_CATEGORIES
-from skillevaluator.validators.pii_waivers import pii_evidence_sha256, today_utc
+from skillevaluator.validators.pii_waivers import PIIWaiver, PIIWaiverSet, pii_evidence_sha256, today_utc
 from skillevaluator.validators.security import SecurityValidator
 
 ADDRESS = "boss@company.com"
@@ -39,6 +39,17 @@ def _waiver(**overrides: object) -> dict:
     }
     waiver.update(overrides)
     return waiver
+
+
+def _loaded(**overrides: object) -> dict:
+    """Return :class:`PIIWaiver` fields for a waiver built without the loader."""
+    waiver = _waiver(**overrides)
+    return {
+        "waiver_id": waiver.pop("id"),
+        **waiver,
+        "created": date.fromisoformat(waiver["created"]),
+        "expires": date.fromisoformat(waiver["expires"]),
+    }
 
 
 def _write_waivers(root: Path, *waivers: dict) -> Path:
@@ -178,6 +189,8 @@ _IN_TWO_DAYS = (today_utc() + timedelta(days=2)).isoformat()
         pytest.param([_waiver(file="../skill/contact.md")], ".file", id="parent-traversal"),
         pytest.param([_waiver(file="skill\\contact.md")], ".file", id="backslash-path"),
         pytest.param([_waiver(file="./skill/contact.md")], ".file", id="unnormalized-path"),
+        pytest.param([_waiver(file="skill/a\x00b/contact.md")], ".file", id="nul-in-path"),
+        pytest.param([_waiver(file="skill/contact.md\n")], ".file", id="control-character-in-path"),
         pytest.param([_waiver(line=0)], ".line", id="line-zero"),
         pytest.param([_waiver(line=True)], ".line", id="line-bool"),
         pytest.param([_waiver(evidence_sha256="abc")], "evidence_sha256", id="short-digest"),
@@ -210,6 +223,17 @@ def test_invalid_waiver_file_applies_nothing_and_fails_the_scan(
     assert expected in invalid.message
     assert invalid.file_path == "pii-waivers.yaml"
     assert str(tmp_path) not in JSONReporter(include_timestamp=False).render(result)
+
+
+def test_waiver_whose_file_cannot_be_located_is_not_judged(skill: Path, tmp_path: Path) -> None:
+    """A path the OS rejects (here an embedded NUL) is skipped, never a crash of the scan."""
+    waivers = PIIWaiverSet(
+        path=tmp_path / "pii-waivers.yaml", waivers=[PIIWaiver(**_loaded(file="skill/a\x00b/contact.md"))]
+    )
+    waivers.cover(skill)
+
+    assert waivers.matcher(skill / "contact.md") is None
+    assert waivers.findings(skill) == []
 
 
 def _write_skills(root: Path, *names: str, line: str = f"Write to {ADDRESS}.") -> None:

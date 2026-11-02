@@ -28,6 +28,7 @@ _SKILLSPECTOR_2_11_1_PE3_REPORT = Path(__file__).parents[1] / "fixtures" / "skil
 # build.sh as scanned for the captured 2.11.1 PE3 report: line 2 is a
 # read-only UID-map mount, line 3 a real credential-file read.
 _SKILLSPECTOR_2_11_1_PE3_BUILD_SH = "#!/bin/sh\ndocker run -v /etc/passwd:/etc/passwd:ro image\ncat /etc/passwd\n"
+_SKILLSPECTOR_2_13_3_PASSWD_REPORTS = Path(__file__).parents[1] / "fixtures" / "skillspector-2.13.3-passwd-mount"
 _SKILLSPECTOR_2_12_LLM_PROVENANCE = Path(__file__).parents[1] / "fixtures" / "skillspector-2.12.0-llm-provenance.json"
 _SKILLSPECTOR_2_10_REQUIRED_ANALYZERS = (
     "artifact_integrity",
@@ -2295,8 +2296,8 @@ print(json.dumps([finding.metadata["matched_value"] for finding in result.findin
         [
             {"llm_requested": True, "llm_available": True},
             {"llm_requested": True, "llm_available": False},
-            {"llm_requested": False, "llm_available": True},
             {"llm_requested": False, "llm_available": False, "meta_analysis_applied": True},
+            {"llm_requested": False, "llm_available": True, "meta_analysis_applied": True},
         ],
     )
     @patch("skillevaluator.validators.security.Tools")
@@ -2537,17 +2538,14 @@ print(json.dumps([finding.metadata["matched_value"] for finding in result.findin
             }[mutation]
             assert any(expected in error for error in result.errors)
 
-    @pytest.mark.parametrize("version", ["2.11.1", "2.12.0", "2.13.2"])
     @patch("skillevaluator.validators.security.Tools")
     def test_skillspector_ignores_tagged_read_only_passwd_mount(
         self,
         mock_tools,
         sample_skill_dir: Path,
-        version: str,
     ) -> None:
         (sample_skill_dir / "build.sh").write_text(_SKILLSPECTOR_2_11_1_PE3_BUILD_SH, encoding="utf-8")
         payload = json.loads(_SKILLSPECTOR_2_11_1_PE3_REPORT.read_text(encoding="utf-8"))
-        payload["metadata"]["skillspector_version"] = version
 
         result = _validate_skillspector_payload(mock_tools, sample_skill_dir, payload)
 
@@ -2560,6 +2558,112 @@ print(json.dumps([finding.metadata["matched_value"] for finding in result.findin
         ] == [("build.sh", 3)]
         assert not result.passed
         assert "skillspector ignored 1 read-only /etc/passwd mount issue(s)" in result.messages
+
+    @pytest.mark.parametrize("provider_available", [False, True])
+    @pytest.mark.parametrize("case", ["read-only", "separate-read"])
+    @patch("skillevaluator.validators.security.Tools")
+    def test_skillspector_captured_2_13_3_passwd_mount(
+        self,
+        mock_tools,
+        sample_skill_dir: Path,
+        case: str,
+        provider_available: bool,
+    ) -> None:
+        content = "#!/bin/sh\ndocker run -v /etc/passwd:/etc/passwd:ro image\n"
+        if case == "separate-read":
+            content += "cat /etc/passwd\n"
+        (sample_skill_dir / "build.sh").write_text(content, encoding="utf-8")
+        payload = json.loads((_SKILLSPECTOR_2_13_3_PASSWD_REPORTS / f"{case}.json").read_text(encoding="utf-8"))
+        # These are real release reports, including distinct source/target PE3
+        # identities and provider availability despite --no-llm execution.
+        assert payload["metadata"]["skillspector_version"] == "2.13.3"
+        assert payload["metadata"]["llm_requested"] is False
+        assert payload["metadata"]["llm_available"] is True
+        # Also exercise the same contract with no provider credentials.
+        payload["metadata"]["llm_available"] = provider_available
+
+        result = _validate_skillspector_payload(mock_tools, sample_skill_dir, payload)
+
+        assert not result.is_incomplete
+        assert result.metadata["skillspector_version"] == "2.13.3"
+        assert result.passed is (case == "read-only")
+        assert [
+            (finding.file_path, finding.line_number)
+            for finding in result.findings
+            if finding.check_name.endswith("(PE3)")
+        ] == ([("build.sh", 3)] if case == "separate-read" else [])
+        assert any(finding.check_name.endswith("(RP1)") for finding in result.findings)
+        assert "skillspector ignored 2 read-only /etc/passwd mount issue(s)" in result.messages
+        assert not any(finding.check_name == "skillspector_risk_score" for finding in result.findings)
+
+    @pytest.mark.parametrize(
+        "reason_code",
+        [
+            "llm_response_refused",
+            "llm_response_truncated",
+            "llm_response_incomplete",
+            "llm_response_missing_fields",
+            "llm_response_invalid_tool",
+            "llm_response_invalid_schema",
+            "llm_response_empty",
+            "llm_response_limit",
+        ],
+    )
+    @patch("skillevaluator.validators.security.Tools")
+    def test_skillspector_2_13_3_passwd_mount_keeps_llm_inspection_incomplete(
+        self,
+        mock_tools,
+        sample_skill_dir: Path,
+        reason_code: str,
+    ) -> None:
+        (sample_skill_dir / "build.sh").write_text(
+            "#!/bin/sh\ndocker run -v /etc/passwd:/etc/passwd:ro image\n", encoding="utf-8"
+        )
+        deterministic = json.loads((_SKILLSPECTOR_2_13_3_PASSWD_REPORTS / "read-only.json").read_text(encoding="utf-8"))
+        # Model a partial enrichment using 2.13.3's new response reason codes;
+        # the stored deterministic report remains the captured CLI output.
+        enrichment = json.loads(json.dumps(deterministic))
+        enrichment["metadata"].update({"llm_requested": True, "llm_available": True})
+        enrichment["metadata"].pop("llm_provenance", None)
+        completeness = enrichment["analysis_completeness"]
+        message = f"LLM inspection incomplete: {reason_code}."
+        completeness.update(
+            {
+                "is_complete": False,
+                "status": "partial",
+                "limitations": [message],
+                "ledger_exceptions": [{"reason_code": reason_code, "fatal": False}],
+            }
+        )
+        # Replace disabled optional analyzers with valid enrichment accounting.
+        for status in completeness["analyzer_statuses"]:
+            if status["status"] == "disabled":
+                status.update({"status": "completed", "planned_work": 1, "completed": 1})
+                status.pop("reason_code", None)
+                status.pop("message", None)
+            if status["analyzer_id"] == "semantic_security_discovery":
+                status.update(
+                    {
+                        "status": "degraded",
+                        "completed": 0,
+                        "skipped": 1,
+                        "reason_code": reason_code,
+                        "message": message,
+                    }
+                )
+        mock_tools.skillspector.is_available = True
+        mock_tools.skillspector.run.side_effect = [
+            ToolResult(success=True, stdout=json.dumps(payload), stderr="", exit_code=0)
+            for payload in (deterministic, enrichment)
+        ]
+
+        result = SecurityValidator(use_llm=True).validate_security_only(sample_skill_dir)
+
+        assert result.status == "incomplete"
+        assert result.metadata["incomplete_scans"] == ["skillspector-llm"]
+        assert any("analysis_completeness" in error and "partial" in error for error in result.errors)
+        assert "skillspector ignored 2 read-only /etc/passwd mount issue(s)" in result.messages
+        assert not any(finding.check_name.endswith("(PE3)") for finding in result.findings)
 
     @pytest.mark.parametrize(
         "build_sh",

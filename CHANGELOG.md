@@ -291,7 +291,10 @@ All notable changes to SkillEvaluator are documented in this file.
   of such a mount. The aggregate risk score is recomputed without it. Writable
   or implicit-mode mounts, other paths, same-line reads such as
   `cat /etc/passwd`, aggregated rows, and earlier SkillSpector versions still
-  block.
+  block. Captured SkillSpector 2.13.3 reports cover both mount operands and a
+  separate blocking read, and partial LLM-response inspection stays incomplete.
+  Static reports are accepted when a provider is available but LLM analysis
+  was neither requested nor applied; availability alone is not execution.
 
 - PII email scans recognize all RFC 2606 reserved domains, including their
   subdomains, mixed-case forms, trailing dots, and prose ellipses. A local-part

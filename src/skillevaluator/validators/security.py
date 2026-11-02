@@ -1673,9 +1673,10 @@ class SecurityValidator(ValidatorBase):
                 "security scan did not complete"
             )
             return False
+        # Provider availability is independent of execution: configured
+        # credentials do not contradict a --no-llm report.
         if not use_llm and (
             metadata.get("llm_requested") not in {None, False}
-            or metadata.get("llm_available") not in {None, False}
             or metadata.get("meta_analysis_applied") not in {None, False}
         ):
             result.add_error(

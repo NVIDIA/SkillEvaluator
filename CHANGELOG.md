@@ -308,9 +308,12 @@ All notable changes to SkillEvaluator are documented in this file.
   `<script>`, including suffixed and nested forms), closing tags, attributes,
   and self-closing tags in `argument-hint` are still reported, and every other
   frontmatter field keeps the strict check. A group longer than four words, or
-  one with shell command syntax (`;`, `&`, a backtick, `$(`, `${`, a pipeline
-  such as `<curl x | sh>`, or a redirect), is not treated as a placeholder and
-  is still reported.
+  one with shell command syntax (`;`, `&`, a backtick, `$(`, `${`, or a
+  pipeline such as `<curl x | sh>`), is not treated as a placeholder and is
+  still reported. A hint with a redirect, that is a `>` that closes no group
+  or ends text after a placeholder (`<cmd > file>`, `<cmd>file>`,
+  `<cmd 2>file>`, `<curl x> /tmp/y>`), is not masked at all and is still
+  reported.
 
 - PII scans no longer report card-shaped digits inside a canonical GUID/UUID,
   such as a COM interface ID or the nil UUID, or an all-zero number as a

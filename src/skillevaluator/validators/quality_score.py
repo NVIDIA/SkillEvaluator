@@ -66,6 +66,10 @@ _ARGUMENT_COMMAND_SYNTAX_RE = re.compile(r"[;&`]|\$[({]")
 _ARGUMENT_CHOICE_LABEL_RE = re.compile(r"^(?:[^|:]+:|\S+\s+(?:e\.g\.|i\.e\.),?)\s+", re.IGNORECASE)
 # One choice in a ``|`` list: a single word or a quoted literal.
 _ARGUMENT_CHOICE_RE = re.compile(r"\S+|\"[^\"]*\"|'[^']*'")
+# A masked placeholder followed by text that runs into a ``>``, as in ``<<cmd>file>``
+# (masked to ``<[]file>``). A placeholder nested directly in a group (``<R<NNN>>``,
+# masked to ``<R[]>``) has no text before the ``>`` and does not match.
+_ARGUMENT_TEXT_AFTER_MASK_RE = re.compile(r"\[\][^<>\[\]]+>")
 _URL_EDGE_C0_OR_SPACE_RE = re.compile(r"^[\x00-\x20]+|[\x00-\x20]+$")
 _ERROR_HANDLING_RE = re.compile(
     r"\b(?:errors?|exceptions?|invalid|fail(?:s|ed|ure|ures|ing)?|"
@@ -99,6 +103,37 @@ def _mask_argument_placeholder(match: re.Match[str]) -> str:
     """Mask a short CLI placeholder; leave free text and command syntax for the tag check."""
     # "[]" cannot form a new tag when masking nested syntax such as ``<R<NNN>>``.
     return "[]" if _is_argument_placeholder(match.group(1)) else match.group(0)
+
+
+def _has_unmatched_close(text: str) -> bool:
+    """Return whether ``text`` has a ``>`` that closes no earlier ``<``."""
+    depth = 0
+    for char in text:
+        if char == "<":
+            depth += 1
+        elif char == ">":
+            if not depth:
+                return True
+            depth -= 1
+    return False
+
+
+def _mask_argument_hint(hint: str) -> str:
+    """Mask the short CLI placeholders in a string ``argument-hint`` for the XML tag check.
+
+    Control tags are checked on the raw value first: masking an inner placeholder
+    could otherwise erase an enclosing tag such as ``<system<payload>>``. A ``>``
+    left after masking reads as a redirect when it closes no group (``<cmd>file>``,
+    ``<cmd 2>file>``, ``<curl x> /tmp/y>``) or ends text after a masked placeholder
+    (``<<cmd>file>``). The raw hint is then returned, so every group in it stays
+    visible to the tag check.
+    """
+    if _ARGUMENT_CONTROL_TAG_RE.search(hint):
+        return hint
+    masked = _ARGUMENT_PLACEHOLDER_RE.sub(_mask_argument_placeholder, hint)
+    if _has_unmatched_close(masked) or _ARGUMENT_TEXT_AFTER_MASK_RE.search(masked):
+        return hint
+    return masked
 
 
 def _contains_term(text: str, term: str) -> bool:
@@ -478,10 +513,8 @@ class QualityScoreValidator(ValidatorBase):
                 continue
             value = str(val)
             # A string argument-hint documents CLI placeholders (``<file> [--strict]``).
-            # Check control tags on the raw value first: masking an inner placeholder
-            # could otherwise erase an enclosing tag such as ``<system<payload>>``.
-            if key == "argument-hint" and isinstance(val, str) and not _ARGUMENT_CONTROL_TAG_RE.search(value):
-                value = _ARGUMENT_PLACEHOLDER_RE.sub(_mask_argument_placeholder, value)
+            if key == "argument-hint" and isinstance(val, str):
+                value = _mask_argument_hint(value)
             if XML_TAG_RE.search(value):
                 dim.deduct(
                     15,

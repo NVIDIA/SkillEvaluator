@@ -731,6 +731,8 @@ class TestQualityScoreDeterministicContracts:
             "<pr number> [base branch]",
             "<base branch>",
             "<path to config file>",
+            "<owner>/<repo>",
+            "<file>:<line>",
         ],
     )
     def test_argument_hint_placeholders_are_not_xml(self, quality_skill: Path, hint: str):
@@ -825,6 +827,14 @@ class TestQualityScoreDeterministicContracts:
             "<run ${HOME}>",
             "<run `id`>",
             "<curl x > /tmp/y>",
+            "<curl x>/tmp/y>",
+            "<cmd>file>",
+            "<cmd 2>file>",
+            "<curl x> /tmp/y>",
+            "<curl x>> /tmp/y",
+            "<<curl x>/tmp/y>",
+            "<<curl x> /tmp/y>",
+            "<bug_id> <curl x>/tmp/y>",
         ],
     )
     def test_argument_hint_free_text_and_commands_are_not_placeholders(self, quality_skill: Path, hint: str):

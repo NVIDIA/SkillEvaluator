@@ -4910,6 +4910,7 @@ def _pass_summary(
     stop_on_pass: bool = False,
     expected_cases: int | None,
     expected_case_ids: list[str] | None = None,
+    recovered_attempts: list[dict[str, Any]] | None = None,
     scorer: Callable[[dict[str, Any]], float | None] | None = None,
 ) -> dict[str, Any]:
     """Summarize pass@k using SkillEvaluator continuous reward scores.
@@ -4948,6 +4949,7 @@ def _pass_summary(
         best_score: float | None = None
         first_pass_attempt: int | None = None
         for idx, (reward, overall) in enumerate(sorted(attempts, key=lambda item: _attempt_sort_key(item[0])), start=1):
+            idx = _attempt_ordinal(reward) or idx
             score = round(overall, 4)
             passed = score >= pass_threshold
             attempt_passes.append({"passed": passed})
@@ -4975,7 +4977,8 @@ def _pass_summary(
             passed_cases += 1
         if is_expected_case:
             attempts_used += len(attempts)
-        unscored = max(0, n_attempts - len(attempts))
+        recovered_count = sum(item["case_id"] == entry_id for item in (recovered_attempts or []))
+        unscored = max(0, n_attempts - len(attempts) - recovered_count)
         skipped = unscored if stop_on_pass and case_passed else 0
         missing = 0 if skipped else unscored
 
@@ -4990,6 +4993,7 @@ def _pass_summary(
                 "passed": case_passed,
                 "first_pass_attempt": first_pass_attempt,
                 "attempts_used": len(attempts),
+                "attempts_recovered": recovered_count,
                 "attempts_skipped": skipped,
                 "attempts_missing": missing,
                 "best_score": round(best_score, 4) if best_score is not None else None,
@@ -6366,6 +6370,208 @@ def _summarize_trajectory(data: dict[str, Any]) -> dict[str, Any]:
     }
 
 
+def _timeout_recovered_by(failed: dict[str, Any], successful: dict[str, Any]) -> bool:
+    """Recognize only Harbor's agent-phase deadline followed by a fresh completion.
+
+    This is evidence classification, not command replay. Setup, transport, verifier,
+    multi-step, missing, and ambiguous failures remain errors. The original result
+    is never rewritten, and an unscored timeout never contributes a zero reward.
+    """
+    try:
+        from harbor.models.trial.result import TrialResult
+
+        before = TrialResult.model_validate(failed)
+        after = TrialResult.model_validate(successful)
+    except (ImportError, ValueError, TypeError):
+        return False
+    error = before.exception_info
+    if (
+        error is None
+        or error.exception_type != "AgentTimeoutError"
+        or not re.fullmatch(r"Agent execution timed out after [0-9.]+ seconds", error.exception_message)
+        or "_run_agent_phase" not in error.exception_traceback
+        or "AgentTimeoutError" not in error.exception_traceback
+        or before.step_results
+        or after.step_results
+        or after.exception_info is not None
+        or after.verifier_result is None
+        or not after.verifier_result.rewards
+        or before.id == after.id
+        or not before.task_checksum
+        or before.task_checksum != after.task_checksum
+        or before.task_id != after.task_id
+        or before.agent_info != after.agent_info
+        or before.agent_execution is None
+        or before.agent_execution.finished_at is None
+        or before.finished_at is None
+        or after.agent_execution is None
+        or after.agent_execution.finished_at is None
+        or after.finished_at is None
+    ):
+        return False
+    # Job/physical-trial identity changes on a fresh attempt; execution inputs must not.
+    excluded = {"trial_name", "trials_dir", "job_id"}
+    if before.config.model_dump(exclude=excluded) != after.config.model_dump(exclude=excluded):
+        return False
+    try:
+        return (
+            before.started_at
+            <= before.agent_execution.started_at
+            <= before.agent_execution.finished_at
+            <= error.occurred_at
+            <= before.finished_at
+            <= after.started_at
+            <= after.agent_execution.started_at
+            <= after.agent_execution.finished_at
+            <= after.finished_at
+        )
+    except TypeError:  # Mixed timezone/invalid timestamps cannot prove ordering.
+        return False
+
+
+def _trial_derived_job_stats(stats: Any) -> dict[str, Any]:
+    """Return the job counters Harbor derives from trials, independent of order.
+
+    Harbor fills job-level ``metrics`` and ``pass_at_k`` after aggregating
+    trials, and token or cost totals depend on summation order, so neither is
+    compared.
+    """
+    return {
+        "counts": (
+            stats.n_completed_trials,
+            stats.n_errored_trials,
+            stats.n_running_trials,
+            stats.n_pending_trials,
+            stats.n_cancelled_trials,
+            stats.n_retries,
+        ),
+        "evals": {
+            key: (
+                value.n_trials,
+                value.n_errors,
+                {
+                    name: {reward: sorted(trials) for reward, trials in rewards.items()}
+                    for name, rewards in value.reward_stats.items()
+                },
+                {name: sorted(trials) for name, trials in value.exception_stats.items()},
+            )
+            for key, value in stats.evals.items()
+        },
+    }
+
+
+def _split_recovered_failures(
+    failures: list[dict[str, str]], recovered: list[dict[str, Any]]
+) -> tuple[list[dict[str, str]], list[dict[str, str]]]:
+    """Separate active trial failures from timeouts a later attempt recovered."""
+    recovered_trials = {item["trial"] for item in recovered}
+    active = [item for item in failures if item["trial"] not in recovered_trials]
+    return active, [item for item in failures if item["trial"] in recovered_trials]
+
+
+def _job_stats_match_trials(job_dir: Path) -> bool:
+    """Require a terminal native job whose counters agree with every physical trial."""
+    try:
+        from harbor.models.job.result import JobResult, JobStats
+        from harbor.models.trial.result import TrialResult
+
+        if _inspect_trial_directory(job_dir)[0] != "directory":
+            return False
+        job = JobResult.model_validate(_read_json(job_dir / "result.json"))
+        trials = []
+        for directory in job_dir.iterdir():
+            kind, _ = _inspect_trial_directory(directory)
+            if kind == "link":
+                return False
+            if kind == "directory":
+                trials.append(TrialResult.model_validate(_read_json(directory / "result.json")))
+        if not job.finished_at or len(trials) != job.n_total_trials or any(t.finished_at is None for t in trials):
+            return False
+        if len({t.id for t in trials}) != len(trials):
+            return False
+        expected = JobStats.from_trial_results(trials, n_total_trials=len(trials), n_retries=job.stats.n_retries)
+        return _trial_derived_job_stats(expected) == _trial_derived_job_stats(job.stats)
+    except (ImportError, ValueError, TypeError, OSError):
+        return False
+
+
+def harbor_timeout_job_recovered(failed_job: Path, completed_job: Path) -> bool:
+    """Check one failed single-trial launch against its successful fresh attempt."""
+    failures = _extract_trial_failures(failed_job)
+    if (
+        len(failures) != 1
+        or not _can_preserve_partial_rewards(failed_job, failures)
+        or not _job_stats_match_trials(failed_job)
+    ):
+        return False
+    failed_trials = [d for d in failed_job.iterdir() if _inspect_trial_directory(d)[0] == "directory"]
+    successful_trials = [d for d in completed_job.iterdir() if _inspect_trial_directory(d)[0] == "directory"]
+    if len(failed_trials) != 1 or len(successful_trials) != 1:
+        return False
+    valid, _ = validate_harbor_job_result(completed_job / "result.json", expected_trials=1)
+    if not valid or _trial_failure_reason(successful_trials[0]):
+        return False
+    failed = _read_json(failed_trials[0] / "result.json")
+    successful = _read_json(successful_trials[0] / "result.json")
+    return isinstance(failed, dict) and isinstance(successful, dict) and _timeout_recovered_by(failed, successful)
+
+
+def _recovered_timeout_attempts(
+    job_dir: Path, rewards: list[dict[str, Any]], *, n_attempts: int
+) -> list[dict[str, Any]]:
+    """Bind retained failures to later scoreable trials of the same task and agent."""
+    completed = []
+    for reward in _logical_attempt_rewards(rewards):
+        root = str(reward.get("_trial_root_name") or "")
+        if not root or Path(root).name != root or _overall_score(reward) is None:
+            continue
+        directory = job_dir / root
+        if _inspect_trial_directory(directory)[0] != "directory" or _trial_failure_reason(directory):
+            continue
+        payload = _read_json(directory / "result.json")
+        if isinstance(payload, dict):
+            completed.append((reward, payload))
+    recovered = []
+    for directory in sorted(job_dir.iterdir()):
+        if _inspect_trial_directory(directory)[0] != "directory":
+            continue
+        failed = _read_json(directory / "result.json")
+        if not isinstance(failed, dict):
+            continue
+        for reward, successful in completed:
+            selector = str(reward.get("_trusted_task_selector") or _entry_id(reward))
+            ordinal = _structural_attempt_ordinal(directory.name, selector)
+            later = _attempt_ordinal(reward)
+            if ordinal is None or later is None or not 0 < ordinal < later <= n_attempts:
+                continue
+            if _timeout_recovered_by(failed, successful):
+                recovered.append(
+                    {
+                        "trial": _published_trial_label(directory.name),
+                        "case_id": _entry_id(reward),
+                        "attempt": ordinal,
+                        "recovered_by": _published_trial_label(reward["_trial_root_name"]),
+                        "recovered_by_attempt": later,
+                    }
+                )
+                break
+    return recovered
+
+
+def _recovered_job_failure(job_dir: Path, failures: list[dict[str, str]], recovered: list[dict[str, Any]]) -> bool:
+    """Only dismiss aggregate error counts fully explained by retained timeouts."""
+    if not recovered or not _can_preserve_partial_rewards(job_dir, failures) or not _job_stats_match_trials(job_dir):
+        return False
+    payload = _read_json(job_dir / "result.json")
+    stats = payload.get("stats", {})
+    errors = stats.get("n_errored_trials", stats.get("n_errors"))
+    return (
+        errors == len(recovered) == len(failures)
+        and {item["trial"] for item in failures} == {item["trial"] for item in recovered}
+        and payload.get("finished_at") is not None
+    )
+
+
 def _condition_execution_summary(
     rewards: list[dict[str, Any]],
     *,
@@ -6375,6 +6581,7 @@ def _condition_execution_summary(
     job_failure: str,
     runtime_failures: list[dict[str, str]] | None = None,
     reward_failures: list[dict[str, str]] | None = None,
+    recovered_attempts: list[dict[str, Any]] | None = None,
     skipped: bool = False,
     stop_on_pass: bool = False,
     pass_threshold: float = 0.50,
@@ -6401,6 +6608,14 @@ def _condition_execution_summary(
             **_failure_list_metadata("reward_failure_details", reward_failures),
         }
 
+    recovered_attempts = recovered_attempts or []
+    recovered_names = {item["trial"] for item in recovered_attempts}
+    runtime_failures = [
+        item
+        for item in (runtime_failures or [])
+        if item["trial"] not in recovered_names or not item.get("reason", "").startswith("AgentTimeoutError:")
+    ]
+    reward_failures = [item for item in (reward_failures or []) if item["trial"] not in recovered_names]
     errors: list[str] = [job_failure] if job_failure else []
     public_runtime_failures = _public_failure_list(runtime_failures)
     public_reward_failures = _public_failure_list(reward_failures)
@@ -6474,11 +6689,12 @@ def _condition_execution_summary(
         attempts.sort(key=lambda item: _attempt_sort_key(item["reward"]))
 
     def _case_attempt_coverage(case_id: str, attempts: list[dict[str, Any]]) -> tuple[int, bool, bool]:
+        recovered_ordinals = [item["attempt"] for item in recovered_attempts if item["case_id"] == case_id]
         explicit = [item["attempt_ordinal"] for item in attempts if item["attempt_ordinal"] is not None]
         all_explicit = len(explicit) == len(attempts) and bool(attempts)
         if explicit and len(explicit) != len(attempts):
             errors.append(f"Scored case {case_id!r} mixes explicit and implicit attempt labels")
-        if len(explicit) != len(set(explicit)):
+        if len(explicit + recovered_ordinals) != len(set(explicit + recovered_ordinals)):
             errors.append(f"Scored case {case_id!r} has duplicate attempt ordinals")
 
         required = n_attempts
@@ -6495,7 +6711,7 @@ def _condition_execution_summary(
 
         if all_explicit:
             expected_ordinals = set(range(1, required + 1))
-            actual_ordinals = set(explicit)
+            actual_ordinals = set(explicit + recovered_ordinals)
             return required, bool(expected_ordinals - actual_ordinals), bool(actual_ordinals - expected_ordinals)
         return required, len(attempts) < required, len(attempts) > required
 
@@ -6528,6 +6744,8 @@ def _condition_execution_summary(
         errors.append(_sampled_case_id_diagnostic("Excess scored attempts for cases", sorted(excess)))
 
     scored_attempts = len(roots)
+    physical_expected_attempts = expected_attempts
+    expected_attempts -= len(recovered_attempts)
     if scored_attempts != expected_attempts:
         errors.append(f"Scored attempt coverage is {scored_attempts}/{expected_attempts}")
     all_errors = list(
@@ -6544,6 +6762,15 @@ def _condition_execution_summary(
         "execution_error_details_truncated": len(errors) < len(all_errors),
         "expected_attempts": expected_attempts,
         "scored_attempts": scored_attempts,
+        **(
+            {
+                "physical_expected_attempts": physical_expected_attempts,
+                "recovered_attempts": recovered_attempts[:PUBLISHED_FAILURE_DETAILS_MAX],
+                "recovered_attempts_total": len(recovered_attempts),
+            }
+            if recovered_attempts
+            else {}
+        ),
         **_failure_list_metadata("runtime_failure_details", runtime_failures),
         **_failure_list_metadata("reward_failure_details", reward_failures),
     }
@@ -6685,6 +6912,8 @@ def collect_harbor_results(
         with_runtime_failures: list[dict[str, str]] = []
         with_trial_failures: list[dict[str, str]] = []
         with_job_failure = ""
+        with_recovered: list[dict[str, Any]] = []
+        with_job_recovered = False
         with_execution: dict[str, Any] = {}
         with_overall_score: float | None = None
         with_policy = DEFAULT_SCORE_POLICY
@@ -6721,6 +6950,10 @@ def collect_harbor_results(
                 else []
             )
             with_rewards, invalid_score_failures = _partition_scoreable_rewards(with_collected_rewards)
+            with_recovered = (
+                _recovered_timeout_attempts(with_job_dir, with_rewards, n_attempts=n_attempts) if stop_on_pass else []
+            )
+            with_job_recovered = _recovered_job_failure(with_job_dir, with_trial_failures, with_recovered)
             with_logical_rewards = _logical_attempt_rewards(with_rewards)
             with_mixed_metric_contracts = rewards_have_mixed_metric_contracts(with_rewards)
             with_trial_failures.extend(invalid_score_failures)
@@ -6740,13 +6973,15 @@ def collect_harbor_results(
                 stop_on_pass=stop_on_pass,
                 expected_cases=expected_cases,
                 expected_case_ids=expected_case_ids,
+                recovered_attempts=with_recovered,
             )
             with_execution = _condition_execution_summary(
                 with_rewards,
                 expected_case_ids=expected_case_ids,
                 expected_cases=expected_cases,
                 n_attempts=n_attempts,
-                job_failure=with_job_failure,
+                job_failure="" if with_job_recovered else with_job_failure,
+                recovered_attempts=with_recovered,
                 runtime_failures=with_runtime_failures,
                 reward_failures=with_trial_failures,
                 stop_on_pass=stop_on_pass,
@@ -6800,9 +7035,17 @@ def collect_harbor_results(
                 "skill_activation": summarize_skill_activation(with_rewards),
                 "pass_at_k": _public_pass_summary(with_pass),
                 **with_execution,
-                "job_failure": with_job_failure,
-                "trial_failures": _public_failure_list(with_trial_failures),
-                **_failure_list_metadata("trial_failure_details", with_trial_failures),
+                "job_failure": "" if with_job_recovered else with_job_failure,
+                "historical_job_failure": with_job_failure if with_job_recovered else "",
+                "trial_failures": _public_failure_list(
+                    _split_recovered_failures(with_trial_failures, with_recovered)[0]
+                ),
+                "recovered_trial_failures": _public_failure_list(
+                    _split_recovered_failures(with_trial_failures, with_recovered)[1]
+                ),
+                **_failure_list_metadata(
+                    "trial_failure_details", _split_recovered_failures(with_trial_failures, with_recovered)[0]
+                ),
             }
             _write_generated_root_json(agent_dir / "with-skill" / "summary.json", output_dir, with_summary)
             logger.debug(
@@ -6890,6 +7133,8 @@ def collect_harbor_results(
         without_runtime_failures: list[dict[str, str]] = []
         without_trial_failures: list[dict[str, str]] = []
         without_job_failure = ""
+        without_recovered: list[dict[str, Any]] = []
+        without_job_recovered = False
         without_execution: dict[str, Any] = {}
         without_overall_score: float | None = None
         without_policy = DEFAULT_SCORE_POLICY
@@ -6927,6 +7172,14 @@ def collect_harbor_results(
                     else []
                 )
                 without_rewards, invalid_score_failures = _partition_scoreable_rewards(without_collected_rewards)
+                without_recovered = (
+                    _recovered_timeout_attempts(without_job_dir, without_rewards, n_attempts=n_attempts)
+                    if stop_on_pass
+                    else []
+                )
+                without_job_recovered = _recovered_job_failure(
+                    without_job_dir, without_trial_failures, without_recovered
+                )
                 without_logical_rewards = _logical_attempt_rewards(without_rewards)
                 without_mixed_metric_contracts = rewards_have_mixed_metric_contracts(without_rewards)
                 without_trial_failures.extend(invalid_score_failures)
@@ -6943,13 +7196,15 @@ def collect_harbor_results(
                     stop_on_pass=stop_on_pass,
                     expected_cases=expected_cases,
                     expected_case_ids=expected_case_ids,
+                    recovered_attempts=without_recovered,
                 )
                 without_execution = _condition_execution_summary(
                     without_rewards,
                     expected_case_ids=expected_case_ids,
                     expected_cases=expected_cases,
                     n_attempts=n_attempts,
-                    job_failure=without_job_failure,
+                    job_failure="" if without_job_recovered else without_job_failure,
+                    recovered_attempts=without_recovered,
                     runtime_failures=without_runtime_failures,
                     reward_failures=without_trial_failures,
                     stop_on_pass=stop_on_pass,
@@ -7005,9 +7260,18 @@ def collect_harbor_results(
                     "mixed_metric_contracts": without_mixed_metric_contracts,
                     "pass_at_k": _public_pass_summary(without_pass),
                     **without_execution,
-                    "job_failure": without_job_failure,
-                    "trial_failures": _public_failure_list(without_trial_failures),
-                    **_failure_list_metadata("trial_failure_details", without_trial_failures),
+                    "job_failure": "" if without_job_recovered else without_job_failure,
+                    "historical_job_failure": without_job_failure if without_job_recovered else "",
+                    "trial_failures": _public_failure_list(
+                        _split_recovered_failures(without_trial_failures, without_recovered)[0]
+                    ),
+                    "recovered_trial_failures": _public_failure_list(
+                        _split_recovered_failures(without_trial_failures, without_recovered)[1]
+                    ),
+                    **_failure_list_metadata(
+                        "trial_failure_details",
+                        _split_recovered_failures(without_trial_failures, without_recovered)[0],
+                    ),
                 }
                 _write_generated_root_json(agent_dir / "without-skill" / "summary.json", output_dir, without_summary)
                 logger.debug(
@@ -7242,6 +7506,12 @@ def collect_harbor_results(
                 )
 
         agent_execution = _aggregate_execution([with_execution, without_execution])
+        with_active_trial_failures, with_recovered_trial_failures = _split_recovered_failures(
+            with_trial_failures, with_recovered
+        )
+        without_active_trial_failures, without_recovered_trial_failures = _split_recovered_failures(
+            without_trial_failures, without_recovered
+        )
         all_results["agents"][agent] = {
             "model": agent_model,
             "model_source": agent_model_source,
@@ -7276,18 +7546,26 @@ def collect_harbor_results(
                 "without_skill": _public_failure_list(without_runtime_failures),
             },
             "trial_failures": {
-                "with_skill": _public_failure_list(with_trial_failures),
-                "without_skill": _public_failure_list(without_trial_failures),
+                "with_skill": _public_failure_list(with_active_trial_failures),
+                "without_skill": _public_failure_list(without_active_trial_failures),
+            },
+            "recovered_trial_failures": {
+                "with_skill": _public_failure_list(with_recovered_trial_failures),
+                "without_skill": _public_failure_list(without_recovered_trial_failures),
             },
             "failure_detail_metadata": {
                 "with_skill_runtime": _failure_list_metadata("details", with_runtime_failures),
                 "without_skill_runtime": _failure_list_metadata("details", without_runtime_failures),
-                "with_skill_trials": _failure_list_metadata("details", with_trial_failures),
-                "without_skill_trials": _failure_list_metadata("details", without_trial_failures),
+                "with_skill_trials": _failure_list_metadata("details", with_active_trial_failures),
+                "without_skill_trials": _failure_list_metadata("details", without_active_trial_failures),
             },
             "job_failures": {
-                "with_skill": with_job_failure,
-                "without_skill": without_job_failure,
+                "with_skill": "" if with_job_recovered else with_job_failure,
+                "without_skill": "" if without_job_recovered else without_job_failure,
+            },
+            "historical_job_failures": {
+                "with_skill": with_job_failure if with_job_recovered else "",
+                "without_skill": without_job_failure if without_job_recovered else "",
             },
             "conditions": {
                 "with_skill": with_execution,

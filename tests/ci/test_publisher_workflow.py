@@ -78,7 +78,7 @@ def test_privileged_publisher_installs_the_reviewed_hash_locked_bootstrap():
     assert lines[1].startswith('"$RUNNER_TEMP/uv/bin/python" -m pip install ')
     for flag in ("--require-hashes", "--no-deps", "--only-binary :all:", "-r ci/requirements/uv.txt"):
         assert flag in lines[1]
-    assert lines[2] == '"$RUNNER_TEMP/uv/bin/uv" sync --frozen --no-dev --no-editable'
+    assert lines[2] == '"$RUNNER_TEMP/uv/bin/uv" sync --frozen --no-dev --no-editable --extra publisher'
     assert len(lines) == 3
     # The runner's system Python and pip are never modified.
     assert "python3 -m pip" not in install["run"]

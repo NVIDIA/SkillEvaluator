@@ -88,6 +88,7 @@ def test_release_shell_never_pushes_an_existing_or_unverified_tag(tmp_path, scen
     docker.write_text(
         "#!/bin/sh\n"
         'printf "%s\\n" "$*" >> "$COMMAND_LOG"\n'
+        'if [ "$1" = login ]; then cat >/dev/null; fi\n'
         'if [ "$1" = inspect ]; then\n'
         '  if [ "$SCENARIO" = wrong-revision ]; then printf "bad-revision\\n"; else printf "%s\\n" "$GITHUB_SHA"; fi\n'
         "fi\n"
@@ -118,7 +119,7 @@ def test_release_shell_never_pushes_an_existing_or_unverified_tag(tmp_path, scen
         ["bash", "-e", "-o", "pipefail", "-c", script], env=environment, capture_output=True, text=True
     )
     commands = (tmp_path / "commands").read_text()
-    assert ("push " in commands) is (scenario == "new")
+    assert ("push " in commands) is (scenario == "new"), (commands, result.returncode, result.stderr)
     assert (result.returncode == 0) is (scenario in {"existing", "new"})
     if scenario == "existing":
         assert "pull " + environment["EXISTING_IMAGE"] in commands

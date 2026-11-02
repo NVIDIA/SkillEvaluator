@@ -56,3 +56,15 @@ def test_fork_verification_templates_point_to_the_fork(tmp_path):
 def test_existing_release_output_is_preserved(tmp_path):
     with pytest.raises(ValueError, match="new output directory"):
         release.render_templates(tmp_path, "b" * 40, "ghcr.io/nvidia/scan@sha256:" + "a" * 64)
+
+
+def test_gitlab_consumer_pins_image_and_reviewed_job_and_enables_mr_rules(tmp_path):
+    output = tmp_path / "out"
+    image = "ghcr.io/nvidia/skillevaluator-tier1@sha256:" + "a" * 64
+    release.render_templates(output, "b" * 40, image)
+    config = yaml.safe_load((output / "gitlab-skill-checks.yml").read_text())
+    assert config["variables"]["SKILL_EVAL_IMAGE"] == image
+    assert config["include"][0]["remote"] == (
+        "https://raw.githubusercontent.com/NVIDIA/SkillEvaluator/" + "b" * 40 + "/ci/gitlab/skill-evaluation.yml"
+    )
+    assert any("merge_request_event" in rule["if"] for rule in config["skill-evaluation"]["rules"])

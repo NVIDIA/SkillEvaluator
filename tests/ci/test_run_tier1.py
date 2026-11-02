@@ -71,6 +71,8 @@ def payload(passed=True, status="passed", incomplete=None, findings=1):
         )
     if status == "incomplete":
         results[0].metadata["incomplete_scans"] = incomplete or ["semgrep"]
+        if not passed and not findings:
+            results[0].add_error("Scanner execution did not complete")
     return json.loads(JSONReporter(include_timestamp=False).render_all(results))
 
 
@@ -342,6 +344,7 @@ def test_llm_maps_only_explicit_provider_and_credentials(tmp_path):
         "LLM_PROVIDER": "nv_build",
         "LLM_API_KEY": "test-key",
         "LLM_MODEL": "test-model",
+        "MIN_SCORE": "85",
         "OPENAI_API_KEY": "ambient-key",
         "SKILLSPECTOR_PROVIDER": "untrusted-ambient-provider",
         "SKILL_EVAL_LLM_BASE_URL": "https://unexpected.invalid",
@@ -349,6 +352,7 @@ def test_llm_maps_only_explicit_provider_and_credentials(tmp_path):
     assert runner.run(workspace, tmp_path / "reports", environment, execute=fake_cli([(0, payload())], calls)) == 0
     argv, kwargs = calls[0]
     assert "--llm" in argv
+    assert argv[argv.index("--min-score") + 1] == "85"
     assert kwargs["env"]["NVIDIA_API_KEY"] == "test-key"
     assert kwargs["env"]["SKILL_EVAL_LLM_PROVIDER"] == "nv_build"
     assert kwargs["env"]["SKILL_EVAL_LLM_MODEL"] == "test-model"
@@ -486,7 +490,7 @@ def test_incomplete_runtime_rollup_is_not_mislabeled_as_inconsistent_evidence(tm
             workspace,
             reports,
             {"SKILL_PATHS": "skills"},
-            execute=fake_cli([(1, payload(False, "incomplete", ["semgrep"]))], []),
+            execute=fake_cli([(1, payload(False, "incomplete", ["semgrep"], findings=0))], []),
         )
         == 1
     )
@@ -497,6 +501,51 @@ def test_incomplete_runtime_rollup_is_not_mislabeled_as_inconsistent_evidence(tm
     assert "**Tier 1 scan result: INCOMPLETE**" in compact
     assert "1 skills · 0 passed · 0 failed · 1 incomplete" in compact
     assert "Report evidence is missing or inconsistent" not in compact
+
+
+def test_confirmed_failure_and_incomplete_scanner_survive_retained_publication(tmp_path):
+    import ci.publish_reports as publisher
+
+    from skillevaluator.reporting.retained import retained_results
+
+    workspace = tmp_path / "workspace"
+    skill(workspace, "skills/a")
+    report = payload(False, "incomplete", ["semgrep"])
+    assert report["overall_status"] == "failed"
+    assert report["results"][0]["status"] == "failed"
+    assert retained_results(report)[0].is_incomplete
+    reports = tmp_path / "reports"
+    assert runner.run(workspace, reports, {"SKILL_PATHS": "skills"}, execute=fake_cli([(1, report)], [])) == 1
+    summary = json.loads((reports / "summary.json").read_text())
+    row = summary["skills"][0]
+    assert row["overall_status"] == "failed"
+    assert row["incomplete_scans"] == ["semgrep"]
+    assert row.get("error") is None
+    assert (summary["failed"], summary["incomplete"]) == (1, 0)
+    publisher.validate_summary(summary)
+    artifact = io.BytesIO()
+    with zipfile.ZipFile(artifact, "w") as archive:
+        archive.write(reports / "summary.json", "summary.json")
+        archive.write(reports / "skill-001/skillevaluator-tier1.json", "skill-001/skillevaluator-tier1.json")
+    retained, children = publisher.read_artifact(artifact.getvalue())
+    assert retained["skills"][0]["overall_status"] == "failed"
+    assert children["skill-001"]["results"][0]["incomplete_scans"] == ["semgrep"]
+
+
+def test_confirmed_skill_failure_precedes_another_skills_incomplete_scan(tmp_path):
+    import ci.publish_reports as publisher
+
+    workspace = tmp_path / "workspace"
+    skill(workspace, "skills/a")
+    skill(workspace, "skills/b")
+    reports = tmp_path / "reports"
+    responses = [(1, payload(False)), (1, payload(False, "incomplete", ["semgrep"], findings=0))]
+    assert runner.run(workspace, reports, {"SKILL_PATHS": "skills"}, execute=fake_cli(responses, [])) == 1
+    summary = json.loads((reports / "summary.json").read_text())
+    assert summary["overall_status"] == "failed"
+    assert [row["overall_status"] for row in summary["skills"]] == ["failed", "incomplete"]
+    assert (summary["failed"], summary["incomplete"]) == (2, 1)
+    publisher.validate_summary(summary)
 
 
 def repository_git(workspace, *arguments):
@@ -728,6 +777,40 @@ def test_relative_annotation_location_is_confined_to_skill(capsys, path, expecte
         assert f"file={expected},line=7" in command
     else:
         assert "file=" not in command and "line=" not in command
+
+
+@pytest.mark.parametrize("score", ["0", "75", "100"])
+@pytest.mark.parametrize("workers", ["1", "4"])
+def test_quality_threshold_is_forwarded_to_evaluator(tmp_path, score, workers):
+    workspace = tmp_path / "workspace"
+    skill(workspace, "skills/a")
+    skill(workspace, "skills/b")
+    calls = []
+    assert runner.run(
+        workspace,
+        tmp_path / "reports",
+        {"SKILL_PATHS": "skills", "MIN_SCORE": score, "SCAN_WORKERS": workers},
+        execute=fake_cli([(0, payload()), (0, payload())], calls),
+    ) == 0
+    assert len(calls) == 2
+    for argv, _env in calls:
+        assert argv[argv.index("--min-score") + 1] == score
+
+
+@pytest.mark.parametrize("score", ["-1", "101", "12.5", "abc", "\uff17\uff10", ""])
+def test_invalid_quality_threshold_fails_without_running_scanner(tmp_path, score):
+    workspace = tmp_path / "workspace"
+    skill(workspace, "skills/a")
+    calls = []
+    assert runner.run(
+        workspace,
+        tmp_path / "reports",
+        {"SKILL_PATHS": "skills", "MIN_SCORE": score},
+        execute=fake_cli([(0, payload())], calls),
+    ) == 1
+    assert not calls
+    summary = json.loads((tmp_path / "reports/summary.json").read_text())
+    assert summary["overall_status"] == "error"
 
 
 def parallel_cli(responses, calls, *, before=None):

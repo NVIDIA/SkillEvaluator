@@ -153,6 +153,15 @@ If chat-LLM analysis fails for a candidate cluster, Tier 2 reports the
 incomplete analysis as a blocking error rather than treating the content as
 clean.
 
+The same applies when a skill exceeds a work limit on content that was
+already collected: the content-chunk or comparison-work limit, or a limit on
+the LLM review (candidate clusters, members in one cluster, or prompt size per
+cluster or in total). Tier 2 stops and reports the scan as **INCOMPLETE**, not
+as a duplicate-content finding, with an execution error that names the limit;
+the JSON report records it under `work_limit`. A policy severity override
+cannot turn the incomplete scan into a pass. Split the skill or remove repeated
+material, then rerun.
+
 ## Compare skills across a collection
 
 `similarity-check` recursively discovers skill manifests, embeds each skill's
@@ -300,12 +309,13 @@ you intend to skip Tier 2 entirely.
 | Intra-skill comparison work | 267,911,168 scalar comparisons | Bounds all-pairs clustering; allows all 512 chunks with embeddings of up to 2,048 dimensions, 418 chunks at 3,072, and 362 at 4,096 |
 
 Intra-skill clustering compares every pair of chunks, so its work is
-`n * (n - 1) / 2 * dimensions`. A skill over the chunk ceiling fails before any
+`n * (n - 1) / 2 * dimensions`. A skill over the chunk ceiling stops before any
 embedding request. A skill within the ceiling whose embeddings are too wide for
-its chunk count fails after the first embedding batch, which sets the width,
-with a CRITICAL `scalar_comparison_limit` finding that names the effective chunk
-limit for that embedding width. Split the skill, remove repeated material, or
-use a narrower embedding model.
+its chunk count stops after the first embedding batch, which sets the width.
+Either way the scan is reported as **INCOMPLETE**. For the comparison-work
+limit (`scalar_comparison_limit`), the execution error and the JSON
+`work_limit` record name the effective chunk limit for that embedding width.
+Split the skill, remove repeated material, or use a narrower embedding model.
 
 Tier 2 treats skill content and catalog files as untrusted input. Before any
 provider call, it rejects linked roots, linked directories and manifests,
@@ -355,6 +365,7 @@ handling terms before sending confidential skill content to a hosted endpoint.
     | Skill carries large generated snapshots (`evals`, `.evals`, `results`, `.results`, `versions`, `.versions`) | Excluded directories are pruned during traversal, so their contents never count toward the discovered-path limit |
     | A directory is a Windows junction or other reparse point | Rejected during the walk, like symbolic links |
     | Embedding or chat-LLM analysis is incomplete | Reports an error; does not claim a clean result |
+    | Skill exceeds the content-chunk, comparison-work, or LLM-review limit (candidate clusters, cluster members, or prompt size) | Stops before the remaining analysis and reports the scan as incomplete; no duplicate-content finding is added |
   </Accordion>
   <Accordion title="Inter-skill analysis">
     | Scenario | Behavior |

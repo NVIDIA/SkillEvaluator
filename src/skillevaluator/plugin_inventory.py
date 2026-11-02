@@ -627,10 +627,15 @@ def _inert_grant_finding(finding: Finding) -> None:
     component = finding.metadata.get("plugin_component") or {}
     kind = str(component.get("type") or "component")
     name = str(component.get("name") or "")
-    grant = "a wildcard tool grant" if finding.check_name.endswith("_wildcard_tools") else "unrestricted 'Bash'"
+    if finding.check_name.endswith("_wildcard_tools"):
+        grant, shell = "a wildcard tool grant", "Bash"
+    else:
+        # The shell grant as the component analysis worded it ('PowerShell(iex *)' names PowerShell, not Bash).
+        grant = str(finding.metadata.get("shell_grant") or "unrestricted 'Bash'")
+        shell = str(finding.metadata.get("shell_tool") or "Bash")
     finding.message = (
         f"{kind} '{name}' pre-approves {grant} in allowed-tools, but the grant has no effect: Codex ignores "
-        f"allowed-tools (it has no Bash tool), and Claude Code does not load this {kind} from this folder"
+        f"allowed-tools (it has no {shell} tool), and Claude Code does not load this {kind} from this folder"
     )
     finding.severity = Severity.LOW
     finding.suggestion = (

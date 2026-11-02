@@ -437,6 +437,22 @@ def test_waiver_findings_carry_no_digest(
     assert pii_evidence_sha256("emails", ADDRESS) not in JSONReporter(include_timestamp=False).render(result)
 
 
+def test_digest_is_not_masked_by_a_credential_elsewhere_in_the_skill(skill: Path) -> None:
+    """The digest is added after redaction, so a short password that occurs in its hex stays visible there."""
+    digest = pii_evidence_sha256("emails", ADDRESS)
+    password = next(digest[i : i + 2] for i in range(len(digest) - 1) if digest[i : i + 2].isdigit())
+    (skill / "contact.md").write_text(
+        f"# Contact\nWrite to {ADDRESS} for access.\nConnect with postgres://svc:{password}@db.internal.corp/app now.\n",
+        encoding="utf-8",
+    )
+
+    findings = _pii(_scan(skill, None))
+
+    assert "database_credentials" in [finding.check_name for finding in findings]
+    (email,) = [finding for finding in findings if finding.check_name == "emails"]
+    assert email.metadata["evidence_sha256"] == digest
+
+
 @pytest.mark.parametrize("category", sorted(SENSITIVE_PII_CATEGORIES))
 def test_credential_checks_cannot_be_waived(skill: Path, tmp_path: Path, category: str) -> None:
     """Credentials are removed or rotated, never waived, even with a digest computed from the source."""

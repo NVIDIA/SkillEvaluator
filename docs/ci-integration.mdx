@@ -248,7 +248,7 @@ When the exit code is not enough — dashboards, custom thresholds, badge genera
 | `severity_counts` | object | Totals for `critical`, `high`, `medium`, `low` |
 | `total_errors`, `total_warnings` | number | Raw error and warning records across all validators; a finding that two validators report counts twice |
 | `finding_counts` | object | Reconciled counts: `raw_occurrences`, `distinct_occurrences`, `unique_findings`, `duplicates_removed`, `occurrences_grouped`, `raw_by_severity`, `unique_by_severity` |
-| `finding_groups` | array | One entry per unique finding: `finding_id`, highest `severity`, `message`, `validators`, and every location in `occurrences[]` with its `occurrence_id` |
+| `finding_groups` | array | One entry per unique finding: `finding_id`, highest `severity`, `message`, `validators`, and every location in `occurrences[]` with its `occurrence_id`, including each location a finding lists in `metadata.occurrences` when its check folds repeats of one value into it (the PII scan does) |
 | `message_counts` | object | `independent_errors` and `independent_warnings`: error and warning strings with no finding behind them, such as `gate_failures` and scanner or execution errors (strings that mirror a finding are not counted); `informational`: informational messages, not counting the `[OK]` line recorded for each passed check |
 | `results[].findings[].finding_id`, `results[].findings[].occurrence_id` | string | Stable finding and location identities (see below) |
 | `skills` | array | Per-skill `{ name, passed, issue_count }`; `issue_count` counts raw finding records |

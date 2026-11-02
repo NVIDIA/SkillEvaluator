@@ -177,19 +177,29 @@ class Finding:
         digest = hashlib.sha256(identity.encode("utf-8"), usedforsecurity=False).hexdigest()[:20]
         return f"SEF-{digest}"
 
-    @property
-    def occurrence_id(self) -> str:
-        """Return a deterministic identity for this concrete location."""
+    def location_occurrence_id(self, file_path: object, line_number: object, line_content: object = None) -> str:
+        """Return the occurrence ID this finding has at another location.
+
+        A check that folds repeats into one finding, such as the PII scan,
+        lists the other locations in ``metadata["occurrences"]``; reporters
+        give each of them an ID this way. At the finding's own location and
+        line content it equals ``occurrence_id``.
+        """
         identity = "\x1f".join(
             (
                 self.finding_id,
-                ("" if self.file_path is None else str(self.file_path)).replace("\\", "/"),
-                str(self.line_number) if self.line_number is not None else "",
-                self._normalize_identity_text(self.line_content),
+                ("" if file_path is None else str(file_path)).replace("\\", "/"),
+                str(line_number) if line_number is not None else "",
+                self._normalize_identity_text(line_content),
             )
         )
         digest = hashlib.sha256(identity.encode("utf-8"), usedforsecurity=False).hexdigest()[:20]
         return f"SEO-{digest}"
+
+    @property
+    def occurrence_id(self) -> str:
+        """Return a deterministic identity for this concrete location."""
+        return self.location_occurrence_id(self.file_path, self.line_number, self.line_content)
 
     @property
     def location(self) -> str:

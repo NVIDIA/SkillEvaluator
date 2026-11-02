@@ -107,7 +107,8 @@ the evidence below it:
 
 A finding is one problem a check reports, with a severity. The same problem
 reported on several lines, or in several files or skills, counts once at its
-highest severity; each location is an occurrence. When the counts differ, the
+highest severity; each location is an occurrence, including each line a
+PII finding lists when one value repeats. When the counts differ, the
 findings number shows the occurrences, the raw records and any errors or
 warnings with no finding behind them beneath it, in the same words as the
 Markdown report's Total Issues. A finding in a failed check blocks the

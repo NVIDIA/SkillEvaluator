@@ -104,7 +104,8 @@ All notable changes to SkillEvaluator are documented in this file.
   from a removed value. The JSON report and the HTML report's embedded data
   add `finding_counts` (raw records, distinct occurrences, unique findings,
   and duplicates removed), `finding_groups` (each unique finding with its
-  validators and every location), and `message_counts` (error and warning
+  validators and every location, including each location a PII finding
+  lists for a repeated value), and `message_counts` (error and warning
   strings with no finding behind them, such as failed gates and scanner or
   execution errors, plus informational messages other than the `[OK]` line
   recorded for each passed check); each JSON result also carries its own

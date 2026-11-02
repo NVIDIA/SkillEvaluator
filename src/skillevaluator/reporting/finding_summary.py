@@ -40,8 +40,52 @@ def _occurrence_sort_key(item: dict[str, Any]) -> tuple[str, int, str, str]:
     )
 
 
-def _finalize_summary(groups: dict[str, dict[str, Any]], raw_by_severity: dict[str, int]) -> dict[str, Any]:
-    """Finalize counts and stable ordering for a set of finding groups."""
+def _finding_occurrences(finding: Finding, validator: str) -> list[dict[str, Any]]:
+    """Return every location one raw finding reports.
+
+    That is the finding's own location plus, when the check folded repeats
+    of one value into this finding (the PII scan does), each other location
+    listed in ``metadata["occurrences"]`` as ``{"file": ..., "line": ...}``.
+    """
+    entries = [
+        {
+            "occurrence_id": finding.occurrence_id,
+            "validator": validator,
+            "file_path": finding.file_path,
+            "line_number": finding.line_number,
+            "line_content": finding.line_content,
+        }
+    ]
+    listed = finding.metadata.get("occurrences") if isinstance(finding.metadata, dict) else None
+    if not isinstance(listed, list):
+        return entries
+    for item in listed:
+        if not isinstance(item, dict) or "file" not in item:
+            continue
+        file_path, line_number = item.get("file"), item.get("line")
+        if file_path == finding.file_path and line_number == finding.line_number:
+            continue
+        entries.append(
+            {
+                "occurrence_id": finding.location_occurrence_id(file_path, line_number),
+                "validator": validator,
+                "file_path": file_path,
+                "line_number": line_number,
+                "line_content": None,
+            }
+        )
+    return entries
+
+
+def _finalize_summary(
+    groups: dict[str, dict[str, Any]], raw_by_severity: dict[str, int], reported_occurrences: int
+) -> dict[str, Any]:
+    """Finalize counts and stable ordering for a set of finding groups.
+
+    ``reported_occurrences`` counts every location the raw records report,
+    so ``duplicates_removed`` is the number of those locations that repeat
+    one already counted.
+    """
     unique_by_severity = dict.fromkeys(_SEVERITY_ORDER, 0)
     for group in groups.values():
         unique_by_severity.setdefault(group["severity"], 0)
@@ -57,7 +101,7 @@ def _finalize_summary(groups: dict[str, dict[str, Any]], raw_by_severity: dict[s
         "raw_occurrences": raw_count,
         "distinct_occurrences": distinct_occurrences,
         "unique_findings": unique_count,
-        "duplicates_removed": raw_count - distinct_occurrences,
+        "duplicates_removed": reported_occurrences - distinct_occurrences,
         "occurrences_grouped": distinct_occurrences - unique_count,
         "raw_by_severity": raw_by_severity,
         "unique_by_severity": unique_by_severity,
@@ -70,6 +114,7 @@ def summarize_findings(results: list[ValidationResult]) -> dict[str, Any]:
     groups: dict[str, dict[str, Any]] = {}
     seen_occurrences: dict[str, set[str]] = {}
     raw_by_severity = dict.fromkeys(_SEVERITY_ORDER, 0)
+    reported_occurrences = 0
 
     for result in results:
         for finding in result.findings:
@@ -79,7 +124,6 @@ def summarize_findings(results: list[ValidationResult]) -> dict[str, Any]:
             raw_by_severity.setdefault(severity, 0)
             raw_by_severity[severity] += 1
             finding_id = finding.finding_id
-            occurrence_id = finding.occurrence_id
             group = groups.get(finding_id)
             if group is None:
                 group = {
@@ -100,26 +144,22 @@ def summarize_findings(results: list[ValidationResult]) -> dict[str, Any]:
 
             if result.validator_name not in group["validators"]:
                 group["validators"].append(result.validator_name)
-            if occurrence_id not in seen_occurrences[finding_id]:
-                seen_occurrences[finding_id].add(occurrence_id)
-                group["occurrences"].append(
-                    {
-                        "occurrence_id": occurrence_id,
-                        "validator": result.validator_name,
-                        "file_path": finding.file_path,
-                        "line_number": finding.line_number,
-                        "line_content": finding.line_content,
-                    }
-                )
+            for occurrence in _finding_occurrences(finding, result.validator_name):
+                reported_occurrences += 1
+                if occurrence["occurrence_id"] not in seen_occurrences[finding_id]:
+                    seen_occurrences[finding_id].add(occurrence["occurrence_id"])
+                    group["occurrences"].append(occurrence)
 
-    return _finalize_summary(groups, raw_by_severity)
+    return _finalize_summary(groups, raw_by_severity, reported_occurrences)
 
 
 def merge_finding_summaries(summaries: list[dict[str, Any]]) -> dict[str, Any]:
     """Merge per-result summaries without hashing the same findings again."""
     groups: dict[str, dict[str, Any]] = {}
     raw_by_severity = dict.fromkeys(_SEVERITY_ORDER, 0)
+    reported_occurrences = 0
     for summary in summaries:
+        reported_occurrences += summary["distinct_occurrences"] + summary["duplicates_removed"]
         for severity, count in summary["raw_by_severity"].items():
             raw_by_severity.setdefault(severity, 0)
             raw_by_severity[severity] += count
@@ -137,7 +177,7 @@ def merge_finding_summaries(summaries: list[dict[str, Any]]) -> dict[str, Any]:
                 deepcopy(item) for item in incoming["occurrences"] if item["occurrence_id"] not in existing_occurrences
             )
 
-    return _finalize_summary(groups, raw_by_severity)
+    return _finalize_summary(groups, raw_by_severity, reported_occurrences)
 
 
 def groups_by_display_priority(summary: Mapping[str, Any]) -> list[dict[str, Any]]:

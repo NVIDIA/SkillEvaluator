@@ -2322,6 +2322,7 @@ class HTMLReporter(ReporterBase):
         unique_by_severity = findings["unique_by_severity"]
         has_detail = (
             findings["raw_occurrences"] != findings["unique_findings"]
+            or findings["distinct_occurrences"] != findings["unique_findings"]
             or messages["independent_errors"]
             or messages["independent_warnings"]
         )

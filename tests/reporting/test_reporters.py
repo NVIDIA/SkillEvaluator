@@ -912,6 +912,50 @@ def test_findings_kpi_has_no_detail_line_when_every_record_is_unique() -> None:
     assert '<span class="issue-count-badge">2 findings</span>' in html
 
 
+def test_folded_pii_finding_counts_each_listed_location_as_an_occurrence(tmp_path) -> None:
+    from skillevaluator.reporting.finding_summary import refresh_finding_identities
+    from skillevaluator.validators.security import SecurityValidator
+
+    skill = tmp_path / "demo"
+    skill.mkdir()
+    (skill / "SKILL.md").write_text(
+        "---\nname: demo\ndescription: A sample skill.\n---\n# Demo\n\n\n"
+        "See /Users/johndoe/a.\nSee /Users/johndoe/b.\n",
+        encoding="utf-8",
+    )
+    result = SecurityValidator(use_llm=False).validate_pii_only(skill)
+    result.validator_name = "PII Scan"
+    [finding] = [finding for finding in result.findings if "/Users/johndoe/" in finding.message]
+    assert finding.metadata["occurrence_count"] == 2
+
+    data = json.loads(JSONReporter(include_timestamp=False).render_all([result]))
+    [group] = [group for group in data["finding_groups"] if group["finding_id"] == finding.finding_id]
+    assert group["occurrence_count"] == 2
+    assert [(item["file_path"], item["line_number"]) for item in group["occurrences"]] == [
+        ("SKILL.md", 8),
+        ("SKILL.md", 9),
+    ]
+    assert finding.occurrence_id in {item["occurrence_id"] for item in group["occurrences"]}
+    counts = data["finding_counts"]
+    assert counts["distinct_occurrences"] == counts["raw_occurrences"] + 1
+    assert counts["duplicates_removed"] == 0
+    # Refreshing the IDs of an unredacted report changes nothing.
+    refreshed = copy.deepcopy(data)
+    refresh_finding_identities(refreshed)
+    assert refreshed == data
+
+    markdown = MarkdownReporter().render_all([result])
+    assert re.search(rf"\| `{finding.finding_id}` \| HIGH \| [^|]+ \| 2 \| PII Scan \|", markdown)
+    html = HTMLReporter(include_timestamp=False).render_all([result])
+    html_data = _html_report_data(html)
+    assert html_data["finding_counts"] == data["finding_counts"]
+    assert html_data["finding_groups"] == data["finding_groups"]
+    unique = counts["unique_findings"]
+    occurrences = counts["distinct_occurrences"]
+    assert f"/ {occurrences} occurrences /" in _findings_kpi(html)[1]
+    assert _findings_kpi(html)[0] == str(unique)
+
+
 def test_same_finding_in_several_skills_counts_once_with_one_occurrence_per_skill() -> None:
     collection = ValidationResult(validator_name="SCHEMA", validator_description="Schema")
     for skill in ("alpha", "beta", "gamma"):

@@ -61,7 +61,11 @@ _AGENT_INSTRUCTION_FILES = frozenset(
         "workflow-rules.mdc",
     }
 )
-_AGENT_INSTRUCTION_DIRS = frozenset({"agents", "commands", "prompts", "rules", "team-rules", "workflows"})
+# ``output-styles/`` is a Claude Code plugin default: its Markdown is added to
+# the system prompt without any manifest entry.
+_AGENT_INSTRUCTION_DIRS = frozenset(
+    {"agents", "commands", "output-styles", "prompts", "rules", "team-rules", "workflows"}
+)
 _AGENT_REFERENCE_DIRS = frozenset({"design-system", "references", "resources", "templates"})
 _AGENT_EXECUTABLE_DIRS = frozenset({"hooks", "scripts", "tools"})
 _AGENT_CONFIG_DIR = "config"
@@ -92,6 +96,13 @@ _FONT_EXTENSIONS = frozenset({".otf", ".ttc", ".ttf", ".woff", ".woff2"})
 _SOURCE_EXTENSIONS = frozenset({".c", ".cc", ".cpp", ".cu", ".go", ".java", ".js", ".jsx", ".py", ".rs", ".ts", ".tsx"})
 _UI_SOURCE_EXTENSIONS = frozenset({".css", ".html", ".js", ".jsx", ".scss", ".svelte", ".ts", ".tsx", ".vue"})
 _UI_SOURCE_DIRS = frozenset({"client", "frontend", "public", "ui", "web"})
+# Plugin default component files that launch commands or connectors without
+# any manifest entry: Claude Code's ``.lsp.json`` (language servers) and
+# ``monitors/monitors.json`` (monitor commands), and Codex's ``.app.json``.
+_PLUGIN_DEFAULT_EXECUTABLE_FILES = frozenset({".lsp.json"})
+_PLUGIN_DEFAULT_MONITORS_FILE = ("monitors", "monitors.json")
+_PLUGIN_DEFAULT_CONFIG_FILES = frozenset({".app.json"})
+_PLUGIN_MANIFEST_DIRS = frozenset({".claude-plugin", ".codex-plugin", ".cursor-plugin"})
 _MCP_CONTROL_FILES = frozenset(
     {".mcp.json", "agent_plugin.yaml", "agent_plugin.yml", "mcp.json", "mcp.yaml", "mcp.yml"}
 )
@@ -308,8 +319,12 @@ def skillspector_file_role(file_path: str, *, executable: bool = False) -> str:
         return "agent_executable"
     if parts & _AGENT_INSTRUCTION_DIRS:
         return "agent_instruction"
-    if name in {"agent_plugin.yaml", "agent_plugin.yml"} or (name == "plugin.json" and ".claude-plugin" in parts):
+    if name in {"agent_plugin.yaml", "agent_plugin.yml"} or (name == "plugin.json" and parts & _PLUGIN_MANIFEST_DIRS):
         return "plugin_manifest"
+    if name in _PLUGIN_DEFAULT_EXECUTABLE_FILES or ordered_parts[-2:] == _PLUGIN_DEFAULT_MONITORS_FILE:
+        return "agent_executable"
+    if name in _PLUGIN_DEFAULT_CONFIG_FILES:
+        return "agent_config"
     if name in _MCP_CONTROL_FILES or (ordered_parts and ordered_parts[0] == ".mcp"):
         return "mcp_control"
     if name in _AGENT_INSTRUCTION_FILES or suffix == ".mdc":
@@ -856,7 +871,8 @@ def referenced_report_paths(
             | _AGENT_INSTRUCTION_DIRS
             | _AGENT_REFERENCE_DIRS
             | _HIDDEN_AGENT_CONFIG_DIRS
-            | {_AGENT_ASSET_DIR, _AGENT_CONFIG_DIR, ".mcp"}
+            | _PLUGIN_MANIFEST_DIRS
+            | {_AGENT_ASSET_DIR, _AGENT_CONFIG_DIR, ".mcp", _PLUGIN_DEFAULT_MONITORS_FILE[0]}
         )
         try:
             for current_root, directory_names, file_names in os.walk(reference_root, followlinks=False):

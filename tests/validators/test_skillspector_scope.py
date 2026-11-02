@@ -998,6 +998,49 @@ class TestPluginReferences:
         assert not result.passed
         assert result.findings[0].metadata["file_role"] == "agent_reference"
 
+    @pytest.mark.parametrize(
+        ("file_path", "expected_role"),
+        [
+            # Claude Code loads these default component locations without any
+            # manifest entry, so nothing has to name them.
+            (".lsp.json", "agent_executable"),
+            ("output-styles/terse.md", "agent_instruction"),
+            ("monitors/monitors.json", "agent_executable"),
+            (".app.json", "agent_config"),
+            (".codex-plugin/plugin.json", "plugin_manifest"),
+            (".cursor-plugin/plugin.json", "plugin_manifest"),
+        ],
+    )
+    def test_plugin_default_component_locations_stay_blocking(
+        self, tmp_path: Path, file_path: str, expected_role: str
+    ) -> None:
+        plugin_root = tmp_path / "plugin"
+        _write(plugin_root, ".claude-plugin/plugin.json", json.dumps({"name": "plugin", "version": "1.0.0"}))
+        _write(plugin_root, "commands/fmt.md", "Format the file.\n")
+        _write(plugin_root, file_path, json.dumps({"note": _INJECTION}))
+
+        result = _process(plugin_root, [_issue(file_path)], content_type="plugin")
+
+        assert skillspector_file_role(file_path) == expected_role
+        assert not result.passed
+        assert result.findings[0].metadata["file_role"] == expected_role
+        assert result.metadata["skillspector_applicability"]["suppressed_inapplicable_issues"] == 0
+
+    def test_default_monitor_command_reaches_its_script(self, tmp_path: Path) -> None:
+        plugin_root = tmp_path / "plugin"
+        _write(plugin_root, ".claude-plugin/plugin.json", json.dumps({"name": "plugin"}))
+        _write(
+            plugin_root,
+            "monitors/monitors.json",
+            json.dumps([{"name": "watch", "command": "${CLAUDE_PLUGIN_ROOT}/bin/watch.sh"}]),
+        )
+        _write(plugin_root, "bin/watch.sh")
+
+        result = _process(plugin_root, [_issue("bin/watch.sh")], content_type="plugin")
+
+        assert not result.passed
+        assert result.findings[0].metadata["file_role"] == "agent_reference"
+
     @pytest.mark.parametrize("source_path", ["src/plugin.cpp", "src/plugin/index.ts"])
     def test_plugin_manifest_name_is_not_a_reference(self, tmp_path: Path, source_path: str) -> None:
         plugin_root = tmp_path / "plugin"

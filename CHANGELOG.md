@@ -8,6 +8,22 @@ All notable changes to SkillEvaluator are documented in this file.
 
 ### Added
 
+- Custom execution backends. An installed package can add an `--env-mode`
+  through the `skillevaluator.env_modes` entry-point group, naming an
+  `EnvironmentBackendSpec` with a Harbor environment class plus the `--ek`
+  kwargs, host variables, prerequisite hook, and optional agent wrappers that
+  backend accepts. Custom execution backends follow the same kwarg and
+  `runtime_env` policy as Harbor-native backends, may not forward agent,
+  provider, or other backends' credentials, cannot replace a built-in mode or
+  share a name with another installed package, are not named on published
+  benchmark cards, and can be turned off with
+  `SKILLEVALUATOR_DISABLE_CUSTOM_BACKENDS=1`.
+- The lightweight `publisher` install extra adds the dependencies for verifying
+  GitHub-signed execution receipts without installing the Tier 3 runtime.
+- Private Python helpers add bounded plugin manifest discovery, component
+  inventories, hook/MCP/LSP/settings and permission checks, context estimates,
+  dependency and endpoint audits, and local catalog comparisons. Private
+  runtime helpers collect canary and hook evidence for explicit callers.
 - Support Python 3.14 alongside Python 3.12 and 3.13, including installation
   guidance and CI coverage for tests and built packages.
 - Add reusable GitLab CI onboarding and configurable Tier 1 quality thresholds,
@@ -28,7 +44,8 @@ All notable changes to SkillEvaluator are documented in this file.
   `no change`, `inconclusive`). With several agents, each agent gets a column
   showing without-skill → with-skill marks and the pass-rate change. Success
   rate, quality score, and dimensions follow. A "How to improve" list follows,
-  ranked by attempts lost and capped at three; each item names the case,
+  capped at three. It puts run errors last and ranks each group by attempts
+  lost; each item names the case,
   agent, issue type (`skill`, `skill not used`, `skill hurts`, `environment`,
   `run error`, `eval case`, `missing input`, `goal not met`), one action, and an evidence
   path, and is also written to `what_to_fix.json` in the run directory. When
@@ -134,6 +151,23 @@ All notable changes to SkillEvaluator are documented in this file.
   workflows with `validate --tiers`: which tiers run, Tier 1 dependency and LLM
   stages, report files, and exit codes. It also states that `--tiers` must
   include Tier 1, so Tier 2 or Tier 3 alone runs through its direct workflow.
+- Install instructions, the CI recipe, the missing-scanner hint and the Tier 1
+  CI image's scanner lock now pin SkillSpector to `v2.13.3` instead of
+  `v2.12.0`. With `v2.12.0`, the Tier 1 security check could be `INCOMPLETE`
+  or fail for skills with no real issue: valid Python and Perl helpers were
+  recorded as only partially inspected
+  (`static_parse_limit` or `obfuscated_instruction_text`,
+  [NVIDIA/SkillSpector#777](https://github.com/NVIDIA/SkillSpector/pull/777)),
+  the bytecode check could hit its time budget while waiting behind other
+  analyzers (`runtime_limit`,
+  [NVIDIA/SkillSpector#828](https://github.com/NVIDIA/SkillSpector/pull/828)),
+  and visible text between HTML comments raised High P2 hidden-instruction
+  findings
+  ([NVIDIA/SkillSpector#452](https://github.com/NVIDIA/SkillSpector/pull/452)).
+  An existing SkillSpector install keeps its version until you rerun the
+  install command. `v2.13.3` still does not return structured output for
+  Claude 5.5 models, so set `SKILLSPECTOR_MODEL` as before when
+  `SKILL_EVAL_LLM_MODEL` names one.
 - README and onboarding docs now offer two first-run paths: a lightweight,
   keyless quality check on a bundled skill, or an NVIDIA Build rubric evaluation
   with eligible free prototyping access. Installation adds extras as needed,
@@ -164,6 +198,41 @@ All notable changes to SkillEvaluator are documented in this file.
   Docker setup, and custom-backend and MCP environment controls.
 
 ### Fixed
+
+- Tier 3 reports preserve judge-model exclusions when calculating dimension and
+  overall lift. Native multi-step results also retain the judge provenance needed
+  for those comparisons, so fallback judges cannot turn a regression into an
+  apparent improvement. Judge-free cases retain valid lift, bounded report loads
+  use the collector's recorded comparisons, and FINAL-strategy trials use only
+  the final step's judges. The CLI displays unavailable comparisons as `n/a`.
+  Dashboard score differences preserve the same matching-judge lift, including
+  unavailable comparisons.
+- The LLM judge treats a schema option reported as `unavailable` as a schema
+  rejection and retries without it, so OpenAI-compatible endpoints such as
+  DeepSeek, which answer `response_format: json_schema` with HTTP 400 and
+  "This response_format type is unavailable now", can score Tier 3 instead
+  of failing every judge call (fixes #207).
+- External scanners no longer crash the scan when they print bytes that the
+  selected text codec cannot decode (for example a Windows traceback with a
+  CJK path). Those bytes are replaced, so the captured output is never `None`,
+  and valid output keeps the selected codec and universal-newline handling.
+- The Tier 1 LLM rubric gives reasoning models (DeepSeek R and V4, OpenAI o1,
+  o3, o4 and GPT-5 families, and models named "reasoning") a 32,768-token
+  budget instead of the default 16,384, giving hidden reasoning more room
+  before the rubric JSON is emitted. The budget follows the model each request
+  resolves to, is capped at 16,384 on the Anthropic provider, and an explicit
+  `max_tokens` overrides this default, subject to provider and model limits.
+- `doctor --env-mode docker` and Tier 3 runs on Windows now find the Harbor
+  CLI installed next to the active interpreter as `harbor.exe` or
+  `harbor.cmd`, instead of reporting "harbor CLI not found".
+- Tier 3 records `accuracy` and `goal_accuracy` as N/A when an eval case has
+  no reference answer, and `behavior_check` as N/A when it has no expected
+  behavior, without calling those judges. `skill_execution` and
+  `skill_efficiency` are N/A in a baseline arm with no skill it could activate;
+  staged acceptable alternatives keep them applicable. Scores and lift exclude
+  explicitly marked N/A metrics, while Security remains required and missing
+  or failed evidence stays incomplete. Pass-rate lift uses the metrics shared
+  by both arms, so activation alone cannot create lift.
 
 - CI quality thresholds apply to every parallel scan worker. Report overviews
   and detailed reports surface failed quality gates ahead of advisory findings,
@@ -370,9 +439,21 @@ All notable changes to SkillEvaluator are documented in this file.
   when the quality score met `--min-score`. The 15-point Efficiency deduction is
   unchanged, so a large skill still fails when its score falls below the
   minimum.
+- `--llm` security scans on the `nv_build` provider now run SkillSpector with
+  `SKILLSPECTOR_PROVIDER=nv_build` instead of `openai`, so SkillSpector sizes
+  requests from its NVIDIA Build model registry. A Build model with a smaller
+  output cap, such as `openai/gpt-oss-120b` (16,384 tokens), no longer gets
+  SkillSpector's 32,000-token fallback budget, which can exceed what the
+  endpoint accepts and leave the LLM security stage incomplete. An explicit
+  `SKILLSPECTOR_PROVIDER=nv_build` gets the same mapping. The key still reaches
+  SkillSpector only as `OPENAI_API_KEY`, with `OPENAI_BASE_URL` set to the
+  public Build endpoint.
 
 ### Security
 
+- Plugin inventories and findings now redact credentials embedded in declared
+  component paths, including invalid or unsafe references, before recording
+  their names, locations and metadata.
 - Linux local mode now launches Bubblewrap by the absolute path that passed its
   smoke test instead of a bare `bwrap`. The bare name was looked up on the host
   `PATH` for every command, from that command's working directory (the
@@ -382,20 +463,17 @@ All notable changes to SkillEvaluator are documented in this file.
   `PATH` is resolved to its target before the smoke test, and the local-mode
   isolation message names that resolved path.
 
+### Development
+
+- Python 3.13 and 3.14 CI test jobs run in parallel with `pytest -n auto`;
+  the Python 3.12 coverage job remains serial.
+- Streamed-execution cleanup tests wait for descendant processes to exit
+  before asserting termination, avoiding a race on macOS.
+
 ## 0.6.0 - 2026-10-20
 
 ### Added
 
-- Custom execution backends. An installed package can add an `--env-mode`
-  through the `skillevaluator.env_modes` entry-point group, naming an
-  `EnvironmentBackendSpec` with a Harbor environment class plus the `--ek`
-  kwargs, host variables, prerequisite hook, and optional agent wrappers that
-  backend accepts. Custom execution backends follow the same kwarg and
-  `runtime_env` policy as Harbor-native backends, may not forward agent,
-  provider, or other backends' credentials, cannot replace a built-in mode or
-  share a name with another installed package, are not named on published
-  benchmark cards, and can be turned off with
-  `SKILLEVALUATOR_DISABLE_CUSTOM_BACKENDS=1`.
 - Optional `skillevaluator dashboard` tables for comparing saved Tier 3 reports
   and retained runs across skills, models, harnesses, recorded harness
   features, and skill conditions. Paired with/without differences cover score,
@@ -471,9 +549,7 @@ All notable changes to SkillEvaluator are documented in this file.
 - `run_config.json` records the judge reasoning effort, and each standard
   judge's details record `judge_model_used`, `judge_reasoning_effort` and
   `judge_fallback_used`. Skill lift leaves out a case whose two conditions were
-  judged by different models and counts it in `judge_mixed_cases`. Dashboard
-  score differences preserve this matching-judge lift, including unavailable
-  comparisons.
+  judged by different models and counts it in `judge_mixed_cases`.
 - Removed the unused `CONTENT_DEDUP_LLM_*` constants and `LLM_VERIFY_MODEL`; an
   LLM client built from explicit credentials uses the provider default model.
 - Tier 3 pins the agent CLIs Harbor installs: Codex 0.161.0 and Claude Code
@@ -534,17 +610,6 @@ All notable changes to SkillEvaluator are documented in this file.
 
 ### Fixed
 
-- Tier 3 reports preserve judge-model exclusions when calculating dimension and
-  overall lift. Native multi-step results also retain the judge provenance needed
-  for those comparisons, so fallback judges cannot turn a regression into an
-  apparent improvement. Judge-free cases retain valid lift, bounded report loads
-  use the collector's recorded comparisons, and FINAL-strategy trials use only
-  the final step's judges. The CLI displays unavailable comparisons as `n/a`.
-- The LLM judge treats a schema option reported as `unavailable` as a schema
-  rejection and retries without it, so OpenAI-compatible endpoints such as
-  DeepSeek, which answer `response_format: json_schema` with HTTP 400 and
-  "This response_format type is unavailable now", can score Tier 3 instead
-  of failing every judge call (fixes #207).
 - Tier 3 reports an inconclusive result when every observed positive with-skill
   trial has zero activation, and omits skill-lift comparisons for that agent.
   Activation counts are reported separately; negative controls and missing
@@ -618,19 +683,6 @@ All notable changes to SkillEvaluator are documented in this file.
   budget and judge time-budget variables, and the Harbor process environment.
   The CLI reference adds `validate --workers`, the full `--env-mode` list, and
   the exit codes the CLI actually returns (`0`, `1`, `2`).
-- External scanners no longer crash the scan when they print bytes that the
-  selected text codec cannot decode (for example a Windows traceback with a
-  CJK path). Those bytes are replaced, so the captured output is never `None`,
-  and valid output keeps the selected codec and universal-newline handling.
-- The Tier 1 LLM rubric gives reasoning models (DeepSeek R and V4, OpenAI o1,
-  o3, o4 and GPT-5 families, and models named "reasoning") a 32,768-token
-  budget instead of the default 16,384, giving hidden reasoning more room
-  before the rubric JSON is emitted. The budget follows the model each request
-  resolves to, is capped at 16,384 on the Anthropic provider, and an explicit `max_tokens`
-  overrides this default, subject to provider and model limits.
-- `doctor --env-mode docker` and Tier 3 runs on Windows now find the Harbor
-  CLI installed next to the active interpreter as `harbor.exe` or
-  `harbor.cmd`, instead of reporting "harbor CLI not found".
 - `BENCHMARK.md` publication verdicts now require completed Tier 1 and Tier 2
   execution evidence by default (Tier 1 must cover every default check that
   applies to the content type, so a run narrowed with `--checks` cannot

@@ -48,7 +48,7 @@ from pathlib import Path
 from typing import Any
 from urllib.parse import urlparse
 
-from skillevaluator.constants import SKILL_MANIFEST_VARIANTS
+from skillevaluator.constants import SCAN_EXCLUDED_DIRS, SKILL_MANIFEST_VARIANTS
 from skillevaluator.plugin_refs import PLUGIN_REF_SOURCES, normalize_ref
 from skillevaluator.plugin_states import DEPENDENCY_STATES
 from skillevaluator.utils.helpers import resolve_git_root
@@ -72,6 +72,11 @@ CONTENT_ROOTS: dict[str, tuple[str, ...]] = {
     "rules": ("rules", "team-rules"),
 }
 
+# Folders that never hold plugin content (.git, node_modules, ...). A ref through
+# one is unsafe wherever it points, inside the plugin root too: a plugin at the
+# repository root would otherwise "provide" .git/config.
+_EXCLUDED_REF_SEGMENTS = frozenset(name.casefold() for name in SCAN_EXCLUDED_DIRS)
+
 MAX_PLUGIN_MANIFEST_ITEMS = 256
 MAX_PLUGIN_MANIFEST_TEXT_CHARS = 16_384
 # Tier 1 classifies every declared ref, past MAX_PLUGIN_MANIFEST_ITEMS too (the
@@ -79,7 +84,8 @@ MAX_PLUGIN_MANIFEST_TEXT_CHARS = 16_384
 # staging limit still reaches the missing-dependency gate.
 MAX_CLASSIFIED_REFS = 1_024
 
-# Reported ref labels are truncated so a pathological ref cannot bloat reports.
+# Reported ref labels, and every ref-derived part of a reason, are truncated so a
+# pathological ref cannot bloat reports.
 MAX_REF_LABEL_CHARS = 512
 
 
@@ -151,25 +157,34 @@ def slug_from_remote_url(url: str) -> str | None:
 
 
 # Remote URL forms whose path names a hosted <owner>/<repo>: https, http, ssh,
-# git, and SCP-style ``[user@]host:owner/repo``. A local path or file:// URL
-# names no hosted repository, so it never proves identity.
+# git, and SCP-style ``[user@]host:owner/repo``. As in git, a colon before the
+# first slash (or backslash) makes a remote SCP-style, so an SSH config alias
+# (``gh:owner/repo``) counts; a single-letter drive prefix (``C:``) does not.
+# A local path or file:// URL names no hosted repository, so it never proves
+# identity.
 _HOSTED_REMOTE_RE = re.compile(
-    r"^(?:(?:https?|ssh|git(?:\+ssh)?)://[^/]+/.+|(?:[^/@:\s]+@[^/:\s]+|[^/@:\s]+\.[^/@:\s]+):(?!/).+)$",
+    r"^(?:(?:https?|ssh|git(?:\+ssh)?)://[^/]+/.+|(?:[^/@:\s]+@[^/:\s]+|[^/\\@:\s]{2,}):(?!/).+)$",
     re.IGNORECASE,
 )
 
 
 def origin_remote_url(clone_root: Path) -> str | None:
-    """The raw ``origin`` URL of the git repository at ``clone_root``, or ``None`` when there is none."""
+    """The raw ``origin`` URL of the git repository at ``clone_root``, or ``None`` when there is none.
+
+    git prints the URL as UTF-8 whatever the locale, so it is decoded as UTF-8
+    (not the Windows ANSI code page ``text=True`` would use, which cannot decode
+    some non-ASCII origins).
+    """
     try:
         url = subprocess.check_output(
             ["git", "remote", "get-url", "origin"],
             cwd=str(clone_root),
             stderr=subprocess.DEVNULL,
-            text=True,
+            encoding="utf-8",
+            errors="replace",
             timeout=30,
         ).strip()
-    except (subprocess.SubprocessError, OSError):
+    except (subprocess.SubprocessError, OSError, ValueError):
         return None
     return url or None
 
@@ -318,6 +333,11 @@ def _ref_label_from(ref: Any, canonical: str | None) -> str:
     raise ValueError("Plugin reference must be a canonical string or scalar selector object")
 
 
+def _clip(text: str) -> str:
+    """``text`` cut to :data:`MAX_REF_LABEL_CHARS` characters, ending in ``...`` when cut."""
+    return text if len(text) <= MAX_REF_LABEL_CHARS else text[: MAX_REF_LABEL_CHARS - 3] + "..."
+
+
 def is_within(path: Path, root: Path) -> bool:
     """Return whether ``path`` resolves inside ``root``."""
     try:
@@ -408,11 +428,12 @@ class _Probe:
 
 
 def _lstat(path: Path) -> tuple[Any, str | None]:
+    """``(metadata, None)``, ``(None, None)`` when the path is not there, or ``(None, error)``."""
     try:
         return path.lstat(), None
     except (FileNotFoundError, NotADirectoryError):
         return None, None
-    except OSError as exc:
+    except (OSError, ValueError) as exc:
         return None, str(exc)
 
 
@@ -621,10 +642,9 @@ def _classify_ref(
         leaf = ref_name(ref)
     except ValueError as exc:
         return DependencyRow(
-            "<invalid reference>", "unresolved", None, f"invalid reference: {exc}", cause=CAUSE_MALFORMED
+            "<invalid reference>", "unresolved", None, f"invalid reference: {_clip(str(exc))}", cause=CAUSE_MALFORMED
         )
-    if len(label) > MAX_REF_LABEL_CHARS:
-        label = label[: MAX_REF_LABEL_CHARS - 3] + "..."
+    label = _clip(label)
 
     parsed = _split_canonical(canonical)
     if parsed is None:
@@ -637,7 +657,9 @@ def _classify_ref(
         )
     source, repo, ref_kind, name = parsed
     if source not in REMOTE_REF_SOURCES:
-        return DependencyRow(label, "unresolved", None, f"unsupported reference source '{source}'", cause=CAUSE_SOURCE)
+        return DependencyRow(
+            label, "unresolved", None, f"unsupported reference source '{_clip(source)}'", cause=CAUSE_SOURCE
+        )
     if identity.local_slug is None:
         return DependencyRow(
             label,
@@ -651,7 +673,7 @@ def _classify_ref(
             label,
             "external",
             None,
-            f"references repository '{repo}', not this repository '{identity.local_slug}'; "
+            f"references repository '{_clip(repo)}', not this repository '{identity.local_slug}'; "
             f"not fetched or verified offline{_bundled_hint(leaf, hints)}",
         )
 
@@ -671,43 +693,56 @@ def _classify_ref(
         or "\\" in ref_kind
     ):
         return DependencyRow(
-            label, "unresolved", None, f"unsafe reference path '{ref_kind}/{name}'", cause=CAUSE_UNSAFE
+            label, "unresolved", None, f"unsafe reference path '{_clip(f'{ref_kind}/{name}')}'", cause=CAUSE_UNSAFE
+        )
+    excluded = next(
+        (part for part in (ref_kind, *relative_name.parts) if part.casefold() in _EXCLUDED_REF_SEGMENTS), None
+    )
+    if excluded is not None:
+        return DependencyRow(
+            label,
+            "unresolved",
+            None,
+            f"unsafe reference path '{_clip(f'{ref_kind}/{name}')}': '{excluded}' never holds plugin content",
+            cause=CAUSE_UNSAFE,
         )
 
     relative = Path(ref_kind) / relative_name
     target = identity.clone_root / relative
     # Outside the plugin root a ref may only reach a recognized content root
-    # (never .git/, secrets/, ...); inside it, any bundled path is eligible.
+    # (never .git/, secrets/, ...); inside it, any bundled path outside the
+    # excluded folders above is eligible.
     allowed_roots = CONTENT_ROOTS[kind]
     if ref_kind not in allowed_roots and not target.is_relative_to(plugin_real):
         return DependencyRow(
             label,
             "unresolved",
             None,
-            f"'{ref_kind}' is not a recognized {kind} content root ({', '.join(allowed_roots)})",
+            f"'{_clip(ref_kind)}' is not a recognized {kind} content root ({', '.join(allowed_roots)})",
             cause=CAUSE_CONTENT_ROOT,
         )
 
     probe = probe_repository_path(identity.clone_root, relative, want_skill_dir=kind == "skills", listings=listings)
     repo_path = relative.as_posix()
+    shown, detail = _clip(repo_path), _clip(probe.detail)
     if probe.outcome in {"absent", "wrong_type"}:
         component = "skill" if kind == "skills" else "rule"
         return DependencyRow(
             label,
             "missing",
             None,
-            f"same-repository {component} not found at '{repo_path}' ({probe.detail}){_bundled_hint(leaf, hints)}",
+            f"same-repository {component} not found at '{shown}' ({detail}){_bundled_hint(leaf, hints)}",
         )
     if probe.outcome == "link":
         return DependencyRow(
             label,
             "unresolved",
             None,
-            f"refusing to follow a link while resolving '{repo_path}': {probe.detail}; advisory only",
+            f"refusing to follow a link while resolving '{shown}': {detail}; advisory only",
             cause=CAUSE_LINK,
         )
     if probe.outcome == "error":
-        return DependencyRow(label, "unresolved", None, probe.detail, cause=CAUSE_ERROR)
+        return DependencyRow(label, "unresolved", None, detail, cause=CAUSE_ERROR)
 
     if target.is_relative_to(plugin_real):
         return DependencyRow(
@@ -855,7 +890,10 @@ _CAUSE_ADVICE = {
         "whose path is <kind>/<name>)."
     ),
     CAUSE_SOURCE: "Use a supported reference source (github, gitlab, or git).",
-    CAUSE_UNSAFE: "Name the component by its path below its content folder, without '..', '.' or backslashes.",
+    CAUSE_UNSAFE: (
+        "Name the component by its path below its content folder, without '..', '.', backslashes, or folders "
+        "such as .git or node_modules."
+    ),
     CAUSE_CONTENT_ROOT: (
         "Point the reference at skills/ or team-skills/ (skills), or rules/ or team-rules/ (rules), or at a "
         "path inside the plugin."

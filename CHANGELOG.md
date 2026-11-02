@@ -89,6 +89,21 @@ All notable changes to SkillEvaluator are documented in this file.
   expected-case checks cover only the cases that ran, `run_config.json` records
   the selection as `case_selection`, and a run that skipped cases is reported
   as publication-incomplete in JSON, HTML, and BENCHMARK.md.
+- `doctor` and `health-check` take `--tier 1|2|3|all`, so Tier 1 and Tier 2
+  readiness can be checked before a run instead of surfacing mid-validation.
+  Tier 1 reports each scanner that the `--checks` selection runs: SkillSpector,
+  Bandit, Semgrep, Gitleaks, and pip-audit for `dependency`. Each row shows the
+  resolved path, any executable override, and the version from a bounded,
+  shell-free probe. A scanner fails when it is missing, its override is
+  malformed, its probe fails or exceeds `--timeout` (default 60 seconds, at
+  most 3600), or it is older than Bandit 1.9.4 or Gitleaks 8. Tier 2 resolves
+  the embedding and LLM providers offline. `doctor --tier 2 --verify-models`
+  also sends one embedding request and one chat request, each bounded by
+  `--timeout` and sent without retries, and reports only the HTTP status and a
+  remedy. `--tier all` checks every tier, and a failed tier does not stop the
+  next. Without `--tier`, both commands still check Tier 3 only. An option for
+  an unselected tier, or `--timeout` for an offline Tier 2 check, is a usage
+  error. `tier3 doctor` remains Tier 3-only.
 
 - Tier 1 `--llm` security scans of a single skill keep the LLM provenance that
   SkillSpector v2.12.0 and later report: the provider adapter, the model and

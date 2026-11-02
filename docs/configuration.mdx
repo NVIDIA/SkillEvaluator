@@ -55,7 +55,7 @@ contact package and vulnerability services.
 | `doctor`, `health-check` (offline readiness probes by default; missing credentials are reported as not ready) | `--llm-verify` on `validate`, `security-scan`, `pii-scan` — LLM false-positive suppression |
 | | All Tier 2 commands — embeddings API; `context-optimization-check` and `dedup-scan` also use a chat LLM (`similarity-check` is embeddings-only). A local OpenAI-compatible server works too — see [Fully local setup](#fully-local-setup) |
 | Tier 3 scaffolding and inspection: `create-eval-dataset --no-llm`, `init-custom-grader`, `init-harbor-task`, `tier3 validate`, `view`, `harbor-view`, and `compare` | Tier 3 LLM dataset generation needs a provider key; `tier3 evaluate` needs a provider key plus a credential the selected live agent can use — with NVIDIA Build in `--env-mode docker` or `local`, one `NVIDIA_API_KEY` covers both roles |
-| | `models` and `doctor --verify-models` — provider-catalog reachability and membership checks; public catalogs do not prove that an inference key works |
+| | `models` and `doctor --verify-models` — provider-catalog reachability and membership checks; public catalogs do not prove that an inference key works. `doctor --tier 2 --verify-models` sends one embedding and one chat request |
 
 `validate PATH` runs all three tiers for skills and needs the provider and
 Tier 3 runtime setup. Use `--tiers 1` for keyless static checks. `--no-dedup`

@@ -809,9 +809,7 @@ def _bounded_console_line(line: str) -> str:
     """Flatten one line of untrusted text and bound it for the compact view."""
     flattened = " ".join(
         "".join(
-            " "
-            if character.isspace() or unicodedata.category(character).startswith("C")
-            else character
+            " " if character.isspace() or unicodedata.category(character).startswith("C") else character
             for character in line
         ).split()
     )
@@ -1178,16 +1176,18 @@ def summarize_tier3(result: ValidationResult) -> tuple[bool, bool, list[TierRow]
         rows.append(TierRow("verdict", [("INCONCLUSIVE: skill never activated", TEXT)]))
     lift = _tier3_finite_number(summary.get("overall_lift"))
     with_score = _tier3_finite_number(summary.get("overall_score"))
-    if lift is not None and -1.0 <= lift <= 1.0 and with_score is not None and 0.0 <= with_score <= 1.0:
+    if (
+        lift is not None
+        and -1.0 <= lift <= 1.0
+        and with_score is not None
+        and 0.0 <= with_score <= 1.0
+    ):
         baseline = with_score - lift
         if 0.0 <= baseline <= 1.0:
             rows.append(lift_row(lift, with_score, baseline))
     if case_rows and len(agents) > 1:
         rows = [row for row in rows if row.label != "lift"]
-    if run_dir:
-        fix_rows = tier3_fix_rows(_tier3_findings(run_dir), agents=len(agents))
-    else:
-        fix_rows = []
+    fix_rows = tier3_fix_rows(_tier3_findings(run_dir), agents=len(agents)) if run_dir else []
     exec_status = payload.get("execution_status") or summary.get("execution_status")
     ok = bool(result.passed) and exec_status in (None, "succeeded")
     if not ok:

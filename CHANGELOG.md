@@ -12,6 +12,10 @@ All notable changes to SkillEvaluator are documented in this file.
   with `skill_workspace.decoy_manifest` in `evals/config.yml`; selected content
   is verified and shared between paired arms without selecting again.
   Explicit helper skills and existing workspace defaults remain unchanged.
+  Selections exclude skills bundled inside the target and use portable roots
+  for the target's collection. Decoy hashes cover the staged runtime content,
+  so evaluation configs and other decoy manifests do not invalidate them.
+  Output guards protect evaluation inputs and existing non-manifest files.
 - Support Python 3.14 alongside Python 3.12 and 3.13, including installation
   guidance and CI coverage for tests and built packages.
 - Add reusable GitLab CI onboarding and configurable Tier 1 quality thresholds,

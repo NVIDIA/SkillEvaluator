@@ -32,7 +32,7 @@ from skillevaluator.embedding.registry import (
     _validate_catalog_string,
     _write_catalog_atomically,
 )
-from skillevaluator.publication_identity import PUBLICATION_TARGET_DIGEST_ALGORITHM, publication_source_digest
+from skillevaluator.tier3.decoy_identity import DECOY_SOURCE_DIGEST_ALGORITHM, decoy_source_digest
 from skillevaluator.utils.path_security import canonicalize_trusted_root_alias
 from skillevaluator.validators.frontmatter_parser import FRONTMATTER_PATTERN
 
@@ -65,12 +65,29 @@ def _identity(text: str) -> str:
 
 
 def _absolute_root(path: Path) -> Path:
-    # Keep later path components lexical until no-follow checks have run.
-    root = canonicalize_trusted_root_alias(Path(os.path.abspath(path.expanduser())))  # noqa: PTH100
+    # Check lexical components before collapsing ``..`` so a link cannot be
+    # hidden by a later parent segment in a portable catalog-root path.
+    root = canonicalize_trusted_root_alias(path.expanduser().absolute())
     _ensure_safe_content_path(Path(root.anchor), root)
+    root = Path(os.path.abspath(root))  # noqa: PTH100 - normalize only after no-follow checks
     if not root.is_dir():
         raise ValueError(f"Decoy skill root must be a directory: {root}")
     return root
+
+
+def _catalog_root_record(root: Path, target: Path) -> str:
+    """Keep a target's own collection relocatable; retain explicit external roots."""
+    base = target.parent
+    if root.is_relative_to(base) or base.is_relative_to(root):
+        return Path(os.path.relpath(root, base)).as_posix()
+    return str(root)
+
+
+def _is_target_path(path: Path, target: Path) -> bool:
+    # Match the baseline staging policy across case-insensitive filesystems.
+    from skillevaluator.tier3.harbor.adapter import _casefold_contained
+
+    return _casefold_contained(path, target)
 
 
 def _skill(path: Path) -> ContentEntry:
@@ -107,7 +124,7 @@ def _aliases_target(entry: ContentEntry, target: ContentEntry) -> bool:
 
 
 def _source_digest(path: Path) -> str:
-    digest = publication_source_digest(path)
+    digest = decoy_source_digest(path)
     if digest is None:
         raise ValueError(f"Selected decoy has an unsafe or unstable source tree: {path}")
     return digest
@@ -175,7 +192,7 @@ def select_decoys(
         if stored.content_type != CONTENT_TYPE_SKILL or stored.path in exclusions:
             continue
         candidate = _selected_path(root, stored.path)
-        if candidate == target or _identity(candidate.name) in names or _identity(stored.name) in skill_names:
+        if _is_target_path(candidate, target) or _identity(candidate.name) in names or _identity(stored.name) in skill_names:
             continue
         entry = _skill(candidate)
         if _sha256(entry.embedding_text) != stored.content_fingerprint:
@@ -206,7 +223,7 @@ def select_decoys(
     return {
         "schema_version": DECOY_MANIFEST_VERSION,
         "strategy": DECOY_SELECTION_STRATEGY,
-        "catalog_root": str(root),
+        "catalog_root": _catalog_root_record(root, target),
         "catalog": {
             "sha256": _sha256(before),
             **{key: catalog[key] for key in _CATALOG_FIELDS - {"sha256"}},
@@ -219,7 +236,7 @@ def select_decoys(
         "count": count,
         "exclude": exclusions,
         "selected": selected,
-        "source_digest_algorithm": PUBLICATION_TARGET_DIGEST_ALGORITHM,
+        "source_digest_algorithm": DECOY_SOURCE_DIGEST_ALGORITHM,
     }
 
 
@@ -241,8 +258,8 @@ def _validate_manifest(manifest: object, target: Path) -> tuple[list[Path], dict
         raise ValueError("Unsupported decoy manifest schema version")
     if data["strategy"] != DECOY_SELECTION_STRATEGY:
         raise ValueError("Unsupported decoy selection strategy")
-    if data["source_digest_algorithm"] != PUBLICATION_TARGET_DIGEST_ALGORITHM:
-        raise ValueError("Unsupported decoy source digest algorithm")
+    if data["source_digest_algorithm"] != DECOY_SOURCE_DIGEST_ALGORITHM:
+        raise ValueError("Unsupported decoy source digest algorithm; regenerate the selection")
     count = _count(data["count"])
     catalog = _object(data["catalog"], _CATALOG_FIELDS, "catalog")
     _hash(catalog["sha256"], "catalog")
@@ -251,10 +268,11 @@ def _validate_manifest(manifest: object, target: Path) -> tuple[list[Path], dict
     if catalog["mode"] != "description" or not re.fullmatch(r"sha256:[0-9a-f]{64}", catalog["endpoint_fingerprint"]):
         raise ValueError("Invalid decoy catalog mode or endpoint fingerprint")
     root_value = _validate_catalog_string(data["catalog_root"], "Decoy catalog root")
-    if not Path(root_value).is_absolute():
-        raise ValueError("Decoy catalog root must be absolute")
-    root = _absolute_root(Path(root_value))
     target = _absolute_root(target)
+    root_path = Path(root_value)
+    if not root_path.is_absolute():
+        root_path = target.parent / root_path
+    root = _absolute_root(root_path)
     entry = _skill(target)
     target_data = _object(data["target"], _TARGET_FIELDS, "target")
     _hash(target_data["manifest_sha256"], "target")
@@ -280,14 +298,15 @@ def _validate_manifest(manifest: object, target: Path) -> tuple[list[Path], dict
     for item in selected:
         item = _object(item, _SELECTED_FIELDS, "selected skill")
         path = _selected_path(root, item["path"])
+        if _is_target_path(path, target):
+            raise ValueError("Decoy manifest contains the target or a skill nested inside the target")
         current = _skill(path)
         score = item["score"]
         if type(score) not in (int, float) or not 0 <= score <= 1 or not math.isfinite(score):
             raise ValueError("Invalid decoy manifest similarity score")
         digest = _hash(item["source_digest"], "source")
         if (
-            path == target
-            or item["path"] in exclusions
+            item["path"] in exclusions
             or _identity(path.name) in names
             or _identity(current.name) in skill_names
             or digest in digests

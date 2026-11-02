@@ -8,6 +8,7 @@ from __future__ import annotations
 import copy
 import hashlib
 import json
+import shutil
 from pathlib import Path
 from types import SimpleNamespace
 from unittest.mock import MagicMock
@@ -16,6 +17,7 @@ import pytest
 
 from skillevaluator.embedding.client import EmbeddingClient
 from skillevaluator.embedding.registry import EmbeddingRegistry
+from skillevaluator.tier3.decoy_identity import DECOY_SOURCE_DIGEST_ALGORITHM, decoy_source_digest
 from skillevaluator.tier3.decoys import load_decoy_manifest, select_decoys, write_decoy_manifest
 
 
@@ -42,6 +44,18 @@ def _catalog(root: Path, path: Path, client: EmbeddingClient) -> None:
     registry = EmbeddingRegistry(client)
     registry.build_from_directory(root, "skill")
     registry.save_catalog(path)
+
+
+def _selected_record(path: Path, root: Path) -> dict:
+    digest = decoy_source_digest(path)
+    assert digest is not None
+    return {
+        "path": path.relative_to(root).as_posix(),
+        "name": path.name,
+        "skill_name": path.name,
+        "score": 1.0,
+        "source_digest": digest,
+    }
 
 
 @pytest.fixture
@@ -78,6 +92,7 @@ def test_selects_ranked_skills_and_records_complete_provenance(selection: Simple
         == hashlib.sha256((selection.target / "SKILL.md").read_bytes()).hexdigest()
     )
     assert all(len(item["source_digest"]) == 64 for item in manifest["selected"])
+    assert manifest["source_digest_algorithm"] == DECOY_SOURCE_DIGEST_ALGORITHM
 
 
 def test_ties_and_reordered_catalog_are_repeatable(selection: SimpleNamespace) -> None:
@@ -151,6 +166,124 @@ def test_deduplicates_directory_basename_across_nested_catalog(tmp_path: Path) -
     assert [item["path"] for item in manifest["selected"]] == ["a/shared", "c-other"]
 
 
+def test_excludes_skills_nested_inside_the_target(tmp_path: Path) -> None:
+    root = tmp_path / "skills"
+    target = _skill(root, "a-target")
+    _skill(root, "a-target/companions/rollback-helper")
+    _skill(root, "z-other")
+    client = _client([[1.0, 0.0]] * 3)
+    catalog = tmp_path / "catalog.json"
+    _catalog(root, catalog, client)
+
+    manifest = select_decoys(target, catalog_path=catalog, catalog_root=root, count=1, client=client)
+
+    assert manifest["selected"][0]["path"] == "z-other"
+
+
+def test_loader_rejects_a_hand_edited_nested_target_selection(selection: SimpleNamespace, tmp_path: Path) -> None:
+    manifest = _select(selection, count=1)
+    nested = _skill(selection.target, "companions/rollback-helper")
+    manifest["catalog_root"] = "."
+    manifest["selected"] = [_selected_record(nested, selection.target.parent)]
+    path = tmp_path / "nested.json"
+    write_decoy_manifest(manifest, path)
+
+    with pytest.raises(ValueError, match="nested inside the target"):
+        load_decoy_manifest(selection.target, path)
+
+
+def test_portable_manifest_uses_the_evaluated_checkout(tmp_path: Path) -> None:
+    original = tmp_path / "checkout-a"
+    root = original / "skills"
+    target = _skill(root, "target")
+    neighbor = _skill(root, "neighbor")
+    client = _client([[1.0, 0.0]] * 2)
+    catalog = original / "catalog.json"
+    _catalog(root, catalog, client)
+    manifest = select_decoys(target, catalog_path=catalog, catalog_root=root, count=1, client=client)
+    assert manifest["catalog_root"] == "."
+    saved = target / "evals" / "decoys.json"
+    write_decoy_manifest(manifest, saved)
+    copied = tmp_path / "checkout-b"
+    shutil.copytree(original, copied)
+    copied_target = copied / "skills" / "target"
+    copied_neighbor = copied / "skills" / "neighbor"
+    copied_manifest = copied_target / "evals" / "decoys.json"
+    client.reset_mock()
+
+    # The original still exists, but this checkout must read its own sources.
+    assert load_decoy_manifest(copied_target, copied_manifest)[0] == [copied_neighbor]
+    original_text = (neighbor / "SKILL.md").read_text(encoding="utf-8")
+    (copied_neighbor / "SKILL.md").write_text(original_text + "\nChanged only in checkout B.\n", encoding="utf-8")
+    with pytest.raises(ValueError, match="Selected decoy source changed"):
+        load_decoy_manifest(copied_target, copied_manifest)
+    (copied_neighbor / "SKILL.md").write_text(original_text, encoding="utf-8")
+    shutil.rmtree(original)
+
+    assert load_decoy_manifest(copied_target, copied_manifest)[0] == [copied_neighbor]
+    client.embed.assert_not_called()
+    client.embed_single.assert_not_called()
+
+
+def test_collection_root_can_be_relative_to_a_nested_targets_parent(tmp_path: Path) -> None:
+    root = tmp_path / "collection-a"
+    target = _skill(root, "category/target")
+    _skill(root, "neighbor")
+    client = _client([[1.0, 0.0]] * 2)
+    catalog = tmp_path / "catalog.json"
+    _catalog(root, catalog, client)
+    manifest = select_decoys(target, catalog_path=catalog, catalog_root=root, count=1, client=client)
+    assert manifest["catalog_root"] == ".."
+    write_decoy_manifest(manifest, target / "evals" / "decoys.json")
+    relocated = tmp_path / "collection-b"
+    shutil.copytree(root, relocated)
+    shutil.rmtree(root)
+
+    assert load_decoy_manifest(
+        relocated / "category" / "target", relocated / "category" / "target" / "evals" / "decoys.json"
+    )[0] == [relocated / "neighbor"]
+
+
+def test_unrelated_external_collection_keeps_an_absolute_root(tmp_path: Path) -> None:
+    target = _skill(tmp_path / "targets", "target")
+    root = tmp_path / "external-collection"
+    neighbor = _skill(root, "neighbor")
+    client = _client([[1.0, 0.0]])
+    catalog = tmp_path / "catalog.json"
+    _catalog(root, catalog, client)
+    manifest = select_decoys(target, catalog_path=catalog, catalog_root=root, count=1, client=client)
+    assert manifest["catalog_root"] == str(root)
+    saved = target / "evals" / "decoys.json"
+    write_decoy_manifest(manifest, saved)
+
+    assert load_decoy_manifest(target, saved)[0] == [neighbor]
+
+
+def test_loader_accepts_an_explicit_absolute_catalog_root(selection: SimpleNamespace, tmp_path: Path) -> None:
+    manifest = _select(selection)
+    manifest["catalog_root"] = str(selection.root)
+    path = tmp_path / "absolute.json"
+    write_decoy_manifest(manifest, path)
+
+    assert load_decoy_manifest(selection.target, path)[0] == selection.skills[:2]
+
+
+@pytest.mark.parametrize("root_value", ["linked", "linked/../catalog-skills"])
+def test_relative_catalog_root_cannot_hide_a_symlink(
+    selection: SimpleNamespace,
+    tmp_path: Path,
+    root_value: str,
+) -> None:
+    manifest = _select(selection)
+    (tmp_path / "linked").symlink_to(selection.root, target_is_directory=True)
+    manifest["catalog_root"] = root_value
+    path = tmp_path / "linked-root.json"
+    write_decoy_manifest(manifest, path)
+
+    with pytest.raises(ValueError, match="symlink"):
+        load_decoy_manifest(selection.target, path)
+
+
 def test_round_trip_load_requires_no_catalog_or_model(selection: SimpleNamespace, tmp_path: Path) -> None:
     manifest = _select(selection)
     path = tmp_path / "decoys.json"
@@ -163,7 +296,7 @@ def test_round_trip_load_requires_no_catalog_or_model(selection: SimpleNamespace
     selection.client.embed_single.assert_not_called()
 
 
-@pytest.mark.parametrize("filename", ["SKILL.md", "scripts/helper.py", "evals/evals.json"])
+@pytest.mark.parametrize("filename", ["SKILL.md", "scripts/helper.py", "references/guide.md"])
 def test_source_changes_invalidate_frozen_selection(
     selection: SimpleNamespace,
     tmp_path: Path,
@@ -179,6 +312,21 @@ def test_source_changes_invalidate_frozen_selection(
         load_decoy_manifest(selection.target, path)
 
 
+@pytest.mark.parametrize("filename", ["evals.json", "config.yml", "decoys.json"])
+def test_evaluator_only_changes_preserve_frozen_selection(
+    selection: SimpleNamespace,
+    tmp_path: Path,
+    filename: str,
+) -> None:
+    path = tmp_path / "decoys.json"
+    write_decoy_manifest(_select(selection), path)
+    changed = selection.skills[0] / "evals" / filename
+    changed.parent.mkdir()
+    changed.write_text("changed evaluator input\n", encoding="utf-8")
+
+    assert load_decoy_manifest(selection.target, path)[0] == selection.skills[:2]
+
+
 def test_target_instruction_changes_invalidate_selection(selection: SimpleNamespace, tmp_path: Path) -> None:
     path = tmp_path / "decoys.json"
     write_decoy_manifest(_select(selection), path)
@@ -192,6 +340,46 @@ def test_manifest_can_live_in_target_evals_without_self_invalidating(selection: 
     path = selection.target / "evals" / "decoys.json"
     write_decoy_manifest(_select(selection), path)
     assert load_decoy_manifest(selection.target, path)[0] == selection.skills[:2]
+
+
+def test_mutually_selected_skills_keep_valid_manifests_after_evaluator_updates(tmp_path: Path) -> None:
+    root = tmp_path / "skills"
+    alpha = _skill(root, "alpha")
+    beta = _skill(root, "beta")
+    gamma = _skill(root, "gamma")
+    client = _client([[1.0, 0.0]] * 3)
+    catalog = tmp_path / "catalog.json"
+    _catalog(root, catalog, client)
+    alpha_manifest = alpha / "evals" / "decoys.json"
+    beta_manifest = beta / "evals" / "decoys.json"
+
+    def save(target: Path, path: Path) -> None:
+        write_decoy_manifest(
+            select_decoys(target, catalog_path=catalog, catalog_root=root, count=2, client=client), path
+        )
+
+    save(alpha, alpha_manifest)
+    save(beta, beta_manifest)
+    for target in (alpha, beta):
+        (target / "evals" / "config.yml").write_text(
+            f"schema_version: 1\nskill_workspace:\n  mode: group\n  decoy_manifest: {target.name}/evals/decoys.json\n",
+            encoding="utf-8",
+        )
+    assert load_decoy_manifest(alpha, alpha_manifest)[0] == [beta, gamma]
+    assert load_decoy_manifest(beta, beta_manifest)[0] == [alpha, gamma]
+    save(alpha, alpha_manifest)
+    assert load_decoy_manifest(alpha, alpha_manifest)[0] == [beta, gamma]
+    assert load_decoy_manifest(beta, beta_manifest)[0] == [alpha, gamma]
+
+
+def test_old_full_source_digest_requires_regeneration(selection: SimpleNamespace, tmp_path: Path) -> None:
+    manifest = _select(selection)
+    manifest["source_digest_algorithm"] = "skill-evaluator-source-tree/2"
+    path = tmp_path / "old-manifest.json"
+    write_decoy_manifest(manifest, path)
+
+    with pytest.raises(ValueError, match="source digest algorithm; regenerate the selection"):
+        load_decoy_manifest(selection.target, path)
 
 
 @pytest.mark.parametrize("relative", ["../escape", "/absolute", "a/../api-debugger", "a\\b", "a//b"])
@@ -281,6 +469,41 @@ def test_excludes_target_payload_in_other_runtime_files(selection: SimpleNamespa
     copied.write_bytes((selection.target / "SKILL.md").read_bytes())
     manifest = _select(selection)
     assert [item["path"] for item in manifest["selected"]] == ["log-triage", "release-planner"]
+
+
+def test_loader_rejects_a_renamed_target_alias_with_a_correct_source_digest(
+    selection: SimpleNamespace,
+    tmp_path: Path,
+) -> None:
+    manifest = _select(selection, count=1)
+    decoy = selection.skills[0]
+    target_body = (selection.target / "SKILL.md").read_text(encoding="utf-8").split("---", 2)[2]
+    (decoy / "SKILL.md").write_text(
+        f"---\nname: {decoy.name}\ndescription: A differently named skill.\n---{target_body}", encoding="utf-8"
+    )
+    manifest["selected"] = [_selected_record(decoy, selection.root)]
+    path = tmp_path / "alias.json"
+    write_decoy_manifest(manifest, path)
+
+    with pytest.raises(ValueError, match="target alias or duplicate skill identity"):
+        load_decoy_manifest(selection.target, path)
+
+
+def test_loader_rejects_target_payload_with_a_correct_source_digest(
+    selection: SimpleNamespace,
+    tmp_path: Path,
+) -> None:
+    manifest = _select(selection, count=1)
+    decoy = selection.skills[0]
+    payload = decoy / "references" / "renamed.md"
+    payload.parent.mkdir()
+    payload.write_bytes((selection.target / "SKILL.md").read_bytes())
+    manifest["selected"] = [_selected_record(decoy, selection.root)]
+    path = tmp_path / "payload.json"
+    write_decoy_manifest(manifest, path)
+
+    with pytest.raises(ValueError, match="Selected decoy contains target instructions"):
+        load_decoy_manifest(selection.target, path)
 
 
 def test_rejects_mixed_content_catalog_before_model_calls(selection: SimpleNamespace) -> None:

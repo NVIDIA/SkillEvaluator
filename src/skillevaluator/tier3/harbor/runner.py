@@ -64,8 +64,6 @@ from skillevaluator.provider_config import (
 )
 from skillevaluator.publication_identity import (
     PUBLICATION_ANY_DEPTH_EXCLUDED_NAMES,
-    publication_source_digest,
-    publication_source_link_is_generated,
     publication_source_path_is_excluded,
     publication_target_from_path,
 )
@@ -3241,6 +3239,31 @@ def _workspace_skills(skill_path: Path, values: list[str | Path]) -> list[Path]:
     return resolved
 
 
+def _workspace_skill_name(path: Path) -> str:
+    """Reserve the effective skill name without requiring an embedding description."""
+    import yaml
+
+    from skillevaluator.constants import CONTENT_DEDUP_MAX_FILE_BYTES
+    from skillevaluator.validators.frontmatter_parser import FRONTMATTER_PATTERN
+
+    content = _read_regular_evals_file(
+        path / "SKILL.md",
+        label="Workspace skill manifest",
+        max_bytes=CONTENT_DEDUP_MAX_FILE_BYTES,
+        allowed_root=path,
+    ).decode("utf-8-sig")
+    match = FRONTMATTER_PATTERN.match(content)
+    if match is not None:
+        try:
+            metadata = yaml.safe_load(match.group(1))
+        except yaml.YAMLError:
+            metadata = None
+        name = metadata.get("name") if isinstance(metadata, dict) else None
+        if isinstance(name, str) and name.strip():
+            return name.strip()
+    return path.name
+
+
 def _decoy_workspace_skills(
     skill_path: Path,
     workspace_config: Mapping[str, Any],
@@ -3249,7 +3272,6 @@ def _decoy_workspace_skills(
     reference_skills_dir: Path | None = None,
 ) -> tuple[list[Path], list[Path], dict[str, Any] | None]:
     """Resolve one frozen selection without changing manual workspace policy."""
-    from skillevaluator.embedding.extractor import extract_from_skill
     from skillevaluator.tier3.decoys import load_decoy_manifest
 
     raw_manifest = workspace_config.get("decoy_manifest")
@@ -3272,11 +3294,7 @@ def _decoy_workspace_skills(
     if reference_skills_dir is not None and reference_skills_dir.is_dir():
         reserved.extend(path for path in reference_skills_dir.iterdir() if _is_skill_dir(path))
     directory_names = {name_key(path.name) for path in reserved}
-    skill_names: set[str] = set()
-    for path in reserved:
-        entry = extract_from_skill(path)
-        if entry is not None:
-            skill_names.add(name_key(entry.name))
+    skill_names = {name_key(_workspace_skill_name(path)) for path in reserved}
     for path, record in zip(selected, manifest["selected"], strict=True):
         if name_key(path.name) in directory_names or name_key(record["skill_name"]) in skill_names:
             raise ValueError(f"Selected decoy '{path.name}' collides with another workspace skill name")
@@ -3288,25 +3306,19 @@ def _decoy_workspace_skills(
 @contextmanager
 def _private_decoy_workspace_snapshot(selected: list[Path], manifest: Mapping[str, Any]) -> Iterator[list[Path]]:
     """Keep the same verified source bytes available to every paired task."""
+    from skillevaluator.tier3.decoy_identity import decoy_source_copy_ignore, decoy_source_digest
+
     with tempfile.TemporaryDirectory(prefix="skillevaluator-decoys-snapshot-") as root_text:
         root = Path(root_text)
         snapshots: list[Path] = []
         for source, record in zip(selected, manifest["selected"], strict=True):
             expected = record["source_digest"]
-            if publication_source_digest(source) != expected:
+            if decoy_source_digest(source) != expected:
                 raise ValueError(f"Selected decoy '{source.name}' changed before snapshot creation")
 
-            def ignore_generated(directory: str, names: list[str], source: Path = source) -> list[str]:
-                return [
-                    name
-                    for name in names
-                    if publication_source_path_is_excluded(source, Path(directory) / name)
-                    or publication_source_link_is_generated(source, Path(directory) / name)
-                ]
-
             snapshot = root / source.name
-            copytree_secure(source, snapshot, allowed_root=source, ignore=ignore_generated)
-            if publication_source_digest(snapshot) != expected or publication_source_digest(source) != expected:
+            copytree_secure(source, snapshot, allowed_root=source, ignore=decoy_source_copy_ignore(source))
+            if decoy_source_digest(snapshot) != expected or decoy_source_digest(source) != expected:
                 raise ValueError(f"Selected decoy '{source.name}' changed while its snapshot was created")
             snapshots.append(snapshot)
         yield snapshots

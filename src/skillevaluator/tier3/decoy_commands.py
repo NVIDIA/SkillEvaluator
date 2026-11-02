@@ -5,6 +5,7 @@
 
 from __future__ import annotations
 
+import json
 from pathlib import Path
 
 import click
@@ -77,11 +78,73 @@ def _validate_output_path(output: Path, target: Path, catalog: Path, catalog_roo
     """Keep manifest output from replacing inputs or changing selected sources."""
     destination = output.resolve()
     target_root = target.resolve()
-    if destination == catalog.resolve():
+    if destination == catalog.resolve() or _same_existing_path(destination, catalog):
         raise ValueError("Decoy manifest output must not replace the embedding catalog")
     # The target's evaluator-only directory is a natural place to version this
     # file. Other skill contents and catalog members are author-owned inputs.
-    if destination.is_relative_to(target_root / "evals"):
-        return
-    if destination.is_relative_to(target_root) or destination.is_relative_to(catalog_root.resolve()):
+    relative = _relative_to_directory(destination, target_root)
+    in_target_evals = relative is not None and len(relative.parts) > 1 and relative.parts[0].casefold() == "evals"
+    if in_target_evals:
+        reserved = {"config.yml", "config.yaml"} | {
+            f"{stem}.{extension}" for stem in ("evals", "dataset") for extension in ("json", "jsonl", "yaml", "yml")
+        }
+        if destination.name.casefold() in reserved:
+            raise ValueError("Decoy manifest output must not replace an evaluation dataset or run policy")
+    elif relative is not None or _relative_to_directory(destination, catalog_root.resolve()) is not None:
         raise ValueError("Save the decoy manifest outside the skill collection or inside the target's evals directory")
+    _validate_existing_output(output)
+
+
+def _same_existing_path(first: Path, second: Path) -> bool:
+    """Recognize filesystem aliases without equating distinct case-sensitive names."""
+    try:
+        return first.samefile(second)
+    except FileNotFoundError:
+        return False
+
+
+def _relative_to_directory(path: Path, directory: Path) -> Path | None:
+    """Find containment through existing ancestors, including case aliases on macOS."""
+    for ancestor in (path, *path.parents):
+        if ancestor == directory or _same_existing_path(ancestor, directory):
+            return path.relative_to(ancestor)
+    return None
+
+
+def _validate_existing_output(output: Path) -> None:
+    """Allow regenerating saved manifests, including ones with stale source hashes."""
+    from skillevaluator.embedding.registry import _catalog_object, _read_catalog_text, _reject_json_constant
+    from skillevaluator.tier3.decoys import (
+        _CATALOG_FIELDS,
+        _MANIFEST_FIELDS,
+        _SELECTED_FIELDS,
+        _TARGET_FIELDS,
+        DECOY_MANIFEST_VERSION,
+        DECOY_SELECTION_STRATEGY,
+        _count,
+        _hash,
+        _object,
+    )
+
+    if not output.exists() and not output.is_symlink():
+        return
+    try:
+        data = _object(
+            json.loads(_read_catalog_text(output), object_pairs_hook=_catalog_object, parse_constant=_reject_json_constant),
+            _MANIFEST_FIELDS,
+            "root",
+        )
+        if type(data["schema_version"]) is not int or data["schema_version"] != DECOY_MANIFEST_VERSION:
+            raise ValueError("Unsupported decoy manifest schema version")
+        if data["strategy"] != DECOY_SELECTION_STRATEGY:
+            raise ValueError("Unsupported decoy selection strategy")
+        catalog = _object(data["catalog"], _CATALOG_FIELDS, "catalog")
+        target = _object(data["target"], _TARGET_FIELDS, "target")
+        _hash(catalog["sha256"], "catalog")
+        _hash(target["manifest_sha256"], "target")
+        if not isinstance(data["selected"], list) or len(data["selected"]) != _count(data["count"]):
+            raise ValueError("Invalid decoy manifest selected count")
+        for item in data["selected"]:
+            _hash(_object(item, _SELECTED_FIELDS, "selected skill")["source_digest"], "source")
+    except (OSError, ValueError) as exc:
+        raise ValueError(f"Refusing to replace an existing file that is not a decoy manifest: {output}") from exc

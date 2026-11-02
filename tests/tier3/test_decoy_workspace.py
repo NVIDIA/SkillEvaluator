@@ -8,11 +8,13 @@ from __future__ import annotations
 import json
 import subprocess
 from pathlib import Path
+from types import SimpleNamespace
+from unittest.mock import MagicMock
 
 import pytest
 
 from skillevaluator.provider_config import ProviderConfig
-from skillevaluator.publication_identity import publication_source_digest
+from skillevaluator.tier3.decoy_identity import decoy_source_digest
 from skillevaluator.tier3.evals_config import EvalsConfigError, load_evals_config
 from skillevaluator.tier3.harbor import runner
 from skillevaluator.tier3.harbor.adapter import generate_harbor_tasks
@@ -31,7 +33,7 @@ def _skill(path: Path, *, skill_name: str | None = None) -> Path:
 def _manifest(selected: list[Path]) -> dict:
     return {
         "selected": [
-            {"path": path.name, "skill_name": path.name, "source_digest": publication_source_digest(path)}
+            {"path": path.name, "skill_name": path.name, "source_digest": decoy_source_digest(path)}
             for path in selected
         ]
     }
@@ -86,12 +88,46 @@ def test_decoy_names_cannot_be_silently_shadowed(tmp_path: Path, monkeypatch, co
     target = _skill(tmp_path / "target")
     decoy = _skill(tmp_path / "catalog" / "decoy")
     helper_name = "DECOY" if collision == "basename" else "helper"
-    helper = _skill(tmp_path / "helpers" / helper_name, skill_name="decoy")
+    helper = _skill(
+        tmp_path / "helpers" / helper_name,
+        skill_name="helper-skill" if collision == "basename" else "decoy",
+    )
     references = tmp_path / "helpers" if collision == "reference" else None
     config = {"mode": "group", "decoy_manifest": "frozen.json"}
     if references is None:
         config["include"] = [str(helper)]
     monkeypatch.setattr(decoys, "load_decoy_manifest", lambda *_: ([decoy], _manifest([decoy])))
+
+    with pytest.raises(ValueError, match="collides with another workspace skill name"):
+        runner._decoy_workspace_skills(target, config, "group", reference_skills_dir=references)
+
+
+@pytest.mark.parametrize("source", ["include", "reference"])
+@pytest.mark.parametrize(
+    ("helper_directory", "manifest_text"),
+    [
+        ("pdf-helper", "---\nname: pdf\n---\n# PDF helper\n"),
+        ("pdf", "# PDF helper without frontmatter\n"),
+        ("pdf", "---\nname: '  '\n---\n# PDF helper\n"),
+        ("pdf", "---\nname: 3\n---\n# PDF helper\n"),
+    ],
+)
+def test_decoy_name_collision_uses_helper_name_without_description(
+    tmp_path: Path, monkeypatch, source: str, helper_directory: str, manifest_text: str
+) -> None:
+    from skillevaluator.tier3 import decoys
+
+    target = _skill(tmp_path / "target")
+    decoy = _skill(tmp_path / "catalog" / "pdf-tools", skill_name="pdf")
+    helper = _skill(tmp_path / "helpers" / helper_directory)
+    (helper / "SKILL.md").write_text(manifest_text, encoding="utf-8")
+    manifest = _manifest([decoy])
+    manifest["selected"][0]["skill_name"] = "pdf"
+    monkeypatch.setattr(decoys, "load_decoy_manifest", lambda *_: ([decoy], manifest))
+    config = {"mode": "group", "decoy_manifest": "frozen.json"}
+    references = helper.parent if source == "reference" else None
+    if source == "include":
+        config["include"] = [str(helper)]
 
     with pytest.raises(ValueError, match="collides with another workspace skill name"):
         runner._decoy_workspace_skills(target, config, "group", reference_skills_dir=references)
@@ -127,6 +163,21 @@ def test_decoy_snapshot_rejects_source_changed_since_selection(tmp_path: Path) -
         runner._private_decoy_workspace_snapshot([decoy], manifest),
     ):
         pytest.fail("Changed source must never be exposed")
+
+
+def test_decoy_snapshot_ignores_changed_evaluator_files(tmp_path: Path) -> None:
+    decoy = _skill(tmp_path / "decoy")
+    (decoy / "evals").mkdir()
+    config = decoy / "evals" / "config.yml"
+    config.write_text("schema_version: 1\n", encoding="utf-8")
+    manifest = _manifest([decoy])
+    config.write_text("schema_version: 1\nharbor:\n  max_cases: 2\n", encoding="utf-8")
+    (decoy / "evals" / "decoys.json").write_text("{}\n", encoding="utf-8")
+
+    with runner._private_decoy_workspace_snapshot([decoy], manifest) as frozen:
+        assert (frozen[0] / "SKILL.md").read_bytes() == (decoy / "SKILL.md").read_bytes()
+        assert not (frozen[0] / "evals").exists()
+        assert decoy_source_digest(frozen[0]) == manifest["selected"][0]["source_digest"]
 
 
 def test_frozen_decoy_stages_identically_after_source_changes(tmp_path: Path) -> None:
@@ -226,4 +277,86 @@ def test_runner_reuses_frozen_selection_and_records_original_provenance(tmp_path
     assert emitted[0][1] == emitted[1][1]
     assert emitted[0][1][0] != decoy
     assert provenance_sources == [decoy]
+    assert result["run_config"]["skill_workspace"]["decoy_manifest"] == manifest
+
+
+def test_runner_stages_config_and_cli_helpers_with_real_decoy_manifest(tmp_path: Path, monkeypatch) -> None:
+    from skillevaluator.embedding.client import EmbeddingClient
+    from skillevaluator.embedding.registry import EmbeddingRegistry
+    from skillevaluator.tier3.decoys import select_decoys, write_decoy_manifest
+    from skillevaluator.tier3.harbor import runtime_preflight
+
+    collection = tmp_path / "repo"
+    target = _skill(collection / "target")
+    subprocess.run(["git", "init", "--quiet", str(collection)], check=True, capture_output=True)
+    config_helper = _skill(collection / "config-helper")
+    cli_helper = _skill(collection / "cli-helper")
+    decoy = _skill(tmp_path / "catalog" / "decoy")
+    _config(target, "  mode: group\n  include:\n    - config-helper\n  decoy_manifest: target/evals/decoys.json\n")
+    (target / "evals" / "evals.json").write_text(
+        json.dumps([{"id": "case-001", "question": "Use the target procedure."}]), encoding="utf-8"
+    )
+    client = MagicMock(spec=EmbeddingClient)
+    client.model = "test-model"
+    client._resolved_config.return_value = SimpleNamespace(provider="nv_build", base_url="https://example.com/v1")
+    client.embed.return_value = [[1.0, 0.0]]
+    client.embed_single.return_value = [1.0, 0.0]
+    catalog = tmp_path / "catalog.json"
+    registry = EmbeddingRegistry(client)
+    registry.build_from_directory(decoy.parent, "skill")
+    registry.save_catalog(catalog)
+    manifest = select_decoys(target, catalog_path=catalog, catalog_root=decoy.parent, count=1, client=client)
+    write_decoy_manifest(manifest, target / "evals" / "decoys.json")
+    expected = {path.name: (path / "SKILL.md").read_bytes() for path in (config_helper, cli_helper, decoy)}
+    staged_arms: list[bool] = []
+
+    def stage(skill, output, **kwargs):
+        paths = generate_harbor_tasks(skill, output, **kwargs)
+        for task in paths:
+            staged = task / "environment" / "skills"
+            assert {path.name for path in staged.iterdir()} == {
+                *expected,
+                *([target.name] if kwargs["with_skill"] else []),
+            }
+            for name, content in expected.items():
+                assert (staged / name / "SKILL.md").read_bytes() == content
+        staged_arms.append(kwargs["with_skill"])
+        return paths
+
+    monkeypatch.setattr(runner, "generate_harbor_tasks", stage)
+    monkeypatch.setattr(
+        runner,
+        "resolve_llm_provider",
+        lambda: ProviderConfig(
+            provider="nv_build",
+            model="test-model",
+            api_key="provider-key",
+            base_url="https://provider.example/v1",
+            litellm_model="openai/test-model",
+        ),
+    )
+    monkeypatch.setattr(runner, "_check_prerequisites", lambda **_: [])
+    monkeypatch.setattr(runner, "_run_agent_pair", lambda **_: [])
+    monkeypatch.setattr(
+        runner,
+        "collect_harbor_results",
+        lambda **_: {"execution_status": "succeeded", "execution_errors": [], "metrics": [], "agents": {}},
+    )
+    monkeypatch.setattr(runner, "render_agent_eval_html_report", lambda *_args, **_kw: tmp_path / "report.html")
+    monkeypatch.setattr(
+        runtime_preflight,
+        "probe_model",
+        lambda provider: runtime_preflight.ModelProbeResult(True, provider.provider, provider.model, "available"),
+    )
+
+    result = runner.run_harbor_eval(
+        target,
+        ["opencode"],
+        output_dir=tmp_path / "results",
+        include_skills=[str(cli_helper)],
+        agent_runtime_preflight=False,
+    )
+
+    assert "error" not in result
+    assert staged_arms == [True, False]
     assert result["run_config"]["skill_workspace"]["decoy_manifest"] == manifest

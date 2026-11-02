@@ -659,18 +659,35 @@ skill_workspace:
     - required-helper
 ```
 
-Selection excludes the target and duplicate candidates, orders equal scores by
-catalog-relative path, and fails if too few eligible skills remain. Required
+Selection excludes the target, skills bundled inside it, and duplicate
+candidates, orders equal scores by catalog-relative path, and fails if too few
+eligible skills remain. Required
 helpers stay explicit in `include`; the selector does not infer prerequisites.
 A collision between a selected skill and an explicitly included skill is an
 error.
 
 The manifest records catalog and model identity, scores, the target manifest
-hash, and selected skill source hashes. Evaluation verifies the hashes and
+hash, and selected skill runtime hashes. Evaluation verifies the hashes and
 uses one snapshot of the selected skills in both arms; it makes no embedding
-request and does not select again. Regenerate after moving the collection,
-editing the target's `SKILL.md`, or changing selected skill content. External
-workspace skills retain the existing publication-evidence limitations.
+request and does not select again. The runtime hashes exclude evaluator-only
+directories, including each nested skill's `evals/`, exactly as staging does.
+Editing those configs, datasets, or selection manifests does not invalidate
+other skills' selections. Agent-visible references still participate in the
+hash, including an ordinary `references/evals/` folder.
+
+For a collection that contains the target, or lies inside the target's parent
+directory, `catalog_root` is stored relative to that parent (`.` in the example
+above). Identical clones and relocated collections can reuse the same manifest;
+evaluation checks the sources in the current checkout. An unrelated external
+collection retains an absolute root and must be available at that location.
+Regenerate after editing the target's `SKILL.md`, changing selected runtime
+content, or moving an external collection. Manifests using the earlier full-source
+digest algorithm must also be regenerated. External workspace skills retain the
+existing publication-evidence limitations.
+
+Use a separate manifest filename such as `decoys.json`. Selection output cannot
+replace an evaluation dataset, run policy, embedding catalog, or existing
+non-manifest file.
 
 Similarity is a heuristic for plausible alternatives, not evidence of actual
 routing confusion. Skill Lift remains conditional on the chosen workspace;

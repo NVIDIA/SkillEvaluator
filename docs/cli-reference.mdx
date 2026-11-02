@@ -438,7 +438,12 @@ skillevaluator tier3 select-decoys ./skills/my-skill \
 | `-o, --output FILE` | required | Selection manifest to write, outside the collection or inside the target's `evals/` directory. |
 
 The manifest records the catalog hash and embedding identity, selected paths
-and scores, target manifest hash, and selected source hashes. Set
+and scores, target manifest hash, and selected runtime-content hashes. The
+target's own collection uses a root relative to its parent directory, so an
+identical checkout can reuse the manifest. Unrelated external collections
+retain an absolute root. Evaluator-only files are excluded from decoy hashes;
+changing a decoy's evaluation config does not require a new selection. Output
+cannot overwrite evaluation inputs or an existing non-manifest file. Set
 `skill_workspace.mode: group` and `skill_workspace.decoy_manifest` in
 `evals/config.yml` to consume it. The manifest path is relative to the target
 skill's parent directory. Evaluation validates and reuses the selection

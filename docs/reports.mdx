@@ -480,6 +480,12 @@ arms; if you ran with `--skip-baseline`, there is no lift to report. In
 `custom_only` grading, your own grader defines the score and lift — see
 [Custom Graders & Tasks](custom-graders.mdx).
 
+When the HTML report has no lift for an agent or dimension, its label says
+why. **no baseline** means that row has no baseline score, for example after
+`--skip-baseline`. **comparison unavailable** means a baseline score was
+recorded but cannot be compared with the with-skill score, for example because
+the arms used different score policies or no case kept matching judge models.
+
 For each LLM metric (`accuracy`, `goal_accuracy`, and `behavior_check`), cases
 that used different judge models across the arms are excluded from that
 metric's lift. This includes model changes across repeated attempts or the

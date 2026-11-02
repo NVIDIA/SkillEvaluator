@@ -98,7 +98,7 @@ If none is set, LLM-backed commands fail with a configuration error. If more tha
 
 ### SkillSpector bridge
 
-The `--llm` security analysis runs [SkillSpector](https://github.com/NVIDIA/SkillSpector), which has its own provider environment. SkillEvaluator bridges your configured provider into that invocation with an isolated subprocess environment: only the selected provider's settings, the SkillSpector model settings below, and a small set of basic process variables are forwarded, so ambient credentials for other providers never reach SkillSpector. `SKILLSPECTOR_TEMPERATURE` is not forwarded, because current reasoning models reject a custom temperature. The `nv_build` provider is bridged through SkillSpector's OpenAI-compatible path, pointing `OPENAI_BASE_URL` at the public NVIDIA Build endpoint.
+The `--llm` security analysis runs [SkillSpector](https://github.com/NVIDIA/SkillSpector), which has its own provider environment. SkillEvaluator bridges your configured provider into that invocation with an isolated subprocess environment: only the selected provider's settings, the SkillSpector model settings below, and a small set of basic process variables are forwarded, so ambient credentials for other providers never reach SkillSpector. `SKILLSPECTOR_TEMPERATURE` is not forwarded, because current reasoning models reject a custom temperature. The `nv_build` provider is bridged as `SKILLSPECTOR_PROVIDER=nv_build`, so SkillSpector sizes requests from its NVIDIA Build model registry, while the key travels as `OPENAI_API_KEY` with `OPENAI_BASE_URL` pointing at the public NVIDIA Build endpoint.
 
 | Variable | Default | Effect |
 | --- | --- | --- |

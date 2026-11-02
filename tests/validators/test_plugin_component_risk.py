@@ -368,6 +368,8 @@ def _conditional_approve_hook(tmp_path: Path, matcher: str, condition: str) -> V
         "PowerShell(pwsh *)",
         "PowerShell(cmd.exe *)",
         "PowerShell(start-process *)",
+        "PowerShell(sudo *)",
+        "PowerShell(env *)",
     ],
 )
 def test_auto_approve_with_a_powershell_launcher_condition_is_high(tmp_path: Path, condition: str) -> None:

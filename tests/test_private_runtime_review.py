@@ -70,6 +70,22 @@ def test_runner_selects_native_before_workers_and_projects_only_native_layout(tm
         entry = json.loads((task / "tests" / "entry.json").read_text())
         assert "a" in entry["workspace_skill_names"]
         assert set(hooks.stagings[agent].workspace_skill_aliases()) <= set(entry["workspace_skill_names"])
+        from skillevaluator.tier3.eval_core.checks import check_routing
+
+        native_call = (
+            {"skill_tool_names": hooks.stagings[agent].workspace_skill_aliases()} if agent == "claude-code" else {}
+        )
+        calls = (
+            [] if native_call else [{"action": "read", "action_input": {"file_path": "/workspace/skills/a/SKILL.md"}}]
+        )
+        routing = check_routing(
+            calls,
+            entry["expected_skill"],
+            workspace_skill_names=entry["workspace_skill_names"],
+            workspace_mode=entry["skill_workspace_mode"],
+            **native_call,
+        )
+        assert routing["passed"], routing
 
 
 @pytest.mark.parametrize("agent", ["claude-code", "codex", "opencode", "hermes"])

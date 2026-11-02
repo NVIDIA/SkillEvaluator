@@ -644,6 +644,43 @@ def test_salvage_after_a_failed_retry_keeps_each_attempt_status(tmp_path: Path) 
     assert attempts[1]["problem"] == "request timed out"
 
 
+def _cut_point(limit: int) -> int:
+    # Where _truncate_for_behavior ends the kept head of a text longer than *limit*.
+    marker = "\n...[truncated]...\n"
+    return (limit - len(marker)) * 2 // 3
+
+
+def test_long_judge_evidence_is_bounded_and_redacted_before_it_is_cut(tmp_path: Path, monkeypatch) -> None:
+    verifier = _stage_verifier(tmp_path)
+    credential = "configured-cut-credential-DO-NOT-SAVE"
+    monkeypatch.setenv("ANTHROPIC_API_KEY", credential)
+    # Each credential crosses the point where the raw text would be cut, so
+    # cutting before redaction would save its first characters in clear.
+    prompt_cut = _cut_point(eval_template.JUDGE_EVIDENCE_PROMPT_CHARS)
+    reply_cut = _cut_point(eval_template.JUDGE_EVIDENCE_REPLY_CHARS)
+    prompt = "p" * (prompt_cut - 12) + credential + "p" * 50_000
+    reply = "r" * (reply_cut - 12) + credential + "r" * 50_000
+
+    token = verifier._ACTIVE_JUDGE_EVIDENCE.set([])
+    try:
+        verifier._record_judge_attempt("accuracy", 1, prompt=prompt, reply=reply, problem="too long")
+    finally:
+        verifier._ACTIVE_JUDGE_EVIDENCE.reset(token)
+
+    saved_text = (verifier.VERIFIER_DIR / "judge_attempts.json").read_text(encoding="utf-8")
+    (entry,) = _attempts(verifier.VERIFIER_DIR)
+    assert entry["prompt_chars"] == len(prompt)
+    assert entry["reply_chars"] == len(reply)
+    assert len(entry["prompt"]) <= eval_template.JUDGE_EVIDENCE_PROMPT_CHARS
+    assert len(entry["reply"]) <= eval_template.JUDGE_EVIDENCE_REPLY_CHARS
+    assert "...[truncated]..." in entry["prompt"]
+    assert "...[truncated]..." in entry["reply"]
+    assert "[REDACTED]" in entry["prompt"]
+    assert "[REDACTED]" in entry["reply"]
+    assert credential[:8] not in saved_text
+    assert credential[-8:] not in saved_text
+
+
 def test_judge_evidence_write_failure_never_changes_the_score(tmp_path: Path, monkeypatch) -> None:
     verifier = _stage_verifier(tmp_path)
     calls: list[str] = []

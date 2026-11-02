@@ -804,10 +804,19 @@ def test_template_anthropic_gateway_gets_effort_without_server_side_fallback(jud
     "reply",
     [
         _anthropic_body(VALID_GOAL_RESPONSE, served_by="claude-opus-4-8", model="claude-opus-4-8"),
+        # Only the fallback block names the model that answered.
+        _anthropic_body(VALID_GOAL_RESPONSE, served_by="claude-opus-4-8"),
+        # The fallback block is read before the reply's top-level model.
+        _anthropic_body(VALID_GOAL_RESPONSE, served_by="claude-opus-4-8", model="claude-opus-5-5"),
         # A turn served by sticky routing carries no fallback block.
         _anthropic_body(VALID_GOAL_RESPONSE, model="claude-opus-4-8"),
     ],
-    ids=["fallback-in-this-call", "sticky-fallback-turn"],
+    ids=[
+        "fallback-in-this-call",
+        "fallback-block-only",
+        "fallback-block-before-reply-model",
+        "sticky-fallback-turn",
+    ],
 )
 def test_template_required_judge_records_the_model_that_answered(judge_env, reply):
     judge_env.setenv("SKILL_EVAL_LLM_PROVIDER", "anthropic")

@@ -1188,6 +1188,50 @@ class TestModelProvenance:
         assert ("fallbacks" in sent[0]) is (base_url is None)
         assert client.model_used == expected_model
 
+    @pytest.mark.parametrize(
+        "base_url", [None, "https://gateway.example"], ids=["native-with-fallback", "gateway-without-fallback"]
+    )
+    def test_model_used_reads_the_fallback_block_before_the_reply_model(
+        self, monkeypatch: pytest.MonkeyPatch, base_url: str | None
+    ) -> None:
+        """The block wins over a different top-level model, and a block is honored on any Anthropic endpoint."""
+        pytest.importorskip("anthropic")
+        httpx = pytest.importorskip("httpx")
+        _use_provider(monkeypatch, "anthropic", "claude-opus-5-5")
+        if base_url:
+            monkeypatch.setenv("ANTHROPIC_BASE_URL", base_url)
+        sent: list[dict] = []
+
+        def handler(request):
+            sent.append(json.loads(request.content))
+            return httpx.Response(
+                200,
+                json={
+                    "id": "msg_test",
+                    "type": "message",
+                    "role": "assistant",
+                    "model": "claude-opus-5-5",
+                    "content": [
+                        {
+                            "type": "fallback",
+                            "from": {"model": "claude-opus-5-5"},
+                            "to": {"model": ANTHROPIC_REFUSAL_FALLBACK_MODEL},
+                        },
+                        {"type": "text", "text": "Done"},
+                    ],
+                    "stop_reason": "end_turn",
+                    "stop_sequence": None,
+                    "usage": {"input_tokens": 1, "output_tokens": 1},
+                },
+            )
+
+        with httpx.Client(transport=httpx.MockTransport(handler)) as http_client:
+            client = LLMClient(http_client=http_client)
+            assert client.completions("system", "user") == "Done"
+
+        assert ("fallbacks" in sent[0]) is (base_url is None)
+        assert client.model_used == ANTHROPIC_REFUSAL_FALLBACK_MODEL
+
     def test_model_used_is_kept_per_thread(self, monkeypatch: pytest.MonkeyPatch) -> None:
         _use_provider(monkeypatch, "openai", CHAT_DEFAULT_OPENAI)
         mock_openai = MagicMock()

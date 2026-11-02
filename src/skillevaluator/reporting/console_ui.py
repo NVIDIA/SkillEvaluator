@@ -39,6 +39,7 @@ from rich.live import Live
 from rich.panel import Panel
 from rich.text import Text
 
+from skillevaluator.constants import CONTENT_DEDUP_LLM_REFUSED_CHECK
 from skillevaluator.reporting.base import get_skip_reason
 from skillevaluator.utils.rich_markup import strip_terminal_controls
 
@@ -55,6 +56,7 @@ INK = "#101403"  # pill/badge foreground on green fills
 
 _TIER2_SCAN_FAILURE_CHECKS = frozenset(
     {
+        CONTENT_DEDUP_LLM_REFUSED_CHECK,
         "invalid_skill_root",
         "invalid_text_encoding",
         "path_access_error",
@@ -783,13 +785,16 @@ def summarize_tier2(results: list[ValidationResult]) -> tuple[bool, bool, list[T
     if failed:
         details: list[tuple[str, str]] = []
         for result in failed:
-            if result.findings:
+            # An advisory LLM refusal never explains why a result failed; the
+            # reports still carry it.
+            findings = [finding for finding in result.findings if not _tier2_finding_is_advisory_refusal(finding)]
+            if findings:
                 details.extend(
                     (
                         "error" if _tier2_finding_is_scan_failure(finding) else "duplicate",
                         str(finding.message),
                     )
-                    for finding in result.findings
+                    for finding in findings
                 )
             else:
                 details.extend(("error", str(error)) for error in result.errors)
@@ -825,6 +830,13 @@ def summarize_tier2(results: list[ValidationResult]) -> tuple[bool, bool, list[T
 def _tier2_finding_is_scan_failure(finding: object) -> bool:
     check_name = str(getattr(finding, "check_name", "")).casefold()
     return check_name in _TIER2_SCAN_FAILURE_CHECKS or check_name.endswith("_limit") or check_name.endswith("_error")
+
+
+def _tier2_finding_is_advisory_refusal(finding: object) -> bool:
+    # A policy can raise a refusal to a blocking severity; it then reads as a scan failure.
+    if getattr(finding, "check_name", None) != CONTENT_DEDUP_LLM_REFUSED_CHECK:
+        return False
+    return str(getattr(finding, "severity", "")).casefold() not in {"critical", "high"}
 
 
 def summarize_tier3(result: ValidationResult) -> tuple[bool, bool, list[TierRow], str]:

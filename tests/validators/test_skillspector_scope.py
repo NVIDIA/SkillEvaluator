@@ -1027,7 +1027,12 @@ class TestReferenceReachability:
 
     @pytest.mark.parametrize(
         "budget_name",
-        ["_REFERENCE_MATCH_CHARACTER_LIMIT", "_REFERENCE_SOURCE_BYTE_LIMIT", "_REFERENCE_SOURCE_FILE_LIMIT"],
+        [
+            "_REFERENCE_MATCH_CHARACTER_LIMIT",
+            "_REFERENCE_SOURCE_BYTE_LIMIT",
+            "_REFERENCE_SOURCE_FILE_LIMIT",
+            "_REFERENCE_FILE_SIZE_LIMIT",
+        ],
     )
     def test_resource_budget_exhaustion_keeps_the_finding(
         self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch, budget_name: str
@@ -1043,6 +1048,44 @@ class TestReferenceReachability:
 
         assert not result.passed
         assert result.findings[0].metadata["applicability"] == "fail-closed"
+
+    @pytest.mark.parametrize(
+        ("extra_directories", "extra_top_level_files", "limit", "fails_closed"),
+        [
+            # 7 directories (src and 6 empty ones) and 3 files.
+            (6, 0, 7, False),
+            (6, 0, 6, True),
+            # 1 directory and 8 files (SKILL.md, 6 notes, src/helper.cpp).
+            (0, 6, 8, False),
+            (0, 6, 7, True),
+        ],
+        ids=["directories-within", "directories-over", "files-within", "files-over"],
+    )
+    def test_artifact_file_limit_keeps_the_finding(
+        self,
+        tmp_path: Path,
+        monkeypatch: pytest.MonkeyPatch,
+        extra_directories: int,
+        extra_top_level_files: int,
+        limit: int,
+        fails_closed: bool,
+    ) -> None:
+        scan_root = tmp_path / "skill"
+        _write(scan_root, "SKILL.md", "Follow the workflow.\n")
+        _write(scan_root, "src/helper.cpp")
+        if not extra_top_level_files:
+            _write(scan_root, "notes.md", "Keep answers short.\n")
+        for index in range(extra_directories):
+            (scan_root / f"empty-{index}").mkdir()
+        for index in range(extra_top_level_files):
+            _write(scan_root, f"note-{index}.md", "Keep answers short.\n")
+        monkeypatch.setattr(scope_module, "_REFERENCE_FILE_LIMIT", limit)
+
+        result = _process(scan_root, [_issue("src/helper.cpp")])
+
+        assert result.passed is not fails_closed
+        if fails_closed:
+            assert result.findings[0].metadata["applicability"] == "fail-closed"
 
     def test_large_guidance_does_not_exhaust_the_character_budget(self, tmp_path: Path) -> None:
         scan_root = tmp_path / "skill"
@@ -1249,6 +1292,23 @@ class TestPluginReferences:
 
         result = _process(plugin_root, [_issue("src/helper.cpp")], content_type="plugin")
 
+        assert not result.passed
+        assert result.findings[0].metadata["applicability"] == "fail-closed"
+
+    def test_manifest_traversal_budget_fails_closed(self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+        plugin_root = tmp_path / "plugin"
+        _write(
+            plugin_root,
+            ".claude-plugin/plugin.json",
+            json.dumps({"name": "plugin", "hooks": {"Stop": [{"command": "./hooks/stop.sh"}]}}),
+        )
+        _write(plugin_root, "src/helper.cpp")
+        within_budget = _process(plugin_root, [_issue("src/helper.cpp")], content_type="plugin")
+        monkeypatch.setattr(scope_module, "_REFERENCE_MANIFEST_NODE_LIMIT", 1)
+
+        result = _process(plugin_root, [_issue("src/helper.cpp")], content_type="plugin")
+
+        assert within_budget.passed
         assert not result.passed
         assert result.findings[0].metadata["applicability"] == "fail-closed"
 

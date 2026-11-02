@@ -64,6 +64,7 @@ from skillevaluator.plugin_paths import (
     _unscanned_packaged_finding,
     _unscanned_path_finding,
     normalize_declared_path,
+    reported_ref,
 )
 from skillevaluator.plugin_refs import normalize_ref
 from skillevaluator.utils.secure_fs import SecurePathError
@@ -252,8 +253,8 @@ class _MemberCollector:
         return component
 
     def _broken(self, component_type: str, declared: DeclaredPath | None, raw: Any, problem: str) -> None:
-        path = declared.rel.as_posix() if declared is not None and declared.rel is not None else None
-        name = raw if isinstance(raw, str) else repr(raw)
+        path = reported_ref(declared.rel.as_posix()) if declared is not None and declared.rel is not None else None
+        name = reported_ref(raw if isinstance(raw, str) else repr(raw))
         self._add(PluginMember(component_type, name, "declared", path, _TYPE_SUPPORT[component_type], problem=problem))
 
     def _declared_field(self, field_name: str) -> Any:
@@ -329,12 +330,12 @@ class _MemberCollector:
                     _plugin_finding(
                         Severity.MEDIUM,
                         "plugin_component_path_invalid",
-                        f"'{field_name}' entry {report_text(repr(raw), 80)} is not a path; Codex ignores the value, "
+                        f"'{field_name}' entry {report_text(reported_ref(repr(raw)), 80)} is not a path; Codex ignores the value, "
                         "loads the default location, and still installs the plugin",
                         self.reader.display(self.manifest_rel),
                         f"Write '{field_name}' as a './'-relative path (or a list of them), or remove it to use the "
                         "default location.",
-                        metadata={"plugin_component_ref": repr(raw)},
+                        metadata={"plugin_component_ref": reported_ref(repr(raw))},
                     )
                 )
                 return None, "dropped"
@@ -377,12 +378,12 @@ class _MemberCollector:
                 _plugin_finding(
                     Severity.HIGH,
                     "plugin_component_path_invalid",
-                    f"'{field_name}' entry {raw!r} must name a {wrong_kind} file; "
+                    f"'{field_name}' entry {reported_ref(raw)!r} must name a {wrong_kind} file; "
                     f"{profile.label.removesuffix(' plugin')} rejects the whole manifest otherwise and does not "
                     "load the plugin",
                     self.reader.display(self.manifest_rel),
                     f"List each {wrong_kind} file by its own './'-relative path, as the {profile.reference} requires.",
-                    metadata={"plugin_component_ref": raw},
+                    metadata={"plugin_component_ref": reported_ref(raw)},
                 )
             )
             return declared, "invalid"
@@ -698,10 +699,8 @@ class _MemberCollector:
             "Skill directory entries", len(entries), rel_dir.as_posix(), limit=CONTENT_DEDUP_MAX_DISCOVERED_PATHS
         )
         for entry in entries[:CONTENT_DEDUP_MAX_DISCOVERED_PATHS]:
-            if entry.name.startswith(".") or (
-                entry.name in SCAN_EXCLUDED_DIRS and entry.name not in SCAN_ARTIFACT_DIRS
-            ):
-                continue  # hidden folders, VCS, virtualenv, package, and bytecode caches
+            if entry.name in SCAN_EXCLUDED_DIRS and entry.name not in SCAN_ARTIFACT_DIRS:
+                continue  # VCS, virtualenv, package, and bytecode caches (hidden skill folders load)
             child = PurePosixPath(entry.name) if str(rel_dir) == "." else rel_dir / entry.name
             if str(rel_dir) == "." and entry.name == DEFAULT_SKILLS_DIR:
                 continue  # the default skills/ scan covers it
@@ -749,6 +748,7 @@ class _MemberCollector:
         from skillevaluator.plugin_member_paths import (
             find_bundled_plugin_skill_manifests,
             find_unscanned_plugin_skill_manifests,
+            unscanned_skill_scan_incomplete_finding,
         )
 
         try:
@@ -774,8 +774,11 @@ class _MemberCollector:
             name = parent.as_posix() if str(parent) != "." else rel_dir.name
             component = self._add(PluginMember("skill", name, "declared", skill_dir.as_posix(), "evaluated"))
             self._read_member(component, skill_dir / manifest.relative_path.name)
-        for manifest_rel in find_unscanned_plugin_skill_manifests(self.reader.root, rel_dir.as_posix()):
+        found, complete = find_unscanned_plugin_skill_manifests(self.reader.root, rel_dir.as_posix())
+        for manifest_rel in found:
             self._flag_unscanned_skill(rel_dir, manifest_rel)
+        if not complete and rel_dir.parts[:1] != (DEFAULT_SKILLS_DIR,):
+            self.inventory.findings.append(unscanned_skill_scan_incomplete_finding(self.reader, rel_dir))
 
     def _flag_unscanned_skill(self, rel_dir: PurePosixPath, manifest_rel: PurePosixPath) -> None:
         """HIGH for a skill deep in a skill's own artifact folder that Codex loads from declared folder ``rel_dir``.
@@ -785,7 +788,7 @@ class _MemberCollector:
         """
         if rel_dir.parts[:1] == (DEFAULT_SKILLS_DIR,):
             return
-        if _in_unscanned_folder(manifest_rel.parent):
+        if _in_unscanned_folder(manifest_rel.parent, self.reader.root):
             self.inventory.findings.append(_unscanned_skill_finding(self.reader, manifest_rel))
 
     def _flag_dependency_folder_skills(self, rel_dir: PurePosixPath) -> None:
@@ -884,7 +887,7 @@ class _MemberCollector:
                 self._list_dir(component_type, PurePosixPath(default_dir), suffixes)
             if declared_value is None:
                 return
-        if component_type == "command" and isinstance(declared_value, dict):
+        if component_type == "command" and isinstance(declared_value, dict) and not self.profile.codex_path_rules:
             self._command_map(declared_value)
             return
         for raw in self._declared_values(field_name, declared_value):
@@ -981,7 +984,7 @@ class _MemberCollector:
                 _plugin_finding(
                     Severity.MEDIUM,
                     "plugin_command_folder_empty",
-                    f"commands[{command_name!r}].source {declared.raw!r} is a folder with no Markdown (.md) file "
+                    f"commands[{command_name!r}].source {reported_ref(declared.raw)!r} is a folder with no Markdown (.md) file "
                     "directly in it, so Claude Code loads no command from it",
                     self.manifest_display,
                     "Point the source at the command's .md file, or put the command files directly in the folder.",

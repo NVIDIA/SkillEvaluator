@@ -1210,13 +1210,32 @@ def _restore_failure_reason_text(deferred: list[tuple[dict[str, Any], str, Any]]
     return omitted
 
 
+def _capped_tier3_trial_rows(payload: dict[str, Any]) -> int:
+    """Count the drill-down rows the bounded preview walk leaves out.
+
+    The walk keeps the first ``_TIER3_HTML_PREVIEW_COLLECTION_ITEMS`` entries of
+    every list and mapping: with-skill rows across all agents in the top-level
+    ``trials``, baseline rows per agent, and the first agents.
+    """
+    limit = _TIER3_HTML_PREVIEW_COLLECTION_ITEMS
+    trials = payload.get("trials")
+    omitted = max(0, len(trials) - limit) if isinstance(trials, list) else 0
+    agents = payload.get("agents")
+    for index, agent in enumerate(agents.values() if isinstance(agents, dict) else []):
+        baseline = agent.get("trials_baseline") if isinstance(agent, dict) else None
+        if isinstance(baseline, list):
+            omitted += len(baseline) if index >= limit else max(0, len(baseline) - limit)
+    return omitted
+
+
 def _bounded_tier3_preview(payload: dict[str, Any] | None) -> tuple[dict[str, Any] | None, dict[str, int]]:
     """Return a presentation-only projection plus visible omission counts.
 
     Built failure reasons and excerpts are optional for the overview, so they
     are taken out first and put back only into room left under the preview
     trigger. They can never spend the bounded preview budget ahead of the
-    overview keys.
+    overview keys. ``trial_rows`` counts only drill-down rows the walk capped,
+    so the drill-down note does not fire when only another list was trimmed.
     """
     if not payload:
         return payload, {}
@@ -1224,11 +1243,15 @@ def _bounded_tier3_preview(payload: dict[str, Any] | None) -> tuple[dict[str, An
     if len(serialized.encode("utf-8")) <= _TIER3_HTML_PREVIEW_TRIGGER_BYTES:
         return payload, {}
 
-    from skillevaluator.evaluation.tier3_findings import failure_reason_text_slots
+    from skillevaluator.evaluation.tier3_findings import failure_reason_text_slots, strip_failure_reason_text
 
     # A private copy: the caller embeds ``payload`` itself as the canonical data.
     slim = json.loads(serialized)
-    deferred = [(container, key, container.pop(key)) for container, key in list(failure_reason_text_slots(slim))]
+    rendered_slots = list(failure_reason_text_slots(slim, include_top_level_cards=False))
+    deferred = [(container, key, container.pop(key)) for container, key in rendered_slots]
+    # The page renders each agent's cards, never the top-level card copy, so its
+    # reasons are dropped without being restored or counted as left out.
+    strip_failure_reason_text(slim)
     slim_size = len(_compact_json(slim).encode("utf-8"))
     if slim_size <= _TIER3_HTML_PREVIEW_TRIGGER_BYTES:
         omitted_reasons = _restore_failure_reason_text(deferred, _TIER3_HTML_PREVIEW_TRIGGER_BYTES - slim_size)
@@ -1241,6 +1264,7 @@ def _bounded_tier3_preview(payload: dict[str, Any] | None) -> tuple[dict[str, An
         for key, value in {
             "characters": budget.omitted_characters,
             "items": budget.omitted_items,
+            "trial_rows": _capped_tier3_trial_rows(slim),
             "failure_reasons": len(deferred),
         }.items()
         if value > 0
@@ -3220,9 +3244,11 @@ class HTMLReporter(ReporterBase):
             tier3_canonical_encoding=tier3_canonical_encoding,
             tier3_truncation=tier3_truncation,
             tier3_preview_notice=tier3_preview_notice,
+            # From the full display payload: the bounded preview can cap rows
+            # unevenly per condition and blank identity fields of late rows.
             steps_by_case_chart=steps_by_case_chart(
-                tier3_preview.get("agents") if isinstance(tier3_preview, dict) else {},
-                tier3_preview.get("trials") if isinstance(tier3_preview, dict) else [],
+                tier3_data.get("agents") if isinstance(tier3_data, dict) else {},
+                tier3_data.get("trials") if isinstance(tier3_data, dict) else [],
             ),
             tier1_summary=tier1_summary,
             skillspector_versions=tier1_skillspector_versions,

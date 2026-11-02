@@ -2780,6 +2780,7 @@
             {% endfor %}
             {% set t3_eval_ids = [] %}
             {% set t3_trial_score_keys = [] %}
+            {% set t3_baseline_score_keys = [] %}
             {% for row in t3_condition_trial_rows %}
                 {% set trial = row.trial %}
                 {% for score_map in [trial.scores, trial.baseline_scores, trial.lift_scores] %}
@@ -2791,9 +2792,23 @@
                         {% endfor %}
                     {% endif %}
                 {% endfor %}
+                {% if row.condition == 'Without skill' and trial.scores is mapping %}
+                    {% for metric_id in trial.scores.keys() %}
+                        {% if metric_id not in t3_baseline_score_keys %}
+                            {% set _ = t3_baseline_score_keys.append(metric_id) %}
+                        {% endif %}
+                    {% endfor %}
+                {% endif %}
             {% endfor %}
             {% for metric_id in t3_metric_ids %}
                 {% if metric_id in t3_trial_score_keys %}
+                    {% set _ = t3_eval_ids.append(metric_id) %}
+                {% endif %}
+            {% endfor %}
+            {# Baseline rows can score metrics the best agent's with-skill evaluators do not list;
+               they still get a column so a failing baseline score and its reason are visible. #}
+            {% for metric_id in t3_baseline_score_keys %}
+                {% if metric_id not in t3_eval_ids %}
                     {% set _ = t3_eval_ids.append(metric_id) %}
                 {% endif %}
             {% endfor %}
@@ -2953,7 +2968,7 @@
                 <div class="t3-details-body">
                 <div class="chart-grid">
                     {% if t3_token_coverage.all_agents_complete %}<div class="chart-card"><h3>With-Skill Token Usage by Agent</h3><canvas id="tier3-token-chart" height="250"></canvas></div>{% endif %}
-                    {% if t3_steps_chart.datasets %}<div class="chart-card"><h3>Steps per Eval Case by Agent and Condition</h3><canvas id="tier3-steps-chart" height="250"></canvas></div>{% endif %}
+                    {% if t3_steps_chart.datasets %}<div class="chart-card"><h3>Steps per Eval Case by Agent and Condition</h3><canvas id="tier3-steps-chart" height="250"></canvas>{% if t3_steps_chart.get('omitted_cases') %}<p style="color:var(--text-secondary);font-size:0.82rem;">Showing the first {{ t3_steps_chart.labels | length }} eval cases; {{ t3_steps_chart['omitted_cases'] }} more are in the JSON Downloads.</p>{% endif %}</div>{% endif %}
                 </div>
                 </div>
             </details>
@@ -3081,8 +3096,8 @@
                     <input class="t3-filter-input" type="search" placeholder="Filter by agent, condition, case, score..." oninput="tier3FilterTable(this, 't3-trials-table')" aria-label="Filter trials">
                     <span class="t3-filter-count" data-tier3-filter-count="t3-trials-table">{{ t3_condition_trial_rows | length }} / {{ t3_condition_trial_rows | length }}</span>
                 </div>
-                {% if tier3_preview_notice and tier3_preview_notice.get('items') %}
-                <p style="color:var(--text-secondary);font-size:0.82rem;">The HTML preview caps per-trial rows (with-skill rows across all agents, baseline rows per agent), so the two conditions can list different numbers of rows. JSON Downloads keep every trial.</p>
+                {% if tier3_preview_notice and tier3_preview_notice.get('trial_rows') %}
+                <p style="color:var(--text-secondary);font-size:0.82rem;">The HTML preview left out {{ tier3_preview_notice['trial_rows'] }} per-trial row{{ 's' if tier3_preview_notice['trial_rows'] != 1 else '' }}: it caps with-skill rows across all agents and baseline rows per agent, so the two conditions can list different numbers of rows. JSON Downloads keep every trial.</p>
                 {% endif %}
                 <div class="table-scroll">
                 <table class="summary-table" id="t3-trials-table">

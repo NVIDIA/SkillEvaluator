@@ -2444,15 +2444,9 @@ def _metric_evidence(
         score_failed = raw_score is not None and raw_score < TRIAL_PASS_THRESHOLD
 
         notes: list[str] = []
-        fallback_reason = ""
         reason = sanitize_grader_text(detail.get("reason"))
         if reason:
             notes.append(reason[:512])
-        elif score_failed:
-            # Graders that record only a message, findings, or failed criteria
-            # still explain a failing score. The built reason stays separate from
-            # the grader's own notes so size limits can drop it first.
-            fallback_reason = failure_reason(detail)
 
         failures: list[str] = []
         results = detail.get("results")
@@ -2479,10 +2473,9 @@ def _metric_evidence(
             "checks": checks,
             "evidence_refs": _compact_evidence_refs(detail.get("evidence_refs")),
         }
-        if fallback_reason:
-            entry["reason"] = fallback_reason
-        if score_failed and (excerpt := failure_excerpt(detail)):
-            entry["excerpt"] = excerpt
+        # The built reason and excerpt are not part of the fingerprint: attempts
+        # of one case often quote different commands under the same grader
+        # reason, and they still collapse into one entry with ``occurrences``.
         fingerprint = json.dumps(
             entry,
             sort_keys=True,
@@ -2500,6 +2493,15 @@ def _metric_evidence(
             report_budget.omit("evidence_entries")
             output_truncated = True
             continue
+        if score_failed:
+            # Graders that record only a message, findings, or failed criteria
+            # still explain a failing score. The built reason stays separate from
+            # the grader's own notes so size limits can drop it first, and leaves
+            # out failing results, which the card already lists as ``failures``.
+            if not notes and (fallback_reason := failure_reason(detail, include_results=False)):
+                entry["reason"] = fallback_reason
+            if excerpt := failure_excerpt(detail):
+                entry["excerpt"] = excerpt
         evidence.append(entry)
         by_fingerprint[fingerprint] = entry
         report_budget.evidence_remaining -= 1

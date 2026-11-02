@@ -41,9 +41,14 @@ _MAX_REASON_CANDIDATES = 8
 # Grader text is collapsed and clipped to this window before redaction so one
 # oversized string cannot stall report generation. The window is measured after
 # whitespace collapse, so padding cannot pull a credential cut at the window
-# edge into the much shorter visible prefix.
+# edge into the much shorter visible prefix. It holds whole words only: a word
+# cut at the edge is dropped, because no redaction pass can match the prefix of
+# a credential, and redacting earlier text can pull that prefix into view.
 _MAX_SCAN_CHARS = 16_384
-_WORD_RE = re.compile(rf"\S{{1,{_MAX_SCAN_CHARS}}}")
+# One character longer than the window, so a word that does not fit is never
+# mistaken for one that does.
+_WORD_RE = re.compile(rf"\S{{1,{_MAX_SCAN_CHARS + 1}}}")
+_LINE_BREAKS = ("\n", "\r")
 
 # Keys whose values are handled by a dedicated branch and must not be re-read by
 # the generic per-check sweep.
@@ -59,22 +64,37 @@ FAILURE_REASON_EVIDENCE_KEYS = ("reason", "excerpt")
 
 
 def _collapsed_prefix(value: str) -> str:
-    """Return at most ``_MAX_SCAN_CHARS`` of ``value`` with whitespace runs collapsed."""
-    words: list[str] = []
+    """Return the whole words of ``value`` that fit in ``_MAX_SCAN_CHARS``, whitespace collapsed.
+
+    A whitespace run that contains a line break becomes one ``\\n`` and any
+    other run one space. Line breaks stay because credential assignments such as
+    ``token: value`` end at the line: flattening them first would let redaction
+    mask the explanation on the next line too.
+    """
+    parts: list[str] = []
     size = 0
+    end = 0
     for match in _WORD_RE.finditer(value):
-        words.append(match.group())
-        size += len(words[-1]) + 1
+        separator = ""
+        if parts:
+            gap = value[end : match.start()]
+            separator = "\n" if any(brk in gap for brk in _LINE_BREAKS) else " "
+        word = match.group()
+        size += len(separator) + len(word)
         if size > _MAX_SCAN_CHARS:
             break
-    return " ".join(words)[:_MAX_SCAN_CHARS]
+        parts.append(separator + word)
+        end = match.end()
+    return "".join(parts)
 
 
 def sanitize_grader_text(value: object, max_len: int | None = None) -> str:
     """Collapse whitespace, redact credentials, and optionally clamp grader text.
 
     Like the Tier 3 findings report, this redacts the exact values of configured
-    credentials first and then recognizable credential shapes.
+    credentials first and then recognizable credential shapes. Line breaks are
+    kept (one per break) so a ``key: value`` assignment is masked only to the end
+    of its line; HTML renders them as spaces, and tooltips as line breaks.
     """
     # Imported here, like the other Tier 3 helpers of the report builders, so
     # importing the reporters does not load the Harbor and judge modules.
@@ -116,7 +136,7 @@ def _failed_check_reason(key: str, value: dict[str, Any]) -> str:
     return f"{label[0].upper()}{label[1:]} failed"
 
 
-def _reason_candidates(detail: dict[str, Any]) -> Iterator[str]:
+def _reason_candidates(detail: dict[str, Any], *, include_results: bool) -> Iterator[str]:
     """Yield candidate reason strings across the known grader detail shapes."""
     from skillevaluator.tier3.harbor.report import _applicable_accuracy_criteria
 
@@ -130,10 +150,13 @@ def _reason_candidates(detail: dict[str, Any]) -> Iterator[str]:
             # the terminal findings report also treats as failure reasons.
             yield finding
         elif _failed(finding):
-            yield str(finding.get("message") or finding.get("reason") or "")
+            # Like the terminal findings report, name the finding type when the
+            # grader wrote no message.
+            yield str(finding.get("message") or finding.get("reason") or finding.get("type") or "")
 
-    # behavior_check records one entry per expected behavior.
-    for result in _detail_list(detail, "results"):
+    # behavior_check records one entry per expected behavior. Evaluator cards
+    # already list these as ``failures``, so they leave them out of the reason.
+    for result in _detail_list(detail, "results") if include_results else []:
         if _failed(result):
             yield str(result.get("reason") or "")
 
@@ -158,12 +181,21 @@ def _reason_candidates(detail: dict[str, Any]) -> Iterator[str]:
         yield detail["attribution_explanation"]
 
 
-def failure_reason(detail: object) -> str:
-    """Return one short, deduplicated, redacted reason for a failing metric."""
+def failure_reason(detail: object, *, include_results: bool = True) -> str:
+    """Return one short, deduplicated, redacted reason for a failing metric.
+
+    ``include_results=False`` leaves out failing behavior results, for evaluator
+    cards that already show them as ``failures``.
+    """
     if not isinstance(detail, dict):
         return ""
     parts: list[str] = []
-    for candidate in islice(_reason_candidates(detail), _MAX_REASON_CANDIDATES):
+    # Only non-blank candidates count toward the cap, so entries without text
+    # cannot crowd out the criteria, checks, or attribution that follow them.
+    candidates = (
+        candidate for candidate in _reason_candidates(detail, include_results=include_results) if candidate.strip()
+    )
+    for candidate in islice(candidates, _MAX_REASON_CANDIDATES):
         cleaned = sanitize_grader_text(candidate)
         if cleaned and cleaned not in parts:
             parts.append(cleaned)
@@ -187,13 +219,18 @@ def failure_excerpt(detail: object) -> str:
     return sanitize_grader_text(detail.get("evidence"), MAX_EXCERPT_CHARS)
 
 
-def failure_reason_text_slots(payload: dict[str, Any]) -> Iterator[tuple[dict[str, Any], str]]:
+def failure_reason_text_slots(
+    payload: dict[str, Any],
+    *,
+    include_top_level_cards: bool = True,
+) -> Iterator[tuple[dict[str, Any], str]]:
     """Yield each ``(container, key)`` that holds a built failure reason or excerpt.
 
     Order follows the report: evaluator-card evidence per agent, then the
     drill-down rows (with-skill rows of an agent, then its baseline rows), then
-    the top-level card copy. Size limits drop these first and the HTML preview
-    restores them in this order while room remains.
+    the top-level card copy, which the HTML page does not render
+    (``include_top_level_cards=False`` leaves it out). Size limits drop these
+    first and the HTML preview restores them in this order while room remains.
     """
     agents = payload.get("agents") if isinstance(payload.get("agents"), dict) else {}
     agent_items = [(str(name), agent) for name, agent in agents.items() if isinstance(agent, dict)]
@@ -219,7 +256,8 @@ def failure_reason_text_slots(payload: dict[str, Any]) -> Iterator[tuple[dict[st
         for trial in [*trials_by_agent.get(name, []), *baseline]:
             if isinstance(trial, dict) and "score_reasons" in trial:
                 yield trial, "score_reasons"
-    yield from card_slots(payload.get("evaluator_cards"))
+    if include_top_level_cards:
+        yield from card_slots(payload.get("evaluator_cards"))
 
 
 def strip_failure_reason_text(payload: dict[str, Any]) -> int:

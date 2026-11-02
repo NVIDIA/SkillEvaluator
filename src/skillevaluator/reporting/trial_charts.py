@@ -10,6 +10,11 @@ from collections.abc import Mapping
 from typing import Any
 
 DEFAULT_AGENT_LABEL = "(default)"
+# The chart is computed from the full display payload, not the bounded HTML
+# preview, so it covers every agent and condition. Its embedded data grows with
+# the number of cases, so it shows at most this many and says how many it left out.
+MAX_STEP_CHART_CASES = 200
+_MAX_LABEL_CHARS = 256
 
 
 def _step_value(trial: Mapping[str, Any]) -> float | None:
@@ -62,6 +67,7 @@ def steps_by_case_chart(
     *,
     with_label: str = "With skill",
     without_label: str = "Without skill",
+    max_cases: int = MAX_STEP_CHART_CASES,
 ) -> dict[str, Any]:
     """Return step-chart labels and one dataset per agent and condition.
 
@@ -69,7 +75,8 @@ def steps_by_case_chart(
     ``agent``) and baseline rows from each agent's ``trials_baseline``. A series
     with no complete measurement is omitted. Cases absent from a series, or with
     any retry lacking step telemetry, are ``None`` so Chart.js renders a gap
-    rather than a misleading zero or partial average.
+    rather than a misleading zero or partial average. Only the first
+    ``max_cases`` cases are charted; ``omitted_cases`` counts the rest.
     """
     agent_map = agents if isinstance(agents, Mapping) else {}
     with_skill: dict[str, list[Mapping[str, Any]]] = {str(name): [] for name in agent_map}
@@ -94,10 +101,15 @@ def steps_by_case_chart(
                 seen.add(entry_id)
                 labels.append(entry_id)
 
-    return {
-        "labels": labels,
-        "datasets": [
-            {"label": label, "data": [values.get(entry_id) for entry_id in labels]}
-            for label, _condition_trials, values in series
-        ],
-    }
+    omitted_cases = max(0, len(labels) - max(0, max_cases))
+    labels = labels[: max(0, max_cases)]
+    datasets: list[dict[str, Any]] = []
+    for label, _condition_trials, values in series:
+        data = [values.get(entry_id) for entry_id in labels]
+        # A series measured only on cases past the cap has nothing to draw.
+        if any(value is not None for value in data):
+            datasets.append({"label": label, "data": data})
+    chart: dict[str, Any] = {"labels": [label[:_MAX_LABEL_CHARS] for label in labels], "datasets": datasets}
+    if omitted_cases:
+        chart["omitted_cases"] = omitted_cases
+    return chart

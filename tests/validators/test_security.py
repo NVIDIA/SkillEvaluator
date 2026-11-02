@@ -424,6 +424,11 @@ description: A skill documenting REST API endpoints
             ),
             pytest.param("notes.txt", "pfx\\drive_c/Users/steamuser/Documents/save.dat\n", id="backslash-prefix"),
             pytest.param("notes.txt", "[save](PFX/Drive_C/uSeRs/StEaMuSeR/save.dat)\n", id="mixed-case-link"),
+            pytest.param(
+                "notes.txt",
+                'cd "compatdata/1/pfx/drive_c/users/steamuser/My Games/Saves..old/v1.. final"\n',
+                id="dots-inside-folder-names",
+            ),
         ],
     )
     def test_proton_virtual_profile_is_not_a_personal_path(self, tmp_path: Path, file_name: str, content: str):
@@ -459,6 +464,26 @@ description: A skill documenting REST API endpoints
             ),
             pytest.param(
                 "pfx/drive_c/users/steamuser/%2e%2e%2falice/notes\n", "/users/steamuser/", id="encoded-traversal"
+            ),
+            pytest.param(
+                'p = "compatdata/1/pfx/drive_c/users/steamuser/" + "../alice/"\n',
+                "/users/steamuser/",
+                id="concatenated-traversal",
+            ),
+            pytest.param(
+                'Path("compatdata/1/pfx/drive_c/users/steamuser/") / ".." / "alice"\n',
+                "/users/steamuser/",
+                id="pathlib-traversal",
+            ),
+            pytest.param(
+                'os.path.join("compatdata/1/pfx/drive_c/users/steamuser/", "..", "alice")\n',
+                "/users/steamuser/",
+                id="joined-traversal",
+            ),
+            pytest.param(
+                "cd compatdata/1/pfx/drive_c/users/steamuser/ && cd ../alice\n",
+                "/users/steamuser/",
+                id="shell-traversal",
             ),
             pytest.param("pfx/drive_c/users/\u017fteamuser/save.dat\n", "/users/\u017fteamuser/", id="lookalike"),
             pytest.param("C:\\Users\\steamuser\\Documents\\save.dat\n", "C:\\Users\\steamuser", id="windows-path"),

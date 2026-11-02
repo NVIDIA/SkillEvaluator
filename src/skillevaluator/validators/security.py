@@ -2710,9 +2710,15 @@ class SecurityValidator(ValidatorBase):
     # component. A ``..`` segment after the profile could lead anywhere, so a
     # line with one anywhere after the profile stays reported: Windows folder
     # names often contain spaces and quotes, so the path's end is not reliable.
+    # A ``..`` counts as a segment when a path separator (plain or encoded),
+    # whitespace, a quote, or another delimiter bounds it on both sides, so
+    # ``steamuser/" + "../x"``, ``/ ".." /``, ``"..",`` and ``cd ../x`` count.
     _PROTON_PREFIX = "pfx/drive_c"
     _PROTON_PREFIX_BOUNDARIES = frozenset("/\\'\"`=(){}[]<>|*,; \t")
-    _DOT_DOT_SEGMENT_PATTERN = re.compile(r"(?:^|[/\\]|%2f|%5c)(?:\.|%2e){2}(?:[/\\]|%2f|%5c|$)", re.IGNORECASE)
+    _DOT_DOT_BOUNDARY = "[" + "".join(re.escape(c) for c in sorted(_PROTON_PREFIX_BOUNDARIES)) + r"\s]|%2f|%5c"
+    _DOT_DOT_SEGMENT_PATTERN = re.compile(
+        rf"(?:^|{_DOT_DOT_BOUNDARY})(?:\.|%2e){{2}}(?=$|{_DOT_DOT_BOUNDARY})", re.IGNORECASE
+    )
 
     @classmethod
     def _is_proton_virtual_profile(cls, match: re.Match, line: str) -> bool:

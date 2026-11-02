@@ -512,12 +512,17 @@ def missing_local_runtimes(
     return missing
 
 
+def managed_runtime_prefix(agent: str, *, runtime_root: Path | None = None) -> Path:
+    """The npm prefix that holds ``agent``'s managed CLI."""
+    return validate_runtime_root(runtime_root or default_runtime_root()) / agent
+
+
 def managed_install_argv(agent: str, *, runtime_root: Path | None = None) -> list[str]:
     """The npm command that installs ``agent``'s pinned CLI into the managed runtime root."""
-    root = validate_runtime_root(runtime_root or default_runtime_root())
     version = PINNED_RUNTIME_VERSIONS.get(agent)
     package = _AGENT_PACKAGES[agent] + (f"@{version}" if version else "")
-    return ["npm", "install", "--global", "--prefix", str(root / agent), "--no-audit", "--no-fund", package]
+    prefix = managed_runtime_prefix(agent, runtime_root=runtime_root)
+    return ["npm", "install", "--global", "--prefix", str(prefix), "--no-audit", "--no-fund", package]
 
 
 def install_local_runtime(
@@ -539,7 +544,8 @@ def install_local_runtime(
         lines = (result.stderr or result.stdout or "").strip().splitlines()
         return f"npm install failed (exit {result.returncode})" + (f": {lines[-1][:200]}" if lines else "")
     if find_runtime_command(agent, runtime_root=runtime_root) is None:
-        return f"npm install finished, but no {' or '.join(_AGENT_COMMANDS[agent])} command was found under {argv[4]}"
+        prefix = managed_runtime_prefix(agent, runtime_root=runtime_root)
+        return f"npm install finished, but no {' or '.join(_AGENT_COMMANDS[agent])} command was found under {prefix}"
     return None
 
 

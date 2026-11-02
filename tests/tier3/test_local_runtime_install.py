@@ -3,7 +3,11 @@
 
 import subprocess
 from pathlib import Path
+from types import SimpleNamespace
 
+import pytest
+
+from skillevaluator import cli, provider_config
 from skillevaluator.tier3.harbor import local_runtime
 from skillevaluator.tier3.harbor.local_runtime import install_local_runtime, managed_install_argv
 
@@ -56,3 +60,20 @@ def test_install_failure_reports_npm_error(monkeypatch, tmp_path):
 def test_install_reports_missing_cli_after_success(monkeypatch, tmp_path):
     _fake_npm(monkeypatch, 0, create_bin=False)
     assert "no codex command was found" in install_local_runtime("codex", runtime_root=tmp_path)
+
+
+def test_offer_waits_for_a_provider(monkeypatch):
+    def no_provider():
+        raise provider_config.ProviderConfigurationError("SKILL_EVAL_LLM_API_KEY is not set")
+
+    monkeypatch.setattr(provider_config, "resolve_llm_provider", no_provider)
+    monkeypatch.setattr(local_runtime, "missing_local_runtimes", lambda *_a, **_k: pytest.fail("checked runtimes"))
+    cli._offer_local_runtime_install(None)
+
+
+def test_offer_uses_the_provider_default_agent(monkeypatch):
+    seen = []
+    monkeypatch.setattr(provider_config, "resolve_llm_provider", lambda: SimpleNamespace(provider="anthropic"))
+    monkeypatch.setattr(local_runtime, "missing_local_runtimes", lambda agents, **_k: seen.append(agents) or {})
+    cli._offer_local_runtime_install(None)
+    assert seen == [["claude-code"]]

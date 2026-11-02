@@ -714,11 +714,11 @@ def test_ci_scans_source_and_built_distributions_for_oss_boundary_violations() -
     assert workflow.index("uv build --python 3.13 --no-sources") < workflow.index(artifact_scan)
 
 
-def test_ci_installs_the_built_tier3_wheel_on_python_312_and_313() -> None:
+def test_ci_installs_the_built_tier3_wheel_on_supported_python_versions() -> None:
     workflow = (REPO_ROOT / ".github" / "workflows" / "ci.yml").read_text(encoding="utf-8")
     package_job = workflow.split("  package:\n", 1)[1].split("\n  tier3-macos:\n", 1)[0]
 
-    assert "for python_version in 3.12 3.13; do" in package_job
+    assert "for python_version in 3.12 3.13 3.14; do" in package_job
     assert 'uv venv --python "$python_version" "$venv"' in package_job
     assert 'uv pip install --python "$venv/bin/python" "${wheel}[tier3]"' in package_job
 

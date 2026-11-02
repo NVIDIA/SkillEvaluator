@@ -2532,7 +2532,8 @@ _ACCURACY_CRITERIA = (
     (
         "FORMAT_FOLLOWED",
         "If the USER QUESTION explicitly requires an output format (a template, prefix, fields, ordering, "
-        "or units), does the response follow it? Answer true when the question requires no specific format.",
+        "or units), does the response follow it? When the question requires no specific format, answer true "
+        "if the response gives an answer and false if it gives none.",
     ),
 )
 _ACCURACY_CRITERIA_KEYS = frozenset(key for key, _question in _ACCURACY_CRITERIA)
@@ -2650,6 +2651,8 @@ the expected answer on each criterion below and decide true (satisfied) or false
 
 Judge the outcome only. Do not reward or penalize the response for naming, or not naming, \
 a tool or skill: that is scored separately.
+If the evidence holds no answer to the question (for example, the agent stopped, timed out or \
+refused), every criterion is false.
 Be lenient on wording, but strict on factual correctness and on any output format the user \
 question explicitly requires.
 

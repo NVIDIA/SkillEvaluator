@@ -202,7 +202,9 @@ All notable changes to SkillEvaluator are documented in this file.
 - Tier 3 `accuracy` grades the outcome only. The `SKILL_IDENTIFIED` criterion,
   which capped a correct answer from the no-skill baseline at 0.8 on positive
   cases, is replaced by `FORMAT_FOLLOWED`: the response follows any output
-  format the question explicitly requires. Skill use is still scored by
+  format the question explicitly requires, and when none is required it is
+  true only if the response gives an answer. A trial that ran but gave no
+  answer still scores `0.0`, as before. Skill use is still scored by
   `skill_execution`. Every case and both arms use the same five criteria, so
   rewards no longer record `excluded_criteria` or the
   `applicable-accuracy-criteria/v1` policy; reports still read older rewards

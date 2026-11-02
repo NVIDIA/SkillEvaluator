@@ -120,6 +120,22 @@ def test_behavior_prompt_example_is_a_valid_reply_for_any_number_of_behaviors(
     assert [entry["step"] for entry in example["results"]] == list(range(1, behavior_count + 1))
 
 
+def test_accuracy_prompt_gives_no_free_criterion_to_a_response_without_an_answer(judge_module, monkeypatch) -> None:
+    # A trial that ran but gave no answer scored 0.0 before FORMAT_FOLLOWED
+    # replaced SKILL_IDENTIFIED. Its "no format required" default must not turn
+    # into a free point for an empty response.
+    prompts = _capture_prompts(judge_module, monkeypatch)
+
+    judge_module.judge_accuracy("Which version of the tool is installed?", "1.2.3", "")
+
+    prompt = prompts[0]
+    format_line = next(line for line in prompt.splitlines() if line.startswith("5. FORMAT_FOLLOWED:"))
+    assert "Answer true when the question requires no specific format." not in format_line
+    assert "answer true if the response gives an answer and false if it gives none" in format_line
+    assert "If the evidence holds no answer to the question" in prompt
+    assert "every criterion is false" in prompt
+
+
 def test_goal_prompt_omits_empty_tool_section_and_keeps_real_one(judge_module, monkeypatch) -> None:
     calls: list[dict[str, Any]] = []
     _use_goal_script(judge_module, monkeypatch, [(_GOAL_RESPONSE, None)], calls)

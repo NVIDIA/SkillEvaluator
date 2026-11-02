@@ -592,7 +592,9 @@ scores. A `score` field in a judge reply is ignored.
 - `accuracy` is passing criteria divided by five. The criteria grade the
   outcome: `ACTION_CORRECT`, `FACTUALLY_ACCURATE`, `TASK_ADDRESSED`,
   `ACTIONABLE`, and `FORMAT_FOLLOWED` (the response follows any output format
-  the question explicitly requires). Every case and both arms use the same
+  the question explicitly requires; when none is required, it is true only if
+  the response gives an answer). A response that gives no answer fails all
+  five criteria and scores `0.0`. Every case and both arms use the same
   five criteria. None of them asks whether the agent named or used the skill;
   `skill_execution` scores that. A reply without all five true/false verdicts
   is invalid.

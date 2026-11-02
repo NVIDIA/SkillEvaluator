@@ -139,6 +139,23 @@ All notable changes to SkillEvaluator are documented in this file.
   workflows with `validate --tiers`: which tiers run, Tier 1 dependency and LLM
   stages, report files, and exit codes. It also states that `--tiers` must
   include Tier 1, so Tier 2 or Tier 3 alone runs through its direct workflow.
+- Install instructions, the CI recipe, the missing-scanner hint and the Tier 1
+  CI image's scanner lock now pin SkillSpector to `v2.13.3` instead of
+  `v2.12.0`. With `v2.12.0`, the Tier 1 security check could be `INCOMPLETE`
+  or fail for skills with no real issue: valid Python and Perl helpers were
+  recorded as only partially inspected
+  (`static_parse_limit` or `obfuscated_instruction_text`,
+  [NVIDIA/SkillSpector#777](https://github.com/NVIDIA/SkillSpector/pull/777)),
+  the bytecode check could hit its time budget while waiting behind other
+  analyzers (`runtime_limit`,
+  [NVIDIA/SkillSpector#828](https://github.com/NVIDIA/SkillSpector/pull/828)),
+  and visible text between HTML comments raised High P2 hidden-instruction
+  findings
+  ([NVIDIA/SkillSpector#452](https://github.com/NVIDIA/SkillSpector/pull/452)).
+  An existing SkillSpector install keeps its version until you rerun the
+  install command. `v2.13.3` still does not return structured output for
+  Claude 5.5 models, so set `SKILLSPECTOR_MODEL` as before when
+  `SKILL_EVAL_LLM_MODEL` names one.
 - README and onboarding docs now offer two first-run paths: a lightweight,
   keyless quality check on a bundled skill, or an NVIDIA Build rubric evaluation
   with eligible free prototyping access. Installation adds extras as needed,
@@ -375,6 +392,15 @@ All notable changes to SkillEvaluator are documented in this file.
   when the quality score met `--min-score`. The 15-point Efficiency deduction is
   unchanged, so a large skill still fails when its score falls below the
   minimum.
+- `--llm` security scans on the `nv_build` provider now run SkillSpector with
+  `SKILLSPECTOR_PROVIDER=nv_build` instead of `openai`, so SkillSpector sizes
+  requests from its NVIDIA Build model registry. A Build model with a smaller
+  output cap, such as `openai/gpt-oss-120b` (16,384 tokens), no longer gets
+  SkillSpector's 32,000-token fallback budget, which can exceed what the
+  endpoint accepts and leave the LLM security stage incomplete. An explicit
+  `SKILLSPECTOR_PROVIDER=nv_build` gets the same mapping. The key still reaches
+  SkillSpector only as `OPENAI_API_KEY`, with `OPENAI_BASE_URL` set to the
+  public Build endpoint.
 
 ### Security
 

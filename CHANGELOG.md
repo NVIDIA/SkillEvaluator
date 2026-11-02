@@ -89,6 +89,36 @@ All notable changes to SkillEvaluator are documented in this file.
   expected-case checks cover only the cases that ran, `run_config.json` records
   the selection as `case_selection`, and a run that skipped cases is reported
   as publication-incomplete in JSON, HTML, and BENCHMARK.md.
+- `doctor` and `health-check` take `--tier 1|2|3|all`, so Tier 1 and Tier 2
+  readiness can be checked before a run instead of surfacing mid-validation.
+  Tier 1 reports each scanner that the `--checks` selection runs: SkillSpector,
+  Bandit, Semgrep, Gitleaks, and pip-audit for `dependency`. Each row shows the
+  resolved path, any executable override, and the version from a bounded,
+  shell-free probe. A scanner fails when it is missing, its override is
+  malformed, its probe fails or exceeds `--timeout` (default 60 seconds, at
+  most 3600), or it is older than Bandit 1.9.4 or Gitleaks 8. Tier 2 resolves
+  the embedding and LLM providers offline. `doctor --tier 2 --verify-models`
+  also sends one embedding request and one chat request, each bounded by
+  `--timeout` and sent without retries, and reports only the HTTP status and a
+  remedy. `--tier all` checks every tier, and a failed tier does not stop the
+  next. Without `--tier`, both commands still check Tier 3 only. An option for
+  an unselected tier, or `--timeout` for an offline Tier 2 check, is a usage
+  error. `tier3 doctor` remains Tier 3-only.
+
+- Tier 1 `--llm` security scans of a single skill keep the LLM provenance that
+  SkillSpector v2.12.0 and later report: the provider adapter, the model and
+  SkillSpector revision behind each LLM analyzer, and the sampling and
+  determinism evidence. The Security result in the JSON report carries it as
+  `skillspector_llm_provenance`, next to `skillspector_provider_id`, the
+  SkillEvaluator provider the scan was bridged from (for example `nv_build`,
+  which SkillSpector runs as its `openai` adapter). The HTML report, including
+  CI pages rendered from the retained Tier 1 JSON, lists it in a collapsible
+  Tier 1 LLM Provenance table. The record is also kept when the LLM stage
+  fails or SkillSpector does not confirm LLM analysis, as long as
+  SkillSpector's JSON output carries a valid record, so the report shows what
+  was attempted. Records that do not match SkillSpector's provenance contract or
+  that contain endpoint- or credential-shaped values are left out, and older
+  SkillSpector releases produce no record.
 
 ### Changed
 
@@ -180,6 +210,9 @@ All notable changes to SkillEvaluator are documented in this file.
 
 ### Fixed
 
+- On Windows, repository root and source-link detection no longer break for
+  repositories in non-ASCII folders: Git output is decoded as UTF-8 instead of
+  the locale code page.
 - CI quality thresholds apply to every parallel scan worker. Report overviews
   and detailed reports surface failed quality gates ahead of advisory findings,
   with links to the check that needs attention.
@@ -189,6 +222,14 @@ All notable changes to SkillEvaluator are documented in this file.
   Markdown sections are packed by paragraph, so short labels and fragments stay
   attached to their neighbours, source ranges retain blank-line gaps, and findings
   list a split source once.
+- A chat model that declines to classify a Tier 2 content cluster (a safety
+  refusal, which some models return for security-themed skill content) no
+  longer marks the scan incomplete and fails `validate` under the default
+  `--block-on-dedup`. Tier 2 now reports the refusal as an advisory MEDIUM
+  `llm_refused` finding that names the overlapping sections, and the JSON
+  report's `llm_analysis` counts it in `clusters_refused`. Other chat-LLM
+  failures still leave the scan incomplete. Raise `CONTENT_DEDUP.llm_refused`
+  in a policy overlay to keep refusals blocking.
 - Local-mode verifier uploads now copy directly to the absent destination,
   avoiding an unnecessary rollback snapshot of an empty tests directory.
   Inputs and rewritten scripts are prepared privately before publication,
@@ -406,6 +447,15 @@ All notable changes to SkillEvaluator are documented in this file.
   `SKILLSPECTOR_PROVIDER=nv_build` gets the same mapping. The key still reaches
   SkillSpector only as `OPENAI_API_KEY`, with `OPENAI_BASE_URL` set to the
   public Build endpoint.
+- SkillSpector runs are no longer stopped after a fixed 300 seconds, which ended
+  slow `--llm` security scans, such as those on local models, as `INCOMPLETE`
+  before SkillSpector's own scan deadline (1,080 seconds in v2.13.3). Each run
+  now has a 1,200-second watchdog by default; set
+  `SKILLEVALUATOR_SKILLSPECTOR_TIMEOUT_SECONDS` to a positive integer to change
+  it (values above 86400 are capped). `SKILLSPECTOR_MAX_WORKFLOW_SECONDS` is now
+  forwarded to SkillSpector so its own deadline can be raised as well, and the
+  security result records the effective `skillspector_timeout_seconds`
+  ([#155](https://github.com/NVIDIA/SkillEvaluator/issues/155)).
 
 ### Security
 

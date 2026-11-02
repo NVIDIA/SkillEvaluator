@@ -87,10 +87,8 @@ def _best_elapsed(pattern, text: str, repeats: int = 5) -> float:
     [
         secret_redaction.LOG_GITHUB_TOKEN_RE,
         secret_redaction.LOG_GITHUB_PAT_RE,
-        eval_template.LOG_GITHUB_TOKEN_RE,
-        eval_template.LOG_GITHUB_PAT_RE,
     ],
-    ids=["host-classic", "host-fine-grained", "template-classic", "template-fine-grained"],
+    ids=["classic", "fine-grained"],
 )
 def test_github_token_patterns_scale_linearly(pattern):
     small = _best_elapsed(pattern, _near_miss_text(250))

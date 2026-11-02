@@ -10,6 +10,7 @@ unchanged.
 
 from __future__ import annotations
 
+import os
 from collections.abc import Callable, Iterator, Mapping, Sequence
 from contextlib import contextmanager
 from contextvars import ContextVar
@@ -395,6 +396,8 @@ def evaluate_prepared_plugin(
     decisions = apply_native_refusals(
         load, resolve_plugin_load(load, agents, env_mode=options.env_mode), package.native_source
     )
+    results_dir = options.results_dir or package.native_source.plugin_root / "evals" / "results"
+    _require_results_outside_source(results_dir, package.native_source.plugin_root)
     temp = Path(tempfile.mkdtemp(prefix="skilleval-plugin-", dir=work_dir))
     try:
         wrapper = stage_wrapper_skill(
@@ -403,7 +406,6 @@ def evaluate_prepared_plugin(
     except BaseException:
         shutil.rmtree(temp, ignore_errors=True)
         raise
-    results_dir = options.results_dir or package.native_source.plugin_root / "evals" / "results"
     hooks = NativeRuntimeHooks(package.native_source, decisions, package=package)
     try:
         hooks.observer = (observer_factory or RuntimeEvidenceObserver)(
@@ -431,6 +433,13 @@ def evaluate_prepared_plugin(
         from skillevaluator.evaluation.service import EvaluationService
 
         evaluate = EvaluationService().evaluate
+    engine = evaluate
+
+    def evaluate_attempt(attempt_options: EvaluationOptions) -> dict[str, Any]:
+        # Evidence belongs to one attempt; a retry that ends before its run
+        # directory is finalized must not publish the previous attempt's.
+        hooks.evidence, hooks.evidence_error = {}, None
+        return engine(attempt_options)
 
     def publish_with_evidence(outcome: PrivateRunOutcome) -> None:
         if hooks.stagings:
@@ -450,9 +459,31 @@ def evaluate_prepared_plugin(
         replace(options, skill_path=wrapper.path, results_dir=results_dir),
         hooks=hooks,
         provenance=provenance,
-        evaluate=evaluate,
+        evaluate=evaluate_attempt,
         publish=publish_with_evidence,
         cleanup=cleanup,
+    )
+
+
+def _require_results_outside_source(results_dir: Path, plugin_root: Path) -> None:
+    """Refuse a results directory that would change the verified plugin source.
+
+    Staging re-verifies the source-tree identity, which omits only the
+    established generated roots such as ``evals/results`` and ``results``.
+    """
+    from skillevaluator.publication_identity import _PUBLICATION_EXCLUDED_DIR_PATHS, _PUBLICATION_EXCLUDED_ROOT_DIRS
+
+    try:
+        parts = Path(os.path.abspath(results_dir)).relative_to(os.path.abspath(plugin_root)).parts  # noqa: PTH100
+    except ValueError:
+        return
+    if (parts[:1] and parts[0] in _PUBLICATION_EXCLUDED_ROOT_DIRS) or any(
+        parts[: len(excluded)] == excluded for excluded in _PUBLICATION_EXCLUDED_DIR_PATHS
+    ):
+        return
+    raise PluginLoadError(
+        f"results directory {results_dir} is inside the plugin source; use the plugin's evals/results, "
+        "its results/ directory, or a directory outside the plugin"
     )
 
 

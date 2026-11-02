@@ -68,7 +68,9 @@ class SourceIdentity:
 def _source_identity(root: Path, manifest: str) -> SourceIdentity:
     # Normalize only trusted OS aliases; authored links must still be refused.
     root = canonicalize_trusted_root_alias(Path(os.path.abspath(root)))  # noqa: PTH100
-    digest = publication_source_digest(root)
+    # The default results root creates <plugin>/evals/ during the run; a
+    # directory with no authored content does not change the source identity.
+    digest = publication_source_digest(root, ignore_empty_directories=True)
     if digest is None:
         raise PreparationError("Refusing linked, unsafe, or unstable plugin source tree")
     try:
@@ -335,7 +337,7 @@ def build_native_source(
         ),
         mcp_servers=tuple(portable_mcp),
         plugin_file_mcp_servers=tuple(plugin_file_mcp),
-        mcp_declared={str(server["name"]): dict(server) for server in mcp_servers},
+        mcp_declared={str(server["name"]): _claude_declared_mcp(server, pattern) for server in mcp_servers},
         texts=tuple(texts),
         hooks=tuple(hooks),
         other=tuple(other),
@@ -344,6 +346,16 @@ def build_native_source(
         settings=settings,
         lsp_servers=lsp_servers,
     )
+
+
+def _claude_declared_mcp(server: Mapping[str, Any], pattern: re.Pattern[str] | None) -> dict[str, Any]:
+    """The declared server with its env/header values in Claude Code's plugin-root spelling."""
+    declared = dict(server)
+    for key in ("env", "headers"):
+        values = declared.get(key)
+        if isinstance(values, Mapping):
+            declared[key] = {name: native.to_claude_root(value, pattern) for name, value in values.items()}
+    return declared
 
 
 def _plugin_launch_path(value: Any, *, plugin_file: Callable[[str], bool] | None) -> Any:
@@ -373,6 +385,21 @@ def _member_text(reader: PluginRootReader, manifest: Mapping[str, Any], member: 
 MAX_DATASET_CASES = 1000
 _EVALUATOR_DIRS = frozenset({"evals", "eval"})
 _MEMBER_LAYOUTS = (("evals", "evals"), ("eval", "dataset"))
+
+
+def is_evaluator_dir(path: Path) -> bool:
+    """Whether *path* is a skill's verifier-only dataset directory.
+
+    ``evals/`` always is. A legacy ``eval/`` is only when it holds the
+    ``dataset.*`` this module reads, so runtime helpers that a skill keeps in
+    ``eval/`` still reach the agent.
+    """
+    from skillevaluator.tier3.dataset_utils import DATASET_EXTENSIONS
+
+    name = path.name.casefold()
+    if name == "evals":
+        return True
+    return name == "eval" and any(os.path.lexists(path / f"dataset{ext}") for ext in DATASET_EXTENSIONS)
 
 
 @dataclass(frozen=True)
@@ -450,7 +477,7 @@ def _evaluator_ignore(member_dir: Path):
     def ignore(directory: str, contents: list[str]) -> list[str]:
         if Path(directory).resolve() != member_dir:
             return []
-        return [entry for entry in contents if entry.casefold() in _EVALUATOR_DIRS]
+        return [entry for entry in contents if is_evaluator_dir(Path(directory) / entry)]
 
     return ignore
 

@@ -1094,14 +1094,14 @@ def git_root_for(path: Path) -> Path | None:
         result = subprocess.run(
             ["git", "-C", str(path.expanduser().resolve()), "rev-parse", "--show-toplevel"],
             capture_output=True,
-            text=True,
             check=False,
         )
     except (OSError, subprocess.SubprocessError):
         return None
     if result.returncode != 0:
         return None
-    root = result.stdout.strip()
+    # Raw file-name bytes: decode them the way Python encodes paths, not with the locale code page.
+    root = os.fsdecode(result.stdout).strip()
     return Path(root).resolve() if root else None
 
 

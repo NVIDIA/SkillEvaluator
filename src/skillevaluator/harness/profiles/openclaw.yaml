@@ -13,7 +13,7 @@ rules:
   - {id: OW-SYMLINK-FILE, when: "skill_md_symlink", effect: not_loaded, message: "Symlinked SKILL.md files are not loaded.", confidence: high}
   - {id: OW-FILE-CAP, when: "skill_md_bytes > 256000", effect: not_loaded, message: "SKILL.md over 256,000 bytes is skipped as invalid.", confidence: high}
   - {id: OW-READ-BUDGET, when: "skill_md_bytes > 32768", effect: degraded, message: "SKILL.md must be read whole; over 32 KiB (small-context models) to 128 KiB (any model) the read is refused.", confidence: high}
-  - {id: OW-COMPACT, when: "description_codepoints > 220", effect: degraded, message: "With over 150 skills or 18,000 chars of list, descriptions are cut to 220 chars, then skills omitted.", confidence: high}
+  - {id: OW-COMPACT, when: "description_codepoints > 220", effect: advisory, message: "With over 150 skills or 18,000 chars of list, descriptions are cut to 220 chars, then skills omitted.", confidence: high}
   - {id: OW-NESTED, when: "nested_skill_md", effect: advisory, message: "Nested SKILL.md is ignored.", confidence: medium}
   - {id: OW-ALLOWED-TOOLS, when: "allowed_tools_shape != 'none'", effect: advisory, message: "allowed-tools is ignored by OpenClaw.", confidence: high}
   - {id: OW-CASING, when: "not manifest_name_exact", effect: degraded, message: "Non-canonical name (skill.md/Skill.md): loaded on case-insensitive filesystems (macOS default APFS, 3/3), ignored on case-sensitive Linux (3/3). Works or breaks depending on the OS.", confidence: high}

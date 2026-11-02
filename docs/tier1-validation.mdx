@@ -168,10 +168,14 @@ For `validate`, the default set is `schema`, `version`, `security`, `pii`, `lice
     **To fix common findings:** rename the directory to match `name`, remove forbidden fields, and move the skill under `skills/`.
   </Accordion>
 
-  <Accordion title="--harness — advisory harness compatibility">
-    `skillevaluator validate <skill> --harness codex,claude-code` (or `--harness all`) adds a table with one row per agent harness after the Tier 1 results: `loads`, `degraded` (loads, but something is cut, hidden or ignored) or `not_loaded`, with the rule IDs behind each verdict and the harness version and date the profile was verified against. Supported harnesses: `claude-code`, `codex`, `copilot-cli`, `hermes`, `openclaw`, `opencode`.
+  <Accordion title="harness — advisory harness compatibility">
+    The `harness` check reports, for each agent harness, whether the skill `loads`, is `degraded` (loads, but something is cut, hidden or ignored) or is `not_loaded`, with the rule IDs behind each verdict and the harness version and date the profile was verified against. Supported harnesses: `claude-code`, `codex`, `copilot-cli`, `hermes`, `openclaw`, `opencode`.
 
-    The profiles ship with the package and come from repeated runs of each harness in which the request sent to the model was captured. With `-r json`, the same data is added under `harness_compatibility`. The table is advisory: it never changes Tier 1 findings or the exit code. Install-location rules apply only when the skill sits under a harness root such as `.claude/skills` or `.agents/skills`. Use `--harness-profiles DIR` to try newer profile YAMLs without a release.
+    `validate` runs it by default for all six: it appears in the checks line (`! harness` when a harness drops or degrades the skill), in a "Harness compatibility · advisory" panel after Tier 1, and in the HTML, JSON and SARIF reports. JSON reports also get a `harness_compatibility` block. Use `--checks harness` to run it alone and `--harness codex,claude-code` to narrow the harnesses.
+
+    `skillevaluator harness-check <skill>` runs only this check and shows the same panel, updated as each harness is checked. It accepts a folder of skills, `--harness`, `-v` (every harness with its verified version) and `--json PATH`.
+
+    The profiles ship with the package and come from repeated runs of each harness in which the request sent to the model was captured. The check is advisory: its findings are MEDIUM (`not_loaded`), LOW (`degraded`) or INFO, so it never fails a run unless a policy raises those severities, and `harness-check` always exits 0. Install-location rules apply only when the skill sits under a harness root such as `.claude/skills` or `.agents/skills`. Use `--harness-profiles DIR` to try newer profile YAMLs without a release.
   </Accordion>
 
   <Accordion title="security — vulnerability scanning">

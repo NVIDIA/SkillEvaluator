@@ -6,12 +6,16 @@ All notable changes to SkillEvaluator are documented in this file.
 
 ### Added
 
-- `validate --harness codex,claude-code` (or `all`) adds an advisory
-  harness-compatibility table, one row per harness (`loads`, `degraded`,
-  `not_loaded`), from packaged, version-pinned profiles for Claude Code, Codex,
-  OpenCode, OpenClaw, Hermes and Copilot CLI. JSON reports gain a
-  `harness_compatibility` block; Tier 1 findings and the exit code are unchanged.
-  `--harness-profiles DIR` loads profiles from a directory.
+- New advisory Tier 1 `harness` check: for each agent harness (`claude-code`,
+  `codex`, `copilot-cli`, `hermes`, `openclaw`, `opencode`) it reports whether the
+  skill `loads`, is `degraded` or is `not_loaded`, from versioned profiles shipped
+  with the package. `validate` shows it in the checks line and in a dedicated
+  "Harness compatibility" panel, lists findings in every report and adds a
+  `harness_compatibility` block to JSON. It never fails the run.
+  `--harness codex,claude-code` narrows the harnesses; `--harness-profiles DIR`
+  loads profiles from a directory.
+- New `skillevaluator harness-check <skill>` command: the same panel, updated live
+  as each harness is checked. Always exits 0; `--json PATH` writes the block.
 
 - Tier 1 `schema` now reports harness-portability issues: duplicate frontmatter
   keys (HIGH), a UTF-8 BOM, a symlinked or nested `SKILL.md`, descriptions over

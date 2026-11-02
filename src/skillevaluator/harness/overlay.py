@@ -208,7 +208,8 @@ class _Rule:
         raise ValueError("Unsupported rule expression")
 
 
-def _evaluate_profile(profile: dict[str, Any], facts: dict[str, Any]) -> HarnessResult:
+def evaluate_profile(profile: dict[str, Any], facts: dict[str, Any]) -> HarnessResult:
+    """Evaluate one profile's rules against precomputed skill facts (stricter effect wins)."""
     roots = profile.get("roots", {})
     all_roots = [*roots.get("project", []), *roots.get("user", [])]
     names = {**facts, "always": True, "roots": _RootList(all_roots, roots)}
@@ -252,4 +253,4 @@ def evaluate_harnesses(
 ) -> list[HarnessResult]:
     """Evaluate one skill against the selected harness profiles."""
     facts = skill_facts(skill_path)
-    return [_evaluate_profile(profile, facts) for profile in load_profiles(harnesses, profiles_dir)]
+    return [evaluate_profile(profile, facts) for profile in load_profiles(harnesses, profiles_dir)]

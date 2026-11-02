@@ -12,8 +12,16 @@ from skillevaluator.harness.overlay import (
     HARNESS_STATUSES,
     HarnessResult,
     evaluate_harnesses,
+    evaluate_profile,
     load_profiles,
     skill_facts,
 )
 
-__all__ = ["HARNESS_STATUSES", "HarnessResult", "evaluate_harnesses", "load_profiles", "skill_facts"]
+__all__ = [
+    "HARNESS_STATUSES",
+    "HarnessResult",
+    "evaluate_harnesses",
+    "evaluate_profile",
+    "load_profiles",
+    "skill_facts",
+]

@@ -1384,6 +1384,27 @@ def _agent_eval_publication_aggregates_consistent(
     return root_dimensions == agent_dimensions
 
 
+def agent_eval_case_selection_issue(payload: dict[str, Any] | None) -> str | None:
+    """Return why a run limited by ``max_cases`` cannot be publication evidence."""
+    if not isinstance(payload, dict):
+        return None
+    summary = payload.get("summary") if isinstance(payload.get("summary"), dict) else {}
+    recorded = [container["case_selection"] for container in (payload, summary) if "case_selection" in container]
+    if not recorded:
+        return None
+    selection = recorded[0]
+    total = _agent_eval_count(selection.get("total")) if isinstance(selection, dict) else 0
+    selected = _agent_eval_count(selection.get("selected")) if isinstance(selection, dict) else 0
+    if any(value != selection for value in recorded) or not 0 < selected <= total:
+        return "Tier 3 case selection metadata is missing, invalid, or contradictory."
+    if selected < total:
+        return (
+            f"Tier 3 ran only the first {selected} of {total} cases (max_cases); "
+            "a partial suite is not publication evidence."
+        )
+    return None
+
+
 def agent_eval_publication_evidence_complete(payload: dict[str, Any] | None) -> bool:
     """Return whether a payload carries the minimum publication Tier 3 evidence."""
     if not isinstance(payload, dict):
@@ -1420,6 +1441,7 @@ def agent_eval_publication_evidence_complete(payload: dict[str, Any] | None) -> 
         and publication_target is not None
         and publication_target.skill_name == skill_name
         and agent_eval_publication_run_id(payload) is not None
+        and agent_eval_case_selection_issue(payload) is None
     )
 
 
@@ -2239,7 +2261,8 @@ def assess_tier3_evidence(
                 execution_status,
                 raw_verdict,
                 selected_payload,
-                "Tier 3 ran but lacks publication-complete provenance or dimension evidence.",
+                agent_eval_case_selection_issue(selected_payload)
+                or "Tier 3 ran but lacks publication-complete provenance or dimension evidence.",
             )
         return Tier3EvidenceAssessment(
             "incomplete" if tier3_results or selected_payload else "not_run",

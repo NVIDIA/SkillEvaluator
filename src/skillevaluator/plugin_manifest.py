@@ -25,13 +25,13 @@ import json
 import os
 import re
 import stat
+from collections.abc import Callable
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Any, Literal
 from urllib.parse import urlsplit
 
 from skillevaluator.constants import (
-    CONTENT_DEDUP_MAX_DISCOVERED_PATHS,
     CONTENT_DEDUP_MAX_FILE_BYTES,
     CONTENT_DEDUP_MAX_TOTAL_BYTES,
     PLUGIN_AGENT_PLUGINS_V1_MANIFEST_FILE,
@@ -40,7 +40,6 @@ from skillevaluator.constants import (
     PLUGIN_MANIFEST_FILES,
     PLUGIN_MANIFEST_PRECEDENCE,
     PLUGIN_NATIVE_MANIFEST_DIRS,
-    SCAN_EXCLUDED_DIRS,
 )
 from skillevaluator.plugin_formats import (
     AGENT_PLUGINS_SCHEMA_PREFIX,
@@ -51,7 +50,6 @@ from skillevaluator.utils.secure_fs import (
     SecureFile,
     SecurePathError,
     SecureRoot,
-    discover_secure_files,
     stat_is_link_or_reparse,
 )
 from skillevaluator.utils.structured_data import StructuredDataError, load_bounded_json
@@ -416,6 +414,96 @@ def manifest_type_for_relative_path(relative: Path | str) -> str | None:
     return _MANIFEST_TYPES_BY_PATH.get(canonical) if canonical is not None else None
 
 
+def _matching_entries(directory: Path, wanted: Callable[[str], bool]) -> list[str]:
+    """The names in ``directory`` that ``wanted`` accepts, in name order (the listing is never kept whole)."""
+    try:
+        with os.scandir(directory) as entries:
+            return sorted(entry.name for entry in entries if wanted(entry.name))
+    except OSError as exc:
+        raise SecurePathError("unsafe_path", f"Cannot list plugin folder safely: {directory.name}: {exc}") from exc
+
+
+def _lstat_candidate(root: Path, relative: Path) -> os.stat_result | None:
+    try:
+        return (root / relative).lstat()
+    except FileNotFoundError:
+        return None
+    except OSError as exc:
+        raise SecurePathError(
+            "unsafe_path",
+            f"Cannot inspect selected file securely: {relative.as_posix()}: {exc}",
+            relative_path=relative.as_posix(),
+        ) from exc
+
+
+def _manifest_file(root: Path, relative: Path) -> SecureFile | None:
+    """A regular single-link manifest candidate, ``None`` when it vanished; anything else fails closed."""
+    metadata = _lstat_candidate(root, relative)
+    if metadata is None:
+        return None
+    rel = relative.as_posix()
+    if stat_is_link_or_reparse(metadata):
+        raise SecurePathError("unsafe_path", f"Refusing symlink or reparse point: {rel}", relative_path=rel)
+    if not stat.S_ISREG(metadata.st_mode):
+        raise SecurePathError(
+            "unsafe_path", f"Refusing selected path that is not a regular file: {rel}", relative_path=rel
+        )
+    if getattr(metadata, "st_nlink", 1) != 1:
+        raise SecurePathError(
+            "unsafe_path",
+            f"Refusing hard-linked selected file with link count greater than one: {rel}",
+            relative_path=rel,
+        )
+    return SecureFile(root, root / relative, relative, metadata)
+
+
+def _probe_manifest_files(root: Path) -> list[SecureFile]:
+    """Every supported manifest file in ``root``, probed without following links.
+
+    Only root entries that can name a manifest (any letter case of a client
+    manifest) and the vendor manifest folders are inspected, so an unrelated
+    link or a wide folder elsewhere in the plugin neither fails the lookup nor
+    uses up a path budget. A candidate that is a link, reparse point, hard link,
+    or not a regular file fails closed, as does a linked vendor folder. The
+    returned metadata is re-verified by the anchored read.
+    """
+    try:
+        root_metadata = root.lstat()
+    except OSError as exc:
+        raise SecurePathError("invalid_root", f"Cannot inspect Tier 2 root: {exc}") from exc
+    if stat_is_link_or_reparse(root_metadata):
+        raise SecurePathError("unsafe_root", f"Tier 2 root is a symlink or reparse point: {root.name}")
+    if not stat.S_ISDIR(root_metadata.st_mode):
+        raise SecurePathError("invalid_root", f"Tier 2 root is not a regular directory: {root}")
+
+    files: list[SecureFile | None] = []
+    for name in _matching_entries(
+        root,
+        lambda entry: canonical_manifest_relative(entry) is not None or entry.casefold() in NATIVE_MANIFEST_DIRS_FOLDED,
+    ):
+        relative = Path(name)
+        if name.casefold() not in NATIVE_MANIFEST_DIRS_FOLDED:
+            files.append(_manifest_file(root, relative))
+            continue
+        metadata = _lstat_candidate(root, relative)
+        if metadata is None:
+            continue
+        if stat_is_link_or_reparse(metadata):
+            raise SecurePathError(
+                "unsafe_path",
+                f"Refusing linked directory or reparse point before descent: {name}",
+                relative_path=name,
+            )
+        if not stat.S_ISDIR(metadata.st_mode):
+            continue
+        # Every vendor folder holds the same manifest name (plugin.json, in any letter case).
+        for child in _matching_entries(
+            root / relative, lambda entry: entry.casefold() == PLUGIN_CONTAINED_MANIFEST_FILE
+        ):
+            files.append(_manifest_file(root, relative / child))
+    return sorted((file for file in files if file is not None), key=lambda item: item.rel_path)
+
+
 def locate_plugin_manifest(path: Path) -> PluginManifestLocation | None:
     """Locate one regular single-link manifest beneath a regular plugin root.
 
@@ -451,13 +539,7 @@ def locate_plugin_manifest(path: Path) -> PluginManifestLocation | None:
         return None
 
     try:
-        files = discover_secure_files(
-            root,
-            selected=lambda relative: canonical_manifest_relative(relative) is not None,
-            excluded_dirs=SCAN_EXCLUDED_DIRS,
-            max_paths=CONTENT_DEDUP_MAX_DISCOVERED_PATHS,
-            max_depth=2,
-        )
+        files = _probe_manifest_files(root)
     except SecurePathError as exc:
         raise _wrap_security_error(exc) from exc
 
@@ -615,26 +697,42 @@ def find_claude_marketplace(
     return None
 
 
-def _source_folder_problem(marketplace: ClaudeMarketplace, folder: str) -> str | None:
-    """Why a listed plugin's local source folder is unusable (no-follow), or ``None``."""
+def _source_folder_problem(marketplace: ClaudeMarketplace, folder: str) -> tuple[str, str | None] | None:
+    """Why a listed plugin's local source folder is unusable (no-follow), or ``None``.
+
+    Returns ``(problem, cause)``. ``cause`` is ``None`` when the folder is not
+    there (the dependency is ``missing``), or the
+    :mod:`~skillevaluator.plugin_dependencies` cause that leaves it
+    ``unresolved``: a link on the way, a path that cannot be inspected, or an
+    unsafe source.
+    """
+    from skillevaluator.plugin_dependencies import CAUSE_ERROR, CAUSE_LINK, CAUSE_UNSAFE, _lstat
+
+    if "\x00" in folder:
+        return "its source contains a NUL character", CAUSE_UNSAFE
     current = marketplace.root
+    metadata: os.stat_result | None = None
     for part in Path(folder).parts:
         if part in {".", ""}:
             continue
         if part == "..":
-            return f"its source '{folder}' leaves the marketplace root"
+            return f"its source '{folder}' leaves the marketplace root", None
         current = current / part
-        try:
-            metadata = current.lstat()
-        except OSError:
-            return f"its source folder '{folder}' does not exist"
+        metadata, error = _lstat(current)
+        if error is not None:
+            return f"its source folder '{folder}' cannot be inspected: {error}", CAUSE_ERROR
+        if metadata is None:
+            return f"its source folder '{folder}' does not exist", None
         if stat_is_link_or_reparse(metadata):
-            return f"its source '{folder}' passes through a link"
-    try:
-        if not stat.S_ISDIR(current.lstat().st_mode):
-            return f"its source '{folder}' is not a folder"
-    except OSError:
-        return f"its source folder '{folder}' does not exist"
+            return f"its source '{folder}' passes through a link", CAUSE_LINK
+    if metadata is None:
+        metadata, error = _lstat(current)
+        if error is not None:
+            return f"its source folder '{folder}' cannot be inspected: {error}", CAUSE_ERROR
+        if metadata is None:
+            return f"its source folder '{folder}' does not exist", None
+    if not stat.S_ISDIR(metadata.st_mode):
+        return f"its source '{folder}' is not a folder", None
     return None
 
 
@@ -644,7 +742,8 @@ def classify_claude_dependency(name: str, marketplace_name: str | None, marketpl
     ``referenced`` when the plugin's marketplace lists it, ``missing`` when that
     marketplace does not (or lists it with a local source folder that is not
     there), ``external`` when it names another marketplace, and ``unresolved``
-    when no marketplace that lists this plugin was found.
+    when no marketplace that lists this plugin was found, or the listed source
+    folder can be reached only through a link or cannot be inspected.
     """
     from skillevaluator.plugin_dependencies import DependencyRow
 
@@ -679,5 +778,10 @@ def classify_claude_dependency(name: str, marketplace_name: str | None, marketpl
     if folder:
         problem = _source_folder_problem(marketplace, folder)
         if problem is not None:
-            return DependencyRow(ref, "missing", folder, f"marketplace '{where}) lists it, but {problem}")
+            reason, cause = problem
+            if cause is None:
+                return DependencyRow(ref, "missing", folder, f"marketplace '{where}) lists it, but {reason}")
+            return DependencyRow(
+                ref, "unresolved", None, f"marketplace '{where}) lists it, but {reason}; advisory only", cause=cause
+            )
     return DependencyRow(ref, "referenced", folder or None, f"listed in marketplace '{where})")

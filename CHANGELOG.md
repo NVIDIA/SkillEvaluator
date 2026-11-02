@@ -133,6 +133,13 @@ All notable changes to SkillEvaluator are documented in this file.
 
 ### Changed
 
+- Shared LLM calls and the Harbor verifier retry HTTP 408, 429, and every 5xx
+  response except 501 and 505, including proxy 520–524 and overload 529 errors.
+  TLS certificate verification failures stop immediately. The host Bedrock
+  path preserves the underlying status and certificate failure through
+  LiteLLM wrappers, so generic 500/503 errors do not cause extra attempts.
+  This applies to ordinary skill evaluations and other host LLM calls as well
+  as plugin evaluations; retry limits and scoring formulas are unchanged.
 - Hosted GitHub reports verify a separate GitHub-signed execution receipt.
   Enable `id-token: write` in the scan workflow and refresh its approved blob
   when adding hosting; ordinary scans keep their existing read-only permissions.

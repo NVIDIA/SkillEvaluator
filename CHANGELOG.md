@@ -89,6 +89,21 @@ All notable changes to SkillEvaluator are documented in this file.
   expected-case checks cover only the cases that ran, `run_config.json` records
   the selection as `case_selection`, and a run that skipped cases is reported
   as publication-incomplete in JSON, HTML, and BENCHMARK.md.
+
+- Tier 1 `--llm` security scans of a single skill keep the LLM provenance that
+  SkillSpector v2.12.0 and later report: the provider adapter, the model and
+  SkillSpector revision behind each LLM analyzer, and the sampling and
+  determinism evidence. The Security result in the JSON report carries it as
+  `skillspector_llm_provenance`, next to `skillspector_provider_id`, the
+  SkillEvaluator provider the scan was bridged from (for example `nv_build`,
+  which SkillSpector runs as its `openai` adapter). The HTML report, including
+  CI pages rendered from the retained Tier 1 JSON, lists it in a collapsible
+  Tier 1 LLM Provenance table. The record is also kept when the LLM stage
+  fails or SkillSpector does not confirm LLM analysis, as long as
+  SkillSpector's JSON output carries a valid record, so the report shows what
+  was attempted. Records that do not match SkillSpector's provenance contract or
+  that contain endpoint- or credential-shaped values are left out, and older
+  SkillSpector releases produce no record.
 - `--skip-with-skill` on `tier3 evaluate` and the direct `tier3` workflow runs
   only the without-skill baseline arm, for example to calibrate a task set or
   re-measure a baseline after a model change without paying for with-skill
@@ -191,6 +206,9 @@ All notable changes to SkillEvaluator are documented in this file.
 
 ### Fixed
 
+- On Windows, repository root and source-link detection no longer break for
+  repositories in non-ASCII folders: Git output is decoded as UTF-8 instead of
+  the locale code page.
 - CI quality thresholds apply to every parallel scan worker. Report overviews
   and detailed reports surface failed quality gates ahead of advisory findings,
   with links to the check that needs attention.

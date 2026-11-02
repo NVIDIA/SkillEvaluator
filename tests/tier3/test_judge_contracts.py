@@ -505,6 +505,48 @@ def test_saved_judge_evidence_masks_credentials(tmp_path: Path, monkeypatch: pyt
             "Cookie: <redacted>'",
             id="cookie-every-pair",
         ),
+        pytest.param(
+            'curl -H "Authorization: ApiKey aaaaaaaaaaaaaaaaaaaaaaaa" https://es.example',
+            "aaaaaaaaaaaaaaaaaaaaaaaa",
+            '"Authorization: <redacted>" https://es.example',
+            id="authorization-apikey-scheme",
+        ),
+        pytest.param(
+            "curl -H 'Authorization: Bot bbbbbbbbbbbbbbbbbbbbbbbb' https://x",
+            "bbbbbbbbbbbbbbbbbbbbbbbb",
+            "'Authorization: <redacted>' https://x",
+            id="authorization-bot-scheme",
+        ),
+        pytest.param(
+            "curl -H 'Authorization: SSWS ssssssssssssssssssssssss'",
+            "ssssssssssssssssssssssss",
+            "'Authorization: <redacted>'",
+            id="authorization-ssws-scheme",
+        ),
+        pytest.param(
+            'headers["Authorization"] = "Bearer subscript-bearer-secret"',
+            "subscript-bearer-secret",
+            'headers["Authorization"] = "Bearer <redacted>"',
+            id="authorization-subscript",
+        ),
+        pytest.param(
+            "headers['Authorization'] = f'Token fstring-token-secret'",
+            "fstring-token-secret",
+            "headers['Authorization'] = f'Token <redacted>'",
+            id="authorization-subscript-fstring",
+        ),
+        pytest.param(
+            'headers["X-API-Key"] = "subscript-api-key-secret"',
+            "subscript-api-key-secret",
+            'headers["X-API-Key"] = "<redacted>"',
+            id="api-key-subscript",
+        ),
+        pytest.param(
+            "headers['Cookie'] = 'session=subscript-cookie-secret'",
+            "subscript-cookie-secret",
+            "headers['Cookie'] = '<redacted>'",
+            id="cookie-subscript",
+        ),
     ],
 )
 def test_judge_evidence_masks_credentials_without_a_key_shape(text: str, secret: str, kept: str) -> None:

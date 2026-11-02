@@ -2331,23 +2331,28 @@ def _judge_retry_feedback(problem):
 # ("https://user:token@host"), Authorization, API-key, token and Cookie header
 # values, and the values of credential flags ("--token VALUE",
 # "curl -u user:password"). Each pattern starts at a fixed literal and scans one
-# bounded run, so long text stays linear.
+# bounded run, so long text stays linear. The header patterns accept shell
+# ("-H 'Name: value'"), JSON ('"name": "value"') and Python subscript
+# ('headers["Name"] = f"value"') forms.
 _JUDGE_EVIDENCE_URL_USERINFO_RE = re.compile(r"(://)[^\s/?#@'\"`<>]{1,256}@")
+_JUDGE_EVIDENCE_HEADER_SEPARATOR = r"[\"']?\]?[ \t]{0,8}[:=][ \t]{0,8}(?:[bfru]{0,2}[\"'])?"
+# Authorization schemes vary (Bearer, Basic, ApiKey, Bot, SSWS, ...), so the whole
+# value is masked up to its closing quote or the end of the line. Bearer, Basic
+# and Token stay visible because they say which kind of credential was sent.
 _JUDGE_EVIDENCE_AUTH_HEADER_RE = re.compile(
-    r"(\bauthorization[\"']?[ \t]{0,8}[:=][ \t]{0,8}[\"']?(?:(?:bearer|basic|token)[ \t]{1,8})?)"
-    r"[^\s'\"`,;\\]+",
+    r"(\bauthorization" + _JUDGE_EVIDENCE_HEADER_SEPARATOR + r"(?:(?:bearer|basic|token)[ \t]{1,8})?)"
+    r"[^\s'\"`,;\\][^'\"`\r\n\\]{0,255}",
     re.IGNORECASE,
 )
-# X-API-Key, Api-Key, X-Auth-Token, X-Access-Token and Private-Token headers,
-# in shell ("-H 'X-API-Key: value'") and JSON ('"x-api-key": "value"') form.
+# X-API-Key, Api-Key, X-Auth-Token, X-Access-Token and Private-Token headers.
 _JUDGE_EVIDENCE_KEY_HEADER_RE = re.compile(
-    r"(\b(?:api-key|auth-token|access-token|private-token)[\"']?[ \t]{0,8}:[ \t]{0,8}[\"']?)"
+    r"(\b(?:api-key|auth-token|access-token|private-token)" + _JUDGE_EVIDENCE_HEADER_SEPARATOR + r")"
     r"[^\s'\"`,;\\]+",
     re.IGNORECASE,
 )
 # A Cookie header holds "name=value" pairs joined by ";", and every pair is masked.
 _JUDGE_EVIDENCE_COOKIE_HEADER_RE = re.compile(
-    r"(\bcookie[\"']?[ \t]{0,8}:[ \t]{0,8}[\"']?)"
+    r"(\bcookie" + _JUDGE_EVIDENCE_HEADER_SEPARATOR + r")"
     r"[^\s'\"`,;\\]+(?:;[ \t]{0,8}[^\s'\"`,;\\]+){0,64}",
     re.IGNORECASE,
 )

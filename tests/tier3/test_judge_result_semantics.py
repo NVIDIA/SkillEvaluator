@@ -1268,20 +1268,16 @@ def test_behavior_salvage_tolerates_non_structural_wrappers(judge_module, monkey
     assert result["results"] == [{"passed": True}]
 
 
-def test_neutral_judge_skips_remain_unchanged(judge_module) -> None:
-    assert judge_module.judge_accuracy("question", "", "agent response") == {
-        "score": 1.0,
-        "reason": "No ground_truth -- skipped",
-    }
-    assert judge_module.judge_goal_accuracy("question", "", "agent response") == {
-        "score": 1.0,
-        "reason": "No ground_truth -- skipped",
-    }
-    assert judge_module.judge_behavior_check("conversation", []) == {
-        "score": 1.0,
-        "reason": "No expected_behavior defined",
-        "results": [],
-    }
+def test_absent_reference_judges_are_explicitly_not_applicable(judge_module) -> None:
+    for result in (
+        judge_module.judge_accuracy("question", "", "agent response"),
+        judge_module.judge_goal_accuracy("question", "", "agent response"),
+        judge_module.judge_behavior_check("conversation", []),
+    ):
+        assert result["score"] is None
+        assert result["status"] == "not_applicable"
+        assert result["reason"].startswith("N/A:")
+    assert judge_module.judge_behavior_check("conversation", [])["results"] == []
 
 
 def test_shared_and_template_accuracy_core_results_match(monkeypatch) -> None:

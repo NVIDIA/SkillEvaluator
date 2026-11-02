@@ -15,8 +15,9 @@ import hashlib
 import json
 import os
 import re
+import stat
 from collections.abc import Callable, Mapping, Sequence
-from dataclasses import dataclass, field
+from dataclasses import dataclass, field, replace
 from pathlib import Path, PurePosixPath
 from typing import TYPE_CHECKING, Any
 
@@ -30,7 +31,7 @@ from skillevaluator.plugin_formats import profile_for
 from skillevaluator.plugin_markdown import parse_markdown
 from skillevaluator.plugin_mcp import _server_launch_files
 from skillevaluator.plugin_paths import PluginRootReader
-from skillevaluator.publication_identity import publication_source_digest
+from skillevaluator.publication_identity import publication_source_digest, publication_source_entry_is_excluded
 from skillevaluator.tier3 import plugin_native as native
 from skillevaluator.utils.path_security import canonicalize_trusted_root_alias
 from skillevaluator.utils.secure_fs import SecurePathError, SecureRoot
@@ -68,9 +69,7 @@ class SourceIdentity:
 def _source_identity(root: Path, manifest: str) -> SourceIdentity:
     # Normalize only trusted OS aliases; authored links must still be refused.
     root = canonicalize_trusted_root_alias(Path(os.path.abspath(root)))  # noqa: PTH100
-    # The default results root creates <plugin>/evals/ during the run; a
-    # directory with no authored content does not change the source identity.
-    digest = publication_source_digest(root, ignore_empty_directories=True)
+    digest = publication_source_digest(root)
     if digest is None:
         raise PreparationError("Refusing linked, unsafe, or unstable plugin source tree")
     try:
@@ -93,6 +92,15 @@ class AuditRow:
 
 
 @dataclass(frozen=True)
+class RuntimeSourceIdentity:
+    """A run-specific source guard that omits its generated results only."""
+
+    results_root: Path
+    absent_ancestors: tuple[Path, ...]
+    source_tree_sha256: str
+
+
+@dataclass(frozen=True)
 class PreparedRuntimePackage:
     """One plugin inventory prepared for the runtime arms of an evaluation."""
 
@@ -106,6 +114,7 @@ class PreparedRuntimePackage:
     audit: tuple[AuditRow, ...] = ()
     policy_findings: tuple[Any, ...] = ()
     incomplete_reasons: tuple[str, ...] = ()
+    runtime_identity: RuntimeSourceIdentity | None = None
 
     @property
     def complete(self) -> bool:
@@ -193,14 +202,118 @@ def prepare_runtime_package(
 def verify_source_identity(package: PreparedRuntimePackage, inventory: PluginInventory | None = None) -> None:
     """Re-read disk identity before/after staging, even when the caller retains an old inventory.
 
-    The versioned publication digest includes authored evaluation inputs and
-    excludes only its established generated-output/dependency roots. It is an
-    observed-change guard, not an atomic snapshot against concurrent writers.
+    The analyzed publication digest includes authored evaluation inputs.
+    A bound run uses its separate guard to omit only approved runtime results.
+    Both detect observed changes; neither is an atomic filesystem snapshot.
     """
     root = inventory.root if inventory is not None else package.native_source.plugin_root
     manifest = inventory.selected_manifest.manifest_filename if inventory is not None else package.identity.manifest
-    if _source_identity(root, manifest) != package.identity:
+    runtime = package.runtime_identity
+    if runtime is not None:
+        normalized = canonicalize_trusted_root_alias(Path(os.path.abspath(root)))  # noqa: PTH100
+        if (
+            str(normalized) != package.identity.root
+            or manifest != package.identity.manifest
+            or _runtime_source_digest(normalized, runtime) != runtime.source_tree_sha256
+        ):
+            raise PreparationError("plugin source changed between preparation and staging")
+    elif _source_identity(root, manifest) != package.identity:
         raise PreparationError("plugin source changed between preparation and staging")
+
+
+def bind_runtime_results(package: PreparedRuntimePackage, results_root: Path) -> PreparedRuntimePackage:
+    """Bind a private run's output path without excluding authored source changes.
+
+    The analyzed canonical identity remains intact. A separate staging guard
+    omits the effective results subtree and only those initially absent parent
+    directories that still contain no content besides that output path. This
+    is passive: the engine retains ownership of directory creation.
+
+    Reuse the returned package for later runs at this results root. Fresh
+    preparation still enforces the canonical source policy, so custom output
+    roots with generated links must reuse the bound package. The original
+    unbound package retains its strict snapshot.
+    """
+    from skillevaluator.tier3.case_ids import validate_output_directory_path
+    from skillevaluator.tier3.output_provenance import is_generated_output_root
+
+    verify_source_identity(package)
+    validate_output_directory_path(results_root)
+    root = Path(package.identity.root)
+    output = canonicalize_trusted_root_alias(Path(os.path.abspath(results_root.expanduser())))  # noqa: PTH100
+    if any(_same_directory(output, parent) for parent in (root, *root.parents)):
+        raise PreparationError("runtime results must not contain the plugin source root")
+    source_parent = next((parent for parent in output.parents if _same_directory(parent, root)), None)
+    if source_parent is None:
+        return package
+    output = root / output.relative_to(source_parent)
+    if package.runtime_identity is not None:
+        if _same_directory(output, package.runtime_identity.results_root):
+            return package
+        raise PreparationError("prepared runtime is already bound to another results root")
+    # Canonical generated roots already have an explicit publication contract.
+    # A custom existing destination may contain only authenticated old runs;
+    # otherwise excluding it would silently stop guarding authored content.
+    if (
+        output.exists()
+        and not publication_source_entry_is_excluded(root, output)
+        and any(not is_generated_output_root(child) for child in output.iterdir())
+    ):
+        raise PreparationError("custom runtime results root contains authored or unowned content")
+    absent = tuple(
+        parent for parent in output.parents if parent != root and parent.is_relative_to(root) and not parent.exists()
+    )
+    runtime = RuntimeSourceIdentity(output, absent, "")
+    runtime = replace(runtime, source_tree_sha256=_runtime_source_digest(root, runtime))
+    # Do not adopt a source mutation that occurred while capturing the filtered
+    # guard, before the engine has been allowed to create any output.
+    verify_source_identity(package)
+    return replace(
+        package,
+        runtime_identity=runtime,
+        native_source=replace(package.native_source, excluded_paths=(*package.native_source.excluded_paths, output)),
+    )
+
+
+def _runtime_source_digest(root: Path, runtime: RuntimeSourceIdentity) -> str:
+    from skillevaluator.tier3.case_ids import validate_output_directory_path
+    from skillevaluator.tier3.harbor.secure_copy import UnsafeStagingError, tree_content_fingerprint_secure
+
+    output = runtime.results_root
+    absent = frozenset(runtime.absent_ancestors)
+
+    def output_only_ancestor(path: Path) -> bool:
+        if not any(_same_directory(path, parent) for parent in absent):
+            return False
+        names = list(path.iterdir())
+        return not names or (len(names) == 1 and (_same_directory(names[0], output) or output_only_ancestor(names[0])))
+
+    def ignore(directory: str, names: list[str]) -> set[str]:
+        base = Path(directory)
+        return {
+            name
+            for name in names
+            if _same_directory(path := base / name, output)
+            or publication_source_entry_is_excluded(root, path)
+            or output_only_ancestor(path)
+        }
+
+    try:
+        validate_output_directory_path(output)
+        return tree_content_fingerprint_secure(root, ignore=ignore)
+    except (OSError, ValueError, UnsafeStagingError) as exc:
+        raise PreparationError(f"cannot verify plugin source around runtime results: {exc}") from exc
+
+
+def _same_directory(first: Path, second: Path) -> bool:
+    """Recognize actual filesystem aliases without folding distinct authored names."""
+    if first == second:
+        return True
+    try:
+        observed, expected = first.lstat(), second.lstat()
+    except OSError:
+        return False
+    return stat.S_ISDIR(observed.st_mode) and stat.S_ISDIR(expected.st_mode) and os.path.samestat(observed, expected)
 
 
 def _audit_row(member: PluginMember) -> AuditRow:
@@ -337,7 +450,17 @@ def build_native_source(
         ),
         mcp_servers=tuple(portable_mcp),
         plugin_file_mcp_servers=tuple(plugin_file_mcp),
-        mcp_declared={str(server["name"]): _claude_declared_mcp(server, pattern) for server in mcp_servers},
+        mcp_declared={
+            str(server["name"]): {
+                key: (
+                    {name: native.to_claude_root(item, pattern) for name, item in value.items()}
+                    if key in {"env", "headers"} and isinstance(value, Mapping)
+                    else value
+                )
+                for key, value in server.items()
+            }
+            for server in mcp_servers
+        },
         texts=tuple(texts),
         hooks=tuple(hooks),
         other=tuple(other),
@@ -346,16 +469,6 @@ def build_native_source(
         settings=settings,
         lsp_servers=lsp_servers,
     )
-
-
-def _claude_declared_mcp(server: Mapping[str, Any], pattern: re.Pattern[str] | None) -> dict[str, Any]:
-    """The declared server with its env/header values in Claude Code's plugin-root spelling."""
-    declared = dict(server)
-    for key in ("env", "headers"):
-        values = declared.get(key)
-        if isinstance(values, Mapping):
-            declared[key] = {name: native.to_claude_root(value, pattern) for name, value in values.items()}
-    return declared
 
 
 def _plugin_launch_path(value: Any, *, plugin_file: Callable[[str], bool] | None) -> Any:
@@ -383,23 +496,7 @@ def _member_text(reader: PluginRootReader, manifest: Mapping[str, Any], member: 
 
 #: Upper bound on combined evaluation cases (bounded work before any agent runs).
 MAX_DATASET_CASES = 1000
-_EVALUATOR_DIRS = frozenset({"evals", "eval"})
 _MEMBER_LAYOUTS = (("evals", "evals"), ("eval", "dataset"))
-
-
-def is_evaluator_dir(path: Path) -> bool:
-    """Whether *path* is a skill's verifier-only dataset directory.
-
-    ``evals/`` always is. A legacy ``eval/`` is only when it holds the
-    ``dataset.*`` this module reads, so runtime helpers that a skill keeps in
-    ``eval/`` still reach the agent.
-    """
-    from skillevaluator.tier3.dataset_utils import DATASET_EXTENSIONS
-
-    name = path.name.casefold()
-    if name == "evals":
-        return True
-    return name == "eval" and any(os.path.lexists(path / f"dataset{ext}") for ext in DATASET_EXTENSIONS)
 
 
 @dataclass(frozen=True)
@@ -433,6 +530,7 @@ def stage_wrapper_skill(
     import shutil
     import tempfile
 
+    from skillevaluator.tier3.harbor.adapter import _runtime_skill_copy_ignore
     from skillevaluator.tier3.harbor.secure_copy import UnsafeStagingError, copytree_secure
 
     if os.path.lexists(destination):
@@ -459,7 +557,11 @@ def stage_wrapper_skill(
         for member in package.skills:
             member_dir = package.native_source.plugin_root / str(member.path)
             try:
-                copytree_secure(member_dir, temp / "skills" / member_dir.name, ignore=_evaluator_ignore(member_dir))
+                copytree_secure(
+                    member_dir,
+                    temp / "skills" / member_dir.name,
+                    ignore=_runtime_skill_copy_ignore(member_dir, package.native_source.excluded_paths),
+                )
             except (UnsafeStagingError, OSError) as exc:
                 raise PreparationError(f"Refusing to stage member skill '{member.name}': {exc}") from exc
         (temp / "SKILL.md").write_text(_wrapper_markdown(name, package), encoding="utf-8")
@@ -469,17 +571,6 @@ def stage_wrapper_skill(
         shutil.rmtree(temp, ignore_errors=True)
         raise
     return WrapperSkill(name, destination, sources)
-
-
-def _evaluator_ignore(member_dir: Path):
-    member_dir = member_dir.resolve()
-
-    def ignore(directory: str, contents: list[str]) -> list[str]:
-        if Path(directory).resolve() != member_dir:
-            return []
-        return [entry for entry in contents if is_evaluator_dir(Path(directory) / entry)]
-
-    return ignore
 
 
 def _wrapper_markdown(name: str, package: PreparedRuntimePackage) -> str:

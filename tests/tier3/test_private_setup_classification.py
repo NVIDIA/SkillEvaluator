@@ -49,8 +49,7 @@ def test_native_wrapper_is_not_wrapped_twice(key: tuple, path: str) -> None:
     assert issubclass(import_symbol(path), SetupNetworkErrorAgent)
 
 
-def test_unknown_private_wrapper_keeps_custom_routing() -> None:
-    # Classification is best-effort: a custom backend's own agent keeps its launch path.
+def test_unknown_private_wrapper_does_not_silently_replace_custom_routing() -> None:
     assert private_agent_import_path("codex", "custom.module:MyAgent") == "custom.module:MyAgent"
 
 

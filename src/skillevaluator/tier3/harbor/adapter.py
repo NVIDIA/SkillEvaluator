@@ -814,9 +814,21 @@ def _is_skill_evals_path(path: Path, skill_root: Path) -> bool:
     return False
 
 
+def _is_runtime_evaluator_directory(path: Path) -> bool:
+    """Keep runtime eval helpers; omit evals and recognized legacy dataset roots."""
+    name = path.name.casefold()
+    if name == "evals":
+        return True
+    if name != "eval" or _path_is_link_or_reparse(path):
+        return False
+    from skillevaluator.tier3.dataset_utils import DATASET_EXTENSIONS
+
+    # Match legacy discovery without following dataset links or reading data.
+    return any(os.path.lexists(path / f"dataset{extension}") for extension in DATASET_EXTENSIONS)
+
+
 def _runtime_skill_copy_ignore(skill_root: Path, excluded_roots: Sequence[Path] = ()):
     """Build a root-aware ignore callback for an agent-visible skill copy."""
-    from skillevaluator.tier3.plugin_prepare import is_evaluator_dir
 
     resolved_root = skill_root.resolve()
     excluded_roots = _skill_scoped_excluded_roots(skill_root, excluded_roots)
@@ -835,7 +847,7 @@ def _runtime_skill_copy_ignore(skill_root: Path, excluded_roots: Sequence[Path] 
         current = Path(directory)
         ignored: set[str] = set()
         if current.resolve() == resolved_root or _skill_manifest(current) is not None:
-            ignored.update(name for name in contents if is_evaluator_dir(current / name))
+            ignored.update(name for name in contents if _is_runtime_evaluator_directory(current / name))
         for name in contents:
             candidate = current / name
             if (
@@ -4097,8 +4109,6 @@ def _remove_staged_path(path: Path) -> None:
 
 def _sanitize_staged_runtime_skills(skills_dir: Path) -> None:
     """Remove evaluator-only roots from authored or evaluator-copied skill bundles."""
-    from skillevaluator.tier3.plugin_prepare import is_evaluator_dir
-
     if not skills_dir.exists():
         return
     eval_roots: set[Path] = set()
@@ -4106,7 +4116,7 @@ def _sanitize_staged_runtime_skills(skills_dir: Path) -> None:
         skill_root = manifest.parent
         if not skill_root.is_dir():
             continue
-        eval_roots.update(child for child in skill_root.iterdir() if is_evaluator_dir(child))
+        eval_roots.update(child for child in skill_root.iterdir() if _is_runtime_evaluator_directory(child))
     for eval_root in sorted(eval_roots, key=lambda path: len(path.parts), reverse=True):
         if os.path.lexists(eval_root):
             _remove_staged_path(eval_root)

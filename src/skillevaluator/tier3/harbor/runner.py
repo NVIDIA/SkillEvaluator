@@ -4367,21 +4367,15 @@ def _private_runtime_hooks() -> Any:
 
 
 def _native_plugin_agent_import_paths() -> frozenset[str]:
-    """The private native plugin-loading wrappers, which build on the agents allowed on every backend."""
+    """Private wrappers that do not inherit host-only local execution behavior."""
     from skillevaluator.tier3.plugin_native import NATIVE_AGENT_IMPORT_PATHS, PRIVATE_AGENT_IMPORT_PATHS
 
-    # Wrappers over the host-only local agents stay out: they run on the host,
-    # like the local agents the backend gate already refuses.
-    return frozenset(
-        (
-            *NATIVE_AGENT_IMPORT_PATHS.values(),
-            *(
-                value
-                for (_, base), value in PRIVATE_AGENT_IMPORT_PATHS.items()
-                if not (base or "").startswith("skillevaluator.tier3.harbor.local_agents:SkillEvaluatorLocal")
-            ),
-        )
+    remote_private_paths = (
+        path
+        for (_, base), path in PRIVATE_AGENT_IMPORT_PATHS.items()
+        if not (base and base.startswith("skillevaluator.tier3.harbor.local_agents:SkillEvaluatorLocal"))
     )
+    return frozenset((*NATIVE_AGENT_IMPORT_PATHS.values(), *remote_private_paths))
 
 
 def _private_agent_paths(
@@ -5233,6 +5227,14 @@ def _run_harbor_eval_impl(
         _write_final_result(result_path, failed_result)
         return failed_result
 
+    try:
+        private_agent_paths = _private_agent_paths(agents, agent_import_paths, env_mode)
+    except ValueError as exc:
+        reporter.emit(ProgressEvent(stage="with-skill-tasks", state="failed", detail=str(exc)))
+        failed_result = _persist_pre_execution_failure([str(exc)])
+        _emit_run_finished("failed", "private agent route is not supported")
+        return failed_result
+
     reservation_identity: tuple[int, int] | None = None
     try:
         reservation_metadata = run_dir.lstat()
@@ -5447,11 +5449,6 @@ def _run_harbor_eval_impl(
         )
     except ValueError as exc:
         reporter.emit(ProgressEvent(stage="configuration", state="failed", detail="invalid staged timeout"))
-        return _persist_pre_execution_failure([str(exc)])
-    try:
-        private_agent_paths = _private_agent_paths(agents, agent_import_paths, env_mode)
-    except ValueError as exc:
-        reporter.emit(ProgressEvent(stage="configuration", state="failed", detail="unsupported private agent route"))
         return _persist_pre_execution_failure([str(exc)])
     reporter.start(
         Tier3RunPlan(

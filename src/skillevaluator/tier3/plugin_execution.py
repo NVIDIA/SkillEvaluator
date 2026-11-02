@@ -10,7 +10,6 @@ unchanged.
 
 from __future__ import annotations
 
-import os
 from collections.abc import Callable, Iterator, Mapping, Sequence
 from contextlib import contextmanager
 from contextvars import ContextVar
@@ -45,6 +44,9 @@ class PrivateRuntimeHooks(Protocol):
 
     def collect_evidence(self, jobs_dir: Path, result: dict[str, Any] | None) -> None:
         """Capture private evidence before the engine finalizes its artifacts."""
+
+    def begin_attempt(self) -> None:
+        """Start a new evidence scope before any attempt can return or fail."""
 
 
 _ACTIVE_RUNTIME: ContextVar[PrivateRuntimeHooks | None] = ContextVar("skilleval_private_runtime", default=None)
@@ -82,6 +84,14 @@ class NativeRuntimeHooks:
     evidence_error: str | None = None
     collected_jobs: set[Path] = field(default_factory=set)
 
+    def begin_attempt(self) -> None:
+        # Replace dictionaries: earlier results retain their own evidence even
+        # when the next attempt fails before creating any artifacts.
+        self.stagings = {}
+        self.evidence = {}
+        self.evidence_error = None
+        self.collected_jobs = set()
+
     def with_agent_import_path(self, agent: str, base_import_path: str | None) -> str | None:
         decision = self.decisions.get(agent)
         if decision is None or not decision.native:
@@ -99,15 +109,32 @@ class NativeRuntimeHooks:
             for task_dir in task_dirs:
                 _stage_task_mcp(task_dir, self.source)
             return
-        from skillevaluator.tier3.harbor.native_staging import build_native_task_staging, stage_native_bundle
+        import tomllib
 
-        staging = self.stagings.get(agent) or build_native_task_staging(agent, HARNESS_ADAPTERS[agent], self.source)
-        self.stagings[agent] = staging
+        from skillevaluator.tier3.harbor.native_staging import (
+            build_native_task_staging,
+            stage_native_bundle,
+            validate_native_mcp_source,
+        )
+
         if self.package is not None:
             from skillevaluator.tier3.plugin_prepare import verify_source_identity
 
             verify_source_identity(self.package)
         for task_dir in task_dirs:
+            task_config = task_dir / "task.toml"
+            runtime_env = (
+                tomllib.loads(task_config.read_text(encoding="utf-8")).get("environment", {}).get("env", {})
+                if task_config.is_file()
+                else {}
+            )
+            harness = HARNESS_ADAPTERS[agent]
+            staging = self.stagings.get(agent)
+            if staging is None:
+                staging = build_native_task_staging(agent, harness, self.source, allowed_runtime_env=runtime_env)
+                self.stagings[agent] = staging
+            else:
+                validate_native_mcp_source(harness, self.source, allowed_runtime_env=runtime_env)
             env_dir = task_dir / "environment"
             dockerfile = env_dir / "Dockerfile"
             if dockerfile.is_symlink() or not dockerfile.is_file():
@@ -302,6 +329,8 @@ def run_private_evaluation(
     try:
         while True:
             outcome.attempts += 1
+            if begin_attempt := getattr(hooks, "begin_attempt", None):
+                begin_attempt()
             if hooks is None:
                 outcome.result = evaluate(options)
             else:
@@ -349,7 +378,7 @@ def evaluate_prepared_plugin(
 
     from skillevaluator.tier3.commands import parse_agents
     from skillevaluator.tier3.plugin_native import apply_native_refusals, resolve_plugin_load
-    from skillevaluator.tier3.plugin_prepare import stage_wrapper_skill, wrapper_skill_name
+    from skillevaluator.tier3.plugin_prepare import bind_runtime_results, stage_wrapper_skill, wrapper_skill_name
 
     if not package.runnable:
         raise PluginLoadError("plugin has no runnable skill, rule, MCP server, or text component")
@@ -360,7 +389,7 @@ def evaluate_prepared_plugin(
         load, resolve_plugin_load(load, agents, env_mode=options.env_mode), package.native_source
     )
     results_dir = options.results_dir or package.native_source.plugin_root / "evals" / "results"
-    _require_results_outside_source(results_dir, package.native_source.plugin_root)
+    package = bind_runtime_results(package, results_dir)
     temp = Path(tempfile.mkdtemp(prefix="skilleval-plugin-", dir=work_dir))
     try:
         wrapper = stage_wrapper_skill(
@@ -389,13 +418,6 @@ def evaluate_prepared_plugin(
         from skillevaluator.evaluation.service import EvaluationService
 
         evaluate = EvaluationService().evaluate
-    engine = evaluate
-
-    def evaluate_attempt(attempt_options: EvaluationOptions) -> dict[str, Any]:
-        # Evidence belongs to one attempt; a retry that ends before its run
-        # directory is finalized must not publish the previous attempt's.
-        hooks.evidence, hooks.evidence_error = {}, None
-        return engine(attempt_options)
 
     def publish_with_evidence(outcome: PrivateRunOutcome) -> None:
         if hooks.stagings:
@@ -412,31 +434,9 @@ def evaluate_prepared_plugin(
         replace(options, skill_path=wrapper.path, results_dir=results_dir),
         hooks=hooks,
         provenance=provenance,
-        evaluate=evaluate_attempt,
+        evaluate=evaluate,
         publish=publish_with_evidence,
         cleanup=cleanup,
-    )
-
-
-def _require_results_outside_source(results_dir: Path, plugin_root: Path) -> None:
-    """Refuse a results directory that would change the verified plugin source.
-
-    Staging re-verifies the source-tree identity, which omits only the
-    established generated roots such as ``evals/results`` and ``results``.
-    """
-    from skillevaluator.publication_identity import _PUBLICATION_EXCLUDED_DIR_PATHS, _PUBLICATION_EXCLUDED_ROOT_DIRS
-
-    try:
-        parts = Path(os.path.abspath(results_dir)).relative_to(os.path.abspath(plugin_root)).parts  # noqa: PTH100
-    except ValueError:
-        return
-    if (parts[:1] and parts[0] in _PUBLICATION_EXCLUDED_ROOT_DIRS) or any(
-        parts[: len(excluded)] == excluded for excluded in _PUBLICATION_EXCLUDED_DIR_PATHS
-    ):
-        return
-    raise PluginLoadError(
-        f"results directory {results_dir} is inside the plugin source; use the plugin's evals/results, "
-        "its results/ directory, or a directory outside the plugin"
     )
 
 

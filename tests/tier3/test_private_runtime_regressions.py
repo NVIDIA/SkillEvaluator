@@ -160,13 +160,34 @@ def _plugin_with_dataset(root: Path):
 
 
 @pytest.mark.parametrize("results", ["out", "skills/a/results", ".skilleval-out"])
-def test_results_dir_inside_plugin_source_is_refused_before_staging(tmp_path: Path, results: str) -> None:
+def test_custom_results_dir_inside_plugin_supports_real_reservation_and_staging(tmp_path: Path, results: str) -> None:
+    from skillevaluator.tier3.harbor.adapter import generate_harbor_tasks
+    from skillevaluator.tier3.harbor.runner import _reserve_run_dir
+
     package = _plugin_with_dataset(tmp_path / "plugin")
     work = tmp_path / "work"
     work.mkdir()
-    options = EvaluationOptions(skill_path=tmp_path, results_dir=tmp_path / "plugin" / results)
-    with pytest.raises(PluginLoadError, match="inside the plugin source"):
-        px.evaluate_prepared_plugin(package, options, work_dir=work, evaluate=lambda _options: {})
+    output = tmp_path / "plugin" / results
+    options = EvaluationOptions(skill_path=tmp_path, agents="claude-code", results_dir=output)
+
+    def evaluate(prepared_options):
+        assert prepared_options.results_dir == output
+        run = _reserve_run_dir(output, "run")
+        (run / "report.json").write_text('{"private_report": "CUSTOM-RESULT-MUST-STAY-PRIVATE"}')
+        tasks = generate_harbor_tasks(prepared_options.skill_path, run / "tasks")
+        hooks = px.active_runtime()
+        assert hooks is not None
+        hooks.stage_with_arm("claude-code", tasks)
+        assert not any(
+            b"CUSTOM-RESULT-MUST-STAY-PRIVATE" in path.read_bytes()
+            for path in (tasks[0] / "environment").rglob("*")
+            if path.is_file()
+        )
+        return {"execution_status": "succeeded", "run_dir": str(run)}
+
+    outcome = px.evaluate_prepared_plugin(package, options, work_dir=work, load="native", evaluate=evaluate)
+    assert outcome.status == "succeeded"
+    assert output.is_dir()
     assert list(work.iterdir()) == []
 
 
@@ -209,7 +230,8 @@ def test_retry_does_not_publish_the_previous_attempts_native_evidence(tmp_path: 
         evaluate=evaluate,
     )
     assert len(attempts) == 2
-    assert outcome.provenance["native_evidence"] == {}
+    # No staging in the final attempt means there is no native evidence to publish.
+    assert outcome.provenance.get("native_evidence", {}) == {}
 
 
 @pytest.mark.parametrize(

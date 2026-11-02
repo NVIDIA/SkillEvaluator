@@ -1227,8 +1227,9 @@ def _mcp_entry_claude(server: Mapping[str, Any], declared: Mapping[str, Any] | N
 
     Claude Code applies a server's ``env`` (stdio) and ``headers`` (http/sse), so
     the declared values are kept. They are ``${VAR}`` references or plain
-    values; the blocking MCP checks already refuse inline credentials, and a
-    value that still looks like a literal secret is refused here too.
+    values. Native task staging validates the complete declarations against
+    the task MCP policy before this projection. Keep a defensive redaction
+    check here as well; redaction alone is not credential authorization.
     """
     name = str(server.get("name") or "")
     if server.get("command"):
@@ -1241,8 +1242,8 @@ def _mcp_entry_claude(server: Mapping[str, Any], declared: Mapping[str, Any] | N
         entry = {"type": "sse" if transport == "sse" else "http", "url": _redacted(server["url"])}
         applied = "headers"
     values = (declared or {}).get(applied)
-    kept: dict[str, str] = {}
     if isinstance(values, Mapping) and values:
+        kept: dict[str, str] = {}
         for key, value in values.items():
             text = str(value)
             if _redacted(text) != text:
@@ -1252,37 +1253,7 @@ def _mcp_entry_claude(server: Mapping[str, Any], declared: Mapping[str, Any] | N
                 )
             kept[str(key)] = text
         entry[applied] = kept
-    _validate_claude_mcp_entry(name, server, applied, kept)
     return entry
-
-
-_CLAUDE_PLUGIN_ROOT_REF = re.compile(r"\$\{CLAUDE_PLUGIN_ROOT\}|\$CLAUDE_PLUGIN_ROOT\b")
-
-
-def _validate_claude_mcp_entry(name: str, server: Mapping[str, Any], applied: str, values: Mapping[str, str]) -> None:
-    """Apply the task MCP credential policy to what Claude Code will expand.
-
-    Claude Code expands ``${VAR}`` in ``.mcp.json`` launch fields, URLs, env and
-    headers from its own environment, which holds the operator's credentials.
-    ``${CLAUDE_PLUGIN_ROOT}`` names the staged plugin directory, not a secret.
-    """
-    from skillevaluator.tier3.harbor.adapter import validate_mcp_server_declarations
-
-    def neutral(value: Any) -> Any:
-        return _CLAUDE_PLUGIN_ROOT_REF.sub("/plugin-root", value) if isinstance(value, str) else value
-
-    declaration: dict[str, Any] = {"name": name or "<unnamed>"}
-    for key in ("transport", "url", "command"):
-        if server.get(key) is not None:
-            declaration[key] = neutral(str(server[key]))
-    if server.get("args"):
-        declaration["args"] = [neutral(str(arg)) for arg in server["args"]]
-    if values:
-        declaration[applied] = {key: neutral(value) for key, value in values.items()}
-    try:
-        validate_mcp_server_declarations([declaration], source_label="native Claude Code plugin MCP")
-    except ValueError as exc:
-        raise PluginLoadError(f"Refusing to stage MCP server '{name}' natively: {exc}") from exc
 
 
 def _toml_string(value: str) -> str:
@@ -2286,17 +2257,18 @@ PRIVATE_AGENT_IMPORT_PATHS.update(
 
 
 def private_agent_import_path(agent: str, base_import_path: str | None) -> str | None:
-    """Classify setup failures for a private arm while retaining its routing and launch behavior.
+    """Classify known setup failures without replacing an unsupported backend's agent.
 
-    Classification is best-effort: a route without a setup error wrapper, such
-    as a custom backend's own agent, keeps its import path. Its setup failures
-    are then final rather than retried.
+    Unknown wrappers retain their own setup semantics and are not eligible for
+    setup-only retries unless they already emit the required classification.
+    Native loading still requires an explicit compatible native wrapper.
     """
     if any(
         key[0] == agent and value == base_import_path
         for paths in (NATIVE_AGENT_IMPORT_PATHS, PRIVATE_AGENT_IMPORT_PATHS)
         for key, value in paths.items()
     ):
+        assert base_import_path is not None
         return base_import_path
     return PRIVATE_AGENT_IMPORT_PATHS.get((agent, base_import_path), base_import_path)
 

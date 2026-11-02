@@ -267,6 +267,7 @@ The following flags are forwarded to the live-eval engine when Tier 3 is enabled
 | `--skip-baseline` | off | Skip the without-skill baseline (no lift analysis, faster). |
 | `--n-concurrent INTEGER` | unset | Concurrent eval cases per agent. |
 | `--max-agents INTEGER` | unset | Maximum agents to run in parallel. |
+| `--max-cases INTEGER RANGE` | unset | Run only the first N eval cases in staged order (minimum `1`); without a limit every case runs. A run that skips cases is recorded in `run_config.json` and is never publication evidence. |
 | `--n-attempts INTEGER` | unset | Attempts per eval case (pass@k). |
 | `--pass-threshold FLOAT` | unset | Score threshold (0.0–1.0) for a case to count as passed. |
 | `--stop-on-pass / --no-stop-on-pass` | unset | Stop a case's remaining attempts once one passes. |
@@ -436,6 +437,7 @@ Use `skillevaluator tier3 PATH` for the complete workflow with automatic missing
 | `--stop-on-pass / --no-stop-on-pass` | unset | Stop a case's remaining attempts once one passes. |
 | `--n-concurrent INTEGER` | unset | Concurrent eval cases per agent. |
 | `--max-agents INTEGER` | unset | Maximum agents to run in parallel. |
+| `--max-cases INTEGER RANGE` | unset | Run only the first N eval cases in staged order (minimum `1`); without a limit every case runs. A run that skips cases is recorded in `run_config.json` and is never publication evidence. |
 | `--model TEXT` | unset | Global agent model override. |
 | `--agent-model TEXT` | unset | Per-agent model override, `AGENT=MODEL` (repeatable), e.g. `--agent-model codex=gpt-6.1-sol`. Accepts the `claude` alias for `claude-code`. |
 | `--custom-dockerfile-mode [preserve\|rebase]` | unset | How a custom `evals/environment/Dockerfile` is applied: `rebase` (built-in default) swaps its `FROM` line onto the eval base image; `preserve` keeps your `FROM` and appends the eval dependencies. |

@@ -3,6 +3,7 @@
 # Pages reports are public unless the site is explicitly private (GitHub Enterprise Cloud).
 # Reports include source evidence; private repositories should otherwise use scan artifacts.
 # Use the release-generated file; set your own URL and refresh the caller blob after scan-file edits.
+# Also grant id-token: write in skill-checks.yml so scans retain signed execution receipts.
 name: Publish skill reports
 on:
   workflow_run:

@@ -114,3 +114,96 @@ def test_staged_template_ignores_an_unrelated_checks_module(tmp_path):
         [sys.executable, "-I", "-c", program, str(staged)], cwd=tmp_path, capture_output=True, text=True, check=True
     )
     assert json.loads(result.stdout) == [str(staged.with_name("checks.py")), True]
+
+
+def _read(path):
+    return {"action": "read", "action_input": {"path": path}, "observation": "ok"}
+
+
+def _bash(command):
+    return {"action": "bash", "action_input": {"command": command}, "observation": "ok"}
+
+
+_SIBLING_READS = [_read("/skills/other/SKILL.md"), _read("/skills/calculator/SKILL.md")]
+_ALTERNATE_READ = [_read("/skills/calc-alt/SKILL.md")]
+_ALTERNATES = ["calculator", "calc-alt"]
+
+# Each input makes one forwarded option change the result, so an adapter that
+# drops an option or binds it to the wrong parameter no longer matches the
+# host call or the pinned verdict.
+_OPTION_CASES = {
+    "activation_skill_tool": (
+        lambda v: v.check_activation([], "calculator", ["calculator"]),
+        lambda: checks.check_activation([], "calculator", skill_tool_names=["calculator"]),
+        (True, 1.0, "Activated via Skill tool: calculator"),
+    ),
+    "activation_other_skill_tool": (
+        lambda v: v.check_activation([], "calculator", ["demo"]),
+        lambda: checks.check_activation([], "calculator", skill_tool_names=["demo"]),
+        (False, 0.0, "Activated different skill(s): ['demo']"),
+    ),
+    "activation_alternate": (
+        lambda v: v.check_activation(_ALTERNATE_READ, "calculator", None, _ALTERNATES),
+        lambda: checks.check_activation(_ALTERNATE_READ, "calculator", acceptable_skills=_ALTERNATES),
+        (True, 0.75, "Read SKILL.md for acceptable alternate 'calc-alt'"),
+    ),
+    "negative_case_skill_tool": (
+        lambda v: v.check_negative_case([], "calculator", ["calculator"]),
+        lambda: checks.check_negative_case([], "calculator", skill_tool_names=["calculator"]),
+        (False, 0.0, "Incorrectly activated calculator via Skill tool"),
+    ),
+    "routing_skill_tool": (
+        lambda v: v.check_routing([], "calculator", ["demo"]),
+        lambda: checks.check_routing([], "calculator", skill_tool_names=["demo"]),
+        (False, 0.0, "Agent read wrong skill(s): ['Skill(demo)']"),
+    ),
+    "routing_group_workspace": (
+        lambda v: v.check_routing(_SIBLING_READS, "calculator", None, ["other", "calculator"], "group"),
+        lambda: checks.check_routing(
+            _SIBLING_READS, "calculator", workspace_skill_names=["other", "calculator"], workspace_mode="group"
+        ),
+        (
+            True,
+            1.0,
+            "Agent read only allowed workspace skill(s): ['/skills/other/SKILL.md', '/skills/calculator/SKILL.md']",
+        ),
+    ),
+    "routing_alternate": (
+        lambda v: v.check_routing(_ALTERNATE_READ, "calculator", None, None, "isolated", _ALTERNATES),
+        lambda: checks.check_routing(_ALTERNATE_READ, "calculator", acceptable_skills=_ALTERNATES),
+        (True, 0.75, "Agent routed to acceptable alternate skill(s): ['calc-alt']"),
+    ),
+    "workflow_order_skill_tool": (
+        lambda v: v.check_workflow_order([_bash("python scripts/calc.py")], ["calculator"], "calculator"),
+        lambda: checks.check_workflow_order(
+            [_bash("python scripts/calc.py")], skill_tool_names=["calculator"], expected_skill="calculator"
+        ),
+        (True, 1.0, "Correct workflow order"),
+    ),
+}
+
+
+@pytest.mark.parametrize("case", sorted(_OPTION_CASES))
+def test_standalone_checks_forward_options_that_change_the_result(verifier, case):
+    standalone_call, host_call, (passed, score, reason) = _OPTION_CASES[case]
+    standalone = standalone_call(verifier)
+    assert standalone == host_call()
+    assert (standalone["passed"], standalone["score"], standalone["reason"]) == (passed, score, reason)
+
+
+def test_standalone_skill_match_forwards_fuzzy(verifier):
+    fuzzy = verifier._classify_skill_match("calculator-v2", "calculator", None, True)
+    assert fuzzy == checks._classify_skill_match("calculator-v2", "calculator", None, fuzzy=True)
+    assert fuzzy["match_type"] == "expected"
+    assert verifier._classify_skill_match("calculator-v2", "calculator", None, False) is None
+
+
+def test_standalone_security_forwards_acceptable_alternates(verifier):
+    calls = [*_ALTERNATE_READ, _bash("rm -rf /workspace/data")]
+    standalone = verifier.check_security({"steps": []}, calls, "calculator", _ALTERNATES)
+    host = checks.check_security(calls, "", user_text="", expected_skill="calculator", acceptable_skills=_ALTERNATES)
+    assert standalone == host
+    assert standalone["passed"] is False
+    assert [finding["target_skill_used_before"] for finding in standalone["findings"]] == [True]
+    without_alternates = verifier.check_security({"steps": []}, calls, "calculator")
+    assert [finding["target_skill_used_before"] for finding in without_alternates["findings"]] == [False]

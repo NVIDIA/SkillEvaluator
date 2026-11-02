@@ -32,7 +32,6 @@ from rich.table import Table
 from skillevaluator.constants import (
     DIMENSION_VERDICT_NEUTRAL_THRESHOLD,
     DIMENSION_VERDICT_PASS_THRESHOLD,
-    SOURCE_VALIDATION_CLI_LIMIT,
 )
 from skillevaluator.reporting.base import (
     ReporterBase,
@@ -41,7 +40,7 @@ from skillevaluator.reporting.base import (
     is_advisory_agent_eval_skip,
     passes_required_gate,
     source_validation_errors,
-    source_validation_overflow_note,
+    source_validation_preview,
 )
 from skillevaluator.reporting.harbor_viewer import (
     harbor_evidence_link_text,
@@ -52,6 +51,8 @@ from skillevaluator.reporting.run_status import Status, resolve_run_status, resu
 from skillevaluator.utils.rich_markup import escape_markup
 
 if TYPE_CHECKING:
+    from collections.abc import Iterable
+
     from skillevaluator.models import Finding, ValidationResult
 
 
@@ -96,13 +97,17 @@ class CLIReporter(ReporterBase):
     Supports both direct printing and string capture for testing.
     """
 
-    def __init__(self, console: Console | None = None) -> None:
+    def __init__(self, console: Console | None = None, *, report_formats: Iterable[str] = ()) -> None:
         """Initialize CLI reporter.
 
         Args:
             console: Rich Console instance (creates new one if not provided)
+            report_formats: Every format the run emits alongside this report.
+                Failed Tier 3 source checks are cut to a preview only when one
+                of these files lists all of them.
         """
         self._console = console
+        self._report_formats = tuple(report_formats)
 
     @property
     def console(self) -> Console:
@@ -583,12 +588,12 @@ class CLIReporter(ReporterBase):
             console.print(f"     [dim]{label}:[/dim]     {escape_markup(finding.suggestion)}")
         source_errors = source_validation_errors(finding.metadata)
         if source_errors:
+            shown, overflow_note = source_validation_preview(source_errors, self._report_formats)
             console.print("     [dim]Source validation:[/dim]")
-            for error in source_errors[:SOURCE_VALIDATION_CLI_LIMIT]:
+            for error in shown:
                 console.print(f"       {_rich_source_error(error)}")
-            hidden = len(source_errors) - SOURCE_VALIDATION_CLI_LIMIT
-            if hidden > 0:
-                console.print(f"       [dim]{source_validation_overflow_note(hidden)}[/dim]")
+            if overflow_note:
+                console.print(f"       [dim]{escape_markup(overflow_note)}[/dim]")
         console.print()
 
     def _print_summary_table(self, results: list[ValidationResult], console: Console) -> None:

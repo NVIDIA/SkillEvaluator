@@ -20,13 +20,46 @@ from skillevaluator.constants import SOURCE_VALIDATION_CLI_LIMIT
 from skillevaluator.evaluation.tier3_report import advisory_skip_result, dataset_required_result
 from skillevaluator.models import Finding, ValidationResult
 from skillevaluator.reporting import CLIReporter, HTMLReporter, JSONReporter
-from skillevaluator.reporting.base import source_validation_errors
+from skillevaluator.reporting.base import (
+    source_validation_errors,
+    source_validation_full_report,
+    source_validation_preview,
+)
 from skillevaluator.reporting.console_ui import summarize_tier3
 from skillevaluator.reporting.html import _sanitize_tier3_display_payload
 from skillevaluator.tier3.evals_spec import CheckResult
 
 _MESSAGE = "Missing required fields: question"
-_OVERFLOW = "see Full Insights in the HTML report."
+_HTML_REPORT = "Full Insights in the HTML report"
+_JSON_REPORT = "tier3.provenance.source_validation in the JSON report"
+_OVERFLOW = f"see {_HTML_REPORT}."
+_JSON_OVERFLOW = f"see {_JSON_REPORT}."
+# Format combinations a run can emit: with and without the CLI report, and
+# with HTML, JSON, both, or neither written as a file.
+_FORMAT_SETS = [
+    (),
+    ("cli",),
+    ("cli", "markdown", "sarif"),
+    ("cli", "json"),
+    ("cli", "html"),
+    ("cli", "json", "html"),
+    ("markdown",),
+    ("json",),
+    ("html", "json"),
+]
+
+
+def _written_report(report_formats: tuple[str, ...]) -> str | None:
+    """The written report that lists every source error, or None when the run writes none."""
+    if "html" in report_formats:
+        return _HTML_REPORT
+    if "json" in report_formats:
+        return _JSON_REPORT
+    return None
+
+
+def _overflow_note(hidden: int, report: str | None) -> str:
+    return f"{hidden} more {'error' if hidden == 1 else 'errors'}: see {report}."
 
 
 def _plain(output: str) -> str:
@@ -89,20 +122,62 @@ def test_source_errors_stay_out_of_the_finding_text(tmp_path: Path) -> None:
     assert len(after.findings[0].metadata["source_validation"]) == 10
 
 
+@pytest.mark.parametrize("report_formats", [fmts for fmts in _FORMAT_SETS if "cli" in fmts])
 @pytest.mark.parametrize("error_count", [0, 1, 5, 6, 13, 100])
-def test_cli_report_previews_source_errors_in_order(tmp_path: Path, error_count: int) -> None:
-    output = _plain(CLIReporter().render(_source_result(tmp_path, _entry_errors(error_count))))
+def test_cli_report_previews_source_errors_in_order(
+    tmp_path: Path,
+    error_count: int,
+    report_formats: tuple[str, ...],
+) -> None:
+    result = _source_result(tmp_path, _entry_errors(error_count))
+    output = _plain(CLIReporter(report_formats=report_formats).render(result))
 
-    shown = min(error_count, SOURCE_VALIDATION_CLI_LIMIT)
+    report = _written_report(report_formats)
+    # Without an HTML or JSON report the terminal is the only place the errors
+    # appear, so it lists every one of them and names no report.
+    shown = min(error_count, SOURCE_VALIDATION_CLI_LIMIT) if report else error_count
     assert re.findall(r"entry case-\d+:", output) == [f"entry case-{index}:" for index in range(1, shown + 1)]
     assert "Create or fix the Tier 3 source" in output
     assert ("Source validation:" in output) == (error_count > 0)
-    if error_count > SOURCE_VALIDATION_CLI_LIMIT:
-        hidden = error_count - SOURCE_VALIDATION_CLI_LIMIT
-        assert f"{hidden} more {'error' if hidden == 1 else 'errors'}: {_OVERFLOW}" in output
+    if error_count:
         assert output.index("Source validation:") > output.index("Create or fix the Tier 3 source")
+    hidden = error_count - shown
+    if hidden:
+        assert _overflow_note(hidden, report) in output
     else:
-        assert _OVERFLOW not in output
+        assert "more error" not in output
+    for other_report in {_HTML_REPORT, _JSON_REPORT} - {report}:
+        assert other_report not in output
+
+
+def test_cli_reporter_without_report_formats_lists_every_source_error(tmp_path: Path) -> None:
+    # A reporter that is not told about any written report must not point at one.
+    output = _plain(CLIReporter().render(_source_result(tmp_path, _entry_errors(13))))
+
+    assert re.findall(r"entry case-\d+:", output) == [f"entry case-{index}:" for index in range(1, 14)]
+    assert "more error" not in output
+    assert _HTML_REPORT not in output
+    assert _JSON_REPORT not in output
+
+
+@pytest.mark.parametrize("report_formats", _FORMAT_SETS)
+@pytest.mark.parametrize("error_count", [0, 5, 6, 13])
+def test_source_validation_preview_names_only_written_reports(
+    error_count: int,
+    report_formats: tuple[str, ...],
+) -> None:
+    errors = [{"path": f"entry case-{index}", "status": "error", "message": _MESSAGE} for index in range(error_count)]
+    report = _written_report(report_formats)
+
+    shown, note = source_validation_preview(errors, report_formats)
+
+    assert source_validation_full_report(report_formats) == report
+    if report and error_count > SOURCE_VALIDATION_CLI_LIMIT:
+        assert shown == errors[:SOURCE_VALIDATION_CLI_LIMIT]
+        assert note == _overflow_note(error_count - SOURCE_VALIDATION_CLI_LIMIT, report)
+    else:
+        assert shown == errors
+        assert note is None
 
 
 def test_cli_report_prints_source_errors_as_inert_text(tmp_path: Path) -> None:
@@ -180,28 +255,36 @@ def test_cli_report_omits_source_section_without_errors(metadata: dict) -> None:
 
 @pytest.mark.parametrize("blocking", [False, True])
 @pytest.mark.parametrize("error_count", [0, 1, 5, 6, 13, 100])
-@pytest.mark.parametrize("show_source_details", [False, True])
+@pytest.mark.parametrize("report_formats", _FORMAT_SETS)
 def test_compact_tier3_panel_counts_and_previews_source_errors(
     tmp_path: Path,
     blocking: bool,
     error_count: int,
-    show_source_details: bool,
+    report_formats: tuple[str, ...],
 ) -> None:
     result = _source_result(tmp_path, _entry_errors(error_count), blocking=blocking)
     finding = result.findings[0]
     original_suggestion = finding.suggestion
     original_metadata = json.dumps(result.metadata, sort_keys=True)
 
-    ran, _passed, rows, skip_reason = summarize_tier3(result, show_source_details=show_source_details)
+    ran, _passed, rows, skip_reason = summarize_tier3(result, report_formats=report_formats)
 
     assert ran is True
     assert skip_reason == ""
-    shown = min(error_count, SOURCE_VALIDATION_CLI_LIMIT) if show_source_details else 0
+    report = _written_report(report_formats)
+    # The full CLI report lists the errors itself; otherwise the panel lists all
+    # of them unless an HTML or JSON report written by the run keeps the rest.
+    if "cli" in report_formats:
+        shown = 0
+    elif report:
+        shown = min(error_count, SOURCE_VALIDATION_CLI_LIMIT)
+    else:
+        shown = error_count
     assert [row.segments[0][0] for row in rows if row.label == "source"] == [
         f"entry case-{index}: {_MESSAGE}" for index in range(1, shown + 1)
     ]
     counts = [row.segments[0][0] for row in rows if row.label == "validation"]
-    truncated = show_source_details and error_count > SOURCE_VALIDATION_CLI_LIMIT
+    truncated = "cli" not in report_formats and shown < error_count
     if error_count:
         expected = f"{error_count} source validation {'error' if error_count == 1 else 'errors'}"
         if truncated:
@@ -210,7 +293,10 @@ def test_compact_tier3_panel_counts_and_previews_source_errors(
     else:
         assert counts == []
     rendered = " ".join(text for row in rows for text, _style in row.segments)
-    assert (_OVERFLOW in rendered) == truncated
+    if truncated:
+        assert _overflow_note(error_count - SOURCE_VALIDATION_CLI_LIMIT, report) in rendered
+    else:
+        assert "more error" not in rendered
     assert finding.suggestion == original_suggestion
     assert json.dumps(result.metadata, sort_keys=True) == original_metadata
 
@@ -343,14 +429,14 @@ def _write_invalid_dataset(skill: Path, count: int) -> None:
     )
 
 
-@pytest.mark.parametrize("blocking", [False, True])
-@pytest.mark.parametrize("report_formats", [None, "cli,json,html", "json,html"])
-def test_validate_shows_source_errors_once(
+def _invoke_validate(
     monkeypatch: pytest.MonkeyPatch,
     tmp_path: Path,
+    extra_args: list[str],
+    *,
     blocking: bool,
-    report_formats: str | None,
-) -> None:
+) -> tuple[str, Path]:
+    """Run ``validate`` on a skill with 13 invalid eval entries; return its plain output and report directory."""
     from skillevaluator import cli as cli_module
     from skillevaluator.evaluation import EvaluationService
 
@@ -372,23 +458,70 @@ def test_validate_shows_source_errors_once(
     )
     output_dir = tmp_path / "reports"
     args = ["validate", "--no-autopilot", str(skill), "--no-tier2", "--tier3", "--output-dir", str(output_dir)]
-    if report_formats:
-        args.extend(["--report", report_formats])
+    args.extend(extra_args)
     if blocking:
         args.append("--block-on-agent-eval")
 
     command = CliRunner().invoke(cli, args)
 
     assert command.exit_code == (1 if blocking else 0), command.output
-    output = _plain(command.output)
-    full_cli_report = report_formats is not None and "cli" in report_formats.split(",")
+    return _plain(command.output), output_dir
+
+
+@pytest.mark.parametrize("blocking", [False, True])
+@pytest.mark.parametrize("report_formats", [None, "cli", "json", "cli,json", "cli,json,html", "json,html"])
+def test_validate_shows_source_errors_once(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+    blocking: bool,
+    report_formats: str | None,
+) -> None:
+    extra_args = ["--report", report_formats] if report_formats else []
+
+    output, output_dir = _invoke_validate(monkeypatch, tmp_path, extra_args, blocking=blocking)
+
+    # The quiet default writes HTML and JSON; an explicit -r is honoured exactly.
+    emitted = tuple(report_formats.split(",")) if report_formats else ("html", "json")
+    full_cli_report = "cli" in emitted
+    report = _written_report(emitted)
+    shown = SOURCE_VALIDATION_CLI_LIMIT if report else 13
     assert "13 source validation errors" in output
-    assert ("(showing first 5)" in output) == (not full_cli_report)
+    assert ("(showing first 5)" in output) == (not full_cli_report and report is not None)
     assert ("Source validation:" in output) == full_cli_report
-    assert re.findall(r"entry case-\d+:", output) == [f"entry case-{index}:" for index in range(1, 6)]
-    assert output.count(f"8 more errors: {_OVERFLOW}") == 1
-    report = json.loads(next(output_dir.glob("*.json")).read_text(encoding="utf-8"))
-    assert len(report["tier3"]["provenance"]["source_validation"]) == 13
-    html = next(output_dir.glob("*.html")).read_text(encoding="utf-8")
-    assert "Source Validation Errors (13)" in html
-    assert f"<li>entry case-13: {_MESSAGE}</li>" in html
+    assert re.findall(r"entry case-\d+:", output) == [f"entry case-{index}:" for index in range(1, shown + 1)]
+    if report:
+        assert output.count(_overflow_note(13 - shown, report)) == 1
+    else:
+        assert "more error" not in output
+    for other_report in {_HTML_REPORT, _JSON_REPORT} - {report}:
+        assert other_report not in output
+    json_reports = list(output_dir.glob("*.json"))
+    assert len(json_reports) == ("json" in emitted)
+    if json_reports:
+        json_report = json.loads(json_reports[0].read_text(encoding="utf-8"))
+        assert len(json_report["tier3"]["provenance"]["source_validation"]) == 13
+    html_reports = list(output_dir.glob("*.html"))
+    assert len(html_reports) == ("html" in emitted)
+    if html_reports:
+        html = html_reports[0].read_text(encoding="utf-8")
+        assert "Source Validation Errors (13)" in html
+        assert f"<li>entry case-13: {_MESSAGE}</li>" in html
+
+
+@pytest.mark.parametrize("blocking", [False, True])
+def test_verbose_validate_without_file_reports_lists_every_source_error(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+    blocking: bool,
+) -> None:
+    # --verbose prints the full CLI report and, without -r, writes no HTML or
+    # JSON report, so every error must be in the terminal output.
+    output, output_dir = _invoke_validate(monkeypatch, tmp_path, ["--verbose"], blocking=blocking)
+
+    assert "Source validation:" in output
+    assert re.findall(r"entry case-\d+:", output) == [f"entry case-{index}:" for index in range(1, 14)]
+    assert "more error" not in output
+    assert _HTML_REPORT not in output
+    assert _JSON_REPORT not in output
+    assert list(output_dir.glob("*.json")) == []
+    assert list(output_dir.glob("*.html")) == []

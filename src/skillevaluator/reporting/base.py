@@ -36,6 +36,7 @@ from skillevaluator.constants import (
     DIMENSION_MAPPING,
     DIMENSION_VERDICT_NEUTRAL_THRESHOLD,
     DIMENSION_VERDICT_PASS_THRESHOLD,
+    SOURCE_VALIDATION_CLI_LIMIT,
 )
 from skillevaluator.publication_evidence import (
     TIER1_REQUIRED_CHECKS_KEY,
@@ -55,6 +56,8 @@ from skillevaluator.utils.rich_markup import strip_terminal_controls
 _AGENT_EVAL_MAX_FUTURE_CLOCK_SKEW = timedelta(minutes=5)
 
 if TYPE_CHECKING:
+    from collections.abc import Iterable
+
     from skillevaluator.models import ValidationResult
 
 
@@ -2525,10 +2528,41 @@ def source_validation_errors(metadata: object) -> list[dict[str, str]]:
     return errors
 
 
-def source_validation_overflow_note(hidden: int) -> str:
-    """Return the note that follows a terminal preview of Tier 3 source errors."""
+def source_validation_full_report(report_formats: Iterable[str]) -> str | None:
+    """Name the report file of this run that lists every failed Tier 3 source check.
+
+    ``report_formats`` are the formats the run actually emits. HTML Full
+    Insights and the JSON report's ``tier3.provenance.source_validation`` list
+    every error. ``cli`` writes no file, Markdown has no section for them, and
+    SARIF keeps them only as raw result properties, so ``None`` means no report
+    of this run is a place to send the reader.
+    """
+    formats = set(report_formats)
+    if "html" in formats:
+        return "Full Insights in the HTML report"
+    if "json" in formats:
+        return "tier3.provenance.source_validation in the JSON report"
+    return None
+
+
+def source_validation_preview(
+    errors: list[dict[str, str]],
+    report_formats: Iterable[str],
+) -> tuple[list[dict[str, str]], str | None]:
+    """Return the failed Tier 3 source checks a terminal view prints, and the note after them.
+
+    A terminal view previews the first ``SOURCE_VALIDATION_CLI_LIMIT`` errors
+    and names the report with the rest only when this run writes one (see
+    :func:`source_validation_full_report`). Otherwise, for example with an
+    explicit ``-r cli``, it prints every error and no note, because the rest
+    would not be reachable anywhere else.
+    """
+    full_report = source_validation_full_report(report_formats)
+    hidden = len(errors) - SOURCE_VALIDATION_CLI_LIMIT
+    if full_report is None or hidden <= 0:
+        return list(errors), None
     noun = "error" if hidden == 1 else "errors"
-    return f"{hidden} more {noun}: see Full Insights in the HTML report."
+    return errors[:SOURCE_VALIDATION_CLI_LIMIT], f"{hidden} more {noun}: see {full_report}."
 
 
 class ReporterBase(ABC):

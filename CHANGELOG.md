@@ -186,13 +186,16 @@ All notable changes to SkillEvaluator are documented in this file.
 - When `validate` finds an unusable Tier 3 source, the terminal and HTML
   report now say which entries or files failed and why, instead of only
   "Create or fix the Tier 3 source ... and rerun validation." The terminal
-  lists the first five errors and counts the rest, under the Tier 3 finding
-  when the full CLI report prints (`-r cli` or `--verbose`) and otherwise in
-  the compact Tier 3 panel. The HTML dashboard shows a single error in full or
-  the error count, and Full Insights lists every error under Source Validation
-  Errors. The errors come from the skill's eval files, so they are printed as
-  plain text with terminal control sequences removed. Passing checks and
-  warnings are not listed. The JSON report still carries every error under
+  lists the errors under the Tier 3 finding when the full CLI report prints
+  (`-r cli` or `--verbose`) and otherwise in the compact Tier 3 panel. When
+  the run also writes an HTML or JSON report, the terminal shows the first
+  five and names that report for the rest; when it writes neither (for example
+  `-r cli` alone, or `--verbose` without `-r`), the terminal lists every
+  error. The HTML dashboard shows a single error in full or the error count,
+  and Full Insights lists every error under Source Validation Errors. The
+  errors come from the skill's eval files, so they are printed as plain text
+  with terminal control sequences removed. Passing checks and warnings are not
+  listed. The JSON report still carries every error under
   `tier3.provenance.source_validation`. Validation rules, gate decisions, and
   the finding's suggestion text are unchanged.
 - Tier 2 caps every intra-skill embedding chunk at 3,000 characters, preserves

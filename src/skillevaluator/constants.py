@@ -554,8 +554,9 @@ AGENT_EVAL_DATASET_REQUIRED_FIELDS = [
 
 AGENT_EVAL_DATASET_FORMATS = {".json", ".jsonl", ".yaml", ".yml"}
 
-# Terminal views preview this many failed Tier 3 source checks; the JSON and
-# HTML reports keep all of them.
+# Terminal views preview this many failed Tier 3 source checks when the run
+# also writes an HTML or JSON report, which keeps all of them; otherwise they
+# print every failed check.
 SOURCE_VALIDATION_CLI_LIMIT = 5
 
 

@@ -241,6 +241,8 @@ class PIIWaiverSet:
     applied: set[str] = field(default_factory=set)
     # Each directory or file the PII scan covered, as passed and resolved.
     covered: list[tuple[Path, Path]] = field(default_factory=list)
+    # Each waiver ``file`` as located by :meth:`_locate`, so a scan resolves it once.
+    _located: dict[str, Path | None] = field(default_factory=dict, repr=False)
 
     @classmethod
     def load(cls, path: Path, categories: Collection[str], *, today: date | None = None) -> PIIWaiverSet:
@@ -257,11 +259,13 @@ class PIIWaiverSet:
         return self.path.absolute().parent.resolve()
 
     def _locate(self, relative: str) -> Path | None:
-        located = self._base() / relative
-        try:
-            return located.parent.resolve() / located.name
-        except (OSError, RuntimeError, ValueError):
-            return None
+        if relative not in self._located:
+            located = self._base() / relative
+            try:
+                self._located[relative] = located.parent.resolve() / located.name
+            except (OSError, RuntimeError, ValueError):
+                self._located[relative] = None
+        return self._located[relative]
 
     def cover(self, unit: Path) -> None:
         """Record that the PII scan covered ``unit``: one skill, a folder scanned directly, or a file.
@@ -303,11 +307,14 @@ class PIIWaiverSet:
         """
         try:
             located = file_path.absolute().parent.resolve() / file_path.name
-            relative = located.relative_to(self._base()).as_posix()
         except (OSError, RuntimeError, ValueError):
             return None
+        # Compared as located paths, the way findings() judges a waiver, so a waiver that names
+        # the file through a symlinked directory applies wherever it is judged.
         # ``created`` was checked when the file loaded; only the expiry date can end a waiver.
-        candidates = [waiver for waiver in self.waivers if waiver.file == relative and self.today <= waiver.expires]
+        candidates = [
+            waiver for waiver in self.waivers if self.today <= waiver.expires and self._locate(waiver.file) == located
+        ]
         if not candidates:
             return None
 

@@ -225,6 +225,37 @@ def test_invalid_waiver_file_applies_nothing_and_fails_the_scan(
     assert str(tmp_path) not in JSONReporter(include_timestamp=False).render(result)
 
 
+@pytest.mark.parametrize(
+    ("waiver_dir", "waiver_file"),
+    [
+        pytest.param(".", ".claude/skills/foo/SKILL.md", id="through-the-link"),
+        pytest.param(".", "skills/foo/SKILL.md", id="link-free-path"),
+        pytest.param(".claude", "skills/foo/SKILL.md", id="waiver-file-beside-the-link"),
+    ],
+)
+def test_waiver_through_a_symlinked_skill_directory_applies(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    waiver_dir: str,
+    waiver_file: str,
+) -> None:
+    """A waiver applies wherever it is judged, whichever path to the file it names."""
+    _write_skills(tmp_path / "skills", "foo")
+    (tmp_path / ".claude" / "skills").mkdir(parents=True)
+    try:
+        (tmp_path / ".claude" / "skills" / "foo").symlink_to(tmp_path / "skills" / "foo", target_is_directory=True)
+    except OSError as exc:
+        pytest.skip(f"cannot create a symlink here: {exc}")
+    waiver_path = _write_waivers(tmp_path / waiver_dir, _waiver(file=waiver_file, line=5))
+    monkeypatch.chdir(tmp_path)
+
+    result = _scan(Path(".claude", "skills", "foo"), waiver_path)
+
+    assert result.passed
+    assert _pii(result) == []
+    assert _dispositions(result) == [("applied-pii-waiver", "PII-001", "SKILL.md")]
+
+
 def test_waiver_whose_file_cannot_be_located_is_not_judged(skill: Path, tmp_path: Path) -> None:
     """A path the OS rejects (here an embedded NUL) is skipped, never a crash of the scan."""
     waivers = PIIWaiverSet(

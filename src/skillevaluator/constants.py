@@ -261,6 +261,11 @@ CONTENT_DEDUP_TRIVIAL_DUP_MAX_CHARS = 400
 
 CONTENT_DEDUP_EMBEDDING_BATCH_SIZE = 64
 
+# Check name of the advisory finding recorded when the chat LLM declines to
+# classify a content cluster. A refusal is missing evidence about one cluster,
+# not a failed scan, so it is reported as a MEDIUM finding instead of blocking.
+CONTENT_DEDUP_LLM_REFUSED_CHECK = "llm_refused"
+
 # Resource ceilings for untrusted skill content. Tier 2 sends collected text
 # to external embedding/LLM providers and performs pairwise comparisons, so
 # every stage must have an explicit upper bound.

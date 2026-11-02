@@ -2270,7 +2270,7 @@ class SecurityValidator(ValidatorBase):
         suppressed and excluded from the aggregate risk score (see
         :func:`~skillevaluator.validators.skillspector_scope.scope_skillspector_issues`).
         """
-        self._store_skillspector_metadata(data, result)
+        self._store_skillspector_metadata(data, result, score_message=False)
 
         issues = data.get("issues", [])
         report_components = data.get("components") if isinstance(data.get("components"), list) else []
@@ -2376,6 +2376,16 @@ class SecurityValidator(ValidatorBase):
                 effective_score,
                 min(reported_score, self._retained_skillspector_risk_score(scanned_issues, report_components)),
             )
+        if reported_score > 50:
+            reported_severity = data["risk_assessment"].get("severity", "UNKNOWN")
+            if skipped_inapplicable:
+                # The gate uses the applicable score, so label both scores.
+                result.add_message(
+                    f"skillspector risk score: {effective_score}/100 applicable "
+                    f"(raw {reported_score}/100 {reported_severity})"
+                )
+            else:
+                result.add_message(f"skillspector risk score: {reported_score}/100 ({reported_severity})")
         if self.content_type is not None:
             result.metadata["skillspector_applicability"] = {
                 "artifact_type": self.content_type,
@@ -2475,8 +2485,12 @@ class SecurityValidator(ValidatorBase):
         )
 
     @staticmethod
-    def _store_skillspector_metadata(data: dict, result: ValidationResult) -> None:
-        """Store the validated SkillSpector report metadata on the result."""
+    def _store_skillspector_metadata(data: dict, result: ValidationResult, *, score_message: bool = True) -> None:
+        """Store the validated SkillSpector report metadata on the result.
+
+        With *score_message* false, the caller reports the risk score once it
+        knows the score that applies after scoping.
+        """
         skill_info = data.get("skill") or {}
         sp_metadata = data.get("metadata") or {}
         components = data.get("components") or []
@@ -2508,7 +2522,7 @@ class SecurityValidator(ValidatorBase):
                 "LLM analysis was requested but not available; provider or model diagnostics were redacted"
             )
 
-        if score > 50:
+        if score_message and score > 50:
             result.add_message(f"skillspector risk score: {score}/100 ({severity})")
 
     @staticmethod

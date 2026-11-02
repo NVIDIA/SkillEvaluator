@@ -317,6 +317,7 @@ class TestTier1Applicability:
 
         assert not result.passed
         assert len(result.findings) == 1
+        assert "skillspector risk score: 90/100 (CRITICAL)" in result.messages
         assert "file_role" not in result.findings[0].metadata
         assert "skillspector_applicability" not in result.metadata
 
@@ -332,7 +333,10 @@ class TestTier1Applicability:
         assert result.passed
         assert not any(finding.check_name == "skillspector_risk_score" for finding in result.findings)
         assert result.metadata["skillspector_applicability"]["raw_risk_score"] == 60
-        assert result.metadata["skillspector_applicability"]["applicable_risk_score"] < 50
+        applicable_score = result.metadata["skillspector_applicability"]["applicable_risk_score"]
+        assert applicable_score < 50
+        score_messages = [message for message in result.messages if message.startswith("skillspector risk score")]
+        assert score_messages == [f"skillspector risk score: {applicable_score}/100 applicable (raw 60/100 HIGH)"]
 
     def test_retained_advisories_still_trip_the_aggregate_risk_gate(self, tmp_path: Path) -> None:
         scan_root = tmp_path / "skill"

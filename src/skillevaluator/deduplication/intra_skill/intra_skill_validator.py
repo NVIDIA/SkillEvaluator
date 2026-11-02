@@ -50,6 +50,9 @@ CONTENT_DEDUP_MAX_CLUSTER_MEMBERS = 64
 CONTENT_DEDUP_MAX_LLM_PROMPT_CHARS = 64_000
 CONTENT_DEDUP_MAX_TOTAL_LLM_PROMPT_CHARS = 1_000_000
 
+# Scan label recorded when a work limit stops duplicate analysis early.
+_WORK_LIMIT_SCAN = "context-deduplication"
+
 
 def _is_comment_or_config_line(line: str) -> bool:
     """Return True for comment lines or simple ``key=value``/``key: value`` config lines."""
@@ -93,6 +96,25 @@ def _is_trivial_intra_file_duplicate(cluster: ContentCluster) -> bool:
     return all(_chunk_is_short_config(member) for member in cluster.members)
 
 
+def _mark_work_limit_incomplete(
+    result: ValidationResult,
+    check_name: str,
+    message: str,
+    suggestion: str,
+    **details: object,
+) -> None:
+    """Record a tripped work limit as incomplete coverage, not a duplicate finding.
+
+    The scan stopped before duplicate analysis finished, so it can neither
+    report nor rule out duplicated content. A finding would misreport the skill
+    and could be waived by a policy severity override; the incomplete status
+    cannot. ``metadata["work_limit"]`` keeps the limit for JSON reports.
+    """
+    result.mark_scan_incomplete(_WORK_LIMIT_SCAN)
+    result.metadata["work_limit"] = {"check_name": check_name, **details}
+    result.add_error(f"Tier 2 scan incomplete: {message} {suggestion}")
+
+
 class IntraSkillValidator(ValidatorBase):
     """Detect redundant content within a skill directory."""
 
@@ -134,7 +156,6 @@ class IntraSkillValidator(ValidatorBase):
 
     def validate(self, skill_path: Path, *, _collected_files: list[CollectedFile] | None = None) -> ValidationResult:
         """Run context deduplication on a single skill directory."""
-        report_path = skill_path.name or "."
         result = ValidationResult(
             validator_name=self.name,
             validator_description=self.description,
@@ -175,16 +196,15 @@ class IntraSkillValidator(ValidatorBase):
             file_chunks = chunk_file(f)
             prospective_count = len(all_chunks) + len(file_chunks)
             if prospective_count > CONTENT_DEDUP_MAX_CHUNKS:
-                result.add_finding(
-                    Finding(
-                        category="CONTENT_DEDUP",
-                        severity=Severity.CRITICAL,
-                        check_name="chunk_count_limit",
-                        message=f"Tier 2 produced more than {CONTENT_DEDUP_MAX_CHUNKS} content chunks.",
-                        file_path=f.rel_path,
-                        suggestion="Reduce or split the skill content before running Tier 2.",
-                        metadata={"actual": prospective_count, "limit": CONTENT_DEDUP_MAX_CHUNKS},
-                    )
+                _mark_work_limit_incomplete(
+                    result,
+                    "chunk_count_limit",
+                    f"the skill produced more than {CONTENT_DEDUP_MAX_CHUNKS} content chunks "
+                    f"(the limit was reached in {f.rel_path}).",
+                    "Reduce or split the skill content before running Tier 2.",
+                    file_path=f.rel_path,
+                    actual=prospective_count,
+                    limit=CONTENT_DEDUP_MAX_CHUNKS,
                 )
                 return result
             all_chunks.extend(file_chunks)
@@ -222,21 +242,15 @@ class IntraSkillValidator(ValidatorBase):
                 # excess pairwise work before requesting another provider batch.
                 scalar_work = pair_count * (vector_dimension or 0)
                 if scalar_work > self._max_scalar_comparisons:
-                    result.add_finding(
-                        Finding(
-                            category="CONTENT_DEDUP",
-                            severity=Severity.CRITICAL,
-                            check_name="scalar_comparison_limit",
-                            message=f"Tier 2 scalar comparison work exceeds the configured limit ({self._max_scalar_comparisons}).",
-                            file_path=report_path,
-                            suggestion="Reduce or split the skill content before running Tier 2.",
-                            metadata={
-                                "pair_count": pair_count,
-                                "vector_dimension": vector_dimension,
-                                "scalar_work": scalar_work,
-                                "limit": self._max_scalar_comparisons,
-                            },
-                        )
+                    _mark_work_limit_incomplete(
+                        result,
+                        "scalar_comparison_limit",
+                        f"scalar comparison work of {scalar_work} exceeds the limit of {self._max_scalar_comparisons}.",
+                        "Reduce or split the skill content before running Tier 2.",
+                        pair_count=pair_count,
+                        vector_dimension=vector_dimension,
+                        scalar_work=scalar_work,
+                        limit=self._max_scalar_comparisons,
                     )
                     return result
 
@@ -253,16 +267,14 @@ class IntraSkillValidator(ValidatorBase):
         logger.info("Found %d cluster(s)", len(clusters))
 
         if len(clusters) > self._max_llm_clusters:
-            result.add_finding(
-                Finding(
-                    category="CONTENT_DEDUP",
-                    severity=Severity.CRITICAL,
-                    check_name="llm_cluster_count_limit",
-                    message=f"Tier 2 found more than {self._max_llm_clusters} clusters requiring LLM review.",
-                    file_path=report_path,
-                    suggestion="Reduce duplicated content or split the skill before rerunning Tier 2.",
-                    metadata={"actual": len(clusters), "limit": self._max_llm_clusters},
-                )
+            _mark_work_limit_incomplete(
+                result,
+                "llm_cluster_count_limit",
+                f"{len(clusters)} content clusters require LLM review, more than the limit of "
+                f"{self._max_llm_clusters}.",
+                "Reduce duplicated content or split the skill before rerunning Tier 2.",
+                actual=len(clusters),
+                limit=self._max_llm_clusters,
             )
             return result
 
@@ -278,21 +290,34 @@ class IntraSkillValidator(ValidatorBase):
             prompt_chars = len(SYSTEM_PROMPT) + len(build_user_prompt(cluster))
             total_prompt_chars += prompt_chars
             limits = (
-                (len(cluster.members), CONTENT_DEDUP_MAX_CLUSTER_MEMBERS, "llm_cluster_member_limit"),
-                (prompt_chars, CONTENT_DEDUP_MAX_LLM_PROMPT_CHARS, "llm_prompt_size_limit"),
-                (total_prompt_chars, self._max_total_prompt_chars, "llm_total_prompt_size_limit"),
+                (
+                    len(cluster.members),
+                    CONTENT_DEDUP_MAX_CLUSTER_MEMBERS,
+                    "llm_cluster_member_limit",
+                    "a content cluster has {actual} members, more than the limit of {limit} for LLM review.",
+                ),
+                (
+                    prompt_chars,
+                    CONTENT_DEDUP_MAX_LLM_PROMPT_CHARS,
+                    "llm_prompt_size_limit",
+                    "an LLM review prompt of {actual} characters exceeds the limit of {limit}.",
+                ),
+                (
+                    total_prompt_chars,
+                    self._max_total_prompt_chars,
+                    "llm_total_prompt_size_limit",
+                    "LLM review prompts total {actual} characters, more than the limit of {limit}.",
+                ),
             )
-            for actual, limit, check in limits:
+            for actual, limit, check, message in limits:
                 if actual > limit:
-                    result.add_finding(
-                        Finding(
-                            "CONTENT_DEDUP",
-                            Severity.CRITICAL,
-                            check,
-                            "Tier 2 LLM review exceeds a bounded work limit.",
-                            file_path=report_path,
-                            metadata={"actual": actual, "limit": limit},
-                        )
+                    _mark_work_limit_incomplete(
+                        result,
+                        check,
+                        message.format(actual=actual, limit=limit),
+                        "Reduce duplicated content or split the skill before rerunning Tier 2.",
+                        actual=actual,
+                        limit=limit,
                     )
                     return result
 

@@ -446,8 +446,11 @@ class LLMClient:
     def model_used(self) -> str | None:
         """Return the model that answered this thread's last :meth:`completions` call.
 
-        This is the configured model, or the server-side fallback model when
-        it answered a native Anthropic request. ``None`` before a call
+        For an Anthropic reply, a server-side ``fallback`` content block names
+        the model that answered, on any endpoint. Only a native Claude API
+        request for a Claude 5.5 or later model, which asks for server-side
+        fallback, also reads the reply's top-level ``model`` when there is no
+        block. Otherwise it is the configured model. ``None`` before a call
         succeeds and after a call fails.
         """
         return getattr(self._call_state, "model_used", None)

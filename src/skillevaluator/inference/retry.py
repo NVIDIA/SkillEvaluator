@@ -116,15 +116,36 @@ def resolve_retry_config(environ: Mapping[str, str] | None = None) -> RetryConfi
     return RetryConfig(max_retries=max_retries, base_delay=base_delay, max_delay=max_delay)
 
 
+def _exception_cause(exc: BaseException) -> BaseException | None:
+    """Follow an explicit cause, otherwise the unsuppressed implicit context."""
+    return exc.__cause__ if exc.__cause__ is not None else (None if exc.__suppress_context__ else exc.__context__)
+
+
 def extract_http_status(exc: BaseException) -> int | None:
-    """Extract numeric HTTP status code from an exception if available."""
-    if isinstance(exc, urllib.error.HTTPError):
-        return getattr(exc, "code", None)
-    if hasattr(exc, "status_code") and isinstance(exc.status_code, int):
-        return exc.status_code
-    if hasattr(exc, "status") and isinstance(exc.status, int):
-        return exc.status
-    return None
+    """Use the innermost HTTP status along the exception's causal chain.
+
+    Provider adapters can replace an HTTP status with a generic 500 or 503.
+    Retain the underlying response's status instead, skipping links without
+    one. Explicit causes take precedence over unrelated handling context;
+    repeated exception objects terminate the walk.
+    """
+    status = None
+    seen: set[int] = set()
+    current: BaseException | None = exc
+    while current is not None and id(current) not in seen:
+        seen.add(id(current))
+        candidates = (
+            current.code if isinstance(current, urllib.error.HTTPError) else None,
+            getattr(current, "status_code", None),
+            getattr(current, "status", None),
+            getattr(getattr(current, "response", None), "status_code", None),
+        )
+        for candidate in candidates:
+            if isinstance(candidate, int) and not isinstance(candidate, bool):
+                status = candidate
+                break
+        current = _exception_cause(current)
+    return status
 
 
 def extract_retry_after(exc: BaseException) -> str | None:
@@ -143,12 +164,12 @@ def _is_certificate_failure(exc: BaseException) -> bool:
     The OpenAI and Anthropic SDKs raise ``APIConnectionError`` with the
     ``ssl.SSLCertVerificationError`` chained under httpx's ``ConnectError``;
     urllib keeps it in ``URLError.reason``; botocore keeps it in
-    ``kwargs["error"]``. A retry cannot fix a bad CA bundle. The Harbor
-    verifier template keeps the same helper.
+    ``kwargs["error"]``. A retry cannot fix a bad CA bundle. Walk all causal
+    links and nested errors, using object identity to terminate cycles.
     """
     pending: list[object] = [exc]
     seen: set[int] = set()
-    while pending and len(seen) < 32:
+    while pending:
         current = pending.pop()
         if not isinstance(current, BaseException) or id(current) in seen:
             continue
@@ -161,18 +182,20 @@ def _is_certificate_failure(exc: BaseException) -> bool:
         if isinstance(kwargs, dict):
             pending.append(kwargs.get("error"))
         pending.extend(current.args)
-        pending.extend((current.__cause__, current.__context__))
+        pending.append(_exception_cause(current))
     return False
 
 
 def is_retriable_exception(exc: BaseException) -> bool:
     """Return True if an exception represents a transient failure eligible for retry."""
+    # LiteLLM may attach 500/503 to a certificate failure, so inspect its cause
+    # before treating the adapter's synthetic HTTP status as retryable.
+    if _is_certificate_failure(exc):
+        return False
+
     status = extract_http_status(exc)
     if status is not None:
         return is_retriable_status_code(status)
-
-    if _is_certificate_failure(exc):
-        return False
 
     if isinstance(exc, (TimeoutError, urllib.error.URLError, ConnectionError, OSError)):
         return True

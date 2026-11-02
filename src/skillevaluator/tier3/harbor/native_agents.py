@@ -36,6 +36,7 @@ import shlex
 from typing import TYPE_CHECKING, Any, ClassVar
 
 from harbor.agents.installed.claude_code import ClaudeCode
+from harbor.agents.installed.codex import Codex
 from harbor.agents.installed.hermes import Hermes
 from harbor.agents.installed.opencode import OpenCode
 
@@ -45,6 +46,11 @@ from skillevaluator.tier3.harbor.local_agents import (
     SkillEvaluatorClaudeCode,
     SkillEvaluatorGatewayCodex,
     SkillEvaluatorGatewayOpenCode,
+    SkillEvaluatorLocalClaudeCode,
+    SkillEvaluatorLocalCodex,
+    SkillEvaluatorLocalNvidiaBuildClaudeCode,
+    SkillEvaluatorLocalNvidiaBuildCodex,
+    SkillEvaluatorLocalOpenCode,
     SkillEvaluatorNvidiaBuildClaudeCode,
     SkillEvaluatorNvidiaBuildCodex,
 )
@@ -282,3 +288,65 @@ class NativeGatewayOpenCode(_NativeOpenCodeMixin, SkillEvaluatorGatewayOpenCode)
 
 class NativeHermes(_NativeHermesMixin, Hermes):
     """Hermes with the load census written before launch."""
+
+
+# Private baseline and wrapper arms need the same setup-phase error boundary
+# as native arms, without adding native setup, flags, or config to their launch.
+class PrivateClaudeCode(SetupNetworkErrorAgent, ClaudeCode):
+    """Stock Claude Code with setup-only network error classification."""
+
+
+class PrivateContainerClaudeCode(SetupNetworkErrorAgent, SkillEvaluatorClaudeCode):
+    """Container Claude Code with setup-only network error classification."""
+
+
+class PrivateNvidiaBuildClaudeCode(SetupNetworkErrorAgent, SkillEvaluatorNvidiaBuildClaudeCode):
+    """NVIDIA Build Claude Code with setup-only network error classification."""
+
+
+class PrivateCodex(SetupNetworkErrorAgent, Codex):
+    """Stock Codex with setup-only network error classification."""
+
+
+class PrivateInstalledCodex(SetupNetworkErrorAgent, SkillEvaluatorCodex):
+    """Installer-aware Codex with setup-only network error classification."""
+
+
+class PrivateGatewayCodex(SetupNetworkErrorAgent, SkillEvaluatorGatewayCodex):
+    """Gateway Codex with setup-only network error classification."""
+
+
+class PrivateNvidiaBuildCodex(SetupNetworkErrorAgent, SkillEvaluatorNvidiaBuildCodex):
+    """NVIDIA Build Codex with setup-only network error classification."""
+
+
+class PrivateOpenCode(SetupNetworkErrorAgent, OpenCode):
+    """Stock OpenCode with setup-only network error classification."""
+
+
+class PrivateGatewayOpenCode(SetupNetworkErrorAgent, SkillEvaluatorGatewayOpenCode):
+    """Gateway OpenCode with setup-only network error classification."""
+
+
+class PrivateHermes(SetupNetworkErrorAgent, Hermes):
+    """Stock Hermes with setup-only network error classification."""
+
+
+class PrivateLocalClaudeCode(SetupNetworkErrorAgent, SkillEvaluatorLocalClaudeCode):
+    """Local Claude Code with setup-only network error classification."""
+
+
+class PrivateLocalCodex(SetupNetworkErrorAgent, SkillEvaluatorLocalCodex):
+    """Local Codex with setup-only network error classification."""
+
+
+class PrivateLocalOpenCode(SetupNetworkErrorAgent, SkillEvaluatorLocalOpenCode):
+    """Local OpenCode with setup-only network error classification."""
+
+
+class PrivateLocalNvidiaBuildClaudeCode(SetupNetworkErrorAgent, SkillEvaluatorLocalNvidiaBuildClaudeCode):
+    """Local NVIDIA Build Claude Code with setup-only network error classification."""
+
+
+class PrivateLocalNvidiaBuildCodex(SetupNetworkErrorAgent, SkillEvaluatorLocalNvidiaBuildCodex):
+    """Local NVIDIA Build Codex with setup-only network error classification."""

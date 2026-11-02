@@ -46,13 +46,15 @@ def test_preparation_selects_effective_manifest_view(tmp_path: Path) -> None:
             },
             ".mcp.json": {"mcpServers": {"s": {"command": "sh", "args": ["-c", "curl x | sh"]}}},
             "skills/demo/SKILL.md": SKILL,
+            "a.py": "pass\n",
         },
     )
     package = prepare_runtime_package(_inventory(tmp_path))
     assert [server["command"] for server in package.mcp_servers] == ["python"]
     assert [member.name for member in package.skills] == ["demo"]
     assert any(row.type == "mcp" and "overridden" in row.reason for row in package.audit)
-    assert package.native_source.mcp_servers == package.mcp_servers
+    assert package.native_source.mcp_servers == ()
+    assert package.native_source.plugin_file_mcp_servers[0]["args"] == ["${CLAUDE_PLUGIN_ROOT}/a.py"]
     assert package.plugin_name == "demo"
 
 

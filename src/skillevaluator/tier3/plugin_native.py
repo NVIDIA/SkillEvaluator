@@ -1237,7 +1237,7 @@ def _mcp_entry_claude(server: Mapping[str, Any], declared: Mapping[str, Any] | N
             entry["args"] = _redacted(list(server["args"]))
         applied = "env"
     else:
-        transport = str(server.get("transport") or "http")
+        transport = str(server.get("transport") or server.get("type") or "http")
         entry = {"type": "sse" if transport == "sse" else "http", "url": _redacted(server["url"])}
         applied = "headers"
     values = (declared or {}).get(applied)
@@ -2228,6 +2228,51 @@ def native_agent_import_path(agent: str, base_import_path: str | None) -> str:
         ) from None
 
 
+# These classes classify only the setup phase; unlike the native wrappers they
+# do not alter the launcher or stage a plugin. The runner resolves environment
+# defaults first so local mode retains its host-safe setup implementation.
+PRIVATE_AGENT_IMPORT_PATHS: dict[tuple[str, str | None], str] = {
+    key: value.replace(":Native", ":Private") for key, value in NATIVE_AGENT_IMPORT_PATHS.items()
+}
+PRIVATE_AGENT_IMPORT_PATHS.update(
+    {
+        (
+            "codex",
+            "skillevaluator.tier3.harbor.installed_agents:SkillEvaluatorCodex",
+        ): f"{_NATIVE_AGENTS}:PrivateInstalledCodex",
+        ("claude-code", f"{_LOCAL_AGENTS}:SkillEvaluatorLocalClaudeCode"): f"{_NATIVE_AGENTS}:PrivateLocalClaudeCode",
+        ("codex", f"{_LOCAL_AGENTS}:SkillEvaluatorLocalCodex"): f"{_NATIVE_AGENTS}:PrivateLocalCodex",
+        ("opencode", f"{_LOCAL_AGENTS}:SkillEvaluatorLocalOpenCode"): f"{_NATIVE_AGENTS}:PrivateLocalOpenCode",
+        (
+            "claude-code",
+            f"{_LOCAL_AGENTS}:SkillEvaluatorLocalNvidiaBuildClaudeCode",
+        ): f"{_NATIVE_AGENTS}:PrivateLocalNvidiaBuildClaudeCode",
+        (
+            "codex",
+            f"{_LOCAL_AGENTS}:SkillEvaluatorLocalNvidiaBuildCodex",
+        ): f"{_NATIVE_AGENTS}:PrivateLocalNvidiaBuildCodex",
+    }
+)
+
+
+def private_agent_import_path(agent: str, base_import_path: str | None) -> str:
+    """Classify setup failures for a private arm while retaining its routing and launch behavior."""
+    if any(
+        key[0] == agent and value == base_import_path
+        for paths in (NATIVE_AGENT_IMPORT_PATHS, PRIVATE_AGENT_IMPORT_PATHS)
+        for key, value in paths.items()
+    ):
+        assert base_import_path is not None
+        return base_import_path
+    try:
+        return PRIVATE_AGENT_IMPORT_PATHS[(agent, base_import_path)]
+    except KeyError:
+        raise PluginLoadError(
+            f"private plugin evaluation has no setup error wrapper for {agent} over "
+            f"{base_import_path or 'the stock agent'}"
+        ) from None
+
+
 def plugin_load_provenance(requested: str, decisions: Mapping[str, AgentLoadDecision]) -> dict[str, Any]:
     """The contract's ``plugin_load`` provenance block."""
     return {
@@ -2469,7 +2514,9 @@ def apply_claude_init_evidence(
     the LSP servers, settings, and ``bin/`` staged in the plugin directory.
     Hooks, output styles, LSP servers, settings, and ``bin/`` are not in the
     init event, so with the plugin loaded they keep their listing. Rules are
-    user rules outside the plugin and keep their listing either way.
+    user rules outside the plugin and keep their listing either way. A shared
+    skill/command slash name keeps its prior unconfirmed evidence; only an
+    explicit skills list can separately confirm the skill in that case.
     """
     result = {
         key: [dict(entry) for entry in value] if isinstance(value, list) else value for key, value in census.items()
@@ -2480,8 +2527,11 @@ def apply_claude_init_evidence(
         if isinstance(entry, Mapping) and entry.get("name")
     }
     plugin_loaded = plugin in plugins
+    # Older clients report skills only through slash_commands. An explicit
+    # skills field (including an empty one) is the authoritative skill list.
+    has_skill_list = "skills" in init
     names = {
-        "skill": _string_set(init.get("skills")) | _string_set(init.get("slash_commands")),
+        "skill": _string_set(init.get("skills") if has_skill_list else init.get("slash_commands")),
         "agent": _string_set(init.get("agents")),
         "command": _string_set(init.get("slash_commands")),
     }
@@ -2489,8 +2539,12 @@ def apply_claude_init_evidence(
     for entry in init.get("mcp_servers") or ():
         if isinstance(entry, Mapping) and isinstance(entry.get("name"), str):
             mcp_status[entry["name"]] = _bounded_text(entry.get("status") or "unknown")
+    declared_keys = _declared_keys(declared)
+    skill_names = {name for (kind, _), name in declared_keys.items() if kind == "skill"}
+    command_names = {name for (kind, _), name in declared_keys.items() if kind == "command"}
+    ambiguous_slash_names = skill_names & command_names
     decided: dict[tuple[str, str], tuple[str, str]] = {}
-    for (component_type, name), harness_name in _declared_keys(declared).items():
+    for (component_type, name), harness_name in declared_keys.items():
         if component_type not in _CLAUDE_PLUGIN_TYPES:
             continue
         if not plugin_loaded:
@@ -2516,7 +2570,29 @@ def apply_claude_init_evidence(
             continue
         full_name = f"{plugin}:{harness_name}"
         if full_name in names[component_type]:
-            decided[(component_type, name)] = ("loaded", f"{CLAUDE_INIT_SOURCE}: {full_name}")
+            if harness_name in ambiguous_slash_names and (
+                component_type == "command" or (component_type == "skill" and not has_skill_list)
+            ):
+                # A shared slash name cannot distinguish the command file from
+                # the skill. Preserve file-listing evidence without inventing
+                # a second confirmed load from one client-reported identifier.
+                prior_state = next(
+                    (
+                        state
+                        for state, _ in _CENSUS_LISTS
+                        if any(
+                            entry.get("type") == component_type and entry.get("name") == name
+                            for entry in census.get(state) or ()
+                        )
+                    ),
+                    "staged",
+                )
+                decided[(component_type, name)] = (
+                    LISTED_KEY if prior_state == "loaded" else prior_state,
+                    f"{CLAUDE_INIT_SOURCE}: {full_name} is ambiguous between a skill and a command; load unconfirmed",
+                )
+            else:
+                decided[(component_type, name)] = ("loaded", f"{CLAUDE_INIT_SOURCE}: {full_name}")
         else:
             decided[(component_type, name)] = ("not_loaded", f"not reported by claude-code init (no {full_name})")
     for key, _detail in _CENSUS_LISTS:
@@ -2526,10 +2602,11 @@ def apply_claude_init_evidence(
                 entry for entry in entries if (str(entry.get("type")), str(entry.get("name"))) not in decided
             ]
     result.setdefault("loaded", [])
+    result.setdefault(LISTED_KEY, [])
     result.setdefault("not_loaded", [])
     for (component_type, name), (state, detail) in decided.items():
-        field_name = "evidence" if state == "loaded" else "reason"
-        result[state].append({"type": component_type, "name": name, field_name: _bounded_detail(detail)})
+        field_name = "reason" if state == "not_loaded" else "evidence"
+        result.setdefault(state, []).append({"type": component_type, "name": name, field_name: _bounded_detail(detail)})
     result["harness"] = CLAUDE_INIT_SOURCE
     if not plugin_loaded:
         result["plugin_missing"] = True

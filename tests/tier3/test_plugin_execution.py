@@ -14,7 +14,16 @@ from skillevaluator.evaluation.options import EvaluationOptions
 from skillevaluator.tier3 import plugin_execution as px
 
 OK = {"execution_status": "succeeded"}
-SETUP = {"execution_status": "failed", "error": ["claude-code with-skill: AgentSetupNetworkError: dns"]}
+SETUP = {
+    "execution_status": "failed",
+    "agents": {
+        "claude-code": {
+            "conditions": {"with_skill": {"execution_status": "failed", "expected_attempts": 1, "scored_attempts": 0}},
+            "trial_failures": {"with_skill": [{"trial": "case-1", "reason": "AgentSetupNetworkError: dns"}]},
+            "failure_detail_metadata": {"with_skill_trials": {"details_total": 1, "details_truncated": False}},
+        }
+    },
+}
 AGENT = {"execution_status": "failed", "error": ["claude-code with-skill: NonZeroAgentExitCodeError: 1"]}
 
 
@@ -107,7 +116,7 @@ def test_ordinary_runs_have_no_active_runtime() -> None:
     from skillevaluator.tier3.harbor import runner
 
     assert runner._private_runtime_hooks() is None
-    assert runner._private_with_agent_import_path("claude-code", None) is None
+    assert runner._private_agent_paths(["claude-code"], {}, "docker") == {"claude-code": (None, None)}
 
 
 def _prepared(root: Path):
@@ -162,7 +171,7 @@ def test_native_hooks_stage_only_the_with_arm_of_native_agents(tmp_path: Path) -
     dockerfile = (task / "environment" / "Dockerfile").read_text(encoding="utf-8")
     assert dockerfile.startswith("FROM python:3.12-slim\n") and "COPY" in dockerfile
     assert (task / "environment" / "skilleval").is_dir()
-    assert hooks.with_agent_import_path("codex", None) is None
+    assert "Private" in hooks.with_agent_import_path("codex", None)
     hooks.stage_with_arm("codex", [tmp_path / "missing"])
 
 
@@ -176,16 +185,20 @@ def test_native_evidence_is_read_before_cleanup_and_never_inferred_from_staging(
     package = _prepared(tmp_path / "plugin")
     work = tmp_path / "work"
     work.mkdir()
-    jobs = tmp_path / "jobs"
+    jobs = tmp_path / "run" / "_harbor-jobs"
 
     def evaluate(options):
-        assert options.harbor_keep_jobs
+        assert not options.harbor_keep_jobs
         task = tmp_path / "task"
         (task / "environment").mkdir(parents=True)
         (task / "environment" / "Dockerfile").write_text("FROM x\n", encoding="utf-8")
         px.active_runtime().stage_with_arm("claude-code", [task])
         (jobs / f"{options.skill_path.name}-claude-code-with" / "trial-1" / "agent").mkdir(parents=True)
-        return {"execution_status": "succeeded", "harbor_jobs_dir": str(jobs)}
+        from skillevaluator.tier3.harbor.runner import _finalize_harbor_artifacts
+
+        result = {"execution_status": "succeeded", "harbor_jobs_dir": str(jobs)}
+        _finalize_harbor_artifacts(run_dir_value=jobs.parent, keep_requested=False, result=result)
+        return result
 
     options = EvaluationOptions(skill_path=tmp_path, agents="claude-code")
     outcome = px.evaluate_prepared_plugin(package, options, work_dir=work, load="native", evaluate=evaluate)
@@ -246,16 +259,14 @@ def test_jobs_kept_for_evidence_are_removed_for_every_attempt(tmp_path: Path) ->
     made: list[Path] = []
 
     def evaluate(options):
-        jobs = tmp_path / f"jobs-{len(made)}"
-        jobs.mkdir()
+        from skillevaluator.tier3.harbor.runner import _finalize_harbor_artifacts
+
+        jobs = tmp_path / f"run-{len(made)}" / "_harbor-jobs"
+        jobs.mkdir(parents=True)
         made.append(jobs)
-        if len(made) == 1:
-            return {
-                "execution_status": "failed",
-                "error": ["AgentSetupNetworkError: dns"],
-                "harbor_jobs_dir": str(jobs),
-            }
-        return {"execution_status": "succeeded", "harbor_jobs_dir": str(jobs)}
+        result = {**(SETUP if len(made) == 1 else OK), "harbor_jobs_dir": str(jobs)}
+        _finalize_harbor_artifacts(run_dir_value=jobs.parent, keep_requested=False, result=result)
+        return result
 
     options = EvaluationOptions(skill_path=tmp_path, agents="claude-code")
     outcome = px.evaluate_prepared_plugin(package, options, work_dir=work, load="native", evaluate=evaluate)
@@ -272,6 +283,12 @@ def test_evidence_failure_is_recorded_and_publication_still_runs(tmp_path: Path,
     def broken(*_args, **_kwargs):
         raise OSError("unreadable")
 
+    def evaluate(_options):
+        hooks = px.active_runtime()
+        hooks.stagings["claude-code"] = object()
+        hooks.collect_evidence(tmp_path, {})
+        return dict(OK)
+
     monkeypatch.setattr(px, "collect_native_evidence", broken)
     options = EvaluationOptions(skill_path=tmp_path, agents="claude-code")
     outcome = px.evaluate_prepared_plugin(
@@ -279,7 +296,7 @@ def test_evidence_failure_is_recorded_and_publication_still_runs(tmp_path: Path,
         options,
         work_dir=work,
         load="native",
-        evaluate=lambda _o: {"execution_status": "succeeded", "harbor_jobs_dir": str(tmp_path)},
+        evaluate=evaluate,
         publish=published.append,
     )
     assert published and outcome.publication_error is None
@@ -295,6 +312,9 @@ def test_sampled_errors_are_never_retried() -> None:
     }
     assert px.setup_only_failure(sampled) is None
     assert px.setup_only_failure({**sampled, "execution_error_details_truncated": False}) is None
-    assert px.setup_only_failure(
-        {**sampled, "execution_error_details_total": 1, "execution_error_details_truncated": False}
+    assert (
+        px.setup_only_failure(
+            {**sampled, "execution_error_details_total": 1, "execution_error_details_truncated": False}
+        )
+        is None
     )

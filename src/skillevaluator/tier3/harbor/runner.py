@@ -4331,16 +4331,40 @@ def _private_runtime_hooks() -> Any:
     return active_runtime()
 
 
-def _private_with_agent_import_path(agent: str, base_import_path: str | None) -> str | None:
-    hooks = _private_runtime_hooks()
-    return None if hooks is None else hooks.with_agent_import_path(agent, base_import_path)
-
-
 def _native_plugin_agent_import_paths() -> frozenset[str]:
     """The private native plugin-loading wrappers, which build on the agents allowed on every backend."""
-    from skillevaluator.tier3.plugin_native import NATIVE_AGENT_IMPORT_PATHS
+    from skillevaluator.tier3.plugin_native import NATIVE_AGENT_IMPORT_PATHS, PRIVATE_AGENT_IMPORT_PATHS
 
-    return frozenset(NATIVE_AGENT_IMPORT_PATHS.values())
+    return frozenset((*NATIVE_AGENT_IMPORT_PATHS.values(), *PRIVATE_AGENT_IMPORT_PATHS.values()))
+
+
+def _private_agent_paths(
+    agents: list[str], base_paths: Mapping[str, str], env_mode: str
+) -> dict[str, tuple[str | None, str | None]]:
+    """Resolve both arms on the calling thread, before launching worker pools."""
+    hooks = _private_runtime_hooks()
+    paths = {}
+    for agent in agents:
+        base = base_paths.get(agent)
+        if hooks is not None:
+            if base is None and env_mode == ENV_MODE_LOCAL:
+                from skillevaluator.tier3.harbor import LOCAL_AGENT_IMPORT_PATHS
+
+                base = LOCAL_AGENT_IMPORT_PATHS.get(agent)
+            elif base is None and env_mode in HARBOR_DOCKER_ENGINE_ENV_MODES | {"gke"}:
+                defaults = (
+                    DOCKER_AGENT_IMPORT_PATHS
+                    if env_mode in HARBOR_DOCKER_ENGINE_ENV_MODES
+                    else CONTAINER_AGENT_IMPORT_PATHS
+                )
+                base = defaults.get(agent)
+            with_path = hooks.with_agent_import_path(agent, base)
+            classify = getattr(hooks, "baseline_agent_import_path", None)
+            baseline_path = classify(agent, base) if classify is not None else base
+            paths[agent] = (baseline_path, with_path)
+        else:
+            paths[agent] = (base, None)
+    return paths
 
 
 def _run_agent_pair(
@@ -5421,6 +5445,7 @@ def _run_harbor_eval_impl(
         )
     errors: list[str] = []
     started_agents: SimpleQueue[str] = SimpleQueue()
+    private_agent_paths = _private_agent_paths(agents, agent_import_paths, env_mode)
 
     def _execute_agent(agent: str) -> list[str]:
         started_agents.put(agent)
@@ -5439,8 +5464,8 @@ def _run_harbor_eval_impl(
             override_cpus=override_cpus,
             override_memory_mb=override_memory_mb,
             override_storage_mb=override_storage_mb,
-            agent_import_path=agent_import_paths.get(agent),
-            with_agent_import_path=_private_with_agent_import_path(agent, agent_import_paths.get(agent)),
+            agent_import_path=private_agent_paths[agent][0],
+            with_agent_import_path=private_agent_paths[agent][1],
             expected_trials=expected_trials,
             stop_on_pass=bool(stop_on_pass),
             pass_threshold=float(pass_threshold),
@@ -5682,6 +5707,10 @@ def _finalize_harbor_artifacts(
         return
     jobs_dir = run_dir / "_harbor-jobs"
     tasks_dir = run_dir / "_harbor-tasks"
+    hooks = _private_runtime_hooks()
+    capture = getattr(hooks, "collect_evidence", None)
+    if capture is not None:
+        capture(jobs_dir, result)
     outcome = HarborArtifactLifecycle(
         [jobs_dir, tasks_dir],
         keep_requested=keep_requested,

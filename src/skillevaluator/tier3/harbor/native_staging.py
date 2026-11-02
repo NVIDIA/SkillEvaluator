@@ -100,6 +100,7 @@ def _declared_unsupported_paths(source: NativePluginSource) -> set[str]:
 
 def _plugin_tree_ignore(source: NativePluginSource, excluded_roots: Sequence[Path] = ()):
     from skillevaluator.tier3.harbor.adapter import _runtime_skill_copy_ignore
+    from skillevaluator.tier3.plugin_prepare import _EVALUATOR_DIRS
 
     root = source.plugin_root.resolve()
     declared = _declared_unsupported_paths(source)
@@ -122,8 +123,8 @@ def _plugin_tree_ignore(source: NativePluginSource, excluded_roots: Sequence[Pat
             rel = (PurePosixPath(rel_dir.as_posix()) / name).as_posix().removeprefix("./")
             if rel in declared:
                 ignored.add(name)
-            # A skill's own evals/ (datasets and expected outputs) never reach the agent.
-            if name.casefold() == "evals" and (current / "SKILL.md").is_file():
+            # Both supported dataset layouts contain verifier-only expected outputs.
+            if name.casefold() in _EVALUATOR_DIRS and (current / "SKILL.md").is_file():
                 ignored.add(name)
         return sorted(ignored)
 

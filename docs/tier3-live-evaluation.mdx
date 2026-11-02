@@ -706,10 +706,13 @@ in [Judge evidence budgets](environment-variables.mdx#judge-evidence-budgets).
   `AgentGoalAccuracyWithReference` scorer through its own client, without the
   schema or retry handling above but within the same time budget. If RAGAS is
   unavailable or fails, the prompt judge runs instead.
-- **Transient failures.** HTTP 429, 500, 502, 503, and 504 responses,
-  connection errors, timeouts, and Bedrock throttling or service-unavailable
-  errors are retried transparently with jittered exponential backoff. A
-  `Retry-After` header, in seconds or as an HTTP date, sets the wait; a value
+- **Transient failures.** HTTP 408, 429, and every 5xx response except 501 and
+  505 are retried, including 520–524 proxy errors and 529 overload responses.
+  Connection errors, timeouts, and Bedrock throttling or service-unavailable
+  errors are also retried with jittered exponential backoff. TLS certificate
+  verification failures are terminal, including when an SDK wraps them as a
+  generic connection or service-unavailable error. A `Retry-After` header,
+  in seconds or as an HTTP date, sets the wait; a value
   above the maximum retry delay fails immediately instead of stalling.
 - **Time budget.** Each judge has its own wall-time budget (180 seconds by
   default) inside the generated task's 600-second verifier timeout, which

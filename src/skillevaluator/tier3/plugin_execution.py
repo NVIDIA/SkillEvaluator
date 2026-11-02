@@ -3,7 +3,7 @@
 
 """Private plugin evaluation lifecycle over the existing evaluation engine.
 
-The runner consults :func:`active_runtime` at its with-arm seams only. It is
+The runner consults :func:`active_runtime` on its calling thread. It is
 ``None`` unless :func:`private_runtime` is active, so ordinary skill runs are
 unchanged.
 """
@@ -39,6 +39,12 @@ class PrivateRuntimeHooks(Protocol):
     def stage_with_arm(self, agent: str, task_dirs: Sequence[Path]) -> None:
         """Stage per-agent runtime additions into the with arm's staged tasks."""
 
+    def baseline_agent_import_path(self, agent: str, base_import_path: str | None) -> str | None:
+        """Classify pre-dispatch setup failures without adding plugin components."""
+
+    def collect_evidence(self, jobs_dir: Path, result: dict[str, Any] | None) -> None:
+        """Capture private evidence before the engine finalizes its artifacts."""
+
 
 _ACTIVE_RUNTIME: ContextVar[PrivateRuntimeHooks | None] = ContextVar("skilleval_private_runtime", default=None)
 
@@ -70,30 +76,142 @@ class NativeRuntimeHooks:
     source: NativePluginSource
     decisions: Mapping[str, AgentLoadDecision]
     stagings: dict[str, Any] = field(default_factory=dict)
+    package: PreparedRuntimePackage | None = None
+    evidence: dict[str, Any] = field(default_factory=dict)
+    evidence_error: str | None = None
+    collected_jobs: set[Path] = field(default_factory=set)
 
     def with_agent_import_path(self, agent: str, base_import_path: str | None) -> str | None:
         decision = self.decisions.get(agent)
         if decision is None or not decision.native:
-            return None
+            return self.baseline_agent_import_path(agent, base_import_path)
         return native_agent_import_path(agent, base_import_path)
+
+    def baseline_agent_import_path(self, agent: str, base_import_path: str | None) -> str | None:
+        from skillevaluator.tier3.plugin_native import private_agent_import_path
+
+        return private_agent_import_path(agent, base_import_path)
 
     def stage_with_arm(self, agent: str, task_dirs: Sequence[Path]) -> None:
         decision = self.decisions.get(agent)
         if decision is None or not decision.native:
+            for task_dir in task_dirs:
+                _stage_task_mcp(task_dir, self.source)
             return
         from skillevaluator.tier3.harbor.native_staging import build_native_task_staging, stage_native_bundle
 
         staging = self.stagings.get(agent) or build_native_task_staging(agent, HARNESS_ADAPTERS[agent], self.source)
         self.stagings[agent] = staging
+        if self.package is not None:
+            from skillevaluator.tier3.plugin_prepare import verify_source_identity
+
+            verify_source_identity(self.package)
         for task_dir in task_dirs:
             env_dir = task_dir / "environment"
             dockerfile = env_dir / "Dockerfile"
             if dockerfile.is_symlink() or not dockerfile.is_file():
                 raise PluginLoadError(f"native plugin loading needs a task Dockerfile: {dockerfile}")
+            _stage_native_skills(task_dir, staging)
+            if staging.plugin_mcp_via_task:
+                _stage_task_mcp(task_dir, self.source)
             lines = stage_native_bundle(env_dir, staging, excluded_roots=self.source.excluded_paths)
             content = dockerfile.read_text(encoding="utf-8")
             separator = "" if content.endswith("\n") else "\n"
             dockerfile.write_text(content + separator + "\n".join(lines) + "\n", encoding="utf-8")
+        if self.package is not None:
+            verify_source_identity(self.package)
+
+    def collect_evidence(self, jobs_dir: Path, result: dict[str, Any] | None) -> None:
+        if jobs_dir in self.collected_jobs:
+            return
+        self.collected_jobs.add(jobs_dir)
+        from skillevaluator.tier3.plugin_prepare import wrapper_skill_name
+
+        self.evidence = {}
+        self.evidence_error = None
+        if self.stagings:
+            try:
+                self.evidence = collect_native_evidence(self, jobs_dir, wrapper_skill_name(self.source.plugin_name))
+            except Exception as exc:
+                self.evidence_error = f"{type(exc).__name__}: {exc}"[:600]
+        if result is not None:
+            result["native_evidence"] = self.evidence
+            if self.evidence_error:
+                result["native_evidence_error"] = self.evidence_error
+
+
+def _stage_native_skills(task_dir: Path, staging: Any) -> None:
+    """Project exactly the layout consumed by the selected native adapter."""
+    import json
+    import shutil
+
+    from skillevaluator.tier3.harbor.adapter import _runtime_skill_copy_ignore, _sanitize_staged_runtime_skills
+    from skillevaluator.tier3.harbor.secure_copy import copytree_secure
+    from skillevaluator.tier3.plugin_prepare import wrapper_skill_name
+
+    skills = task_dir / "environment" / "skills"
+    wrapper = skills / wrapper_skill_name(staging.source.plugin_name)
+    if not staging.stage_wrapper_skill and wrapper.exists():
+        shutil.rmtree(wrapper)
+    if staging.stage_member_skills:
+        for source in staging.source.member_skills:
+            target = skills / source.name
+            if target.exists() or target.is_symlink():
+                raise PluginLoadError(f"native member skill conflicts with staged skill: {source.name}")
+            copytree_secure(
+                source,
+                target,
+                allowed_root=staging.source.plugin_root,
+                ignore=_runtime_skill_copy_ignore(source, staging.source.excluded_paths),
+            )
+        _sanitize_staged_runtime_skills(skills)
+    entry_path = task_dir / "tests" / "entry.json"
+    if entry_path.is_file():
+        entry = json.loads(entry_path.read_text(encoding="utf-8"))
+        entry["workspace_skill_names"] = sorted(
+            set(entry.get("workspace_skill_names", []))
+            | {path.name for path in staging.source.member_skills}
+            | set(staging.workspace_skill_aliases())
+        )
+        entry_path.write_text(json.dumps(entry, indent=2), encoding="utf-8")
+
+
+def _stage_task_mcp(task_dir: Path, source: NativePluginSource) -> None:
+    """Add portable MCP declarations only to the private with arm."""
+    import json
+    import tomllib
+
+    from skillevaluator.tier3.harbor.adapter import _toml_quote, _toml_value, validate_mcp_server_declarations
+
+    if not source.mcp_servers:
+        return
+    path = task_dir / "task.toml"
+    content = path.read_text(encoding="utf-8")
+    environment = tomllib.loads(content).get("environment", {})
+    existing = environment.get("mcp_servers", [])
+    servers = []
+    names = {server["name"] for server in existing}
+    for raw in source.mcp_servers:
+        server = {
+            key: value
+            for key, value in raw.items()
+            if key in {"name", "command", "args", "url", "env", "headers", "transport"}
+        }
+        if "transport" not in server:
+            server["transport"] = raw.get("type") or ("stdio" if raw.get("command") else "http")
+        if server["name"] in names:
+            raise PluginLoadError(f"plugin MCP name conflicts with task environment: {server['name']}")
+        names.add(server["name"])
+        servers.append(server)
+    validate_mcp_server_declarations(
+        servers, allowed_runtime_env=environment.get("env", {}), source_label="private runtime MCP"
+    )
+    for server in servers:
+        content += "\n[[environment.mcp_servers]]\n"
+        content += "".join(f"{_toml_quote(key)} = {_toml_value(value)}\n" for key, value in server.items())
+    tomllib.loads(content)
+    path.write_text(content, encoding="utf-8")
+    (task_dir / "mcp_servers.json").write_text(json.dumps([*existing, *servers], indent=2), encoding="utf-8")
 
 
 @dataclass
@@ -106,6 +224,7 @@ class PrivateRunOutcome:
     cleanup_error: str | None = None
     publication_error: str | None = None
     retry_reasons: list[str] = field(default_factory=list)
+    setup_attempt_results: list[dict[str, Any]] = field(default_factory=list)
 
     @property
     def status(self) -> str:
@@ -115,21 +234,45 @@ class PrivateRunOutcome:
 def setup_only_failure(result: Mapping[str, Any]) -> str | None:
     """The setup failure that makes ``result`` safe to rerun, or ``None``.
 
-    Only a failed run whose every recorded error is the setup-network
-    classification is rerun: that agent never received its task. Any other
-    error (dispatch, agent, verifier, cancellation, timeout) may have run part
-    of the task and is final.
+    Every expected trial in every executed arm must have a complete, typed
+    setup failure record. Collector diagnostics about missing scores are
+    consequences of that failure, not evidence that the agent ran. Strings
+    alone, sampled details, successful arms and missing trials are insufficient.
     """
-    if result.get("execution_status") == "succeeded":
+    if result.get("execution_status") != "failed":
         return None
-    errors = result.get("error") or result.get("execution_errors") or []
-    errors = [errors] if isinstance(errors, str) else [str(error) for error in errors]
-    total = result.get("execution_error_details_total")
-    if result.get("execution_error_details_truncated") or (isinstance(total, int) and total > len(errors)):
-        return None  # The result shows a sample of its errors; the hidden ones may not be setup failures.
-    if errors and all(SETUP_RETRY_EXCEPTION in error for error in errors):
-        return errors[0][:300]
-    return None
+    agents = result.get("agents")
+    if not isinstance(agents, Mapping) or not agents:
+        return None
+    reason = None
+    for info in agents.values():
+        if not isinstance(info, Mapping):
+            return None
+        conditions = info.get("conditions", {})
+        if not isinstance(conditions, Mapping) or not conditions:
+            return None
+        for arm, condition in conditions.items():
+            if not isinstance(condition, Mapping):
+                return None
+            if condition.get("execution_status") == "skipped":
+                continue
+            expected = condition.get("expected_attempts")
+            if condition.get("execution_status") != "failed" or condition.get("scored_attempts") != 0:
+                return None
+            if not isinstance(expected, int) or isinstance(expected, bool) or expected <= 0:
+                return None
+            failures = info.get("trial_failures", {}).get(arm, [])
+            metadata = info.get("failure_detail_metadata", {}).get(f"{arm}_trials", {})
+            if metadata.get("details_truncated") or metadata.get("details_total") != len(failures):
+                return None
+            if len(failures) != expected or len({f.get("trial") for f in failures}) != expected:
+                return None
+            for failure in failures:
+                typed_reason = failure.get("reason", "")
+                if not failure.get("trial") or not typed_reason.startswith(SETUP_RETRY_EXCEPTION + ":"):
+                    return None
+                reason = typed_reason[:300]
+    return reason
 
 
 def run_private_evaluation(
@@ -167,6 +310,7 @@ def run_private_evaluation(
             if reason is None or outcome.attempts > max_setup_retries:
                 break
             outcome.retry_reasons.append(reason)
+            outcome.setup_attempt_results.append(outcome.result)
         if publish is not None:
             try:
                 publish(outcome)
@@ -202,15 +346,18 @@ def evaluate_prepared_plugin(
     import tempfile
     from dataclasses import replace
 
-    from skillevaluator.tier3.plugin_native import resolve_plugin_load
+    from skillevaluator.tier3.commands import parse_agents
+    from skillevaluator.tier3.plugin_native import apply_native_refusals, resolve_plugin_load
     from skillevaluator.tier3.plugin_prepare import stage_wrapper_skill, wrapper_skill_name
 
     if not package.runnable:
         raise PluginLoadError("plugin has no runnable skill, rule, MCP server, or text component")
-    agents = [agent.strip() for agent in (options.agents or "").split(",") if agent.strip()]
+    agents = parse_agents(options.agents)
     if load != "wrapper" and not agents:
         raise PluginLoadError("native plugin loading needs explicit agents")
-    decisions = resolve_plugin_load(load, agents, env_mode=options.env_mode) if agents else {}
+    decisions = apply_native_refusals(
+        load, resolve_plugin_load(load, agents, env_mode=options.env_mode), package.native_source
+    )
     temp = Path(tempfile.mkdtemp(prefix="skilleval-plugin-", dir=work_dir))
     try:
         wrapper = stage_wrapper_skill(
@@ -220,13 +367,14 @@ def evaluate_prepared_plugin(
         shutil.rmtree(temp, ignore_errors=True)
         raise
     results_dir = options.results_dir or package.native_source.plugin_root / "evals" / "results"
-    hooks = NativeRuntimeHooks(package.native_source, decisions) if any(d.native for d in decisions.values()) else None
+    hooks = NativeRuntimeHooks(package.native_source, decisions, package=package)
     provenance = {
         "plugin": package.plugin_name,
         "source": {
             "root": package.identity.root,
             "manifest": package.identity.manifest,
             "manifest_sha256": package.identity.manifest_sha256,
+            "source_tree_sha256": package.identity.source_tree_sha256,
         },
         "wrapper_skill": wrapper.name,
         "case_sources": dict(wrapper.case_sources),
@@ -239,38 +387,23 @@ def evaluate_prepared_plugin(
         from skillevaluator.evaluation.service import EvaluationService
 
         evaluate = EvaluationService().evaluate
-    engine = evaluate
-    retained: list[Path] = []
-
-    def evaluate_attempt(attempt_options: EvaluationOptions) -> dict[str, Any]:
-        result = engine(attempt_options)
-        if jobs := result.get("harbor_jobs_dir"):
-            retained.append(Path(jobs))
-        return result
 
     def publish_with_evidence(outcome: PrivateRunOutcome) -> None:
-        if hooks is not None and retained:
-            try:
-                outcome.provenance["native_evidence"] = collect_native_evidence(hooks, retained[-1], wrapper.name)
-            except Exception as exc:
-                outcome.provenance["native_evidence_error"] = f"{type(exc).__name__}: {exc}"[:600]
+        if hooks.stagings:
+            outcome.provenance["native_evidence"] = hooks.evidence
+        if hooks.evidence_error:
+            outcome.provenance["native_evidence_error"] = hooks.evidence_error
         if publish is not None:
             publish(outcome)
 
     def cleanup() -> None:
-        # Jobs kept only to read native evidence are removed; ones the caller asked to keep stay.
-        if not options.harbor_keep_jobs:
-            for jobs in retained:
-                shutil.rmtree(jobs, ignore_errors=True)
         shutil.rmtree(temp)
 
-    # Native evidence lives in the Harbor jobs, so they are kept until it is read.
-    keep_jobs = options.harbor_keep_jobs or hooks is not None
     return run_private_evaluation(
-        replace(options, skill_path=wrapper.path, results_dir=results_dir, harbor_keep_jobs=keep_jobs),
+        replace(options, skill_path=wrapper.path, results_dir=results_dir),
         hooks=hooks,
         provenance=provenance,
-        evaluate=evaluate_attempt,
+        evaluate=evaluate,
         publish=publish_with_evidence,
         cleanup=cleanup,
     )

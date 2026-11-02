@@ -421,17 +421,21 @@ skillspector baseline ./my-skill --no-llm \
 
 Fingerprints bind to the scanned file content and to the SkillSpector version that generated them. After a source edit, the affected findings are reported again. After a scanner upgrade, SkillSpector ignores every fingerprint, and SkillEvaluator reports `fingerprint_version_mismatch` with both versions: as an error when blocking findings remain, otherwise as a warning. Rules keep working across scanner versions.
 
+Fingerprints only match static-only runs: `tier1 --no-llm`, or `validate` and `security-scan` without `--llm`. When the LLM security stage runs (`tier1` by default when a provider is configured, or `--llm`), SkillSpector's meta-analysis rewrites each finding's message, explanation, remediation, confidence, or tags before the baseline is applied. Those fields are part of the fingerprint, so fingerprints from `skillspector baseline --no-llm` no longer match, and the LLM stage reports the findings again. SkillEvaluator then reports `llm_stage_unmatched` with both stages' suppressed counts: as an error when blocking findings remain, otherwise as a warning. For runs with LLM analysis, use narrow `id`, `path`, and `message` rules instead; they still match because SkillSpector also checks `message` against the matched text.
+
 A baseline stored inside the skill is excluded from the scan, including when SkillEvaluator scans a staged copy without `evals/` outputs. For a folder of skills, the same baseline applies to each skill, and rule paths are relative to each skill.
 
 For a single-skill target, when SkillSpector is installed, JSON reports record the outcome under `results[].skillspector_baseline`:
 
-- `status`: `applied`, `no_matches`, `fingerprint_version_mismatch`, or `not_applied`.
+- `status`: `applied`, `no_matches`, `fingerprint_version_mismatch`, `llm_stage_unmatched`, or `not_applied`.
 - `file` and `digest`: the baseline's file name and a `sha256:` digest of its bytes. The local path is not recorded.
 - The baseline and runtime scanner versions, and the rule and fingerprint counts.
-- The suppressed, active, and active blocking finding counts, taken from SkillSpector's report before any `--llm-verify` downgrade or policy severity override.
+- `suppressed_findings` from the static stage and, when the LLM stage completed, `llm_stage_suppressed_findings`; and the active and active blocking finding counts. All are taken from SkillSpector's reports before any `--llm-verify` downgrade or policy severity override.
 - `message`: the outcome or the reason the baseline was rejected.
 
-The field is absent for folder targets. It keeps the fingerprint mismatch message even when a later `--llm-verify` downgrade or policy severity override rebuilds the error and warning lists. See the [SkillSpector suppression reference](https://github.com/NVIDIA/SkillSpector/blob/main/docs/SUPPRESSION.md) for the full baseline schema.
+Markdown and HTML reports show the same outcome as a `skillspector_baseline` line in the Security result, with the file name and digest, and a scan whose only findings were suppressed reads "No active security findings; N finding(s) suppressed by the requested baseline" rather than a clean result.
+
+`security-scan` and `tier1 security-scan` on a folder of skills write one merged report without the JSON field; the Markdown and HTML lines are kept per skill. `validate` on a folder validates each skill as its own job, so each skill's JSON report records the field. The field keeps the `fingerprint_version_mismatch` and `llm_stage_unmatched` messages even when a later `--llm-verify` downgrade or policy severity override rebuilds the error and warning lists. See the [SkillSpector suppression reference](https://github.com/NVIDIA/SkillSpector/blob/v2.13.3/docs/SUPPRESSION.md) for the full baseline schema.
 
 ## Exit behavior and scoring
 

@@ -659,6 +659,7 @@ def _inspect_skillspector_baseline(path: Path) -> tuple[dict, str | None]:
         "rule_count": 0,
         "fingerprint_count": 0,
         "suppressed_findings": None,
+        "llm_stage_suppressed_findings": None,
         "active_findings": None,
         "active_blocking_findings": None,
         "message": None,
@@ -1099,6 +1100,10 @@ class SecurityValidator(ValidatorBase):
                 use_llm=False,
                 baseline=baseline,
             )
+            # Merging the enrichment stage overwrites this metadata, so keep
+            # each stage's own suppression count for the baseline outcome.
+            static_suppressed = result.metadata.get("skillspector_suppressed_count")
+            llm_suppressed = None
             if self.use_llm and not result.is_incomplete:
                 enrichment = self._run_skillspector_once(
                     scan_root,
@@ -1106,12 +1111,19 @@ class SecurityValidator(ValidatorBase):
                     use_llm=True,
                     baseline=baseline,
                 )
+                if not enrichment.is_incomplete:
+                    llm_suppressed = enrichment.metadata.get("skillspector_suppressed_count")
                 result.merge(enrichment)
                 if not enrichment.is_incomplete:
                     self._deduplicate_skillspector_findings(result)
             if baseline_state is not None:
                 result.metadata["skillspector_baseline"] = baseline_state
-                self._report_skillspector_baseline(result, baseline_state)
+                self._report_skillspector_baseline(
+                    result,
+                    baseline_state,
+                    static_suppressed=static_suppressed,
+                    llm_suppressed=llm_suppressed,
+                )
             return result
         finally:
             if staged is not None:
@@ -2639,11 +2651,23 @@ class SecurityValidator(ValidatorBase):
             result.add_message(f"skillspector risk score: {score}/100 ({severity})")
 
     @staticmethod
-    def _report_skillspector_baseline(result: ValidationResult, baseline: dict) -> None:
+    def _report_skillspector_baseline(
+        result: ValidationResult,
+        baseline: dict,
+        *,
+        static_suppressed: object = None,
+        llm_suppressed: object = None,
+    ) -> None:
         """Record whether the requested baseline applied, so an inert one is not silent.
 
         The diagnostic is added after SkillSpector returns, outside its finding
-        stream, so the baseline cannot suppress it.
+        stream, so the baseline cannot suppress it. ``static_suppressed`` and
+        ``llm_suppressed`` are the counts each stage reported; the LLM count
+        is ``None`` when that stage did not run or did not complete.
+
+        Every processed outcome is also a ``skillspector_baseline`` success
+        detail, so Markdown and HTML reports show that reviewed exceptions
+        were applied, not only the JSON report.
         """
         runtime_version = result.metadata.get("skillspector_version")
         if not isinstance(runtime_version, str):
@@ -2653,7 +2677,8 @@ class SecurityValidator(ValidatorBase):
                 "see the security check errors."
             )
             return
-        suppressed = result.metadata.get("skillspector_suppressed_count", 0)
+        suppressed = static_suppressed if isinstance(static_suppressed, int) else 0
+        llm_stage_suppressed = llm_suppressed if isinstance(llm_suppressed, int) else None
         blocking = sum(
             1
             for finding in result.findings
@@ -2665,6 +2690,7 @@ class SecurityValidator(ValidatorBase):
                 "loaded": True,
                 "runtime_scanner_version": runtime_version,
                 "suppressed_findings": suppressed,
+                "llm_stage_suppressed_findings": llm_stage_suppressed,
                 "active_findings": len(result.findings),
                 "active_blocking_findings": blocking,
             }
@@ -2672,29 +2698,50 @@ class SecurityValidator(ValidatorBase):
         counts = (
             f"rules={baseline['rule_count']}, fingerprints={baseline['fingerprint_count']}, suppressed={suppressed}"
         )
+        if llm_stage_suppressed is not None:
+            counts += f", llm_stage_suppressed={llm_stage_suppressed}"
+        file_label = f"{baseline['file']} ({baseline['digest']})"
+
+        def report(status: str, message: str, *, problem: bool) -> None:
+            baseline["status"] = status
+            baseline["message"] = message
+            if problem and blocking:
+                # Explain remaining blockers without turning a passing scan into a failure.
+                result.add_error(message)
+                return
+            if problem:
+                result.add_warning(message)
+            result.add_success(check_name="skillspector_baseline", message=f"{file_label}: {message}")
+
         # SkillSpector compares scanner versions as exact strings and ignores
         # every fingerprint on a mismatch; rules still apply.
         if baseline["fingerprint_count"] and baseline["baseline_scanner_version"] != runtime_version:
-            baseline["status"] = "fingerprint_version_mismatch"
-            baseline["message"] = (
+            report(
+                "fingerprint_version_mismatch",
                 "SkillSpector baseline fingerprints were ignored: they were generated with SkillSpector "
                 f"{baseline['baseline_scanner_version'] or 'unknown'}, but this scan used {runtime_version} "
                 f"({counts}). Regenerate the fingerprints with SkillSpector {runtime_version}, or replace them "
-                "with narrow reviewed rules."
+                "with narrow reviewed rules.",
+                problem=True,
             )
-            # Explain remaining blockers without turning a passing scan into a failure.
-            if blocking:
-                result.add_error(baseline["message"])
-            else:
-                result.add_warning(baseline["message"])
             return
-        if suppressed:
-            baseline["status"] = "applied"
-            baseline["message"] = f"SkillSpector baseline applied ({counts})."
+        if llm_stage_suppressed is not None and llm_stage_suppressed < suppressed:
+            # SkillSpector's LLM meta-analysis rewrites findings before the
+            # baseline is applied, so fingerprints of static findings stop
+            # matching and those findings come back from the LLM stage.
+            report(
+                "llm_stage_unmatched",
+                f"SkillSpector baseline suppressed {suppressed} finding(s) in the static stage but only "
+                f"{llm_stage_suppressed} in the LLM stage ({counts}). LLM analysis rewrites findings before the "
+                "baseline applies, so fingerprints do not match them; use narrow id, path, or message rules for "
+                "runs with LLM analysis, or scan without --llm.",
+                problem=True,
+            )
             return
-        baseline["status"] = "no_matches"
-        baseline["message"] = f"SkillSpector baseline loaded but matched no findings ({counts})."
-        result.add_message(baseline["message"])
+        if suppressed or llm_stage_suppressed:
+            report("applied", f"SkillSpector baseline applied ({counts}).", problem=False)
+            return
+        report("no_matches", f"SkillSpector baseline loaded but matched no findings ({counts}).", problem=False)
 
     @staticmethod
     def _convert_skillspector_issue(issue: dict) -> tuple[Finding, bool]:
@@ -2760,7 +2807,15 @@ class SecurityValidator(ValidatorBase):
     @staticmethod
     def _summarize_skillspector_results(issues: list, has_critical_or_high: bool, result: ValidationResult) -> None:
         """Add a summary success/message entry for the skillspector scan."""
-        if not issues:
+        suppressed = result.metadata.get("skillspector_suppressed_count")
+        if not issues and isinstance(suppressed, int) and suppressed > 0:
+            # Suppressions require an explicit baseline; never present them as a clean scan.
+            result.add_success(
+                check_name="skillspector",
+                message=f"No active security findings; {suppressed} finding(s) suppressed by the requested baseline",
+                suppressed_count=suppressed,
+            )
+        elif not issues:
             result.add_success(
                 check_name="skillspector",
                 message="No security vulnerabilities detected (secrets, API keys, credentials)",

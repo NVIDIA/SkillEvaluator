@@ -1643,6 +1643,15 @@ print(json.dumps([finding.metadata["matched_value"] for finding in result.findin
         assert reported["file"] == "skillspector-baseline.yaml"
         assert reported["digest"] == f"sha256:{hashlib.sha256(baseline.read_bytes()).hexdigest()}"
         assert str(baseline.parent) not in rendered
+        # Markdown and HTML reports disclose the suppression too; a clean-looking check would hide it.
+        markdown = MarkdownReporter(include_timestamp=False).render_all([result])
+        html = HTMLReporter(include_timestamp=False).render_all([result])
+        for text in (markdown, html):
+            assert "skillspector_baseline" in text
+            assert "skillspector-baseline.yaml" in text and "SkillSpector baseline applied" in text
+            assert "suppressed by the requested baseline" in text
+            assert "No security vulnerabilities detected" not in text
+            assert str(baseline.parent) not in text
 
     @patch("skillevaluator.validators.security.Tools")
     def test_skillspector_baseline_suppressions_do_not_loosen_risk_reconciliation(
@@ -1798,6 +1807,7 @@ print(json.dumps([finding.metadata["matched_value"] for finding in result.findin
         assert result.metadata["skillspector_baseline"]["status"] == "no_matches"
         assert any("matched no findings" in message for message in result.messages)
         assert not result.warnings
+        assert "matched no findings" in MarkdownReporter(include_timestamp=False).render_all([result])
 
     @pytest.mark.parametrize(
         "content",
@@ -2018,6 +2028,67 @@ print(json.dumps([finding.metadata["matched_value"] for finding in result.findin
         stages = [call.args[0] for call in mock_tools.skillspector.run.call_args_list]
         assert ["--no-llm" in args for args in stages] == [True, False]
         assert all(args[args.index("--baseline") + 1] == str(baseline.resolve()) for args in stages)
+
+    @pytest.mark.parametrize(("llm_suppressed", "status"), [(0, "llm_stage_unmatched"), (1, "applied")])
+    @patch("skillevaluator.validators.security.Tools")
+    def test_skillspector_baseline_outcome_accounts_for_each_stage(
+        self,
+        mock_tools,
+        llm_suppressed: int,
+        status: str,
+        sample_skill_dir: Path,
+        tmp_path: Path,
+        monkeypatch,
+    ) -> None:
+        """LLM meta-analysis rewrites findings, so static fingerprints can stop matching in that stage."""
+        baseline = tmp_path / "baseline.yaml"
+        baseline.write_text(
+            f'version: 2\nscanner_version: "2.10.0"\nfingerprints:\n  - hash: "sha256:{"1" * 64}"\n'
+            '    reason: "Reviewed"\n',
+            encoding="utf-8",
+        )
+        monkeypatch.setenv("SKILL_EVAL_LLM_PROVIDER", "nv_build")
+        monkeypatch.setenv("NVIDIA_API_KEY", "test-credential")
+        static = _skillspector_json_report()
+        static["suppressed_count"] = 1
+        static["suppressed"] = [{"id": "PE5", "suppressed": True}]
+        static["analysis_completeness"].update({"findings_before_filtering": 1, "findings_after_filtering": 1})
+        privileged = {
+            "id": "PE5",
+            "category": "Privilege Escalation",
+            "pattern": "Privileged container",
+            "severity": "HIGH",
+            "finding": "Container runs with full host privileges (LLM-confirmed)",
+            "location": {"file": "SKILL.md", "start_line": 5},
+        }
+        enriched = _skillspector_json_report(
+            [] if llm_suppressed else [privileged], llm_requested=True, llm_available=True
+        )
+        if llm_suppressed:
+            enriched["suppressed_count"] = 1
+            enriched["suppressed"] = [{"id": "PE5", "suppressed": True}]
+            enriched["analysis_completeness"].update({"findings_before_filtering": 1, "findings_after_filtering": 1})
+        mock_tools.skillspector.is_available = True
+        mock_tools.skillspector.run.side_effect = [
+            ToolResult(success=True, stdout=json.dumps(static), stderr="", exit_code=0),
+            ToolResult(success=True, stdout=json.dumps(enriched), stderr="", exit_code=0 if llm_suppressed else 1),
+        ]
+
+        result = SecurityValidator(use_llm=True, skillspector_baseline=baseline).validate_security_only(
+            sample_skill_dir
+        )
+
+        state = result.metadata["skillspector_baseline"]
+        assert state["status"] == status
+        # The static stage's count is not overwritten by the LLM stage's.
+        assert (state["suppressed_findings"], state["llm_stage_suppressed_findings"]) == (1, llm_suppressed)
+        if llm_suppressed:
+            assert result.status == "passed", result.errors
+        else:
+            assert result.status == "failed"
+            assert state["active_blocking_findings"] == 1
+            assert any("only 0 in the LLM stage" in error and "--llm" in error for error in result.errors)
+            assert not any("matched no findings" in message for message in result.messages)
 
     @patch("skillevaluator.validators.security.Tools")
     def test_skillspector_2_10_partial_scan_reports_incomplete_before_recommendation(

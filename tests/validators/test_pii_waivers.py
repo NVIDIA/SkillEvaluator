@@ -19,6 +19,7 @@ import yaml
 
 from skillevaluator.reporting import JSONReporter, SARIFReporter
 from skillevaluator.utils.secret_redaction import SENSITIVE_PII_CATEGORIES
+from skillevaluator.validators import pii_waivers
 from skillevaluator.validators.pii_waivers import PIIWaiver, PIIWaiverSet, pii_evidence_sha256, today_utc
 from skillevaluator.validators.security import SecurityValidator
 
@@ -160,6 +161,16 @@ def test_expired_waiver_is_reported_and_not_applied(skill: Path, tmp_path: Path)
     (expired,) = [finding for finding in result.findings if finding.category == "PII_WAIVER"]
     assert (expired.check_name, expired.severity.value) == ("expired-pii-waiver", "medium")
     assert expired.file_path == "contact.md"
+
+
+def test_waiver_applies_on_its_expiry_day(skill: Path, tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    """A waiver applies through ``expires``; the date is pinned so a run crossing UTC midnight cannot flake."""
+    monkeypatch.setattr(pii_waivers, "today_utc", lambda: date(2026, 11, 2))
+
+    result = _scan(skill, _write_waivers(tmp_path, _waiver(expires="2026-11-02")))
+
+    assert result.passed
+    assert _waiver_checks(result) == ["applied-pii-waiver"]
 
 
 def test_created_may_be_one_day_ahead_of_utc(skill: Path, tmp_path: Path) -> None:

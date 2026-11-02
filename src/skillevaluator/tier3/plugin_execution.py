@@ -27,6 +27,7 @@ from skillevaluator.tier3.plugin_native import (
 
 if TYPE_CHECKING:
     from skillevaluator.evaluation.options import EvaluationOptions
+    from skillevaluator.tier3.plugin_evidence import EvidenceOptions, RuntimeEvidenceObserver
     from skillevaluator.tier3.plugin_prepare import PreparedRuntimePackage
 
 
@@ -80,6 +81,32 @@ class NativeRuntimeHooks:
     evidence: dict[str, Any] = field(default_factory=dict)
     evidence_error: str | None = None
     collected_jobs: set[Path] = field(default_factory=set)
+    trial_censuses: dict[Path, Mapping[str, Any]] = field(default_factory=dict)
+    trial_init_events: dict[Path, Mapping[str, Any]] = field(default_factory=dict)
+    observer: RuntimeEvidenceObserver | None = None
+
+    def configure_run(
+        self,
+        *,
+        case_id_by_task_selector: Mapping[str, str] | None = None,
+        arm_jobs: Mapping[str, Mapping[str, Path]] | None = None,
+    ) -> None:
+        """Supply coordinator-owned identities and additional private arm locations."""
+        if self.observer is not None:
+            self.observer.configure_run(case_id_by_task_selector=case_id_by_task_selector, arm_jobs=arm_jobs)
+
+    def observe_collected_trials(
+        self,
+        agent: str,
+        arm: str,
+        job_dir: Path,
+        collected: list[dict[str, Any]],
+        scoreable: list[dict[str, Any]],
+        selector_map: Mapping[str, str] | None,
+    ) -> None:
+        """Reuse the engine's reward reads; behavior evidence never participates in scoring."""
+        if self.observer is not None:
+            self.observer.observe_collected_trials(agent, arm, job_dir, collected, scoreable, selector_map)
 
     def with_agent_import_path(self, agent: str, base_import_path: str | None) -> str | None:
         decision = self.decisions.get(agent)
@@ -138,6 +165,13 @@ class NativeRuntimeHooks:
             result["native_evidence"] = self.evidence
             if self.evidence_error:
                 result["native_evidence_error"] = self.evidence_error
+        if self.observer is not None:
+            try:
+                self.observer.collect(jobs_dir, result)
+            except Exception as exc:
+                self.observer.record_failure(exc)
+                if result is not None:
+                    result["runtime_evidence"] = self.observer.provenance()
 
 
 def _stage_native_skills(task_dir: Path, staging: Any) -> None:
@@ -334,6 +368,8 @@ def evaluate_prepared_plugin(
     evals_source: Path | None = None,
     evaluate: Callable[[EvaluationOptions], dict[str, Any]] | None = None,
     publish: Callable[[PrivateRunOutcome], None] | None = None,
+    evidence_options: EvidenceOptions | None = None,
+    observer_factory: Callable[..., RuntimeEvidenceObserver] | None = None,
 ) -> PrivateRunOutcome:
     """Evaluate a prepared plugin through the existing engine and remove the operation-owned staging.
 
@@ -347,6 +383,7 @@ def evaluate_prepared_plugin(
     from dataclasses import replace
 
     from skillevaluator.tier3.commands import parse_agents
+    from skillevaluator.tier3.plugin_evidence import EvidenceOptions, RuntimeEvidenceObserver
     from skillevaluator.tier3.plugin_native import apply_native_refusals, resolve_plugin_load
     from skillevaluator.tier3.plugin_prepare import stage_wrapper_skill, wrapper_skill_name
 
@@ -368,6 +405,13 @@ def evaluate_prepared_plugin(
         raise
     results_dir = options.results_dir or package.native_source.plugin_root / "evals" / "results"
     hooks = NativeRuntimeHooks(package.native_source, decisions, package=package)
+    try:
+        hooks.observer = (observer_factory or RuntimeEvidenceObserver)(
+            package, wrapper, hooks, evidence_options or EvidenceOptions()
+        )
+    except BaseException:
+        shutil.rmtree(temp, ignore_errors=True)
+        raise
     provenance = {
         "plugin": package.plugin_name,
         "source": {
@@ -393,6 +437,9 @@ def evaluate_prepared_plugin(
             outcome.provenance["native_evidence"] = hooks.evidence
         if hooks.evidence_error:
             outcome.provenance["native_evidence_error"] = hooks.evidence_error
+        if hooks.observer is not None:
+            observed = hooks.observer.provenance()
+            outcome.provenance.update(runtime_evidence=observed, mcp_proof=observed["mcp_proof"])
         if publish is not None:
             publish(outcome)
 
@@ -427,13 +474,25 @@ def collect_native_evidence(hooks: NativeRuntimeHooks, jobs_dir: Path, skill_nam
         declared = plan["declared"]
         job = jobs_dir / f"{skill_name}-{agent}-with"
         trials = sorted(p for p in job.iterdir() if (p / "agent").is_dir()) if job.is_dir() else []
-        censuses = [_trial_census(native, agent, trial / "agent", declared, plan) for trial in trials]
+        censuses = []
+        for trial in trials:
+            census = _trial_census(native, agent, trial / "agent", declared, plan, init_events=hooks.trial_init_events)
+            hooks.trial_censuses[trial] = census
+            censuses.append(census)
         summary = native.summarize_censuses(agent, "native", censuses, staged_hook_ids=plan["hook_ids"])
         evidence[agent] = {**summary, "trials": len(censuses), "job": job.name}
     return evidence
 
 
-def _trial_census(native: Any, agent: str, logs: Path, declared: Any, plan: Mapping[str, Any]) -> dict[str, Any]:
+def _trial_census(
+    native: Any,
+    agent: str,
+    logs: Path,
+    declared: Any,
+    plan: Mapping[str, Any],
+    *,
+    init_events: dict[Path, Mapping[str, Any]] | None = None,
+) -> dict[str, Any]:
     raw = native.read_census_file(logs / native.LOAD_CENSUS_FILENAME)
     if raw is None:
         return {**native.fallback_census(agent, "native", declared), "fallback": True}
@@ -444,5 +503,7 @@ def _trial_census(native: Any, agent: str, logs: Path, declared: Any, plan: Mapp
         with log.open("rb") as handle:
             text = handle.read(_MAX_AGENT_LOG_BYTES).decode("utf-8", errors="replace")
         if (init := native.claude_init_event(text)) is not None:
+            if init_events is not None:
+                init_events[logs.parent] = init
             census = native.apply_claude_init_evidence(census, declared, init, plugin=harness["plugin"])
     return census

@@ -24,6 +24,7 @@ from collections.abc import Callable, Iterable, Mapping, Sequence
 from dataclasses import dataclass
 from dataclasses import field as dataclass_field
 from fractions import Fraction
+from itertools import islice
 from pathlib import Path, PurePosixPath, PureWindowsPath
 from typing import Any
 
@@ -3505,17 +3506,47 @@ def _staged_task_entry_id_map(
     return mapping
 
 
+def _private_reward_inputs(job_dir: Path, trial_roots: Sequence[Path]) -> tuple[list[Path], list[Path]]:
+    """Known verifier layouts of a bounded, explicitly selected set of regular trial roots."""
+    if len(trial_roots) > 512:
+        raise ValueError("selected trial roots exceed the private evidence bound")
+    result_files, reward_files = [], []
+    with SecureRoot(job_dir):
+        for root in trial_roots:
+            if root.parent.absolute() != job_dir.absolute() or _safe_trial_path_component(root.name) != root.name:
+                raise ValueError("selected trial root is outside the Harbor job")
+            with SecureRoot(root):
+                result_files.append(root / "result.json")
+                reward_files.append(root / "verifier" / "reward.json")
+                steps = root / "steps"
+                if not os.path.lexists(steps):
+                    continue
+                with SecureRoot(steps), os.scandir(steps) as iterator:
+                    children = list(islice(iterator, _MAX_TRAJECTORY_STEP_DIRECTORIES + 1))
+                if len(children) > _MAX_TRAJECTORY_STEP_DIRECTORIES:
+                    raise ValueError("selected trial step directory bound exceeded")
+                for child in sorted(children, key=lambda item: item.name):
+                    metadata = child.stat(follow_symlinks=False)
+                    if stat.S_ISDIR(metadata.st_mode) and not stat_is_link_or_reparse(metadata):
+                        reward_files.append(Path(child.path) / "verifier" / "reward.json")
+    return ([path for path in result_files if path.exists()], [path for path in reward_files if path.exists()])
+
+
 def _extract_rewards(
     job_dir: Path,
     case_id_by_task_selector: dict[str, str] | None = None,
     *,
     arm_suffix: str = "",
     task_entry_id_map: Mapping[str, str] | None = None,
+    selected_trial_roots: Sequence[Path] | None = None,
 ) -> list[dict[str, Any]]:
     """Extract reward.json from all trials in a job directory."""
     rewards: list[dict[str, Any]] = []
     scored_trial_roots: set[Path] = set()
     authoritative_trial_roots: set[Path] = set()
+    selected_results, selected_rewards = (
+        _private_reward_inputs(job_dir, selected_trial_roots) if selected_trial_roots is not None else (None, None)
+    )
 
     def _resolve_trial_name_entry_id(trial_name_val: str) -> str:
         if not task_entry_id_map or not trial_name_val:
@@ -3572,7 +3603,7 @@ def _extract_rewards(
     # Native multi-step Harbor tasks can persist an authoritative aggregate at
     # the trial root in addition to one reward file per step. Materialize that
     # single logical row first so both averages and pass@k use the same score.
-    for result_file in sorted(job_dir.glob("*/result.json")):
+    for result_file in selected_results if selected_results is not None else sorted(job_dir.glob("*/result.json")):
         trial_dir = result_file.parent
         if _trial_failure_reason(trial_dir) or _is_agent_runtime_failure_trial(trial_dir):
             continue
@@ -3600,7 +3631,7 @@ def _extract_rewards(
         rewards.append(data)
         authoritative_trial_roots.add(trial_dir)
 
-    for reward_file in sorted(job_dir.rglob("reward.json")):
+    for reward_file in selected_rewards if selected_rewards is not None else sorted(job_dir.rglob("reward.json")):
         if reward_file.parent.name == "verifier":
             try:
                 trial_dir, trial_name, step_name = _reward_trial_context(reward_file)
@@ -3642,7 +3673,7 @@ def _extract_rewards(
             except OSError as e:
                 logger.warning("Failed to read %s: %s", reward_file, e)
 
-    for result_file in sorted(job_dir.glob("*/result.json")):
+    for result_file in selected_results if selected_results is not None else sorted(job_dir.glob("*/result.json")):
         trial_dir = result_file.parent
         if (
             trial_dir in authoritative_trial_roots
@@ -6844,6 +6875,18 @@ def _aggregate_execution(summaries: list[dict[str, Any]]) -> dict[str, Any]:
     }
 
 
+def _observe_private_trials(agent, arm, job_dir, collected, scoreable, selector_map) -> None:
+    """Hand existing observations to an active private hook without affecting ordinary collection."""
+    runtime = sys.modules.get("skillevaluator.tier3.plugin_execution")
+    hooks = runtime.active_runtime() if runtime is not None else None
+    observe = getattr(hooks, "observe_collected_trials", None)
+    if observe is not None:
+        try:
+            observe(agent, arm, job_dir, collected, scoreable, selector_map)
+        except Exception as exc:
+            logger.warning("Private evidence handoff failed: %s", _safe_diagnostic_text(exc, max_len=300))
+
+
 def collect_harbor_results(
     skill_name: str,
     agents: list[str],
@@ -6950,6 +6993,9 @@ def collect_harbor_results(
                 else []
             )
             with_rewards, invalid_score_failures = _partition_scoreable_rewards(with_collected_rewards)
+            _observe_private_trials(
+                agent, "with_skill", with_job_dir, with_collected_rewards, with_rewards, case_id_by_task_selector
+            )
             with_recovered = (
                 _recovered_timeout_attempts(with_job_dir, with_rewards, n_attempts=n_attempts) if stop_on_pass else []
             )
@@ -7172,6 +7218,14 @@ def collect_harbor_results(
                     else []
                 )
                 without_rewards, invalid_score_failures = _partition_scoreable_rewards(without_collected_rewards)
+                _observe_private_trials(
+                    agent,
+                    "without_skill",
+                    without_job_dir,
+                    without_collected_rewards,
+                    without_rewards,
+                    case_id_by_task_selector,
+                )
                 without_recovered = (
                     _recovered_timeout_attempts(without_job_dir, without_rewards, n_attempts=n_attempts)
                     if stop_on_pass

@@ -92,6 +92,9 @@ _CREDENTIAL_URI_USERINFO_RE = re.compile(r"(?i)(?P<scheme>[a-z][a-z0-9+.-]{0,31}
 _SENSITIVE_QUOTED_ASSIGNMENT_RE = re.compile(
     rf"(?i){_SENSITIVE_KEY_PATTERN}\s*+(?P<sep>[:=])\s*+(?:\"[^\"\r\n]*+\"|'[^'\r\n]*+')"
 )
+_SENSITIVE_OPEN_QUOTED_ASSIGNMENT_RE = re.compile(
+    rf"(?im){_SENSITIVE_KEY_PATTERN}\s*+(?P<sep>[:=])\s*+(?:\"[^\"\r\n]*+$|'[^'\r\n]*+$)"
+)
 # The whitespace after ":" must stay backtrackable: in "token:  ," the value is the last blank.
 _SENSITIVE_COLON_ASSIGNMENT_RE = re.compile(rf"(?im){_SENSITIVE_KEY_PATTERN}\s*+(?P<sep>:)\s*[^\r\n,;]+")
 _SENSITIVE_EQUALS_ASSIGNMENT_RE = re.compile(rf"(?i){_SENSITIVE_KEY_PATTERN}\s*+(?P<sep>=)\s*+[^\s\"',;]+")
@@ -249,8 +252,14 @@ def _redact_unterminated_private_key(text: str) -> str:
     return text
 
 
-def redact_sensitive_text(value: str, *, max_len: int | None = None) -> str:
+def redact_sensitive_text(value: str, *, max_len: int | None = None, max_input_chars: int | None = None) -> str:
     """Best-effort masking for credentials before writing logs or artifacts."""
+    if max_input_chars is not None and len(value) > max_input_chars:
+        window = value[:max_input_chars]
+        # A cut credential may no longer match its redaction pattern. Drop
+        # the final token before redaction can shorten earlier content.
+        boundary = next((index for index in range(len(window) - 1, -1, -1) if window[index].isspace()), -1)
+        value = window[: boundary + 1]
     out = value
     # Remove multiline private-key material before any single-line assignment
     # or header rule can consume only its BEGIN delimiter and orphan the body.
@@ -261,6 +270,7 @@ def redact_sensitive_text(value: str, *, max_len: int | None = None) -> str:
         out = _CREDENTIAL_URI_USERINFO_RE.sub(r"\g<scheme><redacted>@", out)
     out = _AUTH_HEADER_RE.sub(_redact_auth_header, out)
     out = _SENSITIVE_QUOTED_ASSIGNMENT_RE.sub(_redact_sensitive_assignment, out)
+    out = _SENSITIVE_OPEN_QUOTED_ASSIGNMENT_RE.sub(_redact_sensitive_assignment, out)
     out = _SENSITIVE_COLON_ASSIGNMENT_RE.sub(_redact_sensitive_assignment, out)
     out = _SENSITIVE_EQUALS_ASSIGNMENT_RE.sub(_redact_sensitive_assignment, out)
     for pattern, replacement in _REDACTIONS:

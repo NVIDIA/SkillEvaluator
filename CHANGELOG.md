@@ -206,9 +206,13 @@ All notable changes to SkillEvaluator are documented in this file.
   the Findings number shows the same occurrence, raw-record and no-finding
   counts beneath it when they differ from the unique count. Both formats used
   to add up raw records, so a finding reported on several lines or by two
-  validators counted more than once. The JSON `skills[].issue_count`,
-  contributor totals, `total_errors`, `total_warnings` and `severity_counts`
-  still count raw records.
+  validators counted more than once. The HTML report's embedded and exported
+  data changes `summary.total_issues` the same way: it now counts unique
+  findings plus errors and warnings with no finding behind them, instead of
+  raw errors plus warnings; the raw finding count is in
+  `summary.raw_finding_occurrences` and `finding_counts.raw_occurrences`. The
+  JSON `skills[].issue_count`, contributor totals, `total_errors`,
+  `total_warnings` and `severity_counts` still count raw records.
 
 ### Documentation
 

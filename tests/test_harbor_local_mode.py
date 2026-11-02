@@ -3205,7 +3205,11 @@ def test_streamed_exec_cancellation_reaps_descendants(
         with environment.scoped_output_callback(on_output):
             task = asyncio.create_task(
                 environment.exec(
-                    'printf "%s\\n" "$CANCEL_TOKEN"; (sleep 30) & printf \'%s\' "$!" > stream-cancel-child-pid; wait',
+                    'printf "%s\\n" "$CANCEL_TOKEN"; (sleep 30) & '
+                    # Publish a complete PID before signaling readiness to the
+                    # test; cancellation can otherwise catch an empty new file.
+                    "printf '%s' \"$!\" > stream-cancel-child-pid.tmp; "
+                    "mv stream-cancel-child-pid.tmp stream-cancel-child-pid; wait",
                     env={"CANCEL_TOKEN": secret},
                 )
             )
@@ -6115,9 +6119,7 @@ def test_harbor_bin_falls_back_to_path_lookup(tmp_path: Path, monkeypatch: pytes
     assert runner._harbor_bin() == "/opt/harbor/bin/harbor"
 
 
-def test_harbor_bin_returns_bare_name_when_missing_everywhere(
-    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
-) -> None:
+def test_harbor_bin_returns_bare_name_when_missing_everywhere(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
     """A missing Harbor still yields the command name for the caller to report."""
     from skillevaluator.tier3.harbor import runner
 

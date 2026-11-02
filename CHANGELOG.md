@@ -6,6 +6,10 @@ All notable changes to SkillEvaluator are documented in this file.
 
 ### Added
 
+- In local mode (`--env-mode local`), a missing Claude Code, Codex, or OpenCode
+  CLI is offered as a pinned npm install into the SkillEvaluator runtime folder;
+  without a terminal, the command is printed instead.
+
 - Support Python 3.14 alongside Python 3.12 and 3.13, including installation
   guidance and CI coverage for tests and built packages.
 - Add reusable GitLab CI onboarding and configurable Tier 1 quality thresholds,
@@ -131,7 +135,25 @@ All notable changes to SkillEvaluator are documented in this file.
   rules, and is not accepted by `validate`, so a baseline-only run cannot pass
   a Tier 3 gate.
 
+- Tier 1 sets up SkillSpector 2.13.3 and Gitleaks 8.30.0 on first use from
+  pinned, SHA-256-verified releases, without a prompt; Semgrep is optional
+  unless `SKILLEVALUATOR_REQUIRE_SEMGREP=1`. `--skip <check>` on `validate` and
+  `tier1` leaves a check out and reports it as skipped. A `scanners` row and the
+  JSON report record which scanner versions ran.
+
 ### Changed
+
+- Shared LLM calls and the Harbor verifier retry HTTP 408, 429, and every 5xx
+  response except 501 and 505, including proxy 520–524 and overload 529 errors.
+  TLS certificate verification failures stop immediately. The host Bedrock
+  path preserves the underlying status and certificate failure through
+  LiteLLM wrappers, so generic 500/503 errors do not cause extra attempts.
+  This applies to ordinary skill evaluations and other host LLM calls as well
+  as plugin evaluations; retry limits and scoring formulas are unchanged.
+- The compact `validate` view lists every Tier 3 test case with and without
+  the skill, updates the list while trials run, and ends each tier with a short
+  "what to fix" list: the problem, then the action. A required scanner that
+  could not run counts as "didn't run", not as a failed check.
 
 - Hosted GitHub reports verify a separate GitHub-signed execution receipt.
   Enable `id-token: write` in the scan workflow and refresh its approved blob
@@ -224,6 +246,8 @@ All notable changes to SkillEvaluator are documented in this file.
 - Reusable Tier 1 CI always requires Semgrep in scanner subprocesses, so local
   optional-scanner defaults cannot hide missing CI code-scanning coverage.
 
+- Use public, commit-pinned README image URLs so the wordmark and three-tier
+  diagram can render in PyPI package descriptions as well as on GitHub.
 - On Windows, repository root and source-link detection no longer break for
   repositories in non-ASCII folders. Git's repository path is decoded as a file
   name and its remote URL and branch as UTF-8, instead of with the locale code

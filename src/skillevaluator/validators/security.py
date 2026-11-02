@@ -51,6 +51,7 @@ from skillevaluator.provider_config import (
 from skillevaluator.skillspector_provenance import sanitize_skillspector_llm_provenance
 from skillevaluator.spdx import is_spdx_only_html_comment
 from skillevaluator.utils.path_security import matches_filesystem_name
+from skillevaluator.utils.scanner_install import prepare_skillspector
 from skillevaluator.utils.secure_fs import SecurePathError, SecureRoot
 from skillevaluator.utils.tool_runner import Tools, parse_json_output
 from skillevaluator.validators.base import (
@@ -1299,9 +1300,17 @@ class SecurityValidator(ValidatorBase):
                 result.metadata["skillspector_llm_provenance"] = provenance
 
         if tool_result.exit_code not in _SKILLSPECTOR_POLICY_EXIT_CODES:
-            detail = tool_result.error_message or (
-                f"{stage_name} failed with unexpected exit code {tool_result.exit_code}: "
-                "scanner diagnostics were redacted"
+            error_message = tool_result.error_message
+            if not error_message and Tools.skillspector.resolution_source == "uv tool run":
+                error_message = prepare_skillspector(Tools.skillspector.path)
+            hint = Tools.skillspector.get_install_hint() if (error_message or "").startswith("couldn't ") else ""
+            detail = (
+                f"{error_message}. {hint}".rstrip(". ")
+                if error_message
+                else (
+                    f"{stage_name} failed with unexpected exit code {tool_result.exit_code}: "
+                    "scanner diagnostics were redacted"
+                )
             )
             result.add_error(detail)
             result.mark_scan_incomplete(stage_name)
@@ -1325,6 +1334,7 @@ class SecurityValidator(ValidatorBase):
             result.add_error(f"{stage_name} JSON output was not an object; security scan did not complete")
             result.mark_scan_incomplete(stage_name)
             return result
+        result.record_scanner("skillspector", Tools.skillspector.version)
 
         if original_root is not None:
             try:

@@ -1970,17 +1970,6 @@ def test_responses_namespaced_tool_choice_becomes_forced_flat_chat_function(
             [
                 {
                     "type": "namespace",
-                    "name": "n" * 40,
-                    "description": "too long after flattening",
-                    "tools": [{"type": "function", "name": "t" * 30, "parameters": {}}],
-                }
-            ],
-            "64",
-        ),
-        (
-            [
-                {
-                    "type": "namespace",
                     "name": "ns",
                     "description": "duplicate",
                     "tools": [
@@ -2295,7 +2284,23 @@ def test_claude_code_orchestration_tools_are_omitted_but_executable_and_custom_t
 
     translated = anthropic_to_chat_request(request)
 
-    assert [tool["function"]["name"] for tool in translated["tools"]] == ["Bash", "mcp_custom"]
+    names = [tool["function"]["name"] for tool in translated["tools"]]
+    assert names[:2] == ["Bash", "mcp_custom"]
+    assert len(names) == 3 and len(names[2]) == 64 and names[2].startswith("mcp_xxx")
+
+
+def test_responses_namespace_tools_alias_names_too_long_after_flattening() -> None:
+    tools = [
+        {
+            "type": "namespace",
+            "name": "n" * 40,
+            "description": "long",
+            "tools": [{"type": "function", "name": "t" * 30, "parameters": {}}],
+        }
+    ]
+    translated = responses_to_chat_request({"model": "nvidia/model", "tools": tools})
+    name = translated["tools"][0]["function"]["name"]
+    assert len(name) == 64 and name.startswith("n" * 40 + "__")
 
 
 def test_anthropic_required_tool_choice_rejects_an_all_filtered_tool_set() -> None:

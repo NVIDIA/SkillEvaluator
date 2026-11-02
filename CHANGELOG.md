@@ -6,6 +6,8 @@ All notable changes to SkillEvaluator are documented in this file.
 
 ### Added
 
+- Support Python 3.14 alongside Python 3.12 and 3.13, including installation
+  guidance and CI coverage for tests and built packages.
 - Add reusable GitLab CI onboarding and configurable Tier 1 quality thresholds,
   alongside a shared repository integration guide.
 - Opt-in `SKILL_EVAL_JUDGE_CHARACTER_FACTS=1` adds bounded, escaped Unicode

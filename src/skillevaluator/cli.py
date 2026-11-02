@@ -135,6 +135,19 @@ def _validate_similarity_threshold(_ctx: click.Context, _param: click.Parameter,
     return value
 
 
+def _validate_progress_interval(_ctx: click.Context, _param: click.Parameter, value: float | None) -> float | None:
+    if value is None:
+        return None
+    from skillevaluator.tier3.harbor.progress import MAX_REFRESH_INTERVAL_SECONDS, MIN_REFRESH_INTERVAL_SECONDS
+
+    # NaN passes every range comparison, so check finiteness explicitly.
+    if not math.isfinite(value) or not MIN_REFRESH_INTERVAL_SECONDS <= value <= MAX_REFRESH_INTERVAL_SECONDS:
+        raise click.BadParameter(
+            f"must be finite and within [{MIN_REFRESH_INTERVAL_SECONDS:g}, {MAX_REFRESH_INTERVAL_SECONDS:g}] seconds"
+        )
+    return value
+
+
 # Heading + intro for the grouped Tier 3 options in ``validate --help``.
 _RUN_GROUP = "Run & Reports"
 _RUN_GROUP_DESC = "Applies to the whole run: target typing, policy profile, reports, tier selection."
@@ -2840,6 +2853,11 @@ def _tier2_workflow(
     help="Create one eval case when no dataset/task source exists, then evaluate.",
 )
 @click.option("--skip-baseline", is_flag=True, help="Skip without-skill baseline.")
+@click.option(
+    "--skip-with-skill",
+    is_flag=True,
+    help="Skip the with-skill arm and run only the without-skill baseline (no lift analysis).",
+)
 @click.option("--n-attempts", type=int, default=None)
 @click.option("--pass-threshold", type=float, default=None)
 @click.option(
@@ -2898,6 +2916,14 @@ def _tier2_workflow(
     help="Tier 3 progress presentation (auto uses Rich on a TTY and plain lines otherwise).",
 )
 @click.option(
+    "--progress-interval",
+    type=float,
+    default=None,
+    metavar="SECONDS",
+    callback=_validate_progress_interval,
+    help="Seconds between Tier 3 progress heartbeats (defaults to 1 for Rich and 60 for plain/CI output).",
+)
+@click.option(
     "--verbose",
     is_flag=True,
     help="Also print per-evaluator and per-dimension tables and the metric findings report.",
@@ -2909,6 +2935,7 @@ def evaluate(
     environment_kwarg: tuple[str, ...],
     autopilot: bool,
     skip_baseline: bool,
+    skip_with_skill: bool,
     n_attempts: int | None,
     pass_threshold: float | None,
     stop_on_pass: bool | None,
@@ -2933,12 +2960,16 @@ def evaluate(
     evaluated_source_revision: str | None,
     evaluator_container_revision: str | None,
     progress: str,
+    progress_interval: float | None,
     verbose: bool,
 ) -> None:
     """Run Tier 3 live agent evaluation."""
     from skillevaluator.evaluation import EvaluationOptions, EvaluationService
     from skillevaluator.tier3.harbor.progress import create_progress_reporter
 
+    if skip_baseline and skip_with_skill:
+        # Reject before --autopilot can spend a generation call on a run that cannot start.
+        raise click.UsageError("--skip-baseline and --skip-with-skill are mutually exclusive (no arm would run)")
     service = EvaluationService()
     # Resolved before the service is built so a non-canonical value is refused
     # at the boundary rather than after a long live run has already started.
@@ -2958,6 +2989,7 @@ def evaluate(
         env_mode=env_mode,
         environment_kwarg=environment_kwarg,
         skip_baseline=skip_baseline,
+        skip_with_skill=skip_with_skill,
         n_attempts=n_attempts,
         pass_threshold=pass_threshold,
         stop_on_pass=stop_on_pass,
@@ -3023,7 +3055,11 @@ def evaluate(
                         padding=(0, 1),
                     )
                 )
-        progress_reporter = create_progress_reporter(progress, stream=click.get_text_stream("stderr"))
+        progress_reporter = create_progress_reporter(
+            progress,
+            stream=click.get_text_stream("stderr"),
+            refresh_interval=progress_interval,
+        )
         engine_result = service.evaluate(options, progress_reporter=progress_reporter)
         failure = service.failure_reason(engine_result)
         display_result = engine_result

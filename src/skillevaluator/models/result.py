@@ -135,11 +135,33 @@ class Finding:
         """Normalize human text without coupling identity to formatting."""
         return " ".join(("" if value is None else str(value)).casefold().split())
 
+    def _identity_message(self) -> str:
+        """Return the message without location text the finding records elsewhere.
+
+        Secret detection writes the finding's own ``in <file>:<line>`` into
+        its message, and the PII scan appends ``— N occurrences (...)`` when
+        it folds repeats of one value into a finding whose ``metadata``
+        lists them. Leaving that text out keeps ``finding_id`` stable when
+        lines move. Other text, such as a file name a check puts in its
+        message, stays part of the identity.
+        """
+        message = "" if self.message is None else str(self.message)
+        if self.file_path is not None and self.line_number is not None:
+            message = message.replace(f" in {self.file_path}:{self.line_number}", "", 1)
+        occurrences = self.metadata.get("occurrences") if isinstance(self.metadata, dict) else None
+        if isinstance(occurrences, list) and len(occurrences) > 1:
+            marker = f" \u2014 {len(occurrences)} occurrences ("
+            index = message.rfind(marker)
+            if index >= 0 and message.endswith(")"):
+                message = message[:index]
+        return message
+
     @property
     def finding_id(self) -> str:
         """Return a deterministic semantic identity independent of location.
 
-        File and line belong to an occurrence. Excluding them lets reporters
+        File and line belong to an occurrence. Excluding them, and any copy
+        of them in the message (see ``_identity_message``), lets reporters
         group the same check across paths and validators while retaining every
         concrete occurrence in the reconciliation contract. Severity is also
         excluded, so a policy override or verifier downgrade keeps the ID.
@@ -148,7 +170,7 @@ class Finding:
             (
                 self._normalize_identity_text(self.category),
                 self._normalize_identity_text(self.check_name),
-                self._normalize_identity_text(self.message),
+                self._normalize_identity_text(self._identity_message()),
                 self._normalize_identity_text(self.suggestion),
             )
         )

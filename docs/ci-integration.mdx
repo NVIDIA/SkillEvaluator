@@ -258,7 +258,12 @@ Every finding carries two stable IDs. `finding_id` (`SEF-` plus 20 hex
 characters) hashes the finding's category, check name, message, and suggestion,
 ignoring case and extra whitespace. It does not change when the finding moves
 to another line or file, or when a policy changes its severity, so you can
-track a finding across runs. `occurrence_id` (`SEO-…`) adds the file path,
+track a finding across runs. Location text that a check also writes into its
+message is left out of the hash: the `in <file>:<line>` in a secret detection
+message, and the `— N occurrences (…)` list that the PII scan appends when it
+folds repeats of one value into one finding. Other message text stays part of
+the ID; script lint names the script in its messages, so the same lint problem
+in two scripts has two `finding_id` values. `occurrence_id` (`SEO-…`) adds the file path,
 line number, and line content, so it identifies one location.
 `finding_groups` groups findings by `finding_id` across validators, and each
 result in `results[]` carries its own `finding_counts`. Identical findings in

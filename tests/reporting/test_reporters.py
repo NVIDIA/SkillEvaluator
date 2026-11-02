@@ -670,6 +670,48 @@ def test_occurrence_identity_distinguishes_line_zero_from_no_line() -> None:
     assert Finding(**common, line_number=0).occurrence_id != Finding(**common, line_number=None).occurrence_id
 
 
+def test_secret_finding_id_ignores_the_location_written_into_its_message() -> None:
+    from skillevaluator.validators.secrets import SecretsValidator
+
+    findings = []
+    for file_path, line in (("scripts/run.py", 10), ("scripts/run.py", 11), ("scripts/other.py", 10)):
+        result = ValidationResult(validator_name="Secrets Detection")
+        SecretsValidator()._process_findings(
+            [{"RuleID": "generic-api-key", "Description": "Generic API Key", "File": file_path, "StartLine": line}],
+            result,
+        )
+        findings.extend(result.findings)
+
+    # The message still names the location; only the identity leaves it out.
+    assert findings[0].message == "Generic API Key in scripts/run.py:10 [generic-api-key]"
+    assert len({finding.finding_id for finding in findings}) == 1
+    assert len({finding.occurrence_id for finding in findings}) == 3
+
+
+def test_repeated_pii_finding_id_survives_line_moves(tmp_path) -> None:
+    from skillevaluator.validators.security import SecurityValidator
+
+    def scan(name: str, padding: str, repeats: int) -> Finding:
+        skill = tmp_path / name
+        skill.mkdir()
+        body = "".join(f"See /Users/johndoe/notes{index}.\n" for index in range(repeats))
+        (skill / "SKILL.md").write_text(
+            "---\nname: demo\ndescription: A sample skill.\n---\n# Demo\n" + padding + body, encoding="utf-8"
+        )
+        result = SecurityValidator(use_llm=False).validate_pii_only(skill)
+        [finding] = [finding for finding in result.findings if "/Users/johndoe/" in finding.message]
+        return finding
+
+    repeated = scan("repeated", "", 2)
+    moved = scan("moved", "\n", 2)
+    single = scan("single", "", 1)
+
+    assert "2 occurrences (SKILL.md lines 6, 7)" in repeated.message
+    assert "2 occurrences (SKILL.md lines 7, 8)" in moved.message
+    assert repeated.finding_id == moved.finding_id == single.finding_id
+    assert repeated.occurrence_id != moved.occurrence_id
+
+
 def test_finding_reconciliation_contract_matches_json_markdown_and_html(monkeypatch) -> None:
     results = _repeated_finding_results()
 

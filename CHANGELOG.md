@@ -93,8 +93,11 @@ All notable changes to SkillEvaluator are documented in this file.
 - Every finding now has stable IDs for tracking across runs and validators.
   `finding_id` (`SEF-…`) is derived from the finding's category, check,
   message, and suggestion, so it survives line moves, whitespace or case
-  changes, and severity overrides; `occurrence_id` (`SEO-…`) adds the file,
-  line, and line content. Identical findings in different files or skills
+  changes, and severity overrides. Location text a check copies into its
+  message is left out of it: the `in <file>:<line>` in a secret detection
+  message and the `— N occurrences (…)` list a PII scan message ends with.
+  A file name in a message, as script lint writes, stays part of the ID.
+  `occurrence_id` (`SEO-…`) adds the file, line, and line content. Identical findings in different files or skills
   share one `finding_id`, so they count as one unique finding with one
   occurrence per location. When CI redacts a detected credential from a
   report, it recomputes the IDs from the redacted text, so no ID is derived

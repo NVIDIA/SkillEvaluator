@@ -195,6 +195,14 @@ All notable changes to SkillEvaluator are documented in this file.
 
 ### Fixed
 
+- Tier 3 decodes the native Codex `exec` wrappers that Codex 0.161.0 emits:
+  inline `text(await tools.NAME(...))`, single-quoted string literals, and
+  literal `Promise.allSettled` batches rendered by an indexed `for`, indexed
+  `forEach`, or `forEach(text)`. Multi-call wrappers decode only when each call
+  owns its own JSON record of the outer output; dynamic arguments, shadowed
+  bindings, unsupported renderers, and missing, extra, reordered, or truncated
+  records remain unsupported. This restores security and skill-execution
+  scoring for those wrappers instead of the neutral fallback.
 - On Windows, repository root and source-link detection no longer break for
   repositories in non-ASCII folders: Git output is decoded as UTF-8 instead of
   the locale code page.

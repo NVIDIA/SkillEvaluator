@@ -771,3 +771,438 @@ def normalize_tool_call(tool_call: dict[str, Any]) -> list[dict[str, Any]]:
             }
         )
     return normalized
+
+
+# ── Extended static grammar for inline and Promise.allSettled wrappers (#235) ──
+# Codex 0.161.0 also emits `text(await tools.NAME(...))`, single-quoted strings and literal
+# `Promise.allSettled` batches. This grammar decodes only those static forms, without evaluating
+# JavaScript, and runs only where the grammar above returned unsupported. A wrapper with more
+# than one call is decoded only when each call renders one JSON record of the outer output: the
+# call owns that record, and a missing, extra, reordered, changed or truncated record leaves the
+# whole wrapper unsupported.
+
+_RECORD_FORMAT = "_atif_record_format"
+_RECORD_INDEX = "_atif_record_index"
+_RECORD_OBSERVATION = "_atif_record_observation"
+_RECORD_IS_ERROR = "_atif_record_is_error"
+_EXEC_OUTPUT_RE = re.compile(r"Script completed\r?\nWall time [^\r\n]*\r?\nOutput:\r?\n\r?\n")
+_JS_NUMBER_RE = re.compile(r"-?(?:0|[1-9]\d*)(?:\.\d+)?(?:[eE][+-]?\d+)?(?![\w$.])")
+_JS_NAME_RE = re.compile(rf"{_JS_IDENTIFIER}(?![\w$\\])")
+# Names a binding may not take: the globals the grammar relies on, and reserved words.
+_RESERVED_WORDS = (
+    "Infinity JSON NaN Promise arguments async await break case catch class const continue debugger "
+    "default delete do else enum eval export extends false finally for function globalThis if implements "
+    "import in instanceof interface let new null of package private protected public return static super "
+    "switch text this throw tools true try typeof undefined var void while with yield"
+)
+_RESERVED_BINDINGS = frozenset(_RESERVED_WORDS.split())
+
+
+class _NotStatic(Exception):
+    """The wrapper source is outside the extended static grammar."""
+
+
+class _StaticExecSource:
+    """A cursor over one native Codex wrapper that accepts literal tokens only."""
+
+    def __init__(self, source: str) -> None:
+        self.source = source
+        pragma = _CODEX_PRAGMA_RE.match(source)
+        self.index = pragma.end() if pragma else 0
+
+    def at_end(self) -> bool:
+        while self.index < len(self.source) and self.source[self.index].isspace():
+            self.index += 1
+        return self.index == len(self.source)
+
+    def peek(self) -> str:
+        self.at_end()
+        return self.source[self.index : self.index + 1]
+
+    def take(self, token: str) -> bool:
+        if self.at_end() or not self.source.startswith(token, self.index):
+            return False
+        end = self.index + len(token)
+        if (
+            token[-1].isalnum()
+            and end < len(self.source)
+            and (self.source[end].isalnum() or self.source[end] in "_$\\")
+        ):
+            return False
+        self.index = end
+        return True
+
+    def expect(self, *tokens: str) -> None:
+        for token in tokens:
+            if not self.take(token):
+                raise _NotStatic(token)
+
+    def name(self) -> str:
+        self.at_end()
+        match = _JS_NAME_RE.match(self.source, self.index)
+        if match is None:
+            raise _NotStatic("identifier")
+        self.index = match.end()
+        return match.group(0)
+
+    def binding(self, taken: set[str]) -> str:
+        """Read a new binding; reusing or shadowing a name is rejected."""
+        name = self.name()
+        if name in _RESERVED_BINDINGS or name in taken:
+            raise _NotStatic(name)
+        taken.add(name)
+        return name
+
+    def string(self) -> str:
+        """Decode one plain single- or double-quoted string that uses JSON escapes only."""
+        quote = self.source[self.index]
+        end = self.index + 1
+        while end < len(self.source) and self.source[end] != quote:
+            end += 2 if self.source[end] == "\\" else 1
+        if end >= len(self.source):
+            raise _NotStatic("string")
+        body = self.source[self.index + 1 : end]
+        if quote == "'":
+            body = re.sub(r"\\'|\\.|\"", lambda m: {"\\'": "'", '"': '\\"'}.get(m.group(0), m.group(0)), body)
+        try:
+            value = json.loads(f'"{body}"')
+        except (json.JSONDecodeError, ValueError) as exc:
+            raise _NotStatic("string") from exc
+        self.index = end + 1
+        return value
+
+    def literal(self, depth: int = 0) -> Any:
+        """Decode a JSON-compatible literal: no templates, spreads, computed keys or comments."""
+        char = self.peek()
+        if depth > _MAX_OBJECT_NESTING or not char:
+            raise _NotStatic("literal")
+        if char in "\"'":
+            return self.string()
+        if char in "{[":
+            self.index += 1
+            items: list[Any] = []
+            value: dict[str, Any] = {}
+            while not self.take("}" if char == "{" else "]"):
+                if items or value:
+                    self.expect(",")
+                if char == "[":
+                    items.append(self.literal(depth + 1))
+                    continue
+                key = self.string() if self.peek() in ("'", '"') else self.name()
+                if key in value or key == "__proto__":
+                    raise _NotStatic(key)
+                self.expect(":")
+                value[key] = self.literal(depth + 1)
+            return value if char == "{" else items
+        for word, word_value in (("true", True), ("false", False), ("null", None)):
+            if self.take(word):
+                return word_value
+        number = _JS_NUMBER_RE.match(self.source, self.index)
+        if number is None:
+            raise _NotStatic("literal")
+        try:
+            number_value = json.loads(number.group(0))
+        except ValueError as exc:  # an integer beyond Python's digit limit
+            raise _NotStatic("number") from exc
+        self.index = number.end()
+        return number_value
+
+    def tool_call(self) -> tuple[str, dict[str, Any]]:
+        """Read `tools.NAME(<object literal>)` or `tools.apply_patch(<string literal>)`."""
+        self.expect("tools", ".")
+        function_name = self.name()
+        self.expect("(")
+        if function_name == "apply_patch" and self.peek() in ("'", '"'):
+            # Codex records its freeform apply_patch tool with the patch as `input`.
+            arguments: Any = {"input": self.string()}
+        else:
+            arguments = self.literal()
+            if not isinstance(arguments, dict):
+                raise _NotStatic("arguments")
+        self.expect(")")
+        return function_name, arguments
+
+    def end_statement(self) -> None:
+        if not self.take(";") and not self.at_end():
+            raise _NotStatic(";")
+
+
+def _settled_renderer(cursor: _StaticExecSource, results: str, taken: set[str]) -> tuple[str, ...]:
+    """Read the one renderer of a settled batch and return the format of the records it prints.
+
+    Accepted: `for (let i = 0; i < results.length; i++) text({i, ...results[i]})`,
+    `results.forEach((r, i) => text({i, ...r}))` (both also with `{i, result: ...}` and a braced
+    body), and `results.forEach(text)` or `results.forEach(r => text(r))`.
+    """
+
+    def payload(index: str, element) -> tuple[str, ...]:
+        if index in ("status", "value", "reason"):
+            raise _NotStatic(index)
+        cursor.expect("text", "(", "{", index, ",")
+        if cursor.take("..."):
+            element()
+            record_format: tuple[str, ...] = ("settled_spread", index)
+        else:
+            key = cursor.name()
+            if key == index:
+                raise _NotStatic(key)
+            cursor.expect(":")
+            element()
+            record_format = ("settled_field", index, key)
+        cursor.expect("}", ")")
+        return record_format
+
+    def body(render) -> tuple[str, ...]:
+        braced = cursor.take("{")
+        record_format = render()
+        if braced:
+            cursor.take(";")
+            cursor.expect("}")
+        return record_format
+
+    def render_element(element: str) -> tuple[str, ...]:
+        cursor.expect("text", "(", element, ")")
+        return ("settled",)
+
+    if cursor.take("for"):
+        cursor.expect("(", "let")
+        index = cursor.binding(taken)
+        cursor.expect("=", "0", ";", index, "<", results, ".", "length", ";", index, "++", ")")
+        return body(lambda: payload(index, lambda: cursor.expect(results, "[", index, "]")))
+    cursor.expect(results, ".", "forEach", "(")
+    if cursor.take("text"):
+        cursor.expect(")")
+        return ("settled",)
+    parenthesized = cursor.take("(")
+    element = cursor.binding(taken)
+    index = cursor.binding(taken) if parenthesized and cursor.take(",") else None
+    if parenthesized:
+        cursor.expect(")")
+    cursor.expect("=>")
+    if index is None:
+        record_format = body(lambda: render_element(element))
+    else:
+        record_format = body(lambda: payload(index, lambda: cursor.expect(element)))
+    cursor.expect(")")
+    return record_format
+
+
+def _extended_codex_program(source: str) -> tuple[list[tuple[str, dict[str, Any]]], int | None, tuple] | None:
+    """Decode the extended grammar into ``(calls, owner, record_format)``, or None outside it.
+
+    A single call keeps the upstream ownership: ``owner`` 0 owns the whole outer observation,
+    -1 renders nothing. With records, ``owner`` is None and ``record_format`` says how to split
+    the outer observation; for inline renders it lists the call of each record in output order.
+    """
+    cursor = _StaticExecSource(source)
+    calls: list[tuple[str, dict[str, Any]]] = []
+    bindings: dict[str, int] = {}
+    renders: list[tuple[int, bool]] = []
+    taken: set[str] = set()
+    statements = 0
+    try:
+        while not cursor.at_end():
+            statements += 1
+            if statements > _MAX_STATEMENTS or len(calls) >= _MAX_TOOL_CALLS:
+                return None
+            if cursor.take("const"):
+                variable = cursor.binding(taken)
+                cursor.expect("=", "await")
+                if cursor.take("Promise"):
+                    if calls:
+                        return None
+                    cursor.expect(".", "allSettled", "(", "[")
+                    while not cursor.take("]"):
+                        if calls:
+                            cursor.expect(",")
+                            if cursor.take("]"):
+                                break
+                        if len(calls) >= _MAX_TOOL_CALLS:
+                            return None
+                        calls.append(cursor.tool_call())
+                    cursor.expect(")")
+                    cursor.end_statement()
+                    record_format = _settled_renderer(cursor, variable, taken)
+                    cursor.end_statement()
+                    return (calls, None, record_format) if calls and cursor.at_end() else None
+                bindings[variable] = len(calls)
+                calls.append(cursor.tool_call())
+            else:
+                cursor.expect("text", "(")
+                if cursor.take("("):
+                    cursor.expect("await")
+                    renders.append((len(calls), False))
+                    calls.append(cursor.tool_call())
+                    cursor.expect(")", ".")
+                    cursor.name()
+                elif cursor.take("await"):
+                    renders.append((len(calls), True))
+                    calls.append(cursor.tool_call())
+                elif cursor.take("JSON"):
+                    cursor.expect(".", "stringify", "(")
+                    renders.append((bindings[cursor.name()], True))
+                    cursor.expect(")")
+                else:
+                    call_index = bindings[cursor.name()]
+                    whole = not cursor.take(".")
+                    if not whole:
+                        cursor.name()
+                    renders.append((call_index, whole))
+                cursor.expect(")")
+            cursor.end_statement()
+    except (_NotStatic, KeyError, RecursionError):
+        return None
+    if len(calls) == 1:
+        return calls, 0 if renders else -1, ()
+    owners = [call_index for call_index, _ in renders]
+    if not calls or not all(whole for _, whole in renders) or sorted(owners) != list(range(len(calls))):
+        return None
+    return calls, None, ("result", *owners)
+
+
+def _settled_result(value: object) -> dict[str, Any] | None:
+    """Return a `Promise.allSettled` result with exactly its own keys, else None."""
+    if not isinstance(value, dict):
+        return None
+    if value.get("status") == "fulfilled" and set(value) == {"status", "value"}:
+        return value
+    if value.get("status") == "rejected" and set(value) == {"status", "reason"}:
+        return value
+    return None
+
+
+def _exec_record(value: object, record_format: tuple, record_index: int) -> bool | None:
+    """Check one record against its format; return whether it is a rejected promise."""
+    kind = record_format[0]
+    if kind == "result":
+        return False if isinstance(value, dict) else None
+    if kind == "settled":
+        settled = _settled_result(value)
+    elif (
+        not isinstance(value, dict)
+        or type(value.get(record_format[1])) is not int
+        or value[record_format[1]] != record_index
+    ):
+        return None
+    elif kind == "settled_spread":
+        settled = _settled_result({key: item for key, item in value.items() if key != record_format[1]})
+    else:
+        settled = _settled_result(value.get(record_format[2])) if len(value) == 2 else None
+    return None if settled is None else settled["status"] == "rejected"
+
+
+def _codex_exec_records(observation: str, record_format: tuple, count: int) -> list[tuple[str, bool]] | None:
+    """Split a completed outer observation into exactly ``count`` checked records, in output order."""
+    header = _EXEC_OUTPUT_RE.match(observation)
+    if header is None:
+        return None
+    body = observation[header.end() :]
+    decoder = json.JSONDecoder()
+    position = 0
+    records: list[tuple[str, bool]] = []
+    for record_index in range(count):
+        if record_index:
+            if body.startswith("\r\n", position):
+                position += 1
+            if not body.startswith("\n", position):
+                return None
+            position += 1
+        try:
+            value, end = decoder.raw_decode(body, position)
+        except (json.JSONDecodeError, RecursionError, ValueError):
+            return None
+        is_error = _exec_record(value, record_format, record_index)
+        if is_error is None:
+            return None
+        records.append((body[position:end], is_error))
+        position = end
+    return records if not body[position:].strip() else None
+
+
+_upstream_normalize_tool_call = normalize_tool_call
+_upstream_normalized_tool_call_observation = normalized_tool_call_observation
+_upstream_normalized_tool_call_is_error = normalized_tool_call_is_error
+
+
+def _normalize_tool_call_with_records(tool_call: dict[str, Any]) -> list[dict[str, Any]]:
+    """Unwrap proven native Codex calls, adding the inline and allSettled forms of #235."""
+    normalized = _upstream_normalize_tool_call(tool_call)
+    if len(normalized) != 1 or normalized[0].get("_atif_normalization_status") != UNSUPPORTED_NATIVE_CODEX_EXEC:
+        return normalized
+    source = normalized[0]["arguments"]["input"]
+    parsed = _extended_codex_program(source) if len(source) <= _MAX_SOURCE_CHARS else None
+    if parsed is None:
+        return normalized
+    calls, observation_owner, record_format = parsed
+    outer = {key: value for key, value in normalized[0].items() if key != "_atif_normalization_status"}
+    result: list[dict[str, Any]] = []
+    for inner_index, (function_name, inner_arguments) in enumerate(calls):
+        call = {
+            **outer,
+            "function_name": function_name,
+            "arguments": inner_arguments,
+            "_atif_inner_tool_index": inner_index,
+            "_atif_outer_observation_owner": observation_owner,
+        }
+        if observation_owner is not None:
+            call["_atif_observation_status"] = (
+                MAPPED_OUTER_EXEC_OBSERVATION if observation_owner == inner_index else UNOBSERVED_INNER_CALL
+            )
+        else:
+            # Ambiguous until the outer observation proves which record belongs to this call.
+            call["_atif_observation_status"] = AMBIGUOUS_OUTER_EXEC_OBSERVATION
+            call[_RECORD_FORMAT] = record_format
+            call[_RECORD_INDEX] = record_format[1:].index(inner_index) if record_format[0] == "result" else inner_index
+        result.append(call)
+    return result
+
+
+def _resolve_exec_records(
+    step: dict[str, Any], tool_call: dict[str, Any], raw_index: int, normalized: list[dict[str, Any]]
+) -> list[dict[str, Any]]:
+    """Give each call of a record wrapper its own record, or leave the wrapper unsupported."""
+    observation = _outer_tool_call_observation(step, tool_call, include_unscoped=raw_index == 0)
+    records = _codex_exec_records(observation, normalized[0][_RECORD_FORMAT], len(normalized))
+    if records is None:
+        return _upstream_normalize_tool_call(tool_call)
+    return [
+        {
+            **call,
+            "_atif_observation_status": MAPPED_OUTER_EXEC_OBSERVATION,
+            "_atif_outer_observation_owner": call["_atif_inner_tool_index"],
+            _RECORD_OBSERVATION: records[call[_RECORD_INDEX]][0],
+            _RECORD_IS_ERROR: records[call[_RECORD_INDEX]][1],
+        }
+        for call in normalized
+    ]
+
+
+def _iter_normalized_tool_calls_with_records(traj: dict[str, Any]):
+    """Yield each trajectory tool call after safe native-Codex normalization."""
+    for step in traj.get("steps", []):
+        for raw_index, tool_call in enumerate(step.get("tool_calls") or []):
+            normalized = normalize_tool_call(tool_call)
+            if normalized and _RECORD_FORMAT in normalized[0]:
+                normalized = _resolve_exec_records(step, tool_call, raw_index, normalized)
+            for call in normalized:
+                yield step, {**call, "_atif_raw_tool_index": raw_index}
+
+
+def _normalized_tool_call_observation_with_records(step: dict[str, Any], tool_call: dict[str, Any]) -> str:
+    """Return a call's own record, else the outer observation when its owner is known."""
+    if tool_call.get("_atif_observation_status") == MAPPED_OUTER_EXEC_OBSERVATION and _RECORD_OBSERVATION in tool_call:
+        return tool_call[_RECORD_OBSERVATION]
+    return _upstream_normalized_tool_call_observation(step, tool_call)
+
+
+def _normalized_tool_call_is_error_with_records(step: dict[str, Any], tool_call: dict[str, Any]) -> bool:
+    """Also report the explicit failure of a call's own record: a rejected promise."""
+    if tool_call.get("_atif_observation_status") == MAPPED_OUTER_EXEC_OBSERVATION and tool_call.get(_RECORD_IS_ERROR):
+        return True
+    return _upstream_normalized_tool_call_is_error(step, tool_call)
+
+
+normalize_tool_call = _normalize_tool_call_with_records
+iter_normalized_tool_calls = _iter_normalized_tool_calls_with_records  # noqa: F811
+normalized_tool_call_observation = _normalized_tool_call_observation_with_records
+normalized_tool_call_is_error = _normalized_tool_call_is_error_with_records

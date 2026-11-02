@@ -14,8 +14,9 @@ from functools import partial
 from typing import Any
 
 from skillevaluator.models import Finding, SuccessDetail, ValidationResult, ValidationSummary
-from skillevaluator.reporting.base import is_tier2_result, is_tier3_result, passes_required_gate
+from skillevaluator.reporting.base import is_cleanly_skipped, is_tier2_result, is_tier3_result, passes_required_gate
 from skillevaluator.reporting.html import HTMLReporter
+from skillevaluator.reporting.run_status import resolve_run_status, result_status
 
 
 class RetainedReportError(ValueError):
@@ -215,6 +216,9 @@ def retained_results(payload: dict, *, copy_metadata: bool = True) -> list[Valid
         if "skipped" in row:
             _require(type(row["skipped"]) is bool, "skipped must be boolean")
             metadata["skipped"] = row["skipped"]
+        if "confirmed_failure" in row:
+            _require(type(row["confirmed_failure"]) is bool, "confirmed_failure must be boolean")
+            metadata["confirmed_failure"] = row["confirmed_failure"]
         if row.get("skip_reason") is not None:
             metadata["skip_reason"] = _text(row["skip_reason"], "skip_reason")
         _typed_metadata(metadata)
@@ -228,6 +232,11 @@ def retained_results(payload: dict, *, copy_metadata: bool = True) -> list[Valid
             metadata=metadata,
             **{key: _strings(legacy.get(key), f"legacy.{key}") for key in ("errors", "warnings", "messages")},
         )
+        if metadata.get("confirmed_failure"):
+            _require(
+                not result.passed and result.summary.errors > 0 and bool(result.errors),
+                "Confirmed failure requires failing diagnostics",
+            )
         _require(
             not is_tier2_result(result) and not is_tier3_result(result) and "tier3" not in row,
             "Only retained Tier 1 reports are supported",
@@ -245,8 +254,14 @@ def retained_results(payload: dict, *, copy_metadata: bool = True) -> list[Valid
             for key in ("overall_score", "score"):
                 if key in quality:
                     _require(type(quality[key]) in (int, float) and 0 <= quality[key] <= 100, "Invalid quality score")
-        expected_status = "skipped" if metadata.get("skipped") and result.passed else result.status
+        expected_status = result_status(result).value
         _require(row.get("status", expected_status) == expected_status, "Result status contradicts evidence")
+        verdict_consistent = (
+            is_cleanly_skipped(result)
+            if expected_status == "skipped"
+            else result.passed == (expected_status == "passed")
+        )
+        _require(verdict_consistent, "Result verdict contradicts evidence")
         results.append(result)
     if "overall_passed" in payload:
         _require(
@@ -254,11 +269,7 @@ def retained_results(payload: dict, *, copy_metadata: bool = True) -> list[Valid
             and payload["overall_passed"] == all(passes_required_gate(r) for r in results),
             "Overall verdict contradicts retained results",
         )
-    overall = (
-        "incomplete"
-        if any(r.is_incomplete for r in results)
-        else ("passed" if all(passes_required_gate(r) for r in results) else "failed")
-    )
+    overall = resolve_run_status(results).headline.value
     if "overall_status" in payload:
         _require(payload["overall_status"] == overall, "Overall status contradicts retained results")
     if "total_validators" in payload:

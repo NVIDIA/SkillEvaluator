@@ -55,7 +55,7 @@ class PublicationError(ValueError):
 
 
 class StalePublication(PublicationError):
-    """A PR has closed or moved since the selected run completed."""
+    """Required historical evidence is unavailable, so hosting is skipped."""
 
 
 def allowed_download_url(url: str) -> bool:
@@ -157,7 +157,9 @@ def validate_summary(summary: dict) -> None:
             raise PublicationError("A skill's verdict contradicts its process evidence.")
         if not row["passed"] and row["overall_status"] == "passed":
             raise PublicationError("A failed skill cannot claim a passing status.")
-        if bool(row["incomplete_scans"]) != (row["overall_status"] == "incomplete"):
+        if (row["overall_status"] == "incomplete" and not row["incomplete_scans"]) or (
+            row["incomplete_scans"] and row["overall_status"] not in {"failed", "incomplete"}
+        ):
             raise PublicationError("A skill's status contradicts its scanner completeness evidence.")
         if row["overall_status"] != "error":
             if any(not _integer(row.get(key)) for key in ("total_validators", "total_errors", "total_warnings")):
@@ -203,6 +205,8 @@ def validate_summary(summary: dict) -> None:
         if skipped
         else "passed"
         if expected
+        else "failed"
+        if any(row["overall_status"] == "failed" for row in rows)
         else "incomplete"
         if incomplete
         else "failed"
@@ -238,6 +242,15 @@ def validate_report(report: dict, row: dict) -> None:
         report.get("incomplete_scans")
     ):
         raise PublicationError("A per-skill report contains invalid completeness evidence.")
+    # Establish statuses from the typed findings and scanner evidence, rather
+    # than trusting matching rollups supplied by an untrusted artifact.
+    from skillevaluator.reporting.retained import RetainedReportError, retained_results
+    from skillevaluator.reporting.run_status import resolve_run_status
+
+    try:
+        retained = retained_results(report, copy_metadata=False)
+    except RetainedReportError as exc:
+        raise PublicationError("A per-skill report contains invalid retained evidence.") from exc
     incomplete = []
     totals = {"errors": 0, "warnings": 0, "critical_count": 0, "high_count": 0, "medium_count": 0, "low_count": 0}
     for result in results:
@@ -245,7 +258,7 @@ def validate_report(report: dict, row: dict) -> None:
         if type(result.get("passed")) is not bool or status not in {"passed", "failed", "incomplete", "skipped"}:
             raise PublicationError("A validator has an invalid verdict.")
         scans = result.get("incomplete_scans")
-        if not _scanner_list(scans) or (status == "incomplete") != bool(scans):
+        if not _scanner_list(scans):
             raise PublicationError("A validator has contradictory scanner completeness evidence.")
         if result["passed"] != (status in {"passed", "skipped"}):
             raise PublicationError("A validator has contradictory pass and status fields.")
@@ -257,7 +270,7 @@ def validate_report(report: dict, row: dict) -> None:
             totals[key] += counts[key]
     incomplete = list(dict.fromkeys(incomplete))
     all_passed = all(result["passed"] for result in results)
-    status = "incomplete" if incomplete else "passed" if all_passed else "failed"
+    status = resolve_run_status(retained).headline.value
     if (report["overall_passed"], report["overall_status"], report["incomplete_scans"]) != (
         all_passed,
         status,
@@ -284,14 +297,6 @@ def validate_report(report: dict, row: dict) -> None:
         raise PublicationError("A skill summary has contradictory severity counts.")
     if "total_validators" in row and row["total_validators"] != report["total_validators"]:
         raise PublicationError("A skill summary has contradictory validator counts.")
-    # Validate the same typed evidence the renderer consumes before writing an
-    # immutable receipt. Valid-looking rollups alone cannot establish a report.
-    from skillevaluator.reporting.retained import RetainedReportError, retained_results
-
-    try:
-        retained_results(report)
-    except RetainedReportError as exc:
-        raise PublicationError("A per-skill report contains invalid retained evidence.") from exc
 
 
 def read_artifact(payload: bytes) -> tuple[dict, dict[str, dict]]:
@@ -492,76 +497,6 @@ def _caller_blob(api, repository: str, sha: str) -> str:
     return caller["sha"]
 
 
-def _fork_associations(api, repository: str, run: dict) -> list:
-    """Find an open fork PR from API run metadata; GitHub never records it on the run."""
-    head_repository = run.get("head_repository")
-    if head_repository is None:
-        raise StalePublication("The fork for this PR run was deleted, so the run cannot be verified.")
-    name = head_repository.get("full_name") if isinstance(head_repository, dict) else None
-    if name == repository:
-        raise StalePublication("The PR is closed or no longer associated with this run.")
-    branch = run.get("head_branch")
-    if not isinstance(name, str) or REPO_PATTERN.fullmatch(name) is None or not isinstance(branch, str) or not branch:
-        raise PublicationError("The PR run lacks a valid head repository and branch.")
-    head = urllib.parse.quote(name.split("/", 1)[0], safe="") + ":" + urllib.parse.quote(branch, safe="")
-    pulls = api.get(f"/repos/{repository}/pulls?state=open&head={head}&per_page=100")
-    if not isinstance(pulls, list) or any(not isinstance(pr, dict) for pr in pulls):
-        raise PublicationError("The fork PR run has an unsupported pull request listing.")
-    matches = [
-        pr
-        for pr in pulls
-        if ((pr.get("head") or {}).get("repo") or {}).get("full_name") == name
-        and ((pr.get("base") or {}).get("repo") or {}).get("full_name") == repository
-    ]
-    if not matches:
-        raise StalePublication("The fork PR is closed or merged; no open PR uses this run's fork branch.")
-    return matches
-
-
-def _executed_caller_blob(api, repository: str, run: dict) -> str:
-    """Reconstruct unambiguous PR merge content from GitHub-recorded revisions.
-
-    The run API exposes the PR head, not GITHUB_WORKFLOW_SHA. Never accept a
-    merge revision asserted by an artifact or the PR's current mutable ref.
-    Fork runs have no recorded PR, so the PR API supplies the same revisions.
-    """
-    if run["event"] != "pull_request":
-        return _caller_blob(api, repository, run["head_sha"])
-    associations = run.get("pull_requests")
-    if associations == []:
-        associations = _fork_associations(api, repository, run)
-    if not isinstance(associations, list) or len(associations) != 1:
-        raise PublicationError("The PR run lacks an unambiguous recorded base revision; update the branch and rerun.")
-    association = associations[0]
-    base = (association.get("base") or {}).get("sha") if isinstance(association, dict) else None
-    head = (association.get("head") or {}).get("sha") if isinstance(association, dict) else None
-    if (
-        not isinstance(base, str)
-        or SHA_PATTERN.fullmatch(base) is None
-        or not isinstance(head, str)
-        or SHA_PATTERN.fullmatch(head) is None
-    ):
-        raise PublicationError("The PR run lacks trustworthy recorded merge revisions; update the branch and rerun.")
-    if head != run["head_sha"]:
-        raise StalePublication("The PR head moved after this scan.")
-    head_blob = _caller_blob(api, repository, run["head_sha"])
-    base_blob = _caller_blob(api, repository, base)
-    if head_blob == base_blob:
-        return head_blob
-    comparison = api.get(f"/repos/{repository}/compare/{base}...{head}")
-    ancestor = (comparison.get("merge_base_commit") or {}).get("sha") if isinstance(comparison, dict) else None
-    if not isinstance(ancestor, str) or SHA_PATTERN.fullmatch(ancestor) is None:
-        raise PublicationError("GitHub did not return the caller workflow merge base.")
-    ancestor_blob = _caller_blob(api, repository, ancestor)
-    if head_blob == ancestor_blob:
-        return base_blob
-    if base_blob == ancestor_blob:
-        return head_blob
-    raise PublicationError(
-        "Both branches changed the caller workflow; update the PR branch and rerun before publishing."
-    )
-
-
 def _validate_workflow_provenance(api, repository: str, run: dict) -> None:
     evaluator_pins = _trusted_pins("TRUSTED_EVALUATOR_SHA")
     caller_blobs = _trusted_pins("TRUSTED_CALLER_BLOBS")
@@ -576,7 +511,23 @@ def _validate_workflow_provenance(api, repository: str, run: dict) -> None:
     workflow = f"{evaluator_repository}/.github/workflows/evaluate-skills.yml"
     if sha not in evaluator_pins or reference.get("path") != f"{workflow}@{sha}":
         raise PublicationError("The selected run did not use an approved immutable evaluator workflow.")
-    if _executed_caller_blob(api, repository, run) not in caller_blobs:
+    # The receipt is a separate artifact made by the trusted reusable workflow.
+    # PR associations and current merge refs are mutable, so they never identify
+    # which caller configuration produced a historical report.
+    from verify_provenance import ProvenanceError, verify_receipt
+
+    artifact = _select_artifact(api, repository, run, provenance=True)
+    try:
+        identity = verify_receipt(
+            api.download_artifact(artifact["id"]),
+            repository=repository,
+            run=run,
+            evaluator_workflow=workflow,
+            evaluator_sha=sha,
+        )
+    except ProvenanceError as exc:
+        raise PublicationError(str(exc)) from exc
+    if _caller_blob(api, repository, identity["workflow_sha"]) not in caller_blobs:
         raise PublicationError("The caller workflow differs from the approved workflow blobs.")
 
 
@@ -590,7 +541,7 @@ def _timestamp(value: str) -> datetime:
         raise PublicationError("The run or artifact lacks a valid timestamp.") from exc
 
 
-def _select_artifact(api, repository: str, run: dict) -> dict:
+def _select_artifact(api, repository: str, run: dict, *, provenance=False) -> dict:
     listing = api.get(f"/repos/{repository}/actions/runs/{run['id']}/artifacts?per_page=100")
     if (
         not isinstance(listing, dict)
@@ -602,9 +553,16 @@ def _select_artifact(api, repository: str, run: dict) -> dict:
     finished = _timestamp(run.get("updated_at"))
     if finished < started:
         raise PublicationError("The selected run attempt has an invalid time interval.")
-    name = f"{EVIDENCE_ARTIFACT}-attempt-{run['run_attempt']}"
+    name = (
+        f"{ARTIFACT_NAME}-provenance-attempt-{run['run_attempt']}"
+        if provenance
+        else f"{EVIDENCE_ARTIFACT}-attempt-{run['run_attempt']}"
+    )
+    size_limit = 64 * 1024 if provenance else MAX_TOTAL_BYTES
     candidates = []
     for artifact in listing["artifacts"]:
+        if not isinstance(artifact, dict):
+            raise PublicationError("The selected run has malformed artifact metadata.")
         if artifact.get("name") != name or artifact.get("expired") is not False:
             continue
         identity = artifact.get("workflow_run", {})
@@ -615,11 +573,18 @@ def _select_artifact(api, repository: str, run: dict) -> dict:
         if (
             not _integer(artifact.get("id"), 1)
             or not _integer(artifact.get("size_in_bytes"))
-            or artifact["size_in_bytes"] > MAX_TOTAL_BYTES
+            or artifact["size_in_bytes"] > size_limit
         ):
             raise PublicationError("The selected report artifact exceeds its size limit.")
         candidates.append(artifact)
     if not candidates:
+        if provenance:
+            raise StalePublication(
+                "No signed execution receipt is available for this scan attempt. "
+                "For hosted reports, commit a receipt-capable evaluator and id-token: write in the scan caller, "
+                "approve its updated caller blob, then trigger a new scan. "
+                "Downloadable scan reports remain in Actions."
+            )
         raise PublicationError(
             f"The selected run attempt has no current report evidence artifact named {name}. "
             "The scan may have stopped before writing reports, the artifact may have expired, "

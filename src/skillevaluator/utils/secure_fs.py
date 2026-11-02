@@ -1012,6 +1012,9 @@ class _DiscoveryAdmission:
     def admit_directory(self, relative: Path, *, linked: bool) -> bool:
         """Apply the directory rules; return whether the walker should descend."""
         if linked:
+            # A POSIX walker sees a directory link as a non-directory and counts it in
+            # admit_file; count it here too so both walkers report the same budget error.
+            self._consume_path(relative)
             raise SecurePathError(
                 "unsafe_path",
                 f"Refusing linked directory or reparse point before descent: {relative.as_posix()}",

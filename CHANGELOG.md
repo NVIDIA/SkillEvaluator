@@ -270,8 +270,11 @@ All notable changes to SkillEvaluator are documented in this file.
   following symlinks (glibc before 2.32, or newer glibc without `/proc`). This
   affected, for example, `init-custom-grader` and `init-harbor-task` over an
   existing `evals/` directory. Staging still changes modes without following
-  links where the platform supports it; elsewhere it re-checks that the entry
-  is not a link first and refuses it if it is.
+  links where the platform supports it. Elsewhere it opens the entry without
+  following links, confirms it is the entry it checked, and changes the mode
+  through that open descriptor, so a link swapped in is refused instead of
+  followed. Only an entry that cannot be opened, such as one its owner cannot
+  read, is still changed by name, with an identity check afterwards.
 
 - Local-mode sandbox errors now include Bubblewrap's own failure line when its
   startup probe fails, note that `pivot_root: Operation not permitted` can mean

@@ -15,6 +15,7 @@ import stat
 import tempfile
 import threading
 import time
+from collections.abc import Callable
 from concurrent.futures import ThreadPoolExecutor
 from concurrent.futures import TimeoutError as FutureTimeoutError
 from pathlib import Path
@@ -636,6 +637,209 @@ def test_chmod_fallback_refuses_a_link_without_following_it(
 
     assert rejected == ["entry"]
     assert stat.S_IMODE(outside.stat().st_mode) == 0o755
+
+
+def _descriptor_chmod_module() -> object:
+    module = importlib.import_module("skillevaluator.tier3.harbor.secure_copy")
+    if not module._DESCRIPTOR_BACKEND or not module._CHMOD_BY_DESCRIPTOR:
+        pytest.skip("descriptor-relative staging with O_NOFOLLOW is unavailable")
+    return module
+
+
+def _record_chmod_fallback(monkeypatch: pytest.MonkeyPatch, module: object) -> SimpleNamespace:
+    """Reject no-follow chmod, then record chmod-by-name and fchmod calls."""
+    calls = SimpleNamespace(rejected=_reject_chmod_without_follow(monkeypatch, module), by_name=[], fchmod=[])
+    rejecting_chmod = module.os.chmod
+    original_fchmod = os.fchmod
+
+    def chmod(path: object, mode: int, *, dir_fd: int | None = None, follow_symlinks: bool = True) -> None:
+        if dir_fd is not None and follow_symlinks:
+            calls.by_name.append(os.fspath(path))
+        rejecting_chmod(path, mode, dir_fd=dir_fd, follow_symlinks=follow_symlinks)
+
+    def fchmod(descriptor: int, mode: int) -> None:
+        calls.fchmod.append((os.fstat(descriptor).st_ino, mode))
+        original_fchmod(descriptor, mode)
+
+    monkeypatch.setattr(module.os, "chmod", chmod)
+    monkeypatch.setattr(module.os, "fchmod", fchmod)
+    return calls
+
+
+def _swap_after_first_entry_stat(monkeypatch: pytest.MonkeyPatch, module: object, swap: Callable[[], None]) -> None:
+    # Emulate a same-name replacement landing between the helper's no-follow stat
+    # and whatever it does next with the name.
+    original_stat = os.stat
+    pending = [swap]
+
+    def racing_stat(path: object, *, dir_fd: int | None = None, follow_symlinks: bool = True) -> os.stat_result:
+        result = original_stat(path, dir_fd=dir_fd, follow_symlinks=follow_symlinks)
+        if pending and dir_fd is not None and not follow_symlinks and path == "entry":
+            pending.pop()()
+        return result
+
+    monkeypatch.setattr(module.os, "stat", racing_stat)
+
+
+def _chmod_entry(module: object, parent: Path, mode: int) -> None:
+    descriptor = os.open(parent, module._DIRECTORY_FLAGS)
+    try:
+        module._chmod_named_entry(descriptor, "entry", mode)
+    finally:
+        os.close(descriptor)
+
+
+@pytest.mark.parametrize("kind", ["directory", "file"])
+def test_chmod_fallback_changes_mode_through_the_opened_descriptor(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    kind: str,
+) -> None:
+    module = _descriptor_chmod_module()
+    parent = tmp_path / "parent"
+    parent.mkdir()
+    entry = parent / "entry"
+    if kind == "directory":
+        entry.mkdir()
+        entry.chmod(0o500)
+        target = 0o700
+    else:
+        entry.write_text("old", encoding="utf-8")
+        entry.chmod(0o644)
+        target = 0o600
+    inode = entry.stat().st_ino
+    calls = _record_chmod_fallback(monkeypatch, module)
+
+    _chmod_entry(module, parent, target)
+
+    assert calls.rejected == ["entry"]
+    assert calls.fchmod == [(inode, target)]
+    assert calls.by_name == []
+    assert stat.S_IMODE(entry.stat().st_mode) == target
+
+
+@pytest.mark.parametrize("kind", ["directory", "file"])
+def test_chmod_fallback_refuses_a_link_swapped_in_after_the_stat(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    kind: str,
+) -> None:
+    module = _descriptor_chmod_module()
+    outside = tmp_path / "outside"
+    parent = tmp_path / "parent"
+    parent.mkdir()
+    entry = parent / "entry"
+    if kind == "directory":
+        outside.mkdir()
+        entry.mkdir()
+    else:
+        outside.write_text("outside", encoding="utf-8")
+        entry.write_text("entry", encoding="utf-8")
+    outside.chmod(0o755)
+
+    def swap() -> None:
+        entry.rename(parent / "moved")
+        entry.symlink_to(outside, target_is_directory=kind == "directory")
+
+    calls = _record_chmod_fallback(monkeypatch, module)
+    _swap_after_first_entry_stat(monkeypatch, module, swap)
+
+    with pytest.raises(module.UnsafeStagingError, match="symlink"):
+        _chmod_entry(module, parent, 0o700)
+
+    # A chmod by name here would follow the link and change the outside mode.
+    assert calls.by_name == []
+    assert calls.fchmod == []
+    assert stat.S_IMODE(outside.stat().st_mode) == 0o755
+
+
+@pytest.mark.parametrize("replacement", ["directory", "file"])
+def test_chmod_fallback_refuses_an_entry_replaced_after_the_stat(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    replacement: str,
+) -> None:
+    module = _descriptor_chmod_module()
+    parent = tmp_path / "parent"
+    parent.mkdir()
+    entry = parent / "entry"
+    entry.mkdir()
+    entry.chmod(0o500)
+
+    def swap() -> None:
+        entry.rename(parent / "moved")
+        if replacement == "directory":
+            entry.mkdir()
+            entry.chmod(0o555)
+        else:
+            entry.write_text("swapped", encoding="utf-8")
+            entry.chmod(0o555)
+
+    calls = _record_chmod_fallback(monkeypatch, module)
+    _swap_after_first_entry_stat(monkeypatch, module, swap)
+
+    with pytest.raises(module.UnsafeStagingError, match="changed"):
+        _chmod_entry(module, parent, 0o700)
+
+    assert calls.by_name == []
+    assert calls.fchmod == []
+    assert stat.S_IMODE((parent / "moved").stat().st_mode) == 0o500
+    assert stat.S_IMODE(entry.stat().st_mode) == 0o555
+
+
+@pytest.mark.parametrize("code", [errno.EACCES, errno.EPERM], ids=["EACCES", "EPERM"])
+def test_chmod_fallback_keeps_checked_chmod_by_name_when_entry_cannot_be_opened(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    code: int,
+) -> None:
+    module = _descriptor_chmod_module()
+    parent = tmp_path / "parent"
+    parent.mkdir()
+    entry = parent / "entry"
+    entry.mkdir()
+    entry.chmod(0o300)
+    calls = _record_chmod_fallback(monkeypatch, module)
+    original_open = os.open
+    refused: list[str] = []
+
+    def unreadable_open(path: object, flags: int, mode: int = 0o777, *, dir_fd: int | None = None) -> int:
+        # The owner may chmod an entry it cannot read; root would bypass a real
+        # 0o000/0o300 mode, so the refusal is injected.
+        if dir_fd is not None and path == "entry":
+            refused.append(path)
+            raise PermissionError(code, os.strerror(code), path)
+        return original_open(path, flags, mode, dir_fd=dir_fd)
+
+    monkeypatch.setattr(module.os, "open", unreadable_open)
+
+    _chmod_entry(module, parent, 0o700)
+
+    assert refused == ["entry"]
+    assert calls.fchmod == []
+    assert calls.by_name == ["entry"]
+    assert stat.S_IMODE(entry.stat().st_mode) == 0o700
+
+
+def test_chmod_fallback_without_nofollow_open_keeps_checked_chmod_by_name(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    module = _descriptor_chmod_module()
+    parent = tmp_path / "parent"
+    parent.mkdir()
+    entry = parent / "entry"
+    entry.mkdir()
+    entry.chmod(0o500)
+    calls = _record_chmod_fallback(monkeypatch, module)
+    # Platforms without os.O_NOFOLLOW (native Windows) keep the checked call by name.
+    monkeypatch.setattr(module, "_CHMOD_BY_DESCRIPTOR", False)
+
+    _chmod_entry(module, parent, 0o700)
+
+    assert calls.fchmod == []
+    assert calls.by_name == ["entry"]
+    assert stat.S_IMODE(entry.stat().st_mode) == 0o700
 
 
 def test_copy_file_rejects_source_and_destination_links_and_hardlinks(tmp_path: Path) -> None:

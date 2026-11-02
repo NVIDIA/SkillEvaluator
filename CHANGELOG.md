@@ -78,6 +78,15 @@ All notable changes to SkillEvaluator are documented in this file.
 - CI-native per-skill HTML pages link Download JSON to the retained
   `skillevaluator-tier1.json` and do not embed a second copy of the report
   JSON. Standalone CLI HTML reports embed it for Export JSON.
+- Tier 3 runs can be limited to the first N eval cases with the opt-in
+  `--max-cases N` flag on `validate`, `tier3`, and `tier3 evaluate`, or the
+  `harbor.max_cases` key in `evals/config.yml`; the CLI value wins. Unset, every
+  case runs as before. Cases are taken in staged order (dataset order, or
+  task-directory name order for native Harbor tasks) and the same subset runs
+  for every agent's with-skill and baseline arms. The dataset snapshot and
+  expected-case checks cover only the cases that ran, `run_config.json` records
+  the selection as `case_selection`, and a run that skipped cases is reported
+  as publication-incomplete in JSON, HTML, and BENCHMARK.md.
 
 ### Changed
 

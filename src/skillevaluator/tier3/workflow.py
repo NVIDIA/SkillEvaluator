@@ -129,6 +129,7 @@ def _preflight_options(skill_path: Path, params: dict[str, Any]) -> dict[str, An
         "stop_on_pass",
         "n_concurrent",
         "max_agents",
+        "max_cases",
         "timeout_multiplier",
         "agent_runtime_preflight",
         "custom_dockerfile_mode",

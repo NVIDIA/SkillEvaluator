@@ -36,6 +36,21 @@ def prepared(root):
     return prepare_runtime_package(plugin_inventory_for_root(root))
 
 
+def test_selected_case_mapping_accepts_a_trusted_subset_and_rejects_unknown_or_duplicate_ids(tmp_path):
+    from skillevaluator.tier3.plugin_prepare import stage_wrapper_skill
+
+    package = prepared(tmp_path / "plugin")
+    wrapper = stage_wrapper_skill(package, tmp_path / "wrapper")
+    hooks = execution.NativeRuntimeHooks(package.native_source, {})
+    observer = evidence.RuntimeEvidenceObserver(package, wrapper, hooks, evidence.EvidenceOptions())
+    observer.configure_run(case_id_by_task_selector={"selected-task": "a-one"})
+    assert observer.selector_map == {"selected-task": "a-one"}
+    with pytest.raises(ValueError, match="identit"):
+        observer.configure_run(case_id_by_task_selector={"unknown-task": "unknown-case"})
+    with pytest.raises(ValueError, match="unique"):
+        observer.configure_run(case_id_by_task_selector={"first": "a-one", "second": "a-one"})
+
+
 def trajectory():
     return {
         "schema_version": "ATIF-v1.7",

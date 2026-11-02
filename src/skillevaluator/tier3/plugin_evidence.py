@@ -296,9 +296,12 @@ class RuntimeEvidenceObserver:
         arm_jobs: Mapping[str, Mapping[str, Path]] | None = None,
     ) -> None:
         if case_id_by_task_selector is not None:
-            self.selector_map = collector._validated_case_id_by_task_selector(
-                dict(case_id_by_task_selector), list(self.wrapper.case_sources)
+            selected = collector._validated_case_id_by_task_selector(
+                dict(case_id_by_task_selector), list(case_id_by_task_selector.values())
             )
+            if not set(selected.values()).issubset(self.wrapper.case_sources):
+                raise ValueError("Task selector mapping contains unknown logical case identities")
+            self.selector_map = selected
         if arm_jobs is not None:
             self.arm_jobs = {agent: dict(arms) for agent, arms in arm_jobs.items()}
 

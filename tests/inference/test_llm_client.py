@@ -95,6 +95,27 @@ class TestLLMClientGetClient:
 
         mock_cls.assert_called_once_with(api_key="test-key", base_url="https://api.openai.com/v1", max_retries=0)
 
+    @pytest.mark.parametrize(
+        ("provider", "key_env", "sdk_class"),
+        [("openai", "OPENAI_API_KEY", "openai.OpenAI"), ("anthropic", "ANTHROPIC_API_KEY", "anthropic.Anthropic")],
+    )
+    def test_explicit_timeout_reaches_the_sdk(
+        self, monkeypatch: pytest.MonkeyPatch, provider: str, key_env: str, sdk_class: str
+    ) -> None:
+        # The SDKs replace an http_client timeout equal to httpx's 5-second
+        # default with their own 600 seconds, so the bound must be explicit.
+        monkeypatch.setenv("SKILL_EVAL_LLM_PROVIDER", provider)
+        monkeypatch.setenv(key_env, "test-key")
+        for name in ("SKILL_EVAL_LLM_BASE_URL", "OPENAI_BASE_URL", "ANTHROPIC_BASE_URL"):
+            monkeypatch.delenv(name, raising=False)
+        http_client = object()
+
+        with patch(sdk_class, return_value=MagicMock()) as mock_cls:
+            LLMClient(http_client=http_client, timeout=5.0)._get_client()
+
+        assert mock_cls.call_args.kwargs["timeout"] == 5.0
+        assert mock_cls.call_args.kwargs["http_client"] is http_client
+
     def test_missing_api_key_raises(self, monkeypatch: pytest.MonkeyPatch) -> None:
         monkeypatch.setenv("SKILL_EVAL_LLM_PROVIDER", "openai")
         monkeypatch.delenv("OPENAI_API_KEY", raising=False)
@@ -534,6 +555,18 @@ class TestCompletions:
         else:
             assert call_kwargs["max_tokens"] == 0
             assert "max_completion_tokens" not in call_kwargs
+
+    @pytest.mark.parametrize(("timeout", "expected"), [(None, {}), (5.0, {"timeout": 5.0})])
+    def test_bedrock_forwards_only_an_explicit_timeout(
+        self, monkeypatch: pytest.MonkeyPatch, timeout: float | None, expected: dict
+    ) -> None:
+        monkeypatch.setenv("SKILL_EVAL_LLM_PROVIDER", "bedrock")
+        response = SimpleNamespace(choices=[SimpleNamespace(message=SimpleNamespace(content="Done"))])
+
+        with patch("litellm.completion", return_value=response) as completion:
+            LLMClient(timeout=timeout).completions("system", "user")
+
+        assert {key: value for key, value in completion.call_args.kwargs.items() if key == "timeout"} == expected
 
     def test_older_bedrock_model_preserves_custom_temperature(self, monkeypatch: pytest.MonkeyPatch) -> None:
         monkeypatch.setenv("SKILL_EVAL_LLM_PROVIDER", "bedrock")

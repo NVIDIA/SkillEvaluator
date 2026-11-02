@@ -1931,7 +1931,9 @@ class HTMLReporter(ReporterBase):
         This dramatically reduces visual noise when the same PII pattern
         (e.g., "Personal macOS user path") fires on many lines in the same file.
         A finding's ``occurrence_id`` becomes an ``occurrence_ids`` list on the
-        merged entry, so every merged location keeps its identity.
+        merged entry, so every merged location keeps its identity. The key
+        also holds ``finding_id`` when present, so two different checks with
+        the same text never merge and an entry's IDs all belong to it.
         """
         groups: dict[tuple, dict[str, Any]] = {}
         seen_occurrences: dict[tuple, set[str]] = {}
@@ -1943,6 +1945,7 @@ class HTMLReporter(ReporterBase):
                 norm_msg,
                 finding.get("file_path", ""),
                 finding.get("suggestion", ""),
+                finding.get("finding_id"),
             )
 
             if key in groups:

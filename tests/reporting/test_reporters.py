@@ -975,6 +975,35 @@ def test_folded_pii_finding_counts_each_listed_location_as_an_occurrence(tmp_pat
     assert _findings_kpi(html)[0] == str(unique)
 
 
+def test_html_skill_entries_merge_only_occurrences_of_one_finding() -> None:
+    # Two checks with the same message and suggestion are two findings.
+    result = ValidationResult(validator_name="SECURITY", validator_description="Security")
+    for check_name, line_number in (("rule-a", 3), ("rule-b", 9)):
+        result.add_finding(
+            Finding(
+                category="SECURITY",
+                severity=Severity.HIGH,
+                check_name=check_name,
+                message="Unsafe command execution",
+                file_path="scripts/run.py",
+                line_number=line_number,
+                suggestion="Use an argument vector.",
+            )
+        )
+
+    data = _html_report_data(HTMLReporter(include_timestamp=False).render_all([result]))
+
+    group_of = {
+        item["occurrence_id"]: group["finding_id"] for group in data["finding_groups"] for item in group["occurrences"]
+    }
+    [skill] = data["skills"].values()
+    entries = [entry for validator in skill["validators"].values() for entry in validator["findings"]]
+    assert len(entries) == skill["finding_count"] == 2
+    for entry in entries:
+        assert entry["occurrence_ids"]
+        assert {group_of[occurrence_id] for occurrence_id in entry["occurrence_ids"]} == {entry["finding_id"]}
+
+
 def test_same_finding_in_several_skills_counts_once_with_one_occurrence_per_skill() -> None:
     collection = ValidationResult(validator_name="SCHEMA", validator_description="Schema")
     for skill in ("alpha", "beta", "gamma"):

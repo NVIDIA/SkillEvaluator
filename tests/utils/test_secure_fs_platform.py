@@ -373,34 +373,67 @@ class _TreeBackedWindowsHandles:
         return sorted(self.closed) == sorted(self.paths)
 
 
-_SKIP_ON_NATIVE_WINDOWS = pytest.mark.skipif(
-    os.name == "nt", reason="native Windows walks are covered by the real-handle tests"
-)
+_NATIVE_WINDOWS = os.name == "nt"
+_SKIP_ON_NATIVE_WINDOWS = pytest.mark.skipif(_NATIVE_WINDOWS, reason="the stand-in handles model a POSIX tree")
 
 
-@_SKIP_ON_NATIVE_WINDOWS
+def _link_directory(link: Path, target: Path) -> None:
+    """Create a directory link: a junction on native Windows, a symlink elsewhere."""
+    if not _NATIVE_WINDOWS:
+        link.symlink_to(target, target_is_directory=True)
+        return
+    created = subprocess.run(
+        ["cmd", "/d", "/c", "mklink", "/J", str(link), str(target)],
+        capture_output=True,
+        text=True,
+        check=False,
+    )
+    if created.returncode != 0:
+        pytest.skip(f"Windows junction creation unavailable: {created.stderr or created.stdout}")
+
+
+def _link_file(link: Path, target: str) -> None:
+    try:
+        link.symlink_to(target)
+    except OSError as exc:  # Windows without the symlink privilege
+        pytest.skip(f"file symlink creation unavailable: {exc}")
+
+
 def test_windows_walker_selects_like_the_posix_walker(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    # discover_secure_files uses the real-handle walker on native Windows and the
+    # POSIX walker elsewhere; the stand-in handles then rerun the Windows walker off Windows.
     root = tmp_path / "skill"
     (root / "references" / "deep").mkdir(parents=True)
     (root / ".git").mkdir()
-    (root / ".git" / "ignored.md").write_text("pruned")
-    (root / "SKILL.md").write_text("skill")
-    (root / "references" / "guide.md").write_text("guide")
-    (root / "references" / "deep" / "notes.md").write_text("notes")
+    (root / ".git" / "ignored.md").write_text("pruned", encoding="utf-8")
+    (root / "Node_Modules").mkdir()
+    (root / "Node_Modules" / "package.md").write_text("pruned where the names alias", encoding="utf-8")
+    (root / "SKILL.md").write_text("skill", encoding="utf-8")
+    (root / "references" / "guide.md").write_text("guide", encoding="utf-8")
+    (root / "references" / "deep" / "notes.md").write_text("notes", encoding="utf-8")
     (root / "references" / "data.bin").write_bytes(b"x")
-    (root / "AGENTS.md").write_text("agents")
-    (root / "CLAUDE.md").symlink_to("AGENTS.md")
-    posix = [
+    (root / "AGENTS.md").write_text("agents", encoding="utf-8")
+    _link_file(root / "CLAUDE.md", "AGENTS.md")
+    excluded_dirs = (".git", "node_modules")
+    case_alias = [] if (root / "node_modules").exists() else ["Node_Modules/package.md"]
+    native = [
         file.rel_path
         for file in secure_fs.discover_secure_files(
-            root, selected=lambda relative: relative.suffix == ".md", excluded_dirs=(".git",), max_paths=50
+            root, selected=lambda relative: relative.suffix == ".md", excluded_dirs=excluded_dirs, max_paths=50
         )
     ]
+
+    assert native == [
+        "AGENTS.md",
+        *case_alias,
+        "SKILL.md",
+        "references/deep/notes.md",
+        "references/guide.md",
+    ]
+    if _NATIVE_WINDOWS:
+        return
     handles = _TreeBackedWindowsHandles(monkeypatch)
-
-    selected = handles.walk(root, excluded_dirs=(".git",))
-
-    assert selected == posix == ["AGENTS.md", "SKILL.md", "references/deep/notes.md", "references/guide.md"]
+    assert handles.walk(root, excluded_dirs=excluded_dirs) == native
     assert handles.all_closed()
 
 
@@ -419,10 +452,10 @@ def test_windows_walker_refuses_redirects_and_closes_every_handle(
 ) -> None:
     root = tmp_path / "skill"
     root.mkdir()
-    (root / "SKILL.md").write_text("skill")
+    (root / "SKILL.md").write_text("skill", encoding="utf-8")
     outside = tmp_path / "outside"
     outside.mkdir()
-    (outside / "secret.md").write_text("secret")
+    (outside / "secret.md").write_text("secret", encoding="utf-8")
     make_link(root, outside)
     handles = _TreeBackedWindowsHandles(monkeypatch)
 
@@ -430,28 +463,56 @@ def test_windows_walker_refuses_redirects_and_closes_every_handle(
         handles.walk(root)
 
     assert handles.all_closed()
-    assert all(not path.is_relative_to(outside) for path in handles.paths.values())
+    redirects = [root / name for name in ("linked", "guide.md", "CLAUDE.md")]
+    assert not any(redirect in path.parents for redirect in redirects for path in handles.paths.values())
 
 
-@_SKIP_ON_NATIVE_WINDOWS
-def test_windows_walker_consumes_the_path_budget_like_the_posix_walker(
-    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
-) -> None:
+def _ordered_budget_tree(tmp_path: Path) -> Path:
     root = tmp_path / "skill"
     (root / "b-dir").mkdir(parents=True)
     for name in ("c.md", "a.md", "b-dir/z.md"):
-        (root / name).write_text("x")
-    with pytest.raises(secure_fs.SecurePathError) as posix:
+        (root / name).write_text("x", encoding="utf-8")
+    return root
+
+
+def _budget_edge_link_tree(tmp_path: Path) -> Path:
+    root = tmp_path / "skill"
+    root.mkdir()
+    for name in ("a.md", "b.md"):
+        (root / name).write_text("x", encoding="utf-8")
+    outside = tmp_path / "outside"
+    outside.mkdir()
+    _link_directory(root / "c-link", outside)
+    return root
+
+
+@pytest.mark.parametrize(
+    ("make_tree", "max_paths", "relative_path", "actual"),
+    [
+        (_ordered_budget_tree, 3, "b-dir/z.md", 4),
+        # The directory link is the entry that crosses the budget.
+        (_budget_edge_link_tree, 2, "c-link", 3),
+    ],
+    ids=["listing-order", "directory-link-at-budget"],
+)
+def test_windows_walker_consumes_the_path_budget_like_the_posix_walker(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, make_tree, max_paths: int, relative_path: str, actual: int
+) -> None:
+    root = make_tree(tmp_path)
+    expected = ("path_count_limit", relative_path, {"actual": actual, "limit": max_paths})
+    with pytest.raises(secure_fs.SecurePathError) as native:
         secure_fs.discover_secure_files(
-            root, selected=lambda relative: relative.suffix == ".md", excluded_dirs=("x", "y"), max_paths=3
+            root, selected=lambda relative: relative.suffix == ".md", excluded_dirs=("x", "y"), max_paths=max_paths
         )
+    assert (native.value.code, native.value.relative_path, native.value.metadata) == expected
+    if _NATIVE_WINDOWS:
+        return
     handles = _TreeBackedWindowsHandles(monkeypatch)
 
     with pytest.raises(secure_fs.SecurePathError) as windows:
-        handles.walk(root, excluded_dirs=("x", "y"), max_paths=3)
+        handles.walk(root, excluded_dirs=("x", "y"), max_paths=max_paths)
 
-    assert (windows.value.relative_path, windows.value.metadata) == (posix.value.relative_path, posix.value.metadata)
-    assert windows.value.relative_path == "b-dir/z.md"
+    assert (windows.value.code, windows.value.relative_path, windows.value.metadata) == expected
     assert handles.all_closed()
 
 

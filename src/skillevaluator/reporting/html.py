@@ -76,6 +76,7 @@ from skillevaluator.reporting.presentation import success_is_not_applicable
 from skillevaluator.reporting.run_status import Status, resolve_run_status, result_status
 from skillevaluator.reporting.tier3_scope import completed_agent_result, validate_report_scope
 from skillevaluator.reporting.trial_charts import steps_by_case_chart
+from skillevaluator.skillspector_provenance import skillspector_provenance_records
 
 if TYPE_CHECKING:
     from skillevaluator.models import ValidationResult
@@ -1256,6 +1257,11 @@ def _skillspector_versions(results: list[ValidationResult]) -> list[str]:
         if isinstance(raw_version, str) and _SKILLSPECTOR_VERSION_RE.fullmatch(raw_version.strip()):
             versions.setdefault(raw_version.strip(), None)
     return list(versions)
+
+
+def _skillspector_provenance(results: list[ValidationResult]) -> list[dict[str, object]]:
+    """Return the validated SkillSpector LLM provenance records on ``results``."""
+    return [record for result in results for record in skillspector_provenance_records(result.metadata)]
 
 
 def _related_paths(finding: object) -> list[str]:
@@ -2870,6 +2876,7 @@ class HTMLReporter(ReporterBase):
         # from the global aggregate counters.
         tier1_summary = self._compute_tier_summary(tier1_results)
         tier1_skillspector_versions = _skillspector_versions(tier1_results)
+        tier1_skillspector_provenance = _skillspector_provenance(tier1_results)
         tier2_summary = self._compute_tier_summary(tier2_results)
         tier3_summary = self._compute_tier_summary(tier3_results)
         tier3_preview, tier3_preview_notice = _bounded_tier3_preview(tier3_data)
@@ -3115,6 +3122,7 @@ class HTMLReporter(ReporterBase):
                 },
             },
             "skillspector_versions": tier1_skillspector_versions,
+            "skillspector_provenance": tier1_skillspector_provenance,
         }
         # CI-native pages link Download JSON to the retained canonical file, so
         # nothing on them reads an embedded copy. Only standalone reports embed it.
@@ -3218,6 +3226,7 @@ class HTMLReporter(ReporterBase):
             ),
             tier1_summary=tier1_summary,
             skillspector_versions=tier1_skillspector_versions,
+            skillspector_provenance=tier1_skillspector_provenance,
             tier2_summary=tier2_summary,
             tier3_summary=tier3_summary,
             tier1_display_results=tier1_display_results,

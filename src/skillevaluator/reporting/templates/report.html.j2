@@ -1614,6 +1614,53 @@
                 </div>
             </div>
             {% endif %}
+            {# SkillSpector LLM provenance from --llm runs, validated by skillspector_provenance.py. #}
+            {% if skillspector_provenance %}
+            <div class="top-issues-section">
+                <div class="top-issues-header" onclick="toggleTopIssues(this)">
+                    <h3>Tier 1 LLM Provenance</h3>
+                    <span class="expand-text">&#9660;</span>
+                </div>
+                <div class="top-issues-content">
+                    <p style="margin: 0.75rem 1rem; color: var(--text-secondary); font-size: 0.85rem;">Provider, model, SkillSpector revision, and determinism evidence for the LLM security analysis.</p>
+                    <table class="top-issues-table">
+                        <thead>
+                            <tr>
+                                <th>Provider</th>
+                                <th>Adapter</th>
+                                <th>Analyzer</th>
+                                <th>Model</th>
+                                <th>Revision</th>
+                                <th>Determinism</th>
+                            </tr>
+                        </thead>
+                        <tbody>
+                            {% for record in skillspector_provenance %}
+                            {% set provenance = record.provenance %}
+                            {% if provenance %}
+                            {% for analyzer in provenance.analyzers %}
+                            {% set source_revision = analyzer.analyzer_revision.source_revision %}
+                            <tr>
+                                <td>{{ record.provider_id or 'not recorded' }}</td>
+                                <td>{{ provenance.provider.effective_adapter }}</td>
+                                <td>{{ analyzer.analyzer_id }}</td>
+                                <td><code>{{ analyzer.model }}</code></td>
+                                <td><code>{{ analyzer.analyzer_revision.value }}</code>{% if source_revision and source_revision.value != 'unknown' %} <code>{{ source_revision.value[:12] }}</code>{% endif %}</td>
+                                <td>{{ provenance.determinism.classification }} / {{ provenance.determinism.control_status }}</td>
+                            </tr>
+                            {% endfor %}
+                            {% else %}
+                            <tr>
+                                <td>{{ record.provider_id or 'not recorded' }}</td>
+                                <td colspan="5">No valid LLM provenance was recorded for this scan.</td>
+                            </tr>
+                            {% endif %}
+                            {% endfor %}
+                        </tbody>
+                    </table>
+                </div>
+            </div>
+            {% endif %}
 
         <div class="report-searchbar">
             <label for="report-search">Search evidence</label>
@@ -2630,7 +2677,7 @@
                                                 <span class="t3-mad-score" style="color:{{ d_color }};">{{ "%.2f" | format(d_score) if d_score is not none else "N/A" }}</span>
                                                 {% if d_score is not none %}<div class="t3-mad-bar"><span style="width:{{ (d_score * 100) | round(0) }}%; background:{{ d_color }};"></span></div>{% endif %}
                                             </div>
-                                            <span class="t3-mad-lift" style="color:{{ lift_color }};">{% if _agent.get('skill_activation', {}).get('status') == 'never_activated' %}inconclusive: skill never activated{% elif d_lift is not none %}{{ "%+.2f" | format(d_lift) }} lift{% elif d_score is none and d.baseline is not none %}with-skill unavailable{% elif d_score is none %}N/A lift{% else %}no baseline lift{% endif %}</span>
+                                            <span class="t3-mad-lift" style="color:{{ lift_color }};">{% if _agent.get('skill_activation', {}).get('status') == 'never_activated' %}inconclusive: skill never activated{% elif d_lift is not none %}{{ "%+.2f" | format(d_lift) }} lift{% elif d_score is none and d.baseline is not none %}with-skill unavailable{% elif d_score is none %}N/A lift{% elif d.baseline is not none %}comparison unavailable{% else %}no baseline lift{% endif %}</span>
                                         </div>
                                     </td>
                                 {% else %}
@@ -2653,7 +2700,7 @@
                                         <span class="t3-mad-score" style="color:{{ ws_color }};">{{ "%.2f" | format(ws) if ws is not none else "N/A" }}</span>
                                         {% if ws is not none %}<div class="t3-mad-bar"><span style="width:{{ (ws * 100) | round(0) }}%; background:{{ ws_color }};"></span></div>{% endif %}
                                     </div>
-                                    <span class="t3-mad-lift" style="color:{{ lf_color }};">{% if agent.get('skill_activation', {}).get('status') == 'never_activated' %}inconclusive: skill never activated{% elif lf is not none %}{{ "%+.2f" | format(lf) }} lift{% elif ws is none and bl is not none %}with-skill unavailable{% elif ws is none %}N/A lift{% else %}no baseline lift{% endif %}</span>
+                                    <span class="t3-mad-lift" style="color:{{ lf_color }};">{% if agent.get('skill_activation', {}).get('status') == 'never_activated' %}inconclusive: skill never activated{% elif lf is not none %}{{ "%+.2f" | format(lf) }} lift{% elif ws is none and bl is not none %}with-skill unavailable{% elif ws is none %}N/A lift{% elif bl is not none %}comparison unavailable{% else %}no baseline lift{% endif %}</span>
                                 </div>
                             </td>
                         {% endfor %}
@@ -2689,7 +2736,7 @@
                             <div class="t3-agent-name">{{ name }}</div>
                             <div class="t3-agent-score" style="color:{{ score_color }};">{{ "%.2f" | format(with_skill) if with_skill is not none else "N/A" }}</div>
                             <div style="color:{{ card_lift_color }};font-size:0.85rem;">
-                                {% if agent.get('skill_activation', {}).get('status') == 'never_activated' %}inconclusive: skill never activated{% elif lift is not none %}{{ "%+.2f" | format(lift) }} lift{% elif with_skill is none and agent.baseline is not none %}with-skill unavailable{% elif with_skill is none %}N/A lift{% else %}no baseline{% endif %}
+                                {% if agent.get('skill_activation', {}).get('status') == 'never_activated' %}inconclusive: skill never activated{% elif lift is not none %}{{ "%+.2f" | format(lift) }} lift{% elif with_skill is none and agent.baseline is not none %}with-skill unavailable{% elif with_skill is none %}N/A lift{% elif agent.baseline is not none %}comparison unavailable{% else %}no baseline{% endif %}
                             </div>
                             <div style="color:var(--text-secondary);font-size:0.75rem;margin-top:0.25rem;">{{ agent.num_trials or 0 }} trials</div>
                             {% if with_skill is not none %}<div class="t3-mini-bar"><span style="width:{{ (with_skill * 100) | round(0) }}%; background:{{ score_color }};"></span></div>{% endif %}
@@ -3253,7 +3300,7 @@
                         <div class="t3-kpi-sub">{% if agent.lift >= tier3_lift_pass_threshold %}positive{% elif agent.lift <= tier3_lift_fail_threshold %}regression{% else %}neutral{% endif %}</div>
                         {% else %}
                         <div class="t3-kpi-value" style="color:var(--text-secondary);">N/A</div>
-                        <div class="t3-kpi-sub">{% if agent.get('skill_activation', {}).get('status') == 'never_activated' %}inconclusive: skill never activated{% elif agent.with_skill is none and agent.baseline is not none %}with-skill unavailable{% elif agent.with_skill is none %}N/A lift{% else %}no baseline{% endif %}</div>
+                        <div class="t3-kpi-sub">{% if agent.get('skill_activation', {}).get('status') == 'never_activated' %}inconclusive: skill never activated{% elif agent.with_skill is none and agent.baseline is not none %}with-skill unavailable{% elif agent.with_skill is none %}N/A lift{% elif agent.baseline is not none %}comparison unavailable{% else %}no baseline{% endif %}</div>
                         {% endif %}
                     </div>
                     <div class="t3-kpi-card">

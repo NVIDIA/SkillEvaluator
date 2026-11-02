@@ -175,6 +175,7 @@ _REFERENCE_WORD_PATTERN = re.compile(r"\w+")
 # followed by a non-path character still end the reference.
 _REFERENCE_TRAILING_BOUNDARY = r"(?=\.*(?![\w./-]))"
 _REFERENCE_DIRECTORY_TRAILING_BOUNDARY = r"(?=\.*(?![\w.-]))"
+_DIRECTORY_NAME_QUOTES = ("`", "'", '"')
 _PLUGIN_ROOT_MARKER = "__skillspector_claude_plugin_root__"
 _SKILL_ROOT_MARKER = "__skillspector_skill_root__"
 
@@ -229,9 +230,17 @@ def _reference_variant_may_match(variant: str, reference_index: tuple[list[str],
     its first two segments are an indexed segment pair, or, when the variant
     has only two segments, begin one. Other variants are always searched.
     """
+    sorted_tokens, sorted_segment_pairs = reference_index
+    if (
+        len(variant) > 2
+        and variant[0] in _DIRECTORY_NAME_QUOTES
+        and variant[-1] == variant[0]
+        and _REFERENCE_TOKEN_PATTERN.fullmatch(variant[1:-1]) is not None
+    ):
+        # A quoted name is a whole token of the text.
+        return _sorted_has_prefix(sorted_tokens, variant[1:-1], exact=True)
     if _REFERENCE_TOKEN_PATTERN.fullmatch(variant) is None:
         return True
-    sorted_tokens, sorted_segment_pairs = reference_index
     if "/" not in variant:
         return _sorted_has_prefix(sorted_tokens, variant)
     head, _separator, rest = variant.partition("/")
@@ -600,9 +609,14 @@ def _path_variants(
             if parent == Path():
                 continue
             parent_path = parent.as_posix()
-            variants.update({parent_path, f"./{parent_path}", f"{parent_path}/", f"./{parent_path}/"})
-            if include_import_aliases:
-                variants.add(parent_path.replace("/", "."))
+            variants.update({f"./{parent_path}", f"{parent_path}/", f"./{parent_path}/"})
+            # A one-segment directory name alone reads as an ordinary word
+            # ("build a web page from the docs"), so it counts only with a
+            # slash, a ``./`` prefix, or quoted (see _quoted_directory_variants).
+            if "/" in parent_path:
+                variants.add(parent_path)
+                if include_import_aliases:
+                    variants.add(parent_path.replace("/", "."))
     if include_import_aliases and len(path.parts) > 1 and path.name.lower() in {"__init__.py", "__main__.py"}:
         package = path.parent.as_posix()
         dotted_package = package.replace("/", ".")
@@ -629,6 +643,20 @@ def _bare_name_variants(file_path: str) -> set[str]:
     if len(path.parts) > 1 and path.suffix and _REFERENCE_WORD_PATTERN.search(path.stem):
         return {path.name}
     return set()
+
+
+def _quoted_directory_variants(file_path: str) -> set[str]:
+    """Return the quoted top-level directory name of a nested file, such as `` `policies` ``.
+
+    Guidance names a directory as code or a string ("Load the `policies`
+    directory", ``open("policies")``) without a slash. Unquoted, the name
+    reads as an ordinary word, so it is left out of :func:`_path_variants`.
+    """
+    path = Path(file_path)
+    names = {path.parts[0]} if len(path.parts) > 1 else set()
+    if len(path.parts) > 2 and path.parts[0].lower() == "src":
+        names.add(path.parts[1])
+    return {f"{quote}{name}{quote}" for name in names for quote in _DIRECTORY_NAME_QUOTES}
 
 
 def _reference_anchor_words(file_path: str) -> frozenset[str] | None:
@@ -967,7 +995,9 @@ def referenced_report_paths(
     is_directory = {path: target.is_dir() for path, target in local_files.items()}
     include_parents_by_path = {path: role != "repository_metadata" for path, role in roles.items()}
     variants_by_path = {
-        path: _path_variants(path, include_parents=include_parents_by_path[path]) | _bare_name_variants(path)
+        path: _path_variants(path, include_parents=include_parents_by_path[path])
+        | _bare_name_variants(path)
+        | (_quoted_directory_variants(path) if include_parents_by_path[path] else set())
         for path in local_files
     }
     directory_prefix_variants: dict[str, set[str]] = {}

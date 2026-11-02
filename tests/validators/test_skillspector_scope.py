@@ -736,6 +736,8 @@ class TestReferenceReachability:
             ("SKILL.md", "Run `python -m src`.", "src/__main__.py"),
             ("SKILL.md", "Read every YAML under `policies/`.", "policies/override.yaml"),
             ("SKILL.md", "Load the `policies` directory before responding.", "policies/override.yaml"),
+            ("scripts/load.py", 'POLICIES = ROOT / "policies"', "policies/override.yaml"),
+            ("SKILL.md", "Load ./policies before responding.", "policies/override.yaml"),
             ("hooks/run.js", "require('../src/helper.js')", "src/helper.js"),
             ("hooks/run.ts", "await import('../src/helper.ts')", "src/helper.ts"),
             ("SKILL.md", "Run `${CLAUDE_PLUGIN_ROOT}/src/server.py`.", "src/server.py"),
@@ -798,6 +800,12 @@ class TestReferenceReachability:
             ("Read other-skill/README.md first.", "README.md"),
             ("Read my-docs/threats.md first.", "docs/threats.md"),
             ("Read <div>/README.md first.", "README.md"),
+            # A one-segment directory name alone reads as an ordinary word.
+            ("Use when building a web page from the docs.", "docs/threats.md"),
+            ("Use when building a web page from the docs.", "web/instruction_display.tsx"),
+            ("Run the tests before you finish.", "tests/fixture.txt"),
+            ("Load the policies before responding.", "policies/override.yaml"),
+            ("Load `policies.yaml` before responding.", "policies/override.yaml"),
         ],
     )
     def test_near_miss_reference_does_not_reach_the_file(
@@ -1090,6 +1098,9 @@ class TestReferenceReachability:
             ("skill-card", ["skill-card.md"], True),
             ("references/", ["references/guide.md"], True),
             ("skill-card.md", ["references/guide.md", "skill-card"], False),
+            # A quoted directory name must be a whole token.
+            ("`policies`", ["policies"], True),
+            ("`policies`", ["policies.yaml"], False),
             ("card.md", ["skill-card.md"], False),
             ("my file.md", [], True),
             # A variant with ``/`` may also start after a ``/`` inside a token.
@@ -1262,6 +1273,27 @@ class TestPluginReferences:
         assert scope_module._manifest_reference_text(manifest_text) is None
         assert not result.passed
         assert result.findings[0].metadata["applicability"] == "fail-closed"
+
+    def test_bundled_skill_mentioning_other_skills_does_not_reach_its_files(self, tmp_path: Path) -> None:
+        plugin_root = tmp_path / "plugin"
+        skill_root = plugin_root / "skills" / "foo"
+        _write(
+            skill_root,
+            "SKILL.md",
+            "---\nname: foo\ndescription: Works with the other skills in this plugin.\n---\nSummarize the log.\n",
+        )
+        _write(skill_root, "docs/threats.md")
+        _write(skill_root, "web/instruction_display.tsx")
+
+        result = _process(
+            skill_root,
+            [_issue("docs/threats.md"), _issue("web/instruction_display.tsx")],
+            content_type="plugin",
+            reference_root=plugin_root,
+        )
+
+        assert result.passed
+        assert result.metadata["skillspector_applicability"]["suppressed_inapplicable_issues"] == 2
 
     def test_bundled_skill_directory_variable_reaches_its_own_files(self, tmp_path: Path) -> None:
         plugin_root = tmp_path / "plugin"

@@ -61,6 +61,9 @@ from skillevaluator.validators.base import (
 logger = get_logger(__name__)
 
 _AUTHOR_IDENTITY_RE = re.compile(r"^\S[^<>\n]* <(?P<email>[^<>@\s]+@[^<>\s]+)>$")
+# SkillSpector 2.13.3 allows 1,080 seconds of workflow work per invocation.
+# Leave bounded headroom for process startup and report serialization.
+_SKILLSPECTOR_STAGE_TIMEOUT_SECONDS = 1200
 _SKILLSPECTOR_POLICY_EXIT_CODES = frozenset({0, 1})
 _SKILLSPECTOR_STATUSLESS_COMPLETENESS_VERSIONS = {(2, 9, 5), (2, 9, 6)}
 _SKILLSPECTOR_FINDING_IDENTITY_VERSION = (2, 11, 1)
@@ -861,7 +864,9 @@ class SecurityValidator(ValidatorBase):
                 result.metadata["skillspector_provider_id"] = provider_id
         else:
             child_env = _skillspector_process_env()
-        tool_result = Tools.skillspector.run(args, timeout=300, env=child_env, replace_env=True)
+        tool_result = Tools.skillspector.run(
+            args, timeout=_SKILLSPECTOR_STAGE_TIMEOUT_SECONDS, env=child_env, replace_env=True
+        )
         try:
             data = parse_json_output(tool_result.stdout)
         except (RecursionError, ValueError):

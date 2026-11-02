@@ -195,6 +195,12 @@ All notable changes to SkillEvaluator are documented in this file.
 
 ### Fixed
 
+- Give each SkillSpector static or LLM stage a bounded 1,200-second process
+  timeout, allowing its 1,080-second workflow budget plus startup and report
+  serialization. Completed scans taking more than five minutes no longer
+  become `INCOMPLETE` because of the evaluator's previous 300-second timeout.
+  A stage that exceeds the process timeout still fails closed.
+
 - On Windows, repository root and source-link detection no longer break for
   repositories in non-ASCII folders: Git output is decoded as UTF-8 instead of
   the locale code page.

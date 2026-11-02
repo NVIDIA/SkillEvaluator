@@ -181,6 +181,13 @@ def _skillspector_json_report(
     }
 
 
+def _merge_amplified_yaml(levels: int) -> str:
+    """Return YAML whose chained merge keys double the expanded size on every line."""
+    lines = ["a0: &a0 {k: 1}"]
+    lines += [f"a{n}: &a{n} {{<<: [*a{n - 1}, *a{n - 1}], k{n}: 1}}" for n in range(1, levels + 1)]
+    return "\n".join(lines)
+
+
 def _validate_skillspector_payload(
     mock_tools,
     sample_skill_dir: Path,
@@ -1808,6 +1815,12 @@ print(json.dumps([finding.metadata["matched_value"] for finding in result.findin
             f'version: 2\nscanner_version: "2.12.0"\nfingerprints:\n  - hash: "sha256:{"0" * 64}"\n',
             'version: 2\nrules:\n  PE5:\n    reason: "Not a list"\n',
             'version: 2\nfingerprints: "sha256:abc"\n',
+            # SafeLoader raises a plain ValueError for an impossible timestamp.
+            'version: 2\nrules:\n  - id: "PE5"\n    reason: "Reviewed"\n    reviewed_on: 2026-06-31\n',
+            'version: !!int ""\n',
+            # Chained merge keys double the expanded size on every line.
+            _merge_amplified_yaml(20) + '\nversion: 2\nrules:\n  - id: "PE5"\n    reason: "Reviewed"\n',
+            "a: &a [*a]\nversion: 2\n",
         ],
     )
     @patch("skillevaluator.validators.security.Tools")
@@ -1900,6 +1913,71 @@ print(json.dumps([finding.metadata["matched_value"] for finding in result.findin
 
         assert error is None
         assert state["rule_count"] == 1
+
+    @pytest.mark.parametrize(
+        ("content", "expected"),
+        [
+            ("version: 2\nrules:\n  - PE5\n", "rule 0 in baseline.yaml must be a mapping"),
+            (
+                f'version: 2\nscanner_version: "2.13.3"\nfingerprints:\n  - "sha256:{"0" * 64}"\n',
+                "fingerprint 0 in baseline.yaml must be a mapping with 'hash' and 'reason'",
+            ),
+            (
+                'version: 2\nrules:\n  - id: "PE5"\n    reason: "Reviewed"\n    reviewed_on: 2026-06-31\n',
+                "baseline.yaml could not be parsed (ValueError)",
+            ),
+            (
+                _merge_amplified_yaml(20),
+                "baseline.yaml exceeds the expanded YAML node limit",
+            ),
+        ],
+    )
+    def test_skillspector_baseline_rejections_name_the_actual_problem(
+        self, content: str, expected: str, tmp_path: Path
+    ) -> None:
+        """A shape, date, or expansion error is reported as such, not as an unbounded rule or a crash."""
+        from skillevaluator.validators.security import _inspect_skillspector_baseline
+
+        baseline = tmp_path / "baseline.yaml"
+        baseline.write_text(content, encoding="utf-8")
+
+        _state, error = _inspect_skillspector_baseline(baseline)
+
+        assert error is not None and error.endswith(expected), error
+
+    def test_oversized_skillspector_baseline_is_rejected_before_parsing(self, tmp_path: Path) -> None:
+        from skillevaluator.validators.security import (
+            _SKILLSPECTOR_BASELINE_MAX_BYTES,
+            _inspect_skillspector_baseline,
+        )
+
+        baseline = tmp_path / "baseline.yaml"
+        baseline.write_bytes(b"#" * (_SKILLSPECTOR_BASELINE_MAX_BYTES + 1))
+
+        state, error = _inspect_skillspector_baseline(baseline)
+
+        assert error is not None and "byte limit" in error
+        assert state["digest"] is None
+
+    @pytest.mark.parametrize("content", ["", "# no exceptions yet\n"])
+    @patch("skillevaluator.validators.security.Tools")
+    def test_empty_skillspector_baseline_is_an_empty_baseline(
+        self, mock_tools, content: str, sample_skill_dir: Path, tmp_path: Path
+    ) -> None:
+        """SkillSpector loads an empty or comment-only baseline as one with no exceptions."""
+        baseline = tmp_path / "baseline.yaml"
+        baseline.write_text(content, encoding="utf-8")
+
+        result = _validate_skillspector_payload(
+            mock_tools,
+            sample_skill_dir,
+            _skillspector_json_report(),
+            validator=SecurityValidator(use_llm=False, skillspector_baseline=baseline),
+        )
+
+        assert result.status == "passed", result.errors
+        state = result.metadata["skillspector_baseline"]
+        assert (state["status"], state["rule_count"], state["fingerprint_count"]) == ("no_matches", 0, 0)
 
     @pytest.mark.parametrize("version", [None, 1])
     def test_legacy_rule_only_skillspector_baseline_needs_no_reason(self, version: int | None, tmp_path: Path) -> None:

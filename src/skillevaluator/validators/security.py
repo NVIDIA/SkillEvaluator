@@ -66,6 +66,12 @@ _SKILLSPECTOR_POLICY_EXIT_CODES = frozenset({0, 1})
 # SkillSpector maps an unreadable or invalid --baseline file to exit code 2.
 _SKILLSPECTOR_INPUT_ERROR_EXIT_CODE = 2
 _SKILLSPECTOR_BASELINE_SCHEMA_VERSION = 2
+# SkillSpector's baseline loader limits (v2.12.0 and later); a file beyond
+# them is rejected by SkillSpector, so the pre-check stops there too.
+_SKILLSPECTOR_BASELINE_MAX_BYTES = 2 * 1024 * 1024
+_SKILLSPECTOR_BASELINE_MAX_NODES = 100_000
+_SKILLSPECTOR_BASELINE_MAX_DEPTH = 64
+_SKILLSPECTOR_BASELINE_MAX_SCALAR_CHARS = 64 * 1024
 _SKILLSPECTOR_STATUSLESS_COMPLETENESS_VERSIONS = {(2, 9, 5), (2, 9, 6)}
 _SKILLSPECTOR_FINDING_IDENTITY_VERSION = (2, 11, 1)
 _SKILLSPECTOR_COMPLETENESS_SCHEMA_VERSION = (2, 10, 0)
@@ -561,6 +567,69 @@ def _baseline_glob_has_literal_scope(value: object) -> bool:
     return False
 
 
+class _SkillSpectorBaselineLimitError(ValueError):
+    """A baseline exceeds the size or YAML expansion limits SkillSpector enforces."""
+
+
+class _BoundedSkillSpectorBaselineLoader(yaml.SafeLoader):
+    """SafeLoader that bounds composition and alias or merge expansion like SkillSpector.
+
+    Plain ``yaml.safe_load`` expands chained merge keys without limit, so a
+    small file could take minutes or exhaust memory before any check runs.
+    Expansion is counted on the composed node graph, revisiting every alias,
+    before any value is constructed.
+    """
+
+    def __init__(self, stream: str) -> None:
+        super().__init__(stream)
+        self._composed_nodes = 0
+        self._compose_depth = 0
+
+    def compose_node(self, parent: object, index: object) -> yaml.Node:
+        self._composed_nodes += 1
+        if self._composed_nodes > _SKILLSPECTOR_BASELINE_MAX_NODES:
+            raise _SkillSpectorBaselineLimitError("exceeds the YAML node limit")
+        if self._compose_depth >= _SKILLSPECTOR_BASELINE_MAX_DEPTH:
+            raise _SkillSpectorBaselineLimitError("exceeds the YAML depth limit")
+        self._compose_depth += 1
+        try:
+            return super().compose_node(parent, index)
+        finally:
+            self._compose_depth -= 1
+
+    def construct_document(self, node: yaml.Node) -> object:
+        counts = {"nodes": 0, "characters": 0}
+        active: set[int] = set()
+
+        def visit(item: yaml.Node, depth: int) -> None:
+            counts["nodes"] += 1
+            if counts["nodes"] > _SKILLSPECTOR_BASELINE_MAX_NODES:
+                raise _SkillSpectorBaselineLimitError("exceeds the expanded YAML node limit")
+            if depth > _SKILLSPECTOR_BASELINE_MAX_DEPTH:
+                raise _SkillSpectorBaselineLimitError("exceeds the expanded YAML depth limit")
+            if id(item) in active:
+                raise _SkillSpectorBaselineLimitError("contains cyclic YAML aliases")
+            if isinstance(item, yaml.ScalarNode):
+                if len(item.value) > _SKILLSPECTOR_BASELINE_MAX_SCALAR_CHARS:
+                    raise _SkillSpectorBaselineLimitError("exceeds the YAML scalar character limit")
+                counts["characters"] += len(item.value)
+                if counts["characters"] > _SKILLSPECTOR_BASELINE_MAX_BYTES:
+                    raise _SkillSpectorBaselineLimitError("exceeds the expanded YAML character limit")
+                return
+            active.add(id(item))
+            children = (
+                (child for pair in item.value for child in pair) if isinstance(item, yaml.MappingNode) else item.value
+            )
+            for child in children:
+                visit(child, depth + 1)
+            active.remove(id(item))
+
+        # Depth is bounded, so this recursion stays shallow; every alias is
+        # revisited because counting unique nodes misses merge amplification.
+        visit(node, 1)
+        return super().construct_document(node)
+
+
 def _is_non_empty_text(value: object) -> bool:
     """Return whether a parsed YAML value is a string with visible text."""
     return isinstance(value, str) and bool(value.strip())
@@ -597,11 +666,33 @@ def _inspect_skillspector_baseline(path: Path) -> tuple[dict, str | None]:
     if not path.is_file():
         return state, f"SkillSpector baseline {name} does not exist or is not a file"
     try:
-        content = path.read_bytes()
-        state["digest"] = f"sha256:{hashlib.sha256(content).hexdigest()}"
-        raw = yaml.safe_load(content.decode("utf-8"))
-    except (OSError, UnicodeError, RecursionError, yaml.YAMLError) as exc:
+        with path.open("rb") as source:
+            content = source.read(_SKILLSPECTOR_BASELINE_MAX_BYTES + 1)
+    except OSError as exc:
+        return state, f"SkillSpector baseline {name} could not be read ({type(exc).__name__})"
+    if len(content) > _SKILLSPECTOR_BASELINE_MAX_BYTES:
+        return state, f"SkillSpector baseline {name} exceeds the {_SKILLSPECTOR_BASELINE_MAX_BYTES}-byte limit"
+    state["digest"] = f"sha256:{hashlib.sha256(content).hexdigest()}"
+    try:
+        raw = yaml.load(content.decode("utf-8"), Loader=_BoundedSkillSpectorBaselineLoader)
+    except _SkillSpectorBaselineLimitError as exc:
+        return state, f"SkillSpector baseline {name} {exc}"
+    except (
+        RecursionError,
+        yaml.YAMLError,
+        # SafeLoader scalar constructors raise these for values such as an
+        # impossible timestamp (``2026-06-31``) or ``!!int ""``.
+        ValueError,
+        IndexError,
+        KeyError,
+        AttributeError,
+        TypeError,
+        OverflowError,
+    ) as exc:
         return state, f"SkillSpector baseline {name} could not be parsed ({type(exc).__name__})"
+    if raw is None:
+        # Like SkillSpector, an empty or comment-only file is an empty baseline.
+        raw = {}
     if not isinstance(raw, dict):
         return state, f"SkillSpector baseline {name} must be a YAML or JSON mapping"
 
@@ -622,12 +713,21 @@ def _inspect_skillspector_baseline(path: Path) -> tuple[dict, str | None]:
             return state, f"SkillSpector baseline {name} field '{field}' must be a list"
     rule_list = rules or []
     fingerprint_list = fingerprints or []
+    # Shape errors first, so a bare string is not reported as an unbounded
+    # rule or a missing reason.
+    malformed = [f"rule {index}" for index, rule in enumerate(rule_list) if not isinstance(rule, dict)]
+    if malformed:
+        return state, f"SkillSpector baseline {', '.join(malformed)} in {name} must be a mapping"
+    malformed = [f"fingerprint {index}" for index, entry in enumerate(fingerprint_list) if not isinstance(entry, dict)]
+    if malformed:
+        return state, (
+            f"SkillSpector baseline {', '.join(malformed)} in {name} must be a mapping with 'hash' and 'reason'"
+        )
     unbounded = [
         index
         for index, rule in enumerate(rule_list)
-        if not isinstance(rule, dict)
         # Field aliases match SkillSpector's rule loader.
-        or not any(
+        if not any(
             _baseline_glob_has_literal_scope(rule.get(field) or rule.get(alias))
             for field, alias in (("id", "rule_id"), ("path", "file"), ("message", "message"))
         )
@@ -646,7 +746,7 @@ def _inspect_skillspector_baseline(path: Path) -> tuple[dict, str | None]:
         unexplained += [
             f"fingerprint {index}"
             for index, entry in enumerate(fingerprint_list)
-            if not isinstance(entry, dict) or not _is_non_empty_text(entry.get("reason"))
+            if not _is_non_empty_text(entry.get("reason"))
         ]
         if unexplained:
             return state, (

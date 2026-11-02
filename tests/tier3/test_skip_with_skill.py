@@ -355,6 +355,33 @@ def test_baseline_only_keeps_the_baseline_isolation_guard(skill: Path, monkeypat
     assert calls["emitted"] == []
 
 
+def test_baseline_only_setup_rejection_does_not_suggest_skip_baseline(
+    skill: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    # --skip-baseline cannot be combined with --skip-with-skill, so the
+    # paired-run advice would be a dead end for a baseline-only run.
+    calls = _stub_engine(monkeypatch, skill, harbor_config={"pre_agent_setup": ["echo setup"]})
+    reporter = _Reporter()
+
+    result = runner.run_harbor_eval(
+        skill,
+        ["codex"],
+        skip_with_skill=True,
+        output_dir=skill.parent / "results",
+        progress_reporter=reporter,
+    )
+
+    expected = (
+        "harbor.pre_agent_setup/setup_commands cannot run in a baseline-only run (--skip-with-skill); "
+        "the baseline arm must stay isolated from skill-owned setup commands"
+    )
+    assert result == {"error": [expected]}
+    assert "--skip-baseline" not in result["error"][0]
+    failed = [event for event in reporter.events if event.stage == "configuration" and event.state == "failed"]
+    assert [event.detail for event in failed] == [expected]
+    assert calls["emitted"] == []
+
+
 @pytest.mark.parametrize("stop_on_pass", [False, True])
 def test_agent_pair_launches_only_the_baseline_job(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch, stop_on_pass: bool

@@ -4737,10 +4737,18 @@ def _run_harbor_eval_impl(
         reporter.emit(ProgressEvent(stage="configuration", state="failed", detail="invalid workspace mode"))
         return {"error": ["skill_workspace.mode must be isolated or group"]}
     if not skip_baseline and harbor_config.get("pre_agent_setup"):
-        detail = (
-            "harbor.pre_agent_setup/setup_commands cannot run in a paired evaluation; "
-            "use --skip-baseline for a with-skill-only run"
-        )
+        if skip_with_skill:
+            # --skip-baseline cannot be combined with --skip-with-skill, so it
+            # is not offered as a way out of a baseline-only run.
+            detail = (
+                "harbor.pre_agent_setup/setup_commands cannot run in a baseline-only run (--skip-with-skill); "
+                "the baseline arm must stay isolated from skill-owned setup commands"
+            )
+        else:
+            detail = (
+                "harbor.pre_agent_setup/setup_commands cannot run in a paired evaluation; "
+                "use --skip-baseline for a with-skill-only run"
+            )
         reporter.emit(ProgressEvent(stage="configuration", state="failed", detail=detail))
         return {"error": [detail]}
 

@@ -595,9 +595,11 @@ overall score and best agent come from the baseline arm, the with-skill arm is
 recorded as `skipped`, with-skill scores and Skill Lift are unavailable (shown
 as `skipped` or N/A, never 0.0), and the verdict stays NEUTRAL because no skill
 was measured. The two flags are mutually
-exclusive, and baseline isolation rules such as the `harbor.pre_agent_setup`
-restriction still apply. `validate` does not accept `--skip-with-skill`, so a
-baseline-only run can never satisfy a Tier 3 gate.
+exclusive, and baseline isolation rules still apply: a config that sets
+`harbor.pre_agent_setup` (or `setup_commands`) is rejected, because the
+baseline arm must stay isolated from skill-owned setup commands. `validate`
+does not accept `--skip-with-skill`, so a baseline-only run can never satisfy a
+Tier 3 gate.
 
 ## How standard grading judges a trial
 

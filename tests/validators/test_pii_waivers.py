@@ -183,7 +183,9 @@ def test_created_may_be_one_day_ahead_of_utc(skill: Path, tmp_path: Path) -> Non
     assert _waiver_checks(result) == ["applied-pii-waiver"]
 
 
-_IN_TWO_DAYS = (today_utc() + timedelta(days=2)).isoformat()
+# Replaced with a real date when the test runs, not when pytest collects the module: a run that
+# starts shortly before 00:00 UTC would otherwise leave it only one day ahead, which is allowed.
+_IN_TWO_DAYS = "<in-two-days>"
 
 
 @pytest.mark.parametrize(
@@ -223,7 +225,9 @@ def test_invalid_waiver_file_applies_nothing_and_fails_the_scan(
     waiver_path = tmp_path / "private" / "pii-waivers.yaml"
     waiver_path.parent.mkdir()
     if isinstance(document, list):
-        document = {"version": 1, "waivers": document}
+        in_two_days = (pii_waivers.today_utc() + timedelta(days=2)).isoformat()
+        waivers = [{key: in_two_days if value == _IN_TWO_DAYS else value for key, value in w.items()} for w in document]
+        document = {"version": 1, "waivers": waivers}
     text = document if isinstance(document, str) else yaml.safe_dump(document, sort_keys=False)
     waiver_path.write_text(text, encoding="utf-8")
 

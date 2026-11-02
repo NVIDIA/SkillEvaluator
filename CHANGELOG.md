@@ -6,6 +6,13 @@ All notable changes to SkillEvaluator are documented in this file.
 
 ### Added
 
+- `validate --harness codex,claude-code` (or `all`) adds an advisory
+  harness-compatibility table, one row per harness (`loads`, `degraded`,
+  `not_loaded`), from packaged, version-pinned profiles for Claude Code, Codex,
+  OpenCode, OpenClaw, Hermes and Copilot CLI. JSON reports gain a
+  `harness_compatibility` block; Tier 1 findings and the exit code are unchanged.
+  `--harness-profiles DIR` loads profiles from a directory.
+
 - Tier 1 `schema` now reports harness-portability issues: duplicate frontmatter
   keys (HIGH), a UTF-8 BOM, a symlinked or nested `SKILL.md`, descriptions over
   1,024 UTF-16 units (MEDIUM), `SKILL.md` size tiers (32 KiB LOW, 50 KiB MEDIUM,

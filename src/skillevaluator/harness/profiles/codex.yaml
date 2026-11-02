@@ -1,0 +1,24 @@
+harness: codex
+display_name: OpenAI Codex CLI
+verified: {version: 0.166.0, source: "rust-v0.166.0 @ 593389380740", date: 2026-11-01, method: proxy-captured canary probes x3 + source, os: linux}
+roots:
+  project: [.agents/skills, .codex/skills]
+  user: [~/.agents/skills, ~/.codex/skills]
+limits: {scan_depth: 6, skips_hidden_dirs: true, catalog_desc_codepoints: 1024, list_budget: "2% of context, 8,000 chars if unknown, max 10,000 tokens"}
+rules:
+  - {id: CX-ROOT, when: "install_root not in roots", effect: not_loaded, message: "Codex reads .agents/skills and .codex/skills (project and user).", confidence: high}
+  - {id: CX-DESC-CUT, when: "description_codepoints > 1024", effect: degraded, message: "Description cut at 1,024 code points.", confidence: high}
+  - {id: CX-DESC-MISSING, when: "description_missing or description_empty or description_type != 'str'", effect: not_loaded, message: "Skill dropped: Codex requires a string description.", confidence: high}
+  - {id: CX-STRICT-YAML, when: "frontmatter_tab_indent or frontmatter_duplicate_keys", effect: not_loaded, message: "Skill dropped: invalid YAML (tabs or duplicate keys).", confidence: high}
+  - {id: CX-BOM, when: "frontmatter_bom", effect: not_loaded, message: "Skill dropped: SKILL.md starts with a UTF-8 BOM.", confidence: high}
+  - {id: CX-NESTED, when: "nested_skill_md", effect: degraded, message: "The nested SKILL.md is loaded as a second, separate skill.", confidence: high}
+  - {id: CX-DEPTH, when: "grouping_depth > 5", effect: not_loaded, message: "Beyond Codex's scan depth of 6.", confidence: medium}
+  - {id: CX-SYMLINK-FILE, when: "skill_md_symlink", effect: not_loaded, message: "Symlinked SKILL.md files are skipped (codex#15756).", confidence: high}
+  - {id: CX-LIST-BUDGET, when: "catalog_size > 0", effect: advisory, message: "Skill list budget is 2% of context: descriptions are shortened (~40 chars at 225 skills), then removed, then skills omitted with a warning. The warning is emitted as an error-type event in `codex exec --json`.", confidence: high}
+  - {id: CX-DUP-NAME, when: "always", effect: advisory, message: "Same name in two roots: both are listed, not merged.", confidence: high}
+  - {id: CX-ALLOWED-TOOLS, when: "allowed_tools_shape != 'none'", effect: advisory, message: "allowed-tools is ignored by Codex.", confidence: high}
+  - {id: CX-CASING, when: "not manifest_name_exact", effect: not_loaded, message: "Non-canonical name (skill.md/Skill.md): never loaded, on Linux or macOS (3/3 each).", confidence: high}
+notes:
+  - "Explicit $skill injects the whole SKILL.md (145 KB tested); the 8,000-byte cap applies only to plugin skills."
+  - "Follows symlinked skill folders (inside or outside the root)."
+  - "New skills are listed next turn; files are re-read from disk."

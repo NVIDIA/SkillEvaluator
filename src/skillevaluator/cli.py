@@ -1093,6 +1093,10 @@ def _catalog_child_argv_from_ctx(
         argv.extend(["--checks", str(params["checks"])])
     if params.get("previous_version"):
         argv.extend(["--previous-version", str(params["previous_version"])])
+    if params.get("harness"):
+        argv.extend(["--harness", str(params["harness"])])
+    if params.get("harness_profiles"):
+        argv.extend(["--harness-profiles", str(params["harness_profiles"])])
     if params.get("fail_fast"):
         argv.append("--fail-fast")
     if params.get("continue_on_failure"):
@@ -1592,6 +1596,23 @@ def _print_run_banner(target_path: Path, content_type: str, profile: str | None)
     "quality/lint/version are skill-only and skipped for rules/workflows.",
 )
 @click.option(
+    "--harness",
+    "harness",
+    default=None,
+    cls=GroupedOption,
+    help_group=_RUN_GROUP,
+    help="Advisory harness-compatibility table for skills, e.g. --harness codex,claude-code or --harness all.",
+)
+@click.option(
+    "--harness-profiles",
+    "harness_profiles",
+    type=click.Path(path_type=Path, exists=True, file_okay=False),
+    default=None,
+    cls=GroupedOption,
+    help_group=_RUN_GROUP,
+    help="Directory of harness profile YAMLs to use instead of the packaged ones.",
+)
+@click.option(
     "--previous-version",
     default=None,
     metavar="VERSION",
@@ -1945,6 +1966,8 @@ def validate(
     evaluator_container_revision: str | None,
     report_formats: tuple[str, ...],
     output_dir: Path,
+    harness: str | None = None,
+    harness_profiles: Path | None = None,
 ) -> None:
     """Validate a skill through all three tiers, with automatic dataset preparation.
 
@@ -1963,6 +1986,13 @@ def validate(
     skill-only and skipped for plugins.
     """
     _record_validate_json_report(None)
+    if harness:
+        from skillevaluator.harness import load_profiles
+
+        try:
+            load_profiles(harness, harness_profiles)
+        except ValueError as exc:
+            raise click.BadParameter(str(exc), param_hint="--harness") from exc
     if dedup:
         _reject_linked_tier2_root(target_path)
     target_path = target_path.resolve()
@@ -2336,6 +2366,15 @@ def validate(
         sarif_repository_root=sarif_repository_root,
     )
     _record_validate_json_report(f"{report_basename_value}.json" if "json" in effective_formats else None)
+    if harness and resolved_type == CONTENT_TYPE_SKILL:
+        from skillevaluator.harness.report import emit_harness_compatibility
+
+        emit_harness_compatibility(
+            target_path,
+            harness,
+            harness_profiles,
+            json_report=output_dir / f"{report_basename_value}.json" if "json" in effective_formats else None,
+        )
 
     # BENCHMARK.md is generated compulsorily for skills (matches SkillEvaluator), even on
     # failure, so the publication card always reflects the latest evaluation --

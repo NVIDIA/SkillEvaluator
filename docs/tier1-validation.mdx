@@ -168,6 +168,12 @@ For `validate`, the default set is `schema`, `version`, `security`, `pii`, `lice
     **To fix common findings:** rename the directory to match `name`, remove forbidden fields, and move the skill under `skills/`.
   </Accordion>
 
+  <Accordion title="--harness — advisory harness compatibility">
+    `skillevaluator validate <skill> --harness codex,claude-code` (or `--harness all`) adds a table with one row per agent harness after the Tier 1 results: `loads`, `degraded` (loads, but something is cut, hidden or ignored) or `not_loaded`, with the rule IDs behind each verdict and the harness version and date the profile was verified against. Supported harnesses: `claude-code`, `codex`, `copilot-cli`, `hermes`, `openclaw`, `opencode`.
+
+    The profiles ship with the package and come from repeated runs of each harness in which the request sent to the model was captured. With `-r json`, the same data is added under `harness_compatibility`. The table is advisory: it never changes Tier 1 findings or the exit code. Install-location rules apply only when the skill sits under a harness root such as `.claude/skills` or `.agents/skills`. Use `--harness-profiles DIR` to try newer profile YAMLs without a release.
+  </Accordion>
+
   <Accordion title="security — vulnerability scanning">
     `security-scan`, and the `security` check inside `validate`, run SkillSpector. Static scanning covers common skill attack patterns such as prompt injection and data exfiltration; each finding carries the matched pattern, severity, and location.
 

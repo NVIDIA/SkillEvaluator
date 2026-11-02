@@ -1,0 +1,23 @@
+harness: openclaw
+display_name: OpenClaw
+verified: {version: 2026.10.9, source: "v2026.10.9 @ 88a19e0d8677", date: 2026-11-01, method: proxy-captured canary probes x3 + source, os: linux}
+roots:
+  project: [skills, .agents/skills]
+  user: [~/.agents/skills, ~/.openclaw/skills]
+limits: {max_skills_in_prompt: 150, max_prompt_chars: 18000, compact_desc_chars: 220, max_skill_file_bytes: 256000, read_budget: "32-128 KiB by model context"}
+rules:
+  - {id: OW-ROOT, when: "install_root not in roots", effect: not_loaded, message: "OpenClaw reads skills/, .agents/skills, ~/.agents/skills and ~/.openclaw/skills.", confidence: high}
+  - {id: OW-DESC-MISSING, when: "description_missing or description_empty", effect: not_loaded, message: "Skill dropped: no description.", confidence: high}
+  - {id: OW-STRICT-YAML, when: "frontmatter_tab_indent or frontmatter_duplicate_keys", effect: not_loaded, message: "Skill dropped: invalid YAML (tabs or duplicate keys).", confidence: high}
+  - {id: OW-SYMLINK-ESCAPE, when: "skill_dir_symlink_target == 'outside_root'", effect: not_loaded, message: "Symlink target is outside the skills root (even inside the repo): rejected.", confidence: high}
+  - {id: OW-SYMLINK-FILE, when: "skill_md_symlink", effect: not_loaded, message: "Symlinked SKILL.md files are not loaded.", confidence: high}
+  - {id: OW-FILE-CAP, when: "skill_md_bytes > 256000", effect: not_loaded, message: "SKILL.md over 256,000 bytes is skipped as invalid.", confidence: high}
+  - {id: OW-READ-BUDGET, when: "skill_md_bytes > 32768", effect: degraded, message: "SKILL.md must be read whole; over 32 KiB (small-context models) to 128 KiB (any model) the read is refused.", confidence: high}
+  - {id: OW-COMPACT, when: "description_codepoints > 220", effect: degraded, message: "With over 150 skills or 18,000 chars of list, descriptions are cut to 220 chars, then skills omitted.", confidence: high}
+  - {id: OW-NESTED, when: "nested_skill_md", effect: advisory, message: "Nested SKILL.md is ignored.", confidence: medium}
+  - {id: OW-ALLOWED-TOOLS, when: "allowed_tools_shape != 'none'", effect: advisory, message: "allowed-tools is ignored by OpenClaw.", confidence: high}
+  - {id: OW-CASING, when: "not manifest_name_exact", effect: degraded, message: "Non-canonical name (skill.md/Skill.md): loaded on case-insensitive filesystems (macOS default APFS, 3/3), ignored on case-sensitive Linux (3/3). Works or breaks depending on the OS.", confidence: high}
+notes:
+  - "Precedence: workspace skills/ > .agents/skills > ~/.agents/skills > managed > bundled > extra dirs (project wins, 3/3)."
+  - "Description given as a YAML list is stringified and listed. BOM, CRLF, bare colons tolerated."
+  - "New skills listed next turn in `openclaw chat`; files re-read from disk."

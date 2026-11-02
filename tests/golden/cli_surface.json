@@ -466,6 +466,16 @@
           "type": "boolean"
         },
         {
+          "default": "False",
+          "is_flag": true,
+          "name": "skip_with_skill",
+          "opts": [
+            "--skip-with-skill"
+          ],
+          "param_type": "option",
+          "type": "boolean"
+        },
+        {
           "name": "n_attempts",
           "opts": [
             "--n-attempts"
@@ -2409,6 +2419,16 @@
               "type": "boolean"
             },
             {
+              "default": "False",
+              "is_flag": true,
+              "name": "skip_with_skill",
+              "opts": [
+                "--skip-with-skill"
+              ],
+              "param_type": "option",
+              "type": "boolean"
+            },
+            {
               "name": "n_attempts",
               "opts": [
                 "--n-attempts"
@@ -2928,6 +2948,16 @@
             "name": "skip_baseline",
             "opts": [
               "--skip-baseline"
+            ],
+            "param_type": "option",
+            "type": "boolean"
+          },
+          {
+            "default": "False",
+            "is_flag": true,
+            "name": "skip_with_skill",
+            "opts": [
+              "--skip-with-skill"
             ],
             "param_type": "option",
             "type": "boolean"

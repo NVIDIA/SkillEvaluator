@@ -559,6 +559,7 @@ The high-signal flags, with defaults:
 | `--max-agents` | selected-agent count | Maximum agents run in parallel |
 | `--max-cases` | every case | Run only the first N eval cases; a run that skips cases is not publication evidence |
 | `--skip-baseline` | off | Skip the without-skill arm; faster, but no Skill Lift |
+| `--skip-with-skill` | off | Run only the without-skill arm, for example to calibrate a task set; the report shows baseline scores with no Skill Lift or skill verdict |
 | `--stop-on-pass` | off | Stop a case's remaining attempts once one passes |
 | `--agent-runtime-preflight` | off | Add one agent-only execution of the first staged task per agent before the full A/B matrix; `--no-agent-runtime-preflight` overrides a config value that enables it |
 | `--progress` | `auto` | Progress rendering: `auto`, `rich` (live TTY view with secret redaction), `plain`, or `off` |
@@ -577,6 +578,28 @@ modes, is in the [CLI Reference](cli-reference.mdx).
 While iterating on a dataset, `--skip-baseline` roughly halves the runtime.
 Re-enable the baseline arm for any run whose Skill Lift you intend to trust.
 </Tip>
+
+### Baseline-only runs
+
+`--skip-with-skill` is the counterpart of `--skip-baseline`: it stages and runs
+only the without-skill arm. Use it to measure how agents do on a task set
+before the skill exists, or to re-measure a baseline after a model or harness
+change without paying for with-skill trials.
+
+```bash title="Baseline-only calibration run"
+skillevaluator tier3 evaluate ./my-skill --agents codex --skip-with-skill
+```
+
+The run is reported as a baseline calibration, not a skill evaluation. The
+overall score and best agent come from the baseline arm, the with-skill arm is
+recorded as `skipped`, with-skill scores and Skill Lift are unavailable (shown
+as `skipped` or N/A, never 0.0), and the verdict stays NEUTRAL because no skill
+was measured. The two flags are mutually
+exclusive, and baseline isolation rules still apply: a config that sets
+`harbor.pre_agent_setup` (or `setup_commands`) is rejected, because the
+baseline arm must stay isolated from skill-owned setup commands. `validate`
+does not accept `--skip-with-skill`, so a baseline-only run can never satisfy a
+Tier 3 gate.
 
 ## How standard grading judges a trial
 

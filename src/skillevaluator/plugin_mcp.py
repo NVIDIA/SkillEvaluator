@@ -47,6 +47,7 @@ from skillevaluator.plugin_paths import (
     _unscanned_folder,
     _unscanned_path_finding,
     normalize_declared_path,
+    reported_ref,
 )
 from skillevaluator.utils.secure_fs import SecurePathError
 from skillevaluator.utils.structured_data import StructuredDataError, StructuredDataLimitError, load_bounded_json
@@ -61,10 +62,7 @@ from skillevaluator.validators.mcp_static import (
 )
 from skillevaluator.validators.url_policy import (
     looks_like_inline_secret,
-    redact_secrets,
-    report_text,
     safe_url,
-    url_scheme,
 )
 
 McpSource = Literal["inline", "mcp_json", "path_ref", "agent_plugin_yaml"]
@@ -721,14 +719,14 @@ def _collect_path_ref(
     dropped = contained and profile.codex_path_rules and not codex_accepts_path(raw)
     declared = normalize_declared_path(raw, profile.manifest_path_prefixes)
     # Findings and the inventory name the reference without the credentials it may carry.
-    shown = _reported_ref(raw)
+    shown = reported_ref(raw)
     reported = (
         declared
         if shown == raw
         else replace(
             declared,
             raw=shown,
-            rel=None if declared.rel is None else PurePosixPath(_reported_ref(declared.rel.as_posix())),
+            rel=None if declared.rel is None else PurePosixPath(reported_ref(declared.rel.as_posix())),
         )
     )
     if declared.problem is not None or declared.rel is None:
@@ -796,22 +794,6 @@ def _collect_path_ref(
         )
         return
     _load_mcp_file(reader, collection, rel, "path_ref", shown)
-
-
-def _reported_ref(raw: str) -> str:
-    """A declared ``mcpServers`` reference as findings and the inventory show it, without its credentials.
-
-    A reference with a URL scheme (``ws://user:token@host/srv.mcpb``, the
-    one-slash ``https:/user:pw@host/...``) is shown as :func:`safe_url` shows
-    it: no userinfo, query, or fragment. Any other (``//user:pw@host/...``,
-    ``./servers.json?token=...``) has its credentials redacted. A reference
-    that carries none is returned as written.
-    """
-    scheme = url_scheme(raw.strip())
-    if scheme is not None and len(scheme) > 1:  # one letter is a Windows drive ('C:\\...')
-        return safe_url(raw)
-    redacted = redact_secrets(raw)
-    return raw if redacted == raw else report_text(redacted)
 
 
 def _collect_url_ref(reader: PluginRootReader, collection: McpCollection, raw: str, manifest_rel: str) -> None:

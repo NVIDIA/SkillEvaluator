@@ -59,7 +59,7 @@ for skills. Its Tier 1 LLM checks still run only when requested.
 
   ```bash title="Complete offline Tier 1"
   brew install gitleaks semgrep
-  uv tool install git+https://github.com/NVIDIA/SkillSpector.git@v2.12.0
+  uv tool install git+https://github.com/NVIDIA/SkillSpector.git@v2.13.3
   skillevaluator validate ./my-skill --tiers 1
   ```
 
@@ -178,6 +178,13 @@ For `validate`, the default set is `schema`, `version`, `security`, `pii`, `lice
 
     The LLM pass requires a configured provider. It enriches the static result but does not replace static findings or make missing scanner evidence pass.
 
+    To explain why two otherwise identical `--llm` scans differ, the reports record the LLM provenance that SkillSpector v2.12.0 and later return. The Security result in the JSON report carries:
+
+    - `skillspector_llm_provenance`: SkillSpector's provider adapter, the model and SkillSpector revision behind each LLM analyzer, the requested and forwarded temperature, seed, and reasoning-effort controls, and a determinism classification. Provider output is never guaranteed to be identical.
+    - `skillspector_provider_id`: the SkillEvaluator provider the scan was bridged from (`nv_build`, `openai`, `openai-compatible`, `anthropic`, or `bedrock`). `nv_build` and `openai-compatible` both run as SkillSpector's `openai` adapter. The field is omitted when `SKILLSPECTOR_PROVIDER` selects a SkillSpector adapter directly (`anthropic`, `bedrock`, or `openai`) or names an unsupported provider. `SKILLSPECTOR_PROVIDER=nv_build` is bridged like `SKILL_EVAL_LLM_PROVIDER=nv_build` and recorded as `nv_build`.
+
+    The HTML report shows the same data in the **Tier 1 LLM Provenance** table on the Tier 1 tab. The record contains no prompts, endpoints, or credentials. A record that does not match SkillSpector's provenance contract, or that contains a URL or credential-shaped value, is left out rather than partially shown. If the LLM stage fails or SkillSpector does not confirm LLM analysis, a valid record in SkillSpector's output is still kept to show what was attempted, and the Security result stays incomplete. Provenance is recorded when you scan a single skill. A scan of a folder with several skills does not record it yet.
+
     To accept reviewed findings, pass an audited baseline with `--skillspector-baseline`; see [Audited SkillSpector baselines](#audited-skillspector-baselines).
   </Accordion>
 
@@ -236,6 +243,8 @@ For `validate`, the default set is `schema`, `version`, `security`, `pii`, `lice
     | Discoverability | 25% | Description quality, trigger wording, purpose, scope, and naming |
     | Reliability | 25% | Error handling, prerequisites, limitations, troubleshooting, and implementation safeguards |
     | Efficiency | 15% | Token budget, body length, repetition, instruction clarity, and reference use |
+
+    The 5,000-token budget for `SKILL.md` is a recommendation, not a hard limit. A larger `SKILL.md` gets a MEDIUM `quality_efficiency` finding and a 15-point Efficiency deduction. The finding does not fail the check by itself, but the deduction can still take the score below `--min-score`.
 
     Grades are A for scores of at least 90, B for at least 80, C for at least 70, D for at least 60, and F below 60. The default `--min-score` is 70. Passing requires the score to reach that minimum and no HIGH or CRITICAL quality findings under the active policy.
 
@@ -443,7 +452,10 @@ Tier 1 checks always gate the exit code inside `validate`. Tier 2 gates when it 
     Install it with `brew install gitleaks` or download a binary from the official [Gitleaks releases](https://github.com/gitleaks/gitleaks/releases).
   </Accordion>
   <Accordion title="A scanner is missing">
-    Install Bandit and pip-audit with `skillevaluator[security]`. Install Semgrep separately with `brew install semgrep` or `uv tool install semgrep`, and SkillSpector with `uv tool install git+https://github.com/NVIDIA/SkillSpector.git@v2.12.0`. Required scanner failures remain `INCOMPLETE` until the scanner is installed and returns valid evidence.
+    Install Bandit and pip-audit with `skillevaluator[security]`. Install Semgrep separately with `brew install semgrep` or `uv tool install semgrep`, and SkillSpector with `uv tool install git+https://github.com/NVIDIA/SkillSpector.git@v2.13.3`. Required scanner failures remain `INCOMPLETE` until the scanner is installed and returns valid evidence.
+  </Accordion>
+  <Accordion title="SkillSpector reports incomplete analysis for a valid helper script">
+    SkillSpector releases before v2.13.1 can stop inspecting a valid Python or Perl helper early and record a `static_parse_limit`, `obfuscated_instruction_text`, or `runtime_limit` ledger exception. The security check is then `INCOMPLETE`, often with a High **Incomplete referenced artifact analysis (AE1)** finding at each line that names the helper. Check the installed release with `skillspector --version` and upgrade with `uv tool install git+https://github.com/NVIDIA/SkillSpector.git@v2.13.3`. If the exception remains after the upgrade, investigate it like any other incomplete scan.
   </Accordion>
   <Accordion title="An LLM-backed stage fails immediately">
     Configure a supported provider or select a keyless Tier 1 run with

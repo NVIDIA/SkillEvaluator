@@ -23,6 +23,7 @@ REVIEWED_NPM_COMMAND = ["npm", "ci", "--prefix", "fern", "--ignore-scripts", "--
 REQUIRED_CI_JOBS = {
     "test-python-312": "Tests (Python 3.12)",
     "test-python-313": "Tests (Python 3.13)",
+    "test-python-314": "Tests (Python 3.14)",
     "package": "Package",
     "rhel8-security-install": "RHEL 8 security install",
     "tier2-macos": "Tier 2 (macos-latest)",
@@ -181,6 +182,9 @@ def test_full_lane_keeps_the_existing_commands_and_runners() -> None:
 
     assert jobs["test-python-313"]["runs-on"] == "ubuntu-latest"
     assert "uv run pytest -q" in _runs(jobs["test-python-313"])
+    assert jobs["test-python-314"]["runs-on"] == "ubuntu-latest"
+    assert "uv sync --all-extras --locked --python 3.14" in _runs(jobs["test-python-314"])
+    assert "uv run pytest -q" in _runs(jobs["test-python-314"])
     assert jobs["tier2-macos"]["runs-on"] == "macos-latest"
     assert jobs["tier2-windows"]["runs-on"] == "windows-latest"
     assert "tests/embedding" in _runs(jobs["tier2-macos"])

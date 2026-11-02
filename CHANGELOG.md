@@ -6,6 +6,10 @@ All notable changes to SkillEvaluator are documented in this file.
 
 ### Added
 
+- In local mode (`--env-mode local`), a missing Claude Code, Codex, or OpenCode
+  CLI is offered as a pinned npm install into the SkillEvaluator runtime folder;
+  without a terminal, the command is printed instead.
+
 - Support Python 3.14 alongside Python 3.12 and 3.13, including installation
   guidance and CI coverage for tests and built packages.
 - Add reusable GitLab CI onboarding and configurable Tier 1 quality thresholds,
@@ -139,6 +143,13 @@ All notable changes to SkillEvaluator are documented in this file.
 
 ### Changed
 
+- Shared LLM calls and the Harbor verifier retry HTTP 408, 429, and every 5xx
+  response except 501 and 505, including proxy 520–524 and overload 529 errors.
+  TLS certificate verification failures stop immediately. The host Bedrock
+  path preserves the underlying status and certificate failure through
+  LiteLLM wrappers, so generic 500/503 errors do not cause extra attempts.
+  This applies to ordinary skill evaluations and other host LLM calls as well
+  as plugin evaluations; retry limits and scoring formulas are unchanged.
 - The compact `validate` view lists every Tier 3 test case with and without
   the skill, updates the list while trials run, and ends each tier with a short
   "what to fix" list: the problem, then the action. A required scanner that
@@ -232,6 +243,8 @@ All notable changes to SkillEvaluator are documented in this file.
 
 ### Fixed
 
+- Use public, commit-pinned README image URLs so the wordmark and three-tier
+  diagram can render in PyPI package descriptions as well as on GitHub.
 - On Windows, repository root and source-link detection no longer break for
   repositories in non-ASCII folders. Git's repository path is decoded as a file
   name and its remote URL and branch as UTF-8, instead of with the locale code

@@ -115,6 +115,7 @@ from skillevaluator.tier3.harbor.gke_environment import (
     is_gke_workload_identity_allowed,
 )
 from skillevaluator.tier3.harbor.kubeconfig import _resolve_single_kubeconfig
+from skillevaluator.tier3.harbor.local_runtime import PINNED_RUNTIME_VERSIONS
 from skillevaluator.tier3.harbor.metrics import DEFAULT_METRICS, score_policy_for_metrics
 from skillevaluator.tier3.harbor.progress import (
     MIN_EXACT_SECRET_CHARS,
@@ -1322,8 +1323,8 @@ _HARBOR_LAUNCH_ENV = MappingProxyType({"HARBOR_TELEMETRY": "0", "PYTHON_DOTENV_D
 # releases SkillEvaluator was validated with, so trials do not change when a
 # new CLI ships. Local mode runs the operator's installed CLI instead, and its
 # wrappers check a minimum version for the selected model.
-_CODEX_VERSION = "0.161.0"
-_CLAUDE_CODE_VERSION = "2.1.292"
+_CODEX_VERSION = PINNED_RUNTIME_VERSIONS["codex"]
+_CLAUDE_CODE_VERSION = PINNED_RUNTIME_VERSIONS["claude-code"]
 # Harbor 0.22's Codex agent ran with ``model_reasoning_effort=high``; later
 # releases defer to Codex's own default. Pin the effort SkillEvaluator was
 # validated with so scores and cost stay comparable across Harbor upgrades.
@@ -1764,6 +1765,7 @@ def build_harbor_run_command(
         agent_import_path
         and env_mode not in HARBOR_DOCKER_ENGINE_ENV_MODES | {ENV_MODE_LOCAL}
         and agent_import_path not in _NATIVE_BACKEND_AGENT_IMPORT_PATHS
+        and agent_import_path not in _native_plugin_agent_import_paths()
         and (backend is None or agent_import_path not in backend.agent_import_paths.values())
     ):
         raise ValueError("agent_import_path is supported only with --env docker, kata, or local")
@@ -4358,6 +4360,54 @@ def _run_stop_on_pass_variant(
     return [detail for _, detail in errors]
 
 
+def _private_runtime_hooks() -> Any:
+    """The private plugin runtime hooks of this run, or ``None`` for an ordinary run."""
+    from skillevaluator.tier3.plugin_execution import active_runtime
+
+    return active_runtime()
+
+
+def _native_plugin_agent_import_paths() -> frozenset[str]:
+    """Private wrappers that do not inherit host-only local execution behavior."""
+    from skillevaluator.tier3.plugin_native import NATIVE_AGENT_IMPORT_PATHS, PRIVATE_AGENT_IMPORT_PATHS
+
+    remote_private_paths = (
+        path
+        for (_, base), path in PRIVATE_AGENT_IMPORT_PATHS.items()
+        if not (base and base.startswith("skillevaluator.tier3.harbor.local_agents:SkillEvaluatorLocal"))
+    )
+    return frozenset((*NATIVE_AGENT_IMPORT_PATHS.values(), *remote_private_paths))
+
+
+def _private_agent_paths(
+    agents: list[str], base_paths: Mapping[str, str], env_mode: str
+) -> dict[str, tuple[str | None, str | None]]:
+    """Resolve both arms on the calling thread, before launching worker pools."""
+    hooks = _private_runtime_hooks()
+    paths = {}
+    for agent in agents:
+        base = base_paths.get(agent)
+        if hooks is not None:
+            if base is None and env_mode == ENV_MODE_LOCAL:
+                from skillevaluator.tier3.harbor import LOCAL_AGENT_IMPORT_PATHS
+
+                base = LOCAL_AGENT_IMPORT_PATHS.get(agent)
+            elif base is None and env_mode in HARBOR_DOCKER_ENGINE_ENV_MODES | {"gke"}:
+                defaults = (
+                    DOCKER_AGENT_IMPORT_PATHS
+                    if env_mode in HARBOR_DOCKER_ENGINE_ENV_MODES
+                    else CONTAINER_AGENT_IMPORT_PATHS
+                )
+                base = defaults.get(agent)
+            with_path = hooks.with_agent_import_path(agent, base)
+            classify = getattr(hooks, "baseline_agent_import_path", None)
+            baseline_path = classify(agent, base) if classify is not None else base
+            paths[agent] = (baseline_path, with_path)
+        else:
+            paths[agent] = (base, None)
+    return paths
+
+
 def _run_agent_pair(
     *,
     skill_name: str,
@@ -4381,18 +4431,20 @@ def _run_agent_pair(
     task_names: list[str] | None = None,
     verifier_env: Mapping[str, str] | None = None,
     environment_kwargs: Mapping[str, Any] | None = None,
+    with_agent_import_path: str | None = None,
 ) -> list[str]:
+    """Run the with-skill arm and its baseline; ``with_agent_import_path`` replaces the agent of the with arm only."""
     # A baseline-only run (``skip_with_skill``) stages no with-skill dataset.
-    jobs = [] if with_skill is None else [("with", with_skill)]
+    jobs = [] if with_skill is None else [("with", with_skill, with_agent_import_path or agent_import_path)]
     if baseline is not None:
-        jobs.append(("without", baseline))
+        jobs.append(("without", baseline, agent_import_path))
     if not jobs:
         return [f"{agent} has no staged Harbor dataset to run"]
     if stop_on_pass:
         # A later attempt is launched only after the previous one scored, so
         # stop-on-pass runs each condition sequentially, one attempt at a time.
         sequential_errors: list[str] = []
-        for variant, dataset in jobs:
+        for variant, dataset, job_import_path in jobs:
             sequential_errors.extend(
                 _run_stop_on_pass_variant(
                     skill_name=skill_name,
@@ -4410,7 +4462,7 @@ def _run_agent_pair(
                     override_cpus=override_cpus,
                     override_memory_mb=override_memory_mb,
                     override_storage_mb=override_storage_mb,
-                    agent_import_path=agent_import_path,
+                    agent_import_path=job_import_path,
                     verifier_env=verifier_env,
                     environment_kwargs=environment_kwargs,
                 )
@@ -4442,12 +4494,12 @@ def _run_agent_pair(
                 override_cpus=override_cpus,
                 override_memory_mb=override_memory_mb,
                 override_storage_mb=override_storage_mb,
-                agent_import_path=agent_import_path,
+                agent_import_path=job_import_path,
                 verifier_env=verifier_env,
                 environment_kwargs=environment_kwargs,
                 expected_trials=expected_trials,
             ): variant
-            for (variant, dataset), condition_concurrency in zip(jobs, job_concurrency, strict=True)
+            for (variant, dataset, job_import_path), condition_concurrency in zip(jobs, job_concurrency, strict=True)
         }
         for future in as_completed(futures):
             ok, detail = future.result()
@@ -5193,6 +5245,14 @@ def _run_harbor_eval_impl(
         _write_final_result(result_path, failed_result)
         return failed_result
 
+    try:
+        private_agent_paths = _private_agent_paths(agents, agent_import_paths, env_mode)
+    except ValueError as exc:
+        reporter.emit(ProgressEvent(stage="with-skill-tasks", state="failed", detail=str(exc)))
+        failed_result = _persist_pre_execution_failure([str(exc)])
+        _emit_run_finished("failed", "private agent route is not supported")
+        return failed_result
+
     reservation_identity: tuple[int, int] | None = None
     try:
         reservation_metadata = run_dir.lstat()
@@ -5300,6 +5360,8 @@ def _run_harbor_eval_impl(
                 or case_id_by_task_selector != expected_case_id_by_task_selector
             ):
                 raise ValueError(f"Generated task identities differ for agent {agent}")
+            if (private_hooks := _private_runtime_hooks()) is not None:
+                private_hooks.stage_with_arm(agent, task_paths)
         if not skip_with_skill:
             reporter.emit(ProgressEvent(stage="with-skill-tasks", state="ready", detail="task inputs staged"))
         if not skip_baseline:
@@ -5521,7 +5583,8 @@ def _run_harbor_eval_impl(
             override_cpus=override_cpus,
             override_memory_mb=override_memory_mb,
             override_storage_mb=override_storage_mb,
-            agent_import_path=agent_import_paths.get(agent),
+            agent_import_path=private_agent_paths[agent][0],
+            with_agent_import_path=private_agent_paths[agent][1],
             expected_trials=expected_trials,
             stop_on_pass=bool(stop_on_pass),
             pass_threshold=float(pass_threshold),
@@ -5767,6 +5830,10 @@ def _finalize_harbor_artifacts(
         return
     jobs_dir = run_dir / "_harbor-jobs"
     tasks_dir = run_dir / "_harbor-tasks"
+    hooks = _private_runtime_hooks()
+    capture = getattr(hooks, "collect_evidence", None)
+    if capture is not None:
+        capture(jobs_dir, result)
     outcome = HarborArtifactLifecycle(
         [jobs_dir, tasks_dir],
         keep_requested=keep_requested,

@@ -1,6 +1,6 @@
 # SkillEvaluator
 
-![SkillEvaluator wordmark](docs/assets/skillevaluator-wordmark.svg)
+![SkillEvaluator wordmark](https://raw.githubusercontent.com/NVIDIA/SkillEvaluator/ad2815fe78c045db91d230681d32863698da08cf/docs/assets/skillevaluator-wordmark.svg)
 
 [![License](https://img.shields.io/badge/License-Apache%202.0-green.svg)](LICENSE)
 [![Python](https://img.shields.io/badge/Python-3.12%20%7C%203.13%20%7C%203.14-blue.svg)](https://www.python.org/)
@@ -97,7 +97,7 @@ The same key supports Tier 2 embeddings and supported Tier 3 agents. See the
 
 ## Three-tier overview
 
-![SkillEvaluator three-tier pipeline: Skill → Tier 1 Validation → Tier 2 Deduplication → Tier 3 Live Evaluation → Reports](docs/assets/three-tier-overview.svg)
+![SkillEvaluator three-tier pipeline: Skill → Tier 1 Validation → Tier 2 Deduplication → Tier 3 Live Evaluation → Reports](https://raw.githubusercontent.com/NVIDIA/SkillEvaluator/ad2815fe78c045db91d230681d32863698da08cf/docs/assets/three-tier-overview.svg)
 
 Each tier is independent. Add the relevant extra to your checkout command:
 

@@ -324,6 +324,20 @@ All notable changes to SkillEvaluator are documented in this file.
   single commands need longer can raise Claude Code's default with
   `BASH_DEFAULT_TIMEOUT_MS` in `harbor.runtime_env`.
 
+- Tier 1 security scans no longer fail a skill for an exact read-only
+  `/etc/passwd` bind mount such as `docker run -v /etc/passwd:/etc/passwd:ro`.
+  SkillSpector 2.11.1 and later tags this mount as likely benign but still
+  reports a HIGH Credential Access (PE3) finding. That finding is now ignored
+  only when it carries both benign-context tags and every `/etc/passwd` on the
+  reported source line, read without following links, is the source or target
+  of such a mount. The aggregate risk score is recomputed without it. Writable
+  or implicit-mode mounts, other paths, same-line reads such as
+  `cat /etc/passwd`, aggregated rows, and earlier SkillSpector versions still
+  block. Captured SkillSpector 2.13.3 reports cover both mount operands and a
+  separate blocking read, and partial LLM-response inspection stays incomplete.
+  Static reports are accepted when a provider is available but LLM analysis
+  was neither requested nor applied; availability alone is not execution.
+
 - PII email scans recognize all RFC 2606 reserved domains, including their
   subdomains, mixed-case forms, trailing dots, and prose ellipses. A local-part
   boundary prevents quadratic rescanning of long excluded addresses. Ordinary
@@ -470,6 +484,13 @@ All notable changes to SkillEvaluator are documented in this file.
   `SKILLSPECTOR_PROVIDER=nv_build` gets the same mapping. The key still reaches
   SkillSpector only as `OPENAI_API_KEY`, with `OPENAI_BASE_URL` set to the
   public Build endpoint.
+- Tier 3 plain progress output, which `--progress auto` selects for CI and
+  redirected logs, now repeats its `still running` heartbeat every 60 seconds
+  instead of every second, so long runs no longer add thousands of identical
+  lines per hour. The interactive Rich view still refreshes every second. A
+  new `--progress-interval SECONDS` option on `tier3 evaluate` and `tier3 PATH`
+  sets the interval explicitly for either view (0.05 to 86400 seconds;
+  non-finite values are rejected).
 - SkillSpector runs are no longer stopped after a fixed 300 seconds, which ended
   slow `--llm` security scans, such as those on local models, as `INCOMPLETE`
   before SkillSpector's own scan deadline (1,080 seconds in v2.13.3). Each run

@@ -877,10 +877,10 @@ def test_launch_docs_address_scanner_and_naming_ambiguities() -> None:
     assert "are not interchangeable" in environment
 
 
-SKILLSPECTOR_RELEASE = "v2.13.1"
+SKILLSPECTOR_RELEASE = "v2.13.3"
 # Tag commit of SKILLSPECTOR_RELEASE. The Tier 1 CI image installs this commit's
 # source archive, so it must move together with the install instructions.
-SKILLSPECTOR_RELEASE_COMMIT = "f3b25697d76256998ca9d42c198d256258d4c035"
+SKILLSPECTOR_RELEASE_COMMIT = "38a1dfe93325d2f8bfcd4f8d0241eed706334915"
 
 
 def test_skillspector_install_instructions_pin_one_release() -> None:

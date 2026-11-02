@@ -1,8 +1,8 @@
 {
   "skill": {
     "name": "simple",
-    "source": "/private/tmp/skillspector-2.13.1/simple",
-    "scanned_at": "2026-10-29T16:09:57.186342+00:00"
+    "source": "/private/tmp/skillspector-2.13.3/simple",
+    "scanned_at": "2026-11-02T18:05:08.796112+00:00"
   },
   "risk_assessment": {
     "score": 0,
@@ -38,7 +38,7 @@
   "suppressed": [],
   "metadata": {
     "has_executable_scripts": true,
-    "skillspector_version": "2.13.1",
+    "skillspector_version": "2.13.3",
     "llm_requested": false,
     "llm_available": false,
     "meta_analysis_applied": false,
@@ -64,10 +64,10 @@
           "model": "z-ai/glm-5.3",
           "model_source": "resolved_configuration",
           "analyzer_revision": {
-            "value": "2.13.1",
+            "value": "2.13.3",
             "source": "skillspector_package",
             "source_revision": {
-              "value": "f3b25697d76256998ca9d42c198d256258d4c035",
+              "value": "38a1dfe93325d2f8bfcd4f8d0241eed706334915",
               "source": "package_vcs_metadata"
             }
           }
@@ -77,10 +77,10 @@
           "model": "z-ai/glm-5.3",
           "model_source": "resolved_configuration",
           "analyzer_revision": {
-            "value": "2.13.1",
+            "value": "2.13.3",
             "source": "skillspector_package",
             "source_revision": {
-              "value": "f3b25697d76256998ca9d42c198d256258d4c035",
+              "value": "38a1dfe93325d2f8bfcd4f8d0241eed706334915",
               "source": "package_vcs_metadata"
             }
           }
@@ -90,10 +90,10 @@
           "model": "z-ai/glm-5.3",
           "model_source": "resolved_configuration",
           "analyzer_revision": {
-            "value": "2.13.1",
+            "value": "2.13.3",
             "source": "skillspector_package",
             "source_revision": {
-              "value": "f3b25697d76256998ca9d42c198d256258d4c035",
+              "value": "38a1dfe93325d2f8bfcd4f8d0241eed706334915",
               "source": "package_vcs_metadata"
             }
           }
@@ -103,10 +103,10 @@
           "model": "z-ai/glm-5.3",
           "model_source": "resolved_configuration",
           "analyzer_revision": {
-            "value": "2.13.1",
+            "value": "2.13.3",
             "source": "skillspector_package",
             "source_revision": {
-              "value": "f3b25697d76256998ca9d42c198d256258d4c035",
+              "value": "38a1dfe93325d2f8bfcd4f8d0241eed706334915",
               "source": "package_vcs_metadata"
             }
           }
@@ -116,10 +116,10 @@
           "model": "z-ai/glm-5.3",
           "model_source": "resolved_configuration",
           "analyzer_revision": {
-            "value": "2.13.1",
+            "value": "2.13.3",
             "source": "skillspector_package",
             "source_revision": {
-              "value": "f3b25697d76256998ca9d42c198d256258d4c035",
+              "value": "38a1dfe93325d2f8bfcd4f8d0241eed706334915",
               "source": "package_vcs_metadata"
             }
           }

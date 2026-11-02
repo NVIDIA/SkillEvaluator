@@ -414,7 +414,7 @@ class TestExternalTool:
 
         assert (
             tool.get_install_hint()
-            == "Install with: uv tool install git+https://github.com/NVIDIA/SkillSpector.git@v2.13.1"
+            == "Install with: uv tool install git+https://github.com/NVIDIA/SkillSpector.git@v2.13.3"
         )
         assert "[security]" not in tool.get_install_hint()
 

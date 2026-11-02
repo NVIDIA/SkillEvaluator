@@ -54,6 +54,7 @@ def _process(
     reference_root: Path | None = None,
     score: int = 90,
     report_fields: dict | None = None,
+    version: str = "2.9.6",
 ) -> ValidationResult:
     """Run one SkillSpector report through the Tier 1 result converter."""
     validator = SecurityValidator(
@@ -67,13 +68,55 @@ def _process(
             "risk_assessment": _risk(score),
             "issues": issues,
             "components": components if components is not None else [],
-            "metadata": {"skillspector_version": "2.9.6"},
+            "metadata": {"skillspector_version": version},
             **(report_fields or {}),
         },
         result,
         source_root=scan_root,
     )
     return result
+
+
+def _modern_issue(
+    file_path: str,
+    *,
+    rule_id: str = "P1",
+    severity: str = "HIGH",
+    confidence: float = 0.8,
+    line: int = 1,
+    occurrence_files: tuple[str, ...] | None = None,
+) -> dict:
+    """Return a SkillSpector 2.11+ issue; an identical match keeps its ``finding_id`` in every file."""
+    return {
+        **_issue(file_path, rule_id=rule_id),
+        "severity": severity,
+        "confidence": confidence,
+        "finding": f"match for {rule_id}",
+        "finding_id": f"finding-{rule_id.lower()}",
+        "match_fingerprint": f"{rule_id.lower()}-fingerprint",
+        "location": {"file": file_path, "start_line": line, "end_line": None},
+        "occurrences": [
+            {"file": occurrence, "start_line": line, "end_line": None}
+            for occurrence in (occurrence_files or (file_path,))
+        ],
+    }
+
+
+def _process_modern(scan_root: Path, issues: list[dict], *, score: int = 100, counted: int | None = None):
+    """Run a SkillSpector 2.11.2 report whose findings count matches its records unless *counted* is given."""
+    records = sum(len(issue["occurrences"]) for issue in issues)
+    return _process(
+        scan_root,
+        issues,
+        score=score,
+        version="2.11.2",
+        report_fields={
+            "analysis_completeness": {
+                "findings_before_filtering": records,
+                "findings_after_filtering": records if counted is None else counted,
+            }
+        },
+    )
 
 
 def _compacted_issue(location: str, *occurrence_files: str) -> dict:
@@ -309,6 +352,100 @@ class TestTier1Applicability:
         assert any(finding.check_name == "skillspector_risk_score" for finding in result.findings)
         assert result.metadata["skillspector_applicability"]["suppressed_inapplicable_issues"] == 1
 
+    @pytest.mark.parametrize("repeats", [1, 2, 3])
+    def test_suppressed_match_repeated_across_files_does_not_lower_the_kept_score(
+        self, tmp_path: Path, repeats: int
+    ) -> None:
+        """SkillSpector 2.11.2 writes and scores an identical match once per file."""
+        scan_root = tmp_path / "skill"
+        _write(scan_root, "SKILL.md", "Summarize the latest log.\n")
+        doc_files = [f"docs/{name}.md" for name in "abc"[:repeats]]
+        for doc_file in doc_files:
+            _write(scan_root, doc_file)
+        suppressed = [
+            _modern_issue(doc_file, rule_id=rule_id, confidence=confidence)
+            for rule_id, confidence in (("P1", 0.8), ("P6", 0.85))
+            for doc_file in doc_files
+        ]
+        advisories = [
+            _modern_issue("SKILL.md", rule_id=f"M{index}", severity="MEDIUM", confidence=1.0, line=index + 1)
+            for index in range(6)
+        ]
+
+        result = _process_modern(scan_root, [*suppressed, *advisories])
+
+        applicability = result.metadata["skillspector_applicability"]
+        assert applicability["suppressed_inapplicable_issues"] == 2 * repeats
+        assert applicability["applicable_risk_score"] == 60
+        assert not result.passed
+        assert any(finding.check_name == "skillspector_risk_score" for finding in result.findings)
+
+    def test_kept_match_repeated_across_files_counts_every_file(self, tmp_path: Path) -> None:
+        scan_root = tmp_path / "skill"
+        for path in ("SKILL.md", "notes.md", "guide.md", "docs/a.md"):
+            _write(scan_root, path)
+        advisories = [
+            _modern_issue("SKILL.md", rule_id=f"M{index}", severity="MEDIUM", confidence=1.0, line=index + 1)
+            for index in range(4)
+        ]
+        repeated = [
+            _modern_issue(path, rule_id="M9", severity="MEDIUM", confidence=1.0, line=9)
+            for path in ("SKILL.md", "notes.md", "guide.md")
+        ]
+
+        result = _process_modern(scan_root, [*advisories, *repeated, _modern_issue("docs/a.md")], score=77)
+
+        # 4 x 10 + 10 x (1 + 0.5 + 0.25); SkillSpector adds 20 for docs/a.md.
+        assert result.metadata["skillspector_applicability"]["applicable_risk_score"] == 57
+        assert not result.passed
+
+    def test_modern_report_with_only_suppressed_issues_passes(self, tmp_path: Path) -> None:
+        scan_root = tmp_path / "skill"
+        _write(scan_root, "SKILL.md", "Summarize the latest log.\n")
+        _write(scan_root, "web/app.tsx")
+        _write(scan_root, "docs/threats.md")
+
+        result = _process_modern(
+            scan_root,
+            [_modern_issue("web/app.tsx"), _modern_issue("docs/threats.md", rule_id="P6", line=2)],
+            score=40,
+        )
+
+        assert result.passed
+        assert result.metadata["skillspector_applicability"]["applicable_risk_score"] == 0
+
+    @pytest.mark.parametrize("counted", [None, 8])
+    def test_modern_report_reconciles_kept_advisories_with_suppressed_issues(
+        self, tmp_path: Path, counted: int | None
+    ) -> None:
+        """Suppressed issues are known findings in the 2.10+ score reconciliation.
+
+        With ``counted=8`` the report has more occurrence records (10) than
+        counted findings, so only the reconciliation floor scores it.
+        """
+        scan_root = tmp_path / "skill"
+        _write(scan_root, "SKILL.md")
+        for path in ("web/app.tsx", "web/view.tsx"):
+            _write(scan_root, path)
+        advisories = [
+            _modern_issue("SKILL.md", rule_id=f"M{index}", severity="MEDIUM", confidence=1.0, line=index + 1)
+            for index in range(6)
+        ]
+        suppressed = [
+            _modern_issue(
+                "web/app.tsx",
+                rule_id=rule_id,
+                occurrence_files=None if counted is None else ("web/app.tsx", "web/view.tsx"),
+            )
+            for rule_id in ("H1", "H2")
+        ]
+
+        result = _process_modern(scan_root, [*advisories, *suppressed], counted=counted)
+
+        assert result.metadata["skillspector_applicability"]["suppressed_inapplicable_issues"] == 2
+        assert result.metadata["skillspector_applicability"]["applicable_risk_score"] == 60
+        assert not result.passed
+
     @pytest.mark.parametrize(
         ("file_path", "rule_id", "category"),
         [
@@ -503,6 +640,32 @@ class TestTier1Applicability:
     )
     def test_report_truncation_counts_occurrence_records(self, report: dict, truncated: bool) -> None:
         assert scope_module.skillspector_report_is_truncated(report) is truncated
+
+    @pytest.mark.parametrize(
+        ("report", "serialized"),
+        [
+            ({"issues": [_issue("a.md")]}, False),
+            ({"issues": [_issue("a.md")], "analysis_completeness": {"findings_after_filtering": True}}, False),
+            ({"issues": [_issue("a.md")], "analysis_completeness": {"findings_after_filtering": 1}}, True),
+            (
+                {
+                    "issues": [_compacted_issue("a.md", "a.md", "b.md"), _issue("c.md")],
+                    "analysis_completeness": {"findings_after_filtering": 3},
+                },
+                True,
+            ),
+            (
+                {
+                    "issues": [_compacted_issue("a.md", "a.md", "b.md")],
+                    "analysis_completeness": {"findings_after_filtering": 1},
+                },
+                False,
+            ),
+            ({"issues": [_issue("a.md")], "analysis_completeness": {"findings_after_filtering": 2}}, False),
+        ],
+    )
+    def test_report_serializes_every_finding_counts_occurrence_records(self, report: dict, serialized: bool) -> None:
+        assert scope_module.skillspector_report_serializes_every_finding(report) is serialized
 
     @pytest.mark.parametrize("executable_path", ["src/missing.py", "../outside.py", "C:/outside.py"])
     def test_unresolvable_executable_component_disables_suppression(self, tmp_path: Path, executable_path: str) -> None:

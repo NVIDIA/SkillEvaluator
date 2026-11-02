@@ -61,6 +61,7 @@ from skillevaluator.validators.skillspector_scope import (
     IssueScope,
     scope_skillspector_issues,
     skillspector_report_is_truncated,
+    skillspector_report_serializes_every_finding,
 )
 
 logger = get_logger(__name__)
@@ -2052,6 +2053,47 @@ class SecurityValidator(ValidatorBase):
         return max(minimum_score, reported_floor)
 
     @staticmethod
+    def _retained_skillspector_risk_score(issues: list[dict], components: list[dict]) -> int:
+        """Score *issues* with SkillSpector's formula, one finding per serialized record.
+
+        Use only when the report serializes every finding it counted. Each
+        occurrence is a finding, scored with its own file's executable
+        multiplier. Within a rule, the lowest contributions take the largest
+        weights, so the result never exceeds SkillSpector's score for the
+        same findings.
+        """
+        file_executable = {
+            (_skillspector_scoring_source_scope(component), component["path"]): component.get("executable") is True
+            for component in components
+            if isinstance(component, dict) and isinstance(component.get("path"), str)
+        }
+        by_rule: dict[str, list[float]] = {}
+        score_floor = 0
+        for issue in issues:
+            if issue["confidence"] <= 0:
+                continue
+            score_floor = max(score_floor, _SKILLSPECTOR_RISK_SCORE_FLOORS_BY_RULE_ID.get(issue["id"], 0))
+            occurrences = issue.get("occurrences")
+            records = occurrences if isinstance(occurrences, list) and occurrences else [issue.get("location")]
+            source_scope = _skillspector_scoring_source_scope(issue)
+            for record in records:
+                record_file = record.get("file") if isinstance(record, dict) else None
+                multiplier = (
+                    _SKILLSPECTOR_EXECUTABLE_MULTIPLIER
+                    if file_executable.get((source_scope, record_file), False)
+                    else 1.0
+                )
+                by_rule.setdefault(issue["id"], []).append(
+                    _SKILLSPECTOR_SEVERITY_POINTS[issue["severity"]] * issue["confidence"] * multiplier
+                )
+        total = sum(
+            contribution * weight
+            for contributions in by_rule.values()
+            for contribution, weight in zip(sorted(contributions), _SKILLSPECTOR_DIMINISHING_WEIGHTS, strict=False)
+        )
+        return min(100, max(score_floor, int(total)))
+
+    @staticmethod
     def _deduplicate_skillspector_issues_for_scoring(
         issues: list[dict],
         *,
@@ -2325,6 +2367,15 @@ class SecurityValidator(ValidatorBase):
             if skipped_generated or skipped_spdx_comments or skipped_inapplicable
             else reported_score
         )
+        if skipped_inapplicable and uses_report_identities and skillspector_report_serializes_every_finding(data):
+            # The reconciliation floor treats a match repeated across files
+            # as one finding plus unknown findings, which lowers the score of
+            # the kept issues. With every counted finding serialized, score
+            # the kept records directly.
+            effective_score = max(
+                effective_score,
+                min(reported_score, self._retained_skillspector_risk_score(scanned_issues, report_components)),
+            )
         if self.content_type is not None:
             result.metadata["skillspector_applicability"] = {
                 "artifact_type": self.content_type,

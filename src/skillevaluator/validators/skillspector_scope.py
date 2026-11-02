@@ -403,17 +403,37 @@ def skillspector_report_is_truncated(report: Mapping[str, object]) -> bool:
     bound have no serialized location. ``findings_after_filtering`` is the
     count before that bound. A report without the count is not truncated.
     """
-    completeness = report.get("analysis_completeness")
-    expected = completeness.get("findings_after_filtering") if isinstance(completeness, dict) else None
+    expected = _counted_finding_total(report)
     if expected is None:
         return False
     if isinstance(expected, bool) or not isinstance(expected, int):
         return True
+    return _serialized_finding_records(report) < expected
+
+
+def skillspector_report_serializes_every_finding(report: Mapping[str, object]) -> bool:
+    """Return whether every finding a report counted has exactly one serialized record.
+
+    Each issue occurrence (or an issue without occurrences) is one record,
+    as is each baseline-suppressed entry. When the records match
+    ``findings_after_filtering``, the scanner scored exactly these records.
+    """
+    expected = _counted_finding_total(report)
+    if isinstance(expected, bool) or not isinstance(expected, int):
+        return False
+    return _serialized_finding_records(report) == expected
+
+
+def _counted_finding_total(report: Mapping[str, object]) -> object:
+    completeness = report.get("analysis_completeness")
+    return completeness.get("findings_after_filtering") if isinstance(completeness, dict) else None
+
+
+def _serialized_finding_records(report: Mapping[str, object]) -> int:
     issues = report.get("issues")
     suppressed = report.get("suppressed")
     records = sum(_occurrence_record_count(issue) for issue in issues) if isinstance(issues, list) else 0
-    records += len(suppressed) if isinstance(suppressed, list) else 0
-    return records < expected
+    return records + (len(suppressed) if isinstance(suppressed, list) else 0)
 
 
 def _occurrence_record_count(issue: object) -> int:

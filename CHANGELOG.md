@@ -4,6 +4,8 @@ All notable changes to SkillEvaluator are documented in this file.
 
 ## Unreleased
 
+## 0.7.0 - 2026-11-02
+
 ### Added
 
 - Support Python 3.14 alongside Python 3.12 and 3.13, including installation

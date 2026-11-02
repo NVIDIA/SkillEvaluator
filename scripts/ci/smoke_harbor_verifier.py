@@ -34,6 +34,7 @@ def check_staged(directory: Path) -> None:
         assert Path(sys.modules[name].__file__).resolve() == directory / (name + ".py")
     assert verifier["_shell_tokens"] is sys.modules["shell_lexing"]._shell_tokens
     assert verifier["check_error_recovery"] is shared_checks.check_error_recovery
+    assert verifier["redact_secrets_in_log_line"] is sys.modules["secret_redaction"].redact_secrets_in_log_line
     assert verifier["_shell_tokens"]("cat 2>/dev/null") == ["cat", "2>", "/dev/null"]
     for command, expected in [
         ("python scripts/calc.py", True),

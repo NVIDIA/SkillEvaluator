@@ -310,6 +310,12 @@ All notable changes to SkillEvaluator are documented in this file.
   `quality-check` before any report was written. The schema check reports the
   malformed `metadata`, and the quality score counts `metadata.author` and
   `metadata.tags` as missing, as it already did for other non-mapping values.
+- A `SKILL.md` over the recommended 5,000-token budget now gets a MEDIUM
+  `quality_efficiency` finding instead of a HIGH one. The HIGH finding failed
+  the quality check, and with it `validate`, `tier1`, and `quality-check`, even
+  when the quality score met `--min-score`. The 15-point Efficiency deduction is
+  unchanged, so a large skill still fails when its score falls below the
+  minimum.
 
 ## 0.6.0 - 2026-10-20
 

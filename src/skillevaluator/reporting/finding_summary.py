@@ -27,6 +27,9 @@ if TYPE_CHECKING:
 _SEVERITY_ORDER = {"critical": 4, "high": 3, "medium": 2, "low": 1, "info": 0}
 # ValidationResult.add_success records each passed check as "[OK] check: message".
 _SUCCESS_PREFIX = "[OK] "
+# tier_workflows._record_scope records a stage skipped by configuration, such
+# as --no-llm, as a warning with this prefix. It notes scope, not a problem.
+_WORKFLOW_SCOPE_PREFIX = "Workflow scope: "
 
 
 def _occurrence_sort_key(item: dict[str, Any]) -> tuple[str, int, str, str]:
@@ -260,6 +263,9 @@ def summarize_messages(results: list[ValidationResult]) -> dict[str, int]:
     leave those mirrors out, so they never count a finding twice. They cover
     problems with no ``Finding`` behind them: failed gates such as a minimum
     score, scanner and execution errors, and a missing or failed scanner.
+    The ``Workflow scope:`` note recorded when configuration skips a stage,
+    such as LLM checks under ``--no-llm``, is not a problem and is left out
+    of ``independent_warnings``; the raw ``total_warnings`` still counts it.
     ``informational`` counts informational messages. It leaves out the
     ``[OK]`` line that ``add_success`` records for every passed check; those
     checks are listed in ``success_details``.
@@ -269,7 +275,12 @@ def summarize_messages(results: list[ValidationResult]) -> dict[str, int]:
             1 for result in results for message in result.messages if not str(message).startswith(_SUCCESS_PREFIX)
         ),
         "independent_errors": sum(len(additional_errors(result)) for result in results),
-        "independent_warnings": sum(len(additional_warnings(result)) for result in results),
+        "independent_warnings": sum(
+            1
+            for result in results
+            for warning in additional_warnings(result)
+            if not str(warning).startswith(_WORKFLOW_SCOPE_PREFIX)
+        ),
     }
 
 

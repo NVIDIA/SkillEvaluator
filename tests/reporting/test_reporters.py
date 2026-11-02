@@ -912,6 +912,25 @@ def test_findings_kpi_has_no_detail_line_when_every_record_is_unique() -> None:
     assert '<span class="issue-count-badge">2 findings</span>' in html
 
 
+def test_workflow_scope_note_is_not_an_issue_without_a_finding() -> None:
+    from skillevaluator.tier_workflows import _record_scope
+
+    result = ValidationResult(validator_name="Schema Validation", validator_description="Schema")
+    result.add_success(check_name="schema", message="Frontmatter is valid")
+    _record_scope([result], 1, {"llm": {"status": "skipped", "reason": "LLM checks disabled by --no-llm."}})
+    assert result.warnings == ["Workflow scope: llm skipped. LLM checks disabled by --no-llm."]
+
+    html = HTMLReporter(include_timestamp=False).render_all([result])
+    assert _findings_kpi(html) == ("0", "")
+    assert _html_report_data(html)["summary"]["total_issues"] == 0
+    data = json.loads(JSONReporter(include_timestamp=False).render_all([result]))
+    assert data["message_counts"]["independent_warnings"] == 0
+    assert data["total_warnings"] == 1
+    assert "| Total Issues | 0 unique findings / 0 occurrences / 0 raw records |" in MarkdownReporter().render_all(
+        [result]
+    )
+
+
 def test_folded_pii_finding_counts_each_listed_location_as_an_occurrence(tmp_path) -> None:
     from skillevaluator.reporting.finding_summary import refresh_finding_identities
     from skillevaluator.validators.security import SecurityValidator

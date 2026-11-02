@@ -107,7 +107,8 @@ All notable changes to SkillEvaluator are documented in this file.
   validators and every location, including each location a PII finding
   lists for a repeated value), and `message_counts` (error and warning
   strings with no finding behind them, such as failed gates and scanner or
-  execution errors, plus informational messages other than the `[OK]` line
+  execution errors, but not the workflow scope note for a stage that
+  configuration skips, plus informational messages other than the `[OK]` line
   recorded for each passed check); each JSON result also carries its own
   `finding_counts`. Markdown adds a Finding Reconciliation table, most severe
   first, and per-finding IDs. `total_errors`, `total_warnings`, and

@@ -136,15 +136,17 @@ def test_tier2_cli_reports_preserve_analysis_errors_with_findings(tmp_path: Path
     # Analysis errors count as issues beside any finding, so an errors-only run
     # never reports zero issues.
     assert payload["message_counts"]["independent_errors"] == int(failed_clusters > 0)
-    # The skipped catalog comparison is a workflow-scope warning in every case.
-    assert payload["message_counts"]["independent_warnings"] == 1
+    # The skipped catalog comparison is a workflow-scope note in every case. It
+    # stays a raw warning but records scope, not an issue without a finding.
+    assert any(warning.startswith("Workflow scope: ") for warning in result["legacy"]["warnings"])
+    assert payload["message_counts"]["independent_warnings"] == 0
     markdown_lines = (reports / "skillevaluator-tier2.md").read_text(encoding="utf-8").splitlines()
-    finding_text = "1 unique finding (1 high) / 1 occurrence / 1 raw record; "
+    finding_text = "1 unique finding (1 high) / 1 occurrence / 1 raw record"
     assert [line for line in markdown_lines if line.startswith("| Total Issues |")] == [
         {
-            "mixed": f"| Total Issues | {finding_text}1 error and 1 warning without a finding |",
-            "errors_only": "| Total Issues | 1 error and 1 warning without a finding |",
-            "finding_only": f"| Total Issues | {finding_text}1 warning without a finding |",
+            "mixed": f"| Total Issues | {finding_text}; 1 error without a finding |",
+            "errors_only": "| Total Issues | 1 error without a finding |",
+            "finding_only": f"| Total Issues | {finding_text} |",
         }[outcome]
     ]
 

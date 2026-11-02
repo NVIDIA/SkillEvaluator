@@ -159,6 +159,11 @@ class ExternalTool:
         """Get full path to tool binary."""
         return self._path
 
+    @property
+    def configuration_error(self) -> str | None:
+        """Return why an explicit executable override was rejected, if it was."""
+        return self._configuration_error
+
     def get_install_hint(self) -> str:
         """Get installation hint for this tool."""
         if self._configuration_error:
@@ -178,7 +183,7 @@ class ExternalTool:
                 "Install Semgrep separately with: brew install semgrep (macOS) "
                 "or uv tool install semgrep"
             ),
-            "skillspector": "Install with: uv tool install git+https://github.com/NVIDIA/SkillSpector.git@v2.12.0",
+            "skillspector": "Install with: uv tool install git+https://github.com/NVIDIA/SkillSpector.git@v2.13.3",
             "skillevaluator": (
                 'Install with: uv tool install "skillevaluator[all] @ git+https://github.com/NVIDIA/SkillEvaluator.git"'
             ),

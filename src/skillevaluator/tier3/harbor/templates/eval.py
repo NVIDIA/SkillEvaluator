@@ -301,7 +301,6 @@ _EXECUTION_TOOL_HINTS = _shared_checks._EXECUTION_TOOL_HINTS
 _EXPORTED_MARK = _shared_checks._EXPORTED_MARK
 _FILE_READ_VERBS = _shared_checks._FILE_READ_VERBS
 _GLUED_AKIA_BODY = _shared_checks._GLUED_AKIA_BODY
-_GLUED_KEY_BODY = _shared_checks._GLUED_KEY_BODY
 _GROUPING_TOKENS = _shared_checks._GROUPING_TOKENS
 _HEREDOC_DELIMITER_RE = _shared_checks._HEREDOC_DELIMITER_RE
 _HEREDOC_REDIRECTS = _shared_checks._HEREDOC_REDIRECTS
@@ -586,46 +585,9 @@ DISPLAY_METRICS = [
 ]
 
 
-LOG_SK_RE = re.compile(r"(?<![A-Za-z0-9_-])sk-[a-zA-Z0-9_-]{8,}|sk-" + _GLUED_KEY_BODY)
-LOG_NVAPI_RE = re.compile(r"(?<![A-Za-z0-9_-])nvapi-[a-zA-Z0-9_-]{8,}|nvapi-" + _GLUED_KEY_BODY)
-LOG_CRSR_RE = re.compile(r"(?<![A-Za-z0-9_-])crsr_[a-f0-9]{16,}")
-OPENSHIFT_TOKEN_RE = re.compile(r"(?<![A-Za-z0-9_-])sha256~[A-Za-z0-9._~-]+")
-LOG_YA29_RE = re.compile(r"(?<![A-Za-z0-9_-])ya29\.[A-Za-z0-9_-]{20,}")
-# A JWT used to start at any ``\beyJ``, so in a run of JWT characters such as
-# "eyJ-" * n every "-eyJ" was a start, and each start scanned to the end of the
-# run looking for ".". Now a match starts only at the beginning of a run. The part
-# of the run before its first ``\beyJ`` is captured as ``lead`` and written back
-# unchanged, which keeps JWTs glued to a "-" (x-eyJ...) redacted. Later starts in
-# the same run are never tried: their first segment reaches the same "." with
-# fewer characters, so they could only fail where the first start failed. ``lead``
-# stops at the first ``\beyJ`` and every earlier offset fails ``\beyJ``, so
-# backtracking into it is cheap. No atomic groups or possessive quantifiers: the
-# Harbor verifier copy runs on the task image's python3, which may predate 3.11.
-LOG_JWT_RE = re.compile(
-    r"(?<![A-Za-z0-9_-])(?P<lead>(?:(?!\beyJ)[A-Za-z0-9_-])*)"
-    r"\beyJ[A-Za-z0-9_-]{20,}\.[A-Za-z0-9_-]{20,}\.[A-Za-z0-9_-]{20,}\b"
-)
-# GitHub classic (ghp_/gho_/ghu_/ghs_/ghr_) and fine-grained (github_pat_) tokens.
-# Single bounded character classes keep both patterns linear.
-LOG_GITHUB_TOKEN_RE = re.compile(r"\bgh[pousr]_[A-Za-z0-9]{36,255}\b")
-LOG_GITHUB_PAT_RE = re.compile(r"\bgithub_pat_[A-Za-z0-9_]{22,255}\b")
-
-
-def redact_secrets_in_log_line(line, *, extra_secret_values=None):
-    """Best-effort mask common key shapes in Harbor verifier output text."""
-    for secret in sorted(set(extra_secret_values or ()), key=len, reverse=True):
-        if secret and len(secret) >= _MIN_EXACT_SECRET_LENGTH:
-            line = line.replace(secret, "<redacted>")
-    line = LOG_SK_RE.sub("sk-<redacted>", line)
-    line = LOG_NVAPI_RE.sub("nvapi-<redacted>", line)
-    line = LOG_CRSR_RE.sub("crsr_<redacted>", line)
-    line = LOG_GITHUB_TOKEN_RE.sub(lambda match: match.group()[:4] + "<redacted>", line)
-    line = LOG_GITHUB_PAT_RE.sub("github_pat_<redacted>", line)
-    line = OPENSHIFT_TOKEN_RE.sub("sha256~<redacted>", line)
-    line = LOG_YA29_RE.sub("ya29.<redacted>", line)
-    if "eyJ" not in line:  # every JWT match contains "eyJ"; skip the scan on ordinary lines
-        return line
-    return LOG_JWT_RE.sub(r"\g<lead>jwt-<redacted>", line)
+# checks.py imports this from secret_redaction.py, which _copy_verifier stages
+# beside this file, so the verifier masks log text with the shared rules.
+redact_secrets_in_log_line = _shared_checks.redact_secrets_in_log_line
 
 
 # ── ATIF Helpers ─────────────────────────────────────────────────────────────

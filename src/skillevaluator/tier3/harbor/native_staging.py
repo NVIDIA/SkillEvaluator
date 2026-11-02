@@ -48,7 +48,11 @@ _PLUGIN_TREE_IGNORED_ROOT = frozenset(
         ".claude",
     }
 )
-_CLAUDE_RUNTIME_PATH_REF = re.compile(r"\$\{(CLAUDE_PLUGIN_(?:ROOT|DATA))\}|\$(CLAUDE_PLUGIN_(?:ROOT|DATA))\b")
+_CLAUDE_RUNTIME_PATH_REF = re.compile(
+    # A default (${VAR:-x}) is a path too; one that names another variable is
+    # left for the policy to inspect.
+    r"\$\{(CLAUDE_PLUGIN_(?:ROOT|DATA))(?::?-[^}$]*)?\}|\$(CLAUDE_PLUGIN_(?:ROOT|DATA))\b"
+)
 
 
 @dataclass(frozen=True)

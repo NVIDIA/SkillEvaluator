@@ -254,3 +254,20 @@ def test_remote_backend_gate_refuses_host_only_private_wrappers(import_path: str
     else:
         with pytest.raises(ValueError, match="supported only with --env docker, kata, or local"):
             build()
+
+
+def test_claude_install_variable_defaults_are_paths_but_cannot_hide_credentials(tmp_path: Path) -> None:
+    staged = _claude_mcp(
+        tmp_path / "default",
+        {
+            "command": "node",
+            "args": ["${CLAUDE_PLUGIN_ROOT:-.}/server.js"],
+            "env": {"D": "${CLAUDE_PLUGIN_DATA:-/tmp}"},
+        },
+    )
+    assert staged["env"] == {"D": "${CLAUDE_PLUGIN_DATA:-/tmp}"}
+    with pytest.raises(PluginLoadError, match="Refusing to stage MCP server 's' natively"):
+        _claude_mcp(
+            tmp_path / "nested",
+            {"command": "node", "args": ["x.js"], "env": {"K": "${CLAUDE_PLUGIN_ROOT:-${ANTHROPIC_API_KEY}}"}},
+        )

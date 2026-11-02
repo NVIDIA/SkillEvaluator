@@ -836,9 +836,18 @@ class SecurityValidator(ValidatorBase):
         tool_result = Tools.skillspector.run(args, timeout=300, env=child_env, replace_env=True)
 
         if tool_result.exit_code not in _SKILLSPECTOR_POLICY_EXIT_CODES:
-            detail = tool_result.error_message or (
-                f"{stage_name} failed with unexpected exit code {tool_result.exit_code}: "
-                "scanner diagnostics were redacted"
+            hint = (
+                Tools.skillspector.get_install_hint()
+                if (tool_result.error_message or "").startswith("couldn't download")
+                else ""
+            )
+            detail = (
+                f"{tool_result.error_message}. {hint}".rstrip(". ")
+                if tool_result.error_message
+                else (
+                    f"{stage_name} failed with unexpected exit code {tool_result.exit_code}: "
+                    "scanner diagnostics were redacted"
+                )
             )
             result.add_error(detail)
             result.mark_scan_incomplete(stage_name)

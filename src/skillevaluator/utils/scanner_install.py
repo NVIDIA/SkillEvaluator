@@ -61,7 +61,9 @@ def _download_verified(url: str, sha256: str, name: str) -> bytes:
         with urllib.request.urlopen(url, timeout=DOWNLOAD_TIMEOUT_SECONDS) as response:
             payload = response.read(_MAX_DOWNLOAD_BYTES + 1)
     except OSError as exc:
-        raise _InstallError(f"{name} download failed: {exc}") from exc
+        reason = getattr(exc, "reason", exc)
+        detail = getattr(reason, "strerror", None) or str(reason)
+        raise _InstallError(f"couldn't download {name} ({detail.lower()})") from exc
     if len(payload) > _MAX_DOWNLOAD_BYTES:
         raise _InstallError(f"{name} download exceeded the size limit")
     if hashlib.sha256(payload).hexdigest() != sha256:
@@ -95,7 +97,9 @@ def ensure_skillspector_wheel() -> str | None:
     try:
         if target.is_file() and hashlib.sha256(target.read_bytes()).hexdigest() == SKILLSPECTOR_WHEEL_SHA256:
             return None
-        payload = _download_verified(SKILLSPECTOR_WHEEL_URL, SKILLSPECTOR_WHEEL_SHA256, "SkillSpector")
+        payload = _download_verified(
+            SKILLSPECTOR_WHEEL_URL, SKILLSPECTOR_WHEEL_SHA256, f"SkillSpector {SKILLSPECTOR_VERSION}"
+        )
         _write_atomic(target, payload, 0o644)
     except _InstallError as exc:
         return str(exc)
@@ -138,7 +142,7 @@ def install_gitleaks() -> str | None:
     if key is None or target is None:
         return f"no pinned Gitleaks {GITLEAKS_VERSION} binary for this platform"
     try:
-        payload = _download_verified(gitleaks_url(key), _GITLEAKS_SHA256[key], "Gitleaks")
+        payload = _download_verified(gitleaks_url(key), _GITLEAKS_SHA256[key], f"Gitleaks {GITLEAKS_VERSION}")
         with tarfile.open(fileobj=io.BytesIO(payload), mode="r:gz") as archive:
             member = archive.getmember("gitleaks")
             stream = archive.extractfile(member) if member.isfile() else None

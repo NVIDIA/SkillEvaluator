@@ -789,6 +789,11 @@ def stage_hint_row(label: str, hint: str, *, lead: str = "") -> TierRow:
 # ── summaries: turn ValidationResult lists into tier rows ──────────────
 
 
+def _is_user_skipped(result: ValidationResult) -> bool:
+    """True when the user left this check out with ``--skip``."""
+    return isinstance(result.metadata, dict) and bool(result.metadata.get("skipped_by_user"))
+
+
 def _is_skipped(result: ValidationResult) -> bool:
     """True when a validator was recorded without executing (OSS conventions)."""
     if bool(getattr(result, "skipped", False)):
@@ -931,8 +936,11 @@ def _check_key(validator_name: str) -> str | None:
 def final_check_ticker_row(lineup: list[str], results: list[ValidationResult]) -> TierRow:
     """The check lineup with final per-check states: ✓ passed, ✗ failed, dim skipped."""
     status: dict[str, str] = {}
+    user_skipped: set[str] = set()
     for result in results:
         key = _check_key(result.validator_name)
+        if key is not None and _is_user_skipped(result):
+            user_skipped.add(key)
         if key is None or _is_skipped(result):
             continue
         if not result.passed:
@@ -948,6 +956,8 @@ def final_check_ticker_row(lineup: list[str], results: list[ValidationResult]) -
             segments.append((f"✗ {name}", f"bold {RED}"))
         elif state == PASS:
             segments.append((f"✓ {name}", GREEN))
+        elif name in user_skipped:
+            segments.append((f"\N{EN DASH} {name}", MUTED))
         else:
             segments.append((name, FAINT))
     return TierRow("checks", segments)
@@ -992,7 +1002,8 @@ def summarize_tier1(results: list[ValidationResult], lineup: list[str] | None = 
     When *lineup* is given, the per-check ticker stays in the completed
     section with each check's final state (failed checks in red).
     """
-    total = len(results)
+    user_skipped = [r for r in results if _is_user_skipped(r)]
+    total = len(results) - len(user_skipped)
     failed = [r for r in results if not r.passed and not _is_skipped(r)]
     incomplete = [r for r in failed if r.is_incomplete]
     broken = [r for r in failed if not r.is_incomplete]
@@ -1012,9 +1023,14 @@ def summarize_tier1(results: list[ValidationResult], lineup: list[str] | None = 
         checks_segments += [("  ·  ", FAINT), (f"{len(broken)} failed", f"bold {RED}")]
     if incomplete:
         checks_segments += [("  ·  ", FAINT), (f"{len(incomplete)} didn't run", f"bold {RED}")]
+    if user_skipped:
+        checks_segments += [("  ·  ", FAINT), (f"{len(user_skipped)} skipped", MUTED)]
     if warnings:
         checks_segments += [("  ·  ", FAINT), (f"{warnings} warning{'s' if warnings != 1 else ''}", MUTED)]
     rows.append(TierRow("summary" if lineup else "checks", checks_segments))
+    if user_skipped:
+        names = ", ".join(dict.fromkeys(_short_name(r.validator_name) for r in user_skipped))
+        rows.append(TierRow("skipped", [(names, MUTED), ("  with --skip, not checked", FAINT)]))
 
     if advisory:
         detail = " · ".join(f"{name} {count}" for name, count in sorted(advisory.items(), key=lambda kv: -kv[1]))
@@ -1043,18 +1059,38 @@ def _tier1_fix(result: ValidationResult) -> FixItem:
 _INSTALL_HINT = re.compile(r"\b[Ii]nstall(?: [\w-]+)*? with: (.+?)\.?$")
 
 
+_DOWNLOAD_FAILED = re.compile(r"couldn't download .+? \([^)]*\)")
+
+
 def _setup_fix(results: list[ValidationResult]) -> FixItem:
-    """One item for checks that could not run because a scanner is not installed."""
+    """One item for checks that could not run because a scanner is missing or failed to download."""
     scanners = list(dict.fromkeys(name for r in results for name in r.incomplete_scans))
-    hints = []
+    hints: list[str] = []
+    failed_downloads: list[str] = []
     for r in results:
-        for text in r.warnings:
-            match = _INSTALL_HINT.search(str(text))
+        for text in map(str, [*r.warnings, *r.errors]):
+            if (download := _DOWNLOAD_FAILED.search(text)) and download.group(0) not in failed_downloads:
+                failed_downloads.append(download.group(0))
+            match = _INSTALL_HINT.search(text)
             if match and match.group(1) not in hints:
                 hints.append(match.group(1))
     checks = ", ".join(dict.fromkeys(_short_name(r.validator_name) for r in results))
-    missing = ", ".join(scanners) or "a required scanner"
-    return FixItem("setup", f"{checks} didn't run: {missing} not installed", hints)
+    skip = ",".join(dict.fromkeys(_skip_name(r.validator_name) for r in results))
+    if failed_downloads:
+        actions = ["check network access to github.com, then rerun"]
+        actions += [f"or install it yourself: {hint}" for hint in hints]
+        problem = f"{checks} didn't run: {'; '.join(failed_downloads)}"
+    else:
+        actions = list(hints)
+        problem = f"{checks} didn't run: {', '.join(scanners) or 'a required scanner'} not installed"
+    return FixItem("setup", problem, [*actions, f"or skip it: --skip {skip}"])
+
+
+def _skip_name(validator_name: str) -> str:
+    """The ``--skip`` value that leaves out the check producing *validator_name*."""
+    if validator_name == "Secrets Detection":
+        return "secrets"
+    return _check_key(validator_name) or _short_name(validator_name)
 
 
 def summarize_tier2(results: list[ValidationResult]) -> tuple[bool, bool, list[TierRow], str]:

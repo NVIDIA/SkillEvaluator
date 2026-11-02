@@ -80,6 +80,33 @@ OPTIONAL_CHECKS = ("dependency",)
 # Every canonical check name ``run_validation`` understands after alias
 # resolution (the default run plus the opt-in checks).
 RECOGNIZED_CHECKS = frozenset(DEFAULT_CHECKS) | frozenset(OPTIONAL_CHECKS)
+# ``--skip`` accepts every check plus the Gitleaks-backed secrets scan inside code-integrity.
+SKIPPABLE_CHECKS = RECOGNIZED_CHECKS | {"secrets"}
+SKIP_REASON = "skipped with --skip"
+_CHECK_ALIASES = {
+    "code": "code-integrity",
+    "code-risk": "code-integrity",
+    "scripts": "lint",
+    "script-lint": "lint",
+    "dependencies": "dependency",
+    "deps": "dependency",
+    "dependency-audit": "dependency",
+    "licence": "license",
+    "license-check": "license",
+}
+# Validator names recorded for a skipped check, matching the names its run would produce.
+_SKIPPED_VALIDATORS = {
+    "schema": ("Schema & Repository Governance",),
+    "version": ("Semantic Version Validation",),
+    "security": ("Security Scan",),
+    "pii": ("PII Scan",),
+    "license": ("License Compliance",),
+    "code-integrity": ("Code Risk Analysis", "Secrets Detection", "Code Integrity & Hygiene"),
+    "dependency": ("Dependency Vulnerability Audit",),
+    "unicode": ("Unicode Smuggling Detection",),
+    "quality": ("Quality Score (4-Dimension Analysis)",),
+    "lint": ("Script Lint (Advisory)",),
+}
 REPORTERS = {
     "json": JSONReporter,
     "html": HTMLReporter,
@@ -121,26 +148,22 @@ def _as_result(
     return result
 
 
+def _parse_checks(value: str | None) -> set[str]:
+    return {_CHECK_ALIASES.get(check, check) for raw in (value or "").split(",") if (check := raw.strip().lower())}
+
+
 def _enabled_checks(checks: str | None) -> set[str]:
-    if not checks:
-        return set(DEFAULT_CHECKS)
-    aliases = {
-        "code": "code-integrity",
-        "code-risk": "code-integrity",
-        "scripts": "lint",
-        "script-lint": "lint",
-        "dependencies": "dependency",
-        "deps": "dependency",
-        "dependency-audit": "dependency",
-        "licence": "license",
-        "license-check": "license",
-    }
-    enabled = set()
-    for raw in checks.split(","):
-        check = raw.strip().lower()
-        if check:
-            enabled.add(aliases.get(check, check))
-    return enabled
+    return _parse_checks(checks) if checks else set(DEFAULT_CHECKS)
+
+
+def skipped_checks(skip: str | None) -> set[str]:
+    """Resolve ``--skip`` names (aliases included) to canonical check names."""
+    return _parse_checks(skip)
+
+
+def runs_secrets_scan(checks: str | None, skip: str | None) -> bool:
+    """True when a run with these ``--checks``/``--skip`` values executes the Gitleaks scan."""
+    return "code-integrity" in _enabled_checks(checks) and not {"code-integrity", "secrets"} & skipped_checks(skip)
 
 
 def _schema_validator_for(content_type: str | None, policy: ValidationPolicy | None):
@@ -184,8 +207,12 @@ def run_validation(
     fail_fast: bool = False,
     continue_on_failure: bool = False,
     on_check: Callable[[str], None] | None = None,
+    skip: str | None = None,
 ) -> list[ValidationResult]:
     """Run selected Tier 1 validators and return structured results.
+
+    Checks named in *skip* do not run; each is recorded as a user-skipped
+    result, which reports show as skipped and which never certifies Tier 1.
 
     *on_check* is invoked with each canonical check name just before it runs;
     when provided it replaces the stderr ``[n/total]`` progress lines (the
@@ -204,6 +231,7 @@ def run_validation(
     applied centrally in :func:`emit_reports` via the policy.
     """
     enabled = _enabled_checks(checks)
+    skipped = skipped_checks(skip)
     results: list[ValidationResult] = []
     initial_target = publication_target_from_path(target_path)
     skill_like = content_type in (None, CONTENT_TYPE_SKILL, CONTENT_TYPE_UNKNOWN)
@@ -224,6 +252,16 @@ def run_validation(
             skill_like=skill_like,
         )
 
+    def _skipped_result(check_id: str, name: str) -> ValidationResult:
+        result = ValidationResult(
+            validator_name=name,
+            validator_description=SKIP_REASON,
+            metadata={"skipped": True, "skipped_by_user": True, "skip_reason": SKIP_REASON},
+        )
+        stamp_publication_evidence([result], tier=1, check_id=check_id)
+        stamp_tier1_required_checks([result], skill_like=skill_like)
+        return result
+
     def _schema_results() -> list[ValidationResult]:
         v = _schema_validator_for(content_type, policy)
         return [_run_result("schema", v.name, v.description, v.validate)]
@@ -238,7 +276,9 @@ def run_validation(
 
     def _code_integrity_results() -> list[ValidationResult]:
         return [
-            _run_result("code-integrity", v.name, v.description, v.validate)
+            _skipped_result("code-integrity", v.name)
+            if "secrets" in skipped and isinstance(v, SecretsValidator)
+            else _run_result("code-integrity", v.name, v.description, v.validate)
             for v in (CodeRiskValidator(), SecretsValidator(), HygieneValidator())
         ]
 
@@ -286,6 +326,9 @@ def run_validation(
     active = [
         (check_name, builder) for check_name, builder, applicable in steps if check_name in enabled and applicable
     ]
+    for check_name, _builder in [step for step in active if step[0] in skipped]:
+        active.remove((check_name, _builder))
+        results.extend(_skipped_result(check_name, name) for name in _SKIPPED_VALIDATORS[check_name])
     with continue_on_failure_scope(continue_on_failure):
         for step_number, (check_name, builder) in enumerate(active, 1):
             if on_check is not None:
@@ -317,7 +360,7 @@ def run_validation(
                 finalize_publication_target(results, target_path, initial_target)
                 return results
 
-    unknown = enabled - RECOGNIZED_CHECKS
+    unknown = (enabled - RECOGNIZED_CHECKS) | (skipped - SKIPPABLE_CHECKS)
     if unknown:
         result = ValidationResult(
             validator_name="Tier 1 option validation",

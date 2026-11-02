@@ -219,7 +219,7 @@ skillevaluator health-check
 uv installs tools to `~/.local/bin`, which may not be on PATH yet. Run `uv tool update-shell` and open a new terminal.
 </Accordion>
 <Accordion title="Validation reports INCOMPLETE and exits non-zero">
-A required scanner could not run. Check that uv is on `PATH` and GitHub and PyPI are reachable (SkillSpector), or that GitHub is reachable for the Gitleaks download, or install the scanner named in the report. Missing required evidence leaves validation `INCOMPLETE` and non-zero.
+A required scanner could not run. Check that uv is on `PATH` and GitHub and PyPI are reachable (SkillSpector), or that GitHub is reachable for the Gitleaks download, or install the scanner named in the report. Missing required evidence leaves validation `INCOMPLETE` and non-zero. To run without that scanner, pass `--skip` with the check named in the fix list (e.g. `--skip secrets`); the check is then reported as skipped and the run cannot certify Tier 1.
 </Accordion>
 </AccordionGroup>
 

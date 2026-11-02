@@ -797,18 +797,34 @@ def _offer_local_runtime_install(agents: list[str]) -> None:
             console.print(f"  [green]✓ {agent} installed[/green]")
 
 
-def _offer_scanner_install() -> None:
+def _validate_skip(_ctx: click.Context, _param: click.Parameter, value: str | None) -> str | None:
+    """Reject ``--skip`` values that name no known Tier 1 check."""
+    from skillevaluator.tier1.commands import SKIPPABLE_CHECKS, skipped_checks
+
+    if value is None:
+        return None
+    names = skipped_checks(value)
+    if not names or names - SKIPPABLE_CHECKS:
+        unknown = ", ".join(sorted(names - SKIPPABLE_CHECKS)) or repr(value)
+        raise click.BadParameter(f"unknown check {unknown}; choose from {', '.join(sorted(SKIPPABLE_CHECKS))}")
+    return value
+
+
+def _offer_scanner_install(checks: str | None = None, skip: str | None = None) -> None:
     """Before Tier 1, install the pinned, checksum-verified Gitleaks binary when it is missing."""
+    from skillevaluator.tier1.commands import runs_secrets_scan
     from skillevaluator.utils.scanner_install import GITLEAKS_VERSION, ensure_gitleaks
     from skillevaluator.utils.tool_runner import Tools
 
+    if not runs_secrets_scan(checks, skip):
+        return
     path = Tools.gitleaks.path
     if Tools.gitleaks.resolution_source != "managed" or path is None or Path(path).is_file():
         return
     with console.status(f"Installing Gitleaks {GITLEAKS_VERSION}…"):
         error = ensure_gitleaks()
     if error:
-        console.print(f"[red]✗ {error}[/red]", highlight=False)
+        console.print(f"[red]✗ {error[:1].upper()}{error[1:]}[/red]", highlight=False)
     else:
         console.print(f"[dim]✓ Gitleaks {GITLEAKS_VERSION} installed (checksum-verified)[/dim]", highlight=False)
 
@@ -1134,6 +1150,8 @@ def _catalog_child_argv_from_ctx(
         argv.extend(["--tiers", str(params["tiers"])])
     if params.get("checks"):
         argv.extend(["--checks", str(params["checks"])])
+    if params.get("skip"):
+        argv.extend(["--skip", str(params["skip"])])
     if params.get("previous_version"):
         argv.extend(["--previous-version", str(params["previous_version"])])
     if params.get("fail_fast"):
@@ -1543,6 +1561,11 @@ def _finish_pipeline_view(
             headline = "gating tiers passed · advisory tier reported findings (see report)"
         else:
             headline = f"all {ran} tier{'s' if ran != 1 else ''} passed"
+            skipped = sum(
+                1 for r in tier_gate_results if isinstance(r.metadata, dict) and r.metadata.get("skipped_by_user")
+            )
+            if skipped:
+                headline += f"  ·  {skipped} check{'s' if skipped != 1 else ''} skipped"
             lift = summary.get("overall_lift")
             if agent_eval and isinstance(lift, (int, float)):
                 headline += f"  ·  skill lift {lift:+.2f}"
@@ -1642,6 +1665,16 @@ def _print_run_banner(target_path: Path, content_type: str, profile: str | None)
     "Choices: schema, version, security, pii, license, code-integrity, unicode, quality, lint; "
     "opt-in (not run by default): dependency. "
     "quality/lint/version are skill-only and skipped for rules/workflows.",
+)
+@click.option(
+    "--skip",
+    default=None,
+    metavar="CHECKS",
+    callback=_validate_skip,
+    cls=GroupedOption,
+    help_group=_TIER1_GROUP,
+    help="Comma-separated Tier 1 checks to leave out, e.g. secrets (the Gitleaks scan). "
+    "Skipped checks are shown and recorded as skipped in the report, and nothing is installed for them.",
 )
 @click.option(
     "--previous-version",
@@ -1949,6 +1982,7 @@ def validate(
     full: bool,
     verbose: bool,
     checks: str | None,
+    skip: str | None,
     previous_version: str | None,
     fail_fast: bool,
     continue_on_failure: bool,
@@ -2152,7 +2186,7 @@ def validate(
         from skillevaluator.tier3.commands import parse_agents
 
         _offer_local_runtime_install(parse_agents(agents))
-    _offer_scanner_install()
+    _offer_scanner_install(checks, skip)
     view.start()
     if autopilot:
         # Generation now precedes Tier 1, so surface it on the first live block
@@ -2193,6 +2227,7 @@ def validate(
         fail_fast=fail_fast,
         continue_on_failure=continue_on_failure,
         on_check=_on_check if quiet else None,
+        skip=skip,
     )
     # The raw pass/fail signal drives --fail-fast identically in both modes;
     # the DISPLAYED tier summary must reflect policy-finalized severities or
@@ -2742,6 +2777,13 @@ def _workflow_report_options(func):
 @click.argument("skill_path", metavar="PATH", type=click.Path(exists=True, file_okay=False, path_type=Path))
 @click.option("--checks", default=None, help="Select static checks; by default all checks include dependency auditing.")
 @click.option(
+    "--skip",
+    default=None,
+    metavar="CHECKS",
+    callback=_validate_skip,
+    help="Leave out these checks, e.g. secrets; they are reported as skipped.",
+)
+@click.option(
     "--llm/--no-llm", default=None, help="Include rubric, LLM security, and verification [default: when configured]."
 )
 @click.option("--min-score", type=click.IntRange(0, 100), default=70, show_default=True)
@@ -2757,6 +2799,7 @@ def _workflow_report_options(func):
 def _tier1_workflow(
     skill_path: Path,
     checks: str | None,
+    skip: str | None,
     llm: bool | None,
     min_score: int,
     quality_config: Path | None,
@@ -2773,10 +2816,11 @@ def _tier1_workflow(
         policy = resolve_policy(profile=profile)
     except (FileNotFoundError, ValueError) as exc:
         raise click.ClickException(str(exc)) from exc
-    _offer_scanner_install()
+    _offer_scanner_install(checks, skip)
     results = run_tier1_workflow(
         skill_path,
         checks=checks,
+        skip=skip,
         llm=llm,
         min_score=min_score,
         quality_config=quality_config,

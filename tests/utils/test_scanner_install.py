@@ -76,7 +76,7 @@ class TestSkillSpectorWheel:
             patch("subprocess.run") as run,
         ):
             result = tool.run(["scan", "x"])
-        assert result.error_message == "SkillSpector download failed checksum verification"
+        assert result.error_message == "SkillSpector 2.12.0 download failed checksum verification"
         run.assert_not_called()
 
     def test_pinned_wheel_url_matches_version(self):
@@ -175,7 +175,7 @@ class TestManagedGitleaks:
         ):
             result = tool.run(["version"])
         assert not result.success
-        assert result.error_message == "Gitleaks download failed: network unreachable"
+        assert result.error_message == "couldn't download Gitleaks 8.30.0 (network unreachable)"
         run.assert_not_called()
 
     @pytest.mark.usefixtures("runtime_dir")
@@ -188,14 +188,14 @@ class TestManagedGitleaks:
         monkeypatch.setattr(scanner_install, "gitleaks_platform", lambda: ("linux", "x64"))
         with patch("urllib.request.urlopen", return_value=io.BytesIO(_gitleaks_tarball())):
             error = scanner_install.install_gitleaks()
-        assert error == "Gitleaks download failed checksum verification"
+        assert error == "Gitleaks 8.30.0 download failed checksum verification"
         assert not runtime_dir.exists()
 
     @pytest.mark.usefixtures("runtime_dir")
     def test_download_error_is_reported(self, monkeypatch):
         monkeypatch.setattr(scanner_install, "gitleaks_platform", lambda: ("linux", "x64"))
         with patch("urllib.request.urlopen", side_effect=OSError("network unreachable")):
-            assert scanner_install.install_gitleaks() == "Gitleaks download failed: network unreachable"
+            assert scanner_install.install_gitleaks() == "couldn't download Gitleaks 8.30.0 (network unreachable)"
 
     @pytest.mark.usefixtures("runtime_dir")
     def test_unsupported_platform(self, monkeypatch):

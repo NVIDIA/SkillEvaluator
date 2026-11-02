@@ -408,13 +408,13 @@ class TestExternalTool:
             hint = tool.get_install_hint()
             assert "gitleaks" in hint.lower()
 
-    def test_skillspector_install_hint_uses_public_source_distribution(self):
+    def test_skillspector_install_hint_uses_release_wheel(self):
         with patch("shutil.which", return_value=None):
             tool = ExternalTool("SkillSpector", "skillspector")
 
         assert (
-            tool.get_install_hint()
-            == "Install with: uv tool install git+https://github.com/NVIDIA/SkillSpector.git@v2.12.0"
+            tool.get_install_hint() == "Install with: uv tool install "
+            "https://github.com/NVIDIA/SkillSpector/releases/download/v2.12.0/skillspector-2.12.0-py3-none-any.whl"
         )
         assert "[security]" not in tool.get_install_hint()
 

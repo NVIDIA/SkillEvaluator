@@ -22,6 +22,7 @@ from pathlib import Path
 from skillevaluator.logging_config import get_logger
 from skillevaluator.models.result import Severity
 from skillevaluator.utils.scanner_install import (
+    SKILLSPECTOR_WHEEL_URL,
     ensure_gitleaks,
     ensure_skillspector_wheel,
     gitleaks_platform,
@@ -213,14 +214,13 @@ class ExternalTool:
         )
         hints = {
             "gitleaks": (
-                "Rerun in a terminal to download it automatically, or install with: "
-                "brew install gitleaks (macOS) or go install github.com/gitleaks/gitleaks/v8@latest"
+                "Install with: brew install gitleaks (macOS) or go install github.com/gitleaks/gitleaks/v8@latest"
             ),
             "pip-audit": bundled_scanner_hint,
             "safety": "Optional secondary scanner; install separately with: uv tool install safety",
             "bandit": bundled_scanner_hint,
             "semgrep": ("Optional; install separately with: brew install semgrep (macOS) or uv tool install semgrep"),
-            "skillspector": "Install with: uv tool install git+https://github.com/NVIDIA/SkillSpector.git@v2.12.0",
+            "skillspector": f"Install with: uv tool install {SKILLSPECTOR_WHEEL_URL}",
             "skillevaluator": (
                 'Install with: uv tool install "skillevaluator[all] @ git+https://github.com/NVIDIA/SkillEvaluator.git"'
             ),

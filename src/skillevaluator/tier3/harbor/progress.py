@@ -60,6 +60,7 @@ class Tier3RunPlan:
     case_count: int | None = None
     attempts: int | None = None
     baseline: bool | None = None
+    with_skill: bool | None = None
     concurrency: int | None = None
     max_agents: int | None = None
     timeout_multiplier: float | None = None
@@ -239,6 +240,7 @@ class PlainProgressReporter:
             ("tasks", plan.task_count),
             ("cases", plan.case_count),
             ("attempts", plan.attempts),
+            ("with-skill", None if plan.with_skill is None else "yes" if plan.with_skill else "no"),
             ("baseline", None if plan.baseline is None else "yes" if plan.baseline else "no"),
             ("concurrency", plan.concurrency),
             ("max-agents", plan.max_agents),
@@ -355,7 +357,10 @@ class RichProgressReporter(PlainProgressReporter):
         plan = self._live_plan
         if plan is None:
             return Table(title="Harbor Run Configuration")
-        mode_label = "Skill-lift evaluation" if plan.baseline is not False else "Agent evaluation"
+        if plan.with_skill is False:
+            mode_label = "Baseline-only evaluation"
+        else:
+            mode_label = "Skill-lift evaluation" if plan.baseline is not False else "Agent evaluation"
         title = Text.assemble(
             ("Harbor Run Configuration", "bold cyan"),
             "  ·  ",
@@ -389,6 +394,7 @@ class RichProgressReporter(PlainProgressReporter):
             ("Tasks", plan.task_count),
             ("Cases", plan.case_count),
             ("Attempts", plan.attempts),
+            ("With skill", None if plan.with_skill is None else "yes" if plan.with_skill else "no"),
             ("Baseline", None if plan.baseline is None else "yes" if plan.baseline else "no"),
             ("Concurrency", plan.concurrency),
             ("Max agents", plan.max_agents),

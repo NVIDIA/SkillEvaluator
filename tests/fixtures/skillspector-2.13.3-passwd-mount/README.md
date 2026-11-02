@@ -53,7 +53,7 @@ outside the inputs, and run:
 
 ```sh
 for case in read-only separate-read; do
-  NVIDIA_INFERENCE_KEY=fixture-only uvx \
+  OPENAI_API_KEY=fixture-only SKILLSPECTOR_PROVIDER=openai uvx \
     --from git+https://github.com/NVIDIA/SkillSpector.git@v2.13.3 \
     skillspector scan "/tmp/skillspector-2.13.3-passwd-mount/$case" \
     --no-llm --format json --output "$case.json"

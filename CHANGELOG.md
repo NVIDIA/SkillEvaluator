@@ -108,6 +108,21 @@ All notable changes to SkillEvaluator are documented in this file.
   expected-case checks cover only the cases that ran, `run_config.json` records
   the selection as `case_selection`, and a run that skipped cases is reported
   as publication-incomplete in JSON, HTML, and BENCHMARK.md.
+- `doctor` and `health-check` take `--tier 1|2|3|all`, so Tier 1 and Tier 2
+  readiness can be checked before a run instead of surfacing mid-validation.
+  Tier 1 reports each scanner that the `--checks` selection runs: SkillSpector,
+  Bandit, Semgrep, Gitleaks, and pip-audit for `dependency`. Each row shows the
+  resolved path, any executable override, and the version from a bounded,
+  shell-free probe. A scanner fails when it is missing, its override is
+  malformed, its probe fails or exceeds `--timeout` (default 60 seconds, at
+  most 3600), or it is older than Bandit 1.9.4 or Gitleaks 8. Tier 2 resolves
+  the embedding and LLM providers offline. `doctor --tier 2 --verify-models`
+  also sends one embedding request and one chat request, each bounded by
+  `--timeout` and sent without retries. Probe diagnostics keep provider
+  response bodies out of the report. `--tier all` checks every tier, and a failed tier does not stop the
+  next. Without `--tier`, both commands still check Tier 3 only. An option for
+  an unselected tier, or `--timeout` for an offline Tier 2 check, is a usage
+  error. `tier3 doctor` remains Tier 3-only.
 
 - Tier 1 `--llm` security scans of a single skill keep the LLM provenance that
   SkillSpector v2.12.0 and later report: the provider adapter, the model and
@@ -249,12 +264,14 @@ All notable changes to SkillEvaluator are documented in this file.
   or failed evidence stays incomplete. Pass-rate lift uses the metrics shared
   by both arms, so activation alone cannot create lift.
 
-- On Windows, repository root and source-link detection no longer break for
-  repositories in non-ASCII folders: Git output is decoded as UTF-8 instead of
-  the locale code page.
+- Repository-root detection decodes Git's raw path bytes as filesystem names,
+  preserving non-ASCII and non-UTF-8 paths. Remote URLs and branch names
+  remain UTF-8.
 - Private plugin risk checks preserve PowerShell semantics in hook conditions,
   grants, findings and remediation; denying Bash no longer hides a PowerShell
-  grant.
+  grant. Hook conditions retain both PowerShell and Bash broad-prefix checks,
+  so launchers such as `iex`, `sudo` and `env` keep their HIGH auto-approval
+  findings.
 - CI quality thresholds apply to every parallel scan worker. Report overviews
   and detailed reports surface failed quality gates ahead of advisory findings,
   with links to the check that needs attention.

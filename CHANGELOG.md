@@ -214,12 +214,34 @@ All notable changes to SkillEvaluator are documented in this file.
   report generation; measured zeroes retain their numeric formatting
   ([#240](https://github.com/NVIDIA/SkillEvaluator/issues/240)).
 
+- Tier 3 HTML reports no longer label a recorded baseline as missing. When an
+  agent or dimension has a baseline score but no comparable lift, for example
+  because the arms used different score policies or no case kept matching judge
+  models, the dimension grid, agent scorecards, and Skill Lift card now say
+  "comparison unavailable" instead of "no baseline". Rows with no baseline
+  score, such as `--skip-baseline` runs, keep "no baseline".
+
 - Explicit searches of `/` (`find`, `grep -r`, `rg`, `ag`, `du` and `tree` with a
   `/` operand, and native search tools rooted at `/`) now count as wasted tool
   calls whether or not they name the expected skill or script, including when
   output is redirected or the search runs inside `sh -c`. Host and bundled
   scoring agree, while scoped searches and slash-valued patterns retain their
   classification.
+
+- Tier 3 `claude-code` trials no longer hang until the agent timeout after the
+  agent has already answered. Claude Code moves a shell command that outlasts
+  its Bash timeout to the background, and a headless run waits for background
+  commands before it exits, so a command that never finishes (for example a
+  `grep -r /` search for a missing skill) held the trial open and the case was
+  recorded as an unscored agent timeout. Generated and native tasks now set
+  `CLAUDE_CODE_DISABLE_BACKGROUND_TASKS=1` in the task environment for every
+  env mode, so each command finishes in its turn or is stopped at Claude Code's
+  Bash timeout (2 minutes unless the agent requests a longer one). Neither
+  `harbor.runtime_env` nor a native task's `[environment.env]` can turn
+  background tasks back on, and other agents ignore the variable. A skill whose
+  single commands need longer can raise Claude Code's default with
+  `BASH_DEFAULT_TIMEOUT_MS` in `harbor.runtime_env`.
+
 - PII email scans recognize all RFC 2606 reserved domains, including their
   subdomains, mixed-case forms, trailing dots, and prose ellipses. A local-part
   boundary prevents quadratic rescanning of long excluded addresses. Ordinary
@@ -310,12 +332,35 @@ All notable changes to SkillEvaluator are documented in this file.
   Harbor, so Docker Desktop finds its `compose` plugin, and passes
   `PYTHONUTF8` and `PYTHONIOENCODING` so Python UTF-8 mode reaches Harbor on
   non-UTF-8 locales.
+- On native Windows, generated Tier 3 `test.sh` files and the grader starters
+  from `init-custom-grader` and `init-harbor-task` are now written with LF line
+  endings. They were written with CRLF, which broke the `#!/bin/bash` shebang
+  and `set -euo pipefail` in the Linux container, so the verifier failed
+  before grading. The repository's `.gitattributes` also keeps `*.sh` files LF
+  in Windows checkouts.
 - A `SKILL.md` `metadata` value that is not a mapping, such as `true`, `1.5`, a
   date, or a list or string containing `author` or `tags`, no longer crashes
   the quality check with a `TypeError`, which aborted `validate`, `tier1`, and
   `quality-check` before any report was written. The schema check reports the
   malformed `metadata`, and the quality score counts `metadata.author` and
   `metadata.tags` as missing, as it already did for other non-mapping values.
+- A `SKILL.md` over the recommended 5,000-token budget now gets a MEDIUM
+  `quality_efficiency` finding instead of a HIGH one. The HIGH finding failed
+  the quality check, and with it `validate`, `tier1`, and `quality-check`, even
+  when the quality score met `--min-score`. The 15-point Efficiency deduction is
+  unchanged, so a large skill still fails when its score falls below the
+  minimum.
+
+### Security
+
+- Linux local mode now launches Bubblewrap by the absolute path that passed its
+  smoke test instead of a bare `bwrap`. The bare name was looked up on the host
+  `PATH` for every command, from that command's working directory (the
+  writable trial workspace by default), so a relative `PATH` entry such as `.`,
+  an empty entry, or `./node_modules/.bin` let a `bwrap` file created by an
+  earlier sandboxed command run outside the sandbox. A `bwrap` symlink on
+  `PATH` is resolved to its target before the smoke test, and the local-mode
+  isolation message names that resolved path.
 
 ## 0.6.0 - 2026-10-20
 

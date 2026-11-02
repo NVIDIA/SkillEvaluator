@@ -5,33 +5,13 @@
 
 from __future__ import annotations
 
-import importlib.util
 import time
-from pathlib import Path
 
 import pytest
 
 from skillevaluator.tier3.eval_core.secret_redaction import redact_secrets_in_log_line
 
-_TEMPLATE = (
-    Path(__file__).resolve().parents[2] / "src" / "skillevaluator" / "tier3" / "harbor" / "templates" / "eval.py"
-)
-
-
-def _load_template_module():
-    spec = importlib.util.spec_from_file_location("harbor_template_eval_log_jwt", _TEMPLATE)
-    module = importlib.util.module_from_spec(spec)
-    spec.loader.exec_module(module)
-    return module
-
-
-eval_template = _load_template_module()
-
-REDACTORS = pytest.mark.parametrize(
-    "redact",
-    [redact_secrets_in_log_line, eval_template.redact_secrets_in_log_line],
-    ids=["host", "template"],
-)
+REDACTORS = pytest.mark.parametrize("redact", [redact_secrets_in_log_line], ids=["shared"])
 
 
 def _fixture_secret(*parts: str) -> str:

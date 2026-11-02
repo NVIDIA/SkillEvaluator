@@ -96,6 +96,7 @@ class LogicalTrialEvidence:
     evidence_status: str
     init_event: Mapping[str, Any] | None = None
     first_turn_excluded_reason: str | None = None
+    attempt_ordinal: int | None = None
 
     def persisted(self) -> dict[str, Any]:
         return {
@@ -121,6 +122,37 @@ def _usage(raw: Any) -> dict[str, float | None] | None:
     )
     kept = {key: finite_number(raw[key], non_negative=True) for key in fields if key in raw}
     return kept or None
+
+
+def _harbor_usage(result: Any) -> dict[str, float]:
+    """Finite recorded counters, summing complete native steps without a root mirror."""
+    if not isinstance(result, dict) or not collector._is_serialized_harbor_trial_result(result):
+        return {}
+    steps = result.get("step_results")
+    if steps is not None:
+        if collector._valid_step_result_names(steps, max_count=collector._MAX_TRAJECTORY_STEP_DIRECTORIES) is None:
+            return {}
+        constituents = steps
+    else:
+        constituents = [result]
+    counters = {}
+    for name, native in (
+        ("prompt_tokens", "n_input_tokens"),
+        ("completion_tokens", "n_output_tokens"),
+        ("cached_tokens", "n_cache_tokens"),
+        ("cost_usd", "cost_usd"),
+    ):
+        values = [
+            finite_number(row.get("agent_result", {}).get(native), non_negative=True)
+            if isinstance(row.get("agent_result"), Mapping)
+            else None
+            for row in constituents
+        ]
+        if all(value is not None for value in values):
+            total = finite_number(sum(values), non_negative=True)
+            if total is not None:
+                counters[name] = total
+    return counters
 
 
 def _first_usage(trajectory: Mapping[str, Any] | None) -> tuple[Mapping[str, float | None] | None, str | None]:
@@ -319,11 +351,10 @@ class RuntimeEvidenceObserver:
         self.arm_jobs.setdefault(agent, {})[arm] = job_dir
         self._rewards[job_dir] = (collected, scoreable)
 
-    def _case_id(self, root: Path, row: Mapping[str, Any] | None) -> str | None:
+    def _case_id(self, root: Path, row: Mapping[str, Any] | None, result: Any) -> str | None:
         selector = row.get("_trusted_task_selector") if isinstance(row, Mapping) else None
         if self.selector_map is not None:
             if not selector:
-                result = collector._read_json(root / "result.json")
                 selector = collector._task_selector_from_harbor_result(result) if isinstance(result, dict) else None
             return self.selector_map.get(selector) if selector else None
         # Generated trial selectors are coordinator-owned. Reward entry_id is
@@ -393,10 +424,11 @@ class RuntimeEvidenceObserver:
         labels = collector._published_trial_labels_by_root([root.name for root in roots])
         records = []
         for root in roots:
+            result_payload = collector._read_json(root / "result.json")
             rows = groups.get(root.name, [])
             logical = collector._logical_attempt_rewards(rows)
             reward = logical[0] if len(logical) == 1 else None
-            case_id = self._case_id(root, raw_by_root.get(root.name))
+            case_id = self._case_id(root, raw_by_root.get(root.name), result_payload)
             if reward is not None:
                 reward = {**reward, "entry_id": case_id, "_authoritative_entry_id": True}
             trace = self.artifacts.trace(root)
@@ -424,6 +456,9 @@ class RuntimeEvidenceObserver:
                 else "not_applicable"
             )
             usage = _usage((trace.trajectory or {}).get("final_metrics"))
+            for name, value in _harbor_usage(result_payload).items():
+                if not any((usage or {}).get(alias) is not None for alias in (name, f"total_{name}")):
+                    usage = {**(usage or {}), name: value}
             first_usage, excluded = _first_usage(trace.trajectory)
             if excluded == "hosted_search":
                 usage = {**(usage or {}), "first_turn_hosted_search": 1.0}
@@ -441,6 +476,12 @@ class RuntimeEvidenceObserver:
                     status,
                     self.hooks.trial_init_events.get(root),
                     excluded,
+                    collector._structural_attempt_ordinal(
+                        root.name,
+                        collector._task_selector_from_harbor_result(result_payload)
+                        if isinstance(result_payload, dict)
+                        else case_id or "",
+                    ),
                 )
             )
         result = tuple(records)

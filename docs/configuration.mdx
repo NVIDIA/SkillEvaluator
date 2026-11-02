@@ -311,7 +311,7 @@ variables.
 
 ## SkillSpector bridge
 
-The `--llm` security analysis runs [SkillSpector](https://github.com/NVIDIA/SkillSpector), which has its own provider environment (`SKILLSPECTOR_PROVIDER` plus per-provider credential variables). SkillEvaluator bridges your configured provider automatically for that invocation, so the one key above is all you need. For `nv_build`, the bridge uses SkillSpector's OpenAI-compatible provider path pointed at the public Build endpoint, so the same `NVIDIA_API_KEY` covers this too; it does not create a second NVIDIA credential name.
+The `--llm` security analysis runs [SkillSpector](https://github.com/NVIDIA/SkillSpector), which has its own provider environment (`SKILLSPECTOR_PROVIDER` plus per-provider credential variables). SkillEvaluator bridges your configured provider automatically for that invocation, so the one key above is all you need. For `nv_build`, the bridge selects SkillSpector's `nv_build` provider, so its Build model registry sets output-token limits, and sends the key through SkillSpector's OpenAI-compatible provider path (`OPENAI_API_KEY`, with `OPENAI_BASE_URL` pointed at the public Build endpoint). The same `NVIDIA_API_KEY` covers this too; it does not create a second NVIDIA credential name.
 
 The subprocess environment is isolated. Only the selected provider settings and basic process environment variables (`PATH`, `HOME`, TLS bundles, temp dirs) pass through — other ambient credentials in your shell are never forwarded. Your SkillSpector model settings (`SKILLSPECTOR_MODEL_<SLOT>`, `SKILLSPECTOR_MODEL_REGISTRY`, `SKILLSPECTOR_REASONING_EFFORT`) pass through too; `SKILLSPECTOR_TEMPERATURE` does not.
 

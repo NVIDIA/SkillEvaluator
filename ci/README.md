@@ -1,10 +1,16 @@
-# Reusable GitHub Actions CI
+# Reusable repository CI
 
-This directory supplies the public GitHub CI runtime and consumer
-onboarding templates. Start with the [short GitHub Actions guide](../docs/github-actions.mdx).
+This directory supplies the shared Tier 1 CI runtime and consumer onboarding
+templates. Start with [repository integration](../docs/repository-integration.mdx)
+for GitHub Actions or GitLab CI/CD. The GitLab adapter is in `ci/gitlab/`;
+the image and report generation are shared by both platforms.
 The upstream workflow release and public package must be reviewed and published
 before consumers can use this path. Source templates are not runnable while
 `RELEASE_WORKFLOW_SHA` or `RELEASE_IMAGE_DIGEST` remains unresolved.
+
+For manual setup, start with the [copyable template catalog](templates/README.md).
+The [report and feedback examples](examples/README.md) are kept here in the public
+repository. Neither requires a local onboarding CLI or personal-demo access.
 
 ## Consumer contract
 
@@ -115,19 +121,23 @@ Pages is not an inherent requirement for GitHub PR comments.
    `NVIDIA/SkillEvaluator`; an explicitly reviewed fork override is available
    for integration testing, not needed for standard onboarding.
 6. Generated release files include the caller blob for their unedited scan
-   template. After **any edits** to that consumer file, compute its exact Git blob:
+   template. For hosting, first uncomment `id-token: write` under `permissions`
+   in `.github/workflows/skill-checks.yml`. This lets GitHub sign the workflow's
+   execution identity; no personal token or cloud account is needed.
+   After **any edits** to that consumer file, compute its exact Git blob:
    `git hash-object .github/workflows/skill-checks.yml`. Put that value in
    `trusted-caller-blobs`. Every later scan-file edit needs review and a new
    approved blob. Preserve older reviewed SHA/blob entries only when needed for
    historical backfill. Both allowlists accept comma- or newline-separated
-   entries; do not copy the personal demo's trust hashes. The publisher verifies
-   the caller from recorded PR base/head revisions. Conflicting workflow edits
-   or unavailable historical metadata are rejected: update/rebase the consumer
-   branch and rerun its scan.
+   entries; compute trust hashes from your own reviewed configuration. The
+   publisher verifies a separate GitHub-signed execution receipt and checks the
+   caller at that receipt's immutable workflow revision. It never reconstructs
+   the executed workflow from a pull request's current base or head.
 7. The publisher caller must grant `contents: write`, `actions: read`,
    `pages: write`, `id-token: write` and `pull-requests: write`. Reusable jobs
    narrow these to history preparation, Pages deployment and PR feedback. The
-   scan remains `contents: read`. The automatic GitHub token is sufficient;
+   scan uses `contents: read`, plus `id-token: write` only when hosting is enabled.
+   The automatic GitHub token is sufficient;
    no personal access token or model credential is required for publication.
 
 The publisher rebuilds native HTML from bounded, validated JSON using pinned
@@ -155,6 +165,19 @@ Fork PR scans can run without provider secrets; fork PR bot comments and current
 PR aliases are not enabled. Comment-only operation and hosting alongside an
 arbitrary existing Pages deployment need further integration work.
 
+Basic scans do not request identity credentials. If GitHub withholds the signing
+permission (including under fork policies), the scan and downloadable reports
+remain available, but hosting is skipped with a setup message. Historical runs
+without a signed receipt cannot be backfilled. Commit the updated configuration
+and trigger a new scan from that revision; rerunning an old job keeps its old
+workflow. Receipts are separate,
+attempt-specific artifacts and are never copied to the report site. The publisher
+checks their signature, repository, attempt, workflow revisions and issuance
+time; token expiration does not invalidate historical evidence. If GitHub has
+retired the signing key, that evidence can no longer be verified and publication
+stops. The receipt establishes execution identity; the approved complete caller
+workflow and GitHub artifact metadata also remain required.
+
 ## Optional LLM checks
 
 The generated `skill-checks-llm.yml` is a separate trusted manual run. Set
@@ -172,10 +195,9 @@ then.
 
 1. Review and merge source, wrapper, scanner pins, renderer and reusable
    workflows. Run focused selection/report/trust tests plus practical E2E
-   checks. A personal-fork demo is prior evidence, not proof of this new upstream
-   revision. Its [consumer](https://github.com/chrisknvidia/skill-evaluator-consumer-demo)
-   illustrates the earlier full-path scan and hosted-feedback flow; it does not
-   establish changed-skill selection for a newer release.
+   checks using the candidate revision. The [public examples](examples/README.md)
+   illustrate the report and feedback surfaces; they are not proof that a new
+   release has passed end-to-end verification.
 2. From a reviewed commit on upstream `main`, manually run **Build and publish
    Tier 1 image** with `publish: true`. Publishing is allowed only from `main`
    in `NVIDIA/SkillEvaluator`; PR runs build and smoke-test without uploading.
@@ -205,7 +227,7 @@ then.
    being treated as an absent image.
 4. Select the reviewed immutable reusable-workflow/tools revision and the
    verified image digest. Use `ci/render_templates.py` to generate release
-   copies of the three files in `ci/templates/`, replacing
+   copies of the files in `ci/templates/`, replacing
    `RELEASE_WORKFLOW_SHA` and `RELEASE_IMAGE_DIGEST` with those identities.
    Follow the helper's current `--help` for its CLI. Reject unresolved release
    placeholders or mutable references in generated files. The consumer's Pages

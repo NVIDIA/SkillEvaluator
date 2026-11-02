@@ -103,6 +103,7 @@ from skillevaluator.tier3.harbor.collector import (
     _score_definition_for_policy,
     collect_harbor_results,
     harbor_job_passed,
+    harbor_timeout_job_recovered,
     validate_harbor_job_result,
 )
 from skillevaluator.tier3.harbor.gke_environment import (
@@ -1213,9 +1214,7 @@ def _backend_may_forward(name: str) -> bool:
     upper = name.upper()
     if upper in _HARBOR_BASE_ENV_VARS or upper in _BACKEND_ALLOWED_SHARED_HOST_ENV:
         return True
-    other_backend_secret = any(
-        upper in names and is_sensitive_key(upper) for names in _HARBOR_ENV_MODE_VARS.values()
-    )
+    other_backend_secret = any(upper in names and is_sensitive_key(upper) for names in _HARBOR_ENV_MODE_VARS.values())
     return not (
         upper in _OPERATOR_OWNED_AGENT_ENV
         or upper in _RUNTIME_ENV_HOST_CONTROL_NAMES
@@ -1868,9 +1867,9 @@ def build_harbor_run_command(
         command.extend(["--override-storage-mb", str(override_storage_mb)])
     for name, value in sorted((verifier_env or {}).items()):
         str_val = str(value)
-        if (is_operator_owned_or_provider_secret(name) or _is_sensitive_environment_kwarg_name(name)) and not re.fullmatch(
-            r"\$\{[A-Za-z_][A-Za-z0-9_]*\}", str_val
-        ):
+        if (
+            is_operator_owned_or_provider_secret(name) or _is_sensitive_environment_kwarg_name(name)
+        ) and not re.fullmatch(r"\$\{[A-Za-z_][A-Za-z0-9_]*\}", str_val):
             raise ValueError(
                 f"Sensitive key detected in verifier_env: {name}. "
                 "Credentials and operator-owned settings must use ${VAR} placeholder indirection."
@@ -3239,6 +3238,41 @@ def _workspace_skills(skill_path: Path, values: list[str | Path]) -> list[Path]:
     return resolved
 
 
+def _limit_staged_cases(
+    task_selectors: list[str],
+    case_id_by_task_selector: Mapping[str, str],
+    staged_task_paths: Iterable[Path],
+    *,
+    max_cases: int,
+) -> dict[str, Any]:
+    """Remove staged cases after the first ``max_cases`` and describe the selection.
+
+    Harbor discovers local dataset tasks from their directories, so pruning the
+    unselected task directories from every agent's with-skill and baseline
+    datasets limits what runs. This happens before the dataset snapshot and the
+    collector's expected cases are derived, so both describe exactly the cases
+    that ran. The staged ``dataset.toml`` is not read by ``harbor run`` and is
+    left as staged.
+    """
+    selected = task_selectors[:max_cases]
+    skipped = set(task_selectors[max_cases:])
+    for task_path in staged_task_paths:
+        if task_path.name not in skipped:
+            continue
+        if task_path.is_dir() and not task_path.is_symlink():
+            shutil.rmtree(task_path)
+        else:
+            task_path.unlink(missing_ok=True)
+    return {
+        "policy": "first_n",
+        "limit": max_cases,
+        "total": len(task_selectors),
+        "selected": len(selected),
+        "skipped": len(task_selectors) - len(selected),
+        "selected_ids": [case_id_by_task_selector[selector] for selector in selected],
+    }
+
+
 def _task_timeout_plan(task_roots: list[Path], timeout_multiplier: float) -> float | None:
     """Return the largest staged agent timeout after applying Harbor scaling."""
     timeouts: list[float] = []
@@ -3372,7 +3406,9 @@ def _agent_import_path(provider: ProviderConfig, agent: str, env_mode: str) -> s
     try:
         compatible = issubclass(import_symbol(selected), import_symbol(required))
     except (ImportError, TypeError, ValueError) as exc:
-        raise ValueError(f"Custom execution backend '{env_mode}' agent wrapper {selected} could not be checked: {exc}") from None
+        raise ValueError(
+            f"Custom execution backend '{env_mode}' agent wrapper {selected} could not be checked: {exc}"
+        ) from None
     if not compatible:
         raise ValueError(
             f"Custom execution backend '{env_mode}' runs {agent} with {selected}, but the {provider.provider} "
@@ -4277,7 +4313,7 @@ def _run_stop_on_pass_variant(
     environment_kwargs: Mapping[str, Any] | None = None,
 ) -> list[str]:
     """Run each case one attempt at a time, stopping its attempts on first pass."""
-    errors: list[str] = []
+    errors: list[tuple[Path, str]] = []
     attempt_job_dirs: list[Path] = []
     for task_name in task_names:
         for attempt in range(1, n_attempts + 1):
@@ -4305,12 +4341,21 @@ def _run_stop_on_pass_variant(
             job_dir = jobs_dir / job_name
             attempt_job_dirs.append(job_dir)
             if not ok:
-                errors.append(f"{agent} {variant}-skill Harbor run failed: {task_name} attempt {attempt}: {detail}")
+                errors.append(
+                    (job_dir, f"{agent} {variant}-skill Harbor run failed: {task_name} attempt {attempt}: {detail}")
+                )
                 continue
+            errors = [
+                (failed_dir, detail)
+                for failed_dir, detail in errors
+                if not detail.endswith(": Harbor job did not complete successfully: 1 errored")
+                or not failed_dir.is_dir()
+                or not harbor_timeout_job_recovered(failed_dir, job_dir)
+            ]
             if _job_passed(job_dir, pass_threshold):
                 break
     _merge_attempt_jobs(attempt_job_dirs, jobs_dir / f"{skill_name}-{agent}-{variant}")
-    return errors
+    return [detail for _, detail in errors]
 
 
 def _run_agent_pair(
@@ -4540,6 +4585,7 @@ def _run_harbor_eval_impl(
     stop_on_pass: bool | None = None,
     n_concurrent: int | None = None,
     max_agents: int | None = None,
+    max_cases: int | None = None,
     model: str | None = None,
     agent_models: dict[str, str | list[str]] | None = None,
     custom_dockerfile_mode: str | None = None,
@@ -4619,6 +4665,7 @@ def _run_harbor_eval_impl(
     stop_on_pass = stop_on_pass if stop_on_pass is not None else harbor_config.get("stop_on_pass", False)
     n_concurrent = n_concurrent if n_concurrent is not None else harbor_config.get("n_concurrent", 4)
     max_agents = max_agents if max_agents is not None else harbor_config.get("max_agents", len(agents))
+    max_cases = max_cases if max_cases is not None else harbor_config.get("max_cases")
     timeout_multiplier = (
         timeout_multiplier if timeout_multiplier is not None else harbor_config.get("timeout_multiplier", 1.0)
     )
@@ -4662,6 +4709,9 @@ def _run_harbor_eval_impl(
     if not isinstance(max_agents, int) or max_agents < 1:
         reporter.emit(ProgressEvent(stage="configuration", state="failed", detail="invalid agent concurrency"))
         return {"error": ["max_agents must be >= 1"]}
+    if max_cases is not None and (isinstance(max_cases, bool) or not isinstance(max_cases, int) or max_cases < 1):
+        reporter.emit(ProgressEvent(stage="configuration", state="failed", detail="invalid case limit"))
+        return {"error": ["max_cases must be >= 1"]}
     try:
         timeout_multiplier = _validated_timeout_multiplier(timeout_multiplier)
     except ValueError as exc:
@@ -4916,9 +4966,8 @@ def _run_harbor_eval_impl(
         disposition = credential_probe_disposition(selected_provider, probe, env_mode=env_mode)
         if probe.ok and disposition == CredentialProbeDisposition.DEGRADED:
             safe_detail = "model catalog access does not verify runtime credentials for this endpoint"
-        elif (
-            disposition == CredentialProbeDisposition.DEGRADED
-            and is_unverified_gke_vertex_auth_probe(selected_provider, probe, env_mode=env_mode)
+        elif disposition == CredentialProbeDisposition.DEGRADED and is_unverified_gke_vertex_auth_probe(
+            selected_provider, probe, env_mode=env_mode
         ):
             safe_detail = GKE_HOST_UNVERIFIED_VERTEX_AUTH_DETAIL
         credential_validation_targets.append(
@@ -4993,6 +5042,8 @@ def _run_harbor_eval_impl(
         # source tree that was evaluated, not the evaluator build that ran it.
         "evaluated_source": normalized_evaluated_source(evaluated_source),
     }
+    if max_cases is not None:
+        run_config["harbor"]["max_cases"] = max_cases
     verifier_env = {**configured_runtime_env, **provider_env}
     staged_verifier_env = {
         name: f"${{{name}}}"
@@ -5278,6 +5329,34 @@ def _run_harbor_eval_impl(
     except (OSError, ValueError) as exc:
         reporter.emit(ProgressEvent(stage=staging_failure_stage, state="failed", detail=str(exc)))
         return _persist_pre_execution_failure([str(exc)])
+
+    if max_cases is not None:
+        all_task_selectors = expected_task_selectors or []
+        all_case_ids = expected_case_id_by_task_selector or {}
+        try:
+            case_selection = _limit_staged_cases(
+                all_task_selectors,
+                all_case_ids,
+                staged_task_paths,
+                max_cases=max_cases,
+            )
+        except OSError as exc:
+            reporter.emit(ProgressEvent(stage="case-selection", state="failed", detail=str(exc)))
+            return _persist_pre_execution_failure([str(exc)])
+        expected_task_selectors = all_task_selectors[:max_cases]
+        expected_case_id_by_task_selector = {selector: all_case_ids[selector] for selector in expected_task_selectors}
+        staged_task_paths = [path for path in staged_task_paths if path.name in expected_case_id_by_task_selector]
+        run_config["case_selection"] = case_selection
+        reporter.emit(
+            ProgressEvent(
+                stage="case-selection",
+                state="complete",
+                detail=(
+                    f"running the first {case_selection['selected']} of {case_selection['total']} cases "
+                    f"(max_cases={max_cases})"
+                ),
+            )
+        )
 
     if not _runtime_context_is_bound_to_publication_target(
         skill_path,

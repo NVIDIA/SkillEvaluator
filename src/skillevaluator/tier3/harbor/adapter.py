@@ -2339,7 +2339,9 @@ def _write_test_sh(task_dir: Path, *, grading_mode: str, custom_grader: bool) ->
     else:
         script = prefix + 'python3 -I "${evaluator_dir}/eval.py"\n'
     test_sh = tests_dir / "test.sh"
-    test_sh.write_text(script, encoding="utf-8")
+    # LF only: the script runs inside a Linux container, and Windows' default
+    # CRLF turns the shebang into "#!/bin/bash\r".
+    test_sh.write_text(script, encoding="utf-8", newline="\n")
     test_sh.chmod(0o755)
 
 
@@ -2376,6 +2378,7 @@ def _copy_verifier(task_dir: Path) -> None:
     sources = (
         (TEMPLATES_DIR / "eval.py", "Verifier template"),
         (_EVAL_CORE_DIR / "log_converters.py", "log_converters helper"),
+        (_EVAL_CORE_DIR / "atif_helpers.py", "ATIF evidence helpers"),
         (_EVAL_CORE_DIR / "shell_lexing.py", "Shell lexical helper"),
         (_EVAL_CORE_DIR / "script_invocation.py", "Shell invocation helper"),
         (_EVAL_CORE_DIR / "checks.py", "Deterministic grading checks"),
@@ -3634,6 +3637,11 @@ _RUNTIME_POLICY_ENV_RESET = 'ENV CLAUDE_CODE_DISABLE_POLICY_SKILLS="1"'
 _EVALUATOR_MANAGED_RUNTIME_ENV = {
     **dict.fromkeys(_RUNTIME_LOADER_ENV_NAMES, ""),
     "CLAUDE_CODE_DISABLE_POLICY_SKILLS": "1",
+    # A headless Claude Code run waits for its background commands, so one that
+    # never exits (for example ``grep -r /``) holds a trial that has already
+    # answered until the agent timeout. With background tasks off, a command
+    # ends in its turn or at the Bash tool timeout. Other agents ignore it.
+    "CLAUDE_CODE_DISABLE_BACKGROUND_TASKS": "1",
 }
 _CLEAR_SKILL_ROOT_FUNCTION = (
     "clear_skill_root() { target=$1; "

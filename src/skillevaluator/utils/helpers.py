@@ -125,14 +125,13 @@ def find_bundled_plugin_skills(plugin_root: Path) -> list[Path]:
     ]
 
 
-def _git_output(args: list[str], cwd: Path, *, errors: str = "replace") -> str:
+def _git_output(args: list[str], cwd: Path) -> str:
     """Run git in ``cwd`` and return its stripped stdout decoded as UTF-8.
 
-    Git writes paths, refs and URLs as UTF-8 on every platform, so the locale
-    code page (cp1252 on many Windows hosts) must not be used to decode them.
-    ``errors`` is never ``"strict"``, so decoding cannot raise. The default
-    ``"replace"`` suits display strings (URLs, refs) that are later written to
-    UTF-8 reports, where surrogate escapes would fail to encode.
+    Remote URLs and ref names are UTF-8 text, so the locale code page (cp1252
+    on many Windows hosts) must not be used to decode them. Undecodable bytes
+    are replaced, so decoding cannot raise and the result can be written to
+    UTF-8 reports.
     """
     return subprocess.check_output(
         ["git", *args],
@@ -140,7 +139,7 @@ def _git_output(args: list[str], cwd: Path, *, errors: str = "replace") -> str:
         stderr=subprocess.DEVNULL,
         text=True,
         encoding="utf-8",
-        errors=errors,
+        errors="replace",
     ).strip()
 
 
@@ -149,9 +148,13 @@ def resolve_git_root(local_path: Path) -> Path | None:
     resolved = local_path.resolve()
     working_dir = resolved if resolved.is_dir() else resolved.parent
     try:
-        # surrogateescape keeps non-UTF-8 path bytes losslessly (as POSIX
-        # filesystem decoding does), so the result still names the real directory.
-        root = _git_output(["rev-parse", "--show-toplevel"], working_dir, errors="surrogateescape")
+        # Git prints the root as raw file-name bytes; decode them the way Python
+        # encodes paths, not with the locale code page, so the result names the real directory.
+        root = os.fsdecode(
+            subprocess.check_output(
+                ["git", "rev-parse", "--show-toplevel"], cwd=str(working_dir), stderr=subprocess.DEVNULL
+            )
+        ).strip()
     except (subprocess.CalledProcessError, FileNotFoundError, OSError):
         return None
     return Path(root).resolve() if root else None

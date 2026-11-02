@@ -456,9 +456,7 @@ def _resolve_report_output_location(target_path: Path, output_dir: Path) -> Path
             if output_is_real_directory and is_generated_output_root(output_dir):
                 return output_dir
         except (OSError, RuntimeError, ValueError) as exc:
-            raise click.ClickException(
-                f"Cannot safely reserve default report output directory: {output_dir}"
-            ) from exc
+            raise click.ClickException(f"Cannot safely reserve default report output directory: {output_dir}") from exc
 
     if output_is_default:
         relocated = target_path.with_name(f"{target_path.name}-reports")
@@ -501,8 +499,7 @@ def _reject_copy_repo_root_output(
     try:
         context_roots = [(resolve_repo_context_root(target_path), "repository root")]
         context_roots.extend(
-            (included_skill.resolve(strict=True), "runtime source root")
-            for included_skill in include_skills
+            (included_skill.resolve(strict=True), "runtime source root") for included_skill in include_skills
         )
     except (OSError, RuntimeError, ValueError) as exc:
         raise click.ClickException(f"Cannot validate {mode_label} report output directory: {output_dir}") from exc
@@ -780,6 +777,7 @@ def _run_agent_eval_or_skip(
     skip_baseline: bool,
     n_concurrent: int | None,
     max_agents: int | None,
+    max_cases: int | None = None,
     n_attempts: int | None = None,
     pass_threshold: float | None = None,
     stop_on_pass: bool | None = None,
@@ -839,6 +837,7 @@ def _run_agent_eval_or_skip(
         skip_baseline=skip_baseline,
         n_concurrent=n_concurrent,
         max_agents=max_agents,
+        max_cases=max_cases,
         n_attempts=n_attempts,
         pass_threshold=pass_threshold,
         stop_on_pass=stop_on_pass,
@@ -1149,6 +1148,8 @@ def _catalog_child_argv_from_ctx(
         argv.extend(["--n-concurrent", str(params["n_concurrent"])])
     if params.get("max_agents") is not None:
         argv.extend(["--max-agents", str(params["max_agents"])])
+    if params.get("max_cases") is not None:
+        argv.extend(["--max-cases", str(params["max_cases"])])
     if params.get("n_attempts") is not None:
         argv.extend(["--n-attempts", str(params["n_attempts"])])
     if params.get("pass_threshold") is not None:
@@ -1778,6 +1779,14 @@ def _print_run_banner(target_path: Path, content_type: str, profile: str | None)
     help="Maximum agents to run in parallel.",
 )
 @click.option(
+    "--max-cases",
+    type=click.IntRange(min=1),
+    default=None,
+    cls=GroupedOption,
+    help_group=_TIER3_GROUP,
+    help="Run only the first N eval cases (default: every case); a partial run is not publication evidence.",
+)
+@click.option(
     "--n-attempts",
     type=int,
     default=None,
@@ -1917,6 +1926,7 @@ def validate(
     skip_baseline: bool,
     n_concurrent: int | None,
     max_agents: int | None,
+    max_cases: int | None,
     n_attempts: int | None,
     pass_threshold: float | None,
     stop_on_pass: bool | None,
@@ -2228,6 +2238,7 @@ def validate(
             skip_baseline=skip_baseline,
             n_concurrent=n_concurrent,
             max_agents=max_agents,
+            max_cases=max_cases,
             n_attempts=n_attempts,
             pass_threshold=pass_threshold,
             stop_on_pass=stop_on_pass,
@@ -2355,9 +2366,9 @@ def validate(
         )
     if tier3_result is not None and block_on_agent_eval_effective:
         effective_gate_results.append(tier3_result)
-    from skillevaluator.reporting.base import passes_required_gate
+    from skillevaluator.reporting.run_status import Status, resolve_run_status
 
-    gate_failed = not all(passes_required_gate(result) for result in effective_gate_results)
+    gate_failed = resolve_run_status(effective_gate_results).headline != Status.PASSED
     if quiet:
         _finish_pipeline_view(
             view,
@@ -2826,6 +2837,12 @@ def _tier2_workflow(
 )
 @click.option("--n-concurrent", type=int, default=None)
 @click.option("--max-agents", type=int, default=None)
+@click.option(
+    "--max-cases",
+    type=click.IntRange(min=1),
+    default=None,
+    help="Run only the first N eval cases (default: every case); a partial run is not publication evidence.",
+)
 @click.option("--model", default=None, help="Global agent model override.")
 @click.option("--agent-model", multiple=True, help="Per-agent model override, AGENT=MODEL.")
 @click.option("--custom-dockerfile-mode", type=click.Choice(["preserve", "rebase"]), default=None)
@@ -2885,6 +2902,7 @@ def evaluate(
     stop_on_pass: bool | None,
     n_concurrent: int | None,
     max_agents: int | None,
+    max_cases: int | None,
     model: str | None,
     agent_model: tuple[str, ...],
     custom_dockerfile_mode: str | None,
@@ -2933,6 +2951,7 @@ def evaluate(
         stop_on_pass=stop_on_pass,
         n_concurrent=n_concurrent,
         max_agents=max_agents,
+        max_cases=max_cases,
         model=model,
         agent_model=agent_model,
         custom_dockerfile_mode=custom_dockerfile_mode,

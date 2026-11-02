@@ -29,6 +29,9 @@ from skillevaluator.tier3.harbor.metrics import (
     LEGACY_METRICS,
     PARTIAL_SCORE_POLICY,
     metric_set_for_reward,
+    not_applicable_list,
+    not_applicable_metrics,
+    score_value,
 )
 from skillevaluator.tier3.harbor.resource_usage import agent_execution_seconds
 
@@ -688,6 +691,7 @@ def load_agent_data(
                         continue
                     key = "with_skill" if variant == "with-skill" else "without_skill"
                     agent_info[key] = scores
+                    agent_info[f"_not_applicable_hint_{key}"] = not_applicable_list(data.get("not_applicable_metrics"))
                     if variant == "with-skill" and isinstance(data.get("skill_activation"), dict):
                         agent_info["skill_activation"] = data["skill_activation"]
                     metric_key = "metrics_with_skill" if variant == "with-skill" else "metrics_without_skill"
@@ -745,6 +749,9 @@ def load_agent_data(
                         **_execution_error_details(data, len(condition_errors)),
                         "expected_attempts": _nonnegative_counter(data.get("expected_attempts")),
                         "scored_attempts": _nonnegative_counter(data.get("scored_attempts")),
+                        "recovered_attempts_total": _nonnegative_counter(data.get("recovered_attempts_total")),
+                        "recovered_attempts": data.get("recovered_attempts", []),
+                        "recovered_trial_failures": data.get("recovered_trial_failures", []),
                     }
                     count_key = "num_trials" if variant == "with-skill" else "num_trials_baseline"
                     num_trials = data.get("num_trials")
@@ -935,6 +942,19 @@ def load_agent_data(
                     agent_info[field] = None
                 else:
                     agent_info[field] = [] if field.startswith("rewards") else {}
+        for condition, rewards_key in (("with_skill", "rewards"), ("without_skill", "rewards_baseline")):
+            rows = agent_info.get(rewards_key) or []
+            scores = agent_info.get(condition) or {}
+            validated = (
+                _condition_status(agent_info, condition) == "succeeded"
+                and agent_info.get(f"{rewards_key}_complete") is True
+            )
+            agent_info[f"not_applicable_{condition}"] = (
+                [metric for metric in not_applicable_metrics(rows) if score_value(scores.get(metric)) is None]
+                if validated
+                else []
+            )
+            agent_info[f"not_applicable_validated_{condition}"] = validated
         _attach_truncation(agent_info, agent_diagnostics)
         agents[agent_name] = agent_info
     if selection_diagnostics and agents:

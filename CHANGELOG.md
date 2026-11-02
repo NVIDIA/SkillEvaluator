@@ -243,6 +243,9 @@ All notable changes to SkillEvaluator are documented in this file.
 
 ### Fixed
 
+- Reusable Tier 1 CI always requires Semgrep in scanner subprocesses, so local
+  optional-scanner defaults cannot hide missing CI code-scanning coverage.
+
 - Use public, commit-pinned README image URLs so the wordmark and three-tier
   diagram can render in PyPI package descriptions as well as on GitHub.
 - On Windows, repository root and source-link detection no longer break for

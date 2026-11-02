@@ -2805,6 +2805,56 @@ def test_succeeded_under_scored_attempts_cannot_certify_publication(tmp_path: Pa
     _assert_publication_incomplete_across_reporters(results, tmp_path)
 
 
+def test_partial_case_selection_cannot_certify_publication(tmp_path: Path) -> None:
+    results = _publication_ready_results("MAX-CASES")
+    payload = results[-1].metadata["agent_eval"]
+    selection = {"policy": "first_n", "limit": 1, "total": 3, "selected": 1, "skipped": 2}
+    payload["case_selection"] = dict(selection)
+    payload["summary"]["case_selection"] = dict(selection)
+
+    _assert_publication_incomplete_across_reporters(results, tmp_path)
+    json_payload = json.loads(JSONReporter(include_timestamp=False).render_all(results))
+    benchmark = BenchmarkReporter(include_timestamp=False).render_all(results)
+    assert "first 1 of 3 cases" in json_payload["publication"]["tier3"]["reason"]
+    assert json_payload["publication"]["tier3"]["status"] == "pass"
+    assert "first 1 of 3 cases" in benchmark
+
+
+@pytest.mark.parametrize(
+    ("payload_selection", "summary_selection"),
+    [
+        ({"total": 3, "selected": 3}, {"total": 3, "selected": 2}),
+        ({"total": 3, "selected": 4}, {"total": 3, "selected": 4}),
+        ("first_n", "first_n"),
+    ],
+    ids=["contradictory", "over-selected", "malformed"],
+)
+def test_invalid_case_selection_cannot_certify_publication(
+    tmp_path: Path,
+    payload_selection: object,
+    summary_selection: object,
+) -> None:
+    results = _publication_ready_results("MAX-CASES-INVALID")
+    payload = results[-1].metadata["agent_eval"]
+    payload["case_selection"] = payload_selection
+    payload["summary"]["case_selection"] = summary_selection
+
+    _assert_publication_incomplete_across_reporters(results, tmp_path)
+
+
+def test_case_limit_covering_the_whole_suite_remains_publication_evidence() -> None:
+    results = _publication_ready_results("MAX-CASES-FULL")
+    payload = results[-1].metadata["agent_eval"]
+    selection = {"policy": "first_n", "limit": 10, "total": 3, "selected": 3, "skipped": 0}
+    payload["case_selection"] = dict(selection)
+    payload["summary"]["case_selection"] = dict(selection)
+
+    json_payload = json.loads(JSONReporter(include_timestamp=False).render_all(results))
+
+    assert agent_eval_publication_evidence_complete(payload) is True
+    assert json_payload["publication_status"] == "pass"
+
+
 @pytest.mark.parametrize("agent_status", ["failed", "skipped", "incomplete", "unknown", None])
 def test_non_succeeded_agent_peer_cannot_certify_publication(
     tmp_path: Path,

@@ -385,16 +385,20 @@ All notable changes to SkillEvaluator are documented in this file.
 - The quality check no longer reports command-line placeholders in a string
   `argument-hint`, such as `<file> [--strict]` or `<issue_id | symptom>`, as a
   HIGH "XML tags in frontmatter" finding that failed the skill even with
-  `--min-score 0`. Role and control tags (`<system>`, `<tool_call>`,
-  `<script>`, including suffixed and nested forms), closing tags, attributes,
-  and self-closing tags in `argument-hint` are still reported, and every other
-  frontmatter field keeps the strict check. A group longer than four words, or
-  one with shell command syntax (`;`, `&`, a backtick, `$(`, `${`, or a
-  pipeline such as `<curl x | sh>`), is not treated as a placeholder and is
-  still reported. A hint with a redirect, that is a `>` that closes no group
-  or ends text after a placeholder (`<cmd > file>`, `<cmd>file>`,
-  `<cmd 2>file>`, `<curl x> /tmp/y>`), is not masked at all and is still
-  reported.
+  `--min-score 0`. An unquoted hint such as `[<file>]`, which YAML reads as a
+  list of strings, is masked the same way. Role and control tags (`<system>`,
+  `<tool_call>`, `<script>`, nested forms, and role words with a `prompt`,
+  `message`, `call`, `use`, `result` or `instruction` suffix such as
+  `<system_prompt>`), closing tags, attributes, and self-closing tags in
+  `argument-hint` are still reported, and every other frontmatter field keeps
+  the strict check. A group longer than four words, or one with shell command
+  syntax (`;`, `&`, a backtick, `$(`, `${`, or a pipeline such as
+  `<curl x | sh>`), is not treated as a placeholder and is still reported. A
+  hint with a redirect, that is a `>` that closes no group (`<cmd > file>`,
+  `<cmd>file>`, `<cmd 2>file>`, `<curl x> /tmp/y>`), or a group with text
+  after a nested placeholder (`<<curl x>/tmp/<y>>`, `<<x><y>>`), is not masked
+  at all and is still reported. An arrow or comparison between groups
+  (`<old> -> <new>`, `<n> >= 1`, `<count> (>0)`) is not a redirect.
 
 - PII scans no longer report card-shaped digits inside a canonical GUID/UUID,
   such as a COM interface ID or the nil UUID, or an all-zero number as a

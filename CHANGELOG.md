@@ -383,10 +383,12 @@ All notable changes to SkillEvaluator are documented in this file.
   when Harbor's best-effort Codex cleanup is skipped, for example after a
   timeout or cancellation. Merging the per-attempt jobs now omits the leftover
   `codex-home` and `codex-secrets` directories in each trial's `agent/` or
-  `steps/<step>/agent/` directory. Their linked `auth.json` made the merge fail
-  closed, and a regular-file `auth.json` was copied into the merged job with
-  the Codex credential. Symlink and hard-link checks still apply everywhere
-  else, including to the same names at any other depth.
+  `steps/<step>/agent/` directory, including steps whose names span several
+  path components, such as `phase/author`, as declared in the trial's
+  `result.json`. Their linked `auth.json` made the merge fail closed, and a
+  regular-file `auth.json` was copied into the merged job with the Codex
+  credential. Symlink and hard-link checks still apply everywhere else,
+  including to the same names at any other depth.
 - A `SKILL.md` over the recommended 5,000-token budget now gets a MEDIUM
   `quality_efficiency` finding instead of a HIGH one. The HIGH finding failed
   the quality check, and with it `validate`, `tier1`, and `quality-check`, even

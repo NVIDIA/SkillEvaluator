@@ -1486,15 +1486,46 @@ _LOCAL_CODEX_KEY = "sk-codex-codex-codex"
 _LOCAL_CODEX_AUTH = json.dumps({"OPENAI_API_KEY": _LOCAL_CODEX_KEY})
 
 
+def _declare_trial_steps(job_dir: Path, trial_name: str, step_names: list[str], *, in_root: bool = False) -> None:
+    """Turn a fixture trial into a multi-step one that declares ``step_names``.
+
+    ``in_root`` moves the trial result into the attempt root's ``trial_results``
+    entry, which the merge reads when the trial's own result is missing.
+    """
+    trial_result_path = job_dir / trial_name / "result.json"
+    payload = json.loads(trial_result_path.read_text(encoding="utf-8"))
+    payload["agent_result"] = None
+    payload["step_results"] = [{"step_name": name} for name in step_names]
+    if not in_root:
+        trial_result_path.write_text(json.dumps(payload), encoding="utf-8")
+        return
+    trial_result_path.unlink()
+    root_result_path = job_dir / "result.json"
+    root_payload = json.loads(root_result_path.read_text(encoding="utf-8"))
+    root_payload["trial_results"] = [payload]
+    root_result_path.write_text(json.dumps(root_payload), encoding="utf-8")
+
+
 # Single-step trials keep agent logs in <trial>/agent. Harbor's multi-step
-# trials move them into <trial>/steps/<step>/agent after each step.
-@pytest.mark.parametrize("step_root", [".", "steps/step-1"])
+# trials move them into <trial>/steps/<step>/agent after each step, and a step
+# name may span several path components ("phase/author").
+@pytest.mark.parametrize(
+    ("step_root", "declared_in"),
+    [
+        (".", None),
+        ("steps/step-1", None),
+        ("steps/step-1", "trial"),
+        ("steps/phase/author", "trial"),
+        ("steps/phase/author", "root"),
+    ],
+)
 @pytest.mark.parametrize("auth_layout", ["secrets-link", "host-link", "regular-file"])
 @pytest.mark.parametrize("descriptor_backend", [False, True])
 def test_merge_attempt_jobs_omits_leftover_local_codex_credential_dirs(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
     step_root: str,
+    declared_in: str | None,
     auth_layout: str,
     descriptor_backend: bool,
 ) -> None:
@@ -1505,6 +1536,9 @@ def test_merge_attempt_jobs_omits_leftover_local_codex_credential_dirs(
     job_dir = tmp_path / "attempt-001"
     trial_name = "case-001__trial"
     _write_current_harbor_attempt(job_dir, trial_name=trial_name, root_completed=1)
+    if declared_in is not None:
+        step_name = step_root.removeprefix("steps/")
+        _declare_trial_steps(job_dir, trial_name, [step_name], in_root=declared_in == "root")
     trial_dir = job_dir / trial_name
     # Harbor's Codex agent writes (or uploads the host's) auth.json into
     # codex-secrets and links codex-home/auth.json to it. Local mode keeps both
@@ -1560,6 +1594,8 @@ def test_merge_attempt_jobs_omits_leftover_local_codex_credential_dirs(
     assert leaked == []
     merged_result = json.loads((merged_trial / "result.json").read_text(encoding="utf-8"))
     assert merged_result["verifier_result"]["rewards"] == {"reward": 1.0}
+    if declared_in is not None:
+        assert [step["step_name"] for step in merged_result["step_results"]] == [step_root.removeprefix("steps/")]
     # The source attempt is left as it was; only the aggregate omits the dirs.
     assert auth.is_symlink() is (auth_layout != "regular-file")
     assert auth.read_text(encoding="utf-8") == _LOCAL_CODEX_AUTH
@@ -1597,6 +1633,10 @@ def test_merge_attempt_jobs_codex_exclusions_track_local_codex_runtime_dirs() ->
         "steps/step-1/agent/codex-home-other/auth.json",
         "steps/step-1/artifacts/agent/codex-home/auth.json",
         "steps/step-1/nested/agent/codex-home/auth.json",
+        "steps/phase/author/nested/agent/codex-home/auth.json",
+        "steps/phase/author/artifacts/agent/codex-secrets/auth.json",
+        "steps/other/author/agent/codex-home/auth.json",
+        "steps/x/agent/agent/codex-home/auth.json",
         "agent/steps/step-1/agent/codex-home/auth.json",
         "other/step-1/agent/codex-home/auth.json",
     ],
@@ -1606,8 +1646,16 @@ def test_merge_attempt_jobs_rejects_auth_links_outside_trial_codex_dirs(
     relative_auth: str,
 ) -> None:
     job_dir = tmp_path / "attempt-001"
-    auth = job_dir / "case-001__trial" / relative_auth
+    trial_dir = job_dir / "case-001__trial"
+    auth = trial_dir / relative_auth
     auth.parent.mkdir(parents=True)
+    # Declared step names extend the exclusion only to their own agent dirs;
+    # names that would leave the steps dir are not trusted.
+    declared_steps = ["phase/author", "../agent", "x/../x/agent", "/abs"]
+    (trial_dir / "result.json").write_text(
+        json.dumps({"step_results": [{"step_name": name} for name in declared_steps]}),
+        encoding="utf-8",
+    )
     host_auth = tmp_path / "host-auth.json"
     host_auth.write_text("private\n", encoding="utf-8")
     try:

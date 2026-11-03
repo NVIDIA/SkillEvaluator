@@ -18,7 +18,6 @@ DEFAULT_QUALITY_CONFIG = files("skillevaluator.config").joinpath("quality-defaul
 _ATX_HEADING_RE = re.compile(r"^(#{1,6})[ \t]+(.+?)(?:[ \t]+#+)?[ \t]*$")
 _TOP_LEVEL_KEYS = frozenset({"expected_headers", "error_handling"})
 _EXPECTED_HEADER_KEYS = frozenset({"heading", "alternatives", "points", "message", "suggestion"})
-# Each error-handling rule's list key: whole-word "terms" for SKILL.md, substring "markers" for code.
 _ERROR_HANDLING_LIST_KEYS = {"mentioned": "terms", "scripts": "markers", "lib": "markers"}
 
 
@@ -126,14 +125,13 @@ def _validate_entries(value: object, source: str, location: str, *, ignore_case:
 
 
 def _parse_error_handling(raw: object, source: str, base: ErrorHandlingConfig | None) -> ErrorHandlingConfig:
-    """Validate error_handling. Without a base every key is required; with one, omitted blocks and keys keep it."""
     if not isinstance(raw, dict):
         raise QualityConfigError(f"{source}: error_handling must be a mapping")
     _reject_unknown_keys(raw, frozenset(_ERROR_HANDLING_LIST_KEYS), source, "error_handling")
     parsed = {}
     for name, list_key in _ERROR_HANDLING_LIST_KEYS.items():
         location = f"error_handling.{name}"
-        block = raw.get(name, {}) if base else raw.get(name)
+        block = raw.get(name) if base is None else raw.get(name, {})
         if not isinstance(block, dict):
             raise QualityConfigError(f"{source}: {location} must be a mapping")
         allowed = frozenset({"points", "message", "suggestion", list_key})
@@ -142,7 +140,7 @@ def _parse_error_handling(raw: object, source: str, base: ErrorHandlingConfig | 
             missing = sorted(allowed - block.keys())
             if missing:
                 raise QualityConfigError(f"{source}: {location} is missing key(s): {', '.join(missing)}")
-        merged = {**(base[name] if base else {}), **block}
+        merged = block if base is None else {**base[name], **block}
         parsed[name] = {
             "points": _validate_points(merged["points"], source, location),
             "message": _validate_text(merged["message"], source, f"{location}.message"),
@@ -247,7 +245,6 @@ def load_quality_config(path: Path | None = None) -> QualityConfig:
             }
         )
 
-    # expected_headers replaces the packaged list; error_handling overlays the packaged rules.
     if path is None:
         error_handling = _parse_error_handling(raw.get("error_handling"), source, base=None)
     else:

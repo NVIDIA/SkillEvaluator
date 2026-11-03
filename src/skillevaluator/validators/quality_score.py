@@ -65,7 +65,6 @@ def _contains_any_term(text: str, terms: Iterable[str]) -> bool:
 
 
 def _contains_any_word(text: str, words: Iterable[str]) -> bool:
-    """Whole-word, case-insensitive match where any Unicode letter or digit counts as part of a word."""
     pattern = "|".join(re.escape(word) for word in words)
     return bool(re.search(rf"\b(?:{pattern})\b", text, re.IGNORECASE))
 
@@ -663,7 +662,6 @@ class QualityScoreValidator(ValidatorBase):
 
         mentioned = error_handling["mentioned"]
         qs.has_error_handling = _contains_any_word(content, mentioned["terms"])
-        # A rule with points 0 is turned off, so it adds no finding.
         if not qs.has_error_handling and mentioned["points"]:
             dim.deduct(mentioned["points"], "info", mentioned["message"], mentioned["suggestion"])
 
@@ -684,7 +682,6 @@ class QualityScoreValidator(ValidatorBase):
 
     @staticmethod
     def _check_code_error_handling(dim, files: list[Path], rule: CodeErrorHandlingRule) -> None:
-        """Deduct once when files have neither a try/except pair nor any configured marker."""
         if not rule["points"]:
             return
         unhandled = []

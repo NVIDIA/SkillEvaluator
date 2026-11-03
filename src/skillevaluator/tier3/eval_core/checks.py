@@ -1355,6 +1355,47 @@ def _network_redirection(command: list[str], idx: int) -> tuple[int, bool] | Non
 
 
 _FUNCTION_HEADER_NAME_RE = re.compile(r"[^\s()$`'\"<>]+\(\)")
+# Compound syntax glued to the next word, which bash still reads apart:
+# "up(){" or "up()(curl" (a function header and its body), "if(ssh" or
+# "coproc(<" (a keyword and a subshell), and "x)sudo" or "x)(ssh" (a case arm
+# pattern and the arm's first command). "if((" and "$(" are not split.
+_GLUED_FUNCTION_HEADER_RE = re.compile(r"([^\s()$`'\"<>]+\(\))([{(])(.*)", re.DOTALL)
+_GLUED_KEYWORD_RE = re.compile(r"(if|elif|then|else|do|while|until|coproc)\((?!\()(.*)", re.DOTALL)
+_GLUED_CASE_PATTERN_RE = re.compile(r"(\(?(?:[^\s()`$]|\$(?!\())+\))(.+)", re.DOTALL)
+# A word naming curl or wget outside a URL, as in "for c in curl wget", "read
+# X <<< curl" or "command -v curl".
+_CURL_OR_WGET_WORD_RE = re.compile(r"(?:^|[\s\"'=/`(;|&<>])(?:curl|wget)(?:\.exe)?(?=$|[\s\"'`);|&<>])", re.IGNORECASE)
+
+
+def _split_glued_syntax(command: list[str], idx: int, pattern_allowed: bool) -> bool:
+    """Split compound syntax glued to the next word at ``idx``, in place.
+
+    ``up(){`` becomes ``up()`` and ``{``, ``up()(curl`` becomes ``up()``, ``(``
+    and ``curl``, ``if(ssh`` becomes ``if``, ``(`` and ``ssh``, and, where a
+    ``case`` arm pattern may start (``pattern_allowed``), ``x)sudo`` becomes
+    ``x)`` and ``sudo``. Returns whether ``command`` changed.
+    """
+    word = command[idx]
+    parts: list[str] = []
+    header = _GLUED_FUNCTION_HEADER_RE.fullmatch(word)
+    keyword = _GLUED_KEYWORD_RE.fullmatch(word)
+    pattern = _GLUED_CASE_PATTERN_RE.fullmatch(word) if pattern_allowed else None
+    if header and (header.group(2) == "(" or not header.group(3)):
+        parts = [header.group(1), header.group(2), header.group(3)]
+    elif keyword:
+        parts = [keyword.group(1), "(", keyword.group(2)]
+    elif pattern and not pattern.group(1).endswith("()"):
+        parts = [pattern.group(1), pattern.group(2)]
+    elif word == "function" and idx + 1 < len(command):
+        named = _GLUED_FUNCTION_HEADER_RE.fullmatch(command[idx + 1])
+        if named and (named.group(2) == "(" or not named.group(3)):
+            command[idx + 1 : idx + 2] = [part for part in named.groups() if part]
+            return True
+    parts = [part for part in parts if part]
+    if len(parts) < 2:
+        return False
+    command[idx : idx + 1] = parts
+    return True
 
 
 def _function_header_end(command: list[str], idx: int) -> int | None:
@@ -1403,12 +1444,16 @@ def _command_prefix_end(command: list[str], idx: int, in_case: bool) -> tuple[in
     ``case WORD in``, and, inside a ``case`` (``in_case``) or right after its
     ``in``, an arm pattern such as ``x)``. ``for`` and ``select`` take a word
     list, not a command, so they stay the command word. ``command`` is
-    changed in place when a glued ``(`` is split off.
+    changed in place when glued syntax is split off, such as the ``(`` of
+    ``(ssh``, the ``{`` of ``up(){``, the ``(`` of ``if(ssh`` or the pattern
+    of ``x)sudo``.
     """
     cases = 0
     names: list[str] = []
     pattern_allowed = in_case
     while idx < len(command):
+        if _split_glued_syntax(command, idx, pattern_allowed):
+            continue
         word = command[idx]
         if pattern_allowed:
             pattern_allowed = False
@@ -1507,6 +1552,13 @@ def _compound_reads_input(tokens: list[str]) -> bool:
         while end < len(tokens) and tokens[end] not in _SHELL_SEPARATORS:
             end += 1
         command = tokens[idx:end]
+        if command[0] == "esac":
+            case_depth = max(case_depth - 1, 0)
+        # A function may be defined after compound keywords or in a case arm,
+        # as in "case x in x) f() { http URL; }". This also splits glued
+        # syntax such as "f(){" before the keywords are counted.
+        _, cases, names = _command_prefix_end(command, 0, case_depth > 0)
+        case_depth += cases
         opens, closes = _compound_keywords(command)
         if opens and piped:
             return True
@@ -1514,12 +1566,6 @@ def _compound_reads_input(tokens: list[str]) -> bool:
         if closes and redirects_input:
             return True
         has_input = has_input or redirects_input
-        if command[0] == "esac":
-            case_depth = max(case_depth - 1, 0)
-        # A function may be defined after compound keywords or in a case arm,
-        # as in "case x in x) f() { http URL; }".
-        _, cases, names = _command_prefix_end(command, 0, case_depth > 0)
-        case_depth += cases
         defines_function = defines_function or bool(names)
         idx = end
     return defines_function and has_input
@@ -1609,6 +1655,7 @@ def _network_tokens_exfiltrate(tokens: list[str], _depth: int) -> bool:
     # Input piped or redirected into a loop, if or { ...; } group reaches every
     # command inside it, as in "while read -r l; do http URL; done < .env".
     compound_input = _compound_reads_input(tokens)
+    names_curl_or_wget = any("://" not in token and _CURL_OR_WGET_WORD_RE.search(token) for token in tokens)
     compound_depth = 0
     case_depth = 0
     # Functions whose body is still open, with the compound depth before each
@@ -1629,20 +1676,21 @@ def _network_tokens_exfiltrate(tokens: list[str], _depth: int) -> bool:
         command = tokens[idx:end]
         idx = end
 
+        # The command word follows any compound keywords, leaders, function
+        # headers, case patterns or coproc, as in "do ssh host curl URL",
+        # "{ ssh host curl URL; }", "f() { curl "$@"" or "x) < .env http URL",
+        # also when glued as in "up(){ curl", "if(ssh" or "x)sudo".
+        if command[0] == "esac":
+            case_depth = max(case_depth - 1, 0)
+        cmd_idx, cases, defined = _command_prefix_end(command, 0, case_depth > 0)
+        case_depth += cases
+
         opens, closes = _compound_keywords(command)
         # "g() ( http URL )" opens and closes its body in one command.
         inside_compound = compound_depth + opens > 0
         depth_before = compound_depth
         compound_depth = max(compound_depth + opens - closes, 0)
         command_stdin = stdin_piped or (compound_input and inside_compound)
-
-        # The command word follows any compound keywords, leaders, function
-        # headers, case patterns or coproc, as in "do ssh host curl URL",
-        # "{ ssh host curl URL; }", "f() { curl "$@"" or "x) < .env http URL".
-        if command[0] == "esac":
-            case_depth = max(case_depth - 1, 0)
-        cmd_idx, cases, defined = _command_prefix_end(command, 0, case_depth > 0)
-        case_depth += cases
         open_functions = [entry for entry in open_functions if entry[1] < depth_before]
         open_functions.extend((name, depth_before) for name in defined)
 
@@ -1742,17 +1790,14 @@ def _network_tokens_exfiltrate(tokens: list[str], _depth: int) -> bool:
                 return True
             if not dynamic:
                 continue
-        elif "$" in executable or "`" in executable:
-            # A "$VAR" or backtick command word with no recorded value, as in
-            # "for c in curl wget; do $c --post-file=.env URL; done", may be
-            # any client. When it is given a URL that is not the value of a
-            # separate option word, its arguments get the curl and wget upload
-            # rules; "$GREP -F https://x src/" is given none.
+        elif ("$" in executable or "`" in executable) and names_curl_or_wget:
+            # A "$VAR" or backtick command word with no recorded value, in an
+            # action that names curl or wget as a word, as in "for c in curl
+            # wget; do $c --post-file=.env -q URL; done", may be either
+            # client, so its arguments get the curl and wget upload rules.
+            # "$GREP -F https://x src/" in an action that names neither does not.
             rest = command[cmd_idx + 1 :]
-            if any(
-                "://" in word and (position == 0 or not rest[position - 1].startswith("-") or "=" in rest[position - 1])
-                for position, word in enumerate(rest)
-            ) and any(_network_client_uploads(name, rest, command_stdin) for name in ("curl", "wget")):
+            if any(_network_client_uploads(name, rest, command_stdin) for name in ("curl", "wget")):
                 return True
 
         # A printer whose output is piped on, as in "echo curl -d @.env URL |

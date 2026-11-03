@@ -520,7 +520,12 @@ dataset iteration, `--skip-baseline` removes the without-skill arm and usually
 cuts the live trial count roughly in half, but that run cannot produce Skill
 Lift. Re-enable the baseline for any result you intend to compare or publish.
 For multi-attempt runs, `--stop-on-pass` can avoid remaining attempts after a
-pass; it is rejected with `--n-attempts 1`. By contrast,
+pass; it is rejected with `--n-attempts 1`. To try a large dataset before
+paying for every case, `--max-cases N` (or `harbor.max_cases`) runs only the
+first N cases in staged order: eval dataset order, or task-directory name
+order for native Harbor tasks. The run records the selection in
+`run_config.json`, its dataset snapshot covers only the cases that ran, and
+reports mark it publication-incomplete when cases were skipped. By contrast,
 `--n-concurrent` and `--max-agents` control parallelism and elapsed time; they
 do not reduce the total planned trials or model work.
 
@@ -552,10 +557,13 @@ The high-signal flags, with defaults:
 | `--pass-threshold` | `0.5` | Score an attempt needs to count as passed |
 | `--n-concurrent` | `4` | Concurrent eval cases per agent |
 | `--max-agents` | selected-agent count | Maximum agents run in parallel |
+| `--max-cases` | every case | Run only the first N eval cases; a run that skips cases is not publication evidence |
 | `--skip-baseline` | off | Skip the without-skill arm; faster, but no Skill Lift |
+| `--skip-with-skill` | off | Run only the without-skill arm, for example to calibrate a task set; the report shows baseline scores with no Skill Lift or skill verdict |
 | `--stop-on-pass` | off | Stop a case's remaining attempts once one passes |
 | `--agent-runtime-preflight` | off | Add one agent-only execution of the first staged task per agent before the full A/B matrix; `--no-agent-runtime-preflight` overrides a config value that enables it |
 | `--progress` | `auto` | Progress rendering: `auto`, `rich` (live TTY view with secret redaction), `plain`, or `off` |
+| `--progress-interval` | mode default | Seconds between progress heartbeats: 1 for `rich`, 60 for `plain` lines in CI and redirected output |
 | `--autopilot` | off | When no evaluation source exists, generate exactly one eval case — with the configured provider, falling back to a deterministic keyless template — never overwriting an existing source |
 | `--grading-mode` | `default` | `default`, `default_plus_custom`, or `custom_only` — see [Custom Graders & Tasks](custom-graders.mdx) |
 | `--results-dir` | `evals/results`, or `SKILLEVALUATOR_RESULTS_DIR` when set | Write results under an external root instead of the skill directory; custom in-skill roots are rejected |
@@ -571,6 +579,28 @@ modes, is in the [CLI Reference](cli-reference.mdx).
 While iterating on a dataset, `--skip-baseline` roughly halves the runtime.
 Re-enable the baseline arm for any run whose Skill Lift you intend to trust.
 </Tip>
+
+### Baseline-only runs
+
+`--skip-with-skill` is the counterpart of `--skip-baseline`: it stages and runs
+only the without-skill arm. Use it to measure how agents do on a task set
+before the skill exists, or to re-measure a baseline after a model or harness
+change without paying for with-skill trials.
+
+```bash title="Baseline-only calibration run"
+skillevaluator tier3 evaluate ./my-skill --agents codex --skip-with-skill
+```
+
+The run is reported as a baseline calibration, not a skill evaluation. The
+overall score and best agent come from the baseline arm, the with-skill arm is
+recorded as `skipped`, with-skill scores and Skill Lift are unavailable (shown
+as `skipped` or N/A, never 0.0), and the verdict stays NEUTRAL because no skill
+was measured. The two flags are mutually
+exclusive, and baseline isolation rules still apply: a config that sets
+`harbor.pre_agent_setup` (or `setup_commands`) is rejected, because the
+baseline arm must stay isolated from skill-owned setup commands. `validate`
+does not accept `--skip-with-skill`, so a baseline-only run can never satisfy a
+Tier 3 gate.
 
 ## How standard grading judges a trial
 
@@ -610,6 +640,29 @@ neither `trajectory.json` nor a supported log yields any steps, the reward
 records `No trajectory or reconstructible agent log`. Custom graders read
 `trajectory.json` directly and do not get this rebuild.
 
+### Character-sensitive judging
+
+Set `SKILL_EVAL_JUDGE_CHARACTER_FACTS=1` in the evaluator's host environment to
+append character facts to the `accuracy`, `goal_accuracy`, and `behavior_check`
+prompts. For example, a literal U+00A0 (NO-BREAK SPACE) in code can look like an
+ordinary U+0020 space even when the task treats them differently. The metadata
+identifies non-ASCII whitespace and Unicode format (`Cf`) characters by code
+point, Unicode name, position, and ASCII-escaped context. Their presence alone
+does not indicate an error; the task determines which characters are permitted.
+
+The original prompt and evidence remain intact. Metadata is added separately,
+after evidence selection and compaction, with up to 20 occurrences per field
+and 20 code points of context on either side. Additional occurrences are counted.
+The metadata adds prompt tokens beyond the evidence budgets below.
+Line and column positions are one-based Unicode code points in that field; only
+LF advances the line number. Metadata cannot recover characters removed by
+earlier processing, and does not identify all invisible or look-alike characters.
+
+The option is disabled by default. Enabling it selects the prompt-based goal
+judge instead of the optional RAGAS route, so keep this setting consistent when
+comparing scores. Facts can help a judge interpret evidence but do not guarantee
+correct judgments. Prefer executable checks for requirements they can verify.
+
 ### Evidence budgets
 
 Each LLM judge sees a bounded evidence bundle drawn from the trajectory rather
@@ -634,7 +687,11 @@ clipped cannot count, so on a long trajectory a behavior that appears only in
 truncated history can be judged as not observed. In the results tree, each
 judge's details in a trial's `reward.json` include an `omitted` record
 (`count`, `truncated`, and `reason`); when `truncated` is `true` on cases that
-matter, raise that judge's budget. Larger budgets send longer judge prompts and
+matter, raise that judge's budget. For `behavior_check`, the reason names the
+other possible cause: the final-response section limit. When a behavior
+bundle's `truncated` comes from that limit rather than the budget, raise
+`SKILL_EVAL_BEHAVIOR_FINAL_RESPONSE_LIMIT` instead; raising
+`SKILL_EVAL_BEHAVIOR_CHECK_BUDGET` does not clear it. Larger budgets send longer judge prompts and
 use more evaluator tokens. The behavior budget never falls below the
 final-response limit plus 4,000 characters, so raising the limit leaves room
 for the tool history. Set these variables in the host environment;
@@ -683,10 +740,13 @@ in [Judge evidence budgets](environment-variables.mdx#judge-evidence-budgets).
   `AgentGoalAccuracyWithReference` scorer through its own client, without the
   schema or retry handling above but within the same time budget. If RAGAS is
   unavailable or fails, the prompt judge runs instead.
-- **Transient failures.** HTTP 429, 500, 502, 503, and 504 responses,
-  connection errors, timeouts, and Bedrock throttling or service-unavailable
-  errors are retried transparently with jittered exponential backoff. A
-  `Retry-After` header, in seconds or as an HTTP date, sets the wait; a value
+- **Transient failures.** HTTP 408, 429, and every 5xx response except 501 and
+  505 are retried, including 520–524 proxy errors and 529 overload responses.
+  Connection errors, timeouts, and Bedrock throttling or service-unavailable
+  errors are also retried with jittered exponential backoff. TLS certificate
+  verification failures are terminal, including when an SDK wraps them as a
+  generic connection or service-unavailable error. A `Retry-After` header,
+  in seconds or as an HTTP date, sets the wait; a value
   above the maximum retry delay fails immediately instead of stalling.
 - **Time budget.** Each judge has its own wall-time budget (180 seconds by
   default) inside the generated task's 600-second verifier timeout, which

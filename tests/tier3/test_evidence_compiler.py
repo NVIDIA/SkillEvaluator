@@ -398,3 +398,38 @@ def test_behavior_bundle_complete_evidence_is_not_reported_truncated() -> None:
         assert bundle["omitted"]["truncated"] is False
         assert bundle["omitted"]["count"] == 0
         assert bundle["omitted"]["reason"] == ""
+
+
+def test_behavior_bundle_mid_length_final_answer_in_history_is_not_truncated() -> None:
+    # A final answer past the final-response section cap (784 of the default
+    # 800 characters) still reaches the judge in full when the compact
+    # history repeats the text-only final step verbatim (up to 1,500
+    # characters). The accounting must not flag that as truncated: nothing
+    # the judge reads is missing.
+    marker = "MID_ANSWER_COVERAGE_TOKEN"
+    answer = "x" * 550 + marker + "y" * 620
+    assert 800 < len(answer) < 1500
+    traj = {"steps": [{"source": "agent", "message": answer}]}
+
+    for module in (atif_helpers, _load_harbor_template_module()):
+        bundle = module.build_metric_evidence_bundles(traj, "Summarize the run.")["behavior_check"]
+        assert marker in bundle["prompt_evidence"]
+        assert bundle["omitted"]["truncated"] is False
+        assert bundle["omitted"]["count"] == 0
+        assert bundle["omitted"]["reason"] == ""
+
+
+def test_behavior_bundle_final_answer_past_history_repeat_is_truncated() -> None:
+    # Past the history repeat, the middle of the final answer is genuinely
+    # missing from the evidence, and the reason names the setting that
+    # applied so users know which limit to raise.
+    marker = "DEEP_ANSWER_COVERAGE_TOKEN"
+    answer = "A" * 2000 + marker + "B" * 2000
+    traj = {"steps": [{"source": "agent", "message": answer}]}
+
+    for module in (atif_helpers, _load_harbor_template_module()):
+        bundle = module.build_metric_evidence_bundles(traj, "Explain the migration.")["behavior_check"]
+        assert marker not in bundle["prompt_evidence"]
+        assert bundle["omitted"]["truncated"] is True
+        assert bundle["omitted"]["count"] >= 1
+        assert "SKILL_EVAL_BEHAVIOR_FINAL_RESPONSE_LIMIT" in bundle["omitted"]["reason"]

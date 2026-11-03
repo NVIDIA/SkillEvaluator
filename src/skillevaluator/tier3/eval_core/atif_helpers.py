@@ -16,23 +16,42 @@ import os
 import re
 from typing import Any
 
-from skillevaluator.evidence import evidence_ref_identity
-from skillevaluator.tier3.eval_core.codex_tool_call_normalizer import (
-    atif_content_has_text,
-    atif_content_text,
-    normalized_tool_call_error_flag,
-    normalized_tool_call_is_error,
-)
-from skillevaluator.tier3.eval_core.codex_tool_call_normalizer import (
-    iter_normalized_tool_calls as iter_tool_calls,
-)
-from skillevaluator.tier3.eval_core.codex_tool_call_normalizer import (
-    normalized_tool_call_observation as _tool_call_observation,
-)
-from skillevaluator.tier3.eval_core.codex_tool_call_normalizer import (
-    normalized_tool_call_wrapper_observation as _tool_call_wrapper_observation,
-)
-from skillevaluator.tier3.eval_core.secret_redaction import redact_secrets_in_log_line
+if __package__:
+    from skillevaluator.evidence import evidence_ref_identity
+    from skillevaluator.tier3.eval_core.codex_tool_call_normalizer import (
+        atif_content_has_text,
+        atif_content_text,
+        normalized_tool_call_error_flag,
+        normalized_tool_call_is_error,
+    )
+    from skillevaluator.tier3.eval_core.codex_tool_call_normalizer import (
+        iter_normalized_tool_calls as iter_tool_calls,
+    )
+    from skillevaluator.tier3.eval_core.codex_tool_call_normalizer import (
+        normalized_tool_call_observation as _tool_call_observation,
+    )
+    from skillevaluator.tier3.eval_core.codex_tool_call_normalizer import (
+        normalized_tool_call_wrapper_observation as _tool_call_wrapper_observation,
+    )
+    from skillevaluator.tier3.eval_core.secret_redaction import redact_secrets_in_log_line
+else:  # Standalone helper staged beside the verifier.
+    from codex_tool_call_normalizer import (
+        atif_content_has_text,
+        atif_content_text,
+        normalized_tool_call_error_flag,
+        normalized_tool_call_is_error,
+    )
+    from codex_tool_call_normalizer import (
+        iter_normalized_tool_calls as iter_tool_calls,
+    )
+    from codex_tool_call_normalizer import (
+        normalized_tool_call_observation as _tool_call_observation,
+    )
+    from codex_tool_call_normalizer import (
+        normalized_tool_call_wrapper_observation as _tool_call_wrapper_observation,
+    )
+    from evidence import evidence_ref_identity
+    from secret_redaction import redact_secrets_in_log_line
 
 
 def get_all_tool_calls(traj: dict[str, Any]) -> list[dict[str, Any]]:
@@ -348,9 +367,7 @@ def build_behavior_evidence(
     fixed-size judge prompt does not miss late file creation.
     """
     effective_final_limit = (
-        _behavior_final_response_limit()
-        if final_response_limit is None
-        else max(1, int(final_response_limit))
+        _behavior_final_response_limit() if final_response_limit is None else max(1, int(final_response_limit))
     )
 
     if max_chars is None:
@@ -372,9 +389,7 @@ def build_behavior_evidence(
     user_needed = (
         min(800, len(_SECTION_USER_REQUEST) + len(question.strip()) + 2) if question and question.strip() else 0
     )
-    history_needed = (
-        len(_SECTION_COMPACT_TOOL_HISTORY) + len(history.strip()) + 2 if history and history.strip() else 0
-    )
+    history_needed = len(_SECTION_COMPACT_TOOL_HISTORY) + len(history.strip()) + 2 if history and history.strip() else 0
     tail_needed = user_needed + (2 if user_needed and history_needed else 0) + history_needed
 
     if file_changes:
@@ -1042,17 +1057,29 @@ def build_metric_evidence_bundles(
     # that was not complete.
     bc_full = build_behavior_evidence(traj, question, max_chars=10**9, final_response_limit=10**9)
     bc_trunc = bc_full != bc_text
+    bc_reason = "behavior evidence shortened to fit the evidence budget or section limits" if bc_trunc else ""
+    if bc_trunc and final:
+        # An unlimited-budget rendering with the usual final-response cap
+        # differs from the reference rendering only in that section. If the
+        # budgeted rendering matches it, the budget itself dropped nothing
+        # and the only loss is the final-response cap. That loss does not
+        # count when the complete final answer still reaches the judge
+        # through the compact history, which repeats a text-only final step
+        # verbatim; when it does count, name the setting that applied.
+        bc_capped = build_behavior_evidence(traj, question, max_chars=10**9)
+        if bc_text == bc_capped:
+            if final.strip() in bc_text:
+                bc_trunc = False
+                bc_reason = ""
+            else:
+                bc_reason = "final response shortened to fit SKILL_EVAL_BEHAVIOR_FINAL_RESPONSE_LIMIT"
     bundles["behavior_check"] = {
         "prompt_evidence": _prepend_facts(bc_text),
         "evidence_refs": refs["behavior_check"],
         "omitted": {
             "count": 1 if bc_trunc else 0,
             "truncated": bc_trunc,
-            "reason": (
-                "behavior evidence shortened to fit the evidence budget or section limits"
-                if bc_trunc
-                else ""
-            ),
+            "reason": bc_reason,
         },
         "verified": facts,
     }

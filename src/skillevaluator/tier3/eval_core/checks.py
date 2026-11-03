@@ -15,6 +15,7 @@ fallback) compared to the earlier single-harness checks.
 from __future__ import annotations
 
 import ast
+import bisect
 import posixpath
 import re
 import shlex
@@ -383,8 +384,9 @@ _APPLY_PATCH_UNMODELLED_SHELL_RE = re.compile(r"#|\$(?=')")
 # header is never left out of the command-text path checks.
 _APPLY_PATCH_SHELL_PATH_RE = re.compile(r"[;&|<>()$`~]")
 # Shell text that feeds apply_patch's output, and with it every header path,
-# somewhere else: a pipe, a redirection, or a command or process substitution.
-_APPLY_PATCH_OUTPUT_USE_RE = re.compile(r"[|>`]|[$<]\(")
+# somewhere else: a pipe, a redirection, a command or process substitution, or a
+# coprocess, whose output the shell reads back through ${NAME[0]}.
+_APPLY_PATCH_OUTPUT_USE_RE = re.compile(r"[|>`]|[$<]\(|\bcoproc\b")
 # Relative header paths resolve against the container WORKDIR unless the call
 # names another directory, for example Codex's "cd <dir> && apply_patch <<'EOF'".
 # A cd, pushd or popd command, its options ("cd -P", "cd --", "pushd -n") and its
@@ -402,19 +404,29 @@ _APPLY_PATCH_CD_RE = re.compile(
 _APPLY_PATCH_UNSETTLED_DIR_RE = re.compile(r"[$`{%]|^[-+]|\\$")
 # Shell text before apply_patch in which the last cd/pushd/popd need not be the one
 # that sets apply_patch's directory: a subshell "(...)", a pipeline or a background
-# job (each runs its cd in a subshell), "||", a compound-command keyword ("if ...
-# then cd ~; else cd /workspace; fi"), or "&&" followed later by another list, as
-# in "false && cd /workspace; apply_patch".
+# job (each runs its cd in a subshell), "||", or a compound-command keyword ("if ...
+# then cd ~; else cd /workspace; fi"). "&&" followed later by another list, as in
+# "false && cd /workspace; apply_patch", is checked by _apply_patch_prefix_is_unsettled
+# outside the regex, so the scan stays linear.
 # A closed quoted string; operators and keywords inside it are text, not shell syntax.
 _APPLY_PATCH_QUOTED_RE = re.compile(r"'[^']*'|\"(?:[^\"\\]|\\.)*\"")
 _APPLY_PATCH_UNSETTLED_PREFIX_RE = re.compile(
-    r"[()]|\|[|&]|(?<![|&>])[|&](?![|&>])|&&[^\n;]*[\n;]"
+    r"[()]|\|[|&]|(?<![|&>])[|&](?![|&>])"
     r"|(?:^|[\s;&|])(?:if|then|else|elif|fi|case|esac|while|until|for|select|do|done|function)(?=[\s;]|$)"
 )
+# CDPATH makes a relative cd operand resolve against its directories first, so
+# "CDPATH=/ cd home" enters /home.
+_APPLY_PATCH_CDPATH_RE = re.compile(r"\bCDPATH\b")
 # "/proc/self/root", "/proc/thread-self/root", "/proc/<pid>/root" and
 # "/proc/<pid>/task/<tid>/root" name a process's root directory, "/" inside the
 # agent container.
 _PROC_ROOT_ALIAS_RE = re.compile(r"proc/(?:self|thread-self|[0-9]+)(?:/task/[0-9]+)?/root")
+# "/proc/self/cwd" (or "thread-self", a pid or a task) names a process's working
+# directory: the call's own for "self" and "thread-self", an unknown one for a pid.
+_PROC_CWD_ALIAS_RE = re.compile(r"proc/(self|thread-self|[0-9]+)(?:/task/[0-9]+)?/cwd")
+# The directory a "/proc/<pid>/cwd" alias of another process resolves to: a name no
+# real directory has, so a path under it is read as being in an unknown directory.
+_UNKNOWN_CWD_ROOT = "/\x01"
 # The directory a relative header is resolved against to read it on its own: a
 # name no real directory has, so ".." out of it is visible.
 _RELATIVE_HEADER_ROOT = "/\x00"
@@ -613,19 +625,45 @@ def _apply_patch_call(tool_call: dict[str, Any], action_lower: str, is_exec_tool
             workdir = _resolved_workdir(value, workdir)
             break
     changes_directory = False
+    quoted = [span for quote in _APPLY_PATCH_QUOTED_RE.finditer(cd_prefix) for span in quote.span()]
     for match in _APPLY_PATCH_CD_RE.finditer(cd_prefix):
         command, options, operand = match.group("command", "options", "operand")
         if command != "cd" and "n" in options:
             # "pushd -n" and "popd -n" edit the directory stack without changing directory.
             continue
         changes_directory = True
-        if command == "popd" or (operand is None and command == "pushd") or _unsettled_cd_operand(operand):
+        if (
+            command == "popd"
+            or (operand is None and command == "pushd")
+            or _unsettled_cd_operand(operand)
+            # A cd inside a closed quoted string, such as a "bash -c 'cd /workspace'"
+            # script or an "eval", runs in whichever shell reads that string.
+            or bisect.bisect_right(quoted, match.start("command")) % 2
+        ):
             workdir = None
         else:
             workdir = _resolved_workdir(operand or "~", workdir)
-    if changes_directory and _APPLY_PATCH_UNSETTLED_PREFIX_RE.search(_APPLY_PATCH_QUOTED_RE.sub("Q", cd_prefix)):
+    if changes_directory and _apply_patch_prefix_is_unsettled(cd_prefix):
         workdir = None
     return patch, workdir, shell
+
+
+def _apply_patch_prefix_is_unsettled(prefix: str) -> bool:
+    """Return whether the last cd/pushd/popd in a shell apply_patch *prefix* may not set its directory.
+
+    Operators and keywords inside closed quoted strings are text. The prefix is
+    unsettled when it matches ``_APPLY_PATCH_UNSETTLED_PREFIX_RE``, when a "&&" is
+    followed later by another list (a ";" or a newline), as in
+    "false && cd /workspace; apply_patch", or when it names CDPATH. Each check is
+    one linear scan.
+    """
+    if _APPLY_PATCH_CDPATH_RE.search(prefix):
+        return True
+    text = _APPLY_PATCH_QUOTED_RE.sub("Q", prefix)
+    if _APPLY_PATCH_UNSETTLED_PREFIX_RE.search(text):
+        return True
+    and_list = text.find("&&")
+    return and_list >= 0 and ("\n" in text[and_list + 2 :] or ";" in text[and_list + 2 :])
 
 
 def _unsettled_cd_operand(operand: str | None) -> bool:
@@ -650,7 +688,8 @@ def _resolved_workdir(target: str, workdir: str | None) -> str | None:
     """Return the directory *target* names from *workdir*, or None when the shell decides it at run time.
 
     None means the directory is unknown: *target* holds a variable or substitution
-    other than a home shorthand, or it is relative to an unknown *workdir*.
+    other than a home shorthand, it is relative to an unknown *workdir*, or it is
+    inside another process's working directory ("/proc/<pid>/cwd").
     """
     cleaned = target.lower().strip().strip("'\"")
     cleaned = _HOME_SHORTHAND_RE.sub("/", cleaned, count=1)
@@ -658,7 +697,11 @@ def _resolved_workdir(target: str, workdir: str | None) -> str | None:
         return None
     if workdir is None and not cleaned.startswith(("/", "\\")) and not _WINDOWS_DRIVE_PREFIX_RE.match(cleaned):
         return None
-    return _normalized_write_path(target, workdir or _APPLY_PATCH_DEFAULT_WORKDIR)
+    resolved = _normalized_write_path(target, workdir or _APPLY_PATCH_DEFAULT_WORKDIR)
+    if resolved == _UNKNOWN_CWD_ROOT or resolved.startswith(f"{_UNKNOWN_CWD_ROOT}/"):
+        # Another process's working directory ("/proc/<pid>/cwd").
+        return None
+    return resolved
 
 
 def _normalized_write_path(target: Any, workdir: str) -> str:
@@ -669,7 +712,10 @@ def _normalized_write_path(target: Any, workdir: str) -> str:
     ".." segments are resolved, clamping at "/" because "/.." is "/". A
     "/proc/self/root" prefix (or "thread-self", a pid or a task) names the root
     directory, so it resets the path to "/": "/proc/1/root/etc/shadow" is
-    "/etc/shadow" and "/proc/self/root/../root" is "/root".
+    "/etc/shadow" and "/proc/self/root/../root" is "/root". A "/proc/self/cwd"
+    prefix (or "thread-self", or a task of either) names *workdir*, and a
+    "/proc/<pid>/cwd" prefix names another process's unknown directory,
+    ``_UNKNOWN_CWD_ROOT``.
     """
     # OpenCode trims header paths with JavaScript's trim(), which also strips U+FEFF.
     cleaned = str(target).replace("\ufeff", " ").lower().replace("\\", "/").strip().strip("'\"<>")
@@ -687,6 +733,9 @@ def _normalized_write_path(target: Any, workdir: str) -> str:
             parts.append(part)
             if part == "root" and _PROC_ROOT_ALIAS_RE.fullmatch("/".join(parts)):
                 parts = []
+            elif part == "cwd" and (alias := _PROC_CWD_ALIAS_RE.fullmatch("/".join(parts))):
+                own = alias.group(1) in ("self", "thread-self")
+                parts = [segment for segment in (workdir if own else _UNKNOWN_CWD_ROOT).split("/") if segment]
     return "/" + "/".join(parts)
 
 
@@ -701,15 +750,19 @@ def _protected_write_entry(target: str, workdir: str | None) -> str | None:
 
     A None *workdir* is unknown, so it may be the home directory or any other: a
     relative target is also resolved from "~", and every relative entry matches
-    whole path segments.
+    whole path segments. A target under another process's working directory
+    ("/proc/<pid>/cwd/...") is read the same way, with that directory unknown.
     """
     paths = [_normalized_write_path(target, workdir or _APPLY_PATCH_DEFAULT_WORKDIR)]
     if workdir is None:
         paths.append(_normalized_write_path(target, "/home/~"))
+    unknown = [path for path in paths if path == _UNKNOWN_CWD_ROOT or path.startswith(f"{_UNKNOWN_CWD_ROOT}/")]
+    paths += [f"/home/~{path[len(_UNKNOWN_CWD_ROOT) :]}" for path in unknown]
+    known = workdir is not None and not unknown
     candidates = [candidate for path in paths for candidate in (path, _HOME_DIR_PREFIX_RE.sub("~", path, count=1))]
     for candidate in candidates:
         for entry in (*_SENSITIVE_WRITE_PATHS, *_UNAUTHORIZED_PATHS):
-            anchor = f"~/{entry}" if entry.startswith(".") and workdir is not None else entry
+            anchor = f"~/{entry}" if entry.startswith(".") and known else entry
             if anchor.startswith(("/", "~")):
                 if candidate == anchor or candidate.startswith(f"{anchor}/"):
                     return entry

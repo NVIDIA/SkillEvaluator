@@ -126,6 +126,100 @@ def test_redaction_drops_a_secret_cut_after_a_shrinking_assignment():
     assert "ghp_" not in rendered
 
 
+@pytest.mark.parametrize("control", ["\x01", "\x9b", "\x1b[31m", "\x1b]0;title\x07"])
+def test_diagnostics_redact_credentials_after_removing_controls(control):
+    from skillevaluator.tier3 import mcp_proof, plugin_evidence
+
+    value = "ghp_" + "B" * 33 + control + "C" * 3
+    for render in (signals._safe_text, plugin_evidence._safe_text, mcp_proof._detail):
+        text = render(value)
+        assert "ghp_" not in text
+        assert "B" * 12 not in text
+        assert "redacted" in text
+
+
+def test_malformed_codex_types_do_not_discard_valid_log_items(tmp_path):
+    root = tmp_path / "trial"
+    agent = root / "agent"
+    sessions = agent / "sessions"
+    sessions.mkdir(parents=True)
+    trajectory = {
+        "schema_version": "ATIF-v1.7",
+        "agent": {"name": "codex", "version": "test"},
+        "steps": [call("c", "search")],
+    }
+    (agent / "trajectory.json").write_text(json.dumps(trajectory))
+    (agent / "codex.txt").write_text(
+        "\n".join(
+            json.dumps(event)
+            for event in [
+                {"type": [], "mcp": 1},
+                {
+                    "type": "item.completed",
+                    "item": {
+                        "type": "mcp_tool_call",
+                        "id": "i",
+                        "server": "docs",
+                        "tool": "search",
+                        "arguments": {},
+                        "status": "failed",
+                    },
+                },
+            ]
+        )
+    )
+    (sessions / "session.jsonl").write_text(
+        "\n".join(
+            json.dumps({"payload": payload})
+            for payload in [
+                {"item": {"type": [], "mcp": 1}},
+                {"type": {}, "mcp": 1},
+                {
+                    "type": "function_call",
+                    "namespace": "mcp__docs",
+                    "name": "search",
+                    "call_id": "c",
+                    "arguments": "{}",
+                },
+            ]
+        )
+    )
+    trace = artifacts.TrialTraceArtifacts().trace(root)
+    result = signals.compute_plugin_signals(
+        trace.trajectory, {}, declared={"mcp": ["docs"]}, mcp_call_servers=trace.call_servers
+    )
+    assert trace.call_servers == {"c": "docs"}
+    assert result["mcp_calls"]["failed"] == result["mcp_calls"]["total"] == 1
+
+
+@pytest.mark.parametrize("overlay", ["_codex_mcp_calls", "_opencode_call_errors"])
+def test_harness_overlay_failure_keeps_plain_trajectory_and_other_trials(tmp_path, monkeypatch, overlay):
+    original = getattr(artifacts, overlay)
+
+    def failing_overlay(root, *args):
+        if root.name == "bad":
+            raise TypeError("malformed harness event")
+        return original(root, *args)
+
+    monkeypatch.setattr(artifacts, overlay, failing_overlay)
+    cache = artifacts.TrialTraceArtifacts()
+    for name in ("bad", "good"):
+        agent = tmp_path / name / "agent"
+        agent.mkdir(parents=True)
+        (agent / "trajectory.json").write_text(
+            json.dumps(
+                {
+                    "schema_version": "ATIF-v1.7",
+                    "agent": {"name": "codex", "version": "test"},
+                    "steps": [call("c", "mcp__docs__search")],
+                }
+            )
+        )
+        trace = cache.trace(agent.parent)
+        assert grade(trace.trajectory)["mcp_calls"]["succeeded"] == 1
+        assert cache.trace(agent.parent) is trace
+
+
 def test_unstaged_file_server_is_skipped_without_hiding_a_portable_server(tmp_path):
     from dataclasses import replace
     from types import SimpleNamespace

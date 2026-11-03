@@ -371,6 +371,56 @@ def test_setup_retry_replaces_cached_trials_without_reprobing_or_rereading_rewar
     assert attempts[1]["runtime_evidence"]["mcp_proof"]["docs"]["status"] == "used-successfully"
 
 
+def test_retry_that_fails_before_collection_cannot_publish_previous_runtime_evidence(tmp_path):
+    package = prepared(tmp_path / "plugin")
+    work = tmp_path / "work"
+    work.mkdir()
+    attempts, observers = [], []
+
+    def evaluate(settings):
+        hooks = execution.active_runtime()
+        observers.append(hooks.observer)
+        if attempts:
+            return {"execution_status": "failed", "error": ["fixture failure before jobs exist"]}
+        jobs = tmp_path / "first-attempt" / "_harbor-jobs"
+        root = write_trial(jobs, settings.skill_path.name)
+        hooks.trial_censuses[root] = {"loaded": [{"type": "mcp", "name": "docs"}]}
+        hooks.configure_run(case_id_by_task_selector={"a-one": "a-one"})
+        result = {
+            "execution_status": "failed",
+            "agents": {
+                "codex": {
+                    "conditions": {
+                        "with_skill": {"execution_status": "failed", "expected_attempts": 1, "scored_attempts": 0}
+                    },
+                    "trial_failures": {"with_skill": [{"trial": "a-one", "reason": "AgentSetupNetworkError: dns"}]},
+                    "failure_detail_metadata": {"with_skill_trials": {"details_total": 1, "details_truncated": False}},
+                }
+            },
+        }
+        hooks.collect_evidence(jobs, result)
+        hooks.observer.record_failure(ValueError("first attempt only"))
+        attempts.append(result)
+        return result
+
+    outcome = execution.evaluate_prepared_plugin(
+        package,
+        EvaluationOptions(skill_path=package.native_source.plugin_root, agents="codex"),
+        work_dir=work,
+        evaluate=evaluate,
+    )
+    assert outcome.attempts == 2 and outcome.status == "failed"
+    assert attempts[0]["runtime_evidence"]["mcp_proof"]["docs"]["status"] == "used-successfully"
+    final = outcome.provenance["runtime_evidence"]
+    assert final["mcp_proof"]["docs"]["status"] == "declared"
+    assert final["evidence_complete"] is False and final["errors"] == []
+    observer = observers[-1]
+    assert observer.logical_trials == observer.summaries == observer.arm_jobs == {}
+    assert observer.artifacts._traces == observer._rewards == {}
+    assert observer.hooks.trial_censuses == observer.hooks.trial_init_events == {}
+    assert observer.selector_map is None and observer._sidecar is None
+
+
 def test_unscored_trace_keeps_trusted_identity_and_usage(tmp_path, monkeypatch):
     extract = evidence.collector._extract_rewards
 

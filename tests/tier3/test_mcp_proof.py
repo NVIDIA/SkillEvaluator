@@ -622,16 +622,21 @@ def test_a_slow_dns_lookup_counts_against_the_probe_deadline() -> None:
 
 def test_probed_tool_names_and_details_are_printable(fake_mcp: str, monkeypatch: pytest.MonkeyPatch) -> None:
     hostile = [
-        {"name": "\x1b[31mred\x1b[0m", "inputSchema": {"type": "object"}},
-        {"name": "\x1b]0;pwned\x07title", "inputSchema": {"type": "object"}},
-        {"name": "bell\x07\x9bcsi", "inputSchema": {"type": "object"}},
+        {"name": "\x1b[31mred\x1b[0m", "inputSchema": {"type": [["x"]]}},
+        {"name": "\x1b]0;pwned\x07title", "inputSchema": {"type": [{"x": "string"}]}},
+        {
+            "name": "bell\x07\x9bcsi",
+            "inputSchema": {"type": "object", "properties": {"nested": {"type": [["x"]], "minimum": 1}}},
+        },
+        {"name": "safe", "inputSchema": {"type": "object", "properties": {"nested": {"type": [{}], "minimum": 1}}}},
     ]
     monkeypatch.setitem(globals(), "TOOLS", hostile)
 
     entry = probe_mcp_server({"name": "docs", "url": f"{fake_mcp}/mcp"}, allowed_private_hosts=LOCAL)
 
     assert entry["status"] == "reachable-host"
-    assert entry["tools"] == ["red", "title", "bellcsi"]
+    assert entry["tools"] == ["red", "title", "bellcsi", "safe"]
+    assert entry["input_schemas"] == {"safe": {"type": "object", "properties": {"nested": {"minimum": 1}}}}
     assert not any(ord(char) < 0x20 or 0x7F <= ord(char) <= 0x9F for char in json.dumps(entry, ensure_ascii=False))
 
 

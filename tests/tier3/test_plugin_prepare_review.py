@@ -17,6 +17,7 @@ from skillevaluator.tier3.plugin_native import HARNESS_ADAPTERS, ClaudeCodeAdapt
 from skillevaluator.tier3.plugin_prepare import (
     PreparationError,
     SourceIdentity,
+    bind_runtime_results,
     prepare_runtime_package,
     stage_wrapper_skill,
     verify_source_identity,
@@ -146,7 +147,7 @@ def test_invalid_fixture_reference_is_refused_before_task_generation(tmp_path: P
 
 
 def test_prepared_mcp_env_and_headers_reach_real_native_bundle(tmp_path: Path, monkeypatch) -> None:
-    monkeypatch.setenv("SKILLEVALUATOR_ALLOWED_MCP_SECRETS", "API_BASE,MCP_TOKEN")
+    monkeypatch.setenv("SKILLEVALUATOR_ALLOWED_MCP_SECRETS", "MCP_TOKEN")
     monkeypatch.setenv("SKILLEVALUATOR_ALLOWED_MCP_HOSTS", "example.invalid")
     servers = {
         "stdio": {"command": "npx", "args": ["example-server"], "env": {"API_BASE": "${API_BASE}", "MODE": "ci"}},
@@ -156,7 +157,9 @@ def test_prepared_mcp_env_and_headers_reach_real_native_bundle(tmp_path: Path, m
         tmp_path / "plugin", {".claude-plugin/plugin.json": {"name": "demo"}, ".mcp.json": {"mcpServers": servers}}
     )
     source = _package(root).native_source
-    staging = build_native_task_staging("claude-code", ClaudeCodeAdapter(), source)
+    staging = build_native_task_staging(
+        "claude-code", ClaudeCodeAdapter(), source, allowed_runtime_env={"API_BASE": "https://example.invalid"}
+    )
     stage_native_bundle(tmp_path / "environment", staging)
     actual = json.loads((tmp_path / "environment/skilleval/native/claude-code/plugin/.mcp.json").read_text())[
         "mcpServers"
@@ -239,8 +242,7 @@ def test_generated_results_do_not_invalidate_source_tree_identity(tmp_path: Path
     if authored_evals_dir:
         (root / "evals").mkdir()
     inventory = _inventory(root)
-    package = prepare_runtime_package(inventory)
-    # Without an authored evals/, the default results root creates it mid-run.
+    package = bind_runtime_results(prepare_runtime_package(inventory), root / "evals/results")
     _tree(root, {"evals/results/report.json": {"generated": True}, "BENCHMARK.md": "generated"})
     verify_source_identity(package, inventory)
     stage_wrapper_skill(package, tmp_path / "out")

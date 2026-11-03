@@ -144,7 +144,7 @@ from skillevaluator.tier3.eval_core.codex_tool_call_normalizer import (
 )
 from skillevaluator.tier3.plugin_native import OPENCODE_BUILTIN_AGENTS
 from skillevaluator.tier3.runtime_arms import ARM_LOOSE_PARTS, ARM_SUM_OF_PARTS, ARM_WITH, ARM_WITHOUT
-from skillevaluator.utils.redaction import redact_sensitive_text
+from skillevaluator.utils.redaction import redact_printable_text
 
 COMPONENT_SKILL = "skill"
 COMPONENT_MCP = "mcp"
@@ -740,12 +740,65 @@ def _check_tool_patterns(value: Any, where: str, errors: _FieldErrors) -> list[s
     return patterns
 
 
+_REGEX_COMPILE_TOKENS = re.compile(
+    r"\\[pPN]\{[^}]*\}|\\.|\[\^?\]?(?:\\.|[^\]\\])*\]"
+    r"|(?P<flags>\(\?[a-zA-Z0-9-]+\))"
+    r"|\{(?P<count>[0-9]*)(?:,(?P<upper>[0-9]*))?\}"
+    r"|(?P<fuzzy>\{(?:[ides](?=[<>=,}:])|[0-9]+[ides<=>]))|.",
+    re.DOTALL,
+)
+_REGEX_EXTENDED_REPEAT_FLAGS = re.compile(r"\(\?[a-zA-Z0-9-]*(?:x|V1)")
+_MAX_REGEX_REPEAT = 100
+
+
+def _regex_compile_problem(value: str) -> str | None:
+    """Bound counted expansion before entering the engine's untimed compiler.
+
+    Escapes and simple character classes are single tokens. Braces combined
+    with comments, POSIX classes, verbose mode or V1 sets are conservatively
+    unsupported because those constructs change the token grammar. Fuzzy
+    repetition constraints are unsupported too.
+    """
+    if "{" in value and _REGEX_EXTENDED_REPEAT_FLAGS.search(value):
+        return "braces with verbose mode or V1 sets are unsupported"
+    if "{" in value and ("(?#" in value or "[:" in value):
+        return "braces with regex comments or POSIX classes are unsupported"
+    groups = [False]
+    atom_counted = False
+    for token in _REGEX_COMPILE_TOKENS.finditer(value):
+        count = token.group("count")
+        if count is not None:
+            for bound in (count, token.group("upper")):
+                digits = (bound or "0").lstrip("0") or "0"
+                if len(digits) > 3 or int(digits) > _MAX_REGEX_REPEAT:
+                    return f"counted repeats must be at most {_MAX_REGEX_REPEAT}"
+            if atom_counted:
+                return "nested counted repeats are unsupported"
+            groups[-1] = atom_counted = True
+        elif token.group("fuzzy"):
+            return "fuzzy repetition constraints are unsupported"
+        elif token.group("flags"):
+            continue
+        elif token[0] == "(":
+            groups.append(False)
+            atom_counted = False
+        elif token[0] == ")" and len(groups) > 1:
+            atom_counted = groups.pop()
+            groups[-1] |= atom_counted
+        elif token[0] not in {"*", "+", "?"}:
+            atom_counted = False
+    return None
+
+
 def _check_regex(value: Any, where: str, errors: _FieldErrors) -> str | None:
     if not isinstance(value, str) or not value:
         errors.add(where, "must be a non-empty regular expression string")
         return None
     if len(value) > MAX_REGEX_CHARS:
         errors.add(where, f"must be at most {MAX_REGEX_CHARS} characters")
+        return None
+    if problem := _regex_compile_problem(value):
+        errors.add(where, f"is not a valid regular expression ({problem})")
         return None
     # Checked with the engine that runs it (see _regex_search): ``re`` rejects
     # ``\p{L}``, which ``regex`` runs, and accepts ``[[:alpha:]``, which it does not.
@@ -939,7 +992,11 @@ def sanitize_input_schema(schema: Any, *, depth: int = 1, budget: list[int] | No
     out: dict[str, Any] = {}
     types = schema.get("type")
     type_list = [types] if isinstance(types, str) else types
-    if isinstance(type_list, list) and type_list and all(item in _SCHEMA_TYPES for item in type_list):
+    if (
+        isinstance(type_list, list)
+        and type_list
+        and all(isinstance(item, str) and item in _SCHEMA_TYPES for item in type_list)
+    ):
         out["type"] = types
     required = schema.get("required")
     if isinstance(required, list):
@@ -1654,10 +1711,9 @@ def _safe_text(value: Any, limit: int = _MAX_LABEL_CHARS) -> str:
     # The redactor is superlinear on some inputs, so it only ever sees a bounded
     # window; text past the window would be truncated away anyway. The slack
     # leaves room for redaction to shorten the text and still fill ``limit``.
-    text = redact_sensitive_text(
+    return redact_printable_text(
         str(value if value is not None else ""), max_len=limit, max_input_chars=limit * 4 + 256
     )
-    return _CONTROL_CHARS_RE.sub(" ", text)
 
 
 def _tool_name(tool_call: Mapping[str, Any]) -> str:

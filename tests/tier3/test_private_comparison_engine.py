@@ -102,6 +102,36 @@ def test_private_comparison_options_refuse_an_incomplete_ladder():
         ComparisonOptions(member_skills="yes")
 
 
+@pytest.mark.parametrize("loose_parts", [False, True])
+def test_baseline_only_keeps_one_arm_and_explains_unmeasured_private_controls(tmp_path, monkeypatch, loose_parts):
+    from skillevaluator.tier3 import plugin_comparisons as comparisons
+
+    package = SimpleNamespace(native_source=SimpleNamespace(member_skills=(tmp_path / "member",)))
+    runtime = comparisons.ComparisonRuntime(
+        SimpleNamespace(),
+        package,
+        comparisons.ComparisonOptions(loose_parts=loose_parts),
+        ["claude-code"],
+        baseline=True,
+    )
+    if loose_parts:
+        runtime.loose_plan.arms["claude-code"] = object()
+    baseline = tmp_path / "baseline" / "case"
+    baseline.mkdir(parents=True)
+    monkeypatch.setattr(comparisons, "verify_source_identity", lambda _package: None)
+
+    def unexpected_control(*_args):
+        pytest.fail("baseline-only execution emitted an additional comparison arm")
+
+    jobs = runtime.stage_additional("claude-code", unexpected_control, {"without_skill": [baseline]}, None)
+
+    assert jobs == ()
+    runtime.bind_execution(["case"], n_attempts=1, stop_on_pass=False, pass_threshold=0.5)
+    assert runtime.task_sets["claude-code"] == {"without_skill": (baseline,)}
+    assert runtime.loose_plan.arm_for("claude-code") is None
+    assert "with-skill arm disabled" in runtime.loose_plan.not_measured["claude-code"]
+
+
 def test_usage_of_unscored_attempts_is_kept_without_inventing_scores():
     from skillevaluator.tier3.plugin_comparisons import arm_observations
 

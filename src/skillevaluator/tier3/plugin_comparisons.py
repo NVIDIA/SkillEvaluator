@@ -233,6 +233,11 @@ class ComparisonRuntime:
     ) -> tuple[tuple[str, Path, str | None], ...]:
         verify_source_identity(self.package)
         staged = {arm: tuple(paths) for arm, paths in task_sets.items()}
+        if ARM_WITH not in staged:
+            self.task_sets[agent] = staged
+            self.loose_plan.arms.pop(agent, None)
+            self.loose_plan.not_measured[agent] = "with-skill arm disabled; private comparison arms require it"
+            return ()
         jobs = []
         if self.members:
             paths = tuple(emit_control(VARIANTS[ARM_SUM_OF_PARTS], self.members))

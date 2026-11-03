@@ -59,8 +59,7 @@ from typing import Any
 from urllib.parse import urlsplit
 
 from skillevaluator.tier3.eval_core.plugin_signals import declared_mcp_server_matcher, sanitize_input_schema
-from skillevaluator.utils.redaction import redact_sensitive_text
-from skillevaluator.utils.rich_markup import strip_terminal_controls
+from skillevaluator.utils.redaction import redact_printable_text
 from skillevaluator.validators.mcp_static import HostAllowlist, classify_endpoint_host, host_name_is_allowlisted
 
 STATUS_DECLARED = "declared"
@@ -213,7 +212,7 @@ def planned_env_sends(
 
 def _detail(text: Any) -> str:
     """Bounded, printable, redacted text: terminal controls and C0/C1 characters are removed."""
-    text = redact_sensitive_text(strip_terminal_controls(str(text)), max_input_chars=MAX_DETAIL_CHARS * 8)
+    text = redact_printable_text(str(text), max_input_chars=MAX_DETAIL_CHARS * 8)
     return " ".join(text.split())[:MAX_DETAIL_CHARS]
 
 

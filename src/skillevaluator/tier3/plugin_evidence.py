@@ -36,8 +36,7 @@ from skillevaluator.tier3.mcp_proof import (
 from skillevaluator.tier3.plugin_prepare import verify_source_identity
 from skillevaluator.tier3.plugin_trace_artifacts import TrialTraceArtifacts
 from skillevaluator.tier3.runtime_arms import ARM_LOOSE_PARTS, ARM_SUM_OF_PARTS, ARM_WITH, ARM_WITHOUT
-from skillevaluator.utils.redaction import redact_sensitive_text
-from skillevaluator.utils.rich_markup import strip_terminal_controls
+from skillevaluator.utils.redaction import redact_printable_text
 from skillevaluator.utils.secure_fs import SecureRoot, stat_is_link_or_reparse
 
 if TYPE_CHECKING:
@@ -57,9 +56,7 @@ ARM_SUFFIXES = {
 
 
 def _safe_text(value: Any, limit: int = 300) -> str:
-    return strip_terminal_controls(
-        redact_sensitive_text(str(value or ""), max_len=limit, max_input_chars=limit * 4 + 256)
-    )
+    return redact_printable_text(str(value or ""), max_len=limit, max_input_chars=limit * 4 + 256)
 
 
 @dataclass(frozen=True)
@@ -298,11 +295,7 @@ class RuntimeEvidenceObserver:
         self._declaration_errors = tuple(self.errors)
         verify_source_identity(package)
 
-    def _begin_attempt(self, jobs_dir: Path) -> None:
-        """Release the previous attempt before accepting this attempt's first handoff."""
-        if self._jobs_dir == jobs_dir:
-            return
-        self._jobs_dir = jobs_dir
+    def _reset_attempt(self) -> None:
         self.logical_trials = {}
         self.summaries = {}
         self.errors = list(self._declaration_errors)
@@ -310,6 +303,23 @@ class RuntimeEvidenceObserver:
         self.artifacts = TrialTraceArtifacts()
         self._rewards = {}
         self._collected = set()
+
+    def begin_attempt(self) -> None:
+        """Release prior observations even when the next attempt creates no artifacts."""
+        self._reset_attempt()
+        self._jobs_dir = None
+        self._sidecar = None
+        self.selector_map = None
+        self.arm_jobs = {}
+        self.hooks.trial_censuses = {}
+        self.hooks.trial_init_events = {}
+
+    def _begin_attempt(self, jobs_dir: Path) -> None:
+        """Scope a handoff while retaining coordinator data registered for its jobs."""
+        if self._jobs_dir == jobs_dir:
+            return
+        self._jobs_dir = jobs_dir
+        self._reset_attempt()
         self.arm_jobs = {
             agent: {arm: job for arm, job in arms.items() if job.parent == jobs_dir}
             for agent, arms in self.arm_jobs.items()

@@ -1285,6 +1285,73 @@ def test_a_pattern_the_engine_cannot_compile_is_dropped_without_breaking_collect
     assert _signals(traj, case)["arguments"]["status"] == "not_applicable"
 
 
+@pytest.mark.parametrize(
+    "pattern",
+    [
+        "(?:a{3000}){3000}",
+        "(?:a{10000}){10000}",
+        "a{101}",
+        "a{1,101}",
+        "a{101,}",
+        "a{0000101}",
+        "a{" + "9" * 200 + "}",
+        "(?:a{2}){2}",
+        "(?:(?:a{2})+){2}",
+        "a{100}{100}",
+        "(?:abc){e<=99999999999999999999}",
+        "(?x:a{ 10000 })",
+        "(?x:a{1 0 0 0 0})",
+        "(?x:a{1 # count\n0000})",
+        "(?iV1)(?:a{100}){100}",
+        "(?V1i)(?:a{100}){100}",
+        "(?V1)[[a]{10000}]",
+        "a{100}(?i){100}",
+        "(?:abc){e<=99999999999999999999:[a]}",
+        "(?:abc){1i+1d<99999999999999999999}",
+        "(?:abc){0<=e<=99999999999999999999}",
+        "a{,10000}",
+        "(?:a{,100}){100}",
+        "(?x) a{ 10000 }",
+        r"(?:(?#abc\))a{100}){100}",
+        r"(?:a{100}[[:alpha:] )]){100}",
+    ],
+)
+def test_expensive_counted_repeats_are_rejected_before_compilation(monkeypatch, pattern):
+    compiled = []
+
+    def forbidden_compile(value):
+        compiled.append(value)
+        raise AssertionError("unsafe pattern reached the compiler")
+
+    # Never send these patterns to the real compiler, including during the red run.
+    monkeypatch.setattr(plugin_signals.regex, "compile", forbidden_compile)
+    case = {"tool_arguments": [{"tool": "t", "pattern": {"title": pattern}}]}
+    schema_case = {"tool_arguments": [{"tool": "t", "schema": {"pattern": pattern}}]}
+    assert validate_plugin_case_fields(case)
+    assert validate_plugin_case_fields(schema_case)
+    assert plugin_signals.sanitize_input_schema({"type": "string", "pattern": pattern}) == {"type": "string"}
+    assert compiled == []
+
+
+@pytest.mark.parametrize(
+    "pattern",
+    [
+        r"a{100}",
+        r"a{1,100}",
+        r"a{1,}",
+        r"\{3000\}",
+        r"[a{3000}]{2}",
+        r"a{2}b{2}",
+        r"(?i:a){2}",
+        r"\p{gc=L}{2}",
+        r"a{,100}",
+    ],
+)
+def test_small_counted_repeats_and_literal_braces_remain_supported(pattern):
+    case = {"tool_arguments": [{"tool": "t", "pattern": {"title": pattern}}]}
+    assert validate_plugin_case_fields(case) == []
+
+
 @pytest.mark.parametrize("error", [KeyError("V0"), RuntimeError("invalid RE code"), IndexError("list index")])
 def test_a_pattern_search_that_raises_fails_the_check(monkeypatch: pytest.MonkeyPatch, error: Exception) -> None:
     def failing_search(*_args: Any, **_kwargs: Any) -> Any:
@@ -1371,6 +1438,8 @@ class TestUntrustedTrajectoryContent:
         assert [f["tool"] for f in signals["arguments"]["failures"]] == ["Skill:<non-name>", "Skill:release notes"]
 
     def test_adversarial_text_for_the_redactor_does_not_stall_collection(self, monkeypatch: pytest.MonkeyPatch) -> None:
+        from skillevaluator.utils import redaction
+
         payload = "a." * 32_768  # quadratic for the credential redactor's assignment patterns
         traj = _traj(
             _one("Skill", {"skill": payload}),
@@ -1387,13 +1456,13 @@ class TestUntrustedTrajectoryContent:
         }
 
         redacted: list[int] = []
-        redact = plugin_signals.redact_sensitive_text
+        redact = redaction.redact_sensitive_text
 
         def recording_redact(text: str, **kwargs: Any) -> str:
             redacted.append(len(text))
             return redact(text, **kwargs)
 
-        monkeypatch.setattr(plugin_signals, "redact_sensitive_text", recording_redact)
+        monkeypatch.setattr(redaction, "redact_sensitive_text", recording_redact)
 
         signals = _signals(traj, case)
 

@@ -4,7 +4,27 @@ All notable changes to SkillEvaluator are documented in this file.
 
 ## Unreleased
 
+### Documentation
+
+- Keep verified CI templates in the public repository and use one product
+  release for Python packages and CI downloads. Update onboarding links to
+  avoid relying on separate CI release entries.
+
 ### Added
+
+- Include `skillevaluator ci init`, `ci status` and `ci demo` in the Python
+  package. Guided GitHub onboarding discovers skills, configures checks and
+  optional public hosted reports, and opens a reviewable setup PR. An optional
+  test PR demonstrates the results. Existing Pages sites and organization
+  action restrictions are preserved; private repositories can use checks only.
+- Add a visual CLI onboarding guide under GitHub Actions, alongside the manual
+  template path. Keep GitHub and GitLab as the two repository-integration choices.
+- Allow CI release templates to pin the reviewed report publisher separately
+  from the verified scanner workflow and image.
+
+- In local mode (`--env-mode local`), a missing Claude Code, Codex, or OpenCode
+  CLI is offered as a pinned npm install into the SkillEvaluator runtime folder;
+  without a terminal, the command is printed instead.
 
 - Support Python 3.14 alongside Python 3.12 and 3.13, including installation
   guidance and CI coverage for tests and built packages.
@@ -89,6 +109,53 @@ All notable changes to SkillEvaluator are documented in this file.
   expected-case checks cover only the cases that ran, `run_config.json` records
   the selection as `case_selection`, and a run that skipped cases is reported
   as publication-incomplete in JSON, HTML, and BENCHMARK.md.
+- `doctor` and `health-check` take `--tier 1|2|3|all`, so Tier 1 and Tier 2
+  readiness can be checked before a run instead of surfacing mid-validation.
+  Tier 1 reports each scanner that the `--checks` selection runs: SkillSpector,
+  Bandit, Semgrep, Gitleaks, and pip-audit for `dependency`. Each row shows the
+  resolved path, any executable override, and the version from a bounded,
+  shell-free probe. A scanner fails when it is missing, its override is
+  malformed, its probe fails or exceeds `--timeout` (default 60 seconds, at
+  most 3600), or it is older than Bandit 1.9.4 or Gitleaks 8. Tier 2 resolves
+  the embedding and LLM providers offline. `doctor --tier 2 --verify-models`
+  also sends one embedding request and one chat request, each bounded by
+  `--timeout` and sent without retries, and reports only the HTTP status and a
+  remedy. `--tier all` checks every tier, and a failed tier does not stop the
+  next. Without `--tier`, both commands still check Tier 3 only. An option for
+  an unselected tier, or `--timeout` for an offline Tier 2 check, is a usage
+  error. `tier3 doctor` remains Tier 3-only.
+
+- Tier 1 `--llm` security scans of a single skill keep the LLM provenance that
+  SkillSpector v2.12.0 and later report: the provider adapter, the model and
+  SkillSpector revision behind each LLM analyzer, and the sampling and
+  determinism evidence. The Security result in the JSON report carries it as
+  `skillspector_llm_provenance`, next to `skillspector_provider_id`, the
+  SkillEvaluator provider the scan was bridged from (for example `nv_build`,
+  which SkillSpector runs as its `openai` adapter). The HTML report, including
+  CI pages rendered from the retained Tier 1 JSON, lists it in a collapsible
+  Tier 1 LLM Provenance table. The record is also kept when the LLM stage
+  fails or SkillSpector does not confirm LLM analysis, as long as
+  SkillSpector's JSON output carries a valid record, so the report shows what
+  was attempted. Records that do not match SkillSpector's provenance contract or
+  that contain endpoint- or credential-shaped values are left out, and older
+  SkillSpector releases produce no record.
+- `--skip-with-skill` on `tier3 evaluate` and the direct `tier3` workflow runs
+  only the without-skill baseline arm, for example to calibrate a task set or
+  re-measure a baseline after a model change without paying for with-skill
+  trials. Only baseline tasks are staged and launched. The run is reported as
+  a baseline calibration: `mode` is `baseline_only`, the overall score and best
+  agent come from the baseline arm, the with-skill arm is recorded as
+  `skipped`, with-skill scores and lift stay unavailable instead of becoming
+  0.0 (report tables print `skipped`), and the verdict stays NEUTRAL. The flag
+  is mutually exclusive with `--skip-baseline`, keeps the baseline isolation
+  rules, and is not accepted by `validate`, so a baseline-only run cannot pass
+  a Tier 3 gate.
+
+- Tier 1 sets up SkillSpector 2.13.3 and Gitleaks 8.30.0 on first use from
+  pinned, SHA-256-verified releases, without a prompt; Semgrep is optional
+  unless `SKILLEVALUATOR_REQUIRE_SEMGREP=1`. `--skip <check>` on `validate` and
+  `tier1` leaves a check out and reports it as skipped. A `scanners` row and the
+  JSON report record which scanner versions ran.
 
 ### Changed
 
@@ -99,6 +166,11 @@ All notable changes to SkillEvaluator are documented in this file.
   LiteLLM wrappers, so generic 500/503 errors do not cause extra attempts.
   This applies to ordinary skill evaluations and other host LLM calls as well
   as plugin evaluations; retry limits and scoring formulas are unchanged.
+- The compact `validate` view lists every Tier 3 test case with and without
+  the skill, updates the list while trials run, and ends each tier with a short
+  "what to fix" list: the problem, then the action. A required scanner that
+  could not run counts as "didn't run", not as a failed check.
+
 - Hosted GitHub reports verify a separate GitHub-signed execution receipt.
   Enable `id-token: write` in the scan workflow and refresh its approved blob
   when adding hosting; ordinary scans keep their existing read-only permissions.
@@ -187,6 +259,20 @@ All notable changes to SkillEvaluator are documented in this file.
 
 ### Fixed
 
+- PR scan comments show the verdict, quality scores, first actionable fixes and
+  report links; full provenance and detailed findings stay in the report.
+- Hosted reports use the retained site commit as the Pages deployment identity,
+  so repeated publications from one default-branch revision deploy fresh reports.
+
+- Reusable Tier 1 CI always requires Semgrep in scanner subprocesses, so local
+  optional-scanner defaults cannot hide missing CI code-scanning coverage.
+
+- Use public, commit-pinned README image URLs so the wordmark and three-tier
+  diagram can render in PyPI package descriptions as well as on GitHub.
+- On Windows, repository root and source-link detection no longer break for
+  repositories in non-ASCII folders. Git's repository path is decoded as a file
+  name and its remote URL and branch as UTF-8, instead of with the locale code
+  page.
 - CI quality thresholds apply to every parallel scan worker. Report overviews
   and detailed reports surface failed quality gates ahead of advisory findings,
   with links to the check that needs attention.
@@ -196,6 +282,14 @@ All notable changes to SkillEvaluator are documented in this file.
   Markdown sections are packed by paragraph, so short labels and fragments stay
   attached to their neighbours, source ranges retain blank-line gaps, and findings
   list a split source once.
+- A chat model that declines to classify a Tier 2 content cluster (a safety
+  refusal, which some models return for security-themed skill content) no
+  longer marks the scan incomplete and fails `validate` under the default
+  `--block-on-dedup`. Tier 2 now reports the refusal as an advisory MEDIUM
+  `llm_refused` finding that names the overlapping sections, and the JSON
+  report's `llm_analysis` counts it in `clusters_refused`. Other chat-LLM
+  failures still leave the scan incomplete. Raise `CONTENT_DEDUP.llm_refused`
+  in a policy overlay to keep refusals blocking.
 - Local-mode verifier uploads now copy directly to the absent destination,
   avoiding an unnecessary rollback snapshot of an empty tests directory.
   Inputs and rewritten scripts are prepared privately before publication,
@@ -270,6 +364,20 @@ All notable changes to SkillEvaluator are documented in this file.
   background tasks back on, and other agents ignore the variable. A skill whose
   single commands need longer can raise Claude Code's default with
   `BASH_DEFAULT_TIMEOUT_MS` in `harbor.runtime_env`.
+
+- Tier 1 security scans no longer fail a skill for an exact read-only
+  `/etc/passwd` bind mount such as `docker run -v /etc/passwd:/etc/passwd:ro`.
+  SkillSpector 2.11.1 and later tags this mount as likely benign but still
+  reports a HIGH Credential Access (PE3) finding. That finding is now ignored
+  only when it carries both benign-context tags and every `/etc/passwd` on the
+  reported source line, read without following links, is the source or target
+  of such a mount. The aggregate risk score is recomputed without it. Writable
+  or implicit-mode mounts, other paths, same-line reads such as
+  `cat /etc/passwd`, aggregated rows, and earlier SkillSpector versions still
+  block. Captured SkillSpector 2.13.3 reports cover both mount operands and a
+  separate blocking read, and partial LLM-response inspection stays incomplete.
+  Static reports are accepted when a provider is available but LLM analysis
+  was neither requested nor applied; availability alone is not execution.
 
 - PII email scans recognize all RFC 2606 reserved domains, including their
   subdomains, mixed-case forms, trailing dots, and prose ellipses. A local-part
@@ -386,6 +494,22 @@ All notable changes to SkillEvaluator are documented in this file.
   `quality-check` before any report was written. The schema check reports the
   malformed `metadata`, and the quality score counts `metadata.author` and
   `metadata.tags` as missing, as it already did for other non-mapping values.
+- The Tier 1 SkillSpector scan of a skill that references PNG or JPEG images,
+  such as a logo shown with `![Logo](assets/logo.png)`, is no longer
+  `INCOMPLETE` only because SkillSpector's text pattern analyzers cannot read
+  images and report the analysis as `partial`. That gap is now a warning when
+  the report shows no other gap and no fatal scope exclusion, and each image
+  is a regular, single-link (not hard-linked), non-executable file whose bytes
+  have the chunk or marker structure of a PNG or JPEG, is not reached through
+  a symlink, and is not in a directory that agents run, load as instructions
+  or read as configuration. The gap is accepted for at most 256 images and
+  128 MiB of image data in total. The structure check corroborates the file
+  type without decoding the image or proving that it renders. PNG IDAT
+  compressed data and ancillary chunks, and JPEG entropy-coded data and APPn
+  or COM segments, are not inspected and can still carry other bytes. Other
+  image formats, files without that structure, and every other partial reason
+  still leave the scan `INCOMPLETE`. SkillSpector's own High `AE1` findings for
+  images it could not inspect are unchanged.
 - A `SKILL.md` over the recommended 5,000-token budget now gets a MEDIUM
   `quality_efficiency` finding instead of a HIGH one. The HIGH finding failed
   the quality check, and with it `validate`, `tier1`, and `quality-check`, even
@@ -401,6 +525,22 @@ All notable changes to SkillEvaluator are documented in this file.
   `SKILLSPECTOR_PROVIDER=nv_build` gets the same mapping. The key still reaches
   SkillSpector only as `OPENAI_API_KEY`, with `OPENAI_BASE_URL` set to the
   public Build endpoint.
+- Tier 3 plain progress output, which `--progress auto` selects for CI and
+  redirected logs, now repeats its `still running` heartbeat every 60 seconds
+  instead of every second, so long runs no longer add thousands of identical
+  lines per hour. The interactive Rich view still refreshes every second. A
+  new `--progress-interval SECONDS` option on `tier3 evaluate` and `tier3 PATH`
+  sets the interval explicitly for either view (0.05 to 86400 seconds;
+  non-finite values are rejected).
+- SkillSpector runs are no longer stopped after a fixed 300 seconds, which ended
+  slow `--llm` security scans, such as those on local models, as `INCOMPLETE`
+  before SkillSpector's own scan deadline (1,080 seconds in v2.13.3). Each run
+  now has a 1,200-second watchdog by default; set
+  `SKILLEVALUATOR_SKILLSPECTOR_TIMEOUT_SECONDS` to a positive integer to change
+  it (values above 86400 are capped). `SKILLSPECTOR_MAX_WORKFLOW_SECONDS` is now
+  forwarded to SkillSpector so its own deadline can be raised as well, and the
+  security result records the effective `skillspector_timeout_seconds`
+  ([#155](https://github.com/NVIDIA/SkillEvaluator/issues/155)).
 
 ### Security
 

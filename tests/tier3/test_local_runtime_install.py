@@ -26,6 +26,8 @@ def test_install_without_npm(monkeypatch, tmp_path):
 
 def _fake_npm(monkeypatch, returncode, create_bin):
     calls = []
+    # A simulated install must not discover the developer's real agent on PATH.
+    monkeypatch.setenv("PATH", "")
 
     def run(argv, **_kwargs):
         calls.append(argv)

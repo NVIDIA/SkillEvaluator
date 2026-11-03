@@ -268,7 +268,7 @@ For `validate`, the default set is `schema`, `version`, `security`, `pii`, `lice
       If a quality score changes unexpectedly, inspect the finding message rather than adding keywords. The checker rewards usable instructions and evidence in their relevant context, not vocabulary alone.
     </Tip>
 
-    **Expected headings.** Reliability deducts points when `SKILL.md` lacks an expected heading. The packaged `quality-default.yaml` expects `## Prerequisites` (or `## Requirements`), `## Limitations`, and `## Troubleshooting` (or `## Common Issues` or `## FAQ`), each worth 5 points. Pass `--quality-config PATH` to `quality-check`, `tier1`, or `validate` to use your own list instead. The file replaces the packaged defaults rather than merging with them, so copy any default entries you want to keep.
+    **Expected headings.** Reliability deducts points when `SKILL.md` lacks an expected heading. The packaged `quality-default.yaml` expects `## Prerequisites` (or `## Requirements`), `## Limitations`, and `## Troubleshooting` (or `## Common Issues` or `## FAQ`), each worth 5 points. Pass `--quality-config PATH` to `quality-check`, `tier1`, or `validate` to use your own list instead. The `expected_headers` list replaces the packaged list rather than merging with it, so copy any default entries you want to keep. A custom file must include `expected_headers`, even as `expected_headers: []`.
 
     ```yaml title="quality.yaml"
     expected_headers:
@@ -303,7 +303,26 @@ For `validate`, the default set is `schema`, `version`, `security`, `pii`, `lice
 
     An entry is satisfied when the heading or any alternative appears anywhere in `SKILL.md` as text, so `## Security` also matches `### Security Notes` or a heading inside a code block.
 
-    The file is checked before any validation runs. A file that is missing, unreadable, not UTF-8, invalid YAML, has an unknown key (such as `point` instead of `points`), or lists the same heading twice is a usage error: the command exits with code 2 and names the file and the problem. `validate` checks the file even when `--checks` leaves out `quality`.
+    **Error-handling checks.** Reliability also runs three error-handling rules, set in the `error_handling` section of the same file. Unlike `expected_headers`, this section is optional and merges with the packaged values: an omitted rule or key keeps its packaged value, and a list you set replaces the packaged list. Set `points: 0` to turn a rule off; it then adds no finding.
+
+    ```yaml title="quality.yaml"
+    expected_headers: []
+    error_handling:
+      mentioned:
+        terms: [error, failure, rollback, retry]
+      scripts:
+        points: 0
+    ```
+
+    | Rule | Deducts when | Packaged points | List field |
+    | --- | --- | --- | --- |
+    | `mentioned` | `SKILL.md` contains none of the `terms` | `10` | `terms`: whole words, any case. `error` matches `Error` but not `errorless` |
+    | `scripts` | A `.py` file under `scripts/` or `tools/` has neither a `try:`/`except` pair nor any of the `markers` | `5` | `markers`: case-sensitive text found anywhere in the file, such as `raise` or `if not ` |
+    | `lib` | A module in the skill's Python package has neither a `try:`/`except` pair nor any of the `markers` | `5` | `markers`: as for `scripts` |
+
+    Each rule also takes `message` and `suggestion`. The `scripts` and `lib` findings append up to three file names to the message, as in `Scripts may lack error handling: run.py`. The `try:`/`except` pair always counts as error handling and is not configurable. See the packaged `quality-default.yaml` for every default term and marker.
+
+    The file is checked before any validation runs. A file that is missing, unreadable, not UTF-8, invalid YAML, has an unknown key (such as `point` instead of `points`), lists the same heading twice, has a negative or non-numeric `points`, an empty `terms` or `markers` list, or a repeated entry in one of those lists is a usage error: the command exits with code 2 and names the file and the problem. `validate` checks the file even when `--checks` leaves out `quality`.
 
     ```text title="Example error"
     Error: Invalid value for '--quality-config': quality.yaml: unknown key(s) in expected_headers[0]: point (allowed: alternatives, heading, message, points, suggestion)

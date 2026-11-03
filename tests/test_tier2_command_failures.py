@@ -111,6 +111,47 @@ def test_detected_duplicate_remains_failed_not_incomplete(tmp_path: Path, monkey
     assert actual.findings[0].category == "DUPLICATE"
 
 
+def test_work_limit_is_incomplete_in_cli_and_reports(tmp_path: Path, monkeypatch) -> None:
+    """A skill over a Tier 2 work limit reads INCOMPLETE, never a failed duplicate scan."""
+    from skillevaluator.deduplication.intra_skill import intra_skill_validator
+    from skillevaluator.reporting import BenchmarkReporter
+
+    monkeypatch.setattr(intra_skill_validator, "CONTENT_DEDUP_MAX_CHUNKS", 1)
+    skill = tmp_path / "skill"
+    skill.mkdir()
+    (skill / "SKILL.md").write_text("## Section A\n" + "a" * 200 + "\n## Section B\n" + "b" * 200)
+    reports = tmp_path / "reports"
+    for purpose in ("LLM", "EMBEDDING"):
+        # The limit trips before any provider request; port 9 is never contacted.
+        monkeypatch.setenv(f"SKILL_EVAL_{purpose}_PROVIDER", "openai-compatible")
+        monkeypatch.setenv(f"SKILL_EVAL_{purpose}_BASE_URL", "http://127.0.0.1:9/v1")
+        monkeypatch.setenv(f"SKILL_EVAL_{purpose}_API_KEY", "local-test-key")
+        monkeypatch.setenv(f"SKILL_EVAL_{purpose}_MODEL", "local-test-model")
+
+    invocation = CliRunner().invoke(cli, ["tier2", str(skill), "-r", "cli,json,markdown", "-o", str(reports)])
+
+    assert invocation.exit_code == 1, invocation.output
+    assert "context-deduplication did not complete" in invocation.output
+    payload = json.loads((reports / "skillevaluator-tier2.json").read_text())
+    assert payload["overall_status"] == "incomplete"
+    result = payload["results"][0]
+    assert result["status"] == "incomplete"
+    assert result["incomplete_scans"] == ["context-deduplication"]
+    assert result["findings"] == []
+    assert result["summary"]["critical_count"] == 0
+    assert result["work_limit"] == {"check_name": "chunk_count_limit", "file_path": "SKILL.md", "actual": 2, "limit": 1}
+    markdown = (reports / "skillevaluator-tier2.md").read_text()
+    assert "**Status:** ⚠️ INCOMPLETE" in markdown
+    assert "Tier 2 scan incomplete: the skill produced more than 1 content chunks" in markdown
+
+    benchmark = BenchmarkReporter(include_timestamp=False).render_all(commands.run_context_optimization_check(skill))
+    assert (
+        "| Tier 2 | Semantic deduplication | **INCOMPLETE** | Missing trustworthy evidence from context-deduplication |"
+        in benchmark
+    )
+    assert "**FAILED**" not in benchmark
+
+
 def test_http_410_is_incomplete_in_real_cli_and_reports(tmp_path: Path, monkeypatch) -> None:
     """Exercise the actual SDK against a local HTTP service, without external calls."""
     requests = []
@@ -296,3 +337,81 @@ def test_chat_http_diagnostics_after_successful_embedding(tmp_path: Path, monkey
             assert "SKILL_EVAL_LLM_MODEL" in errors[0]
         elif chat_status == 429:
             assert "quota" in errors[0]
+
+
+def test_chat_refusal_is_advisory_in_real_cli_and_reports(tmp_path: Path, monkeypatch) -> None:
+    """A content-filtered chat reply is an advisory finding, not a blocking incomplete scan."""
+    requests = []
+
+    class RefusingChatHandler(BaseHTTPRequestHandler):
+        def do_POST(self):
+            body = json.loads(self.rfile.read(int(self.headers["Content-Length"])))
+            requests.append((self.path, body))
+            if self.path == "/v1/embeddings":
+                payload = {
+                    "data": [
+                        {"index": index, "embedding": [float(dimension == index // 2) for dimension in range(4)]}
+                        for index in range(len(body["input"]))
+                    ]
+                }
+            else:
+                payload = {
+                    "id": "local-completion",
+                    "object": "chat.completion",
+                    "created": 0,
+                    "model": body["model"],
+                    "choices": [
+                        {
+                            "index": 0,
+                            "finish_reason": "content_filter",
+                            "message": {"role": "assistant", "content": "provider-private-token"},
+                        }
+                    ],
+                }
+            response = json.dumps(payload).encode()
+            self.send_response(200)
+            self.send_header("Content-Type", "application/json")
+            self.send_header("Content-Length", str(len(response)))
+            self.end_headers()
+            self.wfile.write(response)
+
+        def log_message(self, _format, *_args):
+            pass
+
+    server = ThreadingHTTPServer(("127.0.0.1", 0), RefusingChatHandler)
+    thread = threading.Thread(target=server.serve_forever, daemon=True)
+    thread.start()
+    skill = tmp_path / "skill"
+    skill.mkdir()
+    (skill / "SKILL.md").write_text("\n".join(f"## Section {letter}\n{letter.lower() * 200}" for letter in "ABCD"))
+    reports = tmp_path / "reports"
+    for purpose in ("LLM", "EMBEDDING"):
+        monkeypatch.setenv(f"SKILL_EVAL_{purpose}_PROVIDER", "openai-compatible")
+        monkeypatch.setenv(f"SKILL_EVAL_{purpose}_BASE_URL", f"http://127.0.0.1:{server.server_port}/v1")
+        monkeypatch.setenv(f"SKILL_EVAL_{purpose}_API_KEY", "local-test-key")
+        monkeypatch.setenv(f"SKILL_EVAL_{purpose}_MODEL", f"local-{purpose.lower()}-model")
+    try:
+        invocation = CliRunner().invoke(cli, ["tier2", str(skill), "-o", str(reports)])
+    finally:
+        server.shutdown()
+        server.server_close()
+        thread.join(timeout=5)
+
+    assert invocation.exit_code == 0, invocation.output
+    # A refusal is not transient, so the same request is not retried.
+    assert len([path for path, _body in requests if path == "/v1/chat/completions"]) == 2
+    payload = json.loads((reports / "skillevaluator-tier2.json").read_text())
+    result = payload["results"][0]
+    assert payload["overall_status"] == "passed"
+    assert result["status"] == "passed"
+    assert [(finding["check_name"], finding["severity"]) for finding in result["findings"]] == [
+        ("llm_refused", "medium"),
+        ("llm_refused", "medium"),
+    ]
+    analysis = result["llm_analysis"]
+    assert (analysis["clusters_completed"], analysis["clusters_refused"], analysis["clusters_failed"]) == (0, 2, 0)
+    assert all(finding["metadata"]["llm_model"] == "local-llm-model" for finding in result["findings"])
+    html = (reports / "skillevaluator-tier2.html").read_text()
+    for output in (invocation.output, json.dumps(payload), html):
+        assert "provider-private-token" not in output
+        assert "local-test-key" not in output

@@ -30,6 +30,20 @@ The pinned CLI releases apply wherever Harbor installs the agent: Docker and
 the remote environments. [Local mode](#local-mode) runs the CLI already on your
 machine instead.
 
+Claude Code runs with background tasks turned off. Every staged task sets
+`CLAUDE_CODE_DISABLE_BACKGROUND_TASKS=1` in its environment, in every env mode,
+so a shell command finishes in the agent's turn or is stopped at Claude Code's
+Bash timeout (2 minutes unless the agent requests a longer one) instead of
+moving to the background. A headless Claude Code run waits for its background
+commands before it exits, so a command that never finishes would otherwise hold
+a trial that has already answered until the agent timeout. Neither
+`harbor.runtime_env` nor a native task's `[environment.env]` can turn
+background tasks back on. If a skill needs a single command to run
+longer, raise Claude Code's default in `evals/config.yml` with
+`harbor.runtime_env: {BASH_DEFAULT_TIMEOUT_MS: "240000"}` (milliseconds), and
+keep it below the trial's agent timeout: 300 seconds times
+`harbor.timeout_multiplier` for generated tasks.
+
 The `claude` alias is canonicalized to `claude-code` everywhere an agent
 name can appear — `-a/--agents`, `--agent-model`, and `harbor.agents` in
 `evals/config.yml` — so both spellings always name the same agent.
@@ -453,6 +467,12 @@ SkillEvaluator forwards both Python settings to Harbor when they are set;
 it does not enable them automatically. Native Windows local mode remains
 unsupported; use Docker or run local mode inside WSL2.
 
+Verifier scripts run inside the Linux container, so they need LF line
+endings. SkillEvaluator writes generated `test.sh` files and the
+`init-custom-grader` and `init-harbor-task` grader starters with LF on every
+host. Keep LF when you edit them: a CRLF `grader.sh` or `test.sh` fails in the
+container before grading starts.
+
 ### Resource tuning
 
 If an agent's work is heavier than the defaults allow — large builds,
@@ -564,7 +584,9 @@ on your machine runs the trials, wrapped in an OS-level sandbox. On Linux that
 is Bubblewrap — kernel namespace isolation, a read-only view of the system,
 writes confined to the run directories, and a network namespace that is
 isolated when the run is airgapped and shared for model egress when network
-is allowed. On macOS it is Seatbelt, which confines reads and writes and —
+is allowed. SkillEvaluator resolves `bwrap` on `PATH` to an absolute path once,
+smoke-tests that binary, and launches the same binary for every command. On
+macOS it is Seatbelt, which confines reads and writes and —
 even when network is allowed — denies inbound connections, socket binding,
 and Unix sockets (except the `mDNSResponder` DNS socket); it cannot provide
 full process isolation, so it is the weaker of the two. Native Windows is
@@ -615,7 +637,10 @@ cleaner experiment.
 `doctor` and `health-check` run the same readiness checks and exit nonzero when
 any check fails, so either can gate a script or CI job. Warnings from
 `doctor --verify-models` are nonblocking because the catalog result is
-inconclusive rather than a definitive rejection.
+inconclusive rather than a definitive rejection. Both commands check Tier 3 by
+default. `--tier 1` checks the Tier 1 scanners, `--tier 2` the embedding and LLM
+providers, and `--tier all` every tier; see the
+[CLI Reference](cli-reference.mdx#doctor).
 
 ### doctor
 

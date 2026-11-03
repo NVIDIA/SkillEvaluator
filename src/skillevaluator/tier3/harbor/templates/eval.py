@@ -33,6 +33,7 @@ import os
 import random
 import re
 import signal
+import ssl
 import sys
 import threading
 import time
@@ -131,20 +132,25 @@ _bind = _shared_checks._bind
 _bind_unsettled = _shared_checks._bind_unsettled
 _binding_readings = _shared_checks._binding_readings
 _carries_a_nested_invocation = _shared_checks._carries_a_nested_invocation
+_case_pattern_end = _shared_checks._case_pattern_end
 _child_environment = _shared_checks._child_environment
 _cmd_executes_script = _shared_checks._cmd_executes_script
 _cmd_reads_skill_md = _shared_checks._cmd_reads_skill_md
 _command_input_args = _shared_checks._command_input_args
 _command_names_script = _shared_checks._command_names_script
+_command_prefix_end = _shared_checks._command_prefix_end
 _command_position_words = _shared_checks._command_position_words
 _command_reads_skill_md_arg = _shared_checks._command_reads_skill_md_arg
 _command_run_before_refusal = _shared_checks._command_run_before_refusal
 _command_start = _shared_checks._command_start
 _compound_after_assignment = _shared_checks._compound_after_assignment
 _compound_closer_ends = _shared_checks._compound_closer_ends
+_compound_keywords = _shared_checks._compound_keywords
+_compound_reads_input = _shared_checks._compound_reads_input
 _declaration_options = _shared_checks._declaration_options
 _double_parens_are_arithmetic = _shared_checks._double_parens_are_arithmetic
 _failed_single_skill_read = _shared_checks._failed_single_skill_read
+_function_header_end = _shared_checks._function_header_end
 _has_literal_secret = _shared_checks._has_literal_secret
 _has_unquoted_secret_var = _shared_checks._has_unquoted_secret_var
 _has_unsupported_native_codex_call = _shared_checks._has_unsupported_native_codex_call
@@ -173,7 +179,12 @@ _mark_quoted_syntax = _shared_checks._mark_quoted_syntax
 _mask_non_assignment_equals = _shared_checks._mask_non_assignment_equals
 _mentions_skill_artifact = _shared_checks._mentions_skill_artifact
 _names_script_anywhere = _shared_checks._names_script_anywhere
+_network_client_uploads = _shared_checks._network_client_uploads
+_network_executable = _shared_checks._network_executable
+_network_lookup_readings = _shared_checks._network_lookup_readings
+_network_redirection = _shared_checks._network_redirection
 _network_shell_tokens = _shared_checks._network_shell_tokens
+_network_tokens_exfiltrate = _shared_checks._network_tokens_exfiltrate
 _normalize_skill_names = _shared_checks._normalize_skill_names
 _normalized_write_path = _shared_checks._normalized_write_path
 _number_may_fail = _shared_checks._number_may_fail
@@ -188,15 +199,29 @@ _prefixed_scope = _shared_checks._prefixed_scope
 _protected_write_entry = _shared_checks._protected_write_entry
 _reader_scope = _shared_checks._reader_scope
 _reads_program_from_stdin = _shared_checks._reads_program_from_stdin
+_record_builtin_reassignments = _shared_checks._record_builtin_reassignments
 _redact_network_evidence = _shared_checks._redact_network_evidence
 _redirects_script_to_stdin = _shared_checks._redirects_script_to_stdin
 _references_exact_target_artifact = _shared_checks._references_exact_target_artifact
 _refuse_assignment = _shared_checks._refuse_assignment
+_resolve_lookups = _shared_checks._resolve_lookups
+_resolve_network_client_lookups = _shared_checks._resolve_network_client_lookups
 _resolved_shell_arg = _shared_checks._resolved_shell_arg
+_rm_brace_sequence = _shared_checks._rm_brace_sequence
+_rm_brace_words = _shared_checks._rm_brace_words
+_rm_call_workdirs = _shared_checks._rm_call_workdirs
+_rm_cd_workdirs = _shared_checks._rm_cd_workdirs
+_rm_dot_glob_paths = _shared_checks._rm_dot_glob_paths
+_rm_find_exec_protected = _shared_checks._rm_find_exec_protected
+_rm_force_operand_is_protected = _shared_checks._rm_force_operand_is_protected
 _rm_group_end = _shared_checks._rm_group_end
 _rm_inline_code = _shared_checks._rm_inline_code
+_rm_operand_follows_find = _shared_checks._rm_operand_follows_find
+_rm_sequence_workdirs = _shared_checks._rm_sequence_workdirs
 _rm_sequential_commands = _shared_checks._rm_sequential_commands
 _rm_shell_tokens = _shared_checks._rm_shell_tokens
+_rm_shell_workdirs = _shared_checks._rm_shell_workdirs
+_rm_spend = _shared_checks._rm_spend
 _rm_stdin_code = _shared_checks._rm_stdin_code
 _rm_stdin_codes = _shared_checks._rm_stdin_codes
 _rm_symbolic_link_command = _shared_checks._rm_symbolic_link_command
@@ -206,6 +231,7 @@ _rm_symlink_fallback = _shared_checks._rm_symlink_fallback
 _rm_targets_fallback = _shared_checks._rm_targets_fallback
 _rm_targets_outside_tmp = _shared_checks._rm_targets_outside_tmp
 _rm_tmp_operand_is_exempt = _shared_checks._rm_tmp_operand_is_exempt
+_rm_token_workdirs = _shared_checks._rm_token_workdirs
 _rm_wrapped_command_index = _shared_checks._rm_wrapped_command_index
 _rm_xargs_context = _shared_checks._rm_xargs_context
 _rm_xargs_fallback = _shared_checks._rm_xargs_fallback
@@ -226,10 +252,12 @@ _skill_name_from_ref = _shared_checks._skill_name_from_ref
 _skip_arithmetic = _shared_checks._skip_arithmetic
 _skip_transparent_prefixes = _shared_checks._skip_transparent_prefixes
 _skip_wrapper_options = _shared_checks._skip_wrapper_options
+_split_glued_syntax = _shared_checks._split_glued_syntax
 _split_heredoc_body = _shared_checks._split_heredoc_body
 _split_heredocs = _shared_checks._split_heredocs
 _split_punctuation_runs = _shared_checks._split_punctuation_runs
 _string_argument = _shared_checks._string_argument
+_substitution_command_names = _shared_checks._substitution_command_names
 _tool_call_shell = _shared_checks._tool_call_shell
 _tool_searches_root = _shared_checks._tool_searches_root
 _unit_is_complete = _shared_checks._unit_is_complete
@@ -269,8 +297,10 @@ _BUILTIN_REACHES_BUILTINS = _shared_checks._BUILTIN_REACHES_BUILTINS
 _COMMAND_INTRODUCING_WORDS = _shared_checks._COMMAND_INTRODUCING_WORDS
 _COMMAND_POSITION_LEADERS = _shared_checks._COMMAND_POSITION_LEADERS
 _COMMAND_REACHES_BUILTINS = _shared_checks._COMMAND_REACHES_BUILTINS
+_COMMAND_SUBSTITUTION_RE = _shared_checks._COMMAND_SUBSTITUTION_RE
 _COMPOUND_CLOSERS = _shared_checks._COMPOUND_CLOSERS
 _COMPOUND_OPENERS = _shared_checks._COMPOUND_OPENERS
+_CURL_OR_WGET_WORD_RE = _shared_checks._CURL_OR_WGET_WORD_RE
 _CURL_DATA_FLAGS = _shared_checks._CURL_DATA_FLAGS
 _CURL_SHORT_OPTS_WITH_ARG = _shared_checks._CURL_SHORT_OPTS_WITH_ARG
 _CURL_UPLOAD_FLAGS = _shared_checks._CURL_UPLOAD_FLAGS
@@ -289,8 +319,11 @@ _EMPTY_REFERENCE_SHELLS = _shared_checks._EMPTY_REFERENCE_SHELLS
 _EXECUTION_TOOL_HINTS = _shared_checks._EXECUTION_TOOL_HINTS
 _EXPORTED_MARK = _shared_checks._EXPORTED_MARK
 _FILE_READ_VERBS = _shared_checks._FILE_READ_VERBS
+_FUNCTION_HEADER_NAME_RE = _shared_checks._FUNCTION_HEADER_NAME_RE
 _GLUED_AKIA_BODY = _shared_checks._GLUED_AKIA_BODY
-_GLUED_KEY_BODY = _shared_checks._GLUED_KEY_BODY
+_GLUED_CASE_PATTERN_RE = _shared_checks._GLUED_CASE_PATTERN_RE
+_GLUED_FUNCTION_HEADER_RE = _shared_checks._GLUED_FUNCTION_HEADER_RE
+_GLUED_KEYWORD_RE = _shared_checks._GLUED_KEYWORD_RE
 _GROUPING_TOKENS = _shared_checks._GROUPING_TOKENS
 _HEREDOC_DELIMITER_RE = _shared_checks._HEREDOC_DELIMITER_RE
 _HEREDOC_REDIRECTS = _shared_checks._HEREDOC_REDIRECTS
@@ -311,8 +344,10 @@ _LAST_STAGE_IN_SUBSHELL = _shared_checks._LAST_STAGE_IN_SUBSHELL
 _LISTING_ACTS_ON_NAMES = _shared_checks._LISTING_ACTS_ON_NAMES
 _LITERAL_DOLLAR = _shared_checks._LITERAL_DOLLAR
 _LOOP_HEADER_WORDS = _shared_checks._LOOP_HEADER_WORDS
+_MAPFILE_OPTIONS_WITH_ARG = _shared_checks._MAPFILE_OPTIONS_WITH_ARG
 _MAX_HEREDOCS_PER_LINE = _shared_checks._MAX_HEREDOCS_PER_LINE
 _MAX_HEREDOC_OPERANDS = _shared_checks._MAX_HEREDOC_OPERANDS
+_MAX_LOOKUP_READINGS = _shared_checks._MAX_LOOKUP_READINGS
 _MAX_NETWORK_ACTION_CHARS = _shared_checks._MAX_NETWORK_ACTION_CHARS
 _MAX_PARSE_UNIT_LINES = _shared_checks._MAX_PARSE_UNIT_LINES
 _MAX_PARSE_UNIT_READ = _shared_checks._MAX_PARSE_UNIT_READ
@@ -325,7 +360,10 @@ _NEGATIVE_NUMBER_RE = _shared_checks._NEGATIVE_NUMBER_RE
 _NESTED_QUOTING_RE = _shared_checks._NESTED_QUOTING_RE
 _NETWORK_CLIENT_FAST_PATTERN = _shared_checks._NETWORK_CLIENT_FAST_PATTERN
 _NETWORK_CLIENT_PATTERN = _shared_checks._NETWORK_CLIENT_PATTERN
+_NETWORK_COMMAND_RUNNERS = _shared_checks._NETWORK_COMMAND_RUNNERS
 _NETWORK_EXECUTABLES = _shared_checks._NETWORK_EXECUTABLES
+_NETWORK_INPUT_REDIRECTS = _shared_checks._NETWORK_INPUT_REDIRECTS
+_NETWORK_OUTPUT_REDIRECTS = _shared_checks._NETWORK_OUTPUT_REDIRECTS
 _NOT_A_SIMPLE_COMMAND = _shared_checks._NOT_A_SIMPLE_COMMAND
 _NO_HERE_STRING_SHELLS = _shared_checks._NO_HERE_STRING_SHELLS
 _NO_SCRIPT = _shared_checks._NO_SCRIPT
@@ -336,6 +374,7 @@ _OPENERS_REFUSED_AFTER_ASSIGNMENT = _shared_checks._OPENERS_REFUSED_AFTER_ASSIGN
 _OPERATOR_TOKEN_RE = _shared_checks._OPERATOR_TOKEN_RE
 _OUTPUT_REDIRECTS = _shared_checks._OUTPUT_REDIRECTS
 _PARSES_WHOLE_TEXT_FIRST = _shared_checks._PARSES_WHOLE_TEXT_FIRST
+_PASS_THROUGH_WRAPPERS = _shared_checks._PASS_THROUGH_WRAPPERS
 _PATH_ARG_KEYS = _shared_checks._PATH_ARG_KEYS
 _PIPELINE_OPTION_RE = _shared_checks._PIPELINE_OPTION_RE
 _POSITIONAL_SET_RE = _shared_checks._POSITIONAL_SET_RE
@@ -350,12 +389,20 @@ _READONLY_ATTRIBUTES = _shared_checks._READONLY_ATTRIBUTES
 _READONLY_MARK = _shared_checks._READONLY_MARK
 _READS_ARGV0_RE = _shared_checks._READS_ARGV0_RE
 _READS_POSITIONAL_RE = _shared_checks._READS_POSITIONAL_RE
+_READ_OPTIONS_WITH_ARG = _shared_checks._READ_OPTIONS_WITH_ARG
 _READ_TOOL_HINTS = _shared_checks._READ_TOOL_HINTS
 _REDIRECTION_OPERATOR_RE = _shared_checks._REDIRECTION_OPERATOR_RE
 _REDIRECTION_WORD_RE = _shared_checks._REDIRECTION_WORD_RE
 _REFERENCE_MARK = _shared_checks._REFERENCE_MARK
 _REFERENCE_SHELLS = _shared_checks._REFERENCE_SHELLS
 _REFUSED_ASSIGNMENT_GOES_ON = _shared_checks._REFUSED_ASSIGNMENT_GOES_ON
+_RM_CD_RE = _shared_checks._RM_CD_RE
+_RM_FIND_EXEC_ACTIONS = _shared_checks._RM_FIND_EXEC_ACTIONS
+_RM_FORCE_PROTECTED_ROOTS = _shared_checks._RM_FORCE_PROTECTED_ROOTS
+_RM_MAX_BRACE_WORDS = _shared_checks._RM_MAX_BRACE_WORDS
+_RM_MAX_DOT_GLOB_COMPONENTS = _shared_checks._RM_MAX_DOT_GLOB_COMPONENTS
+_RM_MAX_FORCE_RESOLUTIONS = _shared_checks._RM_MAX_FORCE_RESOLUTIONS
+_RM_MAX_WORKDIRS = _shared_checks._RM_MAX_WORKDIRS
 _RUNNER_COMMAND_PREFIXES = _shared_checks._RUNNER_COMMAND_PREFIXES
 _RUNTIME_BINDING_BUILTINS = _shared_checks._RUNTIME_BINDING_BUILTINS
 _SCRIPT = _shared_checks._SCRIPT
@@ -375,6 +422,7 @@ _SPECIAL_BUILTINS = _shared_checks._SPECIAL_BUILTINS
 _SPECIAL_BUILTIN_ERROR_STOPS = _shared_checks._SPECIAL_BUILTIN_ERROR_STOPS
 _STDIN_ARGV_RE = _shared_checks._STDIN_ARGV_RE
 _STDIN_DEPENDENT_WRAPPERS = _shared_checks._STDIN_DEPENDENT_WRAPPERS
+_STDIN_TEXT_CONSUMERS = _shared_checks._STDIN_TEXT_CONSUMERS
 _SYNTAX_SHAPE_RE = _shared_checks._SYNTAX_SHAPE_RE
 _SYNTAX_WORDS = _shared_checks._SYNTAX_WORDS
 _TRANSPARENT_COMMAND_PREFIXES = _shared_checks._TRANSPARENT_COMMAND_PREFIXES
@@ -388,6 +436,7 @@ _UNSAFE_HTTP_METHODS = _shared_checks._UNSAFE_HTTP_METHODS
 _UNSETTLED_EXPANSION_RE = _shared_checks._UNSETTLED_EXPANSION_RE
 _UNSETTLED_VALUE = _shared_checks._UNSETTLED_VALUE
 _UNSET_REFERENCE_SHELLS = _shared_checks._UNSET_REFERENCE_SHELLS
+_VARIABLE_READING_BUILTINS = _shared_checks._VARIABLE_READING_BUILTINS
 _VERSION_SUFFIX_RE = _shared_checks._VERSION_SUFFIX_RE
 _WGET_DATA_FLAGS = _shared_checks._WGET_DATA_FLAGS
 _WRAPPER_GRAMMARS = _shared_checks._WRAPPER_GRAMMARS
@@ -574,46 +623,9 @@ DISPLAY_METRICS = [
 ]
 
 
-LOG_SK_RE = re.compile(r"(?<![A-Za-z0-9_-])sk-[a-zA-Z0-9_-]{8,}|sk-" + _GLUED_KEY_BODY)
-LOG_NVAPI_RE = re.compile(r"(?<![A-Za-z0-9_-])nvapi-[a-zA-Z0-9_-]{8,}|nvapi-" + _GLUED_KEY_BODY)
-LOG_CRSR_RE = re.compile(r"(?<![A-Za-z0-9_-])crsr_[a-f0-9]{16,}")
-OPENSHIFT_TOKEN_RE = re.compile(r"(?<![A-Za-z0-9_-])sha256~[A-Za-z0-9._~-]+")
-LOG_YA29_RE = re.compile(r"(?<![A-Za-z0-9_-])ya29\.[A-Za-z0-9_-]{20,}")
-# A JWT used to start at any ``\beyJ``, so in a run of JWT characters such as
-# "eyJ-" * n every "-eyJ" was a start, and each start scanned to the end of the
-# run looking for ".". Now a match starts only at the beginning of a run. The part
-# of the run before its first ``\beyJ`` is captured as ``lead`` and written back
-# unchanged, which keeps JWTs glued to a "-" (x-eyJ...) redacted. Later starts in
-# the same run are never tried: their first segment reaches the same "." with
-# fewer characters, so they could only fail where the first start failed. ``lead``
-# stops at the first ``\beyJ`` and every earlier offset fails ``\beyJ``, so
-# backtracking into it is cheap. No atomic groups or possessive quantifiers: the
-# Harbor verifier copy runs on the task image's python3, which may predate 3.11.
-LOG_JWT_RE = re.compile(
-    r"(?<![A-Za-z0-9_-])(?P<lead>(?:(?!\beyJ)[A-Za-z0-9_-])*)"
-    r"\beyJ[A-Za-z0-9_-]{20,}\.[A-Za-z0-9_-]{20,}\.[A-Za-z0-9_-]{20,}\b"
-)
-# GitHub classic (ghp_/gho_/ghu_/ghs_/ghr_) and fine-grained (github_pat_) tokens.
-# Single bounded character classes keep both patterns linear.
-LOG_GITHUB_TOKEN_RE = re.compile(r"\bgh[pousr]_[A-Za-z0-9]{36,255}\b")
-LOG_GITHUB_PAT_RE = re.compile(r"\bgithub_pat_[A-Za-z0-9_]{22,255}\b")
-
-
-def redact_secrets_in_log_line(line, *, extra_secret_values=None):
-    """Best-effort mask common key shapes in Harbor verifier output text."""
-    for secret in sorted(set(extra_secret_values or ()), key=len, reverse=True):
-        if secret and len(secret) >= _MIN_EXACT_SECRET_LENGTH:
-            line = line.replace(secret, "<redacted>")
-    line = LOG_SK_RE.sub("sk-<redacted>", line)
-    line = LOG_NVAPI_RE.sub("nvapi-<redacted>", line)
-    line = LOG_CRSR_RE.sub("crsr_<redacted>", line)
-    line = LOG_GITHUB_TOKEN_RE.sub(lambda match: match.group()[:4] + "<redacted>", line)
-    line = LOG_GITHUB_PAT_RE.sub("github_pat_<redacted>", line)
-    line = OPENSHIFT_TOKEN_RE.sub("sha256~<redacted>", line)
-    line = LOG_YA29_RE.sub("ya29.<redacted>", line)
-    if "eyJ" not in line:  # every JWT match contains "eyJ"; skip the scan on ordinary lines
-        return line
-    return LOG_JWT_RE.sub(r"\g<lead>jwt-<redacted>", line)
+# checks.py imports this from secret_redaction.py, which _copy_verifier stages
+# beside this file, so the verifier masks log text with the shared rules.
+redact_secrets_in_log_line = _shared_checks.redact_secrets_in_log_line
 
 
 # ── ATIF Helpers ─────────────────────────────────────────────────────────────
@@ -1313,7 +1325,38 @@ def _anthropic_url():
     return _validate_http_url(url)
 
 
-_RETRIABLE_HTTP_CODES = frozenset({429, 500, 502, 503, 504})
+# 501 Not Implemented and 505 HTTP Version Not Supported do not change on a retry.
+_NON_RETRIABLE_5XX_CODES = frozenset({501, 505})
+
+
+def _is_retriable_http_status(status):
+    """408, 429, and every 5xx except 501 and 505 (same rule as ``skillevaluator.inference.retry``)."""
+    if not isinstance(status, int) or isinstance(status, bool):
+        return False
+    return status in (408, 429) or (500 <= status <= 599 and status not in _NON_RETRIABLE_5XX_CODES)
+
+
+def _is_certificate_failure(error):
+    """Return whether ``error`` is, or wraps, a failed TLS certificate check; a retry cannot fix it."""
+    pending = [error]
+    seen = set()
+    while pending and len(seen) < 32:
+        current = pending.pop()
+        if not isinstance(current, BaseException) or id(current) in seen:
+            continue
+        if isinstance(current, ssl.SSLCertVerificationError):
+            return True
+        seen.add(id(current))
+        if isinstance(current, urllib.error.URLError):
+            pending.append(current.reason)
+        kwargs = getattr(current, "kwargs", None)
+        if isinstance(kwargs, dict):
+            pending.append(kwargs.get("error"))
+        pending.extend(current.args)
+        pending.extend((current.__cause__, current.__context__))
+    return False
+
+
 _DEFAULT_MAX_RETRIES = 3
 _DEFAULT_BASE_DELAY = 1.0
 _DEFAULT_MAX_DELAY = 30.0
@@ -1374,13 +1417,13 @@ def _parse_retry_after(header_value, fallback_delay):
     except ValueError:
         pass
     try:
-        from datetime import UTC, datetime
+        from datetime import datetime, timezone
         from email.utils import parsedate_to_datetime
 
         target = parsedate_to_datetime(clean_val)
         if target.tzinfo is None:
-            target = target.replace(tzinfo=UTC)
-        now = datetime.now(UTC)
+            target = target.replace(tzinfo=timezone.utc)  # noqa: UP017 - datetime.UTC needs Python 3.11; task images may run 3.9
+        now = datetime.now(timezone.utc)  # noqa: UP017
         return max(0.0, (target - now).total_seconds())
     except Exception:
         return fallback_delay
@@ -1455,7 +1498,8 @@ def _urlopen_with_retry(request, timeout=90):
             if (
                 attempt >= retry_config.max_retries
                 or (not is_http and not is_network)
-                or (is_http and error.code not in _RETRIABLE_HTTP_CODES)
+                or (is_http and not _is_retriable_http_status(error.code))
+                or _is_certificate_failure(error)
             ):
                 raise
 
@@ -1703,14 +1747,12 @@ def _classify_bedrock_retry_error(error):
                 break
 
     if http_status is not None or error_code:
-        is_retriable = (
-            http_status in _RETRIABLE_HTTP_CODES or http_status == 408 or error_code in _RETRIABLE_BEDROCK_ERROR_CODES
-        )
+        is_retriable = _is_retriable_http_status(http_status) or error_code in _RETRIABLE_BEDROCK_ERROR_CODES
         status_label = f"HTTP {http_status}" if http_status is not None else error_code
         return is_retriable, status_label, retry_after_str
 
     type_name = type(error).__name__
-    is_network = (
+    is_network = not _is_certificate_failure(error) and (
         isinstance(error, (ConnectionError, TimeoutError, OSError)) or type_name in _RETRIABLE_BOTOCORE_EXCEPTION_NAMES
     )
     return is_network, type_name, None

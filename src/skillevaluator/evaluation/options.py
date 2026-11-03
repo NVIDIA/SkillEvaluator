@@ -27,6 +27,9 @@ class EvaluationOptions:
     agents: str | None = None
     env_mode: str = "docker"
     skip_baseline: bool = False
+    # Baseline-only runs (for example harness calibration) skip the with-skill
+    # arm. Mutually exclusive with ``skip_baseline``.
+    skip_with_skill: bool = False
     n_attempts: int | None = None
     pass_threshold: float | None = None
     stop_on_pass: bool | None = None
@@ -52,6 +55,8 @@ class EvaluationOptions:
     # the tree that runs the evaluator is not the tree being evaluated.
     evaluated_source: dict[str, str] | None = None
     environment_kwargs: dict[str, str] = field(default_factory=dict)
+    # Appended so legacy positional construction keeps its field order.
+    max_cases: int | None = None
 
     def engine_kwargs(self) -> dict[str, Any]:
         """Return keyword arguments (excluding ``skill_path``) for the engine."""

@@ -253,6 +253,7 @@ grading:
 | `harbor.stop_on_pass` | boolean | Stop a case's remaining attempts after the first pass. Requires `n_attempts` > 1. |
 | `harbor.n_concurrent` | integer ≥ 1 | Concurrent trials. |
 | `harbor.max_agents` | integer ≥ 1 | Cap on agents evaluated in one run. |
+| `harbor.max_cases` | integer ≥ 1 | Run only the first N cases in staged order (eval dataset order, or task-directory name order for native Harbor tasks). Unset runs every case. A run that skips cases is not publication evidence. The `--max-cases` CLI flag overrides this value. |
 | `harbor.timeout_multiplier` | finite number > 0 | Scales task timeouts. Values that would overflow Harbor's mandatory lifecycle timeouts are rejected before execution. |
 | `harbor.agent_runtime_preflight` | boolean | Opt-in extra agent-only execution of the first staged task before the measured evaluation. Default: `false`; the CLI flag overrides this value. |
 | `harbor.agent_workdir` | string | Working directory for the agent inside the container. |
@@ -345,6 +346,24 @@ skillevaluator tier3 validate ./my-skill
 
 Run it in CI or before a long evaluation: it catches an empty dataset, missing
 required fields, duplicate case IDs, and invalid config in seconds.
+
+`validate PATH` also checks the selected Tier 3 source (dataset entries and
+case IDs, `config.yml`, or the native Harbor task layout) before any live run.
+When that check fails, each error names the entry or file and what is wrong,
+for example `entry case-3: Missing required fields: question`:
+
+- The terminal lists the errors under the Tier 3 finding when the full CLI
+  report prints (`-r cli` or `--verbose`), otherwise in the compact Tier 3
+  panel. When the run also writes an HTML or JSON report, the terminal shows
+  the first five and names that report for the rest. When it writes neither
+  (for example `-r cli` alone, or `--verbose` without `-r`), the terminal lists
+  every error.
+- The HTML report shows the exact error on the Tier 3 dashboard when there is
+  one, or the error count when there are several. **Full Insights → Source
+  Validation Errors** lists every error in order.
+- The JSON report keeps every error under `tier3.provenance.source_validation`.
+
+Passing checks and warnings are not listed as source errors.
 
 ## Next steps
 

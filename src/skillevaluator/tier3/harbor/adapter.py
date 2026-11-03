@@ -814,8 +814,22 @@ def _is_skill_evals_path(path: Path, skill_root: Path) -> bool:
     return False
 
 
+def _is_runtime_evaluator_directory(path: Path) -> bool:
+    """Keep runtime eval helpers; omit evals and recognized legacy dataset roots."""
+    name = path.name.casefold()
+    if name == "evals":
+        return True
+    if name != "eval" or _path_is_link_or_reparse(path):
+        return False
+    from skillevaluator.tier3.dataset_utils import DATASET_EXTENSIONS
+
+    # Match legacy discovery without following dataset links or reading data.
+    return any(os.path.lexists(path / f"dataset{extension}") for extension in DATASET_EXTENSIONS)
+
+
 def _runtime_skill_copy_ignore(skill_root: Path, excluded_roots: Sequence[Path] = ()):
     """Build a root-aware ignore callback for an agent-visible skill copy."""
+
     resolved_root = skill_root.resolve()
     excluded_roots = _skill_scoped_excluded_roots(skill_root, excluded_roots)
     authenticated_output_roots: set[Path] = set()
@@ -832,8 +846,8 @@ def _runtime_skill_copy_ignore(skill_root: Path, excluded_roots: Sequence[Path] 
     def _ignore(directory: str, contents: list[str]) -> list[str]:
         current = Path(directory)
         ignored: set[str] = set()
-        if current.resolve() == resolved_root:
-            ignored.update(name for name in contents if name.casefold() == "evals")
+        if current.resolve() == resolved_root or _skill_manifest(current) is not None:
+            ignored.update(name for name in contents if _is_runtime_evaluator_directory(current / name))
         for name in contents:
             candidate = current / name
             if (
@@ -2339,7 +2353,9 @@ def _write_test_sh(task_dir: Path, *, grading_mode: str, custom_grader: bool) ->
     else:
         script = prefix + 'python3 -I "${evaluator_dir}/eval.py"\n'
     test_sh = tests_dir / "test.sh"
-    test_sh.write_text(script, encoding="utf-8")
+    # LF only: the script runs inside a Linux container, and Windows' default
+    # CRLF turns the shebang into "#!/bin/bash\r".
+    test_sh.write_text(script, encoding="utf-8", newline="\n")
     test_sh.chmod(0o755)
 
 
@@ -3635,6 +3651,11 @@ _RUNTIME_POLICY_ENV_RESET = 'ENV CLAUDE_CODE_DISABLE_POLICY_SKILLS="1"'
 _EVALUATOR_MANAGED_RUNTIME_ENV = {
     **dict.fromkeys(_RUNTIME_LOADER_ENV_NAMES, ""),
     "CLAUDE_CODE_DISABLE_POLICY_SKILLS": "1",
+    # A headless Claude Code run waits for its background commands, so one that
+    # never exits (for example ``grep -r /``) holds a trial that has already
+    # answered until the agent timeout. With background tasks off, a command
+    # ends in its turn or at the Bash tool timeout. Other agents ignore it.
+    "CLAUDE_CODE_DISABLE_BACKGROUND_TASKS": "1",
 }
 _CLEAR_SKILL_ROOT_FUNCTION = (
     "clear_skill_root() { target=$1; "
@@ -4095,7 +4116,7 @@ def _sanitize_staged_runtime_skills(skills_dir: Path) -> None:
         skill_root = manifest.parent
         if not skill_root.is_dir():
             continue
-        eval_roots.update(child for child in skill_root.iterdir() if child.name.casefold() == "evals")
+        eval_roots.update(child for child in skill_root.iterdir() if _is_runtime_evaluator_directory(child))
     for eval_root in sorted(eval_roots, key=lambda path: len(path.parts), reverse=True):
         if os.path.lexists(eval_root):
             _remove_staged_path(eval_root)

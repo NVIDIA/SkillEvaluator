@@ -466,6 +466,16 @@
           "type": "boolean"
         },
         {
+          "default": "False",
+          "is_flag": true,
+          "name": "skip_with_skill",
+          "opts": [
+            "--skip-with-skill"
+          ],
+          "param_type": "option",
+          "type": "boolean"
+        },
+        {
           "name": "n_attempts",
           "opts": [
             "--n-attempts"
@@ -686,6 +696,14 @@
             "--progress"
           ],
           "param_type": "option"
+        },
+        {
+          "name": "progress_interval",
+          "opts": [
+            "--progress-interval"
+          ],
+          "param_type": "option",
+          "type": "float"
         },
         {
           "default": "False",
@@ -1621,6 +1639,14 @@
               "type": "text"
             },
             {
+              "name": "skip",
+              "opts": [
+                "--skip"
+              ],
+              "param_type": "option",
+              "type": "text"
+            },
+            {
               "is_flag": true,
               "name": "llm",
               "opts": [
@@ -1711,6 +1737,14 @@
             "name": "checks",
             "opts": [
               "--checks"
+            ],
+            "param_type": "option",
+            "type": "text"
+          },
+          {
+            "name": "skip",
+            "opts": [
+              "--skip"
             ],
             "param_type": "option",
             "type": "text"
@@ -2409,6 +2443,16 @@
               "type": "boolean"
             },
             {
+              "default": "False",
+              "is_flag": true,
+              "name": "skip_with_skill",
+              "opts": [
+                "--skip-with-skill"
+              ],
+              "param_type": "option",
+              "type": "boolean"
+            },
+            {
               "name": "n_attempts",
               "opts": [
                 "--n-attempts"
@@ -2629,6 +2673,14 @@
                 "--progress"
               ],
               "param_type": "option"
+            },
+            {
+              "name": "progress_interval",
+              "opts": [
+                "--progress-interval"
+              ],
+              "param_type": "option",
+              "type": "float"
             },
             {
               "default": "False",
@@ -3000,6 +3052,16 @@
             "type": "boolean"
           },
           {
+            "default": "False",
+            "is_flag": true,
+            "name": "skip_with_skill",
+            "opts": [
+              "--skip-with-skill"
+            ],
+            "param_type": "option",
+            "type": "boolean"
+          },
+          {
             "name": "n_attempts",
             "opts": [
               "--n-attempts"
@@ -3222,6 +3284,14 @@
             "param_type": "option"
           },
           {
+            "name": "progress_interval",
+            "opts": [
+              "--progress-interval"
+            ],
+            "param_type": "option",
+            "type": "float"
+          },
+          {
             "default": "False",
             "is_flag": true,
             "name": "verbose",
@@ -3293,6 +3363,14 @@
           "opts": [
             "--checks",
             "--tier1-checks"
+          ],
+          "param_type": "option",
+          "type": "text"
+        },
+        {
+          "name": "skip",
+          "opts": [
+            "--skip"
           ],
           "param_type": "option",
           "type": "text"

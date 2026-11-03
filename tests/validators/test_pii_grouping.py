@@ -114,3 +114,22 @@ class TestPiiGroupingByValue:
         result = SecurityValidator().validate_pii_only(skill)
         values = {f.metadata.get("matched_value") for f in _email_findings(result)}
         assert values == {"bob@company.com", "carol@company.com"}
+
+
+def test_folder_run_counts_folded_locations_once(tmp_path):
+    from skillevaluator.models.result import ValidationResult
+    from skillevaluator.reporting.finding_summary import summarize_findings
+
+    skill = tmp_path / "support"
+    skill.mkdir()
+    (skill / "SKILL.md").write_text(
+        "---\nname: support\ndescription: support helper\n---\nMail boss@company.com now.\nCC boss@company.com too.\n"
+    )
+    single = SecurityValidator(use_llm=False).validate_pii_only(skill)
+    parent = ValidationResult()
+    parent.merge_with_prefix(single, "support")
+
+    [finding] = [f for f in parent.findings if f.check_name == "emails"]
+    assert {item["file"] for item in finding.metadata["occurrences"]} == {finding.file_path}
+    summary = summarize_findings([parent])
+    assert summary["distinct_occurrences"] == summarize_findings([single])["distinct_occurrences"]

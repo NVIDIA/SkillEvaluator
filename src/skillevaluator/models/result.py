@@ -610,6 +610,19 @@ class ValidationResult:
 
         # Prefix findings with skill name in file_path
         for finding in other.findings:
+            metadata = finding.metadata
+            listed = metadata.get("occurrences") if isinstance(metadata, dict) else None
+            if isinstance(listed, list):
+                # Folded locations live under the same prefixed file_path as the finding.
+                metadata = {
+                    **metadata,
+                    "occurrences": [
+                        {**item, "file": f"[{prefix}] {item['file']}"}
+                        if isinstance(item, dict) and "file" in item
+                        else item
+                        for item in listed
+                    ],
+                }
             prefixed_finding = Finding(
                 category=finding.category,
                 severity=finding.severity,
@@ -619,7 +632,7 @@ class ValidationResult:
                 line_number=finding.line_number,
                 line_content=finding.line_content,
                 suggestion=finding.suggestion,
-                metadata=finding.metadata,
+                metadata=metadata,
             )
             self.findings.append(prefixed_finding)
 

@@ -56,7 +56,6 @@ def _finding_occurrences(finding: Finding, validator: str) -> list[dict[str, Any
             "validator": validator,
             "file_path": finding.file_path,
             "line_number": finding.line_number,
-            "line_content": finding.line_content,
         }
     ]
     listed = finding.metadata.get("occurrences") if isinstance(finding.metadata, dict) else None
@@ -74,7 +73,6 @@ def _finding_occurrences(finding: Finding, validator: str) -> list[dict[str, Any
                 "validator": validator,
                 "file_path": file_path,
                 "line_number": line_number,
-                "line_content": None,
             }
         )
     return entries

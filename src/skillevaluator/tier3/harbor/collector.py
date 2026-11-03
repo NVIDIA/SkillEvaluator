@@ -5242,7 +5242,9 @@ def _merge_constituent_judge_models(data: dict[str, Any], result: dict[str, Any]
 def _reward_judge_models(reward: dict[str, Any], metric: str) -> set[str]:
     """Return the judge models that scored ``metric`` in one reward row.
 
-    A multi-step logical reward carries its steps' models in ``_judge_models``.
+    A RAGAS score is tagged ``"<model> (ragas)"`` so it never pairs with a
+    prompt-judge score from the same model. A multi-step logical reward carries
+    its steps' models in ``_judge_models``.
     """
     carried = reward.get("_judge_models")
     if isinstance(carried, dict):
@@ -5253,7 +5255,10 @@ def _reward_judge_models(reward: dict[str, Any], metric: str) -> set[str]:
     if isinstance(detail, dict) and isinstance(detail.get("judge_models"), list):
         return {model for model in detail["judge_models"] if isinstance(model, str) and model}
     model = detail.get("judge_model_used") if isinstance(detail, dict) else None
-    return {model} if isinstance(model, str) and model else set()
+    if not isinstance(model, str) or not model:
+        return set()
+    # RAGAS and the prompt judge score differently with the same model, so a mix of the two must not pair.
+    return {f"{model} (ragas)" if detail.get("method") == "ragas" else model}
 
 
 def _judge_models_by_case(

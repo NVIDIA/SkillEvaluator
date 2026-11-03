@@ -535,8 +535,10 @@ All notable changes to SkillEvaluator are documented in this file.
   `judge_reasoning_effort` and `judge_fallback_used`, so scores and lift can
   differ from earlier runs. A RAGAS failure that falls back to the prompt
   judge is logged as a warning with the redacted error, and the scorer's
-  OpenAI client is closed after each attempt. Default GPT-5 and GPT-6 judges
-  are unaffected.
+  OpenAI client is closed after each attempt. A case scored by RAGAS in one
+  condition and by the prompt judge in the other is left out of the
+  `goal_accuracy` lift and counted in `judge_mixed_cases`, even when both used
+  the same model. Default GPT-5 and GPT-6 judges are unaffected.
 
 ### Security
 

@@ -1,0 +1,20 @@
+# SPDX-License-Identifier: Apache-2.0
+# Optional trusted manual run; the basic skill-checks.yml needs no model secret.
+# Use the release-generated copy with reviewed workflow and image pins.
+name: Skill checks with LLM
+on:
+  workflow_dispatch:
+permissions:
+  contents: read
+jobs:
+  skills:
+    uses: NVIDIA/SkillEvaluator/.github/workflows/evaluate-skills.yml@46a8cf269257d1ec56a0285c508ac9ee48010930
+    with:
+      image: ghcr.io/nvidia/skillevaluator-tier1@sha256:a3baec51f48145cdf9de05a5ab054d9576f62f1de0f5276b788410f5c17747d4
+      paths: skills
+      min-score: 70
+      scan-mode: all
+      llm: true
+      llm-provider: openai
+    secrets:
+      LLM_API_KEY: ${{ secrets.LLM_API_KEY }}

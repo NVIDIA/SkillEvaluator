@@ -274,8 +274,9 @@ result in `results[]` carries its own `finding_counts`. Identical findings in
 different files or skills share one `finding_id`, so they count as one unique
 finding with one occurrence per location. When the CI templates redact a
 detected credential from a report, they recompute the IDs and groups from the
-redacted text, so no ID is derived from a removed value; such a finding's IDs
-differ from a local run's.
+redacted text and render the HTML, Markdown, and SARIF copies from that JSON,
+so no ID is derived from a removed value; such a finding's IDs differ from a
+local run's.
 
 The Markdown summary and the HTML report count findings the same way: each
 unique finding once, at its highest severity. Markdown's Total Issues also

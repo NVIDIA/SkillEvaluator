@@ -169,8 +169,9 @@ All notable changes to SkillEvaluator are documented in this file.
   content. Otherwise identical findings in different files or skills
   share one `finding_id`, so they count as one unique finding with one
   occurrence per location. When CI redacts a detected credential from a
-  report, it recomputes the IDs from the redacted text, so no ID is derived
-  from a removed value. The JSON report and the HTML report's embedded data
+  report, it recomputes the IDs from the redacted text and renders the HTML,
+  Markdown, and SARIF copies from that JSON, so no ID is derived from a
+  removed value. The JSON report and the HTML report's embedded data
   add `finding_counts` (raw records, distinct occurrences, unique findings,
   and duplicates removed), `finding_groups` (each unique finding with its
   validators and every location, including each location a PII finding

@@ -17,6 +17,7 @@ from urllib.parse import quote
 import pytest
 
 from skillevaluator.models import Finding, Severity, ValidationResult
+from skillevaluator.reporting.html import HTMLReporter
 from skillevaluator.reporting.json_reporter import JSONReporter
 from skillevaluator.validators.security import SecurityValidator
 
@@ -229,6 +230,42 @@ def test_redacted_report_does_not_keep_ids_hashed_from_the_credential(tmp_path):
     _assert_finding_ids_match_text(document)
     assert document["finding_counts"]["unique_findings"] == len(document["finding_groups"]) == 2
     assert document["results"][1]["finding_counts"]["raw_occurrences"] == 1
+
+
+def test_redacted_html_does_not_keep_ids_hashed_from_the_credential(tmp_path):
+    # The HTML report embeds finding and occurrence IDs. Passed through text
+    # redaction alone, it would keep the IDs hashed before the value was masked.
+    skill = _skill(tmp_path / "workspace")
+    echo = ValidationResult(validator_name="Code Risk", validator_description="Static analysis")
+    echoed = Finding(
+        "SECURITY",
+        Severity.HIGH,
+        "hardcoded-credential",
+        "Credential in source: " + _fixture_value(),
+        "source.py",
+        1,
+        line_content='API_KEY = "' + _fixture_value() + '"',
+    )
+    echo.add_finding(echoed)
+    raw = tmp_path / "raw"
+    raw.mkdir()
+    (raw / "skillevaluator-tier1.json").write_text(
+        JSONReporter(include_timestamp=False).render_all([echo]), encoding="utf-8"
+    )
+    native = HTMLReporter(include_timestamp=False).render_all([echo])
+    assert echoed.finding_id in native and echoed.occurrence_id in native
+    (raw / "skillevaluator-tier1.html").write_text(native, encoding="utf-8")
+
+    sanitized = runner.sanitized_outputs(raw, runner.collect_sensitive_values(skill))
+
+    page = sanitized["skillevaluator-tier1.html"]
+    _assert_no_secret(page)
+    for raw_id in (echoed.finding_id, echoed.occurrence_id):
+        assert raw_id.encode() not in page
+    # The page carries the IDs of the redacted finding, as the JSON does.
+    redacted = json.loads(sanitized["skillevaluator-tier1.json"])["results"][0]["findings"][0]
+    assert redacted["finding_id"].encode() in page
+    assert redacted["occurrence_id"].encode() in page
 
 
 def _database_url_line() -> str:

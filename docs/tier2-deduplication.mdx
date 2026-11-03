@@ -263,6 +263,31 @@ existing set — save the collection once and query candidates against it.
   </Step>
 </Steps>
 
+Re-screening a skill that is already in the catalog does not report it as a
+duplicate of its own entry. A catalog does not record the directory it was
+built from, so an entry is skipped as the candidate's own only when all of
+these hold:
+
+- Its content fingerprint matches what the query compares: the name and
+  description, or the whole `SKILL.md` with `--full-body`.
+- Its path ends the candidate's path — `alpha` for `./skills/alpha` in a
+  catalog built from `./skills` — which locates the catalog's tree around the
+  candidate.
+- Of up to eight other catalog skills, spread evenly across the catalog's
+  path-sorted list, more than half are present unchanged at their recorded
+  paths in that tree, without symlinks. Skills that contain the candidate or are nested inside it are not
+  checked, because a copied folder carries them too.
+
+At most one entry is skipped, and the result records it under
+`excluded_catalog_paths`. A catalog with no other skill entry never skips one.
+A verbatim copy elsewhere — in a staging folder, another repository, or a new
+folder of the same repository — is still compared and reported, unless it sits
+in a copy of most of the catalog's tree, such as a second checkout of the same
+repository, which counts as the same tree. An edited skill whose compared
+content changed no longer matches its old entry and is compared with it like
+any other skill; to screen edited skills, build the catalog from the same tree
+you screen.
+
 Catalogs contain finite embedding vectors, relative skill paths, display names,
 descriptions, content fingerprints, and provider, model, mode, and
 endpoint-fingerprint metadata for compatibility checks. They never contain API
@@ -314,6 +339,18 @@ you intend to skip Tier 2 entirely.
 | Minimum content chunk | 80 characters | Drops sections and chunks too small to compare usefully; short paragraphs of an oversized section stay attached to a neighbour |
 | Embedding input cap | 3,000 characters | Caps every Markdown, Python, and shell embedding input; oversized Markdown sections are packed at paragraph boundaries |
 | High-confidence duplicate boundary | `0.70` | Maps actionable duplicate verdicts to HIGH rather than MEDIUM |
+| Intra-skill content chunks | 512 | Per-skill ceiling, checked before any embedding request |
+| Intra-skill comparison work | 267,911,168 scalar comparisons | Bounds all-pairs clustering; allows all 512 chunks with embeddings of up to 2,048 dimensions, 418 chunks at 3,072, and 362 at 4,096 |
+
+Intra-skill clustering compares every pair of chunks, so its work is
+`n * (n - 1) / 2 * dimensions`. A skill over the chunk ceiling stops before any
+embedding request. A skill within the ceiling whose embeddings are too wide for
+its chunk count stops after the first embedding batch, which sets the width.
+Either way the scan is reported as **INCOMPLETE**. For the comparison-work
+limit (`scalar_comparison_limit`), the execution error and the JSON
+`work_limit` record name the effective chunk limit for that embedding width
+(`effective_chunk_limit`) and the skill's chunk count (`chunk_count`).
+Split the skill, remove repeated material, or use a narrower embedding model.
 
 Tier 2 treats skill content and catalog files as untrusted input. Before any
 provider call, it rejects linked roots, linked directories and manifests,

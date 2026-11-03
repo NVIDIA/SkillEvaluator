@@ -557,6 +557,18 @@ All notable changes to SkillEvaluator are documented in this file.
   security result records the effective `skillspector_timeout_seconds`
   ([#155](https://github.com/NVIDIA/SkillEvaluator/issues/155)).
 
+- PII scans no longer report Proton (Steam Play) prefix paths such as
+  `compatdata/<appid>/pfx/drive_c/users/steamuser/` as personal macOS paths:
+  `steamuser` is the profile name Proton uses for every player. Other user
+  names, `steamuser` outside a `pfx/drive_c` prefix, profile paths followed by
+  a `..` segment later on the line, and Windows `C:\Users\steamuser` paths are
+  still reported. When a Proton path and a personal path share a line, the
+  personal path is reported.
+
+- An unrelated `/home/<user>/` path no longer hides a personal home path later
+  on the same line; the PII scan drops such paths before it picks the line's
+  first match.
+
 ### Security
 
 - Linux local mode now launches Bubblewrap by the absolute path that passed its
@@ -567,17 +579,6 @@ All notable changes to SkillEvaluator are documented in this file.
   earlier sandboxed command run outside the sandbox. A `bwrap` symlink on
   `PATH` is resolved to its target before the smoke test, and the local-mode
   isolation message names that resolved path.
-
-- PII scans no longer report Proton (Steam Play) prefix paths such as
-  `compatdata/<appid>/pfx/drive_c/users/steamuser/` as personal macOS paths:
-  `steamuser` is the profile name Proton uses for every player. Other user
-  names, `steamuser` outside a `pfx/drive_c` prefix, profile paths followed by
-  a `..` segment later on the line, and Windows `C:\Users\steamuser` paths are
-  still reported. When a Proton path and a personal path share a line, the
-  personal path is reported.
-- An unrelated `/home/<user>/` path no longer hides a personal home path later
-  on the same line; the PII scan drops such paths before it picks the line's
-  first match.
 
 ## 0.6.0 - 2026-10-20
 

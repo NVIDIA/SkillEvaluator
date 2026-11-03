@@ -1163,23 +1163,39 @@ def _agent_eval_dimension_scores(
             return None
         dimensions[dimension_id] = raw_dimension
 
+    # A baseline without the skill under test records the skill metrics as not
+    # applicable, so the dimensions they feed have no baseline and no lift.
+    raw_not_applicable = agent.get("not_applicable_metrics")
+    baseline_not_applicable_metrics = (
+        raw_not_applicable.get("without_skill") if isinstance(raw_not_applicable, dict) else None
+    )
+    if not isinstance(baseline_not_applicable_metrics, list):
+        baseline_not_applicable_metrics = []
+
     scores: list[float] = []
     baselines: list[float] = []
-    for dimension_id in DIMENSION_MAPPING:
+    compared_scores: list[float] = []
+    for dimension_id, config in DIMENSION_MAPPING.items():
         dimension = dimensions.get(dimension_id)
         if dimension is None:
             return None
         value = dimension.get("with_skill") if "with_skill" in dimension else dimension.get("score")
         score = _agent_eval_finite_score(value)
         baseline = _agent_eval_finite_score(dimension.get("baseline"))
-        if score is None or (require_baseline and baseline is None):
+        baseline_not_applicable = (
+            dimension.get("baseline") is None
+            and dimension.get("lift") is None
+            and all(metric in baseline_not_applicable_metrics for metric in config["evaluators"])
+        )
+        if score is None or (require_baseline and baseline is None and not baseline_not_applicable):
             return None
-        if require_baseline:
+        if require_baseline and not baseline_not_applicable:
             assert baseline is not None
             lift = _agent_eval_finite_number(dimension.get("lift"))
             if lift is None or not math.isclose(lift, score - baseline, rel_tol=1e-9, abs_tol=5e-4):
                 return None
             baselines.append(baseline)
+            compared_scores.append(score)
         scores.append(score)
 
     agent_score = _agent_eval_finite_score(agent.get("with_skill", agent.get("overall_score")))
@@ -1194,7 +1210,8 @@ def _agent_eval_dimension_scores(
         agent_baseline = _agent_eval_finite_score(agent.get("baseline"))
         agent_lift = _agent_eval_finite_number(agent.get("lift"))
         if (
-            agent_baseline is None
+            not baselines
+            or agent_baseline is None
             or agent_lift is None
             or not math.isclose(
                 agent_baseline,
@@ -1202,7 +1219,13 @@ def _agent_eval_dimension_scores(
                 rel_tol=1e-9,
                 abs_tol=5e-4,
             )
-            or not math.isclose(agent_lift, agent_score - agent_baseline, rel_tol=1e-9, abs_tol=5e-4)
+            # The lift compares both arms on the dimensions the baseline scored.
+            or not math.isclose(
+                agent_lift,
+                sum(compared_scores) / len(compared_scores) - agent_baseline,
+                rel_tol=1e-9,
+                abs_tol=5e-4,
+            )
         ):
             return None
     return scores

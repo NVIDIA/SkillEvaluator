@@ -11,11 +11,14 @@ from __future__ import annotations
 
 import asyncio
 from collections.abc import Awaitable, Callable
+from time import monotonic
 from typing import TYPE_CHECKING
 
 from harbor.agents.installed.base import NonZeroAgentExitCodeError
 from harbor.agents.installed.claude_code import ClaudeCode
 from harbor.agents.installed.codex import Codex
+
+from skillevaluator.utils.redaction import redact_sensitive_text
 
 if TYPE_CHECKING:
     from harbor.agents.installed.base import BaseInstalledAgent
@@ -29,6 +32,22 @@ _INSTALLER_BRANCHES = frozenset({"system", "bundled", "bundled-without-ca"})
 # attempt already installed, so rerunning it after a failure is safe.
 _INSTALL_ATTEMPTS = 3
 _INSTALL_RETRY_BASE_DELAY_SEC = 2.0
+# A slow failure (a connect that hangs, say) is not retried when it used more
+# than this share of the agent setup timeout, so the trial still ends with the
+# install error instead of Harbor's setup timeout.
+_INSTALL_RETRY_MAX_ATTEMPT_SHARE = 1 / 3
+# The retry warning keeps the end of Harbor's error, which holds the failed
+# command's stderr; Harbor logs the full output only at debug level.
+_INSTALL_FAILURE_DETAIL_CHARS = 200
+
+
+def _install_failure_detail(exc: BaseException) -> str:
+    # Redact before truncating so a credential cut at the boundary is still
+    # recognized, and fold Harbor's stdout/stderr lines into one log line.
+    detail = " ".join(redact_sensitive_text(str(exc)).split())
+    if len(detail) > _INSTALL_FAILURE_DETAIL_CHARS:
+        return "..." + detail[-_INSTALL_FAILURE_DETAIL_CHARS:]
+    return detail
 
 
 async def _install_with_retries(
@@ -38,22 +57,48 @@ async def _install_with_retries(
 ) -> None:
     # Retry only a Harbor command that exited non-zero. Probe, transport and
     # cancellation errors propagate, and all attempts share Harbor's agent
-    # setup timeout.
+    # setup timeout. The agent cannot see Harbor's timeout multiplier, so the
+    # budget is the agent's unscaled default; a larger multiplier only makes
+    # the guard skip a retry that would have fit.
+    budget_sec = agent.DEFAULT_SETUP_TIMEOUT_SEC
+    started = monotonic()
     for attempt in range(1, _INSTALL_ATTEMPTS + 1):
+        attempt_started = monotonic()
         try:
             await install(environment)
             return
         except NonZeroAgentExitCodeError as exc:
             if attempt == _INSTALL_ATTEMPTS:
                 raise
+            now = monotonic()
+            attempt_sec = now - attempt_started
             delay = _INSTALL_RETRY_BASE_DELAY_SEC * attempt
+            detail = _install_failure_detail(exc)
+            # Assume another attempt takes as long as this one.
+            if (
+                attempt_sec > budget_sec * _INSTALL_RETRY_MAX_ATTEMPT_SHARE
+                or now - started + delay + attempt_sec > budget_sec
+            ):
+                agent.logger.warning(
+                    "%s install attempt %d of %d failed with %s after %.0fs; not retrying, another "
+                    "attempt would not fit the %.0fs agent setup timeout: %s",
+                    agent.name(),
+                    attempt,
+                    _INSTALL_ATTEMPTS,
+                    type(exc).__name__,
+                    attempt_sec,
+                    budget_sec,
+                    detail,
+                )
+                raise
             agent.logger.warning(
-                "%s install attempt %d of %d failed with %s; retrying in %.0fs",
+                "%s install attempt %d of %d failed with %s; retrying in %.0fs: %s",
                 agent.name(),
                 attempt,
                 _INSTALL_ATTEMPTS,
                 type(exc).__name__,
                 delay,
+                detail,
             )
             await asyncio.sleep(delay)
 

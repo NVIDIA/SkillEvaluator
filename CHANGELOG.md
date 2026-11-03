@@ -264,8 +264,11 @@ All notable changes to SkillEvaluator are documented in this file.
   for example on a dropped download or a package mirror error, instead of
   failing the trial on the first attempt. Up to three attempts run within
   Harbor's agent setup timeout, so an install that keeps failing still fails
-  the trial. Platform probe and transport errors are not retried, and local
-  mode still checks the installed CLI once.
+  the trial. A slow failure that would leave no room for another attempt is
+  not retried, so the trial reports the install error rather than a setup
+  timeout, and each retry warning ends with the failed command's output.
+  Platform probe and transport errors are not retried, and local mode still
+  checks the installed CLI once.
 - Tier 2 caps every intra-skill embedding chunk at 3,000 characters, preserves
   meaningful short tails and actual Python docstring source ranges, and avoids
   counting pieces of one original chunk as duplicates of each other. Oversized

@@ -165,10 +165,15 @@ class Finding:
         """
         message = "" if self.message is None else str(self.message)
         if self.file_path is not None and self.line_number is not None:
+            # Compare with "/" separators: a plugin scan writes file_path with
+            # "/" while the message keeps the scanner's backslashes on Windows.
+            # Each backslash maps to one "/", so a match spans the same text.
+            slashed = message.replace("\\", "/")
             for location in self._location_paths(self.file_path):
-                text = f" in {location}:{self.line_number}"
-                if text in message:
-                    message = message.replace(text, "", 1)
+                text = f" in {location}:{self.line_number}".replace("\\", "/")
+                index = slashed.find(text)
+                if index >= 0:
+                    message = message[:index] + message[index + len(text) :]
                     break
         occurrences = self.metadata.get("occurrences") if isinstance(self.metadata, dict) else None
         if isinstance(occurrences, list) and len(occurrences) > 1:

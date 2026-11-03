@@ -710,6 +710,39 @@ def test_secret_finding_id_ignores_the_location_written_into_its_message() -> No
     assert other.finding_id != findings[0].finding_id
 
 
+def test_secret_finding_id_ignores_a_windows_location_in_its_message() -> None:
+    from skillevaluator.validators.secrets import SecretsValidator
+
+    def scan(line: int) -> Finding:
+        result = ValidationResult(validator_name="Secrets Detection")
+        SecretsValidator()._process_findings(
+            [
+                {
+                    "RuleID": "generic-api-key",
+                    "Description": "Generic API Key",
+                    "File": "scripts\\run.py",
+                    "StartLine": line,
+                }
+            ],
+            result,
+        )
+        [finding] = result.findings
+        # On Windows, plugin member attribution writes file_path with "/"
+        # while the message keeps the path Gitleaks reported.
+        finding.file_path = "skills/alpha/scripts/run.py"
+        return finding
+
+    moved = [scan(line) for line in (10, 11)]
+
+    assert moved[0].message == "Generic API Key in scripts\\run.py:10 [generic-api-key]"
+    assert moved[0].finding_id == moved[1].finding_id
+    assert moved[0].occurrence_id != moved[1].occurrence_id
+    # A path that is not the finding's own location stays part of the identity.
+    other = Finding("SECRETS", Severity.HIGH, "generic-api-key", "Key in other\\run.py:10", "scripts/run.py", 10)
+    renamed = Finding("SECRETS", Severity.HIGH, "generic-api-key", "Key in other\\run.py:11", "scripts/run.py", 11)
+    assert other.finding_id != renamed.finding_id
+
+
 def test_repeated_pii_finding_id_survives_line_moves(tmp_path) -> None:
     from skillevaluator.validators.security import SecurityValidator
 

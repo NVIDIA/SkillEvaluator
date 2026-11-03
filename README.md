@@ -1,6 +1,6 @@
 # SkillEvaluator
 
-![SkillEvaluator wordmark](docs/assets/skillevaluator-wordmark.svg)
+![SkillEvaluator wordmark](https://raw.githubusercontent.com/NVIDIA/SkillEvaluator/ad2815fe78c045db91d230681d32863698da08cf/docs/assets/skillevaluator-wordmark.svg)
 
 [![License](https://img.shields.io/badge/License-Apache%202.0-green.svg)](LICENSE)
 [![Python](https://img.shields.io/badge/Python-3.12%20%7C%203.13%20%7C%203.14-blue.svg)](https://www.python.org/)
@@ -19,20 +19,31 @@ the [NVIDIA Verified Skills pipeline](https://github.com/NVIDIA/skills).
 
 ## Bring skill evaluation to your repository
 
-Automatically check changed skills in GitHub pull requests or GitLab merge
-requests, with Tier 1 quality checks, SkillSpector security scanning and retained
-reports. Choose your skill folders and minimum score. No evaluation code, local
-installation or onboarding CLI is required: [copy a template](ci/templates/README.md).
+Check changed skills in GitHub or GitLab with Tier 1 quality checks, SkillSpector
+security scanning and reports. Choose folders and thresholds; no evaluator code
+to import.
 
-| Your repository | Source template | Copy destination |
+**GitHub guided setup:** run inside your checked-out repository:
+
+```bash
+pip install --upgrade skillevaluator
+skillevaluator ci init
+```
+
+Choose checks and optional hosted feedback, then review the setup PR.
+[CLI setup guide](docs/cli-onboarding.mdx).
+
+**Manual setup:** copy a filled-in template from
+[CI templates](https://github.com/NVIDIA/SkillEvaluator/tree/main/ci/bundles/0.7.1). No local CLI needed.
+
+| Your repository | Ready-to-use template | Copy destination |
 | --- | --- | --- |
-| GitHub | [Skill checks](ci/templates/skill-checks.yml) | `.github/workflows/skill-checks.yml` |
-| GitLab | [Skill checks](ci/templates/gitlab-skill-checks.yml) | `.gitlab-ci.yml`, or merge into your existing pipeline |
-| GitHub reports and PR comments | [Optional publisher](ci/templates/publish-skill-reports.yml) | Add a second workflow; complete publisher setup |
+| GitHub | [Skill checks](https://github.com/NVIDIA/SkillEvaluator/blob/main/ci/bundles/0.7.1/skill-checks.yml) | `.github/workflows/skill-checks.yml` |
+| GitLab | [Skill checks](https://github.com/NVIDIA/SkillEvaluator/blob/main/ci/bundles/0.7.1/gitlab-skill-checks.yml) | `.gitlab-ci.yml`, or merge into your existing pipeline |
+| GitHub reports and PR comments | [Optional publisher](https://github.com/NVIDIA/SkillEvaluator/blob/main/ci/bundles/0.7.1/publish-skill-reports.yml) | Second workflow; complete publisher setup |
 
-Source templates contain release placeholders; use the filled-in copies from an
-official CI image release. See [setup and availability](docs/repository-integration.mdx)
-and [public report, log and comment examples](ci/examples/README.md).
+See [GitHub](docs/github-actions.mdx) and [GitLab](docs/gitlab-ci.mdx) setup,
+[template reference](ci/templates/README.md) and [report examples](ci/examples/README.md).
 
 ## Quickstart
 
@@ -97,7 +108,7 @@ The same key supports Tier 2 embeddings and supported Tier 3 agents. See the
 
 ## Three-tier overview
 
-![SkillEvaluator three-tier pipeline: Skill → Tier 1 Validation → Tier 2 Deduplication → Tier 3 Live Evaluation → Reports](docs/assets/three-tier-overview.svg)
+![SkillEvaluator three-tier pipeline: Skill → Tier 1 Validation → Tier 2 Deduplication → Tier 3 Live Evaluation → Reports](https://raw.githubusercontent.com/NVIDIA/SkillEvaluator/ad2815fe78c045db91d230681d32863698da08cf/docs/assets/three-tier-overview.svg)
 
 Each tier is independent. Add the relevant extra to your checkout command:
 
@@ -107,10 +118,10 @@ Each tier is independent. Add the relevant extra to your checkout command:
 | Tier 2: Deduplication | Does guidance repeat or overlap? | `uv run --extra tier2 skillevaluator tier2 ./my-skill` | Embeddings and chat; add `--catalog ./skill-catalog.json` for inter-skill comparison |
 | Tier 3: Live Evaluation | Does the skill help the agent? | `uv run --extra tier3 skillevaluator tier3 ./my-skill` | Provider access, a supported agent, and a running sandbox (Docker by default) |
 
-Full static Tier 1 needs Semgrep, SkillSpector, and Gitleaks in addition to the
-`security` extra. Follow [scanner installation](docs/installation.mdx#system-tools).
-`--no-llm` disables model-backed stages; it does not remove scanner requirements.
-Missing required scanner evidence is reported as `INCOMPLETE` and exits nonzero.
+Tier 1 fetches pinned, verified SkillSpector and Gitleaks releases when they
+are missing; Semgrep is optional. See [scanners](docs/installation.mdx#system-tools).
+`--no-llm` does not remove scanner requirements; a scanner that cannot run is
+`INCOMPLETE` and exits nonzero.
 [SkillSpector](https://github.com/NVIDIA/SkillSpector) provides specialized skill
 security scanning; [Harbor](https://github.com/harbor-framework/harbor), the
 open-source agent evaluation framework, powers sandboxed agent runs.

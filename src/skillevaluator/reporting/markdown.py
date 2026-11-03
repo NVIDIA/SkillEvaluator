@@ -352,9 +352,13 @@ class MarkdownReporter(ReporterBase):
                     ws = scores.get("with_skill")
                     bl = scores.get("baseline")
                     lift = scores.get("lift")
+                    # A baseline-only run (--skip-with-skill) never ran the with-skill arm.
+                    with_skipped = scores.get("with_skill_status") == "skipped"
                     ws_text = (
                         "N/A"
                         if scores.get("with_skill_status") == "not_applicable" and ws is None
+                        else "skipped"
+                        if with_skipped and ws is None
                         else "NO SCORE"
                         if ws is None
                         else _format_report_number(ws)
@@ -371,6 +375,8 @@ class MarkdownReporter(ReporterBase):
                         if lift is not None
                         else "N/A"
                         if "not_applicable" in (scores.get("with_skill_status"), scores.get("baseline_status"))
+                        else "skipped"
+                        if with_skipped
                         else "NO SCORE"
                     )
                     lines.append(

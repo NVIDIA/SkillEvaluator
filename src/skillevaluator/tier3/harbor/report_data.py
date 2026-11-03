@@ -545,11 +545,11 @@ def metrics_for_condition(agent_info: dict[str, Any], condition: str) -> list[st
     return _metrics_for_rewards(rewards) if isinstance(rewards, list) else []
 
 
-def metrics_for_agents(agents: dict[str, dict[str, Any]]) -> list[str]:
+def metrics_for_agents(agents: dict[str, dict[str, Any]], *, condition: str = "with_skill") -> list[str]:
     """Return the canonical default or legacy metric set represented by agents."""
     saw_metrics = False
     for info in agents.values():
-        metrics = metrics_for_condition(info, "with_skill")
+        metrics = metrics_for_condition(info, condition)
         if metrics:
             saw_metrics = True
         if "security" in metrics:

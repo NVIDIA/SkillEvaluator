@@ -11,6 +11,7 @@ or discarded by an API caller.
 from __future__ import annotations
 
 import logging
+import math
 import re
 import sys
 import threading
@@ -40,6 +41,15 @@ _SECRET_ENV_NAME_RE = re.compile(r"(?i)(?:api[_-]?key|access[_-]?key|auth|creden
 # shorter credential fragments come only from URI userinfo.
 MIN_EXACT_SECRET_CHARS = 4
 _CREDENTIAL_URI_USERINFO_RE = re.compile(r"(?i)(?P<scheme>[a-z][a-z0-9+.-]{0,31}://)(?P<userinfo>[^\s/?#]+@)")
+# Plain lines are durable CI and log output, so the still-running heartbeat is
+# written once a minute; the interactive Rich frame updates elapsed times every
+# second.
+_PLAIN_REFRESH_INTERVAL_SECONDS = 60.0
+_RICH_REFRESH_INTERVAL_SECONDS = 1.0
+MIN_REFRESH_INTERVAL_SECONDS = 0.05
+# One day stays below every platform's threading.TIMEOUT_MAX, beyond which the
+# heartbeat thread's wait would raise OverflowError.
+MAX_REFRESH_INTERVAL_SECONDS = 86400.0
 
 
 @dataclass(frozen=True, slots=True)
@@ -60,6 +70,7 @@ class Tier3RunPlan:
     case_count: int | None = None
     attempts: int | None = None
     baseline: bool | None = None
+    with_skill: bool | None = None
     concurrency: int | None = None
     max_agents: int | None = None
     timeout_multiplier: float | None = None
@@ -147,9 +158,18 @@ def secret_values_from_environment(environment: Mapping[str, str]) -> set[str]:
 class PlainProgressReporter:
     """Durable line-oriented reporter for redirected output and CI logs."""
 
-    def __init__(self, *, stream: TextIO | None = None, refresh_interval: float = 1.0) -> None:
+    def __init__(
+        self,
+        *,
+        stream: TextIO | None = None,
+        refresh_interval: float = _PLAIN_REFRESH_INTERVAL_SECONDS,
+    ) -> None:
+        interval = float(refresh_interval)
+        # A NaN wait returns at once, so the heartbeat thread would spin.
+        if not math.isfinite(interval):
+            raise ValueError("refresh_interval must be a finite number of seconds")
         self._stream = stream or sys.stderr
-        self._refresh_interval = max(float(refresh_interval), 0.05)
+        self._refresh_interval = min(max(interval, MIN_REFRESH_INTERVAL_SECONDS), MAX_REFRESH_INTERVAL_SECONDS)
         self._started_at: float | None = None
         self._active: dict[str, str] = {}
         self._secret_values: set[str] = set()
@@ -239,6 +259,7 @@ class PlainProgressReporter:
             ("tasks", plan.task_count),
             ("cases", plan.case_count),
             ("attempts", plan.attempts),
+            ("with-skill", None if plan.with_skill is None else "yes" if plan.with_skill else "no"),
             ("baseline", None if plan.baseline is None else "yes" if plan.baseline else "no"),
             ("concurrency", plan.concurrency),
             ("max-agents", plan.max_agents),
@@ -284,7 +305,12 @@ class PlainProgressReporter:
 class RichProgressReporter(PlainProgressReporter):
     """Interactive Rich Live table selected for terminal output."""
 
-    def __init__(self, *, stream: TextIO | None = None, refresh_interval: float = 1.0) -> None:
+    def __init__(
+        self,
+        *,
+        stream: TextIO | None = None,
+        refresh_interval: float = _RICH_REFRESH_INTERVAL_SECONDS,
+    ) -> None:
         super().__init__(stream=stream, refresh_interval=refresh_interval)
         from rich.console import Console
         from rich.live import Live
@@ -355,7 +381,10 @@ class RichProgressReporter(PlainProgressReporter):
         plan = self._live_plan
         if plan is None:
             return Table(title="Harbor Run Configuration")
-        mode_label = "Skill-lift evaluation" if plan.baseline is not False else "Agent evaluation"
+        if plan.with_skill is False:
+            mode_label = "Baseline-only evaluation"
+        else:
+            mode_label = "Skill-lift evaluation" if plan.baseline is not False else "Agent evaluation"
         title = Text.assemble(
             ("Harbor Run Configuration", "bold cyan"),
             "  ·  ",
@@ -389,6 +418,7 @@ class RichProgressReporter(PlainProgressReporter):
             ("Tasks", plan.task_count),
             ("Cases", plan.case_count),
             ("Attempts", plan.attempts),
+            ("With skill", None if plan.with_skill is None else "yes" if plan.with_skill else "no"),
             ("Baseline", None if plan.baseline is None else "yes" if plan.baseline else "no"),
             ("Concurrency", plan.concurrency),
             ("Max agents", plan.max_agents),
@@ -528,8 +558,17 @@ def safe_progress_reporter(reporter: ProgressReporter | None) -> SafeProgressRep
     return SafeProgressReporter(reporter or NullProgressReporter())
 
 
-def create_progress_reporter(mode: ProgressMode, *, stream: TextIO | None = None) -> ProgressReporter:
-    """Create the requested presentation; ``auto`` follows stream TTY state."""
+def create_progress_reporter(
+    mode: ProgressMode,
+    *,
+    stream: TextIO | None = None,
+    refresh_interval: float | None = None,
+) -> ProgressReporter:
+    """Create the requested presentation; ``auto`` follows stream TTY state.
+
+    ``refresh_interval`` overrides the heartbeat period, which otherwise
+    defaults to one second for Rich and one minute for plain lines.
+    """
     if mode not in {"auto", "rich", "plain", "off"}:
         raise ValueError("progress must be one of: auto, rich, plain, off")
     if mode == "off":
@@ -541,9 +580,10 @@ def create_progress_reporter(mode: ProgressMode, *, stream: TextIO | None = None
 
         console = Console(file=output)
         use_rich = console.is_terminal and not console.is_dumb_terminal
+    reporter_options = {} if refresh_interval is None else {"refresh_interval": refresh_interval}
     if use_rich:
-        return RichProgressReporter(stream=output)
-    return PlainProgressReporter(stream=output)
+        return RichProgressReporter(stream=output, **reporter_options)
+    return PlainProgressReporter(stream=output, **reporter_options)
 
 
 __all__ = [

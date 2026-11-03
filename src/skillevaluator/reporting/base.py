@@ -1979,7 +1979,15 @@ def missing_tier1_publication_checks(results: list[ValidationResult]) -> tuple[s
     if not declarations:
         return ()
     required = frozenset().union(*(declared_tier1_required_checks(value) for value in declarations))
-    covered = {producer.check_id for _result, producer in executed}
+    user_skipped = {
+        producer.check_id
+        for result in results
+        if isinstance(result.metadata, dict)
+        and result.metadata.get("skipped_by_user")
+        and (producer := result_publication_evidence(result)) is not None
+        and producer.tier == 1
+    }
+    covered = {producer.check_id for _result, producer in executed} - user_skipped
     return tuple(sorted(required - covered))
 
 

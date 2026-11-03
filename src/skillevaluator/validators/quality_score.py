@@ -46,11 +46,13 @@ logger = get_logger(__name__)
 
 _WORD_CHAR = r"A-Za-z0-9_"
 # Role and control tags that stay reportable in ``argument-hint`` even when they
-# look like a CLI placeholder, including suffixed forms (``<system_prompt>``,
-# ``<toolCall>``) and nested ones (``<system<payload>>``).
+# look like a CLI placeholder, including nested forms (``<system<payload>>``) and a
+# role word with a message-part suffix (``<system_prompt>``, ``<toolCall>``,
+# ``<tool_results>``). Other suffixes name an ordinary value (``<tool_name>``,
+# ``<prompt_file>``, ``<toolchain>``, ``<systemd-unit>``) and may be masked.
 _ARGUMENT_CONTROL_TAG_RE = re.compile(
     r"<(?:(?:system|developer|assistant|tool|instructions?|prompt|override|rules|policy)"
-    r"[A-Za-z0-9_-]*|user|context|script)(?=[\s<>:])",
+    r"(?:[_-]?(?:prompt|message|call|use|result|instruction)s?)?|user|context|script)(?=[\s<>:])",
     re.IGNORECASE,
 )
 # A complete group that may be a CLI placeholder such as ``<file>``, ``<plan|apply>`` or

@@ -733,6 +733,12 @@ class TestQualityScoreDeterministicContracts:
             "<path to config file>",
             "<owner>/<repo>",
             "<file>:<line>",
+            "<tool_name>",
+            "<prompt_file>",
+            "<rules_file>",
+            "<toolchain>",
+            "<systemd-unit>",
+            "<policy-id>",
         ],
     )
     def test_argument_hint_placeholders_are_not_xml(self, quality_skill: Path, hint: str):
@@ -770,6 +776,10 @@ class TestQualityScoreDeterministicContracts:
             "<developerMessage>",
             "<toolCall>",
             "<SYSTEMPROMPT>",
+            "<tool_use>",
+            "<tool_results>",
+            "<system_instructions>",
+            "<assistantMessages>",
             "<system<payload>>",
             "<tool<name>>",
             "<developer<R<NNN>>>",

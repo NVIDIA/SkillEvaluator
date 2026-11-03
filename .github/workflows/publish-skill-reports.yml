@@ -32,6 +32,10 @@ on:
         description: Approved Git blobs for the consumer scan workflow, separated by commas or newlines
         type: string
         required: true
+      trusted-wrapper-workflows:
+        description: Optional approved wrapper workflow paths pinned by full SHA, separated by commas or newlines
+        type: string
+        default: ''
 permissions:
   contents: read
 jobs:
@@ -100,6 +104,7 @@ jobs:
           PAGES_BASE_URL: ${{ inputs.report-base-url }}
           TRUSTED_EVALUATOR_SHA: ${{ inputs.trusted-evaluator-shas }}
           TRUSTED_CALLER_BLOBS: ${{ inputs.trusted-caller-blobs }}
+          TRUSTED_WRAPPER_WORKFLOWS: ${{ inputs.trusted-wrapper-workflows }}
           EVALUATOR_REPOSITORY: ${{ inputs.tools-repository }}
         run: |
           export SITE_DIR="$GITHUB_WORKSPACE/site" OUTPUT_DIR="$RUNNER_TEMP/report-feedback"

@@ -192,6 +192,20 @@ or let the [CLI](/skills/skillevaluator/cli-onboarding) handle it.
     rerunning an old job keeps its original workflow. The scan's downloadable
     report remains a separate way to inspect available findings.
   </Accordion>
+  <Accordion title="Our organization uses a shared workflow wrapper">
+    Each repository still supplies its own skill folders. To publish results
+    through a shared wrapper, use a publisher revision with the
+    `trusted-wrapper-workflows` input and approve each wrapper by its full
+    workflow path and commit SHA. The archived 0.7.1 publisher does not have
+    this input. Direct callers need no wrapper approval.
+
+    Grant `id-token: write` in the consumer scan job and every wrapper job
+    calling the next workflow. Keep the existing evaluator and consumer-file
+    approvals, then start a new scan. Follow the
+    [shared-workflow setup](https://github.com/NVIDIA/SkillEvaluator/blob/main/ci/README.md#calling-through-a-shared-workflow)
+    for the YAML and update procedure. PR comments still follow successful
+    report deployment; internal reports need appropriately restricted hosting.
+  </Accordion>
   <Accordion title="Do the checks need an LLM key or network access?">
     Default Tier 1 checks use no model key. Dependency audits can contact
     vulnerability services and submit package metadata; packages are not

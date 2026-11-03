@@ -34,5 +34,7 @@ jobs:
       report-base-url: YOUR_REPORT_BASE_URL
       trusted-evaluator-shas: RELEASE_WORKFLOW_SHA
       trusted-caller-blobs: YOUR_APPROVED_CALLER_BLOB
+      # When the scan calls through shared wrappers, approve each full workflow path@SHA.
+      # trusted-wrapper-workflows: your-org/shared-ci/.github/workflows/skill-checks.yml@FULL_COMMIT_SHA
       tools-ref: RELEASE_WORKFLOW_SHA
       tools-repository: NVIDIA/SkillEvaluator

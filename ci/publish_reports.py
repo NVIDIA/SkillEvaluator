@@ -497,19 +497,53 @@ def _caller_blob(api, repository: str, sha: str) -> str:
     return caller["sha"]
 
 
-def _validate_workflow_provenance(api, repository: str, run: dict) -> None:
+def _trusted_wrappers() -> set[str]:
+    raw = os.environ.get("TRUSTED_WRAPPER_WORKFLOWS", "").strip()
+    if not raw:
+        return set()
+    values = [value.strip() for value in re.split(r"[,\n]", raw)]
+    pattern = r"[A-Za-z0-9_.-]+/[A-Za-z0-9_.-]+/\.github/workflows/[A-Za-z0-9_-][A-Za-z0-9_.-]*\.ya?ml@[0-9a-f]{40}"
+    if len(raw) > 32768 or len(values) > 32 or any(re.fullmatch(pattern, value) is None for value in values):
+        raise PublicationError("Approved wrappers require owner/repository/.github/workflows/file.yml@<full SHA> pins.")
+    return set(values)
+
+
+def _validate_workflow_provenance(api, repository: str, run: dict) -> dict:
     evaluator_pins = _trusted_pins("TRUSTED_EVALUATOR_SHA")
     caller_blobs = _trusted_pins("TRUSTED_CALLER_BLOBS")
+    approved_wrappers = _trusted_wrappers()
     references = run.get("referenced_workflows")
-    if not isinstance(references, list) or len(references) != 1 or not isinstance(references[0], dict):
-        raise PublicationError("The scan must reference exactly one approved reusable evaluator workflow.")
-    reference = references[0]
-    sha = reference.get("sha")
+    if not isinstance(references, list) or not 1 <= len(references) <= 33:
+        raise PublicationError("The scan must reference one approved evaluator and only explicitly approved wrappers.")
     evaluator_repository = os.environ.get("EVALUATOR_REPOSITORY", "NVIDIA/SkillEvaluator")
     if not REPO_PATTERN.fullmatch(evaluator_repository):
         raise PublicationError("The approved evaluator repository identity is invalid.")
     workflow = f"{evaluator_repository}/.github/workflows/evaluate-skills.yml"
-    if sha not in evaluator_pins or reference.get("path") != f"{workflow}@{sha}":
+    evaluator_sha = None
+    seen = set()
+    wrappers = set()
+    for reference in references:
+        if not isinstance(reference, dict):
+            raise PublicationError("The scan has an invalid workflow reference.")
+        path, sha = reference.get("path"), reference.get("sha")
+        if (
+            not isinstance(path, str)
+            or not isinstance(sha, str)
+            or SHA_PATTERN.fullmatch(sha) is None
+            or not path.endswith(f"@{sha}")
+            or path in seen
+        ):
+            raise PublicationError("The scan has a duplicate or non-immutable workflow reference.")
+        seen.add(path)
+        if path == f"{workflow}@{sha}" and sha in evaluator_pins:
+            if evaluator_sha is not None:
+                raise PublicationError("The scan must reference exactly one approved evaluator.")
+            evaluator_sha = sha
+        elif path in approved_wrappers and not path.startswith(f"{workflow}@"):
+            wrappers.add(path)
+        else:
+            raise PublicationError("The scan references an unapproved evaluator or wrapper workflow.")
+    if evaluator_sha is None:
         raise PublicationError("The selected run did not use an approved immutable evaluator workflow.")
     # The receipt is a separate artifact made by the trusted reusable workflow.
     # PR associations and current merge refs are mutable, so they never identify
@@ -523,12 +557,13 @@ def _validate_workflow_provenance(api, repository: str, run: dict) -> None:
             repository=repository,
             run=run,
             evaluator_workflow=workflow,
-            evaluator_sha=sha,
+            evaluator_sha=evaluator_sha,
         )
     except ProvenanceError as exc:
         raise PublicationError(str(exc)) from exc
     if _caller_blob(api, repository, identity["workflow_sha"]) not in caller_blobs:
         raise PublicationError("The caller workflow differs from the approved workflow blobs.")
+    return {"evaluator_sha": evaluator_sha, "wrapper_workflows": sorted(wrappers)}
 
 
 def _timestamp(value: str) -> datetime:
@@ -787,7 +822,7 @@ def publish(
     _validate_run(run, repository, run_id)
     if run["run_attempt"] != run_attempt:
         raise PublicationError("GitHub returned a different workflow attempt from the requested one.")
-    _validate_workflow_provenance(api, repository, run)
+    provenance = _validate_workflow_provenance(api, repository, run)
     artifact = _select_artifact(api, repository, run)
     summary, reports = read_artifact(api.download_artifact(artifact["id"]))
     successful = summary["overall_passed"] or summary["overall_status"] == "skipped"
@@ -813,8 +848,10 @@ def publish(
         "overall_status": summary["overall_status"],
         "ci_conclusion": run["conclusion"],
         "event": run["event"],
-        "trusted_evaluator_sha": run["referenced_workflows"][0]["sha"],
+        "trusted_evaluator_sha": provenance["evaluator_sha"],
     }
+    if provenance["wrapper_workflows"]:
+        receipt["trusted_wrapper_workflows"] = provenance["wrapper_workflows"]
     if selected_image:
         receipt["image"] = selected_image
     destination = site / relative

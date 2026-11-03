@@ -522,11 +522,35 @@ def test_ragas_goal_scorer_setup_failure_closes_its_client(tmp_path: Path, monke
     assert [instance.closed for instance in client.instances] == [1]
 
 
-def test_ragas_goal_judge_obeys_the_required_judge_time_budget(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
-    """Ensure Ragas goal scorer returns before its Harbor budget expires."""
+@pytest.mark.parametrize("cutoff", ["scorer_timeout", "deadline_alarm"])
+def test_ragas_goal_judge_obeys_the_required_judge_time_budget(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, cutoff: str
+) -> None:
+    """Ensure Ragas goal scorer returns before its Harbor budget expires and still closes its client."""
     verifier = _load_verifier(tmp_path)
     _use_ragas_eligible_judge(monkeypatch)
-    monkeypatch.setattr(verifier, "_JUDGE_WALL_TIME_BUDGET_SEC", 0.01)
+    cancelled: list[bool] = []
+    if cutoff == "scorer_timeout":
+        # Without an interval timer only the scorer's own wait_for bounds it.
+        monkeypatch.setattr(verifier, "signal", SimpleNamespace())
+        monkeypatch.setattr(verifier, "_JUDGE_WALL_TIME_BUDGET_SEC", 0.01)
+        scorer_sleep = 0.05
+    else:
+        if not hasattr(signal, "setitimer") or signal.getitimer(signal.ITIMER_REAL)[0] > 0:
+            pytest.skip("free POSIX interval timer required")
+        monkeypatch.setattr(verifier, "_JUDGE_WALL_TIME_BUDGET_SEC", 0.05)
+        scorer_sleep = 30.0
+        real_remaining = verifier._remaining_judge_timeout
+        scorer_bounds: list[float] = []
+
+        def remaining_after_scorer(timeout):
+            # Leave the scorer's first bound open so the deadline alarm stops the loop mid-score.
+            if not scorer_bounds:
+                scorer_bounds.append(timeout)
+                return 60.0
+            return real_remaining(timeout)
+
+        monkeypatch.setattr(verifier, "_remaining_judge_timeout", remaining_after_scorer)
 
     class FakeMetric:
         """Mock metric object for Ragas async evaluation."""
@@ -535,10 +559,14 @@ def test_ragas_goal_judge_obeys_the_required_judge_time_budget(tmp_path: Path, m
             self.llm = llm
 
         async def ascore(self, **_kwargs):
-            await asyncio.sleep(0.05)
+            try:
+                await asyncio.sleep(scorer_sleep)
+            except asyncio.CancelledError:
+                cancelled.append(True)
+                raise
             return SimpleNamespace(value=1.0)
 
-    _install_fake_ragas(monkeypatch, FakeMetric)
+    client = _install_fake_ragas(monkeypatch, FakeMetric)
     monkeypatch.setattr(
         verifier.urllib.request,
         "urlopen",
@@ -551,6 +579,9 @@ def test_ragas_goal_judge_obeys_the_required_judge_time_budget(tmp_path: Path, m
 
     assert result["status"] == "error"
     assert result["score"] is None
+    # The cut-off scoring work is cancelled and the client is closed once, not left to the loop's teardown.
+    assert cancelled == [True]
+    assert [instance.closed for instance in client.instances] == [1]
 
 
 def test_verifier_main_keeps_genuine_zero_judge_verdicts_scoreable(

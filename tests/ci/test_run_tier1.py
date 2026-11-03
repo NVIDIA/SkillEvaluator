@@ -481,6 +481,16 @@ def test_static_run_does_not_receive_ambient_model_credentials():
     assert env["SEMGREP_ENABLE_VERSION_CHECK"] == "0"
 
 
+@pytest.mark.parametrize("llm", ["false", "true"])
+@pytest.mark.parametrize("ambient_requirement", [None, "0", "1"])
+def test_ci_requires_semgrep_even_when_ambient_configuration_disables_it(llm, ambient_requirement):
+    configuration = {"LLM_ENABLED": llm, "LLM_PROVIDER": "openai", "LLM_API_KEY": "test-key"}
+    if ambient_requirement is not None:
+        configuration["SKILLEVALUATOR_REQUIRE_SEMGREP"] = ambient_requirement
+    env, _ = runner.child_environment(configuration)
+    assert env["SKILLEVALUATOR_REQUIRE_SEMGREP"] == "1"
+
+
 def test_incomplete_runtime_rollup_is_not_mislabeled_as_inconsistent_evidence(tmp_path):
     workspace = tmp_path / "workspace"
     skill(workspace, "skills/a")

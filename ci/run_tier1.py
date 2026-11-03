@@ -147,6 +147,8 @@ def child_environment(environ: dict[str, str]) -> tuple[dict[str, str], bool]:
     env["PYTHON_DOTENV_DISABLED"] = "1"
     env["SEMGREP_SEND_METRICS"] = "off"
     env["SEMGREP_ENABLE_VERSION_CHECK"] = "0"
+    # The complete CI runtime requires Semgrep even when local installs make it optional.
+    env["SKILLEVALUATOR_REQUIRE_SEMGREP"] = "1"
     env["NO_COLOR"] = "1"
     Path(env["HOME"]).mkdir(parents=True, exist_ok=True)
     if enabled == "true":

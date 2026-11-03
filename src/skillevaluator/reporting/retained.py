@@ -208,6 +208,13 @@ def retained_results(payload: dict, *, copy_metadata: bool = True) -> list[Valid
         for key in ("incomplete_scans", "gate_failures"):
             if key in row:
                 metadata[key] = _strings(row[key], key)
+        if "scanners" in row:
+            _require(
+                isinstance(row["scanners"], dict)
+                and all(isinstance(k, str) and isinstance(v, str) for k, v in row["scanners"].items()),
+                "scanners must map scanner names to versions",
+            )
+            metadata["scanners"] = dict(row["scanners"])
         if "dependency_coverage" in row:
             _require(
                 isinstance(row["dependency_coverage"], list)

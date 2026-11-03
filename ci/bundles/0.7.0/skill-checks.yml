@@ -1,0 +1,21 @@
+# SPDX-License-Identifier: Apache-2.0
+# Use the release-generated copy with reviewed workflow and image pins.
+name: Skill checks
+on:
+  pull_request:
+  push:
+    branches: [main]
+  workflow_dispatch:
+permissions:
+  contents: read
+  # Hosted reports/PR comments: uncomment this, then refresh trusted-caller-blobs.
+  # id-token: write
+jobs:
+  skills:
+    uses: NVIDIA/SkillEvaluator/.github/workflows/evaluate-skills.yml@e4cda13a85f34fa7a112b3529feaf24cfe587caf
+    with:
+      image: ghcr.io/nvidia/skillevaluator-tier1@sha256:c75c826f0e52d6c9a8d303ad7eefd606ed86e6940123f42b4eda2457863bcee7
+      paths: skills
+      min-score: 70
+      scan-mode: auto
+      llm: false

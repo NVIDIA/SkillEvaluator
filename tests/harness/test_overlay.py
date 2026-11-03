@@ -80,6 +80,17 @@ def test_utf16_overflow_is_not_loaded_by_copilot(tmp_path: Path):
     assert status["codex"] == "loads"
 
 
+def test_copilot_shows_body_for_missing_description_but_drops_non_string(tmp_path: Path):
+    skill = tmp_path / "skills" / "no-desc"
+    skill.mkdir(parents=True)
+    (skill / "SKILL.md").write_text("---\nname: no-desc\n---\nCustom skill\n", encoding="utf-8")
+    rows = _rows(skill)
+    assert rows["copilot-cli"]["status"] == "degraded"
+    assert "CP-DESC-MISSING" in _ids(rows, "copilot-cli") and "CP-STRICT-YAML" not in _ids(rows, "copilot-cli")
+    listed = _skill(tmp_path / "list", desc="[a, b]")
+    assert "CP-STRICT-YAML" in _ids(_rows(listed), "copilot-cli")
+
+
 def test_symlinked_manifest(tmp_path: Path):
     skill = _skill(tmp_path)
     target = tmp_path / "real.md"

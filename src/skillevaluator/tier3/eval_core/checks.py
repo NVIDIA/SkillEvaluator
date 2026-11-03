@@ -1376,6 +1376,19 @@ def _function_header_end(command: list[str], idx: int) -> int | None:
     return None
 
 
+_WORD_TAKING_OPENERS = frozenset({"for", "select", "case"})
+# "$@", "$*" and a positional parameter, as a word on their own.
+_FORWARDED_ARGS_RE = re.compile(r"\$(?:@|\*|\{@\}|\{\*\}|[1-9])")
+
+
+def _function_header_name(command: list[str]) -> str:
+    """Return the name a function header at the start of ``command`` defines."""
+    word = command[0]
+    if word == "function" and len(command) > 1:
+        return command[1].removesuffix("()")
+    return word.removesuffix("()")
+
+
 def _compound_keywords(command: list[str]) -> tuple[int, int]:
     """Count the compound commands a simple command opens and closes.
 
@@ -1538,6 +1551,12 @@ def _network_tokens_exfiltrate(tokens: list[str], _depth: int) -> bool:
     # command inside it, as in "while read -r l; do http URL; done < .env".
     compound_input = _compound_reads_input(tokens)
     compound_depth = 0
+    # Functions defined in this command line, and the clients that were given
+    # the function's own arguments ("$@", "$*", "$1") somewhere in it. A later
+    # call "up -d @.env URL" hands its arguments to that client, so a client
+    # forwarded this way is read with its upload rules on the call's arguments.
+    function_names: set[str] = set()
+    forwarding_clients: set[str] = set()
 
     while idx < len(tokens):
         if tokens[idx] in _SHELL_SEPARATORS:
@@ -1557,9 +1576,24 @@ def _network_tokens_exfiltrate(tokens: list[str], _depth: int) -> bool:
         compound_depth = max(compound_depth + opens - closes, 0)
         command_stdin = stdin_piped or (compound_input and inside_compound)
 
+        header_end = _function_header_end(command, 0) if command else None
+        if header_end is not None:
+            function_names.add(_function_header_name(command))
+            word_names.clear()
+
         cmd_idx = 0
         for _ in range(_MAX_SHELL_WRAPPERS + 1):
             while cmd_idx < len(command):
+                # "do", "then", "else", "{", "!" and an "if" or "while" head
+                # lead into the command that runs, so the runner rule,
+                # assignment tracking and "$VAR" resolution see that command.
+                # "for", "select" and "case" take a variable or word, not a command.
+                if cmd_idx + 1 < len(command) and (
+                    command[cmd_idx] in _COMMAND_POSITION_LEADERS
+                    or (command[cmd_idx] in _COMPOUND_OPENERS and command[cmd_idx] not in _WORD_TAKING_OPENERS)
+                ):
+                    cmd_idx += 1
+                    continue
                 # A redirection before the command word, as in "< .env http
                 # URL", "2>&1 < .env http URL" or "sudo < .env http URL", is
                 # not the command word. Redirected input is the command's stdin.
@@ -1633,10 +1667,28 @@ def _network_tokens_exfiltrate(tokens: list[str], _depth: int) -> bool:
             word_names.clear()
 
         if executable in _NETWORK_EXECUTABLES:
-            if _network_client_uploads(executable, command[cmd_idx + 1 :], command_stdin):
+            client_args = command[cmd_idx + 1 :]
+            if _network_client_uploads(executable, client_args, command_stdin):
                 return True
+            if any(_FORWARDED_ARGS_RE.fullmatch(arg.strip("\"'")) for arg in client_args):
+                forwarding_clients.add(executable)
             if not dynamic:
                 continue
+
+        if command[cmd_idx] in function_names and forwarding_clients:
+            # A function that passes its own arguments to a client hides the
+            # client behind the function's name.
+            rest = command[cmd_idx + 1 :]
+            if any(_network_client_uploads(name, rest, command_stdin) for name in forwarding_clients):
+                return True
+
+        if dynamic and executable not in _NETWORK_EXECUTABLES and ("$" in executable or "`" in executable):
+            # A client picked at runtime ("for c in curl wget; do $c ..."): the
+            # action names one, so read its arguments with the curl and wget
+            # upload rules.
+            rest = command[cmd_idx + 1 :]
+            if any(_network_client_uploads(name, rest, command_stdin) for name in ("curl", "wget")):
+                return True
 
         if executable in _INERT_PRINT_COMMANDS and not dynamic:
             continue
@@ -1707,6 +1759,8 @@ def _network_tokens_exfiltrate(tokens: list[str], _depth: int) -> bool:
             client_args = command[sub_idx + 1 :]
             if not keeps_stdin:
                 client_args = [token for token in client_args if token not in _NETWORK_INPUT_REDIRECTS]
+            if any(_FORWARDED_ARGS_RE.fullmatch(arg.strip("\"'")) for arg in client_args):
+                forwarding_clients.add(client)
             if client not in ("http", "https") or "--ignore-stdin" not in (a.strip("\"'") for a in client_args):
                 seen_clients.add(client)
             if _network_client_uploads(client, client_args, command_stdin and keeps_stdin):

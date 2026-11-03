@@ -30,6 +30,12 @@ image digest. If you copy a source template instead, replace
 `RELEASE_WORKFLOW_SHA` and `RELEASE_IMAGE_DIGEST` with the values recorded in that
 CI release. Do not leave placeholders or substitute `main` or `latest`.
 
+Maintainers can release a reviewed publisher update while keeping the verified
+scanner workflow and image unchanged. Pass its full commit SHA as
+`--publisher-ref` to `ci/render_templates.py`; otherwise it uses `--workflow-ref`.
+The release receipt records both revisions. This changes the publisher workflow
+and tools only; the scanner pin and approved evaluator identity stay unchanged.
+
 ## Customize and commit
 
 - **GitHub:** set `paths` and optionally `min-score` (default `70`). Change

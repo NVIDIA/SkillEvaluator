@@ -19,9 +19,19 @@ TEMPLATES = Path(__file__).parent / "templates"
 IMAGE_PLACEHOLDER = "ghcr.io/nvidia/skillevaluator-tier1@sha256:RELEASE_IMAGE_DIGEST"
 
 
-def render_templates(output: Path, workflow_ref: str, image: str, repository: str = "NVIDIA/SkillEvaluator") -> dict:
+def render_templates(
+    output: Path,
+    workflow_ref: str,
+    image: str,
+    repository: str = "NVIDIA/SkillEvaluator",
+    *,
+    publisher_ref: str | None = None,
+) -> dict:
     if not github_api.COMMIT_SHA.fullmatch(workflow_ref):
         raise ValueError("A full reviewed workflow commit SHA is required.")
+    publisher_ref = workflow_ref if publisher_ref is None else publisher_ref
+    if not github_api.COMMIT_SHA.fullmatch(publisher_ref):
+        raise ValueError("A full reviewed publisher commit SHA is required.")
     if not github_api.GHCR_DIGEST.fullmatch(image):
         raise ValueError("A published GHCR image digest is required.")
     if not github_api.REPOSITORY.fullmatch(repository):
@@ -32,6 +42,8 @@ def render_templates(output: Path, workflow_ref: str, image: str, repository: st
     for source in sorted(TEMPLATES.glob("*.yml")):
         rendered[source.name] = (
             source.read_text(encoding="utf-8")
+            .replace("publish-skill-reports.yml@RELEASE_WORKFLOW_SHA", f"publish-skill-reports.yml@{publisher_ref}")
+            .replace("tools-ref: RELEASE_WORKFLOW_SHA", f"tools-ref: {publisher_ref}")
             .replace("RELEASE_WORKFLOW_SHA", workflow_ref)
             .replace(IMAGE_PLACEHOLDER, image)
             .replace("RELEASE_IMAGE_DIGEST", image.rsplit(":", 1)[1])
@@ -46,7 +58,13 @@ def render_templates(output: Path, workflow_ref: str, image: str, repository: st
     output.mkdir(parents=True)
     for name, text in rendered.items():
         (output / name).write_text(text, encoding="utf-8")
-    receipt = {"repository": repository, "workflow_ref": workflow_ref, "image": image, "caller_blob": blob}
+    receipt = {
+        "repository": repository,
+        "workflow_ref": workflow_ref,
+        "publisher_ref": publisher_ref,
+        "image": image,
+        "caller_blob": blob,
+    }
     (output / "release.json").write_text(json.dumps(receipt, indent=2) + "\n", encoding="utf-8")
     (output / "README.md").write_text(
         "# Repository CI onboarding\n\n"
@@ -75,7 +93,7 @@ def render_templates(output: Path, workflow_ref: str, image: str, repository: st
         "and comment-only operation are not supported by this publisher.\n\n"
         "Without the signing permission, ordinary scans and downloadable reports still run; hosting is skipped. "
         "Commit the setup and trigger a new scan; rerunning an old job keeps its original workflow.\n\n"
-        f"[Full publisher setup](https://github.com/{repository}/blob/{workflow_ref}/ci/README.md"
+        f"[Full publisher setup](https://github.com/{repository}/blob/{publisher_ref}/ci/README.md"
         "#optional-hosted-reports-and-pr-feedback).\n\n"
         "## GitLab\n\n"
         "For GitLab, merge gitlab-skill-checks.yml into your root .gitlab-ci.yml and set "
@@ -88,11 +106,15 @@ def render_templates(output: Path, workflow_ref: str, image: str, repository: st
 def main() -> None:
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--workflow-ref", required=True)
+    parser.add_argument(
+        "--publisher-ref",
+        help="Reviewed publisher workflow and tools SHA; defaults to --workflow-ref. Does not change the scanner pin.",
+    )
     parser.add_argument("--image", required=True)
     parser.add_argument("--repository", default="NVIDIA/SkillEvaluator")
     parser.add_argument("--output", type=Path, required=True)
     args = parser.parse_args()
-    render_templates(args.output, args.workflow_ref, args.image, args.repository)
+    render_templates(args.output, args.workflow_ref, args.image, args.repository, publisher_ref=args.publisher_ref)
 
 
 if __name__ == "__main__":

@@ -66,7 +66,7 @@ def _contains_any_term(text: str, terms: Iterable[str]) -> bool:
 
 def _contains_any_word(text: str, words: Iterable[str]) -> bool:
     pattern = "|".join(re.escape(word) for word in words)
-    return bool(re.search(rf"\b(?:{pattern})\b", text, re.IGNORECASE))
+    return bool(re.search(rf"(?<!\w)(?:{pattern})(?!\w)", text, re.IGNORECASE))
 
 
 def _has_api_documentation(content: str) -> bool:

@@ -1399,3 +1399,12 @@ class TestReliabilityErrorHandlingConfig:
 
         assert not [m for m, _ in _reliability_issues(packaged) if m.startswith("Lib modules may lack")]
         assert ("Lib modules may lack error handling: core.py", 7) in _reliability_issues(custom)
+
+    @pytest.mark.parametrize(("term", "text"), [("error:", "On error: retry."), ("C++", "Check the C++ build.")])
+    def test_custom_terms_with_punctuation_at_the_edge_match(self, tmp_path: Path, term: str, text: str):
+        skill_dir = _write_issue_skill(tmp_path, troubleshooting=text)
+        config = f'expected_headers: []\nerror_handling:\n  mentioned:\n    terms: ["{term}"]\n'
+
+        result = _validate_with(skill_dir, tmp_path, config)
+
+        assert result.metadata["quality_scores"]["metrics"]["has_error_handling"] is True

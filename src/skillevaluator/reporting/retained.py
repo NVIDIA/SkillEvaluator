@@ -17,6 +17,7 @@ from skillevaluator.models import Finding, SuccessDetail, ValidationResult, Vali
 from skillevaluator.reporting.base import is_cleanly_skipped, is_tier2_result, is_tier3_result, passes_required_gate
 from skillevaluator.reporting.html import HTMLReporter
 from skillevaluator.reporting.run_status import resolve_run_status, result_status
+from skillevaluator.skillspector_provenance import sanitize_skillspector_provenance_metadata
 
 
 class RetainedReportError(ValueError):
@@ -192,6 +193,8 @@ def retained_results(payload: dict, *, copy_metadata: bool = True) -> list[Valid
                 metadata[dest] = mapping(row[source], source)
         if "skillspector_version" in row:
             metadata["skillspector_version"] = _text(row["skillspector_version"], "skillspector_version")
+        # Revalidated like every report boundary; a non-canonical record is left out.
+        metadata.update(sanitize_skillspector_provenance_metadata(row))
         if "publication_target_conflict" in row:
             metadata["publication_target_conflict"] = _text(
                 row["publication_target_conflict"], "publication_target_conflict"
@@ -205,6 +208,13 @@ def retained_results(payload: dict, *, copy_metadata: bool = True) -> list[Valid
         for key in ("incomplete_scans", "gate_failures"):
             if key in row:
                 metadata[key] = _strings(row[key], key)
+        if "scanners" in row:
+            _require(
+                isinstance(row["scanners"], dict)
+                and all(isinstance(k, str) and isinstance(v, str) for k, v in row["scanners"].items()),
+                "scanners must map scanner names to versions",
+            )
+            metadata["scanners"] = dict(row["scanners"])
         if "dependency_coverage" in row:
             _require(
                 isinstance(row["dependency_coverage"], list)

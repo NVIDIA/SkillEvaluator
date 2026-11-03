@@ -34,13 +34,13 @@ Choose checks and optional hosted feedback, then review the setup PR.
 [CLI setup guide](docs/cli-onboarding.mdx).
 
 **Manual setup:** copy a filled-in template from
-[ci-0.7.1](https://github.com/NVIDIA/SkillEvaluator/releases/tag/ci-0.7.1). No local CLI needed.
+[CI templates](https://github.com/NVIDIA/SkillEvaluator/tree/main/ci/bundles/0.7.1). No local CLI needed.
 
 | Your repository | Ready-to-use template | Copy destination |
 | --- | --- | --- |
-| GitHub | [Skill checks](https://github.com/NVIDIA/SkillEvaluator/releases/download/ci-0.7.1/skill-checks.yml) | `.github/workflows/skill-checks.yml` |
-| GitLab | [Skill checks](https://github.com/NVIDIA/SkillEvaluator/releases/download/ci-0.7.1/gitlab-skill-checks.yml) | `.gitlab-ci.yml`, or merge into your existing pipeline |
-| GitHub reports and PR comments | [Optional publisher](https://github.com/NVIDIA/SkillEvaluator/releases/download/ci-0.7.1/publish-skill-reports.yml) | Second workflow; complete publisher setup |
+| GitHub | [Skill checks](https://github.com/NVIDIA/SkillEvaluator/blob/main/ci/bundles/0.7.1/skill-checks.yml) | `.github/workflows/skill-checks.yml` |
+| GitLab | [Skill checks](https://github.com/NVIDIA/SkillEvaluator/blob/main/ci/bundles/0.7.1/gitlab-skill-checks.yml) | `.gitlab-ci.yml`, or merge into your existing pipeline |
+| GitHub reports and PR comments | [Optional publisher](https://github.com/NVIDIA/SkillEvaluator/blob/main/ci/bundles/0.7.1/publish-skill-reports.yml) | Second workflow; complete publisher setup |
 
 See [GitHub](docs/github-actions.mdx) and [GitLab](docs/gitlab-ci.mdx) setup,
 [template reference](ci/templates/README.md) and [report examples](ci/examples/README.md).

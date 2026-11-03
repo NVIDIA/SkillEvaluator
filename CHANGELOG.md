@@ -4,6 +4,12 @@ All notable changes to SkillEvaluator are documented in this file.
 
 ## Unreleased
 
+### Documentation
+
+- Keep verified CI templates in the public repository and use one product
+  release for Python packages and CI downloads. Update onboarding links to
+  avoid relying on separate CI release entries.
+
 ### Added
 
 - Include `skillevaluator ci init`, `ci status` and `ci demo` in the Python

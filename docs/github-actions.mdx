@@ -12,7 +12,7 @@ The shared image includes **Tier 1 and SkillSpector security scanning**.
     Answer a few questions. The CLI prepares checks, optional hosted feedback and a setup PR.
   </Card>
   <Card title="Copy the workflows" icon="file-code" href="#get-started">
-    Add the release templates yourself. No local CLI installation required.
+    Copy the ready-to-use templates. No local CLI installation required.
   </Card>
 </CardGroup>
 
@@ -20,12 +20,12 @@ The shared image includes **Tier 1 and SkillSpector security scanning**.
 
 <Steps>
 
-### Download the released template
+### Copy the ready-to-use template
 
-Download [skill-checks.yml](https://github.com/NVIDIA/SkillEvaluator/releases/download/ci-0.7.1/skill-checks.yml)
-from the [CI 0.7.1 release](https://github.com/NVIDIA/SkillEvaluator/releases/tag/ci-0.7.1).
-Put it in `.github/workflows/skill-checks.yml` in your repository.
-The release supplies the pinned workflow and image versions.
+Open [skill-checks.yml](https://github.com/NVIDIA/SkillEvaluator/blob/main/ci/bundles/0.7.1/skill-checks.yml)
+from the [ready-to-use templates](https://github.com/NVIDIA/SkillEvaluator/tree/main/ci/bundles/0.7.1).
+Use GitHub's **Raw** view to copy it into `.github/workflows/skill-checks.yml`.
+The template already supplies pinned workflow and image versions.
 
 ### Point it at your skills
 
@@ -123,13 +123,13 @@ succeeds**. It needs a second workflow plus one-time hosting and approval settin
   PR for you to review.
 </Card>
 
-Download [publish-skill-reports.yml](https://github.com/NVIDIA/SkillEvaluator/releases/download/ci-0.7.1/publish-skill-reports.yml)
-from the same release as your scan workflow. Complete the one-time setup below,
+Copy [publish-skill-reports.yml](https://github.com/NVIDIA/SkillEvaluator/blob/main/ci/bundles/0.7.1/publish-skill-reports.yml)
+from the same template folder as your scan workflow. Complete the one-time setup below,
 or let the [CLI](/skills/skillevaluator/cli-onboarding) handle it.
 
 <AccordionGroup>
   <Accordion title="What does manual publisher setup involve?">
-    Start with the release-generated publisher template and follow the
+    Start with the filled-in publisher template and follow the
     [publisher setup guide](https://github.com/NVIDIA/SkillEvaluator/blob/main/ci/README.md#optional-hosted-reports-and-pr-feedback).
     The main steps are:
 

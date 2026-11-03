@@ -4,6 +4,7 @@
 """Tests for Tier 1 SkillSpector file-role applicability."""
 
 import json
+import os
 from pathlib import Path
 from typing import ClassVar
 from unittest.mock import patch
@@ -1228,6 +1229,78 @@ class TestReferenceReachability:
         assert not result.passed
         assert result.findings[0].file_path == "linked.cpp"
         assert result.findings[0].metadata["file_role"] == "agent_reference"
+
+    @pytest.mark.parametrize(
+        ("alias", "target", "skill_text"),
+        [
+            ("SKILL.md", "docs/body.md", None),
+            ("references/guide.md", "docs/evil.md", "Read `references/guide.md`.\n"),
+            ("guide.md", "docs/evil.md", "Read `guide.md`.\n"),
+        ],
+    )
+    def test_finding_on_a_symlink_target_stays_blocking(
+        self, tmp_path: Path, alias: str, target: str, skill_text: str | None
+    ) -> None:
+        scan_root = tmp_path / "skill"
+        _write(scan_root, target)
+        if skill_text is not None:
+            _write(scan_root, "SKILL.md", skill_text)
+        (scan_root / alias).parent.mkdir(parents=True, exist_ok=True)
+        (scan_root / alias).symlink_to(os.path.relpath(scan_root / target, (scan_root / alias).parent))
+
+        result = _process(scan_root, [_issue(target)])
+
+        assert not result.passed
+        assert result.findings[0].file_path == target
+        assert result.findings[0].metadata["file_role"] == "agent_reference"
+
+    def test_tsx_component_marked_executable_by_current_skillspector_stays_blocking(self, tmp_path: Path) -> None:
+        """SkillSpector 2.12+ marks ``.tsx`` executable, so UI strings in it are not suppressed."""
+        scan_root = tmp_path / "skill"
+        _write(scan_root, "SKILL.md", "Summarize the log.\n")
+        _write(scan_root, "web/instruction_display.tsx")
+        _write(scan_root, "docs/threats.md")
+
+        result = _process(
+            scan_root,
+            [_issue("web/instruction_display.tsx"), _issue("docs/threats.md", rule_id="P6")],
+            components=[{"path": "web/instruction_display.tsx", "type": "typescript", "executable": True}],
+        )
+
+        assert not result.passed
+        assert [finding.file_path for finding in result.findings] == ["web/instruction_display.tsx"]
+        assert result.findings[0].metadata["file_role"] == "agent_executable"
+
+    @pytest.mark.parametrize(
+        "skill_text",
+        [
+            "Read `docs/policy-*.md` before answering.\n",
+            "```sh\nfind docs -name '*.md' | xargs cat\n```\n",
+            "Run `grep -rn TODO docs`.\n",
+        ],
+    )
+    def test_globs_and_bare_directories_in_code_reach_the_files(self, tmp_path: Path, skill_text: str) -> None:
+        scan_root = tmp_path / "skill"
+        _write(scan_root, "docs/policy-v1.md")
+        _write(scan_root, "SKILL.md", skill_text)
+
+        result = _process(scan_root, [_issue("docs/policy-v1.md")])
+
+        assert not result.passed
+        assert result.findings[0].metadata["file_role"] == "agent_reference"
+
+    @pytest.mark.parametrize(
+        "skill_text",
+        ["Use when building a web page from the docs.\n", "Read `other/policy-*.md` or `*.txt` first.\n"],
+    )
+    def test_prose_and_unrelated_globs_do_not_reach_the_files(self, tmp_path: Path, skill_text: str) -> None:
+        scan_root = tmp_path / "skill"
+        _write(scan_root, "docs/policy-v1.md")
+        _write(scan_root, "SKILL.md", skill_text)
+
+        result = _process(scan_root, [_issue("docs/policy-v1.md")])
+
+        assert result.passed
 
     def test_relative_scan_root_is_resolved(self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
         scan_root = tmp_path / "skill"

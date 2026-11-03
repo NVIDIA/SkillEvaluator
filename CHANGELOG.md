@@ -415,7 +415,7 @@ All notable changes to SkillEvaluator are documented in this file.
 
 - Tier 1 `security` no longer fails a skill, rules, workflows, or plugin
   artifact on SkillSpector agent-threat matches in files no agent reads or
-  runs, such as UI strings in `.tsx` or HTML files, test fixtures,
+  runs, such as UI strings in HTML, CSS, or `.vue` files, test fixtures,
   documentation, notebooks, images, and lockfiles. Findings stay blocking on
   agent control paths (instructions, references, executables, agent
   configuration, MCP and plugin manifests) and on any file those reference by
@@ -423,7 +423,7 @@ All notable changes to SkillEvaluator are documented in this file.
   (`${CLAUDE_SKILL_DIR}`, `$SKILL_DIR`, `$SKILL_ROOT`,
   `${CLAUDE_PLUGIN_ROOT}`, `{baseDir}`, `<skill-dir>`), install path, or
   import, without regard to case. Files SkillSpector marks executable, such as
-  `.py`, `.js`, and `.ts` files under `tests/` or `web/`, are executables, so
+  `.py`, `.js`, `.ts`, and `.tsx` files under `tests/` or `web/`, are executables, so
   their findings and those of any fixture they name stay blocking. An issue
   that SkillSpector reports for several files is suppressed only when every
   one of its occurrences is outside agent control paths. Supply-chain

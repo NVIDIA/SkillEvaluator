@@ -891,7 +891,15 @@ class SecurityValidator(ValidatorBase):
                     original_root=original_root if staged is not None else None,
                     use_llm=True,
                 )
+                # The static stage is the authoritative audit of what was
+                # suppressed; keep its block and record the LLM stage's apart.
+                static_applicability = result.metadata.get("skillspector_applicability")
+                llm_applicability = enrichment.metadata.pop("skillspector_applicability", None)
                 result.merge(enrichment)
+                if static_applicability is not None:
+                    result.metadata["skillspector_applicability"] = static_applicability
+                if llm_applicability is not None:
+                    result.metadata["skillspector_llm_applicability"] = llm_applicability
                 if not enrichment.is_incomplete:
                     self._deduplicate_skillspector_findings(result)
             return result

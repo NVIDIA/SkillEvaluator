@@ -33,8 +33,10 @@ establish its role.
 from __future__ import annotations
 
 import ast
+import fnmatch
 import json
 import os
+import posixpath
 import re
 from bisect import bisect_left
 from collections.abc import Iterable, Mapping
@@ -659,6 +661,48 @@ def _quoted_directory_variants(file_path: str) -> set[str]:
     return {f"{quote}{name}{quote}" for name in names for quote in _DIRECTORY_NAME_QUOTES}
 
 
+_CODE_REGION_PATTERN = re.compile(r"```.*?```|`[^`\n]+`", re.DOTALL)
+_CODE_TOKEN_PATTERN = re.compile(r"[^\s'\"`|;&<>()=,]+")
+_GLOB_CHARACTERS = frozenset("*?[")
+_CODE_TOKEN_LIMIT = 2000
+_GLOB_TOKEN_LIMIT = 100
+
+
+def _code_span_reference_text(text: str, source_path: str, candidate_paths: Mapping[str, str]) -> str | None:
+    """Return extra reference text for names only a shell command or glob spells.
+
+    Code spans and fenced blocks name directories as bare words
+    (``find docs -name '*.md'``, ``grep -rn TODO docs``) and files by glob
+    (``docs/policy-*.md``), and the agent expands both. Each bare word is
+    restated quoted, which the directory variants accept, and each glob is
+    restated as the paths it matches (``candidate_paths`` maps a lowercase
+    path to its walk key). Prose outside code stays excluded. None means a
+    budget was exceeded, and the caller fails closed.
+    """
+    words: set[str] = set()
+    globs: set[str] = set()
+    for region in _CODE_REGION_PATTERN.findall(text):
+        for token in _CODE_TOKEN_PATTERN.findall(region):
+            token = token.strip("`").lower()
+            if not token:
+                continue
+            if _GLOB_CHARACTERS & set(token):
+                globs.add(token)
+            elif "/" not in token:
+                words.add(token)
+    if len(words) > _CODE_TOKEN_LIMIT or len(globs) > _GLOB_TOKEN_LIMIT:
+        return None
+    extra = [f"`{word}`" for word in sorted(words)]
+    source_directory = posixpath.dirname(source_path)
+    for pattern in sorted(globs):
+        bare = pattern.removeprefix("./")
+        patterns = {bare, posixpath.normpath(posixpath.join(source_directory, bare))}
+        extra.extend(
+            key for lowered, key in candidate_paths.items() if any(fnmatch.fnmatchcase(lowered, p) for p in patterns)
+        )
+    return "\n".join(extra)
+
+
 def _reference_anchor_words(file_path: str) -> frozenset[str] | None:
     """Return words, one of which appears in any text that references *file_path*.
 
@@ -1105,6 +1149,7 @@ def referenced_report_paths(
             relative_variant_cache[key] = _lowercase(variants, unbounded)
         return relative_variant_cache[key]
 
+    lowered_candidate_paths = {path.lower(): path for path in local_files}
     prefixed_executable_paths = {_prefixed(path) for path in executable_paths if path != "unknown"}
     reachable = {
         path for path in local_files if roles[path] in AGENT_CONTROL_PATH_ROLES or path in prefixed_executable_paths
@@ -1127,6 +1172,14 @@ def referenced_report_paths(
             resolved_file.relative_to(resolved_base)
             if not resolved_file.is_file():
                 return None
+            if control_file.is_symlink():
+                # SkillSpector never scans through a symlink; it reports the
+                # matches under the real file's name. Reaching the alias
+                # therefore reaches its target.
+                target_path = resolved_file.relative_to(resolved_base).as_posix()
+                if target_path in local_files and target_path not in reachable:
+                    reachable.add(target_path)
+                    pending.append(target_path)
             source_files_read += 1
             if source_files_read > _REFERENCE_SOURCE_FILE_LIMIT:
                 return None
@@ -1158,6 +1211,11 @@ def referenced_report_paths(
             text = f"{text}\n{' '.join(expanded_imports)}"
         text = _PLUGIN_ROOT_PATTERN.sub(f"{_PLUGIN_ROOT_MARKER}/", text)
         text = _SKILL_ROOT_PATTERN.sub(f"{_SKILL_ROOT_MARKER}/", text)
+        code_references = _code_span_reference_text(text, source_path, lowered_candidate_paths)
+        if code_references is None:
+            return None
+        if code_references:
+            text = f"{text}\n{code_references}"
         # References match without regard to case: an agent on a
         # case-insensitive file system reads ``DOCS/Guide.md`` as docs/guide.md.
         text = text.lower()

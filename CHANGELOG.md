@@ -109,7 +109,7 @@ All notable changes to SkillEvaluator are documented in this file.
   reviewed PII value without relaxing the whole check through a severity
   override. Each waiver names the PII check, the file (relative to the waiver
   file's directory), the line, the SHA-256 digest that PII findings now report
-  as `evidence_sha256`, a reason, an owner, and a `created`/`expires` window,
+  as `evidence_sha256`, a reason, an owner, and a `created`/`expires` window of at most 366 days,
   and it stops applying as soon as any of them no longer matches. Other values
   on the same line are still reported. Reports list each waiver for a scanned
   file as applied (INFO), stale (LOW), or expired (MEDIUM), so one file can

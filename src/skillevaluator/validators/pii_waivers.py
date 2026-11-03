@@ -52,8 +52,14 @@ from pathlib import Path, PurePosixPath
 import yaml
 
 from skillevaluator.models.result import Finding, Severity
-from skillevaluator.quality_config import _UniqueKeySafeLoader, _yaml_error_detail
+from skillevaluator.quality_config import _yaml_error_detail
 from skillevaluator.utils.secret_redaction import SENSITIVE_PII_CATEGORIES
+from skillevaluator.utils.structured_data import (
+    StructuredDataLimitError,
+    StructuredDataSyntaxError,
+    _UniqueKeySafeLoader,
+    load_bounded_yaml,
+)
 
 PII_WAIVER_CATEGORY = "PII_WAIVER"
 _WAIVER_FIELDS = ("id", "category", "file", "line", "evidence_sha256", "reason", "owner", "created", "expires")
@@ -61,6 +67,8 @@ _SHA256_PATTERN = re.compile(r"[0-9a-f]{64}")
 _MIN_REASON_LENGTH = 8
 # The local date can be at most one day ahead of the UTC date (UTC+14 at most).
 _CREATED_TOLERANCE = timedelta(days=1)
+# A waiver is a bounded-time exception that forces periodic review, so it cannot be permanent.
+_MAX_WAIVER_WINDOW = timedelta(days=366)
 
 
 class PIIWaiverError(ValueError):
@@ -154,7 +162,13 @@ def load_pii_waivers(path: Path, categories: Collection[str], *, today: date) ->
     except OSError as exc:
         raise PIIWaiverError(f"cannot read file: {exc.strerror or type(exc).__name__}") from exc
     try:
-        raw = yaml.load(text, Loader=_UniqueKeySafeLoader)  # nosec B506
+        try:
+            raw = load_bounded_yaml(text)
+        except StructuredDataSyntaxError:
+            # The bounded loader reports no position; the same loader gives a line and column.
+            raw = yaml.load(text, Loader=_UniqueKeySafeLoader)  # nosec B506
+    except StructuredDataLimitError as exc:
+        raise PIIWaiverError(f"invalid YAML: {exc}") from exc
     except yaml.YAMLError as exc:
         raise PIIWaiverError(f"invalid YAML: {_yaml_error_detail(exc)}") from exc
     except RecursionError as exc:
@@ -213,6 +227,11 @@ def load_pii_waivers(path: Path, categories: Collection[str], *, today: date) ->
             raise PIIWaiverError(f"{location}.created is in the future")
         if expires < created:
             raise PIIWaiverError(f"{location}.expires is before created")
+        if expires - created > _MAX_WAIVER_WINDOW:
+            raise PIIWaiverError(
+                f"{location}.expires is more than {_MAX_WAIVER_WINDOW.days} days after created; renew the waiver "
+                "after a review instead"
+            )
 
         waivers.append(
             PIIWaiver(

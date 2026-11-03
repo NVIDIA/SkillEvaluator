@@ -3622,6 +3622,10 @@ from skillevaluator.tier3.workflow import build_tier3_workflow
 tier3.workflow = build_tier3_workflow(evaluate)
 cli.add_command(harbor_view, "harbor-view")
 
+from skillevaluator.ci_onboarding import ci as ci_onboarding_group
+
+cli.add_command(ci_onboarding_group)
+
 
 if __name__ == "__main__":
     cli()

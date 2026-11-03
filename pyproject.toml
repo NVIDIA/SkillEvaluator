@@ -120,6 +120,7 @@ where = ["src"]
 include = ["skillevaluator*"]
 
 [tool.setuptools.package-data]
+"skillevaluator" = ["ci-release.json"]
 "skillevaluator.config" = ["*.yaml", "profiles/*.yaml"]
 "skillevaluator.reporting" = ["templates/*.j2"]
 "skillevaluator.tier3.harbor" = [

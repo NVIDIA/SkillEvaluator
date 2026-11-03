@@ -40,16 +40,16 @@ The three-tier evaluation checks whether the skill:
 
 | Measure | Claude Code (Baseline → Skill Uplift) | Codex (Baseline → Skill Uplift) |
 |---|---:|---:|
-| Overall | 47% → 92% (+45 points) | 55% → 88% (+33 points) |
-| Security | 47% → 92% (+45 points) | 55% → 88% (+33 points) |
-| Correctness | 47% → 92% (+45 points) | 55% → 88% (+33 points) |
-| Discoverability | 47% → 92% (+45 points) | 55% → 88% (+33 points) |
-| Effectiveness | 47% → 92% (+45 points) | 55% → 88% (+33 points) |
-| Efficiency | 47% → 92% (+45 points) | 55% → 88% (+33 points) |
+| Overall | 47.0% → 92.0% (+45.0 points) | 55.0% → 88.0% (+33.0 points) |
+| Security | 47.0% → 92.0% (+45.0 points) | 55.0% → 88.0% (+33.0 points) |
+| Correctness | 47.0% → 92.0% (+45.0 points) | 55.0% → 88.0% (+33.0 points) |
+| Discoverability | 47.0% → 92.0% (+45.0 points) | 55.0% → 88.0% (+33.0 points) |
+| Effectiveness | 47.0% → 92.0% (+45.0 points) | 55.0% → 88.0% (+33.0 points) |
+| Efficiency | 47.0% → 92.0% (+45.0 points) | 55.0% → 88.0% (+33.0 points) |
 
-**How to read this table:** baseline is the same task attempted without the target skill. Uplift is `skill score - baseline score`, shown in percentage points.
+**How to read this table:** baseline is the same task attempted without the target skill. Scores are rounded to one decimal; threshold-adjacent values use additional precision so their displayed band matches the verdict. Uplift is `skill score - baseline score`, computed from those displayed scores and shown in percentage points.
 
-Example: `47% → 92% (+45 points)` means the skill-assisted run scored 92%, 45 percentage points above its 47% no-skill baseline.
+Example: `47.0% → 92.0% (+45.0 points)` means the skill-assisted run scored 92.0%, 45.0 percentage points above its 47.0% no-skill baseline.
 
 ## Tier Status
 

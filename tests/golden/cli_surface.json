@@ -5,7 +5,7 @@
         "demo": {
           "params": [
             {
-              "default": "<bound method Path.cwd of <class 'pathlib.Path'>>",
+              "default": "<callable pathlib.Path.cwd>",
               "name": "repo",
               "opts": [
                 "--repo"
@@ -28,7 +28,7 @@
         "init": {
           "params": [
             {
-              "default": "<bound method Path.cwd of <class 'pathlib.Path'>>",
+              "default": "<callable pathlib.Path.cwd>",
               "name": "repo",
               "opts": [
                 "--repo"
@@ -145,7 +145,7 @@
         "status": {
           "params": [
             {
-              "default": "<bound method Path.cwd of <class 'pathlib.Path'>>",
+              "default": "<callable pathlib.Path.cwd>",
               "name": "repo",
               "opts": [
                 "--repo"

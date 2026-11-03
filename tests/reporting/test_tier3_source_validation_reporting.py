@@ -217,6 +217,8 @@ def test_cli_report_ignores_malformed_source_validation_metadata() -> None:
                     {"path": "entry ok", "status": "ok", "message": "Loaded."},
                     {"path": "entry warn", "status": "warning", "message": "Optional field."},
                     {"path": 7, "status": "error", "message": "Non-string path."},
+                    {"path": "entry list", "status": ["error"], "message": "List status."},
+                    {"path": "entry dict", "status": {"error": True}, "message": "Mapping status."},
                     {"path": "entry blank", "status": "error", "message": "  "},
                     {"path": "entry kept", "status": "error", "message": "Invalid entry."},
                 ]
@@ -228,7 +230,15 @@ def test_cli_report_ignores_malformed_source_validation_metadata() -> None:
 
     assert "Keep the existing recommendation." in output
     assert "Source validation: entry kept: Invalid entry." in output
-    for dropped in ("text-only", "Loaded.", "Optional field.", "Non-string path.", "entry blank"):
+    for dropped in (
+        "text-only",
+        "Loaded.",
+        "Optional field.",
+        "Non-string path.",
+        "List status.",
+        "Mapping status.",
+        "entry blank",
+    ):
         assert dropped not in output
 
 
@@ -407,6 +417,7 @@ def test_html_payload_keeps_only_well_formed_source_errors() -> None:
                     {"path": "entry a", "status": "error", "message": "Invalid entry.", "extra": "dropped"},
                     {"path": "entry b", "status": "ok", "message": "Loaded."},
                     {"path": None, "status": "error", "message": "Bad path."},
+                    {"path": "entry d", "status": ["error"], "message": "Unhashable status."},
                     ["entry c", "error", "Not a mapping."],
                     {"message": "No path or status recorded."},
                 ]

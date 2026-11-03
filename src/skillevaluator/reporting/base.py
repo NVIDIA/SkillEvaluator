@@ -2528,6 +2528,7 @@ def source_validation_errors(metadata: object) -> list[dict[str, str]]:
         message = check.get("message")
         if (
             isinstance(path, str)
+            and isinstance(status, str)
             and status in _SOURCE_VALIDATION_ERROR_STATUSES
             and isinstance(message, str)
             and message.strip()

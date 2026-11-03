@@ -8,6 +8,7 @@ import json
 import shutil
 import threading
 from collections.abc import Callable
+from datetime import timedelta
 from pathlib import Path
 
 import pytest
@@ -906,7 +907,7 @@ _PII_WAIVER_COMMANDS = {
 
 def _pii_waiver_run(tmp_path: Path, monkeypatch: pytest.MonkeyPatch, command: str, *extra_args: str):
     """Run a PII-scanning command on a copy of the fixture with one non-placeholder address in it."""
-    from skillevaluator.validators.pii_waivers import pii_evidence_sha256
+    from skillevaluator.validators.pii_waivers import pii_evidence_sha256, today_utc
 
     skill = tmp_path / "simple"
     shutil.copytree(FIXTURE, skill)
@@ -919,8 +920,8 @@ def _pii_waiver_run(tmp_path: Path, monkeypatch: pytest.MonkeyPatch, command: st
         "evidence_sha256": pii_evidence_sha256("emails", "boss@company.com"),
         "reason": "Public support address of the documented service",
         "owner": "docs-team",
-        "created": "2026-01-01",
-        "expires": "2099-12-31",
+        "created": (today_utc() - timedelta(days=1)).isoformat(),
+        "expires": (today_utc() + timedelta(days=300)).isoformat(),
     }
     (tmp_path / "pii-waivers.yaml").write_text(json.dumps({"version": 1, "waivers": [waiver]}), encoding="utf-8")
     monkeypatch.chdir(tmp_path)
@@ -984,7 +985,7 @@ def test_catalog_validate_reports_each_waiver_only_in_its_own_skill(
     A symlinked waiver file keeps the link's directory as the base of its entries
     in every child, serial or parallel.
     """
-    from skillevaluator.validators.pii_waivers import pii_evidence_sha256
+    from skillevaluator.validators.pii_waivers import pii_evidence_sha256, today_utc
 
     names = ("one", "two", "three")
     waivers = []
@@ -1006,8 +1007,8 @@ def test_catalog_validate_reports_each_waiver_only_in_its_own_skill(
                 "evidence_sha256": pii_evidence_sha256("emails", address),
                 "reason": "Public support address of the documented service",
                 "owner": "docs-team",
-                "created": "2026-01-01",
-                "expires": "2099-12-31",
+                "created": (today_utc() - timedelta(days=1)).isoformat(),
+                "expires": (today_utc() + timedelta(days=300)).isoformat(),
             }
         )
     waiver_text = json.dumps({"version": 1, "waivers": waivers})

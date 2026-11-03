@@ -11,6 +11,7 @@ and a waiver file that does not load must apply nothing and fail the scan.
 from __future__ import annotations
 
 import json
+import time
 from datetime import date, timedelta
 from pathlib import Path
 
@@ -35,7 +36,7 @@ def _waiver(**overrides: object) -> dict:
         "evidence_sha256": pii_evidence_sha256("emails", ADDRESS),
         "reason": "Public support address of the documented service",
         "owner": "docs-team",
-        "created": "2026-01-01",
+        "created": (today_utc() - timedelta(days=30)).isoformat(),
         "expires": (today_utc() + timedelta(days=30)).isoformat(),
     }
     waiver.update(overrides)
@@ -167,10 +168,36 @@ def test_waiver_applies_on_its_expiry_day(skill: Path, tmp_path: Path, monkeypat
     """A waiver applies through ``expires``; the date is pinned so a run crossing UTC midnight cannot flake."""
     monkeypatch.setattr(pii_waivers, "today_utc", lambda: date(2026, 11, 2))
 
-    result = _scan(skill, _write_waivers(tmp_path, _waiver(expires="2026-11-02")))
+    result = _scan(skill, _write_waivers(tmp_path, _waiver(created="2026-10-01", expires="2026-11-02")))
 
     assert result.passed
     assert _waiver_checks(result) == ["applied-pii-waiver"]
+
+
+def test_waiver_window_may_span_a_year(skill: Path, tmp_path: Path) -> None:
+    created = today_utc() - timedelta(days=1)
+    waiver = _waiver(created=created.isoformat(), expires=(created + timedelta(days=366)).isoformat())
+
+    result = _scan(skill, _write_waivers(tmp_path, waiver))
+
+    assert result.passed
+    assert _waiver_checks(result) == ["applied-pii-waiver"]
+
+
+def test_waiver_file_with_chained_merges_is_rejected_without_expanding_them(skill: Path, tmp_path: Path) -> None:
+    """A merge bomb in a checked-out waiver file must fail fast instead of stalling the run."""
+    anchors = ["a0: &a0 {k: v}"]
+    merge = ", ".join(["*a{}"] * 8)
+    anchors += [f"a{i}: &a{i} {{<<: [" + merge.format(*[i - 1] * 8) + "]}" for i in range(1, 12)]
+    waiver_path = tmp_path / "pii-waivers.yaml"
+    waiver_path.write_text("version: 1\nwaivers: []\n" + "\n".join(anchors) + "\n", encoding="utf-8")
+
+    started = time.monotonic()
+    loaded = PIIWaiverSet.load(waiver_path, {"emails"}, today=today_utc())
+
+    assert time.monotonic() - started < 5
+    assert loaded.error is not None
+    assert loaded.waivers == []
 
 
 def test_created_may_be_one_day_ahead_of_utc(skill: Path, tmp_path: Path) -> None:
@@ -194,7 +221,7 @@ _IN_TWO_DAYS = "<in-two-days>"
         pytest.param("version: [1\n", "invalid YAML", id="bad-yaml"),
         pytest.param({"version": 2, "waivers": []}, "version must be 1", id="unknown-version"),
         pytest.param({"version": 1, "waivers": [], "extra": True}, "top level", id="unknown-top-level-key"),
-        pytest.param("version: 1\nversion: 1\nwaivers: []\n", "duplicate key", id="duplicate-key"),
+        pytest.param("version: 1\nversion: 1\nwaivers: []\n", "duplicate mapping key", id="duplicate-key"),
         pytest.param({"version": 1, "waivers": {}}, "waivers must be a list", id="waivers-not-list"),
         pytest.param([_waiver(note="x")], "unknown field(s): note", id="unknown-field"),
         pytest.param([{k: v for k, v in _waiver().items() if k != "owner"}], "missing: owner", id="missing-field"),
@@ -214,6 +241,10 @@ _IN_TWO_DAYS = "<in-two-days>"
         pytest.param([_waiver(created="2026-13-01")], ".created", id="bad-date"),
         pytest.param([_waiver(created=_IN_TWO_DAYS)], "in the future", id="created-in-future"),
         pytest.param([_waiver(created="2026-02-01", expires="2026-01-01")], "before created", id="expires-first"),
+        pytest.param(
+            [_waiver(created="2026-01-01", expires="2027-01-03")], "more than 366 days", id="window-too-long"
+        ),
+        pytest.param([_waiver(created="2026-01-01", expires="9999-12-31")], "more than 366 days", id="permanent"),
     ],
 )
 def test_invalid_waiver_file_applies_nothing_and_fails_the_scan(

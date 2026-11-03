@@ -10,9 +10,22 @@ change *names* and not the command structure.
 
 from __future__ import annotations
 
+from pathlib import Path
 from typing import Any
 
 import click
+
+
+def _default_to_string(value: Any) -> str:
+    if not callable(value):
+        return str(value)
+    # pathlib moved this classmethod between private implementations in 3.13.
+    # Keep its public identity, without evaluating the current working directory.
+    if value == Path.cwd:
+        return "<callable pathlib.Path.cwd>"
+    module = getattr(value, "__module__", type(value).__module__)
+    name = getattr(value, "__qualname__", type(value).__qualname__)
+    return f"<callable {module}.{name}>"
 
 
 def _param_to_dict(param: click.Parameter) -> dict[str, Any]:
@@ -34,7 +47,7 @@ def _param_to_dict(param: click.Parameter) -> dict[str, Any]:
         data["required"] = True
     default = getattr(param, "default", None)
     if default is not None and default is not getattr(click.core, "UNSET", None):
-        data["default"] = str(default)
+        data["default"] = _default_to_string(default)
     param_type = getattr(param, "type", None)
     if isinstance(param_type, click.Choice):
         data["choices"] = list(param_type.choices)

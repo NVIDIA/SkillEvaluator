@@ -104,6 +104,61 @@ def test_auto_reporter_selects_terminal_appropriate_presentation(monkeypatch: py
     assert isinstance(progress.create_progress_reporter("off", stream=_TTYBuffer()), progress.NullProgressReporter)
 
 
+class _RecordingStop:
+    """Stop event that records the heartbeat wait and ends the loop at once."""
+
+    def __init__(self) -> None:
+        self.timeouts: list[float] = []
+
+    def wait(self, timeout: float) -> bool:
+        self.timeouts.append(timeout)
+        return True
+
+
+def test_plain_heartbeat_defaults_to_one_minute_and_rich_to_one_second(monkeypatch: pytest.MonkeyPatch) -> None:
+    progress = _progress_module()
+    monkeypatch.setenv("TERM", "xterm-256color")
+    plain = progress.create_progress_reporter("auto", stream=io.StringIO())
+    rich = progress.create_progress_reporter("auto", stream=_TTYBuffer())
+
+    assert type(plain) is progress.PlainProgressReporter
+    assert type(rich) is progress.RichProgressReporter
+    for reporter, expected in ((plain, 60.0), (rich, 1.0)):
+        stop = _RecordingStop()
+        reporter._stop = stop
+        reporter._heartbeat_loop()
+        assert stop.timeouts == [expected]
+
+
+@pytest.mark.parametrize("mode", ["plain", "rich", "auto"])
+def test_progress_interval_overrides_plain_and_rich_defaults(monkeypatch: pytest.MonkeyPatch, mode: str) -> None:
+    progress = _progress_module()
+    monkeypatch.setenv("TERM", "xterm-256color")
+
+    reporter = progress.create_progress_reporter(mode, stream=_TTYBuffer(), refresh_interval=12.5)
+
+    assert reporter._refresh_interval == 12.5
+
+
+@pytest.mark.parametrize("interval", [float("nan"), float("inf"), float("-inf")])
+def test_progress_reporter_rejects_non_finite_refresh_interval(interval: float) -> None:
+    progress = _progress_module()
+
+    with pytest.raises(ValueError, match="finite number of seconds"):
+        progress.create_progress_reporter("plain", stream=io.StringIO(), refresh_interval=interval)
+
+
+def test_progress_reporter_bounds_refresh_interval_below_thread_timeout_limit() -> None:
+    progress = _progress_module()
+
+    fast = progress.PlainProgressReporter(stream=io.StringIO(), refresh_interval=0.0)
+    slow = progress.PlainProgressReporter(stream=io.StringIO(), refresh_interval=1e12)
+
+    assert fast._refresh_interval == progress.MIN_REFRESH_INTERVAL_SECONDS
+    assert slow._refresh_interval == progress.MAX_REFRESH_INTERVAL_SECONDS
+    assert progress.MAX_REFRESH_INTERVAL_SECONDS < threading.TIMEOUT_MAX
+
+
 def test_plain_plan_labels_the_maximum_scaled_top_level_agent_timeout() -> None:
     progress = _progress_module()
     output = io.StringIO()

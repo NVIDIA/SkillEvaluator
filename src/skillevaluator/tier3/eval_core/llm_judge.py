@@ -16,6 +16,11 @@ import urllib.error
 import urllib.request
 from typing import Any
 
+from skillevaluator.inference.json_span import (
+    MAX_JSON_NESTING,
+    STRICT_JSON_DECODE_HOOKS,
+    balanced_json_container_end,
+)
 from skillevaluator.inference.types import EmptyLLMResponseError, LLMClientTruncatedError
 from skillevaluator.provider_config import (
     MAX_COMPLETION_TOKENS,
@@ -294,61 +299,8 @@ def call_public_llm(
 
 _JSON_WHITESPACE = " \t\r\n"
 _MAX_JSON_TEXT_CHARS = 100_000
-_MAX_JSON_NESTING = 128
+_MAX_JSON_NESTING = MAX_JSON_NESTING
 _JSON_NUMBER_PREFIX_RE = re.compile(r"-?(?:(?:0|[1-9][0-9]*)(?:\.[0-9]+)?(?:[eE][+-]?[0-9]*)?|(?:0|[1-9][0-9]*)\.)?")
-
-
-def _balanced_json_container_end(text: str, start: int) -> int | None:
-    """Return the exclusive end of one bounded structural container."""
-    if start >= len(text) or text[start] not in "{[":
-        return None
-    stack: list[str] = []
-    in_string = False
-    escaped = False
-    for i in range(start, len(text)):
-        ch = text[i]
-        if in_string:
-            if escaped:
-                escaped = False
-            elif ch == "\\":
-                escaped = True
-            elif ch == '"':
-                in_string = False
-        elif ch == '"':
-            in_string = True
-        elif ch in "{[":
-            stack.append(ch)
-            if len(stack) > _MAX_JSON_NESTING:
-                return None
-        elif ch in "}]":
-            expected = "{" if ch == "}" else "["
-            if not stack or stack[-1] != expected:
-                return None
-            stack.pop()
-            if not stack:
-                return i + 1
-    return None
-
-
-def _reject_duplicate_object_pairs(pairs: list[tuple[str, Any]]) -> dict[str, Any]:
-    """Build an object while rejecting ambiguous duplicate members."""
-    result: dict[str, Any] = {}
-    for key, value in pairs:
-        if key in result:
-            raise ValueError("Duplicate JSON object member")
-        result[key] = value
-    return result
-
-
-def _reject_nonstandard_json_constant(_value: str) -> None:
-    raise ValueError("Non-standard JSON constant")
-
-
-def _parse_finite_json_float(value: str) -> float:
-    parsed = float(value)
-    if not math.isfinite(parsed):
-        raise ValueError("JSON number overflowed to a non-finite value")
-    return parsed
 
 
 def _json_nesting_within_limit(text: str) -> bool:
@@ -394,16 +346,14 @@ def _extract_json(text: str) -> dict[str, Any] | list[Any] | None:
         if text[index] not in "{[":
             index += 1
             continue
-        end = _balanced_json_container_end(text, index)
+        end = balanced_json_container_end(text, index)
         if end is None:
             return documents[0] if documents else None
         candidate = text[index:end]
         try:
             parsed = json.loads(
                 candidate,
-                object_pairs_hook=_reject_duplicate_object_pairs,
-                parse_constant=_reject_nonstandard_json_constant,
-                parse_float=_parse_finite_json_float,
+                **STRICT_JSON_DECODE_HOOKS,
             )
         except (json.JSONDecodeError, RecursionError, ValueError):
             index = end
@@ -465,9 +415,7 @@ def _is_append_only_json_object_prefix(fragment: str) -> bool:
         return False
 
     decoder = json.JSONDecoder(
-        object_pairs_hook=_reject_duplicate_object_pairs,
-        parse_constant=_reject_nonstandard_json_constant,
-        parse_float=_parse_finite_json_float,
+        **STRICT_JSON_DECODE_HOOKS,
     )
 
     def _skip_whitespace(index: int) -> int:
@@ -540,9 +488,7 @@ def _salvage_behavior_results(text: str) -> list[dict[str, Any]]:
         return []
 
     decoder = json.JSONDecoder(
-        object_pairs_hook=_reject_duplicate_object_pairs,
-        parse_constant=_reject_nonstandard_json_constant,
-        parse_float=_parse_finite_json_float,
+        **STRICT_JSON_DECODE_HOOKS,
     )
 
     def _skip_whitespace(index: int) -> int:

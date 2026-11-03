@@ -2907,7 +2907,6 @@ class HTMLReporter(ReporterBase):
         # exit code. Results produced outside ``validate`` retain the public
         # defaults: Tier 1/Tier 2 block and Tier 3 is advisory.
         blocking_results: list[ValidationResult] = []
-        advisory_results: list[ValidationResult] = []
         # Per tier, so the gate policy counts findings the way each tier card does.
         blocking_by_tier: dict[str, list[ValidationResult]] = {}
         advisory_by_tier: dict[str, list[ValidationResult]] = {}
@@ -2935,7 +2934,6 @@ class HTMLReporter(ReporterBase):
                     blocking_by_tier.setdefault(tier_name, []).append(result)
                     tier_blocks = True
                 else:
-                    advisory_results.append(result)
                     advisory_by_tier.setdefault(tier_name, []).append(result)
                     tier_advises = True
             if tier_blocks:

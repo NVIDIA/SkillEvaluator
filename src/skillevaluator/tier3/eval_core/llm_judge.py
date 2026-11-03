@@ -767,7 +767,7 @@ the expected answer on each criterion below and decide true (satisfied) or false
 Judge the outcome only. Do not reward or penalize the response for naming, or not naming, \
 a tool or skill: that is scored separately.
 If the evidence holds no answer to the question (for example, the agent stopped, timed out or \
-refused), every criterion is false.
+refused), every criterion is false, unless the expected answer is itself a refusal.
 Be lenient on wording, but strict on factual correctness and on any output format the user \
 question explicitly requires.
 

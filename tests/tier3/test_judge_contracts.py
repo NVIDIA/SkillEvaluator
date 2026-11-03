@@ -134,6 +134,8 @@ def test_accuracy_prompt_gives_no_free_criterion_to_a_response_without_an_answer
     assert "answer true if the response gives an answer and false if it gives none" in format_line
     assert "If the evidence holds no answer to the question" in prompt
     assert "every criterion is false" in prompt
+    # A correct refusal still scores when the expected answer is a refusal.
+    assert "unless the expected answer is itself a refusal" in prompt
 
 
 def test_goal_prompt_omits_empty_tool_section_and_keeps_real_one(judge_module, monkeypatch) -> None:

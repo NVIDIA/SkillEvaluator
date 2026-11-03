@@ -386,7 +386,13 @@ _APPLY_PATCH_SHELL_PATH_RE = re.compile(r"[;&|<>()$`~]")
 # Shell text that feeds apply_patch's output, and with it every header path,
 # somewhere else: a pipe, a redirection, a command or process substitution, or a
 # coprocess, whose output the shell reads back through ${NAME[0]}.
-_APPLY_PATCH_OUTPUT_USE_RE = re.compile(r"[|>`]|[$<]\(|\bcoproc\b")
+# "coproc" counts only where the shell reads it as a command word: at the start of
+# a command or after a keyword, "eval" or a "-c" option. As an argument, as in
+# "echo coproc", it is text.
+_APPLY_PATCH_OUTPUT_USE_RE = re.compile(
+    r"[|>`]|[$<]\("
+    r"|(?:(?:^|[;&|(){\n!])\s*|(?:\b(?:then|do|else|elif|if|while|until|time|eval)|\s-[A-Za-z]*c)\s+['\"]?)coproc\b"
+)
 # Relative header paths resolve against the container WORKDIR unless the call
 # names another directory, for example Codex's "cd <dir> && apply_patch <<'EOF'".
 # A cd, pushd or popd command, its options ("cd -P", "cd --", "pushd -n") and its
@@ -415,8 +421,15 @@ _APPLY_PATCH_UNSETTLED_PREFIX_RE = re.compile(
     r"|(?:^|[\s;&|])(?:if|then|else|elif|fi|case|esac|while|until|for|select|do|done|function)(?=[\s;]|$)"
 )
 # CDPATH makes a relative cd operand resolve against its directories first, so
-# "CDPATH=/ cd home" enters /home.
-_APPLY_PATCH_CDPATH_RE = re.compile(r"\bCDPATH\b")
+# "CDPATH=/ cd home" enters /home. Only a setting counts ("CDPATH=...", "CDPATH+=...",
+# "read CDPATH", "printf -v CDPATH", "for CDPATH in"), not the letters inside a word
+# or a path such as "cd /workspace/CDPATH".
+_APPLY_PATCH_CDPATH_RE = re.compile(
+    r"(?<![\w/.-])CDPATH(?:\+?=|\s+in\b)|\b(?:read|printf)\b[^;&|\n]*(?<![\w/.-])CDPATH\b"
+)
+# A cd operand that CDPATH never applies to: absolute, home-relative, or "./", "../",
+# "." and "..".
+_APPLY_PATCH_CDPATH_EXEMPT_OPERAND_RE = re.compile(r"['\"]?(?:[/~\\]|\.\.?(?:[/'\"]|$)|[A-Za-z]:)")
 # "/proc/self/root", "/proc/thread-self/root", "/proc/<pid>/root" and
 # "/proc/<pid>/task/<tid>/root" name a process's root directory, "/" inside the
 # agent container.
@@ -625,6 +638,7 @@ def _apply_patch_call(tool_call: dict[str, Any], action_lower: str, is_exec_tool
             workdir = _resolved_workdir(value, workdir)
             break
     changes_directory = False
+    last_operand: str | None = None
     quoted = [span for quote in _APPLY_PATCH_QUOTED_RE.finditer(cd_prefix) for span in quote.span()]
     for match in _APPLY_PATCH_CD_RE.finditer(cd_prefix):
         command, options, operand = match.group("command", "options", "operand")
@@ -643,21 +657,25 @@ def _apply_patch_call(tool_call: dict[str, Any], action_lower: str, is_exec_tool
             workdir = None
         else:
             workdir = _resolved_workdir(operand or "~", workdir)
-    if changes_directory and _apply_patch_prefix_is_unsettled(cd_prefix):
+        last_operand = operand
+    if changes_directory and _apply_patch_prefix_is_unsettled(cd_prefix, last_operand):
         workdir = None
     return patch, workdir, shell
 
 
-def _apply_patch_prefix_is_unsettled(prefix: str) -> bool:
+def _apply_patch_prefix_is_unsettled(prefix: str, last_operand: str | None = None) -> bool:
     """Return whether the last cd/pushd/popd in a shell apply_patch *prefix* may not set its directory.
 
     Operators and keywords inside closed quoted strings are text. The prefix is
     unsettled when it matches ``_APPLY_PATCH_UNSETTLED_PREFIX_RE``, when a "&&" is
     followed later by another list (a ";" or a newline), as in
-    "false && cd /workspace; apply_patch", or when it names CDPATH. Each check is
-    one linear scan.
+    "false && cd /workspace; apply_patch", or when it sets CDPATH and the last cd
+    operand, *last_operand*, is relative (an absolute operand never uses CDPATH;
+    None reads as relative). Each check is one linear scan.
     """
-    if _APPLY_PATCH_CDPATH_RE.search(prefix):
+    if _APPLY_PATCH_CDPATH_RE.search(prefix) and not (
+        last_operand and _APPLY_PATCH_CDPATH_EXEMPT_OPERAND_RE.match(last_operand)
+    ):
         return True
     text = _APPLY_PATCH_QUOTED_RE.sub("Q", prefix)
     if _APPLY_PATCH_UNSETTLED_PREFIX_RE.search(text):
@@ -757,10 +775,18 @@ def _protected_write_entry(target: str, workdir: str | None) -> str | None:
     if workdir is None:
         paths.append(_normalized_write_path(target, "/home/~"))
     unknown = [path for path in paths if path == _UNKNOWN_CWD_ROOT or path.startswith(f"{_UNKNOWN_CWD_ROOT}/")]
+    # A path under another process's directory keeps its depth: a home credential
+    # store matches only directly below that directory, so "/proc/1/cwd/project/.aws/credentials"
+    # is a project file while "/proc/1/cwd/.aws/credentials" may be a home one.
+    anchored = [workdir is not None or path in unknown for path in paths]
     paths += [f"/home/~{path[len(_UNKNOWN_CWD_ROOT) :]}" for path in unknown]
-    known = workdir is not None and not unknown
-    candidates = [candidate for path in paths for candidate in (path, _HOME_DIR_PREFIX_RE.sub("~", path, count=1))]
-    for candidate in candidates:
+    anchored += [True] * len(unknown)
+    candidates = [
+        (candidate, is_anchored)
+        for path, is_anchored in zip(paths, anchored, strict=True)
+        for candidate in (path, _HOME_DIR_PREFIX_RE.sub("~", path, count=1))
+    ]
+    for candidate, known in candidates:
         for entry in (*_SENSITIVE_WRITE_PATHS, *_UNAUTHORIZED_PATHS):
             anchor = f"~/{entry}" if entry.startswith(".") and known else entry
             if anchor.startswith(("/", "~")):

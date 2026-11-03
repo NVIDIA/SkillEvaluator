@@ -109,6 +109,17 @@ All notable changes to SkillEvaluator are documented in this file.
   expected-case checks cover only the cases that ran, `run_config.json` records
   the selection as `case_selection`, and a run that skipped cases is reported
   as publication-incomplete in JSON, HTML, and BENCHMARK.md.
+- Tier 1 schema validation accepts a list for `metadata.domain` in `SKILL.md`
+  (for example `domain: [backend, ai-ml]`) instead of reporting a HIGH
+  `Input should be a valid string` finding that also stopped the remaining
+  schema checks for that skill. A single string is still accepted and is
+  treated as a one-entry list. The parsed value is now always a list: entries
+  are trimmed and deduplicated in order, and a missing, null, or blank value
+  becomes an empty list. Lists longer than 16 entries and non-string, blank, or
+  over-128-character entries are rejected. This adds a length limit that
+  `metadata.domain` did not have before: a single string longer than 128
+  characters, which used to pass, now fails Tier 1 with a HIGH
+  `Field 'metadata.domain'` finding.
 - `doctor` and `health-check` take `--tier 1|2|3|all`, so Tier 1 and Tier 2
   readiness can be checked before a run instead of surfacing mid-validation.
   Tier 1 reports each scanner that the `--checks` selection runs: SkillSpector,

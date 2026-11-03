@@ -426,6 +426,7 @@ class TestLocalCatalogWorkflow:
         (nested / "SKILL.md").write_text("---\nname: nested-skill\ndescription: Nested reference skill\n---\n")
         registry = mock_registry_cls.return_value
         registry.size = 1
+        registry.catalog_self_entry.return_value = None
         registry.query_entry.return_value = []
 
         result = SimilarityValidator(content_type="skill", catalog_path=catalog).validate(target)
@@ -433,6 +434,7 @@ class TestLocalCatalogWorkflow:
         assert result.passed
         queried_entry = registry.query_entry.call_args.args[0]
         assert queried_entry.name == "root-skill"
+        assert registry.query_entry.call_args.kwargs == {"exclude_entry_id": None}
 
     @patch("skillevaluator.validators.similarity.extract_from_skill")
     @patch("skillevaluator.validators.similarity.EmbeddingRegistry")
@@ -451,6 +453,7 @@ class TestLocalCatalogWorkflow:
         (tmp_path / "candidate").mkdir()
         mock_extract.return_value = target
         mock_registry_cls.return_value.size = 1
+        mock_registry_cls.return_value.catalog_self_entry.return_value = None
         mock_registry_cls.return_value.query_entry.return_value = [
             SimilarityMatch(
                 entry_a="shared-name",
@@ -465,6 +468,7 @@ class TestLocalCatalogWorkflow:
 
         result = SimilarityValidator(content_type="skill", catalog_path=catalog).validate(tmp_path / "candidate")
 
+        mock_registry_cls.return_value.query_entry.assert_called_once_with(target, 0.75, exclude_entry_id=None)
         finding = result.findings[0]
         assert "Target skill 'shared-name'" in finding.message
         assert "catalog skill 'shared-name'" in finding.message

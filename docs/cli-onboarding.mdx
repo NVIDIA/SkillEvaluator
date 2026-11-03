@@ -1,0 +1,195 @@
+---
+title: "Set Up CI with the CLI"
+description: "Install SkillEvaluator, answer a few questions and bring automatic skill checks to your GitHub repository."
+---
+
+Bring skill evaluation to your GitHub repository in one guided setup.
+SkillEvaluator finds your skills, prepares the workflows and opens a setup PR.
+Your CI gets **Tier 1 checks, including SkillSpector security scanning**.
+
+```bash title="Run inside your checked-out GitHub repository"
+pip install --upgrade skillevaluator
+skillevaluator ci init
+```
+
+<CardGroup cols={3}>
+  <Card title="1. Choose" icon="terminal" href="#run-the-wizard">
+    Select skill folders, a score threshold and feedback.
+  </Card>
+  <Card title="2. Merge" icon="code-pull-request" href="#review-your-setup">
+    Review the setup PR and merge it when ready.
+  </Card>
+  <Card title="3. See results" icon="chart-simple" href="#try-a-test-pr">
+    Open a skill PR and follow its check, comment and report.
+  </Card>
+</CardGroup>
+
+No evaluation code to copy into your repository. No CI scanners to install
+locally. The shared container supplies the runtime; you control the configuration.
+
+<Accordion title="What do I need before I start?">
+  Use Python 3.12–3.14, Git and the [GitHub CLI](https://cli.github.com/).
+  Start from a clean checkout with a GitHub `origin` remote. Sign in with
+  `gh auth login --scopes workflow` if you have not already done so. The login
+  needs permission to add workflow files as well as access to the repository.
+
+  Automatic GitHub setup requires repository admin access. GitHub Actions and
+  the referenced reusable workflows must be allowed. Checks-only setup supports
+  public and private repositories. Hosted feedback uses a public repository's
+  GitHub Pages site; choose checks only when public report hosting is unsuitable.
+  This wizard supports GitHub. For GitLab, use the
+  [GitLab template](/skills/skillevaluator/gitlab-ci).
+</Accordion>
+
+## Run the wizard
+
+The wizard discovers folders containing `SKILL.md`. Answer five short questions;
+press **Enter** to keep a default.
+
+| Question | Your choice |
+| --- | --- |
+| **Skill folders** | Use the displayed numbers: `1,2` or `1 2` selects two folders. |
+| **Minimum score** | `70` by default; a lower quality score fails the check. |
+| **PR scope** | `auto` checks changed skills; `all` checks the selected collection. |
+| **Hosted feedback** | Add public HTML reports and one PR comment that updates with new results. |
+| **Apply setup** | Choose `pr`, review the summary, then confirm. |
+
+<Frame caption="Shortened example interview. Folder names and counts come from your repository.">
+```text
+╭─ 1/5  Which skill folders? ───────────╮
+│ 1  skills          12                │
+│ 2  .agents/skills   3                │
+│ Use folder numbers: 1,2 or 1 2.      │
+╰─────────────────────────────────────╯
+Folders [1]: 1,2
+✓ Selected: skills, .agents/skills (15 skills)
+```
+</Frame>
+
+The score threshold does not override required security or schema checks.
+Default Tier 1 checks use no model key. Tier 2 and Tier 3 are not part of this setup.
+
+## Review your setup
+
+After confirmation, the CLI configures your selected GitHub settings and opens
+a PR with the workflow files:
+
+```text title="What changes in your repository"
+.github/workflows/
+├── skill-checks.yml             Checks + downloadable reports
+└── publish-skill-reports.yml    Optional hosting + PR comments
+```
+
+<Frame caption="Example completion screen. Your CLI prints the real setup PR link.">
+```text
+╭─ ✓ Setup PR ready ───────────────────╮
+│ Merge this PR to enable checks.      │
+╰─────────────────────────────────────╯
+https://github.com/your-org/skills/pull/12
+
+After merging, optionally create a test PR:
+  skillevaluator ci demo
+```
+</Frame>
+
+**Review and merge the setup PR yourself.** The CLI does not merge it.
+A setup-only run may say **Skipped** because no skill changed.
+
+## Try a test PR
+
+After merging setup, run:
+
+```bash
+skillevaluator ci demo
+```
+
+The CLI asks before adding a small Markdown comment to one selected `SKILL.md`
+on a new branch. Type `y` to create the test PR, or press Enter to skip.
+You can also make a small skill edit and open a PR yourself.
+
+<Frame caption="Example test PR output with hosted feedback enabled. Checks-only setups link to the downloadable report.">
+```text
+╭─ ✓ Test PR created ──────────────────────────────╮
+│ Checks → Skill checks                            │
+│ Bot comment → Open full report                   │
+│ Comment follows publication. Close PR when done. │
+╰─────────────────────────────────────────────────╯
+https://github.com/your-org/skills/pull/13
+```
+</Frame>
+
+Close the test PR when you finish; **you do not need to merge it**.
+
+## See the result on your PR
+
+<Frame caption="Illustrative bot comment. Each run supplies its own verdict, score and report links.">
+<div style={{ padding: "16px", width: "100%", minWidth: 0 }}>
+
+**github-actions[bot]**
+
+**Tier 1 scan result: PASSED**
+
+1 skill · 1 passed · 0 failed · 0 incomplete
+
+| Skill | Status | Quality / 100 |
+| --- | --- | --- |
+| `skills/evidence-table` | PASS | 98.2 / A |
+
+**Open full report** · **View workflow run**
+
+</div>
+</Frame>
+
+| Where to look | What you get |
+| --- | --- |
+| **PR → Checks** | The scan result for the current commit. |
+| **PR → Conversation**, with publishing enabled | One bot comment, updated when a new scan is published. |
+| **Open full report** in that comment | Detailed HTML findings and scores. |
+
+**Checks only:** open the scan in **Actions**, download its report artifact,
+extract it and open `index.html`. Failed scans retain their available reports too.
+
+<AccordionGroup>
+  <Accordion title="GitHub says my login cannot add workflow files">
+    For an existing GitHub CLI login, run
+    `gh auth refresh --hostname github.com --scopes workflow`, then retry setup.
+    If you supply a token yourself, it must permit workflow-file writes.
+    See [GitHub's workflow scope](https://docs.github.com/en/apps/oauth-apps/building-oauth-apps/scopes-for-oauth-apps).
+  </Accordion>
+  <Accordion title="Can I inspect the setup before applying it?">
+    Choose the read-only option in the wizard to see the plan without changing
+    files or GitHub settings. The `save` option writes only the local workflow
+    files; choose `pr` for automatic GitHub setup.
+  </Accordion>
+  <Accordion title="Will this change my other workflows or branch rules?">
+    Existing workflows remain separate. The CLI does not automatically make
+    the scan a required merge check. After the first run, select its emitted
+    check in GitHub branch rules if a failed or incomplete result should block
+    merging; the current template emits `skills / Tier 1 scan`.
+    Organization action restrictions are preserved. Repositories using an
+    Actions allowlist must use the wizard's `save` option, even when the required
+    actions are already allowed. Review the saved files and complete setup through
+    your normal repository process.
+  </Accordion>
+  <Accordion title="A scan ran, but I cannot find the comment">
+    Confirm that setup is merged, the PR is open and its branch is in the same
+    repository. Wait for **Publish skill reports** to finish; open that run if
+    publication failed. Fork-origin PRs retain their available results in
+    Actions. Checks-only setups do not post comments.
+  </Accordion>
+  <Accordion title="The check failed. Did onboarding fail?">
+    Read the reported issue. A failed scan can still publish feedback: the
+    result may identify a skill issue or a scanner that did not finish. Merging
+    setup is not a passing evaluation. Push a fix to the same PR to rerun its
+    checks and update the published feedback.
+  </Accordion>
+</AccordionGroup>
+
+<CardGroup cols={2}>
+  <Card title="Prefer to copy a template?" icon="file-code" href="/skills/skillevaluator/github-actions#get-started">
+    Add the GitHub workflows yourself using the release files.
+  </Card>
+  <Card title="Using GitLab?" icon="code-branch" href="/skills/skillevaluator/gitlab-ci">
+    Add the shared scanner to your GitLab pipeline.
+  </Card>
+</CardGroup>

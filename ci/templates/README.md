@@ -18,17 +18,24 @@ a separate demo repository.
 
 ## Get a version you can run
 
-**These source templates contain release placeholders.** Before running them,
-use the generated copies attached to an official CI image release on
-[NVIDIA/SkillEvaluator Releases](https://github.com/NVIDIA/SkillEvaluator/releases).
-Choose a release that explicitly includes the CI onboarding bundle; a regular
-Python package release may not include it. If no such release is available, the
-official CI integration is not yet ready to install from these templates.
+**These source templates contain placeholders.** Copy the
+[ready-to-use configurations](../bundles/0.7.1/README.md) instead; their reviewed
+workflow commits and container image digest are already filled in.
 
-The generated files already contain the reviewed workflow commit and container
-image digest. If you copy a source template instead, replace
-`RELEASE_WORKFLOW_SHA` and `RELEASE_IMAGE_DIGEST` with the values recorded in that
-CI release. Do not leave placeholders or substitute `main` or `latest`.
+Open a file in that folder and use GitHub's **Raw** view to copy its complete
+contents. The generated files and their checksums are kept in this public
+repository. Future releases attach the same files to the single SkillEvaluator
+product release, alongside its Python packages.
+
+If you customize a source template instead, use the immutable workflow/image
+identities in the generated bundle's `release.json`. Do not leave placeholders
+or substitute `main` or `latest` for runtime pins.
+
+Maintainers can release a reviewed publisher update while keeping the verified
+scanner workflow and image unchanged. Pass its full commit SHA as
+`--publisher-ref` to `ci/render_templates.py`; otherwise it uses `--workflow-ref`.
+The release receipt records both revisions. This changes the publisher workflow
+and tools only; the scanner pin and approved evaluator identity stay unchanged.
 
 ## Customize and commit
 

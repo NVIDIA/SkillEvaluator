@@ -209,6 +209,7 @@ Examples:
 _TOP_LEVEL_COMMAND_HELP_GROUPS = (
     ("Tier workflows", ("tier1", "tier2", "tier3")),
     ("Core workflows", ("validate", "health-check", "doctor", "models", "dashboard")),
+    ("Repository CI", ("ci",)),
     (
         "Tier 1 · Static and security",
         ("quality-check", "rubric-eval", "security-scan", "pii-scan", "lint-scripts"),
@@ -2424,7 +2425,14 @@ def validate(
             repo_context_exclude_paths=tuple(repo_context_exclude_paths),
         )
         results.append(tier3_result)
-        tier3_ran, tier3_ok, tier3_rows, tier3_skip = summarize_tier3(tier3_result)
+        # The panel follows the formats this run emits: with cli the full report
+        # lists the source errors under the Tier 3 finding, so the panel keeps
+        # the count; it shortens its own list only when an HTML or JSON report
+        # keeps every error.
+        tier3_ran, tier3_ok, tier3_rows, tier3_skip = summarize_tier3(
+            tier3_result,
+            report_formats=_effective_report_formats(report_formats, quiet=quiet),
+        )
         if autopilot_error and not tier3_ran:
             from skillevaluator.reporting.base import get_skip_reason
 
@@ -3621,6 +3629,10 @@ from skillevaluator.tier3.workflow import build_tier3_workflow
 
 tier3.workflow = build_tier3_workflow(evaluate)
 cli.add_command(harbor_view, "harbor-view")
+
+from skillevaluator.ci_onboarding import ci as ci_onboarding_group
+
+cli.add_command(ci_onboarding_group)
 
 
 if __name__ == "__main__":

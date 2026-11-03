@@ -124,6 +124,38 @@ def test_scores_scope_and_json_only_publish(tmp_path):
     assert (tmp_path / "summary.json").read_bytes() == original
 
 
+def test_pr_comment_shows_result_score_and_report_without_provenance_dump(tmp_path):
+    summary, _ = example(tmp_path)
+    context = {
+        "report_url": "https://example.com/reports/1",
+        "run_url": "https://github.com/o/r/actions/runs/1",
+        "ci_conclusion": "success",
+        "llm_enabled": False,
+        "commit": "a" * 40,
+        "image": "ghcr.io/o/image@sha256:" + "b" * 64,
+    }
+    views.render_reports(tmp_path, summary, context)
+    comment = (tmp_path / "pr-comment.md").read_text()
+    visible = visible_markdown(comment)
+    assert "Tier 1 scan result: PASSED" in visible
+    assert "skills/sample" in visible and "98.2 / A" in visible
+    assert "https://example.com/reports/1/index.html" in comment
+    assert "Evaluation scope" not in visible and "Runtime image" not in visible
+    assert "1 skill · 1 passed" in visible and "Tier 1 static checks." in visible
+    assert "CI run conclusion" not in visible and "--no-llm" not in visible
+    assert context["commit"] not in comment and len(comment.encode()) < 1400
+    details = visible_markdown((tmp_path / "details.md").read_text())
+    assert context["commit"] in details and context["image"] in details.replace("\u200b", "")
+
+
+def test_comment_without_hosting_explains_where_to_open_the_html(tmp_path):
+    summary, _ = example(tmp_path)
+    views.render_reports(tmp_path, summary, {"run_url": "https://github.com/o/r/actions/runs/1"})
+    comment = (tmp_path / "pr-comment.md").read_text()
+    assert "download the scan run's report artifact and open index.html" in comment
+    assert "https://github.com/o/r/actions/runs/1" in comment
+
+
 def test_failure_finding_location_and_suggestion_are_visible(tmp_path):
     result = {
         "validator": "Schema",
@@ -662,7 +694,9 @@ def test_comment_retains_run_error_with_all_optional_header_fields(tmp_path):
     views.render_reports(tmp_path, summary, context)
     comment = visible_markdown((tmp_path / "pr-comment.md").read_text())
     assert summary["error"] in comment
-    assert context["commit"] in comment and context["image"] in comment.replace("\u200b", "")
+    details = visible_markdown((tmp_path / "details.md").read_text())
+    assert context["commit"] in details and context["image"] in details.replace("\u200b", "")
+    assert context["commit"] not in comment and context["image"] not in comment
     assert "Run error" in comment
 
 

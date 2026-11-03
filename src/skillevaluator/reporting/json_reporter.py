@@ -36,6 +36,7 @@ from skillevaluator.reporting.finding_summary import (
     summarize_messages,
 )
 from skillevaluator.reporting.run_status import Status, resolve_run_status, result_status
+from skillevaluator.skillspector_provenance import sanitize_skillspector_provenance_metadata
 from skillevaluator.source_identity import recorded_evaluated_source
 
 if TYPE_CHECKING:
@@ -291,6 +292,7 @@ class JSONReporter(ReporterBase):
             "skipped": skipped,
             "skip_reason": get_skip_reason(result) if skipped else None,
             "incomplete_scans": result.incomplete_scans,
+            **({"scanners": result.scanners} if result.scanners else {}),
             "summary": {
                 "files_scanned": result.summary.files_scanned,
                 "checks_performed": result.summary.checks_performed,
@@ -325,6 +327,9 @@ class JSONReporter(ReporterBase):
         skillspector_version = result.metadata.get("skillspector_version")
         if isinstance(skillspector_version, str):
             data["skillspector_version"] = skillspector_version
+        # Tier 1 SkillSpector LLM provenance (``--llm``), revalidated here so
+        # only the canonical record reaches the report.
+        data.update(sanitize_skillspector_provenance_metadata(result.metadata))
 
         if result.gate_failures:
             data["gate_failures"] = result.gate_failures

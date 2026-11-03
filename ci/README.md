@@ -190,8 +190,8 @@ apply. A configured LLM run is not proof of Tier 2 or Tier 3 evaluation.
 ## Maintainer release procedure
 
 Release publication is deliberate and manual. Consumer files become usable
-after the official image release; source templates contain placeholders until
-then.
+after the official image is published and verified; source templates contain
+placeholders until then.
 
 1. Review and merge source, wrapper, scanner pins, renderer and reusable
    workflows. Run focused selection/report/trust tests plus practical E2E
@@ -234,8 +234,11 @@ then.
    URL remains their own configuration; the generated caller blob must be
    recalculated after any scan-file edits.
 5. Download the workflow's `github-actions-onboarding` artifact (retained for
-   90 days) and attach that generated bundle and image/source identity to the
-   official release for a durable public download.
+   90 days). Commit the verified generated files under `ci/bundles/VERSION/`.
+   Use **one SkillEvaluator product release per version**: stage the Python
+   wheel, source archive, CI bundle and checksums together in that release's
+   draft, include the versioned PyPI package link in its notes, then publish
+   after all assets are ready. Do not create separate `ci-*` release entries.
    Test those exact generated files in a clean consumer repository. Verify a
    passing collection, an intentional failure, configuration and missing-tool
    failures, affected-skill PR selection and `scan-mode: all`, and report

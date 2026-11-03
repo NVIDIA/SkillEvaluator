@@ -155,6 +155,27 @@ def test_agent_scoped_bash_and_accept_edits(tmp_path: Path) -> None:
     assert checks["plugin_agent_accept_edits"] == Severity.MEDIUM
 
 
+def _suggestions(result: ValidationResult) -> dict[str, str]:
+    return {finding.check_name: finding.suggestion or "" for finding in result.findings}
+
+
+@pytest.mark.parametrize("frontmatter", ["tools: PowerShell(pwsh *)\n", "tools: PowerShell\ndisallowedTools: Bash\n"])
+def test_agent_powershell_grant_is_worded_by_powershell(tmp_path: Path, frontmatter: str) -> None:
+    """Regression: the remediation for a PowerShell grant said to deny Bash, and denying Bash hid the grant."""
+    result = _validate(_plugin(tmp_path, files={"agents/helper.md": _agent(frontmatter)}))
+
+    assert _checks(result)["plugin_agent_unrestricted_bash"] == Severity.LOW
+    suggestion = _suggestions(result)["plugin_agent_unrestricted_bash"]
+    assert "PowerShell(Get-ChildItem *)" in suggestion
+    assert "deny PowerShell with disallowedTools" in suggestion
+    assert "Bash" not in suggestion
+
+
+def test_agent_powershell_grant_denied_by_disallowed_tools_is_quiet(tmp_path: Path) -> None:
+    root = _plugin(tmp_path, files={"agents/helper.md": _agent("tools: PowerShell\ndisallowedTools: PowerShell\n")})
+    assert "plugin_agent_unrestricted_bash" not in _checks(_validate(root))
+
+
 def test_agent_wildcard_tools_is_medium(tmp_path: Path) -> None:
     root = _plugin(tmp_path, files={"agents/helper.md": _agent('tools: "*"\n')})
     assert _checks(_validate(root))["plugin_agent_wildcard_tools"] == Severity.MEDIUM
@@ -272,6 +293,20 @@ def test_command_map_allowed_tools_are_checked(tmp_path: Path) -> None:
     assert _checks(result)["plugin_command_unrestricted_bash"] == Severity.HIGH
 
 
+def test_command_powershell_grant_suggests_a_scoped_powershell_rule(tmp_path: Path) -> None:
+    root = _plugin(
+        tmp_path,
+        files={"commands/run.md": "---\ndescription: Run.\nallowed-tools: PowerShell(iex *)\n---\nRun.\n"},
+    )
+    result = _validate(root)
+
+    assert _checks(result)["plugin_command_unrestricted_bash"] == Severity.HIGH
+    assert "'PowerShell(iex *)'" in _messages(result)["plugin_command_unrestricted_bash"]
+    suggestion = _suggestions(result)["plugin_command_unrestricted_bash"]
+    assert "PowerShell(Get-ChildItem *)" in suggestion
+    assert "Bash" not in suggestion
+
+
 # --------------------------------------------------------------------------- #
 # Hooks                                                                       #
 # --------------------------------------------------------------------------- #
@@ -314,6 +349,43 @@ def test_auto_approve_with_narrow_matcher_is_recorded_not_flagged(tmp_path: Path
         },
     )
     result = _validate(root)
+    assert "plugin_hook_auto_approve" not in _checks(result)
+    assert _hook_rows(result)[0]["risk_flags"] == ["auto_approve"]
+
+
+def _conditional_approve_hook(tmp_path: Path, matcher: str, condition: str) -> ValidationResult:
+    handler = {"type": "command", "command": "${CLAUDE_PLUGIN_ROOT}/a.sh", "if": condition}
+    hooks = _hooks({"PreToolUse": [{"matcher": matcher, "hooks": [handler]}]})
+    return _validate(_plugin(tmp_path, files={"hooks/hooks.json": hooks, "a.sh": _APPROVE_SCRIPT}))
+
+
+@pytest.mark.parametrize(
+    "condition",
+    [
+        "PowerShell",
+        "PowerShell(*)",
+        "PowerShell(iex *)",
+        "PowerShell(pwsh *)",
+        "PowerShell(cmd.exe *)",
+        "PowerShell(start-process *)",
+        "PowerShell(sudo *)",
+        "PowerShell(env *)",
+    ],
+)
+def test_auto_approve_with_a_powershell_launcher_condition_is_high(tmp_path: Path, condition: str) -> None:
+    """Regression: a PowerShell 'if' condition was read as a Bash rule, so its launchers looked narrow."""
+    result = _conditional_approve_hook(tmp_path, "PowerShell", condition)
+    assert _checks(result)["plugin_hook_auto_approve"] == Severity.HIGH
+
+
+@pytest.mark.parametrize(
+    ("matcher", "condition"),
+    [("PowerShell", "PowerShell(Get-ChildItem *)"), ("Bash", "Bash(git status)"), ("Bash", "Bash(iex *)")],
+)
+def test_auto_approve_with_a_scoped_shell_condition_is_not_flagged(
+    tmp_path: Path, matcher: str, condition: str
+) -> None:
+    result = _conditional_approve_hook(tmp_path, matcher, condition)
     assert "plugin_hook_auto_approve" not in _checks(result)
     assert _hook_rows(result)[0]["risk_flags"] == ["auto_approve"]
 

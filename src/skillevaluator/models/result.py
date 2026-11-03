@@ -135,19 +135,41 @@ class Finding:
         """Normalize human text without coupling identity to formatting."""
         return " ".join(("" if value is None else str(value)).casefold().split())
 
+    @staticmethod
+    def _location_paths(file_path: object) -> list[str]:
+        """Return ``file_path`` and the shorter paths a message may name it by.
+
+        A folder run prefixes each skill's ``file_path`` with ``[skill] ``
+        and a plugin scan prepends the member's directory, but neither
+        rewrites the message, which still names the path the scanner saw.
+        Longest first, so the most specific match is removed.
+        """
+        path = str(file_path)
+        paths = [path]
+        while path.startswith("[") and "] " in path:
+            path = path.split("] ", 1)[1]
+            paths.append(path)
+        paths.extend(path[index + 1 :] for index, char in enumerate(path[:-1]) if char in "/\\")
+        return paths
+
     def _identity_message(self) -> str:
         """Return the message without location text the finding records elsewhere.
 
         Secret detection writes the finding's own ``in <file>:<line>`` into
-        its message, and the PII scan appends ``— N occurrences (...)`` when
-        it folds repeats of one value into a finding whose ``metadata``
-        lists them. Leaving that text out keeps ``finding_id`` stable when
+        its message (with the path as the scanner saw it, which may be a
+        suffix of ``file_path``), and the PII scan appends
+        ``— N occurrences (...)`` when it folds repeats of one value into a
+        finding whose ``metadata`` lists them. Leaving that text out keeps ``finding_id`` stable when
         lines move. Other text, such as a file name a check puts in its
         message, stays part of the identity.
         """
         message = "" if self.message is None else str(self.message)
         if self.file_path is not None and self.line_number is not None:
-            message = message.replace(f" in {self.file_path}:{self.line_number}", "", 1)
+            for location in self._location_paths(self.file_path):
+                text = f" in {location}:{self.line_number}"
+                if text in message:
+                    message = message.replace(text, "", 1)
+                    break
         occurrences = self.metadata.get("occurrences") if isinstance(self.metadata, dict) else None
         if isinstance(occurrences, list) and len(occurrences) > 1:
             marker = f" \u2014 {len(occurrences)} occurrences ("
@@ -623,6 +645,21 @@ class ValidationResult:
 
         # Prefix findings with skill name in file_path
         for finding in other.findings:
+            metadata = finding.metadata
+            listed = metadata.get("occurrences") if isinstance(metadata, dict) else None
+            if isinstance(listed, list):
+                # A check that folds repeats (the PII scan) lists each location
+                # in metadata; prefix those like file_path so the finding's own
+                # location still matches its first listed one.
+                metadata = {
+                    **metadata,
+                    "occurrences": [
+                        {**item, "file": f"[{prefix}] {item['file']}"}
+                        if isinstance(item, dict) and isinstance(item.get("file"), str)
+                        else item
+                        for item in listed
+                    ],
+                }
             prefixed_finding = Finding(
                 category=finding.category,
                 severity=finding.severity,
@@ -632,7 +669,7 @@ class ValidationResult:
                 line_number=finding.line_number,
                 line_content=finding.line_content,
                 suggestion=finding.suggestion,
-                metadata=finding.metadata,
+                metadata=metadata,
             )
             self.findings.append(prefixed_finding)
 

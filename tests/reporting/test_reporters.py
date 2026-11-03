@@ -673,21 +673,41 @@ def test_occurrence_identity_distinguishes_line_zero_from_no_line() -> None:
 
 
 def test_secret_finding_id_ignores_the_location_written_into_its_message() -> None:
+    from skillevaluator.tier1.plugin_checks import _attribute_scan_result
     from skillevaluator.validators.secrets import SecretsValidator
 
-    findings = []
-    for file_path, line in (("scripts/run.py", 10), ("scripts/run.py", 11), ("scripts/other.py", 10)):
+    def scan(file_path: str, line: int) -> ValidationResult:
         result = ValidationResult(validator_name="Secrets Detection")
         SecretsValidator()._process_findings(
             [{"RuleID": "generic-api-key", "Description": "Generic API Key", "File": file_path, "StartLine": line}],
             result,
         )
-        findings.extend(result.findings)
+        return result
+
+    findings = [scan("scripts/run.py", line).findings[0] for line in (10, 11)]
+    # A folder run prefixes the skill name and a plugin scan the member
+    # directory to file_path; neither rewrites the message.
+    for line in (10, 11):
+        folder = ValidationResult(validator_name="Secrets Detection")
+        folder.merge_with_prefix(scan("scripts/run.py", line), "alpha")
+        member = scan("scripts/run.py", line)
+        _attribute_scan_result(member, "skills/alpha", Path("/view"), Path("/plugin"))
+        findings.extend([folder.findings[0], member.findings[0]])
+    assert {finding.file_path for finding in findings} == {
+        "scripts/run.py",
+        "[alpha] scripts/run.py",
+        "skills/alpha/scripts/run.py",
+    }
 
     # The message still names the location; only the identity leaves it out.
     assert findings[0].message == "Generic API Key in scripts/run.py:10 [generic-api-key]"
+    assert findings[-1].message == "Generic API Key in scripts/run.py:11 [generic-api-key]"
     assert len({finding.finding_id for finding in findings}) == 1
-    assert len({finding.occurrence_id for finding in findings}) == 3
+    assert len({finding.occurrence_id for finding in findings}) == 6
+    # The suggestion names the file, so a secret in another file is another finding.
+    other = scan("scripts/other.py", 10).findings[0]
+    assert "scripts/other.py" in other.suggestion
+    assert other.finding_id != findings[0].finding_id
 
 
 def test_repeated_pii_finding_id_survives_line_moves(tmp_path) -> None:
@@ -1056,6 +1076,81 @@ def test_folded_pii_finding_counts_each_listed_location_as_an_occurrence(tmp_pat
     occurrences = counts["distinct_occurrences"]
     assert f"/ {occurrences} occurrences /" in _findings_kpi(html)[1]
     assert _findings_kpi(html)[0] == str(unique)
+
+
+def test_folded_pii_finding_in_a_folder_run_counts_each_location_once(tmp_path) -> None:
+    from skillevaluator.validators.security import SecurityValidator
+
+    for name, body in (("support", "Mail boss@company.com.\nAlso boss@company.com.\n"), ("other", "Nothing.\n")):
+        skill = tmp_path / name
+        skill.mkdir()
+        (skill / "SKILL.md").write_text(
+            f"---\nname: {name}\ndescription: A sample skill.\n---\n{body}",
+            encoding="utf-8",
+        )
+    original = ValidationResult(validator_name="PII Scan")
+    original.add_finding(
+        Finding(
+            category="PII",
+            severity=Severity.HIGH,
+            check_name="pii",
+            message="Folded",
+            file_path="SKILL.md",
+            line_number=5,
+            metadata={"occurrences": [{"file": "SKILL.md", "line": 5}, {"file": "SKILL.md", "line": 6}]},
+        )
+    )
+    ValidationResult(validator_name="PII Scan").merge_with_prefix(original, "support")
+    # Prefixing a merged copy leaves the original finding's metadata alone.
+    assert original.findings[0].metadata["occurrences"][0]["file"] == "SKILL.md"
+
+    result = SecurityValidator(use_llm=False).validate_pii_only(tmp_path)
+    result.validator_name = "PII Scan"
+    [finding] = [finding for finding in result.findings if "boss@company.com" in finding.message]
+    assert finding.file_path == "[support] SKILL.md"
+    assert "2 occurrences" in finding.message
+
+    data = json.loads(JSONReporter(include_timestamp=False).render_all([result]))
+    [group] = [group for group in data["finding_groups"] if group["finding_id"] == finding.finding_id]
+    assert [(item["file_path"], item["line_number"]) for item in group["occurrences"]] == [
+        ("[support] SKILL.md", 5),
+        ("[support] SKILL.md", 6),
+    ]
+    assert group["occurrence_count"] == 2
+    assert finding.occurrence_id in {item["occurrence_id"] for item in group["occurrences"]}
+    assert data["finding_counts"]["distinct_occurrences"] == data["finding_counts"]["raw_occurrences"] + 1
+
+    markdown = MarkdownReporter().render_all([result])
+    assert re.search(rf"\| `{finding.finding_id}` \| HIGH \| [^|]+ \| 2 \| PII Scan \|", markdown)
+
+
+def test_finding_group_occurrences_do_not_copy_the_source_line() -> None:
+    result = ValidationResult(validator_name="Code Risk")
+    for line_number in (3, 9):
+        result.add_finding(
+            Finding(
+                category="SECURITY",
+                severity=Severity.MEDIUM,
+                check_name="shell",
+                message="subprocess call with shell=True",
+                file_path="run.py",
+                line_number=line_number,
+                line_content="subprocess.run(command, shell=True)  # " + "x" * 200,
+            )
+        )
+
+    data = json.loads(JSONReporter(include_timestamp=False).render_all([result]))
+    html_data = _html_report_data(HTMLReporter(include_timestamp=False).render_all([result]))
+    [group] = data["finding_groups"]
+    assert html_data["finding_groups"] == data["finding_groups"]
+    # Each location keeps its identity; its source line is on the finding
+    # with the same occurrence_id, not repeated in the group.
+    assert [sorted(item) for item in group["occurrences"]] == [
+        ["file_path", "line_number", "occurrence_id", "validator"]
+    ] * 2
+    by_occurrence = {finding["occurrence_id"]: finding for finding in data["results"][0]["findings"]}
+    assert all(by_occurrence[item["occurrence_id"]]["line_content"] for item in group["occurrences"])
+    assert json.dumps(data).count("x" * 200) == 2
 
 
 def test_html_skill_entries_merge_only_occurrences_of_one_finding() -> None:

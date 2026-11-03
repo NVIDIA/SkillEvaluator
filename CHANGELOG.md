@@ -162,9 +162,11 @@ All notable changes to SkillEvaluator are documented in this file.
   message, and suggestion, so it survives line moves, whitespace or case
   changes, and severity overrides. Location text a check copies into its
   message is left out of it: the `in <file>:<line>` in a secret detection
-  message and the `— N occurrences (…)` list a PII scan message ends with.
-  A file name in a message, as script lint writes, stays part of the ID.
-  `occurrence_id` (`SEO-…`) adds the file, line, and line content. Identical findings in different files or skills
+  message, also in a folder or plugin run that prefixes the file path, and
+  the `— N occurrences (…)` list a PII scan message ends with. A file name in
+  a message or suggestion, as script lint and secret detection write, stays
+  part of the ID. `occurrence_id` (`SEO-…`) adds the file, line, and line
+  content. Otherwise identical findings in different files or skills
   share one `finding_id`, so they count as one unique finding with one
   occurrence per location. When CI redacts a detected credential from a
   report, it recomputes the IDs from the redacted text, so no ID is derived
@@ -172,14 +174,14 @@ All notable changes to SkillEvaluator are documented in this file.
   add `finding_counts` (raw records, distinct occurrences, unique findings,
   and duplicates removed), `finding_groups` (each unique finding with its
   validators and every location, including each location a PII finding
-  lists for a repeated value), and `message_counts` (error and warning
-  strings with no finding behind them, such as failed gates and scanner or
-  execution errors, but not the workflow scope note for a stage that
-  configuration skips, plus informational messages other than the `[OK]` line
-  recorded for each passed check); each JSON result also carries its own
-  `finding_counts`. Markdown adds a Finding Reconciliation table, most severe
-  first, and per-finding IDs. `total_errors`, `total_warnings`, and
-  `severity_counts` are unchanged.
+  lists for a repeated value, also in a folder run), and `message_counts`
+  (error and warning strings with no finding behind them, such as failed
+  gates and scanner or execution errors, but not the workflow scope note for
+  a stage that configuration skips, plus informational messages other than
+  the `[OK]` line recorded for each passed check); each JSON result also
+  carries its own `finding_counts`. Markdown adds a Finding Reconciliation
+  table, most severe first, and per-finding IDs. `total_errors`,
+  `total_warnings`, and `severity_counts` are unchanged.
 
 ### Changed
 

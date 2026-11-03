@@ -49,6 +49,9 @@ def _finding_occurrences(finding: Finding, validator: str) -> list[dict[str, Any
     That is the finding's own location plus, when the check folded repeats
     of one value into this finding (the PII scan does), each other location
     listed in ``metadata["occurrences"]`` as ``{"file": ..., "line": ...}``.
+    The source line stays on the finding in ``results[].findings[]``, under
+    the same ``occurrence_id``; copying it here would roughly double a report
+    in which one check fires on many lines.
     """
     entries = [
         {
@@ -56,7 +59,6 @@ def _finding_occurrences(finding: Finding, validator: str) -> list[dict[str, Any
             "validator": validator,
             "file_path": finding.file_path,
             "line_number": finding.line_number,
-            "line_content": finding.line_content,
         }
     ]
     listed = finding.metadata.get("occurrences") if isinstance(finding.metadata, dict) else None
@@ -74,7 +76,6 @@ def _finding_occurrences(finding: Finding, validator: str) -> list[dict[str, Any
                 "validator": validator,
                 "file_path": file_path,
                 "line_number": line_number,
-                "line_content": None,
             }
         )
     return entries

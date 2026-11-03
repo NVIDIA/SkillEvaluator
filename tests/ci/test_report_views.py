@@ -148,6 +148,14 @@ def test_pr_comment_shows_result_score_and_report_without_provenance_dump(tmp_pa
     assert context["commit"] in details and context["image"] in details.replace("\u200b", "")
 
 
+def test_comment_without_hosting_explains_where_to_open_the_html(tmp_path):
+    summary, _ = example(tmp_path)
+    views.render_reports(tmp_path, summary, {"run_url": "https://github.com/o/r/actions/runs/1"})
+    comment = (tmp_path / "pr-comment.md").read_text()
+    assert "download the scan run's report artifact and open index.html" in comment
+    assert "https://github.com/o/r/actions/runs/1" in comment
+
+
 def test_failure_finding_location_and_suggestion_are_visible(tmp_path):
     result = {
         "validator": "Schema",

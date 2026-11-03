@@ -601,7 +601,7 @@ def _compact_summary(
     # Preserve the result and counts rather than spending that budget on links.
     if len(footer.encode("utf-8")) > SUMMARY_LIMIT // 2 or footer.startswith("Full evidence:"):
         footer = artifact_help
-    elif not include_scores:
+    elif not include_scores or not context.get("report_url"):
         lines.append(artifact_help)
     return _bounded(lines, SUMMARY_LIMIT, footer)
 

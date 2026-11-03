@@ -29,6 +29,7 @@ from skillevaluator.logging_config import setup_logging
 from skillevaluator.models.result import ValidationResult
 from skillevaluator.quality_config import QualityConfigError, load_quality_config
 from skillevaluator.reporting.console_ui import (
+    TierRow,
     ValidateView,
     ViewProgressReporter,
     check_ticker_row,
@@ -135,6 +136,19 @@ def _validate_similarity_threshold(_ctx: click.Context, _param: click.Parameter,
     return value
 
 
+def _validate_progress_interval(_ctx: click.Context, _param: click.Parameter, value: float | None) -> float | None:
+    if value is None:
+        return None
+    from skillevaluator.tier3.harbor.progress import MAX_REFRESH_INTERVAL_SECONDS, MIN_REFRESH_INTERVAL_SECONDS
+
+    # NaN passes every range comparison, so check finiteness explicitly.
+    if not math.isfinite(value) or not MIN_REFRESH_INTERVAL_SECONDS <= value <= MAX_REFRESH_INTERVAL_SECONDS:
+        raise click.BadParameter(
+            f"must be finite and within [{MIN_REFRESH_INTERVAL_SECONDS:g}, {MAX_REFRESH_INTERVAL_SECONDS:g}] seconds"
+        )
+    return value
+
+
 # Heading + intro for the grouped Tier 3 options in ``validate --help``.
 _RUN_GROUP = "Run & Reports"
 _RUN_GROUP_DESC = "Applies to the whole run: target typing, policy profile, reports, tier selection."
@@ -195,6 +209,7 @@ Examples:
 _TOP_LEVEL_COMMAND_HELP_GROUPS = (
     ("Tier workflows", ("tier1", "tier2", "tier3")),
     ("Core workflows", ("validate", "health-check", "doctor", "models", "dashboard")),
+    ("Repository CI", ("ci",)),
     (
         "Tier 1 · Static and security",
         ("quality-check", "rubric-eval", "security-scan", "pii-scan", "lint-scripts"),
@@ -780,6 +795,58 @@ def _evaluated_source_from_options(
     return identity or None
 
 
+def _validate_skip(_ctx: click.Context, _param: click.Parameter, value: str | None) -> str | None:
+    """Reject ``--skip`` values that name no known Tier 1 check."""
+    from skillevaluator.tier1.commands import SKIPPABLE_CHECKS, skipped_checks
+
+    if value is None:
+        return None
+    names = skipped_checks(value)
+    if not names or names - SKIPPABLE_CHECKS:
+        unknown = ", ".join(sorted(names - SKIPPABLE_CHECKS)) or repr(value)
+        raise click.BadParameter(f"unknown check {unknown}; choose from {', '.join(sorted(SKIPPABLE_CHECKS))}")
+    return value
+
+
+def _offer_scanner_install(checks: str | None = None, skip: str | None = None) -> None:
+    """Before Tier 1, install the pinned, checksum-verified SkillSpector and Gitleaks when missing."""
+    from skillevaluator.tier1.commands import runs_secrets_scan, runs_security_scan
+    from skillevaluator.utils.scanner_install import (
+        GITLEAKS_VERSION,
+        SKILLSPECTOR_VERSION,
+        ensure_gitleaks,
+        managed_skillspector_wheel,
+        prepare_skillspector,
+    )
+    from skillevaluator.utils.tool_runner import Tools
+
+    steps = []
+    wheel = managed_skillspector_wheel()
+    if (
+        runs_security_scan(checks, skip)
+        and Tools.skillspector.resolution_source == "uv tool run"
+        and wheel is not None
+        and not wheel.is_file()
+    ):
+        uv = Tools.skillspector.path
+        steps.append((f"SkillSpector {SKILLSPECTOR_VERSION}", lambda: prepare_skillspector(uv)))
+    path = Tools.gitleaks.path
+    if (
+        runs_secrets_scan(checks, skip)
+        and Tools.gitleaks.resolution_source == "managed"
+        and path is not None
+        and not Path(path).is_file()
+    ):
+        steps.append((f"Gitleaks {GITLEAKS_VERSION}", ensure_gitleaks))
+    for label, install in steps:
+        with console.status(f"Installing {label}…"):
+            error = install()
+        if error:
+            console.print(f"[red]✗ {error[:1].upper()}{error[1:]}[/red]", highlight=False)
+        else:
+            console.print(f"[dim]✓ {label} installed (checksum-verified)[/dim]", highlight=False)
+
+
 def _run_agent_eval_or_skip(
     target_path: Path,
     *,
@@ -924,6 +991,42 @@ _TIER_BANNERS = {
     "tier2": "Tier 2: Deduplication",
     "tier3": "Tier 3: Live Agent Evaluation",
 }
+
+
+def _offer_local_runtime_install(raw_agents: str | None) -> None:
+    """Before a local-mode run, offer to install each missing agent CLI (pinned, managed root)."""
+    import shlex
+    import sys
+
+    from skillevaluator.provider_config import ProviderConfigurationError, resolve_llm_provider
+    from skillevaluator.tier3.commands import resolve_agents
+    from skillevaluator.tier3.harbor.local_runtime import (
+        install_local_runtime,
+        managed_install_argv,
+        managed_runtime_prefix,
+        missing_local_runtimes,
+    )
+
+    # Without a provider Tier 3 cannot run, so there is nothing to install yet; Tier 3 reports why.
+    try:
+        agents = resolve_agents(raw_agents, provider=resolve_llm_provider().provider)
+    except (ProviderConfigurationError, ValueError):
+        return
+    for agent in missing_local_runtimes(agents):
+        argv = managed_install_argv(agent)
+        console.print(f"[yellow]Local mode needs the {agent} CLI, and it is not installed.[/yellow]")
+        console.print(f"  [dim]{shlex.join(argv)}[/dim]", highlight=False, soft_wrap=True)
+        if not sys.stdin.isatty():
+            console.print("  [dim]Run the command above, or use --env-mode docker.[/dim]")
+            continue
+        if not click.confirm(f"  Install it into {managed_runtime_prefix(agent)}?", default=True):
+            continue
+        with console.status(f"Installing {agent}…"):
+            error = install_local_runtime(agent)
+        if error:
+            console.print(f"  [red]✗ {error}[/red]", highlight=False)
+        else:
+            console.print(f"  [green]✓ {agent} installed[/green]")
 
 
 def _ensure_autopilot_dataset(skill_path: Path, *, quiet: bool = False, progress: str = "auto") -> str | None:
@@ -1103,6 +1206,8 @@ def _catalog_child_argv_from_ctx(
         argv.extend(["--tiers", str(params["tiers"])])
     if params.get("checks"):
         argv.extend(["--checks", str(params["checks"])])
+    if params.get("skip"):
+        argv.extend(["--skip", str(params["skip"])])
     if params.get("previous_version"):
         argv.extend(["--previous-version", str(params["previous_version"])])
     if params.get("fail_fast"):
@@ -1495,7 +1600,7 @@ def _finish_pipeline_view(
     agent_eval: bool,
 ) -> None:
     """Render the quiet-mode verdict panel and report footer."""
-    from skillevaluator.reporting.console_ui import Verdict, _is_skipped, first_fix
+    from skillevaluator.reporting.console_ui import MUTED, Verdict, _is_skipped, first_fix
 
     ext = {"html": ".html", "json": ".json", "markdown": ".md", "sarif": ".sarif.json"}
     links: list[tuple[str, str]] = [
@@ -1513,6 +1618,11 @@ def _finish_pipeline_view(
             headline = "gating tiers passed · advisory tier reported findings (see report)"
         else:
             headline = f"all {ran} tier{'s' if ran != 1 else ''} passed"
+            skipped = sum(
+                1 for r in tier_gate_results if isinstance(r.metadata, dict) and r.metadata.get("skipped_by_user")
+            )
+            if skipped:
+                headline += f"  ·  {skipped} check{'s' if skipped != 1 else ''} skipped"
             lift = summary.get("overall_lift")
             if agent_eval and isinstance(lift, (int, float)):
                 headline += f"  ·  skill lift {lift:+.2f}"
@@ -1520,19 +1630,29 @@ def _finish_pipeline_view(
         return
 
     failed = [result for result in tier_gate_results if not result.passed and not _is_skipped(result)]
-    if failed:
-        first = failed[0].validator_name or "validation"
-        extra = f" (+{len(failed) - 1} more)" if len(failed) > 1 else ""
-        tier_no = (failed[0].metadata.get("gating") or {}).get("tier")
-        tier_label = f" in Tier {tier_no}" if tier_no is not None else ""
-        headline = f"{first}{extra} failed{tier_label}"
+    if len(failed) == 1:
+        only = failed[0]
+        tier_no = (only.metadata.get("gating") or {}).get("tier")
+        state = "didn't run" if only.is_incomplete else "failed"
+        headline = f"{only.validator_name or 'validation'} {state}" + (
+            f" in Tier {tier_no}" if tier_no is not None else ""
+        )
     else:
-        headline = "validation failed"
+        by_tier: dict[object, list] = {}
+        for result in failed:
+            by_tier.setdefault((result.metadata.get("gating") or {}).get("tier"), []).append(result)
+        parts = []
+        for tier_no, results in by_tier.items():
+            broken = sum(1 for r in results if not r.is_incomplete)
+            counts = [
+                f"{broken} failed" if broken else "",
+                f"{len(results) - broken} didn't run" if broken < len(results) else "",
+            ]
+            parts.append((f"Tier {tier_no}: " if tier_no is not None else "") + ", ".join(c for c in counts if c))
+        headline = " · ".join(parts) or "validation failed"
     rerun = _rerun_hint(target_path, agent_eval)
-    view.finish(
-        Verdict(passed=False, headline=headline, fix=first_fix(tier_gate_results), rerun=rerun),
-        links,
-    )
+    fix = [("see what to fix above, then rerun", MUTED)] if failed else first_fix(tier_gate_results)
+    view.finish(Verdict(passed=False, headline=headline, fix=fix, rerun=rerun), links)
 
 
 def _print_tier_banner(title: str) -> None:
@@ -1602,6 +1722,16 @@ def _print_run_banner(target_path: Path, content_type: str, profile: str | None)
     "Choices: schema, version, security, pii, license, code-integrity, unicode, quality, lint; "
     "opt-in (not run by default): dependency. "
     "quality/lint/version are skill-only and skipped for rules/workflows.",
+)
+@click.option(
+    "--skip",
+    default=None,
+    metavar="CHECKS",
+    callback=_validate_skip,
+    cls=GroupedOption,
+    help_group=_TIER1_GROUP,
+    help="Comma-separated Tier 1 checks to leave out, e.g. secrets (the Gitleaks scan). "
+    "Skipped checks are shown and recorded as skipped in the report, and nothing is installed for them.",
 )
 @click.option(
     "--previous-version",
@@ -1917,6 +2047,7 @@ def validate(
     full: bool,
     verbose: bool,
     checks: str | None,
+    skip: str | None,
     previous_version: str | None,
     fail_fast: bool,
     continue_on_failure: bool,
@@ -2111,12 +2242,16 @@ def validate(
         _print_run_banner(target_path, resolved_type, getattr(policy, "profile", None))
         _print_tier_banner(_TIER_BANNERS["tier1"])
 
+    if run_tier3 and env_mode == "local":
+        _offer_local_runtime_install(agents)
+
     # Autopilot source generation must precede every tier's publication-target
     # capture so one combined report cannot bind otherwise valid tier evidence
     # to different source trees. Generation remains advisory: retain any error
     # for the later Tier 3 skip result and continue through Tier 1/2.
     autopilot_error: str | None = None
     autopilot_dataset_note: str | None = None
+    _offer_scanner_install(checks, skip)
     view.start()
     if autopilot:
         # Generation now precedes Tier 1, so surface it on the first live block
@@ -2157,6 +2292,7 @@ def validate(
         fail_fast=fail_fast,
         continue_on_failure=continue_on_failure,
         on_check=_on_check if quiet else None,
+        skip=skip,
     )
     # The raw pass/fail signal drives --fail-fast identically in both modes;
     # the DISPLAYED tier summary must reflect policy-finalized severities or
@@ -2231,10 +2367,29 @@ def validate(
             [*tier3_config_rows, stage_hint_row("status", "running with-skill and baseline trials…")],
         )
 
-        def _on_engine_tail(lines: list[str]) -> None:
-            view.tier_progress(tier3_index, [*tier3_config_rows, *engine_feed_rows(lines)])
+        from threading import Lock
 
-        reporter = ViewProgressReporter(_on_engine_tail) if quiet else None
+        live_case_rows: list[TierRow] = []
+        engine_tail: list[str] = []
+        progress_lock = Lock()  # case rows refresh from a polling thread, engine lines from the runner
+
+        def _show_tier3_progress() -> None:
+            with progress_lock:
+                view.tier_progress(tier3_index, [*tier3_config_rows, *live_case_rows, *engine_feed_rows(engine_tail)])
+
+        def _on_engine_tail(lines: list[str]) -> None:
+            engine_tail[:] = lines
+            _show_tier3_progress()
+
+        def _on_case_rows(rows: list[TierRow]) -> None:
+            live_case_rows[:] = rows
+            _show_tier3_progress()
+
+        reporter = (
+            ViewProgressReporter(_on_engine_tail, on_cases=_on_case_rows, pass_threshold=pass_threshold)
+            if quiet
+            else None
+        )
         repo_context_exclude_paths = [output_dir] if report_output_required else []
         catalog_report_root = click.get_current_context().meta.get("skillevaluator_catalog_report_root")
         if isinstance(catalog_report_root, Path) and not paths_refer_to_same_location(
@@ -2692,6 +2847,13 @@ def _workflow_report_options(func):
 @click.argument("skill_path", metavar="PATH", type=click.Path(exists=True, file_okay=False, path_type=Path))
 @click.option("--checks", default=None, help="Select static checks; by default all checks include dependency auditing.")
 @click.option(
+    "--skip",
+    default=None,
+    metavar="CHECKS",
+    callback=_validate_skip,
+    help="Leave out these checks, e.g. secrets; they are reported as skipped.",
+)
+@click.option(
     "--llm/--no-llm", default=None, help="Include rubric, LLM security, and verification [default: when configured]."
 )
 @click.option("--min-score", type=click.IntRange(0, 100), default=70, show_default=True)
@@ -2707,6 +2869,7 @@ def _workflow_report_options(func):
 def _tier1_workflow(
     skill_path: Path,
     checks: str | None,
+    skip: str | None,
     llm: bool | None,
     min_score: int,
     quality_config: Path | None,
@@ -2723,9 +2886,11 @@ def _tier1_workflow(
         policy = resolve_policy(profile=profile)
     except (FileNotFoundError, ValueError) as exc:
         raise click.ClickException(str(exc)) from exc
+    _offer_scanner_install(checks, skip)
     results = run_tier1_workflow(
         skill_path,
         checks=checks,
+        skip=skip,
         llm=llm,
         min_score=min_score,
         quality_config=quality_config,
@@ -2903,6 +3068,14 @@ def _tier2_workflow(
     help="Tier 3 progress presentation (auto uses Rich on a TTY and plain lines otherwise).",
 )
 @click.option(
+    "--progress-interval",
+    type=float,
+    default=None,
+    metavar="SECONDS",
+    callback=_validate_progress_interval,
+    help="Seconds between Tier 3 progress heartbeats (defaults to 1 for Rich and 60 for plain/CI output).",
+)
+@click.option(
     "--verbose",
     is_flag=True,
     help="Also print per-evaluator and per-dimension tables and the metric findings report.",
@@ -2939,6 +3112,7 @@ def evaluate(
     evaluated_source_revision: str | None,
     evaluator_container_revision: str | None,
     progress: str,
+    progress_interval: float | None,
     verbose: bool,
 ) -> None:
     """Run Tier 3 live agent evaluation."""
@@ -2993,6 +3167,7 @@ def evaluate(
     )
     try:
         if env_mode == "local":
+            _offer_local_runtime_install(agents)
             from rich.panel import Panel
             from rich.text import Text
 
@@ -3033,7 +3208,11 @@ def evaluate(
                         padding=(0, 1),
                     )
                 )
-        progress_reporter = create_progress_reporter(progress, stream=click.get_text_stream("stderr"))
+        progress_reporter = create_progress_reporter(
+            progress,
+            stream=click.get_text_stream("stderr"),
+            refresh_interval=progress_interval,
+        )
         engine_result = service.evaluate(options, progress_reporter=progress_reporter)
         failure = service.failure_reason(engine_result)
         display_result = engine_result
@@ -3443,6 +3622,10 @@ from skillevaluator.tier3.workflow import build_tier3_workflow
 
 tier3.workflow = build_tier3_workflow(evaluate)
 cli.add_command(harbor_view, "harbor-view")
+
+from skillevaluator.ci_onboarding import ci as ci_onboarding_group
+
+cli.add_command(ci_onboarding_group)
 
 
 if __name__ == "__main__":

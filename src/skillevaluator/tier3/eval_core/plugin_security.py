@@ -3370,14 +3370,31 @@ def security_patch_paths(tool_call, action_lower, is_exec_tool, cwd=_SECURITY_DE
         if value:
             cwd = security_path(value, cwd, anchors) or cwd
             break
+    # The shell's directory stack below the current directory, top last.
+    stack = []
     for match in _APPLY_PATCH_CD_RE.finditer(prefix):
         command, options, operand = match.group("command", "options", "operand")
-        # A bare "cd" goes home. popd, a bare pushd and "pushd -n" leave the directory to
-        # the shell's stack, so the last known directory stays.
+        stack_only = "n" in options
         if command == "cd":
+            # A bare "cd" goes home.
             cwd = security_path(operand or "~", cwd, anchors) or cwd
-        elif command == "pushd" and operand and "n" not in options:
-            cwd = security_path(operand, cwd, anchors) or cwd
+        elif command == "pushd":
+            target = security_path(operand, cwd, anchors) if operand else ""
+            if stack_only:
+                # "pushd -n DIR" adds DIR to the stack and stays where it is.
+                if target:
+                    stack.append(target)
+            elif target:
+                stack.append(cwd)
+                cwd = target
+            elif stack:
+                # A bare pushd swaps the current directory with the top of the stack.
+                cwd, stack[-1] = stack[-1], cwd
+        elif stack:
+            # "popd" returns to the top of the stack; "popd -n" only drops it.
+            top = stack.pop()
+            if not stack_only:
+                cwd = top
     paths = []
     for match in _APPLY_PATCH_HEADER_RE.finditer(patch):
         # OpenCode trims header paths with JavaScript's trim(), which also strips U+FEFF.

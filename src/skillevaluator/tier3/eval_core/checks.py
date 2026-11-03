@@ -405,6 +405,8 @@ _APPLY_PATCH_UNSETTLED_DIR_RE = re.compile(r"[$`{%]|^[-+]|\\$")
 # job (each runs its cd in a subshell), "||", a compound-command keyword ("if ...
 # then cd ~; else cd /workspace; fi"), or "&&" followed later by another list, as
 # in "false && cd /workspace; apply_patch".
+# A closed quoted string; operators and keywords inside it are text, not shell syntax.
+_APPLY_PATCH_QUOTED_RE = re.compile(r"'[^']*'|\"(?:[^\"\\]|\\.)*\"")
 _APPLY_PATCH_UNSETTLED_PREFIX_RE = re.compile(
     r"[()]|\|[|&]|(?<![|&>])[|&](?![|&>])|&&[^\n;]*[\n;]"
     r"|(?:^|[\s;&|])(?:if|then|else|elif|fi|case|esac|while|until|for|select|do|done|function)(?=[\s;]|$)"
@@ -621,7 +623,7 @@ def _apply_patch_call(tool_call: dict[str, Any], action_lower: str, is_exec_tool
             workdir = None
         else:
             workdir = _resolved_workdir(operand or "~", workdir)
-    if changes_directory and _APPLY_PATCH_UNSETTLED_PREFIX_RE.search(cd_prefix):
+    if changes_directory and _APPLY_PATCH_UNSETTLED_PREFIX_RE.search(_APPLY_PATCH_QUOTED_RE.sub("Q", cd_prefix)):
         workdir = None
     return patch, workdir, shell
 

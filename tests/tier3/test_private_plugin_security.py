@@ -490,10 +490,13 @@ def _apply_patch_heredoc(prefix, header):
         ("cd /root && apply_patch", ".ssh/authorized_keys", "~/.ssh/authorized_keys"),
         ("cd /etc && apply_patch", "sudoers.d/x", "/etc/sudoers.d/x"),
         ("pushd /root && apply_patch", ".bashrc", "~/.bashrc"),
-        # popd, a bare pushd and "pushd -n" leave the last known directory.
+        # With an empty stack popd and a bare pushd leave the directory, and "pushd -n" only edits the stack.
         ("cd ~ && pushd -n /workspace && apply_patch", ".bashrc", "~/.bashrc"),
         ("cd ~ && popd && apply_patch", ".bashrc", "~/.bashrc"),
         ("cd ~ && pushd && apply_patch", ".bashrc", "~/.bashrc"),
+        # The directory stack is followed: popd returns to the directory pushd left.
+        ("cd /root && pushd /workspace && popd && apply_patch", ".bashrc", "~/.bashrc"),
+        ("cd /root && pushd /workspace && pushd && apply_patch", ".bashrc", "~/.bashrc"),
     ],
 )
 def test_apply_patch_after_cd_resolves_the_shell_directory(security, prefix, header, path):
@@ -503,3 +506,18 @@ def test_apply_patch_after_cd_resolves_the_shell_directory(security, prefix, hea
     result = security.scan_plugin_security([tool_call])
     assert result["score"] == 0
     assert "sensitive_file_write" in kinds(result)
+
+
+@pytest.mark.parametrize(
+    "prefix",
+    [
+        "pushd /root && popd && apply_patch",
+        "cd ~ && pushd -n /workspace && popd && apply_patch",
+        "cd ~ && pushd /workspace && popd -n && apply_patch",
+    ],
+)
+def test_apply_patch_after_the_directory_stack_returns_to_the_workspace_is_not_flagged(security, prefix):
+    tool_call = call(_apply_patch_heredoc(prefix, ".bashrc"))
+
+    assert security.security_patch_paths(tool_call, "bash", True) == ["/workspace/.bashrc"]
+    assert security.scan_plugin_security([tool_call])["score"] == 1

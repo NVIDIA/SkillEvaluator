@@ -8,20 +8,18 @@ and choose a quality threshold; merge requests evaluate changed skills
 without installing scanners or adding evaluation code to your repository.
 The shared container includes SkillSpector security scanning.
 
-<Note>
-  Use the generated configuration from an official CI image release. Until
-  that release is available, the source template contains placeholders and is
-  not runnable.
-</Note>
-
 ## Get started
 
-Open the [GitLab source template](https://github.com/NVIDIA/SkillEvaluator/blob/main/ci/templates/gitlab-skill-checks.yml)
-in the public NVIDIA/SkillEvaluator repository. It is maintained alongside the
-GitHub templates; you do not need a GitLab mirror or a local onboarding CLI.
-The [template catalog](https://github.com/NVIDIA/SkillEvaluator/blob/main/ci/templates/README.md)
-explains how to get the release-generated version with the workflow and image
-versions filled in.
+Download [gitlab-skill-checks.yml](https://github.com/NVIDIA/SkillEvaluator/releases/download/ci-0.7.1/gitlab-skill-checks.yml)
+from the [CI 0.7.1 release](https://github.com/NVIDIA/SkillEvaluator/releases/tag/ci-0.7.1).
+It includes the pinned shared configuration and scanner image. You do not need
+a GitLab mirror or a local onboarding CLI.
+
+<Accordion title="I prefer to inspect the source template">
+  Browse the [GitLab source template](https://github.com/NVIDIA/SkillEvaluator/blob/main/ci/templates/gitlab-skill-checks.yml)
+  and [template catalog](https://github.com/NVIDIA/SkillEvaluator/blob/main/ci/templates/README.md).
+  Source files contain placeholders; use the filled-in release file when onboarding.
+</Accordion>
 
 <Steps>
 

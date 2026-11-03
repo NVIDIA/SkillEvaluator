@@ -8,11 +8,11 @@ Choose your skill folders; pull requests check changed skills automatically.
 The shared image includes **Tier 1 and SkillSpector security scanning**.
 
 <CardGroup cols={2}>
-  <Card title="Copy a workflow" icon="file-code" href="#get-started">
-    Use the released template. No local CLI or evaluator code to install.
+  <Card title="Use the CLI" icon="terminal" href="/skills/skillevaluator/cli-onboarding">
+    Answer a few questions. The CLI prepares checks, optional hosted feedback and a setup PR.
   </Card>
-  <Card title="Let the CLI set it up" icon="terminal" href="/skills/skillevaluator/cli-onboarding">
-    Preview a guided setup for checks, hosted reports and PR comments.
+  <Card title="Copy the workflows" icon="file-code" href="#get-started">
+    Add the release templates yourself. No local CLI installation required.
   </Card>
 </CardGroup>
 
@@ -22,8 +22,8 @@ The shared image includes **Tier 1 and SkillSpector security scanning**.
 
 ### Download the released template
 
-Download [skill-checks.yml](https://github.com/NVIDIA/SkillEvaluator/releases/download/ci-0.7.0/skill-checks.yml)
-from the [CI 0.7.0 release](https://github.com/NVIDIA/SkillEvaluator/releases/tag/ci-0.7.0).
+Download [skill-checks.yml](https://github.com/NVIDIA/SkillEvaluator/releases/download/ci-0.7.1/skill-checks.yml)
+from the [CI 0.7.1 release](https://github.com/NVIDIA/SkillEvaluator/releases/tag/ci-0.7.1).
 Put it in `.github/workflows/skill-checks.yml` in your repository.
 The release supplies the pinned workflow and image versions.
 
@@ -56,7 +56,7 @@ reusable workflow and actions.
 <Note>
   The released template provides **checks and downloadable reports**.
   Hosted reports and PR comments need the [optional publisher setup](#enable-pr-comments).
-  The publisher is not included in the `ci-0.7.0` bundle.
+  The same release also includes the optional publisher template.
 </Note>
 
 <Accordion title="I prefer to inspect the source templates">
@@ -70,7 +70,7 @@ reusable workflow and actions.
 
 | Start here | Then open |
 | --- | --- |
-| **PR → Checks → Skill checks** | The scan result and its short summary. |
+| **PR → Checks** | The `skills / Tier 1 scan` result and its short summary. |
 | **Actions → Skill checks** | The run and downloadable report artifact. |
 | **PR → Conversation**, with publishing enabled | The updated bot comment and **Open full report** link. |
 
@@ -119,27 +119,24 @@ The optional publisher hosts the HTML and posts a comment **after deployment
 succeeds**. It needs a second workflow plus one-time hosting and approval settings.
 
 <Card title="Try the guided setup" icon="terminal" href="/skills/skillevaluator/cli-onboarding">
-  The local CLI preview prepares those settings and both workflow files, then
-  opens a setup PR for you to review.
+  The CLI prepares those settings and both workflow files, then opens a setup
+  PR for you to review.
 </Card>
 
-<Note>
-  The current publisher changes are under review in
-  [PR #326](https://github.com/NVIDIA/SkillEvaluator/pull/326).
-  The `ci-0.7.0` release does not contain a filled-in publisher template.
-  The source file alone is not a copy-and-run installation.
-</Note>
+Download [publish-skill-reports.yml](https://github.com/NVIDIA/SkillEvaluator/releases/download/ci-0.7.1/publish-skill-reports.yml)
+from the same release as your scan workflow. Complete the one-time setup below,
+or let the [CLI](/skills/skillevaluator/cli-onboarding) handle it.
 
 <AccordionGroup>
   <Accordion title="What does manual publisher setup involve?">
-    Use the [publisher setup guide](https://github.com/NVIDIA/SkillEvaluator/blob/main/ci/README.md#optional-hosted-reports-and-pr-feedback)
-    and an explicitly reviewed, pinned publisher configuration. The main steps
-    are:
+    Start with the release-generated publisher template and follow the
+    [publisher setup guide](https://github.com/NVIDIA/SkillEvaluator/blob/main/ci/README.md#optional-hosted-reports-and-pr-feedback).
+    The main steps are:
 
     1. Enable **Settings → Pages → Source: GitHub Actions** and initialize the
        `gh-pages` report-history branch. Preserve any existing site or history.
-    2. Add `publish-skill-reports.yml` with your Pages URL and reviewed evaluator
-       and publisher versions.
+    2. Add `publish-skill-reports.yml` with your Pages URL. Keep the evaluator
+       and publisher versions supplied by the release.
     3. Grant the scan workflow `id-token: write`, then approve its exact contents
        in the publisher's `trusted-caller-blobs` input. Compute the value with
        `git hash-object .github/workflows/skill-checks.yml`; refresh it whenever
@@ -206,7 +203,7 @@ succeeds**. It needs a second workflow plus one-time hosting and approval settin
 </AccordionGroup>
 
 <CardGroup cols={2}>
-  <Card title="CLI onboarding preview" icon="terminal" href="/skills/skillevaluator/cli-onboarding">
+  <Card title="Set up with the CLI" icon="terminal" href="/skills/skillevaluator/cli-onboarding">
     See the guided setup and try your first test PR.
   </Card>
   <Card title="GitLab CI/CD" icon="code-branch" href="/skills/skillevaluator/gitlab-ci">

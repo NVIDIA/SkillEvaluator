@@ -513,6 +513,26 @@ description: A skill documenting REST API endpoints
                 "/users/steamuser/",
                 id="shell-traversal",
             ),
+            pytest.param(
+                "cd compatdata/1/pfx/drive_c/users/steamuser/ && cd ..&& cd alice\n",
+                "/users/steamuser/",
+                id="shell-traversal-before-and",
+            ),
+            pytest.param(
+                "cd compatdata/1/pfx/drive_c/users/steamuser/&&cd ..&&cd alice\n",
+                "/users/steamuser/",
+                id="shell-traversal-unspaced-and",
+            ),
+            pytest.param(
+                "cd compatdata/1/pfx/drive_c/users/steamuser/ &&cd ..&cd alice\n",
+                "/users/steamuser/",
+                id="shell-traversal-before-background",
+            ),
+            pytest.param(
+                "PATH=compatdata/1/pfx/drive_c/users/steamuser/bin:..:/usr/bin\n",
+                "/users/steamuser/",
+                id="path-list-traversal",
+            ),
             pytest.param("pfx/drive_c/users/\u017fteamuser/save.dat\n", "/users/\u017fteamuser/", id="lookalike"),
             pytest.param("C:\\Users\\steamuser\\Documents\\save.dat\n", "C:\\Users\\steamuser", id="windows-path"),
         ],

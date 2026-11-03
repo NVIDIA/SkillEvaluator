@@ -3275,10 +3275,13 @@ class SecurityValidator(ValidatorBase):
     # names often contain spaces and quotes, so the path's end is not reliable.
     # A ``..`` counts as a segment when a path separator (plain or encoded),
     # whitespace, a quote, or another delimiter bounds it on both sides, so
-    # ``steamuser/" + "../x"``, ``/ ".." /``, ``"..",`` and ``cd ../x`` count.
+    # ``steamuser/" + "../x"``, ``/ ".." /``, ``"..",``, ``cd ../x`` and
+    # ``cd ..&& cd x`` count. Shell ``&`` and ``:`` bound a ``..`` but not ``pfx``.
     _PROTON_PREFIX = "pfx/drive_c"
     _PROTON_PREFIX_BOUNDARIES = frozenset("/\\'\"`=(){}[]<>|*,; \t")
-    _DOT_DOT_BOUNDARY = "[" + "".join(re.escape(c) for c in sorted(_PROTON_PREFIX_BOUNDARIES)) + r"\s]|%2f|%5c"
+    _DOT_DOT_BOUNDARY = (
+        "[" + "".join(re.escape(c) for c in sorted(_PROTON_PREFIX_BOUNDARIES | {"&", ":"})) + r"\s]|%2f|%5c"
+    )
     _DOT_DOT_SEGMENT_PATTERN = re.compile(
         rf"(?:^|{_DOT_DOT_BOUNDARY})(?:\.|%2e){{2}}(?=$|{_DOT_DOT_BOUNDARY})", re.IGNORECASE
     )

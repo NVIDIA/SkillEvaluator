@@ -2523,16 +2523,17 @@ class SecurityValidator(ValidatorBase):
 
         Use only when the report serializes every finding it counted. Each
         occurrence is a finding, scored with its own file's executable
-        multiplier. Within a rule, the lowest contributions take the largest
-        weights, so the result never exceeds SkillSpector's score for the
-        same findings.
+        multiplier. Within a rule, SkillSpector gives the largest weights to
+        the most severe findings; within one severity, the lowest
+        contributions take the larger weights here, so the result never
+        exceeds SkillSpector's score for the same findings.
         """
         file_executable = {
             (_skillspector_scoring_source_scope(component), component["path"]): component.get("executable") is True
             for component in components
             if isinstance(component, dict) and isinstance(component.get("path"), str)
         }
-        by_rule: dict[str, list[float]] = {}
+        by_rule: dict[str, list[tuple[float, float]]] = {}
         score_floor = 0
         for issue in issues:
             if issue["confidence"] <= 0:
@@ -2548,13 +2549,16 @@ class SecurityValidator(ValidatorBase):
                     if file_executable.get((source_scope, record_file), False)
                     else 1.0
                 )
+                severity_points = _SKILLSPECTOR_SEVERITY_POINTS[issue["severity"]]
                 by_rule.setdefault(issue["id"], []).append(
-                    _SKILLSPECTOR_SEVERITY_POINTS[issue["severity"]] * issue["confidence"] * multiplier
+                    (-severity_points, severity_points * issue["confidence"] * multiplier)
                 )
         total = sum(
             contribution * weight
             for contributions in by_rule.values()
-            for contribution, weight in zip(sorted(contributions), _SKILLSPECTOR_DIMINISHING_WEIGHTS, strict=False)
+            for (_severity, contribution), weight in zip(
+                sorted(contributions), _SKILLSPECTOR_DIMINISHING_WEIGHTS, strict=False
+            )
         )
         return min(100, max(score_floor, int(total)))
 

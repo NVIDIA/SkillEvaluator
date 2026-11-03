@@ -412,6 +412,32 @@ class TestTier1Applicability:
         assert result.metadata["skillspector_applicability"]["applicable_risk_score"] == 57
         assert not result.passed
 
+    def test_kept_mixed_severity_rule_weights_the_most_severe_finding_first(self, tmp_path: Path) -> None:
+        """SkillSpector weights a rule's findings by severity first, as P9 and TM1 emit mixed severities."""
+        scan_root = tmp_path / "skill"
+        _write(scan_root, "SKILL.md")
+        _write(scan_root, "web/app.tsx")
+        advisories = [
+            {
+                **_modern_issue("SKILL.md", rule_id=f"M{rule}", severity=severity, confidence=1.0, line=line),
+                "finding_id": f"finding-m{rule}-{line}",
+            }
+            for rule in range(5)
+            for line, severity in ((10 * rule + 1, "MEDIUM"), (10 * rule + 2, "LOW"), (10 * rule + 3, "LOW"))
+        ]
+        suppressed = [
+            {**_modern_issue("web/app.tsx", rule_id=f"H{index}", line=index + 1), "finding_id": f"finding-h{index}"}
+            for index in range(3)
+        ]
+
+        result = _process_modern(scan_root, [*advisories, *suppressed])
+
+        # 5 x (10 + 5 x 0.5 + 5 x 0.25) = 68.75, as SkillSpector scores the kept findings.
+        assert result.metadata["skillspector_applicability"]["suppressed_inapplicable_issues"] == 3
+        assert result.metadata["skillspector_applicability"]["applicable_risk_score"] == 68
+        assert not result.passed
+        assert any(finding.check_name == "skillspector_risk_score" for finding in result.findings)
+
     def test_modern_report_with_only_suppressed_issues_passes(self, tmp_path: Path) -> None:
         scan_root = tmp_path / "skill"
         _write(scan_root, "SKILL.md", "Summarize the latest log.\n")

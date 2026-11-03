@@ -46,7 +46,7 @@ OUTCOME_EFFECT = {
     "not_observed": "degraded",
 }
 OUTCOME_TEXT = {
-    "deferred": "{n} {kind}: registered, but the model sees only names until it searches for them.",
+    "deferred": "{n} {kind}: registered; tool schemas reach the model only when it searches for or asks to use them.",
     "registered": "{n} {kind}: started or registered, but nothing reached the model in canary runs.",
     "not_observed": "{n} {kind}: not registered or delivered in canary runs.",
 }

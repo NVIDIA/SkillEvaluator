@@ -63,7 +63,7 @@ for skills. Its Tier 1 LLM checks still run only when requested.
   skillevaluator validate ./my-skill --tiers 1
   ```
 
-  With `skillevaluator[security]`, Semgrep, SkillSpector, and Gitleaks installed, every required scanner produces evidence and the run is deterministic — the same input yields the same exit code, with nothing leaving your machine.
+  With `skillevaluator[security]`, Semgrep, SkillSpector, and Gitleaks installed, every required scanner produces evidence and the run is deterministic — the same input yields the same exit code, with nothing leaving your machine. Run `skillevaluator doctor --tier 1` first to confirm that each scanner resolves and reports a supported version.
 
   ### Narrow to specific checks
 
@@ -178,6 +178,8 @@ For `validate`, the default set is `schema`, `version`, `security`, `pii`, `lice
 
     The LLM pass requires a configured provider. It enriches the static result but does not replace static findings or make missing scanner evidence pass.
 
+    SkillSpector's text pattern analyzers cannot read images, so it reports the analysis of a skill that references a PNG or JPEG file as `partial`. SkillEvaluator accepts that gap with a warning instead of `INCOMPLETE` only when the report shows no other gap and no fatal scope exclusion, and each referenced image is a regular, single-link (not hard-linked), non-executable file whose bytes have the chunk structure of a PNG or the marker structure of a JPEG and that is not reached through a symlink. The gap is accepted for at most 256 images and 128 MiB of image data in total. An image is never accepted inside a `hooks`, `scripts`, `tools`, `agents`, `commands`, `prompts`, `rules`, `team-rules` or `workflows` directory at any depth, or under a top-level `config`, `skills`, `.mcp`, `.agents`, `.claude`, `.codex`, `.continue`, `.cursor`, `.gemini` or `.windsurf` directory (names compared without regard to case). The structure check corroborates the file type; it does not decode the image or prove that it renders. PNG IDAT compressed data and ancillary chunks, and JPEG entropy-coded data and APPn or COM segments, are not inspected and can still carry other bytes. The image content itself is not assessed. Any other partial reason still leaves the scan `INCOMPLETE`. SkillSpector also reports a High `AE1` (incomplete referenced artifact analysis) finding for such an image; from v2.12.0 it omits that finding when the skill renders a PNG with Markdown image syntax, such as `![Logo](assets/logo.png)`. An `AE1` finding fails the check like any other High finding.
+
     **Agent control paths.** SkillSpector rules describe attacks on an agent, so a match is an agent threat only in a file the agent reads or runs. When `validate` or `tier1` detects a skill, rules, workflows, or plugin artifact, the `security` check keeps findings on agent control paths and suppresses the rest:
 
     | File role | Tier 1 finding | Examples |
@@ -220,6 +222,10 @@ For `validate`, the default set is `schema`, `version`, `security`, `pii`, `lice
     - `skillspector_provider_id`: the SkillEvaluator provider the scan was bridged from (`nv_build`, `openai`, `openai-compatible`, `anthropic`, or `bedrock`). `nv_build` and `openai-compatible` both run as SkillSpector's `openai` adapter. The field is omitted when `SKILLSPECTOR_PROVIDER` selects a SkillSpector adapter directly (`anthropic`, `bedrock`, or `openai`) or names an unsupported provider. `SKILLSPECTOR_PROVIDER=nv_build` is bridged like `SKILL_EVAL_LLM_PROVIDER=nv_build` and recorded as `nv_build`.
 
     The HTML report shows the same data in the **Tier 1 LLM Provenance** table on the Tier 1 tab. The record contains no prompts, endpoints, or credentials. A record that does not match SkillSpector's provenance contract, or that contains a URL or credential-shaped value, is left out rather than partially shown. If the LLM stage fails or SkillSpector does not confirm LLM analysis, a valid record in SkillSpector's output is still kept to show what was attempted, and the Security result stays incomplete. Provenance is recorded when you scan a single skill. A scan of a folder with several skills does not record it yet.
+
+    SkillSpector 2.11.1 and later tags an exact read-only `/etc/passwd` bind mount, such as `docker run -v /etc/passwd:/etc/passwd:ro` or the Podman, `--volume`, and quoted forms, as likely benign but still reports it as a HIGH Credential Access (PE3) finding. SkillEvaluator ignores that finding only when SkillSpector tagged it benign and every `/etc/passwd` on the reported source line is the source or target of such a mount. Writable or implicit-mode mounts, other source or target paths, and reads such as `cat /etc/passwd` still block.
+
+    SkillSpector 2.13.3 can report separate findings for the mount's source and target; both must pass the same checks. Ignoring a mount never clears incomplete inspection, including refused or truncated LLM responses. A static report can say an LLM provider is available without having requested or applied LLM analysis; provider availability alone does not invalidate the static scan.
   </Accordion>
 
   <Accordion title="pii — PII, credentials, and local identifiers">
@@ -442,10 +448,28 @@ Tier 1 checks always gate the exit code inside `validate`. Tier 2 gates when it 
     Install it with `brew install gitleaks` or download a binary from the official [Gitleaks releases](https://github.com/gitleaks/gitleaks/releases).
   </Accordion>
   <Accordion title="A scanner is missing">
-    Install Bandit and pip-audit with `skillevaluator[security]`. Install Semgrep separately with `brew install semgrep` or `uv tool install semgrep`, and SkillSpector with `uv tool install git+https://github.com/NVIDIA/SkillSpector.git@v2.13.3`. Required scanner failures remain `INCOMPLETE` until the scanner is installed and returns valid evidence.
+    Install Bandit and pip-audit with `skillevaluator[security]`. Install Semgrep separately with `brew install semgrep` or `uv tool install semgrep`, and SkillSpector with `uv tool install git+https://github.com/NVIDIA/SkillSpector.git@v2.13.3`. Required scanner failures remain `INCOMPLETE` until the scanner is installed and returns valid evidence. `skillevaluator doctor --tier 1` lists every scanner the selected checks need, with its resolved path and version.
   </Accordion>
   <Accordion title="SkillSpector reports incomplete analysis for a valid helper script">
     SkillSpector releases before v2.13.1 can stop inspecting a valid Python or Perl helper early and record a `static_parse_limit`, `obfuscated_instruction_text`, or `runtime_limit` ledger exception. The security check is then `INCOMPLETE`, often with a High **Incomplete referenced artifact analysis (AE1)** finding at each line that names the helper. Check the installed release with `skillspector --version` and upgrade with `uv tool install git+https://github.com/NVIDIA/SkillSpector.git@v2.13.3`. If the exception remains after the upgrade, investigate it like any other incomplete scan.
+  </Accordion>
+  <Accordion title="SkillSpector times out">
+    Each SkillSpector run (the static stage, and the LLM stage with `--llm`)
+    is stopped after 1,200 seconds by default, and the security scan is reported
+    `INCOMPLETE` with `skillspector timed out after 1200 seconds`. SkillSpector
+    also ends a scan at its own deadline (1,080 seconds by default in v2.13.3) and reports partial
+    analysis, which is `INCOMPLETE` as well. Slow or local LLM providers can
+    need more time. Raise both limits, keeping SkillEvaluator's watchdog higher:
+
+    ```bash
+    export SKILLSPECTOR_MAX_WORKFLOW_SECONDS=1800
+    export SKILLEVALUATOR_SKILLSPECTOR_TIMEOUT_SECONDS=2400
+    skillevaluator validate ./my-skill --tiers 1 --llm
+    ```
+
+    Each stage gets the full watchdog, so a scan that stalls in both stages can
+    take up to twice the value before it is reported. See
+    [Environment Variables](environment-variables.mdx#validation-tier-1).
   </Accordion>
   <Accordion title="An LLM-backed stage fails immediately">
     Configure a supported provider or select a keyless Tier 1 run with

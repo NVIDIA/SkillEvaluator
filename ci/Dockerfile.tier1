@@ -70,6 +70,7 @@ COPY --from=build /usr/local/bin/gitleaks /usr/local/bin/gitleaks
 COPY --from=build /usr/local/share/licenses/gitleaks /usr/local/share/licenses/gitleaks
 COPY --from=build /opt/skillevaluator/.venv /opt/skillevaluator/.venv
 ENV PATH="/opt/skillevaluator/.venv/bin:/opt/semgrep/bin:/opt/skillspector/bin:${PATH}"
+ENV SKILLEVALUATOR_REQUIRE_SEMGREP=1
 RUN bandit --version && pip-audit --version && semgrep --version && skillspector --version \
     && gitleaks version && /opt/skillspector/bin/python -c 'import yara'
 RUN useradd --uid 10001 --create-home --shell /usr/sbin/nologin evaluator \

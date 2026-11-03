@@ -44,3 +44,10 @@ condition = "AND"
 targetRules = ["generic-api-key"]
 regexes = ["^abcd1234secret$"]
 paths = ["^tests/validators/test_plugin_component_risk[.]py$"]
+
+[[allowlists]]
+description = "Synthetic MCP header value used by private runtime credential rejection tests"
+condition = "AND"
+targetRules = ["generic-api-key"]
+regexes = ['''^0123456789abcdef0123456789abcdef$''']
+paths = ['''^tests/tier3/test_(private_runtime_regressions|native_mcp_policy)\.py$''']

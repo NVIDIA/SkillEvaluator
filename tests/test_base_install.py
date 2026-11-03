@@ -97,6 +97,12 @@ direct_result = CliRunner().invoke(
 )
 assert direct_result.exit_code == 0, direct_result.output
 
+tier1_doctor = CliRunner().invoke(cli, ["doctor", "--tier", "1", "--checks", "schema,quality,lint"])
+assert tier1_doctor.exit_code == 0, tier1_doctor.output
+tier2_doctor = CliRunner().invoke(cli, ["doctor", "--tier", "2", "--verify-models"])
+assert tier2_doctor.exit_code == 1, tier2_doctor.output
+assert "Tier 2 extra" in tier2_doctor.output, tier2_doctor.output
+
 leaked = sorted(m for m in BLOCKED if m in sys.modules)
 assert not leaked, f"base path imported extras-only modules: {leaked}"
 print("BASE_OK")

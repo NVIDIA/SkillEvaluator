@@ -74,6 +74,9 @@ navigation:
       - page: Repository Integration
         path: ../docs/repository-integration.mdx
         slug: repository-integration
+      - page: CLI Onboarding
+        path: ../docs/cli-onboarding.mdx
+        slug: cli-onboarding
       - page: GitHub Actions
         path: ../docs/github-actions.mdx
         slug: github-actions

@@ -6,6 +6,10 @@ All notable changes to SkillEvaluator are documented in this file.
 
 ### Added
 
+- Add a visual local-preview guide for CLI onboarding and an optional test PR;
+  simplify the GitHub Actions guide and distinguish released scan templates
+  from the unreleased CLI and publisher candidate.
+
 - In local mode (`--env-mode local`), a missing Claude Code, Codex, or OpenCode
   CLI is offered as a pinned npm install into the SkillEvaluator runtime folder;
   without a terminal, the command is printed instead.

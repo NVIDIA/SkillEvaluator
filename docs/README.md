@@ -25,6 +25,7 @@ contributors making non-trivial edits.
 - `performance-dashboard.mdx` — compare saved Tier 3 scores and resource use
 - `benchmark-rollout.mdx` — regenerating and promoting `BENCHMARK.md` cards
 - `github-actions.mdx` — reusable Tier 1 onboarding and optional hosted PR feedback
+- `cli-onboarding.mdx` — local CLI preview, guided GitHub setup and an optional test PR
 - `ci-integration.mdx` — exit codes, GitHub Actions recipe, progressive adoption
 - `cli-reference.mdx` — every command and flag
 - `environment-variables.mdx` — variable-by-variable inventory
@@ -58,8 +59,13 @@ to `.mdx` files or `fern/docs.yml`.
 - New pages must be added to the `navigation` section of
   [`../fern/docs.yml`](../fern/docs.yml); otherwise they will not appear in the
   site.
-- Use relative links between MDX pages (`./configuration.mdx`) and relative repo
-  links (`../README.md`) for files outside `docs/`.
+- In published MDX pages, use site paths such as
+  `/skills/skillevaluator/configuration` for other documentation pages. File-relative
+  `.mdx` links are not resolved by Fern; see the
+  [official link format](https://buildwithfern.com/learn/docs/writing-content/markdown-basics#link-format).
+  The Fern 5.121.0 local preview returned HTTP 400 for those `.mdx` page URLs.
+  Keep images, YAML `path:` values and
+  repository-only Markdown links relative to their source files.
 - The Fern version is pinned in
   [`../fern/fern.config.json`](../fern/fern.config.json); bump it intentionally
   rather than as a side effect.

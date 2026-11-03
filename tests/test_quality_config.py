@@ -246,3 +246,125 @@ def test_quality_config_provenance_names_custom_file_without_its_directory(tmp_p
         "digest": quality_config_digest(config),
     }
     assert quality_config_provenance(None, load_quality_config())["file"] is None
+
+
+PACKAGED_ERROR_HANDLING = {
+    "mentioned": {
+        "points": 10,
+        "message": "No mention of error handling or validation",
+        "suggestion": "Document expected errors and how to handle them",
+        "terms": [
+            "error",
+            "errors",
+            "exception",
+            "exceptions",
+            "invalid",
+            "fail",
+            "fails",
+            "failed",
+            "failure",
+            "failures",
+            "failing",
+            "validate",
+            "validates",
+            "validated",
+            "validating",
+            "validation",
+            "validations",
+        ],
+    },
+    "scripts": {
+        "points": 5,
+        "message": "Scripts may lack error handling",
+        "suggestion": "Scripts should handle errors explicitly",
+        "markers": ["if not ", "if error", "raise", "assert", "ValueError", "FileNotFoundError"],
+    },
+    "lib": {
+        "points": 5,
+        "message": "Lib modules may lack error handling",
+        "suggestion": "Library code should handle errors explicitly with try/except or raise",
+        "markers": ["raise", "assert", "ValueError", "TypeError", "RuntimeError"],
+    },
+}
+
+
+def _write_config(tmp_path: Path, body: str) -> Path:
+    config_path = tmp_path / "quality.yaml"
+    config_path.write_text("expected_headers: []\n" + body, encoding="utf-8")
+    return config_path
+
+
+def test_packaged_error_handling_rules_match_former_hard_coded_values() -> None:
+    error_handling = load_quality_config()["error_handling"]
+
+    assert error_handling == PACKAGED_ERROR_HANDLING
+    assert all(type(block["points"]) is int for block in error_handling.values())
+
+
+def test_custom_file_without_error_handling_keeps_packaged_rules(tmp_path: Path) -> None:
+    config = load_quality_config(_write_config(tmp_path, ""))
+
+    assert config["expected_headers"] == []
+    assert config["error_handling"] == PACKAGED_ERROR_HANDLING
+
+
+def test_custom_error_handling_overlays_packaged_rules_key_by_key(tmp_path: Path) -> None:
+    config_path = _write_config(tmp_path, "error_handling:\n  scripts:\n    points: 2\n  mentioned:\n    terms: [oops]\n")
+
+    error_handling = load_quality_config(config_path)["error_handling"]
+
+    assert error_handling["scripts"] == {**PACKAGED_ERROR_HANDLING["scripts"], "points": 2}
+    assert error_handling["mentioned"] == {**PACKAGED_ERROR_HANDLING["mentioned"], "terms": ["oops"]}
+    assert error_handling["lib"] == PACKAGED_ERROR_HANDLING["lib"]
+
+
+@pytest.mark.parametrize(
+    ("body", "match"),
+    [
+        ("error_handling: []\n", r"error_handling must be a mapping"),
+        ("error_handling:\n  retries: {}\n", r"unknown key\(s\) in error_handling: retries"),
+        (
+            "error_handling:\n  mentioned:\n    point: 3\n",
+            r"unknown key\(s\) in error_handling\.mentioned: point \(allowed: message, points, suggestion, terms\)",
+        ),
+        ("error_handling:\n  scripts:\n    terms: [raise]\n", r"unknown key\(s\) in error_handling\.scripts: terms"),
+        ("error_handling:\n  lib: [raise]\n", r"error_handling\.lib must be a mapping"),
+        ("error_handling:\n  scripts:\n    points: -1\n", r"error_handling\.scripts\.points must be a non-negative"),
+        ("error_handling:\n  scripts:\n    points: true\n", r"error_handling\.scripts\.points must be a non-negative"),
+        ('error_handling:\n  scripts:\n    points: "5"\n', r"error_handling\.scripts\.points must be a non-negative"),
+        ('error_handling:\n  lib:\n    message: " "\n', r"error_handling\.lib\.message must be a non-empty string"),
+        ("error_handling:\n  lib:\n    suggestion: 3\n", r"error_handling\.lib\.suggestion must be a non-empty string"),
+        ("error_handling:\n  scripts:\n    markers: []\n", r"error_handling\.scripts\.markers must be a non-empty list"),
+        ("error_handling:\n  scripts:\n    markers: raise\n", r"error_handling\.scripts\.markers must be a non-empty list"),
+        ('error_handling:\n  scripts:\n    markers: [""]\n', r"error_handling\.scripts\.markers\[0\] must be a non-blank"),
+        ("error_handling:\n  lib:\n    markers: [raise, 3]\n", r"error_handling\.lib\.markers\[1\] must be a non-blank"),
+        ("error_handling:\n  scripts:\n    markers: [raise, raise]\n", r"duplicate entry 'raise' in error_handling\.scripts\.markers"),
+        ("error_handling:\n  mentioned:\n    terms: [Error, error]\n", r"duplicate entry 'error' in error_handling\.mentioned\.terms"),
+    ],
+)
+def test_quality_config_rejects_invalid_error_handling(tmp_path: Path, body: str, match: str) -> None:
+    config_path = _write_config(tmp_path, body)
+
+    with pytest.raises(QualityConfigError, match=rf"^{tmp_path}.*{match}"):
+        load_quality_config(config_path)
+
+
+def test_error_handling_markers_are_case_sensitive_so_case_variants_are_distinct(tmp_path: Path) -> None:
+    config_path = _write_config(tmp_path, "error_handling:\n  lib:\n    markers: [Raise, raise]\n")
+
+    assert load_quality_config(config_path)["error_handling"]["lib"]["markers"] == ["Raise", "raise"]
+
+
+def test_quality_config_digest_covers_error_handling(tmp_path: Path) -> None:
+    compact = tmp_path / "compact.yaml"
+    compact.write_text("expected_headers: []\nerror_handling: {mentioned: {points: 9}}\n", encoding="utf-8")
+    verbose = tmp_path / "verbose.yaml"
+    verbose.write_text(
+        "# team rules\nexpected_headers: []\nerror_handling:\n  mentioned:\n    points:   9\n", encoding="utf-8"
+    )
+    packaged_headings_only = _write_config(tmp_path, "")
+
+    digest = quality_config_digest(load_quality_config(compact))
+
+    assert quality_config_digest(load_quality_config(verbose)) == digest
+    assert quality_config_digest(load_quality_config(packaged_headings_only)) != digest

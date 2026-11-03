@@ -670,7 +670,7 @@ class TestQualityScoreValidator:
         assert result.metadata["quality_config"] == {
             "source": "custom",
             "file": "team-quality.yaml",
-            "digest": quality_config_digest({"expected_headers": []}),
+            "digest": quality_config_digest(load_quality_config(config_path)),
             "min_score": 80,
         }
 

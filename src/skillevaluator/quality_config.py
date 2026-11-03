@@ -16,8 +16,10 @@ import yaml
 
 DEFAULT_QUALITY_CONFIG = files("skillevaluator.config").joinpath("quality-default.yaml")
 _ATX_HEADING_RE = re.compile(r"^(#{1,6})[ \t]+(.+?)(?:[ \t]+#+)?[ \t]*$")
-_TOP_LEVEL_KEYS = frozenset({"expected_headers"})
+_TOP_LEVEL_KEYS = frozenset({"expected_headers", "error_handling"})
 _EXPECTED_HEADER_KEYS = frozenset({"heading", "alternatives", "points", "message", "suggestion"})
+# Each error-handling rule's list key: whole-word "terms" for SKILL.md, substring "markers" for code.
+_ERROR_HANDLING_LIST_KEYS = {"mentioned": "terms", "scripts": "markers", "lib": "markers"}
 
 
 class QualityConfigError(ValueError):
@@ -34,10 +36,37 @@ class ExpectedHeader(TypedDict):
     suggestion: str
 
 
+class MentionedRule(TypedDict):
+    """Deduction when SKILL.md mentions none of the error-handling terms (whole word, any case)."""
+
+    points: int | float
+    message: str
+    suggestion: str
+    terms: list[str]
+
+
+class CodeErrorHandlingRule(TypedDict):
+    """Deduction for Python files with neither try/except nor any marker (case-sensitive substring)."""
+
+    points: int | float
+    message: str
+    suggestion: str
+    markers: list[str]
+
+
+class ErrorHandlingConfig(TypedDict):
+    """Reliability error-handling rules; a rule with points 0 is skipped."""
+
+    mentioned: MentionedRule
+    scripts: CodeErrorHandlingRule
+    lib: CodeErrorHandlingRule
+
+
 class QualityConfig(TypedDict):
     """Validated deterministic quality configuration."""
 
     expected_headers: list[ExpectedHeader]
+    error_handling: ErrorHandlingConfig
 
 
 class QualityConfigProvenance(TypedDict):
@@ -62,6 +91,67 @@ def _reject_unknown_keys(mapping: dict, allowed: frozenset[str], source: str, lo
         raise QualityConfigError(
             f"{source}: unknown key(s) in {location}: {', '.join(unknown)} (allowed: {', '.join(sorted(allowed))})"
         )
+
+
+def _validate_points(points: object, source: str, location: str) -> int | float:
+    try:
+        valid_points = (
+            not isinstance(points, bool) and isinstance(points, (int, float)) and isfinite(points) and points >= 0
+        )
+    except OverflowError:  # isfinite() on an int too large for a float
+        valid_points = False
+    if not valid_points:
+        raise QualityConfigError(f"{source}: {location}.points must be a non-negative number")
+    return points
+
+
+def _validate_text(value: object, source: str, location: str) -> str:
+    if not isinstance(value, str) or not value.strip():
+        raise QualityConfigError(f"{source}: {location} must be a non-empty string when set")
+    return value
+
+
+def _validate_entries(value: object, source: str, location: str, *, ignore_case: bool) -> list[str]:
+    if not isinstance(value, list) or not value:
+        raise QualityConfigError(f"{source}: {location} must be a non-empty list")
+    seen: set[str] = set()
+    for index, entry in enumerate(value):
+        if not isinstance(entry, str) or not entry.strip():
+            raise QualityConfigError(f"{source}: {location}[{index}] must be a non-blank string")
+        key = entry.casefold() if ignore_case else entry
+        if key in seen:
+            raise QualityConfigError(f"{source}: duplicate entry '{entry}' in {location}")
+        seen.add(key)
+    return list(value)
+
+
+def _parse_error_handling(raw: object, source: str, base: ErrorHandlingConfig | None) -> ErrorHandlingConfig:
+    """Validate error_handling. Without a base every key is required; with one, omitted blocks and keys keep it."""
+    if not isinstance(raw, dict):
+        raise QualityConfigError(f"{source}: error_handling must be a mapping")
+    _reject_unknown_keys(raw, frozenset(_ERROR_HANDLING_LIST_KEYS), source, "error_handling")
+    parsed = {}
+    for name, list_key in _ERROR_HANDLING_LIST_KEYS.items():
+        location = f"error_handling.{name}"
+        block = raw.get(name, {}) if base else raw.get(name)
+        if not isinstance(block, dict):
+            raise QualityConfigError(f"{source}: {location} must be a mapping")
+        allowed = frozenset({"points", "message", "suggestion", list_key})
+        _reject_unknown_keys(block, allowed, source, location)
+        if base is None:
+            missing = sorted(allowed - block.keys())
+            if missing:
+                raise QualityConfigError(f"{source}: {location} is missing key(s): {', '.join(missing)}")
+        merged = {**(base[name] if base else {}), **block}
+        parsed[name] = {
+            "points": _validate_points(merged["points"], source, location),
+            "message": _validate_text(merged["message"], source, f"{location}.message"),
+            "suggestion": _validate_text(merged["suggestion"], source, f"{location}.suggestion"),
+            list_key: _validate_entries(
+                merged[list_key], source, f"{location}.{list_key}", ignore_case=list_key == "terms"
+            ),
+        }
+    return parsed  # type: ignore[return-value]
 
 
 class _UniqueKeySafeLoader(yaml.SafeLoader):
@@ -129,15 +219,7 @@ def load_quality_config(path: Path | None = None) -> QualityConfig:
             _normalize_heading(value, source, f"{location}.alternatives[{alternative_index}]")
             for alternative_index, value in enumerate(raw_alternatives)
         ]
-        points = rule.get("points", 5)
-        try:
-            valid_points = (
-                not isinstance(points, bool) and isinstance(points, (int, float)) and isfinite(points) and points >= 0
-            )
-        except OverflowError:  # isfinite() on an int too large for a float
-            valid_points = False
-        if not valid_points:
-            raise QualityConfigError(f"{source}: {location}.points must be a non-negative number")
+        points = _validate_points(rule.get("points", 5), source, location)
         # message and suggestion are optional; omitted ones get generic text naming the headings.
         accepted_display = " or ".join(f"'{accepted}'" for accepted in (heading, *alternatives))
         message = rule.get("message", f"Missing expected heading: {accepted_display}")
@@ -146,8 +228,7 @@ def load_quality_config(path: Path | None = None) -> QualityConfig:
             f"Add a {accepted_display} section" if not alternatives else f"Add one of these sections: {accepted_display}",
         )
         for field, value in (("message", message), ("suggestion", suggestion)):
-            if not isinstance(value, str) or not value.strip():
-                raise QualityConfigError(f"{source}: {location}.{field} must be a non-empty string when set")
+            _validate_text(value, source, f"{location}.{field}")
 
         for accepted in (heading, *alternatives):
             if accepted in seen_headings:
@@ -166,7 +247,13 @@ def load_quality_config(path: Path | None = None) -> QualityConfig:
             }
         )
 
-    return {"expected_headers": expected_headers}
+    # expected_headers replaces the packaged list; error_handling overlays the packaged rules.
+    if path is None:
+        error_handling = _parse_error_handling(raw.get("error_handling"), source, base=None)
+    else:
+        packaged = load_quality_config()["error_handling"]
+        error_handling = _parse_error_handling(raw.get("error_handling", {}), source, base=packaged)
+    return {"expected_headers": expected_headers, "error_handling": error_handling}
 
 
 def quality_config_digest(config: QualityConfig) -> str:

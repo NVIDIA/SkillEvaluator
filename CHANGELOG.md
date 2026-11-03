@@ -377,32 +377,39 @@ All notable changes to SkillEvaluator are documented in this file.
 - Tier 3 security grading no longer gives a critical finding and a security
   score of 0.0 when an agent uses `apply_patch` to write a workspace file that
   only resembles a protected path. The `.aws/credentials` and `.config/gcloud`
-  entries now match a patch target only in a home directory (`~/`, `/root/`,
-  `/home/<user>/`, `/Users/<user>/`, `C:\Users\<user>\`, `%USERPROFILE%`),
-  after the existing workdir, `cd`, `~` and `$HOME` resolution, which now also
-  reads a bare `cd` as the home directory and skips `cd`/`pushd` options. When
-  the directory depends on the shell at run time (`cd "$DIR"`,
-  `cd ${HOME:-/root}`, `cd -`, `popd`, a variable `workdir`), these entries
-  keep the existing match anywhere in the path, and a relative header such as
-  `.bashrc` is also checked as a home path. A project file
-  or test fixture such as `project/.aws/credentials`, or a bare
-  `.aws/credentials` header resolved against the default `/workspace` workdir,
-  is no longer a `sensitive_file_write`; a Windows home path such as
-  `C:\Users\<user>\.bashrc` now is. A shell `apply_patch` now scores like the
-  tool call: the command-text path checks skip the file header lines of an
-  argv patch and of a heredoc body fed to `apply_patch` (as a `cmd` string or
-  in the `["bash", "-lc", script]` argv form), so headers such as
-  `docs/.config/gcloud-setup.md` no longer raise `sensitive_path_access`.
-  Header paths that hold shell syntax (`;`, `&`, `|`, `<`, `>`, `(`, `)`, `$`,
-  a backtick or `~`) are always checked, and so is every header when the
-  command pipes, redirects or captures `apply_patch`'s output, which names
-  each added file. Header-shaped lines elsewhere in the command, a heredoc
-  body that a shell expands or runs, and heredocs whose extent is uncertain
-  (mixed delimiter quoting, a missing terminator, a comment or ANSI-C quote
-  before the operator, or another use of the `apply_patch` name) are still
-  checked, as is a `bash -lc "..."` string inside a `cmd`. Read and Write
-  tool paths and other shell commands keep the existing credential-path
-  matching.
+  entries now match a patch target with a directory prefix only in a home
+  directory (`~/`, `/root/`, `/home/<user>/`, `/Users/<user>/`,
+  `C:\Users\<user>\`, `%USERPROFILE%`), after the existing workdir, `cd`, `~`
+  and `$HOME` resolution. That resolution now reads a bare `cd` as the home
+  directory, skips `cd`/`pushd` options, leaves the directory unchanged for
+  `pushd -n`/`popd -n`, and reads `/proc/self/root`, `/proc/<pid>/root` and
+  similar aliases as `/`. A relative header that itself starts with one of
+  these names (`.aws/credentials`, `./.config/gcloud/adc.json`) is still
+  flagged whatever directory it resolves against. When the shell decides the
+  directory at run time (`cd "$DIR"`, `cd ${HOME:-/root}`, `cd -`, `popd`, a
+  variable `workdir`, an operand with quotes or backslashes the shell removes,
+  or a `cd` inside a subshell, pipeline, branch or `||`/`&&` list that may not
+  run), these entries keep the existing match anywhere in the path, and a
+  relative header such as `.bashrc` is also checked as a home path. A project
+  file or test fixture such as `project/.aws/credentials` is no longer a
+  `sensitive_file_write`; a Windows home path such as `C:\Users\<user>\.bashrc`
+  and a `/proc/<pid>/root` alias of a protected path now are. A shell
+  `apply_patch` now scores like the tool call: the command-text path checks
+  skip the file header lines of an argv patch and of a heredoc body fed to
+  `apply_patch` (as a `cmd` string or in the `["bash", "-lc", script]` argv
+  form), so headers such as `docs/.config/gcloud-setup.md` no longer raise
+  `sensitive_path_access`. Header paths that hold shell syntax (`;`, `&`, `|`,
+  `<`, `>`, `(`, `)`, `$`, a backtick or `~`) or a word that is itself a
+  protected path (`x /root/.ssh/id_rsa`) are always checked, and so is every
+  header when the command, or any other word of an argv command, pipes,
+  redirects or captures `apply_patch`'s output, which names each added file.
+  Header-shaped lines elsewhere in the command, a heredoc body that a shell
+  expands or runs (an unquoted body holding `$`, a backtick or a backslash),
+  and heredocs whose extent is uncertain (mixed delimiter quoting, a missing
+  terminator, a comment or ANSI-C quote before the operator, or another use of
+  the `apply_patch` name) are still checked, as is a `bash -lc "..."` string
+  inside a `cmd`. Read and Write tool paths and other shell commands keep the
+  existing credential-path matching.
 - Tier 3 error recovery now scores unrecovered command failures as zero and
   includes them in fault counts and failure verdicts/report reasons. Host and
   bundled verifier detection agree and use a result's execution status when it

@@ -473,8 +473,9 @@ class TestCodeRiskValidator:
 
         assert result.status == "incomplete"
         assert not result.passed
-        assert result.metadata["incomplete_scans"] == ["bandit", "semgrep"]
+        assert result.metadata["incomplete_scans"] == ["bandit"]
         assert any("bandit not installed" in w for w in result.warnings)
+        assert any("Semgrep not installed; skipped" in m for m in result.messages)
 
     def test_validate_bandit_clean(self, skill_with_security_issues: Path, mock_tool_available):
         """Test Bandit analysis with no findings."""

@@ -415,6 +415,8 @@ def _render_agent_scores(
     safe: Any,
 ) -> None:
     with_usable = _condition_usable(data, "with_skill")
+    # A baseline-only run (--skip-with-skill) deliberately leaves the with-skill arm unscored.
+    with_unavailable = "skipped" if _condition_status(data, "with_skill") == "skipped" else "NO SCORE"
     baseline_status = _condition_status(data, "without_skill")
     baseline_skipped = baseline_status == "skipped"
     baseline_usable = _condition_usable(data, "without_skill") and not baseline_skipped
@@ -454,7 +456,9 @@ def _render_agent_scores(
         baseline_na = (
             metric in _not_applicable_metrics(data, "without_skill") and _finite_number(baseline_value) is None
         )
-        with_score, with_bar = _not_applicable_cell() if with_na else _score_cell(with_value)
+        with_score, with_bar = (
+            _not_applicable_cell() if with_na else _score_cell(with_value, unavailable=with_unavailable)
+        )
         row: list[Text] = [label, with_score, with_bar]
         if show_baseline:
             persisted = lift.get(metric) if isinstance(lift.get(metric), Mapping) else {}
@@ -479,7 +483,7 @@ def _render_agent_scores(
         for metric in custom_metrics:
             with_value = custom_with.get(metric) if with_usable else None
             baseline_value = custom_without.get(metric) if baseline_usable else None
-            with_score, with_bar = _score_cell(with_value)
+            with_score, with_bar = _score_cell(with_value, unavailable=with_unavailable)
             row = [Text(f"custom: {safe(metric)}", style="cyan"), with_score, with_bar]
             if show_baseline:
                 persisted = custom_lift.get(metric) if isinstance(custom_lift.get(metric), Mapping) else {}
@@ -642,7 +646,12 @@ def _render_dimensions(
             baseline_na = baseline_numeric is None and dimension_is_not_applicable(
                 dimension, _not_applicable_metrics(data, "without_skill")
             )
-            with_cell, with_bar = _not_applicable_cell() if with_na else _score_cell(with_numeric)
+            with_skipped = _condition_status(data, "with_skill") == "skipped"
+            with_cell, with_bar = (
+                _not_applicable_cell()
+                if with_na
+                else _score_cell(with_numeric, unavailable="skipped" if with_skipped else "NO SCORE")
+            )
             baseline_skipped = _condition_status(data, "without_skill") == "skipped"
             if baseline_skipped:
                 baseline_cell, baseline_bar = Text("skipped", style="dim"), Text("")

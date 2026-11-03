@@ -11,16 +11,27 @@ from __future__ import annotations
 
 import json
 import os
+import re
 import shutil
 import subprocess
 import sys
 import tempfile
-from collections.abc import Mapping
+from collections.abc import Callable, Mapping
 from dataclasses import dataclass
 from pathlib import Path
 
 from skillevaluator.logging_config import get_logger
 from skillevaluator.models.result import Severity
+from skillevaluator.utils.scanner_install import (
+    GITLEAKS_VERSION,
+    SKILLSPECTOR_VERSION,
+    SKILLSPECTOR_WHEEL_URL,
+    ensure_gitleaks,
+    ensure_skillspector_wheel,
+    gitleaks_platform,
+    managed_gitleaks_path,
+    managed_skillspector_wheel,
+)
 
 logger = get_logger(__name__)
 
@@ -115,6 +126,7 @@ class ExternalTool:
         *,
         prefer_interpreter_sibling: bool = False,
         override_env: str | None = None,
+        managed: bool = False,
     ):
         """Initialize tool wrapper.
 
@@ -126,12 +138,26 @@ class ExternalTool:
             override_env: Optional environment variable containing an explicit
                 absolute executable path. Invalid overrides fail closed rather
                 than silently falling back to another executable.
+            managed: When the tool is not installed, fall back to SkillEvaluator's
+                pinned provisioning: the verified SkillSpector wheel through
+                ``uv tool run``, or the downloaded Gitleaks binary.
         """
         self.name = name
         self.command = command or name
         self.override_env = override_env
+        self._prefer_interpreter_sibling = prefer_interpreter_sibling
+        self._managed = managed
+        self.refresh()
+
+    def refresh(self) -> None:
+        """Resolve the executable again, e.g. after a managed install."""
         self.resolution_source = "automatic"
         self._configuration_error: str | None = None
+        self._version: str | None = None
+        self._uv_run: tuple[str, tuple[str, ...]] | None = None
+        self._ensure: tuple[str, Callable[[], str | None]] | None = None
+        override_env = self.override_env
+        name = self.name
 
         override = os.environ.get(override_env, "").strip() if override_env else ""
         if override:
@@ -146,8 +172,31 @@ class ExternalTool:
         else:
             self._path = resolve_tool_path(
                 self.command,
-                prefer_interpreter_sibling=prefer_interpreter_sibling,
+                prefer_interpreter_sibling=self._prefer_interpreter_sibling,
             )
+            if self._path is None and self._managed:
+                self._resolve_managed()
+
+    def _resolve_managed(self) -> None:
+        if self.command == "skillspector":
+            uv = resolve_tool_path("uv")
+            wheel = managed_skillspector_wheel()
+            if uv is not None and wheel is not None:
+                self._path = uv
+                self._uv_run = (uv, ("tool", "run", "--quiet", "--from", str(wheel), "skillspector"))
+                self._ensure = (uv, ensure_skillspector_wheel)
+                self.resolution_source = "uv tool run"
+        elif self.command == "gitleaks":
+            binary = managed_gitleaks_path()
+            if binary is not None and gitleaks_platform() is not None:
+                self._path = str(binary)
+                self._ensure = (self._path, ensure_gitleaks)
+                self.resolution_source = "managed"
+
+    def _launch_args(self) -> tuple[str, ...]:
+        if self._uv_run is not None and self._path == self._uv_run[0]:
+            return self._uv_run[1]
+        return ()
 
     @property
     def is_available(self) -> bool:
@@ -158,6 +207,30 @@ class ExternalTool:
     def path(self) -> str | None:
         """Get full path to tool binary."""
         return self._path
+
+    @property
+    def version(self) -> str | None:
+        """The pinned release for managed installs, otherwise what the tool's version command reports."""
+        if self.resolution_source == "uv tool run":
+            return SKILLSPECTOR_VERSION
+        if self.resolution_source == "managed":
+            return GITLEAKS_VERSION
+        if self._path is None:
+            return None
+        if self._version is None:
+            argv = [self._path, "version" if self.command == "gitleaks" else "--version"]
+            try:
+                proc = subprocess.run(argv, capture_output=True, text=True, timeout=30, check=False)
+            except (OSError, subprocess.SubprocessError):
+                proc = None
+            match = proc and re.search(r"\d+\.\d+(?:\.\d+)?", proc.stdout or proc.stderr or "")
+            self._version = match.group(0) if match else ""
+        return self._version or None
+
+    @property
+    def configuration_error(self) -> str | None:
+        """Return why an explicit executable override was rejected, if it was."""
+        return self._configuration_error
 
     def get_install_hint(self) -> str:
         """Get installation hint for this tool."""
@@ -174,11 +247,8 @@ class ExternalTool:
             "pip-audit": bundled_scanner_hint,
             "safety": "Optional secondary scanner; install separately with: uv tool install safety",
             "bandit": bundled_scanner_hint,
-            "semgrep": (
-                "Install Semgrep separately with: brew install semgrep (macOS) "
-                "or uv tool install semgrep"
-            ),
-            "skillspector": "Install with: uv tool install git+https://github.com/NVIDIA/SkillSpector.git@v2.13.3",
+            "semgrep": "Optional; install separately with: brew install semgrep (macOS) or uv tool install semgrep",
+            "skillspector": f"Install with: uv tool install {SKILLSPECTOR_WHEEL_URL}",
             "skillevaluator": (
                 'Install with: uv tool install "skillevaluator[all] @ git+https://github.com/NVIDIA/SkillEvaluator.git"'
             ),
@@ -220,7 +290,11 @@ class ExternalTool:
                 error_message=f"{self.name} not installed. {self.get_install_hint()}",
             )
 
-        cmd = [self._path, *args]
+        launch_args = self._launch_args()
+        if self._ensure is not None and self._path == self._ensure[0] and (error := self._ensure[1]()):
+            return ToolResult(success=False, stdout="", stderr="", exit_code=-1, error_message=error)
+
+        cmd = [self._path, *launch_args, *args]
 
         if log_command:
             logger.info(f"Running {self.name}: {' '.join(cmd[:5])}...")
@@ -322,7 +396,7 @@ class Tools:
     tools and evaluation tools used by SkillEvaluator validators.
     """
 
-    gitleaks = ExternalTool("Gitleaks", "gitleaks")
+    gitleaks = ExternalTool("Gitleaks", "gitleaks", managed=True)
     pip_audit = ExternalTool("pip-audit", "pip-audit", prefer_interpreter_sibling=True)
     safety = ExternalTool("Safety", "safety")
     bandit = ExternalTool(
@@ -342,4 +416,5 @@ class Tools:
         "skillspector",
         prefer_interpreter_sibling=True,
         override_env="SKILLEVALUATOR_SKILLSPECTOR_PATH",
+        managed=True,
     )

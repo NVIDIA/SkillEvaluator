@@ -612,6 +612,21 @@ def _bash_grant_label(entry: str) -> str:
     return f"unrestricted {entry!r}"
 
 
+# A scoped grant to show in a remediation, per shell tool.
+_SCOPED_SHELL_EXAMPLES = {"Bash": "Bash(git status *)", "PowerShell": "PowerShell(Get-ChildItem *)"}
+
+
+def _shell_tool(tool: str) -> str:
+    """The Claude Code shell tool a shell-tool name stands for: ``PowerShell`` for any spelling of it, else ``Bash``."""
+    return "PowerShell" if tool.lower() == "powershell" else "Bash"
+
+
+def _grant_shell_tool(entry: str) -> str:
+    """The shell tool a flagged shell grant names (``PowerShell`` for ``PowerShell(iex *)``)."""
+    match = _TOOL_RULE_RE.fullmatch(entry)
+    return _shell_tool(match.group(1)) if match is not None else "Bash"
+
+
 def is_wildcard_tool(entry: str) -> bool:
     """A wildcard grant of every tool (``*``) or every MCP tool (``mcp__*``)."""
     return "".join(entry.split()).lower() in _WILDCARD_TOOLS
@@ -622,8 +637,9 @@ def _is_star_grant(entry: str) -> bool:
     return "".join(entry.split()) in {"*", "*(*)"}
 
 
-def denies_every_bash_command(entries: Iterable[str] | None) -> bool:
-    """Whether a ``disallowedTools`` list removes the Bash tool, the way Claude Code matches it.
+def denies_every_bash_command(entries: Iterable[str] | None, tool: str = "Bash") -> bool:
+    """Whether a ``disallowedTools`` list removes the shell tool ``tool`` (``Bash`` or ``PowerShell``), the way
+    Claude Code matches it.
 
     Tool names are case-sensitive (``bash`` denies nothing), and a rule whose
     content matches every command (``Bash(*)``, ``Bash()``) denies the whole tool.
@@ -631,7 +647,7 @@ def denies_every_bash_command(entries: Iterable[str] | None) -> bool:
     """
     for entry in entries or []:
         match = _TOOL_RULE_RE.fullmatch(entry)
-        if match is None or match.group(1) != "Bash":
+        if match is None or match.group(1) != tool:
             continue
         content = match.group(2)
         if content is None or not content.strip(" \t\n\r*"):
@@ -849,13 +865,22 @@ def analyze_agent(
     record.permission_mode = _string_field(frontmatter, "permissionMode", "permission-mode")
     record.inherits_all_tools = tools is None
     # Claude Code matches tool names case-sensitively: 'bash' denies nothing, and 'Bash(*)' denies all of Bash.
-    denies_bash = denies_every_bash_command(disallowed_tools)
-    bash = [entry for entry in tools if is_unrestricted_bash(entry)] if tools is not None else []
-    if (bash or tools is None) and not denies_bash:
+    # Denying one shell tool leaves the other: 'disallowedTools: Bash' keeps a 'PowerShell' grant.
+    bash = (
+        [
+            entry
+            for entry in tools
+            if is_unrestricted_bash(entry) and not denies_every_bash_command(disallowed_tools, _grant_shell_tool(entry))
+        ]
+        if tools is not None
+        else []
+    )
+    if bash or (tools is None and not denies_every_bash_command(disallowed_tools)):
         # Advisory only: a subagent's tools list limits what it may call, it never pre-approves a tool,
         # so the session's permission prompts still apply. An agent that omits 'tools' inherits Bash too,
         # so both get the same severity.
         record.flags.append("unrestricted_bash")
+        shell = _grant_shell_tool(bash[0]) if bash else "Bash"
         grant = (
             f"is granted {_bash_grant_label(bash[0])}"
             if bash
@@ -869,7 +894,7 @@ def analyze_agent(
                 "prompts still apply)",
                 file_path,
                 "List the tools the subagent needs and scope the shell grant to exact commands (for example "
-                "Bash(git status *)), or deny Bash with disallowedTools.",
+                f"{_SCOPED_SHELL_EXAMPLES[shell]}), or deny {shell} with disallowedTools.",
                 component=component,
             )
         )
@@ -1013,10 +1038,11 @@ def _analyze_allowed_tools(
     for tool in allowed or []:
         if is_unrestricted_bash(tool):
             record.flags.append("unrestricted_bash")
+            shell = _grant_shell_tool(tool)
             if claude_only:
                 message = (
                     f"{kind} '{name}' pre-approves {_bash_grant_label(tool)} in allowed-tools; {loader} ignores "
-                    "allowed-tools (it has no Bash tool), but if Claude Code loads this "
+                    f"allowed-tools (it has no {shell} tool), but if Claude Code loads this "
                     f"{kind} (claude --plugin-dir reads skills/ and commands/ from this folder), any shell command "
                     "runs without a prompt while it is active"
                 )
@@ -1031,9 +1057,14 @@ def _analyze_allowed_tools(
                     f"plugin_{kind}_unrestricted_bash",
                     message,
                     file_path,
-                    "Scope allowed-tools to the exact commands it needs, such as Bash(git status *).",
+                    f"Scope allowed-tools to the exact commands it needs, such as {_SCOPED_SHELL_EXAMPLES[shell]}.",
                     component=component,
-                    extra=claude_only_extra,
+                    # The inert-grant rewrite (a file Claude Code does not load either) names the same grant and tool.
+                    extra=(
+                        {**claude_only_extra, "shell_grant": _bash_grant_label(tool), "shell_tool": shell}
+                        if claude_only_extra
+                        else None
+                    ),
                 )
             )
             break
@@ -1600,17 +1631,21 @@ def _condition_scope(condition: str, shell_tools: tuple[str, ...] = ("Bash",)) -
     """The scope a handler's ``if`` condition allows, read as one permission rule (``Bash(git status)``).
 
     A shell rule that runs any command (``Bash``, ``Bash(*)``, an interpreter
-    prefix) is ``bash``; any other shell rule is ``narrow``. A write, fetch, or
-    MCP tool is ``scoped``; another tool is ``narrow``. ``None`` when the text is
-    not one rule, so the caller keeps the matcher's scope (fail closed).
+    prefix, a PowerShell launcher such as ``PowerShell(iex *)``) is ``bash``; any
+    other shell rule is ``narrow``. A write, fetch, or MCP tool is ``scoped``;
+    another tool is ``narrow``. ``None`` when the text is not one rule, so the
+    caller keeps the matcher's scope (fail closed).
     """
     match = _TOOL_RULE_RE.fullmatch(condition)
     if match is None:
         return None
     tool, content = match.group(1), match.group(2)
     if tool in shell_tools:
-        rule = "Bash" if content is None else f"Bash({content})"
-        return ("bash", ()) if bash_rule_risk(rule) is not None else ("narrow", ())
+        # A PowerShell rule is also read as one (its launchers, such as iex, run any command), on top of the
+        # Bash reading that catches prefixes every shell runs (sudo, env, xargs); other shell-tool names as Bash.
+        readings = {_shell_tool(tool), "Bash"}
+        broad = any(bash_rule_risk(name if content is None else f"{name}({content})") is not None for name in readings)
+        return ("bash", ()) if broad else ("narrow", ())
     if tool in _SENSITIVE_TOOLS or tool.startswith("mcp__"):
         label = "mcp__server__tool" if tool.startswith("mcp__") else tool
         return "scoped", (_SENSITIVE_TOOL_LABELS.get(label, tool),)

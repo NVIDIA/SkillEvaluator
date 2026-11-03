@@ -13,10 +13,12 @@ from dataclasses import dataclass, field, replace
 from itertools import combinations
 from typing import TYPE_CHECKING
 
-from skillevaluator.constants import CONTENT_DEDUP_MAX_CHUNKS, CONTENT_DEDUP_SIMILARITY_THRESHOLD
+from skillevaluator.constants import (
+    CONTENT_DEDUP_MAX_CHUNKS,
+    CONTENT_DEDUP_MAX_SCALAR_COMPARISONS,
+    CONTENT_DEDUP_SIMILARITY_THRESHOLD,
+)
 from skillevaluator.embedding.client import normalize_embedding_vector, unit_vector_similarity
-
-CONTENT_DEDUP_MAX_SCALAR_COMPARISONS = 25_000_000
 
 if TYPE_CHECKING:
     from skillevaluator.deduplication.utils.chunker import ContentChunk

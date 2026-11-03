@@ -316,6 +316,15 @@ All notable changes to SkillEvaluator are documented in this file.
   report's `llm_analysis` counts it in `clusters_refused`. Other chat-LLM
   failures still leave the scan incomplete. Raise `CONTENT_DEDUP.llm_refused`
   in a policy overlay to keep refusals blocking.
+- Tier 2 context deduplication no longer stops valid skills at the
+  `scalar_comparison_limit` work limit below its 512-chunk ceiling. The fixed
+  25,000,000 scalar-comparison budget stopped 2,048-dimensional embeddings at
+  156 chunks and 1,536-dimensional embeddings at 180. The budget is now
+  267,911,168, so embeddings of up to 2,048 dimensions reach all 512 chunks.
+  Wider embeddings have a lower effective chunk limit (418 chunks at 3,072
+  dimensions, 362 at 4,096), which the incomplete-scan error and the JSON
+  `work_limit` record now report as `effective_chunk_limit`, next to the
+  skill's own `chunk_count`.
 - Local-mode verifier uploads now copy directly to the absent destination,
   avoiding an unnecessary rollback snapshot of an empty tests directory.
   Inputs and rewritten scripts are prepared privately before publication,

@@ -579,7 +579,7 @@ def select_roots(roots: list[dict], explicit: tuple[str, ...], no_input: bool) -
         selected = [item["root"] for item in suggested]
     else:
         while True:
-            answer = click.prompt("Folders", default=",".join(defaults)).strip()
+            answer = click.prompt("Folders", default=",".join(defaults) or None).strip()
             if not re.fullmatch(r"\d+(?:(?:\s*,\s*|\s+)\d+)*", answer):
                 console.print("Use listed numbers: 1,2 or 1 2.", style="yellow")
                 continue
@@ -668,9 +668,13 @@ def init(
         for i, item in enumerate(roots, 1):
             suggested = item["default"]
             table.add_row(str(i), Text(item["root"]), str(item["count"]), "Yes" if suggested else "Optional")
-        selection_hint = "Use folder numbers: 1 or 1,2. Spaces work too. Enter accepts the default."
+        selection_hint = "Use folder numbers: 1 or 1,2. Spaces work too."
         if len(roots) == 1:
-            selection_hint = "Use folder number 1, or press Enter."
+            selection_hint = "Use folder number 1."
+        if any(item["default"] for item in roots):
+            selection_hint += " Enter accepts the default."
+        else:
+            selection_hint += "\nNo default: enter a number to continue."
         question(1, "Which skill folders?", table, selection_hint)
         selected = select_roots(roots, paths, no_input)
         selected_count = sum(item["count"] for item in roots if item["root"] in selected)

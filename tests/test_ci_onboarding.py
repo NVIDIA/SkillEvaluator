@@ -140,6 +140,43 @@ def test_interactive_selection_can_recover_from_skill_limit(monkeypatch):
         wizard.select_roots(roots, ("skills", "extra"), True)
 
 
+@pytest.mark.parametrize("optional_folders", [1, 2])
+def test_optional_only_roots_require_explicit_numbers(repository, release_file, optional_folders):
+    def git(*args):
+        return subprocess.check_output(
+            ["git", "-c", "core.hooksPath=/dev/null", "-C", str(repository), *args], text=True
+        )
+
+    git("rm", "-r", "--cached", "skills", ".agents")
+    if optional_folders == 2:
+        sample = repository / "examples/demo/SKILL.md"
+        sample.parent.mkdir(parents=True)
+        sample.write_text("---\nname: demo\n---\n")
+        git("add", "examples")
+    assert not any(root["default"] for root in wizard.git_helpers.discover(repository))
+    result = invoke(
+        repository,
+        release_file,
+        "--mode",
+        "preview",
+        "--min-score",
+        "70",
+        "--scan-mode",
+        "auto",
+        "--checks-only",
+        input_text="\n1\n",
+    )
+    assert result.exit_code == 0, result.output
+    assert "No default: enter a number to continue." in result.output
+    assert "Enter accepts" not in result.output
+    assert "press Enter" not in result.output
+    assert "Folders []" not in result.output
+    assert "No changes applied" in result.output
+    unattended = invoke(repository, release_file, "--mode", "preview", "--no-input")
+    assert unattended.exit_code != 0
+    assert "Select at least one displayed skill folder" in unattended.output
+
+
 @pytest.mark.parametrize("width", [80, 140])
 def test_completion_keeps_long_pr_links_copyable(monkeypatch, tmp_path, width):
     from io import StringIO

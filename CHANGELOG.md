@@ -30,6 +30,12 @@ All notable changes to SkillEvaluator are documented in this file.
   whole-or-nothing skill read against its 16,000/32,000/64,000-char result caps.
   Rules whose behaviour changed between releases name the versions they apply to,
   and the Codex and Copilot description findings give the exact overflow.
+- The `harness` check now counts every file the skill ships (`evals/` included):
+  files over OpenCode's 51,200-byte / 2,000-line read and OpenClaw's result cap,
+  lines over 2,000 chars, and files Hermes leaves out of its file list (outside
+  `references/`, `templates/`, `assets/`, `scripts/`). It also flags a SKILL.md
+  that Codex cuts when read through the shell (~10K tokens), and the Hermes
+  60-char listing is now a note.
 
 - Tier 1 `schema` now reports harness-portability issues: duplicate frontmatter
   keys (HIGH), a UTF-8 BOM, a symlinked or nested `SKILL.md`, descriptions over

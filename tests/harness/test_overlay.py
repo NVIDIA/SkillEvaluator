@@ -387,6 +387,8 @@ def _sized(root: Path, fact: str, target: int) -> Path:
         ("hermes", "HM-VIEW-BUDGET", "hermes_view_chars", 100_000),
         ("openclaw", "OW-READ-BUDGET", "skill_md_chars", 16_000),
         ("openclaw", "OW-READ-REFUSED", "skill_md_chars", 64_000),
+        ("codex", "CX-SHELL-READ", "skill_md_bytes", 40_000),
+        ("opencode", "OC-BODY-CUT", "skill_md_bytes", 51_200),
     ],
 )
 def test_body_limits_fire_just_over_the_limit(tmp_path: Path, harness: str, rule: str, fact: str, limit: int):
@@ -412,3 +414,20 @@ def test_price_like_dollar_numbers_are_flagged_with_lines(tmp_path: Path):
     assert "OC-DOLLAR-N" in _ids(prices, "opencode")
     assert "CC-DOLLAR-N" not in _ids(safe, "claude-code") and "OC-DOLLAR-N" not in _ids(safe, "opencode")
     assert skill_facts(tmp_path / "b" / "skills" / "demo-skill")["dollar_placeholder_count"] == 1
+
+
+def test_every_oversized_file_long_line_and_unlisted_folder_is_counted(tmp_path: Path):
+    skill = _skill(tmp_path)
+    for rel, size in {"references/a.md": 51_201, "shared/b.md": 64_001, "shared/c.md": 51_200}.items():
+        (skill / rel).parent.mkdir(parents=True, exist_ok=True)
+        (skill / rel).write_text("x" * size, encoding="utf-8")
+    (skill / "python").mkdir()
+    (skill / "python" / "wide.md").write_text("y" * 2001 + "\n" + "z" * 2000 + "\n", encoding="utf-8")
+    facts = skill_facts(skill)
+    rows = _rows(skill)
+
+    assert (facts["files_over_51200"], facts["files_over_64000"]) == (2, 1)
+    assert (facts["long_line_count"], facts["hermes_unlisted_files"]) == (4, 3)
+    assert facts["hermes_unlisted_dirs"] == "python, shared"
+    assert {"OC-REF-CUT", "OC-LONG-LINES"} <= _ids(rows, "opencode")
+    assert {"HM-LINKED-LAYOUT"} <= _ids(rows, "hermes") and "OW-REF-BUDGET" in _ids(rows, "openclaw")

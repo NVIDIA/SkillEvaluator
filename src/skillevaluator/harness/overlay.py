@@ -139,16 +139,25 @@ def _bundle_files(skill_path: Path, manifest: Path) -> list[Path]:
     files = []
     for path in sorted(skill_path.rglob("*")):
         parts = path.relative_to(skill_path).parts
-        if path == manifest or any(part in SCAN_EXCLUDED_DIRS for part in parts):
+        if path == manifest or any(part in _NOT_SHIPPED_DIRS for part in parts):
             continue
         if path.is_symlink() or path.is_file():
             files.append(path)
     return files
 
 
+# Harnesses read every file a skill ships, evals/ included; only VCS and caches are skipped.
+_NOT_SHIPPED_DIRS = frozenset({".git", "__pycache__", "node_modules", ".venv"})
+_HERMES_LINKED_DIRS = ("references", "templates", "assets", "scripts")
+
+
+def _paths(items: list[str]) -> str:
+    return ", ".join(items[:3]) + (f" +{len(items) - 3} more" if len(items) > 3 else "")
+
+
 def _bundle_facts(skill_path: Path, manifest: Path) -> dict[str, Any]:
     base = skill_path.resolve()
-    links, escapes, largest, largest_bytes, largest_lines = [], [], "", 0, 0
+    links, escapes, sizes, long_lines, unlisted = [], [], [], [], []
     for path in _bundle_files(skill_path, manifest):
         rel = path.relative_to(skill_path).as_posix()
         if path.is_symlink():
@@ -157,19 +166,30 @@ def _bundle_facts(skill_path: Path, manifest: Path) -> dict[str, Any]:
             if target != base and base not in target.parents:
                 escapes.append(rel)
             continue
-        size = path.stat().st_size
-        if size > largest_bytes:
-            with path.open("rb") as handle:
-                largest_lines = sum(1 for _ in handle)
-            largest, largest_bytes = rel, size
+        lines = path.read_bytes().decode("utf-8", "replace").splitlines()
+        sizes.append((rel, path.stat().st_size, len(lines)))
+        long_lines += [rel] * sum(len(line) > 2000 for line in lines)
+        if rel.split("/", 1)[0] not in _HERMES_LINKED_DIRS:
+            unlisted.append(rel)
+    largest = max(sizes, key=lambda item: item[1], default=("", 0, 0))
+    paged = [rel for rel, size, count in sizes if size > 51200 or count > 2000]
+    multi_read = [rel for rel, size, _ in sizes if size > 64000]
     return {
         "resource_symlinks": len(links),
-        "resource_symlink_paths": ", ".join(links[:3]),
+        "resource_symlink_paths": _paths(links),
         "resource_symlink_escapes": len(escapes),
-        "resource_symlink_escape_paths": ", ".join(escapes[:3]),
-        "largest_resource": largest,
-        "largest_resource_bytes": largest_bytes,
-        "largest_resource_lines": largest_lines,
+        "resource_symlink_escape_paths": _paths(escapes),
+        "largest_resource": largest[0],
+        "largest_resource_bytes": largest[1],
+        "largest_resource_lines": largest[2],
+        "files_over_51200": len(paged),
+        "files_over_51200_paths": _paths(paged),
+        "files_over_64000": len(multi_read),
+        "files_over_64000_paths": _paths(multi_read),
+        "long_line_count": len(long_lines),
+        "long_line_files": _paths(list(dict.fromkeys(long_lines))),
+        "hermes_unlisted_files": len(unlisted),
+        "hermes_unlisted_dirs": _paths(list(dict.fromkeys(rel.split("/", 1)[0] for rel in unlisted))),
     }
 
 
@@ -287,6 +307,7 @@ def skill_facts(skill_path: Path, catalog: Catalog | None = None) -> dict[str, A
         "platforms_excluded": _excluded_os(platforms),
         "openclaw_gates": _openclaw_gates(data),
         "skill_md_chars": len(text),
+        "skill_md_tokens": len(raw) // 4,
         "description_over": max(0, (len(description) if isinstance(description, str) else 0) - 1024),
         "utf16_over": max(0, (len(description.encode("utf-16-le")) // 2 if isinstance(description, str) else 0) - 1024),
         # Hermes skill_view returns JSON: escaped SKILL.md + description + ~400 chars of other keys.

@@ -310,7 +310,10 @@ Custom scores flow into the same results tree as everything else:
 - In `custom_only` mode, your `overall` reward drives pass@k and the overall
   lift. The standard dimension rows stay visible but render `NO SCORE` —
   unscored metrics are never coerced to 0.0, and your custom metrics are
-  never re-labeled as standard dimensions.
+  never re-labeled as standard dimensions. An arm that produces no scoreable
+  reward (for example, every attempt fails) still records the `custom-only`
+  metric set and `custom-overall-v1` score policy in its summary and in the
+  run's attempt policy.
 
 Custom lift needs both arms — a `--skip-baseline` run reports your custom
 scores but no lift. [Reports & Results](reports.mdx) covers the full on-disk

@@ -680,9 +680,17 @@ directory, `catalog_root` is stored relative to that parent (`.` in the example
 above). Identical clones and relocated collections can reuse the same manifest;
 evaluation checks the sources in the current checkout. An unrelated external
 collection retains an absolute root and must be available at that location.
+The runtime hashes cover everything staging copies from a selected skill,
+including files that git ignores or does not track (such as `.DS_Store` or
+`.pytest_cache/`) and empty folders, so generate a manifest you plan to commit
+from a fresh clone. Of the permission bits, only whether a file is executable
+by its owner counts, so clones made under different umasks agree. Windows
+checkouts can differ: Git may convert line endings there, and Python reports
+`.exe`, `.bat`, `.cmd` and `.com` files as executable and other files as not
+executable. Generate a separate selection on Windows.
 Regenerate after editing the target's `SKILL.md`, changing selected runtime
-content, or moving an external collection. Manifests using the earlier full-source
-digest algorithm must also be regenerated. External workspace skills retain the
+content, or moving an external collection. Manifests using an earlier digest
+algorithm must also be regenerated. External workspace skills retain the
 existing publication-evidence limitations.
 
 Use a separate manifest filename such as `decoys.json`. Selection output cannot

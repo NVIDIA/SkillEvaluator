@@ -78,6 +78,26 @@ def test_executable_bits_change_runtime_identity(tmp_path: Path) -> None:
     assert decoy_source_digest(source) != before
 
 
+@pytest.mark.skipif(os.name == "nt", reason="Windows does not preserve POSIX permission bits")
+@pytest.mark.parametrize("umask", [0o027, 0o077])
+def test_clone_umask_leaves_runtime_identity_unchanged(tmp_path: Path, umask: int) -> None:
+    source = _skill(tmp_path / "decoy")
+    scripts = source / "scripts"
+    scripts.mkdir()
+    script = scripts / "run.sh"
+    script.write_text("#!/bin/sh\nexit 0\n", encoding="utf-8")
+    modes = {source: 0o755, scripts: 0o755, script: 0o755, source / "SKILL.md": 0o644}
+    for path, mode in modes.items():
+        path.chmod(mode)
+    before = decoy_source_digest(source)
+    assert before is not None
+
+    # A clone made under another umask differs only in group and other bits.
+    for path, mode in modes.items():
+        path.chmod(mode & ~umask)
+    assert decoy_source_digest(source) == before
+
+
 def test_secure_runtime_snapshot_has_the_same_identity(tmp_path: Path) -> None:
     source = _skill(tmp_path / "decoy")
     nested = _skill(source / "references" / "nested")

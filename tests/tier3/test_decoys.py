@@ -18,7 +18,12 @@ import pytest
 from skillevaluator.embedding.client import EmbeddingClient
 from skillevaluator.embedding.registry import EmbeddingRegistry
 from skillevaluator.tier3.decoy_identity import DECOY_SOURCE_DIGEST_ALGORITHM, decoy_source_digest
-from skillevaluator.tier3.decoys import load_decoy_manifest, select_decoys, write_decoy_manifest
+from skillevaluator.tier3.decoys import (
+    _catalog_root_record,
+    load_decoy_manifest,
+    select_decoys,
+    write_decoy_manifest,
+)
 
 
 def _skill(root: Path, name: str, *, skill_name: str | None = None) -> Path:
@@ -242,6 +247,69 @@ def test_collection_root_can_be_relative_to_a_nested_targets_parent(tmp_path: Pa
     assert load_decoy_manifest(
         relocated / "category" / "target", relocated / "category" / "target" / "evals" / "decoys.json"
     )[0] == [relocated / "neighbor"]
+
+
+def _case_insensitive(path: Path) -> bool:
+    probe = path / "CaseProbe"
+    probe.mkdir()
+    try:
+        return (path / "caseprobe").exists()
+    finally:
+        probe.rmdir()
+
+
+@pytest.mark.parametrize(
+    ("root_spelling", "target_spelling", "target_name", "expected"),
+    [
+        ("Skills", "skills/target", "target", "."),
+        ("skills", "Skills/target", "target", "."),
+        ("Skills", "skills/category/target", "category/target", ".."),
+    ],
+)
+def test_case_variant_spellings_keep_a_portable_root(
+    tmp_path: Path, root_spelling: str, target_spelling: str, target_name: str, expected: str
+) -> None:
+    if not _case_insensitive(tmp_path):
+        pytest.skip("requires a case-insensitive filesystem")
+    original = tmp_path / "checkout-a"
+    root = original / "skills"
+    _skill(root, target_name)
+    _skill(root, "neighbor")
+    client = _client([[1.0, 0.0]] * 2)
+    catalog = original / "catalog.json"
+    _catalog(root, catalog, client)
+    target = original.joinpath(*target_spelling.split("/"))
+    manifest = select_decoys(
+        target, catalog_path=catalog, catalog_root=original / root_spelling, count=1, client=client
+    )
+    assert manifest["catalog_root"] == expected
+    write_decoy_manifest(manifest, target / "evals" / "decoys.json")
+    copied = tmp_path / "checkout-b"
+    shutil.copytree(original, copied)
+    shutil.rmtree(original)
+    copied_target = copied.joinpath(*target_spelling.split("/"))
+
+    # The manifest no longer names checkout-a, so it loads from the copy alone.
+    loaded = load_decoy_manifest(copied_target, copied_target / "evals" / "decoys.json")[0]
+    assert len(loaded) == 1
+    assert loaded[0].samefile(copied / "skills" / "neighbor")
+
+
+def test_catalog_root_spellings_are_matched_by_file_identity(tmp_path: Path) -> None:
+    # A linked spelling takes the same identity match as a case variant on a
+    # case-insensitive filesystem, so this also runs on case-sensitive CI.
+    root = tmp_path / "skills"
+    target = _skill(root, "category/target")
+    alias = tmp_path / "skills-alias"
+    try:
+        alias.symlink_to(root, target_is_directory=True)
+    except OSError:
+        pytest.skip("symlinks are not available")
+
+    assert _catalog_root_record(alias, root / "target") == "."
+    assert _catalog_root_record(alias, target) == ".."
+    assert _catalog_root_record(alias / "category", root / "target") == "category"
+    assert _catalog_root_record(tmp_path / "elsewhere", root / "target") == str(tmp_path / "elsewhere")
 
 
 def test_unrelated_external_collection_keeps_an_absolute_root(tmp_path: Path) -> None:

@@ -10,12 +10,25 @@ separate contract, which deliberately includes authored evaluation inputs.
 
 from __future__ import annotations
 
+import dataclasses
 import hashlib
 from collections.abc import Callable, Iterable
 from pathlib import Path
+from typing import Any
 
 # Bump this recipe if the runtime projection or reused canonical encoding changes.
-DECOY_SOURCE_DIGEST_ALGORITHM = "skill-evaluator-decoy-runtime/1"
+DECOY_SOURCE_DIGEST_ALGORITHM = "skill-evaluator-decoy-runtime/2"
+
+
+def _portable_mode(entry: Any) -> Any:
+    """Keep only the execute state that a git checkout reproduces.
+
+    Git records whether a file is executable and nothing for directories; the
+    group and other bits of a clone follow the cloning user's umask. Encoding
+    the owner execute bit of regular files keeps identical clones identical.
+    """
+    executable = entry.kind == "file" and bool(entry.mode & 0o100)
+    return dataclasses.replace(entry, mode=0o755 if executable else 0o644)
 
 
 def decoy_source_copy_ignore(source: Path) -> Callable[[str, list[str]], Iterable[str]]:
@@ -32,7 +45,8 @@ def decoy_source_digest(source: Path) -> str | None:
     and mount crossings. Three captures detect incidental changes between
     scans. As with staging, this does not promise a coherent snapshot against
     another process concurrently mutating the tree with the same OS identity.
-    Paths are NFC-normalized, and executable bits participate in the digest.
+    Paths are NFC-normalized, and the owner execute bit of each file
+    participates in the digest.
     """
     from skillevaluator.publication_identity import _manifest_digest
     from skillevaluator.tier3.harbor.secure_copy import _build_tree_manifest
@@ -45,7 +59,7 @@ def decoy_source_digest(source: Path) -> str | None:
                 return None
         # Reuse the publication recipe's canonical paths, node kinds, content
         # hashes and executable-bit encoding, under a distinct runtime label.
-        encoded = _manifest_digest((captured.root, *captured.entries))
+        encoded = _manifest_digest(_portable_mode(entry) for entry in (captured.root, *captured.entries))
         return hashlib.sha256(
             DECOY_SOURCE_DIGEST_ALGORITHM.encode("ascii") + b"\0" + bytes.fromhex(encoded)
         ).hexdigest()

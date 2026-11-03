@@ -75,11 +75,28 @@ def _absolute_root(path: Path) -> Path:
     return root
 
 
+def _ancestor_depth(path: Path, ancestor: Path) -> int | None:
+    """Count the levels from *path* up to *ancestor*, matching by file identity.
+
+    A lexical comparison misses a case-variant spelling of the same directory
+    on a case-insensitive filesystem.
+    """
+    for depth, candidate in enumerate((path, *path.parents)):
+        try:
+            if candidate.samefile(ancestor):
+                return depth
+        except OSError:
+            continue
+    return None
+
+
 def _catalog_root_record(root: Path, target: Path) -> str:
     """Keep a target's own collection relocatable; retain explicit external roots."""
     base = target.parent
-    if root.is_relative_to(base) or base.is_relative_to(root):
-        return Path(os.path.relpath(root, base)).as_posix()
+    if (depth := _ancestor_depth(root, base)) is not None:
+        return PurePosixPath(*root.parts[len(root.parts) - depth :]).as_posix()
+    if (depth := _ancestor_depth(base, root)) is not None:
+        return PurePosixPath(*[".."] * depth).as_posix()
     return str(root)
 
 

@@ -442,7 +442,10 @@ skillevaluator tier3 select-decoys ./skills/my-skill \
 The manifest records the catalog hash and embedding identity, selected paths
 and scores, target manifest hash, and selected runtime-content hashes. The
 target's own collection uses a root relative to its parent directory, so an
-identical checkout can reuse the manifest. Unrelated external collections
+identical checkout can reuse the manifest. The hashes cover everything staging
+copies from a selected skill, including ignored or untracked files and empty
+folders, so generate a manifest you plan to commit from a fresh clone.
+Unrelated external collections
 retain an absolute root. Evaluator-only files are excluded from decoy hashes;
 changing a decoy's evaluation config does not require a new selection. Output
 cannot overwrite evaluation inputs or an existing non-manifest file. Set

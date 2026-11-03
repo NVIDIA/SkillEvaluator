@@ -224,6 +224,33 @@ jobs:
         run: python scripts/check_oss_boundary.py --root . --allowlist config/oss_boundary_allowlist.json --archive dist/*.whl --archive dist/*.tar.gz
       - name: Validate distribution metadata
         run: uvx --from twine==6.2.0 twine check --strict dist/*
+      - name: Verify onboarding from the base wheel
+        shell: bash
+        run: |
+          uv venv --python 3.12 "$RUNNER_TEMP/skillevaluator-base"
+          uv pip install --python "$RUNNER_TEMP/skillevaluator-base/bin/python" dist/*.whl
+          "$RUNNER_TEMP/skillevaluator-base/bin/python" - <<'PY'
+          import json
+          import subprocess
+          import sys
+          import tempfile
+          from importlib.resources import files
+          from pathlib import Path
+
+          release = json.loads(files("skillevaluator").joinpath("ci-release.json").read_text())
+          assert release["repository"] == "NVIDIA/SkillEvaluator"
+          command = [str(Path(sys.executable).with_name("skillevaluator"))]
+          with tempfile.TemporaryDirectory() as directory:
+              root = Path(directory)
+              subprocess.run(["git", "init", "-b", "main", directory], check=True)
+              subprocess.run(["git", "-C", directory, "remote", "add", "origin", "https://github.com/example/skills.git"], check=True)
+              (root / "skills" / "example").mkdir(parents=True)
+              (root / "skills" / "example" / "SKILL.md").write_text("---\nname: example\ndescription: Example skill\n---\n# Example\n")
+              subprocess.run(["git", "-C", directory, "add", "skills"], check=True)
+              for feedback in ("--checks-only", "--full"):
+                  subprocess.run(command + ["ci", "init", "--repo", directory, "--default-branch", "main", "--mode", "preview", "--no-input", feedback], check=True)
+              assert not (root / ".github").exists(), "Preview changed the consumer checkout"
+          PY
       - name: Install and smoke-test the wheel on Python 3.12, 3.13, and 3.14
         shell: bash
         run: |
@@ -240,6 +267,7 @@ jobs:
             "$venv/bin/skillevaluator" --version
             "$venv/bin/skillevaluator" --help >/dev/null
             "$venv/bin/skillevaluator" models --help >/dev/null
+            "$venv/bin/skillevaluator" ci --help >/dev/null
             SKILL_EVAL_LLM_PROVIDER=nv_build NVIDIA_API_KEY=nvapi-ci-placeholder \
               "$venv/bin/skillevaluator" doctor --agents opencode --env-mode docker >/dev/null
             "$venv/bin/python" -c 'import io; from skillevaluator.tier3.harbor.progress import PlainProgressReporter,ProgressEvent,Tier3RunPlan; s=io.StringIO(); r=PlainProgressReporter(stream=s,refresh_interval=60); r.start(Tier3RunPlan(skill_name="wheel-smoke",environment="docker",agents=("opencode",))); r.emit(ProgressEvent(stage="configuration",state="complete")); r.close(); assert "configuration: complete" in s.getvalue()'

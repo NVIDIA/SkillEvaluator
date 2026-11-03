@@ -160,6 +160,15 @@ def test_missing_jobs_keep_requested_grading_policy(tmp_path: Path, grading_mode
         (tmp_path / "results" / "codex" / "without-skill" / "summary.json").read_text(encoding="utf-8")
     )
     assert baseline_summary["score_policy"] == policy
+    assert baseline_summary["metric_set"] == metric_set
+    assert baseline_summary["metrics"] == list(metrics)
+    with_summary = json.loads(
+        (tmp_path / "results" / "codex" / "with-skill" / "summary.json").read_text(encoding="utf-8")
+    )
+    assert with_summary["score_policy"] == policy
+    assert with_summary["metric_set"] == metric_set
+    assert with_summary["metrics"] == list(metrics)
+    assert with_summary["job_failure"] == "sandbox unavailable"
 
 
 @pytest.mark.parametrize("grading_mode", ["default", "default_plus_custom", "custom_only"])

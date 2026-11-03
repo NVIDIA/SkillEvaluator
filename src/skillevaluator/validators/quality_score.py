@@ -71,9 +71,7 @@ _ARGUMENT_CHOICE_RE = re.compile(r"\S+|\"[^\"]*\"|'[^']*'")
 # A ``>`` between groups that is an arrow or a comparison, not a redirect: a
 # space-delimited ``->``, ``=>`` or ``>=`` (``<old> -> <new>``, ``<n> >= <m>``), or ``>``
 # or ``>=`` before a number after a space or bracket (``<n> > 0``, ``<count> (>0)``).
-_ARGUMENT_ARROW_OR_COMPARISON_RE = re.compile(
-    r"(?<!\S)(?:->|=>|>=)(?!\S)|(?<![^\s(\[])>=? ?\d+(?:\.\d+)?(?![^\s)\],])"
-)
+_ARGUMENT_ARROW_OR_COMPARISON_RE = re.compile(r"(?<!\S)(?:->|=>|>=)(?!\S)|(?<![^\s(\[])>=? ?\d+(?:\.\d+)?(?![^\s)\],])")
 _URL_EDGE_C0_OR_SPACE_RE = re.compile(r"^[\x00-\x20]+|[\x00-\x20]+$")
 _ERROR_HANDLING_RE = re.compile(
     r"\b(?:errors?|exceptions?|invalid|fail(?:s|ed|ure|ures|ing)?|"
@@ -543,6 +541,10 @@ class QualityScoreValidator(ValidatorBase):
             # A string argument-hint documents CLI placeholders (``<file> [--strict]``).
             if key == "argument-hint" and isinstance(val, str):
                 value = _mask_argument_hint(value)
+            elif key == "argument-hint" and isinstance(val, list) and val and all(isinstance(i, str) for i in val):
+                # YAML reads an unquoted ``[<file>]`` hint as a list. Check every item and
+                # the joined hint, so a group split across items stays visible.
+                value = "\n".join([*map(_mask_argument_hint, val), _mask_argument_hint(" ".join(val))])
             if XML_TAG_RE.search(value):
                 dim.deduct(
                     15,

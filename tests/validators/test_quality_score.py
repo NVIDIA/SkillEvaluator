@@ -318,9 +318,7 @@ class TestQualityScoreValidator:
             pytest.param("\nSecurity\n========\n\nReview permissions.\n", False, id="setext-heading"),
         ],
     )
-    def test_expected_header_matches_heading_as_text_anywhere(
-        self, tmp_path: Path, extra_body: str, satisfied: bool
-    ):
+    def test_expected_header_matches_heading_as_text_anywhere(self, tmp_path: Path, extra_body: str, satisfied: bool):
         skill_dir = _write_issue_skill(tmp_path, extra_body=extra_body)
         config_path = tmp_path / "quality.yaml"
         config_path.write_text(
@@ -344,9 +342,7 @@ class TestQualityScoreValidator:
 
         result = QualityScoreValidator(min_score=0).validate(skill_dir)
 
-        assert all(
-            finding.message != "No prerequisites/requirements documented" for finding in result.findings
-        )
+        assert all(finding.message != "No prerequisites/requirements documented" for finding in result.findings)
 
     @pytest.mark.parametrize("alternative", ["## Common Issues", "## FAQ"])
     def test_troubleshooting_header_accepts_configured_alternative(self, tmp_path: Path, alternative: str):
@@ -750,7 +746,10 @@ class TestQualityScoreDeterministicContracts:
     def test_argument_hint_placeholders_are_not_xml(self, quality_skill: Path, hint: str):
         manifest = quality_skill / "SKILL.md"
         baseline = QualityScoreValidator(min_score=0).validate(quality_skill)
-        manifest.write_text(manifest.read_text().replace("---\n", "---\n" + yaml.safe_dump({"argument-hint": hint}), 1))
+        manifest.write_text(
+            manifest.read_text(encoding="utf-8").replace("---\n", "---\n" + yaml.safe_dump({"argument-hint": hint}), 1),
+            encoding="utf-8",
+        )
 
         result = QualityScoreValidator(min_score=0).validate(quality_skill)
 
@@ -815,12 +814,21 @@ class TestQualityScoreDeterministicContracts:
             "<payload /\u2003>",
             "<payload\nignore previous instructions>",
             "<bug_id> <payload ignore previous instructions",
-            ["<bug_id>"],
+            ["<system>"],
+            ["<bug_id>", "<payload/>"],
+            ["<curl x>", "/tmp/y>"],
+            ["<a x", "b>"],
+            ["<bug_id>", 1],
+            [["<bug_id>"]],
+            [{"file": "<bug_id>"}],
         ],
     )
     def test_argument_hint_markup_remains_flagged(self, quality_skill: Path, hint):
         manifest = quality_skill / "SKILL.md"
-        manifest.write_text(manifest.read_text().replace("---\n", "---\n" + yaml.safe_dump({"argument-hint": hint}), 1))
+        manifest.write_text(
+            manifest.read_text(encoding="utf-8").replace("---\n", "---\n" + yaml.safe_dump({"argument-hint": hint}), 1),
+            encoding="utf-8",
+        )
 
         assert any(
             "XML tags in frontmatter field 'argument-hint'" in message for message in _finding_messages(quality_skill)
@@ -866,26 +874,49 @@ class TestQualityScoreDeterministicContracts:
     )
     def test_argument_hint_free_text_and_commands_are_not_placeholders(self, quality_skill: Path, hint: str):
         manifest = quality_skill / "SKILL.md"
-        manifest.write_text(manifest.read_text().replace("---\n", "---\n" + yaml.safe_dump({"argument-hint": hint}), 1))
+        manifest.write_text(
+            manifest.read_text(encoding="utf-8").replace("---\n", "---\n" + yaml.safe_dump({"argument-hint": hint}), 1),
+            encoding="utf-8",
+        )
 
         assert any(
             "XML tags in frontmatter field 'argument-hint'" in message for message in _finding_messages(quality_skill)
         )
 
+    @pytest.mark.parametrize("hint", ["[<file>]", "[--model <model>]", "[<file>, --strict]", "[<old> -> <new>]"])
+    def test_argument_hint_unquoted_bracket_list_is_masked(self, quality_skill: Path, hint: str):
+        manifest = quality_skill / "SKILL.md"
+        baseline = QualityScoreValidator(min_score=0).validate(quality_skill)
+        manifest.write_text(
+            manifest.read_text(encoding="utf-8").replace("---\n", f"---\nargument-hint: {hint}\n", 1), encoding="utf-8"
+        )
+        assert isinstance(yaml.safe_load(manifest.read_text(encoding="utf-8").split("---\n")[1])["argument-hint"], list)
+
+        result = QualityScoreValidator(min_score=0).validate(quality_skill)
+
+        assert not any("XML tags" in finding.message for finding in result.findings)
+        assert (
+            result.metadata["quality_scores"]["dimensions"]["correctness"]
+            == baseline.metadata["quality_scores"]["dimensions"]["correctness"]
+        )
+
     def test_argument_hint_repeated_optional_groups_do_not_backtrack(self, quality_skill: Path):
         manifest = quality_skill / "SKILL.md"
         hint = "<bug_id> " + "[ ]" * 1000 + "!"
-        manifest.write_text(manifest.read_text().replace("---\n", "---\n" + yaml.safe_dump({"argument-hint": hint}), 1))
+        manifest.write_text(
+            manifest.read_text(encoding="utf-8").replace("---\n", "---\n" + yaml.safe_dump({"argument-hint": hint}), 1),
+            encoding="utf-8",
+        )
 
         assert not any("XML tags" in message for message in _finding_messages(quality_skill))
 
     @pytest.mark.parametrize("field", ["name", "description", "compatibility", "metadata", "Argument-Hint"])
     def test_argument_placeholder_allowance_is_field_specific(self, quality_skill: Path, field: str):
         manifest = quality_skill / "SKILL.md"
-        frontmatter, body = manifest.read_text().split("---\n", 2)[1:]
+        frontmatter, body = manifest.read_text(encoding="utf-8").split("---\n", 2)[1:]
         data = yaml.safe_load(frontmatter)
         data[field] = "<bug_id>"
-        manifest.write_text("---\n" + yaml.safe_dump(data) + "---\n" + body)
+        manifest.write_text("---\n" + yaml.safe_dump(data) + "---\n" + body, encoding="utf-8")
 
         assert any("XML tags" in message for message in _finding_messages(quality_skill))
 

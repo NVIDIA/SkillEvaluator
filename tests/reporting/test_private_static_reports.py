@@ -369,6 +369,98 @@ def test_report_bounds_reserve_identity_and_later_risk_evidence():
     assert "context_injection" in json.dumps(hooks)
 
 
+@pytest.mark.parametrize("long_cells", [False, True], ids=["row-limit", "text-limit"])
+def test_crowded_reports_retain_risk_evidence_across_all_six_formats(long_cells):
+    results = bundle()
+    block = results[0].metadata["plugin"]
+    count = 64 if long_cells else 100
+    text = "x" * 300 if long_cells else "fixture"
+    block["component_inventory"]["components"] = [
+        dict.fromkeys(("type", "name", "origin", "path", "support", "problem", "declared_by", "loaded_by"), text)
+        for _ in range(count)
+    ]
+    block["dependency_resolution"] = {
+        "skills": [dict.fromkeys(("ref", "state", "path", "declared_by", "reason"), text) for _ in range(count)]
+    }
+    other_count = 1 if long_cells else 100
+    block["mcp"]["servers"] = [{"name": f"server-{index}"} for index in range(other_count)]
+    block["context_cost"]["by_component"] = [{"name": f"context-{index}"} for index in range(other_count)]
+    block["hook_risk"]["hooks"] = [
+        {"id": f"flagged-hook-{index}", "event": "SessionStart", "risk_flags": ["context_injection"]}
+        for index in range(5)
+    ]
+    block["privileges"]["components"][0].update(permission_mode="bypass_permissions", flags=["bypass_permissions"])
+    before = deepcopy(results)
+
+    output = renderers().render_plugin_static_reports(results, reporters=reporters())
+
+    payload = json.loads(output["json"])["plugin_static"]
+    sections = {section["key"]: section for section in payload["sections"]}
+    assert {key: len(sections[key]["rows"]) for key in ("hooks", "privileges", "audits", "endpoints")} == {
+        "hooks": 5,
+        "privileges": 1,
+        "audits": 1,
+        "endpoints": 1,
+    }
+    assert sum(len(section["rows"]) for section in sections.values()) <= 256
+    assert all(len(section["rows"]) <= 64 for section in sections.values())
+    assert len(json.dumps(payload, ensure_ascii=False).encode()) <= 256 * 1024
+    text_cells = [payload["name"]]
+    for section in sections.values():
+        text_cells.extend(section["notes"])
+        text_cells.extend(cell for row in section["rows"] for cell in row)
+    assert sum(len(cell.encode()) for cell in text_cells if isinstance(cell, str)) <= 48 * 1024
+    assert payload["truncated"] is True
+    if long_cells:
+        assert sections["inventory"]["omitted"] > 0
+    for section in sections.values():
+        assert section["total"] == len(section["rows"]) + section["omitted"]
+        assert all(any(cell not in ("", None) for cell in row) for row in section["rows"])
+    for name, document in output.items():
+        text = html.unescape(document).replace("\\_", "_")
+        for marker in ("flagged-hook-4", "bypass_permissions", "audit capped", "remote-endpoint"):
+            assert marker in text, (name, marker)
+        assert "hidden-value" not in document
+    assert json.loads(output["sarif"])["runs"][0]["properties"]["pluginStatic"] == payload
+    assert results == before
+
+
+def test_text_limit_omits_unrepresentable_rows_explicitly_in_all_formats(monkeypatch):
+    monkeypatch.setattr(api(), "MAX_TEXT_BYTES", 100)
+    result = ValidationResult(
+        validator_name="Private static fixture",
+        metadata={
+            "plugin": {
+                "name": "bounded",
+                "component_inventory": {"components": [{"type": "skill", "name": "x" * 300}]},
+            }
+        },
+    )
+
+    output = renderers().render_plugin_static_reports([result], reporters=reporters())
+
+    payload = json.loads(output["json"])["plugin_static"]
+    inventory = next(section for section in payload["sections"] if section["key"] == "inventory")
+    assert inventory["rows"] == []
+    assert inventory["omitted"] == inventory["total"] == 1
+    assert payload["truncated"] is True
+    for name in ("cli", "markdown", "html", "benchmark"):
+        assert "1 more rows omitted (1 total)." in output[name]
+    assert json.loads(output["sarif"])["runs"][0]["properties"]["pluginStatic"] == payload
+
+
+def test_endpoint_rows_use_only_the_authoritative_top_level_result_metadata():
+    results = bundle()
+    results[2].metadata["plugin"] = {"endpoint_resolution": results[2].metadata["endpoint_resolution"]}
+
+    sections = api().project_plugin_static(results).payload()["sections"]
+
+    endpoints = next(section for section in sections if section["key"] == "endpoints")
+    assert endpoints["total"] == 1
+    assert len(endpoints["rows"]) == 1
+    assert endpoints["rows"][0][1] == "remote-endpoint"
+
+
 def test_conflicting_source_identity_is_explicit_and_never_a_static_pass():
     results = bundle()[:1]
     other = ValidationResult(validator_name="Private Manifest and Component Checks")

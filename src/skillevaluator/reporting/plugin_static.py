@@ -203,23 +203,45 @@ class _Projection:
         total: int | None = None,
         notes: list | None = None,
     ) -> None:
-        total = len(rows) if total is None else total
-        allowance = min(MAX_SECTION_ROWS, self.rows_remaining)
-        shown = rows[:allowance]
-        self.rows_remaining -= len(shown)
-        omitted = max(0, total - len(shown))
-        self.truncated |= bool(omitted)
+        # Defer shared budgets until every section is known so risk evidence
+        # can take priority without changing the report's display order.
         self.sections.append(
             {
                 "key": key,
                 "title": title,
                 "columns": list(columns),
-                "rows": [[self.text(cell) for cell in row] for row in shown],
-                "total": total,
-                "omitted": omitted,
-                "notes": [self.text(note) for note in (notes or [])[:8]],
+                "rows": rows[:MAX_SECTION_ROWS],
+                "total": len(rows) if total is None else total,
+                "notes": (notes or [])[:8],
             }
         )
+
+    def _bounded_cells(self, values: list) -> list | None:
+        cells = [self.text(value, charge=False) for value in values]
+        size = sum(len(cell.encode("utf-8")) for cell in cells if isinstance(cell, str))
+        if size > self.text_remaining:
+            self.truncated = True
+            return None
+        self.text_remaining -= size
+        return cells
+
+    def finish(self) -> list[dict[str, Any]]:
+        risk_keys = {"hooks", "privileges", "audits", "endpoints"}
+        for section in sorted(self.sections, key=lambda item: item["key"] not in risk_keys):
+            rows = []
+            for row in section["rows"][: self.rows_remaining]:
+                cells = self._bounded_cells(row)
+                if cells is None:
+                    break
+                rows.append(cells)
+            self.rows_remaining -= len(rows)
+            section["rows"] = rows
+            section["omitted"] = max(0, section["total"] - len(rows))
+            self.truncated |= bool(section["omitted"])
+            section["notes"] = [
+                cells[0] for note in section["notes"] if (cells := self._bounded_cells([note])) is not None
+            ]
+        return self.sections
 
     def url(self, value: object) -> str:
         if not isinstance(value, str) or len(value) > MAX_FIELD_INPUT:
@@ -266,7 +288,6 @@ def project_plugin_static(results: list[ValidationResult]) -> StaticPluginReport
         "privileges",
         "cve_summary",
         "validator_parity",
-        "endpoint_resolution",
         "catalog_skill_similarity",
         "inter_plugin_similarity",
     )
@@ -580,9 +601,6 @@ def project_plugin_static(results: list[ValidationResult]) -> StaticPluginReport
                     parity.get("reason"),
                 ]
             )
-        endpoint = _mapping(block.get("endpoint_resolution"))
-        if endpoint:
-            endpoints.append(endpoint)
     if audit_rows:
         projection.section(
             "audits",
@@ -659,16 +677,17 @@ def project_plugin_static(results: list[ValidationResult]) -> StaticPluginReport
                 ],
                 total=_count_rows(comparison.get("matches")),
                 notes=[
-                    f"Advisory; status {projection.text(comparison.get('status'))}; catalog entries {projection.label(_count(comparison.get('catalog_entries')))}",
+                    f"Advisory; status {projection.text(comparison.get('status'), charge=False)}; catalog entries {projection.label(_count(comparison.get('catalog_entries')))}",
                     comparison.get("reason"),
                 ],
             )
+    sections = projection.finish()
     payload = {
         "schema_version": 1,
         "name": name,
         "status": status,
         "truncated": projection.truncated,
-        "sections": projection.sections,
+        "sections": sections,
     }
     serialized = json.dumps(payload, ensure_ascii=False, allow_nan=False, separators=(",", ":"))
     # A final byte ceiling also covers structural overhead, not only text cells.

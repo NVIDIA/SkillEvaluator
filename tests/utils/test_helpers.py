@@ -3,16 +3,22 @@
 
 """Tests for skillevaluator.utils module."""
 
+import os
 import subprocess
+import sys
 from pathlib import Path
 from unittest.mock import patch
 
+import pytest
+
+from skillevaluator.tier3.results_location import git_root_for
 from skillevaluator.utils import find_skills_in_directory, get_skill_name_from_path
 from skillevaluator.utils.helpers import (
     _ssh_to_https,
     resolve_git_remote_url,
     resolve_git_root,
 )
+from skillevaluator.utils.path_security import find_git_repo_root
 
 
 class TestFindSkillsInDirectory:
@@ -179,6 +185,38 @@ def _init_git_repo(path: Path, remote_url: str) -> str:
     return subprocess.check_output(["git", "-C", str(path), "rev-parse", "HEAD"], text=True).strip()
 
 
+_REAL_CHECK_OUTPUT = subprocess.check_output
+
+
+def _cp1252_locale_check_output(*args, **kwargs):
+    """Run the real command, decoding text output as a Windows cp1252 locale would."""
+    if kwargs.get("text") and kwargs.get("encoding") is None:
+        kwargs["encoding"] = "cp1252"
+    return _REAL_CHECK_OUTPUT(*args, **kwargs)
+
+
+_REAL_RUN = subprocess.run
+
+
+def _cp1252_locale_run(*args, **kwargs):
+    """Run the real command, decoding text output as a Windows cp1252 locale would."""
+    if kwargs.get("text") and kwargs.get("encoding") is None:
+        kwargs["encoding"] = "cp1252"
+    return _REAL_RUN(*args, **kwargs)
+
+
+def _fake_git_output(outputs: dict[str, bytes]):
+    """Return a check_output stand-in that emits raw git bytes decoded like a cp1252 locale."""
+
+    def fake(cmd, **kwargs):
+        raw = outputs[" ".join(cmd[1:])]
+        if not kwargs.get("text"):
+            return raw
+        return raw.decode(kwargs.get("encoding") or "cp1252", kwargs.get("errors") or "strict")
+
+    return fake
+
+
 class TestResolveGitRoot:
     """Tests for lightweight repository-root discovery used by base reports."""
 
@@ -195,6 +233,40 @@ class TestResolveGitRoot:
 
     def test_returns_none_outside_git_repository(self, tmp_path: Path) -> None:
         assert resolve_git_root(tmp_path) is None
+
+    @pytest.mark.parametrize("folder", ["café-skills", "Ýōrk-skills"])
+    def test_non_ascii_root_decodes_git_output_as_utf8(self, tmp_path: Path, monkeypatch, folder: str) -> None:
+        """Git prints UTF-8 paths; a cp1252 locale must neither garble them nor raise UnicodeDecodeError."""
+        repo_root = tmp_path / folder
+        _init_git_repo(repo_root, "git@github.com:example/project.git")
+        monkeypatch.setattr(subprocess, "check_output", _cp1252_locale_check_output)
+
+        assert resolve_git_root(repo_root) == repo_root.resolve()
+
+    @pytest.mark.skipif(sys.platform == "win32", reason="non-UTF-8 path bytes are a POSIX filesystem case")
+    def test_non_utf8_root_bytes_round_trip(self, tmp_path: Path, monkeypatch) -> None:
+        """Undecodable path bytes are kept losslessly instead of raising or being replaced."""
+        raw_root = os.fsencode(str(tmp_path.resolve())) + b"/repo-\xff"
+        monkeypatch.setattr(
+            subprocess, "check_output", _fake_git_output({"rev-parse --show-toplevel": raw_root + b"\n"})
+        )
+
+        root = resolve_git_root(tmp_path)
+
+        assert root is not None
+        assert os.fsencode(str(root)) == raw_root
+
+
+@pytest.mark.parametrize("lookup", [resolve_git_root, find_git_repo_root, git_root_for], ids=lambda f: f.__name__)
+def test_every_git_root_lookup_names_a_non_ascii_root(tmp_path: Path, monkeypatch, lookup) -> None:
+    """Each repository-root lookup decodes git's path bytes as file names, not with the locale code page."""
+    repo_root = tmp_path / "café-skills"
+    _init_git_repo(repo_root, "git@github.com:example/project.git")
+    (repo_root / "skills").mkdir()
+    monkeypatch.setattr(subprocess, "check_output", _cp1252_locale_check_output)
+    monkeypatch.setattr(subprocess, "run", _cp1252_locale_run)
+
+    assert lookup(repo_root / "skills") == repo_root.resolve()
 
 
 class TestResolveGitRemoteUrl:
@@ -275,3 +347,20 @@ class TestResolveGitRemoteUrl:
             url = resolve_git_remote_url(skill_dir)
 
         assert url == f"https://github.com/example/secondary/tree/{head}/skills/demo"
+
+    def test_non_ascii_remote_and_branch_decode_as_utf8(self, tmp_path: Path, monkeypatch) -> None:
+        """Remote URL and branch names from git are UTF-8 regardless of the locale code page."""
+        repo_root = tmp_path / "repo"
+        sub_dir = repo_root / "skills"
+        sub_dir.mkdir(parents=True)
+        outputs = {
+            "rev-parse --show-toplevel": f"{repo_root.resolve()}\n".encode(),
+            "remote get-url origin": "https://github.com/example/Ýōrk.git\n".encode(),
+            "rev-parse --abbrev-ref HEAD": "feature/café\n".encode(),
+        }
+        monkeypatch.setattr(subprocess, "check_output", _fake_git_output(outputs))
+
+        with patch.dict("os.environ", _clean_ci_env(), clear=True):
+            url = resolve_git_remote_url(sub_dir)
+
+        assert url == "https://github.com/example/Ýōrk/tree/feature/café/skills"

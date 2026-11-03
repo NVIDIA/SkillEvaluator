@@ -156,10 +156,16 @@ def test_missing_jobs_keep_requested_grading_policy(tmp_path: Path, grading_mode
     assert result["attempt_policy"]["score_definition"] == score_definition(metrics)
     agent = result["agents"]["codex"]
     assert agent["score_policy_with_skill"] == agent["score_policy_without_skill"] == policy
-    baseline_summary = json.loads(
-        (tmp_path / "results" / "codex" / "without-skill" / "summary.json").read_text(encoding="utf-8")
-    )
-    assert baseline_summary["score_policy"] == policy
+    for condition in ("with_skill", "without_skill"):
+        # The persisted summary, not just the returned result, records the policy.
+        summary_path = tmp_path / "results" / "codex" / condition.replace("_", "-") / "summary.json"
+        summary = json.loads(summary_path.read_text(encoding="utf-8"))
+        assert summary["execution_status"] == "failed"
+        assert summary["metric_set"] == metric_set
+        assert summary["metrics"] == agent[f"metrics_{condition}"] == []
+        assert summary["score_policy"] == policy
+    loaded = report_data.load_agent_data(tmp_path / "results")["codex"]
+    assert loaded["score_policy_with_skill"] == loaded["score_policy_without_skill"] == policy
 
 
 @pytest.mark.parametrize("grading_mode", ["default", "default_plus_custom", "custom_only"])

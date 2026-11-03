@@ -7092,29 +7092,6 @@ def collect_harbor_results(
                 f"Harbor job directory was not created: {with_job_name}",
             )
             with_job_failure = _published_job_failure(with_job_failure)
-            summary_dir = agent_dir / "with-skill"
-            summary_dir.mkdir(parents=True, exist_ok=True)
-            _write_generated_root_json(
-                summary_dir / "summary.json",
-                output_dir,
-                {
-                    "agent": agent,
-                    "model": agent_model,
-                    "model_source": agent_model_source,
-                    "scores": {},
-                    "custom_scores": {},
-                    "overall_score": None,
-                    "metric_set": fallback_metric_set,
-                    "metrics": list(fallback_metrics),
-                    "dimensions": {},
-                    "num_trials": 0,
-                    "num_reward_rows": 0,
-                    "mixed_metric_contracts": False,
-                    "pass_at_k": {},
-                    "job_failure": with_job_failure,
-                    "trial_failures": [],
-                },
-            )
 
         if not with_execution:
             with_execution = _condition_execution_summary(
@@ -7130,6 +7107,8 @@ def collect_harbor_results(
             )
         # A skipped with-skill arm still writes its summary: report loading keys
         # agent presence on it, and its "skipped" status marks a baseline-only run.
+        # A with-skill job that never started records the requested grading
+        # policy, like an arm whose attempts all failed.
         if with_job_dir is None:
             summary_dir = agent_dir / "with-skill"
             summary_dir.mkdir(parents=True, exist_ok=True)
@@ -7143,7 +7122,9 @@ def collect_harbor_results(
                     "scores": {},
                     "custom_scores": {},
                     "overall_score": None,
+                    **({} if skip_with_skill else {"metric_set": fallback_metric_set}),
                     "metrics": [],
+                    **({} if skip_with_skill else {"score_policy": fallback_policy}),
                     "dimensions": {},
                     "num_trials": 0,
                     "num_reward_rows": 0,
@@ -7333,30 +7314,6 @@ def collect_harbor_results(
                     f"Harbor job directory was not created: {without_job_name}",
                 )
                 without_job_failure = _published_job_failure(without_job_failure)
-                summary_dir = agent_dir / "without-skill"
-                summary_dir.mkdir(parents=True, exist_ok=True)
-                _write_generated_root_json(
-                    summary_dir / "summary.json",
-                    output_dir,
-                    {
-                        "agent": agent,
-                        "model": agent_model,
-                        "model_source": agent_model_source,
-                        "scores": {},
-                        "custom_scores": {},
-                        "overall_score": None,
-                        "metric_set": fallback_metric_set,
-                        "metrics": list(fallback_metrics),
-                        "score_policy": fallback_policy,
-                        "dimensions": {},
-                        "num_trials": 0,
-                        "num_reward_rows": 0,
-                        "mixed_metric_contracts": False,
-                        "pass_at_k": {},
-                        "job_failure": without_job_failure,
-                        "trial_failures": [],
-                    },
-                )
 
         if not without_execution:
             without_execution = _condition_execution_summary(
@@ -7383,6 +7340,7 @@ def collect_harbor_results(
                     "scores": {},
                     "custom_scores": {},
                     "overall_score": None,
+                    "metric_set": fallback_metric_set,
                     "metrics": [],
                     "score_policy": fallback_policy,
                     "dimensions": {},

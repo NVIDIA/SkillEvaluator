@@ -384,11 +384,11 @@ All notable changes to SkillEvaluator are documented in this file.
   set and `skill-evaluator-dimension-mean-v1` policy. That condition's
   `summary.json`, the agent's recorded metrics and score policies,
   `attempt_policy.json`, and the report's score definition now carry the
-  `custom-only` metric set and `custom-overall-v1` policy; a Harbor job that
-  never started records the same score policy. A failed custom-only agent is
-  therefore no longer treated as a standard agent. Scores were already cleared
-  for these conditions, and observed rewards still determine their own metric
-  set.
+  `custom-only` metric set and `custom-overall-v1` policy. When a Harbor job
+  never started, both conditions' persisted `summary.json` files record that
+  metric set and policy. A failed custom-only agent is therefore no longer
+  treated as a standard agent. Scores were already cleared for these
+  conditions, and observed rewards still determine their own metric set.
 
 - PII email scans recognize all RFC 2606 reserved domains, including their
   subdomains, mixed-case forms, trailing dots, and prose ellipses. A local-part

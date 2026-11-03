@@ -2035,7 +2035,9 @@ class SecurityValidator(ValidatorBase):
                     if raster_note is not None:
                         result.add_warning(raster_note)
                     else:
-                        result.add_error(_skillspector_incomplete_analysis_error(completeness_status, ledger_exceptions))
+                        result.add_error(
+                            _skillspector_incomplete_analysis_error(completeness_status, ledger_exceptions)
+                        )
                         result.mark_scan_incomplete(stage_name)
 
         status = data.get("status")

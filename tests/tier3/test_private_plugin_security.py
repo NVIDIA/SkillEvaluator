@@ -241,6 +241,20 @@ def test_current_rm_xargs_and_symlink_hardening_is_retained(security, command, d
     assert ("destructive_command" in kinds(security.scan_plugin_security([call(command)]))) is destructive
 
 
+@pytest.mark.parametrize(
+    "calls,destructive",
+    [
+        ([call("rm -f out.txt")], False),
+        ([call("cd /app"), call("rm -f out.txt")], False),
+        ([call("cd /etc"), call("rm -f hosts")], True),
+        ([call("rm -f hosts", workdir="/etc")], True),
+        ([call("find / -name '*.so' -exec rm -f {} +")], True),
+    ],
+)
+def test_force_only_rm_follows_cd_and_find_start_paths(security, calls, destructive):
+    assert ("destructive_command" in kinds(security.scan_plugin_security(calls))) is destructive
+
+
 def test_ordinary_security_api_is_unchanged_and_does_not_plant_canaries():
     from skillevaluator.tier3.eval_core import checks
 

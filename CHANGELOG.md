@@ -387,10 +387,14 @@ All notable changes to SkillEvaluator are documented in this file.
   `rm -f out.txt && python run.py` or `find . -name '*.pyc' -exec rm -f {} \;`
   received a critical destructive-command finding and a security score of 0.0
   in both graders, which could fail the Security dimension and the Tier 3
-  verdict. Force-only deletion keeps the finding when a literal target resolves
-  under `/bin`, `/boot`, `/etc`, `/home`, `/lib*`, `/root`, `/sbin`, `/usr`, or
-  `/var` (except `/var/tmp`), or under `~` or `$HOME`. Recursive deletion and
-  `xargs rm -f` are graded as before.
+  verdict. Force-only deletion keeps the finding when a target resolves under
+  `/bin`, `/boot`, `/etc`, `/home`, `/lib*`, `/root`, `/sbin`, `/usr`, or
+  `/var` (except `/var/tmp`), or under `~` or `$HOME`. Brace lists and dot
+  globs are expanded first, `find -exec rm -f {}` is checked against find's
+  start paths, and a relative target also resolves against directories that a
+  `cd`, `pushd`, or the tool call's `workdir` names, so
+  `find / -exec rm -f {} +` and `cd /etc && rm -f hosts` keep the finding.
+  Recursive deletion and `xargs rm -f` are graded as before.
 
 - Tier 3 security grading preserves ordinary nested `/tmp` cleanup, including
   child operands with trailing slashes, unless the current or an earlier

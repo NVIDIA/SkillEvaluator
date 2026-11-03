@@ -356,6 +356,18 @@ _SENSITIVE_WRITE_PATHS = [
 _RM_FORCE_PROTECTED_ROOTS = frozenset(
     {"bin", "boot", "etc", "home", "lib", "lib32", "lib64", "libx32", "root", "sbin", "usr", "var"}
 )
+# find runs these actions' commands on every file under its start paths.
+_RM_FIND_EXEC_ACTIONS = frozenset({"-exec", "-execdir", "-ok", "-okdir"})
+# A cd or pushd changes the directory a later relative rm target resolves
+# against. Options are skipped; a bare cd goes to the home directory.
+_RM_CD_RE = re.compile(
+    r"(?:^|[\s;&|('\"`{])(?:cd|pushd)(?:[ \t]+(?:--|-[A-Za-z@]+))*"
+    r"(?:[ \t]+([^\s;&|()<>]+)|(?=[ \t]*(?:$|[\n;&|)'\"`])))"
+)
+# Brace expansion beyond this many words, or more dot-glob components that can
+# match "..", leaves an rm target unresolved, so it is treated as protected.
+_RM_MAX_BRACE_WORDS = 256
+_RM_MAX_DOT_GLOB_COMPONENTS = 4
 
 # apply_patch writes every file named by an "*** Add File: ", "*** Update File: ",
 # "*** Delete File: ", or "*** Move to: " header, so each header path is a write
@@ -2142,19 +2154,178 @@ def _rm_tmp_operand_is_exempt(operand: str, *, symlink_seen: bool) -> bool:
     return inside_tmp
 
 
-def _rm_force_operand_is_protected(operand: str) -> bool:
+def _rm_brace_sequence(body: str, limit: int) -> list[str] | None:
+    """Return the words of a bash ``{a..b[..step]}`` sequence, [] when *body* is not one, None past *limit*."""
+    match = re.fullmatch(r"([+-]?\d+|[A-Za-z])\.\.([+-]?\d+|[A-Za-z])(?:\.\.([+-]?\d+))?", body)
+    if match is None or match.group(1).isalpha() != match.group(2).isalpha():
+        return []
+    first, last, step_text = match.groups()
+    step = abs(int(step_text or 1)) or 1
+    if first.isalpha():
+        start, stop = ord(first), ord(last)
+    else:
+        start, stop = int(first), int(last)
+    if abs(stop - start) // step + 1 > limit:
+        return None
+    values = range(start, stop + (1 if stop >= start else -1), step if stop >= start else -step)
+    if first.isalpha():
+        return [chr(value) for value in values]
+    padded = any(re.fullmatch(r"[+-]?0\d+", value) for value in (first, last))
+    width = max(len(first), len(last)) if padded else 0
+    return [f"{value:0{width}d}" for value in values]
+
+
+def _rm_brace_words(word: str, limit: int = _RM_MAX_BRACE_WORDS) -> list[str] | None:
+    """Expand bash brace lists and sequences in an rm target, or None past *limit* words.
+
+    ``${...}`` is a parameter expansion, not a brace list, and stays as written.
+    """
+    if word.count("{") > 64:
+        return None
+    index = 0
+    while (index := word.find("{", index)) >= 0:
+        if index and word[index - 1] == "$":
+            index += 1
+            continue
+        depth = 0
+        commas: list[int] = []
+        for end in range(index, len(word)):
+            char = word[end]
+            if char == "{":
+                depth += 1
+            elif char == "}":
+                depth -= 1
+                if not depth:
+                    break
+            elif char == "," and depth == 1:
+                commas.append(end)
+        else:
+            index += 1  # An unmatched brace is literal text.
+            continue
+        if commas:
+            bounds = [index, *commas, end]
+            alternatives: list[str] | None = [word[bounds[i] + 1 : bounds[i + 1]] for i in range(len(commas) + 1)]
+        else:
+            alternatives = _rm_brace_sequence(word[index + 1 : end], limit)
+            if alternatives == []:
+                index += 1  # "{x}" is literal, but a brace list inside it still expands.
+                continue
+        if alternatives is None:
+            return None
+        words: list[str] = []
+        for alternative in alternatives:
+            expanded = _rm_brace_words(word[:index] + alternative + word[end + 1 :], limit - len(words))
+            if expanded is None or len(words) + len(expanded) > limit:
+                return None
+            words.extend(expanded)
+        return words
+    return [word]
+
+
+def _rm_dot_glob_paths(word: str) -> list[str] | None:
+    """Spell *word* with each combination of its dot globs before the last component read as "..".
+
+    A pattern such as ``.*`` matches ".." in bash, so ``/tmp/.*/etc/hosts`` reaches
+    /etc. rm refuses a final "..", so the last component is left as written.
+    """
+    components = word.replace("\\", "/").split("/")
+    last = max((index for index, component in enumerate(components) if component), default=0)
+    dot_globs = [
+        index
+        for index, component in enumerate(components[:last])
+        if component.startswith(".") and any(char in component for char in "*?[") and fnmatchcase("..", component)
+    ]
+    if len(dot_globs) > _RM_MAX_DOT_GLOB_COMPONENTS:
+        return None
+    paths = []
+    for mask in range(1 << len(dot_globs)):
+        spelled = list(components)
+        for bit, index in enumerate(dot_globs):
+            if mask >> bit & 1:
+                spelled[index] = ".."
+        paths.append("/".join(spelled))
+    return paths
+
+
+def _rm_force_operand_is_protected(operand: str, workdirs: tuple[str, ...] = (_APPLY_PATCH_DEFAULT_WORKDIR,)) -> bool:
     """Flag force-only deletion of system or home paths, resolved lexically.
 
-    Home shorthands map under /home and relative targets resolve against the
-    container WORKDIR, as apply_patch paths do. Unresolved targets are treated
-    like those of a plain rm.
+    Home shorthands map under /home and a relative target resolves against each
+    of *workdirs*: the container WORKDIR plus directories a ``cd`` named.
+    Brace lists and dot globs are expanded first. Unresolved targets are
+    treated like those of a plain rm.
     """
-    components = _normalized_write_path(operand, _APPLY_PATCH_DEFAULT_WORKDIR).split("/")[1:]
-    root = components[0]
-    if not root or any(char in root for char in "*?["):
-        # "/" or a glob at the top level ("/*", "/e*/hosts") can name any protected root.
+    words = _rm_brace_words(operand)
+    if words is None:
         return True
-    return root in _RM_FORCE_PROTECTED_ROOTS and components[:2] != ["var", "tmp"]
+    for word in words:
+        paths = _rm_dot_glob_paths(word)
+        if paths is None:
+            return True
+        for path in paths:
+            for workdir in workdirs:
+                components = _normalized_write_path(path, workdir).split("/")[1:]
+                root = components[0]
+                if not root or any(char in root for char in "*?["):
+                    # "/" or a glob at the top level ("/*", "/e*/hosts") can name any protected root.
+                    return True
+                if root in _RM_FORCE_PROTECTED_ROOTS and components[:2] != ["var", "tmp"]:
+                    return True
+    return False
+
+
+def _rm_find_exec_protected(tokens: list[str], rm_index: int, workdirs: tuple[str, ...]) -> bool:
+    """True when a find whose -exec, -execdir, -ok or -okdir runs ``tokens[rm_index]`` starts at a protected path.
+
+    find hands the command every file under its start paths, so they, not the
+    ``{}`` placeholder, are the deletion targets. No start path means ".".
+    """
+    start = rm_index
+    while start and not (tokens[start - 1] in _SHELL_SEPARATORS or re.fullmatch(r"[;&|()]+", tokens[start - 1])):
+        start -= 1
+    words = [token.replace(_QUOTED_SYNTAX_MARK, "") for token in tokens[start:rm_index]]
+    find_index = next((index for index, word in enumerate(words) if _shell_executable(word) == "find"), None)
+    if find_index is None or not _RM_FIND_EXEC_ACTIONS.intersection(words[find_index + 1 :]):
+        return False
+    paths: list[str] = []
+    index = find_index + 1
+    while index < len(words):
+        word = words[index]
+        if word in {"-H", "-L", "-P", "-E", "-X", "-d", "-s", "-x"} or word.startswith("-O"):
+            index += 1
+        elif word == "-D":
+            index += 2
+        elif word == "-f" and index + 1 < len(words):  # BSD find names a start path with -f.
+            paths.append(words[index + 1])
+            index += 2
+        else:
+            break
+    while index < len(words) and not words[index].startswith(("-", "(", ")", "!", ",")):
+        paths.append(words[index])
+        index += 1
+    return any(_rm_force_operand_is_protected(path, workdirs) for path in paths or ["."])
+
+
+def _rm_action_workdirs(tool_call: dict[str, Any], action_text: str, workdirs: tuple[str, ...]) -> tuple[str, ...]:
+    """Add the directories this action can run rm from to *workdirs*; the last entry is the current one.
+
+    A shell can keep its directory between calls, so earlier entries stay. The
+    call's ``workdir`` or ``cwd`` argument and every ``cd`` or ``pushd`` in the
+    action count, wherever they appear relative to the rm.
+    """
+    current = workdirs[-1]
+    seen = list(workdirs)
+    args = _action_args(tool_call)
+    for key in ("workdir", "cwd"):
+        if value := _string_argument(args.get(key)).strip():
+            current = _normalized_write_path(value, current)
+            seen.append(current)
+            break
+    for match in _RM_CD_RE.finditer(action_text):
+        current = _normalized_write_path(match.group(1) or "~", current)
+        seen.append(current)
+    unique = [directory for directory in dict.fromkeys(seen) if directory != current]
+    return (*unique, current)
 
 
 def _rm_xargs_fallback(command_text: str) -> bool:
@@ -2170,7 +2341,14 @@ def _rm_xargs_fallback(command_text: str) -> bool:
     )
 
 
-def _rm_targets_fallback(command_text: str, _depth: int, *, _symlink_seen: bool = False) -> bool:
+def _rm_targets_fallback(
+    command_text: str,
+    _depth: int,
+    *,
+    _symlink_seen: bool = False,
+    _workdirs: tuple[str, ...] = (_APPLY_PATCH_DEFAULT_WORKDIR,),
+    _find_protected: bool = False,
+) -> bool:
     """Confine parse failures and budgets to candidate deletion commands.
 
     Raw separators can cut a quoted word or substitution short; that fragment
@@ -2187,7 +2365,13 @@ def _rm_targets_fallback(command_text: str, _depth: int, *, _symlink_seen: bool 
         fragment = tail[: separator.start()] if separator else tail
         if len(fragment) > 65_536 or fragment == command_text:
             return True
-        if _rm_targets_outside_tmp(fragment, _depth + 1, _symlink_seen=_symlink_seen):
+        if _rm_targets_outside_tmp(
+            fragment,
+            _depth + 1,
+            _symlink_seen=_symlink_seen,
+            _workdirs=_workdirs,
+            _find_protected=_find_protected,
+        ):
             return True
     return False
 
@@ -2235,6 +2419,8 @@ def _rm_targets_outside_tmp(
     *,
     _xargs_only: bool = False,
     _symlink_seen: bool = False,
+    _workdirs: tuple[str, ...] = (_APPLY_PATCH_DEFAULT_WORKDIR,),
+    _find_protected: bool = False,
 ) -> bool:
     """Withhold nested /tmp cleanup exemptions after observed link creation.
 
@@ -2243,6 +2429,9 @@ def _rm_targets_outside_tmp(
     shell payloads, while keeping that broad detection behavior.
     The xargs-only query extends the regex gate to operandless xargs invocations
     without changing detection of unrelated operandless rm commands.
+    A force-only rm is checked against *_workdirs*, the directories a relative
+    target can resolve against; *_find_protected* marks script text that an
+    enclosing find -exec runs on a protected tree.
     """
     if _depth > 3:
         return _rm_xargs_fallback(command_text) if _xargs_only else True
@@ -2254,6 +2443,8 @@ def _rm_targets_outside_tmp(
                 command_text,
                 _depth,
                 _symlink_seen=_symlink_seen or _rm_symlink_creation_seen(command_text),
+                _workdirs=_workdirs,
+                _find_protected=_find_protected,
             )
         )
     if _xargs_only and "xargs" not in command_text.casefold():
@@ -2272,6 +2463,8 @@ def _rm_targets_outside_tmp(
                 command_text,
                 _depth,
                 _symlink_seen=_symlink_seen or _rm_symlink_creation_seen(command_text),
+                _workdirs=_workdirs,
+                _find_protected=_find_protected,
             )
         )
     tokens, payloads = tokenized
@@ -2283,13 +2476,22 @@ def _rm_targets_outside_tmp(
                 command_text,
                 _depth,
                 _symlink_seen=_symlink_seen or _rm_symlink_creation_seen(command_text),
+                _workdirs=_workdirs,
+                _find_protected=_find_protected,
             )
         )
     commands = _rm_sequential_commands(command_text, tokens)
     if commands is not None and len(commands) > 1:
         seen = _symlink_seen
         for command in commands:
-            if _rm_targets_outside_tmp(command, _depth, _xargs_only=_xargs_only, _symlink_seen=seen):
+            if _rm_targets_outside_tmp(
+                command,
+                _depth,
+                _xargs_only=_xargs_only,
+                _symlink_seen=seen,
+                _workdirs=_workdirs,
+                _find_protected=_find_protected,
+            ):
                 return True
             seen |= _rm_symlink_creation_seen(command)
         return False
@@ -2312,6 +2514,8 @@ def _rm_targets_outside_tmp(
             _depth + 1,
             _xargs_only=_xargs_only,
             _symlink_seen=_symlink_seen,
+            _workdirs=_workdirs,
+            _find_protected=_find_protected,
         ):
             return True
     for index, token in enumerate(tokens):
@@ -2320,6 +2524,8 @@ def _rm_targets_outside_tmp(
             _depth + 1,
             _xargs_only=_xargs_only,
             _symlink_seen=_symlink_seen,
+            _workdirs=_workdirs,
+            _find_protected=_find_protected or _rm_find_exec_protected(tokens, index, _workdirs),
         ):
             return True
         if not re.search(r"\brm$", token):
@@ -2369,7 +2575,11 @@ def _rm_targets_outside_tmp(
             continue
         if not recursive:
             # Without recursion, -f only silences prompts and missing-file errors.
-            if any(_rm_force_operand_is_protected(operand) for operand in operands):
+            if (
+                _find_protected
+                or any(_rm_force_operand_is_protected(operand, _workdirs) for operand in operands)
+                or _rm_find_exec_protected(tokens, index, _workdirs)
+            ):
                 return True
             continue
         # Nested script strings can end before a dynamic target is appended.
@@ -2421,6 +2631,7 @@ def check_security(
 
     target_skill_seen = False
     symlink_seen = False
+    rm_workdirs: tuple[str, ...] = (_APPLY_PATCH_DEFAULT_WORKDIR,)
     for tc in tool_calls:
         action = str(tc.get("action", ""))
         observation = str(tc.get("observation", ""))
@@ -2460,6 +2671,7 @@ def check_security(
         exec_evidence = _apply_patch_command_evidence(action_text) if shell_patch else action_text
 
         if is_exec_tool:
+            rm_workdirs = _rm_action_workdirs(tc, action_text, rm_workdirs)
             # This trace-wide signal covers moved or replaced links without
             # claiming to resolve their destinations or inspect the filesystem.
             for pattern, label in _DESTRUCTIVE_PATTERNS:
@@ -2475,7 +2687,10 @@ def check_security(
                             _symlink_seen=symlink_seen,
                         )
                     )
-                ) and (label != "rm -rf" or _rm_targets_outside_tmp(action_text, _symlink_seen=symlink_seen)):
+                ) and (
+                    label != "rm -rf"
+                    or _rm_targets_outside_tmp(action_text, _symlink_seen=symlink_seen, _workdirs=rm_workdirs)
+                ):
                     findings.append(
                         _security_finding(
                             finding_type="destructive_command",

@@ -3979,6 +3979,7 @@ def scan_plugin_security(
     )
     symlink_seen = False
     target_seen = False
+    rm_workdirs = (_current_checks._APPLY_PATCH_DEFAULT_WORKDIR,)
     for tool_call in tool_calls:
         if _tool_mentions_any_skill(tool_call, expected_skill, acceptable_skills):
             target_seen = True
@@ -3986,7 +3987,8 @@ def scan_plugin_security(
         if not any(hint in action.lower() for hint in _EXECUTION_TOOL_HINTS):
             continue
         text = _action_text(tool_call)
-        if _current_checks._rm_targets_outside_tmp(text, _symlink_seen=symlink_seen):
+        rm_workdirs = _current_checks._rm_action_workdirs(tool_call, text, rm_workdirs)
+        if _current_checks._rm_targets_outside_tmp(text, _symlink_seen=symlink_seen, _workdirs=rm_workdirs):
             result["findings"].append(
                 _security_finding(
                     finding_type="destructive_command",

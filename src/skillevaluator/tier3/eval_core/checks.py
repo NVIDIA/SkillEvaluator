@@ -387,17 +387,35 @@ _APPLY_PATCH_SHELL_PATH_RE = re.compile(r"[;&|<>()$`~]")
 _APPLY_PATCH_OUTPUT_USE_RE = re.compile(r"[|>`]|[$<]\(")
 # Relative header paths resolve against the container WORKDIR unless the call
 # names another directory, for example Codex's "cd <dir> && apply_patch <<'EOF'".
-# A cd, pushd or popd command, its options ("cd -P", "cd --") and its operand, if
-# any; a bare "cd" goes to the home directory.
+# A cd, pushd or popd command, its options ("cd -P", "cd --", "pushd -n") and its
+# operand, if any; a bare "cd" goes to the home directory. The groups are named
+# because eval_core.plugin_security reads them too.
 _APPLY_PATCH_DEFAULT_WORKDIR = "/workspace"
 _APPLY_PATCH_CD_RE = re.compile(
-    r"(?:^|[\s;&|('\"])(cd|pushd|popd)(?:[ \t]+-(?:-|[A-Za-z@]+))*(?:[ \t]+([^\s;&|()<>]+))?(?=[\s;&|()<>]|$)"
+    r"(?:^|[\s;&|('\"])(?P<command>cd|pushd|popd)(?P<options>(?:[ \t]+-(?:-|[A-Za-z@]+))*)"
+    r"(?:[ \t]+(?P<operand>[^\s;&|()<>]+))?(?=[\s;&|()<>]|$)"
 )
 # A directory operand or workdir value that cannot be resolved without running the
 # shell, once a leading home shorthand is removed: a variable or substitution other
 # than $HOME, a cmd.exe variable, "cd -" or a pushd stack index, or a line
 # continuation.
 _APPLY_PATCH_UNSETTLED_DIR_RE = re.compile(r"[$`{%]|^[-+]|\\$")
+# Shell text before apply_patch in which the last cd/pushd/popd need not be the one
+# that sets apply_patch's directory: a subshell "(...)", a pipeline or a background
+# job (each runs its cd in a subshell), "||", a compound-command keyword ("if ...
+# then cd ~; else cd /workspace; fi"), or "&&" followed later by another list, as
+# in "false && cd /workspace; apply_patch".
+_APPLY_PATCH_UNSETTLED_PREFIX_RE = re.compile(
+    r"[()]|\|[|&]|(?<![|&>])[|&](?![|&>])|&&[^\n;]*[\n;]"
+    r"|(?:^|[\s;&|])(?:if|then|else|elif|fi|case|esac|while|until|for|select|do|done|function)(?=[\s;]|$)"
+)
+# "/proc/self/root", "/proc/thread-self/root", "/proc/<pid>/root" and
+# "/proc/<pid>/task/<tid>/root" name a process's root directory, "/" inside the
+# agent container.
+_PROC_ROOT_ALIAS_RE = re.compile(r"proc/(?:self|thread-self|[0-9]+)(?:/task/[0-9]+)?/root")
+# The directory a relative header is resolved against to read it on its own: a
+# name no real directory has, so ".." out of it is visible.
+_RELATIVE_HEADER_ROOT = "/\x00"
 # Shell spellings of a home directory ("~", "~user", "$HOME", "${HOME}", and on
 # Windows "%USERPROFILE%" or PowerShell's "$env:USERPROFILE") become an absolute
 # placeholder before ".." segments are resolved.
@@ -592,13 +610,38 @@ def _apply_patch_call(tool_call: dict[str, Any], action_lower: str, is_exec_tool
         if value := _string_argument(args.get(key)).strip():
             workdir = _resolved_workdir(value, workdir)
             break
+    changes_directory = False
     for match in _APPLY_PATCH_CD_RE.finditer(cd_prefix):
-        command, operand = match.groups()
-        if command == "popd" or (operand is None and command == "pushd"):
+        command, options, operand = match.group("command", "options", "operand")
+        if command != "cd" and "n" in options:
+            # "pushd -n" and "popd -n" edit the directory stack without changing directory.
+            continue
+        changes_directory = True
+        if command == "popd" or (operand is None and command == "pushd") or _unsettled_cd_operand(operand):
             workdir = None
         else:
             workdir = _resolved_workdir(operand or "~", workdir)
+    if changes_directory and _APPLY_PATCH_UNSETTLED_PREFIX_RE.search(cd_prefix):
+        workdir = None
     return patch, workdir, shell
+
+
+def _unsettled_cd_operand(operand: str | None) -> bool:
+    """Return whether a shell ``cd`` *operand* keeps quoting the lexical reading does not remove.
+
+    One surrounding pair of quotes is read as the shell reads it. A quote or a
+    backslash left after that (``/r"o"ot``, ``"/root"/``, ``/r\\oot``) is removed by
+    the shell, so the directory is not the operand as written. A Windows drive path
+    (``C:\\Users\\agent``) keeps its backslashes as separators.
+    """
+    if not operand:
+        return False
+    text = operand
+    if len(text) >= 2 and text[0] == text[-1] and text[0] in "'\"":
+        text = text[1:-1]
+    if "'" in text or '"' in text:
+        return True
+    return "\\" in text and not _WINDOWS_DRIVE_PREFIX_RE.match(text[:3].lower().replace("\\", "/"))
 
 
 def _resolved_workdir(target: str, workdir: str | None) -> str | None:
@@ -621,7 +664,10 @@ def _normalized_write_path(target: Any, workdir: str) -> str:
 
     A home shorthand becomes "/home/~", a Windows drive path keeps its drive as the
     first segment ("/c:/users/..."), a relative path is joined onto *workdir*, and
-    ".." segments are resolved, clamping at "/" because "/.." is "/".
+    ".." segments are resolved, clamping at "/" because "/.." is "/". A
+    "/proc/self/root" prefix (or "thread-self", a pid or a task) names the root
+    directory, so it resets the path to "/": "/proc/1/root/etc/shadow" is
+    "/etc/shadow" and "/proc/self/root/../root" is "/root".
     """
     # OpenCode trims header paths with JavaScript's trim(), which also strips U+FEFF.
     cleaned = str(target).replace("\ufeff", " ").lower().replace("\\", "/").strip().strip("'\"<>")
@@ -630,7 +676,16 @@ def _normalized_write_path(target: Any, workdir: str) -> str:
         cleaned = f"/{cleaned}"
     elif not cleaned.startswith("/"):
         cleaned = f"{workdir}/{cleaned}"
-    return "/" + "/".join(part for part in _lexical_path_components(cleaned) if part != "..")
+    parts: list[str] = []
+    for part in cleaned.split("/"):
+        if part == "..":
+            if parts:
+                parts.pop()
+        elif part and part != ".":
+            parts.append(part)
+            if part == "root" and _PROC_ROOT_ALIAS_RE.fullmatch("/".join(parts)):
+                parts = []
+    return "/" + "/".join(parts)
 
 
 def _protected_write_entry(target: str, workdir: str | None) -> str | None:
@@ -661,10 +716,30 @@ def _protected_write_entry(target: str, workdir: str | None) -> str | None:
     return None
 
 
+def _relative_dotfile_entry(target: str) -> str | None:
+    """Return the relative dotfile entry a relative *target* itself starts with, whatever its directory.
+
+    A relative header such as ".aws/credentials" or "./.config/gcloud/adc.json"
+    names a home credential store whenever the directory it resolves against is
+    the home directory. That directory is only read from the call (the default
+    WORKDIR, ``workdir``/``cwd``, ``cd``), and the agent's real WORKDIR is
+    configurable, so such a header stays protected wherever it resolves. A header
+    with a directory prefix, such as "project/.aws/credentials", does not match.
+    """
+    path = _normalized_write_path(target, _RELATIVE_HEADER_ROOT)
+    if not path.startswith(f"{_RELATIVE_HEADER_ROOT}/"):
+        return None
+    relative = path[len(_RELATIVE_HEADER_ROOT) + 1 :]
+    for entry in (*_SENSITIVE_WRITE_PATHS, *_UNAUTHORIZED_PATHS):
+        if entry.startswith(".") and (relative == entry or relative.startswith(f"{entry}/")):
+            return entry
+    return None
+
+
 def _apply_patch_protected_entry(patch: str, workdir: str | None) -> str | None:
     """Return the protected-path entry the first protected apply_patch file header targets."""
     for match in _APPLY_PATCH_HEADER_RE.finditer(patch):
-        if entry := _protected_write_entry(match.group(1), workdir):
+        if entry := _protected_write_entry(match.group(1), workdir) or _relative_dotfile_entry(match.group(1)):
             return entry
     return None
 
@@ -677,41 +752,38 @@ def _apply_patch_command_evidence(command: str) -> str:
     return f"{_redact_network_evidence(command[: body.start()].strip())[:400]} [apply_patch body omitted]".lstrip()
 
 
-def _without_plain_patch_headers(patch: str) -> str:
-    """Return *patch* without its file header lines, except those whose path holds shell syntax."""
+def _keeps_patch_header(path: str, workdir: str | None) -> bool:
+    """Return whether a header *path* stays in the command-text path checks of a shell apply_patch.
+
+    A path holding shell syntax stays (``_APPLY_PATCH_SHELL_PATH_RE``). So does a
+    path of several words when any one word is a protected path from *workdir*:
+    a shell copied to an apply_patch path runs ``x /root/.ssh/id_rsa`` as a
+    command with that word as an argument.
+    """
+    if _APPLY_PATCH_SHELL_PATH_RE.search(path):
+        return True
+    words = path.split()
+    return len(words) > 1 and any(_protected_write_entry(word, workdir) for word in words)
+
+
+def _without_plain_patch_headers(patch: str, workdir: str | None = _APPLY_PATCH_DEFAULT_WORKDIR) -> str:
+    """Return *patch* without its file header lines, except those ``_keeps_patch_header`` keeps."""
     return _APPLY_PATCH_HEADER_RE.sub(
-        lambda match: match.group(0) if _APPLY_PATCH_SHELL_PATH_RE.search(match.group(1)) else "", patch
+        lambda match: match.group(0) if _keeps_patch_header(match.group(1), workdir) else "", patch
     )
 
 
-def _apply_patch_heredoc_text(command: str) -> str:
-    """Return a shell *command* without the file header lines of each heredoc body fed to apply_patch.
+def _apply_patch_heredoc_pieces(command: str, workdir: str | None) -> list[str]:
+    """Split a shell *command* into text the shell reads and the stripped heredoc bodies it feeds apply_patch.
 
-    A body counts when its heredoc is the only one declared on its line and its
-    ``<<`` follows the apply_patch command word (``_APPLY_PATCH_HEREDOC_COMMAND_RE``),
-    so a ``bash <<EOF`` script keeps every line. A quoted heredoc (``<<'EOF'``)
-    body is data for apply_patch. An unquoted body is data too unless it holds
-    ``$`` or a backtick, which the shell expands, so such a body keeps every
-    header line. Lines outside these bodies, such as a header-shaped line after
-    the terminator, are kept, and so is a header whose path holds shell syntax
-    (``_without_plain_patch_headers``).
-
-    A body also counts only where every shell ends it at the same line: its
-    delimiter is one plain word (``_APPLY_PATCH_HEREDOC_WORD_RE``), its terminator
-    line is present, and no earlier body line starts with the terminator (bash
-    also ends a body at ``EOF)`` inside ``$(...)``). Anything else this reading
-    does not settle keeps every line: heredocs that cannot be read, a comment or
-    ANSI-C quote before the operator (``_APPLY_PATCH_UNMODELLED_SHELL_RE``), an
-    operator line that continues the line before it, and the apply_patch name
-    used anywhere else in the command, as when it defines an apply_patch function.
-    The whole command is also kept when its shell text can send apply_patch's
-    output, which names every added file, somewhere else
-    (``_APPLY_PATCH_OUTPUT_USE_RE``): a pipe, a redirection, or a command or
-    process substitution.
+    The result alternates shell text and bodies (``_without_plain_patch_headers``)
+    and ends with shell text, so ``pieces[::2]`` is the shell text and
+    ``len(pieces) // 2`` the number of stripped bodies. A command with no such
+    body is one piece. ``_apply_patch_heredoc_text`` documents which bodies count.
     """
     spans = _heredoc_body_spans(command, "bash") if "<<" in command else None
     if not spans:
-        return command
+        return [command]
     pieces: list[str] = []
     copied = 0
     position = 0
@@ -748,22 +820,66 @@ def _apply_patch_heredoc_text(command: str) -> str:
         ):
             continue
         body = command[line_end:end]
-        if delimiter.group(2)[0] not in "'\"" and any(char in body for char in "$`"):
+        # An unquoted body is expanded by the shell, and bash and zsh also join a
+        # backslash-newline before comparing a line with the terminator, so a body
+        # holding "$", a backtick or a backslash keeps every line.
+        if delimiter.group(2)[0] not in "'\"" and any(char in body for char in "$`\\"):
             continue
         pieces.append(command[copied:line_end])
-        pieces.append(_without_plain_patch_headers(body))
+        pieces.append(_without_plain_patch_headers(body, workdir))
         copied = end
     pieces.append(command[copied:])
-    # pieces alternate text the shell reads and stripped bodies, ending with text.
-    shell_text = "\n".join(pieces[::2])
-    if len(_APPLY_PATCH_COMMAND_RE.findall(shell_text)) != len(pieces) // 2:
-        return command
-    if _APPLY_PATCH_OUTPUT_USE_RE.search(shell_text):
+    return pieces
+
+
+def _apply_patch_bodies_are_data(shell_texts: list[str], bodies: int) -> bool:
+    """Return whether stripped apply_patch bodies are only data, judged from all of the shell text around them.
+
+    Every apply_patch name in *shell_texts* must declare one of the *bodies*, so no
+    function, alias or second command reuses the name, and no pipe, redirection or
+    substitution may send apply_patch's output, which names every added file,
+    somewhere else (``_APPLY_PATCH_OUTPUT_USE_RE``).
+    """
+    shell_text = "\n".join(shell_texts)
+    return len(_APPLY_PATCH_COMMAND_RE.findall(shell_text)) == bodies and not _APPLY_PATCH_OUTPUT_USE_RE.search(
+        shell_text
+    )
+
+
+def _apply_patch_heredoc_text(command: str, workdir: str | None = _APPLY_PATCH_DEFAULT_WORKDIR) -> str:
+    """Return a shell *command* without the file header lines of each heredoc body fed to apply_patch.
+
+    A body counts when its heredoc is the only one declared on its line and its
+    ``<<`` follows the apply_patch command word (``_APPLY_PATCH_HEREDOC_COMMAND_RE``),
+    so a ``bash <<EOF`` script keeps every line. A quoted heredoc (``<<'EOF'``)
+    body is data for apply_patch. An unquoted body is data too unless it holds
+    ``$``, a backtick or a backslash, which the shell expands or uses to join a
+    line onto the terminator, so such a body keeps every header line. Lines
+    outside these bodies, such as a header-shaped line after the terminator, are
+    kept, and so is a header ``_keeps_patch_header`` keeps.
+
+    A body also counts only where every shell ends it at the same line: its
+    delimiter is one plain word (``_APPLY_PATCH_HEREDOC_WORD_RE``), its terminator
+    line is present, and no earlier body line starts with the terminator (bash
+    also ends a body at ``EOF)`` inside ``$(...)``). Anything else this reading
+    does not settle keeps every line: heredocs that cannot be read, a comment or
+    ANSI-C quote before the operator (``_APPLY_PATCH_UNMODELLED_SHELL_RE``), an
+    operator line that continues the line before it, and the apply_patch name
+    used anywhere else in the command, as when it defines an apply_patch function.
+    The whole command is also kept when its shell text can send apply_patch's
+    output, which names every added file, somewhere else
+    (``_APPLY_PATCH_OUTPUT_USE_RE``): a pipe, a redirection, or a command or
+    process substitution.
+    """
+    pieces = _apply_patch_heredoc_pieces(command, workdir)
+    if len(pieces) == 1 or not _apply_patch_bodies_are_data(pieces[::2], len(pieces) // 2):
         return command
     return "".join(pieces)
 
 
-def _apply_patch_path_text(tool_call: dict[str, Any], patch: str) -> str:
+def _apply_patch_path_text(
+    tool_call: dict[str, Any], patch: str, workdir: str | None = _APPLY_PATCH_DEFAULT_WORKDIR
+) -> str:
     """Return the action text of a shell apply_patch call for the command-text path checks.
 
     ``_apply_patch_protected_entry`` already checked every file header path as a
@@ -772,9 +888,15 @@ def _apply_patch_path_text(tool_call: dict[str, Any], patch: str) -> str:
     apply_patch, and in a heredoc body fed to apply_patch
     (``_apply_patch_heredoc_text``). The rest of the command, the patch body and
     every other argument are kept, and so is a header-shaped line anywhere else,
-    such as after the heredoc terminator. A header whose path holds shell syntax
+    such as after the heredoc terminator. A header ``_keeps_patch_header`` keeps
     is always kept, because a shell may still run apply_patch's output or a
     renamed shell may be called apply_patch.
+
+    In any other argv command, each word is its own shell text, as for
+    ``bash -lc <script>``, but the guards of ``_apply_patch_bodies_are_data`` read
+    the shell text of every word together: a ``-c`` script can run a heredoc
+    passed as a positional or assignment word and pipe its output, or define an
+    apply_patch function, from another word.
     """
     args: dict[str, Any] = {}
     for key, value in _action_args(tool_call).items():
@@ -783,13 +905,15 @@ def _apply_patch_path_text(tool_call: dict[str, Any], patch: str) -> str:
         elif isinstance(value, (list, tuple)):
             argv = [str(part) for part in value]
             if argv and argv[0].replace("\\", "/").rsplit("/", 1)[-1].lower() in ("apply_patch", "applypatch"):
-                argv = [_without_plain_patch_headers(part) for part in argv]
+                argv = [_without_plain_patch_headers(part, workdir) for part in argv]
             else:
-                # Each word is its own shell text, as for "bash -lc <script>".
-                argv = [_apply_patch_heredoc_text(part) for part in argv]
+                word_pieces = [_apply_patch_heredoc_pieces(part, workdir) for part in argv]
+                shell_texts = [text for pieces in word_pieces for text in pieces[::2]]
+                if _apply_patch_bodies_are_data(shell_texts, sum(len(pieces) // 2 for pieces in word_pieces)):
+                    argv = ["".join(pieces) for pieces in word_pieces]
             args[key] = " ".join(argv)
         else:
-            args[key] = _apply_patch_heredoc_text(value)
+            args[key] = _apply_patch_heredoc_text(value, workdir)
     return _action_text({"action_input": args})
 
 
@@ -2612,7 +2736,7 @@ def check_security(
         # The command-text path checks below read a shell apply_patch without the
         # file headers that are only data for apply_patch, which
         # _apply_patch_protected_entry already checked.
-        path_text_lower = _apply_patch_path_text(tc, patch).lower() if shell_patch else action_text_lower
+        path_text_lower = _apply_patch_path_text(tc, patch, patch_workdir).lower() if shell_patch else action_text_lower
 
         if is_exec_tool:
             # This trace-wide signal covers moved or replaced links without

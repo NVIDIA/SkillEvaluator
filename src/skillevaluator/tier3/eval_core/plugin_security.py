@@ -3371,7 +3371,13 @@ def security_patch_paths(tool_call, action_lower, is_exec_tool, cwd=_SECURITY_DE
             cwd = security_path(value, cwd, anchors) or cwd
             break
     for match in _APPLY_PATCH_CD_RE.finditer(prefix):
-        cwd = security_path(match.group(1), cwd, anchors) or cwd
+        command, options, operand = match.group("command", "options", "operand")
+        # A bare "cd" goes home. popd, a bare pushd and "pushd -n" leave the directory to
+        # the shell's stack, so the last known directory stays.
+        if command == "cd":
+            cwd = security_path(operand or "~", cwd, anchors) or cwd
+        elif command == "pushd" and operand and "n" not in options:
+            cwd = security_path(operand, cwd, anchors) or cwd
     paths = []
     for match in _APPLY_PATCH_HEADER_RE.finditer(patch):
         # OpenCode trims header paths with JavaScript's trim(), which also strips U+FEFF.

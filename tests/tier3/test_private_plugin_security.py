@@ -475,3 +475,31 @@ def test_truncated_quoted_credential_is_omitted_from_evidence(security, quote):
     result = security.scan_plugin_security([call(command)])
     assert "destructive_command" in kinds(result)
     assert "private-value" not in " ".join(finding.get("evidence", "") for finding in result["findings"])
+
+
+def _apply_patch_heredoc(prefix, header):
+    return f"{prefix} <<'EOF'\n*** Begin Patch\n*** Add File: {header}\n+x\n*** End Patch\nEOF"
+
+
+@pytest.mark.parametrize(
+    "prefix,header,path",
+    [
+        ("cd ~ && apply_patch", ".bashrc", "~/.bashrc"),
+        ("cd && apply_patch", ".bashrc", "~/.bashrc"),
+        ("cd -P ~ && apply_patch", ".aws/credentials", "~/.aws/credentials"),
+        ("cd /root && apply_patch", ".ssh/authorized_keys", "~/.ssh/authorized_keys"),
+        ("cd /etc && apply_patch", "sudoers.d/x", "/etc/sudoers.d/x"),
+        ("pushd /root && apply_patch", ".bashrc", "~/.bashrc"),
+        # popd, a bare pushd and "pushd -n" leave the last known directory.
+        ("cd ~ && pushd -n /workspace && apply_patch", ".bashrc", "~/.bashrc"),
+        ("cd ~ && popd && apply_patch", ".bashrc", "~/.bashrc"),
+        ("cd ~ && pushd && apply_patch", ".bashrc", "~/.bashrc"),
+    ],
+)
+def test_apply_patch_after_cd_resolves_the_shell_directory(security, prefix, header, path):
+    tool_call = call(_apply_patch_heredoc(prefix, header))
+
+    assert security.security_patch_paths(tool_call, "bash", True) == [path]
+    result = security.scan_plugin_security([tool_call])
+    assert result["score"] == 0
+    assert "sensitive_file_write" in kinds(result)

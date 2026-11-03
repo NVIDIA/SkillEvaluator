@@ -1,12 +1,5 @@
 title = "SkillEvaluator Gitleaks configuration"
 
-[[allowlists]]
-description = "Synthetic API header in a retired prerequisite regression fixture"
-condition = "AND"
-targetRules = ["generic-api-key"]
-commits = ["90e198216f9fe1f33efed3ce9ec55eb664ee6637"]
-paths = ['''^tests/tier3/test_private_runtime_regressions\.py$''']
-
 [extend]
 useDefault = true
 
@@ -51,3 +44,10 @@ condition = "AND"
 targetRules = ["generic-api-key"]
 regexes = ["^abcd1234secret$"]
 paths = ["^tests/validators/test_plugin_component_risk[.]py$"]
+
+[[allowlists]]
+description = "Synthetic MCP header value used by private runtime credential rejection tests"
+condition = "AND"
+targetRules = ["generic-api-key"]
+regexes = ['''^0123456789abcdef0123456789abcdef$''']
+paths = ['''^tests/tier3/test_(private_runtime_regressions|native_mcp_policy)\.py$''']

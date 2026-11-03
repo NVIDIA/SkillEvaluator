@@ -13,10 +13,12 @@ written only beneath the bundle root, and never through an existing link.
 from __future__ import annotations
 
 import os
+import re
 import stat
-from collections.abc import Sequence
+from collections.abc import Mapping, Sequence
 from dataclasses import dataclass
 from pathlib import Path, PurePosixPath
+from typing import Any
 
 from skillevaluator.plugin_member_paths import is_env_file
 from skillevaluator.tier3.harbor.secure_copy import UnsafeStagingError, copy_file_secure, copytree_secure
@@ -45,6 +47,11 @@ _PLUGIN_TREE_IGNORED_ROOT = frozenset(
         "monitors",
         ".claude",
     }
+)
+_CLAUDE_RUNTIME_PATH_REF = re.compile(
+    # A default (${VAR:-x}) is a path too; one that names another variable is
+    # left for the policy to inspect.
+    r"\$\{(CLAUDE_PLUGIN_(?:ROOT|DATA))(?::?-[^}$]*)?\}|\$(CLAUDE_PLUGIN_(?:ROOT|DATA))\b"
 )
 
 
@@ -79,11 +86,72 @@ class NativeTaskStaging:
         return list(self.bundle.skill_aliases)
 
 
-def build_native_task_staging(agent: str, adapter: HarnessAdapter, source: NativePluginSource) -> NativeTaskStaging:
-    """Build one agent's bundle; refuse a component this adapter would stage with a permission bypass."""
+def validate_native_mcp_source(
+    adapter: HarnessAdapter,
+    source: NativePluginSource,
+    *,
+    allowed_runtime_env: Mapping[str, str] | None = None,
+) -> None:
+    """Apply the task MCP policy to declarations before native config projection.
+
+    Claude's installation placeholders are client-owned paths, not references
+    to host credentials. Substitute path markers for policy validation only;
+    preserve the placeholders in the config that the client expands.
+    """
+    from skillevaluator.tier3.harbor.adapter import validate_mcp_server_declarations
+
+    runtime_paths = (
+        {
+            "CLAUDE_PLUGIN_ROOT": f"{CONTAINER_ROOT}/{adapter.bundle_dir}",
+            "CLAUDE_PLUGIN_DATA": f"{CONTAINER_ROOT}/native/claude-code/plugin-data",
+        }
+        if adapter.agent == "claude-code"
+        else {}
+    )
+
+    def validation_value(value: Any) -> Any:
+        if isinstance(value, str) and adapter.agent == "claude-code":
+            return _CLAUDE_RUNTIME_PATH_REF.sub(lambda match: runtime_paths[match.group(1) or match.group(2)], value)
+        if isinstance(value, list):
+            return [validation_value(item) for item in value]
+        if isinstance(value, Mapping):
+            return {key: validation_value(item) for key, item in value.items()}
+        return value
+
+    servers = (*source.mcp_servers, *(source.plugin_file_mcp_servers if adapter.copies_plugin_tree else ()))
+    fields = {"name", "command", "args", "url", "transport"}
+    if adapter.agent == "claude-code" or adapter.plugin_mcp_via_task:
+        fields |= {"env", "headers"}
+    for raw in servers:
+        server = {key: value for key, value in raw.items() if key in fields}
+        if "transport" not in server:
+            server["transport"] = raw.get("type") or ("stdio" if raw.get("command") else "http")
+        if adapter.agent == "claude-code":
+            declared = source.mcp_declared.get(str(raw.get("name", "")), {})
+            server.update({key: declared[key] for key in ("env", "headers") if key in declared})
+        try:
+            validate_mcp_server_declarations(
+                [validation_value(server)],
+                allowed_runtime_env=allowed_runtime_env,
+                source_label=f"{adapter.agent} native MCP configuration",
+            )
+        except ValueError as exc:
+            name = str(raw.get("name", "<unnamed>"))
+            raise PluginLoadError(f"Refusing to stage MCP server '{name}' natively: {exc}") from exc
+
+
+def build_native_task_staging(
+    agent: str,
+    adapter: HarnessAdapter,
+    source: NativePluginSource,
+    *,
+    allowed_runtime_env: Mapping[str, str] | None = None,
+) -> NativeTaskStaging:
+    """Build a bundle after checking native component and MCP policy."""
     refusal = native_refusal(adapter, source)
     if refusal is not None:
         raise PluginLoadError(refusal)
+    validate_native_mcp_source(adapter, source, allowed_runtime_env=allowed_runtime_env)
     return NativeTaskStaging(agent=agent, adapter=adapter, source=source, bundle=adapter.build(source))
 
 
@@ -100,7 +168,6 @@ def _declared_unsupported_paths(source: NativePluginSource) -> set[str]:
 
 def _plugin_tree_ignore(source: NativePluginSource, excluded_roots: Sequence[Path] = ()):
     from skillevaluator.tier3.harbor.adapter import _runtime_skill_copy_ignore
-    from skillevaluator.tier3.plugin_prepare import is_evaluator_dir
 
     root = source.plugin_root.resolve()
     declared = _declared_unsupported_paths(source)
@@ -122,9 +189,6 @@ def _plugin_tree_ignore(source: NativePluginSource, excluded_roots: Sequence[Pat
         for name in contents:
             rel = (PurePosixPath(rel_dir.as_posix()) / name).as_posix().removeprefix("./")
             if rel in declared:
-                ignored.add(name)
-            # Both supported dataset layouts contain verifier-only expected outputs.
-            if is_evaluator_dir(current / name) and (current / "SKILL.md").is_file():
                 ignored.add(name)
         return sorted(ignored)
 

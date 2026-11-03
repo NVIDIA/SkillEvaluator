@@ -48,13 +48,18 @@ _WORD_CHAR = r"A-Za-z0-9_"
 # Role and control tags that stay reportable in ``argument-hint`` even when they
 # look like a CLI placeholder, including nested forms (``<system<payload>>``) and a
 # role word with a message-part suffix (``<system_prompt>``, ``<toolCall>``,
-# ``<tool_results>``). Other suffixes name an ordinary value (``<tool_name>``,
-# ``<prompt_file>``, ``<toolchain>``, ``<systemd-unit>``) and may be masked.
+# ``<user_message>``, ``<tool_results>``). Other suffixes name an ordinary value
+# (``<tool_name>``, ``<user_id>``, ``<prompt_file>``, ``<toolchain>``,
+# ``<systemd-unit>``) and may be masked. ``<script>`` takes no suffix.
 _ARGUMENT_CONTROL_TAG_RE = re.compile(
-    r"<(?:(?:system|developer|assistant|tool|instructions?|prompt|override|rules|policy)"
-    r"(?:[_-]?(?:prompt|message|call|use|result|instruction)s?)?|user|context|script)(?=[\s<>:])",
+    r"<(?:(?:system|developer|assistant|user|tool|context|instructions?|prompt|override|rules|policy)"
+    r"(?:[_-]?(?:prompt|message|call|use|result|instruction)s?)?|script)(?=[\s<>:])",
     re.IGNORECASE,
 )
+# The text before a nested placeholder in its outer group: a plain name such as the
+# ``R`` in ``<R<NNN>>``. Anything else (``<curl;sh<x>>``, ``<$(curl x|sh)<x>>``) is not
+# a placeholder.
+_ARGUMENT_NESTED_PREFIX_RE = re.compile(r"[A-Za-z][A-Za-z0-9_-]*")
 # A complete group that may be a CLI placeholder such as ``<file>``, ``<plan|apply>`` or
 # ``<codec e.g. av1|h264>``: no attribute, line break, nested tag or self-closing slash.
 # ``_is_argument_placeholder`` then bounds the body before the group is masked.
@@ -112,15 +117,16 @@ def _masking_hides_text(masked: str) -> bool:
 
     A ``>`` that closes no group (``<cmd>file>``) reads as a redirect. Inside a group,
     a masked placeholder must be followed directly by the group's own closing ``>``
-    (``<R<NNN>>`` masks to ``<R[]>``). Any other text after it (``<<cmd>file>``,
-    ``<<x><y>>``, ``<<x>[y] free text>``) means the outer group is not a placeholder.
-    An arrow or comparison between groups (``<old> -> <new>``, ``<n> >= 1``) is not a
-    redirect.
+    (``<R<NNN>>`` masks to ``<R[]>``), and the group must open with a plain name
+    before it. Any other text after it (``<<cmd>file>``, ``<<x><y>>``,
+    ``<<x>[y] free text>``) or before it (``<curl;sh<x>>``, ``<$(curl x|sh)<x>>``)
+    means the outer group is not a placeholder. An arrow or comparison between
+    groups (``<old> -> <new>``, ``<n> >= 1``) is not a redirect.
     """
     operators = {
         match.start() + match.group().index(">") for match in _ARGUMENT_ARROW_OR_COMPARISON_RE.finditer(masked)
     }
-    depth = 0
+    opened: list[int] = []
     after_mask = False
     index = 0
     while index < len(masked):
@@ -129,14 +135,16 @@ def _masking_hides_text(masked: str) -> bool:
             return True
         after_mask = False
         if char == "<":
-            depth += 1
+            opened.append(index)
         elif char == ">":
-            if not depth:
+            if not opened:
                 if index not in operators:
                     return True
             else:
-                depth -= 1
-        elif depth and masked.startswith("[]", index):
+                opened.pop()
+        elif opened and masked.startswith("[]", index):
+            if not _ARGUMENT_NESTED_PREFIX_RE.fullmatch(masked, opened[-1] + 1, index):
+                return True
             after_mask = True
             index += 1
         index += 1
@@ -537,15 +545,16 @@ class QualityScoreValidator(ValidatorBase):
         for key, val in fm.items():
             if key in ("name", "description"):
                 continue
-            value = str(val)
+            values = [str(val)]
             # A string argument-hint documents CLI placeholders (``<file> [--strict]``).
             if key == "argument-hint" and isinstance(val, str):
-                value = _mask_argument_hint(value)
+                values = [_mask_argument_hint(val)]
             elif key == "argument-hint" and isinstance(val, list) and val and all(isinstance(i, str) for i in val):
                 # YAML reads an unquoted ``[<file>]`` hint as a list. Check every item and
-                # the joined hint, so a group split across items stays visible.
-                value = "\n".join([*map(_mask_argument_hint, val), _mask_argument_hint(" ".join(val))])
-            if XML_TAG_RE.search(value):
+                # the joined hint on its own, so a group split across items stays visible
+                # and no tag forms across the boundary between two checked values.
+                values = [*map(_mask_argument_hint, val), _mask_argument_hint(" ".join(val))]
+            if any(XML_TAG_RE.search(checked) for checked in values):
                 dim.deduct(
                     15,
                     "error",

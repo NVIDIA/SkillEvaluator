@@ -51,6 +51,7 @@ from skillevaluator.provider_config import (
 from skillevaluator.skillspector_provenance import sanitize_skillspector_llm_provenance
 from skillevaluator.spdx import is_spdx_only_html_comment
 from skillevaluator.utils.path_security import matches_filesystem_name
+from skillevaluator.utils.scanner_install import prepare_skillspector
 from skillevaluator.utils.secure_fs import SecurePathError, SecureRoot
 from skillevaluator.utils.tool_runner import Tools, parse_json_output
 from skillevaluator.validators.base import (
@@ -85,6 +86,22 @@ _SKILLSPECTOR_DOCS_ONLY_NOT_APPLICABLE_ANALYZERS = frozenset(
         "mcp_least_privilege",
         "meta_analyzer",
     }
+)
+# SkillSpector 2.11.1+ classifies each occurrence separately, so benign-context
+# tags describe the reported row instead of a compacted sibling.
+_SKILLSPECTOR_OCCURRENCE_TRIAGE_VERSION = (2, 11, 1)
+_SKILLSPECTOR_BENIGN_CONTEXT_TAGS = frozenset({"contextual-triage", "likely-benign-context"})
+_SKILLSPECTOR_PASSWD_MOUNT_SOURCE_LIMIT_BYTES = 1024 * 1024
+_PASSWD_PATH_PATTERN = re.compile(r"/etc/passwd", re.IGNORECASE)
+# SkillSpector's own bounded grammar for an exact read-only UID-map mount.
+_READ_ONLY_PASSWD_VOLUME_PATTERN = re.compile(
+    r"\b(?:docker|podman)\s+run\b"
+    r"(?:(?:\\\r?\n)|[^\n;&|]){0,1000}?"
+    r"(?:-v|--volume)(?:=|\s+)"
+    r"(?P<quote>['\"]?)"
+    r"(?P<source>/etc/passwd):(?P<target>/etc/passwd):ro"
+    r"(?P=quote)(?=$|[\s\\])",
+    re.IGNORECASE | re.MULTILINE,
 )
 
 
@@ -1283,9 +1300,17 @@ class SecurityValidator(ValidatorBase):
                 result.metadata["skillspector_llm_provenance"] = provenance
 
         if tool_result.exit_code not in _SKILLSPECTOR_POLICY_EXIT_CODES:
-            detail = tool_result.error_message or (
-                f"{stage_name} failed with unexpected exit code {tool_result.exit_code}: "
-                "scanner diagnostics were redacted"
+            error_message = tool_result.error_message
+            if not error_message and Tools.skillspector.resolution_source == "uv tool run":
+                error_message = prepare_skillspector(Tools.skillspector.path)
+            hint = Tools.skillspector.get_install_hint() if (error_message or "").startswith("couldn't ") else ""
+            detail = (
+                f"{error_message}. {hint}".rstrip(". ")
+                if error_message
+                else (
+                    f"{stage_name} failed with unexpected exit code {tool_result.exit_code}: "
+                    "scanner diagnostics were redacted"
+                )
             )
             result.add_error(detail)
             result.mark_scan_incomplete(stage_name)
@@ -1309,6 +1334,7 @@ class SecurityValidator(ValidatorBase):
             result.add_error(f"{stage_name} JSON output was not an object; security scan did not complete")
             result.mark_scan_incomplete(stage_name)
             return result
+        result.record_scanner("skillspector", Tools.skillspector.version)
 
         if original_root is not None:
             try:
@@ -2086,9 +2112,10 @@ class SecurityValidator(ValidatorBase):
                 "security scan did not complete"
             )
             return False
+        # Provider availability is independent of execution: configured
+        # credentials do not contradict a --no-llm report.
         if not use_llm and (
             metadata.get("llm_requested") not in {None, False}
-            or metadata.get("llm_available") not in {None, False}
             or metadata.get("meta_analysis_applied") not in {None, False}
         ):
             result.add_error(
@@ -2595,10 +2622,14 @@ class SecurityValidator(ValidatorBase):
         self._store_skillspector_metadata(data, result)
 
         issues = data.get("issues", [])
+        report_metadata = data.get("metadata") if isinstance(data.get("metadata"), dict) else {}
+        raw_version = report_metadata.get("skillspector_version")
         scanned_issues = []
         removed_issues = []
         skipped_generated = 0
         skipped_spdx_comments = 0
+        skipped_passwd_mounts = 0
+        passwd_mount_lines: dict[str, frozenset[int]] = {}
         has_critical_or_high = False
         for issue in issues:
             if not isinstance(issue, dict):
@@ -2611,6 +2642,15 @@ class SecurityValidator(ValidatorBase):
                 removed_issues.append(issue)
                 skipped_spdx_comments += 1
                 continue
+            if self._is_read_only_passwd_mount_issue(
+                issue,
+                scanner_version=raw_version,
+                source_root=source_root,
+                safe_lines_by_file=passwd_mount_lines,
+            ):
+                removed_issues.append(issue)
+                skipped_passwd_mounts += 1
+                continue
             scanned_issues.append(issue)
             finding, is_error = self._convert_skillspector_issue(issue)
             if is_error:
@@ -2621,11 +2661,11 @@ class SecurityValidator(ValidatorBase):
             result.add_message(f"skillspector ignored {skipped_generated} generated artifact issue(s)")
         if skipped_spdx_comments:
             result.add_message(f"skillspector ignored {skipped_spdx_comments} SPDX-only HTML comment issue(s)")
+        if skipped_passwd_mounts:
+            result.add_message(f"skillspector ignored {skipped_passwd_mounts} read-only /etc/passwd mount issue(s)")
 
         reported_score = data["risk_assessment"]["score"]
         report_components = data.get("components") if isinstance(data.get("components"), list) else []
-        report_metadata = data.get("metadata") if isinstance(data.get("metadata"), dict) else {}
-        raw_version = report_metadata.get("skillspector_version")
         uses_report_identities = (
             isinstance(raw_version, str)
             and SEMVER_RE.fullmatch(raw_version) is not None
@@ -2656,7 +2696,7 @@ class SecurityValidator(ValidatorBase):
                 removed_issues=removed_issues,
                 all_findings_serialized=findings_after_filtering == serialized_findings,
             )
-            if skipped_generated or skipped_spdx_comments
+            if skipped_generated or skipped_spdx_comments or skipped_passwd_mounts
             else reported_score
         )
         if effective_score > 50 and not has_critical_or_high:
@@ -2717,6 +2757,99 @@ class SecurityValidator(ValidatorBase):
             str(issue.get("code_snippet") or ""),
             allow_frontmatter_separator=True,
         )
+
+    @staticmethod
+    def _is_read_only_passwd_mount_issue(
+        issue: dict,
+        *,
+        scanner_version: object,
+        source_root: Path | None,
+        safe_lines_by_file: dict[str, frozenset[int]],
+    ) -> bool:
+        """Suppress only a benign-tagged PE3 on an exact read-only passwd mount.
+
+        SkillSpector tags ``docker run -v /etc/passwd:/etc/passwd:ro`` (and its
+        Podman, ``--volume`` and quoted forms) as likely benign context but
+        still reports it as a HIGH Credential Access finding. Trust those tags
+        only where each occurrence is classified separately, and re-check the
+        reported source line: every ``/etc/passwd`` on it must be the source or
+        target of an exact read-only mount. Writable or implicit-mode mounts,
+        other paths, same-line reads such as ``cat /etc/passwd``, aggregated
+        rows, unsafe or unreadable locations, and older scanners stay reported.
+        """
+        tags = issue.get("tags")
+        if (
+            issue.get("id") != "PE3"
+            or issue.get("pattern") != "Credential Access"
+            or issue.get("finding") != "/etc/passwd"
+            or not isinstance(tags, list)
+            or not all(isinstance(tag, str) for tag in tags)
+            or not _SKILLSPECTOR_BENIGN_CONTEXT_TAGS.issubset(tags)
+            or not isinstance(scanner_version, str)
+            or SEMVER_RE.fullmatch(scanner_version) is None
+            or tuple(int(part) for part in scanner_version.split(".")) < _SKILLSPECTOR_OCCURRENCE_TRIAGE_VERSION
+            or source_root is None
+        ):
+            return False
+
+        location = issue.get("location")
+        occurrences = issue.get("occurrences")
+        if not isinstance(location, dict) or not isinstance(occurrences, list) or len(occurrences) != 1:
+            return False
+        occurrence = occurrences[0]
+        if not isinstance(occurrence, dict) or any(
+            occurrence.get(field) != location.get(field) for field in ("file", "start_line", "end_line")
+        ):
+            return False
+        file_path = location.get("file")
+        line_number = location.get("start_line")
+        if (
+            not isinstance(file_path, str)
+            or not _is_filesystem_safe_path_text(file_path)
+            or isinstance(line_number, bool)
+            or not isinstance(line_number, int)
+            or location.get("end_line") not in (None, line_number)
+        ):
+            return False
+
+        if file_path not in safe_lines_by_file:
+            safe_lines_by_file[file_path] = SecurityValidator._read_only_passwd_mount_lines(source_root, file_path)
+        return line_number in safe_lines_by_file[file_path]
+
+    @staticmethod
+    def _read_only_passwd_mount_lines(source_root: Path, file_path: str) -> frozenset[int]:
+        """Return lines whose every ``/etc/passwd`` belongs to an exact read-only mount.
+
+        The file is read once, without following links, from beneath the scan
+        root. Unreadable, oversized, non-UTF-8, or out-of-root files yield no
+        lines, which keeps their findings reported.
+        """
+        root = Path(os.path.abspath(source_root))  # noqa: PTH100 - do not follow untrusted path links
+        relative = Path(file_path)
+        try:
+            if relative.is_absolute():
+                relative = relative.relative_to(root)
+            with SecureRoot(root) as secure_root:
+                raw, _metadata = secure_root.read_bytes(relative, _SKILLSPECTOR_PASSWD_MOUNT_SOURCE_LIMIT_BYTES)
+            content = raw.decode("utf-8")
+        except (OSError, SecurePathError, UnicodeError, ValueError):
+            return frozenset()
+
+        mount_path_starts = {
+            volume.start(group)
+            for volume in _READ_ONLY_PASSWD_VOLUME_PATTERN.finditer(content)
+            for group in ("source", "target")
+        }
+        safe_lines = set()
+        offset = 0
+        # str.splitlines() uses the same logical line breaks as SkillSpector's
+        # reported line numbers.
+        for line_number, line in enumerate(content.splitlines(keepends=True), start=1):
+            passwd_starts = [offset + match.start() for match in _PASSWD_PATH_PATTERN.finditer(line)]
+            if passwd_starts and all(start in mount_path_starts for start in passwd_starts):
+                safe_lines.add(line_number)
+            offset += len(line)
+        return frozenset(safe_lines)
 
     @staticmethod
     def _store_skillspector_metadata(data: dict, result: ValidationResult) -> None:

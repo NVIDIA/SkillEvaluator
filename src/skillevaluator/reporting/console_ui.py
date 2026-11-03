@@ -27,10 +27,15 @@ consoles are created with ``emoji=False`` so ``:name:`` codes print literally.
 from __future__ import annotations
 
 import math
+import os
+import re
 import sys
+import textwrap
+import threading
 import time
 import unicodedata
 from dataclasses import dataclass, field
+from pathlib import Path
 from typing import TYPE_CHECKING, TextIO
 
 from rich import box
@@ -53,6 +58,7 @@ MUTED = "#8A8F98"  # labels / secondary
 FAINT = "#565B66"  # chrome, pending, bar remainders
 BRIGHT = "#EDEDED"  # the actively-running element
 INK = "#101403"  # pill/badge foreground on green fills
+AMBER = "#E5A33B"  # the "what to fix" section only
 
 _TIER2_SCAN_FAILURE_CHECKS = frozenset(
     {
@@ -109,18 +115,73 @@ class ViewProgressReporter:
     :func:`redact_progress_detail` so secrets never reach the terminal.
     """
 
-    def __init__(self, on_tail, max_lines: int = 4):
+    def __init__(
+        self,
+        on_tail,
+        max_lines: int = 4,
+        *,
+        on_cases=None,
+        pass_threshold: float | None = None,
+        poll_seconds: float = 2.0,
+    ):
         self._on_tail = on_tail
         self._max_lines = max_lines
         self._tail: list[str] = []
         self._secrets: set[str] = set()
+        self._on_cases = on_cases
+        self._pass_threshold = 0.5 if pass_threshold is None else pass_threshold
+        self._poll_seconds = poll_seconds
+        self._plan = None
+        self._stop = threading.Event()
+        self._poller: threading.Thread | None = None
 
     @property
     def is_active(self) -> bool:
         return True
 
-    def start(self, _plan) -> None:  # Tier3RunPlan — the view renders its own config rows
-        return None
+    def start(self, plan) -> None:
+        """Track the run plan; once it names the run directory, poll case results."""
+        if self._on_cases is None or not getattr(plan, "output_dir", None):
+            return
+        self._plan = plan
+        self.poll_cases()
+        if self._poller is None:
+            self._poller = threading.Thread(target=self._poll_loop, name="tier3-case-poller", daemon=True)
+            self._poller.start()
+
+    def poll_cases(self) -> None:
+        """Push live per-case rows for the current plan to the view."""
+        from skillevaluator.tier3.case_summary import live_case_marks
+
+        plan = self._plan
+        if plan is None or self._on_cases is None:
+            return
+        try:
+            marks, running = live_case_marks(
+                Path(plan.output_dir), list(plan.agents), pass_threshold=self._pass_threshold
+            )
+        except OSError:
+            return
+        done = sum(len(m) for conditions in marks.values() for cases in conditions.values() for m in cases.values())
+        conditions = ("with_skill",) if plan.baseline is False else ("with_skill", "without_skill")
+        rows = tier3_case_rows(
+            marks,
+            agents=list(plan.agents),
+            conditions=conditions,
+            k=plan.attempts,
+            running=running,
+            progress=(done, plan.matrix_trials) if plan.matrix_trials else None,
+            show_agent=False,
+        )
+        if rows:
+            self._on_cases(rows)
+
+    def _poll_loop(self) -> None:
+        while not self._stop.wait(self._poll_seconds):
+            try:
+                self.poll_cases()
+            except Exception:  # a display refresh must never break the run
+                continue
 
     def set_secret_values(self, values) -> None:
         self._secrets.update(str(v) for v in values if v)
@@ -143,7 +204,10 @@ class ViewProgressReporter:
         return None
 
     def close(self) -> None:
-        return None
+        self._stop.set()
+        if self._poller is not None:
+            self._poller.join(timeout=5)
+            self._poller = None
 
 
 def make_view_console(file: TextIO | None = None) -> Console:
@@ -168,6 +232,8 @@ class TierRow:
     segments: list[tuple[str, str]]
     glyph: str = " "
     glyph_style: str = MUTED
+    label_style: str = MUTED
+    fit: str = ""  # "wrap": word-wrap the last segment to the panel; "rule": a full-width divider
 
 
 def detail_row(label: str, value: str, note: str = "") -> TierRow:
@@ -196,6 +262,204 @@ def lift_row(lift: float, with_score: float, baseline: float) -> TierRow:
         *bar(baseline, MUTED),
     ]
     return TierRow("lift", segments)
+
+
+_CASES_PER_LINE = 8
+_FIX_TEXT_LIMIT = 300
+_CONDITION_LABELS = {"with_skill": "with skill", "without_skill": "without"}
+_CASE_STYLES = {"✓": GREEN, "✗": f"bold {RED}", "⊘": RED, "▸": f"bold {BRIGHT}", "·": FAINT}
+
+
+def _case_state(marks: list[str], k: int | None, *, running: bool) -> str:
+    """Case glyph: ✓ every attempt passed, ✗ one failed, ⊘ one did not run, ▸ running, · waiting."""
+    if "✗" in marks:
+        return "✗"
+    if "⊘" in marks:
+        return "⊘"
+    finished = "✓" in marks and not running and ("·" in marks or k is None or len(marks) >= k)
+    if finished:
+        return "✓"
+    return "▸" if running or marks else "·"
+
+
+def _case_prefix(case_ids: list[str]) -> str:
+    """The shared ``name-`` prefix of the case ids, shown once in the agent row."""
+    if len(case_ids) < 2:
+        return ""
+    first, last = min(case_ids), max(case_ids)
+    common = os.path.commonprefix([first, last])
+    cut = common.rfind("-") + 1
+    return common[:cut] if all(len(c) > cut for c in case_ids) else ""
+
+
+def _case_line_rows(label: str, states: dict[str, str], case_ids: list[str], prefix: str) -> list[TierRow]:
+    counts = {glyph: list(states.values()).count(glyph) for glyph in _CASE_STYLES}
+    tally: list[tuple[str, str]] = [
+        ("    ", ""),
+        (f"{counts['✓']} passed", GREEN if counts["✓"] else MUTED),
+        (" · ", FAINT),
+        (f"{counts['✗']} failed", f"bold {RED}" if counts["✗"] else MUTED),
+    ]
+    if counts["⊘"]:
+        tally += [(" · ", FAINT), (f"{counts['⊘']} did not run", RED)]
+    if counts["▸"] + counts["·"]:
+        tally += [(" · ", FAINT), (f"{counts['▸'] + counts['·']} to go", MUTED)]
+    rows: list[TierRow] = []
+    for start in range(0, len(case_ids), _CASES_PER_LINE):
+        segments: list[tuple[str, str]] = []
+        for case_id in case_ids[start : start + _CASES_PER_LINE]:
+            glyph = states.get(case_id, "·")
+            name = sanitize_tier3_console_text(case_id[len(prefix) :], limit=24)
+            segments += [("  " if segments else "", ""), (f"{glyph} {name}", _CASE_STYLES[glyph])]
+        rows.append(TierRow(label if not rows else "", segments))
+    rows[0].segments += tally
+    return rows
+
+
+def tier3_case_rows(
+    marks: dict[str, dict[str, dict[str, list[str]]]],
+    *,
+    agents: list[str] | None = None,
+    conditions: tuple[str, ...] = ("with_skill", "without_skill"),
+    k: int | None = None,
+    running: set[tuple[str, str, str]] | None = None,
+    progress: tuple[int, int] | None = None,
+    show_agent: bool = True,
+) -> list[TierRow]:
+    """Tier 1-style case rows: one ✓/✗ per test case and condition, plus passed/failed counts."""
+    running = running or set()
+    agents = [a for a in (agents or list(marks)) if a in marks]
+    case_ids = sorted({c for a in agents for key in conditions for c in marks[a].get(key, {})})
+    if not case_ids:
+        return []
+    prefix = _case_prefix(case_ids)
+    if k is None:
+        k = (
+            max((len(m) for a in agents for key in conditions for m in marks[a].get(key, {}).values()), default=0)
+            or None
+        )
+    names = sanitize_tier3_console_text(", ".join(agents), limit=64)
+    detail = (
+        f"  {len(case_ids)} test case{'s' if len(case_ids) != 1 else ''}"
+        + (f" ({prefix}…)" if prefix else "")
+        + (f" · k={k}" if k else "")
+    )
+    header = [(names, TEXT), (detail, MUTED)] if show_agent else [(detail.strip(), TEXT)]
+    rows = [TierRow("agent" if show_agent else "cases", header)]
+    if progress and progress[1] > 0:
+        done, total = min(progress[0], progress[1]), progress[1]
+        filled = round(BAR * done / total)
+        rows.append(
+            TierRow(
+                "progress",
+                [("█" * filled, GREEN), ("░" * (BAR - filled), FAINT), (f"  {done}/{total} attempts", MUTED)],
+            )
+        )
+    for agent in agents:
+        indent = ""
+        if len(agents) > 1:
+            rows.append(TierRow(sanitize_tier3_console_text(agent, limit=LABEL - 1), []))
+            indent = " "
+        for key in conditions:
+            cases = marks[agent].get(key, {})
+            states = {c: _case_state(cases.get(c, []), k, running=(agent, key, c) in running) for c in case_ids}
+            rows += _case_line_rows(indent + _CONDITION_LABELS[key], states, case_ids, prefix)
+    return rows
+
+
+_FIX_ITEMS_SHOWN = 3
+
+
+@dataclass
+class FixItem:
+    """One "what to fix" entry: where it is, what is wrong, and the action(s) that fix it."""
+
+    where: str
+    problem: str
+    actions: list[str] = field(default_factory=list)
+
+
+def fix_section_rows(items: list[FixItem]) -> list[TierRow]:
+    """The highlighted "what to fix" section closing a tier box; empty when nothing needs fixing."""
+    if not items:
+        return []
+    rows = [
+        TierRow("", []),
+        TierRow("what to fix", [("─", FAINT)], label_style=f"bold {AMBER}", fit="rule"),
+    ]
+    for number, item in enumerate(items[:_FIX_ITEMS_SHOWN], start=1):
+        rows.append(
+            TierRow(
+                item.where[: LABEL - 1],
+                [(item.problem, TEXT)],
+                glyph=str(number),
+                glyph_style=f"bold {AMBER}",
+                fit="wrap",
+            )
+        )
+        rows += [TierRow("", [("→ ", AMBER), (action, MUTED)], fit="wrap") for action in item.actions]
+    if len(items) > _FIX_ITEMS_SHOWN:
+        rows.append(TierRow("", [(f"+{len(items) - _FIX_ITEMS_SHOWN} more in report.html", FAINT)]))
+    return rows
+
+
+def _case_span(case_ids: list[str]) -> str:
+    """Compact case label: ``001-003`` for a consecutive run, else a list, else a count."""
+    prefix = _case_prefix(case_ids)
+    names = [c[len(prefix) :] for c in case_ids]
+    if len(names) > 2 and all(n.isdigit() for n in names):
+        numbers = [int(n) for n in names]
+        if numbers == list(range(numbers[0], numbers[0] + len(numbers))):
+            return f"{names[0]}-{names[-1]}"
+    label = ", ".join(names)
+    return label if len(label) < LABEL else f"{len(names)} cases"
+
+
+def tier3_fix_rows(findings: list[dict] | None, *, agents: int = 1) -> list[TierRow]:
+    """Tier 3 "How to improve" items as the tier's "what to fix" section."""
+    items = []
+    for finding in findings or []:
+        case_ids = [c.strip() for c in str(finding.get("case", "")).split(",") if c.strip()]
+        kind = sanitize_tier3_console_text(str(finding.get("kind", "")), limit=24)
+        what = sanitize_tier3_console_text(str(finding.get("what", "")).split(": ", 1)[-1], limit=_FIX_TEXT_LIMIT)
+        if agents > 1 and finding.get("scope"):
+            what += f" ({sanitize_tier3_console_text(str(finding.get('scope')), limit=32)})"
+        action = sanitize_tier3_console_text(str(finding.get("action", "")), limit=_FIX_TEXT_LIMIT)
+        items.append(
+            FixItem(
+                sanitize_tier3_console_text(_case_span(case_ids), limit=LABEL - 1) if case_ids else "cases",
+                f"{kind.capitalize()}: {what}" if kind else what,
+                [action] if action else [],
+            )
+        )
+    return fix_section_rows(items)
+
+
+def _fit_row(row: TierRow, room: int) -> list[list[tuple[str, str]]]:
+    """Lay a row out in ``room`` columns so nothing wraps under the label column."""
+    if row.fit == "rule":
+        return [[("─" * room, row.segments[0][1])]]
+    if row.fit != "wrap" or not row.segments:
+        return _wrap_segments(row.segments, room)
+    *prefix, (text, style) = row.segments
+    indent = sum(len(chunk) for chunk, _ in prefix)
+    wrapped = textwrap.wrap(text, max(room - indent, 20), break_on_hyphens=False) or [""]
+    return [[*prefix, (wrapped[0], style)]] + [[(" " * indent + line, style)] for line in wrapped[1:]]
+
+
+def _wrap_segments(segments: list[tuple[str, str]], room: int) -> list[list[tuple[str, str]]]:
+    """Split a row at segment boundaries so it never wraps under the label column."""
+    lines: list[list[tuple[str, str]]] = [[]]
+    used = 0
+    for chunk, style in segments:
+        if used and used + len(chunk) > room:
+            lines.append([])
+            used = 0
+            if chunk.strip() in {"·", ""}:
+                continue
+        lines[-1].append((chunk, style))
+        used += len(chunk)
+    return lines
 
 
 @dataclass
@@ -431,13 +695,15 @@ class ValidateView:
             (block.name, f"bold {TEXT}"),
         )
         lines = []
+        room = self.width - 8 - LABEL
         for row in block.rows:
-            t = Text()
-            t.append(f"{row.glyph} ", style=row.glyph_style)
-            t.append(f"{strip_terminal_controls(row.label):<{LABEL}}", style=MUTED)
-            for chunk, style in row.segments:
-                t.append(strip_terminal_controls(chunk), style=style)
-            lines.append(t)
+            for i, segments in enumerate(_fit_row(row, room)):
+                t = Text()
+                t.append(f"{row.glyph if i == 0 else ' '} ", style=row.glyph_style)
+                t.append(f"{strip_terminal_controls(row.label if i == 0 else ''):<{LABEL}}", style=row.label_style)
+                for chunk, style in segments:
+                    t.append(strip_terminal_controls(chunk), style=style)
+                lines.append(t)
         body = Group(*lines) if lines else Text("…", style=FAINT)
         return Panel(
             body,
@@ -523,6 +789,35 @@ def stage_hint_row(label: str, hint: str, *, lead: str = "") -> TierRow:
 
 
 # ── summaries: turn ValidationResult lists into tier rows ──────────────
+
+
+_SCANNER_NAMES = {"skillspector": "SkillSpector", "bandit": "Bandit", "semgrep": "Semgrep", "gitleaks": "Gitleaks"}
+_CHECK_SCANNERS = {"Security Scan": "skillspector", "Code Risk Analysis": "bandit", "Secrets Detection": "gitleaks"}
+
+
+def _scanners_row(results: list[ValidationResult]) -> list[TierRow]:
+    """The external scanners behind the Tier 1 checks, with their versions or why they did not run."""
+    states: dict[str, tuple[str, str]] = {}
+    for r in results:
+        if _is_user_skipped(r):
+            if scanner := _CHECK_SCANNERS.get(r.validator_name):
+                states.setdefault(scanner, ("skipped", MUTED))
+            continue
+        for scanner, version in r.scanners.items():
+            states[scanner] = (version, MUTED)
+        for scan in r.incomplete_scans:
+            if (scanner := scan.removesuffix("-llm")) in _SCANNER_NAMES:
+                states[scanner] = ("didn't run", f"bold {RED}")
+    segments: list[tuple[str, str]] = []
+    for scanner in [name for name in _SCANNER_NAMES if name in states]:
+        state, style = states[scanner]
+        segments += [*([(" · ", FAINT)] if segments else []), (_SCANNER_NAMES[scanner], TEXT), (f" {state}", style)]
+    return [TierRow("scanners", segments)] if segments else []
+
+
+def _is_user_skipped(result: ValidationResult) -> bool:
+    """True when the user left this check out with ``--skip``."""
+    return isinstance(result.metadata, dict) and bool(result.metadata.get("skipped_by_user"))
 
 
 def _is_skipped(result: ValidationResult) -> bool:
@@ -669,8 +964,11 @@ def _check_key(validator_name: str) -> str | None:
 def final_check_ticker_row(lineup: list[str], results: list[ValidationResult]) -> TierRow:
     """The check lineup with final per-check states: ✓ passed, ✗ failed, dim skipped."""
     status: dict[str, str] = {}
+    user_skipped: set[str] = set()
     for result in results:
         key = _check_key(result.validator_name)
+        if key is not None and _is_user_skipped(result):
+            user_skipped.add(key)
         if key is None or _is_skipped(result):
             continue
         if not result.passed:
@@ -686,6 +984,8 @@ def final_check_ticker_row(lineup: list[str], results: list[ValidationResult]) -
             segments.append((f"✗ {name}", f"bold {RED}"))
         elif state == PASS:
             segments.append((f"✓ {name}", GREEN))
+        elif name in user_skipped:
+            segments.append((f"\N{EN DASH} {name}", MUTED))
         else:
             segments.append((name, FAINT))
     return TierRow("checks", segments)
@@ -730,8 +1030,11 @@ def summarize_tier1(results: list[ValidationResult], lineup: list[str] | None = 
     When *lineup* is given, the per-check ticker stays in the completed
     section with each check's final state (failed checks in red).
     """
-    total = len(results)
+    user_skipped = [r for r in results if _is_user_skipped(r)]
+    total = len(results) - len(user_skipped)
     failed = [r for r in results if not r.passed and not _is_skipped(r)]
+    incomplete = [r for r in failed if r.is_incomplete]
+    broken = [r for r in failed if not r.is_incomplete]
     # Warnings from passing validators surface as advisories below; only the
     # failing validators' warnings belong on the headline checks row.
     warnings = sum(len(r.warnings) for r in failed)
@@ -741,25 +1044,25 @@ def summarize_tier1(results: list[ValidationResult], lineup: list[str] | None = 
             advisory[_short_name(r.validator_name)] = advisory.get(_short_name(r.validator_name), 0) + len(r.findings)
 
     rows: list[TierRow] = []
+    scanners = _scanners_row(results)
     if lineup:
         rows.append(final_check_ticker_row(lineup, results))
+        rows += scanners
     checks_segments: list[tuple[str, str]] = [(f"{total - len(failed)}/{total} passed", TEXT)]
-    if failed:
-        checks_segments += [("  ·  ", FAINT), (f"{len(failed)} failed", f"bold {RED}")]
+    if broken:
+        checks_segments += [("  ·  ", FAINT), (f"{len(broken)} failed", f"bold {RED}")]
+    if incomplete:
+        checks_segments += [("  ·  ", FAINT), (f"{len(incomplete)} didn't run", f"bold {RED}")]
+    if user_skipped:
+        checks_segments += [("  ·  ", FAINT), (f"{len(user_skipped)} skipped", MUTED)]
     if warnings:
         checks_segments += [("  ·  ", FAINT), (f"{warnings} warning{'s' if warnings != 1 else ''}", MUTED)]
     rows.append(TierRow("summary" if lineup else "checks", checks_segments))
-
-    for r in failed:
-        reason = _first_error(r)
-        rows.append(
-            TierRow(
-                "failed",
-                [(r.validator_name, f"bold {TEXT}"), (f" — {reason}" if reason else "", RED)],
-                glyph="✗",
-                glyph_style=f"bold {RED}",
-            )
-        )
+    if not lineup:
+        rows += scanners
+    if user_skipped:
+        names = ", ".join(dict.fromkeys(_short_name(r.validator_name) for r in user_skipped))
+        rows.append(TierRow("skipped", [(names, MUTED), ("  with --skip, not checked", FAINT)]))
 
     if advisory:
         detail = " · ".join(f"{name} {count}" for name, count in sorted(advisory.items(), key=lambda kv: -kv[1]))
@@ -769,7 +1072,58 @@ def summarize_tier1(results: list[ValidationResult], lineup: list[str] | None = 
     if quality:
         grade, score = quality
         rows.append(TierRow("quality", [(grade, f"bold {GREEN}"), (f"  {score:.1f} / 100", TEXT)]))
-    return not failed, rows
+    items = [_tier1_fix(r) for r in broken]
+    if incomplete:
+        items.append(_setup_fix(incomplete))
+    return not failed, rows + fix_section_rows(items)
+
+
+def _tier1_fix(result: ValidationResult) -> FixItem:
+    problem = _first_error(result) or f"{result.validator_name} failed"
+    action = next((f.suggestion for f in result.findings if f.message == problem and f.suggestion), None)
+    if action is None and not result.gate_failures:
+        action = first_fix([result])
+        action = action[0][0] if action else None
+    where = _short_name(result.validator_name)
+    return FixItem(where, problem, [action] if action and action != problem else [])
+
+
+_INSTALL_HINT = re.compile(r"\b[Ii]nstall(?: [\w-]+)*? with: (.+?)\.?$")
+
+
+_DOWNLOAD_FAILED = re.compile(r"couldn't (?:download|set up) .+? \((?:[^()]|\([^()]*\))*\)")
+
+
+def _setup_fix(results: list[ValidationResult]) -> FixItem:
+    """One item for checks that could not run because a scanner is missing or failed to download."""
+    scanners = list(dict.fromkeys(name for r in results for name in r.incomplete_scans))
+    hints: list[str] = []
+    failed_downloads: list[str] = []
+    for r in results:
+        for text in map(str, [*r.warnings, *r.errors]):
+            if (download := _DOWNLOAD_FAILED.search(text)) and download.group(0) not in failed_downloads:
+                failed_downloads.append(download.group(0))
+            match = _INSTALL_HINT.search(text)
+            if match and match.group(1) not in hints:
+                hints.append(match.group(1))
+    checks = ", ".join(dict.fromkeys(_short_name(r.validator_name) for r in results))
+    skip = ",".join(dict.fromkeys(_skip_name(r.validator_name) for r in results))
+    if failed_downloads:
+        hosts = "github.com and pypi.org" if any("set up" in d for d in failed_downloads) else "github.com"
+        actions = [f"check network access to {hosts}, then rerun"]
+        actions += [f"or install it yourself: {hint}" for hint in hints]
+        problem = f"{checks} didn't run: {'; '.join(failed_downloads)}"
+    else:
+        actions = list(hints)
+        problem = f"{checks} didn't run: {', '.join(scanners) or 'a required scanner'} not installed"
+    return FixItem("setup", problem, [*actions, f"or skip it: --skip {skip}"])
+
+
+def _skip_name(validator_name: str) -> str:
+    """The ``--skip`` value that leaves out the check producing *validator_name*."""
+    if validator_name == "Secrets Detection":
+        return "secrets"
+    return _check_key(validator_name) or _short_name(validator_name)
 
 
 def summarize_tier2(results: list[ValidationResult]) -> tuple[bool, bool, list[TierRow], str]:
@@ -804,32 +1158,63 @@ def summarize_tier2(results: list[ValidationResult]) -> tuple[bool, bool, list[T
         found_duplicates = any(label == "duplicate" for label, _message in details)
         headline = "duplicates found" if found_duplicates else "scan failed"
         rows.append(TierRow("context", [(headline, f"bold {RED}")]))
-        # Show the actual overlaps, or the errors that stopped the scan.
-        shown = 0
-        for label, message in details:
-            if shown >= 3:
-                continue
-            rows.append(
-                TierRow(
-                    label,
-                    [(message[:110], TEXT)],
-                    glyph="✗",
-                    glyph_style=f"bold {RED}",
-                )
-            )
-            shown += 1
-        if len(details) > shown:
-            rows.append(TierRow("", [(f"… {len(details) - shown} more — see the report", MUTED)]))
+        errors = [message for label, message in details if label == "error"]
+        for message in errors[:3]:
+            rows.append(TierRow("error", [(message[:110], TEXT)], glyph="✗", glyph_style=f"bold {RED}"))
+        if len(errors) > 3:
+            rows.append(TierRow("", [(f"… {len(errors) - 3} more — see the report", MUTED)]))
+        duplicates = [
+            finding for result in failed for finding in result.findings if not _tier2_finding_is_scan_failure(finding)
+        ]
+        fix_rows = fix_section_rows([_tier2_fix(finding) for finding in duplicates])
     else:
+        fix_rows = []
         rows.append(TierRow("context", [("clean", TEXT), ("  no duplicate guidance", MUTED)]))
     if advisories:
         rows.append(TierRow("advisories", [(str(advisories), TEXT), ("  catalog", MUTED)]))
-    return True, not failed, rows, ""
+    return True, not failed, rows + fix_rows, ""
+
+
+_DUPLICATE_SECTION = re.compile(r'^(?:vs )?"(?P<title>.+)" in (?P<file>\S+) \(lines (?P<lines>[\d-]+)\)$')
+
+
+def _tier2_fix(finding) -> FixItem:
+    """A duplicate finding as a fix item; the section list collapses to ``"Title" lines a-b`` parts."""
+    first, *rest = [line.strip() for line in str(finding.message).splitlines() if line.strip()] or [""]
+    sections = [_DUPLICATE_SECTION.match(line) for line in rest]
+    if rest and all(sections):
+        first = first.rstrip(":") + ": " + " · ".join(f'"{m["title"]}" lines {m["lines"]}' for m in sections)
+    elif rest:
+        first = " ".join([first, *rest])
+    where = Path(str(finding.file_path or "")).name or "context"
+    return FixItem(where, first, [str(finding.suggestion)] if finding.suggestion else [])
 
 
 def _tier2_finding_is_scan_failure(finding: object) -> bool:
     check_name = str(getattr(finding, "check_name", "")).casefold()
     return check_name in _TIER2_SCAN_FAILURE_CHECKS or check_name.endswith("_limit") or check_name.endswith("_error")
+
+
+def _tier3_run_dir(payload: dict) -> Path | None:
+    provenance = payload.get("provenance")
+    raw = provenance.get("run_dir") if isinstance(provenance, dict) else None
+    path = Path(raw).resolve() if isinstance(raw, str) and raw else None
+    return path if path is not None and path.is_dir() else None
+
+
+def _tier3_final_marks(run_dir: Path) -> dict[str, dict[str, dict[str, list[str]]]]:
+    from skillevaluator.tier3.case_summary import load_case_marks
+
+    try:
+        return load_case_marks(run_dir)
+    except OSError:
+        return {}
+
+
+def _tier3_findings(run_dir: Path) -> list[dict] | None:
+    from skillevaluator.tier3.case_summary import load_case_findings
+
+    return load_case_findings(run_dir)
 
 
 def _tier2_finding_is_advisory_refusal(finding: object) -> bool:
@@ -855,12 +1240,15 @@ def summarize_tier3(result: ValidationResult) -> tuple[bool, bool, list[TierRow]
     agents = _tier3_string_list(raw_agents)
     agent_label = sanitize_tier3_console_text(", ".join(agents)) or "n/a"
     agent_segments: list[tuple[str, str]] = [(agent_label, TEXT)]
+    run_dir = _tier3_run_dir(payload)
+    case_rows = tier3_case_rows(_tier3_final_marks(run_dir), agents=agents or None) if run_dir else []
     case_list = payload.get("cases")
-    if isinstance(case_list, list) and case_list:
-        # A plain count: per-case pass/fail lives in the report, and rendering
-        # a fabricated N/N ratio here would overstate what we measured.
-        agent_segments.append((f"  eval cases {len(case_list)}", MUTED))
-    rows = [TierRow("agent", agent_segments)]
+    if case_rows:
+        rows = case_rows
+    else:
+        if isinstance(case_list, list) and case_list:
+            agent_segments.append((f"  eval cases {len(case_list)}", MUTED))
+        rows = [TierRow("agent", agent_segments)]
     if payload.get("verdict") == "inconclusive" or summary.get("verdict") == "inconclusive":
         rows.append(TierRow("verdict", [("INCONCLUSIVE: skill never activated", TEXT)]))
     lift = _tier3_finite_number(summary.get("overall_lift"))
@@ -874,6 +1262,9 @@ def summarize_tier3(result: ValidationResult) -> tuple[bool, bool, list[TierRow]
         baseline = with_score - lift
         if 0.0 <= baseline <= 1.0:
             rows.append(lift_row(lift, with_score, baseline))
+    if case_rows and len(agents) > 1:
+        rows = [row for row in rows if row.label != "lift"]
+    fix_rows = tier3_fix_rows(_tier3_findings(run_dir), agents=len(agents)) if run_dir else []
     exec_status = payload.get("execution_status") or summary.get("execution_status")
     ok = bool(result.passed) and exec_status in (None, "succeeded")
     if not ok:
@@ -889,7 +1280,7 @@ def summarize_tier3(result: ValidationResult) -> tuple[bool, bool, list[TierRow]
                 glyph_style=f"bold {RED}",
             )
         )
-    return True, ok, rows, ""
+    return True, ok, rows + fix_rows, ""
 
 
 def _first_error(result: ValidationResult) -> str:

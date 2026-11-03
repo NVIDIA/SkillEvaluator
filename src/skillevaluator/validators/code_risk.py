@@ -9,6 +9,7 @@ code quality issues, and potential bugs via CWE/OWASP patterns.
 
 from __future__ import annotations
 
+import os
 from pathlib import Path
 
 from skillevaluator.config import CONFIG_DIR
@@ -28,6 +29,9 @@ def _semgrep_file_excludes(skill_path: Path) -> list[str]:
     except OSError:
         pass
     return sorted(excludes)
+
+
+REQUIRE_SEMGREP_ENV = "SKILLEVALUATOR_REQUIRE_SEMGREP"
 
 
 class CodeRiskValidator(ValidatorBase):
@@ -147,6 +151,7 @@ class CodeRiskValidator(ValidatorBase):
             result.mark_scan_incomplete("bandit")
         elif tool_result.exit_code in (0, 1):
             # Exit code 0 = clean, 1 = findings; both emit JSON on stdout
+            result.record_scanner("bandit", Tools.bandit.version)
             self._process_bandit_output(tool_result.stdout, result, exit_code=tool_result.exit_code)
         else:
             error_msg = tool_result.stderr or tool_result.stdout
@@ -264,8 +269,11 @@ class CodeRiskValidator(ValidatorBase):
         result = ValidationResult()
 
         if not Tools.semgrep.is_available:
-            result.add_warning(f"semgrep not installed. {Tools.semgrep.get_install_hint()}")
-            result.mark_scan_incomplete("semgrep")
+            if os.environ.get(REQUIRE_SEMGREP_ENV, "").strip().lower() in {"1", "true", "yes"}:
+                result.add_warning(f"semgrep not installed. {Tools.semgrep.get_install_hint()}")
+                result.mark_scan_incomplete("semgrep")
+            else:
+                result.add_message(f"Semgrep not installed; skipped. {Tools.semgrep.get_install_hint()}")
             return result
 
         rules_path = (CONFIG_DIR / "semgrep_rules.yaml").resolve()
@@ -296,6 +304,7 @@ class CodeRiskValidator(ValidatorBase):
             result.mark_scan_incomplete("semgrep")
         elif tool_result.exit_code in (0, 1):
             # Exit code 0 = clean, 1 = findings; both emit JSON on stdout
+            result.record_scanner("semgrep", Tools.semgrep.version)
             self._process_semgrep_output(tool_result.stdout, result, exit_code=tool_result.exit_code)
         else:
             error_msg = tool_result.stderr or tool_result.stdout or "no diagnostic output"

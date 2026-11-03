@@ -161,16 +161,17 @@ All notable changes to SkillEvaluator are documented in this file.
   reviewed PII value without relaxing the whole check through a severity
   override. Each waiver names the PII check, the file (relative to the waiver
   file's directory), the line, the SHA-256 digest that PII findings now report
-  as `evidence_sha256`, a reason, an owner, and a `created`/`expires` window of at most 366 days,
-  and it stops applying as soon as any of them no longer matches. Other values
-  on the same line are still reported. Reports list each waiver for a scanned
-  file as applied (INFO), stale (LOW), or expired (MEDIUM), so one file can
-  serve single-skill, folder, and catalog runs. A malformed file is rejected
-  with exit code 2; through the Python API it applies no waivers and fails the
-  PII scan with a HIGH `invalid-pii-waiver-file` finding. Credential checks
-  cannot be waived, and their findings, like any finding whose value reports
-  mask, carry no digest. Waivers are never discovered automatically inside the
-  scanned skill; pass the file with `--pii-waivers`.
+  as `evidence_sha256`, a reason, an owner, and a `created`/`expires` window
+  of at most 366 days, and it stops applying as soon as any of them no longer
+  matches. Other values on the same line are still reported. Reports list each
+  waiver for a scanned file as applied (INFO), stale (LOW), or expired
+  (MEDIUM), so one file can serve single-skill, folder, and catalog runs. A
+  malformed file is rejected with exit code 2; through the Python API it
+  applies no waivers and fails the PII scan with a HIGH
+  `invalid-pii-waiver-file` finding. Credential checks cannot be waived, and
+  their findings, like any finding whose value reports mask, carry no digest.
+  Waivers are never discovered automatically inside the scanned skill; pass
+  the file with `--pii-waivers`.
 
 ### Changed
 

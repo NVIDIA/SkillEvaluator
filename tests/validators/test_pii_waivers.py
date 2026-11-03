@@ -241,9 +241,7 @@ _IN_TWO_DAYS = "<in-two-days>"
         pytest.param([_waiver(created="2026-13-01")], ".created", id="bad-date"),
         pytest.param([_waiver(created=_IN_TWO_DAYS)], "in the future", id="created-in-future"),
         pytest.param([_waiver(created="2026-02-01", expires="2026-01-01")], "before created", id="expires-first"),
-        pytest.param(
-            [_waiver(created="2026-01-01", expires="2027-01-03")], "more than 366 days", id="window-too-long"
-        ),
+        pytest.param([_waiver(created="2026-01-01", expires="2027-01-03")], "more than 366 days", id="window-too-long"),
         pytest.param([_waiver(created="2026-01-01", expires="9999-12-31")], "more than 366 days", id="permanent"),
     ],
 )

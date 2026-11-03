@@ -552,7 +552,8 @@ All notable changes to SkillEvaluator are documented in this file.
   out of the skill, while a sub-analysis that stopped at its own budget (named
   `<analyzer>_runtime_limit`, such as the SC8 bytecode walk in SkillSpector
   2.12.0) is not affected by bundle size and needs a rerun or a newer
-  SkillSpector. The scan still fails closed as `INCOMPLETE`.
+  SkillSpector. A report with both kinds of rows gets both explanations. The
+  scan still fails closed as `INCOMPLETE`.
 
 ### Security
 

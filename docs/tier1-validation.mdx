@@ -456,7 +456,8 @@ Tier 1 checks always gate the exit code inside `validate`. Tier 2 gates when it 
     it adds how many files each reason affected, for example
     `and 463 more (incomplete files by reason: runtime_limit 462, obfuscated_instruction_text 4)`.
 
-    For `runtime_limit`, the error also says what to do:
+    For `runtime_limit`, the error also says what to do, with one piece of advice
+    for each kind of row the report contains:
 
     - **Scan time budget.** Rows that name regular analyzers, or no analyzer,
       mean SkillSpector ran out of time for the bundle: at its own whole-scan

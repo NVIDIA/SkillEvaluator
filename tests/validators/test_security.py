@@ -1954,9 +1954,28 @@ print(json.dumps([finding.metadata["matched_value"] for finding in result.findin
 
         assert "SkillSpector reached a runtime limit before it finished 4 file(s)." in error
         assert "keep large reference material outside the skill" in error
-        assert "sub-analysis" not in error
+        # The bytecode-budget file still gets its own rerun or update advice.
+        assert error.endswith(
+            "a plain rerun may complete. A SkillSpector sub-analysis stopped at its own time budget on 1 file(s). "
+            "That budget is separate from the whole-scan limit, so reducing bundled content does not change it. "
+            "Rerun the scan; if the limit repeats, update SkillSpector or report the completeness exceptions to "
+            "the SkillSpector project."
+        )
         # The report does not say which budget ran out, so the hint names no specific deadline.
         assert "seconds" not in error
+
+    def test_skillspector_runtime_limit_hint_covers_every_runtime_limit_file_in_the_count(self) -> None:
+        """With both kinds of runtime_limit rows, the two hints add up to the by-reason file count."""
+        ledger = [
+            *(_ledger_exception(f"references/sect-{index}.html") for index in range(3)),
+            _ledger_exception("scripts/build.py", analyzers=(_SC8_BUDGET_ANALYZER,)),
+        ]
+
+        error = _skillspector_incomplete_analysis_error("partial", ledger)
+
+        assert "and 1 more (incomplete files by reason: runtime_limit 4);" in error
+        assert "SkillSpector reached a runtime limit before it finished 3 file(s)." in error
+        assert "A SkillSpector sub-analysis stopped at its own time budget on 1 file(s)." in error
 
     def test_skillspector_incomplete_analysis_error_without_runtime_limit_has_no_hint(self) -> None:
         ledger = [

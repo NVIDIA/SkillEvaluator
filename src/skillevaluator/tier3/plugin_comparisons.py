@@ -11,7 +11,12 @@ from pathlib import Path
 from typing import Any
 
 from skillevaluator.tier3.harbor import collector
-from skillevaluator.tier3.harbor.loose_parts_arm import LoosePartsPlan, plan_loose_parts
+from skillevaluator.tier3.harbor.loose_parts_arm import (
+    LOAD_EVIDENCE_FILENAME,
+    LoosePartsPlan,
+    compact_load_evidence,
+    plan_loose_parts,
+)
 from skillevaluator.tier3.harbor.metrics import finite_number
 from skillevaluator.tier3.harbor.stats import (
     ArmObservations,
@@ -171,6 +176,17 @@ class ComparisonRuntime:
         self.members = package.native_source.member_skills if options.member_skills else ()
         self.loose_plan = LoosePartsPlan(requested=options.loose_parts, order=self.agents)
 
+    def begin_attempt(self) -> None:
+        """Start a fresh comparison attempt alongside the native runtime's reset."""
+        begin = getattr(self.native, "begin_attempt", None)
+        if begin is not None:
+            begin()
+        self.task_sets, self.jobs = {}, {}
+        self.launch_errors = {agent: {} for agent in self.agents}
+        self.expected_case_ids = ()
+        self.data = {"status": "not_collected", "agents": {}, "errors": []}
+        self.loose_plan = LoosePartsPlan(requested=self.options.loose_parts, order=self.agents)
+
     def configure_agent_routes(self, paths: Mapping[str, str]) -> None:
         """Bind the coordinator-resolved routes once for this engine attempt."""
         self.task_sets = {}
@@ -297,20 +313,28 @@ class ComparisonRuntime:
             return
         try:
             self._collect_statistics(result, jobs_dir)
-            self.data["status"] = "incomplete" if self.data["errors"] else "recorded"
-            result["private_comparisons"] = self.provenance()
-            collector._write_generated_root_json(
-                jobs_dir.parent / COMPARISON_FILENAME, jobs_dir.parent, self.provenance()
-            )
         except Exception as exc:
             self._record_error(exc)
-            result["private_comparisons"] = self.provenance()
+        self.data["status"] = "incomplete" if self.data["errors"] else "recorded"
+        self._write_artifact(jobs_dir.parent / COMPARISON_FILENAME, jobs_dir.parent, self.provenance)
+        result["private_comparisons"] = self.provenance()
 
-    def _record_error(self, exc: Exception) -> None:
+    def _record_error(self, exc: Exception, *, artifact: str = "") -> None:
         from skillevaluator.tier3.harbor.runner import _bounded_execution_error
 
-        self.data["errors"].append(_bounded_execution_error(f"{type(exc).__name__}: {exc}"))
+        context = f"{artifact}: " if artifact else ""
+        self.data["errors"].append(_bounded_execution_error(f"{context}{type(exc).__name__}: {exc}"))
         self.data["status"] = "incomplete"
+
+    def _write_artifact(self, path: Path, output: Path, payload: Callable[[], Any]) -> None:
+        """An advisory artifact cannot prevent the others from being collected."""
+        try:
+            if path.parent != output:
+                collector._assert_safe_generated_output_path(path.parent, output, follow_target=False)
+                path.parent.mkdir(exist_ok=True)
+            collector._write_generated_root_json(path, output, payload())
+        except Exception as exc:
+            self._record_error(exc, artifact=path.relative_to(output).as_posix())
 
     def _collect_statistics(self, result: dict[str, Any], jobs_dir: Path) -> None:
         from skillevaluator.tier3.harbor.activation import summarize_skill_activation
@@ -444,11 +468,13 @@ class ComparisonRuntime:
             }
             output = jobs_dir.parent
             directory = output / agent
-            collector._assert_safe_generated_output_path(directory, output, follow_target=False)
-            directory.mkdir(exist_ok=True)
-            collector._write_generated_root_json(directory / "statistics.json", output, stats)
+            self._write_artifact(directory / "statistics.json", output, lambda stats=stats: stats)
             if loose is not None:
-                collector._write_generated_root_json(directory / "loose_parts_load_evidence.json", output, evidence)
+                self._write_artifact(
+                    directory / LOAD_EVIDENCE_FILENAME,
+                    output,
+                    lambda evidence=evidence: compact_load_evidence(evidence),
+                )
 
     def provenance(self) -> dict[str, Any]:
         return {

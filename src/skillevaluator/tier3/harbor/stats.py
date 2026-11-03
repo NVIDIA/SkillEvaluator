@@ -408,14 +408,6 @@ def case_dimension_means(trials: Sequence[TrialObservation]) -> dict[str, dict[s
     }
 
 
-def case_mean_scores(trials: Sequence[TrialObservation]) -> dict[str, float]:
-    """Average usable trial scores within each case (attempts nest in cases)."""
-    return {
-        case_id: math.fsum(dimensions.values()) / len(dimensions)
-        for case_id, dimensions in case_dimension_means(trials).items()
-    }
-
-
 _DIMENSION_ORDER = (*DIMENSION_MAPPING, OVERALL_DIMENSION)
 
 

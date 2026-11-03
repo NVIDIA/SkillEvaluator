@@ -255,14 +255,6 @@ def not_supported_reason(agent: str) -> str:
     )
 
 
-def ladder_skip_reason(not_measured: Mapping[str, str]) -> str | None:
-    """Why no agent runs the loose-parts arm: the one reason they share, else each agent's own (``None`` if none)."""
-    reasons = list(dict.fromkeys(str(reason) for reason in not_measured.values() if reason))
-    if len(reasons) <= 1:
-        return reasons[0] if reasons else None
-    return "; ".join(f"{agent}: {reason}" for agent, reason in not_measured.items() if reason)
-
-
 def loose_parts_launch_env() -> dict[str, str]:
     """The plugin-root variables the loose launch exports, so scripts reading them find the loose root."""
     return {"CLAUDE_PLUGIN_ROOT": LOOSE_ROOT, "CLAUDE_PLUGIN_DATA": LOOSE_DATA}
@@ -610,16 +602,6 @@ def build_loose_parts(
     if refusal is not None:
         return LooseParts(agent=agent, bundle=None, error=refusal, source=source)
     return _Builder(source).build()
-
-
-def loose_parts_error(
-    source: NativePluginSource | None, agent: str = LOOSE_AGENT, *, plugin_load: str = "native"
-) -> str | None:
-    """Why the loose-parts arm cannot run for this plugin snapshot and agent, or ``None``."""
-    try:
-        return build_loose_parts(source, agent, plugin_load=plugin_load).error
-    except (ValueError, OSError) as exc:
-        return f"loose parts cannot be staged: {exc}"
 
 
 def loose_parts_task_staging(agent: str, source: NativePluginSource | None, *, plugin_load: str = "native") -> Any:

@@ -22,6 +22,7 @@ as the native full-plugin arm (the bundle is part of each task's
 
 from __future__ import annotations
 
+import json
 from collections.abc import Mapping, Sequence
 from dataclasses import dataclass, field
 from pathlib import Path
@@ -40,7 +41,7 @@ from skillevaluator.tier3.plugin_native import PluginLoadError
 
 #: The loose arm's Harbor job-name suffix and staged task directory name.
 LOOSE_PARTS_VARIANT = "looseparts"
-#: Where the full per-trial load evidence is saved, next to the agent's statistics.json.
+#: Where the full per-trial load evidence is saved as indexed tables, next to statistics.json.
 LOAD_EVIDENCE_FILENAME = "loose_parts_load_evidence.json"
 #: Why the ladder cannot run at all without the no-plugin and skills-only arms beside it.
 NEEDS_BASE_ARMS = (
@@ -52,7 +53,7 @@ LOAD_EVIDENCE_SOURCE = (
     "only after a successful call of one of its tools in the trial's trajectory. Rules, hooks and scripts are not "
     "in that report (unverifiable, never a failure)."
 )
-# The summary's bounded copy of the failure records; the evidence file keeps every trial.
+# The summary's bounded copy of the failure records; the indexed file keeps every trial.
 _MAX_FAILURE_CASES = 128
 _MAX_FAILURE_RECORDS = 12
 
@@ -228,3 +229,37 @@ def load_evidence_summary(evidence: Mapping[str, Mapping[str, Sequence[Mapping[s
         "dropped_cases": sorted(failures),
         "file": LOAD_EVIDENCE_FILENAME,
     }
+
+
+def compact_load_evidence(evidence: Mapping[str, Mapping[str, Sequence[Mapping[str, Any]]]]) -> dict[str, Any]:
+    """Retain every piece result and attempt without repeating their JSON trees.
+
+    ``arms[arm][case]`` lists attempt-table indices in the original attempt
+    order. Each ``attempts[index]`` maps piece ids to ``results`` indices; a
+    result retains the complete original evidence row, including unknown load
+    states, reasons, MCP status and tools. Both tables share identical values
+    across arms and cases. The normal generated-artifact bounds still apply.
+    """
+    results: list[dict[str, Any]] = []
+    attempts: list[dict[str, int]] = []
+    result_ids: dict[str, int] = {}
+    attempt_ids: dict[tuple[tuple[str, int], ...], int] = {}
+    arms: dict[str, dict[str, list[int]]] = {}
+    for arm, cases in sorted(evidence.items()):
+        arms[arm] = {}
+        for case, trials in sorted(cases.items()):
+            indices = arms[arm][case] = []
+            for trial in trials:
+                rows = {}
+                for piece, row in sorted(trial.items()):
+                    key = json.dumps(row, sort_keys=True, separators=(",", ":"), allow_nan=False)
+                    if key not in result_ids:
+                        result_ids[key] = len(results)
+                        results.append(dict(row))
+                    rows[piece] = result_ids[key]
+                attempt_key = tuple(rows.items())
+                if attempt_key not in attempt_ids:
+                    attempt_ids[attempt_key] = len(attempts)
+                    attempts.append(rows)
+                indices.append(attempt_ids[attempt_key])
+    return {"format": "indexed-v1", "results": results, "attempts": attempts, "arms": arms}

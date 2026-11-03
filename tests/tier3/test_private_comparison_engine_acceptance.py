@@ -4,7 +4,9 @@
 from __future__ import annotations
 
 import json
+import os
 import shutil
+import subprocess
 import threading
 import tomllib
 from datetime import UTC, datetime
@@ -44,11 +46,24 @@ def _package(root: Path):
 
 
 def _harbor_result(job: Path, tasks: list[Path], attempts: int) -> None:
-    """Real Harbor model shapes, deterministic complete rewards, no process/provider."""
+    """Real Harbor model shapes, deterministic complete rewards, no agent/provider."""
     from harbor.models.job.result import JobResult, JobStats
     from harbor.models.trial.result import TrialResult
 
     now = datetime(2026, 11, 2, tzinfo=UTC)
+    variant = job.name.rsplit("-", 1)[-1]
+    score = {"without": 0.2, "sumofparts": 0.4, "looseparts": 0.6, "with": 0.8}[variant]
+    init = {
+        "type": "system",
+        "subtype": "init",
+        "skills": ["acceptance:member"] if variant == "with" else [] if variant == "without" else ["member"],
+        "plugins": [{"name": "acceptance"}] if variant == "with" else [],
+        "mcp_servers": (
+            [{"name": "plugin:acceptance:fixture" if variant == "with" else "fixture", "status": "connected"}]
+            if variant in {"with", "looseparts"}
+            else []
+        ),
+    }
     trials = []
     for task in tasks:
         entry = json.loads((task / "tests/entry.json").read_text())
@@ -56,11 +71,33 @@ def _harbor_result(job: Path, tasks: list[Path], attempts: int) -> None:
             trial_name = f"{task.name}__attempt-{ordinal}"
             trial = job / trial_name
             (trial / "verifier").mkdir(parents=True)
+            (trial / "agent").mkdir()
+            setup = task / "environment/skilleval/native/setup.sh"
+            if setup.is_file():
+                # Fake Harbor skips agent setup. Run only the emitted fixture's
+                # copy/listing script, with every writable location in tmp_path,
+                # so the collector reads the same census as a real native trial.
+                home = trial / "home"
+                home.mkdir()
+                script = (
+                    setup.read_text()
+                    .replace("/skilleval/", str(task / "environment/skilleval") + "/")
+                    .replace("/logs/agent", str(trial / "agent"))
+                )
+                completed = subprocess.run(
+                    ["sh", "-c", script],
+                    env={"PATH": os.environ["PATH"], "HOME": str(home), "CLAUDE_CONFIG_DIR": str(home / ".claude")},
+                    capture_output=True,
+                    text=True,
+                    timeout=15,
+                )
+                assert completed.returncode == 0, completed.stderr
+            (trial / "agent/claude-code.txt").write_text(json.dumps(init) + "\n")
             reward = {
                 "entry_id": entry["id"],
                 "_attempt_ordinal": ordinal,
                 "metric_set": DEFAULT_METRIC_SET,
-                **dict.fromkeys(DEFAULT_METRICS, 1.0),
+                **dict.fromkeys(DEFAULT_METRICS, score),
             }
             (trial / "verifier/reward.json").write_text(json.dumps(reward))
             result = TrialResult.model_validate(
@@ -78,7 +115,7 @@ def _harbor_result(job: Path, tasks: list[Path], attempts: int) -> None:
                         "model_info": {"name": "fixture-model"},
                     },
                     "agent_result": {"n_input_tokens": 10, "n_output_tokens": 2},
-                    "verifier_result": {"rewards": dict.fromkeys(DEFAULT_METRICS, 1.0)},
+                    "verifier_result": {"rewards": dict.fromkeys(DEFAULT_METRICS, score)},
                     "started_at": now,
                     "finished_at": now,
                     "step_results": None,
@@ -96,6 +133,34 @@ def _harbor_result(job: Path, tasks: list[Path], attempts: int) -> None:
         trial_results=trials,
     )
     (job / "result.json").write_text(result.model_dump_json())
+
+
+def test_fake_harbor_native_setup_confirms_the_full_arm_and_caches_its_init_event(tmp_path):
+    from skillevaluator.tier3 import plugin_native
+    from skillevaluator.tier3.harbor.native_staging import build_native_task_staging, stage_native_bundle
+
+    package = _package(tmp_path / "plugin")
+    task = tmp_path / "tasks/fixture"
+    (task / "tests").mkdir(parents=True)
+    (task / "tests/entry.json").write_text(json.dumps({"id": "case-1"}))
+    staging = build_native_task_staging(
+        "claude-code", plugin_native.HARNESS_ADAPTERS["claude-code"], package.native_source
+    )
+    stage_native_bundle(task / "environment", staging)
+    job = tmp_path / "jobs/fixture-with"
+    _harbor_result(job, [task], 2)
+
+    plan = staging.bundle.census_plan()
+    events = {}
+    for trial in sorted(job.iterdir()):
+        if not trial.is_dir():
+            continue
+        census = px._trial_census(
+            plugin_native, "claude-code", trial / "agent", plan["declared"], plan, init_events=events
+        )
+        assert {(row["type"], row["name"]) for row in census["loaded"]} == {("skill", "member"), ("mcp", "fixture")}
+        assert events[trial]["plugins"] == [{"name": "acceptance"}]
+    assert len(events) == 2
 
 
 def _engine(monkeypatch, root: Path, *, arm_count: int, route: str | None, keep: bool, ordinary: bool = False):
@@ -262,12 +327,21 @@ def test_comparison_evidence_is_saved_before_real_runner_cleanup(tmp_path, monke
     assert not (run_dir / "_harbor-tasks").exists()
     assert not (run_dir / "_harbor-jobs").exists()
     saved = json.loads((run_dir / "private_comparisons.json").read_text())
+    assert saved["status"] == "recorded" and saved["errors"] == []
     agent = saved["agents"]["claude-code"]
     assert agent["loose_parts"]["equal_across_arms"] is True
     assert agent["integration_claim"]["eligible"] is False
     assert agent["integration_claim"]["verdict"] == "inconclusive"
-    assert agent["lift_ladder"]["n_cases"] == 0
-    assert {item["reason"] for item in agent["lift_ladder"]["excluded_cases"]} == {"load_failed"}
+    ladder = agent["lift_ladder"]
+    assert ladder["n_cases"] == 2
+    assert ladder["excluded_cases"] == [] and ladder["failed_arms"] == []
+    assert {name: step["estimate"] for name, step in ladder["steps"].items()} == pytest.approx(
+        {"skill": 0.2, "capability": 0.2, "integration": 0.2, "plugin": 0.6}
+    )
+    assert {step["n_cases"] for step in ladder["steps"].values()} == {2}
+    assert ladder["bundle"]["estimate"] == pytest.approx(0.4)
+    assert agent["loose_parts"]["load_evidence"]["dropped_cases"] == []
+    assert json.loads((run_dir / "claude-code/statistics.json").read_text())["lift_ladder"] == ladder
     assert runtime.expected_case_ids
     assert json.loads(Path(result["result_path"]).read_text())["private_comparisons"]
 

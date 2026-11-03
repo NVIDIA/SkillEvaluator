@@ -533,21 +533,38 @@ def _ignore_artifact_dirs(dirpath: str, names: list[str]) -> set[str]:
     return {n for n in names if n in _SKILLSPECTOR_SCAN_EXCLUDED_DIRS and Path(dirpath, n).is_dir()}
 
 
-def _baseline_glob_has_literal_scope(value: object) -> bool:
-    """Return whether a SkillSpector suppression glob names any literal text.
+_SKILLSPECTOR_SUPPRESSED_RULE_ID_LIMIT = 50
+
+# Shortest run of literal characters that bounds a rule glob. SkillSpector matches
+# message and path globs case-insensitively against free text, so a single
+# letter such as ``*e*`` matches almost every finding.
+_BASELINE_ID_MIN_LITERAL_RUN = 2
+_BASELINE_TEXT_MIN_LITERAL_RUN = 4
+
+
+def _baseline_glob_has_literal_scope(value: object, *, min_run: int = 1) -> bool:
+    """Return whether a SkillSpector suppression glob has a literal run of ``min_run`` characters.
 
     Wildcards, negated classes, and multi-character classes match too broadly
-    to bound a rule; a one-character class such as ``[d]`` is a literal.
+    to bound a rule and break a run; a one-character class such as ``[d]`` is a
+    literal. Only letters and digits count toward a run.
     """
     if not isinstance(value, str):
         return False
     pattern = value.strip()
+    run = 0
     index = 0
     while index < len(pattern):
         character = pattern[index]
+        if character in "*?":
+            run = 0
+            index += 1
+            continue
         if character != "[":
             if character.isalnum():
-                return True
+                run += 1
+                if run >= min_run:
+                    return True
             index += 1
             continue
         cursor = index + 1
@@ -559,10 +576,14 @@ def _baseline_glob_has_literal_scope(value: object) -> bool:
         close = pattern.find("]", cursor)
         if close < 0:
             # fnmatch treats an unclosed bracket as literal text.
-            return True
+            return len(pattern) - index + run >= min_run
         class_body = pattern[index + 1 : close]
         if not negated and len(class_body) == 1 and class_body.isalnum():
-            return True
+            run += 1
+            if run >= min_run:
+                return True
+        else:
+            run = 0
         index = close + 1
     return False
 
@@ -662,6 +683,8 @@ def _inspect_skillspector_baseline(path: Path) -> tuple[dict, str | None]:
         "llm_stage_suppressed_findings": None,
         "active_findings": None,
         "active_blocking_findings": None,
+        "suppressed_by_severity": {},
+        "suppressed_rule_ids": [],
         "message": None,
     }
     if not path.is_file():
@@ -729,15 +752,20 @@ def _inspect_skillspector_baseline(path: Path) -> tuple[dict, str | None]:
         for index, rule in enumerate(rule_list)
         # Field aliases match SkillSpector's rule loader.
         if not any(
-            _baseline_glob_has_literal_scope(rule.get(field) or rule.get(alias))
-            for field, alias in (("id", "rule_id"), ("path", "file"), ("message", "message"))
+            _baseline_glob_has_literal_scope(rule.get(field) or rule.get(alias), min_run=min_run)
+            for field, alias, min_run in (
+                ("id", "rule_id", _BASELINE_ID_MIN_LITERAL_RUN),
+                ("path", "file", _BASELINE_TEXT_MIN_LITERAL_RUN),
+                ("message", "message", _BASELINE_TEXT_MIN_LITERAL_RUN),
+            )
         )
     ]
     if unbounded:
         noun = "rule" if len(unbounded) == 1 else "rules"
         return state, (
-            f"SkillSpector baseline {noun} {', '.join(map(str, unbounded))} in {name} must set an id, path, "
-            "or message glob containing literal text; a wildcard-only rule would suppress every finding"
+            f"SkillSpector baseline {noun} {', '.join(map(str, unbounded))} in {name} must set an id glob with "
+            f"{_BASELINE_ID_MIN_LITERAL_RUN} literal characters in a row, or a path or message glob with "
+            f"{_BASELINE_TEXT_MIN_LITERAL_RUN}; a broader rule would suppress nearly every finding"
         )
     if version == _SKILLSPECTOR_BASELINE_SCHEMA_VERSION:
         # SkillSpector rejects a version 2 entry without a reason.
@@ -1103,6 +1131,7 @@ class SecurityValidator(ValidatorBase):
             # Merging the enrichment stage overwrites this metadata, so keep
             # each stage's own suppression count for the baseline outcome.
             static_suppressed = result.metadata.get("skillspector_suppressed_count")
+            static_summary = result.metadata.get("skillspector_suppressed_summary")
             llm_suppressed = None
             if self.use_llm and not result.is_incomplete:
                 enrichment = self._run_skillspector_once(
@@ -1123,6 +1152,7 @@ class SecurityValidator(ValidatorBase):
                     baseline_state,
                     static_suppressed=static_suppressed,
                     llm_suppressed=llm_suppressed,
+                    static_summary=static_summary,
                 )
             return result
         finally:
@@ -2636,6 +2666,7 @@ class SecurityValidator(ValidatorBase):
                 "skillspector_components_count": len(components),
                 "skillspector_has_executable_scripts": sp_metadata.get("has_executable_scripts", False),
                 "skillspector_suppressed_count": suppressed_count,
+                "skillspector_suppressed_summary": SecurityValidator._summarize_suppressed(data.get("suppressed")),
             }
         )
 
@@ -2651,12 +2682,28 @@ class SecurityValidator(ValidatorBase):
             result.add_message(f"skillspector risk score: {score}/100 ({severity})")
 
     @staticmethod
+    def _summarize_suppressed(suppressed: object) -> dict:
+        """Return the severity counts and rule IDs of the findings a baseline suppressed."""
+        by_severity: dict[str, int] = {}
+        rule_ids: set[str] = set()
+        for item in suppressed if isinstance(suppressed, list) else []:
+            if not isinstance(item, dict):
+                continue
+            severity = str(item.get("severity") or "UNKNOWN").upper()
+            by_severity[severity] = by_severity.get(severity, 0) + 1
+            rule_id = item.get("id")
+            if isinstance(rule_id, str) and rule_id:
+                rule_ids.add(rule_id[:64])
+        return {"by_severity": by_severity, "rule_ids": sorted(rule_ids)[:_SKILLSPECTOR_SUPPRESSED_RULE_ID_LIMIT]}
+
+    @staticmethod
     def _report_skillspector_baseline(
         result: ValidationResult,
         baseline: dict,
         *,
         static_suppressed: object = None,
         llm_suppressed: object = None,
+        static_summary: object = None,
     ) -> None:
         """Record whether the requested baseline applied, so an inert one is not silent.
 
@@ -2678,6 +2725,10 @@ class SecurityValidator(ValidatorBase):
             )
             return
         suppressed = static_suppressed if isinstance(static_suppressed, int) else 0
+        summary = static_summary if isinstance(static_summary, dict) else {}
+        by_severity = summary.get("by_severity") if isinstance(summary.get("by_severity"), dict) else {}
+        baseline["suppressed_by_severity"] = by_severity
+        baseline["suppressed_rule_ids"] = summary.get("rule_ids") if isinstance(summary.get("rule_ids"), list) else []
         llm_stage_suppressed = llm_suppressed if isinstance(llm_suppressed, int) else None
         blocking = sum(
             1
@@ -2700,18 +2751,21 @@ class SecurityValidator(ValidatorBase):
         )
         if llm_stage_suppressed is not None:
             counts += f", llm_stage_suppressed={llm_stage_suppressed}"
+        if by_severity:
+            breakdown = ", ".join(f"{name}={count}" for name, count in sorted(by_severity.items()))
+            counts += f", suppressed_by_severity: {breakdown}"
         file_label = f"{baseline['file']} ({baseline['digest']})"
 
         def report(status: str, message: str, *, problem: bool) -> None:
             baseline["status"] = status
             baseline["message"] = message
+            # Recorded for every outcome, so reports that hide errors still show it.
+            result.add_success(check_name="skillspector_baseline", message=f"{file_label}: {message}")
             if problem and blocking:
                 # Explain remaining blockers without turning a passing scan into a failure.
                 result.add_error(message)
-                return
-            if problem:
+            elif problem:
                 result.add_warning(message)
-            result.add_success(check_name="skillspector_baseline", message=f"{file_label}: {message}")
 
         # SkillSpector compares scanner versions as exact strings and ignores
         # every fingerprint on a mismatch; rules still apply.

@@ -110,8 +110,8 @@ All notable changes to SkillEvaluator are documented in this file.
   positives no longer leave the security check failed or `INCOMPLETE`.
   Baselines apply only when passed explicitly; one shipped inside the skill is
   never used, and suppressed findings without a requested baseline still fail
-  closed. A rule with no literal `id`, `path`, or `message` text (such as
-  `id: "*"`), or a version 2 rule or fingerprint without a `reason`, is
+  closed. A rule without a literal run in its `id` (two characters)
+  or in its `path` or `message` (four), such as `id: "*"` or `message: "*e*"`, or a version 2 rule or fingerprint without a `reason`, is
   rejected before the scan, as are entries that are not mappings, unparseable
   files, and files beyond SkillSpector's size and YAML expansion limits; an
   empty file is an empty baseline. A baseline kept inside the skill is
@@ -120,7 +120,7 @@ All notable changes to SkillEvaluator are documented in this file.
   outcome (`applied`, `no_matches`, `fingerprint_version_mismatch`,
   `llm_stage_unmatched`, or `not_applied`), the baseline file name and
   `sha256:` digest (never its local path), scanner versions, and per-stage
-  finding counts, and Markdown and HTML reports show the outcome as a
+  finding counts with the suppressed findings' severities and rule IDs, and Markdown and HTML reports show the outcome as a
   `skillspector_baseline` line. Fingerprints ignored after a SkillSpector
   upgrade, or not matched by the LLM stage, are reported instead of silently
   suppressing nothing; fingerprints only match static-only runs.

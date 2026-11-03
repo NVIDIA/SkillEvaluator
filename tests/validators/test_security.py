@@ -1619,7 +1619,9 @@ print(json.dumps([finding.metadata["matched_value"] for finding in result.findin
         )
         payload = _skillspector_json_report()
         payload["suppressed_count"] = 1
-        payload["suppressed"] = [{"id": "PE5", "suppressed": True, "suppression_reason": "Reviewed"}]
+        payload["suppressed"] = [
+            {"id": "PE5", "severity": "HIGH", "suppressed": True, "suppression_reason": "Reviewed"}
+        ]
         payload["analysis_completeness"].update({"findings_before_filtering": 1, "findings_after_filtering": 1})
 
         result = _validate_skillspector_payload(
@@ -1636,6 +1638,9 @@ print(json.dumps([finding.metadata["matched_value"] for finding in result.findin
         assert state["loaded"] is True
         assert state["status"] == "applied"
         assert (state["rule_count"], state["fingerprint_count"], state["suppressed_findings"]) == (1, 0, 1)
+        # CI can refuse a baseline that hides blocking findings.
+        assert state["suppressed_by_severity"] == {"HIGH": 1}
+        assert state["suppressed_rule_ids"] == ["PE5"]
         rendered = JSONReporter(include_timestamp=False).render_all([result])
         reported = json.loads(rendered)["results"][0]["skillspector_baseline"]
         assert reported["status"] == "applied"
@@ -1816,6 +1821,11 @@ print(json.dumps([finding.metadata["matched_value"] for finding in result.findin
             'version: 2\nrules:\n  - id: "PE5"\n    reason: "Fine"\n  - path: "*/*"\n    message: "*?*"\n'
             '    reason: "Too broad"\n',
             'version: 2\nrules:\n  - message: "[!a]*"\n    reason: "Too broad"\n',
+            # A single common letter or digit still matches nearly every finding.
+            'version: 2\nrules:\n  - message: "*e*"\n    reason: "Too broad"\n',
+            'version: 2\nrules:\n  - path: "*s*"\n    reason: "Too broad"\n',
+            'version: 2\nrules:\n  - id: "*P*"\n    reason: "Too broad"\n',
+            'version: 2\nrules:\n  - message: "*a*b*c*d*"\n    reason: "Too broad"\n',
             "version: 2\nrules:\n  - just-a-string\n",
             "- not\n- a mapping\n",
             "version: [2\n",
@@ -2088,7 +2098,29 @@ print(json.dumps([finding.metadata["matched_value"] for finding in result.findin
             assert result.status == "failed"
             assert state["active_blocking_findings"] == 1
             assert any("only 0 in the LLM stage" in error and "--llm" in error for error in result.errors)
+            # The outcome stays visible when the error list is rebuilt later.
+            assert any(
+                detail.check_name == "skillspector_baseline" and "only 0 in the LLM stage" in detail.message
+                for detail in result.success_details
+            )
             assert not any("matched no findings" in message for message in result.messages)
+
+    def test_folder_scan_keeps_the_baseline_outcome_in_each_passing_skill_line(self, tmp_path: Path) -> None:
+        folder = tmp_path / "skills"
+        for name in ("a", "b"):
+            (folder / name).mkdir(parents=True)
+            (folder / name / "SKILL.md").write_text(f"---\nname: {name}\ndescription: d\n---\n", encoding="utf-8")
+
+        def single(skill_dir: Path) -> ValidationResult:
+            outcome = ValidationResult()
+            outcome.add_success(check_name="skillspector_baseline", message=f"{skill_dir.name}: baseline applied")
+            return outcome
+
+        result = SecurityValidator(use_llm=False)._validate_folder_or_skill(folder, single, "Scanning")
+
+        markdown = MarkdownReporter(include_timestamp=False).render_all([result])
+        assert "a: baseline applied" in markdown
+        assert "b: baseline applied" in markdown
 
     @patch("skillevaluator.validators.security.Tools")
     def test_skillspector_2_10_partial_scan_reports_incomplete_before_recommendation(

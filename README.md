@@ -19,34 +19,31 @@ the [NVIDIA Verified Skills pipeline](https://github.com/NVIDIA/skills).
 
 ## Bring skill evaluation to your repository
 
-Automatically check changed skills in GitHub pull requests or GitLab merge
-requests, with Tier 1 quality checks, SkillSpector security scanning and reports.
-Choose your skill folders and minimum score without importing evaluation code.
+Check changed skills in GitHub or GitLab with Tier 1 quality checks, SkillSpector
+security scanning and reports. Choose folders and thresholds; no evaluator code
+to import.
 
-**GitHub: let the CLI set it up.** Run inside your checked-out repository:
+**GitHub guided setup:** run inside your checked-out repository:
 
 ```bash
 pip install --upgrade skillevaluator
 skillevaluator ci init
 ```
 
-Answer a few questions, choose optional hosted reports and PR comments, then
-review the setup PR. See the [CLI setup guide](docs/cli-onboarding.mdx) for
-requirements and an optional test PR.
+Choose checks and optional hosted feedback, then review the setup PR.
+[CLI setup guide](docs/cli-onboarding.mdx).
 
-**Prefer to copy the files?** Use the filled-in templates from
-[CI release ci-0.7.1](https://github.com/NVIDIA/SkillEvaluator/releases/tag/ci-0.7.1).
-No local CLI installation is needed for this path.
+**Manual setup:** copy a filled-in template from
+[ci-0.7.1](https://github.com/NVIDIA/SkillEvaluator/releases/tag/ci-0.7.1). No local CLI needed.
 
 | Your repository | Ready-to-use template | Copy destination |
 | --- | --- | --- |
 | GitHub | [Skill checks](https://github.com/NVIDIA/SkillEvaluator/releases/download/ci-0.7.1/skill-checks.yml) | `.github/workflows/skill-checks.yml` |
 | GitLab | [Skill checks](https://github.com/NVIDIA/SkillEvaluator/releases/download/ci-0.7.1/gitlab-skill-checks.yml) | `.gitlab-ci.yml`, or merge into your existing pipeline |
-| GitHub reports and PR comments | [Optional publisher](https://github.com/NVIDIA/SkillEvaluator/releases/download/ci-0.7.1/publish-skill-reports.yml) | Add a second workflow; complete publisher setup |
+| GitHub reports and PR comments | [Optional publisher](https://github.com/NVIDIA/SkillEvaluator/releases/download/ci-0.7.1/publish-skill-reports.yml) | Second workflow; complete publisher setup |
 
-See the [GitHub](docs/github-actions.mdx) and [GitLab](docs/gitlab-ci.mdx) guides,
-[template reference](ci/templates/README.md) and
-[public report, log and comment examples](ci/examples/README.md).
+See [GitHub](docs/github-actions.mdx) and [GitLab](docs/gitlab-ci.mdx) setup,
+[template reference](ci/templates/README.md) and [report examples](ci/examples/README.md).
 
 ## Quickstart
 

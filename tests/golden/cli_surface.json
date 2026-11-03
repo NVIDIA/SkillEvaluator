@@ -1,5 +1,163 @@
 {
   "commands": {
+    "ci": {
+      "commands": {
+        "demo": {
+          "params": [
+            {
+              "default": "<callable pathlib.Path.cwd>",
+              "name": "repo",
+              "opts": [
+                "--repo"
+              ],
+              "param_type": "option",
+              "type": "directory"
+            },
+            {
+              "default": "False",
+              "is_flag": true,
+              "name": "no_input",
+              "opts": [
+                "--no-input"
+              ],
+              "param_type": "option",
+              "type": "boolean"
+            }
+          ]
+        },
+        "init": {
+          "params": [
+            {
+              "default": "<callable pathlib.Path.cwd>",
+              "name": "repo",
+              "opts": [
+                "--repo"
+              ],
+              "param_type": "option",
+              "type": "directory"
+            },
+            {
+              "name": "release_path",
+              "opts": [
+                "--release"
+              ],
+              "param_type": "option",
+              "type": "file"
+            },
+            {
+              "multiple": true,
+              "name": "paths",
+              "opts": [
+                "--paths"
+              ],
+              "param_type": "option",
+              "type": "text"
+            },
+            {
+              "name": "min_score",
+              "opts": [
+                "--min-score"
+              ],
+              "param_type": "option",
+              "type": "integer range"
+            },
+            {
+              "choices": [
+                "auto",
+                "all"
+              ],
+              "name": "scan_mode",
+              "opts": [
+                "--scan-mode"
+              ],
+              "param_type": "option"
+            },
+            {
+              "name": "default_branch",
+              "opts": [
+                "--default-branch"
+              ],
+              "param_type": "option",
+              "type": "text"
+            },
+            {
+              "is_flag": true,
+              "name": "full",
+              "opts": [
+                "--full"
+              ],
+              "param_type": "option",
+              "secondary_opts": [
+                "--checks-only"
+              ],
+              "type": "boolean"
+            },
+            {
+              "name": "custom_url",
+              "opts": [
+                "--report-url"
+              ],
+              "param_type": "option",
+              "type": "text"
+            },
+            {
+              "choices": [
+                "preview",
+                "save",
+                "pr"
+              ],
+              "name": "mode",
+              "opts": [
+                "--mode"
+              ],
+              "param_type": "option"
+            },
+            {
+              "default": "False",
+              "is_flag": true,
+              "name": "no_input",
+              "opts": [
+                "--no-input"
+              ],
+              "param_type": "option",
+              "type": "boolean"
+            },
+            {
+              "default": "False",
+              "is_flag": true,
+              "name": "show_files",
+              "opts": [
+                "--show-files"
+              ],
+              "param_type": "option",
+              "type": "boolean"
+            },
+            {
+              "name": "output",
+              "opts": [
+                "--output"
+              ],
+              "param_type": "option",
+              "type": "path"
+            }
+          ]
+        },
+        "status": {
+          "params": [
+            {
+              "default": "<callable pathlib.Path.cwd>",
+              "name": "repo",
+              "opts": [
+                "--repo"
+              ],
+              "param_type": "option",
+              "type": "directory"
+            }
+          ]
+        }
+      },
+      "params": []
+    },
     "compare": {
       "params": [
         {

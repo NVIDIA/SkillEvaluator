@@ -159,9 +159,10 @@ extract it and open `index.html`. Failed scans retain their available reports to
     the scan a required merge check. After the first run, select its emitted
     check in GitHub branch rules if a failed or incomplete result should block
     merging; the current template emits `skills / Tier 1 scan`.
-    Organization action restrictions are preserved. If they prevent automatic
-    setup, use the wizard's `save` option and ask your administrator to allow
-    the required workflow and actions.
+    Organization action restrictions are preserved. Repositories using an
+    Actions allowlist must use the wizard's `save` option, even when the required
+    actions are already allowed. Review the saved files and complete setup through
+    your normal repository process.
   </Accordion>
   <Accordion title="A scan ran, but I cannot find the comment">
     Confirm that setup is merged, the PR is open and its branch is in the same

@@ -247,7 +247,11 @@ def test_current_rm_xargs_and_symlink_hardening_is_retained(security, command, d
         ([call("rm -f out.txt")], False),
         ([call("cd /app"), call("rm -f out.txt")], False),
         ([call("cd /etc"), call("rm -f hosts")], True),
+        ([call("cd /etc && cat hosts"), call("cd /workspace && rm -f out.txt")], False),
+        ([call("(cd /etc && ls); rm -f out.txt")], False),
+        ([call("echo 'run: cd /etc'; rm -f out.txt")], False),
         ([call("rm -f hosts", workdir="/etc")], True),
+        ([call("ls", workdir="/etc"), call("rm -f out.o", workdir="/app")], False),
         ([call("find / -name '*.so' -exec rm -f {} +")], True),
     ],
 )

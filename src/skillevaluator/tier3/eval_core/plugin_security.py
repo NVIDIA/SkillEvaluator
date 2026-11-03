@@ -3988,7 +3988,7 @@ def scan_plugin_security(
         if not any(hint in action.lower() for hint in _EXECUTION_TOOL_HINTS):
             continue
         text = _action_text(tool_call)
-        rm_workdirs = _current_checks._rm_action_workdirs(tool_call, text, rm_workdirs)
+        rm_workdirs = _current_checks._rm_call_workdirs(tool_call, rm_workdirs)
         if _current_checks._rm_targets_outside_tmp(
             text, _symlink_seen=symlink_seen, _workdirs=rm_workdirs, _budget=rm_budget
         ):
@@ -4005,6 +4005,7 @@ def scan_plugin_security(
                 )
             )
         symlink_seen |= _current_checks._rm_symlink_creation_seen(text)
+        rm_workdirs = _current_checks._rm_shell_workdirs(text, rm_workdirs)
     impacted = [finding for finding in result["findings"] if finding.get("score_impact")]
     if impacted:
         result.update(

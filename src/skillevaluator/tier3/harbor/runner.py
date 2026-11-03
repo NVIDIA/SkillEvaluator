@@ -78,7 +78,12 @@ from skillevaluator.tier3.evals_config import (
     load_evals_config,
     validate_environment_kwargs,
 )
-from skillevaluator.tier3.harbor import CONTAINER_AGENT_IMPORT_PATHS, DOCKER_AGENT_IMPORT_PATHS
+from skillevaluator.tier3.harbor import (
+    CONTAINER_AGENT_IMPORT_PATHS,
+    DOCKER_AGENT_IMPORT_PATHS,
+    LOCAL_CODEX_HOME_DIRNAME,
+    LOCAL_CODEX_SECRETS_DIRNAME,
+)
 from skillevaluator.tier3.harbor.adapter import (
     _RUNTIME_PROCESS_CONTROL_ENV_NAMES,
     _RUNTIME_PROCESS_CONTROL_ENV_PREFIXES,
@@ -134,7 +139,7 @@ from skillevaluator.tier3.harbor.report_data import (
     encode_dataset_snapshot,
     load_staged_harbor_dataset,
 )
-from skillevaluator.tier3.harbor.secure_copy import copytree_secure
+from skillevaluator.tier3.harbor.secure_copy import IgnoreCallback, _absolute_lexical, copytree_secure
 from skillevaluator.tier3.harbor.secure_docker_environment import (
     SECURE_DOCKER_ENV_IMPORT_PATH,
     SECURE_KATA_ENV_IMPORT_PATH,
@@ -4027,12 +4032,100 @@ def _aggregate_trial_name(
     return candidate
 
 
+# Local-mode Codex runtime dirs left under a trial's agent log dir. They hold
+# the Codex credential, so attempt merges omit them instead of publishing them.
+_LOCAL_CODEX_PRIVATE_AGENT_DIRS = frozenset({LOCAL_CODEX_HOME_DIRNAME, LOCAL_CODEX_SECRETS_DIRNAME})
+
+
+def _read_json_mapping_no_follow(path: Path) -> dict[str, Any] | None:
+    """Read a regular, unlinked JSON object file, or return ``None``."""
+    try:
+        if not stat.S_ISREG(path.lstat().st_mode):
+            return None
+        fd = os.open(path, os.O_RDONLY | getattr(os, "O_NOFOLLOW", 0) | getattr(os, "O_BINARY", 0))
+    except OSError:
+        return None
+    try:
+        with os.fdopen(fd, "rb") as handle:
+            if not stat.S_ISREG(os.fstat(handle.fileno()).st_mode):
+                return None
+            payload = json.loads(handle.read().decode("utf-8"))
+    except (OSError, UnicodeDecodeError, json.JSONDecodeError):
+        return None
+    return payload if isinstance(payload, dict) else None
+
+
+def _trial_codex_private_dirs_ignore(job_path: Path) -> IgnoreCallback:
+    """Return a secure-copy ignore callback that drops local Codex runtime dirs.
+
+    Harbor's Codex agent links ``codex-home/auth.json`` to the credential in
+    ``codex-secrets`` and removes both only in a best-effort cleanup, so a
+    timed-out or cancelled trial can leave them behind. The exclusion is limited
+    to trial agent dirs: ``<trial>/agent``, and ``<trial>/steps/<step>/agent``
+    where Harbor's multi-step trials move it after each step. ``<step>`` is one
+    path component, or a step name the trial's ``result.json`` (or the attempt
+    root's matching ``trial_results`` entry) declares, which may span several
+    components. Every other path still passes through the secure copier's link
+    checks.
+    """
+    from skillevaluator.tier3.harbor.runtime_preflight import _agent_artifact_dirs
+
+    # copytree_secure reports directories under its own lexical source root.
+    job_root = _absolute_lexical(job_path)
+    root_trial_results: dict[str, Mapping[str, Any]] | None = None
+    declared_step_agent_dirs: dict[str, frozenset[tuple[str, ...]]] = {}
+
+    def trial_result(trial_name: str) -> Mapping[str, Any] | None:
+        nonlocal root_trial_results
+        payload = _read_json_mapping_no_follow(job_root / trial_name / "result.json")
+        if payload is not None:
+            return payload
+        # The merge falls back to the attempt root's entry for an unreadable
+        # trial result, so the declared step names come from the same place.
+        if root_trial_results is None:
+            root = _read_json_mapping_no_follow(job_root / "result.json") or {}
+            candidates = root.get("trial_results")
+            root_trial_results = {
+                candidate["trial_name"]: candidate
+                for candidate in (candidates if isinstance(candidates, list) else [])
+                if isinstance(candidate, dict) and isinstance(candidate.get("trial_name"), str)
+            }
+        return root_trial_results.get(trial_name)
+
+    def step_agent_dirs(trial_name: str) -> frozenset[tuple[str, ...]]:
+        if trial_name not in declared_step_agent_dirs:
+            payload = trial_result(trial_name) or {}
+            # Only the step results name step dirs; reuse the preflight's
+            # step-name validation so both read the same layout.
+            dirs = _agent_artifact_dirs(Path(), {"step_results": payload.get("step_results")})
+            declared_step_agent_dirs[trial_name] = frozenset(path.parts for path in dirs)
+        return declared_step_agent_dirs[trial_name]
+
+    def ignore(directory: str, names: list[str]) -> set[str]:
+        try:
+            parts = Path(directory).relative_to(job_root).parts
+        except ValueError:
+            return set()
+        if len(parts) < 2 or parts[-1] != "agent" or not _LOCAL_CODEX_PRIVATE_AGENT_DIRS.intersection(names):
+            return set()
+        trial_relative = parts[1:]
+        is_trial_agent_dir = (
+            trial_relative == ("agent",)
+            or (len(trial_relative) == 3 and trial_relative[0] == "steps")
+            or (trial_relative[0] == "steps" and trial_relative in step_agent_dirs(parts[0]))
+        )
+        return _LOCAL_CODEX_PRIVATE_AGENT_DIRS.intersection(names) if is_trial_agent_dir else set()
+
+    return ignore
+
+
 def _merge_attempt_jobs(job_dirs: list[Path], aggregate_dir: Path) -> None:
     """Merge per-attempt Harbor jobs into the job directory shape collection expects.
 
     Trial directories are copied under attempt-qualified names and the
     per-attempt Harbor ``result.json`` statistics are combined so the merged
-    job still satisfies :func:`validate_harbor_job_result`.
+    job still satisfies :func:`validate_harbor_job_result`. Leftover local
+    Codex credential dirs in trial agent dirs are omitted from the merge.
     """
     from harbor.models.job.result import JobResult, JobStats
     from harbor.models.trial.config import TrialConfig
@@ -4083,7 +4176,12 @@ def _merge_attempt_jobs(job_dirs: list[Path], aggregate_dir: Path) -> None:
                 raise ValueError(f"attempt Harbor job root changed before snapshot: {job_path}") from exc
             if _job_path_is_link_or_reparse(job_path, before) or _job_root_fingerprint(before) != expected_fingerprint:
                 raise ValueError(f"attempt Harbor job root changed before snapshot: {job_path}")
-            copytree_secure(job_path, snapshot, allowed_root=job_resolved)
+            copytree_secure(
+                job_path,
+                snapshot,
+                allowed_root=job_resolved,
+                ignore=_trial_codex_private_dirs_ignore(job_path),
+            )
             try:
                 after = job_path.lstat()
             except OSError as exc:
@@ -5772,6 +5870,7 @@ def _run_harbor_eval_impl(
             env_mode=env_mode,
             agent_models=model_resolution,
             launch_errors=errors,
+            grading_mode=grading_mode,
         )
     except Exception:
         reporter.emit(ProgressEvent(stage="collection", state="failed", detail="result collection failed"))

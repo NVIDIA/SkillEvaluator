@@ -211,10 +211,11 @@ class TestIntraSkillValidatorValidate:
                 "scalar_work": 2,
                 "limit": 1,
                 "effective_chunk_limit": 1,
+                "chunk_count": 2,
             },
         )
         assert "scalar comparison work of 2 exceeds the limit of 1" in result.errors[0]
-        assert "effective chunk limit is 1 for 2-dimensional embeddings" in result.errors[0]
+        assert "effective chunk limit is 1 for 2-dimensional embeddings; this skill has 2 chunks." in result.errors[0]
         assert str(tmp_path) not in result.errors[0]
         mock_build_clusters.assert_not_called()
 
@@ -293,9 +294,13 @@ class TestIntraSkillValidatorValidate:
                 "scalar_work": pair_count * vector_dimension,
                 "limit": 267_911_168,
                 "effective_chunk_limit": chunk_limit,
+                "chunk_count": chunk_count,
             },
         )
-        assert f"effective chunk limit is {chunk_limit} for {vector_dimension}-dimensional" in result.errors[0]
+        assert (
+            f"effective chunk limit is {chunk_limit} for {vector_dimension}-dimensional embeddings; "
+            f"this skill has {chunk_count} chunks."
+        ) in result.errors[0]
         mock_build_clusters.assert_not_called()
 
     @patch("skillevaluator.deduplication.intra_skill.intra_skill_validator.build_clusters")
@@ -317,7 +322,11 @@ class TestIntraSkillValidatorValidate:
         assert work_limit["check_name"] == "scalar_comparison_limit"
         assert work_limit["limit"] == 25_000_000
         assert work_limit["effective_chunk_limit"] == 156
-        assert "effective chunk limit is 156 for 2048-dimensional" in result.errors[0]
+        assert work_limit["chunk_count"] == 157
+        assert (
+            "effective chunk limit is 156 for 2048-dimensional embeddings; this skill has 157 chunks."
+            in result.errors[0]
+        )
         assert mock_embed.return_value.embed.call_count == 1
         mock_build_clusters.assert_not_called()
 

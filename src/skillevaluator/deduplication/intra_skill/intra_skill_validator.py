@@ -263,13 +263,15 @@ class IntraSkillValidator(ValidatorBase):
                         result,
                         "scalar_comparison_limit",
                         f"scalar comparison work of {scalar_work} exceeds the limit of {self._max_scalar_comparisons}; "
-                        f"the effective chunk limit is {chunk_limit} for {vector_dimension}-dimensional embeddings.",
+                        f"the effective chunk limit is {chunk_limit} for {vector_dimension}-dimensional embeddings; "
+                        f"this skill has {len(all_chunks)} chunks.",
                         "Reduce or split the skill content before running Tier 2.",
                         pair_count=pair_count,
                         vector_dimension=vector_dimension,
                         scalar_work=scalar_work,
                         limit=self._max_scalar_comparisons,
                         effective_chunk_limit=chunk_limit,
+                        chunk_count=len(all_chunks),
                     )
                     return result
 

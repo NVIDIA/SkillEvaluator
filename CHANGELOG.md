@@ -281,7 +281,8 @@ All notable changes to SkillEvaluator are documented in this file.
   267,911,168, so embeddings of up to 2,048 dimensions reach all 512 chunks.
   Wider embeddings have a lower effective chunk limit (418 chunks at 3,072
   dimensions, 362 at 4,096), which the incomplete-scan error and the JSON
-  `work_limit` record now report as `effective_chunk_limit`.
+  `work_limit` record now report as `effective_chunk_limit`, next to the
+  skill's own `chunk_count`.
 - Local-mode verifier uploads now copy directly to the absent destination,
   avoiding an unnecessary rollback snapshot of an empty tests directory.
   Inputs and rewritten scripts are prepared privately before publication,

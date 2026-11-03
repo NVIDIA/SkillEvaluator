@@ -410,7 +410,9 @@ All notable changes to SkillEvaluator are documented in this file.
   start paths, and a relative target also resolves against directories that a
   `cd`, `pushd`, or the tool call's `workdir` names, so
   `find / -exec rm -f {} +` and `cd /etc && rm -f hosts` keep the finding.
-  Recursive deletion and `xargs rm -f` are graded as before.
+  This resolution has a per-trace work cap; past it, or after more than 32
+  distinct directories, force-only targets keep the finding. Recursive
+  deletion and `xargs rm -f` are graded as before.
 
 - Tier 3 security grading preserves ordinary nested `/tmp` cleanup, including
   child operands with trailing slashes, unless the current or an earlier

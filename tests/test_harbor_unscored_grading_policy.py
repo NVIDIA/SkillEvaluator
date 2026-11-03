@@ -164,6 +164,11 @@ def test_missing_jobs_keep_requested_grading_policy(tmp_path: Path, grading_mode
         assert summary["metric_set"] == metric_set
         assert summary["metrics"] == agent[f"metrics_{condition}"] == []
         assert summary["score_policy"] == policy
+        assert summary["job_failure"]
+    with_summary = json.loads(
+        (tmp_path / "results" / "codex" / "with-skill" / "summary.json").read_text(encoding="utf-8")
+    )
+    assert with_summary["job_failure"] == "sandbox unavailable"
     loaded = report_data.load_agent_data(tmp_path / "results")["codex"]
     assert loaded["score_policy_with_skill"] == loaded["score_policy_without_skill"] == policy
 

@@ -6879,11 +6879,11 @@ def collect_harbor_results(
     """Collect results from Harbor jobs into evals/results/<agent>/ structure.
 
     Returns a dict with per-agent scores, lift, and a cross-agent comparison.
+    ``skip_with_skill`` collects only the baseline arm of a baseline-only run:
+    the with-skill arm is recorded as skipped and no lift is computed.
     ``grading_mode`` labels a condition with no scoreable reward with the
     requested metric set and score policy; observed rewards still declare
     their own.
-    ``skip_with_skill`` collects only the baseline arm of a baseline-only run:
-    the with-skill arm is recorded as skipped and no lift is computed.
     """
     if skip_baseline and skip_with_skill:
         raise ValueError("skip_baseline and skip_with_skill are mutually exclusive (no arm would run)")
@@ -7108,7 +7108,9 @@ def collect_harbor_results(
         # A skipped with-skill arm still writes its summary: report loading keys
         # agent presence on it, and its "skipped" status marks a baseline-only run.
         # A with-skill job that never started records the requested grading
-        # policy, like an arm whose attempts all failed.
+        # policy, like an arm whose attempts all failed; a skipped arm was never
+        # graded, so it records no metric set or score policy. Both keep
+        # metrics [], matching the returned agent result.
         if with_job_dir is None:
             summary_dir = agent_dir / "with-skill"
             summary_dir.mkdir(parents=True, exist_ok=True)

@@ -178,6 +178,31 @@ _REFERENCE_WORD_PATTERN = re.compile(r"\w+")
 _REFERENCE_TRAILING_BOUNDARY = r"(?=\.*(?![\w./-]))"
 _REFERENCE_DIRECTORY_TRAILING_BOUNDARY = r"(?=\.*(?![\w.-]))"
 _DIRECTORY_NAME_QUOTES = ("`", "'", '"')
+# Code names a directory as a bare shell or program argument
+# (``find policies -type f``, ``cd policies``), so a code source also reaches
+# every file under a bare top-level directory name. Prose files never do,
+# even in an executable directory such as ``scripts/README.md``.
+_CODE_SOURCE_EXTENSIONS = _SOURCE_EXTENSIONS | frozenset(
+    {
+        ".bash",
+        ".bat",
+        ".cjs",
+        ".cmd",
+        ".cts",
+        ".fish",
+        ".lua",
+        ".mjs",
+        ".mts",
+        ".php",
+        ".pl",
+        ".ps1",
+        ".r",
+        ".rb",
+        ".sh",
+        ".zsh",
+    }
+)
+_PROSE_SOURCE_EXTENSIONS = frozenset({".markdown", ".md", ".mdc", ".rst", ".txt"})
 _PLUGIN_ROOT_MARKER = "__skillspector_claude_plugin_root__"
 _SKILL_ROOT_MARKER = "__skillspector_skill_root__"
 
@@ -647,6 +672,18 @@ def _bare_name_variants(file_path: str) -> set[str]:
     return set()
 
 
+def _top_level_directory_names(file_path: str) -> set[str]:
+    """Return the one-segment directory names of a nested file, such as ``policies``.
+
+    ``src/<package>/`` also yields the package name, which imports use.
+    """
+    path = Path(file_path)
+    names = {path.parts[0]} if len(path.parts) > 1 else set()
+    if len(path.parts) > 2 and path.parts[0].lower() == "src":
+        names.add(path.parts[1])
+    return names
+
+
 def _quoted_directory_variants(file_path: str) -> set[str]:
     """Return the quoted top-level directory name of a nested file, such as `` `policies` ``.
 
@@ -654,11 +691,16 @@ def _quoted_directory_variants(file_path: str) -> set[str]:
     directory", ``open("policies")``) without a slash. Unquoted, the name
     reads as an ordinary word, so it is left out of :func:`_path_variants`.
     """
-    path = Path(file_path)
-    names = {path.parts[0]} if len(path.parts) > 1 else set()
-    if len(path.parts) > 2 and path.parts[0].lower() == "src":
-        names.add(path.parts[1])
+    names = _top_level_directory_names(file_path)
     return {f"{quote}{name}{quote}" for name in names for quote in _DIRECTORY_NAME_QUOTES}
+
+
+def _is_code_source(file_path: str, *, role: str, executable: bool) -> bool:
+    """Return whether *file_path* is code, whose bare words can be directory arguments."""
+    suffix = Path(file_path).suffix.lower()
+    if suffix in _CODE_SOURCE_EXTENSIONS:
+        return True
+    return suffix not in _PROSE_SOURCE_EXTENSIONS and (executable or role == "agent_executable")
 
 
 _CODE_REGION_PATTERN = re.compile(r"```.*?```|`[^`\n]+`", re.DOTALL)
@@ -1044,6 +1086,18 @@ def referenced_report_paths(
         | (_quoted_directory_variants(path) if include_parents_by_path[path] else set())
         for path in local_files
     }
+    # A bare top-level directory name, from the walk root and from the
+    # enclosing skill root, counts only when a code source in the same
+    # namespace names it (see _is_code_source).
+    bare_directory_variants: dict[str, frozenset[str]] = {}
+    for path in local_files:
+        names: set[str] = set()
+        if include_parents_by_path[path]:
+            names = _top_level_directory_names(path)
+            skill_root = enclosing_skill_roots[path]
+            if skill_root is not None and skill_root != Path():
+                names |= _top_level_directory_names(Path(path).relative_to(skill_root).as_posix())
+        bare_directory_variants[path] = frozenset(name.lower() for name in names)
     directory_prefix_variants: dict[str, set[str]] = {}
     for path in local_files:
         if is_directory[path]:
@@ -1228,6 +1282,11 @@ def referenced_report_paths(
         reference_index = _reference_index(text)
         reference_words = set(_REFERENCE_WORD_PATTERN.findall(text))
         source_skill_root = enclosing_skill_roots[source_path]
+        source_is_code = _is_code_source(
+            source_path,
+            role=roles[source_path],
+            executable=source_path in prefixed_executable_paths,
+        )
         for candidate, target_file in local_files.items():
             if candidate in reachable:
                 continue
@@ -1248,6 +1307,8 @@ def referenced_report_paths(
             variants, unbounded_directory_variants = _shared_variants(
                 candidate, full_namespace=source_is_plugin_manifest or same_namespace
             )
+            if source_is_code and same_namespace:
+                variants = variants | bare_directory_variants[candidate]
             if source_skill_root is not None:
                 skill_variants, skill_unbounded = _skill_root_variants(candidate, source_skill_root)
                 variants = variants | skill_variants

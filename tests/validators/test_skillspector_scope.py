@@ -1302,6 +1302,55 @@ class TestReferenceReachability:
 
         assert result.passed
 
+    @pytest.mark.parametrize(
+        ("script_path", "script_text"),
+        [
+            ("scripts/load.sh", "#!/bin/sh\nfind policies -type f -name '*.md' -exec cat {} +\n"),
+            ("scripts/load.sh", "#!/bin/sh\ncd policies && cat *.md\n"),
+            ("scripts/load.sh", "#!/bin/sh\ngrep -rh . policies\n"),
+            ("scripts/load", "#!/bin/sh\ncd policies && cat *.md\n"),
+            ("hooks/load.py", "import subprocess\nsubprocess.run(['cat', *sorted(Path(policies).glob('*'))])\n"),
+        ],
+    )
+    def test_bare_directory_argument_in_a_script_reaches_the_files(
+        self, tmp_path: Path, script_path: str, script_text: str
+    ) -> None:
+        scan_root = tmp_path / "skill"
+        _write(scan_root, "SKILL.md", f"Run `{script_path}` first and follow its output.\n")
+        _write(scan_root, script_path, script_text)
+        _write(scan_root, "policies/rules.md")
+
+        result = _process(scan_root, [_issue("policies/rules.md"), _issue("policies/rules.md", rule_id="E2")])
+
+        assert not result.passed
+        assert [finding.metadata["file_role"] for finding in result.findings] == ["agent_reference"] * 2
+        assert result.metadata.get("skillspector_applicability", {}).get("suppressed_inapplicable_issues", 0) == 0
+
+    def test_bundled_skill_script_bare_directory_reaches_its_own_files(self, tmp_path: Path) -> None:
+        plugin_root = tmp_path / "plugin"
+        skill_root = plugin_root / "skills" / "foo"
+        _write(skill_root, "SKILL.md", "Run `scripts/load.sh` first and follow its output.\n")
+        _write(skill_root, "scripts/load.sh", "#!/bin/sh\ncd policies && cat *.md\n")
+        _write(skill_root, "policies/rules.md")
+
+        result = _process(skill_root, [_issue("policies/rules.md")], content_type="plugin", reference_root=plugin_root)
+
+        assert not result.passed
+        assert result.findings[0].metadata["file_role"] == "agent_reference"
+
+    @pytest.mark.parametrize("prose_path", ["scripts/README.md", "references/notes.txt"])
+    def test_bare_directory_word_in_prose_beside_scripts_does_not_reach_the_files(
+        self, tmp_path: Path, prose_path: str
+    ) -> None:
+        scan_root = tmp_path / "skill"
+        _write(scan_root, "SKILL.md", "Summarize the log.\n")
+        _write(scan_root, prose_path, "These helpers follow the policies in this repository.\n")
+        _write(scan_root, "policies/rules.md")
+
+        result = _process(scan_root, [_issue("policies/rules.md")])
+
+        assert result.passed
+
     def test_relative_scan_root_is_resolved(self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
         scan_root = tmp_path / "skill"
         _write(scan_root, "policies/override.yaml")

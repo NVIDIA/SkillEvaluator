@@ -3200,19 +3200,24 @@ class SecurityValidator(ValidatorBase):
     # cue (location, office, address, degrees, or a degree sign) also labels
     # technical data such as ``calibration_location_offset`` or a rotation in
     # degrees, so it does not override a technical label on the same line.
-    # Cue words accept their plurals (``locations:``, ``latitudes``). Map hosts
-    # are matched with bounded TLD forms so long lines stay linear.
+    # Cue words accept their plurals and a numeric suffix (``locations:``,
+    # ``latlngs``, ``lat1, lon1``, ``location2``). The GeoJSON ``type`` and
+    # ``geometry`` keys may be double-quoted, single-quoted (a Python dict) or
+    # bare (a JS object or YAML); a bare type value must use GeoJSON's own
+    # spelling (``Point``, ``MultiPolygon``). Map hosts are matched with bounded
+    # TLD forms so long lines stay linear.
     _GPS_STRONG_CONTEXT_PATTERN = re.compile(
-        r"(?i)\b(?:gps|geolocation|geospatial|latitudes?|longitudes?|lat|lon|lng|latlng|latlong?|lonlat|lnglat"
-        r"|wgs[- ]?84)\b"
+        r"(?i)\b(?:gps|geolocations?|geospatial|latitudes?|longitudes?|lats?|lons?|lngs?|latlngs?|latlong?s?"
+        r"|lonlats?|lnglats?|wgs[- ]?84)\d*\b"
         r"|\bgeo:"
         r"|\bmaps\.google\.|\bgoogle(?:\.[a-z]{2,3}){1,2}/maps\b|\bmaps\.apple\.com\b|\bopenstreetmap\.org\b"
         r"|\bbing\.com/maps\b"
-        r"|[\"']type[\"']\s*:\s*[\"'](?:(?:multi)?(?:point|linestring|polygon)"
+        r"|\btype[\"']?\s*:\s*(?:[\"'](?:(?:multi)?(?:point|linestring|polygon)"
         r"|(?-i:Feature(?:Collection)?|GeometryCollection))[\"']"
-        r"|[\"'](?-i:geometry)[\"']\s*:\s*\{"
+        r"|(?-i:(?:Multi)?(?:Point|LineString|Polygon)|Feature(?:Collection)?|GeometryCollection)\b)"
+        r"|\b(?-i:geometry)[\"']?\s*:\s*\{"
     )
-    _GPS_SOFT_CONTEXT_PATTERN = re.compile(r"(?i)\b(?:locations?|offices?|address(?:es)?|degrees?)\b|[°º]")
+    _GPS_SOFT_CONTEXT_PATTERN = re.compile(r"(?i)\b(?:locations?|offices?|address(?:es)?|degrees?)\d*\b|[°º]")
     _TECHNICAL_COORDINATE_CONTEXT_PATTERN = re.compile(
         r"(?i)\b(?:texture|uv|pixel|screen|canvas|image|normalized|cartesian|robot(?:ic(?:s)?)?|local|world|camera"
         r"|pose|joint|model|object|viewport|mesh|vertex|clip|device)[ -]+coordinates?\b"
@@ -3222,10 +3227,13 @@ class SecurityValidator(ValidatorBase):
         r"|\bcoordinates?\s*=|(?:^|\s)(?:x\s+y|u\s+v)(?:\s|$)"
     )
     _CAMEL_CASE_BOUNDARY = re.compile(r"(?<=[a-z])(?=[A-Z])|(?<=[A-Z])(?=[A-Z][a-z])")
-    # JSON strings (one line at most, so a stray quote in prose cannot run on)
-    # and structural characters, for the GeoJSON ``"coordinates"`` array pass.
-    _JSON_TOKEN_PATTERN = re.compile(r'"((?:[^"\\\n]|\\.)*)"|([{}\[\]:,])')
+    # Double- or single-quoted strings (one line at most, so a stray quote in
+    # prose cannot run on), bare identifiers (JS object keys), and structural
+    # characters, for the GeoJSON ``"coordinates"`` array pass.
+    _JSON_TOKEN_PATTERN = re.compile(r'"((?:[^"\\\n]|\\.)*)"|\'((?:[^\'\\\n]|\\.)*)\'|([A-Za-z_$][\w$]*)|([{}\[\]:,])')
     _GEOJSON_GEOMETRY_TYPE = re.compile(r"(?i)(?:multi)?(?:point|linestring|polygon)")
+    # A bare (unquoted) type value must use GeoJSON's own spelling.
+    _GEOJSON_BARE_GEOMETRY_TYPE = re.compile(r"(?:Multi)?(?:Point|LineString|Polygon)")
     _SCIENTIFIC_LITERAL_PATTERN = re.compile(r"(?<![\w.])[-+]?(?:\d+(?:\.\d*)?|\.\d+)[eE][-+]?\d+")
     # A timestamp or digest label that directly precedes a value
     # (``timestamp_microseconds: ``, ``"sha256": "``, ``checksum=``). An
@@ -3350,12 +3358,15 @@ class SecurityValidator(ValidatorBase):
         A pretty-printed ``Polygon`` or ``Multi*`` geometry opens its rings on
         their own lines, so positions can sit far below the ``"type"`` cue. The
         array counts when its object has a geometry ``"type"`` (before or after
-        ``"coordinates"``) or is the value of a ``"geometry"`` member. One pass
-        over JSON-like tokens keeps the scan linear; unbalanced brackets in
-        other text are tolerated.
+        ``"coordinates"``) or is the value of a ``"geometry"`` member. Keys and
+        values may be double-quoted (JSON), single-quoted (a Python dict) or
+        bare keys (a JS object). One pass over these tokens finds the arrays,
+        and nested arrays are merged before their lines are marked, so the scan
+        stays linear however deep the nesting; unbalanced brackets in other
+        text are tolerated.
         """
         text = "\n".join(lines)
-        if '"coordinates"' not in text:
+        if "coordinates" not in text:
             return frozenset()
         line_starts = [0, *itertools.accumulate(len(line) + 1 for line in lines)]
         # Each frame is [kind, is_geojson, coordinate_spans, coordinates_owner, start].
@@ -3364,10 +3375,15 @@ class SecurityValidator(ValidatorBase):
         last_string: str | None = None
         key: str | None = None
         for token in cls._JSON_TOKEN_PATTERN.finditer(text):
-            value, punct = token.group(1), token.group(2)
+            bare = token.group(3)
+            value = token.group(1) if token.group(1) is not None else token.group(2)
+            if value is None:
+                value = bare
+            punct = token.group(4)
             top = stack[-1] if stack else None
             if value is not None:
-                if key == "type" and top is not None and top[0] == "{" and cls._GEOJSON_GEOMETRY_TYPE.fullmatch(value):
+                type_pattern = cls._GEOJSON_BARE_GEOMETRY_TYPE if bare is not None else cls._GEOJSON_GEOMETRY_TYPE
+                if key == "type" and top is not None and top[0] == "{" and type_pattern.fullmatch(value):
                     top[1] = True
                 last_string, key = value, None
             elif punct == ":":
@@ -3387,11 +3403,17 @@ class SecurityValidator(ValidatorBase):
                 key = last_string = None
             else:
                 key = last_string = None
+        # Nested arrays yield nested spans; keep only the outermost of each
+        # group so every line is marked once.
         numbers: set[int] = set()
-        for start, end in spans:
-            first = bisect.bisect_right(line_starts, start)
+        kept_end = -1
+        for start, end in sorted(spans):
+            if end <= kept_end:
+                continue
+            first = bisect.bisect_right(line_starts, max(start, kept_end + 1))
             last = bisect.bisect_right(line_starts, end)
             numbers.update(range(first, last + 1))
+            kept_end = end
         return frozenset(numbers)
 
     @classmethod

@@ -294,9 +294,10 @@ mac_addresses:
 # A match also needs a geospatial cue (GPS, latitude/longitude, lat/lng,
 # latlong/lonlat keys, WGS 84, a GeoJSON geometry type, a geo: URI, a map link
 # such as google.com/maps or maps.apple.com, or location/office/address/degrees,
-# including plural, snake_case, and camelCase forms) on its line, on one of the
-# two lines before it, or in the file name, or must sit inside a GeoJSON
-# geometry's "coordinates" array, so precise vectors, poses, quaternions,
+# including plural, numeric-suffix, snake_case, and camelCase forms) on its
+# line, on one of the two lines before it, or in the file name, or must sit
+# inside a GeoJSON geometry's "coordinates" array written with braces (JSON, a
+# Python dict, or a JS object), so precise vectors, poses, quaternions,
 # calibration values, and waypoints are not reported.
 gps_coordinates:
   - pattern: '[-+]?([1-8]?\d\.\d{4,}|90\.0+)[,\s]+[-+]?(180\.0+|((1[0-7]\d)|([1-9]?\d))\.\d{4,})'

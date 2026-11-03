@@ -5726,6 +5726,8 @@ class TestFalsePositivePrevention:
             "long vector = 0.123456, 0.654321",
             "37.123456, -12.654321",
             '{"type": "feature", "weights": [0.123456, 0.654321]}',
+            # A bare GeoJSON type must use GeoJSON's spelling, so a point light is not a cue.
+            "type: point\nposition: [12.345678, 45.678901]",
         ],
     )
     def test_gps_shape_requires_geospatial_context(self, tmp_path: Path, technical_value: str):
@@ -5793,11 +5795,21 @@ class TestFalsePositivePrevention:
             ("values.txt", "Our offices\n37.774929, -122.419416\n"),
             ("values.txt", "latitudes_longitudes: 37.774929, -122.419416\n"),
             ("locations.json", "[37.774929, -122.419416]\n"),
+            ("values.yaml", "geolocations:\n  - 37.774929, -122.419416\n"),
+            ("map.md", "var latlngs = [[37.774929, -122.419416]];\n"),
+            ("values.yaml", "lats: 37.774929, 37.784929\n"),
+            # A numeric suffix keeps the cue word.
+            ("haversine.py", "lat1, lon1 = 37.774929, -122.419416\n"),
+            ("values.yaml", "location1: 37.774929, -122.419416\n"),
+            ("data.json", '{"homeLocation2": [37.774929, -122.419416]}\n'),
             # camelCase JSON keys carry the same cue words.
             ("data.json", '{"homeLocation": [37.774929, -122.419416]}\n'),
             ("data.json", '{"officeAddress": "37.774929, -122.419416"}\n'),
             ("data.json", '{"gpsCoords": [37.774929, -122.419416]}\n'),
             ("data.json", '{"lastKnownGps": [37.774929, -122.419416]}\n'),
+            # GeoJSON written as a JS object (in a Markdown snippet) or in YAML.
+            ("point.md", "const p = {type: 'Point', coordinates: [-122.4194, 37.7749]};\n"),
+            ("point.yaml", "type: Point\ncoordinates: [-122.4194, 37.7749]\n"),
             # A strong cue nearby outweighs a technical coordinate label nearby.
             ("world_coordinates.md", "GPS position of the office:\n37.7749, -122.4194\n"),
             ("gps_world_coordinates.txt", "37.7749, -122.4194\n"),
@@ -5838,6 +5850,24 @@ class TestFalsePositivePrevention:
                 '        [-122.4094, 37.7849]\n      ]\n    ]\n  ],\n  "type": "MultiLineString"\n}\n',
                 [5, 6],
             ),
+            # A single-quoted Python dict.
+            (
+                "{\n    'type': 'Polygon',\n    'coordinates': [\n        [\n            [-122.4194, 37.7749],\n"
+                "            [-122.4094, 37.7849],\n        ]\n    ],\n}\n",
+                [5, 6],
+            ),
+            # A JS object with bare keys.
+            (
+                "{\n  type: 'MultiLineString',\n  coordinates: [\n    [\n      [-122.4194, 37.7749],\n"
+                "      [-122.4094, 37.7849]\n    ]\n  ]\n}\n",
+                [5, 6],
+            ),
+            # A bare type value must use GeoJSON's spelling.
+            (
+                "{\n  type: polygon,\n  coordinates: [\n    [\n      [0.123456, 0.654321],\n"
+                "      [0.234567, 0.765432]\n    ]\n  ]\n}\n",
+                [],
+            ),
             # A non-geographic "type" does not make its coordinates location data.
             (
                 '{\n  "type": "Mesh",\n  "coordinates": [\n    [\n      [\n'
@@ -5856,6 +5886,22 @@ class TestFalsePositivePrevention:
         candidates = SecurityValidator()._scan_file_for_pii(geojson_file)
 
         assert [item["line"] for item in candidates if item["category"] == "gps_coordinates"] == expected_lines
+
+    def test_gps_deeply_nested_geojson_inner_position_flagged(self, tmp_path: Path):
+        """Nested coordinates arrays are merged before marking lines, and the inner position stays cued."""
+        depth = 2000
+        geojson_file = tmp_path / "nested.json"
+        geojson_file.write_text(
+            '{"type": "Point", "coordinates": [\n' * depth + "-122.419416, 37.774929\n" + "]}\n" * depth,
+            encoding="utf-8",
+        )
+
+        candidates = SecurityValidator()._scan_file_for_pii(geojson_file)
+
+        assert [item["line"] for item in candidates if item["category"] == "gps_coordinates"] == [depth + 1]
+        assert SecurityValidator._geojson_coordinate_lines(geojson_file.read_text(encoding="utf-8").splitlines()) == (
+            frozenset(range(1, 2 * depth + 2))
+        )
 
     # --- Phone number false positives ---
 

@@ -383,11 +383,12 @@ All notable changes to SkillEvaluator are documented in this file.
   lat/lng, `latlong`/`lonlat` keys, WGS 84, a `geo:` URI, a Google, Apple,
   OpenStreetMap, or Bing map link, a GeoJSON geometry, `Feature`, or collection
   type or `"geometry"` member, or location, office, address, or degrees, also
-  in plural, snake_case, or camelCase forms such as `locations:` or
-  `homeLocation`) on the line, on one of the two lines before it, or in the
-  file name, so waypoints, poses, quaternions, and calibration vectors are no
-  longer reported as location data. Every position inside a GeoJSON geometry's
-  `"coordinates"` array is still reported. Pairs without a cue, such as
+  in plural, numeric-suffix, snake_case, or camelCase forms such as
+  `locations:`, `lat1`, or `homeLocation`) on the line, on one of the two lines
+  before it, or in the file name, so waypoints, poses, quaternions, and
+  calibration vectors are no longer reported as location data. Every position
+  inside a GeoJSON geometry's `coordinates` array written as JSON, a Python
+  dict, or a JS object is still reported. Pairs without a cue, such as
   `coordinates: 37.7749, -122.4194` or `Meet me at 37.7749, -122.4194`, are no
   longer reported either.
 

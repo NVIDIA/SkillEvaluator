@@ -150,6 +150,34 @@ def test_persistent_installer_failure_stops_after_bounded_attempts(
 
 
 @pytest.mark.parametrize("agent_class", [SkillEvaluatorCodex, SkillEvaluatorClaudeCode])
+def test_slow_failed_attempt_is_not_retried(
+    tmp_path: Path, agent_class: type, sleeps: list[float], monkeypatch: pytest.MonkeyPatch
+) -> None:
+    # An attempt that used much of the setup budget must surface its own error.
+    clock = iter(range(0, 10_000, 200))
+    monkeypatch.setattr(installed_agents.time, "monotonic", lambda: float(next(clock)))
+    environment = _FlakyEnvironment(installer_failures=1)
+    agent = agent_class(logs_dir=tmp_path, model_name="openai/test-model")
+
+    with pytest.raises(NetworkConnectionError, match="Could not resolve host"):
+        asyncio.run(agent.install(environment))
+
+    assert environment.installer_runs == 1
+    assert sleeps == []
+
+
+def test_retry_warning_includes_failure_detail(tmp_path: Path, sleeps: list[float], caplog) -> None:
+    environment = _FlakyEnvironment(installer_failures=1)
+    agent = SkillEvaluatorCodex(logs_dir=tmp_path, model_name="openai/test-model")
+    agent.logger.propagate = True
+
+    with caplog.at_level("WARNING"):
+        asyncio.run(agent.install(environment))
+
+    assert any("Could not resolve host" in record.getMessage() for record in caplog.records)
+
+
+@pytest.mark.parametrize("agent_class", [SkillEvaluatorCodex, SkillEvaluatorClaudeCode])
 def test_transient_system_package_failure_is_retried(tmp_path: Path, agent_class: type, sleeps: list[float]) -> None:
     # The npm installer branch still needs distribution Node/npm from a mirror.
     environment = _FlakyEnvironment(package_failures=1, system_npm=True)

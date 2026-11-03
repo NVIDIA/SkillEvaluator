@@ -10,6 +10,7 @@ a package mirror error otherwise fails the trial before the agent starts.
 from __future__ import annotations
 
 import asyncio
+import time
 from collections.abc import Awaitable, Callable
 from typing import TYPE_CHECKING
 
@@ -29,6 +30,12 @@ _INSTALLER_BRANCHES = frozenset({"system", "bundled", "bundled-without-ca"})
 # attempt already installed, so rerunning it after a failure is safe.
 _INSTALL_ATTEMPTS = 3
 _INSTALL_RETRY_BASE_DELAY_SEC = 2.0
+# Harbor's default agent setup timeout covers every attempt. An attempt that
+# already used a third of it leaves too little budget to retry without turning
+# the original error into AgentSetupTimeoutError.
+_SETUP_TIMEOUT_SEC = 360.0
+_MAX_RETRYABLE_ATTEMPT_SEC = _SETUP_TIMEOUT_SEC / 3
+_FAILURE_DETAIL_CHARS = 200
 
 
 async def _install_with_retries(
@@ -40,19 +47,22 @@ async def _install_with_retries(
     # cancellation errors propagate, and all attempts share Harbor's agent
     # setup timeout.
     for attempt in range(1, _INSTALL_ATTEMPTS + 1):
+        started = time.monotonic()
         try:
             await install(environment)
             return
         except NonZeroAgentExitCodeError as exc:
-            if attempt == _INSTALL_ATTEMPTS:
+            elapsed = time.monotonic() - started
+            if attempt == _INSTALL_ATTEMPTS or elapsed > _MAX_RETRYABLE_ATTEMPT_SEC:
                 raise
             delay = _INSTALL_RETRY_BASE_DELAY_SEC * attempt
             agent.logger.warning(
-                "%s install attempt %d of %d failed with %s; retrying in %.0fs",
+                "%s install attempt %d of %d failed with %s (%s); retrying in %.0fs",
                 agent.name(),
                 attempt,
                 _INSTALL_ATTEMPTS,
                 type(exc).__name__,
+                str(exc)[-_FAILURE_DETAIL_CHARS:],
                 delay,
             )
             await asyncio.sleep(delay)

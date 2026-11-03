@@ -68,6 +68,12 @@ _ARGUMENT_COMMAND_SYNTAX_RE = re.compile(r"[;&`]|\$[({]")
 _ARGUMENT_CHOICE_LABEL_RE = re.compile(r"^(?:[^|:]+:|\S+\s+(?:e\.g\.|i\.e\.),?)\s+", re.IGNORECASE)
 # One choice in a ``|`` list: a single word or a quoted literal.
 _ARGUMENT_CHOICE_RE = re.compile(r"\S+|\"[^\"]*\"|'[^']*'")
+# A ``>`` between groups that is an arrow or a comparison, not a redirect: a
+# space-delimited ``->``, ``=>`` or ``>=`` (``<old> -> <new>``, ``<n> >= <m>``), or ``>``
+# or ``>=`` before a number after a space or bracket (``<n> > 0``, ``<count> (>0)``).
+_ARGUMENT_ARROW_OR_COMPARISON_RE = re.compile(
+    r"(?<!\S)(?:->|=>|>=)(?!\S)|(?<![^\s(\[])>=? ?\d+(?:\.\d+)?(?![^\s)\],])"
+)
 _URL_EDGE_C0_OR_SPACE_RE = re.compile(r"^[\x00-\x20]+|[\x00-\x20]+$")
 _ERROR_HANDLING_RE = re.compile(
     r"\b(?:errors?|exceptions?|invalid|fail(?:s|ed|ure|ures|ing)?|"
@@ -110,7 +116,12 @@ def _masking_hides_text(masked: str) -> bool:
     a masked placeholder must be followed directly by the group's own closing ``>``
     (``<R<NNN>>`` masks to ``<R[]>``). Any other text after it (``<<cmd>file>``,
     ``<<x><y>>``, ``<<x>[y] free text>``) means the outer group is not a placeholder.
+    An arrow or comparison between groups (``<old> -> <new>``, ``<n> >= 1``) is not a
+    redirect.
     """
+    operators = {
+        match.start() + match.group().index(">") for match in _ARGUMENT_ARROW_OR_COMPARISON_RE.finditer(masked)
+    }
     depth = 0
     after_mask = False
     index = 0
@@ -123,8 +134,10 @@ def _masking_hides_text(masked: str) -> bool:
             depth += 1
         elif char == ">":
             if not depth:
-                return True
-            depth -= 1
+                if index not in operators:
+                    return True
+            else:
+                depth -= 1
         elif depth and masked.startswith("[]", index):
             after_mask = True
             index += 1

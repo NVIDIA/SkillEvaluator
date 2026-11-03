@@ -36,19 +36,18 @@ require copying SkillEvaluator or SkillSpector source code into your repository.
 
 No local installation is required for the template route. Both platforms' templates
 live in the public NVIDIA/SkillEvaluator repository. Open the file, copy the
-release-generated version, and set your skill folders and score threshold.
+filled-in version, and set your skill folders and score threshold.
 
 | Your platform | Ready-to-use template | Put it in your repository |
 | --- | --- | --- |
-| GitHub | [skill-checks.yml](https://github.com/NVIDIA/SkillEvaluator/releases/download/ci-0.7.1/skill-checks.yml) | `.github/workflows/skill-checks.yml` |
-| GitLab | [gitlab-skill-checks.yml](https://github.com/NVIDIA/SkillEvaluator/releases/download/ci-0.7.1/gitlab-skill-checks.yml) | `.gitlab-ci.yml`, or merge into your existing root configuration |
+| GitHub | [skill-checks.yml](https://github.com/NVIDIA/SkillEvaluator/blob/main/ci/bundles/0.7.1/skill-checks.yml) | `.github/workflows/skill-checks.yml` |
+| GitLab | [gitlab-skill-checks.yml](https://github.com/NVIDIA/SkillEvaluator/blob/main/ci/bundles/0.7.1/gitlab-skill-checks.yml) | `.gitlab-ci.yml`, or merge into your existing root configuration |
 
-Download the filled-in GitHub or GitLab scan template from the
-[CI 0.7.1 release](https://github.com/NVIDIA/SkillEvaluator/releases/tag/ci-0.7.1).
-The [template catalog](https://github.com/NVIDIA/SkillEvaluator/blob/main/ci/templates/README.md)
-also contains source templates for optional GitHub publishing and LLM checks.
-Source files contain placeholders. The release bundle includes filled-in scan
-templates and the optional GitHub publisher template.
+The [ready-to-use templates](https://github.com/NVIDIA/SkillEvaluator/tree/main/ci/bundles/0.7.1)
+include the scan workflows and optional GitHub publisher, with reviewed workflow
+and image versions already filled in. Open a file and use GitHub's **Raw** view
+to copy its full contents. The [template catalog](https://github.com/NVIDIA/SkillEvaluator/blob/main/ci/templates/README.md)
+explains customization and optional LLM checks.
 
 ## What you get
 

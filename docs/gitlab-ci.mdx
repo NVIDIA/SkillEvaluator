@@ -10,22 +10,22 @@ The shared container includes SkillSpector security scanning.
 
 ## Get started
 
-Download [gitlab-skill-checks.yml](https://github.com/NVIDIA/SkillEvaluator/releases/download/ci-0.7.1/gitlab-skill-checks.yml)
-from the [CI 0.7.1 release](https://github.com/NVIDIA/SkillEvaluator/releases/tag/ci-0.7.1).
+Copy [gitlab-skill-checks.yml](https://github.com/NVIDIA/SkillEvaluator/blob/main/ci/bundles/0.7.1/gitlab-skill-checks.yml)
+from the [ready-to-use templates](https://github.com/NVIDIA/SkillEvaluator/tree/main/ci/bundles/0.7.1).
 It includes the pinned shared configuration and scanner image. You do not need
 a GitLab mirror or a local onboarding CLI.
 
 <Accordion title="I prefer to inspect the source template">
   Browse the [GitLab source template](https://github.com/NVIDIA/SkillEvaluator/blob/main/ci/templates/gitlab-skill-checks.yml)
   and [template catalog](https://github.com/NVIDIA/SkillEvaluator/blob/main/ci/templates/README.md).
-  Source files contain placeholders; use the filled-in release file when onboarding.
+  Source files contain placeholders; use the filled-in copy when onboarding.
 </Accordion>
 
 <Steps>
 
 ### Add the reusable job
 
-Download `gitlab-skill-checks.yml` from the release bundle. For a new pipeline,
+Copy `gitlab-skill-checks.yml` from the template folder using GitHub's **Raw** view. For a new pipeline,
 use its contents as `.gitlab-ci.yml`. For an existing pipeline, merge its
 `include`, variables and `skill-evaluation` rules into your root file.
 

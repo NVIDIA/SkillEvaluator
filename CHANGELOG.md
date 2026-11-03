@@ -36,6 +36,16 @@ All notable changes to SkillEvaluator are documented in this file.
   `references/`, `templates/`, `assets/`, `scripts/`). It also flags a SKILL.md
   that Codex cuts when read through the shell (~10K tokens), and the Hermes
   60-char listing is now a note.
+- The harness panel is compact by default: one line per harness with its most
+  serious finding and an outcome label (`not found`, `rejected`, `listing
+  shortened`, `instructions not delivered`, `delivery truncated`, `needs
+  paging`, `text rewritten`), then `+N more` and the note count; `-v` shows
+  every finding with its fix and the versions it applies to. A `catalog` line
+  names the folder measured with the skill, the lowest level is called a note,
+  Tier 1 gets its own `harness` summary line instead of swelling the advisories
+  count, and `harness-check` points to Tier 1 schema when it also fails. The
+  Claude Code and Codex list-budget findings now say descriptions get
+  shortened instead of projecting names only.
 
 - Tier 1 `schema` now reports harness-portability issues: duplicate frontmatter
   keys (HIGH), a UTF-8 BOM, a symlinked or nested `SKILL.md`, descriptions over

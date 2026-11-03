@@ -24,7 +24,8 @@ from skillevaluator.validators.harness import HARNESS_METADATA_KEY, HarnessValid
 if TYPE_CHECKING:
     from skillevaluator.models.result import ValidationResult
 
-VALIDATE_FOOTER = "Doesn't change the result. Details: skillevaluator harness-check <skill>"
+FOOTER = "Doesn't change pass/fail."
+VERBOSE_HINT = "  Details and fixes: -v"
 _STATUS = {
     "loads": ("✓", GREEN, "loads", TEXT),
     "degraded": ("!", AMBER, "degraded", f"bold {AMBER}"),
@@ -34,8 +35,9 @@ _STATUS = {
 _EFFECT = {
     "not_loaded": ("✗", RED, "NOT LOADED"),
     "degraded": ("!", AMBER, "degraded"),
-    "advisory": ("·", MUTED, "advisory"),
+    "advisory": ("·", MUTED, "note"),
 }
+_RANK = {"advisory": 0, "degraded": 1, "not_loaded": 2}
 
 Block = dict[str, list[dict[str, Any]]]
 
@@ -75,40 +77,82 @@ def _summary_line(rows: list[dict[str, Any]], prefix: str = "") -> Text:
     return line
 
 
+def _plural(count: int, word: str) -> str:
+    return f"{count} {word}{'s' if count != 1 else ''}"
+
+
+def _compact_grid(rows: list[dict[str, Any]]) -> Table | None:
+    """One line per flagged harness: its most serious finding, then how many more."""
+    grid = Table.grid(padding=(0, 2), expand=True)
+    grid.add_column(no_wrap=True)
+    grid.add_column(ratio=1, style=TEXT)
+    grid.add_column(no_wrap=True, style=MUTED, justify="right")
+    for row in rows:
+        findings = row.get("findings") or []
+        if row["status"] in ("pending", "checking") or not findings:
+            continue
+        worst = max(findings, key=lambda finding: _RANK[finding["effect"]])
+        problems = sum(finding["effect"] != "advisory" for finding in findings)
+        notes = len(findings) - problems
+        glyph, color, label, _ = _STATUS[row["status"]]
+        more = [f"+{problems - 1} more"] if problems > 1 else []
+        more += [_plural(notes, "note")] if notes else []
+        if worst["effect"] == "advisory":
+            grid.add_row(Text(f"{glyph} {row['harness']}", f"bold {color}"), Text(label, TEXT), ", ".join(more))
+            continue
+        grid.add_row(
+            Text(f"{glyph} {row['harness']}", f"bold {color}"),
+            Text.assemble((worst.get("outcome") or label, f"bold {color}"), ("  ", ""), (worst["message"], TEXT)),
+            ", ".join(more),
+        )
+    return grid if grid.row_count else None
+
+
+def _catalog_line(rows: list[dict[str, Any]]) -> Text | None:
+    catalog = next((row["catalog"] for row in rows if row.get("catalog")), None)
+    if not catalog or catalog["size"] < 2:
+        return None
+    folder = catalog["folder"].replace(str(Path.home()), "~", 1) if catalog["folder"] else "this folder"
+    return Text.assemble(
+        ("catalog  ", MUTED), (f"{catalog['size']} skills in {folder} ({catalog['desc_chars']:,} desc chars)", TEXT)
+    )
+
+
 def _detail_grid(rows: list[dict[str, Any]], verbose: bool) -> Table | None:
+    """Every finding with its fix, under a line naming the harness, its status and verified version."""
     grid = Table.grid(padding=(0, 2), expand=True)
     grid.add_column(no_wrap=True)
     grid.add_column(no_wrap=True)
     grid.add_column(ratio=1)
-    if verbose:
-        grid.add_column(no_wrap=True, style=MUTED)
-    count = 0
     for row in rows:
-        findings = row.get("findings") or []
-        if row["status"] in ("pending", "checking") or (not findings and not verbose):
+        if row["status"] in ("pending", "checking"):
             continue
-        version = f"{row.get('verified_version', '')}, {row.get('verified_date', '')}"
-        if not findings:
-            cells = [Text(f"✓ {row['harness']}", GREEN), Text("loads", TEXT), Text("-", MUTED)]
-            grid.add_row(*cells, *([version] if verbose else []))
-            count += 1
-        for index, finding in enumerate(findings):
+        glyph, color, label, _ = _STATUS[row["status"]]
+        version = f"verified {row.get('verified_version', '')}, {row.get('verified_date', '')}"
+        grid.add_row(
+            Text(f"{glyph} {row['harness']}", f"bold {color}"), Text(label, f"bold {color}"), Text(version, MUTED)
+        )
+        for finding in row.get("findings") or []:
             glyph, color, label = _EFFECT[finding["effect"]]
-            cells = [
-                Text(f"{glyph} {row['harness']}" if index == 0 else "", f"bold {color}"),
-                Text(label, f"bold {color}" if finding["effect"] != "advisory" else MUTED),
+            grid.add_row(
+                "",
+                Text(f"{glyph} {label}", f"bold {color}" if finding["effect"] != "advisory" else MUTED),
                 Text.assemble(
                     (finding["message"], TEXT),
                     (f"  [{finding['id']}]", MUTED),
                     *([("\n→ ", GREEN), (finding["fix"], MUTED)] if finding.get("fix") else []),
+                    *([("\n  applies: ", MUTED), (finding["versions"], MUTED)] if finding.get("versions") else []),
                 ),
-            ]
-            grid.add_row(*cells, *([version if index == 0 else ""] if verbose else []))
-            count += 1
-    return grid if count else None
+            )
+    return grid if grid.row_count else None
 
 
-_LISTING = {"cut": "cut to {limit} chars", "name_only": "name only", "dropped": "not listed"}
+_LISTING = {
+    "cut": "cut to {limit} chars",
+    "name_only": "name only",
+    "dropped": "not listed",
+    "shortened": "shortened (over list budget)",
+}
 
 
 def _listing_grid(rows: list[dict[str, Any]]) -> Table | None:
@@ -142,29 +186,31 @@ def _subtitle(rows: list[dict[str, Any]]) -> tuple[Text, str]:
 def harness_panel(
     block: Block,
     *,
-    title: str = "Harness compatibility · advisory",
-    footer: str | None = VALIDATE_FOOTER,
+    title: str = "Harness compatibility",
+    footer: str | None = FOOTER,
     verbose: bool = False,
-    show_listing: bool = False,
     width: int = WIDTH,
 ) -> Panel:
-    """One panel: a ✓/!/✗ line per skill, then a row per harness finding."""
+    """One panel: a ✓/!/✗ line per skill, then its worst finding per harness (every finding with ``verbose``)."""
     parts: list[Any] = []
     many = len(block) > 1
     all_rows = [row for rows in block.values() for row in rows]
     for skill, rows in block.items():
         if parts:
             parts.append(Text())
+        catalog = _catalog_line(rows)
+        if catalog is not None:
+            parts.extend([catalog, Text()])
         parts.append(_summary_line(rows, f"{Path(skill).name}   " if many else ""))
-        grid = _detail_grid(rows, verbose)
+        grid = _detail_grid(rows, verbose) if verbose else _compact_grid(rows)
         if grid is not None:
             parts.extend([Text(), grid])
-        listing = _listing_grid(rows) if show_listing or verbose else None
+        listing = _listing_grid(rows) if verbose else None
         if listing is not None:
             parts.extend([Text(), Text("Description in the model's skill list (from the profile):", MUTED), listing])
     flagged = any(row.get("findings") for row in all_rows)
     if footer and (flagged or verbose):
-        parts.extend([Text(), Text(footer, MUTED)])
+        parts.extend([Text(), Text(footer + ("" if verbose else VERBOSE_HINT), MUTED)])
     subtitle, border = _subtitle(all_rows)
     return Panel(
         Group(*parts),
@@ -209,9 +255,7 @@ def run_harness_check(
             return harness_panel(
                 {str(skill): rows},
                 title=f"Harness compatibility · {skill.name}",
-                footer="Advisory: doesn't change any validation result.",
                 verbose=verbose,
-                show_listing=True,
                 width=width,
             )
 

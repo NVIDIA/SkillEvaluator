@@ -74,6 +74,7 @@ class HarnessResult:
     verified_date: str
     findings: list[dict[str, str]] = field(default_factory=list)
     listed: dict[str, Any] = field(default_factory=dict)
+    catalog: dict[str, Any] = field(default_factory=dict)
 
     def to_dict(self) -> dict[str, Any]:
         return {
@@ -84,6 +85,7 @@ class HarnessResult:
             "verified_version": self.version,
             "verified_date": self.verified_date,
             "findings": self.findings,
+            "catalog": self.catalog,
         }
 
 
@@ -320,6 +322,7 @@ def skill_facts(skill_path: Path, catalog: Catalog | None = None) -> dict[str, A
         **_bundle_facts(skill_path, manifest),
         "catalog_size": catalog.size if catalog else 0,
         "catalog_desc_chars": catalog.desc_chars if catalog else 0,
+        "catalog_base": str(catalog.base) if catalog and catalog.base else "",
         "duplicate_name": bool(duplicates),
         "duplicate_paths": ", ".join(duplicates[:3]),
     }
@@ -396,8 +399,8 @@ def listed_description(profile: dict[str, Any], facts: dict[str, Any]) -> dict[s
     if not text or (listing.get("name_only_over") and len(text) > listing["name_only_over"]):
         return {"mode": "name_only", "text": ""}
     cut = budget.get("cut") if over_budget else listing.get("cut")
-    if over_budget and cut == 0:
-        return {"mode": "name_only", "text": ""}
+    if over_budget and not cut:
+        return {"mode": "shortened", "text": ""}
     if cut and len(text) > cut:
         return {"mode": "cut", "text": text[:cut], "limit": cut}
     return {"mode": "full", "text": text}
@@ -496,7 +499,7 @@ def evaluate_profile(profile: dict[str, Any], facts: dict[str, Any]) -> HarnessR
         if expression == "always" and rule["effect"] == "advisory":
             continue
         finding = {"id": rule["id"], "effect": rule["effect"], "message": _fill(rule["message"], facts)}
-        for key in ("fix", "versions"):
+        for key in ("fix", "versions", "outcome"):
             if rule.get(key):
                 finding[key] = _fill(rule[key], facts)
         findings.append(finding)
@@ -511,6 +514,11 @@ def evaluate_profile(profile: dict[str, Any], facts: dict[str, Any]) -> HarnessR
         verified_date=str(verified.get("date", "")),
         findings=findings,
         listed=listed_description(profile, facts),
+        catalog={
+            "size": facts["catalog_size"],
+            "desc_chars": facts["catalog_desc_chars"],
+            "folder": facts["catalog_base"],
+        },
     )
 
 

@@ -441,13 +441,16 @@ class ValidateView:
             (block.name, f"bold {TEXT}"),
         )
         lines = []
+        room = self.width - 6 - 2 - LABEL
         for row in block.rows:
-            t = Text()
-            t.append(f"{row.glyph} ", style=row.glyph_style)
-            t.append(f"{strip_terminal_controls(row.label):<{LABEL}}", style=MUTED)
-            for chunk, style in row.segments:
-                t.append(strip_terminal_controls(chunk), style=style)
-            lines.append(t)
+            wrapped = _wrap_ticker(row.segments, room) if row.label in ("checks", "summary") else [row.segments]
+            for index, segments in enumerate(wrapped):
+                t = Text()
+                t.append(f"{row.glyph} " if index == 0 else "  ", style=row.glyph_style)
+                t.append(f"{strip_terminal_controls(row.label) if index == 0 else '':<{LABEL}}", style=MUTED)
+                for chunk, style in segments:
+                    t.append(strip_terminal_controls(chunk), style=style)
+                lines.append(t)
         body = Group(*lines) if lines else Text("…", style=FAINT)
         return Panel(
             body,
@@ -515,6 +518,32 @@ class ValidateView:
             self._static_printed += 1
 
 
+def _wrap_ticker(segments: list[tuple[str, str]], width: int) -> list[list[tuple[str, str]]]:
+    """Wrap a ``a · b · c`` row only at its separators, so a check's glyph stays with its name."""
+    items: list[list[tuple[str, str]]] = [[]]
+    sep = (" · ", FAINT)
+    for chunk, style in segments:
+        if chunk.strip() == "·":
+            sep = (chunk, style)
+            items.append([])
+        else:
+            items[-1].append((chunk, style))
+    lines: list[list[tuple[str, str]]] = []
+    line: list[tuple[str, str]] = []
+    used = 0
+    for item in items:
+        size = sum(len(chunk) for chunk, _ in item)
+        if line and used + len(sep[0]) + size > width:
+            lines.append([*line, (sep[0].rstrip(), sep[1])])
+            line, used = [], 0
+        if line:
+            line.append(sep)
+            used += len(sep[0])
+        line.extend(item)
+        used += size
+    return [*lines, line]
+
+
 def check_ticker_row(lineup: list[str], done: list[str], current: str | None) -> TierRow:
     """Live Tier 1 lineup: completed checks tick, the active one is marked.
 
@@ -566,7 +595,9 @@ def _bounded_console_line(line: str) -> str:
     """Flatten one line of untrusted text and bound it for the compact view."""
     flattened = " ".join(
         "".join(
-            " " if character.isspace() or unicodedata.category(character).startswith("C") else character
+            " "
+            if character.isspace() or unicodedata.category(character).startswith("C")
+            else character
             for character in line
         ).split()
     )
@@ -628,9 +659,7 @@ def sanitize_tier3_console_text(value: object, *, limit: int = _TIER3_TEXT_MAX_C
     sample = value[:sample_limit]
     flattened = " ".join(
         "".join(
-            " "
-            if character.isspace() or unicodedata.category(character).startswith("C")
-            else character
+            " " if character.isspace() or unicodedata.category(character).startswith("C") else character
             for character in sample
         ).split()
     )
@@ -768,7 +797,7 @@ def summarize_tier1(results: list[ValidationResult], lineup: list[str] | None = 
     warnings = sum(len(r.warnings) for r in failed)
     advisory: dict[str, int] = {}
     for r in results:
-        if r.passed and not _is_skipped(r) and r.findings:
+        if r.passed and not _is_skipped(r) and r.findings and _short_name(r.validator_name) != "harness":
             advisory[_short_name(r.validator_name)] = advisory.get(_short_name(r.validator_name), 0) + len(r.findings)
 
     rows: list[TierRow] = []
@@ -795,6 +824,19 @@ def summarize_tier1(results: list[ValidationResult], lineup: list[str] | None = 
     if advisory:
         detail = " · ".join(f"{name} {count}" for name, count in sorted(advisory.items(), key=lambda kv: -kv[1]))
         rows.append(TierRow("advisories", [(str(sum(advisory.values())), TEXT), (f"  {detail}", MUTED)]))
+    harness_rows = [
+        row
+        for r in results
+        for rows in ((r.metadata or {}).get("harness_compatibility") or {}).values()
+        for row in rows
+    ]
+    counts = [
+        f"{sum(row.get('status') == status for row in harness_rows)} {label}"
+        for status, label in (("not_loaded", "not loaded"), ("degraded", "degraded"))
+        if any(row.get("status") == status for row in harness_rows)
+    ]
+    if counts:
+        rows.append(TierRow("harness", [(" · ".join(counts), TEXT), ("  (see below)", MUTED)]))
 
     quality = _quality_stats(results)
     if quality:

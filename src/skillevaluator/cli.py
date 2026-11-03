@@ -2189,7 +2189,7 @@ def validate(
     tier1_ok, tier1_rows = summarize_tier1(results, lineup=check_lineup)
     harness_rows = harness_block(results)
     if harness_rows:
-        view.set_harness(harness_panel(harness_rows, width=view.width), harness_note(harness_rows))
+        view.set_harness(harness_panel(harness_rows, width=view.width, verbose=verbose), harness_note(harness_rows))
     view.tier_done(0, failed=not tier1_ok, rows=tier1_rows)
     tier1_gate_results = list(results)
     tier2_gate_results: list[ValidationResult] = []
@@ -2473,6 +2473,15 @@ def harness_check(
         raise click.BadParameter(str(exc), param_hint="--harness") from exc
     if not block:
         raise click.ClickException(f"No skills found in {target_path}")
+    from skillevaluator.validators.schema import SchemaValidator
+
+    for skill in block:
+        schema = SchemaValidator().validate(Path(skill))
+        if not schema.passed and schema.errors:
+            click.echo(
+                f"Tier 1 schema also fails for {Path(skill).name}: {schema.errors[0].split(' in /', 1)[0]}. "
+                "Run `skillevaluator validate --tiers 1` for details."
+            )
     if json_path is not None:
         json_path.write_text(json.dumps({"harness_compatibility": block}, indent=2), encoding="utf-8")
 

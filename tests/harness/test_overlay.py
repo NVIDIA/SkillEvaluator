@@ -14,7 +14,7 @@ from skillevaluator.harness import HARNESS_STATUSES, evaluate_harnesses, facts_f
 from skillevaluator.harness.overlay import PROFILES_DIR
 from skillevaluator.harness.report import harness_block, harness_note, harness_panel
 from skillevaluator.models.result import Severity
-from skillevaluator.reporting.console_ui import final_check_ticker_row
+from skillevaluator.reporting.console_ui import final_check_ticker_row, summarize_tier1
 from skillevaluator.tier1.commands import DEFAULT_CHECKS, run_validation
 from skillevaluator.validators.harness import HarnessValidator
 
@@ -162,10 +162,11 @@ def test_harness_check_alone_marks_ticker_and_panel(tmp_path: Path):
     assert any(text == "! harness" for text, _ in final_check_ticker_row(["harness"], results).segments)
     assert harness_note(block) == "won't load in copilot-cli"
     text = _render(harness_panel(block))
-    assert "Harness compatibility · advisory" in text
-    assert "NOT LOADED" in text and "[CP-DESC-LIMIT]" in text
-    assert "1 of 6 not loaded" in text
-    assert "harness-check <skill>" in text
+    assert "Harness compatibility" in text and "advisory" not in text
+    assert "rejected" in text and "[CP-DESC-LIMIT]" not in text
+    assert "1 of 6 not loaded" in text and "Details and fixes: -v" in text
+    full = _render(harness_panel(block, verbose=True))
+    assert "NOT LOADED" in full and "[CP-DESC-LIMIT]" in full
 
 
 def test_clean_skill_panel_is_one_line(tmp_path: Path):
@@ -183,7 +184,7 @@ def test_validate_shows_panel_and_verdict_note(tmp_path: Path):
     )
 
     assert result.exit_code == 0, result.output
-    assert "Harness compatibility · advisory" in result.output
+    assert "Harness compatibility" in result.output and "· advisory" not in result.output
     assert "! harness: won't load in copilot-cli" in result.output
 
 
@@ -234,9 +235,9 @@ def test_single_skill_is_measured_against_its_installed_folder(tmp_path: Path):
     assert "CC-LIST-BUDGET" in _ids(rows, "claude-code")
     assert "CP-LIST-BUDGET" in _ids(rows, "copilot-cli")
     message = next(f["message"] for f in rows["claude-code"]["findings"] if f["id"] == "CC-LIST-BUDGET")
-    assert message.startswith("40 skills here share 12,000 description chars")
-    assert rows["claude-code"]["listed"] == {"mode": "name_only", "text": ""}
-    assert rows["codex"]["listed"]["mode"] == "cut" and len(rows["codex"]["listed"]["text"]) == 40
+    assert message.startswith("The 40 skills in this folder have 12,000 description chars")
+    assert rows["claude-code"]["listed"] == rows["codex"]["listed"] == {"mode": "shortened", "text": ""}
+    assert rows["claude-code"]["catalog"]["size"] == 40
 
 
 def test_skill_outside_a_skills_folder_has_no_catalog_rules(tmp_path: Path):
@@ -357,7 +358,7 @@ def test_fix_reaches_findings_and_panels(tmp_path: Path):
     finding = next(f for f in result.findings if f.check_name == "CP-DESC-LIMIT")
 
     assert finding.suggestion == "Cut the description by at least 200 UTF-16 units."
-    out = CliRunner().invoke(cli, ["harness-check", str(skill)], env={"COLUMNS": "120"}).output
+    out = CliRunner().invoke(cli, ["harness-check", str(skill), "-v"], env={"COLUMNS": "120"}).output
     assert "→ Cut the description by at least 200 UTF-16 units." in out
     assert "Description in the model's skill list" in out
 
@@ -431,3 +432,23 @@ def test_every_oversized_file_long_line_and_unlisted_folder_is_counted(tmp_path:
     assert facts["hermes_unlisted_dirs"] == "python, shared"
     assert {"OC-REF-CUT", "OC-LONG-LINES"} <= _ids(rows, "opencode")
     assert {"HM-LINKED-LAYOUT"} <= _ids(rows, "hermes") and "OW-REF-BUDGET" in _ids(rows, "openclaw")
+
+
+def test_compact_view_shows_worst_finding_per_harness_and_catalog(tmp_path: Path):
+    _catalog(tmp_path, 40)
+    block = harness_block(run_validation(tmp_path / ".claude" / "skills" / "filler-000", checks="harness"))
+    compact, full = _render(harness_panel(block)), _render(harness_panel(block, verbose=True))
+
+    assert "catalog  40 skills in" in compact and "(12,000 desc" in compact
+    assert "not found" in compact and "listing shortened" in compact
+    assert "[CX-ROOT]" not in compact and "[CX-ROOT]" in full and "[CX-LIST-BUDGET]" in full
+    assert len(compact.splitlines()) < len(full.splitlines())
+
+
+def test_tier1_summary_gives_harness_its_own_line(tmp_path: Path):
+    results = run_validation(_skill(tmp_path, desc=EMOJI_DESC), checks="schema,harness", harness="all")
+    _, rows = summarize_tier1(results)
+    labels = {row.label: "".join(text for text, _ in row.segments) for row in rows}
+
+    assert labels["harness"].startswith("1 not loaded")
+    assert "harness" not in labels.get("advisories", "")

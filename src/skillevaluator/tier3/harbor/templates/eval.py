@@ -2383,7 +2383,7 @@ _JUDGE_EVIDENCE_AUTH_HEADER_RE = re.compile(
     r"(\bauthorization"
     + _JUDGE_EVIDENCE_HEADER_SEPARATOR
     + r"(?:(?:bearer|basic|token|digest)[ \t]{1,8}(?:\\?[\"'])?)?)"
-    r"[^\s'\"`,;\\][^'\"`\r\n\\]{0,255}",
+    r"[^\s'\"`,;\\][^'\"`\r\n\\]*",
     re.IGNORECASE,
 )
 # X-API-Key, Api-Key, X-Auth-Token, X-Access-Token and Private-Token headers.
@@ -2400,13 +2400,14 @@ _JUDGE_EVIDENCE_COOKIE_HEADER_RE = re.compile(
 )
 _JUDGE_EVIDENCE_CREDENTIAL_FLAG_RE = re.compile(
     r"((?<![^\s'\"])--?(?:password|passwd|token|api-key|apikey|secret|access-token|auth-token)(?:[ \t]{1,8}|=))"
-    r"[^\s'\"`\\]+",
+    r"(?:\"[^\"\r\n]{1,256}\"|'[^'\r\n]{1,256}'|[^\s'\"`\\]+)",
     re.IGNORECASE,
 )
 # "-u"/"--user" also name ordinary options (python -u, pip --user), so only a
 # user:password value is masked.
 _JUDGE_EVIDENCE_USER_FLAG_RE = re.compile(
-    r"((?<![^\s'\"])(?:-u|--user)(?:[ \t]{1,8}|=))[^\s'\"`:\\]{1,256}:[^\s'\"`\\]+"
+    r"((?<![^\s'\"])(?:-u|--user)(?:[ \t]{1,8}|=))"
+    r"(?:\"[^\"\r\n:]{1,256}:[^\"\r\n]{1,256}\"|'[^'\r\n:]{1,256}:[^'\r\n]{1,256}'|[^\s'\"`:\\]{1,256}:[^\s'\"`\\]+)"
 )
 
 

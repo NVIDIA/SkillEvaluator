@@ -577,6 +577,42 @@ def test_saved_judge_evidence_masks_credentials(tmp_path: Path, monkeypatch: pyt
             "Authorization: Digest <redacted>' https://x",
             id="authorization-digest",
         ),
+        pytest.param(
+            'curl -H "Authorization: Bearer ' + "L0ngOpaqueT0ken" * 60 + '" https://x',
+            "L0ngOpaqueT0ken" * 3,
+            'Authorization: Bearer <redacted>" https://x',
+            id="authorization-value-over-256-chars",
+        ),
+        pytest.param(
+            'curl -u "admin:quoted-user-password" https://x',
+            "quoted-user-password",
+            "curl -u <redacted> https://x",
+            id="user-flag-double-quoted",
+        ),
+        pytest.param(
+            "curl --user='admin:quoted-user-password' https://x",
+            "quoted-user-password",
+            "--user=<redacted> https://x",
+            id="user-flag-single-quoted",
+        ),
+        pytest.param(
+            "mysql --password='quoted-db-password' db",
+            "quoted-db-password",
+            "mysql --password=<redacted> db",
+            id="password-flag-single-quoted",
+        ),
+        pytest.param(
+            "tool --token 'quoted-token-value'",
+            "quoted-token-value",
+            "tool --token <redacted>",
+            id="token-flag-quoted",
+        ),
+        pytest.param(
+            'tool --api-key="quoted-api-key-value" run',
+            "quoted-api-key-value",
+            "tool --api-key=<redacted> run",
+            id="api-key-flag-double-quoted",
+        ),
     ],
 )
 def test_judge_evidence_masks_credentials_without_a_key_shape(text: str, secret: str, kept: str) -> None:

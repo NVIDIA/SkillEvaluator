@@ -5739,6 +5739,22 @@ class TestFalsePositivePrevention:
         assert not any(finding.check_name == "gps_coordinates" for finding in result.findings)
 
     @pytest.mark.parametrize(
+        "line",
+        [
+            "Location: 37.774929, -122.419416 (map scale 1:5000)",
+            "Office: 37.774929, -122.419416; vector tiles from the same provider",
+            "Address: 37.774929, -122.419416 roi=downtown, calibration=none",
+        ],
+    )
+    def test_gps_technical_word_after_pair_does_not_hide_location_label(self, tmp_path: Path, line: str):
+        """A technical word that follows the pair does not label it, so the location cue still counts."""
+        (tmp_path / "values.txt").write_text(f"{line}\n", encoding="utf-8")
+
+        result = SecurityValidator().validate_pii_only(tmp_path)
+
+        assert any(finding.check_name == "gps_coordinates" for finding in result.findings)
+
+    @pytest.mark.parametrize(
         ("filename", "contents"),
         [
             ("values.txt", "Location data formats\nquaternion = [0.707107, 0.000000, 0.707107, 0.000000]\n"),
@@ -6017,6 +6033,11 @@ class TestFalsePositivePrevention:
             ('prompt: "Pay with\\r4532015112830366 now"', "4532015112830366"),
             ('msg = "Card:\\n4532 0151 1283 0366"', "4532 0151 1283 0366"),
             ("https://pay.acme.io/charge?q=card%3D4532015112830366", "4532015112830366"),
+            # A payment word before the underscore names a card, not an identifier.
+            ("card_4532015112830366", "4532015112830366"),
+            ("CARD_4532015112830366.png", "4532015112830366"),
+            ("cc_4532015112830366", "4532015112830366"),
+            ("payment_card_4532015112830366", "4532015112830366"),
         ],
     )
     def test_credit_card_next_to_technical_or_test_value_still_flagged(self, tmp_path: Path, contents: str, card: str):

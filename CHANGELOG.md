@@ -370,7 +370,8 @@ All notable changes to SkillEvaluator are documented in this file.
   label such as `timestamp_microseconds:`, `event_timestamp:`, `unix_time`,
   `epoch_us`, `sha256:`, or `checksum=` directly precedes it, or when it sits
   inside a longer ASCII identifier or hex token such as `id_1707938736269577`;
-  a card in Markdown underscore emphasis (`_4532015112830366_`), after a string
+  a card after a payment word and an underscore (`card_4532015112830366`,
+  `cc_...`), in Markdown underscore emphasis (`_4532015112830366_`), after a string
   escape such as `\n` or a percent-encoded byte such as `%3D`, or written
   directly next to Chinese, Japanese, or Korean text is still reported. Known
   test card numbers, now including other widely published test cards such as

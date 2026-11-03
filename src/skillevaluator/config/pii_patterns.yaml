@@ -230,7 +230,7 @@ private_keys:
 # with IGNORECASE, under which [A-Za-z] also matches non-ASCII letters such as
 # the dotless i and the Kelvin sign.
 credit_cards:
-  - pattern: '(?:(?<=\\(?-i:[abfnrtv]))|(?<=%(?-i:[0-9A-Fa-f]{2}))|(?<!(?-i:[A-Za-z0-9.])))(?<!(?-i:[A-Za-z0-9])_)[0-9]{4}[\s-]?[0-9]{4}[\s-]?[0-9]{4}[\s-]?[0-9]{4}(?!(?-i:[A-Za-z0-9]))(?!_(?-i:[A-Za-z0-9]))'
+  - pattern: '(?:(?<=\\(?-i:[abfnrtv]))|(?<=%(?-i:[0-9A-Fa-f]{2}))|(?<!(?-i:[A-Za-z0-9.])))[0-9]{4}[\s-]?[0-9]{4}[\s-]?[0-9]{4}[\s-]?[0-9]{4}(?!(?-i:[A-Za-z0-9]))(?!_(?-i:[A-Za-z0-9]))'
     severity: critical
     description: Possible credit card number
     suggestion: "Remove credit card number - use placeholder like 4111-1111-1111-1111"

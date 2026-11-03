@@ -3235,6 +3235,11 @@ class SecurityValidator(ValidatorBase):
     # A bare (unquoted) type value must use GeoJSON's own spelling.
     _GEOJSON_BARE_GEOMETRY_TYPE = re.compile(r"(?:Multi)?(?:Point|LineString|Polygon)")
     _SCIENTIFIC_LITERAL_PATTERN = re.compile(r"(?<![\w.])[-+]?(?:\d+(?:\.\d*)?|\.\d+)[eE][-+]?\d+")
+    # ``<identifier>_`` directly before a candidate; group 1 is the identifier.
+    _UNDERSCORE_JOINED_PREFIX_PATTERN = re.compile(r"(?-i:([A-Za-z0-9]+(?:_[A-Za-z0-9]+)*)_)\Z")
+    _PAYMENT_LABEL_WORDS = frozenset(
+        {"card", "cards", "cc", "ccn", "pan", "credit", "debit", "payment", "visa", "mastercard", "amex"}
+    )
     # A timestamp or digest label that directly precedes a value
     # (``timestamp_microseconds: ``, ``"sha256": "``, ``checksum=``). An
     # underscore separates words, so snake_case prefixes such as
@@ -3290,7 +3295,15 @@ class SecurityValidator(ValidatorBase):
             # directly before this number counts, so a timestamp field does not
             # hide a card number in a later field on the same line.
             label_start = max(0, match.start() - 100)
-            return cls._NON_PAYMENT_NUMBER_CONTEXT_PATTERN.search(line, label_start, match.start()) is not None
+            if cls._NON_PAYMENT_NUMBER_CONTEXT_PATTERN.search(line, label_start, match.start()) is not None:
+                return True
+            # An underscore joining the number to a letter or digit makes it part
+            # of an identifier (``id_1707938736269577``), unless a word in that
+            # identifier is a payment label (``card_4532015112830366``).
+            joined = cls._UNDERSCORE_JOINED_PREFIX_PATTERN.search(line, label_start, match.start())
+            if joined is None:
+                return False
+            return not any(word in cls._PAYMENT_LABEL_WORDS for word in joined.group(1).lower().split("_"))
 
         if category == "phone_numbers":
             # International phone syntax can begin at the ``+00`` exponent of a
@@ -3323,7 +3336,7 @@ class SecurityValidator(ValidatorBase):
         return any(pattern.search(text) for text in variants)
 
     @classmethod
-    def _lacks_geospatial_context(cls, line: str, context: str) -> bool:
+    def _lacks_geospatial_context(cls, line: str, context: str, pair_start: int | None = None) -> bool:
         """Return whether GPS-shaped pairs on *line* have no geospatial cue.
 
         Precise vectors, poses, quaternions, and waypoints have the same shape
@@ -3332,15 +3345,19 @@ class SecurityValidator(ValidatorBase):
         snake_case or camelCase, so underscores and case changes separate words.
         A strong cue anywhere in *context* outweighs a technical label, and a
         technical label outweighs a soft cue. Vector labels such as
-        ``waypoint`` count only on *line*; ``<pixel|camera|...> coordinates``
+        ``waypoint`` count only on *line*, before the pair at *pair_start*
+        (the whole line when omitted); ``<pixel|camera|...> coordinates``
         labels also count in *context*.
         """
         local = cls._cue_text_variants(line)
+        # A technical label labels the pair only when it comes before it, so
+        # ``Location: 37.77, -122.41 (map scale 1:5000)`` keeps its location cue.
+        label = cls._cue_text_variants(line if pair_start is None else line[:pair_start])
         nearby = cls._cue_text_variants(context)
         if cls._search_cue(cls._GPS_STRONG_CONTEXT_PATTERN, local):
             return False
-        if cls._search_cue(cls._TECHNICAL_COORDINATE_CONTEXT_PATTERN, local) or cls._search_cue(
-            cls._TECHNICAL_VECTOR_CONTEXT_PATTERN, local
+        if cls._search_cue(cls._TECHNICAL_COORDINATE_CONTEXT_PATTERN, label) or cls._search_cue(
+            cls._TECHNICAL_VECTOR_CONTEXT_PATTERN, label
         ):
             return not cls._search_cue(cls._GPS_STRONG_CONTEXT_PATTERN, nearby)
         if cls._search_cue(cls._GPS_SOFT_CONTEXT_PATTERN, local):
@@ -3618,7 +3635,7 @@ class SecurityValidator(ValidatorBase):
                     geojson_lines = self._geojson_coordinate_lines(lines)
                 if line_num not in geojson_lines:
                     context = "\n".join((file_path.name, *lines[max(0, line_num - 3) : line_num]))
-                    if self._lacks_geospatial_context(line, context):
+                    if self._lacks_geospatial_context(line, context, matches[0].start()):
                         continue
             if category == "ip_addresses":
                 matches = [match for match in matches if not self._is_version_literal(match, line)]

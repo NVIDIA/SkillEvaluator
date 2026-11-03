@@ -19,7 +19,6 @@ provider-native credential. Importing this module never requires a key.
 from __future__ import annotations
 
 import io
-import json
 import os
 import re
 import urllib.error
@@ -52,6 +51,10 @@ from skillevaluator.provider_config import (
     is_claude_5_5_or_later,
     is_openai_reasoning_model,
     resolve_llm_provider,
+)
+from skillevaluator.utils.json_spans import (
+    balanced_json_container_end,
+    loads_strict_json,
 )
 
 logger = get_logger(__name__)
@@ -340,42 +343,7 @@ def _extract_choice_content(response: Any) -> str:
     )
 
 
-# Bracket depth beyond which an embedded span is not decoded. Verdicts are
-# shallow, and the cap keeps the decoder well away from the recursion limit.
-_MAX_EMBEDDED_JSON_NESTING = 128
 _JSON_CONTAINER_START = re.compile(r"[{\[]")
-
-
-def _balanced_json_span_end(text: str, start: int) -> int | None:
-    """Return the exclusive end of the string-aware ``{...}``/``[...]`` span at *start*.
-
-    ``None`` means the span never closes, closes with a mismatched bracket, or
-    nests deeper than ``_MAX_EMBEDDED_JSON_NESTING``.
-    """
-    closers: list[str] = []
-    in_string = False
-    escaped = False
-    for index in range(start, len(text)):
-        ch = text[index]
-        if in_string:
-            if escaped:
-                escaped = False
-            elif ch == "\\":
-                escaped = True
-            elif ch == '"':
-                in_string = False
-        elif ch == '"':
-            in_string = True
-        elif ch in "{[":
-            closers.append("}" if ch == "{" else "]")
-            if len(closers) > _MAX_EMBEDDED_JSON_NESTING:
-                return None
-        elif ch in "}]":
-            if not closers or closers.pop() != ch:
-                return None
-            if not closers:
-                return index + 1
-    return None
 
 
 def _embedded_json_objects(text: str) -> list[dict[str, Any]]:
@@ -394,11 +362,11 @@ def _embedded_json_objects(text: str) -> list[dict[str, Any]]:
     cursor = 0
     while (match := _JSON_CONTAINER_START.search(text, cursor)) is not None:
         start = match.start()
-        end = _balanced_json_span_end(text, start)
+        end = balanced_json_container_end(text, start)
         if end is None:
             break
         try:
-            value = json.loads(text[start:end])
+            value = loads_strict_json(text[start:end])
         except (RecursionError, ValueError):
             value = None
         if isinstance(value, dict):
@@ -776,7 +744,7 @@ class LLMClient:
             cleaned = cleaned.rsplit("```", 1)[0].strip()
 
         try:
-            return json.loads(cleaned)
+            return loads_strict_json(cleaned)
         except (RecursionError, ValueError) as e:
             objects = _embedded_json_objects(raw)
             if len(objects) == 1:

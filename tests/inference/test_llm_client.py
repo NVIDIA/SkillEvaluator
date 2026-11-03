@@ -894,6 +894,42 @@ class TestExtractJsonFromResponse:
         with pytest.raises(LLMClientError, match="invalid JSON"):
             _extract_json_reply(monkeypatch, prefix + payload)
 
+    @pytest.mark.parametrize("prefix", [pytest.param("", id="whole-reply"), pytest.param("Result: ", id="in-prose")])
+    @pytest.mark.parametrize(
+        ("payload", "reason"),
+        [
+            pytest.param(
+                '{"verdict": "DUPLICATE", "confidence": 0.9, "verdict": "RELATED_BUT_DISTINCT"}',
+                "Duplicate JSON object member",
+                id="duplicate-key",
+            ),
+            pytest.param(
+                '{"verdict": "DUPLICATE", "detail": {"k": 1, "k": 2}}',
+                "Duplicate JSON object member",
+                id="nested-duplicate-key",
+            ),
+            pytest.param('{"verdict": "DUPLICATE", "confidence": NaN}', "Non-standard JSON constant", id="nan"),
+            pytest.param(
+                '{"verdict": "DUPLICATE", "confidence": -Infinity}', "Non-standard JSON constant", id="infinity"
+            ),
+            pytest.param('{"verdict": "DUPLICATE", "confidence": 1e400}', "non-finite", id="float-overflow"),
+        ],
+    )
+    def test_ambiguous_object_is_rejected(
+        self, monkeypatch: pytest.MonkeyPatch, prefix: str, payload: str, reason: str
+    ) -> None:
+        with pytest.raises(LLMClientError, match="invalid JSON") as excinfo:
+            _extract_json_reply(monkeypatch, prefix + payload)
+
+        if not prefix:
+            # In prose the strict whole-reply error is reported; the scan found no usable object.
+            assert reason in str(excinfo.value)
+
+    def test_ambiguous_object_does_not_hide_another_object(self, monkeypatch: pytest.MonkeyPatch) -> None:
+        content = 'Draft: {"verdict": "DUPLICATE", "verdict": "UNIQUE"}\nFinal: {"verdict": "RELATED_BUT_DISTINCT"}'
+
+        assert _extract_json_reply(monkeypatch, content) == {"verdict": "RELATED_BUT_DISTINCT"}
+
     def test_undecodable_object_blocks_a_later_object(self, monkeypatch: pytest.MonkeyPatch) -> None:
         payload = '{"a":' * 100_000 + "1" + "}" * 100_000
 

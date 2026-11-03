@@ -31,6 +31,14 @@ from skillevaluator.tier3.eval_core.atif_helpers import (
     _truncate_for_behavior,
 )
 from skillevaluator.tier3.eval_core.character_facts import append_character_facts
+from skillevaluator.utils.json_spans import (
+    MAX_JSON_NESTING,
+    balanced_json_container_end,
+    json_nesting_within_limit,
+    parse_finite_json_float,
+    reject_duplicate_object_pairs,
+    reject_nonstandard_json_constant,
+)
 
 logger = logging.getLogger(__name__)
 
@@ -294,85 +302,13 @@ def call_public_llm(
 
 _JSON_WHITESPACE = " \t\r\n"
 _MAX_JSON_TEXT_CHARS = 100_000
-_MAX_JSON_NESTING = 128
+_MAX_JSON_NESTING = MAX_JSON_NESTING
 _JSON_NUMBER_PREFIX_RE = re.compile(r"-?(?:(?:0|[1-9][0-9]*)(?:\.[0-9]+)?(?:[eE][+-]?[0-9]*)?|(?:0|[1-9][0-9]*)\.)?")
-
-
-def _balanced_json_container_end(text: str, start: int) -> int | None:
-    """Return the exclusive end of one bounded structural container."""
-    if start >= len(text) or text[start] not in "{[":
-        return None
-    stack: list[str] = []
-    in_string = False
-    escaped = False
-    for i in range(start, len(text)):
-        ch = text[i]
-        if in_string:
-            if escaped:
-                escaped = False
-            elif ch == "\\":
-                escaped = True
-            elif ch == '"':
-                in_string = False
-        elif ch == '"':
-            in_string = True
-        elif ch in "{[":
-            stack.append(ch)
-            if len(stack) > _MAX_JSON_NESTING:
-                return None
-        elif ch in "}]":
-            expected = "{" if ch == "}" else "["
-            if not stack or stack[-1] != expected:
-                return None
-            stack.pop()
-            if not stack:
-                return i + 1
-    return None
-
-
-def _reject_duplicate_object_pairs(pairs: list[tuple[str, Any]]) -> dict[str, Any]:
-    """Build an object while rejecting ambiguous duplicate members."""
-    result: dict[str, Any] = {}
-    for key, value in pairs:
-        if key in result:
-            raise ValueError("Duplicate JSON object member")
-        result[key] = value
-    return result
-
-
-def _reject_nonstandard_json_constant(_value: str) -> None:
-    raise ValueError("Non-standard JSON constant")
-
-
-def _parse_finite_json_float(value: str) -> float:
-    parsed = float(value)
-    if not math.isfinite(parsed):
-        raise ValueError("JSON number overflowed to a non-finite value")
-    return parsed
-
-
-def _json_nesting_within_limit(text: str) -> bool:
-    """Bound structural nesting without recursively parsing partial JSON."""
-    depth = 0
-    in_string = False
-    escaped = False
-    for character in text:
-        if in_string:
-            if escaped:
-                escaped = False
-            elif character == "\\":
-                escaped = True
-            elif character == '"':
-                in_string = False
-        elif character == '"':
-            in_string = True
-        elif character in "{[":
-            depth += 1
-            if depth > _MAX_JSON_NESTING:
-                return False
-        elif character in "}]" and depth:
-            depth -= 1
-    return True
+_balanced_json_container_end = balanced_json_container_end
+_json_nesting_within_limit = json_nesting_within_limit
+_reject_duplicate_object_pairs = reject_duplicate_object_pairs
+_reject_nonstandard_json_constant = reject_nonstandard_json_constant
+_parse_finite_json_float = parse_finite_json_float
 
 
 def _extract_json(text: str) -> dict[str, Any] | list[Any] | None:

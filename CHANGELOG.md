@@ -533,7 +533,10 @@ All notable changes to SkillEvaluator are documented in this file.
   `LLM returned invalid JSON` (or an `IndexError` for the one-line fence) and
   left Tier 2 incomplete. Exactly one embedded JSON object is accepted. Replies
   with several objects are still rejected instead of guessed, and an object
-  inside an array or a malformed container is never used as the verdict.
+  inside an array or a malformed container is never used as the verdict. As in
+  the Tier 3 judge, an object with a repeated key, a `NaN` or `Infinity` value
+  or a number that overflows a float is rejected, whether it is the whole reply
+  or embedded in prose.
 
 ### Security
 

@@ -16,6 +16,12 @@ import urllib.error
 import urllib.request
 from typing import Any
 
+from skillevaluator.inference.json_span import (
+    MAX_JSON_NESTING,
+    STRICT_JSON_DECODE_HOOKS,
+    balanced_json_container_end,
+    json_nesting_within_limit,
+)
 from skillevaluator.inference.types import EmptyLLMResponseError, LLMClientTruncatedError
 from skillevaluator.provider_config import (
     MAX_COMPLETION_TOKENS,
@@ -31,14 +37,6 @@ from skillevaluator.tier3.eval_core.atif_helpers import (
     _truncate_for_behavior,
 )
 from skillevaluator.tier3.eval_core.character_facts import append_character_facts
-from skillevaluator.utils.json_spans import (
-    MAX_JSON_NESTING,
-    balanced_json_container_end,
-    json_nesting_within_limit,
-    parse_finite_json_float,
-    reject_duplicate_object_pairs,
-    reject_nonstandard_json_constant,
-)
 
 logger = logging.getLogger(__name__)
 
@@ -304,11 +302,7 @@ _JSON_WHITESPACE = " \t\r\n"
 _MAX_JSON_TEXT_CHARS = 100_000
 _MAX_JSON_NESTING = MAX_JSON_NESTING
 _JSON_NUMBER_PREFIX_RE = re.compile(r"-?(?:(?:0|[1-9][0-9]*)(?:\.[0-9]+)?(?:[eE][+-]?[0-9]*)?|(?:0|[1-9][0-9]*)\.)?")
-_balanced_json_container_end = balanced_json_container_end
 _json_nesting_within_limit = json_nesting_within_limit
-_reject_duplicate_object_pairs = reject_duplicate_object_pairs
-_reject_nonstandard_json_constant = reject_nonstandard_json_constant
-_parse_finite_json_float = parse_finite_json_float
 
 
 def _extract_json(text: str) -> dict[str, Any] | list[Any] | None:
@@ -330,16 +324,14 @@ def _extract_json(text: str) -> dict[str, Any] | list[Any] | None:
         if text[index] not in "{[":
             index += 1
             continue
-        end = _balanced_json_container_end(text, index)
+        end = balanced_json_container_end(text, index)
         if end is None:
             return documents[0] if documents else None
         candidate = text[index:end]
         try:
             parsed = json.loads(
                 candidate,
-                object_pairs_hook=_reject_duplicate_object_pairs,
-                parse_constant=_reject_nonstandard_json_constant,
-                parse_float=_parse_finite_json_float,
+                **STRICT_JSON_DECODE_HOOKS,
             )
         except (json.JSONDecodeError, RecursionError, ValueError):
             index = end
@@ -401,9 +393,7 @@ def _is_append_only_json_object_prefix(fragment: str) -> bool:
         return False
 
     decoder = json.JSONDecoder(
-        object_pairs_hook=_reject_duplicate_object_pairs,
-        parse_constant=_reject_nonstandard_json_constant,
-        parse_float=_parse_finite_json_float,
+        **STRICT_JSON_DECODE_HOOKS,
     )
 
     def _skip_whitespace(index: int) -> int:
@@ -476,9 +466,7 @@ def _salvage_behavior_results(text: str) -> list[dict[str, Any]]:
         return []
 
     decoder = json.JSONDecoder(
-        object_pairs_hook=_reject_duplicate_object_pairs,
-        parse_constant=_reject_nonstandard_json_constant,
-        parse_float=_parse_finite_json_float,
+        **STRICT_JSON_DECODE_HOOKS,
     )
 
     def _skip_whitespace(index: int) -> int:

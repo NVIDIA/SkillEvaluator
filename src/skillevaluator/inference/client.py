@@ -19,6 +19,7 @@ provider-native credential. Importing this module never requires a key.
 from __future__ import annotations
 
 import io
+import json
 import os
 import re
 import urllib.error
@@ -29,6 +30,12 @@ from urllib.parse import urlsplit
 
 from skillevaluator.constants import LLM_VERIFY_TEMPERATURE
 from skillevaluator.inference.diagnostics import llm_failure_diagnostic
+from skillevaluator.inference.json_span import (
+    MAX_JSON_NESTING,
+    STRICT_JSON_DECODE_HOOKS,
+    balanced_json_container_end,
+    json_nesting_within_limit,
+)
 from skillevaluator.inference.retry import RetryConfig, resolve_retry_config, retry_call_with_backoff
 from skillevaluator.inference.types import (
     EmptyLLMResponseError,
@@ -51,12 +58,6 @@ from skillevaluator.provider_config import (
     is_claude_5_5_or_later,
     is_openai_reasoning_model,
     resolve_llm_provider,
-)
-from skillevaluator.utils.json_spans import (
-    MAX_JSON_NESTING,
-    balanced_json_container_end,
-    json_nesting_within_limit,
-    loads_strict_json,
 )
 
 logger = get_logger(__name__)
@@ -368,7 +369,7 @@ def _embedded_json_objects(text: str) -> list[dict[str, Any]]:
         if end is None:
             break
         try:
-            value = loads_strict_json(text[start:end])
+            value = json.loads(text[start:end], **STRICT_JSON_DECODE_HOOKS)
         except (RecursionError, ValueError):
             value = None
         if isinstance(value, dict):
@@ -748,7 +749,7 @@ class LLMClient:
         try:
             if not json_nesting_within_limit(cleaned):
                 raise ValueError(f"JSON nests deeper than {MAX_JSON_NESTING} levels")
-            return loads_strict_json(cleaned)
+            return json.loads(cleaned, **STRICT_JSON_DECODE_HOOKS)
         except (RecursionError, ValueError) as e:
             objects = _embedded_json_objects(raw)
             if len(objects) == 1:

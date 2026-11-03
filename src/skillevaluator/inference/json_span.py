@@ -1,38 +1,33 @@
-"""Bounded JSON span scanning and strict decode hooks for LLM replies.
+"""Shared JSON span scanning and strict decode hooks for LLM replies.
 
-The Tier 3 judge and the inference client both recover JSON that a model
-wrapped in prose. They share these helpers so the two extractors agree on what
-a container span is and on which decoded values are ambiguous: duplicate
-object members, ``NaN``/``Infinity`` constants and numbers that overflow to a
-non-finite float are all rejected.
+Both the public inference client and the Tier 3 judge recover JSON that a model
+wrapped in prose. They share one span scanner and one set of decode hooks so
+the two paths accept and refuse the same replies.
 """
 
 from __future__ import annotations
 
-import json
 import math
 from typing import Any
 
-# Structural depth beyond which a span is not decoded. LLM verdicts are
-# shallow, and the cap keeps the decoder away from recursion and C stack
-# limits, which differ between Python versions and threads.
+# Bracket depth beyond which a span is not decoded. Verdicts are shallow, and
+# the cap keeps the decoder well away from the recursion limit.
 MAX_JSON_NESTING = 128
 
 
 def balanced_json_container_end(text: str, start: int) -> int | None:
     """Return the exclusive end of the string-aware ``{...}``/``[...]`` span at *start*.
 
-    ``None`` means *start* is not a container opener, or the span never
-    closes, closes with a mismatched bracket, or nests deeper than
-    ``MAX_JSON_NESTING``.
+    ``None`` means *start* is not a container opener, or the span never closes,
+    closes with a mismatched bracket, or nests deeper than ``MAX_JSON_NESTING``.
     """
     if start >= len(text) or text[start] not in "{[":
         return None
     stack: list[str] = []
     in_string = False
     escaped = False
-    for i in range(start, len(text)):
-        ch = text[i]
+    for index in range(start, len(text)):
+        ch = text[index]
         if in_string:
             if escaped:
                 escaped = False
@@ -52,12 +47,16 @@ def balanced_json_container_end(text: str, start: int) -> int | None:
                 return None
             stack.pop()
             if not stack:
-                return i + 1
+                return index + 1
     return None
 
 
 def json_nesting_within_limit(text: str) -> bool:
-    """Bound structural nesting without recursively parsing partial JSON."""
+    """Bound structural nesting of *text* without recursively parsing it.
+
+    Checked before decoding a whole reply, because the decoder's own depth
+    limit depends on the Python version and the thread's C stack size.
+    """
     depth = 0
     in_string = False
     escaped = False
@@ -91,26 +90,20 @@ def reject_duplicate_object_pairs(pairs: list[tuple[str, Any]]) -> dict[str, Any
 
 
 def reject_nonstandard_json_constant(_value: str) -> None:
+    """``parse_constant`` hook that refuses ``NaN`` and ``Infinity``."""
     raise ValueError("Non-standard JSON constant")
 
 
 def parse_finite_json_float(value: str) -> float:
+    """``parse_float`` hook that refuses numbers overflowing to infinity."""
     parsed = float(value)
     if not math.isfinite(parsed):
         raise ValueError("JSON number overflowed to a non-finite value")
     return parsed
 
 
-def loads_strict_json(text: str) -> Any:
-    """Decode *text* with the shared hooks.
-
-    Raises ``ValueError`` (including ``json.JSONDecodeError``) for invalid or
-    ambiguous JSON, and may raise ``RecursionError`` for deep input; callers
-    that need a depth bound check ``json_nesting_within_limit`` first.
-    """
-    return json.loads(
-        text,
-        object_pairs_hook=reject_duplicate_object_pairs,
-        parse_constant=reject_nonstandard_json_constant,
-        parse_float=parse_finite_json_float,
-    )
+STRICT_JSON_DECODE_HOOKS: dict[str, Any] = {
+    "object_pairs_hook": reject_duplicate_object_pairs,
+    "parse_constant": reject_nonstandard_json_constant,
+    "parse_float": parse_finite_json_float,
+}

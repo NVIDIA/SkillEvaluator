@@ -23,6 +23,7 @@ from skillevaluator.inference import (
 )
 from skillevaluator.inference import client as client_mod
 from skillevaluator.inference.client import _is_native_openai_endpoint, _token_limit_kwargs
+from skillevaluator.inference.json_span import MAX_JSON_NESTING
 from skillevaluator.provider_config import (
     ANTHROPIC_REFUSAL_FALLBACK_MODEL,
     ANTHROPIC_SERVER_SIDE_FALLBACK_BETA,
@@ -36,7 +37,6 @@ from skillevaluator.provider_config import (
     REASONING_MAX_COMPLETION_TOKENS,
     ProviderConfig,
 )
-from skillevaluator.utils.json_spans import MAX_JSON_NESTING
 from skillevaluator.validators.rubric_eval import RUBRIC_JSON_SCHEMA, RubricJudge
 
 
@@ -734,7 +734,9 @@ class TestCompletions:
         monkeypatch.setenv("SKILL_EVAL_LLM_PROVIDER", "openai-compatible")
         monkeypatch.setenv("SKILL_EVAL_LLM_BASE_URL", vertex_base_url)
         monkeypatch.setenv("SKILL_EVAL_LLM_MODEL", "google/gemini-3.8-flash")
-        monkeypatch.setattr("skillevaluator.provider_config._get_google_access_token", lambda **_kwargs: "mock-refreshed-token")
+        monkeypatch.setattr(
+            "skillevaluator.provider_config._get_google_access_token", lambda **_kwargs: "mock-refreshed-token"
+        )
 
         mock_openai = MagicMock()
         mock_auth_err = AuthenticationError("Unauthorized", response=MagicMock(status_code=401), body=None)
@@ -766,7 +768,9 @@ class TestCompletions:
         monkeypatch.setenv("SKILL_EVAL_LLM_BASE_URL", vertex_base_url)
         monkeypatch.setenv("SKILL_EVAL_LLM_API_KEY", "explicit-user-key")
         monkeypatch.setenv("SKILL_EVAL_LLM_MODEL", "google/gemini-3.8-flash")
-        monkeypatch.setattr("skillevaluator.provider_config._get_google_access_token", lambda **_kwargs: "host-adc-token")
+        monkeypatch.setattr(
+            "skillevaluator.provider_config._get_google_access_token", lambda **_kwargs: "host-adc-token"
+        )
 
         mock_openai = MagicMock()
         mock_auth_err = AuthenticationError("Unauthorized", response=MagicMock(status_code=401), body=None)
@@ -855,6 +859,21 @@ class TestExtractJsonFromResponse:
         content = 'Compare {skill_name} with ${HOME} first.\n{"key": "value"}'
 
         assert _extract_json_reply(monkeypatch, content) == {"key": "value"}
+
+    @pytest.mark.parametrize(
+        "span",
+        [
+            pytest.param('{"verdict": "DUPLICATE", "verdict": "RELATED_BUT_DISTINCT"}', id="duplicate-key"),
+            pytest.param('{"verdict": "DUPLICATE", "confidence": NaN}', id="nan-constant"),
+            pytest.param('{"verdict": "DUPLICATE", "confidence": 1e999}', id="overflowing-float"),
+        ],
+    )
+    def test_ambiguous_or_non_finite_embedded_object_is_refused(
+        self, monkeypatch: pytest.MonkeyPatch, span: str
+    ) -> None:
+        # Matches the Tier 3 judge: the last duplicate key must not silently win.
+        with pytest.raises(LLMClientError):
+            _extract_json_reply(monkeypatch, f"Result:\n{span}\nDone.")
 
     def test_multiple_embedded_objects_raise(self, monkeypatch: pytest.MonkeyPatch) -> None:
         with pytest.raises(LLMClientError, match="found 2 JSON objects; expected exactly one"):

@@ -132,6 +132,7 @@ errors, such as an option the workflow does not accept, exit `2`.
 | `--min-score INTEGER` | `70` | Minimum passing quality and rubric score, from 0 to 100; quality severity overrides cannot waive the minimum |
 | `--quality-config PATH` | packaged `quality-default.yaml` | YAML file that replaces the quality check's expected-heading rules. See [Tier 1: Validation](tier1-validation.mdx#the-checks). |
 | `--profile TEXT` | `SKILLEVALUATOR_PROFILE`, then `external` | Validation policy profile |
+| `--policy FILE` | none | Explicit policy overlay, including reviewed ownership-contact severity. See [Tier 1 policies](tier1-validation.mdx#validation-profiles-and-policies). |
 | `--previous-version TEXT` | `SKILLEVALUATOR_PREVIOUS_VERSION`, else unset | Previous version for version checks |
 
 Also accepts `-r/--report` and `-o/--output-dir` described above.

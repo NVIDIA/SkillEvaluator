@@ -2871,6 +2871,10 @@ def _workflow_report_options(func):
     help="Override the packaged quality-default.yaml with a custom YAML file.",
 )
 @click.option("--profile", default=None, help="Validation policy profile [default: external].")
+@click.option(
+    "--policy", "policy_path", type=click.Path(exists=True, dir_okay=False, path_type=Path), default=None,
+    help="Custom policy YAML overlaid on top of --profile.",
+)
 @click.option("--previous-version", default=None, help="Previous version for version checks.")
 @_workflow_report_options
 def _tier1_workflow(
@@ -2881,6 +2885,7 @@ def _tier1_workflow(
     min_score: int,
     quality_config: Path | None,
     profile: str | None,
+    policy_path: Path | None,
     previous_version: str | None,
     report_formats: tuple[str, ...],
     output_dir: Path,
@@ -2890,7 +2895,7 @@ def _tier1_workflow(
     from skillevaluator.validators.policy import resolve_policy
 
     try:
-        policy = resolve_policy(profile=profile)
+        policy = resolve_policy(profile=profile, policy_path=policy_path)
     except (FileNotFoundError, ValueError) as exc:
         raise click.ClickException(str(exc)) from exc
     _offer_scanner_install(checks, skip)

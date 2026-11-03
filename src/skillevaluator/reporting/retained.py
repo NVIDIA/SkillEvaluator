@@ -17,6 +17,7 @@ from skillevaluator.models import Finding, SuccessDetail, ValidationResult, Vali
 from skillevaluator.reporting.base import is_cleanly_skipped, is_tier2_result, is_tier3_result, passes_required_gate
 from skillevaluator.reporting.html import HTMLReporter
 from skillevaluator.reporting.run_status import resolve_run_status, result_status
+from skillevaluator.skillspector_diagnostics import sanitize_completeness
 from skillevaluator.skillspector_provenance import sanitize_skillspector_provenance_metadata
 
 
@@ -195,6 +196,9 @@ def retained_results(payload: dict, *, copy_metadata: bool = True) -> list[Valid
             metadata["skillspector_version"] = _text(row["skillspector_version"], "skillspector_version")
         # Revalidated like every report boundary; a non-canonical record is left out.
         metadata.update(sanitize_skillspector_provenance_metadata(row))
+        completeness = sanitize_completeness(row.get("skillspector_completeness"))
+        if completeness:
+            metadata["skillspector_completeness"] = completeness
         if "publication_target_conflict" in row:
             metadata["publication_target_conflict"] = _text(
                 row["publication_target_conflict"], "publication_target_conflict"

@@ -12,6 +12,14 @@ All notable changes to SkillEvaluator are documented in this file.
 
 ### Added
 
+- Classify explicit `SKILL.md` ownership contacts (`metadata.pic` and
+  `metadata.email`) as `PII.ownership_emails`, still HIGH by default. Add
+  `--policy` to `tier1` and `tier1 validate` so operators can permit reviewed
+  ownership metadata without allowing ordinary email occurrences.
+- Retain bounded SkillSpector completeness diagnostics in JSON reports and
+  show file/line, phase, and reason in incomplete-scan errors. Preserve details
+  across scan stages, folder aggregation, and policy application.
+
 - Include `skillevaluator ci init`, `ci status` and `ci demo` in the Python
   package. Guided GitHub onboarding discovers skills, configures checks and
   optional public hosted reports, and opens a reviewable setup PR. An optional

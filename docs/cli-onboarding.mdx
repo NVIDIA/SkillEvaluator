@@ -30,7 +30,8 @@ locally. The shared container supplies the runtime; you control the configuratio
 <Accordion title="What do I need before I start?">
   Use Python 3.12–3.14, Git and the [GitHub CLI](https://cli.github.com/).
   Start from a clean checkout with a GitHub `origin` remote. Sign in with
-  `gh auth login` if you have not already done so.
+  `gh auth login --scopes workflow` if you have not already done so. The login
+  needs permission to add workflow files as well as access to the repository.
 
   Automatic GitHub setup requires repository admin access. GitHub Actions and
   the referenced reusable workflows must be allowed. Checks-only setup supports
@@ -149,6 +150,12 @@ Close the test PR when you finish; **you do not need to merge it**.
 extract it and open `index.html`. Failed scans retain their available reports too.
 
 <AccordionGroup>
+  <Accordion title="GitHub says my login cannot add workflow files">
+    For an existing GitHub CLI login, run
+    `gh auth refresh --hostname github.com --scopes workflow`, then retry setup.
+    If you supply a token yourself, it must permit workflow-file writes.
+    See [GitHub's workflow scope](https://docs.github.com/en/apps/oauth-apps/building-oauth-apps/scopes-for-oauth-apps).
+  </Accordion>
   <Accordion title="Can I inspect the setup before applying it?">
     Choose the read-only option in the wizard to see the plan without changing
     files or GitHub settings. The `save` option writes only the local workflow

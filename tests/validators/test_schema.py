@@ -390,20 +390,36 @@ metadata:
         with pytest.raises(ValueError, match=message):
             SkillMetadata(domain=domain)
 
-    def test_invalid_metadata_domain_reports_field_finding(self, tmp_path: Path):
-        """An invalid domain entry is reported against metadata.domain."""
+    @pytest.mark.parametrize(
+        ("domain_yaml", "message"),
+        [
+            pytest.param(
+                "  domain:\n    - backend\n    - 42\n",
+                "domain values must be strings",
+                id="non-string-list-entry",
+            ),
+            pytest.param(
+                f"  domain: {'x' * 129}\n",
+                "domain values must be at most 128 characters",
+                id="over-long-single-string",
+            ),
+        ],
+    )
+    def test_invalid_metadata_domain_reports_field_finding(self, tmp_path: Path, domain_yaml: str, message: str):
+        """An invalid domain, including an over-long single string, is a HIGH metadata.domain finding."""
+        from skillevaluator.models.result import Severity
+
         skill_dir = tmp_path / "bad-domain"
         skill_dir.mkdir()
         (skill_dir / "SKILL.md").write_text(
             "---\n"
             "name: bad-domain\n"
-            "description: A skill with an invalid domain list entry\n"
+            "description: A skill with an invalid domain\n"
             "metadata:\n"
             "  author: Test User <testuser@example.com>\n"
-            "  domain:\n"
-            "    - backend\n"
-            "    - 42\n"
-            "---\n\n# Bad Domain\n"
+            f"{domain_yaml}"
+            "---\n\n# Bad Domain\n",
+            encoding="utf-8",
         )
 
         result = SchemaValidator().validate(skill_dir)
@@ -411,8 +427,9 @@ metadata:
         assert not result.passed
         findings = [f for f in result.findings if f.check_name == "frontmatter_field"]
         assert len(findings) == 1
+        assert findings[0].severity == Severity.HIGH
         assert findings[0].metadata["field"] == "metadata.domain"
-        assert "domain values must be strings" in findings[0].message
+        assert message in findings[0].message
 
     # =========================================================================
     # agentskills.io spec + validate_skill_md.py CI checks

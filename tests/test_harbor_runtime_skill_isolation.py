@@ -379,7 +379,7 @@ def test_native_tasks_project_runtime_skills_without_root_evals(tmp_path: Path) 
 
 @pytest.mark.parametrize(
     "name",
-    ["LLM_JUDGE_MODEL", "SKILL_EVAL_JUDGE_MODEL", "LLM_JUDGE_FALLBACK_MODELS"],
+    ["LLM_JUDGE_MODEL", "SKILL_EVAL_JUDGE_MODEL", "LLM_JUDGE_FALLBACK_MODELS", "SKILL_EVAL_JUDGE_CHARACTER_FACTS"],
 )
 def test_native_custom_only_preserves_authored_judge_controls_in_verifier_env(
     tmp_path: Path,
@@ -409,7 +409,7 @@ def test_native_custom_only_preserves_authored_judge_controls_in_verifier_env(
 @pytest.mark.parametrize("scope", ["task", "step"])
 @pytest.mark.parametrize(
     "name",
-    ["LLM_JUDGE_MODEL", "SKILL_EVAL_JUDGE_MODEL", "LLM_JUDGE_FALLBACK_MODELS"],
+    ["LLM_JUDGE_MODEL", "SKILL_EVAL_JUDGE_MODEL", "LLM_JUDGE_FALLBACK_MODELS", "SKILL_EVAL_JUDGE_CHARACTER_FACTS"],
 )
 def test_native_standard_grading_rejects_task_owned_judge_controls(
     tmp_path: Path,

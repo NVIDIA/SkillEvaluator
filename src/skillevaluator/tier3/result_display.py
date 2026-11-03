@@ -28,6 +28,8 @@ from skillevaluator.tier3.harbor.metrics import (
     DIMENSION_DISPLAY,
     LEGACY_SCORE_POLICY,
     METRIC_DISPLAY,
+    dimension_is_not_applicable,
+    not_applicable_list,
     overall_score_from_metrics,
 )
 from skillevaluator.tier3.harbor.progress import redact_progress_detail, secret_values_from_environment
@@ -70,6 +72,18 @@ def _score_cell(value: object, *, unavailable: str = "NO SCORE") -> tuple[Text, 
     return Text(f"{numeric:.2f}", style=f"bold {style}"), Text(_score_bar(numeric), style=style)
 
 
+def _not_applicable_cell() -> tuple[Text, Text]:
+    return Text("N/A", style="dim italic"), Text("")
+
+
+def _not_applicable_metrics(data: Mapping[str, Any], variant: str) -> frozenset[str]:
+    if not _condition_usable(data, variant):
+        return frozenset()
+    by_variant = data.get("not_applicable_metrics")
+    raw = by_variant.get(variant) if isinstance(by_variant, Mapping) else None
+    return frozenset(not_applicable_list(raw))
+
+
 def _delta_cell(value: object) -> Text:
     numeric = _finite_number(value)
     if numeric is None:
@@ -106,7 +120,9 @@ def _default_with_skill_overall(data: Mapping[str, Any]) -> float | None:
     scores = data.get("with_skill")
     if not isinstance(scores, Mapping):
         return None
-    score = overall_score_from_metrics(scores, DEFAULT_METRICS)
+    score = overall_score_from_metrics(
+        scores, DEFAULT_METRICS, not_applicable=_not_applicable_metrics(data, "with_skill")
+    )
     return round(score, 4) if score is not None else None
 
 
@@ -399,6 +415,8 @@ def _render_agent_scores(
     safe: Any,
 ) -> None:
     with_usable = _condition_usable(data, "with_skill")
+    # A baseline-only run (--skip-with-skill) deliberately leaves the with-skill arm unscored.
+    with_unavailable = "skipped" if _condition_status(data, "with_skill") == "skipped" else "NO SCORE"
     baseline_status = _condition_status(data, "without_skill")
     baseline_skipped = baseline_status == "skipped"
     baseline_usable = _condition_usable(data, "without_skill") and not baseline_skipped
@@ -434,7 +452,13 @@ def _render_agent_scores(
         with_value = with_scores.get(metric) if with_usable else None
         baseline_value = baseline_scores.get(metric) if baseline_usable else None
         label = Text(METRIC_DISPLAY.get(metric, metric.replace("_", " ").title()), style="bold")
-        with_score, with_bar = _score_cell(with_value)
+        with_na = metric in _not_applicable_metrics(data, "with_skill") and _finite_number(with_value) is None
+        baseline_na = (
+            metric in _not_applicable_metrics(data, "without_skill") and _finite_number(baseline_value) is None
+        )
+        with_score, with_bar = (
+            _not_applicable_cell() if with_na else _score_cell(with_value, unavailable=with_unavailable)
+        )
         row: list[Text] = [label, with_score, with_bar]
         if show_baseline:
             persisted = lift.get(metric) if isinstance(lift.get(metric), Mapping) else {}
@@ -443,10 +467,15 @@ def _render_agent_scores(
                 if _finite_number(with_value) is not None and _finite_number(baseline_value) is not None
                 else None
             )
-            baseline_score, baseline_bar = _score_cell(baseline_value)
+            baseline_score, baseline_bar = _not_applicable_cell() if baseline_na else _score_cell(baseline_value)
             row.extend([baseline_score, baseline_bar, _delta_cell(delta)])
         table.add_row(*row)
 
+    basis = lift.get("basis")
+    if isinstance(basis, Mapping) and basis.get("pairing") == "same_cases_per_metric":
+        table.caption = "Lift compares the cases scored by both arms for each evaluator."
+    if _not_applicable_metrics(data, "with_skill") or _not_applicable_metrics(data, "without_skill"):
+        table.caption = (str(table.caption or "") + " N/A: no applicable reference or skill in this arm.").strip()
     if custom_with or custom_without:
         if metrics:
             table.add_section()
@@ -454,7 +483,7 @@ def _render_agent_scores(
         for metric in custom_metrics:
             with_value = custom_with.get(metric) if with_usable else None
             baseline_value = custom_without.get(metric) if baseline_usable else None
-            with_score, with_bar = _score_cell(with_value)
+            with_score, with_bar = _score_cell(with_value, unavailable=with_unavailable)
             row = [Text(f"custom: {safe(metric)}", style="cyan"), with_score, with_bar]
             if show_baseline:
                 persisted = custom_lift.get(metric) if isinstance(custom_lift.get(metric), Mapping) else {}
@@ -611,12 +640,23 @@ def _render_dimensions(
             )
             with_numeric = _finite_number(with_score)
             baseline_numeric = _finite_number(baseline_score)
-            with_cell, with_bar = _score_cell(with_numeric)
+            with_na = with_numeric is None and dimension_is_not_applicable(
+                dimension, _not_applicable_metrics(data, "with_skill")
+            )
+            baseline_na = baseline_numeric is None and dimension_is_not_applicable(
+                dimension, _not_applicable_metrics(data, "without_skill")
+            )
+            with_skipped = _condition_status(data, "with_skill") == "skipped"
+            with_cell, with_bar = (
+                _not_applicable_cell()
+                if with_na
+                else _score_cell(with_numeric, unavailable="skipped" if with_skipped else "NO SCORE")
+            )
             baseline_skipped = _condition_status(data, "without_skill") == "skipped"
             if baseline_skipped:
                 baseline_cell, baseline_bar = Text("skipped", style="dim"), Text("")
             else:
-                baseline_cell, baseline_bar = _score_cell(baseline_numeric)
+                baseline_cell, baseline_bar = _not_applicable_cell() if baseline_na else _score_cell(baseline_numeric)
             delta = (
                 with_numeric - baseline_numeric
                 if not _never_activated(data) and with_numeric is not None and baseline_numeric is not None

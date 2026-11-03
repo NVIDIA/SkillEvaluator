@@ -254,6 +254,11 @@ All notable changes to SkillEvaluator are documented in this file.
   summaries) are unchanged. The evidence-budget documentation now names
   both causes of a `behavior_check` truncation and which setting raises
   each.
+- PR scan comments show the verdict, quality scores, first actionable fixes and
+  report links; full provenance and detailed findings stay in the report.
+- Hosted reports use the retained site commit as the Pages deployment identity,
+  so repeated publications from one default-branch revision deploy fresh reports.
+
 - Reusable Tier 1 CI always requires Semgrep in scanner subprocesses, so local
   optional-scanner defaults cannot hide missing CI code-scanning coverage.
 

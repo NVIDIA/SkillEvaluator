@@ -30,6 +30,7 @@ from skillevaluator.tier3.eval_core.atif_helpers import (
     _behavior_final_response_limit,
     _truncate_for_behavior,
 )
+from skillevaluator.tier3.eval_core.character_facts import append_character_facts
 
 logger = logging.getLogger(__name__)
 
@@ -124,6 +125,30 @@ def _judge_error(error_reason: str, **metadata: Any) -> dict[str, Any]:
     if len(safe_reason) > _JUDGE_ERROR_REASON_LIMIT:
         safe_reason = safe_reason[: _JUDGE_ERROR_REASON_LIMIT - 3] + "..."
     return {**metadata, "score": None, "status": "error", "reason": safe_reason}
+
+
+NOT_APPLICABLE_STATUS = "not_applicable"
+_NO_GROUND_TRUTH_REASON = "N/A: no ground_truth defined for this eval case"
+_NO_EXPECTED_BEHAVIOR_REASON = "N/A: no expected_behavior defined for this eval case"
+
+
+def _judge_not_applicable(reason: str, **metadata: Any) -> dict[str, Any]:
+    """Return a scoreless result for a judge that has nothing to judge against."""
+    return {**metadata, "score": None, "status": NOT_APPLICABLE_STATUS, "reason": reason}
+
+
+def _has_judge_reference(value: Any) -> bool:
+    """Return whether a ground_truth / expected_behavior value gives a judge something to check."""
+    if value is None:
+        return False
+    if isinstance(value, str):
+        return bool(value.strip())
+    if isinstance(value, (list, tuple)):
+        return any(_has_judge_reference(item) for item in value)
+    if isinstance(value, (bool, int, float)):
+        # 0, 0.0 and False are real reference answers, not a missing one.
+        return True
+    return bool(value)
 
 
 def _bounded_judge_text(value: Any) -> str:
@@ -774,8 +799,8 @@ def judge_accuracy(
     **kwargs: Any,
 ) -> dict[str, Any]:
     """Judge accuracy; exclude skill identification when no skill is expected."""
-    if not ground_truth:
-        return {"score": 1.0, "reason": "No ground_truth -- skipped"}
+    if not _has_judge_reference(ground_truth):
+        return _judge_not_applicable(_NO_GROUND_TRUTH_REASON)
 
     prompt = ACCURACY_PROMPT
     if not skill_identification_applicable:
@@ -785,6 +810,7 @@ def judge_accuracy(
         ).replace("Compute score = count(true) / 5.", "Compute score = count(true among the other four criteria) / 4.")
     # Adjust the rubric before interpolation so task/evidence text stays intact.
     prompt = prompt.format(question=question, ground_truth=ground_truth, agent_text=agent_text)
+    prompt = append_character_facts(prompt, question=question, ground_truth=ground_truth, agent_text=agent_text)
 
     def validate_payload(parsed: Any) -> str | None:
         error = _accuracy_payload_error(parsed)
@@ -883,14 +909,17 @@ def judge_goal_accuracy(
     **kwargs: Any,
 ) -> dict[str, Any]:
     """Run the goal accuracy judge (two-step: infer goal, compare outcome)."""
-    if not ground_truth:
-        return {"score": 1.0, "reason": "No ground_truth -- skipped"}
+    if not _has_judge_reference(ground_truth):
+        return _judge_not_applicable(_NO_GROUND_TRUTH_REASON)
 
     prompt = GOAL_ACCURACY_PROMPT.format(
         question=question,
         ground_truth=ground_truth,
         tool_summary=tool_summary,
         agent_text=agent_text,
+    )
+    prompt = append_character_facts(
+        prompt, question=question, ground_truth=ground_truth, tool_summary=tool_summary, agent_text=agent_text
     )
     kwargs.setdefault("response_schema", GOAL_ACCURACY_JSON_SCHEMA)
     kwargs.setdefault("schema_name", "goal_accuracy_judgment")
@@ -1045,15 +1074,17 @@ def judge_behavior_check(
     **kwargs: Any,
 ) -> dict[str, Any]:
     """Run the behavior check LLM judge."""
-    if not expected_behaviors:
-        return {"score": 1.0, "reason": "No expected_behavior defined", "results": []}
+    if not _has_judge_reference(expected_behaviors):
+        return _judge_not_applicable(_NO_EXPECTED_BEHAVIOR_REASON, results=[])
 
     behaviors_text = "\n".join(f"{i + 1}. {b}" for i, b in enumerate(expected_behaviors))
 
+    conversation = _compact_behavior_conversation(conversation_text)
     prompt = BEHAVIOR_CHECK_PROMPT.format(
-        conversation=_compact_behavior_conversation(conversation_text),
+        conversation=conversation,
         behaviors=behaviors_text,
     )
+    prompt = append_character_facts(prompt, conversation=conversation, expected_behaviors=behaviors_text)
     kwargs.setdefault("max_tokens", BEHAVIOR_JUDGE_MAX_TOKENS)
     kwargs.setdefault("response_schema", BEHAVIOR_CHECK_JSON_SCHEMA)
     kwargs.setdefault("schema_name", "behavior_check_judgment")

@@ -424,6 +424,23 @@ def finding_repository_path(skill_path: object, file_path: object) -> str | None
     return str(path)
 
 
+def _issue_for_result(result: dict) -> tuple[object, dict]:
+    """Use an explicit failed gate before unrelated advisory findings."""
+    gates = _items(result.get("gate_failures"))
+    findings = [_dict(item) for item in _items(result.get("findings"))]
+    if gates:
+        for finding in findings:
+            message = finding.get("message")
+            if isinstance(message, str) and message and message in _text(gates[0]):
+                return gates[0], finding
+        return gates[0], {}
+    severity = {"critical": 0, "high": 1, "medium": 2, "low": 3, "info": 4}
+    findings.sort(key=lambda item: severity.get(_text(item.get("severity")).lower(), 5))
+    finding = findings[0] if findings else {}
+    errors = _items(_dict(result.get("legacy")).get("errors"))
+    return finding.get("message") or (errors[0] if errors else result.get("skip_reason")), finding
+
+
 def _first_action(model: dict) -> tuple[str, str, str]:
     """Select one recorded problem, preferring unavailable scans over findings."""
     row = model["row"]
@@ -456,12 +473,8 @@ def _first_action(model: dict) -> tuple[str, str, str]:
                 "",
                 "Check this validator's diagnostics and rerun after restoring the missing scan.",
             )
-        findings = [_dict(f) for f in _items(result.get("findings"))]
-        severity = {"critical": 0, "high": 1, "medium": 2, "low": 3, "info": 4}
-        findings.sort(key=lambda f: severity.get(_text(f.get("severity")).lower(), 5))
-        finding = findings[0] if findings else {}
-        errors = _items(legacy.get("errors"))
-        reason = finding.get("message") or (errors[0] if errors else "This validator failed without a recorded reason.")
+        reason, finding = _issue_for_result(result)
+        reason = reason or "This validator failed without a recorded reason."
         fix = (
             finding.get("suggestion")
             or "Open the full report and inspect this validator's diagnostics before rerunning."
@@ -495,7 +508,9 @@ def _first_action(model: dict) -> tuple[str, str, str]:
     )
 
 
-def _compact_summary(models: list[dict], summary: dict, context: dict, *, status: str, llm: str, footer: str) -> str:
+def _compact_summary(
+    models: list[dict], summary: dict, context: dict, *, status: str, llm: str, footer: str, include_scores: bool = False
+) -> str:
     """Keep the Actions landing view small; detailed evidence lives in reports."""
     outcomes = [
         "INCOMPLETE"
@@ -523,10 +538,20 @@ def _compact_summary(models: list[dict], summary: dict, context: dict, *, status
         status = "ERROR"
     if status.startswith("INCOMPLETE"):
         status = "INCOMPLETE"
-    lines = ["# Skill scan", f"**Tier 1 scan result: {_brief(status)}**"]
+    lines = ([] if include_scores else ["# Skill scan"]) + [f"**Tier 1 scan result: {_brief(status)}**"]
+    noun = "skill" if include_scores and len(models) == 1 else "skills"
     lines.append(
-        f"{len(models)} skills · {counts['PASS']} passed · {counts['FAIL']} failed · {counts['INCOMPLETE']} incomplete"
+        f"{len(models)} {noun} · {counts['PASS']} passed · {counts['FAIL']} failed · {counts['INCOMPLETE']} incomplete"
     )
+    if include_scores and models:
+        lines.extend(["| Skill | Status | Quality / 100 |", "| --- | --- | --- |"])
+        for model, outcome in list(zip(models, outcomes, strict=True))[:SUMMARY_SKILL_LIMIT]:
+            quality = model["quality"][0] if len(model["quality"]) == 1 else {}
+            score = _score(quality.get("overall_score"))
+            grade = _brief(quality.get("grade"))
+            lines.append(f"| {_brief(model['row'].get('path'), 240)} | {outcome} | {score} / {grade} |")
+        if len(models) > SUMMARY_SKILL_LIMIT:
+            lines.append(f"{len(models) - SUMMARY_SKILL_LIMIT} more skills are listed in the full report.")
     if summary.get("error"):
         lines.extend(
             [f"**Run error:** {_brief(summary['error'])}", "Correct the workflow configuration and rerun the scan."]
@@ -549,16 +574,24 @@ def _compact_summary(models: list[dict], summary: dict, context: dict, *, status
             lines.append(f"**{len(affected) - SUMMARY_SKILL_LIMIT} more affected skills:** open the full report.")
         lines.append("Push your fixes to rerun PR checks, or rerun the workflow after resolving scan errors.")
     elif models and status in {"PASSED", "PASS"}:
-        lines.append("No blocking issues found. Advisory findings remain available in the full report.")
+        lines.append(
+            "No blocking issues found."
+            if include_scores
+            else "No blocking issues found. Advisory findings remain available in the full report."
+        )
     elif not summary.get("error"):
         lines.append("Inspect the full report and failed workflow step; no complete passing scan is established.")
     deleted = _items(_dict(summary.get("selection")).get("deleted"))
     if deleted:
         lines.append(f"{len(deleted)} completely deleted skill directories were skipped; see summary.json.")
     conclusion = context.get("ci_conclusion", context.get("run_conclusion"))
-    if conclusion is not None:
+    if conclusion is not None and (not include_scores or conclusion != "success"):
         lines.append(f"**CI run conclusion:** {_brief(conclusion, 80)}")
-    lines.append(f"Tier 1 only · Tier 2: Not run · Tier 3: Not run. {_brief(llm, 240)}")
+    lines.append(
+        "Tier 1 static checks."
+        if include_scores and context.get("llm_enabled") is False
+        else f"Tier 1 only · Tier 2: Not run · Tier 3: Not run. {_brief(llm, 240)}"
+    )
     # The source scan's artifact is also the fallback when reading a separate
     # publisher workflow's summary, or when the hosted URL is not deployed yet.
     artifact_help = (
@@ -568,7 +601,7 @@ def _compact_summary(models: list[dict], summary: dict, context: dict, *, status
     # Preserve the result and counts rather than spending that budget on links.
     if len(footer.encode("utf-8")) > SUMMARY_LIMIT // 2 or footer.startswith("Full evidence:"):
         footer = artifact_help
-    else:
+    elif not include_scores or not context.get("report_url"):
         lines.append(artifact_help)
     return _bounded(lines, SUMMARY_LIMIT, footer)
 
@@ -662,16 +695,12 @@ def render_reports(
             markdown.append(f"**{label}:** {_md(_text(value)[:4096])}")
     if summary.get("error"):
         markdown.append(f"**Run error:** {_md(summary['error'])}")
-    comment_header = list(markdown)
     attention = []
     for model in models:
         for result, outcome in zip(model["results"], model["statuses"], strict=True):
             if outcome not in {"FAIL", "INCOMPLETE", "UNKNOWN"}:
                 continue
-            findings = _items(result.get("findings"))
-            finding = _dict(findings[0]) if findings else {}
-            errors = _items(_dict(result.get("legacy")).get("errors"))
-            reason = finding.get("message") or (errors[0] if errors else result.get("skip_reason"))
+            reason, finding = _issue_for_result(result)
             reason = reason or "Execution evidence is incomplete; inspect the validator details."
             location = _text(finding.get("file_path"))
             if finding.get("line_number") is not None:
@@ -695,11 +724,6 @@ def render_reports(
             "| --- | --- | --- | --- | --- | --- |",
         ]
     )
-    comments = [
-        *comment_header,
-        "| Skill | Status | Quality / 100 | Errors | Warnings |",
-        "| --- | --- | --- | --- | --- |",
-    ]
     for model in models:
         row, data = model["row"], model["data"]
         skill = _text(row.get("path"))
@@ -708,7 +732,6 @@ def render_reports(
         score, grade = _score(quality.get("overall_score")), _text(quality.get("grade"))
         errors, warnings = data.get("total_errors"), data.get("total_warnings")
         markdown.append(f"| {_md(skill)} | {skill_status} | {score} | {_md(grade)} | {_md(errors)} | {_md(warnings)} |")
-        comments.append(f"| {_md(skill)} | {skill_status} | {score} / {_md(grade)} | {_md(errors)} | {_md(warnings)} |")
     details = _Budget(markdown, DETAIL_LIMIT, footer)
     for model in models:
         row = model["row"]
@@ -718,7 +741,6 @@ def render_reports(
             block.append(f"Run error: {_md(row['error'])}")
         if model["issue"]:
             block.append(_md(model["issue"]))
-            comments.append(f"**{_md(skill)}:** {_md(model['issue'])}")
         for quality in model["quality"]:
             block.extend(
                 [
@@ -754,26 +776,9 @@ def render_reports(
                 if details.spent():
                     break
                 markdown.append(f"**{_md(label)}:** {_md(value)}")
-        failures = [
-            result
-            for result, outcome in zip(model["results"], model["statuses"], strict=True)
-            if outcome in {"FAIL", "INCOMPLETE", "UNKNOWN"}
-        ]
-        for result in failures:
-            findings = _items(result.get("findings"))
-            errors = _items(_dict(result.get("legacy")).get("errors"))
-            message = (
-                _dict(findings[0]).get("message") if findings else (errors[0] if errors else "See retained evidence.")
-            )
-            comments.append(f"**{_md(skill)} / {_md(result.get('validator'))}:** {_md(_text(message)[:2000])}")
-            if findings:
-                finding = _dict(findings[0])
-                location = _text(finding.get("file_path"))
-                if finding.get("line_number") is not None:
-                    location += ":" + _text(finding["line_number"])
-                comments.append(
-                    f"Location: {_md(location[:2000])}. Suggested fix: {_md(_text(finding.get('suggestion'))[:2000])}"
-                )
     _write(reports / "details.md", _bounded(markdown, DETAIL_LIMIT, footer))
     _write(reports / "summary.md", _compact_summary(models, summary, context, status=status, llm=llm, footer=footer))
-    _write(reports / "pr-comment.md", _bounded(comments, COMMENT_LIMIT, footer))
+    _write(
+        reports / "pr-comment.md",
+        _compact_summary(models, summary, context, status=status, llm=llm, footer=footer, include_scores=True),
+    )

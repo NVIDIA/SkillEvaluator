@@ -147,6 +147,8 @@ def child_environment(environ: dict[str, str]) -> tuple[dict[str, str], bool]:
     env["PYTHON_DOTENV_DISABLED"] = "1"
     env["SEMGREP_SEND_METRICS"] = "off"
     env["SEMGREP_ENABLE_VERSION_CHECK"] = "0"
+    # The complete CI runtime requires Semgrep even when local installs make it optional.
+    env["SKILLEVALUATOR_REQUIRE_SEMGREP"] = "1"
     env["NO_COLOR"] = "1"
     Path(env["HOME"]).mkdir(parents=True, exist_ok=True)
     if enabled == "true":
@@ -246,6 +248,8 @@ def _summary(skills: list[dict], error: str | None = None) -> dict:
         "overall_passed": bool(skills) and passed == len(skills) and error is None,
         "overall_status": "error"
         if error
+        else "failed"
+        if any(item["overall_status"] == "failed" for item in skills)
         else "incomplete"
         if incomplete
         else "passed"
@@ -392,6 +396,7 @@ def evaluate_skill(
     workspace: Path,
     env: dict[str, str],
     llm: bool,
+    min_score: str,
     timeout: float,
     execute,
     tokens: set[str],
@@ -423,6 +428,8 @@ def evaluate_skill(
                 "--llm" if llm else "--no-llm",
                 "--profile",
                 "external",
+                "--min-score",
+                min_score,
                 # native_reports renders each skill's HTML from the retained JSON
                 # and replaces any CLI copy, so the CLI does not render it.
                 "-r",
@@ -514,6 +521,10 @@ def run(workspace: Path, reports: Path, environ: dict[str, str], *, execute=None
         if reports.is_relative_to(workspace):
             raise ConfigurationError("The report directory must be outside the read-only workspace.")
         env, llm = child_environment(environ)
+        score = environ.get("MIN_SCORE", "70")
+        if not score.isascii() or not score.isdigit() or len(score) > 3 or int(score) > 100:
+            raise ConfigurationError("MIN_SCORE must be an integer between 0 and 100.")
+        min_score = str(int(score))
         workers = scan_workers(environ)
         mode = environ.get("SCAN_MODE", "all")
         if mode not in {"all", "changed"}:
@@ -638,6 +649,7 @@ def run(workspace: Path, reports: Path, environ: dict[str, str], *, execute=None
                         workspace=workspace,
                         env=worker_env,
                         llm=llm,
+                        min_score=min_score,
                         timeout=remaining,
                         execute=execute,
                         tokens=tokens,

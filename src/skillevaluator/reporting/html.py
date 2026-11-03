@@ -73,7 +73,9 @@ from skillevaluator.reporting.base import (
 )
 from skillevaluator.reporting.harbor_viewer import normalize_agent_eval_harbor_links
 from skillevaluator.reporting.presentation import success_is_not_applicable
+from skillevaluator.reporting.run_status import Status, resolve_run_status, result_status
 from skillevaluator.reporting.tier3_scope import completed_agent_result, validate_report_scope
+from skillevaluator.skillspector_provenance import skillspector_provenance_records
 
 if TYPE_CHECKING:
     from skillevaluator.models import ValidationResult
@@ -965,6 +967,10 @@ def _sanitize_tier3_display_payload(value: dict[str, Any]) -> dict[str, Any]:
                 "baseline": _finite_number(scores.get("baseline"), minimum=0.0, maximum=1.0),
                 "lift": _finite_number(scores.get("lift"), minimum=-1.0, maximum=1.0),
             }
+            if scores.get("with_skill_status") == "skipped":
+                # A baseline-only run (--skip-with-skill) never ran this arm;
+                # the table says so instead of reporting a missing score.
+                evaluators[name]["with_skill_status"] = "skipped"
     payload["evaluators"] = evaluators
     for key in (
         "insights",
@@ -1176,6 +1182,11 @@ def _skillspector_versions(results: list[ValidationResult]) -> list[str]:
         if isinstance(raw_version, str) and _SKILLSPECTOR_VERSION_RE.fullmatch(raw_version.strip()):
             versions.setdefault(raw_version.strip(), None)
     return list(versions)
+
+
+def _skillspector_provenance(results: list[ValidationResult]) -> list[dict[str, object]]:
+    """Return the validated SkillSpector LLM provenance records on ``results``."""
+    return [record for result in results for record in skillspector_provenance_records(result.metadata)]
 
 
 def _related_paths(finding: object) -> list[str]:
@@ -1395,8 +1406,9 @@ def _fix_first(
 
     A check that could not finish comes first, with the scanner's own reason,
     because no pass can be claimed until it runs. Findings then rank by severity, then blocking before
-    advisory, then occurrences. A failed check with no located finding is
-    listed as a high, blocking item so its reason is not lost. Two findings at
+    advisory, then occurrences. A failed check's independent error, or its
+    failure without a located finding, is listed as a high, blocking item so
+    its reason is not lost. Two findings at
     the same file and line (for example one secret reported by two scanners)
     take one slot.
     """
@@ -1407,17 +1419,18 @@ def _fix_first(
             label = plain_check_name(check_name)
             status = check.get("status") or ("pass" if check.get("passed") else "fail")
             findings = check.get("findings") or []
+            independent_errors = [str(error) for error in check.get("additional_errors") or [] if str(error).strip()]
             blocking = not check.get("passed", True)
             item = {"check": label, "skill": skill_name, "location": "", "blocking": True}
             check_key = (skill_name, "check", check_name)
-            if status == "incomplete":
+            if status == "incomplete" or check.get("incomplete_scans"):
                 scans = ", ".join(str(scan) for scan in check.get("incomplete_scans") or [])
                 reason = _scan_stop_reason(check.get("additional_errors") or [], check.get("additional_warnings") or [])
                 message = f"{label} did not finish" + (f": {reason}" if reason else f" ({scans})" if scans else "")
                 item |= {"kind": "incomplete", "severity": "incomplete", "message": message}
                 candidates.append(((2, 0, 1, 0), check_key, item | {"anchor": check_anchors[skill_name][check_name]}))
-            elif status == "fail" and not findings:
-                errors = [str(error) for error in check.get("errors") or [] if str(error).strip()]
+            elif status == "fail" and (independent_errors or not findings):
+                errors = independent_errors or [str(error) for error in check.get("errors") or [] if str(error).strip()]
                 message = errors[0] if errors else f"{label} failed without a located finding"
                 item |= {"kind": "check", "severity": "high", "message": message}
                 rank = (1, _SEVERITY_RANK["high"], 1, 1)
@@ -1484,7 +1497,10 @@ def _result_display_status(result: ValidationResult) -> str:
         and not result.findings
         and all(_detail_display_status(detail) == "not_applicable" for detail in result.success_details)
     )
-    if result.is_incomplete:
+    outcome = result_status(result)
+    if outcome == Status.FAILED:
+        return "fail"
+    if outcome == Status.INCOMPLETE:
         return "incomplete"
     if is_cleanly_skipped(result):
         return "not_applicable" if "not applicable" in get_skip_reason(result).casefold() else "skipped"
@@ -1724,10 +1740,10 @@ class HTMLReporter(ReporterBase):
                 skill_data["passed"] = False
                 vdata["passed"] = False
 
-            if result.is_incomplete:
-                skill_data["status"] = "incomplete"
-            elif not result.passed and skill_data["status"] != "incomplete":
+            if result_status(result) == Status.FAILED:
                 skill_data["status"] = "fail"
+            elif result_status(result) == Status.INCOMPLETE and skill_data["status"] != "fail":
+                skill_data["status"] = "incomplete"
             skill_data["validators"][vn] = vdata
 
         # Deduplicate findings per validator
@@ -2263,8 +2279,8 @@ class HTMLReporter(ReporterBase):
         executed_count = total - skipped_count
         passed_count = sum(1 for r in results if r.passed and not r.is_incomplete and not is_cleanly_skipped(r))
         advisory_skipped_count = sum(1 for r in results if is_advisory_agent_eval_skip(r))
-        failed_count = sum(1 for r in results if not r.passed and not is_cleanly_skipped(r))
-        incomplete_count = sum(1 for r in results if r.is_incomplete)
+        failed_count = sum(1 for r in results if result_status(r) == Status.FAILED)
+        incomplete_count = sum(1 for r in results if result_status(r) == Status.INCOMPLETE)
         issue_count = 0
         critical = high = medium = low = 0
         for r in results:
@@ -2303,7 +2319,7 @@ class HTMLReporter(ReporterBase):
                 "validator_name": result.validator_name,
                 "validator_description": result.validator_description,
                 "passed": result.passed,
-                "status": "skipped" if skipped else result.status,
+                "status": result_status(result).value,
                 "skipped": skipped,
                 "skip_reason": get_skip_reason(result) if skipped else None,
                 "incomplete_scans": result.incomplete_scans,
@@ -2476,6 +2492,9 @@ class HTMLReporter(ReporterBase):
                 score = _finite_number(agent.get("with_skill"), minimum=0.0, maximum=1.0)
                 if score is None:
                     score = _finite_number(agent.get("overall_score"), minimum=0.0, maximum=1.0)
+                if score is None and candidate.get("mode") == "baseline_only":
+                    # A baseline-only run (--skip-with-skill) is scored by its baseline arm.
+                    score = _finite_number(agent.get("baseline"), minimum=0.0, maximum=1.0)
                 attempts = max(payload_attempts, _nonnegative_count(agent.get("scored_attempts")))
                 if score is not None and attempts > 0:
                     return True
@@ -2722,9 +2741,10 @@ class HTMLReporter(ReporterBase):
             ),
         )
 
-        all_passed = all(passes_required_gate(r) for r in results)
-        has_incomplete = any(r.is_incomplete for r in results)
-        overall_status = "incomplete" if has_incomplete else "passed" if all_passed else "failed"
+        run_status = resolve_run_status(results)
+        all_passed = run_status.headline == Status.PASSED
+        has_incomplete = run_status.headline == Status.INCOMPLETE
+        overall_status = run_status.headline.value
         total_errors = sum(r.summary.errors for r in results)
         total_warnings = sum(r.summary.warnings for r in results)
         skipped_count = sum(1 for r in results if is_cleanly_skipped(r))
@@ -2784,6 +2804,7 @@ class HTMLReporter(ReporterBase):
         # from the global aggregate counters.
         tier1_summary = self._compute_tier_summary(tier1_results)
         tier1_skillspector_versions = _skillspector_versions(tier1_results)
+        tier1_skillspector_provenance = _skillspector_provenance(tier1_results)
         tier2_summary = self._compute_tier_summary(tier2_results)
         tier3_summary = self._compute_tier_summary(tier3_results)
         tier3_preview, tier3_preview_notice = _bounded_tier3_preview(tier3_data)
@@ -3029,6 +3050,7 @@ class HTMLReporter(ReporterBase):
                 },
             },
             "skillspector_versions": tier1_skillspector_versions,
+            "skillspector_provenance": tier1_skillspector_provenance,
         }
         # CI-native pages link Download JSON to the retained canonical file, so
         # nothing on them reads an embedded copy. Only standalone reports embed it.
@@ -3083,7 +3105,8 @@ class HTMLReporter(ReporterBase):
             publication_status=publication.status,
             publication_reasons=publication.reasons,
             tier3_effective_status=(
-                completed_agent["verdict"] if self.report_scope == "tier3" and completed_agent
+                completed_agent["verdict"]
+                if self.report_scope == "tier3" and completed_agent
                 else publication.tier3.status
             ),
             total_validators=total_validators,
@@ -3127,6 +3150,7 @@ class HTMLReporter(ReporterBase):
             tier3_preview_notice=tier3_preview_notice,
             tier1_summary=tier1_summary,
             skillspector_versions=tier1_skillspector_versions,
+            skillspector_provenance=tier1_skillspector_provenance,
             tier2_summary=tier2_summary,
             tier3_summary=tier3_summary,
             tier1_display_results=tier1_display_results,

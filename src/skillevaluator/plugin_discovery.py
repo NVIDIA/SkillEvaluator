@@ -15,21 +15,27 @@ import os
 import re
 from collections import Counter
 from collections.abc import Iterable, Iterator
-from dataclasses import dataclass, field
+from dataclasses import dataclass, field, replace
 from pathlib import Path, PurePosixPath
 from typing import Any, Literal, NamedTuple
 
 from skillevaluator.constants import (
     CONTENT_DEDUP_MAX_DISCOVERED_PATHS,
     CONTENT_DEDUP_MAX_FILE_BYTES,
+    PLUGIN_AGENT_PLUGINS_V1_MANIFEST_TYPE,
+    PLUGIN_CODEX_MANIFEST_TYPE,
     PLUGIN_COMPONENT_MAX_ITEMS,
     PLUGIN_CONFIG_MAX_BYTES,
+    PLUGIN_CONTAINED_MANIFEST_TYPE,
+    PLUGIN_CURSOR_MANIFEST_TYPE,
+    PLUGIN_MANIFEST_TYPE,
     SCAN_ARTIFACT_DIRS,
     SCAN_EXCLUDED_DIRS,
     SKILL_MANIFEST_VARIANTS,
 )
 from skillevaluator.models.result import Finding, Severity
 from skillevaluator.plugin_formats import (
+    CLAUDE_PROFILE,
     CODEX_PROFILE,
     DEFAULT_SKILLS_DIR,
     FormatProfile,
@@ -58,6 +64,7 @@ from skillevaluator.plugin_paths import (
     _unscanned_packaged_finding,
     _unscanned_path_finding,
     normalize_declared_path,
+    reported_ref,
 )
 from skillevaluator.plugin_refs import normalize_ref
 from skillevaluator.utils.secure_fs import SecurePathError
@@ -86,8 +93,11 @@ class PluginMember:
     config: Any = None
     mcp: McpDeclaration | None = None
     bundle: bool = False
-    effective: bool = True
     # False means a later declaration overrides this record in the same client view.
+    effective: bool = True
+    loaded_by: str | None = None
+    findings: int = 0
+    dependency_state: str | None = None
 
 
 @dataclass
@@ -243,8 +253,8 @@ class _MemberCollector:
         return component
 
     def _broken(self, component_type: str, declared: DeclaredPath | None, raw: Any, problem: str) -> None:
-        path = declared.rel.as_posix() if declared is not None and declared.rel is not None else None
-        name = raw if isinstance(raw, str) else repr(raw)
+        path = reported_ref(declared.rel.as_posix()) if declared is not None and declared.rel is not None else None
+        name = reported_ref(raw if isinstance(raw, str) else repr(raw))
         self._add(PluginMember(component_type, name, "declared", path, _TYPE_SUPPORT[component_type], problem=problem))
 
     def _declared_field(self, field_name: str) -> Any:
@@ -320,12 +330,12 @@ class _MemberCollector:
                     _plugin_finding(
                         Severity.MEDIUM,
                         "plugin_component_path_invalid",
-                        f"'{field_name}' entry {report_text(repr(raw), 80)} is not a path; Codex ignores the value, "
+                        f"'{field_name}' entry {report_text(reported_ref(repr(raw)), 80)} is not a path; Codex ignores the value, "
                         "loads the default location, and still installs the plugin",
                         self.reader.display(self.manifest_rel),
                         f"Write '{field_name}' as a './'-relative path (or a list of them), or remove it to use the "
                         "default location.",
-                        metadata={"plugin_component_ref": repr(raw)},
+                        metadata={"plugin_component_ref": reported_ref(repr(raw))},
                     )
                 )
                 return None, "dropped"
@@ -368,12 +378,12 @@ class _MemberCollector:
                 _plugin_finding(
                     Severity.HIGH,
                     "plugin_component_path_invalid",
-                    f"'{field_name}' entry {raw!r} must name a {wrong_kind} file; "
+                    f"'{field_name}' entry {reported_ref(raw)!r} must name a {wrong_kind} file; "
                     f"{profile.label.removesuffix(' plugin')} rejects the whole manifest otherwise and does not "
                     "load the plugin",
                     self.reader.display(self.manifest_rel),
                     f"List each {wrong_kind} file by its own './'-relative path, as the {profile.reference} requires.",
-                    metadata={"plugin_component_ref": raw},
+                    metadata={"plugin_component_ref": reported_ref(raw)},
                 )
             )
             return declared, "invalid"
@@ -689,10 +699,8 @@ class _MemberCollector:
             "Skill directory entries", len(entries), rel_dir.as_posix(), limit=CONTENT_DEDUP_MAX_DISCOVERED_PATHS
         )
         for entry in entries[:CONTENT_DEDUP_MAX_DISCOVERED_PATHS]:
-            if entry.name.startswith(".") or (
-                entry.name in SCAN_EXCLUDED_DIRS and entry.name not in SCAN_ARTIFACT_DIRS
-            ):
-                continue  # hidden folders, VCS, virtualenv, package, and bytecode caches
+            if entry.name in SCAN_EXCLUDED_DIRS and entry.name not in SCAN_ARTIFACT_DIRS:
+                continue  # VCS, virtualenv, package, and bytecode caches (hidden skill folders load)
             child = PurePosixPath(entry.name) if str(rel_dir) == "." else rel_dir / entry.name
             if str(rel_dir) == "." and entry.name == DEFAULT_SKILLS_DIR:
                 continue  # the default skills/ scan covers it
@@ -740,6 +748,7 @@ class _MemberCollector:
         from skillevaluator.plugin_member_paths import (
             find_bundled_plugin_skill_manifests,
             find_unscanned_plugin_skill_manifests,
+            unscanned_skill_scan_incomplete_finding,
         )
 
         try:
@@ -765,8 +774,11 @@ class _MemberCollector:
             name = parent.as_posix() if str(parent) != "." else rel_dir.name
             component = self._add(PluginMember("skill", name, "declared", skill_dir.as_posix(), "evaluated"))
             self._read_member(component, skill_dir / manifest.relative_path.name)
-        for manifest_rel in find_unscanned_plugin_skill_manifests(self.reader.root, rel_dir.as_posix()):
+        found, complete = find_unscanned_plugin_skill_manifests(self.reader.root, rel_dir.as_posix())
+        for manifest_rel in found:
             self._flag_unscanned_skill(rel_dir, manifest_rel)
+        if not complete and rel_dir.parts[:1] != (DEFAULT_SKILLS_DIR,):
+            self.inventory.findings.append(unscanned_skill_scan_incomplete_finding(self.reader, rel_dir))
 
     def _flag_unscanned_skill(self, rel_dir: PurePosixPath, manifest_rel: PurePosixPath) -> None:
         """HIGH for a skill deep in a skill's own artifact folder that Codex loads from declared folder ``rel_dir``.
@@ -776,7 +788,7 @@ class _MemberCollector:
         """
         if rel_dir.parts[:1] == (DEFAULT_SKILLS_DIR,):
             return
-        if _in_unscanned_folder(manifest_rel.parent):
+        if _in_unscanned_folder(manifest_rel.parent, self.reader.root):
             self.inventory.findings.append(_unscanned_skill_finding(self.reader, manifest_rel))
 
     def _flag_dependency_folder_skills(self, rel_dir: PurePosixPath) -> None:
@@ -875,7 +887,7 @@ class _MemberCollector:
                 self._list_dir(component_type, PurePosixPath(default_dir), suffixes)
             if declared_value is None:
                 return
-        if component_type == "command" and isinstance(declared_value, dict):
+        if component_type == "command" and isinstance(declared_value, dict) and not self.profile.codex_path_rules:
             self._command_map(declared_value)
             return
         for raw in self._declared_values(field_name, declared_value):
@@ -972,7 +984,7 @@ class _MemberCollector:
                 _plugin_finding(
                     Severity.MEDIUM,
                     "plugin_command_folder_empty",
-                    f"commands[{command_name!r}].source {declared.raw!r} is a folder with no Markdown (.md) file "
+                    f"commands[{command_name!r}].source {reported_ref(declared.raw)!r} is a folder with no Markdown (.md) file "
                     "directly in it, so Claude Code loads no command from it",
                     self.manifest_display,
                     "Point the source at the command's .md file, or put the command files directly in the folder.",
@@ -1341,7 +1353,9 @@ class _MemberCollector:
         )
 
 
-def discover_plugin_members(path: Path, *, include_additional: bool = True) -> PluginDiscovery | None:
+def discover_plugin_members(
+    path: Path, *, include_additional: bool = True, include_cross_client: bool = False
+) -> PluginDiscovery | None:
     """Locate and read actual plugin declarations without activating public validators.
 
     Each supported co-located manifest gets its own profile and provenance.
@@ -1365,6 +1379,7 @@ def discover_plugin_members(path: Path, *, include_additional: bool = True) -> P
     environment_files, result.environment_scan_complete = find_environment_files(located.root)
     result.environment_files = tuple(environment_files)
     reader = PluginRootReader(located.root)
+    loaded: list[tuple[str, dict[str, Any] | None, str]] = []
     for manifest in manifests:
         try:
             parsed = manifest.parse_for_audit()
@@ -1379,6 +1394,7 @@ def discover_plugin_members(path: Path, *, include_additional: bool = True) -> P
                 )
             )
             continue
+        loaded.append((manifest.manifest_type, parsed, manifest.manifest_filename))
         if parsed is None:
             result.findings.append(
                 _plugin_finding(
@@ -1390,15 +1406,90 @@ def discover_plugin_members(path: Path, *, include_additional: bool = True) -> P
                 )
             )
             continue
-        collector = _MemberCollector(
+        discovered = discover_plugin_view(
             reader,
-            normalized_component_manifest(manifest.manifest_type, parsed),
-            contained=manifest.manifest_type != "agent_bundle_yaml",
-            manifest_rel=manifest.manifest_filename,
+            parsed,
             profile=profile_for(manifest.manifest_type),
+            contained=manifest.manifest_type != PLUGIN_MANIFEST_TYPE,
+            manifest_rel=manifest.manifest_filename,
         )
-        discovered = collector.collect()
         result.components.extend(discovered.components)
         result.findings.extend(discovered.findings)
         result.unread_files += discovered.unread_files
+    if include_cross_client:
+        covered = {member.path for member in result.components if member.path}
+        covered.update(manifest.manifest_filename for manifest in manifests)
+        covered.update(
+            f"{member.path}/{variant}"
+            for member in result.components
+            if member.type == "skill" and member.path
+            for variant in SKILL_MANIFEST_VARIANTS
+        )
+        for profile, data, rel, client in _cross_client_views(loaded):
+            view = discover_plugin_view(reader, data, profile=profile, contained=True, manifest_rel=rel)
+            for member in view.components:
+                if member.type in {"rule", "extension"} or member.path in covered:
+                    continue
+                member.loaded_by = client
+                member.support = "static_only" if member.support == "evaluated" else member.support
+                result.components.append(member)
+            for finding in view.findings:
+                try:
+                    relative = Path(finding.file_path).relative_to(reader.root).as_posix()
+                except ValueError:
+                    relative = finding.file_path
+                if relative not in covered:
+                    finding.metadata["loaded_by"] = client
+                    result.findings.append(finding)
+            covered.update(member.path for member in view.components if member.path)
+            result.unread_files += view.unread_files
     return result
+
+
+def discover_plugin_view(
+    reader: PluginRootReader,
+    manifest: dict[str, Any] | None,
+    *,
+    profile: FormatProfile,
+    contained: bool,
+    manifest_rel: str,
+) -> PluginDiscovery:
+    """Read one client's view through the shared bounded collector and operation budget."""
+    return _MemberCollector(
+        reader,
+        normalized_component_manifest(profile.manifest_type, manifest),
+        contained=contained,
+        manifest_rel=manifest_rel,
+        profile=profile,
+    ).collect()
+
+
+def _cross_client_views(
+    loaded: Iterable[tuple[str, dict[str, Any] | None, str]],
+) -> list[tuple[FormatProfile, dict[str, Any] | None, str, str]]:
+    """Client fallback views, without promoting them to selected declarations."""
+    by_type = {kind: (data, rel) for kind, data, rel in reversed(list(loaded))}
+    views: list[tuple[FormatProfile, dict[str, Any] | None, str, str]] = []
+    if PLUGIN_CONTAINED_MANIFEST_TYPE not in by_type and PLUGIN_MANIFEST_TYPE not in by_type:
+        views.append(
+            (
+                replace(CLAUDE_PROFILE, mcp_dialect="codex"),
+                None,
+                CLAUDE_PROFILE.manifest_path,
+                "Claude Code (--plugin-dir default locations)",
+            )
+        )
+    if not {PLUGIN_AGENT_PLUGINS_V1_MANIFEST_TYPE, PLUGIN_CODEX_MANIFEST_TYPE} & by_type.keys():
+        for kind in (PLUGIN_CONTAINED_MANIFEST_TYPE, PLUGIN_CURSOR_MANIFEST_TYPE):
+            if kind in by_type:
+                data, rel = by_type[kind]
+                views.append(
+                    (
+                        CODEX_PROFILE,
+                        data if isinstance(data, dict) else {},
+                        rel,
+                        f"Codex (reads {rel} with its own paths and defaults)",
+                    )
+                )
+                break
+    return views

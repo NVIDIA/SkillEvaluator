@@ -249,6 +249,9 @@ CONTENT_DEDUP_SIMILARITY_THRESHOLD = 0.80
 
 CONTENT_DEDUP_MIN_CHUNK_CHARS = 80
 
+# Bound each provider embedding input, including dense tables and long lines.
+CONTENT_DEDUP_MAX_CHUNK_CHARS = 3000
+
 # Upper bound (in characters) for treating a repeated chunk as a "trivial"
 # duplicate. Short, single-file blocks dominated by comment/config-style lines
 # (e.g. a recurring `# default pts-tolerance is 60 ms.` config snippet) are
@@ -257,6 +260,11 @@ CONTENT_DEDUP_MIN_CHUNK_CHARS = 80
 CONTENT_DEDUP_TRIVIAL_DUP_MAX_CHARS = 400
 
 CONTENT_DEDUP_EMBEDDING_BATCH_SIZE = 64
+
+# Check name of the advisory finding recorded when the chat LLM declines to
+# classify a content cluster. A refusal is missing evidence about one cluster,
+# not a failed scan, so it is reported as a MEDIUM finding instead of blocking.
+CONTENT_DEDUP_LLM_REFUSED_CHECK = "llm_refused"
 
 # Resource ceilings for untrusted skill content. Tier 2 sends collected text
 # to external embedding/LLM providers and performs pairwise comparisons, so

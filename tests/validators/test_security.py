@@ -1961,6 +1961,7 @@ print(json.dumps([finding.metadata["matched_value"] for finding in result.findin
             "Rerun the scan; if the limit repeats, update SkillSpector or report the completeness exceptions to "
             "the SkillSpector project."
         )
+        assert error.count("runtime limit before it finished") == 1
         # The report does not say which budget ran out, so the hint names no specific deadline.
         assert "seconds" not in error
 

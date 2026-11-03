@@ -559,9 +559,11 @@ The high-signal flags, with defaults:
 | `--max-agents` | selected-agent count | Maximum agents run in parallel |
 | `--max-cases` | every case | Run only the first N eval cases; a run that skips cases is not publication evidence |
 | `--skip-baseline` | off | Skip the without-skill arm; faster, but no Skill Lift |
+| `--skip-with-skill` | off | Run only the without-skill arm, for example to calibrate a task set; the report shows baseline scores with no Skill Lift or skill verdict |
 | `--stop-on-pass` | off | Stop a case's remaining attempts once one passes |
 | `--agent-runtime-preflight` | off | Add one agent-only execution of the first staged task per agent before the full A/B matrix; `--no-agent-runtime-preflight` overrides a config value that enables it |
 | `--progress` | `auto` | Progress rendering: `auto`, `rich` (live TTY view with secret redaction), `plain`, or `off` |
+| `--progress-interval` | mode default | Seconds between progress heartbeats: 1 for `rich`, 60 for `plain` lines in CI and redirected output |
 | `--autopilot` | off | When no evaluation source exists, generate exactly one eval case — with the configured provider, falling back to a deterministic keyless template — never overwriting an existing source |
 | `--grading-mode` | `default` | `default`, `default_plus_custom`, or `custom_only` — see [Custom Graders & Tasks](custom-graders.mdx) |
 | `--results-dir` | `evals/results`, or `SKILLEVALUATOR_RESULTS_DIR` when set | Write results under an external root instead of the skill directory; custom in-skill roots are rejected |
@@ -577,6 +579,28 @@ modes, is in the [CLI Reference](cli-reference.mdx).
 While iterating on a dataset, `--skip-baseline` roughly halves the runtime.
 Re-enable the baseline arm for any run whose Skill Lift you intend to trust.
 </Tip>
+
+### Baseline-only runs
+
+`--skip-with-skill` is the counterpart of `--skip-baseline`: it stages and runs
+only the without-skill arm. Use it to measure how agents do on a task set
+before the skill exists, or to re-measure a baseline after a model or harness
+change without paying for with-skill trials.
+
+```bash title="Baseline-only calibration run"
+skillevaluator tier3 evaluate ./my-skill --agents codex --skip-with-skill
+```
+
+The run is reported as a baseline calibration, not a skill evaluation. The
+overall score and best agent come from the baseline arm, the with-skill arm is
+recorded as `skipped`, with-skill scores and Skill Lift are unavailable (shown
+as `skipped` or N/A, never 0.0), and the verdict stays NEUTRAL because no skill
+was measured. The two flags are mutually
+exclusive, and baseline isolation rules still apply: a config that sets
+`harbor.pre_agent_setup` (or `setup_commands`) is rejected, because the
+baseline arm must stay isolated from skill-owned setup commands. `validate`
+does not accept `--skip-with-skill`, so a baseline-only run can never satisfy a
+Tier 3 gate.
 
 ## How standard grading judges a trial
 
@@ -712,10 +736,13 @@ in [Judge evidence budgets](environment-variables.mdx#judge-evidence-budgets).
   `AgentGoalAccuracyWithReference` scorer through its own client, without the
   schema or retry handling above but within the same time budget. If RAGAS is
   unavailable or fails, the prompt judge runs instead.
-- **Transient failures.** HTTP 429, 500, 502, 503, and 504 responses,
-  connection errors, timeouts, and Bedrock throttling or service-unavailable
-  errors are retried transparently with jittered exponential backoff. A
-  `Retry-After` header, in seconds or as an HTTP date, sets the wait; a value
+- **Transient failures.** HTTP 408, 429, and every 5xx response except 501 and
+  505 are retried, including 520–524 proxy errors and 529 overload responses.
+  Connection errors, timeouts, and Bedrock throttling or service-unavailable
+  errors are also retried with jittered exponential backoff. TLS certificate
+  verification failures are terminal, including when an SDK wraps them as a
+  generic connection or service-unavailable error. A `Retry-After` header,
+  in seconds or as an HTTP date, sets the wait; a value
   above the maximum retry delay fails immediately instead of stalling.
 - **Time budget.** Each judge has its own wall-time budget (180 seconds by
   default) inside the generated task's 600-second verifier timeout, which

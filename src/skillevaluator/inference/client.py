@@ -53,7 +53,9 @@ from skillevaluator.provider_config import (
     resolve_llm_provider,
 )
 from skillevaluator.utils.json_spans import (
+    MAX_JSON_NESTING,
     balanced_json_container_end,
+    json_nesting_within_limit,
     loads_strict_json,
 )
 
@@ -744,6 +746,8 @@ class LLMClient:
             cleaned = cleaned.rsplit("```", 1)[0].strip()
 
         try:
+            if not json_nesting_within_limit(cleaned):
+                raise ValueError(f"JSON nests deeper than {MAX_JSON_NESTING} levels")
             return loads_strict_json(cleaned)
         except (RecursionError, ValueError) as e:
             objects = _embedded_json_objects(raw)

@@ -36,6 +36,7 @@ from skillevaluator.provider_config import (
     REASONING_MAX_COMPLETION_TOKENS,
     ProviderConfig,
 )
+from skillevaluator.utils.json_spans import MAX_JSON_NESTING
 from skillevaluator.validators.rubric_eval import RUBRIC_JSON_SCHEMA, RubricJudge
 
 
@@ -781,6 +782,10 @@ class TestCompletions:
         assert client._resolved_config().api_key == "explicit-user-key"
 
 
+def _nested_object(depth: int) -> str:
+    return '{"a":' * (depth - 1) + '{"a": 1}' + "}" * (depth - 1)
+
+
 def _extract_json_reply(monkeypatch: pytest.MonkeyPatch, content: str) -> dict:
     monkeypatch.setenv("SKILL_EVAL_LLM_PROVIDER", "nv_build")
     monkeypatch.setenv("NVIDIA_API_KEY", "test-key")
@@ -886,13 +891,23 @@ class TestExtractJsonFromResponse:
     @pytest.mark.parametrize(
         "payload",
         [
-            pytest.param('{"a":' * 100_000 + "1" + "}" * 100_000, id="nesting-beyond-recursion-limit"),
+            pytest.param(_nested_object(MAX_JSON_NESTING + 1), id="nesting-just-beyond-limit"),
+            pytest.param(_nested_object(100_000), id="nesting-beyond-recursion-limit"),
             pytest.param('{"a": ' + "1" * 5_000 + "}", id="integer-beyond-digit-limit"),
         ],
     )
     def test_undecodable_object_fails_closed(self, monkeypatch: pytest.MonkeyPatch, prefix: str, payload: str) -> None:
+        # The depth bound is checked before decoding, so the result does not
+        # depend on the Python version or thread stack size (Python 3.14 can
+        # decode 100,000 levels when the C stack allows it).
         with pytest.raises(LLMClientError, match="invalid JSON"):
             _extract_json_reply(monkeypatch, prefix + payload)
+
+    @pytest.mark.parametrize("prefix", [pytest.param("", id="whole-reply"), pytest.param("Result: ", id="in-prose")])
+    def test_object_at_nesting_limit_is_accepted(self, monkeypatch: pytest.MonkeyPatch, prefix: str) -> None:
+        payload = _nested_object(MAX_JSON_NESTING)
+
+        assert _extract_json_reply(monkeypatch, prefix + payload) == json.loads(payload)
 
     @pytest.mark.parametrize("prefix", [pytest.param("", id="whole-reply"), pytest.param("Result: ", id="in-prose")])
     @pytest.mark.parametrize(
@@ -931,7 +946,7 @@ class TestExtractJsonFromResponse:
         assert _extract_json_reply(monkeypatch, content) == {"verdict": "RELATED_BUT_DISTINCT"}
 
     def test_undecodable_object_blocks_a_later_object(self, monkeypatch: pytest.MonkeyPatch) -> None:
-        payload = '{"a":' * 100_000 + "1" + "}" * 100_000
+        payload = _nested_object(100_000)
 
         with pytest.raises(LLMClientError, match="invalid JSON"):
             _extract_json_reply(monkeypatch, "Result: " + payload + ' {"key": "value"}')

@@ -679,11 +679,12 @@ def _skillspector_runtime_limit_hint(ledger_exceptions: Iterable[Mapping[str, ob
             budget_limited.add(path if isinstance(path, str) else "")
         else:
             scan_limited.add(path if isinstance(path, str) else "")
+    hints: list[str] = []
     if scan_limited:
         # These rows come from SkillSpector's whole-scan deadline or from a shorter
         # stage budget such as bundle discovery, and the report does not say which,
         # so the hint names no specific limit.
-        return (
+        hints.append(
             f"SkillSpector reached a runtime limit before it finished {len(scan_limited)} file(s). "
             "When many files are affected, the skill most likely bundles more content than SkillSpector can "
             "inspect within its time budgets, so a skill that bundles a large corpus (vendored documents, "
@@ -692,12 +693,14 @@ def _skillspector_runtime_limit_hint(ledger_exceptions: Iterable[Mapping[str, ob
             "a plain rerun may complete."
         )
     if budget_limited:
-        return (
+        hints.append(
             f"A SkillSpector sub-analysis stopped at its own time budget on {len(budget_limited)} file(s). "
             "That budget is separate from the whole-scan limit, so reducing bundled content does not change it. "
             "Rerun the scan; if the limit repeats, update SkillSpector or report the completeness exceptions "
             "to the SkillSpector project."
         )
+    if hints:
+        return " ".join(hints)
     return None
 
 

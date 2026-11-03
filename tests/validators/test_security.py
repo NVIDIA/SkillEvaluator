@@ -1888,7 +1888,9 @@ print(json.dumps([finding.metadata["matched_value"] for finding in result.findin
 
         assert "SkillSpector reached a runtime limit before it finished 4 file(s)." in error
         assert "keep large reference material outside the skill" in error
-        assert "sub-analysis" not in error
+        # The sub-analysis row is counted separately, never folded into the scan-budget count.
+        assert "A SkillSpector sub-analysis stopped at its own time budget on 1 file(s)." in error
+        assert error.count("runtime limit before it finished") == 1
         # The report does not say which budget ran out, so the hint names no specific deadline.
         assert "seconds" not in error
 

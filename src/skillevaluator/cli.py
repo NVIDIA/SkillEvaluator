@@ -209,6 +209,7 @@ Examples:
 _TOP_LEVEL_COMMAND_HELP_GROUPS = (
     ("Tier workflows", ("tier1", "tier2", "tier3")),
     ("Core workflows", ("validate", "health-check", "doctor", "models", "dashboard")),
+    ("Repository CI", ("ci",)),
     (
         "Tier 1 · Static and security",
         ("quality-check", "rubric-eval", "security-scan", "pii-scan", "lint-scripts"),

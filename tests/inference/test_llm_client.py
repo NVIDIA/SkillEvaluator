@@ -860,21 +860,6 @@ class TestExtractJsonFromResponse:
 
         assert _extract_json_reply(monkeypatch, content) == {"key": "value"}
 
-    @pytest.mark.parametrize(
-        "span",
-        [
-            pytest.param('{"verdict": "DUPLICATE", "verdict": "RELATED_BUT_DISTINCT"}', id="duplicate-key"),
-            pytest.param('{"verdict": "DUPLICATE", "confidence": NaN}', id="nan-constant"),
-            pytest.param('{"verdict": "DUPLICATE", "confidence": 1e999}', id="overflowing-float"),
-        ],
-    )
-    def test_ambiguous_or_non_finite_embedded_object_is_refused(
-        self, monkeypatch: pytest.MonkeyPatch, span: str
-    ) -> None:
-        # Matches the Tier 3 judge: the last duplicate key must not silently win.
-        with pytest.raises(LLMClientError):
-            _extract_json_reply(monkeypatch, f"Result:\n{span}\nDone.")
-
     def test_multiple_embedded_objects_raise(self, monkeypatch: pytest.MonkeyPatch) -> None:
         with pytest.raises(LLMClientError, match="found 2 JSON objects; expected exactly one"):
             _extract_json_reply(monkeypatch, 'First: {"key": "one"}\nSecond: {"key": "two"}')

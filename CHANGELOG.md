@@ -6,9 +6,15 @@ All notable changes to SkillEvaluator are documented in this file.
 
 ### Added
 
-- Add a visual local-preview guide for CLI onboarding and an optional test PR;
-  simplify the GitHub Actions guide and distinguish released scan templates
-  from the unreleased CLI and publisher candidate.
+- Include `skillevaluator ci init`, `ci status` and `ci demo` in the Python
+  package. Guided GitHub onboarding discovers skills, configures checks and
+  optional public hosted reports, and opens a reviewable setup PR. An optional
+  test PR demonstrates the results. Existing Pages sites and organization
+  action restrictions are preserved; private repositories can use checks only.
+- Add a visual CLI onboarding guide under GitHub Actions, alongside the manual
+  template path. Keep GitHub and GitLab as the two repository-integration choices.
+- Allow CI release templates to pin the reviewed report publisher separately
+  from the verified scanner workflow and image.
 
 - In local mode (`--env-mode local`), a missing Claude Code, Codex, or OpenCode
   CLI is offered as a pinned npm install into the SkillEvaluator runtime folder;

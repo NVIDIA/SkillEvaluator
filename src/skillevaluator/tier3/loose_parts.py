@@ -24,9 +24,9 @@ dir, which Harbor sets; ``/skilleval`` is the native bundle in the image):
 * MCP servers: :data:`LOOSE_MCP_CONFIG`, passed with ``--mcp-config``: the
   plugin arm's ``.mcp.json`` entries (command, args, env) with the same
   substitution;
-* every plugin file a hook or MCP server references through
-  ``${CLAUDE_PLUGIN_ROOT}``: a byte- and mode-identical copy under
-  :data:`LOOSE_ROOT` at the same relative path.
+* plugin-root resources used by hooks or MCP servers: the same filtered tree
+  as the full arm under :data:`LOOSE_ROOT`, preserving relative imports and
+  data-file access without guessing a language-specific dependency graph.
 
 Everything reaches the container through the native staging path
 (:func:`~skillevaluator.tier3.harbor.native_staging.stage_native_bundle` and
@@ -197,7 +197,6 @@ UNATTRIBUTED_HOOKS = "(groups without a command handler)"
 _EVIDENCE_INIT = "system/init"
 _EVIDENCE_CALL = "mcp-call"
 _EVIDENCE_NONE = "unverifiable"
-_MAX_REFERENCED_FILES = 2048
 _PLUGIN_BUNDLE = f"{BUNDLE_DIRNAME}/{ClaudeCodeAdapter.bundle_dir}"
 _LOOSE_BUNDLE = f"{BUNDLE_DIRNAME}/{LOOSE_BUNDLE_DIR}"
 _RULES_BUNDLE = f"{BUNDLE_DIRNAME}/native/claude-code/rules"
@@ -294,7 +293,9 @@ class _Placement:
     ``key`` picks the piece out of a JSON file (an MCP server name or a hook
     source name). ``overrides`` maps a staged file to the source file hashed
     instead (a census rewrite), and ``exclude`` lists staged files a tree hash
-    leaves out (files only the plugin arm generates).
+    leaves out (files only the plugin arm generates). ``generated_dirs`` omits
+    only mode records for generated parent directories absent from the source
+    copy; their unexpected descendants still participate in the tree hash.
     """
 
     id: str
@@ -306,6 +307,7 @@ class _Placement:
     override_digests: tuple[tuple[str, str], ...] = ()
     exclude: tuple[str, ...] = ()
     root_template: str | None = None
+    generated_dirs: tuple[str, ...] = ()
 
     @property
     def name(self) -> str:
@@ -1134,17 +1136,16 @@ class _Builder:
                 self.references.append("" if ambiguous else match.group(1) or "")
 
     def _scripts(self) -> None:
-        """Copy every plugin file a staged hook or MCP server references through the plugin root."""
+        """Preserve referenced resources and their transitive dependencies under the same root."""
         rels: set[str] = set()
         for raw in self.references:
             rel = posixpath.normpath(raw.strip("/")) if raw.strip("/") else "."
             rels.add(rel)
-        if "." in rels:
-            self._whole_root()
-            return
-        files: dict[str, Path] = {}
-        trees: list[str] = []
+        copy_root = False
         for rel in sorted(rels):
+            if rel == ".":
+                copy_root = True
+                continue
             if rel == ".." or rel.startswith("../"):
                 self.not_staged.append(
                     GluePiece(
@@ -1153,8 +1154,6 @@ class _Builder:
                         "plugin root)",
                     )
                 )
-                continue
-            if any(rel.startswith(f"{tree}/") for tree in trees):
                 continue
             if not self._kept_by_plugin_copy(rel):
                 self.not_staged.append(
@@ -1167,16 +1166,12 @@ class _Builder:
                     GluePiece(f"script:{rel}", "the referenced path does not exist in the plugin; neither arm has it")
                 )
                 continue
-            if kind == "file":
-                files[rel] = self.source.plugin_root / rel
-            elif kind == "dir":
-                trees.append(rel)
-                files.update(self._tree_files(rel))
-            else:
+            if kind not in {"file", "dir"}:
                 raise ValueError(
                     f"Refusing to stage referenced plugin file '{rel}' for the loose-parts arm: it is a link or "
                     f"special file ({kind})"
                 )
+            copy_root = True
             exclude = tuple(path for path in self.generated_in_plugin if path == rel or path.startswith(f"{rel}/"))
             self._place(
                 f"script:{rel}",
@@ -1186,12 +1181,21 @@ class _Builder:
                 loose=f"{_LOOSE_BUNDLE}/root/{rel}",
                 exclude=tuple(path.removeprefix(rel).lstrip("/") for path in exclude),
             )
-        for rel, path in sorted(files.items()):
-            self.bundle.files.append((path, f"{LOOSE_BUNDLE_DIR}/root/{rel}"))
+        if copy_root:
+            # An entrypoint can import siblings, ancestor-relative modules or
+            # data at runtime. Reuse the full arm's filtered resource copy and
+            # hash its entire tree so missing/changed support files break parity.
+            self._whole_root()
 
     def _whole_root(self) -> None:
-        """A hook or server names the plugin root itself: copy the plugin tree there as the plugin arm does."""
+        """Copy and compare the full arm's resource tree without activating a plugin loader."""
         self.bundle.plugin_tree = f"{LOOSE_BUNDLE_DIR}/root"
+        parents = {
+            parent.as_posix()
+            for rel in self.generated_in_plugin
+            for parent in PurePosixPath(rel).parents
+            if parent.parts
+        }
         self._place(
             "script:.",
             "script",
@@ -1199,6 +1203,13 @@ class _Builder:
             full=_PLUGIN_BUNDLE,
             loose=f"{_LOOSE_BUNDLE}/root",
             exclude=self.generated_in_plugin,
+            generated_dirs=tuple(
+                sorted(
+                    rel
+                    for rel in parents
+                    if not self._kept_by_plugin_copy(rel) or self.reader.kind(PurePosixPath(rel)) != "dir"
+                )
+            ),
         )
 
     def _kept_by_plugin_copy(self, rel: str) -> bool:
@@ -1212,41 +1223,6 @@ class _Builder:
                 return False
             directory = directory / part
         return True
-
-    def _tree_files(self, rel: str) -> dict[str, Path]:
-        """The regular files under a referenced plugin directory that the plugin arm's copy keeps."""
-        from skillevaluator.tier3.harbor.native_staging import _plugin_tree_ignore
-
-        ignore = _plugin_tree_ignore(self.source)
-        root = self.source.plugin_root
-        found: dict[str, Path] = {}
-        pending = [PurePosixPath(rel)]
-        while pending:
-            current = pending.pop()
-            directory = root / current.as_posix()
-            try:
-                with os.scandir(directory) as iterator:
-                    names = sorted(entry.name for entry in iterator)
-            except OSError as exc:
-                raise ValueError(f"Refusing to stage referenced plugin directory '{current}': {exc}") from exc
-            skipped = set(ignore(str(directory), names))
-            for name in names:
-                if name in skipped:
-                    continue
-                child = current / name
-                kind = self.reader.kind(child)
-                if kind == "dir":
-                    pending.append(child)
-                elif kind == "file":
-                    found[child.as_posix()] = root / child.as_posix()
-                else:
-                    raise ValueError(
-                        f"Refusing to stage referenced plugin file '{child}' for the loose-parts arm: it is a link or "
-                        f"special file ({kind})"
-                    )
-                if len(found) > _MAX_REFERENCED_FILES:
-                    raise ValueError(f"Refusing to stage referenced plugin directory '{rel}': too many files")
-        return found
 
     def _glue(self) -> None:
         for name in sorted(self.source.lsp_servers):
@@ -1347,7 +1323,9 @@ def _read_regular(path: Path) -> bytes | None:
     return (_PARITY_READS.get() or _ParityReads()).read(path)
 
 
-def _tree_digest(root: Path, overrides: Mapping[str, Path], exclude: Sequence[str]) -> str | None:
+def _tree_digest(
+    root: Path, overrides: Mapping[str, Path], exclude: Sequence[str], generated_dirs: Sequence[str] = ()
+) -> str | None:
     """Hash relative file content and file/directory rwx modes without following links."""
     try:
         if not stat.S_ISDIR(root.lstat().st_mode):
@@ -1358,6 +1336,7 @@ def _tree_digest(root: Path, overrides: Mapping[str, Path], exclude: Sequence[st
     total_bytes = 0
     file_count = 0
     directory_count = 0
+    generated_parents = frozenset(generated_dirs)
     for directory, dirnames, filenames in os.walk(root, followlinks=False):
         relative_directory = Path(directory).relative_to(root).as_posix()
         if any(relative_directory == skipped or relative_directory.startswith(f"{skipped}/") for skipped in exclude):
@@ -1377,7 +1356,7 @@ def _tree_digest(root: Path, overrides: Mapping[str, Path], exclude: Sequence[st
             and not dirnames
             and all((PurePosixPath(relative_directory) / name).as_posix() in exclude for name in filenames)
         )
-        if not generated_only_leaf:
+        if not generated_only_leaf and relative_directory not in generated_parents:
             lines.append(f"{relative_directory}/\tmode:{stat.S_IMODE(metadata.st_mode) & 0o777:o}\n")
         dirnames.sort()
         for name in sorted(filenames) + [item for item in dirnames if (Path(directory) / item).is_symlink()]:
@@ -1476,7 +1455,7 @@ def _piece_digest(env_dir: Path, placement: _Placement, cache: dict[str, Any]) -
     if is_dir:
         if placement.kind == "skill" and _read_regular(target / "SKILL.md") is None:
             return None
-        return _tree_digest(target, overrides, placement.exclude)
+        return _tree_digest(target, overrides, placement.exclude, placement.generated_dirs)
     if not stat.S_ISREG(metadata.st_mode) or metadata.st_nlink != 1:
         return None
     original = overrides.get(target.as_posix())

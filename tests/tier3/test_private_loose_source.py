@@ -134,8 +134,8 @@ def test_arm_names_are_the_final_names() -> None:
 def test_loose_bundle_stages_each_part_where_claude_code_loads_it_standalone(loose) -> None:
     bundle = loose.bundle
     assert bundle is not None
-    # No plugin copy, no manifest, no --plugin-dir layout.
-    assert bundle.plugin_tree is None
+    # Resource files retain their root, but no plugin loader or manifest is installed.
+    assert bundle.plugin_tree == f"{LOOSE_BUNDLE_DIR}/root"
     assert not any("plugin.json" in rel or "/plugin/" in rel for rel in bundle.generated)
     assert sorted(bundle.generated) == [
         f"{LOOSE_BUNDLE_DIR}/mcp.json",
@@ -147,8 +147,6 @@ def test_loose_bundle_stages_each_part_where_claude_code_loads_it_standalone(loo
     assert sorted(dest for _source, dest in bundle.files) == [
         f"{LOOSE_BUNDLE_DIR}/agents/release-reviewer.md",
         f"{LOOSE_BUNDLE_DIR}/commands/release-check.md",
-        f"{LOOSE_BUNDLE_DIR}/root/hooks/guard-push.sh",
-        f"{LOOSE_BUNDLE_DIR}/root/servers/reltools.js",
     ]
     # Member skills go through the task skills projection, as in the skills-only arm.
     assert bundle.trees == []
@@ -239,7 +237,7 @@ def test_mcp_config_is_identical_except_the_root_variable(loose, source) -> None
     assert loose.mcp_servers == ("reltools",)
 
 
-def test_nothing_else_is_staged(tmp_path: Path, loose) -> None:
+def test_support_tree_preserves_resources_and_excludes_loader_and_evaluator_data(tmp_path: Path, loose) -> None:
     env_dir = tmp_path / "loose" / "environment"
     loose.stage_arm(LOOSE_PARTS_ARM, env_dir)
     assert sorted(_tree(env_dir / "skilleval")) == [
@@ -247,8 +245,20 @@ def test_nothing_else_is_staged(tmp_path: Path, loose) -> None:
         "native/claude-code/loose/agents/release-reviewer.md",
         "native/claude-code/loose/commands/release-check.md",
         "native/claude-code/loose/mcp.json",
+        "native/claude-code/loose/root/agents/release-reviewer.md",
+        "native/claude-code/loose/root/bin/shipit-notify",
+        "native/claude-code/loose/root/commands/release-check.md",
         "native/claude-code/loose/root/hooks/guard-push.sh",
+        "native/claude-code/loose/root/hooks/hooks.json",
+        "native/claude-code/loose/root/output-styles/terse.md",
+        "native/claude-code/loose/root/rules/release-files.md",
+        "native/claude-code/loose/root/rules/release-policy.md",
+        "native/claude-code/loose/root/rules/semver-help.mdc",
+        "native/claude-code/loose/root/servers/README.md",
         "native/claude-code/loose/root/servers/reltools.js",
+        "native/claude-code/loose/root/skills/changelog-collect/SKILL.md",
+        "native/claude-code/loose/root/skills/version-bump/SKILL.md",
+        "native/claude-code/loose/root/skills/version-bump/scripts/bump.sh",
         "native/claude-code/loose/settings.json",
         "native/claude-code/rules/release-files.md",
         "native/claude-code/rules/release-policy.md",
@@ -284,6 +294,7 @@ def test_dropped_as_glue_lists_exactly_what_cannot_load_standalone(loose) -> Non
         "mcp:reltools",
         "rule:release-files.md",
         "rule:release-policy.md",
+        "script:.",
         "script:hooks/guard-push.sh",
         "script:servers/reltools.js",
         "skill:changelog-collect",
@@ -325,15 +336,17 @@ def test_content_hashes_are_equal_across_arms_for_every_piece(loose) -> None:
 
 
 @pytest.mark.parametrize(
-    ("staged_rel", "piece_id"),
+    ("staged_rel", "expected_mismatches"),
     [
-        (f"skilleval/{LOOSE_BUNDLE_DIR}/agents/release-reviewer.md", "agent:release-reviewer"),
-        (f"{ROOT_DIR}/hooks/guard-push.sh", "script:hooks/guard-push.sh"),
-        ("skills/version-bump/scripts/bump.sh", "skill:version-bump"),
-        (f"skilleval/{LOOSE_BUNDLE_DIR}/mcp.json", "mcp:reltools"),
+        (f"skilleval/{LOOSE_BUNDLE_DIR}/agents/release-reviewer.md", ["agent:release-reviewer"]),
+        (f"{ROOT_DIR}/hooks/guard-push.sh", ["script:.", "script:hooks/guard-push.sh"]),
+        ("skills/version-bump/scripts/bump.sh", ["skill:version-bump"]),
+        (f"skilleval/{LOOSE_BUNDLE_DIR}/mcp.json", ["mcp:reltools"]),
     ],
 )
-def test_a_changed_byte_makes_that_piece_a_mismatch(tmp_path: Path, loose, staged_rel: str, piece_id: str) -> None:
+def test_a_changed_byte_makes_that_piece_a_mismatch(
+    tmp_path: Path, loose, staged_rel: str, expected_mismatches
+) -> None:
     env_dir = tmp_path / "loose" / "environment"
     loose.stage_arm(LOOSE_PARTS_ARM, env_dir)
     target = env_dir / staged_rel
@@ -350,7 +363,7 @@ def test_a_changed_byte_makes_that_piece_a_mismatch(tmp_path: Path, loose, stage
     report = compare_content_hashes(hashes)
 
     assert report["equal_across_arms"] is False
-    assert report["mismatches"] == [piece_id]
+    assert report["mismatches"] == expected_mismatches
 
 
 def test_a_piece_missing_from_the_loose_arm_is_a_mismatch(loose) -> None:

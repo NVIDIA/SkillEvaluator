@@ -2333,14 +2333,25 @@ def _judge_retry_feedback(problem):
 # "curl -u user:password"). Each pattern starts at a fixed literal and scans one
 # bounded run, so long text stays linear. The header patterns accept shell
 # ("-H 'Name: value'"), JSON ('"name": "value"') and Python subscript
-# ('headers["Name"] = f"value"') forms.
+# ('headers["Name"] = f"value"') forms, also with the quotes JSON-escaped
+# ('\"Name\": \"value\"'), as tool-call arguments appear in the behavior and
+# goal prompts.
 _JUDGE_EVIDENCE_URL_USERINFO_RE = re.compile(r"(://)[^\s/?#@'\"`<>]{1,256}@")
-_JUDGE_EVIDENCE_HEADER_SEPARATOR = r"[\"']?\]?[ \t]{0,8}[:=][ \t]{0,8}(?:[bfru]{0,2}[\"'])?"
-# Authorization schemes vary (Bearer, Basic, ApiKey, Bot, SSWS, ...), so the whole
-# value is masked up to its closing quote or the end of the line. Bearer, Basic
-# and Token stay visible because they say which kind of credential was sent.
+_JUDGE_EVIDENCE_HEADER_SEPARATOR = r"\\?[\"']?\]?[ \t]{0,8}[:=][ \t]{0,8}(?:[bfru]{0,2}\\?[\"'])?"
+# Digest values hold quoted fields (username="...", response="..."), so the rest
+# of the value is masked up to a single quote, a backtick or the end of the line.
+_JUDGE_EVIDENCE_DIGEST_AUTH_HEADER_RE = re.compile(
+    r"(\bauthorization" + _JUDGE_EVIDENCE_HEADER_SEPARATOR + r"digest[ \t]{1,8})[^'`\r\n]{1,512}",
+    re.IGNORECASE,
+)
+# Other Authorization schemes vary (Bearer, Basic, ApiKey, Bot, SSWS, ...), so the
+# whole value is masked up to its closing quote or the end of the line. Bearer,
+# Basic, Token and Digest stay visible because they say which kind of credential
+# was sent, and a quoted token after them ('Bearer "token"') is masked too.
 _JUDGE_EVIDENCE_AUTH_HEADER_RE = re.compile(
-    r"(\bauthorization" + _JUDGE_EVIDENCE_HEADER_SEPARATOR + r"(?:(?:bearer|basic|token)[ \t]{1,8})?)"
+    r"(\bauthorization"
+    + _JUDGE_EVIDENCE_HEADER_SEPARATOR
+    + r"(?:(?:bearer|basic|token|digest)[ \t]{1,8}(?:\\?[\"'])?)?)"
     r"[^\s'\"`,;\\][^'\"`\r\n\\]{0,255}",
     re.IGNORECASE,
 )
@@ -2375,6 +2386,7 @@ def _redact_judge_evidence(text):
         redacted = pattern.sub("<redacted>", redacted)
     redacted = _JUDGE_EVIDENCE_URL_USERINFO_RE.sub(r"\1<redacted>@", redacted)
     for pattern in (
+        _JUDGE_EVIDENCE_DIGEST_AUTH_HEADER_RE,
         _JUDGE_EVIDENCE_AUTH_HEADER_RE,
         _JUDGE_EVIDENCE_KEY_HEADER_RE,
         _JUDGE_EVIDENCE_COOKIE_HEADER_RE,

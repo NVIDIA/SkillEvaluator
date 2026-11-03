@@ -563,6 +563,18 @@ def test_saved_judge_evidence_masks_credentials(tmp_path: Path, monkeypatch: pyt
             "headers['Cookie'] = '<redacted>'",
             id="cookie-subscript",
         ),
+        pytest.param(
+            "curl -H 'Authorization: Bearer \"quoted-bearer-secret\"' https://x",
+            "quoted-bearer-secret",
+            'Authorization: Bearer "<redacted>"',
+            id="authorization-quoted-token",
+        ),
+        pytest.param(
+            """curl -H 'Authorization: Digest username="bob", response="digest-response-secret"' https://x""",
+            "digest-response-secret",
+            "Authorization: Digest <redacted>' https://x",
+            id="authorization-digest",
+        ),
     ],
 )
 def test_judge_evidence_masks_credentials_without_a_key_shape(text: str, secret: str, kept: str) -> None:
@@ -570,6 +582,54 @@ def test_judge_evidence_masks_credentials_without_a_key_shape(text: str, secret:
 
     assert secret not in redacted
     assert kept in redacted
+
+
+# Behavior and goal prompts render tool-call arguments with json.dumps, so the
+# quotes around header names and values reach the judge prompt escaped.
+@pytest.mark.parametrize(
+    ("command", "secret"),
+    [
+        pytest.param(
+            """python -c 'requests.get(u, headers={"Authorization": "ApiKey escaped-dict-apikey-secret"})'""",
+            "escaped-dict-apikey-secret",
+            id="authorization-dict",
+        ),
+        pytest.param(
+            """python -c 'h={}; h["Authorization"] = "Bearer escaped-subscript-bearer-secret"'""",
+            "escaped-subscript-bearer-secret",
+            id="authorization-subscript",
+        ),
+        pytest.param(
+            """python -c 'h={}; h["X-API-Key"]="escaped-subscript-api-key-secret"'""",
+            "escaped-subscript-api-key-secret",
+            id="api-key-subscript",
+        ),
+        pytest.param(
+            """python -c 'h={"Cookie": "session=escaped-cookie-secret"}'""",
+            "escaped-cookie-secret",
+            id="cookie-dict",
+        ),
+        pytest.param(
+            """curl -H "Authorization: Digest username=\\"bob\\", response=\\"escaped-digest-secret\\"" https://x""",
+            "escaped-digest-secret",
+            id="authorization-digest",
+        ),
+    ],
+)
+def test_judge_evidence_masks_json_escaped_tool_call_headers(command: str, secret: str) -> None:
+    trajectory = {
+        "steps": [
+            {"source": "agent", "tool_calls": [{"function_name": "Bash", "arguments": {"command": command}}]},
+        ]
+    }
+    summary = eval_template.build_conversation_summary(trajectory, "Fetch the index.")
+    assert secret in summary
+    assert '\\"' in summary
+
+    redacted = eval_template._redact_judge_evidence(summary)
+
+    assert secret not in redacted
+    assert "<redacted>" in redacted
 
 
 @pytest.mark.parametrize(

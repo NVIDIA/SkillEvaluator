@@ -5,17 +5,20 @@ roots:
   project: [.claude/skills]
   user: [~/.claude/skills]
   not_scanned: [.agents/skills, ~/.agents/skills]
+listing: {cut: 1536, budget: {desc_chars: 8000, cut: 0}}
 rules:
-  - {id: CC-ROOT, when: "install_root not in roots", effect: not_loaded, message: "Claude Code reads only .claude/skills and ~/.claude/skills; .agents/skills is not scanned.", confidence: high}
-  - {id: CC-GROUPING, when: "grouping_depth > 0", effect: not_loaded, message: "Claude Code finds skills only directly under the skills folder; grouping folders are not searched.", confidence: high}
-  - {id: CC-DESC-CUT, when: "description_codepoints > 1536", effect: degraded, message: "Description cut at 1,536 characters.", confidence: high}
-  - {id: CC-DESC-MISSING, when: "description_missing or description_empty or description_type != 'str'", effect: degraded, message: "No usable description: Claude Code shows body text instead.", confidence: high}
-  - {id: CC-LIST-BUDGET, when: "catalog_size > 0", effect: advisory, message: "Skill list budget is ~1% of context (~8,000 chars); with many skills descriptions are cut or dropped (names only seen at 225 skills).", confidence: medium}
-  - {id: CC-PRECEDENCE, when: "always", effect: advisory, message: "Same name in user and project folders: the user copy wins (most other harnesses pick project).", confidence: high}
-  - {id: CC-ALLOWED-TOOLS, when: "allowed_tools_shape != 'none'", effect: advisory, message: "allowed-tools only pre-approves tools, never restricts, and applies only when the skill is invoked through the Skill tool (e.g. /name), not when the model reads the file.", confidence: high}
-  - {id: CC-DUP-KEY, when: "frontmatter_duplicate_keys", effect: advisory, message: "Duplicate keys: Claude Code keeps the last value (four other harnesses drop the skill).", confidence: high}
-  - {id: CC-BODY-CAP, when: "skill_md_bytes > 1048576", effect: not_loaded, message: "SKILL.md over 1 MB is rejected (bundle string skill_md_too_large).", confidence: medium}
-  - {id: CC-CASING, when: "not manifest_name_exact", effect: degraded, message: "Non-canonical name (skill.md/Skill.md): loaded on case-insensitive filesystems (macOS default APFS, 3/3), ignored on case-sensitive Linux (3/3). Works or breaks depending on the OS.", confidence: high}
+  - {id: CC-ROOT, when: "install_root not in roots", effect: not_loaded, message: "Claude Code reads only .claude/skills and ~/.claude/skills; .agents/skills is not scanned.", fix: "Install it under .claude/skills or ~/.claude/skills (a symlink from .agents/skills works).", confidence: high}
+  - {id: CC-GROUPING, when: "grouping_depth > 0", effect: not_loaded, message: "Claude Code finds skills only directly under the skills folder; grouping folders are not searched.", fix: "Move the skill folder directly under .claude/skills.", confidence: high}
+  - {id: CC-DESC-CUT, when: "description_codepoints > 1536", effect: degraded, message: "Description cut at 1,536 characters.", fix: "Keep the description at or under 1,536 characters.", confidence: high}
+  - {id: CC-DESC-MISSING, when: "description_missing or description_empty or description_type != 'str'", effect: degraded, message: "No usable description: Claude Code shows body text instead.", fix: "Add a non-empty string description.", confidence: high}
+  - {id: CC-LIST-BUDGET, when: "catalog_desc_chars > 8000", effect: degraded, message: "{catalog_size} skills here share {catalog_desc_chars} description chars, over the ~8,000-char list budget (~1% of context): descriptions are cut or dropped (names only at 225 skills).", fix: "Shorten descriptions (trigger first) or install fewer skills in one folder.", confidence: medium}
+  - {id: CC-PRECEDENCE, when: "duplicate_name", effect: advisory, message: "Another skill is also named '{skill_name}' ({duplicate_paths}); only one is used, and a user-level copy beats a project copy.", fix: "Give each skill a unique name.", confidence: high}
+  - {id: CC-ALLOWED-TOOLS, when: "allowed_tools_shape != 'none'", effect: advisory, message: "allowed-tools only pre-approves tools, never restricts, and applies only when the skill is invoked through the Skill tool (e.g. /name), not when the model reads the file.", fix: "Don't rely on allowed-tools to restrict tools; use the harness's permission settings.", confidence: high}
+  - {id: CC-DUP-KEY, when: "frontmatter_duplicate_keys", effect: advisory, message: "Duplicate keys: Claude Code keeps the last value (four other harnesses drop the skill).", fix: "Remove the duplicate frontmatter key.", confidence: high}
+  - {id: CC-BODY-CAP, when: "skill_md_bytes > 1048576", effect: not_loaded, message: "SKILL.md over 1 MB is rejected (bundle string skill_md_too_large).", fix: "Move detail into references/ files and keep SKILL.md under 1 MB.", confidence: medium}
+  - {id: CC-CASING, when: "not manifest_name_exact", effect: degraded, message: "Non-canonical name (skill.md/Skill.md): loaded on case-insensitive filesystems (macOS default APFS, 3/3), ignored on case-sensitive Linux (3/3). Works or breaks depending on the OS.", fix: "Rename the file to SKILL.md (exact casing).", confidence: high}
+  - {id: CC-CODEX-POLICY, when: "codex_implicit_disabled and not disable_model_invocation", effect: degraded, message: "agents/openai.yaml implicit-invocation policy is Codex-only: here the model can still use this skill on its own.", fix: "Also set disable-model-invocation: true (Claude Code, Copilot and OpenClaw honour it).", confidence: high}
+  - {id: CC-FM-STRIPPED, when: "custom_field_chars > 200", effect: advisory, message: "Frontmatter is stripped when the skill is used, so the text in {custom_fields} never reaches the model.", fix: "Move instructions from frontmatter into the SKILL.md body.", confidence: medium}
 notes:
   - "Follows symlinked skill folders and symlinked SKILL.md files, inside or outside the root."
   - "Nested SKILL.md, CRLF, BOM, tabs, uppercase names: no effect observed."

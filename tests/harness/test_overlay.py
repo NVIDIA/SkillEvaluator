@@ -3,13 +3,14 @@
 """Tests for the advisory harness check, panel and harness-check command."""
 
 import json
+import re
 from pathlib import Path
 
 import pytest
 from click.testing import CliRunner
 
 from skillevaluator.cli import cli
-from skillevaluator.harness import HARNESS_STATUSES, evaluate_harnesses, load_profiles, skill_facts
+from skillevaluator.harness import HARNESS_STATUSES, evaluate_harnesses, facts_for, load_profiles, skill_facts
 from skillevaluator.harness.overlay import PROFILES_DIR
 from skillevaluator.harness.report import harness_block, harness_note, harness_panel
 from skillevaluator.models.result import Severity
@@ -205,3 +206,157 @@ def test_harness_check_command_rejects_unknown_harness(tmp_path: Path):
 
     assert result.exit_code == 2
     assert "Unknown harness: nope" in result.output
+
+
+def _catalog(root: Path, count: int, desc_len: int = 300) -> Path:
+    skills = root / ".claude" / "skills"
+    for index in range(count):
+        skill = skills / f"filler-{index:03d}"
+        skill.mkdir(parents=True)
+        desc = ("Use when testing catalog budgets. " + "x" * desc_len)[:desc_len]
+        (skill / "SKILL.md").write_text(f"---\nname: filler-{index:03d}\ndescription: {desc}\n---\n{BODY}")
+    return skills
+
+
+def _rows(skill: Path) -> dict[str, dict]:
+    return {r.harness: r.to_dict() for r in evaluate_harnesses(skill)}
+
+
+def _ids(rows: dict[str, dict], harness: str) -> set[str]:
+    return {f["id"] for f in rows[harness]["findings"]}
+
+
+def test_single_skill_is_measured_against_its_installed_folder(tmp_path: Path):
+    _catalog(tmp_path, 40)
+    rows = _rows(tmp_path / ".claude" / "skills" / "filler-000")
+
+    assert rows["claude-code"]["status"] == "degraded"
+    assert "CC-LIST-BUDGET" in _ids(rows, "claude-code")
+    assert "CP-LIST-BUDGET" in _ids(rows, "copilot-cli")
+    message = next(f["message"] for f in rows["claude-code"]["findings"] if f["id"] == "CC-LIST-BUDGET")
+    assert message.startswith("40 skills here share 12,000 description chars")
+    assert rows["claude-code"]["listed"] == {"mode": "name_only", "text": ""}
+    assert rows["codex"]["listed"]["mode"] == "cut" and len(rows["codex"]["listed"]["text"]) == 40
+
+
+def test_skill_outside_a_skills_folder_has_no_catalog_rules(tmp_path: Path):
+    rows = _rows(_skill(tmp_path))
+
+    assert not any(
+        f["id"].endswith(("LIST-BUDGET", "DUP-NAME", "PRECEDENCE")) for r in rows.values() for f in r["findings"]
+    )
+
+
+def test_folder_of_skills_is_its_own_catalog(tmp_path: Path):
+    skills = _catalog(tmp_path, 3)
+    facts = facts_for(sorted(skills.iterdir()))
+
+    assert {f["catalog_size"] for f in facts.values()} == {3}
+    assert {f["catalog_desc_chars"] for f in facts.values()} == {900}
+
+
+def test_duplicate_names_report_each_harness_winner(tmp_path: Path):
+    skills = _catalog(tmp_path, 2)
+    copy = skills / "filler-copy"
+    copy.mkdir()
+    (copy / "SKILL.md").write_text(f"---\nname: filler-000\ndescription: Use when testing duplicates.\n---\n{BODY}")
+    rows = _rows(skills / "filler-000")
+
+    assert rows["opencode"]["status"] == "degraded"
+    assert {"CC-PRECEDENCE", "CX-DUP-NAME", "CP-DUP-NAME", "HM-DUP-NAME", "OW-DUP-NAME", "OC-DUP-NAME"} <= {
+        f["id"] for r in rows.values() for f in r["findings"]
+    }
+    assert "(filler-copy)" in next(f["message"] for f in rows["opencode"]["findings"] if f["id"] == "OC-DUP-NAME")
+
+
+def test_listed_description_projection(tmp_path: Path):
+    desc = "Use when " + "a" * 1600
+    rows = _rows(_skill(tmp_path, desc=desc))
+
+    assert rows["hermes"]["listed"] == {"mode": "cut", "text": desc[:60], "limit": 60}
+    assert rows["claude-code"]["listed"]["limit"] == 1536
+    assert rows["codex"]["listed"]["limit"] == 1024
+    assert rows["copilot-cli"]["listed"]["mode"] == "dropped"
+    assert rows["opencode"]["listed"]["mode"] == rows["openclaw"]["listed"]["mode"] == "full"
+
+
+def test_bundle_files_symlinks_and_large_references(tmp_path: Path):
+    skill = _skill(tmp_path)
+    (skill / "references").mkdir()
+    (skill / "references" / "big.md").write_text("line\n" * 20000)
+    outside = tmp_path / "shared.md"
+    outside.write_text("shared")
+    (skill / "references" / "shared.md").symlink_to(outside)
+    facts = skill_facts(skill)
+    rows = _rows(skill)
+
+    assert facts["resource_symlinks"] == facts["resource_symlink_escapes"] == 1
+    assert facts["largest_resource"] == "references/big.md" and facts["largest_resource_lines"] == 20000
+    assert "HM-RESOURCE-SYMLINK" in _ids(rows, "hermes")
+    assert "OW-REF-BUDGET" in _ids(rows, "openclaw")
+    assert "OC-REF-CUT" in _ids(rows, "opencode")
+
+
+def test_disable_model_invocation_is_ignored_by_three_harnesses(tmp_path: Path):
+    rows = _rows(_skill(tmp_path, extra="disable-model-invocation: true\n"))
+
+    flagged = {h for h, r in rows.items() if any(f["id"].endswith("DMI-IGNORED") for f in r["findings"])}
+    assert flagged == {"codex", "hermes", "opencode"}
+
+
+def test_codex_implicit_policy_is_codex_only(tmp_path: Path):
+    skill = _skill(tmp_path)
+    (skill / "agents").mkdir()
+    (skill / "agents" / "openai.yaml").write_text("policy:\n  allow_implicit_invocation: false\n")
+    rows = _rows(skill)
+
+    flagged = {h for h, r in rows.items() if any(f["id"].endswith("CODEX-POLICY") for f in r["findings"])}
+    assert flagged == set(HARNESSES) - {"codex"}
+
+
+def test_claude_placeholders_reach_other_harnesses_literally(tmp_path: Path):
+    rows = _rows(_skill(tmp_path, body=BODY + "Run ${CLAUDE_SKILL_DIR}/run.sh $ARGUMENTS\n"))
+
+    for harness in set(HARNESSES) - {"claude-code"}:
+        assert any(f["id"].endswith("-ARGUMENTS") for f in rows[harness]["findings"]), harness
+        assert any(f["id"].endswith("-SKILL-DIR") for f in rows[harness]["findings"]), harness
+    assert not rows["claude-code"]["findings"]
+
+
+def test_gating_and_claude_only_fields(tmp_path: Path):
+    extra = 'argument-hint: "<file>"\nplatforms: [macos]\n'
+    skill = _skill(tmp_path, extra=extra)
+    manifest = skill / "SKILL.md"
+    manifest.write_text(
+        manifest.read_text().replace("  author:", '  openclaw: {"requires": {"bins": ["pdftotext"]}}\n  author:')
+    )
+    rows = _rows(skill)
+
+    assert "HM-PLATFORMS" in _ids(rows, "hermes")
+    assert "Left out of the skill list unless the host has: bins pdftotext." in {
+        f["message"] for f in rows["openclaw"]["findings"]
+    }
+    assert "OC-CLAUDE-ONLY" in _ids(rows, "opencode")
+    assert not any(f["id"].endswith("CLAUDE-ONLY") for f in rows["claude-code"]["findings"])
+
+
+def test_every_rule_has_a_fix_and_placeholders_are_filled(tmp_path: Path):
+    for profile in load_profiles("all"):
+        for rule in profile["rules"]:
+            assert rule["when"] == "always" or rule.get("fix"), rule["id"]
+    skills = _catalog(tmp_path, 200, desc_len=400)
+    rows = _rows(skills / "filler-000")
+    messages = [f["message"] + f.get("fix", "") for r in rows.values() for f in r["findings"]]
+    assert messages and not any(re.search(r"\{[a-z_]+\}", m) for m in messages)
+    assert {"OW-COMPACT", "OW-PROMPT-CAP"} <= _ids(rows, "openclaw")
+
+
+def test_fix_reaches_findings_and_panels(tmp_path: Path):
+    skill = _skill(tmp_path, desc="Use when testing emoji. " + "\U0001f600" * 600)
+    result = HarnessValidator().validate(skill)
+    finding = next(f for f in result.findings if f.check_name == "CP-DESC-LIMIT")
+
+    assert finding.suggestion.startswith("Keep the description at or under 1,024 UTF-16 units")
+    out = CliRunner().invoke(cli, ["harness-check", str(skill)], env={"COLUMNS": "120"}).output
+    assert "→ Keep the description at or under 1,024 UTF-16 units" in out
+    assert "Description in the model's skill list" in out

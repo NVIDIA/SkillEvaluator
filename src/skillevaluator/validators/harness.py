@@ -6,7 +6,7 @@ from __future__ import annotations
 
 from pathlib import Path
 
-from skillevaluator.harness.overlay import evaluate_profile, load_profiles, skill_facts
+from skillevaluator.harness.overlay import evaluate_profile, facts_for, load_profiles
 from skillevaluator.models.result import Finding, Severity, ValidationResult
 from skillevaluator.validators.base import ValidatorBase
 
@@ -35,8 +35,7 @@ class HarnessValidator(ValidatorBase):
         skills = [skill_path] if self._is_skill_directory(skill_path) else self._find_all_skills(skill_path)
         result = ValidationResult(validator_name=self.name, validator_description=self.description)
         block: dict[str, list[dict]] = {}
-        for skill in skills:
-            facts = skill_facts(skill)
+        for skill, facts in facts_for(skills).items():
             rows = [evaluate_profile(profile, facts) for profile in profiles]
             block[str(skill)] = [row.to_dict() for row in rows]
             for row in rows:
@@ -47,6 +46,7 @@ class HarnessValidator(ValidatorBase):
                             severity=_SEVERITY[finding["effect"]],
                             check_name=finding["id"],
                             message=f"{row.harness}: {finding['message']}",
+                            suggestion=finding.get("fix"),
                             file_path=str(skill / "SKILL.md"),
                             metadata={
                                 "harness": row.harness,

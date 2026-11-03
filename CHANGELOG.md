@@ -17,6 +17,14 @@ All notable changes to SkillEvaluator are documented in this file.
 - New `skillevaluator harness-check <skill>` command: the same panel, updated live
   as each harness is checked. Always exits 0; `--json PATH` writes the block.
 
+- The `harness` check now measures the skill with the skills installed beside it
+  (list budgets, duplicate names and which copy each harness uses), reads the
+  skill's other files (symlinked resources, large references), and checks
+  harness-specific frontmatter: `disable-model-invocation`, Codex's
+  `agents/openai.yaml` policy, `$ARGUMENTS`/`${CLAUDE_SKILL_DIR}`, Hermes
+  `platforms`, OpenClaw requirements and Claude Code-only fields. Every finding
+  has a fix line, and `harness-check` shows the description each harness lists.
+
 - Tier 1 `schema` now reports harness-portability issues: duplicate frontmatter
   keys (HIGH), a UTF-8 BOM, a symlinked or nested `SKILL.md`, descriptions over
   1,024 UTF-16 units (MEDIUM), `SKILL.md` size tiers (32 KiB LOW, 50 KiB MEDIUM,

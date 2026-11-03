@@ -17,7 +17,7 @@ from rich.panel import Panel
 from rich.table import Table
 from rich.text import Text
 
-from skillevaluator.harness.overlay import evaluate_profile, load_profiles, skill_facts
+from skillevaluator.harness.overlay import evaluate_profile, facts_for, load_profiles
 from skillevaluator.reporting.console_ui import AMBER, BRIGHT, FAINT, GREEN, MUTED, RED, SPIN, TEXT, WIDTH
 from skillevaluator.validators.harness import HARNESS_METADATA_KEY, HarnessValidator
 
@@ -97,11 +97,33 @@ def _detail_grid(rows: list[dict[str, Any]], verbose: bool) -> Table | None:
             cells = [
                 Text(f"{glyph} {row['harness']}" if index == 0 else "", f"bold {color}"),
                 Text(label, f"bold {color}" if finding["effect"] != "advisory" else MUTED),
-                Text.assemble((finding["message"], TEXT), (f"  [{finding['id']}]", MUTED)),
+                Text.assemble(
+                    (finding["message"], TEXT),
+                    (f"  [{finding['id']}]", MUTED),
+                    *([("\n→ ", GREEN), (finding["fix"], MUTED)] if finding.get("fix") else []),
+                ),
             ]
             grid.add_row(*cells, *([version if index == 0 else ""] if verbose else []))
             count += 1
     return grid if count else None
+
+
+_LISTING = {"cut": "cut to {limit} chars", "name_only": "name only", "dropped": "not listed"}
+
+
+def _listing_grid(rows: list[dict[str, Any]]) -> Table | None:
+    grid = Table.grid(padding=(0, 2), expand=True)
+    grid.add_column(no_wrap=True, style=TEXT)
+    grid.add_column(no_wrap=True, style=MUTED)
+    grid.add_column(ratio=1, style=MUTED)
+    for row in rows:
+        listed = row.get("listed") or {}
+        if listed.get("mode", "full") == "full":
+            continue
+        text = listed.get("text", "")
+        shown = f"“{text[:57]}…”" if len(text) > 57 else f"“{text}”" if text else "-"
+        grid.add_row(row["harness"], _LISTING[listed["mode"]].format(limit=listed.get("limit", "")), shown)
+    return grid if grid.row_count else None
 
 
 def _subtitle(rows: list[dict[str, Any]]) -> tuple[Text, str]:
@@ -123,6 +145,7 @@ def harness_panel(
     title: str = "Harness compatibility · advisory",
     footer: str | None = VALIDATE_FOOTER,
     verbose: bool = False,
+    show_listing: bool = False,
     width: int = WIDTH,
 ) -> Panel:
     """One panel: a ✓/!/✗ line per skill, then a row per harness finding."""
@@ -136,6 +159,9 @@ def harness_panel(
         grid = _detail_grid(rows, verbose)
         if grid is not None:
             parts.extend([Text(), grid])
+        listing = _listing_grid(rows) if show_listing or verbose else None
+        if listing is not None:
+            parts.extend([Text(), Text("Description in the model's skill list (from the profile):", MUTED), listing])
     flagged = any(row.get("findings") for row in all_rows)
     if footer and (flagged or verbose):
         parts.extend([Text(), Text(footer, MUTED)])
@@ -175,6 +201,7 @@ def run_harness_check(
     skills = [target] if finder._is_skill_directory(target) else finder._find_all_skills(target)
     width = max(60, min(WIDTH, console.width))
     block: Block = {}
+    all_facts = facts_for(skills)
     for skill in skills:
         rows: list[dict[str, Any]] = [{"harness": p["harness"], "status": "pending"} for p in profiles]
 
@@ -184,11 +211,12 @@ def run_harness_check(
                 title=f"Harness compatibility · {skill.name}",
                 footer="Advisory: doesn't change any validation result.",
                 verbose=verbose,
+                show_listing=True,
                 width=width,
             )
 
         with Live(panel(), console=console, refresh_per_second=12) as live:
-            facts = skill_facts(skill)
+            facts = all_facts[skill]
             for index, profile in enumerate(profiles):
                 rows[index] = {"harness": profile["harness"], "status": "checking"}
                 live.update(panel())

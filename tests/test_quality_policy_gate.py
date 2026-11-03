@@ -74,8 +74,8 @@ def test_pipeline_explains_minimum_score_failure(below_threshold_skill: Path) ->
     passed, rows = summarize_tier1([result])
 
     assert not passed
-    failure_row = next(row for row in rows if row.label == "failed")
-    assert result.gate_failures[0] in "".join(text for text, _style in failure_row.segments)
+    fix_text = " ".join("".join(text for text, _style in row.segments) for row in rows if row.glyph != "✓")
+    assert "".join(result.gate_failures[0].split()) in "".join(fix_text.split())
     fix = first_fix([result])
     assert fix is not None
     assert "67.8/100 is below the required 70/100" in fix[0][0]

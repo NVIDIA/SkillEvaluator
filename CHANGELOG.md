@@ -6,6 +6,10 @@ All notable changes to SkillEvaluator are documented in this file.
 
 ### Added
 
+- In local mode (`--env-mode local`), a missing Claude Code, Codex, or OpenCode
+  CLI is offered as a pinned npm install into the SkillEvaluator runtime folder;
+  without a terminal, the command is printed instead.
+
 - Support Python 3.14 alongside Python 3.12 and 3.13, including installation
   guidance and CI coverage for tests and built packages.
 - Add reusable GitLab CI onboarding and configurable Tier 1 quality thresholds,
@@ -119,8 +123,37 @@ All notable changes to SkillEvaluator are documented in this file.
   was attempted. Records that do not match SkillSpector's provenance contract or
   that contain endpoint- or credential-shaped values are left out, and older
   SkillSpector releases produce no record.
+- `--skip-with-skill` on `tier3 evaluate` and the direct `tier3` workflow runs
+  only the without-skill baseline arm, for example to calibrate a task set or
+  re-measure a baseline after a model change without paying for with-skill
+  trials. Only baseline tasks are staged and launched. The run is reported as
+  a baseline calibration: `mode` is `baseline_only`, the overall score and best
+  agent come from the baseline arm, the with-skill arm is recorded as
+  `skipped`, with-skill scores and lift stay unavailable instead of becoming
+  0.0 (report tables print `skipped`), and the verdict stays NEUTRAL. The flag
+  is mutually exclusive with `--skip-baseline`, keeps the baseline isolation
+  rules, and is not accepted by `validate`, so a baseline-only run cannot pass
+  a Tier 3 gate.
+
+- Tier 1 sets up SkillSpector 2.13.3 and Gitleaks 8.30.0 on first use from
+  pinned, SHA-256-verified releases, without a prompt; Semgrep is optional
+  unless `SKILLEVALUATOR_REQUIRE_SEMGREP=1`. `--skip <check>` on `validate` and
+  `tier1` leaves a check out and reports it as skipped. A `scanners` row and the
+  JSON report record which scanner versions ran.
 
 ### Changed
+
+- Shared LLM calls and the Harbor verifier retry HTTP 408, 429, and every 5xx
+  response except 501 and 505, including proxy 520–524 and overload 529 errors.
+  TLS certificate verification failures stop immediately. The host Bedrock
+  path preserves the underlying status and certificate failure through
+  LiteLLM wrappers, so generic 500/503 errors do not cause extra attempts.
+  This applies to ordinary skill evaluations and other host LLM calls as well
+  as plugin evaluations; retry limits and scoring formulas are unchanged.
+- The compact `validate` view lists every Tier 3 test case with and without
+  the skill, updates the list while trials run, and ends each tier with a short
+  "what to fix" list: the problem, then the action. A required scanner that
+  could not run counts as "didn't run", not as a failed check.
 
 - Hosted GitHub reports verify a separate GitHub-signed execution receipt.
   Enable `id-token: write` in the scan workflow and refresh its approved blob
@@ -210,6 +243,16 @@ All notable changes to SkillEvaluator are documented in this file.
 
 ### Fixed
 
+- PR scan comments show the verdict, quality scores, first actionable fixes and
+  report links; full provenance and detailed findings stay in the report.
+- Hosted reports use the retained site commit as the Pages deployment identity,
+  so repeated publications from one default-branch revision deploy fresh reports.
+
+- Reusable Tier 1 CI always requires Semgrep in scanner subprocesses, so local
+  optional-scanner defaults cannot hide missing CI code-scanning coverage.
+
+- Use public, commit-pinned README image URLs so the wordmark and three-tier
+  diagram can render in PyPI package descriptions as well as on GitHub.
 - On Windows, repository root and source-link detection no longer break for
   repositories in non-ASCII folders. Git's repository path is decoded as a file
   name and its remote URL and branch as UTF-8, instead of with the locale code
@@ -305,6 +348,20 @@ All notable changes to SkillEvaluator are documented in this file.
   background tasks back on, and other agents ignore the variable. A skill whose
   single commands need longer can raise Claude Code's default with
   `BASH_DEFAULT_TIMEOUT_MS` in `harbor.runtime_env`.
+
+- Tier 1 security scans no longer fail a skill for an exact read-only
+  `/etc/passwd` bind mount such as `docker run -v /etc/passwd:/etc/passwd:ro`.
+  SkillSpector 2.11.1 and later tags this mount as likely benign but still
+  reports a HIGH Credential Access (PE3) finding. That finding is now ignored
+  only when it carries both benign-context tags and every `/etc/passwd` on the
+  reported source line, read without following links, is the source or target
+  of such a mount. The aggregate risk score is recomputed without it. Writable
+  or implicit-mode mounts, other paths, same-line reads such as
+  `cat /etc/passwd`, aggregated rows, and earlier SkillSpector versions still
+  block. Captured SkillSpector 2.13.3 reports cover both mount operands and a
+  separate blocking read, and partial LLM-response inspection stays incomplete.
+  Static reports are accepted when a provider is available but LLM analysis
+  was neither requested nor applied; availability alone is not execution.
 
 - PII email scans recognize all RFC 2606 reserved domains, including their
   subdomains, mixed-case forms, trailing dots, and prose ellipses. A local-part
@@ -457,6 +514,22 @@ All notable changes to SkillEvaluator are documented in this file.
   `quality-check` before any report was written. The schema check reports the
   malformed `metadata`, and the quality score counts `metadata.author` and
   `metadata.tags` as missing, as it already did for other non-mapping values.
+- The Tier 1 SkillSpector scan of a skill that references PNG or JPEG images,
+  such as a logo shown with `![Logo](assets/logo.png)`, is no longer
+  `INCOMPLETE` only because SkillSpector's text pattern analyzers cannot read
+  images and report the analysis as `partial`. That gap is now a warning when
+  the report shows no other gap and no fatal scope exclusion, and each image
+  is a regular, single-link (not hard-linked), non-executable file whose bytes
+  have the chunk or marker structure of a PNG or JPEG, is not reached through
+  a symlink, and is not in a directory that agents run, load as instructions
+  or read as configuration. The gap is accepted for at most 256 images and
+  128 MiB of image data in total. The structure check corroborates the file
+  type without decoding the image or proving that it renders. PNG IDAT
+  compressed data and ancillary chunks, and JPEG entropy-coded data and APPn
+  or COM segments, are not inspected and can still carry other bytes. Other
+  image formats, files without that structure, and every other partial reason
+  still leave the scan `INCOMPLETE`. SkillSpector's own High `AE1` findings for
+  images it could not inspect are unchanged.
 - A `SKILL.md` over the recommended 5,000-token budget now gets a MEDIUM
   `quality_efficiency` finding instead of a HIGH one. The HIGH finding failed
   the quality check, and with it `validate`, `tier1`, and `quality-check`, even
@@ -472,6 +545,13 @@ All notable changes to SkillEvaluator are documented in this file.
   `SKILLSPECTOR_PROVIDER=nv_build` gets the same mapping. The key still reaches
   SkillSpector only as `OPENAI_API_KEY`, with `OPENAI_BASE_URL` set to the
   public Build endpoint.
+- Tier 3 plain progress output, which `--progress auto` selects for CI and
+  redirected logs, now repeats its `still running` heartbeat every 60 seconds
+  instead of every second, so long runs no longer add thousands of identical
+  lines per hour. The interactive Rich view still refreshes every second. A
+  new `--progress-interval SECONDS` option on `tier3 evaluate` and `tier3 PATH`
+  sets the interval explicitly for either view (0.05 to 86400 seconds;
+  non-finite values are rejected).
 - SkillSpector runs are no longer stopped after a fixed 300 seconds, which ended
   slow `--llm` security scans, such as those on local models, as `INCOMPLETE`
   before SkillSpector's own scan deadline (1,080 seconds in v2.13.3). Each run

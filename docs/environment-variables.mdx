@@ -55,10 +55,15 @@ own client and scoring path, so these settings do not apply to them.
 | `SKILL_EVAL_LLM_RETRY_MAX_DELAY` | `30` seconds | Longest single wait between attempts. A value below the base delay is raised to the base delay. Non-numeric, non-finite, or negative values use the default. |
 | `SKILL_EVAL_LLM_JUDGE_BUDGET_SEC` | `180` seconds | Wall-time budget for each required LLM judge in the Harbor verifier, covering all of its attempts and waits. Non-numeric, non-finite, zero, or negative values use the default. |
 
-Retries cover HTTP 429, 500, 502, 503, and 504 responses, connection errors,
-and timeouts. In the verifier, Bedrock throttling and service-unavailable
-errors are also retried. Other HTTP errors, such as 400, 401, 403, or 404, are
-not retried. When a retryable response carries a `Retry-After` header,
+Retries cover HTTP 408, 429, and every 5xx response except 501 and 505,
+including 520–524 proxy errors and 529 overload responses. Connection errors
+and timeouts are also retried, but TLS certificate verification failures are
+not: retrying cannot repair an untrusted or invalid certificate. The host LLM
+client inspects the underlying HTTP status in wrapped SDK errors; an adapter's
+generic 500 or 503 does not hide a terminal failure. In the verifier, Bedrock
+throttling and service-unavailable errors are also retried. Other HTTP errors,
+such as 400, 401, 403, or 404, are not retried. When a retryable response carries
+a `Retry-After` header,
 either in seconds or as an HTTP date, the next attempt waits that long plus 0.1
 to 0.5 seconds of jitter instead of the computed backoff. An unparseable value
 waits the base delay. If `Retry-After` asks for longer than

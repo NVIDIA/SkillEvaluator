@@ -549,6 +549,14 @@ AGENT_EVAL_VERDICT_FAIL = "fail"
 TIER3_LIFT_PASS_THRESHOLD = 0.05
 TIER3_LIFT_FAIL_THRESHOLD = -0.10
 
+# Private paired comparisons resample whole cases with a reproducible seed.
+LIFT_BOOTSTRAP_RESAMPLES = 2000
+LIFT_BOOTSTRAP_TAIL_RESAMPLES = 200
+LIFT_BOOTSTRAP_SEED = 0
+LIFT_BOOTSTRAP_CONFIDENCE = 0.95
+LIFT_CI_MIN_PAIRED_CASES = 5
+LIFT_CI_LOW_PRECISION_WIDTH = 0.20
+
 AGENT_EVAL_DATASET_REQUIRED_FIELDS = [
     "id",
     "question",
@@ -558,6 +566,11 @@ AGENT_EVAL_DATASET_REQUIRED_FIELDS = [
 ]
 
 AGENT_EVAL_DATASET_FORMATS = {".json", ".jsonl", ".yaml", ".yml"}
+
+# Terminal views preview this many failed Tier 3 source checks when the run
+# also writes an HTML or JSON report, which keeps all of them; otherwise they
+# print every failed check.
+SOURCE_VALIDATION_CLI_LIMIT = 5
 
 
 # =============================================================================

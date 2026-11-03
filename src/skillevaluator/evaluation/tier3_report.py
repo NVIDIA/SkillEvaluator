@@ -382,6 +382,9 @@ def dataset_required_result(
         applicability = "not_required"
         execution_status = "not_applicable"
 
+    # Reporters list these as source errors, so passing checks and warnings stay
+    # out. The detail lives in metadata rather than the suggestion, which keeps
+    # the finding text stable while the author fixes entries one by one.
     serialized_checks = [
         {
             "path": str(getattr(check, "path", "")),
@@ -389,6 +392,7 @@ def dataset_required_result(
             "message": str(getattr(check, "message", check)),
         }
         for check in checks
+        if str(getattr(check, "status", "error")) in {"missing", "error"}
     ]
     result = ValidationResult(
         validator_name=_AGENT_EVAL_VALIDATOR,

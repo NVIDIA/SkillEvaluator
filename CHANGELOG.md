@@ -109,6 +109,17 @@ All notable changes to SkillEvaluator are documented in this file.
   expected-case checks cover only the cases that ran, `run_config.json` records
   the selection as `case_selection`, and a run that skipped cases is reported
   as publication-incomplete in JSON, HTML, and BENCHMARK.md.
+- Tier 1 schema validation accepts a list for `metadata.domain` in `SKILL.md`
+  (for example `domain: [backend, ai-ml]`) instead of reporting a HIGH
+  `Input should be a valid string` finding that also stopped the remaining
+  schema checks for that skill. A single string is still accepted and is
+  treated as a one-entry list. The parsed value is now always a list: entries
+  are trimmed and deduplicated in order, and a missing, null, or blank value
+  becomes an empty list. Lists longer than 16 entries and non-string, blank, or
+  over-128-character entries are rejected. This adds a length limit that
+  `metadata.domain` did not have before: a single string longer than 128
+  characters, which used to pass, now fails Tier 1 with a HIGH
+  `Field 'metadata.domain'` finding.
 - `doctor` and `health-check` take `--tier 1|2|3|all`, so Tier 1 and Tier 2
   readiness can be checked before a run instead of surfacing mid-validation.
   Tier 1 reports each scanner that the `--checks` selection runs: SkillSpector,
@@ -287,6 +298,21 @@ All notable changes to SkillEvaluator are documented in this file.
 - CI quality thresholds apply to every parallel scan worker. Report overviews
   and detailed reports surface failed quality gates ahead of advisory findings,
   with links to the check that needs attention.
+- When `validate` finds an unusable Tier 3 source, the terminal and HTML
+  report now say which entries or files failed and why, instead of only
+  "Create or fix the Tier 3 source ... and rerun validation." The terminal
+  lists the errors under the Tier 3 finding when the full CLI report prints
+  (`-r cli` or `--verbose`) and otherwise in the compact Tier 3 panel. When
+  the run also writes an HTML or JSON report, the terminal shows the first
+  five and names that report for the rest; when it writes neither (for example
+  `-r cli` alone, or `--verbose` without `-r`), the terminal lists every
+  error. The HTML dashboard shows a single error in full or the error count,
+  and Full Insights lists every error under Source Validation Errors. The
+  errors come from the skill's eval files, so they are printed as plain text
+  with terminal control sequences removed. Passing checks and warnings are not
+  listed. The JSON report still carries every error under
+  `tier3.provenance.source_validation`. Validation rules, gate decisions, and
+  the finding's suggestion text are unchanged.
 - Tier 2 caps every intra-skill embedding chunk at 3,000 characters, preserves
   meaningful short tails and actual Python docstring source ranges, and avoids
   counting pieces of one original chunk as duplicates of each other. Oversized
@@ -402,6 +428,17 @@ All notable changes to SkillEvaluator are documented in this file.
   or whose scores are outside 0–100%; consistent whole-number cards from
   earlier releases still pass.
 
+- Tier 3 `custom_only` runs no longer label a condition without a scoreable
+  reward, for example one whose attempts all failed, with the standard metric
+  set and `skill-evaluator-dimension-mean-v1` policy. That condition's
+  `summary.json`, the agent's recorded metrics and score policies,
+  `attempt_policy.json`, and the report's score definition now carry the
+  `custom-only` metric set and `custom-overall-v1` policy. When a Harbor job
+  never started, both conditions' persisted `summary.json` files record that
+  metric set and policy. A failed custom-only agent is therefore no longer
+  treated as a standard agent. Scores were already cleared for these
+  conditions, and observed rewards still determine their own metric set.
+
 - PII email scans recognize all RFC 2606 reserved domains, including their
   subdomains, mixed-case forms, trailing dots, and prose ellipses. A local-part
   boundary prevents quadratic rescanning of long excluded addresses. Ordinary
@@ -420,6 +457,24 @@ All notable changes to SkillEvaluator are documented in this file.
   BENCHMARK.md, and a policy severity override could downgrade them into a pass
   with no duplicate analysis. Exit codes are otherwise unchanged. An execution
   error names the limit, and the JSON report records it under `work_limit`.
+
+- Tier 3 security grading no longer treats `rm -f` or `rm --force` without
+  `-r`, `-R`, or `--recursive` as a destructive command. Routine cleanup such as
+  `rm -f out.txt && python run.py` or `find . -name '*.pyc' -exec rm -f {} \;`
+  received a critical destructive-command finding and a security score of 0.0
+  in both graders, which could fail the Security dimension and the Tier 3
+  verdict. Force-only deletion keeps the finding when a target resolves under
+  `/bin`, `/boot`, `/etc`, `/home`, `/lib*`, `/root`, `/sbin`, `/usr`, or
+  `/var` (except `/var/tmp`), or under `~` or `$HOME`. Brace lists and dot
+  globs are expanded first, `find -exec rm -f {}` is checked against find's
+  start paths, and a relative target resolves against the directory that the
+  tool call's `workdir` and each earlier `cd`, `pushd`, or `popd` leave the
+  shell in, so `find / -exec rm -f {} +` and `cd /etc && rm -f hosts` keep the
+  finding while `(cd /etc && ls); rm -f out.txt` and
+  `echo 'run: cd /etc'; rm -f out.txt` do not. This resolution has a
+  per-trace work cap; past it, force-only targets keep the finding, as do
+  relative targets after one call moves through more than 32 directories.
+  Recursive deletion and `xargs rm -f` are graded as before.
 
 - Tier 3 security grading preserves ordinary nested `/tmp` cleanup, including
   child operands with trailing slashes, unless the current or an earlier
@@ -564,6 +619,19 @@ All notable changes to SkillEvaluator are documented in this file.
   forwarded to SkillSpector so its own deadline can be raised as well, and the
   security result records the effective `skillspector_timeout_seconds`
   ([#155](https://github.com/NVIDIA/SkillEvaluator/issues/155)).
+- `similarity-check --catalog` and `tier2 --catalog` no longer report a skill
+  that is already in the local catalog as an `EXACT_DUPLICATE` of its own
+  entry, which failed the run. An entry is skipped as the skill's own only when
+  its content fingerprint matches, its path ends the skill's path, and more
+  than half of up to eight other catalog skills, spread evenly across the
+  catalog's path-sorted list, are present unchanged at their recorded paths
+  around it. The skip is recorded under
+  `self_matches_excluded` and `excluded_catalog_paths`. Verbatim copies and
+  same-name skills outside the catalog's tree are still reported; a copy of
+  most of the tree, such as a second checkout, counts as the same tree. An
+  edited skill whose name, description, or (with `--full-body`) `SKILL.md`
+  changed is still compared with its old entry; build the catalog from the tree
+  you screen.
 
 ### Security
 

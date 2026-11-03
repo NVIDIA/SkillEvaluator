@@ -30,6 +30,7 @@ from urllib.parse import urlsplit
 
 from skillevaluator.constants import LLM_VERIFY_TEMPERATURE
 from skillevaluator.inference.diagnostics import llm_failure_diagnostic
+from skillevaluator.inference.json_span import STRICT_JSON_DECODE_HOOKS, balanced_json_container_end
 from skillevaluator.inference.retry import RetryConfig, resolve_retry_config, retry_call_with_backoff
 from skillevaluator.inference.types import (
     EmptyLLMResponseError,
@@ -340,42 +341,7 @@ def _extract_choice_content(response: Any) -> str:
     )
 
 
-# Bracket depth beyond which an embedded span is not decoded. Verdicts are
-# shallow, and the cap keeps the decoder well away from the recursion limit.
-_MAX_EMBEDDED_JSON_NESTING = 128
 _JSON_CONTAINER_START = re.compile(r"[{\[]")
-
-
-def _balanced_json_span_end(text: str, start: int) -> int | None:
-    """Return the exclusive end of the string-aware ``{...}``/``[...]`` span at *start*.
-
-    ``None`` means the span never closes, closes with a mismatched bracket, or
-    nests deeper than ``_MAX_EMBEDDED_JSON_NESTING``.
-    """
-    closers: list[str] = []
-    in_string = False
-    escaped = False
-    for index in range(start, len(text)):
-        ch = text[index]
-        if in_string:
-            if escaped:
-                escaped = False
-            elif ch == "\\":
-                escaped = True
-            elif ch == '"':
-                in_string = False
-        elif ch == '"':
-            in_string = True
-        elif ch in "{[":
-            closers.append("}" if ch == "{" else "]")
-            if len(closers) > _MAX_EMBEDDED_JSON_NESTING:
-                return None
-        elif ch in "}]":
-            if not closers or closers.pop() != ch:
-                return None
-            if not closers:
-                return index + 1
-    return None
 
 
 def _embedded_json_objects(text: str) -> list[dict[str, Any]]:
@@ -394,11 +360,11 @@ def _embedded_json_objects(text: str) -> list[dict[str, Any]]:
     cursor = 0
     while (match := _JSON_CONTAINER_START.search(text, cursor)) is not None:
         start = match.start()
-        end = _balanced_json_span_end(text, start)
+        end = balanced_json_container_end(text, start)
         if end is None:
             break
         try:
-            value = json.loads(text[start:end])
+            value = json.loads(text[start:end], **STRICT_JSON_DECODE_HOOKS)
         except (RecursionError, ValueError):
             value = None
         if isinstance(value, dict):

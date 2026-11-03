@@ -244,8 +244,8 @@ jobs:
               root = Path(directory)
               subprocess.run(["git", "init", "-b", "main", directory], check=True)
               subprocess.run(["git", "-C", directory, "remote", "add", "origin", "https://github.com/example/skills.git"], check=True)
-              (root / "skills" / "example").mkdir(parents=True)
-              (root / "skills" / "example" / "SKILL.md").write_text("---\nname: example\ndescription: Example skill\n---\n# Example\n")
+              (root / "skills" / "smoke-check").mkdir(parents=True)
+              (root / "skills" / "smoke-check" / "SKILL.md").write_text("---\nname: smoke-check\ndescription: Smoke check skill\n---\n# Smoke check\n")
               subprocess.run(["git", "-C", directory, "add", "skills"], check=True)
               for feedback in ("--checks-only", "--full"):
                   subprocess.run(command + ["ci", "init", "--repo", directory, "--default-branch", "main", "--mode", "preview", "--no-input", feedback], check=True)

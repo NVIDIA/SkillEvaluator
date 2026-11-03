@@ -145,7 +145,8 @@ def _codex_txt_items(agent_dir: Path) -> list[dict[str, Any]]:
     """
     items: dict[str, dict[str, Any]] = {}
     for event in _codex_json_lines(agent_dir / "codex.txt"):
-        if not isinstance(event, Mapping) or event.get("type") not in {"item.started", "item.completed"}:
+        event_type = event.get("type") if isinstance(event, Mapping) else None
+        if not isinstance(event_type, str) or event_type not in {"item.started", "item.completed"}:
             continue
         item = event.get("item")
         if not isinstance(item, Mapping) or item.get("type") != "mcp_tool_call":
@@ -266,10 +267,12 @@ def _codex_mcp_calls(trial_root: Path, trajectory: Mapping[str, Any] | None) -> 
             item = payload.get("item")
             tool: Any = None
             args: str | None = None
-            if isinstance(item, Mapping) and item.get("type") in {"McpToolCall", "mcp_tool_call"}:
+            item_type = item.get("type") if isinstance(item, Mapping) else None
+            payload_type = payload.get("type")
+            if isinstance(item_type, str) and item_type in {"McpToolCall", "mcp_tool_call"}:
                 call_id, server = item.get("id"), _codex_server(item.get("server"))
                 tool, args = item.get("tool"), _codex_args_key(item.get("arguments"))
-            elif payload.get("type") in {"function_call", "custom_tool_call"}:
+            elif isinstance(payload_type, str) and payload_type in {"function_call", "custom_tool_call"}:
                 namespace = payload.get("namespace")
                 call_id = payload.get("call_id")
                 server = _codex_server(namespace) if isinstance(namespace, str) and namespace[:5] == "mcp__" else None
@@ -511,10 +514,14 @@ class TrialTraceArtifacts:
                 if source is None:
                     trajectory = None
                     break
-                local_servers, statuses = _codex_mcp_calls(source_root, source)
-                errors = _opencode_call_errors(source_root)
-                statuses.update(dict.fromkeys(errors, "error"))
-                marked = _with_harness_statuses(source, statuses, errors)
+                try:
+                    local_servers, statuses = _codex_mcp_calls(source_root, source)
+                    errors = _opencode_call_errors(source_root)
+                    statuses.update(dict.fromkeys(errors, "error"))
+                    marked = _with_harness_statuses(source, statuses, errors)
+                except Exception:
+                    # Advisory harness logs cannot discard an authorized trajectory.
+                    local_servers, marked = {}, source
                 if source_root != trial_root:
                     prefix = f"harbor-step:{index}:"
                     marked = _scope_harness_call_ids(marked, prefix)

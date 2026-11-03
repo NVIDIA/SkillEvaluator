@@ -11,6 +11,8 @@ from collections.abc import Iterable, Mapping
 from typing import Any
 from urllib.parse import unquote
 
+from skillevaluator.utils.rich_markup import strip_terminal_controls
+
 _SECRET_KEY_PARTS = {
     "auth",
     "authorization",
@@ -280,6 +282,11 @@ def redact_sensitive_text(value: str, *, max_len: int | None = None, max_input_c
             return out[:max_len]
         return out[: max_len - 14] + "...<truncated>"
     return out
+
+
+def redact_printable_text(value: str, *, max_len: int | None = None, max_input_chars: int | None = None) -> str:
+    """Strip terminal controls before masking credentials they may have split."""
+    return redact_sensitive_text(strip_terminal_controls(value), max_len=max_len, max_input_chars=max_input_chars)
 
 
 def contains_credential_value(value: object) -> bool:

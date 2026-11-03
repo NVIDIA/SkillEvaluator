@@ -118,6 +118,8 @@ class NativeRuntimeHooks:
         self.evidence = {}
         self.evidence_error = None
         self.collected_jobs = set()
+        if self.observer is not None:
+            self.observer.begin_attempt()
 
     def with_agent_import_path(self, agent: str, base_import_path: str | None) -> str | None:
         decision = self.decisions.get(agent)

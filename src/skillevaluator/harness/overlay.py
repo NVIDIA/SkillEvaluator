@@ -179,6 +179,18 @@ def _codex_implicit_disabled(skill_path: Path) -> bool:
     return isinstance(policy, dict) and policy.get("allow_implicit_invocation") is False
 
 
+_HERMES_OS = {"linux": "linux", "macos": "darwin", "windows": "win32"}
+
+
+def _excluded_os(platforms: Any) -> str:
+    """Operating systems Hermes hides the skill on (it maps names, then prefix-matches sys.platform)."""
+    if not platforms:
+        return ""
+    wanted = [str(p).lower().strip() for p in (platforms if isinstance(platforms, list) else [platforms])]
+    mapped = [_HERMES_OS.get(p, p) for p in wanted]
+    return ", ".join(os for os, sys_name in _HERMES_OS.items() if not any(sys_name.startswith(m) for m in mapped))
+
+
 def _openclaw_gates(data: dict[str, Any]) -> str:
     metadata = data.get("metadata")
     claw = metadata.get("openclaw") if isinstance(metadata, dict) else None
@@ -253,6 +265,7 @@ def skill_facts(skill_path: Path, catalog: Catalog | None = None) -> dict[str, A
         "custom_fields": ", ".join(map(str, custom)),
         "custom_field_chars": sum(len(v) if isinstance(v, str) else len(yaml.safe_dump(v)) for v in custom.values()),
         "platforms": ", ".join(map(str, platforms)) if isinstance(platforms, list) else str(platforms or ""),
+        "platforms_excluded": _excluded_os(platforms),
         "openclaw_gates": _openclaw_gates(data),
         "uses_arguments_placeholder": "$ARGUMENTS" in body,
         "uses_claude_skill_dir": "${CLAUDE_SKILL_DIR}" in body,

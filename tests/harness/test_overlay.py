@@ -360,3 +360,13 @@ def test_fix_reaches_findings_and_panels(tmp_path: Path):
     out = CliRunner().invoke(cli, ["harness-check", str(skill)], env={"COLUMNS": "120"}).output
     assert "→ Keep the description at or under 1,024 UTF-16 units" in out
     assert "Description in the model's skill list" in out
+
+
+def test_hermes_platforms_listing_every_os_is_not_flagged(tmp_path: Path):
+    everywhere = _rows(_skill(tmp_path / "a", extra="platforms: [linux, macos, windows]\n"))
+    mac_only = _rows(_skill(tmp_path / "b", extra="platforms: macos\n"))
+
+    assert "HM-PLATFORMS" not in _ids(everywhere, "hermes")
+    assert "Hidden from the skill list on linux, windows (platforms: macos)." in {
+        f["message"] for f in mac_only["hermes"]["findings"]
+    }

@@ -363,9 +363,9 @@ class EmbeddingRegistry:
           scan root (the longest such path wins; a case-only difference counts
           when both spellings name the same directory); and
         - more than half of up to ``SELF_ENTRY_SAMPLE_SIZE`` other catalog skill
-          entries (path order, none containing or inside the target's own path)
-          are present under that root at their recorded paths, through no
-          links, with matching fingerprints.
+          entries (spread evenly across the path-sorted list, none containing or
+          inside the target's own path) are present under that root at their
+          recorded paths, through no links, with matching fingerprints.
 
         A root (``.``) entry, a catalog with no other skill entry, and copies or
         same-name skills outside such a tree never match, so they stay
@@ -394,9 +394,13 @@ class EmbeddingRegistry:
         return candidate
 
     def _holds_catalog_tree(self, scan_root: Path, own: RegistryEntry, skills: list[RegistryEntry]) -> bool:
-        """Return whether *scan_root* holds more than half of the sampled other catalog skills unchanged."""
+        """Return whether *scan_root* holds more than half of the sampled other catalog skills unchanged.
+
+        At most ``SELF_ENTRY_SAMPLE_SIZE`` other skills are read, spread evenly
+        across the path-sorted list so the sample stands for the whole tree.
+        """
         own_parts = PurePosixPath(own.path).parts
-        sampled = present = 0
+        others: list[tuple[RegistryEntry, tuple[str, ...]]] = []
         for catalog_entry in skills:
             parts = PurePosixPath(catalog_entry.path).parts
             shared = min(len(parts), len(own_parts))
@@ -404,16 +408,19 @@ class EmbeddingRegistry:
                 # The entry itself, the scan root, an ancestor, or a skill nested
                 # in the target: a copy of the target's subtree carries these too.
                 continue
-            sampled += 1
+            others.append((catalog_entry, parts))
+        if len(others) > SELF_ENTRY_SAMPLE_SIZE:
+            others = [others[index * len(others) // SELF_ENTRY_SAMPLE_SIZE] for index in range(SELF_ENTRY_SAMPLE_SIZE)]
+        present = 0
+        for catalog_entry, parts in others:
             directory = _unlinked_directory(scan_root, parts)
-            if directory is not None:
-                with suppress(ValueError, OSError):
-                    found = extract_from_skill(directory)
-                    if found is not None and self._entry_fingerprint(found) == catalog_entry.content_fingerprint:
-                        present += 1
-            if sampled == SELF_ENTRY_SAMPLE_SIZE:
-                break
-        return present * 2 > sampled
+            if directory is None:
+                continue
+            with suppress(ValueError, OSError):
+                found = extract_from_skill(directory)
+                if found is not None and self._entry_fingerprint(found) == catalog_entry.content_fingerprint:
+                    present += 1
+        return present * 2 > len(others)
 
     def _entry_fingerprint(self, entry: ContentEntry) -> str:
         """Fingerprint *entry* the way this registry's mode records catalog entries."""

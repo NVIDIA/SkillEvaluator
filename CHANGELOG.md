@@ -529,8 +529,9 @@ All notable changes to SkillEvaluator are documented in this file.
   that is already in the local catalog as an `EXACT_DUPLICATE` of its own
   entry, which failed the run. An entry is skipped as the skill's own only when
   its content fingerprint matches, its path ends the skill's path, and more
-  than half of up to eight other catalog skills are present unchanged at their
-  recorded paths around it. The skip is recorded under
+  than half of up to eight other catalog skills, spread evenly across the
+  catalog's path-sorted list, are present unchanged at their recorded paths
+  around it. The skip is recorded under
   `self_matches_excluded` and `excluded_catalog_paths`. Verbatim copies and
   same-name skills outside the catalog's tree are still reported; a copy of
   most of the tree, such as a second checkout, counts as the same tree. An

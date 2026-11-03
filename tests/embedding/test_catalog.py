@@ -764,7 +764,33 @@ class TestCatalogSelfEntry:
         monkeypatch.setattr(registry_module, "extract_from_skill", counting_extract)
 
         assert registry.catalog_self_entry(target) is not None
-        assert reads == others[: registry_module.SELF_ENTRY_SAMPLE_SIZE]
+        # The sample is spread evenly across the sorted list, not its first entries.
+        assert reads == [others[index] for index in (0, 1, 3, 4, 6, 7, 9, 10)]
+
+    def test_staging_copy_of_the_first_sorted_catalog_skills_is_not_a_catalog_tree(
+        self, tmp_path: Path, write_skill
+    ) -> None:
+        others = [f"skill-{index:02d}" for index in range(39)]
+        skills = _write_skills(write_skill, tmp_path / "repo" / "skills", "alpha", *others)
+        registry = _saved_catalog(tmp_path, skills)
+        staging = tmp_path / "staging"
+        for name in ("alpha", *others[:5]):
+            shutil.copytree(skills / name, staging / name)
+
+        assert registry.catalog_self_entry(_target(staging / "alpha")) is None
+
+    def test_catalog_tree_missing_some_first_sorted_skills_still_skips(self, tmp_path: Path, write_skill) -> None:
+        others = [f"skill-{index:02d}" for index in range(39)]
+        skills = _write_skills(write_skill, tmp_path / "repo" / "skills", "alpha", *others)
+        registry = _saved_catalog(tmp_path, skills)
+        # Four of the first eight other skills are gone; 35 of the 39 are intact.
+        for name in others[0:8:2]:
+            shutil.rmtree(skills / name)
+
+        self_entry = registry.catalog_self_entry(_target(skills / "alpha"))
+
+        assert self_entry is not None
+        assert self_entry.path == "alpha"
 
     def test_longest_catalog_path_identifies_the_target(self, tmp_path: Path, write_skill) -> None:
         repo = tmp_path / "repo"

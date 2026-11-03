@@ -37,7 +37,7 @@ from skillevaluator.logging_config import get_logger
 from skillevaluator.models.quality import QualityScoreResult
 from skillevaluator.models.result import Finding, Severity, ValidationResult
 from skillevaluator.models.skill import XML_TAG_RE
-from skillevaluator.quality_config import load_quality_config, quality_config_provenance
+from skillevaluator.quality_config import CodeErrorHandlingRule, load_quality_config, quality_config_provenance
 from skillevaluator.validators.base import ValidatorBase
 from skillevaluator.validators.frontmatter_parser import FRONTMATTER_PATTERN
 from skillevaluator.validators.markdown import markdown_link_targets
@@ -46,11 +46,6 @@ logger = get_logger(__name__)
 
 _WORD_CHAR = r"A-Za-z0-9_"
 _URL_EDGE_C0_OR_SPACE_RE = re.compile(r"^[\x00-\x20]+|[\x00-\x20]+$")
-_ERROR_HANDLING_RE = re.compile(
-    r"\b(?:errors?|exceptions?|invalid|fail(?:s|ed|ure|ures|ing)?|"
-    r"validat(?:e|es|ed|ing|ion|ions))\b",
-    re.IGNORECASE,
-)
 
 
 def _contains_term(text: str, term: str) -> bool:
@@ -67,6 +62,12 @@ def _contains_term(text: str, term: str) -> bool:
 
 def _contains_any_term(text: str, terms: Iterable[str]) -> bool:
     return any(_contains_term(text, term) for term in terms)
+
+
+def _contains_any_word(text: str, words: Iterable[str]) -> bool:
+    """Whole-word, case-insensitive match where any Unicode letter or digit counts as part of a word."""
+    pattern = "|".join(re.escape(word) for word in words)
+    return bool(re.search(rf"\b(?:{pattern})\b", text, re.IGNORECASE))
 
 
 def _has_api_documentation(content: str) -> bool:
@@ -658,81 +659,45 @@ class QualityScoreValidator(ValidatorBase):
         skill_path: Path,
     ) -> None:
         dim = qs.reliability
+        error_handling = self.quality_config["error_handling"]
 
-        if _ERROR_HANDLING_RE.search(content):
-            qs.has_error_handling = True
-        else:
-            dim.deduct(
-                10,
-                "info",
-                "No mention of error handling or validation",
-                "Document expected errors and how to handle them",
-            )
+        mentioned = error_handling["mentioned"]
+        qs.has_error_handling = _contains_any_word(content, mentioned["terms"])
+        # A rule with points 0 is turned off, so it adds no finding.
+        if not qs.has_error_handling and mentioned["points"]:
+            dim.deduct(mentioned["points"], "info", mentioned["message"], mentioned["suggestion"])
 
         # Type-aware code quality
         if qs.skill_type in ("script-based", "hybrid"):
-            self._check_script_reliability(dim, skill_path)
+            scripts = self._executable_files(skill_path, patterns=("*.py",))
+            self._check_code_error_handling(dim, scripts, error_handling["scripts"])
         elif qs.skill_type == "lib-based":
-            self._check_lib_reliability(dim, skill_path)
+            lib_dir = QualityScoreValidator.find_lib_module(skill_path)
+            if lib_dir:
+                modules = [py for py in lib_dir.rglob("*.py") if py.name != "__init__.py"]
+                self._check_code_error_handling(dim, modules, error_handling["lib"])
 
         for expected in self.quality_config["expected_headers"]:
             accepted_headings = [expected["heading"], *expected["alternatives"]]
             if not any(heading in content for heading in accepted_headings):
                 dim.deduct(expected["points"], "info", expected["message"], expected["suggestion"])
 
-    def _check_script_reliability(self, dim, skill_path: Path) -> None:
-        no_error_handling = []
-        for script in self._executable_files(skill_path, patterns=("*.py",)):
-            try:
-                sc = script.read_text(encoding="utf-8")
-            except Exception:
-                continue
-            has_try = "try:" in sc and "except" in sc
-            has_err = any(
-                p in sc
-                for p in [
-                    "if not ",
-                    "if error",
-                    "raise",
-                    "assert",
-                    "ValueError",
-                    "FileNotFoundError",
-                ]
-            )
-            if not (has_try or has_err):
-                no_error_handling.append(script.name)
-
-        if no_error_handling:
-            dim.deduct(
-                5,
-                "info",
-                f"Scripts may lack error handling: {', '.join(no_error_handling[:3])}",
-                "Scripts should handle errors explicitly",
-            )
-
-    def _check_lib_reliability(self, dim, skill_path: Path) -> None:
-        lib_dir = QualityScoreValidator.find_lib_module(skill_path)
-        if not lib_dir:
+    @staticmethod
+    def _check_code_error_handling(dim, files: list[Path], rule: CodeErrorHandlingRule) -> None:
+        """Deduct once when files have neither a try/except pair nor any configured marker."""
+        if not rule["points"]:
             return
-        no_err = []
-        for py in lib_dir.rglob("*.py"):
-            if py.name == "__init__.py":
-                continue
+        unhandled = []
+        for path in files:
             try:
-                pc = py.read_text(encoding="utf-8")
+                code = path.read_text(encoding="utf-8")
             except Exception:
                 continue
-            has_try = "try:" in pc and "except" in pc
-            has_err = any(p in pc for p in ["raise", "assert", "ValueError", "TypeError", "RuntimeError"])
-            if not (has_try or has_err):
-                no_err.append(py.name)
-        if no_err:
-            dim.deduct(
-                5,
-                "info",
-                f"Lib modules may lack error handling: {', '.join(no_err[:3])}",
-                "Library code should handle errors explicitly with try/except or raise",
-            )
+            has_try = "try:" in code and "except" in code
+            if not (has_try or any(marker in code for marker in rule["markers"])):
+                unhandled.append(path.name)
+        if unhandled:
+            dim.deduct(rule["points"], "info", f"{rule['message']}: {', '.join(unhandled[:3])}", rule["suggestion"])
 
     # -----------------------------------------------------------------
     # Efficiency dimension (weight: 0.15)

@@ -66,10 +66,6 @@ _ARGUMENT_COMMAND_SYNTAX_RE = re.compile(r"[;&`]|\$[({]")
 _ARGUMENT_CHOICE_LABEL_RE = re.compile(r"^(?:[^|:]+:|\S+\s+(?:e\.g\.|i\.e\.),?)\s+", re.IGNORECASE)
 # One choice in a ``|`` list: a single word or a quoted literal.
 _ARGUMENT_CHOICE_RE = re.compile(r"\S+|\"[^\"]*\"|'[^']*'")
-# A masked placeholder followed by text that runs into a ``>``, as in ``<<cmd>file>``
-# (masked to ``<[]file>``). A placeholder nested directly in a group (``<R<NNN>>``,
-# masked to ``<R[]>``) has no text before the ``>`` and does not match.
-_ARGUMENT_TEXT_AFTER_MASK_RE = re.compile(r"\[\][^<>\[\]]+>")
 _URL_EDGE_C0_OR_SPACE_RE = re.compile(r"^[\x00-\x20]+|[\x00-\x20]+$")
 _ERROR_HANDLING_RE = re.compile(
     r"\b(?:errors?|exceptions?|invalid|fail(?:s|ed|ure|ures|ing)?|"
@@ -105,17 +101,33 @@ def _mask_argument_placeholder(match: re.Match[str]) -> str:
     return "[]" if _is_argument_placeholder(match.group(1)) else match.group(0)
 
 
-def _has_unmatched_close(text: str) -> bool:
-    """Return whether ``text`` has a ``>`` that closes no earlier ``<``."""
+def _masking_hides_text(masked: str) -> bool:
+    """Return whether masking left a ``>`` that could hide text inside a group.
+
+    A ``>`` that closes no group (``<cmd>file>``) reads as a redirect. Inside a group,
+    a masked placeholder must be followed directly by the group's own closing ``>``
+    (``<R<NNN>>`` masks to ``<R[]>``). Any other text after it (``<<cmd>file>``,
+    ``<<x><y>>``, ``<<x>[y] free text>``) means the outer group is not a placeholder.
+    """
     depth = 0
-    for char in text:
+    after_mask = False
+    index = 0
+    while index < len(masked):
+        char = masked[index]
+        if after_mask and char != ">":
+            return True
+        after_mask = False
         if char == "<":
             depth += 1
         elif char == ">":
             if not depth:
                 return True
             depth -= 1
-    return False
+        elif depth and masked.startswith("[]", index):
+            after_mask = True
+            index += 1
+        index += 1
+    return after_mask
 
 
 def _mask_argument_hint(hint: str) -> str:
@@ -124,14 +136,15 @@ def _mask_argument_hint(hint: str) -> str:
     Control tags are checked on the raw value first: masking an inner placeholder
     could otherwise erase an enclosing tag such as ``<system<payload>>``. A ``>``
     left after masking reads as a redirect when it closes no group (``<cmd>file>``,
-    ``<cmd 2>file>``, ``<curl x> /tmp/y>``) or ends text after a masked placeholder
-    (``<<cmd>file>``). The raw hint is then returned, so every group in it stays
-    visible to the tag check.
+    ``<cmd 2>file>``, ``<curl x> /tmp/y>``), and a group that holds anything after a
+    masked placeholder other than its own closing ``>`` (``<<cmd>file>``,
+    ``<<x><y>>``) is not a placeholder. The raw hint is then returned, so every
+    group in it stays visible to the tag check.
     """
     if _ARGUMENT_CONTROL_TAG_RE.search(hint):
         return hint
     masked = _ARGUMENT_PLACEHOLDER_RE.sub(_mask_argument_placeholder, hint)
-    if _has_unmatched_close(masked) or _ARGUMENT_TEXT_AFTER_MASK_RE.search(masked):
+    if _masking_hides_text(masked):
         return hint
     return masked
 

@@ -65,7 +65,37 @@ def test_publisher_uses_verified_node24_action_releases():
     uses = {step.get("uses", "") for job in jobs.values() for step in job["steps"]}
     assert "actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9" in uses
     assert "actions/upload-pages-artifact@fc324d3547104276b827a68afc52ff2a11cc49c9" in uses
-    assert "actions/deploy-pages@368f82528645a54fb793d4d04e342629a3f51346" in uses
+    assert "actions/github-script@ed597411d8f924073f98dfc5c65a23a2325f34cd" in uses
+
+
+@pytest.mark.parametrize(
+    ("revision", "artifact"),
+    [("", "123"), ("bad", "123"), ("a" * 41, "123"), ("a" * 40, ""), ("a" * 40, "0"), ("a" * 40, "9007199254740993")],
+)
+def test_pages_rejects_invalid_identity_before_requesting_credentials(revision, artifact):
+    node = shutil.which("node")
+    if not node:
+        pytest.skip("Node.js is required to exercise the deployed workflow script")
+    steps = load(".github/workflows/publish-skill-reports.yml")["jobs"]["deploy"]["steps"]
+    deploy = next(step for step in steps if step.get("id") == "deployment")
+    script = deploy["with"]["script"]
+    # Run the actual workflow code without an API or token provider. Invalid
+    # identities must be rejected before either collaborator can be accessed.
+    harness = """
+      const AsyncFunction = Object.getPrototypeOf(async function(){}).constructor;
+      new AsyncFunction('github', 'context', 'core', process.argv[1])({}, {}, {})
+        .then(() => process.exit(2))
+        .catch(error => { console.log(error.message); });
+    """
+    result = subprocess.run(
+        [node, "-e", harness, script],
+        env={**os.environ, "SITE_REVISION": revision, "PAGES_ARTIFACT_ID": artifact},
+        check=True,
+        capture_output=True,
+        text=True,
+        timeout=10,
+    )
+    assert result.stdout.strip() == "A retained site revision and uploaded Pages artifact are required."
 
 
 def test_privileged_publisher_installs_the_reviewed_hash_locked_bootstrap():

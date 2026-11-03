@@ -70,7 +70,8 @@ class TestScanIncompleteMarking:
             ("gitleaks", lambda path: SecretsValidator()._validate_single_skill(path)),
         ],
     )
-    def test_missing_scanner_is_incomplete(self, tool_name, run_scan, skill_dir):
+    def test_missing_scanner_is_incomplete(self, tool_name, run_scan, skill_dir, monkeypatch):
+        monkeypatch.setenv("SKILLEVALUATOR_REQUIRE_SEMGREP", "1")
         tool = getattr(Tools, tool_name)
         with patch.object(tool, "_path", None):
             result = run_scan(skill_dir)

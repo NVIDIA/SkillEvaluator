@@ -5,8 +5,9 @@
 
 Local mode runs the vendor agent CLIs (claude-code, codex, opencode) that are
 already installed on the host or under ``SKILLEVALUATOR_RUNTIME_DIR``. This
-module discovers them on ``PATH``; it never downloads or installs anything.
-When a CLI is missing, it returns the vendor's own install command as a hint.
+module discovers them on ``PATH``. Discovery never installs anything; only
+:func:`install_local_runtime`, run after the operator confirms, installs the
+pinned npm release into the dedicated runtime root.
 """
 
 from __future__ import annotations
@@ -21,6 +22,7 @@ from collections.abc import Mapping, Sequence
 from errno import ELOOP
 from pathlib import Path
 from subprocess import SubprocessError, TimeoutExpired
+from types import MappingProxyType
 from typing import Any
 
 from skillevaluator.tier3.harbor.local_sandbox import SandboxUnavailable
@@ -52,6 +54,16 @@ _AGENT_COMMANDS: dict[str, tuple[str, ...]] = {
     "codex": ("codex",),
     "opencode": ("opencode",),
 }
+
+# npm packages and the releases SkillEvaluator was validated with. Harbor pins
+# these inside containers; a managed local install uses the same release.
+_AGENT_PACKAGES: dict[str, str] = {
+    "claude-code": "@anthropic-ai/claude-code",
+    "codex": "@openai/codex",
+    "opencode": "opencode-ai",
+}
+PINNED_RUNTIME_VERSIONS: Mapping[str, str] = MappingProxyType({"claude-code": "2.1.292", "codex": "0.161.0"})
+RUNTIME_INSTALL_TIMEOUT_SECONDS = 600
 
 # Vendor install hints shown when a CLI is missing. Local mode never runs these
 # for the user — it only prints them — so there is no download-and-exec surface.
@@ -498,6 +510,43 @@ def missing_local_runtimes(
             continue
         missing[agent] = " or ".join(_AGENT_COMMANDS[agent])
     return missing
+
+
+def managed_runtime_prefix(agent: str, *, runtime_root: Path | None = None) -> Path:
+    """The npm prefix that holds ``agent``'s managed CLI."""
+    return validate_runtime_root(runtime_root or default_runtime_root()) / agent
+
+
+def managed_install_argv(agent: str, *, runtime_root: Path | None = None) -> list[str]:
+    """The npm command that installs ``agent``'s pinned CLI into the managed runtime root."""
+    version = PINNED_RUNTIME_VERSIONS.get(agent)
+    package = _AGENT_PACKAGES[agent] + (f"@{version}" if version else "")
+    prefix = managed_runtime_prefix(agent, runtime_root=runtime_root)
+    return ["npm", "install", "--global", "--prefix", str(prefix), "--no-audit", "--no-fund", package]
+
+
+def install_local_runtime(
+    agent: str,
+    *,
+    runtime_root: Path | None = None,
+    timeout: float = RUNTIME_INSTALL_TIMEOUT_SECONDS,
+) -> str | None:
+    """Install ``agent``'s pinned CLI under the runtime root; return an error, or ``None`` on success."""
+    npm = shutil.which("npm")
+    if npm is None:
+        return "npm not found: install Node.js 18 or newer (https://nodejs.org), then retry"
+    argv = managed_install_argv(agent, runtime_root=runtime_root)
+    try:
+        result = subprocess.run([npm, *argv[1:]], capture_output=True, text=True, timeout=timeout, check=False)
+    except (OSError, SubprocessError) as exc:
+        return f"npm install failed: {type(exc).__name__}"
+    if result.returncode != 0:
+        lines = (result.stderr or result.stdout or "").strip().splitlines()
+        return f"npm install failed (exit {result.returncode})" + (f": {lines[-1][:200]}" if lines else "")
+    if find_runtime_command(agent, runtime_root=runtime_root) is None:
+        prefix = managed_runtime_prefix(agent, runtime_root=runtime_root)
+        return f"npm install finished, but no {' or '.join(_AGENT_COMMANDS[agent])} command was found under {prefix}"
+    return None
 
 
 def local_runtime_install_command(agents: Sequence[str], **_ignored: object) -> str:

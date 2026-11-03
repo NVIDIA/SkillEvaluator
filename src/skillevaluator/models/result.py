@@ -494,6 +494,16 @@ class ValidationResult:
             scans.append(tool_name)
         self.passed = False
 
+    @property
+    def scanners(self) -> dict[str, str]:
+        """External scanners that produced this result, mapped to their versions."""
+        value = self.metadata.get("scanners")
+        return dict(value) if isinstance(value, dict) else {}
+
+    def record_scanner(self, name: str, version: str | None) -> None:
+        """Record that scanner *name* ran, so reports show which scanner versions produced the result."""
+        self.metadata["scanners"] = {**self.scanners, name: version or "unknown"}
+
     def merge(self, other: ValidationResult) -> None:
         """Merge another result into this one, combining all fields."""
         if not other.passed:
@@ -508,9 +518,12 @@ class ValidationResult:
         # another's (e.g. bandit and semgrep both failing); concatenate.
         incomplete = list(dict.fromkeys([*self.incomplete_scans, *other.incomplete_scans]))
         gate_failures = [*self.gate_failures, *other.gate_failures]
+        scanners = {**self.scanners, **other.scanners}
         self.metadata.update(other.metadata)
         if incomplete:
             self.metadata["incomplete_scans"] = incomplete
+        if scanners:
+            self.metadata["scanners"] = scanners
         if gate_failures:
             self.metadata["gate_failures"] = gate_failures
 
@@ -564,6 +577,8 @@ class ValidationResult:
         gate_failures = [*self.gate_failures, *(f"[{prefix}] {message}" for message in other.gate_failures)]
         if gate_failures:
             self.metadata["gate_failures"] = gate_failures
+        if scanners := {**self.scanners, **other.scanners}:
+            self.metadata["scanners"] = scanners
 
         # Merge summary
         self.summary.errors += other.summary.errors
@@ -583,4 +598,6 @@ class ValidationResult:
         }
         if self.gate_failures:
             result["gate_failures"] = self.gate_failures
+        if self.scanners:
+            result["scanners"] = self.scanners
         return result

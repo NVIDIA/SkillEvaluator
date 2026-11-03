@@ -28,3 +28,8 @@ notes:
   - "Explicit $skill injects the whole SKILL.md (145 KB tested); the 8,000-byte cap applies only to plugin skills."
   - "Follows symlinked skill folders (inside or outside the root)."
   - "New skills are listed next turn; files are re-read from disk."
+plugin:
+  rules:
+    - {id: CX-PLUGIN-FORMAT, when: "not (fmt_codex or fmt_claude or fmt_cursor or fmt_agent_v1)", effect: not_loaded, outcome: rejected, message: "Codex installs .codex-plugin, .claude-plugin, .cursor-plugin and Agent Plugins v1 bundles; this one has none of them.", fix: "Add .codex-plugin/plugin.json.", confidence: high}
+    - {id: CX-PLUGIN-NAMESPACE, when: "components.skills > 0", effect: advisory, message: "Plugin skills are named {plugin_name}:<skill>; a bare skill name does not invoke them.", fix: "Refer to plugin skills by their full {plugin_name}:<skill> name.", confidence: high}
+  components: {skills: listed, commands: not_observed, agents: not_observed, hooks: not_observed, mcp: delivered, lsp: not_observed}

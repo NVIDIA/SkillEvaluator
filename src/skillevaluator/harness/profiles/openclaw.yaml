@@ -27,7 +27,13 @@ rules:
   - {id: OW-ARGUMENTS, when: "uses_arguments_placeholder", effect: degraded, message: "$ARGUMENTS is not substituted: the model sees the literal text.", fix: "Describe the expected input in words instead of $ARGUMENTS.", confidence: medium}
   - {id: OW-SKILL-DIR, when: "uses_claude_skill_dir", effect: degraded, message: "${CLAUDE_SKILL_DIR} is not substituted: the model sees the literal text.", fix: "Use paths relative to SKILL.md.", confidence: medium}
   - {id: OW-CLAUDE-ONLY, when: "claude_only_fields != ''", effect: advisory, message: "Ignored here (Claude Code only): {claude_only_fields}.", fix: "Fine to keep for Claude Code; don't depend on them elsewhere.", confidence: medium}
+  - {id: OW-DESC-ESCAPED, when: "description_has_quote", effect: advisory, outcome: text rewritten, message: "Double quotes in the description are shown to the model as &quot; in the skill list.", fix: "Use single quotes in the description if the exact text matters.", confidence: high}
 notes:
   - "Precedence: workspace skills/ > .agents/skills > ~/.agents/skills > managed > bundled > extra dirs (project wins, 3/3)."
   - "Description given as a YAML list is stringified and listed. BOM, CRLF, bare colons tolerated."
   - "New skills listed next turn in `openclaw chat`; files re-read from disk."
+plugin:
+  rules:
+    - {id: OW-PLUGIN-FORMAT, when: "not (fmt_claude or fmt_codex or fmt_cursor or fmt_agent_v1 or fmt_root_json)", effect: not_loaded, outcome: rejected, message: "OpenClaw installs bundles with a JSON plugin manifest (.claude-plugin, .codex-plugin, .cursor-plugin or plugin.json); Hermes plugin.yaml plugins are not found.", fix: "Add .claude-plugin/plugin.json.", confidence: medium}
+    - {id: OW-PLUGIN-CODEX-HOOKS, when: "fmt_codex and not (fmt_claude or fmt_agent_v1) and components.hooks > 0", effect: degraded, message: "Hooks of Codex-format bundles did not fire.", fix: "Also ship .claude-plugin/plugin.json.", confidence: medium}
+  components: {skills: listed, commands: not_observed, agents: not_observed, hooks: runs, mcp: registered, lsp: runs}

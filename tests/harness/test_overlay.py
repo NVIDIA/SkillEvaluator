@@ -463,3 +463,9 @@ def test_tier1_summary_gives_harness_its_own_line(tmp_path: Path):
 
     assert labels["harness"].startswith("1 not loaded")
     assert "harness" not in labels.get("advisories", "")
+
+
+def test_quotes_in_description_are_escaped_in_copilot_and_openclaw_lists(tmp_path: Path):
+    rows = _rows(_skill(tmp_path, desc='Use when asked to "summarize" a file.'))
+    assert "CP-DESC-ESCAPED" in _ids(rows, "copilot-cli") and "OW-DESC-ESCAPED" in _ids(rows, "openclaw")
+    assert "CC-DESC-ESCAPED" not in _ids(rows, "claude-code") and rows["copilot-cli"]["status"] == "loads"

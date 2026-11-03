@@ -22,7 +22,14 @@ rules:
   - {id: CP-SKILL-DIR, when: "uses_claude_skill_dir", effect: degraded, message: "${CLAUDE_SKILL_DIR} is not substituted: the model sees the literal text.", fix: "Use paths relative to SKILL.md.", confidence: high}
   - {id: CP-CLAUDE-ONLY, when: "claude_only_fields != ''", effect: advisory, message: "Ignored here (Claude Code only): {claude_only_fields}.", fix: "Fine to keep for Claude Code; don't depend on them elsewhere.", confidence: medium}
   - {id: CP-FM-STRIPPED, when: "custom_field_chars > 200", effect: advisory, message: "Frontmatter is stripped when the skill is used, so the text in {custom_fields} never reaches the model.", fix: "Move instructions from frontmatter into the SKILL.md body.", confidence: medium}
+  - {id: CP-DESC-ESCAPED, when: "description_has_quote", effect: advisory, outcome: text rewritten, message: "Double quotes in the description are shown to the model as &quot; in the skill list.", fix: "Use single quotes in the description if the exact text matters.", confidence: high}
 notes:
   - "Docs say skills only in immediate subfolders; runtime finds them 3 grouping levels deep."
   - "Follows symlinks inside and outside the checkout (SDK docs say inside only)."
   - "Project copy wins on duplicate names (3/3); missing name falls back to the folder name."
+plugin:
+  rules:
+    - {id: CP-PLUGIN-FORMAT, when: "not (fmt_claude or fmt_agent_v1 or fmt_copilot or fmt_root_json)", effect: not_loaded, outcome: rejected, message: "Copilot CLI installs .claude-plugin, .github/plugin, .plugin and plugin.json bundles; Codex- and Cursor-only bundles are refused.", fix: "Add .claude-plugin/plugin.json (Copilot reads it).", confidence: high}
+    - {id: CP-PLUGIN-AGENTV1, when: "fmt_agent_v1 and not fmt_claude and (components.commands > 0 or components.agents > 0 or components.hooks > 0)", effect: degraded, outcome: partly delivered, message: "From an Agent Plugins v1 bundle Copilot delivers skills and MCP tools only; commands, agents and hooks did not reach the model or run.", fix: "Also ship .claude-plugin/plugin.json.", confidence: high}
+    - {id: CP-PLUGIN-MCP-NAMES, when: "components.mcp > 0", effect: advisory, message: "MCP tool names are shown as <server>-<tool> and cut to 64 characters.", fix: "Keep server plus tool names under 64 characters.", confidence: high}
+  components: {skills: delivered, commands: listed, agents: delivered, hooks: runs, mcp: delivered, lsp: not_observed}

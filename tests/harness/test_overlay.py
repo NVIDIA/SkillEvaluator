@@ -347,7 +347,7 @@ def test_every_rule_has_a_fix_and_placeholders_are_filled(tmp_path: Path):
     skills = _catalog(tmp_path, 200, desc_len=400)
     rows = _rows(skills / "filler-000")
     messages = [f["message"] + f.get("fix", "") for r in rows.values() for f in r["findings"]]
-    assert messages and not any(re.search(r"\{[a-z_]+\}", m) for m in messages)
+    assert messages and not any(re.search(r"\{[a-z0-9_]+\}", m) for m in messages)
     assert {"OW-COMPACT", "OW-PROMPT-CAP"} <= _ids(rows, "openclaw")
 
 
@@ -356,9 +356,9 @@ def test_fix_reaches_findings_and_panels(tmp_path: Path):
     result = HarnessValidator().validate(skill)
     finding = next(f for f in result.findings if f.check_name == "CP-DESC-LIMIT")
 
-    assert finding.suggestion.startswith("Keep the description at or under 1,024 UTF-16 units")
+    assert finding.suggestion == "Cut the description by at least 200 UTF-16 units."
     out = CliRunner().invoke(cli, ["harness-check", str(skill)], env={"COLUMNS": "120"}).output
-    assert "→ Keep the description at or under 1,024 UTF-16 units" in out
+    assert "→ Cut the description by at least 200 UTF-16 units." in out
     assert "Description in the model's skill list" in out
 
 
@@ -370,3 +370,45 @@ def test_hermes_platforms_listing_every_os_is_not_flagged(tmp_path: Path):
     assert "Hidden from the skill list on linux, windows (platforms: macos)." in {
         f["message"] for f in mac_only["hermes"]["findings"]
     }
+
+
+def _sized(root: Path, fact: str, target: int) -> Path:
+    """A skill whose ``fact`` (a body-length measure) is exactly ``target``."""
+    probe = _skill(root / "probe", body="a")
+    padding = target - skill_facts(probe)[fact] + 1
+    skill = _skill(root / str(target), body="a" * padding)
+    assert skill_facts(skill)[fact] == target
+    return skill
+
+
+@pytest.mark.parametrize(
+    ("harness", "rule", "fact", "limit"),
+    [
+        ("hermes", "HM-VIEW-BUDGET", "hermes_view_chars", 100_000),
+        ("openclaw", "OW-READ-BUDGET", "skill_md_chars", 16_000),
+        ("openclaw", "OW-READ-REFUSED", "skill_md_chars", 64_000),
+    ],
+)
+def test_body_limits_fire_just_over_the_limit(tmp_path: Path, harness: str, rule: str, fact: str, limit: int):
+    assert rule not in _ids(_rows(_sized(tmp_path / "at", fact, limit)), harness)
+    assert rule in _ids(_rows(_sized(tmp_path / "over", fact, limit + 1)), harness)
+
+
+@pytest.mark.parametrize(("harness", "rule"), [("codex", "CX-DESC-CUT"), ("copilot-cli", "CP-DESC-LIMIT")])
+def test_description_limit_is_1024(tmp_path: Path, harness: str, rule: str):
+    at = _rows(_skill(tmp_path / "at", desc="Use when " + "a" * 1015))
+    over = _rows(_skill(tmp_path / "over", desc="Use when " + "a" * 1016))
+
+    assert rule not in _ids(at, harness)
+    assert any(f["id"] == rule and "1 over" in f["message"] for f in over[harness]["findings"])
+
+
+def test_price_like_dollar_numbers_are_flagged_with_lines(tmp_path: Path):
+    prices = _rows(_skill(tmp_path / "a", body="# Prices\n\nInput $4.00, cache $0.25.\nBatch $4 / $20 per MTok.\n"))
+    safe = _rows(_skill(tmp_path / "b", body="Input USD 4.00, \\$0.25, $10k, $ARGUMENTS.\nRun on $1.\n"))
+
+    finding = next(f for f in prices["claude-code"]["findings"] if f["id"] == "CC-DOLLAR-N")
+    assert finding["message"].startswith("4 price-like $N tokens (lines 9, 10)")
+    assert "OC-DOLLAR-N" in _ids(prices, "opencode")
+    assert "CC-DOLLAR-N" not in _ids(safe, "claude-code") and "OC-DOLLAR-N" not in _ids(safe, "opencode")
+    assert skill_facts(tmp_path / "b" / "skills" / "demo-skill")["dollar_placeholder_count"] == 1

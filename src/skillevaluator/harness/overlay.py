@@ -5,6 +5,7 @@
 from __future__ import annotations
 
 import ast
+import json
 import os
 import re
 from dataclasses import dataclass, field
@@ -46,7 +47,10 @@ _KNOWN_FIELDS = frozenset(
         *_CLAUDE_ONLY_FIELDS,
     )
 )
-_FACT_RE = re.compile(r"\{([a-z_]+)\}")
+_FACT_RE = re.compile(r"\{([a-z0-9_]+)\}")
+_DOLLAR_N_RE = re.compile(r"(?<!\\)\$(\d+)(?!\w)")
+_PRICE_TAIL_RE = re.compile(r"[.,]\d|\s*(?:/|per\b)")
+_PRICE_HEAD_RE = re.compile(r"/\s*$")
 _KNOWN_ROOTS = (
     ".agents/skills",
     ".claude/skills",
@@ -169,6 +173,21 @@ def _bundle_facts(skill_path: Path, manifest: Path) -> dict[str, Any]:
     }
 
 
+def _dollar_n(body: str, first_line: int) -> dict[str, Any]:
+    """Count ``$<number>`` tokens: price-like ones ($4.00, $4 / $20 per MTok) versus bare placeholders ($1)."""
+    prices, placeholders, lines = 0, 0, []
+    for number, line in enumerate(body.splitlines(), first_line):
+        for match in _DOLLAR_N_RE.finditer(line):
+            if _PRICE_TAIL_RE.match(line, match.end()) or _PRICE_HEAD_RE.search(line, 0, match.start()):
+                prices += 1
+                if number not in lines:
+                    lines.append(number)
+            else:
+                placeholders += 1
+    shown = ", ".join(map(str, lines[:5])) + (f" +{len(lines) - 5} more" if len(lines) > 5 else "")
+    return {"dollar_literal_count": prices, "dollar_literal_lines": shown, "dollar_placeholder_count": placeholders}
+
+
 def _codex_implicit_disabled(skill_path: Path) -> bool:
     policy_file = skill_path / "agents" / "openai.yaml"
     try:
@@ -267,6 +286,14 @@ def skill_facts(skill_path: Path, catalog: Catalog | None = None) -> dict[str, A
         "platforms": ", ".join(map(str, platforms)) if isinstance(platforms, list) else str(platforms or ""),
         "platforms_excluded": _excluded_os(platforms),
         "openclaw_gates": _openclaw_gates(data),
+        "skill_md_chars": len(text),
+        "description_over": max(0, (len(description) if isinstance(description, str) else 0) - 1024),
+        "utf16_over": max(0, (len(description.encode("utf-16-le")) // 2 if isinstance(description, str) else 0) - 1024),
+        # Hermes skill_view returns JSON: escaped SKILL.md + description + ~400 chars of other keys.
+        "hermes_view_chars": len(json.dumps(text))
+        + len(json.dumps(description if isinstance(description, str) else ""))
+        + 400,
+        **_dollar_n(body, text[: match.start(2)].count("\n") + 1 if match else 1),
         "uses_arguments_placeholder": "$ARGUMENTS" in body,
         "uses_claude_skill_dir": "${CLAUDE_SKILL_DIR}" in body,
         **_bundle_facts(skill_path, manifest),
@@ -448,8 +475,9 @@ def evaluate_profile(profile: dict[str, Any], facts: dict[str, Any]) -> HarnessR
         if expression == "always" and rule["effect"] == "advisory":
             continue
         finding = {"id": rule["id"], "effect": rule["effect"], "message": _fill(rule["message"], facts)}
-        if rule.get("fix"):
-            finding["fix"] = _fill(rule["fix"], facts)
+        for key in ("fix", "versions"):
+            if rule.get(key):
+                finding[key] = _fill(rule[key], facts)
         findings.append(finding)
         worst = max(worst, _EFFECT_RANK[rule["effect"]])
     status = "not_loaded" if worst == 2 else "degraded" if worst == 1 else "loads"

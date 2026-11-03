@@ -24,6 +24,12 @@ All notable changes to SkillEvaluator are documented in this file.
   `agents/openai.yaml` policy, `$ARGUMENTS`/`${CLAUDE_SKILL_DIR}`, Hermes
   `platforms`, OpenClaw requirements and Claude Code-only fields. Every finding
   has a fix line, and `harness-check` shows the description each harness lists.
+- New `harness` rules for fixed delivery limits: price-like `$N` text that
+  Claude Code and OpenCode 1.x slash commands replace with arguments (with line
+  numbers), Hermes's 100,000-char `skill_view` result budget, and OpenClaw's
+  whole-or-nothing skill read against its 16,000/32,000/64,000-char result caps.
+  Rules whose behaviour changed between releases name the versions they apply to,
+  and the Codex and Copilot description findings give the exact overflow.
 
 - Tier 1 `schema` now reports harness-portability issues: duplicate frontmatter
   keys (HIGH), a UTF-8 BOM, a symlinked or nested `SKILL.md`, descriptions over

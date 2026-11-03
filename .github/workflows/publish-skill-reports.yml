@@ -167,13 +167,66 @@ jobs:
           ref: gh-pages
           path: site
           persist-credentials: false
+      - name: Identify the retained site revision
+        id: site
+        # workflow_run events share the default-branch SHA. Pages uses its
+        # build SHA as deployment identity, so use the retained site revision.
+        run: |
+          echo "revision=$(git -C site rev-parse HEAD)" >> "$GITHUB_OUTPUT"
       - name: Package the static report site
+        id: pages
         uses: actions/upload-pages-artifact@fc324d3547104276b827a68afc52ff2a11cc49c9 # v5.0.0
         with:
           path: site
       - name: Deploy the static report site
         id: deployment
-        uses: actions/deploy-pages@368f82528645a54fb793d4d04e342629a3f51346 # v5.0.1
+        uses: actions/github-script@ed597411d8f924073f98dfc5c65a23a2325f34cd # v8.0.0
+        env:
+          SITE_REVISION: ${{ steps.site.outputs.revision }}
+          PAGES_ARTIFACT_ID: ${{ steps.pages.outputs.artifact_id }}
+        with:
+          script: |
+            const revision = process.env.SITE_REVISION;
+            const artifact = Number(process.env.PAGES_ARTIFACT_ID);
+            if (!/^[0-9a-f]{40}$/.test(revision || '') || !Number.isSafeInteger(artifact) || artifact < 1) {
+              throw new Error('A retained site revision and uploaded Pages artifact are required.');
+            }
+            const {data: deployment} = await github.request('POST /repos/{owner}/{repo}/pages/deployments', {
+              ...context.repo,
+              artifact_id: artifact,
+              pages_build_version: revision,
+              oidc_token: await core.getIDToken(),
+              request: {timeout: 30000}
+            });
+            if (deployment.id !== revision) {
+              throw new Error('GitHub returned an unexpected Pages deployment identity.');
+            }
+            core.info(`Pages build revision: ${revision}`);
+            let completed = false;
+            const deadline = Date.now() + 300000;
+            try {
+              for (let attempt = 0; attempt < 60 && Date.now() < deadline; attempt++) {
+                const {data: status} = await github.request('GET /repos/{owner}/{repo}/pages/deployments/{deployment_id}', {
+                  ...context.repo, deployment_id: revision, request: {timeout: 30000}
+                });
+                if (status.status === 'succeed') {
+                  completed = true;
+                  core.setOutput('page_url', deployment.page_url);
+                  return;
+                }
+                if (['deployment_failed', 'deployment_content_failed', 'deployment_cancelled', 'deployment_lost'].includes(status.status)) {
+                  throw new Error(`Pages deployment did not complete: ${status.status}`);
+                }
+                await new Promise(resolve => setTimeout(resolve, 5000));
+              }
+              throw new Error('Pages deployment timed out before publication was confirmed.');
+            } finally {
+              if (!completed) {
+                await github.request('POST /repos/{owner}/{repo}/pages/deployments/{deployment_id}/cancel', {
+                  ...context.repo, deployment_id: revision, request: {timeout: 30000}
+                }).catch(() => core.warning('Could not cancel the unfinished Pages deployment.'));
+              }
+            }
   comment:
     needs: [prepare, deploy]
     # Comment only after this run's own deploy. A skipped deploy means another

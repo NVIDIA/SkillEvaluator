@@ -24,6 +24,7 @@ from collections.abc import Callable, Iterable, Mapping, Sequence
 from dataclasses import dataclass
 from dataclasses import field as dataclass_field
 from fractions import Fraction
+from itertools import islice
 from pathlib import Path, PurePosixPath, PureWindowsPath
 from typing import Any
 
@@ -3516,17 +3517,47 @@ def _staged_task_entry_id_map(
     return mapping
 
 
+def _private_reward_inputs(job_dir: Path, trial_roots: Sequence[Path]) -> tuple[list[Path], list[Path]]:
+    """Known verifier layouts of a bounded, explicitly selected set of regular trial roots."""
+    if len(trial_roots) > 512:
+        raise ValueError("selected trial roots exceed the private evidence bound")
+    result_files, reward_files = [], []
+    with SecureRoot(job_dir):
+        for root in trial_roots:
+            if root.parent.absolute() != job_dir.absolute() or _safe_trial_path_component(root.name) != root.name:
+                raise ValueError("selected trial root is outside the Harbor job")
+            with SecureRoot(root):
+                result_files.append(root / "result.json")
+                reward_files.append(root / "verifier" / "reward.json")
+                steps = root / "steps"
+                if not os.path.lexists(steps):
+                    continue
+                with SecureRoot(steps), os.scandir(steps) as iterator:
+                    children = list(islice(iterator, _MAX_TRAJECTORY_STEP_DIRECTORIES + 1))
+                if len(children) > _MAX_TRAJECTORY_STEP_DIRECTORIES:
+                    raise ValueError("selected trial step directory bound exceeded")
+                for child in sorted(children, key=lambda item: item.name):
+                    metadata = child.stat(follow_symlinks=False)
+                    if stat.S_ISDIR(metadata.st_mode) and not stat_is_link_or_reparse(metadata):
+                        reward_files.append(Path(child.path) / "verifier" / "reward.json")
+    return ([path for path in result_files if path.exists()], [path for path in reward_files if path.exists()])
+
+
 def _extract_rewards(
     job_dir: Path,
     case_id_by_task_selector: dict[str, str] | None = None,
     *,
     arm_suffix: str = "",
     task_entry_id_map: Mapping[str, str] | None = None,
+    selected_trial_roots: Sequence[Path] | None = None,
 ) -> list[dict[str, Any]]:
     """Extract reward.json from all trials in a job directory."""
     rewards: list[dict[str, Any]] = []
     scored_trial_roots: set[Path] = set()
     authoritative_trial_roots: set[Path] = set()
+    selected_results, selected_rewards = (
+        _private_reward_inputs(job_dir, selected_trial_roots) if selected_trial_roots is not None else (None, None)
+    )
 
     def _resolve_trial_name_entry_id(trial_name_val: str) -> str:
         if not task_entry_id_map or not trial_name_val:
@@ -3583,7 +3614,7 @@ def _extract_rewards(
     # Native multi-step Harbor tasks can persist an authoritative aggregate at
     # the trial root in addition to one reward file per step. Materialize that
     # single logical row first so both averages and pass@k use the same score.
-    for result_file in sorted(job_dir.glob("*/result.json")):
+    for result_file in selected_results if selected_results is not None else sorted(job_dir.glob("*/result.json")):
         trial_dir = result_file.parent
         if _trial_failure_reason(trial_dir) or _is_agent_runtime_failure_trial(trial_dir):
             continue
@@ -3611,7 +3642,7 @@ def _extract_rewards(
         rewards.append(data)
         authoritative_trial_roots.add(trial_dir)
 
-    for reward_file in sorted(job_dir.rglob("reward.json")):
+    for reward_file in selected_rewards if selected_rewards is not None else sorted(job_dir.rglob("reward.json")):
         if reward_file.parent.name == "verifier":
             try:
                 trial_dir, trial_name, step_name = _reward_trial_context(reward_file)
@@ -3653,7 +3684,7 @@ def _extract_rewards(
             except OSError as e:
                 logger.warning("Failed to read %s: %s", reward_file, e)
 
-    for result_file in sorted(job_dir.glob("*/result.json")):
+    for result_file in selected_results if selected_results is not None else sorted(job_dir.glob("*/result.json")):
         trial_dir = result_file.parent
         if (
             trial_dir in authoritative_trial_roots
@@ -6855,6 +6886,18 @@ def _aggregate_execution(summaries: list[dict[str, Any]]) -> dict[str, Any]:
     }
 
 
+def _observe_private_trials(agent, arm, job_dir, collected, scoreable, selector_map) -> None:
+    """Hand existing observations to an active private hook without affecting ordinary collection."""
+    runtime = sys.modules.get("skillevaluator.tier3.plugin_execution")
+    hooks = runtime.active_runtime() if runtime is not None else None
+    observe = getattr(hooks, "observe_collected_trials", None)
+    if observe is not None:
+        try:
+            observe(agent, arm, job_dir, collected, scoreable, selector_map)
+        except Exception as exc:
+            logger.warning("Private evidence handoff failed: %s", _safe_diagnostic_text(exc, max_len=300))
+
+
 def collect_harbor_results(
     skill_name: str,
     agents: list[str],
@@ -6874,12 +6917,16 @@ def collect_harbor_results(
     env_mode: str | None = None,
     agent_models: dict[str, dict[str, str]] | None = None,
     launch_errors: list[str] | None = None,
+    grading_mode: str | None = None,
 ) -> dict[str, Any]:
     """Collect results from Harbor jobs into evals/results/<agent>/ structure.
 
     Returns a dict with per-agent scores, lift, and a cross-agent comparison.
     ``skip_with_skill`` collects only the baseline arm of a baseline-only run:
     the with-skill arm is recorded as skipped and no lift is computed.
+    ``grading_mode`` labels a condition with no scoreable reward with the
+    requested metric set and score policy; observed rewards still declare
+    their own.
     """
     if skip_baseline and skip_with_skill:
         raise ValueError("skip_baseline and skip_with_skill are mutually exclusive (no arm would run)")
@@ -6893,17 +6940,23 @@ def collect_harbor_results(
         expected_case_ids,
     )
 
+    # Unscored conditions keep the requested grading policy instead of
+    # falling back to the default metric set, which custom_only never grades.
+    fallback_metric_set, fallback_metrics = (
+        (CUSTOM_ONLY_METRIC_SET, ()) if grading_mode == "custom_only" else (DEFAULT_METRIC_SET, DISPLAY_METRICS)
+    )
+    fallback_policy = score_policy_for_metrics(fallback_metrics)
     all_results: dict[str, Any] = {
         "agents": {},
-        "metric_set": DEFAULT_METRIC_SET,
-        "metrics": list(DISPLAY_METRICS),
-        "score_policy": DEFAULT_SCORE_POLICY,
+        "metric_set": fallback_metric_set,
+        "metrics": list(fallback_metrics),
+        "score_policy": fallback_policy,
         "attempt_policy": {
             "max_attempts": n_attempts,
             "pass_threshold": pass_threshold,
             "stop_on_pass": stop_on_pass,
-            "score_definition": score_definition(DISPLAY_METRICS),
-            "score_policy": DEFAULT_SCORE_POLICY,
+            "score_definition": score_definition(fallback_metrics),
+            "score_policy": fallback_policy,
         },
     }
 
@@ -6933,7 +6986,7 @@ def collect_harbor_results(
         with_job_recovered = False
         with_execution: dict[str, Any] = {}
         with_overall_score: float | None = None
-        with_policy = DEFAULT_SCORE_POLICY
+        with_policy = fallback_policy
         with_policy_ambiguous = False
         with_metrics: tuple[str, ...] = ()
         with_summary: dict[str, Any] | None = None
@@ -6967,6 +7020,9 @@ def collect_harbor_results(
                 else []
             )
             with_rewards, invalid_score_failures = _partition_scoreable_rewards(with_collected_rewards)
+            _observe_private_trials(
+                agent, "with_skill", with_job_dir, with_collected_rewards, with_rewards, case_id_by_task_selector
+            )
             with_recovered = (
                 _recovered_timeout_attempts(with_job_dir, with_rewards, n_attempts=n_attempts) if stop_on_pass else []
             )
@@ -6975,6 +7031,8 @@ def collect_harbor_results(
             with_mixed_metric_contracts = rewards_have_mixed_metric_contracts(with_rewards)
             with_trial_failures.extend(invalid_score_failures)
             with_scores, with_metric_set, with_metrics = average_metrics(with_logical_rewards)
+            if not with_logical_rewards:
+                with_metric_set, with_metrics = fallback_metric_set, fallback_metrics
             with_not_applicable = not_applicable_metrics(with_logical_rewards, with_metrics)
             with_policy, with_policy_ambiguous = _score_policy_for_rewards(with_logical_rewards, with_metrics)
             all_results["metric_set"] = with_metric_set
@@ -7080,29 +7138,6 @@ def collect_harbor_results(
                 f"Harbor job directory was not created: {with_job_name}",
             )
             with_job_failure = _published_job_failure(with_job_failure)
-            summary_dir = agent_dir / "with-skill"
-            summary_dir.mkdir(parents=True, exist_ok=True)
-            _write_generated_root_json(
-                summary_dir / "summary.json",
-                output_dir,
-                {
-                    "agent": agent,
-                    "model": agent_model,
-                    "model_source": agent_model_source,
-                    "scores": {},
-                    "custom_scores": {},
-                    "overall_score": None,
-                    "metric_set": DEFAULT_METRIC_SET,
-                    "metrics": list(DISPLAY_METRICS),
-                    "dimensions": {},
-                    "num_trials": 0,
-                    "num_reward_rows": 0,
-                    "mixed_metric_contracts": False,
-                    "pass_at_k": {},
-                    "job_failure": with_job_failure,
-                    "trial_failures": [],
-                },
-            )
 
         if not with_execution:
             with_execution = _condition_execution_summary(
@@ -7118,6 +7153,10 @@ def collect_harbor_results(
             )
         # A skipped with-skill arm still writes its summary: report loading keys
         # agent presence on it, and its "skipped" status marks a baseline-only run.
+        # A with-skill job that never started records the requested grading
+        # policy, like an arm whose attempts all failed; a skipped arm was never
+        # graded, so it records no metric set or score policy. Both keep
+        # metrics [], matching the returned agent result.
         if with_job_dir is None:
             summary_dir = agent_dir / "with-skill"
             summary_dir.mkdir(parents=True, exist_ok=True)
@@ -7131,7 +7170,9 @@ def collect_harbor_results(
                     "scores": {},
                     "custom_scores": {},
                     "overall_score": None,
+                    **({} if skip_with_skill else {"metric_set": fallback_metric_set}),
                     "metrics": [],
+                    **({} if skip_with_skill else {"score_policy": fallback_policy}),
                     "dimensions": {},
                     "num_trials": 0,
                     "num_reward_rows": 0,
@@ -7158,7 +7199,7 @@ def collect_harbor_results(
         without_job_recovered = False
         without_execution: dict[str, Any] = {}
         without_overall_score: float | None = None
-        without_policy = DEFAULT_SCORE_POLICY
+        without_policy = fallback_policy
         without_policy_ambiguous = False
         without_metrics: tuple[str, ...] = ()
         without_summary: dict[str, Any] | None = None
@@ -7195,6 +7236,14 @@ def collect_harbor_results(
                     else []
                 )
                 without_rewards, invalid_score_failures = _partition_scoreable_rewards(without_collected_rewards)
+                _observe_private_trials(
+                    agent,
+                    "without_skill",
+                    without_job_dir,
+                    without_collected_rewards,
+                    without_rewards,
+                    case_id_by_task_selector,
+                )
                 without_recovered = (
                     _recovered_timeout_attempts(without_job_dir, without_rewards, n_attempts=n_attempts)
                     if stop_on_pass
@@ -7207,6 +7256,8 @@ def collect_harbor_results(
                 without_mixed_metric_contracts = rewards_have_mixed_metric_contracts(without_rewards)
                 without_trial_failures.extend(invalid_score_failures)
                 without_scores, without_metric_set, without_metrics = average_metrics(without_logical_rewards)
+                if not without_logical_rewards:
+                    without_metric_set, without_metrics = fallback_metric_set, fallback_metrics
                 without_not_applicable = not_applicable_metrics(without_logical_rewards, without_metrics)
                 without_policy, without_policy_ambiguous = _score_policy_for_rewards(
                     without_logical_rewards, without_metrics
@@ -7319,30 +7370,6 @@ def collect_harbor_results(
                     f"Harbor job directory was not created: {without_job_name}",
                 )
                 without_job_failure = _published_job_failure(without_job_failure)
-                summary_dir = agent_dir / "without-skill"
-                summary_dir.mkdir(parents=True, exist_ok=True)
-                _write_generated_root_json(
-                    summary_dir / "summary.json",
-                    output_dir,
-                    {
-                        "agent": agent,
-                        "model": agent_model,
-                        "model_source": agent_model_source,
-                        "scores": {},
-                        "custom_scores": {},
-                        "overall_score": None,
-                        "metric_set": DEFAULT_METRIC_SET,
-                        "metrics": list(DISPLAY_METRICS),
-                        "score_policy": DEFAULT_SCORE_POLICY,
-                        "dimensions": {},
-                        "num_trials": 0,
-                        "num_reward_rows": 0,
-                        "mixed_metric_contracts": False,
-                        "pass_at_k": {},
-                        "job_failure": without_job_failure,
-                        "trial_failures": [],
-                    },
-                )
 
         if not without_execution:
             without_execution = _condition_execution_summary(
@@ -7369,8 +7396,9 @@ def collect_harbor_results(
                     "scores": {},
                     "custom_scores": {},
                     "overall_score": None,
+                    "metric_set": fallback_metric_set,
                     "metrics": [],
-                    "score_policy": DEFAULT_SCORE_POLICY,
+                    "score_policy": fallback_policy,
                     "dimensions": {},
                     "num_trials": 0,
                     "num_reward_rows": 0,

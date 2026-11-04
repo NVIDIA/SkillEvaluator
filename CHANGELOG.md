@@ -12,6 +12,9 @@ All notable changes to SkillEvaluator are documented in this file.
   The CI image now selects `default`; GitHub and GitLab templates explain that
   policy selection does not control report visibility. Existing image pins keep
   their previous label until upgraded to an image containing this change.
+  New report policy metadata uses `profile: default` and `audience: all`; its
+  digest and bundled source path change with the name. Saved reports are not
+  rewritten.
 
 ### Documentation
 

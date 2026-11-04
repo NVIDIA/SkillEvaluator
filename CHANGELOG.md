@@ -802,6 +802,19 @@ All notable changes to SkillEvaluator are documented in this file.
   killed; a second Ctrl+C skips that wait, and on Windows the task tree is
   stopped immediately. Progress shows the agents that are stopping and reports
   the run as interrupted instead of failed unexpectedly.
+- A Tier 1 security scan that SkillSpector reports as partial no longer fails
+  with only "reports incomplete analysis (status 'partial')". The error quotes
+  up to three completeness exceptions as `path [phase; reason_code;
+  analyzers=...]` and, when there are more, counts the incomplete files per
+  reason, for example `(incomplete files by reason: runtime_limit 462,
+  obfuscated_instruction_text 4)`. For `runtime_limit`, it explains the fix:
+  when many files are cut short, a skill that bundles a large corpus hits the
+  same SkillSpector time budget on every rerun and needs that material moved
+  out of the skill, while a sub-analysis that stopped at its own budget (named
+  `<analyzer>_runtime_limit`, such as the SC8 bytecode walk in SkillSpector
+  2.12.0) is not affected by bundle size and needs a rerun or a newer
+  SkillSpector. A report with both kinds of rows gets both explanations. The
+  scan still fails closed as `INCOMPLETE`.
 
 ### Security
 

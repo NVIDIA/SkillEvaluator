@@ -5651,6 +5651,398 @@ description: Test
         assert "aws" in findings_text
 
 
+_GENERIC_LLM_EXIT_2_ERROR = "skillspector-llm failed with unexpected exit code 2: scanner diagnostics were redacted"
+_PROVIDER_OUTAGE_ERROR_START = "skillspector-llm did not complete: the LLM provider kept failing"
+_SEMANTIC_RUNTIME_ROW = {
+    "outcome": "partial",
+    "phase": "semantic_runtime",
+    "reason_code": "semantic_runtime_incomplete",
+    "message": "Requested semantic analysis did not produce complete per-source runtime telemetry.",
+    "path": "SKILL.md",
+    "start_line": None,
+    "end_line": None,
+    "fatal": False,
+}
+
+
+def _skillspector_provider_outage_report(*, old_scanner: bool = False) -> dict:
+    """Return a SkillSpector 2.13.3 LLM-stage report whose only fatal cause is provider retry exhaustion.
+
+    ``old_scanner`` adds what SkillSpector can also emit for the same outage: a
+    failed row for ``SKILL.md``, a High AE1 finding derived from the outage, and
+    the run-level ``semantic_runtime_incomplete`` row.
+    """
+    row = {
+        "outcome": "failed",
+        "phase": "semantic",
+        "reason_code": "llm_connection_retries_exhausted",
+        "message": "Transient LLM provider failure persisted after bounded retries.",
+        "path": "references/guide.md",
+        "start_line": None,
+        "end_line": None,
+        "fatal": True,
+        "error_class": "RateLimitError",
+        "analyzers": ["mcp_tool_poisoning", "semantic_security_discovery"],
+    }
+    payload = _skillspector_json_report(llm_requested=True, llm_available=True)
+    payload["metadata"]["skillspector_version"] = "2.13.3"
+    payload["components"] = [
+        {"path": "SKILL.md", "executable": False},
+        {"path": "references/guide.md", "executable": False},
+    ]
+    payload["execution_successful"] = False
+    completeness = payload["analysis_completeness"]
+    completeness.update(
+        {
+            "execution_successful": False,
+            "status": "failed",
+            "is_complete": False,
+            "total_components": 2,
+            "scanned_components": 1,
+            "fully_inspected_files": 1,
+            "partially_inspected_files": 1,
+            "coverage_percent": 50.0,
+            "ledger_exceptions": [row],
+            "limitations": [f"Analyzer {analyzer} status: failed." for analyzer in row["analyzers"]],
+        }
+    )
+    for status in completeness["analyzer_statuses"]:
+        if status["analyzer_id"] in row["analyzers"]:
+            status.update({"status": "failed", "planned_work": 2, "completed": 1, "failed": 1})
+    if old_scanner:
+        completeness["ledger_exceptions"].append({**row, "path": "SKILL.md"})
+        completeness["ledger_exceptions"].append(dict(_SEMANTIC_RUNTIME_ROW))
+        for status in completeness["analyzer_statuses"]:
+            if status["analyzer_id"] in row["analyzers"]:
+                status.update({"planned_work": 3, "failed": 2})
+        payload["issues"] = [
+            {
+                "id": "AE1",
+                "finding_id": "finding-ae1",
+                "confidence": 1.0,
+                "category": "Analysis Evasion",
+                "pattern": "Incomplete referenced artifact analysis",
+                "severity": "HIGH",
+                "finding": "references/guide.md (failed)",
+                "location": {"file": "SKILL.md", "start_line": 7},
+                "evidence": {
+                    "target_path": "references/guide.md",
+                    "target_disposition": "failed",
+                    "reasons": [
+                        {
+                            "reason_code": row["reason_code"],
+                            "phase": row["phase"],
+                            "message": row["message"],
+                            "analyzers": list(row["analyzers"]),
+                        }
+                    ],
+                },
+            }
+        ]
+        payload["risk_assessment"].update({"score": 80, "severity": "HIGH"})
+    return payload
+
+
+def _run_llm_scan(
+    mock_tools,
+    skill_dir: Path,
+    llm_report: dict,
+    *,
+    exit_code: int = 2,
+    static_issues: list[dict] | None = None,
+) -> ValidationResult:
+    """Run a static stage that completes, then an LLM stage that returns *llm_report*."""
+    mock_tools.skillspector.is_available = True
+    mock_tools.skillspector.run.side_effect = [
+        ToolResult(
+            success=True,
+            stdout=json.dumps(_skillspector_json_report(static_issues)),
+            stderr="",
+            exit_code=1 if static_issues else 0,
+        ),
+        ToolResult(success=True, stdout=json.dumps(llm_report), stderr="", exit_code=exit_code),
+    ]
+    return SecurityValidator(use_llm=True).validate_security_only(skill_dir)
+
+
+class TestSkillspectorProviderOutage:
+    """A SkillSpector LLM provider outage stays INCOMPLETE and says the scan can be retried."""
+
+    @pytest.mark.parametrize("old_scanner", [False, True], ids=["provider-rows", "with-ae1"])
+    @patch("skillevaluator.validators.security.Tools")
+    def test_provider_only_failure_is_incomplete_with_retry_advice(
+        self,
+        mock_tools,
+        old_scanner: bool,
+        sample_skill_dir: Path,
+    ) -> None:
+        result = _run_llm_scan(
+            mock_tools, sample_skill_dir, _skillspector_provider_outage_report(old_scanner=old_scanner)
+        )
+
+        assert result.status == "incomplete"
+        assert not result.passed
+        assert result.incomplete_scans == ["skillspector-llm"]
+        # Issues in the failed LLM report, including an outage-derived AE1, are not converted.
+        assert result.findings == []
+        assert len(result.errors) == 1
+        error = result.errors[0]
+        assert error.startswith(_PROVIDER_OUTAGE_ERROR_START)
+        assert "(llm_connection_retries_exhausted)" in error
+        assert "retriable provider failure" in error
+        assert "Retry the full scan when the provider is available." in error
+        assert "unexpected exit code" not in error
+        report = json.loads(JSONReporter(include_timestamp=False).render_all([result]))
+        assert report["overall_status"] == "incomplete"
+        assert report["overall_passed"] is False
+        # Strip styling and line wrapping, which depend on the terminal.
+        cli_text = " ".join(re.sub(r"\x1b\[[0-9;]*m", "", CLIReporter().render_all([result])).split())
+        assert "[INCOMPLETE] skillspector-llm did not complete" in cli_text
+        assert "retriable provider failure, not a security finding" in cli_text
+
+    @patch("skillevaluator.validators.security.Tools")
+    def test_provider_failure_keeps_static_findings_and_failed_verdict(
+        self,
+        mock_tools,
+        sample_skill_dir: Path,
+    ) -> None:
+        static_issue = {
+            "id": "DE1",
+            "category": "Data Exfiltration",
+            "pattern": "Data exfiltration",
+            "severity": "HIGH",
+            "finding": "Sends secrets to an untrusted endpoint",
+            "location": {"file": "SKILL.md", "start_line": 3},
+        }
+
+        result = _run_llm_scan(
+            mock_tools,
+            sample_skill_dir,
+            _skillspector_provider_outage_report(old_scanner=True),
+            static_issues=[static_issue],
+        )
+
+        assert result.incomplete_scans == ["skillspector-llm"]
+        assert [finding.check_name for finding in result.findings] == ["Data exfiltration (DE1)"]
+        assert result.findings[0].severity == Severity.HIGH
+        assert any(error.startswith(_PROVIDER_OUTAGE_ERROR_START) for error in result.errors)
+        report = json.loads(JSONReporter(include_timestamp=False).render_all([result]))
+        assert report["overall_status"] == "failed"
+        assert report["overall_passed"] is False
+
+    @pytest.mark.parametrize("exit_code", [0, 1])
+    @patch("skillevaluator.validators.security.Tools")
+    def test_failed_execution_with_policy_exit_code_gets_provider_message(
+        self,
+        mock_tools,
+        exit_code: int,
+        sample_skill_dir: Path,
+    ) -> None:
+        """A report with execution_successful=false is explained the same way after exit 0 or 1."""
+        result = _run_llm_scan(
+            mock_tools,
+            sample_skill_dir,
+            _skillspector_provider_outage_report(),
+            exit_code=exit_code,
+        )
+
+        assert result.incomplete_scans == ["skillspector-llm"]
+        assert result.findings == []
+        assert len(result.errors) == 1
+        assert result.errors[0].startswith(_PROVIDER_OUTAGE_ERROR_START)
+
+    @pytest.mark.parametrize("phase", ["semantic", "meta"])
+    @patch("skillevaluator.validators.security.Tools")
+    def test_run_level_runtime_row_accompanies_provider_failure(
+        self,
+        mock_tools,
+        phase: str,
+        sample_skill_dir: Path,
+    ) -> None:
+        """The SKILL.md runtime row may accompany a helper-file or meta-analysis outage."""
+        payload = _skillspector_provider_outage_report(old_scanner=True)
+        completeness = payload["analysis_completeness"]
+        provider_row, _skill_md_row, runtime_row = completeness["ledger_exceptions"]
+        completeness["ledger_exceptions"] = [provider_row, runtime_row]
+        if phase == "meta":
+            provider_row.update({"phase": "meta", "analyzers": ["meta_analyzer"]})
+            for status in completeness["analyzer_statuses"]:
+                if status["analyzer_id"] == "meta_analyzer":
+                    status.update({"status": "failed", "planned_work": 1, "completed": 0, "failed": 1})
+                elif status["status"] == "failed":
+                    status.update({"status": "completed", "completed": status["planned_work"], "failed": 0})
+            completeness["limitations"] = ["Analyzer meta_analyzer status: failed."]
+
+        result = _run_llm_scan(mock_tools, sample_skill_dir, payload)
+
+        assert result.incomplete_scans == ["skillspector-llm"]
+        assert len(result.errors) == 1
+        assert result.errors[0].startswith(_PROVIDER_OUTAGE_ERROR_START)
+
+    @pytest.mark.parametrize("exit_code", [2, 0])
+    @pytest.mark.parametrize(
+        "mutation",
+        [
+            "mixed_static_failure",
+            "mixed_llm_failure",
+            "partial_runtime_limit",
+            "truncated_ledger",
+            "malformed_row",
+            "non_llm_analyzer",
+            "meta_analyzer_in_semantic_phase",
+            "duplicate_analyzer",
+            "older_scanner",
+            "missing_version",
+            "unknown_limitation",
+            "unfinished_static_analyzer",
+            "unaccounted_provider_work",
+            "runtime_row_elsewhere",
+            "runtime_row_reworded",
+            "runtime_row_only",
+            "reported_errors",
+            "provider_analyzer_completed",
+            "duplicate_status",
+            "status_reason_mismatch",
+            "unexplained_status_message",
+            "unhashable_phase",
+            "unhashable_status",
+            "unhashable_status_message",
+        ],
+    )
+    @patch("skillevaluator.validators.security.Tools")
+    def test_uncertain_evidence_keeps_generic_error(
+        self,
+        mock_tools,
+        mutation: str,
+        exit_code: int,
+        sample_skill_dir: Path,
+    ) -> None:
+        """Mixed, malformed, truncated or older reports cannot pass for a provider outage."""
+        payload = _skillspector_provider_outage_report(old_scanner=True)
+        completeness = payload["analysis_completeness"]
+        rows = completeness["ledger_exceptions"]
+        provider_row = rows[0]
+        if mutation == "mixed_static_failure":
+            rows.append({**provider_row, "phase": "static", "reason_code": "syntax_error", "path": "scripts/run.py"})
+        elif mutation == "mixed_llm_failure":
+            rows.append({**provider_row, "reason_code": "llm_response_refused"})
+        elif mutation == "partial_runtime_limit":
+            rows.append({**provider_row, "outcome": "partial", "fatal": False, "reason_code": "runtime_limit"})
+        elif mutation == "truncated_ledger":
+            completeness["ledger_exceptions_truncated"] = True
+        elif mutation == "malformed_row":
+            provider_row["fatal"] = "yes"
+        elif mutation == "non_llm_analyzer":
+            provider_row["analyzers"] = ["static_yara"]
+        elif mutation == "meta_analyzer_in_semantic_phase":
+            provider_row["analyzers"] = ["meta_analyzer"]
+        elif mutation == "duplicate_analyzer":
+            provider_row["analyzers"] = ["semantic_security_discovery", "semantic_security_discovery"]
+        elif mutation == "older_scanner":
+            payload["metadata"]["skillspector_version"] = "2.11.1"
+        elif mutation == "missing_version":
+            del payload["metadata"]["skillspector_version"]
+        elif mutation == "unknown_limitation":
+            completeness["limitations"].append("Artifact inspection incomplete for an unknown reason.")
+        elif mutation == "unfinished_static_analyzer":
+            static_status = next(s for s in completeness["analyzer_statuses"] if s["analyzer_id"] == "static_yara")
+            static_status.update({"status": "failed", "completed": 0, "failed": static_status["planned_work"]})
+        elif mutation == "unaccounted_provider_work":
+            next(
+                s for s in completeness["analyzer_statuses"] if s["analyzer_id"] == "semantic_security_discovery"
+            ).update({"unaccounted": 1, "planned_work": 4})
+        elif mutation == "runtime_row_elsewhere":
+            rows[-1]["path"] = "references/guide.md"
+        elif mutation == "runtime_row_reworded":
+            rows[-1]["message"] = "Unrelated runtime data is missing."
+        elif mutation == "runtime_row_only":
+            completeness["ledger_exceptions"] = [rows[-1]]
+        elif mutation == "reported_errors":
+            completeness["errors"] = ["scanner fault"]
+        else:
+            statuses = completeness["analyzer_statuses"]
+            discovery = next(s for s in statuses if s["analyzer_id"] == "semantic_security_discovery")
+            if mutation == "provider_analyzer_completed":
+                discovery.update({"status": "completed", "completed": discovery["planned_work"], "failed": 0})
+                completeness["limitations"].remove("Analyzer semantic_security_discovery status: failed.")
+            elif mutation == "duplicate_status":
+                statuses.append(dict(discovery))
+            elif mutation == "status_reason_mismatch":
+                discovery["reason_code"] = "analyzer_runtime_error"
+            elif mutation == "unexplained_status_message":
+                discovery["message"] = "Analyzer failed after beginning applicable work."
+                completeness["limitations"] = ["Analyzer failed after beginning applicable work."]
+            elif mutation == "unhashable_phase":
+                provider_row["phase"] = ["semantic"]
+            elif mutation == "unhashable_status":
+                discovery["status"] = ["failed"]
+            elif mutation == "unhashable_status_message":
+                discovery["message"] = ["Transient LLM provider failure persisted after bounded retries."]
+
+        result = _run_llm_scan(mock_tools, sample_skill_dir, payload, exit_code=exit_code)
+
+        assert result.status == "incomplete"
+        assert result.incomplete_scans == ["skillspector-llm"]
+        assert not any("LLM provider kept failing" in error for error in result.errors)
+        if exit_code == 2:
+            assert result.errors == [_GENERIC_LLM_EXIT_2_ERROR]
+
+    @pytest.mark.parametrize(
+        ("use_llm", "exit_code", "expected"),
+        [
+            (True, 3, "skillspector-llm failed with unexpected exit code 3: scanner diagnostics were redacted"),
+            (False, 2, "skillspector failed with unexpected exit code 2: scanner diagnostics were redacted"),
+        ],
+        ids=["llm-exit-3", "static-stage"],
+    )
+    @patch("skillevaluator.validators.security.Tools")
+    def test_provider_message_needs_llm_stage_exit_2(
+        self,
+        mock_tools,
+        use_llm: bool,
+        exit_code: int,
+        expected: str,
+        sample_skill_dir: Path,
+    ) -> None:
+        report = ToolResult(
+            success=True,
+            stdout=json.dumps(_skillspector_provider_outage_report()),
+            stderr="",
+            exit_code=exit_code,
+        )
+        static = ToolResult(success=True, stdout=json.dumps(_skillspector_json_report()), stderr="", exit_code=0)
+        mock_tools.skillspector.is_available = True
+        mock_tools.skillspector.run.side_effect = [static, report] if use_llm else [report]
+
+        result = SecurityValidator(use_llm=use_llm).validate_security_only(sample_skill_dir)
+
+        assert result.status == "incomplete"
+        assert result.errors == [expected]
+
+    def test_cli_provider_only_failure_exits_nonzero_as_incomplete(self, sample_skill_dir: Path) -> None:
+        from click.testing import CliRunner
+
+        from skillevaluator.cli import cli
+
+        static = ToolResult(success=True, stdout=json.dumps(_skillspector_json_report()), stderr="", exit_code=0)
+        outage = ToolResult(
+            success=True,
+            stdout=json.dumps(_skillspector_provider_outage_report(old_scanner=True)),
+            stderr="",
+            exit_code=2,
+        )
+        with patch("skillevaluator.validators.security.Tools") as mock_tools:
+            mock_tools.skillspector.is_available = True
+            mock_tools.skillspector.run.side_effect = [static, outage]
+            outcome = CliRunner().invoke(cli, ["security-scan", str(sample_skill_dir), "--llm", "--report", "cli"])
+
+        assert outcome.exit_code == 1, outcome.output
+        output = " ".join(re.sub(r"\x1b\[[0-9;]*m", "", outcome.output).split())
+        assert "INCOMPLETE" in output
+        assert "retriable provider failure" in output
+        assert "unexpected exit code" not in output
+
+
 class TestFalsePositivePrevention:
     """Tests that known false-positive scenarios are correctly suppressed."""
 

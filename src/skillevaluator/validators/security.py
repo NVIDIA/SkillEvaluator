@@ -48,7 +48,7 @@ from skillevaluator.provider_config import (
     resolve_llm_provider,
     skillspector_reasoning_effort,
 )
-from skillevaluator.skillspector_provenance import sanitize_skillspector_llm_provenance
+from skillevaluator.skillspector_provenance import SKILLSPECTOR_LLM_ANALYZERS, sanitize_skillspector_llm_provenance
 from skillevaluator.spdx import is_spdx_only_html_comment
 from skillevaluator.utils.path_security import matches_filesystem_name
 from skillevaluator.utils.scanner_install import prepare_skillspector
@@ -422,6 +422,153 @@ def _skillspector_report_llm_provenance(report: object) -> dict | None:
     if not isinstance(metadata, Mapping):
         return None
     return sanitize_skillspector_llm_provenance(metadata.get("llm_provenance"))
+
+
+# SkillSpector 2.11.2 and later records an LLM provider error that persists after
+# its own bounded retries as a fatal ``llm_connection_retries_exhausted`` ledger
+# row. A fatal row makes ``execution_successful`` false, and the scan command
+# prints the report before it exits with this code.
+_SKILLSPECTOR_EXECUTION_FAILED_EXIT_CODE = 2
+_SKILLSPECTOR_PROVIDER_RETRY_VERSION = (2, 11, 2)
+_SKILLSPECTOR_PROVIDER_RETRY_REASON = "llm_connection_retries_exhausted"
+_SKILLSPECTOR_PROVIDER_RETRY_MAX_ROWS = 4096
+_SKILLSPECTOR_PROVIDER_RETRY_MAX_MESSAGE = 4096
+# The run-level row SkillSpector adds on SKILL.md when requested semantic
+# analysis did not finish. It names no analyzer and is not fatal.
+_SKILLSPECTOR_SEMANTIC_RUNTIME_ROW = {
+    "outcome": "partial",
+    "phase": "semantic_runtime",
+    "reason_code": "semantic_runtime_incomplete",
+    "message": "Requested semantic analysis did not produce complete per-source runtime telemetry.",
+    "path": "SKILL.md",
+    "start_line": None,
+    "end_line": None,
+    "fatal": False,
+}
+_SKILLSPECTOR_REPORT_FAILURE_MARKERS = ("error", "errors", "exceptions", "failed", "failure", "failures")
+
+
+def _skillspector_provider_retry_row(row: object) -> bool:
+    """Return whether one ledger row is a provider-retry exhaustion on LLM analyzers only."""
+    if not isinstance(row, dict):
+        return False
+    phase = row.get("phase")
+    path = row.get("path")
+    analyzers = row.get("analyzers")
+    message = row.get("message")
+    return (
+        row.get("reason_code") == _SKILLSPECTOR_PROVIDER_RETRY_REASON
+        and row.get("outcome") == "failed"
+        and row.get("fatal") is True
+        and phase in ("semantic", "meta")
+        and isinstance(message, str)
+        and 0 < len(message) <= _SKILLSPECTOR_PROVIDER_RETRY_MAX_MESSAGE
+        and isinstance(path, str)
+        and bool(path.strip())
+        and isinstance(analyzers, list)
+        and bool(analyzers)
+        and all(isinstance(analyzer, str) and analyzer in SKILLSPECTOR_LLM_ANALYZERS for analyzer in analyzers)
+        and len(set(analyzers)) == len(analyzers)
+        # Only the meta analyzer runs in the meta phase.
+        and all((analyzer == "meta_analyzer") == (phase == "meta") for analyzer in analyzers)
+    )
+
+
+def _skillspector_provider_retries_exhausted(data: object) -> bool:
+    """Return whether a failed LLM-stage report shows only an LLM provider outage.
+
+    Every ledger exception must be a fatal ``llm_connection_retries_exhausted``
+    row for LLM analyzers, apart from SkillSpector's run-level
+    ``semantic_runtime_incomplete`` row on ``SKILL.md``. Exactly those analyzers
+    must report ``failed``, every other analyzer must have finished, and every
+    limitation must name one of the failed analyzers. Older,
+    truncated, malformed or mixed reports return ``False`` and keep the generic
+    error, so a scanner fault cannot pass for a provider outage.
+    """
+    if not isinstance(data, dict) or data.get("execution_successful") is not False:
+        return False
+    metadata = data.get("metadata")
+    raw_version = metadata.get("skillspector_version") if isinstance(metadata, dict) else None
+    if not isinstance(raw_version, str) or SEMVER_RE.fullmatch(raw_version) is None:
+        return False
+    if tuple(int(part) for part in raw_version.split(".")) < _SKILLSPECTOR_PROVIDER_RETRY_VERSION:
+        return False
+    completeness = data.get("analysis_completeness")
+    if (
+        not isinstance(completeness, dict)
+        or completeness.get("execution_successful") is not False
+        or completeness.get("status") != "failed"
+        or completeness.get("is_complete") is not False
+    ):
+        return False
+    for container in (data, completeness):
+        if any(container.get(key) for key in _SKILLSPECTOR_REPORT_FAILURE_MARKERS):
+            return False
+        # A truncated list may hide a different cause.
+        if any(
+            isinstance(key, str) and key.endswith("_truncated") and value is not False and value is not None
+            for key, value in container.items()
+        ):
+            return False
+
+    rows = completeness.get("ledger_exceptions")
+    if not isinstance(rows, list) or not 0 < len(rows) <= _SKILLSPECTOR_PROVIDER_RETRY_MAX_ROWS:
+        return False
+    provider_analyzers: set[str] = set()
+    provider_messages: set[str] = set()
+    for row in rows:
+        if isinstance(row, dict) and row == _SKILLSPECTOR_SEMANTIC_RUNTIME_ROW and row["fatal"] is False:
+            continue
+        if not _skillspector_provider_retry_row(row):
+            return False
+        provider_analyzers.update(row["analyzers"])
+        provider_messages.add(row["message"])
+    if not provider_analyzers:
+        return False
+
+    statuses = completeness.get("analyzer_statuses")
+    limitations = completeness.get("limitations", [])
+    if not isinstance(statuses, list) or not isinstance(limitations, list):
+        return False
+    seen: set[str] = set()
+    failed: set[str] = set()
+    explained: set[str] = set()
+    for status in statuses:
+        if not isinstance(status, dict) or not isinstance(status.get("analyzer_id"), str):
+            return False
+        analyzer = status["analyzer_id"]
+        if analyzer in seen:
+            return False
+        seen.add(analyzer)
+        state = status.get("status")
+        if state in ("completed", "not_applicable") and analyzer not in provider_analyzers:
+            continue
+        message = status.get("message")
+        if (
+            state != "failed"
+            or analyzer not in provider_analyzers
+            or any(status.get(key) for key in ("partial", "skipped", "unaccounted"))
+            or status.get("reason_code") not in (None, _SKILLSPECTOR_PROVIDER_RETRY_REASON)
+            or (message is not None and (not isinstance(message, str) or message not in provider_messages))
+        ):
+            return False
+        failed.add(analyzer)
+        explained.add(f"Analyzer {analyzer} status: failed.")
+        if message is not None:
+            explained.add(message)
+    # Every analyzer named by a provider row must itself report the failure.
+    return failed == provider_analyzers and all(
+        isinstance(limitation, str) and limitation in explained for limitation in limitations
+    )
+
+
+def _skillspector_provider_retry_error(stage_name: str) -> str:
+    """Describe a provider outage in fixed text; no report field is quoted."""
+    return (
+        f"{stage_name} did not complete: the LLM provider kept failing after SkillSpector's bounded "
+        f"retries ({_SKILLSPECTOR_PROVIDER_RETRY_REASON}). This is a retriable provider failure, not a "
+        "security finding, and static findings are kept. Retry the full scan when the provider is available."
+    )
 
 
 def _copy_selected_environment(environ: Mapping[str, str], names: Iterable[str]) -> dict[str, str]:
@@ -1312,6 +1459,14 @@ class SecurityValidator(ValidatorBase):
                     "scanner diagnostics were redacted"
                 )
             )
+            if (
+                use_llm
+                and not error_message
+                and tool_result.exit_code == _SKILLSPECTOR_EXECUTION_FAILED_EXIT_CODE
+                and _skillspector_provider_retries_exhausted(data)
+            ):
+                # The stage stays incomplete; only the explanation changes.
+                detail = _skillspector_provider_retry_error(stage_name)
             result.add_error(detail)
             result.mark_scan_incomplete(stage_name)
             return result
@@ -1466,7 +1621,10 @@ class SecurityValidator(ValidatorBase):
             )
             return False
         if execution_successful is False:
-            result.add_error("skillspector reported execution_successful=false; security scan did not complete")
+            if use_llm and _skillspector_provider_retries_exhausted(data):
+                result.add_error(_skillspector_provider_retry_error(stage_name))
+            else:
+                result.add_error("skillspector reported execution_successful=false; security scan did not complete")
             return False
 
         findings_after_filtering: int | None = None

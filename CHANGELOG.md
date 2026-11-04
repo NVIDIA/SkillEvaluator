@@ -717,6 +717,16 @@ All notable changes to SkillEvaluator are documented in this file.
   edited skill whose name, description, or (with `--full-body`) `SKILL.md`
   changed is still compared with its old entry; build the catalog from the tree
   you screen.
+- Ctrl+C during `tier3 evaluate` now stops the run. The interrupt reached only
+  the coordinating thread, so running Harbor jobs kept going in their own
+  process groups, agents waiting for a `--max-agents` slot still started, and
+  the command appeared to hang until every job finished. Queued agents,
+  conditions, and `--stop-on-pass` attempts now never start. Each running
+  Harbor job receives SIGTERM and up to 30 seconds to stop its trial
+  environments, such as Docker containers, before its process group is
+  killed; a second Ctrl+C skips that wait, and on Windows the task tree is
+  stopped immediately. Progress shows the agents that are stopping and reports
+  the run as interrupted instead of failed unexpectedly.
 
 ### Security
 

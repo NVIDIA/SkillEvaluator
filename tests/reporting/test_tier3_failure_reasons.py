@@ -257,6 +257,8 @@ def test_credential_glued_to_a_word_is_redacted() -> None:
         ("sshpass -p hunter2hunter2 ssh admin@host", "hunter2hunter2"),
         ("curl -H 'Cookie: theme=dark; session=hunter2hunter2' https://x.example.net", "hunter2hunter2"),
         ("curl --cookie 'theme=dark; session=hunter2hunter2' https://x.example.net", "hunter2hunter2"),
+        ("curl -b 'session=hunter2hunter2' https://x.example.net", "hunter2hunter2"),
+        ('curl -b "theme=dark; session=hunter2hunter2" https://x.example.net', "hunter2hunter2"),
     ],
 )
 def test_command_line_credentials_are_redacted_from_excerpts(command: str, secret: str) -> None:
@@ -274,6 +276,7 @@ def test_command_line_redaction_keeps_harmless_flags() -> None:
     command = "mkdir -p /tmp/build && mysql -u root -e 'select 1' && curl -u admin https://x.example.net --max-time 5"
 
     assert sanitize_grader_text(command) == command
+    assert sanitize_grader_text("tar -b 20 -cf out.tar dir") == "tar -b 20 -cf out.tar dir"
 
 
 def test_configured_credential_values_are_redacted_from_both_arms(monkeypatch: pytest.MonkeyPatch) -> None:

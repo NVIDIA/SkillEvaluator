@@ -93,6 +93,7 @@ def _collapsed_prefix(value: str) -> str:
 # excerpts quote raw command lines, so the report masks these shapes itself.
 _CLI_VALUE = r"""(?:"[^"\r\n]*+"|'[^'\r\n]*+'|[^\s"'|;&]++)"""
 _CLI_USER_PASSWORD_RE = re.compile(rf"(?<![\w-])(?P<flag>-u|--user)(?P<sep>\s++|=)(?=[^\s]*:)(?P<value>{_CLI_VALUE})")
+_CLI_COOKIE_FLAG_RE = re.compile(rf"(?<![\w-])(?P<flag>-b)(?P<sep>\s++)(?=[^\s]*=)(?P<value>{_CLI_VALUE})")
 _CLI_SECRET_FLAG_RE = re.compile(
     r"(?i)(?<![\w-])(?P<flag>--[a-z0-9-]*(?:password|passwd|passphrase|token|secret|api-?key|credential|cookie)"
     rf"[a-z0-9-]*)(?P<sep>\s++|=)(?!-)(?P<value>{_CLI_VALUE})"
@@ -109,6 +110,7 @@ _COOKIE_HEADER_RE = re.compile(r"(?i)\b(?P<key>(?:set-)?cookie)(?P<sep>\s*+:\s*+
 def _redact_command_line_credentials(text: str) -> str:
     """Mask password, token and cookie arguments of quoted shell command lines."""
     text = _CLI_USER_PASSWORD_RE.sub(r"\g<flag>\g<sep><redacted>", text)
+    text = _CLI_COOKIE_FLAG_RE.sub(r"\g<flag>\g<sep><redacted>", text)
     text = _CLI_SECRET_FLAG_RE.sub(r"\g<flag>\g<sep><redacted>", text)
     text = _CLI_SSHPASS_RE.sub(r"\g<flag><redacted>", text)
     text = _CLI_MYSQL_PASSWORD_RE.sub(r"\g<head>-p<redacted>", text)

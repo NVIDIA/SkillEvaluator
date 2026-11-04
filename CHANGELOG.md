@@ -339,6 +339,19 @@ All notable changes to SkillEvaluator are documented in this file.
   dimensions, 362 at 4,096), which the incomplete-scan error and the JSON
   `work_limit` record now report as `effective_chunk_limit`, next to the
   skill's own `chunk_count`.
+- Tier 2 context deduplication no longer stops skills with many repeated
+  sections at the `llm_cluster_member_limit` work limit. A candidate cluster
+  with more than 64 members was reported as incomplete even when its review
+  prompt fit the 64,000-character budget. The member limit now equals the
+  512-chunk ceiling, so the per-cluster prompt, total prompt, and cluster-count
+  limits decide. When a cluster's request (system prompt plus cluster text)
+  would exceed 64,000 characters, each exactly repeated chunk text is sent once
+  as `SHARED CONTENT n`, and every occurrence keeps its own entry with its file,
+  section, and line range. Distinct text is never dropped or sampled, so a
+  cluster still over the budget stays incomplete with `llm_prompt_size_limit`.
+  Duplicate and `llm_refused` finding messages name at most 64 member locations
+  and source files and count the rest; the JSON `source_files` list stays
+  complete.
 - Local-mode verifier uploads now copy directly to the absent destination,
   avoiding an unnecessary rollback snapshot of an empty tests directory.
   Inputs and rewritten scripts are prepared privately before publication,
@@ -459,7 +472,7 @@ All notable changes to SkillEvaluator are documented in this file.
 
 - A skill that exceeds a Tier 2 context-deduplication work limit (more than
   512 content chunks, too much pairwise comparison work, or an LLM-review limit:
-  more than 50 candidate clusters, more than 64 members in one cluster, or an
+  more than 50 candidate clusters, more than 512 members in one cluster, or an
   oversized per-cluster or total review prompt) is now reported as
   **INCOMPLETE** instead of failing with a CRITICAL `chunk_count_limit`,
   `scalar_comparison_limit`, `llm_cluster_count_limit`,

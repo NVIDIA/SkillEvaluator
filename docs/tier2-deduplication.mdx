@@ -149,6 +149,18 @@ Duplicate findings map to severities by confidence:
 | `DUPLICATE` with confidence < 0.70 | MEDIUM — advisory |
 | Short, same-file duplicate dominated by comment or configuration-style text | Capped at LOW — advisory |
 
+Each candidate cluster is reviewed in one chat-LLM request that carries every
+member's file, section, line range, and text. When that request (the system
+prompt plus the cluster text) would exceed 64,000 characters, text that repeats
+exactly is listed once as `SHARED CONTENT n`. Each occurrence keeps its own
+entry with its file, section, and line range, plus a reference to the shared
+text. Distinct text is always sent in full; nothing is sampled or dropped to
+fit. A cluster that is still over 64,000 characters stops the scan as
+incomplete (`llm_prompt_size_limit`), as described below. A duplicate or
+`llm_refused` finding names up to 64 member locations and source files and
+counts the rest; its `source_files` metadata in the JSON report lists every
+file.
+
 If chat-LLM analysis fails for a candidate cluster, Tier 2 reports the
 incomplete analysis as a blocking error rather than treating the content as
 clean.
@@ -341,6 +353,10 @@ you intend to skip Tier 2 entirely.
 | High-confidence duplicate boundary | `0.70` | Maps actionable duplicate verdicts to HIGH rather than MEDIUM |
 | Intra-skill content chunks | 512 | Per-skill ceiling, checked before any embedding request |
 | Intra-skill comparison work | 267,911,168 scalar comparisons | Bounds all-pairs clustering; allows all 512 chunks with embeddings of up to 2,048 dimensions, 418 chunks at 3,072, and 362 at 4,096 |
+| Intra-skill LLM review clusters | 50 | Most candidate clusters sent for chat-LLM review in one skill |
+| Intra-skill cluster members | 512 | Same as the chunk ceiling; every member must also fit the review prompt limits |
+| Intra-skill review prompt | 64,000 characters | One cluster's request, system prompt included; exactly repeated text is listed once before this limit applies |
+| Intra-skill review prompts in total | 1,000,000 characters | All cluster requests for one skill, checked before the first chat-LLM call |
 
 Intra-skill clustering compares every pair of chunks, so its work is
 `n * (n - 1) / 2 * dimensions`. A skill over the chunk ceiling stops before any

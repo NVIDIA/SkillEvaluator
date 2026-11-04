@@ -1240,6 +1240,18 @@ class TestChat:
             {"role": "user", "content": "user"},
         ]
 
+    def test_feedback_chat_truncation_is_a_typed_error_and_not_retried(self, monkeypatch: pytest.MonkeyPatch) -> None:
+        from skillevaluator.evaluation.tier3_feedback_chat import Tier3FeedbackAssistant
+
+        _use_provider(monkeypatch, "openai", CHAT_DEFAULT_OPENAI)
+        mock_openai = MagicMock()
+        mock_openai.chat.completions.create.return_value = _openai_choice_response("partial", finish_reason="length")
+
+        with patch("openai.OpenAI", return_value=mock_openai), pytest.raises(LLMClientTruncatedError):
+            Tier3FeedbackAssistant().chat([{"role": "user", "content": "hello"}])
+
+        assert mock_openai.chat.completions.create.call_count == 1
+
     def test_empty_choices_is_a_typed_error(self, monkeypatch: pytest.MonkeyPatch) -> None:
         _use_provider(monkeypatch, "openai", CHAT_DEFAULT_OPENAI)
         mock_openai = MagicMock()

@@ -37,6 +37,7 @@ commands referenced below.
 | [init-harbor-task](#init-harbor-task) | Scaffold a bring-your-own-task Harbor starter | Nothing |
 | [view](#view) | Open the latest HTML live-evaluation report | A previous `tier3 evaluate` run |
 | [compare](#compare) | Compare live-evaluation results across agents | A previous `tier3 evaluate` run |
+| [tier3 feedback](#tier3-feedback) | Chat about one completed live-evaluation run and possible skill changes | A completed `tier3 evaluate` run, LLM provider key |
 | [dashboard](#dashboard) | Filter quantitative tables and paired usage differences | Saved JSON reports or retained runs; dashboard extra |
 | [harbor-view](#harbor-view) | Browse retained Harbor job artifacts | A run made with `--harbor-keep-jobs` |
 | [doctor](#doctor) | Live-evaluation readiness check, or Tier 1 scanners and Tier 2 providers with `--tier` | Nothing |
@@ -161,11 +162,12 @@ pipeline.
 | --- | --- |
 | `tier1` | `validate`, `quality-check`, `rubric-eval`, `security-scan`, `pii-scan`, `lint-scripts` |
 | `tier2` | `context-optimization-check`, `dedup-scan`, `similarity-check` |
-| `tier3` | `evaluate`, `select-decoys`, `create-eval-dataset`, `init-custom-grader`, `init-harbor-task`, `doctor`, `view`, `compare`, `validate`, `harbor-view` |
+| `tier3` | `evaluate`, `select-decoys`, `create-eval-dataset`, `init-custom-grader`, `init-harbor-task`, `doctor`, `view`, `compare`, `feedback`, `validate`, `harbor-view` |
 
 `health-check` and [models](#models) are top-level only. The expert commands
 [tier3 evaluate](#tier3-evaluate), [tier3 select-decoys](#tier3-select-decoys),
-and `tier3 validate` are advertised **only** inside the `tier3` group:
+[tier3 feedback](#tier3-feedback), and `tier3 validate` are advertised **only**
+inside the `tier3` group:
 
 ### tier3 validate
 
@@ -589,6 +591,52 @@ skillevaluator compare ./my-skill
 | Flag | Default | Effect |
 | --- | --- | --- |
 | `--results-dir DIRECTORY` | unset | Results directory to read from. |
+
+## tier3 feedback
+
+Chat in the terminal about one completed live-evaluation run: which cases
+explain a score, how the skill compared with the baseline, and what to change
+in the skill. Answers are grounded in that run's saved evidence: scores,
+with-skill and baseline comparisons, every case's attempts with per-metric
+scores, measured agent tokens and seconds, execution errors, and the report's
+saved feedback. The run is not evaluated again, and the report's LLM feedback
+is not generated again.
+
+```bash title="Discuss a completed run"
+skillevaluator tier3 feedback ./my-skill/evals/results/20260709_141530_12345_a1b2c3d4e5f6
+
+# Name the evaluated skill explicitly
+skillevaluator tier3 feedback ./my-skill/evals/results/20260709_141530_12345_a1b2c3d4e5f6 --skill ./my-skill
+```
+
+Pass one completed run directory, also when results live under a custom
+`--results-dir`. The command infers the evaluated skill from the run. An
+explicit `--skill` must name the skill directory the run recorded; when that
+skill has changed since the run, the chat says so, and its answers describe the
+evaluated version.
+
+| Flag | Default | Effect |
+| --- | --- | --- |
+| `--skill DIRECTORY` | inferred from the run | Evaluated skill directory. It must match the skill the run recorded. |
+
+Ask, for example, "Which cases explain the lower score?" or "What should I
+change if agent time matters more than token cost?" Treat proposed changes as
+hypotheses and check them with another evaluation; answer quality depends on
+the configured model. Type `exit` or press Ctrl-D to end the chat. Ctrl-C
+during an answer discards that question and returns to the prompt.
+
+The chat uses the provider and model configured for LLM checks
+(`SKILL_EVAL_LLM_PROVIDER` and `SKILL_EVAL_LLM_MODEL`; see
+[Environment Variables](environment-variables.mdx)). Each question sends the
+run's compact evidence to that provider. The evidence names the run by its ID
+instead of its local path, and credential-shaped text in errors and warnings is
+redacted first. The command writes nothing to disk.
+
+No request is sent before the first question, so the command exits 0
+immediately when standard input is empty. Piped input sends each line as a
+question, and each one is a paid request. The command exits 1 when the run or
+provider configuration cannot be used, or when questions were asked and every
+one of them failed.
 
 ## dashboard
 

@@ -15,7 +15,7 @@ NEW = "# Updated team workflow\n"
 
 def existing_scan(repository, monkeypatch):
     target = repository / wizard.SCAN
-    target.write_text(OLD)
+    target.write_bytes(OLD.encode())
     monkeypatch.setattr(wizard.git_helpers, "require_clean", lambda *_: None)
     return target
 
@@ -23,6 +23,7 @@ def existing_scan(repository, monkeypatch):
 def test_replacement_is_atomic_and_preserves_mode(repository, monkeypatch):
     target = existing_scan(repository, monkeypatch)
     target.chmod(0o751)
+    original_mode = stat.S_IMODE(target.stat().st_mode)
     original_replace = os.replace
     replacements = []
 
@@ -34,7 +35,7 @@ def test_replacement_is_atomic_and_preserves_mode(repository, monkeypatch):
     monkeypatch.setattr(wizard.os, "replace", observe_replace)
     wizard.save_files(repository, {wizard.SCAN: NEW}, {wizard.SCAN: OLD})
     assert target.read_text() == NEW
-    assert stat.S_IMODE(target.stat().st_mode) == 0o751
+    assert stat.S_IMODE(target.stat().st_mode) == original_mode
     assert len(replacements) == 1
     assert not list(target.parent.glob(".skillevaluator-*.tmp"))
 
@@ -99,6 +100,7 @@ def test_concurrent_new_file_is_not_overwritten(repository, monkeypatch):
 def test_later_write_failure_rolls_back_original_bytes_and_mode(repository, monkeypatch):
     target = existing_scan(repository, monkeypatch)
     target.chmod(0o750)
+    original_mode = stat.S_IMODE(target.stat().st_mode)
 
     def fail_publication(*_args, **_kwargs):
         raise OSError("Simulated second-file publication failure")
@@ -107,7 +109,7 @@ def test_later_write_failure_rolls_back_original_bytes_and_mode(repository, monk
     with pytest.raises(OSError, match="second-file"):
         wizard.save_files(repository, {wizard.SCAN: NEW, wizard.PUBLISH: "publisher\n"}, {wizard.SCAN: OLD})
     assert target.read_text() == OLD
-    assert stat.S_IMODE(target.stat().st_mode) == 0o750
+    assert stat.S_IMODE(target.stat().st_mode) == original_mode
     assert not (repository / wizard.PUBLISH).exists()
     assert not list(target.parent.glob(".skillevaluator-*.tmp"))
 

@@ -2923,6 +2923,10 @@ def _judge_model_config(
     }
     if character_facts := provider_env.get("SKILL_EVAL_JUDGE_CHARACTER_FACTS"):
         configuration["character_facts"] = character_facts
+    # Opt-in judge policies; the verifier rejects a value it does not know.
+    for name, key in (("LLM_JUDGE_FALLBACK_POLICY", "fallback_policy"), ("LLM_JUDGE_RETRY_POLICY", "retry_policy")):
+        if policy := provider_env.get(name, "").strip():
+            configuration[key] = policy.lower()
     return configuration
 
 

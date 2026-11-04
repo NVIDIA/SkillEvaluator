@@ -817,6 +817,119 @@ def _fallback_models(primary_model):
     return _dedupe_models([primary_model, *env_fallbacks])
 
 
+def _judge_policy(name, choices):
+    """Read one judge policy variable: unset or empty selects ``choices[0]``; another value raises."""
+    value = os.environ.get(name, "").strip().lower()
+    if not value:
+        return choices[0]
+    if value not in choices:
+        raise ValueError(f"{name} must be {' or '.join(choices)}")
+    return value
+
+
+def _judge_fallback_policy():
+    """Return LLM_JUDGE_FALLBACK_POLICY: ``append`` (default) or ``replace``.
+
+    The only fallback model this verifier adds on its own is the Claude Opus
+    4.8 refusal fallback for Claude 5.5 or later judges (server-side on the
+    native Claude API, a second request on Bedrock). ``replace`` turns it off,
+    so only the primary judge and the LLM_JUDGE_FALLBACK_MODELS entries answer.
+    """
+    return _judge_policy("LLM_JUDGE_FALLBACK_POLICY", ("append", "replace"))
+
+
+def _judge_retry_policy():
+    """Return LLM_JUDGE_RETRY_POLICY: ``legacy`` (default) or ``strict`` (see _call_strict_judge)."""
+    return _judge_policy("LLM_JUDGE_RETRY_POLICY", ("legacy", "strict"))
+
+
+def _strict_judge_replies():
+    """Return whether a completed judge reply must be one whole JSON object and is final.
+
+    True under LLM_JUDGE_RETRY_POLICY=strict. An invalid policy value also
+    counts as strict here; the provider call rejects it before sending anything.
+    """
+    try:
+        return _judge_retry_policy() == "strict"
+    except ValueError:
+        return True
+
+
+def _builtin_refusal_fallback_allowed():
+    """Return whether the built-in Claude Opus 4.8 refusal fallback may answer a refused judge.
+
+    It is off under LLM_JUDGE_FALLBACK_POLICY=replace, and under
+    LLM_JUDGE_RETRY_POLICY=strict, where a refusal ends the judge.
+    """
+    try:
+        return _judge_fallback_policy() == "append" and _judge_retry_policy() == "legacy"
+    except ValueError:
+        return False
+
+
+# LLM_JUDGE_RETRY_POLICY=strict tries at most this many models, the primary
+# first, and sends each at most this many requests. All of them share the
+# judge's wall-time budget (_ACTIVE_JUDGE_DEADLINE).
+_STRICT_JUDGE_MAX_MODELS = 3
+_STRICT_JUDGE_REQUESTS_PER_MODEL = 2
+# Requests left for the model the strict policy is trying; None outside it.
+_STRICT_JUDGE_REQUESTS_LEFT: ContextVar[list[int] | None] = ContextVar("strict_judge_requests_left", default=None)
+# Under the strict policy, a failed request whose error mentions one of these
+# is not retried or handed to another model, even when it is an HTTP 429:
+# another model cannot lift a quota, budget or billing limit, and must not be
+# asked to overturn a content-filter, safety or security rejection.
+_STRICT_JUDGE_STOP_MARKERS = (
+    "insufficient_quota",
+    "quota_exceeded",
+    "budget",
+    "billing",
+    "credit",
+    "content_filter",
+    "content filter",
+    "safety",
+    "security",
+    "policy rejection",
+)
+_STRICT_JUDGE_ERROR_BODY_CHARS = 500
+
+
+class _StrictJudgeRequestLimitError(RuntimeError):
+    """The strict policy's per-model request limit is used up."""
+
+
+def _spend_strict_judge_request():
+    """Count one request against the strict per-model limit; a no-op outside the strict policy."""
+    left = _STRICT_JUDGE_REQUESTS_LEFT.get()
+    if left is None:
+        return
+    if left[0] <= 0:
+        raise _StrictJudgeRequestLimitError(
+            f"strict judge policy allows {_STRICT_JUDGE_REQUESTS_PER_MODEL} requests per model"
+        )
+    left[0] -= 1
+
+
+def _strict_judge_error_stops(error):
+    """Return whether a failed request is a quota, budget, billing, safety or security rejection.
+
+    Only the start of an HTTP error body is read, the same excerpt the error
+    detail shows, so footer text on a long proxy error page cannot end the judge.
+    """
+    text = str(error)
+    if isinstance(error, urllib.error.HTTPError):
+        text = f"{text} {_http_error_body(error)[:_STRICT_JUDGE_ERROR_BODY_CHARS]}"
+    lowered = text.lower()
+    return any(marker in lowered for marker in _STRICT_JUDGE_STOP_MARKERS)
+
+
+def _strict_judge_retry_allowed(error):
+    """Return whether the strict policy lets the transport retry *error* on the same model."""
+    left = _STRICT_JUDGE_REQUESTS_LEFT.get()
+    if left is None:
+        return True
+    return left[0] > 0 and not _strict_judge_error_stops(error)
+
+
 def _resolve_url(provider):
     if provider == "nv_build":
         url = os.environ.get("SKILL_EVAL_LLM_BASE_URL") or NVIDIA_BUILD_CHAT_URL
@@ -903,11 +1016,22 @@ def _sanitize_error_value(value, extra_secret_values=()):
     return sanitize(value)
 
 
-def _format_http_error_with_fallback(error):
+def _http_error_body(error):
+    """Return a failed response's body text, reading it only once."""
+    body = getattr(error, "_skill_evaluator_body", None)
+    if isinstance(body, str):
+        return body
     try:
         body = error.read().decode("utf-8", "replace").strip()
     except Exception:
         body = ""
+    with contextlib.suppress(Exception):
+        error._skill_evaluator_body = body
+    return body
+
+
+def _format_http_error_with_fallback(error):
+    body = _http_error_body(error)
     raw_detail = f"HTTP {error.code}: {error.reason}"
     safe_detail = raw_detail
     if body:
@@ -1489,6 +1613,7 @@ def _urlopen_with_retry(request, timeout=90):
     attempt = 0
     while True:
         request_timeout = _remaining_judge_timeout(timeout)
+        _spend_strict_judge_request()
         try:
             with urllib.request.urlopen(request, timeout=request_timeout) as response:  # nosec B310
                 return response.read()
@@ -1500,6 +1625,7 @@ def _urlopen_with_retry(request, timeout=90):
                 or (not is_http and not is_network)
                 or (is_http and not _is_retriable_http_status(error.code))
                 or _is_certificate_failure(error)
+                or not _strict_judge_retry_allowed(error)
             ):
                 raise
 
@@ -1646,7 +1772,11 @@ def _call_anthropic(prompt, model, max_tokens, temperature, response_schema=None
     effort = _effective_reasoning_effort("anthropic", model, JUDGE_REASONING_EFFORT)
     # Server-side fallback (beta, native Claude API only): a safety-classifier
     # refusal is retried on the fallback model within the same call.
-    server_side_fallback = _is_claude_5_5_or_later(model) and urlparse(target_url).hostname == "api.anthropic.com"
+    server_side_fallback = (
+        _is_claude_5_5_or_later(model)
+        and urlparse(target_url).hostname == "api.anthropic.com"
+        and _builtin_refusal_fallback_allowed()
+    )
 
     def _build_request(include_schema):
         payload = {
@@ -1802,6 +1932,7 @@ def _call_bedrock(prompt, model, max_tokens, temperature, timeout=90, provenance
                 endpoint = getattr(client, "_endpoint", None)
                 if endpoint is not None and hasattr(endpoint, "timeout"):
                     endpoint.timeout = request_timeout
+                _spend_strict_judge_request()
                 try:
                     return client.converse(
                         modelId=model_id,
@@ -1810,7 +1941,11 @@ def _call_bedrock(prompt, model, max_tokens, temperature, timeout=90, provenance
                     )
                 except Exception as error:
                     is_retriable, status_label, retry_after_str = _classify_bedrock_retry_error(error)
-                    if attempt >= retry_config.max_retries or not is_retriable:
+                    if (
+                        attempt >= retry_config.max_retries
+                        or not is_retriable
+                        or not _strict_judge_retry_allowed(error)
+                    ):
                         raise
 
                     sleep_duration = _compute_bounded_retry_delay(
@@ -1831,7 +1966,7 @@ def _call_bedrock(prompt, model, max_tokens, temperature, timeout=90, provenance
                     attempt += 1
 
         response = _converse(model)
-        fallback_model = _bedrock_refusal_fallback_model(model)
+        fallback_model = _bedrock_refusal_fallback_model(model) if _builtin_refusal_fallback_allowed() else None
         if response.get("stopReason") == "content_filtered" and fallback_model:
             # Bedrock has no server-side fallback, so retry a classifier refusal here.
             response = _converse(fallback_model)
@@ -1848,6 +1983,9 @@ def _call_bedrock(prompt, model, max_tokens, temperature, timeout=90, provenance
     except _JudgeRefusedError:
         raise
     except Exception as exc:
+        if _STRICT_JUDGE_REQUESTS_LEFT.get() is not None and _strict_judge_failure(exc)[1]:
+            # The strict policy lets the next candidate answer for an unavailable model.
+            raise
         return None, f"Bedrock request failed: {exc}"
 
 
@@ -1953,6 +2091,100 @@ def _record_judge_call(provenance, requested_model, sent_model):
         )
 
 
+def _call_judge_model(prompt, provider, model, max_tokens, temperature, response_schema, schema_name, provenance):
+    """Send one judge prompt to *model*; ``provenance["model"]`` becomes the model that answered."""
+    if provider == "anthropic":
+        return _call_anthropic(
+            prompt,
+            model,
+            max_tokens,
+            temperature,
+            response_schema=response_schema,
+            provenance=provenance,
+        )
+    if provider == "bedrock":
+        return _call_bedrock(prompt, model, max_tokens, temperature, provenance=provenance)
+    return _call_openai_compatible(
+        prompt,
+        provider,
+        model,
+        max_tokens,
+        temperature,
+        response_schema=response_schema,
+        schema_name=schema_name,
+    )
+
+
+def _strict_judge_failure(error):
+    """Describe a failed strict judge request and whether the next candidate may answer instead.
+
+    Only unavailability moves on: a transient HTTP status or connection failure
+    that outlasted its one retry, a model the key cannot use, or a used-up
+    per-model request limit. Everything else ends the judge.
+    """
+    if isinstance(error, _JudgeRefusedError):
+        return str(error), False
+    if isinstance(error, _StrictJudgeRequestLimitError):
+        return str(error), True
+    if isinstance(error, urllib.error.HTTPError):
+        detail, model_unavailable = _format_http_error_with_fallback(error)
+        if _strict_judge_error_stops(error):
+            return detail, False
+        return detail, model_unavailable or _is_retriable_http_status(error.code)
+    detail = f"Public provider call failed: {error}"
+    if isinstance(error, TimeoutError) and "LLM judge time budget exhausted" in str(error):
+        return detail, False
+    if _is_certificate_failure(error) or _strict_judge_error_stops(error):
+        return detail, False
+    if isinstance(error, (urllib.error.URLError, OSError)):
+        return detail, True
+    # Bedrock throttling and service errors (see _call_bedrock).
+    return detail, _classify_bedrock_retry_error(error)[0]
+
+
+def _call_strict_judge(provider, requested_model, models, call_model):
+    """Ask the judge under LLM_JUDGE_RETRY_POLICY=strict.
+
+    At most _STRICT_JUDGE_MAX_MODELS candidates are tried, the primary first,
+    with at most _STRICT_JUDGE_REQUESTS_PER_MODEL requests to each, all inside
+    the judge's wall-time budget. See _strict_judge_failure for which failures
+    move on to the next candidate. The first completed reply is final, even an
+    empty or invalid one: a second request from the same required judge, such
+    as behavior_check's format retry, is not sent, so no other model can
+    overturn the reply.
+    """
+    calls = _ACTIVE_JUDGE_CALLS.get()
+    if calls:
+        return (
+            None,
+            "LLM_JUDGE_RETRY_POLICY=strict accepts one completed reply per judge, so the judge's retry was not sent",
+            {"provider": provider, "model": calls[-1]["model"]},
+        )
+    errors = []
+    provenance = {"provider": provider, "model": requested_model}
+    for candidate_model in models[:_STRICT_JUDGE_MAX_MODELS]:
+        provenance = {"provider": provider, "model": candidate_model}
+        requests_left = _STRICT_JUDGE_REQUESTS_LEFT.set([_STRICT_JUDGE_REQUESTS_PER_MODEL])
+        try:
+            content, error = call_model(candidate_model, provenance)
+        except Exception as exc:
+            detail, move_on = _strict_judge_failure(exc)
+            if not move_on:
+                return None, _redact_configured_credentials(f"{candidate_model}: {detail}"), provenance
+            errors.append(f"{candidate_model}: {detail}")
+            continue
+        finally:
+            _STRICT_JUDGE_REQUESTS_LEFT.reset(requests_left)
+        if error:
+            return None, _redact_configured_credentials(error), provenance
+        if candidate_model != requested_model:
+            logger.warning("LLM judge model %s failed; using fallback model %s", requested_model, candidate_model)
+        _record_judge_call(provenance, requested_model, candidate_model)
+        return content, None, provenance
+    detail = "LLM judge model fallback exhausted: " + " | ".join(errors)
+    return None, _redact_configured_credentials(detail), provenance
+
+
 def _call_public_llm_with_provenance(
     prompt,
     model=None,
@@ -1965,35 +2197,29 @@ def _call_public_llm_with_provenance(
     provider = _public_provider()
     if not provider:
         return None, _public_provider_error(), {}
+    try:
+        # An invalid policy value fails closed before any request is sent.
+        _judge_fallback_policy()
+        strict = _judge_retry_policy() == "strict"
+    except ValueError as error:
+        return None, str(error), {}
     requested_model = _selected_judge_model(model)
     models = _fallback_models(requested_model) if allow_model_fallback else [requested_model]
+
+    def call_model(candidate_model, provenance):
+        return _call_judge_model(
+            prompt, provider, candidate_model, max_tokens, temperature, response_schema, schema_name, provenance
+        )
+
+    if strict:
+        return _call_strict_judge(provider, requested_model, models, call_model)
     errors = []
     last_provenance = {"provider": provider, "model": requested_model}
     for candidate_model in models:
         provenance = {"provider": provider, "model": candidate_model}
         last_provenance = provenance
         try:
-            if provider == "anthropic":
-                content, error = _call_anthropic(
-                    prompt,
-                    candidate_model,
-                    max_tokens,
-                    temperature,
-                    response_schema=response_schema,
-                    provenance=provenance,
-                )
-            elif provider == "bedrock":
-                content, error = _call_bedrock(prompt, candidate_model, max_tokens, temperature, provenance=provenance)
-            else:
-                content, error = _call_openai_compatible(
-                    prompt,
-                    provider,
-                    candidate_model,
-                    max_tokens,
-                    temperature,
-                    response_schema=response_schema,
-                    schema_name=schema_name,
-                )
+            content, error = call_model(candidate_model, provenance)
         except _JudgeRefusedError as refusal:
             # A classifier refusal is fallback-eligible like a missing model.
             errors.append(f"{candidate_model}: {refusal}")
@@ -2127,6 +2353,22 @@ def _json_nesting_within_limit(text):
     return True
 
 
+def _parse_whole_json_object(text):
+    """Return *text* parsed as one JSON object, or None when it holds anything else."""
+    if not text.startswith("{") or not _json_nesting_within_limit(text):
+        return None
+    try:
+        parsed = json.loads(
+            text,
+            object_pairs_hook=_reject_duplicate_object_pairs,
+            parse_constant=_reject_nonstandard_json_constant,
+            parse_float=_parse_finite_json_float,
+        )
+    except (json.JSONDecodeError, RecursionError, ValueError):
+        return None
+    return parsed if isinstance(parsed, dict) else None
+
+
 def extract_json(text):
     """Extract a JSON payload from LLM response text.
 
@@ -2134,11 +2376,14 @@ def extract_json(text):
     container. Multiple complete documents are ambiguous, and an unfinished
     earlier structural segment blocks promotion of a nested object. Top-level
     arrays parse through unchanged; judge callers must dict-check the result
-    themselves.
+    themselves. Under LLM_JUDGE_RETRY_POLICY=strict the whole reply, apart
+    from surrounding whitespace, must be one JSON object.
     """
     text = (text or "").strip()
     if not text or len(text) > _MAX_JSON_TEXT_CHARS:
         return None
+    if _strict_judge_replies():
+        return _parse_whole_json_object(text)
 
     documents = []
     index = 0
@@ -2280,8 +2525,11 @@ def _salvage_behavior_results(text):
 
     Reasoning judges that hit the output-token cap emit ``{"results": [...`` and
     stop mid-entry (``finish_reason="length"``); every fully-formed ``{...}``
-    entry before the cut is still valid JSON and can be scored.
+    entry before the cut is still valid JSON and can be scored. The strict
+    judge policy scores only complete replies, so nothing is salvaged under it.
     """
+    if _strict_judge_replies():
+        return []
     text = text or ""
     if len(text) > _MAX_JSON_TEXT_CHARS or not _json_nesting_within_limit(text):
         return []
@@ -2391,7 +2639,11 @@ _JUDGE_RETRY_REMINDER = (
 
 
 def _call_validated_json_judge(prompt, validate, call, extract, **call_kwargs):
-    """Invoke a JSON judge with one format-correction retry when payload validation fails."""
+    """Invoke a JSON judge with one format-correction retry when payload validation fails.
+
+    Under LLM_JUDGE_RETRY_POLICY=strict the first completed reply is final, so
+    an invalid one fails the judge without a retry.
+    """
     call_kwargs.setdefault("max_tokens", STRUCTURED_JUDGE_MAX_TOKENS)
 
     def invoke(call_prompt):
@@ -2406,6 +2658,8 @@ def _call_validated_json_judge(prompt, validate, call, extract, **call_kwargs):
         return None, f"LLM judge error: {error}", provenance
     if validation_error is None:
         return parsed, None, provenance
+    if _strict_judge_replies():
+        return None, f"{validation_error}; LLM_JUDGE_RETRY_POLICY=strict sends no retry", provenance
 
     parsed, error, provenance, validation_error = invoke(prompt + _JUDGE_RETRY_REMINDER)
     if error:
@@ -2636,6 +2890,9 @@ def _ragas_goal_accuracy_enabled():
     """
     # The prompt judge can append metadata outside the original evidence.
     if character_facts_enabled():
+        return False
+    # RAGAS sends its own requests, outside the strict policy's request limits.
+    if _strict_judge_replies():
         return False
     if _public_provider() != "openai" or _is_openai_reasoning_model(_selected_judge_model()):
         return False

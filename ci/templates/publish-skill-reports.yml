@@ -34,5 +34,14 @@ jobs:
       report-base-url: YOUR_REPORT_BASE_URL
       trusted-evaluator-shas: RELEASE_WORKFLOW_SHA
       trusted-caller-blobs: YOUR_APPROVED_CALLER_BLOB
+      # Approve each wrapper by its exact workflow path and full SHA or tag name.
+      # Tags use GitHub's recorded historical commit, never the tag's current target.
+      # trusted-wrapper-workflows: your-org/shared-ci/.github/workflows/skill-checks.yml@FULL_COMMIT_SHA
+      # To let one shared wrapper select new pinned evaluator revisions, explicitly delegate:
+      # trusted-wrapper-workflows: your-org/shared-ci/.github/workflows/skill-checks.yml@v3
+      # delegated-evaluator-wrapper: your-org/shared-ci/.github/workflows/skill-checks.yml@v3
+      # Delegation requires the approved caller's only job to call that wrapper, without a matrix.
+      # Only this wrapper and one pinned evaluator leaf may appear in the historical run.
+      # With delegation, trusted-evaluator-shas may be omitted; caller blob approval stays required.
       tools-ref: RELEASE_WORKFLOW_SHA
       tools-repository: NVIDIA/SkillEvaluator

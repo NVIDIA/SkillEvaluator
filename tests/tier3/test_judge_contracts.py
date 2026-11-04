@@ -608,6 +608,24 @@ def test_saved_judge_evidence_masks_credentials(tmp_path: Path, monkeypatch: pyt
             id="token-flag-quoted",
         ),
         pytest.param(
+            'mysql --password="' + "p" * 300 + '" db',
+            "p" * 300,
+            "mysql --password=<redacted> db",
+            id="password-flag-double-quoted-over-256-chars",
+        ),
+        pytest.param(
+            "tool --token '" + "t" * 300 + "'",
+            "t" * 300,
+            "tool --token <redacted>",
+            id="token-flag-single-quoted-over-256-chars",
+        ),
+        pytest.param(
+            'curl -u "admin:' + "x" * 300 + '" https://x',
+            "x" * 300,
+            "curl -u <redacted> https://x",
+            id="user-flag-double-quoted-over-256-chars",
+        ),
+        pytest.param(
             'tool --api-key="quoted-api-key-value" run',
             "quoted-api-key-value",
             "tool --api-key=<redacted> run",

@@ -3409,7 +3409,11 @@ class SecurityValidator(ValidatorBase):
 
             scan_line = line
             if category == "emails" and (author_email := author_emails.get(line_num)):
-                scan_line = re.sub(re.escape(author_email), "author@example.com", line, count=1, flags=re.IGNORECASE)
+                # Keep source offsets intact for adjacent ownership contacts in
+                # flow YAML; substituting a different-length address shifts them.
+                scan_line = re.sub(
+                    re.escape(author_email), lambda match: " " * len(match.group()), line, count=1, flags=re.IGNORECASE
+                )
 
             matches = list(regex.finditer(scan_line))
             if not matches or any(exc in line for exc in exceptions):

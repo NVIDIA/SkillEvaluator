@@ -47,7 +47,7 @@ def completeness_record(completeness: dict, stage: str) -> dict:
             item["omitted_analyzers"] = max(0, len(analyzers) - 8) + _count(row.get("omitted_analyzers"))
         exceptions.append(item)
     return {
-        "stage": stage if stage in {"skillspector", "skillspector-llm"} else "unknown",
+        "stage": stage if isinstance(stage, str) and stage in {"skillspector", "skillspector-llm"} else "unknown",
         "reported_status": "partial",
         "ledger_exceptions": exceptions,
         "limitations": [_text(value) for value in limits[:_MAX_LIMITATIONS]],

@@ -6,6 +6,9 @@
 import json
 from pathlib import Path
 
+import pytest
+from rich.text import Text
+
 from skillevaluator.models.result import Finding, Severity, ValidationResult
 from skillevaluator.reporting import CLIReporter, HTMLReporter, JSONReporter, MarkdownReporter
 from skillevaluator.reporting.retained import retained_results
@@ -40,7 +43,10 @@ def partial_result() -> ValidationResult:
     return result
 
 
-def test_partial_evidence_is_retained_without_turning_it_into_a_pass():
+@pytest.mark.parametrize("terminal", ["dumb", "xterm-256color"])
+def test_partial_evidence_is_retained_without_turning_it_into_a_pass(monkeypatch, terminal):
+    monkeypatch.setenv("TERM", terminal)
+    monkeypatch.delenv("NO_COLOR", raising=False)
     result = partial_result()
     apply_policy([result], default_policy())
     assert result.status == "incomplete"
@@ -48,6 +54,8 @@ def test_partial_evidence_is_retained_without_turning_it_into_a_pass():
     assert result.findings == []  # Coverage diagnostics are not security defects.
     for reporter in (CLIReporter(), HTMLReporter(), MarkdownReporter(), JSONReporter()):
         output = reporter.render(result)
+        if isinstance(reporter, CLIReporter):
+            output = Text.from_ansi(output).plain
         assert "reference_missing" in output
         assert "SKILL.md:8" in output
     data = json.loads(JSONReporter().render(result))
@@ -130,3 +138,17 @@ def test_saved_diagnostic_metadata_is_revalidated_at_json_boundary():
     output = JSONReporter().render(result)
     assert "fictional-password" not in output
     assert "unexpected_secret" not in output
+
+
+@pytest.mark.parametrize("stage", [[], {}, None, True, 3, "unsupported"])
+def test_malformed_saved_stage_cannot_crash_json_or_retained_reports(stage):
+    result = partial_result()
+    result.metadata["skillspector_completeness"]["records"][0]["stage"] = stage
+    data = json.loads(JSONReporter().render_all([result]))
+    assert data["results"][0]["skillspector_completeness"]["records"][0]["stage"] == "unknown"
+    # Exercise the independent retained-report input boundary as well.
+    data["results"][0]["skillspector_completeness"]["records"][0]["stage"] = stage
+    retained = retained_results(data)[0]
+    assert retained.is_incomplete
+    assert retained.metadata["skillspector_completeness"]["records"][0]["stage"] == "unknown"
+    assert "reference_missing" in HTMLReporter().render(retained)

@@ -56,6 +56,21 @@ def test_flow_metadata_does_not_hide_another_address_on_the_same_line(tmp_path, 
     assert {f.check_name for f in result.findings} == {"emails", "ownership_emails"}
 
 
+@pytest.mark.parametrize("author", ["a@company.com", "long-author-address@company.com"])
+@pytest.mark.parametrize("ordinary", [False, True])
+def test_author_exemption_preserves_adjacent_flow_contact_offsets(tmp_path, author, ordinary):
+    extra = f", description: {ADDRESS}" if ordinary else ""
+    _, result = scan(
+        tmp_path,
+        f'metadata: {{\n  author: "Author <{author}>", pic: {ADDRESS}{extra}}}',
+    )
+    apply_policy([result], POLICY)
+    assert result.passed is not ordinary
+    expected = {"ownership_emails", "emails"} if ordinary else {"ownership_emails"}
+    assert {f.check_name for f in result.findings} == expected
+    assert all(f.metadata["matched_value"] == ADDRESS for f in result.findings)
+
+
 @pytest.mark.parametrize(
     "frontmatter",
     [

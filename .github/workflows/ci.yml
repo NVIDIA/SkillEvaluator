@@ -461,7 +461,10 @@ jobs:
               git("add", ".github")
               git("commit", "-m", "Add checks")
               scan_path = ".github/workflows/skill-checks.yml"
-              git("checkout-index", "--force", "--", scan_path)
+              # Force a fresh checkout: checkout-index can keep an existing
+              # up-to-date LF file even when core.autocrlf is enabled.
+              (root / scan_path).unlink()
+              git("checkout-index", "--index", "--force", "--", scan_path)
               assert b"\r\n" in (root / scan_path).read_bytes()
               receipt = Path(directory) / "onboarding.json"
               subprocess.run(common + ["--mode", "save", "--full", "--output", str(receipt)], check=True)

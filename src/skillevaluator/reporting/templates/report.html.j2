@@ -2897,26 +2897,43 @@
             <details class="t3-details" open>
                 <summary>Measured Agent Resources</summary>
                 <div class="t3-details-body">
-                <p class="t3-section-hint">Efficiency scores measure routing and productive tool use. These separate measurements show observed agent resource use. Delta = with skill minus baseline; negative means less use. Judge and setup time are excluded. Deltas require complete telemetry and matching case counts in both arms.</p>
+                <p class="t3-section-hint">Efficiency scores measure routing and productive tool use. These separate measurements show observed agent resource use. Delta = with skill minus baseline; negative means less use. Judge and setup time are excluded. Deltas require complete telemetry and matching case counts in both arms. LLM and tool seconds split the agent's trajectory time; inferred LLM time also includes harness and queue time.</p>
+                {% set t3_resource_rows = [
+                    ('tokens', 'Prompt + completion tokens (cache included)', '{:,.0f}', 'total'),
+                    ('agent_seconds', 'Agent execution seconds', '{:,.1f} s', 'total'),
+                    ('llm_seconds', 'LLM seconds', '{:,.1f} s', 'total'),
+                    ('tool_seconds', 'Tool seconds', '{:,.1f} s', 'total'),
+                    ('llm_ms_per_token', 'LLM ms per token', '{:,.2f} ms', 'value'),
+                ] %}
+                {% macro t3_timing_source_text(sources) %}{% for source in sources %}{{ ' and ' if not loop.first }}{{ 'native ATIF timing' if source == 'atif' else ('inferred from step timestamps' if source == 'step_timestamps' else source) }}{% endfor %}{% if not sources %}none{% endif %}{% endmacro %}
                 <div class="table-scroll"><table class="summary-table">
                     <thead><tr><th>Agent</th><th>Measurement</th><th>With skill total</th><th>Baseline total</th><th>Delta</th><th>Measured trials (skill / baseline)</th></tr></thead>
                     <tbody>
                     {% for name, agent in t3_agents.items() %}
                     {% if agent.resources is defined %}
-                    {% for field, label in [('tokens', 'Prompt + completion tokens (cache included)'), ('agent_seconds', 'Agent execution seconds')] %}
+                    {% for field, label, unit_fmt, key in t3_resource_rows %}
+                    {% if agent.resources[field] is defined %}
                     {% set measured = agent.resources[field] %}
+                    {% set with_value = measured.with_skill[key] %}
+                    {% set baseline_value = measured.baseline[key] %}
                     <tr><td>{{ name }}</td><td>{{ label }}</td>
-                        {% set unit_fmt = '{:,.1f} s' if field == 'agent_seconds' else '{:,.0f}' %}
-                        <td>{{ unit_fmt.format(measured.with_skill.total) if measured.with_skill.total is not none else 'N/A' }}</td>
-                        <td>{{ unit_fmt.format(measured.baseline.total) if measured.baseline.total is not none else 'N/A' }}</td>
-                        <td>{% if measured.delta is not none %}{{ ('+' if measured.delta >= 0 else '') ~ unit_fmt.format(measured.delta) }}{% if measured.baseline.total %} ({{ '%+.0f' | format(measured.delta / measured.baseline.total * 100) }}%){% endif %}{% else %}N/A{% endif %}</td>
+                        <td>{{ unit_fmt.format(with_value) if with_value is not none else 'N/A' }}</td>
+                        <td>{{ unit_fmt.format(baseline_value) if baseline_value is not none else 'N/A' }}</td>
+                        <td>{% if measured.delta is not none %}{{ ('+' if measured.delta >= 0 else '') ~ unit_fmt.format(measured.delta) }}{% if baseline_value %} ({{ '%+.0f' | format(measured.delta / baseline_value * 100) }}%){% endif %}{% else %}N/A{% endif %}</td>
                         <td>{{ measured.with_skill.measured_trials }}/{{ measured.with_skill.trials }} / {{ measured.baseline.measured_trials }}/{{ measured.baseline.trials }}</td>
                     </tr>
+                    {% endif %}
                     {% endfor %}
                     {% endif %}
                     {% endfor %}
                     </tbody>
                 </table></div>
+                {% for name, agent in t3_agents.items() %}
+                {% set t3_timing_sources = agent.resources.timing_sources if agent.resources is defined and agent.resources.timing_sources is mapping else {} %}
+                {% if t3_timing_sources.with_skill or t3_timing_sources.baseline %}
+                <p class="t3-section-hint">{{ name }} timing source: with skill {{ t3_timing_source_text(t3_timing_sources.with_skill or []) }}; baseline {{ t3_timing_source_text(t3_timing_sources.baseline or []) }}.{% if 'mixed_timing_sources' in (agent.resources.caveats or []) %} The measurements mix native and inferred timing, so LLM and tool seconds are not like-for-like.{% endif %}</p>
+                {% endif %}
+                {% endfor %}
                 </div>
             </details>
             {% endif %}

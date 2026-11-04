@@ -2844,6 +2844,7 @@ def _normalize_trials(rewards: list[dict[str, Any]], metrics: list[str]) -> list
         overall_score,
     )
     from skillevaluator.tier3.harbor.report_data import logical_trial_reward_groups
+    from skillevaluator.tier3.harbor.resource_usage import normalized_trial_timing
 
     out: list[dict[str, Any]] = []
     reward_groups = logical_trial_reward_groups([reward for reward in rewards if isinstance(reward, dict)])
@@ -2899,6 +2900,9 @@ def _normalize_trials(rewards: list[dict[str, Any]], metrics: list[str]) -> list
                 }
                 if cached_tokens is not None:
                     trial["tokens"]["cached"] = cached_tokens
+            timing = normalized_trial_timing(traj.get("timing"))
+            if timing is not None:
+                trial["timing"] = timing
         warnings = list(
             dict.fromkeys(
                 str(warning) for item in group if isinstance(item.get("warnings"), list) for warning in item["warnings"]

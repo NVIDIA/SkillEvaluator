@@ -261,6 +261,10 @@ def test_gitleaks_single_value_allowlists_are_exactly_scoped() -> None:
             r"^us\.anthropic\.claude-opus-5$",
             r"^tests/validators/test_security\.py$",
         ),
+        "Bedrock model ID in the merge-leftover SkillSpector bridge test copy from commit e8aa35d6a": (
+            r"^us\.anthropic\.claude-opus-5$",
+            r"^tests/validators/test_security\.py\.orig$",
+        ),
     }
     for description, (regex, path) in expected.items():
         entry = allowlists[description]

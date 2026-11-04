@@ -1,6 +1,8 @@
 # SPDX-License-Identifier: Apache-2.0
 # Merge this into an existing .gitlab-ci.yml or use it as the complete file.
 # The release-generated copy pins both the reusable job and its container image.
+# The image uses the default OSS policy for public and private repositories.
+# No internal/external variable is needed; artifacts follow repository access.
 include:
   - remote: https://raw.githubusercontent.com/NVIDIA/SkillEvaluator/RELEASE_WORKFLOW_SHA/ci/gitlab/skill-evaluation.yml
 

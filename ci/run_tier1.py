@@ -427,7 +427,7 @@ def evaluate_skill(
                 str(target),
                 "--llm" if llm else "--no-llm",
                 "--profile",
-                "external",
+                "default",
                 "--min-score",
                 min_score,
                 # native_reports renders each skill's HTML from the retained JSON

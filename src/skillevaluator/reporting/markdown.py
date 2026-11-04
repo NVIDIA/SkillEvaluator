@@ -231,7 +231,7 @@ class MarkdownReporter(ReporterBase):
             None,
         )
         if policy is not None:
-            lines.append(f"**Profile:** {policy.get('profile', 'external')}")
+            lines.append(f"**Profile:** {policy.get('profile', 'default')}")
             if policy.get("digest"):
                 lines.append(f"**Policy digest:** `{policy['digest']}`")
 

@@ -131,7 +131,7 @@ errors, such as an option the workflow does not accept, exit `2`.
 | `--llm / --no-llm` | Enabled when a provider is configured | Enable or skip rubric, LLM security, and finding verification; explicit `--llm` requires valid provider configuration |
 | `--min-score INTEGER` | `70` | Minimum passing quality and rubric score, from 0 to 100; quality severity overrides cannot waive the minimum |
 | `--quality-config PATH` | packaged `quality-default.yaml` | YAML file that replaces the quality check's expected-heading rules. See [Tier 1: Validation](tier1-validation.mdx#the-checks). |
-| `--profile TEXT` | `SKILLEVALUATOR_PROFILE`, then `external` | Validation policy profile |
+| `--profile TEXT` | `SKILLEVALUATOR_PROFILE`, then `default` | Validation policy; `external` is a compatibility alias |
 | `--previous-version TEXT` | `SKILLEVALUATOR_PREVIOUS_VERSION`, else unset | Previous version for version checks |
 
 Also accepts `-r/--report` and `-o/--output-dir` described above.
@@ -188,7 +188,7 @@ skillevaluator validate ./my-skill --llm                  # add LLM security ana
 skillevaluator validate ./my-skill -r cli,json,html       # multiple report formats
 skillevaluator validate ./my-skill --no-dedup             # skip Tier 2 dedup
 skillevaluator validate ./my-skill --no-block-on-dedup    # run Tier 2 as advisory
-skillevaluator validate ./my-skill --external             # strict publication profile
+skillevaluator validate ./my-skill --profile default      # standard validation policy
 skillevaluator validate ./my-skill -a codex               # choose the Tier 3 agent
 skillevaluator validate ./my-skill -a codex \
     --block-on-agent-eval                                  # gate on Tier 3 too
@@ -216,8 +216,8 @@ Applies to the whole run: target typing, policy profile, reports, tier selection
 | `--tiers TEXT` | all three for skills | Explicit tier selection, e.g. `--tiers 1,2` skips live evaluation and `--tiers 1,3` skips dedup. Tier 1 always runs. |
 | `--full` | unnecessary for skills | Compatibility flag for all three tiers with autopilot. Explicit tier selection and disable flags still apply. |
 | `--verbose` | off | Print the full per-check detail stream instead of the compact pipeline view. |
-| `--profile TEXT` | `$SKILLEVALUATOR_PROFILE`, then `external` | Validation profile: `external` or a custom name. |
-| `--external` | — | Shortcut for `--profile external` (validate for public publication). |
+| `--profile TEXT` | `$SKILLEVALUATOR_PROFILE`, then `default` | Bundled validation policy. `external` is a compatibility alias for `default`. |
+| `--external` | — | Compatibility alias for `--profile default`; does not change repository visibility. |
 | `--policy FILE` | none | Custom policy YAML overlaid on top of `--profile`. |
 | `--workers INTEGER RANGE` | `1` | Concurrent skill jobs when validating a folder of skills (`x>=1`). Values above 1 run skills in parallel processes and disable the per-skill pipeline view. |
 

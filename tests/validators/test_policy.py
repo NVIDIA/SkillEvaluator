@@ -22,11 +22,39 @@ from skillevaluator.validators.policy import (
 )
 
 
+@pytest.mark.parametrize("name", ["default", "external"])
+def test_default_and_legacy_names_resolve_one_policy_without_weakening_rules(name: str) -> None:
+    policy = resolve_policy(profile=name)
+
+    assert policy.profile == "default"
+    assert policy.audience == "all"
+    assert policy.is_author_email_acceptable("Author <author@nvidia.com>")
+    assert policy.is_author_email_acceptable("Author <author@example.com>")
+    assert policy.severity_for("SCHEMA", "author_missing", Severity.LOW) == Severity.HIGH
+    assert policy.severity_for("SCHEMA", "author_format", Severity.LOW) == Severity.HIGH
+    assert policy.severity_for("WORKFLOWS", "author_format", Severity.LOW) == Severity.HIGH
+    assert policy.severity_for("LICENSE", "blocked_license", Severity.LOW) == Severity.CRITICAL
+    assert policy.severity_for("PII", "email", Severity.HIGH) == Severity.HIGH
+    assert policy.severity_for("SECURITY", "scanner_failure", Severity.CRITICAL) == Severity.CRITICAL
+
+
+def test_legacy_environment_and_custom_overlay_use_the_same_default_policy(tmp_path, monkeypatch) -> None:
+    monkeypatch.setenv("SKILLEVALUATOR_PROFILE", "external")
+    assert resolve_policy().to_dict() == load_profile("default").to_dict()
+    custom = tmp_path / "team.yaml"
+    custom.write_text("profile: team\nseverity_overrides:\n  SCHEMA.author_missing: critical\n")
+    policy = resolve_policy(policy_path=custom)
+    assert policy.profile == "team"
+    assert policy.severity_for("SCHEMA", "author_missing", Severity.LOW) == Severity.CRITICAL
+    assert policy.severity_for("LICENSE", "blocked_license", Severity.LOW) == Severity.CRITICAL
+    assert resolve_policy(profile="default").profile == "default"
+
+
 def test_default_profile_is_the_public_profile() -> None:
     policy = default_policy()
 
-    assert DEFAULT_PROFILE_NAME == "external"
-    assert policy.profile == "external"
+    assert DEFAULT_PROFILE_NAME == "default"
+    assert policy.profile == "default"
     assert policy.author_email_regex is None
     assert policy.is_author_email_acceptable("Jane Doe <jane@example.com>")
     assert policy.severity_for("SCHEMA", "author_missing", Severity.LOW) == Severity.HIGH
@@ -118,7 +146,7 @@ def test_bundled_profile_wraps_malformed_yaml(tmp_path: Path, monkeypatch: pytes
 
 
 def test_policy_validation_and_resolution() -> None:
-    assert resolve_policy().profile == "external"
+    assert resolve_policy().profile == "default"
     assert (
         ValidationPolicy(severity_overrides={"LICENSE.*": Severity.MEDIUM}).severity_for(
             "LICENSE", "unknown", Severity.HIGH
@@ -133,7 +161,7 @@ def test_public_policy_serialization_has_stable_digest() -> None:
     policy = default_policy()
     data = policy.to_dict()
 
-    assert data["audience"] == "external"
+    assert data["audience"] == "all"
     assert data["digest"].startswith("sha256:")
     assert policy.digest == default_policy().digest
 

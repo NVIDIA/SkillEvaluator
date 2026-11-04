@@ -513,7 +513,8 @@ def emit_reports(
     if policy is not None:
         apply_policy(results, policy)
     if "cli" in report_formats:
-        CLIReporter(console=console).print_all(results)
+        # The CLI report previews failed Tier 3 source checks only when a file written below lists them all.
+        CLIReporter(console=console, report_formats=report_formats).print_all(results)
 
     html_tabs = _derive_html_tabs(results)
     for fmt in report_formats:

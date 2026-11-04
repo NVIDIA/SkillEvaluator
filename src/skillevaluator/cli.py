@@ -2425,7 +2425,14 @@ def validate(
             repo_context_exclude_paths=tuple(repo_context_exclude_paths),
         )
         results.append(tier3_result)
-        tier3_ran, tier3_ok, tier3_rows, tier3_skip = summarize_tier3(tier3_result)
+        # The panel follows the formats this run emits: with cli the full report
+        # lists the source errors under the Tier 3 finding, so the panel keeps
+        # the count; it shortens its own list only when an HTML or JSON report
+        # keeps every error.
+        tier3_ran, tier3_ok, tier3_rows, tier3_skip = summarize_tier3(
+            tier3_result,
+            report_formats=_effective_report_formats(report_formats, quiet=quiet),
+        )
         if autopilot_error and not tier3_ran:
             from skillevaluator.reporting.base import get_skip_reason
 
@@ -3617,6 +3624,10 @@ tier3.add_command(init_harbor_task, "init-harbor-task")
 tier3.add_command(compare, "compare")
 tier3.add_command(view, "view")
 tier3.add_command(tier3_doctor_command, "doctor")
+
+from skillevaluator.tier3.decoy_commands import select_decoys_command
+
+tier3.add_command(select_decoys_command, "select-decoys")
 
 from skillevaluator.tier3.workflow import build_tier3_workflow
 

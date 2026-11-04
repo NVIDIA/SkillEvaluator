@@ -1,0 +1,18 @@
+<section class="table-section" id="plugin-static-evidence" aria-label="Plugin static evidence">
+  <h2>Plugin static evidence: {{ plugin_static.name }}</h2>
+  <p>Status: {{ plugin_static.status }}. Static evidence does not demonstrate runtime loading or behavior.</p>
+  {% if plugin_static.truncated %}<p>Some static evidence was omitted by report bounds; see section counts.</p>{% endif %}
+  {% for section in plugin_static.sections %}
+  <section aria-label="{{ section.title }}">
+    <h3>{{ section.title }}</h3>
+    {% for note in section.notes %}{% if note is not none %}<p>{{ note }}</p>{% endif %}{% endfor %}
+    {% if section.rows %}
+    <div class="table-scroll" tabindex="0" role="region" aria-label="{{ section.title }}"><table class="contributor-table plugin-static-table">
+      <thead><tr>{% for column in section.columns %}<th scope="col">{{ column }}</th>{% endfor %}</tr></thead>
+      <tbody>{% for row in section.rows %}<tr>{% for cell in row %}<td>{{ 'unknown' if cell is none else cell }}</td>{% endfor %}</tr>{% endfor %}</tbody>
+    </table></div>
+    {% endif %}
+    {% if section.omitted %}<p>{{ section.omitted }} more rows omitted ({{ section.total }} total).</p>{% endif %}
+  </section>
+  {% endfor %}
+</section>

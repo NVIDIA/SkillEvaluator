@@ -45,10 +45,16 @@ from rich.panel import Panel
 from rich.text import Text
 
 from skillevaluator.constants import CONTENT_DEDUP_LLM_REFUSED_CHECK
-from skillevaluator.reporting.base import get_skip_reason
+from skillevaluator.reporting.base import (
+    get_skip_reason,
+    source_validation_errors,
+    source_validation_preview,
+)
 from skillevaluator.utils.rich_markup import strip_terminal_controls
 
 if TYPE_CHECKING:
+    from collections.abc import Iterable
+
     from skillevaluator.models.result import ValidationResult
 
 GREEN = "#76B900"  # NVIDIA green: success + identity moments only
@@ -1211,6 +1217,27 @@ def _tier2_finding_is_scan_failure(finding: object) -> bool:
     return check_name in _TIER2_SCAN_FAILURE_CHECKS or check_name.endswith("_limit") or check_name.endswith("_error")
 
 
+def _tier3_source_validation_rows(result: ValidationResult, *, report_formats: tuple[str, ...]) -> list[TierRow]:
+    """Count the failed Tier 3 source checks and, unless the CLI report lists them, show them."""
+    errors = [error for finding in result.findings for error in source_validation_errors(finding.metadata)]
+    if not errors:
+        return []
+    count = len(errors)
+    summary = f"{count} source validation {'error' if count == 1 else 'errors'}"
+    if "cli" in report_formats:
+        return [detail_row("validation", summary)]
+    shown, overflow_note = source_validation_preview(errors, report_formats)
+    if len(shown) < count:
+        summary += f" (showing first {len(shown)})"
+    rows = [detail_row("validation", summary)]
+    for error in shown:
+        text = f"{error['path']}: {error['message']}" if error["path"] else error["message"]
+        rows.append(detail_row("source", sanitize_tier3_console_text(text)))
+    if overflow_note:
+        rows.append(detail_row("", overflow_note))
+    return rows
+
+
 def _tier3_run_dir(payload: dict) -> Path | None:
     provenance = payload.get("provenance")
     raw = provenance.get("run_dir") if isinstance(provenance, dict) else None
@@ -1240,8 +1267,19 @@ def _tier2_finding_is_advisory_refusal(finding: object) -> bool:
     return str(getattr(finding, "severity", "")).casefold() not in {"critical", "high"}
 
 
-def summarize_tier3(result: ValidationResult) -> tuple[bool, bool, list[TierRow], str]:
-    """Return (ran, passed, rows, skip_reason) for the agent-eval result."""
+def summarize_tier3(
+    result: ValidationResult,
+    *,
+    report_formats: Iterable[str] = (),
+) -> tuple[bool, bool, list[TierRow], str]:
+    """Return (ran, passed, rows, skip_reason) for the agent-eval result.
+
+    Failed Tier 3 source checks add a count row. ``report_formats`` are the
+    formats the run emits. When they include ``cli``, the full CLI report lists
+    the errors under the finding, so the panel keeps only the count. Otherwise
+    the panel lists them, and shortens the list only when an HTML or JSON
+    report written by the run keeps every error.
+    """
     metadata = result.metadata if isinstance(result.metadata, dict) else {}
     raw_payload = metadata.get("agent_eval")
     payload = raw_payload if isinstance(raw_payload, dict) else {}
@@ -1296,6 +1334,7 @@ def summarize_tier3(result: ValidationResult) -> tuple[bool, bool, list[TierRow]
                 glyph_style=f"bold {RED}",
             )
         )
+    rows.extend(_tier3_source_validation_rows(result, report_formats=tuple(report_formats)))
     return True, ok, rows + fix_rows, ""
 
 

@@ -3303,7 +3303,8 @@ class SecurityValidator(ValidatorBase):
             joined = cls._UNDERSCORE_JOINED_PREFIX_PATTERN.search(line, label_start, match.start())
             if joined is None:
                 return False
-            return not any(word in cls._PAYMENT_LABEL_WORDS for word in joined.group(1).lower().split("_"))
+            words = cls._CAMEL_CASE_BOUNDARY.sub("_", joined.group(1)).lower().split("_")
+            return not any(word in cls._PAYMENT_LABEL_WORDS for word in words)
 
         if category == "phone_numbers":
             # International phone syntax can begin at the ``+00`` exponent of a
@@ -3336,28 +3337,45 @@ class SecurityValidator(ValidatorBase):
         return any(pattern.search(text) for text in variants)
 
     @classmethod
-    def _lacks_geospatial_context(cls, line: str, context: str, pair_start: int | None = None) -> bool:
+    def _lacks_geospatial_context(
+        cls, line: str, context: str, pair_start: int | None = None, label_start: int = 0
+    ) -> bool:
         """Return whether GPS-shaped pairs on *line* have no geospatial cue.
 
         Precise vectors, poses, quaternions, and waypoints have the same shape
         as coordinates, so a pair needs a cue. *context* is the file name, up to
         two lines before *line*, and *line*. Keys and file names often use
         snake_case or camelCase, so underscores and case changes separate words.
-        A strong cue anywhere in *context* outweighs a technical label, and a
-        technical label outweighs a soft cue. Vector labels such as
-        ``waypoint`` count only on *line*, before the pair at *pair_start*
-        (the whole line when omitted); ``<pixel|camera|...> coordinates``
-        labels also count in *context*.
+        Vector labels such as ``waypoint`` count only before the pair at
+        *pair_start*; a GPS cue after a separator can limit that label segment.
         """
         local = cls._cue_text_variants(line)
         # A technical label labels the pair only when it comes before it, so
         # ``Location: 37.77, -122.41 (map scale 1:5000)`` keeps its location cue.
-        label = cls._cue_text_variants(line if pair_start is None else line[:pair_start])
+        label_end = len(line) if pair_start is None else pair_start
+        label_segment = line[label_start:label_end]
+        last_separator = max(label_segment.rfind(";"), label_segment.rfind("|"))
+        tail = label_segment[last_separator + 1 :]
+        tail_variants = cls._cue_text_variants(tail)
+        if cls._search_cue(cls._GPS_SOFT_CONTEXT_PATTERN, tail_variants) or cls._search_cue(
+            cls._GPS_STRONG_CONTEXT_PATTERN, tail_variants
+        ):
+            label_segment = tail
+        label = cls._cue_text_variants(label_segment)
         nearby = cls._cue_text_variants(context)
         if cls._search_cue(cls._GPS_STRONG_CONTEXT_PATTERN, local):
             return False
-        if cls._search_cue(cls._TECHNICAL_COORDINATE_CONTEXT_PATTERN, label) or cls._search_cue(
-            cls._TECHNICAL_VECTOR_CONTEXT_PATTERN, label
+        inherits_technical_label = False
+        if label_start and ";" not in line[label_start:label_end] and "|" not in line[label_start:label_end]:
+            previous_separator = max(line.rfind(";", 0, label_start), line.rfind("|", 0, label_start))
+            previous_label = cls._cue_text_variants(line[previous_separator + 1 : label_start])
+            inherits_technical_label = cls._search_cue(
+                cls._TECHNICAL_COORDINATE_CONTEXT_PATTERN, previous_label
+            ) or cls._search_cue(cls._TECHNICAL_VECTOR_CONTEXT_PATTERN, previous_label)
+        if (
+            cls._search_cue(cls._TECHNICAL_COORDINATE_CONTEXT_PATTERN, label)
+            or cls._search_cue(cls._TECHNICAL_VECTOR_CONTEXT_PATTERN, label)
+            or inherits_technical_label
         ):
             return not cls._search_cue(cls._GPS_STRONG_CONTEXT_PATTERN, nearby)
         if cls._search_cue(cls._GPS_SOFT_CONTEXT_PATTERN, local):
@@ -3635,7 +3653,14 @@ class SecurityValidator(ValidatorBase):
                     geojson_lines = self._geojson_coordinate_lines(lines)
                 if line_num not in geojson_lines:
                     context = "\n".join((file_path.name, *lines[max(0, line_num - 3) : line_num]))
-                    if self._lacks_geospatial_context(line, context, matches[0].start()):
+                    previous_end = 0
+                    kept_matches = []
+                    for pair in matches:
+                        if not self._lacks_geospatial_context(line, context, pair.start(), label_start=previous_end):
+                            kept_matches.append(pair)
+                        previous_end = pair.end()
+                    matches = kept_matches
+                    if not matches:
                         continue
             if category == "ip_addresses":
                 matches = [match for match in matches if not self._is_version_literal(match, line)]

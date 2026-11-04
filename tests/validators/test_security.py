@@ -5755,6 +5755,23 @@ class TestFalsePositivePrevention:
         assert any(finding.check_name == "gps_coordinates" for finding in result.findings)
 
     @pytest.mark.parametrize(
+        "line",
+        [
+            "map scale 1:5000; Location: 37.774929, -122.419416",
+            "Camera pose 10.123456, 20.123456; home location: 37.774929, -122.419416",
+        ],
+    )
+    def test_gps_labels_are_applied_per_pair(self, tmp_path: Path, line: str):
+        data_file = tmp_path / "values.txt"
+        data_file.write_text(f"{line}\n", encoding="utf-8")
+
+        candidates = SecurityValidator()._scan_file_for_pii(data_file)
+
+        assert [item["matched_value"] for item in candidates if item["category"] == "gps_coordinates"] == [
+            "37.774929, -122.419416"
+        ]
+
+    @pytest.mark.parametrize(
         ("filename", "contents"),
         [
             ("values.txt", "Location data formats\nquaternion = [0.707107, 0.000000, 0.707107, 0.000000]\n"),
@@ -6037,6 +6054,9 @@ class TestFalsePositivePrevention:
             ("card_4532015112830366", "4532015112830366"),
             ("CARD_4532015112830366.png", "4532015112830366"),
             ("cc_4532015112830366", "4532015112830366"),
+            ("creditCard_4532015112830366", "4532015112830366"),
+            ("cardNumber_4532015112830366", "4532015112830366"),
+            ("ccNum_4532015112830366", "4532015112830366"),
             ("payment_card_4532015112830366", "4532015112830366"),
         ],
     )

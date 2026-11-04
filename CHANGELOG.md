@@ -289,10 +289,13 @@ All notable changes to SkillEvaluator are documented in this file.
   compared two renderings that both capped that section (800 characters
   by default), so a long final answer could lose its middle to the cap
   while the bundle claimed `truncated: false`. The comparison now runs
-  against a rendering without the final-response section limit, and an
-  answer that still reaches the judge in full through the compact history
-  is not flagged. Caps inside individual sections (write bodies, history
-  summaries) are unchanged. The evidence-budget documentation now names
+  against a rendering without the final-response section limit. An answer
+  that still reaches the judge in full is not flagged, including one split
+  between the compact history and the end of the final-response section.
+  The `reason` names each setting that cut evidence:
+  `SKILL_EVAL_BEHAVIOR_CHECK_BUDGET`,
+  `SKILL_EVAL_BEHAVIOR_FINAL_RESPONSE_LIMIT`, or both. Caps inside
+  individual sections (write bodies, history summaries) are unchanged. The evidence-budget documentation now names
   both causes of a `behavior_check` truncation and which setting raises
   each.
 - PR scan comments show the verdict, quality scores, first actionable fixes and

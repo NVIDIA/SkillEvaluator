@@ -971,6 +971,25 @@ def _build_verified_facts_section(facts: list[dict[str, Any]]) -> str:
     return "\n".join(lines)
 
 
+def _final_answer_reaches_judge(final: str, evidence: str) -> bool:
+    """Return True when every character of the final answer appears in *evidence*.
+
+    A long answer can arrive in two pieces: the compact history repeats the
+    first 1,500 characters of a text-only final step, and the final-response
+    section keeps the end. Find the longest prefix of the answer present in
+    *evidence*; the answer is complete when the rest is present too.
+    """
+    answer = final.strip()
+    lo, hi = 0, len(answer)
+    while lo < hi:
+        mid = (lo + hi + 1) // 2
+        if answer[:mid] in evidence:
+            lo = mid
+        else:
+            hi = mid - 1
+    return answer[lo:] in evidence
+
+
 def build_metric_evidence_bundles(
     traj: dict[str, Any],
     question: str,
@@ -1056,23 +1075,22 @@ def build_metric_evidence_bundles(
     # final answer: the bundle then reported truncated=False for evidence
     # that was not complete.
     bc_full = build_behavior_evidence(traj, question, max_chars=10**9, final_response_limit=10**9)
-    bc_trunc = bc_full != bc_text
-    bc_reason = "behavior evidence shortened to fit the evidence budget or section limits" if bc_trunc else ""
-    if bc_trunc and final:
+    bc_causes: list[str] = []
+    if bc_full != bc_text:
         # An unlimited-budget rendering with the usual final-response cap
-        # differs from the reference rendering only in that section. If the
-        # budgeted rendering matches it, the budget itself dropped nothing
-        # and the only loss is the final-response cap. That loss does not
-        # count when the complete final answer still reaches the judge
-        # through the compact history, which repeats a text-only final step
-        # verbatim; when it does count, name the setting that applied.
-        bc_capped = build_behavior_evidence(traj, question, max_chars=10**9)
-        if bc_text == bc_capped:
-            if final.strip() in bc_text:
-                bc_trunc = False
-                bc_reason = ""
-            else:
-                bc_reason = "final response shortened to fit SKILL_EVAL_BEHAVIOR_FINAL_RESPONSE_LIMIT"
+        # differs from the reference rendering only in that section, so it
+        # separates the two causes. The budget cut evidence when the budgeted
+        # rendering differs from it. The cap cut evidence when it changed that
+        # section and the complete final answer does not still reach the
+        # judge through the compact history. Name every cause that applied so
+        # users know which settings to raise.
+        bc_capped = build_behavior_evidence(traj, question, max_chars=10**9) if final else bc_full
+        if bc_text != bc_capped:
+            bc_causes.append("behavior evidence shortened to fit SKILL_EVAL_BEHAVIOR_CHECK_BUDGET")
+        if bc_capped != bc_full and not _final_answer_reaches_judge(final, bc_capped):
+            bc_causes.append("final response shortened to fit SKILL_EVAL_BEHAVIOR_FINAL_RESPONSE_LIMIT")
+    bc_trunc = bool(bc_causes)
+    bc_reason = "; ".join(bc_causes)
     bundles["behavior_check"] = {
         "prompt_evidence": _prepend_facts(bc_text),
         "evidence_refs": refs["behavior_check"],

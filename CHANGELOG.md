@@ -687,6 +687,17 @@ All notable changes to SkillEvaluator are documented in this file.
   forwarded to SkillSpector so its own deadline can be raised as well, and the
   security result records the effective `skillspector_timeout_seconds`
   ([#155](https://github.com/NVIDIA/SkillEvaluator/issues/155)).
+- An `--llm` security scan whose LLM provider keeps failing after
+  SkillSpector's bounded retries no longer reports only
+  `skillspector-llm failed with unexpected exit code 2: scanner diagnostics were redacted`
+  (or `skillspector reported execution_successful=false`). When every failure
+  in the SkillSpector v2.11.2+ report is an `llm_connection_retries_exhausted`
+  row on an LLM analyzer, the error says that the provider kept failing, that
+  this is a retriable provider failure rather than a security finding, and
+  that the full scan should be retried when the provider is available. Mixed,
+  truncated, malformed or older reports keep the generic error. The scan stays
+  `INCOMPLETE` with a nonzero exit, and static findings still decide a
+  `FAILED` result.
 - `similarity-check --catalog` and `tier2 --catalog` no longer report a skill
   that is already in the local catalog as an `EXACT_DUPLICATE` of its own
   entry, which failed the run. An entry is skipped as the skill's own only when

@@ -436,6 +436,28 @@ Tier 1 checks always gate the exit code inside `validate`. Tier 2 gates when it 
     take up to twice the value before it is reported. See
     [Environment Variables](environment-variables.mdx#validation-tier-1).
   </Accordion>
+  <Accordion title="The SkillSpector LLM provider keeps failing">
+    With `--llm`, SkillSpector retries a failing provider call a bounded number
+    of times. When the provider still fails, for example because of rate limits
+    or an outage, SkillSpector records the `llm_connection_retries_exhausted`
+    reason and ends the LLM stage as failed. If that is the only cause in a
+    report from SkillSpector v2.11.2 or later, the security error reads
+    `skillspector-llm did not complete: the LLM provider kept failing after SkillSpector's bounded retries`
+    and says that this is a retriable provider failure, not a security
+    finding. Retry the full scan when the provider is available.
+
+    The gate is unchanged: the security scan is `INCOMPLETE`, the command
+    exits `1`, and findings from the static stage are kept, so a High or
+    Critical static finding still makes the result `FAILED`.
+
+    SkillEvaluator shows this message only when every failure that
+    SkillSpector recorded is a provider-retry failure on an LLM analyzer.
+    Reports that mix it with another cause, are truncated or malformed, or come
+    from an older SkillSpector keep the generic error, such as
+    `skillspector-llm failed with unexpected exit code 2`. A provider error
+    that SkillSpector records under a different reason also keeps the generic
+    error.
+  </Accordion>
   <Accordion title="An LLM-backed stage fails immediately">
     Configure a supported provider or select a keyless Tier 1 run with
     `skillevaluator tier1 ./my-skill --no-llm` or

@@ -44,6 +44,23 @@ longer, raise Claude Code's default in `evals/config.yml` with
 keep it below the trial's agent timeout: 300 seconds times
 `harbor.timeout_multiplier` for generated tasks.
 
+Claude Code also runs with its refusal model fallback turned off. When the
+model provider's safety classifier stops the selected model, Claude Code
+would otherwise retry the turn on another model from its own fixed table (for
+example `claude-opus-4-8` after Claude Opus 5.5) under that bare Anthropic
+model ID. A route that does not serve that ID, such as a gateway that serves
+only the selected model, rejects the retry with HTTP 403, and Harbor records
+an unknown API error. Where the retry succeeds, one trial mixes two models but
+is scored as the selected one. Every staged task therefore sets
+`CLAUDE_CODE_DISABLE_REFUSAL_FALLBACK=1` in its environment, in every env mode
+and for every provider route, including the Anthropic API, Bedrock, Vertex AI
+and gateways. One model answers the whole trial, and a refusal ends the
+attempt with Harbor's `AgentSafetyRefusalError`. Like any other failed trial,
+that attempt is not scored and counts against the arm's scored-attempt
+coverage. Neither `harbor.runtime_env` nor a native task's
+`[environment.env]` can turn the fallback back on, and other agents ignore the
+variable.
+
 The `claude` alias is canonicalized to `claude-code` everywhere an agent
 name can appear — `-a/--agents`, `--agent-model`, and `harbor.agents` in
 `evals/config.yml` — so both spellings always name the same agent.

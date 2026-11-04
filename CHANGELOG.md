@@ -21,9 +21,11 @@ All notable changes to SkillEvaluator are documented in this file.
   the `scripts` and `lib` code checks. Each sets `points`, `message`,
   `suggestion`, and its `terms` or `markers`; `points: 0` turns a rule off.
   The section is optional and merges with the packaged values. Without a
-  custom file, scores and findings are unchanged. Every recorded
-  `quality_config` digest changes, packaged and custom, because the digest now
-  covers the error-handling rules, so digests from earlier runs won't match.
+  custom file, scores and findings are unchanged. The packaged
+  `quality_config` digest changes once, because `quality-default.yaml` gained
+  the section. A custom file's digest covers only the rules that file sets, so
+  existing custom files keep their digests and a digest changes only when the
+  file's rules change.
 - Include `skillevaluator ci init`, `ci status` and `ci demo` in the Python
   package. Guided GitHub onboarding discovers skills, configures checks and
   optional public hosted reports, and opens a reviewable setup PR. An optional

@@ -182,6 +182,26 @@ def _yaml_error_detail(exc: yaml.YAMLError) -> str:
 
 
 def load_quality_config(path: Path | None = None) -> QualityConfig:
+    """Load and validate the packaged config, or a custom file merged over it."""
+    return _load(path)[0]
+
+
+def load_quality_config_with_provenance(path: Path | None = None) -> tuple[QualityConfig, QualityConfigProvenance]:
+    """Load the config and describe it. Only the file name is kept, so reports do not leak local paths.
+
+    The digest covers the rules the file itself defines. For a custom file, packaged values it
+    omits are left out, so its digest changes only when its own rules change.
+    """
+    config, declared = _load(path)
+    provenance: QualityConfigProvenance = {
+        "source": "custom" if path else "packaged",
+        "file": path.name if path else None,
+        "digest": quality_config_digest(declared),
+    }
+    return config, provenance
+
+
+def _load(path: Path | None) -> tuple[QualityConfig, dict]:
     source = str(path) if path else "packaged quality-default.yaml"
     try:
         text = path.read_text(encoding="utf-8") if path else DEFAULT_QUALITY_CONFIG.read_text(encoding="utf-8")
@@ -247,22 +267,24 @@ def load_quality_config(path: Path | None = None) -> QualityConfig:
 
     if path is None:
         error_handling = _parse_error_handling(raw.get("error_handling"), source, base=None)
-    else:
-        packaged = load_quality_config()["error_handling"]
-        error_handling = _parse_error_handling(raw.get("error_handling", {}), source, base=packaged)
-    return {"expected_headers": expected_headers, "error_handling": error_handling}
+        config: QualityConfig = {"expected_headers": expected_headers, "error_handling": error_handling}
+        return config, dict(config)
+    raw_error_handling = raw.get("error_handling", {})
+    packaged = load_quality_config()["error_handling"]
+    error_handling = _parse_error_handling(raw_error_handling, source, base=packaged)
+    declared: dict = {"expected_headers": expected_headers}
+    declared_error_handling = {
+        name: {key: error_handling[name][key] for key in block}
+        for name, block in raw_error_handling.items()
+        if block
+    }
+    if declared_error_handling:
+        declared["error_handling"] = declared_error_handling
+    return {"expected_headers": expected_headers, "error_handling": error_handling}, declared
 
 
-def quality_config_digest(config: QualityConfig) -> str:
+def quality_config_digest(config: QualityConfig | dict) -> str:
     """Return a stable digest of the normalized rules, independent of file formatting."""
     canonical = json.dumps(config, sort_keys=True, separators=(",", ":")).encode()
     return f"sha256:{hashlib.sha256(canonical).hexdigest()}"
 
-
-def quality_config_provenance(path: Path | None, config: QualityConfig) -> QualityConfigProvenance:
-    """Describe the effective config. Only the file name is kept, so reports do not leak local paths."""
-    return {
-        "source": "custom" if path else "packaged",
-        "file": path.name if path else None,
-        "digest": quality_config_digest(config),
-    }

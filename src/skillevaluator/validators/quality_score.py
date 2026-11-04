@@ -37,7 +37,7 @@ from skillevaluator.logging_config import get_logger
 from skillevaluator.models.quality import QualityScoreResult
 from skillevaluator.models.result import Finding, Severity, ValidationResult
 from skillevaluator.models.skill import XML_TAG_RE
-from skillevaluator.quality_config import CodeErrorHandlingRule, load_quality_config, quality_config_provenance
+from skillevaluator.quality_config import CodeErrorHandlingRule, load_quality_config_with_provenance
 from skillevaluator.validators.base import ValidatorBase
 from skillevaluator.validators.frontmatter_parser import FRONTMATTER_PATTERN
 from skillevaluator.validators.markdown import markdown_link_targets
@@ -132,8 +132,7 @@ class QualityScoreValidator(ValidatorBase):
 
     def __init__(self, min_score: int = 70, quality_config: Path | None = None) -> None:
         self.min_score = min_score
-        self.quality_config = load_quality_config(quality_config)
-        self.quality_config_provenance = quality_config_provenance(quality_config, self.quality_config)
+        self.quality_config, self.quality_config_provenance = load_quality_config_with_provenance(quality_config)
 
     @property
     def name(self) -> str:

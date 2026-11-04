@@ -8,8 +8,8 @@ import pytest
 from skillevaluator.quality_config import (
     QualityConfigError,
     load_quality_config,
+    load_quality_config_with_provenance,
     quality_config_digest,
-    quality_config_provenance,
 )
 
 
@@ -238,14 +238,13 @@ def test_quality_config_digest_ignores_formatting_but_not_rules(tmp_path: Path) 
 def test_quality_config_provenance_names_custom_file_without_its_directory(tmp_path: Path) -> None:
     config_path = tmp_path / "team-quality.yaml"
     config_path.write_text("expected_headers: []\n", encoding="utf-8")
-    config = load_quality_config(config_path)
 
-    assert quality_config_provenance(config_path, config) == {
+    assert load_quality_config_with_provenance(config_path)[1] == {
         "source": "custom",
         "file": "team-quality.yaml",
-        "digest": quality_config_digest(config),
+        "digest": quality_config_digest({"expected_headers": []}),
     }
-    assert quality_config_provenance(None, load_quality_config())["file"] is None
+    assert load_quality_config_with_provenance(None)[1]["file"] is None
 
 
 PACKAGED_ERROR_HANDLING = {
@@ -364,7 +363,51 @@ def test_quality_config_digest_covers_error_handling(tmp_path: Path) -> None:
     )
     packaged_headings_only = _write_config(tmp_path, "")
 
-    digest = quality_config_digest(load_quality_config(compact))
+    digest = _digest(compact)
 
-    assert quality_config_digest(load_quality_config(verbose)) == digest
-    assert quality_config_digest(load_quality_config(packaged_headings_only)) != digest
+    assert _digest(verbose) == digest
+    assert _digest(packaged_headings_only) != digest
+
+
+def _digest(path: Path | None) -> str:
+    return load_quality_config_with_provenance(path)[1]["digest"]
+
+
+def test_packaged_digest_covers_the_whole_packaged_config() -> None:
+    assert _digest(None) == quality_config_digest(load_quality_config())
+
+
+def test_custom_digest_covers_only_the_rules_the_file_sets(tmp_path: Path) -> None:
+    def write(name: str, body: str) -> Path:
+        path = tmp_path / name
+        path.write_text("expected_headers: []\n" + body, encoding="utf-8")
+        return path
+
+    headings_only = write("headings-only.yaml", "")
+    empty_section = write("empty-section.yaml", "error_handling: {mentioned: {}}\n")
+    one_key = write("one-key.yaml", "error_handling: {mentioned: {points: 9}}\n")
+
+    assert _digest(headings_only) == quality_config_digest({"expected_headers": []})
+    assert _digest(empty_section) == _digest(headings_only)
+    assert _digest(one_key) == quality_config_digest(
+        {"expected_headers": [], "error_handling": {"mentioned": {"points": 9}}}
+    )
+
+
+def test_custom_digest_ignores_packaged_defaults_the_file_omits(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    from skillevaluator import quality_config
+
+    custom = _write_config(tmp_path, "error_handling: {scripts: {points: 2}}\n")
+    before_config, before = load_quality_config_with_provenance(custom)
+    changed_default = tmp_path / "changed-default.yaml"
+    changed_default.write_text(
+        quality_config.DEFAULT_QUALITY_CONFIG.read_text(encoding="utf-8").replace("points: 10", "points: 11"),
+        encoding="utf-8",
+    )
+    monkeypatch.setattr(quality_config, "DEFAULT_QUALITY_CONFIG", changed_default)
+
+    after_config, after = load_quality_config_with_provenance(custom)
+
+    assert after_config["error_handling"]["mentioned"]["points"] == 11  # the new default still applies
+    assert before_config["error_handling"]["mentioned"]["points"] == 10
+    assert after["digest"] == before["digest"]

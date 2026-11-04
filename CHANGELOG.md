@@ -12,6 +12,11 @@ All notable changes to SkillEvaluator are documented in this file.
 
 ### Added
 
+- Private runtime runs retain sanitized loading, coverage, MCP, behavior and
+  comparison views before cleanup. The saved snapshot supports offline reports
+  in all six existing formats, with explicit missing evidence and omissions.
+  Public command activation remains deferred.
+
 - Allow hosted CI reports and PR comments from scans called through explicitly
   approved reusable workflow wrappers. Direct callers retain the existing setup;
   signed evaluator identity and exact consumer workflow approvals remain required.

@@ -1,0 +1,20 @@
+<section class="table-section" id="plugin-runtime-evidence" aria-label="Plugin runtime evidence">
+  <h2>Plugin runtime evidence: {{ plugin_runtime.name }}</h2>
+  <p>Evidence status: {{ plugin_runtime.status }}. Execution status: {{ plugin_runtime.execution_status }}.</p>
+  <p>Run: {{ 'unknown' if plugin_runtime.run_id is none else plugin_runtime.run_id }}</p>
+  <p>Advisory observations do not change scores or validation gates.</p>
+  {% if plugin_runtime.truncated %}<p>Some runtime evidence was omitted by report bounds; see section counts.</p>{% endif %}
+  {% for section in plugin_runtime.sections %}
+  <section aria-label="{{ section.title }}">
+    <h3>{{ section.title }}</h3>
+    {% for note in section.notes %}{% if note is not none %}<p>{{ note }}</p>{% endif %}{% endfor %}
+    {% if section.rows %}
+    <div class="table-scroll" tabindex="0" role="region" aria-label="{{ section.title }}"><table class="contributor-table plugin-runtime-table">
+      <thead><tr>{% for column in section.columns %}<th scope="col">{{ column }}</th>{% endfor %}</tr></thead>
+      <tbody>{% for row in section.rows %}<tr>{% for cell in row %}<td>{{ 'unknown' if cell is none else cell }}</td>{% endfor %}</tr>{% endfor %}</tbody>
+    </table></div>
+    {% endif %}
+    {% if section.omitted %}<p>{{ section.omitted }} more rows omitted ({{ section.total }} total).</p>{% endif %}
+  </section>
+  {% endfor %}
+</section>

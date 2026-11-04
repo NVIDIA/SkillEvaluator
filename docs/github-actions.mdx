@@ -22,8 +22,8 @@ The shared image includes **Tier 1 and SkillSpector security scanning**.
 
 ### Copy the ready-to-use template
 
-Open [skill-checks.yml](https://github.com/NVIDIA/SkillEvaluator/blob/main/ci/bundles/0.7.1/skill-checks.yml)
-from the [ready-to-use templates](https://github.com/NVIDIA/SkillEvaluator/tree/main/ci/bundles/0.7.1).
+Open [skill-checks.yml](https://github.com/NVIDIA/SkillEvaluator/blob/main/ci/bundles/0.7.2/skill-checks.yml)
+from the [ready-to-use templates](https://github.com/NVIDIA/SkillEvaluator/tree/main/ci/bundles/0.7.2).
 Use GitHub's **Raw** view to copy it into `.github/workflows/skill-checks.yml`.
 The template already supplies pinned workflow and image versions.
 
@@ -124,7 +124,7 @@ succeeds**. It needs a second workflow plus one-time hosting and approval settin
   get both workflows.
 </Card>
 
-Copy [publish-skill-reports.yml](https://github.com/NVIDIA/SkillEvaluator/blob/main/ci/bundles/0.7.1/publish-skill-reports.yml)
+Copy [publish-skill-reports.yml](https://github.com/NVIDIA/SkillEvaluator/blob/main/ci/bundles/0.7.2/publish-skill-reports.yml)
 from the same template folder as your scan workflow. Complete the one-time setup below,
 or let the [CLI](/skills/skillevaluator/cli-onboarding) handle it.
 
@@ -228,7 +228,7 @@ or let the [CLI](/skills/skillevaluator/cli-onboarding) handle it.
     commit SHAs for each run. The component still pins its evaluator and image
     immutably. Use a full component SHA when you want to hold that version fixed.
 
-    Use a publisher revision that supports these delegation inputs; the
+    Use SkillEvaluator 0.7.2 or later and its reviewed publisher for these delegation inputs; the
     archived 0.7.1 publisher does not. Direct callers keep an immutable
     evaluator approval. For manual configuration, follow the
     [shared-workflow setup](https://github.com/NVIDIA/SkillEvaluator/blob/main/ci/README.md#calling-through-a-shared-workflow)

@@ -182,6 +182,15 @@ All notable changes to SkillEvaluator are documented in this file.
   `tier1` leaves a check out and reports it as skipped. A `scanners` row and the
   JSON report record which scanner versions ran.
 
+- `scripts/ci/check_public_benchmarks.py` accepts `--expected-source-repository`,
+  `--expected-source-revision` and `--expected-evaluator-container-revision`,
+  so a publishing pipeline can check that each card names the source it asked
+  to evaluate. A card of any verdict fails when the matching `Evaluated source`,
+  `Evaluated source revision` or `Evaluator container revision` line is
+  missing, `not recorded`, duplicated or different. Values are compared in the
+  canonical form the card records, and any of these options implies
+  `--require-files`. Without them the scan is unchanged.
+
 ### Changed
 
 - Shared LLM calls and the Harbor verifier retry HTTP 408, 429, and every 5xx

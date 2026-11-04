@@ -31,6 +31,18 @@ def test_rollout_runbook_covers_safe_backfill_and_freshness() -> None:
     assert "without completed required Tier 1, Tier 2," in runbook
 
 
+def test_rollout_runbook_documents_the_expected_source_options() -> None:
+    runbook = (REPO / "docs/benchmark-rollout.mdx").read_text(encoding="utf-8")
+
+    for flag in (
+        "--expected-source-repository",
+        "--expected-source-revision",
+        "--expected-evaluator-container-revision",
+    ):
+        assert flag in runbook
+    assert "`--expected-*` option also implies `--require-files`" in runbook
+
+
 def test_ci_runs_benchmark_gate_with_project_dependencies() -> None:
     workflow = (REPO / ".github/workflows/ci.yml").read_text(encoding="utf-8")
 

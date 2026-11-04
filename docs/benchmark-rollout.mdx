@@ -165,6 +165,31 @@ skillevaluator validate ./my-skill \
   --evaluator-container-revision ghcr.io/nvidia/skillevaluator@sha256:0117bc2e...
 ```
 
+A pipeline that publishes cards for a requested source can also check that each
+card names that source, so a stale card or one generated for another commit
+fails before it is signed or copied:
+
+```bash
+uv run python scripts/ci/check_public_benchmarks.py \
+  --require-source-provenance \
+  --expected-source-repository NVIDIA/NVFlare \
+  --expected-source-revision 2263a2ebdab903e87f7e7c0a001d22c3a926a9cf \
+  --expected-evaluator-container-revision ghcr.io/nvidia/skillevaluator@sha256:0117bc2e... \
+  ./benchmark-backfill/example-skill
+```
+
+Each `--expected-*` option is optional and checks one metadata line of every
+scanned card, whatever its verdict: `Evaluated source`,
+`Evaluated source revision` or `Evaluator container revision`. The line must
+appear once in `Evaluation Metadata` and hold the same value; a missing line, a
+`not recorded` placeholder, a duplicate or a different value fails the scan.
+The expected values use the same forms as the `validate` options above, and a
+malformed value stops the scan with a usage error. Hex digits are compared
+without regard to case, while repository names must match exactly. The card's
+revision line is the commit when one was supplied and the content digest
+otherwise, so pass the same kind of revision the run received. Any
+`--expected-*` option also implies `--require-files`.
+
 A `PASS` card must also record its `Source digest` and `Tier 3 run ID`, so a
 `PASS` card rendered by an earlier release fails the scan until it is
 regenerated. Earlier `FAIL`, `NEUTRAL`, and `INCOMPLETE` cards without those

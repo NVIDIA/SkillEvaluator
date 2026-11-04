@@ -119,8 +119,9 @@ The optional publisher hosts the HTML and posts a comment **after deployment
 succeeds**. It needs a second workflow plus one-time hosting and approval settings.
 
 <Card title="Try the guided setup" icon="terminal" href="/skills/skillevaluator/cli-onboarding">
-  The CLI prepares those settings and both workflow files, then opens a setup
-  PR for you to review.
+  The CLI recognizes an existing single-job scan, keeps its settings and
+  component version tag, and adds reporting in a setup PR. New repositories
+  get both workflows.
 </Card>
 
 Copy [publish-skill-reports.yml](https://github.com/NVIDIA/SkillEvaluator/blob/main/ci/bundles/0.7.1/publish-skill-reports.yml)
@@ -134,7 +135,9 @@ or let the [CLI](/skills/skillevaluator/cli-onboarding) handle it.
     The main steps are:
 
     1. Enable **Settings → Pages → Source: GitHub Actions** and initialize the
-       `gh-pages` report-history branch. Preserve any existing site or history.
+       `gh-pages` report-history branch. For private reports, an administrator
+       must also select **Private** site visibility in GitHub's settings; see
+       the private-hosting requirements below. Preserve any existing site or history.
     2. Add `publish-skill-reports.yml` with your Pages URL. Keep the evaluator
        and publisher versions supplied by the release.
     3. Grant the scan workflow `id-token: write`, then approve its exact contents
@@ -156,6 +159,20 @@ or let the [CLI](/skills/skillevaluator/cli-onboarding) handle it.
     alone does not make its Pages site private. Reports may contain source
     excerpts and unmerged findings. Use downloadable artifacts when public
     hosting is unsuitable.
+  </Accordion>
+  <Accordion title="Can our private repository publish private reports?">
+    Access-controlled Pages requires a private or internal project repository
+    owned by a GitHub Enterprise Cloud organization. An administrator first
+    selects **GitHub Actions** and **Private** in **Settings → Pages**. The
+    REST API cannot set Pages visibility. Personal repositories cannot host
+    private Pages.
+
+    The CLI verifies the existing private site and uses its assigned
+    `*.pages.github.io` URL. It accepts an existing SkillEvaluator report site
+    or a newly configured empty private site, and preserves unrelated websites.
+    If private hosting is unavailable, choose checks only. See
+    [private report hosting](cli-onboarding.mdx#private-report-hosting) for the
+    guided path and [GitHub's access-control requirements](https://docs.github.com/en/enterprise-cloud@latest/pages/getting-started-with-github-pages/changing-the-visibility-of-your-github-pages-site).
   </Accordion>
 </AccordionGroup>
 
@@ -193,18 +210,30 @@ or let the [CLI](/skills/skillevaluator/cli-onboarding) handle it.
     report remains a separate way to inspect available findings.
   </Accordion>
   <Accordion title="Our organization uses a shared workflow wrapper">
-    Each repository still supplies its own skill folders. To publish results
-    through a shared wrapper, use a publisher revision with the
-    `trusted-wrapper-workflows` input and approve each wrapper by its full
-    workflow path and commit SHA. The archived 0.7.1 publisher does not have
-    this input. Direct callers need no wrapper approval.
+    Keep the component reference in your existing caller, for example
+    `your-org/ci/.github/workflows/skill-checks.yml@v3`, then run
+    `skillevaluator ci init` in each consumer repository. The CLI recognizes
+    `.github/workflows/skill-checks.yml` with the name **Skill checks** and one
+    reusable scan job. It preserves inputs, triggers and the version tag while
+    adding the publisher and any needed scan-job `id-token: write` permission.
 
-    Grant `id-token: write` in the consumer scan job and every wrapper job
-    calling the next workflow. Keep the existing evaluator and consumer-file
-    approvals, then start a new scan. Follow the
+    The component maintainer must first grant `id-token: write` in the job
+    calling the evaluator. The CLI checks that prerequisite before applying
+    reporting setup; a consumer permission alone cannot grant it downstream.
+
+    With delegation, the publisher approves the exact component path and tag
+    in `trusted-wrapper-workflows` and `delegated-evaluator-wrapper`. Updating
+    `v3` then updates future scans centrally, with no consumer workflow edit.
+    Published execution receipts record the resolved component and evaluator
+    commit SHAs for each run. The component still pins its evaluator and image
+    immutably. Use a full component SHA when you want to hold that version fixed.
+
+    Use a publisher revision that supports these delegation inputs; the
+    archived 0.7.1 publisher does not. Direct callers keep an immutable
+    evaluator approval. For manual configuration, follow the
     [shared-workflow setup](https://github.com/NVIDIA/SkillEvaluator/blob/main/ci/README.md#calling-through-a-shared-workflow)
-    for the YAML and update procedure. PR comments still follow successful
-    report deployment; internal reports need appropriately restricted hosting.
+    guide. PR comments follow successful report deployment; private reports
+    require the private Pages setup described above.
   </Accordion>
   <Accordion title="Do the checks need an LLM key or network access?">
     Default Tier 1 checks use no model key. Dependency audits can contact

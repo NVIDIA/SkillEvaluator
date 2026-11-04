@@ -12,6 +12,16 @@ All notable changes to SkillEvaluator are documented in this file.
 
 ### Added
 
+- Add reporting to an existing single-job GitHub scan caller without replacing
+  its skill folders, thresholds, triggers or shared component. Explicit version
+  tag delegation lets a central component update its pinned evaluator while
+  reports retain the actual resolved commits and signed scan identity.
+- Support CLI setup with verified private GitHub Pages in Enterprise Cloud
+  organization repositories. The CLI preserves site access controls and checks
+  the report URL; an administrator must select private visibility in GitHub
+  once when no private site exists. Personal private repositories retain
+  downloadable reports. Publishing rechecks private report-site access.
+
 - Allow hosted CI reports and PR comments from scans called through explicitly
   approved reusable workflow wrappers. Direct callers retain the existing setup;
   signed evaluator identity and exact consumer workflow approvals remain required.

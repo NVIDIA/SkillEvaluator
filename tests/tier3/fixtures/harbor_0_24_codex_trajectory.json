@@ -1,0 +1,269 @@
+{
+  "schema_version": "ATIF-v1.7",
+  "session_id": "00000000-0000-4000-8000-000000000001",
+  "agent": {
+    "name": "codex",
+    "version": "0.0.0-test",
+    "model_name": "gpt-5-mini",
+    "extra": {
+      "originator": "codex_exec",
+      "cwd": "/workspace"
+    }
+  },
+  "steps": [
+    {
+      "step_id": 1,
+      "timestamp": "2026-05-01T12:00:00.020Z",
+      "source": "system",
+      "message": "Follow the workspace rules."
+    },
+    {
+      "step_id": 2,
+      "timestamp": "2026-05-01T12:00:00.030Z",
+      "source": "user",
+      "message": "<environment_context>cwd=/workspace</environment_context>"
+    },
+    {
+      "step_id": 3,
+      "timestamp": "2026-05-01T12:00:00.040Z",
+      "source": "user",
+      "message": "Summarize README.md."
+    },
+    {
+      "step_id": 4,
+      "timestamp": "2026-05-01T12:00:03.100Z",
+      "source": "agent",
+      "model_name": "gpt-5-mini",
+      "message": "I'll read the file.",
+      "reasoning_content": "Read the file first.",
+      "tool_calls": [
+        {
+          "tool_call_id": "call_1",
+          "function_name": "exec_command",
+          "arguments": {
+            "cmd": "cat README.md"
+          }
+        }
+      ],
+      "observation": {
+        "results": [
+          {
+            "source_call_id": "call_1",
+            "content": "Chunk ID: a1b2c3\nWall time: 1.4000 seconds\nProcess exited with code 0\nOriginal token count: 3\nOutput:\n# Demo\nWall time: 999 seconds\n"
+          }
+        ]
+      },
+      "metrics": {
+        "prompt_tokens": 400,
+        "completion_tokens": 40,
+        "cost_usd": 0.00017999999999999998,
+        "extra": {
+          "reasoning_output_tokens": null,
+          "total_tokens": 440
+        }
+      },
+      "llm_call_count": 1,
+      "extra": {
+        "api_call_id": "api_call_1",
+        "codex_turn_id": "turn-1",
+        "tool_call_details": {
+          "call_1": {
+            "raw_arguments": "{\"cmd\": \"cat README.md\"}",
+            "item_type": "function_call"
+          }
+        }
+      }
+    },
+    {
+      "step_id": 5,
+      "timestamp": "2026-05-01T12:00:06.000Z",
+      "source": "agent",
+      "model_name": "gpt-5-mini",
+      "message": "",
+      "tool_calls": [
+        {
+          "tool_call_id": "call_2",
+          "function_name": "exec_command",
+          "arguments": {
+            "cmd": "wc -l README.md"
+          }
+        },
+        {
+          "tool_call_id": "call_3",
+          "function_name": "exec_command",
+          "arguments": {
+            "cmd": "ls"
+          }
+        }
+      ],
+      "observation": {
+        "results": [
+          {
+            "source_call_id": "call_2",
+            "content": "Chunk ID: d4e5f6\nWall time: 0.7000 seconds\nProcess exited with code 0\nOriginal token count: 3\nOutput:\n12 README.md\n"
+          },
+          {
+            "source_call_id": "call_3",
+            "content": "Chunk ID: 0a1b2c\nWall time: 1.1000 seconds\nProcess exited with code 0\nOriginal token count: 3\nOutput:\nREADME.md\n"
+          }
+        ]
+      },
+      "metrics": {
+        "prompt_tokens": 400,
+        "completion_tokens": 40,
+        "cost_usd": 0.00017999999999999998,
+        "extra": {
+          "reasoning_output_tokens": null,
+          "total_tokens": 440
+        }
+      },
+      "llm_call_count": 1,
+      "extra": {
+        "api_call_id": "api_call_2",
+        "codex_turn_id": "turn-1",
+        "tool_call_details": {
+          "call_2": {
+            "raw_arguments": "{\"cmd\": \"wc -l README.md\"}",
+            "item_type": "function_call"
+          },
+          "call_3": {
+            "raw_arguments": "{\"cmd\": \"ls\"}",
+            "item_type": "function_call"
+          }
+        }
+      }
+    },
+    {
+      "step_id": 6,
+      "timestamp": "2026-05-01T12:00:09.000Z",
+      "source": "agent",
+      "model_name": "gpt-5-mini",
+      "message": "",
+      "tool_calls": [
+        {
+          "tool_call_id": "call_4",
+          "function_name": "shell",
+          "arguments": {
+            "command": [
+              "bash",
+              "-lc",
+              "ls"
+            ]
+          }
+        }
+      ],
+      "observation": {
+        "results": [
+          {
+            "source_call_id": "call_4",
+            "content": "README.md\n"
+          }
+        ]
+      },
+      "metrics": {
+        "prompt_tokens": 400,
+        "completion_tokens": 40,
+        "cost_usd": 0.00017999999999999998,
+        "extra": {
+          "reasoning_output_tokens": null,
+          "total_tokens": 440
+        }
+      },
+      "llm_call_count": 1,
+      "extra": {
+        "api_call_id": "api_call_3",
+        "codex_turn_id": "turn-1",
+        "tool_call_details": {
+          "call_4": {
+            "metadata": {
+              "exit_code": 0,
+              "duration_seconds": 0.8
+            },
+            "raw_arguments": "{\"command\": [\"bash\", \"-lc\", \"ls\"]}",
+            "item_type": "function_call"
+          }
+        }
+      }
+    },
+    {
+      "step_id": 7,
+      "timestamp": "2026-05-01T12:00:12.000Z",
+      "source": "agent",
+      "model_name": "gpt-5-mini",
+      "message": "",
+      "tool_calls": [
+        {
+          "tool_call_id": "call_5",
+          "function_name": "apply_patch",
+          "arguments": {
+            "input": "*** Begin Patch\n*** Update File: README.md\n@@\n-# Demo\n+# Demo project\n*** End Patch\n"
+          }
+        }
+      ],
+      "observation": {
+        "results": [
+          {
+            "source_call_id": "call_5",
+            "content": "Exit code: 0\nWall time: 0.1 seconds\nOutput:\nSuccess. Updated the following files:\nM README.md\n"
+          }
+        ]
+      },
+      "metrics": {
+        "prompt_tokens": 400,
+        "completion_tokens": 40,
+        "cost_usd": 0.00017999999999999998,
+        "extra": {
+          "reasoning_output_tokens": null,
+          "total_tokens": 440
+        }
+      },
+      "llm_call_count": 1,
+      "extra": {
+        "api_call_id": "api_call_4",
+        "codex_turn_id": "turn-1",
+        "tool_call_details": {
+          "call_5": {
+            "raw_arguments": "*** Begin Patch\n*** Update File: README.md\n@@\n-# Demo\n+# Demo project\n*** End Patch\n",
+            "item_type": "custom_tool_call"
+          }
+        }
+      }
+    },
+    {
+      "step_id": 8,
+      "timestamp": "2026-05-01T12:00:14.000Z",
+      "source": "agent",
+      "model_name": "gpt-5-mini",
+      "message": "README.md describes a demo project.",
+      "metrics": {
+        "prompt_tokens": 400,
+        "completion_tokens": 40,
+        "cost_usd": 0.00017999999999999998,
+        "extra": {
+          "reasoning_output_tokens": null,
+          "total_tokens": 440
+        }
+      },
+      "llm_call_count": 1,
+      "extra": {
+        "api_call_id": "api_call_5",
+        "codex_turn_id": "turn-1"
+      }
+    }
+  ],
+  "final_metrics": {
+    "total_prompt_tokens": 2000,
+    "total_completion_tokens": 200,
+    "total_cost_usd": 0.0009,
+    "total_steps": 8,
+    "extra": {
+      "reasoning_output_tokens": null,
+      "total_tokens": 2200,
+      "last_token_usage": {
+        "input_tokens": 400,
+        "output_tokens": 40,
+        "total_tokens": 440
+      }
+    }
+  }
+}

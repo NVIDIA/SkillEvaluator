@@ -7,7 +7,7 @@ Provides a single ``LLMClient`` class for public provider-backed checks. The
 class supports two usage patterns:
 
 1. **Direct** -- call ``completions()`` or ``extract_json_from_response()``
-   with explicit system/user prompts.
+   with explicit system/user prompts, or ``chat()`` with a multi-turn history.
 2. **Template-method** -- subclass and override ``get_system_prompt``,
    ``create_user_prompt``, ``parse_response``, and
    ``get_fallback_response``, then call ``process(**kwargs)``.
@@ -23,7 +23,7 @@ import json
 import os
 import re
 import urllib.error
-from collections.abc import Callable
+from collections.abc import Callable, Mapping, Sequence
 from dataclasses import replace
 from typing import Any, NamedTuple
 from urllib.parse import urlsplit
@@ -328,6 +328,39 @@ def _checked_content(content: str, stop_reason: object, refusal: object = None) 
     return content
 
 
+_CHAT_TURN_ROLES = frozenset({"user", "assistant"})
+
+
+def _split_chat_history(messages: Sequence[Mapping[str, str]]) -> tuple[str | None, list[dict[str, str]]]:
+    """Split an OpenAI-style history into its leading system text and its conversation turns."""
+    if not messages:
+        raise LLMClientError("chat requires at least one message")
+    system_parts: list[str] = []
+    turns: list[dict[str, str]] = []
+    for message in messages:
+        role = message.get("role") if isinstance(message, Mapping) else None
+        content = message.get("content") if isinstance(message, Mapping) else None
+        if not isinstance(content, str):
+            raise LLMClientError("chat message content must be a string")
+        if role == "system":
+            if turns:
+                raise LLMClientError("chat system messages must come before the user and assistant turns")
+            system_parts.append(content)
+        elif role in _CHAT_TURN_ROLES:
+            turns.append({"role": str(role), "content": content})
+        else:
+            raise LLMClientError("chat message role must be system, user or assistant")
+    if not turns:
+        raise LLMClientError("chat requires at least one user or assistant message")
+    return ("\n\n".join(system_parts) if system_parts else None), turns
+
+
+def _chat_messages(system_prompt: str | None, turns: list[dict[str, str]]) -> list[dict[str, str]]:
+    """Return an OpenAI-style message list: the optional system message, then the turns."""
+    system = [{"role": "system", "content": system_prompt}] if system_prompt is not None else []
+    return [*system, *(dict(turn) for turn in turns)]
+
+
 def _extract_choice_content(response: Any) -> str:
     choices = getattr(response, "choices", None) or []
     first_choice = choices[0] if choices else None
@@ -346,7 +379,8 @@ class LLMClient:
     Supports two usage modes:
 
     1. **Direct** -- call :meth:`completions` or
-       :meth:`extract_json_from_response` with explicit prompts.
+       :meth:`extract_json_from_response` with explicit prompts, or
+       :meth:`chat` with a multi-turn history.
     2. **Template-method** -- subclass and override
        :meth:`get_system_prompt`, :meth:`create_user_prompt`,
        :meth:`parse_response`, and :meth:`get_fallback_response`, then
@@ -572,6 +606,36 @@ class LLMClient:
 
         Raises :class:`LLMClientError` when the response is empty.
         """
+        return self._complete_messages(
+            system_prompt,
+            [{"role": "user", "content": user_prompt}],
+            response_schema=response_schema,
+            schema_name=schema_name,
+        )
+
+    def chat(self, messages: Sequence[Mapping[str, str]]) -> str:
+        """Send a multi-turn conversation and return the reply text.
+
+        ``messages`` is an OpenAI-style history: optional leading ``system``
+        messages, then ``user`` and ``assistant`` turns. Anthropic receives the
+        system text in its separate ``system`` field. Retries, the typed
+        refusal, truncation and empty-reply errors, Anthropic server-side
+        fallback and the ADC token refresh work as in :meth:`completions`, and
+        provider SDK errors are raised unchanged after the retries. An invalid
+        history raises :class:`LLMClientError` before any client is created.
+        """
+        system_prompt, turns = _split_chat_history(messages)
+        return self._complete_messages(system_prompt, turns)
+
+    def _complete_messages(
+        self,
+        system_prompt: str | None,
+        turns: list[dict[str, str]],
+        *,
+        response_schema: dict[str, Any] | None = None,
+        schema_name: str = "judge_response",
+    ) -> str:
+        """Send ``turns`` after an optional system prompt and return the response text."""
         config = self._resolved_config()
         client = self._get_client()
         target_key = SchemaTargetKey(config.provider, config.base_url or "", config.model)
@@ -586,8 +650,8 @@ class LLMClient:
                     call_kwargs: dict[str, Any] = {
                         "model": config.model,
                         "max_tokens": _anthropic_max_tokens(config.model, max_tokens or MAX_COMPLETION_TOKENS),
-                        "system": system_prompt,
-                        "messages": [{"role": "user", "content": user_prompt}],
+                        **({"system": system_prompt} if system_prompt is not None else {}),
+                        "messages": [dict(turn) for turn in turns],
                         **_temperature_kwargs(config.model, self._temperature),
                     }
                     output_config: dict[str, Any] = {}
@@ -623,10 +687,7 @@ class LLMClient:
                     ) from exc
                 response = completion(
                     model=config.litellm_model,
-                    messages=[
-                        {"role": "system", "content": system_prompt},
-                        {"role": "user", "content": user_prompt},
-                    ],
+                    messages=_chat_messages(system_prompt, turns),
                     aws_region_name=config.region,
                     **_temperature_kwargs(config.model, self._temperature),
                     **({"max_tokens": max_tokens} if max_tokens is not None else {}),
@@ -638,10 +699,7 @@ class LLMClient:
                 call_kwargs: dict[str, Any] = {
                     "model": config.model,
                     "stream": False,
-                    "messages": [
-                        {"role": "system", "content": system_prompt},
-                        {"role": "user", "content": user_prompt},
-                    ],
+                    "messages": _chat_messages(system_prompt, turns),
                     **_temperature_kwargs(config.model, self._temperature),
                     **_token_limit_kwargs(config, max_tokens),
                     **({"reasoning_effort": reasoning_effort} if reasoning_effort is not None else {}),

@@ -12,6 +12,10 @@ All notable changes to SkillEvaluator are documented in this file.
 
 ### Added
 
+- Allow hosted CI reports and PR comments from scans called through explicitly
+  approved reusable workflow wrappers. Direct callers retain the existing setup;
+  signed evaluator identity and exact consumer workflow approvals remain required.
+
 - Include `skillevaluator ci init`, `ci status` and `ci demo` in the Python
   package. Guided GitHub onboarding discovers skills, configures checks and
   optional public hosted reports, and opens a reviewable setup PR. An optional
@@ -21,6 +25,16 @@ All notable changes to SkillEvaluator are documented in this file.
   template path. Keep GitHub and GitLab as the two repository-integration choices.
 - Allow CI release templates to pin the reviewed report publisher separately
   from the verified scanner workflow and image.
+- `tier3 select-decoys` selects neighboring skills from a local description-
+  embedding catalog and saves a reproducible JSON manifest with scores,
+  catalog/model identity, and content hashes. Group evaluations can opt in
+  with `skill_workspace.decoy_manifest` in `evals/config.yml`; selected content
+  is verified and shared between paired arms without selecting again.
+  Explicit helper skills and existing workspace defaults remain unchanged.
+  Selections exclude skills bundled inside the target and use portable roots
+  for the target's collection. Decoy hashes cover the staged runtime content,
+  so evaluation configs and other decoy manifests do not invalidate them.
+  Output guards protect evaluation inputs and existing non-manifest files.
 
 - In local mode (`--env-mode local`), a missing Claude Code, Codex, or OpenCode
   CLI is offered as a pinned npm install into the SkillEvaluator runtime folder;
@@ -721,6 +735,19 @@ All notable changes to SkillEvaluator are documented in this file.
   earlier sandboxed command run outside the sandbox. A `bwrap` symlink on
   `PATH` is resolved to its target before the smoke test, and the local-mode
   isolation message names that resolved path.
+
+## 0.7.2 - 2026-11-03
+
+- Add reporting to an existing single-job GitHub scan caller while preserving
+  its skill folders, thresholds, triggers and shared component. Explicit wrapper
+  delegation supports central version-tag updates and retains signed scan
+  identity and the resolved workflow commits in published receipts.
+- Support CLI setup with verified private GitHub Pages in eligible Enterprise
+  Cloud organization repositories. Publication rechecks site access and the
+  expected URL before retaining reports and before deployment. Private Pages
+  must already be configured by an administrator.
+- Publish updated onboarding templates and CLI metadata while retaining the
+  existing verified scanner workflow and immutable container image.
 
 ## 0.6.0 - 2026-10-20
 

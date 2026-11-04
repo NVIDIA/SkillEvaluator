@@ -170,8 +170,8 @@ clean.
 
 The same applies when a skill exceeds a work limit on content that was
 already collected: the content-chunk or comparison-work limit, or a limit on
-the LLM review (candidate clusters, members in one cluster, or prompt size per
-cluster or in total). Tier 2 stops and reports the scan as **INCOMPLETE**, not
+the LLM review (the number of candidate clusters, or prompt size per cluster
+or in total). Tier 2 stops and reports the scan as **INCOMPLETE**, not
 as a duplicate-content finding, with an execution error that names the limit;
 the JSON report records it under `work_limit`. A policy severity override
 cannot turn the incomplete scan into a pass. Split the skill or remove repeated
@@ -357,7 +357,7 @@ you intend to skip Tier 2 entirely.
 | Intra-skill content chunks | 512 | Per-skill ceiling, checked before any embedding request |
 | Intra-skill comparison work | 267,911,168 scalar comparisons | Bounds all-pairs clustering; allows all 512 chunks with embeddings of up to 2,048 dimensions, 418 chunks at 3,072, and 362 at 4,096 |
 | Intra-skill LLM review clusters | 50 | Most candidate clusters sent for chat-LLM review in one skill |
-| Intra-skill cluster members | 512 | Same as the chunk ceiling; every member must also fit the review prompt limits |
+| Intra-skill cluster members | 512 | Same as the chunk ceiling, so it never stops a scan on its own; the review prompt limits decide |
 | Intra-skill review prompt | 64,000 characters | One cluster's request, system prompt included; exactly repeated text (a Markdown section's body after its heading line) is listed once before this limit applies |
 | Intra-skill review prompts in total | 1,000,000 characters | All cluster requests for one skill, checked before the first chat-LLM call |
 
@@ -419,7 +419,7 @@ handling terms before sending confidential skill content to a hosted endpoint.
     | Skill carries large generated snapshots (`evals`, `.evals`, `results`, `.results`, `versions`, `.versions`) | Excluded directories are pruned during traversal, so their contents never count toward the discovered-path limit |
     | A directory is a Windows junction or other reparse point | Rejected during the walk, like symbolic links |
     | Embedding or chat-LLM analysis is incomplete | Reports an error; does not claim a clean result |
-    | Skill exceeds the content-chunk, comparison-work, or LLM-review limit (candidate clusters, cluster members, or prompt size) | Stops before the remaining analysis and reports the scan as incomplete; no duplicate-content finding is added |
+    | Skill exceeds the content-chunk, comparison-work, or LLM-review limit (candidate clusters or prompt size) | Stops before the remaining analysis and reports the scan as incomplete; no duplicate-content finding is added |
     | The chat LLM declines to classify a cluster | Reports an advisory MEDIUM `llm_refused` finding for that cluster's sections |
   </Accordion>
   <Accordion title="Inter-skill analysis">

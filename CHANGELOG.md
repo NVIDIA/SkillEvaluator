@@ -20,6 +20,10 @@ All notable changes to SkillEvaluator are documented in this file.
   show file/line, phase, and reason in incomplete-scan errors. Preserve details
   across scan stages, folder aggregation, and policy application.
 
+- Allow hosted CI reports and PR comments from scans called through explicitly
+  approved reusable workflow wrappers. Direct callers retain the existing setup;
+  signed evaluator identity and exact consumer workflow approvals remain required.
+
 - Include `skillevaluator ci init`, `ci status` and `ci demo` in the Python
   package. Guided GitHub onboarding discovers skills, configures checks and
   optional public hosted reports, and opens a reviewable setup PR. An optional
@@ -29,6 +33,16 @@ All notable changes to SkillEvaluator are documented in this file.
   template path. Keep GitHub and GitLab as the two repository-integration choices.
 - Allow CI release templates to pin the reviewed report publisher separately
   from the verified scanner workflow and image.
+- `tier3 select-decoys` selects neighboring skills from a local description-
+  embedding catalog and saves a reproducible JSON manifest with scores,
+  catalog/model identity, and content hashes. Group evaluations can opt in
+  with `skill_workspace.decoy_manifest` in `evals/config.yml`; selected content
+  is verified and shared between paired arms without selecting again.
+  Explicit helper skills and existing workspace defaults remain unchanged.
+  Selections exclude skills bundled inside the target and use portable roots
+  for the target's collection. Decoy hashes cover the staged runtime content,
+  so evaluation configs and other decoy manifests do not invalidate them.
+  Output guards protect evaluation inputs and existing non-manifest files.
 
 - In local mode (`--env-mode local`), a missing Claude Code, Codex, or OpenCode
   CLI is offered as a pinned npm install into the SkillEvaluator runtime folder;

@@ -705,8 +705,16 @@ def test_scan_evidence_upload_holds_exactly_what_the_publisher_reads(tmp_path):
     ]["steps"]
     uploads = [step for step in steps if step.get("uses", "").startswith("actions/upload-artifact@")]
     assert len(uploads) == 3
-    full = next(step for step in uploads if step["with"]["name"] == "${{ inputs.artifact-name }}-attempt-${{ github.run_attempt }}")
-    evidence = next(step for step in uploads if step["with"]["name"] == "${{ inputs.artifact-name }}-evidence-attempt-${{ github.run_attempt }}")
+    full = next(
+        step
+        for step in uploads
+        if step["with"]["name"] == "${{ inputs.artifact-name }}-attempt-${{ github.run_attempt }}"
+    )
+    evidence = next(
+        step
+        for step in uploads
+        if step["with"]["name"] == "${{ inputs.artifact-name }}-evidence-attempt-${{ github.run_attempt }}"
+    )
     assert evidence["uses"] == full["uses"] and evidence["if"] == full["if"] == "always()"
     assert evidence["with"]["name"] == "${{ inputs.artifact-name }}-evidence-attempt-${{ github.run_attempt }}"
     assert evidence["with"]["retention-days"] == full["with"]["retention-days"]
@@ -1191,6 +1199,97 @@ def test_explicit_fork_evaluator_identity_is_required(monkeypatch):
         publisher._validate_workflow_provenance(FakeAPI(record=record), "owner/consumer", record)
     monkeypatch.setenv("EVALUATOR_REPOSITORY", "example/evaluator")
     publisher._validate_workflow_provenance(FakeAPI(record=record), "owner/consumer", record)
+
+
+WRAPPER = "example/shared/.github/workflows/skills.yml@" + "e" * 40
+SECOND_WRAPPER = "example/platform/.github/workflows/check.yml@" + "f" * 40
+EVALUATOR = "NVIDIA/SkillEvaluator/.github/workflows/evaluate-skills.yml@" + "c" * 40
+
+
+class NestedAPI(FakeAPI):
+    def download_artifact(self, artifact_id):
+        if artifact_id == 457:
+            # GitHub signs the leaf job identity, independent of API reference order.
+            return signed_receipt(self.record, job_workflow_ref=EVALUATOR, job_workflow_sha="c" * 40)
+        return super().download_artifact(artifact_id)
+
+
+@pytest.mark.parametrize("event", ["push", "pull_request", "workflow_dispatch"])
+@pytest.mark.parametrize("wrappers", [[], [WRAPPER], [WRAPPER, SECOND_WRAPPER]])
+@pytest.mark.parametrize("reverse", [False, True])
+def test_approved_wrappers_preserve_leaf_identity_and_direct_publication(
+    tmp_path, monkeypatch, event, wrappers, reverse
+):
+    monkeypatch.setenv("TRUSTED_WRAPPER_WORKFLOWS", "\n".join(wrappers))
+    paths = [*wrappers, EVALUATOR]
+    if reverse:
+        paths.reverse()
+    record = {
+        **run_record(),
+        "event": event,
+        "referenced_workflows": [{"path": path, "sha": path.rsplit("@", 1)[1]} for path in paths],
+    }
+    publisher.publish(
+        NestedAPI(record=record),
+        "owner/consumer",
+        123,
+        "https://owner.github.io/consumer",
+        tmp_path / "site",
+        tmp_path / "output",
+        render=fake_render,
+    )
+    receipt = json.loads((tmp_path / "site/runs/123/1/receipt.json").read_text())
+    assert receipt["trusted_evaluator_sha"] == "c" * 40
+    if wrappers:
+        assert receipt["trusted_wrapper_workflows"] == sorted(wrappers)
+    else:
+        assert "trusted_wrapper_workflows" not in receipt
+
+
+@pytest.mark.parametrize(
+    "approved, paths",
+    [
+        ("", [WRAPPER, EVALUATOR]),
+        (SECOND_WRAPPER, [WRAPPER, EVALUATOR]),
+        (WRAPPER, [WRAPPER, SECOND_WRAPPER, EVALUATOR]),
+        (WRAPPER, [WRAPPER, WRAPPER, EVALUATOR]),
+        (WRAPPER, [WRAPPER, EVALUATOR, EVALUATOR]),
+        (WRAPPER, [WRAPPER]),
+        (WRAPPER.replace("e" * 40, "main"), [WRAPPER, EVALUATOR]),
+        (WRAPPER + ",", [WRAPPER, EVALUATOR]),
+        (WRAPPER.replace("skills.yml", "../skills.yml"), [WRAPPER, EVALUATOR]),
+        (",".join([WRAPPER] * 33), [WRAPPER, EVALUATOR]),
+    ],
+)
+def test_wrapper_trust_rejects_unapproved_ambiguous_or_mutable_references(monkeypatch, approved, paths):
+    monkeypatch.setenv("TRUSTED_WRAPPER_WORKFLOWS", approved)
+    record = {**run_record(), "referenced_workflows": [{"path": path, "sha": path.rsplit("@", 1)[1]} for path in paths]}
+    with pytest.raises(publisher.PublicationError):
+        publisher._validate_workflow_provenance(NestedAPI(record=record), "owner/consumer", record)
+
+
+@pytest.mark.parametrize("failure", ["caller", "receipt", "sha"])
+def test_wrapper_approval_does_not_bypass_caller_receipt_or_sha_validation(monkeypatch, failure):
+    monkeypatch.setenv("TRUSTED_WRAPPER_WORKFLOWS", WRAPPER)
+    record = run_record()
+    record["referenced_workflows"].insert(0, {"path": WRAPPER, "sha": "e" * 40})
+    if failure == "sha":
+        record["referenced_workflows"][0]["sha"] = "f" * 40
+
+    class BadAPI(NestedAPI):
+        def get(self, path):
+            result = super().get(path)
+            if failure == "caller" and "/contents/" in path:
+                return {**result, "sha": "f" * 40}
+            return result
+
+        def download_artifact(self, artifact_id):
+            if failure == "receipt" and artifact_id == 457:
+                return signed_receipt(self.record, job_workflow_ref=WRAPPER, job_workflow_sha="e" * 40)
+            return super().download_artifact(artifact_id)
+
+    with pytest.raises(publisher.PublicationError):
+        publisher._validate_workflow_provenance(BadAPI(record=record), "owner/consumer", record)
 
 
 def test_missing_receipt_is_a_skipped_publisher_run(tmp_path, monkeypatch):

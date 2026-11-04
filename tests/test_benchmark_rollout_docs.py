@@ -32,7 +32,7 @@ def test_rollout_runbook_covers_safe_backfill_and_freshness() -> None:
 
 
 def test_rollout_runbook_documents_the_expected_source_options() -> None:
-    runbook = (REPO / "docs/benchmark-rollout.mdx").read_text(encoding="utf-8")
+    runbook = " ".join((REPO / "docs/benchmark-rollout.mdx").read_text(encoding="utf-8").split())
 
     for flag in (
         "--expected-source-repository",
@@ -41,6 +41,11 @@ def test_rollout_runbook_documents_the_expected_source_options() -> None:
     ):
         assert flag in runbook
     assert "`--expected-*` option also implies `--require-files`" in runbook
+    # Only the source revision is case-folded; repository names and container
+    # revisions are compared exactly, so the runbook must not promise more.
+    assert "Hex digits in the source revision are compared without regard to case." in runbook
+    assert "Hex digits are compared without regard to case" not in runbook
+    assert "Repository names and evaluator container revisions must match the card exactly" in runbook
 
 
 def test_ci_runs_benchmark_gate_with_project_dependencies() -> None:

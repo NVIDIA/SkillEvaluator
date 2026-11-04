@@ -183,13 +183,15 @@ scanned card, whatever its verdict: `Evaluated source`,
 `Evaluated source revision` or `Evaluator container revision`. The line must
 appear once in `Evaluation Metadata` and hold the same value; a missing line, a
 `not recorded` placeholder, a malformed value, a duplicate or a different value
-fails the scan.
-The expected values use the same forms as the `validate` options above, and a
-malformed value stops the scan with a usage error. Hex digits are compared
-without regard to case, while repository names must match exactly. The card's
-revision line is the commit when one was supplied and the content digest
-otherwise, so pass the same kind of revision the run received. Any
-`--expected-*` option also implies `--require-files`.
+fails the scan. The expected values use the same forms as the `validate`
+options above, and a malformed expected value stops the scan with a usage
+error. Hex digits in the source revision are compared without regard to case.
+Repository names and evaluator container revisions must match the card
+exactly, so give a container digest or implementation commit in lower case and
+the registry host as the card records it. The card's revision line is the
+commit when one was supplied and the content digest otherwise, so pass the
+same kind of revision the run received. Any `--expected-*` option also implies
+`--require-files`.
 
 A `PASS` card must also record its `Source digest` and `Tier 3 run ID`, so a
 `PASS` card rendered by an earlier release fails the scan until it is

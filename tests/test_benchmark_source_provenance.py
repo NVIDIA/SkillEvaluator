@@ -640,6 +640,21 @@ class TestExpectedSourceBinding:
         assert _scan_expected(tmp_path, upper_card, _expected(), require=False) == []
         assert _scan_expected(tmp_path, _pass_card(_RECORDED), _expected(revision=_COMMIT_A.upper())) == []
 
+    def test_container_revisions_are_compared_exactly(self, tmp_path: Path) -> None:
+        """Only the source revision is case-folded, as the runbook says."""
+        for container in (
+            "ghcr.io/nvidia/skillevaluator@sha256:" + ("0117bc2e" * 8).upper(),
+            _COMMIT_B.upper(),
+        ):
+            with pytest.raises(ValueError, match="expected evaluator container revision must be"):
+                benchmark_gate.ExpectedSource(evaluator_container_revision=container)
+        upper_host = "GHCR.io" + _CONTAINER.removeprefix("ghcr.io")
+        card = _pass_card(_recorded_lines(**{"Evaluator container revision": f"`{upper_host}`"}))
+        assert _scan_expected(tmp_path, card, _expected(), require=False) == [
+            "evaluator container revision does not match the expected value"
+        ]
+        assert _scan_expected(tmp_path, card, _expected(evaluator_container_revision=upper_host), require=False) == []
+
     def test_a_content_digest_revision_is_matched(self, tmp_path: Path) -> None:
         card = _pass_card(_recorded_lines(**{"Evaluated source revision": f"`{_DIGEST}`"}))
         assert _scan_expected(tmp_path, card, _expected(revision=_DIGEST.upper())) == []

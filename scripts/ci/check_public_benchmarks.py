@@ -1974,10 +1974,16 @@ def _check_expected_source(path: Path, text: str, offenders: list[Offender], exp
         if len(matches) > 1:
             offenders.append(Offender(path, line_number, f"{name} recorded more than once, so it cannot match"))
             continue
-        recorded = _code_span_value(matches[0][1]) if matches else None
+        value = matches[0][1] if matches else ""
+        if not value or _NOT_RECORDED_VALUE.fullmatch(value):
+            offenders.append(Offender(path, line_number, f"{name} not recorded, but an expected value was given"))
+            continue
+        # The line is there but holds something the library would never render,
+        # so point the operator at the malformed value rather than a missing line.
+        recorded = _code_span_value(value)
         normalized = _normalized_identity_value(field, recorded) if recorded is not None else None
         if normalized is None:
-            offenders.append(Offender(path, line_number, f"{name} not recorded, but an expected value was given"))
+            offenders.append(Offender(path, line_number, f"{name} is not a canonical value, so it cannot match"))
         elif normalized != expected_value:
             offenders.append(Offender(path, line_number, f"{name} does not match the expected value"))
 

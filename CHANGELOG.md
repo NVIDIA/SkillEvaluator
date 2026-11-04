@@ -187,9 +187,9 @@ All notable changes to SkillEvaluator are documented in this file.
   so a publishing pipeline can check that each card names the source it asked
   to evaluate. A card of any verdict fails when the matching `Evaluated source`,
   `Evaluated source revision` or `Evaluator container revision` line is
-  missing, `not recorded`, duplicated or different. Values are compared in the
-  canonical form the card records, and any of these options implies
-  `--require-files`. Without them the scan is unchanged.
+  missing, `not recorded`, malformed, duplicated or different. Values are
+  compared in the canonical form the card records, and any of these options
+  implies `--require-files`. Without them the scan is unchanged.
 
 ### Changed
 

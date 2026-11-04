@@ -182,7 +182,8 @@ Each `--expected-*` option is optional and checks one metadata line of every
 scanned card, whatever its verdict: `Evaluated source`,
 `Evaluated source revision` or `Evaluator container revision`. The line must
 appear once in `Evaluation Metadata` and hold the same value; a missing line, a
-`not recorded` placeholder, a duplicate or a different value fails the scan.
+`not recorded` placeholder, a malformed value, a duplicate or a different value
+fails the scan.
 The expected values use the same forms as the `validate` options above, and a
 malformed value stops the scan with a usage error. Hex digits are compared
 without regard to case, while repository names must match exactly. The card's

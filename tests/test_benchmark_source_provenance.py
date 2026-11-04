@@ -600,14 +600,22 @@ class TestExpectedSourceBinding:
             ("Evaluated source", "`not a repository`"),
             ("Evaluated source", f"{_REPOSITORY}"),
             ("Evaluated source", f"`{_REPOSITORY}` (fork)"),
+            ("Evaluated source", f"``{_REPOSITORY}``"),
             ("Evaluated source revision", f"`{_COMMIT_A[:12]}`"),
             ("Evaluator container revision", "`ghcr.io/nvidia/skillevaluator`"),
         ],
     )
     def test_a_malformed_recorded_value_never_matches(self, tmp_path: Path, field: str, value: str) -> None:
+        """A present but malformed line is named as such, not reported as a missing line."""
         card = _pass_card(_recorded_lines(**{field: value}))
         reasons = _scan_expected(tmp_path, card, _expected(), require=False)
-        assert reasons == [f"{field.lower()} not recorded, but an expected value was given"]
+        assert reasons == [f"{field.lower()} is not a canonical value, so it cannot match"]
+
+    @pytest.mark.parametrize("value", [_UNRECORDED, "not recorded", ""])
+    def test_a_placeholder_or_empty_line_is_reported_as_not_recorded(self, tmp_path: Path, value: str) -> None:
+        card = _pass_card(_recorded_lines(**{"Evaluated source revision": value}))
+        reasons = _scan_expected(tmp_path, card, _expected(), require=False)
+        assert reasons == ["evaluated source revision not recorded, but an expected value was given"]
 
     def test_a_duplicated_line_cannot_match(self, tmp_path: Path) -> None:
         card = _pass_card(_RECORDED + f"- Evaluated source revision: `{_COMMIT_B}`\n")

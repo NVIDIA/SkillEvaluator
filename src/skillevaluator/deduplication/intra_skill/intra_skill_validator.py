@@ -26,6 +26,7 @@ from skillevaluator.constants import (
     CONTENT_DEDUP_TRIVIAL_DUP_MAX_CHARS,
 )
 from skillevaluator.deduplication.intra_skill.llm_analyzer import (
+    MAX_PROMPT_CHARS,
     SYSTEM_PROMPT,
     analyze_cluster,
     build_user_prompt,
@@ -48,9 +49,16 @@ logger = logging.getLogger(__name__)
 # config assignment. Used to recognize repeated config/comment snippets.
 _COMMENT_PREFIXES = ("#", ";", "//", "--", "!")
 _CONFIG_KV_RE = re.compile(r"^[\w.\-/]+\s*[=:]\s*\S")
-CONTENT_DEDUP_MAX_CLUSTER_MEMBERS = 64
-CONTENT_DEDUP_MAX_LLM_PROMPT_CHARS = 64_000
+# One cluster may hold every chunk of the scan. The per-call and aggregate
+# prompt budgets bound paid review; a fixed member cap below the chunk ceiling
+# would refuse large repeated-content clusters whose prompt fits.
+CONTENT_DEDUP_MAX_CLUSTER_MEMBERS = CONTENT_DEDUP_MAX_CHUNKS
+# build_user_prompt shares exactly repeated text against this same budget.
+CONTENT_DEDUP_MAX_LLM_PROMPT_CHARS = MAX_PROMPT_CHARS
 CONTENT_DEDUP_MAX_TOTAL_LLM_PROMPT_CHARS = 1_000_000
+# Most member locations and source files named in one finding message. The
+# rest are counted, so a finding for a 512-member cluster stays a few kilobytes.
+_MAX_REPORTED_LOCATIONS = 64
 
 # Scan label recorded when a work limit stops duplicate analysis early.
 _WORK_LIMIT_SCAN = "context-deduplication"
@@ -110,6 +118,27 @@ def _is_trivial_intra_file_duplicate(cluster: ContentCluster) -> bool:
     if cluster.cross_file:
         return False
     return all(_chunk_is_short_config(member) for member in cluster.members)
+
+
+def _cluster_location_text(cluster: ContentCluster) -> tuple[str, str]:
+    """Return the finding scope and member location list, bounded in length."""
+    distinct_files = sorted({c.source_file for c in cluster.members})
+    if len(distinct_files) == 1:
+        scope = f"within {distinct_files[0]}"
+    else:
+        scope = f"across {' and '.join(distinct_files[:_MAX_REPORTED_LOCATIONS])}"
+        if (omitted_files := len(distinct_files) - _MAX_REPORTED_LOCATIONS) > 0:
+            scope += f" and {omitted_files} more file{'s' if omitted_files != 1 else ''}"
+
+    locations = [
+        f'"{c.heading}" in {c.source_file} (lines {c.start_line}-{c.end_line})'
+        for c in cluster.members[:_MAX_REPORTED_LOCATIONS]
+    ]
+    location_text = "\n  vs ".join(locations)
+    if (omitted := len(cluster.members) - _MAX_REPORTED_LOCATIONS) > 0:
+        noun = "locations" if omitted != 1 else "location"
+        location_text += f"\n  and {omitted} more {noun} ({len(cluster.members)} in total)"
+    return scope, location_text
 
 
 def _mark_work_limit_incomplete(
@@ -418,15 +447,7 @@ class IntraSkillValidator(ValidatorBase):
                 continue
 
             distinct_files = sorted({c.source_file for c in cluster.members})
-
-            locations = []
-            for c in cluster.members:
-                locations.append(f'"{c.heading}" in {c.source_file} (lines {c.start_line}-{c.end_line})')
-            location_text = "\n  vs ".join(locations)
-            if len(distinct_files) == 1:
-                scope = f"within {distinct_files[0]}"
-            else:
-                scope = f"across {' and '.join(distinct_files)}"
+            scope, location_text = _cluster_location_text(cluster)
 
             if verdict is None:
                 # Report the refused overlap so the author can review it, but

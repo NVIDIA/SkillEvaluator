@@ -345,10 +345,12 @@ All notable changes to SkillEvaluator are documented in this file.
   prompt fit the 64,000-character budget. The member limit now equals the
   512-chunk ceiling, so the per-cluster prompt, total prompt, and cluster-count
   limits decide. When a cluster's request (system prompt plus cluster text)
-  would exceed 64,000 characters, each exactly repeated chunk text is sent once
-  as `SHARED CONTENT n`, and every occurrence keeps its own entry with its file,
-  section, and line range. Distinct text is never dropped or sampled, so a
-  cluster still over the budget stays incomplete with `llm_prompt_size_limit`.
+  would exceed 64,000 characters, each exactly repeated text is sent once as
+  `SHARED CONTENT n`. A Markdown section is compared without its own heading
+  line, so the same body under different headings is shared too. Every
+  occurrence keeps its own entry with its file, section, line range, and
+  heading line. Distinct text is never dropped or sampled, so a cluster still
+  over the budget stays incomplete with `llm_prompt_size_limit`.
   Duplicate and `llm_refused` finding messages name at most 64 member locations
   and source files and count the rest; the JSON `source_files` list stays
   complete.

@@ -45,7 +45,7 @@ class TestBuildUserPrompt:
         assert prompt.count(unique) == 1
         assert prompt.count("---SHARED CONTENT ") == 1
         assert prompt.count("---CHUNK ") == 501
-        assert prompt.count("Content reference: SHARED CONTENT 1") == 500
+        assert prompt.count("Content:\n[SHARED CONTENT 1]") == 500
         assert "No chunks were omitted." in prompt
         for index, member in enumerate(members, start=1):
             assert (
@@ -66,9 +66,9 @@ class TestBuildUserPrompt:
         assert _request_chars(prompt) <= llm_analyzer.MAX_PROMPT_CHARS
         assert prompt.count(first) == prompt.count(second) == 1
         assert prompt.index(f"---SHARED CONTENT 1---\n{second}") < prompt.index(f"---SHARED CONTENT 2---\n{first}")
-        assert prompt.count("Content reference: SHARED CONTENT 1") == 30
-        assert prompt.count("Content reference: SHARED CONTENT 2") == 30
-        assert "Section: Section 1\nLines: 1-5\nContent reference: SHARED CONTENT 2" in prompt
+        assert prompt.count("Content:\n[SHARED CONTENT 1]") == 30
+        assert prompt.count("Content:\n[SHARED CONTENT 2]") == 30
+        assert "Section: Section 1\nLines: 1-5\nContent:\n[SHARED CONTENT 2]" in prompt
 
     def test_request_budget_includes_the_system_prompt(self, make_chunk, monkeypatch) -> None:
         repeated = "r" * 2_000
@@ -118,6 +118,69 @@ class TestBuildUserPrompt:
         assert _request_chars(prompt) > llm_analyzer.MAX_PROMPT_CHARS
         assert "SHARED CONTENT" not in prompt
         assert prompt.count("Content:\nshort repeated line") == 2
+
+    def test_same_body_under_different_heading_lines_is_shared(self, make_chunk) -> None:
+        body = "Describe the supported workflow. " * 4
+        members = [make_chunk(heading=f"## Step {index}", text=f"## Step {index}\n{body}") for index in range(500)]
+        cluster = ContentCluster(members, 0.95, 0.85, False, {"markdown"})
+
+        prompt = build_user_prompt(cluster)
+
+        assert _request_chars(prompt) <= llm_analyzer.MAX_PROMPT_CHARS
+        assert prompt.count(body) == 1
+        assert f"---SHARED CONTENT 1---\n{body}\n\n---CHUNK 1---" in prompt
+        assert prompt.count("---CHUNK ") == 500
+        for index, member in enumerate(members, start=1):
+            # The heading line plus the shared body is exactly the member's text.
+            assert (
+                f"---CHUNK {index}---\nFile: README.md\nSection: {member.heading}\nLines: 1-5\n"
+                f"Content:\n{member.heading}\n[SHARED CONTENT 1]\n\n"
+            ) in prompt
+
+    def test_heading_line_with_a_carriage_return_is_kept_with_each_occurrence(self, make_chunk) -> None:
+        body = "Describe the supported workflow.\r\n" * 4
+        members = [
+            make_chunk(heading=f"## Step {index}", text=f"## Step {index}\r\n{body}".strip()) for index in range(500)
+        ]
+        cluster = ContentCluster(members, 0.95, 0.85, False, {"markdown"})
+
+        prompt = build_user_prompt(cluster)
+
+        assert _request_chars(prompt) <= llm_analyzer.MAX_PROMPT_CHARS
+        assert prompt.count(body.strip()) == 1
+        assert prompt.count("---SHARED CONTENT ") == 1
+        for member in members:
+            assert f"Content:\n{member.heading}\r\n[SHARED CONTENT 1]" in prompt
+
+    def test_whole_text_matching_another_chunks_body_shares_it(self, make_chunk) -> None:
+        body = "Describe the supported workflow. " * 4
+        sections = [make_chunk(heading=f"## Step {index}", text=f"## Step {index}\n{body}") for index in range(250)]
+        docstrings = [
+            make_chunk(source_file="tool.py", heading=f"step_{index}()", text=body, source_format="python")
+            for index in range(250)
+        ]
+        cluster = ContentCluster([*sections, *docstrings], 0.95, 0.85, True, {"markdown", "python"})
+
+        prompt = build_user_prompt(cluster)
+
+        assert _request_chars(prompt) <= llm_analyzer.MAX_PROMPT_CHARS
+        assert prompt.count(body) == 1
+        assert prompt.count("---SHARED CONTENT ") == 1
+        assert prompt.count("[SHARED CONTENT 1]") == 500
+        for member in docstrings:
+            assert f"Section: {member.heading}\nLines: 1-5\nContent:\n[SHARED CONTENT 1]" in prompt
+
+    def test_text_that_does_not_open_with_its_heading_line_is_compared_whole(self, make_chunk) -> None:
+        body = "Describe the supported workflow. " * 4
+        # The first line differs per chunk but is not the chunk's heading.
+        members = [make_chunk(heading=f"## Step {index}", text=f"Step {index}\n{body}") for index in range(500)]
+        cluster = ContentCluster(members, 0.95, 0.85, False, {"markdown"})
+
+        prompt = build_user_prompt(cluster)
+
+        assert _request_chars(prompt) > llm_analyzer.MAX_PROMPT_CHARS
+        assert "SHARED CONTENT" not in prompt
+        assert prompt.count(body) == 500
 
     def test_contains_chunk_details(self, make_cluster) -> None:
         cluster = make_cluster()

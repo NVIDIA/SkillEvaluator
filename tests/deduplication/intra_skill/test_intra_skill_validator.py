@@ -431,17 +431,33 @@ class TestIntraSkillValidatorValidate:
         assert intra_skill_validator.CONTENT_DEDUP_MAX_LLM_PROMPT_CHARS == llm_analyzer.MAX_PROMPT_CHARS == 64_000
         assert intra_skill_validator.CONTENT_DEDUP_MAX_TOTAL_LLM_PROMPT_CHARS == 1_000_000
 
+    @pytest.mark.parametrize("newline", ["\n", "\r\n"], ids=["lf", "crlf"])
+    @pytest.mark.parametrize(
+        ("headings", "body"),
+        [
+            pytest.param(["## Repeated"] * 500, "Describe the supported workflow. " * 4, id="500-same-heading"),
+            pytest.param(
+                [f"## Step {index}" for index in range(500)],
+                "Describe the supported workflow. " * 4,
+                id="500-distinct-headings",
+            ),
+            pytest.param(
+                [f"## Tool {index}" for index in range(30)],
+                "\n\n".join(["Boilerplate paragraph about safety and usage. " * 20] * 3),
+                id="30-distinct-headings-long-body",
+            ),
+        ],
+    )
     @patch("skillevaluator.deduplication.intra_skill.intra_skill_validator.analyze_cluster")
     @patch("skillevaluator.deduplication.intra_skill.intra_skill_validator.LLMClient")
     @patch("skillevaluator.deduplication.intra_skill.intra_skill_validator.EmbeddingClient")
-    def test_repeated_sections_complete_through_real_chunking_and_clustering(
-        self, mock_embed, _mock_llm, mock_analyze, tmp_path: Path
+    def test_repeated_section_bodies_complete_through_real_chunking_and_clustering(
+        self, mock_embed, _mock_llm, mock_analyze, tmp_path: Path, headings: list[str], body: str, newline: str
     ) -> None:
         skill_dir = tmp_path / "repeated-sections"
         skill_dir.mkdir()
-        (skill_dir / "SKILL.md").write_text(
-            ("## Repeated\n" + "Describe the supported workflow. " * 4 + "\n") * 500, encoding="utf-8"
-        )
+        markdown = "".join(f"{heading}\n{body}\n" for heading in headings)
+        (skill_dir / "SKILL.md").write_bytes(markdown.replace("\n", newline).encode("utf-8"))
         mock_embed.return_value.embed.side_effect = _unit_embeddings(2)
         mock_analyze.return_value = LLMVerdict(
             verdict="DUPLICATE", confidence=0.9, reasoning="Repeated instructions", suggestion="Consolidate sections"
@@ -454,17 +470,25 @@ class TestIntraSkillValidatorValidate:
         assert "work_limit" not in result.metadata
         mock_analyze.assert_called_once()
         cluster = mock_analyze.call_args.args[1]
-        assert len(cluster.members) == 500
+        assert len(cluster.members) == len(headings)
+        assert [member.heading for member in cluster.members] == headings
         assert all(len(member.text) >= constants.CONTENT_DEDUP_MIN_CHUNK_CHARS for member in cluster.members)
         prompt = build_user_prompt(cluster)
-        assert prompt.count("---CHUNK ") == 500
-        assert prompt.count(cluster.members[0].text) == 1
-        assert len(SYSTEM_PROMPT) + len(prompt) <= intra_skill_validator.CONTENT_DEDUP_MAX_LLM_PROMPT_CHARS
+        assert len(SYSTEM_PROMPT) + len(prompt) <= llm_analyzer.MAX_PROMPT_CHARS
+        assert prompt.count("---CHUNK ") == len(headings)
+        # Each section's text is its own heading line plus the shared body.
+        shared_body = body.strip().replace("\n", newline)
+        assert prompt.count("---SHARED CONTENT ") == 1
+        assert prompt.count(shared_body) == 1
+        for member in cluster.members:
+            assert member.text == f"{member.heading}{newline}{shared_body}"
+            assert f"Content:\n{member.heading}{newline}[SHARED CONTENT 1]" in prompt
         [finding] = result.findings
         assert finding.severity == Severity.HIGH
         assert finding.message.startswith("Duplicate content found within SKILL.md:\n")
-        assert finding.message.count(" in SKILL.md (lines ") == 64
-        assert finding.message.endswith("\n  and 436 more locations (500 in total)")
+        assert finding.message.count(" in SKILL.md (lines ") == min(len(headings), 64)
+        if len(headings) > 64:
+            assert finding.message.endswith(f"\n  and {len(headings) - 64} more locations ({len(headings)} in total)")
 
     @pytest.mark.parametrize("verdict", ["DUPLICATE", "RELATED_BUT_DISTINCT"])
     @patch("skillevaluator.deduplication.intra_skill.intra_skill_validator.analyze_cluster")

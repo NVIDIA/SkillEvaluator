@@ -451,6 +451,23 @@ All notable changes to SkillEvaluator are documented in this file.
   treated as a standard agent. Scores were already cleared for these
   conditions, and observed rewards still determine their own metric set.
 
+- Tier 3 staging no longer fails with `chmod: cannot use dir_fd and
+  follow_symlinks together` when it replaces or merges into an existing
+  directory or file on Linux hosts whose glibc cannot change a mode without
+  following symlinks (glibc before 2.32, or newer glibc without `/proc`). This
+  affected, for example, `init-custom-grader` and `init-harbor-task` over an
+  existing `evals/` directory. Staging still changes modes without following
+  links where the platform supports it. Elsewhere it opens the entry without
+  following links, confirms it is the entry it checked, and changes the mode
+  through that open descriptor, so a link swapped in is refused instead of
+  followed. Only an entry that cannot be opened, such as one its owner cannot
+  read, is still changed by name, with an identity check afterwards.
+
+- Local-mode sandbox errors now include Bubblewrap's own failure line when its
+  startup probe fails, note that `pivot_root: Operation not permitted` can mean
+  an enclosing container's seccomp profile blocks Bubblewrap, and suggest
+  `SKILLEVALUATOR_LOCAL_SANDBOX=prefer` alongside `off`.
+
 - PII email scans recognize all RFC 2606 reserved domains, including their
   subdomains, mixed-case forms, trailing dots, and prose ellipses. A local-part
   boundary prevents quadratic rescanning of long excluded addresses. Ordinary

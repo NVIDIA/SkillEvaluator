@@ -978,6 +978,8 @@ def _final_answer_reaches_judge(final: str, evidence: str) -> bool:
     first 1,500 characters of a text-only final step, and the final-response
     section keeps the end. Find the longest prefix of the answer present in
     *evidence*; the answer is complete when the rest is present too.
+    Whitespace at the split does not count, because the history section
+    drops trailing whitespace.
     """
     answer = final.strip()
     lo, hi = 0, len(answer)
@@ -987,7 +989,7 @@ def _final_answer_reaches_judge(final: str, evidence: str) -> bool:
             lo = mid
         else:
             hi = mid - 1
-    return answer[lo:] in evidence
+    return answer[lo:].lstrip() in evidence
 
 
 def build_metric_evidence_bundles(
@@ -1082,8 +1084,9 @@ def build_metric_evidence_bundles(
         # separates the two causes. The budget cut evidence when the budgeted
         # rendering differs from it. The cap cut evidence when it changed that
         # section and the complete final answer does not still reach the
-        # judge through the compact history. Name every cause that applied so
-        # users know which settings to raise.
+        # judge, whole in the compact history or split between the history
+        # and the end of that section (see _final_answer_reaches_judge). Name
+        # every cause that applied so users know which settings to raise.
         bc_capped = build_behavior_evidence(traj, question, max_chars=10**9) if final else bc_full
         if bc_text != bc_capped:
             bc_causes.append("behavior evidence shortened to fit SKILL_EVAL_BEHAVIOR_CHECK_BUDGET")

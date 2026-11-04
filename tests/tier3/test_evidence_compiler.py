@@ -445,19 +445,25 @@ def _distinct_text(length: int) -> str:
     return " ".join(f"w{idx:04d}" for idx in range(length // 6 + 1))[:length]
 
 
+@pytest.mark.parametrize("cut_char", [" ", "-"], ids=["space-at-cut", "text-at-cut"])
 @pytest.mark.parametrize(("length", "truncated"), [(1501, False), (1640, False), (1755, False), (1756, True)])
-def test_behavior_bundle_final_answer_split_across_history_and_section(length: int, truncated: bool) -> None:
+def test_behavior_bundle_final_answer_split_across_history_and_section(
+    length: int, truncated: bool, cut_char: str
+) -> None:
     # The compact history repeats the first 1,500 characters of a text-only
     # final answer, and at the default limit the final-response section keeps
     # its last 255. Together they carry an answer of up to 1,755 characters
-    # in full, although no single piece holds all of it.
+    # in full, although no single piece holds all of it. The history drops
+    # trailing whitespace, so cover a cut that falls on a space and one that
+    # falls on text.
     answer = _distinct_text(length)
+    answer = answer[:1499] + cut_char + answer[1500:]
     traj = {"steps": [{"source": "agent", "message": answer}]}
 
     for module in (atif_helpers, _load_harbor_template_module()):
         bundle = module.build_metric_evidence_bundles(traj, "Summarize the run.")["behavior_check"]
         assert answer not in bundle["prompt_evidence"]
-        assert answer[:1500] in bundle["prompt_evidence"]
+        assert answer[:1500].rstrip() in bundle["prompt_evidence"]
         assert bundle["omitted"]["truncated"] is truncated
         assert bundle["omitted"]["count"] == (1 if truncated else 0)
         assert bundle["omitted"]["reason"] == (_LIMIT_REASON if truncated else "")

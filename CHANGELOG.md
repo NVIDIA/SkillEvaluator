@@ -293,11 +293,10 @@ All notable changes to SkillEvaluator are documented in this file.
   that still reaches the judge in full is not flagged, including one split
   between the compact history and the end of the final-response section.
   The `reason` names each setting that cut evidence:
-  `SKILL_EVAL_BEHAVIOR_CHECK_BUDGET`,
-  `SKILL_EVAL_BEHAVIOR_FINAL_RESPONSE_LIMIT`, or both. Caps inside
-  individual sections (write bodies, history summaries) are unchanged. The evidence-budget documentation now names
-  both causes of a `behavior_check` truncation and which setting raises
-  each.
+  `SKILL_EVAL_BEHAVIOR_CHECK_BUDGET`, `SKILL_EVAL_BEHAVIOR_FINAL_RESPONSE_LIMIT`,
+  or both. Caps inside individual sections (write bodies, history summaries)
+  are unchanged. The evidence-budget documentation now names both causes of
+  a `behavior_check` truncation and which setting raises each.
 - PR scan comments show the verdict, quality scores, first actionable fixes and
   report links; full provenance and detailed findings stay in the report.
 - Hosted reports use the retained site commit as the Pages deployment identity,

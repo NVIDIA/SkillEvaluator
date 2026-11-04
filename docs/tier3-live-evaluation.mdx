@@ -703,9 +703,9 @@ matter, raise that judge's budget. For `behavior_check`, the reason names each
 setting that cut evidence: `SKILL_EVAL_BEHAVIOR_CHECK_BUDGET`,
 `SKILL_EVAL_BEHAVIOR_FINAL_RESPONSE_LIMIT`, or both. Raise each setting it
 names; raising the budget does not clear a cut made by the final-response
-limit. Larger budgets send longer judge prompts and use more evaluator tokens. The behavior budget never falls below the
-final-response limit plus 4,000 characters, so raising the limit leaves room
-for the tool history. Set these variables in the host environment;
+limit. Larger budgets send longer judge prompts and use more evaluator
+tokens. The behavior budget never falls below the final-response limit plus
+4,000 characters, so raising the limit leaves room for the tool history. Set these variables in the host environment;
 SkillEvaluator forwards them to the verifier. Defaults and accepted values are
 in [Judge evidence budgets](environment-variables.mdx#judge-evidence-budgets).
 

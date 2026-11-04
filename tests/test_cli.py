@@ -83,6 +83,7 @@ def test_top_level_help_groups_commands_by_workflow() -> None:
     headings = (
         "Tier workflows:",
         "Core workflows:",
+        "Repository CI:",
         "Tier 1 · Static and security:",
         "Tier 2 · Deduplication:",
         "Tier 3 · Live evaluation:",
@@ -90,8 +91,10 @@ def test_top_level_help_groups_commands_by_workflow() -> None:
     positions = [result.output.index(heading) for heading in headings]
     assert positions == sorted(positions)
 
-    core = result.output.split("Core workflows:", 1)[1].split("Tier 1 · Static and security:", 1)[0]
+    core = result.output.split("Core workflows:", 1)[1].split("Repository CI:", 1)[0]
     assert all(command in core for command in ("validate", "health-check", "doctor", "models", "dashboard"))
+    repository_ci = result.output.split("Repository CI:", 1)[1].split("Tier 1 · Static and security:", 1)[0]
+    assert any(line.split() and line.split()[0] == "ci" for line in repository_ci.splitlines())
     tier3 = result.output.split("Tier 3 · Live evaluation:", 1)[1]
     assert all(command in tier3 for command in ("create-eval-dataset", "compare", "view", "harbor-view"))
     assert "Other commands:" not in result.output

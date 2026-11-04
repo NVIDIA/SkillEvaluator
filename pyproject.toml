@@ -7,7 +7,7 @@ requires = ["setuptools >= 77", "wheel"]
 
 [project]
 name = "skillevaluator"
-version = "0.7.0"
+version = "0.7.2"
 description = "Multi-tier framework for evaluating AI agent skills with quality gates, semantic overlap detection, synthetic evaluation dataset generation, and live agent evaluation."
 authors = [{ name = "NVIDIA Corporation" }]
 readme = "README.md"
@@ -45,6 +45,8 @@ dependencies = [
     "packaging>=24",
     "pydantic>=2.11.0",
     "pyyaml>=6.0",
+    # Dataset-authored signal patterns require a per-match timeout.
+    "regex>=2024.11.6",
     "rich>=13.5.0",
 ]
 
@@ -120,6 +122,7 @@ where = ["src"]
 include = ["skillevaluator*"]
 
 [tool.setuptools.package-data]
+"skillevaluator" = ["ci-release.json"]
 "skillevaluator.config" = ["*.yaml", "profiles/*.yaml"]
 "skillevaluator.reporting" = ["templates/*.j2"]
 "skillevaluator.tier3.harbor" = [

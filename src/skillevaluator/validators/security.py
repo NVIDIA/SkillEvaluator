@@ -48,6 +48,7 @@ from skillevaluator.provider_config import (
     resolve_llm_provider,
     skillspector_reasoning_effort,
 )
+from skillevaluator.skillspector_diagnostics import completeness_details, completeness_record, merge_completeness
 from skillevaluator.skillspector_provenance import sanitize_skillspector_llm_provenance
 from skillevaluator.spdx import is_spdx_only_html_comment
 from skillevaluator.utils.path_security import matches_filesystem_name
@@ -61,6 +62,7 @@ from skillevaluator.validators.base import (
     ValidatorBase,
     iter_scannable_files,
 )
+from skillevaluator.validators.pii_ownership import ownership_email_spans
 
 logger = get_logger(__name__)
 
@@ -1929,9 +1931,15 @@ class SecurityValidator(ValidatorBase):
                     if raster_note is not None:
                         result.add_warning(raster_note)
                     else:
-                        result.add_error(
+                        diagnostic = completeness_record(analysis_completeness, stage_name)
+                        result.metadata["skillspector_completeness"] = merge_completeness(
+                            result.metadata.get("skillspector_completeness"), {"records": [diagnostic]}
+                        )
+                        details = completeness_details(diagnostic)
+                        result.fail_gate(
                             "skillspector JSON field 'analysis_completeness' reports incomplete analysis "
                             f"(status '{completeness_status}'); security scan did not complete"
+                            + (f". Details: {details}" if details else "")
                         )
                         result.mark_scan_incomplete(stage_name)
 
@@ -3313,6 +3321,7 @@ class SecurityValidator(ValidatorBase):
 
         lines = content.split("\n")
         author_emails = self._frontmatter_author_emails(file_path, lines)
+        ownership_spans = ownership_email_spans(file_path, content)
         comment_lines = _comment_line_numbers(file_path, lines)
         global_exceptions = self.pii_patterns.get("exceptions", {}).get("allowed_paths", [])
         compiled = self._compile_pii_patterns(global_exceptions)
@@ -3330,6 +3339,7 @@ class SecurityValidator(ValidatorBase):
                 protected_usernames,
                 author_emails,
                 comment_lines,
+                ownership_spans,
             )
         return findings
 
@@ -3386,10 +3396,12 @@ class SecurityValidator(ValidatorBase):
         protected_usernames: set[str] | None = None,
         author_emails: dict[int, str] | None = None,
         comment_lines: frozenset[int] | None = None,
+        ownership_spans: dict[int, list[tuple[int, int]]] | None = None,
     ) -> None:
         """Check all lines against a single compiled PII pattern."""
         protected_usernames = protected_usernames or set()
         author_emails = author_emails or {}
+        ownership_spans = ownership_spans or {}
         comment_lines = comment_lines if comment_lines is not None else _comment_line_numbers(file_path, lines)
         for line_num, line in enumerate(lines, 1):
             if line_num in comment_lines:
@@ -3397,7 +3409,11 @@ class SecurityValidator(ValidatorBase):
 
             scan_line = line
             if category == "emails" and (author_email := author_emails.get(line_num)):
-                scan_line = re.sub(re.escape(author_email), "author@example.com", line, count=1, flags=re.IGNORECASE)
+                # Keep source offsets intact for adjacent ownership contacts in
+                # flow YAML; substituting a different-length address shifts them.
+                scan_line = re.sub(
+                    re.escape(author_email), lambda match: " " * len(match.group()), line, count=1, flags=re.IGNORECASE
+                )
 
             matches = list(regex.finditer(scan_line))
             if not matches or any(exc in line for exc in exceptions):
@@ -3422,19 +3438,39 @@ class SecurityValidator(ValidatorBase):
             if category == "gps_coordinates" and self._is_near_zero_gps(line):
                 confidence = "low"
 
-            findings.append(
-                {
+            # Preserve the first occurrence of each email class on a line.
+            # An ownership contact must not hide an ordinary address beside it.
+            candidates = [(category, match)]
+            if category == "emails":
+                classes = {}
+                for candidate in matches:
+                    check = (
+                        "ownership_emails"
+                        if candidate.span() in ownership_spans.get(line_num, [])
+                        else "emails"
+                    )
+                    classes.setdefault(check, candidate)
+                candidates = list(classes.items())
+            for check, candidate in candidates:
+                finding = {
                     "file": file_path.name,
                     "line": line_num,
                     "line_content": line,
                     "severity": pattern_def.get("severity", "medium"),
                     "description": pattern_def.get("description", category),
                     "suggestion": pattern_def.get("suggestion"),
-                    "category": category,
+                    "category": check,
                     "confidence": confidence,
-                    "matched_value": match.group(),
+                    "matched_value": candidate.group(),
                 }
-            )
+                if check == "ownership_emails":
+                    finding["description"] = "Ownership contact email in skill metadata"
+                    finding["suggestion"] = (
+                        "Review whether ownership contacts are permitted for this repository. "
+                        "If approved, set PII.ownership_emails to info in an explicit --policy file; "
+                        "otherwise remove the address or use a placeholder."
+                    )
+                findings.append(finding)
 
     # ------------------------------------------------------------------
     # LLM finding verification (delegates to skillevaluator.inference.FindingVerifier)

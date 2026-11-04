@@ -273,9 +273,16 @@ class ValidatorBase(ABC):
                     for detail in skill_result.success_details
                 ]
 
+                # A reviewed baseline suppressing findings must stay visible in
+                # reports that show only this one-line summary.
+                notes = [
+                    detail.message
+                    for detail in skill_result.success_details
+                    if detail.check_name == "skillspector_baseline" or "suppressed_count" in detail.metadata
+                ]
                 result.add_success(
                     check_name=skill_name,
-                    message="All checks passed",
+                    message="All checks passed" + (f"; {'; '.join(notes)}" if notes else ""),
                     checks=check_details,
                     total_checks=len(check_details),
                 )

@@ -418,6 +418,127 @@ _MAX_NETWORK_ACTION_CHARS = 65_536
 _NETWORK_CLIENT_FAST_PATTERN = re.compile(r"(?i)\b(?:curl|wget|https?)(?:\.exe)?\b")
 _NETWORK_CLIENT_PATTERN = _NETWORK_CLIENT_FAST_PATTERN
 _NETWORK_EXECUTABLES = ("curl", "wget", "http", "https")
+# Commands that run a later word as a command in another root, container,
+# host, user, or network route. Any network client they start is flagged, even
+# when its own arguments upload nothing. "ip" covers "ip netns exec" and
+# "ip vrf exec". The set is fixed: any other command that starts a client only
+# gets that client's own upload rules.
+_NETWORK_COMMAND_RUNNERS = frozenset(
+    {
+        "apptainer",
+        "autossh",
+        "buildah",
+        "bwrap",
+        "chroot",
+        "crictl",
+        "ctr",
+        "distrobox",
+        "docker",
+        "docker-compose",
+        "firejail",
+        "flatpak-spawn",
+        "incus",
+        "ip",
+        "kubectl",
+        "lxc",
+        "lxc-attach",
+        "machinectl",
+        "mosh",
+        "nerdctl",
+        "nsenter",
+        "oc",
+        "pkexec",
+        "podman",
+        "podman-compose",
+        "proot",
+        "proxychains",
+        "proxychains4",
+        "runuser",
+        "schroot",
+        "sg",
+        "singularity",
+        "ssh",
+        "sshpass",
+        "su",
+        "systemd-nspawn",
+        "systemd-run",
+        "toolbox",
+        "torsocks",
+        "unshare",
+    }
+)
+_COMMAND_SUBSTITUTION_RE = re.compile(r"\$\(([^()`]*)\)|`([^`]*)`")
+# Commands that read piped or redirected input as text and never run a later
+# word as a command, as in "env | grep -i http" or "grep -c https < access.log".
+# A client named after one of them does not receive that input as a request
+# body. Every other command, such as find -exec, strace, or uv run, may pass
+# its input on to the client it starts.
+_STDIN_TEXT_CONSUMERS = frozenset(
+    {
+        "ack",
+        "ag",
+        "awk",
+        "base64",
+        "cat",
+        "column",
+        "comm",
+        "cut",
+        "diff",
+        "egrep",
+        "fgrep",
+        "fold",
+        "gawk",
+        "grep",
+        "head",
+        "jq",
+        "less",
+        "mawk",
+        "more",
+        "nl",
+        "od",
+        "paste",
+        "rev",
+        "rg",
+        "sed",
+        "sort",
+        "strings",
+        "tac",
+        "tail",
+        "tee",
+        "tr",
+        "uniq",
+        "wc",
+        "xxd",
+        "yq",
+        "zgrep",
+    }
+)
+# Commands that run the rest of their words as a command after their own
+# options, as in "strace -f ssh host curl URL", "flock /tmp/l docker exec c
+# curl URL", or "watch ssh host curl URL". A command runner named after one of
+# them starts the client in another host, container, root, user, or network
+# route.
+_PASS_THROUGH_WRAPPERS = frozenset(
+    {
+        "chrt",
+        "cpulimit",
+        "eatmydata",
+        "fakeroot",
+        "faketime",
+        "flock",
+        "ionice",
+        "ltrace",
+        "numactl",
+        "parallel",
+        "prlimit",
+        "setarch",
+        "strace",
+        "taskset",
+        "unbuffer",
+        "valgrind",
+        "watch",
+    }
+)
 _SECRET_VAR_NAME_RE = re.compile(
     r"^\$(?:\{[A-Za-z_0-9]*(?i:token|key|secret|password)[A-Za-z_0-9]*\}|[A-Za-z_0-9]*(?i:token|key|secret|password)[A-Za-z_0-9]*)"
 )
@@ -959,36 +1080,26 @@ def _network_shell_tokens(cmd: Any) -> list[str]:
             if idx + 1 < length and normalized[idx : idx + 2] in ("&&", "||"):
                 tokens.append(normalized[idx : idx + 2])
                 idx += 2
+            elif normalized[idx : idx + 2] == "&>":
+                # "&>" and "&>>" redirect stdout and stderr; they do not end the command.
+                operator = "&>>" if normalized[idx : idx + 3] == "&>>" else "&>"
+                tokens.append(operator)
+                idx += len(operator)
             else:
                 tokens.append(ch)
                 idx += 1
             continue
 
-        if ch == "<":
+        if ch in ("<", ">"):
             if current:
                 tokens.append("".join(current))
                 current = []
-            if normalized[idx : idx + 3] == "<<<":
-                tokens.append("<<<")
-                idx += 3
-            elif normalized[idx : idx + 2] == "<<":
-                tokens.append("<<")
-                idx += 2
-            else:
-                tokens.append("<")
-                idx += 1
-            continue
-
-        if ch == ">":
-            if current:
-                tokens.append("".join(current))
-                current = []
-            if normalized[idx : idx + 2] == ">>":
-                tokens.append(">>")
-                idx += 2
-            else:
-                tokens.append(">")
-                idx += 1
+            # "2>&1", ">&2" and "<&3" duplicate a descriptor; the "&" is part
+            # of the operator, not a command separator.
+            operators = ("<<<", "<<", "<&", "<>", "<") if ch == "<" else (">>", ">&", ">|", ">")
+            operator = next(op for op in operators if normalized.startswith(op, idx))
+            tokens.append(operator)
+            idx += len(operator)
             continue
 
         current.append(ch)
@@ -1007,6 +1118,222 @@ def _redact_network_evidence(action_text: str) -> str:
     return redacted
 
 
+_MAX_LOOKUP_READINGS = 8
+
+
+def _substitution_command_names(body: str) -> list[str]:
+    """List what the commands in a substitution body name, in order.
+
+    Every word after a command's first that names a network client, a command
+    runner such as ``ssh`` or ``docker``, or a pass-through wrapper such as
+    ``strace`` is listed, so ``which wget curl`` lists ``wget`` and ``curl``. A
+    text printer such as ``echo`` or ``printf`` prints the words after that
+    name too, so ``echo curl -d @.env URL`` lists ``curl -d @.env URL``.
+    Redirections and their targets are not words, so ``command -v curl
+    2>/dev/null`` lists ``curl``.
+    """
+    names: list[str] = []
+    words: list[str] = []
+    tokens = _network_shell_tokens(body)
+    idx = 0
+    while idx <= len(tokens):
+        if idx == len(tokens) or tokens[idx] in _SHELL_SEPARATORS:
+            if len(words) >= 2:
+                prints_text = _shell_executable(words[0]) in _INERT_PRINT_COMMANDS
+                for i in range(1, len(words)):
+                    name = _shell_executable(words[i]).removesuffix(".exe")
+                    if (
+                        name in _NETWORK_EXECUTABLES
+                        or name in _NETWORK_COMMAND_RUNNERS
+                        or name in _PASS_THROUGH_WRAPPERS
+                    ):
+                        named = " ".join(words[i:]) if prints_text else name
+                        if named not in names:
+                            names.append(named)
+            words = []
+            idx += 1
+            continue
+        if tokens[idx] in (*_NETWORK_INPUT_REDIRECTS, *_NETWORK_OUTPUT_REDIRECTS):
+            if words and words[-1].isdigit():
+                words.pop()
+            idx += 2
+            continue
+        words.append(tokens[idx])
+        idx += 1
+    return names
+
+
+def _resolve_lookups(cmd_text: str, choice: int) -> tuple[str, int]:
+    """Resolve substitutions with the ``choice``-th name each lists; also return the most any listed."""
+    widest = 1
+
+    def _client(match: re.Match[str]) -> str:
+        nonlocal widest
+        body = match.group(1) if match.group(1) is not None else match.group(2)
+        names = _substitution_command_names(body)
+        if not names:
+            return match.group(0)
+        widest = max(widest, len(names))
+        return names[min(choice, len(names) - 1)]
+
+    for _ in range(4):
+        resolved = _COMMAND_SUBSTITUTION_RE.sub(_client, cmd_text)
+        if resolved == cmd_text:
+            break
+        cmd_text = resolved
+    return cmd_text, widest
+
+
+def _resolve_network_client_lookups(cmd_text: str, choice: int = 0) -> str:
+    """Replace ``$(which curl)``-style substitutions with the command they name.
+
+    A substitution any of whose commands names a network client, a command
+    runner such as ``ssh`` or ``docker``, or a pass-through wrapper such as
+    ``strace`` is replaced with that name. This covers lookups such as
+    ``which``, ``command -v`` or ``type -P``, a lookup behind a wrapper such as
+    ``$(env which curl)`` or after another command such as ``$(cd /tmp &&
+    which curl)``, and any other producer such as ``$(ls /usr/bin/curl)`` or
+    ``$(find /usr -name curl)``, so in command position the substitution runs
+    that command, as it does in bash. A text printer such as ``echo`` or
+    ``printf`` also prints the words after that name, which become the
+    command's arguments, so ``$(echo curl -d @.env URL)`` is replaced with
+    ``curl -d @.env URL``. Redirections are not words, so ``$(which curl |
+    head -1)`` and ``$(command -v curl 2>/dev/null)`` name curl too. When a
+    substitution's commands name several, as in ``$(command -v wget || command
+    -v curl)``, ``choice`` picks which one; ``_network_lookup_readings`` tries
+    each. Nested lookups such as ``$(readlink -f $(which curl))`` resolve from
+    the innermost substitution outward, one level per pass.
+    """
+    return _resolve_lookups(cmd_text, choice)[0]
+
+
+def _network_lookup_readings(cmd_text: str) -> list[str]:
+    """Return the command as written and each distinct way its lookups resolve.
+
+    Checking every reading means resolution can only add a finding: a
+    fallback chain such as ``$(command -v wget || command -v curl)`` is
+    checked once as wget and once as curl, up to ``_MAX_LOOKUP_READINGS``.
+    """
+    readings = [cmd_text]
+    choice = 0
+    while choice < _MAX_LOOKUP_READINGS:
+        resolved, widest = _resolve_lookups(cmd_text, choice)
+        if resolved not in readings:
+            readings.append(resolved)
+        choice += 1
+        if choice >= widest:
+            break
+    return readings
+
+
+def _network_executable(token: str, assignments: dict[str, str], names: dict[str, str] | None = None) -> str:
+    """Name a command word's executable, resolving ``$CURL`` through earlier assignments.
+
+    A value with several words, as in ``SSH="ssh -i key host"; $SSH curl URL``,
+    names the executable by its first word. ``names`` caches the result per
+    word while ``assignments`` stays the same, so a word such as ``$X`` that
+    appears many times is resolved once.
+    """
+    if names is not None and token in names:
+        return names[token]
+    value = token
+    if "$" in token:
+        value = _resolved_shell_arg(token, assignments)
+        if value != token:
+            words = value.strip("\"'").split(None, 1)
+            value = words[0] if words else ""
+    name = _shell_executable(value).removesuffix(".exe")
+    if names is not None:
+        names[token] = name
+    return name
+
+
+def _network_client_uploads(executable: str, args: list[str], stdin_piped: bool) -> bool:
+    """Check one curl, wget or HTTPie invocation's arguments for upload indicators."""
+    for arg in args:
+        if _has_unquoted_secret_var(arg):
+            return True
+        if _has_literal_secret(arg):
+            return True
+
+    if executable == "curl":
+        i = 0
+        while i < len(args):
+            arg = args[i]
+            clean = arg.strip("\"'")
+            if clean.casefold() in {"-head", "-follow", "-speed"}:
+                i += 1
+                continue
+            if clean.startswith("--"):
+                opt_name, has_eq, opt_val = clean.partition("=")
+                if opt_name in _CURL_DATA_FLAGS or opt_name in _CURL_UPLOAD_FLAGS:
+                    return True
+                if opt_name == "--request":
+                    method = opt_val if has_eq else (args[i + 1].strip("\"'") if i + 1 < len(args) else "")
+                    if method.casefold() in _UNSAFE_HTTP_METHODS:
+                        return True
+            elif clean.startswith("-") and len(clean) > 1:
+                chars = clean[1:]
+                c_idx = 0
+                while c_idx < len(chars):
+                    ch = chars[c_idx]
+                    if ch in ("d", "T", "F"):
+                        return True
+                    if ch == "X":
+                        val = chars[c_idx + 1 :].removeprefix("=")
+                        if not val and i + 1 < len(args):
+                            val = args[i + 1].strip("\"'")
+                        if val.casefold() in _UNSAFE_HTTP_METHODS:
+                            return True
+                        break
+                    if ch in _CURL_SHORT_OPTS_WITH_ARG:
+                        val = chars[c_idx + 1 :]
+                        if not val and i + 1 < len(args):
+                            i += 1
+                        break
+                    c_idx += 1
+            i += 1
+
+    elif executable == "wget":
+        i = 0
+        while i < len(args):
+            arg = args[i]
+            clean = arg.strip("\"'")
+            if clean.startswith("--"):
+                opt_name, has_eq, opt_val = clean.partition("=")
+                if opt_name in _WGET_DATA_FLAGS:
+                    return True
+                if opt_name == "--method":
+                    method = opt_val if has_eq else (args[i + 1].strip("\"'") if i + 1 < len(args) else "")
+                    if method.casefold() in _UNSAFE_HTTP_METHODS:
+                        return True
+            i += 1
+
+    elif executable in {"http", "https"}:
+        cleaned_args = [a.strip("\"'") for a in args]
+        if stdin_piped and "--ignore-stdin" not in cleaned_args:
+            return True
+        i = 0
+        while i < len(args):
+            arg = args[i]
+            clean = arg.strip("\"'")
+            if (
+                clean in ("<", "<<", "<<<") or clean.startswith(("<", "<<", "<<<"))
+            ) and "--ignore-stdin" not in cleaned_args:
+                return True
+            if clean.casefold() in _UNSAFE_HTTP_METHODS:
+                return True
+            if clean.startswith("--raw"):
+                opt_name, _, _ = clean.partition("=")
+                if opt_name == "--raw":
+                    return True
+            if _is_httpie_body_item(arg):
+                return True
+            i += 1
+
+    return False
+
+
 def _is_network_exfiltration_command(cmd_text: str, _depth: int = 0) -> bool:
     """Inspect a shell command for network client exfiltration indicators."""
     if not cmd_text or _depth > 3:
@@ -1023,13 +1350,346 @@ def _is_network_exfiltration_command(cmd_text: str, _depth: int = 0) -> bool:
         if _is_network_exfiltration_command(sub, _depth=_depth + 1):
             return True
 
-    tokens = _network_shell_tokens(cmd_text)
-    if not tokens:
-        return False
+    # A resolved lookup can only add a finding, so the command is checked as
+    # written and once per way its lookups resolve. As written, "x=$(echo curl
+    # -T .env); $x URL" still reads the printed "curl -T .env" as a command,
+    # which the resolved "x=curl -T .env" does not.
+    readings = _network_lookup_readings(cmd_text)
+    return any(_network_tokens_exfiltrate(_network_shell_tokens(reading), _depth) for reading in reversed(readings))
 
+
+_NETWORK_INPUT_REDIRECTS = ("<", "<<", "<<<", "<&", "<>")
+_NETWORK_OUTPUT_REDIRECTS = (">", ">>", ">&", ">|", "&>", "&>>")
+
+
+def _network_redirection(command: list[str], idx: int) -> tuple[int, bool] | None:
+    """Return the index after a redirection at ``idx`` and whether it redirects stdin.
+
+    ``< .env``, ``0< .env``, ``<&3``, ``2> /dev/null``, ``2>&1`` and ``<<<
+    "$x"`` are each a redirection operator token, with an optional descriptor
+    before it, and its target. ``None`` means ``idx`` does not start a
+    redirection.
+    """
+    if idx >= len(command):
+        return None
+    descriptor = ""
+    if command[idx].isdigit() and idx + 1 < len(command):
+        descriptor = command[idx]
+        idx += 1
+    if command[idx] not in (*_NETWORK_INPUT_REDIRECTS, *_NETWORK_OUTPUT_REDIRECTS):
+        return None
+    return idx + 2, command[idx] in _NETWORK_INPUT_REDIRECTS and descriptor in ("", "0")
+
+
+_FUNCTION_HEADER_NAME_RE = re.compile(r"[^\s()$`'\"<>]+\(\)")
+# Compound syntax glued to the next word, which bash still reads apart:
+# "up(){" or "up()(curl" (a function header and its body), "if(ssh" or
+# "coproc(<" (a keyword and a subshell), and "x)sudo" or "x)(ssh" (a case arm
+# pattern and the arm's first command). "if((" and "$(" are not split.
+_GLUED_FUNCTION_HEADER_RE = re.compile(r"([^\s()$`'\"<>]+\(\))([{(])(.*)", re.DOTALL)
+_GLUED_KEYWORD_RE = re.compile(r"(if|elif|then|else|do|while|until|coproc)\((?!\()(.*)", re.DOTALL)
+_GLUED_CASE_PATTERN_RE = re.compile(r"(\(?(?:[^\s()`$]|\$(?!\())+\))(.+)", re.DOTALL)
+# A word naming curl or wget outside a URL, as in "for c in curl wget", "read
+# X <<< curl" or "command -v curl".
+_CURL_OR_WGET_WORD_RE = re.compile(r"(?:^|[\s\"'=/`(;|&<>])(?:curl|wget)(?:\.exe)?(?=$|[\s\"'`);|&<>])", re.IGNORECASE)
+
+
+def _split_glued_syntax(command: list[str], idx: int, pattern_allowed: bool) -> bool:
+    """Split compound syntax glued to the next word at ``idx``, in place.
+
+    ``up(){`` becomes ``up()`` and ``{``, ``up()(curl`` becomes ``up()``, ``(``
+    and ``curl``, ``if(ssh`` becomes ``if``, ``(`` and ``ssh``, and, where a
+    ``case`` arm pattern may start (``pattern_allowed``), ``x)sudo`` becomes
+    ``x)`` and ``sudo``. Returns whether ``command`` changed.
+    """
+    word = command[idx]
+    parts: list[str] = []
+    header = _GLUED_FUNCTION_HEADER_RE.fullmatch(word)
+    keyword = _GLUED_KEYWORD_RE.fullmatch(word)
+    pattern = _GLUED_CASE_PATTERN_RE.fullmatch(word) if pattern_allowed else None
+    if header and (header.group(2) == "(" or not header.group(3)):
+        parts = [header.group(1), header.group(2), header.group(3)]
+    elif keyword:
+        parts = [keyword.group(1), "(", keyword.group(2)]
+    elif pattern and not pattern.group(1).endswith("()"):
+        parts = [pattern.group(1), pattern.group(2)]
+    elif word == "function" and idx + 1 < len(command):
+        named = _GLUED_FUNCTION_HEADER_RE.fullmatch(command[idx + 1])
+        if named and (named.group(2) == "(" or not named.group(3)):
+            command[idx + 1 : idx + 2] = [part for part in named.groups() if part]
+            return True
+    parts = [part for part in parts if part]
+    if len(parts) < 2:
+        return False
+    command[idx : idx + 1] = parts
+    return True
+
+
+def _function_header_end(command: list[str], idx: int) -> int | None:
+    """Return the index after a function header at ``idx``, or ``None``.
+
+    ``f()``, ``f ()``, ``function f`` and ``function f()`` each start a
+    function definition; its body, such as ``{ http URL; }``, follows.
+    """
+    word = command[idx]
+    if word == "function" and idx + 1 < len(command):
+        idx += 2
+        if idx < len(command) and command[idx] == "()":
+            idx += 1
+        return idx
+    if _FUNCTION_HEADER_NAME_RE.fullmatch(word):
+        return idx + 1
+    if idx + 1 < len(command) and command[idx + 1] == "()":
+        return idx + 2
+    return None
+
+
+def _case_pattern_end(command: list[str], idx: int) -> int | None:
+    """Return the index after a ``case`` arm pattern at ``idx``, or ``None``.
+
+    ``x)``, ``*)``, ``"$1")``, ``(x)``, ``( x)`` and ``x )`` each end a
+    pattern; the arm's first command follows.
+    """
+    word = command[idx]
+    if word == "(" and idx + 1 < len(command) and command[idx + 1].endswith(")"):
+        return idx + 2
+    if word.endswith(")") and word != ")" and not word.endswith("()"):
+        return idx + 1
+    if word != "(" and idx + 1 < len(command) and command[idx + 1] == ")":
+        return idx + 2
+    return None
+
+
+def _command_prefix_end(command: list[str], idx: int, in_case: bool) -> tuple[int, int, list[str]]:
+    """Skip the compound syntax in front of a command word.
+
+    Returns the index of the command word, the number of ``case`` commands
+    opened, and the names of the functions defined. Skipped are the keywords
+    and leaders ``if``, ``while``, ``until``, ``then``, ``do``, ``else``,
+    ``!``, ``{`` and ``(``, a ``(`` glued to the command word as in ``(ssh
+    host curl URL)``, ``coproc`` and its optional name, function headers,
+    ``case WORD in``, and, inside a ``case`` (``in_case``) or right after its
+    ``in``, an arm pattern such as ``x)``. ``for`` and ``select`` take a word
+    list, not a command, so they stay the command word. ``command`` is
+    changed in place when glued syntax is split off, such as the ``(`` of
+    ``(ssh``, the ``{`` of ``up(){``, the ``(`` of ``if(ssh`` or the pattern
+    of ``x)sudo``.
+    """
+    cases = 0
+    names: list[str] = []
+    pattern_allowed = in_case
+    while idx < len(command):
+        if _split_glued_syntax(command, idx, pattern_allowed):
+            continue
+        word = command[idx]
+        if pattern_allowed:
+            pattern_allowed = False
+            pattern_end = _case_pattern_end(command, idx)
+            if pattern_end is not None:
+                idx = pattern_end
+                continue
+        if word == "case":
+            cases += 1
+            idx += 2
+            if idx < len(command) and command[idx] == "in":
+                idx += 1
+                pattern_allowed = True
+            continue
+        if word in _COMMAND_POSITION_LEADERS or (word in _COMPOUND_OPENERS and word not in ("for", "select")):
+            idx += 1
+            continue
+        if word == "coproc":
+            idx += 1
+            if idx + 1 < len(command) and _SHELL_NAME_RE.fullmatch(command[idx]) and command[idx + 1] in ("{", "("):
+                idx += 1
+            continue
+        if len(word) > 1 and word.startswith("(") and not word.startswith("(("):
+            command[idx : idx + 1] = ["(", word[1:]]
+            continue
+        header = _function_header_end(command, idx)
+        if header is not None:
+            if word == "function":
+                names.append(command[idx + 1].removesuffix("()"))
+            else:
+                names.append(word.removesuffix("()"))
+            idx = header
+            continue
+        break
+    return idx, cases, names
+
+
+def _compound_keywords(command: list[str]) -> tuple[int, int]:
+    """Count the compound commands a simple command opens and closes.
+
+    ``while read -r l``, ``do if true`` and the ``f() {`` or ``g() (`` of a
+    function body each open one, and ``done < .env``, ``fi`` and ``}`` close
+    one. A ``(`` subshell that spans several commands, as in ``( cd x; http
+    URL )``, opens one in its first command and closes it at the ``)``; a
+    ``$( ... )`` substitution written with spaces opens and closes nothing.
+    """
+    opens = 0
+    parens = 0
+    idx = 0
+    while idx < len(command):
+        word = command[idx]
+        if word in _COMPOUND_OPENERS:
+            opens += 1
+        elif word not in _COMMAND_POSITION_LEADERS:
+            header = _function_header_end(command, idx)
+            if header is None:
+                break
+            if header < len(command) and command[header] == "(":
+                # The body's "(" opens the function body, not a subshell.
+                opens += 1
+                parens -= 1
+            idx = header
+            continue
+        idx += 1
+    for word in command:
+        if word == ")":
+            parens -= 1
+        elif word.endswith("(") and not word.endswith("()"):
+            parens += 1
+    closes = int(bool(command) and command[0] in _COMPOUND_CLOSERS)
+    return opens + max(parens, 0), closes + max(-parens, 0)
+
+
+def _compound_reads_input(tokens: list[str]) -> bool:
+    """Say whether a loop, ``if``, ``{ ...; }`` group or function body in the action reads input.
+
+    ``cat .env | while read -r l; do ...; done`` pipes into the compound, and
+    ``{ ...; } < .env`` or ``done < .env`` redirects its input. Every command
+    inside such a compound inherits that input. A function body reads the
+    input of each later call, as in ``f() { http URL; }; cat .env | f``, so an
+    action that defines a function and pipes or redirects input anywhere
+    counts as one that does.
+    """
+    piped = False
+    defines_function = False
+    has_input = False
+    case_depth = 0
+    idx = 0
+    while idx < len(tokens):
+        if tokens[idx] in _SHELL_SEPARATORS:
+            piped = tokens[idx] == "|"
+            has_input = has_input or piped
+            idx += 1
+            continue
+        end = idx
+        while end < len(tokens) and tokens[end] not in _SHELL_SEPARATORS:
+            end += 1
+        command = tokens[idx:end]
+        if command[0] == "esac":
+            case_depth = max(case_depth - 1, 0)
+        # A function may be defined after compound keywords or in a case arm,
+        # as in "case x in x) f() { http URL; }". This also splits glued
+        # syntax such as "f(){" before the keywords are counted.
+        _, cases, names = _command_prefix_end(command, 0, case_depth > 0)
+        case_depth += cases
+        opens, closes = _compound_keywords(command)
+        if opens and piped:
+            return True
+        redirects_input = any(token in _NETWORK_INPUT_REDIRECTS for token in command)
+        if closes and redirects_input:
+            return True
+        has_input = has_input or redirects_input
+        defines_function = defines_function or bool(names)
+        idx = end
+    return defines_function and has_input
+
+
+_VARIABLE_READING_BUILTINS = frozenset({"read", "mapfile", "readarray", "printf"})
+_READ_OPTIONS_WITH_ARG = frozenset({"-a", "-d", "-i", "-n", "-N", "-p", "-t", "-u"})
+_MAPFILE_OPTIONS_WITH_ARG = frozenset({"-d", "-n", "-O", "-s", "-u", "-C", "-c"})
+
+
+def _record_builtin_reassignments(
+    command: list[str], cmd_idx: int, executable: str, assignments: dict[str, str]
+) -> None:
+    """Update ``assignments`` for the variables ``read``, ``mapfile`` or ``printf -v`` set.
+
+    ``read X <<< curl`` and ``printf -v X curl`` set ``X`` to ``curl``. A
+    value read from any other input is unknown, so the variable's recorded
+    assignment is dropped rather than kept with its earlier value.
+    """
+    words: list[str] = []
+    here_string: str | None = None
+    idx = cmd_idx + 1
+    while idx < len(command):
+        redirection = _network_redirection(command, idx)
+        if redirection is not None:
+            operator_idx = redirection[0] - 2
+            if command[operator_idx] == "<<<" and operator_idx + 1 < len(command):
+                here_string = command[operator_idx + 1].strip("\"'")
+            idx = redirection[0]
+            continue
+        words.append(command[idx].strip("\"'"))
+        idx += 1
+
+    if executable == "printf":
+        if "-v" not in words:
+            return
+        rest = words[words.index("-v") + 1 :]
+        if not rest or not _SHELL_NAME_RE.fullmatch(rest[0]):
+            return
+        values = [word for word in rest[1:] if "%" not in word]
+        if values:
+            assignments[rest[0]] = values[0]
+        else:
+            assignments.pop(rest[0], None)
+        return
+
+    options_with_arg = _READ_OPTIONS_WITH_ARG if executable == "read" else _MAPFILE_OPTIONS_WITH_ARG
+    names: list[str] = []
+    idx = 0
+    while idx < len(words):
+        word = words[idx]
+        if word in options_with_arg:
+            if word == "-a" and idx + 1 < len(words):
+                names.append(words[idx + 1])
+            idx += 2
+            continue
+        if word.startswith("-"):
+            idx += 1
+            continue
+        if _SHELL_NAME_RE.fullmatch(word):
+            names.append(word)
+        idx += 1
+    if executable == "read":
+        names = names or ["REPLY"]
+    else:
+        names = names[:1] or ["MAPFILE"]
+    if executable != "read" or here_string is None:
+        for name in names:
+            assignments.pop(name, None)
+        return
+    values = here_string.split()
+    for position, name in enumerate(names):
+        if position == len(names) - 1:
+            assignments[name] = " ".join(values[position:])
+        else:
+            assignments[name] = values[position] if position < len(values) else ""
+
+
+def _network_tokens_exfiltrate(tokens: list[str], _depth: int) -> bool:
+    """Inspect a tokenized shell command for network client exfiltration indicators."""
     assignments: dict[str, str] = {}
+    # Executable names of words resolved since assignments last changed, so a
+    # word such as "$X" repeated across a long action is resolved once.
+    word_names: dict[str, str] = {}
     idx = 0
     stdin_piped = False
+    # Input piped or redirected into a loop, if or { ...; } group reaches every
+    # command inside it, as in "while read -r l; do http URL; done < .env".
+    compound_input = _compound_reads_input(tokens)
+    names_curl_or_wget = any("://" not in token and _CURL_OR_WGET_WORD_RE.search(token) for token in tokens)
+    compound_depth = 0
+    case_depth = 0
+    # Functions whose body is still open, with the compound depth before each
+    # header, and the clients and runners each function's body starts, so
+    # "up() { curl "$@"; }; up -d @.env URL" is checked as curl.
+    open_functions: list[tuple[str, int]] = []
+    function_commands: dict[str, set[str]] = {}
 
     while idx < len(tokens):
         if tokens[idx] in _SHELL_SEPARATORS:
@@ -1043,30 +1703,85 @@ def _is_network_exfiltration_command(cmd_text: str, _depth: int = 0) -> bool:
         command = tokens[idx:end]
         idx = end
 
-        cmd_idx = 0
-        while cmd_idx < len(command):
-            clean_tok = command[cmd_idx].strip("\"'")
-            assignment = _SHELL_ASSIGNMENT_RE.match(clean_tok)
-            if not assignment:
-                break
-            assignments[assignment.group(1)] = assignment.group(2)
-            cmd_idx += 1
+        # The command word follows any compound keywords, leaders, function
+        # headers, case patterns or coproc, as in "do ssh host curl URL",
+        # "{ ssh host curl URL; }", "f() { curl "$@"" or "x) < .env http URL",
+        # also when glued as in "up(){ curl", "if(ssh" or "x)sudo".
+        if command[0] == "esac":
+            case_depth = max(case_depth - 1, 0)
+        cmd_idx, cases, defined = _command_prefix_end(command, 0, case_depth > 0)
+        case_depth += cases
 
-        unwrapped_idx = _unwrap_shell_command(command, cmd_idx, assignments)
-        if unwrapped_idx is None:
-            return True
-        cmd_idx = unwrapped_idx
+        opens, closes = _compound_keywords(command)
+        # "g() ( http URL )" opens and closes its body in one command.
+        inside_compound = compound_depth + opens > 0
+        depth_before = compound_depth
+        compound_depth = max(compound_depth + opens - closes, 0)
+        command_stdin = stdin_piped or (compound_input and inside_compound)
+        open_functions = [entry for entry in open_functions if entry[1] < depth_before]
+        open_functions.extend((name, depth_before) for name in defined)
+
+        for _ in range(_MAX_SHELL_WRAPPERS + 1):
+            while cmd_idx < len(command):
+                # A redirection before the command word, as in "< .env http
+                # URL", "2>&1 < .env http URL" or "sudo < .env http URL", is
+                # not the command word. Redirected input is the command's stdin.
+                redirection = _network_redirection(command, cmd_idx)
+                if redirection is not None:
+                    cmd_idx, reads_input = redirection
+                    command_stdin = command_stdin or reads_input
+                    continue
+                clean_tok = command[cmd_idx].strip("\"'")
+                assignment = _SHELL_ASSIGNMENT_RE.match(clean_tok)
+                if not assignment:
+                    break
+                assignments[assignment.group(1)] = assignment.group(2)
+                word_names.clear()
+                cmd_idx += 1
+
+            unwrapped_idx = _unwrap_shell_command(command, cmd_idx, assignments)
+            if unwrapped_idx is None:
+                return True
+            if unwrapped_idx == cmd_idx:
+                break
+            # A skipped wrapper such as "env NAME=value" may have assigned.
+            word_names.clear()
+            cmd_idx = unwrapped_idx
 
         if cmd_idx >= len(command):
             continue
 
-        executable = _shell_executable(command[cmd_idx]).removesuffix(".exe")
+        executable = _network_executable(command[cmd_idx], assignments, word_names)
+        # A "$VAR" or backtick command word may not be what the recorded
+        # assignments say: a prefix assignment, one after || or &&, one later
+        # unset, or one inside an if branch. Its resolved name only adds
+        # checks; it never skips the command as a printer or declaration, and
+        # never drops its stdin as a text consumer.
+        dynamic = "$" in command[cmd_idx] or "`" in command[cmd_idx]
+
+        # A function whose body starts a client or runner, as in "up() { curl
+        # "$@"; }", passes each call's arguments on, so "up -d @.env URL" is
+        # checked with curl's upload rules and "r host curl URL" after "r() {
+        # ssh "$@"; }" with the runner rule.
+        function_starts = function_commands.get(executable, set())
+        if open_functions:
+            started = function_starts | (
+                {executable} if executable in _NETWORK_EXECUTABLES or executable in _NETWORK_COMMAND_RUNNERS else set()
+            )
+            for name, _ in open_functions:
+                function_commands.setdefault(name, set()).update(started)
+        for started_client in function_starts:
+            if started_client in _NETWORK_EXECUTABLES and _network_client_uploads(
+                started_client, command[cmd_idx + 1 :], command_stdin
+            ):
+                return True
 
         if executable in _SHELL_COMMAND_INTERPRETERS:
             c_payload = _shell_c_payload(command, cmd_idx, assignments)
             if c_payload and _is_network_exfiltration_command(c_payload, _depth=_depth + 1):
                 return True
-            continue
+            if not dynamic:
+                continue
 
         if executable == "eval":
             raw_args = command[cmd_idx + 1 :]
@@ -1081,102 +1796,112 @@ def _is_network_exfiltration_command(cmd_text: str, _depth: int = 0) -> bool:
                     eval_payload = " ".join(_resolved_shell_arg(arg, assignments) for arg in raw_args)
                 if eval_payload and _is_network_exfiltration_command(eval_payload, _depth=_depth + 1):
                     return True
-            continue
-
-        if executable not in _NETWORK_EXECUTABLES:
-            if executable in _INERT_PRINT_COMMANDS:
+            if not dynamic:
                 continue
-            for sub_idx in range(cmd_idx + 1, len(command)):
-                tok = command[sub_idx].strip("\"'")
-                if not tok or "://" in tok or tok.startswith("-"):
-                    continue
-                sub_exe = _shell_executable(tok).removesuffix(".exe")
-                if sub_exe in _NETWORK_EXECUTABLES:
-                    return True
+
+        if executable in _DECLARATION_BUILTINS and not dynamic:
+            for token in command[cmd_idx + 1 :]:
+                assignment = _SHELL_ASSIGNMENT_RE.match(token.strip("\"'"))
+                if assignment:
+                    assignments[assignment.group(1)] = assignment.group(2)
+                    word_names.clear()
             continue
 
-        args = command[cmd_idx + 1 :]
+        if executable in _VARIABLE_READING_BUILTINS and not dynamic:
+            # "read X <<< curl", "mapfile X" and "printf -v X curl" set X too.
+            _record_builtin_reassignments(command, cmd_idx, executable, assignments)
+            word_names.clear()
 
-        for arg in args:
-            if _has_unquoted_secret_var(arg):
+        if executable in _NETWORK_EXECUTABLES:
+            if _network_client_uploads(executable, command[cmd_idx + 1 :], command_stdin):
                 return True
-            if _has_literal_secret(arg):
+            if not dynamic:
+                continue
+        elif ("$" in executable or "`" in executable) and names_curl_or_wget:
+            # A "$VAR" or backtick command word with no recorded value, in an
+            # action that names curl or wget as a word, as in "for c in curl
+            # wget; do $c --post-file=.env -q URL; done", may be either
+            # client, so its arguments get the curl and wget upload rules.
+            # "$GREP -F https://x src/" in an action that names neither does not.
+            rest = command[cmd_idx + 1 :]
+            if any(_network_client_uploads(name, rest, command_stdin) for name in ("curl", "wget")):
                 return True
 
-        if executable == "curl":
-            i = 0
-            while i < len(args):
-                arg = args[i]
-                clean = arg.strip("\"'")
-                if clean.casefold() in {"-head", "-follow", "-speed"}:
-                    i += 1
-                    continue
-                if clean.startswith("--"):
-                    opt_name, has_eq, opt_val = clean.partition("=")
-                    if opt_name in _CURL_DATA_FLAGS or opt_name in _CURL_UPLOAD_FLAGS:
-                        return True
-                    if opt_name == "--request":
-                        method = opt_val if has_eq else (args[i + 1].strip("\"'") if i + 1 < len(args) else "")
-                        if method.casefold() in _UNSAFE_HTTP_METHODS:
-                            return True
-                elif clean.startswith("-") and len(clean) > 1:
-                    chars = clean[1:]
-                    c_idx = 0
-                    while c_idx < len(chars):
-                        ch = chars[c_idx]
-                        if ch in ("d", "T", "F"):
-                            return True
-                        if ch == "X":
-                            val = chars[c_idx + 1 :].removeprefix("=")
-                            if not val and i + 1 < len(args):
-                                val = args[i + 1].strip("\"'")
-                            if val.casefold() in _UNSAFE_HTTP_METHODS:
-                                return True
-                            break
-                        if ch in _CURL_SHORT_OPTS_WITH_ARG:
-                            val = chars[c_idx + 1 :]
-                            if not val and i + 1 < len(args):
-                                i += 1
-                            break
-                        c_idx += 1
-                i += 1
+        # A printer whose output is piped on, as in "echo curl -d @.env URL |
+        # sh", may be feeding its words to a shell, so they are checked below.
+        if executable in _INERT_PRINT_COMMANDS and not dynamic and not (idx < len(tokens) and tokens[idx] == "|"):
+            continue
 
-        elif executable == "wget":
-            i = 0
-            while i < len(args):
-                arg = args[i]
-                clean = arg.strip("\"'")
-                if clean.startswith("--"):
-                    opt_name, has_eq, opt_val = clean.partition("=")
-                    if opt_name in _WGET_DATA_FLAGS:
-                        return True
-                    if opt_name == "--method":
-                        method = opt_val if has_eq else (args[i + 1].strip("\"'") if i + 1 < len(args) else "")
-                        if method.casefold() in _UNSAFE_HTTP_METHODS:
-                            return True
-                i += 1
-
-        elif executable in {"http", "https"}:
-            cleaned_args = [a.strip("\"'") for a in args]
-            if stdin_piped and "--ignore-stdin" not in cleaned_args:
+        # Other commands may run a later word as a command, as find -exec and
+        # poetry run do, or only name a client as data, as in apt-get install
+        # -y curl, which curl, grep -rn http src/, or prose in a here-document.
+        # Every client named later is read with its own upload rules, as when
+        # it runs directly. A later word naming the same client sees a suffix
+        # of the same arguments, so it is skipped once an earlier word's check
+        # covered it; an HTTPie word whose arguments include --ignore-stdin
+        # does not cover a later one, which may not see that flag. Piped or
+        # redirected stdin stays with a text consumer such as grep, so it is
+        # not the client's request body; any other command may pass it on. A
+        # command runner, or one named after a pass-through wrapper such as
+        # strace or flock, starts the client elsewhere, so any client named
+        # after it is flagged. After a compound keyword or function header, as
+        # in "do grep -c http" or "f() { < .env http URL", the command word
+        # after the keywords, redirections and wrappers is the one that reads
+        # stdin, and an input redirection before it is that command's stdin.
+        lead = cmd_idx
+        while lead < len(command):
+            if command[lead] in _COMPOUND_OPENERS or command[lead] in _COMMAND_POSITION_LEADERS:
+                lead += 1
+                continue
+            header = _function_header_end(command, lead)
+            if header is not None:
+                lead = header
+                continue
+            redirection = _network_redirection(command, lead)
+            if redirection is not None:
+                lead, reads_input = redirection
+                command_stdin = command_stdin or reads_input
+                continue
+            if _SHELL_ASSIGNMENT_RE.match(command[lead].strip("\"'")):
+                lead += 1
+                continue
+            if "$" in command[lead] or "`" in command[lead]:
+                # A "$VAR" word is never resolved into a wrapper here, so it
+                # keeps its stdin as described above.
+                break
+            unwrapped = _unwrap_shell_command(command, lead, assignments)
+            if unwrapped is None:
                 return True
-            i = 0
-            while i < len(args):
-                arg = args[i]
-                clean = arg.strip("\"'")
-                if (
-                    clean in ("<", "<<", "<<<") or clean.startswith(("<", "<<", "<<<"))
-                ) and "--ignore-stdin" not in cleaned_args:
-                    return True
-                if clean.casefold() in _UNSAFE_HTTP_METHODS:
-                    return True
-                if clean.startswith("--raw"):
-                    opt_name, _, _ = clean.partition("=")
-                    if opt_name == "--raw":
-                        return True
-                if _is_httpie_body_item(arg):
-                    return True
-                i += 1
+            if unwrapped == lead:
+                break
+            word_names.clear()
+            lead = unwrapped
+        reader = command[lead] if lead < len(command) else ""
+        keeps_stdin = (
+            "$" in reader
+            or "`" in reader
+            or _network_executable(reader, assignments, word_names) not in _STDIN_TEXT_CONSUMERS
+        )
+        runs_elsewhere = executable in _NETWORK_COMMAND_RUNNERS or bool(function_starts & _NETWORK_COMMAND_RUNNERS)
+        seen_clients: set[str] = set()
+        for sub_idx in range(cmd_idx + 1, len(command)):
+            client = _network_executable(command[sub_idx], assignments, word_names)
+            if executable in _PASS_THROUGH_WRAPPERS and client in _NETWORK_COMMAND_RUNNERS:
+                runs_elsewhere = True
+                continue
+            if client not in _NETWORK_EXECUTABLES:
+                continue
+            if runs_elsewhere:
+                return True
+            if client in seen_clients:
+                continue
+            client_args = command[sub_idx + 1 :]
+            if not keeps_stdin:
+                client_args = [token for token in client_args if token not in _NETWORK_INPUT_REDIRECTS]
+            if client not in ("http", "https") or "--ignore-stdin" not in (a.strip("\"'") for a in client_args):
+                seen_clients.add(client)
+            if _network_client_uploads(client, client_args, command_stdin and keeps_stdin):
+                return True
 
     return False
 

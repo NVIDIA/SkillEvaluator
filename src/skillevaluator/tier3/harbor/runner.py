@@ -24,6 +24,7 @@ import tempfile
 import threading
 import time
 import tomllib
+import unicodedata
 from collections.abc import Iterable, Iterator, Mapping, Sequence
 from concurrent.futures import FIRST_COMPLETED, ThreadPoolExecutor, as_completed, wait
 from contextlib import ExitStack, contextmanager, suppress
@@ -78,7 +79,12 @@ from skillevaluator.tier3.evals_config import (
     load_evals_config,
     validate_environment_kwargs,
 )
-from skillevaluator.tier3.harbor import CONTAINER_AGENT_IMPORT_PATHS, DOCKER_AGENT_IMPORT_PATHS
+from skillevaluator.tier3.harbor import (
+    CONTAINER_AGENT_IMPORT_PATHS,
+    DOCKER_AGENT_IMPORT_PATHS,
+    LOCAL_CODEX_HOME_DIRNAME,
+    LOCAL_CODEX_SECRETS_DIRNAME,
+)
 from skillevaluator.tier3.harbor.adapter import (
     _RUNTIME_PROCESS_CONTROL_ENV_NAMES,
     _RUNTIME_PROCESS_CONTROL_ENV_PREFIXES,
@@ -134,7 +140,7 @@ from skillevaluator.tier3.harbor.report_data import (
     encode_dataset_snapshot,
     load_staged_harbor_dataset,
 )
-from skillevaluator.tier3.harbor.secure_copy import copytree_secure
+from skillevaluator.tier3.harbor.secure_copy import IgnoreCallback, _absolute_lexical, copytree_secure
 from skillevaluator.tier3.harbor.secure_docker_environment import (
     SECURE_DOCKER_ENV_IMPORT_PATH,
     SECURE_KATA_ENV_IMPORT_PATH,
@@ -3240,6 +3246,91 @@ def _workspace_skills(skill_path: Path, values: list[str | Path]) -> list[Path]:
     return resolved
 
 
+def _workspace_skill_name(path: Path) -> str:
+    """Reserve the effective skill name without requiring an embedding description."""
+    import yaml
+
+    from skillevaluator.constants import CONTENT_DEDUP_MAX_FILE_BYTES
+    from skillevaluator.validators.frontmatter_parser import FRONTMATTER_PATTERN
+
+    content = _read_regular_evals_file(
+        path / "SKILL.md",
+        label="Workspace skill manifest",
+        max_bytes=CONTENT_DEDUP_MAX_FILE_BYTES,
+        allowed_root=path,
+    ).decode("utf-8-sig")
+    match = FRONTMATTER_PATTERN.match(content)
+    if match is not None:
+        try:
+            metadata = yaml.safe_load(match.group(1))
+        except yaml.YAMLError:
+            metadata = None
+        name = metadata.get("name") if isinstance(metadata, dict) else None
+        if isinstance(name, str) and name.strip():
+            return name.strip()
+    return path.name
+
+
+def _decoy_workspace_skills(
+    skill_path: Path,
+    workspace_config: Mapping[str, Any],
+    workspace_mode: str,
+    include_skills: list[str | Path] | None = None,
+    reference_skills_dir: Path | None = None,
+) -> tuple[list[Path], list[Path], dict[str, Any] | None]:
+    """Resolve one frozen selection without changing manual workspace policy."""
+    from skillevaluator.tier3.decoys import load_decoy_manifest
+
+    raw_manifest = workspace_config.get("decoy_manifest")
+    include_values = [*workspace_config.get("include", []), *(include_skills or [])]
+    if (include_values or raw_manifest is not None) and workspace_mode != "group":
+        field = "skill_workspace.decoy_manifest" if raw_manifest is not None else "include_skills"
+        raise ValueError(f"{field} requires skill_workspace.mode=group")
+    manual_skills = _workspace_skills(skill_path.resolve(), include_values)
+    if raw_manifest is None:
+        return manual_skills, [], None
+    manifest_path = Path(raw_manifest).expanduser()
+    if not manifest_path.is_absolute():
+        manifest_path = skill_path.parent / manifest_path
+    selected, manifest = load_decoy_manifest(skill_path, manifest_path)
+
+    def name_key(value: str) -> str:
+        return unicodedata.normalize("NFC", value).casefold()
+
+    reserved = [skill_path, *manual_skills]
+    if reference_skills_dir is not None and reference_skills_dir.is_dir():
+        reserved.extend(path for path in reference_skills_dir.iterdir() if _is_skill_dir(path))
+    directory_names = {name_key(path.name) for path in reserved}
+    skill_names = {name_key(_workspace_skill_name(path)) for path in reserved}
+    for path, record in zip(selected, manifest["selected"], strict=True):
+        if name_key(path.name) in directory_names or name_key(record["skill_name"]) in skill_names:
+            raise ValueError(f"Selected decoy '{path.name}' collides with another workspace skill name")
+        directory_names.add(name_key(path.name))
+        skill_names.add(name_key(record["skill_name"]))
+    return manual_skills, selected, manifest
+
+
+@contextmanager
+def _private_decoy_workspace_snapshot(selected: list[Path], manifest: Mapping[str, Any]) -> Iterator[list[Path]]:
+    """Keep the same verified source bytes available to every paired task."""
+    from skillevaluator.tier3.decoy_identity import decoy_source_copy_ignore, decoy_source_digest
+
+    with tempfile.TemporaryDirectory(prefix="skillevaluator-decoys-snapshot-") as root_text:
+        root = Path(root_text)
+        snapshots: list[Path] = []
+        for source, record in zip(selected, manifest["selected"], strict=True):
+            expected = record["source_digest"]
+            if decoy_source_digest(source) != expected:
+                raise ValueError(f"Selected decoy '{source.name}' changed before snapshot creation")
+
+            snapshot = root / source.name
+            copytree_secure(source, snapshot, allowed_root=source, ignore=decoy_source_copy_ignore(source))
+            if decoy_source_digest(snapshot) != expected or decoy_source_digest(source) != expected:
+                raise ValueError(f"Selected decoy '{source.name}' changed while its snapshot was created")
+            snapshots.append(snapshot)
+        yield snapshots
+
+
 def _limit_staged_cases(
     task_selectors: list[str],
     case_id_by_task_selector: Mapping[str, str],
@@ -4027,12 +4118,100 @@ def _aggregate_trial_name(
     return candidate
 
 
+# Local-mode Codex runtime dirs left under a trial's agent log dir. They hold
+# the Codex credential, so attempt merges omit them instead of publishing them.
+_LOCAL_CODEX_PRIVATE_AGENT_DIRS = frozenset({LOCAL_CODEX_HOME_DIRNAME, LOCAL_CODEX_SECRETS_DIRNAME})
+
+
+def _read_json_mapping_no_follow(path: Path) -> dict[str, Any] | None:
+    """Read a regular, unlinked JSON object file, or return ``None``."""
+    try:
+        if not stat.S_ISREG(path.lstat().st_mode):
+            return None
+        fd = os.open(path, os.O_RDONLY | getattr(os, "O_NOFOLLOW", 0) | getattr(os, "O_BINARY", 0))
+    except OSError:
+        return None
+    try:
+        with os.fdopen(fd, "rb") as handle:
+            if not stat.S_ISREG(os.fstat(handle.fileno()).st_mode):
+                return None
+            payload = json.loads(handle.read().decode("utf-8"))
+    except (OSError, UnicodeDecodeError, json.JSONDecodeError):
+        return None
+    return payload if isinstance(payload, dict) else None
+
+
+def _trial_codex_private_dirs_ignore(job_path: Path) -> IgnoreCallback:
+    """Return a secure-copy ignore callback that drops local Codex runtime dirs.
+
+    Harbor's Codex agent links ``codex-home/auth.json`` to the credential in
+    ``codex-secrets`` and removes both only in a best-effort cleanup, so a
+    timed-out or cancelled trial can leave them behind. The exclusion is limited
+    to trial agent dirs: ``<trial>/agent``, and ``<trial>/steps/<step>/agent``
+    where Harbor's multi-step trials move it after each step. ``<step>`` is one
+    path component, or a step name the trial's ``result.json`` (or the attempt
+    root's matching ``trial_results`` entry) declares, which may span several
+    components. Every other path still passes through the secure copier's link
+    checks.
+    """
+    from skillevaluator.tier3.harbor.runtime_preflight import _agent_artifact_dirs
+
+    # copytree_secure reports directories under its own lexical source root.
+    job_root = _absolute_lexical(job_path)
+    root_trial_results: dict[str, Mapping[str, Any]] | None = None
+    declared_step_agent_dirs: dict[str, frozenset[tuple[str, ...]]] = {}
+
+    def trial_result(trial_name: str) -> Mapping[str, Any] | None:
+        nonlocal root_trial_results
+        payload = _read_json_mapping_no_follow(job_root / trial_name / "result.json")
+        if payload is not None:
+            return payload
+        # The merge falls back to the attempt root's entry for an unreadable
+        # trial result, so the declared step names come from the same place.
+        if root_trial_results is None:
+            root = _read_json_mapping_no_follow(job_root / "result.json") or {}
+            candidates = root.get("trial_results")
+            root_trial_results = {
+                candidate["trial_name"]: candidate
+                for candidate in (candidates if isinstance(candidates, list) else [])
+                if isinstance(candidate, dict) and isinstance(candidate.get("trial_name"), str)
+            }
+        return root_trial_results.get(trial_name)
+
+    def step_agent_dirs(trial_name: str) -> frozenset[tuple[str, ...]]:
+        if trial_name not in declared_step_agent_dirs:
+            payload = trial_result(trial_name) or {}
+            # Only the step results name step dirs; reuse the preflight's
+            # step-name validation so both read the same layout.
+            dirs = _agent_artifact_dirs(Path(), {"step_results": payload.get("step_results")})
+            declared_step_agent_dirs[trial_name] = frozenset(path.parts for path in dirs)
+        return declared_step_agent_dirs[trial_name]
+
+    def ignore(directory: str, names: list[str]) -> set[str]:
+        try:
+            parts = Path(directory).relative_to(job_root).parts
+        except ValueError:
+            return set()
+        if len(parts) < 2 or parts[-1] != "agent" or not _LOCAL_CODEX_PRIVATE_AGENT_DIRS.intersection(names):
+            return set()
+        trial_relative = parts[1:]
+        is_trial_agent_dir = (
+            trial_relative == ("agent",)
+            or (len(trial_relative) == 3 and trial_relative[0] == "steps")
+            or (trial_relative[0] == "steps" and trial_relative in step_agent_dirs(parts[0]))
+        )
+        return _LOCAL_CODEX_PRIVATE_AGENT_DIRS.intersection(names) if is_trial_agent_dir else set()
+
+    return ignore
+
+
 def _merge_attempt_jobs(job_dirs: list[Path], aggregate_dir: Path) -> None:
     """Merge per-attempt Harbor jobs into the job directory shape collection expects.
 
     Trial directories are copied under attempt-qualified names and the
     per-attempt Harbor ``result.json`` statistics are combined so the merged
-    job still satisfies :func:`validate_harbor_job_result`.
+    job still satisfies :func:`validate_harbor_job_result`. Leftover local
+    Codex credential dirs in trial agent dirs are omitted from the merge.
     """
     from harbor.models.job.result import JobResult, JobStats
     from harbor.models.trial.config import TrialConfig
@@ -4083,7 +4262,12 @@ def _merge_attempt_jobs(job_dirs: list[Path], aggregate_dir: Path) -> None:
                 raise ValueError(f"attempt Harbor job root changed before snapshot: {job_path}") from exc
             if _job_path_is_link_or_reparse(job_path, before) or _job_root_fingerprint(before) != expected_fingerprint:
                 raise ValueError(f"attempt Harbor job root changed before snapshot: {job_path}")
-            copytree_secure(job_path, snapshot, allowed_root=job_resolved)
+            copytree_secure(
+                job_path,
+                snapshot,
+                allowed_root=job_resolved,
+                ignore=_trial_codex_private_dirs_ignore(job_path),
+            )
             try:
                 after = job_path.lstat()
             except OSError as exc:
@@ -4699,6 +4883,9 @@ def _run_harbor_eval_impl(
     repo_context_exclude_paths: Sequence[Path] = (),
     _evaluator_skill_path: Path | None = None,
     _snapshot_publication_target: dict[str, str] | None = None,
+    _decoy_workspace_paths: list[Path] | None = None,
+    _decoy_workspace_source_paths: list[Path] | None = None,
+    _decoy_manifest: dict[str, Any] | None = None,
     _monotonic_start: float | None = None,
 ) -> dict[str, Any]:
     """Run a public Harbor evaluation with and without the target skill."""
@@ -4732,6 +4919,35 @@ def _run_harbor_eval_impl(
             try:
                 snapshot_publication_target = publication_target_from_path(skill_path)
                 evaluator_skill_path = snapshot_stack.enter_context(private_evaluator_skill_snapshot(skill_path))
+                snapshot_config, _ = load_evals_config(evaluator_skill_path)
+                snapshot_workspace = snapshot_config.get("skill_workspace", {})
+                if "decoy_manifest" in snapshot_workspace:
+                    manual, selected, manifest = _decoy_workspace_skills(
+                        skill_path,
+                        snapshot_workspace,
+                        skill_workspace_mode or snapshot_workspace.get("mode", "isolated"),
+                        include_skills,
+                        reference_skills_dir,
+                    )
+                    assert manifest is not None
+                    source_paths = [*manual, *selected]
+                    results_root = Path(output_dir) if output_dir is not None else skill_path / "evals" / "results"
+                    validate_output_provenance_key_location(
+                        skill_path,
+                        results_root,
+                        reference_skills_dir=reference_skills_dir,
+                        workspace_skill_paths=source_paths,
+                    )
+                    validate_results_root_location(
+                        skill_path,
+                        results_root,
+                        reference_skills_dir=reference_skills_dir,
+                        workspace_skill_paths=source_paths,
+                    )
+                    frozen = snapshot_stack.enter_context(_private_decoy_workspace_snapshot(selected, manifest))
+                    forwarded["_decoy_workspace_paths"] = [*manual, *frozen]
+                    forwarded["_decoy_workspace_source_paths"] = source_paths
+                    forwarded["_decoy_manifest"] = manifest
                 if publication_target_from_path(skill_path) != snapshot_publication_target:
                     raise ValueError("Publication source changed while its private evaluator snapshot was created")
             except (OSError, ValueError) as exc:
@@ -4822,6 +5038,10 @@ def _run_harbor_eval_impl(
     if workspace_mode not in {"isolated", "group"}:
         reporter.emit(ProgressEvent(stage="configuration", state="failed", detail="invalid workspace mode"))
         return {"error": ["skill_workspace.mode must be isolated or group"]}
+    if "decoy_manifest" in workspace_config and workspace_mode != "group":
+        detail = "skill_workspace.decoy_manifest requires skill_workspace.mode=group"
+        reporter.emit(ProgressEvent(stage="configuration", state="failed", detail=detail))
+        return {"error": [detail]}
     if not skip_baseline and harbor_config.get("pre_agent_setup"):
         if skip_with_skill:
             # --skip-baseline cannot be combined with --skip-with-skill, so it
@@ -5157,12 +5377,21 @@ def _run_harbor_eval_impl(
     job_judge_verifier_env = _job_judge_verifier_env(provider_env, grading_mode)
     job_judge_subprocess_env = _job_judge_subprocess_env(provider_env, grading_mode)
 
+    if _decoy_manifest is not None:
+        run_config["skill_workspace"] = {
+            "mode": workspace_mode,
+            "decoy_manifest": _decoy_manifest,
+        }
     include_values = [*workspace_config.get("include", []), *(include_skills or [])]
     if include_values and workspace_mode != "group":
         reporter.emit(ProgressEvent(stage="with-skill-tasks", state="failed", detail="invalid included skills"))
         return {"error": ["include_skills requires skill_workspace.mode=group"]}
     try:
-        workspace_skills = _workspace_skills(skill_path.resolve(), include_values if workspace_mode == "group" else [])
+        workspace_skills = (
+            _decoy_workspace_paths
+            if _decoy_workspace_paths is not None
+            else _workspace_skills(skill_path.resolve(), include_values if workspace_mode == "group" else [])
+        )
     except ValueError as exc:
         reporter.emit(ProgressEvent(stage="with-skill-tasks", state="failed", detail=str(exc)))
         return {"error": [str(exc)]}
@@ -5174,13 +5403,13 @@ def _run_harbor_eval_impl(
             skill_path,
             root,
             reference_skills_dir=reference_skills_dir,
-            workspace_skill_paths=workspace_skills,
+            workspace_skill_paths=_decoy_workspace_source_paths or workspace_skills,
         )
         validate_results_root_location(
             skill_path,
             root,
             reference_skills_dir=reference_skills_dir,
-            workspace_skill_paths=workspace_skills,
+            workspace_skill_paths=_decoy_workspace_source_paths or workspace_skills,
         )
     except ValueError as exc:
         reporter.emit(ProgressEvent(stage="with-skill-tasks", state="failed", detail=str(exc)))
@@ -5532,7 +5761,7 @@ def _run_harbor_eval_impl(
         skill_path,
         staged_task_paths,
         reference_skills_dir=reference_skills_dir,
-        workspace_skill_paths=workspace_skills,
+        workspace_skill_paths=_decoy_workspace_source_paths or workspace_skills,
     ):
         publication_target_conflict = {
             "run_start": dict(publication_target) if publication_target is not None else None,

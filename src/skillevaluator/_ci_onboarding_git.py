@@ -121,11 +121,18 @@ def safe_relative(value: str) -> str:
 
 
 def no_symlinks(repo: Path, relative: str) -> None:
+    import stat
+
     current = repo
     for part in PurePosixPath(relative).parts:
         current /= part
-        if current.is_symlink():
-            raise SetupError("Symlink paths are not supported by CI onboarding.")
+        try:
+            metadata = current.lstat()
+        except FileNotFoundError:
+            continue
+        reparse = getattr(metadata, "st_file_attributes", 0) & getattr(stat, "FILE_ATTRIBUTE_REPARSE_POINT", 0x400)
+        if stat.S_ISLNK(metadata.st_mode) or reparse:
+            raise SetupError("Symlink and Windows junction paths are not supported by CI onboarding.")
 
 
 def discover(repo: Path) -> list[dict]:

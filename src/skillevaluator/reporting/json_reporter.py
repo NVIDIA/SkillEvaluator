@@ -269,6 +269,7 @@ class JSONReporter(ReporterBase):
             "skipped": skipped,
             "skip_reason": get_skip_reason(result) if skipped else None,
             "incomplete_scans": result.incomplete_scans,
+            **({"scanners": result.scanners} if result.scanners else {}),
             "summary": {
                 "files_scanned": result.summary.files_scanned,
                 "checks_performed": result.summary.checks_performed,

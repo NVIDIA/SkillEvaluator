@@ -632,12 +632,86 @@ Use group mode when the skill delegates to companion skills and evaluating it
 alone would be unfair; keep the default otherwise — a smaller workspace is a
 cleaner experiment.
 
+### Select a reproducible decoy set
+
+`tier3 select-decoys` ranks real skills from a local description-embedding
+catalog and saves a selection manifest. Selection accepts skill-only catalogs
+with at most 1,000 entries. Build the catalog without `--full-body` and use the
+same embedding provider and model for selection:
+
+```bash title="Select four neighboring skills"
+skillevaluator similarity-check ./skills --save-catalog ./skill-catalog.json
+skillevaluator tier3 select-decoys ./skills/my-skill \
+  --catalog ./skill-catalog.json --catalog-root ./skills \
+  --count 4 --exclude required-helper \
+  --output ./skills/my-skill/evals/decoys.json
+```
+
+Opt in through the target skill's run policy. Manifest paths, like included
+skill paths, are relative to the target skill's parent directory:
+
+```yaml title="skills/my-skill/evals/config.yml"
+schema_version: 1
+skill_workspace:
+  mode: group
+  decoy_manifest: my-skill/evals/decoys.json
+  include:
+    - required-helper
+```
+
+Selection excludes the target, skills bundled inside it, and duplicate
+candidates, orders equal scores by catalog-relative path, and fails if too few
+eligible skills remain. Required
+helpers stay explicit in `include`; the selector does not infer prerequisites.
+A collision between a selected skill and an explicitly included skill is an
+error.
+
+The manifest records catalog and model identity, scores, the target manifest
+hash, and selected skill runtime hashes. Evaluation verifies the hashes and
+uses one snapshot of the selected skills in both arms; it makes no embedding
+request and does not select again. The runtime hashes exclude evaluator-only
+directories, including each nested skill's `evals/`, exactly as staging does.
+Editing those configs, datasets, or selection manifests does not invalidate
+other skills' selections. Agent-visible references still participate in the
+hash, including an ordinary `references/evals/` folder.
+
+For a collection that contains the target, or lies inside the target's parent
+directory, `catalog_root` is stored relative to that parent (`.` in the example
+above). Identical clones and relocated collections can reuse the same manifest;
+evaluation checks the sources in the current checkout. An unrelated external
+collection retains an absolute root and must be available at that location.
+The runtime hashes cover everything staging copies from a selected skill,
+including files that git ignores or does not track (such as `.DS_Store` or
+`.pytest_cache/`) and empty folders, so generate a manifest you plan to commit
+from a fresh clone. Of the permission bits, only whether a file is executable
+by its owner counts, so clones made under different umasks agree. Windows
+checkouts can differ: Git may convert line endings there, and Python reports
+`.exe`, `.bat`, `.cmd` and `.com` files as executable and other files as not
+executable. Generate a separate selection on Windows.
+Regenerate after editing the target's `SKILL.md`, changing selected runtime
+content, or moving an external collection. Manifests using an earlier digest
+algorithm must also be regenerated. External workspace skills retain the
+existing publication-evidence limitations.
+
+Use a separate manifest filename such as `decoys.json`. Selection output cannot
+replace an evaluation dataset, run policy, embedding catalog, or existing
+non-manifest file.
+
+Similarity is a heuristic for plausible alternatives, not evidence of actual
+routing confusion. Skill Lift remains conditional on the chosen workspace;
+a neighboring skill may legitimately substitute for the target. Review the
+selection before running the evaluation, and keep the manifest with the run
+policy when comparing results.
+
 ## Readiness checks
 
 `doctor` and `health-check` run the same readiness checks and exit nonzero when
 any check fails, so either can gate a script or CI job. Warnings from
 `doctor --verify-models` are nonblocking because the catalog result is
-inconclusive rather than a definitive rejection.
+inconclusive rather than a definitive rejection. Both commands check Tier 3 by
+default. `--tier 1` checks the Tier 1 scanners, `--tier 2` the embedding and LLM
+providers, and `--tier all` every tier; see the
+[CLI Reference](cli-reference.mdx#doctor).
 
 ### doctor
 

@@ -73,6 +73,7 @@ def run_tier1_workflow(
     profile: ValidationPolicy,
     previous_version: str | None,
     skillspector_baseline: Path | None = None,
+    skip: str | None = None,
 ) -> list[ValidationResult]:
     require_skill(skill_path)
     if checks is not None and not checks.strip(", \t\n"):
@@ -100,6 +101,7 @@ def run_tier1_workflow(
         content_type="skill",
         continue_on_failure=True,
         skillspector_baseline=skillspector_baseline,
+        skip=skip,
     )
     apply_policy(results, profile)
     stages = {"validation": _stage(results)}

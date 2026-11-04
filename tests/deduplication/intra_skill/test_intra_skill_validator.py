@@ -12,14 +12,26 @@ from unittest.mock import patch
 
 import pytest
 
+from skillevaluator import constants
 from skillevaluator.deduplication.intra_skill import intra_skill_validator
-from skillevaluator.deduplication.intra_skill.intra_skill_validator import IntraSkillValidator
+from skillevaluator.deduplication.intra_skill.intra_skill_validator import IntraSkillValidator, effective_chunk_limit
 from skillevaluator.deduplication.intra_skill.llm_analyzer import SYSTEM_PROMPT, build_user_prompt
 from skillevaluator.deduplication.intra_skill.semantic_clustering import ContentCluster
 from skillevaluator.deduplication.utils.chunker import ContentChunk
-from skillevaluator.embedding.client import SimilarityConfigError
-from skillevaluator.inference import LLMClientError, LLMVerdict
+from skillevaluator.embedding.client import MAX_EMBEDDING_VECTOR_DIMENSION, SimilarityConfigError
+from skillevaluator.inference import LLMClientError, LLMClientRefusedError, LLMVerdict
 from skillevaluator.models.result import Severity
+
+
+def _numbered_sections(count: int) -> str:
+    """Return Markdown that chunks into exactly ``count`` sections."""
+    return "\n".join(f"## Section {index}\n" + ("x" * 100) for index in range(count))
+
+
+def _unit_embeddings(vector_dimension: int):
+    """Return an ``embed`` side effect producing one valid vector per input."""
+    embedding = [1.0] + [0.0] * (vector_dimension - 1)
+    return lambda batch: [list(embedding) for _text in batch]
 
 
 class TestIntraSkillValidatorProperties:
@@ -50,6 +62,47 @@ class TestIntraSkillValidatorProperties:
         monkeypatch.delenv("SKILL_EVAL_EMBEDDING_MODEL", raising=False)
 
         assert resolve_embedding_provider().model == "nvidia/nemotron-3-embed-1b"
+
+
+class TestEffectiveChunkLimit:
+    def test_scalar_budget_lets_2048_dimensional_embeddings_reach_the_chunk_ceiling(self) -> None:
+        assert constants.CONTENT_DEDUP_MAX_CHUNKS == 512
+        assert constants.CONTENT_DEDUP_MAX_PAIR_COMPARISONS == 512 * 511 // 2
+        assert constants.CONTENT_DEDUP_MAX_SCALAR_COMPARISONS == 267_911_168
+        assert (
+            constants.CONTENT_DEDUP_MAX_SCALAR_COMPARISONS
+            == constants.CONTENT_DEDUP_MAX_PAIR_COMPARISONS * constants.CONTENT_DEDUP_SCALAR_BUDGET_DIMENSION
+        )
+
+    @pytest.mark.parametrize(
+        ("vector_dimension", "expected_limit"),
+        [(1, 512), (1024, 512), (1536, 512), (2048, 512), (2049, 511), (3072, 418), (4096, 362)],
+    )
+    def test_limit_depends_on_vector_dimension(self, vector_dimension: int, expected_limit: int) -> None:
+        assert effective_chunk_limit(vector_dimension) == expected_limit
+
+    def test_limit_is_the_largest_chunk_count_within_budget_for_every_width(self) -> None:
+        budget = constants.CONTENT_DEDUP_MAX_SCALAR_COMPARISONS
+        for vector_dimension in range(1, MAX_EMBEDDING_VECTOR_DIMENSION + 1):
+            limit = effective_chunk_limit(vector_dimension)
+            assert 2 <= limit <= constants.CONTENT_DEDUP_MAX_CHUNKS
+            assert limit * (limit - 1) // 2 * vector_dimension <= budget
+            if limit < constants.CONTENT_DEDUP_MAX_CHUNKS:
+                assert (limit + 1) * limit // 2 * vector_dimension > budget
+
+    @pytest.mark.parametrize("vector_dimension", [0, -1, True, 2048.0, "2048", None])
+    def test_rejects_invalid_vector_dimension(self, vector_dimension: object) -> None:
+        with pytest.raises(ValueError, match=r"vector dimension must be a positive integer"):
+            effective_chunk_limit(vector_dimension)  # type: ignore[arg-type]
+
+    def test_limit_uses_an_explicit_budget(self) -> None:
+        assert effective_chunk_limit(2048, 25_000_000) == 156
+        assert effective_chunk_limit(2, 1) == 1
+
+    @pytest.mark.parametrize("budget", [0, -1, True, 1.0, "1"])
+    def test_rejects_invalid_budget(self, budget: object) -> None:
+        with pytest.raises(ValueError, match=r"scalar comparison budget must be a positive integer"):
+            effective_chunk_limit(2048, budget)  # type: ignore[arg-type]
 
 
 class TestIntraSkillValidatorValidate:
@@ -140,7 +193,7 @@ class TestIntraSkillValidatorValidate:
         tmp_path: Path,
         monkeypatch,
     ) -> None:
-        monkeypatch.setattr(intra_skill_validator, "CONTENT_DEDUP_MAX_SCALAR_COMPARISONS", 1, raising=False)
+        monkeypatch.setattr(intra_skill_validator, "CONTENT_DEDUP_MAX_SCALAR_COMPARISONS", 1)
         skill_dir = tmp_path / "skill"
         skill_dir.mkdir()
         (skill_dir / "SKILL.md").write_text("## Section A\n" + "a" * 200 + "\n## Section B\n" + "b" * 200)
@@ -157,11 +210,139 @@ class TestIntraSkillValidatorValidate:
                 "vector_dimension": 2,
                 "scalar_work": 2,
                 "limit": 1,
+                "effective_chunk_limit": 1,
+                "chunk_count": 2,
             },
         )
         assert "scalar comparison work of 2 exceeds the limit of 1" in result.errors[0]
+        assert "effective chunk limit is 1 for 2-dimensional embeddings; this skill has 2 chunks." in result.errors[0]
         assert str(tmp_path) not in result.errors[0]
         mock_build_clusters.assert_not_called()
+
+    @pytest.mark.parametrize("vector_dimension", [1024, 1536, 2048])
+    @patch("skillevaluator.deduplication.intra_skill.intra_skill_validator.build_clusters")
+    @patch("skillevaluator.deduplication.intra_skill.intra_skill_validator.EmbeddingClient")
+    def test_valid_363_chunk_skill_fits_scalar_budget(
+        self,
+        mock_embed,
+        mock_build_clusters,
+        vector_dimension: int,
+        tmp_path: Path,
+    ) -> None:
+        """A skill well under the chunk ceiling must not trip a lower scalar-work limit."""
+        skill_dir = tmp_path / "valid-large-skill"
+        skill_dir.mkdir()
+        (skill_dir / "SKILL.md").write_text(_numbered_sections(363))
+        mock_embed.return_value.embed.side_effect = _unit_embeddings(vector_dimension)
+        mock_build_clusters.return_value = []
+
+        result = IntraSkillValidator().validate(skill_dir)
+
+        assert result.passed is True
+        assert result.findings == []
+        assert mock_embed.return_value.embed.call_count == 6
+        assert len(mock_build_clusters.call_args.args[0]) == 363
+
+    @patch("skillevaluator.deduplication.intra_skill.intra_skill_validator.build_clusters")
+    @patch("skillevaluator.deduplication.intra_skill.intra_skill_validator.EmbeddingClient")
+    def test_chunk_ceiling_is_reachable_with_2048_dimensional_embeddings(
+        self, mock_embed, mock_build_clusters, tmp_path: Path
+    ) -> None:
+        skill_dir = tmp_path / "boundary-skill"
+        skill_dir.mkdir()
+        (skill_dir / "SKILL.md").write_text(_numbered_sections(512))
+        mock_embed.return_value.embed.side_effect = _unit_embeddings(2048)
+        mock_build_clusters.return_value = []
+
+        result = IntraSkillValidator().validate(skill_dir)
+
+        assert result.passed is True
+        assert result.findings == []
+        assert len(mock_build_clusters.call_args.args[0]) == 512
+
+    @pytest.mark.parametrize(("vector_dimension", "chunk_limit"), [(3072, 418), (4096, 362)])
+    @patch("skillevaluator.deduplication.intra_skill.intra_skill_validator.build_clusters")
+    @patch("skillevaluator.deduplication.intra_skill.intra_skill_validator.EmbeddingClient")
+    def test_wider_embeddings_report_their_effective_chunk_limit(
+        self,
+        mock_embed,
+        mock_build_clusters,
+        vector_dimension: int,
+        chunk_limit: int,
+        tmp_path: Path,
+    ) -> None:
+        skill_dir = tmp_path / "wide-embedding-skill"
+        skill_dir.mkdir()
+        mock_embed.return_value.embed.side_effect = _unit_embeddings(vector_dimension)
+        mock_build_clusters.return_value = []
+
+        (skill_dir / "SKILL.md").write_text(_numbered_sections(chunk_limit))
+        assert IntraSkillValidator().validate(skill_dir).passed is True
+
+        chunk_count = chunk_limit + 1
+        pair_count = chunk_count * (chunk_count - 1) // 2
+        (skill_dir / "SKILL.md").write_text(_numbered_sections(chunk_count))
+        mock_build_clusters.reset_mock()
+        result = IntraSkillValidator().validate(skill_dir)
+
+        self._assert_work_limit_incomplete(
+            result,
+            {
+                "check_name": "scalar_comparison_limit",
+                "pair_count": pair_count,
+                "vector_dimension": vector_dimension,
+                "scalar_work": pair_count * vector_dimension,
+                "limit": 267_911_168,
+                "effective_chunk_limit": chunk_limit,
+                "chunk_count": chunk_count,
+            },
+        )
+        assert (
+            f"effective chunk limit is {chunk_limit} for {vector_dimension}-dimensional embeddings; "
+            f"this skill has {chunk_count} chunks."
+        ) in result.errors[0]
+        mock_build_clusters.assert_not_called()
+
+    @patch("skillevaluator.deduplication.intra_skill.intra_skill_validator.build_clusters")
+    @patch("skillevaluator.deduplication.intra_skill.intra_skill_validator.EmbeddingClient")
+    def test_explicit_budget_reports_its_own_effective_chunk_limit(
+        self, mock_embed, mock_build_clusters, tmp_path: Path
+    ) -> None:
+        skill_dir = tmp_path / "bounded-skill"
+        skill_dir.mkdir()
+        (skill_dir / "SKILL.md").write_text(_numbered_sections(157))
+        mock_embed.return_value.embed.side_effect = _unit_embeddings(2048)
+
+        result = IntraSkillValidator(_max_scalar_comparisons=25_000_000).validate(skill_dir)
+
+        assert result.passed is False
+        assert result.status == "incomplete"
+        assert result.findings == []
+        work_limit = result.metadata["work_limit"]
+        assert work_limit["check_name"] == "scalar_comparison_limit"
+        assert work_limit["limit"] == 25_000_000
+        assert work_limit["effective_chunk_limit"] == 156
+        assert work_limit["chunk_count"] == 157
+        assert (
+            "effective chunk limit is 156 for 2048-dimensional embeddings; this skill has 157 chunks."
+            in result.errors[0]
+        )
+        assert mock_embed.return_value.embed.call_count == 1
+        mock_build_clusters.assert_not_called()
+
+    @patch("skillevaluator.deduplication.intra_skill.intra_skill_validator.EmbeddingClient")
+    def test_absolute_chunk_ceiling_fails_before_embedding(self, mock_embed, tmp_path: Path) -> None:
+        skill_dir = tmp_path / "many-headings"
+        skill_dir.mkdir()
+        (skill_dir / "SKILL.md").write_text(_numbered_sections(513))
+
+        result = IntraSkillValidator().validate(skill_dir)
+
+        self._assert_work_limit_incomplete(
+            result,
+            {"check_name": "chunk_count_limit", "file_path": "SKILL.md", "actual": 513, "limit": 512},
+        )
+        mock_embed.assert_not_called()
 
     @patch("skillevaluator.deduplication.intra_skill.intra_skill_validator.LLMClient")
     @patch("skillevaluator.deduplication.intra_skill.intra_skill_validator.build_clusters")
@@ -514,6 +695,121 @@ class TestIntraSkillValidatorValidate:
         assert result.metadata["llm_analysis"]["clusters_completed"] == 1
         assert result.metadata["llm_analysis"]["clusters_failed"] == 1
         assert "1 of 2 content clusters" in result.errors[0]
+
+    @patch("skillevaluator.deduplication.intra_skill.intra_skill_validator.analyze_cluster")
+    @patch("skillevaluator.deduplication.intra_skill.intra_skill_validator.LLMClient")
+    @patch("skillevaluator.deduplication.intra_skill.intra_skill_validator.EmbeddingClient")
+    def test_llm_refusal_is_an_advisory_finding(self, mock_embed, _mock_llm, mock_analyze, tmp_path: Path) -> None:
+        """A safety refusal says nothing about duplication, so it must not block the skill."""
+        skill_dir = tmp_path / "skill"
+        skill_dir.mkdir()
+        (skill_dir / "SKILL.md").write_text("## Section A\n" + "a" * 200 + "\n## Section B\n" + "b" * 200)
+        mock_embed.return_value.embed.return_value = [[1.0, 0.0], [1.0, 0.0]]
+        mock_analyze.side_effect = LLMClientRefusedError("private provider refusal text")
+
+        result = IntraSkillValidator().validate(skill_dir)
+
+        assert result.passed is True
+        assert result.status != "incomplete"
+        assert result.incomplete_scans == []
+        assert result.errors == []
+        [finding] = result.findings
+        assert (finding.category, finding.check_name, finding.severity) == (
+            "CONTENT_DEDUP",
+            "llm_refused",
+            Severity.MEDIUM,
+        )
+        # The author can find the refused overlap without rerunning the scan.
+        assert (finding.file_path, finding.line_number) == ("SKILL.md", 1)
+        assert finding.metadata["source_files"] == ["SKILL.md"]
+        assert finding.message == (
+            "The LLM declined to classify overlapping content within SKILL.md:\n"
+            '  "## Section A" in SKILL.md (lines 1-2)\n'
+            '  vs "## Section B" in SKILL.md (lines 3-4)'
+        )
+        assert "SKILL_EVAL_LLM_MODEL" in finding.suggestion
+        assert "private provider refusal text" not in str(finding.to_dict())
+        analysis = result.metadata["llm_analysis"]
+        assert (analysis["clusters_completed"], analysis["clusters_refused"], analysis["clusters_failed"]) == (0, 1, 0)
+        assert analysis["failures"] == []
+
+    @patch("skillevaluator.deduplication.intra_skill.intra_skill_validator.analyze_cluster")
+    @patch("skillevaluator.deduplication.intra_skill.intra_skill_validator.LLMClient")
+    @patch("skillevaluator.deduplication.intra_skill.intra_skill_validator.EmbeddingClient")
+    def test_llm_refusal_beside_a_failed_cluster_keeps_the_scan_incomplete(
+        self, mock_embed, _mock_llm, mock_analyze, tmp_path: Path
+    ) -> None:
+        skill = tmp_path / "skill"
+        skill.mkdir()
+        (skill / "SKILL.md").write_text("\n".join(f"## Section {letter}\n{letter.lower() * 200}" for letter in "ABCD"))
+        mock_embed.return_value.embed.return_value = [[1.0, 0.0], [1.0, 0.0], [0.0, 1.0], [0.0, 1.0]]
+
+        def analyze(_client, cluster):
+            if any("Section A" in member.heading for member in cluster.members):
+                raise LLMClientRefusedError("declined")
+            raise RuntimeError("private provider response")
+
+        mock_analyze.side_effect = analyze
+        result = IntraSkillValidator().validate(skill)
+
+        # Only the provider failure is missing coverage; the refusal stays advisory.
+        assert result.status == "incomplete"
+        assert result.incomplete_scans == ["deduplication-llm"]
+        assert [finding.check_name for finding in result.findings] == ["llm_refused"]
+        assert result.summary.medium_count == 1
+        analysis = result.metadata["llm_analysis"]
+        assert (analysis["clusters_completed"], analysis["clusters_refused"], analysis["clusters_failed"]) == (0, 1, 1)
+        assert "1 of 2 content clusters" in result.errors[0]
+
+    @patch("skillevaluator.deduplication.intra_skill.intra_skill_validator.analyze_cluster")
+    @patch("skillevaluator.deduplication.intra_skill.intra_skill_validator.LLMClient")
+    @patch("skillevaluator.deduplication.intra_skill.intra_skill_validator.EmbeddingClient")
+    def test_llm_refusal_beside_a_duplicate_keeps_the_duplicate_blocking(
+        self, mock_embed, _mock_llm, mock_analyze, tmp_path: Path
+    ) -> None:
+        skill = tmp_path / "skill"
+        skill.mkdir()
+        (skill / "SKILL.md").write_text("## Section A\n" + "a" * 200 + "\n## Section B\n" + "b" * 200)
+        (skill / "guide.md").write_text("## Section C\n" + "c" * 200 + "\n## Section D\n" + "d" * 200)
+        mock_embed.return_value.embed.return_value = [[1.0, 0.0], [0.0, 1.0], [1.0, 0.0], [0.0, 1.0]]
+
+        def analyze(_client, cluster):
+            if any("Section A" in member.heading for member in cluster.members):
+                return LLMVerdict("DUPLICATE", 0.9, "Same content", "Remove one")
+            raise LLMClientRefusedError("declined")
+
+        mock_analyze.side_effect = analyze
+        result = IntraSkillValidator().validate(skill)
+
+        assert result.status == "failed"
+        assert result.incomplete_scans == []
+        assert {(finding.check_name, finding.severity) for finding in result.findings} == {
+            ("duplicate", Severity.HIGH),
+            ("llm_refused", Severity.MEDIUM),
+        }
+        refusal = next(finding for finding in result.findings if finding.check_name == "llm_refused")
+        assert refusal.message.startswith(
+            "The LLM declined to classify overlapping content across SKILL.md and guide.md:"
+        )
+        assert refusal.metadata["source_files"] == ["SKILL.md", "guide.md"]
+
+    @patch("skillevaluator.deduplication.intra_skill.intra_skill_validator.analyze_cluster")
+    @patch("skillevaluator.deduplication.intra_skill.intra_skill_validator.LLMClient")
+    @patch("skillevaluator.deduplication.intra_skill.intra_skill_validator.EmbeddingClient")
+    def test_policy_can_make_an_llm_refusal_blocking(self, mock_embed, _mock_llm, mock_analyze, tmp_path: Path) -> None:
+        from skillevaluator.validators.policy import ValidationPolicy, apply_policy
+
+        skill_dir = tmp_path / "skill"
+        skill_dir.mkdir()
+        (skill_dir / "SKILL.md").write_text("## Section A\n" + "a" * 200 + "\n## Section B\n" + "b" * 200)
+        mock_embed.return_value.embed.return_value = [[1.0, 0.0], [1.0, 0.0]]
+        mock_analyze.side_effect = LLMClientRefusedError("declined")
+        result = IntraSkillValidator().validate(skill_dir)
+
+        apply_policy([result], ValidationPolicy(severity_overrides={"CONTENT_DEDUP.llm_refused": Severity.HIGH}))
+
+        assert result.passed is False
+        assert result.findings[0].severity == Severity.HIGH
 
     @patch("skillevaluator.deduplication.intra_skill.intra_skill_validator.LLMClient")
     @patch("skillevaluator.deduplication.intra_skill.intra_skill_validator.EmbeddingClient")

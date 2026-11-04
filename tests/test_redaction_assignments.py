@@ -159,6 +159,7 @@ _ADVERSARIAL_INPUTS = {
 }
 # Every other adversarial input must come back unchanged.
 _ADVERSARIAL_OUTPUTS = {
+    "unterminated-quote": "token-" * 300 + "token=<redacted>",
     "pem-repeated-private-key-headers": "private-key-<redacted>",
     "pem-label-word-ending-in-dash": "private-key-<redacted>",
 }

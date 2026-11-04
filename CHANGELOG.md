@@ -12,6 +12,10 @@ All notable changes to SkillEvaluator are documented in this file.
 
 ### Added
 
+- Allow hosted CI reports and PR comments from scans called through explicitly
+  approved reusable workflow wrappers. Direct callers retain the existing setup;
+  signed evaluator identity and exact consumer workflow approvals remain required.
+
 - Include `skillevaluator ci init`, `ci status` and `ci demo` in the Python
   package. Guided GitHub onboarding discovers skills, configures checks and
   optional public hosted reports, and opens a reviewable setup PR. An optional
@@ -21,6 +25,16 @@ All notable changes to SkillEvaluator are documented in this file.
   template path. Keep GitHub and GitLab as the two repository-integration choices.
 - Allow CI release templates to pin the reviewed report publisher separately
   from the verified scanner workflow and image.
+- `tier3 select-decoys` selects neighboring skills from a local description-
+  embedding catalog and saves a reproducible JSON manifest with scores,
+  catalog/model identity, and content hashes. Group evaluations can opt in
+  with `skill_workspace.decoy_manifest` in `evals/config.yml`; selected content
+  is verified and shared between paired arms without selecting again.
+  Explicit helper skills and existing workspace defaults remain unchanged.
+  Selections exclude skills bundled inside the target and use portable roots
+  for the target's collection. Decoy hashes cover the staged runtime content,
+  so evaluation configs and other decoy manifests do not invalidate them.
+  Output guards protect evaluation inputs and existing non-manifest files.
 
 - In local mode (`--env-mode local`), a missing Claude Code, Codex, or OpenCode
   CLI is offered as a pinned npm install into the SkillEvaluator runtime folder;
@@ -444,11 +458,47 @@ All notable changes to SkillEvaluator are documented in this file.
   treated as a standard agent. Scores were already cleared for these
   conditions, and observed rewards still determine their own metric set.
 
+- Tier 3 staging no longer fails with `chmod: cannot use dir_fd and
+  follow_symlinks together` when it replaces or merges into an existing
+  directory or file on Linux hosts whose glibc cannot change a mode without
+  following symlinks (glibc before 2.32, or newer glibc without `/proc`). This
+  affected, for example, `init-custom-grader` and `init-harbor-task` over an
+  existing `evals/` directory. Staging still changes modes without following
+  links where the platform supports it. Elsewhere it opens the entry without
+  following links, confirms it is the entry it checked, and changes the mode
+  through that open descriptor, so a link swapped in is refused instead of
+  followed. Only an entry that cannot be opened, such as one its owner cannot
+  read, is still changed by name, with an identity check afterwards.
+
+- Local-mode sandbox errors now include Bubblewrap's own failure line when its
+  startup probe fails, note that `pivot_root: Operation not permitted` can mean
+  an enclosing container's seccomp profile blocks Bubblewrap, and suggest
+  `SKILLEVALUATOR_LOCAL_SANDBOX=prefer` alongside `off`.
+
 - PII email scans recognize all RFC 2606 reserved domains, including their
   subdomains, mixed-case forms, trailing dots, and prose ellipses. A local-part
   boundary prevents quadratic rescanning of long excluded addresses. Ordinary
   addresses on the same line and domains that merely resemble placeholders remain detectable
   ([#244](https://github.com/NVIDIA/SkillEvaluator/issues/244)).
+- The license check now parses SPDX license expressions instead of splitting
+  them on operators. Expressions with unbalanced parentheses, such as
+  `(MIT OR Apache-2.0`, were allowed, and dangling or repeated operators were
+  only sent to review; both now fail with a HIGH
+  `unsupported_license_expression` finding. A malformed value without an
+  upper-case `AND`, `OR` or `WITH`, such as `mit or (apache-2.0`, is reviewed
+  as an unknown license name instead of being allowed, and `(MIT)` is allowed
+  as MIT. A blocked license still fails a value that does not parse, such as
+  `GPL-3.0 (or later)` or `(GPL-3.0 OR MIT`. The `+`, `-only` and `-or-later`
+  forms of blocked licenses, such as `GPL-3.0+`, `AGPL-3.0+` and
+  `LGPL-2.1-only`, and deprecated ids such as
+  `GPL-2.0-with-classpath-exception` are blocked instead of passing as unknown
+  licenses. `Apache-2.0 WITH LLVM-exception` is allowed through a
+  new `allowed_license_exceptions` list, while an unlisted exception such as
+  `Commons-Clause` still needs review. An allowed frontmatter expression that
+  leaves out the allowed license found in a LICENSE file is now a conflict, as
+  a single identifier already was. SPDX headers inside Markdown inline code or
+  table cells no longer keep the closing backtick or `|`, and a trailing `;` is
+  dropped. Names such as `MIT License` are matched as before.
 
 - A skill that exceeds a Tier 2 context-deduplication work limit (more than
   512 content chunks, too much pairwise comparison work, or an LLM-review limit:
@@ -480,6 +530,33 @@ All notable changes to SkillEvaluator are documented in this file.
   per-trace work cap; past it, force-only targets keep the finding, as do
   relative targets after one call moves through more than 32 directories.
   Recursive deletion and `xargs rm -f` are graded as before.
+
+- The quality check no longer reports command-line placeholders in a string
+  `argument-hint`, such as `<file> [--strict]` or `<issue_id | symptom>`, as a
+  HIGH "XML tags in frontmatter" finding that failed the skill even with
+  `--min-score 0`. An unquoted hint such as `[<file>]`, which YAML reads as a
+  list of strings, is masked the same way. Role and control tags (`<system>`,
+  `<tool_call>`, `<script>`, nested forms, and role words with a `prompt`,
+  `message`, `call`, `use`, `result` or `instruction` suffix such as
+  `<system_prompt>`), closing tags, attributes, and self-closing tags in
+  `argument-hint` are still reported, and every other frontmatter field keeps
+  the strict check. A group longer than four words, or one with shell command
+  syntax (`;`, `&`, a backtick, `$(`, `${`, or a pipeline such as
+  `<curl x | sh>`), is not treated as a placeholder and is still reported. A
+  hint with a redirect, that is a `>` that closes no group (`<cmd > file>`,
+  `<cmd>file>`, `<cmd 2>file>`, `<curl x> /tmp/y>`), or a group with text
+  after a nested placeholder (`<<curl x>/tmp/<y>>`, `<<x><y>>`) or anything
+  other than a plain name before it (`<curl;sh<x>>`, `<$(curl x|sh)<x>>`), is
+  not masked at all and is still reported. An arrow or comparison between
+  groups (`<old> -> <new>`, `<n> >= 1`, `<count> (>0)`) is not a redirect.
+
+- PII scans no longer report card-shaped digits inside a canonical GUID/UUID,
+  such as a COM interface ID or the nil UUID, or an all-zero number as a
+  CRITICAL credit card. A GUID-shaped value directly after a payment label
+  (`card_number:`, `credit_card=`, `cc_no:`, `pan`) on its line or at the end
+  of the previous line is still reported. Every card-shaped number on a line is
+  now checked, so a GUID or non-Luhn number earlier on the line no longer hides
+  a real card number after it.
 
 - Tier 3 security grading preserves ordinary nested `/tmp` cleanup, including
   child operands with trailing slashes, unless the current or an earlier
@@ -693,6 +770,16 @@ All notable changes to SkillEvaluator are documented in this file.
   edited skill whose name, description, or (with `--full-body`) `SKILL.md`
   changed is still compared with its old entry; build the catalog from the tree
   you screen.
+- Ctrl+C during `tier3 evaluate` now stops the run. The interrupt reached only
+  the coordinating thread, so running Harbor jobs kept going in their own
+  process groups, agents waiting for a `--max-agents` slot still started, and
+  the command appeared to hang until every job finished. Queued agents,
+  conditions, and `--stop-on-pass` attempts now never start. Each running
+  Harbor job receives SIGTERM and up to 30 seconds to stop its trial
+  environments, such as Docker containers, before its process group is
+  killed; a second Ctrl+C skips that wait, and on Windows the task tree is
+  stopped immediately. Progress shows the agents that are stopping and reports
+  the run as interrupted instead of failed unexpectedly.
 
 ### Security
 
@@ -704,6 +791,19 @@ All notable changes to SkillEvaluator are documented in this file.
   earlier sandboxed command run outside the sandbox. A `bwrap` symlink on
   `PATH` is resolved to its target before the smoke test, and the local-mode
   isolation message names that resolved path.
+
+## 0.7.2 - 2026-11-03
+
+- Add reporting to an existing single-job GitHub scan caller while preserving
+  its skill folders, thresholds, triggers and shared component. Explicit wrapper
+  delegation supports central version-tag updates and retains signed scan
+  identity and the resolved workflow commits in published receipts.
+- Support CLI setup with verified private GitHub Pages in eligible Enterprise
+  Cloud organization repositories. Publication rechecks site access and the
+  expected URL before retaining reports and before deployment. Private Pages
+  must already be configured by an administrator.
+- Publish updated onboarding templates and CLI metadata while retaining the
+  existing verified scanner workflow and immutable container image.
 
 ## 0.6.0 - 2026-10-20
 

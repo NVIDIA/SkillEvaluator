@@ -6,20 +6,20 @@ needed for manual setup.
 
 | Result | Current configuration | Copy destination |
 | --- | --- | --- |
-| GitHub checks | [skill-checks.yml](0.7.1/skill-checks.yml) | `.github/workflows/skill-checks.yml` |
-| GitHub hosted reports and PR comments | [publish-skill-reports.yml](0.7.1/publish-skill-reports.yml) | Second workflow; follow the [setup instructions](0.7.1/README.md) |
-| GitLab checks | [gitlab-skill-checks.yml](0.7.1/gitlab-skill-checks.yml) | `.gitlab-ci.yml`, or merge into your existing pipeline |
-| Optional manual LLM checks | [skill-checks-llm.yml](0.7.1/skill-checks-llm.yml) | `.github/workflows/skill-checks-llm.yml` |
+| GitHub checks | [skill-checks.yml](0.7.2/skill-checks.yml) | `.github/workflows/skill-checks.yml` |
+| GitHub hosted reports and PR comments | [publish-skill-reports.yml](0.7.2/publish-skill-reports.yml) | Second workflow; follow the [setup instructions](0.7.2/README.md) |
+| GitLab checks | [gitlab-skill-checks.yml](0.7.2/gitlab-skill-checks.yml) | `.gitlab-ci.yml`, or merge into your existing pipeline |
+| Optional manual LLM checks | [skill-checks-llm.yml](0.7.2/skill-checks-llm.yml) | `.github/workflows/skill-checks-llm.yml` |
 
 Open a file and use GitHub's **Raw** view to copy its full contents. Workflow
-commits and the container image digest are already pinned. [Full setup](0.7.1/README.md).
+commits and the container image digest are already pinned. [Full setup](0.7.2/README.md).
 
 ## Download and verification
 
-[Download the current ZIP](0.7.1/skillevaluator-ci-0.7.1.zip). Each version folder
+[Download the current ZIP](0.7.2/skillevaluator-ci-0.7.2.zip). Each version folder
 contains the exact generated files, checksums, source/image identities and
-scanner verification records. The historical [0.7.0 files](0.7.0/) remain
-available for existing configurations; use 0.7.1 for current onboarding.
+scanner verification records. The historical [0.7.0 files](0.7.0/) and [0.7.1 files](0.7.1/) remain
+available for existing configurations; use 0.7.2 for current onboarding.
 
 ## Release convention
 

@@ -759,6 +759,47 @@ is an evaluation infrastructure failure, not a `0.0` score, and the affected
 condition publishes no scores; see
 [Tier 3 judge failure semantics](environment-variables.mdx#tier-3-judge-failure-semantics).
 
+### Judge fallback and retry policies
+
+Two opt-in host variables limit which models may answer a standard judge and
+how often it is asked. Both default to the behavior above. They are forwarded
+like `LLM_JUDGE_FALLBACK_MODELS`: only to standard verifier jobs, never to the
+agent environment or `custom_only` runs.
+
+- **`LLM_JUDGE_FALLBACK_POLICY=replace`.** Only the judge model and your
+  `LLM_JUDGE_FALLBACK_MODELS` entries answer. The built-in `claude-opus-4-8`
+  refusal fallback for Claude 5.5 or later judges is not used, on the native
+  Claude API or on Bedrock. The default, `append`, keeps it.
+- **`LLM_JUDGE_RETRY_POLICY=strict`.** Each judge tries at most three models:
+  the judge model, then the first two `LLM_JUDGE_FALLBACK_MODELS` entries. It
+  sends at most two requests to each, and all of them share the judge's time
+  budget.
+  - A request that fails with a retryable HTTP status, a connection error, or
+    Bedrock throttling is retried at most once, then the next model is tried.
+    A model the provider reports as not found, invalid, or not accessible to
+    the key moves on without a retry. A `Retry-After` wait above the maximum
+    retry delay moves on without waiting. A wait or request that would pass
+    the judge's deadline ends the judge.
+  - A refusal, a TLS certificate failure, an authentication error, and any
+    other non-retryable HTTP status end the judge. So does an error whose
+    message, or the first 500 characters of its HTTP body, names an exhausted
+    quota (`insufficient_quota`, `quota_exceeded`), a budget, billing, credit,
+    a content filter, safety, security, or a policy rejection, even on HTTP
+    429. These are not retried or handed to another model, and the built-in
+    refusal fallback is not used either.
+  - The first completed reply is final. It must be exactly one JSON object,
+    with only whitespace around it: no prose, Markdown fences, second object,
+    duplicate key, or `NaN`. An empty, invalid, or truncated reply fails the
+    judge without the format retry or `behavior_check` salvage, and
+    `goal_accuracy` skips the RAGAS scorer, which sends its own requests.
+  - The default, `legacy`, keeps the retries, fallbacks, format retry, and
+    salvage described above.
+
+Values are case-insensitive. Any other value fails every standard judge before
+a request is sent, so the affected conditions publish no scores. When set,
+`run_config.json` records the values as `judge.fallback_policy` and
+`judge.retry_policy`.
+
 ## Reading results
 
 In the terminal, a finished run renders **Results by Evaluator** — each

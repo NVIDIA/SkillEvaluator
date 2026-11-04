@@ -12,6 +12,17 @@ All notable changes to SkillEvaluator are documented in this file.
 
 ### Added
 
+- Opt-in `LLM_JUDGE_FALLBACK_POLICY` and `LLM_JUDGE_RETRY_POLICY` for the Tier 3
+  standard judges. `LLM_JUDGE_FALLBACK_POLICY=replace` lets only the judge
+  model and the `LLM_JUDGE_FALLBACK_MODELS` entries answer, without the
+  built-in `claude-opus-4-8` refusal fallback. `LLM_JUDGE_RETRY_POLICY=strict`
+  tries at most three models with two requests each within the judge's time
+  budget, moves on only when a model is unavailable, ends the judge on a
+  refusal or a quota, budget, safety, or security error, and scores only a
+  first reply that is exactly one JSON object. Any other value fails the
+  standard judges before a request is sent. The defaults, `append` and
+  `legacy`, keep the current behavior.
+
 - Allow hosted CI reports and PR comments from scans called through explicitly
   approved reusable workflow wrappers. Direct callers retain the existing setup;
   signed evaluator identity and exact consumer workflow approvals remain required.

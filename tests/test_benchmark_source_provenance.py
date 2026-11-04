@@ -520,6 +520,232 @@ class TestReporterGateRoundTrip:
         assert [o.reason for o in benchmark_gate.scan_file(path, require_source_provenance=True)] == []
 
 
+_REPOSITORY = "NVIDIA/demo_skills"
+
+
+def _expected(**overrides: str | None) -> benchmark_gate.ExpectedSource:
+    values: dict[str, str | None] = {
+        "repository": _REPOSITORY,
+        "revision": _COMMIT_A,
+        "evaluator_container_revision": _CONTAINER,
+    }
+    values.update(overrides)
+    return benchmark_gate.ExpectedSource(**values)
+
+
+def _scan_expected(
+    tmp_path: Path,
+    card: str,
+    expected: benchmark_gate.ExpectedSource,
+    *,
+    require: bool = True,
+) -> list[str]:
+    path = tmp_path / "BENCHMARK.md"
+    path.write_text(card, encoding="utf-8")
+    offenders = benchmark_gate.scan_file(path, require_source_provenance=require, expected_source=expected)
+    return [offender.reason for offender in offenders]
+
+
+def _recorded_lines(**values: str) -> str:
+    """Return the three identity lines with any of them replaced by ``values``."""
+    lines = {
+        "Evaluated source": f"`{_REPOSITORY}`",
+        "Evaluated source revision": f"`{_COMMIT_A}`",
+        "Evaluator container revision": f"`{_CONTAINER}`",
+    }
+    lines.update(values)
+    return "".join(f"- {field}: {value}\n" for field, value in lines.items())
+
+
+class TestExpectedSourceBinding:
+    """A publishing pipeline can bind a card to the source it asked to evaluate."""
+
+    def test_the_recorded_card_matches_its_request(self, tmp_path: Path) -> None:
+        assert _recorded_lines() == _RECORDED
+        assert _scan_expected(tmp_path, _pass_card(_RECORDED), _expected()) == []
+        assert _scan_expected(tmp_path, _pass_card(_RECORDED), _expected(), require=False) == []
+
+    @pytest.mark.parametrize(
+        ("override", "reason"),
+        [
+            ({"repository": "NVIDIA/other_skills"}, "evaluated source does not match the expected value"),
+            ({"revision": _COMMIT_B}, "evaluated source revision does not match the expected value"),
+            ({"revision": _DIGEST}, "evaluated source revision does not match the expected value"),
+            (
+                {"evaluator_container_revision": "ghcr.io/nvidia/skillevaluator@sha256:" + "1" * 64},
+                "evaluator container revision does not match the expected value",
+            ),
+        ],
+    )
+    def test_a_card_for_another_source_fails(self, tmp_path: Path, override: dict[str, str], reason: str) -> None:
+        assert _scan_expected(tmp_path, _pass_card(_RECORDED), _expected(**override)) == [reason]
+
+    def test_a_repository_differing_only_in_case_is_another_repository(self, tmp_path: Path) -> None:
+        """The library merges identities case-sensitively, so the gate compares them the same way."""
+        reasons = _scan_expected(tmp_path, _pass_card(_RECORDED), _expected(repository=_REPOSITORY.lower()))
+        assert reasons == ["evaluated source does not match the expected value"]
+
+    @pytest.mark.parametrize("source_lines", [_NOT_RECORDED, _ABSENT])
+    def test_a_card_without_the_identity_fails_the_expectation(self, tmp_path: Path, source_lines: str) -> None:
+        reasons = _scan_expected(tmp_path, _pass_card(source_lines), _expected(), require=False)
+        assert reasons == [
+            "evaluated source not recorded, but an expected value was given",
+            "evaluated source revision not recorded, but an expected value was given",
+            "evaluator container revision not recorded, but an expected value was given",
+        ]
+
+    @pytest.mark.parametrize(
+        ("field", "value"),
+        [
+            ("Evaluated source", "`not a repository`"),
+            ("Evaluated source", f"{_REPOSITORY}"),
+            ("Evaluated source", f"`{_REPOSITORY}` (fork)"),
+            ("Evaluated source revision", f"`{_COMMIT_A[:12]}`"),
+            ("Evaluator container revision", "`ghcr.io/nvidia/skillevaluator`"),
+        ],
+    )
+    def test_a_malformed_recorded_value_never_matches(self, tmp_path: Path, field: str, value: str) -> None:
+        card = _pass_card(_recorded_lines(**{field: value}))
+        reasons = _scan_expected(tmp_path, card, _expected(), require=False)
+        assert reasons == [f"{field.lower()} not recorded, but an expected value was given"]
+
+    def test_a_duplicated_line_cannot_match(self, tmp_path: Path) -> None:
+        card = _pass_card(_RECORDED + f"- Evaluated source revision: `{_COMMIT_B}`\n")
+        reasons = _scan_expected(tmp_path, card, _expected(), require=False)
+        assert reasons == ["evaluated source revision recorded more than once, so it cannot match"]
+
+    def test_only_the_metadata_line_counts(self, tmp_path: Path) -> None:
+        """A matching value elsewhere on the card does not stand in for the metadata line."""
+        decoy = (
+            f"\n```text\n- Evaluated source revision: `{_COMMIT_A}`\n```\n"
+            f"\n<!-- - Evaluated source: `{_REPOSITORY}` -->\n"
+        )
+        card = _pass_card(_NOT_RECORDED) + decoy
+        reasons = _scan_expected(tmp_path, card, _expected(evaluator_container_revision=None), require=False)
+        assert reasons == [
+            "evaluated source not recorded, but an expected value was given",
+            "evaluated source revision not recorded, but an expected value was given",
+        ]
+
+    def test_hex_case_does_not_cause_a_false_mismatch(self, tmp_path: Path) -> None:
+        upper_card = _pass_card(_recorded_lines(**{"Evaluated source revision": f"`{_COMMIT_A.upper()}`"}))
+        assert _scan_expected(tmp_path, upper_card, _expected(), require=False) == []
+        assert _scan_expected(tmp_path, _pass_card(_RECORDED), _expected(revision=_COMMIT_A.upper())) == []
+
+    def test_a_content_digest_revision_is_matched(self, tmp_path: Path) -> None:
+        card = _pass_card(_recorded_lines(**{"Evaluated source revision": f"`{_DIGEST}`"}))
+        assert _scan_expected(tmp_path, card, _expected(revision=_DIGEST.upper())) == []
+        assert _scan_expected(tmp_path, card, _expected(revision=_COMMIT_A)) == [
+            "evaluated source revision does not match the expected value"
+        ]
+
+    def test_an_unset_field_is_not_checked(self, tmp_path: Path) -> None:
+        card = _pass_card(_recorded_lines(**{"Evaluated source revision": f"`{_COMMIT_B}`"}))
+        expected = benchmark_gate.ExpectedSource(repository=_REPOSITORY)
+        assert expected.fields() == (("Evaluated source", _REPOSITORY),)
+        assert _scan_expected(tmp_path, card, expected) == []
+
+    def test_a_non_pass_card_for_another_source_also_fails(self, tmp_path: Path) -> None:
+        card = _card({"repository": _REPOSITORY, "commit": _COMMIT_B, "evaluator_container_revision": _CONTAINER})
+        assert "Overall verdict: INCOMPLETE" in card
+        path = tmp_path / "BENCHMARK.md"
+        path.write_text(card, encoding="utf-8")
+        baseline = {offender.reason for offender in benchmark_gate.scan_file(path)}
+        reasons = {offender.reason for offender in benchmark_gate.scan_file(path, expected_source=_expected())}
+        assert reasons - baseline == {"evaluated source revision does not match the expected value"}
+
+    @pytest.mark.parametrize(
+        "source",
+        [
+            {"repository": _REPOSITORY, "commit": _COMMIT_A, "evaluator_container_revision": _CONTAINER},
+            {"repository": "some-org/repo.name", "content_digest": _DIGEST, "evaluator_container_revision": _COMMIT_B},
+        ],
+    )
+    def test_a_rendered_card_matches_the_identity_it_was_given(self, tmp_path: Path, source: dict[str, str]) -> None:
+        card = _card(source)
+        path = tmp_path / "BENCHMARK.md"
+        path.write_text(card, encoding="utf-8")
+        expected = benchmark_gate.ExpectedSource(
+            repository=source["repository"],
+            revision=source.get("commit") or source["content_digest"],
+            evaluator_container_revision=source["evaluator_container_revision"],
+        )
+        baseline = benchmark_gate.scan_file(path)
+        assert benchmark_gate.scan_file(path, expected_source=expected) == baseline
+
+    @pytest.mark.parametrize(
+        "values",
+        [
+            {"repository": "not a repository"},
+            {"repository": "https://github.com/NVIDIA/demo_skills"},
+            {"revision": _COMMIT_A[:7]},
+            {"revision": "sha256:" + "ab" * 16},
+            {"evaluator_container_revision": "ghcr.io/nvidia/skillevaluator"},
+            {"repository": 42},
+        ],
+    )
+    def test_a_non_canonical_expectation_is_refused(self, values: dict[str, object]) -> None:
+        with pytest.raises(ValueError, match="must be"):
+            benchmark_gate.ExpectedSource(**values)
+
+    def test_the_expectation_is_stored_in_canonical_form(self) -> None:
+        expected = benchmark_gate.ExpectedSource(repository=f" {_REPOSITORY} ", revision=_DIGEST.upper())
+        assert expected.repository == _REPOSITORY
+        assert expected.revision == _DIGEST
+        assert expected.evaluator_container_revision is None
+
+
+class TestExpectedSourceEntryPoints:
+    """The expectation has to survive main() and find_offenders(), not just scan_file()."""
+
+    _FLAGS = (
+        "--expected-source-repository",
+        _REPOSITORY,
+        "--expected-source-revision",
+        _COMMIT_A,
+        "--expected-evaluator-container-revision",
+        _CONTAINER,
+    )
+
+    def _write(self, tmp_path: Path, card: str) -> Path:
+        (tmp_path / "BENCHMARK.md").write_text(card, encoding="utf-8")
+        return tmp_path
+
+    def test_main_accepts_the_requested_card(self, tmp_path: Path) -> None:
+        root = self._write(tmp_path, _pass_card(_RECORDED))
+        assert benchmark_gate.main(["--require-source-provenance", *self._FLAGS, str(root)]) == 0
+
+    def test_main_rejects_a_card_for_another_commit(self, tmp_path: Path, capsys: pytest.CaptureFixture[str]) -> None:
+        root = self._write(tmp_path, _pass_card(_RECORDED))
+        assert benchmark_gate.main(["--expected-source-revision", _COMMIT_B, str(root)]) == 1
+        assert "evaluated source revision does not match the expected value" in capsys.readouterr().out
+
+    def test_main_rejects_a_card_without_the_identity(self, tmp_path: Path) -> None:
+        root = self._write(tmp_path, _pass_card(_NOT_RECORDED))
+        assert benchmark_gate.main([str(root)]) == 0
+        assert benchmark_gate.main(["--expected-source-repository", _REPOSITORY, str(root)]) == 1
+
+    def test_an_expectation_requires_a_card(self, tmp_path: Path, capsys: pytest.CaptureFixture[str]) -> None:
+        assert benchmark_gate.main([str(tmp_path)]) == 0
+        capsys.readouterr()
+        assert benchmark_gate.main(["--expected-source-revision", _COMMIT_A, str(tmp_path)]) == 1
+        assert "no BENCHMARK.md files found" in capsys.readouterr().out
+
+    def test_a_non_canonical_flag_is_a_usage_error(self, tmp_path: Path, capsys: pytest.CaptureFixture[str]) -> None:
+        root = self._write(tmp_path, _pass_card(_RECORDED))
+        with pytest.raises(SystemExit) as raised:
+            benchmark_gate.main(["--expected-source-revision", _COMMIT_A[:7], str(root)])
+        assert raised.value.code == 2
+        assert "expected evaluated source revision must be" in capsys.readouterr().err
+
+    def test_find_offenders_propagates_the_expectation(self, tmp_path: Path) -> None:
+        root = self._write(tmp_path, _pass_card(_RECORDED))
+        _files, offenders = benchmark_gate.find_offenders([root], expected_source=_expected(revision=_COMMIT_B))
+        assert [offender.reason for offender in offenders] == [
+            "evaluated source revision does not match the expected value"
+        ]
+
+
 class TestIdentityResolution:
     """Two orchestration channels, resolved per field and never silently reconciled."""
 

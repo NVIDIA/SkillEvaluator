@@ -284,6 +284,17 @@ All notable changes to SkillEvaluator are documented in this file.
 
 ### Fixed
 
+- A default Tier 3 run with a baseline can reach a PASS or NEUTRAL publication
+  verdict in BENCHMARK.md again. The baseline arm has no skill under test, so
+  it records `skill_execution` and `skill_efficiency` as not applicable and has
+  no Discoverability or Efficiency baseline. The publication check treated
+  those two dimensions as missing evidence and compared Skill Lift with the
+  five-dimension score, so those cards said INCOMPLETE instead. A dimension now
+  counts as not applicable for the baseline only when the baseline recorded all
+  of its metrics that way, and Skill Lift is checked over the dimensions both
+  arms scored. Any other missing or inconsistent baseline still makes the card
+  INCOMPLETE.
+
 - PR scan comments show the verdict, quality scores, first actionable fixes and
   report links; full provenance and detailed findings stay in the report.
 - Hosted reports use the retained site commit as the Pages deployment identity,

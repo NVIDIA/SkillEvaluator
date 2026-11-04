@@ -1248,6 +1248,17 @@ def _network_executable(token: str, assignments: dict[str, str], names: dict[str
     return name
 
 
+def _spelled_with_capitals(token: str) -> bool:
+    """Whether a literal command word spells its executable with a capital letter, as ``HTTP`` or ``Https`` do.
+
+    A ``$VAR`` or backtick word may hold any spelling, so it never counts.
+    """
+    if "$" in token or "`" in token:
+        return False
+    name = token.strip("\"'").replace("\\", "/").rsplit("/", 1)[-1]
+    return name != name.lower()
+
+
 def _network_client_uploads(executable: str, args: list[str], stdin_piped: bool) -> bool:
     """Check one curl, wget or HTTPie invocation's arguments for upload indicators."""
     for arg in args:
@@ -1898,7 +1909,19 @@ def _network_tokens_exfiltrate(tokens: list[str], _depth: int) -> bool:
             client_args = command[sub_idx + 1 :]
             if not keeps_stdin:
                 client_args = [token for token in client_args if token not in _NETWORK_INPUT_REDIRECTS]
-            if client not in ("http", "https") or "--ignore-stdin" not in (a.strip("\"'") for a in client_args):
+            # Linux finds a command by its exact name, so a later HTTP or Https
+            # word, as in the here-document prose "Use HTTP POST to create an
+            # item.", does not start HTTPie. Its method words are not read as
+            # an upload; its body items, stdin and --raw still are, and it does
+            # not cover a later lowercase http word.
+            capitalized = client in ("http", "https") and _spelled_with_capitals(command[sub_idx])
+            if capitalized:
+                client_args = [
+                    token for token in client_args if token.strip("\"'").casefold() not in _UNSAFE_HTTP_METHODS
+                ]
+            if not capitalized and (
+                client not in ("http", "https") or "--ignore-stdin" not in (a.strip("\"'") for a in client_args)
+            ):
                 seen_clients.add(client)
             if _network_client_uploads(client, client_args, command_stdin and keeps_stdin):
                 return True

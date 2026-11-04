@@ -712,6 +712,19 @@ All notable changes to SkillEvaluator are documented in this file.
   `PATH` is resolved to its target before the smoke test, and the local-mode
   isolation message names that resolved path.
 
+## 0.7.2 - 2026-11-03
+
+- Add reporting to an existing single-job GitHub scan caller while preserving
+  its skill folders, thresholds, triggers and shared component. Explicit wrapper
+  delegation supports central version-tag updates and retains signed scan
+  identity and the resolved workflow commits in published receipts.
+- Support CLI setup with verified private GitHub Pages in eligible Enterprise
+  Cloud organization repositories. Publication rechecks site access and the
+  expected URL before retaining reports and before deployment. Private Pages
+  must already be configured by an administrator.
+- Publish updated onboarding templates and CLI metadata while retaining the
+  existing verified scanner workflow and immutable container image.
+
 ## 0.6.0 - 2026-10-20
 
 ### Added

@@ -1365,6 +1365,14 @@
           "type": "boolean"
         },
         {
+          "name": "pii_waivers",
+          "opts": [
+            "--pii-waivers"
+          ],
+          "param_type": "option",
+          "type": "file"
+        },
+        {
           "choices": [
             "cli",
             "json",
@@ -1765,6 +1773,14 @@
               "type": "boolean"
             },
             {
+              "name": "pii_waivers",
+              "opts": [
+                "--pii-waivers"
+              ],
+              "param_type": "option",
+              "type": "file"
+            },
+            {
               "choices": [
                 "cli",
                 "json",
@@ -2027,6 +2043,14 @@
               "type": "file"
             },
             {
+              "name": "pii_waivers",
+              "opts": [
+                "--pii-waivers"
+              ],
+              "param_type": "option",
+              "type": "file"
+            },
+            {
               "name": "profile",
               "opts": [
                 "--profile"
@@ -2133,6 +2157,14 @@
             "name": "quality_config",
             "opts": [
               "--quality-config"
+            ],
+            "param_type": "option",
+            "type": "file"
+          },
+          {
+            "name": "pii_waivers",
+            "opts": [
+              "--pii-waivers"
             ],
             "param_type": "option",
             "type": "file"
@@ -3061,6 +3093,27 @@
             }
           ]
         },
+        "feedback": {
+          "params": [
+            {
+              "name": "run_dir",
+              "opts": [
+                "run_dir"
+              ],
+              "param_type": "argument",
+              "required": true,
+              "type": "directory"
+            },
+            {
+              "name": "skill_path",
+              "opts": [
+                "--skill"
+              ],
+              "param_type": "option",
+              "type": "directory"
+            }
+          ]
+        },
         "harbor-view": {
           "params": [
             {
@@ -3817,6 +3870,14 @@
           "name": "quality_config",
           "opts": [
             "--quality-config"
+          ],
+          "param_type": "option",
+          "type": "file"
+        },
+        {
+          "name": "pii_waivers",
+          "opts": [
+            "--pii-waivers"
           ],
           "param_type": "option",
           "type": "file"

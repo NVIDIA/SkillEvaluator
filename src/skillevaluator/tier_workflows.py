@@ -72,6 +72,7 @@ def run_tier1_workflow(
     quality_config: Path | None,
     profile: ValidationPolicy,
     previous_version: str | None,
+    pii_waivers: Path | None = None,
     skillspector_baseline: Path | None = None,
     skip: str | None = None,
 ) -> list[ValidationResult]:
@@ -96,6 +97,7 @@ def run_tier1_workflow(
         llm_verify=use_llm,
         min_score=min_score,
         quality_config=quality_config,
+        pii_waivers=pii_waivers,
         previous_version=previous_version,
         policy=profile,
         content_type="skill",

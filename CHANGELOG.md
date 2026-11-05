@@ -30,6 +30,17 @@ All notable changes to SkillEvaluator are documented in this file.
   feedback. Candidate templates require a capability-bearing release descriptor;
   released Tier 1 bundles and workflows remain unchanged.
 
+- `skillevaluator tier3 feedback RUN_DIR [--skill PATH]` opens a terminal chat
+  about one completed Tier 3 run. Answers are grounded in that run's scores,
+  with-skill and baseline comparisons, every case's attempts with per-metric
+  scores, measured agent tokens and seconds, execution errors, and the report's
+  saved feedback, without evaluating again or regenerating LLM feedback. It uses
+  the configured `SKILL_EVAL_LLM_PROVIDER` and `SKILL_EVAL_LLM_MODEL`, sends the
+  run ID instead of the local path, redacts credential-shaped text, and writes
+  nothing to disk. No request is sent before the first question. `LLMClient`
+  gains `chat(messages)` for multi-turn requests with the same retries and typed
+  errors as `completions()`.
+
 - Allow hosted CI reports and PR comments from scans called through explicitly
   approved reusable workflow wrappers. Direct callers retain the existing setup;
   signed evaluator identity and exact consumer workflow approvals remain required.
@@ -224,6 +235,21 @@ All notable changes to SkillEvaluator are documented in this file.
   `tier1` leaves a check out and reports it as skipped. A `scanners` row and the
   JSON report record which scanner versions ran.
 
+- `--pii-waivers PATH` on `validate`, `tier1`, and `pii-scan` accepts a
+  reviewed PII value without relaxing the whole check through a severity
+  override. Each waiver names the PII check, the file (relative to the waiver
+  file's directory), the line, the SHA-256 digest that PII findings now report
+  as `evidence_sha256`, a reason, an owner, and a `created`/`expires` window
+  of at most 366 days, and it stops applying as soon as any of them no longer
+  matches. Other values on the same line are still reported. Reports list each
+  waiver for a scanned file as applied (INFO), stale (LOW), or expired
+  (MEDIUM), so one file can serve single-skill, folder, and catalog runs. A
+  malformed file is rejected with exit code 2; through the Python API it
+  applies no waivers and fails the PII scan with a HIGH
+  `invalid-pii-waiver-file` finding. Credential checks cannot be waived, and
+  their findings, like any finding whose value reports mask, carry no digest.
+  Waivers are never discovered automatically inside the scanned skill; pass
+  the file with `--pii-waivers`.
 - Every finding now has stable IDs for tracking across runs and validators.
   `finding_id` (`SEF-…`) is derived from the finding's category, check,
   message, and suggestion, so it survives line moves, whitespace or case
@@ -270,6 +296,15 @@ All notable changes to SkillEvaluator are documented in this file.
   `skillspector_baseline` line. Fingerprints ignored after a SkillSpector
   upgrade, or not matched by the LLM stage, are reported instead of silently
   suppressing nothing; fingerprints only match static-only runs.
+
+- `scripts/ci/check_public_benchmarks.py` accepts `--expected-source-repository`,
+  `--expected-source-revision` and `--expected-evaluator-container-revision`,
+  so a publishing pipeline can check that each card names the source it asked
+  to evaluate. A card of any verdict fails when the matching `Evaluated source`,
+  `Evaluated source revision` or `Evaluator container revision` line is
+  missing, `not recorded`, malformed, duplicated or different. Values are
+  compared in the canonical form the card records, and any of these options
+  implies `--require-files`. Without them the scan is unchanged.
 
 ### Changed
 
@@ -1035,6 +1070,17 @@ All notable changes to SkillEvaluator are documented in this file.
   forwarded to SkillSpector so its own deadline can be raised as well, and the
   security result records the effective `skillspector_timeout_seconds`
   ([#155](https://github.com/NVIDIA/SkillEvaluator/issues/155)).
+- An `--llm` security scan whose LLM provider keeps failing after
+  SkillSpector's bounded retries no longer reports only
+  `skillspector-llm failed with unexpected exit code 2: scanner diagnostics were redacted`
+  (or `skillspector reported execution_successful=false`). When every failure
+  in the SkillSpector v2.12.0+ report is an `llm_connection_retries_exhausted`
+  row on an LLM analyzer, the error says that the provider kept failing, that
+  this is a retriable provider failure rather than a security finding, and
+  that the full scan should be retried when the provider is available. Mixed,
+  truncated, malformed or older reports keep the generic error. The scan stays
+  `INCOMPLETE` with a nonzero exit, and static findings still decide a
+  `FAILED` result.
 - `similarity-check --catalog` and `tier2 --catalog` no longer report a skill
   that is already in the local catalog as an `EXACT_DUPLICATE` of its own
   entry, which failed the run. An entry is skipped as the skill's own only when
@@ -1149,6 +1195,18 @@ All notable changes to SkillEvaluator are documented in this file.
   `filtered` summary row, and recorded in the JSON report's
   `skillspector_applicability` block. `security-scan` and targets of `unknown`
   type keep the unrestricted scan.
+
+- PII scans no longer report Proton (Steam Play) prefix paths such as
+  `compatdata/<appid>/pfx/drive_c/users/steamuser/` as personal macOS paths:
+  `steamuser` is the profile name Proton uses for every player. Other user
+  names, `steamuser` outside a `pfx/drive_c` prefix, profile paths followed by
+  a `..` segment later on the line, and Windows `C:\Users\steamuser` paths are
+  still reported. When a Proton path and a personal path share a line, the
+  personal path is reported.
+
+- An unrelated `/home/<user>/` path no longer hides a personal home path later
+  on the same line; the PII scan drops such paths before it picks the line's
+  first match.
 
 ### Security
 

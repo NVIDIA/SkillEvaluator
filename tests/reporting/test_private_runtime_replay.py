@@ -74,6 +74,62 @@ def test_replay_refuses_incompatible_snapshot_schema(tmp_path, change):
         io_api().load_plugin_runtime_report(tmp_path)
 
 
+def test_saved_snapshot_is_the_live_report_for_multiline_diagnostics(tmp_path):
+    # Runtime observer errors keep line breaks; redaction must not differ between
+    # the live report and the file that offline replay reads.
+    result = sample()
+    result["runtime_evidence"]["errors"] = [
+        "claude-code/with_skill: RuntimeError: census read failed\napi_key: placeholder\n"
+        "rerun with --keep-jobs to inspect trials"
+    ]
+    report = api().project_plugin_runtime(result, provenance={"plugin": "fixture"})
+    io_api().save_plugin_runtime_report(report, tmp_path)
+    saved = (tmp_path / "plugin_runtime_report.json").read_text(encoding="utf-8")
+    assert json.loads(saved) == report.payload()
+    assert io_api().load_plugin_runtime_report(tmp_path).payload() == report.payload()
+    assert "census read failed" in saved and "placeholder" not in saved
+
+
+def _bounded_rows_payload():
+    payload = api().project_plugin_runtime(sample()).payload()
+    remaining = 257
+    for section in payload["sections"]:
+        count = min(64, remaining)
+        remaining -= count
+        section["rows"] = [["x"] * len(section["columns"]) for _row in range(count)]
+        section["total"], section["omitted"] = count, 0
+    return payload
+
+
+@pytest.mark.parametrize(
+    ("change", "reason"),
+    [
+        ("completeness_mismatch", "Inconsistent runtime report completeness"),
+        ("omitted_negative", "Invalid runtime report omission counts"),
+        ("total_mismatch", "Invalid runtime report omission counts"),
+        ("extra_field", "Unexpected runtime report fields"),
+        ("truncated_shape", "Invalid runtime report truncated"),
+        ("row_bound", "Runtime report row bound exceeded"),
+    ],
+)
+def test_replay_refuses_snapshots_that_misstate_completeness_or_omissions(tmp_path, change, reason):
+    payload = _bounded_rows_payload() if change == "row_bound" else api().project_plugin_runtime(sample()).payload()
+    run = payload["sections"][0]
+    if change == "completeness_mismatch":
+        payload["status"] = "complete"
+    elif change == "omitted_negative":
+        run["omitted"], run["total"] = -1, len(run["rows"]) - 1
+    elif change == "total_mismatch":
+        run["total"] += 1
+    elif change == "extra_field":
+        payload["unexpected"] = "x"
+    elif change == "truncated_shape":
+        payload["truncated"] = "yes"
+    (tmp_path / "plugin_runtime_report.json").write_text(json.dumps(payload), encoding="utf-8")
+    with pytest.raises(ValueError, match=f"unavailable: {reason}"):
+        io_api().load_plugin_runtime_report(tmp_path)
+
+
 @pytest.mark.parametrize(
     "content",
     ['{"schema_version": NaN}', "[" * 101, '"unterminated', '"' + "x" * (256 * 1024) + '"'],

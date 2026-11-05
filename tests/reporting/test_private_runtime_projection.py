@@ -125,16 +125,62 @@ def test_projection_keeps_staging_loading_unknowns_and_recorded_statistics_separ
     assert report.payload()["source"]
 
 
-def test_successful_execution_with_missing_evidence_is_not_a_complete_report():
+def complete_sample():
+    """A fixture with no limitation of its own, so each check is observable."""
     result = sample()
-    result["runtime_evidence"]["evidence_complete"] = False
+    native = result["native_evidence"]["claude-code"]
+    native.pop("listed")
+    native.pop("staged")
+    return result
+
+
+def diagnostics(payload):
+    return sections(payload)["diagnostics"]["rows"]
+
+
+def test_complete_baseline_has_no_evidence_limitations():
+    payload = api().project_plugin_runtime(complete_sample()).payload()
+    assert payload["status"] == "complete" and payload["evidence_complete"] is True
+    assert diagnostics(payload) == []
+
+
+@pytest.mark.parametrize(
+    ("scope", "expected"),
+    [
+        ("runtime", ["runtime", "Runtime evidence is unavailable or incomplete"]),
+        ("arm", ["claude-code/with_skill", "Runtime behavior evidence is incomplete"]),
+    ],
+)
+def test_successful_execution_with_missing_evidence_is_not_a_complete_report(scope, expected):
+    result = complete_sample()
     summary = result["agents"]["claude-code"]["plugin_signals_summary"]["with_skill"]
-    summary.update(n_missing_trials=2, n_missing_trajectory=3, evidence_complete=False)
+    summary.update(n_missing_trials=2, n_missing_trajectory=3)
+    if scope == "runtime":
+        result["runtime_evidence"]["evidence_complete"] = False
+    else:
+        summary["evidence_complete"] = False
     payload = api().project_plugin_runtime(result).payload()
     assert payload["execution_status"] == "succeeded"
     assert payload["status"] == "incomplete" and payload["evidence_complete"] is False
-    encoded = json.dumps(sections(payload)["signals"])
-    assert "n_missing_trials" in encoded and "n_missing_trajectory" in encoded
+    assert diagnostics(payload) == [expected]
+    signals = sections(payload)["signals"]["rows"]
+    assert ["claude-code", "with_skill", "n_missing_trials", "recorded", 2, None, None] in signals
+    assert ["claude-code", "with_skill", "n_missing_trajectory", "recorded", 3, None, None] in signals
+
+
+def test_execution_error_alias_is_not_listed_twice():
+    result = complete_sample()
+    result["execution_errors"] = ["claude-code: launch failed", "codex: launch failed"]
+    # The engine keeps ``error`` as a compatibility copy of execution_errors.
+    result["error"] = list(result["execution_errors"])
+    payload = api().project_plugin_runtime(result).payload()
+    assert diagnostics(payload) == [
+        ["execution", "claude-code: launch failed"],
+        ["execution", "codex: launch failed"],
+    ]
+    legacy = complete_sample()
+    legacy["error"] = ["legacy launch failure"]
+    assert diagnostics(api().project_plugin_runtime(legacy).payload()) == [["execution", "legacy launch failure"]]
 
 
 def test_ordinary_result_has_no_private_projection():
@@ -239,12 +285,16 @@ def test_malformed_optional_evidence_is_explicit_and_does_not_crash(value):
 
 @pytest.mark.parametrize("value", [42, {}, True, "unexpected"])
 def test_malformed_coverage_lists_cannot_invent_activation(value):
-    result = sample()
+    result = complete_sample()
     coverage = result["agents"]["claude-code"]["plugin_signals_summary"]["with_skill"]["activation_coverage"]
     coverage.update(exercised=value, unavailable=value)
     payload = api().project_plugin_runtime(result).payload()
     assert all(row[3] == "unverified" for row in sections(payload)["coverage"]["rows"])
     assert payload["status"] == "incomplete"
+    assert diagnostics(payload) == [
+        ["claude-code/with_skill", "Malformed exercised coverage evidence"],
+        ["claude-code/with_skill", "Malformed unavailable coverage evidence"],
+    ]
 
 
 def test_case_coverage_uses_real_condition_summaries_for_every_arm():

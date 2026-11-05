@@ -6,13 +6,24 @@ from __future__ import annotations
 import json
 from pathlib import Path
 
-from skillevaluator.reporting.plugin_runtime import MAX_OUTPUT_BYTES, SCHEMA_VERSION, SECTIONS, RuntimePluginReport
-from skillevaluator.reporting.plugin_static import _clean_text, _number
-from skillevaluator.tier3.output_provenance import write_output_file_atomically
+from skillevaluator.reporting.plugin_runtime import SCHEMA_VERSION, SECTIONS, RuntimePluginReport
+from skillevaluator.reporting.plugin_static import MAX_OUTPUT_BYTES, _clean_text, _number
 from skillevaluator.utils.secure_fs import SecureRoot
 from skillevaluator.utils.structured_data import load_bounded_json
 
 RUNTIME_REPORT_FILENAME = "plugin_runtime_report.json"
+
+
+def _settle(value: str) -> str:
+    # _clean_text redacts before it joins lines, so one pass over multi-line
+    # text is not always stable. Repeat until a pass changes nothing: a saved
+    # snapshot then replays to exactly the report that was saved.
+    for _ in range(8):
+        cleaned = _clean_text(value)[0]
+        if cleaned == value:
+            break
+        value = cleaned
+    return value
 
 
 def _validate(payload: object) -> RuntimePluginReport:
@@ -32,7 +43,7 @@ def _validate(payload: object) -> RuntimePluginReport:
     for key in ("name", "run_id", "execution_status"):
         if not isinstance(payload.get(key), str):
             raise ValueError(f"Invalid runtime report {key}")
-        payload[key] = _clean_text(payload[key])[0]
+        payload[key] = _settle(payload[key])
     source = payload.get("source")
     if (
         not isinstance(source, dict)
@@ -40,7 +51,7 @@ def _validate(payload: object) -> RuntimePluginReport:
         or not all(isinstance(value, str) for value in source.values())
     ):
         raise ValueError("Invalid runtime report source")
-    payload["source"] = {key: _clean_text(value)[0] for key, value in source.items()}
+    payload["source"] = {key: _settle(value) for key, value in source.items()}
     sections = payload.get("sections")
     if not isinstance(sections, list) or len(sections) != len(SECTIONS):
         raise ValueError("Invalid runtime report sections")
@@ -72,10 +83,10 @@ def _validate(payload: object) -> RuntimePluginReport:
                 if type(value) in (int, float) and _number(value) is None:
                     raise ValueError("Invalid runtime report number")
                 if isinstance(value, str):
-                    row[index] = _clean_text(value)[0]
+                    row[index] = _settle(value)
         if not all(isinstance(note, str) for note in notes):
             raise ValueError("Invalid runtime report notes")
-        section["notes"] = [_clean_text(note)[0] for note in notes]
+        section["notes"] = [_settle(note) for note in notes]
         total, omitted = section.get("total"), section.get("omitted")
         if (
             type(total) is not int
@@ -108,6 +119,9 @@ def _validate(payload: object) -> RuntimePluginReport:
 
 def save_plugin_runtime_report(report: RuntimePluginReport, run_dir: Path) -> None:
     """Atomically retain one bounded sanitized snapshot in the selected run directory."""
+    # Writing needs the tier3 output helpers; replay stays free of tier3 imports.
+    from skillevaluator.tier3.output_provenance import write_output_file_atomically
+
     checked = _validate(report.payload())
     encoded = checked._serialized.encode("utf-8")
     write_output_file_atomically(run_dir / RUNTIME_REPORT_FILENAME, encoded)

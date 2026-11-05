@@ -10,7 +10,13 @@ from itertools import islice
 from pathlib import PurePosixPath
 from typing import Any
 
-from skillevaluator.reporting.plugin_static import MAX_OUTPUT_BYTES, _clean_text, _count, _mapping, _Projection
+from skillevaluator.reporting.plugin_static import (  # noqa: F401 - re-exported bound
+    MAX_OUTPUT_BYTES,
+    _clean_text,
+    _count,
+    _mapping,
+    _Projection,
+)
 
 SCHEMA_VERSION = 1
 _PAIR_LABELS = {
@@ -395,8 +401,9 @@ def project_plugin_runtime(
     if provenance.get("complete") is False:
         projection.issue("preparation", "The prepared package has incomplete evidence")
     projection.errors("runtime", observed.get("errors"))
-    projection.errors("execution", result.get("execution_errors"))
-    projection.errors("execution", result.get("error"))
+    # ``error`` is the engine's compatibility copy of ``execution_errors``.
+    execution_errors = result.get("execution_errors")
+    projection.errors("execution", execution_errors if isinstance(execution_errors, list) else result.get("error"))
     for key in ("native_evidence_error", "runtime_report_error"):
         if error := provenance.get(key) or result.get(key):
             projection.issue(key, error)
@@ -441,7 +448,8 @@ def project_plugin_runtime(
         "source": source,
         "sections": sections,
     }
-    serialized = json.dumps(payload, ensure_ascii=True, allow_nan=False)
-    if len(serialized.encode("utf-8")) > MAX_OUTPUT_BYTES:
-        raise ValueError("Runtime report exceeds its publication bound")
-    return RuntimePluginReport(serialized)
+    # Settle sanitization through the validator that replay uses, so the live
+    # report, its provenance copy and the saved snapshot are the same bytes.
+    from skillevaluator.reporting.plugin_runtime_io import _validate
+
+    return _validate(payload)

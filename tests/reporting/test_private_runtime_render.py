@@ -200,25 +200,48 @@ def test_runtime_rendering_does_not_collect_source_or_network_evidence(monkeypat
     assert json.loads(output["json"])["plugin_runtime"]["execution_status"] == "succeeded"
 
 
-def test_runtime_adapter_import_and_render_need_no_optional_runtime_dependencies():
+def test_runtime_replay_and_render_need_no_optional_runtime_dependencies(tmp_path):
     script = """
 import json, sys
+from pathlib import Path
+
+BLOCKED = {'anthropic', 'boto3', 'botocore', 'harbor', 'openai', 'litellm',
+           'langgraph', 'langgraph_checkpoint', 'opentelemetry'}
+
+class Blocker:
+    def find_spec(self, name, path=None, target=None):
+        if name.split('.')[0] in BLOCKED:
+            raise ModuleNotFoundError(f'blocked extras-only module: {name}')
+        return None
+
+sys.meta_path.insert(0, Blocker())
 import skillevaluator.reporting
 from skillevaluator.models.result import ValidationResult
 before = set(sys.modules)
+from skillevaluator.reporting.plugin_runtime import SECTIONS
+from skillevaluator.reporting.plugin_runtime_io import RUNTIME_REPORT_FILENAME, load_plugin_runtime_report
 from skillevaluator.reporting.plugin_runtime_render import render_plugin_runtime_reports
-class Report:
-    def payload(self):
-        return {'schema_version': 1, 'name': 'offline', 'status': 'incomplete',
-                'run_id': 'saved', 'execution_status': 'succeeded', 'evidence_complete': False,
-                'source': {}, 'truncated': False, 'sections': []}
+run_dir = Path(sys.argv[1])
+sections = [{'key': key, 'title': title, 'columns': list(columns), 'rows': [], 'total': 0, 'omitted': 0,
+             'notes': []} for key, (title, columns) in SECTIONS.items()]
+snapshot = {'schema_version': 1, 'name': 'offline', 'status': 'incomplete', 'run_id': 'saved',
+            'execution_status': 'succeeded', 'evidence_complete': False, 'source': {}, 'truncated': False,
+            'sections': sections}
+(run_dir / RUNTIME_REPORT_FILENAME).write_text(json.dumps(snapshot), encoding='utf-8')
+reporting = skillevaluator.reporting
+reporters = [reporting.CLIReporter(), reporting.JSONReporter(include_timestamp=False),
+             reporting.MarkdownReporter(include_timestamp=False), reporting.HTMLReporter(include_timestamp=False),
+             reporting.SARIFReporter(include_timestamp=False), reporting.BenchmarkReporter(include_timestamp=False)]
 output = render_plugin_runtime_reports([ValidationResult(validator_name='retained')],
-    report=Report(), reporters=[skillevaluator.reporting.JSONReporter(include_timestamp=False)])
+    report=load_plugin_runtime_report(run_dir), reporters=reporters)
 assert json.loads(output['json'])['plugin_runtime']['name'] == 'offline'
+assert len(output) == 6
 new = set(sys.modules) - before
-forbidden = ('litellm', 'anthropic', 'openai', 'harbor', 'skillevaluator.inference',
-             'skillevaluator.tier3', 'skillevaluator.validators')
+forbidden = tuple(BLOCKED) + ('skillevaluator.inference', 'skillevaluator.tier3', 'skillevaluator.validators')
 assert not sorted(name for name in new if name.startswith(forbidden)), sorted(new)
 """
-    completed = subprocess.run([sys.executable, "-c", script], capture_output=True, text=True, timeout=20)
+    # Generous: a cold interpreter under coverage can take most of 20 seconds.
+    completed = subprocess.run(
+        [sys.executable, "-c", script, str(tmp_path)], capture_output=True, text=True, timeout=180
+    )
     assert completed.returncode == 0, completed.stderr

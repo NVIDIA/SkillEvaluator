@@ -2,6 +2,7 @@
 """Operator-visible terminal evidence, wrapping and progress contracts."""
 
 import io
+import math
 
 import pytest
 from rich.console import Console
@@ -87,13 +88,16 @@ def test_plain_progress_heartbeat_waits_for_idle_and_deduplicates(monkeypatch):
     monkeypatch.setattr(progress, "monotonic", lambda: clock[0])
     output = io.StringIO()
     reporter = progress.PlainProgressReporter(stream=output)
+    # Manual fake-clock steps must not race the autonomous heartbeat worker.
+    monkeypatch.setattr(reporter, "_heartbeat_loop", reporter._stop.wait)
     try:
         reporter.start(progress.Tier3RunPlan("demo", "docker", ()))
         worker = reporter._thread
         event = progress.ProgressEvent("agent", "running", "one measured trial")
         reporter.emit(event)
+        clock[0] = 130
         reporter.emit(event)
-        clock[0] = 159
+        clock[0] = math.nextafter(160.0, 100.0)
         reporter.heartbeat()
         assert "still running" not in output.getvalue()
         clock[0] = 160
@@ -104,6 +108,12 @@ def test_plain_progress_heartbeat_waits_for_idle_and_deduplicates(monkeypatch):
         clock[0] = 220
         reporter.heartbeat()
         assert output.getvalue().count("still running") == 1
+        clock[0] = math.nextafter(240.0, 180.0)
+        reporter.heartbeat()
+        assert output.getvalue().count("still running") == 1
+        clock[0] = 240.0
+        reporter.heartbeat()
+        assert output.getvalue().count("still running") == 2
         assert output.getvalue().count("one measured trial") == 1
     finally:
         reporter.close()

@@ -9,6 +9,7 @@ import errno
 import importlib
 import io
 import json
+import math
 import os
 import tempfile
 import threading
@@ -357,19 +358,32 @@ def test_rich_reporter_stops_live_display_during_exception_cleanup(monkeypatch: 
 
 def test_plain_reporter_emits_durable_plan_events_and_elapsed_heartbeat(monkeypatch: pytest.MonkeyPatch) -> None:
     progress = _progress_module()
+    clock = [0.0]
+    monkeypatch.setattr(progress, "monotonic", lambda: clock[0])
     output = io.StringIO()
     reporter = progress.PlainProgressReporter(stream=output, refresh_interval=60)
+    # Drive heartbeat() ourselves; the real worker only waits for cleanup.
+    monkeypatch.setattr(reporter, "_heartbeat_loop", reporter._stop.wait)
 
-    reporter.start(_plan(progress))
-    reporter.emit(progress.ProgressEvent(stage="configuration", state="running"))
-    reporter.emit(progress.ProgressEvent(stage="configuration", state="ready", detail="eval config loaded"))
-    reporter.emit(progress.ProgressEvent(stage="docker-images", state="delegated", detail="build delegated to Harbor"))
-    reporter.emit(progress.ProgressEvent(stage="agent:codex", state="running", detail="with-skill + baseline"))
-    heartbeat_at = reporter._last_progress_at + 60
-    monkeypatch.setattr(progress, "monotonic", lambda: heartbeat_at)
-    reporter.heartbeat()
-    reporter.emit(progress.ProgressEvent(stage="agent:codex", state="complete"))
-    reporter.close()
+    try:
+        reporter.start(_plan(progress))
+        worker = reporter._thread
+        reporter.emit(progress.ProgressEvent(stage="configuration", state="running"))
+        reporter.emit(progress.ProgressEvent(stage="configuration", state="ready", detail="eval config loaded"))
+        reporter.emit(
+            progress.ProgressEvent(stage="docker-images", state="delegated", detail="build delegated to Harbor")
+        )
+        reporter.emit(progress.ProgressEvent(stage="agent:codex", state="running", detail="with-skill + baseline"))
+        clock[0] = math.nextafter(60.0, 0.0)
+        reporter.heartbeat()
+        assert "still running" not in output.getvalue()
+        clock[0] = 60.0
+        reporter.heartbeat()
+        reporter.emit(progress.ProgressEvent(stage="agent:codex", state="complete"))
+    finally:
+        reporter.close()
+    assert not worker.is_alive()
+    assert not reporter.is_active
 
     rendered = output.getvalue()
     assert "Tier 3 live evaluation: demo-skill" in rendered
@@ -384,7 +398,7 @@ def test_plain_reporter_emits_durable_plan_events_and_elapsed_heartbeat(monkeypa
     assert "timeout=1.5x" in rendered
     assert "configuration: ready - eval config loaded" in rendered
     assert "docker-images: delegated - build delegated to Harbor" in rendered
-    assert "still running" in rendered
+    assert "[00:01:00] still running: agent:codex" in rendered
     assert "agent:codex" in rendered
     assert "\x1b[" not in rendered
     assert "\r" not in rendered

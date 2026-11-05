@@ -126,6 +126,17 @@ All notable changes to SkillEvaluator are documented in this file.
 - CI-native per-skill HTML pages link Download JSON to the retained
   `skillevaluator-tier1.json` and do not embed a second copy of the report
   JSON. Standalone CLI HTML reports embed it for Export JSON.
+- Rubric evaluation JSON reports name the provider and model that gave each
+  score as `llm_provider` and `llm_model_used` in the skill's `rubric_eval`
+  success detail and, for a single skill, also in `rubric_eval`. Tier 3
+  conclusions and recommendations written by the LLM, and LLM-written
+  dimensions returned by `compute_dimensions`, record the model that wrote
+  them as `model`. For a Claude 5.5 or later model on the native Claude API
+  this is the model the reply names: the server-side refusal fallback model,
+  not the configured model, when the fallback answered. Otherwise it is the
+  configured model, unless a server-side `fallback` block in the reply names
+  another model.
+
 - Tier 3 runs can be limited to the first N eval cases with the opt-in
   `--max-cases N` flag on `validate`, `tier3`, and `tier3 evaluate`, or the
   `harbor.max_cases` key in `evals/config.yml`; the CLI value wins. Unset, every
@@ -206,6 +217,33 @@ All notable changes to SkillEvaluator are documented in this file.
   unless `SKILLEVALUATOR_REQUIRE_SEMGREP=1`. `--skip <check>` on `validate` and
   `tier1` leaves a check out and reports it as skipped. A `scanners` row and the
   JSON report record which scanner versions ran.
+
+- Every finding now has stable IDs for tracking across runs and validators.
+  `finding_id` (`SEF-…`) is derived from the finding's category, check,
+  message, and suggestion, so it survives line moves, whitespace or case
+  changes, and severity overrides. Location text a check copies into its
+  message is left out of it: the `in <file>:<line>` in a secret detection
+  message, also in a folder or plugin run that prefixes the file path, and
+  the `— N occurrences (…)` list a PII scan message ends with. A file name in
+  a message or suggestion, as script lint and secret detection write, stays
+  part of the ID. `occurrence_id` (`SEO-…`) adds the file, line, and line
+  content. Otherwise identical findings in different files or skills
+  share one `finding_id`, so they count as one unique finding with one
+  occurrence per location. When CI redacts a detected credential from a
+  report, it recomputes the IDs from the redacted text and renders the HTML,
+  Markdown, and SARIF copies from that JSON, so no ID is derived from a
+  removed value. The JSON report and the HTML report's embedded data
+  add `finding_counts` (raw records, distinct occurrences, unique findings,
+  and duplicates removed), `finding_groups` (each unique finding with its
+  validators and every location, including each location a PII finding
+  lists for a repeated value, also in a folder run), and `message_counts`
+  (error and warning strings with no finding behind them, such as failed
+  gates and scanner or execution errors, but not the workflow scope note for
+  a stage that configuration skips, plus informational messages other than
+  the `[OK]` line recorded for each passed check); each JSON result also
+  carries its own `finding_counts`. Markdown adds a Finding Reconciliation
+  table, most severe first, and per-finding IDs. `total_errors`,
+  `total_warnings`, and `severity_counts` are unchanged.
 
 - `--skillspector-baseline FILE` on `validate`, `tier1`, and `security-scan`
   applies an audited SkillSpector suppression baseline, so reviewed false
@@ -319,6 +357,25 @@ All notable changes to SkillEvaluator are documented in this file.
 - HTML reports rendered in one process share one compiled template
   environment, so each template compiles once per process instead of once per
   report.
+
+- The Markdown summary and the HTML report's summary now count findings the
+  same way: each unique finding once, at its highest severity, however many
+  lines, files, skills or validators report it. Markdown's Total Issues adds
+  distinct occurrences, raw records, and errors and warnings with no finding
+  behind them, such as failed gates and incomplete scans; its severity
+  breakdown counts unique findings. In HTML, the tier cards, the Tier 1
+  Findings and Blocking critical + high numbers, the verdict sentence, the
+  skill finding badges and the gate policy line count unique findings, and
+  the Findings number shows the same occurrence, raw-record and no-finding
+  counts beneath it when they differ from the unique count. Both formats used
+  to add up raw records, so a finding reported on several lines or by two
+  validators counted more than once. The HTML report's embedded and exported
+  data changes `summary.total_issues` the same way: it now counts unique
+  findings plus errors and warnings with no finding behind them, instead of
+  raw errors plus warnings; the raw finding count is in
+  `summary.raw_finding_occurrences` and `finding_counts.raw_occurrences`. The
+  JSON `skills[].issue_count`, contributor totals, `total_errors`,
+  `total_warnings` and `severity_counts` still count raw records.
 
 - Tier 3 `accuracy` grades the outcome only. The `SKILL_IDENTIFIED` criterion,
   which capped a correct answer from the no-skill baseline at 0.8 on positive
@@ -512,6 +569,14 @@ All notable changes to SkillEvaluator are documented in this file.
   scoring agree, while scoped searches and slash-valued patterns retain their
   classification.
 
+- On the native Claude API, the Tier 3 judges' `judge_model_used` names the
+  server-side fallback model when the API serves a repeated request straight
+  from that model. Such a reply has no `fallback` content block, so the label
+  now comes from the reply's own `model` field instead of the configured
+  model. `judge_fallback_used` is then `true`, and Skill Lift treats such a
+  case like an in-call fallback: when another condition, attempt or step of
+  the case was judged by the configured model, the case leaves that judge
+  metric's lift and is counted in `judge_mixed_cases`.
 - Tier 2 `similarity-check` and `context-optimization-check` no longer abort
   with a "symlink or reparse point" error when a skill or collection aliases
   one agent directory to another, such as `.agents -> .claude`. A directory
@@ -999,6 +1064,32 @@ All notable changes to SkillEvaluator are documented in this file.
   `goal_accuracy` lift and counted in `judge_mixed_cases`, even when both used
   the same model. GPT-5 and GPT-6 judges, including the defaults, are
   unaffected.
+
+- Tier 1 `security` no longer fails a skill, rules, workflows, or plugin
+  artifact on SkillSpector agent-threat matches in files no agent reads or
+  runs, such as UI strings in HTML, CSS, or `.vue` files, test fixtures,
+  documentation, notebooks, images, and lockfiles. Findings stay blocking on
+  agent control paths (instructions, references, executables, agent
+  configuration, MCP and plugin manifests) and on any file those reference by
+  path, file name, skill or plugin root variable or placeholder
+  (`${CLAUDE_SKILL_DIR}`, `$SKILL_DIR`, `$SKILL_ROOT`,
+  `${CLAUDE_PLUGIN_ROOT}`, `{baseDir}`, `<skill-dir>`), install path, or
+  import, without regard to case. Files SkillSpector marks executable, such as
+  `.py`, `.js`, `.ts`, and `.tsx` files under `tests/` or `web/`, are executables, so
+  their findings and those of any fixture they name stay blocking. An issue
+  that SkillSpector reports for several files is suppressed only when every
+  one of its occurrences is outside agent control paths. Supply-chain
+  findings, YARA malware signatures, and artifact-integrity findings for a
+  misleading extension or embedded NUL bytes still apply on every path, and a
+  file named as a raster image keeps its findings unless its content is an
+  image. A location or occurrence that is missing or escapes the artifact
+  through `..` or a symlink keeps its finding. Malformed occurrences, a report
+  that serializes fewer occurrences than it counted, an unloadable manifest,
+  and an unfinished reference walk keep every affected finding. Suppressed
+  issues are left out of the aggregate risk-score gate, counted in a
+  `filtered` summary row, and recorded in the JSON report's
+  `skillspector_applicability` block. `security-scan` and targets of `unknown`
+  type keep the unrestricted scan.
 
 ### Security
 

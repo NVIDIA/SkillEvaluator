@@ -368,3 +368,148 @@ def test_tool_only_trajectory_retains_latest_verification_failure(monkeypatch, i
     assert len(evidence) <= {"accuracy": accuracy_budget, "goal_accuracy": goal_budget}[metric]
     assert bundle["omitted"]["truncated"] is True
     assert bundle["omitted"]["count"] > 0
+
+
+def test_behavior_bundle_reports_final_response_cap_loss() -> None:
+    # Regression test: a final answer longer than the behavior evidence
+    # final-response section limit loses its middle to that cap even when the
+    # whole bundle fits the total budget. The omission accounting used to
+    # compare two renderings that shared the cap, so the loss was reported
+    # as truncated=False.
+    marker = "MIGRATE_UNIQUE_COVERAGE_FIRST"
+    answer = "A" * 2000 + marker + "B" * 2000
+    traj = {"steps": [{"source": "agent", "message": answer}]}
+
+    for module in (atif_helpers, _load_harbor_template_module()):
+        bundle = module.build_metric_evidence_bundles(traj, "Explain the migration.")["behavior_check"]
+        assert marker not in bundle["prompt_evidence"]
+        assert bundle["omitted"]["truncated"] is True
+        assert bundle["omitted"]["count"] >= 1
+        assert bundle["omitted"]["reason"]
+
+
+def test_behavior_bundle_complete_evidence_is_not_reported_truncated() -> None:
+    # Control case: when nothing is dropped, the accounting must still say so.
+    traj = {"steps": [{"source": "agent", "message": "Short final answer."}]}
+
+    for module in (atif_helpers, _load_harbor_template_module()):
+        bundle = module.build_metric_evidence_bundles(traj, "What happened?")["behavior_check"]
+        assert "Short final answer." in bundle["prompt_evidence"]
+        assert bundle["omitted"]["truncated"] is False
+        assert bundle["omitted"]["count"] == 0
+        assert bundle["omitted"]["reason"] == ""
+
+
+def test_behavior_bundle_mid_length_final_answer_in_history_is_not_truncated() -> None:
+    # A final answer past the final-response section cap (784 of the default
+    # 800 characters) still reaches the judge in full when the compact
+    # history repeats the text-only final step verbatim (up to 1,500
+    # characters). The accounting must not flag that as truncated: nothing
+    # the judge reads is missing.
+    marker = "MID_ANSWER_COVERAGE_TOKEN"
+    answer = "x" * 550 + marker + "y" * 620
+    assert 800 < len(answer) < 1500
+    traj = {"steps": [{"source": "agent", "message": answer}]}
+
+    for module in (atif_helpers, _load_harbor_template_module()):
+        bundle = module.build_metric_evidence_bundles(traj, "Summarize the run.")["behavior_check"]
+        assert marker in bundle["prompt_evidence"]
+        assert bundle["omitted"]["truncated"] is False
+        assert bundle["omitted"]["count"] == 0
+        assert bundle["omitted"]["reason"] == ""
+
+
+def test_behavior_bundle_final_answer_past_history_repeat_is_truncated() -> None:
+    # Past the history repeat, the middle of the final answer is genuinely
+    # missing from the evidence, and the reason names the setting that
+    # applied so users know which limit to raise.
+    marker = "DEEP_ANSWER_COVERAGE_TOKEN"
+    answer = "A" * 2000 + marker + "B" * 2000
+    traj = {"steps": [{"source": "agent", "message": answer}]}
+
+    for module in (atif_helpers, _load_harbor_template_module()):
+        bundle = module.build_metric_evidence_bundles(traj, "Explain the migration.")["behavior_check"]
+        assert marker not in bundle["prompt_evidence"]
+        assert bundle["omitted"]["truncated"] is True
+        assert bundle["omitted"]["count"] >= 1
+        assert "SKILL_EVAL_BEHAVIOR_FINAL_RESPONSE_LIMIT" in bundle["omitted"]["reason"]
+
+
+_BUDGET_REASON = "behavior evidence shortened to fit SKILL_EVAL_BEHAVIOR_CHECK_BUDGET"
+_LIMIT_REASON = "final response shortened to fit SKILL_EVAL_BEHAVIOR_FINAL_RESPONSE_LIMIT"
+
+
+def _distinct_text(length: int) -> str:
+    # Numbered words keep long substrings unique, so a coverage check cannot
+    # match a repeated run by accident.
+    return " ".join(f"w{idx:04d}" for idx in range(length // 6 + 1))[:length]
+
+
+@pytest.mark.parametrize("cut_char", [" ", "-"], ids=["space-at-cut", "text-at-cut"])
+@pytest.mark.parametrize(("length", "truncated"), [(1501, False), (1640, False), (1755, False), (1756, True)])
+def test_behavior_bundle_final_answer_split_across_history_and_section(
+    length: int, truncated: bool, cut_char: str
+) -> None:
+    # The compact history repeats the first 1,500 characters of a text-only
+    # final answer, and at the default limit the final-response section keeps
+    # its last 255. Together they carry an answer of up to 1,755 characters
+    # in full, although no single piece holds all of it. The history drops
+    # trailing whitespace, so cover a cut that falls on a space and one that
+    # falls on text.
+    answer = _distinct_text(length)
+    answer = answer[:1499] + cut_char + answer[1500:]
+    traj = {"steps": [{"source": "agent", "message": answer}]}
+
+    for module in (atif_helpers, _load_harbor_template_module()):
+        bundle = module.build_metric_evidence_bundles(traj, "Summarize the run.")["behavior_check"]
+        assert answer not in bundle["prompt_evidence"]
+        assert answer[:1500].rstrip() in bundle["prompt_evidence"]
+        assert bundle["omitted"]["truncated"] is truncated
+        assert bundle["omitted"]["count"] == (1 if truncated else 0)
+        assert bundle["omitted"]["reason"] == (_LIMIT_REASON if truncated else "")
+
+
+@pytest.mark.parametrize(
+    ("env", "reason"),
+    [
+        ({}, f"{_BUDGET_REASON}; {_LIMIT_REASON}"),
+        ({"SKILL_EVAL_BEHAVIOR_CHECK_BUDGET": "100000"}, _LIMIT_REASON),
+        ({"SKILL_EVAL_BEHAVIOR_FINAL_RESPONSE_LIMIT": "3000"}, _BUDGET_REASON),
+        (
+            {"SKILL_EVAL_BEHAVIOR_CHECK_BUDGET": "100000", "SKILL_EVAL_BEHAVIOR_FINAL_RESPONSE_LIMIT": "3000"},
+            "",
+        ),
+    ],
+    ids=["both", "limit-only", "budget-only", "neither"],
+)
+def test_behavior_bundle_reason_names_each_setting_that_cut_evidence(
+    monkeypatch: pytest.MonkeyPatch, env: dict[str, str], reason: str
+) -> None:
+    # A long tool history overflows the default behavior budget, and a final
+    # answer past 1,755 characters also loses its middle to the default
+    # final-response limit. The reason must name every setting that applied,
+    # so raising only the budget is not mistaken for a fix.
+    for name in ("SKILL_EVAL_BEHAVIOR_CHECK_BUDGET", "SKILL_EVAL_BEHAVIOR_FINAL_RESPONSE_LIMIT"):
+        monkeypatch.delenv(name, raising=False)
+    for name, value in env.items():
+        monkeypatch.setenv(name, value)
+    steps: list[dict] = []
+    for idx in range(40):
+        steps.append({
+            "source": "agent",
+            "tool_calls": [{
+                "tool_call_id": f"list-{idx}",
+                "function_name": "bash",
+                "arguments": {"command": f"ls /workspace/step-{idx:02d}"},
+            }],
+            "observation": {"results": [{"source_call_id": f"list-{idx}", "content": f"step {idx:02d} " + "z" * 292}]},
+        })
+    answer = _distinct_text(2000)
+    steps.append({"source": "agent", "message": answer})
+
+    for module in (atif_helpers, _load_harbor_template_module()):
+        bundle = module.build_metric_evidence_bundles({"steps": steps}, "Explain the migration.")["behavior_check"]
+        assert bundle["omitted"]["truncated"] is bool(reason)
+        assert bundle["omitted"]["count"] == (1 if reason else 0)
+        assert bundle["omitted"]["reason"] == reason
+        assert (answer in bundle["prompt_evidence"]) is (_LIMIT_REASON not in reason)

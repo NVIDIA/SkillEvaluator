@@ -419,12 +419,13 @@ def test_private_cluster_allowance_keeps_default_skill_behavior(tmp_path, monkey
 
 def test_context_prompt_limit_refuses_llm_before_external_work(tmp_path, monkeypatch):
     from skillevaluator.deduplication.intra_skill import intra_skill_validator as core
+    from skillevaluator.deduplication.intra_skill import llm_analyzer
 
     root = tmp_path / "skill"
     root.mkdir()
     (root / "SKILL.md").write_text("## One\n" + "a" * 200 + "\n## Two\n" + "a" * 200)
     monkeypatch.setattr(core, "EmbeddingClient", lambda **_kwargs: FakeEmbedding())
-    monkeypatch.setattr(core, "CONTENT_DEDUP_MAX_LLM_PROMPT_CHARS", 100, raising=False)
+    monkeypatch.setattr(llm_analyzer, "MAX_PROMPT_CHARS", 100)
 
     def forbidden(**_kwargs):
         raise AssertionError("LLM must not start above the prompt bound")

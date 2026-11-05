@@ -778,8 +778,9 @@ def normalize_tool_call(tool_call: dict[str, Any]) -> list[dict[str, Any]]:
 # `Promise.allSettled` batches. This grammar decodes only those static forms, without evaluating
 # JavaScript, and runs only where the grammar above returned unsupported. A wrapper with more
 # than one call is decoded only when each call renders one JSON record of the outer output: the
-# call owns that record, and a missing, extra, reordered, changed or truncated record leaves the
-# whole wrapper unsupported.
+# call owns that record, and a missing, extra, reordered, changed, truncated or duplicate-key
+# record leaves the whole wrapper unsupported. A record's own exit code or rejection decides
+# whether its call failed; a record that states neither leaves the outcome unknown.
 
 _RECORD_FORMAT = "_atif_record_format"
 _RECORD_INDEX = "_atif_record_index"
@@ -991,8 +992,10 @@ def _extended_codex_program(source: str) -> tuple[list[tuple[str, dict[str, Any]
     """Decode the extended grammar into ``(calls, owner, record_format)``, or None outside it.
 
     A single call keeps the upstream ownership: ``owner`` 0 owns the whole outer observation,
-    -1 renders nothing. With records, ``owner`` is None and ``record_format`` says how to split
-    the outer observation; for inline renders it lists the call of each record in output order.
+    -1 renders nothing. A lone call that prints its whole result has the ``("single",)`` format,
+    so its own exit code can mark it failed. With records, ``owner`` is None and ``record_format``
+    says how to split the outer observation; for inline renders it lists the call of each record
+    in output order.
     """
     cursor = _StaticExecSource(source)
     calls: list[tuple[str, dict[str, Any]]] = []
@@ -1053,7 +1056,8 @@ def _extended_codex_program(source: str) -> tuple[list[tuple[str, dict[str, Any]
     except (_NotStatic, KeyError, RecursionError):
         return None
     if len(calls) == 1:
-        return calls, 0 if renders else -1, ()
+        # A lone call that prints its whole result owns the outer output, which is its record.
+        return calls, 0 if renders else -1, ("single",) if renders and renders[0][1] else ()
     owners = [call_index for call_index, _ in renders]
     if not calls or not all(whole for _, whole in renders) or sorted(owners) != list(range(len(calls))):
         return None
@@ -1071,11 +1075,21 @@ def _settled_result(value: object) -> dict[str, Any] | None:
     return None
 
 
-def _exec_record(value: object, record_format: tuple, record_index: int) -> bool | None:
-    """Check one record against its format; return whether it is a rejected promise."""
+def _returned_outcome(value: object) -> tuple[bool | None, str]:
+    """Return the outcome of a tool that returned: only its own exit code says whether it succeeded."""
+    code = value.get("exit_code") if isinstance(value, dict) else None
+    return (code != 0, f"exit_code={code}" if code else "") if type(code) is int else (None, "")
+
+
+def _exec_record(value: object, record_format: tuple, record_index: int) -> tuple[bool | None, str] | None:
+    """Check one record against its format; return its ``(is_error, evidence)``, or None if malformed.
+
+    ``is_error`` is None while the record states no outcome. ``evidence`` is the status line, in the
+    form the scorers read, that makes an explicit outcome visible in the record's observation.
+    """
     kind = record_format[0]
-    if kind == "result":
-        return False if isinstance(value, dict) else None
+    if kind in ("result", "single"):
+        return _returned_outcome(value) if isinstance(value, dict) else None
     if kind == "settled":
         settled = _settled_result(value)
     elif (
@@ -1088,18 +1102,27 @@ def _exec_record(value: object, record_format: tuple, record_index: int) -> bool
         settled = _settled_result({key: item for key, item in value.items() if key != record_format[1]})
     else:
         settled = _settled_result(value.get(record_format[2])) if len(value) == 2 else None
-    return None if settled is None else settled["status"] == "rejected"
+    if settled is None:
+        return None
+    return (True, "status=failed") if settled["status"] == "rejected" else _returned_outcome(settled["value"])
 
 
-def _codex_exec_records(observation: str, record_format: tuple, count: int) -> list[tuple[str, bool]] | None:
+def _unique_keys(pairs: list[tuple[str, Any]]) -> dict[str, Any]:
+    """Reject a duplicate key, which would let the last value silently win."""
+    if len({key for key, _ in pairs}) != len(pairs):
+        raise ValueError("duplicate key")
+    return dict(pairs)
+
+
+def _codex_exec_records(observation: str, record_format: tuple, count: int) -> list[tuple[str, bool | None]] | None:
     """Split a completed outer observation into exactly ``count`` checked records, in output order."""
     header = _EXEC_OUTPUT_RE.match(observation)
     if header is None:
         return None
     body = observation[header.end() :]
-    decoder = json.JSONDecoder()
+    decoder = json.JSONDecoder(object_pairs_hook=_unique_keys)
     position = 0
-    records: list[tuple[str, bool]] = []
+    records: list[tuple[str, bool | None]] = []
     for record_index in range(count):
         if record_index:
             if body.startswith("\r\n", position):
@@ -1111,17 +1134,17 @@ def _codex_exec_records(observation: str, record_format: tuple, count: int) -> l
             value, end = decoder.raw_decode(body, position)
         except (json.JSONDecodeError, RecursionError, ValueError):
             return None
-        is_error = _exec_record(value, record_format, record_index)
-        if is_error is None:
+        outcome = _exec_record(value, record_format, record_index)
+        if outcome is None:
             return None
-        records.append((body[position:end], is_error))
+        is_error, evidence = outcome
+        records.append((f"{body[position:end]}\n{evidence}" if evidence else body[position:end], is_error))
         position = end
     return records if not body[position:].strip() else None
 
 
 _upstream_normalize_tool_call = normalize_tool_call
 _upstream_normalized_tool_call_observation = normalized_tool_call_observation
-_upstream_normalized_tool_call_is_error = normalized_tool_call_is_error
 _upstream_normalized_tool_call_error_flag = normalized_tool_call_error_flag
 
 
@@ -1149,6 +1172,8 @@ def _normalize_tool_call_with_records(tool_call: dict[str, Any]) -> list[dict[st
             call["_atif_observation_status"] = (
                 MAPPED_OUTER_EXEC_OBSERVATION if observation_owner == inner_index else UNOBSERVED_INNER_CALL
             )
+            if record_format:
+                call[_RECORD_FORMAT], call[_RECORD_INDEX] = record_format, 0
         else:
             # Ambiguous until the outer observation proves which record belongs to this call.
             call["_atif_observation_status"] = AMBIGUOUS_OUTER_EXEC_OBSERVATION
@@ -1163,7 +1188,10 @@ def _resolve_exec_records(
 ) -> list[dict[str, Any]]:
     """Give each call of a record wrapper its own record, or leave the wrapper unsupported."""
     observation = _outer_tool_call_observation(step, tool_call, include_unscoped=raw_index == 0)
-    records = _codex_exec_records(observation, normalized[0][_RECORD_FORMAT], len(normalized))
+    record_format = normalized[0][_RECORD_FORMAT]
+    records = _codex_exec_records(observation, record_format, len(normalized))
+    if record_format == ("single",) and not (records and records[0][1]):
+        return normalized  # only an explicit failure changes how a lone call's whole output reads
     if records is None:
         return _upstream_normalize_tool_call(tool_call)
     return [
@@ -1199,27 +1227,16 @@ def _normalized_tool_call_observation_with_records(step: dict[str, Any], tool_ca
 def _normalized_tool_call_error_flag_with_records(
     step: dict[str, Any], tool_call: dict[str, Any]
 ) -> bool | None:
-    """Report a call's own record outcome before falling back to the upstream flag."""
+    """Report a call's own record outcome, which may be unknown, before the upstream flag."""
     if (
         tool_call.get("_atif_observation_status") == MAPPED_OUTER_EXEC_OBSERVATION
         and _RECORD_IS_ERROR in tool_call
     ):
-        return bool(tool_call[_RECORD_IS_ERROR])
+        return tool_call[_RECORD_IS_ERROR]
     return _upstream_normalized_tool_call_error_flag(step, tool_call)
-
-
-def _normalized_tool_call_is_error_with_records(step: dict[str, Any], tool_call: dict[str, Any]) -> bool:
-    """Also report the explicit failure of a call's own record: a rejected promise."""
-    if (
-        tool_call.get("_atif_observation_status") == MAPPED_OUTER_EXEC_OBSERVATION
-        and _RECORD_IS_ERROR in tool_call
-    ):
-        return bool(tool_call[_RECORD_IS_ERROR])
-    return _upstream_normalized_tool_call_is_error(step, tool_call)
 
 
 normalize_tool_call = _normalize_tool_call_with_records
 iter_normalized_tool_calls = _iter_normalized_tool_calls_with_records  # noqa: F811
 normalized_tool_call_observation = _normalized_tool_call_observation_with_records
 normalized_tool_call_error_flag = _normalized_tool_call_error_flag_with_records
-normalized_tool_call_is_error = _normalized_tool_call_is_error_with_records

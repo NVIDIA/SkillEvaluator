@@ -10,7 +10,7 @@ from pathlib import Path
 
 import pytest
 
-from skillevaluator.tier3.eval_core import codex_tool_call_normalizer
+from skillevaluator.tier3.eval_core import checks, codex_tool_call_normalizer
 from skillevaluator.tier3.eval_core.atif_helpers import (
     build_behavior_evidence,
     build_metric_evidence_refs,
@@ -1083,6 +1083,14 @@ _ALL_SETTLED_RAW_RECORDS = [
 ]
 
 
+def _expected_records(records: list[dict]) -> list[str]:
+    """Each record's JSON text, plus the failed-status line a rejected promise gains."""
+    return [
+        json.dumps(record, separators=(",", ":")) + ("\nstatus=failed" if "rejected" in str(record) else "")
+        for record in records
+    ]
+
+
 def _record_observation(records: list[dict]) -> str:
     body = "\n".join(json.dumps(record, separators=(",", ":")) for record in records)
     return "Script completed\nWall time 0.1 seconds\nOutput:\n\n" + body
@@ -1136,9 +1144,7 @@ def test_extended_codex_allsettled_maps_each_call_to_its_record(extractor, rende
     assert calls[0]["action_input"] == {"cmd": "pwd"}
     assert calls[1]["action_input"] == {"session_id": 1, "chars": ""}
     assert [call["observation_status"] for call in calls] == ["mapped_outer_exec_result"] * 2
-    assert [call["observation"] for call in calls] == [
-        json.dumps(record, separators=(",", ":")) for record in records
-    ]
+    assert [call["observation"] for call in calls] == _expected_records(records)
 
 
 @pytest.mark.parametrize("extractor", _EXTRACTORS)
@@ -1300,9 +1306,9 @@ def test_extended_codex_rejected_allsettled_record_is_an_error():
         False,
         True,
     ]
-    assert [codex_tool_call_normalizer.normalized_tool_call_observation(step, call) for step, call in yielded] == [
-        json.dumps(record, separators=(",", ":")) for record in _ALL_SETTLED_SPREAD_RECORDS
-    ]
+    assert [
+        codex_tool_call_normalizer.normalized_tool_call_observation(step, call) for step, call in yielded
+    ] == _expected_records(_ALL_SETTLED_SPREAD_RECORDS)
 
 
 @pytest.mark.parametrize("extractor", _EXTRACTORS)
@@ -1352,6 +1358,7 @@ def test_extended_codex_inline_multi_call_records_are_split_in_order(extractor):
     assert [call["action"] for call in calls] == ["exec_command", "exec_command"]
     assert [call["action_input"] for call in calls] == [{"cmd": "pwd"}, {"cmd": "ls"}]
     assert [call["observation"] for call in calls] == [json.dumps(record, separators=(",", ":")) for record in records]
+    assert all("is_error" not in call for call in calls)
 
 
 @pytest.mark.parametrize("extractor", _EXTRACTORS)
@@ -1386,3 +1393,188 @@ def test_extended_codex_dynamic_inline_is_not_a_clean_security_result(extractor)
     assert result["passed"] is False
     assert result["score"] == 0.5
     assert [finding["type"] for finding in result["findings"]] == ["unsupported_tool_wrapper"]
+
+
+def _scorer(extractor, name: str):
+    """The host or bundled-verifier scorer that pairs with ``extractor``."""
+    return getattr(_TEMPLATE_MODULE if extractor is _TEMPLATE_MODULE.extract_tool_calls_as_dicts else checks, name)
+
+
+def _error_recovery(trajectory: dict, extractor) -> dict:
+    return _scorer(extractor, "check_error_recovery")(extractor(trajectory))
+
+
+def _failed_exit_records(shape: str, code: int) -> list[dict]:
+    """The `pwd` record fails with ``code`` in the given record shape; the second record is clean."""
+    records = [
+        {"i": 0, "status": "fulfilled", "value": {"exit_code": code, "output": "boom\n"}},
+        {"i": 1, "status": "fulfilled", "value": {"exit_code": 0}},
+    ]
+    if shape == "field":
+        return [{"i": r["i"], "result": {k: v for k, v in r.items() if k != "i"}} for r in records]
+    return [{k: v for k, v in r.items() if k != "i"} for r in records] if shape == "raw" else records
+
+
+_RENDERERS = [
+    ("results.forEach((r,i)=>text({i,...r}));", "spread"),
+    ("for (let i = 0; i < results.length; i++) text({i, ...results[i]});", "spread"),
+    ("results.forEach(text);", "raw"),
+    ("results.forEach((r,i)=>text({i,result:r}));", "field"),
+]
+
+
+@pytest.mark.parametrize("extractor", _EXTRACTORS)
+@pytest.mark.parametrize(("renderer", "shape"), _RENDERERS)
+def test_extended_codex_fulfilled_record_keeps_its_exit_code(extractor, renderer, shape):
+    records = _failed_exit_records(shape, 7)
+    calls = extractor(_trajectory(_ALL_SETTLED_SOURCE + renderer, _record_observation(records)))
+
+    assert [call["is_error"] for call in calls] == [True, False]
+    assert calls[0]["observation"].endswith("\nexit_code=7")
+    assert "exit_code=" not in calls[1]["observation"]
+
+
+@pytest.mark.parametrize("extractor", _EXTRACTORS)
+def test_extended_codex_inline_result_keeps_its_exit_code(extractor):
+    source = 'text(await tools.exec_command({cmd:"false"}));text(await tools.exec_command({cmd:"pwd"}));'
+    records = [{"exit_code": 3, "output": "boom\n"}, {"exit_code": 0, "output": "/workspace\n"}]
+    trajectory = _trajectory(source, _record_observation(records))
+
+    assert [call["is_error"] for call in extractor(trajectory)] == [True, False]
+    assert _error_recovery(trajectory, extractor)["first_attempt_clean"] is False
+
+
+@pytest.mark.parametrize("extractor", _EXTRACTORS)
+def test_extended_codex_fulfilled_record_without_exit_code_stays_unknown(extractor):
+    records = [
+        {"i": 0, "status": "fulfilled", "value": {"session_id": 4, "output": "running\n"}},
+        {"i": 1, "status": "fulfilled", "value": "done"},
+    ]
+    source = _ALL_SETTLED_SOURCE + "results.forEach((r,i)=>text({i,...r}));"
+    calls = extractor(_trajectory(source, _record_observation(records)))
+
+    assert [call["observation"] for call in calls] == _expected_records(records)
+    assert all("is_error" not in call for call in calls)
+
+
+@pytest.mark.parametrize("extractor", _EXTRACTORS)
+@pytest.mark.parametrize("reason", [{"error": "boom"}, {}, "boom"])
+def test_extended_codex_rejected_record_scores_as_a_failed_command(extractor, reason):
+    records = [{"status": "rejected", "reason": reason}, {"status": "fulfilled", "value": {"exit_code": 0}}]
+    source = _ALL_SETTLED_SOURCE + "results.forEach(text);"
+    trajectory = _trajectory(source, _record_observation(records))
+    result = _error_recovery(trajectory, extractor)
+
+    assert result["first_attempt_clean"] is False
+
+
+@pytest.mark.parametrize("extractor", _EXTRACTORS)
+def test_extended_codex_fulfilled_nonzero_exit_scores_as_a_failed_command(extractor):
+    records = _failed_exit_records("raw", 7)
+    trajectory = _trajectory(_ALL_SETTLED_SOURCE + "results.forEach(text);", _record_observation(records))
+    result = _error_recovery(trajectory, extractor)
+
+    assert result["first_attempt_clean"] is False
+    assert result["score"] < 1.0
+
+
+@pytest.mark.parametrize("extractor", _EXTRACTORS)
+def test_extended_codex_clean_records_still_score_clean(extractor):
+    records = _failed_exit_records("raw", 0)
+    trajectory = _trajectory(_ALL_SETTLED_SOURCE + "results.forEach(text);", _record_observation(records))
+
+    assert _error_recovery(trajectory, extractor)["first_attempt_clean"] is True
+
+
+@pytest.mark.parametrize("extractor", _EXTRACTORS)
+def test_extended_codex_failed_skill_read_gets_no_activation_credit(extractor):
+    source = (
+        'const results=await Promise.allSettled([tools.exec_command({cmd:"cat /skills/example/SKILL.md"})]);'
+        "results.forEach(text);"
+    )
+    record = {"status": "fulfilled", "value": {"exit_code": 1, "output": "cat: No such file\n"}}
+    calls = extractor(_trajectory(source, _record_observation([record])))
+    result = _scorer(extractor, "check_activation")(calls, "example")
+
+    assert calls[0]["is_error"] is True
+    assert result["score"] == 0.0
+
+
+@pytest.mark.parametrize("extractor", _EXTRACTORS)
+@pytest.mark.parametrize(
+    "records",
+    [
+        '{"i":1,"i":0,"status":"fulfilled","value":{}}\n{"i":1,"status":"fulfilled","value":{}}',
+        '{"i":0,"status":"rejected","status":"fulfilled","value":{}}\n{"i":1,"status":"fulfilled","value":{}}',
+        '{"i":0,"status":"fulfilled","value":{},"value":{"exit_code":0}}\n{"i":1,"status":"fulfilled","value":{}}',
+        '{"i":0,"status":"fulfilled","value":{"exit_code":1,"exit_code":0}}\n{"i":1,"status":"fulfilled","value":{}}',
+    ],
+    ids=["index", "status", "value", "nested"],
+)
+def test_extended_codex_duplicate_record_keys_stay_unsupported(extractor, records):
+    source = _ALL_SETTLED_SOURCE + "results.forEach((r,i)=>text({i,...r}));"
+    calls = extractor(_trajectory(source, "Script completed\nWall time 0.1 seconds\nOutput:\n\n" + records))
+
+    assert len(calls) == 1
+    assert calls[0]["normalization_status"] == "unsupported_native_codex_exec_wrapper"
+
+
+@pytest.mark.parametrize("extractor", _EXTRACTORS)
+@pytest.mark.parametrize(
+    ("command", "output", "clean"),
+    [
+        ("grep foo file.txt", "", True),
+        ("grep foo file.txt", "grep: file.txt: Permission denied\n", False),
+        ("false", "", False),
+    ],
+    ids=["quiet-probe-no-match", "probe-with-diagnostic", "failed-command"],
+)
+@pytest.mark.parametrize("settled", [True, False], ids=["allSettled", "inline"])
+def test_extended_codex_exit_one_record_keeps_the_quiet_probe_exemption(extractor, command, output, clean, settled):
+    # A second call keeps the inline form on the record path; a lone inline call owns the whole output.
+    records = [{"exit_code": 1, "output": output}, {"exit_code": 0, "output": "/workspace\n"}]
+    calls = f'tools.exec_command({{cmd:"{command}"}}),tools.exec_command({{cmd:"pwd"}})'
+    if settled:
+        source = f"const results=await Promise.allSettled([{calls}]);results.forEach(text);"
+        records = [{"status": "fulfilled", "value": record} for record in records]
+    else:
+        source = "".join(f"text(await {call});" for call in calls.split(","))
+    result = _error_recovery(_trajectory(source, _record_observation(records)), extractor)
+
+    assert result["first_attempt_clean"] is clean
+
+
+@pytest.mark.parametrize("extractor", _EXTRACTORS)
+def test_extended_codex_lone_inline_call_keeps_its_exit_code(extractor):
+    source = 'text(await tools.exec_command({cmd:"exit 7"}));'
+    trajectory = _trajectory(source, _record_observation([{"exit_code": 7, "output": "boom\n"}]))
+    calls = extractor(trajectory)
+
+    assert [call["action"] for call in calls] == ["exec_command"]
+    assert calls[0]["is_error"] is True
+    assert _error_recovery(trajectory, extractor)["first_attempt_clean"] is False
+
+
+@pytest.mark.parametrize("extractor", _EXTRACTORS)
+def test_extended_codex_lone_inline_call_without_a_record_keeps_the_whole_output(extractor):
+    source = 'text(await tools.exec_command({cmd:"pwd"}));'
+    calls = extractor(_trajectory(source, "run.py completed"))
+
+    assert calls[0]["observation"] == "run.py completed"
+    assert "is_error" not in calls[0]
+
+
+@pytest.mark.parametrize("checker", [check_error_recovery, _TEMPLATE_MODULE.check_error_recovery])
+@pytest.mark.parametrize(
+    ("observation", "clean"),
+    [
+        ('{"exit_code":1,"output":""}\nexit_code=1', True),
+        ('{"exit_code":1,"output":""}\nexit_code=1\ngrep: f: Permission denied', False),
+        ("[" * 100_000 + "\nexit_code=1", False),
+    ],
+    ids=["record", "text-after-record", "deeply-nested-is-not-a-record"],
+)
+def test_quiet_probe_reads_only_a_whole_record(checker, observation, clean):
+    call = {"action": "bash", "action_input": {"command": "grep foo f"}, "observation": observation}
+
+    assert checker([call])["first_attempt_clean"] is clean

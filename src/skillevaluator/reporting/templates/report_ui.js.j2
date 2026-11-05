@@ -242,6 +242,19 @@ function reportRevealTier(target) {
     if (agent) activateReportTabs('.t3-agent-tab-btn', '.t3-agent-panel', agent.id);
 }
 document.addEventListener('DOMContentLoaded', function() {
+    document.querySelectorAll('[data-report-tier]').forEach(link => link.addEventListener('click', function(event) {
+        event.preventDefault();
+        activateReportTier(link.dataset.reportTier);
+    }));
+    document.querySelectorAll('[data-report-tier-tile]').forEach(tile => {
+        tile.addEventListener('click', function() { activateReportTier(tile.dataset.targetTab); });
+        tile.addEventListener('keydown', function(event) {
+            if ((event.key === 'Enter' || event.key === ' ') && event.target === tile) {
+                event.preventDefault();
+                tile.click();
+            }
+        });
+    });
     document.querySelectorAll('.t3-subtabs,.t3-agent-tabs').forEach(list => list.addEventListener('keydown', reportTabKeyboard));
     const initial = document.querySelector('.tab-content.active') || document.querySelector('.tab-content');
     if (initial) activateReportTier(initial.id.slice(4), {scroll:false, focus:false});
@@ -282,7 +295,7 @@ document.addEventListener('DOMContentLoaded', function() {
     // Native fragment links also reveal their parent tier, with no name-based CSS selectors.
     document.addEventListener('click', function(event) {
         const link = event.target.closest('a[href^="#"]');
-        if (!link || link.hasAttribute('onclick') || link.dataset.reportSection) return;
+        if (!link || link.hasAttribute('onclick') || link.dataset.reportSection || link.dataset.reportTier) return;
         let id;
         try { id = decodeURIComponent(link.getAttribute('href').slice(1)); } catch (err) { return; }
         const target = document.getElementById(id);

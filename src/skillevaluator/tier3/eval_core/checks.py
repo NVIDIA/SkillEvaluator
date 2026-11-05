@@ -1904,25 +1904,25 @@ def _network_tokens_exfiltrate(tokens: list[str], _depth: int) -> bool:
                 continue
             if runs_elsewhere:
                 return True
-            if client in seen_clients:
+            # Linux finds a command by its exact name, so a later HTTP or Https
+            # word, as in the here-document prose "Use HTTP POST to create an
+            # item.", does not start HTTPie. Its method words are not read as
+            # an upload; its body items, stdin and --raw still are. It covers a
+            # later capitalized word, which sees a suffix of the same
+            # arguments, but not a later lowercase http word.
+            capitalized = client in ("http", "https") and _spelled_with_capitals(command[sub_idx])
+            seen_key = f"{client}:capitalized" if capitalized else client
+            if client in seen_clients or seen_key in seen_clients:
                 continue
             client_args = command[sub_idx + 1 :]
             if not keeps_stdin:
                 client_args = [token for token in client_args if token not in _NETWORK_INPUT_REDIRECTS]
-            # Linux finds a command by its exact name, so a later HTTP or Https
-            # word, as in the here-document prose "Use HTTP POST to create an
-            # item.", does not start HTTPie. Its method words are not read as
-            # an upload; its body items, stdin and --raw still are, and it does
-            # not cover a later lowercase http word.
-            capitalized = client in ("http", "https") and _spelled_with_capitals(command[sub_idx])
             if capitalized:
                 client_args = [
                     token for token in client_args if token.strip("\"'").casefold() not in _UNSAFE_HTTP_METHODS
                 ]
-            if not capitalized and (
-                client not in ("http", "https") or "--ignore-stdin" not in (a.strip("\"'") for a in client_args)
-            ):
-                seen_clients.add(client)
+            if client not in ("http", "https") or "--ignore-stdin" not in (a.strip("\"'") for a in client_args):
+                seen_clients.add(seen_key)
             if _network_client_uploads(client, client_args, command_stdin and keeps_stdin):
                 return True
 

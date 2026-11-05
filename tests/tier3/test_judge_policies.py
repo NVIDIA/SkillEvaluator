@@ -115,17 +115,35 @@ def goal_judge(verifier):
 # ---------------------------------------------------------------------------
 
 
-def test_replacement_tries_only_the_primary_and_the_explicit_list(verifier, monkeypatch):
-    monkeypatch.setenv("LLM_JUDGE_FALLBACK_POLICY", "replace")
-    monkeypatch.setenv("LLM_JUDGE_FALLBACK_MODELS", "family/backup,family/backup")
+@pytest.mark.parametrize(
+    ("policy", "answered_by"),
+    [("replace", "family/backup"), ("append", "us.anthropic.claude-opus-4-8")],
+)
+def test_refused_judge_is_answered_from_the_explicit_list_only_under_replace(
+    verifier, monkeypatch, policy, answered_by
+):
+    import boto3
 
-    assert verifier._fallback_models(PRIMARY) == [PRIMARY, "family/backup"]
+    monkeypatch.setenv("SKILL_EVAL_LLM_PROVIDER", "bedrock")
+    monkeypatch.setenv("LLM_JUDGE_FALLBACK_POLICY", policy)
+    monkeypatch.setenv("LLM_JUDGE_FALLBACK_MODELS", "family/backup")
+    client = MagicMock()
+    client.converse.side_effect = [
+        {"stopReason": "content_filtered", "output": {"message": {"content": []}}},
+        {"stopReason": "end_turn", "output": {"message": {"content": [{"text": "judged"}]}}},
+    ]
+    monkeypatch.setattr(boto3, "client", lambda *_args, **_kwargs: client)
 
+    content, error, provenance = verifier._call_public_llm_with_provenance(
+        "prompt", model="us.anthropic.claude-opus-5-5"
+    )
 
-def test_replacement_with_an_empty_list_keeps_only_the_primary(verifier, monkeypatch):
-    monkeypatch.setenv("LLM_JUDGE_FALLBACK_POLICY", "replace")
-
-    assert verifier._fallback_models(PRIMARY) == [PRIMARY]
+    assert (content, error) == ("judged", None)
+    assert provenance["model"] == answered_by
+    assert [call.kwargs["modelId"] for call in client.converse.call_args_list] == [
+        "us.anthropic.claude-opus-5-5",
+        answered_by,
+    ]
 
 
 def _anthropic_request(verifier, monkeypatch):

@@ -55,7 +55,12 @@ from skillevaluator.tier3.harbor.adapter import (
     stage_native_harbor_tasks,
 )
 from skillevaluator.tier3.harbor.local_environment import SkillEvaluatorLocalEnvironment
-from skillevaluator.tier3.harbor.runner import _model_for_agent, _resolve_agent_runtime_plan, _resolve_runtime_env
+from skillevaluator.tier3.harbor.runner import (
+    _CLAUDE_CODE_VERSION,
+    _model_for_agent,
+    _resolve_agent_runtime_plan,
+    _resolve_runtime_env,
+)
 
 _SWITCH = "CLAUDE_CODE_DISABLE_REFUSAL_FALLBACK"
 _FAKE_CREDENTIAL = "test-key"
@@ -198,6 +203,18 @@ def test_claude_code_refusal_fallback_is_off_for_every_provider_route(
     assert _staged_environment_env(task)[_SWITCH] == "1"
     assert _SWITCH not in plan.staged_env
     assert _SWITCH not in plan.subprocess_env
+
+
+def test_docs_scope_the_switch_to_the_pinned_claude_code_release() -> None:
+    # The variable was checked with the pinned CLI only, and local mode runs the
+    # host's CLI. A pin bump must re-check the variable and update the paragraph.
+    page = Path(__file__).resolve().parents[1] / "docs" / "agents-and-sandboxes.mdx"
+    [paragraph] = [
+        " ".join(block.split()) for block in page.read_text(encoding="utf-8").split("\n\n") if f"{_SWITCH}=1" in block
+    ]
+
+    assert f"With the pinned Claude Code {_CLAUDE_CODE_VERSION}," in paragraph
+    assert "[Local mode](#local-mode) runs the Claude Code already on your machine" in paragraph
 
 
 def test_refusal_fallback_switch_is_not_redacted_as_a_secret() -> None:

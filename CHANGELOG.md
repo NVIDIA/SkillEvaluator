@@ -427,6 +427,9 @@ All notable changes to SkillEvaluator are documented in this file.
   nor a native task's `[environment.env]` can turn the fallback back on. The
   refused attempt is not scored, like any other failed trial, and counts
   against the arm's scored-attempt coverage. Other agents ignore the variable.
+  The variable was checked with Claude Code 2.1.292, the release Harbor
+  installs; local mode keeps the fallback off only if the host's Claude Code
+  honors it.
 
 - Tier 1 security scans no longer fail a skill for an exact read-only
   `/etc/passwd` bind mount such as `docker run -v /etc/passwd:/etc/passwd:ro`.

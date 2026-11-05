@@ -34,6 +34,7 @@ from skillevaluator.publication_identity import (
 from skillevaluator.reporting import CLIReporter, HTMLReporter, JSONReporter, MarkdownReporter, SARIFReporter
 from skillevaluator.reporting.html import is_tier2_validator_name
 from skillevaluator.reporting.naming import DEFAULT_REPORT_BASENAME
+from skillevaluator.reporting.presentation import FinalRenderContext, build_final_render_context
 from skillevaluator.utils.rich_markup import escape_markup
 from skillevaluator.validators.base import continue_on_failure_scope
 from skillevaluator.validators.code_risk import CodeRiskValidator
@@ -511,6 +512,9 @@ def emit_reports(
     announce_paths: bool = True,
     sarif_scan_root: Path | None = None,
     sarif_repository_root: Path | None = None,
+    requested_tiers: tuple[int, ...] | None = None,
+    displayed_tiers: tuple[int, ...] | None = None,
+    presentation_context: FinalRenderContext | None = None,
 ) -> bool:
     """Render reports and return whether every result passed.
 
@@ -525,9 +529,15 @@ def emit_reports(
     """
     if policy is not None:
         apply_policy(results, policy)
+    context = presentation_context or build_final_render_context(
+        results,
+        requested_tiers=requested_tiers,
+        displayed_tiers=displayed_tiers,
+        expected_skill_name=expected_skill_name,
+    )
     if "cli" in report_formats:
         # The CLI report previews failed Tier 3 source checks only when a file written below lists them all.
-        CLIReporter(console=console, report_formats=report_formats).print_all(results)
+        CLIReporter(console=console, report_formats=report_formats, presentation_context=context).print_all(results)
 
     html_tabs = _derive_html_tabs(results)
     for fmt in report_formats:
@@ -539,6 +549,9 @@ def emit_reports(
                 target_path=target_path,
                 content_label=content_label,
                 tabs=html_tabs,
+                presentation_context=context,
+                requested_tiers=requested_tiers,
+                displayed_tiers=displayed_tiers,
                 expected_skill_name=expected_skill_name,
             )
         elif fmt == "sarif":

@@ -214,8 +214,8 @@ class TestCLIReporter:
         output = CLIReporter().render_all([result])
 
         assert "SKIP" in output
-        assert "Required validations passed" in output
-        assert "live evaluation skipped" in output
+        assert "Passed required checks" in output
+        assert "1 skipped" in output
 
     @pytest.mark.parametrize(
         ("baseline", "lift", "expected_baseline", "expected_lift"),
@@ -380,7 +380,7 @@ class TestCLIReporter:
 
         assert result.passed is True
         assert "same-name similarity match" in output
-        assert "All validations passed" in output
+        assert "Passed required checks" in output
 
     def test_render_finding_shows_both_related_paths(self) -> None:
         result = _similarity_result()
@@ -1716,7 +1716,7 @@ class TestTier3HarborCanonicalPayload:
         cli_output = CLIReporter().render_all([result])
         assert "SKIP" in cli_output
         assert "Validation failed" not in cli_output
-        assert "Required validations passed" in cli_output
+        assert "Passed required checks" in cli_output
 
     def test_legacy_summary_without_execution_status_is_unknown(self, tmp_path: Path) -> None:
         from skillevaluator.tier3.harbor.report_data import load_agent_data

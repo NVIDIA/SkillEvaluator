@@ -47,7 +47,8 @@ from skillevaluator.reporting.harbor_viewer import (
     normalize_harbor_viewer_for_display,
     safe_url,
 )
-from skillevaluator.reporting.run_status import Status, resolve_run_status, result_status
+from skillevaluator.reporting.presentation import FinalRenderContext, build_final_render_context, trial_coverage
+from skillevaluator.reporting.run_status import Status, result_status
 from skillevaluator.utils.rich_markup import escape_markup
 
 if TYPE_CHECKING:
@@ -97,7 +98,13 @@ class CLIReporter(ReporterBase):
     Supports both direct printing and string capture for testing.
     """
 
-    def __init__(self, console: Console | None = None, *, report_formats: Iterable[str] = ()) -> None:
+    def __init__(
+        self,
+        console: Console | None = None,
+        *,
+        report_formats: Iterable[str] = (),
+        presentation_context: FinalRenderContext | None = None,
+    ) -> None:
         """Initialize CLI reporter.
 
         Args:
@@ -108,6 +115,7 @@ class CLIReporter(ReporterBase):
         """
         self._console = console
         self._report_formats = tuple(report_formats)
+        self._presentation_context = presentation_context
 
     @property
     def console(self) -> Console:
@@ -159,8 +167,9 @@ class CLIReporter(ReporterBase):
 
     def _render_all_results(self, results: list[ValidationResult], console: Console) -> None:
         """Render all results with summary table and failure details."""
+        context = self._presentation_context or build_final_render_context(results)
         # Print summary table
-        self._print_summary_table(results, console)
+        self._print_summary_table(results, console, presentation=context)
         console.print()
 
         # Print detailed results for failures
@@ -188,22 +197,17 @@ class CLIReporter(ReporterBase):
             for result in non_blocking:
                 self.render_result(result, console)
 
-        # Print overall status
-        advisory_skips = [result for result in results if self._is_advisory_agent_eval_skip(result)]
-        run_status = resolve_run_status(results)
-        required_passed = run_status.headline == Status.PASSED
-        if run_status.headline == Status.INCOMPLETE:
-            console.print("\n[bold yellow][INCOMPLETE] Validation evidence is incomplete[/bold yellow]\n")
-        elif required_passed:
-            if advisory_skips:
-                console.print(
-                    "\n[bold green][PASS] Required validations passed[/bold green] "
-                    f"[yellow]({len(advisory_skips)} live evaluation skipped)[/yellow]\n"
-                )
-            else:
-                console.print("\n[bold green][PASS] All validations passed[/bold green]\n")
-        else:
-            console.print("\n[bold red][FAIL] Validation failed[/bold red]\n")
+        color = {Status.PASSED: "green", Status.FAILED: "red"}.get(context.command_status, "yellow")
+        console.print(f"\n[bold {color}][{context.command_status.verdict}] {context.command_label}[/bold {color}]")
+        for number, tier in context.tiers.items():
+            if not tier.displayed:
+                continue
+            console.print(f"Tier {number}: {tier.summary}")
+        if context.tiers[3].status != Status.NOT_RUN:
+            console.print(context.coverage.text)
+            for line in context.coverage.details:
+                console.print(line)
+        console.print(f"Publication eligibility: {context.publication_label}\n")
 
     def render_result(self, result: ValidationResult, console: Console) -> None:
         """Render a single validation result."""
@@ -388,6 +392,7 @@ class CLIReporter(ReporterBase):
                     f"    [dim]Harbor analysis:[/dim] [cyan]{escape_markup(harbor_viewer['analysis_url'])}[/cyan]",
                     soft_wrap=True,
                 )
+        console.print(f"  {trial_coverage(agent_eval).text}")
         console.print()
 
         evaluators = agent_eval.get("evaluators", {})
@@ -602,7 +607,9 @@ class CLIReporter(ReporterBase):
                 console.print(f"       [dim]{escape_markup(overflow_note)}[/dim]")
         console.print()
 
-    def _print_summary_table(self, results: list[ValidationResult], console: Console) -> None:
+    def _print_summary_table(
+        self, results: list[ValidationResult], console: Console, *, presentation: FinalRenderContext | None = None
+    ) -> None:
         """Print summary table for all validators."""
         table = Table(
             title="SkillEvaluator Validation Results",
@@ -616,22 +623,21 @@ class CLIReporter(ReporterBase):
         table.add_column("Details")
 
         for result in results:
-            advisory_skip = result_status(result) == Status.SKIPPED
-            status = (
-                "[yellow]SKIP[/yellow]"
-                if advisory_skip
-                else "[bold yellow]INCOMPLETE[/bold yellow]"
-                if result_status(result) == Status.INCOMPLETE
-                else "[green]PASS[/green]"
-                if result.passed
-                else "[red]FAIL[/red]"
-            )
+            outcome = presentation.result_statuses[id(result)] if presentation else result_status(result).value
+            advisory_skip = outcome == "skipped"
+            status = {
+                "skipped": "[yellow]SKIP[/yellow]",
+                "not_applicable": "[dim]N/A[/dim]",
+                "incomplete": "[bold yellow]INCOMPLETE[/bold yellow]",
+                "passed": "[green]PASS[/green]",
+                "pass": "[green]PASS[/green]",
+            }.get(outcome, "[red]FAIL[/red]")
             s = result.summary
             static_test_evidence = self._static_test_evidence_message(result)
 
             if advisory_skip:
                 details = _rich_skip_reason(result)
-            elif result_status(result) == Status.INCOMPLETE:
+            elif outcome == "incomplete":
                 scanners = escape_markup(", ".join(result.incomplete_scans))
                 details = f"[bold yellow]{scanners} did not complete[/bold yellow]"
                 counts = []

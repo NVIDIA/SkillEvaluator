@@ -63,6 +63,35 @@ skillevaluator validate ./my-skill -r json,html,markdown,sarif -o reports
 
 For gating a pipeline on the JSON output, see [Gate Your CI](ci-integration.mdx).
 
+## Reading the final status
+
+The compact terminal summary, full terminal report, and HTML header describe the
+same command outcome: **Passed required checks**, **Changes required**, or
+**Incomplete**. A confirmed failure takes precedence over missing evidence.
+Advisory tiers retain their own findings and execution status without changing
+the required gate or process exit code.
+
+**Publication eligibility** is a separate, stricter assessment of the recorded
+policy, provenance, and evidence coverage. A passed required gate does not imply
+publication eligibility. Standalone Tier 3 reports show **Not assessed (Tier 3
+only)**. **Best agent score** describes one evaluated agent, rather than approval
+of the whole validation run.
+
+Each tier counts its own passed, failed, incomplete, skipped, and N/A results.
+Skipped and explicitly inapplicable checks are excluded from executed-check
+denominators. A tier that produced no results is **Not run**; presentation of an
+unrequested tier does not create evidence that it ran.
+
+Tier 3 summaries prefer recorded per-condition counters: for example,
+**188 scored trials: 101 with skill, 87 baseline**. Condition details retain
+expected counts and execution status, so partial execution and early stopping
+remain distinguishable. Missing or malformed counters are **unavailable**, and
+explicitly skipped arms remain **skipped**. Legacy reports with trial rows but
+no counters show **retained rows**, which are observations rather than complete
+scored totals. Preview limits and physical retry rows do not replace recorded
+attempt counts. These are display projections; canonical JSON and evaluation
+payloads are unchanged.
+
 ## File naming
 
 Report filenames follow two patterns, both under the output directory:

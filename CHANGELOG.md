@@ -6,6 +6,11 @@ All notable changes to SkillEvaluator are documented in this file.
 
 ### Changed
 
+- Align final terminal and HTML command outcomes: Passed required checks,
+  Changes required, or Incomplete. Keep publication eligibility and Best agent
+  score separate. Tier counts exclude explicit N/A checks from execution;
+  Tier 3 trial summaries use recorded condition counters before retained rows.
+
 - Name the shared OSS validation policy `default` for both public and private
   repositories. Keep `--profile external`, `--external`, and the legacy
   environment value as compatibility aliases without changing validation rules.

@@ -393,6 +393,13 @@ All notable changes to SkillEvaluator are documented in this file.
   timeout, and each retry warning ends with the failed command's output.
   Platform probe and transport errors are not retried, and local mode still
   checks the installed CLI once.
+- Tier 3 `--stop-on-pass` (or `harbor.stop_on_pass: true`) no longer ignores
+  `--n-concurrent`. Every case and attempt previously ran one at a time, so
+  large evaluations took several times longer than the configured concurrency
+  allowed. Up to `n_concurrent` cases now run at once per agent. A case's
+  attempts still run one after another and stop after its first pass, the
+  with-skill and without-skill arms still run one after the other, and the
+  merged arm results keep dataset order.
 - Tier 2 caps every intra-skill embedding chunk at 3,000 characters, preserves
   meaningful short tails and actual Python docstring source ranges, and avoids
   counting pieces of one original chunk as duplicates of each other. Oversized

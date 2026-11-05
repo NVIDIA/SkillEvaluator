@@ -161,6 +161,43 @@ def gitlab_api(origin: str, method: str, endpoint: str, payload=None, *, missing
         raise git.SetupError("GitLab API request failed; check host, authentication and connectivity.") from exc
 
 
+def gitlab_admission_prerequisite(origin, *, online):
+    requirement = {"server_version": None, "read_token_required": None, "verified": False}
+    if not online:
+        return requirement
+    try:
+        result = gitlab_api(origin, "GET", "version")
+    except git.SetupError:
+        return requirement
+    version = result.get("version") if isinstance(result, dict) else None
+    if not isinstance(version, str):
+        return requirement
+    match = re.match(r"^(\d{1,3})\.(\d{1,3})(?:\.|-|$)", version)
+    if match:
+        major, minor = map(int, match.groups())
+        requirement.update(
+            server_version=f"{major}.{minor}", read_token_required=(major, minor) < (18, 4), verified=True
+        )
+    return requirement
+
+
+def _print_gitlab_admission_prerequisite(wizard, requirement):
+    if not requirement["verified"]:
+        wizard.console.print("GitLab server version unverified; admission readiness is unverified.")
+        wizard.console.print(
+            "GitLab before 18.4 needs SKILLEVALUATOR_GITLAB_READ_TOKEN (project Reporter/read_api); configure it until the server version is verified."
+        )
+    elif requirement["read_token_required"]:
+        wizard.console.print(
+            f"GitLab {requirement['server_version']} requires SKILLEVALUATOR_GITLAB_READ_TOKEN (project Reporter/read_api) for current-MR admission."
+        )
+    else:
+        wizard.console.print(f"GitLab {requirement['server_version']} supports CI_JOB_TOKEN for current-MR admission.")
+    wizard.console.print(
+        "Admission credential validity is not verified by local setup/status; inspect the actual CI run."
+    )
+
+
 class Client:
     def __init__(self, wizard, platform, origin, name):
         self.wizard, self.platform, self.origin, self.name = wizard, platform, origin, name
@@ -474,6 +511,10 @@ def initialize(
             "GitLab: protect the default branch and add a scoped protected SKILLEVALUATOR_GITLAB_TOKEN for trusted feedback. Enable job-token pipeline triggers for this project."
         )
     mode = mode or click.prompt("Next", default="preview", type=click.Choice(["preview", "save", "pr"]))
+    admission = None
+    if platform == "gitlab":
+        admission = gitlab_admission_prerequisite(origin, online=mode == "pr")
+        _print_gitlab_admission_prerequisite(wizard, admission)
     plan = {
         "repository": name,
         "platform": platform,
@@ -485,6 +526,8 @@ def initialize(
         "changed_files": changed,
         "requested_action": mode,
     }
+    if admission is not None:
+        plan["gitlab_admission"] = admission
     if mode == "preview":
         plan["action"] = "preview"
         wizard.console.print(
@@ -560,6 +603,8 @@ def inspect(wizard, repo, platform="auto", tiers=None):
     wizard.console.print(f"{platform.title()} {name} | default branch: {branch}", markup=False)
     wizard.console.print("All-tier checks: " + ("configured" if scan else "awaiting setup PR/MR merge"))
     wizard.console.print("Trusted feedback: " + ("configured" if feedback else "missing"))
+    if platform == "gitlab":
+        _print_gitlab_admission_prerequisite(wizard, gitlab_admission_prerequisite(origin, online=True))
     if scan and feedback and platform == "github":
         inputs = yaml.safe_load(feedback).get("jobs", {}).get("feedback", {}).get("with", {})
         blob = wizard.blob_id(scan)

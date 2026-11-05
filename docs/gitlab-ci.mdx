@@ -42,6 +42,22 @@ Local agent CLIs are pinned and bootstrapped before selected-mode readiness
 checks. The current same-project MR head is checked before model execution;
 fork MRs do not receive provider-backed jobs.
 
+GitLab 17.0–18.3 requires a separate project access token with **Reporter** role
+and **read_api** scope for current-MR admission. Store it as masked
+`SKILLEVALUATOR_GITLAB_READ_TOKEN`, scoped only to the configured execution
+environment (`skillevaluator` by default). Protect that environment to approved CI maintainers. For ordinary
+unprotected MR branches, the variable must be available on those refs; enabling
+GitLab's protected-variable restriction would withhold it. The admission helper
+uses this read credential once, refuses HTTP redirects, and the job removes it
+before runtime installation, doctor or provider execution.
+
+GitLab 18.4 and later support the default short-lived `CI_JOB_TOKEN` path for
+this MR endpoint; the separate read token remains optional. `ci init --mode pr`
+and `ci status` check the server version through the local authenticated API.
+Offline preview/save keep the version unverified. These local commands report
+the prerequisite and do not claim to validate a stored CI secret's privileges.
+The setup still consists of two consumer files.
+
 Protect the default branch and create a project access token with `api` scope
 and the Maintainer role. The publisher reads source-pipeline variables to verify
 provenance as well as reading artifacts and updating MR notes; GitLab 17.8
@@ -56,6 +72,8 @@ API host and project, so forwarded MR variables cannot replace its privileged
 bootstrap. It fetches only pinned evaluator tools and validates source
 pipeline, MR and current commit before updating
 one comment. Permit this same-project downstream pipeline and its protected execution environment.
+The feedback bridge is advisory; the aggregate remains the required evaluation
+gate when the first setup MR has not yet installed feedback on the default branch.
 
 Install both configuration files on the default branch before the first demo
 MR. GitLab must permit the downstream pipeline and the protected feedback job;

@@ -7,9 +7,15 @@ from __future__ import annotations
 
 import json
 import os
+import urllib.error
 import urllib.parse
 import urllib.request
 from collections.abc import Mapping
+
+
+class _NoRedirect(urllib.request.HTTPRedirectHandler):
+    def redirect_request(self, *_args, **_kwargs):
+        return None
 
 
 def eligible(env: Mapping[str, str], current: dict | None) -> bool:
@@ -38,22 +44,46 @@ def main() -> int:
     if env.get("CI_PIPELINE_SOURCE") == "merge_request_event":
         base = env.get("CI_API_V4_URL", "")
         parsed = urllib.parse.urlsplit(base)
-        if parsed.scheme != "https" or not parsed.hostname or parsed.username or parsed.password:
+        if (
+            parsed.scheme != "https"
+            or not parsed.hostname
+            or parsed.username
+            or parsed.password
+            or parsed.query
+            or parsed.fragment
+            or not parsed.path.rstrip("/").endswith("/api/v4")
+        ):
             print("GitLab admission requires an HTTPS API endpoint.")
             return 2
         project = env.get("CI_PROJECT_ID", "")
         iid = env.get("CI_MERGE_REQUEST_IID", "")
         if not project.isdigit() or not iid.isdigit():
             return 2
-        request = urllib.request.Request(
-            f"{base}/projects/{project}/merge_requests/{iid}", headers={"JOB-TOKEN": env.get("CI_JOB_TOKEN", "")}
-        )
-        # The API call reads current MR state using only the short-lived job token.
+        # GitLab added job-token authentication for this endpoint in 18.4.
+        # Older servers use a separate project Reporter/read_api token, never
+        # the publisher credential or the local onboarding user's PAT.
+        read_token = env.get("SKILLEVALUATOR_GITLAB_READ_TOKEN", "").strip()
+        headers = {"PRIVATE-TOKEN": read_token} if read_token else {"JOB-TOKEN": env.get("CI_JOB_TOKEN", "")}
+        request = urllib.request.Request(f"{base.rstrip('/')}/projects/{project}/merge_requests/{iid}", headers=headers)
         try:
-            with urllib.request.urlopen(request, timeout=30) as response:
-                current = json.loads(response.read(1024 * 1024))
-        except (OSError, ValueError):
-            print("Current merge-request head could not be verified.")
+            with urllib.request.build_opener(_NoRedirect()).open(request, timeout=30) as response:
+                payload = response.read(1024 * 1024 + 1)
+                if len(payload) > 1024 * 1024:
+                    raise ValueError("Oversized admission response")
+                current = json.loads(payload)
+                if not isinstance(current, dict):
+                    raise ValueError("Invalid admission response")
+        except urllib.error.HTTPError as error:
+            print(f"Current merge-request head could not be verified (HTTP {error.code}).")
+            print(
+                "GitLab before 18.4 requires a separate SKILLEVALUATOR_GITLAB_READ_TOKEN with project Reporter/read_api access."
+            )
+            return 2
+        except urllib.error.URLError as error:
+            print(f"Current merge-request head could not be verified (transport {type(error.reason).__name__}).")
+            return 2
+        except (OSError, ValueError) as error:
+            print(f"Current merge-request head could not be verified ({type(error).__name__}).")
             return 2
     if not eligible(env, current):
         print("Provider jobs require the current same-project MR head or a protected default branch.")

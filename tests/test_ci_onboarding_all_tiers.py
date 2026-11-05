@@ -433,3 +433,72 @@ def test_gitlab_variable_scalars_are_explicit_strings_for_gitlab_yaml_parser(rep
     assert parsed["skill-evaluation-native"]["timeout"] == "300 minutes"
     feedback = yaml.safe_load((repository / ".gitlab/skill-feedback.yml").read_text())
     assert isinstance(feedback["include"][0]["inputs"]["tools-ref"], str)
+
+
+@pytest.mark.parametrize(
+    "version,required",
+    [
+        ("17.8.7-ee", True),
+        ("18.3.0", True),
+        ("18.4.0-ee", False),
+        ("19.0.1", False),
+        ("unknown", None),
+        (None, None),
+        (123, None),
+        (True, None),
+    ],
+)
+def test_gitlab_admission_prerequisite_checks_server_version(monkeypatch, version, required):
+    from skillevaluator import _ci_onboarding_all_tiers as all_tiers
+
+    monkeypatch.setattr(all_tiers, "gitlab_api", lambda *_args, **_kwargs: {"version": version})
+    result = all_tiers.gitlab_admission_prerequisite("https://gitlab.example.test", online=True)
+    assert result["read_token_required"] is required
+    assert result["verified"] is (required is not None)
+
+
+def test_gitlab_offline_admission_prerequisite_does_not_call_api(monkeypatch):
+    from skillevaluator import _ci_onboarding_all_tiers as all_tiers
+
+    monkeypatch.setattr(
+        all_tiers, "gitlab_api", lambda *_args, **_kwargs: pytest.fail("Offline setup must remain offline")
+    )
+    result = all_tiers.gitlab_admission_prerequisite("https://gitlab.example.test", online=False)
+    assert result["verified"] is False and result["read_token_required"] is None
+
+
+@pytest.mark.parametrize(
+    "version,phrase",
+    [
+        ("17.8.7-ee", "requires SKILLEVALUATOR_GITLAB_READ_TOKEN"),
+        ("18.4.0", "supports CI_JOB_TOKEN"),
+        ("unknown", "admission readiness is unverified"),
+    ],
+)
+def test_gitlab_status_reports_admission_version_prerequisite(repository, monkeypatch, version, phrase):
+    from skillevaluator import _ci_onboarding_all_tiers as all_tiers
+
+    subprocess.run(
+        ["git", "-C", str(repository), "remote", "set-url", "origin", "https://gitlab.example.test/group/consumer.git"],
+        check=True,
+    )
+
+    def api(_origin, method, endpoint, payload=None, **_kwargs):
+        assert method == "GET"
+        if endpoint == "version":
+            return {"version": version}
+        if endpoint == "projects/group%2Fconsumer":
+            return {"default_branch": "trunk"}
+        if "/repository/files/" in endpoint:
+            return None
+        if endpoint.endswith("/pipelines?per_page=1"):
+            return []
+        raise AssertionError(endpoint)
+
+    monkeypatch.setattr(all_tiers, "gitlab_api", api)
+    result = CliRunner().invoke(
+        cli, ["ci", "status", "--repo", str(repository), "--platform", "gitlab", "--tiers", "1,2,3"]
+    )
+    assert result.exit_code == 0, result.output
+    assert phrase in result.output
+    assert "credential validity is not verified" in result.output

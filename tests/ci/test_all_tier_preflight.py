@@ -186,3 +186,19 @@ def test_failed_docker_doctor_prevents_native_provider_execution(tmp_path, monke
     assert commands[0][commands[0].index("--env-mode") + 1] == "docker"
     result = json.loads((reports / "tier3/ci-tier.json").read_text())
     assert result["tiers"][0]["status"] == "incomplete"
+
+
+def test_provider_child_excludes_both_gitlab_read_and_feedback_credentials():
+    from ci import run_tiers
+
+    child = run_tiers.child_environment(
+        {
+            "SKILL_EVAL_PROVIDER": "nv_build",
+            "SKILLEVALUATOR_GITLAB_READ_TOKEN": "read-only-test-token",
+            "SKILLEVALUATOR_GITLAB_TOKEN": "feedback-test-token",
+            "CI_JOB_TOKEN": "job-test-token",
+        }
+    )
+    assert not any(
+        key in child for key in ("SKILLEVALUATOR_GITLAB_READ_TOKEN", "SKILLEVALUATOR_GITLAB_TOKEN", "CI_JOB_TOKEN")
+    )

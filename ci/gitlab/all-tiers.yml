@@ -163,6 +163,7 @@ skill-evaluation-native:
         *) echo "Tier $SKILL_EVAL_TIER is not selected"; exit 0 ;;
       esac
       python -I "$SKILL_EVAL_TOOLS_DIR/ci/eligible_gitlab.py"
+      unset SKILLEVALUATOR_GITLAB_READ_TOKEN
       if [ "$SKILL_EVAL_TIER" = 3 ]; then
         if [ "$SKILL_EVAL_ENV_MODE" = docker ] && { ! command -v docker >/dev/null 2>&1 || ! docker compose version >/dev/null 2>&1 || ! docker buildx version >/dev/null 2>&1; }; then
           if [ "$(id -u)" != 0 ] || ! command -v apt-get >/dev/null 2>&1; then
@@ -247,6 +248,7 @@ skill-evaluation-aggregate:
     - if: '$CI_PIPELINE_SOURCE == "web"'
 
 skill-evaluation-request-feedback:
+  allow_failure: true
   stage: test
   needs:
     - job: skill-evaluation-aggregate

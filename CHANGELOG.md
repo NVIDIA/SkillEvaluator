@@ -36,6 +36,8 @@ All notable changes to SkillEvaluator are documented in this file.
   redacted startup diagnostics, and interrupted selections cannot pass on partial
   results. GitLab callers quote variable values, use literal job timeouts
   compatible with GitLab 17.8, and safely select changes in runner-owned checkouts.
+  GitLab before 18.4 uses a separate read-only admission credential; feedback
+  initiation is advisory so first-install reporting does not change the tier gate.
 
 - `skillevaluator tier3 feedback RUN_DIR [--skill PATH]` opens a terminal chat
   about one completed Tier 3 run. Answers are grounded in that run's scores,

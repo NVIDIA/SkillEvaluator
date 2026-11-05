@@ -267,3 +267,14 @@ def test_gitlab_setup_selector_uses_pinned_safe_git_reader():
     assert "from select_changed_skills import _git" in script
     assert "--name-only" in script and '"-z"' in script and "--no-renames" in script
     assert 're.fullmatch(r"[0-9a-f]{40}", value)' in script
+
+
+def test_gitlab_read_token_is_removed_before_provider_bootstrap_and_feedback_is_advisory():
+    config = load("ci/gitlab/all-tiers.yml")
+    script = "\n".join(config["skill-evaluation-native"]["script"])
+    assert (
+        script.index("eligible_gitlab.py")
+        < script.index("unset SKILLEVALUATOR_GITLAB_READ_TOKEN")
+        < script.index("-m pip")
+    )
+    assert config["skill-evaluation-request-feedback"]["allow_failure"] == "true"

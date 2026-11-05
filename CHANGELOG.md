@@ -176,6 +176,19 @@ All notable changes to SkillEvaluator are documented in this file.
   rules, and is not accepted by `validate`, so a baseline-only run cannot pass
   a Tier 3 gate.
 
+- The Tier 3 verifier saves every LLM judge attempt to `judge_attempts.json`
+  next to the trial's `skill_evaluator_reward.json`, rewritten after each
+  attempt so it also explains a judge that failed. Each entry records the
+  metric, attempt number, method (`llm`, `ragas` or `salvage`), judge model,
+  status, and the problem with a rejected reply, plus the prompt and reply
+  with long text shortened. A `behavior_check` score rebuilt from a truncated
+  reply adds a `salvage` entry. Configured credentials, common key shapes,
+  URL userinfo, `Authorization`, API-key, token and `Cookie` header values,
+  and the values of credential flags such as `--token` and
+  `curl -u user:password` are masked. Rewards record
+  `judge_contract: skill-evaluator-judges-v2`, a reserved name that custom
+  graders cannot use.
+
 - Tier 1 sets up SkillSpector 2.13.3 and Gitleaks 8.30.0 on first use from
   pinned, SHA-256-verified releases, without a prompt; Semgrep is optional
   unless `SKILLEVALUATOR_REQUIRE_SEMGREP=1`. `--skip <check>` on `validate` and
@@ -294,6 +307,28 @@ All notable changes to SkillEvaluator are documented in this file.
 - HTML reports rendered in one process share one compiled template
   environment, so each template compiles once per process instead of once per
   report.
+
+- Tier 3 `accuracy` grades the outcome only. The `SKILL_IDENTIFIED` criterion,
+  which capped a correct answer from the no-skill baseline at 0.8 on positive
+  cases, is replaced by `FORMAT_FOLLOWED`: the response follows any output
+  format the question explicitly requires, and when none is required it is
+  true only if the response gives an answer. A trial that ran but gave no
+  answer still scores `0.0`, as before. Skill use is still scored by
+  `skill_execution`. Every case and both arms use the same five criteria, so
+  rewards no longer record `excluded_criteria` or the
+  `applicable-accuracy-criteria/v1` policy; reports still read older rewards
+  that do. `judge_accuracy` still accepts the `skill_identification_applicable`
+  keyword but ignores it. Expect baseline accuracy to rise and accuracy lift to
+  fall for the same runs.
+
+- Tier 3 LLM judges return verdicts only, and the verifier computes every
+  score: `accuracy` is passing criteria divided by five, `goal_accuracy` is
+  `1.0` when the goal was achieved and `0.0` otherwise, and `behavior_check` is
+  the share of expected behaviors observed. A `score` field in a reply is
+  ignored, and the prompts no longer ask for one. An invalid reply is retried
+  once with the exact problem, for example `steps not judged: [2]`, instead of
+  a generic format reminder. The prompt examples are valid replies for the task
+  at hand, and the goal prompt no longer shows an empty tool-call section.
 
 ### Documentation
 
@@ -815,6 +850,15 @@ All notable changes to SkillEvaluator are documented in this file.
   killed; a second Ctrl+C skips that wait, and on Windows the task tree is
   stopped immediately. Progress shows the agents that are stopping and reports
   the run as interrupted instead of failed unexpectedly.
+- The prompt-based `goal_accuracy` judge, which runs whenever the RAGAS scorer
+  does not (including with the default NVIDIA Build provider), used the reply's
+  `score` field over its `achieved` verdict, so `achieved: false` with
+  `score: 1.0` scored 1.0. Other judge replies were also accepted when they
+  should have been retried: an `accuracy` reply with only a numeric total
+  (clamped into 0 to 1, so `99` scored 1.0), a `behavior_check` reply that
+  judged one step twice and skipped another, and a RAGAS goal score other than
+  `0.0` or `1.0`. Each is now rejected and retried, and a RAGAS score that is
+  not binary falls back to the prompt judge.
 - A Tier 1 security scan that SkillSpector reports as partial no longer fails
   with only "reports incomplete analysis (status 'partial')". The error quotes
   up to three completeness exceptions as `path [phase; reason_code;

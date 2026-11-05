@@ -339,3 +339,61 @@ def test_artifact_uri_uses_only_native_absolute_windows_paths(target, windows, e
     from skillevaluator.reporting.terminal_styles import _artifact_uri
 
     assert _artifact_uri(target, windows=windows) == expected
+
+
+@pytest.mark.parametrize("captured", [False, True])
+def test_real_tty_live_lifecycle_prints_footer_once_with_capture_safe_links(monkeypatch, captured):
+    import os
+    import threading
+
+    from skillevaluator.utils.rich_markup import strip_terminal_controls
+
+    if not hasattr(os, "openpty"):
+        pytest.skip("Live PTY regression runs on POSIX")
+    monkeypatch.setenv("TERM", "xterm-256color")
+    master, slave = os.openpty()
+    chunks = []
+
+    def drain():
+        while True:
+            try:
+                chunk = os.read(master, 65536)
+            except OSError:
+                return
+            if not chunk:
+                return
+            chunks.append(chunk)
+
+    reader = threading.Thread(target=drain, daemon=True)
+    try:
+        with os.fdopen(slave, "w") as stream:
+            # Drain concurrently: a real Live frame can fill a PTY's small buffer.
+            reader.start()
+            console = Console(file=stream, color_system="truecolor", no_color=False, width=98)
+            view = ValidateView("demo", [], console=console)
+
+            def lifecycle():
+                view.start()
+                worker = view._live._refresh_thread
+                try:
+                    view.finish(Verdict(True, "Passed required checks"), [("report", "/tmp/actual.html")])
+                finally:
+                    view.stop()
+                assert view._live is None
+                worker.join(timeout=1)
+                assert not worker.is_alive()
+
+            if captured:
+                with console.capture() as capture:
+                    lifecycle()
+                output = capture.get()
+            else:
+                lifecycle()
+        reader.join(timeout=1)
+        assert not reader.is_alive()
+        if not captured:
+            output = b"".join(chunks).decode()
+        assert strip_terminal_controls(output).count("/tmp/actual.html") == 1
+        assert ("\x1b]8" in output) is (not captured)
+    finally:
+        os.close(master)

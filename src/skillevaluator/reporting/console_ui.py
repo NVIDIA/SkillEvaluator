@@ -629,19 +629,27 @@ class ValidateView:
         if self.progress_reporter is not None:
             self.progress_reporter.close()
         self.verdict = verdict
-        self.links = links
+        # Keep artifacts out of Live's refresh/stop buffers. After its render
+        # hook is removed, normal printing can distinguish TTY from capture.
+        self.links = []
         if self._live is not None:
-            self._live.update(self)
-            self._live.stop()
-            self._live = None
+            live = self._live
+            try:
+                live.update(self)
+            finally:
+                try:
+                    live.stop()
+                finally:
+                    self._live = None
         else:
             if len(self.blocks) >= 2:
                 self.console.print(self._gate())
                 self.console.print()
             self.console.print(self._verdict_panel(verdict))
             self.console.print()
-            for line in self._footer_lines():
-                self.console.print(line)
+        self.links = links
+        for line in self._footer_lines():
+            self.console.print(line)
 
     def stop(self) -> None:
         """Tear down the live display (safe on errors / KeyboardInterrupt)."""

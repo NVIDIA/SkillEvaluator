@@ -195,6 +195,26 @@ All notable changes to SkillEvaluator are documented in this file.
   `tier1` leaves a check out and reports it as skipped. A `scanners` row and the
   JSON report record which scanner versions ran.
 
+- `--skillspector-baseline FILE` on `validate`, `tier1`, and `security-scan`
+  applies an audited SkillSpector suppression baseline, so reviewed false
+  positives no longer leave the security check failed or `INCOMPLETE`.
+  Baselines apply only when passed explicitly; one shipped inside the skill is
+  never used, and suppressed findings without a requested baseline still fail
+  closed. A rule without a literal run in its `id` (two characters)
+  or in its `path` or `message` (four), such as `id: "*"` or `message: "*e*"`, or a version 2 rule or fingerprint without a `reason`, is
+  rejected before the scan, as are entries that are not mappings, unparseable
+  files, and files beyond SkillSpector's size and YAML expansion limits; an
+  empty file is an empty baseline. A baseline kept inside the skill is
+  excluded from the scan, including the staged copy used when the skill has
+  `evals/` outputs. JSON reports add `results[].skillspector_baseline` with the
+  outcome (`applied`, `no_matches`, `fingerprint_version_mismatch`,
+  `llm_stage_unmatched`, or `not_applied`), the baseline file name and
+  `sha256:` digest (never its local path), scanner versions, and per-stage
+  finding counts with the suppressed findings' severities and rule IDs, and Markdown and HTML reports show the outcome as a
+  `skillspector_baseline` line. Fingerprints ignored after a SkillSpector
+  upgrade, or not matched by the LLM stage, are reported instead of silently
+  suppressing nothing; fingerprints only match static-only runs.
+
 ### Changed
 
 - Shared LLM calls and the Harbor verifier retry HTTP 408, 429, and every 5xx
@@ -351,6 +371,15 @@ All notable changes to SkillEvaluator are documented in this file.
   listed. The JSON report still carries every error under
   `tier3.provenance.source_validation`. Validation rules, gate decisions, and
   the finding's suggestion text are unchanged.
+- Tier 3 Docker and Kata runs retry a Claude Code or Codex install that fails,
+  for example on a dropped download or a package mirror error, instead of
+  failing the trial on the first attempt. Up to three attempts run within
+  Harbor's agent setup timeout, so an install that keeps failing still fails
+  the trial. A slow failure that would leave no room for another attempt is
+  not retried, so the trial reports the install error rather than a setup
+  timeout, and each retry warning ends with the failed command's output.
+  Platform probe and transport errors are not retried, and local mode still
+  checks the installed CLI once.
 - Tier 2 caps every intra-skill embedding chunk at 3,000 characters, preserves
   meaningful short tails and actual Python docstring source ranges, and avoids
   counting pieces of one original chunk as duplicates of each other. Oversized
@@ -817,6 +846,19 @@ All notable changes to SkillEvaluator are documented in this file.
   judged one step twice and skipped another, and a RAGAS goal score other than
   `0.0` or `1.0`. Each is now rejected and retried, and a RAGAS score that is
   not binary falls back to the prompt judge.
+- A Tier 1 security scan that SkillSpector reports as partial no longer fails
+  with only "reports incomplete analysis (status 'partial')". The error quotes
+  up to three completeness exceptions as `path [phase; reason_code;
+  analyzers=...]` and, when there are more, counts the incomplete files per
+  reason, for example `(incomplete files by reason: runtime_limit 462,
+  obfuscated_instruction_text 4)`. For `runtime_limit`, it explains the fix:
+  when many files are cut short, a skill that bundles a large corpus hits the
+  same SkillSpector time budget on every rerun and needs that material moved
+  out of the skill, while a sub-analysis that stopped at its own budget (named
+  `<analyzer>_runtime_limit`, such as the SC8 bytecode walk in SkillSpector
+  2.12.0) is not affected by bundle size and needs a rerun or a newer
+  SkillSpector. A report with both kinds of rows gets both explanations. The
+  scan still fails closed as `INCOMPLETE`.
 
 ### Security
 

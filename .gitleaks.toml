@@ -46,6 +46,13 @@ regexes = ['''^us\.anthropic\.claude-opus-5$''']
 paths = ['''^tests/validators/test_security\.py$''']
 
 [[allowlists]]
+description = "Bedrock model ID in the merge-leftover SkillSpector bridge test copy from commit e8aa35d6a"
+condition = "AND"
+targetRules = ["generic-api-key"]
+regexes = ['''^us\.anthropic\.claude-opus-5$''']
+paths = ['''^tests/validators/test_security\.py\.orig$''']
+
+[[allowlists]]
 description = "Synthetic HTTP hook credential used by static risk tests"
 condition = "AND"
 targetRules = ["generic-api-key"]

@@ -634,9 +634,11 @@ The chat uses the provider and model configured for LLM checks
 [Environment Variables](environment-variables.mdx)). Each question sends the
 run's compact evidence to that provider. The evidence names the run by its ID
 instead of its local path. In every text field, such as errors, warnings, case
-questions and saved feedback, the run's path is replaced with that ID and
-credential-shaped text is redacted before the text is shortened. The command
-writes nothing to disk.
+questions and saved feedback, an absolute path that ends in the run's directory
+is replaced with that ID. This covers the path a copied run had on the machine
+where it ran, unless that path contains a space. Credential-shaped text is
+redacted before the text is shortened, and a shortened field ends in
+`...<truncated>`. The command writes nothing to disk.
 
 No request is sent before the first question, so the command exits 0
 immediately when standard input is empty. Piped input sends each line as a

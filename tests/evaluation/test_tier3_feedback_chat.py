@@ -298,6 +298,43 @@ def test_context_sends_run_id_not_host_path(tmp_path: Path) -> None:
     assert tmp_path.as_posix() not in evidence
 
 
+def test_context_masks_the_path_a_copied_run_had_elsewhere(tmp_path: Path) -> None:
+    # A copied run keeps its ID, but text written where it first ran still
+    # names that machine's path.
+    posix = f"/home/ci-runner/work/acme-skill/evals/results/{RUN_ID}"
+    windows = f"C:\\Users\\builder\\acme-skill\\results\\{RUN_ID}"
+    escaped = windows.replace("\\", "\\\\")
+    kept = f"kept results/{RUN_ID}/jobs, /tmp/{RUN_ID}_old and /tmp/{RUN_ID}.log"
+    payload = {
+        "dataset": [{"id": "case-1", "question": f"Read {posix}/inputs/a.txt", "ground_truth": f"path={posix}"}],
+        "agents": {
+            "codex": {
+                "execution_errors": [
+                    f"Trial failed: {posix}/jobs/t1 exited 1",
+                    f'{{"cwd":"{escaped}\\\\jobs"}}',
+                    f"see ~/acme-skill/results/{RUN_ID}, then ({windows}\\jobs).",
+                    kept,
+                ],
+            }
+        },
+    }
+
+    context = compact_run_context(payload, run_dir=tmp_path / "Downloads" / RUN_ID)
+
+    serialized = json.dumps(context)
+    for leaked in ("ci-runner", "acme-skill", "builder"):
+        assert leaked not in serialized
+    errors = context["agents"]["codex"]["execution_errors"]
+    assert errors[0] == f"Trial failed: {RUN_ID}/jobs/t1 exited 1"
+    assert errors[1] == f'{{"cwd":"{RUN_ID}\\\\jobs"}}'
+    assert errors[2] == f"see {RUN_ID}, then ({RUN_ID}\\jobs)."
+    # A relative path and other names that only start with the run ID are left alone.
+    assert errors[3] == kept
+    (row,) = context["cases"]
+    assert row["question"] == f"Read {RUN_ID}/inputs/a.txt"
+    assert row["ground_truth"] == f"path={RUN_ID}"
+
+
 def test_context_redacts_credentials_but_keeps_measurements() -> None:
     payload = {
         "agents": {

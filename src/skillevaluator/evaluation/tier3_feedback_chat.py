@@ -14,6 +14,7 @@ from __future__ import annotations
 
 import json
 import math
+import re
 import unicodedata
 from dataclasses import dataclass, field
 from pathlib import Path
@@ -244,17 +245,69 @@ def _finite_score(value: Any) -> float | None:
     return round(number, 4) if number is not None else None
 
 
+def _starts_absolute_path(value: str, index: int) -> bool:
+    """Whether a POSIX, home, UNC or drive-letter absolute path starts at ``index``.
+
+    The character before it must not belong to a name, so ``a/b`` is not read as ``/b``.
+    """
+    if index and (value[index - 1].isalnum() or value[index - 1] in "_.~-"):
+        return False
+    head = value[index : index + 3]
+    if head[:1] in ("/", "\\"):
+        return True
+    if head[:1] == "~":
+        return head[1:2] in ("/", "\\")
+    return len(head) == 3 and head[0].isascii() and head[0].isalpha() and head[1] == ":" and head[2] in "/\\"
+
+
 @dataclass(frozen=True)
 class _Scrubber:
     """Replace the run's host path with its ID and redact credentials in text sent to the provider."""
 
     host_paths: tuple[str, ...]
     run_id: str
+    # A separator, then the run ID as a whole path segment (not ``<id>_old`` or ``<id>.log``).
+    run_reference: re.Pattern[str]
 
     @classmethod
     def for_run(cls, run_dir: Path) -> _Scrubber:
         paths = (str(run_dir), run_dir.as_posix())
-        return cls(tuple(dict.fromkeys(path for path in paths if len(path) > 1)), run_dir.name)
+        run_id = run_dir.name
+        return cls(
+            tuple(dict.fromkeys(path for path in paths if len(path) > 1)),
+            run_id,
+            re.compile(r"[\\/]" + re.escape(run_id) + r"(?![\w-]|\.\w)"),
+        )
+
+    def paths(self, value: str) -> str:
+        """``value`` with each absolute path that ends in the run's directory replaced by the run ID.
+
+        This run's own path is replaced first, spaces included. A copied run
+        keeps its ID, so the path it had on another machine is found by its
+        last segment: the path starts at the first absolute-path root after
+        the preceding whitespace or quote. Such a path that contains a space
+        is not recognized. Relative paths are kept.
+        """
+        for host_path in self.host_paths:
+            value = value.replace(host_path, self.run_id)
+        if not self.run_id or self.run_id not in value:
+            return value
+        pieces: list[str] = []
+        done = floor = 0
+        for match in self.run_reference.finditer(value):
+            start = match.start()
+            # The walk back stops at the previous match, so the scan stays linear.
+            while start > floor and not value[start - 1].isspace() and value[start - 1] not in "\"'`<>|":
+                start -= 1
+            root = next(
+                (index for index in range(start, match.start() + 1) if _starts_absolute_path(value, index)), None
+            )
+            floor = match.end()
+            if root is not None:
+                pieces.extend((value[done:root], self.run_id))
+                done = match.end()
+        pieces.append(value[done:])
+        return "".join(pieces)
 
     def text(self, value: str, limit: int | None = None) -> str:
         """Masked ``value``; with ``limit``, masked first and then shortened to at most ``limit`` characters.
@@ -266,8 +319,7 @@ class _Scrubber:
         ``limit`` (compact JSON, a minified error), a larger window is masked
         so the field is not blanked. A shortened field ends in the marker.
         """
-        for host_path in self.host_paths:
-            value = value.replace(host_path, self.run_id)
+        value = self.paths(value)
         if limit is None:
             return redact_sensitive_text(value)
         window = limit * 4 + 256
@@ -520,7 +572,8 @@ def _scrub(value: Any, scrub: _Scrubber) -> Any:
 def compact_run_context(payload: dict[str, Any], *, run_dir: Path) -> dict[str, Any]:
     """Trim the payload to the evidence the feedback chat may cite.
 
-    Only the run id is included, not the run's host path. The host path and
+    Only the run id is included, not the run's host path. Absolute paths that
+    end in the run's directory (here, or where a copied run first ran) and
     credential-shaped text are masked in each string before it is shortened, so
     a cut cannot leave part of either behind.
     """

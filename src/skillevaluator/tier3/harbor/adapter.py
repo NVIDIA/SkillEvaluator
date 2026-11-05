@@ -3655,6 +3655,16 @@ _EVALUATOR_MANAGED_RUNTIME_ENV = {
     # answered until the agent timeout. With background tasks off, a command
     # ends in its turn or at the Bash tool timeout. Other agents ignore it.
     "CLAUDE_CODE_DISABLE_BACKGROUND_TASKS": "1",
+    # A refused turn is not retried on another model. When the provider's
+    # safety classifier stops the selected model, Claude Code otherwise retries
+    # on a model from its own fixed table (for example Claude Opus 5.5 ->
+    # ``claude-opus-4-8``) under that bare Anthropic id. A gateway that serves
+    # only the selected model rejects it (HTTP 403, an unknown API error), and
+    # where it succeeds the trial mixes two models but is scored as the
+    # selected one. With the fallback off, the CLI stops with
+    # ``model_refusal_no_fallback`` and Harbor raises AgentSafetyRefusalError.
+    # Other agents ignore it.
+    "CLAUDE_CODE_DISABLE_REFUSAL_FALLBACK": "1",
 }
 _CLEAR_SKILL_ROOT_FUNCTION = (
     "clear_skill_root() { target=$1; "

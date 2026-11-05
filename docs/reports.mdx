@@ -548,7 +548,9 @@ offset, or run backwards, has no LLM or tool time. Agents without native timing
 or Codex `Wall time` headers are timed only when their trajectory has no tool
 calls.
 Each step of a multi-step task is timed on its own, so the time between Harbor
-steps is not counted. Trials whose `trajectory.json` was omitted (too large, or
+steps is not counted. Steps marked `is_copied_context` repeat context from an
+earlier trajectory and are not timed; a copied step after new steps leaves the
+trial without timing. Trials whose `trajectory.json` was omitted (too large, or
 redaction or validation failed) and multi-step trials scored per step have no
 timing. Missing timing stays `N/A` (`null` in JSON), never zero, and follows the
 same complete-arm and matching-case rules as tokens. Timing is diagnostic and

@@ -23,7 +23,10 @@ Two sources are used, never mixed within one trajectory:
   nothing is inferred.
 
 Each step of a merged multi-step trajectory is timed on its own, so the gap
-between Harbor steps (verifier and setup time) is never counted. Missing,
+between Harbor steps (verifier and setup time) is never counted. Steps marked
+``is_copied_context`` repeat earlier work, so each Harbor step's copied prefix
+is dropped before timing; a copied step after new work, or a Harbor step with
+only copied steps, leaves the trajectory unmeasured. Missing,
 malformed, unordered or inconsistent evidence makes a component ``None``; it
 is never reported as zero. A trajectory with no tool calls measures zero tool
 seconds.
@@ -60,11 +63,14 @@ def trajectory_timing(trajectory: Any) -> dict[str, Any] | None:
     steps = trajectory.get("steps")
     if not isinstance(steps, list) or not steps or not all(isinstance(step, dict) for step in steps):
         return None
-    if _has_native_timing(steps):
-        measured = _native_timing_ms(steps)
+    new_steps = _without_copied_context(steps)
+    if new_steps is None:
+        return None
+    if _has_native_timing(new_steps):
+        measured = _native_timing_ms(new_steps)
         source = "atif"
     else:
-        measured = _inferred_timing_ms(steps)
+        measured = _inferred_timing_ms(new_steps)
         source = "step_timestamps"
     if measured is None:
         return None
@@ -334,6 +340,20 @@ def _harbor_step_segments(steps: list[dict[str, Any]]) -> list[list[dict[str, An
             current = name
         segments[-1].append(step)
     return segments
+
+
+def _without_copied_context(steps: list[dict[str, Any]]) -> list[dict[str, Any]] | None:
+    """Drop each Harbor step's ``is_copied_context`` prefix, or ``None`` if copied steps are not a prefix."""
+    new_steps: list[dict[str, Any]] = []
+    for segment in _harbor_step_segments(steps):
+        prefix_length = 0
+        while prefix_length < len(segment) and segment[prefix_length].get("is_copied_context") is True:
+            prefix_length += 1
+        segment_new_steps = segment[prefix_length:]
+        if not segment_new_steps or any(step.get("is_copied_context") is True for step in segment_new_steps):
+            return None
+        new_steps.extend(segment_new_steps)
+    return new_steps
 
 
 def _inferred_timing_ms(steps: list[dict[str, Any]]) -> tuple[float, float] | None:

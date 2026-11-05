@@ -380,6 +380,69 @@ def test_merged_multistep_trajectory_needs_every_harbor_step_timed() -> None:
     assert trajectory_timing({"steps": [*_named("prepare", first), *_named("finish", second)]}) is None
 
 
+def _copied(step: dict[str, Any]) -> dict[str, Any]:
+    return {**step, "is_copied_context": True}
+
+
+def _exec_step(timestamp: str, call_id: str) -> dict[str, Any]:
+    return {
+        "source": "agent",
+        "timestamp": timestamp,
+        "tool_calls": [{"tool_call_id": call_id, "function_name": "exec_command"}],
+        "observation": {"results": [{"source_call_id": call_id, "content": "Wall time: 1.0 seconds\nOutput:\nok"}]},
+    }
+
+
+def test_copied_context_steps_are_not_timed_as_new_work() -> None:
+    trajectory = {
+        "steps": [
+            _copied(_exec_step("2026-01-01T11:00:02Z", "call-old")),
+            {"source": "user", "timestamp": "2026-01-01T12:00:00Z"},
+            _exec_step("2026-01-01T12:00:02Z", "call-new"),
+            {"source": "agent", "timestamp": "2026-01-01T12:00:05Z"},
+        ]
+    }
+    # Timing the copied step would count its 1 s again and the hour after it as LLM time.
+    assert trajectory_timing(trajectory) == _inferred(4.0, 1.0)
+
+
+def test_copied_context_native_timing_is_not_counted_twice() -> None:
+    copied_extra = {"llm_duration_ms": 1000}
+    trajectory = {
+        "steps": [
+            _copied({"source": "agent", "extra": copied_extra, "tool_calls": [{"extra": {"duration_ms": 300}}]}),
+            {"source": "user"},
+            {"source": "agent", "extra": {"llm_duration_ms": 2000}, "tool_calls": [{"extra": {"duration_ms": 500}}]},
+        ]
+    }
+    assert trajectory_timing(trajectory) == {"llm_seconds": 2.0, "tool_seconds": 0.5, "source": "atif"}
+
+
+def test_native_extras_on_copied_context_only_do_not_block_inference() -> None:
+    copied = _copied({"source": "agent", "timestamp": "2026-01-01T00:00:00+00:00", "extra": {"llm_duration_ms": 9}})
+    assert trajectory_timing({"steps": [copied, _user(1), _agent(4)]}) == _inferred(3.0, 0.0)
+
+
+def test_each_harbor_step_drops_its_own_copied_context_prefix() -> None:
+    first = [_user(), _tool_step(3, [1.0]), _agent(10)]
+    # An untrusted continuation keeps the copied prefix in the merged trajectory.
+    second = [*(_copied(step) for step in first), _user(40), _tool_step(43, [2.0]), _agent(50)]
+    merged = [*_named("prepare", first), *_named("finish", second)]
+    assert trajectory_timing({"steps": merged}) == _inferred(17.0, 3.0)
+
+
+@pytest.mark.parametrize(
+    "steps",
+    [
+        [_user(), _tool_step(3, [1.0]), _copied(_agent(5)), _agent(10)],
+        [_copied(_user()), _copied(_agent(5))],
+    ],
+    ids=["copied-after-new-step", "only-copied-steps"],
+)
+def test_copied_context_that_is_not_a_prefix_of_new_work_is_unmeasured(steps: list[dict[str, Any]]) -> None:
+    assert trajectory_timing({"steps": steps}) is None
+
+
 @pytest.mark.parametrize("value", [None, [], {}, {"steps": "x"}, {"steps": [None]}, {"steps": []}])
 def test_malformed_trajectories_have_no_timing(value: Any) -> None:
     assert trajectory_timing(value) is None

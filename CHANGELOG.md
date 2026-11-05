@@ -377,6 +377,14 @@ All notable changes to SkillEvaluator are documented in this file.
   JSON `skills[].issue_count`, contributor totals, `total_errors`,
   `total_warnings` and `severity_counts` still count raw records.
 
+- The Tier 3 per-evaluator drill-down and steps chart now include baseline
+  (without-skill) trials. The drill-down adds a Condition column and shows
+  metrics that only baseline rows scored; the steps chart plots one series per
+  agent and condition from every trial, for up to 200 eval cases. Cases with
+  missing or partial step telemetry stay gaps instead of zeros or partial
+  averages. The token chart remains with-skill only; Measured Agent Resources
+  compares token totals across both arms.
+
 - Tier 3 `accuracy` grades the outcome only. The `SKILL_IDENTIFIED` criterion,
   which capped a correct answer from the no-skill baseline at 0.8 on positive
   cases, is replaced by `FORMAT_FOLLOWED`: the response follows any output
@@ -1046,6 +1054,22 @@ All notable changes to SkillEvaluator are documented in this file.
   the Tier 3 judge, an object with a repeated key, a `NaN` or `Infinity` value,
   a number that overflows a float or more than 128 levels of nesting is
   rejected, whether it is the whole reply or embedded in prose.
+- Tier 3 HTML reports now explain failing evaluator scores. A failing
+  evaluator card opens its per-trial evidence, shows the grader's reason
+  (or, when the grader recorded none, its message, findings, or failed
+  criteria), and quotes a short excerpt of the offending command or artifact.
+  A failing cell in the per-evaluator drill-down shows the reason as a
+  tooltip. When attempts of one case disagree, the card shows the
+  lowest-scoring attempt's reason, so a passing attempt no longer hides a
+  failure. Grader reasons and excerpts are credential-redacted, including
+  the values of configured credential environment variables. Criteria the
+  grader excluded from the score are not listed as failed. Drill-down
+  reasons and excerpts are capped at 240 and 300 characters, and
+  secret-detector findings never quote their detection pattern back.
+  Large reports drop these reasons before any other detail, so they never
+  displace the HTML overview or recorded evidence.
+- The Tier 3 HTML size notice no longer prints `<built-in method items ...>`
+  in place of the number of items the preview omitted.
 - Ctrl+C during `tier3 evaluate` now stops the run. The interrupt reached only
   the coordinating thread, so running Harbor jobs kept going in their own
   process groups, agents waiting for a `--max-agents` slot still started, and

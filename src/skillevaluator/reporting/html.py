@@ -83,6 +83,7 @@ from skillevaluator.reporting.harbor_viewer import normalize_agent_eval_harbor_l
 from skillevaluator.reporting.presentation import success_is_not_applicable
 from skillevaluator.reporting.run_status import Status, resolve_run_status, result_status
 from skillevaluator.reporting.tier3_scope import completed_agent_result, validate_report_scope
+from skillevaluator.reporting.trial_charts import steps_by_case_chart
 from skillevaluator.skillspector_provenance import skillspector_provenance_records
 
 if TYPE_CHECKING:
@@ -458,6 +459,25 @@ def _score_mapping(
     return scores
 
 
+def _tier3_score_reasons(value: object) -> dict[str, str]:
+    """Keep per-metric reasons keyed like ``_score_mapping`` so each matches its score cell."""
+    if not isinstance(value, dict):
+        return {}
+    reasons: dict[str, str] = {}
+    seen: set[str] = set()
+    for key, reason in value.items():
+        identifier = _tier3_display_identifier(key)
+        identity_key = identifier.casefold()
+        if not identifier:
+            continue
+        if identity_key in seen:
+            return {}
+        seen.add(identity_key)
+        if isinstance(reason, str) and reason:
+            reasons[identifier] = reason
+    return reasons
+
+
 def _tier3_text_mapping(value: object) -> dict[str, str]:
     """Normalize public label maps without silently overwriting aliases."""
     if not isinstance(value, dict):
@@ -773,6 +793,8 @@ def _sanitize_tier3_pass_at_k(value: object) -> dict[str, Any]:
 
 
 def _sanitize_tier3_evaluator_card(value: dict[str, Any]) -> dict[str, Any] | None:
+    from skillevaluator.evaluation.tier3_findings import FAILURE_REASON_EVIDENCE_KEYS
+
     card = dict(value)
     card["with_skill"] = _finite_number(card.get("with_skill"), minimum=0.0, maximum=1.0)
     if card["with_skill"] is None:
@@ -791,6 +813,9 @@ def _sanitize_tier3_evaluator_card(value: dict[str, Any]) -> dict[str, Any] | No
         entry["score"] = _finite_number(entry.get("score"), minimum=0.0, maximum=1.0)
         for key in ("notes", "failures", "checks", "evidence_refs"):
             entry[key] = _string_list(entry.get(key))
+        for key in FAILURE_REASON_EVIDENCE_KEYS:
+            if not (isinstance(entry.get(key), str) and entry[key]):
+                entry.pop(key, None)
         evidence.append(entry)
     card["evidence"] = evidence
     sampling = card.get("evidence_sampling") if isinstance(card.get("evidence_sampling"), dict) else {}
@@ -833,6 +858,13 @@ def _sanitize_tier3_agent(value: dict[str, Any]) -> dict[str, Any]:
     ]
     agent["findings"] = [_sanitize_tier3_dimension(item) for item in _dict_list(agent.get("findings"))]
     agent["pass_at_k"] = _sanitize_tier3_pass_at_k(agent.get("pass_at_k"))
+    # The drill-down and steps chart render baseline rows from
+    # ``trials_baseline`` (with-skill rows come from the top-level trials), so
+    # those rows get the same render-time bounds as with-skill rows.
+    if "trials_baseline" in agent:
+        agent["trials_baseline"] = [
+            _sanitize_tier3_trial(item, fill_defaults=False) for item in _dict_list(agent.get("trials_baseline"))
+        ]
     return agent
 
 
@@ -877,14 +909,25 @@ def _scrub_untrusted_tier3_agents(value: object) -> dict[str, dict[str, Any]]:
     return agents
 
 
-def _sanitize_tier3_trial(value: dict[str, Any]) -> dict[str, Any]:
+def _sanitize_tier3_trial(value: dict[str, Any], *, fill_defaults: bool = True) -> dict[str, Any]:
+    """Bound the trial fields the template renders.
+
+    With ``fill_defaults=False`` (baseline rows), optional fields are normalized
+    only when present, so the embedded payload does not grow by empty defaults
+    on every row.
+    """
     trial = dict(value)
     for key in ("agent", "entry_id", "trial_id"):
-        trial[key] = _tier3_display_identifier(trial.get(key))
+        if fill_defaults or key in trial:
+            trial[key] = _tier3_display_identifier(trial.get(key))
     trial["overall"] = _finite_number(trial.get("overall"), minimum=0.0, maximum=1.0)
     trial["scores"] = _score_mapping(trial.get("scores"))
-    trial["baseline_scores"] = _score_mapping(trial.get("baseline_scores"))
-    trial["lift_scores"] = _score_mapping(trial.get("lift_scores"), minimum=-1.0, maximum=1.0)
+    for key, minimum in (("baseline_scores", 0.0), ("lift_scores", -1.0)):
+        if fill_defaults or key in trial:
+            trial[key] = _score_mapping(trial.get(key), minimum=minimum, maximum=1.0)
+    score_reasons = _tier3_score_reasons(trial.pop("score_reasons", None))
+    if score_reasons:
+        trial["score_reasons"] = score_reasons
     # Unavailable telemetry stays absent rather than becoming zero, so the
     # template can omit charts and show "—" instead of reporting no usage.
     raw_tokens = trial.pop("tokens", None)
@@ -899,10 +942,12 @@ def _sanitize_tier3_trial(value: dict[str, Any]) -> dict[str, Any]:
     steps = _strict_nonnegative_count(trial.pop("steps", None))
     if steps is not None:
         trial["steps"] = steps
-    trial["warnings"] = _string_list(trial.get("warnings"))
-    recovery = trial.get("error_recovery") if isinstance(trial.get("error_recovery"), dict) else {}
-    recovery["details"] = _string_list(recovery.get("details"))
-    trial["error_recovery"] = recovery
+    if fill_defaults or "warnings" in trial:
+        trial["warnings"] = _string_list(trial.get("warnings"))
+    if fill_defaults or "error_recovery" in trial:
+        recovery = trial.get("error_recovery") if isinstance(trial.get("error_recovery"), dict) else {}
+        recovery["details"] = _string_list(recovery.get("details"))
+        trial["error_recovery"] = recovery
     return trial
 
 
@@ -1165,18 +1210,76 @@ def _bounded_tier3_preview_value(value: Any, budget: _Tier3PreviewBudget) -> Any
     return value
 
 
+def _restore_failure_reason_text(deferred: list[tuple[dict[str, Any], str, Any]], room: int) -> int:
+    """Put deferred failure reasons back while ``room`` bytes remain; return how many stay out."""
+    omitted = 0
+    for container, key, value in deferred:
+        # Key, colon, value and separating comma in compact JSON.
+        cost = len(_compact_json(key).encode("utf-8")) + len(_compact_json(value).encode("utf-8")) + 2
+        if cost <= room:
+            container[key] = value
+            room -= cost
+        else:
+            omitted += 1
+    return omitted
+
+
+def _capped_tier3_trial_rows(payload: dict[str, Any]) -> int:
+    """Count the drill-down rows the bounded preview walk leaves out.
+
+    The walk keeps the first ``_TIER3_HTML_PREVIEW_COLLECTION_ITEMS`` entries of
+    every list and mapping: with-skill rows across all agents in the top-level
+    ``trials``, baseline rows per agent, and the first agents.
+    """
+    limit = _TIER3_HTML_PREVIEW_COLLECTION_ITEMS
+    trials = payload.get("trials")
+    omitted = max(0, len(trials) - limit) if isinstance(trials, list) else 0
+    agents = payload.get("agents")
+    for index, agent in enumerate(agents.values() if isinstance(agents, dict) else []):
+        baseline = agent.get("trials_baseline") if isinstance(agent, dict) else None
+        if isinstance(baseline, list):
+            omitted += len(baseline) if index >= limit else max(0, len(baseline) - limit)
+    return omitted
+
+
 def _bounded_tier3_preview(payload: dict[str, Any] | None) -> tuple[dict[str, Any] | None, dict[str, int]]:
-    """Return a presentation-only projection plus visible omission counts."""
-    if not payload or len(_compact_json(payload).encode("utf-8")) <= _TIER3_HTML_PREVIEW_TRIGGER_BYTES:
+    """Return a presentation-only projection plus visible omission counts.
+
+    Built failure reasons and excerpts are optional for the overview, so they
+    are taken out first and put back only into room left under the preview
+    trigger. They can never spend the bounded preview budget ahead of the
+    overview keys. ``trial_rows`` counts only drill-down rows the walk capped,
+    so the drill-down note does not fire when only another list was trimmed.
+    """
+    if not payload:
+        return payload, {}
+    serialized = _compact_json(payload)
+    if len(serialized.encode("utf-8")) <= _TIER3_HTML_PREVIEW_TRIGGER_BYTES:
         return payload, {}
 
+    from skillevaluator.evaluation.tier3_findings import failure_reason_text_slots, strip_failure_reason_text
+
+    # A private copy: the caller embeds ``payload`` itself as the canonical data.
+    slim = json.loads(serialized)
+    rendered_slots = list(failure_reason_text_slots(slim, include_top_level_cards=False))
+    deferred = [(container, key, container.pop(key)) for container, key in rendered_slots]
+    # The page renders each agent's cards, never the top-level card copy, so its
+    # reasons are dropped without being restored or counted as left out.
+    strip_failure_reason_text(slim)
+    slim_size = len(_compact_json(slim).encode("utf-8"))
+    if slim_size <= _TIER3_HTML_PREVIEW_TRIGGER_BYTES:
+        omitted_reasons = _restore_failure_reason_text(deferred, _TIER3_HTML_PREVIEW_TRIGGER_BYTES - slim_size)
+        return slim, {"failure_reasons": omitted_reasons} if omitted_reasons else {}
+
     budget = _Tier3PreviewBudget()
-    preview = _bounded_tier3_preview_value(payload, budget)
+    preview = _bounded_tier3_preview_value(slim, budget)
     notice = {
         key: value
         for key, value in {
             "characters": budget.omitted_characters,
             "items": budget.omitted_items,
+            "trial_rows": _capped_tier3_trial_rows(slim),
+            "failure_reasons": len(deferred),
         }.items()
         if value > 0
     }
@@ -3215,6 +3318,12 @@ class HTMLReporter(ReporterBase):
             tier3_canonical_encoding=tier3_canonical_encoding,
             tier3_truncation=tier3_truncation,
             tier3_preview_notice=tier3_preview_notice,
+            # From the full display payload: the bounded preview can cap rows
+            # unevenly per condition and blank identity fields of late rows.
+            steps_by_case_chart=steps_by_case_chart(
+                tier3_data.get("agents") if isinstance(tier3_data, dict) else {},
+                tier3_data.get("trials") if isinstance(tier3_data, dict) else [],
+            ),
             tier1_summary=tier1_summary,
             skillspector_versions=tier1_skillspector_versions,
             skillspector_provenance=tier1_skillspector_provenance,

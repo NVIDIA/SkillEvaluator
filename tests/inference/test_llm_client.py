@@ -1408,6 +1408,22 @@ class TestModelProvenance:
         assert seen == [None]
         assert client.model_used == CHAT_DEFAULT_OPENAI
 
+    def test_chat_names_the_model_that_answered(self, monkeypatch: pytest.MonkeyPatch) -> None:
+        _use_provider(monkeypatch, "anthropic", "claude-opus-5-5")
+        mock_anthropic = MagicMock()
+        mock_anthropic.messages.create.return_value = _anthropic_fallback_response(
+            "Done", {"model": ANTHROPIC_REFUSAL_FALLBACK_MODEL}
+        )
+        client = LLMClient()
+
+        with patch("anthropic.Anthropic", return_value=mock_anthropic):
+            assert client.chat([{"role": "user", "content": "hello"}]) == "Done"
+            assert client.model_used == ANTHROPIC_REFUSAL_FALLBACK_MODEL
+            with pytest.raises(LLMClientError, match="at least one message"):
+                client.chat([])
+
+        assert client.model_used is None
+
     def test_llm_insights_name_the_model_that_wrote_them(self, monkeypatch: pytest.MonkeyPatch) -> None:
         from skillevaluator.evaluation.insights_judge import InsightsJudge
 

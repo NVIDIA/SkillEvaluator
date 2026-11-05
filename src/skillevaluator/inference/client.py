@@ -484,7 +484,7 @@ class LLMClient:
 
     @property
     def model_used(self) -> str | None:
-        """Return the model that answered this thread's last :meth:`completions` call.
+        """Return the model that answered this thread's last :meth:`completions` or :meth:`chat` call.
 
         For an Anthropic reply, a server-side ``fallback`` content block names
         the model that answered, on any endpoint. Only a native Claude API
@@ -668,7 +668,9 @@ class LLMClient:
         fallback and the ADC token refresh work as in :meth:`completions`, and
         provider SDK errors are raised unchanged after the retries. An invalid
         history raises :class:`LLMClientError` before any client is created.
+        On success :attr:`model_used` names the model that answered.
         """
+        self._call_state.model_used = None
         system_prompt, turns = _split_chat_history(messages)
         return self._complete_messages(system_prompt, turns)
 

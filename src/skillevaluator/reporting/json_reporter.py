@@ -29,12 +29,18 @@ from skillevaluator.reporting.base import (
     result_publication_target_dict,
     select_agent_eval_payload,
 )
+from skillevaluator.reporting.finding_summary import (
+    finding_counts,
+    merge_finding_summaries,
+    summarize_findings,
+    summarize_messages,
+)
 from skillevaluator.reporting.run_status import Status, resolve_run_status, result_status
 from skillevaluator.skillspector_provenance import sanitize_skillspector_provenance_metadata
 from skillevaluator.source_identity import recorded_evaluated_source
 
 if TYPE_CHECKING:
-    from skillevaluator.models import ValidationResult
+    from skillevaluator.models import Finding, ValidationResult
 
 
 def _json_safe_agent_eval(value: object) -> dict[str, Any]:
@@ -107,6 +113,8 @@ class JSONReporter(ReporterBase):
         overall_status = run_status.headline.value
         total_errors = sum(r.summary.errors for r in results)
         total_warnings = sum(r.summary.warnings for r in results)
+        result_finding_summaries = [summarize_findings([result]) for result in results]
+        finding_summary = merge_finding_summaries(result_finding_summaries)
 
         # Reuse HTML reporter's skill reorganization and contributor extraction
         html_reporter = HTMLReporter()
@@ -141,9 +149,17 @@ class JSONReporter(ReporterBase):
                 "medium": sum(r.summary.medium_count for r in results),
                 "low": sum(r.summary.low_count for r in results),
             },
+            # Raw totals above count every validator record. These reconcile
+            # them into unique findings and distinct locations by stable ID.
+            "finding_counts": finding_counts(finding_summary),
+            "finding_groups": finding_summary["groups"],
+            "message_counts": summarize_messages(results),
             "skills": skills_summary,
             "contributors": contributors,
-            "results": [self._result_to_dict(r) for r in results],
+            "results": [
+                self._result_to_dict(result, finding_summary=result_summary)
+                for result, result_summary in zip(results, result_finding_summaries, strict=True)
+            ],
         }
 
         agent_eval = select_agent_eval_payload(results)
@@ -258,8 +274,15 @@ class JSONReporter(ReporterBase):
 
         return json.dumps(data, indent=self.indent, default=str, allow_nan=False)
 
-    def _result_to_dict(self, result: ValidationResult) -> dict[str, Any]:
+    def _result_to_dict(
+        self,
+        result: ValidationResult,
+        *,
+        finding_summary: dict[str, Any] | None = None,
+    ) -> dict[str, Any]:
         """Convert ValidationResult to serializable dictionary."""
+        if finding_summary is None:
+            finding_summary = summarize_findings([result])
         skipped = is_cleanly_skipped(result)
         data: dict[str, Any] = {
             "validator": result.validator_name,
@@ -280,20 +303,8 @@ class JSONReporter(ReporterBase):
                 "medium_count": result.summary.medium_count,
                 "low_count": result.summary.low_count,
             },
-            "findings": [
-                {
-                    "category": f.category,
-                    "severity": f.severity.value,
-                    "check_name": f.check_name,
-                    "message": f.message,
-                    "file_path": f.file_path,
-                    "line_number": f.line_number,
-                    "line_content": f.line_content,
-                    "suggestion": f.suggestion,
-                    "metadata": f.metadata or None,
-                }
-                for f in result.findings
-            ],
+            "finding_counts": finding_counts(finding_summary),
+            "findings": [self._finding_to_dict(finding) for finding in result.findings],
             "success_details": [
                 {
                     "check": s.check_name,
@@ -327,6 +338,12 @@ class JSONReporter(ReporterBase):
         coverage = result.metadata.get("dependency_coverage")
         if isinstance(coverage, list):
             data["dependency_coverage"] = coverage
+
+        # Tier 1 SkillSpector file-role scoping: retained and suppressed issue
+        # counts, and the raw versus applicable aggregate risk score.
+        skillspector_applicability = result.metadata.get("skillspector_applicability")
+        if isinstance(skillspector_applicability, dict):
+            data["skillspector_applicability"] = skillspector_applicability
 
         qs = result.metadata.get("quality_scores")
         if qs:
@@ -379,6 +396,13 @@ class JSONReporter(ReporterBase):
         if isinstance(work_limit, dict):
             data["work_limit"] = work_limit
 
+        return data
+
+    @staticmethod
+    def _finding_to_dict(finding: Finding) -> dict[str, Any]:
+        """Preserve the legacy JSON null for findings without metadata."""
+        data = finding.to_dict()
+        data["metadata"] = data["metadata"] or None
         return data
 
     def get_file_extension(self) -> str:

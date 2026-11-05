@@ -250,3 +250,11 @@ def test_gitlab_dind_bootstrap_installs_client_compose_and_buildx_without_a_seco
     assert "docker compose version" in script
     assert "docker buildx version" in script
     assert script.index("bootstrap_tiers.py") < script.index('run_tiers.py" evaluate')
+
+
+def test_gitlab_shared_native_timeout_is_a_literal_duration():
+    config = load("ci/gitlab/all-tiers.yml")
+    assert config["skill-evaluation-native"]["timeout"] == "5 hours"
+    assert "SKILL_EVAL_JOB_TIMEOUT" not in config["variables"]
+    candidate = load("ci/templates/all-tiers/gitlab-all-tiers.yml")
+    assert candidate["skill-evaluation-native"]["timeout"] == "5 hours"

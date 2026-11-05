@@ -6,6 +6,10 @@ All notable changes to SkillEvaluator are documented in this file.
 
 ### Changed
 
+- Give staged Tier 3 main images a fixed liveness healthcheck so Docker Compose
+  2 can wait for readiness while authored image healthchecks remain suppressed.
+  Keep custom service healthchecks and their readiness dependencies intact.
+
 - Name the shared OSS validation policy `default` for both public and private
   repositories. Keep `--profile external`, `--external`, and the legacy
   environment value as compatibility aliases without changing validation rules.
@@ -28,7 +32,9 @@ All notable changes to SkillEvaluator are documented in this file.
   advisory paired Tier 3, Docker and native local execution, pinned local agent
   bootstrap, retained aggregate/native reports, and trusted default-branch
   feedback. Candidate templates require a capability-bearing release descriptor;
-  released Tier 1 bundles and workflows remain unchanged.
+  released Tier 1 bundles and workflows remain unchanged. Incomplete runs retain
+  redacted startup diagnostics, and interrupted selections cannot pass on partial
+  results. GitLab callers use literal job timeouts compatible with GitLab 17.8.
 
 - `skillevaluator tier3 feedback RUN_DIR [--skill PATH]` opens a terminal chat
   about one completed Tier 3 run. Answers are grounded in that run's scores,

@@ -306,7 +306,8 @@ def test_gitlab_local_render_sets_actual_runtime_inputs(repository, all_release)
     scan = yaml.safe_load((repository / ".gitlab-ci.yml").read_text())
     assert scan["variables"]["SKILL_EVAL_IMAGE"] == ALL_RELEASE["image"]
     assert scan["variables"]["SKILL_EVAL_TIMEOUT_SECONDS"] == "2700"
-    assert scan["variables"]["SKILL_EVAL_JOB_TIMEOUT"] == "45 minutes"
+    assert "SKILL_EVAL_JOB_TIMEOUT" not in scan["variables"]
+    assert scan["skill-evaluation-native"]["timeout"] == "45 minutes"
     assert scan["variables"]["SKILL_EVAL_RUNNER"] == "docker"
     assert scan["skill-evaluation-native"]["services"] == []
 
@@ -400,3 +401,17 @@ def test_candidate_descriptor_is_declared_as_package_data():
 
     project = tomllib.loads((Path(__file__).parents[1] / "pyproject.toml").read_text())
     assert "ci-release-all-tiers.json" in project["tool"]["setuptools"]["package-data"]["skillevaluator"]
+
+
+@pytest.mark.parametrize("minutes", [45, 300])
+def test_gitlab_docker_render_sets_a_literal_job_timeout(repository, all_release, minutes):
+    subprocess.run(
+        ["git", "-C", str(repository), "remote", "set-url", "origin", "https://gitlab.example.test/group/consumer.git"],
+        check=True,
+    )
+    result = invoke(repository, all_release, "--mode", "save", "--timeout-minutes", str(minutes))
+    assert result.exit_code == 0, result.output
+    scan = yaml.safe_load((repository / ".gitlab-ci.yml").read_text())
+    assert scan["skill-evaluation-native"] == {"timeout": f"{minutes} minutes"}
+    assert scan["variables"]["SKILL_EVAL_TIMEOUT_SECONDS"] == str(minutes * 60)
+    assert "SKILL_EVAL_JOB_TIMEOUT" not in scan["variables"]

@@ -42,8 +42,10 @@ Local agent CLIs are pinned and bootstrapped before selected-mode readiness
 checks. The current same-project MR head is checked before model execution;
 fork MRs do not receive provider-backed jobs.
 
-Protect the default branch and create a scoped bot token able to read pipeline
-artifacts and update MR notes. Store it as masked, protected
+Protect the default branch and create a project access token with `api` scope
+and the Maintainer role. The publisher reads source-pipeline variables to verify
+provenance as well as reading artifacts and updating MR notes; GitLab 17.8
+rejects the variables request for a Developer token. Store the token as masked, protected
 `SKILLEVALUATOR_GITLAB_TOKEN`, scoped only to the protected
 `skillevaluator-feedback` environment. The MR pipeline never receives that
 token. After aggregation, a declarative bridge requests a separate pipeline on the
@@ -62,6 +64,18 @@ that restrict protected variables in MR pipelines, approve an eligible protected
 execution path according to your project policy; missing provider credentials
 remain actionable evidence rather than a pass. Review the pipeline's actual
 required aggregate check before enabling merge restrictions.
+
+The CLI's `--timeout-minutes` option writes a literal native-job duration and
+the corresponding runtime budget. The default is 300 minutes. On GitLab 17.8,
+CI variables are not expanded in a job's `timeout` field. For a manual consumer,
+set the literal directly:
+
+```yaml
+variables:
+  SKILL_EVAL_TIMEOUT_SECONDS: '2700'
+skill-evaluation-native:
+  timeout: 45 minutes
+```
 
 ## Get started
 

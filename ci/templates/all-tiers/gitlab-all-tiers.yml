@@ -15,6 +15,7 @@ variables:
   SKILL_EVAL_PROVIDER: openai
   SKILL_EVAL_RUNNER: docker
   SKILL_EVAL_ENVIRONMENT: skillevaluator
+  SKILL_EVAL_TIMEOUT_SECONDS: '18000'
   SKILL_EVAL_TIER3_REQUIRED: 'false'
 skill-evaluation:
   rules:
@@ -23,3 +24,7 @@ skill-evaluation:
     - if: '$CI_PIPELINE_SOURCE == "merge_request_event"'
     - if: '$CI_COMMIT_BRANCH == $CI_DEFAULT_BRANCH'
     - if: '$CI_PIPELINE_SOURCE == "web"'
+
+# Job duration must be a literal; GitLab 17.8 does not expand CI variables here.
+skill-evaluation-native:
+  timeout: 5 hours

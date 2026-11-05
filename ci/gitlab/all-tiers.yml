@@ -6,7 +6,6 @@ variables:
   SKILL_EVAL_MIN_SCORE: '70'
   SKILL_EVAL_RUNNER: docker
   SKILL_EVAL_ENVIRONMENT: skillevaluator
-  SKILL_EVAL_JOB_TIMEOUT: 5 hours
   SKILL_EVAL_TIERS: '1,2,3'
   SKILL_EVAL_ENV_MODE: docker
   SKILL_EVAL_PROVIDER: openai
@@ -131,7 +130,7 @@ skill-evaluation-native:
   allow_failure: true
   extends: .skill-evaluation-tools
   stage: test
-  timeout: $SKILL_EVAL_JOB_TIMEOUT
+  timeout: 5 hours
   tags: [$SKILL_EVAL_RUNNER]
   environment:
     name: $SKILL_EVAL_ENVIRONMENT

@@ -114,7 +114,9 @@ NVIDIA Build uses OpenCode. CI installs Tier 2 or Tier 3 extras from the reviewe
 tools commit. Tier 3 checks the selected environment with `doctor`; local mode
 also installs pinned native CLIs into an isolated runtime directory.
 
-`--runner` chooses a GitHub runner label or GitLab runner tag. GitHub defaults
+`--timeout-minutes` sets the runtime budget and native job duration (300 by
+default). GitLab receives a literal duration so the configuration also works on
+GitLab 17.8. `--runner` chooses a GitHub runner label or GitLab runner tag. GitHub defaults
 to `ubuntu-24.04`; GitLab defaults to a configured `docker` tag. Docker mode
 requires a working daemon, Docker CLI, Compose v2 and Buildx; GitLab's included Docker-in-Docker service requires
 a privileged runner. Local mode needs a compatible native runner with Node/npm;
@@ -124,7 +126,8 @@ sandbox backends are outside this onboarding path.
 Merge both generated files onto the default branch **before opening the demo**.
 The first setup PR/MR can show evaluation checks, but automatic comments need
 the trusted feedback entrypoint to exist on the default branch. GitLab also
-needs a protected default branch and a scoped, protected
+needs a protected default branch and a project access token with `api` scope
+and the Maintainer role, stored as a scoped, protected
 `SKILLEVALUATOR_GITLAB_TOKEN` limited to the `skillevaluator-feedback`
 environment. The MR jobs receive no comment token. See the platform pages for
 [GitHub](github-actions.mdx#three-tier-checks-and-feedback) and

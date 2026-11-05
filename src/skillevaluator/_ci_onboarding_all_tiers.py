@@ -307,7 +307,6 @@ def render(wizard, repo, release, platform, branch, roots, options):
             "SKILL_EVAL_PATHS": "\n".join(roots),
             "SKILL_EVAL_IMAGE": release["image"],
             "SKILL_EVAL_TIMEOUT_SECONDS": str(options["timeout_minutes"] * 60),
-            "SKILL_EVAL_JOB_TIMEOUT": str(options["timeout_minutes"]) + " minutes",
             "SKILL_EVAL_TOOLS_REPOSITORY": release["repository"],
             "SKILL_EVAL_TOOLS_REF": release["tools_ref"],
             "SKILL_EVAL_ENVIRONMENT": options["environment"],
@@ -349,8 +348,10 @@ def render(wizard, repo, release, platform, branch, roots, options):
             ]
         },
     }
+    # GitLab 17.8 validates job timeout before expanding CI variables.
+    scan["skill-evaluation-native"] = {"timeout": str(options["timeout_minutes"]) + " minutes"}
     if options["env_mode"] == "local":
-        scan["skill-evaluation-native"] = {"services": []}
+        scan["skill-evaluation-native"]["services"] = []
     _, origin, project = remote(repo, "gitlab")
     feedback_include = {
         "remote": upstream + "feedback.yml",

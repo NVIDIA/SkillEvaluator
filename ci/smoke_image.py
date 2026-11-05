@@ -261,6 +261,11 @@ def verify_case(directory: Path, case: str, exit_code: int) -> dict:
             _require(row.get("report_dir") == f"skill-{index:03d}", "Unexpected child report location")
             child = directory / row["report_dir"]
             data = _load(child / "skillevaluator-tier1.json")
+            policy = data.get("policy", {})
+            _require(
+                policy.get("profile") == "default" and policy.get("audience") == "all",
+                "The image did not report the shared default OSS policy",
+            )
             expected_pass = not (failing and row["path"] == "skills/glossary-builder")
             _require(
                 row.get("passed") is expected_pass and data.get("overall_passed") is expected_pass,

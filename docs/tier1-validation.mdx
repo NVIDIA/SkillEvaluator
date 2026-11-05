@@ -113,20 +113,26 @@ skillevaluator validate ./skills --type skill --continue-on-failure
 
 ## Validation profiles and policies
 
-The bundled `external` profile is the default public-publication policy. It requires a well-formed `metadata.author` value but does not restrict the email domain. Missing or malformed author attribution is HIGH severity. Blocked license findings are CRITICAL; missing or unknown licenses are reported for review.
+The bundled `default` policy applies to both public and private repositories.
+It requires a well-formed `metadata.author` value but does not restrict the email
+domain. Missing or malformed author attribution is HIGH severity. Blocked license
+findings are CRITICAL; missing or unknown licenses are reported for review.
+The policy controls validation rules, not repository visibility or report hosting.
+The old `external` name and `--external` flag remain compatibility aliases for
+this same policy; there is no separate bundled `internal` policy.
 
 ```bash title="Profile selection"
-skillevaluator validate ./my-skill                         # default = external
-skillevaluator validate ./my-skill --profile external      # explicit public profile
-skillevaluator validate ./my-skill --external              # alias for --profile external
+skillevaluator validate ./my-skill                         # default policy
+skillevaluator validate ./my-skill --profile default       # explicit default policy
+skillevaluator validate ./my-skill --external              # compatibility alias
 skillevaluator validate ./my-skill --policy ./policy.yaml  # custom overlay
-SKILLEVALUATOR_PROFILE=external skillevaluator validate ./my-skill
+SKILLEVALUATOR_PROFILE=default skillevaluator validate ./my-skill
 ```
 
-Precedence, highest to lowest: `--policy` overlay, `--profile` flag, `SKILLEVALUATOR_PROFILE` environment variable, then the bundled `external` default.
+Precedence, highest to lowest: `--policy` overlay, `--profile` flag, `SKILLEVALUATOR_PROFILE` environment variable, then the bundled `default` policy.
 
 <Accordion title="Write a custom policy overlay">
-  A custom policy overlays the external profile. It can narrow the accepted author domain and change severities by `CATEGORY.check_name` or `CATEGORY.*`:
+  A custom policy overlays the default rules. It can narrow the accepted author domain and change severities by `CATEGORY.check_name` or `CATEGORY.*`:
 
   ```yaml title="policy.yaml"
   profile: community-strict
@@ -143,7 +149,7 @@ Precedence, highest to lowest: `--policy` overlay, `--profile` flag, `SKILLEVALU
 </Accordion>
 
 <Note>
-  The active profile name is stamped into the HTML report header and `BENCHMARK.md`, and printed in the run banner under `--verbose`, so reviewers can see which gate was applied.
+  The active profile name is stamped into the HTML report header and JSON report, and printed in the run banner under `--verbose`, so reviewers can see which gate was applied.
 </Note>
 
 ## The checks
@@ -256,7 +262,7 @@ For `validate`, the default set is `schema`, `version`, `security`, `pii`, `lice
   </Accordion>
 
   <Accordion title="license — compliance">
-    Looks for license evidence in frontmatter, common license files, and SPDX headers. Detected identifiers are normalized and matched against the packaged permissive allowlist and restrictive blocklist. Missing or unknown licenses are reported for review; blocked licenses fail according to the active profile (CRITICAL under the default `external` profile).
+    Looks for license evidence in frontmatter, common license files, and SPDX headers. Detected identifiers are normalized and matched against the packaged permissive allowlist and restrictive blocklist. Missing or unknown licenses are reported for review; blocked licenses fail according to the active policy (CRITICAL under the bundled `default` policy).
 
     Frontmatter values and SPDX headers can be SPDX license expressions with `AND`, `OR`, `WITH`, and parentheses, such as `MIT OR Apache-2.0`. An expression passes only when every license in it is allowed, and any blocked license fails it. The `+`, `-only`, and `-or-later` forms of a blocked license, such as `GPL-3.0+` or `LGPL-2.1-only`, and deprecated ids such as `GPL-2.0-with-classpath-exception` are blocked too. A `WITH` exception keeps an allowed license allowed only when it is in the packaged `allowed_license_exceptions` list (`LLVM-exception`, `Swift-exception`); other exceptions are reported for review. An expression that uses an upper-case `AND`, `OR`, or `WITH` but has unbalanced parentheses or a missing or repeated operator fails with an `unsupported_license_expression` finding. A value without those operators, such as `MIT License` or `MIT License (MIT)`, is treated as a license name: it is matched by name as before or reported for review. A blocked license fails the value even when it does not parse, so `GPL-3.0 (or later)` and `(GPL-3.0 OR MIT` are blocked.
   </Accordion>
@@ -478,7 +484,7 @@ The command line rejects a malformed waiver file before the run starts, with exi
 
 Install `skillevaluator[security]` for the bundled Python scanners (Bandit and pip-audit). Install Semgrep and SkillSpector in separate tool environments, and install Gitleaks separately — it is a Go binary, not a pip package. See [Installation](installation.mdx) for commands and the extras table.
 
-Semgrep uses a policy packaged with the installed distribution, with metrics and version checks disabled; Tier 1 never fetches a registry policy at runtime. The other public Tier 1 configuration also ships inside the package under `skillevaluator/config/`: `pii_patterns.yaml`, `unicode_smuggle_patterns.yaml`, `license_config.yaml`, and `profiles/external.yaml`.
+Semgrep uses a policy packaged with the installed distribution, with metrics and version checks disabled; Tier 1 never fetches a registry policy at runtime. The other public Tier 1 configuration also ships inside the package under `skillevaluator/config/`: `pii_patterns.yaml`, `unicode_smuggle_patterns.yaml`, `license_config.yaml`, and `profiles/default.yaml`.
 
 Bundled Python scanners resolve next to the SkillEvaluator interpreter before `PATH`; external Semgrep and SkillSpector installations resolve from `PATH`. Intentional replacements require an auditable absolute executable path in `SKILLEVALUATOR_BANDIT_PATH`, `SKILLEVALUATOR_SEMGREP_PATH`, or `SKILLEVALUATOR_SKILLSPECTOR_PATH`.
 

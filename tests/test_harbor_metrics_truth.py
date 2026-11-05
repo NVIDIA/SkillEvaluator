@@ -698,6 +698,63 @@ def test_lift_leaves_out_multistep_cases_whose_steps_used_a_fallback_judge() -> 
     assert lift["judge_mixed_cases"] == {"accuracy": 1}
 
 
+def test_lift_leaves_out_goal_cases_scored_by_ragas_in_one_arm_only() -> None:
+    def goal_reward(case_id: str, score: float, method: str, step: int | None = None) -> dict:
+        reward = {
+            "entry_id": case_id,
+            "_trial_name": f"{case_id}__attempt1",
+            "metric_set": DEFAULT_METRIC_SET,
+            **dict.fromkeys(DEFAULT_METRICS, 0.5),
+            "goal_accuracy": score,
+            "details": {"goal_accuracy": {"score": score, "method": method, "judge_model_used": "gpt-4.1"}},
+        }
+        if step is not None:
+            reward |= {"_trial_root_name": f"{case_id}__attempt1", "_step_name": f"step-{step}"}
+        return reward
+
+    with_scores = dict.fromkeys(DEFAULT_METRICS, 0.5) | {"goal_accuracy": 0.9}
+    without_scores = dict.fromkeys(DEFAULT_METRICS, 0.5) | {"goal_accuracy": 0.2}
+    expected = {"with_skill": 0.8, "without_skill": 0.4, "delta": 0.4, "direction": "up"}
+
+    # The same model scored both arms, but RAGAS fell back to the prompt judge in one of them.
+    with_rewards = [goal_reward("case-1", 1.0, "ragas"), goal_reward("case-2", 0.8, "ragas")]
+    without_rewards = [goal_reward("case-1", 0.0, "custom"), goal_reward("case-2", 0.4, "ragas")]
+    lift = _compute_lift(with_scores, without_scores, with_rewards, without_rewards, ["case-1", "case-2"])
+    assert lift["goal_accuracy"] == expected
+    assert lift["judge_mixed_cases"] == {"goal_accuracy": 1}
+
+    # Two prompt-judged arms with the same model still pair.
+    same = _compute_lift(
+        with_scores,
+        without_scores,
+        [goal_reward("case-1", 0.8, "custom")],
+        [goal_reward("case-1", 0.4, "custom")],
+        ["case-1"],
+    )
+    assert "judge_mixed_cases" not in same
+
+    # A multi-step attempt whose steps used different scorers is left out too.
+    multistep_with = _logical_attempt_rewards(
+        [
+            goal_reward("case-1", 1.0, "ragas", step=1),
+            goal_reward("case-1", 1.0, "custom", step=2),
+            goal_reward("case-2", 0.8, "ragas", step=1),
+            goal_reward("case-2", 0.8, "ragas", step=2),
+        ]
+    )
+    multistep_without = _logical_attempt_rewards(
+        [
+            goal_reward("case-1", 0.0, "ragas", step=1),
+            goal_reward("case-1", 0.0, "ragas", step=2),
+            goal_reward("case-2", 0.4, "ragas", step=1),
+            goal_reward("case-2", 0.4, "ragas", step=2),
+        ]
+    )
+    lift = _compute_lift(with_scores, without_scores, multistep_with, multistep_without, ["case-1", "case-2"])
+    assert lift["goal_accuracy"] == expected
+    assert lift["judge_mixed_cases"] == {"goal_accuracy": 1}
+
+
 def test_pass_summary_marks_incomplete_reward_unscored() -> None:
     reward = {
         "entry_id": "case-001",

@@ -291,6 +291,15 @@ All notable changes to SkillEvaluator are documented in this file.
   upgrade, or not matched by the LLM stage, are reported instead of silently
   suppressing nothing; fingerprints only match static-only runs.
 
+- `scripts/ci/check_public_benchmarks.py` accepts `--expected-source-repository`,
+  `--expected-source-revision` and `--expected-evaluator-container-revision`,
+  so a publishing pipeline can check that each card names the source it asked
+  to evaluate. A card of any verdict fails when the matching `Evaluated source`,
+  `Evaluated source revision` or `Evaluator container revision` line is
+  missing, `not recorded`, malformed, duplicated or different. Values are
+  compared in the canonical form the card records, and any of these options
+  implies `--require-files`. Without them the scan is unchanged.
+
 ### Changed
 
 - Shared LLM calls and the Harbor verifier retry HTTP 408, 429, and every 5xx

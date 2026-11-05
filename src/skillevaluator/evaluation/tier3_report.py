@@ -39,6 +39,13 @@ from skillevaluator.constants import (
     TIER3_LIFT_FAIL_THRESHOLD,
     TIER3_LIFT_PASS_THRESHOLD,
 )
+from skillevaluator.evaluation.tier3_findings import (
+    TRIAL_PASS_THRESHOLD,
+    failure_excerpt,
+    failure_reason,
+    sanitize_grader_text,
+    strip_failure_reason_text,
+)
 from skillevaluator.evidence import evidence_ref_identity
 from skillevaluator.models.result import Finding, Severity, ValidationResult
 from skillevaluator.source_identity import resolve_evaluated_source
@@ -838,6 +845,11 @@ def build_agent_eval_payload(
     metric_ids = list(best.get("evaluators", {}).keys())
     metric_labels = _metric_labels(metric_ids)
     canonical_trials = _flatten_trials(agent_payloads)
+    # The drill-down reads with-skill reasons from the flattened trials and
+    # baseline reasons from ``trials_baseline``, so keep one copy of each.
+    for agent in agent_payloads.values():
+        for trial in agent.get("trials", []):
+            trial.pop("score_reasons", None)
     public_dataset = deduplicate_dataset_entries([entry for entry in (dataset or []) if isinstance(entry, dict)])
     computed_dataset_truth = (
         build_dataset_snapshot(public_dataset, evaluator_version=evaluator_version or "") if public_dataset else None
@@ -1350,6 +1362,13 @@ def _enforce_report_payload_budget(
     _prune_pass_at_k_pairing_diagnostics(payload, report_budget)
     refresh_signal()
     if not enforce_size or _serialized_payload_size(payload) <= _MAX_EMBEDDED_REPORT_BYTES:
+        return
+
+    # Built failure reasons and excerpts only explain scores the payload already
+    # carries, so they go before any recorded evidence.
+    report_budget.omit("failure_reasons", strip_failure_reason_text(payload))
+    refresh_signal()
+    if _serialized_payload_size(payload) <= _MAX_EMBEDDED_REPORT_BYTES:
         return
 
     provenance = payload.get("provenance")
@@ -2483,6 +2502,24 @@ def _bounded_custom_metric_names(
     return names, False
 
 
+def _metric_detail(reward: dict[str, Any], metric: str) -> dict[str, Any] | None:
+    """Return the grader detail that explains one metric score in ``reward``."""
+    from skillevaluator.tier3.harbor.metrics import DEFAULT_METRICS
+
+    custom_details = reward.get("custom_details")
+    custom_detail_is_authoritative = (
+        metric not in DEFAULT_METRICS and isinstance(custom_details, dict) and metric in custom_details
+    )
+    if custom_detail_is_authoritative:
+        detail = custom_details[metric]
+    else:
+        details = reward.get("details")
+        detail = details.get(metric) if isinstance(details, dict) else None
+        if not isinstance(detail, dict):
+            detail = custom_details.get(metric) if isinstance(custom_details, dict) else None
+    return detail if isinstance(detail, dict) else None
+
+
 def _metric_evidence(
     metric: str,
     rewards: list[dict[str, Any]],
@@ -2510,28 +2547,19 @@ def _metric_evidence(
             continue
         if metric in DEFAULT_METRICS and metric not in metric_set_for_reward(reward)[1]:
             continue
-        custom_details = reward.get("custom_details")
-        custom_detail_is_authoritative = (
-            metric not in DEFAULT_METRICS and isinstance(custom_details, dict) and metric in custom_details
-        )
-        if custom_detail_is_authoritative:
-            detail = custom_details[metric]
-        else:
-            details = reward.get("details")
-            detail = details.get(metric) if isinstance(details, dict) else None
-            if not isinstance(detail, dict):
-                detail = custom_details.get(metric) if isinstance(custom_details, dict) else None
-        if not isinstance(detail, dict):
+        detail = _metric_detail(reward, metric)
+        if detail is None:
             continue
 
         raw_score = _finite_float(reward.get(metric))
         if raw_score is None:
             raw_score = _custom_metric_value(reward, metric)
+        score_failed = raw_score is not None and raw_score < TRIAL_PASS_THRESHOLD
 
         notes: list[str] = []
-        reason = detail.get("reason")
-        if isinstance(reason, str) and reason.strip():
-            notes.append(reason.strip()[:512])
+        reason = sanitize_grader_text(detail.get("reason"))
+        if reason:
+            notes.append(reason[:512])
 
         failures: list[str] = []
         results = detail.get("results")
@@ -2539,9 +2567,9 @@ def _metric_evidence(
             for result in results:
                 if not isinstance(result, dict) or result.get("passed") is not False:
                     continue
-                failure = result.get("reason")
-                if isinstance(failure, str) and failure.strip():
-                    failures.append(failure.strip()[:512])
+                failure = sanitize_grader_text(result.get("reason"))
+                if failure:
+                    failures.append(failure[:512])
                 if len(failures) == 3:
                     break
 
@@ -2558,6 +2586,9 @@ def _metric_evidence(
             "checks": checks,
             "evidence_refs": _compact_evidence_refs(detail.get("evidence_refs")),
         }
+        # The built reason and excerpt are not part of the fingerprint: attempts
+        # of one case often quote different commands under the same grader
+        # reason, and they still collapse into one entry with ``occurrences``.
         fingerprint = json.dumps(
             entry,
             sort_keys=True,
@@ -2575,6 +2606,15 @@ def _metric_evidence(
             report_budget.omit("evidence_entries")
             output_truncated = True
             continue
+        if score_failed:
+            # Graders that record only a message, findings, or failed criteria
+            # still explain a failing score. The built reason stays separate from
+            # the grader's own notes so size limits can drop it first, and leaves
+            # out failing results, which the card already lists as ``failures``.
+            if not notes and (fallback_reason := failure_reason(detail, include_results=False)):
+                entry["reason"] = fallback_reason
+            if excerpt := failure_excerpt(detail):
+                entry["excerpt"] = excerpt
         evidence.append(entry)
         by_fingerprint[fingerprint] = entry
         report_budget.evidence_remaining -= 1
@@ -2882,6 +2922,10 @@ def _normalize_trials(rewards: list[dict[str, Any]], metrics: list[str]) -> list
         from skillevaluator.tier3.harbor.metrics import not_applicable_metrics
 
         trial["not_applicable_metrics"] = not_applicable_metrics(group, metrics)
+        # One extraction point for the drill-down tooltips of both arms.
+        score_reasons = _trial_score_reasons(standard_rows, scores)
+        if score_reasons:
+            trial["score_reasons"] = score_reasons
         seconds = _finite_float(reward.get("_agent_seconds"))
         if not is_multi_row and seconds is not None and seconds >= 0:
             trial["agent_seconds"] = seconds
@@ -2929,6 +2973,37 @@ def _normalize_trials(rewards: list[dict[str, Any]], metrics: list[str]) -> list
             trial["harbor_viewer"] = harbor_viewer
         out.append(trial)
     return out
+
+
+def _trial_score_reasons(
+    rows: list[tuple[dict[str, Any], tuple[str, ...]]],
+    scores: dict[str, float],
+) -> dict[str, str]:
+    """Return one bounded grader reason per failing metric of a logical trial.
+
+    A logical trial can span several reward rows. The reason comes from the
+    lowest-scoring row that explains the metric, so a passing row cannot hide a
+    failure behind the averaged score.
+    """
+    from skillevaluator.tier3.harbor.metrics import metric_value
+
+    reasons: dict[str, str] = {}
+    for metric in scores:
+        lowest: tuple[float, str] | None = None
+        for row, row_metrics in rows:
+            if metric not in row_metrics:
+                continue
+            row_score = metric_value(row, metric)
+            if row_score is None or row_score >= TRIAL_PASS_THRESHOLD:
+                continue
+            if lowest is not None and row_score >= lowest[0]:
+                continue
+            reason = failure_reason(_metric_detail(row, metric))
+            if reason:
+                lowest = (row_score, reason)
+        if lowest is not None:
+            reasons[metric] = lowest[1]
+    return reasons
 
 
 def _attach_baseline_pairs(

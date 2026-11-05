@@ -6491,6 +6491,7 @@ def _run_llm_scan(
     exit_code: int = 2,
     static_issues: list[dict] | None = None,
     error_message: str | None = None,
+    baseline: Path | None = None,
 ) -> ValidationResult:
     """Run a static stage that completes, then an LLM stage that returns *llm_report*."""
     mock_tools.skillspector.is_available = True
@@ -6509,7 +6510,7 @@ def _run_llm_scan(
             error_message=error_message,
         ),
     ]
-    return SecurityValidator(use_llm=True).validate_security_only(skill_dir)
+    return SecurityValidator(use_llm=True, skillspector_baseline=baseline).validate_security_only(skill_dir)
 
 
 class TestSkillspectorProviderOutage:
@@ -6546,6 +6547,28 @@ class TestSkillspectorProviderOutage:
         cli_text = " ".join(re.sub(r"\x1b\[[0-9;]*m", "", CLIReporter().render_all([result])).split())
         assert "[INCOMPLETE] skillspector-llm did not complete" in cli_text
         assert "retriable provider failure, not a security finding" in cli_text
+
+    @patch("skillevaluator.validators.security.Tools")
+    def test_provider_outage_with_a_baseline_gets_only_the_retry_advice(
+        self,
+        mock_tools,
+        sample_skill_dir: Path,
+        tmp_path: Path,
+    ) -> None:
+        baseline = tmp_path / "audit" / "skillspector-baseline.yaml"
+        baseline.parent.mkdir()
+        baseline.write_text(
+            'version: 2\nrules:\n  - id: "PE5"\n    path: "SKILL.md"\n    reason: "Reviewed"\n',
+            encoding="utf-8",
+        )
+
+        result = _run_llm_scan(mock_tools, sample_skill_dir, _skillspector_provider_outage_report(), baseline=baseline)
+
+        assert result.incomplete_scans == ["skillspector-llm"]
+        [error] = result.errors
+        assert error.startswith(_PROVIDER_OUTAGE_ERROR_START)
+        assert "--baseline" not in error
+        assert ".." not in error
 
     @patch("skillevaluator.validators.security.Tools")
     def test_provider_failure_keeps_static_findings_and_failed_verdict(

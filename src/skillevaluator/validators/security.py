@@ -1973,7 +1973,9 @@ class SecurityValidator(ValidatorBase):
             ):
                 # The stage stays incomplete; only the explanation changes.
                 detail = _skillspector_provider_retry_error(stage_name)
-            if (
+            elif (
+                # SkillSpector uses exit code 2 for both; a provider outage report
+                # proves it accepted its input, including the baseline.
                 baseline is not None
                 and tool_result.error_message is None
                 and tool_result.exit_code == _SKILLSPECTOR_INPUT_ERROR_EXIT_CODE

@@ -424,12 +424,15 @@ def _skillspector_report_llm_provenance(report: object) -> dict | None:
     return sanitize_skillspector_llm_provenance(metadata.get("llm_provenance"))
 
 
-# SkillSpector 2.11.2 and later records an LLM provider error that persists after
-# its own bounded retries as a fatal ``llm_connection_retries_exhausted`` ledger
-# row. A fatal row makes ``execution_successful`` false, and the scan command
-# prints the report before it exits with this code.
+# SkillSpector 2.12.0 and later retries transient provider failures, such as rate
+# limits, in its own bounded loop and records a fatal
+# ``llm_connection_retries_exhausted`` ledger row when that loop gives up. A
+# fatal row makes ``execution_successful`` false, and the scan command prints the
+# report before it exits with this code. Releases 2.9.1 to 2.11.2 used the same
+# reason only for a connection error left after the provider SDK's own retries,
+# so their reports keep the generic error.
 _SKILLSPECTOR_EXECUTION_FAILED_EXIT_CODE = 2
-_SKILLSPECTOR_PROVIDER_RETRY_VERSION = (2, 11, 2)
+_SKILLSPECTOR_PROVIDER_RETRY_VERSION = (2, 12, 0)
 _SKILLSPECTOR_PROVIDER_RETRY_REASON = "llm_connection_retries_exhausted"
 _SKILLSPECTOR_PROVIDER_RETRY_MAX_ROWS = 4096
 _SKILLSPECTOR_PROVIDER_RETRY_MAX_MESSAGE = 4096

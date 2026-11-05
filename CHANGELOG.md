@@ -691,7 +691,7 @@ All notable changes to SkillEvaluator are documented in this file.
   SkillSpector's bounded retries no longer reports only
   `skillspector-llm failed with unexpected exit code 2: scanner diagnostics were redacted`
   (or `skillspector reported execution_successful=false`). When every failure
-  in the SkillSpector v2.11.2+ report is an `llm_connection_retries_exhausted`
+  in the SkillSpector v2.12.0+ report is an `llm_connection_retries_exhausted`
   row on an LLM analyzer, the error says that the provider kept failing, that
   this is a retriable provider failure rather than a security finding, and
   that the full scan should be retried when the provider is available. Mixed,

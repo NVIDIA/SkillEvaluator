@@ -5881,6 +5881,37 @@ class TestSkillspectorProviderOutage:
 
     @pytest.mark.parametrize("exit_code", [2, 0])
     @pytest.mark.parametrize(
+        ("version", "provider_message"),
+        [("2.11.2", False), ("2.12.0", True)],
+        ids=["sdk-retries-only", "own-retry-loop"],
+    )
+    @patch("skillevaluator.validators.security.Tools")
+    def test_provider_message_needs_skillspector_2_12_0(
+        self,
+        mock_tools,
+        version: str,
+        provider_message: bool,
+        exit_code: int,
+        sample_skill_dir: Path,
+    ) -> None:
+        """Before 2.12.0 the reason covered only a connection error left after the provider SDK's retries."""
+        payload = _skillspector_provider_outage_report()
+        payload["metadata"]["skillspector_version"] = version
+
+        result = _run_llm_scan(mock_tools, sample_skill_dir, payload, exit_code=exit_code)
+
+        assert result.status == "incomplete"
+        assert result.incomplete_scans == ["skillspector-llm"]
+        if provider_message:
+            assert len(result.errors) == 1
+            assert result.errors[0].startswith(_PROVIDER_OUTAGE_ERROR_START)
+        else:
+            assert not any("LLM provider kept failing" in error for error in result.errors)
+            if exit_code == 2:
+                assert result.errors == [_GENERIC_LLM_EXIT_2_ERROR]
+
+    @pytest.mark.parametrize("exit_code", [2, 0])
+    @pytest.mark.parametrize(
         "mutation",
         [
             "mixed_static_failure",

@@ -541,7 +541,33 @@ def test_case_evidence_is_capped_for_large_datasets(monkeypatch: pytest.MonkeyPa
     payload = {"dataset": [{"id": f"case-{i:03d}", "question": "Q" * 100} for i in range(50)]}
     context = compact_run_context(payload, run_dir=Path("/runs/demo"))
     assert 0 < len(context["cases"]) < 50
-    assert context["cases_omitted"] == 50 - len(context["cases"])
+    assert context["cases_omitted"] == {"default": 50 - len(context["cases"])}
+
+
+def test_case_evidence_cap_keeps_every_agent(monkeypatch: pytest.MonkeyPatch) -> None:
+    # Over the budget, each agent keeps the same leading cases; no agent is dropped whole.
+    monkeypatch.setattr(tier3_feedback_chat, "_MAX_CASE_EVIDENCE_CHARS", 6_000)
+    agents = ("codex", "gemini-cli", "opencode")
+    n_cases = 40
+
+    def trials() -> list[dict[str, Any]]:
+        return [{"entry_id": f"case-{i:02d}", "overall": 0.5} for i in range(n_cases) for _ in range(3)]
+
+    payload = {
+        "dataset": [{"id": f"case-{i:02d}", "question": f"Question {i}"} for i in range(n_cases)],
+        "agents": {name: {"trials": trials(), "trials_baseline": trials()} for name in agents},
+    }
+    context = compact_run_context(payload, run_dir=Path("/runs/demo") / RUN_ID)
+
+    kept: dict[str, list[str]] = {name: [] for name in agents}
+    for row in context["cases"]:
+        kept[row["agent"]].append(row["entry_id"])
+    assert all(kept[name] for name in agents)
+    # Rows stay grouped by agent and in case order.
+    assert [row["agent"] for row in context["cases"]] == sorted(row["agent"] for row in context["cases"])
+    assert all(ids == sorted(ids) for ids in kept.values())
+    assert max(map(len, kept.values())) - min(map(len, kept.values())) <= 1
+    assert context["cases_omitted"] == {name: n_cases - len(kept[name]) for name in agents}
 
 
 # -- session --------------------------------------------------------------------

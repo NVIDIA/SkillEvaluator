@@ -47,7 +47,7 @@ _MAX_FEEDBACK_CHARS = 600
 # ``_summarize_dimensions`` keeps this many characters of each explanation.
 _MAX_EXPLANATION_CHARS = 600
 # The case rows are re-sent with every question. Rows past this many characters
-# of compact JSON are left out and counted in ``cases_omitted``.
+# of compact JSON are left out and counted per agent in ``cases_omitted``.
 _MAX_CASE_EVIDENCE_CHARS = 300_000
 
 _SYSTEM_PROMPT = """\
@@ -68,7 +68,9 @@ advice accordingly.
 evidence. Do not propose a skill change as the remedy for an unrelated failure.
 - Respect comparison coverage: a null delta or an unavailable measurement means the run \
 did not measure it. Token and agent-second totals cover the agent only, not judge or \
-setup time. When cases_omitted is set, say that those cases are not in the evidence.
+setup time. cases_omitted counts, per agent, the case rows left out of the evidence \
+(the cases after that agent's last listed case); when it is set, say which agent's \
+cases are not in the evidence.
 - Focus on concrete, reviewable skill changes when evidence supports them. Explain \
 quality, time and cost tradeoffs and uncertainty under the user's thresholds.
 - Treat a proposed improvement as unverified until another evaluation supports it; say \
@@ -443,16 +445,30 @@ def _summarize_cases_for_feedback(payload: dict[str, Any], scrub: _Scrubber) -> 
     return sorted(rows.values(), key=lambda row: (str(row.get("agent")), str(row.get("entry_id"))))
 
 
-def _bounded_cases(cases: list[dict[str, Any]]) -> tuple[list[dict[str, Any]], int]:
-    """Keep case rows up to the evidence budget; return them and the number left out."""
+def _row_key(row: dict[str, Any]) -> tuple[str, str]:
+    return str(row.get("agent")), str(row.get("entry_id"))
+
+
+def _bounded_cases(cases: list[dict[str, Any]]) -> tuple[list[dict[str, Any]], dict[str, int]]:
+    """Keep case rows up to the evidence budget; return them and the rows left out per agent.
+
+    The budget is spent one case at a time across agents, so a run over the
+    budget keeps the same leading cases for every agent instead of dropping
+    whole agents. Kept rows are returned in agent and case order.
+    """
+    by_case = sorted(cases, key=lambda row: _row_key(row)[::-1])
     kept: list[dict[str, Any]] = []
     used = 0
-    for index, row in enumerate(cases):
+    for index, row in enumerate(by_case):
         used += len(json.dumps(row, separators=(",", ":"), default=str)) + 1
         if used > _MAX_CASE_EVIDENCE_CHARS:
-            return kept, len(cases) - index
+            omitted: dict[str, int] = {}
+            for left_out in by_case[index:]:
+                agent = _row_key(left_out)[0]
+                omitted[agent] = omitted.get(agent, 0) + 1
+            return sorted(kept, key=_row_key), dict(sorted(omitted.items()))
         kept.append(row)
-    return kept, 0
+    return sorted(kept, key=_row_key), {}
 
 
 def _feedback_items(raw: Any, scrub: _Scrubber) -> list[Any]:

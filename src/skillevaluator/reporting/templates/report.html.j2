@@ -1213,6 +1213,8 @@
             box-shadow: var(--shadow);
         }
         .chart-card h3 { font-size: 0.95rem; color: var(--text-secondary); margin-bottom: 0.75rem; }
+        .chart-description,.chart-fallback { font-size: 0.82rem; color: var(--text-secondary); }
+        .chart-notices pre { white-space: pre-wrap; overflow-wrap: anywhere; font-size: 0.75rem; }
         .table-scroll { max-width: 100%; overflow-x: auto; margin: 1rem 0; border-radius: 10px; border: 1px solid var(--border-color); -webkit-overflow-scrolling: touch; }
         .table-scroll .summary-table { margin: 0; }
         .pass-at-k-table { min-width: 720px; }
@@ -2150,6 +2152,12 @@
         {# Helpers / locals used across the Tier 3 sub-tabs #}
         {% set t3_summary = tier3.summary or {} %}
         {% set t3_agents = tier3.agents or {} %}
+        {% macro tier3_chart(id, title, description, reference, reference_label, height) %}
+            <h3>{{ title }}</h3>
+            <p class="chart-description" id="{{ id }}-description">{{ description }} <a href="#{{ reference }}">{{ reference_label }}</a>.</p>
+            <canvas id="{{ id }}" height="{{ height }}" role="img" aria-label="{{ title }}" aria-describedby="{{ id }}-description" hidden></canvas>
+            <p class="chart-fallback" id="{{ id }}-fallback" role="status">Chart unavailable. Use the data link above to read the results.</p>
+        {% endmacro %}
         {% set t3_best_name = tier3.best_agent or t3_summary.best_agent %}
         {% set t3_best = t3_agents[t3_best_name] if t3_best_name and t3_agents[t3_best_name] is defined else None %}
         {% set t3_dim_ids = ["security", "correctness", "discoverability", "effectiveness", "efficiency"] %}
@@ -2604,7 +2612,7 @@
                     Consolidated evaluation dimensions. The Signals column shows which evaluator metrics feed each human-readable dimension.
                 </p>
                 <div class="table-scroll">
-                <table class="summary-table">
+                <table class="summary-table" id="tier3-dimension-table">
                     <thead><tr>
                         <th>Dimension</th><th>Score</th>
                         <th>Baseline</th><th>Skill Lift</th>
@@ -2670,7 +2678,7 @@
                     {% set _ = t3_mad_by_agent.update({name: dmap}) %}
                 {% endfor %}
                 <div class="table-scroll">
-                <table class="summary-table" style="width:100%;">
+                <table class="summary-table" id="tier3-multi-agent-dimension-table" style="width:100%;">
                     <thead><tr>
                         <th>Dimension</th>
                         {% for name, _agent in t3_agents.items() %}
@@ -2763,8 +2771,10 @@
                         </div>
                     {% endfor %}
                     </div>
-                    <div class="chart-card"><h3>Dimension Comparison (Radar)</h3><canvas id="tier3-radar" height="260"></canvas></div>
-                    <div class="chart-card"><h3>Dimension Scores by Agent</h3><canvas id="tier3-metric-bar" height="260"></canvas></div>
+                    {% set dimension_reference = ('tier3-multi-agent-dimension-table' if t3_agents | length > 1 else 'tier3-dimension-table') if tier3.dimensions else 'tier3-page-provenance' %}
+                    {% set dimension_reference_label = 'Read the dimension scores table' if tier3.dimensions else 'Read JSON Downloads (dimension scores unavailable)' %}
+                    <div class="chart-card">{{ tier3_chart('tier3-radar', 'Dimension Comparison (Radar)', 'Dimension scores for each agent, on a scale from 0 to 1; missing measurements are gaps.', dimension_reference, dimension_reference_label, 260) }}</div>
+                    <div class="chart-card">{{ tier3_chart('tier3-metric-bar', 'Dimension Scores by Agent', 'Dimension scores grouped by dimension and agent, on a scale from 0 to 1; missing measurements are gaps.', dimension_reference, dimension_reference_label, 260) }}</div>
                 </div>
                 </div>
             </details>
@@ -2987,8 +2997,8 @@
                 <summary>Trial Charts</summary>
                 <div class="t3-details-body">
                 <div class="chart-grid">
-                    {% if t3_token_coverage.all_agents_complete %}<div class="chart-card"><h3>With-Skill Token Usage by Agent</h3><canvas id="tier3-token-chart" height="250"></canvas></div>{% endif %}
-                    {% if t3_steps_chart.datasets %}<div class="chart-card"><h3>Steps per Eval Case by Agent and Condition</h3><canvas id="tier3-steps-chart" height="250"></canvas>{% if t3_steps_chart.get('omitted_cases') %}<p style="color:var(--text-secondary);font-size:0.82rem;">Showing the first {{ t3_steps_chart.labels | length }} eval cases; {{ t3_steps_chart['omitted_cases'] }} more are in the JSON Downloads.</p>{% endif %}</div>{% endif %}
+                    {% if t3_token_coverage.all_agents_complete %}<div class="chart-card">{{ tier3_chart('tier3-token-chart', 'With-Skill Token Usage by Agent', 'Prompt, completion and observed cached tokens summed across with-skill trials for each agent.', 't3-trials-table', 'Read token measurements in the trial table', 250) }}</div>{% endif %}
+                    {% if t3_steps_chart.datasets %}<div class="chart-card">{{ tier3_chart('tier3-steps-chart', 'Steps per Eval Case by Agent and Condition', 'Average measured steps per eval case, grouped by agent and with-skill or baseline condition; incomplete measurements are gaps.', 't3-trials-table', 'Read individual step measurements in the trial table', 250) }}{% if t3_steps_chart.get('omitted_cases') %}<p style="color:var(--text-secondary);font-size:0.82rem;">Showing the first {{ t3_steps_chart.labels | length }} eval cases; {{ t3_steps_chart['omitted_cases'] }} more are in the JSON Downloads.</p>{% endif %}</div>{% endif %}
                 </div>
                 </div>
             </details>
@@ -3838,9 +3848,14 @@
         </section>
 
         {# Sub-tab switcher and Chart.js charts #}
-        <script src="https://cdn.jsdelivr.net/npm/chart.js@4.5.1/dist/chart.umd.min.js"
-                integrity="sha384-jb8JQMbMoBUzgWatfe6COACi2ljcDdZQ2OxczGA3bGNeWe+6DChMTBJemed7ZnvJ"
-                crossorigin="anonymous"></script>
+        {% if t3_agents or (t3_steps_chart is defined and t3_steps_chart.datasets) %}
+        {% set chart_runtime, chart_notices = chart_assets() %}
+        <details class="chart-notices" id="tier3-chart-notices">
+            <summary>Chart software notices: Chart.js 4.5.1 and @kurkle/color 0.3.2 (MIT)</summary>
+            <pre>{{ chart_notices }}</pre>
+        </details>
+        <script id="tier3-chart-runtime">{{ chart_runtime | safe }}</script>
+        {% endif %}
         <script>
         function showTier3SubTab(id, btn) {
             document.querySelectorAll('.t3-page').forEach(function(p){ p.classList.remove('active'); });
@@ -4105,6 +4120,22 @@
                 charts.forEach(function(chart){ chart.destroy(); });
                 charts = [];
             }
+            function createChart(canvas, config) {
+                var fallback = document.getElementById(canvas.id + "-fallback");
+                canvas.hidden = false;
+                try {
+                    var chart = new Chart(canvas, config);
+                    // Chart.js can return an instance without a context instead of throwing.
+                    if (!chart.ctx) throw new Error("Chart canvas unavailable");
+                    charts.push(chart);
+                    if (fallback) fallback.hidden = true;
+                } catch (error) {
+                    var partial = Chart.getChart && Chart.getChart(canvas);
+                    if (partial) partial.destroy();
+                    canvas.hidden = true;
+                    if (fallback) fallback.hidden = false;
+                }
+            }
             window.rebuildTier3Charts = function rebuildTier3Charts() {
                 if (typeof Chart === "undefined") return;
                 destroyCharts();
@@ -4113,7 +4144,7 @@
                 var dimensionLabelList = dimensionIds.map(labelForDimension);
                 var radar = document.getElementById("tier3-radar");
                 if (radar && agents.length) {
-                    charts.push(new Chart(radar, {
+                    createChart(radar, {
                         type: "radar",
                         data: {
                             labels: dimensionLabelList,
@@ -4134,11 +4165,11 @@
                             scales: { r: { min: 0, max: 1, ticks: { stepSize: 0.2, color: colors.tick, backdropColor: "transparent" }, grid: { color: colors.grid }, angleLines: { color: colors.grid }, pointLabels: { color: colors.label, font: { size: 11 } } } },
                             plugins: { legend: { labels: { color: colors.label } } }
                         })
-                    }));
+                    });
                 }
                 var metricBar = document.getElementById("tier3-metric-bar");
                 if (metricBar && agents.length) {
-                    charts.push(new Chart(metricBar, {
+                    createChart(metricBar, {
                         type: "bar",
                         data: {
                             labels: dimensionLabelList,
@@ -4151,13 +4182,13 @@
                             scales: { y: { min: 0, max: 1, ticks: { stepSize: 0.2, color: colors.tick }, grid: { color: colors.grid } }, x: { ticks: { color: colors.label, maxRotation: 45 }, grid: { display: false } } },
                             plugins: { legend: { labels: { color: colors.label } } }
                         })
-                    }));
+                    });
                 }
                 var tokenChart = document.getElementById("tier3-token-chart");
                 var tokenTotals = tokenTotalsByAgent();
                 var tokenAgents = Object.keys(tokenTotals);
                 if (tokenChart && tokenAgents.length) {
-                    charts.push(new Chart(tokenChart, {
+                    createChart(tokenChart, {
                         type: "bar",
                         data: {
                             labels: tokenAgents,
@@ -4172,13 +4203,13 @@
                             scales: { x: { ticks: { color: colors.tick }, grid: { color: colors.grid } }, y: { beginAtZero: true, ticks: { color: colors.label }, grid: { display: false } } },
                             plugins: { legend: { labels: { color: colors.label } } }
                         })
-                    }));
+                    });
                 }
                 var stepsChart = document.getElementById("tier3-steps-chart");
                 if (stepsChart) {
                     var stepsData = stepsByCaseDatasets();
                     if (stepsData.labels.length) {
-                        charts.push(new Chart(stepsChart, {
+                        createChart(stepsChart, {
                             type: "bar",
                             data: stepsData,
                             options: chartOptions({
@@ -4186,7 +4217,7 @@
                                 scales: { x: { ticks: { color: colors.tick, maxRotation: 45 }, grid: { color: colors.grid } }, y: { ticks: { color: colors.label }, grid: { display: false } } },
                                 plugins: { legend: { labels: { color: colors.label } } }
                             })
-                        }));
+                        });
                     }
                 }
             };

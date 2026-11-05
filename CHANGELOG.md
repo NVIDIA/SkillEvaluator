@@ -6,6 +6,11 @@ All notable changes to SkillEvaluator are documented in this file.
 
 ### Changed
 
+- Embed the verified Chart.js 4.5.1 runtime and its MIT notices in Tier 3 HTML
+  reports so charts work offline without CDN or source-map requests. Charts
+  include accessible descriptions, links to data tables and visible fallbacks
+  when canvas initialization is unavailable; Tier 1 reports omit chart assets.
+
 - Name the shared OSS validation policy `default` for both public and private
   repositories. Keep `--profile external`, `--external`, and the legacy
   environment value as compatibility aliases without changing validation rules.

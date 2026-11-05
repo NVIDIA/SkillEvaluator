@@ -5969,7 +5969,17 @@ class TestSkillspectorProviderOutage:
         elif mutation == "malformed_row":
             provider_row["fatal"] = "yes"
         elif mutation == "non_llm_analyzer":
+            # A consistent report in which a static analyzer, not an LLM
+            # analyzer, failed with the provider reason: only the LLM-analyzer
+            # allowlist rejects it.
             provider_row["analyzers"] = ["static_yara"]
+            completeness["ledger_exceptions"] = [provider_row, rows[-1]]
+            for status in completeness["analyzer_statuses"]:
+                if status["analyzer_id"] == "static_yara":
+                    status.update({"status": "failed", "completed": status["planned_work"] - 1, "failed": 1})
+                elif status["status"] == "failed":
+                    status.update({"status": "completed", "completed": status["planned_work"], "failed": 0})
+            completeness["limitations"] = ["Analyzer static_yara status: failed."]
         elif mutation == "meta_analyzer_in_semantic_phase":
             provider_row["analyzers"] = ["meta_analyzer"]
         elif mutation == "duplicate_analyzer":

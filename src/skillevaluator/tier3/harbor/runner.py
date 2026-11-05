@@ -2927,6 +2927,32 @@ def _gateway_anthropic_agent_credentials(
     }
 
 
+# Opt-in standard judge policies, read again by the verifier template:
+# host variable -> (run_config.json judge key, accepted values, default first).
+_JUDGE_POLICY_ENV_VARS = {
+    "LLM_JUDGE_FALLBACK_POLICY": ("fallback_policy", ("append", "replace")),
+    "LLM_JUDGE_RETRY_POLICY": ("retry_policy", ("legacy", "strict")),
+}
+
+
+def _judge_policies(environ: Mapping[str, str]) -> tuple[dict[str, str], list[str]]:
+    """Return the set judge policies keyed for ``run_config.json``, and an error for each unknown value.
+
+    Values are case-insensitive and an empty value means unset, as in the verifier.
+    """
+    policies: dict[str, str] = {}
+    errors: list[str] = []
+    for name, (key, choices) in _JUDGE_POLICY_ENV_VARS.items():
+        value = environ.get(name, "").strip().lower()
+        if not value:
+            continue
+        if value in choices:
+            policies[key] = value
+        else:
+            errors.append(f"{name} must be {' or '.join(choices)}")
+    return policies, errors
+
+
 def _judge_model_config(
     provider: ProviderConfig,
     provider_env: Mapping[str, str],
@@ -2954,6 +2980,8 @@ def _judge_model_config(
     }
     if character_facts := provider_env.get("SKILL_EVAL_JUDGE_CHARACTER_FACTS"):
         configuration["character_facts"] = character_facts
+    # Only a known value is recorded; the run stops before trials on any other.
+    configuration.update(_judge_policies(provider_env)[0])
     return configuration
 
 
@@ -5173,6 +5201,12 @@ def _run_harbor_eval_impl(
     if grading_mode not in {"default", "default_plus_custom", "custom_only"}:
         reporter.emit(ProgressEvent(stage="configuration", state="failed", detail="invalid grading mode"))
         return {"error": ["grading.mode must be default, default_plus_custom, or custom_only"]}
+    # The standard judges would all fail on an unknown policy, after the agent
+    # trials had spent their budget; custom_only runs never forward the policies.
+    judge_policy_errors = _judge_policies(os.environ)[1] if grading_mode != "custom_only" else []
+    if judge_policy_errors:
+        reporter.emit(ProgressEvent(stage="configuration", state="failed", detail="invalid judge policy"))
+        return {"error": judge_policy_errors}
     if workspace_mode not in {"isolated", "group"}:
         reporter.emit(ProgressEvent(stage="configuration", state="failed", detail="invalid workspace mode"))
         return {"error": ["skill_workspace.mode must be isolated or group"]}

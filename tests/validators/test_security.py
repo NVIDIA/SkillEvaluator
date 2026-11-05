@@ -5907,6 +5907,11 @@ class TestSkillspectorProviderOutage:
             "unhashable_phase",
             "unhashable_status",
             "unhashable_status_message",
+            "provider_analyzer_missing_status",
+            "completeness_not_failed",
+            "completeness_marked_complete",
+            "empty_row_path",
+            "oversized_row_message",
         ],
     )
     @patch("skillevaluator.validators.security.Tools")
@@ -5959,6 +5964,14 @@ class TestSkillspectorProviderOutage:
             completeness["ledger_exceptions"] = [rows[-1]]
         elif mutation == "reported_errors":
             completeness["errors"] = ["scanner fault"]
+        elif mutation == "completeness_not_failed":
+            completeness["status"] = "partial"
+        elif mutation == "completeness_marked_complete":
+            completeness["is_complete"] = True
+        elif mutation == "empty_row_path":
+            provider_row["path"] = "  "
+        elif mutation == "oversized_row_message":
+            provider_row["message"] = "x" * 4097
         else:
             statuses = completeness["analyzer_statuses"]
             discovery = next(s for s in statuses if s["analyzer_id"] == "semantic_security_discovery")
@@ -5978,6 +5991,10 @@ class TestSkillspectorProviderOutage:
                 discovery["status"] = ["failed"]
             elif mutation == "unhashable_status_message":
                 discovery["message"] = ["Transient LLM provider failure persisted after bounded retries."]
+            elif mutation == "provider_analyzer_missing_status":
+                # The row names an analyzer whose work no status accounts for.
+                statuses.remove(next(s for s in statuses if s["analyzer_id"] == "mcp_tool_poisoning"))
+                completeness["limitations"].remove("Analyzer mcp_tool_poisoning status: failed.")
 
         result = _run_llm_scan(mock_tools, sample_skill_dir, payload, exit_code=exit_code)
 

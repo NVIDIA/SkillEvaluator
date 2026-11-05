@@ -1038,6 +1038,16 @@ machine-readable JSON contract, and how to judge whether a given lift is good.
     evaluator provider's default model is not automatically valid for every
     agent.
   </Accordion>
+  <Accordion title="A claude-code trial fails with AgentSafetyRefusalError">
+    The model provider's safety classifier stopped the selected model on that
+    case. SkillEvaluator turns Claude Code's refusal model fallback off
+    (`CLAUDE_CODE_DISABLE_REFUSAL_FALLBACK=1` in every staged task), so the
+    attempt ends on the selected model instead of retrying on another one.
+    Like any other failed trial, the attempt is not scored and counts against
+    the arm's scored-attempt coverage. Review the case prompt and the skill
+    content that the agent read, or evaluate the case with another model. See
+    [Agents & Sandboxes](agents-and-sandboxes.mdx#supported-agents).
+  </Accordion>
   <Accordion title="Results look wrong or a case is hard to diagnose">
     Re-run with `--harbor-keep-jobs` — Harbor artifacts are transient and
     deleted by default whether the run succeeds or fails. With retention on,

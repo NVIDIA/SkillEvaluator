@@ -139,6 +139,7 @@ def _trial_coverage_truncated(marker: dict[str, Any]) -> bool:
         "insight_items",
         "custom_metric_discovery_trials",
         "non_best_agent_details",
+        "failure_reasons",
     }
     if not omitted:
         return not loading  # an unexplained truncation still fails closed

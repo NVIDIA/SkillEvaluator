@@ -1302,6 +1302,133 @@ class TestRefusalAndTruncation:
         assert client.last_failure is not None
 
 
+_CHAT_HISTORY = [
+    {"role": "system", "content": "Use run evidence"},
+    {"role": "user", "content": "Reduce tokens"},
+    {"role": "assistant", "content": "Check case 1"},
+    {"role": "user", "content": "What about runtime?"},
+]
+
+
+class TestChat:
+    def test_empty_history_is_rejected_without_creating_client(self) -> None:
+        client = LLMClient()
+        with (
+            patch.object(client, "_get_client") as get_client,
+            pytest.raises(LLMClientError, match="at least one message"),
+        ):
+            client.chat([])
+        get_client.assert_not_called()
+
+    @pytest.mark.parametrize(
+        ("messages", "match"),
+        [
+            ([{"role": "system", "content": "only system"}], "user or assistant"),
+            ([{"role": "user", "content": "hi"}, {"role": "system", "content": "late"}], "must come before"),
+            ([{"role": "tool", "content": "result"}], "system, user or assistant"),
+            ([{"role": "user", "content": None}], "must be a string"),
+            (["hello"], "must be a string"),
+        ],
+        ids=["system-only", "late-system", "unknown-role", "non-string-content", "not-a-mapping"],
+    )
+    def test_invalid_history_is_rejected_without_creating_client(self, messages, match: str) -> None:
+        client = LLMClient()
+        with patch.object(client, "_get_client") as get_client, pytest.raises(LLMClientError, match=match):
+            client.chat(messages)
+        get_client.assert_not_called()
+
+    def test_openai_compatible_history_is_sent_unchanged(self, monkeypatch: pytest.MonkeyPatch) -> None:
+        monkeypatch.setenv("SKILL_EVAL_LLM_PROVIDER", "nv_build")
+        monkeypatch.setenv("NVIDIA_API_KEY", "test-key")
+        mock_openai = MagicMock()
+        mock_openai.chat.completions.create.return_value = _openai_choice_response("ok")
+        messages = [dict(message) for message in _CHAT_HISTORY]
+
+        with patch("openai.OpenAI", return_value=mock_openai):
+            assert LLMClient().chat(messages) == "ok"
+
+        call_kwargs = mock_openai.chat.completions.create.call_args.kwargs
+        assert call_kwargs["messages"] == _CHAT_HISTORY
+        assert call_kwargs["stream"] is False
+        assert messages == _CHAT_HISTORY
+
+    def test_anthropic_receives_the_system_text_separately(self, monkeypatch: pytest.MonkeyPatch) -> None:
+        _use_provider(monkeypatch, "anthropic", "claude-opus-5-5")
+        mock_anthropic = MagicMock()
+        mock_anthropic.messages.create.return_value = _anthropic_response("ok")
+
+        with patch("anthropic.Anthropic", return_value=mock_anthropic):
+            assert LLMClient().chat(_CHAT_HISTORY) == "ok"
+
+        call_kwargs = mock_anthropic.messages.create.call_args.kwargs
+        assert call_kwargs["system"] == "Use run evidence"
+        assert call_kwargs["messages"] == _CHAT_HISTORY[1:]
+        # Server-side refusal fallback still applies to chat on the native endpoint.
+        assert call_kwargs["extra_headers"] == {"anthropic-beta": ANTHROPIC_SERVER_SIDE_FALLBACK_BETA}
+        assert call_kwargs["extra_body"] == {"fallbacks": [{"model": ANTHROPIC_REFUSAL_FALLBACK_MODEL}]}
+
+    def test_bedrock_history_is_sent_through_litellm(self, monkeypatch: pytest.MonkeyPatch) -> None:
+        _use_provider(monkeypatch, "bedrock", "us.anthropic.claude-opus-5-5")
+
+        with patch("litellm.completion", return_value=_openai_choice_response("ok")) as completion:
+            assert LLMClient().chat(_CHAT_HISTORY) == "ok"
+
+        assert completion.call_args.kwargs["messages"] == _CHAT_HISTORY
+
+    @pytest.mark.parametrize("provider", ["openai", "anthropic"])
+    def test_history_without_system_text_sends_none(self, monkeypatch: pytest.MonkeyPatch, provider: str) -> None:
+        _use_provider(monkeypatch, provider, CHAT_DEFAULT_ANTHROPIC if provider == "anthropic" else CHAT_DEFAULT_OPENAI)
+        sdk = MagicMock()
+        sdk.chat.completions.create.return_value = _openai_choice_response("ok")
+        sdk.messages.create.return_value = _anthropic_response("ok")
+        turns = [{"role": "user", "content": "hello"}]
+
+        with patch("openai.OpenAI", return_value=sdk), patch("anthropic.Anthropic", return_value=sdk):
+            assert LLMClient().chat(turns) == "ok"
+
+        if provider == "anthropic":
+            call_kwargs = sdk.messages.create.call_args.kwargs
+            assert "system" not in call_kwargs
+        else:
+            call_kwargs = sdk.chat.completions.create.call_args.kwargs
+        assert call_kwargs["messages"] == turns
+
+    def test_completions_still_sends_one_system_and_one_user_message(self, monkeypatch: pytest.MonkeyPatch) -> None:
+        _use_provider(monkeypatch, "openai", CHAT_DEFAULT_OPENAI)
+        mock_openai = MagicMock()
+        mock_openai.chat.completions.create.return_value = _openai_choice_response("ok")
+
+        with patch("openai.OpenAI", return_value=mock_openai):
+            assert LLMClient().completions("", "user") == "ok"
+
+        assert mock_openai.chat.completions.create.call_args.kwargs["messages"] == [
+            {"role": "system", "content": ""},
+            {"role": "user", "content": "user"},
+        ]
+
+    def test_feedback_chat_truncation_is_a_typed_error_and_not_retried(self, monkeypatch: pytest.MonkeyPatch) -> None:
+        from skillevaluator.evaluation.tier3_feedback_chat import Tier3FeedbackAssistant
+
+        _use_provider(monkeypatch, "openai", CHAT_DEFAULT_OPENAI)
+        mock_openai = MagicMock()
+        mock_openai.chat.completions.create.return_value = _openai_choice_response("partial", finish_reason="length")
+
+        with patch("openai.OpenAI", return_value=mock_openai), pytest.raises(LLMClientTruncatedError):
+            Tier3FeedbackAssistant().chat([{"role": "user", "content": "hello"}])
+
+        assert mock_openai.chat.completions.create.call_count == 1
+
+    def test_empty_choices_is_a_typed_error(self, monkeypatch: pytest.MonkeyPatch) -> None:
+        _use_provider(monkeypatch, "openai", CHAT_DEFAULT_OPENAI)
+        mock_openai = MagicMock()
+        mock_openai.chat.completions.create.return_value = SimpleNamespace(choices=[])
+
+        with patch("openai.OpenAI", return_value=mock_openai), pytest.raises(EmptyLLMResponseError):
+            LLMClient().chat([{"role": "user", "content": "hello"}])
+
+        assert mock_openai.chat.completions.create.call_count == 1
+
+
 def _anthropic_fallback_response(text: str, served_by: object):
     """Return a reply whose server-side fallback block names the model that served it."""
     response = _anthropic_response(text)
@@ -1449,6 +1576,22 @@ class TestModelProvenance:
 
         assert seen == [None]
         assert client.model_used == CHAT_DEFAULT_OPENAI
+
+    def test_chat_names_the_model_that_answered(self, monkeypatch: pytest.MonkeyPatch) -> None:
+        _use_provider(monkeypatch, "anthropic", "claude-opus-5-5")
+        mock_anthropic = MagicMock()
+        mock_anthropic.messages.create.return_value = _anthropic_fallback_response(
+            "Done", {"model": ANTHROPIC_REFUSAL_FALLBACK_MODEL}
+        )
+        client = LLMClient()
+
+        with patch("anthropic.Anthropic", return_value=mock_anthropic):
+            assert client.chat([{"role": "user", "content": "hello"}]) == "Done"
+            assert client.model_used == ANTHROPIC_REFUSAL_FALLBACK_MODEL
+            with pytest.raises(LLMClientError, match="at least one message"):
+                client.chat([])
+
+        assert client.model_used is None
 
     def test_llm_insights_name_the_model_that_wrote_them(self, monkeypatch: pytest.MonkeyPatch) -> None:
         from skillevaluator.evaluation.insights_judge import InsightsJudge

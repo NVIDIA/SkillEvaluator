@@ -252,7 +252,11 @@ For `validate`, the default set is `schema`, `version`, `security`, `pii`, `lice
 
     Common placeholders such as `YOUR_API_KEY_HERE`, `example`, `test`, `dummy`, and `placeholder`, along with `@example.com` and `@test.com`, are excluded, as are configured allowed paths.
 
+    Proton (Steam Play) game prefixes are not personal paths: `pfx/drive_c/users/steamuser/` is the same fixed Windows profile for every player. Other user names, the same profile outside a `pfx/drive_c` prefix (for example `~/.wine/drive_c/users/steamuser/` or `/Users/steamuser/`), and a profile path followed by a `..` segment anywhere later on its line are still reported, as is any other personal path on the same line.
+
     A card-shaped number is reported only when it passes the Luhn checksum; all-zero numbers do not. Digits inside a canonical GUID/UUID, such as the COM interface ID `{00000000-0000-0000-C000-000000000046}`, are treated as an identifier unless a payment label (`card_number`, `credit_card`, `cc_no`, `cc_number`, `pan`, and similar) directly precedes the GUID on its line or ends the line before it. Every card-shaped number on a line is checked, so an identifier or non-card number earlier on the line does not hide a card after it.
+
+    To accept a specific reviewed value, use a [PII waiver](#pii-waivers) rather than a `PII.*` severity override, which would relax every finding of that check.
 
     The home-path check compares detected user paths against the submitter's identity. When no identity is available, that check is skipped and logged — set `SKILLEVALUATOR_SUBMITTER` (or add `author` to `SKILL.md`) to enable it. `SKILLEVALUATOR_SUBMITTER` is combined with `GITHUB_ACTOR`, `USER`, `LOGNAME`, `USERNAME`, the OS login name, and the skill's declared author — every identity that resolves is protected.
   </Accordion>
@@ -436,6 +440,46 @@ For `validate`, the default set is `schema`, `version`, `security`, `pii`, `lice
   </Accordion>
 </AccordionGroup>
 
+## PII waivers
+
+A PII waiver accepts one reviewed value at one place, for example a public support address that a skill must document. Pass the waiver file with `--pii-waivers PATH` on `validate`, `tier1`, or `pii-scan`. Waivers are never discovered automatically inside the scanned skill, so a skill cannot waive its own findings. Keep it outside the skill: a waiver file inside the scanned tree ships with the skill and is PII-scanned like any other file, owners and reasons included.
+
+```yaml title="pii-waivers.yaml"
+version: 1
+waivers:
+  - id: PII-001
+    category: emails
+    file: skills/support/SKILL.md
+    line: 12
+    evidence_sha256: 3f1d…  # 64 hex characters, copied from the PII finding
+    reason: Public support address of the documented service
+    owner: docs-team
+    created: 2026-10-01
+    expires: 2027-01-01
+```
+
+```bash title="Apply reviewed waivers"
+skillevaluator validate ./skills/support --pii-waivers ./pii-waivers.yaml
+```
+
+- `category` is the PII check name (`emails`, `personal_paths`, `phone_numbers`, and so on) and `line` is the line of the value. Credential checks (`database_credentials`, `hardcoded_secrets`, `jwt_tokens`, `github_tokens`, `aws_identifiers`, `webhook_urls`, `private_keys`) cannot be waived: remove or rotate the credential instead.
+- `file` is relative to the directory that holds the waiver file (the directory of the link, when the waiver file is a symlink), so one file covers single-skill, folder, and catalog runs. Absolute paths, `..`, and control characters are rejected. A path through a symlinked directory, such as `.claude/skills/support/SKILL.md` when `.claude/skills/support` links to `skills/support`, names the same file as the path without the link.
+- `evidence_sha256` comes from the `evidence_sha256` metadata of the PII finding in the JSON report. It is a SHA-256 digest of the check name and the case-folded value, so the waiver file never contains the value. A digest is an identifier, not encryption: a short value such as an SSN can be recovered from it by trying every candidate. Findings report a digest only for a value the report shows in full, so credential findings, and any other finding whose value reports mask because it contains a credential, carry none.
+- `reason` needs at least 8 characters, `owner` names the reviewer or team, and the waiver applies through `expires`. Dates are UTC calendar dates; `created` may be at most one day after the UTC date, so a reviewer east of UTC can enter their local date, and `expires` may not be before `created` or more than 366 days after it, so every waiver comes up for review at least yearly.
+
+A waiver applies only while the check, file, line, and value all match. When the value changes or moves, the finding is reported again, and other values on the same line are reported as usual. The outcome of each waiver the run judges is in the reports under the `PII_WAIVER` category:
+
+| Check | Severity | Meaning |
+| --- | --- | --- |
+| `applied-pii-waiver` | INFO | The waiver suppressed the finding. |
+| `stale-pii-waiver` | LOW | No current finding matches the waiver; update or remove it. |
+| `expired-pii-waiver` | MEDIUM | The waiver is past `expires`; the finding is reported again. |
+| `invalid-pii-waiver-file` | HIGH | The file could not be applied, so no waiver from it was used. |
+
+A run judges only the waivers whose file lies in a skill or folder it scanned; a waiver for a deleted file there is stale. A run on one skill, and each skill of a catalog run, reports the waivers for that skill's files and leaves the other waivers in the file unjudged. Waiver findings name the file the way the PII findings of the same report do, for example `[support] SKILL.md` in a folder run; the waiver's own `file` value is in the `waiver_file` metadata. They do not repeat the waiver's `evidence_sha256`, because the run may now mask that value.
+
+The command line rejects a malformed waiver file before the run starts, with exit code 2 and the problem named: unknown or missing fields, duplicate ids or keys, unknown or credential check names, and malformed paths, digests, or dates. Waivers apply only to the `pii` check; findings from other checks for the same value, such as Gitleaks secrets, are unaffected.
+
 ## Scanner setup
 
 Install `skillevaluator[security]` for the bundled Python scanners (Bandit and pip-audit). Install Semgrep and SkillSpector in separate tool environments, and install Gitleaks separately — it is a Go binary, not a pip package. See [Installation](installation.mdx) for commands and the extras table.
@@ -505,7 +549,7 @@ Markdown and HTML reports show the same outcome as a `skillspector_baseline` lin
 | --- | --- |
 | `0` | Success — every gate passed |
 | `1` | Validation failed — a check failed or required scanner evidence is incomplete |
-| `2` | Usage error — an unknown flag, a value outside an option's type or choices, a target path that does not exist, or an invalid `--quality-config` file |
+| `2` | Usage error — an unknown flag, a value outside an option's type or choices, a target path that does not exist, or an invalid `--quality-config` or `--pii-waivers` file |
 
 Tier 1 checks always gate the exit code inside `validate`. Tier 2 gates when it runs unless `--no-block-on-dedup` is set. Tier 3 is advisory unless `--block-on-agent-eval` is set. The `quality` check requires the composite score to reach `--min-score` (default `70`) as well as no HIGH or CRITICAL quality findings under the active policy. Severity overrides cannot waive the minimum. Reports record the effective gate membership for every tier so saved evidence and process status agree.
 
@@ -540,6 +584,31 @@ Tier 1 checks always gate the exit code inside `validate`. Tier 2 gates when it 
     Each stage gets the full watchdog, so a scan that stalls in both stages can
     take up to twice the value before it is reported. See
     [Environment Variables](environment-variables.mdx#validation-tier-1).
+  </Accordion>
+  <Accordion title="The SkillSpector LLM provider keeps failing">
+    With `--llm`, SkillSpector v2.12.0 and later retries a failing provider call
+    a bounded number of times. When the provider still fails, for example
+    because of rate limits or an outage, SkillSpector records the
+    `llm_connection_retries_exhausted` reason and ends the LLM stage as failed.
+    If that is the only cause in a report from SkillSpector v2.12.0 or later,
+    the security error reads
+    `skillspector-llm did not complete: the LLM provider kept failing after SkillSpector's bounded retries`
+    and says that this is a retriable provider failure, not a security
+    finding. Retry the full scan when the provider is available.
+
+    The gate is unchanged: the security scan is `INCOMPLETE`, the command
+    exits `1`, and findings from the static stage are kept, so a High or
+    Critical static finding still makes the result `FAILED`.
+
+    SkillEvaluator shows this message only when every failure that
+    SkillSpector recorded is a provider-retry failure on an LLM analyzer.
+    Reports that mix it with another cause, are truncated or malformed, or come
+    from an older SkillSpector keep the generic error, such as
+    `skillspector-llm failed with unexpected exit code 2`. SkillSpector v2.9.1
+    to v2.11.2 used the same reason only for a connection error left after the
+    provider SDK's own retries, so SkillEvaluator does not read it from those
+    releases. A provider error that SkillSpector records under a different
+    reason also keeps the generic error.
   </Accordion>
   <Accordion title="An LLM-backed stage fails immediately">
     Configure a supported provider or select a keyless Tier 1 run with

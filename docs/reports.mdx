@@ -679,6 +679,19 @@ skillevaluator compare ./my-skill
 
 Both commands accept `--results-dir` to read from a non-default location.
 
+### tier3 feedback
+
+Opens a terminal chat about one completed run. Answers are grounded in that
+run's scores, comparisons, per-case attempts, measured agent resources, and
+saved feedback, without running the evaluation or regenerating its LLM feedback.
+Pass the run directory itself; see
+[tier3 feedback](cli-reference.mdx#tier3-feedback) for the options and what the
+chat sends to the LLM provider.
+
+```bash title="Discuss one run"
+skillevaluator tier3 feedback ./my-skill/evals/results/20260709_141530_12345_a1b2c3d4e5f6
+```
+
 ### harbor-view
 
 Opens retained Harbor job artifacts in Harbor's own trajectory browser — the

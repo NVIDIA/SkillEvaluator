@@ -733,9 +733,7 @@ class TestCompletions:
         monkeypatch.setenv("SKILL_EVAL_LLM_PROVIDER", "openai-compatible")
         monkeypatch.setenv("SKILL_EVAL_LLM_BASE_URL", vertex_base_url)
         monkeypatch.setenv("SKILL_EVAL_LLM_MODEL", "google/gemini-3.8-flash")
-        monkeypatch.setattr(
-            "skillevaluator.provider_config._get_google_access_token", lambda **_kwargs: "mock-refreshed-token"
-        )
+        monkeypatch.setattr("skillevaluator.provider_config._get_google_access_token", lambda **_kwargs: "mock-refreshed-token")
 
         mock_openai = MagicMock()
         mock_auth_err = AuthenticationError("Unauthorized", response=MagicMock(status_code=401), body=None)
@@ -767,9 +765,7 @@ class TestCompletions:
         monkeypatch.setenv("SKILL_EVAL_LLM_BASE_URL", vertex_base_url)
         monkeypatch.setenv("SKILL_EVAL_LLM_API_KEY", "explicit-user-key")
         monkeypatch.setenv("SKILL_EVAL_LLM_MODEL", "google/gemini-3.8-flash")
-        monkeypatch.setattr(
-            "skillevaluator.provider_config._get_google_access_token", lambda **_kwargs: "host-adc-token"
-        )
+        monkeypatch.setattr("skillevaluator.provider_config._get_google_access_token", lambda **_kwargs: "host-adc-token")
 
         mock_openai = MagicMock()
         mock_auth_err = AuthenticationError("Unauthorized", response=MagicMock(status_code=401), body=None)

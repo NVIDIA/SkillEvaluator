@@ -1262,6 +1262,21 @@ def _spelled_with_capitals(token: str) -> bool:
     return name != name.lower()
 
 
+_SHELL_QUOTE_CHARS = str.maketrans("", "", "\"'\\")
+
+
+def _may_be_header_file_item(token: str) -> bool:
+    """Whether an HTTPie argument may reach it as a ``name:@file`` header item.
+
+    The shell removes quotes and backslashes, so ``X-Data:"@.env"``,
+    ``"X-Data:"@.env`` and ``X-Data:\\@.env`` all pass ``X-Data:@.env``. A
+    ``$VAR`` or backtick word may expand to such an item.
+    """
+    if "$" in token or "`" in token:
+        return True
+    return ":@" in token.translate(_SHELL_QUOTE_CHARS)
+
+
 def _network_client_uploads(executable: str, args: list[str], stdin_piped: bool) -> bool:
     """Check one curl, wget or HTTPie invocation's arguments for upload indicators."""
     for arg in args:
@@ -1910,10 +1925,10 @@ def _network_tokens_exfiltrate(tokens: list[str], _depth: int) -> bool:
             # Linux finds a command by its exact name, so a later HTTP or Https
             # word, as in the here-document prose "Use HTTP POST to create an
             # item.", does not start HTTPie. Its method words are not read as
-            # an upload unless a later name:@file item may send a file as a
-            # header; its body items, stdin and --raw still are. It covers a
-            # later capitalized word, which sees a suffix of the same
-            # arguments, but not a later lowercase http word.
+            # an upload unless a later argument may be a name:@file item, which
+            # may send a file as a header; its body items, stdin and --raw
+            # still are. It covers a later capitalized word, which sees a
+            # suffix of the same arguments, but not a later lowercase http word.
             capitalized = client in ("http", "https") and _spelled_with_capitals(command[sub_idx])
             seen_key = f"{client}:capitalized" if capitalized else client
             if client in seen_clients or seen_key in seen_clients:
@@ -1921,7 +1936,7 @@ def _network_tokens_exfiltrate(tokens: list[str], _depth: int) -> bool:
             client_args = command[sub_idx + 1 :]
             if not keeps_stdin:
                 client_args = [token for token in client_args if token not in _NETWORK_INPUT_REDIRECTS]
-            if capitalized and not any(":@" in token for token in client_args):
+            if capitalized and not any(_may_be_header_file_item(token) for token in client_args):
                 client_args = [
                     token for token in client_args if token.strip("\"'").casefold() not in _UNSAFE_HTTP_METHODS
                 ]

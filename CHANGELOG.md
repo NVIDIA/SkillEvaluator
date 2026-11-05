@@ -291,9 +291,10 @@ All notable changes to SkillEvaluator are documented in this file.
   so a later `HTTP`, `HTTPS`, or `Http` word does not start HTTPie, and its
   method word is no longer read as an upload. Its body items, piped or
   redirected input, `--raw`, and a method word before a `name:@file` header
-  item still warn, as do a lowercase `http PUT URL`, `http.EXE POST URL`, an
-  `HTTP POST URL` command word, and any upload in the same action. Both the
-  host checker and the bundled Harbor verifier apply the rule.
+  item, even a quoted or escaped one, or before a `$VAR` word still warn, as do
+  a lowercase `http PUT URL`, `http.EXE POST URL`, an `HTTP POST URL` command
+  word, and any upload in the same action. Both the host checker and the
+  bundled Harbor verifier apply the rule.
 
 - PR scan comments show the verdict, quality scores, first actionable fixes and
   report links; full provenance and detailed findings stay in the report.

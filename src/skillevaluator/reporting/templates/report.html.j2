@@ -1271,7 +1271,7 @@
         <span class="sidebar-label">THIS REPORT</span>
         <a href="#report-workspace" data-report-section="report-workspace" class="sidebar-current" aria-current="location">Summary</a>
         {% for number, tier in presentation.tiers.items() if tier.displayed or (tabs | selectattr('id', 'equalto', 'tier' ~ number) | list) %}
-        <a href="#tab-tier{{ number }}" data-report-tier="tier{{ number }}" onclick="activateReportTier('tier{{ number }}');return false">Tier {{ number }}</a>
+        <a href="#tab-tier{{ number }}" data-report-tier="tier{{ number }}">Tier {{ number }}</a>
         {% endfor %}
         <a href="#run-metadata" data-report-section="run-metadata">Run details</a>
         {% if ci.get('report_index_url') %}<a class="sidebar-index-link" href="{{ ci.report_index_url }}">← All skills</a>{% endif %}
@@ -1362,7 +1362,7 @@
             {% set single_tier = tabs | length < 2 and presentation.tiers.values() | selectattr('displayed') | list | length < 2 %}
 {% macro absent_tier_tile(number, tier) %}
                 <div class="tier-card skipped" role="button" tabindex="0" data-target-tab="tier{{ number }}" aria-controls="tab-tier{{ number }}" aria-pressed="false"
-                     onclick="showTab('tier{{ number }}')" onkeydown="if(event.key==='Enter'||event.key===' '){event.preventDefault();showTab('tier{{ number }}');}">
+                     data-report-tier-tile="true">
                     <div class="tier-card-head"><span class="tier-card-label">Tier {{ number }}</span><span class="tier-card-verdict">{{ tier.summary }}</span></div>
                     <p class="tier-card-title">{{ {1:'Security & Static Validation',2:'Deduplication',3:'Live Agent Evaluation'}[number] }}</p>
                 </div>
@@ -1471,7 +1471,7 @@
             </div>
         </section>
         <nav class="mobile-tier-nav" aria-label="Tier navigation">
-            {% for number, tier in presentation.tiers.items() if tier.displayed or (tabs | selectattr('id', 'equalto', 'tier' ~ number) | list) %}<a href="#tab-tier{{ number }}" data-report-tier="tier{{ number }}" onclick="activateReportTier('tier{{ number }}');return false">Tier {{ number }}</a>{% endfor %}
+            {% for number, tier in presentation.tiers.items() if tier.displayed or (tabs | selectattr('id', 'equalto', 'tier' ~ number) | list) %}<a href="#tab-tier{{ number }}" data-report-tier="tier{{ number }}">Tier {{ number }}</a>{% endfor %}
         </nav>
         <div id="report-evidence" class="workspace-heading" tabindex="-1"><h2>Findings &amp; evidence</h2><p>Each check with its results and the evidence behind them.</p></div>
         {% set workspace_tabs = [] %}

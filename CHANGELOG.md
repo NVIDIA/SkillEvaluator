@@ -24,6 +24,17 @@ All notable changes to SkillEvaluator are documented in this file.
 
 ### Added
 
+- `skillevaluator tier3 feedback RUN_DIR [--skill PATH]` opens a terminal chat
+  about one completed Tier 3 run. Answers are grounded in that run's scores,
+  with-skill and baseline comparisons, every case's attempts with per-metric
+  scores, measured agent tokens and seconds, execution errors, and the report's
+  saved feedback, without evaluating again or regenerating LLM feedback. It uses
+  the configured `SKILL_EVAL_LLM_PROVIDER` and `SKILL_EVAL_LLM_MODEL`, sends the
+  run ID instead of the local path, redacts credential-shaped text, and writes
+  nothing to disk. No request is sent before the first question. `LLMClient`
+  gains `chat(messages)` for multi-turn requests with the same retries and typed
+  errors as `completions()`.
+
 - Opt-in `LLM_JUDGE_FALLBACK_POLICY` and `LLM_JUDGE_RETRY_POLICY` for the Tier 3
   standard judges. `LLM_JUDGE_FALLBACK_POLICY=replace` lets only the judge
   model and the `LLM_JUDGE_FALLBACK_MODELS` entries answer, without the
@@ -229,6 +240,21 @@ All notable changes to SkillEvaluator are documented in this file.
   `tier1` leaves a check out and reports it as skipped. A `scanners` row and the
   JSON report record which scanner versions ran.
 
+- `--pii-waivers PATH` on `validate`, `tier1`, and `pii-scan` accepts a
+  reviewed PII value without relaxing the whole check through a severity
+  override. Each waiver names the PII check, the file (relative to the waiver
+  file's directory), the line, the SHA-256 digest that PII findings now report
+  as `evidence_sha256`, a reason, an owner, and a `created`/`expires` window
+  of at most 366 days, and it stops applying as soon as any of them no longer
+  matches. Other values on the same line are still reported. Reports list each
+  waiver for a scanned file as applied (INFO), stale (LOW), or expired
+  (MEDIUM), so one file can serve single-skill, folder, and catalog runs. A
+  malformed file is rejected with exit code 2; through the Python API it
+  applies no waivers and fails the PII scan with a HIGH
+  `invalid-pii-waiver-file` finding. Credential checks cannot be waived, and
+  their findings, like any finding whose value reports mask, carry no digest.
+  Waivers are never discovered automatically inside the scanned skill; pass
+  the file with `--pii-waivers`.
 - Every finding now has stable IDs for tracking across runs and validators.
   `finding_id` (`SEF-…`) is derived from the finding's category, check,
   message, and suggestion, so it survives line moves, whitespace or case
@@ -387,6 +413,14 @@ All notable changes to SkillEvaluator are documented in this file.
   `summary.raw_finding_occurrences` and `finding_counts.raw_occurrences`. The
   JSON `skills[].issue_count`, contributor totals, `total_errors`,
   `total_warnings` and `severity_counts` still count raw records.
+
+- The Tier 3 per-evaluator drill-down and steps chart now include baseline
+  (without-skill) trials. The drill-down adds a Condition column and shows
+  metrics that only baseline rows scored; the steps chart plots one series per
+  agent and condition from every trial, for up to 200 eval cases. Cases with
+  missing or partial step telemetry stay gaps instead of zeros or partial
+  averages. The token chart remains with-skill only; Measured Agent Resources
+  compares token totals across both arms.
 
 - Tier 3 `accuracy` grades the outcome only. The `SKILL_IDENTIFIED` criterion,
   which capped a correct answer from the no-skill baseline at 0.8 on positive
@@ -1032,6 +1066,17 @@ All notable changes to SkillEvaluator are documented in this file.
   forwarded to SkillSpector so its own deadline can be raised as well, and the
   security result records the effective `skillspector_timeout_seconds`
   ([#155](https://github.com/NVIDIA/SkillEvaluator/issues/155)).
+- An `--llm` security scan whose LLM provider keeps failing after
+  SkillSpector's bounded retries no longer reports only
+  `skillspector-llm failed with unexpected exit code 2: scanner diagnostics were redacted`
+  (or `skillspector reported execution_successful=false`). When every failure
+  in the SkillSpector v2.12.0+ report is an `llm_connection_retries_exhausted`
+  row on an LLM analyzer, the error says that the provider kept failing, that
+  this is a retriable provider failure rather than a security finding, and
+  that the full scan should be retried when the provider is available. Mixed,
+  truncated, malformed or older reports keep the generic error. The scan stays
+  `INCOMPLETE` with a nonzero exit, and static findings still decide a
+  `FAILED` result.
 - `similarity-check --catalog` and `tier2 --catalog` no longer report a skill
   that is already in the local catalog as an `EXACT_DUPLICATE` of its own
   entry, which failed the run. An entry is skipped as the skill's own only when
@@ -1057,6 +1102,22 @@ All notable changes to SkillEvaluator are documented in this file.
   the Tier 3 judge, an object with a repeated key, a `NaN` or `Infinity` value,
   a number that overflows a float or more than 128 levels of nesting is
   rejected, whether it is the whole reply or embedded in prose.
+- Tier 3 HTML reports now explain failing evaluator scores. A failing
+  evaluator card opens its per-trial evidence, shows the grader's reason
+  (or, when the grader recorded none, its message, findings, or failed
+  criteria), and quotes a short excerpt of the offending command or artifact.
+  A failing cell in the per-evaluator drill-down shows the reason as a
+  tooltip. When attempts of one case disagree, the card shows the
+  lowest-scoring attempt's reason, so a passing attempt no longer hides a
+  failure. Grader reasons and excerpts are credential-redacted, including
+  the values of configured credential environment variables. Criteria the
+  grader excluded from the score are not listed as failed. Drill-down
+  reasons and excerpts are capped at 240 and 300 characters, and
+  secret-detector findings never quote their detection pattern back.
+  Large reports drop these reasons before any other detail, so they never
+  displace the HTML overview or recorded evidence.
+- The Tier 3 HTML size notice no longer prints `<built-in method items ...>`
+  in place of the number of items the preview omitted.
 - Ctrl+C during `tier3 evaluate` now stops the run. The interrupt reached only
   the coordinating thread, so running Harbor jobs kept going in their own
   process groups, agents waiting for a `--max-agents` slot still started, and
@@ -1130,6 +1191,18 @@ All notable changes to SkillEvaluator are documented in this file.
   `filtered` summary row, and recorded in the JSON report's
   `skillspector_applicability` block. `security-scan` and targets of `unknown`
   type keep the unrestricted scan.
+
+- PII scans no longer report Proton (Steam Play) prefix paths such as
+  `compatdata/<appid>/pfx/drive_c/users/steamuser/` as personal macOS paths:
+  `steamuser` is the profile name Proton uses for every player. Other user
+  names, `steamuser` outside a `pfx/drive_c` prefix, profile paths followed by
+  a `..` segment later on the line, and Windows `C:\Users\steamuser` paths are
+  still reported. When a Proton path and a personal path share a line, the
+  personal path is reported.
+
+- An unrelated `/home/<user>/` path no longer hides a personal home path later
+  on the same line; the PII scan drops such paths before it picks the line's
+  first match.
 
 ### Security
 

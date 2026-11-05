@@ -23,6 +23,9 @@ permissions:
   pull-requests: write
 jobs:
   feedback:
+    concurrency:
+      group: skillevaluator-feedback-${{ github.repository }}
+      cancel-in-progress: false
     if: ${{ github.event_name == 'workflow_run' && github.event.workflow_run.event == 'pull_request' }}
     runs-on: ubuntu-24.04
     permissions:

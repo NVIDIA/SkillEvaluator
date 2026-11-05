@@ -137,3 +137,52 @@ def test_bootstrap_doctor_receives_the_configured_ci_provider_and_model(monkeypa
     assert calls[0]["env"]["SKILL_EVAL_LLM_PROVIDER"] == "nv_build"
     assert calls[0]["env"]["SKILL_EVAL_LLM_MODEL"] == "nvidia/example-model"
     assert calls[0]["env"]["PYTHON_DOTENV_DISABLED"] == "1"
+
+
+def test_failed_docker_doctor_prevents_native_provider_execution(tmp_path, monkeypatch):
+    import json
+    import os
+
+    from ci import run_tiers
+
+    workspace = tmp_path / "candidate"
+    skill = workspace / "skills/example"
+    skill.mkdir(parents=True)
+    (skill / "SKILL.md").write_text("---\nname: example\ndescription: Use for test examples.\n---\nInstructions.\n")
+    subprocess.run(["git", "init", "-b", "main", str(workspace)], check=True, capture_output=True)
+    git = ["git", "-C", str(workspace), "-c", "user.name=CI tests", "-c", "user.email=ci@example.com"]
+    subprocess.run([*git, "add", "."], check=True)
+    subprocess.run([*git, "commit", "-m", "fixture"], check=True, capture_output=True)
+    commit = subprocess.check_output([*git, "rev-parse", "HEAD"], text=True).strip()
+    commands = []
+
+    def unavailable_doctor(args, **_kwargs):
+        commands.append(args)
+        assert "doctor" in args, "No provider or native evaluation may run after failed Docker readiness"
+        return 1
+
+    monkeypatch.setattr(run_tiers, "dataset_preflight", lambda _skill: {})
+    monkeypatch.setattr(run_tiers, "run_command", unavailable_doctor)
+    reports = tmp_path / "reports"
+    code = run_tiers.evaluate(
+        3,
+        workspace,
+        reports,
+        {
+            "PATH": os.environ["PATH"],
+            "SKILL_EVAL_PATHS": "skills",
+            "SKILL_EVAL_ENV_MODE": "docker",
+            "SKILL_EVAL_PROVIDER": "nv_build",
+            "NVIDIA_API_KEY": "test-key-value-123456789",
+            "REPORT_COMMIT": commit,
+            "REPORT_REPOSITORY": "example/consumer",
+            "GITHUB_ACTIONS": "true",
+            "GITHUB_RUN_ID": "123",
+            "GITHUB_RUN_ATTEMPT": "1",
+        },
+    )
+    assert code == 0  # Advisory failures retain evidence, while spending no provider calls.
+    assert len(commands) == 1
+    assert commands[0][commands[0].index("--env-mode") + 1] == "docker"
+    result = json.loads((reports / "tier3/ci-tier.json").read_text())
+    assert result["tiers"][0]["status"] == "incomplete"

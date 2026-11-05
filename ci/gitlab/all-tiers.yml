@@ -155,11 +155,11 @@ skill-evaluation-native:
       esac
       python -I "$SKILL_EVAL_TOOLS_DIR/ci/eligible_gitlab.py"
       if [ "$SKILL_EVAL_TIER" = 3 ]; then
-        if [ "$SKILL_EVAL_ENV_MODE" = docker ] && ! command -v docker >/dev/null 2>&1; then
+        if [ "$SKILL_EVAL_ENV_MODE" = docker ] && { ! command -v docker >/dev/null 2>&1 || ! docker compose version >/dev/null 2>&1 || ! docker buildx version >/dev/null 2>&1; }; then
           if [ "$(id -u)" != 0 ] || ! command -v apt-get >/dev/null 2>&1; then
-            echo 'Install Docker on this runner before retrying.' >&2; exit 1
+            echo 'Install the Docker CLI, Compose v2 and Buildx on this runner before retrying.' >&2; exit 1
           fi
-          apt-get update -qq && apt-get install -y --no-install-recommends docker.io
+          apt-get update -qq && apt-get install -y --no-install-recommends docker-cli docker-compose docker-buildx
         elif [ "$SKILL_EVAL_ENV_MODE" = local ] && ! command -v npm >/dev/null 2>&1; then
           if [ "$(id -u)" != 0 ] || ! command -v apt-get >/dev/null 2>&1; then
             echo 'Install Node/npm on this native local runner before retrying.' >&2; exit 1

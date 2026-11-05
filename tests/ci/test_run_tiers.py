@@ -6,6 +6,7 @@ from __future__ import annotations
 import json
 import os
 import subprocess
+from pathlib import Path
 
 import pytest
 
@@ -163,6 +164,74 @@ def test_report_directory_cannot_modify_consumer_checkout(consumer):
 def test_head_identity_is_checked_before_full_scan(consumer, tmp_path):
     with pytest.raises(run_tiers.ConfigurationError, match="commit"):
         run_tiers.evaluate(2, consumer, tmp_path / "reports", env_for(consumer, REPORT_COMMIT="a" * 40))
+
+
+def test_interrupted_second_skill_cannot_publish_a_passing_partial_gate(consumer, tmp_path, monkeypatch):
+    from skillevaluator.models import ValidationResult
+    from skillevaluator.reporting.json_reporter import JSONReporter
+
+    attempts = []
+
+    def execute(args, **_kwargs):
+        if "catalog" in args:
+            return 0
+        attempts.append(args)
+        if len(attempts) == 2:
+            raise KeyboardInterrupt
+        result = ValidationResult(
+            validator_name="Context Deduplication", metadata={"gating": {"tier": 2, "blocking": True}}
+        )
+        output = Path(args[args.index("-o") + 1])
+        (output / "skillevaluator-tier2.json").write_text(JSONReporter().render_all([result]))
+        return 0
+
+    monkeypatch.setattr(run_tiers, "run_command", execute)
+    reports = tmp_path / "reports"
+    env = env_for(consumer, NVIDIA_API_KEY="test-provider-value-1234")
+    with pytest.raises(KeyboardInterrupt):
+        run_tiers.evaluate(2, consumer, reports, env)
+    retained = json.loads((reports / "tier2/ci-tier.json").read_text())
+    tier = retained["tiers"][0]
+    assert tier["status"] == "incomplete"
+    assert len(tier["skills"]) == 2
+    assert [row["status"] for row in tier["skills"]] == ["passed", "incomplete"]
+    assert retained["overall_passed"] is False
+    assert run_tiers.aggregate(reports, (2,), env) == 1
+
+
+@pytest.mark.parametrize("phase", ["doctor", "catalog", "evaluation"])
+def test_worker_failure_keeps_redacted_diagnostics_after_scratch_cleanup(consumer, tmp_path, monkeypatch, phase):
+    secret = "test-provider-secret-never-retain-12345"
+    scratch_paths = []
+
+    def execute(args, *, log, **_kwargs):
+        log.write_text(f"{phase} startup failure NVIDIA_API_KEY={secret}\n")
+        scratch_paths.append(log.parent)
+        if phase == "evaluation":
+            if "doctor" in args:
+                return 0
+            raw = Path(args[args.index("--output") + 1])
+            trial = raw / "harbor/trials/case"
+            trial.mkdir(parents=True)
+            (trial / "exception.txt").write_text(f"Compose startup failed; provider={secret}\n")
+        return 1
+
+    monkeypatch.setattr(run_tiers, "dataset_preflight", lambda _skill: {})
+    monkeypatch.setattr(run_tiers, "run_command", execute)
+    tier = 2 if phase == "catalog" else 3
+    output = tmp_path / "reports"
+    code = run_tiers.evaluate(tier, consumer, output, env_for(consumer, NVIDIA_API_KEY=secret))
+    assert code == (1 if tier == 2 else 0)
+    assert all(not path.exists() for path in scratch_paths)
+    diagnostics = list((output / f"tier{tier}").rglob("diagnostics/index.json"))
+    assert diagnostics, "Temporary worker errors must survive even without a canonical report"
+    retained = "\n".join(p.read_text() for p in output.rglob("*") if p.is_file())
+    assert secret not in retained
+    assert f"{phase} startup failure" in retained
+    if phase == "evaluation":
+        assert "Compose startup failed" in retained
+    document = json.loads((output / f"tier{tier}/ci-tier.json").read_text())
+    assert document["tiers"][0]["status"] == "incomplete"
 
 
 def test_consumer_python_module_cannot_shadow_installed_evaluator(consumer, tmp_path):

@@ -232,3 +232,21 @@ def test_github_native_and_aggregate_record_the_exact_tools_revision():
     jobs = load(".github/workflows/evaluate-all-tiers.yml")["jobs"]
     for name in ("paid-tiers", "aggregate"):
         assert jobs[name]["env"]["SKILLEVALUATOR_TOOLS_REF"] == "${{ inputs.tools-ref }}"
+
+
+def test_feedback_mutation_jobs_are_serialized_for_the_entire_repository():
+    github = load(".github/workflows/feedback-all-tiers.yml")["jobs"]["feedback"]
+    assert github["concurrency"] == {
+        "group": "skillevaluator-feedback-${{ github.repository }}",
+        "cancel-in-progress": "false",
+    }
+    assert load("ci/gitlab/feedback.yml")["skill-evaluation-feedback"]["resource_group"] == "skillevaluator-feedback"
+
+
+def test_gitlab_dind_bootstrap_installs_client_compose_and_buildx_without_a_second_daemon():
+    script = "\n".join(load("ci/gitlab/all-tiers.yml")["skill-evaluation-native"]["script"])
+    assert "apt-get install -y --no-install-recommends docker-cli docker-compose docker-buildx" in script
+    assert "--no-install-recommends docker.io" not in script
+    assert "docker compose version" in script
+    assert "docker buildx version" in script
+    assert script.index("bootstrap_tiers.py") < script.index('run_tiers.py" evaluate')

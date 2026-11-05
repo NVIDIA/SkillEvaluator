@@ -31,7 +31,9 @@ GitLab artifact access controls.
 Configure a runner matching `SKILL_EVAL_RUNNER` (default `docker`), the protected
 `SKILL_EVAL_ENVIRONMENT` (default `skillevaluator`) and provider secrets scoped
 to that execution environment. The default Docker service needs a privileged
-runner with Docker-in-Docker enabled. For local mode the generated caller
+runner with Docker-in-Docker enabled. Docker mode also requires the Docker CLI,
+Compose v2 and Buildx; the shared job installs these clients in supported root
+Linux containers and checks readiness before evaluation. For local mode the generated caller
 removes that service; use a Linux or macOS native runner with Python 3.12,
 Git and Node/npm. Missing native tools must be installed by the runner
 administrator; system-package bootstrap is limited to root Linux containers. The

@@ -17,6 +17,7 @@ spec:
 # SPDX-License-Identifier: Apache-2.0
 # Install the thin include on the protected default branch before opening MRs.
 skill-evaluation-feedback:
+  resource_group: skillevaluator-feedback
   image: python:3.12.12-slim
   stage: test
   environment:

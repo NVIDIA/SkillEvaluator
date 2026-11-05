@@ -33,11 +33,13 @@ from skillevaluator.reporting.run_status import resolve_run_status
 from skillevaluator.utils.secret_redaction import Redactor
 
 try:
+    from diagnostics import retain_diagnostics
     from github_api import strict_json
     from run_tier1 import discover_skills
     from secret_redaction import collect_sensitive_values
     from select_changed_skills import SelectionError, _git, _paths, select_changed_skills, skill_roots
 except ModuleNotFoundError:
+    from ci.diagnostics import retain_diagnostics
     from ci.github_api import strict_json
     from ci.run_tier1 import discover_skills
     from ci.secret_redaction import collect_sensitive_values
@@ -418,7 +420,20 @@ def evaluate(tier: int, workspace: Path, reports: Path, env: dict[str, str]) -> 
     document = context(env)
     required = tier != 3 or boolean(env, "SKILL_EVAL_TIER3_REQUIRED")
     selected, selection = select_skills(workspace, env)
-    row = {"tier": tier, "required": required, "status": "skipped" if not selected else "incomplete", "skills": []}
+    row = {
+        "tier": tier,
+        "required": required,
+        "status": "skipped" if not selected else "incomplete",
+        "skills": [
+            {
+                "path": skill.relative_to(workspace).as_posix(),
+                "status": "incomplete",
+                "report_json": None,
+                "report_html": None,
+            }
+            for skill in selected
+        ],
+    }
     document.update({"tiers": [row], "expected_tiers": [tier], "selection": selection})
     destination = reports / f"tier{tier}"
     destination.mkdir(parents=True, exist_ok=True)
@@ -440,6 +455,7 @@ def evaluate(tier: int, workspace: Path, reports: Path, env: dict[str, str]) -> 
         retain()
         return int(required)
     child = child_environment(env)
+    provider_tokens = {child[key] for key in PROVIDER_KEYS.values() if child.get(key)}
     needed = {PROVIDER_KEYS[child["SKILL_EVAL_LLM_PROVIDER"]]}
     if tier == 2:
         needed.add(PROVIDER_KEYS[child["SKILL_EVAL_EMBEDDING_PROVIDER"]])
@@ -449,7 +465,7 @@ def evaluate(tier: int, workspace: Path, reports: Path, env: dict[str, str]) -> 
         return int(required)
     deadline = time.monotonic() + integer(env, "SKILL_EVAL_TIMEOUT_SECONDS", 18000, 1, 86400)
     with tempfile.TemporaryDirectory(prefix="skillevaluator-ci-") as temporary:
-        scratch = Path(temporary)
+        scratch = Path(temporary).resolve()
         child["HOME"] = str(scratch / "home")
         Path(child["HOME"]).mkdir(mode=0o700)
         child["TMPDIR"] = str(scratch)
@@ -479,22 +495,24 @@ def evaluate(tier: int, workspace: Path, reports: Path, env: dict[str, str]) -> 
                     row["reason"] = (
                         "The complete comparison catalog could not be built; inspect provider and embedding configuration."
                     )
+                    diagnostics = scratch / "catalog-diagnostics"
+                    diagnostics.mkdir()
+                    retain_diagnostics(
+                        diagnostics, destination / "catalog", provider_tokens, command_log=scratch / "catalog.log"
+                    )
                     retain()
                     return 1
         doctor_done = False
         for index, skill in enumerate(selected, 1):
-            skill_row = {
-                "path": skill.relative_to(workspace).as_posix(),
-                "status": "incomplete",
-                "report_json": None,
-                "report_html": None,
-            }
-            row["skills"].append(skill_row)
+            skill_row = row["skills"][index - 1]
+            raw = scratch / f"skill-{index:03}"
+            raw.mkdir()
+            leaf = destination / f"skill-{index:03}"
+            tokens = provider_tokens
+            command_log = scratch / f"skill-{index:03}.log"
             try:
                 digests = dataset_preflight(skill) if tier == 3 else {}
-                tokens = collect_sensitive_values(skill) | {
-                    child[key] for key in PROVIDER_KEYS.values() if child.get(key)
-                }
+                tokens = collect_sensitive_values(skill) | provider_tokens
                 if tier == 3 and not doctor_done:
                     args = [
                         sys.executable,
@@ -509,19 +527,18 @@ def evaluate(tier: int, workspace: Path, reports: Path, env: dict[str, str]) -> 
                     ]
                     if env.get("SKILL_EVAL_AGENTS"):
                         args += ["--agents", env["SKILL_EVAL_AGENTS"]]
+                    command_log = scratch / "doctor.log"
                     if run_command(
                         args,
                         env=child,
                         cwd=workspace,
                         timeout=min(180, deadline - time.monotonic()),
-                        log=scratch / "doctor.log",
+                        log=command_log,
                     ):
                         raise ConfigurationError(
                             "Tier 3 runtime preflight failed; check the selected mode, agent and provider."
                         )
                     doctor_done = True
-                raw = scratch / f"skill-{index:03}"
-                raw.mkdir()
                 if tier == 3:
                     config_keys = (
                         "SKILL_EVAL_ENV_MODE",
@@ -538,14 +555,14 @@ def evaluate(tier: int, workspace: Path, reports: Path, env: dict[str, str]) -> 
                         "SKILL_EVAL_TOOLS_REF",
                     )
                     write_json(raw / "ci-options.json", {key: env[key] for key in config_keys if key in env})
+                command_log = scratch / f"skill-{index:03}.log"
                 code = run_command(
                     skill_command(tier, skill, raw, env, catalog=catalog),
                     env=child,
                     cwd=workspace,
                     timeout=deadline - time.monotonic(),
-                    log=scratch / f"skill-{index:03}.log",
+                    log=command_log,
                 )
-                leaf = destination / f"skill-{index:03}"
                 if code == 124:
                     skill_row["error"] = "Evaluation exceeded the configured time budget."
                 skill_row.update(_retain(raw, leaf, tier, tokens, skill, code))
@@ -561,6 +578,19 @@ def evaluate(tier: int, workspace: Path, reports: Path, env: dict[str, str]) -> 
                     if isinstance(exc, ConfigurationError)
                     else "Evaluation evidence could not be safely retained; check the runtime and provider."
                 )
+            finally:
+                if skill_row["status"] not in SUCCESS:
+                    try:
+                        retain_diagnostics(
+                            raw,
+                            leaf,
+                            tokens,
+                            command_log=command_log if command_log.is_file() else None,
+                        )
+                    except (OSError, ValueError):
+                        # Diagnostic failures must never replace the evaluation
+                        # outcome or expose raw worker exception messages.
+                        skill_row["diagnostics_error"] = "Worker diagnostics could not be safely retained."
             row["status"] = _combined([r["status"] for r in row["skills"]])
             retain()
             print(f"Tier {tier}: completed {index}/{len(selected)} selected skills; {skill_row['status']}.", flush=True)
@@ -589,6 +619,15 @@ def aggregate(reports: Path, tiers: tuple[int, ...], env: dict) -> int:
             if not isinstance(rows, list) or len(rows) != 1 or rows[0].get("tier") != tier:
                 raise ConfigurationError("A tier artifact does not identify its expected tier.")
             row = {**rows[0], "required": required}
+            selected = incoming.get("selection", {}).get("selected")
+            if (
+                row.get("status") == "passed"
+                and isinstance(selected, list)
+                and set(selected) != {skill.get("path") for skill in row.get("skills", [])}
+            ):
+                row.update(
+                    status="incomplete", reason="Results are missing for selected skills; the tier did not complete."
+                )
         elif tier == 1 and (reports / "tier1/summary.json").is_file():
             legacy = read_json(reports / "tier1/summary.json")
             try:

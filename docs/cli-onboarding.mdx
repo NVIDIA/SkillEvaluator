@@ -116,7 +116,7 @@ also installs pinned native CLIs into an isolated runtime directory.
 
 `--runner` chooses a GitHub runner label or GitLab runner tag. GitHub defaults
 to `ubuntu-24.04`; GitLab defaults to a configured `docker` tag. Docker mode
-requires a working daemon; GitLab's included Docker-in-Docker service requires
+requires a working daemon, Docker CLI, Compose v2 and Buildx; GitLab's included Docker-in-Docker service requires
 a privileged runner. Local mode needs a compatible native runner with Node/npm;
 the generated GitLab local configuration removes the Docker service. Cloud
 sandbox backends are outside this onboarding path.

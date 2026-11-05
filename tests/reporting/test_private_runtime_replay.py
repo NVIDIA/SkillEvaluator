@@ -75,7 +75,9 @@ def test_replay_refuses_incompatible_snapshot_schema(tmp_path, change):
 
 
 @pytest.mark.parametrize(
-    "content", ['{"schema_version": NaN}', "[" * 101, '"unterminated', '"' + "x" * (256 * 1024) + '"']
+    "content",
+    ['{"schema_version": NaN}', "[" * 101, '"unterminated', '"' + "x" * (256 * 1024) + '"'],
+    ids=["non-finite", "too-deep", "malformed", "oversized"],
 )
 def test_replay_rejects_invalid_or_unbounded_json(tmp_path, content):
     (tmp_path / "plugin_runtime_report.json").write_text(content)

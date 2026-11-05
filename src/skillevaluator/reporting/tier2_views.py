@@ -22,6 +22,7 @@ class Tier2ScopeView:
     affected: int | None
     catalog_entries: int | None
     notes: tuple[str, ...]
+    catalog_not_applicable: bool = False
 
 
 def _count(value: object) -> int | None:
@@ -67,6 +68,7 @@ def tier2_scope_views(results: list[ValidationResult]) -> tuple[Tier2ScopeView, 
         all_complete = bool(members)
         catalog_counts: list[int] = []
         catalog_known = bool(members) and scope == "across"
+        pairwise_only = bool(members) and scope == "across"
         for result in members:
             details = {detail.check_name: detail.metadata for detail in result.success_details}
             workflow = result.metadata.get("workflow")
@@ -120,6 +122,7 @@ def tier2_scope_views(results: list[ValidationResult]) -> tuple[Tier2ScopeView, 
                 catalog_known = False
             indexed = details.get("index_built")
             entries = _count(indexed.get("entry_count")) if isinstance(indexed, dict) else None
+            pairwise_only = pairwise_only and entries is not None and "catalog_compared" not in details
             if scope == "across" and entries is not None:
                 notes.append(f"Pairwise comparison of {entries} collection entries; no catalog used.")
         duplicates = []
@@ -161,6 +164,7 @@ def tier2_scope_views(results: list[ValidationResult]) -> tuple[Tier2ScopeView, 
                 affected,
                 sum(catalog_counts) if catalog_known else None,
                 tuple(dict.fromkeys(notes)),
+                scope == "within" or pairwise_only,
             )
         )
     unknown = tuple(result for result in results if _scope(result) is None)

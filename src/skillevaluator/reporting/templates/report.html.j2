@@ -2086,7 +2086,7 @@
                 {% for label, value in [('Checks completed', scope.completed), ('Duplicate findings', scope.duplicates), ('Affected files' if scope.id == 'within' else 'Affected skills', scope.affected), ('Catalog entries compared', scope.catalog_entries)] %}
                 <div class="dashboard-card">
                     <h3 class="dashboard-card-title">{{ label }}</h3>
-                    <p class="dashboard-card-value">{{ value if value is not none else 'Unavailable' }}</p>
+                    <p class="dashboard-card-value">{{ 'Not applicable' if label == 'Catalog entries compared' and scope.catalog_not_applicable else (value if value is not none else 'Unavailable') }}</p>
                 </div>
                 {% endfor %}
             </div>

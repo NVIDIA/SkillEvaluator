@@ -230,3 +230,13 @@ def test_compact_validate_summary_keeps_all_harbor_evidence_reachable(tmp_path):
     assert "https://example.test/analysis" in text
     assert "Job 2" in text
     assert result == original
+
+
+def test_catalog_kpi_marks_non_catalog_scopes_not_applicable():
+    result = ValidationResult(validator_name="Similarity Check")
+    result.add_success("index_built", "Indexed", entry_count=3, content_type="skill")
+    output = HTMLReporter(include_timestamp=False).render_all([result])
+    for scope in ("within", "across"):
+        section = output.split(f'id="tier2-{scope}"', 1)[1].split("</section>", 1)[0]
+        catalog_card = section.split("Catalog entries compared</h3>", 1)[1].split("</div>", 1)[0]
+        assert "Not applicable" in catalog_card

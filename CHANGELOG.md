@@ -4,6 +4,18 @@ All notable changes to SkillEvaluator are documented in this file.
 
 ## Unreleased
 
+### Changed
+
+- Name the shared OSS validation policy `default` for both public and private
+  repositories. Keep `--profile external`, `--external`, and the legacy
+  environment value as compatibility aliases without changing validation rules.
+  The CI image now selects `default`; GitHub and GitLab templates explain that
+  policy selection does not control report visibility. Existing image pins keep
+  their previous label until upgraded to an image containing this change.
+  New report policy metadata uses `profile: default` and `audience: all`; its
+  digest and bundled source path change with the name. Saved reports are not
+  rewritten.
+
 ### Documentation
 
 - Keep verified CI templates in the public repository and use one product

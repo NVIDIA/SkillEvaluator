@@ -477,6 +477,16 @@ All notable changes to SkillEvaluator are documented in this file.
   scoring agree, while scoped searches and slash-valued patterns retain their
   classification.
 
+- Tier 2 `similarity-check` and `context-optimization-check` no longer abort
+  with a "symlink or reparse point" error when a skill or collection aliases
+  one agent directory to another, such as `.agents -> .claude`. A directory
+  link whose name is not a scanned file type and whose relative target is a
+  regular directory found by the same scan is skipped without being followed,
+  so the target directory is scanned once. Absolute links and Windows
+  junctions, broken or escaping links, links to the scan root or one of the
+  alias's parent directories, `..` after a named component, and aliases that
+  point at another link remain rejected.
+
 - Tier 3 `claude-code` trials no longer hang until the agent timeout after the
   agent has already answered. Claude Code moves a shell command that outlasts
   its Bash timeout to the background, and a headless run waits for background
@@ -490,6 +500,34 @@ All notable changes to SkillEvaluator are documented in this file.
   background tasks back on, and other agents ignore the variable. A skill whose
   single commands need longer can raise Claude Code's default with
   `BASH_DEFAULT_TIMEOUT_MS` in `harbor.runtime_env`.
+
+- PII scans no longer report Luhn-valid timestamps and digests as CRITICAL
+  credit cards that fail `validate` and `pii-scan`. A number is skipped when a
+  label such as `timestamp_microseconds:`, `event_timestamp:`, `unix_time`,
+  `epoch_us`, `sha256:`, or `checksum=` directly precedes it, or when it sits
+  inside a longer ASCII identifier or hex token such as `id_1707938736269577`;
+  a card after a payment word and an underscore (`card_4532015112830366`,
+  `cc_...`), in Markdown underscore emphasis (`_4532015112830366_`), after a string
+  escape such as `\n` or a percent-encoded byte such as `%3D`, or written
+  directly next to Chinese, Japanese, or Korean text is still reported. Known
+  test card numbers, now including other widely published test cards such as
+  `4242424242424242` and `5555555555554444`, are excepted however their digits
+  are grouped (`4111 1111 1111 1111`). They no longer hide a different card
+  number on the same line, so a card listed next to a test card is now
+  reported. The exponent of a scientific-notation value such as
+  `1.000000e+00` is no longer reported as an international phone number.
+  GPS-shaped decimal pairs now need a geospatial cue (GPS, latitude/longitude,
+  lat/lng, `latlong`/`lonlat` keys, WGS 84, a `geo:` URI, a Google, Apple,
+  OpenStreetMap, or Bing map link, a GeoJSON geometry, `Feature`, or collection
+  type or `"geometry"` member, or location, office, address, or degrees, also
+  in plural, numeric-suffix, snake_case, or camelCase forms such as
+  `locations:`, `lat1`, or `homeLocation`) on the line, on one of the two lines
+  before it, or in the file name, so waypoints, poses, quaternions, and
+  calibration vectors are no longer reported as location data. Every position
+  inside a GeoJSON geometry's `coordinates` array written as JSON, a Python
+  dict, or a JS object is still reported. Pairs without a cue, such as
+  `coordinates: 37.7749, -122.4194` or `Meet me at 37.7749, -122.4194`, are no
+  longer reported either.
 
 - Tier 1 security scans no longer fail a skill for an exact read-only
   `/etc/passwd` bind mount such as `docker run -v /etc/passwd:/etc/passwd:ro`.

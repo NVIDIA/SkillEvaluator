@@ -1,12 +1,13 @@
 # SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 # SPDX-License-Identifier: Apache-2.0
 
-# skillevaluator validation profile: external
+# SkillEvaluator default validation policy
 #
-# This is the default policy for public repositories. It accepts any
-# well-formed contributor email address and keeps licensing errors blocking.
+# Shared by public and private repositories. This policy governs finding
+# severity and author validation, not repository visibility or report hosting.
+# The CLI accepts "external" as a compatibility alias for this same policy.
 
-profile: external
+profile: default
 
 identity:
   # Disable domain restriction. The author shape (Name <email@host>) is

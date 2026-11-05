@@ -230,7 +230,8 @@ def test_executive_summary_states_one_verdict_reason_and_four_kpis() -> None:
         "Quality",
     ]
     assert "Minimum 70 to pass" in summary
-    assert summary.count("A finding is one problem a check reports at one location") == 1
+    assert summary.count("A finding is one problem a check reports,") == 1
+    assert "each location is an occurrence" in summary
     assert "<h3>Fix first</h3>" in summary
 
 

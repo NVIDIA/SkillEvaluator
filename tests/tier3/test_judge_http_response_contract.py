@@ -21,7 +21,10 @@ def test_standalone_judge_requests_json_from_streaming_default_endpoint(monkeypa
     verifier = importlib.util.module_from_spec(spec)
     spec.loader.exec_module(verifier)
     requests = []
-    judge_reply = json.dumps({"score": 1.0, "reason": "The answer matches the expected result."})
+    criteria = ("ACTION_CORRECT", "FACTUALLY_ACCURATE", "TASK_ADDRESSED", "ACTIONABLE", "FORMAT_FOLLOWED")
+    judge_reply = json.dumps(
+        {"criteria": dict.fromkeys(criteria, True), "reason": "The answer matches the expected result."}
+    )
 
     class StreamingDefaultEndpoint(BaseHTTPRequestHandler):
         def do_POST(self):

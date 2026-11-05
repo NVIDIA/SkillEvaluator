@@ -107,6 +107,7 @@ def _scan_case(directory, case):
             "overall_passed": passed,
             "overall_status": row["overall_status"],
             "incomplete_scans": [],
+            "policy": {"profile": "default", "audience": "all"},
             "results": results,
         }
         (child / "skillevaluator-tier1.json").write_text(json.dumps(payload))
@@ -160,6 +161,7 @@ def test_acceptance_checks_cover_each_real_scan_scenario(tmp_path, case):
         "report-dir",
         "row-incomplete",
         "report-incomplete",
+        "wrong-policy",
     ],
 )
 def test_acceptance_rejects_incomplete_or_contradictory_scan_evidence(tmp_path, case, damage):
@@ -170,6 +172,8 @@ def test_acceptance_rejects_incomplete_or_contradictory_scan_evidence(tmp_path, 
     process_exit = int(case == "invalid-name")
     if damage == "missing-sarif":
         (child / "skillevaluator-tier1.sarif.json").unlink()
+    elif damage == "wrong-policy":
+        data["policy"] = {"profile": "external", "audience": "external"}
     elif damage == "incomplete-scan":
         data["results"][0]["incomplete_scans"] = ["gitleaks"]
     elif damage == "missing-validators":

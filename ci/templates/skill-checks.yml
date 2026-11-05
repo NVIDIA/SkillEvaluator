@@ -1,5 +1,7 @@
 # SPDX-License-Identifier: Apache-2.0
 # Use the release-generated copy with reviewed workflow and image pins.
+# The image uses the default OSS validation policy for public and private repos.
+# No internal/external input is needed; report visibility is configured separately.
 name: Skill checks
 on:
   pull_request:

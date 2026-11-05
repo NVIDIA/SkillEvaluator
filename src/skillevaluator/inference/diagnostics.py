@@ -40,15 +40,19 @@ _PROVIDERS = frozenset({"openai", "anthropic", "nv_build", "bedrock", "openai-co
 def safe_llm_labels(provider: object, model: object) -> tuple[str, str]:
     """Keep configured identifiers readable without emitting URLs or control text."""
     safe_provider = provider if isinstance(provider, str) and provider in _PROVIDERS else "unresolved"
-    safe_model = "unresolved"
+    return safe_provider, safe_llm_model(model)
+
+
+def safe_llm_model(model: object) -> str:
+    """Return a model identifier fit for reports, or ``unresolved``."""
     if (
         isinstance(model, str)
         and re.fullmatch(r"[A-Za-z0-9][A-Za-z0-9._:/-]{0,159}", model)
         and "://" not in model
         and not model.startswith(("sk-", "nvapi-"))
     ):
-        safe_model = model
-    return safe_provider, safe_model
+        return model
+    return "unresolved"
 
 
 def llm_failure_diagnostic(exc: Exception) -> str:

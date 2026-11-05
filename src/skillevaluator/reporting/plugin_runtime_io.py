@@ -100,15 +100,16 @@ def _validate(payload: object) -> RuntimePluginReport:
     }
     if payload.keys() != allowed:
         raise ValueError("Unexpected runtime report fields")
-    return RuntimePluginReport(json.dumps(payload, ensure_ascii=True, allow_nan=False))
+    serialized = json.dumps(payload, ensure_ascii=True, allow_nan=False)
+    if len(serialized.encode("utf-8")) > MAX_OUTPUT_BYTES:
+        raise ValueError("Runtime report exceeds its publication bound")
+    return RuntimePluginReport(serialized)
 
 
 def save_plugin_runtime_report(report: RuntimePluginReport, run_dir: Path) -> None:
     """Atomically retain one bounded sanitized snapshot in the selected run directory."""
     checked = _validate(report.payload())
     encoded = checked._serialized.encode("utf-8")
-    if len(encoded) > MAX_OUTPUT_BYTES:
-        raise ValueError("Runtime report exceeds its publication bound")
     write_output_file_atomically(run_dir / RUNTIME_REPORT_FILENAME, encoded)
 
 

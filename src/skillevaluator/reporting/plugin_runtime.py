@@ -13,6 +13,10 @@ from typing import Any
 from skillevaluator.reporting.plugin_static import MAX_OUTPUT_BYTES, _clean_text, _count, _mapping, _Projection
 
 SCHEMA_VERSION = 1
+_PAIR_LABELS = {
+    "effectiveness": "Effectiveness lift (full minus baseline)",
+    "integration": "Bundle lift (full minus member skills)",
+}
 SECTIONS = {
     "run": ("Run and source", ("Field", "Value")),
     "diagnostics": ("Evidence limitations", ("Source", "Detail")),
@@ -78,6 +82,16 @@ class _RuntimeProjection:
         if isinstance(raw, (list, tuple)):
             self.totals[key] += len(raw) - len(records)
         return records
+
+    def labels(self, key: str, raw: object) -> list[str]:
+        if not isinstance(raw, (list, tuple)):
+            return []
+        length = min(len(raw), self.bound.input_remaining, 4096)
+        self.bound.input_remaining -= length
+        labels = [item for item in islice(raw, length) if isinstance(item, str)]
+        self.totals[key] += len(raw) - len(labels)
+        self.bound.truncated |= length < len(raw)
+        return labels
 
     def errors(self, source: str, raw: object) -> None:
         if isinstance(raw, list):
@@ -256,9 +270,7 @@ def _comparison_views(projection: _RuntimeProjection, comparisons: dict) -> None
         estimates.extend((name, ladder[name]) for name in ("bundle", "glue") if isinstance(ladder.get(name), dict))
         estimates.extend(
             (
-                "Bundle lift (full minus member skills)"
-                if name == "integration"
-                else "Effectiveness lift (full minus baseline)",
+                _PAIR_LABELS.get(name, _PAIR_LABELS["effectiveness"]),
                 step,
             )
             for name, step in projection.items(stats.get("lift_uncertainty"), limit=2)
@@ -325,8 +337,20 @@ def _comparison_views(projection: _RuntimeProjection, comparisons: dict) -> None
                         state,
                         f"loaded={_count(counts.get('loaded'))}; not_loaded={_count(counts.get('not_loaded'))}; unverified={_count(counts.get('unverifiable'))}",
                     )
+        seen_exclusions = set()
         for entry in projection.records("exclusions", ladder.get("excluded_cases")):
-            projection.add("exclusions", agent, entry.get("case_id", entry.get("case")), entry.get("reason"))
+            case, reason = entry.get("case_id", entry.get("case")), entry.get("reason")
+            projection.add("exclusions", agent, case, reason)
+            if isinstance(case, str) and isinstance(reason, str):
+                seen_exclusions.add((case, reason))
+        eligibility = _mapping(stats.get("comparison_eligibility"))
+        for measure, label in _PAIR_LABELS.items():
+            mismatches = _mapping(eligibility.get(measure)).get("score_policy_mismatches")
+            for case in projection.labels("exclusions", mismatches):
+                reason = f"{label}: score_policy_mismatch"
+                if (case, reason) not in seen_exclusions:
+                    projection.add("exclusions", agent, case, reason)
+                    seen_exclusions.add((case, reason))
         for arm, raw_cost in projection.items(stats.get("cost"), limit=4):
             cost = _mapping(raw_cost)
             projection.add(

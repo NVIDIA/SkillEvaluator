@@ -85,6 +85,22 @@ def test_replay_rejects_invalid_or_unbounded_json(tmp_path, content):
         io_api().load_plugin_runtime_report(tmp_path)
 
 
+def test_replay_rejects_snapshot_that_exceeds_byte_bound_after_sanitization(tmp_path):
+    payload = api().project_plugin_runtime(sample()).payload()
+    for section in payload["sections"]:
+        section["rows"] = []
+        section["total"] = section["omitted"] = 0
+        if section["key"] in {"comparisons", "context", "cost", "loading"}:
+            section["rows"] = [["\u202e" * 40 for _column in section["columns"]] for _row in range(64)]
+            section["total"] = 64
+    encoded = json.dumps(payload, ensure_ascii=False).encode("utf-8")
+    assert len(encoded) < 256 * 1024
+    (tmp_path / "plugin_runtime_report.json").write_bytes(encoded)
+
+    with pytest.raises(ValueError, match=r"unavailable.*publication bound"):
+        io_api().load_plugin_runtime_report(tmp_path)
+
+
 @pytest.mark.parametrize("value", [True, 2**100, {"unexpected": "nested"}])
 def test_replay_refuses_cells_outside_the_display_schema(tmp_path, value):
     payload = api().project_plugin_runtime(sample()).payload()

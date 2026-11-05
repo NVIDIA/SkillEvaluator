@@ -245,3 +245,101 @@ def test_malformed_coverage_lists_cannot_invent_activation(value):
     payload = api().project_plugin_runtime(result).payload()
     assert all(row[3] == "unverified" for row in sections(payload)["coverage"]["rows"])
     assert payload["status"] == "incomplete"
+
+
+def test_case_coverage_uses_real_condition_summaries_for_every_arm():
+    from skillevaluator.tier3.harbor.collector import _condition_execution_summary
+    from skillevaluator.tier3.harbor.metrics import DEFAULT_METRIC_SET, DEFAULT_METRICS
+
+    rewards = [
+        {
+            "entry_id": "recorded",
+            "_trial_root_name": f"recorded__attempt{attempt}",
+            "metric_set": DEFAULT_METRIC_SET,
+            **dict.fromkeys(DEFAULT_METRICS, 0.8),
+        }
+        for attempt in (1, 2)
+    ]
+    condition = _condition_execution_summary(
+        rewards,
+        expected_case_ids=["recorded", "missing"],
+        expected_cases=2,
+        n_attempts=2,
+        job_failure="",
+    )
+    result = sample()
+    result["agents"]["claude-code"]["conditions"] = dict.fromkeys(
+        ("with_skill", "without_skill", "sum_of_parts", "loose_parts"), condition
+    )
+    rows = sections(api().project_plugin_runtime(result).payload())["conditions"]["rows"]
+    assert rows == [
+        ["claude-code", "with_skill", "failed", 2, 1, 4, 2],
+        ["claude-code", "without_skill", "failed", 2, 1, 4, 2],
+        ["claude-code", "sum_of_parts", "failed", 2, 1, 4, 2],
+        ["claude-code", "loose_parts", "failed", 2, 1, 4, 2],
+    ]
+
+
+@pytest.mark.parametrize("member_skills", [False, True])
+def test_pairwise_policy_exclusions_survive_without_a_loose_parts_ladder(member_skills):
+    from skillevaluator.tier3.harbor.metrics import (
+        DEFAULT_METRIC_SET,
+        DEFAULT_METRICS,
+        LEGACY_METRIC_SET,
+        LEGACY_METRICS,
+    )
+    from skillevaluator.tier3.harbor.stats import ArmObservations, TrialObservation, build_agent_statistics
+
+    def trial(case, value, *, legacy=False):
+        return TrialObservation(
+            case,
+            {
+                "entry_id": case,
+                "metric_set": LEGACY_METRIC_SET if legacy else DEFAULT_METRIC_SET,
+                **dict.fromkeys(LEGACY_METRICS if legacy else DEFAULT_METRICS, value),
+            },
+        )
+
+    arms = {
+        "with_skill": ArmObservations("succeeded", (trial("kept", 0.8), trial("excluded-policy", 0.8))),
+        "without_skill": ArmObservations("succeeded", (trial("kept", 0.4), trial("excluded-policy", 0.4, legacy=True))),
+    }
+    if member_skills:
+        arms["sum_of_parts"] = ArmObservations(
+            "succeeded", (trial("kept", 0.6), trial("excluded-policy", 0.6, legacy=True))
+        )
+    stats = build_agent_statistics(
+        arms,
+        expected_case_ids=["kept", "excluded-policy"],
+        n_attempts=1,
+        stop_on_pass=False,
+        pass_threshold=0.5,
+        sum_of_parts_requested=member_skills,
+    )
+    assert stats["lift_ladder"] is None
+    # Repeated retained entries must not create duplicate displayed exclusions.
+    stats["comparison_eligibility"]["effectiveness"]["score_policy_mismatches"] *= 2
+    result = sample()
+    result["private_comparisons"]["agents"]["claude-code"] = stats
+    excluded = sections(api().project_plugin_runtime(result).payload())["exclusions"]
+    expected = [["claude-code", "excluded-policy", "Effectiveness lift (full minus baseline): score_policy_mismatch"]]
+    if member_skills:
+        expected.append(
+            ["claude-code", "excluded-policy", "Bundle lift (full minus member skills): score_policy_mismatch"]
+        )
+    assert excluded["rows"] == expected
+    assert excluded["total"] == len(expected) and excluded["omitted"] == 0
+
+
+def test_pairwise_policy_exclusion_bounds_count_every_withheld_entry():
+    result = sample()
+    stats = result["private_comparisons"]["agents"]["claude-code"]
+    stats["lift_ladder"] = None
+    stats["comparison_eligibility"] = {
+        "effectiveness": {"score_policy_mismatches": [f"case-{i}" for i in range(10000)]}
+    }
+    payload = api().project_plugin_runtime(result).payload()
+    excluded = sections(payload)["exclusions"]
+    assert excluded["total"] == 10000
+    assert excluded["rows"] and excluded["omitted"] == 10000 - len(excluded["rows"])
+    assert payload["truncated"] is True

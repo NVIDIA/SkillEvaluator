@@ -225,6 +225,8 @@ def test_service_run_retains_one_snapshot_before_cleanup_and_replays_six_formats
     run_dir = Path(outcome.result["run_dir"])
     assert not (run_dir / "_harbor-jobs").exists() and not (run_dir / "_harbor-tasks").exists()
     ladder = outcome.result["agents"]["claude-code"]["lift_ladder"]
+    for condition in outcome.result["agents"]["claude-code"]["conditions"].values():
+        assert condition["expected_cases"] == 5 and condition["scored_cases"] == 5
     assert ladder["n_cases"] == 5 and ladder["excluded_cases"] == []
     assert len(seen["observer"].context.cross_component_cases) == 5
     assert ladder["by_case_type"]["cross_component"]["n_cases"] == 5

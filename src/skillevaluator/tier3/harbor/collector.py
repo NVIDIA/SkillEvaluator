@@ -6644,6 +6644,8 @@ def _condition_execution_summary(
             "execution_error_details_total": 0,
             "execution_error_details_shown": 0,
             "execution_error_details_truncated": False,
+            "expected_cases": 0,
+            "scored_cases": 0,
             "expected_attempts": 0,
             "scored_attempts": 0,
             **_failure_list_metadata("runtime_failure_details", runtime_failures),
@@ -6802,6 +6804,8 @@ def _condition_execution_summary(
         "execution_error_details_total": len(all_errors),
         "execution_error_details_shown": len(errors),
         "execution_error_details_truncated": len(errors) < len(all_errors),
+        "expected_cases": expected_count,
+        "scored_cases": len(expected_set.intersection(by_case)) if expected_ids else len(by_case),
         "expected_attempts": expected_attempts,
         "scored_attempts": scored_attempts,
         **(

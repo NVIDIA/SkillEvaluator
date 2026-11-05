@@ -286,6 +286,44 @@ def test_strict_reads_stop_words_only_at_the_start_of_an_error_page(verifier, mo
     assert requested == [PRIMARY, PRIMARY, "family/backup"]
 
 
+def test_strict_stop_words_in_an_echoed_model_id_do_not_end_the_judge(verifier, monkeypatch):
+    strict(monkeypatch)
+    monkeypatch.setenv("LLM_JUDGE_MODEL", "vendor/content-safety-judge")
+    missing = http_error(404, b'{"error":{"message":"invalid model: vendor/content-safety-judge"}}')
+    requested = replay(verifier, monkeypatch, [missing, completion("judged")])
+
+    assert verifier.call_public_llm("prompt") == ("judged", None)
+    assert requested == ["vendor/content-safety-judge", "family/backup"]
+
+
+def test_strict_stop_words_in_a_connection_error_do_not_end_the_judge(verifier, monkeypatch):
+    strict(monkeypatch)
+    tunnel = urllib.error.URLError(OSError("Tunnel connection failed: 503 security-gateway.example unavailable"))
+    requested = replay(verifier, monkeypatch, [tunnel, tunnel, completion("judged")])
+
+    assert verifier.call_public_llm("prompt") == ("judged", None)
+    assert requested == [PRIMARY, PRIMARY, "family/backup"]
+
+
+@pytest.mark.parametrize(
+    "body",
+    [
+        b'{"error":{"code":"budget_exceeded","message":"Budget has been exceeded"}}',
+        b'{"type":"error","error":{"type":"invalid_request_error","message":"Your credit balance is too low"}}',
+        b'{"error":{"code":"billing_hard_limit_reached","message":"Billing hard limit has been reached"}}',
+        b'{"error":{"code":"content_filter","message":"The prompt was filtered"}}',
+    ],
+)
+def test_strict_structured_stop_errors_end_the_judge(verifier, monkeypatch, body):
+    strict(monkeypatch)
+    requested = replay(verifier, monkeypatch, [http_error(429, body), completion("judged")])
+
+    content, error = verifier.call_public_llm("prompt")
+
+    assert content is None and "HTTP 429" in error
+    assert requested == [PRIMARY]
+
+
 @pytest.mark.parametrize(
     "reply",
     [

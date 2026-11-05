@@ -781,12 +781,15 @@ agent environment or `custom_only` runs.
     retry delay moves on without waiting. A wait or request that would pass
     the judge's deadline ends the judge.
   - A refusal, a TLS certificate failure, an authentication error, and any
-    other non-retryable HTTP status end the judge. So does an error whose
-    message, or the first 500 characters of its HTTP body, names an exhausted
-    quota (`insufficient_quota`, `quota_exceeded`), a budget, billing, credit,
-    a content filter, safety, security, or a policy rejection, even on HTTP
-    429. These are not retried or handed to another model, and the built-in
-    refusal fallback is not used either.
+    other non-retryable HTTP status end the judge. So does a provider error,
+    even on HTTP 429, that says a quota, budget, billing, or credit limit was
+    reached, or that a content filter, safety, or security policy rejected
+    the request. Only the provider's error code, type, and message are read
+    (the first 500 characters of a body that is not JSON), and only whole
+    phrases such as `insufficient_quota`, `budget exceeded`,
+    `credit balance`, or `content_filter` count, so a model id or proxy host
+    name in the error does not. These are not retried or handed to another
+    model, and the built-in refusal fallback is not used either.
   - The first completed reply is final. It must be exactly one JSON object,
     with only whitespace around it: no prose, Markdown fences, second object,
     duplicate key, or `NaN`. An empty, invalid, or truncated reply fails the

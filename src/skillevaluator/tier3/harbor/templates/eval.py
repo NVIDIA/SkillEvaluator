@@ -884,21 +884,25 @@ _STRICT_JUDGE_MAX_MODELS = 3
 _STRICT_JUDGE_REQUESTS_PER_MODEL = 2
 # Requests left for the model the strict policy is trying; None outside it.
 _STRICT_JUDGE_REQUESTS_LEFT: ContextVar[list[int] | None] = ContextVar("strict_judge_requests_left", default=None)
-# Under the strict policy, a failed request whose error mentions one of these
-# is not retried or handed to another model, even when it is an HTTP 429:
-# another model cannot lift a quota, budget or billing limit, and must not be
-# asked to overturn a content-filter, safety or security rejection.
-_STRICT_JUDGE_STOP_MARKERS = (
-    "insufficient_quota",
-    "quota_exceeded",
-    "budget",
-    "billing",
-    "credit",
-    "content_filter",
-    "content filter",
-    "safety",
-    "security",
-    "policy rejection",
+# Under the strict policy, a provider error that says one of these is not
+# retried or handed to another model, even when it is an HTTP 429: another
+# model cannot lift a quota, budget, billing or credit limit, and must not be
+# asked to overturn a content-filter, safety or security rejection. Whole
+# phrases only, joined by a space or underscore, so a model id or host name
+# such as ``content-safety-judge`` or ``security-gateway`` is not a reason.
+_STRICT_JUDGE_STOP_PATTERN = re.compile(
+    r"\b(?:"
+    r"insufficient[ _]quota|quota[ _]exceeded|exceeded (?:your|the) (?:current )?quota"
+    r"|budget(?: has been)?[ _](?:exceeded|exhausted)|exceeded (?:your|the) (?:\w+ )?budget"
+    r"|billing[ _](?:hard[ _]limit|not[ _]active)"
+    r"|credit balance|insufficient[ _]credits?|out of credits"
+    r"|content[ _](?:filter|policy|management policy)"
+    r"|safety (?:system|filter|policy|block)"
+    r"|security (?:policy|filter|block|violation)"
+    r"|(?:blocked|flagged|rejected) by (?:the |a |an )?(?:\w+ )?(?:safety|security|content)"
+    r"|policy[ _](?:rejection|violation)"
+    r")\b",
+    re.IGNORECASE,
 )
 _STRICT_JUDGE_ERROR_BODY_CHARS = 500
 
@@ -919,17 +923,46 @@ def _spend_strict_judge_request():
     left[0] -= 1
 
 
-def _strict_judge_error_stops(error):
-    """Return whether a failed request is a quota, budget, billing, safety or security rejection.
+def _provider_error_fields(body):
+    """Return the code, type and message of a JSON error body, or None when the body is not one."""
+    if len(body) > _STRICT_JUDGE_ERROR_BODY_CHARS * 20:
+        return None
+    try:
+        parsed = json.loads(body)
+    except (RecursionError, ValueError):
+        return None
+    detail = parsed.get("error", parsed) if isinstance(parsed, dict) else None
+    if isinstance(detail, str):
+        return detail
+    if not isinstance(detail, dict):
+        return None
+    return " ".join(str(detail[key]) for key in ("code", "type", "message") if isinstance(detail.get(key), str))
 
-    Only the start of an HTTP error body is read, the same excerpt the error
-    detail shows, so footer text on a long proxy error page cannot end the judge.
+
+def _strict_judge_error_stops(error):
+    """Return whether a provider error is a quota, budget, billing, safety or security rejection.
+
+    Only what the provider said is read: the code, type and message of a JSON
+    error body, else the start of the body (the excerpt the error detail
+    shows, so a long proxy error page's footer cannot end the judge), or a
+    Bedrock error's code and message. A connection error has no provider
+    verdict, so the words in its reason, such as a proxy host name, never count.
     """
-    text = str(error)
     if isinstance(error, urllib.error.HTTPError):
-        text = f"{text} {_http_error_body(error)[:_STRICT_JUDGE_ERROR_BODY_CHARS]}"
-    lowered = text.lower()
-    return any(marker in lowered for marker in _STRICT_JUDGE_STOP_MARKERS)
+        body = _http_error_body(error)
+        text = _provider_error_fields(body)
+        if text is None:
+            text = body[:_STRICT_JUDGE_ERROR_BODY_CHARS]
+    elif isinstance(error, (urllib.error.URLError, OSError)):
+        return False
+    else:
+        response = getattr(error, "response", None)
+        info = response.get("Error") if isinstance(response, dict) else None
+        if isinstance(info, dict):
+            text = f"{info.get('Code') or ''} {info.get('Message') or ''}"
+        else:
+            text = str(error)
+    return _STRICT_JUDGE_STOP_PATTERN.search(text) is not None
 
 
 def _strict_judge_retry_allowed(error):

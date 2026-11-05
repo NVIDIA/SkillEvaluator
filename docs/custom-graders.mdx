@@ -239,7 +239,8 @@ The staged task also has explicit compatibility boundaries:
   environment controls are also rejected. An exact `${NAME}` assignment for a
   provider or judge control is accepted in task/step `verifier.env` only when
   the operator explicitly staged that same name; unrelated verifier variables
-  remain available. An operator-set `LLM_JUDGE_FALLBACK_MODELS` value is
+  remain available. Operator-set `LLM_JUDGE_FALLBACK_MODELS`,
+  `LLM_JUDGE_FALLBACK_POLICY`, and `LLM_JUDGE_RETRY_POLICY` values are
   forwarded only to the standard verifier job, never to the agent environment
   or a `custom_only` run. SkillEvaluator's Python verifier runs in isolated mode
   from a replaced `tests/skill_evaluator/` payload so authored helper modules

@@ -5,12 +5,16 @@ description: "Install SkillEvaluator, answer a few questions and bring automatic
 
 Bring skill evaluation to your GitHub repository in one guided setup.
 SkillEvaluator finds your skills, prepares the workflows and opens a setup PR.
+If your repository already has skill checks, it can add reporting to that setup.
 Your CI gets **Tier 1 checks, including SkillSpector security scanning**.
 
 ```bash title="Run inside your checked-out GitHub repository"
 pip install --upgrade skillevaluator
 skillevaluator ci init
 ```
+
+Adding reports to an existing shared component and using private Pages require
+SkillEvaluator **0.7.2 or later**.
 
 <CardGroup cols={3}>
   <Card title="1. Choose" icon="terminal" href="#run-the-wizard">
@@ -35,23 +39,24 @@ locally. The shared container supplies the runtime; you control the configuratio
 
   Automatic GitHub setup requires repository admin access. GitHub Actions and
   the referenced reusable workflows must be allowed. Checks-only setup supports
-  public and private repositories. Hosted feedback uses a public repository's
-  GitHub Pages site; choose checks only when public report hosting is unsuitable.
+  public and private repositories. Hosted feedback supports public Pages and
+  verified private Pages sites in eligible organization repositories. See
+  [private report hosting](#private-report-hosting) for the one-time prerequisite.
   This wizard supports GitHub. For GitLab, use the
   [GitLab template](/skills/skillevaluator/gitlab-ci).
 </Accordion>
 
 ## Run the wizard
 
-The wizard discovers folders containing `SKILL.md`. Answer five short questions;
-press **Enter** to keep a default.
+For a new scan, the wizard discovers folders containing `SKILL.md`. Answer five
+short questions; press **Enter** to keep a default.
 
 | Question | Your choice |
 | --- | --- |
 | **Skill folders** | Use the displayed numbers: `1,2` or `1 2` selects two folders. |
 | **Minimum score** | `70` by default; a lower quality score fails the check. |
 | **PR scope** | `auto` checks changed skills; `all` checks the selected collection. |
-| **Hosted feedback** | Add public HTML reports and one PR comment that updates with new results. |
+| **Hosted feedback** | Add hosted HTML reports and one PR comment that updates with new results. |
 | **Apply setup** | Choose `pr`, review the summary, then confirm. |
 
 <Frame caption="Shortened example interview. Folder names and counts come from your repository.">
@@ -68,6 +73,46 @@ Folders [1]: 1,2
 
 The score threshold does not override required security or schema checks.
 Default Tier 1 checks use no model key. Tier 2 and Tier 3 are not part of this setup.
+
+<Note>
+  Already have `.github/workflows/skill-checks.yml`? The CLI recognizes a
+  **Skill checks** workflow with one reusable scan job. It keeps your existing
+  inputs, triggers and workflow reference, including a shared component's `@v3`
+  tag. Review those settings, then choose whether to add hosted feedback.
+  Reporting adds `id-token: write` to the scan job when needed and prepares the
+  publisher workflow.
+</Note>
+
+### Shared components
+
+If your scan calls a shared component such as
+`your-org/ci/.github/workflows/skill-checks.yml@v3`, its maintainer first grants
+`id-token: write` in the component job that calls the evaluator. This is a
+one-time component change; the CLI checks it before applying reporting setup.
+Then run `skillevaluator ci init` in each consuming repository.
+
+The setup keeps `@v3` and approves that component to select the evaluator
+revision. When the maintainer updates `v3`, future scans use the updated
+component without a consumer edit. Each published report retains the resolved
+component and evaluator commits in its execution receipt.
+
+### Private report hosting
+
+Private Pages requires a private or internal project repository owned by a
+GitHub Enterprise Cloud organization. An administrator must first open
+**Settings → Pages**, choose **GitHub Actions** as the source and set the site
+visibility to **Private**. GitHub's REST API cannot change site visibility, so
+this step is done in GitHub's settings.
+
+Rerun `skillevaluator ci init` after that one-time setup. The CLI verifies the
+site's private visibility and uses GitHub's assigned private URL. It can reuse
+an existing SkillEvaluator report site or a newly configured empty private
+site; an unrelated website is preserved.
+
+Personal repositories cannot host access-controlled Pages. If private Pages is
+unavailable, choose **checks only** to retain reports in Actions artifacts.
+Repository privacy alone does not restrict access to a Pages site. See
+[GitHub's private Pages requirements](https://docs.github.com/en/enterprise-cloud@latest/pages/getting-started-with-github-pages/changing-the-visibility-of-your-github-pages-site).
 
 ## Review your setup
 
@@ -158,12 +203,15 @@ extract it and open `index.html`. Failed scans retain their available reports to
   </Accordion>
   <Accordion title="Can I inspect the setup before applying it?">
     Choose the read-only option in the wizard to see the plan without changing
-    files or GitHub settings. The `save` option writes only the local workflow
-    files; choose `pr` for automatic GitHub setup.
+    files or GitHub settings. Previewing an existing scan workflow makes no
+    network requests; GitHub access and private Pages checks happen when you
+    apply setup. The `save` option writes only the local workflow files; choose
+    `pr` for automatic GitHub setup.
   </Accordion>
   <Accordion title="Will this change my other workflows or branch rules?">
-    Existing workflows remain separate. The CLI does not automatically make
-    the scan a required merge check. After the first run, select its emitted
+    The CLI preserves the settings of a recognized existing scan and leaves
+    other workflows separate. It does not automatically make the scan a
+    required merge check. After the first run, select its emitted
     check in GitHub branch rules if a failed or incomplete result should block
     merging; the current template emits `skills / Tier 1 scan`.
     Organization action restrictions are preserved. Repositories using an

@@ -3370,8 +3370,31 @@ def security_patch_paths(tool_call, action_lower, is_exec_tool, cwd=_SECURITY_DE
         if value:
             cwd = security_path(value, cwd, anchors) or cwd
             break
+    # The shell's directory stack below the current directory, top last.
+    stack = []
     for match in _APPLY_PATCH_CD_RE.finditer(prefix):
-        cwd = security_path(match.group(1), cwd, anchors) or cwd
+        command, options, operand = match.group("command", "options", "operand")
+        stack_only = "n" in options
+        if command == "cd":
+            # A bare "cd" goes home.
+            cwd = security_path(operand or "~", cwd, anchors) or cwd
+        elif command == "pushd":
+            target = security_path(operand, cwd, anchors) if operand else ""
+            if stack_only:
+                # "pushd -n DIR" adds DIR to the stack and stays where it is.
+                if target:
+                    stack.append(target)
+            elif target:
+                stack.append(cwd)
+                cwd = target
+            elif stack:
+                # A bare pushd swaps the current directory with the top of the stack.
+                cwd, stack[-1] = stack[-1], cwd
+        elif stack:
+            # "popd" returns to the top of the stack; "popd -n" only drops it.
+            top = stack.pop()
+            if not stack_only:
+                cwd = top
     paths = []
     for match in _APPLY_PATCH_HEADER_RE.finditer(patch):
         # OpenCode trims header paths with JavaScript's trim(), which also strips U+FEFF.
@@ -3979,6 +4002,8 @@ def scan_plugin_security(
     )
     symlink_seen = False
     target_seen = False
+    rm_workdirs = (_current_checks._APPLY_PATCH_DEFAULT_WORKDIR,)
+    rm_budget = [_current_checks._RM_MAX_FORCE_RESOLUTIONS]
     for tool_call in tool_calls:
         if _tool_mentions_any_skill(tool_call, expected_skill, acceptable_skills):
             target_seen = True
@@ -3986,7 +4011,10 @@ def scan_plugin_security(
         if not any(hint in action.lower() for hint in _EXECUTION_TOOL_HINTS):
             continue
         text = _action_text(tool_call)
-        if _current_checks._rm_targets_outside_tmp(text, _symlink_seen=symlink_seen):
+        rm_workdirs = _current_checks._rm_call_workdirs(tool_call, rm_workdirs)
+        if _current_checks._rm_targets_outside_tmp(
+            text, _symlink_seen=symlink_seen, _workdirs=rm_workdirs, _budget=rm_budget
+        ):
             result["findings"].append(
                 _security_finding(
                     finding_type="destructive_command",
@@ -4000,6 +4028,7 @@ def scan_plugin_security(
                 )
             )
         symlink_seen |= _current_checks._rm_symlink_creation_seen(text)
+        rm_workdirs = _current_checks._rm_shell_workdirs(text, rm_workdirs)
     impacted = [finding for finding in result["findings"] if finding.get("score_impact")]
     if impacted:
         result.update(

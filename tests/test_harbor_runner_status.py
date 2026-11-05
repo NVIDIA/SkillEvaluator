@@ -386,6 +386,230 @@ def test_bounded_harbor_process_failure_reaps_descendants(
     assert not child_marker.exists()
 
 
+@pytest.mark.skipif(os.name != "posix", reason="requires POSIX process-group verification")
+def test_bounded_harbor_process_cancellation_reaps_descendants(tmp_path: Path) -> None:
+    child_pid_path = tmp_path / "cancelled-child-pid"
+    child_marker = tmp_path / "cancelled-child-survived"
+    child_script = (
+        "import pathlib,signal,time;"
+        "signal.signal(signal.SIGTERM, signal.SIG_IGN);"
+        "time.sleep(1);"
+        f"pathlib.Path({str(child_marker)!r}).write_text('survived')"
+    )
+    parent_script = (
+        "import pathlib,subprocess,sys,time;"
+        f"child=subprocess.Popen([{sys.executable!r},'-c',{child_script!r}]);"
+        f"pathlib.Path({str(child_pid_path)!r}).write_text(str(child.pid));"
+        "time.sleep(30)"
+    )
+    cancellation = runner._HarborRunCancellation()
+
+    def cancel_once_child_started() -> None:
+        deadline = time.monotonic() + 10
+        while not child_pid_path.exists() and time.monotonic() < deadline:
+            time.sleep(0.01)
+        cancellation.requested.set()
+
+    canceller = threading.Thread(target=cancel_once_child_started, daemon=True)
+    canceller.start()
+    with pytest.raises(runner._HarborRunCancelledError):
+        runner._run_bounded_harbor_process(
+            [sys.executable, "-c", parent_script],
+            env=dict(os.environ),
+            cwd=Path.cwd(),
+            stdin_text=None,
+            timeout_seconds=None,
+            max_output_bytes=4096,
+            diagnostic_tail_chars=128,
+            secret_values=set(),
+            cancellation=cancellation,
+        )
+    canceller.join(timeout=5)
+
+    child_pid = int(child_pid_path.read_text(encoding="ascii"))
+    deadline = time.monotonic() + 5
+    while time.monotonic() < deadline:
+        try:
+            os.kill(child_pid, 0)
+        except ProcessLookupError:
+            break
+        time.sleep(0.01)
+    else:
+        with contextlib.suppress(ProcessLookupError):
+            os.kill(child_pid, signal.SIGKILL)
+        pytest.fail("Harbor descendant survived cancellation")
+    time.sleep(1.05)
+    assert not child_marker.exists()
+
+
+def _sigterm_handling_harbor_script(ready_path: Path, *, on_sigterm: list[str]) -> str:
+    """Stand-in Harbor CLI that reports readiness and handles SIGTERM itself."""
+    handler = "".join(f"    {line}\n" for line in on_sigterm)
+    return (
+        "import pathlib,signal,sys,time\n"
+        "def stop(*_):\n"
+        f"{handler}"
+        "signal.signal(signal.SIGTERM, stop)\n"
+        f"pathlib.Path({str(ready_path)!r}).write_text('ready')\n"
+        "time.sleep(120)\n"
+    )
+
+
+def _cancel_when_ready(
+    ready_path: Path,
+    cancellation: runner._HarborRunCancellation,
+    *,
+    force_after_seconds: float | None = None,
+) -> threading.Thread:
+    def cancel() -> None:
+        deadline = time.monotonic() + 30
+        while not ready_path.exists() and time.monotonic() < deadline:
+            time.sleep(0.01)
+        cancellation.requested.set()
+        if force_after_seconds is not None:
+            time.sleep(force_after_seconds)
+            cancellation.forced.set()
+
+    canceller = threading.Thread(target=cancel, daemon=True)
+    canceller.start()
+    return canceller
+
+
+@pytest.mark.skipif(os.name != "posix", reason="requires POSIX SIGTERM delivery")
+def test_bounded_harbor_process_cancellation_lets_harbor_finish_cleanup(tmp_path: Path) -> None:
+    # Harbor maps SIGTERM to KeyboardInterrupt and then stops its trial
+    # environments. Cancellation must wait for that instead of killing the
+    # group after the short timeout grace.
+    ready_path = tmp_path / "ready"
+    cleanup_marker = tmp_path / "cleanup-finished"
+    script = _sigterm_handling_harbor_script(
+        ready_path,
+        on_sigterm=[
+            "time.sleep(0.5)",
+            f"pathlib.Path({str(cleanup_marker)!r}).write_text('done')",
+            "sys.exit(0)",
+        ],
+    )
+    cancellation = runner._HarborRunCancellation()
+    canceller = _cancel_when_ready(ready_path, cancellation)
+
+    with pytest.raises(runner._HarborRunCancelledError) as exc_info:
+        runner._run_bounded_harbor_process(
+            [sys.executable, "-c", script],
+            env=dict(os.environ),
+            cwd=tmp_path,
+            stdin_text=None,
+            timeout_seconds=None,
+            max_output_bytes=4096,
+            diagnostic_tail_chars=128,
+            secret_values=set(),
+            cancellation=cancellation,
+        )
+    canceller.join(timeout=5)
+
+    assert cleanup_marker.read_text(encoding="utf-8") == "done"
+    assert not getattr(exc_info.value, "__notes__", [])
+
+
+@pytest.mark.skipif(os.name != "posix", reason="requires POSIX SIGTERM delivery")
+@pytest.mark.parametrize("ending", ["forced", "grace-expired"])
+def test_bounded_harbor_process_cancellation_kills_harbor_that_ignores_sigterm(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+    ending: str,
+) -> None:
+    ready_path = tmp_path / "ready"
+    script = _sigterm_handling_harbor_script(ready_path, on_sigterm=["pass"])
+    if ending == "forced":
+        # A second Ctrl+C must not wait out the cleanup grace period.
+        monkeypatch.setattr(runner, "_HARBOR_RUN_CANCEL_GRACE_SECONDS", 300.0)
+        force_after_seconds: float | None = 0.2
+    else:
+        monkeypatch.setattr(runner, "_HARBOR_RUN_CANCEL_GRACE_SECONDS", 0.3)
+        force_after_seconds = None
+    cancellation = runner._HarborRunCancellation()
+    canceller = _cancel_when_ready(ready_path, cancellation, force_after_seconds=force_after_seconds)
+    started = time.monotonic()
+
+    with pytest.raises(runner._HarborRunCancelledError) as exc_info:
+        runner._run_bounded_harbor_process(
+            [sys.executable, "-c", script],
+            env=dict(os.environ),
+            cwd=tmp_path,
+            stdin_text=None,
+            timeout_seconds=None,
+            max_output_bytes=4096,
+            diagnostic_tail_chars=128,
+            secret_values=set(),
+            cancellation=cancellation,
+        )
+    canceller.join(timeout=5)
+
+    # The stand-in sleeps for 120 s, so returning sooner proves SIGKILL.
+    assert time.monotonic() - started < 60
+    assert not getattr(exc_info.value, "__notes__", [])
+
+
+def test_bounded_harbor_process_never_launches_after_cancellation(monkeypatch: pytest.MonkeyPatch) -> None:
+    launched: list[object] = []
+    monkeypatch.setattr(runner.subprocess, "Popen", lambda *args, **_kwargs: launched.append(args))
+    cancellation = runner._HarborRunCancellation()
+    cancellation.requested.set()
+
+    with pytest.raises(runner._HarborRunCancelledError):
+        runner._run_bounded_harbor_process(
+            [sys.executable, "-c", "pass"],
+            env=dict(os.environ),
+            cwd=Path.cwd(),
+            stdin_text=None,
+            timeout_seconds=None,
+            max_output_bytes=4096,
+            diagnostic_tail_chars=128,
+            secret_values=set(),
+            cancellation=cancellation,
+        )
+
+    assert launched == []
+
+
+def test_run_harbor_checks_cancellation_before_refreshing_credentials(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    refreshed: list[object] = []
+
+    def refresh(*args: object, **kwargs: object) -> None:
+        refreshed.append((args, kwargs))
+
+    def launch(*_args: object, **_kwargs: object) -> None:
+        pytest.fail("Harbor launched after cancellation")
+
+    monkeypatch.setattr(runner, "refresh_host_vertex_adc_environment", refresh)
+    monkeypatch.setattr(runner, "_run_bounded_harbor_process", launch)
+    cancellation = runner._HarborRunCancellation()
+    cancellation.requested.set()
+
+    with pytest.raises(runner._HarborRunCancelledError):
+        runner._run_harbor(
+            dataset=tmp_path / "dataset",
+            agent="opencode",
+            job_name="demo-opencode-with",
+            env_mode="docker",
+            model="nvidia/openai/gpt-oss-120b",
+            jobs_dir=tmp_path / "jobs",
+            run_env={},
+            n_attempts=1,
+            n_concurrent=1,
+            timeout_multiplier=1.0,
+            override_cpus=None,
+            override_memory_mb=None,
+            override_storage_mb=None,
+            cancellation=cancellation,
+        )
+
+    assert refreshed == []
+
+
 @pytest.mark.skipif(os.name != "nt", reason="requires Windows taskkill tree verification")
 @pytest.mark.parametrize("failure_mode", ["output", "timeout"])
 def test_bounded_harbor_process_failure_reaps_windows_descendants(
@@ -751,6 +975,54 @@ def test_stop_on_pass_preserves_nvidia_build_agent_import_path(
     assert launches[0]["verifier_env"] == {
         "SKILL_EVAL_JUDGE_MODEL": "${SKILL_EVAL_JUDGE_MODEL}",
     }
+
+
+@pytest.mark.parametrize("stop_on_pass", [False, True])
+def test_agent_pair_launches_nothing_after_cancellation(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+    stop_on_pass: bool,
+) -> None:
+    cancellation = runner._HarborRunCancellation()
+    launched: list[str] = []
+
+    def _run_harbor(**kwargs: object) -> tuple[bool, str]:
+        assert kwargs["cancellation"] is cancellation
+        # Mirrors the gate at the top of the real _run_harbor.
+        cancellation.raise_if_requested()
+        launched.append(str(kwargs["job_name"]))
+        # Ctrl+C arrives while the first Harbor job runs.
+        cancellation.requested.set()
+        raise runner._HarborRunCancelledError("interrupted")
+
+    monkeypatch.setattr(runner, "_run_harbor", _run_harbor)
+    monkeypatch.setattr(runner, "_job_passed", lambda *_args, **_kwargs: False)
+    monkeypatch.setattr(runner, "_merge_attempt_jobs", lambda *_args, **_kwargs: None)
+
+    with pytest.raises(runner._HarborRunCancelledError):
+        runner._run_agent_pair(
+            skill_name="demo",
+            agent="opencode",
+            model="nvidia/openai/gpt-oss-120b",
+            env_mode="docker",
+            with_skill=tmp_path / "with",
+            baseline=tmp_path / "without",
+            jobs_dir=tmp_path / "jobs",
+            run_env={},
+            n_attempts=2,
+            n_concurrent=1,
+            timeout_multiplier=1.0,
+            override_cpus=None,
+            override_memory_mb=None,
+            override_storage_mb=None,
+            expected_trials=2,
+            stop_on_pass=stop_on_pass,
+            task_names=["case-001"],
+            cancellation=cancellation,
+        )
+
+    assert len(launched) == 1
+    assert "-with" in launched[0]
 
 
 _UNSAFE_LINK = r"symlink|reparse"
@@ -1479,6 +1751,200 @@ def test_merge_attempt_jobs_ignores_tmpdir_inside_attempt_job(
 
     assert (aggregate_dir / f"{job_dir.name}__{trial_dir.name}" / "artifact.txt").read_text() == "expected"
     assert not list(tmp_path.glob(".aggregate-merge-*"))
+
+
+# Synthetic, low-entropy credential so secret scanners do not flag the fixture.
+_LOCAL_CODEX_KEY = "sk-codex-codex-codex"
+_LOCAL_CODEX_AUTH = json.dumps({"OPENAI_API_KEY": _LOCAL_CODEX_KEY})
+
+
+def _declare_trial_steps(job_dir: Path, trial_name: str, step_names: list[str], *, in_root: bool = False) -> None:
+    """Turn a fixture trial into a multi-step one that declares ``step_names``.
+
+    ``in_root`` moves the trial result into the attempt root's ``trial_results``
+    entry, which the merge reads when the trial's own result is missing.
+    """
+    trial_result_path = job_dir / trial_name / "result.json"
+    payload = json.loads(trial_result_path.read_text(encoding="utf-8"))
+    payload["agent_result"] = None
+    payload["step_results"] = [{"step_name": name} for name in step_names]
+    if not in_root:
+        trial_result_path.write_text(json.dumps(payload), encoding="utf-8")
+        return
+    trial_result_path.unlink()
+    root_result_path = job_dir / "result.json"
+    root_payload = json.loads(root_result_path.read_text(encoding="utf-8"))
+    root_payload["trial_results"] = [payload]
+    root_result_path.write_text(json.dumps(root_payload), encoding="utf-8")
+
+
+# Single-step trials keep agent logs in <trial>/agent. Harbor's multi-step
+# trials move them into <trial>/steps/<step>/agent after each step, and a step
+# name may span several path components ("phase/author").
+@pytest.mark.parametrize(
+    ("step_root", "declared_in"),
+    [
+        (".", None),
+        ("steps/step-1", None),
+        ("steps/step-1", "trial"),
+        ("steps/phase/author", "trial"),
+        ("steps/phase/author", "root"),
+    ],
+)
+@pytest.mark.parametrize("auth_layout", ["secrets-link", "host-link", "regular-file"])
+@pytest.mark.parametrize("descriptor_backend", [False, True])
+def test_merge_attempt_jobs_omits_leftover_local_codex_credential_dirs(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    step_root: str,
+    declared_in: str | None,
+    auth_layout: str,
+    descriptor_backend: bool,
+) -> None:
+    secure_copy = importlib.import_module("skillevaluator.tier3.harbor.secure_copy")
+    if descriptor_backend and not secure_copy._DESCRIPTOR_BACKEND:
+        pytest.skip("descriptor-relative copying unavailable")
+    monkeypatch.setattr(secure_copy, "_DESCRIPTOR_BACKEND", descriptor_backend)
+    job_dir = tmp_path / "attempt-001"
+    trial_name = "case-001__trial"
+    _write_current_harbor_attempt(job_dir, trial_name=trial_name, root_completed=1)
+    if declared_in is not None:
+        step_name = step_root.removeprefix("steps/")
+        _declare_trial_steps(job_dir, trial_name, [step_name], in_root=declared_in == "root")
+    trial_dir = job_dir / trial_name
+    # Harbor's Codex agent writes (or uploads the host's) auth.json into
+    # codex-secrets and links codex-home/auth.json to it. Local mode keeps both
+    # under the trial agent dir, and a skipped best-effort cleanup leaves them.
+    agent_dir = trial_dir / step_root / "agent"
+    codex_home = agent_dir / "codex-home"
+    codex_secrets = agent_dir / "codex-secrets"
+    codex_home.mkdir(parents=True)
+    codex_secrets.mkdir()
+    secret_auth = codex_secrets / "auth.json"
+    secret_auth.write_text(_LOCAL_CODEX_AUTH, encoding="utf-8")
+    auth = codex_home / "auth.json"
+    if auth_layout == "regular-file":
+        auth.write_text(_LOCAL_CODEX_AUTH, encoding="utf-8")
+    else:
+        link_target = secret_auth
+        if auth_layout == "host-link":
+            link_target = tmp_path / "host-auth.json"
+            link_target.write_text(_LOCAL_CODEX_AUTH, encoding="utf-8")
+        try:
+            auth.symlink_to(link_target)
+        except OSError as exc:  # pragma: no cover - filesystem policy
+            pytest.skip(f"file symlinks unavailable: {exc}")
+    (codex_home / "config.toml").write_text("private config\n", encoding="utf-8")
+    retained = {
+        "agent/trajectory.json": '{"messages": []}',
+        "agent/codex.txt": "codex output\n",
+        "verifier/reward.json": '{"reward": 1.0}',
+        "artifacts/output.txt": "expected output\n",
+        # The same names outside the trial agent dir are ordinary evidence.
+        "artifacts/agent/codex-home/example.txt": "authored artifact\n",
+        "artifacts/agent/codex-secrets/example.txt": "authored artifact\n",
+    }
+    for relative, contents in retained.items():
+        path = trial_dir / step_root / relative
+        path.parent.mkdir(parents=True, exist_ok=True)
+        path.write_text(contents, encoding="utf-8")
+    aggregate_dir = tmp_path / "aggregate"
+
+    runner._merge_attempt_jobs([job_dir], aggregate_dir)
+
+    merged_trial = aggregate_dir / f"{job_dir.name}__{trial_name}"
+    merged_step = merged_trial / step_root
+    assert not (merged_step / "agent" / "codex-home").exists()
+    assert not (merged_step / "agent" / "codex-secrets").exists()
+    for relative, contents in retained.items():
+        assert (merged_step / relative).read_text(encoding="utf-8") == contents
+    leaked = [
+        path.relative_to(aggregate_dir).as_posix()
+        for path in aggregate_dir.rglob("*")
+        if path.is_file() and _LOCAL_CODEX_KEY in path.read_text(encoding="utf-8", errors="ignore")
+    ]
+    assert leaked == []
+    merged_result = json.loads((merged_trial / "result.json").read_text(encoding="utf-8"))
+    assert merged_result["verifier_result"]["rewards"] == {"reward": 1.0}
+    if declared_in is not None:
+        assert [step["step_name"] for step in merged_result["step_results"]] == [step_root.removeprefix("steps/")]
+    # The source attempt is left as it was; only the aggregate omits the dirs.
+    assert auth.is_symlink() is (auth_layout != "regular-file")
+    assert auth.read_text(encoding="utf-8") == _LOCAL_CODEX_AUTH
+    assert secret_auth.read_text(encoding="utf-8") == _LOCAL_CODEX_AUTH
+    assert (codex_home / "config.toml").read_text(encoding="utf-8") == "private config\n"
+
+
+def test_merge_attempt_jobs_codex_exclusions_track_local_codex_runtime_dirs() -> None:
+    from harbor.models.trial.paths import EnvironmentPaths
+
+    from skillevaluator.tier3.harbor.local_agents import (
+        SkillEvaluatorLocalCodex,
+        SkillEvaluatorLocalNvidiaBuildCodex,
+    )
+
+    for agent_class in (SkillEvaluatorLocalCodex, SkillEvaluatorLocalNvidiaBuildCodex):
+        runtime_dirs = (agent_class._REMOTE_CODEX_HOME, agent_class._REMOTE_CODEX_SECRETS_DIR)
+        assert {path.parent for path in runtime_dirs} == {EnvironmentPaths.agent_dir}
+        assert {path.name for path in runtime_dirs} == runner._LOCAL_CODEX_PRIVATE_AGENT_DIRS
+
+
+@pytest.mark.parametrize(
+    "relative_auth",
+    [
+        "agent/auth.json",
+        "codex-home/auth.json",
+        "codex-secrets/auth.json",
+        "agent/codex-home-other/auth.json",
+        "agent/codex-secrets-other/auth.json",
+        "artifacts/agent/codex-home/auth.json",
+        "artifacts/agent/codex-secrets/auth.json",
+        "steps/codex-home/auth.json",
+        "steps/agent/codex-home/auth.json",
+        "steps/step-1/codex-home/auth.json",
+        "steps/step-1/agent/codex-home-other/auth.json",
+        "steps/step-1/artifacts/agent/codex-home/auth.json",
+        "steps/step-1/nested/agent/codex-home/auth.json",
+        "steps/phase/author/nested/agent/codex-home/auth.json",
+        "steps/phase/author/artifacts/agent/codex-secrets/auth.json",
+        "steps/other/author/agent/codex-home/auth.json",
+        "steps/x/agent/agent/codex-home/auth.json",
+        "agent/steps/step-1/agent/codex-home/auth.json",
+        "other/step-1/agent/codex-home/auth.json",
+    ],
+)
+def test_merge_attempt_jobs_rejects_auth_links_outside_trial_codex_dirs(
+    tmp_path: Path,
+    relative_auth: str,
+) -> None:
+    job_dir = tmp_path / "attempt-001"
+    trial_dir = job_dir / "case-001__trial"
+    auth = trial_dir / relative_auth
+    auth.parent.mkdir(parents=True)
+    # Declared step names extend the exclusion only to their own agent dirs;
+    # names that would leave the steps dir are not trusted.
+    declared_steps = ["phase/author", "../agent", "x/../x/agent", "/abs"]
+    (trial_dir / "result.json").write_text(
+        json.dumps({"step_results": [{"step_name": name} for name in declared_steps]}),
+        encoding="utf-8",
+    )
+    host_auth = tmp_path / "host-auth.json"
+    host_auth.write_text("private\n", encoding="utf-8")
+    try:
+        auth.symlink_to(host_auth)
+    except OSError as exc:  # pragma: no cover - filesystem policy
+        pytest.skip(f"file symlinks unavailable: {exc}")
+    aggregate_dir = tmp_path / "aggregate"
+    aggregate_dir.mkdir()
+    marker = aggregate_dir / "keep.txt"
+    marker.write_text("old aggregate", encoding="utf-8")
+
+    with pytest.raises(ValueError, match=_UNSAFE_LINK):
+        runner._merge_attempt_jobs([job_dir], aggregate_dir)
+
+    assert sorted(path.name for path in aggregate_dir.iterdir()) == ["keep.txt"]
+    assert marker.read_text(encoding="utf-8") == "old aggregate"
+    assert host_auth.read_text(encoding="utf-8") == "private\n"
 
 
 def test_merge_attempt_jobs_preserves_existing_aggregate_on_unsafe_source(tmp_path: Path) -> None:

@@ -408,7 +408,7 @@ def test_evaluation_date_is_normalized_to_utc_before_publication(tmp_path: Path)
     assert "- Tier 3 evidence: required for publication" in rendered
     assert "Each task attempt ran in its own isolated sandbox." in rendered
     assert "| Measure | Claude Code (Baseline → Skill Uplift) | Codex (Baseline → Skill Uplift) |" in rendered
-    assert "| Overall | 47% → 92% (+45 points) | 55% → 88% (+33 points) |" in rendered
+    assert "| Overall | 47.0% → 92.0% (+45.0 points) | 55.0% → 88.0% (+33.0 points) |" in rendered
     assert "| Dimension | Num |" not in rendered
     assert "The 50% attempt pass threshold is a separate per-task gate" in rendered
     assert "`goal_accuracy` (50%) + `behavior_check` (50%)" in rendered
@@ -1121,17 +1121,156 @@ def test_benchmark_no_baseline_never_fabricates_uplift() -> None:
 
     assert "Overall verdict: INCOMPLETE" in rendered
     assert "Tier 3 ran but lacks publication-complete provenance or dimension evidence" in rendered
-    assert "92% — baseline not run; uplift unavailable" in rendered
-    assert "88% — baseline not run; uplift unavailable" in rendered
+    assert "92.0% — baseline not run; uplift unavailable" in rendered
+    assert "88.0% — baseline not run; uplift unavailable" in rendered
     assert "Publication Recommendation" not in rendered
 
 
 def test_benchmark_zero_and_negative_lift_use_percentage_points() -> None:
+    from skillevaluator.reporting.benchmark import _score_transition, _score_transition_values
+
+    assert _score_transition_values(1.0, 1.0) == "100.0% → 100.0% (±0.0 points)"
+    assert _score_transition_values(0.7, 0.62) == "70.0% → 62.0% (-8.0 points)"
+    assert _score_transition_values(0.0, 0.0) == "0.0% → 0.0% (±0.0 points)"
+    assert _score_transition_values(-0.0, 0.5) == "0.0% → 50.0% (+50.0 points)"
+    # Raw scores differ, but the displayed endpoints are equal, so the uplift is an unsigned zero.
+    assert _score_transition_values(0.50004, 0.500049) == "50.0% → 50.0% (±0.0 points)"
+    assert _score_transition_values(0.500049, 0.50004) == "50.0% → 50.0% (±0.0 points)"
+    assert _score_transition_values(None, 0.92) == "92.0% — baseline not run; uplift unavailable"
+    assert _score_transition_values(0.5, None) == "Not available"
+    assert _score_transition({"baseline": float("nan"), "with_skill": 0.92}) == "Not available"
+    assert _score_transition({"baseline": 0.5, "with_skill": float("inf")}) == "Not available"
+
+
+@pytest.mark.parametrize(
+    ("baseline", "score", "expected"),
+    [
+        # Whole-percent rounding used to publish "58% → 95% (+36 points)" here.
+        (0.5842, 0.9479, "58.4% → 94.8% (+36.4 points)"),
+        (0.9479, 0.5842, "94.8% → 58.4% (-36.4 points)"),
+        # Rounding carry: the uplift follows the displayed endpoints, not the raw +20.04 points.
+        (0.5002, 0.7006, "50.0% → 70.1% (+20.1 points)"),
+        # Ties round half-up on the decimal value; binary float formatting shows 50.0% and 12.3% here.
+        (0.5005, 0.7005, "50.1% → 70.1% (+20.0 points)"),
+        (0.1235, 0.9865, "12.4% → 98.7% (+86.3 points)"),
+    ],
+)
+def test_score_transition_derives_uplift_from_displayed_endpoints(
+    baseline: float,
+    score: float,
+    expected: str,
+) -> None:
     from skillevaluator.reporting.benchmark import _score_transition_values
 
-    assert _score_transition_values(1.0, 1.0) == "100% → 100% (±0 points)"
-    assert _score_transition_values(0.7, 0.62) == "70% → 62% (-8 points)"
-    assert _score_transition_values(None, 0.92) == "92% — baseline not run; uplift unavailable"
+    assert _score_transition_values(baseline, score) == expected
+
+
+@pytest.mark.parametrize(
+    ("baseline", "score", "expected"),
+    [
+        # Below the 50% PASS threshold: one decimal would display 50.0%.
+        (0.4, 0.4995, "40.00% → 49.95% (+9.95 points)"),
+        (0.3, 0.49996, "30.000% → 49.996% (+19.996 points)"),
+        # Below the 40% NEUTRAL threshold: one decimal would display 40.0%.
+        (0.3995, 0.4, "39.95% → 40.00% (+0.05 points)"),
+        (0.39996, 0.6, "39.996% → 60.000% (+20.004 points)"),
+        # Exactly on a threshold needs no extra precision.
+        (0.4, 0.5, "40.0% → 50.0% (+10.0 points)"),
+    ],
+)
+def test_threshold_adjacent_scores_keep_their_verdict_band(baseline: float, score: float, expected: str) -> None:
+    from skillevaluator.reporting.benchmark import _score_transition_values
+
+    assert _score_transition_values(baseline, score) == expected
+
+
+@pytest.mark.parametrize(
+    ("baseline", "score"),
+    [
+        (-0.00004, 0.92),
+        (0.5, 1.00004),
+        (0.0, 1.5),
+        (0.5, float("nan")),
+        (float("-inf"), 0.92),
+        (float("nan"), 0.92),
+        (True, 0.92),
+        ("0.5", 0.92),
+    ],
+)
+def test_score_transition_does_not_publish_invalid_raw_scores(baseline: object, score: object) -> None:
+    from skillevaluator.reporting.benchmark import _score_transition_values
+
+    assert _score_transition_values(baseline, score) == "Not available"
+
+
+def test_never_activated_cell_ignores_baseline_and_keeps_threshold_precision() -> None:
+    from skillevaluator.reporting.benchmark import _score_transition_values
+
+    expected = "49.95% — INCONCLUSIVE: skill never activated; uplift unavailable"
+    assert _score_transition_values(0.4, 0.4995, skill_never_activated=True) == expected
+    assert _score_transition_values(float("nan"), 0.4995, skill_never_activated=True) == expected
+    assert _score_transition_values(0.4, 1.5, skill_never_activated=True) == "Not available"
+
+
+def test_threshold_adjacent_card_scores_keep_their_band_and_pass_the_gate(tmp_path: Path) -> None:
+    tier3 = deepcopy(_live_tier3_result())
+    codex = tier3.metadata["agent_eval"]["agents"]["codex"]
+    codex["dimensions"][0]["with_skill"] = 0.49996
+    codex["dimensions"][1]["baseline"] = 0.39996
+
+    rendered = BenchmarkReporter(include_timestamp=True).render_all([*_deterministic_results(), tier3])
+    benchmark = tmp_path / "BENCHMARK.md"
+    benchmark.write_text(rendered, encoding="utf-8")
+    _files, offenders = benchmark_gate.find_offenders([benchmark])
+
+    assert "| Security | 47.0% → 92.0% (+45.0 points) | 55.000% → 49.996% (-5.004 points) |" in rendered
+    assert "| Correctness | 47.0% → 92.0% (+45.0 points) | 39.996% → 88.000% (+48.004 points) |" in rendered
+    assert "threshold-adjacent values use additional precision so their displayed band matches the verdict" in rendered
+    assert offenders == []
+
+
+def test_rendered_score_transitions_satisfy_the_gate_and_keep_verdict_bands() -> None:
+    import random
+    from decimal import Decimal
+
+    from skillevaluator.constants import DIMENSION_VERDICT_NEUTRAL_THRESHOLD, DIMENSION_VERDICT_PASS_THRESHOLD
+    from skillevaluator.reporting.benchmark import _score_transition_values
+
+    neutral = Decimal(str(DIMENSION_VERDICT_NEUTRAL_THRESHOLD))
+    passing = Decimal(str(DIMENSION_VERDICT_PASS_THRESHOLD))
+
+    def band(fraction: Decimal) -> int:
+        return 0 if fraction < neutral else 1 if fraction < passing else 2
+
+    edges = [0.0, 1.0, 0.4, 0.5, 0.39995, 0.3999999, 0.49995, 0.4999999, 0.5842, 0.9479, 0.0005, 0.9995]
+    rng = random.Random(20260903)
+    pairs = [(baseline, score) for baseline in edges for score in edges]
+    pairs.extend((rng.random(), rng.random()) for _ in range(2000))
+    for baseline, score in pairs:
+        cell = _score_transition_values(baseline, score)
+        match = benchmark_gate._SCORE_TRANSITION.fullmatch(cell)
+        assert match is not None, cell
+        assert benchmark_gate._score_transition_problem(match) is None, cell
+        for raw, shown in ((baseline, match.group("baseline")), (score, match.group("score"))):
+            assert band(Decimal(str(raw))) == band(Decimal(shown) / 100), cell
+
+
+def test_score_rendering_is_isolated_from_the_ambient_decimal_context() -> None:
+    from decimal import ROUND_DOWN, localcontext
+
+    tier3 = deepcopy(_live_tier3_result())
+    codex = tier3.metadata["agent_eval"]["agents"]["codex"]
+    codex["baseline"] = 0.5842
+    codex["with_skill"] = 0.9479
+    codex["dimensions"][-1]["with_skill"] = 1e25
+
+    with localcontext() as ambient_context:
+        ambient_context.prec = 2
+        ambient_context.rounding = ROUND_DOWN
+        rendered = BenchmarkReporter(include_timestamp=False).render_all([*_deterministic_results(), tier3])
+
+    assert "| Overall | 47.0% → 92.0% (+45.0 points) | 58.4% → 94.8% (+36.4 points) |" in rendered
+    assert "| Efficiency | 47.0% → 92.0% (+45.0 points) | Not available |" in rendered
 
 
 def test_benchmark_local_mode_does_not_claim_sandboxing() -> None:

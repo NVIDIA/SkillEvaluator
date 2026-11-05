@@ -263,6 +263,7 @@ grading:
 | `harbor.agents.<name>.model` | string | Per-agent model override; whitespace is trimmed. `claude` is accepted as an alias of `claude-code`, but configuring both spellings in one config is an error. |
 | `skill_workspace.mode` | `isolated`, `group` | Whether sibling skills are visible — see [Agents & Sandboxes](agents-and-sandboxes.mdx). |
 | `skill_workspace.include` | list of paths | Extra skills staged into a `group` workspace. |
+| `skill_workspace.decoy_manifest` | path | Optional frozen selection from `tier3 select-decoys`; requires `group` mode. Relative paths resolve against the target skill's parent directory, as with `include`. Selected runtime-content hashes are checked before evaluation; evaluator-only files do not affect them. See [Workspace modes](agents-and-sandboxes.mdx#select-a-reproducible-decoy-set). |
 | `grading.mode` | `default`, `default_plus_custom`, `custom_only` | Grading pipeline — see [Custom Graders & Tasks](custom-graders.mdx). Legacy spellings `aces_default` and `aces_plus_custom` are accepted and normalized to `default` and `default_plus_custom`. |
 
 Environment constructor kwargs are deliberately not accepted in this
@@ -346,6 +347,24 @@ skillevaluator tier3 validate ./my-skill
 
 Run it in CI or before a long evaluation: it catches an empty dataset, missing
 required fields, duplicate case IDs, and invalid config in seconds.
+
+`validate PATH` also checks the selected Tier 3 source (dataset entries and
+case IDs, `config.yml`, or the native Harbor task layout) before any live run.
+When that check fails, each error names the entry or file and what is wrong,
+for example `entry case-3: Missing required fields: question`:
+
+- The terminal lists the errors under the Tier 3 finding when the full CLI
+  report prints (`-r cli` or `--verbose`), otherwise in the compact Tier 3
+  panel. When the run also writes an HTML or JSON report, the terminal shows
+  the first five and names that report for the rest. When it writes neither
+  (for example `-r cli` alone, or `--verbose` without `-r`), the terminal lists
+  every error.
+- The HTML report shows the exact error on the Tier 3 dashboard when there is
+  one, or the error count when there are several. **Full Insights → Source
+  Validation Errors** lists every error in order.
+- The JSON report keeps every error under `tier3.provenance.source_validation`.
+
+Passing checks and warnings are not listed as source errors.
 
 ## Next steps
 

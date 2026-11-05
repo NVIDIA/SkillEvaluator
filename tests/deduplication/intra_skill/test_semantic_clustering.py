@@ -7,6 +7,8 @@ from __future__ import annotations
 
 import pytest
 
+from skillevaluator import constants
+from skillevaluator.deduplication.intra_skill import semantic_clustering
 from skillevaluator.deduplication.intra_skill.semantic_clustering import (
     UnionFind,
     build_clusters,
@@ -115,3 +117,23 @@ class TestBuildClusters:
         b = make_chunk(source_format="python", source_file="b.py", embedding=[1.0, 0.0])
         clusters = build_clusters([a, b], threshold=0.80)
         assert clusters[0].source_formats == {"markdown", "python"}
+
+    def test_clustering_uses_the_intra_skill_scalar_budget(self) -> None:
+        assert (
+            semantic_clustering.CONTENT_DEDUP_MAX_SCALAR_COMPARISONS == constants.CONTENT_DEDUP_MAX_SCALAR_COMPARISONS
+        )
+
+    def test_accepts_work_above_the_former_fixed_budget(self, make_chunk) -> None:
+        # 157 chunks of 2,048 dimensions is 25,079,808 scalar comparisons: above
+        # the former fixed 25,000,000 budget, well within the derived budget.
+        dimension = 2048
+        chunk_count = 157
+        assert chunk_count * (chunk_count - 1) // 2 * dimension > 25_000_000
+        chunks = [
+            make_chunk(
+                heading=f"## Section {index}",
+                embedding=[1.0 if position == index else 0.0 for position in range(dimension)],
+            )
+            for index in range(chunk_count)
+        ]
+        assert build_clusters(chunks) == []

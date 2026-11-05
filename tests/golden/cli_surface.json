@@ -1365,6 +1365,14 @@
           "type": "boolean"
         },
         {
+          "name": "skillspector_baseline",
+          "opts": [
+            "--skillspector-baseline"
+          ],
+          "param_type": "option",
+          "type": "file"
+        },
+        {
           "choices": [
             "cli",
             "json",
@@ -1765,6 +1773,14 @@
               "type": "boolean"
             },
             {
+              "name": "skillspector_baseline",
+              "opts": [
+                "--skillspector-baseline"
+              ],
+              "param_type": "option",
+              "type": "file"
+            },
+            {
               "choices": [
                 "cli",
                 "json",
@@ -1872,6 +1888,14 @@
               ],
               "param_type": "option",
               "type": "text"
+            },
+            {
+              "name": "skillspector_baseline",
+              "opts": [
+                "--skillspector-baseline"
+              ],
+              "param_type": "option",
+              "type": "file"
             },
             {
               "choices": [
@@ -1983,6 +2007,14 @@
             ],
             "param_type": "option",
             "type": "text"
+          },
+          {
+            "name": "skillspector_baseline",
+            "opts": [
+              "--skillspector-baseline"
+            ],
+            "param_type": "option",
+            "type": "file"
           },
           {
             "choices": [
@@ -3021,6 +3053,73 @@
             }
           ]
         },
+        "select-decoys": {
+          "params": [
+            {
+              "name": "skill_path",
+              "opts": [
+                "skill_path"
+              ],
+              "param_type": "argument",
+              "required": true,
+              "type": "directory"
+            },
+            {
+              "name": "catalog_path",
+              "opts": [
+                "--catalog"
+              ],
+              "param_type": "option",
+              "required": true,
+              "type": "file"
+            },
+            {
+              "name": "catalog_root",
+              "opts": [
+                "--catalog-root"
+              ],
+              "param_type": "option",
+              "required": true,
+              "type": "directory"
+            },
+            {
+              "default": "4",
+              "name": "count",
+              "opts": [
+                "--count"
+              ],
+              "param_type": "option",
+              "type": "integer range"
+            },
+            {
+              "multiple": true,
+              "name": "exclude",
+              "opts": [
+                "--exclude"
+              ],
+              "param_type": "option",
+              "type": "text"
+            },
+            {
+              "name": "model",
+              "opts": [
+                "--model"
+              ],
+              "param_type": "option",
+              "type": "text"
+            },
+            {
+              "name": "output_path",
+              "opts": [
+                "--output",
+                "-o"
+              ],
+              "param_type": "option",
+              "required": true,
+              "type": "file"
+            }
+          ]
+        },
         "validate": {
           "params": [
             {
@@ -3551,6 +3650,14 @@
           ],
           "param_type": "option",
           "type": "boolean"
+        },
+        {
+          "name": "skillspector_baseline",
+          "opts": [
+            "--skillspector-baseline"
+          ],
+          "param_type": "option",
+          "type": "file"
         },
         {
           "default": "70",

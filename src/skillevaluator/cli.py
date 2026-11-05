@@ -135,6 +135,11 @@ class _QualityConfigPath(click.Path):
 
 
 QUALITY_CONFIG_PATH = _QualityConfigPath()
+# Resolved so parallel catalog children receive the same absolute file.
+SKILLSPECTOR_BASELINE_PATH = click.Path(exists=True, dir_okay=False, readable=True, resolve_path=True, path_type=Path)
+_SKILLSPECTOR_BASELINE_HELP = (
+    "Apply an audited SkillSpector YAML/JSON suppression baseline. Never discovered from the scanned skill."
+)
 
 
 class _PIIWaiversPath(click.Path):
@@ -1246,6 +1251,8 @@ def _catalog_child_argv_from_ctx(
         argv.append("--no-llm")
     if params.get("llm_verify"):
         argv.append("--llm-verify")
+    if params.get("skillspector_baseline"):
+        argv.extend(["--skillspector-baseline", str(params["skillspector_baseline"])])
     if not params.get("dedup", True):
         argv.append("--no-dedup")
     block_on_dedup = params.get("block_on_dedup")
@@ -1808,6 +1815,14 @@ def _print_run_banner(target_path: Path, content_type: str, profile: str | None)
     help="Run a second LLM pass to suppress false-positive findings.",
 )
 @click.option(
+    "--skillspector-baseline",
+    type=SKILLSPECTOR_BASELINE_PATH,
+    default=None,
+    cls=GroupedOption,
+    help_group=_TIER1_GROUP,
+    help=_SKILLSPECTOR_BASELINE_HELP,
+)
+@click.option(
     "--min-score",
     type=int,
     default=70,
@@ -2091,6 +2106,7 @@ def validate(
     continue_on_failure: bool,
     llm: bool,
     llm_verify: bool,
+    skillspector_baseline: Path | None,
     min_score: int,
     quality_config: Path | None,
     pii_waivers: Path | None,
@@ -2323,6 +2339,7 @@ def validate(
         checks=checks,
         use_llm=llm,
         llm_verify=llm_verify,
+        skillspector_baseline=skillspector_baseline,
         min_score=min_score,
         quality_config=quality_config,
         pii_waivers=pii_waivers,
@@ -2465,7 +2482,14 @@ def validate(
             repo_context_exclude_paths=tuple(repo_context_exclude_paths),
         )
         results.append(tier3_result)
-        tier3_ran, tier3_ok, tier3_rows, tier3_skip = summarize_tier3(tier3_result)
+        # The panel follows the formats this run emits: with cli the full report
+        # lists the source errors under the Tier 3 finding, so the panel keeps
+        # the count; it shortens its own list only when an HTML or JSON report
+        # keeps every error.
+        tier3_ran, tier3_ok, tier3_rows, tier3_skip = summarize_tier3(
+            tier3_result,
+            report_formats=_effective_report_formats(report_formats, quiet=quiet),
+        )
         if autopilot_error and not tier3_ran:
             from skillevaluator.reporting.base import get_skip_reason
 
@@ -2649,14 +2673,22 @@ def rubric_eval(target_path: Path, min_score: int, report_formats: tuple[str, ..
 @_target_argument
 @click.option("--llm/--no-llm", default=False, show_default=True, help="Enable LLM security analysis.")
 @click.option("--llm-verify", is_flag=True, help="Use LLM verification to reduce false positives.")
+@click.option(
+    "--skillspector-baseline", type=SKILLSPECTOR_BASELINE_PATH, default=None, help=_SKILLSPECTOR_BASELINE_HELP
+)
 @_report_options
 def security_scan(
-    target_path: Path, llm: bool, llm_verify: bool, report_formats: tuple[str, ...], output_dir: Path
+    target_path: Path,
+    llm: bool,
+    llm_verify: bool,
+    skillspector_baseline: Path | None,
+    report_formats: tuple[str, ...],
+    output_dir: Path,
 ) -> None:
     """Scan for security vulnerabilities."""
     output_dir = _resolve_file_report_output_location(target_path.resolve(), output_dir, report_formats)
     if not emit_reports(
-        run_security_scan(target_path, use_llm=llm, llm_verify=llm_verify),
+        run_security_scan(target_path, use_llm=llm, llm_verify=llm_verify, skillspector_baseline=skillspector_baseline),
         report_formats=report_formats,
         output_dir=output_dir,
         basename=report_basename("security"),
@@ -2913,6 +2945,9 @@ def _workflow_report_options(func):
 @click.option("--pii-waivers", type=PII_WAIVERS_PATH, default=None, help=_PII_WAIVERS_HELP)
 @click.option("--profile", default=None, help="Validation policy profile [default: external].")
 @click.option("--previous-version", default=None, help="Previous version for version checks.")
+@click.option(
+    "--skillspector-baseline", type=SKILLSPECTOR_BASELINE_PATH, default=None, help=_SKILLSPECTOR_BASELINE_HELP
+)
 @_workflow_report_options
 def _tier1_workflow(
     skill_path: Path,
@@ -2924,6 +2959,7 @@ def _tier1_workflow(
     pii_waivers: Path | None,
     profile: str | None,
     previous_version: str | None,
+    skillspector_baseline: Path | None,
     report_formats: tuple[str, ...],
     output_dir: Path,
 ) -> None:
@@ -2946,6 +2982,7 @@ def _tier1_workflow(
         pii_waivers=pii_waivers,
         profile=policy,
         previous_version=previous_version,
+        skillspector_baseline=skillspector_baseline,
     )
     # Resolved after the run so configuration errors still leave no output.
     output_dir = _resolve_file_report_output_location(skill_path.resolve(), output_dir, report_formats)
@@ -3667,6 +3704,10 @@ tier3.add_command(init_harbor_task, "init-harbor-task")
 tier3.add_command(compare, "compare")
 tier3.add_command(view, "view")
 tier3.add_command(tier3_doctor_command, "doctor")
+
+from skillevaluator.tier3.decoy_commands import select_decoys_command
+
+tier3.add_command(select_decoys_command, "select-decoys")
 
 from skillevaluator.tier3.workflow import build_tier3_workflow
 

@@ -304,6 +304,19 @@ All notable changes to SkillEvaluator are documented in this file.
 
 ### Fixed
 
+- Tier 3 behavior-check evidence bundles now count a final answer cut by
+  the final-response section limit as truncated. The omission check
+  compared two renderings that both capped that section (800 characters
+  by default), so a long final answer could lose its middle to the cap
+  while the bundle claimed `truncated: false`. The comparison now runs
+  against a rendering without the final-response section limit. An answer
+  that still reaches the judge in full is not flagged, including one split
+  between the compact history and the end of the final-response section.
+  The `reason` names each setting that cut evidence:
+  `SKILL_EVAL_BEHAVIOR_CHECK_BUDGET`, `SKILL_EVAL_BEHAVIOR_FINAL_RESPONSE_LIMIT`,
+  or both. Caps inside individual sections (write bodies, history summaries)
+  are unchanged. The evidence-budget documentation now names both causes of
+  a `behavior_check` truncation and which setting raises each.
 - PR scan comments show the verdict, quality scores, first actionable fixes and
   report links; full provenance and detailed findings stay in the report.
 - Hosted reports use the retained site commit as the Pages deployment identity,
@@ -809,6 +822,19 @@ All notable changes to SkillEvaluator are documented in this file.
   killed; a second Ctrl+C skips that wait, and on Windows the task tree is
   stopped immediately. Progress shows the agents that are stopping and reports
   the run as interrupted instead of failed unexpectedly.
+- A Tier 1 security scan that SkillSpector reports as partial no longer fails
+  with only "reports incomplete analysis (status 'partial')". The error quotes
+  up to three completeness exceptions as `path [phase; reason_code;
+  analyzers=...]` and, when there are more, counts the incomplete files per
+  reason, for example `(incomplete files by reason: runtime_limit 462,
+  obfuscated_instruction_text 4)`. For `runtime_limit`, it explains the fix:
+  when many files are cut short, a skill that bundles a large corpus hits the
+  same SkillSpector time budget on every rerun and needs that material moved
+  out of the skill, while a sub-analysis that stopped at its own budget (named
+  `<analyzer>_runtime_limit`, such as the SC8 bytecode walk in SkillSpector
+  2.12.0) is not affected by bundle size and needs a rerun or a newer
+  SkillSpector. A report with both kinds of rows gets both explanations. The
+  scan still fails closed as `INCOMPLETE`.
 
 ### Security
 

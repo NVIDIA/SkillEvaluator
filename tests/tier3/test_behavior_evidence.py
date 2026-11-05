@@ -435,21 +435,20 @@ def test_harbor_template_main_persists_evidence_refs_in_reward_json(monkeypatch,
         raise RuntimeError("force custom judge")
 
     def fake_call_public_llm(prompt, *args, **kwargs):
-        if "For each criterion" in prompt:
+        if "FORMAT_FOLLOWED" in prompt:
             return json.dumps(
                 {
                     "criteria": {
-                        "SKILL_IDENTIFIED": True,
                         "ACTION_CORRECT": True,
                         "FACTUALLY_ACCURATE": True,
                         "TASK_ADDRESSED": True,
                         "ACTIONABLE": True,
+                        "FORMAT_FOLLOWED": True,
                     },
-                    "score": 1.0,
                     "reason": "ok",
                 }
             ), None
-        if "Did the agent achieve the expected goal?" in prompt:
+        if "achieved the expected goal" in prompt:
             return json.dumps({"achieved": True, "score": 1.0, "reason": "ok"}), None
         return json.dumps(
             {

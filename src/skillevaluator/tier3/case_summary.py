@@ -70,6 +70,13 @@ def _never_activated(agent: Mapping[str, Any]) -> bool:
     return isinstance(activation, Mapping) and activation.get("status") == "never_activated"
 
 
+def _with_skill_skipped(agent: Mapping[str, Any]) -> bool:
+    """A baseline-only run (--skip-with-skill) deliberately never ran the with-skill arm."""
+    conditions = agent.get("conditions")
+    arm = conditions.get("with_skill") if isinstance(conditions, Mapping) else None
+    return isinstance(arm, Mapping) and arm.get("execution_status") == "skipped"
+
+
 def _details_truncated(agent: Mapping[str, Any]) -> bool:
     branches = agent.get("pass_at_k")
     for key, _ in _VARIANTS:
@@ -226,6 +233,10 @@ def _pct(passed: int, total: int) -> float | None:
 
 def verdict(agents: Mapping[str, Any]) -> tuple[str, str]:
     """Return (label, per-agent detail) using the raw per-attempt success rate."""
+    scored = [agent for agent in agents.values() if isinstance(agent, Mapping)]
+    if scored and all(_with_skill_skipped(agent) for agent in scored):
+        # Baseline calibration: no with-skill arm ran, so there is no effect to call.
+        return "baseline only", "no with-skill arm ran (--skip-with-skill), so no skill effect was measured"
     deltas: dict[str, float] = {}
     not_run: dict[str, int] = {}
     unavailable: list[str] = []
@@ -377,6 +388,7 @@ def _condition_grid(
     """One agent: a row per case with both conditions side by side and the effect."""
     [agent] = agents.values()
     comparable = _comparable(agent)
+    with_skill_skipped = _with_skill_skipped(agent)
     table = _table(title, "with skill", "without skill", "effect")
     for case_id in case_ids:
         with_case, without_case = _cases(agent, "with_skill").get(case_id), _cases(agent, "without_skill").get(case_id)
@@ -384,7 +396,10 @@ def _condition_grid(
             Text(safe(case_id)),
             _condition_cell(with_case),
             _condition_cell(without_case),
-            _effect(with_case, without_case, comparable=_case_comparable(agent, with_case, without_case)),
+            # No with-skill arm ran (--skip-with-skill), so there is no effect to call.
+            Text("-", style="dim")
+            if with_skill_skipped
+            else _effect(with_case, without_case, comparable=_case_comparable(agent, with_case, without_case)),
         )
     table.add_section()
     rates = _agent_rates(agent)
@@ -1135,3 +1150,93 @@ def _baseline_saturated(agents: Mapping[str, Mapping[str, Any]]) -> dict[str, An
             "conventions or domain rules) so the eval measures the skill's value."
         ),
     }
+
+
+# ---------------------------------------------------------------- validate panel data
+
+
+def case_marks(result: Mapping[str, Any]) -> dict[str, dict[str, dict[str, list[str]]]]:
+    """Final attempt marks per agent, condition (``with_skill``/``without_skill``) and case."""
+    agents = result.get("agents") if isinstance(result, Mapping) else None
+    marks: dict[str, dict[str, dict[str, list[str]]]] = {}
+    for name, agent in (agents or {}).items():
+        if isinstance(agent, Mapping):
+            marks[str(name)] = {
+                key: {str(case_id): _marks(case) for case_id, case in _cases(agent, key).items()}
+                for key, _ in _VARIANTS
+            }
+    return marks
+
+
+def load_case_marks(run_dir: Path) -> dict[str, dict[str, dict[str, list[str]]]]:
+    """Final attempt marks read from a finished run's ``result.json``."""
+    result = _load_json(run_dir / "result.json", root=run_dir)
+    return case_marks(result) if isinstance(result, Mapping) else {}
+
+
+_LIVE_VARIANTS = {"with": "with_skill", "without": "without_skill"}
+
+
+def _harbor_job_owner(job_name: str, agents: list[str]) -> tuple[str, str] | None:
+    for agent in sorted(agents, key=len, reverse=True):
+        match = re.search(rf"-{re.escape(agent)}-(with|without)(?:-|$)", job_name)
+        if match:
+            return agent, _LIVE_VARIANTS[match.group(1)]
+    return None
+
+
+def _live_mark(trial: Path, run_dir: Path, pass_threshold: float) -> str | None:
+    """``None`` while the trial runs, else its attempt mark."""
+    result = _load_json(trial / "result.json", root=run_dir)
+    if not isinstance(result, Mapping) or not result.get("finished_at"):
+        return None
+    verifier = result.get("verifier_result")
+    rewards = verifier.get("rewards") if isinstance(verifier, Mapping) else None
+    score = rewards.get("overall") if isinstance(rewards, Mapping) else None
+    if isinstance(score, int | float) and not isinstance(score, bool):
+        return PASS if score >= pass_threshold else FAIL
+    return ERROR
+
+
+def live_case_marks(
+    run_dir: Path, agents: list[str], *, pass_threshold: float = 0.5
+) -> tuple[dict[str, dict[str, dict[str, list[str]]]], set[tuple[str, str, str]]]:
+    """Attempt marks of an in-flight run, read from its Harbor job directories.
+
+    Returns ``(marks, running)``: every staged case appears (with no marks
+    until an attempt finishes), and ``running`` holds the
+    ``(agent, condition, case)`` triples with an unfinished trial.
+    """
+    marks: dict[str, dict[str, dict[str, list[str]]]] = {}
+    running: set[tuple[str, str, str]] = set()
+    for agent in agents:
+        for variant, key in _LIVE_VARIANTS.items():
+            staged = run_dir / "_harbor-tasks" / agent / variant
+            if staged.is_dir() and not staged.is_symlink():
+                cases = marks.setdefault(agent, {}).setdefault(key, {})
+                for task in sorted(staged.iterdir()):
+                    if task.is_dir() and not task.is_symlink() and _SAFE_TRIAL.match(task.name):
+                        cases.setdefault(task.name, [])
+    jobs = run_dir / "_harbor-jobs"
+    if not jobs.is_dir() or jobs.is_symlink():
+        return marks, running
+    seen: set[tuple[str, str, str]] = set()
+    for job in islice(sorted(jobs.iterdir()), _MAX_TRIAL_PATHS_SCANNED):
+        owner = _harbor_job_owner(job.name, agents) if job.is_dir() and not job.is_symlink() else None
+        if owner is None:
+            continue
+        agent, key = owner
+        for trial in islice(sorted(job.iterdir()), _MAX_TRIAL_PATHS_SCANNED):
+            if "__" not in trial.name or not _SAFE_TRIAL.match(trial.name) or trial.is_symlink():
+                continue
+            case_id = trial.name.split("__", 1)[0]
+            if (agent, key, trial.name) in seen or not trial.is_dir():
+                continue
+            seen.add((agent, key, trial.name))
+            mark = _live_mark(trial, run_dir, pass_threshold)
+            case = marks.setdefault(agent, {}).setdefault(key, {}).setdefault(case_id, [])
+            if mark is None:
+                running.add((agent, key, case_id))
+            else:
+                case.append(mark)
+    return marks, running

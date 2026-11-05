@@ -85,12 +85,13 @@ def find_git_repo_root(path: Path) -> Path | None:
         result = subprocess.run(
             ["git", "-C", str(path), "rev-parse", "--show-toplevel"],
             capture_output=True,
-            text=True,
             timeout=5,
             check=False,
         )
-        if result.returncode == 0 and result.stdout.strip():
-            return Path(result.stdout.strip()).resolve()
+        # Raw file-name bytes: decode them the way Python encodes paths, not with the locale code page.
+        root = os.fsdecode(result.stdout).strip()
+        if result.returncode == 0 and root:
+            return Path(root).resolve()
     except Exception:
         pass
 

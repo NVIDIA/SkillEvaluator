@@ -67,6 +67,7 @@ from skillevaluator.reporting.base import (
     result_publication_target_conflict_marker,
     result_publication_target_dict,
     select_agent_eval_candidate,
+    source_validation_errors,
 )
 from skillevaluator.reporting.base import (
     is_tier2_validator_name as _is_tier2_validator_name,
@@ -967,6 +968,10 @@ def _sanitize_tier3_display_payload(value: dict[str, Any]) -> dict[str, Any]:
                 "baseline": _finite_number(scores.get("baseline"), minimum=0.0, maximum=1.0),
                 "lift": _finite_number(scores.get("lift"), minimum=-1.0, maximum=1.0),
             }
+            if scores.get("with_skill_status") == "skipped":
+                # A baseline-only run (--skip-with-skill) never ran this arm;
+                # the table says so instead of reporting a missing score.
+                evaluators[name]["with_skill_status"] = "skipped"
     payload["evaluators"] = evaluators
     for key in (
         "insights",
@@ -980,6 +985,8 @@ def _sanitize_tier3_display_payload(value: dict[str, Any]) -> dict[str, Any]:
     payload["dimension_hints"] = _tier3_text_mapping(payload.get("dimension_hints"))
     evaluator_paths = payload["provenance"].get("evaluator_paths")
     payload["provenance"]["evaluator_paths"] = evaluator_paths if isinstance(evaluator_paths, dict) else {}
+    if "source_validation" in payload["provenance"]:
+        payload["provenance"]["source_validation"] = source_validation_errors(payload["provenance"])
     harbor_viewer = _sanitize_tier3_harbor_viewer(payload.get("harbor_viewer"))
     if harbor_viewer:
         payload["harbor_viewer"] = harbor_viewer
@@ -2488,6 +2495,9 @@ class HTMLReporter(ReporterBase):
                 score = _finite_number(agent.get("with_skill"), minimum=0.0, maximum=1.0)
                 if score is None:
                     score = _finite_number(agent.get("overall_score"), minimum=0.0, maximum=1.0)
+                if score is None and candidate.get("mode") == "baseline_only":
+                    # A baseline-only run (--skip-with-skill) is scored by its baseline arm.
+                    score = _finite_number(agent.get("baseline"), minimum=0.0, maximum=1.0)
                 attempts = max(payload_attempts, _nonnegative_count(agent.get("scored_attempts")))
                 if score is not None and attempts > 0:
                     return True

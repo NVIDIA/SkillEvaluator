@@ -61,6 +61,112 @@ def test_validate_passes_explicit_previous_version(monkeypatch, tmp_path: Path) 
     assert captured == ["1.2.0"]
 
 
+@pytest.mark.parametrize(
+    "command",
+    [
+        ["validate", "--no-tier3", "--no-dedup", "--no-llm", "--checks", "security"],
+        ["security-scan"],
+        ["tier1", "security-scan"],
+        ["tier1", "--checks", "security", "--no-llm"],
+        ["tier1", "validate", "--checks", "security", "--no-llm"],
+    ],
+    ids=["validate", "security-scan", "tier1-security-scan", "tier1", "tier1-validate"],
+)
+def test_explicit_skillspector_baseline_reaches_the_security_scan(
+    command: list[str], monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    from skillevaluator.models.result import ValidationResult
+    from skillevaluator.validators.security import SecurityValidator
+
+    baseline = tmp_path / "approved-baseline.yaml"
+    baseline.write_text('version: 2\nrules:\n  - id: "PE5"\n    reason: "Reviewed"\n', encoding="utf-8")
+    seen: list[Path | None] = []
+
+    def _run_skillspector(self: SecurityValidator, _path: Path) -> ValidationResult:
+        seen.append(self.skillspector_baseline)
+        return ValidationResult()
+
+    monkeypatch.setattr(SecurityValidator, "_run_skillspector", _run_skillspector)
+    monkeypatch.chdir(tmp_path)
+
+    result = CliRunner().invoke(
+        cli,
+        [
+            *command,
+            str(FIXTURE),
+            "--skillspector-baseline",
+            baseline.name,
+            "-r",
+            "json",
+            "-o",
+            str(tmp_path / "reports"),
+        ],
+    )
+
+    assert result.exit_code == 0, result.output
+    assert seen == [baseline.resolve()]
+
+
+@pytest.mark.parametrize(
+    "command",
+    [
+        ["validate", "--no-tier3", "--no-dedup", "--no-llm"],
+        ["tier1", "--no-llm"],
+    ],
+    ids=["validate", "tier1"],
+)
+def test_skillspector_baseline_and_skip_both_reach_the_run(
+    command: list[str], monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    """``--skip`` on another check must not drop the baseline, and vice versa."""
+    from skillevaluator.models.result import ValidationResult
+    from skillevaluator.validators.security import SecurityValidator
+
+    baseline = tmp_path / "approved-baseline.yaml"
+    baseline.write_text('version: 2\nrules:\n  - id: "PE5"\n    reason: "Reviewed"\n', encoding="utf-8")
+    seen: list[Path | None] = []
+
+    def _run_skillspector(self: SecurityValidator, _path: Path) -> ValidationResult:
+        seen.append(self.skillspector_baseline)
+        return ValidationResult()
+
+    monkeypatch.setattr(SecurityValidator, "_run_skillspector", _run_skillspector)
+    reports = tmp_path / "reports"
+
+    result = CliRunner().invoke(
+        cli,
+        [
+            *command,
+            str(FIXTURE),
+            "--checks",
+            "security,unicode",
+            "--skip",
+            "unicode",
+            "--skillspector-baseline",
+            str(baseline),
+            "-r",
+            "json",
+            "-o",
+            str(reports),
+        ],
+    )
+
+    assert result.exit_code == 0, result.output
+    assert seen == [baseline.resolve()]
+    (report,) = reports.rglob("*.json")
+    by_name = {entry["validator"]: entry for entry in json.loads(report.read_text(encoding="utf-8"))["results"]}
+    assert by_name["Unicode Smuggling Detection"]["skip_reason"] == "skipped with --skip"
+
+
+def test_skillspector_baseline_must_name_an_existing_file(tmp_path: Path) -> None:
+    result = CliRunner().invoke(
+        cli, ["security-scan", str(FIXTURE), "--skillspector-baseline", str(tmp_path / "missing.yaml")]
+    )
+
+    assert result.exit_code == 2
+    assert "--skillspector-baseline" in result.output
+
+
 def test_claude_alias_is_canonicalized_and_deduplicated() -> None:
     assert parse_agents("claude, claude-code, opencode, claude") == ["claude-code", "opencode"]
 
@@ -1549,6 +1655,23 @@ def test_catalog_child_argv_carries_the_evaluated_source(tmp_path: Path) -> None
     assert "--workers" not in argv
 
 
+def test_catalog_child_argv_forwards_the_skillspector_baseline(tmp_path: Path) -> None:
+    from skillevaluator.cli import _catalog_child_argv_from_ctx, validate
+
+    skill_dir = tmp_path / "catalog" / "simple"
+    skill_dir.mkdir(parents=True)
+    baseline = tmp_path / "approved-baseline.yaml"
+    baseline.write_text('version: 2\nrules:\n  - id: "PE5"\n    reason: "Reviewed"\n', encoding="utf-8")
+    ctx = validate.make_context(
+        "validate",
+        [str(skill_dir), "--workers", "2", "--skillspector-baseline", str(baseline)],
+    )
+
+    argv = _catalog_child_argv_from_ctx(ctx, skill_dir, tmp_path / "out" / "simple")
+
+    assert argv[argv.index("--skillspector-baseline") + 1] == str(baseline.resolve())
+
+
 def test_catalog_child_argv_forwards_every_validate_option() -> None:
     """The allowlist is explicit, so a new option is silently dropped by default.
 
@@ -2951,9 +3074,55 @@ def test_summarize_tier2_lists_duplicate_details() -> None:
     rendered = ["".join(chunk for chunk, _style in row.segments) for row in rows]
     assert any("duplicates found" in line for line in rendered)
     assert any("Sections 'Setup 0'" in line for line in rendered)
-    duplicate_rows = [row for row in rows if row.label == "duplicate"]
+    duplicate_rows = [row for row in rows if row.glyph in {"1", "2", "3"}]
     assert len(duplicate_rows) == 3
+    assert any(row.label == "what to fix" for row in rows)
     assert any("2 more" in line for line in rendered)
+
+
+def test_summarize_tier2_does_not_blame_an_advisory_llm_refusal() -> None:
+    # A refusal is advisory: when another cluster's analysis failed, the
+    # summary must name that failure, not list the refusal as a duplicate.
+    from skillevaluator.models.result import Finding, Severity, ValidationResult
+    from skillevaluator.reporting.console_ui import summarize_tier2
+
+    def refusal(severity: Severity) -> Finding:
+        return Finding(
+            category="CONTENT_DEDUP",
+            severity=severity,
+            check_name="llm_refused",
+            message="The LLM declined to classify overlapping content within SKILL.md",
+            file_path="SKILL.md",
+        )
+
+    incomplete = ValidationResult(validator_name="Context Deduplication")
+    incomplete.add_finding(refusal(Severity.MEDIUM))
+    incomplete.mark_scan_incomplete("deduplication-llm")
+    incomplete.add_error("LLM analysis did not complete for 1 of 2 content clusters")
+
+    ran, ok, rows, _skip = summarize_tier2([incomplete])
+    assert ran and not ok
+    rendered = ["".join(chunk for chunk, _style in row.segments) for row in rows]
+    assert any("scan failed" in line for line in rendered)
+    assert not any("duplicates found" in line for line in rendered)
+    assert [row.label for row in rows if row.glyph == "✗"] == ["error"]
+    assert any("1 of 2 content clusters" in line for line in rendered)
+    assert not any("declined" in line for line in rendered)
+
+    # A policy that raises the refusal to a blocking severity reports it as a scan failure.
+    blocking = ValidationResult(validator_name="Context Deduplication")
+    blocking.add_finding(refusal(Severity.HIGH))
+
+    _ran, ok, rows, _skip = summarize_tier2([blocking])
+    rendered = ["".join(chunk for chunk, _style in row.segments) for row in rows]
+    assert not ok
+    assert any("scan failed" in line for line in rendered)
+    assert [row.label for row in rows if row.glyph == "✗"] == ["error"]
+
+    advisory = ValidationResult(validator_name="Context Deduplication")
+    advisory.add_finding(refusal(Severity.MEDIUM))
+    _ran, ok, _rows, _skip = summarize_tier2([advisory])
+    assert ok
 
 
 def test_rerun_hint_preserves_run_shaping_flags(monkeypatch) -> None:

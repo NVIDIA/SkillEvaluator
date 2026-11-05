@@ -106,7 +106,15 @@ def test_character_facts_use_the_same_formatting_as_prompt_placeholders(monkeypa
 def test_judges_accept_non_string_fields_with_character_facts(monkeypatch, implementation, judge_name, ground_truth):
     judge = llm_judge if implementation == "host" else load_harbor_eval_template()
     payload = json.dumps(
-        {"score": 0.0, "reason": "test verdict", "achieved": False, "user_goal": "test", "end_state": "test"}
+        {
+            "criteria": dict.fromkeys(
+                ["ACTION_CORRECT", "FACTUALLY_ACCURATE", "TASK_ADDRESSED", "ACTIONABLE", "FORMAT_FOLLOWED"], False
+            ),
+            "reason": "test verdict",
+            "achieved": False,
+            "user_goal": "test",
+            "end_state": "test",
+        }
     )
     mock = MagicMock(return_value=(payload, None))
     monkeypatch.setattr(judge, "call_public_llm", mock)
@@ -142,9 +150,8 @@ def test_all_judges_preserve_original_evidence_and_append_facts(monkeypatch, imp
     payload = json.dumps(
         {
             "criteria": dict.fromkeys(
-                ["SKILL_IDENTIFIED", "ACTION_CORRECT", "FACTUALLY_ACCURATE", "TASK_ADDRESSED", "ACTIONABLE"], True
+                ["ACTION_CORRECT", "FACTUALLY_ACCURATE", "TASK_ADDRESSED", "ACTIONABLE", "FORMAT_FOLLOWED"], True
             ),
-            "score": 1.0,
             "reason": "test",
             "achieved": True,
             "user_goal": "test",

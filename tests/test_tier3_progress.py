@@ -104,6 +104,61 @@ def test_auto_reporter_selects_terminal_appropriate_presentation(monkeypatch: py
     assert isinstance(progress.create_progress_reporter("off", stream=_TTYBuffer()), progress.NullProgressReporter)
 
 
+class _RecordingStop:
+    """Stop event that records the heartbeat wait and ends the loop at once."""
+
+    def __init__(self) -> None:
+        self.timeouts: list[float] = []
+
+    def wait(self, timeout: float) -> bool:
+        self.timeouts.append(timeout)
+        return True
+
+
+def test_plain_heartbeat_defaults_to_one_minute_and_rich_to_one_second(monkeypatch: pytest.MonkeyPatch) -> None:
+    progress = _progress_module()
+    monkeypatch.setenv("TERM", "xterm-256color")
+    plain = progress.create_progress_reporter("auto", stream=io.StringIO())
+    rich = progress.create_progress_reporter("auto", stream=_TTYBuffer())
+
+    assert type(plain) is progress.PlainProgressReporter
+    assert type(rich) is progress.RichProgressReporter
+    for reporter, expected in ((plain, 60.0), (rich, 1.0)):
+        stop = _RecordingStop()
+        reporter._stop = stop
+        reporter._heartbeat_loop()
+        assert stop.timeouts == [expected]
+
+
+@pytest.mark.parametrize("mode", ["plain", "rich", "auto"])
+def test_progress_interval_overrides_plain_and_rich_defaults(monkeypatch: pytest.MonkeyPatch, mode: str) -> None:
+    progress = _progress_module()
+    monkeypatch.setenv("TERM", "xterm-256color")
+
+    reporter = progress.create_progress_reporter(mode, stream=_TTYBuffer(), refresh_interval=12.5)
+
+    assert reporter._refresh_interval == 12.5
+
+
+@pytest.mark.parametrize("interval", [float("nan"), float("inf"), float("-inf")])
+def test_progress_reporter_rejects_non_finite_refresh_interval(interval: float) -> None:
+    progress = _progress_module()
+
+    with pytest.raises(ValueError, match="finite number of seconds"):
+        progress.create_progress_reporter("plain", stream=io.StringIO(), refresh_interval=interval)
+
+
+def test_progress_reporter_bounds_refresh_interval_below_thread_timeout_limit() -> None:
+    progress = _progress_module()
+
+    fast = progress.PlainProgressReporter(stream=io.StringIO(), refresh_interval=0.0)
+    slow = progress.PlainProgressReporter(stream=io.StringIO(), refresh_interval=1e12)
+
+    assert fast._refresh_interval == progress.MIN_REFRESH_INTERVAL_SECONDS
+    assert slow._refresh_interval == progress.MAX_REFRESH_INTERVAL_SECONDS
+    assert progress.MAX_REFRESH_INTERVAL_SECONDS < threading.TIMEOUT_MAX
+
+
 def test_plain_plan_labels_the_maximum_scaled_top_level_agent_timeout() -> None:
     progress = _progress_module()
     output = io.StringIO()
@@ -2710,6 +2765,100 @@ def test_default_collection_exception_cleans_transient_artifacts(
     assert len(run_dirs) == 1
     assert not (run_dirs[0] / "_harbor-jobs").exists()
     assert not (run_dirs[0] / "_harbor-tasks").exists()
+
+
+class _InterruptingReporter(_RecordingReporter):
+    """Deliver Ctrl+C on the coordinator thread once the first agent is running."""
+
+    def __init__(self) -> None:
+        super().__init__()
+        self.interrupted = False
+
+    def emit(self, event: Any) -> None:
+        super().emit(event)
+        if not self.interrupted and event.stage.startswith("agent:") and event.state == "running":
+            self.interrupted = True
+            raise KeyboardInterrupt
+
+
+def test_interrupt_cancels_running_agent_and_never_starts_queued_agents(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    launched: list[str] = []
+    observed_cancellation: list[bool] = []
+
+    def run_agent(**kwargs: Any) -> list[str]:
+        launched.append(kwargs["agent"])
+        cancellation = kwargs.get("cancellation")
+        # Harbor jobs poll this event; the bounded wait keeps a regression from hanging.
+        observed_cancellation.append(cancellation is not None and cancellation.requested.wait(10))
+        return []
+
+    # The stub configures max_agents=1, so the second agent waits in the queue.
+    runner, skill = _stub_runner(monkeypatch, tmp_path, run_agent=run_agent)
+    reporter = _InterruptingReporter()
+
+    with pytest.raises(KeyboardInterrupt):
+        runner.run_harbor_eval(
+            skill,
+            ["codex", "opencode"],
+            output_dir=tmp_path / "results",
+            progress_reporter=reporter,
+        )
+
+    assert launched == ["codex"]
+    assert observed_cancellation == [True]
+    events = [(event.stage, event.state, event.detail) for event in reporter.events]
+    assert ("agent:codex", "failed", "interrupted before completion") in events
+    assert ("agent:opencode", "running", "with-skill + baseline") not in events
+    assert events[-1] == ("run-finished", "failed", "Tier 3 evaluation interrupted")
+
+
+class _RepeatedInterruptReporter(_RecordingReporter):
+    """Deliver Ctrl+C when the first agent starts and again when it reports stopping."""
+
+    def __init__(self) -> None:
+        super().__init__()
+        self.interrupts = 0
+
+    def emit(self, event: Any) -> None:
+        super().emit(event)
+        if self.interrupts < 2 and event.stage.startswith("agent:") and event.state == "running":
+            self.interrupts += 1
+            raise KeyboardInterrupt
+
+
+def test_second_interrupt_forces_running_agents_to_stop(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    observed: list[tuple[bool, bool]] = []
+
+    def run_agent(**kwargs: Any) -> list[str]:
+        cancellation = kwargs["cancellation"]
+        # A running Harbor job stays in its cleanup grace until it is forced.
+        observed.append((cancellation.requested.wait(10), cancellation.forced.wait(10)))
+        return []
+
+    runner, skill = _stub_runner(monkeypatch, tmp_path, run_agent=run_agent)
+    reporter = _RepeatedInterruptReporter()
+
+    with pytest.raises(KeyboardInterrupt):
+        runner.run_harbor_eval(
+            skill,
+            ["codex"],
+            output_dir=tmp_path / "results",
+            progress_reporter=reporter,
+        )
+
+    assert observed == [(True, True)]
+    assert reporter.interrupts == 2
+    events = [(event.stage, event.state, event.detail) for event in reporter.events]
+    stopping = [detail for stage, state, detail in events if stage == "agent:codex" and state == "running"]
+    assert stopping[-1].startswith("stopping Harbor jobs; press Ctrl+C again")
+    assert ("agent:codex", "failed", "interrupted before completion") in events
+    assert events[-1] == ("run-finished", "failed", "Tier 3 evaluation interrupted")
 
 
 def test_runtime_preflight_running_event_precedes_slow_preflight_call(

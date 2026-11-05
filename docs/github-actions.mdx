@@ -1,111 +1,95 @@
 ---
 title: "GitHub Actions"
-description: "Bring SkillEvaluator checks and reports to your GitHub repository with a reusable workflow."
+description: "Bring SkillEvaluator to your GitHub repository with a reusable workflow, clear results and optional PR feedback."
 ---
 
-Bring skill evaluation to your GitHub repository with one workflow file. Point
-it at your skill directories; pull requests check changed skills automatically.
-The shared container includes Tier 1 and SkillSpector security scanning.
+Bring skill evaluation to your GitHub repository with one workflow file.
+Choose your skill folders; pull requests check changed skills automatically.
+The shared image includes **Tier 1 and SkillSpector security scanning**.
 
-<Note>
-  Use the generated workflow from an official CI image release. Until that
-  release is available, the source template contains placeholders and is not
-  runnable.
-</Note>
-
-## Choose what to add
-
-The release bundle provides these two GitHub templates. Copy them into
-`.github/workflows/`; you do not need to copy evaluator code or build an image.
-
-| You want | Add this file | Setup |
-| --- | --- | --- |
-| Automatic checks and downloadable reports | [skill-checks.yml](https://github.com/NVIDIA/SkillEvaluator/blob/main/ci/templates/skill-checks.yml) | Choose your skill folders and score threshold. |
-| Hosted reports and an updated PR comment | Also add [publish-skill-reports.yml](https://github.com/NVIDIA/SkillEvaluator/blob/main/ci/templates/publish-skill-reports.yml) | Complete the [one-time publisher setup](#enable-pr-comments). |
-
-These links open the source templates in NVIDIA/SkillEvaluator. The
-[template catalog](https://github.com/NVIDIA/SkillEvaluator/blob/main/ci/templates/README.md)
-explains how to get release-generated copies from an official CI image release.
-You can copy the files directly; no local installation or onboarding CLI is
-required.
-
-The release fills in the workflow and image versions. Both templates use
-GitHub's automatic token; the default checks need no model key or paid LLM.
+<CardGroup cols={2}>
+  <Card title="Use the CLI" icon="terminal" href="/skills/skillevaluator/cli-onboarding">
+    Answer a few questions. The CLI prepares checks, optional hosted feedback and a setup PR.
+  </Card>
+  <Card title="Copy the workflows" icon="file-code" href="#get-started">
+    Copy the ready-to-use templates. No local CLI installation required.
+  </Card>
+</CardGroup>
 
 ## Get started
 
 <Steps>
 
-### Add the workflow
+### Copy the ready-to-use template
 
-Copy the release-generated `skill-checks.yml` to
-`.github/workflows/skill-checks.yml`. It pins the shared workflow and image.
+Open [skill-checks.yml](https://github.com/NVIDIA/SkillEvaluator/blob/main/ci/bundles/0.7.2/skill-checks.yml)
+from the [ready-to-use templates](https://github.com/NVIDIA/SkillEvaluator/tree/main/ci/bundles/0.7.2).
+Use GitHub's **Raw** view to copy it into `.github/workflows/skill-checks.yml`.
+The template already supplies pinned workflow and image versions.
 
-### Choose your skills and score
+### Point it at your skills
 
-Set `paths` to your skill directory and `min-score` to the minimum quality score
-from 0 to 100 (default 70). For multiple roots, use a YAML multiline string.
-Change `branches: [main]` if your default branch has a different name.
+Edit these inputs in the downloaded file:
 
-### Open a pull request
+```yaml title="Your choices in skill-checks.yml"
+with:
+  paths: |-
+    skills
+    .agents/skills
+  min-score: 70
+  scan-mode: auto
+  llm: false
+```
 
-GitHub Actions evaluates changed skills and provides a concise result. Open the
-run and download its report artifact for details. Enable GitHub Actions and
-allow the external reusable workflow and its actions in your organization.
+Use your own skill folders. Keep `auto` to scan changed skills in PRs;
+`all` checks the configured collection. If your default branch is not `main`,
+update the template's push branch.
+
+### Commit the workflow and open a skill PR
+
+Merge the workflow onto your default branch, then open a PR changing a selected
+skill. GitHub Actions must be enabled and allowed to use the referenced
+reusable workflow and actions.
 
 </Steps>
 
-The generated job has this shape; the release fills in the immutable pins:
+<Note>
+  The released template provides **checks and downloadable reports**.
+  Hosted reports and PR comments need the [optional publisher setup](#enable-pr-comments).
+  The same release also includes the optional publisher template.
+</Note>
 
-```yaml title=".github/workflows/skill-checks.yml"
-jobs:
-  skills:
-    uses: NVIDIA/SkillEvaluator/.github/workflows/evaluate-skills.yml@RELEASE_WORKFLOW_SHA
-    with:
-      image: ghcr.io/nvidia/skillevaluator-tier1@sha256:RELEASE_IMAGE_DIGEST
-      paths: skills
-      min-score: 70
-      scan-mode: auto
-      llm: false
-```
+<Accordion title="I prefer to inspect the source templates">
+  Browse the public [template catalog](https://github.com/NVIDIA/SkillEvaluator/blob/main/ci/templates/README.md)
+  and [skill-checks.yml source](https://github.com/NVIDIA/SkillEvaluator/blob/main/ci/templates/skill-checks.yml).
+  Source templates contain placeholders. Use the release-generated file when
+  onboarding; do not substitute `main` or `latest` for its immutable versions.
+</Accordion>
 
-## See the results
+## See what happened
 
-Open **Actions → Skill checks** for the result and suggested next step. Download
-`skill-evaluator-tier1-attempt-N` for `index.html`, per-skill HTML and JSON,
-Markdown, SARIF and available scanner logs. Failed and incomplete scans retain
-their available reports. The smaller `skill-evaluator-tier1-evidence-attempt-N`
-artifact contains only the JSON used by the optional report publisher.
+| Start here | Then open |
+| --- | --- |
+| **PR → Checks** | The `skills / Tier 1 scan` result and its short summary. |
+| **Actions → Skill checks** | The run and downloadable report artifact. |
+| **PR → Conversation**, with publishing enabled | The updated bot comment and **Open full report** link. |
 
-The HTML index and reports use four verdicts: **Passed**, **Changes required**,
-**Incomplete** and **Skipped**. A quality score below your minimum fails the
-Quality score check and blocks the verdict.
+Download `skill-evaluator-tier1-attempt-N`, extract it, and open `index.html`.
+Failed scans retain their available reports too. The HTML separates the
+**verdict** from the **quality score**: a high score does not override a failed
+required security or schema check.
 
-<Frame caption="Example: a Tier 1 report shows the verdict and quality score separately. This example was captured from a GitLab demo using the same report renderer.">
-  <img src="./assets/repository-ci-results-example.png" alt="Example results table showing a failed skill, its quality score, and a link to its report" />
+<Frame caption="Report example: the skill scored 98.2 but did not meet a configured 100-point threshold. The shared renderer is used by both GitHub and GitLab.">
+  <img src="./assets/repository-ci-results-example.png" alt="SkillEvaluator report table showing the skill verdict, score and link to its detailed report" />
 </Frame>
-
-### In the Actions summary
-
-A failed skill is identified with a reason and suggested fix. Open its report
-for all findings. The quality score is separate from the scan verdict.
-
-```text
-Tier 1 scan result: FAILED
-1 skill · 0 passed · 1 failed
-Problem: Quality score 98.2/100 is below the required 100/100
-```
-
-This is an illustrative summary; the actual findings depend on the run.
 
 ### On the pull request
 
-The optional publisher posts one bot comment and updates it for new results.
-Reviewers can see the failed skill, its score, and what to fix without opening
-the Actions logs.
+With publishing enabled, one bot comment is updated for new results. Reviewers
+see the issue and next step without reading the full Actions log.
 
-<Frame caption="Shortened illustrative PR comment. This example is included in the public SkillEvaluator documentation; no demo-repository access is needed.">
-<div style={{ width: "100%", minWidth: 0, padding: "16px" }}>
+<Frame caption="Shortened illustrative PR comment. Real comments link to your report and workflow run.">
+<div style={{ padding: "16px", width: "100%", minWidth: 0 }}>
 
 **github-actions[bot]**
 
@@ -119,131 +103,153 @@ the Actions logs.
 
 **Problem:** Quality score 98.2/100 is below the required 100/100.
 
-**Suggested fix:** Open the skill report and address the quality findings.
+**Next step:** Open the skill report and address its quality findings.
 
 **Open full report** · **View workflow run**
 
 </div>
 </Frame>
 
-The last line shows link labels. In a real comment, they open your repository's
-hosted report and workflow run. Browse the
-[public examples](https://github.com/NVIDIA/SkillEvaluator/blob/main/ci/examples/README.md)
-for the report preview and log excerpts. With `scan-mode: auto`, a pull request
-evaluates only affected skills in the configured folders.
+Browse the [public report and log examples](https://github.com/NVIDIA/SkillEvaluator/blob/main/ci/examples/README.md)
+for more detail. No personal demo-repository access is needed.
 
 ## Enable PR comments
 
-Add the second template for **hosted reports and PR comments together**.
-The current publisher posts the comment after the report site deploys
-successfully, so copying the second file alone is not enough.
+The optional publisher hosts the HTML and posts a comment **after deployment
+succeeds**. It needs a second workflow plus one-time hosting and approval settings.
 
-<Steps>
+<Card title="Try the guided setup" icon="terminal" href="/skills/skillevaluator/cli-onboarding">
+  The CLI recognizes an existing single-job scan, keeps its settings and
+  component version tag, and adds reporting in a setup PR. New repositories
+  get both workflows.
+</Card>
 
-### Enable report hosting once
-
-Select **Settings → Pages → Source: GitHub Actions**. Create a new `gh-pages`
-history branch containing an empty `.nojekyll` file and `history.json` with
-`[]`. Keep any existing site or report history intact.
-
-### Configure the publisher template
-
-Copy the release-generated `publish-skill-reports.yml` into
-`.github/workflows/`. Replace `YOUR_REPORT_BASE_URL` with your repository's
-Pages URL, for example `https://your-org.github.io/your-repo`.
-
-In `skill-checks.yml`, uncomment the permission for signed report receipts:
-
-```yaml
-permissions:
-  contents: read
-  id-token: write
-```
-
-GitHub uses this to prove which workflow ran. No personal token or cloud account
-is needed. After choosing your skill folders and other scan options, run:
-
-```bash
-git hash-object .github/workflows/skill-checks.yml
-```
-
-Paste the output into `trusted-caller-blobs` in the publisher file. This
-approves that exact scan configuration; refresh it whenever you edit the scan
-file. The release supplies the evaluator and publisher version pins.
-
-### Merge the setup and open a skill PR
-
-Put both workflow files on your default branch. Keep the **Skill checks**
-workflow name, `skill-checks.yml` filename, and default artifact name.
-The publisher template already includes the needed permissions; your
-organization must allow them and the referenced actions. No extra token is
-required.
-
-The next eligible PR scan triggers publication automatically. After deployment,
-the bot posts or updates its comment. Only open, current-head PRs from branches
-in the same repository receive comments; fork PRs retain their scan results in
-Actions.
-
-</Steps>
-
-<Note>
-  Reports can include source excerpts and unmerged findings. Pages is public
-  unless explicitly configured as private; a private repository alone does not
-  make its Pages site private. This publisher owns the report site's root, so
-  coordinate an existing Pages site before enabling it. Use downloadable
-  artifacts if hosting is unsuitable.
-</Note>
-
-For history initialization, permission details and troubleshooting, follow the
-[publisher setup guide](https://github.com/NVIDIA/SkillEvaluator/blob/main/ci/README.md#optional-hosted-reports-and-pr-feedback).
+Copy [publish-skill-reports.yml](https://github.com/NVIDIA/SkillEvaluator/blob/main/ci/bundles/0.7.2/publish-skill-reports.yml)
+from the same template folder as your scan workflow. Complete the one-time setup below,
+or let the [CLI](/skills/skillevaluator/cli-onboarding) handle it.
 
 <AccordionGroup>
-  <Accordion title="When does it run?">
-    `scan-mode: auto` evaluates skills affected by a pull request and the full
-    configured collection on pushes and manual runs. `all` evaluates the whole
-    collection each time. No changed skills is a successful skip, not a scanner
-    pass. Completely deleted skills are listed as skipped; removing `SKILL.md`
-    while leaving tracked files is an error. Shared files outside skill roots are
-    not inferred dependencies; use `all` when they should trigger a full scan.
-    The 100-skill cap is a selection limit, not a runtime guarantee. Timed-out
-    scans retain completed results and mark the remainder incomplete. The workflow
-    scans up to four skills at once. Set `scan-workers` from 1 to 16 to change
-    this; `1` scans one skill at a time. Results and logs keep the same skill
-    order either way.
+  <Accordion title="What does manual publisher setup involve?">
+    Start with the filled-in publisher template and follow the
+    [publisher setup guide](https://github.com/NVIDIA/SkillEvaluator/blob/main/ci/README.md#optional-hosted-reports-and-pr-feedback).
+    The main steps are:
+
+    1. Enable **Settings → Pages → Source: GitHub Actions** and initialize the
+       `gh-pages` report-history branch. For private reports, an administrator
+       must also select **Private** site visibility in GitHub's settings; see
+       the private-hosting requirements below. Preserve any existing site or history.
+    2. Add `publish-skill-reports.yml` with your Pages URL. Keep the evaluator
+       and publisher versions supplied by the release.
+    3. Grant the scan workflow `id-token: write`, then approve its exact contents
+       in the publisher's `trusted-caller-blobs` input. Compute the value with
+       `git hash-object .github/workflows/skill-checks.yml`; refresh it whenever
+       that scan file changes.
+    4. Merge both workflow files into the default branch. Open a new skill PR
+       to test checks, hosting and feedback together.
+
+    Keep the **Skill checks** workflow name, scan filename and default artifact
+    name. The publisher uses GitHub's automatic token; organization policies
+    must allow its permissions and referenced actions. Copying a second file
+    alone does not finish setup.
   </Accordion>
-  <Accordion title="Control whether it blocks merging">
-    The workflow runs independently of existing workflows; it does not wait for
-    them automatically. Configure a required check in GitHub branch rules if a
-    failed or incomplete result should block merging. `min-score` controls the
-    quality threshold and also applies to the rubric when LLM checks are enabled;
-    required security, schema and other checks remain independent. Tier 2 and
-    Tier 3 are not run.
+  <Accordion title="Who receives a comment, and who can read the report?">
+    Comments are posted on open, current-head PRs from branches in the same
+    repository. Fork-origin PRs keep their available reports in Actions.
+    Pages is public unless explicitly configured as private; repository privacy
+    alone does not make its Pages site private. Reports may contain source
+    excerpts and unmerged findings. Use downloadable artifacts when public
+    hosting is unsuitable.
   </Accordion>
-  <Accordion title="A scan finished, but hosting was skipped">
-    Check that the scan workflow grants `id-token: write` and refresh
-    `trusted-caller-blobs` after editing that file. Commit the setup and start
-    a new scan; rerunning an old job keeps its original workflow and cannot add
-    a missing receipt. GitHub can withhold this permission under fork
-    policies; the downloadable report remains available. Signing receipts are
-    separate artifacts and are never published on the report site.
-  </Accordion>
-  <Accordion title="Privacy, dependencies, and optional LLM checks">
-    Static Tier 1 needs no model key, but dependency checks can contact
-    vulnerability services and submit package metadata. Dependencies are audited
-    without installing packages or running build scripts; unpinned or unresolved
-    requirements are incomplete. Known credential values detected by the PII
-    patterns, NVIDIA API keys, and unquoted `KEY=value` and `Bearer` credentials
-    are redacted from CI reports, including parts that scanners cut or escape.
-    Not every credential or transformed value is detectable. Raw scanner logs
-    are withheld when a credential or LLM key is present.
-    Remove and rotate exposed credentials; old reports and Git history are not
-    rewritten. Optional model-backed checks use the separate trusted manual
-    [LLM template](https://github.com/NVIDIA/SkillEvaluator/blob/main/ci/templates/skill-checks-llm.yml),
-    a provider key and provider charges; they send selected content to that
-    provider and are not included in the default publisher allowlist.
+  <Accordion title="Can our private repository publish private reports?">
+    Access-controlled Pages requires a private or internal project repository
+    owned by a GitHub Enterprise Cloud organization. An administrator first
+    selects **GitHub Actions** and **Private** in **Settings → Pages**. The
+    REST API cannot set Pages visibility. Personal repositories cannot host
+    private Pages.
+
+    The CLI verifies the existing private site and uses its assigned
+    `*.pages.github.io` URL. It accepts an existing SkillEvaluator report site
+    or a newly configured empty private site, and preserves unrelated websites.
+    If private hosting is unavailable, choose checks only. See
+    [private report hosting](cli-onboarding.mdx#private-report-hosting) for the
+    guided path and [GitHub's access-control requirements](https://docs.github.com/en/enterprise-cloud@latest/pages/getting-started-with-github-pages/changing-the-visibility-of-your-github-pages-site).
   </Accordion>
 </AccordionGroup>
 
-See [Repository Integration](repository-integration.mdx) for GitLab and other
-CI options, or the [maintainer guide](https://github.com/NVIDIA/SkillEvaluator/blob/main/ci/README.md)
-for the release and runtime details.
+## Fit it into your workflow
+
+<AccordionGroup>
+  <Accordion title="Will this wait for my existing workflows?">
+    This workflow runs independently. Existing workflows remain separate; it
+    does not automatically wait for them to finish. Configure explicit workflow
+    dependencies if your pipeline needs that ordering.
+  </Accordion>
+  <Accordion title="Which changes trigger a scan?">
+    `auto` selects affected skills on pull requests. Pushes to the default
+    branch and manual runs scan the configured collection. `all` scans that
+    collection each time. No changed skills is a successful **Skipped** result,
+    not a scanner pass. Changes to shared files outside the skill roots are not
+    inferred dependencies; use `all` when they should trigger a full scan.
+    Selection is capped at 100 skills. Timeouts retain completed results and
+    mark unfinished work incomplete. The workflow scans up to four skills at
+    once; `scan-workers` accepts 1–16.
+  </Accordion>
+  <Accordion title="How do I make this a merge gate?">
+    After the first run, select its scan check in GitHub branch rules. The
+    current template emits `skills / Tier 1 scan`; use the actual check name
+    shown in your repository. `min-score` sets the quality threshold; required
+    security, schema and other checks remain independent. This integration
+    runs Tier 1 only.
+  </Accordion>
+  <Accordion title="The scan finished, but the comment is missing">
+    Confirm setup is on the default branch and the PR is eligible for comments.
+    Open **Publish skill reports** to see whether deployment completed. If
+    hosting was skipped, check the scan's `id-token: write` permission and
+    `trusted-caller-blobs` value. A new scan must use the updated workflow;
+    rerunning an old job keeps its original workflow. The scan's downloadable
+    report remains a separate way to inspect available findings.
+  </Accordion>
+  <Accordion title="Our organization uses a shared workflow wrapper">
+    Keep the component reference in your existing caller, for example
+    `your-org/ci/.github/workflows/skill-checks.yml@v3`, then run
+    `skillevaluator ci init` in each consumer repository. The CLI recognizes
+    `.github/workflows/skill-checks.yml` with the name **Skill checks** and one
+    reusable scan job. It preserves inputs, triggers and the version tag while
+    adding the publisher and any needed scan-job `id-token: write` permission.
+
+    The component maintainer must first grant `id-token: write` in the job
+    calling the evaluator. The CLI checks that prerequisite before applying
+    reporting setup; a consumer permission alone cannot grant it downstream.
+
+    With delegation, the publisher approves the exact component path and tag
+    in `trusted-wrapper-workflows` and `delegated-evaluator-wrapper`. Updating
+    `v3` then updates future scans centrally, with no consumer workflow edit.
+    Published execution receipts record the resolved component and evaluator
+    commit SHAs for each run. The component still pins its evaluator and image
+    immutably. Use a full component SHA when you want to hold that version fixed.
+
+    Use SkillEvaluator 0.7.2 or later and its reviewed publisher for these delegation inputs; the
+    archived 0.7.1 publisher does not. Direct callers keep an immutable
+    evaluator approval. For manual configuration, follow the
+    [shared-workflow setup](https://github.com/NVIDIA/SkillEvaluator/blob/main/ci/README.md#calling-through-a-shared-workflow)
+    guide. PR comments follow successful report deployment; private reports
+    require the private Pages setup described above.
+  </Accordion>
+  <Accordion title="Do the checks need an LLM key or network access?">
+    Default Tier 1 checks use no model key. Dependency audits can contact
+    vulnerability services and submit package metadata; packages are not
+    installed and build scripts are not run. Optional LLM checks use a separate
+    [manual workflow](https://github.com/NVIDIA/SkillEvaluator/blob/main/ci/templates/skill-checks-llm.yml),
+    your provider key and provider charges. They send selected content to that
+    provider and are outside the default publisher allowlist.
+  </Accordion>
+</AccordionGroup>
+
+<CardGroup cols={2}>
+  <Card title="Set up with the CLI" icon="terminal" href="/skills/skillevaluator/cli-onboarding">
+    See the guided setup and try your first test PR.
+  </Card>
+  <Card title="GitLab CI/CD" icon="code-branch" href="/skills/skillevaluator/gitlab-ci">
+    Use the shared scanner image with a GitLab pipeline.
+  </Card>
+</CardGroup>

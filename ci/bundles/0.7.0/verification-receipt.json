@@ -1,0 +1,104 @@
+{
+  "all_verified": true,
+  "image": "ghcr.io/nvidia/skillevaluator-tier1@sha256:c75c826f0e52d6c9a8d303ad7eefd606ed86e6940123f42b4eda2457863bcee7",
+  "source_revision": "e4cda13a85f34fa7a112b3529feaf24cfe587caf",
+  "platform": {
+    "os": "linux",
+    "architecture": "amd64"
+  },
+  "public_manifest_matches_smoke_tested_image": true,
+  "official_build_run": "https://github.com/NVIDIA/SkillEvaluator/actions/runs/41545278872",
+  "image_smoke_cases": [
+    {
+      "case": "all-pass",
+      "verified": true,
+      "exit_code": 0,
+      "overall_status": "passed"
+    },
+    {
+      "case": "invalid-name",
+      "verified": true,
+      "exit_code": 1,
+      "overall_status": "failed"
+    },
+    {
+      "case": "changed-one",
+      "verified": true,
+      "exit_code": 0,
+      "overall_status": "passed"
+    },
+    {
+      "case": "no-change",
+      "verified": true,
+      "exit_code": 0,
+      "overall_status": "skipped"
+    },
+    {
+      "case": "missing-llm-key",
+      "verified": true,
+      "exit_code": 1,
+      "overall_status": "error"
+    }
+  ],
+  "consumer_checks": [
+    {
+      "platform": "github",
+      "selected": 1,
+      "discovered": 23,
+      "score": 89.8,
+      "minimum_score": 70,
+      "passed": true,
+      "native_reports_verified": true
+    },
+    {
+      "platform": "gitlab",
+      "selected": 1,
+      "discovered": 23,
+      "score": 89.8,
+      "minimum_score": 70,
+      "passed": true,
+      "native_reports_verified": true
+    }
+  ],
+  "strict_threshold_checks": [
+    {
+      "platform": "github",
+      "verified": true,
+      "status": "failed",
+      "quality_score": 89.8,
+      "minimum_score": 100,
+      "selected": 1,
+      "discovered": 23,
+      "reports_retained": true
+    },
+    {
+      "platform": "gitlab",
+      "verified": true,
+      "status": "failed",
+      "quality_score": 89.8,
+      "minimum_score": 100,
+      "selected": 1,
+      "discovered": 23,
+      "reports_retained": true
+    }
+  ],
+  "scope": "Static Tier 1 and downloadable reports; no paid model calls, Tier 2 or Tier 3 runs.",
+  "restored_consumer_tests": [
+    {
+      "platform": "github",
+      "passed": true,
+      "selected": 1,
+      "discovered": 23,
+      "score": 89.8,
+      "minimum_score": 70
+    },
+    {
+      "platform": "gitlab",
+      "passed": true,
+      "selected": 1,
+      "discovered": 23,
+      "score": 89.8,
+      "minimum_score": 70
+    }
+  ]
+}

@@ -375,6 +375,43 @@ def test_included_skills_need_group_mode_before_preparation(skill, configured, m
     assert not configured
 
 
+@pytest.mark.parametrize(
+    ("manifest_state", "workspace_mode", "expected_error"),
+    [
+        ("missing", "group", "Catalog does not exist:"),
+        ("invalid-json", "group", "Invalid decoy manifest JSON:"),
+        ("missing", "isolated", "skill_workspace.decoy_manifest requires skill_workspace.mode=group"),
+    ],
+)
+def test_bad_decoy_manifest_fails_before_dataset_preparation(
+    skill, configured, monkeypatch, manifest_state, workspace_mode, expected_error
+):
+    from skillevaluator.tier3 import workflow
+
+    evals = skill / "evals"
+    evals.mkdir()
+    manifest = evals / "decoys.json"
+    if manifest_state == "invalid-json":
+        manifest.write_text("{not valid JSON", encoding="utf-8")
+    (evals / "config.yml").write_text(
+        f"schema_version: 1\nskill_workspace:\n  mode: {workspace_mode}\n"
+        f"  decoy_manifest: {skill.name}/evals/decoys.json\n",
+        encoding="utf-8",
+    )
+    monkeypatch.setattr(
+        workflow, "_prepare_dataset", lambda *_args, **_kwargs: pytest.fail("must preflight decoy manifest")
+    )
+
+    result = CliRunner().invoke(_command(), [str(skill), "--progress", "off"])
+
+    assert result.exit_code != 0
+    assert expected_error in result.output
+    if manifest_state == "missing" and workspace_mode == "group":
+        assert str(manifest) in result.output
+    assert not (evals / "evals.json").exists()
+    assert not configured
+
+
 def test_unavailable_environment_fails_before_generation(skill, configured, monkeypatch):
     from skillevaluator.tier3.harbor import runner
 

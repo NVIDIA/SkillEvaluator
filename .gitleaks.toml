@@ -65,3 +65,10 @@ condition = "AND"
 targetRules = ["generic-api-key"]
 regexes = ['''^0123456789abcdef0123456789abcdef$''']
 paths = ['''^tests/tier3/test_(private_runtime_regressions|native_mcp_policy)\.py$''']
+
+[[allowlists]]
+description = "Synthetic curl basic-auth credential used by grader reason redaction tests"
+condition = "AND"
+targetRules = ["curl-auth-user"]
+regexes = ['''^admin:hunter2hunter2$''']
+paths = ['''^tests/reporting/test_tier3_failure_reasons\.py$''']

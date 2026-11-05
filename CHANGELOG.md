@@ -647,12 +647,18 @@ All notable changes to SkillEvaluator are documented in this file.
   trial was scored as the selected model although another model finished it.
   Generated and native tasks now set `CLAUDE_CODE_DISABLE_REFUSAL_FALLBACK=1`
   in the task environment for every env mode, and neither `harbor.runtime_env`
-  nor a native task's `[environment.env]` can turn the fallback back on. The
-  refused attempt is not scored, like any other failed trial, and counts
-  against the arm's scored-attempt coverage. Other agents ignore the variable.
-  The variable was checked with Claude Code 2.1.292, the release Harbor
-  installs; local mode keeps the fallback off only if the host's Claude Code
-  honors it.
+  nor a native task's `[environment.env]` can turn the fallback back on. Other
+  agents ignore the variable. The variable was checked with Claude Code
+  2.1.292, the release Harbor installs; local mode keeps the fallback off only
+  if the host's Claude Code honors it. A refused attempt is not scored, like
+  any other failed trial, so the arm no longer has complete attempt coverage:
+  after one refusal in 20 cases with 3 attempts each, it reports
+  `Scored attempt coverage is 59/60` and its execution fails.
+  `tier3 evaluate` then exits 1, and so does `validate --block-on-agent-eval`.
+  On a route that serves the fallback model, such as the Anthropic API, the
+  retry used to finish such an attempt and the arm succeeded, so a run that
+  completed before can now fail. Rerun it, or evaluate the refused case with
+  another model.
 
 - Tier 1 security scans no longer fail a skill for an exact read-only
   `/etc/passwd` bind mount such as `docker run -v /etc/passwd:/etc/passwd:ro`.

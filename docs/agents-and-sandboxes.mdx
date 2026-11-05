@@ -68,11 +68,18 @@ and gateways. With the pinned Claude Code 2.1.292, a refused turn is not
 retried on another model, and the refusal ends the attempt with Harbor's
 `AgentSafetyRefusalError`. The variable was checked with that release only.
 [Local mode](#local-mode) runs the Claude Code already on your machine, so it
-keeps the fallback off only if that release honors the variable. Like any
-other failed trial, a refused attempt is not scored and counts against the
-arm's scored-attempt coverage. Neither `harbor.runtime_env` nor a native
-task's `[environment.env]` can turn the fallback back on, and other agents
-ignore the variable.
+keeps the fallback off only if that release honors the variable. Neither
+`harbor.runtime_env` nor a native task's `[environment.env]` can turn the
+fallback back on, and other agents ignore the variable.
+
+Like any other failed trial, a refused attempt is not scored, so the arm no
+longer has complete attempt coverage: after one refusal in 20 cases with 3
+attempts each, it reports `Scored attempt coverage is 59/60` and its
+execution fails. `tier3 evaluate` then exits 1, and so does
+`validate --block-on-agent-eval`. On a route that serves the fallback model,
+such as the Anthropic API, the retry used to finish such an attempt and the
+arm succeeded, so a run that completed before can now fail. See
+[Troubleshooting](tier3-live-evaluation.mdx#troubleshooting) for what to do.
 
 The `claude` alias is canonicalized to `claude-code` everywhere an agent
 name can appear — `-a/--agents`, `--agent-model`, and `harbor.agents` in

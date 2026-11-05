@@ -66,6 +66,8 @@ class TierPresentation:
     def summary(self) -> str:
         if self.status == Status.NOT_RUN:
             return "Not run" if self.requested else "Not run (not requested)"
+        if not self.executed:
+            return f"{self.skipped} skipped, {self.not_applicable} N/A; no checks executed"
         assessment = (
             f"{self.display_status.capitalize()} evidence; "
             if self.assessment_status is not None and self.display_status != self.status.value

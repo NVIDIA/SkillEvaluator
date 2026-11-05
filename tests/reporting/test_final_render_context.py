@@ -456,3 +456,21 @@ def test_exhausted_projection_budget_does_not_turn_other_arm_into_observed_zero(
     assert coverage.with_skill.observed is None
     assert coverage.baseline.observed is None
     assert "0 retained baseline rows" not in coverage.text
+
+
+@pytest.mark.parametrize("width", [60, 80, 98])
+@pytest.mark.parametrize(("skipped", "not_applicable"), [(1, 0), (0, 2), (2, 3)])
+def test_zero_execution_counts_stay_explicit_at_terminal_widths(monkeypatch, width, skipped, not_applicable):
+    monkeypatch.setenv("COLUMNS", str(width))
+    monkeypatch.setenv("TERM", "xterm-256color")
+    monkeypatch.setenv("CI", "true")
+    sources = [result(skipped=True) for _ in range(skipped)]
+    for _ in range(not_applicable):
+        source = result()
+        source.add_success("lint", "No scripts/ or tools/ directory found")
+        sources.append(source)
+    output = CLIReporter().render_all(sources)
+    assert f"Tier 1: {skipped} skipped, {not_applicable} N/A; no checks executed" in output
+    assert "0 of 0 checks passed" not in output
+    assert "Passed required checks" in output
+    assert "Publication eligibility: Incomplete" in output

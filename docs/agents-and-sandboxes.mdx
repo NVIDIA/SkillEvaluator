@@ -30,6 +30,16 @@ The pinned CLI releases apply wherever Harbor installs the agent: Docker and
 the remote environments. [Local mode](#local-mode) runs the CLI already on your
 machine instead.
 
+In Docker and Kata, SkillEvaluator reruns a Claude Code or Codex install that
+fails, for example on a dropped download or a package mirror error. It makes up
+to three attempts, waiting 2 and then 4 seconds, all within Harbor's agent setup
+timeout, so an install that keeps failing still fails the trial. A slow failure
+is not retried when the attempt took over a third of that timeout, or when
+another attempt as long would not finish within it, so the trial reports the
+install error rather than a setup timeout. Each retry logs a warning that ends
+with the failed command's output. Claude Code on GKE, and Codex behind an
+OpenAI-compatible gateway, are retried the same way.
+
 Claude Code runs with background tasks turned off. Every staged task sets
 `CLAUDE_CODE_DISABLE_BACKGROUND_TASKS=1` in its environment, in every env mode,
 so a shell command finishes in the agent's turn or is stopped at Claude Code's
@@ -614,6 +624,14 @@ Full semantics for each variable are in
 [Environment Variables](environment-variables.mdx). `doctor --env-mode local`
 verifies the sandbox backend and the installed agent CLIs before you commit to
 a run.
+
+When Bubblewrap is installed but fails its startup probe, the error includes
+Bubblewrap's own failure line. Inside a container,
+`pivot_root: Operation not permitted` can mean the container's seccomp profile
+blocks Bubblewrap; only the options the container was launched with can change
+that. On such a host, use `--env-mode docker` where a Docker daemon is
+available, or set `SKILLEVALUATOR_LOCAL_SANDBOX=prefer` (advisory-only
+guardrails) or `off` for skills you fully trust.
 
 ## Workspace modes
 

@@ -176,11 +176,44 @@ All notable changes to SkillEvaluator are documented in this file.
   rules, and is not accepted by `validate`, so a baseline-only run cannot pass
   a Tier 3 gate.
 
+- The Tier 3 verifier saves every LLM judge attempt to `judge_attempts.json`
+  next to the trial's `skill_evaluator_reward.json`, rewritten after each
+  attempt so it also explains a judge that failed. Each entry records the
+  metric, attempt number, method (`llm`, `ragas` or `salvage`), judge model,
+  status, and the problem with a rejected reply, plus the prompt and reply
+  with long text shortened. A `behavior_check` score rebuilt from a truncated
+  reply adds a `salvage` entry. Configured credentials, common key shapes,
+  URL userinfo, `Authorization`, API-key, token and `Cookie` header values,
+  and the values of credential flags such as `--token` and
+  `curl -u user:password` are masked. Rewards record
+  `judge_contract: skill-evaluator-judges-v2`, a reserved name that custom
+  graders cannot use.
+
 - Tier 1 sets up SkillSpector 2.13.3 and Gitleaks 8.30.0 on first use from
   pinned, SHA-256-verified releases, without a prompt; Semgrep is optional
   unless `SKILLEVALUATOR_REQUIRE_SEMGREP=1`. `--skip <check>` on `validate` and
   `tier1` leaves a check out and reports it as skipped. A `scanners` row and the
   JSON report record which scanner versions ran.
+
+- `--skillspector-baseline FILE` on `validate`, `tier1`, and `security-scan`
+  applies an audited SkillSpector suppression baseline, so reviewed false
+  positives no longer leave the security check failed or `INCOMPLETE`.
+  Baselines apply only when passed explicitly; one shipped inside the skill is
+  never used, and suppressed findings without a requested baseline still fail
+  closed. A rule without a literal run in its `id` (two characters)
+  or in its `path` or `message` (four), such as `id: "*"` or `message: "*e*"`, or a version 2 rule or fingerprint without a `reason`, is
+  rejected before the scan, as are entries that are not mappings, unparseable
+  files, and files beyond SkillSpector's size and YAML expansion limits; an
+  empty file is an empty baseline. A baseline kept inside the skill is
+  excluded from the scan, including the staged copy used when the skill has
+  `evals/` outputs. JSON reports add `results[].skillspector_baseline` with the
+  outcome (`applied`, `no_matches`, `fingerprint_version_mismatch`,
+  `llm_stage_unmatched`, or `not_applied`), the baseline file name and
+  `sha256:` digest (never its local path), scanner versions, and per-stage
+  finding counts with the suppressed findings' severities and rule IDs, and Markdown and HTML reports show the outcome as a
+  `skillspector_baseline` line. Fingerprints ignored after a SkillSpector
+  upgrade, or not matched by the LLM stage, are reported instead of silently
+  suppressing nothing; fingerprints only match static-only runs.
 
 ### Changed
 
@@ -275,6 +308,28 @@ All notable changes to SkillEvaluator are documented in this file.
   environment, so each template compiles once per process instead of once per
   report.
 
+- Tier 3 `accuracy` grades the outcome only. The `SKILL_IDENTIFIED` criterion,
+  which capped a correct answer from the no-skill baseline at 0.8 on positive
+  cases, is replaced by `FORMAT_FOLLOWED`: the response follows any output
+  format the question explicitly requires, and when none is required it is
+  true only if the response gives an answer. A trial that ran but gave no
+  answer still scores `0.0`, as before. Skill use is still scored by
+  `skill_execution`. Every case and both arms use the same five criteria, so
+  rewards no longer record `excluded_criteria` or the
+  `applicable-accuracy-criteria/v1` policy; reports still read older rewards
+  that do. `judge_accuracy` still accepts the `skill_identification_applicable`
+  keyword but ignores it. Expect baseline accuracy to rise and accuracy lift to
+  fall for the same runs.
+
+- Tier 3 LLM judges return verdicts only, and the verifier computes every
+  score: `accuracy` is passing criteria divided by five, `goal_accuracy` is
+  `1.0` when the goal was achieved and `0.0` otherwise, and `behavior_check` is
+  the share of expected behaviors observed. A `score` field in a reply is
+  ignored, and the prompts no longer ask for one. An invalid reply is retried
+  once with the exact problem, for example `steps not judged: [2]`, instead of
+  a generic format reminder. The prompt examples are valid replies for the task
+  at hand, and the goal prompt no longer shows an empty tool-call section.
+
 ### Documentation
 
 - Give the performance dashboard its own sidebar guide, retain the previous
@@ -284,6 +339,19 @@ All notable changes to SkillEvaluator are documented in this file.
 
 ### Fixed
 
+- Tier 3 behavior-check evidence bundles now count a final answer cut by
+  the final-response section limit as truncated. The omission check
+  compared two renderings that both capped that section (800 characters
+  by default), so a long final answer could lose its middle to the cap
+  while the bundle claimed `truncated: false`. The comparison now runs
+  against a rendering without the final-response section limit. An answer
+  that still reaches the judge in full is not flagged, including one split
+  between the compact history and the end of the final-response section.
+  The `reason` names each setting that cut evidence:
+  `SKILL_EVAL_BEHAVIOR_CHECK_BUDGET`, `SKILL_EVAL_BEHAVIOR_FINAL_RESPONSE_LIMIT`,
+  or both. Caps inside individual sections (write bodies, history summaries)
+  are unchanged. The evidence-budget documentation now names both causes of
+  a `behavior_check` truncation and which setting raises each.
 - PR scan comments show the verdict, quality scores, first actionable fixes and
   report links; full provenance and detailed findings stay in the report.
 - Hosted reports use the retained site commit as the Pages deployment identity,
@@ -316,6 +384,15 @@ All notable changes to SkillEvaluator are documented in this file.
   listed. The JSON report still carries every error under
   `tier3.provenance.source_validation`. Validation rules, gate decisions, and
   the finding's suggestion text are unchanged.
+- Tier 3 Docker and Kata runs retry a Claude Code or Codex install that fails,
+  for example on a dropped download or a package mirror error, instead of
+  failing the trial on the first attempt. Up to three attempts run within
+  Harbor's agent setup timeout, so an install that keeps failing still fails
+  the trial. A slow failure that would leave no room for another attempt is
+  not retried, so the trial reports the install error rather than a setup
+  timeout, and each retry warning ends with the failed command's output.
+  Platform probe and transport errors are not retried, and local mode still
+  checks the installed CLI once.
 - Tier 2 caps every intra-skill embedding chunk at 3,000 characters, preserves
   meaningful short tails and actual Python docstring source ranges, and avoids
   counting pieces of one original chunk as duplicates of each other. Oversized
@@ -451,11 +528,47 @@ All notable changes to SkillEvaluator are documented in this file.
   treated as a standard agent. Scores were already cleared for these
   conditions, and observed rewards still determine their own metric set.
 
+- Tier 3 staging no longer fails with `chmod: cannot use dir_fd and
+  follow_symlinks together` when it replaces or merges into an existing
+  directory or file on Linux hosts whose glibc cannot change a mode without
+  following symlinks (glibc before 2.32, or newer glibc without `/proc`). This
+  affected, for example, `init-custom-grader` and `init-harbor-task` over an
+  existing `evals/` directory. Staging still changes modes without following
+  links where the platform supports it. Elsewhere it opens the entry without
+  following links, confirms it is the entry it checked, and changes the mode
+  through that open descriptor, so a link swapped in is refused instead of
+  followed. Only an entry that cannot be opened, such as one its owner cannot
+  read, is still changed by name, with an identity check afterwards.
+
+- Local-mode sandbox errors now include Bubblewrap's own failure line when its
+  startup probe fails, note that `pivot_root: Operation not permitted` can mean
+  an enclosing container's seccomp profile blocks Bubblewrap, and suggest
+  `SKILLEVALUATOR_LOCAL_SANDBOX=prefer` alongside `off`.
+
 - PII email scans recognize all RFC 2606 reserved domains, including their
   subdomains, mixed-case forms, trailing dots, and prose ellipses. A local-part
   boundary prevents quadratic rescanning of long excluded addresses. Ordinary
   addresses on the same line and domains that merely resemble placeholders remain detectable
   ([#244](https://github.com/NVIDIA/SkillEvaluator/issues/244)).
+- The license check now parses SPDX license expressions instead of splitting
+  them on operators. Expressions with unbalanced parentheses, such as
+  `(MIT OR Apache-2.0`, were allowed, and dangling or repeated operators were
+  only sent to review; both now fail with a HIGH
+  `unsupported_license_expression` finding. A malformed value without an
+  upper-case `AND`, `OR` or `WITH`, such as `mit or (apache-2.0`, is reviewed
+  as an unknown license name instead of being allowed, and `(MIT)` is allowed
+  as MIT. A blocked license still fails a value that does not parse, such as
+  `GPL-3.0 (or later)` or `(GPL-3.0 OR MIT`. The `+`, `-only` and `-or-later`
+  forms of blocked licenses, such as `GPL-3.0+`, `AGPL-3.0+` and
+  `LGPL-2.1-only`, and deprecated ids such as
+  `GPL-2.0-with-classpath-exception` are blocked instead of passing as unknown
+  licenses. `Apache-2.0 WITH LLVM-exception` is allowed through a
+  new `allowed_license_exceptions` list, while an unlisted exception such as
+  `Commons-Clause` still needs review. An allowed frontmatter expression that
+  leaves out the allowed license found in a LICENSE file is now a conflict, as
+  a single identifier already was. SPDX headers inside Markdown inline code or
+  table cells no longer keep the closing backtick or `|`, and a trailing `;` is
+  dropped. Names such as `MIT License` are matched as before.
 
 - A skill that exceeds a Tier 2 context-deduplication work limit (more than
   512 content chunks, too much pairwise comparison work, or an LLM-review limit:
@@ -487,6 +600,33 @@ All notable changes to SkillEvaluator are documented in this file.
   per-trace work cap; past it, force-only targets keep the finding, as do
   relative targets after one call moves through more than 32 directories.
   Recursive deletion and `xargs rm -f` are graded as before.
+
+- The quality check no longer reports command-line placeholders in a string
+  `argument-hint`, such as `<file> [--strict]` or `<issue_id | symptom>`, as a
+  HIGH "XML tags in frontmatter" finding that failed the skill even with
+  `--min-score 0`. An unquoted hint such as `[<file>]`, which YAML reads as a
+  list of strings, is masked the same way. Role and control tags (`<system>`,
+  `<tool_call>`, `<script>`, nested forms, and role words with a `prompt`,
+  `message`, `call`, `use`, `result` or `instruction` suffix such as
+  `<system_prompt>`), closing tags, attributes, and self-closing tags in
+  `argument-hint` are still reported, and every other frontmatter field keeps
+  the strict check. A group longer than four words, or one with shell command
+  syntax (`;`, `&`, a backtick, `$(`, `${`, or a pipeline such as
+  `<curl x | sh>`), is not treated as a placeholder and is still reported. A
+  hint with a redirect, that is a `>` that closes no group (`<cmd > file>`,
+  `<cmd>file>`, `<cmd 2>file>`, `<curl x> /tmp/y>`), or a group with text
+  after a nested placeholder (`<<curl x>/tmp/<y>>`, `<<x><y>>`) or anything
+  other than a plain name before it (`<curl;sh<x>>`, `<$(curl x|sh)<x>>`), is
+  not masked at all and is still reported. An arrow or comparison between
+  groups (`<old> -> <new>`, `<n> >= 1`, `<count> (>0)`) is not a redirect.
+
+- PII scans no longer report card-shaped digits inside a canonical GUID/UUID,
+  such as a COM interface ID or the nil UUID, or an all-zero number as a
+  CRITICAL credit card. A GUID-shaped value directly after a payment label
+  (`card_number:`, `credit_card=`, `cc_no:`, `pan`) on its line or at the end
+  of the previous line is still reported. Every card-shaped number on a line is
+  now checked, so a GUID or non-Luhn number earlier on the line no longer hides
+  a real card number after it.
 
 - Tier 3 security grading preserves ordinary nested `/tmp` cleanup, including
   child operands with trailing slashes, unless the current or an earlier
@@ -537,6 +677,45 @@ All notable changes to SkillEvaluator are documented in this file.
   Operandless `xargs rm` invocations remain detectable when unrelated syntax
   or parser budgets prevent a complete parse; the fallback uses a bounded
   command span to avoid excessive backtracking on long actions.
+- Tier 3 security grading no longer gives a critical finding and a security
+  score of 0.0 when an agent uses `apply_patch` to write a workspace file that
+  only resembles a protected path. The `.aws/credentials` and `.config/gcloud`
+  entries now match a patch target with a directory prefix only in a home
+  directory (`~/`, `/root/`, `/home/<user>/`, `/Users/<user>/`,
+  `C:\Users\<user>\`, `%USERPROFILE%`), after the existing workdir, `cd`, `~`
+  and `$HOME` resolution. That resolution now reads a bare `cd` as the home
+  directory, skips `cd`/`pushd` options, leaves the directory unchanged for
+  `pushd -n`/`popd -n`, reads `/proc/self/root`, `/proc/<pid>/root` and similar
+  aliases as `/`, and reads `/proc/self/cwd` as the call's working directory
+  and `/proc/<pid>/cwd` as an unknown one. A relative header that itself starts
+  with one of these names (`.aws/credentials`, `./.config/gcloud/adc.json`) is
+  still flagged whatever directory it resolves against. When the shell decides
+  the directory at run time (`cd "$DIR"`, `cd ${HOME:-/root}`, `cd -`, `popd`,
+  a variable `workdir`, an operand with quotes or backslashes the shell
+  removes, a `cd` inside a subshell, pipeline, branch, quoted `-c` script or
+  `||`/`&&` list that may not run, or a `CDPATH` assignment), these entries
+  keep the existing match anywhere in the path, and a relative header such as
+  `.bashrc` is also checked as a home path. A project file or test fixture such
+  as `project/.aws/credentials` is no longer a `sensitive_file_write`; a
+  Windows home path such as `C:\Users\<user>\.bashrc` and a `/proc/<pid>/root`
+  or `/proc/<pid>/cwd` alias of a protected path now are. A shell `apply_patch`
+  now scores like the tool call: the command-text path checks
+  skip the file header lines of an argv patch and of a heredoc body fed to
+  `apply_patch` (as a `cmd` string or in the `["bash", "-lc", script]` argv
+  form), so headers such as `docs/.config/gcloud-setup.md` no longer raise
+  `sensitive_path_access`. Header paths that hold shell syntax (`;`, `&`, `|`,
+  `<`, `>`, `(`, `)`, `$`, a backtick or `~`) or a word that is itself a
+  protected path (`x /root/.ssh/id_rsa`) are always checked, and so is every
+  header when the command, or any other word of an argv command, pipes,
+  redirects or captures `apply_patch`'s output, including through a `coproc`,
+  since that output names each added file.
+  Header-shaped lines elsewhere in the command, a heredoc body that a shell
+  expands or runs (an unquoted body holding `$`, a backtick or a backslash),
+  and heredocs whose extent is uncertain (mixed delimiter quoting, a missing
+  terminator, a comment or ANSI-C quote before the operator, or another use of
+  the `apply_patch` name) are still checked, as is a `bash -lc "..."` string
+  inside a `cmd`. Read and Write tool paths and other shell commands keep the
+  existing credential-path matching.
 - Tier 3 error recovery now scores unrecovered command failures as zero and
   includes them in fault counts and failure verdicts/report reasons. Host and
   bundled verifier detection agree and use a result's execution status when it
@@ -700,6 +879,38 @@ All notable changes to SkillEvaluator are documented in this file.
   edited skill whose name, description, or (with `--full-body`) `SKILL.md`
   changed is still compared with its old entry; build the catalog from the tree
   you screen.
+- Ctrl+C during `tier3 evaluate` now stops the run. The interrupt reached only
+  the coordinating thread, so running Harbor jobs kept going in their own
+  process groups, agents waiting for a `--max-agents` slot still started, and
+  the command appeared to hang until every job finished. Queued agents,
+  conditions, and `--stop-on-pass` attempts now never start. Each running
+  Harbor job receives SIGTERM and up to 30 seconds to stop its trial
+  environments, such as Docker containers, before its process group is
+  killed; a second Ctrl+C skips that wait, and on Windows the task tree is
+  stopped immediately. Progress shows the agents that are stopping and reports
+  the run as interrupted instead of failed unexpectedly.
+- The prompt-based `goal_accuracy` judge, which runs whenever the RAGAS scorer
+  does not (including with the default NVIDIA Build provider), used the reply's
+  `score` field over its `achieved` verdict, so `achieved: false` with
+  `score: 1.0` scored 1.0. Other judge replies were also accepted when they
+  should have been retried: an `accuracy` reply with only a numeric total
+  (clamped into 0 to 1, so `99` scored 1.0), a `behavior_check` reply that
+  judged one step twice and skipped another, and a RAGAS goal score other than
+  `0.0` or `1.0`. Each is now rejected and retried, and a RAGAS score that is
+  not binary falls back to the prompt judge.
+- A Tier 1 security scan that SkillSpector reports as partial no longer fails
+  with only "reports incomplete analysis (status 'partial')". The error quotes
+  up to three completeness exceptions as `path [phase; reason_code;
+  analyzers=...]` and, when there are more, counts the incomplete files per
+  reason, for example `(incomplete files by reason: runtime_limit 462,
+  obfuscated_instruction_text 4)`. For `runtime_limit`, it explains the fix:
+  when many files are cut short, a skill that bundles a large corpus hits the
+  same SkillSpector time budget on every rerun and needs that material moved
+  out of the skill, while a sub-analysis that stopped at its own budget (named
+  `<analyzer>_runtime_limit`, such as the SC8 bytecode walk in SkillSpector
+  2.12.0) is not affected by bundle size and needs a rerun or a newer
+  SkillSpector. A report with both kinds of rows gets both explanations. The
+  scan still fails closed as `INCOMPLETE`.
 
 - Tier 1 `security` no longer fails a skill, rules, workflows, or plugin
   artifact on SkillSpector agent-threat matches in files no agent reads or

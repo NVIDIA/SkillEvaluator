@@ -165,11 +165,11 @@ def test_call_public_llm_uses_production_gpt5_payload_without_temperature(
             json.dumps(
                 {
                     "criteria": {
-                        "SKILL_IDENTIFIED": True,
                         "ACTION_CORRECT": True,
                         "FACTUALLY_ACCURATE": True,
                         "TASK_ADDRESSED": True,
                         "ACTIONABLE": True,
+                        "FORMAT_FOLLOWED": True,
                     },
                     "score": 1.0,
                     "reason": "recovered",
@@ -342,11 +342,11 @@ def test_deceptive_openai_urls_keep_max_tokens(provider: str, request_url: str) 
             json.dumps(
                 {
                     "criteria": {
-                        "SKILL_IDENTIFIED": True,
                         "ACTION_CORRECT": True,
                         "FACTUALLY_ACCURATE": True,
                         "TASK_ADDRESSED": True,
                         "ACTIONABLE": True,
+                        "FORMAT_FOLLOWED": True,
                     },
                     "score": 1.0,
                     "reason": "all good",
@@ -433,11 +433,11 @@ def test_structured_judges_pass_anthropic_output_config_schema(
     valid_response = json.dumps(
         {
             "criteria": {
-                "SKILL_IDENTIFIED": True,
                 "ACTION_CORRECT": True,
                 "FACTUALLY_ACCURATE": True,
                 "TASK_ADDRESSED": True,
                 "ACTIONABLE": True,
+                "FORMAT_FOLLOWED": True,
             },
             "score": 1.0,
             "reason": "all good",
@@ -504,11 +504,11 @@ def test_client_and_template_downgrade_on_400_422_and_memoize_across_calls(
     valid_response = json.dumps(
         {
             "criteria": {
-                "SKILL_IDENTIFIED": True,
                 "ACTION_CORRECT": True,
                 "FACTUALLY_ACCURATE": True,
                 "TASK_ADDRESSED": True,
                 "ACTIONABLE": True,
+                "FORMAT_FOLLOWED": True,
             },
             "score": 1.0,
             "reason": "downgraded ok",
@@ -641,11 +641,11 @@ def test_transient_429_preserves_schema_and_does_not_memoize_unsupported(
     valid_response = json.dumps(
         {
             "criteria": {
-                "SKILL_IDENTIFIED": True,
                 "ACTION_CORRECT": True,
                 "FACTUALLY_ACCURATE": True,
                 "TASK_ADDRESSED": True,
                 "ACTIONABLE": True,
+                "FORMAT_FOLLOWED": True,
             },
             "score": 1.0,
             "reason": "retried 429 with schema",
@@ -689,11 +689,11 @@ def test_template_model_fallback_isolates_schema_memoization_per_model(
     valid_response = json.dumps(
         {
             "criteria": {
-                "SKILL_IDENTIFIED": True,
                 "ACTION_CORRECT": True,
                 "FACTUALLY_ACCURATE": True,
                 "TASK_ADDRESSED": True,
                 "ACTIONABLE": True,
+                "FORMAT_FOLLOWED": True,
             },
             "score": 1.0,
             "reason": "fallback model with schema",
@@ -750,11 +750,11 @@ def test_reasoning_token_exhaustion_missing_message_retries_cleanly(
     valid_response = json.dumps(
         {
             "criteria": {
-                "SKILL_IDENTIFIED": True,
                 "ACTION_CORRECT": True,
                 "FACTUALLY_ACCURATE": True,
                 "TASK_ADDRESSED": True,
                 "ACTIONABLE": True,
+                "FORMAT_FOLLOWED": True,
             },
             "score": 1.0,
             "reason": "recovered from missing message",
@@ -835,11 +835,11 @@ def test_anthropic_downgrades_on_400_and_memoizes_across_calls(
     valid_response = json.dumps(
         {
             "criteria": {
-                "SKILL_IDENTIFIED": True,
                 "ACTION_CORRECT": True,
                 "FACTUALLY_ACCURATE": True,
                 "TASK_ADDRESSED": True,
                 "ACTIONABLE": True,
+                "FORMAT_FOLLOWED": True,
             },
             "score": 1.0,
             "reason": "anthropic downgraded ok",
@@ -979,11 +979,11 @@ def test_schema_builders_and_downgrade_warning_log(monkeypatch, caplog):
     valid_response = json.dumps(
         {
             "criteria": {
-                "SKILL_IDENTIFIED": True,
                 "ACTION_CORRECT": True,
                 "FACTUALLY_ACCURATE": True,
                 "TASK_ADDRESSED": True,
                 "ACTIONABLE": True,
+                "FORMAT_FOLLOWED": True,
             },
             "score": 1.0,
             "reason": "ok",
@@ -1056,11 +1056,11 @@ def test_unrelated_400_does_not_disable_schema_flags(error_message: str) -> None
                             "content": json.dumps(
                                 {
                                     "criteria": {
-                                        "SKILL_IDENTIFIED": True,
                                         "ACTION_CORRECT": True,
                                         "FACTUALLY_ACCURATE": True,
                                         "TASK_ADDRESSED": True,
                                         "ACTIONABLE": True,
+                                        "FORMAT_FOLLOWED": True,
                                     },
                                     "score": 1.0,
                                     "reason": "ok",
@@ -1180,11 +1180,11 @@ def test_harbor_eval_template_unrelated_400_does_not_disable_schema(
                         "content": json.dumps(
                             {
                                 "criteria": {
-                                    "SKILL_IDENTIFIED": True,
                                     "ACTION_CORRECT": True,
                                     "FACTUALLY_ACCURATE": True,
                                     "TASK_ADDRESSED": True,
                                     "ACTIONABLE": True,
+                                    "FORMAT_FOLLOWED": True,
                                 },
                                 "score": 1.0,
                                 "reason": "ok",

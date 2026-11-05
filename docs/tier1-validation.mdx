@@ -227,6 +227,8 @@ For `validate`, the default set is `schema`, `version`, `security`, `pii`, `lice
     SkillSpector 2.11.1 and later tags an exact read-only `/etc/passwd` bind mount, such as `docker run -v /etc/passwd:/etc/passwd:ro` or the Podman, `--volume`, and quoted forms, as likely benign but still reports it as a HIGH Credential Access (PE3) finding. SkillEvaluator ignores that finding only when SkillSpector tagged it benign and every `/etc/passwd` on the reported source line is the source or target of such a mount. Writable or implicit-mode mounts, other source or target paths, and reads such as `cat /etc/passwd` still block.
 
     SkillSpector 2.13.3 can report separate findings for the mount's source and target; both must pass the same checks. Ignoring a mount never clears incomplete inspection, including refused or truncated LLM responses. A static report can say an LLM provider is available without having requested or applied LLM analysis; provider availability alone does not invalidate the static scan.
+
+    To accept reviewed findings, pass an audited baseline with `--skillspector-baseline`; see [Audited SkillSpector baselines](#audited-skillspector-baselines).
   </Accordion>
 
   <Accordion title="pii — PII, credentials, and local identifiers">
@@ -242,11 +244,15 @@ For `validate`, the default set is `schema`, `version`, `security`, `pii`, `lice
 
     Common placeholders such as `YOUR_API_KEY_HERE`, `example`, `test`, `dummy`, and `placeholder`, along with `@example.com` and `@test.com`, are excluded, as are configured allowed paths.
 
+    A card-shaped number is reported only when it passes the Luhn checksum; all-zero numbers do not. Digits inside a canonical GUID/UUID, such as the COM interface ID `{00000000-0000-0000-C000-000000000046}`, are treated as an identifier unless a payment label (`card_number`, `credit_card`, `cc_no`, `cc_number`, `pan`, and similar) directly precedes the GUID on its line or ends the line before it. Every card-shaped number on a line is checked, so an identifier or non-card number earlier on the line does not hide a card after it.
+
     The home-path check compares detected user paths against the submitter's identity. When no identity is available, that check is skipped and logged — set `SKILLEVALUATOR_SUBMITTER` (or add `author` to `SKILL.md`) to enable it. `SKILLEVALUATOR_SUBMITTER` is combined with `GITHUB_ACTOR`, `USER`, `LOGNAME`, `USERNAME`, the OS login name, and the skill's declared author — every identity that resolves is protected.
   </Accordion>
 
   <Accordion title="license — compliance">
     Looks for license evidence in frontmatter, common license files, and SPDX headers. Detected identifiers are normalized and matched against the packaged permissive allowlist and restrictive blocklist. Missing or unknown licenses are reported for review; blocked licenses fail according to the active profile (CRITICAL under the default `external` profile).
+
+    Frontmatter values and SPDX headers can be SPDX license expressions with `AND`, `OR`, `WITH`, and parentheses, such as `MIT OR Apache-2.0`. An expression passes only when every license in it is allowed, and any blocked license fails it. The `+`, `-only`, and `-or-later` forms of a blocked license, such as `GPL-3.0+` or `LGPL-2.1-only`, and deprecated ids such as `GPL-2.0-with-classpath-exception` are blocked too. A `WITH` exception keeps an allowed license allowed only when it is in the packaged `allowed_license_exceptions` list (`LLVM-exception`, `Swift-exception`); other exceptions are reported for review. An expression that uses an upper-case `AND`, `OR`, or `WITH` but has unbalanced parentheses or a missing or repeated operator fails with an `unsupported_license_expression` finding. A value without those operators, such as `MIT License` or `MIT License (MIT)`, is treated as a license name: it is matched by name as before or reported for review. A blocked license fails the value even when it does not parse, so `GPL-3.0 (or later)` and `(GPL-3.0 OR MIT` are blocked.
   </Accordion>
 
   <Accordion title="code-integrity — code risk, secrets, and hygiene">
@@ -295,6 +301,8 @@ For `validate`, the default set is `schema`, `version`, `security`, `pii`, `lice
     `Quality score 67.8/100 is below the required 70/100`, retained in the JSON
     result's `gate_failures` list. Improve the skill or explicitly choose the
     required threshold with `--min-score`.
+
+    Correctness reports XML-style tags in any frontmatter value as a HIGH finding (potential prompt injection). A string `argument-hint`, or an unquoted hint such as `[<file>]` that YAML reads as a list of strings, may use command-line placeholders such as `<file> [--strict]`, `<plan|apply|verify>`, or `<codec e.g. av1|h264>`. A placeholder has at most four words, and `|` separates choices that are each one word or a quoted literal, after an optional label such as `stage:` or `codec e.g.`. Longer free text, shell command syntax (`;`, `&`, a backtick, `$(`, `${`, or a pipeline such as `<curl x | sh>`), closing tags, attributes, self-closing tags, and role or control tags such as `<system>`, `<tool_call>`, or `<script>` are still reported there. A role word (`system`, `developer`, `assistant`, `user`, `tool`, `context`, `instructions`, `prompt`, `override`, `rules`, or `policy`) followed by `prompt`, `message`, `call`, `use`, `result`, or `instruction` counts as a role tag (`<system_prompt>`, `<toolCall>`, `<user_message>`), while other names such as `<tool_name>`, `<user_id>`, `<prompt_file>`, or `<toolchain>` are ordinary placeholders. A hint with a redirect, that is a `>` that closes no group (`<cmd > file>`, `<cmd>file>`, `<cmd 2>file>`, `<curl x> /tmp/y>`), or a group with anything after a nested placeholder other than its own closing `>` (`<<curl x>/tmp/<y>>`, `<<x><y>>`) or anything other than a plain name before it (`<curl;sh<x>>`, `<$(curl x|sh)<x>>`), is not masked at all, so it is still reported. A placeholder nested directly after a plain name, such as `<R<NNN>>`, is masked. For a list value, each item and the space-joined hint are checked separately. An arrow or comparison between groups, such as `<old> -> <new>`, `<n> >= 1`, or `<count> (>0)`, is not a redirect. Every other field keeps the strict check.
 
     The checker detects five skill shapes and applies relevant checks: **script-based** (Python or shell files under `scripts/`), **lib-based** (a Python module containing `__init__.py`), **resource-based** (assets, templates, design-system content, or resources), **guide-only** (documentation without executable or resource content), and **hybrid** (scripts plus library or resource content).
 
@@ -430,6 +438,57 @@ Bundled Python scanners resolve next to the SkillEvaluator interpreter before `P
   Scanner path overrides fail closed: a relative, missing, or non-executable override path fails the run rather than silently falling back. Required scanners that are missing or produce malformed output leave the run `INCOMPLETE` and non-green.
 </Warning>
 
+## Audited SkillSpector baselines
+
+Record reviewed SkillSpector exceptions in a SkillSpector YAML or JSON baseline and pass it with `--skillspector-baseline` to `validate`, `tier1`, or `security-scan`. SkillEvaluator never discovers a baseline on its own, including a `.skillspector-baseline.yaml` shipped inside the skill: applying exceptions is an operator or CI decision. A scan that reports suppressed findings without a requested baseline stays `INCOMPLETE`.
+
+```bash title="Apply a reviewed baseline"
+skillevaluator validate ./my-skill \
+  --skillspector-baseline ./trusted/skillspector-baseline.yaml
+```
+
+Keep the baseline outside the skill under review, for example in a checkout of the base branch or a separate policy repository. A baseline kept inside the skill is only as trusted as the review of that file: whoever edits the skill can edit its exceptions, SkillSpector leaves the selected baseline file out of its own scan so extra text in it is never inspected, and a version 2 rule needs only a non-empty `reason`. In a pull-request pipeline, the checked-out skill is the PR's version, so pass a baseline from the target branch instead.
+
+Prefer narrow rules. Every field a rule sets must match the finding. `id` (the rule ID), `path` (the file), and `message` (the finding text) are all case-insensitive globs, and `reason` is required.
+
+```yaml title="config/skillspector-baseline.yaml"
+version: 2
+rules:
+  - id: "PE5"
+    path: "SKILL.md"
+    message: "*--privilege[d]*"
+    reason: "Reviewed: the diagnostics container needs host device access."
+```
+
+The bracket class `[d]` matches the letter `d`, so the rule still matches `--privileged`, but the baseline file does not contain the literal text that triggers the finding. SkillEvaluator rejects a rule unless its `id` has at least two literal letters or digits in a row, or its `path` or `message` has at least four. Wildcards and multi-character classes break a run. This rejects `id: "*"` and also `message: "*e*"`, which matches almost every finding because SkillSpector matches the glob case-insensitively against the finding text. Before the scan it also rejects a version 2 rule or fingerprint without a `reason`, `rules` or `fingerprints` that are not lists or contain entries that are not mappings, a file that is not valid YAML or JSON (including an impossible date such as `2026-06-31`), and a file larger than 2 MiB or whose aliases and merge keys expand beyond SkillSpector's own limits. An empty or comment-only file is an empty baseline, as in SkillSpector. SkillSpector checks the rest of the schema. If it rejects the baseline, it exits with code 2, the security check is `INCOMPLETE`, and the error suggests checking the file with `skillspector scan <skill> --baseline <file>`.
+
+To waive individual findings exactly, generate fingerprints with SkillSpector. The command records every current finding, so review each entry before you commit the file:
+
+```bash title="Generate exact fingerprints"
+skillspector baseline ./my-skill --no-llm \
+  --reason "Reviewed: <rationale>" \
+  -o ./my-skill/config/skillspector-baseline.yaml
+```
+
+Fingerprints bind to the scanned file content and to the SkillSpector version that generated them. After a source edit, the affected findings are reported again. After a scanner upgrade, SkillSpector ignores every fingerprint, and SkillEvaluator reports `fingerprint_version_mismatch` with both versions: as an error when blocking findings remain, otherwise as a warning. Rules keep working across scanner versions.
+
+Fingerprints only match static-only runs: `tier1 --no-llm`, or `validate` and `security-scan` without `--llm`. When the LLM security stage runs (`tier1` by default when a provider is configured, or `--llm`), SkillSpector's meta-analysis rewrites each finding's message, explanation, remediation, confidence, or tags before the baseline is applied. Those fields are part of the fingerprint, so fingerprints from `skillspector baseline --no-llm` no longer match, and the LLM stage reports the findings again. SkillEvaluator then reports `llm_stage_unmatched` with both stages' suppressed counts: as an error when blocking findings remain, otherwise as a warning. For runs with LLM analysis, use narrow `id`, `path`, and `message` rules instead; they still match because SkillSpector also checks `message` against the matched text.
+
+A baseline stored inside the skill is excluded from the scan, including when SkillEvaluator scans a staged copy without `evals/` outputs. For a folder of skills, the same baseline applies to each skill, and rule paths are relative to each skill.
+
+For a single-skill target, when SkillSpector is installed, JSON reports record the outcome under `results[].skillspector_baseline`:
+
+- `status`: `applied`, `no_matches`, `fingerprint_version_mismatch`, `llm_stage_unmatched`, or `not_applied`.
+- `file` and `digest`: the baseline's file name and a `sha256:` digest of its bytes. The local path is not recorded.
+- The baseline and runtime scanner versions, and the rule and fingerprint counts.
+- `suppressed_findings` from the static stage and, when the LLM stage completed, `llm_stage_suppressed_findings`; and the active and active blocking finding counts. All are taken from SkillSpector's reports before any `--llm-verify` downgrade or policy severity override.
+- `suppressed_by_severity` and `suppressed_rule_ids`: the static stage's suppressed findings by severity and their rule IDs, so CI can refuse a baseline that hides anything blocking. The Markdown and HTML line shows the severity counts.
+- `message`: the outcome or the reason the baseline was rejected.
+
+Markdown and HTML reports show the same outcome as a `skillspector_baseline` line in the Security result, with the file name and digest, and a scan whose only findings were suppressed reads "No active security findings; N finding(s) suppressed by the requested baseline" rather than a clean result.
+
+`security-scan` and `tier1 security-scan` on a folder of skills write one merged report without the JSON field. When a skill in the folder passes, its outcome is appended to that skill's "All checks passed" line in the Markdown and HTML reports. `validate` on a folder validates each skill as its own job, so each skill's JSON report records the field. The field keeps the `fingerprint_version_mismatch` and `llm_stage_unmatched` messages even when a later `--llm-verify` downgrade or policy severity override rebuilds the error and warning lists. See the [SkillSpector suppression reference](https://github.com/NVIDIA/SkillSpector/blob/v2.13.3/docs/SUPPRESSION.md) for the full baseline schema.
+
 ## Exit behavior and scoring
 
 | Exit code | Meaning |
@@ -485,6 +544,33 @@ Tier 1 checks always gate the exit code inside `validate`. Tier 2 gates when it 
   </Accordion>
   <Accordion title="An executable override is rejected">
     Use an existing, executable absolute path for the relevant `SKILLEVALUATOR_*_PATH` variable.
+  </Accordion>
+  <Accordion title="SkillSpector stops at a runtime limit">
+    When SkillSpector reports partial analysis, the security scan is
+    `INCOMPLETE`. The error quotes up to three of SkillSpector's completeness
+    exceptions as `path [phase; reason_code; analyzers=...]`. When there are more,
+    it adds how many files each reason affected, for example
+    `and 463 more (incomplete files by reason: runtime_limit 462, obfuscated_instruction_text 4)`.
+
+    For `runtime_limit`, the error also says what to do, with one piece of advice
+    for each kind of row the report contains:
+
+    - **Scan time budget.** Rows that name regular analyzers, or no analyzer,
+      mean SkillSpector ran out of time for the bundle: at its own whole-scan
+      deadline (1,080 seconds by default in v2.13.3) or at a shorter stage
+      budget such as bundle discovery. A skill that bundles a large corpus, such
+      as vendored documents, generated figures or renderer scripts, hits the
+      same limit on every rerun. Keep large reference material outside the
+      skill and point to it. A plain rerun helps only when a few files are
+      affected on a busy machine. If SkillEvaluator's own SkillSpector timeout
+      stops the run before SkillSpector's deadline, the error is
+      `skillspector timed out after N seconds` instead, with no list of files.
+    - **Sub-analysis budget.** Analyzers named `<analyzer>_runtime_limit`, such as
+      `static_patterns_supply_chain_bytecode_runtime_limit`, stopped at a time
+      budget of their own, so bundle size does not matter. Releases before
+      v2.13.0 charge the SC8 bytecode walk for time spent waiting behind other
+      analyzers, so it can stop even on a skill with no bytecode. Rerun the scan,
+      and update SkillSpector if the limit repeats.
   </Accordion>
 </AccordionGroup>
 

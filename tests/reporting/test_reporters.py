@@ -2737,3 +2737,34 @@ def test_legacy_analysis_only_harbor_evidence_is_available(reporter, summary_onl
     output = reporter().render_all([result])
     assert "https://harbor.example.test/analysis-only" in output
     assert "Job 1" in output
+
+
+@pytest.mark.parametrize("colored", [False, True])
+def test_cli_harbor_job_labels_remain_neutral_and_literal(colored):
+    from io import StringIO
+
+    from rich.console import Console
+
+    stream = StringIO()
+    console = Console(
+        file=stream, force_terminal=colored, color_system="standard" if colored else None, record=True, width=160
+    )
+    payload = {
+        "harbor_viewer": {
+            "jobs": [
+                {
+                    "name": "Job 3 [bad]",
+                    "url": "https://example.test/jobs/3",
+                    "analysis_url": "https://example.test/analysis/3",
+                }
+            ]
+        }
+    }
+    CLIReporter._print_harbor_artifacts(payload, console)
+    output = stream.getvalue()
+    assert "Job 3 [bad]" in output
+    assert "Harbor logs: Results https://example.test/jobs/3" in output
+    assert "Harbor analysis: https://example.test/analysis/3" in output
+    assert "Job 3 [bad]" in console.export_text()
+    if colored:
+        assert "\x1b[1mJob 3 [bad]\x1b[0m" in output

@@ -376,11 +376,13 @@ class CLIReporter(ReporterBase):
         if jobs:
             console.print("  [bold]Harbor artifacts:[/bold]")
         for job in jobs:
-            console.print(f"    [bold]{escape_markup(job['name'])}[/bold]")
+            console.print(f"    [bold]{escape_markup(job['name'])}[/bold]", highlight=False)
             if job.get("url"):
-                console.print(f"    Harbor logs: Results {escape_markup(job['url'])}", soft_wrap=True)
+                console.print(f"    Harbor logs: Results {escape_markup(job['url'])}", soft_wrap=True, highlight=False)
             if job.get("analysis_url"):
-                console.print(f"    Harbor analysis: {escape_markup(job['analysis_url'])}", soft_wrap=True)
+                console.print(
+                    f"    Harbor analysis: {escape_markup(job['analysis_url'])}", soft_wrap=True, highlight=False
+                )
 
     @staticmethod
     def _print_agent_eval_tables(agent_eval: dict, console: Console) -> None:

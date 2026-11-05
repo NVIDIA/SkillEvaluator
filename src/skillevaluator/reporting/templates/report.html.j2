@@ -2075,7 +2075,7 @@
         {% elif tab.id == 'tier2' %}
         {# ==================== TIER 2: SEMANTIC OVERLAP ==================== #}
 
-        <nav aria-label="Tier 2 comparison scopes" class="t3-harbor-actions">
+        <nav aria-label="Tier 2 comparison scopes" class="tier2-scope-nav">
             {% for scope in tier2_scopes %}<a href="#tier2-{{ scope.id }}">{{ scope.label }}</a>{% endfor %}
         </nav>
         {% for scope in tier2_scopes %}

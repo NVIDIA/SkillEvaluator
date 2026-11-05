@@ -444,6 +444,8 @@ def test_strict_stop_words_in_a_connection_error_do_not_end_the_judge(verifier, 
         b'{"type":"error","error":{"type":"invalid_request_error","message":"Your credit balance is too low"}}',
         b'{"error":{"code":"billing_hard_limit_reached","message":"Billing hard limit has been reached"}}',
         b'{"error":{"code":"content_filter","message":"The prompt was filtered"}}',
+        b'{"detail":"Budget has been exceeded for this key"}',
+        b'{"error":{"status":429},"note":"insufficient_quota"}',
     ],
 )
 def test_strict_structured_stop_errors_end_the_judge(verifier, monkeypatch, body):

@@ -924,7 +924,7 @@ def _spend_strict_judge_request():
 
 
 def _provider_error_fields(body):
-    """Return the code, type and message of a JSON error body, or None when the body is not one."""
+    """Return the code, type and message of a JSON error body, or None when the body has none."""
     if len(body) > _STRICT_JUDGE_ERROR_BODY_CHARS * 20:
         return None
     try:
@@ -933,10 +933,11 @@ def _provider_error_fields(body):
         return None
     detail = parsed.get("error", parsed) if isinstance(parsed, dict) else None
     if isinstance(detail, str):
-        return detail
+        return detail or None
     if not isinstance(detail, dict):
         return None
-    return " ".join(str(detail[key]) for key in ("code", "type", "message") if isinstance(detail.get(key), str))
+    fields = [detail[key] for key in ("code", "type", "message", "detail") if isinstance(detail.get(key), str)]
+    return " ".join(fields) or None
 
 
 def _strict_judge_error_stops(error):
@@ -971,7 +972,7 @@ def _strict_judge_error_stops(error):
 # ("The model `x` does not exist ..."), a Claude not_found_error about the
 # model, and Bedrock's access-denied, not-found and invalid-model errors.
 _STRICT_MODEL_UNAVAILABLE_PATTERN = re.compile(
-    r"\bmodel_not_found\b|^not_found_error model:|\bthe model\b.{0,200}?\bdoes not exist\b", re.IGNORECASE
+    r"\bmodel_not_found\b|\bnot_found_error model:|\bthe model\b.{0,200}?\bdoes not exist\b", re.IGNORECASE
 )
 _STRICT_BEDROCK_MODEL_UNAVAILABLE_CODES = frozenset({"AccessDeniedException", "ResourceNotFoundException"})
 

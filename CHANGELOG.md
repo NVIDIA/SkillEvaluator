@@ -347,11 +347,12 @@ All notable changes to SkillEvaluator are documented in this file.
   guard and never stops a scan on its own; the per-cluster prompt, total
   prompt, and cluster-count limits decide. When a cluster's request (system
   prompt plus cluster text) would exceed 64,000 characters, each exactly
-  repeated text is sent once as `SHARED CONTENT n`. A Markdown section is
-  compared without its own heading line, so the same body under different
-  headings is shared too. Every occurrence keeps its own entry with its file,
-  section, line range, and heading line. Distinct text is never dropped or
-  sampled, so a cluster still over the budget stays incomplete with
+  repeated text is sent once as `SHARED CONTENT n` when that makes the request
+  shorter; a short text repeated under long headings stays inline. A Markdown
+  section is compared without its own heading line, so the same body under
+  different headings is shared too. Every occurrence keeps its own entry with
+  its file, section, line range, and heading line. Distinct text is never
+  dropped or sampled, so a cluster still over the budget stays incomplete with
   `llm_prompt_size_limit`. Duplicate and `llm_refused` finding messages name
   at most 64 member locations and source files and count the rest; the JSON
   `source_files` list stays complete.

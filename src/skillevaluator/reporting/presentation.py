@@ -163,14 +163,6 @@ def _count(value: object) -> int | None:
     return value if type(value) is int and 0 <= value <= 2**63 - 1 else None
 
 
-def _rows(value: object) -> int | None:
-    return (
-        sum(isinstance(row, dict) for row in value)
-        if isinstance(value, list) and len(value) <= reporting_base.AGENT_EVAL_REPORT_MAX_NODES
-        else None
-    )
-
-
 def trial_coverage(payload: object) -> TrialCoverage:
     """Prefer per-condition counters; rows are only retained observations.
 
@@ -180,8 +172,25 @@ def trial_coverage(payload: object) -> TrialCoverage:
     payload = payload if isinstance(payload, dict) else {}
     raw_agents = payload.get("agents")
     raw_agents = raw_agents if isinstance(raw_agents, dict) else {}
-    if len(raw_agents) > reporting_base.AGENT_EVAL_REPORT_MAX_NODES:
+    # Reserve an agent record and its two condition records before reading any
+    # values. Retained rows in both arms consume the same remaining allowance.
+    remaining = reporting_base.AGENT_EVAL_REPORT_MAX_NODES
+    agent_nodes = 3 * len(raw_agents)
+    if agent_nodes > remaining:
         return TrialCoverage(ConditionCoverage(), ConditionCoverage(), MappingProxyType({}))
+    remaining -= agent_nodes
+
+    def retained_rows(value: object) -> int | None:
+        nonlocal remaining
+        if not isinstance(value, list):
+            return None
+        nodes = 1 + len(value)
+        if nodes > remaining:
+            remaining = 0
+            return None
+        remaining -= nodes
+        return sum(isinstance(row, dict) for row in value)
+
     agents = {}
     for name, raw in raw_agents.items():
         if not isinstance(name, str) or not isinstance(raw, dict):
@@ -214,11 +223,21 @@ def trial_coverage(payload: object) -> TrialCoverage:
             values = [getattr(c, field) if c.status != "skipped" else 0 for c in members]
             return sum(values) if values and all(value is not None for value in values) else None
 
-        observed = _rows(payload.get("trials")) if arm == "with_skill" else None
-        if arm == "without_skill":
-            rows = [_rows(raw.get("trials_baseline")) for raw in raw_agents.values() if isinstance(raw, dict)]
-            observed = sum(rows) if rows and all(n is not None for n in rows) else None
-        return ConditionCoverage(status, total("scored"), total("expected"), observed)
+        scored = total("scored")
+        observed = None
+        if scored is None:
+            if arm == "with_skill":
+                observed = retained_rows(payload.get("trials"))
+            else:
+                for raw in raw_agents.values():
+                    if not isinstance(raw, dict):
+                        continue
+                    rows = retained_rows(raw.get("trials_baseline"))
+                    if rows is None:
+                        observed = None
+                        break
+                    observed = (observed or 0) + rows
+        return ConditionCoverage(status, scored, total("expected"), observed)
 
     return TrialCoverage(combine("with_skill"), combine("without_skill"), MappingProxyType(agents))
 

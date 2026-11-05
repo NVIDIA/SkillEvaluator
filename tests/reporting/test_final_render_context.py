@@ -391,3 +391,68 @@ def test_explicit_tier3_skip_is_shared_even_when_publication_is_incomplete():
     assert ctx.tiers[3].status == Status.SKIPPED
     assert ctx.tiers[3].display_status == "skipped"
     assert ctx.publication_status == Status.INCOMPLETE
+
+
+def test_retained_row_observations_share_one_projection_budget(monkeypatch):
+    from skillevaluator.reporting import base
+
+    visited = []
+
+    class CountedRows(list):
+        def __iter__(self):
+            for row in super().__iter__():
+                visited.append(row)
+                yield row
+
+    monkeypatch.setattr(base, "AGENT_EVAL_REPORT_MAX_NODES", 100)
+    rows = CountedRows([{}] * 10)
+    coverage = presentation.trial_coverage(
+        {
+            "trials": rows,
+            "agents": {f"agent-{i}": {"trials_baseline": rows} for i in range(12)},
+        }
+    )
+    assert len(visited) <= 100
+    assert coverage.with_skill.observed == 10
+    assert coverage.baseline.observed is None
+    assert coverage.baseline.scored is None
+    assert "baseline scored trials unavailable" in coverage.text
+    assert "0 retained baseline rows" not in coverage.text
+
+
+def test_recorded_scored_counters_avoid_all_retained_row_iteration():
+    visited = []
+
+    class CountedRows(list):
+        def __iter__(self):
+            for row in super().__iter__():
+                visited.append(row)
+                yield row
+
+    rows = CountedRows([{}] * 1000)
+    conditions = {
+        arm: {"execution_status": "succeeded", "scored_attempts": 9, "expected_attempts": 12}
+        for arm in ("with_skill", "without_skill")
+    }
+    coverage = presentation.trial_coverage(
+        {
+            "trials": rows,
+            "agents": {f"agent-{i}": {"conditions": conditions, "trials_baseline": rows} for i in range(120)},
+        }
+    )
+    assert visited == []
+    assert coverage.text == "2160 scored trials: 1080 with skill, 1080 baseline"
+    assert coverage.with_skill.expected == 1440
+    assert coverage.baseline.expected == 1440
+    assert coverage.with_skill.observed is None
+    assert coverage.baseline.observed is None
+
+
+def test_exhausted_projection_budget_does_not_turn_other_arm_into_observed_zero(monkeypatch):
+    from skillevaluator.reporting import base
+
+    monkeypatch.setattr(base, "AGENT_EVAL_REPORT_MAX_NODES", 10)
+    coverage = presentation.trial_coverage({"trials": [{}] * 11, "agents": {"a": {"trials_baseline": []}}})
+    assert coverage.with_skill.observed is None
+    assert coverage.baseline.observed is None
+    assert "0 retained baseline rows" not in coverage.text

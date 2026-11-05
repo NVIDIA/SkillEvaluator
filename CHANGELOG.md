@@ -288,13 +288,14 @@ All notable changes to SkillEvaluator are documented in this file.
   which lowered the Security score to 0.5, for HTTP method prose such as
   `Use HTTP POST to create an item.` or `Document HTTP PUT semantics.` in a
   here-document or `apply_patch` body. Linux finds a command by its exact name,
-  so a later `HTTP`, `HTTPS`, or `Http` word does not start HTTPie, and its
-  method word is no longer read as an upload. Its body items, piped or
+  so a later bare `HTTP`, `HTTPS`, or `Http` word does not start HTTPie, and
+  its method word is no longer read as an upload. Its body items, piped or
   redirected input, `--raw`, and a method word before a `name:@file` header
   item, even a quoted or escaped one, or before a `$VAR` word still warn, as do
-  a lowercase `http PUT URL`, `http.EXE POST URL`, an `HTTP POST URL` command
-  word, and any upload in the same action. Both the host checker and the
-  bundled Harbor verifier apply the rule.
+  a lowercase `http PUT URL`, a path or `.exe` word such as `./HTTP POST URL`
+  or `HTTP.exe POST URL`, an `HTTP POST URL` command word, and any upload in
+  the same action. Both the host checker and the bundled Harbor verifier apply
+  the rule.
 
 - PR scan comments show the verdict, quality scores, first actionable fixes and
   report links; full provenance and detailed findings stay in the report.

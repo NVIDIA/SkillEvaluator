@@ -1248,21 +1248,24 @@ def _network_executable(token: str, assignments: dict[str, str], names: dict[str
     return name
 
 
-def _spelled_with_capitals(token: str) -> bool:
-    """Whether a literal command word spells its executable with a capital letter, as ``HTTP`` or ``Https`` do.
-
-    A ``$VAR`` or backtick word may hold any spelling, so it never counts. A
-    ``.exe`` suffix in any case, as in ``http.EXE``, is not part of the name.
-    """
-    if "$" in token or "`" in token:
-        return False
-    name = token.strip("\"'").replace("\\", "/").rsplit("/", 1)[-1]
-    if name[-4:].lower() == ".exe":
-        name = name[:-4]
-    return name != name.lower()
-
-
 _SHELL_QUOTE_CHARS = str.maketrans("", "", "\"'\\")
+
+
+def _spelled_with_capitals(token: str) -> bool:
+    """Whether a bare command word spells its executable with a capital letter, as prose ``HTTP`` or ``Https`` do.
+
+    Prose has no path or ``.exe`` words, and a host that finds them in any
+    case runs HTTPie for ``./HTTP``, ``/usr/local/bin/HTTP`` or ``HTTP.exe``,
+    so a word with a slash or backslash, or one ending in ``.exe`` in any case,
+    never counts. A ``$VAR`` or backtick word may hold any spelling, so it
+    never counts either.
+    """
+    if any(char in token for char in "$`/\\"):
+        return False
+    name = token.translate(_SHELL_QUOTE_CHARS)
+    if name.lower().endswith(".exe"):
+        return False
+    return name != name.lower()
 
 
 def _may_be_header_file_item(token: str) -> bool:
@@ -1922,13 +1925,15 @@ def _network_tokens_exfiltrate(tokens: list[str], _depth: int) -> bool:
                 continue
             if runs_elsewhere:
                 return True
-            # Linux finds a command by its exact name, so a later HTTP or Https
-            # word, as in the here-document prose "Use HTTP POST to create an
-            # item.", does not start HTTPie. Its method words are not read as
-            # an upload unless a later argument may be a name:@file item, which
-            # may send a file as a header; its body items, stdin and --raw
-            # still are. It covers a later capitalized word, which sees a
-            # suffix of the same arguments, but not a later lowercase http word.
+            # Linux finds a command by its exact name, so a later bare HTTP or
+            # Https word, as in the here-document prose "Use HTTP POST to
+            # create an item.", does not start HTTPie. Its method words are not
+            # read as an upload unless a later argument may be a name:@file
+            # item, which may send a file as a header; its body items, stdin
+            # and --raw still are. A path or .exe word is not prose, so it keeps
+            # the method rule. A capitalized bare word covers a later one,
+            # which sees a suffix of the same arguments, but not a later
+            # lowercase http word.
             capitalized = client in ("http", "https") and _spelled_with_capitals(command[sub_idx])
             seen_key = f"{client}:capitalized" if capitalized else client
             if client in seen_clients or seen_key in seen_clients:

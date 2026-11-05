@@ -796,9 +796,12 @@ Linux finds a command by its exact name, so a later word spelled `HTTP`,
 `HTTPS`, or `Http`, as in the here-document or `apply_patch` prose
 `Use HTTP POST to create an item.`, does not start HTTPie. Its method word is
 not read as an upload, while a body item, piped or redirected input, or `--raw`
-after it still warns. A command word keeps the case-insensitive match, so
-`HTTP POST URL` still warns, and so does a here-document line or Markdown table
-cell that starts with `HTTP POST`, because each line is read as a command.
+after it still warns. Its method word still warns when a `name:@file` item
+follows, because that item may send a file as a header. A `.exe` suffix is not
+part of the name, so `http.EXE` is read as `http`. A command word keeps the
+case-insensitive match, so `HTTP POST URL` still warns, and so does a
+here-document line or Markdown table cell that starts with `HTTP POST`, because
+each line is read as a command.
 
 A fixed set of runners that start a command in another host, container, root,
 user, or network namespace, such as `ssh`, `docker`, `docker-compose`,

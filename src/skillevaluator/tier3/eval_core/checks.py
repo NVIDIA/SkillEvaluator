@@ -1251,11 +1251,14 @@ def _network_executable(token: str, assignments: dict[str, str], names: dict[str
 def _spelled_with_capitals(token: str) -> bool:
     """Whether a literal command word spells its executable with a capital letter, as ``HTTP`` or ``Https`` do.
 
-    A ``$VAR`` or backtick word may hold any spelling, so it never counts.
+    A ``$VAR`` or backtick word may hold any spelling, so it never counts. A
+    ``.exe`` suffix in any case, as in ``http.EXE``, is not part of the name.
     """
     if "$" in token or "`" in token:
         return False
     name = token.strip("\"'").replace("\\", "/").rsplit("/", 1)[-1]
+    if name[-4:].lower() == ".exe":
+        name = name[:-4]
     return name != name.lower()
 
 
@@ -1907,7 +1910,8 @@ def _network_tokens_exfiltrate(tokens: list[str], _depth: int) -> bool:
             # Linux finds a command by its exact name, so a later HTTP or Https
             # word, as in the here-document prose "Use HTTP POST to create an
             # item.", does not start HTTPie. Its method words are not read as
-            # an upload; its body items, stdin and --raw still are. It covers a
+            # an upload unless a later name:@file item may send a file as a
+            # header; its body items, stdin and --raw still are. It covers a
             # later capitalized word, which sees a suffix of the same
             # arguments, but not a later lowercase http word.
             capitalized = client in ("http", "https") and _spelled_with_capitals(command[sub_idx])
@@ -1917,7 +1921,7 @@ def _network_tokens_exfiltrate(tokens: list[str], _depth: int) -> bool:
             client_args = command[sub_idx + 1 :]
             if not keeps_stdin:
                 client_args = [token for token in client_args if token not in _NETWORK_INPUT_REDIRECTS]
-            if capitalized:
+            if capitalized and not any(":@" in token for token in client_args):
                 client_args = [
                     token for token in client_args if token.strip("\"'").casefold() not in _UNSAFE_HTTP_METHODS
                 ]

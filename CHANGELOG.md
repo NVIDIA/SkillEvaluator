@@ -629,6 +629,23 @@ All notable changes to SkillEvaluator are documented in this file.
   `coordinates: 37.7749, -122.4194` or `Meet me at 37.7749, -122.4194`, are no
   longer reported either.
 
+- A Tier 3 `claude-code` trial that the model provider's safety classifier
+  stops now ends as Harbor's typed `AgentSafetyRefusalError` on the selected
+  model, on the Anthropic API, Bedrock, Vertex AI and gateway routes alike.
+  Claude Code 2.1.292 retried such a turn on another model from its own table
+  (for example `claude-opus-4-8` after Claude Opus 5.5) under the bare
+  Anthropic ID: a route that does not serve that ID, such as a gateway, failed
+  with HTTP 403 and an `UnknownApiError`, and where the retry succeeded the
+  trial was scored as the selected model although another model finished it.
+  Generated and native tasks now set `CLAUDE_CODE_DISABLE_REFUSAL_FALLBACK=1`
+  in the task environment for every env mode, and neither `harbor.runtime_env`
+  nor a native task's `[environment.env]` can turn the fallback back on. The
+  refused attempt is not scored, like any other failed trial, and counts
+  against the arm's scored-attempt coverage. Other agents ignore the variable.
+  The variable was checked with Claude Code 2.1.292, the release Harbor
+  installs; local mode keeps the fallback off only if the host's Claude Code
+  honors it.
+
 - Tier 1 security scans no longer fail a skill for an exact read-only
   `/etc/passwd` bind mount such as `docker run -v /etc/passwd:/etc/passwd:ro`.
   SkillSpector 2.11.1 and later tags this mount as likely benign but still

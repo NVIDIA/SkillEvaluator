@@ -176,6 +176,19 @@ All notable changes to SkillEvaluator are documented in this file.
   rules, and is not accepted by `validate`, so a baseline-only run cannot pass
   a Tier 3 gate.
 
+- The Tier 3 verifier saves every LLM judge attempt to `judge_attempts.json`
+  next to the trial's `skill_evaluator_reward.json`, rewritten after each
+  attempt so it also explains a judge that failed. Each entry records the
+  metric, attempt number, method (`llm`, `ragas` or `salvage`), judge model,
+  status, and the problem with a rejected reply, plus the prompt and reply
+  with long text shortened. A `behavior_check` score rebuilt from a truncated
+  reply adds a `salvage` entry. Configured credentials, common key shapes,
+  URL userinfo, `Authorization`, API-key, token and `Cookie` header values,
+  and the values of credential flags such as `--token` and
+  `curl -u user:password` are masked. Rewards record
+  `judge_contract: skill-evaluator-judges-v2`, a reserved name that custom
+  graders cannot use.
+
 - Tier 1 sets up SkillSpector 2.13.3 and Gitleaks 8.30.0 on first use from
   pinned, SHA-256-verified releases, without a prompt; Semgrep is optional
   unless `SKILLEVALUATOR_REQUIRE_SEMGREP=1`. `--skip <check>` on `validate` and
@@ -294,6 +307,28 @@ All notable changes to SkillEvaluator are documented in this file.
 - HTML reports rendered in one process share one compiled template
   environment, so each template compiles once per process instead of once per
   report.
+
+- Tier 3 `accuracy` grades the outcome only. The `SKILL_IDENTIFIED` criterion,
+  which capped a correct answer from the no-skill baseline at 0.8 on positive
+  cases, is replaced by `FORMAT_FOLLOWED`: the response follows any output
+  format the question explicitly requires, and when none is required it is
+  true only if the response gives an answer. A trial that ran but gave no
+  answer still scores `0.0`, as before. Skill use is still scored by
+  `skill_execution`. Every case and both arms use the same five criteria, so
+  rewards no longer record `excluded_criteria` or the
+  `applicable-accuracy-criteria/v1` policy; reports still read older rewards
+  that do. `judge_accuracy` still accepts the `skill_identification_applicable`
+  keyword but ignores it. Expect baseline accuracy to rise and accuracy lift to
+  fall for the same runs.
+
+- Tier 3 LLM judges return verdicts only, and the verifier computes every
+  score: `accuracy` is passing criteria divided by five, `goal_accuracy` is
+  `1.0` when the goal was achieved and `0.0` otherwise, and `behavior_check` is
+  the share of expected behaviors observed. A `score` field in a reply is
+  ignored, and the prompts no longer ask for one. An invalid reply is retried
+  once with the exact problem, for example `steps not judged: [2]`, instead of
+  a generic format reminder. The prompt examples are valid replies for the task
+  at hand, and the goal prompt no longer shows an empty tool-call section.
 
 ### Documentation
 
@@ -649,6 +684,45 @@ All notable changes to SkillEvaluator are documented in this file.
   Operandless `xargs rm` invocations remain detectable when unrelated syntax
   or parser budgets prevent a complete parse; the fallback uses a bounded
   command span to avoid excessive backtracking on long actions.
+- Tier 3 security grading no longer gives a critical finding and a security
+  score of 0.0 when an agent uses `apply_patch` to write a workspace file that
+  only resembles a protected path. The `.aws/credentials` and `.config/gcloud`
+  entries now match a patch target with a directory prefix only in a home
+  directory (`~/`, `/root/`, `/home/<user>/`, `/Users/<user>/`,
+  `C:\Users\<user>\`, `%USERPROFILE%`), after the existing workdir, `cd`, `~`
+  and `$HOME` resolution. That resolution now reads a bare `cd` as the home
+  directory, skips `cd`/`pushd` options, leaves the directory unchanged for
+  `pushd -n`/`popd -n`, reads `/proc/self/root`, `/proc/<pid>/root` and similar
+  aliases as `/`, and reads `/proc/self/cwd` as the call's working directory
+  and `/proc/<pid>/cwd` as an unknown one. A relative header that itself starts
+  with one of these names (`.aws/credentials`, `./.config/gcloud/adc.json`) is
+  still flagged whatever directory it resolves against. When the shell decides
+  the directory at run time (`cd "$DIR"`, `cd ${HOME:-/root}`, `cd -`, `popd`,
+  a variable `workdir`, an operand with quotes or backslashes the shell
+  removes, a `cd` inside a subshell, pipeline, branch, quoted `-c` script or
+  `||`/`&&` list that may not run, or a `CDPATH` assignment), these entries
+  keep the existing match anywhere in the path, and a relative header such as
+  `.bashrc` is also checked as a home path. A project file or test fixture such
+  as `project/.aws/credentials` is no longer a `sensitive_file_write`; a
+  Windows home path such as `C:\Users\<user>\.bashrc` and a `/proc/<pid>/root`
+  or `/proc/<pid>/cwd` alias of a protected path now are. A shell `apply_patch`
+  now scores like the tool call: the command-text path checks
+  skip the file header lines of an argv patch and of a heredoc body fed to
+  `apply_patch` (as a `cmd` string or in the `["bash", "-lc", script]` argv
+  form), so headers such as `docs/.config/gcloud-setup.md` no longer raise
+  `sensitive_path_access`. Header paths that hold shell syntax (`;`, `&`, `|`,
+  `<`, `>`, `(`, `)`, `$`, a backtick or `~`) or a word that is itself a
+  protected path (`x /root/.ssh/id_rsa`) are always checked, and so is every
+  header when the command, or any other word of an argv command, pipes,
+  redirects or captures `apply_patch`'s output, including through a `coproc`,
+  since that output names each added file.
+  Header-shaped lines elsewhere in the command, a heredoc body that a shell
+  expands or runs (an unquoted body holding `$`, a backtick or a backslash),
+  and heredocs whose extent is uncertain (mixed delimiter quoting, a missing
+  terminator, a comment or ANSI-C quote before the operator, or another use of
+  the `apply_patch` name) are still checked, as is a `bash -lc "..."` string
+  inside a `cmd`. Read and Write tool paths and other shell commands keep the
+  existing credential-path matching.
 - Tier 3 error recovery now scores unrecovered command failures as zero and
   includes them in fault counts and failure verdicts/report reasons. Host and
   bundled verifier detection agree and use a result's execution status when it
@@ -822,6 +896,15 @@ All notable changes to SkillEvaluator are documented in this file.
   killed; a second Ctrl+C skips that wait, and on Windows the task tree is
   stopped immediately. Progress shows the agents that are stopping and reports
   the run as interrupted instead of failed unexpectedly.
+- The prompt-based `goal_accuracy` judge, which runs whenever the RAGAS scorer
+  does not (including with the default NVIDIA Build provider), used the reply's
+  `score` field over its `achieved` verdict, so `achieved: false` with
+  `score: 1.0` scored 1.0. Other judge replies were also accepted when they
+  should have been retried: an `accuracy` reply with only a numeric total
+  (clamped into 0 to 1, so `99` scored 1.0), a `behavior_check` reply that
+  judged one step twice and skipped another, and a RAGAS goal score other than
+  `0.0` or `1.0`. Each is now rejected and retried, and a RAGAS score that is
+  not binary falls back to the prompt judge.
 - A Tier 1 security scan that SkillSpector reports as partial no longer fails
   with only "reports incomplete analysis (status 'partial')". The error quotes
   up to three completeness exceptions as `path [phase; reason_code;

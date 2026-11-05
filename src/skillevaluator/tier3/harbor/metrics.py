@@ -119,6 +119,7 @@ _RESERVED_METADATA_KEYS = {
     "evaluation_errors",
     "evaluation_status",
     "has_skill",
+    "judge_contract",
     "metric_set",
     "metric_set_version",
     "metrics",

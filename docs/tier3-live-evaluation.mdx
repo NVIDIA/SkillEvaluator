@@ -629,14 +629,29 @@ grades each trial after the agent finishes. `security`, `skill_execution`, and
 `goal_accuracy`, and `behavior_check` are LLM judges that call the configured
 evaluator provider. `custom_only` runs none of them.
 
-Accuracy is calculated from the judge's criterion verdicts, not its numeric
-total: passing applicable criteria divided by applicable criteria. Positive
-cases score all five criteria; a positive-case reply with no criteria falls
-back to the judge's numeric score. When `should_trigger` is false or no
-`expected_skill` is declared, accuracy excludes `SKILL_IDENTIFIED` from both
-counts and scores the other four criterion verdicts. The reward details record
-the excluded criterion and `applicable-accuracy-criteria/v1` scoring policy.
-Missing criterion evidence is an error for these cases.
+The three LLM judges return verdicts only, and the verifier computes the
+scores. A `score` field in a judge reply is ignored.
+
+- `accuracy` is passing criteria divided by five. The criteria grade the
+  outcome: `ACTION_CORRECT`, `FACTUALLY_ACCURATE`, `TASK_ADDRESSED`,
+  `ACTIONABLE`, and `FORMAT_FOLLOWED` (the response follows any output format
+  the question explicitly requires; when none is required, it is true only if
+  the response gives an answer). A response that gives no answer fails all
+  five criteria and scores `0.0`, unless the expected answer is itself a
+  refusal. Every case and both arms use the same
+  five criteria. None of them asks whether the agent named or used the skill;
+  `skill_execution` scores that. A reply without all five true/false verdicts
+  is invalid.
+- `goal_accuracy` is `1.0` when the judge decides the goal was `achieved` and
+  `0.0` otherwise, the same binary scale as the RAGAS scorer.
+- `behavior_check` is the share of expected behaviors observed. The reply must
+  judge every behavior exactly once, identified by its 1-based `step` number.
+  A reply that skips, repeats, or invents a step is invalid.
+
+Rewards record `judge_contract: skill-evaluator-judges-v2`. Results written
+before this contract, whose `accuracy` included a `SKILL_IDENTIFIED` criterion,
+are not directly comparable with newer ones: a correct no-skill baseline answer
+used to be capped at `0.8` on positive cases.
 
 ### The graded trajectory
 
@@ -731,10 +746,25 @@ in [Judge evidence budgets](environment-variables.mdx#judge-evidence-budgets).
   downgraded.
 - **Reply validation.** Replies are checked against the expected fields either
   way. An empty, unparseable, or invalid reply, including an empty reply from a
-  reasoning model that ran out of output tokens, gets one retry with a stricter
-  format reminder. `behavior_check` can also salvage complete per-behavior
-  results from a truncated reply and counts the missing behaviors as not
-  passed.
+  reasoning model that ran out of output tokens, gets one retry that names the
+  problem, for example `steps not judged: [2]`. `behavior_check` can also
+  salvage complete per-behavior results from a truncated reply and counts the
+  missing behaviors as not passed.
+- **Saved judge evidence.** The verifier writes every judge attempt to
+  `judge_attempts.json` next to the trial's `skill_evaluator_reward.json` as it
+  happens, so the file also explains a judge that failed. Each entry records
+  the metric, attempt number, method (`llm`, `ragas`, or `salvage`), judge
+  model, status (`accepted`, `rejected`, or `error`), and problem, along with
+  the prompt and reply. When `behavior_check` is scored from a truncated
+  reply, the LLM attempts keep their own status (`rejected`, or `error` if the
+  retry failed in transport), and an `accepted` `salvage` entry, numbered like
+  the truncated attempt, holds the rebuilt results.
+  Configured credentials, common key shapes, URL userinfo, `Authorization`,
+  API-key, token and `Cookie` header values, and credential flag values
+  (`--token`, `--password`, `curl -u user:password`) are masked, and long
+  prompts and replies are shortened. The prompts contain the task question,
+  expected answer, and agent evidence. Pass `--harbor-keep-jobs` to keep the
+  Harbor trial directories that hold this file.
 - **Reasoning models.** GPT-5 and GPT-6 judges get no `temperature` and at
   least 32,768 output tokens, because reasoning tokens count against the
   limit; other judges get 16,384. GPT-6 judges and Claude 5.5 or later judges
@@ -757,7 +787,8 @@ in [Judge evidence budgets](environment-variables.mdx#judge-evidence-budgets).
   GPT-6 reasoning model, `goal_accuracy` first tries the RAGAS
   `AgentGoalAccuracyWithReference` scorer through its own client, without the
   schema or retry handling above but within the same time budget. If RAGAS is
-  unavailable or fails, the prompt judge runs instead.
+  unavailable, fails, or returns a score other than `0.0` or `1.0`, the prompt
+  judge runs instead.
 - **Transient failures.** HTTP 408, 429, and every 5xx response except 501 and
   505 are retried, including 520–524 proxy errors and 529 overload responses.
   Connection errors, timeouts, and Bedrock throttling or service-unavailable

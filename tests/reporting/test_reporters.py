@@ -1964,6 +1964,34 @@ class TestGatingSplit:
         assert "same-name similarity match" in tier2
         assert "Intra-skill check was not run" not in tier2
 
+    @pytest.mark.parametrize("tier", [2, 3])
+    @pytest.mark.parametrize("comprehensive", [False, True])
+    def test_emit_reports_uses_recorded_tier_for_custom_validator_names(
+        self, tmp_path: Path, tier: int, comprehensive: bool
+    ) -> None:
+        result = _similarity_result(severity=Severity.HIGH) if tier == 2 else _failed_result("Custom live evaluation")
+        result.validator_name = "Custom recorded check"
+        result.metadata["gating"] = {"tier": tier, "blocking": tier == 2}
+        before = JSONReporter(include_timestamp=False).render_all([result])
+        scope = {"requested_tiers": (tier,), "displayed_tiers": (1, 2, 3)} if comprehensive else {}
+
+        assert (
+            emit_reports([result], report_formats=("html",), output_dir=tmp_path, basename="recorded", **scope) is False
+        )
+
+        output = (tmp_path / "recorded.html").read_text(encoding="utf-8")
+        panel = _html_tab(output, f"tier{tier}")
+        assert "No check evidence was recorded for this tier." not in panel
+        if tier == 2:
+            assert "same-name similarity match" in panel
+        else:
+            assert 'class="tab-content active"' in panel
+        if comprehensive:
+            assert "No check evidence was recorded for this tier." in _html_tab(output, "tier1")
+        else:
+            assert 'id="tab-tier1"' not in output
+        assert JSONReporter(include_timestamp=False).render_all([result]) == before
+
     def test_default_html_reporter_classifies_similarity_as_tier2(self) -> None:
         output = HTMLReporter(include_timestamp=False).render_all([_similarity_result(severity=Severity.HIGH)])
 

@@ -114,6 +114,17 @@ All notable changes to SkillEvaluator are documented in this file.
 - CI-native per-skill HTML pages link Download JSON to the retained
   `skillevaluator-tier1.json` and do not embed a second copy of the report
   JSON. Standalone CLI HTML reports embed it for Export JSON.
+- Rubric evaluation JSON reports name the provider and model that gave each
+  score as `llm_provider` and `llm_model_used` in the skill's `rubric_eval`
+  success detail and, for a single skill, also in `rubric_eval`. Tier 3
+  conclusions and recommendations written by the LLM, and LLM-written
+  dimensions returned by `compute_dimensions`, record the model that wrote
+  them as `model`. For a Claude 5.5 or later model on the native Claude API
+  this is the model the reply names: the server-side refusal fallback model,
+  not the configured model, when the fallback answered. Otherwise it is the
+  configured model, unless a server-side `fallback` block in the reply names
+  another model.
+
 - Tier 3 runs can be limited to the first N eval cases with the opt-in
   `--max-cases N` flag on `validate`, `tier3`, and `tier3 evaluate`, or the
   `harbor.max_cases` key in `evals/config.yml`; the CLI value wins. Unset, every
@@ -546,6 +557,14 @@ All notable changes to SkillEvaluator are documented in this file.
   scoring agree, while scoped searches and slash-valued patterns retain their
   classification.
 
+- On the native Claude API, the Tier 3 judges' `judge_model_used` names the
+  server-side fallback model when the API serves a repeated request straight
+  from that model. Such a reply has no `fallback` content block, so the label
+  now comes from the reply's own `model` field instead of the configured
+  model. `judge_fallback_used` is then `true`, and Skill Lift treats such a
+  case like an in-call fallback: when another condition, attempt or step of
+  the case was judged by the configured model, the case leaves that judge
+  metric's lift and is counted in `judge_mixed_cases`.
 - Tier 2 `similarity-check` and `context-optimization-check` no longer abort
   with a "symlink or reparse point" error when a skill or collection aliases
   one agent directory to another, such as `.agents -> .claude`. A directory

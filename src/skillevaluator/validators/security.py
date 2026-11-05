@@ -64,6 +64,7 @@ from skillevaluator.validators.base import (
     ValidatorBase,
     iter_scannable_files,
 )
+from skillevaluator.validators.pii_waivers import PIIWaiverSet, configured_pii_categories, pii_evidence_sha256
 from skillevaluator.validators.skillspector_scope import (
     IssueScope,
     scope_skillspector_issues,
@@ -1562,6 +1563,7 @@ class SecurityValidator(ValidatorBase):
         use_llm: bool = False,
         verify_llm: bool = False,
         submitter_usernames: Iterable[str] | None = None,
+        pii_waiver_path: Path | None = None,
         content_type: str | None = None,
         skillspector_reference_root: Path | None = None,
         skillspector_baseline: Path | str | None = None,
@@ -1577,6 +1579,9 @@ class SecurityValidator(ValidatorBase):
                 :data:`HOME_PATH_SUBMITTER_ENV_VARS`) and the OS login name.
                 Pass an explicit value to wire a CI-provided contributor identity
                 or to make tests deterministic.
+            pii_waiver_path: Optional PII waiver file (see
+                :mod:`skillevaluator.validators.pii_waivers`) applied by
+                :meth:`validate` and :meth:`validate_pii_only`.
             content_type: Detected agent artifact type (``skill``, ``rules``,
                 ``workflows``, or ``plugin``). When set, SkillSpector findings
                 outside agent control paths are suppressed (see
@@ -1601,6 +1606,9 @@ class SecurityValidator(ValidatorBase):
         self._home_check_disabled_warned = False
         self.use_llm = use_llm
         self.verify_llm = verify_llm
+        self.pii_waiver_path = Path(pii_waiver_path) if pii_waiver_path is not None else None
+        # The waivers of the scan in progress; set only while validate() or validate_pii_only() runs.
+        self._pii_waivers: PIIWaiverSet | None = None
         self.content_type = content_type
         self.skillspector_reference_root = (
             Path(skillspector_reference_root).resolve() if skillspector_reference_root is not None else None
@@ -1731,10 +1739,13 @@ class SecurityValidator(ValidatorBase):
 
     def validate(self, skill_path: Path) -> ValidationResult:
         """Run both security and PII scanning on skill(s)."""
-        return self._validate_with_applicability(
+        return self._with_pii_waivers(
             skill_path,
-            self._validate_single_skill,
-            action_description="Scanning",
+            lambda: self._validate_with_applicability(
+                skill_path,
+                self._validate_single_skill,
+                action_description="Scanning",
+            ),
         )
 
     def validate_security_only(self, skill_path: Path) -> ValidationResult:
@@ -1750,13 +1761,38 @@ class SecurityValidator(ValidatorBase):
 
     def validate_pii_only(self, skill_path: Path) -> ValidationResult:
         """Run only PII detection (no skillspector security scan)."""
-        result = self._validate_folder_or_skill(
-            skill_path,
-            self._scan_for_pii,
-            action_description="PII scanning",
-        )
-        if self.verify_llm and result.findings:
-            self._verify_findings_with_llm(result, skill_path)
+
+        def scan() -> ValidationResult:
+            result = self._validate_folder_or_skill(
+                skill_path,
+                self._scan_for_pii,
+                action_description="PII scanning",
+            )
+            if self.verify_llm and result.findings:
+                self._verify_findings_with_llm(result, skill_path)
+            return result
+
+        return self._with_pii_waivers(skill_path, scan)
+
+    def _with_pii_waivers(self, skill_path: Path, scan: Callable[[], ValidationResult]) -> ValidationResult:
+        """Run ``scan`` of ``skill_path`` with the configured PII waivers, then report their outcomes once.
+
+        The outcomes are added after the scan (and any LLM verification) at the
+        top level, so a folder run reports them once, not per skill. Only the
+        waivers for files the scan covered are reported.
+        """
+        if self.pii_waiver_path is None:
+            return scan()
+        waivers = PIIWaiverSet.load(self.pii_waiver_path, configured_pii_categories(self.pii_patterns))
+        self._pii_waivers = waivers
+        try:
+            result = scan()
+        finally:
+            self._pii_waivers = None
+        for finding, is_error in waivers.findings(skill_path):
+            result.add_structured_finding(finding, is_error=is_error)
+        if waivers.applied:
+            result.add_message(f"PII waivers suppressed {len(waivers.applied)} reviewed PII value(s)")
         return result
 
     def _validate_with_applicability(
@@ -3957,6 +3993,9 @@ class SecurityValidator(ValidatorBase):
         """Scan files for PII using regex patterns (emails, paths, SSNs, etc.)."""
         result = ValidationResult()
         files = self._get_scannable_files(skill_path)
+        waivers = self._pii_waivers
+        if waivers is not None:
+            waivers.cover(skill_path)
 
         if not files:
             result.add_warning("No scannable files found for PII scan")
@@ -3993,7 +4032,8 @@ class SecurityValidator(ValidatorBase):
             except ValueError:
                 relative_path = file_path.name
 
-            for finding_data in self._scan_file_for_pii(file_path, protected_usernames):
+            waive = waivers.matcher(file_path) if waivers is not None else None
+            for finding_data in self._scan_file_for_pii(file_path, protected_usernames, waive=waive):
                 pii_found = True
                 value = finding_data.get("matched_value")
                 key: object = (
@@ -4042,6 +4082,14 @@ class SecurityValidator(ValidatorBase):
             if len(occurrences) > 1:
                 message += f" — {len(occurrences)} occurrences ({self._format_occurrences(occurrences)})"
                 message = redactor.text(message)
+            metadata = redactor.object(metadata)
+            if value and not sensitive and redactor.text(value) == value:
+                # Identifies the matched value for a PII waiver (see validators/pii_waivers.py). Only a
+                # value the report shows in full gets one: a digest of a masked credential, or of a value
+                # that contains one, would let anyone holding the report test guesses for it offline.
+                # It is added after redaction, which would otherwise mask a short secret that happens
+                # to occur in the hex digest of another value.
+                metadata["evidence_sha256"] = pii_evidence_sha256(first["category"], value)
 
             finding = Finding(
                 category="PII",
@@ -4052,7 +4100,7 @@ class SecurityValidator(ValidatorBase):
                 line_number=first["line"],
                 line_content=None if sensitive else redactor.text(first.get("line_content") or "") or None,
                 suggestion=first.get("suggestion"),
-                metadata=redactor.object(metadata),
+                metadata=metadata,
             )
             result.add_structured_finding(finding, is_error=severity in ("CRITICAL", "HIGH"))
 
@@ -4275,6 +4323,39 @@ class SecurityValidator(ValidatorBase):
         r"(?i)(?<![a-z0-9])(?:(?:credit[_ -]?)?card(?:[_ -]?(?:number|num|no))?|cc[_ -]?(?:number|num|no)|pan)"
         r"(?![a-z0-9])[\"']?(?:\s*[:=]\s*[\"']?|\s+[\"']?)\Z"
     )
+
+    # Proton (Steam Play) runs each Windows game in its own prefix whose only
+    # Windows profile is ``pfx/drive_c/users/steamuser/``. Proton uses that name
+    # for every player, so the path names no person. ``pfx`` must start a path
+    # component. A ``..`` segment after the profile could lead anywhere, so a
+    # line with one anywhere after the profile stays reported: Windows folder
+    # names often contain spaces and quotes, so the path's end is not reliable.
+    # A ``..`` counts as a segment when a path separator (plain or encoded),
+    # whitespace, a quote, or another delimiter bounds it on both sides, so
+    # ``steamuser/" + "../x"``, ``/ ".." /``, ``"..",``, ``cd ../x`` and
+    # ``cd ..&& cd x`` count. Shell ``&`` and ``:`` bound a ``..`` but not ``pfx``.
+    _PROTON_PREFIX = "pfx/drive_c"
+    _PROTON_PREFIX_BOUNDARIES = frozenset("/\\'\"`=(){}[]<>|*,; \t")
+    _DOT_DOT_BOUNDARY = (
+        "[" + "".join(re.escape(c) for c in sorted(_PROTON_PREFIX_BOUNDARIES | {"&", ":"})) + r"\s]|%2f|%5c"
+    )
+    _DOT_DOT_SEGMENT_PATTERN = re.compile(
+        rf"(?:^|{_DOT_DOT_BOUNDARY})(?:\.|%2e){{2}}(?=$|{_DOT_DOT_BOUNDARY})", re.IGNORECASE
+    )
+
+    @classmethod
+    def _is_proton_virtual_profile(cls, match: re.Match, line: str) -> bool:
+        """Return whether a personal-path match is Proton's ``pfx/drive_c/users/steamuser/`` profile."""
+        value = match.group()
+        if not value.isascii() or value.lower() != "/users/steamuser/":
+            return False
+        start = match.start() - len(cls._PROTON_PREFIX)
+        prefix = line[max(start, 0) : match.start()]
+        if start < 0 or not prefix.isascii() or prefix.lower().replace("\\", "/") != cls._PROTON_PREFIX:
+            return False
+        if start > 0 and line[start - 1] not in cls._PROTON_PREFIX_BOUNDARIES:
+            return False
+        return cls._DOT_DOT_SEGMENT_PATTERN.search(line[match.end() :]) is None
 
     @staticmethod
     def _is_near_zero_gps(line: str) -> bool:
@@ -4545,12 +4626,20 @@ class SecurityValidator(ValidatorBase):
         """True when a line is a YAML frontmatter fence, including BOM-prefixed openers."""
         return line.strip().removeprefix("\ufeff").strip() == "---"
 
-    def _scan_file_for_pii(self, file_path: Path, protected_usernames: set[str] | None = None) -> list[dict]:
+    def _scan_file_for_pii(
+        self,
+        file_path: Path,
+        protected_usernames: set[str] | None = None,
+        *,
+        waive: Callable[[str, int, str], bool] | None = None,
+    ) -> list[dict]:
         """Scan a single file for PII patterns, yielding findings with full context.
 
         ``protected_usernames`` is the set of author/submitter identities used by
         the home-path check; when omitted it is resolved from the file's parent
-        directory so the method stays usable standalone.
+        directory so the method stays usable standalone. ``waive`` returns
+        whether a PII waiver covers a candidate (category, line, value); a
+        waived candidate is skipped as if it did not match.
         """
         if protected_usernames is None:
             protected_usernames = self._protected_home_usernames(file_path.parent)
@@ -4580,6 +4669,7 @@ class SecurityValidator(ValidatorBase):
                 protected_usernames,
                 author_emails,
                 comment_lines,
+                waive=waive,
             )
         return findings
 
@@ -4636,8 +4726,17 @@ class SecurityValidator(ValidatorBase):
         protected_usernames: set[str] | None = None,
         author_emails: dict[int, str] | None = None,
         comment_lines: frozenset[int] | None = None,
+        *,
+        waive: Callable[[str, int, str], bool] | None = None,
     ) -> None:
-        """Check all lines against a single compiled PII pattern."""
+        """Check all lines against a single compiled PII pattern.
+
+        Only the first remaining match on a line is reported. Matches are
+        filtered before that choice, so a value that is not reported (a version
+        literal, the Proton profile, an unrelated home directory, a number that
+        is not a card number, or a waived value) does not hide another value on
+        the same line.
+        """
         protected_usernames = protected_usernames or set()
         author_emails = author_emails or {}
         comment_lines = comment_lines if comment_lines is not None else _comment_line_numbers(file_path, lines)
@@ -4687,20 +4786,23 @@ class SecurityValidator(ValidatorBase):
                         continue
             if category == "ip_addresses":
                 matches = [match for match in matches if not self._is_version_literal(match, line)]
-                if not matches:
-                    continue
-            if category == "credit_cards":
+            elif category == "personal_paths":
+                matches = [match for match in matches if not self._is_proton_virtual_profile(match, line)]
+            elif category == "home_paths":
+                # /home/<root>/ is PII only when <root> is the author/submitter
+                # username; unrelated roots are skipped.
+                matches = [match for match in matches if self._is_personal_home_path(match, protected_usernames)]
+            elif category == "credit_cards":
                 # Check every candidate: a GUID or non-Luhn number must not hide a later card.
                 previous_line = lines[line_num - 2] if line_num > 1 else ""
                 matches = [match for match in matches if self._is_card_number_candidate(match, line, previous_line)]
-                if not matches:
-                    continue
-            match = matches[0]
-
-            # /home/<root>/ is PII only when <root> is the author/submitter
-            # username; unrelated roots are skipped.
-            if category == "home_paths" and not self._is_personal_home_path(match, protected_usernames):
+            # A waiver is consulted only for a value that would be reported, so
+            # it never counts as applied for a value the scan already dropped.
+            if waive is not None:
+                matches = [match for match in matches if not waive(category, line_num, self._reported_value(match))]
+            if not matches:
                 continue
+            match = matches[0]
 
             confidence = self._estimate_confidence(category, line)
             if category == "gps_coordinates" and self._is_near_zero_gps(line):
@@ -4716,9 +4818,18 @@ class SecurityValidator(ValidatorBase):
                     "suggestion": pattern_def.get("suggestion"),
                     "category": category,
                     "confidence": confidence,
-                    "matched_value": match.group(),
+                    "matched_value": self._reported_value(match),
                 }
             )
+
+    @staticmethod
+    def _reported_value(match: re.Match) -> str:
+        """Return the value a PII finding identifies for ``match``, before any display redaction.
+
+        A finding's ``evidence_sha256`` and the waiver check both use this value,
+        so a change to which part of a match a finding reports belongs here.
+        """
+        return match.group()
 
     # ------------------------------------------------------------------
     # LLM finding verification (delegates to skillevaluator.inference.FindingVerifier)

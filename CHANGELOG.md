@@ -229,6 +229,21 @@ All notable changes to SkillEvaluator are documented in this file.
   `tier1` leaves a check out and reports it as skipped. A `scanners` row and the
   JSON report record which scanner versions ran.
 
+- `--pii-waivers PATH` on `validate`, `tier1`, and `pii-scan` accepts a
+  reviewed PII value without relaxing the whole check through a severity
+  override. Each waiver names the PII check, the file (relative to the waiver
+  file's directory), the line, the SHA-256 digest that PII findings now report
+  as `evidence_sha256`, a reason, an owner, and a `created`/`expires` window
+  of at most 366 days, and it stops applying as soon as any of them no longer
+  matches. Other values on the same line are still reported. Reports list each
+  waiver for a scanned file as applied (INFO), stale (LOW), or expired
+  (MEDIUM), so one file can serve single-skill, folder, and catalog runs. A
+  malformed file is rejected with exit code 2; through the Python API it
+  applies no waivers and fails the PII scan with a HIGH
+  `invalid-pii-waiver-file` finding. Credential checks cannot be waived, and
+  their findings, like any finding whose value reports mask, carry no digest.
+  Waivers are never discovered automatically inside the scanned skill; pass
+  the file with `--pii-waivers`.
 - Every finding now has stable IDs for tracking across runs and validators.
   `finding_id` (`SEF-…`) is derived from the finding's category, check,
   message, and suggestion, so it survives line moves, whitespace or case
@@ -1165,6 +1180,18 @@ All notable changes to SkillEvaluator are documented in this file.
   `filtered` summary row, and recorded in the JSON report's
   `skillspector_applicability` block. `security-scan` and targets of `unknown`
   type keep the unrestricted scan.
+
+- PII scans no longer report Proton (Steam Play) prefix paths such as
+  `compatdata/<appid>/pfx/drive_c/users/steamuser/` as personal macOS paths:
+  `steamuser` is the profile name Proton uses for every player. Other user
+  names, `steamuser` outside a `pfx/drive_c` prefix, profile paths followed by
+  a `..` segment later on the line, and Windows `C:\Users\steamuser` paths are
+  still reported. When a Proton path and a personal path share a line, the
+  personal path is reported.
+
+- An unrelated `/home/<user>/` path no longer hides a personal home path later
+  on the same line; the PII scan drops such paths before it picks the line's
+  first match.
 
 ### Security
 

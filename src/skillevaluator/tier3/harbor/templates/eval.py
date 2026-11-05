@@ -2853,7 +2853,6 @@ def judge_goal_accuracy(question, ground_truth, agent_text, tool_summary=""):
                 score=score,
             )
             return result
-
     return _judge_goal_accuracy_custom(question, ground_truth, agent_text, tool_summary)
 
 

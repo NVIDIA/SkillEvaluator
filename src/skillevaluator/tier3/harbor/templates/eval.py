@@ -965,6 +965,35 @@ def _strict_judge_error_stops(error):
     return _STRICT_JUDGE_STOP_PATTERN.search(text) is not None
 
 
+# Besides the model errors every policy hands to LLM_JUDGE_FALLBACK_MODELS
+# (_should_try_fallback), the strict policy reads these as a model the
+# provider does not have or the key cannot use: OpenAI's model_not_found
+# ("The model `x` does not exist ..."), a Claude not_found_error about the
+# model, and Bedrock's access-denied, not-found and invalid-model errors.
+_STRICT_MODEL_UNAVAILABLE_PATTERN = re.compile(
+    r"\bmodel_not_found\b|^not_found_error model:|\bthe model\b.{0,200}?\bdoes not exist\b", re.IGNORECASE
+)
+_STRICT_BEDROCK_MODEL_UNAVAILABLE_CODES = frozenset({"AccessDeniedException", "ResourceNotFoundException"})
+
+
+def _strict_model_unavailable(error):
+    """Return whether a failed strict judge request says the model is missing or not open to the key."""
+    if isinstance(error, urllib.error.HTTPError):
+        body = _http_error_body(error)
+        text = _provider_error_fields(body)
+        if text is None:
+            text = body[:_STRICT_JUDGE_ERROR_BODY_CHARS]
+        return _STRICT_MODEL_UNAVAILABLE_PATTERN.search(text) is not None
+    response = getattr(error, "response", None)
+    info = response.get("Error") if isinstance(response, dict) else None
+    if not isinstance(info, dict):
+        return False
+    code = str(info.get("Code") or "")
+    return code in _STRICT_BEDROCK_MODEL_UNAVAILABLE_CODES or (
+        code == "ValidationException" and "model identifier" in str(info.get("Message") or "").lower()
+    )
+
+
 def _strict_judge_retry_allowed(error):
     """Return whether the strict policy lets the transport retry *error* on the same model."""
     left = _STRICT_JUDGE_REQUESTS_LEFT.get()
@@ -2161,9 +2190,11 @@ def _call_judge_model(prompt, provider, model, max_tokens, temperature, response
 def _strict_judge_failure(error):
     """Describe a failed strict judge request and whether the next candidate may answer instead.
 
-    Only unavailability moves on: a transient HTTP status or connection failure
-    that outlasted its one retry, a model the key cannot use, or a used-up
-    per-model request limit. Everything else ends the judge.
+    Only unavailability moves on: a transient HTTP status, connection failure
+    or Bedrock throttling that outlasted its one retry, a model the provider
+    does not have or the key cannot use (_should_try_fallback and
+    _strict_model_unavailable), or a used-up per-model request limit.
+    Everything else ends the judge.
     """
     if isinstance(error, _JudgeRefusedError):
         return str(error), False
@@ -2173,7 +2204,7 @@ def _strict_judge_failure(error):
         detail, model_unavailable = _format_http_error_with_fallback(error)
         if _strict_judge_error_stops(error):
             return detail, False
-        return detail, model_unavailable or _is_retriable_http_status(error.code)
+        return detail, model_unavailable or _strict_model_unavailable(error) or _is_retriable_http_status(error.code)
     detail = f"Public provider call failed: {error}"
     if isinstance(error, TimeoutError) and "LLM judge time budget exhausted" in str(error):
         return detail, False
@@ -2181,8 +2212,8 @@ def _strict_judge_failure(error):
         return detail, False
     if isinstance(error, (urllib.error.URLError, OSError)):
         return detail, True
-    # Bedrock throttling and service errors (see _call_bedrock).
-    return detail, _classify_bedrock_retry_error(error)[0]
+    # Bedrock throttling and service errors (see _call_bedrock), or a model it cannot serve.
+    return detail, _classify_bedrock_retry_error(error)[0] or _strict_model_unavailable(error)
 
 
 def _call_strict_judge(provider, requested_model, models, call_model):

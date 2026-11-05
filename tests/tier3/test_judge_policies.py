@@ -286,6 +286,94 @@ def test_strict_reads_stop_words_only_at_the_start_of_an_error_page(verifier, mo
     assert requested == [PRIMARY, PRIMARY, "family/backup"]
 
 
+OPENAI_MODEL_NOT_FOUND = (
+    b'{"error":{"message":"The model `family/primary` does not exist or you do not have access to it.",'
+    b'"type":"invalid_request_error","param":null,"code":"model_not_found"}}'
+)
+
+
+@pytest.mark.parametrize(
+    "body",
+    [
+        OPENAI_MODEL_NOT_FOUND,
+        b'{"error":{"message":"The model `family/primary` does not exist.","type":"invalid_request_error"}}',
+        b'{"type":"error","error":{"type":"not_found_error","message":"model: family/primary"}}',
+    ],
+)
+def test_strict_missing_model_moves_to_the_explicit_list_without_a_retry(verifier, monkeypatch, body):
+    strict(monkeypatch)
+    requested = replay(verifier, monkeypatch, [http_error(404, body), completion("judged")])
+
+    assert verifier.call_public_llm("prompt") == ("judged", None)
+    assert requested == [PRIMARY, "family/backup"]
+
+
+def test_strict_other_not_found_error_ends_the_judge(verifier, monkeypatch):
+    strict(monkeypatch)
+    body = b'{"type":"error","error":{"type":"not_found_error","message":"Not found"}}'
+    requested = replay(verifier, monkeypatch, [http_error(404, body), completion("judged")])
+
+    content, error = verifier.call_public_llm("prompt")
+
+    assert content is None and "HTTP 404" in error
+    assert requested == [PRIMARY]
+
+
+def test_legacy_policy_keeps_its_model_error_rules(verifier, monkeypatch):
+    monkeypatch.setenv("LLM_JUDGE_FALLBACK_MODELS", ALLOWLIST)
+    requested = replay(verifier, monkeypatch, [http_error(404, OPENAI_MODEL_NOT_FOUND), completion("judged")])
+
+    content, error = verifier.call_public_llm("prompt", model=PRIMARY)
+
+    assert content is None and "HTTP 404" in error
+    assert requested == [PRIMARY]
+
+
+def _bedrock_error(code, status, message):
+    error = RuntimeError(message)
+    error.response = {"Error": {"Code": code, "Message": message}, "ResponseMetadata": {"HTTPStatusCode": status}}
+    return error
+
+
+def _bedrock_client(monkeypatch, outcomes):
+    import boto3
+
+    client = MagicMock()
+    client.converse.side_effect = outcomes
+    monkeypatch.setattr(boto3, "client", lambda *_args, **_kwargs: client)
+    return client
+
+
+@pytest.mark.parametrize(
+    ("code", "status", "message"),
+    [
+        ("AccessDeniedException", 403, "You don't have access to the model with the specified model ID."),
+        ("ResourceNotFoundException", 404, "Model not found."),
+        ("ValidationException", 400, "The provided model identifier is invalid."),
+    ],
+)
+def test_strict_bedrock_model_unavailable_moves_on_without_a_retry(verifier, monkeypatch, code, status, message):
+    strict(monkeypatch)
+    monkeypatch.setenv("SKILL_EVAL_LLM_PROVIDER", "bedrock")
+    answered = {"stopReason": "end_turn", "output": {"message": {"content": [{"text": "judged"}]}}}
+    client = _bedrock_client(monkeypatch, [_bedrock_error(code, status, message), answered])
+
+    assert verifier.call_public_llm("prompt") == ("judged", None)
+    assert [call.kwargs["modelId"] for call in client.converse.call_args_list] == [PRIMARY, "family/backup"]
+
+
+def test_strict_bedrock_other_validation_error_ends_the_judge(verifier, monkeypatch):
+    strict(monkeypatch)
+    monkeypatch.setenv("SKILL_EVAL_LLM_PROVIDER", "bedrock")
+    invalid = _bedrock_error("ValidationException", 400, "maxTokens: must be at most 8192")
+    client = _bedrock_client(monkeypatch, [invalid, {"stopReason": "end_turn"}])
+
+    content, error = verifier.call_public_llm("prompt")
+
+    assert content is None and "maxTokens" in error
+    assert [call.kwargs["modelId"] for call in client.converse.call_args_list] == [PRIMARY]
+
+
 def test_strict_stop_words_in_an_echoed_model_id_do_not_end_the_judge(verifier, monkeypatch):
     strict(monkeypatch)
     monkeypatch.setenv("LLM_JUDGE_MODEL", "vendor/content-safety-judge")

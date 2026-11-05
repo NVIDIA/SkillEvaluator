@@ -777,7 +777,11 @@ agent environment or `custom_only` runs.
   - A request that fails with a retryable HTTP status, a connection error, or
     Bedrock throttling is retried at most once, then the next model is tried.
     A model the provider reports as not found, invalid, or not accessible to
-    the key moves on without a retry. A `Retry-After` wait above the maximum
+    the key moves on without a retry. That covers the errors
+    `LLM_JUDGE_FALLBACK_MODELS` already falls back on, OpenAI's
+    `model_not_found`, a Claude `not_found_error` that names the model, and
+    Bedrock's `AccessDeniedException`, `ResourceNotFoundException`, and
+    invalid model identifier errors. A `Retry-After` wait above the maximum
     retry delay moves on without waiting. A wait or request that would pass
     the judge's deadline ends the judge.
   - A refusal, a TLS certificate failure, an authentication error, and any

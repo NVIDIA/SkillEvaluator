@@ -355,7 +355,7 @@ def test_rich_reporter_stops_live_display_during_exception_cleanup(monkeypatch: 
     assert live.stop_calls == 1
 
 
-def test_plain_reporter_emits_durable_plan_events_and_elapsed_heartbeat() -> None:
+def test_plain_reporter_emits_durable_plan_events_and_elapsed_heartbeat(monkeypatch: pytest.MonkeyPatch) -> None:
     progress = _progress_module()
     output = io.StringIO()
     reporter = progress.PlainProgressReporter(stream=output, refresh_interval=60)
@@ -365,6 +365,8 @@ def test_plain_reporter_emits_durable_plan_events_and_elapsed_heartbeat() -> Non
     reporter.emit(progress.ProgressEvent(stage="configuration", state="ready", detail="eval config loaded"))
     reporter.emit(progress.ProgressEvent(stage="docker-images", state="delegated", detail="build delegated to Harbor"))
     reporter.emit(progress.ProgressEvent(stage="agent:codex", state="running", detail="with-skill + baseline"))
+    heartbeat_at = reporter._last_progress_at + 60
+    monkeypatch.setattr(progress, "monotonic", lambda: heartbeat_at)
     reporter.heartbeat()
     reporter.emit(progress.ProgressEvent(stage="agent:codex", state="complete"))
     reporter.close()

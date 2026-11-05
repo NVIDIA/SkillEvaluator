@@ -22,6 +22,7 @@ Consoles are created with ``emoji=False`` so ``:name:`` codes in that text
 
 from __future__ import annotations
 
+import math
 from io import StringIO
 from typing import TYPE_CHECKING
 
@@ -49,6 +50,7 @@ from skillevaluator.reporting.harbor_viewer import (
 )
 from skillevaluator.reporting.presentation import FinalRenderContext, build_final_render_context, trial_coverage
 from skillevaluator.reporting.run_status import Status, result_status
+from skillevaluator.reporting.terminal_styles import AMBER, FAINT, GREEN, RED, TEXT, grade_style, lift_style
 from skillevaluator.utils.rich_markup import escape_markup
 
 if TYPE_CHECKING:
@@ -220,7 +222,7 @@ class CLIReporter(ReporterBase):
         qs = result.metadata.get("quality_scores") if result.metadata else None
         qs_all = result.metadata.get("quality_scores_all") if result.metadata else None
         if qs and qs.get("dimensions"):
-            grade_colors = {"A": "green", "B": "green", "C": "yellow", "D": "red", "F": "red"}
+            grade_colors = {grade: grade_style(grade, status=result_status(result).value) for grade in "ABCDF"}
             skills_list = qs_all or [qs]
             self._print_quality_table(qs, skills_list, grade_colors, console)
 
@@ -263,7 +265,7 @@ class CLIReporter(ReporterBase):
         """Format a dimension score cell with color coding."""
         d = dims.get(dname, {})
         s = d.get("score", 0)
-        c = "green" if s >= 80 else ("yellow" if s >= 60 else "red")
+        c = GREEN if s >= 80 else (AMBER if s >= 60 else RED)
         return f"[{c}]{s:.0f}[/{c}]"
 
     @staticmethod
@@ -289,7 +291,7 @@ class CLIReporter(ReporterBase):
             console.print(f"\n  [{gc}]Overall: {avg_score:.1f}/100 (Grade: {avg_grade_text})[/{gc}]")
             console.print(f"  [dim]Skill Type:[/dim] {stype}\n")
 
-        table = Table(title="Quality Scores by Skill", border_style="cyan", show_header=True)
+        table = Table(title="Quality Scores by Skill", border_style=FAINT, show_header=True)
         table.add_column("Skill", style="bold")
         table.add_column("Grade", justify="center")
         table.add_column("Score", justify="right")
@@ -342,7 +344,7 @@ class CLIReporter(ReporterBase):
             console.print(f"  [dim]{escape_markup(str(summary))}[/dim]")
         console.print()
 
-        table = Table(title="Rubric Evaluation", border_style="cyan", show_header=True)
+        table = Table(title="Rubric Evaluation", border_style=FAINT, show_header=True)
         table.add_column("Criterion", style="bold")
         table.add_column("Score", justify="center")
         table.add_column("Pass", justify="center")
@@ -369,10 +371,17 @@ class CLIReporter(ReporterBase):
         composite = agent_eval.get("composite_lift")
         runtime = agent_eval.get("runtime_seconds", 0.0)
 
-        vc = "green" if verdict == "pass" else ("red" if verdict == "fail" else "yellow")
-        composite_text = f"{composite:+.2f}" if isinstance(composite, int | float) else "N/A"
+        vc = GREEN if verdict == "pass" else (RED if verdict == "fail" else AMBER)
+        scored_lift = (
+            isinstance(composite, int | float) and not isinstance(composite, bool) and math.isfinite(composite)
+        )
+        composite_text = f"{composite:+.2f}" if scored_lift else "N/A"
+        composite_style = lift_style(composite) if scored_lift else "dim"
         verdict_text = escape_markup(str(verdict).upper())
-        console.print(f"\n  [{vc}]Verdict: {verdict_text} (composite lift = {composite_text})[/{vc}]")
+        console.print(
+            f"\n  [{vc}]Verdict: {verdict_text}[/{vc}] "
+            f"(composite lift = [{composite_style}]{composite_text}[/{composite_style}])"
+        )
         if verdict == "inconclusive":
             console.print(
                 "  [yellow]Skill never activated. Scores are diagnostic only; no lift verdict was computed.[/yellow]"
@@ -384,12 +393,12 @@ class CLIReporter(ReporterBase):
             console.print("  [dim]Harbor artifacts:[/dim]")
             if harbor_viewer.get("job_url"):
                 console.print(
-                    f"    [dim]Harbor logs:[/dim] [cyan]{escape_markup(harbor_viewer['job_url'])}[/cyan]",
+                    f"    [dim]Harbor logs:[/dim] [dim]{escape_markup(harbor_viewer['job_url'])}[/dim]",
                     soft_wrap=True,
                 )
             if harbor_viewer.get("analysis_url"):
                 console.print(
-                    f"    [dim]Harbor analysis:[/dim] [cyan]{escape_markup(harbor_viewer['analysis_url'])}[/cyan]",
+                    f"    [dim]Harbor analysis:[/dim] [dim]{escape_markup(harbor_viewer['analysis_url'])}[/dim]",
                     soft_wrap=True,
                 )
         console.print(f"  {trial_coverage(agent_eval).text}")
@@ -399,7 +408,7 @@ class CLIReporter(ReporterBase):
         if evaluators:
             table = Table(
                 title="Evaluator Scores (Skill Lift)",
-                border_style="cyan",
+                border_style=FAINT,
                 show_header=True,
             )
             table.add_column("Evaluator", style="bold")
@@ -422,7 +431,7 @@ class CLIReporter(ReporterBase):
                         else "NO SCORE"
                     )
                 else:
-                    lc = "green" if lift > 0.01 else ("red" if lift < -0.01 else "dim")
+                    lc = lift_style(lift)
                     lift_text = f"[{lc}]{lift:+.2f}[/{lc}]"
                 table.add_row(
                     escape_markup(str(name).replace("_", " ").title()),
@@ -462,7 +471,7 @@ class CLIReporter(ReporterBase):
                     url = safe_url(evidence.get("url"))
                     if url:
                         link_text = escape_markup(harbor_evidence_link_text(evidence))
-                        console.print(f"    [dim]{link_text}:[/dim] [cyan]{escape_markup(url)}[/cyan]", soft_wrap=True)
+                        console.print(f"    [dim]{link_text}:[/dim] [dim]{escape_markup(url)}[/dim]", soft_wrap=True)
             if printed:
                 console.print()
 
@@ -470,7 +479,7 @@ class CLIReporter(ReporterBase):
         if any(v.get("score") is not None for v in insights.values()):
             table = Table(
                 title="LLM-as-Judge Insights",
-                border_style="cyan",
+                border_style=FAINT,
                 show_header=True,
             )
             table.add_column("Dimension", style="bold")
@@ -618,7 +627,7 @@ class CLIReporter(ReporterBase):
             border_style="green",
             title_style="bold green",
         )
-        table.add_column("Validator", style="cyan")
+        table.add_column("Validator", style=TEXT)
         table.add_column("Status", justify="center")
         table.add_column("Details")
 
@@ -664,6 +673,26 @@ class CLIReporter(ReporterBase):
                     parts.append(f"{s.warnings} warnings")
                 details = ", ".join(parts) if parts else "Failed"
 
+            if outcome in {"pass", "passed"}:
+                quality = result.metadata.get("quality_scores")
+                if isinstance(quality, dict) and isinstance(quality.get("overall_score"), int | float):
+                    grade = str(quality.get("grade", "?"))
+                    details += f"; quality {escape_markup(grade)} {quality['overall_score']:.1f}/100"
+                agent = result.metadata.get("agent_eval")
+                if isinstance(agent, dict):
+                    raw_summary = agent.get("summary")
+                    summary = raw_summary if isinstance(raw_summary, dict) else agent
+                    lift = summary.get("overall_lift", agent.get("composite_lift"))
+                    if (
+                        isinstance(lift, int | float)
+                        and not isinstance(lift, bool)
+                        and math.isfinite(lift)
+                        and agent.get("verdict") != "inconclusive"
+                        and summary.get("verdict") != "inconclusive"
+                    ):
+                        details += f"; lift [{lift_style(lift)}]{lift:+.2f}[/]"
+                    elif agent.get("verdict") == "inconclusive":
+                        details += "; inconclusive (skill never activated)"
             table.add_row(escape_markup(str(result.validator_name)), status, details)
 
         console.print(table)

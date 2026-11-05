@@ -6,6 +6,7 @@
 from __future__ import annotations
 
 import json
+import threading
 from pathlib import Path
 from types import SimpleNamespace
 from unittest.mock import MagicMock, patch
@@ -1130,3 +1131,203 @@ class TestRefusalAndTruncation:
             assert client.process() == "fallback"
 
         assert client.last_failure is not None
+
+
+def _anthropic_fallback_response(text: str, served_by: object):
+    """Return a reply whose server-side fallback block names the model that served it."""
+    response = _anthropic_response(text)
+    response.content.insert(0, SimpleNamespace(type="fallback", to=served_by))
+    return response
+
+
+class TestModelProvenance:
+    def test_model_used_names_the_configured_model_after_a_success_only(self, monkeypatch: pytest.MonkeyPatch) -> None:
+        _use_provider(monkeypatch, "openai", CHAT_DEFAULT_OPENAI)
+        mock_openai = MagicMock()
+        mock_openai.chat.completions.create.side_effect = [
+            _openai_choice_response("Done"),
+            _openai_choice_response("", finish_reason="content_filter"),
+        ]
+        client = LLMClient()
+
+        with patch("openai.OpenAI", return_value=mock_openai):
+            assert client.model_used is None
+            client.completions("system", "user")
+            assert client.model_used == CHAT_DEFAULT_OPENAI
+            with pytest.raises(LLMClientRefusedError):
+                client.completions("system", "user")
+
+        assert client.model_used is None
+
+    @pytest.mark.parametrize(
+        "served_by",
+        [{"model": ANTHROPIC_REFUSAL_FALLBACK_MODEL}, SimpleNamespace(model=ANTHROPIC_REFUSAL_FALLBACK_MODEL)],
+        ids=["untyped-block", "typed-block"],
+    )
+    def test_model_used_names_the_server_side_fallback_model(
+        self, monkeypatch: pytest.MonkeyPatch, served_by: object
+    ) -> None:
+        _use_provider(monkeypatch, "anthropic", "claude-opus-5-5")
+        mock_anthropic = MagicMock()
+        mock_anthropic.messages.create.return_value = _anthropic_fallback_response("Done", served_by)
+        client = LLMClient()
+
+        with patch("anthropic.Anthropic", return_value=mock_anthropic):
+            assert client.completions("system", "user") == "Done"
+
+        assert client.model == "claude-opus-5-5"
+        assert client.model_used == ANTHROPIC_REFUSAL_FALLBACK_MODEL
+
+    @pytest.mark.parametrize(
+        ("base_url", "expected_model"),
+        [(None, ANTHROPIC_REFUSAL_FALLBACK_MODEL), ("https://gateway.example", "claude-opus-5-5")],
+        ids=["native-sticky-turn", "gateway-without-fallback"],
+    )
+    def test_model_used_reads_the_reply_model_only_when_fallback_was_requested(
+        self, monkeypatch: pytest.MonkeyPatch, base_url: str | None, expected_model: str
+    ) -> None:
+        """A sticky-served turn has no fallback block; its top-level model names the model that wrote it."""
+        pytest.importorskip("anthropic")
+        httpx = pytest.importorskip("httpx")
+        _use_provider(monkeypatch, "anthropic", "claude-opus-5-5")
+        if base_url:
+            monkeypatch.setenv("ANTHROPIC_BASE_URL", base_url)
+        sent: list[dict] = []
+
+        def handler(request):
+            sent.append(json.loads(request.content))
+            return httpx.Response(
+                200,
+                json={
+                    "id": "msg_test",
+                    "type": "message",
+                    "role": "assistant",
+                    "model": ANTHROPIC_REFUSAL_FALLBACK_MODEL,
+                    "content": [{"type": "text", "text": "Done"}],
+                    "stop_reason": "end_turn",
+                    "stop_sequence": None,
+                    "usage": {
+                        "input_tokens": 1,
+                        "output_tokens": 1,
+                        "iterations": [{"type": "fallback_message", "model": ANTHROPIC_REFUSAL_FALLBACK_MODEL}],
+                    },
+                },
+            )
+
+        with httpx.Client(transport=httpx.MockTransport(handler)) as http_client:
+            client = LLMClient(http_client=http_client)
+            assert client.completions("system", "user") == "Done"
+
+        assert ("fallbacks" in sent[0]) is (base_url is None)
+        assert client.model_used == expected_model
+
+    @pytest.mark.parametrize(
+        "base_url", [None, "https://gateway.example"], ids=["native-with-fallback", "gateway-without-fallback"]
+    )
+    def test_model_used_reads_the_fallback_block_before_the_reply_model(
+        self, monkeypatch: pytest.MonkeyPatch, base_url: str | None
+    ) -> None:
+        """The block wins over a different top-level model, and a block is honored on any Anthropic endpoint."""
+        pytest.importorskip("anthropic")
+        httpx = pytest.importorskip("httpx")
+        _use_provider(monkeypatch, "anthropic", "claude-opus-5-5")
+        if base_url:
+            monkeypatch.setenv("ANTHROPIC_BASE_URL", base_url)
+        sent: list[dict] = []
+
+        def handler(request):
+            sent.append(json.loads(request.content))
+            return httpx.Response(
+                200,
+                json={
+                    "id": "msg_test",
+                    "type": "message",
+                    "role": "assistant",
+                    "model": "claude-opus-5-5",
+                    "content": [
+                        {
+                            "type": "fallback",
+                            "from": {"model": "claude-opus-5-5"},
+                            "to": {"model": ANTHROPIC_REFUSAL_FALLBACK_MODEL},
+                        },
+                        {"type": "text", "text": "Done"},
+                    ],
+                    "stop_reason": "end_turn",
+                    "stop_sequence": None,
+                    "usage": {"input_tokens": 1, "output_tokens": 1},
+                },
+            )
+
+        with httpx.Client(transport=httpx.MockTransport(handler)) as http_client:
+            client = LLMClient(http_client=http_client)
+            assert client.completions("system", "user") == "Done"
+
+        assert ("fallbacks" in sent[0]) is (base_url is None)
+        assert client.model_used == ANTHROPIC_REFUSAL_FALLBACK_MODEL
+
+    def test_model_used_is_kept_per_thread(self, monkeypatch: pytest.MonkeyPatch) -> None:
+        _use_provider(monkeypatch, "openai", CHAT_DEFAULT_OPENAI)
+        mock_openai = MagicMock()
+        mock_openai.chat.completions.create.return_value = _openai_choice_response("Done")
+        client = LLMClient()
+        with patch("openai.OpenAI", return_value=mock_openai):
+            client.completions("system", "user")
+        seen: list[str | None] = []
+
+        thread = threading.Thread(target=lambda: seen.append(client.model_used))
+        thread.start()
+        thread.join()
+
+        assert seen == [None]
+        assert client.model_used == CHAT_DEFAULT_OPENAI
+
+    def test_llm_insights_name_the_model_that_wrote_them(self, monkeypatch: pytest.MonkeyPatch) -> None:
+        from skillevaluator.evaluation.insights_judge import InsightsJudge
+
+        _use_provider(monkeypatch, "anthropic", "claude-opus-5-5")
+        claim = {"claim_type": "general", "severity": "warn", "evidence_case_ids": ["positive-001"]}
+        reply = json.dumps(
+            {
+                "conclusions": [{**claim, "title": "Slow", "message": "positive-001 took longer."}],
+                "recommendations": [{**claim, "title": "Clarify", "message": "Clarify positive-001's output."}],
+            }
+        )
+        mock_anthropic = MagicMock()
+        mock_anthropic.messages.create.return_value = _anthropic_fallback_response(
+            reply, {"model": ANTHROPIC_REFUSAL_FALLBACK_MODEL}
+        )
+        canonical = {"dataset": [{"id": "positive-001", "expected_skill": "calculator"}]}
+
+        with patch("anthropic.Anthropic", return_value=mock_anthropic):
+            insights = InsightsJudge().process(canonical=canonical, deterministic={})
+
+        entries = insights["conclusions"] + insights["recommendations"]
+        assert len(entries) == 2
+        assert {entry["model"] for entry in entries} == {ANTHROPIC_REFUSAL_FALLBACK_MODEL}
+
+    def test_only_llm_written_dimensions_name_a_model(self, monkeypatch: pytest.MonkeyPatch) -> None:
+        from skillevaluator.constants import DIMENSION_MAPPING
+        from skillevaluator.evaluation.dimension_judge import compute_dimensions
+
+        _use_provider(monkeypatch, "openai", CHAT_DEFAULT_OPENAI)
+        reply = json.dumps(
+            {
+                "dimensions": [
+                    {"id": dimension, "score": 0.8, "verdict": "pass", "explanation": "Strong evidence."}
+                    for dimension in DIMENSION_MAPPING
+                ]
+            }
+        )
+        mock_openai = MagicMock()
+        mock_openai.chat.completions.create.side_effect = [
+            _openai_choice_response(reply),
+            _openai_choice_response("not json"),
+        ]
+        evaluators = {"accuracy": {"with_skill": 0.8, "baseline": 0.6}}
+
+        with patch("openai.OpenAI", return_value=mock_openai):
+            written = compute_dimensions(evaluators, [], 0.2)
+            deterministic = compute_dimensions(evaluators, [], 0.2)
+
+        assert {dimension["model"] for dimension in written} == {CHAT_DEFAULT_OPENAI}
+        assert not any("model" in dimension for dimension in deterministic)

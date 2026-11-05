@@ -611,6 +611,29 @@ class TestExpectedSourceBinding:
         reasons = _scan_expected(tmp_path, card, _expected(), require=False)
         assert reasons == [f"{field.lower()} is not a canonical value, so it cannot match"]
 
+    @pytest.mark.parametrize(
+        "value",
+        [
+            f"[`{_REPOSITORY}`](https://example.com)",
+            f"`{_REPOSITORY}` <span></span>",
+            f"`{_REPOSITORY}`\n  continued",
+        ],
+        ids=["link", "inline-html", "continuation-line"],
+    )
+    def test_only_a_plain_one_line_item_is_read(self, tmp_path: Path, value: str) -> None:
+        """An item with a link, inline HTML or a second line is missing, as the runbook says.
+
+        The strict provenance scan reads the same items, so both checks treat it as missing.
+        """
+        card = _pass_card(_recorded_lines(**{"Evaluated source": value}))
+        assert _scan_expected(tmp_path, card, _expected(), require=False) == [
+            "evaluated source not recorded, but an expected value was given"
+        ]
+        assert _scan(tmp_path, card, require=True) == [
+            "missing metadata field: - Evaluated source:",
+            "publication PASS without recorded evaluated source",
+        ]
+
     @pytest.mark.parametrize("value", [_UNRECORDED, "not recorded", ""])
     def test_a_placeholder_or_empty_line_is_reported_as_not_recorded(self, tmp_path: Path, value: str) -> None:
         card = _pass_card(_recorded_lines(**{"Evaluated source revision": value}))

@@ -1964,6 +1964,14 @@ def _check_expected_source(path: Path, text: str, offenders: list[Offender], exp
 
     This applies to every verdict: a FAIL card for another commit is as wrong
     to publish under this request as a PASS card.
+
+    Only a plain one-line list item counts as the field's line, which is how
+    the reporter renders it. ``_metadata_list_items`` leaves out an item with a
+    link, image or inline HTML, or one that continues onto a second line, so
+    such a line is reported as not recorded rather than as not canonical. The
+    strict provenance scan treats it as missing too. The parser stays strict on
+    purpose: a link or inline HTML can make the visible value differ from the
+    raw text.
     """
     metadata_lines = _metadata_section_lines(text)
     fallback_line = metadata_lines[0][0] if metadata_lines else 1

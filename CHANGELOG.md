@@ -34,7 +34,8 @@ All notable changes to SkillEvaluator are documented in this file.
   feedback. Candidate templates require a capability-bearing release descriptor;
   released Tier 1 bundles and workflows remain unchanged. Incomplete runs retain
   redacted startup diagnostics, and interrupted selections cannot pass on partial
-  results. GitLab callers use literal job timeouts compatible with GitLab 17.8.
+  results. GitLab callers quote variable values, use literal job timeouts
+  compatible with GitLab 17.8, and safely select changes in runner-owned checkouts.
 
 - `skillevaluator tier3 feedback RUN_DIR [--skill PATH]` opens a terminal chat
   about one completed Tier 3 run. Answers are grounded in that run's scores,

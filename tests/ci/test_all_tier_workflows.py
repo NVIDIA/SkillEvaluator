@@ -99,7 +99,7 @@ def test_setup_configuration_changes_force_a_real_tier1_scan():
     assert "/files?per_page=100&page=" in gate
     assert ".github/" in gate and ".gitlab-ci.yml" in gate
     gitlab = str(load("ci/gitlab/all-tiers.yml")["skill-evaluation"]["script"])
-    assert "ci_changed=" in gitlab and "SCAN_MODE=all" in gitlab
+    assert "from select_changed_skills import _git" in gitlab and 'print("all" if setup else "changed")' in gitlab
 
 
 def test_gitlab_native_reports_are_outside_candidate_until_evaluation_completes():
@@ -258,3 +258,12 @@ def test_gitlab_shared_native_timeout_is_a_literal_duration():
     assert "SKILL_EVAL_JOB_TIMEOUT" not in config["variables"]
     candidate = load("ci/templates/all-tiers/gitlab-all-tiers.yml")
     assert candidate["skill-evaluation-native"]["timeout"] == "5 hours"
+
+
+def test_gitlab_setup_selector_uses_pinned_safe_git_reader():
+    script = "\n".join(load("ci/gitlab/all-tiers.yml")["skill-evaluation"]["script"])
+    assert 'ci_changed="$(git diff' not in script
+    assert 'sys.path.insert(0, "/opt/skillevaluator/ci")' in script
+    assert "from select_changed_skills import _git" in script
+    assert "--name-only" in script and '"-z"' in script and "--no-renames" in script
+    assert 're.fullmatch(r"[0-9a-f]{40}", value)' in script

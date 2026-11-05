@@ -415,3 +415,21 @@ def test_gitlab_docker_render_sets_a_literal_job_timeout(repository, all_release
     assert scan["skill-evaluation-native"] == {"timeout": f"{minutes} minutes"}
     assert scan["variables"]["SKILL_EVAL_TIMEOUT_SECONDS"] == str(minutes * 60)
     assert "SKILL_EVAL_JOB_TIMEOUT" not in scan["variables"]
+
+
+def test_gitlab_variable_scalars_are_explicit_strings_for_gitlab_yaml_parser(repository, all_release):
+    subprocess.run(
+        ["git", "-C", str(repository), "remote", "set-url", "origin", "https://gitlab.example.test/group/consumer.git"],
+        check=True,
+    )
+    result = invoke(repository, all_release, "--mode", "save")
+    assert result.exit_code == 0, result.output
+    source = (repository / ".gitlab-ci.yml").read_text()
+    document = yaml.compose(source)
+    variables = next(value for key, value in document.value if key.value == "variables")
+    assert all(value.style in {"'", '"'} for _key, value in variables.value)
+    parsed = yaml.safe_load(source)
+    assert parsed["variables"]["SKILL_EVAL_TIERS"] == "1,2,3"
+    assert parsed["skill-evaluation-native"]["timeout"] == "300 minutes"
+    feedback = yaml.safe_load((repository / ".gitlab/skill-feedback.yml").read_text())
+    assert isinstance(feedback["include"][0]["inputs"]["tools-ref"], str)

@@ -69,10 +69,20 @@ skill-evaluation:
       fi
       # Changes to CI onboarding must exercise real skills on the setup MR.
       if [ "$SCAN_MODE" = changed ]; then
-        ci_changed="$(git diff --name-only "$DIFF_BASE_SHA" "$DIFF_HEAD_SHA")"
-        if printf '%s\n' "$ci_changed" | awk '/^(\.github\/|\.gitlab\/|\.skillevaluator\/ci|\.gitlab-ci\.yml$)/ { found=1 } END { exit !found }'; then
-          export SCAN_MODE=all
-        fi
+        SCAN_MODE="$(python -I - <<'PYTHON'
+      import os, re, sys
+      from pathlib import Path
+      sys.path.insert(0, "/opt/skillevaluator/ci")
+      from select_changed_skills import _git
+      base, head = os.environ["DIFF_BASE_SHA"], os.environ["DIFF_HEAD_SHA"]
+      if any(not re.fullmatch(r"[0-9a-f]{40}", value) for value in (base, head)):
+          raise SystemExit("Changed mode requires exact base and head commits")
+      changed = _git(Path(os.environ["CI_PROJECT_DIR"]).resolve(), "diff", "--name-only", "-z", "--no-renames", base, head, "--").split(b"\0")
+      setup = any(path.startswith((b".github/", b".gitlab/", b".skillevaluator/ci")) or path == b".gitlab-ci.yml" for path in changed)
+      print("all" if setup else "changed")
+      PYTHON
+      )"
+        export SCAN_MODE
       fi
       set +e
       python /opt/skillevaluator/ci/run_tier1.py --workspace "$CI_PROJECT_DIR" --reports "$reports_dir"

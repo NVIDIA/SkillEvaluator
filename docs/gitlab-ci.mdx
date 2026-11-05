@@ -77,6 +77,10 @@ skill-evaluation-native:
   timeout: 45 minutes
 ```
 
+Keep a manual tier selection quoted, for example `SKILL_EVAL_TIERS: '1,2,3'`.
+GitLab's YAML parser reads the unquoted value as the number `123`. The CLI
+quotes generated variable values automatically.
+
 ## Get started
 
 The shared image applies one default validation policy to public and private

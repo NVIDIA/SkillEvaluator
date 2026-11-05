@@ -26,6 +26,35 @@ DEMO_BRANCH = "ci/skillevaluator-all-tiers-test"
 SHA = re.compile(r"[0-9a-f]{40}")
 
 
+class _GitLabVariable(str):
+    """Force GitLab's YAML parser to preserve a CI variable's string value."""
+
+    __slots__ = ()
+
+
+class _GitLabDumper(git.WorkflowDumper):
+    pass
+
+
+def _represent_gitlab_variable(dumper, value):
+    return dumper.represent_scalar("tag:yaml.org,2002:str", value, style='"')
+
+
+_GitLabDumper.add_representer(_GitLabVariable, _represent_gitlab_variable)
+
+
+def _gitlab_yaml_text(document):
+    # GitLab's Ruby parser reads an unquoted 1,2,3 as integer 123. Quote CI
+    # variable scalars without changing typed include inputs or job settings.
+    rendered = dict(document)
+    if "variables" in rendered:
+        rendered["variables"] = {
+            key: _GitLabVariable(value) if isinstance(value, str) else value
+            for key, value in rendered["variables"].items()
+        }
+    return yaml.dump(rendered, Dumper=_GitLabDumper, sort_keys=False, allow_unicode=True, width=1000)
+
+
 def validate_release(data: dict) -> dict:
     if (
         not isinstance(data, dict)
@@ -363,8 +392,8 @@ def render(wizard, repo, release, platform, branch, roots, options):
         },
     }
     return {
-        GL_SCAN: header + wizard.yaml_text(scan),
-        GL_FEEDBACK: header + wizard.yaml_text({"include": [feedback_include]}),
+        GL_SCAN: header + _gitlab_yaml_text(scan),
+        GL_FEEDBACK: header + _gitlab_yaml_text({"include": [feedback_include]}),
     }
 
 

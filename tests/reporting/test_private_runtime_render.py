@@ -205,8 +205,10 @@ def test_runtime_replay_and_render_need_no_optional_runtime_dependencies(tmp_pat
 import json, sys
 from pathlib import Path
 
-BLOCKED = {'anthropic', 'boto3', 'botocore', 'harbor', 'openai', 'litellm',
-           'langgraph', 'langgraph_checkpoint', 'opentelemetry'}
+# Top-level import names of every optional extra in pyproject.toml
+# (llm, tier3, security, publisher, dashboard).
+BLOCKED = {'anthropic', 'boto3', 'botocore', 'litellm', 'openai', 'harbor', 'mcp', 'jwt', 'oauthlib',
+           'dotenv', 'bandit', 'pip_audit', 'streamlit'}
 
 class Blocker:
     def find_spec(self, name, path=None, target=None):

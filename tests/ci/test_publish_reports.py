@@ -3,6 +3,8 @@
 
 """Boundaries for privileged publication of untrusted CI report data."""
 
+import base64
+import hashlib
 import importlib.util
 import io
 import json
@@ -30,6 +32,8 @@ def trusted_workflow_pins(monkeypatch):
     monkeypatch.setattr(verify_provenance, "fetch_signing_keys", lambda: JWKS)
     monkeypatch.setenv("TRUSTED_EVALUATOR_SHA", "c" * 40)
     monkeypatch.setenv("TRUSTED_CALLER_BLOBS", "b" * 40)
+    monkeypatch.delenv("TRUSTED_WRAPPER_WORKFLOWS", raising=False)
+    monkeypatch.delenv("DELEGATED_EVALUATOR_WRAPPER", raising=False)
 
 
 def archive(files):
@@ -420,7 +424,7 @@ class FakeAPI:
                 ],
             }
         if path == "/repos/owner/consumer":
-            return {"default_branch": "main"}
+            return {"default_branch": "main", "private": False, "visibility": "public"}
         if "/branches/" in path:
             return {"commit": {"sha": self.branch_sha}}
         if "/pulls/" in path:
@@ -705,8 +709,16 @@ def test_scan_evidence_upload_holds_exactly_what_the_publisher_reads(tmp_path):
     ]["steps"]
     uploads = [step for step in steps if step.get("uses", "").startswith("actions/upload-artifact@")]
     assert len(uploads) == 3
-    full = next(step for step in uploads if step["with"]["name"] == "${{ inputs.artifact-name }}-attempt-${{ github.run_attempt }}")
-    evidence = next(step for step in uploads if step["with"]["name"] == "${{ inputs.artifact-name }}-evidence-attempt-${{ github.run_attempt }}")
+    full = next(
+        step
+        for step in uploads
+        if step["with"]["name"] == "${{ inputs.artifact-name }}-attempt-${{ github.run_attempt }}"
+    )
+    evidence = next(
+        step
+        for step in uploads
+        if step["with"]["name"] == "${{ inputs.artifact-name }}-evidence-attempt-${{ github.run_attempt }}"
+    )
     assert evidence["uses"] == full["uses"] and evidence["if"] == full["if"] == "always()"
     assert evidence["with"]["name"] == "${{ inputs.artifact-name }}-evidence-attempt-${{ github.run_attempt }}"
     assert evidence["with"]["retention-days"] == full["with"]["retention-days"]
@@ -1191,6 +1203,399 @@ def test_explicit_fork_evaluator_identity_is_required(monkeypatch):
         publisher._validate_workflow_provenance(FakeAPI(record=record), "owner/consumer", record)
     monkeypatch.setenv("EVALUATOR_REPOSITORY", "example/evaluator")
     publisher._validate_workflow_provenance(FakeAPI(record=record), "owner/consumer", record)
+
+
+WRAPPER = "example/shared/.github/workflows/skills.yml@" + "e" * 40
+SECOND_WRAPPER = "example/platform/.github/workflows/check.yml@" + "f" * 40
+EVALUATOR = "NVIDIA/SkillEvaluator/.github/workflows/evaluate-skills.yml@" + "c" * 40
+
+
+class NestedAPI(FakeAPI):
+    def download_artifact(self, artifact_id):
+        if artifact_id == 457:
+            # GitHub signs the leaf job identity, independent of API reference order.
+            return signed_receipt(self.record, job_workflow_ref=EVALUATOR, job_workflow_sha="c" * 40)
+        return super().download_artifact(artifact_id)
+
+
+@pytest.mark.parametrize("event", ["push", "pull_request", "workflow_dispatch"])
+@pytest.mark.parametrize("wrappers", [[], [WRAPPER], [WRAPPER, SECOND_WRAPPER]])
+@pytest.mark.parametrize("reverse", [False, True])
+def test_approved_wrappers_preserve_leaf_identity_and_direct_publication(
+    tmp_path, monkeypatch, event, wrappers, reverse
+):
+    monkeypatch.setenv("TRUSTED_WRAPPER_WORKFLOWS", "\n".join(wrappers))
+    paths = [*wrappers, EVALUATOR]
+    if reverse:
+        paths.reverse()
+    record = {
+        **run_record(),
+        "event": event,
+        "referenced_workflows": [{"path": path, "sha": path.rsplit("@", 1)[1]} for path in paths],
+    }
+    publisher.publish(
+        NestedAPI(record=record),
+        "owner/consumer",
+        123,
+        "https://owner.github.io/consumer",
+        tmp_path / "site",
+        tmp_path / "output",
+        render=fake_render,
+    )
+    receipt = json.loads((tmp_path / "site/runs/123/1/receipt.json").read_text())
+    assert receipt["trusted_evaluator_sha"] == "c" * 40
+    if wrappers:
+        assert receipt["trusted_wrapper_workflows"] == sorted(wrappers)
+    else:
+        assert "trusted_wrapper_workflows" not in receipt
+
+
+@pytest.mark.parametrize(
+    "approved, paths",
+    [
+        ("", [WRAPPER, EVALUATOR]),
+        (SECOND_WRAPPER, [WRAPPER, EVALUATOR]),
+        (WRAPPER, [WRAPPER, SECOND_WRAPPER, EVALUATOR]),
+        (WRAPPER, [WRAPPER, WRAPPER, EVALUATOR]),
+        (WRAPPER, [WRAPPER, EVALUATOR, EVALUATOR]),
+        (WRAPPER, [WRAPPER]),
+        (WRAPPER.replace("e" * 40, "main"), [WRAPPER, EVALUATOR]),
+        (WRAPPER + ",", [WRAPPER, EVALUATOR]),
+        (WRAPPER.replace("skills.yml", "../skills.yml"), [WRAPPER, EVALUATOR]),
+        (",".join([WRAPPER] * 33), [WRAPPER, EVALUATOR]),
+    ],
+)
+def test_wrapper_trust_rejects_unapproved_ambiguous_or_mutable_references(monkeypatch, approved, paths):
+    monkeypatch.setenv("TRUSTED_WRAPPER_WORKFLOWS", approved)
+    record = {**run_record(), "referenced_workflows": [{"path": path, "sha": path.rsplit("@", 1)[1]} for path in paths]}
+    with pytest.raises(publisher.PublicationError):
+        publisher._validate_workflow_provenance(NestedAPI(record=record), "owner/consumer", record)
+
+
+@pytest.mark.parametrize("failure", ["caller", "receipt", "sha"])
+def test_wrapper_approval_does_not_bypass_caller_receipt_or_sha_validation(monkeypatch, failure):
+    monkeypatch.setenv("TRUSTED_WRAPPER_WORKFLOWS", WRAPPER)
+    record = run_record()
+    record["referenced_workflows"].insert(0, {"path": WRAPPER, "sha": "e" * 40})
+    if failure == "sha":
+        record["referenced_workflows"][0]["sha"] = "f" * 40
+
+    class BadAPI(NestedAPI):
+        def get(self, path):
+            result = super().get(path)
+            if failure == "caller" and "/contents/" in path:
+                return {**result, "sha": "f" * 40}
+            return result
+
+        def download_artifact(self, artifact_id):
+            if failure == "receipt" and artifact_id == 457:
+                return signed_receipt(self.record, job_workflow_ref=WRAPPER, job_workflow_sha="e" * 40)
+            return super().download_artifact(artifact_id)
+
+    with pytest.raises(publisher.PublicationError):
+        publisher._validate_workflow_provenance(BadAPI(record=record), "owner/consumer", record)
+
+
+TAG_WRAPPER = WRAPPER.rsplit("@", 1)[0] + "@v3"
+
+
+@pytest.mark.parametrize("resolved_sha", ["e" * 40, "f" * 40])
+def test_approved_tag_uses_historical_resolution_and_keeps_leaf_pins(tmp_path, monkeypatch, resolved_sha):
+    monkeypatch.setenv("TRUSTED_WRAPPER_WORKFLOWS", TAG_WRAPPER)
+    record = run_record()
+    reference = {"path": TAG_WRAPPER, "sha": resolved_sha, "ref": "refs/tags/v3"}
+    record["referenced_workflows"].insert(0, reference)
+    api = NestedAPI(record=record)
+    publisher.publish(
+        api,
+        "owner/consumer",
+        123,
+        "https://owner.github.io/consumer",
+        tmp_path / "site",
+        tmp_path / "out",
+        render=fake_render,
+    )
+    receipt = json.loads((tmp_path / "site/runs/123/1/receipt.json").read_text())
+    assert receipt["resolved_wrapper_workflows"] == [reference]
+    assert receipt["trusted_evaluator_sha"] == "c" * 40
+    assert "delegated_evaluator_wrapper" not in receipt
+    assert not any("/repos/example/" in path or "/git/ref" in path for path in api.paths)
+    monkeypatch.setenv("TRUSTED_EVALUATOR_SHA", "d" * 40)
+    with pytest.raises(publisher.PublicationError, match="unapproved"):
+        publisher._validate_workflow_provenance(api, "owner/consumer", record)
+
+
+@pytest.mark.parametrize("ref", [None, "", "refs/heads/v3", "refs/tags/v4", "v3", 1])
+def test_stable_wrapper_requires_exact_historical_tag_identity(monkeypatch, ref):
+    monkeypatch.setenv("TRUSTED_WRAPPER_WORKFLOWS", TAG_WRAPPER)
+    record = run_record()
+    record["referenced_workflows"].append({"path": TAG_WRAPPER, "sha": "e" * 40, "ref": ref})
+    with pytest.raises(publisher.PublicationError, match="historical GitHub tag"):
+        publisher._validate_workflow_provenance(NestedAPI(record=record), "owner/consumer", record)
+
+
+def caller_contents(source):
+    raw = source.encode("utf-8")
+    return {
+        "type": "file",
+        "path": publisher.WORKFLOW_PATH,
+        "encoding": "base64",
+        "sha": hashlib.sha1(b"blob " + str(len(raw)).encode("ascii") + b"\0" + raw).hexdigest(),
+        "content": base64.b64encode(raw).decode("ascii"),
+    }
+
+
+class DelegatedAPI(FakeAPI):
+    def __init__(self, *, delegate=TAG_WRAPPER, caller=None, leaf_sha="d" * 40, event="push", reverse=False):
+        self.delegate = delegate
+        self.caller = caller_contents(caller or f"name: Skill checks\non: push\njobs:\n  scan:\n    uses: {delegate}\n")
+        self.leaf_sha = leaf_sha
+        self.leaf = EVALUATOR.rsplit("@", 1)[0] + "@" + leaf_sha
+        wrapper = {"path": delegate, "sha": "e" * 40}
+        if delegate == TAG_WRAPPER:
+            wrapper["ref"] = "refs/tags/v3"
+        references = [wrapper, {"path": self.leaf, "sha": leaf_sha}]
+        record = {**run_record(), "event": event, "referenced_workflows": references[::-1] if reverse else references}
+        super().__init__(record=record)
+
+    def get(self, path):
+        # This token cannot read the private components repository or resolve tags.
+        assert path.startswith("/repos/owner/consumer/") or path == "/repos/owner/consumer"
+        assert "/git/ref" not in path
+        if "/contents/" in path:
+            self.paths.append(path)
+            expected = "d" * 40 if self.record["event"] == "pull_request" else self.record["head_sha"]
+            assert path.endswith("?ref=" + expected)
+            return self.caller
+        return super().get(path)
+
+    def download_artifact(self, artifact_id):
+        if artifact_id == 457:
+            return signed_receipt(self.record, job_workflow_ref=self.leaf, job_workflow_sha=self.leaf_sha)
+        return super().download_artifact(artifact_id)
+
+
+def approve_delegation(monkeypatch, api):
+    monkeypatch.setenv("TRUSTED_WRAPPER_WORKFLOWS", api.delegate)
+    monkeypatch.setenv("DELEGATED_EVALUATOR_WRAPPER", api.delegate)
+    monkeypatch.setenv("TRUSTED_CALLER_BLOBS", api.caller["sha"])
+
+
+@pytest.mark.parametrize("event", ["push", "pull_request", "workflow_dispatch"])
+@pytest.mark.parametrize("delegate", [TAG_WRAPPER, WRAPPER])
+@pytest.mark.parametrize("reverse", [False, True])
+def test_explicit_delegation_publishes_new_pinned_leaf_from_private_wrapper(
+    tmp_path, monkeypatch, event, delegate, reverse
+):
+    api = DelegatedAPI(delegate=delegate, event=event, reverse=reverse)
+    approve_delegation(monkeypatch, api)
+    monkeypatch.delenv("TRUSTED_EVALUATOR_SHA")
+    publisher.publish(
+        api,
+        "owner/consumer",
+        123,
+        "https://owner.github.io/consumer",
+        tmp_path / "site",
+        tmp_path / "out",
+        render=fake_render,
+    )
+    receipt = json.loads((tmp_path / "site/runs/123/1/receipt.json").read_text())
+    assert receipt["trusted_evaluator_sha"] == "d" * 40
+    assert receipt["delegated_evaluator_wrapper"] == delegate
+    assert receipt["trusted_wrapper_workflows"] == [delegate]
+    if delegate == TAG_WRAPPER:
+        assert receipt["resolved_wrapper_workflows"] == [{"path": delegate, "sha": "e" * 40, "ref": "refs/tags/v3"}]
+
+
+@pytest.mark.parametrize(
+    "failure",
+    [
+        "unapproved_delegate",
+        "no_wrapper",
+        "extra_wrapper",
+        "two_leaves",
+        "mutable_leaf",
+        "other_evaluator",
+        "missing_wrapper_ref",
+        "wrong_caller_blob",
+        "invalid_pin_allowlist",
+        "wrapper_signed_receipt",
+        "wrong_leaf_sha",
+    ],
+)
+def test_delegation_rejects_unproven_chains_and_preserves_signed_identity(monkeypatch, failure):
+    api = DelegatedAPI(event="pull_request")
+    approve_delegation(monkeypatch, api)
+    refs = api.record["referenced_workflows"]
+    if failure == "unapproved_delegate":
+        monkeypatch.setenv("TRUSTED_WRAPPER_WORKFLOWS", WRAPPER)
+    elif failure == "no_wrapper":
+        refs.pop(0)
+    elif failure == "extra_wrapper":
+        monkeypatch.setenv("TRUSTED_WRAPPER_WORKFLOWS", TAG_WRAPPER + "," + SECOND_WRAPPER)
+        refs.append({"path": SECOND_WRAPPER, "sha": "f" * 40})
+    elif failure == "two_leaves":
+        refs.append({"path": EVALUATOR, "sha": "c" * 40})
+    elif failure == "mutable_leaf":
+        refs[1]["path"] = api.leaf.rsplit("@", 1)[0] + "@v3"
+    elif failure == "other_evaluator":
+        refs[1]["path"] = api.leaf.replace("NVIDIA/SkillEvaluator", "attacker/SkillEvaluator")
+    elif failure == "missing_wrapper_ref":
+        refs[0].pop("ref")
+    elif failure == "wrong_caller_blob":
+        monkeypatch.setenv("TRUSTED_CALLER_BLOBS", "b" * 40)
+    elif failure == "invalid_pin_allowlist":
+        monkeypatch.setenv("TRUSTED_EVALUATOR_SHA", "main")
+    elif failure == "wrapper_signed_receipt":
+        api.leaf, api.leaf_sha = TAG_WRAPPER, "e" * 40
+    elif failure == "wrong_leaf_sha":
+        api.leaf_sha = "f" * 40
+    with pytest.raises(publisher.PublicationError):
+        publisher._validate_workflow_provenance(api, "owner/consumer", api.record)
+
+
+@pytest.mark.parametrize(
+    "caller",
+    [
+        "jobs: {}",
+        "[]",
+        "jobs: []",
+        "jobs:\n  scan: []",
+        "jobs:\n  scan: {runs-on: ubuntu-latest}",
+        f"jobs:\n  scan:\n    uses: {TAG_WRAPPER}\n  second:\n    uses: {EVALUATOR}",
+        f"jobs:\n  scan:\n    uses: {EVALUATOR}",
+        f"jobs:\n  scan:\n    uses: {TAG_WRAPPER}\n    strategy:\n      matrix:\n        x: [1, 2]",
+        f"jobs:\n  scan:\n    uses: {TAG_WRAPPER}\n    steps: []",
+        f"jobs:\n  scan:\n    uses: {TAG_WRAPPER}\n    uses: {EVALUATOR}",
+        f"jobs:\n  scan:\n    uses: {TAG_WRAPPER}\njobs:\n  scan:\n    uses: {EVALUATOR}",
+        f"job: &scan\n  uses: {TAG_WRAPPER}\njobs:\n  scan: *scan",
+        f"jobs:\n  scan: {{uses: {TAG_WRAPPER}, <<: {{}}}}",
+        f"jobs:\n  scan:\n    uses: !!str {TAG_WRAPPER}",
+        f"jobs:\n  scan:\n    uses: {TAG_WRAPPER}\n---\njobs: {{}}",
+    ],
+)
+def test_delegation_rejects_ambiguous_or_nonexclusive_approved_root(monkeypatch, caller):
+    # Even adding an unsafe caller blob to the allowlist cannot relax the delegation shape.
+    api = DelegatedAPI(caller=caller, event="pull_request")
+    approve_delegation(monkeypatch, api)
+    with pytest.raises(publisher.PublicationError):
+        publisher._validate_workflow_provenance(api, "owner/consumer", api.record)
+
+
+@pytest.mark.parametrize("field, value", [("content", "!!!!"), ("content", "YQ=="), ("encoding", "none")])
+def test_delegation_requires_caller_content_matching_approved_blob(monkeypatch, field, value):
+    api = DelegatedAPI()
+    approve_delegation(monkeypatch, api)
+    api.caller[field] = value
+    with pytest.raises(publisher.PublicationError):
+        publisher._validate_workflow_provenance(api, "owner/consumer", api.record)
+
+
+def test_without_delegation_an_explicit_evaluator_allowlist_remains_required(monkeypatch):
+    monkeypatch.delenv("TRUSTED_EVALUATOR_SHA")
+    with pytest.raises(publisher.PublicationError, match="allowlists"):
+        publisher._validate_workflow_provenance(FakeAPI(), "owner/consumer", run_record())
+
+
+PRIVATE_URL = "https://quiet-project-123.pages.github.io/"
+PRIVATE_PAGES = {"public": False, "build_type": "workflow", "cname": None, "html_url": PRIVATE_URL}
+
+
+class PrivatePagesAPI(FakeAPI):
+    def __init__(self, *, info=None, pages=None):
+        super().__init__()
+        self.info = info if info is not None else {"private": True, "visibility": "private", "default_branch": "main"}
+        self.pages = pages if pages is not None else PRIVATE_PAGES
+
+    def get(self, path):
+        if path == "/repos/owner/consumer":
+            self.paths.append(path)
+            return self.info
+        if path == "/repos/owner/consumer/pages":
+            self.paths.append(path)
+            return self.pages
+        return super().get(path)
+
+
+@pytest.mark.parametrize("visibility", ["private", "internal"])
+@pytest.mark.parametrize("trailing_slash", [True, False])
+def test_private_publication_requires_live_private_pages_and_exact_url(tmp_path, visibility, trailing_slash):
+    api = PrivatePagesAPI(info={"private": True, "visibility": visibility, "default_branch": "main"})
+    expected = PRIVATE_URL if trailing_slash else PRIVATE_URL.rstrip("/")
+    published = publisher.publish(
+        api,
+        "owner/consumer",
+        123,
+        expected,
+        tmp_path / "site",
+        tmp_path / "out",
+        render=fake_render,
+    )
+    assert published["report_url"] == PRIVATE_URL + "runs/123/1/"
+    assert "/repos/owner/consumer/pages" in api.paths
+    assert (tmp_path / "site/runs/123/1/receipt.json").is_file()
+
+
+@pytest.mark.parametrize(
+    "pages, expected",
+    [
+        ({**PRIVATE_PAGES, "public": True}, PRIVATE_URL),
+        ({key: value for key, value in PRIVATE_PAGES.items() if key != "public"}, PRIVATE_URL),
+        ({**PRIVATE_PAGES, "public": "false"}, PRIVATE_URL),
+        ({**PRIVATE_PAGES, "public": 0}, PRIVATE_URL),
+        ({**PRIVATE_PAGES, "html_url": "https://changed.pages.github.io/"}, PRIVATE_URL),
+        ({**PRIVATE_PAGES, "html_url": "https://owner.github.io/consumer/"}, PRIVATE_URL),
+        ({**PRIVATE_PAGES, "build_type": "legacy"}, PRIVATE_URL),
+        ({**PRIVATE_PAGES, "cname": "reports.example.com"}, PRIVATE_URL),
+        (PRIVATE_PAGES, "https://owner.github.io/consumer/"),
+        (PRIVATE_PAGES, "https://changed.pages.github.io/"),
+        ([], PRIVATE_URL),
+    ],
+)
+def test_private_publication_stops_before_rendering_or_history_writes(tmp_path, pages, expected):
+    site, output = tmp_path / "site", tmp_path / "out"
+    site.mkdir()
+    (site / "history.json").write_text("[]\n")
+    rendered = []
+    with pytest.raises(publisher.PublicationError, match="verified private Pages"):
+        publisher.publish(
+            PrivatePagesAPI(pages=pages),
+            "owner/consumer",
+            123,
+            expected,
+            site,
+            output,
+            render=lambda *_args: rendered.append(True),
+        )
+    assert not rendered
+    assert (site / "history.json").read_text() == "[]\n"
+    assert sorted(path.name for path in site.iterdir()) == ["history.json"]
+    assert not list(output.iterdir())
+
+
+@pytest.mark.parametrize(
+    "info",
+    [
+        {},
+        {"private": False},
+        {"private": "false", "visibility": "public"},
+        {"private": False, "visibility": "internal"},
+        {"private": False, "visibility": "public"},
+    ],
+)
+def test_private_url_never_bypasses_privacy_recheck_when_repository_metadata_changes(info):
+    with pytest.raises(publisher.PublicationError, match="verified private Pages"):
+        publisher._validate_pages_privacy(
+            PrivatePagesAPI(info=info, pages={**PRIVATE_PAGES, "public": True}),
+            "owner/consumer",
+            PRIVATE_URL,
+        )
+
+
+def test_public_publication_does_not_require_pages_visibility_endpoint():
+    api = FakeAPI()
+    publisher._validate_pages_privacy(api, "owner/consumer", "https://owner.github.io/consumer")
+    assert api.paths == ["/repos/owner/consumer"]
 
 
 def test_missing_receipt_is_a_skipped_publisher_run(tmp_path, monkeypatch):

@@ -81,3 +81,67 @@ details.check-result>summary{cursor:pointer;list-style:none;margin-bottom:0}deta
 
 /* Tier 3 pills: the type floor and AA text in both themes. The Tier 3 tab has its own later style block, hence the .tab-content prefix. */
 .tab-content .t3-insight-source,.tab-content .t3-sug-cat{font-size:11px}.tab-content .insight-source-llm{color:var(--llm-tx)}
+
+/* Native page scrolling and complete expanded evidence. */
+:root{color-scheme:light;scrollbar-gutter:stable;--mobile-nav-height:0px}
+[data-theme="dark"]{color-scheme:dark}
+html{scroll-behavior:auto}
+.table-container.active,.summary-table-container.active{max-height:none;overflow-y:visible}
+.skill-content.active,.validator-content.active,.top-issues-content.active,.contributor-content.active{overflow-y:visible}
+.raw-output{max-height:320px;overflow:auto;scrollbar-gutter:stable}
+.tab-content,.workspace-heading,.run-metadata,.t3-agent-anchor,.check-result,.check-finding{scroll-margin-top:calc(var(--mobile-nav-height) + 80px)}
+.tab-content:focus,.container:focus{outline:none}
+.theme-control{display:flex;align-items:center;gap:7px;font-size:12px;color:var(--text-secondary)}
+.theme-control select{font:inherit;color:var(--dark-text);background:var(--bg);border:1px solid var(--border-color);border-radius:5px;padding:7px;min-height:36px}
+select:focus-visible{outline:3px solid var(--focus-ring);outline-offset:3px}
+.tier-empty{padding:24px;border:1px solid var(--border-color);border-radius:8px;background:var(--bg)}
+.tier-empty h2{font-size:18px}.tier-empty p{color:var(--text-secondary);margin-top:10px}
+.mobile-tier-nav{display:none}
+.agent-hero{padding:20px 24px}.agent-hero-detail{max-width:460px}
+.t3-subtabs{top:var(--mobile-nav-height)!important;scrollbar-gutter:stable}
+.t3-subtab,.t3-agent-tab-btn{min-height:40px}
+.t3-agent-anchor{scroll-margin-top:calc(var(--mobile-nav-height) + 80px)}
+@media(max-width:760px){
+ .report-sidebar{position:relative;overflow:visible;flex-wrap:wrap;gap:6px}
+ .report-sidebar [data-report-tier]{display:none}
+ .report-sidebar .sidebar-brand{flex:1}
+ .mobile-tier-nav{display:flex;position:sticky;top:0;z-index:100;gap:6px;padding:8px;background:var(--sidebar-bg);border-radius:6px;box-shadow:0 2px 4px #0001;margin-bottom:16px}
+ .mobile-tier-nav a{flex:1;padding:7px 10px;border-radius:4px;font-size:12px;text-align:center;color:#dce3e8;text-decoration:none;white-space:nowrap}
+ .mobile-tier-nav a[aria-current]{color:#c3e498;background:#30392b;box-shadow:inset 0 -2px #76b900}
+ .tier-cards{display:flex;flex-wrap:wrap;gap:8px;margin-top:16px;padding-top:16px}
+ .tier-card{flex:1 1 150px;margin:0;padding:10px;min-width:0}
+ .tier-card-title,.tier-card-stats{font-size:11px}.agent-hero{padding:16px}
+ .report-sidebar>a:not(.sidebar-brand){padding:6px;font-size:12px}
+ .t3-subtabs{border-radius:0;max-width:100%;z-index:90}
+ .t3-subtab{padding:10px;font-size:12px}
+}
+@media(forced-colors:active){
+ .tier-card.active,.mobile-tier-nav a[aria-current],.report-sidebar .sidebar-current,[role="tab"][aria-selected="true"]{outline:2px solid Highlight;outline-offset:-2px}
+ .theme-control select{border:1px solid ButtonText}
+}
+@media print{
+ :root,[data-theme="dark"]{color-scheme:light;--mobile-nav-height:0px}
+ .mobile-tier-nav,.theme-control{display:none!important}
+ .tab-content,.t3-page,.t3-agent-panel,.table-container,.summary-table-container{display:block!important;max-height:none!important;overflow:visible!important}
+ .skill-card,.validator-card,.check-finding,.summary-table tr,.t3-trial-card{display:revert!important}
+ .t3-filter-bar{display:none!important}
+ .raw-output{max-height:none;overflow:visible}
+}
+
+.hero-decision-reason{font-size:12px;color:var(--text-secondary);margin-top:8px;max-width:420px}
+
+@media screen and (prefers-color-scheme:dark){:root:not([data-theme]){color-scheme:dark;--light-bg:#151a1f;--bg:#1e252c;--bg-secondary:#252d35;--bg-tertiary:#303b46;--dark-text:#e1e6eb;--text-secondary:#aab5bf;--border-color:#3b454f;--secondary-color:#b0d684;--accent-color:#b0d684;--success-color:#a2cf72;--danger-color:#ffadb1;--warning-color:#e7c778;--critical-color:#ffadb1;--high-color:#f7b27a;--medium-color:#e7c778;--low-color:#aab5bf;--info-color:#8ccff0;--on-accent:#151a1f;--on-success:#151a1f;--on-danger:#151a1f;--on-warning:#151a1f;--focus-ring:#b0d684;--chart-grid:#4b5661;--chart-tick:#aab5bf;--chart-label:#e1e6eb;--table-header-bg:#252d35;--table-row-hover:#303b46;--badge-pass-bg:#293e27;--badge-pass-tx:#c4e7a0;--badge-fail-bg:#412a2d;--badge-fail-tx:#ffc1c4;--badge-warn-bg:#403826;--badge-warn-tx:#f4d792;--sev-critical-bg:#412a2d;--sev-critical-tx:#ffc1c4;--sev-high-bg:#45301f;--sev-high-tx:#ffcd9e;--sev-medium-bg:#403826;--sev-medium-tx:#f4d792;--sev-low-bg:#303b46;--sev-low-tx:#d0d7de;--sev-info-bg:#1d3646;--sev-info-tx:#a9d8f5;--llm-tx:#c4b5fd;--sidebar-bg:#151a1f;--se-logo-panel:#152117;--se-logo-panel-edge:#304631;--se-logo-ring-outer:#39523a;--se-logo-ring-middle:#6f9264;--se-logo-ring-inner:#dbe8d6;--se-logo-core:#76b900;--se-logo-core-edge:#9bdb34}}
+
+@media print{
+ table{table-layout:fixed;width:100%!important;min-width:0!important}
+ th,td{white-space:normal!important;overflow-wrap:anywhere!important;word-break:normal!important}
+ .skill-pill-group,.skill-pill,.quality-pill{white-space:normal;min-width:0;max-width:100%;flex-wrap:wrap}
+ .table-scroll,.table-scroll-lg{overflow:visible;min-width:0;max-width:100%}
+}
+
+@media print{
+ .metric-bar-cell,.metric-value,.t3-attempt-list,.t3-mad-cell,.t3-mad-bar,.t3-delta{min-width:0!important;max-width:100%;flex-wrap:wrap}
+ .t3-attempt-chip{white-space:normal;overflow-wrap:anywhere}
+}
+
+@media(max-width:420px){.tier-cards .tier-card{flex-basis:100%}}

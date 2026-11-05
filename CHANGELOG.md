@@ -6,6 +6,11 @@ All notable changes to SkillEvaluator are documented in this file.
 
 ### Changed
 
+- Keep HTML tier navigation synchronized across sidebar, tiles and a mobile
+  sticky bar, including absent tiers in comprehensive reports. Add accessible
+  keyboard navigation for Tier 3 and agent tabs, a System/Light/Dark preference,
+  complete expanded evidence, and readable no-JavaScript/print views.
+
 - Align final terminal and HTML command outcomes: Passed required checks,
   Changes required, or Incomplete. Keep publication eligibility and Best agent
   score separate. Tier counts exclude explicit N/A checks from execution;

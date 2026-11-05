@@ -67,6 +67,7 @@ document.addEventListener('DOMContentLoaded', function() {
 // Evidence links intentionally reveal their destination even if a previous search hid it.
 const originalOpenSkillCard = _openSkillCard;
 _openSkillCard = function(name) {
+    activateReportTier('tier1', {scroll:false, focus:false});
     reportAffectedSkills = null;
     document.getElementById('skill-filter-banner')?.classList.remove('visible');
     const query = document.getElementById('report-search');
@@ -109,14 +110,14 @@ window.addEventListener('afterprint', function() {
 function openFinding(id) {
     const target = document.getElementById(id);
     if (!target) return true;
+    reportRevealTier(target);
     const card = target.closest('.skill-card');
     if (card) _openSkillCard(card.dataset.skillName);
     for (let node = target; node; node = node.parentElement) {
         if (node.tagName === 'DETAILS') node.open = true;
     }
     try { history.replaceState(null, '', '#' + id); } catch (err) { /* A file:// page may refuse; the jump still works. */ }
-    const reduceMotion = window.matchMedia && window.matchMedia('(prefers-reduced-motion: reduce)').matches;
-    target.scrollIntoView({ behavior: reduceMotion ? 'auto' : 'smooth', block: 'center' });
+    reportScrollTo(target, 'center');
     target.setAttribute('tabindex', '-1');
     target.focus({ preventScroll: true });
     target.classList.add('finding-flash');
@@ -125,5 +126,161 @@ function openFinding(id) {
 }
 // Run after load so the browser's own jump to the fragment does not override it.
 window.addEventListener('load', function() {
-    if (/^#[fc]-/.test(location.hash)) setTimeout(function() { openFinding(decodeURIComponent(location.hash.slice(1))); }, 0);
+    if (location.hash.length > 1) setTimeout(function() {
+        try { openFinding(decodeURIComponent(location.hash.slice(1))); } catch (err) { /* Ignore malformed fragments. */ }
+    }, 0);
+});
+
+// All entry points (sidebar, tiles, mobile links and evidence) use this tier state.
+function reportScrollBehavior() {
+    return window.matchMedia && window.matchMedia('(prefers-reduced-motion: reduce)').matches ? 'auto' : 'smooth';
+}
+function reportScrollTo(target, block = 'start') {
+    target.scrollIntoView({behavior: reportScrollBehavior(), block});
+}
+function reportCurrentSection(id) {
+    document.querySelectorAll('.report-sidebar [data-report-section],.report-sidebar [data-report-tier]').forEach(link => {
+        const current = (link.dataset.reportSection || 'tab-' + link.dataset.reportTier) === id;
+        link.classList.toggle('sidebar-current', current);
+        if (current) link.setAttribute('aria-current', 'location');
+        else link.removeAttribute('aria-current');
+    });
+}
+function activateReportTier(tierId, options = {}) {
+    const panel = document.getElementById('tab-' + tierId);
+    if (!panel) return false;
+    document.querySelectorAll('.tab-content').forEach(item => item.classList.toggle('active', item === panel));
+    document.querySelectorAll('.tier-card[data-target-tab]').forEach(tile => {
+        const selected = tile.dataset.targetTab === tierId;
+        tile.classList.toggle('active', selected);
+        tile.setAttribute('aria-pressed', String(selected));
+    });
+    document.querySelectorAll('.mobile-tier-nav [data-report-tier]').forEach(link => {
+        if (link.dataset.reportTier === tierId) link.setAttribute('aria-current', 'location');
+        else link.removeAttribute('aria-current');
+    });
+    reportCurrentSection(panel.id);
+    if (options.scroll !== false) reportScrollTo(panel);
+    if (options.focus !== false) panel.focus({preventScroll:true});
+    return true;
+}
+function activateReportTabs(tabSelector, panelSelector, panelId, button) {
+    const panel = document.getElementById(panelId);
+    if (!panel) return;
+    document.querySelectorAll(panelSelector).forEach(item => item.classList.toggle('active', item === panel));
+    document.querySelectorAll(tabSelector).forEach(tab => {
+        const selected = tab.getAttribute('aria-controls') === panelId;
+        tab.classList.toggle('active', selected);
+        tab.setAttribute('aria-selected', String(selected));
+        tab.tabIndex = selected ? 0 : -1;
+    });
+    if (button) button.focus({preventScroll:true});
+}
+function reportTabKeyboard(event) {
+    const tabs = Array.from(event.currentTarget.querySelectorAll('[role="tab"]'));
+    const index = tabs.indexOf(event.target);
+    if (index < 0) return;
+    let next;
+    if (event.key === 'ArrowRight') next = (index + 1) % tabs.length;
+    if (event.key === 'ArrowLeft') next = (index + tabs.length - 1) % tabs.length;
+    if (event.key === 'Home') next = 0;
+    if (event.key === 'End') next = tabs.length - 1;
+    if (next !== undefined) {
+        event.preventDefault();
+        tabs.forEach((tab, i) => { tab.tabIndex = i === next ? 0 : -1; });
+        tabs[next].focus();
+    } else if (event.key === 'Enter' || event.key === ' ') {
+        event.preventDefault();
+        event.target.click();
+    }
+}
+let reportThemePreference = 'system';
+const reportColorScheme = window.matchMedia ? window.matchMedia('(prefers-color-scheme: dark)') : null;
+function applyReportTheme() {
+    const theme = reportThemePreference === 'system' ? (reportColorScheme?.matches ? 'dark' : 'light') : reportThemePreference;
+    document.documentElement.setAttribute('data-theme', theme);
+    const control = document.getElementById('report-theme');
+    if (control) control.value = reportThemePreference;
+    if (window.rebuildTier3Charts) window.rebuildTier3Charts();
+}
+function setReportTheme(preference) {
+    reportThemePreference = ['light','dark'].includes(preference) ? preference : 'system';
+    try {
+        if (reportThemePreference === 'system') localStorage.removeItem('skillevaluator-theme');
+        else localStorage.setItem('skillevaluator-theme', reportThemePreference);
+    } catch (err) { /* Standalone reports work without storage. */ }
+    applyReportTheme();
+}
+function initReportTheme() {
+    try {
+        const saved = localStorage.getItem('skillevaluator-theme');
+        reportThemePreference = ['light','dark'].includes(saved) ? saved : 'system';
+    } catch (err) { /* Follow system when storage is unavailable. */ }
+    applyReportTheme();
+    if (reportColorScheme?.addEventListener) reportColorScheme.addEventListener('change', function() {
+        if (reportThemePreference === 'system') applyReportTheme();
+    });
+}
+function reportRevealTier(target) {
+    const panel = target.closest('.tab-content');
+    if (panel) activateReportTier(panel.id.slice(4), {scroll:false, focus:false});
+    const local = target.closest('.t3-page');
+    if (local) activateReportTabs('.t3-subtab', '.t3-page', local.id);
+    const agent = target.closest('.t3-agent-panel');
+    if (agent) activateReportTabs('.t3-agent-tab-btn', '.t3-agent-panel', agent.id);
+}
+document.addEventListener('DOMContentLoaded', function() {
+    document.querySelectorAll('.t3-subtabs,.t3-agent-tabs').forEach(list => list.addEventListener('keydown', reportTabKeyboard));
+    const initial = document.querySelector('.tab-content.active') || document.querySelector('.tab-content');
+    if (initial) activateReportTier(initial.id.slice(4), {scroll:false, focus:false});
+    reportCurrentSection('report-workspace');
+    document.querySelectorAll('[data-report-section]').forEach(link => link.addEventListener('click', function(event) {
+        event.preventDefault();
+        const target = document.getElementById(link.dataset.reportSection);
+        if (!target) return;
+        if (target.tagName === 'DETAILS') target.open = true;
+        target.tabIndex = -1;
+        reportScrollTo(target);
+        target.focus({preventScroll:true});
+        reportCurrentSection(target.id);
+    }));
+    const nav = document.querySelector('.mobile-tier-nav');
+    function measureNavigation() {
+        const height = nav && getComputedStyle(nav).display !== 'none' ? nav.getBoundingClientRect().height : 0;
+        document.documentElement.style.setProperty('--mobile-nav-height', height + 'px');
+    }
+    measureNavigation();
+    if (nav && window.ResizeObserver) new ResizeObserver(measureNavigation).observe(nav);
+    window.addEventListener('resize', measureNavigation);
+    let navigationFrame = null;
+    window.addEventListener('scroll', function() {
+        if (navigationFrame !== null) return;
+        navigationFrame = requestAnimationFrame(function() {
+            navigationFrame = null;
+            const details = document.getElementById('run-metadata');
+            const evidence = document.getElementById('report-evidence');
+            const panel = document.querySelector('.tab-content.active');
+            const offset = parseFloat(getComputedStyle(document.documentElement).getPropertyValue('--mobile-nav-height')) || 0;
+            const atEnd = scrollY > 0 && scrollY + innerHeight >= document.documentElement.scrollHeight - 2;
+            if (details && (details.getBoundingClientRect().top <= offset + 100 || (atEnd && document.activeElement === details))) reportCurrentSection('run-metadata');
+            else if (evidence && panel && (evidence.getBoundingClientRect().top <= offset + 100 || atEnd)) reportCurrentSection(panel.id);
+            else reportCurrentSection('report-workspace');
+        });
+    }, {passive:true});
+    // Native fragment links also reveal their parent tier, with no name-based CSS selectors.
+    document.addEventListener('click', function(event) {
+        const link = event.target.closest('a[href^="#"]');
+        if (!link || link.hasAttribute('onclick') || link.dataset.reportSection) return;
+        let id;
+        try { id = decodeURIComponent(link.getAttribute('href').slice(1)); } catch (err) { return; }
+        const target = document.getElementById(id);
+        if (!target) return;
+        if (target.id.startsWith('validator-')) {
+            event.preventDefault();
+            scrollToValidator(target.id.slice('validator-'.length));
+        } else {
+            event.preventDefault();
+            openFinding(id);
+        }
+    });
 });

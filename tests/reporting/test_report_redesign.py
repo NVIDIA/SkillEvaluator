@@ -373,15 +373,13 @@ def test_check_table_rows_are_keyboard_reachable_links() -> None:
     assert all(f'id="validator-{index}"' in html for index in links)
 
 
-def test_theme_toggle_has_a_fixed_name_and_reports_the_dark_state() -> None:
+def test_theme_selector_has_a_name_and_system_light_dark_choices() -> None:
     html = _render(_results())
-    button = html.split('class="theme-toggle"', 1)[1].split("</button>", 1)[0]
-
-    assert 'aria-pressed="false"' in button
-    assert '<span id="theme-text">Dark theme</span>' in button
-    assert "toggle.setAttribute('aria-pressed', theme === 'dark' ? 'true' : 'false')" in html
-    assert "getElementById('theme-text').textContent" not in html
+    assert '<label class="theme-control" for="report-theme">Theme' in html
+    assert '<select id="report-theme"' in html
+    assert all(f'<option value="{theme}">' in html for theme in ("system", "light", "dark"))
     assert "matchMedia('(prefers-color-scheme: dark)')" in html
+    assert "localStorage.removeItem('skillevaluator-theme')" in html
 
 
 def test_tier3_charts_are_redrawn_with_print_colors() -> None:

@@ -316,7 +316,7 @@ def test_failing_advisory_tier3_is_labelled_advisory() -> None:
     html = HTMLReporter(include_timestamp=False).render_all(_gated([agent_eval], 3, blocking=False))
 
     assert _tier_card_verdicts(html) == [("Tier 3", "Failed (advisory)")]
-    assert '<span class="sr-only">Tier 3 verdict: </span>Failed (advisory)</span>' in html
+    assert "Tier 3 quality: Failed (advisory)</span>" in html
     assert "Changes required" not in html.split("<main", 1)[1].split('id="tab-tier3"', 1)[0]
 
 

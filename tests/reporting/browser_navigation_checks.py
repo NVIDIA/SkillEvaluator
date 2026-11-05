@@ -4,6 +4,8 @@
 Run with: uv run --no-project --with playwright python
  tests/reporting/browser_navigation_checks.py REPORT_DIRECTORY OUTPUT_DIRECTORY
 Uses system Chrome; no live evaluation or network resources are required.
+REPORT_DIRECTORY contains full.html/stress.html plus absent.html rendered with
+HTMLReporter(requested_tiers=(1,), displayed_tiers=(1, 2, 3)) and one Tier 1 result.
 """
 
 import argparse
@@ -57,6 +59,12 @@ def run(reports, output):
                     const original=Element.prototype.scrollIntoView;
                     Element.prototype.scrollIntoView=function(options) { window._navigationScroll.push(options.behavior); original.call(this,options); };
                 }""")
+                check(
+                    page,
+                    "() => document.querySelector('.hero-command-status.verdict-chip.fail')?.innerText === 'Changes required' && document.querySelector('.hero-side .verdict-chip').innerText.startsWith('Tier 3 quality: ')",
+                    "visible outcome hierarchy",
+                )
+                page.screenshot(path=str(output / f"hierarchy-{width}-{theme}.png"))
                 # Every entry point synchronizes all other surfaces and focuses its panel.
                 for tier in ("tier2", "tier3", "tier1"):
                     page.locator(f'.tier-card[data-target-tab="{tier}"]').click()
@@ -221,8 +229,37 @@ def run(reports, output):
                         """() => [...document.querySelectorAll('.skill-content.active,.validator-content.active,.top-issues-content.active,.table-container.active')].every(e=>getComputedStyle(e).maxHeight === 'none')""",
                         "expanded evidence cap",
                     )
+                # A real URL reload must use the same reveal/focus path as an in-page link.
+                page.goto((reports / "full.html").as_uri() + "#validator-1")
+                page.reload()
+                check(
+                    page,
+                    "() => document.querySelector('#results-by-validator').classList.contains('active') && document.querySelector('#validator-1').getClientRects().length > 0 && document.activeElement.id === 'validator-1' && document.querySelector('#validator-1 .validator-content').classList.contains('active')",
+                    "validator fragment reload",
+                )
+                page.goto((reports / "absent.html").as_uri())
+                page.select_option("#report-theme", theme)
+                contrast = page.evaluate(r"""() => {
+                    const rgb = value => (value.match(/[\d.]+/g) || []).map(Number);
+                    const luminance = color => color.slice(0,3).map(v=>v/255).map(v=>v<=0.04045?v/12.92:((v+0.055)/1.055)**2.4).reduce((sum,v,i)=>sum+v*[0.2126,0.7152,0.0722][i],0);
+                    return [...document.querySelectorAll('.tier-card.skipped .tier-card-label')].map(label=>{
+                        const tile=label.closest('.tier-card');
+                        let background=rgb(getComputedStyle(tile).backgroundColor);
+                        const foreground=rgb(getComputedStyle(label).color);
+                        let opacity=1;
+                        for(let node=label;node;node=node.parentElement) opacity*=Number(getComputedStyle(node).opacity);
+                        if(background[3] === 0) background=rgb(getComputedStyle(tile.parentElement.closest('section')).backgroundColor);
+                        const rendered=foreground.slice(0,3).map((v,i)=>v*opacity+background[i]*(1-opacity));
+                        const values=[luminance(rendered),luminance(background)].sort((a,b)=>a-b);
+                        return {tier:tile.dataset.targetTab,opacity,ratio:(values[1]+0.05)/(values[0]+0.05)};
+                    });
+                }""")
+                assert len(contrast) == 2 and all(value["ratio"] >= 4.5 for value in contrast), contrast
+                page.screenshot(path=str(output / f"absent-{width}-{theme}.png"))
                 assert not errors, errors
-                records.append({"width": width, "theme": theme, "errors": errors, "checks": "passed"})
+                records.append(
+                    {"width": width, "theme": theme, "errors": errors, "checks": "passed", "absentContrast": contrast}
+                )
                 context.close()
                 no_js = browser.new_context(
                     viewport={"width": width, "height": 1000}, java_script_enabled=False, color_scheme=theme

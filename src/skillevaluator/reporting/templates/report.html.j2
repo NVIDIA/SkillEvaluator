@@ -1119,7 +1119,6 @@
         .tier-card.fail::before { background: var(--danger-color); }
         .tier-card.warn { background: linear-gradient(135deg, rgba(187, 128, 9, 0.10) 0%, var(--bg) 70%); }
         .tier-card.warn::before { background: var(--warning-color); }
-        .tier-card.skipped { opacity: 0.7; }
         .tier-card.skipped::before { background: var(--text-secondary); }
         .tier-card-head {
             display: flex;
@@ -1306,7 +1305,7 @@
                 <div class="agent-hero-title-block">
                     <span class="agent-hero-eyebrow">{{ content_label }} evaluation</span>
                     <h1 class="agent-hero-title" id="report-title">{{ hero_title }}</h1>
-                    <p class="hero-command-status {{ verdict_class }}">{{ presentation.command_label }}</p>
+                    <p class="hero-command-status verdict-chip {{ verdict_class }}">{{ presentation.command_label }}</p>
                     <p class="hero-decision-reason">{{ presentation.tiers.values() | sum(attribute='failed') }} failed · {{ presentation.tiers.values() | sum(attribute='incomplete') }} incomplete check(s). See tier evidence for reasons.</p>
                     {#-
                         Show the *full* path/URL only when it actually adds
@@ -1333,14 +1332,14 @@
                 {% if has_tier3 %}
                 {% set tier3_environment = (tier3.summary.environment if tier3.summary is defined and tier3.summary else None) or tier3.environment %}
                 {% if tier3_is_skipped %}
-                    <span class="verdict-chip warn"><span class="sr-only">Tier 3 verdict: </span>{{ verdict_words['skipped'] }}</span>
+                    <span class="verdict-chip warn">Tier 3 quality: {{ verdict_words['skipped'] }}</span>
                     <div class="agent-hero-detail">
                         <div><strong>Reason:</strong> {{ tier3_skip_message }}</div>
                         <div>Tier 3 is advisory and does not block required validation.</div>
                     </div>
                 {% else %}
                     {% set t3_key = tier3_verdict if tier3_verdict in ['pass', 'fail', 'neutral'] else 'incomplete' %}
-                    <span class="verdict-chip {{ {'pass': 'pass', 'fail': 'fail'}.get(t3_key, 'warn') }}"><span class="sr-only">Tier 3 verdict: </span>{{ advisory_fail_word if tier3_advisory_fail else verdict_words[t3_key] }}</span>
+                    <span class="verdict-chip {{ {'pass': 'pass', 'fail': 'fail'}.get(t3_key, 'warn') }}">Tier 3 quality: {{ advisory_fail_word if tier3_advisory_fail else verdict_words[t3_key] }}</span>
                     {% if t3_key == 'incomplete' and tier3_status_reason %}<p class="hero-reason">{{ tier3_status_reason }}</p>{% endif %}
                     <div class="agent-hero-score {{ 'score-pass' if hero_score is not none and hero_score >= 0.8 else ('score-warn' if hero_score is not none and hero_score >= 0.6 else 'score-fail') }}">{{ "%.2f" | format(hero_score) if hero_score is not none else "N/A" }}<span class="hero-score-label">{{ presentation.score_scope }}{{ ' (baseline)' if tier3.get('mode') == 'baseline_only' else '' }}</span></div>
                     <div class="agent-hero-detail">

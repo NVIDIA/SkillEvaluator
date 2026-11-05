@@ -109,3 +109,13 @@ def test_theme_control_includes_system_and_no_js_exposes_local_evidence():
     assert {element["value"] for element in doc.elements if element["tag"] == "option"} >= {"system", "light", "dark"}
     no_js = html.split("<noscript>", 1)[1].split("</noscript>", 1)[0]
     assert ".t3-page" in no_js and ".t3-agent-panel" in no_js
+
+
+def test_overall_command_badge_is_prominent_and_agent_quality_is_named():
+    source = static_result()
+    source.add_error("Schema failed")
+    html = HTMLReporter(include_timestamp=False).render_all([source, agent_result()])
+    doc = Document(html)
+    badge = next(element for element in doc.elements if "hero-command-status" in element.get("class", "").split())
+    assert {"verdict-chip", "fail"} <= set(badge["class"].split())
+    assert "Tier 3 quality: " in html.split('<div class="hero-side">', 1)[1].split("</div>", 1)[0]

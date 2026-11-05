@@ -124,10 +124,22 @@ function openFinding(id) {
     setTimeout(function() { target.classList.remove('finding-flash'); }, 2000);
     return false;
 }
+// Share destination routing for initial URLs and clicks, including the alternate validator view.
+function openReportDestination(id) {
+    const target = document.getElementById(id);
+    if (!target) return true;
+    if (target.classList.contains('validator-card') && /^validator-\d+$/.test(id)) {
+        scrollToValidator(id.slice('validator-'.length));
+        try { history.replaceState(null, '', '#' + id); } catch (err) { /* file:// history is optional. */ }
+        reportPressedButtons();
+        return false;
+    }
+    return openFinding(id);
+}
 // Run after load so the browser's own jump to the fragment does not override it.
 window.addEventListener('load', function() {
     if (location.hash.length > 1) setTimeout(function() {
-        try { openFinding(decodeURIComponent(location.hash.slice(1))); } catch (err) { /* Ignore malformed fragments. */ }
+        try { openReportDestination(decodeURIComponent(location.hash.slice(1))); } catch (err) { /* Ignore malformed fragments. */ }
     }, 0);
 });
 
@@ -275,12 +287,7 @@ document.addEventListener('DOMContentLoaded', function() {
         try { id = decodeURIComponent(link.getAttribute('href').slice(1)); } catch (err) { return; }
         const target = document.getElementById(id);
         if (!target) return;
-        if (target.id.startsWith('validator-')) {
-            event.preventDefault();
-            scrollToValidator(target.id.slice('validator-'.length));
-        } else {
-            event.preventDefault();
-            openFinding(id);
-        }
+        event.preventDefault();
+        openReportDestination(id);
     });
 });

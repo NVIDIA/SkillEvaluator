@@ -195,6 +195,33 @@ All notable changes to SkillEvaluator are documented in this file.
   `tier1` leaves a check out and reports it as skipped. A `scanners` row and the
   JSON report record which scanner versions ran.
 
+- Every finding now has stable IDs for tracking across runs and validators.
+  `finding_id` (`SEF-…`) is derived from the finding's category, check,
+  message, and suggestion, so it survives line moves, whitespace or case
+  changes, and severity overrides. Location text a check copies into its
+  message is left out of it: the `in <file>:<line>` in a secret detection
+  message, also in a folder or plugin run that prefixes the file path, and
+  the `— N occurrences (…)` list a PII scan message ends with. A file name in
+  a message or suggestion, as script lint and secret detection write, stays
+  part of the ID. `occurrence_id` (`SEO-…`) adds the file, line, and line
+  content. Otherwise identical findings in different files or skills
+  share one `finding_id`, so they count as one unique finding with one
+  occurrence per location. When CI redacts a detected credential from a
+  report, it recomputes the IDs from the redacted text and renders the HTML,
+  Markdown, and SARIF copies from that JSON, so no ID is derived from a
+  removed value. The JSON report and the HTML report's embedded data
+  add `finding_counts` (raw records, distinct occurrences, unique findings,
+  and duplicates removed), `finding_groups` (each unique finding with its
+  validators and every location, including each location a PII finding
+  lists for a repeated value, also in a folder run), and `message_counts`
+  (error and warning strings with no finding behind them, such as failed
+  gates and scanner or execution errors, but not the workflow scope note for
+  a stage that configuration skips, plus informational messages other than
+  the `[OK]` line recorded for each passed check); each JSON result also
+  carries its own `finding_counts`. Markdown adds a Finding Reconciliation
+  table, most severe first, and per-finding IDs. `total_errors`,
+  `total_warnings`, and `severity_counts` are unchanged.
+
 - `--skillspector-baseline FILE` on `validate`, `tier1`, and `security-scan`
   applies an audited SkillSpector suppression baseline, so reviewed false
   positives no longer leave the security check failed or `INCOMPLETE`.
@@ -307,6 +334,25 @@ All notable changes to SkillEvaluator are documented in this file.
 - HTML reports rendered in one process share one compiled template
   environment, so each template compiles once per process instead of once per
   report.
+
+- The Markdown summary and the HTML report's summary now count findings the
+  same way: each unique finding once, at its highest severity, however many
+  lines, files, skills or validators report it. Markdown's Total Issues adds
+  distinct occurrences, raw records, and errors and warnings with no finding
+  behind them, such as failed gates and incomplete scans; its severity
+  breakdown counts unique findings. In HTML, the tier cards, the Tier 1
+  Findings and Blocking critical + high numbers, the verdict sentence, the
+  skill finding badges and the gate policy line count unique findings, and
+  the Findings number shows the same occurrence, raw-record and no-finding
+  counts beneath it when they differ from the unique count. Both formats used
+  to add up raw records, so a finding reported on several lines or by two
+  validators counted more than once. The HTML report's embedded and exported
+  data changes `summary.total_issues` the same way: it now counts unique
+  findings plus errors and warnings with no finding behind them, instead of
+  raw errors plus warnings; the raw finding count is in
+  `summary.raw_finding_occurrences` and `finding_counts.raw_occurrences`. The
+  JSON `skills[].issue_count`, contributor totals, `total_errors`,
+  `total_warnings` and `severity_counts` still count raw records.
 
 - Tier 3 `accuracy` grades the outcome only. The `SKILL_IDENTIFIED` criterion,
   which capped a correct answer from the no-skill baseline at 0.8 on positive

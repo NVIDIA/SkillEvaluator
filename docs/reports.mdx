@@ -105,10 +105,18 @@ the evidence below it:
   repeat a finding are folded away.
 - **Run details.** Scope, the target path, provenance and the gate policy.
 
-A finding is one problem a check reports at one location, with a severity. A
-finding in a failed check blocks the verdict; a finding in a passed check is
-advisory. A quality score below the configured minimum fails the Quality score
-check, so it also blocks the verdict.
+A finding is one problem a check reports, with a severity. The same problem
+reported on several lines, or in several files or skills, counts once at its
+highest severity; each location is an occurrence, including each line a
+PII finding lists when one value repeats. When the unique, occurrence and
+raw record counts differ, or when some errors or warnings have no finding
+behind them, the findings number shows the occurrences, the raw records and
+those errors and warnings beneath it, in the same words as the Markdown
+report's Total Issues. The workflow scope note for a stage that configuration
+skips, such as LLM checks under `--no-llm`, is not counted as a warning there. A finding in a failed check blocks the
+verdict; a finding in a passed check is advisory. A quality score below the
+configured minimum fails the Quality score check, so it also blocks the
+verdict.
 
 The HTML report, the CI index and the Pages history use the same verdict
 words: **Passed**, **Changes required**, **Incomplete**, **Skipped** and

@@ -16,6 +16,8 @@ from urllib.parse import quote
 
 import pytest
 
+from skillevaluator.models import Finding, Severity, ValidationResult
+from skillevaluator.reporting.html import HTMLReporter
 from skillevaluator.reporting.json_reporter import JSONReporter
 from skillevaluator.validators.security import SecurityValidator
 
@@ -44,6 +46,32 @@ def _assert_no_secret(value: str | bytes) -> None:
     for encoding in (_fixture_value(), html.escape(_fixture_value()), quote(_fixture_value(), safe="")):
         if encoding.encode() in raw:
             pytest.fail("A synthetic credential was present in a shared output.")
+
+
+def _assert_finding_ids_match_text(document: dict) -> None:
+    """Every finding ID in a shared report is hashed from that report's redacted text."""
+    finding_ids = set()
+    for row in document["results"]:
+        for item in row["findings"]:
+            finding = Finding(
+                **{
+                    key: item[key]
+                    for key in (
+                        "category",
+                        "severity",
+                        "check_name",
+                        "message",
+                        "file_path",
+                        "line_number",
+                        "line_content",
+                        "suggestion",
+                    )
+                }
+            )
+            assert item["finding_id"] == finding.finding_id
+            assert item["occurrence_id"] == finding.occurrence_id
+            finding_ids.add(finding.finding_id)
+    assert {group["finding_id"] for group in document["finding_groups"]} == finding_ids
 
 
 def test_pii_findings_do_not_expose_detected_credential(tmp_path):
@@ -98,6 +126,7 @@ def test_runner_and_retained_publisher_never_export_detected_value(tmp_path, cap
             _assert_no_secret(path.read_bytes())
             if _fixture_value()[:24].encode() in path.read_bytes():
                 pytest.fail("A truncated synthetic credential was present in a report.")
+    _assert_finding_ids_match_text(json.loads((reports / "skill-001/skillevaluator-tier1.json").read_text()))
 
     from ci import publish_reports
 
@@ -124,6 +153,7 @@ def test_runner_and_retained_publisher_never_export_detected_value(tmp_path, cap
         zipped.writestr("skill-001/skillevaluator-tier1.json", json.dumps(document))
     safe_summary, safe_reports = publish_reports.read_artifact(old_archive.getvalue())
     _assert_no_secret(json.dumps({"summary": safe_summary, "retained": safe_reports}))
+    _assert_finding_ids_match_text(safe_reports["skill-001"])
 
     spec = importlib.util.spec_from_file_location("publisher_fixtures", ROOT / "tests/ci/test_publish_reports.py")
     fixtures = importlib.util.module_from_spec(spec)
@@ -168,6 +198,164 @@ def test_runner_and_retained_publisher_never_export_detected_value(tmp_path, cap
         zipped.writestr("skill-001/skillevaluator-tier1.json", json.dumps(document))
     with pytest.raises(publish_reports.PublicationError, match="safely redacted"):
         publish_reports.read_artifact(unsafe_archive.getvalue())
+
+
+def test_redacted_report_does_not_keep_ids_hashed_from_the_credential(tmp_path):
+    # A finding ID hashed from text that held a short credential would let a
+    # reader of the redacted report confirm guesses of that credential.
+    skill = _skill(tmp_path / "workspace")
+    pii = SecurityValidator(use_llm=False).validate_pii_only(skill)
+    pii.validator_name = "PII Scan"
+    echo = ValidationResult(validator_name="Code Risk", validator_description="Static analysis")
+    echoed = Finding(
+        "SECURITY",
+        Severity.HIGH,
+        "hardcoded-credential",
+        "Credential in source: " + _fixture_value(),
+        "source.py",
+        1,
+        line_content='API_KEY = "' + _fixture_value() + '"',
+    )
+    echo.add_finding(echoed)
+    raw = tmp_path / "raw"
+    raw.mkdir()
+    (raw / "skillevaluator-tier1.json").write_text(JSONReporter(include_timestamp=False).render_all([pii, echo]))
+
+    sanitized = runner.sanitized_outputs(raw, runner.collect_sensitive_values(skill))
+
+    _assert_no_secret(sanitized["skillevaluator-tier1.json"])
+    for raw_id in (echoed.finding_id, echoed.occurrence_id):
+        assert raw_id.encode() not in sanitized["skillevaluator-tier1.json"]
+    document = json.loads(sanitized["skillevaluator-tier1.json"])
+    _assert_finding_ids_match_text(document)
+    assert document["finding_counts"]["unique_findings"] == len(document["finding_groups"]) == 2
+    assert document["results"][1]["finding_counts"]["raw_occurrences"] == 1
+
+
+def test_redacted_html_does_not_keep_ids_hashed_from_the_credential(tmp_path):
+    # The HTML report embeds finding and occurrence IDs. Passed through text
+    # redaction alone, it would keep the IDs hashed before the value was masked.
+    skill = _skill(tmp_path / "workspace")
+    echo = ValidationResult(validator_name="Code Risk", validator_description="Static analysis")
+    echoed = Finding(
+        "SECURITY",
+        Severity.HIGH,
+        "hardcoded-credential",
+        "Credential in source: " + _fixture_value(),
+        "source.py",
+        1,
+        line_content='API_KEY = "' + _fixture_value() + '"',
+    )
+    echo.add_finding(echoed)
+    raw = tmp_path / "raw"
+    raw.mkdir()
+    (raw / "skillevaluator-tier1.json").write_text(
+        JSONReporter(include_timestamp=False).render_all([echo]), encoding="utf-8"
+    )
+    native = HTMLReporter(include_timestamp=False).render_all([echo])
+    assert echoed.finding_id in native and echoed.occurrence_id in native
+    (raw / "skillevaluator-tier1.html").write_text(native, encoding="utf-8")
+
+    sanitized = runner.sanitized_outputs(raw, runner.collect_sensitive_values(skill))
+
+    page = sanitized["skillevaluator-tier1.html"]
+    _assert_no_secret(page)
+    for raw_id in (echoed.finding_id, echoed.occurrence_id):
+        assert raw_id.encode() not in page
+    # The page carries the IDs of the redacted finding, as the JSON does.
+    redacted = json.loads(sanitized["skillevaluator-tier1.json"])["results"][0]["findings"][0]
+    assert redacted["finding_id"].encode() in page
+    assert redacted["occurrence_id"].encode() in page
+
+
+def _database_url_line() -> str:
+    # Synthetic driver-qualified URL; the PII collector does not name its password.
+    return 'DATABASE_URL = "postgresql+psycopg2://admin:' + "hunter" + '22@db.example.net/app"'
+
+
+def test_ids_are_refreshed_when_only_database_userinfo_is_masked(tmp_path, monkeypatch):
+    # The redactor masks database userinfo even when no token was collected.
+    # IDs hashed from the unmasked line would let a reader confirm a guess.
+    workspace, reports = tmp_path / "workspace", tmp_path / "reports"
+    skill = workspace / "skills" / "demo"
+    skill.mkdir(parents=True)
+    (skill / "SKILL.md").write_text("---\nname: demo\ndescription: A sample formatting skill.\n---\n# Demo\n")
+    (skill / "config.py").write_text(_database_url_line() + "\n")
+    assert runner.collect_sensitive_values(skill) == set()
+    scan = ValidationResult(validator_name="SkillSpector", validator_description="Static analysis")
+    quoted = Finding(
+        "SECURITY",
+        Severity.HIGH,
+        "hardcoded-database-url",
+        "Database URL with credentials",
+        "config.py",
+        1,
+        line_content=_database_url_line(),
+    )
+    scan.add_finding(quoted)
+    raw_report = JSONReporter(include_timestamp=False).render_all([scan])
+
+    def fake_cli(argv, **kwargs):
+        (Path(argv[argv.index("-o") + 1]) / "skillevaluator-tier1.json").write_text(raw_report)
+        return subprocess.CompletedProcess(argv, 1)
+
+    assert runner.run(workspace, reports, {"SKILL_PATHS": "skills", "GITHUB_ACTIONS": "true"}, execute=fake_cli) == 1
+    shared = (reports / "skill-001/skillevaluator-tier1.json").read_text(encoding="utf-8")
+    assert "admin:hunter" not in shared
+    assert quoted.occurrence_id not in shared
+    document = json.loads(shared)
+    assert "[REDACTED]@db.example.net" in document["results"][0]["findings"][0]["line_content"]
+    _assert_finding_ids_match_text(document)
+
+    # A retained report from an older run still quotes the URL with the IDs
+    # hashed from it; the publisher masks it and refreshes the IDs.
+    from ci import publish_reports
+
+    stale = json.loads(shared)
+    stale_finding = stale["results"][0]["findings"][0]
+    stale_finding["line_content"] = _database_url_line()
+    stale_finding["occurrence_id"] = quoted.occurrence_id
+    stale["finding_groups"][0]["occurrences"][0]["occurrence_id"] = quoted.occurrence_id
+    stale["finding_groups"][0]["occurrences"][0]["line_content"] = _database_url_line()
+    archive = io.BytesIO()
+    with zipfile.ZipFile(archive, "w") as zipped:
+        zipped.writestr("summary.json", (reports / "summary.json").read_text(encoding="utf-8"))
+        zipped.writestr("skill-001/skillevaluator-tier1.json", json.dumps(stale))
+    _summary, retained = publish_reports.read_artifact(archive.getvalue())
+    published = json.dumps(retained)
+    assert "admin:hunter" not in published
+    assert quoted.occurrence_id not in published
+    _assert_finding_ids_match_text(retained["skill-001"])
+
+
+def test_refreshing_ids_keeps_the_shape_of_reports_written_before_ids() -> None:
+    from skillevaluator.reporting.finding_summary import refresh_finding_identities
+
+    document = {
+        "results": [
+            {
+                "validator": "Code Risk",
+                "findings": [
+                    {
+                        "category": "SECURITY",
+                        "severity": "high",
+                        "check_name": "shell",
+                        "message": "subprocess call with shell=True",
+                        "file_path": "run.py",
+                        "line_number": 3,
+                        "line_content": None,
+                        "suggestion": None,
+                        "metadata": None,
+                    }
+                ],
+            }
+        ]
+    }
+    before = json.loads(json.dumps(document))
+
+    refresh_finding_identities(document)
+
+    assert document == before
 
 
 def test_interrupted_scan_never_copies_raw_output(tmp_path, capsys):

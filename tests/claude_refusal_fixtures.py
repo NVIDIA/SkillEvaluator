@@ -87,6 +87,11 @@ def result_event(text: str, *, status: int | None = None) -> str:
     )
 
 
+def max_turns_event() -> str:
+    """A terminal failure whose text matches none of Harbor's error patterns."""
+    return line({"type": "result", "subtype": "error_max_turns", "is_error": True, "num_turns": 2})
+
+
 def synthetic_frame(text: str, *, stop_reason: str, error: str | None = None) -> str:
     return line(
         {

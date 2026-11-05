@@ -14,16 +14,25 @@ and Harbor 0.24 raises ``AgentSafetyRefusalError``.
 
 from __future__ import annotations
 
+import asyncio
 import importlib
 import json
 import os
+from collections.abc import Callable
 from pathlib import Path
+from typing import NamedTuple
 
 import pytest
-from harbor.agents.installed.base import AgentSafetyRefusalError, ApiOverloadedError, UnknownApiError
+from harbor.agents.installed.base import (
+    AgentSafetyRefusalError,
+    ApiOverloadedError,
+    NonZeroAgentExitCodeError,
+    UnknownApiError,
+)
 from harbor.agents.installed.claude_code import ClaudeCode
-from harbor.environments.base import ExecResult
-from harbor.models.task.config import TaskConfig
+from harbor.environments.base import BaseEnvironment, ExecResult
+from harbor.models.agent.context import AgentContext
+from harbor.models.task.config import EnvironmentConfig, TaskConfig
 from harbor.models.trial.paths import TrialPaths
 from harbor.utils.env import is_sensitive_env_key
 from tests.claude_refusal_fixtures import (
@@ -32,6 +41,7 @@ from tests.claude_refusal_fixtures import (
     gateway_fallback_403_stream,
     init_event,
     line,
+    max_turns_event,
     no_fallback_stream,
     result_event,
     tool_round,
@@ -49,6 +59,30 @@ from skillevaluator.tier3.harbor.runner import _model_for_agent, _resolve_agent_
 
 _SWITCH = "CLAUDE_CODE_DISABLE_REFUSAL_FALLBACK"
 _FAKE_CREDENTIAL = "test-key"
+_VERTEX_ENV = {
+    "CLAUDE_CODE_USE_VERTEX": "1",
+    "ANTHROPIC_VERTEX_PROJECT_ID": "test-project",
+    "CLOUD_ML_REGION": "us-east5",
+}
+_ROUTE_ENV_PREFIXES = (
+    "ANTHROPIC_",
+    "AWS_",
+    "CLAUDE_",
+    "CLOUD_ML_",
+    "CLOUDSDK_",
+    "GCLOUD_",
+    "GCP_",
+    "GOOGLE_",
+    "NVIDIA_",
+    "OPENAI_",
+    "SKILL_EVAL_",
+)
+
+
+def _clear_route_env(monkeypatch: pytest.MonkeyPatch) -> None:
+    for name in list(os.environ):
+        if name.startswith(_ROUTE_ENV_PREFIXES):
+            monkeypatch.delenv(name, raising=False)
 
 
 def _write_skill(tmp_path: Path) -> Path:
@@ -81,30 +115,54 @@ def test_generated_tasks_disable_claude_code_refusal_fallback(tmp_path: Path, wi
     assert _staged_environment_env(task)[_SWITCH] == "1"
 
 
+class _Route(NamedTuple):
+    provider_env: dict[str, str]
+    host_env: dict[str, str]
+    # A name the route's own credential set stages, so the case proves it took that route.
+    marker: str | None
+    env_mode: str = "docker"
+    agent_model: str | None = None
+    environment_kwargs: dict[str, str] | None = None
+
+
 _ROUTES = {
-    "gateway": (
+    "gateway": _Route(
         {
             "SKILL_EVAL_LLM_PROVIDER": "openai-compatible",
             "SKILL_EVAL_LLM_BASE_URL": "https://gateway.example/team/v1",
             "SKILL_EVAL_LLM_API_KEY": _FAKE_CREDENTIAL,
         },
         {},
+        "ANTHROPIC_BASE_URL",
     ),
-    "anthropic": (
+    "anthropic": _Route(
         {"SKILL_EVAL_LLM_PROVIDER": "anthropic", "ANTHROPIC_API_KEY": _FAKE_CREDENTIAL},
         {"ANTHROPIC_API_KEY": _FAKE_CREDENTIAL},
+        "ANTHROPIC_API_KEY",
     ),
-    "bedrock": (
+    "bedrock": _Route(
         {"SKILL_EVAL_LLM_PROVIDER": "bedrock", "AWS_REGION": "us-east-1"},
         {
             "AWS_REGION": "us-east-1",
             "AWS_ACCESS_KEY_ID": _FAKE_CREDENTIAL,
             "AWS_SECRET_ACCESS_KEY": _FAKE_CREDENTIAL,
         },
+        "CLAUDE_CODE_USE_BEDROCK",
     ),
-    "nv_build": (
+    "nv_build": _Route(
         {"SKILL_EVAL_LLM_PROVIDER": "nv_build", "NVIDIA_API_KEY": _FAKE_CREDENTIAL},
         {"NVIDIA_API_KEY": _FAKE_CREDENTIAL},
+        None,
+    ),
+    # Claude Code on Vertex AI runs in GKE mode with Workload Identity and an
+    # explicit Claude model; the evaluator provider can be any other one.
+    "vertex": _Route(
+        {"SKILL_EVAL_LLM_PROVIDER": "openai", "SKILL_EVAL_LLM_API_KEY": _FAKE_CREDENTIAL},
+        _VERTEX_ENV,
+        "CLAUDE_CODE_USE_VERTEX",
+        env_mode="gke",
+        agent_model=SELECTED_MODEL,
+        environment_kwargs={"allow_workload_identity": "true"},
     ),
 }
 
@@ -113,22 +171,23 @@ _ROUTES = {
 def test_claude_code_refusal_fallback_is_off_for_every_provider_route(
     monkeypatch: pytest.MonkeyPatch, tmp_path: Path, route: str
 ) -> None:
-    for name in list(os.environ):
-        if name.startswith(("ANTHROPIC_", "AWS_", "CLAUDE_CODE_", "NVIDIA_", "OPENAI_", "SKILL_EVAL_")):
-            monkeypatch.delenv(name, raising=False)
-    provider_env, host_env = _ROUTES[route]
-    for name, value in host_env.items():
+    _clear_route_env(monkeypatch)
+    spec = _ROUTES[route]
+    for name, value in spec.host_env.items():
         monkeypatch.setenv(name, value)
-    provider = resolve_llm_provider(provider_env)
-    model, source = _model_for_agent("claude-code", cli_model=None, config_agents={}, provider=provider)
+    provider = resolve_llm_provider(spec.provider_env)
+    model, source = _model_for_agent("claude-code", cli_model=spec.agent_model, config_agents={}, provider=provider)
     plan = _resolve_agent_runtime_plan(
         provider=provider,
         agents=["claude-code"],
         models={"claude-code": model},
         model_sources={"claude-code": source},
         configured_runtime_env={},
-        env_mode="docker",
+        env_mode=spec.env_mode,
+        environment_kwargs=spec.environment_kwargs,
     )["claude-code"]
+    if spec.marker is not None:
+        assert spec.marker in plan.staged_env
 
     [task] = generate_harbor_tasks(
         _write_skill(tmp_path), tmp_path / "tasks", with_skill=True, runtime_env=dict(plan.staged_env)
@@ -217,37 +276,157 @@ def _load(import_path: str) -> type[ClaudeCode]:
     return getattr(importlib.import_module(module), class_name)
 
 
-_CLAUDE_CODE_CLASSES = {
-    "harbor": lambda: ClaudeCode,
-    "container": lambda: _load(CONTAINER_AGENT_IMPORT_PATHS["claude-code"]),
-    "local": lambda: _load(LOCAL_AGENT_IMPORT_PATHS["claude-code"]),
+# Harbor's own agent, the container and local wrappers SkillEvaluator runs, and
+# the container wrapper on the Vertex AI route, which has its own auth and exec
+# rewriting. Each value is the agent class and the host credentials it reads.
+_LANES: dict[str, tuple[Callable[[], type[ClaudeCode]], dict[str, str]]] = {
+    "harbor": (lambda: ClaudeCode, {"ANTHROPIC_API_KEY": _FAKE_CREDENTIAL}),
+    "container": (
+        lambda: _load(CONTAINER_AGENT_IMPORT_PATHS["claude-code"]),
+        {"ANTHROPIC_API_KEY": _FAKE_CREDENTIAL},
+    ),
+    "local": (lambda: _load(LOCAL_AGENT_IMPORT_PATHS["claude-code"]), {"ANTHROPIC_API_KEY": _FAKE_CREDENTIAL}),
+    "vertex": (lambda: _load(CONTAINER_AGENT_IMPORT_PATHS["claude-code"]), _VERTEX_ENV),
 }
-# The shape of Harbor's own Claude Code launch, which selects its stream-json classifier.
-_COMMAND = "claude --verbose --output-format=stream-json --print -- 'Use the skill.' 2>&1 | tee claude-code.txt"
+_INSTRUCTION = "Use the skill."
 
 
-def _classify(tmp_path: Path, lane: str, stdout: str) -> Exception:
-    agent = _CLAUDE_CODE_CLASSES[lane]()(logs_dir=tmp_path, model_name=SELECTED_MODEL)
-    return agent._classify_exec_error(_COMMAND, ExecResult(return_code=1, stdout=stdout, stderr=None))
+class _TrialEnvironment(BaseEnvironment):
+    """Harbor's own task and exec environment merging, with no process behind it.
+
+    The command that carries the task instruction is the Claude Code launch. It
+    exits 1 with the given stream, so Harbor classifies the launch command its
+    agent really builds, not a copy of it.
+    """
+
+    def __init__(self, tmp_path: Path, task_env_config: EnvironmentConfig, launch_stdout: str) -> None:
+        self.launch_stdout = launch_stdout
+        self.launches: list[tuple[str, dict[str, str]]] = []
+        super().__init__(
+            environment_dir=tmp_path,
+            environment_name="refusal-fallback",
+            session_id="refusal-fallback",
+            trial_paths=TrialPaths(tmp_path / "trial"),
+            task_env_config=task_env_config,
+        )
+
+    @staticmethod
+    def type() -> str:
+        return "refusal-fallback"
+
+    def _validate_definition(self) -> None:
+        return None
+
+    async def start(self, force_build: bool) -> None:
+        _ = force_build
+
+    async def stop(self, delete: bool) -> None:
+        _ = delete
+
+    async def upload_file(self, source_path: Path | str, target_path: str) -> None:
+        _ = (source_path, target_path)
+
+    async def upload_dir(self, source_dir: Path | str, target_dir: str) -> None:
+        _ = (source_dir, target_dir)
+
+    async def download_file(self, source_path: str, target_path: Path | str) -> None:
+        _ = (source_path, target_path)
+
+    async def download_dir(self, source_dir: str, target_dir: Path | str) -> None:
+        _ = (source_dir, target_dir)
+
+    async def exec(
+        self,
+        command: str,
+        cwd: str | None = None,
+        env: dict[str, str] | None = None,
+        timeout_sec: int | None = None,
+        user: str | int | None = None,
+    ) -> ExecResult:
+        _ = (cwd, timeout_sec, user)
+        merged = self._merge_env(env) or {}
+        if _INSTRUCTION in command or _INSTRUCTION in merged.values():
+            self.launches.append((command, merged))
+            return ExecResult(return_code=1, stdout=self.launch_stdout, stderr=None)
+        return ExecResult(return_code=0, stdout="", stderr=None)
 
 
-@pytest.mark.parametrize("lane", sorted(_CLAUDE_CODE_CLASSES))
-def test_disabled_fallback_refusal_is_harbors_safety_refusal_error(tmp_path: Path, lane: str) -> None:
-    error = _classify(tmp_path, lane, no_fallback_stream())
+def _run_trial(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path, lane: str, stdout: str
+) -> tuple[NonZeroAgentExitCodeError, str, dict[str, str]]:
+    """Run the lane's real ``run()`` in a staged task; return its error, launch command and env."""
+    _clear_route_env(monkeypatch)
+    agent_class, host_env = _LANES[lane]
+    for name, value in host_env.items():
+        monkeypatch.setenv(name, value)
+    task_dir = tmp_path / "task"
+    task_dir.mkdir()
+    _write_task_toml(task_dir, {"id": "case-001", "expected_skill": "demo-skill"}, has_skill=True)
+    task_config = TaskConfig.model_validate_toml((task_dir / "task.toml").read_text(encoding="utf-8"))
+    environment = _TrialEnvironment(tmp_path, task_config.environment, stdout)
+    # The Harbor model id SkillEvaluator passes for Claude Code, on every route.
+    agent = agent_class()(logs_dir=tmp_path / "agent", model_name=f"anthropic/{SELECTED_MODEL}")
+
+    with pytest.raises(NonZeroAgentExitCodeError) as raised:
+        asyncio.run(agent.run(_INSTRUCTION, environment=environment, context=AgentContext()))
+
+    [(command, launch_env)] = environment.launches
+    return raised.value, command, launch_env
+
+
+@pytest.mark.parametrize("lane", sorted(_LANES))
+def test_staged_switch_reaches_the_claude_code_launch(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path, lane: str
+) -> None:
+    _, command, launch_env = _run_trial(monkeypatch, tmp_path, lane, no_fallback_stream())
+
+    # The agent's own per-command variables (and the Vertex AI wrapper's
+    # filtering of them) leave the staged task value in place.
+    assert launch_env[_SWITCH] == "1"
+    if lane == "vertex":
+        assert launch_env["CLAUDE_CODE_USE_VERTEX"] == "1"
+        assert "; unset ANTHROPIC_API_KEY ANTHROPIC_AUTH_TOKEN ANTHROPIC_BASE_URL CLAUDE_CODE_OAUTH_TOKEN; " in command
+
+
+@pytest.mark.parametrize("lane", sorted(_LANES))
+def test_disabled_fallback_refusal_is_harbors_safety_refusal_error(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path, lane: str
+) -> None:
+    error, _, _ = _run_trial(monkeypatch, tmp_path, lane, no_fallback_stream())
 
     assert type(error) is AgentSafetyRefusalError
     assert "Command failed (exit 1)" in str(error)
 
 
-@pytest.mark.parametrize("lane", sorted(_CLAUDE_CODE_CLASSES))
-def test_enabled_fallback_gateway_403_reads_as_an_unknown_api_error(tmp_path: Path, lane: str) -> None:
+@pytest.mark.parametrize("lane", sorted(_LANES))
+def test_enabled_fallback_gateway_403_reads_as_an_unknown_api_error(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path, lane: str
+) -> None:
     # Why the switch is needed: with the fallback on, the refusal never reaches
     # the CLI's terminal events, so Harbor sees only the fallback model's 403.
-    assert type(_classify(tmp_path, lane, gateway_fallback_403_stream())) is UnknownApiError
+    error, _, _ = _run_trial(monkeypatch, tmp_path, lane, gateway_fallback_403_stream())
+
+    assert type(error) is UnknownApiError
 
 
-@pytest.mark.parametrize("lane", sorted(_CLAUDE_CODE_CLASSES))
-def test_refusal_text_in_tool_output_or_model_text_is_not_a_safety_refusal(tmp_path: Path, lane: str) -> None:
+# The terminal event of the failed launch and the error Harbor must raise for it.
+_TERMINAL_EVENTS = {
+    "overloaded": (lambda: result_event("API Error: Overloaded", status=529), ApiOverloadedError),
+    # Matches no Harbor pattern, so the only refusal text in stdout is the
+    # quoted text in the tool output and the model reply.
+    "max_turns": (max_turns_event, NonZeroAgentExitCodeError),
+}
+
+
+@pytest.mark.parametrize("terminal", sorted(_TERMINAL_EVENTS))
+@pytest.mark.parametrize("lane", sorted(_LANES))
+def test_refusal_text_in_tool_output_or_model_text_is_not_a_safety_refusal(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path, lane: str, terminal: str
+) -> None:
+    # Harbor reads only the CLI's terminal events, and only for the
+    # stream-json launch it builds itself. If a Harbor upgrade changed that
+    # launch so this filter no longer applied, Harbor would scan all of stdout
+    # and the max_turns case would become a safety refusal.
     quoted_event = no_fallback_stream().splitlines()[-3]
     model_text = line(
         {
@@ -260,16 +439,17 @@ def test_refusal_text_in_tool_output_or_model_text_is_not_a_safety_refusal(tmp_p
             },
         }
     )
+    terminal_event, expected = _TERMINAL_EVENTS[terminal]
     stdout = "\n".join(
         [
             init_event(),
             *tool_round(f"{quoted_event}\nRequest blocked\n{NO_FALLBACK_TEXT}"),
             model_text,
-            result_event("API Error: Overloaded", status=529),
+            terminal_event(),
         ]
     )
 
-    error = _classify(tmp_path, lane, stdout)
+    error, _, _ = _run_trial(monkeypatch, tmp_path, lane, stdout)
 
     assert not isinstance(error, AgentSafetyRefusalError)
-    assert type(error) is ApiOverloadedError
+    assert type(error) is expected

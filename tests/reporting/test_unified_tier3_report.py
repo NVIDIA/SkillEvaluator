@@ -606,9 +606,9 @@ def test_trial_report_renders_unavailable_tokens_as_unavailable() -> None:
 
     trials_html = _tier3_page(_render_agent_payload(payload), "trials", "agents")
 
-    assert "With-Skill Steps per Eval Case" in trials_html
+    assert "Steps per Eval Case by Agent and Condition" in trials_html
     assert "With-Skill Token Usage by Agent" not in trials_html
-    assert "With-Skill Per-Evaluator Drill-Down" in trials_html
+    assert "Per-Evaluator Drill-Down" in trials_html
     assert re.search(r"<td>4</td>\s*<td>—</td>", trials_html)
 
 
@@ -789,7 +789,12 @@ def test_trial_charts_preserve_token_and_step_counter_semantics() -> None:
     assert 'id="tier3-token-chart"' in trials_html
     assert '{ label: "Prompt (total)"' in html
     assert '{ label: "Cached (included in prompt)"' in html
-    assert "if (observed.length !== matching.length) return null;" in html
+    steps_chart = re.search(r"function stepsByCaseDatasets\(\) \{.*?var chart = (.*?);\n", html, re.DOTALL)
+    assert steps_chart is not None
+    assert json.loads(steps_chart.group(1)) == {
+        "labels": ["case-1"],
+        "datasets": [{"label": "codex \u00b7 With skill", "data": [4.0]}],
+    }
 
 
 def test_authenticated_pre_status_rerender_preserves_historical_scores(tmp_path: Path) -> None:
@@ -2364,6 +2369,9 @@ def test_escape_heavy_payload_has_bounded_html_and_one_recoverable_canonical_cop
     assert _embedded_tier3_payload(html)["dataset"][0]["prompt"] == escape_heavy_prompt
     assert "HTML preview omitted" in html
     assert "characters" in html
+    # ``notice.items`` once resolved to the dict method and rendered its repr.
+    assert re.search(r"HTML preview omitted \d+ characters\.", html)
+    assert "built-in method" not in html
 
 
 def test_canonical_payload_enforces_total_serialized_budget() -> None:

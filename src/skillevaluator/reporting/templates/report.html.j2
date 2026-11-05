@@ -1425,7 +1425,7 @@
                         <span><strong>{{ tier2_summary.passed_count }}</strong> of {{ tier2_summary.executed_count }} checks passed</span>
                         {% if tier2_summary.not_applicable_count %}<span><strong>{{ tier2_summary.not_applicable_count }}</strong> not applicable</span>{% endif %}
                         {% if tier2_summary.skipped_count %}<span><strong>{{ tier2_summary.skipped_count }}</strong> skipped</span>{% endif %}
-                        {% if tier2_summary.issue_count %}<span><strong>{{ tier2_summary.issue_count }}</strong> duplicate(s)</span>{% endif %}
+                        {% if tier2_summary.issue_count %}<span><strong>{{ tier2_summary.issue_count }}</strong> finding(s)</span>{% endif %}
                     </div>
                 </div>
                 {% elif presentation.tiers[2].displayed %}{{ absent_tier_tile(2, presentation.tiers[2]) }}
@@ -1619,6 +1619,12 @@
                     {% if top_issues | length > 10 %}<p class="findings-overflow-note">Showing 10 of {{ top_issues | length }} finding types. Full evidence and suggested fixes are included below.</p>{% endif %}
                 </div>
             </div>
+            {% endif %}
+            {% if skillspector_versions %}
+            <details class="t3-details">
+                <summary>Scanner provenance</summary>
+                <p>Recorded SkillSpector version{{ 's' if skillspector_versions | length != 1 else '' }}: {{ skillspector_versions | join(', ') }}</p>
+            </details>
             {% endif %}
             {# SkillSpector LLM provenance from --llm runs, validated by skillspector_provenance.py. #}
             {% if skillspector_provenance %}
@@ -2069,26 +2075,23 @@
         {% elif tab.id == 'tier2' %}
         {# ==================== TIER 2: SEMANTIC OVERLAP ==================== #}
 
-        {% set tier2_findings = [] %}{% for r in tier2_results %}{% for f in r.findings %}{% if tier2_findings.append(f) %}{% endif %}{% endfor %}{% endfor %}
-
-        <div class="dashboard">
-            <div class="dashboard-card">
-                <h3 class="dashboard-card-title">Checks Run</h3>
-                <p class="dashboard-card-value">{{ tier2_summary.executed_count }}</p>
-                <p class="dashboard-card-subtitle">Semantic overlap analysis</p>
+        <nav aria-label="Tier 2 comparison scopes" class="t3-harbor-actions">
+            {% for scope in tier2_scopes %}<a href="#tier2-{{ scope.id }}">{{ scope.label }}</a>{% endfor %}
+        </nav>
+        {% for scope in tier2_scopes %}
+        <section id="tier2-{{ scope.id }}" aria-labelledby="tier2-{{ scope.id }}-title">
+            <h2 id="tier2-{{ scope.id }}-title">{{ scope.label }}</h2>
+            <p>{{ 'Redundant content among files in the evaluated skill.' if scope.id == 'within' else 'Semantic overlap with catalog entries or among a collection of skills.' }}</p>
+            <div class="dashboard">
+                {% for label, value in [('Checks completed', scope.completed), ('Duplicate findings', scope.duplicates), ('Affected files' if scope.id == 'within' else 'Affected skills', scope.affected), ('Catalog entries compared', scope.catalog_entries)] %}
+                <div class="dashboard-card">
+                    <h3 class="dashboard-card-title">{{ label }}</h3>
+                    <p class="dashboard-card-value">{{ value if value is not none else 'Unavailable' }}</p>
+                </div>
+                {% endfor %}
             </div>
-            <div class="dashboard-card danger">
-                <h3 class="dashboard-card-title">Matches Found</h3>
-                <p class="dashboard-card-value">{{ tier2_findings | length }}</p>
-                <p class="dashboard-card-subtitle" style="font-size:0.8rem;">Within or across evaluated skills</p>
-            </div>
-        </div>
-
-        {% if tier2_results %}
-            <p style="color:var(--text-secondary);font-size:0.9rem;margin:0.75rem 0;">
-                Checks for redundant content within one skill and semantic overlap across skills or local catalog entries.
-            </p>
-            {% for result in tier2_results %}
+            {% for note in scope.notes %}<p class="t3-section-hint">{{ note }}</p>{% endfor %}
+            {% for result in scope.results %}
                 {% set execution_errors = result | additional_errors %}
                 {% if execution_errors %}
                 <div style="background:var(--bg-secondary);border:1px solid var(--border-color);border-radius:8px;padding:1rem;margin:0.75rem 0;">
@@ -2107,7 +2110,7 @@
                     <strong style="color:var(--warning-color);">Incomplete scanner evidence:</strong>
                     {{ result.incomplete_scans | join(', ') }} did not produce trustworthy evidence. Restore the scanner and rerun validation.
                 </div>
-                {% elif result.passed and not result.findings %}
+                {% elif result.passed and not result.findings and scope.completed == scope.results | length %}
                 <div style="background:var(--bg-secondary);border:1px solid var(--border-color);border-radius:8px;padding:1rem;margin:0.75rem 0;">
                     {{ icons.checkmark | safe }} <strong style="color:var(--success-color);">No semantic overlaps detected.</strong>
                     {% if result.success_details %}
@@ -2143,9 +2146,8 @@
                 </details>
                 {% endfor %}
             {% endfor %}
-        {% else %}
-            <p style="color: var(--text-secondary); padding: 1rem;">No Tier 2 checks were run. Configure a public embedding provider, then run <code>similarity-check</code> or <code>dedup-scan</code>.</p>
-        {% endif %}
+        </section>
+        {% endfor %}
 
         {% elif tab.id == 'tier3' %}
         {# ==================== TIER 3: AGENT EVALUATION (dimensions-first, schema v2.0) ==================== #}
@@ -2501,15 +2503,19 @@
                 {% endif %}
                 {% endif %}
             </div>
-            {% if t3_harbor_job_url or t3_harbor_analysis_url %}
+            {% if harbor_jobs %}
             <div class="t3-harbor-panel">
                 <div>
                     <strong>Harbor artifacts</strong>
                     <p>Open retained logs, raw trajectories, artifacts, and generated Harbor analysis for this Tier 3 run.</p>
                 </div>
                 <div class="t3-harbor-actions">
-                    {% if t3_harbor_job_url %}<a class="t3-harbor-link" href="{{ t3_harbor_job_url }}" target="_blank" rel="noopener">Open Harbor logs</a>{% endif %}
-                    {% if t3_harbor_analysis_url %}<a class="t3-harbor-link" href="{{ t3_harbor_analysis_url }}" target="_blank" rel="noopener">Open Harbor analysis</a>{% endif %}
+                    {% for job in harbor_jobs %}
+                    <div><strong>{{ job.name }}</strong>
+                    {% if job.url %}<a class="t3-harbor-link" href="{{ job.url }}" target="_blank" rel="noopener">Results</a>{% endif %}
+                    {% if job.analysis_url %}<a class="t3-harbor-link" href="{{ job.analysis_url }}" target="_blank" rel="noopener">Analysis</a>{% endif %}
+                    </div>
+                    {% endfor %}
                 </div>
             </div>
             {% endif %}
@@ -3707,6 +3713,24 @@
                 underlying evaluator scores, Harbor artifacts, and timing &mdash; each available as a
                 one-click download.
             </p>
+
+            <details class="t3-details">
+                <summary>Recorded evaluation provenance</summary>
+                <div class="t3-details-body">
+                    <p>Only metadata recorded for this evaluation is shown. Missing values are unavailable.</p>
+                    <dl class="t3-prov-grid">
+                        <dt>Evaluator version</dt><dd>{{ tier3.evaluator_version or t3_summary.evaluator_version or 'Unavailable' }}</dd>
+                        <dt>Dataset digest</dt><dd><code>{{ dataset_provenance[0] if dataset_provenance else 'Unavailable' }}</code></dd>
+                        <dt>Dataset digest algorithm</dt><dd><code>{{ dataset_provenance[1] if dataset_provenance else 'Unavailable' }}</code></dd>
+                        {% if evaluated_source %}
+                        {% for field, value in evaluated_source.items() %}<dt>Evaluated source {{ field | replace('_', ' ') }}</dt><dd><code>{{ value }}</code></dd>{% endfor %}
+                        {% else %}<dt>Evaluated source</dt><dd>Unavailable</dd>{% endif %}
+                        {% for name, agent in t3_agents.items() %}
+                        <dt>{{ name }} model</dt><dd>{{ agent.model or agent.model_name or agent.llm_model or 'Unavailable' }}</dd>
+                        {% endfor %}
+                    </dl>
+                </div>
+            </details>
 
             {# Attempt Policy is configuration/provenance: useful for reproducing a run but not
                an Overview decision signal. Keep it here so reviewers can confirm the exact

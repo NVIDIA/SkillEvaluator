@@ -66,6 +66,29 @@ def normalize_harbor_viewer_for_display(agent_eval: dict[str, Any]) -> dict[str,
     return out
 
 
+def harbor_job_links(agent_eval: dict[str, Any]) -> list[dict[str, str]]:
+    """Project every normalized job and unmatched legacy link, without attribution."""
+    viewer = normalize_harbor_viewer_for_display(agent_eval)
+    jobs = [dict(job) for job in viewer.get("jobs", [])]
+    job_url, analysis_url = viewer.get("job_url"), viewer.get("analysis_url")
+    if job_url and not any(job["url"] == job_url for job in jobs):
+        jobs.append({"url": job_url})
+    if analysis_url and not any(job.get("analysis_url") == analysis_url for job in jobs):
+        if len(jobs) == 1 and not viewer.get("jobs"):
+            jobs[0]["analysis_url"] = analysis_url
+        else:
+            jobs.append({"analysis_url": analysis_url})
+    seen_analysis: set[str] = set()
+    for index, job in enumerate(jobs, 1):
+        job["name"] = job.get("name") or f"Job {index}"
+        analysis = job.get("analysis_url")
+        if analysis in seen_analysis:
+            job.pop("analysis_url", None)
+        elif analysis:
+            seen_analysis.add(analysis)
+    return jobs
+
+
 def normalize_agent_eval_harbor_links(agent_eval: dict[str, Any]) -> dict[str, Any]:
     """Return a shallow copy with display-safe Harbor links in nested fields."""
     normalized = dict(agent_eval)

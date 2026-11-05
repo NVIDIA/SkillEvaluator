@@ -20,6 +20,7 @@ from rich.panel import Panel
 from rich.table import Table
 from rich.text import Text
 
+from skillevaluator.reporting.harbor_viewer import harbor_job_links
 from skillevaluator.tier3.harbor.metrics import (
     CUSTOM_ONLY_METRIC_SET,
     DEFAULT_METRIC_SET,
@@ -933,6 +934,11 @@ def render_evaluation_result(
         )
 
     artifact_rows: list[tuple[str, str]] = []
+    for job in harbor_job_links(dict(result)):
+        artifact_rows.append(("Harbor job", safe(job["name"])))
+        for key, label in (("url", "Results"), ("analysis_url", "Analysis")):
+            if job.get(key):
+                artifact_rows.append((label, safe(job[key])))
     report_path = result.get("report_path")
     if report_path:
         raw_report_path = str(report_path)

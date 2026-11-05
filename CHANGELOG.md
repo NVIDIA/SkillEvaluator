@@ -6,6 +6,12 @@ All notable changes to SkillEvaluator are documented in this file.
 
 ### Changed
 
+- Separate HTML Tier 2 evidence into within-skill and across-skill comparisons,
+  with recorded completion, duplicate, affected-path, and catalog counts. Keep
+  skipped or unavailable comparisons distinct from completed zero-match scans.
+  Link every recorded Harbor job in HTML, terminal, and Markdown reports and
+  disclose recorded scanner, evaluator, model, dataset, and source provenance.
+
 - Keep HTML tier navigation synchronized across sidebar, tiles and a mobile
   sticky bar, including absent tiers in comprehensive reports. Add accessible
   keyboard navigation for Tier 3 and agent tabs, a System/Light/Dark preference,

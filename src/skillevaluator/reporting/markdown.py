@@ -38,7 +38,7 @@ from skillevaluator.reporting.finding_summary import (
 )
 from skillevaluator.reporting.harbor_viewer import (
     harbor_evidence_link_text,
-    normalize_harbor_viewer_for_display,
+    harbor_job_links,
     safe_url,
 )
 from skillevaluator.reporting.run_status import Status, resolve_run_status, result_status
@@ -360,11 +360,12 @@ class MarkdownReporter(ReporterBase):
             runtime_number = _finite_report_number(runtime)
             runtime_text = f"{runtime_number:.1f}s" if runtime_number is not None else "N/A"
             lines.append(f"**Runtime:** {runtime_text}")
-            harbor_viewer = normalize_harbor_viewer_for_display(ae)
-            if job_url := _markdown_safe_url(harbor_viewer.get("job_url")):
-                lines.append(f"**Harbor logs:** [Open Harbor logs]({job_url})")
-            if analysis_url := _markdown_safe_url(harbor_viewer.get("analysis_url")):
-                lines.append(f"**Harbor analysis:** [Open Harbor analysis]({analysis_url})")
+            for job in harbor_job_links(ae):
+                lines.append(f"**{_markdown_inline_text(job['name'])}**")
+                if job_url := _markdown_safe_url(job.get("url")):
+                    lines.append(f"Results — **Harbor logs:** [Open Harbor logs]({job_url})")
+                if analysis_url := _markdown_safe_url(job.get("analysis_url")):
+                    lines.append(f"**Harbor analysis:** [Open Harbor analysis]({analysis_url})")
             lines.append("")
 
             evaluators = ae.get("evaluators", {})

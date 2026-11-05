@@ -717,3 +717,61 @@ def test_unset_policies_are_not_recorded():
 
     assert "fallback_policy" not in configuration
     assert "retry_policy" not in configuration
+
+
+@pytest.mark.parametrize(
+    ("name", "value"), [("LLM_JUDGE_FALLBACK_POLICY", "replce"), ("LLM_JUDGE_RETRY_POLICY", "strcit")]
+)
+def test_unknown_policy_is_not_recorded_as_applied(name, value):
+    provider = SimpleNamespace(provider="openai", model="test-model")
+
+    configuration = runner._judge_model_config(provider, {name: value}, "default")
+
+    assert "fallback_policy" not in configuration
+    assert "retry_policy" not in configuration
+
+
+@pytest.mark.parametrize(
+    ("name", "value", "expected"),
+    [
+        ("LLM_JUDGE_FALLBACK_POLICY", "replce", "LLM_JUDGE_FALLBACK_POLICY must be append or replace"),
+        ("LLM_JUDGE_RETRY_POLICY", "strcit", "LLM_JUDGE_RETRY_POLICY must be legacy or strict"),
+    ],
+)
+def test_unknown_policy_stops_the_run_before_any_trial(monkeypatch, tmp_path, name, value, expected):
+    monkeypatch.setenv(name, value)
+
+    result = _run_until_staging(monkeypatch, tmp_path)
+
+    assert result["error"] == [expected]
+
+
+def test_custom_only_run_ignores_the_judge_policies(monkeypatch, tmp_path):
+    monkeypatch.setenv("LLM_JUDGE_RETRY_POLICY", "strcit")
+
+    result = _run_until_staging(monkeypatch, tmp_path, grading_mode="custom_only")
+
+    assert not any("LLM_JUDGE_RETRY_POLICY" in error for error in result.get("error", []))
+
+
+def _run_until_staging(monkeypatch, tmp_path, **engine_kwargs):
+    """Run the Harbor engine with the provider, prerequisites, staging and trials stubbed out."""
+    skill = tmp_path / "demo"
+    (skill / "evals").mkdir(parents=True)
+    (skill / "evals" / "config.yml").write_text("schema_version: 1\n", encoding="utf-8")
+    monkeypatch.setattr(
+        runner,
+        "resolve_llm_provider",
+        lambda: ProviderConfig(
+            provider="openai",
+            model="test-model",
+            api_key="provider-key",
+            base_url="https://provider.example/v1",
+            litellm_model="openai/test-model",
+        ),
+    )
+    monkeypatch.setattr(runner, "_check_prerequisites", lambda **_kwargs: [])
+    monkeypatch.setattr(runner, "generate_harbor_tasks", lambda *_args, **_kwargs: [])
+    monkeypatch.setattr(runner, "_run_agent_pair", lambda **_kwargs: pytest.fail("trials started"))
+
+    return runner.run_harbor_eval(skill, ["codex"], output_dir=tmp_path / "results", env_mode="docker", **engine_kwargs)

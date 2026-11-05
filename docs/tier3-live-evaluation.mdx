@@ -802,10 +802,12 @@ agent environment or `custom_only` runs.
   - The default, `legacy`, keeps the retries, fallbacks, format retry, and
     salvage described above.
 
-Values are case-insensitive. Any other value fails every standard judge before
-a request is sent, so the affected conditions publish no scores. When set,
-`run_config.json` records the values as `judge.fallback_policy` and
-`judge.retry_policy`.
+Values are case-insensitive. Any other value stops a run with standard
+grading at configuration, before any trial starts. If one still reaches the
+verifier, every standard judge fails before a request is sent, so the affected
+conditions publish no scores. When set, `run_config.json` records the values as
+`judge.fallback_policy` and `judge.retry_policy`. A `custom_only` run does not
+read them.
 
 ## Reading results
 

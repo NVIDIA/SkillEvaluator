@@ -561,7 +561,9 @@ calls.
 Each step of a multi-step task is timed on its own, so the time between Harbor
 steps is not counted. Steps marked `is_copied_context` repeat context from an
 earlier trajectory and are not timed; a copied step after new steps leaves the
-trial without timing. Trials whose `trajectory.json` was omitted (too large, or
+trial without timing. Copied timestamps do not show when the first new response
+started, so inferred timing also leaves the trial without timing when the new
+steps after copied context start with an agent step. Trials whose `trajectory.json` was omitted (too large, or
 redaction or validation failed) and multi-step trials scored per step have no
 timing. Missing timing stays `N/A` (`null` in JSON), never zero, and follows the
 same complete-arm and matching-case rules as tokens. Timing is diagnostic and

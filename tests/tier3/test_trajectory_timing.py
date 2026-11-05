@@ -431,6 +431,43 @@ def test_each_harbor_step_drops_its_own_copied_context_prefix() -> None:
     assert trajectory_timing({"steps": merged}) == _inferred(17.0, 3.0)
 
 
+def _after_copied_context(first_new_step: dict[str, Any] | None) -> list[dict[str, Any]]:
+    copied = [
+        _copied({"source": "user", "timestamp": "2026-01-01T11:00:00Z"}),
+        _copied({"source": "user", "timestamp": "2026-01-01T12:00:00Z"}),
+    ]
+    new_work = [
+        _exec_step("2026-01-01T12:00:10Z", "call-new"),
+        {"source": "agent", "timestamp": "2026-01-01T12:00:15Z"},
+    ]
+    return [*copied, *([first_new_step] if first_new_step else []), *new_work]
+
+
+def test_new_work_that_starts_with_an_agent_step_after_copied_context_is_unmeasured() -> None:
+    # The copied timestamps do not show when the first new response started, so timing from it would
+    # report 4.0 LLM seconds and drop the 10 s spent producing the first tool call.
+    assert trajectory_timing({"steps": _after_copied_context(None)}) is None
+    first = [_user(), _tool_step(3, [1.0]), _agent(10)]
+    second = _after_copied_context(None)
+    assert trajectory_timing({"steps": [*_named("prepare", first), *_named("finish", second)]}) is None
+
+
+@pytest.mark.parametrize("source", ["user", "system"])
+def test_new_user_or_system_step_after_copied_context_starts_the_timing(source: str) -> None:
+    steps = _after_copied_context({"source": source, "timestamp": "2026-01-01T12:00:00Z"})
+    assert trajectory_timing({"steps": steps}) == _inferred(14.0, 1.0)
+
+
+def test_native_timing_after_copied_context_needs_no_new_user_step() -> None:
+    trajectory = {
+        "steps": [
+            _copied({"source": "user"}),
+            {"source": "agent", "extra": {"llm_duration_ms": 2000}, "tool_calls": [{"extra": {"duration_ms": 500}}]},
+        ]
+    }
+    assert trajectory_timing(trajectory) == {"llm_seconds": 2.0, "tool_seconds": 0.5, "source": "atif"}
+
+
 @pytest.mark.parametrize(
     "steps",
     [

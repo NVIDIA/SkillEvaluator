@@ -26,7 +26,9 @@ Each step of a merged multi-step trajectory is timed on its own, so the gap
 between Harbor steps (verifier and setup time) is never counted. Steps marked
 ``is_copied_context`` repeat earlier work, so each Harbor step's copied prefix
 is dropped before timing; a copied step after new work, or a Harbor step with
-only copied steps, leaves the trajectory unmeasured. Missing,
+only copied steps, leaves the trajectory unmeasured. Copied timestamps do not
+show when the first new response started, so inference also leaves a Harbor
+step unmeasured when its new work starts with an agent step. Missing,
 malformed, unordered or inconsistent evidence makes a component ``None``; it
 is never reported as zero. A trajectory with no tool calls measures zero tool
 seconds.
@@ -37,7 +39,7 @@ from __future__ import annotations
 import math
 import re
 from datetime import datetime
-from typing import Any
+from typing import Any, NamedTuple
 
 TIMING_SOURCES = ("atif", "step_timestamps")
 
@@ -63,14 +65,15 @@ def trajectory_timing(trajectory: Any) -> dict[str, Any] | None:
     steps = trajectory.get("steps")
     if not isinstance(steps, list) or not steps or not all(isinstance(step, dict) for step in steps):
         return None
-    new_steps = _without_copied_context(steps)
-    if new_steps is None:
+    segments = _new_work_segments(steps)
+    if segments is None:
         return None
+    new_steps = [step for segment in segments for step in segment.steps]
     if _has_native_timing(new_steps):
         measured = _native_timing_ms(new_steps)
         source = "atif"
     else:
-        measured = _inferred_timing_ms(new_steps)
+        measured = _inferred_timing_ms(segments)
         source = "step_timestamps"
     if measured is None:
         return None
@@ -342,9 +345,16 @@ def _harbor_step_segments(steps: list[dict[str, Any]]) -> list[list[dict[str, An
     return segments
 
 
-def _without_copied_context(steps: list[dict[str, Any]]) -> list[dict[str, Any]] | None:
-    """Drop each Harbor step's ``is_copied_context`` prefix, or ``None`` if copied steps are not a prefix."""
-    new_steps: list[dict[str, Any]] = []
+class _NewWorkSegment(NamedTuple):
+    """One Harbor step's steps after its ``is_copied_context`` prefix."""
+
+    steps: list[dict[str, Any]]
+    after_copied_context: bool
+
+
+def _new_work_segments(steps: list[dict[str, Any]]) -> list[_NewWorkSegment] | None:
+    """Drop each Harbor step's copied prefix, or ``None`` if copied steps are not a prefix."""
+    segments: list[_NewWorkSegment] = []
     for segment in _harbor_step_segments(steps):
         prefix_length = 0
         while prefix_length < len(segment) and segment[prefix_length].get("is_copied_context") is True:
@@ -352,15 +362,19 @@ def _without_copied_context(steps: list[dict[str, Any]]) -> list[dict[str, Any]]
         segment_new_steps = segment[prefix_length:]
         if not segment_new_steps or any(step.get("is_copied_context") is True for step in segment_new_steps):
             return None
-        new_steps.extend(segment_new_steps)
-    return new_steps
+        segments.append(_NewWorkSegment(segment_new_steps, after_copied_context=prefix_length > 0))
+    return segments
 
 
-def _inferred_timing_ms(steps: list[dict[str, Any]]) -> tuple[float, float] | None:
+def _inferred_timing_ms(segments: list[_NewWorkSegment]) -> tuple[float, float] | None:
     llm_ms = 0.0
     tool_ms = 0.0
-    for segment in _harbor_step_segments(steps):
-        measured = _segment_timing_ms(segment)
+    for segment in segments:
+        # A copied timestamp does not show when the first new response started, so
+        # timing from that response would silently drop its model time.
+        if segment.after_copied_context and segment.steps[0].get("source") == "agent":
+            return None
+        measured = _segment_timing_ms(segment.steps)
         if measured is None:
             return None
         llm_ms += measured[0]

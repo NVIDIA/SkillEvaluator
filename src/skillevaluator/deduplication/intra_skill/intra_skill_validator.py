@@ -25,8 +25,8 @@ from skillevaluator.constants import (
     CONTENT_DEDUP_SIMILARITY_THRESHOLD,
     CONTENT_DEDUP_TRIVIAL_DUP_MAX_CHARS,
 )
+from skillevaluator.deduplication.intra_skill import llm_analyzer
 from skillevaluator.deduplication.intra_skill.llm_analyzer import (
-    MAX_PROMPT_CHARS,
     SYSTEM_PROMPT,
     analyze_cluster,
     build_user_prompt,
@@ -53,8 +53,6 @@ _CONFIG_KV_RE = re.compile(r"^[\w.\-/]+\s*[=:]\s*\S")
 # prompt budgets bound paid review; a fixed member cap below the chunk ceiling
 # would refuse large repeated-content clusters whose prompt fits.
 CONTENT_DEDUP_MAX_CLUSTER_MEMBERS = CONTENT_DEDUP_MAX_CHUNKS
-# build_user_prompt shares exactly repeated text against this same budget.
-CONTENT_DEDUP_MAX_LLM_PROMPT_CHARS = MAX_PROMPT_CHARS
 CONTENT_DEDUP_MAX_TOTAL_LLM_PROMPT_CHARS = 1_000_000
 # Most member locations and source files named in one finding message. The
 # rest are counted, so a finding for a 512-member cluster stays a few kilobytes.
@@ -348,7 +346,9 @@ class IntraSkillValidator(ValidatorBase):
                 ),
                 (
                     prompt_chars,
-                    CONTENT_DEDUP_MAX_LLM_PROMPT_CHARS,
+                    # Read at call time: build_user_prompt shares repeated text
+                    # against this same attribute, so one value sets both.
+                    llm_analyzer.MAX_PROMPT_CHARS,
                     "llm_prompt_size_limit",
                     "an LLM review prompt of {actual} characters exceeds the limit of {limit}.",
                 ),

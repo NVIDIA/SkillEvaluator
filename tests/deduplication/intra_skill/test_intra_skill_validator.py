@@ -375,17 +375,17 @@ class TestIntraSkillValidatorValidate:
         ("limit_name", "check_name", "expected_message"),
         [
             (
-                "CONTENT_DEDUP_MAX_CLUSTER_MEMBERS",
+                "intra_skill_validator.CONTENT_DEDUP_MAX_CLUSTER_MEMBERS",
                 "llm_cluster_member_limit",
                 "a content cluster has 2 members, more than the limit of 1 for LLM review.",
             ),
             (
-                "CONTENT_DEDUP_MAX_LLM_PROMPT_CHARS",
+                "llm_analyzer.MAX_PROMPT_CHARS",
                 "llm_prompt_size_limit",
                 "an LLM review prompt of {actual} characters exceeds the limit of 1.",
             ),
             (
-                "CONTENT_DEDUP_MAX_TOTAL_LLM_PROMPT_CHARS",
+                "intra_skill_validator.CONTENT_DEDUP_MAX_TOTAL_LLM_PROMPT_CHARS",
                 "llm_total_prompt_size_limit",
                 "LLM review prompts total {actual} characters, more than the limit of 1.",
             ),
@@ -405,7 +405,7 @@ class TestIntraSkillValidatorValidate:
         tmp_path: Path,
         monkeypatch,
     ) -> None:
-        monkeypatch.setattr(intra_skill_validator, limit_name, 1)
+        monkeypatch.setattr(f"skillevaluator.deduplication.intra_skill.{limit_name}", 1)
         skill_dir = tmp_path / "skill"
         skill_dir.mkdir()
         (skill_dir / "SKILL.md").write_text("## Section A\n" + "a" * 200 + "\n## Section B\n" + "a" * 200)
@@ -428,7 +428,10 @@ class TestIntraSkillValidatorValidate:
 
     def test_cluster_member_limit_is_the_chunk_ceiling(self) -> None:
         assert intra_skill_validator.CONTENT_DEDUP_MAX_CLUSTER_MEMBERS == constants.CONTENT_DEDUP_MAX_CHUNKS == 512
-        assert intra_skill_validator.CONTENT_DEDUP_MAX_LLM_PROMPT_CHARS == llm_analyzer.MAX_PROMPT_CHARS == 64_000
+        assert llm_analyzer.MAX_PROMPT_CHARS == 64_000
+        # The validator reads llm_analyzer.MAX_PROMPT_CHARS; a stale copy here
+        # would let a patched budget move one threshold and not the other.
+        assert not hasattr(intra_skill_validator, "CONTENT_DEDUP_MAX_LLM_PROMPT_CHARS")
         assert intra_skill_validator.CONTENT_DEDUP_MAX_TOTAL_LLM_PROMPT_CHARS == 1_000_000
 
     @pytest.mark.parametrize("newline", ["\n", "\r\n"], ids=["lf", "crlf"])
@@ -519,7 +522,7 @@ class TestIntraSkillValidatorValidate:
         mock_analyze.assert_called_once()
         assert mock_analyze.call_args.args[1] is cluster
         prompt = build_user_prompt(cluster)
-        assert len(SYSTEM_PROMPT) + len(prompt) <= intra_skill_validator.CONTENT_DEDUP_MAX_LLM_PROMPT_CHARS
+        assert len(SYSTEM_PROMPT) + len(prompt) <= llm_analyzer.MAX_PROMPT_CHARS
         assert prompt.count("---CHUNK ") == 500
         for member in members:
             assert f"Section: {member.heading}\n" in prompt
@@ -578,6 +581,56 @@ class TestIntraSkillValidatorValidate:
         assert actual > limit
         self._assert_work_limit_incomplete(result, {"check_name": check_name, "actual": actual, "limit": limit})
         mock_llm.assert_not_called()
+
+    @pytest.mark.parametrize("repeated", [True, False], ids=["shared-fits", "distinct-refused"])
+    @patch("skillevaluator.deduplication.intra_skill.intra_skill_validator.analyze_cluster")
+    @patch("skillevaluator.deduplication.intra_skill.intra_skill_validator.LLMClient")
+    @patch("skillevaluator.deduplication.intra_skill.intra_skill_validator.build_clusters")
+    @patch("skillevaluator.deduplication.intra_skill.intra_skill_validator.EmbeddingClient")
+    def test_one_prompt_budget_sets_sharing_and_refusal(
+        self, mock_embed, mock_clusters, mock_llm, mock_analyze, tmp_path: Path, monkeypatch, repeated: bool
+    ) -> None:
+        budget = 8_000
+        monkeypatch.setattr(llm_analyzer, "MAX_PROMPT_CHARS", budget)
+        skill_dir = tmp_path / "lowered-budget"
+        skill_dir.mkdir()
+        (skill_dir / "SKILL.md").write_text("## A\n" + "a" * 100 + "\n## B\n" + "b" * 100, encoding="utf-8")
+        mock_embed.return_value.embed.return_value = [[1.0, 0.0], [1.0, 0.0]]
+        members = [
+            ContentChunk(
+                "SKILL.md",
+                f"Member {index}",
+                index + 1,
+                index + 1,
+                ("" if repeated else f"{index}: ") + "z" * 300,
+                "markdown",
+            )
+            for index in range(40)
+        ]
+        cluster = ContentCluster(members, 1.0, 1.0, False, {"markdown"})
+        mock_clusters.return_value = [cluster]
+        mock_analyze.return_value = LLMVerdict("DUPLICATE", 0.9, "Same content", "Keep one copy")
+        prompt = build_user_prompt(cluster)
+        prompt_chars = len(SYSTEM_PROMPT) + len(prompt)
+
+        result = IntraSkillValidator().validate(skill_dir)
+
+        if repeated:
+            # Shared under the lowered budget, then accepted by that same budget.
+            assert "SHARED CONTENT" in prompt
+            assert prompt_chars <= budget
+            assert result.incomplete_scans == []
+            assert "work_limit" not in result.metadata
+            mock_analyze.assert_called_once()
+        else:
+            # Distinct text cannot be shared, so the lowered budget refuses it.
+            assert "SHARED CONTENT" not in prompt
+            assert prompt_chars > budget
+            self._assert_work_limit_incomplete(
+                result, {"check_name": "llm_prompt_size_limit", "actual": prompt_chars, "limit": budget}
+            )
+            mock_llm.assert_not_called()
+            mock_analyze.assert_not_called()
 
     @pytest.mark.parametrize(
         ("member_count", "message_tail"),

@@ -240,3 +240,20 @@ def test_catalog_kpi_marks_non_catalog_scopes_not_applicable():
         section = output.split(f'id="tier2-{scope}"', 1)[1].split("</section>", 1)[0]
         catalog_card = section.split("Catalog entries compared</h3>", 1)[1].split("</div>", 1)[0]
         assert "Not applicable" in catalog_card
+
+
+def test_passing_workflow_stages_alone_do_not_prove_comparison_completion():
+    from skillevaluator.reporting.tier2_views import tier2_scope_views
+
+    for name, stage, index in (
+        ("Context Deduplication", "intra_skill", 0),
+        ("Similarity Check", "catalog_comparison", 1),
+    ):
+        result = ValidationResult(validator_name=name)
+        result.metadata["workflow"] = {"tier": 2, "stages": {stage: {"status": "passed"}}}
+        original = deepcopy(result)
+        view = tier2_scope_views([result])[index]
+        assert (view.completed, view.duplicates, view.affected) == (None, None, None)
+        output = HTMLReporter(include_timestamp=False).render_all([result])
+        assert "No semantic overlaps detected." not in output
+        assert result == original

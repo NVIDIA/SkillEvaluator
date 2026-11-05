@@ -42,8 +42,9 @@ def tier2_scope_views(results: list[ValidationResult]) -> tuple[Tier2ScopeView, 
     """Keep missing completion/count metadata unknown; never rewrite results.
 
     Workflow status describes scope, while a failed gate may still have finished
-    comparison. Completion requires a recorded stage pass or comparison evidence,
-    and no incomplete scanner or execution error. Findings alone do not prove it.
+    comparison. Completion requires recorded comparison evidence and no incomplete
+    scanner or execution error. Gate-derived workflow passes and findings alone
+    do not prove it.
     """
     views = []
     for scope, label, stage in (
@@ -71,10 +72,6 @@ def tier2_scope_views(results: list[ValidationResult]) -> tuple[Tier2ScopeView, 
         pairwise_only = bool(members) and scope == "across"
         for result in members:
             details = {detail.check_name: detail.metadata for detail in result.success_details}
-            workflow = result.metadata.get("workflow")
-            raw = workflow.get("stages") if isinstance(workflow, dict) else None
-            evidence = raw.get(stage) if isinstance(raw, dict) else None
-            stage_pass = isinstance(evidence, dict) and evidence.get("status") == "passed"
             analysis = result.metadata.get("llm_analysis")
             analysis_complete = (
                 isinstance(analysis, dict)
@@ -83,7 +80,7 @@ def tier2_scope_views(results: list[ValidationResult]) -> tuple[Tier2ScopeView, 
                 and _count(analysis.get("clusters_failed")) == 0
                 and _count(analysis.get("clusters_refused")) == 0
             )
-            recorded_completion = stage_pass or bool(
+            recorded_completion = bool(
                 {"catalog_compared", "index_built", "similarity_check"} & details.keys()
                 if scope == "across"
                 else "context_dedup" in details or analysis_complete

@@ -230,8 +230,8 @@ def test_small_accuracy_and_goal_budgets_retain_final_response_excerpt(monkeypat
             captured_shared.__setitem__("last", prompt)
             or (
                 '{"achieved": true, "score": 1.0, "reason": "ok", "criteria": '
-                '{"SKILL_IDENTIFIED": true, "ACTION_CORRECT": true, "FACTUALLY_ACCURATE": true, '
-                '"TASK_ADDRESSED": true, "ACTIONABLE": true}}',
+                '{"ACTION_CORRECT": true, "FACTUALLY_ACCURATE": true, '
+                '"TASK_ADDRESSED": true, "ACTIONABLE": true, "FORMAT_FOLLOWED": true}}',
                 None,
             )
         ),
@@ -243,8 +243,8 @@ def test_small_accuracy_and_goal_budgets_retain_final_response_excerpt(monkeypat
             captured_template.__setitem__("last", prompt)
             or (
                 '{"achieved": true, "score": 1.0, "reason": "ok", "criteria": '
-                '{"SKILL_IDENTIFIED": true, "ACTION_CORRECT": true, "FACTUALLY_ACCURATE": true, '
-                '"TASK_ADDRESSED": true, "ACTIONABLE": true}}',
+                '{"ACTION_CORRECT": true, "FACTUALLY_ACCURATE": true, '
+                '"TASK_ADDRESSED": true, "ACTIONABLE": true, "FORMAT_FOLLOWED": true}}',
                 None,
             )
         ),

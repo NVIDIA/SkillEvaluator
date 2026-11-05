@@ -598,7 +598,12 @@ def test_template_bedrock_request_uses_model_compatible_temperature(monkeypatch,
     [
         pytest.param(
             "judge_accuracy",
-            {"score": 1.0, "reason": "recovered"},
+            {
+                "criteria": dict.fromkeys(
+                    ("ACTION_CORRECT", "FACTUALLY_ACCURATE", "TASK_ADDRESSED", "ACTIONABLE", "FORMAT_FOLLOWED"), True
+                ),
+                "reason": "recovered",
+            },
             id="accuracy",
         ),
         pytest.param(

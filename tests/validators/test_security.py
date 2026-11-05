@@ -5750,6 +5750,7 @@ def _run_llm_scan(
     *,
     exit_code: int = 2,
     static_issues: list[dict] | None = None,
+    error_message: str | None = None,
 ) -> ValidationResult:
     """Run a static stage that completes, then an LLM stage that returns *llm_report*."""
     mock_tools.skillspector.is_available = True
@@ -5760,7 +5761,13 @@ def _run_llm_scan(
             stderr="",
             exit_code=1 if static_issues else 0,
         ),
-        ToolResult(success=True, stdout=json.dumps(llm_report), stderr="", exit_code=exit_code),
+        ToolResult(
+            success=True,
+            stdout=json.dumps(llm_report),
+            stderr="",
+            exit_code=exit_code,
+            error_message=error_message,
+        ),
     ]
     return SecurityValidator(use_llm=True).validate_security_only(skill_dir)
 
@@ -5943,6 +5950,16 @@ class TestSkillspectorProviderOutage:
             "completeness_marked_complete",
             "empty_row_path",
             "oversized_row_message",
+            "top_level_errors",
+            "top_level_execution_successful",
+            "completeness_execution_successful",
+            "provider_status_partial",
+            "provider_status_skipped",
+            "row_outcome_skipped",
+            "empty_row_analyzers",
+            "empty_row_message",
+            "oversized_ledger",
+            "runtime_row_fatal_zero",
         ],
     )
     @patch("skillevaluator.validators.security.Tools")
@@ -6013,6 +6030,24 @@ class TestSkillspectorProviderOutage:
             provider_row["path"] = "  "
         elif mutation == "oversized_row_message":
             provider_row["message"] = "x" * 4097
+        elif mutation == "top_level_errors":
+            payload["errors"] = ["scanner fault"]
+        elif mutation == "top_level_execution_successful":
+            payload["execution_successful"] = True
+        elif mutation == "completeness_execution_successful":
+            completeness["execution_successful"] = True
+        elif mutation == "row_outcome_skipped":
+            provider_row["outcome"] = "skipped"
+        elif mutation == "empty_row_analyzers":
+            rows.append({**provider_row, "path": "references/extra.md", "analyzers": []})
+        elif mutation == "empty_row_message":
+            provider_row["message"] = ""
+        elif mutation == "oversized_ledger":
+            # Valid provider rows, one more than the 4096-row bound.
+            rows.extend({**provider_row, "path": f"references/extra-{index}.md"} for index in range(4097 - len(rows)))
+        elif mutation == "runtime_row_fatal_zero":
+            # 0 == False, so only an identity check tells this row apart.
+            rows[-1]["fatal"] = 0
         else:
             statuses = completeness["analyzer_statuses"]
             discovery = next(s for s in statuses if s["analyzer_id"] == "semantic_security_discovery")
@@ -6032,6 +6067,8 @@ class TestSkillspectorProviderOutage:
                 discovery["status"] = ["failed"]
             elif mutation == "unhashable_status_message":
                 discovery["message"] = ["Transient LLM provider failure persisted after bounded retries."]
+            elif mutation in ("provider_status_partial", "provider_status_skipped"):
+                discovery.update({mutation.removeprefix("provider_status_"): 1, "planned_work": 4})
             elif mutation == "provider_analyzer_missing_status":
                 # The row names an analyzer whose work no status accounts for.
                 statuses.remove(next(s for s in statuses if s["analyzer_id"] == "mcp_tool_poisoning"))
@@ -6044,6 +6081,24 @@ class TestSkillspectorProviderOutage:
         assert not any("LLM provider kept failing" in error for error in result.errors)
         if exit_code == 2:
             assert result.errors == [_GENERIC_LLM_EXIT_2_ERROR]
+
+    @patch("skillevaluator.validators.security.Tools")
+    def test_tool_error_message_wins_over_provider_message(
+        self,
+        mock_tools,
+        sample_skill_dir: Path,
+    ) -> None:
+        """A runner error on the LLM stage is reported as is, even with an outage report on exit 2."""
+        result = _run_llm_scan(
+            mock_tools,
+            sample_skill_dir,
+            _skillspector_provider_outage_report(),
+            error_message="skillspector execution failed: interrupted",
+        )
+
+        assert result.status == "incomplete"
+        assert result.incomplete_scans == ["skillspector-llm"]
+        assert result.errors == ["skillspector execution failed: interrupted"]
 
     @pytest.mark.parametrize(
         ("use_llm", "exit_code", "expected"),

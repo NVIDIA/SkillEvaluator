@@ -9,6 +9,7 @@ from unittest.mock import MagicMock
 
 import pytest
 
+from skillevaluator.deduplication.intra_skill import llm_analyzer
 from skillevaluator.deduplication.intra_skill.llm_analyzer import (
     SYSTEM_PROMPT,
     VERDICT_JSON_SCHEMA,
@@ -16,11 +17,171 @@ from skillevaluator.deduplication.intra_skill.llm_analyzer import (
     build_user_prompt,
     verdict_to_severity,
 )
+from skillevaluator.deduplication.intra_skill.semantic_clustering import ContentCluster
 from skillevaluator.inference import LLMClient, LLMClientError, LLMVerdict
 from skillevaluator.models.result import Severity
 
 
+def _request_chars(prompt: str) -> int:
+    """Characters of one review request, measured as the validator measures it."""
+    return len(SYSTEM_PROMPT) + len(prompt)
+
+
 class TestBuildUserPrompt:
+    def test_large_repeated_content_preserves_each_occurrence(self, make_chunk) -> None:
+        repeated = "Exact repeated instructions. " * 10
+        unique = "Unique instructions for the final section. " * 3
+        members = [
+            make_chunk(source_file=f"file-{index // 4}.md", heading=f"Section {index}", text=repeated)
+            for index in range(500)
+        ]
+        members.append(make_chunk(source_file="unique.md", heading="Unique", text=unique))
+        cluster = ContentCluster(members, 0.95, 0.85, True, {"markdown"})
+
+        prompt = build_user_prompt(cluster)
+
+        assert _request_chars(prompt) <= llm_analyzer.MAX_PROMPT_CHARS
+        assert prompt.count(repeated) == 1
+        assert prompt.count(unique) == 1
+        assert prompt.count("---SHARED CONTENT ") == 1
+        assert prompt.count("---CHUNK ") == 501
+        assert prompt.count("Content:\n[SHARED CONTENT 1]") == 500
+        assert "No chunks were omitted." in prompt
+        for index, member in enumerate(members, start=1):
+            assert (
+                f"---CHUNK {index}---\nFile: {member.source_file}\nSection: {member.heading}\n"
+                f"Lines: {member.start_line}-{member.end_line}\n"
+            ) in prompt
+        assert f"Section: Unique\nLines: 1-5\nContent:\n{unique}" in prompt
+        assert prompt.endswith("Classify this content overlap.")
+
+    def test_each_repeated_text_is_shared_once_in_first_seen_order(self, make_chunk) -> None:
+        first = "f" * 1_500
+        second = "s" * 1_500
+        members = [make_chunk(heading=f"Section {index}", text=first if index % 2 else second) for index in range(60)]
+        cluster = ContentCluster(members, 0.95, 0.85, False, {"markdown"})
+
+        prompt = build_user_prompt(cluster)
+
+        assert _request_chars(prompt) <= llm_analyzer.MAX_PROMPT_CHARS
+        assert prompt.count(first) == prompt.count(second) == 1
+        assert prompt.index(f"---SHARED CONTENT 1---\n{second}") < prompt.index(f"---SHARED CONTENT 2---\n{first}")
+        assert prompt.count("Content:\n[SHARED CONTENT 1]") == 30
+        assert prompt.count("Content:\n[SHARED CONTENT 2]") == 30
+        assert "Section: Section 1\nLines: 1-5\nContent:\n[SHARED CONTENT 2]" in prompt
+
+    def test_request_budget_includes_the_system_prompt(self, make_chunk, monkeypatch) -> None:
+        repeated = "r" * 2_000
+        filler = make_chunk(source_file="unique.md", heading="Unique", text="u" * 80)
+        members = [make_chunk(heading=f"Section {index}", text=repeated) for index in range(30)]
+        cluster = ContentCluster([*members, filler], 0.95, 0.85, True, {"markdown"})
+        budget = llm_analyzer.MAX_PROMPT_CHARS
+        with monkeypatch.context() as patched:
+            patched.setattr(llm_analyzer, "MAX_PROMPT_CHARS", 10**9)
+            filler.text += "u" * (budget - len(SYSTEM_PROMPT) // 2 - len(build_user_prompt(cluster)))
+            full_prompt = build_user_prompt(cluster)
+        # The user prompt alone fits; the request with the system prompt does not.
+        assert len(full_prompt) <= budget < _request_chars(full_prompt)
+
+        prompt = build_user_prompt(cluster)
+
+        assert _request_chars(prompt) <= budget
+        assert prompt.count(repeated) == 1
+        assert prompt.count(filler.text) == 1
+        assert prompt.count("---CHUNK ") == 31
+
+    def test_prompt_within_budget_keeps_every_occurrence_inline(self, make_chunk) -> None:
+        repeated = "Exact repeated instructions. " * 10
+        members = [make_chunk(heading=f"Section {index}", text=repeated) for index in range(3)]
+
+        prompt = build_user_prompt(ContentCluster(members, 0.95, 0.85, False, {"markdown"}))
+
+        assert prompt.count(f"Content:\n{repeated}") == 3
+        assert "SHARED CONTENT" not in prompt
+
+    def test_distinct_text_over_budget_is_never_dropped_or_shared(self, make_chunk) -> None:
+        members = [make_chunk(heading=f"Member {index}", text=f"{index}: " + "x" * 80) for index in range(500)]
+
+        prompt = build_user_prompt(ContentCluster(members, 0.95, 0.85, False, {"markdown"}))
+
+        assert _request_chars(prompt) > llm_analyzer.MAX_PROMPT_CHARS
+        assert "SHARED CONTENT" not in prompt
+        for member in members:
+            assert f"Section: {member.heading}\nLines: 1-5\nContent:\n{member.text}" in prompt
+
+    def test_sharing_is_skipped_when_it_does_not_shorten_the_prompt(self, make_chunk) -> None:
+        members = [make_chunk(heading=f"Distinct {index}", text=f"{index}: " + "d" * 2_500) for index in range(30)]
+        members += [make_chunk(heading=f"Short {index}", text="short repeated line") for index in range(2)]
+
+        prompt = build_user_prompt(ContentCluster(members, 0.95, 0.85, False, {"markdown"}))
+
+        assert _request_chars(prompt) > llm_analyzer.MAX_PROMPT_CHARS
+        assert "SHARED CONTENT" not in prompt
+        assert prompt.count("Content:\nshort repeated line") == 2
+
+    def test_same_body_under_different_heading_lines_is_shared(self, make_chunk) -> None:
+        body = "Describe the supported workflow. " * 4
+        members = [make_chunk(heading=f"## Step {index}", text=f"## Step {index}\n{body}") for index in range(500)]
+        cluster = ContentCluster(members, 0.95, 0.85, False, {"markdown"})
+
+        prompt = build_user_prompt(cluster)
+
+        assert _request_chars(prompt) <= llm_analyzer.MAX_PROMPT_CHARS
+        assert prompt.count(body) == 1
+        assert f"---SHARED CONTENT 1---\n{body}\n\n---CHUNK 1---" in prompt
+        assert prompt.count("---CHUNK ") == 500
+        for index, member in enumerate(members, start=1):
+            # The heading line plus the shared body is exactly the member's text.
+            assert (
+                f"---CHUNK {index}---\nFile: README.md\nSection: {member.heading}\nLines: 1-5\n"
+                f"Content:\n{member.heading}\n[SHARED CONTENT 1]\n\n"
+            ) in prompt
+
+    def test_heading_line_with_a_carriage_return_is_kept_with_each_occurrence(self, make_chunk) -> None:
+        body = "Describe the supported workflow.\r\n" * 4
+        members = [
+            make_chunk(heading=f"## Step {index}", text=f"## Step {index}\r\n{body}".strip()) for index in range(500)
+        ]
+        cluster = ContentCluster(members, 0.95, 0.85, False, {"markdown"})
+
+        prompt = build_user_prompt(cluster)
+
+        assert _request_chars(prompt) <= llm_analyzer.MAX_PROMPT_CHARS
+        assert prompt.count(body.strip()) == 1
+        assert prompt.count("---SHARED CONTENT ") == 1
+        for member in members:
+            assert f"Content:\n{member.heading}\r\n[SHARED CONTENT 1]" in prompt
+
+    def test_whole_text_matching_another_chunks_body_shares_it(self, make_chunk) -> None:
+        body = "Describe the supported workflow. " * 4
+        sections = [make_chunk(heading=f"## Step {index}", text=f"## Step {index}\n{body}") for index in range(250)]
+        docstrings = [
+            make_chunk(source_file="tool.py", heading=f"step_{index}()", text=body, source_format="python")
+            for index in range(250)
+        ]
+        cluster = ContentCluster([*sections, *docstrings], 0.95, 0.85, True, {"markdown", "python"})
+
+        prompt = build_user_prompt(cluster)
+
+        assert _request_chars(prompt) <= llm_analyzer.MAX_PROMPT_CHARS
+        assert prompt.count(body) == 1
+        assert prompt.count("---SHARED CONTENT ") == 1
+        assert prompt.count("[SHARED CONTENT 1]") == 500
+        for member in docstrings:
+            assert f"Section: {member.heading}\nLines: 1-5\nContent:\n[SHARED CONTENT 1]" in prompt
+
+    def test_text_that_does_not_open_with_its_heading_line_is_compared_whole(self, make_chunk) -> None:
+        body = "Describe the supported workflow. " * 4
+        # The first line differs per chunk but is not the chunk's heading.
+        members = [make_chunk(heading=f"## Step {index}", text=f"Step {index}\n{body}") for index in range(500)]
+        cluster = ContentCluster(members, 0.95, 0.85, False, {"markdown"})
+
+        prompt = build_user_prompt(cluster)
+
+        assert _request_chars(prompt) > llm_analyzer.MAX_PROMPT_CHARS
+        assert "SHARED CONTENT" not in prompt
+        assert prompt.count(body) == 500
+
     def test_contains_chunk_details(self, make_cluster) -> None:
         cluster = make_cluster()
         prompt = build_user_prompt(cluster)
@@ -111,6 +272,26 @@ class TestAnalyzeCluster:
         }
         with pytest.raises(LLMClientError, match="unknown verdict"):
             analyze_cluster(mock_client, make_cluster())
+
+    def test_sends_the_shared_content_prompt_that_the_validator_measures(self, make_chunk) -> None:
+        repeated = "Exact repeated instructions. " * 10
+        members = [make_chunk(heading=f"Section {index}", text=repeated) for index in range(500)]
+        cluster = ContentCluster(members, 0.95, 0.85, False, {"markdown"})
+        mock_client = MagicMock(spec=LLMClient)
+        mock_client.extract_json_from_response.return_value = {
+            "verdict": "DUPLICATE",
+            "confidence": 0.9,
+            "rationale": "Same instructions in every section",
+            "suggestion": "Keep one copy",
+        }
+
+        analyze_cluster(mock_client, cluster)
+
+        system_prompt, user_prompt = mock_client.extract_json_from_response.call_args.args
+        assert system_prompt == SYSTEM_PROMPT
+        assert user_prompt == build_user_prompt(cluster)
+        assert user_prompt.count(repeated) == 1
+        assert _request_chars(user_prompt) <= llm_analyzer.MAX_PROMPT_CHARS
 
     def test_requests_the_verdict_schema_and_reads_rationale(self, make_cluster) -> None:
         mock_client = MagicMock(spec=LLMClient)

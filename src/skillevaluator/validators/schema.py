@@ -590,12 +590,11 @@ class SchemaValidator(ValidatorBase):
         1. *Shape* — every author value must match ``Name <email@host>``,
            regardless of profile.
         2. *Domain* — only enforced when the active policy supplies an
-           ``author_email_regex`` (the ``internal`` profile pins authors to
-        an organization-specific domain; the default public profile leaves it
-        open).
+           ``author_email_regex``. A custom policy can require an organization
+           domain; the bundled default policy accepts any email domain.
 
         Severity for both ``author_missing`` and ``author_format`` comes from
-        the active policy with internal-equivalent defaults.
+        the active policy with HIGH defaults.
         """
         result = ValidationResult()
         policy = self.policy
@@ -622,7 +621,7 @@ class SchemaValidator(ValidatorBase):
                     )
                     suggestion = (
                         "Use an email matching the active profile's author_email_regex, "
-                        "or run with --profile external if this skill is for public publication."
+                        "or review whether that domain restriction is appropriate for your repository."
                     )
 
                 result.add_finding(

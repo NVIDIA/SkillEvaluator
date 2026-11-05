@@ -10,7 +10,7 @@ import pytest
 from openai import APIConnectionError, APIStatusError, APITimeoutError
 
 from skillevaluator.inference import LLMClientError
-from skillevaluator.inference.diagnostics import llm_failure_diagnostic, safe_llm_labels
+from skillevaluator.inference.diagnostics import llm_failure_diagnostic, safe_llm_labels, safe_llm_model
 
 
 @pytest.mark.parametrize("status", [400, 401, 403, 404, 410, 422, 429, 500])
@@ -82,6 +82,7 @@ def test_transport_and_response_errors_do_not_echo_raw_content(exception, expect
 )
 def test_model_labels_reject_urls_tokens_and_control_text(model):
     assert safe_llm_labels("nv_build", model) == ("nv_build", "unresolved")
+    assert safe_llm_model(model) == "unresolved"
 
 
 def test_model_labels_preserve_real_model_ids_and_bound_unknown_provider():

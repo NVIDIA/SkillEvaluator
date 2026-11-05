@@ -45,6 +45,23 @@ _FILE_FLAGS = (
     | getattr(os, "O_NONBLOCK", 0)
     | getattr(os, "O_NOCTTY", 0)
 )
+# Mode changes by descriptor when fchmodat(AT_SYMLINK_NOFOLLOW) is rejected.
+_CHMOD_BY_DESCRIPTOR = hasattr(os, "O_NOFOLLOW") and hasattr(os, "fchmod")
+_CHMOD_OPEN_FLAGS = (
+    os.O_RDONLY
+    | getattr(os, "O_NOFOLLOW", 0)
+    | getattr(os, "O_NONBLOCK", 0)
+    | getattr(os, "O_CLOEXEC", 0)
+    | getattr(os, "O_NOCTTY", 0)
+)
+# open(O_NOFOLLOW) of a final symlink fails with ELOOP (Linux, macOS), EMLINK
+# (FreeBSD) or EFTYPE (NetBSD).
+_NOFOLLOW_LINK_ERRNOS = frozenset(
+    code for code in (errno.ELOOP, errno.EMLINK, getattr(errno, "EFTYPE", None)) if code is not None
+)
+_CHMOD_OPEN_PERMISSION_ERRNOS = frozenset({errno.EACCES, errno.EPERM})
+_CHMOD_LINK_REFUSAL = "refusing to change the mode of a staging symlink or reparse point"
+_CHMOD_CHANGED = "staging entry changed while its mode was being changed"
 _WINDOWS_CHMOD_SEMANTICS = os.name == "nt"
 _PATH_DESCRIPTOR_IDENTITIES_COMPARABLE = os.name == "posix"
 _DESCRIPTOR_BACKEND = (
@@ -825,6 +842,77 @@ def _destination_metadata(parent_descriptor: int, name: str) -> os.stat_result |
         return None
 
 
+def _names_link(parent_descriptor: int, name: str) -> bool:
+    try:
+        return _is_link(os.stat(name, dir_fd=parent_descriptor, follow_symlinks=False))
+    except OSError:
+        return False
+
+
+def _fchmod_opened_entry(parent_descriptor: int, name: str, mode: int, named: os.stat_result) -> bool:
+    """Change ``name``'s mode through a no-follow descriptor that matches ``named``.
+
+    Returns False only when the entry cannot be opened for a permission reason
+    (for example an entry its owner cannot read), so the caller can fall back to
+    a checked change by name.  A link at ``name`` is refused, never followed.
+    """
+
+    flags = _CHMOD_OPEN_FLAGS
+    if stat.S_ISDIR(named.st_mode):
+        flags |= getattr(os, "O_DIRECTORY", 0)
+    try:
+        descriptor = os.open(name, flags, dir_fd=parent_descriptor)
+    except OSError as exc:
+        if exc.errno in _NOFOLLOW_LINK_ERRNOS:
+            raise UnsafeStagingError(_CHMOD_LINK_REFUSAL) from exc
+        if exc.errno in _CHMOD_OPEN_PERMISSION_ERRNOS:
+            return False
+        if exc.errno == errno.ENOTDIR:
+            # macOS reports O_DIRECTORY | O_NOFOLLOW on a link as ENOTDIR, not ELOOP.
+            refusal = _CHMOD_LINK_REFUSAL if _names_link(parent_descriptor, name) else _CHMOD_CHANGED
+            raise UnsafeStagingError(refusal) from exc
+        raise
+    try:
+        opened = os.fstat(descriptor)
+        if (opened.st_dev, opened.st_ino) != (named.st_dev, named.st_ino):
+            raise UnsafeStagingError(_CHMOD_CHANGED)
+        os.fchmod(descriptor, mode)
+    finally:
+        os.close(descriptor)
+    return True
+
+
+def _chmod_named_entry(parent_descriptor: int, name: str, mode: int) -> None:
+    """Change a named entry's mode without following a final link.
+
+    CPython has no ``lchmod`` on Linux and maps ``dir_fd`` plus ``follow_symlinks=False``
+    to ``fchmodat(AT_SYMLINK_NOFOLLOW)``, which glibc before 2.32 (and newer glibc
+    without ``/proc``) rejects, surfacing as ``ValueError``.  The no-follow call is
+    used wherever it works.  Otherwise a no-follow stat refuses a link, and the
+    entry is opened with ``O_NOFOLLOW``, matched to that stat by device and inode,
+    and changed with ``fchmod``, so a link swapped in after the stat is refused
+    instead of followed.  A plain change by name, followed by a device and inode
+    re-check, remains only for an entry that cannot be opened for a permission
+    reason and for platforms without ``O_NOFOLLOW``.  Callers re-check identity
+    afterwards as well.
+    """
+
+    try:
+        os.chmod(name, mode, dir_fd=parent_descriptor, follow_symlinks=False)
+        return
+    except (NotImplementedError, ValueError):
+        pass
+    named = os.stat(name, dir_fd=parent_descriptor, follow_symlinks=False)
+    if _is_link(named):
+        raise UnsafeStagingError(_CHMOD_LINK_REFUSAL)
+    if _CHMOD_BY_DESCRIPTOR and _fchmod_opened_entry(parent_descriptor, name, mode, named):
+        return
+    os.chmod(name, mode, dir_fd=parent_descriptor)
+    current = os.stat(name, dir_fd=parent_descriptor, follow_symlinks=False)
+    if _is_link(current) or (current.st_dev, current.st_ino) != (named.st_dev, named.st_ino):
+        raise UnsafeStagingError(_CHMOD_CHANGED)
+
+
 def _remove_tree_at(
     parent_descriptor: int,
     name: str,
@@ -843,7 +931,7 @@ def _remove_tree_at(
             raise UnsafeStagingError("refusing to remove an unsafe staging entry")
         os.unlink(name, dir_fd=parent_descriptor)
         return
-    os.chmod(name, 0o700, dir_fd=parent_descriptor, follow_symlinks=False)
+    _chmod_named_entry(parent_descriptor, name, 0o700)
     writable = os.stat(name, dir_fd=parent_descriptor, follow_symlinks=False)
     if _is_link(writable) or (writable.st_dev, writable.st_ino) != (metadata.st_dev, metadata.st_ino):
         raise UnsafeStagingError("staging directory changed while making it removable")
@@ -1303,7 +1391,7 @@ def _prepare_moved_backup(
     ):
         raise UnsafeStagingError(f"destination changed while it was moved to backup: {backup_path}")
     private_mode = 0o700 if kind == "directory" else 0o600
-    os.chmod(backup_name, private_mode, dir_fd=parent_descriptor, follow_symlinks=False)
+    _chmod_named_entry(parent_descriptor, backup_name, private_mode)
     private = os.stat(backup_name, dir_fd=parent_descriptor, follow_symlinks=False)
     if (
         _is_link(private)

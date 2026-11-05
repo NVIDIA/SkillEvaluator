@@ -252,3 +252,90 @@ def test_verdict_badge_background_does_not_fill_headline():
         body = panel.renderable.renderables[0]
         style = body.get_style_at_offset(view.console, body.plain.index(verdict.headline))
         assert style.bgcolor is None
+
+
+def test_real_tty_capture_excludes_links_but_ordinary_print_keeps_them(monkeypatch):
+    import os
+
+    from skillevaluator.reporting.terminal_styles import artifact_text
+
+    if not hasattr(os, "openpty"):
+        pytest.skip("PTY capture regression runs on POSIX; Windows URI policy is tested separately")
+    monkeypatch.setenv("TERM", "xterm-256color")
+    master, slave = os.openpty()
+    try:
+        with os.fdopen(slave, "w") as stream:
+            console = Console(file=stream, color_system="truecolor", no_color=False, width=120)
+            line = artifact_text("/tmp/actual [name].html", console)
+            with console.capture() as capture:
+                console.print(line)
+            assert "actual [name].html" in capture.get()
+            assert "\x1b]8" not in capture.get()
+            console.print(line)
+            assert "\x1b]8" in os.read(master, 65536).decode()
+    finally:
+        os.close(master)
+
+
+def test_footer_links_follow_capture_at_render_time(monkeypatch):
+    monkeypatch.setenv("TERM", "xterm-256color")
+
+    class TTY(io.StringIO):
+        def isatty(self):
+            return True
+
+    stream = TTY()
+    console = Console(file=stream, color_system="truecolor", no_color=False, width=120)
+    view = ValidateView("demo", [], console=console)
+    view.links = [("report", "/tmp/actual [name].html")]
+    view.verdict = Verdict(True, "Passed required checks")
+    with console.capture() as capture:
+        console.print(view)
+    assert "actual [name].html" in capture.get()
+    assert "\x1b]8" not in capture.get()
+    console.print(view)
+    assert "\x1b]8" in stream.getvalue()
+
+
+@pytest.mark.parametrize(
+    "target",
+    [
+        "https://user:password@example.com/report.html",
+        "https://user@example.com/report.html",
+        "https://example.com/line\nbreak.html",
+        "https://example.com/tab\tname.html",
+        "https://example.com/%0areport.html",
+    ],
+)
+def test_remote_credential_and_control_targets_are_not_linked(monkeypatch, target):
+    from skillevaluator.reporting.terminal_styles import artifact_text
+
+    monkeypatch.setenv("TERM", "xterm-256color")
+
+    class TTY(io.StringIO):
+        def isatty(self):
+            return True
+
+    output = TTY()
+    console = Console(file=output, color_system="truecolor", no_color=False, width=120)
+    console.print(artifact_text(target, console, label="Readable report path"))
+    assert "Readable report path" in output.getvalue()
+    assert "\x1b]8" not in output.getvalue()
+
+
+@pytest.mark.parametrize(
+    ("target", "windows", "expected"),
+    [
+        (r"C:\reports\actual [name].html", True, "file:///C:/reports/actual%20%5Bname%5D.html"),
+        ("C:/reports/actual.html", True, "file:///C:/reports/actual.html"),
+        (r"C:\reports\actual.html", False, None),
+        (r"C:report.html", True, None),
+        ("/tmp/report.html", True, None),
+        ("javascript:alert(1)", True, None),
+        ("https://example.com/report.html", True, "https://example.com/report.html"),
+    ],
+)
+def test_artifact_uri_uses_only_native_absolute_windows_paths(target, windows, expected):
+    from skillevaluator.reporting.terminal_styles import _artifact_uri
+
+    assert _artifact_uri(target, windows=windows) == expected

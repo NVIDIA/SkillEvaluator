@@ -30,32 +30,86 @@ def lift_style(value: float) -> str:
     return GREEN if displayed > 0 else RED if displayed < 0 else MUTED
 
 
-def artifact_text(target: str, console, *, label: str | None = None):
-    """Link only on a capable terminal; captured strings remain readable text."""
-    from pathlib import Path
-    from urllib.parse import urlsplit
+def _artifact_uri(target: str, *, windows: bool) -> str | None:
+    """Build a terminal-only URI without changing canonical URL normalization."""
+    from pathlib import Path, PurePosixPath, PureWindowsPath
+    from urllib.parse import unquote, urlsplit
 
+    from skillevaluator.utils.rich_markup import strip_terminal_controls
+
+    def has_controls(value: str) -> bool:
+        return any(ord(char) < 32 or 127 <= ord(char) <= 159 for char in value)
+
+    if strip_terminal_controls(target) != target or has_controls(target):
+        return None
+    windows_path = PureWindowsPath(target)
+    if windows_path.drive:
+        # A foreign Windows path must not become a relative POSIX file URI;
+        # drive-relative paths and UNC shares are deliberately left as text.
+        if windows and len(windows_path.drive) == 2 and windows_path.is_absolute():
+            return windows_path.as_uri()
+        return None
+    try:
+        parts = urlsplit(target)
+        if parts.scheme:
+            decoded = urlsplit(unquote(target))
+            if (
+                parts.scheme not in {"http", "https"}
+                or not parts.hostname
+                or parts.username is not None
+                or parts.password is not None
+                or decoded.username is not None
+                or decoded.password is not None
+                or any(char.isspace() for char in target)
+                or has_controls(unquote(target))
+            ):
+                return None
+            # Access validates malformed/out-of-range ports before linking.
+            _ = parts.port
+            return target
+    except ValueError:
+        return None
+    if windows and PurePosixPath(target).is_absolute():
+        return None
+    return Path(target).expanduser().absolute().as_uri()
+
+
+def artifact_text(target: str, console, *, label: str | None = None, prefix=None):
+    """Defer link styling until render, keeping captured strings inert."""
+    import os
+
+    from rich.measure import Measurement
     from rich.style import Style
     from rich.text import Text
 
-    from skillevaluator.reporting.harbor_viewer import safe_url
     from skillevaluator.utils.rich_markup import strip_terminal_controls
 
-    clean = strip_terminal_controls(target)
-    text = Text(strip_terminal_controls(label) if label is not None else clean, style=MUTED)
-    if (
-        clean != target
-        or not console.is_terminal
-        or console.no_color
-        or console.is_dumb_terminal
-        or not bool(getattr(console.file, "isatty", lambda: False)())
-    ):
-        return text
-    try:
-        scheme = urlsplit(clean).scheme
-    except ValueError:
-        return text
-    url = safe_url(clean) if scheme else Path(clean).expanduser().absolute().as_uri()
-    if url:
-        text.stylize(Style(link=url))
-    return text
+    text = Text()
+    if prefix is not None:
+        text.append_text(prefix)
+    start = len(text)
+    text.append(strip_terminal_controls(label if label is not None else target), style=MUTED)
+    url = _artifact_uri(target, windows=os.name == "nt")
+
+    def capable(output) -> bool:
+        return (
+            output.is_terminal
+            and not output.no_color
+            and not output.is_dumb_terminal
+            and bool(getattr(output.file, "isatty", lambda: False)())
+        )
+
+    class ArtifactLine:
+        def __rich_console__(self, output, options):
+            rendered = text.copy()
+            # Rich's normal print() owns one buffer context. capture() adds an
+            # outer context, even when its underlying stream is a real TTY.
+            # Check at render time so prebuilt/footer renderables remain safe.
+            if url and capable(console) and capable(output) and getattr(output, "_buffer_index", 0) <= 1:
+                rendered.stylize(Style(link=url), start)
+            yield from rendered.__rich_console__(output, options)
+
+        def __rich_measure__(self, output, options):
+            return Measurement.get(output, options, text)
+
+    return ArtifactLine()

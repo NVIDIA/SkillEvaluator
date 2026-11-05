@@ -822,11 +822,8 @@ class ValidateView:
 
     def _footer_lines(self):
         for label, target in self.links:
-            yield Text.assemble(
-                ("      ", ""),
-                (f"{strip_terminal_controls(label):<{LABEL}}", MUTED),
-                artifact_text(target, self.console),
-            )
+            prefix = Text.assemble(("      ", ""), (f"{strip_terminal_controls(label):<{LABEL}}", MUTED))
+            yield artifact_text(target, self.console, prefix=prefix)
 
     def _refresh(self) -> None:
         if self._live is not None:

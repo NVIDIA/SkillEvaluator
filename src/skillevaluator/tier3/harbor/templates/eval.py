@@ -889,7 +889,7 @@ _STRICT_JUDGE_REQUESTS_LEFT: ContextVar[list[int] | None] = ContextVar("strict_j
 # model cannot lift a quota, budget, billing or credit limit, and must not be
 # asked to overturn a content-filter, safety or security rejection. Whole
 # phrases only, joined by a space or underscore, so a model id or host name
-# such as ``content-safety-judge`` or ``security-gateway`` is not a reason.
+# such as ``content-safety-judge`` or ``security-proxy`` is not a reason.
 _STRICT_JUDGE_STOP_PATTERN = re.compile(
     r"\b(?:"
     r"insufficient[ _]quota|quota[ _]exceeded|exceeded (?:your|the) (?:current )?quota"

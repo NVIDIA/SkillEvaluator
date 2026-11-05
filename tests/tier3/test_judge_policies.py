@@ -430,7 +430,7 @@ def test_strict_stop_words_in_an_echoed_model_id_do_not_end_the_judge(verifier, 
 
 def test_strict_stop_words_in_a_connection_error_do_not_end_the_judge(verifier, monkeypatch):
     strict(monkeypatch)
-    tunnel = urllib.error.URLError(OSError("Tunnel connection failed: 503 security-gateway.example unavailable"))
+    tunnel = urllib.error.URLError(OSError("Tunnel connection failed: 503 security-proxy.example unavailable"))
     requested = replay(verifier, monkeypatch, [tunnel, tunnel, completion("judged")])
 
     assert verifier.call_public_llm("prompt") == ("judged", None)

@@ -12,10 +12,12 @@ Detects security vulnerabilities and PII/secrets using:
 
 from __future__ import annotations
 
+import bisect
 import contextlib
 import getpass
 import hashlib
 import io
+import itertools
 import json
 import math
 import os
@@ -3771,6 +3773,67 @@ class SecurityValidator(ValidatorBase):
         return root.lower() in protected_usernames
 
     _GPS_ZERO_PATTERN = re.compile(r"[-+]?0+\.0+[,\s]+[-+]?0+\.0+")
+    # Geospatial cues. A strong cue names a geographic coordinate system, a map
+    # link (an RFC 5870 ``geo:`` URI or a Google, Apple, OpenStreetMap, or Bing
+    # map URL), or a GeoJSON object: a geometry ``"type"``, a ``Feature``,
+    # ``FeatureCollection`` or ``GeometryCollection`` ``"type"``, or a
+    # ``"geometry": {`` member, which comes before ``"coordinates"`` when keys
+    # are sorted. GeoJSON member names and these object types are
+    # case-sensitive, so ``"type": "feature"`` in other JSON is not a cue. A soft
+    # cue (location, office, address, degrees, or a degree sign) also labels
+    # technical data such as ``calibration_location_offset`` or a rotation in
+    # degrees, so it does not override a technical label on the same line.
+    # Cue words accept their plurals and a numeric suffix (``locations:``,
+    # ``latlngs``, ``lat1, lon1``, ``location2``). The GeoJSON ``type`` and
+    # ``geometry`` keys may be double-quoted, single-quoted (a Python dict) or
+    # bare (a JS object or YAML); a bare type value must use GeoJSON's own
+    # spelling (``Point``, ``MultiPolygon``). Map hosts are matched with bounded
+    # TLD forms so long lines stay linear.
+    _GPS_STRONG_CONTEXT_PATTERN = re.compile(
+        r"(?i)\b(?:gps|geolocations?|geospatial|latitudes?|longitudes?|lats?|lons?|lngs?|latlngs?|latlong?s?"
+        r"|lonlats?|lnglats?|wgs[- ]?84)\d*\b"
+        r"|\bgeo:"
+        r"|\bmaps\.google\.|\bgoogle(?:\.[a-z]{2,3}){1,2}/maps\b|\bmaps\.apple\.com\b|\bopenstreetmap\.org\b"
+        r"|\bbing\.com/maps\b"
+        r"|\btype[\"']?\s*:\s*(?:[\"'](?:(?:multi)?(?:point|linestring|polygon)"
+        r"|(?-i:Feature(?:Collection)?|GeometryCollection))[\"']"
+        r"|(?-i:(?:Multi)?(?:Point|LineString|Polygon)|Feature(?:Collection)?|GeometryCollection)\b)"
+        r"|\b(?-i:geometry)[\"']?\s*:\s*\{"
+    )
+    _GPS_SOFT_CONTEXT_PATTERN = re.compile(r"(?i)\b(?:locations?|offices?|address(?:es)?|degrees?)\d*\b|[°º]")
+    _TECHNICAL_COORDINATE_CONTEXT_PATTERN = re.compile(
+        r"(?i)\b(?:texture|uv|pixel|screen|canvas|image|normalized|cartesian|robot(?:ic(?:s)?)?|local|world|camera"
+        r"|pose|joint|model|object|viewport|mesh|vertex|clip|device)[ -]+coordinates?\b"
+    )
+    _TECHNICAL_VECTOR_CONTEXT_PATTERN = re.compile(
+        r"(?i)\b(?:quaternion|pose(?:[ _-]?translation)?|waypoint|vector|calibration|roi|scale)s?\b"
+        r"|\bcoordinates?\s*=|(?:^|\s)(?:x\s+y|u\s+v)(?:\s|$)"
+    )
+    _CAMEL_CASE_BOUNDARY = re.compile(r"(?<=[a-z])(?=[A-Z])|(?<=[A-Z])(?=[A-Z][a-z])")
+    # Double- or single-quoted strings (one line at most, so a stray quote in
+    # prose cannot run on), bare identifiers (JS object keys), and structural
+    # characters, for the GeoJSON ``"coordinates"`` array pass.
+    _JSON_TOKEN_PATTERN = re.compile(r'"((?:[^"\\\n]|\\.)*)"|\'((?:[^\'\\\n]|\\.)*)\'|([A-Za-z_$][\w$]*)|([{}\[\]:,])')
+    _GEOJSON_GEOMETRY_TYPE = re.compile(r"(?i)(?:multi)?(?:point|linestring|polygon)")
+    # A bare (unquoted) type value must use GeoJSON's own spelling.
+    _GEOJSON_BARE_GEOMETRY_TYPE = re.compile(r"(?:Multi)?(?:Point|LineString|Polygon)")
+    _SCIENTIFIC_LITERAL_PATTERN = re.compile(r"(?<![\w.])[-+]?(?:\d+(?:\.\d*)?|\.\d+)[eE][-+]?\d+")
+    # ``<identifier>_`` directly before a candidate; group 1 is the identifier.
+    _UNDERSCORE_JOINED_PREFIX_PATTERN = re.compile(r"(?-i:([A-Za-z0-9]+(?:_[A-Za-z0-9]+)*)_)\Z")
+    _PAYMENT_LABEL_WORDS = frozenset(
+        {"card", "cards", "cc", "ccn", "pan", "credit", "debit", "payment", "visa", "mastercard", "amex"}
+    )
+    # A timestamp or digest label that directly precedes a value
+    # (``timestamp_microseconds: ``, ``"sha256": "``, ``checksum=``). An
+    # underscore separates words, so snake_case prefixes such as
+    # ``event_timestamp:`` and ``"created_at_epoch":`` count as labels.
+    _NON_PAYMENT_NUMBER_CONTEXT_PATTERN = re.compile(
+        r"(?i)(?:(?<![A-Za-z0-9])(?:(?:timestamp|unix(?:[_ -]?time)?|epoch)"
+        r"(?:[_ -]?(?:microseconds?|micros?|us|usec|nanoseconds?|nanos?|ns|nsec))?"
+        r"|(?:microseconds?|nanoseconds?)(?:[_ -]?timestamp)?)\b"
+        r"|(?<![A-Za-z0-9])(?:md5|sha(?:1|224|256|384|512)|hash|digest|checksum)\b)"
+        r"[\"']?(?:\s*[:=]\s*[\"']?|\s+[\"']?)\Z"
+    )
     # Match version/tag as identifier tokens, including separator and camel-case styles.
     # Plain substrings such as ``conversion`` and ``staging`` are not version labels.
     _VERSION_LABEL_PATTERN = re.compile(
@@ -3815,6 +3878,170 @@ class SecurityValidator(ValidatorBase):
     def _is_near_zero_gps(line: str) -> bool:
         """Check if a GPS match contains only near-zero coordinates (Null Island)."""
         return bool(SecurityValidator._GPS_ZERO_PATTERN.search(line))
+
+    @classmethod
+    def _is_numeric_pii_false_positive(cls, category: str, match: re.Match, line: str) -> bool:
+        """Return whether a card or phone candidate on *line* is technical data."""
+        if category == "credit_cards":
+            # A Luhn-valid timestamp or digest is not payment data. Only a label
+            # directly before this number counts, so a timestamp field does not
+            # hide a card number in a later field on the same line.
+            label_start = max(0, match.start() - 100)
+            if cls._NON_PAYMENT_NUMBER_CONTEXT_PATTERN.search(line, label_start, match.start()) is not None:
+                return True
+            # An underscore joining the number to a letter or digit makes it part
+            # of an identifier (``id_1707938736269577``), unless a word in that
+            # identifier is a payment label (``card_4532015112830366``).
+            joined = cls._UNDERSCORE_JOINED_PREFIX_PATTERN.search(line, label_start, match.start())
+            if joined is None:
+                return False
+            words = cls._CAMEL_CASE_BOUNDARY.sub("_", joined.group(1)).lower().split("_")
+            return not any(word in cls._PAYMENT_LABEL_WORDS for word in words)
+
+        if category == "phone_numbers":
+            # International phone syntax can begin at the ``+00`` exponent of a
+            # scientific-notation value and run into the next column. Only a
+            # candidate that starts inside such a literal is dropped, so a real
+            # phone number elsewhere on the line is still reported.
+            window = (max(0, match.start() - 64), match.start() + 64)
+            return any(
+                literal.start() <= match.start() < literal.end()
+                for literal in cls._SCIENTIFIC_LITERAL_PATTERN.finditer(line, *window)
+            )
+
+        return False
+
+    @classmethod
+    def _cue_text_variants(cls, text: str) -> tuple[str, ...]:
+        """Return *text* with underscores as spaces, unsplit and camelCase-split.
+
+        Keys and file names often use snake_case or camelCase (``homeLocation``,
+        ``gpsCoords``). The unsplit form keeps GeoJSON ``"type"`` values such as
+        ``FeatureCollection`` intact.
+        """
+        spaced = text.replace("_", " ")
+        split = cls._CAMEL_CASE_BOUNDARY.sub(" ", spaced)
+        return (spaced,) if split == spaced else (spaced, split)
+
+    @staticmethod
+    def _search_cue(pattern: re.Pattern, variants: tuple[str, ...]) -> bool:
+        """Return whether *pattern* matches any form of the cue text."""
+        return any(pattern.search(text) for text in variants)
+
+    @classmethod
+    def _lacks_geospatial_context(
+        cls, line: str, context: str, pair_start: int | None = None, label_start: int = 0
+    ) -> bool:
+        """Return whether GPS-shaped pairs on *line* have no geospatial cue.
+
+        Precise vectors, poses, quaternions, and waypoints have the same shape
+        as coordinates, so a pair needs a cue. *context* is the file name, up to
+        two lines before *line*, and *line*. Keys and file names often use
+        snake_case or camelCase, so underscores and case changes separate words.
+        Vector labels such as ``waypoint`` count only before the pair at
+        *pair_start*; a GPS cue after a separator can limit that label segment.
+        """
+        local = cls._cue_text_variants(line)
+        # A technical label labels the pair only when it comes before it, so
+        # ``Location: 37.77, -122.41 (map scale 1:5000)`` keeps its location cue.
+        label_end = len(line) if pair_start is None else pair_start
+        label_segment = line[label_start:label_end]
+        last_separator = max(label_segment.rfind(";"), label_segment.rfind("|"))
+        tail = label_segment[last_separator + 1 :]
+        tail_variants = cls._cue_text_variants(tail)
+        if cls._search_cue(cls._GPS_SOFT_CONTEXT_PATTERN, tail_variants) or cls._search_cue(
+            cls._GPS_STRONG_CONTEXT_PATTERN, tail_variants
+        ):
+            label_segment = tail
+        label = cls._cue_text_variants(label_segment)
+        nearby = cls._cue_text_variants(context)
+        if cls._search_cue(cls._GPS_STRONG_CONTEXT_PATTERN, local):
+            return False
+        inherits_technical_label = False
+        if label_start and ";" not in line[label_start:label_end] and "|" not in line[label_start:label_end]:
+            previous_separator = max(line.rfind(";", 0, label_start), line.rfind("|", 0, label_start))
+            previous_label = cls._cue_text_variants(line[previous_separator + 1 : label_start])
+            inherits_technical_label = cls._search_cue(
+                cls._TECHNICAL_COORDINATE_CONTEXT_PATTERN, previous_label
+            ) or cls._search_cue(cls._TECHNICAL_VECTOR_CONTEXT_PATTERN, previous_label)
+        if (
+            cls._search_cue(cls._TECHNICAL_COORDINATE_CONTEXT_PATTERN, label)
+            or cls._search_cue(cls._TECHNICAL_VECTOR_CONTEXT_PATTERN, label)
+            or inherits_technical_label
+        ):
+            return not cls._search_cue(cls._GPS_STRONG_CONTEXT_PATTERN, nearby)
+        if cls._search_cue(cls._GPS_SOFT_CONTEXT_PATTERN, local):
+            return False
+        if cls._search_cue(cls._GPS_STRONG_CONTEXT_PATTERN, nearby):
+            return False
+        if cls._search_cue(cls._TECHNICAL_COORDINATE_CONTEXT_PATTERN, nearby):
+            return True
+        return not cls._search_cue(cls._GPS_SOFT_CONTEXT_PATTERN, nearby)
+
+    @classmethod
+    def _geojson_coordinate_lines(cls, lines: list[str]) -> frozenset[int]:
+        """Return 1-based numbers of lines inside a GeoJSON geometry's ``"coordinates"`` array.
+
+        A pretty-printed ``Polygon`` or ``Multi*`` geometry opens its rings on
+        their own lines, so positions can sit far below the ``"type"`` cue. The
+        array counts when its object has a geometry ``"type"`` (before or after
+        ``"coordinates"``) or is the value of a ``"geometry"`` member. Keys and
+        values may be double-quoted (JSON), single-quoted (a Python dict) or
+        bare keys (a JS object). One pass over these tokens finds the arrays,
+        and nested arrays are merged before their lines are marked, so the scan
+        stays linear however deep the nesting; unbalanced brackets in other
+        text are tolerated.
+        """
+        text = "\n".join(lines)
+        if "coordinates" not in text:
+            return frozenset()
+        line_starts = [0, *itertools.accumulate(len(line) + 1 for line in lines)]
+        # Each frame is [kind, is_geojson, coordinate_spans, coordinates_owner, start].
+        stack: list[list] = []
+        spans: list[tuple[int, int]] = []
+        last_string: str | None = None
+        key: str | None = None
+        for token in cls._JSON_TOKEN_PATTERN.finditer(text):
+            bare = token.group(3)
+            value = token.group(1) if token.group(1) is not None else token.group(2)
+            if value is None:
+                value = bare
+            punct = token.group(4)
+            top = stack[-1] if stack else None
+            if value is not None:
+                type_pattern = cls._GEOJSON_BARE_GEOMETRY_TYPE if bare is not None else cls._GEOJSON_GEOMETRY_TYPE
+                if key == "type" and top is not None and top[0] == "{" and type_pattern.fullmatch(value):
+                    top[1] = True
+                last_string, key = value, None
+            elif punct == ":":
+                key, last_string = last_string, None
+            elif punct in "{[":
+                owner = top if punct == "[" and key == "coordinates" and top is not None and top[0] == "{" else None
+                stack.append([punct, punct == "{" and key == "geometry", [], owner, token.start()])
+                key = last_string = None
+            elif punct in "}]":
+                if not stack:
+                    continue
+                frame = stack.pop()
+                if frame[3] is not None:
+                    frame[3][2].append((frame[4], token.start()))
+                if frame[0] == "{" and frame[1]:
+                    spans.extend(frame[2])
+                key = last_string = None
+            else:
+                key = last_string = None
+        # Nested arrays yield nested spans; keep only the outermost of each
+        # group so every line is marked once.
+        numbers: set[int] = set()
+        kept_end = -1
+        for start, end in sorted(spans):
+            if end <= kept_end:
+                continue
+            first = bisect.bisect_right(line_starts, max(start, kept_end + 1))
+            last = bisect.bisect_right(line_starts, end)
+            numbers.update(range(first, last + 1))
+            kept_end = end
+        return frozenset(numbers)
 
     @classmethod
     def _is_version_literal(cls, match: re.Match, line: str) -> bool:
@@ -4012,6 +4239,15 @@ class SecurityValidator(ValidatorBase):
         protected_usernames = protected_usernames or set()
         author_emails = author_emails or {}
         comment_lines = comment_lines if comment_lines is not None else _comment_line_numbers(file_path, lines)
+        line_exceptions = exceptions
+        excepted_card_digits: frozenset[str] = frozenset()
+        if category == "credit_cards":
+            # Known test card numbers are compared with each candidate, in any
+            # grouping, so one on a line does not hide a different card number.
+            numeric_exceptions = {exc for exc in exceptions if re.fullmatch(r"[0-9\s-]*[0-9][0-9\s-]*", exc)}
+            excepted_card_digits = frozenset(re.sub(r"[\s-]", "", exc) for exc in numeric_exceptions)
+            line_exceptions = [exc for exc in exceptions if exc not in numeric_exceptions]
+        geojson_lines: frozenset[int] | None = None
         for line_num, line in enumerate(lines, 1):
             if line_num in comment_lines:
                 continue
@@ -4021,8 +4257,32 @@ class SecurityValidator(ValidatorBase):
                 scan_line = re.sub(re.escape(author_email), "author@example.com", line, count=1, flags=re.IGNORECASE)
 
             matches = list(regex.finditer(scan_line))
-            if not matches or any(exc in line for exc in exceptions):
+            if excepted_card_digits:
+                matches = [
+                    match for match in matches if re.sub(r"[\s-]", "", match.group()) not in excepted_card_digits
+                ]
+            if not matches or any(exc in line for exc in line_exceptions):
                 continue
+            if category in ("credit_cards", "phone_numbers"):
+                matches = [match for match in matches if not self._is_numeric_pii_false_positive(category, match, line)]
+                if not matches:
+                    continue
+            if category == "gps_coordinates":
+                # A position inside a GeoJSON geometry's "coordinates" array is
+                # cued however far its rings sit below the "type" line.
+                if geojson_lines is None:
+                    geojson_lines = self._geojson_coordinate_lines(lines)
+                if line_num not in geojson_lines:
+                    context = "\n".join((file_path.name, *lines[max(0, line_num - 3) : line_num]))
+                    previous_end = 0
+                    kept_matches = []
+                    for pair in matches:
+                        if not self._lacks_geospatial_context(line, context, pair.start(), label_start=previous_end):
+                            kept_matches.append(pair)
+                        previous_end = pair.end()
+                    matches = kept_matches
+                    if not matches:
+                        continue
             if category == "ip_addresses":
                 matches = [match for match in matches if not self._is_version_literal(match, line)]
                 if not matches:

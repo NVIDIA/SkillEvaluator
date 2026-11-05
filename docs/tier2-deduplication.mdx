@@ -149,6 +149,21 @@ Duplicate findings map to severities by confidence:
 | `DUPLICATE` with confidence < 0.70 | MEDIUM — advisory |
 | Short, same-file duplicate dominated by comment or configuration-style text | Capped at LOW — advisory |
 
+Each candidate cluster is reviewed in one chat-LLM request that carries every
+member's file, section, line range, and text. When that request (the system
+prompt plus the cluster text) would exceed 64,000 characters, text that repeats
+exactly is listed once as `SHARED CONTENT n`. A Markdown section's text starts
+with its own heading line, so the text compared is the body after that line:
+the same body under different headings is listed once too. Each occurrence
+keeps its own entry with its file, section, line range, and heading line, plus
+a reference to the shared text. Distinct text, including text that differs by a
+single character, is always sent in full; nothing is sampled or dropped to fit.
+A cluster that is still over 64,000 characters stops the scan as incomplete
+(`llm_prompt_size_limit`), as described below. A duplicate or
+`llm_refused` finding names up to 64 member locations and source files and
+counts the rest; its `source_files` metadata in the JSON report lists every
+file.
+
 The chat LLM answers each cluster with one JSON verdict. A reply that wraps
 exactly one JSON object in prose or a Markdown fence is accepted, which matters
 on Bedrock and other endpoints that answer with prompt-only JSON. A reply with
@@ -163,8 +178,8 @@ clean.
 
 The same applies when a skill exceeds a work limit on content that was
 already collected: the content-chunk or comparison-work limit, or a limit on
-the LLM review (candidate clusters, members in one cluster, or prompt size per
-cluster or in total). Tier 2 stops and reports the scan as **INCOMPLETE**, not
+the LLM review (the number of candidate clusters, or prompt size per cluster
+or in total). Tier 2 stops and reports the scan as **INCOMPLETE**, not
 as a duplicate-content finding, with an execution error that names the limit;
 the JSON report records it under `work_limit`. A policy severity override
 cannot turn the incomplete scan into a pass. Split the skill or remove repeated
@@ -349,6 +364,10 @@ you intend to skip Tier 2 entirely.
 | High-confidence duplicate boundary | `0.70` | Maps actionable duplicate verdicts to HIGH rather than MEDIUM |
 | Intra-skill content chunks | 512 | Per-skill ceiling, checked before any embedding request |
 | Intra-skill comparison work | 267,911,168 scalar comparisons | Bounds all-pairs clustering; allows all 512 chunks with embeddings of up to 2,048 dimensions, 418 chunks at 3,072, and 362 at 4,096 |
+| Intra-skill LLM review clusters | 50 | Most candidate clusters sent for chat-LLM review in one skill |
+| Intra-skill cluster members | 512 | Same as the chunk ceiling, so it never stops a scan on its own; the review prompt limits decide |
+| Intra-skill review prompt | 64,000 characters | One cluster's request, system prompt included; exactly repeated text (a Markdown section's body after its heading line) is listed once before this limit applies |
+| Intra-skill review prompts in total | 1,000,000 characters | All cluster requests for one skill, checked before the first chat-LLM call |
 
 Intra-skill clustering compares every pair of chunks, so its work is
 `n * (n - 1) / 2 * dimensions`. A skill over the chunk ceiling stops before any
@@ -416,7 +435,7 @@ handling terms before sending confidential skill content to a hosted endpoint.
     | Skill contains a relative directory alias such as `.agents -> .claude` whose target is a regular directory in the same skill | Skips the alias without following it, then scans the target directory once |
     | A directory is a Windows junction, other reparse point, or a symbolic link that does not qualify as a contained alias | Rejected during the walk, before descent |
     | Embedding or chat-LLM analysis is incomplete | Reports an error; does not claim a clean result |
-    | Skill exceeds the content-chunk, comparison-work, or LLM-review limit (candidate clusters, cluster members, or prompt size) | Stops before the remaining analysis and reports the scan as incomplete; no duplicate-content finding is added |
+    | Skill exceeds the content-chunk, comparison-work, or LLM-review limit (candidate clusters or prompt size) | Stops before the remaining analysis and reports the scan as incomplete; no duplicate-content finding is added |
     | The chat LLM declines to classify a cluster | Reports an advisory MEDIUM `llm_refused` finding for that cluster's sections |
   </Accordion>
   <Accordion title="Inter-skill analysis">

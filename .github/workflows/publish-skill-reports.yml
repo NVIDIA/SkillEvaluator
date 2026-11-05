@@ -25,15 +25,19 @@ on:
         type: string
         required: true
       trusted-evaluator-shas:
-        description: Approved immutable evaluator workflow revisions, separated by commas or newlines
+        description: Approved immutable evaluator revisions; required unless delegated-evaluator-wrapper is set
         type: string
-        required: true
+        default: ''
       trusted-caller-blobs:
         description: Approved Git blobs for the consumer scan workflow, separated by commas or newlines
         type: string
         required: true
       trusted-wrapper-workflows:
-        description: Optional approved wrapper workflow paths pinned by full SHA, separated by commas or newlines
+        description: Approved exact wrapper workflow paths at full SHAs or tags, separated by commas or newlines
+        type: string
+        default: ''
+      delegated-evaluator-wrapper:
+        description: Optional approved root wrapper allowed to select pinned evaluator revisions; requires a sole caller job
         type: string
         default: ''
 permissions:
@@ -49,6 +53,7 @@ jobs:
       contents: write
       actions: read
       pull-requests: read
+      pages: read
     outputs:
       report_url: ${{ steps.publish.outputs.report_url }}
       pr_number: ${{ steps.publish.outputs.pr_number }}
@@ -105,6 +110,7 @@ jobs:
           TRUSTED_EVALUATOR_SHA: ${{ inputs.trusted-evaluator-shas }}
           TRUSTED_CALLER_BLOBS: ${{ inputs.trusted-caller-blobs }}
           TRUSTED_WRAPPER_WORKFLOWS: ${{ inputs.trusted-wrapper-workflows }}
+          DELEGATED_EVALUATOR_WRAPPER: ${{ inputs.delegated-evaluator-wrapper }}
           EVALUATOR_REPOSITORY: ${{ inputs.tools-repository }}
         run: |
           export SITE_DIR="$GITHUB_WORKSPACE/site" OUTPUT_DIR="$RUNNER_TEMP/report-feedback"
@@ -189,12 +195,37 @@ jobs:
         env:
           SITE_REVISION: ${{ steps.site.outputs.revision }}
           PAGES_ARTIFACT_ID: ${{ steps.pages.outputs.artifact_id }}
+          PAGES_BASE_URL: ${{ inputs.report-base-url }}
         with:
           script: |
             const revision = process.env.SITE_REVISION;
             const artifact = Number(process.env.PAGES_ARTIFACT_ID);
             if (!/^[0-9a-f]{40}$/.test(revision || '') || !Number.isSafeInteger(artifact) || artifact < 1) {
               throw new Error('A retained site revision and uploaded Pages artifact are required.');
+            }
+            // Visibility can change after onboarding or report preparation.
+            // Check again immediately before requesting deployment credentials.
+            const {data: repository} = await github.request('GET /repos/{owner}/{repo}', {
+              ...context.repo, request: {timeout: 30000}
+            });
+            const expected = process.env.PAGES_BASE_URL || '';
+            let privateOrigin;
+            try {
+              privateOrigin = new URL(expected).hostname.endsWith('.pages.github.io');
+            } catch {
+              throw new Error('The configured report URL is invalid.');
+            }
+            const privateUrl = /^https:\/\/(?:[a-z0-9](?:[a-z0-9-]{0,61}[a-z0-9])?\.)+pages\.github\.io\/?$/;
+            if (repository?.private !== false || repository?.visibility !== 'public' || privateOrigin) {
+              const {data: pages} = await github.request('GET /repos/{owner}/{repo}/pages', {
+                ...context.repo, request: {timeout: 30000}
+              });
+              if (pages?.public !== false || pages?.build_type !== 'workflow' || pages?.cname ||
+                  typeof pages?.html_url !== 'string' || !privateUrl.test(pages.html_url) ||
+                  !privateUrl.test(expected) || pages.html_url.trim() !== pages.html_url || expected.trim() !== expected ||
+                  pages.html_url.replace(/\/$/, '') !== expected.replace(/\/$/, '')) {
+                throw new Error('Private reports require a verified private Pages site at the configured URL; deployment was stopped.');
+              }
             }
             const {data: deployment} = await github.request('POST /repos/{owner}/{repo}/pages/deployments', {
               ...context.repo,

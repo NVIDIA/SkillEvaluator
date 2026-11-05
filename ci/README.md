@@ -193,10 +193,39 @@ with:
 
 Replace `FULL_COMMIT_SHA` with the reviewed 40-character commit. Multiple wrappers
 can be separated by newlines or commas. Each referenced wrapper must be approved;
-branch and tag references are rejected. Continue approving the actual evaluator
+branch references are rejected. Continue approving the actual evaluator
 in `trusted-evaluator-shas` and the consumer scan file in `trusted-caller-blobs`.
 Review any wrapper update and refresh its pin in both the calling workflow and
 publisher approval list; refresh the consumer blob after editing its scan file.
+
+For a central component maintained at a version tag such as `@v3`, the consumer
+can explicitly delegate evaluator version selection to that component:
+
+```yaml
+with:
+  trusted-wrapper-workflows: your-org/shared-ci/.github/workflows/skill-checks.yml@v3
+  delegated-evaluator-wrapper: your-org/shared-ci/.github/workflows/skill-checks.yml@v3
+  trusted-caller-blobs: YOUR_REVIEWED_SCAN_FILE_BLOB
+```
+
+This mode supports one consumer scan job calling one shared component, which
+calls one SHA-pinned evaluator in the configured evaluator repository. Omit
+`trusted-evaluator-shas` when delegating. The publisher verifies GitHub's
+historical tag resolution and the signed evaluator receipt; it never resolves
+today's tag to validate an earlier run. Each report records the resolved wrapper
+commit. Component maintainers can update evaluator pins behind the approved tag
+without changing each consumer; edits to the consumer scan file still need a
+new approved blob. Tag delegation grants that component control over evaluator
+versions and common policy, so enable it only for a component your team trusts.
+Multiple wrapper levels and matrix callers require the explicit SHA allowlists.
+
+`skillevaluator ci init` detects this existing caller, keeps its configuration,
+and prepares the publisher and caller approval automatically. The CLI checks
+the shared component's identity permission before changing GitHub settings.
+For private reports, an administrator first selects **Private** and **GitHub
+Actions** in Pages settings. The CLI verifies the assigned private URL and
+configures report history and the setup PR. It never creates a public site for
+a private repository. Private Pages requires an Enterprise Cloud organization.
 
 The consumer scan job **and every wrapper job calling the next workflow** need:
 

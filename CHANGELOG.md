@@ -477,6 +477,16 @@ All notable changes to SkillEvaluator are documented in this file.
   scoring agree, while scoped searches and slash-valued patterns retain their
   classification.
 
+- Tier 2 `similarity-check` and `context-optimization-check` no longer abort
+  with a "symlink or reparse point" error when a skill or collection aliases
+  one agent directory to another, such as `.agents -> .claude`. A directory
+  link whose name is not a scanned file type and whose relative target is a
+  regular directory found by the same scan is skipped without being followed,
+  so the target directory is scanned once. Absolute links and Windows
+  junctions, broken or escaping links, links to the scan root or one of the
+  alias's parent directories, `..` after a named component, and aliases that
+  point at another link remain rejected.
+
 - Tier 3 `claude-code` trials no longer hang until the agent timeout after the
   agent has already answered. Claude Code moves a shell command that outlasts
   its Bash timeout to the background, and a headless run waits for background

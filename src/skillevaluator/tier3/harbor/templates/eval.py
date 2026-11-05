@@ -2243,13 +2243,16 @@ def _call_strict_judge(provider, requested_model, models, call_model):
             content, error = call_model(candidate_model, provenance)
         except Exception as exc:
             detail, move_on = _strict_judge_failure(exc)
-            if not move_on:
-                return None, _redact_configured_credentials(f"{candidate_model}: {detail}"), provenance
             errors.append(f"{candidate_model}: {detail}")
+            if not move_on:
+                # Keep the earlier models' errors, so the reason shows why they were passed over.
+                return None, _redact_configured_credentials(" | ".join(errors)), provenance
             continue
         finally:
             _STRICT_JUDGE_REQUESTS_LEFT.reset(requests_left)
         if error:
+            if errors:
+                error = " | ".join([*errors, f"{candidate_model}: {error}"])
             return None, _redact_configured_credentials(error), provenance
         if candidate_model != requested_model:
             logger.warning("LLM judge model %s failed; using fallback model %s", requested_model, candidate_model)

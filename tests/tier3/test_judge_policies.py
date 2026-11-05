@@ -277,6 +277,18 @@ def test_strict_rejection_is_not_retried_or_handed_on(verifier, monkeypatch, cod
     assert requested == [PRIMARY]
 
 
+def test_strict_stop_keeps_the_errors_of_earlier_models(verifier, monkeypatch):
+    strict(monkeypatch)
+    requested = replay(verifier, monkeypatch, [http_error(503), http_error(503), http_error(401, b"bad key")])
+
+    content, error = verifier.call_public_llm("prompt")
+
+    assert content is None
+    assert error.startswith(f"{PRIMARY}: HTTP 503")
+    assert error.endswith("family/backup: HTTP 401: test - bad key")
+    assert requested == [PRIMARY, PRIMARY, "family/backup"]
+
+
 def test_strict_reads_stop_words_only_at_the_start_of_an_error_page(verifier, monkeypatch):
     strict(monkeypatch)
     page = b"<html><title>Error 502</title>" + b" " * 600 + b"Performance and security by a proxy</html>"
@@ -372,6 +384,20 @@ def test_strict_bedrock_other_validation_error_ends_the_judge(verifier, monkeypa
 
     assert content is None and "maxTokens" in error
     assert [call.kwargs["modelId"] for call in client.converse.call_args_list] == [PRIMARY]
+
+
+def test_strict_bedrock_stop_keeps_the_errors_of_earlier_models(verifier, monkeypatch):
+    strict(monkeypatch)
+    monkeypatch.setenv("SKILL_EVAL_LLM_PROVIDER", "bedrock")
+    throttled = _bedrock_error("ThrottlingException", 429, "Too many requests")
+    invalid = _bedrock_error("ValidationException", 400, "maxTokens: must be at most 8192")
+    _bedrock_client(monkeypatch, [throttled, throttled, invalid])
+
+    content, error = verifier.call_public_llm("prompt")
+
+    assert content is None
+    assert error.startswith(f"{PRIMARY}: Public provider call failed: Too many requests | family/backup: ")
+    assert error.endswith("maxTokens: must be at most 8192")
 
 
 def test_strict_stop_words_in_an_echoed_model_id_do_not_end_the_judge(verifier, monkeypatch):

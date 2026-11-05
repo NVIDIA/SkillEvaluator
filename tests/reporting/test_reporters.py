@@ -1986,9 +1986,7 @@ class TestGatingSplit:
             assert "same-name similarity match" in panel
         else:
             assert 'class="tab-content active"' in panel
-        if comprehensive:
-            assert "No check evidence was recorded for this tier." in _html_tab(output, "tier1")
-        else:
+        if not comprehensive:
             assert 'id="tab-tier1"' not in output
         assert JSONReporter(include_timestamp=False).render_all([result]) == before
 

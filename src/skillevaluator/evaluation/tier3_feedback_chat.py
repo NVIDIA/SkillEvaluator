@@ -44,6 +44,8 @@ _MAX_QUESTION_CHARS = 300
 _MAX_GROUND_TRUTH_CHARS = 200
 _MAX_FEEDBACK_ITEMS = 8
 _MAX_FEEDBACK_CHARS = 600
+# ``_summarize_dimensions`` keeps this many characters of each explanation.
+_MAX_EXPLANATION_CHARS = 600
 # The case rows are re-sent with every question. Rows past this many characters
 # of compact JSON are left out and counted in ``cases_omitted``.
 _MAX_CASE_EVIDENCE_CHARS = 300_000
@@ -234,12 +236,57 @@ def _finite_score(value: Any) -> float | None:
     return round(number, 4) if number is not None else None
 
 
-def _clip(value: Any, limit: int) -> str:
-    return (value if isinstance(value, str) else str(value))[:limit]
+@dataclass(frozen=True)
+class _Scrubber:
+    """Replace the run's host path with its ID and redact credentials in text sent to the provider."""
+
+    host_paths: tuple[str, ...]
+    run_id: str
+
+    @classmethod
+    def for_run(cls, run_dir: Path) -> _Scrubber:
+        paths = (str(run_dir), run_dir.as_posix())
+        return cls(tuple(dict.fromkeys(path for path in paths if len(path) > 1)), run_dir.name)
+
+    def text(self, value: str, limit: int | None = None) -> str:
+        """Masked ``value``; with ``limit``, masked first and then shortened to at most ``limit`` characters.
+
+        A credential or path cut at the limit would no longer match, so the
+        whole string is masked before it is shortened. The redactor sees a
+        bounded window, as in the plugin evidence helpers, and drops the
+        token cut at the window's edge.
+        """
+        for host_path in self.host_paths:
+            value = value.replace(host_path, self.run_id)
+        if limit is None:
+            return redact_sensitive_text(value)
+        return redact_sensitive_text(value, max_len=limit, max_input_chars=limit * 4 + 256)
 
 
-def _text(value: Any, limit: int) -> str:
-    return value[:limit] if isinstance(value, str) else ""
+def _clip(value: Any, limit: int, scrub: _Scrubber) -> str:
+    return scrub.text(value if isinstance(value, str) else str(value), limit)
+
+
+def _text(value: Any, limit: int, scrub: _Scrubber) -> str:
+    return scrub.text(value, limit) if isinstance(value, str) else ""
+
+
+def _compact_dimensions(raw: Any, scrub: _Scrubber) -> list[dict[str, Any]]:
+    """Summarize dimensions with each explanation masked before it is shortened.
+
+    An explanation that is not text is dropped, so ``_summarize_dimensions``
+    never slices a number.
+    """
+    dimensions = [dimension for dimension in raw if isinstance(dimension, dict)] if isinstance(raw, list) else []
+    return _summarize_dimensions(
+        [
+            {
+                **dimension,
+                "explanation": _text(dimension.get("explanation"), _MAX_EXPLANATION_CHARS, scrub),
+            }
+            for dimension in dimensions
+        ]
+    )
 
 
 def _activation_status(raw: Any) -> dict[str, Any] | None:
@@ -256,7 +303,7 @@ def _compact_resources(raw: Any) -> dict[str, Any] | None:
     return {key: value for key, value in raw.items() if key not in {"scope", "delta_definition"}}
 
 
-def _compact_agents(raw: Any) -> dict[str, Any]:
+def _compact_agents(raw: Any, scrub: _Scrubber) -> dict[str, Any]:
     """Keep per-agent comparisons, measured resources and failure scope without trials."""
     if not isinstance(raw, dict):
         return {}
@@ -266,7 +313,6 @@ def _compact_agents(raw: Any) -> dict[str, Any]:
             continue
         conditions = agent.get("conditions")
         errors = agent.get("execution_errors")
-        dimensions = agent.get("dimensions")
         agents[str(name)] = {
             "model": agent.get("model"),
             "with_skill": agent.get("with_skill"),
@@ -276,13 +322,10 @@ def _compact_agents(raw: Any) -> dict[str, Any]:
             "skill_activation": _activation_status(agent.get("skill_activation")),
             "execution_status": agent.get("execution_status"),
             "execution_errors": [
-                _clip(error, _MAX_ERROR_CHARS) for error in (errors if isinstance(errors, list) else [])
-            ][:_MAX_EXECUTION_ERRORS],
-            "dimensions": _summarize_dimensions(
-                [dimension for dimension in dimensions if isinstance(dimension, dict)]
-                if isinstance(dimensions, list)
-                else []
-            ),
+                _clip(error, _MAX_ERROR_CHARS, scrub)
+                for error in (errors if isinstance(errors, list) else [])[:_MAX_EXECUTION_ERRORS]
+            ],
+            "dimensions": _compact_dimensions(agent.get("dimensions"), scrub),
             "evaluators": _summarize_evaluators(agent.get("evaluators") or {}),
             "resources": _compact_resources(agent.get("resources")),
             "conditions": {
@@ -304,7 +347,7 @@ def _compact_agents(raw: Any) -> dict[str, Any]:
     return agents
 
 
-def _attempt_summary(trial: dict[str, Any]) -> dict[str, Any]:
+def _attempt_summary(trial: dict[str, Any], scrub: _Scrubber) -> dict[str, Any]:
     """Overall and per-metric scores, measured resources and the first warning of one attempt."""
     attempt: dict[str, Any] = {"overall": _finite_score(trial.get("overall"))}
     status = trial.get("status")
@@ -330,11 +373,11 @@ def _attempt_summary(trial: dict[str, Any]) -> dict[str, Any]:
             attempt["tokens"] = prompt + completion
     warnings = trial.get("warnings")
     if isinstance(warnings, list) and warnings:
-        attempt["warning"] = _clip(warnings[0], _MAX_WARNING_CHARS)
+        attempt["warning"] = _clip(warnings[0], _MAX_WARNING_CHARS, scrub)
     return attempt
 
 
-def _summarize_cases_for_feedback(payload: dict[str, Any]) -> list[dict[str, Any]]:
+def _summarize_cases_for_feedback(payload: dict[str, Any], scrub: _Scrubber) -> list[dict[str, Any]]:
     """One row per agent and dataset case listing every attempt per arm."""
     dataset = payload.get("dataset") if isinstance(payload.get("dataset"), list) else []
     case_by_id: dict[str, dict[str, Any]] = {}
@@ -345,8 +388,8 @@ def _summarize_cases_for_feedback(payload: dict[str, Any]) -> list[dict[str, Any
         if not entry_id or entry_id in case_by_id:
             continue
         summary: dict[str, Any] = {
-            "question": _text(case.get("question"), _MAX_QUESTION_CHARS),
-            "ground_truth": _text(case.get("ground_truth"), _MAX_GROUND_TRUTH_CHARS),
+            "question": _text(case.get("question"), _MAX_QUESTION_CHARS, scrub),
+            "ground_truth": _text(case.get("ground_truth"), _MAX_GROUND_TRUTH_CHARS, scrub),
         }
         case_type, _expected = _case_routing(case)
         if case_type != "unlabeled":
@@ -377,7 +420,7 @@ def _summarize_cases_for_feedback(payload: dict[str, Any]) -> list[dict[str, Any
             if not entry_id:
                 continue
             name = agent or str(trial.get("agent") or payload.get("best_agent") or "default")
-            ensure_row(name, entry_id)[arm].append(_attempt_summary(trial))
+            ensure_row(name, entry_id)[arm].append(_attempt_summary(trial, scrub))
 
     agents_raw = payload.get("agents")
     agent_names: list[str] = []
@@ -412,51 +455,50 @@ def _bounded_cases(cases: list[dict[str, Any]]) -> tuple[list[dict[str, Any]], i
     return kept, 0
 
 
-def _feedback_items(raw: Any) -> list[Any]:
+def _feedback_items(raw: Any, scrub: _Scrubber) -> list[Any]:
     """Keep the readable fields of saved report feedback; evidence links are left out."""
     items: list[Any] = []
     for item in (raw if isinstance(raw, list) else [])[:_MAX_FEEDBACK_ITEMS]:
         if isinstance(item, dict):
             compact = {
-                key: _clip(item[key], _MAX_FEEDBACK_CHARS)
+                key: _clip(item[key], _MAX_FEEDBACK_CHARS, scrub)
                 for key in ("severity", "category", "title", "message", "suggestion", "source")
                 if isinstance(item.get(key), str) and item[key]
             }
             if compact:
                 items.append(compact)
         elif isinstance(item, str) and item:
-            items.append(_clip(item, _MAX_FEEDBACK_CHARS))
+            items.append(_clip(item, _MAX_FEEDBACK_CHARS, scrub))
     return items
 
 
-def _scrub(value: Any, host_paths: tuple[str, ...], run_id: str) -> Any:
-    """Redact credential-shaped text in every string and replace the run's host path with its id.
+def _scrub(value: Any, scrub: _Scrubber) -> Any:
+    """Final pass over every string, including names and statuses that were not shortened.
 
     Key-based redaction would also blank measured ``tokens`` totals, so only
     string values are redacted here.
     """
     if isinstance(value, str):
-        for host_path in host_paths:
-            value = value.replace(host_path, run_id)
-        return redact_sensitive_text(value)
+        return scrub.text(value)
     if isinstance(value, dict):
-        return {key: _scrub(item, host_paths, run_id) for key, item in value.items()}
+        return {key: _scrub(item, scrub) for key, item in value.items()}
     if isinstance(value, list | tuple):
-        return [_scrub(item, host_paths, run_id) for item in value]
+        return [_scrub(item, scrub) for item in value]
     return value
 
 
 def compact_run_context(payload: dict[str, Any], *, run_dir: Path) -> dict[str, Any]:
     """Trim the payload to the evidence the feedback chat may cite.
 
-    Only the run id is included, not the run's host path. Credential-shaped
-    text in errors, warnings and case text is redacted before anything is sent.
+    Only the run id is included, not the run's host path. The host path and
+    credential-shaped text are masked in each string before it is shortened, so
+    a cut cannot leave part of either behind.
     """
+    scrub = _Scrubber.for_run(run_dir)
     runtime_seconds = _finite_number(payload.get("runtime_seconds"))
     if runtime_seconds is not None and runtime_seconds <= 0.0:
         runtime_seconds = None
-    dimensions = payload.get("dimensions")
-    cases, cases_omitted = _bounded_cases(_summarize_cases_for_feedback(payload))
+    cases, cases_omitted = _bounded_cases(_summarize_cases_for_feedback(payload, scrub))
 
     context: dict[str, Any] = {
         "run_id": run_dir.name,
@@ -468,24 +510,19 @@ def compact_run_context(payload: dict[str, Any], *, run_dir: Path) -> dict[str, 
         "overall_lift": payload.get("overall_lift"),
         "runtime_seconds": runtime_seconds,
         "execution_status": payload.get("execution_status"),
-        "agents": _compact_agents(payload.get("agents")),
-        "dimensions": _summarize_dimensions(
-            [dimension for dimension in dimensions if isinstance(dimension, dict)]
-            if isinstance(dimensions, list)
-            else []
-        ),
+        "agents": _compact_agents(payload.get("agents"), scrub),
+        "dimensions": _compact_dimensions(payload.get("dimensions"), scrub),
         "best_agent_evaluators": _summarize_evaluators(payload.get("evaluators") or {}),
         "cases": cases,
         "report_feedback": {
-            "conclusions": _feedback_items(payload.get("conclusions")),
-            "recommendations": _feedback_items(payload.get("recommendations")),
-            "suggestions": _feedback_items(payload.get("suggestions")),
+            "conclusions": _feedback_items(payload.get("conclusions"), scrub),
+            "recommendations": _feedback_items(payload.get("recommendations"), scrub),
+            "suggestions": _feedback_items(payload.get("suggestions"), scrub),
         },
     }
     if cases_omitted:
         context["cases_omitted"] = cases_omitted
-    host_paths = tuple(dict.fromkeys(path for path in (str(run_dir), run_dir.as_posix()) if len(path) > 1))
-    return _scrub(context, host_paths, run_dir.name)
+    return _scrub(context, scrub)
 
 
 class Tier3FeedbackAssistant(LLMClient):

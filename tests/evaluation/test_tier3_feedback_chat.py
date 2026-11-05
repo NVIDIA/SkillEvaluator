@@ -20,6 +20,7 @@ from skillevaluator.cli import cli
 from skillevaluator.evaluation import tier3_feedback_chat
 from skillevaluator.evaluation.tier3_feedback_chat import (
     Tier3FeedbackSession,
+    _Scrubber,
     _summarize_cases_for_feedback,
     compact_run_context,
     load_agent_eval_payload,
@@ -122,6 +123,10 @@ def _use_openai(monkeypatch: pytest.MonkeyPatch) -> None:
 def plain_console(monkeypatch: pytest.MonkeyPatch) -> None:
     """Print without color or wrapping, whatever the CI terminal settings are."""
     monkeypatch.setattr(commands, "console", Console(emoji=False, color_system=None, width=400))
+
+
+def _cases(payload: dict[str, Any]) -> list[dict[str, Any]]:
+    return _summarize_cases_for_feedback(payload, _Scrubber.for_run(Path("/runs/demo") / RUN_ID))
 
 
 def _invoke(args: list[str], user_input: str | None = None):
@@ -319,6 +324,90 @@ def test_context_redacts_credentials_but_keeps_measurements() -> None:
     assert context["cases"][0]["with_skill"][0]["tokens"] == 12
 
 
+# Built at runtime so secret scanners never see a literal credential.
+_FAKE_GITHUB_TOKEN = "ghp_" + "a" * 36
+_FAKE_AWS_KEY = "AKIA" + "IOSFODNN7EXAMPLE"
+_PRIVATE_RUN = Path("/home/alice/projects/acme-secret-skill/evals/results") / RUN_ID
+
+
+def _across_limit(limit: int, text: str, inside: int) -> str:
+    """Filler, then ``text`` placed so that only its first ``inside`` characters fit within ``limit``."""
+    return "x" * (limit - inside - 1) + " " + text + " done"
+
+
+def test_context_masks_text_before_shortening_it() -> None:
+    # Each credential or run path starts just inside its field's limit. Cut
+    # first, it would keep a prefix that no redaction pattern or path matches.
+    limits = tier3_feedback_chat
+    path_text = f"failed at {_PRIVATE_RUN / 'jobs' / 'trial'}"
+    path_inside = len("failed at ") + len(str(_PRIVATE_RUN)) - 5
+
+    def token_at(limit: int) -> str:
+        return _across_limit(limit, f"token {_FAKE_GITHUB_TOKEN}", len("token ") + 9)
+
+    def key_at(limit: int) -> str:
+        return _across_limit(limit, f"key={_FAKE_AWS_KEY}", len("key=") + 15)
+
+    explanation = token_at(limits._MAX_EXPLANATION_CHARS)
+    payload = {
+        "dataset": [
+            {
+                "id": "case-1",
+                "question": token_at(limits._MAX_QUESTION_CHARS),
+                "ground_truth": key_at(limits._MAX_GROUND_TRUTH_CHARS),
+            }
+        ],
+        "dimensions": [{"id": "accuracy", "explanation": explanation}, {"id": "speed", "explanation": 5}],
+        "conclusions": [{"title": "t", "message": token_at(limits._MAX_FEEDBACK_CHARS)}],
+        "suggestions": [key_at(limits._MAX_FEEDBACK_CHARS)],
+        "agents": {
+            "codex": {
+                "execution_errors": [
+                    key_at(limits._MAX_ERROR_CHARS),
+                    _across_limit(limits._MAX_ERROR_CHARS, path_text, path_inside),
+                ],
+                "dimensions": [{"id": "accuracy", "explanation": explanation}],
+                "trials": [
+                    {"entry_id": "case-1", "overall": 1.0, "warnings": [token_at(limits._MAX_WARNING_CHARS)]},
+                    {
+                        "entry_id": "case-1",
+                        "overall": 1.0,
+                        "warnings": [_across_limit(limits._MAX_WARNING_CHARS, path_text, path_inside)],
+                    },
+                ],
+            }
+        },
+    }
+
+    context = compact_run_context(payload, run_dir=_PRIVATE_RUN)
+
+    serialized = json.dumps(context)
+    for leaked in ("ghp_", "AKIA", "alice", "acme-secret-skill"):
+        assert leaked not in serialized
+    agent = context["agents"]["codex"]
+    (row,) = context["cases"]
+    token_warning, path_warning = (attempt["warning"] for attempt in row["with_skill"])
+    assert f"failed at {RUN_ID}" in path_warning
+    assert f"failed at {RUN_ID}" in agent["execution_errors"][1]
+    # The placeholder is longer than the key, so the shortened text ends in the marker.
+    assert agent["execution_errors"][0].endswith(" key=a...<truncated>")
+    assert context["dimensions"][1]["explanation"] == ""
+    # Masking first still keeps every field within its limit.
+    for text, limit in (
+        (row["question"], limits._MAX_QUESTION_CHARS),
+        (row["ground_truth"], limits._MAX_GROUND_TRUTH_CHARS),
+        (token_warning, limits._MAX_WARNING_CHARS),
+        (path_warning, limits._MAX_WARNING_CHARS),
+        (agent["execution_errors"][0], limits._MAX_ERROR_CHARS),
+        (agent["execution_errors"][1], limits._MAX_ERROR_CHARS),
+        (context["dimensions"][0]["explanation"], limits._MAX_EXPLANATION_CHARS),
+        (agent["dimensions"][0]["explanation"], limits._MAX_EXPLANATION_CHARS),
+        (context["report_feedback"]["conclusions"][0]["message"], limits._MAX_FEEDBACK_CHARS),
+        (context["report_feedback"]["suggestions"][0], limits._MAX_FEEDBACK_CHARS),
+    ):
+        assert len(text) <= limit
+
+
 # -- case summaries -------------------------------------------------------------
 
 
@@ -335,7 +424,7 @@ def test_summarize_cases_covers_every_dataset_entry() -> None:
             {"agent": "codex", "entry_id": "case-07", "overall": None, "status": "timeout", "warnings": ["timed out"]},
         ],
     }
-    cases = _summarize_cases_for_feedback(payload)
+    cases = _cases(payload)
     assert {row["entry_id"] for row in cases} == {"case-01", "case-02", "case-07", "case-09"}
     case_09 = next(row for row in cases if row["entry_id"] == "case-09")
     assert case_09["question"] == "Q9"
@@ -367,7 +456,7 @@ def test_summarize_cases_keeps_every_attempt() -> None:
         # The payload builder mirrors with-skill trials here; they must not be counted twice.
         "trials": [{**trial, "agent": "codex"} for trial in with_skill],
     }
-    cases = _summarize_cases_for_feedback(payload)
+    cases = _cases(payload)
     row = next(row for row in cases if row["agent"] == "codex" and row["entry_id"] == "case-02")
     assert row["with_skill"] == [
         {"overall": 0.1, "status": "scored", "warning": "wrong file edited"},
@@ -410,7 +499,7 @@ def test_summarize_cases_keeps_per_metric_scores_for_each_attempt() -> None:
             }
         },
     }
-    row = next(iter(_summarize_cases_for_feedback(payload)))
+    row = next(iter(_cases(payload)))
     assert [attempt.get("scores") for attempt in row["with_skill"]] == [
         {"security": 0.2, "accuracy": 0.6123},
         {"security": 0.8},

@@ -1715,10 +1715,18 @@ def _call_anthropic(prompt, model, max_tokens, temperature, response_schema=None
     if body.get("stop_reason") == "refusal":
         raise _JudgeRefusedError("judge model declined the request (stop_reason=refusal)")
     blocks = [block for block in body.get("content", []) if isinstance(block, dict)]
+    served_model = None
     for block in blocks:
         served = block.get("to") if block.get("type") == "fallback" else None
-        if provenance is not None and isinstance(served, dict) and isinstance(served.get("model"), str):
-            provenance["model"] = served["model"]
+        if isinstance(served, dict) and isinstance(served.get("model"), str) and served["model"]:
+            served_model = served["model"]
+    # A turn served by sticky routing, which sends repeats of a fallen-back
+    # request straight to the fallback model, carries no fallback block; the
+    # top-level model then names the model that wrote the reply.
+    if served_model is None and server_side_fallback and isinstance(body.get("model"), str) and body["model"]:
+        served_model = body["model"]
+    if provenance is not None and served_model is not None:
+        provenance["model"] = served_model
     content = "".join(str(block.get("text", "")) for block in blocks if block.get("type") == "text")
     return content.strip(), None
 
@@ -2827,7 +2835,9 @@ def judge_goal_accuracy(question, ground_truth, agent_text, tool_summary=""):
             if isinstance(score, bool) or score not in (0.0, 1.0):
                 raise ValueError("RAGAS returned a non-binary goal accuracy score")
         except Exception as e:
-            logger.info("RAGAS not available (%s), using custom prompt", e)
+            # The documented scorer changed for this trial, so say why where users will see it.
+            detail = _redact_configured_credentials(f"{type(e).__name__}: {e}")[:_JUDGE_ERROR_REASON_LIMIT]
+            logger.warning("RAGAS goal scorer failed (%s); using the custom goal judge", detail)
             problem = f"RAGAS failed ({type(e).__name__}: {e}); used the custom judge"
             _record_judge_attempt(
                 "goal_accuracy",
@@ -2876,7 +2886,6 @@ def _judge_goal_accuracy_ragas(question, ground_truth, agent_text, tool_summary)
     import asyncio
 
     from openai import AsyncOpenAI
-    from ragas import SingleTurnSample
     from ragas.llms.base import llm_factory
     from ragas.messages import AIMessage as RagasAI
     from ragas.messages import HumanMessage as RagasHuman
@@ -2893,38 +2902,71 @@ def _judge_goal_accuracy_ragas(question, ground_truth, agent_text, tool_summary)
     if not request_url.endswith(suffix) or not _is_native_openai_chat_url("openai", request_url):
         raise RuntimeError("RAGAS goal accuracy requires the selected canonical OpenAI provider")
     client = AsyncOpenAI(api_key=api_key, base_url=request_url[: -len(suffix)])
-    llm = llm_factory(_selected_judge_model(), client=client)
-
-    metric = AgentGoalAccuracyWithReference(llm=llm)
-    user_input = [
-        RagasHuman(content=question),
-        RagasAI(content=agent_text),
-    ]
-
-    sample = SingleTurnSample(user_input=user_input, reference=ground_truth)
-
     loop = asyncio.new_event_loop()
     try:
+        # Build the scorer inside the try so a setup failure still closes the client.
+        judge_model = _selected_judge_model()
+        llm = llm_factory(judge_model, client=client)
+        metric = AgentGoalAccuracyWithReference(llm=llm)
+        user_input = [
+            RagasHuman(content=question),
+            RagasAI(content=agent_text),
+        ]
+        # Collections metrics take the messages and reference as keywords, not a SingleTurnSample.
         result = loop.run_until_complete(
             asyncio.wait_for(
-                metric.ascore(sample),
+                metric.ascore(user_input=user_input, reference=ground_truth),
                 timeout=_remaining_judge_timeout(_resolve_judge_wall_time_budget()),
             )
         )
     finally:
-        loop.close()
+
+        def consume_cleanup_task_exception(task):
+            # Tasks can fail after a cleanup timeout; never let asyncio log their exception text.
+            if not task.cancelled():
+                task.exception()
+
+        try:
+            # The judge deadline alarm can stop the loop mid-score; cancel that work before closing the client.
+            pending = asyncio.all_tasks(loop)
+            for task in pending:
+                task.add_done_callback(consume_cleanup_task_exception)
+                task.cancel()
+            if pending:
+                _finished, unfinished = loop.run_until_complete(asyncio.wait(pending, timeout=5.0))
+                if unfinished:
+                    logger.warning("RAGAS judge task cancellation timed out: %d unfinished tasks", len(unfinished))
+        except Exception as error:
+            logger.warning("RAGAS judge task cancellation failed: %s", type(error).__name__)
+        finally:
+            try:
+                # Closing the client must still be attempted if scoring tasks could not be drained.
+                close_task = loop.create_task(client.close())
+                close_task.add_done_callback(consume_cleanup_task_exception)
+                _finished, unfinished = loop.run_until_complete(asyncio.wait({close_task}, timeout=5.0))
+                if unfinished:
+                    close_task.cancel()
+                    logger.warning("RAGAS judge client close timed out")
+                else:
+                    close_task.result()
+            except (Exception, asyncio.CancelledError) as error:
+                # Cleanup must never hide the score or the scorer's own failure.
+                logger.warning("RAGAS judge client close failed: %s", type(error).__name__)
+            finally:
+                loop.close()
 
     score = float(result.value) if hasattr(result, "value") else float(result)
     if score not in (0.0, 1.0):
         # Also rejects NaN; the caller then runs the prompt judge.
         raise ValueError("RAGAS returned a non-binary goal accuracy score")
+    provenance = {"provider": "openai", "model": judge_model}
+    _record_judge_call(provenance, judge_model, judge_model)
     return {
         "score": score,
         "reason": "RAGAS AgentGoalAccuracyWithReference",
         "achieved": score == 1.0,
         "method": "ragas",
-        "provider": "openai",
-        "model": _selected_judge_model(),
+        **provenance,
     }
 
 

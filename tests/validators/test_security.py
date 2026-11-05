@@ -1422,6 +1422,22 @@ print(json.dumps([finding.metadata["matched_value"] for finding in result.findin
         assert not any(detail.check_name == "skillspector" for detail in result.success_details)
 
     @patch("skillevaluator.validators.security.Tools")
+    def test_llm_stage_keeps_the_static_applicability_block(self, mock_tools, sample_skill_dir: Path):
+        mock_tools.skillspector.is_available = True
+        static_block = {"artifact_type": "skill", "kept_issues": 0, "suppressed_inapplicable_issues": 3}
+        llm_block = {"artifact_type": "skill", "kept_issues": 0, "suppressed_inapplicable_issues": 1}
+        static_result, llm_result = ValidationResult(), ValidationResult()
+        static_result.metadata["skillspector_applicability"] = static_block
+        llm_result.metadata["skillspector_applicability"] = llm_block
+
+        validator = SecurityValidator(use_llm=True)
+        with patch.object(validator, "_run_skillspector_once", side_effect=[static_result, llm_result]):
+            result = validator._run_skillspector(sample_skill_dir)
+
+        assert result.metadata["skillspector_applicability"] == static_block
+        assert result.metadata["skillspector_llm_applicability"] == llm_block
+
+    @patch("skillevaluator.validators.security.Tools")
     def test_deeply_nested_skillspector_json_fails_closed(self, mock_tools, sample_skill_dir: Path):
         mock_tools.skillspector.is_available = True
         mock_tools.skillspector.run.return_value = ToolResult(

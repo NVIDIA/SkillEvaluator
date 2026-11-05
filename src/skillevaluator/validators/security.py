@@ -65,6 +65,12 @@ from skillevaluator.validators.base import (
     iter_scannable_files,
 )
 from skillevaluator.validators.pii_waivers import PIIWaiverSet, configured_pii_categories, pii_evidence_sha256
+from skillevaluator.validators.skillspector_scope import (
+    IssueScope,
+    scope_skillspector_issues,
+    skillspector_report_is_truncated,
+    skillspector_report_serializes_every_finding,
+)
 
 logger = get_logger(__name__)
 
@@ -880,6 +886,21 @@ def _rewrite_path_prefix(value, old: str, new: str):
     return value
 
 
+def _combine_skillspector_applicability(blocks: list[dict]) -> dict:
+    """Total per-skill SkillSpector applicability counters for a folder of skills."""
+    by_role: Counter[str] = Counter()
+    for block in blocks:
+        by_role.update(block["suppressed_by_file_role"])
+    return {
+        "artifact_type": blocks[0]["artifact_type"],
+        "kept_issues": sum(block["kept_issues"] for block in blocks),
+        "suppressed_inapplicable_issues": sum(block["suppressed_inapplicable_issues"] for block in blocks),
+        "suppressed_by_file_role": dict(sorted(by_role.items())),
+        "raw_risk_score": max(block["raw_risk_score"] for block in blocks),
+        "applicable_risk_score": max(block["applicable_risk_score"] for block in blocks),
+    }
+
+
 def _issue_field(issue: dict):
     """Return a getter that retrieves a field from *issue*, treating None as empty string."""
 
@@ -1393,6 +1414,8 @@ class SecurityValidator(ValidatorBase):
         verify_llm: bool = False,
         submitter_usernames: Iterable[str] | None = None,
         pii_waiver_path: Path | None = None,
+        content_type: str | None = None,
+        skillspector_reference_root: Path | None = None,
         skillspector_baseline: Path | str | None = None,
     ):
         """Initialize with optional LLM analysis for deeper inspection.
@@ -1409,6 +1432,15 @@ class SecurityValidator(ValidatorBase):
             pii_waiver_path: Optional PII waiver file (see
                 :mod:`skillevaluator.validators.pii_waivers`) applied by
                 :meth:`validate` and :meth:`validate_pii_only`.
+            content_type: Detected agent artifact type (``skill``, ``rules``,
+                ``workflows``, or ``plugin``). When set, SkillSpector findings
+                outside agent control paths are suppressed (see
+                :mod:`skillevaluator.validators.skillspector_scope`). ``None``
+                keeps the unrestricted repository scan used by ``security-scan``.
+            skillspector_reference_root: Artifact root that contains the
+                scanned directory, such as a plugin around its bundled skills.
+                References written relative to it still count as agent
+                references. Defaults to the scanned directory.
             skillspector_baseline: Audited SkillSpector YAML/JSON suppression
                 baseline. Matching findings are removed by SkillSpector before
                 scoring. Baselines are only applied when passed explicitly; one
@@ -1427,6 +1459,10 @@ class SecurityValidator(ValidatorBase):
         self.pii_waiver_path = Path(pii_waiver_path) if pii_waiver_path is not None else None
         # The waivers of the scan in progress; set only while validate() or validate_pii_only() runs.
         self._pii_waivers: PIIWaiverSet | None = None
+        self.content_type = content_type
+        self.skillspector_reference_root = (
+            Path(skillspector_reference_root).resolve() if skillspector_reference_root is not None else None
+        )
         self.skillspector_baseline = (
             Path(skillspector_baseline).expanduser().resolve() if skillspector_baseline is not None else None
         )
@@ -1555,7 +1591,7 @@ class SecurityValidator(ValidatorBase):
         """Run both security and PII scanning on skill(s)."""
         return self._with_pii_waivers(
             skill_path,
-            lambda: self._validate_folder_or_skill(
+            lambda: self._validate_with_applicability(
                 skill_path,
                 self._validate_single_skill,
                 action_description="Scanning",
@@ -1564,7 +1600,7 @@ class SecurityValidator(ValidatorBase):
 
     def validate_security_only(self, skill_path: Path) -> ValidationResult:
         """Run only skillspector security scanning (no PII detection)."""
-        result = self._validate_folder_or_skill(
+        result = self._validate_with_applicability(
             skill_path,
             self._run_skillspector,
             action_description="Security scanning",
@@ -1607,6 +1643,32 @@ class SecurityValidator(ValidatorBase):
             result.add_structured_finding(finding, is_error=is_error)
         if waivers.applied:
             result.add_message(f"PII waivers suppressed {len(waivers.applied)} reviewed PII value(s)")
+        return result
+
+    def _validate_with_applicability(
+        self,
+        skill_path: Path,
+        single_skill_validator: Callable[[Path], ValidationResult],
+        *,
+        action_description: str,
+    ) -> ValidationResult:
+        """Validate each discovered skill and total their SkillSpector applicability counters.
+
+        The folder walker does not merge per-skill metadata, so the counters
+        are collected as each skill finishes.
+        """
+        blocks: list[dict] = []
+
+        def validate_one(path: Path) -> ValidationResult:
+            child = single_skill_validator(path)
+            block = child.metadata.get("skillspector_applicability")
+            if isinstance(block, dict):
+                blocks.append(block)
+            return child
+
+        result = self._validate_folder_or_skill(skill_path, validate_one, action_description=action_description)
+        if blocks:
+            result.metadata["skillspector_applicability"] = _combine_skillspector_applicability(blocks)
         return result
 
     def _validate_single_skill(self, skill_path: Path) -> ValidationResult:
@@ -1707,7 +1769,15 @@ class SecurityValidator(ValidatorBase):
                     kept = [warning for warning in enrichment.warnings if warning not in repeated]
                     enrichment.summary.warnings -= len(enrichment.warnings) - len(kept)
                     enrichment.warnings = kept
+                # The static stage is the authoritative audit of what was
+                # suppressed; keep its block and record the LLM stage's apart.
+                static_applicability = result.metadata.get("skillspector_applicability")
+                llm_applicability = enrichment.metadata.pop("skillspector_applicability", None)
                 result.merge(enrichment)
+                if static_applicability is not None:
+                    result.metadata["skillspector_applicability"] = static_applicability
+                if llm_applicability is not None:
+                    result.metadata["skillspector_llm_applicability"] = llm_applicability
                 if not enrichment.is_incomplete:
                     self._deduplicate_skillspector_findings(result)
             if baseline_state is not None:
@@ -2942,6 +3012,51 @@ class SecurityValidator(ValidatorBase):
         return max(minimum_score, reported_floor)
 
     @staticmethod
+    def _retained_skillspector_risk_score(issues: list[dict], components: list[dict]) -> int:
+        """Score *issues* with SkillSpector's formula, one finding per serialized record.
+
+        Use only when the report serializes every finding it counted. Each
+        occurrence is a finding, scored with its own file's executable
+        multiplier. Within a rule, SkillSpector gives the largest weights to
+        the most severe findings; within one severity, the lowest
+        contributions take the larger weights here, so the result never
+        exceeds SkillSpector's score for the same findings.
+        """
+        file_executable = {
+            (_skillspector_scoring_source_scope(component), component["path"]): component.get("executable") is True
+            for component in components
+            if isinstance(component, dict) and isinstance(component.get("path"), str)
+        }
+        by_rule: dict[str, list[tuple[float, float]]] = {}
+        score_floor = 0
+        for issue in issues:
+            if issue["confidence"] <= 0:
+                continue
+            score_floor = max(score_floor, _SKILLSPECTOR_RISK_SCORE_FLOORS_BY_RULE_ID.get(issue["id"], 0))
+            occurrences = issue.get("occurrences")
+            records = occurrences if isinstance(occurrences, list) and occurrences else [issue.get("location")]
+            source_scope = _skillspector_scoring_source_scope(issue)
+            for record in records:
+                record_file = record.get("file") if isinstance(record, dict) else None
+                multiplier = (
+                    _SKILLSPECTOR_EXECUTABLE_MULTIPLIER
+                    if file_executable.get((source_scope, record_file), False)
+                    else 1.0
+                )
+                severity_points = _SKILLSPECTOR_SEVERITY_POINTS[issue["severity"]]
+                by_rule.setdefault(issue["id"], []).append(
+                    (-severity_points, severity_points * issue["confidence"] * multiplier)
+                )
+        total = sum(
+            contribution * weight
+            for contributions in by_rule.values()
+            for (_severity, contribution), weight in zip(
+                sorted(contributions), _SKILLSPECTOR_DIMINISHING_WEIGHTS, strict=False
+            )
+        )
+        return min(100, max(score_floor, int(total)))
+
+    @staticmethod
     def _deduplicate_skillspector_issues_for_scoring(
         issues: list[dict],
         *,
@@ -3112,19 +3227,24 @@ class SecurityValidator(ValidatorBase):
         *,
         source_root: Path | None = None,
     ) -> None:
-        """Convert a validated SkillSpector JSON report into ValidationResult entries."""
-        self._store_skillspector_metadata(data, result)
+        """Convert a validated SkillSpector JSON report into ValidationResult entries.
+
+        With a ``content_type``, issues outside agent control paths are
+        suppressed and excluded from the aggregate risk score (see
+        :func:`~skillevaluator.validators.skillspector_scope.scope_skillspector_issues`).
+        """
+        self._store_skillspector_metadata(data, result, score_message=False)
 
         issues = data.get("issues", [])
         report_metadata = data.get("metadata") if isinstance(data.get("metadata"), dict) else {}
         raw_version = report_metadata.get("skillspector_version")
-        scanned_issues = []
+        report_components = data.get("components") if isinstance(data.get("components"), list) else []
+        candidate_issues = []
         removed_issues = []
         skipped_generated = 0
         skipped_spdx_comments = 0
         skipped_passwd_mounts = 0
         passwd_mount_lines: dict[str, frozenset[int]] = {}
-        has_critical_or_high = False
         for issue in issues:
             if not isinstance(issue, dict):
                 continue
@@ -3145,8 +3265,34 @@ class SecurityValidator(ValidatorBase):
                 removed_issues.append(issue)
                 skipped_passwd_mounts += 1
                 continue
+            candidate_issues.append(issue)
+
+        scopes = self._skillspector_issue_scopes(
+            candidate_issues,
+            report_components,
+            source_root=source_root,
+            report_truncated=skillspector_report_is_truncated(data),
+        )
+        scanned_issues = []
+        skipped_inapplicable = 0
+        skipped_by_role: Counter[str] = Counter()
+        has_critical_or_high = False
+        for issue, scope in zip(candidate_issues, scopes, strict=True):
+            if scope is not None and not scope.applicable:
+                removed_issues.append(issue)
+                skipped_inapplicable += 1
+                skipped_by_role[scope.file_role] += 1
+                continue
             scanned_issues.append(issue)
             finding, is_error = self._convert_skillspector_issue(issue)
+            if scope is not None:
+                finding.metadata.update(
+                    {
+                        "artifact_type": self.content_type,
+                        "file_role": scope.file_role,
+                        "applicability": scope.applicability,
+                    }
+                )
             if is_error:
                 has_critical_or_high = True
             result.add_structured_finding(finding, is_error=is_error)
@@ -3157,9 +3303,13 @@ class SecurityValidator(ValidatorBase):
             result.add_message(f"skillspector ignored {skipped_spdx_comments} SPDX-only HTML comment issue(s)")
         if skipped_passwd_mounts:
             result.add_message(f"skillspector ignored {skipped_passwd_mounts} read-only /etc/passwd mount issue(s)")
+        if skipped_inapplicable:
+            roles = ", ".join(f"{role}={count}" for role, count in sorted(skipped_by_role.items()))
+            result.add_message(
+                f"skillspector suppressed {skipped_inapplicable} issue(s) outside agent control paths ({roles})"
+            )
 
         reported_score = data["risk_assessment"]["score"]
-        report_components = data.get("components") if isinstance(data.get("components"), list) else []
         uses_report_identities = (
             isinstance(raw_version, str)
             and SEMVER_RE.fullmatch(raw_version) is not None
@@ -3192,9 +3342,37 @@ class SecurityValidator(ValidatorBase):
                 removed_issues=removed_issues,
                 all_findings_serialized=findings_after_filtering == serialized_findings,
             )
-            if skipped_generated or skipped_spdx_comments or skipped_passwd_mounts
+            if skipped_generated or skipped_spdx_comments or skipped_passwd_mounts or skipped_inapplicable
             else reported_score
         )
+        if skipped_inapplicable and uses_report_identities and skillspector_report_serializes_every_finding(data):
+            # The reconciliation floor treats a match repeated across files
+            # as one finding plus unknown findings, which lowers the score of
+            # the kept issues. With every counted finding serialized, score
+            # the kept records directly.
+            effective_score = max(
+                effective_score,
+                min(reported_score, self._retained_skillspector_risk_score(scanned_issues, report_components)),
+            )
+        if reported_score > 50:
+            reported_severity = data["risk_assessment"].get("severity", "UNKNOWN")
+            if skipped_inapplicable:
+                # The gate uses the applicable score, so label both scores.
+                result.add_message(
+                    f"skillspector risk score: {effective_score}/100 applicable "
+                    f"(raw {reported_score}/100 {reported_severity})"
+                )
+            else:
+                result.add_message(f"skillspector risk score: {reported_score}/100 ({reported_severity})")
+        if self.content_type is not None:
+            result.metadata["skillspector_applicability"] = {
+                "artifact_type": self.content_type,
+                "kept_issues": len(scanned_issues),
+                "suppressed_inapplicable_issues": skipped_inapplicable,
+                "suppressed_by_file_role": dict(sorted(skipped_by_role.items())),
+                "raw_risk_score": reported_score,
+                "applicable_risk_score": effective_score,
+            }
         if effective_score > 50 and not has_critical_or_high:
             result.add_structured_finding(
                 Finding(
@@ -3210,7 +3388,37 @@ class SecurityValidator(ValidatorBase):
             has_critical_or_high = True
 
         if not result.is_incomplete:
-            self._summarize_skillspector_results(scanned_issues, has_critical_or_high, result)
+            self._summarize_skillspector_results(
+                scanned_issues,
+                has_critical_or_high,
+                result,
+                suppressed_inapplicable_issues=skipped_inapplicable,
+            )
+
+    def _skillspector_issue_scopes(
+        self,
+        issues: list[dict],
+        components: list,
+        *,
+        source_root: Path | None,
+        report_truncated: bool,
+    ) -> list[IssueScope | None]:
+        """Return each issue's applicability, or ``None`` for an unrestricted scan."""
+        if self.content_type is None or source_root is None:
+            return [None] * len(issues)
+        try:
+            return scope_skillspector_issues(
+                issues,
+                components,
+                scan_root=source_root,
+                reference_root=self.skillspector_reference_root,
+                report_truncated=report_truncated,
+            )
+        except Exception:
+            # Scoping only ever removes findings, so an unexpected failure
+            # keeps every one of them rather than abort the security check.
+            logger.warning("Could not scope SkillSpector findings to agent control paths; keeping all", exc_info=True)
+            return [IssueScope("unknown", "fail-closed") for _issue in issues]
 
     @staticmethod
     def _is_generated_artifact_issue(issue: dict, *, source_root: Path | None = None) -> bool:
@@ -3348,8 +3556,12 @@ class SecurityValidator(ValidatorBase):
         return frozenset(safe_lines)
 
     @staticmethod
-    def _store_skillspector_metadata(data: dict, result: ValidationResult) -> None:
-        """Store the validated SkillSpector report metadata on the result."""
+    def _store_skillspector_metadata(data: dict, result: ValidationResult, *, score_message: bool = True) -> None:
+        """Store the validated SkillSpector report metadata on the result.
+
+        With *score_message* false, the caller reports the risk score once it
+        knows the score that applies after scoping.
+        """
         skill_info = data.get("skill") or {}
         sp_metadata = data.get("metadata") or {}
         components = data.get("components") or []
@@ -3382,7 +3594,7 @@ class SecurityValidator(ValidatorBase):
                 "LLM analysis was requested but not available; provider or model diagnostics were redacted"
             )
 
-        if score > 50:
+        if score_message and score > 50:
             result.add_message(f"skillspector risk score: {score}/100 ({severity})")
 
     @staticmethod
@@ -3563,28 +3775,55 @@ class SecurityValidator(ValidatorBase):
         return pattern_name
 
     @staticmethod
-    def _summarize_skillspector_results(issues: list, has_critical_or_high: bool, result: ValidationResult) -> None:
+    def _summarize_skillspector_results(
+        issues: list,
+        has_critical_or_high: bool,
+        result: ValidationResult,
+        *,
+        suppressed_inapplicable_issues: int = 0,
+    ) -> None:
         """Add a summary success/message entry for the skillspector scan."""
+        suppressed_note = ""
+        suppressed_metadata: dict[str, int] = {}
+        if suppressed_inapplicable_issues:
+            noun = "issue" if suppressed_inapplicable_issues == 1 else "issues"
+            suppressed_note = (
+                f"; {suppressed_inapplicable_issues} scanner {noun} suppressed outside agent control paths"
+            )
+            suppressed_metadata = {"suppressed_inapplicable_issues": suppressed_inapplicable_issues}
         suppressed = result.metadata.get("skillspector_suppressed_count")
         if not issues and isinstance(suppressed, int) and suppressed > 0:
             # Suppressions require an explicit baseline; never present them as a clean scan.
             result.add_success(
                 check_name="skillspector",
-                message=f"No active security findings; {suppressed} finding(s) suppressed by the requested baseline",
+                message=(
+                    f"No active security findings; {suppressed} finding(s) suppressed by the requested baseline"
+                    f"{suppressed_note}"
+                ),
                 suppressed_count=suppressed,
+                **suppressed_metadata,
             )
         elif not issues:
             result.add_success(
                 check_name="skillspector",
-                message="No security vulnerabilities detected (secrets, API keys, credentials)",
+                message=(
+                    f"No applicable security vulnerabilities detected{suppressed_note}"
+                    if suppressed_note
+                    else "No security vulnerabilities detected (secrets, API keys, credentials)"
+                ),
+                **suppressed_metadata,
             )
         elif has_critical_or_high:
             result.add_message(f"skillspector found {len(issues)} issue(s) including critical/high severity")
         else:
             result.add_success(
                 check_name="skillspector",
-                message=f"Security scan completed - {len(issues)} advisory finding(s) (no critical/high issues)",
+                message=(
+                    f"Security scan completed - {len(issues)} advisory finding(s) (no critical/high issues)"
+                    f"{suppressed_note}"
+                ),
                 issue_count=len(issues),
+                **suppressed_metadata,
             )
 
     def _scan_for_pii(self, skill_path: Path) -> ValidationResult:

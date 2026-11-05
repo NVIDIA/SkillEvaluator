@@ -1007,3 +1007,62 @@ class TestRubricEvalValidator:
         assert result.metadata["rubric_eval"]["execution_status"] == "failed"
         assert result.metadata["rubric_eval"]["overall_score"] is None
         assert result.metadata["rubric_eval"]["overall_pass"] is False
+
+    @pytest.mark.parametrize(
+        ("answered_by", "with_fallback_block"),
+        [("claude-opus-5-5", False), ("claude-opus-4-8", True), ("claude-opus-4-8", False)],
+        ids=["configured-model", "fallback-in-this-call", "sticky-fallback-turn"],
+    )
+    def test_json_report_names_the_model_that_scored(
+        self, tmp_path, monkeypatch: pytest.MonkeyPatch, answered_by: str, with_fallback_block: bool
+    ):
+        """A score from the server-side fallback model is labeled with that model, not the configured one.
+
+        A turn served by sticky routing carries no fallback block; only its top-level model names the fallback.
+        """
+        pytest.importorskip("anthropic")
+        httpx = pytest.importorskip("httpx")
+        from skillevaluator.reporting import JSONReporter
+
+        monkeypatch.setenv("SKILL_EVAL_LLM_PROVIDER", "anthropic")
+        monkeypatch.setenv("SKILL_EVAL_LLM_MODEL", "claude-opus-5-5")
+        monkeypatch.setenv("ANTHROPIC_API_KEY", "test-key")
+        for name in ("SKILL_EVAL_LLM_BASE_URL", "ANTHROPIC_BASE_URL"):
+            monkeypatch.delenv(name, raising=False)
+        content = [{"type": "text", "text": json.dumps({"checks": _complete_checks(), "summary": "ok"})}]
+        usage = {"input_tokens": 1, "output_tokens": 1}
+        if with_fallback_block:
+            content.insert(0, {"type": "fallback", "from": {"model": "claude-opus-5-5"}, "to": {"model": answered_by}})
+            usage["iterations"] = [
+                {"type": "message", "model": "claude-opus-5-5"},
+                {"type": "fallback_message", "model": answered_by},
+            ]
+        elif answered_by != "claude-opus-5-5":
+            usage["iterations"] = [{"type": "fallback_message", "model": answered_by}]
+
+        def handler(request):
+            return httpx.Response(
+                200,
+                json={
+                    "id": "msg_test",
+                    "type": "message",
+                    "role": "assistant",
+                    "model": answered_by,
+                    "content": content,
+                    "stop_reason": "end_turn",
+                    "stop_sequence": None,
+                    "usage": usage,
+                },
+            )
+
+        validator = RubricEvalValidator()
+        with httpx.Client(transport=httpx.MockTransport(handler)) as http_client:
+            validator._judge = RubricJudge(http_client=http_client)
+            result = validator.validate(_write_skill(tmp_path))
+
+        data = json.loads(JSONReporter(include_timestamp=False).render_all([result]))
+        assert data["rubric_eval"]["execution_status"] == "succeeded"
+        assert data["rubric_eval"]["llm_provider"] == "anthropic"
+        assert data["rubric_eval"]["llm_model_used"] == answered_by
+        (success,) = data["results"][0]["success_details"]
+        assert success["metadata"]["llm_model_used"] == answered_by

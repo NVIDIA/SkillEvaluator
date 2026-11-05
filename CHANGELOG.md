@@ -114,6 +114,17 @@ All notable changes to SkillEvaluator are documented in this file.
 - CI-native per-skill HTML pages link Download JSON to the retained
   `skillevaluator-tier1.json` and do not embed a second copy of the report
   JSON. Standalone CLI HTML reports embed it for Export JSON.
+- Rubric evaluation JSON reports name the provider and model that gave each
+  score as `llm_provider` and `llm_model_used` in the skill's `rubric_eval`
+  success detail and, for a single skill, also in `rubric_eval`. Tier 3
+  conclusions and recommendations written by the LLM, and LLM-written
+  dimensions returned by `compute_dimensions`, record the model that wrote
+  them as `model`. For a Claude 5.5 or later model on the native Claude API
+  this is the model the reply names: the server-side refusal fallback model,
+  not the configured model, when the fallback answered. Otherwise it is the
+  configured model, unless a server-side `fallback` block in the reply names
+  another model.
+
 - Tier 3 runs can be limited to the first N eval cases with the opt-in
   `--max-cases N` flag on `validate`, `tier3`, and `tier3 evaluate`, or the
   `harbor.max_cases` key in `evals/config.yml`; the CLI value wins. Unset, every
@@ -210,6 +221,32 @@ All notable changes to SkillEvaluator are documented in this file.
   their findings, like any finding whose value reports mask, carry no digest.
   Waivers are never discovered automatically inside the scanned skill; pass
   the file with `--pii-waivers`.
+- Every finding now has stable IDs for tracking across runs and validators.
+  `finding_id` (`SEF-…`) is derived from the finding's category, check,
+  message, and suggestion, so it survives line moves, whitespace or case
+  changes, and severity overrides. Location text a check copies into its
+  message is left out of it: the `in <file>:<line>` in a secret detection
+  message, also in a folder or plugin run that prefixes the file path, and
+  the `— N occurrences (…)` list a PII scan message ends with. A file name in
+  a message or suggestion, as script lint and secret detection write, stays
+  part of the ID. `occurrence_id` (`SEO-…`) adds the file, line, and line
+  content. Otherwise identical findings in different files or skills
+  share one `finding_id`, so they count as one unique finding with one
+  occurrence per location. When CI redacts a detected credential from a
+  report, it recomputes the IDs from the redacted text and renders the HTML,
+  Markdown, and SARIF copies from that JSON, so no ID is derived from a
+  removed value. The JSON report and the HTML report's embedded data
+  add `finding_counts` (raw records, distinct occurrences, unique findings,
+  and duplicates removed), `finding_groups` (each unique finding with its
+  validators and every location, including each location a PII finding
+  lists for a repeated value, also in a folder run), and `message_counts`
+  (error and warning strings with no finding behind them, such as failed
+  gates and scanner or execution errors, but not the workflow scope note for
+  a stage that configuration skips, plus informational messages other than
+  the `[OK]` line recorded for each passed check); each JSON result also
+  carries its own `finding_counts`. Markdown adds a Finding Reconciliation
+  table, most severe first, and per-finding IDs. `total_errors`,
+  `total_warnings`, and `severity_counts` are unchanged.
 
 - `--skillspector-baseline FILE` on `validate`, `tier1`, and `security-scan`
   applies an audited SkillSpector suppression baseline, so reviewed false
@@ -324,6 +361,25 @@ All notable changes to SkillEvaluator are documented in this file.
   environment, so each template compiles once per process instead of once per
   report.
 
+- The Markdown summary and the HTML report's summary now count findings the
+  same way: each unique finding once, at its highest severity, however many
+  lines, files, skills or validators report it. Markdown's Total Issues adds
+  distinct occurrences, raw records, and errors and warnings with no finding
+  behind them, such as failed gates and incomplete scans; its severity
+  breakdown counts unique findings. In HTML, the tier cards, the Tier 1
+  Findings and Blocking critical + high numbers, the verdict sentence, the
+  skill finding badges and the gate policy line count unique findings, and
+  the Findings number shows the same occurrence, raw-record and no-finding
+  counts beneath it when they differ from the unique count. Both formats used
+  to add up raw records, so a finding reported on several lines or by two
+  validators counted more than once. The HTML report's embedded and exported
+  data changes `summary.total_issues` the same way: it now counts unique
+  findings plus errors and warnings with no finding behind them, instead of
+  raw errors plus warnings; the raw finding count is in
+  `summary.raw_finding_occurrences` and `finding_counts.raw_occurrences`. The
+  JSON `skills[].issue_count`, contributor totals, `total_errors`,
+  `total_warnings` and `severity_counts` still count raw records.
+
 - Tier 3 `accuracy` grades the outcome only. The `SKILL_IDENTIFIED` criterion,
   which capped a correct answer from the no-skill baseline at 0.8 on positive
   cases, is replaced by `FORMAT_FOLLOWED`: the response follows any output
@@ -409,6 +465,13 @@ All notable changes to SkillEvaluator are documented in this file.
   timeout, and each retry warning ends with the failed command's output.
   Platform probe and transport errors are not retried, and local mode still
   checks the installed CLI once.
+- Tier 3 `--stop-on-pass` (or `harbor.stop_on_pass: true`) no longer ignores
+  `--n-concurrent`. Every case and attempt previously ran one at a time, so
+  large evaluations took several times longer than the configured concurrency
+  allowed. Up to `n_concurrent` cases now run at once per agent. A case's
+  attempts still run one after another and stop after its first pass, the
+  with-skill and without-skill arms still run one after the other, and the
+  merged arm results keep dataset order.
 - Tier 2 caps every intra-skill embedding chunk at 3,000 characters, preserves
   meaningful short tails and actual Python docstring source ranges, and avoids
   counting pieces of one original chunk as duplicates of each other. Oversized
@@ -432,6 +495,22 @@ All notable changes to SkillEvaluator are documented in this file.
   dimensions, 362 at 4,096), which the incomplete-scan error and the JSON
   `work_limit` record now report as `effective_chunk_limit`, next to the
   skill's own `chunk_count`.
+- Tier 2 context deduplication no longer stops skills with many repeated
+  sections at the `llm_cluster_member_limit` work limit. A candidate cluster
+  with more than 64 members was reported as incomplete even when its review
+  prompt fit the 64,000-character budget. The member limit now equals the
+  512-chunk ceiling, which the chunk check already enforces, so it is only a
+  guard and never stops a scan on its own; the per-cluster prompt, total
+  prompt, and cluster-count limits decide. When a cluster's request (system
+  prompt plus cluster text) would exceed 64,000 characters, each exactly
+  repeated text is sent once as `SHARED CONTENT n`. A Markdown section is
+  compared without its own heading line, so the same body under different
+  headings is shared too. Every occurrence keeps its own entry with its file,
+  section, line range, and heading line. Distinct text is never dropped or
+  sampled, so a cluster still over the budget stays incomplete with
+  `llm_prompt_size_limit`. Duplicate and `llm_refused` finding messages name
+  at most 64 member locations and source files and count the rest; the JSON
+  `source_files` list stays complete.
 - Local-mode verifier uploads now copy directly to the absent destination,
   avoiding an unnecessary rollback snapshot of an empty tests directory.
   Inputs and rewritten scripts are prepared privately before publication,
@@ -493,6 +572,14 @@ All notable changes to SkillEvaluator are documented in this file.
   scoring agree, while scoped searches and slash-valued patterns retain their
   classification.
 
+- On the native Claude API, the Tier 3 judges' `judge_model_used` names the
+  server-side fallback model when the API serves a repeated request straight
+  from that model. Such a reply has no `fallback` content block, so the label
+  now comes from the reply's own `model` field instead of the configured
+  model. `judge_fallback_used` is then `true`, and Skill Lift treats such a
+  case like an in-call fallback: when another condition, attempt or step of
+  the case was judged by the configured model, the case leaves that judge
+  metric's lift and is counted in `judge_mixed_cases`.
 - Tier 2 `similarity-check` and `context-optimization-check` no longer abort
   with a "symlink or reparse point" error when a skill or collection aliases
   one agent directory to another, such as `.agents -> .claude`. A directory
@@ -626,8 +713,8 @@ All notable changes to SkillEvaluator are documented in this file.
 
 - A skill that exceeds a Tier 2 context-deduplication work limit (more than
   512 content chunks, too much pairwise comparison work, or an LLM-review limit:
-  more than 50 candidate clusters, more than 64 members in one cluster, or an
-  oversized per-cluster or total review prompt) is now reported as
+  more than 50 candidate clusters or an oversized per-cluster or total
+  review prompt) is now reported as
   **INCOMPLETE** instead of failing with a CRITICAL `chunk_count_limit`,
   `scalar_comparison_limit`, `llm_cluster_count_limit`,
   `llm_cluster_member_limit`, `llm_prompt_size_limit`, or
@@ -965,6 +1052,47 @@ All notable changes to SkillEvaluator are documented in this file.
   2.12.0) is not affected by bundle size and needs a rerun or a newer
   SkillSpector. A report with both kinds of rows gets both explanations. The
   scan still fails closed as `INCOMPLETE`.
+- The Tier 3 `goal_accuracy` RAGAS scorer now produces scores. It passed a
+  `SingleTurnSample` to the RAGAS 0.4 collections metric, which takes the
+  messages and reference as keyword arguments, so it failed before sending any
+  request and every eligible trial (the `openai` provider on the canonical
+  endpoint with a judge model outside the GPT-5 and GPT-6 families) fell back
+  to the prompt judge with only an info log. These trials now report
+  `goal_accuracy` with `"method": "ragas"` instead of `"custom"`, plus
+  `judge_model_used`, `judge_reasoning_effort` and `judge_fallback_used`, so
+  scores and lift can differ from earlier runs. A RAGAS failure that falls back
+  to the prompt judge is logged as a warning with the redacted error, and the
+  scorer's OpenAI client is closed after each attempt. A case scored by RAGAS
+  in one condition and by the prompt judge in the other is left out of the
+  `goal_accuracy` lift and counted in `judge_mixed_cases`, even when both used
+  the same model. GPT-5 and GPT-6 judges, including the defaults, are
+  unaffected.
+
+- Tier 1 `security` no longer fails a skill, rules, workflows, or plugin
+  artifact on SkillSpector agent-threat matches in files no agent reads or
+  runs, such as UI strings in HTML, CSS, or `.vue` files, test fixtures,
+  documentation, notebooks, images, and lockfiles. Findings stay blocking on
+  agent control paths (instructions, references, executables, agent
+  configuration, MCP and plugin manifests) and on any file those reference by
+  path, file name, skill or plugin root variable or placeholder
+  (`${CLAUDE_SKILL_DIR}`, `$SKILL_DIR`, `$SKILL_ROOT`,
+  `${CLAUDE_PLUGIN_ROOT}`, `{baseDir}`, `<skill-dir>`), install path, or
+  import, without regard to case. Files SkillSpector marks executable, such as
+  `.py`, `.js`, `.ts`, and `.tsx` files under `tests/` or `web/`, are executables, so
+  their findings and those of any fixture they name stay blocking. An issue
+  that SkillSpector reports for several files is suppressed only when every
+  one of its occurrences is outside agent control paths. Supply-chain
+  findings, YARA malware signatures, and artifact-integrity findings for a
+  misleading extension or embedded NUL bytes still apply on every path, and a
+  file named as a raster image keeps its findings unless its content is an
+  image. A location or occurrence that is missing or escapes the artifact
+  through `..` or a symlink keeps its finding. Malformed occurrences, a report
+  that serializes fewer occurrences than it counted, an unloadable manifest,
+  and an unfinished reference walk keep every affected finding. Suppressed
+  issues are left out of the aggregate risk-score gate, counted in a
+  `filtered` summary row, and recorded in the JSON report's
+  `skillspector_applicability` block. `security-scan` and targets of `unknown`
+  type keep the unrestricted scan.
 
 - PII scans no longer report Proton (Steam Play) prefix paths such as
   `compatdata/<appid>/pfx/drive_c/users/steamuser/` as personal macOS paths:

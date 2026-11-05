@@ -2734,10 +2734,10 @@ def test_native_harbor_metadata_entry_id_seam_across_runner_collector_and_datase
 
     assert results["execution_status"] == "succeeded"
     # stop_on_pass passes physical task directory names to Harbor CLI --include-task-name
-    # With-skill passes on attempt 1 (1.0 >= 0.50), baseline runs 2 attempts per task (0.25 < 0.50)
-    assert seen_include_task_names == [
-        ["physical-case"],
-        ["zero-case"],
+    # With-skill passes on attempt 1 (1.0 >= 0.50), baseline runs 2 attempts per task (0.25 < 0.50).
+    # Cases run concurrently within a condition, so only the per-condition launches are ordered.
+    assert sorted(seen_include_task_names[:2]) == [["physical-case"], ["zero-case"]]
+    assert sorted(seen_include_task_names[2:]) == [
         ["physical-case"],
         ["physical-case"],
         ["zero-case"],

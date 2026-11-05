@@ -584,6 +584,13 @@ The high-signal flags, with defaults:
 | `--copy-repo` | off | Copy the surrounding repository into the task environment |
 | `--include-skills` | none | Stage additional skill directories; requires `--skill-workspace-mode group` |
 
+With `--stop-on-pass`, `--n-concurrent` still limits concurrent eval cases per
+agent. Each case's attempts run one after another and stop after the first
+passing score. The with-skill and without-skill arms run one after the other,
+and each uses the full `--n-concurrent` budget. For example, two agents with
+`--n-concurrent 4` run up to eight trials at once, fewer when fewer cases
+remain.
+
 Every `tier3 evaluate` flag, including resource overrides and Dockerfile
 modes, is in the [CLI Reference](cli-reference.mdx).
 
@@ -779,9 +786,14 @@ in [Judge evidence budgets](environment-variables.mdx#judge-evidence-budgets).
   `https://api.openai.com/v1` endpoint and a judge model that is not a GPT-5 or
   GPT-6 reasoning model, `goal_accuracy` first tries the RAGAS
   `AgentGoalAccuracyWithReference` scorer through its own client, without the
-  schema or retry handling above but within the same time budget. If RAGAS is
-  unavailable, fails, or returns a score other than `0.0` or `1.0`, the prompt
-  judge runs instead.
+  schema or retry handling above but within the same time budget. A RAGAS
+  score is recorded with `"method": "ragas"` and the judge-model fields above.
+  If RAGAS is unavailable, fails, or returns a score other than `0.0` or
+  `1.0`, the verifier log shows a warning with the redacted error, and the
+  prompt judge runs instead (`"method": "custom"`). A case scored by RAGAS in
+  one condition and by the prompt judge in the other counts as a judge mix
+  even with the same model, so it is left out of the `goal_accuracy` lift the
+  same way.
 - **Transient failures.** HTTP 408, 429, and every 5xx response except 501 and
   505 are retried, including 520–524 proxy errors and 529 overload responses.
   Connection errors, timeouts, and Bedrock throttling or service-unavailable

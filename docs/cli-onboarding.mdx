@@ -72,8 +72,10 @@ skillevaluator ci init --tiers 1,2,3 --release /path/to/reviewed-ci-release.json
 ```
 
 For GitLab 17.0 or later, select `--platform gitlab`. GitHub uses your local
-`gh` login; GitLab uses a process-scoped `SKILLEVALUATOR_GITLAB_TOKEN` or
-`GITLAB_TOKEN` for the repository's host. GitLab setup does not require `glab`.
+`gh` login; GitLab uses only a process-scoped `SKILLEVALUATOR_GITLAB_TOKEN`
+for the repository's host, never a generic `GITLAB_TOKEN`. Origins other than
+github.com need `--tiers 1,2,3` or `--platform gitlab` before any API request.
+GitLab setup does not require `glab`.
 `--mode preview` shows proposed files;
 `--mode save` writes the two local configuration files; `--mode pr` opens the
 setup review through the platform API. These commands prepare CI configuration;

@@ -127,7 +127,9 @@ def gitlab_api(origin: str, method: str, endpoint: str, payload=None, *, missing
         or parsed.fragment
     ):
         raise git.SetupError("The GitLab API URL must use the HTTPS origin host without credentials.")
-    token = os.environ.get("SKILLEVALUATOR_GITLAB_TOKEN") or os.environ.get("GITLAB_TOKEN")
+    # Generic GITLAB_TOKEN values are often issued for a different instance than
+    # this origin; only the tool-scoped variable is sent to the origin host.
+    token = os.environ.get("SKILLEVALUATOR_GITLAB_TOKEN")
     if not token:
         raise git.SetupError(
             "Set SKILLEVALUATOR_GITLAB_TOKEN for this GitLab host before using PR/MR or live status commands."
@@ -489,6 +491,8 @@ def initialize(
         output = output.resolve()
         if output.exists() or output.is_relative_to(repo):
             raise git.SetupError("Choose a new receipt path outside the consumer checkout.")
+        # Fail before saving files or opening a PR/MR, never after.
+        output.parent.mkdir(parents=True, exist_ok=True)
     wizard.console.print(
         f"{platform.title()} | Tier 1 required; Tiers 2 and 3 advisory",
         markup=False,
@@ -566,11 +570,11 @@ def initialize(
                 branch,
                 pending,
                 "Set up SkillEvaluator all-tier checks and feedback",
-                "Add pinned Tier 1 required checks, Tier 2 and Tier 3 advisory evaluation, and trusted feedback linking retained private CI artifacts.\n\nMerge this setup, configure provider credentials and the protected execution environment, then run `skillevaluator ci demo`. This setup is not an evaluation pass.",
+                "Add pinned Tier 1 required checks, Tier 2 and Tier 3 advisory evaluation, and trusted feedback linking retained private CI artifacts.\n\nMerge this setup, configure provider credentials and the protected execution environment, then run `skillevaluator ci demo --tiers 1,2,3`. This setup is not an evaluation pass.",
                 setup=True,
             )
             plan.update(action="created-pr", pr_url=url)
-            wizard.console.print("Setup PR/MR ready. Merge it before running ci demo.")
+            wizard.console.print("Setup PR/MR ready. Merge it, then run skillevaluator ci demo --tiers 1,2,3.")
             wizard.print_link(url)
         else:
             plan["action"] = "configured"
@@ -588,7 +592,44 @@ def initialize(
 
 def is_all_tier(repo, platform="auto", tiers=None):
     selected, _, _ = remote(repo, platform)
-    return selected == "gitlab" or tiers is not None or (repo / SCAN).exists()
+    if tiers is not None or platform == "gitlab" or (repo / SCAN).exists():
+        return True
+    if selected == "gitlab":
+        if (repo / GL_FEEDBACK).exists():
+            return True
+        # Never contact an unrecognized origin host without an explicit opt-in.
+        raise git.SetupError("This origin is not github.com. For GitLab all-tier onboarding, add --tiers 1,2,3.")
+    return False
+
+
+def trusted_blobs(raw) -> list[str] | None:
+    """Parse approved caller blobs exactly like the trusted feedback job."""
+    pins = [part.strip() for part in re.split(r"[,\n]", str(raw or ""))]
+    return pins if 0 < len(pins) <= 32 and all(SHA.fullmatch(pin) for pin in pins) else None
+
+
+def gitlab_config_problem(text: str) -> str | None:
+    """Mirror ci/feedback.py validate_gitlab_config for the default-branch root config."""
+    try:
+        document = yaml.safe_load(text)
+    except yaml.YAMLError:
+        return "invalid YAML"
+    includes = document.get("include") if isinstance(document, dict) else None
+    if not isinstance(includes, list) or len(includes) != 2:
+        return "missing the pinned evaluator and trusted feedback includes"
+    expected_rule = (
+        '$CI_PIPELINE_SOURCE == "pipeline" && $CI_COMMIT_BRANCH == $CI_DEFAULT_BRANCH && $SKILL_EVAL_FEEDBACK == "true"'
+    )
+    pinned = re.compile(
+        r"https://raw\.githubusercontent\.com/[A-Za-z0-9_.-]+/[A-Za-z0-9_.-]+/[0-9a-f]{40}/ci/gitlab/all-tiers\.yml"
+    )
+    remotes = [i for i in includes if isinstance(i, dict) and set(i) == {"remote"}]
+    locals_ = [i for i in includes if i == {"local": GL_FEEDBACK, "rules": [{"if": expected_rule}]}]
+    if len(remotes) != 1 or not isinstance(remotes[0]["remote"], str) or not pinned.fullmatch(remotes[0]["remote"]):
+        return "missing an immutable evaluator include"
+    if len(locals_) != 1:
+        return "missing the trusted downstream feedback include"
+    return None
 
 
 def inspect(wizard, repo, platform="auto", tiers=None):
@@ -600,28 +641,43 @@ def inspect(wizard, repo, platform="auto", tiers=None):
     branch = info["default_branch"]
     scan_path, feedback_path = (SCAN, FEEDBACK) if platform == "github" else (GL_SCAN, GL_FEEDBACK)
     scan, feedback = client.file(scan_path, branch), client.file(feedback_path, branch)
+    problem = gitlab_config_problem(scan) if scan and platform == "gitlab" else None
     wizard.console.print(f"{platform.title()} {name} | default branch: {branch}", markup=False)
-    wizard.console.print("All-tier checks: " + ("configured" if scan else "awaiting setup PR/MR merge"))
+    wizard.console.print(
+        "All-tier checks: "
+        + (
+            "awaiting setup PR/MR merge"
+            if not scan
+            else f"{scan_path} is present but not an all-tier configuration ({problem})"
+            if problem
+            else "configured"
+        ),
+        markup=False,
+    )
     wizard.console.print("Trusted feedback: " + ("configured" if feedback else "missing"))
     if platform == "gitlab":
         _print_gitlab_admission_prerequisite(wizard, gitlab_admission_prerequisite(origin, online=True))
     if scan and feedback and platform == "github":
         inputs = yaml.safe_load(feedback).get("jobs", {}).get("feedback", {}).get("with", {})
-        blob = wizard.blob_id(scan)
+        pins = trusted_blobs(inputs.get("trusted-caller-blobs"))
         wizard.console.print(
             "Scan approval: "
             + (
-                "matches exact workflow"
-                if blob in str(inputs.get("trusted-caller-blobs", "")).split()
+                "Malformed approval list; feedback will reject it"
+                if pins is None
+                else "matches exact workflow"
+                if wizard.blob_id(scan) in pins
                 else "Needs refresh; feedback will reject it"
             )
         )
     suffix = (
         "/actions/workflows/skill-checks-all-tiers.yml/runs?per_page=1"
         if platform == "github"
-        else "/pipelines?per_page=1"
+        else "/pipelines?" + urlencode({"ref": branch, "per_page": 1})
     )
-    runs = client.api("GET", suffix, missing_ok=True)
+    if problem:
+        suffix = ""
+    runs = client.api("GET", suffix, missing_ok=True) if suffix else None
     records = runs.get("workflow_runs", []) if isinstance(runs, dict) else runs or []
     if records:
         latest = records[0]

@@ -267,7 +267,7 @@ def test_gitlab_demo_updates_existing_manifest_and_needs_merged_setup(repository
         raise AssertionError(endpoint)
 
     monkeypatch.setattr(all_tiers, "gitlab_api", api)
-    result = CliRunner().invoke(cli, ["ci", "demo", "--repo", str(repository), "--no-input"])
+    result = CliRunner().invoke(cli, ["ci", "demo", "--repo", str(repository), "--no-input", "--tiers", "1,2,3"])
     assert result.exit_code == 0, result.output
     commit = next(payload for endpoint, payload in mutations if endpoint.endswith("/repository/commits"))
     assert commit["actions"][0]["action"] == "update"
@@ -528,7 +528,7 @@ def test_gitlab_status_reports_admission_version_prerequisite(repository, monkey
             return {"default_branch": "trunk"}
         if "/repository/files/" in endpoint:
             return None
-        if endpoint.endswith("/pipelines?per_page=1"):
+        if "/pipelines?" in endpoint:
             return []
         raise AssertionError(endpoint)
 
@@ -539,3 +539,200 @@ def test_gitlab_status_reports_admission_version_prerequisite(repository, monkey
     assert result.exit_code == 0, result.output
     assert phrase in result.output
     assert "credential validity is not verified" in result.output
+
+
+@pytest.mark.parametrize("command", [["status"], ["demo", "--no-input"]])
+def test_unrecognized_origin_never_receives_generic_gitlab_token(repository, monkeypatch, command):
+    import urllib.request
+
+    subprocess.run(
+        ["git", "-C", str(repository), "remote", "set-url", "origin", "https://codeberg.org/someone/skills.git"],
+        check=True,
+    )
+    monkeypatch.setenv("GITLAB_TOKEN", "glpat-ambient-test-value")
+    monkeypatch.delenv("SKILLEVALUATOR_GITLAB_TOKEN", raising=False)
+    requests = []
+    monkeypatch.setattr(urllib.request, "build_opener", lambda *a: requests.append(a) or pytest.fail("network"))
+    result = CliRunner().invoke(cli, ["ci", *command, "--repo", str(repository)])
+    assert result.exit_code != 0
+    assert "--tiers 1,2,3" in result.output
+    assert requests == []
+    # An explicit GitLab opt-in still refuses the generic token.
+    result = CliRunner().invoke(cli, ["ci", *command, "--repo", str(repository), "--platform", "gitlab"])
+    assert result.exit_code != 0
+    assert "SKILLEVALUATOR_GITLAB_TOKEN" in result.output
+    assert "glpat-ambient-test-value" not in result.output
+    assert requests == []
+
+
+def _gitlab_status(repository, monkeypatch, root_config):
+    import base64
+
+    from skillevaluator import _ci_onboarding_all_tiers as all_tiers
+
+    subprocess.run(
+        ["git", "-C", str(repository), "remote", "set-url", "origin", "https://gitlab.example.test/group/consumer.git"],
+        check=True,
+    )
+    calls = []
+
+    def api(origin, method, endpoint, payload=None, **kwargs):
+        assert method == "GET"
+        calls.append(endpoint)
+        if endpoint == "version":
+            return {"version": "18.4.0"}
+        if endpoint == "projects/group%2Fconsumer":
+            return {"default_branch": "trunk"}
+        if "/repository/files/" in endpoint:
+            content = root_config if ".gitlab-ci.yml?" in endpoint else "include: []\n"
+            return {"encoding": "base64", "content": base64.b64encode(content.encode()).decode()}
+        if "/pipelines?" in endpoint:
+            return [{"status": "success", "web_url": "https://gitlab.example.test/p/1"}]
+        raise AssertionError(endpoint)
+
+    monkeypatch.setattr(all_tiers, "gitlab_api", api)
+    result = CliRunner().invoke(cli, ["ci", "status", "--repo", str(repository), "--tiers", "1,2,3"])
+    assert result.exit_code == 0, result.output
+    return result.output, calls
+
+
+def test_gitlab_status_requires_trusted_all_tier_root_config(repository, monkeypatch):
+    output, calls = _gitlab_status(repository, monkeypatch, "build:\n  script: make\n")
+    assert "All-tier checks: configured" not in output
+    assert "not an all-tier configuration" in output
+    assert not any("/pipelines" in call for call in calls)
+
+
+def test_gitlab_status_accepts_generated_root_and_filters_default_branch(repository, all_release, monkeypatch):
+    subprocess.run(
+        ["git", "-C", str(repository), "remote", "set-url", "origin", "https://gitlab.example.test/group/consumer.git"],
+        check=True,
+    )
+    assert invoke(repository, all_release, "--mode", "save").exit_code == 0
+    output, calls = _gitlab_status(repository, monkeypatch, (repository / ".gitlab-ci.yml").read_text())
+    assert "All-tier checks: configured" in output
+    assert any("/pipelines?ref=trunk" in call for call in calls)
+
+
+@pytest.mark.parametrize(
+    "document",
+    [
+        "build:\n  script: make\n",
+        "include:\n  - remote: https://raw.githubusercontent.com/NVIDIA/SkillEvaluator/main/ci/gitlab/all-tiers.yml\n"
+        "  - local: .gitlab/skill-feedback.yml\n",
+        "include:\n  - remote: https://raw.githubusercontent.com/NVIDIA/SkillEvaluator/"
+        + "a" * 40
+        + "/ci/gitlab/all-tiers.yml\n"
+        "  - local: .gitlab/other.yml\n",
+        "- not a mapping\n",
+    ],
+)
+def test_status_gitlab_validation_matches_trusted_feedback(document):
+    from ci.feedback import FeedbackError, validate_gitlab_config
+
+    from skillevaluator import _ci_onboarding_all_tiers as all_tiers
+
+    with pytest.raises(FeedbackError):
+        validate_gitlab_config(document.encode())
+    assert all_tiers.gitlab_config_problem(document) is not None
+
+
+@pytest.mark.parametrize(
+    ("separator", "expected"),
+    [(",", "matches exact workflow"), ("\n", "matches exact workflow"), (" ", "Malformed approval list")],
+)
+def test_status_parses_caller_blobs_like_trusted_feedback(repository, all_release, monkeypatch, separator, expected):
+    import base64
+
+    from skillevaluator import ci_onboarding as wizard
+
+    assert invoke(repository, all_release, "--mode", "save").exit_code == 0
+    scan = (repository / ".github/workflows/skill-checks-all-tiers.yml").read_bytes()
+    feedback = yaml.safe_load((repository / ".github/workflows/feedback-all-tiers.yml").read_text())
+    feedback["jobs"]["feedback"]["with"]["trusted-caller-blobs"] = "1" * 40 + separator + wizard.blob_id(scan.decode())
+    texts = {
+        ".github/workflows/skill-checks-all-tiers.yml": scan,
+        ".github/workflows/feedback-all-tiers.yml": yaml.safe_dump(feedback).encode(),
+    }
+
+    def api(method, endpoint, payload=None, **kwargs):
+        if endpoint == "repos/example-org/consumer":
+            return {"default_branch": "trunk"}
+        for path, text in texts.items():
+            if "/contents/" + path + "?" in endpoint:
+                return {"encoding": "base64", "content": base64.b64encode(text).decode()}
+        if "/runs?" in endpoint:
+            return {"workflow_runs": []}
+        raise AssertionError(endpoint)
+
+    monkeypatch.setattr(wizard, "github_api", api)
+    result = CliRunner().invoke(cli, ["ci", "status", "--repo", str(repository)])
+    assert result.exit_code == 0, result.output
+    assert expected in result.output
+
+
+def test_setup_pr_next_steps_name_the_all_tier_demo(repository, all_release, monkeypatch):
+    from skillevaluator import ci_onboarding as wizard
+
+    bodies = []
+
+    def api(method, endpoint, payload=None, **kwargs):
+        if method == "POST":
+            if endpoint.endswith("/pulls"):
+                bodies.append(payload["body"])
+                return {"html_url": "https://github.com/example-org/consumer/pull/1"}
+            return {"sha": "a" * 40}
+        if endpoint == "repos/example-org/consumer":
+            return {"default_branch": "trunk"}
+        if "/contents/" in endpoint or endpoint.endswith("/git/ref/heads/ci%2Fskillevaluator-all-tiers-setup"):
+            return None
+        if "/pulls?" in endpoint:
+            return []
+        if endpoint.endswith("/git/ref/heads/trunk"):
+            return {"object": {"sha": "c" * 40}}
+        if endpoint.endswith("/git/commits/" + "c" * 40):
+            return {"tree": {"sha": "d" * 40}}
+        raise AssertionError(endpoint)
+
+    monkeypatch.setattr(wizard, "github_api", api)
+    monkeypatch.setattr(wizard, "committed_blob", lambda *_args: "0" * 40)
+    result = invoke(repository, all_release, "--mode", "pr", "--paths", "skills")
+    assert result.exit_code == 0, result.output
+    assert "ci demo --tiers 1,2,3" in bodies[0]
+    assert "ci demo --tiers 1,2,3" in result.output
+
+
+def test_all_tier_only_init_options_require_tiers(repository, release_file):
+    before = subprocess.check_output(["git", "-C", str(repository), "status", "--porcelain"])
+    result = CliRunner().invoke(
+        cli,
+        [
+            "ci",
+            "init",
+            "--repo",
+            str(repository),
+            "--release",
+            str(release_file),
+            "--no-input",
+            "--mode",
+            "save",
+            "--checks-only",
+            "--paths",
+            "skills",
+            "--provider",
+            "anthropic",
+            "--timeout-minutes",
+            "45",
+        ],
+    )
+    assert result.exit_code != 0
+    assert "--provider" in result.output and "--timeout-minutes" in result.output
+    assert "--tiers 1,2,3" in result.output
+    assert subprocess.check_output(["git", "-C", str(repository), "status", "--porcelain"]) == before
+
+
+def test_all_tier_receipt_parent_is_created_before_saving(repository, all_release, tmp_path):
+    receipt = tmp_path / "receipts" / "nested" / "plan.json"
+    result = invoke(repository, all_release, "--mode", "save", "--paths", "skills", "--output", str(receipt))
+    assert result.exit_code == 0, result.output
+    assert json.loads(receipt.read_text())["action"] == "saved"

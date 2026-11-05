@@ -846,6 +846,22 @@ def ci():
     """Set up checks, HTML reports and PR comments."""
 
 
+ALL_TIER_ONLY_OPTIONS = (
+    "platform",
+    "env_mode",
+    "provider",
+    "embedding_provider",
+    "model",
+    "embedding_model",
+    "agents",
+    "runner",
+    "n_attempts",
+    "n_concurrent",
+    "timeout_minutes",
+    "environment",
+)
+
+
 @ci.command("init")
 @click.option("--tiers", default=None, help="Opt in with 1,2,3; requires a compatible candidate/release descriptor.")
 @click.option("--platform", type=click.Choice(["auto", "github", "gitlab"]), default="auto")
@@ -953,6 +969,14 @@ def init(
                 timeout_minutes=timeout_minutes,
                 environment=environment,
             )
+        context = click.get_current_context()
+        ignored = [
+            "--" + parameter.replace("_", "-")
+            for parameter in ALL_TIER_ONLY_OPTIONS
+            if context.get_parameter_source(parameter) not in (None, click.core.ParameterSource.DEFAULT)
+        ]
+        if ignored:
+            raise SetupError(f"{', '.join(ignored)} applies only to all-tier onboarding; add --tiers 1,2,3.")
         repo = git_helpers.repository_root(repo)
         if output:
             output = output.resolve()

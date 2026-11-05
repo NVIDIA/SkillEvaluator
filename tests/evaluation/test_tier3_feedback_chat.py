@@ -408,6 +408,44 @@ def test_context_masks_text_before_shortening_it() -> None:
         assert len(text) <= limit
 
 
+def test_context_keeps_long_text_without_spaces() -> None:
+    # Compact JSON and minified errors have no space to cut at near the limit.
+    # Masking must not blank them; they keep a masked prefix and a marker.
+    limits = tier3_feedback_chat
+    ground_truth = json.dumps({"files": [f"src/module_{index}.py" for index in range(60)]}, separators=(",", ":"))
+    minified = "{" + ",".join(f'"k{index}":"v{index}"' for index in range(400)) + "}"
+    token_inside = "x" * (limits._MAX_ERROR_CHARS - 100) + "," + _FAKE_GITHUB_TOKEN + "," + "y" * 3000
+    payload = {
+        "dataset": [{"id": "case-1", "question": "Which files? " + minified, "ground_truth": ground_truth}],
+        "agents": {
+            "codex": {
+                "execution_errors": [minified, "Error: " + minified, token_inside, "z" * 100_000],
+                "trials": [{"entry_id": "case-1", "overall": 1.0, "warnings": [minified]}],
+            }
+        },
+    }
+
+    context = compact_run_context(payload, run_dir=_PRIVATE_RUN)
+
+    assert len(ground_truth) > limits._MAX_GROUND_TRUTH_CHARS * 4 + 256
+    (row,) = context["cases"]
+    errors = context["agents"]["codex"]["execution_errors"]
+    for text, prefix, limit in (
+        (row["ground_truth"], '{"files":["src/module_0.py",', limits._MAX_GROUND_TRUTH_CHARS),
+        (row["question"], 'Which files? {"k0":"v0",', limits._MAX_QUESTION_CHARS),
+        (row["with_skill"][0]["warning"], '{"k0":"v0",', limits._MAX_WARNING_CHARS),
+        (errors[0], '{"k0":"v0",', limits._MAX_ERROR_CHARS),
+        (errors[1], 'Error: {"k0":"v0",', limits._MAX_ERROR_CHARS),
+    ):
+        assert text.startswith(prefix)
+        assert text.endswith("...<truncated>")
+        assert len(text) == limit
+    assert "ghp_" not in errors[2]
+    assert errors[2].startswith("x" * 100) and "github-token-<redacted>" in errors[2]
+    # Past the larger window the cut token is still dropped, and the field says so.
+    assert errors[3] == "...<truncated>"
+
+
 # -- case summaries -------------------------------------------------------------
 
 

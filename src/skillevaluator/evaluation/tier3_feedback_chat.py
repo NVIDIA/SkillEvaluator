@@ -49,6 +49,12 @@ _MAX_EXPLANATION_CHARS = 600
 # The case rows are re-sent with every question. Rows past this many characters
 # of compact JSON are left out and counted per agent in ``cases_omitted``.
 _MAX_CASE_EVIDENCE_CHARS = 300_000
+# A field is masked over ``limit * 4 + 256`` characters, cut back to the last
+# whitespace. Text with no whitespace after its limit is masked over this many
+# characters instead, so the token that crosses the limit is kept.
+_MAX_UNBROKEN_MASK_CHARS = 65_536
+# Ends every shortened field, as in ``redact_sensitive_text(max_len=...)``.
+_TRUNCATED_MARKER = "...<truncated>"
 
 _SYSTEM_PROMPT = """\
 You help a skill author interpret a Tier 3 (live agent) evaluation and decide what to \
@@ -256,13 +262,21 @@ class _Scrubber:
         A credential or path cut at the limit would no longer match, so the
         whole string is masked before it is shortened. The redactor sees a
         bounded window, as in the plugin evidence helpers, and drops the
-        token cut at the window's edge.
+        token cut at the window's edge. When that token starts before
+        ``limit`` (compact JSON, a minified error), a larger window is masked
+        so the field is not blanked. A shortened field ends in the marker.
         """
         for host_path in self.host_paths:
             value = value.replace(host_path, self.run_id)
         if limit is None:
             return redact_sensitive_text(value)
-        return redact_sensitive_text(value, max_len=limit, max_input_chars=limit * 4 + 256)
+        window = limit * 4 + 256
+        if len(value) > window and not any(char.isspace() for char in value[limit:window]):
+            window = max(window, _MAX_UNBROKEN_MASK_CHARS)
+        masked = redact_sensitive_text(value, max_input_chars=window)
+        if len(masked) <= limit and len(value) <= window:
+            return masked
+        return masked[: limit - len(_TRUNCATED_MARKER)] + _TRUNCATED_MARKER
 
 
 def _clip(value: Any, limit: int, scrub: _Scrubber) -> str:

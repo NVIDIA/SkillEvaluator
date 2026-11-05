@@ -40,6 +40,17 @@ All notable changes to SkillEvaluator are documented in this file.
   gains `chat(messages)` for multi-turn requests with the same retries and typed
   errors as `completions()`.
 
+- Opt-in `LLM_JUDGE_FALLBACK_POLICY` and `LLM_JUDGE_RETRY_POLICY` for the Tier 3
+  standard judges. `LLM_JUDGE_FALLBACK_POLICY=replace` lets only the judge
+  model and the `LLM_JUDGE_FALLBACK_MODELS` entries answer, without the
+  built-in `claude-opus-4-8` refusal fallback. `LLM_JUDGE_RETRY_POLICY=strict`
+  tries at most three models with two requests each within the judge's time
+  budget, moves on only when a model is unavailable, ends the judge on a
+  refusal or a quota, budget, safety, or security error, and scores only a
+  first reply that is exactly one JSON object. Any other value stops a run
+  with standard grading before trials start. The defaults, `append` and
+  `legacy`, keep the current behavior.
+
 - Allow hosted CI reports and PR comments from scans called through explicitly
   approved reusable workflow wrappers. Direct callers retain the existing setup;
   signed evaluator identity and exact consumer workflow approvals remain required.
@@ -548,11 +559,12 @@ All notable changes to SkillEvaluator are documented in this file.
   guard and never stops a scan on its own; the per-cluster prompt, total
   prompt, and cluster-count limits decide. When a cluster's request (system
   prompt plus cluster text) would exceed 64,000 characters, each exactly
-  repeated text is sent once as `SHARED CONTENT n`. A Markdown section is
-  compared without its own heading line, so the same body under different
-  headings is shared too. Every occurrence keeps its own entry with its file,
-  section, line range, and heading line. Distinct text is never dropped or
-  sampled, so a cluster still over the budget stays incomplete with
+  repeated text is sent once as `SHARED CONTENT n` when that makes the request
+  shorter; a short text repeated under long headings stays inline. A Markdown
+  section is compared without its own heading line, so the same body under
+  different headings is shared too. Every occurrence keeps its own entry with
+  its file, section, line range, and heading line. Distinct text is never
+  dropped or sampled, so a cluster still over the budget stays incomplete with
   `llm_prompt_size_limit`. Duplicate and `llm_refused` finding messages name
   at most 64 member locations and source files and count the rest; the JSON
   `source_files` list stays complete.
@@ -687,12 +699,18 @@ All notable changes to SkillEvaluator are documented in this file.
   trial was scored as the selected model although another model finished it.
   Generated and native tasks now set `CLAUDE_CODE_DISABLE_REFUSAL_FALLBACK=1`
   in the task environment for every env mode, and neither `harbor.runtime_env`
-  nor a native task's `[environment.env]` can turn the fallback back on. The
-  refused attempt is not scored, like any other failed trial, and counts
-  against the arm's scored-attempt coverage. Other agents ignore the variable.
-  The variable was checked with Claude Code 2.1.292, the release Harbor
-  installs; local mode keeps the fallback off only if the host's Claude Code
-  honors it.
+  nor a native task's `[environment.env]` can turn the fallback back on. Other
+  agents ignore the variable. The variable was checked with Claude Code
+  2.1.292, the release Harbor installs; local mode keeps the fallback off only
+  if the host's Claude Code honors it. A refused attempt is not scored, like
+  any other failed trial, so the arm no longer has complete attempt coverage:
+  after one refusal in 20 cases with 3 attempts each, it reports
+  `Scored attempt coverage is 59/60` and its execution fails.
+  `tier3 evaluate` then exits 1, and so does `validate --block-on-agent-eval`.
+  On a route that serves the fallback model, such as the Anthropic API, the
+  retry used to finish such an attempt and the arm succeeded, so a run that
+  completed before can now fail. Rerun it, or evaluate the refused case with
+  another model.
 
 - Tier 1 security scans no longer fail a skill for an exact read-only
   `/etc/passwd` bind mount such as `docker run -v /etc/passwd:/etc/passwd:ro`.

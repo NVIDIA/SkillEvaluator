@@ -2,17 +2,17 @@ spec:
   inputs:
     tools-ref:
       type: string
-      regex: '^[0-9a-f]{40}$'
+      regex: "^[0-9a-f]{40}$"
     tools-repository:
       type: string
       default: NVIDIA/SkillEvaluator
-      regex: '^[A-Za-z0-9_.-]+/[A-Za-z0-9_.-]+$'
+      regex: "^[A-Za-z0-9_.-]+/[A-Za-z0-9_.-]+$"
     api-url:
       type: string
-      regex: '^https://[A-Za-z0-9.-]+(:[0-9]+)?(/[A-Za-z0-9._~-]+)*/api/v4$'
+      regex: "^https://[A-Za-z0-9.-]+(:[0-9]+)?(/[A-Za-z0-9._~-]+)*/api/v4$"
     project-id:
       type: string
-      regex: '^[A-Za-z0-9_.-]+(/[A-Za-z0-9_.-]+)*$'
+      regex: "^[A-Za-z0-9_.-]+(/[A-Za-z0-9_.-]+)*$"
 ---
 # SPDX-License-Identifier: Apache-2.0
 # Install the thin include on the protected default branch before opening MRs.

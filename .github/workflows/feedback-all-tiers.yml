@@ -17,6 +17,10 @@ on:
         description: Comma-separated reviewed caller Git blob IDs
         type: string
         required: true
+permissions:
+  contents: read
+  actions: read
+  pull-requests: write
 jobs:
   feedback:
     if: ${{ github.event_name == 'workflow_run' && github.event.workflow_run.event == 'pull_request' }}

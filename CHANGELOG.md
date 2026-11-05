@@ -4,6 +4,18 @@ All notable changes to SkillEvaluator are documented in this file.
 
 ## Unreleased
 
+### Changed
+
+- Name the shared OSS validation policy `default` for both public and private
+  repositories. Keep `--profile external`, `--external`, and the legacy
+  environment value as compatibility aliases without changing validation rules.
+  The CI image now selects `default`; GitHub and GitLab templates explain that
+  policy selection does not control report visibility. Existing image pins keep
+  their previous label until upgraded to an image containing this change.
+  New report policy metadata uses `profile: default` and `audience: all`; its
+  digest and bundled source path change with the name. Saved reports are not
+  rewritten.
+
 ### Documentation
 
 - Keep verified CI templates in the public repository and use one product
@@ -628,6 +640,23 @@ All notable changes to SkillEvaluator are documented in this file.
   `coordinates: 37.7749, -122.4194` or `Meet me at 37.7749, -122.4194`, are no
   longer reported either.
 
+- A Tier 3 `claude-code` trial that the model provider's safety classifier
+  stops now ends as Harbor's typed `AgentSafetyRefusalError` on the selected
+  model, on the Anthropic API, Bedrock, Vertex AI and gateway routes alike.
+  Claude Code 2.1.292 retried such a turn on another model from its own table
+  (for example `claude-opus-4-8` after Claude Opus 5.5) under the bare
+  Anthropic ID: a route that does not serve that ID, such as a gateway, failed
+  with HTTP 403 and an `UnknownApiError`, and where the retry succeeded the
+  trial was scored as the selected model although another model finished it.
+  Generated and native tasks now set `CLAUDE_CODE_DISABLE_REFUSAL_FALLBACK=1`
+  in the task environment for every env mode, and neither `harbor.runtime_env`
+  nor a native task's `[environment.env]` can turn the fallback back on. The
+  refused attempt is not scored, like any other failed trial, and counts
+  against the arm's scored-attempt coverage. Other agents ignore the variable.
+  The variable was checked with Claude Code 2.1.292, the release Harbor
+  installs; local mode keeps the fallback off only if the host's Claude Code
+  honors it.
+
 - Tier 1 security scans no longer fail a skill for an exact read-only
   `/etc/passwd` bind mount such as `docker run -v /etc/passwd:/etc/passwd:ro`.
   SkillSpector 2.11.1 and later tags this mount as likely benign but still
@@ -1016,6 +1045,18 @@ All notable changes to SkillEvaluator are documented in this file.
   edited skill whose name, description, or (with `--full-body`) `SKILL.md`
   changed is still compared with its old entry; build the catalog from the tree
   you screen.
+- Tier 2 deduplication no longer fails a content cluster when the model wraps
+  its JSON verdict in prose, puts a fenced block after a short preamble, or
+  writes the fenced block on one line. Such replies come from prompt-only JSON,
+  which Bedrock always uses and other providers fall back to after rejecting
+  the structured-output schema; they previously failed with
+  `LLM returned invalid JSON` (or an `IndexError` for the one-line fence) and
+  left Tier 2 incomplete. Exactly one embedded JSON object is accepted. Replies
+  with several objects are still rejected instead of guessed, and an object
+  inside an array or a malformed container is never used as the verdict. As in
+  the Tier 3 judge, an object with a repeated key, a `NaN` or `Infinity` value,
+  a number that overflows a float or more than 128 levels of nesting is
+  rejected, whether it is the whole reply or embedded in prose.
 - Ctrl+C during `tier3 evaluate` now stops the run. The interrupt reached only
   the coordinating thread, so running Harbor jobs kept going in their own
   process groups, agents waiting for a `--max-agents` slot still started, and

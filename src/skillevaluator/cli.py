@@ -199,7 +199,7 @@ Examples:
   skillevaluator validate ./my-skill -r cli,json,html       # comma-separated too
   skillevaluator validate ./my-skill -o reports/            # custom output dir
   skillevaluator validate ./my-skill --no-dedup             # skip Tier 2 dedup
-  skillevaluator validate ./my-skill --external             # strict publish profile
+  skillevaluator validate ./my-skill --profile default      # standard validation policy
   skillevaluator validate ./my-skill -c                     # continue on failure (record all issues)
   skillevaluator validate ./my-skill -a codex               # choose the Tier 3 agent
   skillevaluator validate ./my-skill --no-autopilot         # require an existing dataset
@@ -1814,14 +1814,14 @@ def _print_run_banner(target_path: Path, content_type: str, profile: str | None)
     default=None,
     cls=GroupedOption,
     help_group=_RUN_GROUP,
-    help="Validation profile: external or a custom name. Default: $SKILLEVALUATOR_PROFILE env var, then external.",
+    help="Validation policy: default (external is a compatibility alias). Default: $SKILLEVALUATOR_PROFILE, then default.",
 )
 @click.option(
     "--external",
     is_flag=True,
     cls=GroupedOption,
     help_group=_RUN_GROUP,
-    help="Shortcut for --profile external (validate for public publication).",
+    help="Compatibility alias for --profile default; does not change repository visibility.",
 )
 @click.option(
     "--policy",
@@ -2149,7 +2149,7 @@ def validate(
     from skillevaluator.utils.helpers import make_timestamped_basename, resolve_git_remote_url, resolve_git_root
     from skillevaluator.validators.policy import apply_policy, resolve_policy
 
-    if external and profile and profile != "external":
+    if external and profile and profile not in {"default", "external"}:
         raise click.ClickException(f"--external conflicts with --profile {profile}; pass one or the other.")
     profile_name = "external" if external else profile
     try:
@@ -2895,7 +2895,7 @@ def _workflow_report_options(func):
     default=None,
     help="Override the packaged quality-default.yaml with a custom YAML file.",
 )
-@click.option("--profile", default=None, help="Validation policy profile [default: external].")
+@click.option("--profile", default=None, help="Validation policy [default: default; external is a compatibility alias].")
 @click.option("--previous-version", default=None, help="Previous version for version checks.")
 @click.option(
     "--skillspector-baseline", type=SKILLSPECTOR_BASELINE_PATH, default=None, help=_SKILLSPECTOR_BASELINE_HELP

@@ -205,16 +205,26 @@ def test_runtime_replay_and_render_need_no_optional_runtime_dependencies(tmp_pat
 import json, sys
 from pathlib import Path
 
-# Top-level import names of every optional extra in pyproject.toml
-# (llm, tier3, security, publisher, dashboard), including packages they pull in
-# that no base dependency provides (cryptography via pyjwt[crypto], httpx).
-BLOCKED = {'anthropic', 'boto3', 'botocore', 'litellm', 'openai', 'harbor', 'mcp', 'jwt', 'oauthlib',
-           'dotenv', 'bandit', 'pip_audit', 'streamlit', 'cryptography', 'httpx'}
+# Allow only what a base install provides: the standard library, this package,
+# the import names of the base dependencies in pyproject.toml and their own
+# requirements (colorama is click's on Windows), and whatever the interpreter
+# had already loaded at startup (coverage, for example). Optional extras and
+# everything they pull in are refused.
+BASE = {'skillevaluator', 'click', 'colorama', 'idna', 'jinja2', 'markupsafe', 'markdown_it', 'mdurl',
+        'packaging', 'pydantic', 'pydantic_core', 'annotated_types', 'typing_extensions',
+        'typing_inspection', 'yaml', '_yaml', 'regex', 'rich', 'pygments'}
+ALLOWED = set(sys.stdlib_module_names) | BASE | {name.split('.')[0] for name in sys.modules}
+
+def allowed(name):
+    # _sysconfigdata_<abi>_<platform> is stdlib but named per platform; Cython
+    # extensions in base dependencies register their runtime modules directly.
+    top = name.split('.')[0]
+    return top in ALLOWED or top.startswith(('_sysconfigdata_', '_cython_')) or top == 'cython_runtime'
 
 class Blocker:
     def find_spec(self, name, path=None, target=None):
-        if name.split('.')[0] in BLOCKED:
-            raise ModuleNotFoundError(f'blocked extras-only module: {name}')
+        if not allowed(name):
+            raise ModuleNotFoundError(f'not provided by a base install: {name}')
         return None
 
 sys.meta_path.insert(0, Blocker())
@@ -240,7 +250,8 @@ output = render_plugin_runtime_reports([ValidationResult(validator_name='retaine
 assert json.loads(output['json'])['plugin_runtime']['name'] == 'offline'
 assert len(output) == 6
 new = set(sys.modules) - before
-forbidden = tuple(BLOCKED) + ('skillevaluator.inference', 'skillevaluator.tier3', 'skillevaluator.validators')
+assert not sorted(name for name in new if not allowed(name)), sorted(new)
+forbidden = ('skillevaluator.inference', 'skillevaluator.tier3', 'skillevaluator.validators')
 assert not sorted(name for name in new if name.startswith(forbidden)), sorted(new)
 """
     # Generous: a cold interpreter under coverage can take most of 20 seconds.

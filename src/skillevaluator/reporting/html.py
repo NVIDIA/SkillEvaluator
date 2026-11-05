@@ -72,6 +72,13 @@ from skillevaluator.reporting.base import (
 from skillevaluator.reporting.base import (
     is_tier2_validator_name as _is_tier2_validator_name,
 )
+from skillevaluator.reporting.finding_summary import (
+    describe_issue_counts,
+    finding_counts,
+    summarize_findings,
+    summarize_messages,
+    total_issue_count,
+)
 from skillevaluator.reporting.harbor_viewer import normalize_agent_eval_harbor_links
 from skillevaluator.reporting.presentation import success_is_not_applicable
 from skillevaluator.reporting.run_status import Status, resolve_run_status, result_status
@@ -1574,7 +1581,7 @@ class HTMLReporter(ReporterBase):
         self._tabs_explicit = tabs is not None
         self.target_path = target_path
         self.content_label = content_label
-        # Active validation profile (e.g. "internal", "external"). Surfaced
+        # Active validation policy (e.g. "default" or a custom policy name). Surfaced
         # in the report header so reviewers can tell which audience the
         # validation gate was applied for.
         self.profile = profile
@@ -1723,6 +1730,8 @@ class HTMLReporter(ReporterBase):
 
                 vdata["findings"].append(
                     {
+                        "finding_id": finding.finding_id,
+                        "occurrence_id": finding.occurrence_id,
                         "category": finding.category,
                         "severity": finding.severity.value
                         if hasattr(finding.severity, "value")
@@ -1749,6 +1758,7 @@ class HTMLReporter(ReporterBase):
                 skill_data["status"] = "incomplete"
             skill_data["validators"][vn] = vdata
 
+        skill_data["finding_count"] = self._unique_finding_count(skill_data)
         # Deduplicate findings per validator
         for vdata in skill_data["validators"].values():
             if vdata["findings"]:
@@ -1859,6 +1869,8 @@ class HTMLReporter(ReporterBase):
                         confidence = finding.metadata.get("confidence", "high")
                     skills[skill_name]["validators"][validator_name]["findings"].append(
                         {
+                            "finding_id": finding.finding_id,
+                            "occurrence_id": finding.occurrence_id,
                             "category": finding.category,
                             "severity": finding.severity.value
                             if hasattr(finding.severity, "value")
@@ -1878,6 +1890,7 @@ class HTMLReporter(ReporterBase):
 
         # Deduplicate findings within each skill/validator
         for skill_data in skills.values():
+            skill_data["finding_count"] = self._unique_finding_count(skill_data)
             # Recompute issue_count after deduplication (use occurrences)
             deduped_count = 0
             for validator_data in skill_data["validators"].values():
@@ -1906,6 +1919,23 @@ class HTMLReporter(ReporterBase):
         return " ".join((msg or "").split())
 
     @staticmethod
+    def _unique_finding_count(skill_data: dict[str, Any]) -> int:
+        """Count a skill's findings once per ``finding_id``, before display merging.
+
+        ``issue_count`` keeps counting raw records for the JSON ``skills``
+        list and contributor totals; the skill badge shows this count so it
+        agrees with the summary's Findings number.
+        """
+        return len(
+            {
+                finding["finding_id"]
+                for validator in skill_data["validators"].values()
+                for finding in validator["findings"]
+                if finding.get("finding_id")
+            }
+        )
+
+    @staticmethod
     def _deduplicate_findings(findings: list[dict[str, Any]]) -> list[dict[str, Any]]:
         """Aggregate duplicate findings that share the same message, file, and suggestion.
 
@@ -1913,8 +1943,13 @@ class HTMLReporter(ReporterBase):
         into a single entry with an 'occurrences' count and a 'lines' list.
         This dramatically reduces visual noise when the same PII pattern
         (e.g., "Personal macOS user path") fires on many lines in the same file.
+        A finding's ``occurrence_id`` becomes an ``occurrence_ids`` list on the
+        merged entry, so every merged location keeps its identity. The key
+        also holds ``finding_id`` when present, so two different checks with
+        the same text never merge and an entry's IDs all belong to it.
         """
         groups: dict[tuple, dict[str, Any]] = {}
+        seen_occurrences: dict[tuple, set[str]] = {}
 
         for finding in findings:
             # Normalize message for deduplication (strip trailing whitespace/newlines)
@@ -1923,6 +1958,7 @@ class HTMLReporter(ReporterBase):
                 norm_msg,
                 finding.get("file_path", ""),
                 finding.get("suggestion", ""),
+                finding.get("finding_id"),
             )
 
             if key in groups:
@@ -1945,10 +1981,18 @@ class HTMLReporter(ReporterBase):
                 new_conf = finding.get("confidence", "high")
                 if conf_order.get(new_conf, 2) < conf_order.get(existing_conf, 2):
                     groups[key]["confidence"] = new_conf
+                occurrence_id = finding.get("occurrence_id")
+                if occurrence_id and "occurrence_ids" in groups[key] and occurrence_id not in seen_occurrences[key]:
+                    seen_occurrences[key].add(occurrence_id)
+                    groups[key]["occurrence_ids"].append(occurrence_id)
             else:
                 entry = dict(finding)
                 entry["message"] = norm_msg  # Store normalized message
                 entry["occurrences"] = 1
+                if "occurrence_id" in entry:
+                    occurrence_id = entry.pop("occurrence_id")
+                    entry["occurrence_ids"] = [occurrence_id] if occurrence_id else []
+                    seen_occurrences[key] = set(entry["occurrence_ids"])
                 line_num = finding.get("line_number")
                 entry["lines"] = [line_num] if line_num else []
                 # Extract confidence from metadata if present
@@ -2273,7 +2317,12 @@ class HTMLReporter(ReporterBase):
         """Compact stats for a single tier — what the hero chip displays.
 
         Returns ``passed`` (boolean), executed/pass/skip counts,
-        ``issue_count`` (sum of findings), and per-severity totals.
+        ``issue_count`` (unique findings, as the Markdown summary counts
+        them), and per-severity totals of those unique findings at their
+        highest severity. ``occurrence_count``, ``raw_finding_count`` and
+        ``duplicates_removed`` sit beside them, and ``issue_detail`` describes
+        them in the shared report wording when they differ from the unique
+        count or when errors or warnings have no finding behind them.
         ``total == 0`` lets the template hide the chip entirely without an
         extra "did this tier run?" predicate.
         """
@@ -2284,20 +2333,15 @@ class HTMLReporter(ReporterBase):
         advisory_skipped_count = sum(1 for r in results if is_advisory_agent_eval_skip(r))
         failed_count = sum(1 for r in results if result_status(r) == Status.FAILED)
         incomplete_count = sum(1 for r in results if result_status(r) == Status.INCOMPLETE)
-        issue_count = 0
-        critical = high = medium = low = 0
-        for r in results:
-            issue_count += len(r.findings or [])
-            for f in r.findings or []:
-                sev = f.severity.value if hasattr(f.severity, "value") else str(f.severity).lower()
-                if sev == "critical":
-                    critical += 1
-                elif sev == "high":
-                    high += 1
-                elif sev == "medium":
-                    medium += 1
-                elif sev == "low":
-                    low += 1
+        findings = summarize_findings(results)
+        messages = summarize_messages(results)
+        unique_by_severity = findings["unique_by_severity"]
+        has_detail = (
+            findings["raw_occurrences"] != findings["unique_findings"]
+            or findings["distinct_occurrences"] != findings["unique_findings"]
+            or messages["independent_errors"]
+            or messages["independent_warnings"]
+        )
         return {
             "total": total,
             "executed_count": executed_count,
@@ -2305,13 +2349,20 @@ class HTMLReporter(ReporterBase):
             "skipped_count": skipped_count,
             "advisory_skipped_count": advisory_skipped_count,
             "failed_count": failed_count,
-            "issue_count": issue_count,
+            "issue_count": findings["unique_findings"],
+            "occurrence_count": findings["distinct_occurrences"],
+            "raw_finding_count": findings["raw_occurrences"],
+            "duplicates_removed": findings["duplicates_removed"],
+            "total_issues": total_issue_count(findings, messages),
+            "issue_detail": (
+                describe_issue_counts(findings, messages, raw_records=True, duplicates=True) if has_detail else ""
+            ),
             "all_passed": executed_count > 0 and failed_count == 0 and incomplete_count == 0,
             "incomplete_count": incomplete_count,
-            "critical": critical,
-            "high": high,
-            "medium": medium,
-            "low": low,
+            "critical": unique_by_severity["critical"],
+            "high": unique_by_severity["high"],
+            "medium": unique_by_severity["medium"],
+            "low": unique_by_severity["low"],
         }
 
     def _results_to_dict(self, results: list[ValidationResult]) -> list[dict[str, Any]]:
@@ -2354,6 +2405,8 @@ class HTMLReporter(ReporterBase):
             for finding in result.findings:
                 result_dict["findings"].append(
                     {
+                        "finding_id": finding.finding_id,
+                        "occurrence_id": finding.occurrence_id,
                         "category": finding.category,
                         "severity": finding.severity.value,
                         "check_name": finding.check_name,
@@ -2748,13 +2801,16 @@ class HTMLReporter(ReporterBase):
         all_passed = run_status.headline == Status.PASSED
         has_incomplete = run_status.headline == Status.INCOMPLETE
         overall_status = run_status.headline.value
-        total_errors = sum(r.summary.errors for r in results)
-        total_warnings = sum(r.summary.warnings for r in results)
+        finding_summary = summarize_findings(results)
+        message_summary = summarize_messages(results)
         skipped_count = sum(1 for r in results if is_cleanly_skipped(r))
         passed_count = sum(1 for r in results if r.passed and not r.is_incomplete and not is_cleanly_skipped(r))
         advisory_skipped_count = sum(1 for r in results if is_advisory_agent_eval_skip(r))
         failed_count = sum(1 for r in results if not passes_required_gate(r))
-        total_issues = total_errors + total_warnings
+        # Count unique findings rather than raw validator records that repeat
+        # one finding, plus errors and warnings with no finding behind them
+        # (failed gates, scanner and execution errors), as Markdown does.
+        total_issues = total_issue_count(finding_summary, message_summary)
         total_validators = len(results)
         executed_count = total_validators - skipped_count
         pass_percentage = round((passed_count / executed_count * 100) if executed_count > 0 else 0, 1)
@@ -2838,7 +2894,9 @@ class HTMLReporter(ReporterBase):
             "passed_count": tier1_display_passed,
             "skipped_count": tier1_display_skipped,
             "failed_count": tier1_display_failed,
-            "total_issues": sum(result.summary.errors + result.summary.warnings for result in tier1_display_results),
+            # Unique Tier 1 findings plus errors and warnings with no finding
+            # behind them, counted as the Markdown summary counts them.
+            "total_issues": tier1_summary["total_issues"],
             "pass_percentage": round(
                 (tier1_display_passed / tier1_display_total * 100) if tier1_display_total else 0,
                 1,
@@ -2852,7 +2910,9 @@ class HTMLReporter(ReporterBase):
         # exit code. Results produced outside ``validate`` retain the public
         # defaults: Tier 1/Tier 2 block and Tier 3 is advisory.
         blocking_results: list[ValidationResult] = []
-        advisory_results: list[ValidationResult] = []
+        # Per tier, so the gate policy counts findings the way each tier card does.
+        blocking_by_tier: dict[str, list[ValidationResult]] = {}
+        advisory_by_tier: dict[str, list[ValidationResult]] = {}
         blocking_tiers: list[str] = []
         advisory_tiers: list[str] = []
         for tier_name, tier_results, default_blocking in (
@@ -2874,28 +2934,28 @@ class HTMLReporter(ReporterBase):
                 )
                 if is_blocking:
                     blocking_results.append(result)
+                    blocking_by_tier.setdefault(tier_name, []).append(result)
                     tier_blocks = True
                 else:
-                    advisory_results.append(result)
+                    advisory_by_tier.setdefault(tier_name, []).append(result)
                     tier_advises = True
             if tier_blocks:
                 blocking_tiers.append(tier_name)
             if tier_advises:
                 advisory_tiers.append(tier_name)
 
-        def _severity_totals(tier_results: list[ValidationResult]) -> dict[str, int]:
+        def _severity_totals(results_by_tier: dict[str, list[ValidationResult]]) -> dict[str, int]:
+            # Each tier's unique findings at their highest severity, as its tier
+            # card counts them; the same finding in two tiers counts in both.
             totals = {"critical": 0, "high": 0, "medium": 0, "low": 0}
-            for result in tier_results:
-                for finding in result.findings:
-                    severity = (
-                        finding.severity.value if hasattr(finding.severity, "value") else str(finding.severity).lower()
-                    )
-                    if severity in totals:
-                        totals[severity] += 1
+            for tier_results in results_by_tier.values():
+                unique_by_severity = summarize_findings(tier_results)["unique_by_severity"]
+                for severity in totals:
+                    totals[severity] += unique_by_severity[severity]
             return totals
 
-        blocking_totals = _severity_totals(blocking_results)
-        advisory_totals = _severity_totals(advisory_results)
+        blocking_totals = _severity_totals(blocking_by_tier)
+        advisory_totals = _severity_totals(advisory_by_tier)
         blocking_critical = blocking_totals["critical"]
         blocking_high = blocking_totals["high"]
         blocking_medium = blocking_totals["medium"]
@@ -2983,13 +3043,11 @@ class HTMLReporter(ReporterBase):
         tier1_failed_checks = [
             plain_check_name(r.validator_name) for r in tier1_results if _result_display_status(r) == "fail"
         ]
-        tier1_blocking_findings = sum(
-            1
-            for r in tier1_results
-            if not passes_required_gate(r)
-            for f in r.findings
-            if (f.severity.value if hasattr(f.severity, "value") else str(f.severity).lower()) in {"critical", "high"}
-        )
+        # Unique critical and high findings in failed checks, counted like the Findings number.
+        tier1_blocking_by_severity = summarize_findings([r for r in tier1_results if not passes_required_gate(r)])[
+            "unique_by_severity"
+        ]
+        tier1_blocking_findings = tier1_blocking_by_severity["critical"] + tier1_blocking_by_severity["high"]
         # Why each incomplete Tier 1 check stopped, in the scanner's words. The
         # summary asks for an install only when every scanner is just missing.
         tier1_stop_reasons = [
@@ -3026,6 +3084,9 @@ class HTMLReporter(ReporterBase):
                 "advisory_skipped_count": advisory_skipped_count,
                 "failed_count": failed_count,
                 "total_issues": total_issues,
+                "raw_finding_occurrences": finding_summary["raw_occurrences"],
+                "distinct_finding_occurrences": finding_summary["distinct_occurrences"],
+                "duplicates_removed": finding_summary["duplicates_removed"],
                 "pass_percentage": pass_percentage,
                 "total_skills": total_skills,
                 "passed_skills": passed_skills,
@@ -3033,6 +3094,9 @@ class HTMLReporter(ReporterBase):
                 "publication_status": publication.status,
             },
             "results": self._results_to_dict(results),
+            "finding_counts": finding_counts(finding_summary),
+            "finding_groups": finding_summary["groups"],
+            "message_counts": message_summary,
             "skills": skills_by_name,
             "top_issues": top_issues,
             "contributors": contributors,

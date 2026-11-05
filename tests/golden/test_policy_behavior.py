@@ -5,8 +5,10 @@
 
 from __future__ import annotations
 
+import json
 from pathlib import Path
 
+import pytest
 from click.testing import CliRunner
 
 from skillevaluator.cli import cli
@@ -41,7 +43,20 @@ def _write_skill(root: Path, name: str, author_line: str | None) -> Path:
 def _validate(skill: Path, out: Path, *args: str) -> int:
     result = CliRunner().invoke(
         cli,
-        ["validate", str(skill), "--tiers", "1", "--no-llm", "--checks", "schema", "-o", str(out), *args],
+        [
+            "validate",
+            str(skill),
+            "--tiers",
+            "1",
+            "--no-llm",
+            "--checks",
+            "schema",
+            "-r",
+            "json,html",
+            "-o",
+            str(out),
+            *args,
+        ],
     )
     return result.exit_code
 
@@ -64,6 +79,20 @@ def test_external_alias_matches_default_public_policy(tmp_path: Path) -> None:
 
     assert _validate(external, out, "--external") == 0  # domain check disabled
     assert _validate(missing, out, "--external") == 1
+
+
+@pytest.mark.parametrize(
+    "options",
+    [[], ["--profile", "default"], ["--profile", "external"], ["--external"], ["--external", "--profile", "default"]],
+)
+def test_default_and_legacy_cli_forms_keep_author_validation(tmp_path: Path, options: list[str]) -> None:
+    present = _write_skill(tmp_path, "attributed-skill", "Demo Author <author@example.com>")
+    missing = _write_skill(tmp_path, "unattributed-skill", None)
+    assert _validate(present, tmp_path / "passed", *options) == 0
+    assert _validate(missing, tmp_path / "failed", *options) == 1
+    report = json.loads(next((tmp_path / "passed").glob("skillevaluator-output-*.json")).read_text())
+    assert report["policy"]["profile"] == "default"
+    assert report["policy"]["audience"] == "all"
 
 
 def test_benchmark_md_generated_for_skill(tmp_path: Path) -> None:

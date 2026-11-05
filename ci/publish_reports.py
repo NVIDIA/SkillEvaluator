@@ -382,6 +382,13 @@ def read_artifact(payload: bytes) -> tuple[dict, dict[str, dict]]:
         redactor = Redactor(tokens)
         summary = redactor.object(summary)
         reports = redactor.object(reports)
+        from skillevaluator.reporting.finding_summary import refresh_finding_identities
+
+        # IDs hashed from the unredacted text could confirm a guessed value.
+        # Refresh even without collected tokens: the redactor also masks
+        # database userinfo that no token names.
+        for report in reports.values():
+            refresh_finding_identities(report)
         validate_summary(summary)
         for row in summary["skills"]:
             if row["overall_status"] != "error":

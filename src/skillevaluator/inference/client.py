@@ -22,6 +22,7 @@ import io
 import json
 import os
 import re
+import threading
 import urllib.error
 from collections.abc import Callable
 from dataclasses import replace
@@ -30,6 +31,12 @@ from urllib.parse import urlsplit
 
 from skillevaluator.constants import LLM_VERIFY_TEMPERATURE
 from skillevaluator.inference.diagnostics import llm_failure_diagnostic
+from skillevaluator.inference.json_span import (
+    MAX_JSON_NESTING,
+    STRICT_JSON_DECODE_HOOKS,
+    balanced_json_container_end,
+    json_nesting_within_limit,
+)
 from skillevaluator.inference.retry import RetryConfig, resolve_retry_config, retry_call_with_backoff
 from skillevaluator.inference.types import (
     EmptyLLMResponseError,
@@ -328,6 +335,30 @@ def _checked_content(content: str, stop_reason: object, refusal: object = None) 
     return content
 
 
+def _anthropic_served_model(response: Any, *, requested_fallback: bool) -> str | None:
+    """Return the model that wrote an Anthropic reply when it can differ from the requested one.
+
+    A server-side ``fallback`` block names the model that took over. A turn
+    served by sticky routing, which sends repeats of a fallen-back request
+    straight to the fallback model, carries no block. For a request that asked
+    for server-side fallback, the top-level ``model`` then names the model
+    that wrote the reply. ``None`` means the requested model answered.
+    """
+    served_model = None
+    for block in getattr(response, "content", None) or []:
+        if getattr(block, "type", None) != "fallback":
+            continue
+        served = getattr(block, "to", None)
+        model = served.get("model") if isinstance(served, dict) else getattr(served, "model", None)
+        if isinstance(model, str) and model:
+            served_model = model
+    if served_model is None and requested_fallback:
+        model = getattr(response, "model", None)
+        if isinstance(model, str) and model:
+            served_model = model
+    return served_model
+
+
 def _extract_choice_content(response: Any) -> str:
     choices = getattr(response, "choices", None) or []
     first_choice = choices[0] if choices else None
@@ -338,6 +369,38 @@ def _extract_choice_content(response: Any) -> str:
         getattr(first_choice, "finish_reason", None),
         getattr(message, "refusal", None),
     )
+
+
+_JSON_CONTAINER_START = re.compile(r"[{\[]")
+
+
+def _embedded_json_objects(text: str) -> list[dict[str, Any]]:
+    """Return the complete top-level JSON objects embedded in prose.
+
+    Each ``{`` or ``[`` starts a string-aware balanced span that is decoded as a
+    whole and then skipped, so nothing nested inside a span is ever promoted:
+    not the members of a valid object or array, and not an object inside a
+    span that fails to decode. Decoded arrays are not counted, so chunk
+    citations such as ``[1]`` stay harmless. A span that never closes, closes
+    with a mismatched bracket or nests too deeply ends the scan, because its
+    extent is unknown. Spans never overlap, so the work stays linear in the
+    reply length.
+    """
+    objects: list[dict[str, Any]] = []
+    cursor = 0
+    while (match := _JSON_CONTAINER_START.search(text, cursor)) is not None:
+        start = match.start()
+        end = balanced_json_container_end(text, start)
+        if end is None:
+            break
+        try:
+            value = json.loads(text[start:end], **STRICT_JSON_DECODE_HOOKS)
+        except (RecursionError, ValueError):
+            value = None
+        if isinstance(value, dict):
+            objects.append(value)
+        cursor = end
+    return objects
 
 
 class LLMClient:
@@ -410,12 +473,31 @@ class LLMClient:
         self._client: Any = None
         self._provider_config: ProviderConfig | None = None
         self.last_failure: str | None = None
+        # Per thread, because one client can serve concurrent calls.
+        self._call_state = threading.local()
 
     # -- public read-only properties for introspection --------------------
 
     @property
     def model(self) -> str:
         return self._model or self._resolved_config().model
+
+    @property
+    def provider(self) -> str:
+        return self._resolved_config().provider
+
+    @property
+    def model_used(self) -> str | None:
+        """Return the model that answered this thread's last :meth:`completions` call.
+
+        For an Anthropic reply, a server-side ``fallback`` content block names
+        the model that answered, on any endpoint. Only a native Claude API
+        request for a Claude 5.5 or later model, which asks for server-side
+        fallback, also reads the reply's top-level ``model`` when there is no
+        block. Otherwise it is the configured model. ``None`` before a call
+        succeeds and after a call fails.
+        """
+        return getattr(self._call_state, "model_used", None)
 
     @property
     def base_url(self) -> str | None:
@@ -570,17 +652,22 @@ class LLMClient:
     ) -> str:
         """Send a chat completion request and return the response text.
 
-        Raises :class:`LLMClientError` when the response is empty.
+        Raises :class:`LLMClientError` when the response is empty. On success
+        :attr:`model_used` names the model that answered.
         """
+        self._call_state.model_used = None
         config = self._resolved_config()
         client = self._get_client()
         target_key = SchemaTargetKey(config.provider, config.base_url or "", config.model)
         max_tokens = self._request_max_tokens(config)
         reasoning_effort = self.reasoning_effort
+        answered_by = config.model
 
         def _invoke_provider() -> str:
+            nonlocal answered_by
             use_schema = response_schema is not None and target_key not in _SCHEMA_UNSUPPORTED_TARGETS
             if config.provider == "anthropic":
+                requests_fallback = is_claude_5_5_or_later(config.model) and _is_native_anthropic_endpoint(config)
 
                 def _anthropic_kwargs(include_schema: bool) -> dict[str, Any]:
                     call_kwargs: dict[str, Any] = {
@@ -597,7 +684,7 @@ class LLMClient:
                         output_config["effort"] = reasoning_effort
                     if output_config:
                         call_kwargs["output_config"] = output_config
-                    if is_claude_5_5_or_later(config.model) and _is_native_anthropic_endpoint(config):
+                    if requests_fallback:
                         # Server-side fallback (beta): a safety-classifier refusal is retried on
                         # the fallback model within the same call. Older SDKs lack typed fields.
                         call_kwargs["extra_headers"] = {"anthropic-beta": ANTHROPIC_SERVER_SIDE_FALLBACK_BETA}
@@ -610,6 +697,7 @@ class LLMClient:
                     target_key=target_key,
                     use_schema=use_schema,
                 )
+                answered_by = _anthropic_served_model(response, requested_fallback=requests_fallback) or config.model
                 content = "".join(
                     str(block.text) for block in response.content if getattr(block, "type", None) == "text"
                 )
@@ -684,7 +772,9 @@ class LLMClient:
                     raise
             return _extract_choice_content(response)
 
-        return retry_call_with_backoff(_invoke_provider, config=self._retry_config)
+        content = retry_call_with_backoff(_invoke_provider, config=self._retry_config)
+        self._call_state.model_used = answered_by
+        return content
 
     def extract_json_from_response(
         self,
@@ -694,18 +784,30 @@ class LLMClient:
         response_schema: dict[str, Any] | None = None,
         schema_name: str = "judge_response",
     ) -> dict:
-        """Send a completion and parse JSON from the response."""
+        """Send a completion and parse one unambiguous JSON object from the response.
+
+        The whole reply, optionally in a Markdown fence, is parsed first. Models
+        without structured output (Bedrock, or after a schema downgrade) may
+        still wrap the object in prose; exactly one embedded object is then
+        accepted, while several objects remain an error rather than a guess.
+        """
         raw = self.completions(system_prompt, user_prompt, response_schema=response_schema, schema_name=schema_name)
 
         cleaned = raw.strip()
         if cleaned.startswith("```"):
-            cleaned = cleaned.split("\n", 1)[1]
+            cleaned = cleaned.partition("\n")[2]
             cleaned = cleaned.rsplit("```", 1)[0].strip()
 
         try:
-            return json.loads(cleaned)
-        except json.JSONDecodeError as e:
-            raise LLMClientError(f"LLM returned invalid JSON: {e}\nRaw: {raw[:500]}") from e
+            if not json_nesting_within_limit(cleaned):
+                raise ValueError(f"JSON nests deeper than {MAX_JSON_NESTING} levels")
+            return json.loads(cleaned, **STRICT_JSON_DECODE_HOOKS)
+        except (RecursionError, ValueError) as e:
+            objects = _embedded_json_objects(raw)
+            if len(objects) == 1:
+                return objects[0]
+            detail = f"found {len(objects)} JSON objects; expected exactly one" if objects else str(e)
+            raise LLMClientError(f"LLM returned invalid JSON: {detail}\nRaw: {raw[:500]}") from e
 
     # -- template-method hooks (override in subclasses) -------------------
 

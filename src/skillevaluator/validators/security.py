@@ -12,9 +12,12 @@ Detects security vulnerabilities and PII/secrets using:
 
 from __future__ import annotations
 
+import bisect
 import contextlib
 import getpass
+import hashlib
 import io
+import itertools
 import json
 import math
 import os
@@ -26,7 +29,7 @@ import tokenize
 import unicodedata
 import zlib
 from collections import Counter
-from collections.abc import Iterable, Mapping
+from collections.abc import Callable, Iterable, Mapping
 from pathlib import Path, PurePosixPath
 
 import yaml
@@ -61,6 +64,12 @@ from skillevaluator.validators.base import (
     ValidatorBase,
     iter_scannable_files,
 )
+from skillevaluator.validators.skillspector_scope import (
+    IssueScope,
+    scope_skillspector_issues,
+    skillspector_report_is_truncated,
+    skillspector_report_serializes_every_finding,
+)
 
 logger = get_logger(__name__)
 
@@ -74,6 +83,15 @@ _SKILLSPECTOR_TIMEOUT_ENV = "SKILLEVALUATOR_SKILLSPECTOR_TIMEOUT_SECONDS"
 
 _AUTHOR_IDENTITY_RE = re.compile(r"^\S[^<>\n]* <(?P<email>[^<>@\s]+@[^<>\s]+)>$")
 _SKILLSPECTOR_POLICY_EXIT_CODES = frozenset({0, 1})
+# SkillSpector maps an unreadable or invalid --baseline file to exit code 2.
+_SKILLSPECTOR_INPUT_ERROR_EXIT_CODE = 2
+_SKILLSPECTOR_BASELINE_SCHEMA_VERSION = 2
+# SkillSpector's baseline loader limits (v2.12.0 and later); a file beyond
+# them is rejected by SkillSpector, so the pre-check stops there too.
+_SKILLSPECTOR_BASELINE_MAX_BYTES = 2 * 1024 * 1024
+_SKILLSPECTOR_BASELINE_MAX_NODES = 100_000
+_SKILLSPECTOR_BASELINE_MAX_DEPTH = 64
+_SKILLSPECTOR_BASELINE_MAX_SCALAR_CHARS = 64 * 1024
 _SKILLSPECTOR_STATUSLESS_COMPLETENESS_VERSIONS = {(2, 9, 5), (2, 9, 6)}
 _SKILLSPECTOR_FINDING_IDENTITY_VERSION = (2, 11, 1)
 _SKILLSPECTOR_COMPLETENESS_SCHEMA_VERSION = (2, 10, 0)
@@ -176,6 +194,9 @@ _SKILLSPECTOR_SEVERITY_POINTS = {"CRITICAL": 50, "HIGH": 25, "MEDIUM": 10, "LOW"
 _SKILLSPECTOR_EXECUTABLE_MULTIPLIER = 1.3
 _SKILLSPECTOR_RISK_SCORE_FLOORS_BY_RULE_ID = {"SC8": 51}
 _SKILLSPECTOR_DIMINISHING_WEIGHTS = (1.0, 0.5, 0.25)
+# Ledger exceptions quoted in an incomplete-analysis error, and the length of each quoted field.
+_SKILLSPECTOR_INCOMPLETE_EXAMPLES = 3
+_SKILLSPECTOR_REPORT_TEXT_MAX_CHARS = 200
 _SKILLSPECTOR_SCAN_EXCLUDED_DIRS = SCAN_EXCLUDED_DIRS - {"__pycache__"}
 _SKILLSPECTOR_PROVIDER_MAP = {
     "anthropic": "anthropic",
@@ -732,6 +753,277 @@ def _ignore_artifact_dirs(dirpath: str, names: list[str]) -> set[str]:
     return {n for n in names if n in _SKILLSPECTOR_SCAN_EXCLUDED_DIRS and Path(dirpath, n).is_dir()}
 
 
+_SKILLSPECTOR_SUPPRESSED_RULE_ID_LIMIT = 50
+
+# Shortest run of literal characters that bounds a rule glob. SkillSpector matches
+# message and path globs case-insensitively against free text, so a single
+# letter such as ``*e*`` matches almost every finding.
+_BASELINE_ID_MIN_LITERAL_RUN = 2
+_BASELINE_TEXT_MIN_LITERAL_RUN = 4
+
+
+def _baseline_glob_has_literal_scope(value: object, *, min_run: int = 1) -> bool:
+    """Return whether a SkillSpector suppression glob has a literal run of ``min_run`` characters.
+
+    Wildcards, negated classes, and multi-character classes match too broadly
+    to bound a rule and break a run; a one-character class such as ``[d]`` is a
+    literal. Only letters and digits count toward a run.
+    """
+    if not isinstance(value, str):
+        return False
+    pattern = value.strip()
+    run = 0
+    index = 0
+    while index < len(pattern):
+        character = pattern[index]
+        if character in "*?":
+            run = 0
+            index += 1
+            continue
+        if character != "[":
+            if character.isalnum():
+                run += 1
+                if run >= min_run:
+                    return True
+            index += 1
+            continue
+        cursor = index + 1
+        negated = cursor < len(pattern) and pattern[cursor] in "!^"
+        if negated:
+            cursor += 1
+        if cursor < len(pattern) and pattern[cursor] == "]":
+            cursor += 1
+        close = pattern.find("]", cursor)
+        if close < 0:
+            # fnmatch treats an unclosed bracket as literal text.
+            return len(pattern) - index + run >= min_run
+        class_body = pattern[index + 1 : close]
+        if not negated and len(class_body) == 1 and class_body.isalnum():
+            run += 1
+            if run >= min_run:
+                return True
+        else:
+            run = 0
+        index = close + 1
+    return False
+
+
+class _SkillSpectorBaselineLimitError(ValueError):
+    """A baseline exceeds the size or YAML expansion limits SkillSpector enforces."""
+
+
+class _BoundedSkillSpectorBaselineLoader(yaml.SafeLoader):
+    """SafeLoader that bounds composition and alias or merge expansion like SkillSpector.
+
+    Plain ``yaml.safe_load`` expands chained merge keys without limit, so a
+    small file could take minutes or exhaust memory before any check runs.
+    Expansion is counted on the composed node graph, revisiting every alias,
+    before any value is constructed.
+    """
+
+    def __init__(self, stream: str) -> None:
+        super().__init__(stream)
+        self._composed_nodes = 0
+        self._compose_depth = 0
+
+    def compose_node(self, parent: object, index: object) -> yaml.Node:
+        self._composed_nodes += 1
+        if self._composed_nodes > _SKILLSPECTOR_BASELINE_MAX_NODES:
+            raise _SkillSpectorBaselineLimitError("exceeds the YAML node limit")
+        if self._compose_depth >= _SKILLSPECTOR_BASELINE_MAX_DEPTH:
+            raise _SkillSpectorBaselineLimitError("exceeds the YAML depth limit")
+        self._compose_depth += 1
+        try:
+            return super().compose_node(parent, index)
+        finally:
+            self._compose_depth -= 1
+
+    def construct_document(self, node: yaml.Node) -> object:
+        counts = {"nodes": 0, "characters": 0}
+        active: set[int] = set()
+
+        def visit(item: yaml.Node, depth: int) -> None:
+            counts["nodes"] += 1
+            if counts["nodes"] > _SKILLSPECTOR_BASELINE_MAX_NODES:
+                raise _SkillSpectorBaselineLimitError("exceeds the expanded YAML node limit")
+            if depth > _SKILLSPECTOR_BASELINE_MAX_DEPTH:
+                raise _SkillSpectorBaselineLimitError("exceeds the expanded YAML depth limit")
+            if id(item) in active:
+                raise _SkillSpectorBaselineLimitError("contains cyclic YAML aliases")
+            if isinstance(item, yaml.ScalarNode):
+                if len(item.value) > _SKILLSPECTOR_BASELINE_MAX_SCALAR_CHARS:
+                    raise _SkillSpectorBaselineLimitError("exceeds the YAML scalar character limit")
+                counts["characters"] += len(item.value)
+                if counts["characters"] > _SKILLSPECTOR_BASELINE_MAX_BYTES:
+                    raise _SkillSpectorBaselineLimitError("exceeds the expanded YAML character limit")
+                return
+            active.add(id(item))
+            children = (
+                (child for pair in item.value for child in pair) if isinstance(item, yaml.MappingNode) else item.value
+            )
+            for child in children:
+                visit(child, depth + 1)
+            active.remove(id(item))
+
+        # Depth is bounded, so this recursion stays shallow; every alias is
+        # revisited because counting unique nodes misses merge amplification.
+        visit(node, 1)
+        return super().construct_document(node)
+
+
+def _is_non_empty_text(value: object) -> bool:
+    """Return whether a parsed YAML value is a string with visible text."""
+    return isinstance(value, str) and bool(value.strip())
+
+
+def _inspect_skillspector_baseline(path: Path) -> tuple[dict, str | None]:
+    """Return the reportable facts of an operator-selected baseline and any blocking error.
+
+    SkillSpector validates the full schema itself. SkillEvaluator rejects a
+    file it cannot read, the cheap schema errors SkillSpector would otherwise
+    report only as an opaque exit code, and rules whose globs carry no literal
+    text, because SkillSpector accepts a rule such as ``id: "*"`` that silently
+    suppresses every finding.
+
+    Only the file name and a content digest are recorded, so reports and
+    errors do not leak local paths.
+    """
+    name = path.name
+    state: dict = {
+        "file": name,
+        "digest": None,
+        "loaded": False,
+        "status": "not_applied",
+        "schema_version": None,
+        "baseline_scanner_version": None,
+        "runtime_scanner_version": None,
+        "rule_count": 0,
+        "fingerprint_count": 0,
+        "suppressed_findings": None,
+        "llm_stage_suppressed_findings": None,
+        "active_findings": None,
+        "active_blocking_findings": None,
+        "suppressed_by_severity": {},
+        "suppressed_rule_ids": [],
+        "message": None,
+    }
+    if not path.is_file():
+        return state, f"SkillSpector baseline {name} does not exist or is not a file"
+    try:
+        with path.open("rb") as source:
+            content = source.read(_SKILLSPECTOR_BASELINE_MAX_BYTES + 1)
+    except OSError as exc:
+        return state, f"SkillSpector baseline {name} could not be read ({type(exc).__name__})"
+    if len(content) > _SKILLSPECTOR_BASELINE_MAX_BYTES:
+        return state, f"SkillSpector baseline {name} exceeds the {_SKILLSPECTOR_BASELINE_MAX_BYTES}-byte limit"
+    state["digest"] = f"sha256:{hashlib.sha256(content).hexdigest()}"
+    try:
+        raw = yaml.load(content.decode("utf-8"), Loader=_BoundedSkillSpectorBaselineLoader)
+    except _SkillSpectorBaselineLimitError as exc:
+        return state, f"SkillSpector baseline {name} {exc}"
+    except (
+        RecursionError,
+        yaml.YAMLError,
+        # SafeLoader scalar constructors raise these for values such as an
+        # impossible timestamp (``2026-06-31``) or ``!!int ""``.
+        ValueError,
+        IndexError,
+        KeyError,
+        AttributeError,
+        TypeError,
+        OverflowError,
+    ) as exc:
+        return state, f"SkillSpector baseline {name} could not be parsed ({type(exc).__name__})"
+    if raw is None:
+        # Like SkillSpector, an empty or comment-only file is an empty baseline.
+        raw = {}
+    if not isinstance(raw, dict):
+        return state, f"SkillSpector baseline {name} must be a YAML or JSON mapping"
+
+    version = raw.get("version")
+    rules = raw.get("rules")
+    fingerprints = raw.get("fingerprints")
+    scanner_version = raw.get("scanner_version")
+    state.update(
+        {
+            "schema_version": version if isinstance(version, int | str) and not isinstance(version, bool) else None,
+            "baseline_scanner_version": scanner_version.strip() if _is_non_empty_text(scanner_version) else None,
+            "rule_count": len(rules) if isinstance(rules, list) else 0,
+            "fingerprint_count": len(fingerprints) if isinstance(fingerprints, list) else 0,
+        }
+    )
+    for field, value in (("rules", rules), ("fingerprints", fingerprints)):
+        if value is not None and not isinstance(value, list):
+            return state, f"SkillSpector baseline {name} field '{field}' must be a list"
+    rule_list = rules or []
+    fingerprint_list = fingerprints or []
+    # Shape errors first, so a bare string is not reported as an unbounded
+    # rule or a missing reason.
+    malformed = [f"rule {index}" for index, rule in enumerate(rule_list) if not isinstance(rule, dict)]
+    if malformed:
+        return state, f"SkillSpector baseline {', '.join(malformed)} in {name} must be a mapping"
+    malformed = [f"fingerprint {index}" for index, entry in enumerate(fingerprint_list) if not isinstance(entry, dict)]
+    if malformed:
+        return state, (
+            f"SkillSpector baseline {', '.join(malformed)} in {name} must be a mapping with 'hash' and 'reason'"
+        )
+    unbounded = [
+        index
+        for index, rule in enumerate(rule_list)
+        # Field aliases match SkillSpector's rule loader.
+        if not any(
+            _baseline_glob_has_literal_scope(rule.get(field) or rule.get(alias), min_run=min_run)
+            for field, alias, min_run in (
+                ("id", "rule_id", _BASELINE_ID_MIN_LITERAL_RUN),
+                ("path", "file", _BASELINE_TEXT_MIN_LITERAL_RUN),
+                ("message", "message", _BASELINE_TEXT_MIN_LITERAL_RUN),
+            )
+        )
+    ]
+    if unbounded:
+        noun = "rule" if len(unbounded) == 1 else "rules"
+        return state, (
+            f"SkillSpector baseline {noun} {', '.join(map(str, unbounded))} in {name} must set an id glob with "
+            f"{_BASELINE_ID_MIN_LITERAL_RUN} literal characters in a row, or a path or message glob with "
+            f"{_BASELINE_TEXT_MIN_LITERAL_RUN}; a broader rule would suppress nearly every finding"
+        )
+    if version == _SKILLSPECTOR_BASELINE_SCHEMA_VERSION:
+        # SkillSpector rejects a version 2 entry without a reason.
+        unexplained = [
+            f"rule {index}" for index, rule in enumerate(rule_list) if not _is_non_empty_text(rule.get("reason"))
+        ]
+        unexplained += [
+            f"fingerprint {index}"
+            for index, entry in enumerate(fingerprint_list)
+            if not _is_non_empty_text(entry.get("reason"))
+        ]
+        if unexplained:
+            return state, (
+                f"SkillSpector baseline {name} has no reason for {', '.join(unexplained)}; "
+                "a version 2 baseline needs a non-empty reason on every rule and fingerprint"
+            )
+    return state, None
+
+
+def _skillspector_baseline_for_scan(original_root: Path, scan_root: Path, baseline: Path | None) -> Path | None:
+    """Point SkillSpector at the staged copy of a baseline that lives inside the skill.
+
+    SkillSpector excludes only the exact file passed to ``--baseline`` from its
+    content scan. On a staged copy, passing the original path would leave the
+    copied baseline in scope, and its reviewed match text would be reported as
+    new findings. Baselines outside the skill, or not copied into the staged
+    tree, keep their original path.
+    """
+    if baseline is None or scan_root == original_root:
+        return baseline
+    try:
+        relative = baseline.relative_to(original_root)
+    except ValueError:
+        return baseline
+    staged_baseline = scan_root / relative
+    return staged_baseline if staged_baseline.is_file() else baseline
+
+
 def _rewrite_path_prefix(value, old: str, new: str):
     """Recursively rewrite ``old`` path prefixes in a parsed JSON structure."""
     if isinstance(value, str):
@@ -741,6 +1033,21 @@ def _rewrite_path_prefix(value, old: str, new: str):
     if isinstance(value, dict):
         return {k: _rewrite_path_prefix(v, old, new) for k, v in value.items()}
     return value
+
+
+def _combine_skillspector_applicability(blocks: list[dict]) -> dict:
+    """Total per-skill SkillSpector applicability counters for a folder of skills."""
+    by_role: Counter[str] = Counter()
+    for block in blocks:
+        by_role.update(block["suppressed_by_file_role"])
+    return {
+        "artifact_type": blocks[0]["artifact_type"],
+        "kept_issues": sum(block["kept_issues"] for block in blocks),
+        "suppressed_inapplicable_issues": sum(block["suppressed_inapplicable_issues"] for block in blocks),
+        "suppressed_by_file_role": dict(sorted(by_role.items())),
+        "raw_risk_score": max(block["raw_risk_score"] for block in blocks),
+        "applicable_risk_score": max(block["applicable_risk_score"] for block in blocks),
+    }
 
 
 def _issue_field(issue: dict):
@@ -781,6 +1088,109 @@ def _skillspector_scoring_match_identity(
         return "row", index
     finding = str(issue.get("finding") or "").strip()[:100]
     return ("finding", finding) if finding else ("row", index)
+
+
+def _skillspector_report_text(value: object) -> str | None:
+    """Return untrusted report text as one bounded line, or ``None`` when it is not text."""
+    if not isinstance(value, str):
+        return None
+    # Control, format and separator characters (newlines included) become spaces.
+    text = "".join(
+        " " if unicodedata.category(character)[0] in {"C", "Z"} else character
+        for character in value[: _SKILLSPECTOR_REPORT_TEXT_MAX_CHARS + 1]
+    ).strip()
+    if len(text) > _SKILLSPECTOR_REPORT_TEXT_MAX_CHARS:
+        text = f"{text[: _SKILLSPECTOR_REPORT_TEXT_MAX_CHARS - 3]}..."
+    return text or None
+
+
+def _skillspector_ledger_exception_label(exception: Mapping[str, object]) -> str:
+    """Describe one ledger exception as ``path[:line] [phase; reason; analyzers=...]``."""
+    location = _skillspector_report_text(exception.get("path")) or "unknown"
+    start_line = exception.get("start_line")
+    if isinstance(start_line, int) and not isinstance(start_line, bool):
+        location = f"{location}:{start_line}"
+    context = [text for key in ("phase", "reason_code") if (text := _skillspector_report_text(exception.get(key)))]
+    analyzers = exception.get("analyzers")
+    if isinstance(analyzers, list) and (
+        analyzer_text := _skillspector_report_text(",".join(name for name in analyzers if isinstance(name, str)))
+    ):
+        context.append(f"analyzers={analyzer_text}")
+    return f"{location} [{'; '.join(context)}]" if context else location
+
+
+def _skillspector_incomplete_files_by_reason(ledger_exceptions: Iterable[Mapping[str, object]]) -> str:
+    """Count distinct files per ledger reason code, most common first."""
+    paths_by_reason: dict[str, set[str]] = {}
+    for exception in ledger_exceptions:
+        reason = _skillspector_report_text(exception.get("reason_code")) or "unknown"
+        path = exception.get("path")
+        paths_by_reason.setdefault(reason, set()).add(path if isinstance(path, str) else "")
+    counts = Counter({reason: len(paths) for reason, paths in paths_by_reason.items()})
+    return ", ".join(f"{reason} {count}" for reason, count in counts.most_common())
+
+
+def _skillspector_runtime_limit_hint(ledger_exceptions: Iterable[Mapping[str, object]]) -> str | None:
+    """Explain how to clear ``runtime_limit`` ledger exceptions, or ``None`` when there are none."""
+    scan_limited: set[str] = set()
+    budget_limited: set[str] = set()
+    for exception in ledger_exceptions:
+        if exception.get("reason_code") != "runtime_limit":
+            continue
+        path = exception.get("path")
+        analyzers = exception.get("analyzers")
+        # A sub-analysis that stops at its own time budget is reported as
+        # "<analyzer>_runtime_limit" (for example the SC8 bytecode walk). That
+        # budget is independent of the whole-scan deadline.
+        if (
+            isinstance(analyzers, list)
+            and analyzers
+            and all(isinstance(name, str) and name.endswith("_runtime_limit") for name in analyzers)
+        ):
+            budget_limited.add(path if isinstance(path, str) else "")
+        else:
+            scan_limited.add(path if isinstance(path, str) else "")
+    hints: list[str] = []
+    if scan_limited:
+        # These rows come from SkillSpector's whole-scan deadline or from a shorter
+        # stage budget such as bundle discovery, and the report does not say which,
+        # so the hint names no specific limit.
+        hints.append(
+            f"SkillSpector reached a runtime limit before it finished {len(scan_limited)} file(s). "
+            "When many files are affected, the skill most likely bundles more content than SkillSpector can "
+            "inspect within its time budgets, so a skill that bundles a large corpus (vendored documents, "
+            "generated figures, renderer scripts) hits the same limit on every rerun; keep large reference "
+            "material outside the skill and point to it. When only a few files are affected on a busy machine, "
+            "a plain rerun may complete."
+        )
+    if budget_limited:
+        # Reported alongside the scan-budget advice too, so every runtime_limit file
+        # counted by reason is covered by one of the two explanations.
+        hints.append(
+            f"A SkillSpector sub-analysis stopped at its own time budget on {len(budget_limited)} file(s). "
+            "That budget is separate from the whole-scan limit, so reducing bundled content does not change it. "
+            "Rerun the scan; if the limit repeats, update SkillSpector or report the completeness exceptions "
+            "to the SkillSpector project."
+        )
+    return " ".join(hints) or None
+
+
+def _skillspector_incomplete_analysis_error(status: str, ledger_exceptions: list[dict]) -> str:
+    """Describe a partial SkillSpector analysis with example gaps and, for runtime limits, a remedy."""
+    message = f"skillspector JSON field 'analysis_completeness' reports incomplete analysis (status '{status}')"
+    if ledger_exceptions:
+        shown = ledger_exceptions[:_SKILLSPECTOR_INCOMPLETE_EXAMPLES]
+        message = f"{message}: {'; '.join(_skillspector_ledger_exception_label(row) for row in shown)}"
+        remaining = len(ledger_exceptions) - len(shown)
+        if remaining:
+            # A few examples cannot show why hundreds of files were cut short.
+            message = (
+                f"{message}; and {remaining} more "
+                f"(incomplete files by reason: {_skillspector_incomplete_files_by_reason(ledger_exceptions)})"
+            )
+    message = f"{message}; security scan did not complete"
+    hint = _skillspector_runtime_limit_hint(ledger_exceptions)
+    return f"{message}. {hint}" if hint else message
 
 
 # SkillSpector's static pattern analyzers read text, so each records a referenced
@@ -1152,6 +1562,9 @@ class SecurityValidator(ValidatorBase):
         use_llm: bool = False,
         verify_llm: bool = False,
         submitter_usernames: Iterable[str] | None = None,
+        content_type: str | None = None,
+        skillspector_reference_root: Path | None = None,
+        skillspector_baseline: Path | str | None = None,
     ):
         """Initialize with optional LLM analysis for deeper inspection.
 
@@ -1164,6 +1577,19 @@ class SecurityValidator(ValidatorBase):
                 :data:`HOME_PATH_SUBMITTER_ENV_VARS`) and the OS login name.
                 Pass an explicit value to wire a CI-provided contributor identity
                 or to make tests deterministic.
+            content_type: Detected agent artifact type (``skill``, ``rules``,
+                ``workflows``, or ``plugin``). When set, SkillSpector findings
+                outside agent control paths are suppressed (see
+                :mod:`skillevaluator.validators.skillspector_scope`). ``None``
+                keeps the unrestricted repository scan used by ``security-scan``.
+            skillspector_reference_root: Artifact root that contains the
+                scanned directory, such as a plugin around its bundled skills.
+                References written relative to it still count as agent
+                references. Defaults to the scanned directory.
+            skillspector_baseline: Audited SkillSpector YAML/JSON suppression
+                baseline. Matching findings are removed by SkillSpector before
+                scoring. Baselines are only applied when passed explicitly; one
+                shipped inside the scanned skill is never picked up on its own.
         """
         self._pii_patterns: dict | None = None
         self._submitter_override: set[str] | None = (
@@ -1175,6 +1601,13 @@ class SecurityValidator(ValidatorBase):
         self._home_check_disabled_warned = False
         self.use_llm = use_llm
         self.verify_llm = verify_llm
+        self.content_type = content_type
+        self.skillspector_reference_root = (
+            Path(skillspector_reference_root).resolve() if skillspector_reference_root is not None else None
+        )
+        self.skillspector_baseline = (
+            Path(skillspector_baseline).expanduser().resolve() if skillspector_baseline is not None else None
+        )
 
     @property
     def pii_patterns(self) -> dict:
@@ -1298,7 +1731,7 @@ class SecurityValidator(ValidatorBase):
 
     def validate(self, skill_path: Path) -> ValidationResult:
         """Run both security and PII scanning on skill(s)."""
-        return self._validate_folder_or_skill(
+        return self._validate_with_applicability(
             skill_path,
             self._validate_single_skill,
             action_description="Scanning",
@@ -1306,7 +1739,7 @@ class SecurityValidator(ValidatorBase):
 
     def validate_security_only(self, skill_path: Path) -> ValidationResult:
         """Run only skillspector security scanning (no PII detection)."""
-        result = self._validate_folder_or_skill(
+        result = self._validate_with_applicability(
             skill_path,
             self._run_skillspector,
             action_description="Security scanning",
@@ -1324,6 +1757,32 @@ class SecurityValidator(ValidatorBase):
         )
         if self.verify_llm and result.findings:
             self._verify_findings_with_llm(result, skill_path)
+        return result
+
+    def _validate_with_applicability(
+        self,
+        skill_path: Path,
+        single_skill_validator: Callable[[Path], ValidationResult],
+        *,
+        action_description: str,
+    ) -> ValidationResult:
+        """Validate each discovered skill and total their SkillSpector applicability counters.
+
+        The folder walker does not merge per-skill metadata, so the counters
+        are collected as each skill finishes.
+        """
+        blocks: list[dict] = []
+
+        def validate_one(path: Path) -> ValidationResult:
+            child = single_skill_validator(path)
+            block = child.metadata.get("skillspector_applicability")
+            if isinstance(block, dict):
+                blocks.append(block)
+            return child
+
+        result = self._validate_folder_or_skill(skill_path, validate_one, action_description=action_description)
+        if blocks:
+            result.metadata["skillspector_applicability"] = _combine_skillspector_applicability(blocks)
         return result
 
     def _validate_single_skill(self, skill_path: Path) -> ValidationResult:
@@ -1349,6 +1808,10 @@ class SecurityValidator(ValidatorBase):
         on a temp copy without those outputs. Shipped bytecode remains for
         artifact-integrity analysis, and reported paths map back to the
         original location.
+
+        An explicitly selected baseline is passed to both stages with
+        ``--baseline``. When it lives inside a staged skill, the staged copy is
+        passed instead so SkillSpector excludes the file it actually scans.
         """
         result = ValidationResult()
 
@@ -1358,6 +1821,16 @@ class SecurityValidator(ValidatorBase):
             )
             result.mark_scan_incomplete("skillspector-llm" if self.use_llm else "skillspector")
             return result
+
+        baseline_state: dict | None = None
+        if self.skillspector_baseline is not None:
+            baseline_state, baseline_error = _inspect_skillspector_baseline(self.skillspector_baseline)
+            if baseline_error is not None:
+                baseline_state["message"] = baseline_error
+                result.metadata["skillspector_baseline"] = baseline_state
+                result.add_error(f"{baseline_error}; security scan did not run")
+                result.mark_scan_incomplete("skillspector-llm" if self.use_llm else "skillspector")
+                return result
 
         original_root = skill_path.resolve()
         scan_root = original_root
@@ -1374,6 +1847,7 @@ class SecurityValidator(ValidatorBase):
                 result.add_warning(f"Could not stage artifact-free skill copy ({exc}); scanning in place.")
 
         try:
+            baseline = _skillspector_baseline_for_scan(original_root, scan_root, self.skillspector_baseline)
             # The deterministic stage is authoritative and always runs, even
             # when LLM enrichment was requested. Enrichment is additive and
             # cannot erase static findings.
@@ -1381,13 +1855,22 @@ class SecurityValidator(ValidatorBase):
                 scan_root,
                 original_root=original_root if staged is not None else None,
                 use_llm=False,
+                baseline=baseline,
             )
+            # Merging the enrichment stage overwrites this metadata, so keep
+            # each stage's own suppression count for the baseline outcome.
+            static_suppressed = result.metadata.get("skillspector_suppressed_count")
+            static_summary = result.metadata.get("skillspector_suppressed_summary")
+            llm_suppressed = None
             if self.use_llm and not result.is_incomplete:
                 enrichment = self._run_skillspector_once(
                     scan_root,
                     original_root=original_root if staged is not None else None,
                     use_llm=True,
+                    baseline=baseline,
                 )
+                if not enrichment.is_incomplete:
+                    llm_suppressed = enrichment.metadata.get("skillspector_suppressed_count")
                 # Both stages run the same static analyzers, so a note such as
                 # an accepted image gap can repeat word for word; keep one copy.
                 finding_messages = {finding.to_legacy_string() for finding in enrichment.findings}
@@ -1400,9 +1883,26 @@ class SecurityValidator(ValidatorBase):
                     kept = [warning for warning in enrichment.warnings if warning not in repeated]
                     enrichment.summary.warnings -= len(enrichment.warnings) - len(kept)
                     enrichment.warnings = kept
+                # The static stage is the authoritative audit of what was
+                # suppressed; keep its block and record the LLM stage's apart.
+                static_applicability = result.metadata.get("skillspector_applicability")
+                llm_applicability = enrichment.metadata.pop("skillspector_applicability", None)
                 result.merge(enrichment)
+                if static_applicability is not None:
+                    result.metadata["skillspector_applicability"] = static_applicability
+                if llm_applicability is not None:
+                    result.metadata["skillspector_llm_applicability"] = llm_applicability
                 if not enrichment.is_incomplete:
                     self._deduplicate_skillspector_findings(result)
+            if baseline_state is not None:
+                result.metadata["skillspector_baseline"] = baseline_state
+                self._report_skillspector_baseline(
+                    result,
+                    baseline_state,
+                    static_suppressed=static_suppressed,
+                    llm_suppressed=llm_suppressed,
+                    static_summary=static_summary,
+                )
             return result
         finally:
             if staged is not None:
@@ -1414,11 +1914,14 @@ class SecurityValidator(ValidatorBase):
         *,
         original_root: Path | None,
         use_llm: bool,
+        baseline: Path | None = None,
     ) -> ValidationResult:
         """Run one SkillSpector stage and validate its process/report contract."""
         result = ValidationResult()
         stage_name = "skillspector-llm" if use_llm else "skillspector"
         args = ["scan", str(scan_root), "--format", "json"]
+        if baseline is not None:
+            args.extend(["--baseline", str(baseline)])
         if not use_llm:
             args.append("--no-llm")
 
@@ -1470,6 +1973,16 @@ class SecurityValidator(ValidatorBase):
             ):
                 # The stage stays incomplete; only the explanation changes.
                 detail = _skillspector_provider_retry_error(stage_name)
+            if (
+                baseline is not None
+                and tool_result.error_message is None
+                and tool_result.exit_code == _SKILLSPECTOR_INPUT_ERROR_EXIT_CODE
+            ):
+                detail += (
+                    f". SkillSpector exits {_SKILLSPECTOR_INPUT_ERROR_EXIT_CODE} when it rejects its input, "
+                    "including an invalid --baseline file; check the baseline with "
+                    "`skillspector scan <skill> --baseline <file>`"
+                )
             result.add_error(detail)
             result.mark_scan_incomplete(stage_name)
             return result
@@ -1508,6 +2021,7 @@ class SecurityValidator(ValidatorBase):
             use_llm,
             stage_name,
             result,
+            baseline_requested=baseline is not None,
             scanned_root=original_root if original_root is not None else scan_root,
         ):
             result.mark_scan_incomplete(stage_name)
@@ -1546,9 +2060,13 @@ class SecurityValidator(ValidatorBase):
         stage_name: str,
         result: ValidationResult,
         *,
+        baseline_requested: bool = False,
         scanned_root: Path | None = None,
     ) -> bool:
         """Return whether JSON is a trustworthy SkillSpector findings report.
+
+        Suppressed findings are accepted only when SkillEvaluator passed an
+        explicit baseline, and that report must then account for them.
 
         A ``partial`` analysis makes the scan INCOMPLETE unless its only gaps are
         referenced PNG or JPEG images that the files under *scanned_root* confirm
@@ -2091,8 +2609,7 @@ class SecurityValidator(ValidatorBase):
                         result.add_warning(raster_note)
                     else:
                         result.add_error(
-                            "skillspector JSON field 'analysis_completeness' reports incomplete analysis "
-                            f"(status '{completeness_status}'); security scan did not complete"
+                            _skillspector_incomplete_analysis_error(completeness_status, ledger_exceptions)
                         )
                         result.mark_scan_incomplete(stage_name)
 
@@ -2390,6 +2907,13 @@ class SecurityValidator(ValidatorBase):
         if isinstance(suppressed, list) and not all(isinstance(item, dict) for item in suppressed):
             result.add_error("skillspector JSON 'suppressed' entries must be objects; security scan did not complete")
             return False
+        if baseline_requested and (suppressed_count is None or suppressed is None):
+            # Without both fields, findings could disappear without a record.
+            result.add_error(
+                "skillspector JSON report does not account for findings suppressed by the requested baseline; "
+                "security scan did not complete"
+            )
+            return False
         normalized_suppressed_count = suppressed_count or 0
         normalized_suppressed = suppressed or []
         if normalized_suppressed_count != len(normalized_suppressed):
@@ -2422,7 +2946,7 @@ class SecurityValidator(ValidatorBase):
                     "security scan did not complete"
                 )
                 return False
-        if normalized_suppressed_count:
+        if normalized_suppressed_count and not baseline_requested:
             result.add_error(
                 "skillspector reported unexpected suppressed findings without a requested baseline; "
                 "security scan did not complete"
@@ -2433,7 +2957,11 @@ class SecurityValidator(ValidatorBase):
             normalized_components,
             uses_report_identities=uses_completeness_schema,
             uses_finding_identity=uses_finding_identity,
-            findings_after_filtering=findings_after_filtering,
+            # Baseline-suppressed findings do not score; counting them as
+            # unseen occurrences would loosen this reconciliation.
+            findings_after_filtering=(
+                findings_after_filtering - normalized_suppressed_count if findings_after_filtering is not None else None
+            ),
             all_findings_serialized=(
                 findings_after_filtering is None
                 or findings_after_filtering == len(issues) + normalized_suppressed_count
@@ -2609,6 +3137,51 @@ class SecurityValidator(ValidatorBase):
         return max(minimum_score, reported_floor)
 
     @staticmethod
+    def _retained_skillspector_risk_score(issues: list[dict], components: list[dict]) -> int:
+        """Score *issues* with SkillSpector's formula, one finding per serialized record.
+
+        Use only when the report serializes every finding it counted. Each
+        occurrence is a finding, scored with its own file's executable
+        multiplier. Within a rule, SkillSpector gives the largest weights to
+        the most severe findings; within one severity, the lowest
+        contributions take the larger weights here, so the result never
+        exceeds SkillSpector's score for the same findings.
+        """
+        file_executable = {
+            (_skillspector_scoring_source_scope(component), component["path"]): component.get("executable") is True
+            for component in components
+            if isinstance(component, dict) and isinstance(component.get("path"), str)
+        }
+        by_rule: dict[str, list[tuple[float, float]]] = {}
+        score_floor = 0
+        for issue in issues:
+            if issue["confidence"] <= 0:
+                continue
+            score_floor = max(score_floor, _SKILLSPECTOR_RISK_SCORE_FLOORS_BY_RULE_ID.get(issue["id"], 0))
+            occurrences = issue.get("occurrences")
+            records = occurrences if isinstance(occurrences, list) and occurrences else [issue.get("location")]
+            source_scope = _skillspector_scoring_source_scope(issue)
+            for record in records:
+                record_file = record.get("file") if isinstance(record, dict) else None
+                multiplier = (
+                    _SKILLSPECTOR_EXECUTABLE_MULTIPLIER
+                    if file_executable.get((source_scope, record_file), False)
+                    else 1.0
+                )
+                severity_points = _SKILLSPECTOR_SEVERITY_POINTS[issue["severity"]]
+                by_rule.setdefault(issue["id"], []).append(
+                    (-severity_points, severity_points * issue["confidence"] * multiplier)
+                )
+        total = sum(
+            contribution * weight
+            for contributions in by_rule.values()
+            for (_severity, contribution), weight in zip(
+                sorted(contributions), _SKILLSPECTOR_DIMINISHING_WEIGHTS, strict=False
+            )
+        )
+        return min(100, max(score_floor, int(total)))
+
+    @staticmethod
     def _deduplicate_skillspector_issues_for_scoring(
         issues: list[dict],
         *,
@@ -2779,19 +3352,24 @@ class SecurityValidator(ValidatorBase):
         *,
         source_root: Path | None = None,
     ) -> None:
-        """Convert a validated SkillSpector JSON report into ValidationResult entries."""
-        self._store_skillspector_metadata(data, result)
+        """Convert a validated SkillSpector JSON report into ValidationResult entries.
+
+        With a ``content_type``, issues outside agent control paths are
+        suppressed and excluded from the aggregate risk score (see
+        :func:`~skillevaluator.validators.skillspector_scope.scope_skillspector_issues`).
+        """
+        self._store_skillspector_metadata(data, result, score_message=False)
 
         issues = data.get("issues", [])
         report_metadata = data.get("metadata") if isinstance(data.get("metadata"), dict) else {}
         raw_version = report_metadata.get("skillspector_version")
-        scanned_issues = []
+        report_components = data.get("components") if isinstance(data.get("components"), list) else []
+        candidate_issues = []
         removed_issues = []
         skipped_generated = 0
         skipped_spdx_comments = 0
         skipped_passwd_mounts = 0
         passwd_mount_lines: dict[str, frozenset[int]] = {}
-        has_critical_or_high = False
         for issue in issues:
             if not isinstance(issue, dict):
                 continue
@@ -2812,8 +3390,34 @@ class SecurityValidator(ValidatorBase):
                 removed_issues.append(issue)
                 skipped_passwd_mounts += 1
                 continue
+            candidate_issues.append(issue)
+
+        scopes = self._skillspector_issue_scopes(
+            candidate_issues,
+            report_components,
+            source_root=source_root,
+            report_truncated=skillspector_report_is_truncated(data),
+        )
+        scanned_issues = []
+        skipped_inapplicable = 0
+        skipped_by_role: Counter[str] = Counter()
+        has_critical_or_high = False
+        for issue, scope in zip(candidate_issues, scopes, strict=True):
+            if scope is not None and not scope.applicable:
+                removed_issues.append(issue)
+                skipped_inapplicable += 1
+                skipped_by_role[scope.file_role] += 1
+                continue
             scanned_issues.append(issue)
             finding, is_error = self._convert_skillspector_issue(issue)
+            if scope is not None:
+                finding.metadata.update(
+                    {
+                        "artifact_type": self.content_type,
+                        "file_role": scope.file_role,
+                        "applicability": scope.applicability,
+                    }
+                )
             if is_error:
                 has_critical_or_high = True
             result.add_structured_finding(finding, is_error=is_error)
@@ -2824,9 +3428,13 @@ class SecurityValidator(ValidatorBase):
             result.add_message(f"skillspector ignored {skipped_spdx_comments} SPDX-only HTML comment issue(s)")
         if skipped_passwd_mounts:
             result.add_message(f"skillspector ignored {skipped_passwd_mounts} read-only /etc/passwd mount issue(s)")
+        if skipped_inapplicable:
+            roles = ", ".join(f"{role}={count}" for role, count in sorted(skipped_by_role.items()))
+            result.add_message(
+                f"skillspector suppressed {skipped_inapplicable} issue(s) outside agent control paths ({roles})"
+            )
 
         reported_score = data["risk_assessment"]["score"]
-        report_components = data.get("components") if isinstance(data.get("components"), list) else []
         uses_report_identities = (
             isinstance(raw_version, str)
             and SEMVER_RE.fullmatch(raw_version) is not None
@@ -2844,22 +3452,52 @@ class SecurityValidator(ValidatorBase):
             if isinstance(analysis_completeness, dict)
             else None
         )
-        suppressed = data.get("suppressed")
-        serialized_findings = len(issues) + (len(suppressed) if isinstance(suppressed, list) else 0)
+        suppressed_count = len(data["suppressed"]) if isinstance(data.get("suppressed"), list) else 0
+        serialized_findings = len(issues) + suppressed_count
         effective_score = (
             self._minimum_skillspector_risk_score(
                 scanned_issues,
                 report_components,
                 uses_report_identities=uses_report_identities,
                 uses_finding_identity=uses_finding_identity,
-                findings_after_filtering=findings_after_filtering,
+                findings_after_filtering=(
+                    findings_after_filtering - suppressed_count if isinstance(findings_after_filtering, int) else None
+                ),
                 reported_score=reported_score,
                 removed_issues=removed_issues,
                 all_findings_serialized=findings_after_filtering == serialized_findings,
             )
-            if skipped_generated or skipped_spdx_comments or skipped_passwd_mounts
+            if skipped_generated or skipped_spdx_comments or skipped_passwd_mounts or skipped_inapplicable
             else reported_score
         )
+        if skipped_inapplicable and uses_report_identities and skillspector_report_serializes_every_finding(data):
+            # The reconciliation floor treats a match repeated across files
+            # as one finding plus unknown findings, which lowers the score of
+            # the kept issues. With every counted finding serialized, score
+            # the kept records directly.
+            effective_score = max(
+                effective_score,
+                min(reported_score, self._retained_skillspector_risk_score(scanned_issues, report_components)),
+            )
+        if reported_score > 50:
+            reported_severity = data["risk_assessment"].get("severity", "UNKNOWN")
+            if skipped_inapplicable:
+                # The gate uses the applicable score, so label both scores.
+                result.add_message(
+                    f"skillspector risk score: {effective_score}/100 applicable "
+                    f"(raw {reported_score}/100 {reported_severity})"
+                )
+            else:
+                result.add_message(f"skillspector risk score: {reported_score}/100 ({reported_severity})")
+        if self.content_type is not None:
+            result.metadata["skillspector_applicability"] = {
+                "artifact_type": self.content_type,
+                "kept_issues": len(scanned_issues),
+                "suppressed_inapplicable_issues": skipped_inapplicable,
+                "suppressed_by_file_role": dict(sorted(skipped_by_role.items())),
+                "raw_risk_score": reported_score,
+                "applicable_risk_score": effective_score,
+            }
         if effective_score > 50 and not has_critical_or_high:
             result.add_structured_finding(
                 Finding(
@@ -2875,7 +3513,37 @@ class SecurityValidator(ValidatorBase):
             has_critical_or_high = True
 
         if not result.is_incomplete:
-            self._summarize_skillspector_results(scanned_issues, has_critical_or_high, result)
+            self._summarize_skillspector_results(
+                scanned_issues,
+                has_critical_or_high,
+                result,
+                suppressed_inapplicable_issues=skipped_inapplicable,
+            )
+
+    def _skillspector_issue_scopes(
+        self,
+        issues: list[dict],
+        components: list,
+        *,
+        source_root: Path | None,
+        report_truncated: bool,
+    ) -> list[IssueScope | None]:
+        """Return each issue's applicability, or ``None`` for an unrestricted scan."""
+        if self.content_type is None or source_root is None:
+            return [None] * len(issues)
+        try:
+            return scope_skillspector_issues(
+                issues,
+                components,
+                scan_root=source_root,
+                reference_root=self.skillspector_reference_root,
+                report_truncated=report_truncated,
+            )
+        except Exception:
+            # Scoping only ever removes findings, so an unexpected failure
+            # keeps every one of them rather than abort the security check.
+            logger.warning("Could not scope SkillSpector findings to agent control paths; keeping all", exc_info=True)
+            return [IssueScope("unknown", "fail-closed") for _issue in issues]
 
     @staticmethod
     def _is_generated_artifact_issue(issue: dict, *, source_root: Path | None = None) -> bool:
@@ -3013,8 +3681,12 @@ class SecurityValidator(ValidatorBase):
         return frozenset(safe_lines)
 
     @staticmethod
-    def _store_skillspector_metadata(data: dict, result: ValidationResult) -> None:
-        """Store the validated SkillSpector report metadata on the result."""
+    def _store_skillspector_metadata(data: dict, result: ValidationResult, *, score_message: bool = True) -> None:
+        """Store the validated SkillSpector report metadata on the result.
+
+        With *score_message* false, the caller reports the risk score once it
+        knows the score that applies after scoping.
+        """
         skill_info = data.get("skill") or {}
         sp_metadata = data.get("metadata") or {}
         components = data.get("components") or []
@@ -3035,6 +3707,7 @@ class SecurityValidator(ValidatorBase):
                 "skillspector_components_count": len(components),
                 "skillspector_has_executable_scripts": sp_metadata.get("has_executable_scripts", False),
                 "skillspector_suppressed_count": suppressed_count,
+                "skillspector_suppressed_summary": SecurityValidator._summarize_suppressed(data.get("suppressed")),
             }
         )
 
@@ -3046,8 +3719,124 @@ class SecurityValidator(ValidatorBase):
                 "LLM analysis was requested but not available; provider or model diagnostics were redacted"
             )
 
-        if score > 50:
+        if score_message and score > 50:
             result.add_message(f"skillspector risk score: {score}/100 ({severity})")
+
+    @staticmethod
+    def _summarize_suppressed(suppressed: object) -> dict:
+        """Return the severity counts and rule IDs of the findings a baseline suppressed."""
+        by_severity: dict[str, int] = {}
+        rule_ids: set[str] = set()
+        for item in suppressed if isinstance(suppressed, list) else []:
+            if not isinstance(item, dict):
+                continue
+            severity = str(item.get("severity") or "UNKNOWN").upper()
+            by_severity[severity] = by_severity.get(severity, 0) + 1
+            rule_id = item.get("id")
+            if isinstance(rule_id, str) and rule_id:
+                rule_ids.add(rule_id[:64])
+        return {"by_severity": by_severity, "rule_ids": sorted(rule_ids)[:_SKILLSPECTOR_SUPPRESSED_RULE_ID_LIMIT]}
+
+    @staticmethod
+    def _report_skillspector_baseline(
+        result: ValidationResult,
+        baseline: dict,
+        *,
+        static_suppressed: object = None,
+        llm_suppressed: object = None,
+        static_summary: object = None,
+    ) -> None:
+        """Record whether the requested baseline applied, so an inert one is not silent.
+
+        The diagnostic is added after SkillSpector returns, outside its finding
+        stream, so the baseline cannot suppress it. ``static_suppressed`` and
+        ``llm_suppressed`` are the counts each stage reported; the LLM count
+        is ``None`` when that stage did not run or did not complete.
+
+        Every processed outcome is also a ``skillspector_baseline`` success
+        detail, so Markdown and HTML reports show that reviewed exceptions
+        were applied, not only the JSON report.
+        """
+        runtime_version = result.metadata.get("skillspector_version")
+        if not isinstance(runtime_version, str):
+            # No report was processed; the scan is already incomplete.
+            baseline["message"] = (
+                "SkillSpector did not return a usable report, so the baseline outcome is unknown; "
+                "see the security check errors."
+            )
+            return
+        suppressed = static_suppressed if isinstance(static_suppressed, int) else 0
+        summary = static_summary if isinstance(static_summary, dict) else {}
+        by_severity = summary.get("by_severity") if isinstance(summary.get("by_severity"), dict) else {}
+        baseline["suppressed_by_severity"] = by_severity
+        baseline["suppressed_rule_ids"] = summary.get("rule_ids") if isinstance(summary.get("rule_ids"), list) else []
+        llm_stage_suppressed = llm_suppressed if isinstance(llm_suppressed, int) else None
+        blocking = sum(
+            1
+            for finding in result.findings
+            if (finding.severity if isinstance(finding.severity, Severity) else Severity(str(finding.severity).lower()))
+            in (Severity.CRITICAL, Severity.HIGH)
+        )
+        baseline.update(
+            {
+                "loaded": True,
+                "runtime_scanner_version": runtime_version,
+                "suppressed_findings": suppressed,
+                "llm_stage_suppressed_findings": llm_stage_suppressed,
+                "active_findings": len(result.findings),
+                "active_blocking_findings": blocking,
+            }
+        )
+        counts = (
+            f"rules={baseline['rule_count']}, fingerprints={baseline['fingerprint_count']}, suppressed={suppressed}"
+        )
+        if llm_stage_suppressed is not None:
+            counts += f", llm_stage_suppressed={llm_stage_suppressed}"
+        if by_severity:
+            breakdown = ", ".join(f"{name}={count}" for name, count in sorted(by_severity.items()))
+            counts += f", suppressed_by_severity: {breakdown}"
+        file_label = f"{baseline['file']} ({baseline['digest']})"
+
+        def report(status: str, message: str, *, problem: bool) -> None:
+            baseline["status"] = status
+            baseline["message"] = message
+            # Recorded for every outcome, so reports that hide errors still show it.
+            result.add_success(check_name="skillspector_baseline", message=f"{file_label}: {message}")
+            if problem and blocking:
+                # Explain remaining blockers without turning a passing scan into a failure.
+                result.add_error(message)
+            elif problem:
+                result.add_warning(message)
+
+        # SkillSpector compares scanner versions as exact strings and ignores
+        # every fingerprint on a mismatch; rules still apply.
+        if baseline["fingerprint_count"] and baseline["baseline_scanner_version"] != runtime_version:
+            report(
+                "fingerprint_version_mismatch",
+                "SkillSpector baseline fingerprints were ignored: they were generated with SkillSpector "
+                f"{baseline['baseline_scanner_version'] or 'unknown'}, but this scan used {runtime_version} "
+                f"({counts}). Regenerate the fingerprints with SkillSpector {runtime_version}, or replace them "
+                "with narrow reviewed rules.",
+                problem=True,
+            )
+            return
+        if llm_stage_suppressed is not None and llm_stage_suppressed < suppressed:
+            # SkillSpector's LLM meta-analysis rewrites findings before the
+            # baseline is applied, so fingerprints of static findings stop
+            # matching and those findings come back from the LLM stage.
+            report(
+                "llm_stage_unmatched",
+                f"SkillSpector baseline suppressed {suppressed} finding(s) in the static stage but only "
+                f"{llm_stage_suppressed} in the LLM stage ({counts}). LLM analysis rewrites findings before the "
+                "baseline applies, so fingerprints do not match them; use narrow id, path, or message rules for "
+                "runs with LLM analysis, or scan without --llm.",
+                problem=True,
+            )
+            return
+        if suppressed or llm_stage_suppressed:
+            report("applied", f"SkillSpector baseline applied ({counts}).", problem=False)
+            return
+        report("no_matches", f"SkillSpector baseline loaded but matched no findings ({counts}).", problem=False)
 
     @staticmethod
     def _convert_skillspector_issue(issue: dict) -> tuple[Finding, bool]:
@@ -3111,20 +3900,55 @@ class SecurityValidator(ValidatorBase):
         return pattern_name
 
     @staticmethod
-    def _summarize_skillspector_results(issues: list, has_critical_or_high: bool, result: ValidationResult) -> None:
+    def _summarize_skillspector_results(
+        issues: list,
+        has_critical_or_high: bool,
+        result: ValidationResult,
+        *,
+        suppressed_inapplicable_issues: int = 0,
+    ) -> None:
         """Add a summary success/message entry for the skillspector scan."""
-        if not issues:
+        suppressed_note = ""
+        suppressed_metadata: dict[str, int] = {}
+        if suppressed_inapplicable_issues:
+            noun = "issue" if suppressed_inapplicable_issues == 1 else "issues"
+            suppressed_note = (
+                f"; {suppressed_inapplicable_issues} scanner {noun} suppressed outside agent control paths"
+            )
+            suppressed_metadata = {"suppressed_inapplicable_issues": suppressed_inapplicable_issues}
+        suppressed = result.metadata.get("skillspector_suppressed_count")
+        if not issues and isinstance(suppressed, int) and suppressed > 0:
+            # Suppressions require an explicit baseline; never present them as a clean scan.
             result.add_success(
                 check_name="skillspector",
-                message="No security vulnerabilities detected (secrets, API keys, credentials)",
+                message=(
+                    f"No active security findings; {suppressed} finding(s) suppressed by the requested baseline"
+                    f"{suppressed_note}"
+                ),
+                suppressed_count=suppressed,
+                **suppressed_metadata,
+            )
+        elif not issues:
+            result.add_success(
+                check_name="skillspector",
+                message=(
+                    f"No applicable security vulnerabilities detected{suppressed_note}"
+                    if suppressed_note
+                    else "No security vulnerabilities detected (secrets, API keys, credentials)"
+                ),
+                **suppressed_metadata,
             )
         elif has_critical_or_high:
             result.add_message(f"skillspector found {len(issues)} issue(s) including critical/high severity")
         else:
             result.add_success(
                 check_name="skillspector",
-                message=f"Security scan completed - {len(issues)} advisory finding(s) (no critical/high issues)",
+                message=(
+                    f"Security scan completed - {len(issues)} advisory finding(s) (no critical/high issues)"
+                    f"{suppressed_note}"
+                ),
                 issue_count=len(issues),
+                **suppressed_metadata,
             )
 
     def _scan_for_pii(self, skill_path: Path) -> ValidationResult:
@@ -3349,6 +4173,67 @@ class SecurityValidator(ValidatorBase):
         return root.lower() in protected_usernames
 
     _GPS_ZERO_PATTERN = re.compile(r"[-+]?0+\.0+[,\s]+[-+]?0+\.0+")
+    # Geospatial cues. A strong cue names a geographic coordinate system, a map
+    # link (an RFC 5870 ``geo:`` URI or a Google, Apple, OpenStreetMap, or Bing
+    # map URL), or a GeoJSON object: a geometry ``"type"``, a ``Feature``,
+    # ``FeatureCollection`` or ``GeometryCollection`` ``"type"``, or a
+    # ``"geometry": {`` member, which comes before ``"coordinates"`` when keys
+    # are sorted. GeoJSON member names and these object types are
+    # case-sensitive, so ``"type": "feature"`` in other JSON is not a cue. A soft
+    # cue (location, office, address, degrees, or a degree sign) also labels
+    # technical data such as ``calibration_location_offset`` or a rotation in
+    # degrees, so it does not override a technical label on the same line.
+    # Cue words accept their plurals and a numeric suffix (``locations:``,
+    # ``latlngs``, ``lat1, lon1``, ``location2``). The GeoJSON ``type`` and
+    # ``geometry`` keys may be double-quoted, single-quoted (a Python dict) or
+    # bare (a JS object or YAML); a bare type value must use GeoJSON's own
+    # spelling (``Point``, ``MultiPolygon``). Map hosts are matched with bounded
+    # TLD forms so long lines stay linear.
+    _GPS_STRONG_CONTEXT_PATTERN = re.compile(
+        r"(?i)\b(?:gps|geolocations?|geospatial|latitudes?|longitudes?|lats?|lons?|lngs?|latlngs?|latlong?s?"
+        r"|lonlats?|lnglats?|wgs[- ]?84)\d*\b"
+        r"|\bgeo:"
+        r"|\bmaps\.google\.|\bgoogle(?:\.[a-z]{2,3}){1,2}/maps\b|\bmaps\.apple\.com\b|\bopenstreetmap\.org\b"
+        r"|\bbing\.com/maps\b"
+        r"|\btype[\"']?\s*:\s*(?:[\"'](?:(?:multi)?(?:point|linestring|polygon)"
+        r"|(?-i:Feature(?:Collection)?|GeometryCollection))[\"']"
+        r"|(?-i:(?:Multi)?(?:Point|LineString|Polygon)|Feature(?:Collection)?|GeometryCollection)\b)"
+        r"|\b(?-i:geometry)[\"']?\s*:\s*\{"
+    )
+    _GPS_SOFT_CONTEXT_PATTERN = re.compile(r"(?i)\b(?:locations?|offices?|address(?:es)?|degrees?)\d*\b|[°º]")
+    _TECHNICAL_COORDINATE_CONTEXT_PATTERN = re.compile(
+        r"(?i)\b(?:texture|uv|pixel|screen|canvas|image|normalized|cartesian|robot(?:ic(?:s)?)?|local|world|camera"
+        r"|pose|joint|model|object|viewport|mesh|vertex|clip|device)[ -]+coordinates?\b"
+    )
+    _TECHNICAL_VECTOR_CONTEXT_PATTERN = re.compile(
+        r"(?i)\b(?:quaternion|pose(?:[ _-]?translation)?|waypoint|vector|calibration|roi|scale)s?\b"
+        r"|\bcoordinates?\s*=|(?:^|\s)(?:x\s+y|u\s+v)(?:\s|$)"
+    )
+    _CAMEL_CASE_BOUNDARY = re.compile(r"(?<=[a-z])(?=[A-Z])|(?<=[A-Z])(?=[A-Z][a-z])")
+    # Double- or single-quoted strings (one line at most, so a stray quote in
+    # prose cannot run on), bare identifiers (JS object keys), and structural
+    # characters, for the GeoJSON ``"coordinates"`` array pass.
+    _JSON_TOKEN_PATTERN = re.compile(r'"((?:[^"\\\n]|\\.)*)"|\'((?:[^\'\\\n]|\\.)*)\'|([A-Za-z_$][\w$]*)|([{}\[\]:,])')
+    _GEOJSON_GEOMETRY_TYPE = re.compile(r"(?i)(?:multi)?(?:point|linestring|polygon)")
+    # A bare (unquoted) type value must use GeoJSON's own spelling.
+    _GEOJSON_BARE_GEOMETRY_TYPE = re.compile(r"(?:Multi)?(?:Point|LineString|Polygon)")
+    _SCIENTIFIC_LITERAL_PATTERN = re.compile(r"(?<![\w.])[-+]?(?:\d+(?:\.\d*)?|\.\d+)[eE][-+]?\d+")
+    # ``<identifier>_`` directly before a candidate; group 1 is the identifier.
+    _UNDERSCORE_JOINED_PREFIX_PATTERN = re.compile(r"(?-i:([A-Za-z0-9]+(?:_[A-Za-z0-9]+)*)_)\Z")
+    _PAYMENT_LABEL_WORDS = frozenset(
+        {"card", "cards", "cc", "ccn", "pan", "credit", "debit", "payment", "visa", "mastercard", "amex"}
+    )
+    # A timestamp or digest label that directly precedes a value
+    # (``timestamp_microseconds: ``, ``"sha256": "``, ``checksum=``). An
+    # underscore separates words, so snake_case prefixes such as
+    # ``event_timestamp:`` and ``"created_at_epoch":`` count as labels.
+    _NON_PAYMENT_NUMBER_CONTEXT_PATTERN = re.compile(
+        r"(?i)(?:(?<![A-Za-z0-9])(?:(?:timestamp|unix(?:[_ -]?time)?|epoch)"
+        r"(?:[_ -]?(?:microseconds?|micros?|us|usec|nanoseconds?|nanos?|ns|nsec))?"
+        r"|(?:microseconds?|nanoseconds?)(?:[_ -]?timestamp)?)\b"
+        r"|(?<![A-Za-z0-9])(?:md5|sha(?:1|224|256|384|512)|hash|digest|checksum)\b)"
+        r"[\"']?(?:\s*[:=]\s*[\"']?|\s+[\"']?)\Z"
+    )
     # Match version/tag as identifier tokens, including separator and camel-case styles.
     # Plain substrings such as ``conversion`` and ``staging`` are not version labels.
     _VERSION_LABEL_PATTERN = re.compile(
@@ -3379,11 +4264,184 @@ class SecurityValidator(ValidatorBase):
     # and a version is never followed by ``/``, so CIDR blocks stay reported.
     _USER_AGENT_PRODUCT_PREFIX_PATTERN = re.compile(r"[A-Za-z][A-Za-z0-9]*\\?/\Z")
     _REDUCED_USER_AGENT_VERSION_PATTERN = re.compile(r"\d{1,3}\.0\.0\.0")
+    # A canonical 8-4-4-4-12 GUID/UUID, such as a COM interface ID. Its digit
+    # groups can form a Luhn-valid 16-digit run without being a card number.
+    _UUID_PATTERN = re.compile(r"(?i)(?<!\w)[0-9a-f]{8}(?:-[0-9a-f]{4}){3}-[0-9a-f]{12}(?!\w)")
+    # A payment label that directly precedes a value (``card_number: "``,
+    # ``credit_card=``, ``cc_no: ``, ``PAN ``), anchored to the end of the prefix.
+    _PAYMENT_LABEL_PATTERN = re.compile(
+        r"(?i)(?<![a-z0-9])(?:(?:credit[_ -]?)?card(?:[_ -]?(?:number|num|no))?|cc[_ -]?(?:number|num|no)|pan)"
+        r"(?![a-z0-9])[\"']?(?:\s*[:=]\s*[\"']?|\s+[\"']?)\Z"
+    )
 
     @staticmethod
     def _is_near_zero_gps(line: str) -> bool:
         """Check if a GPS match contains only near-zero coordinates (Null Island)."""
         return bool(SecurityValidator._GPS_ZERO_PATTERN.search(line))
+
+    @classmethod
+    def _is_numeric_pii_false_positive(cls, category: str, match: re.Match, line: str) -> bool:
+        """Return whether a card or phone candidate on *line* is technical data."""
+        if category == "credit_cards":
+            # A Luhn-valid timestamp or digest is not payment data. Only a label
+            # directly before this number counts, so a timestamp field does not
+            # hide a card number in a later field on the same line.
+            label_start = max(0, match.start() - 100)
+            if cls._NON_PAYMENT_NUMBER_CONTEXT_PATTERN.search(line, label_start, match.start()) is not None:
+                return True
+            # An underscore joining the number to a letter or digit makes it part
+            # of an identifier (``id_1707938736269577``), unless a word in that
+            # identifier is a payment label (``card_4532015112830366``).
+            joined = cls._UNDERSCORE_JOINED_PREFIX_PATTERN.search(line, label_start, match.start())
+            if joined is None:
+                return False
+            words = cls._CAMEL_CASE_BOUNDARY.sub("_", joined.group(1)).lower().split("_")
+            return not any(word in cls._PAYMENT_LABEL_WORDS for word in words)
+
+        if category == "phone_numbers":
+            # International phone syntax can begin at the ``+00`` exponent of a
+            # scientific-notation value and run into the next column. Only a
+            # candidate that starts inside such a literal is dropped, so a real
+            # phone number elsewhere on the line is still reported.
+            window = (max(0, match.start() - 64), match.start() + 64)
+            return any(
+                literal.start() <= match.start() < literal.end()
+                for literal in cls._SCIENTIFIC_LITERAL_PATTERN.finditer(line, *window)
+            )
+
+        return False
+
+    @classmethod
+    def _cue_text_variants(cls, text: str) -> tuple[str, ...]:
+        """Return *text* with underscores as spaces, unsplit and camelCase-split.
+
+        Keys and file names often use snake_case or camelCase (``homeLocation``,
+        ``gpsCoords``). The unsplit form keeps GeoJSON ``"type"`` values such as
+        ``FeatureCollection`` intact.
+        """
+        spaced = text.replace("_", " ")
+        split = cls._CAMEL_CASE_BOUNDARY.sub(" ", spaced)
+        return (spaced,) if split == spaced else (spaced, split)
+
+    @staticmethod
+    def _search_cue(pattern: re.Pattern, variants: tuple[str, ...]) -> bool:
+        """Return whether *pattern* matches any form of the cue text."""
+        return any(pattern.search(text) for text in variants)
+
+    @classmethod
+    def _lacks_geospatial_context(
+        cls, line: str, context: str, pair_start: int | None = None, label_start: int = 0
+    ) -> bool:
+        """Return whether GPS-shaped pairs on *line* have no geospatial cue.
+
+        Precise vectors, poses, quaternions, and waypoints have the same shape
+        as coordinates, so a pair needs a cue. *context* is the file name, up to
+        two lines before *line*, and *line*. Keys and file names often use
+        snake_case or camelCase, so underscores and case changes separate words.
+        Vector labels such as ``waypoint`` count only before the pair at
+        *pair_start*; a GPS cue after a separator can limit that label segment.
+        """
+        local = cls._cue_text_variants(line)
+        # A technical label labels the pair only when it comes before it, so
+        # ``Location: 37.77, -122.41 (map scale 1:5000)`` keeps its location cue.
+        label_end = len(line) if pair_start is None else pair_start
+        label_segment = line[label_start:label_end]
+        last_separator = max(label_segment.rfind(";"), label_segment.rfind("|"))
+        tail = label_segment[last_separator + 1 :]
+        tail_variants = cls._cue_text_variants(tail)
+        if cls._search_cue(cls._GPS_SOFT_CONTEXT_PATTERN, tail_variants) or cls._search_cue(
+            cls._GPS_STRONG_CONTEXT_PATTERN, tail_variants
+        ):
+            label_segment = tail
+        label = cls._cue_text_variants(label_segment)
+        nearby = cls._cue_text_variants(context)
+        if cls._search_cue(cls._GPS_STRONG_CONTEXT_PATTERN, local):
+            return False
+        inherits_technical_label = False
+        if label_start and ";" not in line[label_start:label_end] and "|" not in line[label_start:label_end]:
+            previous_separator = max(line.rfind(";", 0, label_start), line.rfind("|", 0, label_start))
+            previous_label = cls._cue_text_variants(line[previous_separator + 1 : label_start])
+            inherits_technical_label = cls._search_cue(
+                cls._TECHNICAL_COORDINATE_CONTEXT_PATTERN, previous_label
+            ) or cls._search_cue(cls._TECHNICAL_VECTOR_CONTEXT_PATTERN, previous_label)
+        if (
+            cls._search_cue(cls._TECHNICAL_COORDINATE_CONTEXT_PATTERN, label)
+            or cls._search_cue(cls._TECHNICAL_VECTOR_CONTEXT_PATTERN, label)
+            or inherits_technical_label
+        ):
+            return not cls._search_cue(cls._GPS_STRONG_CONTEXT_PATTERN, nearby)
+        if cls._search_cue(cls._GPS_SOFT_CONTEXT_PATTERN, local):
+            return False
+        if cls._search_cue(cls._GPS_STRONG_CONTEXT_PATTERN, nearby):
+            return False
+        if cls._search_cue(cls._TECHNICAL_COORDINATE_CONTEXT_PATTERN, nearby):
+            return True
+        return not cls._search_cue(cls._GPS_SOFT_CONTEXT_PATTERN, nearby)
+
+    @classmethod
+    def _geojson_coordinate_lines(cls, lines: list[str]) -> frozenset[int]:
+        """Return 1-based numbers of lines inside a GeoJSON geometry's ``"coordinates"`` array.
+
+        A pretty-printed ``Polygon`` or ``Multi*`` geometry opens its rings on
+        their own lines, so positions can sit far below the ``"type"`` cue. The
+        array counts when its object has a geometry ``"type"`` (before or after
+        ``"coordinates"``) or is the value of a ``"geometry"`` member. Keys and
+        values may be double-quoted (JSON), single-quoted (a Python dict) or
+        bare keys (a JS object). One pass over these tokens finds the arrays,
+        and nested arrays are merged before their lines are marked, so the scan
+        stays linear however deep the nesting; unbalanced brackets in other
+        text are tolerated.
+        """
+        text = "\n".join(lines)
+        if "coordinates" not in text:
+            return frozenset()
+        line_starts = [0, *itertools.accumulate(len(line) + 1 for line in lines)]
+        # Each frame is [kind, is_geojson, coordinate_spans, coordinates_owner, start].
+        stack: list[list] = []
+        spans: list[tuple[int, int]] = []
+        last_string: str | None = None
+        key: str | None = None
+        for token in cls._JSON_TOKEN_PATTERN.finditer(text):
+            bare = token.group(3)
+            value = token.group(1) if token.group(1) is not None else token.group(2)
+            if value is None:
+                value = bare
+            punct = token.group(4)
+            top = stack[-1] if stack else None
+            if value is not None:
+                type_pattern = cls._GEOJSON_BARE_GEOMETRY_TYPE if bare is not None else cls._GEOJSON_GEOMETRY_TYPE
+                if key == "type" and top is not None and top[0] == "{" and type_pattern.fullmatch(value):
+                    top[1] = True
+                last_string, key = value, None
+            elif punct == ":":
+                key, last_string = last_string, None
+            elif punct in "{[":
+                owner = top if punct == "[" and key == "coordinates" and top is not None and top[0] == "{" else None
+                stack.append([punct, punct == "{" and key == "geometry", [], owner, token.start()])
+                key = last_string = None
+            elif punct in "}]":
+                if not stack:
+                    continue
+                frame = stack.pop()
+                if frame[3] is not None:
+                    frame[3][2].append((frame[4], token.start()))
+                if frame[0] == "{" and frame[1]:
+                    spans.extend(frame[2])
+                key = last_string = None
+            else:
+                key = last_string = None
+        # Nested arrays yield nested spans; keep only the outermost of each
+        # group so every line is marked once.
+        numbers: set[int] = set()
+        kept_end = -1
+        for start, end in sorted(spans):
+            if end <= kept_end:
+                continue
+            first = bisect.bisect_right(line_starts, max(start, kept_end + 1))
+            last = bisect.bisect_right(line_starts, end)
+            numbers.update(range(first, last + 1))
+            kept_end = end
+        return frozenset(numbers)
 
     @classmethod
     def _is_version_literal(cls, match: re.Match, line: str) -> bool:
@@ -3439,7 +4497,8 @@ class SecurityValidator(ValidatorBase):
         """Validate a number string using the Luhn algorithm.
 
         Returns True if the digit string passes the Luhn check, meaning it
-        could be a valid credit card number.
+        could be a valid credit card number. An all-zero string has a zero
+        checksum but is never a card number, so it does not pass.
         """
         total = 0
         for i, ch in enumerate(reversed(digits)):
@@ -3449,7 +4508,35 @@ class SecurityValidator(ValidatorBase):
                 if n > 9:
                     n -= 9
             total += n
-        return total % 10 == 0
+        return total > 0 and total % 10 == 0
+
+    @classmethod
+    def _is_card_number_candidate(cls, match: re.Match, line: str, previous_line: str = "") -> bool:
+        """Return whether a card-shaped match on *line* can be a payment card number.
+
+        The digits must pass the Luhn check. Digits inside a canonical GUID/UUID
+        (optionally in braces) are an identifier, not a card, unless a payment
+        label directly precedes the GUID on its line or ends *previous_line*
+        (a YAML block value). Both prefixes are bounded so long lines stay linear.
+        """
+        if not cls._passes_luhn(re.sub(r"[\s-]", "", match.group())):
+            return False
+        # A GUID is 36 characters, so one that contains the match lies in this window.
+        guid = next(
+            (
+                found
+                for found in cls._UUID_PATTERN.finditer(line, max(0, match.start() - 36), match.end() + 36)
+                if found.start() <= match.start() and match.end() <= found.end()
+            ),
+            None,
+        )
+        if guid is None:
+            return True
+        value_start = guid.start()
+        if value_start and line[value_start - 1] == "{" and line[guid.end() : guid.end() + 1] == "}":
+            value_start -= 1
+        prefix = f"{previous_line[-100:]}\n{line[max(0, value_start - 100) : value_start]}"
+        return cls._PAYMENT_LABEL_PATTERN.search(prefix) is not None
 
     @staticmethod
     def _is_frontmatter_delimiter(line: str) -> bool:
@@ -3552,6 +4639,15 @@ class SecurityValidator(ValidatorBase):
         protected_usernames = protected_usernames or set()
         author_emails = author_emails or {}
         comment_lines = comment_lines if comment_lines is not None else _comment_line_numbers(file_path, lines)
+        line_exceptions = exceptions
+        excepted_card_digits: frozenset[str] = frozenset()
+        if category == "credit_cards":
+            # Known test card numbers are compared with each candidate, in any
+            # grouping, so one on a line does not hide a different card number.
+            numeric_exceptions = {exc for exc in exceptions if re.fullmatch(r"[0-9\s-]*[0-9][0-9\s-]*", exc)}
+            excepted_card_digits = frozenset(re.sub(r"[\s-]", "", exc) for exc in numeric_exceptions)
+            line_exceptions = [exc for exc in exceptions if exc not in numeric_exceptions]
+        geojson_lines: frozenset[int] | None = None
         for line_num, line in enumerate(lines, 1):
             if line_num in comment_lines:
                 continue
@@ -3561,10 +4657,40 @@ class SecurityValidator(ValidatorBase):
                 scan_line = re.sub(re.escape(author_email), "author@example.com", line, count=1, flags=re.IGNORECASE)
 
             matches = list(regex.finditer(scan_line))
-            if not matches or any(exc in line for exc in exceptions):
+            if excepted_card_digits:
+                matches = [
+                    match for match in matches if re.sub(r"[\s-]", "", match.group()) not in excepted_card_digits
+                ]
+            if not matches or any(exc in line for exc in line_exceptions):
                 continue
+            if category in ("credit_cards", "phone_numbers"):
+                matches = [match for match in matches if not self._is_numeric_pii_false_positive(category, match, line)]
+                if not matches:
+                    continue
+            if category == "gps_coordinates":
+                # A position inside a GeoJSON geometry's "coordinates" array is
+                # cued however far its rings sit below the "type" line.
+                if geojson_lines is None:
+                    geojson_lines = self._geojson_coordinate_lines(lines)
+                if line_num not in geojson_lines:
+                    context = "\n".join((file_path.name, *lines[max(0, line_num - 3) : line_num]))
+                    previous_end = 0
+                    kept_matches = []
+                    for pair in matches:
+                        if not self._lacks_geospatial_context(line, context, pair.start(), label_start=previous_end):
+                            kept_matches.append(pair)
+                        previous_end = pair.end()
+                    matches = kept_matches
+                    if not matches:
+                        continue
             if category == "ip_addresses":
                 matches = [match for match in matches if not self._is_version_literal(match, line)]
+                if not matches:
+                    continue
+            if category == "credit_cards":
+                # Check every candidate: a GUID or non-Luhn number must not hide a later card.
+                previous_line = lines[line_num - 2] if line_num > 1 else ""
+                matches = [match for match in matches if self._is_card_number_candidate(match, line, previous_line)]
                 if not matches:
                     continue
             match = matches[0]
@@ -3573,11 +4699,6 @@ class SecurityValidator(ValidatorBase):
             # username; unrelated roots are skipped.
             if category == "home_paths" and not self._is_personal_home_path(match, protected_usernames):
                 continue
-
-            if category == "credit_cards":
-                digits = re.sub(r"[\s-]", "", match.group())
-                if not self._passes_luhn(digits):
-                    continue
 
             confidence = self._estimate_confidence(category, line)
             if category == "gps_coordinates" and self._is_near_zero_gps(line):

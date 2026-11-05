@@ -186,7 +186,9 @@ appear once in `Evaluation Metadata` and hold the same value; a missing line, a
 fails the scan. Only a plain one-line list item counts as that line, which is
 how SkillEvaluator renders it. An item that holds a link or inline HTML, or
 continues onto a second line, is treated as missing and reported as not
-recorded. The expected values use the same forms as the `validate`
+recorded. Only top-level items are read: a nested list item is ignored, not
+counted as a duplicate. A value padded with spaces inside its code span is not
+canonical. The expected values use the same forms as the `validate`
 options above, and a malformed expected value stops the scan with a usage
 error. Hex digits in the source revision are compared without regard to case.
 Repository names and evaluator container revisions must match the card

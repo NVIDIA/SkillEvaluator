@@ -1969,7 +1969,8 @@ def _check_expected_source(path: Path, text: str, offenders: list[Offender], exp
     the reporter renders it. ``_metadata_list_items`` leaves out an item with a
     link, image or inline HTML, or one that continues onto a second line, so
     such a line is reported as not recorded rather than as not canonical. The
-    strict provenance scan treats it as missing too. The parser stays strict on
+    strict provenance scan treats it as missing too. Only top-level items are
+    read, so a nested item is ignored rather than counted as a duplicate. The parser stays strict on
     purpose: a link or inline HTML can make the visible value differ from the
     raw text.
     """
@@ -1989,6 +1990,10 @@ def _check_expected_source(path: Path, text: str, offenders: list[Offender], exp
         # The line is there but holds something the library would never render,
         # so point the operator at the malformed value rather than a missing line.
         recorded = _code_span_value(value)
+        # Padding inside the code span is never rendered, and a parser that reads
+        # the raw value would not see the canonical identity.
+        if recorded is not None and recorded != recorded.strip():
+            recorded = None
         normalized = _normalized_identity_value(field, recorded) if recorded is not None else None
         if normalized is None:
             offenders.append(Offender(path, line_number, f"{name} is not a canonical value, so it cannot match"))

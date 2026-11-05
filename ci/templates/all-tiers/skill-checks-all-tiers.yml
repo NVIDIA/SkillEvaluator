@@ -1,0 +1,33 @@
+# SPDX-License-Identifier: Apache-2.0
+# Opt-in candidate template. Use a capability-bearing release, replacing pins.
+name: Skill checks (all tiers)
+on:
+  pull_request:
+  push:
+    branches: [main]
+  workflow_dispatch:
+permissions:
+  contents: read
+  actions: read
+  pull-requests: read
+  id-token: write
+jobs:
+  skills:
+    uses: NVIDIA/SkillEvaluator/.github/workflows/evaluate-all-tiers.yml@RELEASE_WORKFLOW_SHA
+    with:
+      image: ghcr.io/nvidia/skillevaluator-tier1@sha256:RELEASE_IMAGE_DIGEST
+      tools-repository: NVIDIA/SkillEvaluator
+      tools-ref: RELEASE_WORKFLOW_SHA
+      tiers: '1,2,3'
+      paths: skills
+      min-score: 70
+      scan-mode: auto
+      env-mode: docker
+      provider: openai
+      runner: ubuntu-24.04
+      environment: skillevaluator
+      tier3-required: false
+    secrets:
+      OPENAI_API_KEY: ${{ secrets.OPENAI_API_KEY }}
+      ANTHROPIC_API_KEY: ${{ secrets.ANTHROPIC_API_KEY }}
+      NVIDIA_API_KEY: ${{ secrets.NVIDIA_API_KEY }}

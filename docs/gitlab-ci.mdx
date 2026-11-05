@@ -1,12 +1,65 @@
 ---
 title: "GitLab CI/CD"
-description: "Add reusable SkillEvaluator Tier 1 checks to a GitLab repository."
+description: "Add reusable skill checks to GitLab, including an opt-in three-tier pipeline with trusted feedback."
 ---
 
 Bring skill evaluation to GitLab with a reusable CI job. Point it at your skills
 and choose a quality threshold; merge requests evaluate changed skills
 without installing scanners or adding evaluation code to your repository.
 The shared container includes SkillSpector security scanning.
+
+## Three-tier checks and feedback
+
+This path requires **GitLab 17.0 or later** for validated include inputs.
+The unreleased [all-tier CLI path](cli-onboarding.mdx#opt-in-to-three-tier-ci)
+creates two thin files: `.gitlab-ci.yml` includes the pinned shared evaluation
+configuration, and `.gitlab/skill-feedback.yml` includes pinned trusted feedback.
+Use a schema-version 2 descriptor declaring `all-tiers-gitlab`; released 0.7.2
+configurations below remain Tier 1 only. Merge with any existing root workflow
+rules and stages, retaining rules that allow merge-request pipelines.
+
+The shared configuration runs the pinned Tier 1 image plus parallel native
+Tier 2 and Tier 3 jobs. Tier 1 and Tier 2 are required, while Tier 3 is advisory
+unless `SKILL_EVAL_TIER3_REQUIRED` is `true`. Native execution jobs can retain
+failed outcomes without stopping their parallel sibling; the aggregate is the
+required merge gate and fails for every failed or missing required tier.
+The always-running aggregate job
+retains `skill-evaluator-results/ci-results.json`, `index.html`, `summary.md`,
+and each tier's native reports for 14 days. Reports stay behind your normal
+GitLab artifact access controls.
+
+Configure a runner matching `SKILL_EVAL_RUNNER` (default `docker`), the protected
+`SKILL_EVAL_ENVIRONMENT` (default `skillevaluator`) and provider secrets scoped
+to that execution environment. The default Docker service needs a privileged
+runner with Docker-in-Docker enabled. For local mode the generated caller
+removes that service; use a Linux or macOS native runner with Python 3.12,
+Git and Node/npm. Missing native tools must be installed by the runner
+administrator; system-package bootstrap is limited to root Linux containers. The
+trusted tools are installed from `SKILL_EVAL_TOOLS_REF`, an immutable commit.
+Local agent CLIs are pinned and bootstrapped before selected-mode readiness
+checks. The current same-project MR head is checked before model execution;
+fork MRs do not receive provider-backed jobs.
+
+Protect the default branch and create a scoped bot token able to read pipeline
+artifacts and update MR notes. Store it as masked, protected
+`SKILLEVALUATOR_GITLAB_TOKEN`, scoped only to the protected
+`skillevaluator-feedback` environment. The MR pipeline never receives that
+token. After aggregation, a declarative bridge requests a separate pipeline on the
+protected default branch with only `SKILL_EVAL_FEEDBACK=true` and the source
+pipeline ID. It forwards no repository variables or caller-supplied pipeline
+overrides. That trusted pipeline uses validated include inputs for fixed evaluator pins,
+API host and project, so forwarded MR variables cannot replace its privileged
+bootstrap. It fetches only pinned evaluator tools and validates source
+pipeline, MR and current commit before updating
+one comment. Permit this same-project downstream pipeline and its protected execution environment.
+
+Install both configuration files on the default branch before the first demo
+MR. GitLab must permit the downstream pipeline and the protected feedback job;
+a setup MR alone cannot establish trusted automatic feedback. On instances
+that restrict protected variables in MR pipelines, approve an eligible protected
+execution path according to your project policy; missing provider credentials
+remain actionable evidence rather than a pass. Review the pipeline's actual
+required aggregate check before enabling merge restrictions.
 
 ## Get started
 

@@ -1,0 +1,25 @@
+# SPDX-License-Identifier: Apache-2.0
+# Root .gitlab-ci.yml; keep MR rules here even though jobs are included.
+include:
+  - remote: https://raw.githubusercontent.com/NVIDIA/SkillEvaluator/RELEASE_WORKFLOW_SHA/ci/gitlab/all-tiers.yml
+  - local: .gitlab/skill-feedback.yml
+    rules:
+      - if: '$CI_PIPELINE_SOURCE == "pipeline" && $CI_COMMIT_BRANCH == $CI_DEFAULT_BRANCH && $SKILL_EVAL_FEEDBACK == "true"'
+variables:
+  SKILL_EVAL_IMAGE: ghcr.io/nvidia/skillevaluator-tier1@sha256:RELEASE_IMAGE_DIGEST
+  SKILL_EVAL_TOOLS_REPOSITORY: NVIDIA/SkillEvaluator
+  SKILL_EVAL_TOOLS_REF: RELEASE_WORKFLOW_SHA
+  SKILL_EVAL_PATHS: skills
+  SKILL_EVAL_TIERS: '1,2,3'
+  SKILL_EVAL_ENV_MODE: docker
+  SKILL_EVAL_PROVIDER: openai
+  SKILL_EVAL_RUNNER: docker
+  SKILL_EVAL_ENVIRONMENT: skillevaluator
+  SKILL_EVAL_TIER3_REQUIRED: 'false'
+skill-evaluation:
+  rules:
+    - if: '$SKILL_EVAL_FEEDBACK == "true"'
+      when: never
+    - if: '$CI_PIPELINE_SOURCE == "merge_request_event"'
+    - if: '$CI_COMMIT_BRANCH == $CI_DEFAULT_BRANCH'
+    - if: '$CI_PIPELINE_SOURCE == "web"'

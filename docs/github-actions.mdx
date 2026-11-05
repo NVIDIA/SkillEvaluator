@@ -16,6 +16,52 @@ The shared image includes **Tier 1 and SkillSpector security scanning**.
   </Card>
 </CardGroup>
 
+## Three-tier checks and feedback
+
+The opt-in [CLI setup](cli-onboarding.mdx#opt-in-to-three-tier-ci) creates
+`.github/workflows/skill-checks-all-tiers.yml` and
+`.github/workflows/feedback-all-tiers.yml`. This unreleased path needs a reviewed
+capability-bearing descriptor; the 0.7.2 downloads below remain Tier 1 only.
+The [candidate source templates](https://github.com/NVIDIA/SkillEvaluator/tree/main/ci/templates)
+contain placeholders and must be filled with reviewed immutable references.
+
+The evaluation workflow calls the existing hardened Tier 1 container workflow
+at the same evaluator revision. Tier 2 and Tier 3 run independently with
+`fail-fast: false`, Python 3.12, and only their tier's installed extras. Native
+evaluator tools come from the pinned tools commit, while the candidate is
+checked out separately at the exact PR head. Provider-backed jobs require the
+current same-repository PR head or current default-branch commit, plus proven
+write, maintain, or admin repository permission for the initiating actor.
+Both actor permission and commit freshness are checked again before secrets
+are used. Environment-scoped provider secrets in `skillevaluator` are
+recommended; explicit mappings from repository CI secrets are also supported.
+Reviewers are optional: repositories can add an approval rule when they want one, while
+automatic execution does not depend on that GitHub plan feature. Protect
+repository and CI workflow write access as part of maintaining this boundary.
+Fork PRs retain keyless Tier 1 evidence; required
+Tier 2 is reported incomplete until eligible execution is available.
+
+The aggregate job always runs. Tier 1 and Tier 2 determine the required result;
+Tier 3 failures remain advisory by default. Set `tier3-required: true` to make
+Tier 3 a gate too. Keep the aggregate check required in branch protection and
+review its actual check name in a completed run. Reports are retained for 14
+days in `skill-evaluator-results-attempt-N`, including failed and incomplete
+results, with each tier's native JSON and HTML. Artifact download links require
+normal repository access; they do not create public report hosting.
+
+The feedback workflow starts from `workflow_run` on the default branch. It
+checks out only pinned trusted tools, validates the producer and current PR
+head, and updates one comment linking the exact run's private artifact. It
+never checks out the candidate with a write token. Merge this feedback file
+onto the default branch before expecting the first automatic comment. Changes
+to the caller must refresh its approved Git blob in `trusted-caller-blobs`.
+
+A missing provider key, unavailable runtime, or missing committed native dataset
+must remain visible as an incomplete or needs-action result. Local `ci init`,
+`ci status`, and `ci demo` are setup and inspection commands; a successful setup
+is not evidence that the three tiers passed. Optional Pages hosting remains a
+separate opt-in; artifact feedback works without it.
+
 ## Get started
 
 The scanner uses one **default validation policy** for public and private

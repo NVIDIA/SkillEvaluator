@@ -24,6 +24,12 @@ All notable changes to SkillEvaluator are documented in this file.
 
 ### Added
 
+- Opt-in three-tier GitHub and GitLab CI entrypoints with required Tier 1/Tier 2,
+  advisory paired Tier 3, Docker and native local execution, pinned local agent
+  bootstrap, retained aggregate/native reports, and trusted default-branch
+  feedback. Candidate templates require a capability-bearing release descriptor;
+  released Tier 1 bundles and workflows remain unchanged.
+
 - Allow hosted CI reports and PR comments from scans called through explicitly
   approved reusable workflow wrappers. Direct callers retain the existing setup;
   signed evaluator identity and exact consumer workflow approvals remain required.

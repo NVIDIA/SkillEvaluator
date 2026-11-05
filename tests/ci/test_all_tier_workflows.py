@@ -1,0 +1,234 @@
+# SPDX-License-Identifier: Apache-2.0
+"""Validate the security boundaries of the opt-in three-tier pipeline."""
+
+from pathlib import Path
+
+import yaml
+
+ROOT = Path(__file__).parents[2]
+
+
+def load(path):
+    return list(yaml.load_all((ROOT / path).read_text(), Loader=yaml.BaseLoader))[-1]
+
+
+def test_required_tier1_reuses_hardened_workflow_and_parallel_paid_tiers():
+    workflow = load(".github/workflows/evaluate-all-tiers.yml")
+    inputs = workflow["on"]["workflow_call"]["inputs"]
+    assert inputs["env-mode"]["default"] == "docker"
+    assert inputs["tier3-required"]["default"] == "false"
+    assert workflow["jobs"]["tier1"]["uses"] == "./.github/workflows/evaluate-skills.yml"
+    paid = workflow["jobs"]["paid-tiers"]
+    assert paid["strategy"]["fail-fast"] == "false"
+    assert paid["strategy"]["matrix"]["tier"] == ["2", "3"]
+    assert paid["environment"] == "${{ inputs.environment }}"
+    assert "eligibility" in paid["needs"]
+    assert "needs.eligibility.outputs.allowed" in paid["if"]
+    checkouts = [s for s in paid["steps"] if s.get("uses", "").startswith("actions/checkout@")]
+    assert {s["with"]["path"] for s in checkouts} == {"candidate", "evaluator"}
+    tools = next(s for s in checkouts if s["with"]["path"] == "evaluator")
+    assert tools["with"]["ref"] == "${{ inputs.tools-ref }}"
+    assert tools["with"]["persist-credentials"] == "false"
+    assert all("secrets." not in str(s) for s in workflow["jobs"]["eligibility"]["steps"])
+
+
+def test_aggregate_retains_every_tier_after_failure():
+    workflow = load(".github/workflows/evaluate-all-tiers.yml")
+    aggregate = workflow["jobs"]["aggregate"]
+    assert aggregate["if"] == "${{ always() }}"
+    assert set(aggregate["needs"]) == {"tier1", "paid-tiers"}
+    downloads = [s for s in aggregate["steps"] if s.get("uses", "").startswith("actions/download-artifact@")]
+    assert any(s["with"].get("path", "").endswith("/tier1") for s in downloads)
+    assert any(s["with"].get("merge-multiple") == "true" for s in downloads)
+    upload = next(s for s in aggregate["steps"] if s.get("uses", "").startswith("actions/upload-artifact@"))
+    assert upload["if"] == "${{ always() }}"
+    assert upload["with"]["retention-days"] == "14"
+    assert upload["with"]["name"] == "skill-evaluator-results-attempt-${{ github.run_attempt }}"
+
+
+def test_feedback_checks_out_only_pinned_tools_and_uses_scoped_token():
+    workflow = load(".github/workflows/feedback-all-tiers.yml")
+    job = workflow["jobs"]["feedback"]
+    assert job["permissions"]["pull-requests"] == "write"
+    checkouts = [s for s in job["steps"] if s.get("uses", "").startswith("actions/checkout@")]
+    assert len(checkouts) == 1
+    assert checkouts[0]["with"]["ref"] == "${{ inputs.tools-ref }}"
+    assert "pull_request.head" not in str(checkouts)
+    assert any("ci/feedback.py" in s.get("run", "") for s in job["steps"])
+
+
+def test_gitlab_feedback_token_is_confined_to_trusted_default_branch_job():
+    evaluation = load("ci/gitlab/all-tiers.yml")
+    assert "SKILLEVALUATOR_GITLAB_TOKEN" not in str(evaluation)
+    paid = evaluation["skill-evaluation-native"]
+    assert paid["parallel"]["matrix"] == [{"SKILL_EVAL_TIER": ["2", "3"]}]
+    assert paid["environment"]["name"] == "$SKILL_EVAL_ENVIRONMENT"
+    assert evaluation["skill-evaluation-aggregate"]["when"] == "always"
+    feedback = load("ci/gitlab/feedback.yml")["skill-evaluation-feedback"]
+    assert all("CI_DEFAULT_BRANCH" in r["if"] and "SKILL_EVAL_FEEDBACK" in r["if"] for r in feedback["rules"])
+    assert "SKILLEVALUATOR_GITLAB_TOKEN" in str(feedback)
+
+
+def test_gitlab_tier1_runs_only_digest_pinned_legacy_image():
+    job = load("ci/gitlab/all-tiers.yml")["skill-evaluation"]
+    assert job["image"]["name"] == "$SKILL_EVAL_IMAGE"
+    assert job["image"]["entrypoint"] == [""]
+    assert "/opt/skillevaluator/ci/run_tier1.py" in str(job["script"])
+    assert "python -m pip install" not in str(job["script"])
+
+
+def test_advisory_tier3_cannot_fail_the_reusable_workflow():
+    job = load(".github/workflows/evaluate-all-tiers.yml")["jobs"]["paid-tiers"]
+    assert job["continue-on-error"] == "${{ matrix.tier == 3 && !inputs.tier3-required }}"
+
+
+def test_trusted_aggregate_receipt_is_captured_before_untrusted_artifact_read():
+    job = load(".github/workflows/evaluate-all-tiers.yml")["jobs"]["aggregate"]
+    assert job["permissions"]["id-token"] == "write"
+    first = job["steps"][0]
+    assert first["id"] == "provenance"
+    assert "ACTIONS_ID_TOKEN_REQUEST_URL" in first["run"]
+    assert "skill-evaluator-results-provenance-attempt-" in str(job["steps"])
+
+
+def test_setup_configuration_changes_force_a_real_tier1_scan():
+    jobs = load(".github/workflows/evaluate-all-tiers.yml")["jobs"]
+    assert jobs["tier1"]["needs"] == "eligibility"
+    assert "needs.eligibility.outputs.scan-mode" in jobs["tier1"]["with"]["scan-mode"]
+    gate = str(jobs["eligibility"]["steps"])
+    assert "/files?per_page=100&page=" in gate
+    assert ".github/" in gate and ".gitlab-ci.yml" in gate
+    gitlab = str(load("ci/gitlab/all-tiers.yml")["skill-evaluation"]["script"])
+    assert "ci_changed=" in gitlab and "SCAN_MODE=all" in gitlab
+
+
+def test_gitlab_native_reports_are_outside_candidate_until_evaluation_completes():
+    script = str(load("ci/gitlab/all-tiers.yml")["skill-evaluation-native"]["script"])
+    assert "mktemp -d /tmp/skillevaluator-reports." in script
+    assert '--reports "$reports_dir"' in script
+    assert 'cp -R "$reports_dir/."' in script
+
+
+def test_github_head_is_rechecked_after_environment_approval_before_provider_secrets():
+    steps = load(".github/workflows/evaluate-all-tiers.yml")["jobs"]["paid-tiers"]["steps"]
+    check = next(s for s in steps if s.get("name") == "Recheck current head after environment approval")
+    assert "secrets." not in str(check)
+    assert "current.get('head', {}).get('sha')" in check["run"]
+    assert "pulls/" in check["run"]
+    first_secret = next(i for i, s in enumerate(steps) if "secrets." in str(s))
+    assert steps.index(check) < first_secret
+
+
+def test_provider_steps_cannot_run_when_post_approval_head_check_failed():
+    steps = load(".github/workflows/evaluate-all-tiers.yml")["jobs"]["paid-tiers"]["steps"]
+    for step in steps:
+        if "secrets." in str(step):
+            assert "steps.current-head.outputs.allowed == 'true'" in step["if"]
+
+
+def test_candidate_templates_do_not_change_legacy_bundle_generation():
+    candidates = ROOT / "ci/templates/all-tiers"
+    assert (candidates / "skill-checks-all-tiers.yml").is_file()
+    assert not list((ROOT / "ci/templates").glob("*all-tiers.yml"))
+
+
+def test_gitlab_privileged_bootstrap_uses_fixed_include_inputs():
+    source = (ROOT / "ci/gitlab/feedback.yml").read_text()
+    header = next(yaml.load_all(source, Loader=yaml.BaseLoader))
+    assert set(header["spec"]["inputs"]) == {"tools-ref", "tools-repository", "api-url", "project-id"}
+    job = load("ci/gitlab/feedback.yml")["skill-evaluation-feedback"]
+    script = str(job["script"])
+    assert "$SKILL_EVAL_TOOLS_REF" not in script
+    assert "$SKILL_EVAL_TOOLS_REPOSITORY" not in script
+    assert "$CI_API_V4_URL" not in script
+    assert "$[[ inputs.tools-ref ]]" in script
+    assert job["id_tokens"]["SKILL_EVAL_GITLAB_ID_TOKEN"]["aud"] == "urn:skillevaluator:feedback:v1"
+
+
+def test_gitlab_feedback_bridge_forwards_only_source_identity():
+    bridge = load("ci/gitlab/all-tiers.yml")["skill-evaluation-request-feedback"]
+    assert "script" not in bridge
+    assert bridge["inherit"]["variables"] == "false"
+    assert set(bridge["variables"]) == {"SKILL_EVAL_FEEDBACK", "SKILL_EVAL_SOURCE_PIPELINE_ID"}
+    assert bridge["trigger"]["branch"] == "$CI_DEFAULT_BRANCH"
+    assert bridge["trigger"]["forward"] == {"yaml_variables": "true", "pipeline_variables": "false"}
+
+
+def test_gitlab_bridge_rules_do_not_disable_their_own_feedback_flag():
+    bridge = load("ci/gitlab/all-tiers.yml")["skill-evaluation-request-feedback"]
+    assert all("SKILL_EVAL_FEEDBACK" not in rule["if"] for rule in bridge["rules"])
+
+
+def test_gitlab_feedback_bootstrap_isolates_process_configuration():
+    script = "\n".join(load("ci/gitlab/feedback.yml")["skill-evaluation-feedback"]["script"])
+    assert "export PATH=/usr/local/bin:/usr/bin:/bin" in script
+    assert "GIT_CONFIG_COUNT" in script and "GIT_EXEC_PATH" in script
+    assert "python -I -m pip --isolated install" in script
+    assert "env -i" in script
+
+
+def test_gitlab_aggregate_enforces_required_gates_for_all_matrix_outcomes():
+    jobs = load("ci/gitlab/all-tiers.yml")
+    assert jobs["skill-evaluation-native"]["allow_failure"] == "true"
+    assert jobs["skill-evaluation-aggregate"].get("allow_failure", "false") == "false"
+    assert jobs["skill-evaluation-aggregate"]["when"] == "always"
+
+
+def test_trusted_native_workflow_entrypoints_and_pip_ignore_consumer_import_paths():
+    for file in (
+        ".github/workflows/evaluate-all-tiers.yml",
+        ".github/workflows/feedback-all-tiers.yml",
+        "ci/gitlab/all-tiers.yml",
+    ):
+        document = load(file)
+        jobs = document.get("jobs", document)
+        for job in jobs.values():
+            if not isinstance(job, dict):
+                continue
+            scripts = job.get("script", []) + [step["run"] for step in job.get("steps", []) if "run" in step]
+            for script in scripts:
+                for line in script.splitlines():
+                    if "python " in line and "/opt/skillevaluator/ci/run_tier1.py" not in line:
+                        assert "python -I " in line, (file, line)
+                    if "-m pip" in line:
+                        assert "-m pip --isolated install" in line, (file, line)
+
+
+def test_candidate_caller_propagates_reusable_read_permissions():
+    candidate = load("ci/templates/all-tiers/skill-checks-all-tiers.yml")
+    assert candidate["permissions"]["actions"] == "read"
+    assert candidate["permissions"]["pull-requests"] == "read"
+
+
+def test_all_tier_runtimes_sync_the_reviewed_lock_with_pinned_uv():
+    evaluation = load(".github/workflows/evaluate-all-tiers.yml")
+    paid_install = next(
+        s for s in evaluation["jobs"]["paid-tiers"]["steps"] if s.get("name", "").startswith("Install only")
+    )["run"]
+    assert "uv==0.11.27" in paid_install
+    assert "sync --locked --no-dev" in paid_install
+    assert '--extra "tier${TIER}"' in paid_install
+    assert 'evaluator/.venv/bin" >> "$GITHUB_PATH"' in paid_install
+    aggregate = "\n".join(s["run"] for s in evaluation["jobs"]["aggregate"]["steps"] if "run" in s)
+    assert "sync --locked --no-dev" in aggregate
+    assert "--default-index https://pypi.org/simple" in aggregate
+    feedback = "\n".join(
+        s["run"] for s in load(".github/workflows/feedback-all-tiers.yml")["jobs"]["feedback"]["steps"] if "run" in s
+    )
+    assert "--extra publisher" in feedback
+    for name in ("skill-evaluation-native", "skill-evaluation-aggregate"):
+        script = "\n".join(load("ci/gitlab/all-tiers.yml")[name]["script"])
+        assert "uv==0.11.27" in script
+        assert "sync --locked --no-dev" in script
+        assert '--project "$SKILL_EVAL_TOOLS_DIR"' in script
+        assert 'export PATH="$SKILL_EVAL_TOOLS_DIR/.venv/bin:$PATH"' in script
+    privileged = "\n".join(load("ci/gitlab/feedback.yml")["skill-evaluation-feedback"]["script"])
+    assert "env -i" in privileged and "--no-config" in privileged
+    assert "sync --locked --no-dev --extra publisher" in privileged
+    assert '"$tools_dir/.venv/bin/python" -I - ' in privileged
+
+
+def test_github_native_and_aggregate_record_the_exact_tools_revision():
+    jobs = load(".github/workflows/evaluate-all-tiers.yml")["jobs"]
+    for name in ("paid-tiers", "aggregate"):
+        assert jobs[name]["env"]["SKILLEVALUATOR_TOOLS_REF"] == "${{ inputs.tools-ref }}"

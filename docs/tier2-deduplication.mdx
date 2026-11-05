@@ -15,6 +15,21 @@ must not leave your machine.
 Both checks read local files only.
 No external vector database or catalog service is required.
 
+## Tier 2 in automatic CI
+
+The [all-tier onboarding path](cli-onboarding.mdx#opt-in-to-three-tier-ci)
+runs Tier 2 as a required check, independently from the Tier 1 image and paired
+Tier 3 evaluation. Configure both chat and embedding access and commit each
+skill's native dataset under `evals/`; the initial CI contract supports
+per-skill datasets. CI validates readiness before paid work and reports missing
+credentials or unsupported dataset mappings as actionable incomplete results.
+It never generates a replacement dataset automatically.
+
+The aggregate artifact preserves native Tier 2 JSON and HTML, including
+findings and readiness evidence. A missing or failed required Tier 2 prevents
+the aggregate from passing even if Tier 1 succeeds. See
+[retained CI evidence](reports.mdx#retained-three-tier-ci-evidence).
+
 ## Run Tier 2
 
 ```bash title="Check one skill"

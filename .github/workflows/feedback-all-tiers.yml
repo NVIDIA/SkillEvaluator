@@ -1,0 +1,50 @@
+# SPDX-License-Identifier: Apache-2.0
+name: Trusted three-tier skill feedback
+on:
+  workflow_call:
+    inputs:
+      tools-repository:
+        type: string
+        default: NVIDIA/SkillEvaluator
+      tools-ref:
+        type: string
+        required: true
+      trusted-workflow-ref:
+        description: Exact reusable producer path at an immutable commit
+        type: string
+        required: true
+      trusted-caller-blobs:
+        description: Comma-separated reviewed caller Git blob IDs
+        type: string
+        required: true
+jobs:
+  feedback:
+    if: ${{ github.event_name == 'workflow_run' && github.event.workflow_run.event == 'pull_request' }}
+    runs-on: ubuntu-24.04
+    permissions:
+      contents: read
+      actions: read
+      pull-requests: write
+    steps:
+      # No producer repository ref, artifacts, or PR code is executed here.
+      - uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0
+        with:
+          repository: ${{ inputs.tools-repository }}
+          ref: ${{ inputs.tools-ref }}
+          persist-credentials: false
+      - uses: actions/setup-python@ece7cb06caefa5fff74198d8649806c4678c61a1
+        with:
+          python-version: '3.12'
+      - name: Install the locked trusted feedback runtime
+        run: |
+          python -I -m pip --isolated install --index-url https://pypi.org/simple uv==0.11.27
+          env -i PATH="$PATH" python -I -m uv --no-config --cache-dir "$RUNNER_TEMP/uv-cache" sync --locked --no-dev --extra publisher --project "$GITHUB_WORKSPACE" --python 3.12 --default-index https://pypi.org/simple
+          echo "$GITHUB_WORKSPACE/.venv/bin" >> "$GITHUB_PATH"
+      - name: Verify current head and producer before updating one comment
+        env:
+          GITHUB_TOKEN: ${{ github.token }}
+          SOURCE_RUN_ID: ${{ github.event.workflow_run.id }}
+          SOURCE_RUN_ATTEMPT: ${{ github.event.workflow_run.run_attempt }}
+          SKILL_EVAL_TRUSTED_WORKFLOW_REF: ${{ inputs.trusted-workflow-ref }}
+          SKILL_EVAL_TRUSTED_CALLER_BLOBS: ${{ inputs.trusted-caller-blobs }}
+        run: '"$GITHUB_WORKSPACE/.venv/bin/python" -I ci/feedback.py --platform github --repository "$GITHUB_REPOSITORY" --run-id "$SOURCE_RUN_ID" --run-attempt "$SOURCE_RUN_ATTEMPT"'

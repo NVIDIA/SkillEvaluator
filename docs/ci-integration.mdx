@@ -12,6 +12,22 @@ For the prebuilt runtime and one-file consumer setup, see
 its PR-comment step is separate from the reusable publisher's hosted-feedback
 setup.
 
+## Managed three-tier CI
+
+For two small consumer files and automatic artifact-backed PR/MR feedback, use
+the opt-in [three-tier CLI onboarding](cli-onboarding.mdx#opt-in-to-three-tier-ci).
+This unreleased capability runs required Tier 1 and Tier 2 plus advisory paired
+Tier 3, defaults to Docker, and supports native local mode. It requires an
+explicit compatible release descriptor and committed native datasets. The
+released Tier 1-only workflows and bundles continue to work unchanged.
+
+The shared evaluator retains native tier reports and an aggregate manifest,
+including incomplete outcomes. A separate trusted feedback entrypoint on the
+default branch verifies the current head and updates one comment linking the
+exact private CI artifact. Local setup and demo commands prepare the remote
+run; inspect that run's gates and reports before considering onboarding verified.
+The hand-written recipes below retain their own CLI flags and policy choices.
+
 ## Exit codes
 
 `skillevaluator validate` communicates pass/fail through its exit code, so a plain `run:` step is already a gate — no output parsing required.

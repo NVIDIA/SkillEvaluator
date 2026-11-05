@@ -1,0 +1,260 @@
+# SPDX-License-Identifier: Apache-2.0
+# Include this at a reviewed commit. The legacy Tier 1 runner is unchanged.
+variables:
+  SKILL_EVAL_PATHS: skills
+  SKILL_EVAL_SCAN_MODE: auto
+  SKILL_EVAL_MIN_SCORE: '70'
+  SKILL_EVAL_RUNNER: docker
+  SKILL_EVAL_ENVIRONMENT: skillevaluator
+  SKILL_EVAL_JOB_TIMEOUT: 5 hours
+  SKILL_EVAL_TIERS: '1,2,3'
+  SKILL_EVAL_ENV_MODE: docker
+  SKILL_EVAL_PROVIDER: openai
+  SKILL_EVAL_MODEL: ''
+  SKILL_EVAL_EMBEDDING_PROVIDER: ''
+  SKILL_EVAL_EMBEDDING_MODEL: ''
+  SKILL_EVAL_AGENTS: ''
+  SKILL_EVAL_TIER3_REQUIRED: 'false'
+  SKILL_EVAL_N_ATTEMPTS: '1'
+  SKILL_EVAL_N_CONCURRENT: '1'
+  SKILL_EVAL_TIMEOUT_SECONDS: '18000'
+  SKILL_EVAL_TOOLS_REPOSITORY: NVIDIA/SkillEvaluator
+  GIT_DEPTH: '0'
+  PYTHON_DOTENV_DISABLED: '1'
+
+skill-evaluation:
+  stage: test
+  image:
+    name: "$SKILL_EVAL_IMAGE"
+    entrypoint: [""]
+  variables:
+    GIT_DEPTH: "0"
+    LLM_ENABLED: "false"
+  script:
+    - |
+      set -eu
+      artifact_dir="$CI_PROJECT_DIR/skill-evaluator-report"
+      if [ -e "$artifact_dir" ] || [ -L "$artifact_dir" ]; then
+        echo "skill-evaluator-report already exists; choose a clean checkout for the report." >&2
+        exit 1
+      fi
+      reports_dir="$(mktemp -d /tmp/skillevaluator-reports.XXXXXX)"
+      trap 'rm -rf "$reports_dir"' EXIT
+      export SKILL_PATHS="$SKILL_EVAL_PATHS"
+      export MIN_SCORE="$SKILL_EVAL_MIN_SCORE"
+      # Report links must be HTTPS; an instance served over HTTP gets no job link.
+      case "${CI_JOB_URL:-}" in
+        https://*) export REPORT_RUN_URL="$CI_JOB_URL" ;;
+        *) export REPORT_RUN_URL="" ;;
+      esac
+      export REPORT_COMMIT="${CI_COMMIT_SHA:-}"
+      export REPORT_IMAGE="$SKILL_EVAL_IMAGE"
+      case "$SKILL_EVAL_SCAN_MODE" in
+        auto)
+          if [ "${CI_PIPELINE_SOURCE:-}" = "merge_request_event" ]; then
+            export SCAN_MODE=changed
+          else
+            export SCAN_MODE=all
+          fi
+          ;;
+        all|changed) export SCAN_MODE="$SKILL_EVAL_SCAN_MODE" ;;
+        *) echo "SKILL_EVAL_SCAN_MODE must be auto, all, or changed." >&2; exit 1 ;;
+      esac
+      if [ "$SCAN_MODE" = changed ]; then
+        if [ "${CI_PIPELINE_SOURCE:-}" != "merge_request_event" ] || [ "${CI_MERGE_REQUEST_EVENT_TYPE:-detached}" != detached ]; then
+          echo "Changed-skill selection requires a detached merge-request pipeline." >&2
+          exit 1
+        fi
+        export DIFF_BASE_SHA="${CI_MERGE_REQUEST_DIFF_BASE_SHA:-}"
+        export DIFF_HEAD_SHA="${CI_COMMIT_SHA:-}"
+      fi
+      # Changes to CI onboarding must exercise real skills on the setup MR.
+      if [ "$SCAN_MODE" = changed ]; then
+        ci_changed="$(git diff --name-only "$DIFF_BASE_SHA" "$DIFF_HEAD_SHA")"
+        if printf '%s\n' "$ci_changed" | awk '/^(\.github\/|\.gitlab\/|\.skillevaluator\/ci|\.gitlab-ci\.yml$)/ { found=1 } END { exit !found }'; then
+          export SCAN_MODE=all
+        fi
+      fi
+      set +e
+      python /opt/skillevaluator/ci/run_tier1.py --workspace "$CI_PROJECT_DIR" --reports "$reports_dir"
+      result=$?
+      set -e
+      mkdir "$artifact_dir"
+      cp -R "$reports_dir/." "$artifact_dir/"
+      exit "$result"
+  artifacts:
+    when: always
+    paths:
+      - skill-evaluator-report/
+    expire_in: 14 days
+  rules:
+    - if: '$SKILL_EVAL_FEEDBACK == "true"'
+      when: never
+    - if: '$CI_PIPELINE_SOURCE == "merge_request_event"'
+    - if: '$CI_COMMIT_BRANCH == $CI_DEFAULT_BRANCH'
+    - if: '$CI_PIPELINE_SOURCE == "web"'
+
+.skill-evaluation-tools:
+  image: python:3.12.12-slim
+  before_script:
+    - |
+      if ! command -v git >/dev/null 2>&1; then
+        if [ "$(id -u)" != 0 ] || ! command -v apt-get >/dev/null 2>&1; then
+          echo 'Install git on this native runner before retrying.' >&2; exit 1
+        fi
+        apt-get update -qq && apt-get install -y --no-install-recommends git ca-certificates
+      fi
+    - |
+      set -eu
+      case "$SKILL_EVAL_TOOLS_REF" in
+        *[!a-f0-9]*|'') echo 'SKILL_EVAL_TOOLS_REF must be an immutable commit' >&2; exit 1 ;;
+      esac
+      test "${#SKILL_EVAL_TOOLS_REF}" -eq 40
+      case "$SKILL_EVAL_TOOLS_REPOSITORY" in
+        *[!a-zA-Z0-9_./-]*|/*|*..*) exit 1 ;;
+      esac
+      tools_dir="$(mktemp -d /tmp/skillevaluator-tools.XXXXXX)"
+      export SKILL_EVAL_TOOLS_DIR="$tools_dir"
+      git -C "$tools_dir" init -q
+      git -C "$tools_dir" remote add origin "https://github.com/$SKILL_EVAL_TOOLS_REPOSITORY.git"
+      git -C "$tools_dir" fetch -q --depth 1 origin "$SKILL_EVAL_TOOLS_REF"
+      git -C "$tools_dir" checkout -q --detach FETCH_HEAD
+      export REPORT_COMMIT="$CI_COMMIT_SHA"
+      export REPORT_REPOSITORY="$CI_PROJECT_PATH"
+      export REPORT_RUN_URL="$CI_PIPELINE_URL"
+      export DIFF_BASE_SHA="${CI_MERGE_REQUEST_DIFF_BASE_SHA:-}"
+      export DIFF_HEAD_SHA="$CI_COMMIT_SHA"
+      export SKILLEVALUATOR_RUNTIME_DIR="$(mktemp -d /tmp/skillevaluator-runtimes.XXXXXX)"
+
+skill-evaluation-native:
+  # The aggregate is the required gate; execution failures must retain evidence.
+  allow_failure: true
+  extends: .skill-evaluation-tools
+  stage: test
+  timeout: $SKILL_EVAL_JOB_TIMEOUT
+  tags: [$SKILL_EVAL_RUNNER]
+  environment:
+    name: $SKILL_EVAL_ENVIRONMENT
+  parallel:
+    matrix:
+      - SKILL_EVAL_TIER: ['2', '3']
+  # Docker mode requires a privileged runner supporting Docker-in-Docker.
+  # For local mode select a native runner and remove this service if necessary.
+  services:
+    - name: docker:28.5.1-dind
+      alias: docker
+  variables:
+    DOCKER_HOST: tcp://docker:2375
+    DOCKER_TLS_CERTDIR: ''
+  script:
+    - |
+      set -eu
+      case ",$SKILL_EVAL_TIERS," in
+        *",$SKILL_EVAL_TIER,"*) ;;
+        *) echo "Tier $SKILL_EVAL_TIER is not selected"; exit 0 ;;
+      esac
+      python -I "$SKILL_EVAL_TOOLS_DIR/ci/eligible_gitlab.py"
+      if [ "$SKILL_EVAL_TIER" = 3 ]; then
+        if [ "$SKILL_EVAL_ENV_MODE" = docker ] && ! command -v docker >/dev/null 2>&1; then
+          if [ "$(id -u)" != 0 ] || ! command -v apt-get >/dev/null 2>&1; then
+            echo 'Install Docker on this runner before retrying.' >&2; exit 1
+          fi
+          apt-get update -qq && apt-get install -y --no-install-recommends docker.io
+        elif [ "$SKILL_EVAL_ENV_MODE" = local ] && ! command -v npm >/dev/null 2>&1; then
+          if [ "$(id -u)" != 0 ] || ! command -v apt-get >/dev/null 2>&1; then
+            echo 'Install Node/npm on this native local runner before retrying.' >&2; exit 1
+          fi
+          apt-get update -qq && apt-get install -y --no-install-recommends nodejs npm
+        fi
+      fi
+      python -I -m pip --isolated install --index-url https://pypi.org/simple uv==0.11.27
+      env -i PATH="$PATH" python -I -m uv --no-config --cache-dir "$SKILL_EVAL_TOOLS_DIR/.uv-cache" sync --locked --no-dev --extra "tier$SKILL_EVAL_TIER" --project "$SKILL_EVAL_TOOLS_DIR" --python 3.12 --default-index https://pypi.org/simple
+      export PATH="$SKILL_EVAL_TOOLS_DIR/.venv/bin:$PATH"
+      if [ "$SKILL_EVAL_TIER" = 3 ]; then
+        python -I "$SKILL_EVAL_TOOLS_DIR/ci/bootstrap_tiers.py" || true
+      fi
+      reports_dir="$(mktemp -d /tmp/skillevaluator-reports.XXXXXX)"
+      trap 'rm -rf "$reports_dir"' EXIT
+      set +e
+      python -I "$SKILL_EVAL_TOOLS_DIR/ci/run_tiers.py" evaluate --tier "$SKILL_EVAL_TIER" --workspace "$CI_PROJECT_DIR" --reports "$reports_dir"
+      result=$?
+      set -e
+      artifact_dir="$CI_PROJECT_DIR/skill-evaluator-native"
+      if [ -e "$artifact_dir" ] || [ -L "$artifact_dir" ]; then
+        echo 'Use a clean checkout: skill-evaluator-native already exists.' >&2
+        exit 1
+      fi
+      mkdir "$artifact_dir"
+      cp -R "$reports_dir/." "$artifact_dir/"
+      exit "$result"
+  artifacts:
+    when: always
+    paths: [skill-evaluator-native/]
+    expire_in: 14 days
+  rules:
+    - if: '$SKILL_EVAL_FEEDBACK == "true"'
+      when: never
+    - if: '$CI_PIPELINE_SOURCE == "merge_request_event" && $CI_MERGE_REQUEST_SOURCE_PROJECT_ID != $CI_PROJECT_ID'
+      when: never
+    - if: '$CI_PIPELINE_SOURCE == "merge_request_event"'
+    - if: '$CI_COMMIT_BRANCH == $CI_DEFAULT_BRANCH'
+    - if: '$CI_PIPELINE_SOURCE == "web" && $CI_COMMIT_BRANCH == $CI_DEFAULT_BRANCH'
+
+skill-evaluation-aggregate:
+  extends: .skill-evaluation-tools
+  stage: test
+  when: always
+  needs:
+    - job: skill-evaluation
+      artifacts: true
+      optional: true
+    - job: skill-evaluation-native
+      artifacts: true
+      optional: true
+  script:
+    - |
+      set -eu
+      python -I -m pip --isolated install --index-url https://pypi.org/simple uv==0.11.27
+      env -i PATH="$PATH" python -I -m uv --no-config --cache-dir "$SKILL_EVAL_TOOLS_DIR/.uv-cache" sync --locked --no-dev --project "$SKILL_EVAL_TOOLS_DIR" --python 3.12 --default-index https://pypi.org/simple
+      export PATH="$SKILL_EVAL_TOOLS_DIR/.venv/bin:$PATH"
+      mkdir -p skill-evaluator-results/tier1
+      if [ -d skill-evaluator-report ]; then
+        cp -R skill-evaluator-report/. skill-evaluator-results/tier1/
+      fi
+      if [ -d skill-evaluator-native ]; then
+        cp -R skill-evaluator-native/. skill-evaluator-results/
+      fi
+      python -I "$SKILL_EVAL_TOOLS_DIR/ci/run_tiers.py" aggregate --reports "$CI_PROJECT_DIR/skill-evaluator-results" --tiers "$SKILL_EVAL_TIERS"
+  artifacts:
+    when: always
+    name: skill-evaluator-results-$CI_PIPELINE_ID-$CI_JOB_ID
+    paths: [skill-evaluator-results/]
+    expire_in: 14 days
+  rules:
+    - if: '$SKILL_EVAL_FEEDBACK == "true"'
+      when: never
+    - if: '$CI_PIPELINE_SOURCE == "merge_request_event"'
+    - if: '$CI_COMMIT_BRANCH == $CI_DEFAULT_BRANCH'
+    - if: '$CI_PIPELINE_SOURCE == "web"'
+
+skill-evaluation-request-feedback:
+  stage: test
+  needs:
+    - job: skill-evaluation-aggregate
+      artifacts: false
+  when: always
+  inherit:
+    variables: false
+  variables:
+    SKILL_EVAL_FEEDBACK: 'true'
+    SKILL_EVAL_SOURCE_PIPELINE_ID: $CI_PIPELINE_ID
+  # A real bridge supplies verifiable source/downstream pipeline identity.
+  # No repository variables or caller-supplied pipeline overrides are forwarded.
+  trigger:
+    project: $CI_PROJECT_PATH
+    branch: $CI_DEFAULT_BRANCH
+    forward:
+      yaml_variables: true
+      pipeline_variables: false
+  rules:
+    - if: '$CI_PIPELINE_SOURCE == "merge_request_event" && $CI_MERGE_REQUEST_SOURCE_PROJECT_ID == $CI_PROJECT_ID'

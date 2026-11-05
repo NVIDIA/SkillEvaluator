@@ -1,12 +1,14 @@
 ---
 title: "Set Up CI with the CLI"
-description: "Install SkillEvaluator, answer a few questions and bring automatic skill checks to your GitHub repository."
+description: "Prepare GitHub or GitLab checks and trusted feedback, with an explicit opt-in for three-tier CI."
 ---
 
 Bring skill evaluation to your GitHub repository in one guided setup.
 SkillEvaluator finds your skills, prepares the workflows and opens a setup PR.
 If your repository already has skill checks, it can add reporting to that setup.
-Your CI gets **Tier 1 checks, including SkillSpector security scanning**.
+The released default setup gives your CI **Tier 1 checks, including
+SkillSpector security scanning**. The explicit all-tier path below adds
+required Tier 2 and advisory paired Tier 3 on GitHub or GitLab.
 
 ```bash title="Run inside your checked-out GitHub repository"
 pip install --upgrade skillevaluator
@@ -42,9 +44,101 @@ locally. The shared container supplies the runtime; you control the configuratio
   public and private repositories. Hosted feedback supports public Pages and
   verified private Pages sites in eligible organization repositories. See
   [private report hosting](#private-report-hosting) for the one-time prerequisite.
-  This wizard supports GitHub. For GitLab, use the
+  The released Tier 1 wizard supports GitHub. For Tier 1 on GitLab, use the
   [GitLab template](/skills/skillevaluator/gitlab-ci).
 </Accordion>
+
+## Opt in to three-tier CI
+
+The new all-tier path supports **GitHub and GitLab** with two small consumer
+files. Tier 1 and Tier 2 are required; Tier 3 is advisory unless you select
+`--tier3-required`. Docker is the default. `--env-mode local` runs native agent
+CLIs on the selected CI runner. This setup supports these two modes only.
+
+<Note>
+  This is an unreleased capability. The bundled 0.7.2 descriptor and downloaded
+  0.7.2 templates remain Tier 1 only. Use an explicitly reviewed schema-version
+  2 descriptor declaring `all-tiers-github` or `all-tiers-gitlab`; every workflow,
+  feedback tool and image reference must be immutable. The CLI rejects a
+  Tier 1 descriptor when `--tiers 1,2,3` is requested.
+</Note>
+
+```bash title="Preview, then open a setup PR or MR"
+skillevaluator ci init --tiers 1,2,3 --release /path/to/reviewed-ci-release.json \
+  --platform github --provider openai --paths skills --mode preview --no-input
+skillevaluator ci init --tiers 1,2,3 --release /path/to/reviewed-ci-release.json \
+  --platform github --provider openai --paths skills --mode pr --no-input
+```
+
+For GitLab 17.0 or later, select `--platform gitlab`. GitHub uses your local
+`gh` login; GitLab uses a process-scoped `SKILLEVALUATOR_GITLAB_TOKEN` or
+`GITLAB_TOKEN` for the repository's host. GitLab setup does not require `glab`.
+`--mode preview` shows proposed files;
+`--mode save` writes the two local configuration files; `--mode pr` opens the
+setup review through the platform API. These commands prepare CI configuration;
+they do not run the evaluators on your laptop.
+
+| Local command | Result | Evidence still needed |
+| --- | --- | --- |
+| `ci init` | Prepare the evaluation and trusted feedback entrypoints | Merge the setup and configure the CI runner and secrets |
+| `ci status --tiers 1,2,3` | Read default-branch configuration and latest pipeline status | Inspect the actual CI reports and gates |
+| `ci demo --tiers 1,2,3` | Open a small skill-change PR or MR | Wait for required checks, the comment, and retained reports |
+
+Before the first demo, commit native datasets under each skill's `evals/`
+directory; see [Evaluation Datasets](eval-datasets.mdx). CI reuses those cases
+with full positive and negative paired coverage. It does not generate cases or
+use autopilot. Missing datasets or credentials produce actionable incomplete
+results; they do not count as a passing tier. Central dataset mappings are not
+supported by this initial workflow.
+
+Create the `skillevaluator` execution environment and store provider secrets
+there (`OPENAI_API_KEY`, `ANTHROPIC_API_KEY`, or `NVIDIA_API_KEY`). GitHub also
+supports the generated explicit mappings from repository CI secrets; scoped
+environment secrets are recommended. On GitHub,
+provider-backed jobs require the initiating actor to have repository write,
+maintain, or admin permission, as verified through GitHub's API. They also
+require the exact current same-repository PR head or current default-branch
+commit. These checks run again after entering the execution environment.
+Environment reviewers are optional: configure them if your repository wants
+manual approval; automatic checks do not require a paid reviewer-protection
+feature. Restrict repository and CI workflow write access to trusted maintainers.
+GitLab's protected execution and feedback prerequisites are described below.
+Choose matching chat and embedding configuration with `--provider`,
+`--embedding-provider`, `--model`, and `--embedding-model`; the default embedding
+provider follows OpenAI or NVIDIA Build; Anthropic defaults to OpenAI embeddings
+and needs that provider's key too. The shared `--model` configures chat/judging
+and the native agent provider default; agent-specific models in committed eval
+configuration keep their native override semantics. `--agents` overrides the
+native provider default: OpenAI uses Codex, Anthropic uses Claude Code, and
+NVIDIA Build uses OpenCode. CI installs Tier 2 or Tier 3 extras from the reviewed
+tools commit. Tier 3 checks the selected environment with `doctor`; local mode
+also installs pinned native CLIs into an isolated runtime directory.
+
+`--runner` chooses a GitHub runner label or GitLab runner tag. GitHub defaults
+to `ubuntu-24.04`; GitLab defaults to a configured `docker` tag. Docker mode
+requires a working daemon; GitLab's included Docker-in-Docker service requires
+a privileged runner. Local mode needs a compatible native runner with Node/npm;
+the generated GitLab local configuration removes the Docker service. Cloud
+sandbox backends are outside this onboarding path.
+
+Merge both generated files onto the default branch **before opening the demo**.
+The first setup PR/MR can show evaluation checks, but automatic comments need
+the trusted feedback entrypoint to exist on the default branch. GitLab also
+needs a protected default branch and a scoped, protected
+`SKILLEVALUATOR_GITLAB_TOKEN` limited to the `skillevaluator-feedback`
+environment. The MR jobs receive no comment token. See the platform pages for
+[GitHub](github-actions.mdx#three-tier-checks-and-feedback) and
+[GitLab](gitlab-ci.mdx#three-tier-checks-and-feedback) details.
+
+### Upgrade a Tier 1-only consumer
+
+Keep the existing workflow while previewing the explicit all-tier setup with a
+compatible descriptor. Review the new evaluator and feedback pins, provider,
+runner, protected environment, paths and required-tier policy. Remove or disable
+the old Tier 1 caller in the setup review once the new all-tier caller covers
+the same roots, so a PR does not run two independent scans. Merge the new
+feedback entrypoint and then open a fresh demo. Existing released bundles and
+Tier 1-only callers keep their current behavior.
 
 ## Run the wizard
 
@@ -72,7 +166,9 @@ Folders [1]: 1,2
 </Frame>
 
 The score threshold does not override required security or schema checks.
-Default Tier 1 checks use no model key. Tier 2 and Tier 3 are not part of this setup.
+Default Tier 1 checks use no model key. Tier 2 and Tier 3 are not part of
+the released Tier 1 wizard described in this section; use the explicit
+[all-tier path](#opt-in-to-three-tier-ci) above for those stages.
 
 <Note>
   Already have `.github/workflows/skill-checks.yml`? The CLI recognizes a

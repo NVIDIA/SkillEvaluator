@@ -1,0 +1,399 @@
+# SPDX-License-Identifier: Apache-2.0
+name: Reusable three-tier skill evaluation
+on:
+  workflow_call:
+    inputs:
+      image:
+        description: Immutable legacy Tier 1 GHCR image
+        type: string
+        required: true
+      tools-repository:
+        type: string
+        default: NVIDIA/SkillEvaluator
+      tools-ref:
+        description: Reviewed 40-character evaluator commit
+        type: string
+        required: true
+      tiers:
+        type: string
+        default: '1,2,3'
+      paths:
+        type: string
+        default: skills
+      scan-mode:
+        type: string
+        default: auto
+      min-score:
+        type: number
+        default: 70
+      env-mode:
+        description: docker or local; cloud backends are not supported here
+        type: string
+        default: docker
+      provider:
+        type: string
+        default: openai
+      model:
+        type: string
+        default: ''
+      embedding-provider:
+        type: string
+        default: ''
+      embedding-model:
+        type: string
+        default: ''
+      agents:
+        type: string
+        default: ''
+      runner:
+        type: string
+        default: ubuntu-24.04
+      environment:
+        description: Execution environment with optional repository-configured reviewers
+        type: string
+        default: skillevaluator
+      tier3-required:
+        type: boolean
+        default: false
+      n-attempts:
+        type: number
+        default: 1
+      n-concurrent:
+        type: number
+        default: 1
+      timeout-minutes:
+        type: number
+        default: 300
+    secrets:
+      OPENAI_API_KEY:
+        required: false
+      ANTHROPIC_API_KEY:
+        required: false
+      NVIDIA_API_KEY:
+        required: false
+permissions:
+  contents: read
+  id-token: write
+jobs:
+  tier1:
+    needs: eligibility
+    if: ${{ always() && contains(format(',{0},', inputs.tiers), ',1,') }}
+    uses: ./.github/workflows/evaluate-skills.yml
+    with:
+      image: ${{ inputs.image }}
+      paths: ${{ inputs.paths }}
+      min-score: ${{ inputs.min-score }}
+      scan-mode: ${{ needs.eligibility.outputs.scan-mode || inputs.scan-mode }}
+      artifact-name: skill-evaluator-tier1
+      llm: false
+  eligibility:
+    runs-on: ubuntu-24.04
+    permissions:
+      contents: read
+      pull-requests: read
+    outputs:
+      allowed: ${{ steps.check.outputs.allowed }}
+      scan-mode: ${{ steps.check.outputs.scan-mode }}
+    steps:
+      - name: Check immutable configuration and current same-repository PR head
+        id: check
+        env:
+          GH_TOKEN: ${{ github.token }}
+          API_URL: ${{ github.api_url }}
+          TOOLS_REF: ${{ inputs.tools-ref }}
+          ENV_MODE: ${{ inputs.env-mode }}
+          TIERS: ${{ inputs.tiers }}
+          SCAN_MODE: ${{ inputs.scan-mode }}
+        run: |
+          python3 -I - <<'PY'
+          import json, os, re, urllib.parse, urllib.request
+          if not re.fullmatch(r'[0-9a-f]{40}', os.environ['TOOLS_REF']):
+              raise SystemExit('tools-ref must be a reviewed immutable 40-character commit')
+          if os.environ['ENV_MODE'] not in ('docker', 'local'):
+              raise SystemExit('CI supports env-mode docker or local only')
+          tiers = os.environ['TIERS'].split(',')
+          if not tiers or len(set(tiers)) != len(tiers) or any(t not in ('1','2','3') for t in tiers):
+              raise SystemExit('tiers must be a comma-separated selection of 1,2,3')
+          event = json.load(open(os.environ['GITHUB_EVENT_PATH']))
+          repo = os.environ['GITHUB_REPOSITORY']
+          pr = event.get('pull_request')
+          def read_api(suffix):
+              request = urllib.request.Request(os.environ['API_URL'] + '/repos/' + repo + suffix, headers={'Authorization':'Bearer '+os.environ['GH_TOKEN'], 'Accept':'application/vnd.github+json'})
+              try:
+                  with urllib.request.urlopen(request, timeout=30) as response:
+                      return json.load(response)
+              except (OSError, ValueError):
+                  return {}
+          actor = urllib.parse.quote(os.environ['GITHUB_ACTOR'], safe='')
+          permission = read_api('/collaborators/' + actor + '/permission')
+          actor_allowed = permission.get('permission') in ('write', 'maintain', 'admin')
+          allowed = False
+          scan_mode = os.environ['SCAN_MODE']
+          if pr and pr['head']['repo'] and pr['head']['repo']['full_name'] == repo:
+              url = os.environ['API_URL'] + '/repos/' + repo + '/pulls/' + str(pr['number'])
+              request = urllib.request.Request(url, headers={'Authorization':'Bearer '+os.environ['GH_TOKEN'], 'Accept':'application/vnd.github+json'})
+              with urllib.request.urlopen(request, timeout=30) as response:
+                  current = json.load(response)
+              allowed = actor_allowed and current['state'] == 'open' and current['head']['sha'] == pr['head']['sha'] and current['head']['repo'] and current['head']['repo']['full_name'] == repo
+              # A setup/configuration PR must exercise every selected skill.
+              for page in range(1, 31):
+                  files_url = url + '/files?per_page=100&page=' + str(page)
+                  request = urllib.request.Request(files_url, headers={'Authorization':'Bearer '+os.environ['GH_TOKEN'], 'Accept':'application/vnd.github+json'})
+                  with urllib.request.urlopen(request, timeout=30) as response:
+                      files = json.load(response)
+                  if any(path.startswith(('.github/', '.gitlab/', '.skillevaluator/ci')) or path == '.gitlab-ci.yml' for item in files for path in (item['filename'], item.get('previous_filename', ''))):
+                      scan_mode = 'all'
+                      break
+                  if len(files) < 100:
+                      break
+              else:
+                  scan_mode = 'all'  # Bounded discovery cannot certify a partial list.
+          elif not pr and os.environ['GITHUB_EVENT_NAME'] in ('push', 'workflow_dispatch'):
+              repository = read_api('')
+              default = repository.get('default_branch')
+              if isinstance(default, str) and default and os.environ.get('GITHUB_REF') == 'refs/heads/' + default:
+                  branch = read_api('/branches/' + urllib.parse.quote(default, safe=''))
+                  allowed = actor_allowed and branch.get('commit', {}).get('sha') == os.environ['GITHUB_SHA']
+          with open(os.environ['GITHUB_OUTPUT'], 'a') as output:
+              output.write('allowed=' + str(allowed).lower() + '\n')
+              output.write('scan-mode=' + scan_mode + '\n')
+          print('Provider jobs eligible' if allowed else 'Provider jobs withheld; Tier 1 remains available')
+          PY
+  paid-tiers:
+    needs: eligibility
+    if: ${{ needs.eligibility.outputs.allowed == 'true' }}
+    runs-on: ${{ inputs.runner }}
+    environment: ${{ inputs.environment }}
+    permissions:
+      contents: read
+      pull-requests: read
+    timeout-minutes: ${{ inputs.timeout-minutes }}
+    continue-on-error: ${{ matrix.tier == 3 && !inputs.tier3-required }}
+    strategy:
+      fail-fast: false
+      matrix:
+        tier: [2, 3]
+    env:
+      SKILLEVALUATOR_TOOLS_REF: ${{ inputs.tools-ref }}
+      SKILL_EVAL_PATHS: ${{ inputs.paths }}
+      SKILL_EVAL_SCAN_MODE: ${{ inputs.scan-mode }}
+      SKILL_EVAL_MIN_SCORE: ${{ inputs.min-score }}
+      SKILL_EVAL_ENV_MODE: ${{ inputs.env-mode }}
+      SKILL_EVAL_PROVIDER: ${{ inputs.provider }}
+      SKILL_EVAL_MODEL: ${{ inputs.model }}
+      SKILL_EVAL_EMBEDDING_PROVIDER: ${{ inputs.embedding-provider || inputs.provider }}
+      SKILL_EVAL_EMBEDDING_MODEL: ${{ inputs.embedding-model }}
+      SKILL_EVAL_AGENTS: ${{ inputs.agents }}
+      SKILL_EVAL_TIER3_REQUIRED: ${{ inputs.tier3-required }}
+      SKILL_EVAL_N_ATTEMPTS: ${{ inputs.n-attempts }}
+      SKILL_EVAL_N_CONCURRENT: ${{ inputs.n-concurrent }}
+      SKILL_EVAL_TIMEOUT_MINUTES: ${{ inputs.timeout-minutes }}
+      DIFF_BASE_SHA: ${{ github.event.pull_request.base.sha }}
+      DIFF_HEAD_SHA: ${{ github.event.pull_request.head.sha || github.sha }}
+      REPORT_COMMIT: ${{ github.event.pull_request.head.sha || github.sha }}
+      REPORT_REPOSITORY: ${{ github.repository }}
+      REPORT_RUN_URL: ${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}
+      SKILLEVALUATOR_RUNTIME_DIR: ${{ github.workspace }}/.skillevaluator-ci-runtimes
+      PYTHON_DOTENV_DISABLED: '1'
+    steps:
+      - uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0
+        with:
+          repository: ${{ inputs.tools-repository }}
+          ref: ${{ inputs.tools-ref }}
+          path: evaluator
+          persist-credentials: false
+      - uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0
+        with:
+          ref: ${{ github.event.pull_request.head.sha || github.sha }}
+          path: candidate
+          fetch-depth: 0
+          filter: blob:none
+          persist-credentials: false
+      - uses: actions/setup-python@ece7cb06caefa5fff74198d8649806c4678c61a1
+        with:
+          python-version: '3.12'
+      - name: Install only the selected tier's runtime from pinned tools
+        if: ${{ contains(format(',{0},', inputs.tiers), format(',{0},', matrix.tier)) }}
+        env:
+          TIER: ${{ matrix.tier }}
+        run: |
+          python -I -m pip --isolated install --index-url https://pypi.org/simple uv==0.11.27
+          env -i PATH="$PATH" python -I -m uv --no-config --cache-dir "$RUNNER_TEMP/uv-cache" sync --locked --no-dev --extra "tier${TIER}" --project "$GITHUB_WORKSPACE/evaluator" --python 3.12 --default-index https://pypi.org/simple
+          echo "$GITHUB_WORKSPACE/evaluator/.venv/bin" >> "$GITHUB_PATH"
+      - name: Recheck current head after environment approval
+        id: current-head
+        env:
+          GH_TOKEN: ${{ github.token }}
+          API_URL: ${{ github.api_url }}
+        run: |
+          python3 -I - <<'PYTHON'
+          import json, os, urllib.parse, urllib.request
+          event = json.load(open(os.environ['GITHUB_EVENT_PATH']))
+          repo = os.environ['GITHUB_REPOSITORY']
+          def read_api(suffix):
+              request = urllib.request.Request(os.environ['API_URL'] + '/repos/' + repo + suffix, headers={'Authorization':'Bearer '+os.environ['GH_TOKEN'], 'Accept':'application/vnd.github+json'})
+              try:
+                  with urllib.request.urlopen(request, timeout=30) as response:
+                      return json.load(response)
+              except (OSError, ValueError):
+                  return {}
+          actor = urllib.parse.quote(os.environ['GITHUB_ACTOR'], safe='')
+          permission = read_api('/collaborators/' + actor + '/permission')
+          if permission.get('permission') not in ('write', 'maintain', 'admin'):
+              raise SystemExit('Provider jobs require current write, maintain, or admin permission for the initiating actor')
+          pr = event.get('pull_request')
+          if pr:
+              current = read_api('/pulls/' + str(pr['number']))
+              if not pr['head']['repo'] or pr['head']['repo']['full_name'] != repo or current.get('state') != 'open' or current.get('head', {}).get('sha') != pr['head']['sha'] or not current.get('head', {}).get('repo') or current['head']['repo']['full_name'] != repo:
+                  raise SystemExit('PR head changed or is no longer eligible; rerun the current head')
+          else:
+              repository = read_api('')
+              default = repository.get('default_branch')
+              if os.environ['GITHUB_EVENT_NAME'] not in ('push', 'workflow_dispatch') or not isinstance(default, str) or not default or os.environ.get('GITHUB_REF') != 'refs/heads/' + default:
+                  raise SystemExit('Provider jobs require the current default branch for push or manual runs')
+              branch = read_api('/branches/' + urllib.parse.quote(default, safe=''))
+              if branch.get('commit', {}).get('sha') != os.environ['GITHUB_SHA']:
+                  raise SystemExit('Default branch advanced; rerun the current commit')
+          with open(os.environ['GITHUB_OUTPUT'], 'a') as output:
+              output.write('allowed=true\n')
+          PYTHON
+      - name: Bootstrap native local agents and check selected environment
+        if: ${{ steps.current-head.outputs.allowed == 'true' && matrix.tier == 3 && contains(format(',{0},', inputs.tiers), ',3,') }}
+        continue-on-error: true
+        env:
+          OPENAI_API_KEY: ${{ secrets.OPENAI_API_KEY }}
+          ANTHROPIC_API_KEY: ${{ secrets.ANTHROPIC_API_KEY }}
+          NVIDIA_API_KEY: ${{ secrets.NVIDIA_API_KEY }}
+        run: python -I evaluator/ci/bootstrap_tiers.py
+      - name: Evaluate selected tier and retain native evidence
+        if: ${{ !cancelled() && steps.current-head.outputs.allowed == 'true' && contains(format(',{0},', inputs.tiers), format(',{0},', matrix.tier)) }}
+        env:
+          TIER: ${{ matrix.tier }}
+          OPENAI_API_KEY: ${{ secrets.OPENAI_API_KEY }}
+          ANTHROPIC_API_KEY: ${{ secrets.ANTHROPIC_API_KEY }}
+          NVIDIA_API_KEY: ${{ secrets.NVIDIA_API_KEY }}
+        run: |
+          export SKILL_EVAL_TIMEOUT_SECONDS="$((SKILL_EVAL_TIMEOUT_MINUTES * 60))"
+          python -I evaluator/ci/run_tiers.py evaluate --tier "$TIER" --workspace "$GITHUB_WORKSPACE/candidate" --reports "$RUNNER_TEMP/skill-reports"
+      - name: Retain native reports after failure
+        if: ${{ always() && contains(format(',{0},', inputs.tiers), format(',{0},', matrix.tier)) }}
+        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9
+        with:
+          name: skill-evaluator-tier${{ matrix.tier }}-attempt-${{ github.run_attempt }}
+          path: ${{ runner.temp }}/skill-reports/
+          if-no-files-found: warn
+          retention-days: 14
+  aggregate:
+    needs: [tier1, paid-tiers]
+    if: ${{ always() }}
+    runs-on: ubuntu-24.04
+    permissions:
+      contents: read
+      actions: read
+      id-token: write
+    env:
+      SKILLEVALUATOR_TOOLS_REF: ${{ inputs.tools-ref }}
+      DIFF_BASE_SHA: ${{ github.event.pull_request.base.sha }}
+      REPORT_COMMIT: ${{ github.event.pull_request.head.sha || github.sha }}
+      REPORT_REPOSITORY: ${{ github.repository }}
+      REPORT_RUN_URL: ${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}
+      SKILL_EVAL_ENV_MODE: ${{ inputs.env-mode }}
+      SKILL_EVAL_TIER3_REQUIRED: ${{ inputs.tier3-required }}
+    steps:
+      - name: Capture signed aggregate execution receipt
+        id: provenance
+        continue-on-error: true
+        run: |
+          python3 -I - <<'PY'
+          import json, os, re, tempfile, urllib.parse, urllib.request
+          
+          url = os.environ.get("ACTIONS_ID_TOKEN_REQUEST_URL")
+          credential = os.environ.get("ACTIONS_ID_TOKEN_REQUEST_TOKEN")
+          if not url or not credential:
+              print("Hosted-report receipt is disabled; scan artifacts remain available.")
+              raise SystemExit(0)
+          
+          class NoRedirect(urllib.request.HTTPRedirectHandler):
+              def redirect_request(self, *args, **kwargs):
+                  return None
+          
+          try:
+              parsed = urllib.parse.urlsplit(url)
+              if (parsed.scheme != "https" or not parsed.hostname
+                  or not parsed.hostname.endswith(".actions.githubusercontent.com")
+                  or parsed.port not in (None, 443) or parsed.username or parsed.password
+                  or parsed.fragment):
+                  raise ValueError("Unexpected GitHub identity endpoint")
+              audience = "urn:skillevaluator:report-provenance:v1"
+              url += ("&" if parsed.query else "?") + "audience=" + urllib.parse.quote(audience, safe="")
+              request = urllib.request.Request(url, headers={"Authorization": "Bearer " + credential})
+              with urllib.request.build_opener(NoRedirect()).open(request, timeout=30) as response:
+                  payload = response.read(65537)
+              if len(payload) > 65536:
+                  raise ValueError("Oversized identity response")
+              token = json.loads(payload)["value"]
+              if (not isinstance(token, str) or len(token) > 32768
+                  or not re.fullmatch(r"[A-Za-z0-9_-]+\.[A-Za-z0-9_-]+\.[A-Za-z0-9_-]+", token)):
+                  raise ValueError("Invalid identity response")
+              directory = tempfile.mkdtemp(prefix="skill-provenance-", dir=os.environ["RUNNER_TEMP"])
+              descriptor = os.open(os.path.join(directory, "execution.jwt"), os.O_WRONLY | os.O_CREAT | os.O_EXCL, 0o600)
+              with os.fdopen(descriptor, "w") as handle:
+                  handle.write(token)
+              with open(os.environ["GITHUB_OUTPUT"], "a") as handle:
+                  handle.write("directory=" + directory + "\n")
+              print("Captured the signed execution receipt for hosted reports.")
+          except (OSError, ValueError, KeyError, TypeError):
+              raise SystemExit("Could not capture the hosted-report receipt. Scan artifacts remain available; hosting will be skipped.") from None
+          PY
+      - uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0
+        with:
+          repository: ${{ inputs.tools-repository }}
+          ref: ${{ inputs.tools-ref }}
+          persist-credentials: false
+      - uses: actions/setup-python@ece7cb06caefa5fff74198d8649806c4678c61a1
+        with:
+          python-version: '3.12'
+      - name: Install the locked aggregate runtime
+        run: |
+          python -I -m pip --isolated install --index-url https://pypi.org/simple uv==0.11.27
+          env -i PATH="$PATH" python -I -m uv --no-config --cache-dir "$RUNNER_TEMP/uv-cache" sync --locked --no-dev --project "$GITHUB_WORKSPACE" --python 3.12 --default-index https://pypi.org/simple
+          echo "$GITHUB_WORKSPACE/.venv/bin" >> "$GITHUB_PATH"
+      - name: Download original hardened Tier 1 reports
+        continue-on-error: true
+        uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093
+        with:
+          name: skill-evaluator-tier1-attempt-${{ github.run_attempt }}
+          path: ${{ runner.temp }}/skill-reports/tier1
+      - name: Merge Tier 2 and Tier 3 reports preserving tier directories
+        continue-on-error: true
+        uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093
+        with:
+          pattern: skill-evaluator-tier[23]-attempt-${{ github.run_attempt }}
+          merge-multiple: true
+          path: ${{ runner.temp }}/skill-reports
+      - name: Aggregate required gates and advisory evidence
+        env:
+          TIERS: ${{ inputs.tiers }}
+        run: python -I ci/run_tiers.py aggregate --reports "$RUNNER_TEMP/skill-reports" --tiers "$TIERS"
+      - name: Upload complete reports even when required gates fail
+        if: ${{ always() }}
+        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9
+        with:
+          name: skill-evaluator-results-attempt-${{ github.run_attempt }}
+          path: ${{ runner.temp }}/skill-reports/
+          if-no-files-found: warn
+          retention-days: 14
+      - name: Add aggregate summary
+        if: ${{ always() }}
+        run: |
+          if [ -f "$RUNNER_TEMP/skill-reports/summary.md" ]; then
+            cat "$RUNNER_TEMP/skill-reports/summary.md" >> "$GITHUB_STEP_SUMMARY"
+          fi
+      - name: Retain signed receipt separately from native evidence
+        if: ${{ always() && steps.provenance.outputs.directory != '' }}
+        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9
+        with:
+          name: skill-evaluator-results-provenance-attempt-${{ github.run_attempt }}
+          path: ${{ steps.provenance.outputs.directory }}/execution.jwt
+          if-no-files-found: error
+          retention-days: 14

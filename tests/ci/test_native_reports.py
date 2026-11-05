@@ -283,14 +283,34 @@ def test_failed_and_incomplete_counts_agree_across_all_surfaces(tmp_path):
 
 def test_native_overview_displays_quality_threshold_failure_not_an_advisory(tmp_path):
     result = ValidationResult(validator_name="QUALITY", validator_description="Quality score")
-    result.add_finding(Finding(category="QUALITY", severity="medium", check_name="version", message="Optional version missing", file_path="skills/example/SKILL.md"))
+    result.add_finding(
+        Finding(
+            category="QUALITY",
+            severity="medium",
+            check_name="version",
+            message="Optional version missing",
+            file_path="skills/example/SKILL.md",
+        )
+    )
     result.fail_gate("Quality score 98.2/100 is below the required 100/100")
     payload = json.loads(JSONReporter(include_timestamp=False).render_all([result]))
     directory = tmp_path / "skill-001"
     directory.mkdir()
     (directory / "skillevaluator-tier1.json").write_text(json.dumps(payload))
     row = {"path": "skills/example", "report_dir": "skill-001", "exit_code": 1, "passed": False}
-    row.update({key: payload[key] for key in ("overall_status", "incomplete_scans", "total_validators", "total_errors", "total_warnings", "severity_counts")})
+    row.update(
+        {
+            key: payload[key]
+            for key in (
+                "overall_status",
+                "incomplete_scans",
+                "total_validators",
+                "total_errors",
+                "total_warnings",
+                "severity_counts",
+            )
+        }
+    )
     render_native_reports(tmp_path, _summary([row]), {})
     index = (tmp_path / "index.html").read_text()
     attention = index.split('<section class="attention">', 1)[1].split("</section>", 1)[0]
@@ -358,3 +378,70 @@ def test_index_dark_theme_never_applies_to_print():
     assert "@media screen and (prefers-color-scheme:dark)" in _STYLE
     assert "@media(prefers-color-scheme:dark)" not in _STYLE
     assert all(int(size) >= 11 for size in re.findall(r"font-size:(\d+)px", _STYLE))
+
+
+@pytest.mark.parametrize("tier", [2, 3])
+def test_runtime_retains_public_json_and_regenerates_each_native_tier(tmp_path, tier):
+    from ci.run_tiers import _retain
+
+    from skillevaluator.evaluation.tier3_report import build_agent_eval_payload
+    from skillevaluator.tier3.harbor.metrics import DEFAULT_METRICS
+
+    if tier == 2:
+        result = ValidationResult(validator_name="Context Optimization")
+        result.metadata["llm_analysis"] = {"completed_clusters": 1, "failed_clusters": 0}
+        result.add_finding(
+            Finding(
+                category="CONTENT_DEDUP",
+                severity="medium",
+                check_name="redundancy",
+                message="Repeated instructions",
+                file_path="SKILL.md",
+            )
+        )
+    else:
+        conditions = {
+            arm: {"execution_status": "succeeded", "execution_errors": [], "expected_attempts": 1, "scored_attempts": 1}
+            for arm in ("with_skill", "without_skill")
+        }
+        agent_eval = build_agent_eval_payload(
+            "demo",
+            {
+                "opencode": {
+                    "with_skill": dict.fromkeys(DEFAULT_METRICS, 0.8),
+                    "without_skill": dict.fromkeys(DEFAULT_METRICS, 0.4),
+                    "execution_status": "succeeded",
+                    "execution_errors": [],
+                    "expected_attempts": 2,
+                    "scored_attempts": 2,
+                    "conditions": conditions,
+                    "num_trials": 1,
+                    "num_trials_baseline": 1,
+                }
+            },
+            dataset=[{"id": "case-a"}],
+            use_llm_judge=False,
+            attempt_policy={"max_attempts": 1, "stop_on_pass": False, "pass_threshold": 0.5},
+        )
+        result = ValidationResult(validator_name="AGENT_EVAL", metadata={"agent_eval": agent_eval})
+    payload = json.loads(JSONReporter(include_timestamp=False).render_all([result]))
+    raw = tmp_path / "raw"
+    raw.mkdir()
+    (raw / f"skillevaluator-tier{tier}.json").write_text(json.dumps(payload))
+    (raw / f"skillevaluator-tier{tier}.html").write_text("<script>ARTIFACT HTML</script>")
+    output = tmp_path / f"reports/tier{tier}/skill-001"
+    retained = _retain(raw, output, tier, set(), Path("skills/demo"), 0)
+    assert json.loads((output / f"skillevaluator-tier{tier}.json").read_text()) == payload
+    document = (output / f"skillevaluator-tier{tier}.html").read_text()
+    assert "ARTIFACT HTML" not in document
+    assert 'href="../../index.html"' in document
+    assert f'href="skillevaluator-tier{tier}.json"' in document
+    assert "Content-Security-Policy" in document
+    if tier == 3:
+        assert retained["metrics"]["score"] == pytest.approx(0.8)
+        assert retained["metrics"]["skill_lift"] == pytest.approx(0.4)
+        assert retained["metrics"]["coverage"] == "2/2"
+        # This fixture has execution coverage but no publication target binding.
+        assert retained["status"] == "incomplete"
+    else:
+        assert retained["metrics"]["findings"] == 1

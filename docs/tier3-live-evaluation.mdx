@@ -11,6 +11,24 @@ Docker or another sandbox. NVIDIA Build in Docker, Kata, or local mode uses one 
 for both roles; OpenAI with Codex can also share its key. This guide takes you from a skill directory to a
 finished with-skill vs. without-skill comparison.
 
+## Paired Tier 3 in automatic CI
+
+The [all-tier CI setup](cli-onboarding.mdx#opt-in-to-three-tier-ci) consumes
+committed native `evals/` datasets with full coverage. It runs each selected
+case both with and without the skill; it does not use autopilot, generate new
+cases, or skip the baseline. Docker is the default, with native local mode as
+the other supported CI environment. Cloud backends remain available through
+the expert CLI but are outside this onboarding path.
+
+Tier 3 is advisory by default and runs independently from required Tier 1 and
+Tier 2. Use onboarding's `--tier3-required` (GitHub `tier3-required: true`,
+GitLab `SKILL_EVAL_TIER3_REQUIRED: 'true'`) to require it. CI preserves native
+reports for missing credentials, readiness failures and partial runs as well
+as completed scores. Native reports include coverage and paired arm evidence,
+Skill Lift, attempts, available latency/resource metrics and trial links. An
+incomplete advisory result is visible and never described as a completed pass.
+See [retained CI evidence](reports.mdx#retained-three-tier-ci-evidence).
+
 ## What a live eval measures
 
 SkillEvaluator runs a real agent (`codex`, `claude-code`, or `opencode` —

@@ -1,0 +1,62 @@
+spec:
+  inputs:
+    tools-ref:
+      type: string
+      regex: '^[0-9a-f]{40}$'
+    tools-repository:
+      type: string
+      default: NVIDIA/SkillEvaluator
+      regex: '^[A-Za-z0-9_.-]+/[A-Za-z0-9_.-]+$'
+    api-url:
+      type: string
+      regex: '^https://[A-Za-z0-9.-]+(:[0-9]+)?(/[A-Za-z0-9._~-]+)*/api/v4$'
+    project-id:
+      type: string
+      regex: '^[A-Za-z0-9_.-]+(/[A-Za-z0-9_.-]+)*$'
+---
+# SPDX-License-Identifier: Apache-2.0
+# Install the thin include on the protected default branch before opening MRs.
+skill-evaluation-feedback:
+  image: python:3.12.12-slim
+  stage: test
+  environment:
+    name: skillevaluator-feedback
+  id_tokens:
+    SKILL_EVAL_GITLAB_ID_TOKEN:
+      aud: urn:skillevaluator:feedback:v1
+  variables:
+    GIT_STRATEGY: none
+  script:
+    - |
+      set -eu
+      export PATH=/usr/local/bin:/usr/bin:/bin
+      unset GIT_CONFIG_COUNT GIT_CONFIG_PARAMETERS GIT_CONFIG_GLOBAL GIT_CONFIG_SYSTEM GIT_EXEC_PATH GIT_TEMPLATE_DIR
+      unset GIT_DIR GIT_WORK_TREE GIT_COMMON_DIR GIT_INDEX_FILE GIT_OBJECT_DIRECTORY GIT_ALTERNATE_OBJECT_DIRECTORIES
+      unset LD_PRELOAD LD_LIBRARY_PATH DYLD_INSERT_LIBRARIES DYLD_LIBRARY_PATH PYTHONPATH PYTHONHOME
+      test "$CI_COMMIT_REF_PROTECTED" = true
+      test -n "$SKILLEVALUATOR_GITLAB_TOKEN"
+      # Include inputs are fixed in the protected default-branch configuration;
+      # source-pipeline variables cannot replace the privileged bootstrap.
+      tools_ref='$[[ inputs.tools-ref ]]'
+      tools_repository='$[[ inputs.tools-repository ]]'
+      env -i PATH="$PATH" apt-get update -qq
+      env -i PATH="$PATH" apt-get install -y --no-install-recommends git ca-certificates
+      tools_dir="$(mktemp -d /tmp/skillevaluator-feedback.XXXXXX)"
+      env -i PATH="$PATH" GIT_CONFIG_GLOBAL=/dev/null GIT_CONFIG_SYSTEM=/dev/null git -C "$tools_dir" init -q
+      env -i PATH="$PATH" GIT_CONFIG_GLOBAL=/dev/null GIT_CONFIG_SYSTEM=/dev/null git -C "$tools_dir" remote add origin "https://github.com/$tools_repository.git"
+      env -i PATH="$PATH" GIT_CONFIG_GLOBAL=/dev/null GIT_CONFIG_SYSTEM=/dev/null git -C "$tools_dir" fetch -q --depth 1 origin "$tools_ref"
+      env -i PATH="$PATH" GIT_CONFIG_GLOBAL=/dev/null GIT_CONFIG_SYSTEM=/dev/null git -C "$tools_dir" checkout -q --detach FETCH_HEAD
+      env -i PATH="$PATH" python -I -m pip --isolated install --index-url https://pypi.org/simple uv==0.11.27
+      env -i PATH="$PATH" python -I -m uv --no-config --cache-dir "$tools_dir/.uv-cache" sync --locked --no-dev --extra publisher --project "$tools_dir" --python 3.12 --default-index https://pypi.org/simple
+      "$tools_dir/.venv/bin/python" -I - "$tools_dir/ci/feedback.py" --platform gitlab --api-url '$[[ inputs.api-url ]]' --project-id '$[[ inputs.project-id ]]' --pipeline-id "$SKILL_EVAL_SOURCE_PIPELINE_ID" <<'PYTHON'
+      import os, runpy, sys
+      # Preserve credentials only in the process environment, never CLI arguments.
+      retained = {key: os.environ[key] for key in ('PATH', 'SKILLEVALUATOR_GITLAB_TOKEN', 'SKILL_EVAL_GITLAB_ID_TOKEN') if key in os.environ}
+      os.environ.clear()
+      os.environ.update(retained)
+      sys.argv = sys.argv[1:]
+      sys.path.insert(0, os.path.dirname(sys.argv[0]))
+      runpy.run_path(sys.argv[0], run_name='__main__')
+      PYTHON
+  rules:
+    - if: '$CI_PIPELINE_SOURCE == "pipeline" && $CI_COMMIT_BRANCH == $CI_DEFAULT_BRANCH && $CI_COMMIT_REF_PROTECTED == "true" && $SKILL_EVAL_FEEDBACK == "true"'

@@ -16,6 +16,41 @@ lift data that `view` and `compare` read back later.
 evaluation framework that runs those Tier 3 trials. SkillEvaluator collects its
 job artifacts into the results tree described on this page.
 
+## Retained three-tier CI evidence
+
+The opt-in all-tier workflows retain one aggregate artifact for 14 days. GitHub
+names it `skill-evaluator-results-attempt-N`; GitLab retains the aggregate job's
+`skill-evaluator-results/` directory. The trusted feedback comment links the
+actual artifact download for that run. Authentication and artifact expiry still
+apply; this link does not imply publicly hosted HTML.
+
+```text
+ci-results.json
+index.html
+summary.md
+tier1/                 # hardened scanner reports, including summary.json
+tier2/ci-tier.json
+tier2/skill-001/       # native retained JSON and HTML
+tier3/ci-tier.json
+tier3/skill-001/       # native retained JSON, HTML and trial evidence
+```
+
+`ci-results.json` uses report contract `skillevaluator-ci-v1` and records the
+repository, exact commit, platform, run ID, attempt, environment, and each
+tier's required/advisory policy. A tier can be `passed`, `failed`, `incomplete`,
+`skipped`, `not_run`, or `needs_action`. A missing required tier fails the
+aggregate; advisory Tier 3 never changes a failed required tier into a pass.
+A check that never executed cannot become an empty success.
+
+Tier 2 reports retain deduplication findings and dataset-readiness evidence;
+Tier 3 reports retain paired scores and coverage, Skill Lift, attempts,
+latency/resource metrics and available trial links. Download and extract the
+artifact, then open `index.html` to inspect the aggregate and native reports.
+Detailed files remain available even when a tier fails or needs configuration.
+The publisher renders validated retained JSON; it does not execute artifacts
+or trust candidate-provided HTML in its privileged feedback job. Optional
+report hosting is independent from these private artifact links.
+
 ## Report formats
 
 Every Tier 1 and Tier 2 command accepts `-r`/`--report` and `-o`/`--output-dir`.

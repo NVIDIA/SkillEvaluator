@@ -60,3 +60,22 @@ Open a pull request or merge request that changes a skill to see the checks.
 Enable the platform's CI service, allow the referenced workflows or includes,
 and provide a compatible runner. The [platform guides](../../docs/repository-integration.mdx)
 cover results and merge-gating settings.
+
+
+## Candidate all-tier templates
+
+The unreleased all-tier setup uses two thin consumer files per platform:
+
+| Platform | Evaluation | Trusted feedback |
+| --- | --- | --- |
+| GitHub | [skill-checks-all-tiers.yml](all-tiers/skill-checks-all-tiers.yml) | [feedback-all-tiers.yml](all-tiers/feedback-all-tiers.yml) |
+| GitLab | [gitlab-all-tiers.yml](all-tiers/gitlab-all-tiers.yml) | [gitlab-feedback-all-tiers.yml](all-tiers/gitlab-feedback-all-tiers.yml) |
+
+These files contain placeholders. Use a reviewed schema-version 2 release
+with the platform's all-tier capability and immutable workflow, tools and
+image pins. Existing 0.7.2 downloads remain Tier 1 only. The all-tier CLI
+renders these references and approves the exact GitHub caller blob. See
+[the onboarding guide](../../docs/cli-onboarding.mdx#opt-in-to-three-tier-ci).
+Merge the trusted feedback entrypoint onto the default branch before the
+first demo PR/MR. Tier 1/Tier 2 are required, Tier 3 is advisory, reports expire
+after 14 days, Docker is the default, and native local mode is also supported.

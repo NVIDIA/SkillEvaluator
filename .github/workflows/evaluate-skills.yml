@@ -1,4 +1,6 @@
 name: Reusable Tier 1 skill checks
+# The image selects the bundled default policy for both public and private repos.
+# Policy rules do not control repository visibility or optional report hosting.
 on:
   workflow_call:
     inputs:

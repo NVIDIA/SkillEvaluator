@@ -31,6 +31,12 @@ from urllib.parse import urlsplit
 
 from skillevaluator.constants import LLM_VERIFY_TEMPERATURE
 from skillevaluator.inference.diagnostics import llm_failure_diagnostic
+from skillevaluator.inference.json_span import (
+    MAX_JSON_NESTING,
+    STRICT_JSON_DECODE_HOOKS,
+    balanced_json_container_end,
+    json_nesting_within_limit,
+)
 from skillevaluator.inference.retry import RetryConfig, resolve_retry_config, retry_call_with_backoff
 from skillevaluator.inference.types import (
     EmptyLLMResponseError,
@@ -363,6 +369,38 @@ def _extract_choice_content(response: Any) -> str:
         getattr(first_choice, "finish_reason", None),
         getattr(message, "refusal", None),
     )
+
+
+_JSON_CONTAINER_START = re.compile(r"[{\[]")
+
+
+def _embedded_json_objects(text: str) -> list[dict[str, Any]]:
+    """Return the complete top-level JSON objects embedded in prose.
+
+    Each ``{`` or ``[`` starts a string-aware balanced span that is decoded as a
+    whole and then skipped, so nothing nested inside a span is ever promoted:
+    not the members of a valid object or array, and not an object inside a
+    span that fails to decode. Decoded arrays are not counted, so chunk
+    citations such as ``[1]`` stay harmless. A span that never closes, closes
+    with a mismatched bracket or nests too deeply ends the scan, because its
+    extent is unknown. Spans never overlap, so the work stays linear in the
+    reply length.
+    """
+    objects: list[dict[str, Any]] = []
+    cursor = 0
+    while (match := _JSON_CONTAINER_START.search(text, cursor)) is not None:
+        start = match.start()
+        end = balanced_json_container_end(text, start)
+        if end is None:
+            break
+        try:
+            value = json.loads(text[start:end], **STRICT_JSON_DECODE_HOOKS)
+        except (RecursionError, ValueError):
+            value = None
+        if isinstance(value, dict):
+            objects.append(value)
+        cursor = end
+    return objects
 
 
 class LLMClient:
@@ -746,18 +784,30 @@ class LLMClient:
         response_schema: dict[str, Any] | None = None,
         schema_name: str = "judge_response",
     ) -> dict:
-        """Send a completion and parse JSON from the response."""
+        """Send a completion and parse one unambiguous JSON object from the response.
+
+        The whole reply, optionally in a Markdown fence, is parsed first. Models
+        without structured output (Bedrock, or after a schema downgrade) may
+        still wrap the object in prose; exactly one embedded object is then
+        accepted, while several objects remain an error rather than a guess.
+        """
         raw = self.completions(system_prompt, user_prompt, response_schema=response_schema, schema_name=schema_name)
 
         cleaned = raw.strip()
         if cleaned.startswith("```"):
-            cleaned = cleaned.split("\n", 1)[1]
+            cleaned = cleaned.partition("\n")[2]
             cleaned = cleaned.rsplit("```", 1)[0].strip()
 
         try:
-            return json.loads(cleaned)
-        except json.JSONDecodeError as e:
-            raise LLMClientError(f"LLM returned invalid JSON: {e}\nRaw: {raw[:500]}") from e
+            if not json_nesting_within_limit(cleaned):
+                raise ValueError(f"JSON nests deeper than {MAX_JSON_NESTING} levels")
+            return json.loads(cleaned, **STRICT_JSON_DECODE_HOOKS)
+        except (RecursionError, ValueError) as e:
+            objects = _embedded_json_objects(raw)
+            if len(objects) == 1:
+                return objects[0]
+            detail = f"found {len(objects)} JSON objects; expected exactly one" if objects else str(e)
+            raise LLMClientError(f"LLM returned invalid JSON: {detail}\nRaw: {raw[:500]}") from e
 
     # -- template-method hooks (override in subclasses) -------------------
 

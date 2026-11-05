@@ -1684,7 +1684,7 @@ class HTMLReporter(ReporterBase):
         self._tabs_explicit = tabs is not None
         self.target_path = target_path
         self.content_label = content_label
-        # Active validation profile (e.g. "internal", "external"). Surfaced
+        # Active validation policy (e.g. "default" or a custom policy name). Surfaced
         # in the report header so reviewers can tell which audience the
         # validation gate was applied for.
         self.profile = profile

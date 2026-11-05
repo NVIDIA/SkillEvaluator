@@ -479,6 +479,29 @@ def test_invalid_policy_fails_closed_before_any_request(verifier, monkeypatch, n
     assert name in result["reason"]
 
 
+@pytest.mark.parametrize(
+    ("name", "value"), [("LLM_JUDGE_FALLBACK_POLICY", "replce"), ("LLM_JUDGE_RETRY_POLICY", "strcit")]
+)
+def test_invalid_policy_keeps_the_ragas_goal_scorer_off(verifier, monkeypatch, name, value):
+    monkeypatch.setenv(name, value)
+    monkeypatch.setenv("SKILL_EVAL_LLM_PROVIDER", "openai")
+    monkeypatch.setenv("OPENAI_API_KEY", "judge-test-key")
+    monkeypatch.delenv("SKILL_EVAL_LLM_BASE_URL")
+    monkeypatch.setenv("LLM_JUDGE_MODEL", "gpt-4o")
+    monkeypatch.setattr(
+        verifier, "_judge_goal_accuracy_ragas", lambda *_args: pytest.fail("RAGAS sent its own judge request")
+    )
+    monkeypatch.setattr(
+        verifier.urllib.request, "urlopen", lambda *_args, **_kwargs: pytest.fail("invalid policy sent a request")
+    )
+
+    result = verifier._call_required_judge("goal_accuracy", verifier.judge_goal_accuracy, "q", "truth", "e", "")
+
+    assert verifier._ragas_goal_accuracy_enabled() is False
+    assert result["status"] == "error"
+    assert name in result["reason"]
+
+
 def test_default_policies_keep_legacy_retries_and_refusal_fallback(verifier, monkeypatch):
     monkeypatch.setenv("LLM_JUDGE_FALLBACK_MODELS", ALLOWLIST)
     requested = replay(verifier, monkeypatch, [completion("ignored", refusal="no"), *[http_error() for _ in range(4)]])

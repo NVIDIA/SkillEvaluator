@@ -843,6 +843,16 @@ def _judge_retry_policy():
     return _judge_policy("LLM_JUDGE_RETRY_POLICY", ("legacy", "strict"))
 
 
+def _judge_policies_valid():
+    """Return whether LLM_JUDGE_FALLBACK_POLICY and LLM_JUDGE_RETRY_POLICY both hold a known value."""
+    try:
+        _judge_fallback_policy()
+        _judge_retry_policy()
+    except ValueError:
+        return False
+    return True
+
+
 def _strict_judge_replies():
     """Return whether a completed judge reply must be one whole JSON object and is final.
 
@@ -2891,8 +2901,9 @@ def _ragas_goal_accuracy_enabled():
     # The prompt judge can append metadata outside the original evidence.
     if character_facts_enabled():
         return False
-    # RAGAS sends its own requests, outside the strict policy's request limits.
-    if _strict_judge_replies():
+    # RAGAS sends its own requests, outside the strict policy's request limits,
+    # and an unknown policy value must fail the judge before any request.
+    if _strict_judge_replies() or not _judge_policies_valid():
         return False
     if _public_provider() != "openai" or _is_openai_reasoning_model(_selected_judge_model()):
         return False

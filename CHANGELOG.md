@@ -24,6 +24,17 @@ All notable changes to SkillEvaluator are documented in this file.
 
 ### Added
 
+- `skillevaluator tier3 feedback RUN_DIR [--skill PATH]` opens a terminal chat
+  about one completed Tier 3 run. Answers are grounded in that run's scores,
+  with-skill and baseline comparisons, every case's attempts with per-metric
+  scores, measured agent tokens and seconds, execution errors, and the report's
+  saved feedback, without evaluating again or regenerating LLM feedback. It uses
+  the configured `SKILL_EVAL_LLM_PROVIDER` and `SKILL_EVAL_LLM_MODEL`, sends the
+  run ID instead of the local path, redacts credential-shaped text, and writes
+  nothing to disk. No request is sent before the first question. `LLMClient`
+  gains `chat(messages)` for multi-turn requests with the same retries and typed
+  errors as `completions()`.
+
 - Allow hosted CI reports and PR comments from scans called through explicitly
   approved reusable workflow wrappers. Direct callers retain the existing setup;
   signed evaluator identity and exact consumer workflow approvals remain required.

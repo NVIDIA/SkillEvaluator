@@ -3617,6 +3617,22 @@ def tier3_validate(skill_path: Path, as_json: bool, strict: bool, harbor_contrac
     raise SystemExit(tier3_validate_evals(skill_path, as_json=as_json, strict=strict, harbor_contract=harbor_contract))
 
 
+@tier3.command("feedback")
+@click.argument("run_dir", type=click.Path(exists=True, file_okay=False, dir_okay=True, path_type=Path))
+@click.option(
+    "--skill",
+    "skill_path",
+    type=click.Path(exists=True, file_okay=False, dir_okay=True, path_type=Path),
+    default=None,
+    help="Evaluated skill directory; inferred from the run when omitted.",
+)
+def tier3_feedback(run_dir: Path, skill_path: Path | None) -> None:
+    """Chat about one completed run's results and possible skill improvements."""
+    from skillevaluator.tier3.commands import run_feedback_chat
+
+    raise SystemExit(run_feedback_chat(run_dir, skill_path=skill_path))
+
+
 @tier3.command("harbor-view")
 @click.argument("jobs_dir", type=click.Path(exists=True, file_okay=False, dir_okay=True, path_type=Path))
 def harbor_view(jobs_dir: Path) -> None:

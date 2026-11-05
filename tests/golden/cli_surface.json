@@ -2884,6 +2884,27 @@
             }
           ]
         },
+        "feedback": {
+          "params": [
+            {
+              "name": "run_dir",
+              "opts": [
+                "run_dir"
+              ],
+              "param_type": "argument",
+              "required": true,
+              "type": "directory"
+            },
+            {
+              "name": "skill_path",
+              "opts": [
+                "--skill"
+              ],
+              "param_type": "option",
+              "type": "directory"
+            }
+          ]
+        },
         "harbor-view": {
           "params": [
             {

@@ -242,6 +242,8 @@ All notable changes to SkillEvaluator are documented in this file.
   applies no waivers and fails the PII scan with a HIGH
   `invalid-pii-waiver-file` finding. Credential checks cannot be waived, and
   their findings, like any finding whose value reports mask, carry no digest.
+  When CI redaction masks a credential inside a reported PII value, the
+  finding's digest is removed as well.
   Waivers are never discovered automatically inside the scanned skill; pass
   the file with `--pii-waivers`.
 - Every finding now has stable IDs for tracking across runs and validators.

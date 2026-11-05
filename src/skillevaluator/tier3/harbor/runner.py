@@ -24,8 +24,9 @@ import tempfile
 import threading
 import time
 import tomllib
+import unicodedata
 from collections.abc import Iterable, Iterator, Mapping, Sequence
-from concurrent.futures import FIRST_COMPLETED, ThreadPoolExecutor, as_completed, wait
+from concurrent.futures import FIRST_COMPLETED, Future, ThreadPoolExecutor, as_completed, wait
 from contextlib import ExitStack, contextmanager, suppress
 from dataclasses import dataclass, field, replace
 from datetime import UTC, datetime
@@ -790,6 +791,11 @@ _HARBOR_RUN_DIAGNOSTIC_TAIL_CHARS = 16 * 1024
 _HARBOR_RUN_OUTPUT_READ_BYTES = 64 * 1024
 _HARBOR_RUN_POLL_SECONDS = 0.01
 _HARBOR_RUN_TERMINATE_SECONDS = 0.1
+# Harbor turns SIGTERM into KeyboardInterrupt and then stops its trial
+# environments (for example removing Docker containers). An interrupted run
+# waits this long for that cleanup before it kills the process group.
+_HARBOR_RUN_CANCEL_GRACE_SECONDS = 30.0
+_HARBOR_RUN_CANCEL_POLL_SECONDS = 0.1
 _HARBOR_RUN_REAP_SECONDS = 5.0
 
 
@@ -802,6 +808,32 @@ class _BoundedHarborProcessResult:
 
 class _HarborRunTimeoutError(RuntimeError):
     """Raised after timed-out Harbor orchestration cleanup completes."""
+
+
+class _HarborRunCancelledError(BaseException):
+    """Raised on a worker thread once an interrupted run's Harbor job is contained.
+
+    Like ``KeyboardInterrupt``, it bypasses ``except Exception`` handlers that
+    record ordinary job failures, so a cancelled run stops instead of moving on
+    to its next attempt or condition.
+    """
+
+
+@dataclass(frozen=True, eq=False)
+class _HarborRunCancellation:
+    """Cross-thread stop request for the Harbor jobs of an interrupted run.
+
+    Ctrl+C reaches only the coordinating thread. Setting ``requested`` stops new
+    Harbor launches and sends running jobs SIGTERM with a cleanup grace period;
+    setting ``forced`` (a second Ctrl+C) ends that grace period early.
+    """
+
+    requested: threading.Event = field(default_factory=threading.Event)
+    forced: threading.Event = field(default_factory=threading.Event)
+
+    def raise_if_requested(self) -> None:
+        if self.requested.is_set():
+            raise _HarborRunCancelledError("Tier 3 evaluation was interrupted before this Harbor job started")
 
 
 def _redact_harbor_diagnostic(detail: object, *, secret_values: set[str]) -> str:
@@ -3245,6 +3277,91 @@ def _workspace_skills(skill_path: Path, values: list[str | Path]) -> list[Path]:
     return resolved
 
 
+def _workspace_skill_name(path: Path) -> str:
+    """Reserve the effective skill name without requiring an embedding description."""
+    import yaml
+
+    from skillevaluator.constants import CONTENT_DEDUP_MAX_FILE_BYTES
+    from skillevaluator.validators.frontmatter_parser import FRONTMATTER_PATTERN
+
+    content = _read_regular_evals_file(
+        path / "SKILL.md",
+        label="Workspace skill manifest",
+        max_bytes=CONTENT_DEDUP_MAX_FILE_BYTES,
+        allowed_root=path,
+    ).decode("utf-8-sig")
+    match = FRONTMATTER_PATTERN.match(content)
+    if match is not None:
+        try:
+            metadata = yaml.safe_load(match.group(1))
+        except yaml.YAMLError:
+            metadata = None
+        name = metadata.get("name") if isinstance(metadata, dict) else None
+        if isinstance(name, str) and name.strip():
+            return name.strip()
+    return path.name
+
+
+def _decoy_workspace_skills(
+    skill_path: Path,
+    workspace_config: Mapping[str, Any],
+    workspace_mode: str,
+    include_skills: list[str | Path] | None = None,
+    reference_skills_dir: Path | None = None,
+) -> tuple[list[Path], list[Path], dict[str, Any] | None]:
+    """Resolve one frozen selection without changing manual workspace policy."""
+    from skillevaluator.tier3.decoys import load_decoy_manifest
+
+    raw_manifest = workspace_config.get("decoy_manifest")
+    include_values = [*workspace_config.get("include", []), *(include_skills or [])]
+    if (include_values or raw_manifest is not None) and workspace_mode != "group":
+        field = "skill_workspace.decoy_manifest" if raw_manifest is not None else "include_skills"
+        raise ValueError(f"{field} requires skill_workspace.mode=group")
+    manual_skills = _workspace_skills(skill_path.resolve(), include_values)
+    if raw_manifest is None:
+        return manual_skills, [], None
+    manifest_path = Path(raw_manifest).expanduser()
+    if not manifest_path.is_absolute():
+        manifest_path = skill_path.parent / manifest_path
+    selected, manifest = load_decoy_manifest(skill_path, manifest_path)
+
+    def name_key(value: str) -> str:
+        return unicodedata.normalize("NFC", value).casefold()
+
+    reserved = [skill_path, *manual_skills]
+    if reference_skills_dir is not None and reference_skills_dir.is_dir():
+        reserved.extend(path for path in reference_skills_dir.iterdir() if _is_skill_dir(path))
+    directory_names = {name_key(path.name) for path in reserved}
+    skill_names = {name_key(_workspace_skill_name(path)) for path in reserved}
+    for path, record in zip(selected, manifest["selected"], strict=True):
+        if name_key(path.name) in directory_names or name_key(record["skill_name"]) in skill_names:
+            raise ValueError(f"Selected decoy '{path.name}' collides with another workspace skill name")
+        directory_names.add(name_key(path.name))
+        skill_names.add(name_key(record["skill_name"]))
+    return manual_skills, selected, manifest
+
+
+@contextmanager
+def _private_decoy_workspace_snapshot(selected: list[Path], manifest: Mapping[str, Any]) -> Iterator[list[Path]]:
+    """Keep the same verified source bytes available to every paired task."""
+    from skillevaluator.tier3.decoy_identity import decoy_source_copy_ignore, decoy_source_digest
+
+    with tempfile.TemporaryDirectory(prefix="skillevaluator-decoys-snapshot-") as root_text:
+        root = Path(root_text)
+        snapshots: list[Path] = []
+        for source, record in zip(selected, manifest["selected"], strict=True):
+            expected = record["source_digest"]
+            if decoy_source_digest(source) != expected:
+                raise ValueError(f"Selected decoy '{source.name}' changed before snapshot creation")
+
+            snapshot = root / source.name
+            copytree_secure(source, snapshot, allowed_root=source, ignore=decoy_source_copy_ignore(source))
+            if decoy_source_digest(snapshot) != expected or decoy_source_digest(source) != expected:
+                raise ValueError(f"Selected decoy '{source.name}' changed while its snapshot was created")
+            snapshots.append(snapshot)
+        yield snapshots
+
+
 def _limit_staged_cases(
     task_selectors: list[str],
     case_id_by_task_selector: Mapping[str, str],
@@ -3522,16 +3639,44 @@ def _verified_windows_taskkill_path() -> Path:
     return resolved_candidate
 
 
-def _terminate_harbor_process_tree(process: subprocess.Popen[bytes]) -> None:
-    """Terminate the POSIX process group or Windows task tree and reap Harbor."""
+def _wait_for_harbor_leader(
+    process: subprocess.Popen[bytes],
+    timeout_seconds: float,
+    *,
+    end_grace: threading.Event | None,
+) -> None:
+    """Wait up to ``timeout_seconds`` for Harbor to exit, or until ``end_grace`` is set."""
+    deadline = time.monotonic() + timeout_seconds
+    while (remaining := deadline - time.monotonic()) > 0:
+        if end_grace is not None and end_grace.is_set():
+            return
+        try:
+            process.wait(timeout=min(remaining, _HARBOR_RUN_CANCEL_POLL_SECONDS))
+        except subprocess.TimeoutExpired:
+            continue
+        return
+
+
+def _terminate_harbor_process_tree(
+    process: subprocess.Popen[bytes],
+    *,
+    grace_seconds: float = _HARBOR_RUN_TERMINATE_SECONDS,
+    end_grace: threading.Event | None = None,
+) -> None:
+    """Terminate the POSIX process group or Windows task tree and reap Harbor.
+
+    On POSIX the group receives SIGTERM, then SIGKILL once the leader exits or
+    ``grace_seconds`` pass, whichever is first; a set ``end_grace`` skips the
+    rest of the grace period. Windows has no SIGTERM that Harbor handles, so
+    its task tree is always stopped with ``taskkill /T /F``.
+    """
     if os.name == "posix":
         # POSIX process groups do not own a descendant that deliberately calls
         # setsid(2). The host-side Harbor CLI/configuration is therefore a
         # trusted boundary; untrusted task execution belongs in an isolated
         # backend rather than SkillEvaluator's experimental local mode.
         _signal_harbor_process_group(process, signal.SIGTERM)
-        with suppress(subprocess.TimeoutExpired):
-            process.wait(timeout=_HARBOR_RUN_TERMINATE_SECONDS)
+        _wait_for_harbor_leader(process, grace_seconds, end_grace=end_grace)
         # Always signal the original group after the grace period. The leader
         # may already have exited while a descendant retained the output pipe.
         _signal_harbor_process_group(process, signal.SIGKILL)
@@ -3583,14 +3728,23 @@ def _run_bounded_harbor_process(
     max_output_bytes: int,
     diagnostic_tail_chars: int,
     secret_values: set[str],
+    cancellation: _HarborRunCancellation | None = None,
 ) -> _BoundedHarborProcessResult:
-    """Run Harbor with bounded merged output and optional cleanup deadline."""
+    """Run Harbor with bounded merged output and optional cleanup deadline.
+
+    A requested ``cancellation`` prevents the launch, or stops a running
+    process tree, and then raises :class:`_HarborRunCancelledError`. A running
+    job gets SIGTERM and up to ``_HARBOR_RUN_CANCEL_GRACE_SECONDS`` to stop its
+    environments before the group is killed, unless the cancellation is forced.
+    """
     if timeout_seconds is not None and timeout_seconds <= 0:
         raise ValueError("Harbor run timeout must be positive")
     if max_output_bytes <= 0:
         raise ValueError("Harbor output byte limit must be positive")
     if diagnostic_tail_chars <= 0:
         raise ValueError("Harbor diagnostic tail limit must be positive")
+    if cancellation is not None:
+        cancellation.raise_if_requested()
 
     creation_flags = getattr(subprocess, "CREATE_NEW_PROCESS_GROUP", 0) if os.name == "nt" else 0
     process = subprocess.Popen(
@@ -3691,6 +3845,9 @@ def _run_bounded_harbor_process(
                 break
             if reader_done.is_set() and process.poll() is not None:
                 break
+            if cancellation is not None and cancellation.requested.is_set():
+                # The BaseException handler below stops the process tree.
+                raise _HarborRunCancelledError("Tier 3 evaluation was interrupted; Harbor job stopped")
             if deadline is None:
                 reader_done.wait(_HARBOR_RUN_POLL_SECONDS)
                 continue
@@ -3730,7 +3887,16 @@ def _run_bounded_harbor_process(
         cleanup_error: BaseException | None = None
         if process.poll() is None or not reader_done.is_set():
             try:
-                _terminate_harbor_process_tree(process)
+                if cancellation is not None and isinstance(primary_error, _HarborRunCancelledError):
+                    # Let Harbor's SIGTERM handling stop its trial environments
+                    # instead of leaving containers or agent processes behind.
+                    _terminate_harbor_process_tree(
+                        process,
+                        grace_seconds=_HARBOR_RUN_CANCEL_GRACE_SECONDS,
+                        end_grace=cancellation.forced,
+                    )
+                else:
+                    _terminate_harbor_process_tree(process)
             except BaseException as exc:
                 cleanup_error = exc
         if not reader_started:
@@ -3770,7 +3936,12 @@ def _run_harbor(
     expected_trials: int | None = None,
     expected_total_trials: int | None = None,
     include_task_names: list[str] | None = None,
+    cancellation: _HarborRunCancellation | None = None,
 ) -> tuple[bool, str]:
+    if cancellation is not None:
+        # Check before the credential refresh as well as at launch, so a queued
+        # condition or attempt makes no token request after an interrupt.
+        cancellation.raise_if_requested()
     base_url = (
         (verifier_env or {}).get("OPENAI_BASE_URL")
         or run_env.get("OPENAI_BASE_URL")
@@ -3846,6 +4017,7 @@ def _run_harbor(
                 max_output_bytes=_HARBOR_RUN_OUTPUT_MAX_BYTES,
                 diagnostic_tail_chars=_HARBOR_RUN_DIAGNOSTIC_TAIL_CHARS,
                 secret_values=secret_values,
+                cancellation=cancellation,
             )
     except _HarborRunTimeoutError as exc:
         if adc_timeout is not None:
@@ -4411,6 +4583,7 @@ def _run_stop_on_pass_variant(
     agent_import_path: str | None = None,
     verifier_env: Mapping[str, str] | None = None,
     environment_kwargs: Mapping[str, Any] | None = None,
+    cancellation: _HarborRunCancellation | None = None,
 ) -> list[str]:
     """Run each case one attempt at a time, stopping its attempts on first pass."""
     errors: list[tuple[Path, str]] = []
@@ -4437,6 +4610,7 @@ def _run_stop_on_pass_variant(
                 environment_kwargs=environment_kwargs,
                 expected_trials=1,
                 include_task_names=[task_name],
+                cancellation=cancellation,
             )
             job_dir = jobs_dir / job_name
             attempt_job_dirs.append(job_dir)
@@ -4532,6 +4706,7 @@ def _run_agent_pair(
     verifier_env: Mapping[str, str] | None = None,
     environment_kwargs: Mapping[str, Any] | None = None,
     with_agent_import_path: str | None = None,
+    cancellation: _HarborRunCancellation | None = None,
     additional_arms: Sequence[tuple[str, Path, str | None]] = (),
     additional_arm_errors: dict[str, str] | None = None,
 ) -> list[str]:
@@ -4578,6 +4753,7 @@ def _run_agent_pair(
                     agent_import_path=job_import_path,
                     verifier_env=verifier_env,
                     environment_kwargs=environment_kwargs,
+                    cancellation=cancellation,
                 )
             except Exception as exc:
                 if variant not in extra_variants:
@@ -4615,6 +4791,7 @@ def _run_agent_pair(
                 verifier_env=verifier_env,
                 environment_kwargs=environment_kwargs,
                 expected_trials=expected_trials,
+                cancellation=cancellation,
             ): variant
             for (variant, dataset, job_import_path), condition_concurrency in zip(jobs, job_concurrency, strict=True)
         }
@@ -4697,21 +4874,25 @@ class _RunProgressLifecycle:
     def close(self) -> None:
         self._reporter.close()
 
-    def fail_unfinished(self) -> None:
-        """Fail every open stage and finish the run without masking its error."""
+    def fail_unfinished(self, *, interrupted: bool = False) -> None:
+        """Fail every open stage and finish the run without masking its error.
+
+        ``interrupted`` reports Ctrl+C or cancellation rather than an unexpected failure.
+        """
+        stage_detail = "interrupted before completion" if interrupted else "unexpected failure interrupted this stage"
         for stage in tuple(self._active_stages):
             self.emit(
                 ProgressEvent(
                     stage=stage,
                     state="failed",
-                    detail="unexpected failure interrupted this stage",
+                    detail=stage_detail,
                 )
             )
         self.emit(
             ProgressEvent(
                 stage="run-finished",
                 state="failed",
-                detail="Tier 3 evaluation failed unexpectedly",
+                detail="Tier 3 evaluation interrupted" if interrupted else "Tier 3 evaluation failed unexpectedly",
                 output_dir=self._output_dir,
                 result_path=self._existing_file(self._result_path),
                 report_path=self._existing_file(self._report_path),
@@ -4797,6 +4978,9 @@ def _run_harbor_eval_impl(
     repo_context_exclude_paths: Sequence[Path] = (),
     _evaluator_skill_path: Path | None = None,
     _snapshot_publication_target: dict[str, str] | None = None,
+    _decoy_workspace_paths: list[Path] | None = None,
+    _decoy_workspace_source_paths: list[Path] | None = None,
+    _decoy_manifest: dict[str, Any] | None = None,
     _monotonic_start: float | None = None,
 ) -> dict[str, Any]:
     """Run a public Harbor evaluation with and without the target skill."""
@@ -4830,6 +5014,35 @@ def _run_harbor_eval_impl(
             try:
                 snapshot_publication_target = publication_target_from_path(skill_path)
                 evaluator_skill_path = snapshot_stack.enter_context(private_evaluator_skill_snapshot(skill_path))
+                snapshot_config, _ = load_evals_config(evaluator_skill_path)
+                snapshot_workspace = snapshot_config.get("skill_workspace", {})
+                if "decoy_manifest" in snapshot_workspace:
+                    manual, selected, manifest = _decoy_workspace_skills(
+                        skill_path,
+                        snapshot_workspace,
+                        skill_workspace_mode or snapshot_workspace.get("mode", "isolated"),
+                        include_skills,
+                        reference_skills_dir,
+                    )
+                    assert manifest is not None
+                    source_paths = [*manual, *selected]
+                    results_root = Path(output_dir) if output_dir is not None else skill_path / "evals" / "results"
+                    validate_output_provenance_key_location(
+                        skill_path,
+                        results_root,
+                        reference_skills_dir=reference_skills_dir,
+                        workspace_skill_paths=source_paths,
+                    )
+                    validate_results_root_location(
+                        skill_path,
+                        results_root,
+                        reference_skills_dir=reference_skills_dir,
+                        workspace_skill_paths=source_paths,
+                    )
+                    frozen = snapshot_stack.enter_context(_private_decoy_workspace_snapshot(selected, manifest))
+                    forwarded["_decoy_workspace_paths"] = [*manual, *frozen]
+                    forwarded["_decoy_workspace_source_paths"] = source_paths
+                    forwarded["_decoy_manifest"] = manifest
                 if publication_target_from_path(skill_path) != snapshot_publication_target:
                     raise ValueError("Publication source changed while its private evaluator snapshot was created")
             except (OSError, ValueError) as exc:
@@ -4920,6 +5133,10 @@ def _run_harbor_eval_impl(
     if workspace_mode not in {"isolated", "group"}:
         reporter.emit(ProgressEvent(stage="configuration", state="failed", detail="invalid workspace mode"))
         return {"error": ["skill_workspace.mode must be isolated or group"]}
+    if "decoy_manifest" in workspace_config and workspace_mode != "group":
+        detail = "skill_workspace.decoy_manifest requires skill_workspace.mode=group"
+        reporter.emit(ProgressEvent(stage="configuration", state="failed", detail=detail))
+        return {"error": [detail]}
     if not skip_baseline and harbor_config.get("pre_agent_setup"):
         if skip_with_skill:
             # --skip-baseline cannot be combined with --skip-with-skill, so it
@@ -5255,12 +5472,21 @@ def _run_harbor_eval_impl(
     job_judge_verifier_env = _job_judge_verifier_env(provider_env, grading_mode)
     job_judge_subprocess_env = _job_judge_subprocess_env(provider_env, grading_mode)
 
+    if _decoy_manifest is not None:
+        run_config["skill_workspace"] = {
+            "mode": workspace_mode,
+            "decoy_manifest": _decoy_manifest,
+        }
     include_values = [*workspace_config.get("include", []), *(include_skills or [])]
     if include_values and workspace_mode != "group":
         reporter.emit(ProgressEvent(stage="with-skill-tasks", state="failed", detail="invalid included skills"))
         return {"error": ["include_skills requires skill_workspace.mode=group"]}
     try:
-        workspace_skills = _workspace_skills(skill_path.resolve(), include_values if workspace_mode == "group" else [])
+        workspace_skills = (
+            _decoy_workspace_paths
+            if _decoy_workspace_paths is not None
+            else _workspace_skills(skill_path.resolve(), include_values if workspace_mode == "group" else [])
+        )
     except ValueError as exc:
         reporter.emit(ProgressEvent(stage="with-skill-tasks", state="failed", detail=str(exc)))
         return {"error": [str(exc)]}
@@ -5272,13 +5498,13 @@ def _run_harbor_eval_impl(
             skill_path,
             root,
             reference_skills_dir=reference_skills_dir,
-            workspace_skill_paths=workspace_skills,
+            workspace_skill_paths=_decoy_workspace_source_paths or workspace_skills,
         )
         validate_results_root_location(
             skill_path,
             root,
             reference_skills_dir=reference_skills_dir,
-            workspace_skill_paths=workspace_skills,
+            workspace_skill_paths=_decoy_workspace_source_paths or workspace_skills,
         )
     except ValueError as exc:
         reporter.emit(ProgressEvent(stage="with-skill-tasks", state="failed", detail=str(exc)))
@@ -5630,7 +5856,7 @@ def _run_harbor_eval_impl(
         skill_path,
         staged_task_paths,
         reference_skills_dir=reference_skills_dir,
-        workspace_skill_paths=workspace_skills,
+        workspace_skill_paths=_decoy_workspace_source_paths or workspace_skills,
     ):
         publication_target_conflict = {
             "run_start": dict(publication_target) if publication_target is not None else None,
@@ -5757,6 +5983,8 @@ def _run_harbor_eval_impl(
         )
     errors: list[str] = []
     started_agents: SimpleQueue[str] = SimpleQueue()
+    # Ctrl+C reaches only this thread; workers observe it through this object.
+    cancellation = _HarborRunCancellation()
 
     def _execute_agent(agent: str) -> list[str]:
         started_agents.put(agent)
@@ -5783,6 +6011,7 @@ def _run_harbor_eval_impl(
             task_names=task_selectors,
             verifier_env=job_judge_verifier_env,
             environment_kwargs=effective_environment_kwargs,
+            cancellation=cancellation,
             **(
                 {
                     "additional_arms": additional_arms[agent],
@@ -5809,39 +6038,80 @@ def _run_harbor_eval_impl(
                 variants = "with-skill" if skip_baseline else "with-skill + baseline"
             reporter.emit(ProgressEvent(stage=f"agent:{agent}", state="running", detail=variants))
 
+    futures: dict[Future[list[str]], str] = {}
+
+    def _join_interrupted_agents() -> None:
+        """Wait while running agents stop their Harbor jobs after an interrupt.
+
+        A second Ctrl+C ends the cleanup grace period; a third one propagates.
+        """
+        stopping_reported = False
+        while True:
+            try:
+                running = [future for future in futures if not future.done()]
+                if not running:
+                    return
+                if not stopping_reported:
+                    stopping_reported = True
+                    for agent in sorted(futures[future] for future in running):
+                        reporter.emit(
+                            ProgressEvent(
+                                stage=f"agent:{agent}",
+                                state="running",
+                                detail=(
+                                    "stopping Harbor jobs; press Ctrl+C again to skip up to "
+                                    f"{_HARBOR_RUN_CANCEL_GRACE_SECONDS:g}s of environment cleanup"
+                                ),
+                            )
+                        )
+                wait(running, timeout=_HARBOR_RUN_CANCEL_POLL_SECONDS)
+            except KeyboardInterrupt:
+                if cancellation.forced.is_set():
+                    raise
+                cancellation.forced.set()
+
     with ThreadPoolExecutor(max_workers=min(max_agents, len(agents))) as executor:
-        futures = {executor.submit(_execute_agent, agent): agent for agent in agents}
-        pending = set(futures)
-        while pending:
-            _emit_started_agents()
-            done, pending = wait(pending, timeout=0.1, return_when=FIRST_COMPLETED)
-            _emit_started_agents()
-            for future in done:
-                agent = futures[future]
-                active_agents.discard(agent)
-                try:
-                    agent_errors = future.result()
-                except Exception as exc:
-                    reporter.emit(
-                        ProgressEvent(
-                            stage=f"agent:{agent}",
-                            state="failed",
-                            detail="agent worker failed unexpectedly",
+        try:
+            futures = {executor.submit(_execute_agent, agent): agent for agent in agents}
+            pending = set(futures)
+            while pending:
+                _emit_started_agents()
+                done, pending = wait(pending, timeout=0.1, return_when=FIRST_COMPLETED)
+                _emit_started_agents()
+                for future in done:
+                    agent = futures[future]
+                    active_agents.discard(agent)
+                    try:
+                        agent_errors = future.result()
+                    except Exception as exc:
+                        reporter.emit(
+                            ProgressEvent(
+                                stage=f"agent:{agent}",
+                                state="failed",
+                                detail="agent worker failed unexpectedly",
+                            )
                         )
-                    )
-                    unexpected_worker_error = unexpected_worker_error or exc
-                    continue
-                errors.extend(agent_errors)
-                if agent_errors:
-                    reporter.emit(
-                        ProgressEvent(
-                            stage=f"agent:{agent}",
-                            state="failed",
-                            detail="one or more Harbor jobs failed; inspect retained artifacts",
+                        unexpected_worker_error = unexpected_worker_error or exc
+                        continue
+                    errors.extend(agent_errors)
+                    if agent_errors:
+                        reporter.emit(
+                            ProgressEvent(
+                                stage=f"agent:{agent}",
+                                state="failed",
+                                detail="one or more Harbor jobs failed; inspect retained artifacts",
+                            )
                         )
-                    )
-                else:
-                    reporter.emit(ProgressEvent(stage=f"agent:{agent}", state="complete"))
+                    else:
+                        reporter.emit(ProgressEvent(stage=f"agent:{agent}", state="complete"))
+        except BaseException:
+            # Without this, the executor exit would wait for every running
+            # Harbor job to finish and would still start queued agents. Cancel
+            # the queue first so a worker that stops never picks up another agent.
+            executor.shutdown(wait=False, cancel_futures=True)
+            cancellation.requested.set()
+            _join_interrupted_agents()
+            raise
 
     if unexpected_worker_error is not None:
         for agent in sorted(active_agents):
@@ -6089,14 +6359,14 @@ def run_harbor_eval(*args: Any, **kwargs: Any) -> dict[str, Any]:
             )
         lifecycle.finish_result(result)
         return result
-    except BaseException:
+    except BaseException as exc:
         _finalize_harbor_artifacts(
             run_dir_value=lifecycle.output_dir,
             keep_requested=bool(kwargs.get("keep_harbor_jobs", False)),
             result=None,
         )
         try:
-            lifecycle.fail_unfinished()
+            lifecycle.fail_unfinished(interrupted=isinstance(exc, (KeyboardInterrupt, _HarborRunCancelledError)))
         except BaseException:
             logger.debug("Tier 3 progress terminalization failed", exc_info=True)
         raise

@@ -528,6 +528,106 @@ def test_bundled_release_and_ci_namespace_are_available():
         assert result.exit_code == 0, result.output
 
 
+def test_existing_component_onboarding_preserves_team_configuration(repository, release_file):
+    from test_ci_onboarding_existing import CALLER
+
+    scan = CALLER.replace("libraries", "skills").replace("        reference-implementations\n", "")
+    path = repository / wizard.SCAN
+    path.write_text(scan)
+    subprocess.run(["git", "-C", str(repository), "add", wizard.SCAN], check=True)
+    subprocess.run(
+        [
+            "git",
+            "-c",
+            "core.hooksPath=/dev/null",
+            "-c",
+            "commit.gpgsign=false",
+            "-C",
+            str(repository),
+            "commit",
+            "-m",
+            "Existing team configuration",
+        ],
+        check=True,
+        capture_output=True,
+    )
+    result = invoke(repository, release_file, "--no-input", "--mode", "save")
+    assert result.exit_code == 0, result.output
+    original, updated = yaml.safe_load(scan), yaml.safe_load(path.read_text())
+    updated["jobs"]["catalog"]["permissions"].pop("id-token")
+    assert updated == original
+    publisher = yaml.safe_load((repository / wizard.PUBLISH).read_text())
+    inputs = publisher["jobs"]["reports"]["with"]
+    assert inputs["delegated-evaluator-wrapper"].endswith("@v3")
+    assert "trusted-evaluator-shas" not in inputs
+    assert inputs["trusted-caller-blobs"] == wizard.blob_id(path.read_text())
+
+
+def test_private_configured_rerun_uses_verified_site_before_file_comparison(repository, release_file, monkeypatch):
+    private_url = "https://unique-private.pages.github.io/"
+    files = wizard.render_files(
+        RELEASE,
+        ["skills"],
+        70,
+        "auto",
+        "trunk",
+        "example-org/consumer",
+        url=private_url,
+        verified_private_url=private_url,
+    )
+    wizard.save_files(repository, files)
+    state = {"report_url": private_url, "verified_private_url": private_url}
+    monkeypatch.setattr(wizard, "remote_preflight", lambda *_args: state)
+
+    def already_configured(repo, name, branch, actual_files, full, plan, **kwargs):
+        assert actual_files == files
+        assert plan["changed_files"] == []
+        assert plan["report_url"] == private_url
+
+    monkeypatch.setattr(wizard, "create_setup", already_configured)
+    result = invoke(repository, release_file, "--mode", "pr", "--no-input")
+    assert result.exit_code == 0, result.output
+    assert "Setup is configured" in result.output
+
+
+def test_direct_custom_artifact_is_rejected_before_adding_incompatible_publisher(repository, release_file):
+    files = wizard.render_files(RELEASE, ["skills"], 70, "auto", "trunk", "example-org/consumer", full=False)
+    scan = wizard.workflow_helpers.parse_workflow(files[wizard.SCAN])
+    scan["jobs"]["skills"]["with"]["artifact-name"] = "team-report"
+    (repository / wizard.SCAN).write_text(yaml.safe_dump(scan))
+    result = invoke(repository, release_file, "--mode", "preview", "--no-input")
+    assert result.exit_code != 0
+    assert "artifact-name: skill-evaluator-tier1" in result.output
+    assert not (repository / wizard.PUBLISH).exists()
+
+
+def test_caller_approval_matches_git_line_ending_filters(repository):
+    (repository / ".gitattributes").write_text("*.yml text eol=lf\n")
+    files = wizard.render_files(RELEASE, ["skills"], 70, "auto", "trunk", "example-org/consumer")
+    files[wizard.SCAN] = files[wizard.SCAN].replace("\n", "\r\n")
+    bound = wizard.bind_caller_approval(repository, files)
+    (repository / wizard.SCAN).write_bytes(bound[wizard.SCAN].encode())
+    subprocess.run(["git", "-C", str(repository), "add", wizard.SCAN], check=True, capture_output=True)
+    staged = subprocess.check_output(["git", "-C", str(repository), "rev-parse", ":" + wizard.SCAN], text=True).strip()
+    assert wizard.caller_approval(bound) == staged
+    assert wizard.blob_id(bound[wizard.SCAN]) != staged
+
+
+def test_checks_only_pr_rerun_has_no_empty_commit(repository, release_file, monkeypatch):
+    files = wizard.render_files(RELEASE, ["skills"], 70, "auto", "trunk", "example-org/consumer", full=False)
+    wizard.save_files(repository, files)
+    monkeypatch.setattr(wizard, "remote_preflight", lambda *_args: {})
+
+    def already_configured(repo, name, branch, actual_files, full, plan, **kwargs):
+        assert not full
+        assert actual_files == files
+        assert plan["changed_files"] == []
+
+    monkeypatch.setattr(wizard, "create_setup", already_configured)
+    result = invoke(repository, release_file, "--mode", "pr", "--no-input", "--checks-only")
+    assert result.exit_code == 0, result.output
+
+
 def test_default_branch_mismatch_stops_before_fetch(repository, monkeypatch):
     info = {"default_branch": "main", "permissions": {"admin": True}, "private": False}
     calls, git_calls = _remote_state(monkeypatch, info)

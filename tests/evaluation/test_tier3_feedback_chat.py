@@ -815,6 +815,23 @@ def test_tier3_help_lists_feedback() -> None:
     assert "--skill" in command_help.output
 
 
+def test_skill_folder_named_feedback_needs_an_explicit_path(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    # The registered command wins over a same-named folder, as the docs say.
+    monkeypatch.chdir(tmp_path)
+    (tmp_path / "feedback").mkdir()
+    chat = CliRunner().invoke(cli, ["tier3", "feedback"])
+    assert chat.exit_code == 2
+    assert "RUN_DIR" in chat.output
+    group = cli.commands["tier3"]
+    direct = group.make_context("tier3", ["./feedback"])
+    assert direct.meta["direct_tier_args"] == ["./feedback"]
+    expert = group.make_context("tier3", ["evaluate", "feedback"])
+    assert "direct_tier_args" not in expert.meta
+    _name, command, args = group.resolve_command(expert, ["evaluate", "feedback"])
+    assert command is group.commands["evaluate"]
+    assert args == ["feedback"]
+
+
 def test_feedback_cli_preserves_tradeoffs_and_renders_model_text_literally(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch, plain_console: None
 ) -> None:

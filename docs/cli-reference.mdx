@@ -615,6 +615,10 @@ explicit `--skill` must name the skill directory the run recorded; when that
 skill has changed since the run, the chat says so, and its answers describe the
 evaluated version.
 
+`tier3 feedback` always opens this chat, also in a directory that contains a
+skill folder named `feedback`. To evaluate that skill, run
+`skillevaluator tier3 ./feedback` or `skillevaluator tier3 evaluate feedback`.
+
 | Flag | Default | Effect |
 | --- | --- | --- |
 | `--skill DIRECTORY` | inferred from the run | Evaluated skill directory. It must match the skill the run recorded. |

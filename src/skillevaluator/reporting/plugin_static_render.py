@@ -20,7 +20,16 @@ def _display(value: object) -> str:
     return "unknown" if value is None else str(value)
 
 
-def _markdown(payload: dict, *, publication: bool = False) -> str:
+def _markdown(
+    payload: dict,
+    *,
+    publication: bool = False,
+    title: str = "Plugin static evidence",
+    notice: str = "Static evidence does not demonstrate runtime loading or behavior.",
+    truncation_notice: str = "Some static evidence was omitted by report bounds; see section counts.",
+    status_label: str = "",
+    header_fields: tuple[tuple[str, object], ...] = (),
+) -> str:
     if publication:
         from skillevaluator.reporting.benchmark import _md_cell as escape
     else:
@@ -35,22 +44,23 @@ def _markdown(payload: dict, *, publication: bool = False) -> str:
         return encoded
 
     lines = [
-        "## Plugin static evidence",
+        f"## {title}",
         "",
-        f"**{cell(payload['name'])}** — {payload['status']}",
+        f"**{cell(payload['name'])}** — {status_label + ': ' if status_label else ''}{cell(payload['status'])}",
         "",
-        "Static evidence does not demonstrate runtime loading or behavior.",
+        *[f"{label}: {cell(value)}\n" for label, value in header_fields],
+        notice,
         "",
     ]
     if payload["truncated"]:
-        lines.extend(["Some static evidence was omitted by report bounds; see section counts.", ""])
+        lines.extend([truncation_notice, ""])
     for section in payload["sections"]:
-        lines.extend([f"### {section['title']}", ""])
+        lines.extend([f"### {cell(section['title'])}", ""])
         lines.extend(f"{cell(note)}\n" for note in section["notes"] if note is not None)
         if section["rows"]:
             lines.extend(
                 [
-                    "| " + " | ".join(section["columns"]) + " |",
+                    "| " + " | ".join(cell(column) for column in section["columns"]) + " |",
                     "| " + " | ".join("---" for _ in section["columns"]) + " |",
                 ]
             )
@@ -61,19 +71,28 @@ def _markdown(payload: dict, *, publication: bool = False) -> str:
     return "\n".join(lines)
 
 
-def _cli(payload: dict) -> str:
+def _cli(
+    payload: dict,
+    *,
+    title: str = "Plugin static evidence",
+    notice: str = "Static evidence does not demonstrate runtime loading or behavior.",
+    truncation_notice: str = "Static evidence was omitted by report bounds; see section counts.",
+    status_label: str = "",
+    header_fields: tuple[tuple[str, object], ...] = (),
+) -> str:
     from rich.console import Console
     from rich.text import Text
 
     output = io.StringIO()
     console = Console(file=output, color_system=None, emoji=False)
     lines = [
-        "Plugin static evidence",
-        f"{payload['name']} — {payload['status']}",
-        "Static evidence does not demonstrate runtime loading or behavior.",
+        title,
+        f"{payload['name']} — {status_label + ': ' if status_label else ''}{payload['status']}",
+        *[f"{label}: {_display(value)}" for label, value in header_fields],
+        notice,
     ]
     if payload["truncated"]:
-        lines.append("Static evidence was omitted by report bounds; see section counts.")
+        lines.append(truncation_notice)
     for section in payload["sections"]:
         lines.extend(["", section["title"], " | ".join(section["columns"])])
         lines.extend(_display(note) for note in section["notes"] if note is not None)

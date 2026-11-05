@@ -24,6 +24,11 @@ All notable changes to SkillEvaluator are documented in this file.
 
 ### Added
 
+- Private runtime runs retain sanitized loading, coverage, MCP, behavior and
+  comparison views before cleanup. The saved snapshot supports offline reports
+  in all six existing formats, with explicit missing evidence and omissions.
+  Public command activation remains deferred.
+
 - `skillevaluator tier3 feedback RUN_DIR [--skill PATH]` opens a terminal chat
   about one completed Tier 3 run. Answers are grounded in that run's scores,
   with-skill and baseline comparisons, every case's attempts with per-metric

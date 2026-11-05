@@ -31,6 +31,7 @@ commands referenced below.
 | [dedup-scan](#dedup-scan) | Alias of `context-optimization-check` | Embeddings + LLM provider key |
 | [similarity-check](#similarity-check) | Detect duplicate content across a collection | Embeddings provider key |
 | [tier3 evaluate](#tier3-evaluate) | Run Tier 3 live agent evaluation | Provider key plus a credential the selected agents can use (one `NVIDIA_API_KEY` covers both on NVIDIA Build), backend (Docker by default) |
+| [tier3 select-decoys](#tier3-select-decoys) | Save a reproducible set of neighboring skills for group evaluation | Local description-embedding catalog, skill collection, embeddings provider key |
 | [create-eval-dataset](#create-eval-dataset) | Generate synthetic eval datasets | LLM provider key (none with `--no-llm`) |
 | [init-custom-grader](#init-custom-grader) | Scaffold a bring-your-own-grader starter | Nothing |
 | [init-harbor-task](#init-harbor-task) | Scaffold a bring-your-own-task Harbor starter | Nothing |
@@ -127,11 +128,13 @@ errors, such as an option the workflow does not accept, exit `2`.
 | Flag | Default | Effect |
 | --- | --- | --- |
 | `--checks TEXT` | All applicable static checks, including dependency auditing | Comma-separated subset of static checks |
+| `--skip CHECKS` | none | Comma-separated checks to leave out, e.g. `secrets` for the Gitleaks scan. Skipped checks are shown and reported as skipped, nothing is installed for them, and the run cannot certify Tier 1 for publication |
 | `--llm / --no-llm` | Enabled when a provider is configured | Enable or skip rubric, LLM security, and finding verification; explicit `--llm` requires valid provider configuration |
 | `--min-score INTEGER` | `70` | Minimum passing quality and rubric score, from 0 to 100; quality severity overrides cannot waive the minimum |
 | `--quality-config PATH` | packaged `quality-default.yaml` | YAML file that replaces the quality check's expected-heading rules. See [Tier 1: Validation](tier1-validation.mdx#the-checks). |
 | `--profile TEXT` | `SKILLEVALUATOR_PROFILE`, then `external` | Validation policy profile |
 | `--previous-version TEXT` | `SKILLEVALUATOR_PREVIOUS_VERSION`, else unset | Previous version for version checks |
+| `--skillspector-baseline FILE` | unset | Audited SkillSpector suppression baseline; never discovered from the skill. See [Audited SkillSpector baselines](tier1-validation.mdx#audited-skillspector-baselines). |
 
 Also accepts `-r/--report` and `-o/--output-dir` described above.
 
@@ -159,9 +162,11 @@ pipeline.
 | --- | --- |
 | `tier1` | `validate`, `quality-check`, `rubric-eval`, `security-scan`, `pii-scan`, `lint-scripts` |
 | `tier2` | `context-optimization-check`, `dedup-scan`, `similarity-check` |
-| `tier3` | `evaluate`, `create-eval-dataset`, `init-custom-grader`, `init-harbor-task`, `doctor`, `view`, `compare`, `validate`, `harbor-view` |
+| `tier3` | `evaluate`, `select-decoys`, `create-eval-dataset`, `init-custom-grader`, `init-harbor-task`, `doctor`, `view`, `compare`, `validate`, `harbor-view` |
 
-`health-check` and [models](#models) are top-level only. Two expert commands are advertised **only** inside the `tier3` group: [tier3 evaluate](#tier3-evaluate), documented with its full flag set below, and `tier3 validate`:
+`health-check` and [models](#models) are top-level only. The expert commands
+[tier3 evaluate](#tier3-evaluate), [tier3 select-decoys](#tier3-select-decoys),
+and `tier3 validate` are advertised **only** inside the `tier3` group:
 
 ### tier3 validate
 
@@ -233,11 +238,13 @@ Static checks; LLM-free by default. Tier 1 gates the exit code and always runs.
 | Flag | Default | Effect |
 | --- | --- | --- |
 | `--checks, --tier1-checks TEXT` | all applicable | Comma-separated subset of Tier 1 checks. Default choices: `schema`, `version`, `security`, `pii`, `license`, `code-integrity`, `unicode`, `quality`, `lint`; opt-in (not run by default): `dependency`. `quality`/`lint`/`version` are skill-only and skipped for rules and workflows. |
+| `--skip CHECKS` | none | Comma-separated Tier 1 checks to leave out: any check above or `secrets` (the Gitleaks scan inside `code-integrity`). Skipped checks show as skipped in the terminal and reports, nothing is installed for them, and the run cannot certify Tier 1 for publication. |
 | `--previous-version VERSION` | `SKILLEVALUATOR_PREVIOUS_VERSION`, else unset | Previous released version; the skill's version must be a strictly greater SemVer. Single-skill targets only. |
 | `--fail-fast` | off | Stop on the first failing check instead of collecting all issues. |
 | `-c, --continue-on-failure` | off | Run the full pipeline without stopping early; record all issues in the reports. Overrides `--fail-fast`, and for folder validation keeps scanning every skill past a CRITICAL finding. |
 | `--llm, --tier1-llm / --no-llm, --no-tier1-llm` | `no-llm` | Enable LLM-backed security analysis (requires a configured public provider — see [Providers & Credentials](configuration.mdx)). |
 | `--llm-verify` | off | Run a second LLM pass to suppress false-positive findings. |
+| `--skillspector-baseline FILE` | unset | Audited SkillSpector suppression baseline for the `security` check; never discovered from the skill. See [Audited SkillSpector baselines](tier1-validation.mdx#audited-skillspector-baselines). |
 | `--min-score INTEGER` | `70` | Minimum quality score (0–100) required per skill when the `quality` check runs; policy severity overrides cannot waive this gate. |
 | `--quality-config PATH` | packaged `quality-default.yaml` | YAML file that replaces the quality check's expected-heading rules. See [Tier 1: Validation](tier1-validation.mdx#the-checks). |
 
@@ -337,6 +344,7 @@ skillevaluator security-scan ./my-skill
 | --- | --- | --- |
 | `--llm / --no-llm` | `no-llm` | Enable LLM security analysis. |
 | `--llm-verify` | off | Use LLM verification to reduce false positives. |
+| `--skillspector-baseline FILE` | unset | Audited SkillSpector suppression baseline; never discovered from the skill. See [Audited SkillSpector baselines](tier1-validation.mdx#audited-skillspector-baselines). |
 
 Plus the standard report options.
 
@@ -412,6 +420,44 @@ still map to `--catalog` and `--save-catalog`, respectively. Use the catalog
 spellings for new commands. A catalog query and a catalog build cannot be
 combined in one invocation, and each alias cannot be supplied alongside its
 replacement.
+
+## tier3 select-decoys
+
+Choose neighboring skills from a local description-embedding catalog and save
+a frozen JSON manifest for group evaluation. This command makes an embedding
+request for the target; it does not launch an agent or modify the run policy.
+
+```bash title="Save a group-workspace selection"
+skillevaluator tier3 select-decoys ./skills/my-skill \
+  --catalog ./skill-catalog.json --catalog-root ./skills \
+  --count 4 --output ./skills/my-skill/evals/decoys.json
+```
+
+| Flag | Default | Effect |
+| --- | --- | --- |
+| `--catalog FILE` | required | Skill-only catalog with at most 1,000 entries, saved by `similarity-check --save-catalog` without `--full-body`. |
+| `--catalog-root DIRECTORY` | required | Local collection root corresponding to catalog-relative skill paths. |
+| `--count INTEGER` | `4` | Number of eligible skills to select, from `1` to `1000`; fails if fewer are available. |
+| `--exclude PATH` | none | Exclude a catalog-relative skill path; repeatable. |
+| `--model TEXT` | configured embedding model | Embedding model override; must match the catalog. |
+| `-o, --output FILE` | required | Selection manifest to write, outside the collection or inside the target's `evals/` directory. |
+
+The manifest records the catalog hash and embedding identity, selected paths
+and scores, target manifest hash, and selected runtime-content hashes. The
+target's own collection uses a root relative to its parent directory, so an
+identical checkout can reuse the manifest. The hashes cover everything staging
+copies from a selected skill, including ignored or untracked files and empty
+folders, so generate a manifest you plan to commit from a fresh clone.
+Unrelated external collections
+retain an absolute root. Evaluator-only files are excluded from decoy hashes;
+changing a decoy's evaluation config does not require a new selection. Output
+cannot overwrite evaluation inputs or an existing non-manifest file. Set
+`skill_workspace.mode: group` and `skill_workspace.decoy_manifest` in
+`evals/config.yml` to consume it. The manifest path is relative to the target
+skill's parent directory. Evaluation validates and reuses the selection
+without contacting the embedding provider. See
+[Select a reproducible decoy set](agents-and-sandboxes.mdx#select-a-reproducible-decoy-set)
+for a complete example and the limits of similarity-based selection.
 
 ## tier3 evaluate
 

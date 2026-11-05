@@ -130,6 +130,13 @@ dataset provenance, agent/model details, and a dimension-by-dimension
 `Baseline → Skill Uplift` table when Tier 3 ran. Public cards omit validation
 profile names and absolute host paths.
 
+Table scores are rounded half-up to one decimal place. A score near a dimension
+verdict threshold keeps as many extra decimals as it needs to stay in its band,
+so `0.4995` is shown as `49.95%`, not as a passing `50.0%`. Uplift is the
+difference of the two displayed scores, so a cell such as
+`58.4% → 94.8% (+36.4 points)` always adds up. A score outside 0–1 is shown as
+`Not available`.
+
 The card carries one overall verdict — `PASS`, `NEUTRAL`, `FAIL`, or
 `INCOMPLETE`. It fails closed: if a required scanner produced no trustworthy
 evidence, the verdict is `INCOMPLETE` and the card explicitly says not to use

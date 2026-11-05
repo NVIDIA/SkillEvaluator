@@ -269,6 +269,7 @@ class JSONReporter(ReporterBase):
             "skipped": skipped,
             "skip_reason": get_skip_reason(result) if skipped else None,
             "incomplete_scans": result.incomplete_scans,
+            **({"scanners": result.scanners} if result.scanners else {}),
             "summary": {
                 "files_scanned": result.summary.files_scanned,
                 "checks_performed": result.summary.checks_performed,
@@ -330,6 +331,12 @@ class JSONReporter(ReporterBase):
         qs = result.metadata.get("quality_scores")
         if qs:
             data["quality"] = qs
+
+        # Whether an explicitly requested SkillSpector baseline was applied, so
+        # CI can tell an inert baseline from one that matched nothing.
+        skillspector_baseline = result.metadata.get("skillspector_baseline")
+        if isinstance(skillspector_baseline, dict):
+            data["skillspector_baseline"] = dict(skillspector_baseline)
 
         # Tier 3: Agent evaluation data
         ae = result.metadata.get("agent_eval")

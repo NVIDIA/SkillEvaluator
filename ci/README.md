@@ -108,7 +108,8 @@ Pages is not an inherent requirement for GitHub PR comments.
 4. Keep the scan filename `.github/workflows/skill-checks.yml`, workflow name
    **Skill checks**, and artifact name **skill-evaluator-tier1**. The dedicated
    publisher validates this caller and accepts exactly one approved referenced
-   evaluator workflow. A differently named manual LLM workflow is not accepted
+   evaluator workflow, plus explicitly approved wrappers as described below.
+   A differently named manual LLM workflow is not accepted
    automatically. The publisher reads only the attempt's
    `skill-evaluator-tier1-evidence-attempt-N` artifact. A scan from an
    evaluator revision that does not upload it cannot be published. Re-running
@@ -165,6 +166,79 @@ Fork PR scans can run without provider secrets; fork PR bot comments and current
 PR aliases are not enabled. Comment-only operation and hosting alongside an
 arbitrary existing Pages deployment need further integration work.
 
+### Calling through a shared workflow
+
+Direct consumers need no wrapper configuration. If the scan calls a shared
+workflow that then calls SkillEvaluator, use a reviewed publisher revision that
+exposes `trusted-wrapper-workflows`. The archived 0.7.1 publisher pin predates
+this support; adding the input to that older workflow does not enable it.
+Update both the publisher job's `uses:` revision and its `tools-ref` to that
+reviewed publisher commit. The evaluator workflow and image can keep their
+existing approved pins.
+
+In the consumer's publisher workflow, approve each additional workflow by its
+full repository path and immutable commit:
+
+```yaml
+with:
+  trusted-wrapper-workflows: |-
+    your-org/shared-ci/.github/workflows/skill-checks.yml@FULL_COMMIT_SHA
+```
+
+Replace `FULL_COMMIT_SHA` with the reviewed 40-character commit. Multiple wrappers
+can be separated by newlines or commas. Each referenced wrapper must be approved;
+branch references are rejected. Continue approving the actual evaluator
+in `trusted-evaluator-shas` and the consumer scan file in `trusted-caller-blobs`.
+Review any wrapper update and refresh its pin in both the calling workflow and
+publisher approval list; refresh the consumer blob after editing its scan file.
+
+For a central component maintained at a version tag such as `@v3`, the consumer
+can explicitly delegate evaluator version selection to that component:
+
+```yaml
+with:
+  trusted-wrapper-workflows: your-org/shared-ci/.github/workflows/skill-checks.yml@v3
+  delegated-evaluator-wrapper: your-org/shared-ci/.github/workflows/skill-checks.yml@v3
+  trusted-caller-blobs: YOUR_REVIEWED_SCAN_FILE_BLOB
+```
+
+This mode supports one consumer scan job calling one shared component, which
+calls one SHA-pinned evaluator in the configured evaluator repository. Omit
+`trusted-evaluator-shas` when delegating. The publisher verifies GitHub's
+historical tag resolution and the signed evaluator receipt; it never resolves
+today's tag to validate an earlier run. Each report records the resolved wrapper
+commit. Component maintainers can update evaluator pins behind the approved tag
+without changing each consumer; edits to the consumer scan file still need a
+new approved blob. Tag delegation grants that component control over evaluator
+versions and common policy, so enable it only for a component your team trusts.
+Multiple wrapper levels and matrix callers require the explicit SHA allowlists.
+
+`skillevaluator ci init` detects this existing caller, keeps its configuration,
+and prepares the publisher and caller approval automatically. The CLI checks
+the shared component's identity permission before changing GitHub settings.
+For private reports, an administrator first selects **Private** and **GitHub
+Actions** in Pages settings. The CLI verifies the assigned private URL and
+configures report history and the setup PR. It never creates a public site for
+a private repository. Private Pages requires an Enterprise Cloud organization.
+
+The consumer scan job **and every wrapper job calling the next workflow** need:
+
+```yaml
+permissions:
+  contents: read
+  id-token: write
+```
+
+An intermediate job that grants only `contents: read` removes the identity
+permission, so the scan cannot produce its signed publication receipt. Start a
+new scan after configuring the chain. Keep the scan workflow name, filename and
+artifact name listed above. Wrappers forward `paths`, thresholds and other scan
+choices normally. They do not need PR-write or Pages-write permissions.
+
+The publisher verifies the signed identity of the evaluator job and the exact
+consumer workflow. It records approved wrapper identities in the publication
+receipt. Private repositories still need appropriately restricted report hosting.
+
 Basic scans do not request identity credentials. If GitHub withholds the signing
 permission (including under fork policies), the scan and downloadable reports
 remain available, but hosting is skipped with a setup message. Historical runs
@@ -190,8 +264,8 @@ apply. A configured LLM run is not proof of Tier 2 or Tier 3 evaluation.
 ## Maintainer release procedure
 
 Release publication is deliberate and manual. Consumer files become usable
-after the official image release; source templates contain placeholders until
-then.
+after the official image is published and verified; source templates contain
+placeholders until then.
 
 1. Review and merge source, wrapper, scanner pins, renderer and reusable
    workflows. Run focused selection/report/trust tests plus practical E2E
@@ -234,8 +308,11 @@ then.
    URL remains their own configuration; the generated caller blob must be
    recalculated after any scan-file edits.
 5. Download the workflow's `github-actions-onboarding` artifact (retained for
-   90 days) and attach that generated bundle and image/source identity to the
-   official release for a durable public download.
+   90 days). Commit the verified generated files under `ci/bundles/VERSION/`.
+   Use **one SkillEvaluator product release per version**: stage the Python
+   wheel, source archive, CI bundle and checksums together in that release's
+   draft, include the versioned PyPI package link in its notes, then publish
+   after all assets are ready. Do not create separate `ci-*` release entries.
    Test those exact generated files in a clean consumer repository. Verify a
    passing collection, an intentional failure, configuration and missing-tool
    failures, affected-skill PR selection and `scan-mode: all`, and report

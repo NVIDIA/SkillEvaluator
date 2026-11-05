@@ -3,6 +3,7 @@
 
 """Workflow contracts for attempt-bound publication and queued PR feedback."""
 
+import json
 import os
 import re
 import shutil
@@ -43,6 +44,17 @@ def test_privileged_preparation_has_pr_read_and_queued_deploy_preserves_feedback
     assert "needs.deploy.result == 'success'" in jobs["comment"]["if"]
 
 
+def test_wrapper_delegation_is_explicit_and_static_evaluator_pins_remain_available():
+    workflow = load(".github/workflows/publish-skill-reports.yml")
+    inputs = workflow["on"]["workflow_call"]["inputs"]
+    assert inputs["delegated-evaluator-wrapper"]["default"] == ""
+    assert inputs["trusted-evaluator-shas"]["default"] == ""
+    assert inputs["trusted-caller-blobs"]["required"] == "true"
+    step = next(step for step in workflow["jobs"]["prepare"]["steps"] if step.get("id") == "publish")
+    assert step["env"]["DELEGATED_EVALUATOR_WRAPPER"] == "${{ inputs.delegated-evaluator-wrapper }}"
+    assert step["env"]["TRUSTED_EVALUATOR_SHA"] == "${{ inputs.trusted-evaluator-shas }}"
+
+
 def test_skipped_stale_run_does_not_deploy_or_upload_feedback():
     jobs = load(".github/workflows/publish-skill-reports.yml")["jobs"]
     assert jobs["prepare"]["outputs"]["skipped"] == "${{ steps.publish.outputs.skipped }}"
@@ -65,7 +77,103 @@ def test_publisher_uses_verified_node24_action_releases():
     uses = {step.get("uses", "") for job in jobs.values() for step in job["steps"]}
     assert "actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9" in uses
     assert "actions/upload-pages-artifact@fc324d3547104276b827a68afc52ff2a11cc49c9" in uses
-    assert "actions/deploy-pages@368f82528645a54fb793d4d04e342629a3f51346" in uses
+    assert "actions/github-script@ed597411d8f924073f98dfc5c65a23a2325f34cd" in uses
+
+
+@pytest.mark.parametrize(
+    ("revision", "artifact"),
+    [("", "123"), ("bad", "123"), ("a" * 41, "123"), ("a" * 40, ""), ("a" * 40, "0"), ("a" * 40, "9007199254740993")],
+)
+def test_pages_rejects_invalid_identity_before_requesting_credentials(revision, artifact):
+    node = shutil.which("node")
+    if not node:
+        pytest.skip("Node.js is required to exercise the deployed workflow script")
+    steps = load(".github/workflows/publish-skill-reports.yml")["jobs"]["deploy"]["steps"]
+    deploy = next(step for step in steps if step.get("id") == "deployment")
+    script = deploy["with"]["script"]
+    # Run the actual workflow code without an API or token provider. Invalid
+    # identities must be rejected before either collaborator can be accessed.
+    harness = """
+      const AsyncFunction = Object.getPrototypeOf(async function(){}).constructor;
+      new AsyncFunction('github', 'context', 'core', process.argv[1])({}, {}, {})
+        .then(() => process.exit(2))
+        .catch(error => { console.log(error.message); });
+    """
+    result = subprocess.run(
+        [node, "-e", harness, script],
+        env={**os.environ, "SITE_REVISION": revision, "PAGES_ARTIFACT_ID": artifact},
+        check=True,
+        capture_output=True,
+        text=True,
+        timeout=10,
+    )
+    assert result.stdout.strip() == "A retained site revision and uploaded Pages artifact are required."
+
+
+@pytest.mark.parametrize(
+    "repository, pages, expected, accepted",
+    [
+        ({"private": False, "visibility": "public"}, None, "https://owner.github.io/consumer", True),
+        ({"private": True, "visibility": "private"}, {"public": False}, "https://quiet.pages.github.io/", True),
+        ({"private": True, "visibility": "internal"}, {"public": False}, "https://quiet.pages.github.io", True),
+        ({"private": True, "visibility": "private"}, {"public": True}, "https://quiet.pages.github.io/", False),
+        ({"private": True, "visibility": "private"}, {}, "https://quiet.pages.github.io/", False),
+        ({"private": True, "visibility": "private"}, {"public": 0}, "https://quiet.pages.github.io/", False),
+        ({"private": True, "visibility": "private"}, {"public": "false"}, "https://quiet.pages.github.io/", False),
+        ({"private": True, "visibility": "private"}, {"public": False}, "https://changed.pages.github.io/", False),
+        ({"private": True, "visibility": "private"}, {"public": False}, "https://owner.github.io/consumer", False),
+        ({"private": False, "visibility": "public"}, {"public": True}, "https://quiet.pages.github.io/", False),
+        ({"private": False, "visibility": "public"}, {"public": False}, "https://QUIET.pages.github.io/", False),
+        ({"private": True, "visibility": "private"}, {"public": False}, "https://quiet.pages.github.io/\n", False),
+        ({}, {"public": True}, "https://owner.github.io/consumer", False),
+    ],
+)
+def test_deploy_rechecks_private_pages_before_oidc_or_deployment(repository, pages, expected, accepted):
+    node = shutil.which("node")
+    if not node:
+        pytest.skip("Node.js is required to exercise the deployed workflow script")
+    workflow = load(".github/workflows/publish-skill-reports.yml")
+    step = next(step for step in workflow["jobs"]["deploy"]["steps"] if step.get("id") == "deployment")
+    assert step["env"]["PAGES_BASE_URL"] == "${{ inputs.report-base-url }}"
+    assert workflow["jobs"]["prepare"]["permissions"]["pages"] == "read"
+    if pages is not None:
+        pages = {"html_url": "https://quiet.pages.github.io/", "build_type": "workflow", **pages}
+    harness = """
+      const AsyncFunction = Object.getPrototypeOf(async function(){}).constructor;
+      const [repository, pages] = JSON.parse(process.argv[2]);
+      const calls = [];
+      let credentials = false;
+      const github = {request: async (route, args) => {
+        calls.push(route);
+        if (route === 'GET /repos/{owner}/{repo}') return {data: repository};
+        if (route === 'GET /repos/{owner}/{repo}/pages') return {data: pages};
+        if (route === 'POST /repos/{owner}/{repo}/pages/deployments') {
+          return {data: {id: process.env.SITE_REVISION, page_url: process.env.PAGES_BASE_URL}};
+        }
+        if (route === 'GET /repos/{owner}/{repo}/pages/deployments/{deployment_id}') {
+          return {data: {status: 'succeed'}};
+        }
+        throw new Error('Unexpected request');
+      }};
+      const core = {getIDToken: async () => {credentials = true; return 'test';}, info: () => {}, setOutput: () => {}};
+      new AsyncFunction('github', 'context', 'core', process.argv[1])(github, {repo: {owner:'owner', repo:'consumer'}}, core)
+        .then(() => console.log(JSON.stringify({accepted: true, calls, credentials})))
+        .catch(error => console.log(JSON.stringify({accepted: false, calls, credentials, error: error.message})));
+    """
+    result = subprocess.run(
+        [node, "-e", harness, step["with"]["script"], json.dumps([repository, pages])],
+        env={**os.environ, "SITE_REVISION": "a" * 40, "PAGES_ARTIFACT_ID": "123", "PAGES_BASE_URL": expected},
+        check=True,
+        capture_output=True,
+        text=True,
+        timeout=10,
+    )
+    outcome = json.loads(result.stdout)
+    assert outcome["accepted"] is accepted
+    assert outcome["credentials"] is accepted
+    assert ("POST /repos/{owner}/{repo}/pages/deployments" in outcome["calls"]) is accepted
+    if not accepted:
+        assert "verified private Pages" in outcome["error"]
 
 
 def test_privileged_publisher_installs_the_reviewed_hash_locked_bootstrap():

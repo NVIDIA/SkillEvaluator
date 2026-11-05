@@ -206,9 +206,10 @@ import json, sys
 from pathlib import Path
 
 # Top-level import names of every optional extra in pyproject.toml
-# (llm, tier3, security, publisher, dashboard).
+# (llm, tier3, security, publisher, dashboard), including packages they pull in
+# that no base dependency provides (cryptography via pyjwt[crypto], httpx).
 BLOCKED = {'anthropic', 'boto3', 'botocore', 'litellm', 'openai', 'harbor', 'mcp', 'jwt', 'oauthlib',
-           'dotenv', 'bandit', 'pip_audit', 'streamlit'}
+           'dotenv', 'bandit', 'pip_audit', 'streamlit', 'cryptography', 'httpx'}
 
 class Blocker:
     def find_spec(self, name, path=None, target=None):

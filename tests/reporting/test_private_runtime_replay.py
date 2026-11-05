@@ -74,20 +74,61 @@ def test_replay_refuses_incompatible_snapshot_schema(tmp_path, change):
         io_api().load_plugin_runtime_report(tmp_path)
 
 
-def test_saved_snapshot_is_the_live_report_for_multiline_diagnostics(tmp_path):
+def _strings(value):
+    if isinstance(value, str):
+        yield value
+    elif isinstance(value, dict):
+        for item in value.values():
+            yield from _strings(item)
+    elif isinstance(value, list):
+        for item in value:
+            yield from _strings(item)
+
+
+@pytest.mark.parametrize(
+    ("error", "kept", "dropped"),
+    [
+        (
+            "claude-code/with_skill: RuntimeError: census read failed\napi_key: placeholder\n"
+            "rerun with --keep-jobs to inspect trials",
+            "census read failed",
+            "placeholder",
+        ),
+        # Three sanitizer passes: joining lines exposes the assignments, their
+        # redaction pushes the key footer past the cell bound, and the next pass
+        # redacts the now-unterminated key header.
+        (
+            "token:\n," * 8 + " -----BEGIN PRIVATE KEY----- " + "y" * 150 + " -----END x",
+            "token:<redacted>",
+            "BEGIN PRIVATE KEY",
+        ),
+    ],
+    ids=["two_passes", "three_passes"],
+)
+def test_saved_snapshot_is_the_live_report_for_multiline_diagnostics(tmp_path, error, kept, dropped):
     # Runtime observer errors keep line breaks; redaction must not differ between
     # the live report and the file that offline replay reads.
     result = sample()
-    result["runtime_evidence"]["errors"] = [
-        "claude-code/with_skill: RuntimeError: census read failed\napi_key: placeholder\n"
-        "rerun with --keep-jobs to inspect trials"
-    ]
+    result["runtime_evidence"]["errors"] = [error]
     report = api().project_plugin_runtime(result, provenance={"plugin": "fixture"})
     io_api().save_plugin_runtime_report(report, tmp_path)
     saved = (tmp_path / "plugin_runtime_report.json").read_text(encoding="utf-8")
     assert json.loads(saved) == report.payload()
     assert io_api().load_plugin_runtime_report(tmp_path).payload() == report.payload()
-    assert "census read failed" in saved and "placeholder" not in saved
+    assert kept in saved and dropped not in saved
+    assert all(api()._clean_text(text)[0] == text for text in _strings(report.payload()))
+
+
+def test_text_cut_while_settling_marks_the_report_truncated(tmp_path):
+    # The first pass leaves this under the cell bound; redaction on a later pass
+    # grows it past the bound, so the cut must still be reported.
+    result = sample()
+    result["runtime_evidence"]["errors"] = ["token:\n," * 30 + " rerun with --keep-jobs to inspect trials"]
+    report = api().project_plugin_runtime(result)
+    assert api().project_plugin_runtime(sample()).payload()["truncated"] is False
+    assert report.payload()["truncated"] is True
+    io_api().save_plugin_runtime_report(report, tmp_path)
+    assert io_api().load_plugin_runtime_report(tmp_path).payload() == report.payload()
 
 
 def _bounded_rows_payload():

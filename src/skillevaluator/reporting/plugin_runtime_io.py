@@ -14,16 +14,19 @@ from skillevaluator.utils.structured_data import load_bounded_json
 RUNTIME_REPORT_FILENAME = "plugin_runtime_report.json"
 
 
-def _settle(value: str) -> str:
+def _settle(value: str) -> tuple[str, bool]:
     # _clean_text redacts before it joins lines, so one pass over multi-line
     # text is not always stable. Repeat until a pass changes nothing: a saved
-    # snapshot then replays to exactly the report that was saved.
+    # snapshot then replays to exactly the report that was saved. Also report
+    # whether any pass cut the text at the display bound.
+    cut = False
     for _ in range(8):
-        cleaned = _clean_text(value)[0]
+        cleaned, truncated = _clean_text(value)
+        cut |= truncated
         if cleaned == value:
             break
         value = cleaned
-    return value
+    return value, cut
 
 
 def _validate(payload: object) -> RuntimePluginReport:
@@ -40,10 +43,18 @@ def _validate(payload: object) -> RuntimePluginReport:
             raise ValueError(f"Invalid runtime report {key}")
     if payload["evidence_complete"] is not (payload["status"] == "complete"):
         raise ValueError("Inconsistent runtime report completeness")
+    cut = False
+
+    def settle(value: str) -> str:
+        nonlocal cut
+        value, truncated = _settle(value)
+        cut |= truncated
+        return value
+
     for key in ("name", "run_id", "execution_status"):
         if not isinstance(payload.get(key), str):
             raise ValueError(f"Invalid runtime report {key}")
-        payload[key] = _settle(payload[key])
+        payload[key] = settle(payload[key])
     source = payload.get("source")
     if (
         not isinstance(source, dict)
@@ -51,7 +62,7 @@ def _validate(payload: object) -> RuntimePluginReport:
         or not all(isinstance(value, str) for value in source.values())
     ):
         raise ValueError("Invalid runtime report source")
-    payload["source"] = {key: _settle(value) for key, value in source.items()}
+    payload["source"] = {key: settle(value) for key, value in source.items()}
     sections = payload.get("sections")
     if not isinstance(sections, list) or len(sections) != len(SECTIONS):
         raise ValueError("Invalid runtime report sections")
@@ -83,10 +94,10 @@ def _validate(payload: object) -> RuntimePluginReport:
                 if type(value) in (int, float) and _number(value) is None:
                     raise ValueError("Invalid runtime report number")
                 if isinstance(value, str):
-                    row[index] = _settle(value)
+                    row[index] = settle(value)
         if not all(isinstance(note, str) for note in notes):
             raise ValueError("Invalid runtime report notes")
-        section["notes"] = [_settle(note) for note in notes]
+        section["notes"] = [settle(note) for note in notes]
         total, omitted = section.get("total"), section.get("omitted")
         if (
             type(total) is not int
@@ -111,6 +122,8 @@ def _validate(payload: object) -> RuntimePluginReport:
     }
     if payload.keys() != allowed:
         raise ValueError("Unexpected runtime report fields")
+    # Text cut while settling is as incomplete as text cut during projection.
+    payload["truncated"] = payload["truncated"] or cut
     serialized = json.dumps(payload, ensure_ascii=True, allow_nan=False)
     if len(serialized.encode("utf-8")) > MAX_OUTPUT_BYTES:
         raise ValueError("Runtime report exceeds its publication bound")

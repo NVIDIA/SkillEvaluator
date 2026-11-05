@@ -204,7 +204,7 @@ class CLIReporter(ReporterBase):
         for number, tier in context.tiers.items():
             if not tier.displayed:
                 continue
-            console.print(f"Tier {number}: {tier.summary}")
+            console.print(f"Tier {number}: {tier.summary}", highlight=False)
         if context.tiers[3].status != Status.NOT_RUN:
             console.print(context.coverage.text)
             for line in context.coverage.details:

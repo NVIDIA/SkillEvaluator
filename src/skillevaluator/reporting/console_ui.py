@@ -1074,6 +1074,22 @@ def summarize_tier1(results: list[ValidationResult], lineup: list[str] | None = 
         detail = " · ".join(f"{name} {count}" for name, count in sorted(advisory.items(), key=lambda kv: -kv[1]))
         rows.append(TierRow("advisories", [(str(sum(advisory.values())), TEXT), (f"  {detail}", MUTED)]))
 
+    suppressed_security = 0
+    for r in results:
+        applicability = (r.metadata or {}).get("skillspector_applicability")
+        if isinstance(applicability, dict):
+            count = applicability.get("suppressed_inapplicable_issues")
+            if isinstance(count, int) and not isinstance(count, bool) and count > 0:
+                suppressed_security += count
+    if suppressed_security:
+        noun = "issue" if suppressed_security == 1 else "issues"
+        rows.append(
+            TierRow(
+                "filtered",
+                [(f"{suppressed_security} scanner {noun} suppressed outside agent control paths", MUTED)],
+            )
+        )
+
     quality = _quality_stats(results)
     if quality:
         grade, score = quality

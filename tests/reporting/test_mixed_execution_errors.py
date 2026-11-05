@@ -133,6 +133,22 @@ def test_tier2_cli_reports_preserve_analysis_errors_with_findings(tmp_path: Path
     assert [finding["check_name"] for finding in result["findings"]] == (
         [] if outcome == "errors_only" else ["duplicate"]
     )
+    # Analysis errors count as issues beside any finding, so an errors-only run
+    # never reports zero issues.
+    assert payload["message_counts"]["independent_errors"] == int(failed_clusters > 0)
+    # The skipped catalog comparison is a workflow-scope note in every case. It
+    # stays a raw warning but records scope, not an issue without a finding.
+    assert any(warning.startswith("Workflow scope: ") for warning in result["legacy"]["warnings"])
+    assert payload["message_counts"]["independent_warnings"] == 0
+    markdown_lines = (reports / "skillevaluator-tier2.md").read_text(encoding="utf-8").splitlines()
+    finding_text = "1 unique finding (1 high) / 1 occurrence / 1 raw record"
+    assert [line for line in markdown_lines if line.startswith("| Total Issues |")] == [
+        {
+            "mixed": f"| Total Issues | {finding_text}; 1 error without a finding |",
+            "errors_only": "| Total Issues | 1 error without a finding |",
+            "finding_only": f"| Total Issues | {finding_text} |",
+        }[outcome]
+    ]
 
     html = _VisibleHTMLText()
     html.feed((reports / "skillevaluator-tier2.html").read_text(encoding="utf-8"))
@@ -155,8 +171,9 @@ def test_tier2_cli_reports_preserve_analysis_errors_with_findings(tmp_path: Path
             assert f"{failed_clusters} of 2 content clusters" in text
             assert "structured-output support" in text
     duplicate_message = "Duplicate content found within SKILL.md:"
-    # Markdown intentionally repeats the finding in its table and details.
-    expected_findings = {"cli": 1, "html": 1, "markdown": 2}
+    # Markdown intentionally repeats the finding in its reconciliation table,
+    # its findings table, and its details.
+    expected_findings = {"cli": 1, "html": 1, "markdown": 3}
     assert {name: text.count(duplicate_message) for name, text in outputs.items()} == {
         name: count if outcome != "errors_only" else 0 for name, count in expected_findings.items()
     }
@@ -178,4 +195,24 @@ def test_additional_errors_excludes_only_existing_finding_messages_without_mutat
     before = asdict(result)
 
     assert additional_errors(result) == [diagnostic]
+    assert asdict(result) == before
+
+
+@pytest.mark.parametrize("prefixed", [False, True])
+def test_additional_warnings_excludes_only_existing_finding_messages_without_mutation(prefixed: bool) -> None:
+    from skillevaluator.reporting.base import additional_warnings
+
+    result = ValidationResult(validator_name="Code Risk")
+    result.add_finding(Finding("CODE", Severity.LOW, "style", "Prefer explicit encoding", "run.py", line_number=4))
+    diagnostic = "bandit not installed."
+    result.add_warning(diagnostic)
+    if prefixed:
+        merged = ValidationResult(validator_name="Code Risk")
+        merged.merge_with_prefix(result, "sample-skill")
+        result = merged
+        diagnostic = f"[sample-skill] {diagnostic}"
+    before = asdict(result)
+
+    assert len(result.warnings) == 2
+    assert additional_warnings(result) == [diagnostic]
     assert asdict(result) == before

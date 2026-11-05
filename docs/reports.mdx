@@ -105,10 +105,18 @@ the evidence below it:
   repeat a finding are folded away.
 - **Run details.** Scope, the target path, provenance and the gate policy.
 
-A finding is one problem a check reports at one location, with a severity. A
-finding in a failed check blocks the verdict; a finding in a passed check is
-advisory. A quality score below the configured minimum fails the Quality score
-check, so it also blocks the verdict.
+A finding is one problem a check reports, with a severity. The same problem
+reported on several lines, or in several files or skills, counts once at its
+highest severity; each location is an occurrence, including each line a
+PII finding lists when one value repeats. When the unique, occurrence and
+raw record counts differ, or when some errors or warnings have no finding
+behind them, the findings number shows the occurrences, the raw records and
+those errors and warnings beneath it, in the same words as the Markdown
+report's Total Issues. The workflow scope note for a stage that configuration
+skips, such as LLM checks under `--no-llm`, is not counted as a warning there. A finding in a failed check blocks the
+verdict; a finding in a passed check is advisory. A quality score below the
+configured minimum fails the Quality score check, so it also blocks the
+verdict.
 
 The HTML report, the CI index and the Pages history use the same verdict
 words: **Passed**, **Changes required**, **Incomplete**, **Skipped** and
@@ -366,7 +374,10 @@ completed run directly:
   With standard grading, `reward.json` records `trajectory_source` (the
   trajectory or agent log that was graded) and, under each LLM judge's
   `details`, an `omitted` record showing whether its evidence was truncated to
-  fit the [evidence budget](tier3-live-evaluation.mdx#evidence-budgets).
+  fit the [evidence budget](tier3-live-evaluation.mdx#evidence-budgets) or, for
+  `behavior_check`, the final-response section limit
+  (`SKILL_EVAL_BEHAVIOR_FINAL_RESPONSE_LIMIT`). For `behavior_check`, the
+  record's `reason` names each setting that applied.
 
 <Note>
   Read commands (`view`, `compare`, `create-eval-dataset --refine`) honor the
@@ -689,7 +700,13 @@ For CI and tooling, two JSON entry points matter:
 
 Both paths speak the same dialect: standalone `tier3 evaluate` and
 `validate --tier3` share one HTML renderer for `report.html`, and both embed
-the Tier 3 payload at schema version `2.0`.
+the Tier 3 payload at schema version `2.0`. In that payload, conclusions and
+recommendations written by the LLM carry `source: "llm"` and name the model
+that wrote them as `model`. For a Claude 5.5 or later model on the native
+Claude API this is the model the reply names, which can be the server-side
+refusal fallback model rather than the configured model. Otherwise it is the
+configured model, unless a server-side `fallback` block in the reply names
+another model.
 
 Exit codes and a ready-made JSON gating recipe live in
 [Gate Your CI](ci-integration.mdx).

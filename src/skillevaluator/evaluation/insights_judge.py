@@ -31,6 +31,7 @@ from skillevaluator.constants import (
     INSIGHTS_JUDGE_TEMPERATURE,
 )
 from skillevaluator.inference.client import LLMClient
+from skillevaluator.inference.diagnostics import safe_llm_model
 from skillevaluator.logging_config import get_logger
 
 logger = get_logger(__name__)
@@ -535,6 +536,9 @@ class InsightsJudge(LLMClient):
             raise ValueError(f"Expected JSON object, got {type(data).__name__}")
         canonical = kwargs.get("canonical") if isinstance(kwargs.get("canonical"), dict) else {}
         grounding = _negative_control_grounding(canonical)
+        # Each entry names the model that wrote it, which on the native
+        # Anthropic API can be the server-side fallback.
+        provenance = {"model": safe_llm_model(self.model_used)} if self.model_used else {}
 
         conclusions: list[dict] = []
         for item in (data.get("conclusions") or [])[:INSIGHTS_JUDGE_MAX_CONCLUSIONS]:
@@ -553,6 +557,7 @@ class InsightsJudge(LLMClient):
                     "message": message or title,
                     "severity": _coerce_severity(item.get("severity")),
                     "source": "llm",
+                    **provenance,
                     "evidence_case_ids": _declared_case_ids(item),
                 }
             )
@@ -575,6 +580,7 @@ class InsightsJudge(LLMClient):
                     "category": _coerce_category(item.get("category")),
                     "severity": _coerce_severity(item.get("severity")),
                     "source": "llm",
+                    **provenance,
                     "evidence_case_ids": _declared_case_ids(item),
                 }
             )

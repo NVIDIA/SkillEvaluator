@@ -515,6 +515,74 @@ class TestDiscoverAndExtract:
         with pytest.raises(ValueError, match=r"symlink|reparse|unsafe"):
             discover_and_extract(tmp_path, "skill")
 
+    def test_contained_directory_alias_is_skipped_and_target_discovered_once(self, tmp_path: Path, write_skill) -> None:
+        collection = tmp_path / "skills"
+        write_skill(collection / "shared-skills", "helper", "Shared helper for every coding agent")
+        (collection / ".claude").mkdir()
+        try:
+            # A Path target uses native separators, so the link also resolves on Windows.
+            (collection / ".claude" / "skills").symlink_to(Path("..") / "shared-skills", target_is_directory=True)
+            (collection / ".agents").symlink_to(".claude", target_is_directory=True)
+        except OSError as exc:
+            pytest.skip(f"symlinks unavailable: {exc}")
+
+        entries = discover_and_extract(collection, "skill")
+
+        assert [Path(entry.path).relative_to(collection).as_posix() for entry in entries] == ["shared-skills/helper"]
+
+    def test_directory_alias_to_pruned_regular_directory_is_skipped(self, tmp_path: Path, write_skill) -> None:
+        collection = tmp_path / "skills"
+        write_skill(collection, "visible-skill", "Visible skill")
+        write_skill(collection / "evals", "generated-skill", "Generated snapshot")
+        try:
+            (collection / "latest-evals").symlink_to("evals", target_is_directory=True)
+        except OSError as exc:
+            pytest.skip(f"symlinks unavailable: {exc}")
+
+        entries = discover_and_extract(collection, "skill")
+
+        assert [entry.name for entry in entries] == ["visible-skill"]
+
+    def test_rejects_directory_alias_chain(self, tmp_path: Path, write_skill) -> None:
+        collection = tmp_path / "skills"
+        write_skill(collection / "canonical", "helper", "Shared helper for every coding agent")
+        try:
+            (collection / ".claude").symlink_to("canonical", target_is_directory=True)
+            (collection / ".agents").symlink_to(".claude", target_is_directory=True)
+        except OSError as exc:
+            pytest.skip(f"symlinks unavailable: {exc}")
+
+        with pytest.raises(ValueError, match=r"symlink or reparse point.*\.agents -> \.claude"):
+            discover_and_extract(collection, "skill")
+
+    @pytest.mark.parametrize("alias_name", ["SKILL.md", "skill.md", "team.mdc", "workflow-rules.mdc"])
+    def test_rejects_directory_alias_with_manifest_name(self, tmp_path: Path, write_skill, alias_name: str) -> None:
+        collection = tmp_path / "skills"
+        write_skill(collection / "canonical", "helper", "Shared helper for every coding agent")
+        try:
+            (collection / alias_name).symlink_to("canonical", target_is_directory=True)
+        except OSError as exc:
+            pytest.skip(f"symlinks unavailable: {exc}")
+
+        with pytest.raises(ValueError, match=r"symlink or reparse point"):
+            discover_and_extract(collection, "skill")
+
+    @pytest.mark.parametrize("target", ["missing", ".", "..", "../outside", "absolute"])
+    def test_rejects_directory_alias_without_contained_regular_target(
+        self, tmp_path: Path, write_skill, target: str
+    ) -> None:
+        collection = tmp_path / "skills"
+        write_skill(collection, "visible-skill", "Visible skill")
+        (tmp_path / "outside").mkdir()
+        link_text = str(collection / "visible-skill") if target == "absolute" else target
+        try:
+            (collection / ".agents").symlink_to(link_text, target_is_directory=True)
+        except OSError as exc:
+            pytest.skip(f"symlinks unavailable: {exc}")
+
+        with pytest.raises(ValueError, match=r"symlink or reparse point"):
+            discover_and_extract(collection, "skill")
+
     def test_discover_rules_in_folder(self, tmp_path: Path) -> None:
         rules_dir = tmp_path / "team-rules"
         rules_dir.mkdir()

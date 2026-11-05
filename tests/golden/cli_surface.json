@@ -1357,6 +1357,14 @@
           "type": "boolean"
         },
         {
+          "name": "skillspector_baseline",
+          "opts": [
+            "--skillspector-baseline"
+          ],
+          "param_type": "option",
+          "type": "file"
+        },
+        {
           "choices": [
             "cli",
             "json",
@@ -1749,6 +1757,14 @@
               "type": "boolean"
             },
             {
+              "name": "skillspector_baseline",
+              "opts": [
+                "--skillspector-baseline"
+              ],
+              "param_type": "option",
+              "type": "file"
+            },
+            {
               "choices": [
                 "cli",
                 "json",
@@ -1848,6 +1864,14 @@
               ],
               "param_type": "option",
               "type": "text"
+            },
+            {
+              "name": "skillspector_baseline",
+              "opts": [
+                "--skillspector-baseline"
+              ],
+              "param_type": "option",
+              "type": "file"
             },
             {
               "choices": [
@@ -1951,6 +1975,14 @@
             ],
             "param_type": "option",
             "type": "text"
+          },
+          {
+            "name": "skillspector_baseline",
+            "opts": [
+              "--skillspector-baseline"
+            ],
+            "param_type": "option",
+            "type": "file"
           },
           {
             "choices": [
@@ -3607,6 +3639,14 @@
           ],
           "param_type": "option",
           "type": "boolean"
+        },
+        {
+          "name": "skillspector_baseline",
+          "opts": [
+            "--skillspector-baseline"
+          ],
+          "param_type": "option",
+          "type": "file"
         },
         {
           "default": "70",

@@ -30,6 +30,7 @@ from skillevaluator.constants import (
     TIER3_LIFT_PASS_THRESHOLD,
 )
 from skillevaluator.inference.client import LLMClient
+from skillevaluator.inference.diagnostics import safe_llm_model
 from skillevaluator.logging_config import get_logger
 
 logger = get_logger(__name__)
@@ -181,9 +182,14 @@ class DimensionJudge(LLMClient):
         dims = data.get("dimensions", data) if isinstance(data, dict) else data
         if not isinstance(dims, list) or len(dims) < 5:
             raise ValueError(f"Expected 5 dimensions, got {len(dims) if isinstance(dims, list) else type(dims)}")
+        # The model that answered, which on the native Anthropic API can be
+        # the server-side fallback.
+        model = safe_llm_model(self.model_used) if self.model_used else None
         for dim in dims:
             if isinstance(dim, dict):
                 _normalise_reasoning_fields(dim)
+                if model:
+                    dim["model"] = model
         return dims
 
     def get_fallback_response(self, **kwargs: Any) -> list[dict]:
@@ -420,7 +426,9 @@ def compute_dimensions(
         use_llm: If False, skip LLM and use deterministic fallback.
 
     Returns:
-        List of 5 dimension dicts with id, score, verdict, explanation.
+        List of 5 dimension dicts with id, score, verdict, explanation. A
+        dimension the LLM wrote also names the model that wrote it as
+        ``model``; deterministic dimensions have no ``model``.
     """
     if not use_llm:
         return compute_dimensions_deterministic(evaluators)

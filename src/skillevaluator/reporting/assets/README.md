@@ -18,15 +18,22 @@ report has chart panels. No JavaScript package manager is needed at runtime.
   `48444a82d4edcb5bec0f1965faacdde18d9c17db3063d042abada2f705c9f54a`
   (208,522 bytes).
 - Vendored `chart.umd.min.js` SHA-256:
-  `31afbecadaef6da89edf023df400e08b3dfb44dd099c57e711d5e69c4c731784`
-  (208,481 bytes).
+  `84d0e233daba702b8f77d669d8c137cad36d441a10f200b6f2d3ab553bdfcf6b`
+  (208,480 bytes).
 
-The sole modification is removal of the 41 ASCII bytes
-`//# sourceMappingURL=chart.umd.min.js.map`. Both surrounding newlines are
-retained. This prevents developer tools from requesting a missing source map.
-The MIT header and bundled dependency notice remain intact. To reproduce the
-asset, download the original URL, verify the original SHA-384 above, remove
-that exact directive, and verify the vendored SHA-256. Do not re-minify it.
+The modifications are removal of the 41 ASCII bytes
+`//# sourceMappingURL=chart.umd.min.js.map` and normalization of the remaining
+two trailing LF bytes to one final LF byte. Removing the directive prevents
+developer tools from requesting a missing source map. The JavaScript body,
+MIT header and bundled dependency notice remain intact. To reproduce the
+asset, download the original URL and verify the original SHA-384 above, then
+apply this exact byte transformation and verify the vendored SHA-256:
+
+```python
+vendored = original.replace(b"//# sourceMappingURL=chart.umd.min.js.map", b"").rstrip(b"\n") + b"\n"
+```
+
+Do not re-minify it.
 
 ## Bundled @kurkle/color 0.3.2
 

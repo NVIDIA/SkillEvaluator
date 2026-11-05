@@ -84,9 +84,9 @@ def test_tier3_embeds_verified_chart_runtime_without_network_or_source_map() -> 
     runtime = report.scripts["tier3-chart-runtime"]
     assert "Chart.js v4.5.1" in runtime
     assert "@kurkle/color v0.3.2" in runtime
-    # SHA-256 of the SRI-verified upstream bytes with only the source-map directive removed.
+    # SRI-verified upstream bytes with the source-map directive removed and one final newline.
     assert hashlib.sha256(runtime.encode()).hexdigest() == (
-        "31afbecadaef6da89edf023df400e08b3dfb44dd099c57e711d5e69c4c731784"
+        "84d0e233daba702b8f77d669d8c137cad36d441a10f200b6f2d3ab553bdfcf6b"
     )
     assert "sourceMappingURL" not in runtime
     assert "</script" not in runtime.lower()

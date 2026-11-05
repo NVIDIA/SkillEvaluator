@@ -18,8 +18,9 @@ Tier 3 HTML reports include Chart.js 4.5.1 and its bundled @kurkle/color 0.3.2
 (MIT). The wheel and source distribution retain the full licenses in
 `skillevaluator/reporting/assets/`; generated chart-bearing HTML reports also
 include both full license texts. The asset README records the public upstream
-sources, original SRI verification, digests, and removal of the source-map
-reference. No other changes were made to the bundle.
+sources, original SRI verification, digests, removal of the source-map
+reference and normalization to one final newline. No other changes were made
+to the bundle.
 
 ### Chart.js 4.5.1
 

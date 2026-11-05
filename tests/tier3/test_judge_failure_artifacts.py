@@ -118,9 +118,8 @@ def test_character_facts_keep_numeric_dataset_answers_scoreable(tmp_path, monkey
     payload = json.dumps(
         {
             "criteria": dict.fromkeys(
-                ["SKILL_IDENTIFIED", "ACTION_CORRECT", "FACTUALLY_ACCURATE", "TASK_ADDRESSED", "ACTIONABLE"], False
+                ["ACTION_CORRECT", "FACTUALLY_ACCURATE", "TASK_ADDRESSED", "ACTIONABLE", "FORMAT_FOLLOWED"], False
             ),
-            "score": 0.0,
             "reason": "test verdict",
             "achieved": False,
             "user_goal": "test",
@@ -460,13 +459,12 @@ def test_verifier_main_recovers_malformed_accuracy_and_goal_judges(
             json.dumps(
                 {
                     "criteria": {
-                        "SKILL_IDENTIFIED": True,
                         "ACTION_CORRECT": True,
                         "FACTUALLY_ACCURATE": True,
                         "TASK_ADDRESSED": True,
                         "ACTIONABLE": True,
+                        "FORMAT_FOLLOWED": True,
                     },
-                    "score": 1.0,
                     "reason": "accuracy recovered",
                 }
             ),
@@ -521,24 +519,19 @@ def test_verifier_retries_non_string_judge_text_before_collector_and_report(
     goal_calls: list[str] = []
 
     def pair_call(prompt: str, **_kwargs):
-        if "SKILL_IDENTIFIED" not in prompt:
+        if "FORMAT_FOLLOWED" not in prompt:
             return json.dumps({"results": [{"step": 1, "passed": True}], "score": 1.0}), None
         accuracy_calls.append(prompt)
+        criteria = {
+            "ACTION_CORRECT": True,
+            "FACTUALLY_ACCURATE": True,
+            "TASK_ADDRESSED": True,
+            "ACTIONABLE": True,
+            "FORMAT_FOLLOWED": False,
+        }
         if len(accuracy_calls) == 1:
-            return json.dumps({"score": 1.0, "reason": {"nested": "accuracy"}}), None
-        return json.dumps(
-            {
-                "score": 1.0,
-                "reason": "accuracy recovered",
-                "criteria": {
-                    "SKILL_IDENTIFIED": False,
-                    "ACTION_CORRECT": True,
-                    "FACTUALLY_ACCURATE": True,
-                    "TASK_ADDRESSED": True,
-                    "ACTIONABLE": True,
-                },
-            }
-        ), None
+            return json.dumps({"criteria": criteria, "reason": {"nested": "accuracy"}}), None
+        return json.dumps({"reason": "accuracy recovered", "criteria": criteria}), None
 
     def goal_call(prompt: str, **_kwargs):
         goal_calls.append(prompt)
@@ -582,7 +575,8 @@ def test_verifier_retries_non_string_judge_text_before_collector_and_report(
     assert len(accuracy_calls) == 2
     assert len(goal_calls) == 2
     assert collected["details"]["accuracy"]["reason"] == "accuracy recovered"
-    assert collected["details"]["accuracy"]["excluded_criteria"] == ["SKILL_IDENTIFIED"]
+    assert collected["details"]["accuracy"]["score"] == 0.8
+    assert "excluded_criteria" not in collected["details"]["accuracy"]
     assert collected["details"]["goal_accuracy"]["reason"] == "goal recovered"
     assert all(isinstance(reason, str) for finding in findings for reason in finding["reasons"])
 
@@ -689,7 +683,7 @@ def test_verifier_main_keeps_accuracy_fail_closed_after_retry_exhaustion(
 
     assert exc_info.value.code == 1
     assert len(pair_calls) == 3
-    accuracy_attempts = [call for call in pair_calls if "SKILL_IDENTIFIED" in call[0]]
+    accuracy_attempts = [call for call in pair_calls if "FORMAT_FOLLOWED" in call[0]]
     assert len(accuracy_attempts) == 2
     assert [kwargs["max_tokens"] for _, kwargs in accuracy_attempts] == [verifier.STRUCTURED_JUDGE_MAX_TOKENS] * 2
     assert len(goal_calls) == 1

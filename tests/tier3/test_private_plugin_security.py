@@ -493,3 +493,49 @@ def test_truncated_quoted_credential_is_omitted_from_evidence(security, quote):
     result = security.scan_plugin_security([call(command)])
     assert "destructive_command" in kinds(result)
     assert "private-value" not in " ".join(finding.get("evidence", "") for finding in result["findings"])
+
+
+def _apply_patch_heredoc(prefix, header):
+    return f"{prefix} <<'EOF'\n*** Begin Patch\n*** Add File: {header}\n+x\n*** End Patch\nEOF"
+
+
+@pytest.mark.parametrize(
+    "prefix,header,path",
+    [
+        ("cd ~ && apply_patch", ".bashrc", "~/.bashrc"),
+        ("cd && apply_patch", ".bashrc", "~/.bashrc"),
+        ("cd -P ~ && apply_patch", ".aws/credentials", "~/.aws/credentials"),
+        ("cd /root && apply_patch", ".ssh/authorized_keys", "~/.ssh/authorized_keys"),
+        ("cd /etc && apply_patch", "sudoers.d/x", "/etc/sudoers.d/x"),
+        ("pushd /root && apply_patch", ".bashrc", "~/.bashrc"),
+        # With an empty stack popd and a bare pushd leave the directory, and "pushd -n" only edits the stack.
+        ("cd ~ && pushd -n /workspace && apply_patch", ".bashrc", "~/.bashrc"),
+        ("cd ~ && popd && apply_patch", ".bashrc", "~/.bashrc"),
+        ("cd ~ && pushd && apply_patch", ".bashrc", "~/.bashrc"),
+        # The directory stack is followed: popd returns to the directory pushd left.
+        ("cd /root && pushd /workspace && popd && apply_patch", ".bashrc", "~/.bashrc"),
+        ("cd /root && pushd /workspace && pushd && apply_patch", ".bashrc", "~/.bashrc"),
+    ],
+)
+def test_apply_patch_after_cd_resolves_the_shell_directory(security, prefix, header, path):
+    tool_call = call(_apply_patch_heredoc(prefix, header))
+
+    assert security.security_patch_paths(tool_call, "bash", True) == [path]
+    result = security.scan_plugin_security([tool_call])
+    assert result["score"] == 0
+    assert "sensitive_file_write" in kinds(result)
+
+
+@pytest.mark.parametrize(
+    "prefix",
+    [
+        "pushd /root && popd && apply_patch",
+        "cd ~ && pushd -n /workspace && popd && apply_patch",
+        "cd ~ && pushd /workspace && popd -n && apply_patch",
+    ],
+)
+def test_apply_patch_after_the_directory_stack_returns_to_the_workspace_is_not_flagged(security, prefix):
+    tool_call = call(_apply_patch_heredoc(prefix, ".bashrc"))
+
+    assert security.security_patch_paths(tool_call, "bash", True) == ["/workspace/.bashrc"]
+    assert security.scan_plugin_security([tool_call])["score"] == 1

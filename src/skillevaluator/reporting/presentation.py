@@ -265,6 +265,8 @@ def build_final_render_context(
                 if tier.status == Status.FAILED
                 else "incomplete"
                 if tier.status == Status.INCOMPLETE
+                else "skipped"
+                if tier.status == Status.SKIPPED
                 else assessment.tier3.status
             )
             if n == 3 and tier.results

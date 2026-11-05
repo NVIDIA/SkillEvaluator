@@ -371,3 +371,23 @@ def test_partial_tier3_evidence_assessment_is_shared_without_changing_command_ga
     assert "Tier 3: Incomplete evidence" in output
     html = HTMLReporter(presentation_context=ctx).render(source)
     assert re.search(r'tier-card-label">Tier 3</span>\s*<span class="tier-card-verdict">Incomplete</span>', html)
+
+
+def test_explicit_tier3_skip_is_shared_even_when_publication_is_incomplete():
+    source = result(
+        3,
+        agent_eval={
+            "execution_status": "skipped",
+            "verdict": "neutral",
+            "provenance": {
+                "advisory": True,
+                "reason": "skipped",
+                "message": "provider unavailable",
+            },
+        },
+    )
+    source.metadata["gating"]["blocking"] = False
+    ctx = context([source])
+    assert ctx.tiers[3].status == Status.SKIPPED
+    assert ctx.tiers[3].display_status == "skipped"
+    assert ctx.publication_status == Status.INCOMPLETE

@@ -48,7 +48,9 @@ ignored, including when set to `true`; it cannot make Tier 3 block CI. Keep the
 aggregate check required in branch protection to enforce Tier 1, and review its
 actual check name in a completed run. Reports are retained for 14
 days in `skill-evaluator-results-attempt-N`, including failed and incomplete
-results, with each tier's native JSON and HTML. Artifact download links require
+results, with each tier's native JSON and HTML. **Re-run failed jobs** reuses
+the latest evidence from tier jobs that were not rerun, and records each tier's
+producing attempt as `source_attempt`. Artifact download links require
 normal repository access; they do not create public report hosting.
 
 The feedback workflow starts from `workflow_run` on the default branch. It

@@ -19,16 +19,15 @@ No external vector database or catalog service is required.
 
 The [all-tier onboarding path](cli-onboarding.mdx#opt-in-to-three-tier-ci)
 runs Tier 2 as an advisory check, independently from the Tier 1 image and paired
-Tier 3 evaluation. Configure both chat and embedding access and commit each
-skill's native dataset under `evals/`; the initial CI contract supports
-per-skill datasets. CI validates readiness before paid work and reports missing
-credentials or unsupported dataset mappings as actionable incomplete results.
-It never generates a replacement dataset automatically.
+Tier 3 evaluation. Configure chat and embedding provider credentials as CI
+secrets. Tier 2 does not read `evals/`; committed native datasets are needed
+only for [Tier 3](tier3-live-evaluation.mdx). Missing credentials or a central
+dataset mapping produce an actionable incomplete result before paid work.
 
 The aggregate artifact preserves native Tier 2 JSON and HTML, including
-findings and readiness evidence. Failed, missing or incomplete Tier 2 results
-stay advisory and do not block a passing Tier 1 CI gate; they are never relabeled
-as completed passes. See
+deduplication and catalog-similarity findings. Failed, missing or incomplete
+Tier 2 results stay advisory and do not block a passing Tier 1 CI gate; they are
+never relabeled as completed passes. See
 [retained CI evidence](reports.mdx#retained-three-tier-ci-evidence).
 
 ## Run Tier 2

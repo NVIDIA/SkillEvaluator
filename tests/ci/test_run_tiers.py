@@ -384,3 +384,197 @@ def test_legacy_tier1_no_work_and_runtime_error_still_produce_aggregate(
     assert document["tiers"][0]["status"] == ("skipped" if legacy_status == "skipped" else "incomplete")
     assert document["tiers"][0]["reason"]
     assert (reports / "index.html").is_file()
+
+
+def test_child_environment_forwards_docker_tls_settings():
+    env = run_tiers.child_environment(
+        {
+            "PATH": "/bin",
+            "DOCKER_HOST": "tcp://docker:2376",
+            "DOCKER_TLS_VERIFY": "1",
+            "DOCKER_CERT_PATH": "/certs/client",
+            "NVIDIA_API_KEY": "provider-token",
+            "SKILL_EVAL_PROVIDER": "nv_build",
+        }
+    )
+    assert env["DOCKER_TLS_VERIFY"] == "1"
+    assert env["DOCKER_CERT_PATH"] == "/certs/client"
+
+
+def test_anthropic_chat_with_unset_embedding_provider_uses_openai_embeddings():
+    env = run_tiers.child_environment(
+        {
+            "SKILL_EVAL_PROVIDER": "anthropic",
+            "SKILL_EVAL_EMBEDDING_PROVIDER": "",
+            "ANTHROPIC_API_KEY": "anthropic-token",
+            "OPENAI_API_KEY": "openai-token",
+        }
+    )
+    assert env["SKILL_EVAL_EMBEDDING_PROVIDER"] == "openai"
+    assert env["OPENAI_API_KEY"] == "openai-token"
+
+
+def test_post_run_dataset_recheck_failure_downgrades_the_skill(consumer, tmp_path, monkeypatch):
+    calls = []
+
+    def preflight(_skill):
+        calls.append(_skill)
+        if len(calls) % 2 == 0:
+            raise run_tiers.ConfigurationError("Tier 3 authored inputs cannot contain symlinks.")
+        return {}
+
+    monkeypatch.setattr(run_tiers, "dataset_preflight", preflight)
+    monkeypatch.setattr(run_tiers, "run_command", lambda *_args, **_kwargs: 0)
+    monkeypatch.setattr(run_tiers, "_retain", lambda *_args: {"status": "passed", "metrics": {}})
+    reports = tmp_path / "reports"
+    env = env_for(consumer, NVIDIA_API_KEY="test-provider-value-1234")
+    assert run_tiers.evaluate(3, consumer, reports, env) == 0
+    tier = json.loads((reports / "tier3/ci-tier.json").read_text())["tiers"][0]
+    assert tier["status"] == "incomplete"
+    assert {(s["status"], s["error"]) for s in tier["skills"]} == {
+        ("incomplete", "Tier 3 authored inputs cannot contain symlinks.")
+    }
+    assert run_tiers.aggregate(reports, (3,), env) == 0
+    assert (reports / "ci-results.json").is_file()
+    assert (reports / "summary.md").is_file()
+
+
+def test_timeout_keeps_the_time_budget_diagnostic_for_every_skill(consumer, tmp_path, monkeypatch):
+    import sys
+
+    real_run = run_tiers.run_command
+
+    def execute(args, **kwargs):
+        if "catalog" in args:
+            return 0
+        return real_run([sys.executable, "-c", "import time; time.sleep(30)"], **kwargs)
+
+    monkeypatch.setattr(run_tiers, "run_command", execute)
+    reports = tmp_path / "reports"
+    env = env_for(consumer, NVIDIA_API_KEY="test-provider-value-1234", SKILL_EVAL_TIMEOUT_SECONDS="1")
+    assert run_tiers.evaluate(2, consumer, reports, env) == 0
+    skills = json.loads((reports / "tier2/ci-tier.json").read_text())["tiers"][0]["skills"]
+    # The second skill starts after the budget is spent and must say so too.
+    assert [(s["status"], s["error"]) for s in skills] == [
+        ("incomplete", "Evaluation exceeded the configured time budget.")
+    ] * 2
+
+
+@pytest.mark.parametrize("status", ["passed", "neutral", "skipped"])
+def test_aggregate_rejects_a_completed_claim_missing_selected_skills(consumer, tmp_path, status):
+    reports = tmp_path / "reports"
+    env = env_for(consumer)
+    write_tier(reports, 1, env, "passed")
+    write_tier(reports, 3, env, status)
+    path = reports / "tier3/ci-tier.json"
+    document = json.loads(path.read_text())
+    document["selection"] = {"reason": "full_scan", "selected": ["skills/alpha", "skills/beta"]}
+    path.write_text(json.dumps(document))
+    assert run_tiers.aggregate(reports, (1, 3), env) == 0
+    tier3 = json.loads((reports / "ci-results.json").read_text())["tiers"][1]
+    assert tier3["status"] == "incomplete"
+    assert "missing for selected skills" in tier3["reason"]
+
+
+def test_skill_directories_with_url_delimiters_still_aggregate(tmp_path, monkeypatch):
+    from skillevaluator.models import ValidationResult
+    from skillevaluator.reporting.json_reporter import JSONReporter
+
+    repo = tmp_path / "consumer"
+    names = ("c#-helper", "100%-coverage")
+    for name in names:
+        skill = repo / "skills" / name
+        skill.mkdir(parents=True)
+        (skill / "SKILL.md").write_text("---\nname: helper\ndescription: Use to test paths.\n---\nInstructions.\n")
+    subprocess.run(["git", "init", "-b", "main", str(repo)], check=True, capture_output=True)
+    git = ["git", "-C", str(repo), "-c", "user.name=CI tests", "-c", "user.email=ci@example.com"]
+    subprocess.run([*git, "add", "."], check=True)
+    subprocess.run([*git, "commit", "-m", "fixtures"], check=True, capture_output=True)
+
+    def execute(args, **_kwargs):
+        if "catalog" in args:
+            return 0
+        result = ValidationResult(
+            validator_name="Context Deduplication", metadata={"gating": {"tier": 2, "blocking": False}}
+        )
+        (Path(args[args.index("-o") + 1]) / "skillevaluator-tier2.json").write_text(JSONReporter().render_all([result]))
+        return 0
+
+    monkeypatch.setattr(run_tiers, "run_command", execute)
+    reports = tmp_path / "reports"
+    env = env_for(repo, NVIDIA_API_KEY="test-provider-value-1234")
+    assert run_tiers.evaluate(2, repo, reports, env) == 0
+    assert run_tiers.aggregate(reports, (2,), env) == 0
+    tier2 = json.loads((reports / "ci-results.json").read_text())["tiers"][0]
+    assert tier2["status"] == "passed"
+    assert sorted(s["path"] for s in tier2["skills"]) == sorted(f"skills/{name}" for name in names)
+
+
+def write_attempt(staging, tier, attempt, env, status):
+    """Lay out one downloaded tier artifact as actions/download-artifact does for a pattern."""
+    artifact = staging / f"skill-evaluator-tier{tier}-attempt-{attempt}"
+    write_tier(artifact, tier, {**env, "GITHUB_RUN_ATTEMPT": str(attempt)}, status)
+    return artifact
+
+
+def test_rerun_failed_jobs_reuses_earlier_attempt_tier_evidence(consumer, tmp_path):
+    from ci.run_tier1 import _summary
+
+    env = env_for(consumer, GITHUB_RUN_ATTEMPT="2")
+    staging, reports = tmp_path / "artifacts", tmp_path / "reports"
+    # Attempt 1: Tier 1 had no work and Tier 3 failed; only the failed Tier 2 job was rerun.
+    tier1 = staging / "skill-evaluator-tier1-attempt-1"
+    tier1.mkdir(parents=True)
+    legacy = _summary([], None)
+    legacy.update(overall_status="skipped", execution={"commit": env["REPORT_COMMIT"]})
+    _, legacy["selection"] = run_tiers.select_changed_skills(
+        consumer, "skills", env["REPORT_COMMIT"], env["REPORT_COMMIT"]
+    )
+    (tier1 / "summary.json").write_text(json.dumps(legacy))
+    write_attempt(staging, 2, 1, env, "incomplete")
+    write_attempt(staging, 2, 2, env, "passed")
+    write_attempt(staging, 3, 1, env, "failed")
+    # Neither a future attempt nor another artifact family can be selected.
+    write_attempt(staging, 3, 3, env, "passed")
+    (staging / "skill-evaluator-results-attempt-1").mkdir()
+    (staging / "skill-evaluator-tier1-provenance-attempt-2").mkdir()
+
+    assert run_tiers.select_attempts(staging, reports, 2) == {"1": "1", "2": "2", "3": "1"}
+    assert json.loads((reports / "source-attempts.json").read_text()) == {"1": "1", "2": "2", "3": "1"}
+    assert run_tiers.aggregate(reports, (1, 2, 3), env) == 0
+    document = json.loads((reports / "ci-results.json").read_text())
+    assert document["run_attempt"] == "2"
+    assert [row["status"] for row in document["tiers"]] == ["skipped", "passed", "failed"]
+    assert [row["source_attempt"] for row in document["tiers"]] == ["1", "2", "1"]
+    assert "evidence from run attempt 1" in (reports / "summary.md").read_text()
+
+
+def test_select_attempts_cli_reads_the_current_attempt(consumer, tmp_path, monkeypatch):
+    env = env_for(consumer)
+    staging, reports = tmp_path / "artifacts", tmp_path / "reports"
+    write_attempt(staging, 2, 1, env, "passed")
+    write_attempt(staging, 2, 2, env, "failed")
+    monkeypatch.setenv("GITHUB_RUN_ATTEMPT", "1")
+    assert run_tiers.main(["select-attempts", "--artifacts", str(staging), "--reports", str(reports)]) == 0
+    assert json.loads((reports / "tier2/ci-tier.json").read_text())["run_attempt"] == "1"
+
+
+@pytest.mark.parametrize("damage", ["future", "run_id", "recorded", "recorded_future"])
+def test_aggregate_rejects_foreign_or_future_tier_attempts(consumer, tmp_path, damage):
+    env = env_for(consumer, GITHUB_RUN_ATTEMPT="2")
+    reports = tmp_path / "reports"
+    write_tier(reports, 1, env, "passed")
+    write_tier(reports, 2, {**env, "GITHUB_RUN_ATTEMPT": "1"}, "passed")
+    path = reports / "tier2/ci-tier.json"
+    document = json.loads(path.read_text())
+    if damage == "future":
+        document["run_attempt"] = "3"
+    elif damage == "run_id":
+        document["run_id"] = "124"
+    path.write_text(json.dumps(document))
+    if damage.startswith("recorded"):
+        recorded = {"2": "2"} if damage == "recorded" else {"2": "3"}
+        (reports / "source-attempts.json").write_text(json.dumps(recorded))
+    with pytest.raises(run_tiers.ConfigurationError):
+        run_tiers.aggregate(reports, (1, 2), env)
+    assert not (reports / "ci-results.json").exists()

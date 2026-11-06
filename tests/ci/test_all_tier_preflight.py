@@ -59,6 +59,19 @@ def test_local_bootstrap_installs_only_the_selected_native_runtime(monkeypatch):
     ]
 
 
+def test_local_bootstrap_installs_the_opencode_release_docker_runs_pin(monkeypatch):
+    from skillevaluator.tier3.harbor import runner
+
+    bootstrap = module("bootstrap_tiers")
+    calls = []
+    monkeypatch.setattr(
+        bootstrap.subprocess, "run", lambda args, **_kwargs: calls.append(args) or subprocess.CompletedProcess(args, 0)
+    )
+    bootstrap.install_agent("opencode")
+    assert calls[0][-1] == f"opencode-ai@{runner.OPENCODE_VERSION}"
+    assert runner._harbor_agent_kwargs("opencode", None, "docker") == {"version": runner.OPENCODE_VERSION}
+
+
 def test_gitlab_admission_rejects_forks_and_stale_heads():
     gate = module("eligible_gitlab")
     env = {

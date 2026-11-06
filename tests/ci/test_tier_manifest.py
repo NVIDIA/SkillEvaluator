@@ -221,3 +221,46 @@ def test_neutral_advisory_result_keeps_its_outcome():
     result = tier_manifest.validate_manifest(payload)
     assert result["overall_passed"] is True
     assert "Tier 3 | neutral | Advisory" in tier_manifest.render_markdown(result)
+
+
+@pytest.mark.parametrize("path", ["skills/c#-helper", "skills/100%-coverage", "skills/a:b", "skills/why?"])
+def test_skill_directories_may_contain_url_delimiters_but_report_paths_may_not(path):
+    payload = manifest()
+    payload["tiers"][1]["skills"][0]["path"] = path
+    validated = tier_manifest.validate_manifest(payload)
+    assert validated["tiers"][1]["skills"][0]["path"] == path
+    assert tier_manifest.render_markdown(validated)
+    for unsafe in (f"../{path}", f"/{path}", path.replace("/", "\\")):
+        payload["tiers"][1]["skills"][0]["path"] = unsafe
+        with pytest.raises(ValueError, match="Unsafe skill path"):
+            tier_manifest.validate_manifest(payload)
+    payload = manifest()
+    payload["tiers"][1]["skills"][0]["report_json"] = f"tier2/{path.split('/')[1]}/report.json"
+    with pytest.raises(ValueError, match="Unsafe report_json"):
+        tier_manifest.validate_manifest(payload)
+
+
+def test_tier_source_attempt_is_an_earlier_or_current_attempt_of_the_run():
+    payload = manifest()
+    payload["run_attempt"] = "2"
+    payload["tiers"][0]["source_attempt"] = "1"
+    payload["tiers"][1]["source_attempt"] = "2"
+    validated = tier_manifest.validate_manifest(payload)
+    assert [record.get("source_attempt") for record in validated["tiers"]] == ["1", "2", None]
+    markdown = tier_manifest.render_markdown(validated)
+    assert "evidence from run attempt 1" in markdown
+    assert "evidence from run attempt 2" not in markdown
+    for invalid in ("3", "0", 1, ""):
+        payload["tiers"][0]["source_attempt"] = invalid
+        with pytest.raises(ValueError, match="source_attempt"):
+            tier_manifest.validate_manifest(payload)
+
+
+def test_documented_tier_statuses_match_the_manifest_contract():
+    import re
+    from pathlib import Path
+
+    text = " ".join((Path(__file__).parents[2] / "docs/reports.mdx").read_text().split())
+    sentence = re.search(r"A tier can be (.+?)\.", text)
+    assert sentence is not None
+    assert set(re.findall(r"`([a-z_]+)`", sentence[1])) == tier_manifest._STATUSES

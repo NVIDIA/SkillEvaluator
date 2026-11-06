@@ -38,12 +38,74 @@ def test_aggregate_retains_every_tier_after_failure():
     assert aggregate["if"] == "${{ always() }}"
     assert set(aggregate["needs"]) == {"tier1", "paid-tiers"}
     downloads = [s for s in aggregate["steps"] if s.get("uses", "").startswith("actions/download-artifact@")]
-    assert any(s["with"].get("path", "").endswith("/tier1") for s in downloads)
-    assert any(s["with"].get("merge-multiple") == "true" for s in downloads)
+    assert [s["with"]["pattern"] for s in downloads] == ["skill-evaluator-tier[123]-attempt-*"]
+    assert downloads[0]["with"]["path"] == "${{ runner.temp }}/skill-artifacts"
     upload = next(s for s in aggregate["steps"] if s.get("uses", "").startswith("actions/upload-artifact@"))
     assert upload["if"] == "${{ always() }}"
     assert upload["with"]["retention-days"] == "14"
     assert upload["with"]["name"] == "skill-evaluator-results-attempt-${{ github.run_attempt }}"
+
+
+def test_aggregate_reuses_tier_evidence_from_jobs_not_rerun():
+    import fnmatch
+
+    workflow = load(".github/workflows/evaluate-all-tiers.yml")
+    steps = workflow["jobs"]["aggregate"]["steps"]
+    download = next(s for s in steps if s.get("uses", "").startswith("actions/download-artifact@"))
+    # "Re-run failed jobs" leaves passing tier jobs' artifacts under their own earlier attempt.
+    assert "github.run_attempt" not in str(download["with"])
+    assert "name" not in download["with"]
+    assert download["with"].get("merge-multiple", "false") == "false"
+    pattern = download["with"]["pattern"]
+    tier1 = load(".github/workflows/evaluate-skills.yml")["jobs"]["tier1"]["steps"]
+    produced = [
+        s["with"]["name"].replace("${{ inputs.artifact-name }}", workflow["jobs"]["tier1"]["with"]["artifact-name"])
+        for s in tier1
+        if s.get("uses", "").startswith("actions/upload-artifact@")
+    ]
+    produced += [
+        s["with"]["name"].replace("${{ matrix.tier }}", tier)
+        for s in workflow["jobs"]["paid-tiers"]["steps"]
+        if s.get("uses", "").startswith("actions/upload-artifact@")
+        for tier in workflow["jobs"]["paid-tiers"]["strategy"]["matrix"]["tier"]
+    ]
+    produced += [s["with"]["name"] for s in steps if s.get("uses", "").startswith("actions/upload-artifact@")]
+    for attempt in ("1", "2", "12"):
+        names = [name.replace("${{ github.run_attempt }}", attempt) for name in produced]
+        matched = sorted(name for name in names if fnmatch.fnmatchcase(name, pattern))
+        assert matched == [f"skill-evaluator-tier{tier}-attempt-{attempt}" for tier in (1, 2, 3)]
+    run = [s.get("run", "") for s in steps]
+    select = next(i for i, script in enumerate(run) if "run_tiers.py select-attempts" in script)
+    assert (
+        steps.index(download) < select < next(i for i, script in enumerate(run) if "run_tiers.py aggregate" in script)
+    )
+    assert '--artifacts "$RUNNER_TEMP/skill-artifacts" --reports "$RUNNER_TEMP/skill-reports"' in run[select]
+    assert "continue-on-error" not in steps[select]
+
+
+def test_paid_tier_evaluation_stops_before_the_job_timeout():
+    import subprocess
+
+    paid = load(".github/workflows/evaluate-all-tiers.yml")["jobs"]["paid-tiers"]
+    assert paid["timeout-minutes"] == "${{ inputs.timeout-minutes }}"
+    assert paid["env"]["SKILL_EVAL_TIMEOUT_MINUTES"] == "${{ inputs.timeout-minutes }}"
+    step = next(s for s in paid["steps"] if s.get("name") == "Evaluate selected tier and retain native evidence")
+    setup = step["run"].split("python -I", 1)[0]
+    for minutes, expected in ((300, 280), (60, 45), (10, 8), (1, 1)):
+        result = subprocess.run(
+            ["bash", "-eo", "pipefail", "-c", setup + 'printf %s "$SKILL_EVAL_TIMEOUT_SECONDS"'],
+            env={"PATH": "/usr/bin:/bin", "SKILL_EVAL_TIMEOUT_MINUTES": str(minutes)},
+            capture_output=True,
+            text=True,
+            check=True,
+        )
+        assert int(result.stdout) == expected * 60
+
+
+def test_paid_tiers_leave_the_embedding_default_to_the_runner():
+    paid = load(".github/workflows/evaluate-all-tiers.yml")["jobs"]["paid-tiers"]
+    # An Anthropic chat provider defaults to OpenAI embeddings inside run_tiers.
+    assert paid["env"]["SKILL_EVAL_EMBEDDING_PROVIDER"] == "${{ inputs.embedding-provider }}"
 
 
 def test_feedback_checks_out_only_pinned_tools_and_uses_scoped_token():

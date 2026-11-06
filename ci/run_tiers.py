@@ -66,11 +66,15 @@ SAFE_ENV = {
     "DOCKER_HOST",
     "DOCKER_CONTEXT",
     "DOCKER_CONFIG",
+    "DOCKER_TLS_VERIFY",
+    "DOCKER_CERT_PATH",
     "XDG_RUNTIME_DIR",
     "SYSTEMROOT",
     "SKILLEVALUATOR_RUNTIME_DIR",
 }
 SUCCESS = {"passed", "skipped"}
+ATTEMPT = re.compile(r"[1-9][0-9]{0,7}")
+TIER_ARTIFACT = re.compile(r"skill-evaluator-tier([123])-attempt-([1-9][0-9]{0,7})")
 
 
 class ConfigurationError(ValueError):
@@ -571,8 +575,11 @@ def evaluate(tier: int, workspace: Path, reports: Path, env: dict[str, str]) -> 
                 skill_row["report_json"] = (leaf / f"skillevaluator-tier{tier}.json").relative_to(reports).as_posix()
                 skill_row["report_html"] = (leaf / f"skillevaluator-tier{tier}.html").relative_to(reports).as_posix()
             except (OSError, ValueError, ImportError) as exc:
+                # A failure after _retain must not leave a clean status beside an execution error.
+                skill_row["status"] = "incomplete"
                 # SDK and provider exception messages can carry credentials. Only fixed local diagnostics are safe.
-                skill_row["error"] = (
+                # An earlier specific diagnostic, such as the time budget, explains the missing report better.
+                skill_row["error"] = skill_row.get("error") or (
                     str(exc)
                     if isinstance(exc, ConfigurationError)
                     else "Evaluation evidence could not be safely retained; check the runtime and provider."
@@ -598,6 +605,53 @@ def evaluate(tier: int, workspace: Path, reports: Path, env: dict[str, str]) -> 
     return int(required and row["status"] not in SUCCESS)
 
 
+def select_attempts(artifacts: Path, reports: Path, current: int) -> dict[str, str]:
+    """Place each tier's newest artifact from this or an earlier attempt of the run.
+
+    GitHub's "Re-run failed jobs" reruns only failed jobs and their dependents.
+    Tier jobs that already completed keep artifacts named for their own attempt.
+    """
+    chosen: dict[int, tuple[int, Path]] = {}
+    if artifacts.is_dir():
+        for path in artifacts.iterdir():
+            match = TIER_ARTIFACT.fullmatch(path.name)
+            if not match or int(match[2]) > current:
+                continue
+            if path.is_symlink() or not path.is_dir():
+                raise ConfigurationError("Downloaded tier artifacts must be regular directories.")
+            tier, attempt = int(match[1]), int(match[2])
+            if attempt > chosen.get(tier, (0, path))[0]:
+                chosen[tier] = (attempt, path)
+    reports.mkdir(parents=True, exist_ok=True)
+    selected = {}
+    for tier, (attempt, path) in sorted(chosen.items()):
+        # Tier 1 uploads its report root; Tier 2/3 upload a root containing tierN/.
+        source = path if tier == 1 else path / f"tier{tier}"
+        target = reports / f"tier{tier}"
+        if source.is_symlink() or not source.is_dir():
+            continue
+        if target.exists() or target.is_symlink():
+            raise ConfigurationError("Use a fresh report directory for each aggregate.")
+        source.rename(target)
+        selected[str(tier)] = str(attempt)
+        print(f"Tier {tier}: using retained evidence from run attempt {attempt}.", flush=True)
+    write_json(reports / "source-attempts.json", selected)
+    return selected
+
+
+def _source_attempts(reports: Path, current: int) -> dict[int, str]:
+    path = reports / "source-attempts.json"
+    if not path.exists() and not path.is_symlink():
+        return {}
+    recorded = read_json(path)
+    if not all(
+        key in {"1", "2", "3"} and isinstance(value, str) and ATTEMPT.fullmatch(value) and int(value) <= current
+        for key, value in recorded.items()
+    ):
+        raise ConfigurationError("Recorded tier attempts are invalid.")
+    return {int(key): value for key, value in recorded.items()}
+
+
 def aggregate(reports: Path, tiers: tuple[int, ...], env: dict) -> int:
     try:
         from tier_manifest import validate_manifest, write_reports
@@ -606,21 +660,28 @@ def aggregate(reports: Path, tiers: tuple[int, ...], env: dict) -> int:
     result = context(env)
     result["expected_tiers"] = list(tiers)
     result["tiers"] = []
+    current = integer(env, "GITHUB_RUN_ATTEMPT", 1, 1, 99_999_999)
+    recorded = _source_attempts(reports, current)
     for tier in tiers:
         required = tier == 1
         path = reports / f"tier{tier}" / "ci-tier.json"
         if path.exists():
             incoming = validate_manifest(read_json(path))
-            for field in ("commit", "base_commit", "repository", "platform", "run_id", "run_attempt", "environment"):
+            for field in ("commit", "base_commit", "repository", "platform", "run_id", "environment"):
                 if incoming.get(field) != result[field]:
                     raise ConfigurationError("Tier artifacts do not identify the same evaluation run.")
+            # Evidence from an earlier attempt of this run stays valid after "Re-run failed jobs".
+            attempt = incoming["run_attempt"]
+            if int(attempt) > current or recorded.get(tier, attempt) != attempt:
+                raise ConfigurationError("Tier artifacts do not identify the same evaluation run.")
             rows = incoming.get("tiers")
             if not isinstance(rows, list) or len(rows) != 1 or rows[0].get("tier") != tier:
                 raise ConfigurationError("A tier artifact does not identify its expected tier.")
-            row = {**rows[0], "required": required}
+            row = {**rows[0], "required": required, "source_attempt": attempt}
             selected = incoming.get("selection", {}).get("selected")
+            # A retained checkpoint must cover every selected skill before it can claim completion.
             if (
-                row.get("status") == "passed"
+                row.get("status") in {"passed", "neutral", "skipped"}
                 and isinstance(selected, list)
                 and set(selected) != {skill.get("path") for skill in row.get("skills", [])}
             ):
@@ -666,6 +727,8 @@ def aggregate(reports: Path, tiers: tuple[int, ...], env: dict) -> int:
                 )
             if row["skills"]:
                 row["status"] = _combined([s["status"] for s in row["skills"]])
+            if tier in recorded:
+                row["source_attempt"] = recorded[tier]
         else:
             row = {
                 "tier": tier,
@@ -690,6 +753,9 @@ def main(argv: list[str] | None = None) -> int:
     aggregate_parser = commands.add_parser("aggregate")
     aggregate_parser.add_argument("--reports", type=Path, required=True)
     aggregate_parser.add_argument("--tiers", default="1,2,3")
+    attempts_parser = commands.add_parser("select-attempts")
+    attempts_parser.add_argument("--artifacts", type=Path, required=True)
+    attempts_parser.add_argument("--reports", type=Path, required=True)
     catalog_parser = commands.add_parser("catalog")
     catalog_parser.add_argument("--input", type=Path, required=True)
     catalog_parser.add_argument("--output", type=Path, required=True)
@@ -702,6 +768,10 @@ def main(argv: list[str] | None = None) -> int:
     try:
         if args.command == "evaluate":
             return evaluate(args.tier, args.workspace, args.reports, dict(os.environ))
+        if args.command == "select-attempts":
+            current = integer(os.environ, "GITHUB_RUN_ATTEMPT", 1, 1, 99_999_999)
+            select_attempts(args.artifacts, args.reports, current)
+            return 0
         if args.command == "catalog":
             request = read_json(args.input)
             _build_catalog(Path(request["workspace"]), [Path(p) for p in request["skills"]], args.output)

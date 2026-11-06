@@ -58,8 +58,10 @@ def _path(value, field: str, *, skill: bool = False) -> str:
     value = _text(value, field)
     if skill and value == ".":
         return value
+    # Skill directories are display text and are percent-encoded in links, so
+    # only generated report paths reject URL delimiters.
     _require(
-        not any(c in value for c in ("\\", ":", "%", "?", "#"))
+        not any(c in value for c in (("\\",) if skill else ("\\", ":", "%", "?", "#")))
         and not value.startswith("/")
         and not value.endswith("/")
         and all(part not in {"", ".", ".."} for part in value.split("/"))
@@ -120,6 +122,15 @@ def validate_manifest(payload: dict) -> dict:
         for key in ("reason", "error"):
             if key in record:
                 _text(record[key], f"tier.{key}", empty=True)
+        if "source_attempt" in record:
+            # A tier job that was not rerun keeps evidence from an earlier attempt of the same run.
+            attempt = record["source_attempt"]
+            _require(
+                isinstance(attempt, str)
+                and re.fullmatch(r"[1-9][0-9]{0,29}", attempt) is not None
+                and int(attempt) <= int(payload["run_attempt"]),
+                "Invalid tier source_attempt",
+            )
         if "metrics" in record:
             _require(isinstance(record["metrics"], dict), "Invalid tier metrics")
         skills = record.get("skills")
@@ -276,6 +287,20 @@ def _metrics(record: dict) -> str:
     )[:8000]
 
 
+def _evidence(payload: dict, record: dict) -> str:
+    attempt = record.get("source_attempt")
+    reused = attempt and attempt != payload["run_attempt"]
+    return "; ".join(
+        part
+        for part in (
+            record.get("reason", ""),
+            f"evidence from run attempt {attempt}" if reused else "",
+            _metrics(record),
+        )
+        if part
+    )
+
+
 def _report_base(value: str) -> str:
     if not value:
         return ""
@@ -324,7 +349,7 @@ def render_markdown(payload: dict, report_url: str = "") -> str:
         "| --- | --- | --- | --- |",
     ]
     for record in _tiers(payload):
-        detail = "; ".join(part for part in (record.get("reason", ""), _metrics(record)) if part)
+        detail = _evidence(payload, record)
         lines.append(
             f"| Tier {record['tier']} | {record['status']} | {'Required' if record['required'] else 'Advisory'} | {_md(detail) or 'See skill reports'} |"
         )
@@ -368,7 +393,7 @@ def _render_html(payload: dict) -> str:
         '<div class="table"><table><thead><tr><th>Tier</th><th>Status</th><th>Gate</th><th>Evidence</th></tr></thead><tbody>',
     ]
     for record in _tiers(payload):
-        detail = "; ".join(part for part in (record.get("reason", ""), _metrics(record)) if part)
+        detail = _evidence(payload, record)
         lines.append(
             f"<tr><td>Tier {record['tier']}</td><td>{record['status']}</td><td>{'Required' if record['required'] else 'Advisory'}</td><td>{h(detail)}</td></tr>"
         )

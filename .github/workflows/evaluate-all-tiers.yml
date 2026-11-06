@@ -182,7 +182,8 @@ jobs:
       SKILL_EVAL_ENV_MODE: ${{ inputs.env-mode }}
       SKILL_EVAL_PROVIDER: ${{ inputs.provider }}
       SKILL_EVAL_MODEL: ${{ inputs.model }}
-      SKILL_EVAL_EMBEDDING_PROVIDER: ${{ inputs.embedding-provider || inputs.provider }}
+      # Empty lets run_tiers choose the documented default (OpenAI for Anthropic chat).
+      SKILL_EVAL_EMBEDDING_PROVIDER: ${{ inputs.embedding-provider }}
       SKILL_EVAL_EMBEDDING_MODEL: ${{ inputs.embedding-model }}
       SKILL_EVAL_AGENTS: ${{ inputs.agents }}
       SKILL_EVAL_TIER3_REQUIRED: 'false'
@@ -274,7 +275,9 @@ jobs:
           ANTHROPIC_API_KEY: ${{ secrets.ANTHROPIC_API_KEY }}
           NVIDIA_API_KEY: ${{ secrets.NVIDIA_API_KEY }}
         run: |
-          export SKILL_EVAL_TIMEOUT_SECONDS="$((SKILL_EVAL_TIMEOUT_MINUTES * 60))"
+          # The job budget also covers setup; stop evaluation first so timeout evidence is retained.
+          reserve=$(( SKILL_EVAL_TIMEOUT_MINUTES / 4 < 20 ? SKILL_EVAL_TIMEOUT_MINUTES / 4 : 20 ))
+          export SKILL_EVAL_TIMEOUT_SECONDS="$(( (SKILL_EVAL_TIMEOUT_MINUTES - reserve) * 60 ))"
           python -I evaluator/ci/run_tiers.py evaluate --tier "$TIER" --workspace "$GITHUB_WORKSPACE/candidate" --reports "$RUNNER_TEMP/skill-reports"
       - name: Retain native reports after failure
         if: ${{ always() && contains(format(',{0},', inputs.tiers), format(',{0},', matrix.tier)) }}
@@ -359,19 +362,15 @@ jobs:
           python -I -m pip --isolated install --index-url https://pypi.org/simple uv==0.11.27
           env -i PATH="$PATH" python -I -m uv --no-config --cache-dir "$RUNNER_TEMP/uv-cache" sync --locked --no-dev --project "$GITHUB_WORKSPACE" --python 3.12 --default-index https://pypi.org/simple
           echo "$GITHUB_WORKSPACE/.venv/bin" >> "$GITHUB_PATH"
-      - name: Download original hardened Tier 1 reports
+      # "Re-run failed jobs" keeps earlier-attempt artifacts from tier jobs that were not rerun.
+      - name: Download every attempt's tier reports into separate directories
         continue-on-error: true
         uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093
         with:
-          name: skill-evaluator-tier1-attempt-${{ github.run_attempt }}
-          path: ${{ runner.temp }}/skill-reports/tier1
-      - name: Merge Tier 2 and Tier 3 reports preserving tier directories
-        continue-on-error: true
-        uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093
-        with:
-          pattern: skill-evaluator-tier[23]-attempt-${{ github.run_attempt }}
-          merge-multiple: true
-          path: ${{ runner.temp }}/skill-reports
+          pattern: skill-evaluator-tier[123]-attempt-*
+          path: ${{ runner.temp }}/skill-artifacts
+      - name: Select each tier's latest retained attempt
+        run: python -I ci/run_tiers.py select-attempts --artifacts "$RUNNER_TEMP/skill-artifacts" --reports "$RUNNER_TEMP/skill-reports"
       - name: Aggregate required Tier 1 and advisory Tier 2 and Tier 3 evidence
         env:
           TIERS: ${{ inputs.tiers }}

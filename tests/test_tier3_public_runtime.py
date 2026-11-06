@@ -2906,16 +2906,21 @@ def test_documented_agent_cli_versions_match_the_pins() -> None:
         assert f"{name} {'.'.join(map(str, minimum))} or newer" in pages["agents-and-sandboxes.mdx"]
 
 
-def test_opencode_runs_pass_no_agent_kwargs() -> None:
+@pytest.mark.parametrize("env_mode", ["docker", "local"])
+def test_opencode_runs_pass_only_the_pinned_cli_version(env_mode: str) -> None:
+    from skillevaluator.tier3.harbor import runner
+
     command = build_harbor_run_command(
         dataset_path="/tmp/dataset",
         agent="opencode",
         job_name="effort",
-        env_mode="docker",
+        env_mode=env_mode,
         model="anthropic/claude-opus-5-5",
     )
 
-    assert "--ak" not in command
+    # Without a version Harbor installs opencode-ai@latest; local mode runs the installed CLI.
+    # OpenCode never receives a reasoning-effort override.
+    assert _harbor_agent_kwargs(command) == ({} if env_mode == "local" else {"version": runner.OPENCODE_VERSION})
 
 
 def test_codex_agents_render_the_pinned_reasoning_effort(tmp_path: Path) -> None:

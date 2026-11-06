@@ -38,10 +38,14 @@ tier3/skill-001/       # native retained JSON and HTML
 
 `ci-results.json` uses report contract `skillevaluator-ci-v1` and records the
 repository, exact commit, platform, run ID, attempt, environment, and each
-tier's required/advisory policy. A tier can be `passed`, `failed`, `incomplete`,
-`skipped`, `not_run`, or `needs_action`. A missing required tier fails the
-aggregate; advisory Tier 3 never changes a failed required tier into a pass.
-A check that never executed cannot become an empty success.
+tier's required/advisory policy: Tier 1 has `required: true`, while Tier 2 and
+Tier 3 have `required: false`. A tier can be `passed`, `failed`, `incomplete`,
+`skipped`, `not_run`, or `needs_action`. Failed, incomplete or missing Tier 1
+evidence fails the aggregate. Tier 2/3 failures and incomplete results remain
+advisory and retain their native status; a passing CI gate does not mean those
+tiers passed. A check that never executed cannot become an empty success.
+The deprecated Tier 3 required settings are ignored in CI. Standalone validation
+and benchmark publication retain their separate policies.
 
 Tier 2 reports retain deduplication findings and dataset-readiness evidence;
 Tier 3 reports retain paired scores and coverage, Skill Lift, attempts,

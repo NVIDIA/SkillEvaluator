@@ -6,6 +6,13 @@ All notable changes to SkillEvaluator are documented in this file.
 
 ### Changed
 
+- Make Tier 1 the only gate in opt-in all-tier GitHub and GitLab CI. Tier 2 and
+  Tier 3 retain failed and incomplete advisory outcomes and native reports.
+  Deprecate and ignore onboarding's `--tier3-required`, GitHub's
+  `tier3-required` input and GitLab's `SKILL_EVAL_TIER3_REQUIRED` variable;
+  none can make Tier 3 block CI. Standalone validation and benchmark
+  publication policies are unchanged.
+
 - Give staged Tier 3 main images a fixed liveness healthcheck so Docker Compose
   2 can wait for readiness while authored image healthchecks remain suppressed.
   Keep custom service healthchecks and their readiness dependencies intact.
@@ -28,13 +35,14 @@ All notable changes to SkillEvaluator are documented in this file.
 
 ### Added
 
-- Opt-in three-tier GitHub and GitLab CI entrypoints with required Tier 1/Tier 2,
-  advisory paired Tier 3, Docker and native local execution, pinned local agent
-  bootstrap, retained aggregate/native reports, and trusted default-branch
+- Opt-in three-tier GitHub and GitLab CI entrypoints with required Tier 1,
+  advisory Tier 2 and paired Tier 3, Docker and native local execution, pinned
+  local agent bootstrap, retained aggregate/native reports, and trusted default-branch
   feedback. Candidate templates require a capability-bearing release descriptor;
   released Tier 1 bundles and workflows remain unchanged. Incomplete runs retain
-  redacted startup diagnostics, and interrupted selections cannot pass on partial
-  results. GitLab callers quote variable values, use literal job timeouts
+  redacted startup diagnostics. Interrupted Tier 1 selections cannot pass on
+  partial results; advisory tiers preserve their failed or incomplete status.
+  GitLab callers quote variable values, use literal job timeouts
   compatible with GitLab 17.8, and safely select changes in runner-owned checkouts.
   GitLab before 18.4 uses a separate read-only admission credential; feedback
   initiation is advisory so first-install reporting does not change the tier gate.

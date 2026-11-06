@@ -303,7 +303,7 @@ def native_tier3(skill: Path, output: Path, env: dict) -> int:
         secrets = {os.environ[key] for key in PROVIDER_KEYS.values() if os.environ.get(key)}
         result = advisory_skip_result(Redactor(secrets).text(reason)[:2000], skill_name=skill.name)
         result.mark_scan_incomplete("Tier 3 execution")
-    result.metadata["gating"] = {"tier": 3, "blocking": boolean(env, "SKILL_EVAL_TIER3_REQUIRED")}
+    result.metadata["gating"] = {"tier": 3, "blocking": False}
     result.metadata["evaluated_source"] = options.evaluated_source
     if service.failure_reason(engine):
         result.mark_scan_incomplete("Tier 3 execution")
@@ -418,7 +418,7 @@ def evaluate(tier: int, workspace: Path, reports: Path, env: dict[str, str]) -> 
     if reports.is_relative_to(workspace) or any(p.is_symlink() for p in [reports, *reports.parents]):
         raise ConfigurationError("Reports must be outside the consumer checkout in an unlinked directory.")
     document = context(env)
-    required = tier != 3 or boolean(env, "SKILL_EVAL_TIER3_REQUIRED")
+    required = tier == 1
     selected, selection = select_skills(workspace, env)
     row = {
         "tier": tier,
@@ -501,7 +501,7 @@ def evaluate(tier: int, workspace: Path, reports: Path, env: dict[str, str]) -> 
                         diagnostics, destination / "catalog", provider_tokens, command_log=scratch / "catalog.log"
                     )
                     retain()
-                    return 1
+                    return int(required)
         doctor_done = False
         for index, skill in enumerate(selected, 1):
             skill_row = row["skills"][index - 1]
@@ -546,7 +546,6 @@ def evaluate(tier: int, workspace: Path, reports: Path, env: dict[str, str]) -> 
                         "SKILL_EVAL_MODEL",
                         "SKILL_EVAL_N_ATTEMPTS",
                         "SKILL_EVAL_N_CONCURRENT",
-                        "SKILL_EVAL_TIER3_REQUIRED",
                         "REPORT_REPOSITORY",
                         "REPORT_COMMIT",
                         "GITHUB_REPOSITORY",
@@ -608,10 +607,10 @@ def aggregate(reports: Path, tiers: tuple[int, ...], env: dict) -> int:
     result["expected_tiers"] = list(tiers)
     result["tiers"] = []
     for tier in tiers:
-        required = tier != 3 or boolean(env, "SKILL_EVAL_TIER3_REQUIRED")
+        required = tier == 1
         path = reports / f"tier{tier}" / "ci-tier.json"
         if path.exists():
-            incoming = read_json(path)
+            incoming = validate_manifest(read_json(path))
             for field in ("commit", "base_commit", "repository", "platform", "run_id", "run_attempt", "environment"):
                 if incoming.get(field) != result[field]:
                     raise ConfigurationError("Tier artifacts do not identify the same evaluation run.")

@@ -8,7 +8,7 @@ SkillEvaluator finds your skills, prepares the workflows and opens a setup PR.
 If your repository already has skill checks, it can add reporting to that setup.
 The released default setup gives your CI **Tier 1 checks, including
 SkillSpector security scanning**. The explicit all-tier path below adds
-required Tier 2 and advisory paired Tier 3 on GitHub or GitLab.
+advisory Tier 2 and paired Tier 3 on GitHub or GitLab. Only Tier 1 gates CI.
 
 ```bash title="Run inside your checked-out GitHub repository"
 pip install --upgrade skillevaluator
@@ -51,9 +51,10 @@ locally. The shared container supplies the runtime; you control the configuratio
 ## Opt in to three-tier CI
 
 The new all-tier path supports **GitHub and GitLab** with two small consumer
-files. Tier 1 and Tier 2 are required; Tier 3 is advisory unless you select
-`--tier3-required`. Docker is the default. `--env-mode local` runs native agent
-CLIs on the selected CI runner. This setup supports these two modes only.
+files. Tier 1 is the only required tier; Tier 2 and Tier 3 are advisory, including
+failed or incomplete results. `--tier3-required` is deprecated and ignored; it
+cannot make Tier 3 block CI. Docker is the default. `--env-mode local` runs native
+agent CLIs on the selected CI runner. This setup supports these two modes only.
 
 <Note>
   This is an unreleased capability. The bundled 0.7.2 descriptor and downloaded
@@ -82,13 +83,14 @@ they do not run the evaluators on your laptop.
 | --- | --- | --- |
 | `ci init` | Prepare the evaluation and trusted feedback entrypoints | Merge the setup and configure the CI runner and secrets |
 | `ci status --tiers 1,2,3` | Read default-branch configuration and latest pipeline status | Inspect the actual CI reports and gates |
-| `ci demo --tiers 1,2,3` | Open a small skill-change PR or MR | Wait for required checks, the comment, and retained reports |
+| `ci demo --tiers 1,2,3` | Open a small skill-change PR or MR | Inspect the Tier 1 gate, advisory Tier 2/3 results, comment, and retained reports |
 
 Before the first demo, commit native datasets under each skill's `evals/`
 directory; see [Evaluation Datasets](eval-datasets.mdx). CI reuses those cases
 with full positive and negative paired coverage. It does not generate cases or
 use autopilot. Missing datasets or credentials produce actionable incomplete
-results; they do not count as a passing tier. Central dataset mappings are not
+results; they do not count as a passing tier. A passing Tier 1 CI gate does not
+mean the advisory tiers completed or passed. Central dataset mappings are not
 supported by this initial workflow.
 
 Create the `skillevaluator` execution environment and store provider secrets
@@ -145,7 +147,7 @@ See the platform pages for
 
 Keep the existing workflow while previewing the explicit all-tier setup with a
 compatible descriptor. Review the new evaluator and feedback pins, provider,
-runner, protected environment, paths and required-tier policy. Remove or disable
+runner, protected environment, paths and Tier 1-only gate. Remove or disable
 the old Tier 1 caller in the setup review once the new all-tier caller covers
 the same roots, so a PR does not run two independent scans. Merge the new
 feedback entrypoint and then open a fresh demo. Existing released bundles and

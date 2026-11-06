@@ -16,8 +16,10 @@ setup.
 
 For two small consumer files and automatic artifact-backed PR/MR feedback, use
 the opt-in [three-tier CLI onboarding](cli-onboarding.mdx#opt-in-to-three-tier-ci).
-This unreleased capability runs required Tier 1 and Tier 2 plus advisory paired
-Tier 3, defaults to Docker, and supports native local mode. It requires an
+This unreleased capability gates only on Tier 1 and runs advisory Tier 2 and
+paired Tier 3, defaults to Docker, and supports native local mode. Failed or
+incomplete advisory results retain their native evidence without blocking CI.
+The deprecated Tier 3 required settings are ignored. It requires an
 explicit compatible release descriptor and committed native datasets. The
 released Tier 1-only workflows and bundles continue to work unchanged.
 

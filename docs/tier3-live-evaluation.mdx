@@ -20,9 +20,10 @@ cases, or skip the baseline. Docker is the default, with native local mode as
 the other supported CI environment. Cloud backends remain available through
 the expert CLI but are outside this onboarding path.
 
-Tier 3 is advisory by default and runs independently from required Tier 1 and
-Tier 2. Use onboarding's `--tier3-required` (GitHub `tier3-required: true`,
-GitLab `SKILL_EVAL_TIER3_REQUIRED: 'true'`) to require it. CI preserves native
+Tier 3 and Tier 2 are advisory; only Tier 1 gates CI. Onboarding's
+`--tier3-required`, GitHub's `tier3-required` input and GitLab's
+`SKILL_EVAL_TIER3_REQUIRED` variable are deprecated and ignored, even when true;
+they cannot make Tier 3 block CI. CI preserves native
 reports for missing credentials, readiness failures and partial runs as well
 as completed scores. Native reports include coverage and paired arm evidence,
 Skill Lift, attempts, available latency/resource metrics and trial links. An

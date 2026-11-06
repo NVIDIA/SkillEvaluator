@@ -77,5 +77,9 @@ image pins. Existing 0.7.2 downloads remain Tier 1 only. The all-tier CLI
 renders these references and approves the exact GitHub caller blob. See
 [the onboarding guide](../../docs/cli-onboarding.mdx#opt-in-to-three-tier-ci).
 Merge the trusted feedback entrypoint onto the default branch before the
-first demo PR/MR. Tier 1/Tier 2 are required, Tier 3 is advisory, reports expire
-after 14 days, Docker is the default, and native local mode is also supported.
+first demo PR/MR. Only Tier 1 gates CI; Tier 2 and Tier 3 remain advisory,
+including failed or incomplete outcomes, with their native evidence retained.
+The CLI's `--tier3-required`, GitHub's `tier3-required` input and GitLab's
+`SKILL_EVAL_TIER3_REQUIRED` variable are deprecated and ignored; they cannot
+make Tier 3 blocking. Reports expire after 14 days, Docker is the default, and
+native local mode is also supported.

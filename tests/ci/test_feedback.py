@@ -170,6 +170,55 @@ def test_github_creates_one_owned_comment_with_private_artifact_and_gate(github)
     assert len(api.writes) == 1
 
 
+@pytest.mark.parametrize("platform", ["github", "gitlab"])
+@pytest.mark.parametrize("tier1_status", ["passed", "incomplete"])
+def test_trusted_feedback_keeps_paid_failures_advisory_and_tier1_blocking(request, platform, tier1_status):
+    from skillevaluator.models import ValidationResult
+    from skillevaluator.reporting.json_reporter import JSONReporter
+
+    module, api = request.getfixturevalue(platform)
+    payload = manifest(platform)
+    payload["tiers"][0].update(status=tier1_status, reason="Tier 1 validation")
+    extra = {}
+    if tier1_status == "passed":
+        native = JSONReporter().render_all(
+            [ValidationResult(validator_name="FORMAT", metadata={"gating": {"tier": 1, "blocking": True}})]
+        )
+        payload["tiers"][0]["skills"] = [
+            {
+                "path": "skills/demo",
+                "status": "passed",
+                "report_json": "tier1/skill-001/skillevaluator-tier1.json",
+                "report_html": "tier1/skill-001/skillevaluator-tier1.html",
+            }
+        ]
+        extra = {
+            "tier1/skill-001/skillevaluator-tier1.json": native,
+            "tier1/skill-001/skillevaluator-tier1.html": "<p>Tier 1 passed</p>",
+        }
+    payload["tiers"][1].update(status="failed", required=False, reason="Duplication check failed")
+    payload["tiers"][2].update(status="incomplete", required=False, reason="Paired evaluation timed out")
+    prefix = "skill-evaluator-results/" if platform == "gitlab" else ""
+    api.payload = archive(payload, {prefix + key: value for key, value in extra.items()}, prefix=prefix)
+
+    retained = module.read_results(api.payload, prefix=prefix)
+    assert retained["overall_passed"] is (tier1_status == "passed")
+    if platform == "github":
+        result = module.github_feedback(api, REPO, 123, 1)
+        body = api.comments[0]["body"]
+        report_url = "https://github.com/acme/skills/actions/runs/123/artifacts/21"
+    else:
+        result = module.gitlab_feedback(api, "https://gitlab.example/api/v4", "12", 123)
+        body = api.notes[0]["body"]
+        report_url = "https://gitlab.example/acme/skills/-/jobs/91/artifacts/download"
+    assert result["comment_action"] == "created"
+    assert f"Required gate: **{'Passed' if tier1_status == 'passed' else 'Not passed'}**" in body
+    assert f"Tier 1 | {tier1_status} | Required" in body
+    assert "Tier 2 | failed | Advisory | Duplication check failed" in body
+    assert "Tier 3 | incomplete | Advisory | Paired evaluation timed out" in body
+    assert report_url in body
+
+
 @pytest.mark.parametrize(
     "change", ["attempt", "revision", "expired", "duplicate", "caller", "workflow", "head", "foreign"]
 )

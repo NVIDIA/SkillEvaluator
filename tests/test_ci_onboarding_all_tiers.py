@@ -47,7 +47,7 @@ def test_all_tiers_save_github_is_minimal_pinned_and_idempotent(repository, all_
     assert job["uses"].endswith("/evaluate-all-tiers.yml@" + ALL_RELEASE["workflow_ref"])
     assert job["with"]["env-mode"] == "docker"
     assert job["with"]["tiers"] == "1,2,3"
-    assert job["with"]["tier3-required"] is False
+    assert "tier3-required" not in job["with"]
     assert job["with"]["image"] == ALL_RELEASE["image"]
     feedback = yaml.safe_load((repository / ".github/workflows/feedback-all-tiers.yml").read_text())
     assert feedback["jobs"]["feedback"]["with"]["trusted-caller-blobs"]
@@ -213,6 +213,9 @@ def test_github_setup_pr_is_api_only_and_preserves_checkout(repository, all_rele
     }
     texts = {entry["path"]: entry["content"] for entry in tree["tree"]}
     feedback = yaml.safe_load(texts[".github/workflows/feedback-all-tiers.yml"])
+    setup = next(payload for endpoint, payload in mutations if endpoint.endswith("/pulls"))
+    assert "Tier 1 required" in setup["body"]
+    assert "Tier 2 and Tier 3 advisory" in setup["body"]
     assert feedback["jobs"]["feedback"]["with"]["trusted-caller-blobs"] == wizard.blob_id(
         texts[".github/workflows/skill-checks-all-tiers.yml"]
     )
@@ -269,6 +272,9 @@ def test_gitlab_demo_updates_existing_manifest_and_needs_merged_setup(repository
     commit = next(payload for endpoint, payload in mutations if endpoint.endswith("/repository/commits"))
     assert commit["actions"][0]["action"] == "update"
     assert "automatic feedback" in commit["actions"][0]["content"]
+    review = next(payload for endpoint, payload in mutations if endpoint.endswith("/merge_requests"))
+    assert "required Tier 1" in review["description"]
+    assert "advisory Tier 2 and paired Tier 3" in review["description"]
 
 
 def test_existing_setup_branch_with_extra_files_is_not_reused(repository, all_release, monkeypatch):
@@ -392,7 +398,38 @@ def test_all_tiers_without_release_uses_packaged_candidate_descriptor(repository
         cli, ["ci", "init", "--repo", str(repository), "--tiers", "1,2,3", "--mode", "preview", "--no-input"]
     )
     assert result.exit_code == 0, result.output
-    assert "Tier 1 + Tier 2 required" in result.output
+    assert "Tier 1 required; Tiers 2 and 3 advisory" in result.output
+
+
+@pytest.mark.parametrize("platform", ["github", "gitlab"])
+def test_deprecated_tier3_required_flag_warns_and_never_changes_generated_policy(
+    repository, all_release, tmp_path, platform
+):
+    if platform == "gitlab":
+        subprocess.run(
+            [
+                "git",
+                "-C",
+                str(repository),
+                "remote",
+                "set-url",
+                "origin",
+                "https://gitlab.example.test/group/consumer.git",
+            ],
+            check=True,
+        )
+    receipt = tmp_path / "policy-receipt.json"
+    result = invoke(repository, all_release, "--mode", "save", "--tier3-required", "--output", str(receipt))
+    assert result.exit_code == 0, result.output
+    assert "deprecated" in result.output.lower() and "ignored" in result.output.lower()
+    assert "Tier 1 required; Tiers 2 and 3 advisory" in result.output
+    assert json.loads(receipt.read_text())["options"]["tier3_required"] is False
+    if platform == "github":
+        scan = yaml.safe_load((repository / ".github/workflows/skill-checks-all-tiers.yml").read_text())
+        assert "tier3-required" not in scan["jobs"]["skills"]["with"]
+    else:
+        scan = yaml.safe_load((repository / ".gitlab-ci.yml").read_text())
+        assert "SKILL_EVAL_TIER3_REQUIRED" not in scan["variables"]
 
 
 def test_candidate_descriptor_is_declared_as_package_data():

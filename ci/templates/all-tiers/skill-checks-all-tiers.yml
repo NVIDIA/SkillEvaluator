@@ -1,5 +1,6 @@
 # SPDX-License-Identifier: Apache-2.0
 # Opt-in candidate template. Use a capability-bearing release, replacing pins.
+# Tier 1 is required; Tier 2 and Tier 3 are advisory.
 name: Skill checks (all tiers)
 on:
   pull_request:
@@ -26,7 +27,6 @@ jobs:
       provider: openai
       runner: ubuntu-24.04
       environment: skillevaluator
-      tier3-required: false
     secrets:
       OPENAI_API_KEY: ${{ secrets.OPENAI_API_KEY }}
       ANTHROPIC_API_KEY: ${{ secrets.ANTHROPIC_API_KEY }}

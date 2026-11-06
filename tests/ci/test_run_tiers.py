@@ -43,13 +43,16 @@ def env_for(consumer, **updates):
     }
 
 
-def test_missing_credentials_retains_incomplete_required_tier(consumer, tmp_path):
+@pytest.mark.parametrize("tier", [2, 3])
+@pytest.mark.parametrize("legacy_required", ["false", "true", "unused-legacy-value"])
+def test_missing_credentials_retains_incomplete_advisory_tier(consumer, tmp_path, tier, legacy_required):
     output = tmp_path / "reports"
-    code = run_tiers.evaluate(2, consumer, output, env_for(consumer))
-    result = json.loads((output / "tier2" / "ci-tier.json").read_text())
-    assert code == 1
+    code = run_tiers.evaluate(tier, consumer, output, env_for(consumer, SKILL_EVAL_TIER3_REQUIRED=legacy_required))
+    result = json.loads((output / f"tier{tier}" / "ci-tier.json").read_text())
+    assert code == 0
     assert result["tiers"][0]["status"] == "incomplete"
-    assert result["tiers"][0]["required"] is True
+    assert result["tiers"][0]["required"] is False
+    assert result["overall_passed"] is True
     assert "credential" in result["tiers"][0]["reason"].lower()
 
 
@@ -110,9 +113,14 @@ def test_native_tier3_engine_failure_still_emits_incomplete_evidence(consumer, t
     monkeypatch.setattr(run_tiers, "dataset_preflight", lambda _skill: {})
     monkeypatch.setattr(EvaluationService, "evaluate", lambda _self, _options: {"error": ["Model routing unavailable"]})
     monkeypatch.setenv("NVIDIA_API_KEY", "private-provider-key-1234")
-    assert run_tiers.native_tier3(consumer / "skills/alpha", tmp_path, env_for(consumer)) == 0
+    assert (
+        run_tiers.native_tier3(consumer / "skills/alpha", tmp_path, env_for(consumer, SKILL_EVAL_TIER3_REQUIRED="true"))
+        == 0
+    )
     report = json.loads((tmp_path / "skillevaluator-tier3.json").read_text())
     assert report["results"][0]["status"] == "incomplete"
+    assert report["gating"]["tiers"]["3"]["blocking"] is False
+    assert report["results"][0]["gating"] == {"tier": 3, "blocking": False}
     assert "Model routing unavailable" in json.dumps(report)
 
 
@@ -166,7 +174,7 @@ def test_head_identity_is_checked_before_full_scan(consumer, tmp_path):
         run_tiers.evaluate(2, consumer, tmp_path / "reports", env_for(consumer, REPORT_COMMIT="a" * 40))
 
 
-def test_interrupted_second_skill_cannot_publish_a_passing_partial_gate(consumer, tmp_path, monkeypatch):
+def test_interrupted_advisory_tier_retains_honest_partial_results(consumer, tmp_path, monkeypatch):
     from skillevaluator.models import ValidationResult
     from skillevaluator.reporting.json_reporter import JSONReporter
 
@@ -195,8 +203,9 @@ def test_interrupted_second_skill_cannot_publish_a_passing_partial_gate(consumer
     assert tier["status"] == "incomplete"
     assert len(tier["skills"]) == 2
     assert [row["status"] for row in tier["skills"]] == ["passed", "incomplete"]
-    assert retained["overall_passed"] is False
-    assert run_tiers.aggregate(reports, (2,), env) == 1
+    assert tier["required"] is False
+    assert retained["overall_passed"] is True
+    assert run_tiers.aggregate(reports, (2,), env) == 0
 
 
 @pytest.mark.parametrize("phase", ["doctor", "catalog", "evaluation"])
@@ -221,7 +230,7 @@ def test_worker_failure_keeps_redacted_diagnostics_after_scratch_cleanup(consume
     tier = 2 if phase == "catalog" else 3
     output = tmp_path / "reports"
     code = run_tiers.evaluate(tier, consumer, output, env_for(consumer, NVIDIA_API_KEY=secret))
-    assert code == (1 if tier == 2 else 0)
+    assert code == 0
     assert all(not path.exists() for path in scratch_paths)
     diagnostics = list((output / f"tier{tier}").rglob("diagnostics/index.json"))
     assert diagnostics, "Temporary worker errors must survive even without a canonical report"
@@ -232,6 +241,110 @@ def test_worker_failure_keeps_redacted_diagnostics_after_scratch_cleanup(consume
         assert "Compose startup failed" in retained
     document = json.loads((output / f"tier{tier}/ci-tier.json").read_text())
     assert document["tiers"][0]["status"] == "incomplete"
+
+
+@pytest.mark.parametrize("tier", [2, 3])
+def test_advisory_timeout_retains_incomplete_outcome_and_diagnostics(consumer, tmp_path, monkeypatch, tier):
+    def execute(args, *, log, **_kwargs):
+        log.write_text("Worker exceeded its time budget.\n")
+        return 0 if "doctor" in args or "catalog" in args else 124
+
+    monkeypatch.setattr(run_tiers, "dataset_preflight", lambda _skill: {})
+    monkeypatch.setattr(run_tiers, "run_command", execute)
+    reports = tmp_path / "reports"
+    assert (
+        run_tiers.evaluate(
+            tier,
+            consumer,
+            reports,
+            env_for(consumer, NVIDIA_API_KEY="test-provider-value-1234", SKILL_EVAL_TIER3_REQUIRED="true"),
+        )
+        == 0
+    )
+    retained = json.loads((reports / f"tier{tier}/ci-tier.json").read_text())
+    assert retained["tiers"][0]["status"] == "incomplete"
+    assert all(skill["status"] == "incomplete" and skill["error"] for skill in retained["tiers"][0]["skills"])
+    assert retained["overall_passed"] is True
+    assert list((reports / f"tier{tier}").rglob("diagnostics/index.json"))
+
+
+def write_tier(reports, tier, env, status, *, required=True):
+    document = run_tiers.context(env)
+    document.update(
+        expected_tiers=[tier],
+        tiers=[
+            {
+                "tier": tier,
+                "required": required,
+                "status": status,
+                "skills": [
+                    {
+                        "path": "skills/alpha",
+                        "status": status,
+                        "report_json": f"tier{tier}/skill-001/report.json",
+                        "report_html": f"tier{tier}/skill-001/report.html",
+                        "metrics": {"findings": 7},
+                    }
+                ],
+            }
+        ],
+    )
+    run_tiers.write_json(reports / f"tier{tier}/ci-tier.json", document)
+
+
+@pytest.mark.parametrize("status", ["failed", "incomplete", "needs_action", "not_run", "neutral", "skipped", None])
+def test_aggregate_only_tier1_blocks_despite_legacy_paid_requirements(consumer, tmp_path, status):
+    reports = tmp_path / "reports"
+    env = env_for(consumer, SKILL_EVAL_TIER3_REQUIRED="true")
+    write_tier(reports, 1, env, "passed")
+    if status is not None:
+        for tier in (2, 3):
+            write_tier(reports, tier, env, status)
+    assert run_tiers.aggregate(reports, (1, 2, 3), env) == 0
+    document = json.loads((reports / "ci-results.json").read_text())
+    assert document["overall_passed"] is True
+    assert document["overall_status"] == "passed"
+    assert [row["required"] for row in document["tiers"]] == [True, False, False]
+    assert [row["status"] for row in document["tiers"]] == ["passed", status or "incomplete", status or "incomplete"]
+    if status is not None:
+        assert document["tiers"][1]["skills"][0]["report_html"] == "tier2/skill-001/report.html"
+        assert document["tiers"][2]["skills"][0]["metrics"] == {"findings": 7}
+
+
+@pytest.mark.parametrize("status", ["failed", "incomplete", None])
+def test_aggregate_tier1_nonpass_still_blocks(consumer, tmp_path, status):
+    reports = tmp_path / "reports"
+    env = env_for(consumer)
+    if status is not None:
+        write_tier(reports, 1, env, status)
+    for tier in (2, 3):
+        write_tier(reports, tier, env, "passed")
+    assert run_tiers.aggregate(reports, (1, 2, 3), env) == 1
+    document = json.loads((reports / "ci-results.json").read_text())
+    assert document["overall_passed"] is False
+    assert document["tiers"][0]["status"] == (status or "incomplete")
+
+
+@pytest.mark.parametrize("damage", ["identity", "required", "path", "status"])
+def test_advisory_artifact_validation_remains_strict(consumer, tmp_path, damage):
+    reports = tmp_path / "reports"
+    env = env_for(consumer)
+    write_tier(reports, 1, env, "passed")
+    write_tier(reports, 2, env, "failed")
+    path = reports / "tier2/ci-tier.json"
+    document = json.loads(path.read_text())
+    if damage == "identity":
+        document["commit"] = "f" * 40
+    elif damage == "required":
+        document["tiers"][0]["required"] = "true"
+    elif damage == "path":
+        document["tiers"][0]["skills"][0]["report_html"] = "../private.html"
+    else:
+        document["tiers"][0]["status"] = "unknown"
+    path.write_text(json.dumps(document))
+    with pytest.raises(ValueError):
+        run_tiers.aggregate(reports, (1, 2, 3), env)
+    assert not (reports / "ci-results.json").exists()
 
 
 def test_consumer_python_module_cannot_shadow_installed_evaluator(consumer, tmp_path):

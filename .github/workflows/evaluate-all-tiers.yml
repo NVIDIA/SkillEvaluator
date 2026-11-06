@@ -53,6 +53,7 @@ on:
         type: string
         default: skillevaluator
       tier3-required:
+        description: Deprecated and ignored; Tier 2 and Tier 3 are always advisory
         type: boolean
         default: false
       n-attempts:
@@ -168,7 +169,7 @@ jobs:
       contents: read
       pull-requests: read
     timeout-minutes: ${{ inputs.timeout-minutes }}
-    continue-on-error: ${{ matrix.tier == 3 && !inputs.tier3-required }}
+    continue-on-error: true
     strategy:
       fail-fast: false
       matrix:
@@ -184,7 +185,7 @@ jobs:
       SKILL_EVAL_EMBEDDING_PROVIDER: ${{ inputs.embedding-provider || inputs.provider }}
       SKILL_EVAL_EMBEDDING_MODEL: ${{ inputs.embedding-model }}
       SKILL_EVAL_AGENTS: ${{ inputs.agents }}
-      SKILL_EVAL_TIER3_REQUIRED: ${{ inputs.tier3-required }}
+      SKILL_EVAL_TIER3_REQUIRED: 'false'
       SKILL_EVAL_N_ATTEMPTS: ${{ inputs.n-attempts }}
       SKILL_EVAL_N_CONCURRENT: ${{ inputs.n-concurrent }}
       SKILL_EVAL_TIMEOUT_MINUTES: ${{ inputs.timeout-minutes }}
@@ -298,7 +299,7 @@ jobs:
       REPORT_REPOSITORY: ${{ github.repository }}
       REPORT_RUN_URL: ${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}
       SKILL_EVAL_ENV_MODE: ${{ inputs.env-mode }}
-      SKILL_EVAL_TIER3_REQUIRED: ${{ inputs.tier3-required }}
+      SKILL_EVAL_TIER3_REQUIRED: 'false'
     steps:
       - name: Capture signed aggregate execution receipt
         id: provenance
@@ -371,7 +372,7 @@ jobs:
           pattern: skill-evaluator-tier[23]-attempt-${{ github.run_attempt }}
           merge-multiple: true
           path: ${{ runner.temp }}/skill-reports
-      - name: Aggregate required gates and advisory evidence
+      - name: Aggregate required Tier 1 and advisory Tier 2 and Tier 3 evidence
         env:
           TIERS: ${{ inputs.tiers }}
         run: python -I ci/run_tiers.py aggregate --reports "$RUNNER_TEMP/skill-reports" --tiers "$TIERS"

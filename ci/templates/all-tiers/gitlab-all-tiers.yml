@@ -1,5 +1,6 @@
 # SPDX-License-Identifier: Apache-2.0
 # Root .gitlab-ci.yml; keep MR rules here even though jobs are included.
+# Tier 1 is required; Tier 2 and Tier 3 are advisory.
 include:
   - remote: https://raw.githubusercontent.com/NVIDIA/SkillEvaluator/RELEASE_WORKFLOW_SHA/ci/gitlab/all-tiers.yml
   - local: .gitlab/skill-feedback.yml
@@ -16,7 +17,6 @@ variables:
   SKILL_EVAL_RUNNER: docker
   SKILL_EVAL_ENVIRONMENT: skillevaluator
   SKILL_EVAL_TIMEOUT_SECONDS: '18000'
-  SKILL_EVAL_TIER3_REQUIRED: 'false'
 skill-evaluation:
   rules:
     - if: '$SKILL_EVAL_FEEDBACK == "true"'

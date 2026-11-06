@@ -75,7 +75,8 @@ def validate_manifest(payload: dict) -> dict:
     ``expected_tiers`` defaults to all three tiers. A single-tier producer can
     explicitly declare its one expected tier. Missing expected required evidence
     fails the gate; an explicit no-work skip satisfies it with a skipped headline.
-    Additional JSON provenance is retained. Tier 3 is advisory unless required.
+    Additional JSON provenance and historical declared gate policies are retained.
+    New CI producers require only Tier 1; missing paid-tier evidence is advisory.
     """
     _require(isinstance(payload, dict), "Manifest must be an object")
     _json(payload)
@@ -114,7 +115,7 @@ def validate_manifest(payload: dict) -> dict:
         _require(tier in expected, "Unexpected tier outcome")
         seen.add(tier)
         _require(type(record.get("required")) is bool, "Tier required must be boolean")
-        _require(tier == 3 or record["required"], "Tier 1 and Tier 2 must be required")
+        _require(tier != 1 or record["required"], "Tier 1 must be required")
         _require(isinstance(record.get("status"), str) and record["status"] in _STATUSES, "Invalid tier status")
         for key in ("reason", "error"):
             if key in record:
@@ -146,7 +147,7 @@ def validate_manifest(payload: dict) -> dict:
                 "Passed tier contains execution errors",
             )
     required = [record for record in tiers if record["required"]]
-    missing = set(expected) & {1, 2} - seen
+    missing = set(expected) & {1} - seen
 
     def satisfies_gate(record):
         return record["status"] == "passed" or (
@@ -248,7 +249,7 @@ def _tiers(payload: dict) -> list[dict]:
             {
                 "tier": tier,
                 "status": "not_run",
-                "required": tier != 3,
+                "required": tier == 1 and tier in payload["expected_tiers"],
                 "skills": [],
                 "reason": "No retained result" if tier in payload["expected_tiers"] else "Not requested",
             },
@@ -296,9 +297,16 @@ def _report_base(value: str) -> str:
 def _gate_label(payload: dict) -> str:
     if payload["overall_status"] == "skipped" and payload["overall_passed"]:
         return "Skipped"
-    if not any(record["required"] for record in payload["tiers"]):
+    if not any(record["required"] for record in _tiers(payload)):
         return "Advisory only"
     return "Passed" if payload["overall_passed"] else "Not passed"
+
+
+def _gate_policy(payload: dict) -> str:
+    records = _tiers(payload)
+    required = ", ".join(f"Tier {record['tier']}" for record in records if record["required"]) or "none"
+    advisory = ", ".join(f"Tier {record['tier']}" for record in records if not record["required"]) or "none"
+    return f"Required tiers: {required}. Advisory tiers: {advisory}."
 
 
 def render_markdown(payload: dict, report_url: str = "") -> str:
@@ -310,7 +318,7 @@ def render_markdown(payload: dict, report_url: str = "") -> str:
         "",
         f"Required gate: **{_gate_label(payload)}**",
         "",
-        "Tier 1 and Tier 2 are required. Tier 3 is advisory unless explicitly required.",
+        _gate_policy(payload),
         "",
         "| Tier | Status | Gate | Evidence |",
         "| --- | --- | --- | --- |",
@@ -356,7 +364,7 @@ def _render_html(payload: dict) -> str:
         "<style>body{font:16px system-ui;max-width:1100px;margin:3rem auto;padding:0 1rem;color:#24292f}table{width:100%;border-collapse:collapse}th,td{text-align:left;padding:12px;border-bottom:1px solid #ddd;overflow-wrap:anywhere}a{color:#315b25}p{line-height:1.6}.table{overflow:auto}</style></head><body>",
         "<h1>SkillEvaluator CI results</h1>",
         f"<p>Required gate: <strong>{_gate_label(payload)}</strong></p>",
-        "<p>Tier 1 and Tier 2 are required. Tier 3 is advisory unless explicitly required.</p>",
+        f"<p>{_gate_policy(payload)}</p>",
         '<div class="table"><table><thead><tr><th>Tier</th><th>Status</th><th>Gate</th><th>Evidence</th></tr></thead><tbody>',
     ]
     for record in _tiers(payload):

@@ -856,7 +856,9 @@ def ci():
 @click.option("--embedding-model", default=None)
 @click.option("--agents", default=None)
 @click.option("--runner", default=None, help="GitHub runner label or GitLab runner tag.")
-@click.option("--tier3-required", is_flag=True)
+@click.option(
+    "--tier3-required", is_flag=True, help="Deprecated and ignored; Tier 2 and Tier 3 CI results are advisory."
+)
 @click.option("--n-attempts", type=click.IntRange(1, 10), default=1)
 @click.option("--n-concurrent", type=click.IntRange(1, 16), default=1)
 @click.option("--timeout-minutes", type=click.IntRange(1, 360), default=300)
@@ -915,6 +917,11 @@ def init(
     output,
 ):
     plan = None
+    if tier3_required:
+        console.print(
+            "Warning: --tier3-required is deprecated and ignored; Tier 1 is the only blocking CI tier.",
+            style="yellow",
+        )
     try:
         if tiers is not None:
             return all_tier_helpers.initialize(
@@ -940,7 +947,7 @@ def init(
                 embedding_model=embedding_model,
                 agents=agents,
                 runner=runner,
-                tier3_required=tier3_required,
+                tier3_required=False,
                 n_attempts=n_attempts,
                 n_concurrent=n_concurrent,
                 timeout_minutes=timeout_minutes,

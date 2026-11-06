@@ -19,10 +19,13 @@ configurations below remain Tier 1 only. Merge with any existing root workflow
 rules and stages, retaining rules that allow merge-request pipelines.
 
 The shared configuration runs the pinned Tier 1 image plus parallel native
-Tier 2 and Tier 3 jobs. Tier 1 and Tier 2 are required, while Tier 3 is advisory
-unless `SKILL_EVAL_TIER3_REQUIRED` is `true`. Native execution jobs can retain
-failed outcomes without stopping their parallel sibling; the aggregate is the
-required merge gate and fails for every failed or missing required tier.
+Tier 2 and Tier 3 jobs. Only Tier 1 is required; Tier 2 and Tier 3 are advisory,
+including failed or incomplete outcomes. The deprecated
+`SKILL_EVAL_TIER3_REQUIRED` variable is ignored, including when set to `'true'`;
+it cannot make Tier 3 block CI. Native execution jobs retain failed outcomes
+without stopping their parallel sibling. The aggregate is the required merge
+gate and follows Tier 1 only: failed, incomplete or missing Tier 1 evidence
+fails it, while advisory outcomes remain visible in retained reports.
 The always-running aggregate job
 retains `skill-evaluator-results/ci-results.json`, `index.html`, `summary.md`,
 and each tier's native reports for 14 days. Reports stay behind your normal
@@ -83,8 +86,8 @@ The initiating pipeline user must be allowed to create a pipeline on
 the protected default branch, pass the two pipeline variables and run the
 protected feedback environment. Configure these permissions for authorized CI
 maintainers; a job token does not bypass protected-branch or deployment permissions.
-The feedback request is advisory; the aggregate remains the required evaluation
-gate when the first setup MR has not yet installed feedback on the default branch.
+The feedback request is advisory; the aggregate continues to enforce Tier 1
+when the first setup MR has not yet installed feedback on the default branch.
 
 For a rejected publisher, open its job log. The check location refers to the
 pinned `ci/feedback.py` revision, and the category distinguishes validation,
@@ -96,7 +99,7 @@ a setup MR alone cannot establish trusted automatic feedback. On instances
 that restrict protected variables in MR pipelines, approve an eligible protected
 execution path according to your project policy; missing provider credentials
 remain actionable evidence rather than a pass. Review the pipeline's actual
-required aggregate check before enabling merge restrictions.
+aggregate check before enabling merge restrictions; it gates Tier 1 only.
 
 The CLI's `--timeout-minutes` option writes a literal native-job duration and
 the corresponding runtime budget. The default is 300 minutes. On GitLab 17.8,

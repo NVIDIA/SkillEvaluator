@@ -25,7 +25,7 @@ def manifest():
             {
                 "tier": tier,
                 "status": "passed",
-                "required": tier != 3,
+                "required": tier == 1,
                 "skills": [
                     {
                         "path": "skills/demo",
@@ -52,7 +52,7 @@ def test_advisory_failure_keeps_own_status_without_failing_required_gate():
     assert payload["producer"]["workflow"] == "trusted"
     markdown = tier_manifest.render_markdown(payload, "https://example.test/artifacts/123")
     assert "Tier 1 | passed | Required" in markdown
-    assert "Tier 2 | passed | Required" in markdown
+    assert "Tier 2 | passed | Advisory" in markdown
     assert "Tier 3 | failed | Advisory" in markdown
     assert "score: 0.8" in markdown and "skill lift: -0.1" in markdown and "coverage: 1/1" in markdown
     assert "https://example.test/artifacts/123/tier3/skill-001/skillevaluator-tier3.html" in markdown
@@ -69,12 +69,53 @@ def test_required_tier_nonpass_blocks_overall(tier, status):
 
 def test_missing_required_tier_and_empty_pass_cannot_claim_success():
     payload = manifest()
-    payload["tiers"] = [payload["tiers"][0]]
+    payload["tiers"] = payload["tiers"][1:]
     assert tier_manifest.validate_manifest(payload)["overall_passed"] is False
+    markdown = tier_manifest.render_markdown(payload)
+    assert "Required gate: **Not passed**" in markdown
+    assert "Tier 1 | not_run | Required" in markdown
     payload = manifest()
     payload["tiers"][0]["skills"] = []
     with pytest.raises(ValueError, match=r"empty|nonempty"):
         tier_manifest.validate_manifest(payload)
+
+
+@pytest.mark.parametrize("tier", [2, 3])
+@pytest.mark.parametrize("status", ["failed", "incomplete", "needs_action", "not_run", "neutral", "skipped"])
+def test_paid_advisory_outcomes_do_not_change_required_gate(tier, status):
+    payload = manifest()
+    payload["tiers"][tier - 1]["status"] = status
+    payload["tiers"][tier - 1]["skills"][0]["status"] = status
+    result = tier_manifest.validate_manifest(payload)
+    assert result["overall_passed"] is True
+    assert result["overall_status"] == "passed"
+    assert result["tiers"][tier - 1]["status"] == status
+
+
+def test_missing_paid_advisory_results_do_not_block_tier1():
+    payload = manifest()
+    payload["tiers"] = payload["tiers"][:1]
+    result = tier_manifest.validate_manifest(payload)
+    assert result["overall_passed"] is True
+    assert result["overall_status"] == "passed"
+    markdown = tier_manifest.render_markdown(result)
+    assert "Tier 2 | not_run | Advisory" in markdown
+    assert "Tier 3 | not_run | Advisory" in markdown
+
+
+@pytest.mark.parametrize("required_paid", [[], [2], [3], [2, 3]])
+def test_report_policy_text_matches_current_or_historical_declared_flags(tmp_path, required_paid):
+    payload = manifest()
+    for tier in required_paid:
+        payload["tiers"][tier - 1]["required"] = True
+    required = "Required tiers: " + ", ".join(f"Tier {tier}" for tier in [1, *required_paid]) + "."
+    advisory = "Advisory tiers: " + ", ".join(f"Tier {tier}" for tier in (2, 3) if tier not in required_paid) + "."
+    if len(required_paid) == 2:
+        advisory = "Advisory tiers: none."
+    tier_manifest.write_reports(tmp_path, payload)
+    for name in ("summary.md", "index.html"):
+        rendered = (tmp_path / name).read_text()
+        assert required in rendered and advisory in rendered
 
 
 @pytest.mark.parametrize(

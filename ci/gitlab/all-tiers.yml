@@ -13,7 +13,6 @@ variables:
   SKILL_EVAL_EMBEDDING_PROVIDER: ''
   SKILL_EVAL_EMBEDDING_MODEL: ''
   SKILL_EVAL_AGENTS: ''
-  SKILL_EVAL_TIER3_REQUIRED: 'false'
   SKILL_EVAL_N_ATTEMPTS: '1'
   SKILL_EVAL_N_CONCURRENT: '1'
   SKILL_EVAL_TIMEOUT_SECONDS: '18000'
@@ -136,7 +135,8 @@ skill-evaluation:
       export SKILLEVALUATOR_RUNTIME_DIR="$(mktemp -d /tmp/skillevaluator-runtimes.XXXXXX)"
 
 skill-evaluation-native:
-  # The aggregate is the required gate; execution failures must retain evidence.
+  # Both native tiers are advisory; the aggregate gates only on Tier 1.
+  # Execution failures must retain evidence.
   allow_failure: true
   extends: .skill-evaluation-tools
   stage: test

@@ -77,9 +77,24 @@ def test_gitlab_tier1_runs_only_digest_pinned_legacy_image():
     assert "python -m pip install" not in str(job["script"])
 
 
-def test_advisory_tier3_cannot_fail_the_reusable_workflow():
-    job = load(".github/workflows/evaluate-all-tiers.yml")["jobs"]["paid-tiers"]
-    assert job["continue-on-error"] == "${{ matrix.tier == 3 && !inputs.tier3-required }}"
+def test_both_paid_tiers_are_advisory_even_for_legacy_required_callers():
+    workflow = load(".github/workflows/evaluate-all-tiers.yml")
+    legacy = workflow["on"]["workflow_call"]["inputs"]["tier3-required"]
+    assert legacy["type"] == "boolean"
+    assert legacy["default"] == "false"
+    assert "deprecated" in legacy["description"].lower()
+    for name in ("paid-tiers", "aggregate"):
+        job = workflow["jobs"][name]
+        assert job["env"]["SKILL_EVAL_TIER3_REQUIRED"] == "false"
+        assert "inputs.tier3-required" not in str(job)
+    assert workflow["jobs"]["paid-tiers"]["continue-on-error"] == "true"
+
+
+def test_new_candidate_callers_do_not_expose_a_paid_tier_requirement():
+    github = load("ci/templates/all-tiers/skill-checks-all-tiers.yml")
+    assert "tier3-required" not in github["jobs"]["skills"]["with"]
+    for path in ("ci/templates/all-tiers/gitlab-all-tiers.yml", "ci/gitlab/all-tiers.yml"):
+        assert "SKILL_EVAL_TIER3_REQUIRED" not in load(path)["variables"]
 
 
 def test_trusted_aggregate_receipt_is_captured_before_untrusted_artifact_read():

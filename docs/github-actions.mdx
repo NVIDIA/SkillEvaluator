@@ -38,13 +38,15 @@ recommended; explicit mappings from repository CI secrets are also supported.
 Reviewers are optional: repositories can add an approval rule when they want one, while
 automatic execution does not depend on that GitHub plan feature. Protect
 repository and CI workflow write access as part of maintaining this boundary.
-Fork PRs retain keyless Tier 1 evidence; required
-Tier 2 is reported incomplete until eligible execution is available.
+Fork PRs retain keyless Tier 1 evidence. Provider-backed Tier 2/3 execution needs
+an eligible same-repository run; unavailable evidence remains advisory and visible.
 
-The aggregate job always runs. Tier 1 and Tier 2 determine the required result;
-Tier 3 failures remain advisory by default. Set `tier3-required: true` to make
-Tier 3 a gate too. Keep the aggregate check required in branch protection and
-review its actual check name in a completed run. Reports are retained for 14
+The aggregate job always runs, and only Tier 1 determines its required result.
+Tier 2 and Tier 3 remain advisory when they fail or are incomplete; their native
+statuses and reports remain visible. The deprecated `tier3-required` input is
+ignored, including when set to `true`; it cannot make Tier 3 block CI. Keep the
+aggregate check required in branch protection to enforce Tier 1, and review its
+actual check name in a completed run. Reports are retained for 14
 days in `skill-evaluator-results-attempt-N`, including failed and incomplete
 results, with each tier's native JSON and HTML. Artifact download links require
 normal repository access; they do not create public report hosting.

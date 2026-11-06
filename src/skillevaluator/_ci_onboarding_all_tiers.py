@@ -322,7 +322,6 @@ def render(wizard, repo, release, platform, branch, roots, options):
         "tools-repository": release["repository"],
         "tools-ref": release["tools_ref"],
         "image": release["image"],
-        "tier3-required": options["tier3_required"],
         "n-attempts": options["n_attempts"],
         "n-concurrent": options["n_concurrent"],
         "timeout-minutes": options["timeout_minutes"],
@@ -477,7 +476,9 @@ def initialize(
     for index, item in enumerate(roots, 1):
         wizard.console.print(f"{index}. {item['root']} ({item['count']} skills)", markup=False)
     selected = wizard.select_roots(roots, paths, no_input)
-    options.update(min_score=70 if min_score is None else min_score, scan_mode=scan_mode or "auto")
+    options.update(
+        min_score=70 if min_score is None else min_score, scan_mode=scan_mode or "auto", tier3_required=False
+    )
     options["embedding_provider"] = options["embedding_provider"] or (
         "openai" if options["provider"] == "anthropic" else options["provider"]
     )
@@ -489,8 +490,7 @@ def initialize(
         if output.exists() or output.is_relative_to(repo):
             raise git.SetupError("Choose a new receipt path outside the consumer checkout.")
     wizard.console.print(
-        f"{platform.title()} | Tier 1 + Tier 2 required; Tier 3 "
-        + ("required" if options["tier3_required"] else "advisory"),
+        f"{platform.title()} | Tier 1 required; Tiers 2 and 3 advisory",
         markup=False,
     )
     wizard.console.print(
@@ -566,7 +566,7 @@ def initialize(
                 branch,
                 pending,
                 "Set up SkillEvaluator all-tier checks and feedback",
-                "Add pinned Tier 1 and Tier 2 required checks, advisory paired Tier 3 evaluation, and trusted feedback linking retained private CI artifacts.\n\nMerge this setup, configure provider credentials and the protected execution environment, then run `skillevaluator ci demo`. This setup is not an evaluation pass.",
+                "Add pinned Tier 1 required checks, Tier 2 and Tier 3 advisory evaluation, and trusted feedback linking retained private CI artifacts.\n\nMerge this setup, configure provider credentials and the protected execution environment, then run `skillevaluator ci demo`. This setup is not an evaluation pass.",
                 setup=True,
             )
             plan.update(action="created-pr", pr_url=url)
@@ -697,7 +697,7 @@ def demo(wizard, repo, platform="auto", tiers=None, no_input=False):
         branch,
         {target: content + "\n<!-- SkillEvaluator onboarding demo: exercise automatic feedback. -->\n"},
         "Try automatic SkillEvaluator all-tier feedback",
-        "Exercise the configured required Tier 1/Tier 2 and paired Tier 3 evaluation. Inspect the CI checks, updated comment and retained artifact reports. Close this demo without merging.",
+        "Exercise the configured required Tier 1, advisory Tier 2 and paired Tier 3 evaluation. Inspect the CI checks, updated comment and retained artifact reports. Close this demo without merging.",
     )
     wizard.console.print("Demo PR/MR created. Close it when finished; no merge needed.")
     wizard.print_link(url)

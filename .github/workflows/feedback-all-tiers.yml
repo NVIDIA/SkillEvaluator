@@ -23,9 +23,11 @@ permissions:
   pull-requests: write
 jobs:
   feedback:
+    # Serialize updates to one PR's comment; queue instead of cancelling pending runs.
     concurrency:
-      group: skillevaluator-feedback-${{ github.repository }}
+      group: skillevaluator-feedback-${{ github.repository }}-${{ github.event.workflow_run.head_repository.full_name }}-${{ github.event.workflow_run.head_branch }}
       cancel-in-progress: false
+      queue: max
     # Fork PR runs have no producer receipt; skip them instead of failing.
     if: ${{ github.event_name == 'workflow_run' && github.event.workflow_run.event == 'pull_request' && github.event.workflow_run.head_repository.full_name == github.repository }}
     runs-on: ubuntu-24.04

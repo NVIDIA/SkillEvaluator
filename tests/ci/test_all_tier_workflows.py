@@ -316,12 +316,35 @@ def test_github_native_and_aggregate_record_the_exact_tools_revision():
         assert jobs[name]["env"]["SKILLEVALUATOR_TOOLS_REF"] == "${{ inputs.tools-ref }}"
 
 
-def test_feedback_mutation_jobs_are_serialized_for_the_entire_repository():
+def test_feedback_mutation_jobs_are_serialized_per_pr_source_without_dropping_pending_runs():
+    import re
+
     github = load(".github/workflows/feedback-all-tiers.yml")["jobs"]["feedback"]
-    assert github["concurrency"] == {
-        "group": "skillevaluator-feedback-${{ github.repository }}",
-        "cancel-in-progress": "false",
-    }
+    concurrency = github["concurrency"]
+    # The default `queue: single` cancels an already pending run whenever another joins the group.
+    assert concurrency["cancel-in-progress"] == "false"
+    assert concurrency["queue"] == "max"
+    assert set(concurrency) == {"group", "cancel-in-progress", "queue"}
+    assert "github.event.workflow_run.head_repository.full_name == github.repository" in github["if"]
+
+    def rendered(repository, head_repository, head_branch, run_id, head_sha):
+        # Unknown expressions raise KeyError; `workflow_run.pull_requests` is empty for fork PRs.
+        event = {
+            "github.repository": repository,
+            "github.event.workflow_run.head_repository.full_name": head_repository,
+            "github.event.workflow_run.head_branch": head_branch,
+            "github.event.workflow_run.id": run_id,
+            "github.event.workflow_run.head_sha": head_sha,
+        }
+        return re.sub(r"\$\{\{ ([^}]+) \}\}", lambda match: event[match.group(1)], concurrency["group"])
+
+    first = rendered("acme/skills", "acme/skills", "feature-a", "101", "a" * 40)
+    # Later producer runs for the same PR source serialize behind the comment update in progress.
+    assert rendered("acme/skills", "acme/skills", "feature-a", "102", "b" * 40) == first
+    # Other PRs, repositories and head repositories never compete for one pending slot.
+    assert rendered("acme/skills", "acme/skills", "feature-b", "103", "c" * 40) != first
+    assert rendered("acme/other", "acme/other", "feature-a", "104", "a" * 40) != first
+    assert rendered("acme/skills", "fork/skills", "feature-a", "105", "a" * 40) != first
     assert load("ci/gitlab/feedback.yml")["skill-evaluation-feedback"]["resource_group"] == "skillevaluator-feedback"
 
 

@@ -2,6 +2,7 @@
 """Compact PR/MR comments retain truthful, skill-scoped native evidence."""
 
 import copy
+import html
 import re
 
 import pytest
@@ -248,10 +249,42 @@ def test_cell_content_cannot_create_markup_mentions_or_extra_rows():
     row = data_rows(body)[0]
 
     assert len(data_rows(body)) == 1 and row.count("|") == 6
-    assert "@everyone" not in body and "@team" not in body
+    assert re.search(r"(@|&#64;)\w", body) is None
     assert "<script>" not in body and "<b>" not in body
     assert "[link](https://bad.test)" not in body and "**bold**" not in body
     assert "x" * 150 not in body and "…" in body
+
+
+@pytest.mark.parametrize("handle", ["@user", "@all", "@org/team", "&#64;user", "&commat;user", "\\@user"])
+def test_untrusted_text_never_renders_user_or_team_mentions(handle):
+    from ci.summary_metrics import _plain_text
+
+    payload = manifest()
+    path = f"skills/{handle}"
+    tier1, tier2, tier3 = payload["tiers"]
+    tier1.update(status="failed")
+    tier1["skills"][0].update(path=path, status="failed")
+    tier1["skills"][0]["metrics"].update(issue_count=1, high_count=1, top_issue=f"{handle} raw top issue")
+    other = copy.deepcopy(tier1["skills"][0])
+    other.update(path="skills/other")
+    other["metrics"].update(top_issue=_plain_text(f"{handle} summarized issue"))
+    tier1["skills"].append(other)
+    # A tier without per-skill evidence explains itself with its own error text.
+    tier2.update(status="incomplete", skills=[], error=f"Tier error from {handle}")
+    tier3.update(status="failed")
+    tier3["skills"][0].update(path=path, status="failed", error=f"{handle} skill error")
+    tier3["skills"][0]["metrics"].update(issue_count_known=False)
+
+    body = render(payload)
+
+    # CommonMark decodes "&#64;" to "@" before GitHub and GitLab resolve mentions.
+    assert re.search(r"(@|&#64;)\w", body) is None
+    assert set(re.findall(r"&[^\s&;]*;", body)) <= {"&amp;", "&lt;", "&gt;", "&#124;"}
+    rendered_text = html.unescape(re.sub(r"\\(.)", r"\1", body))
+    assert re.search(r"@\w", rendered_text) is None
+    assert "skills/" + handle.replace("@", "@\u200b") in rendered_text
+    for text in ("skills/other", "raw top issue", "summarized issue", "Tier error from", "skill error"):
+        assert text in rendered_text
 
 
 def test_large_skill_set_is_bounded_and_reports_the_omitted_count():

@@ -18,14 +18,16 @@ _COMMENT_BYTES = 52_000
 
 
 def _text(value: str, limit: int = _CELL_CHARACTERS) -> str:
-    """Keep each cell on one bounded line, without executable Markdown."""
+    """Keep each cell on one bounded line, without executable Markdown or mentions."""
     value = " ".join("".join(" " if unicodedata.category(c).startswith("C") else c for c in value).split())
     if len(value) > limit:
         value = value[: limit - 1].rstrip() + "…"
+    # Markdown decodes "&#64;" back to "@" before mention filters run; a zero-width
+    # space after "@" keeps the text readable without notifying users or teams.
     return "".join(
         html.escape(c, quote=False)
         if c in "&<>"
-        else "&#64;"
+        else "@\u200b"
         if c == "@"
         else "&#124;"
         if c == "|"

@@ -570,12 +570,51 @@ agent with observed activation can still contribute a comparison.
 ### Measured agent resources
 
 Each agent's canonical JSON payload contains a `resources` object. The HTML
-table shows total prompt plus completion tokens and agent execution seconds for
-each arm, telemetry coverage, and the with-skill-minus-baseline difference.
+table shows total prompt plus completion tokens, agent execution seconds, LLM
+seconds, tool seconds, and LLM milliseconds per token for each arm, telemetry
+coverage, and the with-skill-minus-baseline difference. A negative difference
+means less use with the skill; the HTML percentage divides it by the baseline.
 Routing/tool-productivity efficiency remains a separate score. Missing counters
 and incomplete arms produce null totals or deltas (`N/A` in HTML). Resource
 deltas require matching case counts and complete measurements in both arms;
 they do not measure evaluator tokens, setup time, price, or statistical savings.
+
+| Measurement | Meaning |
+| --- | --- |
+| Agent execution seconds (`agent_seconds`) | Harbor's measured agent phase from the trial's `result.json`. Environment setup, agent installation, and verifier time are excluded. |
+| LLM seconds (`llm_seconds`) | Model time from the trial's ATIF trajectory. With native ATIF timing (source `atif`), the sum of `llm_duration_ms` when every agent step records it. Otherwise it is inferred from step timestamps (source `step_timestamps`): each gap between steps counts once, and the part not spent in a tool is LLM time, which then also includes harness and queue time. |
+| Tool seconds (`tool_seconds`) | Tool execution time. Native timing takes the union of tool-call intervals, so overlapping calls count once. Inferred timing reads the `Wall time` that Codex writes in the header of its shell and `apply_patch` tool output, never from the command output, or the `duration_seconds` Harbor keeps for those calls; parallel calls on one step count their longest wall time. A trajectory without tool calls measures 0 seconds. |
+| LLM ms per token (`llm_ms_per_token`) | `1000 × LLM seconds / (prompt + completion tokens)` over the arm's totals. It needs complete LLM-time and token totals and a positive token count. |
+
+Each trial's `timing` object records `llm_seconds`, `tool_seconds`, and
+`source`, and `resources.timing_sources` lists the sources each arm used. If
+the measurements mix native and inferred timing, `resources.caveats` contains
+`mixed_timing_sources` and the HTML report says the LLM and tool seconds are
+not like-for-like.
+
+Inference covers trajectories whose tool calls are all Codex shell tools
+(`exec_command`, `write_stdin`, `wait`, `wait_command`, `shell`, and
+`shell_command`) or `apply_patch`, each with a recorded wall time. A trial that
+also calls a tool with no recorded duration, such as web search,
+`update_plan`, or an MCP tool, or whose step timestamps are missing, lack a UTC
+offset, or run backwards, has no LLM or tool time. Inferred timing also needs
+the agent's next step right after each tool step: a user or system step there
+can follow idle or user time, so the trial has no timing. Agents without native
+timing or Codex `Wall time` headers are timed only when their trajectory has no
+tool calls.
+
+Each step of a multi-step task is timed on its own, so the time between Harbor
+steps is not counted. Steps marked `is_copied_context` repeat context from an
+earlier trajectory and are not timed; a copied step after new steps leaves the
+trial without timing. Copied timestamps do not show when the first new response
+started, so inferred timing also leaves the trial without timing when the new
+steps after copied context start with an agent step.
+
+Trials whose `trajectory.json` was omitted (too large, or redaction or
+validation failed) and multi-step trials scored per step have no timing.
+Missing timing stays `N/A` (`null` in JSON), never zero, and follows the same
+complete-arm and matching-case rules as tokens. Timing is diagnostic and does
+not change scores, verdicts, or gates.
 
 ### Failure reasons and per-trial rows
 

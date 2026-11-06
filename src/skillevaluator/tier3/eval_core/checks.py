@@ -1636,6 +1636,8 @@ def _network_executable(token: str, assignments: dict[str, str], names: dict[str
 
 
 _SHELL_QUOTE_CHARS = str.maketrans("", "", "\"'\\")
+# A brace group the shell may expand: a list such as {@,} or a range such as {?..A}.
+_SHELL_BRACE_EXPANSION_RE = re.compile(r"\{[^{}]*(?:,|\.\.)[^{}]*\}")
 
 
 def _spelled_with_capitals(token: str) -> bool:
@@ -1660,11 +1662,22 @@ def _may_be_header_file_item(token: str) -> bool:
 
     The shell removes quotes and backslashes, so ``X-Data:"@.env"``,
     ``"X-Data:"@.env`` and ``X-Data:\\@.env`` all pass ``X-Data:@.env``. A
-    ``$VAR`` or backtick word may expand to such an item.
+    ``$VAR`` or backtick word may expand to such an item, and so may a brace
+    expansion: ``X-Data:{@,}.env`` passes ``X-Data:@.env X-Data:.env``. A brace
+    list only repeats the word's own characters, so it needs a ``:`` and an
+    ``@`` in the word, while a range such as ``{?..A}`` adds the characters
+    between its ends, so any range counts. A brace group without a comma or
+    range, such as ``/items/{id}``, is not expanded.
     """
     if "$" in token or "`" in token:
         return True
-    return ":@" in token.translate(_SHELL_QUOTE_CHARS)
+    name = token.translate(_SHELL_QUOTE_CHARS)
+    if ":@" in name:
+        return True
+    groups = _SHELL_BRACE_EXPANSION_RE.findall(name)
+    if not groups:
+        return False
+    return any(".." in group for group in groups) or (":" in name and "@" in name)
 
 
 def _network_client_uploads(executable: str, args: list[str], stdin_piped: bool) -> bool:

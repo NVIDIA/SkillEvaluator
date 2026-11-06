@@ -908,18 +908,19 @@ Linux finds a command by its exact name, so a later bare word spelled `HTTP`,
 not read as an upload, while a body item, piped or redirected input, or `--raw`
 after it still warns. Its method word still warns when a `name:@file` item
 follows, because that item may send a file as a header. The shell removes
-quotes and backslashes first, so a quoted or escaped item such as
-`X-Data:"@.env"` or `X-Data:\@.env` counts, and so does a `$VAR` word, which
-may hold one. A word with a slash or backslash, such as `./HTTP`,
-`/usr/local/bin/HTTP`, or the prose `HTTP/HTTPS`, and a word that ends in
-`.exe` in any case, such as `HTTP.exe` or `http.EXE`, are read as a path or a
-Windows program name, which a host may find in any case, so their method word
-still warns. A command word keeps the case-insensitive match, so
-`HTTP POST URL` still warns, and so does a here-document line or Markdown table
-cell that starts with `HTTP POST`, because each line is read as a command. A
-word that a pass-through wrapper runs, a printer pipes on, or a `$VAR` command
-word may start keeps it too, so `strace -f HTTP POST URL`,
-`echo HTTP POST URL | sh`, and `$RUN HTTP POST URL` still warn.
+quotes and backslashes and expands braces first, so a quoted, escaped, or brace
+item such as `X-Data:"@.env"`, `X-Data:\@.env`, or `X-Data:{@,}.env` counts,
+and so does a `$VAR` word, which may hold one. A word with a slash or
+backslash, such as `./HTTP`, `/usr/local/bin/HTTP`, or the prose `HTTP/HTTPS`,
+and a word that ends in `.exe` in any case, such as `HTTP.exe` or `http.EXE`,
+are read as a path or a Windows program name, which a host may find in any
+case, so their method word still warns. A command word keeps the
+case-insensitive match, so `HTTP POST URL` still warns, and so does a
+here-document line or Markdown table cell that starts with `HTTP POST`, because
+each line is read as a command. A word that a pass-through wrapper runs, a
+printer pipes on, or a `$VAR` command word may start keeps it too, so
+`strace -f HTTP POST URL`, `echo HTTP POST URL | sh`, and `$RUN HTTP POST URL`
+still warn.
 
 A fixed set of runners that start a command in another host, container, root,
 user, or network namespace, such as `ssh`, `docker`, `docker-compose`,

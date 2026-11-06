@@ -33,7 +33,7 @@ def lift_style(value: float) -> str:
 def _artifact_uri(target: str, *, windows: bool) -> str | None:
     """Build a terminal-only URI without changing canonical URL normalization."""
     from pathlib import Path, PurePosixPath, PureWindowsPath
-    from urllib.parse import unquote, urlsplit
+    from urllib.parse import quote, unquote, urlsplit
 
     from skillevaluator.utils.rich_markup import strip_terminal_controls
 
@@ -47,7 +47,9 @@ def _artifact_uri(target: str, *, windows: bool) -> str | None:
         # A foreign Windows path must not become a relative POSIX file URI;
         # drive-relative paths and UNC shares are deliberately left as text.
         if windows and len(windows_path.drive) == 2 and windows_path.is_absolute():
-            return windows_path.as_uri()
+            # PurePath.as_uri() is deprecated from Python 3.14; build the same URI.
+            drive = windows_path.drive
+            return "file:///" + drive + quote(windows_path.as_posix()[len(drive) :])
         return None
     try:
         parts = urlsplit(target)

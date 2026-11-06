@@ -556,10 +556,21 @@ class ValidateView:
 
     # ── lifecycle ────────────────────────────────────────────────
 
+    def _live_capable(self) -> bool:
+        """Live redraws need a real, capable TTY, as Harbor progress requires.
+
+        FORCE_COLOR/TTY_COMPATIBLE make Rich treat a CI pipe as a terminal; that
+        stream still needs durable stderr progress, not cursor-control frames.
+        """
+        console = self.console
+        return bool(
+            console.is_terminal and not console.is_dumb_terminal and getattr(console.file, "isatty", lambda: False)()
+        )
+
     def start(self) -> None:
         if not self.enabled:
             return
-        if self.console.is_terminal:
+        if self._live_capable():
             self._live = Live(
                 self,
                 console=self.console,
@@ -595,6 +606,9 @@ class ValidateView:
             detail = "".join(chunk for chunk, _ in row.segments).strip()
             if row.label == "checks":
                 detail = next((chunk.removeprefix("▸ ") for chunk, _ in row.segments if chunk.startswith("▸ ")), detail)
+            elif row.label == "progress" and row.segments:
+                # The bar cells only make sense in Live; durable logs keep the count.
+                detail = row.segments[-1][0].strip()
             stage = f"Tier {self.blocks[index].number}/{row.label}"
             self._progress_stage.setdefault(index, set()).add(stage)
             self._progress_event(index, "running", detail, stage=stage)
@@ -839,7 +853,7 @@ class ValidateView:
 
     def _flush_static(self) -> None:
         """Non-tty mode: print blocks once, as they complete."""
-        if self._live is not None or self.console.is_terminal:
+        if self._live is not None or self._live_capable():
             return
         for block in self.blocks[self._static_printed :]:
             if block.status in (PENDING, RUNNING):

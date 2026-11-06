@@ -498,3 +498,68 @@ def test_success_summary_keeps_valid_numeric_zero_quality_and_lift():
     CLIReporter(console=Console(file=output, width=120, color_system=None)).print_summary([result])
     assert "quality F 0.0/100" in output.getvalue()
     assert "lift +0.00" in output.getvalue()
+
+
+@pytest.mark.parametrize("env", ["FORCE_COLOR", "TTY_COMPATIBLE"])
+def test_forced_terminal_pipe_keeps_durable_progress_instead_of_live(monkeypatch, env):
+    # CI often forces colour, so Rich treats the pipe as a terminal; it is not a TTY.
+    monkeypatch.setenv(env, "1")
+    progress = io.StringIO()
+    output = io.StringIO()
+    monkeypatch.setattr("sys.stderr", progress)
+    view = ValidateView("demo", [(1, "Static", "static")], console=Console(file=output, width=80))
+    assert view.console.is_terminal
+    try:
+        view.start()
+        assert view._live is None
+        view.tier_start(0)
+        view.tier_progress(0, [detail_row("checks", "schema running")])
+        view.tier_done(0)
+    finally:
+        view.stop()
+    assert "Tier 1" in progress.getvalue() and "schema running" in progress.getvalue()
+    assert "\x1b[?25l" not in output.getvalue()
+
+
+def test_durable_tier3_progress_logs_the_count_without_bar_cells(monkeypatch):
+    from skillevaluator.reporting.console_ui import tier3_case_rows
+
+    progress = io.StringIO()
+    monkeypatch.setattr("sys.stderr", progress)
+    view = ValidateView("demo", [(3, "Live Agent Eval", "live")], console=Console(file=io.StringIO()))
+    marks = {"codex": {"with_skill": {"001": ["pass"]}, "without_skill": {"001": []}}}
+    try:
+        view.start()
+        view.tier_start(0)
+        view.tier_progress(0, tier3_case_rows(marks, agents=["codex"], k=4, progress=(3, 8), show_agent=False))
+    finally:
+        view.stop()
+    assert "Tier 3/progress: running - 3/8 attempts" in progress.getvalue()
+    assert "█" not in progress.getvalue() and "░" not in progress.getvalue()
+
+
+def test_windows_artifact_uri_avoids_deprecated_pure_path_as_uri():
+    import warnings
+
+    from skillevaluator.reporting.terminal_styles import _artifact_uri
+
+    with warnings.catch_warnings():
+        warnings.simplefilter("error", DeprecationWarning)
+        assert _artifact_uri(r"D:\a\b #%?;é.html", windows=True) == "file:///D:/a/b%20%23%25%3F%3B%C3%A9.html"
+
+
+def test_compact_dimension_table_keeps_agent_headers_free_of_condition_labels():
+    from skillevaluator.tier3 import result_display
+
+    dimension = next(iter(result_display.DIMENSION_DISPLAY))
+    agent = {
+        "execution_status": "succeeded",
+        "dimensions_with_skill": {dimension: {"score": 0.9}},
+        "dimensions_without_skill": {dimension: {"score": 0.7}},
+    }
+    output = io.StringIO()
+    result_display._render_dimensions(
+        console=Console(file=output, width=80, color_system=None), agents={"codex": agent, "claude": agent}, safe=str
+    )
+    header = next(line for line in output.getvalue().splitlines() if "Agent: codex" in line)
+    assert "With Skill" not in header

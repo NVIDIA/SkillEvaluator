@@ -417,6 +417,10 @@ def _responsive_conditions(table: Table, console: Console) -> Table:
     for index, row in enumerate(table.rows):
         cells = [column[index] for column in columns]
         conditions = Text()
+        if not any(str(cell).strip() for cell in cells[1:]):
+            # Agent header rows carry no scores; keep them as a single heading line.
+            compact.add_row(cells[0], conditions, end_section=row.end_section)
+            continue
         for offset, label in ((1, "With Skill"), (3, "No Skill")):
             if offset >= len(cells):
                 continue

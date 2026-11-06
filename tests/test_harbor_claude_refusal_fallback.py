@@ -240,9 +240,10 @@ def _refusal_doc_texts() -> dict[str, str]:
     """Return each place that documents the switch, whitespace-normalized."""
     root = Path(__file__).resolve().parents[1]
     changelog = (root / "CHANGELOG.md").read_text(encoding="utf-8")
-    unreleased = changelog.split("\n## Unreleased\n", 1)[1].split("\n## ", 1)[0]
-    entries = [block for block in unreleased.split("\n\n") if " ".join(block.split()).startswith(_CHANGELOG_ENTRY_LEAD)]
-    assert entries, "the Unreleased CHANGELOG entry for the refusal fallback switch is missing"
+    [release] = [section for section in changelog.split("\n## ")[1:] if _SWITCH in section]
+    assert release.startswith("0.8.0 - "), release.splitlines()[0]
+    entries = [block for block in release.split("\n\n") if " ".join(block.split()).startswith(_CHANGELOG_ENTRY_LEAD)]
+    assert entries, "the 0.8.0 CHANGELOG entry for the refusal fallback switch is missing"
     entry = entries[0]
     blocks = (root / "docs" / "agents-and-sandboxes.mdx").read_text(encoding="utf-8").split("\n\n")
     [index] = [index for index, block in enumerate(blocks) if f"{_SWITCH}=1" in block]

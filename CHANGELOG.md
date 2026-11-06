@@ -490,9 +490,11 @@ All notable changes to SkillEvaluator are documented in this file.
   redirected input, `--raw`, and a method word before a `name:@file` header
   item, even a quoted or escaped one, or before a `$VAR` word still warn, as do
   a lowercase `http PUT URL`, a path or `.exe` word such as `./HTTP POST URL`
-  or `HTTP.exe POST URL`, an `HTTP POST URL` command word, and any upload in
-  the same action. Both the host checker and the bundled Harbor verifier apply
-  the rule.
+  or `HTTP.exe POST URL`, an `HTTP POST URL` command word, a word that a
+  pass-through wrapper runs, a printer pipes on, or a `$VAR` command word may
+  start, such as `strace -f HTTP POST URL` or `echo HTTP POST URL | sh`, and
+  any upload in the same action. Both the host checker and the bundled Harbor
+  verifier apply the rule.
 
 - PR scan comments show the verdict, quality scores, first actionable fixes and
   report links; full provenance and detailed findings stay in the report.

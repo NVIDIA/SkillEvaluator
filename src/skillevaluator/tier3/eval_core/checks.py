@@ -2248,8 +2248,14 @@ def _network_tokens_exfiltrate(tokens: list[str], _depth: int) -> bool:
 
         # A printer whose output is piped on, as in "echo curl -d @.env URL |
         # sh", may be feeding its words to a shell, so they are checked below.
-        if executable in _INERT_PRINT_COMMANDS and not dynamic and not (idx < len(tokens) and tokens[idx] == "|"):
+        printer_piped = executable in _INERT_PRINT_COMMANDS and idx < len(tokens) and tokens[idx] == "|"
+        if executable in _INERT_PRINT_COMMANDS and not dynamic and not printer_piped:
             continue
+        # A pass-through wrapper runs its next word as the command, as in
+        # "strace -f HTTP POST URL", a piped printer may feed its words to a
+        # shell, as in "echo HTTP POST URL | sh", and a "$VAR" command word may
+        # hold either, so a later HTTP word there may be a command word.
+        may_start_later_word = dynamic or printer_piped or executable in _PASS_THROUGH_WRAPPERS
 
         # Other commands may run a later word as a command, as find -exec and
         # poetry run do, or only name a client as data, as in apt-get install
@@ -2318,10 +2324,14 @@ def _network_tokens_exfiltrate(tokens: list[str], _depth: int) -> bool:
             # read as an upload unless a later argument may be a name:@file
             # item, which may send a file as a header; its body items, stdin
             # and --raw still are. A path or .exe word is not prose, so it keeps
-            # the method rule. A capitalized bare word covers a later one,
-            # which sees a suffix of the same arguments, but not a later
+            # the method rule, and so does a word that a wrapper, piped printer
+            # or "$VAR" command word may start, which keeps the case-insensitive
+            # match of a command word. A capitalized bare word covers a later
+            # one, which sees a suffix of the same arguments, but not a later
             # lowercase http word.
-            capitalized = client in ("http", "https") and _spelled_with_capitals(command[sub_idx])
+            capitalized = (
+                not may_start_later_word and client in ("http", "https") and _spelled_with_capitals(command[sub_idx])
+            )
             seen_key = f"{client}:capitalized" if capitalized else client
             if client in seen_clients or seen_key in seen_clients:
                 continue

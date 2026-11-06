@@ -916,7 +916,10 @@ may hold one. A word with a slash or backslash, such as `./HTTP`,
 Windows program name, which a host may find in any case, so their method word
 still warns. A command word keeps the case-insensitive match, so
 `HTTP POST URL` still warns, and so does a here-document line or Markdown table
-cell that starts with `HTTP POST`, because each line is read as a command.
+cell that starts with `HTTP POST`, because each line is read as a command. A
+word that a pass-through wrapper runs, a printer pipes on, or a `$VAR` command
+word may start keeps it too, so `strace -f HTTP POST URL`,
+`echo HTTP POST URL | sh`, and `$RUN HTTP POST URL` still warn.
 
 A fixed set of runners that start a command in another host, container, root,
 user, or network namespace, such as `ssh`, `docker`, `docker-compose`,

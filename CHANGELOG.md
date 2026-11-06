@@ -39,6 +39,11 @@ All notable changes to SkillEvaluator are documented in this file.
   GitLab before 18.4 uses a separate read-only admission credential; feedback
   initiation is advisory so first-install reporting does not change the tier gate.
 
+- Private runtime runs retain sanitized loading, coverage, MCP, behavior and
+  comparison views before cleanup. The saved snapshot supports offline reports
+  in all six existing formats, with explicit missing evidence and omissions.
+  Public command activation remains deferred.
+
 - `skillevaluator tier3 feedback RUN_DIR [--skill PATH]` opens a terminal chat
   about one completed Tier 3 run. Answers are grounded in that run's scores,
   with-skill and baseline comparisons, every case's attempts with per-metric
@@ -49,6 +54,17 @@ All notable changes to SkillEvaluator are documented in this file.
   nothing to disk. No request is sent before the first question. `LLMClient`
   gains `chat(messages)` for multi-turn requests with the same retries and typed
   errors as `completions()`.
+
+- Opt-in `LLM_JUDGE_FALLBACK_POLICY` and `LLM_JUDGE_RETRY_POLICY` for the Tier 3
+  standard judges. `LLM_JUDGE_FALLBACK_POLICY=replace` lets only the judge
+  model and the `LLM_JUDGE_FALLBACK_MODELS` entries answer, without the
+  built-in `claude-opus-4-8` refusal fallback. `LLM_JUDGE_RETRY_POLICY=strict`
+  tries at most three models with two requests each within the judge's time
+  budget, moves on only when a model is unavailable, ends the judge on a
+  refusal or a quota, budget, safety, or security error, and scores only a
+  first reply that is exactly one JSON object. Any other value stops a run
+  with standard grading before trials start. The defaults, `append` and
+  `legacy`, keep the current behavior.
 
 - Allow hosted CI reports and PR comments from scans called through explicitly
   approved reusable workflow wrappers. Direct callers retain the existing setup;
@@ -479,6 +495,20 @@ All notable changes to SkillEvaluator are documented in this file.
   or both. Caps inside individual sections (write bodies, history summaries)
   are unchanged. The evidence-budget documentation now names both causes of
   a `behavior_check` truncation and which setting raises each.
+
+- Tier 3 security grading no longer reports a network-exfiltration warning,
+  which lowered the Security score to 0.5, for HTTP method prose such as
+  `Use HTTP POST to create an item.` or `Document HTTP PUT semantics.` in a
+  here-document or `apply_patch` body. Linux finds a command by its exact name,
+  so a later bare `HTTP`, `HTTPS`, or `Http` word does not start HTTPie, and
+  its method word is no longer read as an upload. Its body items, piped or
+  redirected input, `--raw`, and a method word before a `name:@file` header
+  item, even a quoted or escaped one, or before a `$VAR` word still warn, as do
+  a lowercase `http PUT URL`, a path or `.exe` word such as `./HTTP POST URL`
+  or `HTTP.exe POST URL`, an `HTTP POST URL` command word, and any upload in
+  the same action. Both the host checker and the bundled Harbor verifier apply
+  the rule.
+
 - PR scan comments show the verdict, quality scores, first actionable fixes and
   report links; full provenance and detailed findings stay in the report.
 - Hosted reports use the retained site commit as the Pages deployment identity,

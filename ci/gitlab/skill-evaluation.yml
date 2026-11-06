@@ -1,6 +1,7 @@
 # SPDX-License-Identifier: Apache-2.0
 # Reusable GitLab job. Include a reviewed commit and provide SKILL_EVAL_IMAGE.
 # Configure merge-request rules in the root .gitlab-ci.yml; GitLab requires it.
+# The image selects the bundled default policy for both public and private repos.
 variables:
   SKILL_EVAL_PATHS: "skills"
   SKILL_EVAL_SCAN_MODE: "auto"

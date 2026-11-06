@@ -41,6 +41,13 @@ def _isolate_operator_vertex_routing(monkeypatch: pytest.MonkeyPatch) -> None:
     monkeypatch.delenv("SKILLEVALUATOR_ALLOWED_MCP_SECRETS", raising=False)
 
 
+@pytest.fixture(autouse=True)
+def _isolate_operator_judge_policies(monkeypatch: pytest.MonkeyPatch) -> None:
+    """Keep tests on the default judge policies even when the host shell opts in to others."""
+    monkeypatch.delenv("LLM_JUDGE_FALLBACK_POLICY", raising=False)
+    monkeypatch.delenv("LLM_JUDGE_RETRY_POLICY", raising=False)
+
+
 # =============================================================================
 # SKILLS FIXTURES
 # =============================================================================

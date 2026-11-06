@@ -33,7 +33,11 @@ from skillevaluator.constants import (
 from skillevaluator.deduplication.utils.skill_collector import _SecureReadError, _SecureRoot
 from skillevaluator.embedding.limits import validate_max_entries
 from skillevaluator.logging_config import get_logger
-from skillevaluator.utils.tier2_paths import is_contained_compatibility_alias, safe_path_label
+from skillevaluator.utils.tier2_paths import (
+    contained_directory_alias_target,
+    is_contained_compatibility_alias,
+    safe_path_label,
+)
 from skillevaluator.validators.frontmatter_parser import FRONTMATTER_PATTERN
 
 logger = get_logger(__name__)
@@ -323,14 +327,31 @@ def _read_bounded_manifest(
         raise ValueError(f"Manifest is not valid UTF-8: {file_path.name}") from exc
 
 
+def _is_discovery_manifest_name(name: str) -> bool:
+    """Return whether *name* could be selected as a skill, rule, or workflow manifest."""
+    folded = name.casefold()
+    return any(folded == variant.casefold() for variant in SKILL_MANIFEST_VARIANTS) or folded.endswith(
+        RULES_FILE_EXTENSION
+    )
+
+
 def _iter_discovery_files(root: Path):
-    """Yield bounded files from one pruned inter-skill traversal."""
+    """Yield bounded files from one pruned inter-skill traversal.
+
+    A contained directory alias such as ``.agents -> .claude`` is never
+    followed. It is skipped only when its name cannot be a manifest and the
+    same walk enumerates its target as a regular directory, so the canonical
+    directory is scanned once. Every other directory redirect is rejected.
+    """
     if _is_symlink_or_reparse(root):
         raise ValueError(f"Discovery root is a symlink or reparse point: {root.name}")
     if not root.is_dir():
         return
 
     discovered_paths = 0
+    discovered_files: list[Path] = []
+    regular_directories: set[str] = set()
+    directory_aliases: list[tuple[str, str]] = []
 
     def _raise_walk_error(error: OSError) -> None:
         raise ValueError(f"Cannot safely traverse the Tier 2 collection: {error}") from error
@@ -343,11 +364,25 @@ def _iter_discovery_files(root: Path):
             discovered_paths += 1
             if discovered_paths > MAX_DISCOVERED_PATHS:
                 raise ValueError(f"Collection path limit exceeded ({MAX_DISCOVERED_PATHS}) before embedding")
-            if dirname in DISCOVERY_EXCLUDED_DIRS:
-                continue
             directory = Path(dirpath) / dirname
+            relative = directory.relative_to(root)
+            if dirname in DISCOVERY_EXCLUDED_DIRS:
+                # A pruned regular directory is still a valid alias target;
+                # its contents stay excluded either way.
+                if not _is_symlink_or_reparse(directory):
+                    regular_directories.add(relative.as_posix())
+                continue
             if _is_symlink_or_reparse(directory):
-                raise ValueError(f"Discovery path contains a symlink or reparse point: {dirname}")
+                target = (
+                    None
+                    if _is_discovery_manifest_name(dirname)
+                    else contained_directory_alias_target(directory, relative)
+                )
+                if target is None:
+                    raise ValueError(f"Discovery path contains a symlink or reparse point: {dirname}")
+                directory_aliases.append((relative.as_posix(), target))
+                continue
+            regular_directories.add(relative.as_posix())
             kept_dirs.append(dirname)
         dirnames[:] = kept_dirs
 
@@ -365,7 +400,16 @@ def _iter_discovery_files(root: Path):
                     )
                     continue
                 raise ValueError(f"Discovery path contains a symlink or reparse point: {filename}")
-            yield file_path
+            discovered_files.append(file_path)
+
+    for alias, target in directory_aliases:
+        if target not in regular_directories:
+            raise ValueError(
+                "Discovery path contains a symlink or reparse point whose target is not a regular "
+                f"directory in the scan root: {alias} -> {target}"
+            )
+        logger.debug("Skipping directory alias in favor of regular target: %s -> %s", alias, target)
+    yield from discovered_files
 
 
 def _discover_skills(root: Path, budget: _ExtractionBudget) -> list[ContentEntry]:

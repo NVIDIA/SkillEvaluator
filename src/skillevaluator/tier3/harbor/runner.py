@@ -2927,6 +2927,32 @@ def _gateway_anthropic_agent_credentials(
     }
 
 
+# Opt-in standard judge policies, read again by the verifier template:
+# host variable -> (run_config.json judge key, accepted values, default first).
+_JUDGE_POLICY_ENV_VARS = {
+    "LLM_JUDGE_FALLBACK_POLICY": ("fallback_policy", ("append", "replace")),
+    "LLM_JUDGE_RETRY_POLICY": ("retry_policy", ("legacy", "strict")),
+}
+
+
+def _judge_policies(environ: Mapping[str, str]) -> tuple[dict[str, str], list[str]]:
+    """Return the set judge policies keyed for ``run_config.json``, and an error for each unknown value.
+
+    Values are case-insensitive and an empty value means unset, as in the verifier.
+    """
+    policies: dict[str, str] = {}
+    errors: list[str] = []
+    for name, (key, choices) in _JUDGE_POLICY_ENV_VARS.items():
+        value = environ.get(name, "").strip().lower()
+        if not value:
+            continue
+        if value in choices:
+            policies[key] = value
+        else:
+            errors.append(f"{name} must be {' or '.join(choices)}")
+    return policies, errors
+
+
 def _judge_model_config(
     provider: ProviderConfig,
     provider_env: Mapping[str, str],
@@ -2954,6 +2980,8 @@ def _judge_model_config(
     }
     if character_facts := provider_env.get("SKILL_EVAL_JUDGE_CHARACTER_FACTS"):
         configuration["character_facts"] = character_facts
+    # Only a known value is recorded; the run stops before trials on any other.
+    configuration.update(_judge_policies(provider_env)[0])
     return configuration
 
 
@@ -4583,13 +4611,23 @@ def _run_stop_on_pass_variant(
     agent_import_path: str | None = None,
     verifier_env: Mapping[str, str] | None = None,
     environment_kwargs: Mapping[str, Any] | None = None,
+    n_concurrent: int = 1,
     cancellation: _HarborRunCancellation | None = None,
 ) -> list[str]:
-    """Run each case one attempt at a time, stopping its attempts on first pass."""
-    errors: list[tuple[Path, str]] = []
-    attempt_job_dirs: list[Path] = []
-    for task_name in task_names:
+    """Run up to ``n_concurrent`` cases at once, stopping each case's attempts on first pass.
+
+    A case launches its next attempt only after the previous one scored, so
+    attempts of one case stay sequential. Attempt jobs are merged in dataset
+    order rather than completion order, keeping the aggregate deterministic.
+    """
+    stop_launching = threading.Event()
+
+    def _run_case(task_name: str) -> tuple[list[str], list[Path]]:
+        case_errors: list[tuple[Path, str]] = []
+        case_job_dirs: list[Path] = []
         for attempt in range(1, n_attempts + 1):
+            if stop_launching.is_set():
+                break
             job_name = f"{skill_name}-{agent}-{variant}-{task_name}-attempt{attempt:03d}"
             ok, detail = _run_harbor(
                 dataset=dataset,
@@ -4613,23 +4651,54 @@ def _run_stop_on_pass_variant(
                 cancellation=cancellation,
             )
             job_dir = jobs_dir / job_name
-            attempt_job_dirs.append(job_dir)
+            case_job_dirs.append(job_dir)
             if not ok:
-                errors.append(
+                case_errors.append(
                     (job_dir, f"{agent} {variant}-skill Harbor run failed: {task_name} attempt {attempt}: {detail}")
                 )
                 continue
-            errors = [
+            # A recovered timeout matches only an earlier attempt of the same
+            # task, so filtering this case's own errors is enough.
+            case_errors = [
                 (failed_dir, detail)
-                for failed_dir, detail in errors
+                for failed_dir, detail in case_errors
                 if not detail.endswith(": Harbor job did not complete successfully: 1 errored")
                 or not failed_dir.is_dir()
                 or not harbor_timeout_job_recovered(failed_dir, job_dir)
             ]
             if _job_passed(job_dir, pass_threshold):
                 break
+        return [detail for _, detail in case_errors], case_job_dirs
+
+    def _run_case_or_stop(task_name: str) -> tuple[list[str], list[Path]]:
+        try:
+            return _run_case(task_name)
+        except BaseException:
+            # As in a serial loop, an unexpected failure stops later launches.
+            stop_launching.set()
+            raise
+
+    errors: list[str] = []
+    attempt_job_dirs: list[Path] = []
+    if task_names:
+        with ThreadPoolExecutor(max_workers=min(n_concurrent, len(task_names))) as executor:
+            futures = [executor.submit(_run_case_or_stop, task_name) for task_name in task_names]
+            try:
+                # Surface an unexpected case failure without waiting on earlier cases.
+                for future in as_completed(futures):
+                    future.result()
+            except BaseException:
+                # Queued cases never start; running cases finish only their current attempt.
+                stop_launching.set()
+                for future in futures:
+                    future.cancel()
+                raise
+        for future in futures:
+            case_errors, case_job_dirs = future.result()
+            errors.extend(case_errors)
+            attempt_job_dirs.extend(case_job_dirs)
     _merge_attempt_jobs(attempt_job_dirs, jobs_dir / f"{skill_name}-{agent}-{variant}")
-    return [detail for _, detail in errors]
+    return errors
 
 
 def _private_runtime_hooks() -> Any:
@@ -4729,8 +4798,9 @@ def _run_agent_pair(
         return []
 
     if stop_on_pass:
-        # A later attempt is launched only after the previous one scored, so
-        # stop-on-pass runs each condition sequentially, one attempt at a time.
+        # A case's later attempt is launched only after its previous one
+        # scored. Up to n_concurrent cases run at once, and the conditions run
+        # one after another, so each gets the full per-agent budget.
         sequential_errors: list[str] = []
         for variant, dataset, job_import_path in jobs:
             try:
@@ -4753,6 +4823,7 @@ def _run_agent_pair(
                     agent_import_path=job_import_path,
                     verifier_env=verifier_env,
                     environment_kwargs=environment_kwargs,
+                    n_concurrent=n_concurrent,
                     cancellation=cancellation,
                 )
             except Exception as exc:
@@ -5130,6 +5201,12 @@ def _run_harbor_eval_impl(
     if grading_mode not in {"default", "default_plus_custom", "custom_only"}:
         reporter.emit(ProgressEvent(stage="configuration", state="failed", detail="invalid grading mode"))
         return {"error": ["grading.mode must be default, default_plus_custom, or custom_only"]}
+    # The standard judges would all fail on an unknown policy, after the agent
+    # trials had spent their budget; custom_only runs never forward the policies.
+    judge_policy_errors = _judge_policies(os.environ)[1] if grading_mode != "custom_only" else []
+    if judge_policy_errors:
+        reporter.emit(ProgressEvent(stage="configuration", state="failed", detail="invalid judge policy"))
+        return {"error": judge_policy_errors}
     if workspace_mode not in {"isolated", "group"}:
         reporter.emit(ProgressEvent(stage="configuration", state="failed", detail="invalid workspace mode"))
         return {"error": ["skill_workspace.mode must be isolated or group"]}

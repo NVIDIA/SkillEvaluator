@@ -22,6 +22,12 @@ immutable `image`, such as
 also pins the workflow with `uses: ...@RELEASE_WORKFLOW_SHA`. Do not substitute a
 mutable image tag or an unreviewed branch reference.
 
+The image selects one bundled `default` validation policy for public and private
+repositories. Its rules live in `src/skillevaluator/config/profiles/default.yaml`;
+there is no `internal`/`external` CI input. Older released images label this same
+policy `external`. Upgrading the workflow alone does not change a pinned image's
+policy label. Profile names do not control network access or report visibility.
+
 | Input | Basic configuration |
 | --- | --- |
 | `paths` | `skills`; up to 100 newline-separated repository-relative skill directories or roots |

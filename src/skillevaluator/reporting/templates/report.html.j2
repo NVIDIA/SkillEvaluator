@@ -1531,6 +1531,7 @@
                         <dt>Findings</dt>
                         <dd class="kpi-value"><strong>{{ tier1_summary.issue_count or 0 }}</strong></dd>
                         <dd class="kpi-sub sev-line">{% for level in ['critical', 'high', 'medium', 'low'] %}{% if tier1_summary[level] %}<span class="sev-item"><span class="sev-dot {{ level }}" aria-hidden="true"></span>{{ tier1_summary[level] }} {{ level }}</span> {% endif %}{% endfor %}{% if not tier1_summary.issue_count %}None reported{% endif %}</dd>
+                        {% if tier1_summary.issue_detail %}<dd class="kpi-sub kpi-issue-detail">{{ tier1_summary.issue_detail }}</dd>{% endif %}
                     </div>
                     <div class="kpi">
                         <dt>Blocking critical + high</dt>
@@ -1551,7 +1552,7 @@
                         {% endif %}
                     </div>
                 </dl>
-                <p class="kpi-legend">A finding is one problem a check reports at one location, with a severity from critical to low. Findings in a failed check block the verdict; findings in a passed check are advisory.</p>
+                <p class="kpi-legend">A finding is one problem a check reports, with a severity from critical to low. The same problem reported on several lines or in several files or {{ content_label_plural | lower }} counts once; each location is an occurrence. Findings in a failed check block the verdict; findings in a passed check are advisory.</p>
                 {% if fix_first %}
                 <div class="fix-first">
                     <h3>{{ 'Worth a look' if t1_key == 'pass' else 'Fix first' }}</h3>
@@ -1564,7 +1565,7 @@
                         </li>
                         {% endfor %}
                     </ol>
-                    {% if tier1_summary.issue_count > fix_first | selectattr('kind', 'equalto', 'finding') | list | length %}<p class="fix-more">The other findings are listed under their checks below.</p>{% endif %}
+                    {% if tier1_summary.occurrence_count > fix_first | selectattr('kind', 'equalto', 'finding') | list | length %}<p class="fix-more">The other findings are listed under their checks below.</p>{% endif %}
                 </div>
                 {% endif %}
             </section>
@@ -1781,7 +1782,8 @@
                         <span class="status-badge {{ 'warn' if skill_status == 'incomplete' else skill_status }}">{{ verdict_words.get(skill_status, skill_status | title) }}</span>
                         <span style="color: var(--text-secondary);">{{ skill_data.validators | length }} checks</span>
                         {% if not skill_data.passed and skill_data.issue_count is defined and skill_data.issue_count > 0 %}
-                        <span class="issue-count-badge">{{ skill_data.issue_count }} finding{{ 's' if skill_data.issue_count != 1 else '' }}</span>
+                        {% set skill_findings = skill_data.finding_count if skill_data.finding_count is defined else skill_data.issue_count %}
+                        <span class="issue-count-badge">{{ skill_findings }} finding{{ 's' if skill_findings != 1 else '' }}</span>
                         {% endif %}
                         <span class="expand-text">{{ '▲' if not skill_data.passed else '▼' }}</span>
                     </div>
@@ -2326,6 +2328,9 @@
             .t3-eval-evidence li .t3-ev-id { font-family:ui-monospace,SFMono-Regular,Menlo,Monaco,Consolas,monospace; font-weight:700; color:var(--secondary-color); }
             .t3-eval-evidence li .t3-ev-count { font-size:0.7rem; color:var(--text-secondary); font-weight:700; padding:0.1rem 0.4rem; border-radius:4px; background:var(--bg-tertiary); }
             .t3-eval-evidence li .t3-ev-notes { color:var(--text-secondary); font-size:0.78rem; }
+            .t3-eval-evidence li .t3-ev-detail { grid-column:1 / -1; display:flex; flex-wrap:wrap; align-items:center; gap:0.5rem; }
+            .t3-ev-excerpt { font-family:ui-monospace,SFMono-Regular,Menlo,Monaco,Consolas,monospace; font-size:0.76rem; padding:0.15rem 0.4rem; border-radius:4px; background:var(--bg-tertiary); color:var(--text-secondary); overflow-wrap:anywhere; }
+            .t3-score-reason { border-bottom:1px dotted currentColor; cursor:help; }
 
             /* Attempt Details: SkillEvaluator-style chip table for per-case attempt scores */
             .t3-attempt-list { display:flex; flex-wrap:wrap; gap:6px; min-width:180px; }
@@ -2440,10 +2445,14 @@
             {% endif %}
             {% if tier3_preview_notice %}
             <span>
-                HTML preview omitted
-                {% if tier3_preview_notice.characters %}{{ tier3_preview_notice.characters }} characters{% endif %}
-                {% if tier3_preview_notice.characters and tier3_preview_notice.items %} and {% endif %}
-                {% if tier3_preview_notice.items %}{{ tier3_preview_notice.items }} items{% endif %}.
+                {# Subscript lookups: ``notice.items`` would resolve to the dict method. #}
+                {% set t3_preview_omitted = [] %}
+                {% if tier3_preview_notice.get('characters') %}{% set _ = t3_preview_omitted.append(tier3_preview_notice['characters'] ~ ' characters') %}{% endif %}
+                {% if tier3_preview_notice.get('items') %}{% set _ = t3_preview_omitted.append(tier3_preview_notice['items'] ~ ' items') %}{% endif %}
+                {% if t3_preview_omitted %}HTML preview omitted {{ t3_preview_omitted | join(' and ') }}.{% endif %}
+                {% if tier3_preview_notice.failure_reasons %}
+                HTML preview left out {{ tier3_preview_notice.failure_reasons }} failure reason{{ 's' if tier3_preview_notice.failure_reasons != 1 else '' }} or excerpt{{ 's' if tier3_preview_notice.failure_reasons != 1 else '' }} to keep the overview complete.
+                {% endif %}
                 JSON Downloads preserve the complete bounded canonical payload.
             </span>
             {% endif %}
@@ -2765,9 +2774,35 @@
 
         {# ---------- Trials ---------- #}
         <section class="t3-page" id="tier3-page-trials">
+            {# Drill-down rows for both conditions: with-skill rows come from the canonical
+               top-level trials, baseline rows from each agent's trials_baseline. #}
+            {% set t3_condition_trial_rows = [] %}
+            {% set t3_row_agents = t3_agents.keys() | list %}
+            {% for trial in tier3.trials or [] %}
+                {% if (trial.agent or '(default)') not in t3_row_agents %}
+                    {% set _ = t3_row_agents.append(trial.agent or '(default)') %}
+                {% endif %}
+            {% endfor %}
+            {% for agent_name in t3_row_agents %}
+                {% for trial in tier3.trials or [] %}
+                    {% if (trial.agent or '(default)') == agent_name %}
+                        {% set _ = t3_condition_trial_rows.append({'agent': agent_name, 'condition': 'With skill', 'trial': trial}) %}
+                    {% endif %}
+                {% endfor %}
+                {% set t3_row_agent = t3_agents.get(agent_name) %}
+                {% if t3_row_agent is mapping %}
+                    {% for trial in t3_row_agent.get('trials_baseline') or [] %}
+                        {% if trial is mapping %}
+                            {% set _ = t3_condition_trial_rows.append({'agent': agent_name, 'condition': 'Without skill', 'trial': trial}) %}
+                        {% endif %}
+                    {% endfor %}
+                {% endif %}
+            {% endfor %}
             {% set t3_eval_ids = [] %}
             {% set t3_trial_score_keys = [] %}
-            {% for trial in tier3.trials or [] %}
+            {% set t3_baseline_score_keys = [] %}
+            {% for row in t3_condition_trial_rows %}
+                {% set trial = row.trial %}
                 {% for score_map in [trial.scores, trial.baseline_scores, trial.lift_scores] %}
                     {% if score_map is mapping %}
                         {% for metric_id in score_map.keys() %}
@@ -2777,9 +2812,23 @@
                         {% endfor %}
                     {% endif %}
                 {% endfor %}
+                {% if row.condition == 'Without skill' and trial.scores is mapping %}
+                    {% for metric_id in trial.scores.keys() %}
+                        {% if metric_id not in t3_baseline_score_keys %}
+                            {% set _ = t3_baseline_score_keys.append(metric_id) %}
+                        {% endif %}
+                    {% endfor %}
+                {% endif %}
             {% endfor %}
             {% for metric_id in t3_metric_ids %}
                 {% if metric_id in t3_trial_score_keys %}
+                    {% set _ = t3_eval_ids.append(metric_id) %}
+                {% endif %}
+            {% endfor %}
+            {# Baseline rows can score metrics the best agent's with-skill evaluators do not list;
+               they still get a column so a failing baseline score and its reason are visible. #}
+            {% for metric_id in t3_baseline_score_keys %}
+                {% if metric_id not in t3_eval_ids %}
                     {% set _ = t3_eval_ids.append(metric_id) %}
                 {% endif %}
             {% endfor %}
@@ -2897,31 +2946,48 @@
             <details class="t3-details" open>
                 <summary>Measured Agent Resources</summary>
                 <div class="t3-details-body">
-                <p class="t3-section-hint">Efficiency scores measure routing and productive tool use. These separate measurements show observed agent resource use. Delta = with skill minus baseline; negative means less use. Judge and setup time are excluded. Deltas require complete telemetry and matching case counts in both arms.</p>
+                <p class="t3-section-hint">Efficiency scores measure routing and productive tool use. These separate measurements show observed agent resource use. Delta = with skill minus baseline; negative means less use. Judge and setup time are excluded. Deltas require complete telemetry and matching case counts in both arms. LLM and tool seconds split the agent's trajectory time; inferred LLM time also includes harness and queue time.</p>
+                {% set t3_resource_rows = [
+                    ('tokens', 'Prompt + completion tokens (cache included)', '{:,.0f}', 'total'),
+                    ('agent_seconds', 'Agent execution seconds', '{:,.1f} s', 'total'),
+                    ('llm_seconds', 'LLM seconds', '{:,.1f} s', 'total'),
+                    ('tool_seconds', 'Tool seconds', '{:,.1f} s', 'total'),
+                    ('llm_ms_per_token', 'LLM ms per token', '{:,.2f} ms', 'value'),
+                ] %}
+                {% macro t3_timing_source_text(sources) %}{% for source in sources %}{{ ' and ' if not loop.first }}{{ 'native ATIF timing' if source == 'atif' else ('inferred from step timestamps' if source == 'step_timestamps' else source) }}{% endfor %}{% if not sources %}none{% endif %}{% endmacro %}
                 <div class="table-scroll"><table class="summary-table">
                     <thead><tr><th>Agent</th><th>Measurement</th><th>With skill total</th><th>Baseline total</th><th>Delta</th><th>Measured trials (skill / baseline)</th></tr></thead>
                     <tbody>
                     {% for name, agent in t3_agents.items() %}
                     {% if agent.resources is defined %}
-                    {% for field, label in [('tokens', 'Prompt + completion tokens (cache included)'), ('agent_seconds', 'Agent execution seconds')] %}
+                    {% for field, label, unit_fmt, key in t3_resource_rows %}
+                    {% if agent.resources[field] is defined %}
                     {% set measured = agent.resources[field] %}
+                    {% set with_value = measured.with_skill[key] %}
+                    {% set baseline_value = measured.baseline[key] %}
                     <tr><td>{{ name }}</td><td>{{ label }}</td>
-                        {% set unit_fmt = '{:,.1f} s' if field == 'agent_seconds' else '{:,.0f}' %}
-                        <td>{{ unit_fmt.format(measured.with_skill.total) if measured.with_skill.total is not none else 'N/A' }}</td>
-                        <td>{{ unit_fmt.format(measured.baseline.total) if measured.baseline.total is not none else 'N/A' }}</td>
-                        <td>{% if measured.delta is not none %}{{ ('+' if measured.delta >= 0 else '') ~ unit_fmt.format(measured.delta) }}{% if measured.baseline.total %} ({{ '%+.0f' | format(measured.delta / measured.baseline.total * 100) }}%){% endif %}{% else %}N/A{% endif %}</td>
+                        <td>{{ unit_fmt.format(with_value) if with_value is not none else 'N/A' }}</td>
+                        <td>{{ unit_fmt.format(baseline_value) if baseline_value is not none else 'N/A' }}</td>
+                        <td>{% if measured.delta is not none %}{{ ('+' if measured.delta >= 0 else '') ~ unit_fmt.format(measured.delta) }}{% if baseline_value %} ({{ '%+.0f' | format(measured.delta / baseline_value * 100) }}%){% endif %}{% else %}N/A{% endif %}</td>
                         <td>{{ measured.with_skill.measured_trials }}/{{ measured.with_skill.trials }} / {{ measured.baseline.measured_trials }}/{{ measured.baseline.trials }}</td>
                     </tr>
+                    {% endif %}
                     {% endfor %}
                     {% endif %}
                     {% endfor %}
                     </tbody>
                 </table></div>
+                {% for name, agent in t3_agents.items() %}
+                {% set t3_timing_sources = agent.resources.timing_sources if agent.resources is defined and agent.resources.timing_sources is mapping else {} %}
+                {% if t3_timing_sources.with_skill or t3_timing_sources.baseline %}
+                <p class="t3-section-hint">{{ name }} timing source: with skill {{ t3_timing_source_text(t3_timing_sources.with_skill or []) }}; baseline {{ t3_timing_source_text(t3_timing_sources.baseline or []) }}.{% if 'mixed_timing_sources' in (agent.resources.caveats or []) %} The measurements mix native and inferred timing, so LLM and tool seconds are not like-for-like.{% endif %}</p>
+                {% endif %}
+                {% endfor %}
                 </div>
             </details>
             {% endif %}
 
-            {% if tier3.trials %}
+            {% if t3_condition_trial_rows %}
 
             {% set t3_trial_agent_groups = (tier3.trials or []) | groupby('agent') %}
             {% set t3_token_coverage = namespace(all_agents_complete=(t3_trial_agent_groups | length == (tier3.agents or {}) | length)) %}
@@ -2931,15 +2997,15 @@
                     {% set t3_token_coverage.all_agents_complete = false %}
                 {% endif %}
             {% endfor %}
-            {% set t3_step_trials = (tier3.trials or []) | selectattr('steps', 'defined') | list %}
+            {% set t3_steps_chart = steps_by_case_chart | default({'labels': [], 'datasets': []}) %}
             {# Charts moved above the heatmap so the visualization narrative is summary-chart -> pivot -> drill-down #}
-            {% if t3_token_coverage.all_agents_complete or t3_step_trials %}
+            {% if t3_token_coverage.all_agents_complete or t3_steps_chart.datasets %}
             <details class="t3-details" open>
                 <summary>Trial Charts</summary>
                 <div class="t3-details-body">
                 <div class="chart-grid">
                     {% if t3_token_coverage.all_agents_complete %}<div class="chart-card"><h3>With-Skill Token Usage by Agent</h3><canvas id="tier3-token-chart" height="250"></canvas></div>{% endif %}
-                    {% if t3_step_trials %}<div class="chart-card"><h3>With-Skill Steps per Eval Case</h3><canvas id="tier3-steps-chart" height="250"></canvas></div>{% endif %}
+                    {% if t3_steps_chart.datasets %}<div class="chart-card"><h3>Steps per Eval Case by Agent and Condition</h3><canvas id="tier3-steps-chart" height="250"></canvas>{% if t3_steps_chart.get('omitted_cases') %}<p style="color:var(--text-secondary);font-size:0.82rem;">Showing the first {{ t3_steps_chart.labels | length }} eval cases; {{ t3_steps_chart['omitted_cases'] }} more are in the JSON Downloads.</p>{% endif %}</div>{% endif %}
                 </div>
                 </div>
             </details>
@@ -3061,32 +3127,40 @@
 
             {# ----- Detailed per-evaluator drill-down (collapsed; preserves all original info) ----- #}
             <details class="t3-details">
-                <summary>With-Skill Per-Evaluator Drill-Down</summary>
+                <summary>Per-Evaluator Drill-Down</summary>
                 <div class="t3-details-body">
                 <div class="t3-filter-bar">
-                    <input class="t3-filter-input" type="search" placeholder="Filter by agent, case, score..." oninput="tier3FilterTable(this, 't3-trials-table')" aria-label="Filter trials">
-                    <span class="t3-filter-count" data-tier3-filter-count="t3-trials-table">{{ tier3.trials | length }} / {{ tier3.trials | length }}</span>
+                    <input class="t3-filter-input" type="search" placeholder="Filter by agent, condition, case, score..." oninput="tier3FilterTable(this, 't3-trials-table')" aria-label="Filter trials">
+                    <span class="t3-filter-count" data-tier3-filter-count="t3-trials-table">{{ t3_condition_trial_rows | length }} / {{ t3_condition_trial_rows | length }}</span>
                 </div>
+                {% if tier3_preview_notice and tier3_preview_notice.get('trial_rows') %}
+                <p style="color:var(--text-secondary);font-size:0.82rem;">The HTML preview left out {{ tier3_preview_notice['trial_rows'] }} per-trial row{{ 's' if tier3_preview_notice['trial_rows'] != 1 else '' }}: it caps with-skill rows across all agents and baseline rows per agent, so the two conditions can list different numbers of rows. JSON Downloads keep every trial.</p>
+                {% endif %}
                 <div class="table-scroll">
                 <table class="summary-table" id="t3-trials-table">
                     <thead><tr>
-                        <th>Agent</th><th>Entry</th><th>Overall</th>
+                        <th>Agent</th><th>Condition</th><th>Entry</th><th>Overall</th>
                         {% for eval_id in t3_eval_ids %}<th>{{ eval_id | replace("_", " ") | title }}</th>{% endfor %}
                         <th>Steps</th><th>Tokens</th><th>Warnings</th>
                     </tr></thead>
                     <tbody>
-                    {% for trial in tier3.trials %}
+                    {% for row in t3_condition_trial_rows %}
+                        {% set trial = row.trial %}
                         {% set scores = trial.scores or {} %}
+                        {% set reasons = trial.score_reasons if trial.score_reasons is mapping else {} %}
                         {% set tokens = trial.tokens or {} %}
                         <tr>
-                            <td><strong>{{ trial.agent or '(default)' }}</strong></td>
+                            <td><strong>{{ row.agent }}</strong></td>
+                            <td>{{ row.condition }}</td>
                             <td style="font-family:ui-monospace,SFMono-Regular,Menlo,Monaco,Consolas,monospace;font-size:0.82rem;">{{ trial.entry_id or trial.trial_id or '?' }}</td>
                             <td style="background:{{ 'rgba(34,197,94,0.14)' if (trial.overall or 0) >= 0.7 else ('rgba(234,179,8,0.14)' if (trial.overall or 0) >= 0.4 else 'rgba(239,68,68,0.14)') }}; color:{{ 'var(--success-color)' if (trial.overall or 0) >= 0.7 else ('var(--warning-color)' if (trial.overall or 0) >= 0.4 else 'var(--danger-color)') }};font-weight:700;">
                                 {{ "%.2f" | format(trial.overall) if trial.overall is not none else "—" }}
                             </td>
                             {% for eval_id in t3_eval_ids %}
                                 {% set s = scores.get(eval_id) %}
-                                <td style="{% if s is not none %}background:{{ 'rgba(34,197,94,0.14)' if s >= 0.7 else ('rgba(234,179,8,0.14)' if s >= 0.4 else 'rgba(239,68,68,0.14)') }}; color:{{ 'var(--success-color)' if s >= 0.7 else ('var(--warning-color)' if s >= 0.4 else 'var(--danger-color)') }}; font-weight:600;{% endif %}">{{ "%.2f" | format(s) if s is not none else "—" }}</td>
+                                {% set cell_reason = reasons.get(eval_id) if s is not none else none %}
+                                {% set cell_text = "%.2f" | format(s) if s is not none else "—" %}
+                                <td style="{% if s is not none %}background:{{ 'rgba(34,197,94,0.14)' if s >= 0.7 else ('rgba(234,179,8,0.14)' if s >= 0.4 else 'rgba(239,68,68,0.14)') }}; color:{{ 'var(--success-color)' if s >= 0.7 else ('var(--warning-color)' if s >= 0.4 else 'var(--danger-color)') }}; font-weight:600;{% endif %}"{% if cell_reason %} title="{{ eval_id | replace('_', ' ') | title }}: {{ cell_reason }}"{% endif %}>{% if cell_reason %}<span class="t3-score-reason">{{ cell_text }}</span>{% else %}{{ cell_text }}{% endif %}</td>
                             {% endfor %}
                             <td>{{ trial.steps if trial.steps is number else "—" }}</td>
                             <td>{% if tokens.prompt is number and tokens.completion is number %}{{ tokens.prompt + tokens.completion }}{% else %}—{% endif %}</td>
@@ -3366,14 +3440,16 @@
                             <span class="t3-bar-value" style="color:{{ card_color }};">{{ "%.2f" | format(card_score) }}</span>
                         </div>
                         {% if card.evidence %}
-                        {# Deduplicate evidence by entry_id: count + average score, keep notes/failures from first non-empty #}
+                        {# Deduplicate evidence by entry_id: count + average score. Reasons come from the
+                           lowest-scoring attempt that explains itself, so a passing attempt cannot hide
+                           a failing attempt's reason; otherwise keep the first non-empty text. #}
                         {% set dedup_map = {} %}
                         {% set dedup_order = [] %}
                         {% for ev in card.evidence %}
                             {% set eid = ev.entry_id or 'trial' %}
                             {% if eid not in dedup_map %}
                                 {% set _ = dedup_order.append(eid) %}
-                                {% set _ = dedup_map.update({eid: {'count': 0, 'sum': 0.0, 'with_score': 0, 'notes': [], 'failures': [], 'checks': [], 'evidence_refs': []}}) %}
+                                {% set _ = dedup_map.update({eid: {'count': 0, 'sum': 0.0, 'with_score': 0, 'notes': [], 'failures': [], 'checks': [], 'evidence_refs': [], 'excerpt': none, 'reason_score': none}}) %}
                             {% endif %}
                             {% set entry = dedup_map[eid] %}
                             {% set ev_occurrences = ev.occurrences or 1 %}
@@ -3381,8 +3457,15 @@
                             {% if ev.score is not none %}
                                 {% set _ = entry.update({'sum': entry.sum + (ev.score * ev_occurrences), 'with_score': entry.with_score + ev_occurrences}) %}
                             {% endif %}
-                            {% if ev.notes and not entry.notes %}{% set _ = entry.update({'notes': ev.notes}) %}{% endif %}
-                            {% if ev.failures and not entry.failures %}{% set _ = entry.update({'failures': ev.failures}) %}{% endif %}
+                            {# A built reason stands in for grader notes when the grader recorded none. #}
+                            {% set ev_notes = ev.notes or ([ev.reason] if ev.reason else []) %}
+                            {% if (ev_notes or ev.failures or ev.excerpt) and ev.score is not none and (entry.reason_score is none or ev.score < entry.reason_score) %}
+                                {% set _ = entry.update({'notes': ev_notes, 'failures': ev.failures or [], 'excerpt': ev.excerpt or none, 'reason_score': ev.score}) %}
+                            {% elif entry.reason_score is none %}
+                                {% if ev_notes and not entry.notes %}{% set _ = entry.update({'notes': ev_notes}) %}{% endif %}
+                                {% if ev.failures and not entry.failures %}{% set _ = entry.update({'failures': ev.failures}) %}{% endif %}
+                                {% if ev.excerpt and not entry.excerpt %}{% set _ = entry.update({'excerpt': ev.excerpt}) %}{% endif %}
+                            {% endif %}
                             {% if ev.checks and not entry.checks %}{% set _ = entry.update({'checks': ev.checks}) %}{% endif %}
                             {% if ev.evidence_refs and not entry.evidence_refs %}{% set _ = entry.update({'evidence_refs': ev.evidence_refs}) %}{% endif %}
                         {% endfor %}
@@ -3390,7 +3473,7 @@
                         {% for ev in card.evidence %}
                             {% set evidence_totals.trials = evidence_totals.trials + (ev.occurrences or 1) %}
                         {% endfor %}
-                        <details class="t3-eval-evidence">
+                        <details class="t3-eval-evidence"{% if card.status == 'fail' %} open{% endif %}>
                             {% if card.evidence_sampling and card.evidence_sampling.truncated %}
                             <summary>Per-trial evidence (&gt;={{ card.evidence_sampling.represented_cases }} cases, &gt;={{ card.evidence_sampling.represented_trials }} of {{ card.evidence_sampling.total_trials }} trials; sampled first {{ card.evidence_sampling.scanned_trials }})</summary>
                             {% else %}
@@ -3415,6 +3498,7 @@
                                     {% else %}
                                         <span class="t3-bar-value" style="color:var(--text-secondary);">N/A</span>
                                     {% endif %}
+                                    {% if ev.excerpt %}<div class="t3-ev-detail"><code class="t3-ev-excerpt">{{ ev.excerpt }}</code></div>{% endif %}
                                 </li>
                             {% endfor %}
                             </ul>
@@ -4026,32 +4110,13 @@
                 return totals;
             }
             function stepsByCaseDatasets() {
-                var entries = [];
-                var seen = {};
-                (tier3Data.trials || []).forEach(function(trial){
-                    var id = trial.entry_id || trial.trial_id || "?";
-                    if (!seen[id]) { seen[id] = true; entries.push(id); }
+                // Precomputed per agent and condition; null marks a missing or partially measured case.
+                var chart = {{ steps_by_case_chart | default({'labels': [], 'datasets': []}) | tojson | safe }};
+                chart.datasets.forEach(function(dataset, idx){
+                    dataset.backgroundColor = palette[idx % palette.length] + "cc";
+                    dataset.borderRadius = 4;
                 });
-                return {
-                    labels: entries,
-                    datasets: agentEntries().map(function(item, idx){
-                        var name = item[0];
-                        return {
-                            label: name,
-                            data: entries.map(function(entry){
-                                var matching = (tier3Data.trials || []).filter(function(t){ return (t.agent || "default") === name && (t.entry_id || t.trial_id || "?") === entry; });
-                                if (!matching.length) return null;
-                                var observed = matching.map(function(t){ return t.steps; }).filter(function(value){
-                                    return typeof value === "number" && Number.isFinite(value) && value >= 0;
-                                });
-                                if (observed.length !== matching.length) return null;
-                                return observed.reduce(function(sum, value){ return sum + value; }, 0) / observed.length;
-                            }),
-                            backgroundColor: palette[idx % palette.length] + "cc",
-                            borderRadius: 4
-                        };
-                    })
-                };
+                return chart;
             }
             function destroyCharts() {
                 charts.forEach(function(chart){ chart.destroy(); });

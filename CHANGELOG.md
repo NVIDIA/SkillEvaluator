@@ -9,6 +9,19 @@ All notable changes to SkillEvaluator are documented in this file.
 - When CI redaction masks a credential inside a reported PII value, remove the
   finding's digest as well.
 
+### Fixed
+
+- Tier 3 decodes the native Codex `exec` wrappers that Codex 0.161.0 emits:
+  inline `text(await tools.NAME(...))`, single-quoted string literals, and
+  literal `Promise.allSettled` batches rendered by an indexed `for`, indexed
+  `forEach`, or `forEach(text)`. Multi-call wrappers decode only when each call
+  owns its own JSON record of the outer output; dynamic arguments, shadowed
+  bindings, unsupported renderers, and missing, extra, reordered, or truncated
+  records, including duplicate JSON keys, remain unsupported. A nonzero exit
+  code or rejected promise in a record is graded as a failure. This restores
+  security and skill-execution scoring for those wrappers instead of the
+  neutral fallback.
+
 ## 0.8.0 - 2026-11-05
 
 ### Added

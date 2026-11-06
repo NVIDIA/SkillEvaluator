@@ -4,6 +4,11 @@ All notable changes to SkillEvaluator are documented in this file.
 
 ## Unreleased
 
+### Changed
+
+- When CI redaction masks a credential inside a reported PII value, remove the
+  finding's digest as well.
+
 ## 0.8.0 - 2026-11-05
 
 ### Added

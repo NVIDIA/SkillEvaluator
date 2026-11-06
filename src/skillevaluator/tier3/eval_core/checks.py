@@ -1635,6 +1635,38 @@ def _network_executable(token: str, assignments: dict[str, str], names: dict[str
     return name
 
 
+_SHELL_QUOTE_CHARS = str.maketrans("", "", "\"'\\")
+
+
+def _spelled_with_capitals(token: str) -> bool:
+    """Whether a bare command word spells its executable with a capital letter, as prose ``HTTP`` or ``Https`` do.
+
+    Prose has no path or ``.exe`` words, and a host that finds them in any
+    case runs HTTPie for ``./HTTP``, ``/usr/local/bin/HTTP`` or ``HTTP.exe``,
+    so a word with a slash or backslash, or one ending in ``.exe`` in any case,
+    never counts. A ``$VAR`` or backtick word may hold any spelling, so it
+    never counts either.
+    """
+    if any(char in token for char in "$`/\\"):
+        return False
+    name = token.translate(_SHELL_QUOTE_CHARS)
+    if name.lower().endswith(".exe"):
+        return False
+    return name != name.lower()
+
+
+def _may_be_header_file_item(token: str) -> bool:
+    """Whether an HTTPie argument may reach it as a ``name:@file`` header item.
+
+    The shell removes quotes and backslashes, so ``X-Data:"@.env"``,
+    ``"X-Data:"@.env`` and ``X-Data:\\@.env`` all pass ``X-Data:@.env``. A
+    ``$VAR`` or backtick word may expand to such an item.
+    """
+    if "$" in token or "`" in token:
+        return True
+    return ":@" in token.translate(_SHELL_QUOTE_CHARS)
+
+
 def _network_client_uploads(executable: str, args: list[str], stdin_piped: bool) -> bool:
     """Check one curl, wget or HTTPie invocation's arguments for upload indicators."""
     for arg in args:
@@ -2280,13 +2312,28 @@ def _network_tokens_exfiltrate(tokens: list[str], _depth: int) -> bool:
                 continue
             if runs_elsewhere:
                 return True
-            if client in seen_clients:
+            # Linux finds a command by its exact name, so a later bare HTTP or
+            # Https word, as in the here-document prose "Use HTTP POST to
+            # create an item.", does not start HTTPie. Its method words are not
+            # read as an upload unless a later argument may be a name:@file
+            # item, which may send a file as a header; its body items, stdin
+            # and --raw still are. A path or .exe word is not prose, so it keeps
+            # the method rule. A capitalized bare word covers a later one,
+            # which sees a suffix of the same arguments, but not a later
+            # lowercase http word.
+            capitalized = client in ("http", "https") and _spelled_with_capitals(command[sub_idx])
+            seen_key = f"{client}:capitalized" if capitalized else client
+            if client in seen_clients or seen_key in seen_clients:
                 continue
             client_args = command[sub_idx + 1 :]
             if not keeps_stdin:
                 client_args = [token for token in client_args if token not in _NETWORK_INPUT_REDIRECTS]
+            if capitalized and not any(_may_be_header_file_item(token) for token in client_args):
+                client_args = [
+                    token for token in client_args if token.strip("\"'").casefold() not in _UNSAFE_HTTP_METHODS
+                ]
             if client not in ("http", "https") or "--ignore-stdin" not in (a.strip("\"'") for a in client_args):
-                seen_clients.add(client)
+                seen_clients.add(seen_key)
             if _network_client_uploads(client, client_args, command_stdin and keeps_stdin):
                 return True
 

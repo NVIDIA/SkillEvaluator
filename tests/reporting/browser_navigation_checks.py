@@ -1,15 +1,26 @@
 # SPDX-License-Identifier: Apache-2.0
-"""Real-browser checks for generated full/stress fixtures, without project dependencies.
+"""Real-browser navigation, theme, print and layout checks for the HTML report.
 
-Run with: uv run --no-project --with playwright python
- tests/reporting/browser_navigation_checks.py REPORT_DIRECTORY OUTPUT_DIRECTORY
-Uses system Chrome; no live evaluation or network resources are required.
-REPORT_DIRECTORY contains full.html/stress.html plus absent.html rendered with
-HTMLReporter(requested_tiers=(1,), displayed_tiers=(1, 2, 3)) and one Tier 1 result.
+Not collected by pytest. Run from the repository root, in an environment with the
+project and Playwright installed (``pip install -e ".[dev]" playwright``):
+
+    python tests/reporting/browser_navigation_checks.py OUTPUT_DIRECTORY
+
+By default the script renders full.html, stress.html and absent.html with
+``browser_navigation_fixtures.py`` into OUTPUT_DIRECTORY/fixtures, then writes
+screenshots and navigation-results.json to OUTPUT_DIRECTORY. Pass
+``--reports DIRECTORY`` to check reports that are already rendered instead.
+
+The browser is Playwright's bundled Chromium (``python -m playwright install
+chromium``). To use another Chromium-based browser, such as system Chrome, pass
+``--browser PATH`` or set SKILLEVALUATOR_TEST_BROWSER to its executable. No live
+evaluation or network access is needed.
 """
 
 import argparse
 import json
+import os
+import sys
 from pathlib import Path
 
 from playwright.sync_api import sync_playwright
@@ -34,13 +45,22 @@ def severity_palette(page):
     })""")
 
 
-def run(reports, output):
+BROWSER_ENV = "SKILLEVALUATOR_TEST_BROWSER"
+
+
+def render_default_fixtures(directory):
+    sys.path.insert(0, str(Path(__file__).resolve().parent))
+    from browser_navigation_fixtures import render_fixtures
+
+    return render_fixtures(directory)
+
+
+def run(reports, output, browser_path=None):
     output.mkdir(parents=True, exist_ok=True)
     records = []
     with sync_playwright() as runtime:
-        browser = runtime.chromium.launch(
-            executable_path="/Applications/Google Chrome.app/Contents/MacOS/Google Chrome", headless=True
-        )
+        # None launches Playwright's bundled Chromium.
+        browser = runtime.chromium.launch(executable_path=browser_path, headless=True)
         for width in (1440, 760, 390):
             for theme in ("light", "dark"):
                 context = browser.new_context(
@@ -341,8 +361,19 @@ def run(reports, output):
 
 
 if __name__ == "__main__":
-    parser = argparse.ArgumentParser()
-    parser.add_argument("reports", type=Path)
-    parser.add_argument("output", type=Path)
+    parser = argparse.ArgumentParser(description="Run the HTML report's real-browser navigation checks.")
+    parser.add_argument("output", type=Path, help="directory for screenshots and navigation-results.json")
+    parser.add_argument(
+        "--reports",
+        type=Path,
+        help="directory with full.html, stress.html and absent.html (default: render them into OUTPUT/fixtures)",
+    )
+    parser.add_argument(
+        "--browser",
+        default=os.environ.get(BROWSER_ENV) or None,
+        help=f"Chromium-based browser executable (default: ${BROWSER_ENV}, else Playwright's bundled Chromium)",
+    )
     args = parser.parse_args()
-    run(args.reports.resolve(), args.output.resolve())
+    output = args.output.resolve()
+    reports = args.reports.resolve() if args.reports else render_default_fixtures(output / "fixtures")
+    run(reports, output, args.browser)

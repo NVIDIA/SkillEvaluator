@@ -4,6 +4,7 @@
 from html.parser import HTMLParser
 
 import pytest
+from browser_navigation_fixtures import render_fixtures
 
 from skillevaluator.evaluation.tier3_report import build_agent_eval_payload
 from skillevaluator.models import ValidationResult
@@ -191,3 +192,38 @@ def test_nojs_dark_fallback_mirrors_every_hard_coded_dark_override():
     for rule in overrides:
         mirrored = ":root:not([data-theme]) " + rule.replace('[data-theme="dark"]', ":root:not([data-theme])")
         assert mirrored in fallback, rule
+
+
+def test_browser_check_fixtures_render_every_target_the_checks_use(tmp_path):
+    # browser_navigation_checks.py needs a browser; this keeps its fixtures usable without one.
+    render_fixtures(tmp_path)
+    pages = {name: (tmp_path / f"{name}.html").read_text(encoding="utf-8") for name in ("full", "stress", "absent")}
+    documents = {name: Document(html) for name, html in pages.items()}
+
+    def classes(element):
+        return set((element.get("class") or "").split())
+
+    full = documents["full"]
+    ids = {element.get("id") for element in full.elements}
+    assert {
+        "t3-trials-table",
+        "validator-1",
+        "results-by-validator",
+        "report-workspace",
+        "run-metadata",
+        "tier3-tab-overview",
+        "tier3-tab-suggestions",
+        "tier3-tab-provenance",
+        "tier3-tab-agents",
+    } <= ids
+    for required in ({"t3-agent-anchor"}, {"t3-agent-tab-btn"}, {"skip-link"}, {"hero-command-status", "fail"}):
+        assert any(required <= classes(element) for element in full.elements), required
+    assert any("check-finding" in classes(element) and element.get("id") for element in full.elements)
+    assert "Changes required" in pages["full"] and "Tier 3 quality: " in pages["full"]
+    for name in ("full", "stress"):
+        tiles = {
+            element.get("data-target-tab") for element in documents[name].elements if "tier-card" in classes(element)
+        }
+        assert tiles == {"tier1", "tier2", "tier3"}, name
+    skipped = [element for element in documents["absent"].elements if {"tier-card", "skipped"} <= classes(element)]
+    assert len(skipped) == 2

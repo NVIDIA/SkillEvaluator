@@ -4,9 +4,21 @@ All notable changes to SkillEvaluator are documented in this file.
 
 ## Unreleased
 
+### Changed
+
+- When CI redaction masks a credential inside a reported PII value, remove the
+  finding's digest as well.
+
 ## 0.8.0 - 2026-11-05
 
 ### Added
+
+- `skills/skillevaluator/` is an agent skill for operating SkillEvaluator: it
+  routes requests to the right tier, readiness check, dataset, report, or CI
+  command, and ships Tier 3 evaluation cases for itself. A test keeps every
+  command and option it documents in sync with the CLI. The new "Evaluate from
+  Your Agent" docs page shows how to install it in Codex, Claude Code, OpenCode,
+  OpenClaw, and other skill-aware agents.
 
 - Private runtime runs retain sanitized loading, coverage, MCP, behavior and
   comparison views before cleanup. The saved snapshot supports offline reports

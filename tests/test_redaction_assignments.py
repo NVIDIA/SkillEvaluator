@@ -9,7 +9,7 @@ import time
 
 import pytest
 
-from skillevaluator.utils.redaction import redact_sensitive_text
+from skillevaluator.utils.redaction import credential_safe_cut, redact_sensitive_text
 
 
 @pytest.mark.parametrize(
@@ -184,3 +184,42 @@ def test_redact_sensitive_text_redacts_value_after_long_key_run() -> None:
 
     assert elapsed < 1.0, f"redaction took {elapsed:.2f}s"
     assert redacted == f"{prefix}token=<redacted>\n{prefix}secret:<redacted>"
+
+
+@pytest.mark.parametrize(
+    ("source", "end", "expected"),
+    [
+        pytest.param('{"a":"b","c":"d"}', 12, 12, id="after-punctuation"),
+        pytest.param('{"a":"b","c":"dddd"}', 16, 14, id="before-a-cut-value"),
+        pytest.param("ab cd", 5, 3, id="after-whitespace"),
+        pytest.param("x" * 10, 10, 0, id="no-cut-point"),
+        pytest.param("a=b/c+d~e.f-g_h", 15, 0, id="token-punctuation-is-not-a-cut-point"),
+        pytest.param("x,https://alice:p,ss", 20, 2, id="before-url-user-info"),
+        pytest.param("x,https://host/p,q", 18, 17, id="after-url-authority"),
+    ],
+)
+def test_credential_safe_cut_points(source: str, end: int, expected: int) -> None:
+    assert credential_safe_cut(source, end) == expected
+
+
+# Built at runtime so secret scanners never see a literal credential.
+@pytest.mark.parametrize(
+    ("credential", "secret"),
+    [
+        pytest.param("ghp_" + "a" * 36, "ghp_", id="github"),
+        pytest.param("ghs_" + "b" * 20 + "." + "c" * 20, "ghs_", id="github-stateless"),
+        pytest.param("AKIA" + "IOSFODNN7EXAMPLE", "AKIA", id="aws"),
+        pytest.param("sk-" + "d" * 24, "sk-", id="sk"),
+        pytest.param("eyJ" + "e" * 12 + ".eyJ" + "f" * 12 + "." + "g" * 12, "eyJ", id="jwt"),
+        pytest.param("Bearer " + "h/+=" * 6, "h/+=", id="bearer"),
+        pytest.param("https://alice:p,ss;w@host.example/x", "alice", id="url-user-info"),
+        pytest.param('password:"jjjj,kkkk;llll"', "jjjj", id="quoted-assignment"),
+    ],
+)
+def test_credential_safe_cut_never_leaves_part_of_a_credential(credential: str, secret: str) -> None:
+    text = "Error:{" + credential + "}"
+    start = len("Error:{")
+    for end in range(start + 1, start + len(credential)):
+        cut = credential_safe_cut(text, end)
+        assert cut <= end
+        assert secret not in redact_sensitive_text(text[:cut]), text[:cut]

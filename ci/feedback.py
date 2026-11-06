@@ -53,7 +53,7 @@ CALLER_PATH = ".github/workflows/skill-checks-all-tiers.yml"
 MAX_BYTES = 64 * 1024 * 1024
 MAX_FILE_BYTES = 32 * 1024 * 1024
 MAX_BODY_BYTES = 60000
-# Size the archive member bound from the documented per-run skill limit
+# Size the report member bound from the documented per-run skill limit
 # (run_tier1.MAX_SKILLS). Each skill retains six Tier 1 files (JSON, HTML,
 # Markdown, SARIF, stdout and stderr) and JSON, HTML and Markdown for Tiers 2
 # and 3; GitLab archives also list each skill's directory once per tier.
@@ -61,6 +61,17 @@ MAX_SKILLS = 100
 MEMBERS_PER_SKILL = 6 + 3 + 3 + 3
 MAX_AGGREGATE_MEMBERS = 64  # manifests, summaries, indexes and tier directories
 MAX_FILES = MAX_SKILLS * MEMBERS_PER_SKILL + MAX_AGGREGATE_MEMBERS
+# Every non-success Tier 2/3 skill and a failed Tier 2 catalog also retain worker
+# diagnostics (ci/diagnostics.py), which this job never opens: index.json plus
+# at most diagnostics.MAX_FILES logs (command.log included) and
+# diagnostics.MAX_TOTAL_BYTES. They have their own bound, outside the report
+# member and expansion limits, allowing each retained file up to seven nested
+# directory entries (Harbor job/trial/agent/setup paths on GitLab).
+DIAGNOSTIC_ROOTS = 2 * MAX_SKILLS + 1
+DIAGNOSTIC_FILES = 100 + 1  # diagnostics.MAX_FILES logs plus index.json
+MAX_DIAGNOSTIC_MEMBERS = DIAGNOSTIC_ROOTS * DIAGNOSTIC_FILES * 8
+MAX_DIAGNOSTIC_BYTES = DIAGNOSTIC_ROOTS * (8 + 1) * 1024 * 1024  # logs plus one index.json
+DIAGNOSTIC_PATH = r"(?:tier[23]/skill-[0-9]{3}|tier2/catalog)/diagnostics/.*"
 MAX_PAGES = 10
 MAX_MARKER_RUNS = 20
 MAX_REDIRECTS = 5
@@ -113,7 +124,8 @@ def read_results(raw: bytes, *, prefix: str = "") -> dict:
     try:
         with zipfile.ZipFile(io.BytesIO(raw)) as archive:
             members = {}
-            total = 0
+            reports = total = diagnostic_members = diagnostic_total = 0
+            diagnostic = re.compile(re.escape(prefix) + DIAGNOSTIC_PATH)
             for entry in archive.infolist():
                 name = entry.filename
                 kind = stat.S_IFMT(entry.external_attr >> 16)
@@ -127,9 +139,18 @@ def read_results(raw: bytes, *, prefix: str = "") -> dict:
                 )
                 _require(name not in members, "The aggregate archive contains duplicate members.")
                 members[name] = entry
-                total += entry.file_size
+                if diagnostic.fullmatch(name):
+                    diagnostic_members += 1
+                    diagnostic_total += entry.file_size
+                else:
+                    reports += 1
+                    total += entry.file_size
                 _require(
-                    len(members) <= MAX_FILES and 0 <= entry.file_size <= MAX_FILE_BYTES and total <= MAX_BYTES,
+                    reports <= MAX_FILES
+                    and diagnostic_members <= MAX_DIAGNOSTIC_MEMBERS
+                    and 0 <= entry.file_size <= MAX_FILE_BYTES
+                    and total <= MAX_BYTES
+                    and diagnostic_total <= MAX_DIAGNOSTIC_BYTES,
                     "The aggregate archive exceeds its member or expansion limits.",
                 )
 
@@ -442,7 +463,8 @@ def github_feedback(api, repository: str, run_id: int, attempt: int) -> dict:
 
     def verified(comment):
         # Same-repository workflows can post as github-actions[bot]; bind the
-        # marker to an existing producer run of this caller for this PR head.
+        # marker to an existing same-repository producer run of this caller for
+        # this PR head. Runs with recorded pull requests must include this PR.
         markers = RUN_MARKER.findall(comment["body"])
         if len(markers) != 1:
             return False
@@ -457,13 +479,21 @@ def github_feedback(api, repository: str, run_id: int, attempt: int) -> dict:
                     raise
                 producers[marker_run] = None
         marked = producers[marker_run]
+        if not isinstance(marked, dict):
+            return False
+        pulls = marked.get("pull_requests")
         return (
-            isinstance(marked, dict)
-            and marked.get("id") == marker_run
+            marked.get("id") == marker_run
             and marked.get("path") == CALLER_PATH
             and marked.get("event") == "pull_request"
             and isinstance(marked.get("repository"), dict)
             and marked["repository"].get("full_name") == repository
+            and isinstance(marked.get("head_repository"), dict)
+            and marked["head_repository"].get("full_name") == repository
+            and (
+                not pulls
+                or (isinstance(pulls, list) and any(isinstance(p, dict) and p.get("number") == number for p in pulls))
+            )
             and marked.get("head_sha") == run["head_sha"]
             and type(marked.get("run_attempt")) is int
             and marked["run_attempt"] >= marker_attempt

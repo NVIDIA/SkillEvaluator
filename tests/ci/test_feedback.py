@@ -356,9 +356,11 @@ def test_github_rechecks_head_after_comments_and_preserves_human_marker(github):
     assert not api.writes
 
 
-def test_github_does_not_overwrite_newer_run_receipt(github):
+@pytest.mark.parametrize("pulls", [[{"number": 7}], [{"number": 8}, {"number": 7}], []])
+def test_github_does_not_overwrite_newer_run_receipt(github, pulls):
     module, api = github
-    api.other_runs[124] = {**copy.deepcopy(api.run), "id": 124}
+    # GitHub may omit a run's pull requests; it then stays bound by head and repository.
+    api.other_runs[124] = {**copy.deepcopy(api.run), "id": 124, "pull_requests": pulls}
     api.comments = [
         {
             "id": 5,
@@ -382,6 +384,9 @@ def _bot_comment(module, identifier, marker):
         "124:1",  # another workflow's run
         "125:1",  # producer run for a different PR head
         "126:1",  # producer run from another event
+        "127:1",  # fork pull-request run of the same head commit
+        "128:1",  # producer run of another pull request on the same head
+        "129:1",  # run whose head repository was deleted
         "123:9",  # attempt that never existed
     ],
 )
@@ -390,6 +395,10 @@ def test_github_overwrites_unverifiable_bot_marker_instead_of_deferring(github, 
     api.other_runs[124] = {**copy.deepcopy(api.run), "id": 124, "path": ".github/workflows/other.yml"}
     api.other_runs[125] = {**copy.deepcopy(api.run), "id": 125, "head_sha": "e" * 40}
     api.other_runs[126] = {**copy.deepcopy(api.run), "id": 126, "event": "push"}
+    fork = {"full_name": "contributor/skills", "id": 99}
+    api.other_runs[127] = {**copy.deepcopy(api.run), "id": 127, "head_repository": fork, "pull_requests": []}
+    api.other_runs[128] = {**copy.deepcopy(api.run), "id": 128, "pull_requests": [{"number": 8}]}
+    api.other_runs[129] = {**copy.deepcopy(api.run), "id": 129, "head_repository": None}
     api.comments = [_bot_comment(module, 5, marker)]
     result = module.github_feedback(api, REPO, 123, 1)
     assert result["comment_action"] == "updated"
@@ -1142,8 +1151,31 @@ def test_tier3_neutral_evidence_is_never_promoted(complete, status):
         module.read_results(_tier3_neutral_archive(status, complete=complete))
 
 
-def _aggregate_layout(skills, *, directories):
-    """Member names of a full three-tier aggregate as its producers retain them."""
+def _retained_diagnostics(tmp_path, trials):
+    """Members of one real worker-diagnostics tree for a failed Harbor run."""
+    from ci.diagnostics import retain_diagnostics
+
+    raw, leaf = tmp_path / "raw", tmp_path / "leaf"
+    for number in range(trials):
+        trial = raw / f"harbor/job/trial-{number:03d}"
+        (trial / "agent/setup").mkdir(parents=True)
+        (trial / "trial.log").write_text("trial started\n")
+        (trial / "exception.txt").write_text("RuntimeError: startup failed\n")
+        (trial / "agent/setup/install-agent-runtime.failed.log").write_text("install failed\n")
+    (tmp_path / "command.log").write_text("command\n")
+    retain_diagnostics(raw, leaf, set(), command_log=tmp_path / "command.log")
+    paths = sorted((leaf / "diagnostics").rglob("*"))
+    files = [p.relative_to(leaf).as_posix() for p in paths if p.is_file()]
+    folders = ["diagnostics/"] + [p.relative_to(leaf).as_posix() + "/" for p in paths if p.is_dir()]
+    return files, folders
+
+
+def _aggregate_layout(skills, *, directories, diagnostics=((), ())):
+    """Member names of a full three-tier aggregate as its producers retain them.
+
+    ``diagnostics`` holds one worker-diagnostics tree (files, folders) retained
+    for every Tier 2 and Tier 3 skill and for a failed Tier 2 catalog.
+    """
     prefix = "skill-evaluator-results/" if directories else ""
     names = [
         "ci-results.json",
@@ -1163,6 +1195,11 @@ def _aggregate_layout(skills, *, directories):
         for tier in (2, 3):
             names += [f"tier{tier}/{leaf}/skillevaluator-tier{tier}.{ext}" for ext in ("json", "html", "md")]
         folders += [f"tier{tier}/{leaf}/" for tier in (1, 2, 3)]
+    files, nested = diagnostics
+    for root in [f"tier{tier}/skill-{n:03d}/" for n in range(1, skills + 1) for tier in (2, 3)] + ["tier2/catalog/"]:
+        if files:
+            names += [root + name for name in files]
+            folders += ([root] if root == "tier2/catalog/" else []) + [root + name for name in nested]
     output = io.BytesIO()
     with zipfile.ZipFile(output, "w") as zipped:
         for folder in folders if directories else []:
@@ -1181,6 +1218,79 @@ def test_member_limit_admits_the_documented_maximum_skill_count_on_every_platfor
     raw, prefix, members = _aggregate_layout(module.MAX_SKILLS, directories=directories)
     assert members <= module.MAX_FILES
     assert module.read_results(raw, prefix=prefix)["tiers"][0]["status"] == "skipped"
+
+
+@pytest.mark.parametrize("trials", [24, 40])
+@pytest.mark.parametrize("directories", [False, True])
+def test_member_limit_admits_worker_diagnostics_for_every_non_success_skill(tmp_path, directories, trials):
+    from ci import diagnostics
+
+    module = adapter()
+    files, folders = _retained_diagnostics(tmp_path, trials)
+    # 40 trials reach the producer's own retained-file cap.
+    assert "diagnostics/index.json" in files
+    assert (len(files) == diagnostics.MAX_FILES + 1) is (trials == 40)
+    raw, prefix, members = _aggregate_layout(module.MAX_SKILLS, directories=directories, diagnostics=(files, folders))
+    assert members > module.MAX_FILES
+    assert module.read_results(raw, prefix=prefix)["tiers"][0]["status"] == "skipped"
+    assert module.DIAGNOSTIC_FILES == diagnostics.MAX_FILES + 1
+    assert module.MAX_DIAGNOSTIC_BYTES == module.DIAGNOSTIC_ROOTS * (
+        diagnostics.MAX_TOTAL_BYTES + diagnostics.MAX_FILE_BYTES
+    )
+
+
+def test_worker_diagnostic_bytes_do_not_consume_the_report_expansion_limit():
+    from ci import diagnostics
+
+    module = adapter()
+    output = io.BytesIO()
+    log = b"startup failed\n" * (diagnostics.MAX_FILE_BYTES // 15)
+    roots = module.MAX_BYTES // diagnostics.MAX_TOTAL_BYTES + 1
+    with zipfile.ZipFile(output, "w", zipfile.ZIP_DEFLATED) as zipped:
+        zipped.writestr("ci-results.json", json.dumps(manifest()))
+        for number in range(1, roots + 1):
+            for trial in range(diagnostics.MAX_TOTAL_BYTES // len(log)):
+                zipped.writestr(f"tier3/skill-{number:03d}/diagnostics/harbor/job/t{trial}/trial.log", log)
+        declared = sum(entry.file_size for entry in zipped.infolist())
+    assert declared > module.MAX_BYTES and len(output.getvalue()) <= module.MAX_BYTES
+    assert module.read_results(output.getvalue())["tiers"][0]["status"] == "skipped"
+
+
+@pytest.mark.parametrize(
+    "name",
+    [
+        "tier3/skill-001/diagnostics/harbor/job/trial/trial.log",
+        "tier2/skill-001/diagnostics/",
+        "tier2/catalog/diagnostics/command.log",
+    ],
+)
+def test_worker_diagnostics_keep_their_own_member_and_byte_bounds(monkeypatch, name):
+    module = adapter()
+
+    def payload(members, size):
+        output = io.BytesIO()
+        with zipfile.ZipFile(output, "w") as zipped:
+            zipped.writestr("ci-results.json", json.dumps(manifest()))
+            for number in range(members):
+                zipped.writestr(f"{name}{number}" + ("/" if name.endswith("/") else ""), b"x" * size)
+        return output.getvalue()
+
+    monkeypatch.setattr(module, "MAX_FILES", 1)
+    monkeypatch.setattr(module, "MAX_DIAGNOSTIC_MEMBERS", 3)
+    monkeypatch.setattr(module, "MAX_DIAGNOSTIC_BYTES", 30)
+    assert module.read_results(payload(3, 10))["tiers"][0]["status"] == "skipped"
+    for members, size in ((4, 0), (3, 11)):
+        with pytest.raises(module.FeedbackError, match="member or expansion limits"):
+            module.read_results(payload(members, size))
+    # Similar names outside a retained diagnostics root stay in the report budget.
+    monkeypatch.setattr(module, "MAX_FILES", 2)
+    output = io.BytesIO()
+    with zipfile.ZipFile(output, "w") as zipped:
+        zipped.writestr("ci-results.json", json.dumps(manifest()))
+        zipped.writestr("tier1/skill-001/diagnostics/a.log", "x")
+        zipped.writestr("tier3/skill-001/other/diagnostics/b.log", "x")
+    with pytest.raises(module.FeedbackError, match="member or expansion limits"):
+        module.read_results(output.getvalue())
 
 
 def test_member_limit_still_rejects_one_member_above_the_derived_bound():

@@ -65,11 +65,14 @@ native reports. See the
 [comment and report contract](reports.mdx#retained-three-tier-ci-evidence).
 The workflow never checks out the candidate with a write token. Fork PR runs and
 producer attempts superseded by a re-run are skipped without a comment rather than
-failed. An existing report comment is kept only when its run marker names a
-producer run of this caller for the same PR head; other `github-actions[bot]`
-report comments are treated as stale and overwritten. Merge this feedback file
-onto the default branch before expecting the first automatic comment. Changes
-to the caller must refresh its approved Git blob in `trusted-caller-blobs`.
+failed. The workflow defers only to a report comment whose run marker names a
+newer same-repository producer run or attempt of this caller for the same pull
+request head. Otherwise it updates one existing report comment in place,
+preferring one whose marker verifies, and leaves any other report comments
+untouched. Report comments with unverifiable markers are never deferred to.
+Merge this feedback file onto the default branch before expecting the first
+automatic comment. Changes to the caller must refresh its approved Git blob in
+`trusted-caller-blobs`.
 
 A missing provider key, unavailable runtime, or missing committed native dataset
 must remain visible as an incomplete or needs-action result. Local `ci init`,

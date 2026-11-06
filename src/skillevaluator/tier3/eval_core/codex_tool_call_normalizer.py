@@ -1191,8 +1191,8 @@ def _resolve_exec_records(
     observation = _outer_tool_call_observation(step, tool_call, include_unscoped=raw_index == 0)
     record_format = normalized[0][_RECORD_FORMAT]
     records = _codex_exec_records(observation, record_format, len(normalized))
-    if record_format == ("single",) and not (records and records[0][1]):
-        return normalized  # only an explicit failure changes how a lone call's whole output reads
+    if record_format == ("single",) and not (records and records[0][1] is not None):
+        return normalized  # a lone call keeps its whole output unless its record states an outcome
     if records is None:
         return _upstream_normalize_tool_call(tool_call)
     return [

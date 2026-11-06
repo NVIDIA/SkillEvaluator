@@ -1648,3 +1648,18 @@ def test_pragma_line_ended_by_a_javascript_line_terminator_fails_closed(extracto
 
     assert result["passed"] is False
     assert result["score"] == 0.5
+
+
+@pytest.mark.parametrize("extractor", _EXTRACTORS)
+@pytest.mark.parametrize("outer_error", [None, True], ids=["no-outer-flag", "outer-error-flag"])
+def test_extended_codex_lone_successful_call_uses_its_own_record(extractor, outer_error):
+    # The record says exit 0, so its traceback text and the outer flag must not decide the grade.
+    source = "text(await tools.exec_command({cmd:'cat tests/fixture.log'}));"
+    record = {"exit_code": 0, "output": "Traceback (most recent call last):\nValueError: bad\n"}
+    trajectory = _trajectory(source, _record_observation([record]))
+    if outer_error is not None:
+        trajectory["steps"][0]["observation"]["results"][0]["extra"] = {"tool_result_is_error": outer_error}
+    calls = extractor(trajectory)
+
+    assert calls[0]["is_error"] is False
+    assert _error_recovery(trajectory, extractor)["first_attempt_clean"] is True

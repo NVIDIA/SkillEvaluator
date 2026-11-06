@@ -315,7 +315,18 @@ def test_context_masks_the_path_a_copied_run_had_elsewhere(tmp_path: Path) -> No
                     f"see ~/acme-skill/results/{RUN_ID}, then ({windows}\\jobs).",
                     kept,
                 ],
-            }
+            },
+            "opencode": {
+                "execution_errors": [
+                    f"see ~builder/acme-skill/results/{RUN_ID}/jobs, $HOME/acme-skill/{RUN_ID}, "
+                    f"${{HOME}}/acme-skill/{RUN_ID} and %USERPROFILE%\\acme-skill\\{RUN_ID}",
+                    # A path joined to another path or option keeps the other one.
+                    f"tried /opt/tool/bin,{posix}/jobs; PATH=/usr/bin:{posix} log:/var/log/x({posix}) "
+                    f"PATH=C:\\bin;{windows}",
+                    # A separator that does not start another absolute path is part of this one.
+                    f"in /home/ci-runner/my(project),v2/{RUN_ID}",
+                ],
+            },
         },
     }
 
@@ -330,9 +341,42 @@ def test_context_masks_the_path_a_copied_run_had_elsewhere(tmp_path: Path) -> No
     assert errors[2] == f"see {RUN_ID}, then ({RUN_ID}\\jobs)."
     # A relative path and other names that only start with the run ID are left alone.
     assert errors[3] == kept
-    (row,) = context["cases"]
+    assert context["agents"]["opencode"]["execution_errors"] == [
+        f"see {RUN_ID}/jobs, {RUN_ID}, {RUN_ID} and {RUN_ID}",
+        f"tried /opt/tool/bin,{RUN_ID}/jobs; PATH=/usr/bin:{RUN_ID} log:/var/log/x({RUN_ID}) PATH=C:\\bin;{RUN_ID}",
+        f"in {RUN_ID}",
+    ]
+    (row, _other_agent_row) = context["cases"]
     assert row["question"] == f"Read {RUN_ID}/inputs/a.txt"
     assert row["ground_truth"] == f"path={RUN_ID}"
+
+
+def test_context_replaces_the_skill_and_home_directories(tmp_path: Path) -> None:
+    # Paths outside the run directory still name the user and where the skill lives.
+    home = tmp_path / "home" / "alice"
+    skill = home / "work" / "acme-skill"
+    run = skill / "evals" / "results" / RUN_ID
+    payload = {
+        "dataset": [{"id": "case-1", "question": f"Read {skill / 'references' / 'a.md'}"}],
+        "agents": {
+            "codex": {
+                "execution_errors": [
+                    f"Skill validation failed: {skill / 'SKILL.md'} missing name",
+                    f"cache {home / '.cache'} is full; see {run / 'jobs'}",
+                    f"kept {home}-old, {skill}2 and {home.parent}",
+                ],
+            }
+        },
+    }
+
+    context = compact_run_context(payload, run_dir=run, skill_dir=skill, home=home)
+
+    errors = context["agents"]["codex"]["execution_errors"]
+    assert errors[0] == f"Skill validation failed: {Path('acme-skill') / 'SKILL.md'} missing name"
+    assert errors[1] == f"cache {Path('~') / '.cache'} is full; see {Path(RUN_ID) / 'jobs'}"
+    # A directory whose name only starts with the same name is a different directory.
+    assert errors[2] == f"kept {home}-old, {Path('~') / 'work' / 'acme-skill2'} and {home.parent}"
+    assert context["cases"][0]["question"] == f"Read {Path('acme-skill') / 'references' / 'a.md'}"
 
 
 def test_context_redacts_credentials_but_keeps_measurements() -> None:
@@ -789,6 +833,30 @@ def test_open_feedback_session(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) 
 
     assert session.run_context["skill_name"] == "demo"
     assert session.run_context["run_id"] == RUN_ID
+
+
+@pytest.mark.parametrize("explicit", [False, True], ids=["inferred-skill", "explicit-skill"])
+def test_open_feedback_session_replaces_the_skill_and_home_directories(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path, explicit: bool
+) -> None:
+    home = tmp_path / "home" / "alice"
+    skill = home / "work" / "acme-skill"
+    # An inferred skill is only a name; a run in the skill's evals/results still names its directory.
+    # An explicit --skill also covers a run kept under another results directory.
+    run = home / "results" / "acme-skill" / RUN_ID if explicit else skill / "evals" / "results" / RUN_ID
+    monkeypatch.setenv("HOME", str(home))
+    monkeypatch.setenv("USERPROFILE", str(home))
+    error = f"Skill validation failed: {skill / 'SKILL.md'} missing name; cache {home / '.cache'}"
+    payload = {"skill_name": "acme-skill", "agents": {"codex": {"execution_errors": [error]}}}
+    monkeypatch.setattr(tier3_feedback_chat, "assert_completed_run_dir", lambda run: run)
+    monkeypatch.setattr(tier3_feedback_chat, "load_agent_eval_payload", lambda *_: payload)
+    monkeypatch.setattr(tier3_feedback_chat, "resolve_llm_provider", lambda: None)
+
+    session = open_feedback_session(skill if explicit else Path("acme-skill"), run)
+
+    assert session.run_context["agents"]["codex"]["execution_errors"] == [
+        f"Skill validation failed: {Path('acme-skill') / 'SKILL.md'} missing name; cache {Path('~') / '.cache'}"
+    ]
 
 
 def test_open_feedback_session_rejects_misconfigured_provider(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> None:

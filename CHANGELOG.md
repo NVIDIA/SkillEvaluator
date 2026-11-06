@@ -35,10 +35,11 @@ All notable changes to SkillEvaluator are documented in this file.
   scores, measured agent tokens and seconds, execution errors, and the report's
   saved feedback, without evaluating again or regenerating LLM feedback. It uses
   the configured `SKILL_EVAL_LLM_PROVIDER` and `SKILL_EVAL_LLM_MODEL`, sends the
-  run ID instead of the local path, redacts credential-shaped text, and writes
-  nothing to disk. No request is sent before the first question. `LLMClient`
-  gains `chat(messages)` for multi-turn requests with the same retries and typed
-  errors as `completions()`.
+  run ID instead of the local path, writes the evaluated skill's directory as
+  its name and the home directory as `~`, redacts credential-shaped text, and
+  writes nothing to disk. No request is sent before the first question.
+  `LLMClient` gains `chat(messages)` for multi-turn requests with the same
+  retries and typed errors as `completions()`.
 
 - Opt-in `LLM_JUDGE_FALLBACK_POLICY` and `LLM_JUDGE_RETRY_POLICY` for the Tier 3
   standard judges. `LLM_JUDGE_FALLBACK_POLICY=replace` lets only the judge

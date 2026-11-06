@@ -181,6 +181,15 @@ def trial_coverage(payload: object) -> TrialCoverage:
     if agent_nodes > remaining:
         return TrialCoverage(ConditionCoverage(), ConditionCoverage(), MappingProxyType({}))
     remaining -= agent_nodes
+    # The producer marks deliberately unexecuted arms at payload level: an
+    # advisory skip sets execution_status="skipped" with no agents, and
+    # --skip-baseline omits the baseline condition (mode "with_skill_only").
+    if payload.get("execution_status") == "skipped":
+        skipped_arms = {"with_skill", "without_skill"}
+    else:
+        skipped_arms = {"with_skill_only": {"without_skill"}, "baseline_only": {"with_skill"}}.get(
+            payload.get("mode"), set()
+        )
 
     def retained_rows(value: object) -> int | None:
         nonlocal remaining
@@ -202,6 +211,8 @@ def trial_coverage(payload: object) -> TrialCoverage:
         coverage = {}
         for arm in ("with_skill", "without_skill"):
             evidence = conditions.get(arm)
+            if evidence is None and arm in skipped_arms:
+                evidence = {"execution_status": "skipped"}
             evidence = evidence if isinstance(evidence, dict) else {}
             status = evidence.get("execution_status")
             status = status if status in ("succeeded", "failed", "incomplete", "skipped") else "unavailable"
@@ -212,6 +223,8 @@ def trial_coverage(payload: object) -> TrialCoverage:
 
     def combine(arm: str) -> ConditionCoverage:
         members = [agent[arm] for agent in agents.values()]
+        if not members and arm in skipped_arms:
+            return ConditionCoverage("skipped")
         status = next(
             (
                 s
@@ -300,10 +313,16 @@ def build_final_render_context(
             assessment.status
         ]
     )
+    headline = run.headline
+    tier3 = run.tiers[3]
+    if report_scope == "tier3" and tier3.blocking is None and tier3.status in (Status.FAILED, Status.INCOMPLETE):
+        # A standalone Tier 3 report carries no gating metadata, so Tier 3 is
+        # the command's only gate; its verdict must drive the header too.
+        headline = tier3.status
     return FinalRenderContext(
-        run.headline,
+        headline,
         {Status.PASSED: "Passed required checks", Status.FAILED: "Changes required", Status.INCOMPLETE: "Incomplete"}[
-            run.headline
+            headline
         ],
         publication,
         "Not assessed (Tier 3 only)"

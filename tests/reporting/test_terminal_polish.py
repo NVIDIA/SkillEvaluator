@@ -3,6 +3,7 @@
 
 import io
 import math
+from pathlib import Path
 
 import pytest
 from rich.console import Console
@@ -11,6 +12,11 @@ from rich.text import Text
 from skillevaluator.models import ValidationResult
 from skillevaluator.reporting.cli import CLIReporter
 from skillevaluator.reporting.console_ui import ValidateView, Verdict, detail_row, lift_row, summarize_tier1
+
+# Native absolute path: POSIX-rooted paths such as /tmp/... are drive-relative
+# on Windows, and artifact links deliberately skip those (see
+# test_artifact_uri_uses_only_native_absolute_windows_paths).
+NATIVE_REPORT = str(Path(Path.cwd().anchor, "tmp", "actual [name].html"))
 
 
 @pytest.mark.parametrize(
@@ -173,7 +179,7 @@ def test_interactive_footer_links_require_capability_and_preserve_real_path(monk
     for stream, no_color, expect_link in [(TTY(), False, True), (TTY(), True, False), (io.StringIO(), False, False)]:
         console = Console(file=stream, force_terminal=True, no_color=no_color, color_system="truecolor", width=98)
         view = ValidateView("demo", [], console=console)
-        view.links = [("report", "/tmp/actual [name].html")]
+        view.links = [("report", NATIVE_REPORT)]
         console.print(next(view._footer_lines()))
         text = stream.getvalue()
         assert "actual [name].html" in text
@@ -297,7 +303,7 @@ def test_footer_links_follow_capture_at_render_time(monkeypatch):
     stream = TTY()
     console = Console(file=stream, color_system="truecolor", no_color=False, width=120)
     view = ValidateView("demo", [], console=console)
-    view.links = [("report", "/tmp/actual [name].html")]
+    view.links = [("report", NATIVE_REPORT)]
     view.verdict = Verdict(True, "Passed required checks")
     with console.capture() as capture:
         console.print(view)

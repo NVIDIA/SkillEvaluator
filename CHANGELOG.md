@@ -467,6 +467,10 @@ All notable changes to SkillEvaluator are documented in this file.
 
 ### Fixed
 
+- Tier 2 includes qualifying shell comment blocks at end of file in context
+  deduplication. Previously those blocks disappeared unless a blank line or
+  code followed them, which could hide repeated guidance across shell files.
+
 - Tier 3 behavior-check evidence bundles now count a final answer cut by
   the final-response section limit as truncated. The omission check
   compared two renderings that both capped that section (800 characters

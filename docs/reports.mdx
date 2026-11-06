@@ -623,19 +623,24 @@ Inference covers trajectories whose tool calls are all Codex shell tools
 `shell_command`) or `apply_patch`, each with a recorded wall time. A trial that
 also calls a tool with no recorded duration, such as web search,
 `update_plan`, or an MCP tool, or whose step timestamps are missing, lack a UTC
-offset, or run backwards, has no LLM or tool time. Agents without native timing
-or Codex `Wall time` headers are timed only when their trajectory has no tool
-calls.
+offset, or run backwards, has no LLM or tool time. Inferred timing also needs
+the agent's next step right after each tool step: a user or system step there
+can follow idle or user time, so the trial has no timing. Agents without native
+timing or Codex `Wall time` headers are timed only when their trajectory has no
+tool calls.
+
 Each step of a multi-step task is timed on its own, so the time between Harbor
 steps is not counted. Steps marked `is_copied_context` repeat context from an
 earlier trajectory and are not timed; a copied step after new steps leaves the
 trial without timing. Copied timestamps do not show when the first new response
 started, so inferred timing also leaves the trial without timing when the new
-steps after copied context start with an agent step. Trials whose `trajectory.json` was omitted (too large, or
-redaction or validation failed) and multi-step trials scored per step have no
-timing. Missing timing stays `N/A` (`null` in JSON), never zero, and follows the
-same complete-arm and matching-case rules as tokens. Timing is diagnostic and
-does not change scores, verdicts, or gates.
+steps after copied context start with an agent step.
+
+Trials whose `trajectory.json` was omitted (too large, or redaction or
+validation failed) and multi-step trials scored per step have no timing.
+Missing timing stays `N/A` (`null` in JSON), never zero, and follows the same
+complete-arm and matching-case rules as tokens. Timing is diagnostic and does
+not change scores, verdicts, or gates.
 
 ### Failure reasons and per-trial rows
 

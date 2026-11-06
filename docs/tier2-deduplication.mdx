@@ -173,9 +173,14 @@ with its own heading line, so the text compared is the body after that line:
 the same body under different headings is listed once too. Each occurrence
 keeps its own entry with its file, section, line range, and heading line, plus
 a reference to the shared text. A repeated text is listed once only when that
-shortens the request, so a short one, such as a one-line body under long
-headings, stays inline. Distinct text, including text that differs by a single
-character, is always sent in full; nothing is sampled or dropped to fit.
+shortens the request. A short one, such as a one-line body, stays inline because
+its reference would be longer than the text; the heading line stays with every
+occurrence either way, so heading length does not affect this. The most
+repeated texts are numbered first, because a reference to block 10 or later is
+one character longer than one to blocks 1-9, and the texts listed once are the
+ones that shorten the request most. Distinct text, including text that differs
+by a single character, is always sent in full; nothing is sampled or dropped to
+fit.
 A cluster that is still over 64,000 characters stops the scan as incomplete
 (`llm_prompt_size_limit`), as described below. A duplicate or
 `llm_refused` finding names up to 64 member locations and source files and

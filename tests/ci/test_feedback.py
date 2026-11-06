@@ -413,6 +413,65 @@ def test_gitlab_binds_protected_downstream_bridge_config_head_job_and_bot(gitlab
     assert len(api.writes) == 1
 
 
+@pytest.mark.parametrize("ref", ["ci/skillevaluator-all-tiers-setup", "refs/merge-requests/7/head"])
+def test_gitlab_accepts_current_mr_branch_or_exact_detached_head_ref(gitlab, ref):
+    module, api = gitlab
+    api.mr["source_branch"] = "ci/skillevaluator-all-tiers-setup"
+    api.pipeline["ref"] = api.job["ref"] = ref
+    result = module.gitlab_feedback(api, "https://gitlab.example/api/v4", "12", 123)
+    assert result["comment_action"] == "created"
+    assert len(api.writes) == 1
+
+
+@pytest.mark.parametrize(
+    "ref",
+    [
+        "refs/merge-requests/8/head",
+        "refs/merge-requests/7/merge",
+        "refs/merge-requests/07/head",
+        "refs/merge-requests/7/head/other",
+        "other-branch",
+    ],
+)
+def test_gitlab_rejects_unrelated_or_non_head_mr_producer_refs(gitlab, ref):
+    module, api = gitlab
+    api.pipeline["ref"] = api.job["ref"] = ref
+    result = module.gitlab_feedback(api, "https://gitlab.example/api/v4", "12", 123)
+    assert result["comment_action"] == "skipped"
+    assert not api.writes
+
+
+@pytest.mark.parametrize("branch", [None, "", ["feature"]])
+def test_gitlab_detached_head_ref_still_requires_a_source_branch(gitlab, branch):
+    module, api = gitlab
+    api.pipeline["ref"] = api.job["ref"] = "refs/merge-requests/7/head"
+    api.mr["source_branch"] = branch
+    result = module.gitlab_feedback(api, "https://gitlab.example/api/v4", "12", 123)
+    assert result["comment_action"] == "skipped"
+    assert not api.writes
+
+
+@pytest.mark.parametrize("change", ["head", "head-pipeline", "job-ref", "recheck"])
+def test_gitlab_detached_head_ref_keeps_exact_current_producer_guards(gitlab, change):
+    module, api = gitlab
+    api.pipeline["ref"] = api.job["ref"] = "refs/merge-requests/7/head"
+    if change == "head":
+        api.mr["sha"] = "e" * 40
+    elif change == "head-pipeline":
+        api.mr["head_pipeline"]["id"] = 124
+    elif change == "job-ref":
+        api.job["ref"] = "refs/merge-requests/8/head"
+    else:
+        api.flip_head_on_recheck = True
+    if change == "job-ref":
+        with pytest.raises(module.FeedbackError, match="aggregate job artifact identity"):
+            module.gitlab_feedback(api, "https://gitlab.example/api/v4", "12", 123)
+    else:
+        result = module.gitlab_feedback(api, "https://gitlab.example/api/v4", "12", 123)
+        assert result["comment_action"] == "skipped"
+    assert not api.writes
+
+
 @pytest.mark.parametrize(
     "change",
     [

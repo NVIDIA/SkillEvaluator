@@ -745,7 +745,10 @@ def gitlab_feedback(api, api_url: str, project: str, pipeline_id: int) -> dict:
             and mr.get("sha") == source["sha"]
             and mr.get("source_project_id") == project_id
             and mr.get("target_project_id") == project_id
-            and mr.get("source_branch") == source["ref"]
+            and isinstance(mr.get("source_branch"), str)
+            and bool(mr["source_branch"])
+            # Detached MR pipelines use the internal head ref on GitLab 17.8.
+            and source["ref"] in (mr["source_branch"], f"refs/merge-requests/{number}/head")
             and mr.get("head_pipeline", {}).get("id") == pipeline_id
             and latest["id"] == aggregate["id"]
         )

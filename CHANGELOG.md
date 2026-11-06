@@ -55,6 +55,16 @@ All notable changes to SkillEvaluator are documented in this file.
   approved reusable workflow wrappers. Direct callers retain the existing setup;
   signed evaluator identity and exact consumer workflow approvals remain required.
 
+- Add an `error_handling` section to the `--quality-config` file for
+  Reliability's three error-handling rules: the `SKILL.md` mention check and
+  the `scripts` and `lib` code checks. Each sets `points`, `message`,
+  `suggestion`, and its `terms` or `markers`; `points: 0` turns a rule off.
+  The section is optional and merges with the packaged values. Without a
+  custom file, scores and findings are unchanged. The packaged
+  `quality_config` digest changes once, because `quality-default.yaml` gained
+  the section. A custom file's digest covers only the rules that file sets, so
+  existing custom files keep their digests and a digest changes only when the
+  file's rules change.
 - Include `skillevaluator ci init`, `ci status` and `ci demo` in the Python
   package. Guided GitHub onboarding discovers skills, configures checks and
   optional public hosted reports, and opens a reviewable setup PR. An optional

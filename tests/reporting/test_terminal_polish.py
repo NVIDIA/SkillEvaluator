@@ -174,9 +174,12 @@ def test_interactive_footer_links_require_capability_and_preserve_real_path(monk
     expected_uri = report_path.as_uri()
     assert expected_uri.endswith("/actual%20%5Bname%5D.html")
     for stream, no_color, expect_link in [(TTY(), False, True), (TTY(), True, False), (io.StringIO(), False, False)]:
+        # Rich never emits OSC 8 in legacy Windows console mode, which it
+        # detects on CI runners without VT support; model a VT terminal.
         console = Console(
             file=stream,
             force_terminal=True,
+            legacy_windows=False,
             no_color=no_color,
             color_system="truecolor",
             width=max(120, len(str(report_path)) + 30),
@@ -308,7 +311,13 @@ def test_footer_links_follow_capture_at_render_time(monkeypatch, tmp_path):
     expected_uri = report_path.as_uri()
     assert expected_uri.endswith("/actual%20%5Bname%5D.html")
     stream = TTY()
-    console = Console(file=stream, color_system="truecolor", no_color=False, width=max(120, len(str(report_path)) + 30))
+    console = Console(
+        file=stream,
+        color_system="truecolor",
+        legacy_windows=False,
+        no_color=False,
+        width=max(120, len(str(report_path)) + 30),
+    )
     view = ValidateView("demo", [], console=console)
     view.links = [("report", str(report_path))]
     view.verdict = Verdict(True, "Passed required checks")

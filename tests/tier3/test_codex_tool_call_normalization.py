@@ -1827,3 +1827,30 @@ def test_exec_call_that_is_not_a_codex_wrapper_is_left_alone_by_the_space_check(
 
     assert [call["action"] for call in calls] == ["exec"]
     assert "normalization_status" not in calls[0]
+
+
+@pytest.mark.parametrize("extractor", _EXTRACTORS)
+@pytest.mark.parametrize("number", ["1e400", "-1e400", "NaN", "Infinity", "-Infinity"])
+@pytest.mark.parametrize(
+    "source",
+    [
+        'const r=await tools.exec_command({{cmd:"x",n:{n}}});text(r);',
+        'const r=await tools.exec_command({{cmd:"x",n:[{n}]}});text(r);',
+    ],
+    ids=["bound", "bound-nested"],
+)
+def test_upstream_grammar_form_with_a_non_finite_number_stays_unsupported(extractor, number, source):
+    # JavaScript serializes these as null, so the decoded inf or nan would not be the call's real argument.
+    calls = extractor(_trajectory(source.format(n=number), "outer observation"))
+
+    assert len(calls) == 1
+    assert calls[0]["normalization_status"] == "unsupported_native_codex_exec_wrapper"
+
+
+@pytest.mark.parametrize("extractor", _EXTRACTORS)
+@pytest.mark.parametrize("number", ["1e3", "-0", "1.5", "2.5e-3"])
+def test_upstream_grammar_form_with_a_finite_number_still_decodes(extractor, number):
+    source = f'const r=await tools.exec_command({{cmd:"x",n:{number}}});text(r);'
+    calls = extractor(_trajectory(source, "outer observation"))
+
+    assert [call["action"] for call in calls] == ["exec_command"]

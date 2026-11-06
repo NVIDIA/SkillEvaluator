@@ -161,6 +161,19 @@ def _skip_js_quoted(source: str, start: int, quote: str) -> int:
     return -1
 
 
+def _finite_float(text: str) -> float:
+    """Parse a JSON float; JavaScript serializes an overflowing one as null, so inf is not its value."""
+    value = float(text)
+    if not math.isfinite(value):
+        raise ValueError(text)
+    return value
+
+
+def _reject_constant(name: str) -> float:
+    """Reject NaN and Infinity, which `json.loads` takes but JavaScript serializes as null."""
+    raise ValueError(name)
+
+
 def _decode_static_js_object(source: str, start: int) -> tuple[dict[str, Any], int] | None:
     """Decode a JSON-compatible object literal, including unquoted property names."""
     rendered: list[str] = []
@@ -204,7 +217,7 @@ def _decode_static_js_object(source: str, start: int) -> tuple[dict[str, Any], i
         index += 1
         if not stack:
             try:
-                arguments = json.loads("".join(rendered))
+                arguments = json.loads("".join(rendered), parse_float=_finite_float, parse_constant=_reject_constant)
             except (json.JSONDecodeError, RecursionError, TypeError, ValueError):
                 return None
             return (arguments, index) if isinstance(arguments, dict) else None

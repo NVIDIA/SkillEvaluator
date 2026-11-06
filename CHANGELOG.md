@@ -572,17 +572,18 @@ All notable changes to SkillEvaluator are documented in this file.
   512-chunk ceiling, which the chunk check already enforces, so it is only a
   guard and never stops a scan on its own; the per-cluster prompt, total
   prompt, and cluster-count limits decide. When a cluster's request (system
-  prompt plus cluster text) would exceed 64,000 characters, each exactly
-  repeated text is sent once as `SHARED CONTENT n` when that makes the request
-  shorter. A short text, such as a one-line body, stays inline because its
-  reference would be longer than the text. A Markdown section is compared
-  without its own heading line, so the same body under different headings is
-  shared too. Every occurrence keeps its own entry with its file, section,
-  line range, and heading line. Distinct text is never dropped or sampled, so
-  a cluster still over the budget stays incomplete with
-  `llm_prompt_size_limit`. Duplicate and `llm_refused` finding messages name
-  at most 64 member locations and source files and count the rest; the JSON
-  `source_files` list stays complete.
+  prompt plus cluster text) would exceed 64,000 characters, exactly repeated
+  texts are sent once as `SHARED CONTENT n`, choosing the ones that make the
+  request shortest. A short text, such as a one-line body, stays inline
+  because its reference would be longer than the text. The most repeated texts
+  get blocks 1-9, whose references are one character shorter than those of
+  later blocks. A Markdown section is compared without its own heading line,
+  so the same body under different headings is shared too. Every occurrence
+  keeps its own entry with its file, section, line range, and heading line.
+  Distinct text is never dropped or sampled, so a cluster still over the
+  budget stays incomplete with `llm_prompt_size_limit`. Duplicate and
+  `llm_refused` finding messages name at most 64 member locations and source
+  files and count the rest; the JSON `source_files` list stays complete.
 - Local-mode verifier uploads now copy directly to the absent destination,
   avoiding an unnecessary rollback snapshot of an empty tests directory.
   Inputs and rewritten scripts are prepared privately before publication,

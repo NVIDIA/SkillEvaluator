@@ -467,6 +467,9 @@ All notable changes to SkillEvaluator are documented in this file.
 
 ### Fixed
 
+- Read JSON, JSONL and YAML evaluation datasets as UTF-8 so Unicode prompts and
+  answers load correctly on hosts with a non-UTF-8 default text encoding.
+
 - Tier 3 behavior-check evidence bundles now count a final answer cut by
   the final-response section limit as truncated. The omission check
   compared two renderings that both capped that section (800 characters

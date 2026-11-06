@@ -2899,6 +2899,7 @@ def test_documented_agent_cli_versions_match_the_pins() -> None:
     for page, text in pages.items():
         assert f"Codex {runner._CODEX_VERSION}" in text, page
         assert f"Claude Code {runner._CLAUDE_CODE_VERSION}" in text, page
+        assert f"OpenCode {runner.OPENCODE_VERSION}" in text, page
     for name, minimum in (
         ("Claude Code", local_agents._CLAUDE_CODE_MIN_VERSION_FOR_CLAUDE_5_5),
         ("Codex", local_agents._CODEX_MIN_VERSION_FOR_GPT_6),

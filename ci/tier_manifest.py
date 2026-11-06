@@ -58,10 +58,11 @@ def _path(value, field: str, *, skill: bool = False) -> str:
     value = _text(value, field)
     if skill and value == ".":
         return value
-    # Skill directories are display text and are percent-encoded in links, so
-    # only generated report paths reject URL delimiters.
+    # Skill directories are escaped display text, never links or file paths, so
+    # they may use any legal POSIX name; only generated report paths reject
+    # backslashes and URL delimiters.
     _require(
-        not any(c in value for c in (("\\",) if skill else ("\\", ":", "%", "?", "#")))
+        (skill or not any(c in value for c in ("\\", ":", "%", "?", "#")))
         and not value.startswith("/")
         and not value.endswith("/")
         and all(part not in {"", ".", ".."} for part in value.split("/"))

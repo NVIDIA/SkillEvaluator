@@ -223,14 +223,16 @@ def test_neutral_advisory_result_keeps_its_outcome():
     assert "Tier 3 | neutral | Advisory" in tier_manifest.render_markdown(result)
 
 
-@pytest.mark.parametrize("path", ["skills/c#-helper", "skills/100%-coverage", "skills/a:b", "skills/why?"])
+@pytest.mark.parametrize(
+    "path", ["skills/c#-helper", "skills/100%-coverage", "skills/a:b", "skills/why?", "skills/a\\b"]
+)
 def test_skill_directories_may_contain_url_delimiters_but_report_paths_may_not(path):
     payload = manifest()
     payload["tiers"][1]["skills"][0]["path"] = path
     validated = tier_manifest.validate_manifest(payload)
     assert validated["tiers"][1]["skills"][0]["path"] == path
     assert tier_manifest.render_markdown(validated)
-    for unsafe in (f"../{path}", f"/{path}", path.replace("/", "\\")):
+    for unsafe in (f"../{path}", f"/{path}", f"{path}/", path.replace("/", "/./")):
         payload["tiers"][1]["skills"][0]["path"] = unsafe
         with pytest.raises(ValueError, match="Unsafe skill path"):
             tier_manifest.validate_manifest(payload)

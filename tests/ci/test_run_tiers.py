@@ -481,7 +481,7 @@ def test_skill_directories_with_url_delimiters_still_aggregate(tmp_path, monkeyp
     from skillevaluator.reporting.json_reporter import JSONReporter
 
     repo = tmp_path / "consumer"
-    names = ("c#-helper", "100%-coverage")
+    names = ("c#-helper", "100%-coverage", "a\\b")
     for name in names:
         skill = repo / "skills" / name
         skill.mkdir(parents=True)

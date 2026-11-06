@@ -147,3 +147,159 @@ select:focus-visible{outline:3px solid var(--focus-ring);outline-offset:3px}
 @media(max-width:420px){.tier-cards .tier-card{flex-basis:100%}}
 
 .tier2-scope-nav{display:flex;flex-wrap:wrap;gap:8px 16px;margin-bottom:16px}
+
+/* Readability rhythm shared by every tier. Tier 3's conditional style block is
+   emitted later, so scoped selectors retain these spacing rules there too. */
+body{line-height:1.6}
+.agent-hero{padding:24px 28px;margin-bottom:24px}
+.agent-hero-top{gap:28px}
+.agent-hero-title{line-height:1.3}
+.agent-hero-subtitle,.hero-decision-reason,.hero-reason{font-size:14px;line-height:1.6;margin-top:12px}
+.hero-side{gap:12px}
+.agent-hero-detail,.publication-line{font-size:12px;line-height:1.6}
+.hero-score-label{margin-top:8px;line-height:1.6}
+.publication-reasons{line-height:1.6}
+.tier-cards{gap:12px;margin-top:24px;padding-top:24px}
+.tier-card{padding:16px 18px}
+.tier-card-head{flex-wrap:wrap;gap:8px 12px}
+.tier-card-title{font-size:14px;line-height:1.6;margin:12px 0 8px}
+.tier-card-stats{gap:8px 16px;font-size:12px;line-height:1.6}
+.tier-card-links,.tier-card-sev{gap:8px;margin-top:10px}
+.scope-strip,.gate-policy{gap:10px 20px;font-size:12px;line-height:1.6;padding-bottom:20px}
+.run-metadata{padding:16px 2px;margin-bottom:32px}
+.metadata-grid{gap:20px 28px;margin-top:24px}
+.metadata-grid p,.metadata-grid .header-meta-item{font-size:12px;line-height:1.6}
+.metadata-grid strong{margin-bottom:8px}
+.workspace-heading{margin-bottom:24px}
+.workspace-heading h2{margin-bottom:8px}
+.workspace-heading p{font-size:14px;line-height:1.6}
+.exec-summary{padding:24px;margin-bottom:28px}
+.exec-verdict{gap:12px 18px}
+.exec-reason{line-height:1.6}
+.kpis{gap:16px;margin:24px 0 12px}
+.kpi{padding:16px 18px}
+.kpi dt{line-height:1.6}
+.kpi dd{margin-top:10px;line-height:1.6}
+.kpi .kpi-sub{margin-top:10px}
+.kpi-legend{line-height:1.6;margin-top:8px}
+.fix-first{margin-top:24px;padding-top:20px}
+.fix-first h3{margin-bottom:12px}
+.fix-first li{padding:10px 0;font-size:14px;line-height:1.6}
+.fix-meta{margin-top:6px;line-height:1.6}
+.dashboard{padding:18px 0;margin:24px 0 28px;row-gap:20px}
+.dashboard-card-title{font-size:12px;line-height:1.6}
+.dashboard-card-value{margin:8px 0}
+.dashboard-card-subtitle{line-height:1.6}
+.report-searchbar{gap:12px;margin-bottom:20px}
+.report-searchbar label,.skills-summary-bar{font-size:12px}
+.view-toggle-section,.filter-group{gap:10px}
+.view-toggle-btn,.filter-btn,.bulk-action-btn,.severity-filter-btn{font-size:12px;padding:8px 12px}
+.skill-card,.validator-card{margin-bottom:16px}
+.skill-header,.validator-collapsible{padding:18px 20px;gap:16px}
+.skill-name,.validator-name{font-size:14px;line-height:1.6}
+.skill-content.active,.validator-content.active{padding:20px}
+.check-header{padding:14px 16px;gap:12px}
+.check-name{font-size:14px;line-height:1.6}
+.check-description{display:block;font-size:12px;line-height:1.6;margin:6px 0 0}
+.check-details{padding:16px}
+.check-detail-item{padding:8px 0;font-size:14px;line-height:1.6}
+.check-finding{padding:16px;margin:12px 0}
+.finding-message,.check-finding .finding-msg{font-size:14px;line-height:1.6}
+.finding-meta{gap:8px 16px;margin-top:10px;font-size:12px;line-height:1.6}
+.check-finding .finding-suggestion,.finding-suggestion{font-size:12px;line-height:1.6;padding:12px;margin-top:12px}
+.quality-outcome-note,.findings-overflow-note{font-size:12px;line-height:1.6}
+.summary-table th,.top-issues-table th{padding:14px 18px;font-size:12px;line-height:1.6}
+.summary-table td,.top-issues-table td{padding:16px 18px;font-size:14px;line-height:1.6;vertical-align:top}
+.raw-output>summary{padding:8px 0;line-height:1.6}
+.tab-content .t3-subtabs{gap:8px;padding:8px;margin-bottom:24px;flex-wrap:wrap;overflow:visible}
+.tab-content .t3-subtab{padding:10px 16px;font-size:14px;line-height:1.6;white-space:normal}
+.tab-content .t3-page{line-height:1.6;min-width:0;overflow-wrap:anywhere}
+.tab-content .t3-page p{line-height:1.6}
+.tab-content .t3-section{margin-top:28px}
+.tab-content .t3-section h3{margin-bottom:16px;line-height:1.6}
+.tab-content .t3-section-hint{font-size:14px;line-height:1.6;margin-bottom:16px}
+.tab-content .t3-agent-card,.tab-content .t3-finding-card,.tab-content .t3-eval-card,.tab-content .t3-sug-card,.tab-content .t3-harbor-panel,.tab-content .t3-next-steps{padding:20px}
+.tab-content .t3-finding-card{margin:16px 0}
+.tab-content .t3-overview-lead{padding:20px;line-height:1.6;margin-bottom:20px}
+.tab-content .t3-agent-score{margin:10px 0}
+.tab-content .t3-checks{margin-top:12px}
+.tab-content .t3-checks li{padding:8px 0;font-size:14px;line-height:1.6}
+.tab-content .t3-details,.tab-content .t3-collapsed{margin-top:20px}
+.tab-content .t3-details>summary,.tab-content details.t3-ds-card>summary{padding:18px 20px;line-height:1.6}
+.tab-content .t3-details-body{padding:20px}
+.tab-content .t3-agent-tabs{gap:8px;padding:8px;margin-bottom:24px}
+.tab-content .t3-agent-tab-btn{padding:10px 16px;gap:10px;white-space:normal;text-align:left;overflow-wrap:anywhere}
+.tab-content .t3-agent-tab-btn .t3-tab-dot{flex-shrink:0}
+.tab-content .t3-kpi-strip{gap:16px;margin-bottom:24px}
+.tab-content .t3-kpi-card{padding:18px 20px;min-width:0}
+.tab-content .t3-kpi-card .t3-kpi-label{font-size:12px;line-height:1.6}
+.tab-content .t3-kpi-card .t3-kpi-value{margin-top:10px;line-height:1.35}
+.tab-content .t3-kpi-card .t3-kpi-sub{font-size:12px;line-height:1.6;margin-top:10px}
+.tab-content .t3-dim-strip{gap:12px;padding:16px;margin:20px 0 24px}
+.tab-content .t3-dim-pill{padding:12px 14px;gap:8px;min-width:0}
+.tab-content .t3-dim-pill .t3-dim-name,.tab-content .t3-dim-pill .t3-dim-lift{font-size:12px;line-height:1.6}
+.tab-content .t3-eval-stack,.tab-content .t3-sug-stack{gap:16px}
+.tab-content .t3-eval-desc,.tab-content .t3-dim-hint{font-size:12px;line-height:1.6;margin-top:8px}
+.tab-content .t3-eval-bars{margin-top:16px;row-gap:12px}
+.tab-content .t3-eval-evidence{margin-top:20px}
+.tab-content .t3-eval-evidence>summary{padding:8px 0;font-size:12px;line-height:1.6}
+.tab-content .t3-eval-evidence ul{gap:10px;margin-top:12px}
+.tab-content .t3-eval-evidence li{padding:12px;gap:10px;font-size:12px;line-height:1.6}
+.tab-content .t3-reasoning,.tab-content .t3-sug-body,.tab-content .t3-ds-value{font-size:14px;line-height:1.6}
+.tab-content .t3-reasoning-list li{margin-bottom:8px}
+.tab-content .t3-dataset-list{gap:20px}
+.tab-content .t3-ds-field{margin:20px 0}
+.tab-content .t3-ds-label{font-size:12px;line-height:1.6;margin-bottom:8px}
+.tab-content .t3-ds-behaviors{gap:12px;margin-top:12px}
+.tab-content .t3-ds-behaviors li{font-size:14px;line-height:1.6;grid-template-columns:24px minmax(0,1fr)}
+.tab-content .t3-prov-grid{grid-template-columns:minmax(140px,.3fr) minmax(0,1fr) auto;gap:12px 20px;padding:8px 0}
+.tab-content .t3-prov-grid .t3-prov-value{padding:10px 12px;line-height:1.6}
+.tab-content .t3-download-grid{gap:12px}
+.tab-content .t3-filter-bar{gap:12px;margin-bottom:20px}
+.tab-content .t3-filter-input{min-width:0;padding:10px 14px}
+.tab-content .t3-lift-grid{grid-template-columns:repeat(auto-fit,minmax(min(280px,100%),1fr));gap:16px}
+.tab-content .t3-lift-row{padding:10px 0;gap:12px}
+@media(max-width:760px){
+ .agent-hero,.exec-summary{padding:20px}
+ .hero-side{margin-top:24px}
+ .tier-cards{gap:12px;margin-top:24px;padding-top:20px}
+ .tier-card{padding:16px}
+ .tier-card-title{font-size:14px}
+ .tier-card-stats{font-size:12px}
+ .skill-header,.validator-collapsible{padding:16px}
+ .skill-content.active,.validator-content.active{padding:16px}
+ .tab-content .t3-subtab{padding:10px 12px;font-size:12px}
+ .tab-content .t3-prov-grid{grid-template-columns:minmax(0,1fr);gap:8px}
+ .tab-content .t3-prov-grid .t3-prov-label:not(:first-child){margin-top:12px}
+}
+@media(max-width:420px){
+ .agent-hero,.exec-summary{padding:18px}
+ .summary-table th,.top-issues-table th,.summary-table td,.top-issues-table td{padding:14px}
+ .tab-content .t3-agent-card,.tab-content .t3-finding-card,.tab-content .t3-eval-card,.tab-content .t3-sug-card,.tab-content .t3-harbor-panel,.tab-content .t3-next-steps,.tab-content .t3-details-body{padding:16px}
+ .tab-content .t3-eval-evidence li{grid-template-columns:minmax(0,1fr);gap:8px}
+ .tab-content .t3-sug-card{grid-template-columns:auto minmax(0,1fr)}
+ .tab-content .t3-sug-actions{grid-column:2}
+ .tab-content .t3-lift-row{grid-template-columns:minmax(0,1fr)}
+ .tab-content .t3-agent-grid,.tab-content .t3-agent-scorecard-list{grid-template-columns:minmax(0,1fr)}
+}
+@media print{
+ .tab-content .t3-subtabs,.tab-content .t3-agent-tabs{display:none!important}
+ .agent-hero,.exec-summary{padding:16px;margin-bottom:20px}
+ .summary-table th,.summary-table td,.top-issues-table th,.top-issues-table td{padding:10px 12px}
+ .tab-content .t3-page{break-inside:auto}
+}
+/* Keep job actions and recorded metadata distinct when names wrap. */
+.tier-card-link{padding:6px 10px;font-size:12px;line-height:1.6;max-width:100%;white-space:normal;overflow-wrap:anywhere}
+.metadata-grid>div>div{margin-top:12px;line-height:1.6}
+.metadata-grid>div>strong{margin-bottom:12px}
+.tab-content .t3-harbor-actions{gap:12px;min-width:0}
+.tab-content .t3-harbor-link{padding:10px 14px;font-size:12px;line-height:1.6;max-width:100%;white-space:normal;overflow-wrap:anywhere}
+.tab-content .t3-harbor-panel>div{min-width:0}
+.tab-content .t3-harbor-panel p{margin-top:8px;font-size:14px;line-height:1.6}
+.tab-content dl:not(.kpis){row-gap:16px}
+.tab-content dl:not(.kpis) dt{margin-top:8px;font-size:12px;line-height:1.6}
+.tab-content dl:not(.kpis) dd{margin-top:8px;line-height:1.6;overflow-wrap:anywhere}
+/* Clear sticky tier navigation as well as the local tabs for agent links. */
+.tab-content .t3-agent-anchor{scroll-margin-top:calc(var(--mobile-nav-height) + 80px)}
+/* Two wrapped tab rows must also clear agent deep links on phone screens. */
+@media(max-width:420px){.tab-content .t3-agent-anchor{scroll-margin-top:calc(var(--mobile-nav-height) + 140px)}}

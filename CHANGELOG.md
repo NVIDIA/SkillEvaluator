@@ -6,6 +6,10 @@ All notable changes to SkillEvaluator are documented in this file.
 
 ### Changed
 
+- Give HTML summaries, tier tiles, KPI labels and values, findings, evidence
+  tables and all six Tier 3 views more reading room. Use relaxed body line
+  spacing and wrap Tier 3 navigation on narrow screens in both themes.
+
 - Keep HTML tier navigation synchronized across sidebar, tiles and a mobile
   sticky bar, including absent tiers in comprehensive reports. Add accessible
   keyboard navigation for Tier 3 and agent tabs, a System/Light/Dark preference,

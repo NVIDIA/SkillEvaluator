@@ -23,6 +23,7 @@ class Tier2ScopeView:
     catalog_entries: int | None
     notes: tuple[str, ...]
     catalog_not_applicable: bool = False
+    not_run: bool = False
 
 
 def _count(value: object) -> int | None:
@@ -65,6 +66,7 @@ def tier2_scope_views(results: list[ValidationResult]) -> tuple[Tier2ScopeView, 
                 if evidence.get("status") == "skipped" and isinstance(evidence.get("reason"), str):
                     notes.append(evidence["reason"])
         completed = 0
+        unfinished = False
         known = bool(members) or any(item.get("status") == "skipped" for item in stages)
         all_complete = bool(members)
         catalog_counts: list[int] = []
@@ -72,6 +74,8 @@ def tier2_scope_views(results: list[ValidationResult]) -> tuple[Tier2ScopeView, 
         pairwise_only = bool(members) and scope == "across"
         for result in members:
             details = {detail.check_name: detail.metadata for detail in result.success_details}
+            indexed = details.get("index_built")
+            entries = _count(indexed.get("entry_count")) if isinstance(indexed, dict) else None
             analysis = result.metadata.get("llm_analysis")
             analysis_complete = (
                 isinstance(analysis, dict)
@@ -95,7 +99,13 @@ def tier2_scope_views(results: list[ValidationResult]) -> tuple[Tier2ScopeView, 
                     "Comparison not applicable: "
                     + next(detail.message for detail in result.success_details if detail.check_name == "context_dedup")
                 )
-            clean_skip = is_cleanly_skipped(result) or insufficient
+            # A collection index of fewer than two entries has nothing to compare pairwise.
+            single_entry = (
+                scope == "across" and entries is not None and entries < 2 and "catalog_compared" not in details
+            )
+            if single_entry:
+                notes.append(f"Comparison not applicable: the collection index has {entries} entry; pairs need two.")
+            clean_skip = is_cleanly_skipped(result) or insufficient or single_entry
             finished = (
                 recorded_completion
                 and (not isinstance(analysis, dict) or analysis_complete)
@@ -107,6 +117,7 @@ def tier2_scope_views(results: list[ValidationResult]) -> tuple[Tier2ScopeView, 
             all_complete = all_complete and bool(finished)
             if not finished and not clean_skip:
                 known = False
+                unfinished = True
             compared = details.get("catalog_compared")
             compared = compared if isinstance(compared, dict) else {}
             total, excluded = _count(compared.get("catalog_entry_count")), _count(compared.get("self_matches_excluded"))
@@ -117,10 +128,8 @@ def tier2_scope_views(results: list[ValidationResult]) -> tuple[Tier2ScopeView, 
                 )
             else:
                 catalog_known = False
-            indexed = details.get("index_built")
-            entries = _count(indexed.get("entry_count")) if isinstance(indexed, dict) else None
             pairwise_only = pairwise_only and entries is not None and "catalog_compared" not in details
-            if scope == "across" and entries is not None:
+            if scope == "across" and entries is not None and not single_entry:
                 notes.append(f"Pairwise comparison of {entries} collection entries; no catalog used.")
         duplicates = []
         paths: set[str] = set()
@@ -147,9 +156,13 @@ def tier2_scope_views(results: list[ValidationResult]) -> tuple[Tier2ScopeView, 
                     paths.update(recorded)
         duplicate_count = len(duplicates) if duplicates or all_complete else None
         affected = len(paths) if paths_known and duplicate_count is not None else None
-        if not members and not notes:
+        # No member and no recorded stage: this command never runs the scope.
+        not_run = not members and not stages
+        if not_run:
+            notes.append("Not run by this command.")
+        elif not members and not notes:
             notes.append("Comparison evidence unavailable; this scope was not recorded.")
-        elif members and not all_complete:
+        elif members and unfinished:
             notes.append("Comparison coverage is incomplete or unavailable; counts describe recorded findings only.")
         views.append(
             Tier2ScopeView(
@@ -162,6 +175,7 @@ def tier2_scope_views(results: list[ValidationResult]) -> tuple[Tier2ScopeView, 
                 sum(catalog_counts) if catalog_known else None,
                 tuple(dict.fromkeys(notes)),
                 scope == "within" or pairwise_only,
+                not_run,
             )
         )
     unknown = tuple(result for result in results if _scope(result) is None)

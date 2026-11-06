@@ -1049,6 +1049,10 @@ with-skill total minus baseline total: negative values indicate less observed
 use. A delta requires complete telemetry, complete successful arms, and matching
 case counts including repeated attempts. Missing measurements, skipped baselines,
 partial runs, and unsupported multi-step timing remain `N/A`; they are not zero.
+The same table splits each trial's trajectory time into LLM seconds and tool
+seconds, from native ATIF timing or inferred from step timestamps and Codex
+tool wall times, and says which source each arm used. See
+[Reports & Results](reports.mdx) for the timing rules.
 These are observations for this run, not a graded efficiency or cost claim.
 
 Each dimension receives a score and a diagnostic band: **PASS** at 0.50 or

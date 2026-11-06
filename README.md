@@ -173,7 +173,8 @@ Cite the paper and record the SkillEvaluator release or commit; see [CITATION.cf
 
 See [the documentation](https://docs.nvidia.com/skills/skillevaluator/) for
 setup, tier guides, reports, CI integration, CLI reference, and
-[performance dashboard](docs/reports.mdx#performance-dashboard).
+[performance dashboard](docs/reports.mdx#performance-dashboard). To let an agent run
+SkillEvaluator, install [`skills/skillevaluator/`](skills/skillevaluator/).
 
 ## Installation and third-party software
 

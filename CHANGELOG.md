@@ -23,6 +23,11 @@ All notable changes to SkillEvaluator are documented in this file.
   score separate. Tier counts exclude explicit N/A checks from execution;
   Tier 3 trial summaries use recorded condition counters before retained rows.
 
+- Embed the verified Chart.js 4.5.1 runtime and its MIT notices in Tier 3 HTML
+  reports so charts work offline without CDN or source-map requests. Charts
+  include accessible descriptions, links to data tables and visible fallbacks
+  when canvas initialization is unavailable; Tier 1 reports omit chart assets.
+
 ## 0.8.0 - 2026-11-05
 
 ### Added

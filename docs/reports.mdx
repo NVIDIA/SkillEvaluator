@@ -147,6 +147,14 @@ the evidence below it:
   repeat a finding are folded away.
 - **Run details.** Scope, the target path, provenance and the gate policy.
 
+Tier 3 charts include Chart.js 4.5.1 inside the HTML file and work offline;
+they make no CDN or source-map requests. Each chart describes its measurements
+and links to the underlying data table. If JavaScript or canvas initialization
+is unavailable, a visible message points readers to the data. Theme changes and
+printing redraw the charts. **Chart software notices** retains the full MIT
+licenses for Chart.js and its bundled color library. Tier 1 reports do not
+load or embed these chart resources.
+
 A finding is one problem a check reports, with a severity. The same problem
 reported on several lines, or in several files or skills, counts once at its
 highest severity; each location is an occurrence, including each line a

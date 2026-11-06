@@ -643,9 +643,16 @@ run's compact evidence to that provider. The evidence names the run by its ID
 instead of its local path. In every text field, such as errors, warnings, case
 questions and saved feedback, an absolute path that ends in the run's directory
 is replaced with that ID. This covers the path a copied run had on the machine
-where it ran, unless that path contains a space. Credential-shaped text is
-redacted before the text is shortened, and a shortened field ends in
-`...<truncated>`. The command writes nothing to disk.
+where it ran, also when it starts with `~user/`, `$HOME/`, `${HOME}/` or
+`%USERPROFILE%\`, unless that path contains a space. A path joined to it, such as
+`/usr/bin` in `PATH=/usr/bin:/home/ci/results/RUN_ID`, is kept. A root right after
+`,` `;` `:` `=` `(` `[` or `{` starts a new path, so a directory name that ends in
+one of those characters before a `/` is read as two paths and only the second is
+replaced. The evaluated skill's directory
+is replaced with its name and your home directory with `~`; the skill directory
+is known when you pass `--skill` or the run is in the skill's `evals/results`
+directory. Credential-shaped text is redacted before the text is shortened, and
+a shortened field ends in `...<truncated>`. The command writes nothing to disk.
 
 No request is sent before the first question, so the command exits 0
 immediately when standard input is empty. Piped input sends each line as a

@@ -561,7 +561,8 @@ def test_html_report_explains_the_baseline_only_run(tmp_path: Path, skill: Path)
     assert "Baseline calibration (no with-skill arm)" in html
     assert "No skill verdict: baseline-only run" in html
     assert "Verdict at a glance:" not in html
-    assert '<span class="hero-score-label">baseline score</span>' in html
+    assert '<span class="hero-score-label">Best agent score (baseline)</span>' in html
+    assert "no with-skill arm, so no skill lift was measured." in html
     assert re.search(r"<td><strong>Goal Accuracy</strong></td>\s*<td>skipped</td>\s*<td>0\.67</td>", html)
 
 

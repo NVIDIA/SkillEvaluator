@@ -38,6 +38,11 @@ All notable changes to SkillEvaluator are documented in this file.
 - When CI redaction masks a credential inside a reported PII value, remove the
   finding's digest as well.
 
+- Align final terminal and HTML command outcomes: Passed required checks,
+  Changes required, or Incomplete. Keep publication eligibility and Best agent
+  score separate. Tier counts exclude explicit N/A checks from execution;
+  Tier 3 trial summaries use recorded condition counters before retained rows.
+
 ### Fixed
 
 - Skill activation now credits a SKILL.md read wrapped in a shell, such as
@@ -102,10 +107,12 @@ All notable changes to SkillEvaluator are documented in this file.
   scores, measured agent tokens and seconds, execution errors, and the report's
   saved feedback, without evaluating again or regenerating LLM feedback. It uses
   the configured `SKILL_EVAL_LLM_PROVIDER` and `SKILL_EVAL_LLM_MODEL`, sends the
-  run ID instead of the local path, redacts credential-shaped text, and writes
-  nothing to disk. No request is sent before the first question. `LLMClient`
-  gains `chat(messages)` for multi-turn requests with the same retries and typed
-  errors as `completions()`.
+  run ID instead of the local path, writes the evaluated skill's directory as
+  its name and the home directory as `~`, leaves URL spans unchanged during
+  local-path scrubbing, redacts credential-shaped text, and writes nothing to
+  disk. No request is sent before the first question.
+  `LLMClient` gains `chat(messages)` for multi-turn requests with the same
+  retries and typed errors as `completions()`.
 
 - Opt-in `LLM_JUDGE_FALLBACK_POLICY` and `LLM_JUDGE_RETRY_POLICY` for the Tier 3
   standard judges. `LLM_JUDGE_FALLBACK_POLICY=replace` lets only the judge
@@ -311,11 +318,17 @@ All notable changes to SkillEvaluator are documented in this file.
   so a later bare `HTTP`, `HTTPS`, or `Http` word does not start HTTPie, and
   its method word is no longer read as an upload. Its body items, piped or
   redirected input, `--raw`, and a method word before a `name:@file` header
-  item, even a quoted or escaped one, or before a `$VAR` word still warn, as do
-  a lowercase `http PUT URL`, a path or `.exe` word such as `./HTTP POST URL`
-  or `HTTP.exe POST URL`, an `HTTP POST URL` command word, and any upload in
-  the same action. Both the host checker and the bundled Harbor verifier apply
-  the rule.
+  item, even a quoted, escaped, or brace-expanded one such as
+  `X-Data:{@,}.env`, or before a `$VAR` or backtick word, such as an inline
+  code span, still warn, as do a lowercase `http PUT URL`, a path or `.exe`
+  word such as `./HTTP POST URL` or `HTTP.exe POST URL`, an `HTTP POST URL`
+  command word, a word that a pass-through wrapper runs, a printer pipes on,
+  or a `$VAR` command word may start, such as `strace -f HTTP POST URL` or
+  `echo HTTP POST URL | sh`, and any upload in the same action. Each
+  here-document line is still read as a command, and `|` and `;` start a new
+  one, so a line that starts with `HTTP POST`, a Markdown table row with an
+  `HTTP` word in any cell, and `HTTP PUT` right after a `;` still warn. Both
+  the host checker and the bundled Harbor verifier apply the rule.
 
 - Tier 3 Docker and Kata runs retry a Claude Code or Codex install that fails,
   for example on a dropped download or a package mirror error, instead of
@@ -342,16 +355,18 @@ All notable changes to SkillEvaluator are documented in this file.
   512-chunk ceiling, which the chunk check already enforces, so it is only a
   guard and never stops a scan on its own; the per-cluster prompt, total
   prompt, and cluster-count limits decide. When a cluster's request (system
-  prompt plus cluster text) would exceed 64,000 characters, each exactly
-  repeated text is sent once as `SHARED CONTENT n` when that makes the request
-  shorter; a short text repeated under long headings stays inline. A Markdown
-  section is compared without its own heading line, so the same body under
-  different headings is shared too. Every occurrence keeps its own entry with
-  its file, section, line range, and heading line. Distinct text is never
-  dropped or sampled, so a cluster still over the budget stays incomplete with
-  `llm_prompt_size_limit`. Duplicate and `llm_refused` finding messages name
-  at most 64 member locations and source files and count the rest; the JSON
-  `source_files` list stays complete.
+  prompt plus cluster text) would exceed 64,000 characters, exactly repeated
+  texts are sent once as `SHARED CONTENT n`, choosing the ones that make the
+  request shortest. A short text, such as a one-line body, stays inline
+  because its reference would be longer than the text. The most repeated texts
+  get blocks 1-9, whose references are one character shorter than those of
+  later blocks. A Markdown section is compared without its own heading line,
+  so the same body under different headings is shared too. Every occurrence
+  keeps its own entry with its file, section, line range, and heading line.
+  Distinct text is never dropped or sampled, so a cluster still over the
+  budget stays incomplete with `llm_prompt_size_limit`. Duplicate and
+  `llm_refused` finding messages name at most 64 member locations and source
+  files and count the rest; the JSON `source_files` list stays complete.
 
 - On the native Claude API, the Tier 3 judges' `judge_model_used` names the
   server-side fallback model when the API serves a repeated request straight
@@ -414,14 +429,14 @@ All notable changes to SkillEvaluator are documented in this file.
   agents ignore the variable. The variable was checked with Claude Code
   2.1.292, the release Harbor installs; local mode keeps the fallback off only
   if the host's Claude Code honors it. A refused attempt is not scored, like
-  any other failed trial, so the arm no longer has complete attempt coverage:
-  after one refusal in 20 cases with 3 attempts each, it reports
-  `Scored attempt coverage is 59/60` and its execution fails.
+  any other failed trial, so the arm no longer has complete attempt coverage
+  and its execution fails: after one refusal in 20 cases with 3 attempts
+  each, the run's `result.json` records `Scored attempt coverage is 59/60`.
   `tier3 evaluate` then exits 1, and so does `validate --block-on-agent-eval`.
   On a route that serves the fallback model, such as the Anthropic API, the
-  retry used to finish such an attempt and the arm succeeded, so a run that
-  completed before can now fail. Rerun it, or evaluate the refused case with
-  another model.
+  retry used to finish such an attempt, and the attempt was scored, so a run
+  that completed before can now fail. Rerun it, or run the arm with another
+  model through `--agent-model claude-code=MODEL`.
 
 - Tier 3 staging no longer fails with `chmod: cannot use dir_fd and
   follow_symlinks together` when it replaces or merges into an existing

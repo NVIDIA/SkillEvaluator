@@ -275,7 +275,7 @@ def _tier_card_verdicts(html: str) -> list[tuple[str, str]]:
     return re.findall(r'tier-card-label">(Tier \d)</span>\s*<span class="tier-card-verdict">([^<]+)</span>', html)
 
 
-def test_header_says_skipped_when_no_check_ran() -> None:
+def test_header_keeps_required_gate_separate_from_skipped_execution() -> None:
     skipped = []
     for name in ("Secrets Detection", "PII Scan"):
         result = ValidationResult(validator_name=name)
@@ -285,10 +285,10 @@ def test_header_says_skipped_when_no_check_ran() -> None:
     html = _render(_gated(skipped, 1))
     summary = html.split('<section class="exec-summary', 1)[1].split("</section>", 1)[0]
 
-    # The header and the summary give the same verdict: nothing ran, so nothing passed.
-    assert _header_verdict(html) == [("skipped", "Skipped")]
+    # The command gate passed; the evidence summary still says nothing ran.
+    assert _header_verdict(html) == [("pass", "Passed required checks")]
     assert '<span class="verdict-chip warn">Skipped</span>' in summary
-    assert 'data-verdict="pass"' not in html
+    assert "0 of 0 checks passed" not in summary
 
 
 def test_failing_advisory_tier_is_labelled_advisory() -> None:
@@ -303,7 +303,7 @@ def test_failing_advisory_tier_is_labelled_advisory() -> None:
     blocking = _render(results(blocking=True))
 
     # A failing tier whose gate does not block never says "Changes required".
-    assert _header_verdict(advisory) == [("pass", "Passed")]
+    assert _header_verdict(advisory) == [("pass", "Passed required checks")]
     assert _tier_card_verdicts(advisory) == [("Tier 1", "Passed"), ("Tier 2", "Failed (advisory)")]
     assert _header_verdict(blocking) == [("fail", "Changes required")]
     assert _tier_card_verdicts(blocking) == [("Tier 1", "Passed"), ("Tier 2", "Changes required")]

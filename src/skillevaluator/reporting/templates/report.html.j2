@@ -1242,17 +1242,9 @@
     {#- A failing tier whose gate does not block is "Failed (advisory)", never "Changes required". -#}
     {% set tier3_advisory_fail = tier3_verdict == 'fail' and 'tier3' in nonblocking_tiers %}
     {% set has_t12_tab = tabs | selectattr('id', 'in', ['tier1', 'tier2']) | list | length > 0 %}
-    {% if has_t12_tab %}
-    {#- The summary's rule: when no Tier 1 or Tier 2 check ran, the verdict is Skipped, not Passed. -#}
-    {% set t12_executed = tier1_summary.executed_count + tier2_summary.executed_count %}
-    {% set verdict_key = 'incomplete' if has_incomplete else ('fail' if not all_passed else ('pass' if t12_executed else 'skipped')) %}
-    {% elif has_tier3 %}
-    {% set verdict_key = 'skipped' if tier3_is_skipped else (tier3_verdict if tier3_verdict in ['pass', 'fail', 'neutral'] else 'incomplete') %}
-    {% else %}
-    {% set verdict_key = 'incomplete' %}
-    {% endif %}
+    {% set verdict_key = {'passed': 'pass', 'failed': 'fail'}.get(presentation.command_status.value, 'incomplete') %}
     {% set verdict_class = {'pass': 'pass', 'fail': 'fail'}.get(verdict_key, 'warn') %}
-    {% set verdict_label = advisory_fail_word if not has_t12_tab and verdict_key == 'fail' and tier3_advisory_fail else verdict_words[verdict_key] %}
+    {% set verdict_label = presentation.command_label %}
     {% set check_words = {'pass': 'Passed', 'fail': 'Failed', 'incomplete': 'Incomplete', 'skipped': 'Skipped', 'not_applicable': 'N/A'} %}
     <header class="main-header">
         <div class="header-content">
@@ -1304,7 +1296,7 @@
         -#}
         {% set hero_title = explicit_skill_name | default(none) or friendly_label or (tier3.skill_name if has_tier3 and tier3.skill_name else (target_display or title)) %}
         {% set hero_score = completed_agent.score if completed_agent else (tier3.overall_score if has_tier3 and tier3.overall_score is not none else none) %}
-        {% set hero_trials = ((tier3.trials or []) | length) if has_tier3 else 0 %}
+        {% set hero_trials = presentation.coverage.text %}
         {% set hero_metric_count = ((tier3.metric_ids or tier3.evaluators or {}) | length) if has_tier3 else 0 %}
         {% set hero_harbor = (tier3.get('harbor_viewer') or tier3.get('summary', {}).get('harbor_viewer') or {}) if has_tier3 else {} %}
         {% set hero_harbor_job_url = hero_harbor.get('job_url') %}
@@ -1314,6 +1306,7 @@
                 <div class="agent-hero-title-block">
                     <span class="agent-hero-eyebrow">{{ content_label }} evaluation</span>
                     <h1 class="agent-hero-title" id="report-title">{{ hero_title }}</h1>
+                    <p class="hero-command-status {{ verdict_class }}">{{ presentation.command_label }}</p>
                     {#-
                         Show the *full* path/URL only when it actually adds
                         information (i.e. it differs from the friendly label).
@@ -1348,13 +1341,13 @@
                     {% set t3_key = tier3_verdict if tier3_verdict in ['pass', 'fail', 'neutral'] else 'incomplete' %}
                     <span class="verdict-chip {{ {'pass': 'pass', 'fail': 'fail'}.get(t3_key, 'warn') }}"><span class="sr-only">Tier 3 verdict: </span>{{ advisory_fail_word if tier3_advisory_fail else verdict_words[t3_key] }}</span>
                     {% if t3_key == 'incomplete' and tier3_status_reason %}<p class="hero-reason">{{ tier3_status_reason }}</p>{% endif %}
-                    <div class="agent-hero-score {{ 'score-pass' if hero_score is not none and hero_score >= 0.8 else ('score-warn' if hero_score is not none and hero_score >= 0.6 else 'score-fail') }}">{{ "%.2f" | format(hero_score) if hero_score is not none else "N/A" }}<span class="hero-score-label">{{ 'baseline score' if tier3.get('mode') == 'baseline_only' else 'overall score' }}</span></div>
+                    <div class="agent-hero-score {{ 'score-pass' if hero_score is not none and hero_score >= 0.8 else ('score-warn' if hero_score is not none and hero_score >= 0.6 else 'score-fail') }}">{{ "%.2f" | format(hero_score) if hero_score is not none else "N/A" }}<span class="hero-score-label">{{ presentation.score_scope }}{{ ' (baseline)' if tier3.get('mode') == 'baseline_only' else '' }}</span></div>
                     <div class="agent-hero-detail">
                         <div><strong>Best performing agent:</strong> {{ tier3.best_agent or 'N/A' }}</div>
                         {% if tier3.get('mode') == 'baseline_only' %}<div>Baseline-only run (<code>--skip-with-skill</code>): no with-skill arm, so no skill lift was measured.</div>{% endif %}
                         {% if completed_agent and completed_agent.needs_attention %}<div class="score-warn">Completed-agent result. Other execution failures need attention; see agent details.</div>{% endif %}
                         {% if completed_agent and completed_agent.recovered_attempts %}<div>{{ completed_agent.recovered_attempts }} timeout attempt(s) recovered; failed history retained.</div>{% endif %}
-                        <div><strong>Trials:</strong> {{ hero_trials }} across {{ (tier3.agents_run or []) | length }} agent(s)</div>
+                        <div class="trial-coverage">{{ hero_trials }}</div>{% for detail in presentation.coverage.details %}<div>{{ detail }}</div>{% endfor %}
                         <div><strong>Metrics:</strong> {{ hero_metric_count }} evaluators</div>
                         {% if tier3_environment %}<div><strong>Environment:</strong> <code>{{ tier3_environment }}</code></div>{% endif %}
                         {% if tier3.get('overall_lift') is not none %}<div><strong>Best-agent lift:</strong> {{ "%+.2f" | format(tier3.get('overall_lift')) }}</div>{% endif %}
@@ -1388,7 +1381,7 @@
             {% set single_tier = tabs | length < 2 %}
             <div class="tier-cards{{ ' single-tier' if single_tier else '' }}{{ ' tier-line' if single_tier and has_tier1 else '' }}">
                 {% if has_tier1 %}
-                {% set t1_class = 'warn' if tier1_summary.incomplete_count else ('skipped' if tier1_summary.executed_count == 0 else ('pass' if tier1_summary.all_passed else 'fail')) %}
+                {% set t1_class = 'fail' if tier1_summary.failed_count else ('warn' if tier1_summary.incomplete_count else ('skipped' if tier1_summary.executed_count == 0 else 'pass')) %}
                 <div class="tier-card {{ t1_class }}{% if initial_tab == 'tier1' %} active{% endif %}"
                      role="button"
                      tabindex="0"
@@ -1399,7 +1392,7 @@
                      title="Open Tier 1: Security and Static Validation">
                     <div class="tier-card-head">
                         <span class="tier-card-label">Tier 1</span>
-                        {% if not single_tier %}<span class="tier-card-verdict">{{ verdict_words[{'pass': 'pass', 'fail': 'fail', 'warn': 'incomplete'}.get(t1_class, 'skipped')] }}</span>{% endif %}
+                        {% if not single_tier %}<span class="tier-card-verdict">{{ 'N/A' if presentation.tiers[1].display_status == 'not_applicable' else verdict_words[{'pass': 'pass', 'fail': 'fail', 'warn': 'incomplete'}.get(t1_class, 'skipped')] }}</span>{% endif %}
                     </div>
                     <p class="tier-card-title">Security &amp; Static Validation</p>
                     <div class="tier-card-stats">
@@ -1421,7 +1414,7 @@
                 </div>
                 {% endif %}
                 {% if has_tier2 %}
-                {% set t2_class = 'warn' if tier2_summary.incomplete_count else ('skipped' if tier2_summary.executed_count == 0 else ('pass' if tier2_summary.all_passed else 'fail')) %}
+                {% set t2_class = 'fail' if tier2_summary.failed_count else ('warn' if tier2_summary.incomplete_count else ('skipped' if tier2_summary.executed_count == 0 else 'pass')) %}
                 <div class="tier-card {{ t2_class }}{% if initial_tab == 'tier2' %} active{% endif %}"
                      role="button"
                      tabindex="0"
@@ -1432,19 +1425,21 @@
                      title="Open Tier 2: Deduplication">
                     <div class="tier-card-head">
                         <span class="tier-card-label">Tier 2</span>
-                        <span class="tier-card-verdict">{{ advisory_fail_word if t2_class == 'fail' and 'tier2' in nonblocking_tiers else verdict_words[{'pass': 'pass', 'fail': 'fail', 'warn': 'incomplete'}.get(t2_class, 'skipped')] }}</span>
+                        <span class="tier-card-verdict">{{ 'N/A' if presentation.tiers[2].display_status == 'not_applicable' else (advisory_fail_word if t2_class == 'fail' and 'tier2' in nonblocking_tiers else verdict_words[{'pass': 'pass', 'fail': 'fail', 'warn': 'incomplete'}.get(t2_class, 'skipped')]) }}</span>
                     </div>
                     <p class="tier-card-title">Deduplication</p>
                     <div class="tier-card-stats">
                         <span><strong>{{ tier2_summary.passed_count }}</strong> of {{ tier2_summary.executed_count }} checks passed</span>
+                        {% if tier2_summary.not_applicable_count %}<span><strong>{{ tier2_summary.not_applicable_count }}</strong> not applicable</span>{% endif %}
                         {% if tier2_summary.skipped_count %}<span><strong>{{ tier2_summary.skipped_count }}</strong> skipped</span>{% endif %}
                         {% if tier2_summary.issue_count %}<span><strong>{{ tier2_summary.issue_count }}</strong> duplicate(s)</span>{% endif %}
                     </div>
                 </div>
                 {% endif %}
                 {% if has_tier3 %}
-                {% set tier3_display_verdict = verdict_words['skipped'] if tier3_is_skipped else (advisory_fail_word if tier3_advisory_fail else verdict_words[tier3_verdict if tier3_verdict in ['pass', 'fail', 'neutral'] else 'incomplete']) %}
-                {% set t3_class = 'skipped' if tier3_is_skipped else ('warn' if completed_agent and completed_agent.needs_attention else ('pass' if tier3_verdict == 'pass' else ('fail' if tier3_verdict == 'fail' else 'warn'))) %}
+                {% set t3_tile_verdict = presentation.tiers[3].assessment_status or 'incomplete' %}
+                {% set tier3_display_verdict = verdict_words['skipped'] if tier3_is_skipped else (advisory_fail_word if t3_tile_verdict == 'fail' and 'tier3' in nonblocking_tiers else verdict_words[t3_tile_verdict if t3_tile_verdict in ['pass', 'fail', 'neutral'] else 'incomplete']) %}
+                {% set t3_class = 'fail' if t3_tile_verdict == 'fail' else ('skipped' if tier3_is_skipped else ('warn' if completed_agent and completed_agent.needs_attention else ('pass' if t3_tile_verdict == 'pass' else 'warn'))) %}
                 <div class="tier-card {{ t3_class }}{% if initial_tab == 'tier3' %} active{% endif %}"
                      role="button"
                      tabindex="0"
@@ -1455,16 +1450,16 @@
                      title="Open Tier 3: Live Agent Evaluation">
                     <div class="tier-card-head">
                         <span class="tier-card-label">Tier 3</span>
-                        <span class="tier-card-verdict">{{ tier3_display_verdict }}{% if report_scope == 'tier3' and completed_agent %} · Quality{% if completed_agent.needs_attention %}; needs attention{% endif %}{% endif %}</span>
+                        <span class="tier-card-verdict">{{ tier3_display_verdict }}</span>
                     </div>
                     <p class="tier-card-title">Live Agent Evaluation</p>
                     <div class="tier-card-stats">
                         {% if tier3_is_skipped %}
                         <span>{{ tier3_skip_message }}</span>
                         {% else %}
-                        <span>score <strong>{{ "%.2f" | format(hero_score) if hero_score is not none else "N/A" }}</strong></span>
+                        <span>Best agent score <strong>{{ "%.2f" | format(hero_score) if hero_score is not none else "N/A" }}</strong></span>
                         {% if tier3.get('overall_lift') is not none %}<span>lift <strong>{{ "%+.2f" | format(tier3.get('overall_lift')) }}</strong></span>{% endif %}
-                        {% if hero_trials %}<span><strong>{{ hero_trials }}</strong> trial(s)</span>{% endif %}
+                        <span class="trial-coverage">{{ hero_trials }}</span>
                         {% endif %}
                     </div>
                     {% if hero_harbor_job_url or hero_harbor_analysis_url %}
@@ -1497,7 +1492,7 @@
         {% set incomplete_skills = skills.values() | selectattr('status', 'defined') | selectattr('status', 'equalto', 'incomplete') | list | length %}
         {% set failed_skills = [tier1_display_summary.failed_skills - incomplete_skills, 0] | max %}
             {# ==================== EXECUTIVE SUMMARY ==================== #}
-            {% set t1_key = 'incomplete' if tier1_summary.incomplete_count else ('skipped' if tier1_summary.executed_count == 0 else ('pass' if tier1_summary.all_passed else 'fail')) %}
+            {% set t1_key = 'fail' if tier1_summary.failed_count else ('incomplete' if tier1_summary.incomplete_count else ('skipped' if tier1_summary.executed_count == 0 else 'pass')) %}
             {% set t1_class = {'pass': 'pass', 'fail': 'fail'}.get(t1_key, 'warn') %}
             {% set t1_all_checks = total_validators + ui_t1_na + (skipped_count or 0) %}
             {% set qualities = skills.values() | selectattr('quality', 'defined') | map(attribute='quality') | selectattr('overall_score', 'defined') | list %}
@@ -1512,7 +1507,7 @@
                     {%- elif t1_key == 'skipped' -%}
                         No Tier 1 check ran, so there is no result to report.
                     {%- else -%}
-                        All {{ total_validators }} checks that apply passed.{% if tier1_summary.issue_count %} {{ tier1_summary.issue_count }} advisory finding{{ 's do' if tier1_summary.issue_count != 1 else ' does' }} not block.{% endif %}
+                        All {{ tier1_summary.executed_count }} checks that apply passed.{% if tier1_summary.issue_count %} {{ tier1_summary.issue_count }} advisory finding{{ 's do' if tier1_summary.issue_count != 1 else ' does' }} not block.{% endif %}
                     {%- endif -%}
                     {%- if tier1_incomplete_scans -%}
                         {%- if tier1_scanners_missing %} Install or enable the scanner and run the evaluation again.

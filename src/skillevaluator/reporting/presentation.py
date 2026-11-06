@@ -132,6 +132,15 @@ class TrialCoverage:
 
 @dataclass(frozen=True)
 class FinalRenderContext:
+    """Immutable human-facing outcomes, separate from publication approval.
+
+    required_failed includes every gate-rejected result except classified
+    incomplete, including pass-shaped evidence rejected by the required gate.
+    required_incomplete counts classified incomplete results rejected by that
+    gate. advisory_unfavorable counts failed/incomplete results that permit it.
+    Standalone Tier 3 adverse results follow the existing implicit-gate headline.
+    """
+
     command_status: Status
     command_label: str
     publication_status: Status | None
@@ -140,6 +149,9 @@ class FinalRenderContext:
     result_statuses: Mapping[int, str]
     score_scope: str
     coverage: TrialCoverage
+    required_failed: int = 0
+    required_incomplete: int = 0
+    advisory_unfavorable: int = 0
 
 
 def result_execution_status(result: ValidationResult, outcome: Status | None = None) -> str:
@@ -279,6 +291,11 @@ def build_final_render_context(
         raise ValueError("presentation tiers must be 1, 2 or 3")
     outcomes = {id(r): result_execution_status(r, run.of(r)) for r in results}
     assessment = publication_assessment or run.publication_assessment
+    tier3 = run.tiers[3]
+    standalone_tier3_gate = (
+        report_scope == "tier3" and tier3.blocking is None and tier3.status in (Status.FAILED, Status.INCOMPLETE)
+    )
+    required_failed = required_incomplete = advisory_unfavorable = 0
     tiers = {}
     for n, tier in run.tiers.items():
         counts = {
@@ -306,6 +323,18 @@ def build_final_render_context(
             if n == 3 and tier.results
             else None,
         )
+        for item in tier.results:
+            outcome = outcomes[id(item)]
+            required = not reporting_base.passes_required_gate(item)
+            if standalone_tier3_gate and n == 3 and outcome in {"fail", "incomplete"}:
+                required = True
+            if required:
+                if outcome == "incomplete":
+                    required_incomplete += 1
+                else:
+                    required_failed += 1
+            elif outcome in {"fail", "incomplete"}:
+                advisory_unfavorable += 1
     publication = (
         None
         if report_scope == "tier3"
@@ -314,8 +343,7 @@ def build_final_render_context(
         ]
     )
     headline = run.headline
-    tier3 = run.tiers[3]
-    if report_scope == "tier3" and tier3.blocking is None and tier3.status in (Status.FAILED, Status.INCOMPLETE):
+    if standalone_tier3_gate:
         # A standalone Tier 3 report carries no gating metadata, so Tier 3 is
         # the command's only gate; its verdict must drive the header too.
         headline = tier3.status
@@ -337,4 +365,7 @@ def build_final_render_context(
         MappingProxyType(outcomes),
         "Best agent score",
         trial_coverage(payload),
+        required_failed=required_failed,
+        required_incomplete=required_incomplete,
+        advisory_unfavorable=advisory_unfavorable,
     )

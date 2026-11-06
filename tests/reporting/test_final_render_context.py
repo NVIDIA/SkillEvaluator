@@ -603,3 +603,127 @@ def test_malformed_or_unknown_mode_preserves_coverage_evidence_and_payload(mode,
         assert "with skill scored trials unavailable" in coverage.text
         assert "baseline scored trials unavailable" in coverage.text
     assert payload == before
+
+
+@pytest.fixture
+def passing_tier3_counts_payload():
+    from skillevaluator.evaluation.tier3_report import build_agent_eval_payload
+    from skillevaluator.tier3.harbor.metrics import DEFAULT_METRICS
+
+    arm = {"execution_status": "succeeded", "execution_errors": [], "expected_attempts": 1, "scored_attempts": 1}
+    return build_agent_eval_payload(
+        "demo",
+        {
+            "agent": {
+                "with_skill": dict.fromkeys(DEFAULT_METRICS, 0.8),
+                "without_skill": dict.fromkeys(DEFAULT_METRICS, 0.4),
+                "execution_status": "succeeded",
+                "execution_errors": [],
+                "expected_attempts": 2,
+                "scored_attempts": 2,
+                "conditions": {"with_skill": arm, "without_skill": arm},
+                "num_trials": 1,
+                "num_trials_baseline": 1,
+            }
+        },
+        dataset=[{"id": "case-a"}],
+        attempt_policy={"max_attempts": 1, "stop_on_pass": False, "pass_threshold": 0.5},
+        use_llm_judge=False,
+    )
+
+
+@pytest.mark.parametrize("tier", [1, 2, 3])
+@pytest.mark.parametrize(
+    ("adverse", "blocking", "expected", "label"),
+    [
+        ("fail", True, (1, 0, 0), "Changes required"),
+        ("incomplete", True, (0, 1, 0), "Incomplete"),
+        ("fail", False, (0, 0, 1), "Passed required checks"),
+        ("incomplete", False, (0, 0, 1), "Passed required checks"),
+    ],
+)
+def test_per_result_adverse_counts_handle_mixed_tier_gates(
+    tier, adverse, blocking, expected, label, passing_tier3_counts_payload
+):
+    passing, unfavorable = result(tier), result(tier)
+    if tier == 3:
+        passing.metadata["agent_eval"] = copy.deepcopy(passing_tier3_counts_payload)
+        unfavorable.metadata["agent_eval"] = copy.deepcopy(passing_tier3_counts_payload)
+    unfavorable.metadata["gating"]["blocking"] = blocking
+    if adverse == "fail":
+        unfavorable.add_error("failed required or advisory check")
+    else:
+        unfavorable.mark_scan_incomplete("scanner")
+    sources = [passing, unfavorable]
+    before = copy.deepcopy(sources)
+    ctx = context(sources)
+    assert (ctx.required_failed, ctx.required_incomplete, ctx.advisory_unfavorable) == expected
+    assert ctx.command_label == label
+    assert sources == before
+
+
+@pytest.mark.parametrize(
+    ("verdict", "advisory", "expected", "label"),
+    [
+        ("fail", False, (1, 0, 0), "Changes required"),
+        ("inconclusive", False, (0, 1, 0), "Incomplete"),
+        ("fail", True, (0, 0, 1), "Passed required checks"),
+        ("inconclusive", True, (0, 0, 1), "Passed required checks"),
+    ],
+)
+def test_standalone_adverse_counts_follow_existing_headline_override(verdict, advisory, expected, label):
+    source = ValidationResult(validator_name="AGENT_EVAL", passed=True, metadata={"agent_eval": {"verdict": verdict}})
+    if advisory:
+        source.metadata["gating"] = {"tier": 3, "blocking": False}
+    before = copy.deepcopy(source)
+    ctx = context([source], report_scope="tier3")
+    assert (ctx.required_failed, ctx.required_incomplete, ctx.advisory_unfavorable) == expected
+    assert ctx.command_label == label
+    assert source == before
+
+
+def test_gate_rejected_pass_shaped_tier3_counts_as_required_failure():
+    source = result(3, agent_eval={"verdict": "pass"})
+    before = copy.deepcopy(source)
+    ctx = context([source])
+    assert ctx.result_statuses[id(source)] == "pass"
+    assert (ctx.required_failed, ctx.required_incomplete, ctx.advisory_unfavorable) == (1, 0, 0)
+    assert ctx.command_label == "Changes required"
+    assert source == before
+
+
+def test_adverse_counts_default_for_existing_context_constructor_and_are_immutable():
+    ctx = context([])
+    legacy = presentation.FinalRenderContext(
+        ctx.command_status,
+        ctx.command_label,
+        ctx.publication_status,
+        ctx.publication_label,
+        ctx.tiers,
+        ctx.result_statuses,
+        ctx.score_scope,
+        ctx.coverage,
+    )
+    assert (legacy.required_failed, legacy.required_incomplete, legacy.advisory_unfavorable) == (0, 0, 0)
+    with pytest.raises(FrozenInstanceError):
+        legacy.required_failed = 1
+
+
+def test_adverse_counts_accumulate_across_required_and_advisory_results_in_all_tiers(passing_tier3_counts_payload):
+    failed = result(1)
+    failed.add_error("required failure")
+    missing = result(2)
+    missing.mark_scan_incomplete("required-scanner")
+    advisory_failed = result(2)
+    advisory_failed.metadata["gating"]["blocking"] = False
+    advisory_failed.add_error("advisory failure")
+    passed = result(3, agent_eval=copy.deepcopy(passing_tier3_counts_payload))
+    advisory_missing = result(3, agent_eval=copy.deepcopy(passing_tier3_counts_payload))
+    advisory_missing.metadata["gating"]["blocking"] = False
+    advisory_missing.mark_scan_incomplete("advisory-scanner")
+    sources = [result(1), failed, missing, advisory_failed, passed, advisory_missing]
+    before = copy.deepcopy(sources)
+    ctx = context(sources)
+    assert (ctx.required_failed, ctx.required_incomplete, ctx.advisory_unfavorable) == (1, 1, 2)
+    assert ctx.command_status == Status.FAILED
+    assert sources == before

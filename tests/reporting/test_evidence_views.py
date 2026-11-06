@@ -3,6 +3,8 @@
 
 from copy import deepcopy
 
+import pytest
+
 from skillevaluator.models import Finding, Severity, ValidationResult
 from skillevaluator.reporting.html import HTMLReporter
 
@@ -322,3 +324,132 @@ def test_terminal_lists_harbor_jobs_from_engine_uploads():
     }
     output = render_result(engine)
     assert "hv.example.test/jobs/with" in output and "hv.example.test/jobs/base" in output
+
+
+@pytest.mark.parametrize("uploads", [1, True, {}, "malformed", None, []])
+def test_terminal_bad_or_empty_uploads_preserve_normalized_jobs_and_run_analysis(uploads):
+    from skillevaluator.tier3.result_display import render_result
+
+    result = {
+        "execution_status": "succeeded",
+        "harbor_viewer": {
+            "uploads": uploads,
+            "jobs": [
+                {
+                    "url": "https://example.test/results/retained",
+                    "name": "Retained job",
+                    "analysis_url": "https://example.test/analysis/retained",
+                }
+            ],
+            "analysis_url": "https://example.test/run-analysis",
+        },
+    }
+    before = deepcopy(result)
+    output = render_result(result)
+    assert "Retained job" in output
+    for url in (
+        "https://example.test/results/retained",
+        "https://example.test/analysis/retained",
+        "https://example.test/run-analysis",
+    ):
+        assert output.count(url) == 1
+    assert "Run analysis" in output
+    assert result == before
+
+
+def test_terminal_upload_projection_merges_with_canonical_jobs_without_reattribution():
+    from skillevaluator.tier3.result_display import render_result
+
+    result = {
+        "execution_status": "succeeded",
+        "harbor_viewer": {
+            "jobs": [
+                {
+                    "url": "https://example.test/results/retained",
+                    "name": "Retained job",
+                    "analysis_url": "https://example.test/analysis/retained",
+                }
+            ],
+            "analysis_url": "https://example.test/run-analysis",
+            "uploads": [
+                {
+                    "viewer_url": "https://example.test/results/uploaded",
+                    "uploaded_job_name": "Uploaded job",
+                    "analysis_url": "https://example.test/analysis/uploaded",
+                },
+                {"viewer_url": "https://example.test/results/uploaded", "uploaded_job_name": "Duplicate upload"},
+                {
+                    "viewer_url": "https://example.test/results/retained",
+                    "uploaded_job_name": "Renamed retained job",
+                    "analysis_url": "https://example.test/analysis/retained",
+                },
+                {"viewer_url": "javascript:alert(1)"},
+            ],
+        },
+    }
+    before = deepcopy(result)
+    output = render_result(result)
+    assert "Retained job" in output and "Uploaded job" in output
+    assert "Renamed retained job" not in output and "Duplicate upload" not in output
+    for url in (
+        "https://example.test/results/retained",
+        "https://example.test/analysis/retained",
+        "https://example.test/results/uploaded",
+        "https://example.test/analysis/uploaded",
+        "https://example.test/run-analysis",
+    ):
+        assert output.count(url) == 1
+    assert "Run analysis" in output
+    assert "javascript:" not in output
+    assert result == before
+
+
+@pytest.mark.parametrize("existing_analysis", [None, "https://example.test/analysis/canonical"])
+@pytest.mark.parametrize("padded_url", [False, True])
+def test_terminal_matching_upload_fills_only_missing_canonical_analysis(existing_analysis, padded_url):
+    from skillevaluator.tier3.result_display import render_result
+
+    url = "https://example.test/results/retained"
+    job = {"url": f" {url} " if padded_url else url, "name": "Retained job"}
+    if existing_analysis:
+        job["analysis_url"] = existing_analysis
+    uploaded_analysis = "https://example.test/analysis/uploaded"
+    result = {
+        "execution_status": "succeeded",
+        "harbor_viewer": {
+            "jobs": [job],
+            "uploads": [{"viewer_url": url, "analysis_url": uploaded_analysis, "uploaded_job_name": "Upload name"}],
+        },
+    }
+    before = deepcopy(result)
+    output = render_result(result)
+    assert "Retained job" in output and "Upload name" not in output
+    assert output.count(url) == 1
+    assert output.count(existing_analysis or uploaded_analysis) == 1
+    if existing_analysis:
+        assert uploaded_analysis not in output
+    assert result == before
+
+
+def test_terminal_upload_analysis_never_fills_a_different_canonical_job():
+    from skillevaluator.tier3.result_display import render_result
+
+    result = {
+        "execution_status": "succeeded",
+        "harbor_viewer": {
+            "jobs": [{"url": "https://example.test/results/retained", "name": "Retained job"}],
+            "uploads": [
+                {
+                    "viewer_url": "https://example.test/results/uploaded",
+                    "uploaded_job_name": "Uploaded job",
+                    "analysis_url": "https://example.test/analysis/uploaded",
+                }
+            ],
+        },
+    }
+    before = deepcopy(result)
+    output = render_result(result)
+    assert output.index("Retained job") < output.index("Uploaded job")
+    assert output.index("Uploaded job") < output.index("https://example.test/analysis/uploaded")
+    assert output.count("https://example.test/analysis/uploaded") == 1
+    assert result == before

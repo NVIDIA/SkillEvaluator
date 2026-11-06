@@ -717,14 +717,14 @@ All notable changes to SkillEvaluator are documented in this file.
   agents ignore the variable. The variable was checked with Claude Code
   2.1.292, the release Harbor installs; local mode keeps the fallback off only
   if the host's Claude Code honors it. A refused attempt is not scored, like
-  any other failed trial, so the arm no longer has complete attempt coverage:
-  after one refusal in 20 cases with 3 attempts each, it reports
-  `Scored attempt coverage is 59/60` and its execution fails.
+  any other failed trial, so the arm no longer has complete attempt coverage
+  and its execution fails: after one refusal in 20 cases with 3 attempts
+  each, the run's `result.json` records `Scored attempt coverage is 59/60`.
   `tier3 evaluate` then exits 1, and so does `validate --block-on-agent-eval`.
   On a route that serves the fallback model, such as the Anthropic API, the
-  retry used to finish such an attempt and the arm succeeded, so a run that
-  completed before can now fail. Rerun it, or evaluate the refused case with
-  another model.
+  retry used to finish such an attempt, and the attempt was scored, so a run
+  that completed before can now fail. Rerun it, or run the arm with another
+  model through `--agent-model claude-code=MODEL`.
 
 - Tier 1 security scans no longer fail a skill for an exact read-only
   `/etc/passwd` bind mount such as `docker run -v /etc/passwd:/etc/passwd:ro`.

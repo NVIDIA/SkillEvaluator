@@ -20,8 +20,11 @@ import json
 import os
 import re
 from collections.abc import Callable
+from datetime import UTC, datetime, timedelta
+from io import StringIO
 from pathlib import Path
-from typing import NamedTuple
+from typing import Any, NamedTuple
+from uuid import UUID
 
 import pytest
 from harbor.agents.installed.base import (
@@ -33,9 +36,12 @@ from harbor.agents.installed.base import (
 from harbor.agents.installed.claude_code import ClaudeCode
 from harbor.environments.base import BaseEnvironment, ExecResult
 from harbor.models.agent.context import AgentContext
+from harbor.models.job.result import JobResult, JobStats
 from harbor.models.task.config import EnvironmentConfig, TaskConfig
 from harbor.models.trial.paths import TrialPaths
+from harbor.models.trial.result import TrialResult
 from harbor.utils.env import is_sensitive_env_key
+from rich.console import Console
 from tests.claude_refusal_fixtures import (
     NO_FALLBACK_TEXT,
     SELECTED_MODEL,
@@ -47,7 +53,6 @@ from tests.claude_refusal_fixtures import (
     result_event,
     tool_round,
 )
-from tests.test_harbor_collector_runtime_failures import _write_actual_harbor_022_result
 
 from skillevaluator.evaluation import EvaluationService
 from skillevaluator.provider_config import resolve_llm_provider
@@ -65,6 +70,7 @@ from skillevaluator.tier3.harbor.runner import (
     _resolve_agent_runtime_plan,
     _resolve_runtime_env,
 )
+from skillevaluator.tier3.result_display import render_evaluation_result
 
 _SWITCH = "CLAUDE_CODE_DISABLE_REFUSAL_FALLBACK"
 # The collector's arm-level error when scored attempts fall short of expected ones.
@@ -245,42 +251,133 @@ def _refusal_doc_texts() -> dict[str, str]:
     return {name: " ".join(text.split()) for name, text in texts.items()}
 
 
-def test_a_refused_attempt_fails_attempt_coverage_and_the_docs_say_so(tmp_path: Path) -> None:
-    # Where the fallback used to finish a refused attempt on another model, the
-    # arm succeeded. Now the attempt is an unscored trial failure, so the arm's
-    # attempt coverage is incomplete, its execution fails and the command exits 1.
-    jobs_dir = tmp_path / "jobs"
-    _write_actual_harbor_022_result(
-        jobs_dir / "demo-claude-code-with", reward=0.0, exception_type="AgentSafetyRefusalError"
+def _write_harbor_job(job_dir: Path, case_ids: list[str], *, attempts: int, refused: str | None = None) -> None:
+    """Persist a Harbor 0.24 job whose trials all score 1.0, except the ``refused`` attempt."""
+    started = datetime(2026, 8, 25, tzinfo=UTC)
+    trials: list[TrialResult] = []
+    for case_id in case_ids:
+        for attempt in range(1, attempts + 1):
+            name = f"{case_id}__attempt{attempt}"
+            trial_dir = job_dir / name
+            trial_dir.mkdir(parents=True)
+            at = started + timedelta(seconds=len(trials))
+            task = {"path": str(job_dir / "task" / case_id)}
+            refusal = {
+                "exception_type": "AgentSafetyRefusalError",
+                "exception_message": "Command failed (exit 1)",
+                "exception_traceback": "",
+                "occurred_at": at,
+            }
+            trial = TrialResult.model_validate(
+                {
+                    "id": UUID(int=len(trials) + 2),
+                    "task_name": case_id,
+                    "trial_name": name,
+                    "trial_uri": trial_dir.as_uri(),
+                    "task_id": task,
+                    "task_checksum": "refusal-fixture",
+                    "config": {"task": task, "trial_name": name},
+                    "agent_info": {"name": "claude-code", "version": "test", "model_info": {"name": SELECTED_MODEL}},
+                    "agent_result": {"n_input_tokens": 7, "n_cache_tokens": 2, "n_output_tokens": 3},
+                    "started_at": at,
+                    "finished_at": at,
+                    "verifier_result": None if name == refused else {"rewards": {"overall": 1.0}},
+                    "exception_info": refusal if name == refused else None,
+                }
+            )
+            (trial_dir / "result.json").write_text(trial.model_dump_json(indent=2), encoding="utf-8")
+            trials.append(trial)
+    job = JobResult(
+        id=UUID(int=1),
+        started_at=started,
+        updated_at=started,
+        finished_at=started,
+        n_total_trials=len(trials),
+        stats=JobStats.from_trial_results(trials, n_total_trials=len(trials)),
+        trial_results=trials,
     )
+    (job_dir / "result.json").write_text(job.model_dump_json(indent=2), encoding="utf-8")
 
-    results = collect_harbor_results(
+
+def _collect_refusal(
+    tmp_path: Path, *, cases: int, attempts: int, refused: str, skip_baseline: bool = True
+) -> dict[str, Any]:
+    """Collect a claude-code run in which the safety classifier stopped only ``refused``."""
+    case_ids = [f"case-{index:03d}" for index in range(1, cases + 1)]
+    jobs_dir = tmp_path / "jobs"
+    _write_harbor_job(jobs_dir / "demo-claude-code-with", case_ids, attempts=attempts, refused=refused)
+    if not skip_baseline:
+        _write_harbor_job(jobs_dir / "demo-claude-code-without", case_ids, attempts=attempts)
+    return collect_harbor_results(
         skill_name="demo",
         agents=["claude-code"],
         output_dir=tmp_path / "results",
         jobs_dir=jobs_dir,
-        skip_baseline=True,
-        expected_cases=1,
-        expected_case_ids=["case-001"],
-        expected_trials=1,
+        skip_baseline=skip_baseline,
+        n_attempts=attempts,
+        expected_cases=cases,
+        expected_case_ids=case_ids,
+        expected_trials=cases * attempts,
+        case_id_by_task_selector={case_id: case_id for case_id in case_ids},
     )
 
+
+def test_a_refused_attempt_fails_attempt_coverage_as_the_docs_say(tmp_path: Path) -> None:
+    # The documented example: one refusal in 20 cases with 3 attempts each.
+    # Where the fallback used to finish a refused attempt on another model, the
+    # attempt was scored. Now it is an unscored trial failure, so the arm's
+    # attempt coverage is incomplete, its execution fails and the command exits 1.
+    refused = "case-007__attempt2"
+    results = _collect_refusal(tmp_path, cases=20, attempts=3, refused=refused)
+
     arm = results["agents"]["claude-code"]
-    assert arm["execution_status"] == "failed"
-    assert (arm["expected_attempts"], arm["scored_attempts"]) == (1, 0)
-    assert f"{_COVERAGE_ERROR} 0/1" in arm["execution_errors"]
-    assert results["execution_status"] == "failed"
+    assert arm["execution_status"] == results["execution_status"] == "failed"
+    assert (arm["expected_attempts"], arm["scored_attempts"]) == (60, 59)
+    coverage = f"{_COVERAGE_ERROR} 59/60"
+    # The run's result.json persists these execution errors.
+    assert coverage in results["execution_errors"]
+    # A refusal is a trial failure, reported as an unscoreable reward, and never
+    # an agent runtime (infrastructure) failure.
+    assert arm["agent_runtime_failures"]["with_skill"] == []
+    assert [failure["trial"] for failure in arm["trial_failures"]["with_skill"]] == [refused]
+    assert (
+        f"Unscoreable reward in {refused}: AgentSafetyRefusalError: Command failed (exit 1)"
+        in results["execution_errors"]
+    )
     # `tier3 evaluate` exits 1 whenever this reports a failure.
     assert EvaluationService.failure_reason(results) is not None
 
-    # Every place that documents the switch names that result in the collector's
-    # own words and uses the gate's term, "complete attempt coverage".
-    for name, text in _refusal_doc_texts().items():
-        assert re.search(rf"`{_COVERAGE_ERROR} \d+/\d+`", text), name
-        assert "complete attempt coverage" in text, name
-        assert "scored-attempt coverage" not in text, name
-        assert "execution fails" in text, name
-        assert "`tier3 evaluate` then exits 1, and so does `validate --block-on-agent-eval`" in text, name
+    texts = _refusal_doc_texts()
+    for name, text in texts.items():
+        # Each place quotes the persisted message for exactly this example.
+        assert re.findall(rf"`({_COVERAGE_ERROR} \d+/\d+)`", text) == [coverage], name
+        for token in (
+            "`result.json`",
+            "complete attempt coverage",
+            "`tier3 evaluate`",
+            "`validate --block-on-agent-eval`",
+            "exits 1",
+        ):
+            assert token in text, (name, token)
+    # The model is chosen per agent, not per case.
+    for name in ("CHANGELOG.md", "tier3-live-evaluation.mdx"):
+        assert "`--agent-model claude-code=MODEL`" in texts[name], name
+    assert "`Unscoreable reward`" in texts["tier3-live-evaluation.mdx"]
+
+
+@pytest.mark.parametrize("skip_baseline", [True, False], ids=["with-skill-only", "with-baseline"])
+def test_verbose_evaluate_output_lists_the_refused_trial(tmp_path: Path, skip_baseline: bool) -> None:
+    # Troubleshooting points to `tier3 evaluate --verbose`. Without it, a run with
+    # a completed baseline arm prints only a failure count, and the terminal never
+    # quotes the coverage message when no arm is usable.
+    refused = "case-001__attempt1"
+    results = _collect_refusal(tmp_path, cases=1, attempts=1, refused=refused, skip_baseline=skip_baseline)
+    stream = StringIO()
+
+    render_evaluation_result(results, console=Console(file=stream, force_terminal=False, width=200), verbose=True)
+
+    assert f"{refused}: AgentSafetyRefusalError: Command failed (exit 1)" in stream.getvalue()
+    assert "`tier3 evaluate --verbose`" in _refusal_doc_texts()["tier3-live-evaluation.mdx"]
 
 
 def test_refusal_fallback_switch_is_not_redacted_as_a_secret() -> None:

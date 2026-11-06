@@ -1110,12 +1110,17 @@ machine-readable JSON contract, and how to judge whether a given lift is good.
     (`CLAUDE_CODE_DISABLE_REFUSAL_FALLBACK=1` in every staged task), so the
     attempt ends on the selected model instead of retrying on another one.
     Like any other failed trial, the attempt is not scored, so the arm no
-    longer has complete attempt coverage: after one refusal in 20 cases with 3
-    attempts each, it reports `Scored attempt coverage is 59/60` and its
-    execution fails. `tier3 evaluate` then exits 1, and so does
-    `validate --block-on-agent-eval`. Review the case prompt and the skill
-    content that the agent read, then rerun, or evaluate the case with another
-    model. See [Agents & Sandboxes](agents-and-sandboxes.mdx#supported-agents).
+    longer has complete attempt coverage and its execution fails: after one
+    refusal in 20 cases with 3 attempts each, the run's `result.json` records
+    `Scored attempt coverage is 59/60`. `tier3 evaluate` then exits 1, and so
+    does `validate --block-on-agent-eval`. `tier3 evaluate --verbose` lists the
+    refused trial and its `AgentSafetyRefusalError` in the terminal. The
+    execution errors in `result.json` call it an `Unscoreable reward`, not an
+    agent runtime failure, because a refusal is the model's response to the
+    case rather than an infrastructure failure. Review the case prompt and the
+    skill content that the agent read, then rerun, or run the arm with another
+    model through `--agent-model claude-code=MODEL`. See
+    [Agents & Sandboxes](agents-and-sandboxes.mdx#supported-agents).
   </Accordion>
   <Accordion title="Results look wrong or a case is hard to diagnose">
     Re-run with `--harbor-keep-jobs` — Harbor artifacts are transient and

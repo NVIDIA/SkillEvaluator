@@ -83,7 +83,7 @@ details.check-result>summary{cursor:pointer;list-style:none;margin-bottom:0}deta
 .tab-content .t3-insight-source,.tab-content .t3-sug-cat{font-size:11px}.tab-content .insight-source-llm{color:var(--llm-tx)}
 
 /* Native page scrolling and complete expanded evidence. */
-:root{color-scheme:light;scrollbar-gutter:stable;--mobile-nav-height:0px}
+:root{color-scheme:light;scrollbar-gutter:stable;--mobile-nav-height:0px;--tier3-nav-height:0px}
 [data-theme="dark"]{color-scheme:dark}
 html{scroll-behavior:auto}
 .table-container.active,.summary-table-container.active{max-height:none;overflow-y:visible}
@@ -120,7 +120,7 @@ select:focus-visible{outline:3px solid var(--focus-ring);outline-offset:3px}
  .theme-control select{border:1px solid ButtonText}
 }
 @media print{
- :root,[data-theme="dark"]{color-scheme:light;--mobile-nav-height:0px}
+ :root,[data-theme="dark"]{color-scheme:light;--mobile-nav-height:0px;--tier3-nav-height:0px}
  .mobile-tier-nav,.theme-control{display:none!important}
  .tab-content,.t3-page,.t3-agent-panel,.table-container,.summary-table-container{display:block!important;max-height:none!important;overflow:visible!important}
  .skill-card,.validator-card,.check-finding,.summary-table tr,.t3-trial-card{display:revert!important}
@@ -297,7 +297,8 @@ body{line-height:1.6}
 .tab-content dl:not(.kpis){row-gap:16px}
 .tab-content dl:not(.kpis) dt{margin-top:8px;font-size:12px;line-height:1.6}
 .tab-content dl:not(.kpis) dd{margin-top:8px;line-height:1.6;overflow-wrap:anywhere}
-/* Clear sticky tier navigation as well as the local tabs for agent links. */
-.tab-content .t3-agent-anchor{scroll-margin-top:calc(var(--mobile-nav-height) + 80px)}
-/* Two wrapped tab rows must also clear agent deep links on phone screens. */
-@media(max-width:420px){.tab-content .t3-agent-anchor{scroll-margin-top:calc(var(--mobile-nav-height) + 140px)}}
+/* Measured heights clear every wrapped tab row, independent of breakpoints. */
+.tab-content .t3-agent-anchor{scroll-margin-top:calc(var(--mobile-nav-height) + var(--tier3-nav-height) + 20px)}
+/* Recorded provenance is a label/value list; action-column grids use DIVs. */
+.tab-content dl.t3-prov-grid{grid-template-columns:minmax(140px,.3fr) minmax(0,1fr);align-items:start}
+@media(max-width:760px){.tab-content dl.t3-prov-grid{grid-template-columns:minmax(0,1fr)}}

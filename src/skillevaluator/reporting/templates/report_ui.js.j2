@@ -104,6 +104,7 @@ window.addEventListener('beforeprint', function() {
 window.addEventListener('afterprint', function() {
     reportPrintClosedDetails.forEach(detail => { detail.open = false; });
     reportPrintClosedDetails = [];
+    reportMeasureNavigation();
 });
 // "Fix first" links open their check or finding: skill view, card expanded,
 // filters cleared. The id goes in the address so the link can be shared.
@@ -147,7 +148,17 @@ window.addEventListener('load', function() {
 function reportScrollBehavior() {
     return window.matchMedia && window.matchMedia('(prefers-reduced-motion: reduce)').matches ? 'auto' : 'smooth';
 }
+function reportMeasureNavigation() {
+    [['.mobile-tier-nav', '--mobile-nav-height'], ['.t3-subtabs', '--tier3-nav-height']].forEach(([selector, property]) => {
+        const nav = document.querySelector(selector);
+        const height = nav && nav.getClientRects().length ? nav.getBoundingClientRect().height : 0;
+        document.documentElement.style.setProperty(property, height + 'px');
+    });
+}
 function reportScrollTo(target, block = 'start') {
+    // Tier activation and font/layout changes must be measured before scrolling,
+    // without waiting for the next ResizeObserver delivery.
+    reportMeasureNavigation();
     target.scrollIntoView({behavior: reportScrollBehavior(), block});
 }
 function reportCurrentSection(id) {
@@ -171,6 +182,7 @@ function activateReportTier(tierId, options = {}) {
         if (link.dataset.reportTier === tierId) link.setAttribute('aria-current', 'location');
         else link.removeAttribute('aria-current');
     });
+    reportMeasureNavigation();
     reportCurrentSection(panel.id);
     if (options.scroll !== false) reportScrollTo(panel);
     if (options.focus !== false) panel.focus({preventScroll:true});
@@ -269,14 +281,12 @@ document.addEventListener('DOMContentLoaded', function() {
         target.focus({preventScroll:true});
         reportCurrentSection(target.id);
     }));
-    const nav = document.querySelector('.mobile-tier-nav');
-    function measureNavigation() {
-        const height = nav && getComputedStyle(nav).display !== 'none' ? nav.getBoundingClientRect().height : 0;
-        document.documentElement.style.setProperty('--mobile-nav-height', height + 'px');
+    reportMeasureNavigation();
+    if (window.ResizeObserver) {
+        const observer = new ResizeObserver(reportMeasureNavigation);
+        document.querySelectorAll('.mobile-tier-nav,.t3-subtabs').forEach(nav => observer.observe(nav));
     }
-    measureNavigation();
-    if (nav && window.ResizeObserver) new ResizeObserver(measureNavigation).observe(nav);
-    window.addEventListener('resize', measureNavigation);
+    window.addEventListener('resize', reportMeasureNavigation);
     let navigationFrame = null;
     window.addEventListener('scroll', function() {
         if (navigationFrame !== null) return;

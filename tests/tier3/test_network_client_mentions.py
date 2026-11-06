@@ -462,6 +462,25 @@ def test_an_upload_beside_http_method_prose_is_still_flagged(run, cmd):
     assert result["score"] == 0.5
 
 
+HTTP_PROSE_READ_AS_A_COMMAND = [
+    # The documented limits: each here-document line is read as a command, and
+    # | and ; start a new one, so this prose still warns.
+    "cat > NOTES.md <<'EOF'\nHTTP POST creates an item.\nEOF",
+    "cat > NOTES.md <<'EOF'\nUse HTTP POST on `/api/items` to create an item.\nEOF",
+    "cat > NOTES.md <<'EOF'\n| Create | Send an HTTP request |\nEOF",
+    "cat > NOTES.md <<'EOF'\nThe HTTP POST method is not idempotent; HTTP PUT is.\nEOF",
+]
+
+
+@RUNNERS
+@pytest.mark.parametrize("cmd", HTTP_PROSE_READ_AS_A_COMMAND)
+def test_http_prose_read_as_a_command_still_warns(run, cmd):
+    result = run(_traj(cmd))
+
+    assert _network_findings(result)
+    assert result["score"] == 0.5
+
+
 @pytest.mark.parametrize(
     ("word", "expected"),
     [

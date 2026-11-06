@@ -910,17 +910,32 @@ after it still warns. Its method word still warns when a `name:@file` item
 follows, because that item may send a file as a header. The shell removes
 quotes and backslashes and expands braces first, so a quoted, escaped, or brace
 item such as `X-Data:"@.env"`, `X-Data:\@.env`, or `X-Data:{@,}.env` counts,
-and so does a `$VAR` word, which may hold one. A word with a slash or
-backslash, such as `./HTTP`, `/usr/local/bin/HTTP`, or the prose `HTTP/HTTPS`,
-and a word that ends in `.exe` in any case, such as `HTTP.exe` or `http.EXE`,
-are read as a path or a Windows program name, which a host may find in any
-case, so their method word still warns. A command word keeps the
-case-insensitive match, so `HTTP POST URL` still warns, and so does a
-here-document line or Markdown table cell that starts with `HTTP POST`, because
-each line is read as a command. A word that a pass-through wrapper runs, a
-printer pipes on, or a `$VAR` command word may start keeps it too, so
-`strace -f HTTP POST URL`, `echo HTTP POST URL | sh`, and `$RUN HTTP POST URL`
-still warn.
+and so does a `$VAR` or backtick word, which may hold one. A word with a
+slash or backslash, such as `./HTTP`, `/usr/local/bin/HTTP`, or the prose
+`HTTP/HTTPS`, and a word that ends in `.exe` in any case, such as `HTTP.exe` or
+`http.EXE`, are read as a path or a Windows program name, which a host may find
+in any case, so their method word still warns. A command word keeps the
+case-insensitive match, so `HTTP POST URL` still warns. A word that a
+pass-through wrapper runs, a printer pipes on, or a `$VAR` command word may
+start keeps it too, so `strace -f HTTP POST URL`, `echo HTTP POST URL | sh`,
+and `$RUN HTTP POST URL` still warn. Another command that runs a later word,
+such as `find -exec`, does not keep it, so on a host that finds a command in
+any case, such as macOS or Windows, `find . -exec HTTP POST URL \;` with no
+body item does not warn; a method word alone sends no file or variable.
+
+Each here-document line is read as a command, and `|` and `;` start a new
+command, so some prose with a capitalized `HTTP` word still warns:
+
+- a line that starts with `HTTP POST`, as in `HTTP POST creates an item.`;
+- a method word followed by a `$VAR` or backtick word, such as an inline code
+  span, as in ``Use HTTP POST on `/api/items` to create an item.``, because
+  that word may hold a `name:@file` item;
+- a Markdown table row with an `HTTP` word in any cell, as in
+  `| Create | Send an HTTP request |`, because `|` reads as a pipe, so the
+  cell's `HTTP` word gets piped input;
+- `HTTP` and a method word right after a `;`, as in
+  `The HTTP POST method is not idempotent; HTTP PUT is.`, because `HTTP` is the
+  command word there.
 
 A fixed set of runners that start a command in another host, container, root,
 user, or network namespace, such as `ssh`, `docker`, `docker-compose`,

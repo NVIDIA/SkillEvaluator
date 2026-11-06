@@ -739,7 +739,8 @@ def gitlab_feedback(api, api_url: str, project: str, pipeline_id: int) -> dict:
     )
     relationship = api.graphql(
         "query($project:ID!,$pipeline:CiPipelineID!){project(fullPath:$project){fullPath "
-        "pipeline(id:$pipeline){id project{fullPath} sourceJob{id} upstream{id project{fullPath}}}}}",
+        "pipeline(id:$pipeline){id project{fullPath} sourceJob{id} "
+        "upstream{id project{fullPath} mergeRequest{iid sourceProjectId targetProjectId}}}}}",
         {"project": namespace, "pipeline": f"gid://gitlab/Ci::Pipeline/{publisher['id']}"},
     )
     relation_project = relationship.get("project") if isinstance(relationship, dict) else None
@@ -793,11 +794,20 @@ def gitlab_feedback(api, api_url: str, project: str, pipeline_id: int) -> dict:
         config(source["sha"]) == config(identity["sha"]),
         "The producer CI config differs from the trusted default-branch config.",
     )
-    candidates = api.get(f"{root}/pipelines/{pipeline_id}/merge_requests")
+    linked_mr = relation["upstream"].get("mergeRequest")
+    linked_iid = linked_mr.get("iid") if isinstance(linked_mr, dict) else None
     _require(
-        isinstance(candidates, list) and len(candidates) == 1, "The producer must belong to exactly one merge request."
+        isinstance(linked_mr, dict)
+        and isinstance(linked_iid, str)
+        and re.fullmatch(r"[1-9][0-9]{0,18}", linked_iid)
+        and int(linked_iid) <= 2**63 - 1
+        and type(linked_mr.get("sourceProjectId")) is int
+        and linked_mr["sourceProjectId"] == project_id
+        and type(linked_mr.get("targetProjectId")) is int
+        and linked_mr["targetProjectId"] == project_id,
+        "The producer must have one linked same-project merge request.",
     )
-    number = _positive(candidates[0].get("iid"))
+    number = int(linked_iid)
 
     def aggregate_job():
         jobs = _listing(api, f"{root}/pipelines/{pipeline_id}/jobs?include_retried=false")

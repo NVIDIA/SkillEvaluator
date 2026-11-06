@@ -40,7 +40,8 @@ All notable changes to SkillEvaluator are documented in this file.
   initiation is advisory so first-install reporting does not change the tier gate.
   Same-project feedback uses the short-lived job-token trigger API and verifies
   the server-bound upstream pipeline and source job, preserving protected-branch
-  and deployment permissions.
+  and deployment permissions. Its persisted GraphQL MR association supports
+  GitLab 17.x without requiring the newer pipeline/MR REST endpoint.
 
 - Private runtime runs retain sanitized loading, coverage, MCP, behavior and
   comparison views before cleanup. The saved snapshot supports offline reports

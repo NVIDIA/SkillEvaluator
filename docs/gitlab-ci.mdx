@@ -77,7 +77,9 @@ API host and project, so forwarded MR variables cannot replace its privileged
 bootstrap. It fetches only pinned evaluator tools and authenticates the server's
 upstream pipeline and source job relationship, then validates the source
 configuration, aggregate artifact, MR and current commit before updating one
-comment. The initiating pipeline user must be allowed to create a pipeline on
+comment. The publisher needs access to the instance's REST and GraphQL APIs;
+the pipeline's persisted MR association supports GitLab 17.x as well.
+The initiating pipeline user must be allowed to create a pipeline on
 the protected default branch, pass the two pipeline variables and run the
 protected feedback environment. Configure these permissions for authorized CI
 maintainers; a job token does not bypass protected-branch or deployment permissions.

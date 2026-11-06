@@ -325,7 +325,11 @@ class GitLab:
                     "id": "gid://gitlab/Ci::Pipeline/456",
                     "project": {"fullPath": REPO},
                     "sourceJob": {"id": "gid://gitlab/Ci::Build/93"},
-                    "upstream": {"id": "gid://gitlab/Ci::Pipeline/123", "project": {"fullPath": REPO}},
+                    "upstream": {
+                        "id": "gid://gitlab/Ci::Pipeline/123",
+                        "project": {"fullPath": REPO},
+                        "mergeRequest": {"iid": "7", "sourceProjectId": 12, "targetProjectId": 12},
+                    },
                 },
             }
         }
@@ -376,8 +380,6 @@ class GitLab:
             return {"file_path": ".gitlab-ci.yml", "blob_id": self.source_blob, "commit_id": SHA, **config_content()}
         if path == root + "/repository/files/.gitlab-ci.yml?ref=" + MERGE:
             return {"file_path": ".gitlab-ci.yml", "blob_id": BLOB, "commit_id": MERGE, **config_content()}
-        if path == root + "/pipelines/123/merge_requests":
-            return [copy.deepcopy(self.mr)]
         if path == root + "/merge_requests/7":
             mr = copy.deepcopy(self.mr)
             self.head_checks += 1
@@ -392,6 +394,7 @@ class GitLab:
 
     def graphql(self, query, variables):
         assert "sourceJob" in query and "upstream" in query
+        assert "mergeRequest{iid sourceProjectId targetProjectId}" in query
         assert variables == {"project": REPO, "pipeline": "gid://gitlab/Ci::Pipeline/456"}
         return copy.deepcopy(self.relationship)
 
@@ -567,6 +570,48 @@ def test_gitlab_accepts_running_source_when_request_job_and_aggregate_are_bound(
     api.pipeline["status"] = api.request_job["status"] = "running"
     result = module.gitlab_feedback(api, "https://gitlab.example/api/v4", "12", 123)
     assert result["comment_action"] == "created"
+
+
+def test_gitlab_uses_persisted_graphql_mr_without_unsupported_pipeline_rest_endpoint(gitlab):
+    import urllib.error
+
+    module, api = gitlab
+    original = api.get
+
+    def historical_api(path):
+        if path == "/projects/12/pipelines/123/merge_requests":
+            raise urllib.error.HTTPError("https://gitlab.example/api/v4" + path, 404, "Not found", {}, None)
+        return original(path)
+
+    api.get = historical_api
+    result = module.gitlab_feedback(api, "https://gitlab.example/api/v4", "12", 123)
+    assert result["comment_action"] == "created"
+
+
+@pytest.mark.parametrize(
+    "linked_mr",
+    [
+        None,
+        [],
+        {},
+        {"iid": 7, "sourceProjectId": 12, "targetProjectId": 12},
+        {"iid": "0", "sourceProjectId": 12, "targetProjectId": 12},
+        {"iid": "07", "sourceProjectId": 12, "targetProjectId": 12},
+        {"iid": "-7", "sourceProjectId": 12, "targetProjectId": 12},
+        {"iid": "7/head", "sourceProjectId": 12, "targetProjectId": 12},
+        {"iid": "9223372036854775808", "sourceProjectId": 12, "targetProjectId": 12},
+        {"iid": "7", "sourceProjectId": 13, "targetProjectId": 12},
+        {"iid": "7", "sourceProjectId": 12, "targetProjectId": 13},
+        {"iid": "7", "sourceProjectId": "12", "targetProjectId": 12},
+        {"iid": "7", "sourceProjectId": 12, "targetProjectId": "12"},
+    ],
+)
+def test_gitlab_rejects_missing_malformed_or_cross_project_persisted_mr(gitlab, linked_mr):
+    module, api = gitlab
+    api.relationship["project"]["pipeline"]["upstream"]["mergeRequest"] = linked_mr
+    with pytest.raises(module.FeedbackError, match="linked same-project merge request"):
+        module.gitlab_feedback(api, "https://gitlab.example/api/v4", "12", 123)
+    assert not api.writes
 
 
 @pytest.mark.parametrize(

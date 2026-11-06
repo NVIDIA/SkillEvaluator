@@ -489,6 +489,27 @@ def evaluate_prepared_plugin(
             outcome.provenance.update(runtime_evidence=observed, mcp_proof=observed["mcp_proof"])
         if comparison_runtime is not None:
             outcome.provenance["private_comparisons"] = comparison_runtime.provenance()
+        # Preserve a passive view while preparation provenance and all arm
+        # summaries are still available. Its failure cannot suppress caller
+        # publication or change the engine's status and cleanup semantics.
+        try:
+            from skillevaluator.reporting.plugin_runtime import project_plugin_runtime
+            from skillevaluator.reporting.plugin_runtime_io import save_plugin_runtime_report
+
+            report = project_plugin_runtime(
+                outcome.result,
+                provenance={**outcome.provenance, "attempts": outcome.attempts, "retry_reasons": outcome.retry_reasons},
+            )
+            if report is not None:
+                outcome.provenance["runtime_report"] = report.payload()
+                if run_dir := outcome.result.get("run_dir"):
+                    save_plugin_runtime_report(report, Path(run_dir))
+        except Exception as exc:
+            from skillevaluator.utils.redaction import redact_printable_text
+
+            error = redact_printable_text(f"Runtime report: {type(exc).__name__}: {exc}", max_len=600)
+            outcome.provenance["runtime_report_error"] = error
+            outcome.publication_error = error
         if publish is not None:
             publish(outcome)
 

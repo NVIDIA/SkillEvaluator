@@ -18,6 +18,7 @@ import asyncio
 import importlib
 import json
 import os
+import re
 from collections.abc import Callable
 from pathlib import Path
 from typing import NamedTuple
@@ -46,7 +47,9 @@ from tests.claude_refusal_fixtures import (
     result_event,
     tool_round,
 )
+from tests.test_harbor_collector_runtime_failures import _write_actual_harbor_022_result
 
+from skillevaluator.evaluation import EvaluationService
 from skillevaluator.provider_config import resolve_llm_provider
 from skillevaluator.tier3.harbor import CONTAINER_AGENT_IMPORT_PATHS, LOCAL_AGENT_IMPORT_PATHS
 from skillevaluator.tier3.harbor.adapter import (
@@ -54,6 +57,7 @@ from skillevaluator.tier3.harbor.adapter import (
     generate_harbor_tasks,
     stage_native_harbor_tasks,
 )
+from skillevaluator.tier3.harbor.collector import collect_harbor_results
 from skillevaluator.tier3.harbor.local_environment import SkillEvaluatorLocalEnvironment
 from skillevaluator.tier3.harbor.runner import (
     _CLAUDE_CODE_VERSION,
@@ -63,6 +67,8 @@ from skillevaluator.tier3.harbor.runner import (
 )
 
 _SWITCH = "CLAUDE_CODE_DISABLE_REFUSAL_FALLBACK"
+# The collector's arm-level error when scored attempts fall short of expected ones.
+_COVERAGE_ERROR = "Scored attempt coverage is"
 _FAKE_CREDENTIAL = "test-key"
 _VERTEX_ENV = {
     "CLAUDE_CODE_USE_VERTEX": "1",
@@ -215,6 +221,69 @@ def test_docs_scope_the_switch_to_the_pinned_claude_code_release() -> None:
 
     assert f"With the pinned Claude Code {_CLAUDE_CODE_VERSION}," in paragraph
     assert "[Local mode](#local-mode) runs the Claude Code already on your machine" in paragraph
+
+
+def _refusal_doc_texts() -> dict[str, str]:
+    """Return each place that documents the switch, whitespace-normalized."""
+    root = Path(__file__).resolve().parents[1]
+    changelog = (root / "CHANGELOG.md").read_text(encoding="utf-8")
+    # The switch shipped in 0.8.0: one release section and one entry in it name it.
+    [release] = [section for section in changelog.split("\n## ")[1:] if _SWITCH in section]
+    assert release.startswith("0.8.0 - "), release.splitlines()[0]
+    entries = re.findall(r"^- .*(?:\n  .*)*", release, flags=re.MULTILINE)
+    [entry] = [item for item in entries if _SWITCH in item]
+    blocks = (root / "docs" / "agents-and-sandboxes.mdx").read_text(encoding="utf-8").split("\n\n")
+    [index] = [index for index, block in enumerate(blocks) if f"{_SWITCH}=1" in block]
+    troubleshooting = (root / "docs" / "tier3-live-evaluation.mdx").read_text(encoding="utf-8")
+    [accordion] = re.findall(
+        r'<Accordion title="A claude-code trial fails with AgentSafetyRefusalError">(.*?)</Accordion>',
+        troubleshooting,
+        flags=re.DOTALL,
+    )
+    texts = {
+        "CHANGELOG.md": entry,
+        "agents-and-sandboxes.mdx": "\n\n".join(blocks[index : index + 2]),
+        "tier3-live-evaluation.mdx": accordion,
+    }
+    return {name: " ".join(text.split()) for name, text in texts.items()}
+
+
+def test_a_refused_attempt_fails_attempt_coverage_and_the_docs_say_so(tmp_path: Path) -> None:
+    # Where the fallback used to finish a refused attempt on another model, the
+    # arm succeeded. Now the attempt is an unscored trial failure, so the arm's
+    # attempt coverage is incomplete, its execution fails and the command exits 1.
+    jobs_dir = tmp_path / "jobs"
+    _write_actual_harbor_022_result(
+        jobs_dir / "demo-claude-code-with", reward=0.0, exception_type="AgentSafetyRefusalError"
+    )
+
+    results = collect_harbor_results(
+        skill_name="demo",
+        agents=["claude-code"],
+        output_dir=tmp_path / "results",
+        jobs_dir=jobs_dir,
+        skip_baseline=True,
+        expected_cases=1,
+        expected_case_ids=["case-001"],
+        expected_trials=1,
+    )
+
+    arm = results["agents"]["claude-code"]
+    assert arm["execution_status"] == "failed"
+    assert (arm["expected_attempts"], arm["scored_attempts"]) == (1, 0)
+    assert f"{_COVERAGE_ERROR} 0/1" in arm["execution_errors"]
+    assert results["execution_status"] == "failed"
+    # `tier3 evaluate` exits 1 whenever this reports a failure.
+    assert EvaluationService.failure_reason(results) is not None
+
+    # Every place that documents the switch names that result in the collector's
+    # own words and uses the gate's term, "complete attempt coverage".
+    for name, text in _refusal_doc_texts().items():
+        assert re.search(rf"`{_COVERAGE_ERROR} \d+/\d+`", text), name
+        assert "complete attempt coverage" in text, name
+        assert "scored-attempt coverage" not in text, name
+        assert "execution fails" in text, name
+        assert "`tier3 evaluate` then exits 1, and so does `validate --block-on-agent-eval`" in text, name
 
 
 def test_refusal_fallback_switch_is_not_redacted_as_a_secret() -> None:

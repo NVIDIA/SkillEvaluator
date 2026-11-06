@@ -493,6 +493,54 @@ class TestIntraSkillValidatorValidate:
         if len(headings) > 64:
             assert finding.message.endswith(f"\n  and {len(headings) - 64} more locations ({len(headings)} in total)")
 
+    @patch("skillevaluator.deduplication.intra_skill.intra_skill_validator.analyze_cluster")
+    @patch("skillevaluator.deduplication.intra_skill.intra_skill_validator.LLMClient")
+    @patch("skillevaluator.deduplication.intra_skill.intra_skill_validator.EmbeddingClient")
+    def test_short_repeated_bodies_under_long_headings_stay_inline_and_the_cluster_completes(
+        self, mock_embed, _mock_llm, mock_analyze, tmp_path: Path
+    ) -> None:
+        skill_dir = tmp_path / "long-headings"
+        skill_dir.mkdir()
+        short_body = "See guide."
+        long_body = "Boilerplate paragraph about safety and usage. " * 20
+        headings = [
+            f"## Configuration option for the workflow runner, number {index:04d} of the set" for index in range(270)
+        ]
+        headings += [f"## Big {index}" for index in range(14)]
+        bodies = [short_body] * 270 + [long_body] * 14
+        markdown = "".join(f"{heading}\n{body}\n" for heading, body in zip(headings, bodies, strict=True))
+        (skill_dir / "SKILL.md").write_bytes(markdown.encode("utf-8"))
+        mock_embed.return_value.embed.side_effect = _unit_embeddings(2)
+        mock_analyze.return_value = LLMVerdict(
+            verdict="DUPLICATE", confidence=0.9, reasoning="Repeated instructions", suggestion="Consolidate sections"
+        )
+
+        result = IntraSkillValidator().validate(skill_dir)
+
+        assert result.incomplete_scans == []
+        assert "work_limit" not in result.metadata
+        mock_analyze.assert_called_once()
+        cluster = mock_analyze.call_args.args[1]
+        assert [member.heading for member in cluster.members] == headings
+        budget = llm_analyzer.MAX_PROMPT_CHARS
+        shared_body = long_body.strip()
+        # Sent in full, or with both repeated bodies shared, the request is over
+        # budget: a "[SHARED CONTENT n]" reference is longer than "See guide.".
+        assert len(SYSTEM_PROMPT) + len(llm_analyzer._render_user_prompt(cluster)) > budget
+        all_shared = llm_analyzer._render_user_prompt(cluster, {short_body: 1, shared_body: 2})
+        assert all_shared.count("[SHARED CONTENT 1]") == 270
+        assert len(SYSTEM_PROMPT) + len(all_shared) > budget
+        prompt = build_user_prompt(cluster)
+        assert len(SYSTEM_PROMPT) + len(prompt) <= budget
+        assert prompt.count("---SHARED CONTENT ") == 1
+        assert prompt.count(shared_body) == 1
+        assert prompt.count("[SHARED CONTENT 1]") == 14
+        for member in cluster.members[:270]:
+            assert member.text == f"{member.heading}\n{short_body}"
+            assert f"Content:\n{member.text}\n\n" in prompt
+        [finding] = result.findings
+        assert finding.severity == Severity.HIGH
+
     @pytest.mark.parametrize("verdict", ["DUPLICATE", "RELATED_BUT_DISTINCT"])
     @patch("skillevaluator.deduplication.intra_skill.intra_skill_validator.analyze_cluster")
     @patch("skillevaluator.deduplication.intra_skill.intra_skill_validator.LLMClient")

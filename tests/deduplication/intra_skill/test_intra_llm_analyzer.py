@@ -109,15 +109,82 @@ class TestBuildUserPrompt:
         for member in members:
             assert f"Section: {member.heading}\nLines: 1-5\nContent:\n{member.text}" in prompt
 
-    def test_sharing_is_skipped_when_it_does_not_shorten_the_prompt(self, make_chunk) -> None:
+    @pytest.mark.parametrize(
+        "repeated",
+        [
+            pytest.param("short repeated line", id="block-longer-than-copies"),
+            # Sharing this text alone saves 39 characters, fewer than the
+            # shared-content notice adds.
+            pytest.param("n" * 100, id="saving-smaller-than-notice"),
+        ],
+    )
+    def test_sharing_is_skipped_when_it_does_not_shorten_the_prompt(self, make_chunk, repeated: str) -> None:
         members = [make_chunk(heading=f"Distinct {index}", text=f"{index}: " + "d" * 2_500) for index in range(30)]
-        members += [make_chunk(heading=f"Short {index}", text="short repeated line") for index in range(2)]
+        members += [make_chunk(heading=f"Short {index}", text=repeated) for index in range(2)]
 
         prompt = build_user_prompt(ContentCluster(members, 0.95, 0.85, False, {"markdown"}))
 
         assert _request_chars(prompt) > llm_analyzer.MAX_PROMPT_CHARS
         assert "SHARED CONTENT" not in prompt
-        assert prompt.count("Content:\nshort repeated line") == 2
+        assert prompt.count(f"Content:\n{repeated}") == 2
+
+    @pytest.mark.parametrize(
+        ("length", "shared"),
+        [pytest.param(61, False, id="saves-nothing"), pytest.param(62, True, id="saves-one-char")],
+    )
+    def test_repeated_text_is_shared_only_when_that_saves_characters(
+        self, make_chunk, length: int, shared: bool
+    ) -> None:
+        # Two inline copies cost 2 * length characters. As block 2 they cost two
+        # 18-character "[SHARED CONTENT 2]" references, the 23-character block
+        # header, one copy and a 2-character separator: length + 61.
+        big = "f" * 1_500
+        text = "t" * length
+        members = [make_chunk(heading=f"Big {index}", text=big) for index in range(60)]
+        members += [make_chunk(heading=f"Small {index}", text=text) for index in range(2)]
+
+        prompt = build_user_prompt(ContentCluster(members, 0.95, 0.85, False, {"markdown"}))
+
+        assert _request_chars(prompt) <= llm_analyzer.MAX_PROMPT_CHARS
+        assert prompt.count(big) == 1
+        assert prompt.count("[SHARED CONTENT 1]") == 60
+        if shared:
+            assert prompt.count(f"---SHARED CONTENT 2---\n{text}\n\n") == 1
+            assert prompt.count("Content:\n[SHARED CONTENT 2]") == 2
+        else:
+            assert "SHARED CONTENT 2" not in prompt
+            assert prompt.count(f"Content:\n{text}\n\n") == 2
+
+    def test_short_repeated_bodies_under_long_headings_stay_inline(self, make_chunk) -> None:
+        short_body = "See guide."
+        long_body = "Boilerplate paragraph about safety and usage. " * 20
+        short_members = [
+            make_chunk(source_file="SKILL.md", heading=heading, text=f"{heading}\n{short_body}")
+            for heading in (
+                f"## Configuration option for the workflow runner, number {index:04d} of the set"
+                for index in range(270)
+            )
+        ]
+        long_members = [
+            make_chunk(source_file="SKILL.md", heading=f"## Big {index}", text=f"## Big {index}\n{long_body}")
+            for index in range(25)
+        ]
+        cluster = ContentCluster([*short_members, *long_members], 0.95, 0.85, False, {"markdown"})
+        budget = llm_analyzer.MAX_PROMPT_CHARS
+        # Sent in full, or with both repeated bodies shared, the request is over
+        # budget: a "[SHARED CONTENT n]" reference is longer than "See guide.".
+        assert _request_chars(llm_analyzer._render_user_prompt(cluster)) > budget
+        assert _request_chars(llm_analyzer._render_user_prompt(cluster, {short_body: 1, long_body: 2})) > budget
+
+        prompt = build_user_prompt(cluster)
+
+        assert _request_chars(prompt) <= budget
+        assert prompt.count("---SHARED CONTENT ") == 1
+        assert prompt.count(f"---SHARED CONTENT 1---\n{long_body}\n\n") == 1
+        assert prompt.count(long_body) == 1
+        assert prompt.count("Content:\n## Big ") == prompt.count("[SHARED CONTENT 1]") == 25
+        for member in short_members:
+            assert f"Section: {member.heading}\nLines: 1-5\nContent:\n{member.text}\n\n" in prompt
 
     def test_same_body_under_different_heading_lines_is_shared(self, make_chunk) -> None:
         body = "Describe the supported workflow. " * 4

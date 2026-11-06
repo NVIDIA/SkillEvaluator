@@ -216,7 +216,8 @@ _CODEX_RENDER_RE = re.compile(
     rf"text\s*\(\s*(?:JSON\.stringify\(\s*({_JS_IDENTIFIER})\s*\)|"
     rf"({_JS_IDENTIFIER})(?:\.({_JS_IDENTIFIER}))?)\s*\)\s*;"
 )
-_CODEX_PRAGMA_RE = re.compile(r"[ \t]*// @exec:[^\r\n]*\r?\n")
+# JavaScript ends a `//` comment at U+2028 and U+2029 too, so a pragma line may not contain them.
+_CODEX_PRAGMA_RE = re.compile(r"[ \t]*// @exec:[^\r\n\u2028\u2029]*\r?\n")
 _CODEX_PRAGMA_PREFIX_RE = re.compile(r"[ \t]*// @exec:")
 _CODEX_TOOL_REF_RE = re.compile(r"\b(?:tools|globalThis)\b|\\u(?:\{[0-9A-Fa-f]{1,6}\}|[0-9A-Fa-f]{4})")
 _JS_IDENTIFIER_ESCAPE_RE = re.compile(r"\\u(?:\{([0-9A-Fa-f]{1,6})\}|([0-9A-Fa-f]{4}))")

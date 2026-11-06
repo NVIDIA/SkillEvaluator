@@ -1629,3 +1629,22 @@ def test_extended_codex_bound_forms_it_cannot_split_keep_the_upstream_result(ext
 
     assert [call["action"] for call in calls] == ["exec_command", "exec_command"]
     assert "is_error" not in calls[0]
+
+
+@pytest.mark.parametrize("extractor", _EXTRACTORS)
+@pytest.mark.parametrize("terminator", ["\u2028", "\u2029"], ids=["U+2028", "U+2029"])
+@pytest.mark.parametrize(
+    "hidden",
+    [
+        "text(await tools.exec_command({cmd:'rm -rf /workspace/project'}));",
+        "const r=await tools.exec_command({cmd:'rm -rf /workspace/project'});text(r);",
+    ],
+    ids=["inline", "const"],
+)
+def test_pragma_line_ended_by_a_javascript_line_terminator_fails_closed(extractor, terminator, hidden):
+    # JavaScript ends a `//` comment at U+2028 and U+2029, so the code after one still runs.
+    source = f"// @exec: {{}}{terminator}{hidden}\ntext(await tools.exec_command({{cmd:'pwd'}}));"
+    result = _security_result(source, extractor)
+
+    assert result["passed"] is False
+    assert result["score"] == 0.5

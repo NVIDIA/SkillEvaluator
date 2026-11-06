@@ -467,6 +467,10 @@ All notable changes to SkillEvaluator are documented in this file.
 
 ### Fixed
 
+- Estimate Tier 1 instruction tokens from the parsed Markdown body, so `---`
+  inside YAML values or comments does not count frontmatter as instructions.
+  Body separators without valid frontmatter no longer produce a spurious estimate.
+
 - Tier 3 behavior-check evidence bundles now count a final answer cut by
   the final-response section limit as truncated. The omission check
   compared two renderings that both capped that section (800 characters

@@ -879,9 +879,7 @@ class QualityScoreValidator(ValidatorBase):
         fm_match = FRONTMATTER_PATTERN.match(content)
         if fm_match:
             qs.frontmatter_tokens = len(fm_match.group(1)) // 4
-        inst_start = content.find("---", 3) + 3
-        if inst_start > 3:
-            qs.instructions_tokens = len(content[inst_start:]) // 4
+            qs.instructions_tokens = len(fm_match.group(2)) // 4
 
         # The token budget is a recommendation: exceeding it is advisory (MEDIUM),
         # and the deduction still counts toward the --min-score gate.

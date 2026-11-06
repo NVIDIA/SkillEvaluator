@@ -886,12 +886,13 @@ def gitlab_feedback(api, api_url: str, project: str, pipeline_id: int) -> dict:
         isinstance(web, str) and web == origin + "/" + info.get("path_with_namespace", ""),
         "The GitLab project web URL does not match the authenticated API origin.",
     )
+    # GitLab removes the renderer's terminal LF when storing a note.
     body = _body(
         manifest,
         f"{web}/-/pipelines/{pipeline_id}",
         f"{web}/-/jobs/{aggregate['id']}/artifacts/download",
         (pipeline_id, aggregate["id"]),
-    )
+    ).removesuffix("\n")
 
     def owned(note):
         return (

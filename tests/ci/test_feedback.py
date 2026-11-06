@@ -442,6 +442,33 @@ def test_gitlab_binds_protected_downstream_source_job_config_head_job_and_bot(gi
     assert len(api.writes) == 1
 
 
+@pytest.mark.parametrize("action", ["created", "updated"])
+def test_gitlab_sends_note_without_the_final_lf_removed_by_server(gitlab, monkeypatch, action):
+    module, api = gitlab
+    if action == "updated":
+        module.gitlab_feedback(api, "https://gitlab.example/api/v4", "12", 123)
+        api.notes[0]["body"] += "\nold content"
+        api.writes.clear()
+
+    def normalize_write(write):
+        def store(path, payload):
+            response = write(path, payload)
+            note = next(note for note in api.notes if note["id"] == response["id"])
+            note["body"] = note["body"].removesuffix("\n")
+            return {**response, "body": note["body"]}
+
+        return store
+
+    monkeypatch.setattr(api, "post", normalize_write(api.post))
+    monkeypatch.setattr(api, "put", normalize_write(api.put))
+    result = module.gitlab_feedback(api, "https://gitlab.example/api/v4", "12", 123)
+    assert result["comment_action"] == action
+    assert api.writes[0][2]["body"] == api.notes[0]["body"]
+    assert not api.notes[0]["body"].endswith("\n")
+    assert module.gitlab_feedback(api, "https://gitlab.example/api/v4", "12", 123)["comment_action"] == "unchanged"
+    assert len(api.writes) == 1
+
+
 @pytest.mark.parametrize(
     "payload",
     [
@@ -886,7 +913,8 @@ def test_github_update_rechecks_bot_ownership_and_requires_exact_readback(github
         module.github_feedback(api, REPO, 123, 1)
 
 
-def test_gitlab_preserves_other_bot_marker_and_requires_its_own_readback(gitlab):
+@pytest.mark.parametrize("tamper", ["owner", "body"])
+def test_gitlab_preserves_other_bot_marker_and_requires_its_own_readback(gitlab, tamper):
     module, api = gitlab
     api.notes = [{"id": 5, "body": module.MARKER, "author": {"id": 78, "bot": True}}]
     assert module.gitlab_feedback(api, "https://gitlab.example/api/v4", "12", 123)["comment_action"] == "created"
@@ -894,13 +922,16 @@ def test_gitlab_preserves_other_bot_marker_and_requires_its_own_readback(gitlab)
     api.notes.pop()
     original_get = api.get
 
-    def wrong_owner(path):
+    def wrong_readback(path):
         value = original_get(path)
         if path == "/projects/12/merge_requests/7/notes/51":
-            value["author"]["id"] = 78
+            if tamper == "owner":
+                value["author"]["id"] = 78
+            else:
+                value["body"] += "\n"
         return value
 
-    api.get = wrong_owner
+    api.get = wrong_readback
     with pytest.raises(module.FeedbackError, match="readback"):
         module.gitlab_feedback(api, "https://gitlab.example/api/v4", "12", 123)
 

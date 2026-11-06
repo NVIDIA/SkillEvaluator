@@ -24,6 +24,11 @@ All notable changes to SkillEvaluator are documented in this file.
 
 ### Added
 
+- Private runtime runs retain sanitized loading, coverage, MCP, behavior and
+  comparison views before cleanup. The saved snapshot supports offline reports
+  in all six existing formats, with explicit missing evidence and omissions.
+  Public command activation remains deferred.
+
 - `skillevaluator tier3 feedback RUN_DIR [--skill PATH]` opens a terminal chat
   about one completed Tier 3 run. Answers are grounded in that run's scores,
   with-skill and baseline comparisons, every case's attempts with per-metric
@@ -487,6 +492,20 @@ All notable changes to SkillEvaluator are documented in this file.
   or both. Caps inside individual sections (write bodies, history summaries)
   are unchanged. The evidence-budget documentation now names both causes of
   a `behavior_check` truncation and which setting raises each.
+
+- Tier 3 security grading no longer reports a network-exfiltration warning,
+  which lowered the Security score to 0.5, for HTTP method prose such as
+  `Use HTTP POST to create an item.` or `Document HTTP PUT semantics.` in a
+  here-document or `apply_patch` body. Linux finds a command by its exact name,
+  so a later bare `HTTP`, `HTTPS`, or `Http` word does not start HTTPie, and
+  its method word is no longer read as an upload. Its body items, piped or
+  redirected input, `--raw`, and a method word before a `name:@file` header
+  item, even a quoted or escaped one, or before a `$VAR` word still warn, as do
+  a lowercase `http PUT URL`, a path or `.exe` word such as `./HTTP POST URL`
+  or `HTTP.exe POST URL`, an `HTTP POST URL` command word, and any upload in
+  the same action. Both the host checker and the bundled Harbor verifier apply
+  the rule.
+
 - PR scan comments show the verdict, quality scores, first actionable fixes and
   report links; full provenance and detailed findings stay in the report.
 - Hosted reports use the retained site commit as the Pages deployment identity,

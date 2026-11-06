@@ -32,7 +32,7 @@ from skillevaluator.inference.diagnostics import llm_failure_diagnostic
 from skillevaluator.inference.types import LLMClientError, LLMClientRefusedError, LLMClientTruncatedError
 from skillevaluator.logging_config import get_logger
 from skillevaluator.provider_config import ProviderConfigurationError, resolve_llm_provider
-from skillevaluator.utils.redaction import redact_sensitive_text
+from skillevaluator.utils.redaction import credential_safe_cut, redact_sensitive_text
 
 logger = get_logger(__name__)
 
@@ -52,7 +52,8 @@ _MAX_EXPLANATION_CHARS = 600
 _MAX_CASE_EVIDENCE_CHARS = 300_000
 # A field is masked over ``limit * 4 + 256`` characters, cut back to the last
 # whitespace. Text with no whitespace after its limit is masked over this many
-# characters instead, so the token that crosses the limit is kept.
+# characters instead, so the token that crosses the limit is kept; past this
+# window it is cut back to the last punctuation no credential contains.
 _MAX_UNBROKEN_MASK_CHARS = 65_536
 # Ends every shortened field, as in ``redact_sensitive_text(max_len=...)``.
 _TRUNCATED_MARKER = "...<truncated>"
@@ -245,68 +246,195 @@ def _finite_score(value: Any) -> float | None:
     return round(number, 4) if number is not None else None
 
 
+# Characters that continue a name, so a root right after one is not a root (``a/b`` is not ``/b``).
+_NAME_CHARS = "_.~-"
+# An absolute-path root: POSIX or UNC, the home of this or another user (``~/``,
+# ``~alice/``), a drive letter, or a home variable.
+_ABSOLUTE_PATH_ROOT = re.compile(r"[\\/]|~[\w.-]*[\\/]|[A-Za-z]:[\\/]|(?:\$HOME|\$\{HOME\}|%USERPROFILE%)[\\/]")
+# A root right after one of these starts a path of its own: ``/opt/bin,/home/a``,
+# ``--out=/home/a``, ``log(/home/a)``. A colon counts unless it is a drive letter's.
+_PATH_LIST_SEPARATORS = ",;:=([{"
+_FILE_URL_LOCALHOST_PATH_RE = re.compile(r"(?i)\b(?P<prefix>file://localhost)(?P<path>/\S*)")
+_URL_SPAN_RE = re.compile(r"(?i)\b(?!file:)[a-z][a-z0-9+.-]*://\S+")
+
+
 def _starts_absolute_path(value: str, index: int) -> bool:
-    """Whether a POSIX, home, UNC or drive-letter absolute path starts at ``index``.
+    """Whether a POSIX, home, UNC, drive-letter or home-variable absolute path starts at ``index``.
 
     The character before it must not belong to a name, so ``a/b`` is not read as ``/b``.
     """
-    if index and (value[index - 1].isalnum() or value[index - 1] in "_.~-"):
+    if value[index] not in "/\\~$%" and value[index + 1 : index + 2] != ":":
         return False
-    head = value[index : index + 3]
-    if head[:1] in ("/", "\\"):
+    if index and (value[index - 1].isalnum() or value[index - 1] in _NAME_CHARS):
+        return False
+    return _ABSOLUTE_PATH_ROOT.match(value, index) is not None
+
+
+def _follows_path_separator(value: str, index: int) -> bool:
+    """Whether the character before ``index`` ends an earlier path or option.
+
+    The colon of a drive letter (``C:\\``) does not: it belongs to the path.
+    """
+    if not index or value[index - 1] not in _PATH_LIST_SEPARATORS:
+        return False
+    if value[index - 1] != ":":
         return True
-    if head[:1] == "~":
-        return head[1:2] in ("/", "\\")
-    return len(head) == 3 and head[0].isascii() and head[0].isalpha() and head[1] == ":" and head[2] in "/\\"
+    letter = index - 2
+    is_drive = (
+        letter >= 0
+        and value[letter].isascii()
+        and value[letter].isalpha()
+        and (letter == 0 or not (value[letter - 1].isalnum() or value[letter - 1] in _NAME_CHARS + "/\\"))
+    )
+    return not is_drive
+
+
+def _path_start(value: str, start: int, end: int) -> int | None:
+    """Where the absolute path that ends at ``end`` starts, searching from ``start``.
+
+    It starts at the first root, unless a later root follows a path separator
+    (``/opt/bin,/home/a``, ``PATH=/usr/bin:/home/a``); then that later root
+    starts it and the text before it is kept. A separator that is not followed
+    by a root (``/home/a/my(project)``) is part of the path.
+    """
+    for index in range(end, start, -1):
+        if (
+            value[index - 1] in _PATH_LIST_SEPARATORS
+            and _follows_path_separator(value, index)
+            and _starts_absolute_path(value, index)
+        ):
+            return index
+    return next((index for index in range(start, end + 1) if _starts_absolute_path(value, index)), None)
+
+
+def _path_spellings(path: Path) -> set[str]:
+    """``path`` as written natively, with ``/``, and with ``\\`` escaped as in JSON."""
+    native = str(path)
+    return {native, path.as_posix(), native.replace("\\", "\\\\")}
+
+
+def _home_dir() -> Path | None:
+    try:
+        return Path.home()
+    except (KeyError, OSError, RuntimeError):
+        return None
+
+
+def _local_skill_dir(skill_path: Path, run_dir: Path) -> Path | None:
+    """The evaluated skill's directory on this machine, when it is known.
+
+    An explicit ``--skill`` is already resolved. An inferred skill is only the
+    recorded name, but a run kept in the skill's own ``evals/results``
+    directory still names the skill directory.
+    """
+    if skill_path.is_absolute():
+        return skill_path
+    candidate = run_dir.parent.parent.parent
+    if (
+        run_dir.parent.name == "results"
+        and run_dir.parent.parent.name == "evals"
+        and candidate.name
+        and _name_key(candidate.name) == _name_key(skill_path.name)
+    ):
+        return candidate
+    return None
 
 
 @dataclass(frozen=True)
 class _Scrubber:
-    """Replace the run's host path with its ID and redact credentials in text sent to the provider."""
+    """Replace local paths and redact credentials in text sent to the provider.
 
-    host_paths: tuple[str, ...]
+    The run's directory becomes its ID, the evaluated skill's directory its
+    name, and the home directory ``~``.
+    """
+
+    # This machine's paths, longest first, as one alternation; group ``p<n>``
+    # is replaced with ``replacements[n]``.
+    local_paths: re.Pattern[str] | None
+    replacements: tuple[str, ...]
     run_id: str
     # A separator, then the run ID as a whole path segment (not ``<id>_old`` or ``<id>.log``).
     run_reference: re.Pattern[str]
 
     @classmethod
-    def for_run(cls, run_dir: Path) -> _Scrubber:
-        paths = (str(run_dir), run_dir.as_posix())
+    def for_run(cls, run_dir: Path, *, skill_dir: Path | None = None, home: Path | None = None) -> _Scrubber:
         run_id = run_dir.name
+        # The run directory is replaced wherever it occurs, as a prefix of
+        # longer names too. The skill and home directories are replaced only as
+        # whole paths, so ``/home/alice2`` is not read as ``~2``.
+        entries: dict[str, tuple[str, bool]] = {}
+        for spelling in (str(run_dir), run_dir.as_posix()):
+            entries.setdefault(spelling, (run_id, False))
+        for directory, replacement in ((skill_dir, skill_dir.name if skill_dir else ""), (home, "~")):
+            if directory is not None and replacement:
+                for spelling in _path_spellings(directory):
+                    entries.setdefault(spelling, (replacement, True))
+        ordered = sorted(
+            ((spelling, *entry) for spelling, entry in entries.items() if len(spelling) > 1),
+            key=lambda entry: len(entry[0]),
+            reverse=True,
+        )
+        alternatives = [
+            rf"(?<![\w.~-])(?P<p{index}>{re.escape(spelling)})(?![\w-]|\.\w)"
+            if whole
+            else rf"(?P<p{index}>{re.escape(spelling)})"
+            for index, (spelling, _replacement, whole) in enumerate(ordered)
+        ]
         return cls(
-            tuple(dict.fromkeys(path for path in paths if len(path) > 1)),
+            re.compile("|".join(alternatives)) if alternatives else None,
+            tuple(replacement for _spelling, replacement, _whole in ordered),
             run_id,
             re.compile(r"[\\/]" + re.escape(run_id) + r"(?![\w-]|\.\w)"),
         )
 
-    def paths(self, value: str) -> str:
-        """``value`` with each absolute path that ends in the run's directory replaced by the run ID.
+    def _local(self, match: re.Match[str]) -> str:
+        return self.replacements[int(str(match.lastgroup)[1:])]
 
-        This run's own path is replaced first, spaces included. A copied run
-        keeps its ID, so the path it had on another machine is found by its
-        last segment: the path starts at the first absolute-path root after
-        the preceding whitespace or quote. Such a path that contains a space
-        is not recognized. Relative paths are kept.
+    def paths(self, value: str) -> str:
+        """``value`` with local paths replaced, and each absolute path that ends in the run's directory.
+
+        This machine's run, skill and home directories are replaced first,
+        spaces included; the longest wins. A copied run keeps its ID, so the
+        path it had on another machine is found by its last segment: the path
+        starts at the first absolute-path root after the preceding whitespace
+        or quote, or at a later root that follows ``,;:=([{``. Such a path
+        that contains a space is not recognized. Relative paths are kept.
+        URL spans through the next whitespace are left unchanged.
         """
-        for host_path in self.host_paths:
-            value = value.replace(host_path, self.run_id)
-        if not self.run_id or self.run_id not in value:
-            return value
+
+        def scrub_segment(segment: str) -> str:
+            if self.local_paths is not None:
+
+                def scrub_localhost_file_url(match: re.Match[str]) -> str:
+                    path = self.local_paths.sub(self._local, match.group("path"))
+                    return f"{match.group('prefix')}/{path.lstrip('/')}"
+
+                segment = _FILE_URL_LOCALHOST_PATH_RE.sub(scrub_localhost_file_url, segment)
+                segment = self.local_paths.sub(self._local, segment)
+            if not self.run_id or self.run_id not in segment:
+                return segment
+            pieces: list[str] = []
+            done = floor = 0
+            for match in self.run_reference.finditer(segment):
+                start = match.start()
+                # The walk back stops at the previous match, so the scan stays linear.
+                while start > floor and not segment[start - 1].isspace() and segment[start - 1] not in "\"'`<>|":
+                    start -= 1
+                root = _path_start(segment, start, match.start())
+                floor = match.end()
+                if root is not None:
+                    pieces.extend((segment[done:root], self.run_id))
+                    done = match.end()
+            pieces.append(segment[done:])
+            return "".join(pieces)
+
         pieces: list[str] = []
-        done = floor = 0
-        for match in self.run_reference.finditer(value):
-            start = match.start()
-            # The walk back stops at the previous match, so the scan stays linear.
-            while start > floor and not value[start - 1].isspace() and value[start - 1] not in "\"'`<>|":
-                start -= 1
-            root = next(
-                (index for index in range(start, match.start() + 1) if _starts_absolute_path(value, index)), None
-            )
-            floor = match.end()
-            if root is not None:
-                pieces.extend((value[done:root], self.run_id))
-                done = match.end()
-        pieces.append(value[done:])
+        done = 0
+        for match in _URL_SPAN_RE.finditer(value):
+            pieces.append(scrub_segment(value[done : match.start()]))
+            pieces.append(match.group())
+            done = match.end()
+        pieces.append(scrub_segment(value[done:]))
         return "".join(pieces)
 
     def text(self, value: str, limit: int | None = None) -> str:
@@ -317,7 +445,10 @@ class _Scrubber:
         bounded window, as in the plugin evidence helpers, and drops the
         token cut at the window's edge. When that token starts before
         ``limit`` (compact JSON, a minified error), a larger window is masked
-        so the field is not blanked. A shortened field ends in the marker.
+        so the field is not blanked. Text longer than that window is cut at
+        its last punctuation that no credential contains (``,`` ``"`` ``}``),
+        so a long minified body keeps its prefix too. A shortened field ends
+        in the marker.
         """
         value = self.paths(value)
         if limit is None:
@@ -325,6 +456,9 @@ class _Scrubber:
         window = limit * 4 + 256
         if len(value) > window and not any(char.isspace() for char in value[limit:window]):
             window = max(window, _MAX_UNBROKEN_MASK_CHARS)
+            if len(value) > window:
+                masked = redact_sensitive_text(value[: credential_safe_cut(value, window)])
+                return masked[: limit - len(_TRUNCATED_MARKER)] + _TRUNCATED_MARKER
         masked = redact_sensitive_text(value, max_input_chars=window)
         if len(masked) <= limit and len(value) <= window:
             return masked
@@ -569,15 +703,18 @@ def _scrub(value: Any, scrub: _Scrubber) -> Any:
     return value
 
 
-def compact_run_context(payload: dict[str, Any], *, run_dir: Path) -> dict[str, Any]:
+def compact_run_context(
+    payload: dict[str, Any], *, run_dir: Path, skill_dir: Path | None = None, home: Path | None = None
+) -> dict[str, Any]:
     """Trim the payload to the evidence the feedback chat may cite.
 
     Only the run id is included, not the run's host path. Absolute paths that
-    end in the run's directory (here, or where a copied run first ran) and
-    credential-shaped text are masked in each string before it is shortened, so
-    a cut cannot leave part of either behind.
+    end in the run's directory (here, or where a copied run first ran), the
+    skill directory ``skill_dir`` (written as its name), the ``home`` directory
+    (written as ``~``) and credential-shaped text are masked in each string
+    before it is shortened, so a cut cannot leave part of any of them behind.
     """
-    scrub = _Scrubber.for_run(run_dir)
+    scrub = _Scrubber.for_run(run_dir, skill_dir=skill_dir, home=home)
     runtime_seconds = _finite_number(payload.get("runtime_seconds"))
     if runtime_seconds is not None and runtime_seconds <= 0.0:
         runtime_seconds = None
@@ -685,7 +822,10 @@ def open_feedback_session(skill_path: Path, run_dir: Path) -> Tier3FeedbackSessi
     run_dir = assert_completed_run_dir(run_dir)
     resolve_llm_provider()
     payload = load_agent_eval_payload(skill_path, run_dir)
-    return Tier3FeedbackSession(run_context=compact_run_context(payload, run_dir=run_dir))
+    context = compact_run_context(
+        payload, run_dir=run_dir, skill_dir=_local_skill_dir(skill_path, run_dir), home=_home_dir()
+    )
+    return Tier3FeedbackSession(run_context=context)
 
 
 __all__ = [

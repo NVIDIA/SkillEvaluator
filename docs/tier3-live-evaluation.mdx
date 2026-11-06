@@ -458,12 +458,16 @@ harness and judge match.
 
 The `nemo-gym` backend supports `--env-mode docker`, the `codex`, `claude-code` and
 `opencode` agents, and the `default`, `default_plus_custom` and `custom_only` grading
-modes. Unset options resolve from `evals/config.yml` as on Harbor, and
-`--skip-baseline`, `--skip-with-skill`, `--max-cases` and `--agent-model` (one model
-per agent) apply the same way. It rejects `--stop-on-pass`, `--harbor-keep-jobs`,
-`--copy-repo`, `--agent-runtime-preflight`, `--override-storage-mb`,
-`--timeout-multiplier`, `--environment-kwarg`, a shared `harbor.base_image_mode`, and
-custom Dockerfile modes other than the default, whether set by flag or config, before
+modes. Unset flags fall back to these `evals/config.yml` keys, as on Harbor:
+`harbor.n_attempts`, `pass_threshold`, `n_concurrent`, `max_cases`, `agents.<agent>.model`,
+`resources` (`cpus`, `memory_mb`), `runtime_env`, `grading.mode`, and
+`skill_workspace.mode`/`include`. `--skip-baseline`, `--skip-with-skill`, `--max-cases` and
+`--agent-model` (one model per agent) apply the same way. It rejects `--stop-on-pass`,
+`--harbor-keep-jobs`, `--copy-repo`, `--agent-runtime-preflight`, `--override-storage-mb`,
+`--timeout-multiplier`, `--environment-kwarg`, custom Dockerfile modes other than the
+default, and the config keys `harbor.base_image_mode` (reuse/rebuild),
+`task_source: native_harbor`, `agent_workdir`, `pre_agent_setup`, `setup_commands`,
+`passthrough_env` and `resources.storage_mb`, whether set by flag or config, before
 anything starts; it never falls back to Harbor. Gym receives only the host variables a
 Harbor backend may receive, plus the policy and judge credentials.
 

@@ -278,6 +278,16 @@ def run_nemo_gym_eval(
         errors.append("n_concurrent must be >= 1")
     if max_cases is not None and not _is_positive_int(max_cases):
         errors.append("max_cases must be >= 1")
+    if harbor_config.get("task_source", "auto") == "native_harbor":
+        errors.append("harbor.task_source native_harbor is not supported with --backend nemo-gym yet")
+    errors += [
+        f"harbor.{key} is not supported with --backend nemo-gym yet"
+        for key in ("agent_workdir", "pre_agent_setup", "setup_commands", "passthrough_env")
+        if harbor_config.get(key)
+    ]
+    resource_config = dict(harbor_config.get("resources") or {})
+    if "storage_mb" in resource_config:
+        errors.append("harbor.resources.storage_mb is not supported with --backend nemo-gym")
     include_values = [*workspace_config.get("include", []), *(include_skills or [])]
     if include_values and workspace_mode != "group":
         errors.append("include_skills requires skill_workspace.mode=group")
@@ -297,9 +307,13 @@ def run_nemo_gym_eval(
     timeout_s = float(os.environ.get(RUN_TIMEOUT_ENV, "21600"))
     resolved_models: dict[str, dict[str, str]] = {}
     endpoints: dict[str, tuple[str, str, str]] = {}
+    config_agents = harbor_config.get("agents") or {}
     for agent in agents:
-        endpoints[agent] = _model_endpoint((agent_models or {}).get(agent) or model)
-        resolved_models[agent] = {"agent": agent, "model": endpoints[agent][0], "source": "nemo-gym"}
+        cli_model = (agent_models or {}).get(agent) or model
+        config_model = (config_agents.get(agent) or {}).get("model")
+        endpoints[agent] = _model_endpoint(cli_model or config_model)
+        source = "CLI" if cli_model else "evals/config.yml" if config_model else "public provider default"
+        resolved_models[agent] = {"agent": agent, "model": endpoints[agent][0], "source": source}
 
     run_dir = _reserve_run_dir(output_dir, datetime.now(UTC).strftime("%Y%m%d_%H%M%S"))
     tasks_root = run_dir / "_harbor-tasks"
@@ -312,7 +326,12 @@ def run_nemo_gym_eval(
         if not skipped
     ]
     task_resources = {
-        key: value for key, value in (("cpus", override_cpus), ("memory_mb", override_memory_mb)) if value is not None
+        **resource_config,
+        **{
+            key: value
+            for key, value in (("cpus", override_cpus), ("memory_mb", override_memory_mb))
+            if value is not None
+        },
     }
     # Judge credentials reach only the verifier: tasks carry ${NAME} templates that the
     # Gym environment server resolves from its own process environment.

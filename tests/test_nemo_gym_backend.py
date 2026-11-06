@@ -386,3 +386,30 @@ def test_cli_rejects_unsupported_gym_flags_before_autopilot_writes_a_dataset(
     assert result.exit_code == 2, result.output
     assert "--harbor-keep-jobs" in result.output
     assert not (skill / "evals" / "evals.json").exists()
+
+
+def test_fake_gym_run_uses_config_agent_model_and_resources(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    config = "schema_version: 1\nharbor:\n  agents:\n    codex:\n      model: cfg-model\n  resources:\n    cpus: 3\n"
+    skill, _env_log = _fake_gym_skill(tmp_path, monkeypatch, config=config)
+    result = _run_fake_gym(skill, tmp_path, model=None, skip_baseline=True)
+
+    assert result["run_config"]["agents"]["codex"] == {
+        "agent": "codex",
+        "model": "cfg-model",
+        "source": "evals/config.yml",
+    }
+    task_tomls = list((Path(result["run_dir"]) / "_harbor-tasks" / "codex" / "with").glob("*/task.toml"))
+    assert task_tomls and all("cpus = 3" in path.read_text() for path in task_tomls)
+
+
+@pytest.mark.parametrize(
+    "harbor_config",
+    ["  pre_agent_setup:\n    - echo hi\n", "  resources:\n    storage_mb: 4096\n", "  task_source: native_harbor\n"],
+)
+def test_fake_gym_run_rejects_harbor_only_config_keys(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, harbor_config: str
+) -> None:
+    skill, env_log = _fake_gym_skill(tmp_path, monkeypatch, config=f"schema_version: 1\nharbor:\n{harbor_config}")
+    result = _run_fake_gym(skill, tmp_path)
+    assert "not supported with --backend nemo-gym" in result["error"][0]
+    assert not env_log.exists()

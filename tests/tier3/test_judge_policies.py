@@ -414,8 +414,46 @@ def test_strict_bedrock_stop_keeps_the_errors_of_earlier_models(verifier, monkey
     content, error = verifier.call_public_llm("prompt")
 
     assert content is None
-    assert error.startswith(f"{PRIMARY}: Public provider call failed: Too many requests | family/backup: ")
-    assert error.endswith("maxTokens: must be at most 8192")
+    assert error == (
+        f"{PRIMARY}: Bedrock request failed: Too many requests | "
+        "family/backup: Bedrock request failed: maxTokens: must be at most 8192"
+    )
+
+
+def _bedrock_endpoint_error():
+    from botocore.exceptions import EndpointConnectionError
+
+    return EndpointConnectionError(endpoint_url="https://bedrock-runtime.example/model/converse")
+
+
+@pytest.mark.parametrize(
+    ("make_error", "requests_per_model"),
+    [
+        (lambda: _bedrock_error("ResourceNotFoundException", 404, "Model not found."), 1),
+        (lambda: _bedrock_error("ThrottlingException", 429, "Too many requests"), 2),
+        (_bedrock_endpoint_error, 2),
+    ],
+    ids=["model-not-found", "throttled", "endpoint-unreachable"],
+)
+def test_strict_bedrock_errors_that_move_on_keep_the_bedrock_label(
+    verifier, monkeypatch, make_error, requests_per_model
+):
+    strict(monkeypatch)
+    monkeypatch.setenv("SKILL_EVAL_LLM_PROVIDER", "bedrock")
+    monkeypatch.setenv("LLM_JUDGE_FALLBACK_MODELS", "family/backup")
+    error = make_error()
+    client = _bedrock_client(monkeypatch, [error] * (2 * requests_per_model))
+
+    content, detail = verifier.call_public_llm("prompt")
+
+    assert content is None
+    assert detail == (
+        f"LLM judge model fallback exhausted: {PRIMARY}: Bedrock request failed: {error} | "
+        f"family/backup: Bedrock request failed: {error}"
+    )
+    assert [call.kwargs["modelId"] for call in client.converse.call_args_list] == (
+        [PRIMARY] * requests_per_model + ["family/backup"] * requests_per_model
+    )
 
 
 def test_strict_stop_words_in_an_echoed_model_id_do_not_end_the_judge(verifier, monkeypatch):

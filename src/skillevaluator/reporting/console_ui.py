@@ -855,9 +855,7 @@ def _bounded_console_line(line: str) -> str:
     """Flatten one line of untrusted text and bound it for the compact view."""
     flattened = " ".join(
         "".join(
-            " "
-            if character.isspace() or unicodedata.category(character).startswith("C")
-            else character
+            " " if character.isspace() or unicodedata.category(character).startswith("C") else character
             for character in line
         ).split()
     )

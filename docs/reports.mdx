@@ -47,7 +47,20 @@ into unrelated content.
 
 For `validate`, that compact default is a pipeline view — a per-check ticker
 plus a summary. Pass `--verbose` to get the full per-check detail stream in
-the terminal instead.
+the terminal instead. Final panels are written to stdout. When output is
+redirected or running in CI, tier and check starts, stage changes, measured
+completion counts, and completion lines remain visible on stderr. Unchanged
+updates are omitted; a running stage emits a heartbeat after 60 seconds without
+progress. Counts describe observed work, without estimating a completion
+percentage. Interruption tears down the progress display and its worker.
+
+Terminal grades use green for A/B, amber for C, and red for D/F; failed,
+incomplete, and unavailable evidence retains its status treatment. Lift that
+rounds to zero is neutral. At narrow widths, condition labels, numeric scores,
+and their complete bars stack together. The full terminal summary includes
+successful quality and lift evidence in Details. Artifact paths use the emitted
+filenames and become clickable only on capable interactive terminals; plain,
+no-color, redirected, and string-rendered output retains readable paths.
 
 | Format | What it is | Reach for it when |
 | --- | --- | --- |

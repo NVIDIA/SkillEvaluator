@@ -9,6 +9,15 @@ All notable changes to SkillEvaluator are documented in this file.
 - When CI redaction masks a credential inside a reported PII value, remove the
   finding's digest as well.
 
+- Align terminal grade and lift colors across compact, full, and direct Tier 3
+  reports; displayed zero lift is neutral. Narrow terminals stack complete
+  condition score/bar groups. Full-report Details retain successful quality and
+  lift evidence without opening every success panel. Artifact footers show the
+  emitted filenames, with links only on capable interactive terminals.
+- Compact validation now writes durable tier/check starts, stage changes and
+  measured milestones to stderr in CI, with deduplicated events and a heartbeat
+  after 60 seconds without progress. Final report panels remain on stdout.
+
 - Align final terminal and HTML command outcomes: Passed required checks,
   Changes required, or Incomplete. Keep publication eligibility and Best agent
   score separate. Tier counts exclude explicit N/A checks from execution;

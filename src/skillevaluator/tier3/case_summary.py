@@ -21,6 +21,7 @@ from rich.box import SIMPLE
 from rich.table import Table
 from rich.text import Text
 
+from skillevaluator.reporting.terminal_styles import AMBER
 from skillevaluator.tier3.harbor.progress import redact_progress_detail, secret_values_from_environment
 from skillevaluator.utils.redaction import redact_sensitive_text
 from skillevaluator.utils.secret_redaction import Redactor
@@ -589,8 +590,8 @@ def render_case_summary(
         heading.append(" (consider these fixes)", style="dim")
         console.print(heading)
         for i, fix in enumerate(fixes, 1):
-            head = Text(f" {i}. ", style="bold")
-            head.append(safe(fix["case"]), style="bold cyan")
+            head = Text(f" {i}. ", style=f"bold {AMBER}")
+            head.append(safe(fix["case"]), style="bold")
             n = fix["attempts_lost"]
             lost = (
                 (f" · {n} attempt(s) missed the goal" if fix["kind"] == "goal not met" else f" · lost {n} attempt(s)")

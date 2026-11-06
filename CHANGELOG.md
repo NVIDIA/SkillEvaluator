@@ -19,6 +19,12 @@ All notable changes to SkillEvaluator are documented in this file.
   their sub-checks (`9/9 checks passed (24 sub-checks)`), instead of
   validators (`11/11 passed`).
 
+- `validate` no longer repeats its header box in short terminal windows or
+  when a log warning prints mid-run. Only the tier that is still running is
+  redrawn; the header and finished tiers print once, and log records print
+  through the live view's console. The progress line now prints once, above
+  the final verdict.
+
 ## 0.8.0 - 2026-11-05
 
 ### Added

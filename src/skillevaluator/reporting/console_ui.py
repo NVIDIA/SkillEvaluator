@@ -45,6 +45,7 @@ from rich.panel import Panel
 from rich.text import Text
 
 from skillevaluator.constants import CONTENT_DEDUP_LLM_REFUSED_CHECK
+from skillevaluator.logging_config import route_logs_to
 from skillevaluator.reporting.base import (
     get_skip_reason,
     source_validation_errors,
@@ -527,17 +528,14 @@ class ValidateView:
     def start(self) -> None:
         if not self.enabled:
             return
+        self.console.print(self._header())
+        self.console.print()
         if self.console.is_terminal:
-            self._live = Live(
-                self,
-                console=self.console,
-                refresh_per_second=8,
-                vertical_overflow="visible",
-            )
+            # Only unfinished tiers stay live; finished ones print once above. A live
+            # region taller than the window can't be erased, so each redraw would repeat it.
+            self._live = Live(get_renderable=self._live_region, console=self.console, refresh_per_second=8)
             self._live.start()
-        else:
-            self.console.print(self._header())
-            self.console.print()
+            route_logs_to(self.console)
 
     def tier_start(self, index: int) -> None:
         if not self.enabled:
@@ -561,8 +559,8 @@ class ValidateView:
         block.status = FAIL if failed else PASS
         block.duration = time.time() - block.started_at if block.started_at else None
         block.rows = rows or []
-        self._refresh()
         self._flush_static()
+        self._refresh()
 
     def tier_skip(self, index: int, reason: str) -> None:
         if not self.enabled:
@@ -572,30 +570,27 @@ class ValidateView:
         # Multi-line reasons (setup instructions) continue on unlabeled rows.
         lines = reason.split("\n") or [""]
         block.rows = [TierRow("skipped" if index == 0 else "", [(line, MUTED)]) for index, line in enumerate(lines)]
-        self._refresh()
         self._flush_static()
+        self._refresh()
 
     def finish(self, verdict: Verdict, links: list[tuple[str, str]]) -> None:
         if not self.enabled:
             return
         self.verdict = verdict
         self.links = links
-        if self._live is not None:
-            self._live.update(self)
-            self._live.stop()
-            self._live = None
-        else:
-            if len(self.blocks) >= 2:
-                self.console.print(self._gate())
-                self.console.print()
-            self.console.print(self._verdict_panel(verdict))
+        self.stop()
+        if len(self.blocks) >= 2:
+            self.console.print(self._gate())
             self.console.print()
-            for line in self._footer_lines():
-                self.console.print(line)
+        self.console.print(self._verdict_panel(verdict))
+        self.console.print()
+        for line in self._footer_lines():
+            self.console.print(line)
 
     def stop(self) -> None:
         """Tear down the live display (safe on errors / KeyboardInterrupt)."""
         if self._live is not None:
+            route_logs_to(None)
             self._live.stop()
             self._live = None
 
@@ -753,17 +748,22 @@ class ValidateView:
 
     def _refresh(self) -> None:
         if self._live is not None:
-            self._live.update(self)
+            self._live.refresh()
+
+    def _live_region(self) -> Group:
+        return Group(*(self._block_panel(b) for b in self.blocks[self._static_printed :] if b.status != PENDING))
 
     def _flush_static(self) -> None:
-        """Non-tty mode: print blocks once, as they complete."""
-        if self._live is not None or self.console.is_terminal:
-            return
+        """Print blocks once, in order, as they complete."""
+        done = []
         for block in self.blocks[self._static_printed :]:
             if block.status in (PENDING, RUNNING):
                 break
+            done.append(block)
+        # Advance first so the live region drops these blocks as they print above it.
+        self._static_printed += len(done)
+        for block in done:
             self.console.print(self._block_panel(block))
-            self._static_printed += 1
 
 
 def check_ticker_row(lineup: list[str], done: list[str], current: str | None) -> TierRow:

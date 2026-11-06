@@ -19,6 +19,7 @@ import importlib
 import json
 import os
 import re
+import shutil
 from collections.abc import Callable
 from datetime import UTC, datetime, timedelta
 from io import StringIO
@@ -27,6 +28,7 @@ from typing import Any, NamedTuple
 from uuid import UUID
 
 import pytest
+from click.testing import CliRunner
 from harbor.agents.installed.base import (
     AgentSafetyRefusalError,
     ApiOverloadedError,
@@ -54,6 +56,7 @@ from tests.claude_refusal_fixtures import (
     tool_round,
 )
 
+from skillevaluator.cli import cli
 from skillevaluator.evaluation import EvaluationService
 from skillevaluator.provider_config import resolve_llm_provider
 from skillevaluator.tier3.harbor import CONTAINER_AGENT_IMPORT_PATHS, LOCAL_AGENT_IMPORT_PATHS
@@ -75,6 +78,10 @@ from skillevaluator.tier3.result_display import render_evaluation_result
 _SWITCH = "CLAUDE_CODE_DISABLE_REFUSAL_FALLBACK"
 # The collector's arm-level error when scored attempts fall short of expected ones.
 _COVERAGE_ERROR = "Scored attempt coverage is"
+# The switch's CHANGELOG entry, found by its opening words so that a later entry
+# that names the variable does not change which entry the docs test reads.
+_CHANGELOG_ENTRY_LEAD = "- A Tier 3 `claude-code` trial that the model provider's safety classifier stops"
+_SIMPLE_SKILL = Path(__file__).resolve().parent / "fixtures" / "skills" / "simple"
 _FAKE_CREDENTIAL = "test-key"
 _VERTEX_ENV = {
     "CLAUDE_CODE_USE_VERTEX": "1",
@@ -234,7 +241,9 @@ def _refusal_doc_texts() -> dict[str, str]:
     root = Path(__file__).resolve().parents[1]
     changelog = (root / "CHANGELOG.md").read_text(encoding="utf-8")
     unreleased = changelog.split("\n## Unreleased\n", 1)[1].split("\n## ", 1)[0]
-    [entry] = [block for block in unreleased.split("\n\n") if _SWITCH in block]
+    entries = [block for block in unreleased.split("\n\n") if " ".join(block.split()).startswith(_CHANGELOG_ENTRY_LEAD)]
+    assert entries, "the Unreleased CHANGELOG entry for the refusal fallback switch is missing"
+    entry = entries[0]
     blocks = (root / "docs" / "agents-and-sandboxes.mdx").read_text(encoding="utf-8").split("\n\n")
     [index] = [index for index, block in enumerate(blocks) if f"{_SWITCH}=1" in block]
     troubleshooting = (root / "docs" / "tier3-live-evaluation.mdx").read_text(encoding="utf-8")
@@ -378,6 +387,56 @@ def test_verbose_evaluate_output_lists_the_refused_trial(tmp_path: Path, skip_ba
 
     assert f"{refused}: AgentSafetyRefusalError: Command failed (exit 1)" in stream.getvalue()
     assert "`tier3 evaluate --verbose`" in _refusal_doc_texts()["tier3-live-evaluation.mdx"]
+
+
+@pytest.mark.parametrize(
+    ("gate", "expected_exit_code"),
+    [("--block-on-agent-eval", 1), ("--no-block-on-agent-eval", 0)],
+)
+def test_validate_block_on_agent_eval_fails_a_run_with_a_refused_attempt(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path, gate: str, expected_exit_code: int
+) -> None:
+    # The docs say `validate --block-on-agent-eval` exits 1 too. The engine
+    # returns the collector's own result for a refused attempt, so the gate reads
+    # the failed execution and the coverage error that a refusal produces.
+    _clear_route_env(monkeypatch)
+    results = _collect_refusal(tmp_path, cases=1, attempts=1, refused="case-001__attempt1")
+    monkeypatch.setattr(EvaluationService, "evaluate", lambda _self, _options, **_kwargs: results)
+    skill = tmp_path / "simple"
+    shutil.copytree(_SIMPLE_SKILL, skill)
+    (skill / "evals").mkdir()
+    (skill / "evals" / "evals.json").write_text(
+        json.dumps([{"id": "case-001", "prompt": "Use the skill."}]), encoding="utf-8"
+    )
+    output_dir = tmp_path / "reports"
+
+    result = CliRunner().invoke(
+        cli,
+        [
+            "validate",
+            "--no-autopilot",
+            str(skill),
+            "--no-llm",
+            "--no-tier2",
+            "--tier3",
+            gate,
+            "--agents",
+            "claude-code",
+            "--checks",
+            "schema",
+            "--report",
+            "json",
+            "--output-dir",
+            str(output_dir),
+        ],
+    )
+
+    assert result.exit_code == expected_exit_code, result.output
+    report_text = next(output_dir.glob("skillevaluator-output-*.json")).read_text(encoding="utf-8")
+    report = json.loads(report_text)
+    assert report["overall_passed"] is (expected_exit_code == 0)
+    assert report["gating"]["tiers"]["3"]["blocking"] is (expected_exit_code == 1)
+    assert f"{_COVERAGE_ERROR} 0/1" in report_text
 
 
 def test_refusal_fallback_switch_is_not_redacted_as_a_secret() -> None:

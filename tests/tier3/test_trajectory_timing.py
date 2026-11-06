@@ -222,6 +222,18 @@ def test_trailing_tool_step_without_a_later_timestamp_is_rejected() -> None:
     assert trajectory_timing({"steps": [_user(), _tool_step(3, [1.0])]}) is None
 
 
+@pytest.mark.parametrize("source", ["user", "system"])
+def test_tool_step_followed_by_a_user_or_system_step_is_unmeasured(source: str) -> None:
+    interjection = {"source": source, "timestamp": "2026-01-01T00:00:40+00:00"}
+    # The 38 s after the 1 s tool call may be idle or user time, not model time; counting it
+    # would report 42.0 LLM seconds (39.0 when the interjection is the last step).
+    assert trajectory_timing({"steps": [_user(), _tool_step(2, [1.0]), interjection, _agent(43)]}) is None
+    assert trajectory_timing({"steps": [_user(), _tool_step(2, [1.0]), interjection]}) is None
+    # With the agent's reply to the tool output first, the gap before the interjection is not counted.
+    steps = [_user(), _tool_step(2, [1.0]), _agent(5), interjection, _agent(43)]
+    assert trajectory_timing({"steps": steps}) == _inferred(7.0, 1.0)
+
+
 def test_measured_zero_tool_duration_is_preserved() -> None:
     trajectory = {"steps": [_user(), _tool_step(3, [0.0]), _agent(10)]}
     assert trajectory_timing(trajectory) == _inferred(10.0, 0.0)

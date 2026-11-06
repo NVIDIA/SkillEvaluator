@@ -312,6 +312,18 @@ All notable changes to SkillEvaluator are documented in this file.
   upgrade, or not matched by the LLM stage, are reported instead of silently
   suppressing nothing; fingerprints only match static-only runs.
 
+- Tier 3 **Measured Agent Resources** split each trial's trajectory time into
+  LLM seconds and tool seconds, plus LLM milliseconds per prompt + completion
+  token, with with-skill-minus-baseline deltas in the HTML report and the
+  `resources` JSON object. Native ATIF timing is used when present; otherwise
+  the time is inferred from step timestamps and the `Wall time` header of Codex
+  shell and `apply_patch` output, so the default Codex agent on Harbor 0.24
+  gets real values. Each trial records its timing source, and a comparison that
+  mixes native and inferred timing carries a `mixed_timing_sources` caveat.
+  Trials with unmeasured tool calls (for example `update_plan`, web search or
+  MCP tools) stay `N/A`, and the time between multi-step Harbor steps is not
+  counted. Deltas keep the existing complete-arm and matching-case rules;
+  scores, verdicts and gates do not change.
 - `scripts/ci/check_public_benchmarks.py` accepts `--expected-source-repository`,
   `--expected-source-revision` and `--expected-evaluator-container-revision`,
   so a publishing pipeline can check that each card names the source it asked

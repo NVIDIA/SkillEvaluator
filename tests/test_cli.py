@@ -192,7 +192,7 @@ def test_similarity_cli_handles_pinned_openclaw_compatibility_layout(tmp_path: P
     result = CliRunner().invoke(cli, ["similarity-check", str(collection), "--type", "skill"])
 
     assert result.exit_code == 0, result.output
-    assert "All validations passed" in result.output
+    assert "Passed required checks" in result.output
     assert sorted(embedded_texts) == [
         "autoreview: Review changes with multiple agents",
         "second-skill: Exercise an unrelated workflow",

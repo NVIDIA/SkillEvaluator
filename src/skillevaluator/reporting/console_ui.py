@@ -487,6 +487,8 @@ class Verdict:
     headline: str
     fix: list[tuple[str, str]] | None = None
     rerun: str | None = None
+    incomplete: bool = False
+    details: tuple[str, ...] = ()
 
 
 class ValidateView:
@@ -729,11 +731,18 @@ class ValidateView:
             body = _pill("✓ PASS", GREEN) + Text.assemble(
                 ("  ", ""), (headline, f"bold {TEXT}"), ("  ·  exit 0", MUTED)
             )
-            return Panel(body, box=box.ROUNDED, border_style=GREEN, width=self.width, padding=(0, 2))
-        line1 = _pill("✗ FAIL", RED, ink="#1C0605") + Text.assemble(
+            return Panel(
+                Group(body, *(Text(strip_terminal_controls(line), style=MUTED) for line in verdict.details)),
+                box=box.ROUNDED,
+                border_style=GREEN,
+                width=self.width,
+                padding=(0, 2),
+            )
+        color = AMBER if verdict.incomplete else RED
+        line1 = _pill("INCOMPLETE" if verdict.incomplete else "✗ FAIL", color, ink="#1C0605") + Text.assemble(
             ("  ", ""), (headline, f"bold {TEXT}"), ("  ·  exit 1", MUTED)
         )
-        parts: list = [line1]
+        parts: list = [line1, *(Text(strip_terminal_controls(line), style=MUTED) for line in verdict.details)]
         if verdict.fix:
             fix = Text.assemble(("fix     ", f"bold {MUTED}"))
             for chunk, style in verdict.fix:
@@ -741,7 +750,7 @@ class ValidateView:
             parts.extend([Text(), fix])
         if verdict.rerun:
             parts.append(Text.assemble(("        ", ""), (strip_terminal_controls(verdict.rerun), GREEN)))
-        return Panel(Group(*parts), box=box.ROUNDED, border_style=RED, width=self.width, padding=(0, 2))
+        return Panel(Group(*parts), box=box.ROUNDED, border_style=color, width=self.width, padding=(0, 2))
 
     def _footer_lines(self):
         for label, target in self.links:

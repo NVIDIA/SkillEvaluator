@@ -22,6 +22,18 @@ def check(page, condition, message):
         raise AssertionError(message) from error
 
 
+def severity_palette(page):
+    return page.evaluate("""() => ['critical','high','medium','low','info'].map(severity => {
+        const probe=document.createElement('span');
+        probe.className='severity-' + severity;
+        document.body.append(probe);
+        const style=getComputedStyle(probe);
+        const colors={background:style.backgroundColor,foreground:style.color};
+        probe.remove();
+        return colors;
+    })""")
+
+
 def run(reports, output):
     output.mkdir(parents=True, exist_ok=True)
     records = []
@@ -36,6 +48,13 @@ def run(reports, output):
                 )
                 # Task 2 owns chart-runtime offline behavior; navigation must work without it.
                 context.route("https://**/*", lambda route: route.abort())
+                context.add_init_script("""
+                    (() => {
+                    window._navigationScroll=[];
+                    const original=Element.prototype.scrollIntoView;
+                    Element.prototype.scrollIntoView=function(options) { window._navigationScroll.push(options.behavior); original.call(this,options); };
+                    })();
+                """)
                 page = context.new_page()
                 errors = []
                 page.on("pageerror", lambda error, errors=errors: errors.append(str(error)))
@@ -54,11 +73,6 @@ def run(reports, output):
                     f"() => document.documentElement.dataset.theme === '{theme}'",
                     "explicit preference ignores system",
                 )
-                page.evaluate("""() => {
-                    window._navigationScroll=[];
-                    const original=Element.prototype.scrollIntoView;
-                    Element.prototype.scrollIntoView=function(options) { window._navigationScroll.push(options.behavior); original.call(this,options); };
-                }""")
                 check(
                     page,
                     "() => document.querySelector('.hero-command-status.verdict-chip.fail')?.innerText === 'Changes required' && document.querySelector('.hero-side .verdict-chip').innerText.startsWith('Tier 3 quality: ')",
@@ -287,6 +301,7 @@ def run(reports, output):
                 }""")
                 assert len(contrast) == 2 and all(value["ratio"] >= 4.5 for value in contrast), contrast
                 page.screenshot(path=str(output / f"absent-{width}-{theme}.png"))
+                explicit_palette = severity_palette(page)
                 assert not errors, errors
                 records.append(
                     {"width": width, "theme": theme, "errors": errors, "checks": "passed", "absentContrast": contrast}
@@ -308,6 +323,7 @@ def run(reports, output):
                     f"() => getComputedStyle(document.documentElement).colorScheme === '{theme}'",
                     "no-JS system theme",
                 )
+                assert severity_palette(page) == explicit_palette, "no-JS and explicit theme severity palette"
                 no_js.close()
         storage_context = browser.new_context()
         storage_context.route("https://**/*", lambda route: route.abort())

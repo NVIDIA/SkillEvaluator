@@ -1091,6 +1091,9 @@ def _expected_records(records: list[dict]) -> list[str]:
     ]
 
 
+_RECORD_FRAME = ("Script completed\nWall time 0.1 seconds\nOutput:\n\n", "")
+
+
 def _record_observation(records: list[dict]) -> str:
     body = "\n".join(json.dumps(record, separators=(",", ":")) for record in records)
     return "Script completed\nWall time 0.1 seconds\nOutput:\n\n" + body
@@ -1711,3 +1714,65 @@ def test_valid_non_ascii_javascript_name_still_decodes(extractor):
 
     assert [call["action"] for call in calls] == ["exec_command"]
     assert calls[0]["action_input"] == {"cmd": "pwd"}
+
+
+@pytest.mark.parametrize("extractor", _EXTRACTORS)
+@pytest.mark.parametrize(
+    "source",
+    [
+        'text(await tools.exec_command({cmd:"false"}));',
+        'const r=await tools.exec_command({cmd:"false"});text(r);',
+    ],
+    ids=["inline", "bound"],
+)
+def test_lone_call_with_a_duplicate_key_record_stays_unsupported(extractor, source):
+    calls = extractor(_trajectory(source, '{"exit_code":1,"exit_code":0,"output":""}'.join(_RECORD_FRAME)))
+
+    assert len(calls) == 1
+    assert calls[0]["normalization_status"] == "unsupported_native_codex_exec_wrapper"
+
+
+_LONE_SOURCES = [
+    pytest.param('text(await tools.exec_command({cmd:"make"}));', id="inline"),
+    pytest.param('const r=await tools.exec_command({cmd:"make"});text(r);', id="bound"),
+]
+
+
+@pytest.mark.parametrize("extractor", _EXTRACTORS)
+@pytest.mark.parametrize("source", _LONE_SOURCES)
+@pytest.mark.parametrize(
+    "body",
+    [
+        '{"exit_code":1,"output":"' + "x" * 300,
+        '{"exit_code":1,"output":"x"}\nextra text',
+        '{"exit_code":1,"outp',
+    ],
+    ids=["truncated-mid-string", "trailing-text", "truncated-mid-key"],
+)
+def test_lone_call_with_an_incomplete_record_stays_unsupported(extractor, source, body):
+    # Incomplete evidence must stop grading: a cut-off failure would otherwise score as a clean run.
+    trajectory = _trajectory(source, "".join(_RECORD_FRAME[:1]) + body)
+    calls = extractor(trajectory)
+
+    assert len(calls) == 1
+    assert calls[0]["normalization_status"] == "unsupported_native_codex_exec_wrapper"
+    assert _error_recovery(trajectory, extractor)["first_attempt_clean"] is False
+
+
+@pytest.mark.parametrize("extractor", _EXTRACTORS)
+@pytest.mark.parametrize(
+    ("source", "body"),
+    [
+        ('const r=await tools.exec_command({cmd:"pwd"});text(r);', "/workspace\n"),
+        ('const r=await tools.exec_command({cmd:"pwd"});text(r);', ""),
+        ("text(await tools.apply_patch('*** Begin Patch\\n*** End Patch\\n'));", "Success. Updated the files:\nA a.txt\n"),
+    ],
+    ids=["plain-text", "empty-body", "apply-patch-text"],
+)
+def test_lone_call_with_a_plain_text_result_keeps_the_whole_output(extractor, source, body):
+    observation = _RECORD_FRAME[0] + body
+    calls = extractor(_trajectory(source, observation))
+
+    assert len(calls) == 1
+    assert "normalization_status" not in calls[0]
+    assert calls[0]["observation"] == observation

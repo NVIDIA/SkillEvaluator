@@ -1140,10 +1140,14 @@ def _exec_record(value: object, record_format: tuple, record_index: int) -> tupl
     return (True, "status=failed") if settled["status"] == "rejected" else _returned_outcome(settled["value"])
 
 
+class _DuplicateKey(ValueError):
+    """A record repeats a key, so which value counts would be ambiguous."""
+
+
 def _unique_keys(pairs: list[tuple[str, Any]]) -> dict[str, Any]:
     """Reject a duplicate key, which would let the last value silently win."""
     if len({key for key, _ in pairs}) != len(pairs):
-        raise ValueError("duplicate key")
+        raise _DuplicateKey("duplicate key")
     return dict(pairs)
 
 
@@ -1165,6 +1169,8 @@ def _codex_exec_records(observation: str, record_format: tuple, count: int) -> l
             position += 1
         try:
             value, end = decoder.raw_decode(body, position)
+        except _DuplicateKey:
+            raise
         except (json.JSONDecodeError, RecursionError, ValueError):
             return None
         outcome = _exec_record(value, record_format, record_index)
@@ -1221,9 +1227,23 @@ def _resolve_exec_records(
     """Give each call of a record wrapper its own record, or leave the wrapper unsupported."""
     observation = _outer_tool_call_observation(step, tool_call, include_unscoped=raw_index == 0)
     record_format = normalized[0][_RECORD_FORMAT]
-    records = _codex_exec_records(observation, record_format, len(normalized))
-    if record_format == ("single",) and not (records and records[0][1] is not None):
-        return normalized  # a lone call keeps its whole output unless its record states an outcome
+    try:
+        records = _codex_exec_records(observation, record_format, len(normalized))
+        duplicate = False
+    except _DuplicateKey:
+        records, duplicate = None, True
+    if record_format == ("single",):
+        header = _EXEC_OUTPUT_RE.match(observation)
+        # A lone call may print plain text, but a body that opens like a record and does not parse
+        # is incomplete evidence: a cut-off failure must not score as a clean run.
+        incomplete = duplicate or (
+            records is None and header is not None and observation[header.end() :].lstrip()[:1] == "{"
+        )
+        if incomplete:
+            outer = {key: value for key, value in tool_call.items() if not key.startswith("_atif_")}
+            return [{**outer, "_atif_normalization_status": UNSUPPORTED_NATIVE_CODEX_EXEC}]
+        if not (records and records[0][1] is not None):
+            return normalized  # a lone call keeps its whole output unless its record states an outcome
     if records is None:
         return _upstream_normalize_tool_call(tool_call)
     return [

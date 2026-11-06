@@ -14,6 +14,7 @@ folder holds MDX pages published to <https://docs.nvidia.com/skills/skillevaluat
 - `quickstart.mdx` — install, one provider and key, and first runs
 - `installation.mdx` — extras, uv, pip, Docker, requirements
 - `configuration.mdx` — providers, embeddings, and Tier 3 credential roles
+- `agent-skill.mdx` — installing and using the `skills/skillevaluator` agent skill
 - `tier1-validation.mdx` — Tier 1 checks, profiles, scanner setup, exit codes
 - `tier2-deduplication.mdx` — Tier 2 dedup commands, catalogs, thresholds, limits
 - `tier3-live-evaluation.mdx` — Tier 3 live agent evaluation workflow

@@ -36,6 +36,7 @@ from skillevaluator.constants import (
     DIMENSION_MAPPING,
     DIMENSION_VERDICT_NEUTRAL_THRESHOLD,
     DIMENSION_VERDICT_PASS_THRESHOLD,
+    SOURCE_VALIDATION_CLI_LIMIT,
 )
 from skillevaluator.publication_evidence import (
     TIER1_REQUIRED_CHECKS_KEY,
@@ -55,6 +56,8 @@ from skillevaluator.utils.rich_markup import strip_terminal_controls
 _AGENT_EVAL_MAX_FUTURE_CLOCK_SKEW = timedelta(minutes=5)
 
 if TYPE_CHECKING:
+    from collections.abc import Iterable
+
     from skillevaluator.models import ValidationResult
 
 
@@ -1330,15 +1333,13 @@ def _agent_eval_publication_aggregates_consistent(
     raw_agents_run: list[list[str]] = []
     for container in (payload, summary):
         agents_run = container.get("agents_run")
-        if (
-            not isinstance(agents_run, list)
-            or any(not isinstance(name, str) for name in agents_run)
-        ):
+        if not isinstance(agents_run, list) or any(not isinstance(name, str) for name in agents_run):
             return False
         raw_agents_run.append(agents_run)
-    if raw_agents_run[0] != raw_agents_run[1] or [
-        publication_semantic_text(name).strip() for name in raw_agents_run[0]
-    ] != expected_agents:
+    if (
+        raw_agents_run[0] != raw_agents_run[1]
+        or [publication_semantic_text(name).strip() for name in raw_agents_run[0]] != expected_agents
+    ):
         return False
 
     best_agent = agents[best_name]
@@ -1386,6 +1387,27 @@ def _agent_eval_publication_aggregates_consistent(
     return root_dimensions == agent_dimensions
 
 
+def agent_eval_case_selection_issue(payload: dict[str, Any] | None) -> str | None:
+    """Return why a run limited by ``max_cases`` cannot be publication evidence."""
+    if not isinstance(payload, dict):
+        return None
+    summary = payload.get("summary") if isinstance(payload.get("summary"), dict) else {}
+    recorded = [container["case_selection"] for container in (payload, summary) if "case_selection" in container]
+    if not recorded:
+        return None
+    selection = recorded[0]
+    total = _agent_eval_count(selection.get("total")) if isinstance(selection, dict) else 0
+    selected = _agent_eval_count(selection.get("selected")) if isinstance(selection, dict) else 0
+    if any(value != selection for value in recorded) or not 0 < selected <= total:
+        return "Tier 3 case selection metadata is missing, invalid, or contradictory."
+    if selected < total:
+        return (
+            f"Tier 3 ran only the first {selected} of {total} cases (max_cases); "
+            "a partial suite is not publication evidence."
+        )
+    return None
+
+
 def agent_eval_publication_evidence_complete(payload: dict[str, Any] | None) -> bool:
     """Return whether a payload carries the minimum publication Tier 3 evidence."""
     if not isinstance(payload, dict):
@@ -1422,6 +1444,7 @@ def agent_eval_publication_evidence_complete(payload: dict[str, Any] | None) -> 
         and publication_target is not None
         and publication_target.skill_name == skill_name
         and agent_eval_publication_run_id(payload) is not None
+        and agent_eval_case_selection_issue(payload) is None
     )
 
 
@@ -1956,7 +1979,15 @@ def missing_tier1_publication_checks(results: list[ValidationResult]) -> tuple[s
     if not declarations:
         return ()
     required = frozenset().union(*(declared_tier1_required_checks(value) for value in declarations))
-    covered = {producer.check_id for _result, producer in executed}
+    user_skipped = {
+        producer.check_id
+        for result in results
+        if isinstance(result.metadata, dict)
+        and result.metadata.get("skipped_by_user")
+        and (producer := result_publication_evidence(result)) is not None
+        and producer.tier == 1
+    }
+    covered = {producer.check_id for _result, producer in executed} - user_skipped
     return tuple(sorted(required - covered))
 
 
@@ -2241,7 +2272,8 @@ def assess_tier3_evidence(
                 execution_status,
                 raw_verdict,
                 selected_payload,
-                "Tier 3 ran but lacks publication-complete provenance or dimension evidence.",
+                agent_eval_case_selection_issue(selected_payload)
+                or "Tier 3 ran but lacks publication-complete provenance or dimension evidence.",
             )
         return Tier3EvidenceAssessment(
             "incomplete" if tier3_results or selected_payload else "not_run",
@@ -2437,12 +2469,8 @@ def passes_required_gate(result: ValidationResult) -> bool:
     return bool(result.passed or is_advisory_agent_eval_skip(result))
 
 
-def additional_errors(result: ValidationResult) -> list[str]:
-    """Return errors not already displayed through a structured finding.
-
-    Findings also populate the legacy error list. Keep independent errors,
-    including execution diagnostics, without repeating those mirrored entries.
-    """
+def _finding_legacy_lines(result: ValidationResult) -> set[str]:
+    """Return the legacy error and warning lines that only repeat a structured finding."""
     represented = {finding.to_legacy_string() for finding in result.findings}
     for finding in result.findings:
         # merge_with_prefix puts skill labels before legacy messages but inside
@@ -2453,7 +2481,97 @@ def additional_errors(result: ValidationResult) -> list[str]:
             label, _, location = location.partition("] ")
             prefix += label + "] "
             represented.add(f"{prefix}{finding.tag} {finding.message} in {location}")
+    return represented
+
+
+def additional_errors(result: ValidationResult) -> list[str]:
+    """Return errors not already displayed through a structured finding.
+
+    Findings also populate the legacy error list. Keep independent errors,
+    including execution diagnostics, without repeating those mirrored entries.
+    """
+    represented = _finding_legacy_lines(result)
     return [error for error in result.errors if error not in represented]
+
+
+def additional_warnings(result: ValidationResult) -> list[str]:
+    """Return warnings not already displayed through a structured finding.
+
+    Medium and low findings also populate the legacy warning list. Some
+    scanners report why they did not run as a warning, so keep those lines.
+    """
+    represented = _finding_legacy_lines(result)
+    return [warning for warning in result.warnings if warning not in represented]
+
+
+_SOURCE_VALIDATION_ERROR_STATUSES = frozenset({"missing", "error"})
+
+
+def source_validation_errors(metadata: object) -> list[dict[str, str]]:
+    """Return the failed Tier 3 source checks recorded in ``metadata``, in order.
+
+    Tier 3 source preflight stores its checks under ``source_validation`` as
+    ``{"path", "status", "message"}`` items. Paths and messages come from the
+    skill's own eval files (entry IDs, parser errors), so callers still escape
+    them for their medium. Malformed items and checks that passed or only
+    warned are left out.
+    """
+    raw_checks = metadata.get("source_validation") if isinstance(metadata, dict) else None
+    if not isinstance(raw_checks, list):
+        return []
+    errors: list[dict[str, str]] = []
+    for check in raw_checks:
+        if not isinstance(check, dict):
+            continue
+        path = check.get("path", "")
+        status = check.get("status", "error")
+        message = check.get("message")
+        if (
+            isinstance(path, str)
+            and isinstance(status, str)
+            and status in _SOURCE_VALIDATION_ERROR_STATUSES
+            and isinstance(message, str)
+            and message.strip()
+        ):
+            errors.append({"path": path, "status": status, "message": message})
+    return errors
+
+
+def source_validation_full_report(report_formats: Iterable[str]) -> str | None:
+    """Name the report file of this run that lists every failed Tier 3 source check.
+
+    ``report_formats`` are the formats the run actually emits. HTML Full
+    Insights and the JSON report's ``tier3.provenance.source_validation`` list
+    every error. ``cli`` writes no file, Markdown has no section for them, and
+    SARIF keeps them only as raw result properties, so ``None`` means no report
+    of this run is a place to send the reader.
+    """
+    formats = set(report_formats)
+    if "html" in formats:
+        return "Full Insights in the HTML report"
+    if "json" in formats:
+        return "tier3.provenance.source_validation in the JSON report"
+    return None
+
+
+def source_validation_preview(
+    errors: list[dict[str, str]],
+    report_formats: Iterable[str],
+) -> tuple[list[dict[str, str]], str | None]:
+    """Return the failed Tier 3 source checks a terminal view prints, and the note after them.
+
+    A terminal view previews the first ``SOURCE_VALIDATION_CLI_LIMIT`` errors
+    and names the report with the rest only when this run writes one (see
+    :func:`source_validation_full_report`). Otherwise, for example with an
+    explicit ``-r cli``, it prints every error and no note, because the rest
+    would not be reachable anywhere else.
+    """
+    full_report = source_validation_full_report(report_formats)
+    hidden = len(errors) - SOURCE_VALIDATION_CLI_LIMIT
+    if full_report is None or hidden <= 0:
+        return list(errors), None
+    noun = "error" if hidden == 1 else "errors"
+    return errors[:SOURCE_VALIDATION_CLI_LIMIT], f"{hidden} more {noun}: see {full_report}."
 
 
 class ReporterBase(ABC):

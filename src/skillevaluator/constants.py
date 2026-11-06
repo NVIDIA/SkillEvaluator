@@ -249,6 +249,9 @@ CONTENT_DEDUP_SIMILARITY_THRESHOLD = 0.80
 
 CONTENT_DEDUP_MIN_CHUNK_CHARS = 80
 
+# Bound each provider embedding input, including dense tables and long lines.
+CONTENT_DEDUP_MAX_CHUNK_CHARS = 3000
+
 # Upper bound (in characters) for treating a repeated chunk as a "trivial"
 # duplicate. Short, single-file blocks dominated by comment/config-style lines
 # (e.g. a recurring `# default pts-tolerance is 60 ms.` config snippet) are
@@ -258,6 +261,11 @@ CONTENT_DEDUP_TRIVIAL_DUP_MAX_CHARS = 400
 
 CONTENT_DEDUP_EMBEDDING_BATCH_SIZE = 64
 
+# Check name of the advisory finding recorded when the chat LLM declines to
+# classify a content cluster. A refusal is missing evidence about one cluster,
+# not a failed scan, so it is reported as a MEDIUM finding instead of blocking.
+CONTENT_DEDUP_LLM_REFUSED_CHECK = "llm_refused"
+
 # Resource ceilings for untrusted skill content. Tier 2 sends collected text
 # to external embedding/LLM providers and performs pairwise comparisons, so
 # every stage must have an explicit upper bound.
@@ -266,6 +274,13 @@ CONTENT_DEDUP_MAX_DISCOVERED_PATHS = 4096
 CONTENT_DEDUP_MAX_FILE_BYTES = 1 * 1024 * 1024
 CONTENT_DEDUP_MAX_TOTAL_BYTES = 8 * 1024 * 1024
 CONTENT_DEDUP_MAX_CHUNKS = 512
+CONTENT_DEDUP_MAX_PAIR_COMPARISONS = CONTENT_DEDUP_MAX_CHUNKS * (CONTENT_DEDUP_MAX_CHUNKS - 1) // 2
+# All-pairs clustering does one multiply-add per vector component per chunk
+# pair. The budget lets embeddings of up to 2,048 dimensions reach the chunk
+# ceiling; wider embeddings get a lower effective chunk limit derived from it
+# (418 chunks at 3,072 dimensions, 362 at 4,096).
+CONTENT_DEDUP_SCALAR_BUDGET_DIMENSION = 2048
+CONTENT_DEDUP_MAX_SCALAR_COMPARISONS = CONTENT_DEDUP_MAX_PAIR_COMPARISONS * CONTENT_DEDUP_SCALAR_BUDGET_DIMENSION
 CONTENT_DEDUP_MAX_LLM_CLUSTERS = 50
 
 # Collection-wide similarity budgets are independent of a single skill's file limit.
@@ -541,6 +556,14 @@ AGENT_EVAL_VERDICT_FAIL = "fail"
 TIER3_LIFT_PASS_THRESHOLD = 0.05
 TIER3_LIFT_FAIL_THRESHOLD = -0.10
 
+# Private paired comparisons resample whole cases with a reproducible seed.
+LIFT_BOOTSTRAP_RESAMPLES = 2000
+LIFT_BOOTSTRAP_TAIL_RESAMPLES = 200
+LIFT_BOOTSTRAP_SEED = 0
+LIFT_BOOTSTRAP_CONFIDENCE = 0.95
+LIFT_CI_MIN_PAIRED_CASES = 5
+LIFT_CI_LOW_PRECISION_WIDTH = 0.20
+
 AGENT_EVAL_DATASET_REQUIRED_FIELDS = [
     "id",
     "question",
@@ -550,6 +573,11 @@ AGENT_EVAL_DATASET_REQUIRED_FIELDS = [
 ]
 
 AGENT_EVAL_DATASET_FORMATS = {".json", ".jsonl", ".yaml", ".yml"}
+
+# Terminal views preview this many failed Tier 3 source checks when the run
+# also writes an HTML or JSON report, which keeps all of them; otherwise they
+# print every failed check.
+SOURCE_VALIDATION_CLI_LIMIT = 5
 
 
 # =============================================================================
@@ -632,6 +660,13 @@ INSIGHTS_JUDGE_REASONING_EFFORT = DIMENSION_JUDGE_REASONING_EFFORT
 INSIGHTS_JUDGE_MAX_CONCLUSIONS = 5
 INSIGHTS_JUDGE_MAX_RECOMMENDATIONS = 5
 
+# Interactive `tier3 feedback` chat over one completed run; it shares the
+# Insights judge's request settings.
+TIER3_FEEDBACK_CHAT_MODEL = INSIGHTS_JUDGE_MODEL
+TIER3_FEEDBACK_CHAT_MAX_TOKENS = INSIGHTS_JUDGE_MAX_TOKENS
+TIER3_FEEDBACK_CHAT_TEMPERATURE: float | None = INSIGHTS_JUDGE_TEMPERATURE
+TIER3_FEEDBACK_CHAT_REASONING_EFFORT = INSIGHTS_JUDGE_REASONING_EFFORT
+
 
 class ExitCode:
     """Exit codes for CLI."""
@@ -640,3 +675,48 @@ class ExitCode:
     VALIDATION_FAILED = 1
     CONFIG_ERROR = 2
     RUNTIME_ERROR = 3
+
+
+# Passive plugin format declarations; not consulted by public dispatch.
+PLUGIN_AGENT_PLUGINS_V1_MANIFEST_FILE = PLUGIN_CONTAINED_MANIFEST_FILE
+PLUGIN_AGENT_PLUGINS_V1_MANIFEST_TYPE = "agent_plugins_v1"
+PLUGIN_CODEX_MANIFEST_DIR = ".codex-plugin"
+PLUGIN_CODEX_MANIFEST_TYPE = "codex_plugin_json"
+PLUGIN_CURSOR_MANIFEST_DIR = ".cursor-plugin"
+PLUGIN_CURSOR_MANIFEST_TYPE = "cursor_plugin_json"
+
+
+# Passive plugin discovery contracts; public dispatch remains unchanged.
+PLUGIN_MANIFEST_PRECEDENCE: tuple[tuple[str, str], ...] = (
+    ("agent_plugin.yaml", PLUGIN_MANIFEST_TYPE),
+    ("agent_plugin.yml", PLUGIN_MANIFEST_TYPE),
+    (f"{PLUGIN_CONTAINED_MANIFEST_DIR}/{PLUGIN_CONTAINED_MANIFEST_FILE}", PLUGIN_CONTAINED_MANIFEST_TYPE),
+    (PLUGIN_AGENT_PLUGINS_V1_MANIFEST_FILE, PLUGIN_AGENT_PLUGINS_V1_MANIFEST_TYPE),
+    (f"{PLUGIN_CODEX_MANIFEST_DIR}/{PLUGIN_CONTAINED_MANIFEST_FILE}", PLUGIN_CODEX_MANIFEST_TYPE),
+    (f"{PLUGIN_CURSOR_MANIFEST_DIR}/{PLUGIN_CONTAINED_MANIFEST_FILE}", PLUGIN_CURSOR_MANIFEST_TYPE),
+)
+
+PLUGIN_NATIVE_MANIFEST_DIRS: tuple[str, ...] = (
+    PLUGIN_CONTAINED_MANIFEST_DIR,
+    PLUGIN_CODEX_MANIFEST_DIR,
+    PLUGIN_CURSOR_MANIFEST_DIR,
+)
+
+PLUGIN_CONTAINED_MANIFEST_TYPES = frozenset(
+    {
+        PLUGIN_CONTAINED_MANIFEST_TYPE,
+        PLUGIN_AGENT_PLUGINS_V1_MANIFEST_TYPE,
+        PLUGIN_CODEX_MANIFEST_TYPE,
+        PLUGIN_CURSOR_MANIFEST_TYPE,
+    }
+)
+
+PLUGIN_COMPONENT_MAX_ITEMS = 256
+
+PLUGIN_CONFIG_MAX_BYTES = 256 * 1024
+
+SCAN_ARTIFACT_DIRS = frozenset({"evals", ".evals", "results", ".results", "versions", ".versions"})
+
+PLUGIN_TREE_PRUNED_DIRS = SCAN_EXCLUDED_DIRS - {"__pycache__"}
+
+PLUGIN_TREE_MAX_DISCOVERED_PATHS = 20_000

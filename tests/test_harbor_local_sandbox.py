@@ -49,7 +49,7 @@ class TestDetect:
         monkeypatch.setattr(local_sandbox.platform, "system", lambda: "Linux")
         monkeypatch.setattr(local_sandbox.shutil, "which", lambda _name: "/usr/bin/bwrap")
         monkeypatch.setattr(local_sandbox, "_userns_enabled", lambda: True)
-        monkeypatch.setattr(local_sandbox, "_bwrap_smoke_test", lambda _bwrap: True)
+        monkeypatch.setattr(local_sandbox, "_bwrap_smoke_result", lambda _bwrap: (True, ""))
         sandbox = local_sandbox.detect("require")
         assert sandbox.plan.backend == "bubblewrap"
         assert sandbox.plan.strength == "kernel"
@@ -115,6 +115,74 @@ class TestDetect:
         with pytest.raises(ValueError):
             local_sandbox.detect("bogus")
 
+    def test_smoke_failure_detail_reaches_the_reason(self, monkeypatch: pytest.MonkeyPatch) -> None:
+        monkeypatch.setattr(local_sandbox.platform, "system", lambda: "Linux")
+        monkeypatch.setattr(local_sandbox.shutil, "which", lambda _name: "/usr/bin/bwrap")
+        monkeypatch.setattr(local_sandbox, "_userns_enabled", lambda: True)
+        monkeypatch.setattr(
+            local_sandbox,
+            "_bwrap_smoke_result",
+            lambda _bwrap: (False, "bwrap: pivot_root: Operation not permitted"),
+        )
+
+        sandbox = local_sandbox.detect("prefer")
+
+        # Without bubblewrap's own line every container-policy failure reads like
+        # the sysctl causes detect() names for the other branches.
+        assert "pivot_root: Operation not permitted" in sandbox.plan.reason
+        assert "seccomp" in sandbox.plan.reason
+
+    def test_other_pivot_root_failure_does_not_claim_seccomp(self, monkeypatch: pytest.MonkeyPatch) -> None:
+        monkeypatch.setattr(local_sandbox.platform, "system", lambda: "Linux")
+        monkeypatch.setattr(local_sandbox.shutil, "which", lambda _name: "/usr/bin/bwrap")
+        monkeypatch.setattr(local_sandbox, "_userns_enabled", lambda: True)
+        monkeypatch.setattr(
+            local_sandbox,
+            "_bwrap_smoke_result",
+            lambda _bwrap: (False, "bwrap: pivot_root: Invalid argument"),
+        )
+
+        with pytest.raises(local_sandbox.SandboxUnavailable) as excinfo:
+            local_sandbox.detect("require")
+
+        message = str(excinfo.value)
+        assert "pivot_root: Invalid argument" in message
+        assert "seccomp" not in message
+
+    def test_require_mode_remediation_offers_prefer_and_off(self, monkeypatch: pytest.MonkeyPatch) -> None:
+        monkeypatch.setattr(local_sandbox.platform, "system", lambda: "Linux")
+        monkeypatch.setattr(local_sandbox.shutil, "which", lambda _name: None)
+
+        with pytest.raises(local_sandbox.SandboxUnavailable) as excinfo:
+            local_sandbox.detect("require")
+
+        message = str(excinfo.value)
+        # "off" drops every guardrail; "prefer" keeps the advisory ones and must
+        # be offered alongside it.
+        assert f"{local_sandbox.SANDBOX_MODE_ENV}=prefer" in message
+        assert f"{local_sandbox.SANDBOX_MODE_ENV}=off" in message
+
+    def test_smoke_result_reports_launch_failure_detail(self) -> None:
+        ok, detail = local_sandbox._bwrap_smoke_result("/nonexistent/bwrap")
+
+        assert ok is False
+        assert detail
+
+    def test_smoke_result_returns_last_stderr_line(self, monkeypatch: pytest.MonkeyPatch) -> None:
+        completed = subprocess.CompletedProcess(
+            args=["bwrap"],
+            returncode=1,
+            stdout=b"",
+            stderr=b"warning: ignored\nbwrap: pivot_root: Operation not permitted\n",
+        )
+        monkeypatch.setattr(local_sandbox.subprocess, "run", lambda *_args, **_kwargs: completed)
+
+        assert local_sandbox._bwrap_smoke_result("/usr/bin/bwrap") == (
+            False,
+            "bwrap: pivot_root: Operation not permitted",
+        )
+        assert local_sandbox._bwrap_smoke_test("/usr/bin/bwrap") is False
+
     def test_bwrap_smoke_argv_binds_lib_dirs(self) -> None:
         # Regression: the smoke test must bind the ELF-interpreter dirs, not just
         # /usr, or a dynamically-linked /usr/bin/true fails ENOENT on usr-merged
@@ -129,6 +197,100 @@ class TestDetect:
         argv = local_sandbox._bwrap_smoke_argv("bwrap")
         for flag in ("--die-with-parent", "--new-session", "--proc", "--dev", "--tmpfs"):
             assert flag in argv
+
+    def test_linux_pins_resolved_bubblewrap_that_passed_smoke_test(
+        self, monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+    ) -> None:
+        target = tmp_path / "pkg" / "bwrap"
+        target.parent.mkdir()
+        target.write_text("#!/bin/sh\n", encoding="utf-8")
+        link = tmp_path / "bin" / "bwrap"
+        link.parent.mkdir()
+        link.symlink_to(target)
+        probes: list[str] = []
+        monkeypatch.setattr(local_sandbox.platform, "system", lambda: "Linux")
+        monkeypatch.setattr(local_sandbox.shutil, "which", lambda _name: str(link))
+        monkeypatch.setattr(local_sandbox, "_userns_enabled", lambda: True)
+        monkeypatch.setattr(local_sandbox, "_bwrap_smoke_result", lambda bwrap: (probes.append(bwrap) is None, ""))
+
+        sandbox = local_sandbox.detect("require")
+        # A later PATH lookup must not change which launcher runs.
+        monkeypatch.setattr(local_sandbox.shutil, "which", lambda _name: "/different/bwrap")
+        argv = sandbox.wrap(
+            ["true"],
+            workdir=tmp_path,
+            write_roots=[tmp_path],
+            home=tmp_path,
+            tmp=tmp_path,
+            allow_net=False,
+            extra_ro=[],
+        )
+
+        resolved = str(target.resolve())
+        assert sandbox.plan.executable == resolved
+        assert probes == [resolved]
+        assert argv[0] == resolved
+
+    def test_linux_relative_which_result_is_pinned_absolute(
+        self, monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+    ) -> None:
+        (tmp_path / "bin").mkdir()
+        (tmp_path / "bin" / "bwrap").write_text("#!/bin/sh\n", encoding="utf-8")
+        monkeypatch.chdir(tmp_path)
+        monkeypatch.setattr(local_sandbox.platform, "system", lambda: "Linux")
+        monkeypatch.setattr(local_sandbox.shutil, "which", lambda _name: "bin/bwrap")
+        monkeypatch.setattr(local_sandbox, "_userns_enabled", lambda: True)
+        monkeypatch.setattr(local_sandbox, "_bwrap_smoke_result", lambda _bwrap: (True, ""))
+
+        sandbox = local_sandbox.detect("require")
+
+        assert sandbox.plan.executable == str((tmp_path / "bin" / "bwrap").resolve())
+        assert Path(sandbox.plan.executable).is_absolute()
+
+    @pytest.mark.skipif(os.name != "posix", reason="executes POSIX shell launchers")
+    def test_relative_path_entry_cannot_substitute_launcher_from_workdir(
+        self, monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+    ) -> None:
+        # Regression: local mode launches the wrapped argv with cwd set to the
+        # writable workspace and the host PATH. A bare "bwrap" let a relative
+        # PATH entry such as ./node_modules/.bin resolve against that workspace,
+        # so a file planted by an earlier sandboxed command ran unconfined.
+        markers = tmp_path / "markers"
+        markers.mkdir()
+        real_dir = tmp_path / "system-bin"
+        real_dir.mkdir()
+        real = real_dir / "bwrap"
+        real.write_text(f"#!/bin/sh\n: > '{markers / 'real'}'\n", encoding="utf-8")
+        real.chmod(0o755)
+        workdir = tmp_path / "run" / "workspace"
+        planted = workdir / "node_modules" / ".bin" / "bwrap"
+        planted.parent.mkdir(parents=True)
+        planted.write_text(f"#!/bin/sh\n: > '{markers / 'planted'}'\n", encoding="utf-8")
+        planted.chmod(0o755)
+        for name in ("home", "tmp"):
+            (tmp_path / "run" / name).mkdir()
+        host_path = f"./node_modules/.bin{os.pathsep}{real_dir}"
+        monkeypatch.chdir(tmp_path)
+        monkeypatch.setenv("PATH", host_path)
+        monkeypatch.setattr(local_sandbox.platform, "system", lambda: "Linux")
+        monkeypatch.setattr(local_sandbox, "_userns_enabled", lambda: True)
+        monkeypatch.setattr(local_sandbox, "_bwrap_smoke_result", lambda _bwrap: (True, ""))
+
+        sandbox = local_sandbox.detect("require")
+        argv = sandbox.wrap(
+            ["true"],
+            workdir=workdir,
+            write_roots=[tmp_path / "run"],
+            home=tmp_path / "run" / "home",
+            tmp=tmp_path / "run" / "tmp",
+            allow_net=False,
+            extra_ro=[],
+        )
+        subprocess.run(argv, cwd=str(workdir), env={"PATH": host_path}, check=True, timeout=10)
+
+        assert Path(argv[0]).is_absolute()
+        assert (markers / "real").exists()
+        assert not (markers / "planted").exists()
 
 
 @pytest.mark.skipif(platform.system() != "Windows", reason="requires a native Windows runner")
@@ -706,6 +868,29 @@ class TestSandboxWrap:
             extra_ro=[],
         )
         assert wrapped[0] == "bwrap"
+
+    def test_bubblewrap_backend_launches_detected_executable(self, tmp_path: Path) -> None:
+        plan = local_sandbox.SandboxPlan("bubblewrap", "kernel", "test", "/opt/bubblewrap/bin/bwrap")
+        wrapped = local_sandbox.Sandbox(plan).wrap(
+            ["bash", "-c", "true"],
+            workdir=tmp_path,
+            write_roots=[tmp_path],
+            home=tmp_path,
+            tmp=tmp_path,
+            allow_net=False,
+            extra_ro=[],
+        )
+        unpinned = local_sandbox._bwrap_argv(
+            ["bash", "-c", "true"],
+            workdir=tmp_path,
+            write_roots=[tmp_path],
+            home=tmp_path,
+            tmp=tmp_path,
+            allow_net=False,
+            extra_ro=[],
+        )
+        assert wrapped[0] == "/opt/bubblewrap/bin/bwrap"
+        assert wrapped[1:] == unpinned[1:]
 
     def test_strict_reads_rejects_root_that_contains_host_home(
         self,

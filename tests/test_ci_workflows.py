@@ -23,6 +23,7 @@ REVIEWED_NPM_COMMAND = ["npm", "ci", "--prefix", "fern", "--ignore-scripts", "--
 REQUIRED_CI_JOBS = {
     "test-python-312": "Tests (Python 3.12)",
     "test-python-313": "Tests (Python 3.13)",
+    "test-python-314": "Tests (Python 3.14)",
     "package": "Package",
     "rhel8-security-install": "RHEL 8 security install",
     "tier2-macos": "Tier 2 (macos-latest)",
@@ -155,6 +156,19 @@ def test_ci_validates_fern_on_the_required_python_312_context() -> None:
     assert "platform test matrix was skipped" not in docs_step["run"]
 
 
+def test_html_parser_patch_boundary_coverage_uses_available_runner_artifacts() -> None:
+    job = _load("ci.yml")["jobs"]["html-parser-compatibility"]
+    # Floating the OS can make these historical patch interpreters unavailable,
+    # preventing the compatibility regression tests from running at all.
+    assert job["runs-on"] == "ubuntu-24.04"
+    assert job["strategy"]["matrix"]["python-version"] == ["3.12.11", "3.13.5"]
+    setup_python = next(step for step in job["steps"] if step.get("uses", "").startswith("actions/setup-python@"))
+    assert setup_python["with"]["python-version"] == "${{ matrix.python-version }}"
+    commands = _runs(job)
+    assert "tests/validators/test_markdown.py" in commands
+    assert "tests/test_cli_html_parser_compat.py" in commands
+
+
 def test_ci_skips_every_other_required_job_only_after_classification() -> None:
     jobs = _load("ci.yml")["jobs"]
 
@@ -168,6 +182,9 @@ def test_full_lane_keeps_the_existing_commands_and_runners() -> None:
 
     assert jobs["test-python-313"]["runs-on"] == "ubuntu-latest"
     assert "uv run pytest -q" in _runs(jobs["test-python-313"])
+    assert jobs["test-python-314"]["runs-on"] == "ubuntu-latest"
+    assert "uv sync --all-extras --locked --python 3.14" in _runs(jobs["test-python-314"])
+    assert "uv run pytest -q" in _runs(jobs["test-python-314"])
     assert jobs["tier2-macos"]["runs-on"] == "macos-latest"
     assert jobs["tier2-windows"]["runs-on"] == "windows-latest"
     assert "tests/embedding" in _runs(jobs["tier2-macos"])
@@ -244,6 +261,10 @@ def test_gitleaks_single_value_allowlists_are_exactly_scoped() -> None:
             r"^us\.anthropic\.claude-opus-5$",
             r"^tests/validators/test_security\.py$",
         ),
+        "Bedrock model ID in the merge-leftover SkillSpector bridge test copy from commit e8aa35d6a": (
+            r"^us\.anthropic\.claude-opus-5$",
+            r"^tests/validators/test_security\.py\.orig$",
+        ),
     }
     for description, (regex, path) in expected.items():
         entry = allowlists[description]
@@ -254,6 +275,24 @@ def test_gitleaks_single_value_allowlists_are_exactly_scoped() -> None:
             "regexes": [regex],
             "paths": [path],
         }
+
+
+def test_gitleaks_curl_auth_allowlists_are_exactly_scoped() -> None:
+    # Fake `curl -u user:password` fixtures stay in history, so each allowlist
+    # must name one credential value and one test file for the curl rule only.
+    config = tomllib.loads(GITLEAKS_CONFIG.read_text(encoding="utf-8"))
+    entries = [entry for entry in config["allowlists"] if "curl-auth-user" in entry.get("targetRules", [])]
+
+    assert entries
+    for entry in entries:
+        assert set(entry) == {"description", "condition", "targetRules", "regexes", "paths"}
+        assert entry["condition"] == "AND"
+        assert entry["targetRules"] == ["curl-auth-user"]
+        [regex] = entry["regexes"]
+        [path] = entry["paths"]
+        assert regex.startswith("^") and regex.endswith("$")
+        assert ".*" not in regex
+        assert re.fullmatch(r"\^tests/[\w/]+\\\.py\$", path)
 
 
 def test_gitleaks_uses_event_specific_full_history_scopes() -> None:
@@ -357,19 +396,28 @@ def test_publish_docs_installs_the_fern_cli_from_the_committed_lockfile() -> Non
     assert "fern/node_modules/.bin/fern" in publish_step["run"], "run the installed CLI, not one from PATH"
 
 
-def test_every_workflow_declares_explicit_permissions() -> None:
+def test_workflows_declare_permissions_or_inherit_the_explicit_scan_caller() -> None:
     """A job-level permissions: block overrides the workflow-level one, so check both.
 
-    This rejects the write-all shorthand and the inherited-default token scope, not
-    every broad grant -- a granular write like `contents: write` is a legitimate
-    choice for a release workflow and is not this test's concern.
+    The callable-only scanner inherits its explicit consumer permissions so
+    hosting can opt into OIDC without requiring that permission for basic scans.
+    All event-triggered workflows still declare their scope; no job uses write-all.
     """
     for workflow_name in _workflow_names():
         workflow = _load(workflow_name)
-        assert workflow.get("permissions") is not None, (
-            f"{workflow_name} inherits the repository default token scope"
-        )
-        for scope, permissions in [("workflow", workflow["permissions"])] + [
+        if workflow_name == "evaluate-skills.yml":
+            assert set(workflow["on"]) == {"workflow_call"}
+            assert "permissions" not in workflow
+            assert all("permissions" not in job for job in workflow["jobs"].values())
+            for template in ("skill-checks.yml", "skill-checks-llm.yml"):
+                caller = yaml.load((ROOT / "ci/templates" / template).read_text(), Loader=yaml.BaseLoader)
+                assert caller["permissions"] == {"contents": "read"}
+                assert all("permissions" not in job for job in caller["jobs"].values())
+        else:
+            assert workflow.get("permissions") is not None, (
+                f"{workflow_name} inherits the repository default token scope"
+            )
+        for scope, permissions in [("workflow", workflow.get("permissions"))] + [
             (f"job {job_id}", job["permissions"]) for job_id, job in workflow["jobs"].items() if "permissions" in job
         ]:
             assert permissions != "write-all", f"{workflow_name}: {scope}"

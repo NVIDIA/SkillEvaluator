@@ -951,6 +951,8 @@ def test_complete_low_score_is_execution_success(tmp_path: Path) -> None:
         "execution_error_details_total": 0,
         "execution_error_details_shown": 0,
         "execution_error_details_truncated": False,
+        "expected_cases": 1,
+        "scored_cases": 1,
         "expected_attempts": 1,
         "scored_attempts": 1,
         "runtime_failure_details_total": 0,

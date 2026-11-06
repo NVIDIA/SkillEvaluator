@@ -408,13 +408,13 @@ class TestExternalTool:
             hint = tool.get_install_hint()
             assert "gitleaks" in hint.lower()
 
-    def test_skillspector_install_hint_uses_public_source_distribution(self):
+    def test_skillspector_install_hint_uses_release_wheel(self):
         with patch("shutil.which", return_value=None):
             tool = ExternalTool("SkillSpector", "skillspector")
 
         assert (
-            tool.get_install_hint()
-            == "Install with: uv tool install git+https://github.com/NVIDIA/SkillSpector.git@v2.12.0"
+            tool.get_install_hint() == "Install with: uv tool install "
+            "https://github.com/NVIDIA/SkillSpector/releases/download/v2.13.3/skillspector-2.13.3-py3-none-any.whl"
         )
         assert "[security]" not in tool.get_install_hint()
 
@@ -496,3 +496,22 @@ class TestToolResult:
         )
         assert result.success is False
         assert result.error_message == "Tool failed"
+
+
+def test_version_reports_pinned_release_for_managed_tools(tmp_path, monkeypatch):
+    from skillevaluator.utils.scanner_install import GITLEAKS_VERSION
+    from skillevaluator.utils.tool_runner import ExternalTool
+
+    monkeypatch.setenv("PATH", str(tmp_path))
+    monkeypatch.setenv("SKILLEVALUATOR_RUNTIME_DIR", str(tmp_path / "rt"))
+    assert ExternalTool("Gitleaks", "gitleaks", managed=True).version == GITLEAKS_VERSION
+
+
+def test_version_parses_tool_output(tmp_path, monkeypatch):
+    from skillevaluator.utils.tool_runner import ExternalTool
+
+    tool = tmp_path / "bandit"
+    tool.write_text("#!/bin/sh\necho 'bandit 1.9.4'\n")
+    tool.chmod(0o755)
+    monkeypatch.setenv("PATH", str(tmp_path))
+    assert ExternalTool("Bandit", "bandit").version == "1.9.4"

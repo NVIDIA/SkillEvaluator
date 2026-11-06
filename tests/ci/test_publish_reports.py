@@ -1,0 +1,1716 @@
+# SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+# SPDX-License-Identifier: Apache-2.0
+
+"""Boundaries for privileged publication of untrusted CI report data."""
+
+import base64
+import hashlib
+import importlib.util
+import io
+import json
+import os
+import stat
+import urllib.error
+import zipfile
+from pathlib import Path
+
+import pytest
+import yaml
+from test_verify_provenance import JWKS, signed_receipt
+
+ROOT = Path(__file__).parents[2]
+SPEC = importlib.util.spec_from_file_location("publish_reports", ROOT / "ci/publish_reports.py")
+publisher = importlib.util.module_from_spec(SPEC)
+SPEC.loader.exec_module(publisher)
+
+
+@pytest.fixture(autouse=True)
+def trusted_workflow_pins(monkeypatch):
+    monkeypatch.syspath_prepend(str(Path(__file__).parents[2] / "ci"))
+    import verify_provenance
+
+    monkeypatch.setattr(verify_provenance, "fetch_signing_keys", lambda: JWKS)
+    monkeypatch.setenv("TRUSTED_EVALUATOR_SHA", "c" * 40)
+    monkeypatch.setenv("TRUSTED_CALLER_BLOBS", "b" * 40)
+    monkeypatch.delenv("TRUSTED_WRAPPER_WORKFLOWS", raising=False)
+    monkeypatch.delenv("DELEGATED_EVALUATOR_WRAPPER", raising=False)
+
+
+def archive(files):
+    output = io.BytesIO()
+    with zipfile.ZipFile(output, "w") as handle:
+        for name, content in files:
+            handle.writestr(name, content if isinstance(content, bytes) else json.dumps(content))
+    return output.getvalue()
+
+
+def summary():
+    return {
+        "total": 1,
+        "passed": 1,
+        "failed": 0,
+        "incomplete": 0,
+        "overall_passed": True,
+        "overall_status": "passed",
+        "total_validators": 1,
+        "total_errors": 0,
+        "total_warnings": 0,
+        "severity_counts": {"critical": 0, "high": 0, "medium": 0, "low": 0},
+        "skills": [
+            {
+                "path": "skills/example",
+                "report_dir": "skill-001",
+                "exit_code": 0,
+                "overall_status": "passed",
+                "incomplete_scans": [],
+                "passed": True,
+                "total_validators": 1,
+                "total_errors": 0,
+                "total_warnings": 0,
+                "severity_counts": {"critical": 0, "high": 0, "medium": 0, "low": 0},
+            }
+        ],
+    }
+
+
+def report():
+    return {
+        "overall_passed": True,
+        "overall_status": "passed",
+        "incomplete_scans": [],
+        "total_validators": 1,
+        "total_errors": 0,
+        "total_warnings": 0,
+        "severity_counts": {"critical": 0, "high": 0, "medium": 0, "low": 0},
+        "results": [
+            {
+                "validator": "Example",
+                "description": "Example validator",
+                "findings": [],
+                "success_details": [],
+                "legacy": {"errors": [], "warnings": [], "messages": []},
+                "passed": True,
+                "status": "passed",
+                "incomplete_scans": [],
+                "summary": {
+                    "files_scanned": 1,
+                    "checks_performed": 1,
+                    "errors": 0,
+                    "warnings": 0,
+                    "critical_count": 0,
+                    "high_count": 0,
+                    "medium_count": 0,
+                    "low_count": 0,
+                },
+            }
+        ],
+    }
+
+
+def valid_archive():
+    return archive(
+        [
+            ("summary.json", summary()),
+            ("skill-001/skillevaluator-tier1.json", report()),
+            ("skill-001/skillevaluator-tier1.html", b"<script>bad()</script>"),
+        ]
+    )
+
+
+def test_only_json_is_loaded_and_html_is_ignored():
+    loaded, reports = publisher.read_artifact(valid_archive())
+    assert loaded["total"] == 1
+    assert list(reports) == ["skill-001"]
+
+
+def test_incomplete_scanner_cannot_invent_a_confirmed_failure():
+    from skillevaluator.models import ValidationResult
+    from skillevaluator.reporting.json_reporter import JSONReporter
+
+    result = ValidationResult(validator_name="Security", metadata={"incomplete_scans": ["semgrep"]})
+    result.add_error("Scanner execution did not complete")
+    data = json.loads(JSONReporter(include_timestamp=False).render_all([result]))
+    data["results"][0]["status"] = "failed"
+    data["overall_status"] = "failed"
+    row = {
+        **summary()["skills"][0],
+        "overall_status": "failed",
+        "passed": False,
+        "exit_code": 1,
+        "incomplete_scans": ["semgrep"],
+        "total_errors": data["total_errors"],
+        "severity_counts": data["severity_counts"],
+    }
+    with pytest.raises(publisher.PublicationError):
+        publisher.validate_report(data, row)
+
+
+@pytest.mark.parametrize(
+    "name", ["../summary.json", "/summary.json", "a/../../summary.json", "C:\\summary.json", "a\\summary.json"]
+)
+def test_zip_paths_cannot_escape(name):
+    with pytest.raises(publisher.PublicationError):
+        publisher.read_artifact(archive([(name, {})]))
+
+
+def test_duplicate_members_are_rejected():
+    with pytest.warns(UserWarning), pytest.raises(publisher.PublicationError):
+        publisher.read_artifact(archive([("summary.json", {}), ("summary.json", {})]))
+
+
+def test_symlink_members_are_rejected():
+    output = io.BytesIO()
+    with zipfile.ZipFile(output, "w") as handle:
+        info = zipfile.ZipInfo("summary.json")
+        info.create_system = 3
+        info.external_attr = (stat.S_IFLNK | 0o777) << 16
+        handle.writestr(info, "outside")
+    with pytest.raises(publisher.PublicationError):
+        publisher.read_artifact(output.getvalue())
+
+
+def test_archive_count_and_expansion_limits(monkeypatch):
+    monkeypatch.setattr(publisher, "MAX_FILES", 1)
+    with pytest.raises(publisher.PublicationError):
+        publisher.read_artifact(valid_archive())
+    monkeypatch.setattr(publisher, "MAX_FILES", 1000)
+    monkeypatch.setattr(publisher, "MAX_TOTAL_BYTES", 10)
+    with pytest.raises(publisher.PublicationError):
+        publisher.read_artifact(valid_archive())
+
+
+@pytest.mark.parametrize(
+    "change",
+    [
+        {"total": 2},
+        {"passed": 0},
+        {"overall_passed": "true"},
+        {"skills": [{**summary()["skills"][0], "report_dir": "../bad"}]},
+    ],
+)
+def test_summary_schema_and_counts_are_checked(change):
+    with pytest.raises(publisher.PublicationError):
+        publisher.read_artifact(
+            archive([("summary.json", {**summary(), **change}), ("skill-001/skillevaluator-tier1.json", report())])
+        )
+
+
+def test_missing_report_and_mismatched_verdict_are_rejected():
+    with pytest.raises(publisher.PublicationError):
+        publisher.read_artifact(archive([("summary.json", summary())]))
+    with pytest.raises(publisher.PublicationError):
+        publisher.read_artifact(
+            archive(
+                [
+                    ("summary.json", summary()),
+                    ("skill-001/skillevaluator-tier1.json", {**report(), "overall_passed": False}),
+                ]
+            )
+        )
+
+
+def test_no_target_configuration_error_can_be_published():
+    payload = {
+        "total": 0,
+        "passed": 0,
+        "failed": 0,
+        "incomplete": 0,
+        "overall_passed": False,
+        "overall_status": "error",
+        "skills": [],
+        "error": "No targets",
+        "total_validators": 0,
+        "total_errors": 0,
+        "total_warnings": 0,
+        "severity_counts": {"critical": 0, "high": 0, "medium": 0, "low": 0},
+    }
+    assert publisher.read_artifact(archive([("summary.json", payload)]))[0] == payload
+
+
+def test_site_writes_are_atomic_and_leave_no_partial_file(tmp_path):
+    target = tmp_path / "site/runs/1/1/summary.json"
+    publisher._write(target, "old")
+    with pytest.raises(UnicodeEncodeError):
+        publisher._write(target, "new \ud800")
+    assert target.read_text(encoding="utf-8") == "old"
+    assert [path.name for path in target.parent.iterdir()] == ["summary.json"]
+    publisher._dump(target, {"new": True})
+    assert json.loads(target.read_text(encoding="utf-8")) == {"new": True}
+    assert [path.name for path in target.parent.iterdir()] == ["summary.json"]
+
+
+@pytest.mark.parametrize("linked", ["target", "parent"])
+def test_site_writes_refuse_linked_targets_and_directories(tmp_path, linked):
+    outside = tmp_path / "outside"
+    outside.mkdir()
+    (outside / "index.html").write_text("outside", encoding="utf-8")
+    site = tmp_path / "site"
+    site.mkdir()
+    if linked == "target":
+        (site / "index.html").symlink_to(outside / "index.html")
+        target = site / "index.html"
+    else:
+        (site / "runs").symlink_to(outside, target_is_directory=True)
+        target = site / "runs/index.html"
+    with pytest.raises(publisher.PublicationError, match="symlink"):
+        publisher._write(target, "replaced")
+    assert (outside / "index.html").read_text(encoding="utf-8") == "outside"
+
+
+def test_alias_order_is_run_then_attempt():
+    assert publisher.is_newer({"run_id": 5, "run_attempt": 2}, {"run_id": 5, "run_attempt": 1})
+    assert not publisher.is_newer({"run_id": 4, "run_attempt": 99}, {"run_id": 5, "run_attempt": 1})
+
+
+def test_large_raw_artifact_ignores_non_json_members_without_extracting():
+    files = [("summary.json", summary()), ("skill-001/skillevaluator-tier1.json", report())]
+    files.extend((f"ignored-{index}.html", b"<script>never_execute()</script>") for index in range(700))
+    assert publisher.read_artifact(archive(files))[0]["total"] == 1
+
+
+def test_redirect_does_not_forward_api_authorization():
+    api = publisher.GitHubAPI("owner/consumer", "private-token")
+    requests = []
+
+    class Response(io.BytesIO):
+        @property
+        def headers(self):
+            return {}
+
+    class Opener:
+        def open(self, request, timeout):
+            assert timeout == 60
+            requests.append(request)
+            if len(requests) == 1:
+                raise urllib.error.HTTPError(
+                    request.full_url,
+                    302,
+                    "redirect",
+                    {
+                        "Location": "https://productionresultssa1.blob.core.windows.net/archive?sig=test",
+                    },
+                    None,
+                )
+            return Response(b"archive-bytes")
+
+    api.opener = Opener()
+    assert api.download_artifact(456) == b"archive-bytes"
+    assert requests[0].get_header("Authorization") == "Bearer private-token"
+    assert requests[1].get_header("Authorization") is None
+
+
+def test_pr_provenance_uses_the_signed_merge_without_mutable_pr_metadata():
+    record = {**run_record(), "event": "pull_request", "pull_requests": []}
+    api = FakeAPI(record=record)
+    publisher._validate_workflow_provenance(api, "owner/consumer", record)
+    assert f"/repos/owner/consumer/contents/{publisher.WORKFLOW_PATH}?ref=" + "d" * 40 in api.paths
+    assert not any("/compare/" in path or "/pulls" in path for path in api.paths)
+
+
+@pytest.mark.parametrize(
+    "path",
+    [
+        "/repos/owner/consumer-other/actions/runs",
+        "/repos/owner/consumer/../other/actions",
+        "/repos/owner/consumer/compare/" + "a" * 40 + "..." + "b" * 40 + "/extra",
+        "/repos/owner/consumer/compare/" + "a" * 40 + "..." + "b" * 39,
+    ],
+)
+def test_github_client_still_rejects_untrusted_paths(path):
+    api = publisher.GitHubAPI("owner/consumer", "private-token")
+    with pytest.raises(publisher.PublicationError):
+        api._request("GET", path)
+
+
+def test_github_client_accepts_repository_root_for_default_branch_lookup():
+    api = publisher.GitHubAPI("owner/consumer", "private-token")
+
+    class Response(io.BytesIO):
+        @property
+        def headers(self):
+            return {}
+
+    class Opener:
+        def open(self, request, timeout):
+            assert request.full_url == "https://api.github.com/repos/owner/consumer"
+            assert timeout == 60
+            return Response(b'{"default_branch":"main"}')
+
+    api.opener = Opener()
+    assert api.get("/repos/owner/consumer")["default_branch"] == "main"
+
+
+def test_signed_download_hosts_are_explicitly_allowlisted():
+    assert publisher.allowed_download_url("https://productionresultssa1.blob.core.windows.net/results/a?sig=x")
+    assert publisher.allowed_download_url("https://objects.githubusercontent.com/a")
+    assert not publisher.allowed_download_url("http://objects.githubusercontent.com/a")
+    assert not publisher.allowed_download_url("https://objects.githubusercontent.com.evil.invalid/a")
+    assert not publisher.allowed_download_url("https://token@objects.githubusercontent.com/a")
+
+
+def run_record():
+    return {
+        "id": 123,
+        "run_attempt": 1,
+        "status": "completed",
+        "conclusion": "success",
+        "path": ".github/workflows/skill-checks.yml",
+        "event": "push",
+        "head_branch": "main",
+        "head_sha": "a" * 40,
+        "repository": {"full_name": "owner/consumer", "id": 1234},
+        "head_repository": {"full_name": "owner/consumer"},
+        "pull_requests": [],
+        "run_started_at": "2026-10-21T12:00:00Z",
+        "updated_at": "2026-10-21T12:02:00Z",
+        "referenced_workflows": [
+            {"path": "NVIDIA/SkillEvaluator/.github/workflows/evaluate-skills.yml@" + "c" * 40, "sha": "c" * 40}
+        ],
+    }
+
+
+def fork_record(**changes):
+    # GitHub never fills pull_requests for a run from a fork PR.
+    return {
+        **run_record(),
+        "event": "pull_request",
+        "head_branch": "feature/fork",
+        "head_repository": {"full_name": "contributor/consumer"},
+        **changes,
+    }
+
+
+def fork_pull(head_sha="a" * 40, *, base_sha="d" * 40, repo=None):
+    return {
+        "number": 7,
+        "state": "open",
+        "head": {"sha": head_sha, "repo": repo or {"full_name": "contributor/consumer"}},
+        "base": {"sha": base_sha, "repo": {"full_name": "owner/consumer"}},
+    }
+
+
+class FakeAPI:
+    def __init__(self, *, branch_sha="a" * 40, record=None):
+        self.record = record or run_record()
+        self.branch_sha = branch_sha
+        self.paths = []
+
+    def get(self, path):
+        self.paths.append(path)
+        if path.endswith("/actions/runs/123/attempts/1"):
+            return self.record
+        if "/contents/.github/workflows/skill-checks.yml?ref=" in path:
+            return {"type": "file", "path": publisher.WORKFLOW_PATH, "sha": "b" * 40}
+        if path.endswith("/artifacts?per_page=100"):
+            return {
+                "total_count": 2,
+                "artifacts": [
+                    {
+                        "id": 456,
+                        "name": "skill-evaluator-tier1-evidence-attempt-1",
+                        "expired": False,
+                        "size_in_bytes": len(valid_archive()),
+                        "created_at": "2026-10-21T12:01:00Z",
+                        "workflow_run": {"id": 123, "head_sha": "a" * 40},
+                    },
+                    {
+                        "id": 457,
+                        "name": f"skill-evaluator-tier1-provenance-attempt-{self.record['run_attempt']}",
+                        "expired": False,
+                        "size_in_bytes": 4096,
+                        "created_at": self.record["run_started_at"],
+                        "workflow_run": {"id": 123, "head_sha": "a" * 40},
+                    },
+                ],
+            }
+        if path == "/repos/owner/consumer":
+            return {"default_branch": "main", "private": False, "visibility": "public"}
+        if "/branches/" in path:
+            return {"commit": {"sha": self.branch_sha}}
+        if "/pulls/" in path:
+            return {
+                "number": 1,
+                "state": "open",
+                "head": {"sha": self.branch_sha, "repo": self.record.get("head_repository")},
+                "base": {"repo": {"full_name": "owner/consumer"}},
+            }
+        if "/pulls?state=open&head=" in path:
+            return [fork_pull(self.branch_sha, repo=self.record.get("head_repository"))]
+        if path.endswith("/pulls"):
+            return [{"number": 1}]
+        raise AssertionError(path)
+
+    def download_artifact(self, artifact_id):
+        if artifact_id == 457:
+            return signed_receipt(self.record)
+        assert artifact_id == 456
+        return valid_archive()
+
+
+def fake_render(directory, _summary, context):
+    (directory / "index.html").write_text("trusted renderer", encoding="utf-8")
+    (directory / "summary.md").write_text(context["run_url"], encoding="utf-8")
+    (directory / "pr-comment.md").write_text("trusted comment", encoding="utf-8")
+
+
+@pytest.mark.parametrize("child", [None, b"not valid JSON", report()])
+def test_rejected_child_evidence_is_not_loaded_or_published(child):
+    payload = summary()
+    payload.update(
+        passed=0, failed=1, incomplete=1, overall_passed=False, overall_status="incomplete", total_validators=0
+    )
+    payload["skills"][0].update(
+        passed=False, overall_status="error", exit_code=1, total_validators=0, error="Rejected child evidence"
+    )
+    files = [("summary.json", payload)]
+    if child is not None:
+        files.append(("skill-001/skillevaluator-tier1.json", child))
+    loaded, reports = publisher.read_artifact(archive(files))
+    assert loaded["skills"][0]["error"] == "Rejected child evidence"
+    assert reports == {}
+
+
+def test_error_row_with_rejected_json_gets_a_native_unavailable_report(tmp_path, monkeypatch):
+    monkeypatch.syspath_prepend(str(Path(__file__).parents[2] / "ci"))
+    payload = summary()
+    payload.update(
+        passed=0, failed=1, incomplete=1, overall_passed=False, overall_status="incomplete", total_validators=0
+    )
+    payload["skills"][0].update(
+        passed=False, overall_status="error", exit_code=1, total_validators=0, error="Rejected child evidence"
+    )
+
+    class ErrorAPI(FakeAPI):
+        def download_artifact(self, artifact_id):
+            if artifact_id == 457:
+                return super().download_artifact(artifact_id)
+            return archive([("summary.json", payload), ("skill-001/skillevaluator-tier1.json", b"not JSON")])
+
+    publisher.publish(
+        ErrorAPI(record={**run_record(), "conclusion": "failure"}),
+        "owner/consumer",
+        123,
+        "https://owner.github.io/consumer",
+        tmp_path / "site",
+        tmp_path / "feedback",
+    )
+    child = tmp_path / "site/runs/123/1/skill-001"
+    assert "Report unavailable" in (child / "skillevaluator-tier1.html").read_text()
+    assert not (child / "skillevaluator-tier1.json").exists()
+    assert "Rejected child evidence" in (tmp_path / "feedback/pr-comment.md").read_text()
+
+
+def test_bad_typed_child_evidence_is_rejected_before_writing_a_receipt(tmp_path):
+    class BadTypedAPI(FakeAPI):
+        def download_artifact(self, artifact_id):
+            if artifact_id == 457:
+                return super().download_artifact(artifact_id)
+            child = report()
+            child["results"][0]["findings"] = "invalid findings"
+            return archive([("summary.json", summary()), ("skill-001/skillevaluator-tier1.json", child)])
+
+    with pytest.raises(publisher.PublicationError, match="invalid retained evidence"):
+        publisher.publish(
+            BadTypedAPI(),
+            "owner/consumer",
+            123,
+            "https://owner.github.io/consumer",
+            tmp_path / "site",
+            tmp_path / "feedback",
+            render=fake_render,
+        )
+    assert not list((tmp_path / "site").rglob("receipt.json"))
+
+
+def test_unexpected_render_failure_cannot_publish_a_passing_receipt(tmp_path, monkeypatch):
+    monkeypatch.syspath_prepend(str(Path(__file__).parents[2] / "ci"))
+
+    class BadDisplayAPI(FakeAPI):
+        def download_artifact(self, artifact_id):
+            if artifact_id == 457:
+                return super().download_artifact(artifact_id)
+            payload = summary()
+            payload["skills"][0]["path"] = "skills/bad\tpath"
+            return archive([("summary.json", payload), ("skill-001/skillevaluator-tier1.json", report())])
+
+    with pytest.raises(publisher.PublicationError, match="native renderer"):
+        publisher.publish(
+            BadDisplayAPI(),
+            "owner/consumer",
+            123,
+            "https://owner.github.io/consumer",
+            tmp_path / "site",
+            tmp_path / "feedback",
+        )
+    assert not list((tmp_path / "site").rglob("receipt.json"))
+
+
+@pytest.mark.parametrize("separator", [",", ", ", "\n"])
+def test_trusted_pins_accept_documented_list_separators(monkeypatch, separator):
+    monkeypatch.setenv("PINS", separator.join(["a" * 40, "b" * 40]) + "\n")
+    assert publisher._trusted_pins("PINS") == {"a" * 40, "b" * 40}
+
+
+@pytest.mark.parametrize("latest_status", ["in_progress", "completed"])
+def test_publication_uses_triggering_attempt_even_after_a_rerun(tmp_path, latest_status):
+    class RerunAPI(FakeAPI):
+        def get(self, path):
+            if path.endswith("/actions/runs/123"):
+                return {**run_record(), "run_attempt": 2, "status": latest_status}
+            result = super().get(path)
+            if path.endswith("/artifacts?per_page=100"):
+                result["artifacts"].append({**result["artifacts"][0], "id": 789, "created_at": "2026-10-21T13:01:00Z"})
+                result["total_count"] = len(result["artifacts"])
+            return result
+
+    metadata = publisher.publish(
+        RerunAPI(),
+        "owner/consumer",
+        123,
+        "https://owner.github.io/consumer",
+        tmp_path / "site",
+        tmp_path / "feedback",
+        run_attempt=1,
+        render=fake_render,
+    )
+    assert metadata["run_attempt"] == "1"
+    assert metadata["report_url"].endswith("/123/1/")
+    receipt = json.loads((tmp_path / "site/runs/123/1/receipt.json").read_text())
+    assert receipt["artifact_id"] == 456
+
+
+def test_requested_second_attempt_gets_only_its_own_artifact(tmp_path):
+    class SecondAttemptAPI(FakeAPI):
+        def get(self, path):
+            if path.endswith("/actions/runs/123/attempts/2"):
+                self.record = {
+                    **run_record(),
+                    "run_attempt": 2,
+                    "run_started_at": "2026-10-21T13:00:00Z",
+                    "updated_at": "2026-10-21T13:02:00Z",
+                }
+                return self.record
+            result = super().get(path)
+            if path.endswith("/artifacts?per_page=100"):
+                result["artifacts"].append(
+                    {
+                        **result["artifacts"][0],
+                        "id": 789,
+                        "name": "skill-evaluator-tier1-evidence-attempt-2",
+                        "created_at": "2026-10-21T13:01:00Z",
+                    }
+                )
+                result["total_count"] = 2
+            return result
+
+        def download_artifact(self, artifact_id):
+            if artifact_id == 457:
+                return super().download_artifact(artifact_id)
+            assert artifact_id == 789
+            return valid_archive()
+
+    metadata = publisher.publish(
+        SecondAttemptAPI(),
+        "owner/consumer",
+        123,
+        "https://owner.github.io/consumer",
+        tmp_path / "site",
+        tmp_path / "feedback",
+        run_attempt=2,
+        render=fake_render,
+    )
+    assert metadata["run_attempt"] == "2"
+
+
+def test_attempt_artifact_name_cannot_claim_another_attempt():
+    class WrongNameAPI(FakeAPI):
+        def get(self, path):
+            result = super().get(path)
+            result["artifacts"][0]["name"] = "skill-evaluator-tier1-evidence-attempt-2"
+            return result
+
+    with pytest.raises(publisher.PublicationError, match="no current report evidence artifact"):
+        publisher._select_artifact(WrongNameAPI(), "owner/consumer", run_record())
+
+
+def artifact_entry(name, identifier, size=100):
+    return {
+        "id": identifier,
+        "name": name,
+        "expired": False,
+        "size_in_bytes": size,
+        "created_at": "2026-10-21T12:01:00Z",
+        "workflow_run": {"id": 123, "head_sha": "a" * 40},
+    }
+
+
+class ListingAPI(FakeAPI):
+    def __init__(self, artifacts):
+        super().__init__()
+        self.artifacts = artifacts
+
+    def get(self, path):
+        if path.endswith("/artifacts?per_page=100"):
+            return {"total_count": len(self.artifacts), "artifacts": self.artifacts}
+        return super().get(path)
+
+
+def test_publisher_selects_the_evidence_artifact_not_the_full_reports():
+    artifacts = [
+        artifact_entry("skill-evaluator-tier1-attempt-1", 455, size=publisher.MAX_TOTAL_BYTES + 1),
+        artifact_entry("skill-evaluator-tier1-evidence-attempt-1", 456),
+    ]
+    assert publisher._select_artifact(ListingAPI(artifacts), "owner/consumer", run_record())["id"] == 456
+
+
+@pytest.mark.parametrize(
+    "names",
+    [
+        # A failed or cancelled scan can stop before it writes any reports.
+        [],
+        ["skill-evaluator-tier1-attempt-1"],
+        ["skill-evaluator-tier1"],
+        ["skill-evaluator-tier1-evidence"],
+    ],
+)
+def test_missing_evidence_artifact_fails_clearly_without_reading_full_reports(names):
+    artifacts = [artifact_entry(name, 455) for name in names]
+    with pytest.raises(publisher.PublicationError) as raised:
+        publisher._select_artifact(ListingAPI(artifacts), "owner/consumer", run_record())
+    # Name every common cause; a scan that uploaded nothing is not an evaluator revision problem.
+    assert str(raised.value) == (
+        "The selected run attempt has no current report evidence artifact named "
+        "skill-evaluator-tier1-evidence-attempt-1. The scan may have stopped before writing reports, "
+        "the artifact may have expired, or the scan used an evaluator revision that does not upload it."
+    )
+
+
+@pytest.mark.parametrize(
+    ("change", "message"),
+    [
+        ({"workflow_run": {"id": 999, "head_sha": "a" * 40}}, "does not match the selected run"),
+        ({"workflow_run": {"id": 123, "head_sha": "f" * 40}}, "does not match the selected run"),
+        ({"size_in_bytes": 64 * 1024 * 1024 + 1}, "size limit"),
+        ({"id": 0}, "size limit"),
+        ({"created_at": "2026-10-21T11:59:59Z"}, "no current report evidence"),
+        ({"created_at": "2026-10-21T12:02:01Z"}, "no current report evidence"),
+        ({"expired": True}, "no current report evidence"),
+    ],
+)
+def test_evidence_artifact_keeps_provenance_attempt_and_size_checks(change, message):
+    artifact = {**artifact_entry("skill-evaluator-tier1-evidence-attempt-1", 456), **change}
+    with pytest.raises(publisher.PublicationError, match=message):
+        publisher._select_artifact(ListingAPI([artifact]), "owner/consumer", run_record())
+
+
+def test_scan_evidence_upload_holds_exactly_what_the_publisher_reads(tmp_path):
+    steps = yaml.load((ROOT / ".github/workflows/evaluate-skills.yml").read_text(), Loader=yaml.BaseLoader)["jobs"][
+        "tier1"
+    ]["steps"]
+    uploads = [step for step in steps if step.get("uses", "").startswith("actions/upload-artifact@")]
+    assert len(uploads) == 3
+    full = next(
+        step
+        for step in uploads
+        if step["with"]["name"] == "${{ inputs.artifact-name }}-attempt-${{ github.run_attempt }}"
+    )
+    evidence = next(
+        step
+        for step in uploads
+        if step["with"]["name"] == "${{ inputs.artifact-name }}-evidence-attempt-${{ github.run_attempt }}"
+    )
+    assert evidence["uses"] == full["uses"] and evidence["if"] == full["if"] == "always()"
+    assert evidence["with"]["name"] == "${{ inputs.artifact-name }}-evidence-attempt-${{ github.run_attempt }}"
+    assert evidence["with"]["retention-days"] == full["with"]["retention-days"]
+    assert f"{publisher.EVIDENCE_ARTIFACT}-attempt-1" == "skill-evaluator-tier1-evidence-attempt-1"
+    reports = tmp_path / "skill-reports"
+    payload = summary()
+    for name in ("summary.md", "details.md", "pr-comment.md", "index.html"):
+        (reports / name).parent.mkdir(parents=True, exist_ok=True)
+        (reports / name).write_text("<p>not evidence</p>", encoding="utf-8")
+    (reports / "summary.json").write_text(json.dumps(payload), encoding="utf-8")
+    child = reports / "skill-001"
+    (child / "logs").mkdir(parents=True)
+    (child / "skillevaluator-tier1.json").write_text(json.dumps(report()), encoding="utf-8")
+    for name in ("skillevaluator-tier1.html", "skillevaluator-tier1.md", "skillevaluator-tier1.sarif", "logs/a.log"):
+        (child / name).write_text("not evidence", encoding="utf-8")
+    lines = [line.strip() for line in evidence["with"]["path"].splitlines() if line.strip()]
+    assert all(line.startswith("${{ runner.temp }}/") for line in lines)
+    patterns = [line.removeprefix("${{ runner.temp }}/") for line in lines]
+    # upload-artifact roots several paths at the common ancestor of their non-glob prefixes.
+    search = [str(tmp_path / pattern.split("*", 1)[0].rsplit("/", 1)[0]) for pattern in patterns]
+    root = Path(os.path.commonpath(search))
+    members = sorted(path.relative_to(root).as_posix() for pattern in patterns for path in tmp_path.glob(pattern))
+    assert root == reports
+    assert members == ["skill-001/skillevaluator-tier1.json", "summary.json"]
+    loaded, documents = publisher.read_artifact(archive([(name, (root / name).read_bytes()) for name in members]))
+    assert loaded == payload
+    assert list(documents) == ["skill-001"]
+
+
+def test_duplicate_evidence_artifacts_are_ambiguous():
+    artifacts = [artifact_entry("skill-evaluator-tier1-evidence-attempt-1", number) for number in (456, 457)]
+    with pytest.raises(publisher.PublicationError, match="ambiguous"):
+        publisher._select_artifact(ListingAPI(artifacts), "owner/consumer", run_record())
+
+
+@pytest.mark.parametrize("repo", [{"full_name": "attacker/fork"}, None])
+def test_fork_and_deleted_fork_from_commit_fallback_get_no_alias_or_comment(repo):
+    class ForkAPI(FakeAPI):
+        def get(self, path):
+            result = super().get(path)
+            if path.endswith("/pulls/1"):
+                result["head"]["repo"] = repo
+            return result
+
+    assert publisher._current_routes(ForkAPI(), "owner/consumer", {**run_record(), "event": "pull_request"}) == ([], "")
+
+
+@pytest.mark.parametrize("associations", [None, [], [{"base": {"sha": "e" * 40}, "head": {"sha": "f" * 40}}]])
+def test_pr_caller_identity_ignores_current_mutable_associations(associations):
+    record = {**run_record(), "event": "pull_request", "pull_requests": associations}
+    api = FakeAPI(record=record)
+    publisher._validate_workflow_provenance(api, "owner/consumer", record)
+    assert not any("/pulls" in path or "/compare/" in path for path in api.paths)
+
+
+def test_open_fork_pr_run_is_published_without_alias_or_comment(tmp_path):
+    api = FakeAPI(record=fork_record())
+    metadata = publisher.publish(
+        api,
+        "owner/consumer",
+        123,
+        "https://owner.github.io/consumer",
+        tmp_path / "site",
+        tmp_path / "output",
+        render=fake_render,
+    )
+    assert metadata["pr_number"] == ""
+    assert metadata["is_current"] == "false"
+    assert (tmp_path / "site/runs/123/1/index.html").is_file()
+    assert not (tmp_path / "site/pr").exists()
+    assert [item["run_id"] for item in json.loads((tmp_path / "site/history.json").read_text())] == [123]
+    # Signed execution identity remains verifiable without mutable PR associations.
+    assert not any("/pulls?" in path for path in api.paths)
+
+
+def test_history_retention_preserves_current_main_and_open_pr_and_prunes_closed(tmp_path):
+    history = []
+    for number in range(1, 6):
+        receipt = {"run_id": number, "run_attempt": 1, "report_url": f"https://example.org/runs/{number}/1/"}
+        history.append(receipt)
+        publisher._dump(tmp_path / f"runs/{number}/1/receipt.json", receipt)
+    publisher._alias(tmp_path, "main/latest", history[0])
+    publisher._alias(tmp_path, "pr/1", history[1])
+    publisher._alias(tmp_path, "pr/2", history[2])
+
+    class ClosedAPI(FakeAPI):
+        def get(self, path):
+            result = super().get(path)
+            result["state"] = "closed" if path.endswith("/2") else "open"
+            return result
+
+    retained = publisher._prune_history(ClosedAPI(), "owner/consumer", tmp_path, history, history[-1], 1)
+    assert [item["run_id"] for item in retained] == [5, 2, 1]
+    assert (tmp_path / "runs/2/1/receipt.json").exists()
+    assert not (tmp_path / "runs/3/1").exists()
+    assert not (tmp_path / "pr/2").exists()
+
+
+def test_history_byte_budget_prunes_only_unprotected_reports(tmp_path, monkeypatch):
+    history = [{"run_id": number, "run_attempt": 1} for number in range(1, 4)]
+    for item in history:
+        publisher._write(tmp_path / f"runs/{item['run_id']}/1/index.html", "x" * 100)
+    monkeypatch.setattr(publisher, "MAX_HISTORY_BYTES", 150)
+    assert publisher._prune_history(FakeAPI(), "owner/consumer", tmp_path, history, history[-1], 100) == [history[-1]]
+    monkeypatch.setattr(publisher, "MAX_HISTORY_BYTES", 50)
+    with pytest.raises(publisher.PublicationError, match="site budget"):
+        publisher._prune_history(FakeAPI(), "owner/consumer", tmp_path, [history[-1]], history[-1], 100)
+
+
+def test_publish_keeps_history_and_updates_only_current_main(tmp_path):
+    site, output = tmp_path / "site", tmp_path / "output"
+    metadata = publisher.publish(
+        FakeAPI(), "owner/consumer", 123, "https://owner.github.io/consumer", site, output, render=fake_render
+    )
+    assert (site / "runs/123/1/index.html").read_text() == "trusted renderer"
+    assert (site / "main/latest/index.html").is_file()
+    assert metadata["is_current"] == "true"
+    assert metadata["report_url"].endswith("/runs/123/1/")
+    assert not list(site.rglob("*.log"))
+    assert not (site / "runs/123/1/skill-001/skillevaluator-tier1.html").exists()
+    # Re-publication is idempotent and does not rewrite immutable report content.
+    publisher.publish(
+        FakeAPI(),
+        "owner/consumer",
+        123,
+        "https://owner.github.io/consumer",
+        site,
+        output,
+        render=lambda *_: pytest.fail("immutable report was re-rendered"),
+    )
+    assert len(json.loads((site / "history.json").read_text())) == 1
+
+
+def test_old_head_is_historical_without_latest_alias(tmp_path):
+    site = tmp_path / "site"
+    metadata = publisher.publish(
+        FakeAPI(branch_sha="b" * 40),
+        "owner/consumer",
+        123,
+        "https://owner.github.io/consumer",
+        site,
+        tmp_path / "output",
+        render=fake_render,
+    )
+    assert metadata["is_current"] == "false"
+    assert not (site / "main/latest/index.html").exists()
+
+
+def test_pr_alias_uses_verified_api_head(tmp_path):
+    record = {
+        **run_record(),
+        "event": "pull_request",
+        "pull_requests": [{"number": 1, "head": {"sha": "a" * 40}, "base": {"sha": "d" * 40}}],
+    }
+    metadata = publisher.publish(
+        FakeAPI(record=record),
+        "owner/consumer",
+        123,
+        "https://owner.github.io/consumer",
+        tmp_path / "site",
+        tmp_path / "output",
+        render=fake_render,
+    )
+    assert metadata["pr_number"] == "1"
+    assert (tmp_path / "site/pr/1/index.html").is_file()
+
+
+def test_manual_skill_checks_run_can_update_current_main(tmp_path):
+    metadata = publisher.publish(
+        FakeAPI(record={**run_record(), "event": "workflow_dispatch"}),
+        "owner/consumer",
+        123,
+        "https://owner.github.io/consumer",
+        tmp_path / "site",
+        tmp_path / "output",
+        render=fake_render,
+    )
+    assert metadata["is_current"] == "true"
+    assert (tmp_path / "site/main/latest/index.html").is_file()
+
+
+def test_previous_attempt_artifact_is_not_reused(tmp_path):
+    class OldArtifactAPI(FakeAPI):
+        def get(self, path):
+            result = super().get(path)
+            if path.endswith("/artifacts?per_page=100"):
+                result["artifacts"][0]["created_at"] = "2026-10-20T12:00:00Z"
+            return result
+
+    with pytest.raises(publisher.PublicationError):
+        publisher.publish(
+            OldArtifactAPI(),
+            "owner/consumer",
+            123,
+            "https://owner.github.io/consumer",
+            tmp_path / "site",
+            tmp_path / "output",
+            render=fake_render,
+        )
+
+
+@pytest.mark.parametrize(
+    "recorded,fallback,expected",
+    [
+        (
+            "ghcr.io/owner/evaluator@sha256:" + "d" * 64,
+            "ghcr.io/owner/evaluator@sha256:" + "e" * 64,
+            "ghcr.io/owner/evaluator@sha256:" + "d" * 64,
+        ),
+        (None, "", ""),
+        (None, "ghcr.io/owner/evaluator@sha256:" + "e" * 64, "ghcr.io/owner/evaluator@sha256:" + "e" * 64),
+    ],
+)
+def test_recorded_image_provenance_wins_and_legacy_stays_unknown(tmp_path, recorded, fallback, expected):
+    document = summary()
+    if recorded is not None:
+        document["execution"] = {"image": recorded}
+
+    class ImageAPI(FakeAPI):
+        def download_artifact(self, artifact_id):
+            if artifact_id == 457:
+                return super().download_artifact(artifact_id)
+            return archive([("summary.json", document), ("skill-001/skillevaluator-tier1.json", report())])
+
+    contexts = []
+
+    def render(directory, payload, context):
+        contexts.append(context)
+        fake_render(directory, payload, context)
+
+    publisher.publish(
+        ImageAPI(),
+        "owner/consumer",
+        123,
+        "https://owner.github.io/consumer",
+        tmp_path / "site",
+        tmp_path / "output",
+        render=render,
+        image=fallback,
+    )
+    assert contexts[0]["image"] == expected
+    receipt = json.loads((tmp_path / "site/runs/123/1/receipt.json").read_text())
+    history = json.loads((tmp_path / "site/history.json").read_text())
+    assert receipt.get("image", "") == expected
+    assert history[0].get("image", "") == expected
+    if not expected:
+        assert "image" not in receipt
+
+
+@pytest.mark.parametrize(
+    "execution",
+    [[], {"image": ["invalid"]}, {"image": "untrusted\nimage"}, {"image": "ghcr.io/owner/evaluator:latest"}],
+)
+def test_invalid_recorded_image_provenance_is_rejected(tmp_path, execution):
+    class BadImageAPI(FakeAPI):
+        def download_artifact(self, artifact_id):
+            if artifact_id == 457:
+                return super().download_artifact(artifact_id)
+            return archive(
+                [
+                    ("summary.json", {**summary(), "execution": execution}),
+                    ("skill-001/skillevaluator-tier1.json", report()),
+                ]
+            )
+
+    with pytest.raises(publisher.PublicationError):
+        publisher.publish(
+            BadImageAPI(),
+            "owner/consumer",
+            123,
+            "https://owner.github.io/consumer",
+            tmp_path / "site",
+            tmp_path / "output",
+            render=fake_render,
+        )
+
+
+@pytest.mark.parametrize("variable", ["TRUSTED_EVALUATOR_SHA", "TRUSTED_CALLER_BLOBS"])
+def test_publisher_requires_explicit_trust_configuration(tmp_path, monkeypatch, variable):
+    monkeypatch.delenv(variable)
+    with pytest.raises(publisher.PublicationError):
+        publisher.publish(
+            FakeAPI(),
+            "owner/consumer",
+            123,
+            "https://owner.github.io/consumer",
+            tmp_path / "site",
+            tmp_path / "output",
+            render=fake_render,
+        )
+
+
+@pytest.mark.parametrize(
+    "reference",
+    [
+        [],
+        [{"path": "attacker/repo/.github/workflows/evaluate-skills.yml@" + "c" * 40, "sha": "c" * 40}],
+        [{"path": "NVIDIA/SkillEvaluator/.github/workflows/evaluate-skills.yml@main", "sha": "c" * 40}],
+        [
+            {
+                "path": "NVIDIA/SkillEvaluator/.github/workflows/evaluate-skills.yml@" + "c" * 40,
+                "sha": "d" * 40,
+            }
+        ],
+    ],
+)
+def test_untrusted_reusable_workflow_is_rejected(tmp_path, reference):
+    with pytest.raises(publisher.PublicationError):
+        publisher.publish(
+            FakeAPI(record={**run_record(), "referenced_workflows": reference}),
+            "owner/consumer",
+            123,
+            "https://owner.github.io/consumer",
+            tmp_path / "site",
+            tmp_path / "output",
+            render=fake_render,
+        )
+
+
+def test_modified_caller_with_trusted_reference_cannot_publish(tmp_path):
+    class ChangedCallerAPI(FakeAPI):
+        def get(self, path):
+            result = super().get(path)
+            if "/contents/" in path:
+                result["sha"] = "f" * 40
+            return result
+
+    with pytest.raises(publisher.PublicationError):
+        publisher.publish(
+            ChangedCallerAPI(),
+            "owner/consumer",
+            123,
+            "https://owner.github.io/consumer",
+            tmp_path / "site",
+            tmp_path / "output",
+            render=fake_render,
+        )
+
+
+def test_failed_workflow_cannot_publish_a_passing_artifact(tmp_path):
+    with pytest.raises(publisher.PublicationError):
+        publisher.publish(
+            FakeAPI(record={**run_record(), "conclusion": "failure"}),
+            "owner/consumer",
+            123,
+            "https://owner.github.io/consumer",
+            tmp_path / "site",
+            tmp_path / "output",
+            render=fake_render,
+        )
+
+
+@pytest.mark.parametrize(
+    "change",
+    [
+        {"total_errors": 3},
+        {"severity_counts": {"critical": 0, "high": 1, "medium": 0, "low": 0}},
+        {"overall_status": "failed"},
+        {"incomplete_scans": ["semgrep"]},
+    ],
+)
+def test_report_counts_status_and_completeness_must_agree(change):
+    with pytest.raises(publisher.PublicationError):
+        publisher.read_artifact(
+            archive([("summary.json", summary()), ("skill-001/skillevaluator-tier1.json", {**report(), **change})])
+        )
+
+
+def test_failed_summary_cannot_display_a_passing_skill_report():
+    payload = summary()
+    payload.update(passed=0, failed=1, overall_passed=False, overall_status="failed")
+    payload["skills"][0].update(passed=False, overall_status="failed", exit_code=1)
+    with pytest.raises(publisher.PublicationError):
+        publisher.read_artifact(archive([("summary.json", payload), ("skill-001/skillevaluator-tier1.json", report())]))
+
+
+@pytest.mark.parametrize(
+    "changes",
+    [
+        {"path": ".github/workflows/evil.yml"},
+        {"status": "in_progress"},
+        {"repository": {"full_name": "other/repo"}},
+        {"event": "workflow_run"},
+    ],
+)
+def test_unexpected_run_provenance_is_rejected(tmp_path, changes):
+    with pytest.raises(publisher.PublicationError):
+        publisher.publish(
+            FakeAPI(record={**run_record(), **changes}),
+            "owner/consumer",
+            123,
+            "https://owner.github.io/consumer",
+            tmp_path / "site",
+            tmp_path / "output",
+            render=fake_render,
+        )
+
+
+def skipped_summary():
+    return {
+        **summary(),
+        "total": 0,
+        "passed": 0,
+        "failed": 0,
+        "incomplete": 0,
+        "overall_passed": False,
+        "overall_status": "skipped",
+        "skills": [],
+        "total_validators": 0,
+        "total_errors": 0,
+        "total_warnings": 0,
+        "selection": {
+            "mode": "changed",
+            "base": "d" * 40,
+            "head": "a" * 40,
+            "discovered": 5,
+            "selected": [],
+            "deleted": [],
+            "changed_files": 1,
+        },
+    }
+
+
+def test_no_change_artifact_retains_skipped_without_claiming_pass():
+    payload, reports = publisher.read_artifact(archive([("summary.json", skipped_summary())]))
+    assert payload["overall_status"] == "skipped"
+    assert payload["overall_passed"] is False
+    assert reports == {}
+
+
+@pytest.mark.parametrize(
+    "change",
+    [
+        {"mode": "all"},
+        {"head": "main"},
+        {"selected": ["skills/example"]},
+        {"discovered": True},
+        {"changed_files": -1},
+        {"deleted": ["valid", 1]},
+    ],
+)
+def test_no_change_requires_consistent_selection_evidence(change):
+    payload = skipped_summary()
+    payload["selection"].update(change)
+    with pytest.raises(publisher.PublicationError):
+        publisher.read_artifact(archive([("summary.json", payload)]))
+
+
+@pytest.mark.parametrize(
+    "head,conclusion,accepted",
+    [
+        ("a" * 40, "success", True),
+        ("e" * 40, "success", False),
+        ("a" * 40, "failure", False),
+    ],
+)
+def test_no_change_publication_matches_run_head_and_success(tmp_path, head, conclusion, accepted):
+    class NoChangeAPI(FakeAPI):
+        def download_artifact(self, artifact_id):
+            if artifact_id == 457:
+                return super().download_artifact(artifact_id)
+            assert artifact_id == 456
+            payload = skipped_summary()
+            payload["selection"]["head"] = head
+            return archive([("summary.json", payload)])
+
+    api = NoChangeAPI(record={**run_record(), "conclusion": conclusion})
+    args = (api, "owner/consumer", 123, "https://owner.github.io/consumer", tmp_path / "site", tmp_path / "out")
+    if accepted:
+        publisher.publish(*args, render=fake_render)
+        receipt = json.loads((tmp_path / "site/runs/123/1/receipt.json").read_text())
+        assert receipt["overall_status"] == "skipped"
+    else:
+        with pytest.raises(publisher.PublicationError):
+            publisher.publish(*args, render=fake_render)
+
+
+def test_explicit_fork_evaluator_identity_is_required(monkeypatch):
+    record = run_record()
+    record["referenced_workflows"][0]["path"] = "example/evaluator/.github/workflows/evaluate-skills.yml@" + "c" * 40
+    with pytest.raises(publisher.PublicationError):
+        publisher._validate_workflow_provenance(FakeAPI(record=record), "owner/consumer", record)
+    monkeypatch.setenv("EVALUATOR_REPOSITORY", "example/evaluator")
+    publisher._validate_workflow_provenance(FakeAPI(record=record), "owner/consumer", record)
+
+
+WRAPPER = "example/shared/.github/workflows/skills.yml@" + "e" * 40
+SECOND_WRAPPER = "example/platform/.github/workflows/check.yml@" + "f" * 40
+EVALUATOR = "NVIDIA/SkillEvaluator/.github/workflows/evaluate-skills.yml@" + "c" * 40
+
+
+class NestedAPI(FakeAPI):
+    def download_artifact(self, artifact_id):
+        if artifact_id == 457:
+            # GitHub signs the leaf job identity, independent of API reference order.
+            return signed_receipt(self.record, job_workflow_ref=EVALUATOR, job_workflow_sha="c" * 40)
+        return super().download_artifact(artifact_id)
+
+
+@pytest.mark.parametrize("event", ["push", "pull_request", "workflow_dispatch"])
+@pytest.mark.parametrize("wrappers", [[], [WRAPPER], [WRAPPER, SECOND_WRAPPER]])
+@pytest.mark.parametrize("reverse", [False, True])
+def test_approved_wrappers_preserve_leaf_identity_and_direct_publication(
+    tmp_path, monkeypatch, event, wrappers, reverse
+):
+    monkeypatch.setenv("TRUSTED_WRAPPER_WORKFLOWS", "\n".join(wrappers))
+    paths = [*wrappers, EVALUATOR]
+    if reverse:
+        paths.reverse()
+    record = {
+        **run_record(),
+        "event": event,
+        "referenced_workflows": [{"path": path, "sha": path.rsplit("@", 1)[1]} for path in paths],
+    }
+    publisher.publish(
+        NestedAPI(record=record),
+        "owner/consumer",
+        123,
+        "https://owner.github.io/consumer",
+        tmp_path / "site",
+        tmp_path / "output",
+        render=fake_render,
+    )
+    receipt = json.loads((tmp_path / "site/runs/123/1/receipt.json").read_text())
+    assert receipt["trusted_evaluator_sha"] == "c" * 40
+    if wrappers:
+        assert receipt["trusted_wrapper_workflows"] == sorted(wrappers)
+    else:
+        assert "trusted_wrapper_workflows" not in receipt
+
+
+@pytest.mark.parametrize(
+    "approved, paths",
+    [
+        ("", [WRAPPER, EVALUATOR]),
+        (SECOND_WRAPPER, [WRAPPER, EVALUATOR]),
+        (WRAPPER, [WRAPPER, SECOND_WRAPPER, EVALUATOR]),
+        (WRAPPER, [WRAPPER, WRAPPER, EVALUATOR]),
+        (WRAPPER, [WRAPPER, EVALUATOR, EVALUATOR]),
+        (WRAPPER, [WRAPPER]),
+        (WRAPPER.replace("e" * 40, "main"), [WRAPPER, EVALUATOR]),
+        (WRAPPER + ",", [WRAPPER, EVALUATOR]),
+        (WRAPPER.replace("skills.yml", "../skills.yml"), [WRAPPER, EVALUATOR]),
+        (",".join([WRAPPER] * 33), [WRAPPER, EVALUATOR]),
+    ],
+)
+def test_wrapper_trust_rejects_unapproved_ambiguous_or_mutable_references(monkeypatch, approved, paths):
+    monkeypatch.setenv("TRUSTED_WRAPPER_WORKFLOWS", approved)
+    record = {**run_record(), "referenced_workflows": [{"path": path, "sha": path.rsplit("@", 1)[1]} for path in paths]}
+    with pytest.raises(publisher.PublicationError):
+        publisher._validate_workflow_provenance(NestedAPI(record=record), "owner/consumer", record)
+
+
+@pytest.mark.parametrize("failure", ["caller", "receipt", "sha"])
+def test_wrapper_approval_does_not_bypass_caller_receipt_or_sha_validation(monkeypatch, failure):
+    monkeypatch.setenv("TRUSTED_WRAPPER_WORKFLOWS", WRAPPER)
+    record = run_record()
+    record["referenced_workflows"].insert(0, {"path": WRAPPER, "sha": "e" * 40})
+    if failure == "sha":
+        record["referenced_workflows"][0]["sha"] = "f" * 40
+
+    class BadAPI(NestedAPI):
+        def get(self, path):
+            result = super().get(path)
+            if failure == "caller" and "/contents/" in path:
+                return {**result, "sha": "f" * 40}
+            return result
+
+        def download_artifact(self, artifact_id):
+            if failure == "receipt" and artifact_id == 457:
+                return signed_receipt(self.record, job_workflow_ref=WRAPPER, job_workflow_sha="e" * 40)
+            return super().download_artifact(artifact_id)
+
+    with pytest.raises(publisher.PublicationError):
+        publisher._validate_workflow_provenance(BadAPI(record=record), "owner/consumer", record)
+
+
+TAG_WRAPPER = WRAPPER.rsplit("@", 1)[0] + "@v3"
+
+
+@pytest.mark.parametrize("resolved_sha", ["e" * 40, "f" * 40])
+def test_approved_tag_uses_historical_resolution_and_keeps_leaf_pins(tmp_path, monkeypatch, resolved_sha):
+    monkeypatch.setenv("TRUSTED_WRAPPER_WORKFLOWS", TAG_WRAPPER)
+    record = run_record()
+    reference = {"path": TAG_WRAPPER, "sha": resolved_sha, "ref": "refs/tags/v3"}
+    record["referenced_workflows"].insert(0, reference)
+    api = NestedAPI(record=record)
+    publisher.publish(
+        api,
+        "owner/consumer",
+        123,
+        "https://owner.github.io/consumer",
+        tmp_path / "site",
+        tmp_path / "out",
+        render=fake_render,
+    )
+    receipt = json.loads((tmp_path / "site/runs/123/1/receipt.json").read_text())
+    assert receipt["resolved_wrapper_workflows"] == [reference]
+    assert receipt["trusted_evaluator_sha"] == "c" * 40
+    assert "delegated_evaluator_wrapper" not in receipt
+    assert not any("/repos/example/" in path or "/git/ref" in path for path in api.paths)
+    monkeypatch.setenv("TRUSTED_EVALUATOR_SHA", "d" * 40)
+    with pytest.raises(publisher.PublicationError, match="unapproved"):
+        publisher._validate_workflow_provenance(api, "owner/consumer", record)
+
+
+@pytest.mark.parametrize("ref", [None, "", "refs/heads/v3", "refs/tags/v4", "v3", 1])
+def test_stable_wrapper_requires_exact_historical_tag_identity(monkeypatch, ref):
+    monkeypatch.setenv("TRUSTED_WRAPPER_WORKFLOWS", TAG_WRAPPER)
+    record = run_record()
+    record["referenced_workflows"].append({"path": TAG_WRAPPER, "sha": "e" * 40, "ref": ref})
+    with pytest.raises(publisher.PublicationError, match="historical GitHub tag"):
+        publisher._validate_workflow_provenance(NestedAPI(record=record), "owner/consumer", record)
+
+
+def caller_contents(source):
+    raw = source.encode("utf-8")
+    return {
+        "type": "file",
+        "path": publisher.WORKFLOW_PATH,
+        "encoding": "base64",
+        "sha": hashlib.sha1(b"blob " + str(len(raw)).encode("ascii") + b"\0" + raw).hexdigest(),
+        "content": base64.b64encode(raw).decode("ascii"),
+    }
+
+
+class DelegatedAPI(FakeAPI):
+    def __init__(self, *, delegate=TAG_WRAPPER, caller=None, leaf_sha="d" * 40, event="push", reverse=False):
+        self.delegate = delegate
+        self.caller = caller_contents(caller or f"name: Skill checks\non: push\njobs:\n  scan:\n    uses: {delegate}\n")
+        self.leaf_sha = leaf_sha
+        self.leaf = EVALUATOR.rsplit("@", 1)[0] + "@" + leaf_sha
+        wrapper = {"path": delegate, "sha": "e" * 40}
+        if delegate == TAG_WRAPPER:
+            wrapper["ref"] = "refs/tags/v3"
+        references = [wrapper, {"path": self.leaf, "sha": leaf_sha}]
+        record = {**run_record(), "event": event, "referenced_workflows": references[::-1] if reverse else references}
+        super().__init__(record=record)
+
+    def get(self, path):
+        # This token cannot read the private components repository or resolve tags.
+        assert path.startswith("/repos/owner/consumer/") or path == "/repos/owner/consumer"
+        assert "/git/ref" not in path
+        if "/contents/" in path:
+            self.paths.append(path)
+            expected = "d" * 40 if self.record["event"] == "pull_request" else self.record["head_sha"]
+            assert path.endswith("?ref=" + expected)
+            return self.caller
+        return super().get(path)
+
+    def download_artifact(self, artifact_id):
+        if artifact_id == 457:
+            return signed_receipt(self.record, job_workflow_ref=self.leaf, job_workflow_sha=self.leaf_sha)
+        return super().download_artifact(artifact_id)
+
+
+def approve_delegation(monkeypatch, api):
+    monkeypatch.setenv("TRUSTED_WRAPPER_WORKFLOWS", api.delegate)
+    monkeypatch.setenv("DELEGATED_EVALUATOR_WRAPPER", api.delegate)
+    monkeypatch.setenv("TRUSTED_CALLER_BLOBS", api.caller["sha"])
+
+
+@pytest.mark.parametrize("event", ["push", "pull_request", "workflow_dispatch"])
+@pytest.mark.parametrize("delegate", [TAG_WRAPPER, WRAPPER])
+@pytest.mark.parametrize("reverse", [False, True])
+def test_explicit_delegation_publishes_new_pinned_leaf_from_private_wrapper(
+    tmp_path, monkeypatch, event, delegate, reverse
+):
+    api = DelegatedAPI(delegate=delegate, event=event, reverse=reverse)
+    approve_delegation(monkeypatch, api)
+    monkeypatch.delenv("TRUSTED_EVALUATOR_SHA")
+    publisher.publish(
+        api,
+        "owner/consumer",
+        123,
+        "https://owner.github.io/consumer",
+        tmp_path / "site",
+        tmp_path / "out",
+        render=fake_render,
+    )
+    receipt = json.loads((tmp_path / "site/runs/123/1/receipt.json").read_text())
+    assert receipt["trusted_evaluator_sha"] == "d" * 40
+    assert receipt["delegated_evaluator_wrapper"] == delegate
+    assert receipt["trusted_wrapper_workflows"] == [delegate]
+    if delegate == TAG_WRAPPER:
+        assert receipt["resolved_wrapper_workflows"] == [{"path": delegate, "sha": "e" * 40, "ref": "refs/tags/v3"}]
+
+
+@pytest.mark.parametrize(
+    "failure",
+    [
+        "unapproved_delegate",
+        "no_wrapper",
+        "extra_wrapper",
+        "two_leaves",
+        "mutable_leaf",
+        "other_evaluator",
+        "missing_wrapper_ref",
+        "wrong_caller_blob",
+        "invalid_pin_allowlist",
+        "wrapper_signed_receipt",
+        "wrong_leaf_sha",
+    ],
+)
+def test_delegation_rejects_unproven_chains_and_preserves_signed_identity(monkeypatch, failure):
+    api = DelegatedAPI(event="pull_request")
+    approve_delegation(monkeypatch, api)
+    refs = api.record["referenced_workflows"]
+    if failure == "unapproved_delegate":
+        monkeypatch.setenv("TRUSTED_WRAPPER_WORKFLOWS", WRAPPER)
+    elif failure == "no_wrapper":
+        refs.pop(0)
+    elif failure == "extra_wrapper":
+        monkeypatch.setenv("TRUSTED_WRAPPER_WORKFLOWS", TAG_WRAPPER + "," + SECOND_WRAPPER)
+        refs.append({"path": SECOND_WRAPPER, "sha": "f" * 40})
+    elif failure == "two_leaves":
+        refs.append({"path": EVALUATOR, "sha": "c" * 40})
+    elif failure == "mutable_leaf":
+        refs[1]["path"] = api.leaf.rsplit("@", 1)[0] + "@v3"
+    elif failure == "other_evaluator":
+        refs[1]["path"] = api.leaf.replace("NVIDIA/SkillEvaluator", "attacker/SkillEvaluator")
+    elif failure == "missing_wrapper_ref":
+        refs[0].pop("ref")
+    elif failure == "wrong_caller_blob":
+        monkeypatch.setenv("TRUSTED_CALLER_BLOBS", "b" * 40)
+    elif failure == "invalid_pin_allowlist":
+        monkeypatch.setenv("TRUSTED_EVALUATOR_SHA", "main")
+    elif failure == "wrapper_signed_receipt":
+        api.leaf, api.leaf_sha = TAG_WRAPPER, "e" * 40
+    elif failure == "wrong_leaf_sha":
+        api.leaf_sha = "f" * 40
+    with pytest.raises(publisher.PublicationError):
+        publisher._validate_workflow_provenance(api, "owner/consumer", api.record)
+
+
+@pytest.mark.parametrize(
+    "caller",
+    [
+        "jobs: {}",
+        "[]",
+        "jobs: []",
+        "jobs:\n  scan: []",
+        "jobs:\n  scan: {runs-on: ubuntu-latest}",
+        f"jobs:\n  scan:\n    uses: {TAG_WRAPPER}\n  second:\n    uses: {EVALUATOR}",
+        f"jobs:\n  scan:\n    uses: {EVALUATOR}",
+        f"jobs:\n  scan:\n    uses: {TAG_WRAPPER}\n    strategy:\n      matrix:\n        x: [1, 2]",
+        f"jobs:\n  scan:\n    uses: {TAG_WRAPPER}\n    steps: []",
+        f"jobs:\n  scan:\n    uses: {TAG_WRAPPER}\n    uses: {EVALUATOR}",
+        f"jobs:\n  scan:\n    uses: {TAG_WRAPPER}\njobs:\n  scan:\n    uses: {EVALUATOR}",
+        f"job: &scan\n  uses: {TAG_WRAPPER}\njobs:\n  scan: *scan",
+        f"jobs:\n  scan: {{uses: {TAG_WRAPPER}, <<: {{}}}}",
+        f"jobs:\n  scan:\n    uses: !!str {TAG_WRAPPER}",
+        f"jobs:\n  scan:\n    uses: {TAG_WRAPPER}\n---\njobs: {{}}",
+    ],
+)
+def test_delegation_rejects_ambiguous_or_nonexclusive_approved_root(monkeypatch, caller):
+    # Even adding an unsafe caller blob to the allowlist cannot relax the delegation shape.
+    api = DelegatedAPI(caller=caller, event="pull_request")
+    approve_delegation(monkeypatch, api)
+    with pytest.raises(publisher.PublicationError):
+        publisher._validate_workflow_provenance(api, "owner/consumer", api.record)
+
+
+@pytest.mark.parametrize("field, value", [("content", "!!!!"), ("content", "YQ=="), ("encoding", "none")])
+def test_delegation_requires_caller_content_matching_approved_blob(monkeypatch, field, value):
+    api = DelegatedAPI()
+    approve_delegation(monkeypatch, api)
+    api.caller[field] = value
+    with pytest.raises(publisher.PublicationError):
+        publisher._validate_workflow_provenance(api, "owner/consumer", api.record)
+
+
+def test_without_delegation_an_explicit_evaluator_allowlist_remains_required(monkeypatch):
+    monkeypatch.delenv("TRUSTED_EVALUATOR_SHA")
+    with pytest.raises(publisher.PublicationError, match="allowlists"):
+        publisher._validate_workflow_provenance(FakeAPI(), "owner/consumer", run_record())
+
+
+PRIVATE_URL = "https://quiet-project-123.pages.github.io/"
+PRIVATE_PAGES = {"public": False, "build_type": "workflow", "cname": None, "html_url": PRIVATE_URL}
+
+
+class PrivatePagesAPI(FakeAPI):
+    def __init__(self, *, info=None, pages=None):
+        super().__init__()
+        self.info = info if info is not None else {"private": True, "visibility": "private", "default_branch": "main"}
+        self.pages = pages if pages is not None else PRIVATE_PAGES
+
+    def get(self, path):
+        if path == "/repos/owner/consumer":
+            self.paths.append(path)
+            return self.info
+        if path == "/repos/owner/consumer/pages":
+            self.paths.append(path)
+            return self.pages
+        return super().get(path)
+
+
+@pytest.mark.parametrize("visibility", ["private", "internal"])
+@pytest.mark.parametrize("trailing_slash", [True, False])
+def test_private_publication_requires_live_private_pages_and_exact_url(tmp_path, visibility, trailing_slash):
+    api = PrivatePagesAPI(info={"private": True, "visibility": visibility, "default_branch": "main"})
+    expected = PRIVATE_URL if trailing_slash else PRIVATE_URL.rstrip("/")
+    published = publisher.publish(
+        api,
+        "owner/consumer",
+        123,
+        expected,
+        tmp_path / "site",
+        tmp_path / "out",
+        render=fake_render,
+    )
+    assert published["report_url"] == PRIVATE_URL + "runs/123/1/"
+    assert "/repos/owner/consumer/pages" in api.paths
+    assert (tmp_path / "site/runs/123/1/receipt.json").is_file()
+
+
+@pytest.mark.parametrize(
+    "pages, expected",
+    [
+        ({**PRIVATE_PAGES, "public": True}, PRIVATE_URL),
+        ({key: value for key, value in PRIVATE_PAGES.items() if key != "public"}, PRIVATE_URL),
+        ({**PRIVATE_PAGES, "public": "false"}, PRIVATE_URL),
+        ({**PRIVATE_PAGES, "public": 0}, PRIVATE_URL),
+        ({**PRIVATE_PAGES, "html_url": "https://changed.pages.github.io/"}, PRIVATE_URL),
+        ({**PRIVATE_PAGES, "html_url": "https://owner.github.io/consumer/"}, PRIVATE_URL),
+        ({**PRIVATE_PAGES, "build_type": "legacy"}, PRIVATE_URL),
+        ({**PRIVATE_PAGES, "cname": "reports.example.com"}, PRIVATE_URL),
+        (PRIVATE_PAGES, "https://owner.github.io/consumer/"),
+        (PRIVATE_PAGES, "https://changed.pages.github.io/"),
+        ([], PRIVATE_URL),
+    ],
+)
+def test_private_publication_stops_before_rendering_or_history_writes(tmp_path, pages, expected):
+    site, output = tmp_path / "site", tmp_path / "out"
+    site.mkdir()
+    (site / "history.json").write_text("[]\n")
+    rendered = []
+    with pytest.raises(publisher.PublicationError, match="verified private Pages"):
+        publisher.publish(
+            PrivatePagesAPI(pages=pages),
+            "owner/consumer",
+            123,
+            expected,
+            site,
+            output,
+            render=lambda *_args: rendered.append(True),
+        )
+    assert not rendered
+    assert (site / "history.json").read_text() == "[]\n"
+    assert sorted(path.name for path in site.iterdir()) == ["history.json"]
+    assert not list(output.iterdir())
+
+
+@pytest.mark.parametrize(
+    "info",
+    [
+        {},
+        {"private": False},
+        {"private": "false", "visibility": "public"},
+        {"private": False, "visibility": "internal"},
+        {"private": False, "visibility": "public"},
+    ],
+)
+def test_private_url_never_bypasses_privacy_recheck_when_repository_metadata_changes(info):
+    with pytest.raises(publisher.PublicationError, match="verified private Pages"):
+        publisher._validate_pages_privacy(
+            PrivatePagesAPI(info=info, pages={**PRIVATE_PAGES, "public": True}),
+            "owner/consumer",
+            PRIVATE_URL,
+        )
+
+
+def test_public_publication_does_not_require_pages_visibility_endpoint():
+    api = FakeAPI()
+    publisher._validate_pages_privacy(api, "owner/consumer", "https://owner.github.io/consumer")
+    assert api.paths == ["/repos/owner/consumer"]
+
+
+def test_missing_receipt_is_a_skipped_publisher_run(tmp_path, monkeypatch):
+    class LegacyAPI(FakeAPI):
+        def get(self, path):
+            result = super().get(path)
+            if path.endswith("/artifacts?per_page=100"):
+                result["artifacts"] = result["artifacts"][:1]
+                result["total_count"] = 1
+            return result
+
+    api = LegacyAPI()
+    monkeypatch.setattr(publisher, "GitHubAPI", lambda *_args: api)
+    for key, value in {
+        "GH_TOKEN": "dummy-token",
+        "GITHUB_REPOSITORY": "owner/consumer",
+        "REPORT_RUN_ID": "123",
+        "REPORT_RUN_ATTEMPT": "1",
+        "PAGES_BASE_URL": "https://owner.github.io/consumer",
+        "SITE_DIR": str(tmp_path / "site"),
+        "OUTPUT_DIR": str(tmp_path / "output"),
+        "GITHUB_OUTPUT": str(tmp_path / "github-output"),
+    }.items():
+        monkeypatch.setenv(key, value)
+    assert publisher.main() == 0
+    assert "skipped=true" in (tmp_path / "github-output").read_text()
+    assert "id-token: write" in (tmp_path / "output/summary.md").read_text()
+    assert "trigger a new scan" in (tmp_path / "output/summary.md").read_text()
+    assert not (tmp_path / "site/runs").exists()
+
+
+@pytest.mark.parametrize(
+    "change",
+    [
+        {"workflow_run": {"id": 124, "head_sha": "a" * 40}},
+        {"workflow_run": {"id": 123, "head_sha": "b" * 40}},
+        {"size_in_bytes": 65537},
+    ],
+)
+def test_receipt_artifact_identity_and_size_are_enforced(change):
+    class BadReceiptAPI(FakeAPI):
+        def get(self, path):
+            result = super().get(path)
+            if path.endswith("/artifacts?per_page=100"):
+                result["artifacts"][1].update(change)
+            return result
+
+    with pytest.raises(publisher.PublicationError) as raised:
+        publisher._validate_workflow_provenance(BadReceiptAPI(), "owner/consumer", run_record())
+    assert not isinstance(raised.value, publisher.StalePublication)
+
+
+@pytest.mark.parametrize(
+    "change",
+    [
+        {"name": "skill-evaluator-tier1-provenance-attempt-2"},
+        {"expired": True},
+        {"created_at": "2026-10-20T12:00:00Z"},
+    ],
+)
+def test_other_attempt_or_unavailable_receipt_cannot_publish(change):
+    class OtherReceiptAPI(FakeAPI):
+        def get(self, path):
+            result = super().get(path)
+            if path.endswith("/artifacts?per_page=100"):
+                result["artifacts"][1].update(change)
+            return result
+
+    with pytest.raises(publisher.StalePublication):
+        publisher._validate_workflow_provenance(OtherReceiptAPI(), "owner/consumer", run_record())
+
+
+@pytest.mark.parametrize("enabled", [True, False, None])
+def test_published_report_preserves_recorded_llm_request(tmp_path, enabled):
+    class RecordedAPI(FakeAPI):
+        def download_artifact(self, artifact_id):
+            if artifact_id == 457:
+                return super().download_artifact(artifact_id)
+            assert artifact_id == 456
+            payload = summary()
+            if enabled is not None:
+                payload["execution"] = {"llm_enabled": enabled}
+            return archive([("summary.json", payload), ("skill-001/skillevaluator-tier1.json", report())])
+
+    def capture(directory, payload, context):
+        assert context["llm_enabled"] is enabled
+        fake_render(directory, payload, context)
+
+    publisher.publish(
+        RecordedAPI(),
+        "owner/consumer",
+        123,
+        "https://owner.github.io/consumer",
+        tmp_path / "site",
+        tmp_path / "out",
+        render=capture,
+    )
+
+
+def test_history_index_uses_the_report_vocabulary_and_logo(tmp_path):
+    def record(run_id, status):
+        return {
+            "run_id": run_id,
+            "run_attempt": 1,
+            "head_sha": f"{run_id:040d}",
+            "report_url": f"https://example.github.io/skills/runs/{run_id}/1/",
+            "overall_status": status,
+        }
+
+    history = [record(1, "passed"), record(2, "failed"), record(3, "incomplete"), record(4, "skipped")]
+    publisher._history_index(tmp_path, history)
+    page = (tmp_path / "index.html").read_text()
+
+    for run_id, word in ((1, "Passed"), (2, "Changes required"), (3, "Incomplete"), (4, "Skipped")):
+        assert f"Run {run_id} / attempt 1 · {word} · " in page
+    assert "— failed —" not in page
+    assert 'class="mark"' not in page
+    assert '<aside class="rail"><div class="brand"><svg class="se-logo"' in page

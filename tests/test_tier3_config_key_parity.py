@@ -121,6 +121,8 @@ def test_user_config_parses_and_routes_end_to_end(monkeypatch: pytest.MonkeyPatc
     assert captured["collect"]["stop_on_pass"] is False
     assert captured["collect"]["pass_threshold"] == 0.6
     assert captured["collect"]["expected_trials"] == 1
+    # Collection labels unscored conditions with the normalized grading mode.
+    assert captured["collect"]["grading_mode"] == "default_plus_custom"
 
 
 def test_environment_kwargs_cli_routes_to_every_harbor_run(

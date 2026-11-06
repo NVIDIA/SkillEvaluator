@@ -43,7 +43,7 @@ def test_windows_selected_file_handle_denies_concurrent_write_and_delete(
         return 200
 
     monkeypatch.setattr(secure_fs, "_windows_open_relative_handle", open_relative)
-    monkeypatch.setattr(secure_fs, "_validate_windows_read_file_handle", lambda *_args: None)
+    monkeypatch.setattr(secure_fs, "_validate_windows_read_file_handle", lambda *_args, **_kwargs: None)
     monkeypatch.setattr(secure_fs.os, "fstat", lambda _descriptor: selected.lstat())
     monkeypatch.setattr(secure_fs.os, "O_BINARY", 0x8000, raising=False)
     monkeypatch.setitem(

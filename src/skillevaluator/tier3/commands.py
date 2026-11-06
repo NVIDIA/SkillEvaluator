@@ -307,10 +307,12 @@ printf "%s" "$score" > "$REWARD_TXT"
 
 
 def _write_grader_file(path: Path, *, language: str) -> None:
+    # LF only: graders run inside a Linux container, and Windows' default CRLF
+    # breaks the shebang and `set -euo pipefail`.
     if language == "shell":
-        path.write_text(_shell_grader_template(), encoding="utf-8")
+        path.write_text(_shell_grader_template(), encoding="utf-8", newline="\n")
     else:
-        path.write_text(_python_grader_template(), encoding="utf-8")
+        path.write_text(_python_grader_template(), encoding="utf-8", newline="\n")
     path.chmod(0o755)
 
 
@@ -628,7 +630,7 @@ WORKDIR /workspace
         grader_path = tests_dir / ("grader.sh" if language == "shell" else "grader.py")
         _write_grader_file(grader_path, language=language)
         test_sh = tests_dir / "test.sh"
-        test_sh.write_text(_native_test_sh(language), encoding="utf-8")
+        test_sh.write_text(_native_test_sh(language), encoding="utf-8", newline="\n")
         test_sh.chmod(0o755)
         (private_harbor / "README.md").write_text(
             """# SkillEvaluator BYOT Harbor Tasks
@@ -661,11 +663,13 @@ def evaluate(
     backend: str = "harbor",
     environment_kwarg: tuple[str, ...] = (),
     skip_baseline: bool,
+    skip_with_skill: bool = False,
     n_attempts: int | None,
     pass_threshold: float | None,
     stop_on_pass: bool | None = None,
     n_concurrent: int | None,
     max_agents: int | None,
+    max_cases: int | None = None,
     model: str | None,
     agent_model: tuple[str, ...],
     custom_dockerfile_mode: str | None,
@@ -711,6 +715,7 @@ def evaluate(
                 environment=env_mode,
                 agents=tuple(agent_list),
                 baseline=not skip_baseline,
+                with_skill=not skip_with_skill,
                 attempts=n_attempts,
                 concurrency=n_concurrent,
                 max_agents=max_agents,
@@ -718,6 +723,8 @@ def evaluate(
             )
         )
         reporter.emit(ProgressEvent(stage="configuration", state="running"))
+        if skip_baseline and skip_with_skill:
+            raise ValueError("--skip-baseline and --skip-with-skill are mutually exclusive (no arm would run)")
         unknown = validate_agents(agent_list)
         if unknown:
             supported = ", ".join(sorted(HARBOR_AGENTS_SUPPORTED))
@@ -784,11 +791,13 @@ def evaluate(
             skill_path=skill_path.resolve(),
             agents=agent_list,
             skip_baseline=skip_baseline,
+            skip_with_skill=skip_with_skill,
             n_attempts=n_attempts,
             pass_threshold=pass_threshold,
             stop_on_pass=stop_on_pass,
             n_concurrent=n_concurrent,
             max_agents=max_agents,
+            max_cases=max_cases,
             model=model,
             agent_models=agent_models or None,
             custom_dockerfile_mode=custom_dockerfile_mode,
@@ -1107,6 +1116,83 @@ def harbor_view(jobs_dir: Path) -> int:
     except PermissionError:
         console.print("[red]Error: harbor binary is not executable.[/red]")
         return 1
+
+
+_FEEDBACK_EXIT_WORDS = frozenset({"exit", "quit", "q", ":q"})
+
+
+def run_feedback_chat(run_dir: Path, *, skill_path: Path | None = None) -> int:
+    """Chat about one completed Tier 3 run directory; nothing is written to disk.
+
+    Returns 0 when the chat ends normally and 1 when the run or provider cannot
+    be used, or when questions were asked but every one of them failed.
+    """
+    from skillevaluator.evaluation.tier3_feedback_chat import (
+        FEEDBACK_CHAT_ASSISTANT_LABEL,
+        assert_completed_run_dir,
+        open_feedback_session,
+        resolve_skill_path_for_run,
+        skill_changed_since_run,
+    )
+
+    try:
+        resolved_run = assert_completed_run_dir(run_dir)
+        resolved_skill = resolve_skill_path_for_run(resolved_run, skill_path)
+        session = open_feedback_session(resolved_skill, resolved_run)
+    except (OSError, ValueError) as exc:
+        # ProviderConfigurationError is a ValueError. No highlighting, so
+        # messages such as "Tier 3" stay plain text.
+        error_line = Text("Error: ", style="red")
+        error_line.append(strip_terminal_controls(str(exc)))
+        console.print(error_line, highlight=False)
+        return 1
+
+    panel_body = Text()
+    panel_body.append(strip_terminal_controls(resolved_skill.name), style="bold")
+    panel_body.append(f" · {strip_terminal_controls(resolved_run.name)}\n")
+    panel_body.append(strip_terminal_controls(str(resolved_run)), style="dim")
+    console.print()
+    console.print(Panel(panel_body, title=Text("Post-run feedback"), border_style="cyan"))
+    if skill_path is not None and skill_changed_since_run(resolved_run, resolved_skill):
+        console.print(
+            Text("The skill has changed since this run; answers describe the evaluated version.", style="yellow")
+        )
+    console.print(
+        Text(
+            "Each question sends this run's evidence to the configured LLM provider. "
+            "Type exit or press Ctrl-D to quit.",
+            style="dim",
+        )
+    )
+    console.print()
+
+    while True:
+        try:
+            line = console.input("[bold cyan]You:[/bold cyan] ")
+        except (EOFError, KeyboardInterrupt):
+            console.print()
+            break
+        question = line.strip()
+        if not question:
+            continue
+        if question.lower() in _FEEDBACK_EXIT_WORDS:
+            break
+        try:
+            answer = session.reply(question)
+        except KeyboardInterrupt:
+            # The session keeps no unanswered turn; Ctrl-C at the prompt still exits.
+            console.print()
+            console.print(Text("Interrupted; that question was discarded.", style="dim"))
+            console.print()
+            continue
+        console.print()
+        # Model text is printed literally: never parsed as markup, escapes removed.
+        reply_line = Text(f"{FEEDBACK_CHAT_ASSISTANT_LABEL}: ", style="bold green")
+        reply_line.append(strip_terminal_controls(answer))
+        console.print(reply_line)
+        console.print()
+
+    return 1 if session.failed_turns and not session.answered_turns else 0
 
 
 def compare_results(skill_path: Path, *, results_dir: Path | None = None) -> int:
@@ -1458,6 +1544,7 @@ __all__ = [
     "init_harbor_task",
     "parse_agents",
     "parse_environment_kwargs",
+    "run_feedback_chat",
     "validate_evals",
     "view_results",
 ]

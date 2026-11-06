@@ -155,6 +155,7 @@ class SandboxPlan:
     backend: str  # "bubblewrap" | "seatbelt" | "none"
     strength: str  # "kernel" | "kernel-macos" | "advisory-only"
     reason: str  # human-readable, surfaced in run summaries
+    executable: str | None = None  # absolute Linux launcher that passed detect()'s smoke test
 
 
 def require_supported_platform() -> str:
@@ -194,6 +195,7 @@ class Sandbox:
         if self.plan.backend == "bubblewrap":
             return _bwrap_argv(
                 argv,
+                bwrap=self.plan.executable or "bwrap",
                 workdir=workdir,
                 write_roots=write_roots,
                 home=home,
@@ -266,8 +268,17 @@ def detect(mode: str = "require") -> Sandbox:
 
     if system == "Linux":
         bwrap = shutil.which("bwrap")
-        if bwrap and _userns_enabled() and _bwrap_smoke_test(bwrap):
-            return Sandbox(SandboxPlan("bubblewrap", "kernel", f"bubblewrap at {bwrap}"))
+        if bwrap:
+            # Launch the absolute binary that passed the smoke test. A bare
+            # "bwrap" is looked up again on the host PATH at every exec, with
+            # cwd set to the writable workspace, so a relative PATH entry could
+            # pick up a launcher planted there by an earlier sandboxed command.
+            bwrap = str(Path(bwrap).resolve())
+        smoke_detail = ""
+        if bwrap and _userns_enabled():
+            smoke_ok, smoke_detail = _bwrap_smoke_result(bwrap)
+            if smoke_ok:
+                return Sandbox(SandboxPlan("bubblewrap", "kernel", f"bubblewrap at {bwrap}", bwrap))
         if not bwrap:
             reason = "bubblewrap not installed (install the bubblewrap package)"
         elif not _userns_enabled():
@@ -277,6 +288,13 @@ def detect(mode: str = "require") -> Sandbox:
             )
         else:
             reason = f"bubblewrap at {bwrap} failed its smoke test"
+            if smoke_detail:
+                reason = f"{reason} ({smoke_detail})"
+            if "pivot_root: operation not permitted" in smoke_detail.casefold():
+                reason = (
+                    f"{reason}; this can mean an enclosing container's seccomp profile blocks "
+                    "bubblewrap, which only the container's launch configuration can change"
+                )
     elif system == "Darwin":
         if _seatbelt_available() and _seatbelt_smoke_test():
             # Seatbelt confines the filesystem (reads/writes) and network at the
@@ -299,8 +317,9 @@ def detect(mode: str = "require") -> Sandbox:
     if mode == "require":
         raise SandboxUnavailable(
             f"Harbor local mode requires an OS-level sandbox, but none is usable: {reason}. "
-            f"Fix the host, use --env-mode docker, or set {SANDBOX_MODE_ENV}=off to run "
-            "without a sandbox for skills you fully trust."
+            "Fix the host, use --env-mode docker where a Docker daemon is available, "
+            f"set {SANDBOX_MODE_ENV}=prefer to continue with advisory-only guardrails, "
+            f"or set {SANDBOX_MODE_ENV}=off to run without a sandbox for skills you fully trust."
         )
     return Sandbox(SandboxPlan("none", "advisory-only", reason))
 
@@ -451,14 +470,29 @@ def _bwrap_smoke_argv(bwrap: str) -> list[str]:
     return argv
 
 
+def _bwrap_smoke_result(bwrap: str) -> tuple[bool, str]:
+    """Run the probe, returning success plus bubblewrap's own failure line.
+
+    The detail separates causes that otherwise share one message:
+    ``pivot_root: Operation not permitted`` can come from a container seccomp
+    profile, which no sysctl or capability change inside the container lifts.
+    """
+    try:
+        result = subprocess.run(_bwrap_smoke_argv(bwrap), capture_output=True, timeout=5)
+    except subprocess.TimeoutExpired as exc:
+        return False, f"timed out after {exc.timeout:g}s"
+    except (OSError, subprocess.SubprocessError) as exc:
+        return False, str(exc)
+    if result.returncode == 0:
+        return True, ""
+    lines = result.stderr.decode("utf-8", "replace").strip().splitlines()
+    return False, lines[-1].strip() if lines else f"exit status {result.returncode}"
+
+
 def _bwrap_smoke_test(bwrap: str) -> bool:
     # Some hosts have bwrap installed but user namespaces refused at runtime
     # (containers, seccomp policies); prove the launcher actually works.
-    try:
-        result = subprocess.run(_bwrap_smoke_argv(bwrap), capture_output=True, timeout=5)
-        return result.returncode == 0
-    except (OSError, subprocess.SubprocessError):
-        return False
+    return _bwrap_smoke_result(bwrap)[0]
 
 
 def _seatbelt_available() -> bool:
@@ -480,6 +514,7 @@ def _seatbelt_smoke_test() -> bool:
 def _bwrap_argv(
     argv: list[str],
     *,
+    bwrap: str = "bwrap",
     workdir: Path,
     write_roots: list[Path] | tuple[Path, ...],
     home: Path,
@@ -497,7 +532,7 @@ def _bwrap_argv(
     the subprocess, and ``--clearenv`` would discard it.
     """
     wrapper = [
-        "bwrap",
+        bwrap,
         "--unshare-all",  # user, ipc, pid, uts, cgroup, AND net (loopback only)
         "--die-with-parent",
         "--new-session",  # blocks TIOCSTI terminal-injection escapes

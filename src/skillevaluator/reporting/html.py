@@ -31,6 +31,7 @@ from collections.abc import Iterator
 from dataclasses import dataclass
 from datetime import UTC, datetime
 from decimal import Decimal, InvalidOperation
+from functools import cache
 from importlib import resources
 from pathlib import Path
 from typing import TYPE_CHECKING, Any, ClassVar
@@ -39,12 +40,13 @@ from urllib.parse import urlparse
 from jinja2 import BaseLoader, Environment
 
 from skillevaluator import __version__
-from skillevaluator.constants import TIER3_LIFT_FAIL_THRESHOLD, TIER3_LIFT_PASS_THRESHOLD
+from skillevaluator.constants import QUALITY_GRADE_THRESHOLDS, TIER3_LIFT_FAIL_THRESHOLD, TIER3_LIFT_PASS_THRESHOLD
 from skillevaluator.publication_evidence import result_publication_evidence_dict
 from skillevaluator.reporting.base import (
     AGENT_EVAL_EXACT_TEXT_KEYS,
     ReporterBase,
     additional_errors,
+    additional_warnings,
     agent_eval_publication_evidence_complete,
     agent_eval_report_serialization_issue,
     agent_eval_report_serialization_limits,
@@ -65,11 +67,24 @@ from skillevaluator.reporting.base import (
     result_publication_target_conflict_marker,
     result_publication_target_dict,
     select_agent_eval_candidate,
+    source_validation_errors,
 )
 from skillevaluator.reporting.base import (
     is_tier2_validator_name as _is_tier2_validator_name,
 )
+from skillevaluator.reporting.finding_summary import (
+    describe_issue_counts,
+    finding_counts,
+    summarize_findings,
+    summarize_messages,
+    total_issue_count,
+)
 from skillevaluator.reporting.harbor_viewer import normalize_agent_eval_harbor_links
+from skillevaluator.reporting.presentation import success_is_not_applicable
+from skillevaluator.reporting.run_status import Status, resolve_run_status, result_status
+from skillevaluator.reporting.tier3_scope import completed_agent_result, validate_report_scope
+from skillevaluator.reporting.trial_charts import steps_by_case_chart
+from skillevaluator.skillspector_provenance import skillspector_provenance_records
 
 if TYPE_CHECKING:
     from skillevaluator.models import ValidationResult
@@ -444,6 +459,25 @@ def _score_mapping(
     return scores
 
 
+def _tier3_score_reasons(value: object) -> dict[str, str]:
+    """Keep per-metric reasons keyed like ``_score_mapping`` so each matches its score cell."""
+    if not isinstance(value, dict):
+        return {}
+    reasons: dict[str, str] = {}
+    seen: set[str] = set()
+    for key, reason in value.items():
+        identifier = _tier3_display_identifier(key)
+        identity_key = identifier.casefold()
+        if not identifier:
+            continue
+        if identity_key in seen:
+            return {}
+        seen.add(identity_key)
+        if isinstance(reason, str) and reason:
+            reasons[identifier] = reason
+    return reasons
+
+
 def _tier3_text_mapping(value: object) -> dict[str, str]:
     """Normalize public label maps without silently overwriting aliases."""
     if not isinstance(value, dict):
@@ -759,6 +793,8 @@ def _sanitize_tier3_pass_at_k(value: object) -> dict[str, Any]:
 
 
 def _sanitize_tier3_evaluator_card(value: dict[str, Any]) -> dict[str, Any] | None:
+    from skillevaluator.evaluation.tier3_findings import FAILURE_REASON_EVIDENCE_KEYS
+
     card = dict(value)
     card["with_skill"] = _finite_number(card.get("with_skill"), minimum=0.0, maximum=1.0)
     if card["with_skill"] is None:
@@ -777,6 +813,9 @@ def _sanitize_tier3_evaluator_card(value: dict[str, Any]) -> dict[str, Any] | No
         entry["score"] = _finite_number(entry.get("score"), minimum=0.0, maximum=1.0)
         for key in ("notes", "failures", "checks", "evidence_refs"):
             entry[key] = _string_list(entry.get(key))
+        for key in FAILURE_REASON_EVIDENCE_KEYS:
+            if not (isinstance(entry.get(key), str) and entry[key]):
+                entry.pop(key, None)
         evidence.append(entry)
     card["evidence"] = evidence
     sampling = card.get("evidence_sampling") if isinstance(card.get("evidence_sampling"), dict) else {}
@@ -819,6 +858,13 @@ def _sanitize_tier3_agent(value: dict[str, Any]) -> dict[str, Any]:
     ]
     agent["findings"] = [_sanitize_tier3_dimension(item) for item in _dict_list(agent.get("findings"))]
     agent["pass_at_k"] = _sanitize_tier3_pass_at_k(agent.get("pass_at_k"))
+    # The drill-down and steps chart render baseline rows from
+    # ``trials_baseline`` (with-skill rows come from the top-level trials), so
+    # those rows get the same render-time bounds as with-skill rows.
+    if "trials_baseline" in agent:
+        agent["trials_baseline"] = [
+            _sanitize_tier3_trial(item, fill_defaults=False) for item in _dict_list(agent.get("trials_baseline"))
+        ]
     return agent
 
 
@@ -863,14 +909,25 @@ def _scrub_untrusted_tier3_agents(value: object) -> dict[str, dict[str, Any]]:
     return agents
 
 
-def _sanitize_tier3_trial(value: dict[str, Any]) -> dict[str, Any]:
+def _sanitize_tier3_trial(value: dict[str, Any], *, fill_defaults: bool = True) -> dict[str, Any]:
+    """Bound the trial fields the template renders.
+
+    With ``fill_defaults=False`` (baseline rows), optional fields are normalized
+    only when present, so the embedded payload does not grow by empty defaults
+    on every row.
+    """
     trial = dict(value)
     for key in ("agent", "entry_id", "trial_id"):
-        trial[key] = _tier3_display_identifier(trial.get(key))
+        if fill_defaults or key in trial:
+            trial[key] = _tier3_display_identifier(trial.get(key))
     trial["overall"] = _finite_number(trial.get("overall"), minimum=0.0, maximum=1.0)
     trial["scores"] = _score_mapping(trial.get("scores"))
-    trial["baseline_scores"] = _score_mapping(trial.get("baseline_scores"))
-    trial["lift_scores"] = _score_mapping(trial.get("lift_scores"), minimum=-1.0, maximum=1.0)
+    for key, minimum in (("baseline_scores", 0.0), ("lift_scores", -1.0)):
+        if fill_defaults or key in trial:
+            trial[key] = _score_mapping(trial.get(key), minimum=minimum, maximum=1.0)
+    score_reasons = _tier3_score_reasons(trial.pop("score_reasons", None))
+    if score_reasons:
+        trial["score_reasons"] = score_reasons
     # Unavailable telemetry stays absent rather than becoming zero, so the
     # template can omit charts and show "—" instead of reporting no usage.
     raw_tokens = trial.pop("tokens", None)
@@ -885,10 +942,12 @@ def _sanitize_tier3_trial(value: dict[str, Any]) -> dict[str, Any]:
     steps = _strict_nonnegative_count(trial.pop("steps", None))
     if steps is not None:
         trial["steps"] = steps
-    trial["warnings"] = _string_list(trial.get("warnings"))
-    recovery = trial.get("error_recovery") if isinstance(trial.get("error_recovery"), dict) else {}
-    recovery["details"] = _string_list(recovery.get("details"))
-    trial["error_recovery"] = recovery
+    if fill_defaults or "warnings" in trial:
+        trial["warnings"] = _string_list(trial.get("warnings"))
+    if fill_defaults or "error_recovery" in trial:
+        recovery = trial.get("error_recovery") if isinstance(trial.get("error_recovery"), dict) else {}
+        recovery["details"] = _string_list(recovery.get("details"))
+        trial["error_recovery"] = recovery
     return trial
 
 
@@ -961,6 +1020,10 @@ def _sanitize_tier3_display_payload(value: dict[str, Any]) -> dict[str, Any]:
                 "baseline": _finite_number(scores.get("baseline"), minimum=0.0, maximum=1.0),
                 "lift": _finite_number(scores.get("lift"), minimum=-1.0, maximum=1.0),
             }
+            if scores.get("with_skill_status") == "skipped":
+                # A baseline-only run (--skip-with-skill) never ran this arm;
+                # the table says so instead of reporting a missing score.
+                evaluators[name]["with_skill_status"] = "skipped"
     payload["evaluators"] = evaluators
     for key in (
         "insights",
@@ -974,6 +1037,8 @@ def _sanitize_tier3_display_payload(value: dict[str, Any]) -> dict[str, Any]:
     payload["dimension_hints"] = _tier3_text_mapping(payload.get("dimension_hints"))
     evaluator_paths = payload["provenance"].get("evaluator_paths")
     payload["provenance"]["evaluator_paths"] = evaluator_paths if isinstance(evaluator_paths, dict) else {}
+    if "source_validation" in payload["provenance"]:
+        payload["provenance"]["source_validation"] = source_validation_errors(payload["provenance"])
     harbor_viewer = _sanitize_tier3_harbor_viewer(payload.get("harbor_viewer"))
     if harbor_viewer:
         payload["harbor_viewer"] = harbor_viewer
@@ -1145,18 +1210,76 @@ def _bounded_tier3_preview_value(value: Any, budget: _Tier3PreviewBudget) -> Any
     return value
 
 
+def _restore_failure_reason_text(deferred: list[tuple[dict[str, Any], str, Any]], room: int) -> int:
+    """Put deferred failure reasons back while ``room`` bytes remain; return how many stay out."""
+    omitted = 0
+    for container, key, value in deferred:
+        # Key, colon, value and separating comma in compact JSON.
+        cost = len(_compact_json(key).encode("utf-8")) + len(_compact_json(value).encode("utf-8")) + 2
+        if cost <= room:
+            container[key] = value
+            room -= cost
+        else:
+            omitted += 1
+    return omitted
+
+
+def _capped_tier3_trial_rows(payload: dict[str, Any]) -> int:
+    """Count the drill-down rows the bounded preview walk leaves out.
+
+    The walk keeps the first ``_TIER3_HTML_PREVIEW_COLLECTION_ITEMS`` entries of
+    every list and mapping: with-skill rows across all agents in the top-level
+    ``trials``, baseline rows per agent, and the first agents.
+    """
+    limit = _TIER3_HTML_PREVIEW_COLLECTION_ITEMS
+    trials = payload.get("trials")
+    omitted = max(0, len(trials) - limit) if isinstance(trials, list) else 0
+    agents = payload.get("agents")
+    for index, agent in enumerate(agents.values() if isinstance(agents, dict) else []):
+        baseline = agent.get("trials_baseline") if isinstance(agent, dict) else None
+        if isinstance(baseline, list):
+            omitted += len(baseline) if index >= limit else max(0, len(baseline) - limit)
+    return omitted
+
+
 def _bounded_tier3_preview(payload: dict[str, Any] | None) -> tuple[dict[str, Any] | None, dict[str, int]]:
-    """Return a presentation-only projection plus visible omission counts."""
-    if not payload or len(_compact_json(payload).encode("utf-8")) <= _TIER3_HTML_PREVIEW_TRIGGER_BYTES:
+    """Return a presentation-only projection plus visible omission counts.
+
+    Built failure reasons and excerpts are optional for the overview, so they
+    are taken out first and put back only into room left under the preview
+    trigger. They can never spend the bounded preview budget ahead of the
+    overview keys. ``trial_rows`` counts only drill-down rows the walk capped,
+    so the drill-down note does not fire when only another list was trimmed.
+    """
+    if not payload:
+        return payload, {}
+    serialized = _compact_json(payload)
+    if len(serialized.encode("utf-8")) <= _TIER3_HTML_PREVIEW_TRIGGER_BYTES:
         return payload, {}
 
+    from skillevaluator.evaluation.tier3_findings import failure_reason_text_slots, strip_failure_reason_text
+
+    # A private copy: the caller embeds ``payload`` itself as the canonical data.
+    slim = json.loads(serialized)
+    rendered_slots = list(failure_reason_text_slots(slim, include_top_level_cards=False))
+    deferred = [(container, key, container.pop(key)) for container, key in rendered_slots]
+    # The page renders each agent's cards, never the top-level card copy, so its
+    # reasons are dropped without being restored or counted as left out.
+    strip_failure_reason_text(slim)
+    slim_size = len(_compact_json(slim).encode("utf-8"))
+    if slim_size <= _TIER3_HTML_PREVIEW_TRIGGER_BYTES:
+        omitted_reasons = _restore_failure_reason_text(deferred, _TIER3_HTML_PREVIEW_TRIGGER_BYTES - slim_size)
+        return slim, {"failure_reasons": omitted_reasons} if omitted_reasons else {}
+
     budget = _Tier3PreviewBudget()
-    preview = _bounded_tier3_preview_value(payload, budget)
+    preview = _bounded_tier3_preview_value(slim, budget)
     notice = {
         key: value
         for key, value in {
             "characters": budget.omitted_characters,
             "items": budget.omitted_items,
+            "trial_rows": _capped_tier3_trial_rows(slim),
+            "failure_reasons": len(deferred),
         }.items()
         if value > 0
     }
@@ -1172,6 +1295,11 @@ def _skillspector_versions(results: list[ValidationResult]) -> list[str]:
         if isinstance(raw_version, str) and _SKILLSPECTOR_VERSION_RE.fullmatch(raw_version.strip()):
             versions.setdefault(raw_version.strip(), None)
     return list(versions)
+
+
+def _skillspector_provenance(results: list[ValidationResult]) -> list[dict[str, object]]:
+    """Return the validated SkillSpector LLM provenance records on ``results``."""
+    return [record for result in results for record in skillspector_provenance_records(result.metadata)]
 
 
 def _related_paths(finding: object) -> list[str]:
@@ -1260,6 +1388,196 @@ def _adaptive_interval_percent(interval: object) -> str:
     return f"{_bound(lower)}\N{EN DASH}{_bound(upper)}"
 
 
+# Plain-language names for checks that report a raw upper-case ID. The report
+# shows the plain name with the raw ID beside it.
+_PLAIN_CHECK_NAMES = {
+    "QUALITY": "Quality score",
+    "SCRIPT_LINT": "Script lint",
+    "SCHEMA": "Schema",
+    "RUBRIC_EVAL": "Rubric evaluation",
+    "AGENT_EVAL": "Live agent evaluation",
+    "DEDUPLICATION": "Duplicate detection",
+}
+_RAW_CHECK_ID = re.compile(r"[A-Z][A-Z0-9_]*")
+# One verdict vocabulary for every surface: the HTML report, the CI index and
+# the Pages history. Keys are the report's verdict keys.
+VERDICT_WORDS = {
+    "pass": "Passed",
+    "fail": "Changes required",
+    "incomplete": "Incomplete",
+    "skipped": "Skipped",
+    "neutral": "Neutral",
+}
+PUBLICATION_WORDS = {"pass": "Eligible", "fail": "Not eligible", "incomplete": "Incomplete", "neutral": "Neutral"}
+# A tier whose gate does not block can fail without requiring changes.
+ADVISORY_FAIL_WORD = "Failed (advisory)"
+# "A 90+, B 80+, C 70+, D 60+, F below 60", from the thresholds the grades use.
+QUALITY_GRADE_LEGEND = ", ".join(
+    f"{grade} {threshold}+" if threshold else f"{grade} below {QUALITY_GRADE_THRESHOLDS[index - 1][0]}"
+    for index, (threshold, grade) in enumerate(QUALITY_GRADE_THRESHOLDS)
+)
+_SEVERITY_RANK = {"critical": 4, "high": 3, "medium": 2, "low": 1, "info": 0}
+FIX_FIRST_LIMIT = 5
+# How the tool runner and the scanners say that a scanner itself is missing.
+_MISSING_SCANNER = re.compile(r"\bnot installed\b|\bnot found in PATH\b", re.IGNORECASE)
+
+
+def _scan_stop_reason(errors: list[str], warnings: list[str]) -> str:
+    """Return the diagnostic that says why a scan did not finish, or "".
+
+    *errors* and *warnings* are the lines that do not repeat a finding.
+    Errors come first. A line saying a scanner is missing is used only when
+    nothing else explains the gap, because a scanner that ran and failed
+    needs a different fix.
+    """
+    lines = [" ".join(str(line).split()) for line in [*errors, *warnings]]
+    lines = [line for line in lines if line]
+    return next((line for line in lines if not _MISSING_SCANNER.search(line)), lines[0] if lines else "")
+
+
+def _sentence(text: str, limit: int = 200) -> str:
+    """Bound *text* to *limit* characters and end it as a sentence."""
+    if len(text) > limit:
+        text = text[: limit - 1].rstrip() + "\N{HORIZONTAL ELLIPSIS}"
+    return text if text.endswith((".", "!", "?", "\N{HORIZONTAL ELLIPSIS}")) else f"{text}."
+
+
+def plain_check_name(name: object) -> str:
+    """Return a readable name for a check that reports a raw ID such as ``SCRIPT_LINT``."""
+    text = str(name or "")
+    if text in _PLAIN_CHECK_NAMES:
+        return _PLAIN_CHECK_NAMES[text]
+    if _RAW_CHECK_ID.fullmatch(text):
+        return text.replace("_", " ").capitalize()
+    return text
+
+
+def _skill_relative_path(path: object, skill_name: object, scan_root: str | None = None) -> str:
+    """Show a location relative to the skill folder instead of the machine path.
+
+    *scan_root* is the folder the scanners ran on, when it is known. Without
+    it, the last part of the skill name marks the skill folder, which cannot
+    work for a skill at the repository root.
+    """
+    text = str(path or "")
+    root = (scan_root or "").rstrip("/")
+    if root and text.startswith(f"{root}/"):
+        return text[len(root) + 1 :]
+    base = str(skill_name or "").rstrip("/").rsplit("/", 1)[-1]
+    marker = f"/{base}/" if base else ""
+    if marker and marker in text:
+        return text.split(marker, 1)[1]
+    return text
+
+
+def _anchor_slug(*parts: object) -> str:
+    slug = re.sub(r"[^a-z0-9]+", "-", " ".join(str(part) for part in parts).lower()).strip("-")
+    return slug or "item"
+
+
+def _evidence_anchors(
+    skills: dict[str, dict[str, Any]],
+) -> tuple[dict[str, dict[str, list[str]]], dict[str, dict[str, str]]]:
+    """Give every check and finding card in the skill view a stable, unique id.
+
+    Returns ``(findings, checks)``: ``findings[skill][check]`` lists one id per
+    finding card in template order, and ``checks[skill][check]`` is the id of
+    the check itself. Ids are readable slugs, so a link to a finding survives
+    a re-render of the same evidence.
+    """
+    used: set[str] = set()
+
+    def unique(base: str) -> str:
+        candidate, suffix = base, 2
+        while candidate in used:
+            candidate, suffix = f"{base}-{suffix}", suffix + 1
+        used.add(candidate)
+        return candidate
+
+    findings: dict[str, dict[str, list[str]]] = {}
+    checks: dict[str, dict[str, str]] = {}
+    for skill_name in sorted(skills):
+        for check_name in sorted(skills[skill_name].get("validators", {})):
+            check = skills[skill_name]["validators"][check_name]
+            base = _anchor_slug(skill_name, check_name)
+            checks.setdefault(skill_name, {})[check_name] = unique(f"c-{base}")
+            findings.setdefault(skill_name, {})[check_name] = [
+                unique(f"f-{base}-{index}") for index in range(1, len(check.get("findings") or []) + 1)
+            ]
+    return findings, checks
+
+
+def _fix_first(
+    skills: dict[str, dict[str, Any]],
+    finding_anchors: dict[str, dict[str, list[str]]],
+    check_anchors: dict[str, dict[str, str]],
+    *,
+    limit: int = FIX_FIRST_LIMIT,
+    scan_root: str | None = None,
+) -> list[dict[str, Any]]:
+    """Pick the few places to fix first, most severe first, one entry per location.
+
+    A check that could not finish comes first, with the scanner's own reason,
+    because no pass can be claimed until it runs. Findings then rank by severity, then blocking before
+    advisory, then occurrences. A failed check's independent error, or its
+    failure without a located finding, is listed as a high, blocking item so
+    its reason is not lost. Two findings at
+    the same file and line (for example one secret reported by two scanners)
+    take one slot.
+    """
+    candidates: list[tuple[tuple[int, ...], tuple, dict[str, Any]]] = []
+    for skill_name in sorted(skills):
+        for check_name in sorted(skills[skill_name].get("validators", {})):
+            check = skills[skill_name]["validators"][check_name]
+            label = plain_check_name(check_name)
+            status = check.get("status") or ("pass" if check.get("passed") else "fail")
+            findings = check.get("findings") or []
+            independent_errors = [str(error) for error in check.get("additional_errors") or [] if str(error).strip()]
+            blocking = not check.get("passed", True)
+            item = {"check": label, "skill": skill_name, "location": "", "blocking": True}
+            check_key = (skill_name, "check", check_name)
+            if status == "incomplete" or check.get("incomplete_scans"):
+                scans = ", ".join(str(scan) for scan in check.get("incomplete_scans") or [])
+                reason = _scan_stop_reason(check.get("additional_errors") or [], check.get("additional_warnings") or [])
+                message = f"{label} did not finish" + (f": {reason}" if reason else f" ({scans})" if scans else "")
+                item |= {"kind": "incomplete", "severity": "incomplete", "message": message}
+                candidates.append(((2, 0, 1, 0), check_key, item | {"anchor": check_anchors[skill_name][check_name]}))
+            elif status == "fail" and (independent_errors or not findings):
+                errors = independent_errors or [str(error) for error in check.get("errors") or [] if str(error).strip()]
+                message = errors[0] if errors else f"{label} failed without a located finding"
+                item |= {"kind": "check", "severity": "high", "message": message}
+                rank = (1, _SEVERITY_RANK["high"], 1, 1)
+                candidates.append((rank, check_key, item | {"anchor": check_anchors[skill_name][check_name]}))
+            for index, finding in enumerate(findings):
+                severity = str(finding.get("severity") or "medium").lower()
+                location = _skill_relative_path(finding.get("file_path"), skill_name, scan_root)
+                if location and finding.get("line_number"):
+                    location = f"{location}:{finding['line_number']}"
+                occurrences = finding.get("occurrences", 1)
+                occurrences = min(occurrences, 9999) if isinstance(occurrences, int) else 1
+                rank = (1, _SEVERITY_RANK.get(severity, _SEVERITY_RANK["medium"]), int(blocking), occurrences)
+                key = (skill_name, "file", location) if location else (skill_name, check_name, finding.get("message"))
+                entry = {
+                    "kind": "finding",
+                    "severity": severity,
+                    "message": str(finding.get("message") or ""),
+                    "check": label,
+                    "skill": skill_name,
+                    "location": location,
+                    "blocking": blocking,
+                    "anchor": finding_anchors[skill_name][check_name][index],
+                }
+                candidates.append((rank, key, entry))
+    items: list[dict[str, Any]] = []
+    seen: set[tuple] = set()
+    # sorted() is stable, so ties keep skill, check and evidence order.
+    for _rank, key, entry in sorted(candidates, key=lambda candidate: candidate[0], reverse=True):
+        if key not in seen:
+            seen.add(key)
+            items.append(entry)
+    return items[:limit]
+
+
 class PackageLoader(BaseLoader):
     """Custom Jinja2 loader that loads templates from package resources."""
 
@@ -1278,6 +1596,57 @@ class PackageLoader(BaseLoader):
                 raise FileNotFoundError(template_path) from exc
             source = encoded.decode("utf-8")
         return source, template, lambda: True
+
+
+def _detail_display_status(detail: Any) -> str:
+    """Recognize explicit producer evidence that a check was inapplicable."""
+    return "not_applicable" if success_is_not_applicable(detail.check_name, detail.message, detail.metadata) else "pass"
+
+
+def _result_display_status(result: ValidationResult) -> str:
+    """Describe execution separately from the preserved gate boolean."""
+    not_applicable = (
+        bool(result.success_details)
+        and not result.findings
+        and all(_detail_display_status(detail) == "not_applicable" for detail in result.success_details)
+    )
+    outcome = result_status(result)
+    if outcome == Status.FAILED:
+        return "fail"
+    if outcome == Status.INCOMPLETE:
+        return "incomplete"
+    if is_cleanly_skipped(result):
+        return "not_applicable" if "not applicable" in get_skip_reason(result).casefold() else "skipped"
+    if result.passed and not_applicable:
+        return "not_applicable"
+    return "pass" if result.passed else "fail"
+
+
+def _validated_ci_context(context: dict[str, str] | None) -> dict[str, str]:
+    """Allow only bounded display text and HTTPS links in trusted CI chrome."""
+    if context is None:
+        return {}
+    if not isinstance(context, dict):
+        raise ValueError("ci_context must be a dictionary")
+    result = {}
+    for key in ("run_url", "report_index_url", "report_url", "canonical_json_url", "commit", "image", "ci_conclusion"):
+        value = context.get(key)
+        if value is None or value == "":
+            continue
+        if not isinstance(value, str) or len(value) > 4096 or any(ord(c) < 32 for c in value):
+            raise ValueError(f"Invalid CI context {key}")
+        if key.endswith("url"):
+            if (key, value) in {
+                ("report_index_url", "../index.html"),
+                ("canonical_json_url", "skillevaluator-tier1.json"),
+            }:
+                result[key] = value
+                continue
+            parsed = urlparse(value)
+            if parsed.scheme != "https" or not parsed.hostname or parsed.username or parsed.password or "\\" in value:
+                raise ValueError(f"CI context {key} must be an HTTPS URL")
+        result[key] = value
+    return result
 
 
 class HTMLReporter(ReporterBase):
@@ -1304,6 +1673,10 @@ class HTMLReporter(ReporterBase):
         content_label: str = "Skill",
         profile: str | None = None,
         expected_skill_name: str | None = None,
+        explicit_skill_name: str | None = None,
+        ci_context: dict[str, str] | None = None,
+        report_scope: str = "publication",
+        scan_root: str | None = None,
     ) -> None:
         self.include_timestamp = include_timestamp
         self.title = title or "SkillEvaluator Validation Report"
@@ -1311,17 +1684,34 @@ class HTMLReporter(ReporterBase):
         self._tabs_explicit = tabs is not None
         self.target_path = target_path
         self.content_label = content_label
-        # Active validation profile (e.g. "internal", "external"). Surfaced
+        # Active validation policy (e.g. "default" or a custom policy name). Surfaced
         # in the report header so reviewers can tell which audience the
         # validation gate was applied for.
         self.profile = profile
+        validate_report_scope(report_scope, [])
+        self.report_scope = report_scope
         self.expected_skill_name = expected_skill_name
+        self.explicit_skill_name = explicit_skill_name
+        self.ci_context = _validated_ci_context(ci_context)
+        # The folder the scanners ran on, used to show finding locations
+        # relative to the skill in "Fix first".
+        self.scan_root = scan_root
         self._env = self._create_environment()
 
-    def _create_environment(self) -> Environment:
+    @staticmethod
+    @cache
+    def _create_environment() -> Environment:
+        """Return one shared environment, so each template compiles once per process.
+
+        Compiling report.html.j2 costs far more than rendering it. The loader
+        serves fixed package templates and the filters are pure functions, so
+        reporters with different options can share it. Jinja environments are
+        safe to share between threads once they are configured.
+        """
         loader = PackageLoader("skillevaluator.reporting", "templates")
         environment = Environment(loader=loader, autoescape=True)
         environment.filters["cleanly_skipped"] = is_cleanly_skipped
+        environment.filters["execution_status"] = _result_display_status
         environment.filters["related_paths"] = _related_paths
         environment.filters["additional_errors"] = additional_errors
         environment.filters["adaptive_percent"] = _adaptive_percent
@@ -1363,6 +1753,9 @@ class HTMLReporter(ReporterBase):
 
         Returns the inferred skill name if single-skill mode, else None.
         """
+        if self.explicit_skill_name is not None:
+            return self.explicit_skill_name
+
         # Check for [prefix] pattern in any finding — indicates folder mode
         for r in results:
             for f in r.findings:
@@ -1400,12 +1793,20 @@ class HTMLReporter(ReporterBase):
         skill_name: str,
     ) -> dict[str, dict[str, Any]]:
         """Reorganize results for a single-skill run into one entry."""
-        skill_data: dict[str, Any] = {"passed": True, "validators": {}, "issue_count": 0}
+        skill_data: dict[str, Any] = {"passed": True, "validators": {}, "issue_count": 0, "status": "pass"}
 
         for result in results:
             vn = result.validator_name
+            display_status = _result_display_status(result)
             vdata: dict[str, Any] = {
                 "passed": result.passed,
+                "status": display_status,
+                "errors": list(result.errors),
+                "warnings": list(result.warnings),
+                # The lines that do not repeat a finding: scanner diagnostics and gate failures.
+                "additional_errors": additional_errors(result),
+                "additional_warnings": additional_warnings(result),
+                "incomplete_scans": list(result.incomplete_scans),
                 "description": result.validator_description,
                 "details": [],
                 "findings": [],
@@ -1415,6 +1816,7 @@ class HTMLReporter(ReporterBase):
                 vdata["details"].append(
                     {
                         "check_name": detail.check_name,
+                        "status": _detail_display_status(detail),
                         "message": detail.message,
                         "metadata": detail.metadata,
                     }
@@ -1422,7 +1824,7 @@ class HTMLReporter(ReporterBase):
 
             for finding in result.findings:
                 clean_path = finding.file_path
-                if "/" + skill_name + "/" in clean_path:
+                if self.explicit_skill_name is None and "/" + skill_name + "/" in clean_path:
                     clean_path = clean_path[clean_path.index("/" + skill_name + "/") + len(skill_name) + 2 :]
 
                 confidence = "high"
@@ -1431,6 +1833,8 @@ class HTMLReporter(ReporterBase):
 
                 vdata["findings"].append(
                     {
+                        "finding_id": finding.finding_id,
+                        "occurrence_id": finding.occurrence_id,
                         "category": finding.category,
                         "severity": finding.severity.value
                         if hasattr(finding.severity, "value")
@@ -1451,8 +1855,13 @@ class HTMLReporter(ReporterBase):
                 skill_data["passed"] = False
                 vdata["passed"] = False
 
+            if result_status(result) == Status.FAILED:
+                skill_data["status"] = "fail"
+            elif result_status(result) == Status.INCOMPLETE and skill_data["status"] != "fail":
+                skill_data["status"] = "incomplete"
             skill_data["validators"][vn] = vdata
 
+        skill_data["finding_count"] = self._unique_finding_count(skill_data)
         # Deduplicate findings per validator
         for vdata in skill_data["validators"].values():
             if vdata["findings"]:
@@ -1563,6 +1972,8 @@ class HTMLReporter(ReporterBase):
                         confidence = finding.metadata.get("confidence", "high")
                     skills[skill_name]["validators"][validator_name]["findings"].append(
                         {
+                            "finding_id": finding.finding_id,
+                            "occurrence_id": finding.occurrence_id,
                             "category": finding.category,
                             "severity": finding.severity.value
                             if hasattr(finding.severity, "value")
@@ -1582,6 +1993,7 @@ class HTMLReporter(ReporterBase):
 
         # Deduplicate findings within each skill/validator
         for skill_data in skills.values():
+            skill_data["finding_count"] = self._unique_finding_count(skill_data)
             # Recompute issue_count after deduplication (use occurrences)
             deduped_count = 0
             for validator_data in skill_data["validators"].values():
@@ -1610,6 +2022,23 @@ class HTMLReporter(ReporterBase):
         return " ".join((msg or "").split())
 
     @staticmethod
+    def _unique_finding_count(skill_data: dict[str, Any]) -> int:
+        """Count a skill's findings once per ``finding_id``, before display merging.
+
+        ``issue_count`` keeps counting raw records for the JSON ``skills``
+        list and contributor totals; the skill badge shows this count so it
+        agrees with the summary's Findings number.
+        """
+        return len(
+            {
+                finding["finding_id"]
+                for validator in skill_data["validators"].values()
+                for finding in validator["findings"]
+                if finding.get("finding_id")
+            }
+        )
+
+    @staticmethod
     def _deduplicate_findings(findings: list[dict[str, Any]]) -> list[dict[str, Any]]:
         """Aggregate duplicate findings that share the same message, file, and suggestion.
 
@@ -1617,8 +2046,13 @@ class HTMLReporter(ReporterBase):
         into a single entry with an 'occurrences' count and a 'lines' list.
         This dramatically reduces visual noise when the same PII pattern
         (e.g., "Personal macOS user path") fires on many lines in the same file.
+        A finding's ``occurrence_id`` becomes an ``occurrence_ids`` list on the
+        merged entry, so every merged location keeps its identity. The key
+        also holds ``finding_id`` when present, so two different checks with
+        the same text never merge and an entry's IDs all belong to it.
         """
         groups: dict[tuple, dict[str, Any]] = {}
+        seen_occurrences: dict[tuple, set[str]] = {}
 
         for finding in findings:
             # Normalize message for deduplication (strip trailing whitespace/newlines)
@@ -1627,6 +2061,7 @@ class HTMLReporter(ReporterBase):
                 norm_msg,
                 finding.get("file_path", ""),
                 finding.get("suggestion", ""),
+                finding.get("finding_id"),
             )
 
             if key in groups:
@@ -1649,10 +2084,18 @@ class HTMLReporter(ReporterBase):
                 new_conf = finding.get("confidence", "high")
                 if conf_order.get(new_conf, 2) < conf_order.get(existing_conf, 2):
                     groups[key]["confidence"] = new_conf
+                occurrence_id = finding.get("occurrence_id")
+                if occurrence_id and "occurrence_ids" in groups[key] and occurrence_id not in seen_occurrences[key]:
+                    seen_occurrences[key].add(occurrence_id)
+                    groups[key]["occurrence_ids"].append(occurrence_id)
             else:
                 entry = dict(finding)
                 entry["message"] = norm_msg  # Store normalized message
                 entry["occurrences"] = 1
+                if "occurrence_id" in entry:
+                    occurrence_id = entry.pop("occurrence_id")
+                    entry["occurrence_ids"] = [occurrence_id] if occurrence_id else []
+                    seen_occurrences[key] = set(entry["occurrence_ids"])
                 line_num = finding.get("line_number")
                 entry["lines"] = [line_num] if line_num else []
                 # Extract confidence from metadata if present
@@ -1715,7 +2158,8 @@ class HTMLReporter(ReporterBase):
         ``issue_key`` (matching the row it rolls up to) so the template can
         deep-link from the executive summary directly to the finding card.
 
-        Returns a list of dicts sorted by total_count descending.
+        Returns a list of dicts, most severe first; the occurrence count only
+        breaks ties within a severity.
         """
         sev_order = {"critical": 4, "high": 3, "medium": 2, "low": 1, "info": 0}
         issue_map: dict[tuple, dict[str, Any]] = {}
@@ -1754,7 +2198,11 @@ class HTMLReporter(ReporterBase):
                             "issue_key": issue_key,
                         }
 
-        return sorted(issue_map.values(), key=lambda x: x["total_count"], reverse=True)
+        return sorted(
+            issue_map.values(),
+            key=lambda issue: (sev_order.get(issue["severity"], 0), issue["total_count"]),
+            reverse=True,
+        )
 
     @staticmethod
     def _extract_contributors(
@@ -1972,7 +2420,12 @@ class HTMLReporter(ReporterBase):
         """Compact stats for a single tier — what the hero chip displays.
 
         Returns ``passed`` (boolean), executed/pass/skip counts,
-        ``issue_count`` (sum of findings), and per-severity totals.
+        ``issue_count`` (unique findings, as the Markdown summary counts
+        them), and per-severity totals of those unique findings at their
+        highest severity. ``occurrence_count``, ``raw_finding_count`` and
+        ``duplicates_removed`` sit beside them, and ``issue_detail`` describes
+        them in the shared report wording when they differ from the unique
+        count or when errors or warnings have no finding behind them.
         ``total == 0`` lets the template hide the chip entirely without an
         extra "did this tier run?" predicate.
         """
@@ -1981,22 +2434,17 @@ class HTMLReporter(ReporterBase):
         executed_count = total - skipped_count
         passed_count = sum(1 for r in results if r.passed and not r.is_incomplete and not is_cleanly_skipped(r))
         advisory_skipped_count = sum(1 for r in results if is_advisory_agent_eval_skip(r))
-        failed_count = sum(1 for r in results if not r.passed and not is_cleanly_skipped(r))
-        incomplete_count = sum(1 for r in results if r.is_incomplete)
-        issue_count = 0
-        critical = high = medium = low = 0
-        for r in results:
-            issue_count += len(r.findings or [])
-            for f in r.findings or []:
-                sev = f.severity.value if hasattr(f.severity, "value") else str(f.severity).lower()
-                if sev == "critical":
-                    critical += 1
-                elif sev == "high":
-                    high += 1
-                elif sev == "medium":
-                    medium += 1
-                elif sev == "low":
-                    low += 1
+        failed_count = sum(1 for r in results if result_status(r) == Status.FAILED)
+        incomplete_count = sum(1 for r in results if result_status(r) == Status.INCOMPLETE)
+        findings = summarize_findings(results)
+        messages = summarize_messages(results)
+        unique_by_severity = findings["unique_by_severity"]
+        has_detail = (
+            findings["raw_occurrences"] != findings["unique_findings"]
+            or findings["distinct_occurrences"] != findings["unique_findings"]
+            or messages["independent_errors"]
+            or messages["independent_warnings"]
+        )
         return {
             "total": total,
             "executed_count": executed_count,
@@ -2004,13 +2452,20 @@ class HTMLReporter(ReporterBase):
             "skipped_count": skipped_count,
             "advisory_skipped_count": advisory_skipped_count,
             "failed_count": failed_count,
-            "issue_count": issue_count,
+            "issue_count": findings["unique_findings"],
+            "occurrence_count": findings["distinct_occurrences"],
+            "raw_finding_count": findings["raw_occurrences"],
+            "duplicates_removed": findings["duplicates_removed"],
+            "total_issues": total_issue_count(findings, messages),
+            "issue_detail": (
+                describe_issue_counts(findings, messages, raw_records=True, duplicates=True) if has_detail else ""
+            ),
             "all_passed": executed_count > 0 and failed_count == 0 and incomplete_count == 0,
             "incomplete_count": incomplete_count,
-            "critical": critical,
-            "high": high,
-            "medium": medium,
-            "low": low,
+            "critical": unique_by_severity["critical"],
+            "high": unique_by_severity["high"],
+            "medium": unique_by_severity["medium"],
+            "low": unique_by_severity["low"],
         }
 
     def _results_to_dict(self, results: list[ValidationResult]) -> list[dict[str, Any]]:
@@ -2021,7 +2476,7 @@ class HTMLReporter(ReporterBase):
                 "validator_name": result.validator_name,
                 "validator_description": result.validator_description,
                 "passed": result.passed,
-                "status": "skipped" if skipped else result.status,
+                "status": result_status(result).value,
                 "skipped": skipped,
                 "skip_reason": get_skip_reason(result) if skipped else None,
                 "incomplete_scans": result.incomplete_scans,
@@ -2053,6 +2508,8 @@ class HTMLReporter(ReporterBase):
             for finding in result.findings:
                 result_dict["findings"].append(
                     {
+                        "finding_id": finding.finding_id,
+                        "occurrence_id": finding.occurrence_id,
                         "category": finding.category,
                         "severity": finding.severity.value,
                         "check_name": finding.check_name,
@@ -2194,6 +2651,9 @@ class HTMLReporter(ReporterBase):
                 score = _finite_number(agent.get("with_skill"), minimum=0.0, maximum=1.0)
                 if score is None:
                     score = _finite_number(agent.get("overall_score"), minimum=0.0, maximum=1.0)
+                if score is None and candidate.get("mode") == "baseline_only":
+                    # A baseline-only run (--skip-with-skill) is scored by its baseline arm.
+                    score = _finite_number(agent.get("baseline"), minimum=0.0, maximum=1.0)
                 attempts = max(payload_attempts, _nonnegative_count(agent.get("scored_attempts")))
                 if score is not None and attempts > 0:
                     return True
@@ -2413,8 +2873,10 @@ class HTMLReporter(ReporterBase):
         return self.render_all([result])
 
     def render_all(self, results: list[ValidationResult]) -> str:
+        validate_report_scope(self.report_scope, results)
         tier1_results, tier2_results, tier3_results = self._split_results_by_tier(results)
         tier3_data = self._tier3_report_data(tier3_results)
+        completed_agent = completed_agent_result(tier3_data)
         # Preserve the raw policy/provenance assessment, then let the emitted
         # payload make the decision only more conservative. Display shaping
         # must never invent a successful run or erase a persisted waiver.
@@ -2438,16 +2900,20 @@ class HTMLReporter(ReporterBase):
             ),
         )
 
-        all_passed = all(passes_required_gate(r) for r in results)
-        has_incomplete = any(r.is_incomplete for r in results)
-        overall_status = "incomplete" if has_incomplete else "passed" if all_passed else "failed"
-        total_errors = sum(r.summary.errors for r in results)
-        total_warnings = sum(r.summary.warnings for r in results)
+        run_status = resolve_run_status(results)
+        all_passed = run_status.headline == Status.PASSED
+        has_incomplete = run_status.headline == Status.INCOMPLETE
+        overall_status = run_status.headline.value
+        finding_summary = summarize_findings(results)
+        message_summary = summarize_messages(results)
         skipped_count = sum(1 for r in results if is_cleanly_skipped(r))
         passed_count = sum(1 for r in results if r.passed and not r.is_incomplete and not is_cleanly_skipped(r))
         advisory_skipped_count = sum(1 for r in results if is_advisory_agent_eval_skip(r))
         failed_count = sum(1 for r in results if not passes_required_gate(r))
-        total_issues = total_errors + total_warnings
+        # Count unique findings rather than raw validator records that repeat
+        # one finding, plus errors and warnings with no finding behind them
+        # (failed gates, scanner and execution errors), as Markdown does.
+        total_issues = total_issue_count(finding_summary, message_summary)
         total_validators = len(results)
         executed_count = total_validators - skipped_count
         pass_percentage = round((passed_count / executed_count * 100) if executed_count > 0 else 0, 1)
@@ -2500,6 +2966,7 @@ class HTMLReporter(ReporterBase):
         # from the global aggregate counters.
         tier1_summary = self._compute_tier_summary(tier1_results)
         tier1_skillspector_versions = _skillspector_versions(tier1_results)
+        tier1_skillspector_provenance = _skillspector_provenance(tier1_results)
         tier2_summary = self._compute_tier_summary(tier2_results)
         tier3_summary = self._compute_tier_summary(tier3_results)
         tier3_preview, tier3_preview_notice = _bounded_tier3_preview(tier3_data)
@@ -2530,7 +2997,9 @@ class HTMLReporter(ReporterBase):
             "passed_count": tier1_display_passed,
             "skipped_count": tier1_display_skipped,
             "failed_count": tier1_display_failed,
-            "total_issues": sum(result.summary.errors + result.summary.warnings for result in tier1_display_results),
+            # Unique Tier 1 findings plus errors and warnings with no finding
+            # behind them, counted as the Markdown summary counts them.
+            "total_issues": tier1_summary["total_issues"],
             "pass_percentage": round(
                 (tier1_display_passed / tier1_display_total * 100) if tier1_display_total else 0,
                 1,
@@ -2544,7 +3013,9 @@ class HTMLReporter(ReporterBase):
         # exit code. Results produced outside ``validate`` retain the public
         # defaults: Tier 1/Tier 2 block and Tier 3 is advisory.
         blocking_results: list[ValidationResult] = []
-        advisory_results: list[ValidationResult] = []
+        # Per tier, so the gate policy counts findings the way each tier card does.
+        blocking_by_tier: dict[str, list[ValidationResult]] = {}
+        advisory_by_tier: dict[str, list[ValidationResult]] = {}
         blocking_tiers: list[str] = []
         advisory_tiers: list[str] = []
         for tier_name, tier_results, default_blocking in (
@@ -2566,28 +3037,28 @@ class HTMLReporter(ReporterBase):
                 )
                 if is_blocking:
                     blocking_results.append(result)
+                    blocking_by_tier.setdefault(tier_name, []).append(result)
                     tier_blocks = True
                 else:
-                    advisory_results.append(result)
+                    advisory_by_tier.setdefault(tier_name, []).append(result)
                     tier_advises = True
             if tier_blocks:
                 blocking_tiers.append(tier_name)
             if tier_advises:
                 advisory_tiers.append(tier_name)
 
-        def _severity_totals(tier_results: list[ValidationResult]) -> dict[str, int]:
+        def _severity_totals(results_by_tier: dict[str, list[ValidationResult]]) -> dict[str, int]:
+            # Each tier's unique findings at their highest severity, as its tier
+            # card counts them; the same finding in two tiers counts in both.
             totals = {"critical": 0, "high": 0, "medium": 0, "low": 0}
-            for result in tier_results:
-                for finding in result.findings:
-                    severity = (
-                        finding.severity.value if hasattr(finding.severity, "value") else str(finding.severity).lower()
-                    )
-                    if severity in totals:
-                        totals[severity] += 1
+            for tier_results in results_by_tier.values():
+                unique_by_severity = summarize_findings(tier_results)["unique_by_severity"]
+                for severity in totals:
+                    totals[severity] += unique_by_severity[severity]
             return totals
 
-        blocking_totals = _severity_totals(blocking_results)
-        advisory_totals = _severity_totals(advisory_results)
+        blocking_totals = _severity_totals(blocking_by_tier)
+        advisory_totals = _severity_totals(advisory_by_tier)
         blocking_critical = blocking_totals["critical"]
         blocking_high = blocking_totals["high"]
         blocking_medium = blocking_totals["medium"]
@@ -2596,6 +3067,17 @@ class HTMLReporter(ReporterBase):
         advisory_high = advisory_totals["high"]
         advisory_medium = advisory_totals["medium"]
         advisory_low = advisory_totals["low"]
+        # A tier whose every result is explicitly non-blocking is advisory: its
+        # failure does not require changes, so the report labels it "Failed (advisory)".
+        nonblocking_tiers = [
+            tier_name
+            for tier_name, tier_results in (("tier2", tier2_results), ("tier3", tier3_results))
+            if tier_results
+            and all(
+                isinstance(result.metadata.get("gating"), dict) and result.metadata["gating"].get("blocking") is False
+                for result in tier_results
+            )
+        ]
         gating = {
             "blocking_tiers": blocking_tiers,
             "advisory_tiers": advisory_tiers,
@@ -2643,6 +3125,51 @@ class HTMLReporter(ReporterBase):
         _attach_quality_scores(skills_by_name)
         _attach_quality_scores(tier1_skills)
 
+        # The quality gate's minimum, shown next to every score it applies to.
+        quality_min_score = next(
+            (
+                r.metadata["quality_config"]["min_score"]
+                for r in results
+                if isinstance(r.metadata, dict)
+                and isinstance(r.metadata.get("quality_config"), dict)
+                and isinstance(r.metadata["quality_config"].get("min_score"), int | float)
+            ),
+            None,
+        )
+        check_names = {
+            r.validator_name: plain_check_name(r.validator_name)
+            for r in results
+            if plain_check_name(r.validator_name) != r.validator_name
+        }
+        tier1_finding_anchors, tier1_check_anchors = _evidence_anchors(tier1_skills)
+        tier1_fix_first = _fix_first(tier1_skills, tier1_finding_anchors, tier1_check_anchors, scan_root=self.scan_root)
+        tier1_failed_checks = [
+            plain_check_name(r.validator_name) for r in tier1_results if _result_display_status(r) == "fail"
+        ]
+        # Unique critical and high findings in failed checks, counted like the Findings number.
+        tier1_blocking_by_severity = summarize_findings([r for r in tier1_results if not passes_required_gate(r)])[
+            "unique_by_severity"
+        ]
+        tier1_blocking_findings = tier1_blocking_by_severity["critical"] + tier1_blocking_by_severity["high"]
+        # Why each incomplete Tier 1 check stopped, in the scanner's words. The
+        # summary asks for an install only when every scanner is just missing.
+        tier1_stop_reasons = [
+            (plain_check_name(r.validator_name), _scan_stop_reason(additional_errors(r), additional_warnings(r)))
+            for r in tier1_results
+            if r.is_incomplete
+        ]
+        tier1_scanners_missing = bool(tier1_stop_reasons) and all(
+            _MISSING_SCANNER.search(reason) for _check, reason in tier1_stop_reasons
+        )
+        tier1_scan_stop = next(
+            (
+                f"{check}: {_sentence(reason)}"
+                for check, reason in tier1_stop_reasons
+                if reason and not _MISSING_SCANNER.search(reason)
+            ),
+            "",
+        )
+
         report_data = {
             "title": self.title,
             "timestamp": timestamp,
@@ -2660,6 +3187,9 @@ class HTMLReporter(ReporterBase):
                 "advisory_skipped_count": advisory_skipped_count,
                 "failed_count": failed_count,
                 "total_issues": total_issues,
+                "raw_finding_occurrences": finding_summary["raw_occurrences"],
+                "distinct_finding_occurrences": finding_summary["distinct_occurrences"],
+                "duplicates_removed": finding_summary["duplicates_removed"],
                 "pass_percentage": pass_percentage,
                 "total_skills": total_skills,
                 "passed_skills": passed_skills,
@@ -2667,6 +3197,9 @@ class HTMLReporter(ReporterBase):
                 "publication_status": publication.status,
             },
             "results": self._results_to_dict(results),
+            "finding_counts": finding_counts(finding_summary),
+            "finding_groups": finding_summary["groups"],
+            "message_counts": message_summary,
             "skills": skills_by_name,
             "top_issues": top_issues,
             "contributors": contributors,
@@ -2687,13 +3220,18 @@ class HTMLReporter(ReporterBase):
                 },
             },
             "skillspector_versions": tier1_skillspector_versions,
+            "skillspector_provenance": tier1_skillspector_provenance,
         }
-        report_json = (
-            json.dumps(report_data, indent=2, allow_nan=False)
-            .replace("<", "\\u003c")
-            .replace(">", "\\u003e")
-            .replace("&", "\\u0026")
-        )
+        # CI-native pages link Download JSON to the retained canonical file, so
+        # nothing on them reads an embedded copy. Only standalone reports embed it.
+        report_json = None
+        if not self.ci_context.get("canonical_json_url"):
+            report_json = (
+                json.dumps(report_data, indent=2, allow_nan=False)
+                .replace("<", "\\u003c")
+                .replace(">", "\\u003e")
+                .replace("&", "\\u0026")
+            )
 
         # Dynamically add Tier 3 tab when agent eval data is present
         active_tabs = list(self.tabs)
@@ -2716,7 +3254,15 @@ class HTMLReporter(ReporterBase):
         template = self._env.get_template("report.html.j2")
         cl = self.content_label
         return template.render(
+            report_scope=self.report_scope,
+            completed_agent=completed_agent,
             title=self.title,
+            ci_context=self.ci_context,
+            explicit_skill_name=self.explicit_skill_name,
+            tier1_execution_summary={
+                status: sum(_result_display_status(r) == status for r in tier1_results)
+                for status in ("pass", "fail", "incomplete", "skipped", "not_applicable")
+            },
             timestamp=timestamp,
             version=__version__,
             target_path=self.target_path,
@@ -2728,7 +3274,11 @@ class HTMLReporter(ReporterBase):
             overall_status=overall_status,
             publication_status=publication.status,
             publication_reasons=publication.reasons,
-            tier3_effective_status=publication.tier3.status,
+            tier3_effective_status=(
+                completed_agent["verdict"]
+                if self.report_scope == "tier3" and completed_agent
+                else publication.tier3.status
+            ),
             total_validators=total_validators,
             executed_count=executed_count,
             passed_count=passed_count,
@@ -2768,8 +3318,15 @@ class HTMLReporter(ReporterBase):
             tier3_canonical_encoding=tier3_canonical_encoding,
             tier3_truncation=tier3_truncation,
             tier3_preview_notice=tier3_preview_notice,
+            # From the full display payload: the bounded preview can cap rows
+            # unevenly per condition and blank identity fields of late rows.
+            steps_by_case_chart=steps_by_case_chart(
+                tier3_data.get("agents") if isinstance(tier3_data, dict) else {},
+                tier3_data.get("trials") if isinstance(tier3_data, dict) else [],
+            ),
             tier1_summary=tier1_summary,
             skillspector_versions=tier1_skillspector_versions,
+            skillspector_provenance=tier1_skillspector_provenance,
             tier2_summary=tier2_summary,
             tier3_summary=tier3_summary,
             tier1_display_results=tier1_display_results,
@@ -2780,7 +3337,55 @@ class HTMLReporter(ReporterBase):
             tier2_results=tier2_results,
             tier3_lift_pass_threshold=TIER3_LIFT_PASS_THRESHOLD,
             tier3_lift_fail_threshold=TIER3_LIFT_FAIL_THRESHOLD,
+            quality_min_score=quality_min_score,
+            quality_grade_legend=QUALITY_GRADE_LEGEND,
+            verdict_words=VERDICT_WORDS,
+            advisory_fail_word=ADVISORY_FAIL_WORD,
+            nonblocking_tiers=nonblocking_tiers,
+            publication_words=PUBLICATION_WORDS,
+            tier3_status_reason=publication.tier3.reason,
+            tier1_failed_checks=tier1_failed_checks,
+            tier1_incomplete_scans=list(dict.fromkeys(tool for r in tier1_results for tool in r.incomplete_scans)),
+            tier1_scanners_missing=tier1_scanners_missing,
+            tier1_scan_stop=tier1_scan_stop,
+            tier1_blocking_findings=tier1_blocking_findings,
+            check_names=check_names,
+            finding_anchors=tier1_finding_anchors,
+            check_anchors=tier1_check_anchors,
+            fix_first=tier1_fix_first,
         )
 
     def get_file_extension(self) -> str:
         return ".html"
+
+
+def fix_first_for_results(
+    results: list[ValidationResult],
+    *,
+    skill_name: str | None = None,
+    expected_skill_name: str | None = None,
+    scan_root: str | None = None,
+) -> list[dict[str, Any]]:
+    """Return the Tier 1 "Fix first" entries exactly as the report for *results* lists them.
+
+    The CI index uses this so its "Needs attention" line names the same first
+    fix as the skill's own report, with the same anchor. Pass the same
+    *scan_root* as the report.
+    """
+    reporter = HTMLReporter(
+        include_timestamp=False, explicit_skill_name=skill_name, expected_skill_name=expected_skill_name
+    )
+    tier1_results, _tier2, _tier3 = reporter._split_results_by_tier(results)
+    skills = reporter._reorganize_by_skill(tier1_results)
+    return _fix_first(skills, *_evidence_anchors(skills), scan_root=scan_root)
+
+
+def render_logo(uid: str, size: int = 28, label: str = "SkillEvaluator logo") -> str:
+    """Return the inline SkillEvaluator logo for pages built outside report.html.j2.
+
+    ``uid`` keeps the logo's ids unique on the page. An empty ``label`` marks
+    the logo as decorative, for use next to visible "SkillEvaluator" text.
+    """
+    # The shared reporter environment compiles the partial once per process.
+    environment = HTMLReporter._create_environment()
+    return str(environment.get_template("logo.svg.j2").module.se_logo(uid, size, label))

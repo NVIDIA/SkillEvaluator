@@ -115,10 +115,31 @@ _SHARED_SECURITY_CONSTANTS = [
     "_APPLY_PATCH_HEADER_RE",
     "_APPLY_PATCH_COMMAND_RE",
     "_APPLY_PATCH_BODY_RE",
+    "_APPLY_PATCH_HEREDOC_COMMAND_RE",
+    "_APPLY_PATCH_HEREDOC_WORD_RE",
+    "_APPLY_PATCH_UNMODELLED_SHELL_RE",
+    "_APPLY_PATCH_SHELL_PATH_RE",
+    "_APPLY_PATCH_OUTPUT_USE_RE",
     "_APPLY_PATCH_DEFAULT_WORKDIR",
     "_APPLY_PATCH_CD_RE",
+    "_APPLY_PATCH_UNSETTLED_DIR_RE",
+    "_APPLY_PATCH_UNSETTLED_PREFIX_RE",
+    "_APPLY_PATCH_QUOTED_RE",
+    "_APPLY_PATCH_CDPATH_RE",
+    "_PROC_ROOT_ALIAS_RE",
+    "_PROC_CWD_ALIAS_RE",
+    "_UNKNOWN_CWD_ROOT",
+    "_RELATIVE_HEADER_ROOT",
     "_HOME_SHORTHAND_RE",
+    "_WINDOWS_DRIVE_PREFIX_RE",
     "_HOME_DIR_PREFIX_RE",
+    "_RM_FORCE_PROTECTED_ROOTS",
+    "_RM_FIND_EXEC_ACTIONS",
+    "_RM_CD_RE",
+    "_RM_MAX_BRACE_WORDS",
+    "_RM_MAX_DOT_GLOB_COMPONENTS",
+    "_RM_MAX_WORKDIRS",
+    "_RM_MAX_FORCE_RESOLUTIONS",
     "_PROMPT_INJECTION_PATTERNS",
     "_EXECUTION_TOOL_HINTS",
     "_READ_TOOL_HINTS",
@@ -126,6 +147,21 @@ _SHARED_SECURITY_CONSTANTS = [
     "_NETWORK_CLIENT_FAST_PATTERN",
     "_NETWORK_CLIENT_PATTERN",
     "_NETWORK_EXECUTABLES",
+    "_NETWORK_COMMAND_RUNNERS",
+    "_COMMAND_SUBSTITUTION_RE",
+    "_STDIN_TEXT_CONSUMERS",
+    "_PASS_THROUGH_WRAPPERS",
+    "_NETWORK_INPUT_REDIRECTS",
+    "_NETWORK_OUTPUT_REDIRECTS",
+    "_MAX_LOOKUP_READINGS",
+    "_FUNCTION_HEADER_NAME_RE",
+    "_GLUED_FUNCTION_HEADER_RE",
+    "_GLUED_KEYWORD_RE",
+    "_GLUED_CASE_PATTERN_RE",
+    "_CURL_OR_WGET_WORD_RE",
+    "_VARIABLE_READING_BUILTINS",
+    "_READ_OPTIONS_WITH_ARG",
+    "_MAPFILE_OPTIONS_WITH_ARG",
     "_CURL_DATA_FLAGS",
     "_CURL_UPLOAD_FLAGS",
     "_WGET_DATA_FLAGS",
@@ -161,57 +197,10 @@ def test_security_constants_stay_in_sync_with_eval_core(name):
     )
 
 
-@pytest.mark.parametrize(
-    "name",
-    [
-        "LOG_SK_RE",
-        "LOG_NVAPI_RE",
-        "LOG_CRSR_RE",
-        "OPENSHIFT_TOKEN_RE",
-        "LOG_YA29_RE",
-        "LOG_JWT_RE",
-        "LOG_GITHUB_TOKEN_RE",
-        "LOG_GITHUB_PAT_RE",
-    ],
-)
-def test_log_redaction_patterns_stay_in_sync_with_eval_core(name):
+def test_template_uses_the_shared_log_redaction():
     from skillevaluator.tier3.eval_core import secret_redaction
 
-    assert hasattr(eval_template, name), f"template missing {name}"
-    assert _normalize(getattr(eval_template, name)) == _normalize(getattr(secret_redaction, name))
-
-
-@pytest.mark.parametrize(
-    "line",
-    [
-        "plain text with task-granularity is unchanged",
-        "token sk-Ab1Cd2Ef3Gh4Ij5Kl6Mn7Op8",
-        "catalog nvapi-Ab1Cd2Ef3Gh4Ij5Kl6Mn7Op8",
-        "cursor crsr_deadbeefcafebabe",
-        "openshift sha256~abcdefghijklmnop",
-        (
-            "jwt eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9."
-            "eyJzdWIiOiIxMjM0NTY3ODkwIiwibmFtZSI6IkpvaG4iLCJhZG1pbiI6dHJ1ZX0."
-            "SflKxwRJSMeKKF2QT4fwpMeJf36POk6yJV_adQssw5c"
-        ),
-        "google ya29." + "a0AXooCgs-abcdefghijklmnopqrstuvwxyz12345",
-        "runtime opaque-secret-value",
-        "github ghp_" + "A1b2C3d4E5f6G7h8I9j0K1l2M3n4O5p6Q7r8" + " and ghp_short",
-        "github github_pat_" + "11ABCDEFG0123456789_abcdefghijklmnopqrstuvwxyz0123",
-    ],
-)
-def test_template_log_redaction_matches_eval_core(line):
-    from skillevaluator.tier3.eval_core.secret_redaction import redact_secrets_in_log_line
-
-    extra_secret_values = ["opaque-secret-value"]
-
-    assert eval_template.redact_secrets_in_log_line(
-        line,
-        extra_secret_values=extra_secret_values,
-    ) == redact_secrets_in_log_line(
-        line,
-        extra_secret_values=extra_secret_values,
-    )
+    assert eval_template.redact_secrets_in_log_line is secret_redaction.redact_secrets_in_log_line
 
 
 @pytest.mark.parametrize(

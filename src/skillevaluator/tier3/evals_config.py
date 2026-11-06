@@ -43,6 +43,7 @@ _HARBOR_KEYS = {
     "stop_on_pass",
     "n_concurrent",
     "max_agents",
+    "max_cases",
     "timeout_multiplier",
     "agent_runtime_preflight",
     "agent_workdir",
@@ -60,7 +61,7 @@ HARBOR_TASK_SOURCES = {"auto", "evals_json", "native_harbor"}
 MAX_HARBOR_TIMEOUT_MULTIPLIER = sys.float_info.max / 600.0
 _AGENT_KEYS = {"model"}
 _RESOURCE_KEYS = {"cpus", "memory_mb", "storage_mb"}
-_SKILL_WORKSPACE_KEYS = {"mode", "include"}
+_SKILL_WORKSPACE_KEYS = {"mode", "include", "decoy_manifest"}
 _GRADING_KEYS = {"mode"}
 _ENV_NAME_RE = re.compile(r"^[A-Za-z_][A-Za-z0-9_]*$")
 _GKE_INFRASTRUCTURE_KWARGS: frozenset[str] = frozenset(
@@ -209,6 +210,8 @@ def _validate_config(raw: dict[str, Any], config_path: Path) -> dict[str, Any]:
             harbor["n_concurrent"] = _int_at_least(harbor_raw["n_concurrent"], 1, config_path, "harbor.n_concurrent")
         if "max_agents" in harbor_raw:
             harbor["max_agents"] = _int_at_least(harbor_raw["max_agents"], 1, config_path, "harbor.max_agents")
+        if "max_cases" in harbor_raw:
+            harbor["max_cases"] = _int_at_least(harbor_raw["max_cases"], 1, config_path, "harbor.max_cases")
         if "timeout_multiplier" in harbor_raw:
             harbor["timeout_multiplier"] = _float_greater_than(
                 harbor_raw["timeout_multiplier"],
@@ -742,6 +745,10 @@ def _skill_workspace(value: Any, config_path: Path) -> dict[str, Any]:
         out["mode"] = _enum(value["mode"], SKILL_WORKSPACE_MODES, config_path, "skill_workspace.mode")
     if "include" in value:
         out["include"] = _string_list(value["include"], config_path, "skill_workspace.include")
+    if "decoy_manifest" in value:
+        out["decoy_manifest"] = _non_empty_string(
+            value["decoy_manifest"], config_path, "skill_workspace.decoy_manifest"
+        )
     return out
 
 
@@ -770,4 +777,3 @@ def load_allowed_runtime_env(skill_path: Path) -> dict[str, str]:
     except Exception:
         pass
     return {}
-

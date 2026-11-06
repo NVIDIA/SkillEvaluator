@@ -56,6 +56,34 @@ def test_skill_validate_selects_tiers_and_prepares_dataset(monkeypatch, tmp_path
     assert calls == expected
 
 
+@pytest.mark.parametrize("tiers", ["2", "3", "2,3"])
+def test_validate_tiers_without_tier1_is_rejected_before_any_tier_runs(monkeypatch, tmp_path, tiers):
+    skill = tmp_path / "sample"
+    skill.mkdir()
+    (skill / "SKILL.md").write_text("---\nname: sample\ndescription: Test skill\n---\n")
+    calls = []
+
+    def record(name):
+        def run(*_args, **_kwargs):
+            calls.append(name)
+            return []
+
+        return run
+
+    monkeypatch.setattr(cli_module, "run_validation", record("tier1"))
+    monkeypatch.setattr(cli_module, "_run_dedup_or_skip", record("tier2"))
+    monkeypatch.setattr(cli_module, "_ensure_autopilot_dataset", record("dataset"))
+    monkeypatch.setattr(cli_module, "_run_agent_eval_or_skip", record("tier3"))
+    result = CliRunner().invoke(
+        cli_module.cli, ["validate", str(skill), "--tiers", tiers, "-o", str(tmp_path / "reports")]
+    )
+    assert result.exit_code == 1
+    assert "Tier 1 always runs" in result.output
+    assert calls == []
+    assert not (tmp_path / "reports").exists()
+    assert not (skill / "evals").exists()
+
+
 def test_default_autopilot_receives_skill_directory_for_file_input(monkeypatch, tmp_path):
     from skillevaluator.tier3 import evals_spec
 

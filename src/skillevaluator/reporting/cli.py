@@ -39,19 +39,25 @@ from skillevaluator.reporting.base import (
     get_skip_reason,
     is_advisory_agent_eval_skip,
     passes_required_gate,
+    source_validation_errors,
+    source_validation_preview,
 )
 from skillevaluator.reporting.harbor_viewer import (
     harbor_evidence_link_text,
     normalize_harbor_viewer_for_display,
     safe_url,
 )
+from skillevaluator.reporting.run_status import Status, resolve_run_status, result_status
 from skillevaluator.utils.rich_markup import escape_markup
 
 if TYPE_CHECKING:
+    from collections.abc import Iterable
+
     from skillevaluator.models import Finding, ValidationResult
 
 
 _SKIP_REASON_MAX_CHARS = 1024
+_SOURCE_ERROR_MAX_CHARS = 1024
 
 
 def _related_paths(finding: Finding) -> list[str]:
@@ -65,6 +71,15 @@ def _related_paths(finding: Finding) -> list[str]:
         if isinstance(value, str) and value and value not in paths:
             paths.append(value)
     return paths
+
+
+def _rich_source_error(error: dict[str, str]) -> str:
+    """Return one failed Tier 3 source check as a bounded line inert to Rich markup."""
+    text = f"{error['path']}: {error['message']}" if error["path"] else error["message"]
+    text = " ".join(text.split())
+    if len(text) > _SOURCE_ERROR_MAX_CHARS:
+        text = text[: _SOURCE_ERROR_MAX_CHARS - 1] + "…"
+    return escape_markup(text)
 
 
 def _rich_skip_reason(result: ValidationResult) -> str:
@@ -82,13 +97,17 @@ class CLIReporter(ReporterBase):
     Supports both direct printing and string capture for testing.
     """
 
-    def __init__(self, console: Console | None = None) -> None:
+    def __init__(self, console: Console | None = None, *, report_formats: Iterable[str] = ()) -> None:
         """Initialize CLI reporter.
 
         Args:
             console: Rich Console instance (creates new one if not provided)
+            report_formats: Every format the run emits alongside this report.
+                Failed Tier 3 source checks are cut to a preview only when one
+                of these files lists all of them.
         """
         self._console = console
+        self._report_formats = tuple(report_formats)
 
     @property
     def console(self) -> Console:
@@ -171,8 +190,9 @@ class CLIReporter(ReporterBase):
 
         # Print overall status
         advisory_skips = [result for result in results if self._is_advisory_agent_eval_skip(result)]
-        required_passed = all(passes_required_gate(result) for result in results)
-        if any(result.is_incomplete for result in results):
+        run_status = resolve_run_status(results)
+        required_passed = run_status.headline == Status.PASSED
+        if run_status.headline == Status.INCOMPLETE:
             console.print("\n[bold yellow][INCOMPLETE] Validation evidence is incomplete[/bold yellow]\n")
         elif required_passed:
             if advisory_skips:
@@ -210,10 +230,15 @@ class CLIReporter(ReporterBase):
         if agent_eval:
             self._print_agent_eval_tables(agent_eval, console)
 
-        if self._is_advisory_agent_eval_skip(result):
-            console.print("[yellow][SKIP] Live evaluation did not run[/yellow]\n")
+        if result_status(result) == Status.SKIPPED:
+            label = (
+                "Live evaluation did not run"
+                if self._is_advisory_agent_eval_skip(result)
+                else "Validation check skipped"
+            )
+            console.print(f"[yellow][SKIP] {label}[/yellow]\n")
             self._print_summary_stats(result, console)
-        elif result.is_incomplete:
+        elif result_status(result) == Status.INCOMPLETE:
             tools = ", ".join(result.incomplete_scans)
             console.print(f"[yellow][INCOMPLETE] {escape_markup(tools)} did not complete[/yellow]\n")
             self._print_summary_stats(result, console)
@@ -378,18 +403,36 @@ class CLIReporter(ReporterBase):
             table.add_column("Lift", justify="right")
 
             for name, scores in evaluators.items():
-                ws = scores.get("with_skill", 0.0)
-                bl = scores.get("baseline", 0.0)
-                lift = scores.get("lift", 0.0)
+                ws = scores.get("with_skill")
+                bl = scores.get("baseline")
+                lift = scores.get("lift")
+                # A baseline-only run (--skip-with-skill) never ran the with-skill arm.
+                with_skipped = scores.get("with_skill_status") == "skipped"
                 if lift is None:
-                    lift_text = "n/a"
+                    lift_text = (
+                        "N/A"
+                        if "not_applicable" in (scores.get("with_skill_status"), scores.get("baseline_status"))
+                        else "skipped"
+                        if with_skipped
+                        else "NO SCORE"
+                    )
                 else:
                     lc = "green" if lift > 0.01 else ("red" if lift < -0.01 else "dim")
                     lift_text = f"[{lc}]{lift:+.2f}[/{lc}]"
                 table.add_row(
                     escape_markup(str(name).replace("_", " ").title()),
-                    f"{ws:.2f}",
-                    f"{bl:.2f}" if bl is not None else "n/a",
+                    f"{ws:.2f}"
+                    if ws is not None
+                    else "N/A"
+                    if scores.get("with_skill_status") == "not_applicable"
+                    else "skipped"
+                    if with_skipped
+                    else "NO SCORE",
+                    f"{bl:.2f}"
+                    if bl is not None
+                    else "N/A"
+                    if scores.get("baseline_status") == "not_applicable"
+                    else "NO SCORE",
                     lift_text,
                 )
 
@@ -549,6 +592,14 @@ class CLIReporter(ReporterBase):
                 "Recommendation" if finding.category in ("WHOLE_DUPLICATE", "PARTIAL_OVERLAP", "DUPLICATE") else "Fix"
             )
             console.print(f"     [dim]{label}:[/dim]     {escape_markup(finding.suggestion)}")
+        source_errors = source_validation_errors(finding.metadata)
+        if source_errors:
+            shown, overflow_note = source_validation_preview(source_errors, self._report_formats)
+            console.print("     [dim]Source validation:[/dim]")
+            for error in shown:
+                console.print(f"       {_rich_source_error(error)}")
+            if overflow_note:
+                console.print(f"       [dim]{escape_markup(overflow_note)}[/dim]")
         console.print()
 
     def _print_summary_table(self, results: list[ValidationResult], console: Console) -> None:
@@ -565,12 +616,12 @@ class CLIReporter(ReporterBase):
         table.add_column("Details")
 
         for result in results:
-            advisory_skip = self._is_advisory_agent_eval_skip(result)
+            advisory_skip = result_status(result) == Status.SKIPPED
             status = (
                 "[yellow]SKIP[/yellow]"
                 if advisory_skip
                 else "[bold yellow]INCOMPLETE[/bold yellow]"
-                if result.is_incomplete
+                if result_status(result) == Status.INCOMPLETE
                 else "[green]PASS[/green]"
                 if result.passed
                 else "[red]FAIL[/red]"
@@ -580,7 +631,7 @@ class CLIReporter(ReporterBase):
 
             if advisory_skip:
                 details = _rich_skip_reason(result)
-            elif result.is_incomplete:
+            elif result_status(result) == Status.INCOMPLETE:
                 scanners = escape_markup(", ".join(result.incomplete_scans))
                 details = f"[bold yellow]{scanners} did not complete[/bold yellow]"
                 counts = []

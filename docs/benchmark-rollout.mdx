@@ -116,7 +116,9 @@ diff -u \
 Expected presentation changes include:
 
 - the verdict and recommendation moving to the top;
-- `Baseline → Skill Uplift` cells with uplift labeled in percentage points;
+- `Baseline → Skill Uplift` cells with uplift labeled in percentage points,
+  scores shown to one decimal place (more near a verdict threshold), and uplift
+  computed from the displayed scores;
 - removal of the `Num` column;
 - explicit `NOT RUN`, `SKIPPED`, and `INCOMPLETE` tier states;
 - collapsible methodology and non-blocking observations;
@@ -163,6 +165,39 @@ skillevaluator validate ./my-skill \
   --evaluator-container-revision ghcr.io/nvidia/skillevaluator@sha256:0117bc2e...
 ```
 
+A pipeline that publishes cards for a requested source can also check that each
+card names that source, so a stale card or one generated for another commit
+fails before it is signed or copied:
+
+```bash
+uv run python scripts/ci/check_public_benchmarks.py \
+  --require-source-provenance \
+  --expected-source-repository NVIDIA/NVFlare \
+  --expected-source-revision 2263a2ebdab903e87f7e7c0a001d22c3a926a9cf \
+  --expected-evaluator-container-revision ghcr.io/nvidia/skillevaluator@sha256:0117bc2e... \
+  ./benchmark-backfill/example-skill
+```
+
+Each `--expected-*` option is optional and checks one metadata line of every
+scanned card, whatever its verdict: `Evaluated source`,
+`Evaluated source revision` or `Evaluator container revision`. The line must
+appear once in `Evaluation Metadata` and hold the same value; a missing line, a
+`not recorded` placeholder, a malformed value, a duplicate or a different value
+fails the scan. Only a plain one-line list item counts as that line, which is
+how SkillEvaluator renders it. An item that holds a link or inline HTML, or
+continues onto a second line, is treated as missing and reported as not
+recorded. Only top-level items are read: a nested list item is ignored, not
+counted as a duplicate. A value padded with spaces inside its code span is not
+canonical. The expected values use the same forms as the `validate`
+options above, and a malformed expected value stops the scan with a usage
+error. Hex digits in the source revision are compared without regard to case.
+Repository names and evaluator container revisions must match the card
+exactly, so give a container digest or implementation commit in lower case and
+the registry host as the card records it. The card's revision line is the
+commit when one was supplied and the content digest otherwise, so pass the
+same kind of revision the run received. Any `--expected-*` option also implies
+`--require-files`.
+
 A `PASS` card must also record its `Source digest` and `Tier 3 run ID`, so a
 `PASS` card rendered by an earlier release fails the scan until it is
 regenerated. Earlier `FAIL`, `NEUTRAL`, and `INCOMPLETE` cards without those
@@ -172,7 +207,12 @@ The linter rejects configured known leak patterns such as retired product
 identities, any validation-profile metadata line, common absolute home paths,
 ambiguous legacy uplift cells, the old `Num` column, missing metadata/decision
 sections, and a publication `PASS` without completed required Tier 1, Tier 2,
-or Tier 3 evidence.
+or Tier 3 evidence. It also rejects a Results at a Glance cell whose uplift is
+not exactly the displayed skill score minus the displayed baseline, or whose
+scores fall outside 0–100%. Whole-number cells from earlier releases still
+pass when their arithmetic holds; a card whose whole-number rounding produced a
+contradiction such as `58% → 95% (+36 points)`, or a signed zero such as
+`50% → 50% (+0 points)`, fails until it is regenerated.
 Structural H1/H2 headings must be undecorated, root-level Markdown; raw HTML,
 formatted, quoted, and list-nested headings are rejected as ambiguous. Decision
 text is checked using its rendered form, including line breaks and image alt

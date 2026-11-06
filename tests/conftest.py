@@ -41,6 +41,13 @@ def _isolate_operator_vertex_routing(monkeypatch: pytest.MonkeyPatch) -> None:
     monkeypatch.delenv("SKILLEVALUATOR_ALLOWED_MCP_SECRETS", raising=False)
 
 
+@pytest.fixture(autouse=True)
+def _isolate_operator_judge_policies(monkeypatch: pytest.MonkeyPatch) -> None:
+    """Keep tests on the default judge policies even when the host shell opts in to others."""
+    monkeypatch.delenv("LLM_JUDGE_FALLBACK_POLICY", raising=False)
+    monkeypatch.delenv("LLM_JUDGE_RETRY_POLICY", raising=False)
+
+
 # =============================================================================
 # SKILLS FIXTURES
 # =============================================================================
@@ -572,6 +579,12 @@ def load_harbor_eval_template(module_name: str = "harbor_eval_template") -> Modu
     mod = importlib.util.module_from_spec(spec)
     spec.loader.exec_module(mod)
     return mod
+
+
+@pytest.fixture(scope="session")
+def harbor_eval_template_loader() -> Callable[[str], ModuleType]:
+    """Expose the loader without importing pytest's ambiguous conftest name."""
+    return load_harbor_eval_template
 
 
 class MockUrllibResponse:

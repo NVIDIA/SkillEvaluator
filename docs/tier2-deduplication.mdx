@@ -113,7 +113,7 @@ vocabulary.
 
 | Extension | Chunking strategy |
 | --- | --- |
-| `.md`, `.mdc` | Heading-based sections; sections over 3,000 characters are split at eligible paragraph boundaries when possible; chunks under 80 characters are dropped |
+| `.md`, `.mdc` | Heading-based sections; eligible sections over 3,000 characters are split into bounded pieces, preferring paragraph and line boundaries |
 | `.py` | Module docstrings plus class and function signatures with their docstrings; implementation bodies are not included |
 | `.sh` | Function bodies and comment blocks of at least three consecutive comment lines |
 | Other extensions | Skipped |
@@ -122,6 +122,16 @@ Valid mapping frontmatter is removed from Markdown before chunking. Malformed,
 empty, or non-mapping frontmatter remains part of the analyzed text. Every
 retained chunk keeps its source file and line range, so findings point you to
 the exact overlapping sections.
+
+Each embedding input is capped at 3,000 characters, including long table rows,
+Python docstrings, and shell functions. Oversized Markdown sections are packed
+paragraph by paragraph up to the cap, and paragraphs under 80 characters stay
+attached to a neighbouring paragraph rather than becoming chunks of their own.
+Pieces split from one section, docstring, or function do not count as
+duplicates of each other. An independent copy can still join a duplicate
+cluster, and the finding then lists the split source once with its merged line
+range. Python pieces retain the enclosing source range because cleaned
+docstrings and function signatures are not contiguous text.
 
 ### Verdicts and what to do about them
 
@@ -139,9 +149,52 @@ Duplicate findings map to severities by confidence:
 | `DUPLICATE` with confidence < 0.70 | MEDIUM — advisory |
 | Short, same-file duplicate dominated by comment or configuration-style text | Capped at LOW — advisory |
 
+Each candidate cluster is reviewed in one chat-LLM request that carries every
+member's file, section, line range, and text. When that request (the system
+prompt plus the cluster text) would exceed 64,000 characters, text that repeats
+exactly is listed once as `SHARED CONTENT n`. A Markdown section's text starts
+with its own heading line, so the text compared is the body after that line:
+the same body under different headings is listed once too. Each occurrence
+keeps its own entry with its file, section, line range, and heading line, plus
+a reference to the shared text. A repeated text is listed once only when that
+shortens the request, so a short one, such as a one-line body under long
+headings, stays inline. Distinct text, including text that differs by a single
+character, is always sent in full; nothing is sampled or dropped to fit.
+A cluster that is still over 64,000 characters stops the scan as incomplete
+(`llm_prompt_size_limit`), as described below. A duplicate or
+`llm_refused` finding names up to 64 member locations and source files and
+counts the rest; its `source_files` metadata in the JSON report lists every
+file.
+
+The chat LLM answers each cluster with one JSON verdict. A reply that wraps
+exactly one JSON object in prose or a Markdown fence is accepted, which matters
+on Bedrock and other endpoints that answer with prompt-only JSON. A reply with
+no complete object or with more than one counts as a failed analysis. An object
+nested inside an array or inside a malformed container is never used as the
+verdict, and neither is an object with a repeated key, a `NaN` or `Infinity`
+value, a number too large for a float, or more than 128 levels of nesting.
+
 If chat-LLM analysis fails for a candidate cluster, Tier 2 reports the
 incomplete analysis as a blocking error rather than treating the content as
 clean.
+
+The same applies when a skill exceeds a work limit on content that was
+already collected: the content-chunk or comparison-work limit, or a limit on
+the LLM review (the number of candidate clusters, or prompt size per cluster
+or in total). Tier 2 stops and reports the scan as **INCOMPLETE**, not
+as a duplicate-content finding, with an execution error that names the limit;
+the JSON report records it under `work_limit`. A policy severity override
+cannot turn the incomplete scan into a pass. Split the skill or remove repeated
+material, then rerun.
+
+A model that declines to classify a cluster (a safety refusal, which some
+models return for security-themed skill content) is reported differently. The
+refusal is no evidence of duplication, and the same model usually refuses
+again on a rerun, so Tier 2 records a MEDIUM `llm_refused` finding that names
+the overlapping sections and does not block. Review that overlap by hand, or
+rerun with another chat model (`--llm-model` or `SKILL_EVAL_LLM_MODEL`). To make
+a refusal block `validate`, raise `CONTENT_DEDUP.llm_refused` to `high` in a
+[policy overlay](tier1-validation.mdx#validation-profiles-and-policies).
 
 ## Compare skills across a collection
 
@@ -235,6 +288,31 @@ existing set — save the collection once and query candidates against it.
   </Step>
 </Steps>
 
+Re-screening a skill that is already in the catalog does not report it as a
+duplicate of its own entry. A catalog does not record the directory it was
+built from, so an entry is skipped as the candidate's own only when all of
+these hold:
+
+- Its content fingerprint matches what the query compares: the name and
+  description, or the whole `SKILL.md` with `--full-body`.
+- Its path ends the candidate's path — `alpha` for `./skills/alpha` in a
+  catalog built from `./skills` — which locates the catalog's tree around the
+  candidate.
+- Of up to eight other catalog skills, spread evenly across the catalog's
+  path-sorted list, more than half are present unchanged at their recorded
+  paths in that tree, without symlinks. Skills that contain the candidate or are nested inside it are not
+  checked, because a copied folder carries them too.
+
+At most one entry is skipped, and the result records it under
+`excluded_catalog_paths`. A catalog with no other skill entry never skips one.
+A verbatim copy elsewhere — in a staging folder, another repository, or a new
+folder of the same repository — is still compared and reported, unless it sits
+in a copy of most of the catalog's tree, such as a second checkout of the same
+repository, which counts as the same tree. An edited skill whose compared
+content changed no longer matches its old entry and is compared with it like
+any other skill; to screen edited skills, build the catalog from the same tree
+you screen.
+
 Catalogs contain finite embedding vectors, relative skill paths, display names,
 descriptions, content fingerprints, and provider, model, mode, and
 endpoint-fingerprint metadata for compatibility checks. They never contain API
@@ -283,17 +361,40 @@ you intend to skip Tier 2 entirely.
 | Inter-skill reporting threshold | `0.75` | Reports `SIMILAR` and stronger matches |
 | Intra-skill clustering threshold | `0.80` | Selects candidate chunk pairs for clustering |
 | Full-body chunking | 512 tokens, 64-token overlap | Chunked average pooling for `--full-body` embeddings |
-| Minimum content chunk | 80 characters | Drops fragments too small to compare usefully |
-| Large Markdown section split point | 3,000 characters | Splits oversized sections at eligible paragraph boundaries |
+| Minimum content chunk | 80 characters | Drops sections and chunks too small to compare usefully; short paragraphs of an oversized section stay attached to a neighbour |
+| Embedding input cap | 3,000 characters | Caps every Markdown, Python, and shell embedding input; oversized Markdown sections are packed at paragraph boundaries |
 | High-confidence duplicate boundary | `0.70` | Maps actionable duplicate verdicts to HIGH rather than MEDIUM |
+| Intra-skill content chunks | 512 | Per-skill ceiling, checked before any embedding request |
+| Intra-skill comparison work | 267,911,168 scalar comparisons | Bounds all-pairs clustering; allows all 512 chunks with embeddings of up to 2,048 dimensions, 418 chunks at 3,072, and 362 at 4,096 |
+| Intra-skill LLM review clusters | 50 | Most candidate clusters sent for chat-LLM review in one skill |
+| Intra-skill cluster members | 512 | Same as the chunk ceiling, so it never stops a scan on its own; the review prompt limits decide |
+| Intra-skill review prompt | 64,000 characters | One cluster's request, system prompt included; exactly repeated text (a Markdown section's body after its heading line) is listed once before this limit applies, when that shortens the request |
+| Intra-skill review prompts in total | 1,000,000 characters | All cluster requests for one skill, checked before the first chat-LLM call |
+
+Intra-skill clustering compares every pair of chunks, so its work is
+`n * (n - 1) / 2 * dimensions`. A skill over the chunk ceiling stops before any
+embedding request. A skill within the ceiling whose embeddings are too wide for
+its chunk count stops after the first embedding batch, which sets the width.
+Either way the scan is reported as **INCOMPLETE**. For the comparison-work
+limit (`scalar_comparison_limit`), the execution error and the JSON
+`work_limit` record name the effective chunk limit for that embedding width
+(`effective_chunk_limit`) and the skill's chunk count (`chunk_count`).
+Split the skill, remove repeated material, or use a narrower embedding model.
 
 Tier 2 treats skill content and catalog files as untrusted input. Before any
-provider call, it rejects linked roots, linked directories and manifests,
-hard-linked selected files, non-regular files, paths outside the verified scan
-root, and all file redirects except the exact contained
-`CLAUDE.md -> AGENTS.md` compatibility alias. That alias is validated but never
-followed; its exactly named, independently discovered, single-link regular
-sibling target is scanned once. Explicit limits bound
+provider call, it rejects linked roots and manifests, hard-linked selected
+files, non-regular files, paths outside the verified scan root, and all
+redirects except two kinds of contained compatibility alias. The exact
+`CLAUDE.md -> AGENTS.md` file alias is validated but never followed; its exactly
+named, independently discovered, single-link regular sibling target is scanned
+once. A directory alias such as `.agents -> .claude` is accepted only when its
+name is not a scanned file type, its raw link text is relative with `..` only
+as leading segments, the target stays below the scan root and is neither the
+root nor one of the alias's own parent directories, and the same walk finds
+that target as a regular directory. The alias is never followed, so the target
+directory is scanned once. Absolute links and Windows junctions, broken links,
+links that escape the root, and aliases that point at another link remain
+rejected. Explicit limits bound
 discovered paths, file counts, per-file and total input bytes, content chunks,
 candidate clusters, catalog size and entry count, vector length, returned
 matches, and pairwise scalar work. Catalog loading also rejects duplicate JSON
@@ -333,8 +434,11 @@ handling terms before sending confidential skill content to a hosted endpoint.
     | Duplicate sections occur in one file | Reports the relevant headings and line ranges |
     | Skill contains an exactly named, single-link regular `AGENTS.md` plus `CLAUDE.md -> AGENTS.md` | Validates and skips the alias, then scans `AGENTS.md` once |
     | Skill carries large generated snapshots (`evals`, `.evals`, `results`, `.results`, `versions`, `.versions`) | Excluded directories are pruned during traversal, so their contents never count toward the discovered-path limit |
-    | A directory is a Windows junction or other reparse point | Rejected during the walk, like symbolic links |
+    | Skill contains a relative directory alias such as `.agents -> .claude` whose target is a regular directory in the same skill | Skips the alias without following it, then scans the target directory once |
+    | A directory is a Windows junction, other reparse point, or a symbolic link that does not qualify as a contained alias | Rejected during the walk, before descent |
     | Embedding or chat-LLM analysis is incomplete | Reports an error; does not claim a clean result |
+    | Skill exceeds the content-chunk, comparison-work, or LLM-review limit (candidate clusters or prompt size) | Stops before the remaining analysis and reports the scan as incomplete; no duplicate-content finding is added |
+    | The chat LLM declines to classify a cluster | Reports an advisory MEDIUM `llm_refused` finding for that cluster's sections |
   </Accordion>
   <Accordion title="Inter-skill analysis">
     | Scenario | Behavior |
@@ -344,6 +448,7 @@ handling terms before sending confidential skill content to a hosted endpoint.
     | Catalog path is missing | Returns an error and does not rebuild it silently |
     | Candidate lacks a root `SKILL.md` | Rejects the catalog query |
     | A skill contains an exactly named, single-link regular `AGENTS.md` plus `CLAUDE.md -> AGENTS.md` | Validates and skips the unrelated compatibility alias while discovering `SKILL.md` |
+    | The collection contains a relative directory alias such as `.agents -> .claude` whose target is a regular directory in the same collection | Skips the alias without following it, so manifests in the target are discovered once |
     | Candidate matches multiple catalog entries | Reports matches in descending similarity order |
     | Provider, endpoint, model, mode, or vector length differs | Rejects the catalog; query with matching settings or rebuild it |
     | Catalog is malformed, non-finite, or oversized | Rejects it before comparison |

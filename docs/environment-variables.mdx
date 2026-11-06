@@ -55,10 +55,15 @@ own client and scoring path, so these settings do not apply to them.
 | `SKILL_EVAL_LLM_RETRY_MAX_DELAY` | `30` seconds | Longest single wait between attempts. A value below the base delay is raised to the base delay. Non-numeric, non-finite, or negative values use the default. |
 | `SKILL_EVAL_LLM_JUDGE_BUDGET_SEC` | `180` seconds | Wall-time budget for each required LLM judge in the Harbor verifier, covering all of its attempts and waits. Non-numeric, non-finite, zero, or negative values use the default. |
 
-Retries cover HTTP 429, 500, 502, 503, and 504 responses, connection errors,
-and timeouts. In the verifier, Bedrock throttling and service-unavailable
-errors are also retried. Other HTTP errors, such as 400, 401, 403, or 404, are
-not retried. When a retryable response carries a `Retry-After` header,
+Retries cover HTTP 408, 429, and every 5xx response except 501 and 505,
+including 520–524 proxy errors and 529 overload responses. Connection errors
+and timeouts are also retried, but TLS certificate verification failures are
+not: retrying cannot repair an untrusted or invalid certificate. The host LLM
+client inspects the underlying HTTP status in wrapped SDK errors; an adapter's
+generic 500 or 503 does not hide a terminal failure. In the verifier, Bedrock
+throttling and service-unavailable errors are also retried. Other HTTP errors,
+such as 400, 401, 403, or 404, are not retried. When a retryable response carries
+a `Retry-After` header,
 either in seconds or as an HTTP date, the next attempt waits that long plus 0.1
 to 0.5 seconds of jitter instead of the computed backoff. An unparseable value
 waits the base delay. If `Retry-After` asks for longer than
@@ -98,7 +103,7 @@ If none is set, LLM-backed commands fail with a configuration error. If more tha
 
 ### SkillSpector bridge
 
-The `--llm` security analysis runs [SkillSpector](https://github.com/NVIDIA/SkillSpector), which has its own provider environment. SkillEvaluator bridges your configured provider into that invocation with an isolated subprocess environment: only the selected provider's settings, the SkillSpector model settings below, and a small set of basic process variables are forwarded, so ambient credentials for other providers never reach SkillSpector. `SKILLSPECTOR_TEMPERATURE` is not forwarded, because current reasoning models reject a custom temperature. The `nv_build` provider is bridged through SkillSpector's OpenAI-compatible path, pointing `OPENAI_BASE_URL` at the public NVIDIA Build endpoint.
+The `--llm` security analysis runs [SkillSpector](https://github.com/NVIDIA/SkillSpector), which has its own provider environment. SkillEvaluator bridges your configured provider into that invocation with an isolated subprocess environment: only the selected provider's settings, the SkillSpector model and deadline settings below, and a small set of basic process variables are forwarded, so ambient credentials for other providers never reach SkillSpector. `SKILLSPECTOR_TEMPERATURE` is not forwarded, because current reasoning models reject a custom temperature. The `nv_build` provider is bridged as `SKILLSPECTOR_PROVIDER=nv_build`, so SkillSpector sizes requests from its NVIDIA Build model registry, while the key travels as `OPENAI_API_KEY` with `OPENAI_BASE_URL` pointing at the public NVIDIA Build endpoint.
 
 | Variable | Default | Effect |
 | --- | --- | --- |
@@ -107,6 +112,7 @@ The `--llm` security analysis runs [SkillSpector](https://github.com/NVIDIA/Skil
 | `SKILLSPECTOR_MODEL_<SLOT>` | unset | Per-analyzer model override, such as `SKILLSPECTOR_MODEL_META_ANALYZER`. Forwarded as set. |
 | `SKILLSPECTOR_MODEL_REGISTRY` | unset | Path to a complete custom SkillSpector model registry, for model IDs the bundled registry does not list. Forwarded as set. |
 | `SKILLSPECTOR_REASONING_EFFORT` | `medium` for GPT-6 models, else unset | Reasoning effort for every SkillSpector analyzer. Your value wins. SkillEvaluator sets it only when every SkillSpector model, including `SKILLSPECTOR_MODEL_<SLOT>` overrides, is a GPT-6 model, so never for Claude. |
+| `SKILLSPECTOR_MAX_WORKFLOW_SECONDS` | SkillSpector default (1080 in v2.13.3) | SkillSpector's own deadline for one scan, in seconds. Forwarded as set to both the static and the LLM stage. When it expires, SkillSpector reports partial analysis and the security scan is `INCOMPLETE`. Keep it below `SKILLEVALUATOR_SKILLSPECTOR_TIMEOUT_SECONDS`. |
 
 ## Embeddings
 
@@ -125,10 +131,11 @@ These variables tune the static and security checks. The check-by-check guide is
 
 | Variable | Default | Effect |
 | --- | --- | --- |
-| `SKILLEVALUATOR_PROFILE` | `external` | Default validation profile when no `--profile` flag is passed. The CLI flag always wins. |
+| `SKILLEVALUATOR_PROFILE` | `default` | Validation policy when no `--profile` flag is passed. `external` remains a compatibility alias. The CLI flag always wins. |
 | `SKILLEVALUATOR_BANDIT_PATH` | auto-discovered | Absolute path to the Bandit executable. |
 | `SKILLEVALUATOR_SEMGREP_PATH` | auto-discovered | Absolute path to the Semgrep executable. |
 | `SKILLEVALUATOR_SKILLSPECTOR_PATH` | auto-discovered | Absolute path to the SkillSpector executable. |
+| `SKILLEVALUATOR_SKILLSPECTOR_TIMEOUT_SECONDS` | `1200` | Watchdog for each SkillSpector run, in seconds. The static stage and, with `--llm`, the LLM stage each get the full value. A run that exceeds it is stopped and the security scan is `INCOMPLETE`. Set a positive integer; values above `86400` are capped, and other values fall back to the default with a warning. Keep it above `SKILLSPECTOR_MAX_WORKFLOW_SECONDS` so SkillSpector's own deadline ends a slow scan first. The effective value is recorded as `skillspector_timeout_seconds` in the security result. |
 | `SKILLEVALUATOR_SCHEMA_ALLOWED_DIRS` | — | Extra allowed skill-root directory names (comma- or whitespace-separated), e.g. `data,fixtures`. Additive only — names extend the built-in allowlist and never replace it. |
 | `SKILLEVALUATOR_SUBMITTER` | auto-detected | Explicit submitter identity for the home-path PII check. It is combined with `GITHUB_ACTOR`, `USER`, `LOGNAME`, `USERNAME`, the OS login name, and the skill's declared author — every identity that resolves is protected. If none resolves, the home-path check is disabled with a warning. |
 | `SKILLEVALUATOR_PREVIOUS_VERSION` | — | The previously published skill version that the default version check compares against. Without this value or `--previous-version`, the check validates the current version's format but does not enforce an increase. |
@@ -165,6 +172,8 @@ execution environments are covered in
 | `SKILL_EVAL_HARBOR_PREBUILD_TASK_ENVS` | unset | Set to exactly `1` to opt in to pre-building Harbor task environment images before trials start (other truthy spellings are not honored). Opt-in because concurrent trial cleanup can remove a shared prebuilt image that sibling trials still need. |
 | `SKILL_EVAL_JUDGE_MODEL` | falls back to `SKILL_EVAL_LLM_MODEL` | Operator-controlled model override for the Tier 3 dimension judge in standard grading. `LLM_JUDGE_MODEL` is honored as a higher-precedence spelling; when neither is set, the judge uses `SKILL_EVAL_LLM_MODEL`, then the built-in judge default. Both spellings change only the model used with the configured `SKILL_EVAL_LLM_PROVIDER`; they do not select a separate judge provider, so the model must be supported by that provider. Standard grading makes both spellings resolve to the selected override in Harbor's parent process, then forwards them through its verifier-only job layer, which takes precedence over task and step verifier declarations. Neither name is injected into the evaluated agent's initial environment; attempts to set or reference one from skill-authored `runtime_env` or native `[environment.env]` tables are rejected. Native custom-only graders keep ownership of their verifier configuration. Shared agent/verifier containers are a process boundary, not a confidentiality boundary; use a separate verifier environment when the model name itself must be hidden from untrusted agent processes. `run_config.json` records the configured judge provider, model, source, `override_applied`, reasoning effort, and catalog-verification status separately from agent models; an allowed provider fallback may use a different model for an individual judge call. When `override_applied` is false for a native Harbor task, `effective_model_source` is `native_harbor_runtime` and catalog verification is explicitly inconclusive because an authored task or step verifier declaration may supersede the recorded fallback. |
 | `LLM_JUDGE_FALLBACK_MODELS` | unset | Comma-separated fallback models for the Tier 3 standard judges in the Harbor verifier. When the provider rejects the judge model as not found, invalid, or not accessible to the key, the verifier tries each fallback in order with the same provider. Fallback applies to the `openai`, `nv_build`, and `openai-compatible` providers. A safety refusal or an empty reply from the judge model also moves to the next fallback, on every provider. The value is forwarded only to standard verifier jobs, never to the agent environment or `custom_only` runs. |
+| `LLM_JUDGE_FALLBACK_POLICY` | `append` | Opt-in limit on which models may answer a Tier 3 standard judge. `append` keeps the built-in refusal fallback, which sends a refused Claude 5.5 or later judge to `claude-opus-4-8`. `replace` turns it off, so only the judge model and the `LLM_JUDGE_FALLBACK_MODELS` entries answer. Values are case-insensitive; any other value stops a run with standard grading before trials start, and the verifier fails every standard judge on it before a request is sent. Forwarded like `LLM_JUDGE_FALLBACK_MODELS`, and recorded as `judge.fallback_policy` in `run_config.json` when set. See [Judge fallback and retry policies](tier3-live-evaluation.mdx#judge-fallback-and-retry-policies). |
+| `LLM_JUDGE_RETRY_POLICY` | `legacy` | Opt-in retry policy for the Tier 3 standard judges. `strict` tries at most three models (the judge model, then the first two `LLM_JUDGE_FALLBACK_MODELS` entries) with at most two requests each within the per-judge time budget, moves on only when a model is unavailable, ends the judge on a refusal or a quota, budget, safety, or security error, and scores only a first completed reply that is exactly one JSON object. `legacy` keeps the standard retries, fallbacks, format retry, and salvage. Values are case-insensitive; any other value stops a run with standard grading before trials start, and the verifier fails every standard judge on it before a request is sent. Forwarded like `LLM_JUDGE_FALLBACK_MODELS`, and recorded as `judge.retry_policy` in `run_config.json` when set. See [Judge fallback and retry policies](tier3-live-evaluation.mdx#judge-fallback-and-retry-policies). |
 | `SKILLEVALUATOR_HARBOR_DIAGNOSTIC_ARTIFACT_MAX_BYTES` | `5242880` (5 MiB) | Size cap per diagnostic artifact copied from a Harbor trial into the results directory. Values are bounded to 0–67108864 bytes (64 MiB); `0` skips non-empty artifacts. Oversized artifacts are skipped and recorded in the artifact manifest. |
 | `SKILLEVALUATOR_GKE_CLUSTER`, `SKILLEVALUATOR_GKE_REGION`, `SKILLEVALUATOR_GKE_NAMESPACE`, `SKILLEVALUATOR_GKE_REGISTRY_LOCATION`, `SKILLEVALUATOR_GKE_REGISTRY_NAME` | — | Target cluster, region, namespace, and Artifact Registry coordinates for `--env-mode gke` when not supplied via `--ek`. |
 | `SKILLEVALUATOR_GKE_ALLOW_WORKLOAD_IDENTITY` | `false` | Opt in (`1`, `true`, `yes`) to single-pod GKE Workload Identity (`CLAUDE_CODE_USE_VERTEX=1` or a GCP-bound Kubernetes ServiceAccount). Restricted to trusted skills because the pod ServiceAccount and GCE/GKE metadata server are shared with evaluated skill commands. |
@@ -203,6 +212,14 @@ directory with `.env` loading and Harbor telemetry disabled:
   starts.
 
 ### Judge evidence budgets
+
+`SKILL_EVAL_JUDGE_CHARACTER_FACTS=1` optionally appends Unicode character metadata
+to standard Tier 3 judge prompts. It is off by default; `true`, `yes`, and `on`
+also enable it (case-insensitive). This operator-owned setting is forwarded only
+to standard verifier jobs, never to agent environments or `custom_only` jobs.
+When configured, its value is recorded as `judge.character_facts` in
+`run_config.json`. See [character-sensitive judging](tier3-live-evaluation.mdx#character-sensitive-judging)
+for scope, limits, and the effect on the goal-accuracy route.
 
 Before the Harbor verifier calls the `accuracy`, `goal_accuracy`, and
 `behavior_check` judges, it condenses the agent's trajectory into a separate

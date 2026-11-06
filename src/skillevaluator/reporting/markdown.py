@@ -28,14 +28,20 @@ from skillevaluator.reporting.base import (
     get_skip_reason,
     is_advisory_agent_eval_skip,
     is_cleanly_skipped,
-    passes_required_gate,
     select_agent_eval_payload,
+)
+from skillevaluator.reporting.finding_summary import (
+    describe_issue_counts,
+    groups_by_display_priority,
+    summarize_findings,
+    summarize_messages,
 )
 from skillevaluator.reporting.harbor_viewer import (
     harbor_evidence_link_text,
     normalize_harbor_viewer_for_display,
     safe_url,
 )
+from skillevaluator.reporting.run_status import Status, resolve_run_status, result_status
 
 if TYPE_CHECKING:
     from skillevaluator.models import Finding, ValidationResult
@@ -202,14 +208,17 @@ class MarkdownReporter(ReporterBase):
     def render_all(self, results: list[ValidationResult]) -> str:
         """Render all results to Markdown with summary."""
         lines = []
+        finding_summary = summarize_findings(results)
+        message_summary = summarize_messages(results)
 
         # Header
         lines.append("# SkillEvaluator Validation Report")
         lines.append("")
 
         # Overall status
-        all_passed = all(passes_required_gate(r) for r in results)
-        has_incomplete = any(r.is_incomplete for r in results)
+        run_status = resolve_run_status(results)
+        all_passed = run_status.headline == Status.PASSED
+        has_incomplete = run_status.headline == Status.INCOMPLETE
         skip_count = sum(1 for r in results if is_cleanly_skipped(r))
         advisory_skip_count = sum(1 for r in results if is_advisory_agent_eval_skip(r))
         executed_count = len(results) - skip_count
@@ -230,7 +239,7 @@ class MarkdownReporter(ReporterBase):
             None,
         )
         if policy is not None:
-            lines.append(f"**Profile:** {policy.get('profile', 'external')}")
+            lines.append(f"**Profile:** {policy.get('profile', 'default')}")
             if policy.get("digest"):
                 lines.append(f"**Policy digest:** `{policy['digest']}`")
 
@@ -266,7 +275,7 @@ class MarkdownReporter(ReporterBase):
         lines.append(f"| Validators Run | {executed_count} |")
         lines.append(f"| ✅ Passed | {passed_count} |")
         lines.append(
-            f"| ❌ Failed | {sum(1 for r in results if r.status == 'failed' and not is_advisory_agent_eval_skip(r))} |"
+            f"| ❌ Failed | {sum(1 for r in results if result_status(r) == Status.FAILED and not is_advisory_agent_eval_skip(r))} |"
         )
         lines.append(f"| ⚠️ Incomplete | {sum(1 for r in results if r.is_incomplete)} |")
         if skip_count:
@@ -274,25 +283,44 @@ class MarkdownReporter(ReporterBase):
         if advisory_skip_count:
             lines.append(f"| ⏭️ Advisory skips | {advisory_skip_count} |")
 
-        total_errors = sum(r.summary.errors for r in results)
-        total_warnings = sum(r.summary.warnings for r in results)
-        critical = sum(r.summary.critical_count for r in results)
-        high = sum(r.summary.high_count for r in results)
-        medium = sum(r.summary.medium_count for r in results)
-
-        severity_breakdown = []
-        if critical > 0:
-            severity_breakdown.append(f"{critical} critical")
-        if high > 0:
-            severity_breakdown.append(f"{high} high")
-        if medium > 0:
-            severity_breakdown.append(f"{medium} medium")
-
-        issue_str = f"{total_errors + total_warnings}"
-        if severity_breakdown:
-            issue_str += f" ({', '.join(severity_breakdown)})"
+        # The breakdown qualifies the unique count, so it counts unique findings
+        # at their highest severity rather than raw validator records.
+        unique_by_severity = finding_summary["unique_by_severity"]
+        severity_breakdown = [
+            f"{unique_by_severity[severity]} {severity}"
+            for severity in ("critical", "high", "medium")
+            if unique_by_severity[severity] > 0
+        ]
+        issue_str = describe_issue_counts(
+            finding_summary,
+            message_summary,
+            unique_suffix=f" ({', '.join(severity_breakdown)})" if severity_breakdown else "",
+            raw_records=True,
+        )
         lines.append(f"| Total Issues | {issue_str} |")
+        lines.append(f"| Duplicate Occurrences Reconciled | {finding_summary['duplicates_removed']} |")
         lines.append("")
+
+        if finding_summary["groups"]:
+            lines.append("## Finding Reconciliation")
+            lines.append("")
+            lines.append("| Finding ID | Severity | Finding | Occurrences | Validators |")
+            lines.append("|------------|----------|---------|-------------|------------|")
+            # The table is capped, so list the most severe findings first.
+            shown_groups = groups_by_display_priority(finding_summary)[: self.max_findings_shown]
+            for group in shown_groups:
+                # Finding text and validator names are untrusted report input.
+                lines.append(
+                    f"| `{group['finding_id']}` "
+                    f"| {_markdown_untrusted_table_cell(str(group['severity']).upper())} "
+                    f"| {_markdown_untrusted_table_cell(group['message'])} "
+                    f"| {group['occurrence_count']} "
+                    f"| {_markdown_untrusted_table_cell(', '.join(group['validators']))} |"
+                )
+            remaining_groups = len(finding_summary["groups"]) - len(shown_groups)
+            if remaining_groups > 0:
+                lines.append(f"| ... | | *{remaining_groups} more unique findings* | | |")
+            lines.append("")
 
         # Quality Score summary (if any QUALITY results present)
         quality_results = [r for r in results if r.metadata.get("quality_scores")]
@@ -348,13 +376,39 @@ class MarkdownReporter(ReporterBase):
                 for name, scores in evaluators.items():
                     if not isinstance(name, str) or not isinstance(scores, dict):
                         continue
-                    ws = scores.get("with_skill", 0.0)
-                    bl = scores.get("baseline", 0.0)
-                    lift = scores.get("lift", 0.0)
+                    ws = scores.get("with_skill")
+                    bl = scores.get("baseline")
+                    lift = scores.get("lift")
+                    # A baseline-only run (--skip-with-skill) never ran the with-skill arm.
+                    with_skipped = scores.get("with_skill_status") == "skipped"
+                    ws_text = (
+                        "N/A"
+                        if scores.get("with_skill_status") == "not_applicable" and ws is None
+                        else "skipped"
+                        if with_skipped and ws is None
+                        else "NO SCORE"
+                        if ws is None
+                        else _format_report_number(ws)
+                    )
+                    bl_text = (
+                        "N/A"
+                        if scores.get("baseline_status") == "not_applicable" and bl is None
+                        else "NO SCORE"
+                        if bl is None
+                        else _format_report_number(bl)
+                    )
+                    lift_text = (
+                        _format_report_number(lift, signed=True)
+                        if lift is not None
+                        else "N/A"
+                        if "not_applicable" in (scores.get("with_skill_status"), scores.get("baseline_status"))
+                        else "skipped"
+                        if with_skipped
+                        else "NO SCORE"
+                    )
                     lines.append(
                         f"| {_markdown_untrusted_table_cell(name.replace('_', ' ').title())} "
-                        f"| {_format_report_number(ws)} | "
-                        f"{_format_report_number(bl)} | {_format_report_number(lift, signed=True)} |"
+                        f"| {ws_text} | {bl_text} | {lift_text} |"
                     )
                 lines.append("")
 
@@ -437,7 +491,7 @@ class MarkdownReporter(ReporterBase):
         qs = result.metadata.get("quality_scores")
 
         clean_skip = is_cleanly_skipped(result)
-        if result.is_incomplete:
+        if result_status(result) == Status.INCOMPLETE:
             status_emoji = "⚠️ INCOMPLETE"
             lines.append(f"### {status_emoji} {result.validator_name}")
         elif clean_skip:
@@ -564,6 +618,8 @@ class MarkdownReporter(ReporterBase):
         lines.append(f"**{index}. {finding.message}**")
         lines.append(f"- File: `{finding.location}`")
         lines.append(f"- Check: `{finding.check_name}`")
+        lines.append(f"- Finding ID: `{finding.finding_id}`")
+        lines.append(f"- Occurrence ID: `{finding.occurrence_id}`")
         related_paths = _related_paths(finding)
         if related_paths:
             lines.append(f"- Related paths: {' <-> '.join(f'`{path}`' for path in related_paths)}")

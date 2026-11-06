@@ -3,6 +3,7 @@
 
 """Tests for all reporters in the reporting module."""
 
+import copy
 import json
 import re
 import tempfile
@@ -27,6 +28,8 @@ from skillevaluator.reporting import (
     SARIFReporter,
 )
 from skillevaluator.tier1.commands import emit_reports
+
+_SKILLSPECTOR_2_12_LLM_PROVENANCE = Path(__file__).parents[1] / "fixtures" / "skillspector-2.12.0-llm-provenance.json"
 
 _PUBLICATION_TARGET = {
     "skill_name": "demo",
@@ -217,8 +220,8 @@ class TestCLIReporter:
     @pytest.mark.parametrize(
         ("baseline", "lift", "expected_baseline", "expected_lift"),
         [
-            (0.6, None, "0.60", "n/a"),
-            (None, None, "n/a", "n/a"),
+            (0.6, None, "0.60", "NO SCORE"),
+            (None, None, "NO SCORE", "NO SCORE"),
             (0.6, 0.2, "0.60", "+0.20"),
             (0.9, -0.1, "0.90", "-0.10"),
         ],
@@ -245,6 +248,47 @@ class TestCLIReporter:
             expected_baseline,
             expected_lift,
         ]
+
+    @pytest.mark.parametrize(("with_skill", "expected_with_skill"), [(None, "NO SCORE"), (0.0, "0.00"), (0.95, "0.95")])
+    @pytest.mark.parametrize(("baseline", "expected_baseline"), [(None, "NO SCORE"), (0.0, "0.00"), (0.95, "0.95")])
+    @pytest.mark.parametrize(("lift", "expected_lift"), [(None, "NO SCORE"), (0.0, "+0.00"), (0.95, "+0.95")])
+    def test_render_agent_eval_score_availability(
+        self, with_skill, expected_with_skill, baseline, expected_baseline, lift, expected_lift
+    ) -> None:
+        result = ValidationResult(validator_name="AGENT_EVAL")
+        result.metadata["agent_eval"] = {
+            "evaluators": {"accuracy": {"with_skill": with_skill, "baseline": baseline, "lift": lift}},
+        }
+
+        output = CLIReporter().render(result)
+        plain_output = re.sub(r"\x1b\[[0-9;]*m", "", output)
+        row = next(line for line in plain_output.splitlines() if "Accuracy" in line)
+
+        assert [cell.strip() for cell in row.split("│")[1:-1]] == [
+            "Accuracy",
+            expected_with_skill,
+            expected_baseline,
+            expected_lift,
+        ]
+
+    @pytest.mark.parametrize(
+        ("scores", "expected_cells"),
+        [
+            ({}, ["NO SCORE", "NO SCORE", "NO SCORE"]),
+            ({"with_skill": 0.0}, ["0.00", "NO SCORE", "NO SCORE"]),
+            ({"baseline": 0.0}, ["NO SCORE", "0.00", "NO SCORE"]),
+            ({"lift": 0.0}, ["NO SCORE", "NO SCORE", "+0.00"]),
+        ],
+    )
+    def test_render_agent_eval_missing_scores_are_unavailable(self, scores, expected_cells) -> None:
+        result = ValidationResult(validator_name="AGENT_EVAL")
+        result.metadata["agent_eval"] = {"evaluators": {"accuracy": scores}}
+
+        output = CLIReporter().render(result)
+        plain_output = re.sub(r"\x1b\[[0-9;]*m", "", output)
+        row = next(line for line in plain_output.splitlines() if "Accuracy" in line)
+
+        assert [cell.strip() for cell in row.split("│")[1:-1]] == ["Accuracy", *expected_cells]
 
     def test_render_failure_escapes_markup_in_finding_fields(self) -> None:
         """Dynamic finding text should not be parsed as Rich markup."""
@@ -548,6 +592,726 @@ class TestJSONReporter:
         """Test reporter name."""
         reporter = JSONReporter()
         assert reporter.name == "json"
+
+
+def _repeated_finding_results() -> list[ValidationResult]:
+    """Same semantic finding across validators and concrete locations."""
+    results = [
+        ValidationResult(validator_name="SECURITY", validator_description="Security"),
+        ValidationResult(validator_name="CODE_RISK", validator_description="Code risk"),
+    ]
+    for result, line_number in ((results[0], 8), (results[0], 12), (results[1], 8)):
+        result.add_finding(
+            Finding(
+                category="SECURITY",
+                severity=Severity.HIGH,
+                check_name="unsafe-command",
+                message="Unsafe command execution",
+                file_path="scripts/run.py",
+                line_number=line_number,
+                suggestion="Use an argument vector.",
+            )
+        )
+    results[0].add_message("Scanned executable helpers")
+    return results
+
+
+def _exec_summary(html: str) -> str:
+    """Return the Tier 1 executive summary: verdict, KPIs and Fix first."""
+    return html.split('<section class="exec-summary', 1)[1].split("</section>", 1)[0]
+
+
+def _findings_kpi(html: str) -> tuple[str, str]:
+    """Return the Findings KPI value and its reconciliation detail line ("" when absent)."""
+    summary = _exec_summary(html)
+    value = re.search(r'<dt>Findings</dt>\s*<dd class="kpi-value"><strong>(\d+)</strong></dd>', summary)
+    assert value is not None
+    detail = re.search(r'<dd class="kpi-sub kpi-issue-detail">([^<]*)</dd>', summary)
+    return value.group(1), detail.group(1) if detail else ""
+
+
+def test_finding_identity_is_semantic_and_occurrence_identity_is_location_bound() -> None:
+    first = Finding(
+        category="SECURITY",
+        severity=Severity.HIGH,
+        check_name="unsafe-command",
+        message="Unsafe  command execution",
+        file_path="scripts/run.py",
+        line_number=8,
+        suggestion="Use an argument vector.",
+    )
+    second = Finding(
+        category="security",
+        severity=Severity.MEDIUM,
+        check_name="unsafe-command",
+        message=" Unsafe command execution ",
+        file_path="scripts/run.py",
+        line_number=12,
+        suggestion="Use an argument vector.",
+    )
+
+    assert first.finding_id == second.finding_id
+    assert re.fullmatch(r"SEF-[0-9a-f]{20}", first.finding_id)
+    assert first.occurrence_id != second.occurrence_id
+    assert re.fullmatch(r"SEO-[0-9a-f]{20}", first.occurrence_id)
+    # IDs are part of the serialized finding and stable across processes.
+    assert first.to_dict()["finding_id"] == first.finding_id
+    assert first.to_dict()["occurrence_id"] == first.occurrence_id
+    assert first.finding_id == "SEF-cca71f6c36db0948f02b"
+
+
+def test_occurrence_identity_distinguishes_line_zero_from_no_line() -> None:
+    common = {
+        "category": "SECURITY",
+        "severity": Severity.HIGH,
+        "check_name": "unsafe-command",
+        "message": "Unsafe command execution",
+        "file_path": "scripts/run.py",
+    }
+
+    assert Finding(**common, line_number=0).occurrence_id != Finding(**common, line_number=None).occurrence_id
+
+
+def test_secret_finding_id_ignores_the_location_written_into_its_message() -> None:
+    from skillevaluator.tier1.plugin_checks import _attribute_scan_result
+    from skillevaluator.validators.secrets import SecretsValidator
+
+    def scan(file_path: str, line: int) -> ValidationResult:
+        result = ValidationResult(validator_name="Secrets Detection")
+        SecretsValidator()._process_findings(
+            [{"RuleID": "generic-api-key", "Description": "Generic API Key", "File": file_path, "StartLine": line}],
+            result,
+        )
+        return result
+
+    findings = [scan("scripts/run.py", line).findings[0] for line in (10, 11)]
+    # A folder run prefixes the skill name and a plugin scan the member
+    # directory to file_path; neither rewrites the message.
+    for line in (10, 11):
+        folder = ValidationResult(validator_name="Secrets Detection")
+        folder.merge_with_prefix(scan("scripts/run.py", line), "alpha")
+        member = scan("scripts/run.py", line)
+        _attribute_scan_result(member, "skills/alpha", Path("/view"), Path("/plugin"))
+        findings.extend([folder.findings[0], member.findings[0]])
+    assert {finding.file_path for finding in findings} == {
+        "scripts/run.py",
+        "[alpha] scripts/run.py",
+        "skills/alpha/scripts/run.py",
+    }
+
+    # The message still names the location; only the identity leaves it out.
+    assert findings[0].message == "Generic API Key in scripts/run.py:10 [generic-api-key]"
+    assert findings[-1].message == "Generic API Key in scripts/run.py:11 [generic-api-key]"
+    assert len({finding.finding_id for finding in findings}) == 1
+    assert len({finding.occurrence_id for finding in findings}) == 6
+    # The suggestion names the file, so a secret in another file is another finding.
+    other = scan("scripts/other.py", 10).findings[0]
+    assert "scripts/other.py" in other.suggestion
+    assert other.finding_id != findings[0].finding_id
+
+
+def test_secret_finding_id_ignores_a_windows_location_in_its_message() -> None:
+    from skillevaluator.validators.secrets import SecretsValidator
+
+    def scan(line: int) -> Finding:
+        result = ValidationResult(validator_name="Secrets Detection")
+        SecretsValidator()._process_findings(
+            [
+                {
+                    "RuleID": "generic-api-key",
+                    "Description": "Generic API Key",
+                    "File": "scripts\\run.py",
+                    "StartLine": line,
+                }
+            ],
+            result,
+        )
+        [finding] = result.findings
+        # On Windows, plugin member attribution writes file_path with "/"
+        # while the message keeps the path Gitleaks reported.
+        finding.file_path = "skills/alpha/scripts/run.py"
+        return finding
+
+    moved = [scan(line) for line in (10, 11)]
+
+    assert moved[0].message == "Generic API Key in scripts\\run.py:10 [generic-api-key]"
+    assert moved[0].finding_id == moved[1].finding_id
+    assert moved[0].occurrence_id != moved[1].occurrence_id
+    # A path that is not the finding's own location stays part of the identity.
+    other = Finding("SECRETS", Severity.HIGH, "generic-api-key", "Key in other\\run.py:10", "scripts/run.py", 10)
+    renamed = Finding("SECRETS", Severity.HIGH, "generic-api-key", "Key in other\\run.py:11", "scripts/run.py", 11)
+    assert other.finding_id != renamed.finding_id
+
+
+def test_repeated_pii_finding_id_survives_line_moves(tmp_path) -> None:
+    from skillevaluator.validators.security import SecurityValidator
+
+    def scan(name: str, padding: str, repeats: int) -> Finding:
+        skill = tmp_path / name
+        skill.mkdir()
+        body = "".join(f"See /Users/johndoe/notes{index}.\n" for index in range(repeats))
+        (skill / "SKILL.md").write_text(
+            "---\nname: demo\ndescription: A sample skill.\n---\n# Demo\n" + padding + body, encoding="utf-8"
+        )
+        result = SecurityValidator(use_llm=False).validate_pii_only(skill)
+        [finding] = [finding for finding in result.findings if "/Users/johndoe/" in finding.message]
+        return finding
+
+    repeated = scan("repeated", "", 2)
+    moved = scan("moved", "\n", 2)
+    single = scan("single", "", 1)
+
+    assert "2 occurrences (SKILL.md lines 6, 7)" in repeated.message
+    assert "2 occurrences (SKILL.md lines 7, 8)" in moved.message
+    assert repeated.finding_id == moved.finding_id == single.finding_id
+    assert repeated.occurrence_id != moved.occurrence_id
+
+
+def test_occurrence_identity_uses_forward_slashes() -> None:
+    common = {
+        "category": "SECURITY",
+        "severity": Severity.HIGH,
+        "check_name": "unsafe-command",
+        "message": "Unsafe command execution",
+        "line_number": 3,
+    }
+
+    windows = Finding(**common, file_path="scripts\\run.py")
+    posix = Finding(**common, file_path="scripts/run.py")
+
+    assert windows.occurrence_id == posix.occurrence_id
+
+
+def test_occurrences_with_and_without_a_line_number_sort_without_error() -> None:
+    from skillevaluator.reporting.finding_summary import summarize_findings
+
+    result = ValidationResult(validator_name="SECURITY", validator_description="Security")
+    for line_number in (None, 3):
+        result.add_finding(
+            Finding(
+                category="SECURITY",
+                severity=Severity.HIGH,
+                check_name="unsafe-command",
+                message="Unsafe command execution",
+                file_path="scripts/run.py",
+                line_number=line_number,
+            )
+        )
+
+    summary = summarize_findings([result])
+
+    assert summary["unique_findings"] == 1
+    assert summary["distinct_occurrences"] == 2
+    assert [item["line_number"] for item in summary["groups"][0]["occurrences"]] == [None, 3]
+    data = json.loads(JSONReporter(include_timestamp=False).render_all([result]))
+    assert data["finding_groups"][0]["occurrence_count"] == 2
+    assert "1 unique finding (1 high) / 2 occurrences" in MarkdownReporter().render_all([result])
+    assert _findings_kpi(HTMLReporter(include_timestamp=False).render_all([result]))[0] == "1"
+
+
+def _unsafe_command(severity: Severity, line_number: int) -> Finding:
+    return Finding(
+        category="SECURITY",
+        severity=severity,
+        check_name="unsafe-command",
+        message="Unsafe command execution",
+        file_path="scripts/run.py",
+        line_number=line_number,
+        suggestion="Use an argument vector.",
+    )
+
+
+def test_reconciled_finding_keeps_its_highest_severity_in_every_format() -> None:
+    # JSON merges per-result summaries; HTML and Markdown summarize all
+    # results at once. Both paths must keep the higher severity.
+    medium = ValidationResult(validator_name="SECURITY", validator_description="Security")
+    medium.add_finding(_unsafe_command(Severity.MEDIUM, 8))
+    high = ValidationResult(validator_name="CODE_RISK", validator_description="Code risk")
+    high.add_finding(_unsafe_command(Severity.HIGH, 8))
+    results = [medium, high]
+
+    data = json.loads(JSONReporter(include_timestamp=False).render_all(results))
+    html_data = _html_report_data(HTMLReporter(include_timestamp=False).render_all(results))
+    for document in (data, html_data):
+        assert [group["severity"] for group in document["finding_groups"]] == ["high"]
+        assert document["finding_counts"]["unique_by_severity"]["high"] == 1
+        assert document["finding_counts"]["unique_by_severity"]["medium"] == 0
+    assert "| Total Issues | 1 unique finding (1 high) / 1 occurrence / 2 raw records |" in (
+        MarkdownReporter().render_all(results)
+    )
+
+    # One validator reporting the finding as medium, then high, blocks as high.
+    single = ValidationResult(validator_name="SECURITY", validator_description="Security")
+    single.add_finding(_unsafe_command(Severity.MEDIUM, 8))
+    single.add_finding(_unsafe_command(Severity.HIGH, 12))
+    summary = _exec_summary(HTMLReporter(include_timestamp=False).render_all([single]))
+    assert re.search(r'Blocking critical \+ high</dt>\s*<dd class="kpi-value"><strong[^>]*>1</strong>', summary)
+
+
+def test_finding_reconciliation_contract_matches_json_markdown_and_html(monkeypatch) -> None:
+    results = _repeated_finding_results()
+
+    original_to_dict = Finding.to_dict
+    to_dict_calls = 0
+
+    def counting_to_dict(finding):
+        nonlocal to_dict_calls
+        to_dict_calls += 1
+        return original_to_dict(finding)
+
+    monkeypatch.setattr(Finding, "to_dict", counting_to_dict)
+
+    json_data = json.loads(JSONReporter(include_timestamp=False).render_all(results))
+    assert to_dict_calls == 3
+    markdown = MarkdownReporter(include_timestamp=False).render_all(results)
+    html = HTMLReporter(include_timestamp=False).render_all(results)
+    html_data = _html_report_data(html)
+
+    expected = {
+        "raw_occurrences": 3,
+        "distinct_occurrences": 2,
+        "unique_findings": 1,
+        "duplicates_removed": 1,
+        "occurrences_grouped": 1,
+        "raw_by_severity": {"critical": 0, "high": 3, "medium": 0, "low": 0, "info": 0},
+        "unique_by_severity": {"critical": 0, "high": 1, "medium": 0, "low": 0, "info": 0},
+    }
+    assert json_data["finding_counts"] == expected
+    assert html_data["finding_counts"] == expected
+    # Error strings that mirror findings are not counted again.
+    assert json_data["message_counts"] == {
+        "informational": 1,
+        "independent_errors": 0,
+        "independent_warnings": 0,
+    }
+    assert html_data["message_counts"] == json_data["message_counts"]
+    # Raw totals stay available for existing consumers.
+    assert json_data["total_errors"] == 3
+    assert [result["finding_counts"]["raw_occurrences"] for result in json_data["results"]] == [2, 1]
+
+    group = json_data["finding_groups"][0]
+    assert group["finding_id"].startswith("SEF-")
+    assert group["occurrence_count"] == 2
+    assert group["validators"] == ["CODE_RISK", "SECURITY"]
+    assert [item["line_number"] for item in group["occurrences"]] == [8, 12]
+    assert html_data["finding_groups"] == json_data["finding_groups"]
+    assert json_data["results"][0]["findings"][0]["finding_id"] == group["finding_id"]
+    assert json_data["results"][0]["findings"][0]["metadata"] is None
+    assert html_data["results"][0]["findings"][0]["finding_id"] == group["finding_id"]
+    assert html_data["summary"]["total_issues"] == 1
+    # A display entry that merges two lines keeps both occurrence IDs.
+    merged_entry = next(iter(html_data["skills"].values()))["validators"]["SECURITY"]["findings"][0]
+    assert merged_entry["occurrences"] == 2
+    assert "occurrence_id" not in merged_entry
+    assert sorted(merged_entry["occurrence_ids"]) == sorted(item["occurrence_id"] for item in group["occurrences"])
+
+    # The severity breakdown qualifies the unique count, so it is not raw.
+    assert "| Total Issues | 1 unique finding (1 high) / 2 occurrences / 3 raw records |" in markdown
+    assert "| Duplicate Occurrences Reconciled | 1 |" in markdown
+    assert "Messages (" not in markdown
+    assert f"| `{group['finding_id']}` | HIGH | Unsafe command execution | 2 |" in markdown
+    assert f"- Occurrence ID: `{group['occurrences'][0]['occurrence_id']}`" in markdown
+    # The HTML summary counts the way Markdown does: one unique high finding,
+    # with its occurrences and raw records beside it.
+    assert _findings_kpi(html) == ("1", "1 unique finding / 2 occurrences / 3 raw records / 1 duplicate reconciled")
+    summary = _exec_summary(html)
+    assert '<span class="sev-dot high" aria-hidden="true"></span>1 high</span>' in summary
+    assert re.search(r'Blocking critical \+ high</dt>\s*<dd class="kpi-value"><strong[^>]*>1</strong>', summary)
+    assert "1 critical or high finding in those checks" in summary
+    assert "each location is an occurrence" in summary
+    # Fix first lists one place; the second occurrence is under its check.
+    assert "The other findings are listed under their checks below." in summary
+    assert '<span class="issue-count-badge">1 finding</span>' in html
+
+
+def test_tier1_dashboard_reconciles_only_tier1_findings() -> None:
+    results = [*_repeated_finding_results(), _similarity_result(severity=Severity.HIGH)]
+
+    html = HTMLReporter(include_timestamp=False).render_all(results)
+    html_data = _html_report_data(html)
+
+    # The embedded summary covers every tier; the Tier 1 card and KPI cover Tier 1 only.
+    assert html_data["summary"]["total_issues"] == 2
+    assert html_data["finding_counts"]["raw_occurrences"] == 4
+    assert _findings_kpi(html) == ("1", "1 unique finding / 2 occurrences / 3 raw records / 1 duplicate reconciled")
+    tier_cards = html.split('class="tier-cards', 1)[1].split('<section class="exec-summary', 1)[0]
+    assert re.search(r"<strong>1</strong> finding</span>", tier_cards)
+    assert '<span class="tier-card-sev-pill high">1 high</span>' in tier_cards
+    assert re.search(r"<strong>1</strong> duplicate\(s\)</span>", tier_cards)
+    # The gate policy counts each tier's unique findings.
+    gate_policy = html.split('class="gate-policy"', 1)[1].split("</div>", 1)[0]
+    assert "0 critical · 2 high · 0 medium · 0 low" in gate_policy
+
+
+def test_tier1_dashboard_counts_only_tier1_errors_without_findings() -> None:
+    tier2 = _similarity_result(severity=Severity.HIGH)
+    tier2.add_error("Similarity provider request failed")
+    results = [*_repeated_finding_results(), tier2]
+
+    html = HTMLReporter(include_timestamp=False).render_all(results)
+
+    assert _findings_kpi(html) == ("1", "1 unique finding / 2 occurrences / 3 raw records / 1 duplicate reconciled")
+    assert "without a finding" not in _html_tab(html, "tier1")
+    assert _html_report_data(html)["summary"]["total_issues"] == 3
+
+
+def _gate_only_result() -> ValidationResult:
+    result = ValidationResult(validator_name="QUALITY", validator_description="Quality")
+    result.fail_gate("Quality score 42 is below the required minimum 70")
+    return result
+
+
+def _incomplete_scan_error_result() -> ValidationResult:
+    result = ValidationResult(validator_name="SECRETS", validator_description="Secrets")
+    result.add_error("gitleaks crashed before writing its report")
+    result.mark_scan_incomplete("gitleaks")
+    return result
+
+
+def _incomplete_scan_warning_result() -> ValidationResult:
+    result = ValidationResult(validator_name="CODE_RISK", validator_description="Code risk")
+    result.add_warning("bandit not installed.")
+    result.mark_scan_incomplete("bandit")
+    return result
+
+
+@pytest.mark.parametrize(
+    ("build_result", "verdict", "expected_text", "expected_messages"),
+    [
+        (_gate_only_result, "fail", "1 error without a finding", (1, 0)),
+        (_incomplete_scan_error_result, "incomplete", "1 error without a finding", (1, 0)),
+        (_incomplete_scan_warning_result, "incomplete", "1 warning without a finding", (0, 1)),
+    ],
+    ids=["gate-only", "incomplete-scan-error", "incomplete-scan-warning"],
+)
+def test_issue_counts_include_errors_and_warnings_without_findings(
+    build_result, verdict: str, expected_text: str, expected_messages: tuple[int, int]
+) -> None:
+    # A failed gate or an incomplete scan without any finding is not zero issues.
+    results = [build_result()]
+
+    json_data = json.loads(JSONReporter(include_timestamp=False).render_all(results))
+    markdown = MarkdownReporter(include_timestamp=False).render_all(results)
+    html = HTMLReporter(include_timestamp=False).render_all(results)
+    html_data = _html_report_data(html)
+
+    independent_errors, independent_warnings = expected_messages
+    assert json_data["finding_counts"]["unique_findings"] == 0
+    assert json_data["message_counts"] == {
+        "informational": 0,
+        "independent_errors": independent_errors,
+        "independent_warnings": independent_warnings,
+    }
+    assert html_data["message_counts"] == json_data["message_counts"]
+    assert html_data["summary"]["total_issues"] == 1
+    assert f"| Total Issues | {expected_text} |" in markdown
+    summary = _exec_summary(html)
+    assert f'<span class="verdict-chip {"warn" if verdict == "incomplete" else verdict}">' in summary
+    assert _findings_kpi(html) == ("0", expected_text)
+    assert "None reported" in summary
+
+
+def test_issue_counts_put_errors_without_findings_after_unique_findings() -> None:
+    results = _repeated_finding_results()
+    results[0].fail_gate("Security policy requires a clean scan")
+
+    markdown = MarkdownReporter(include_timestamp=False).render_all(results)
+    html = HTMLReporter(include_timestamp=False).render_all(results)
+
+    assert (
+        "| Total Issues | 1 unique finding (1 high) / 2 occurrences / 3 raw records; 1 error without a finding |"
+    ) in markdown
+    assert _findings_kpi(html) == (
+        "1",
+        "1 unique finding / 2 occurrences / 3 raw records / 1 duplicate reconciled; 1 error without a finding",
+    )
+    assert _html_report_data(html)["summary"]["total_issues"] == 2
+
+
+def test_findings_kpi_has_no_detail_line_when_every_record_is_unique() -> None:
+    result = ValidationResult(validator_name="SECURITY", validator_description="Security")
+    for line_number, message in ((3, "Unsafe command execution"), (9, "Hard-coded token")):
+        result.add_finding(
+            Finding(
+                category="SECURITY",
+                severity=Severity.HIGH,
+                check_name="unsafe-command",
+                message=message,
+                file_path="scripts/run.py",
+                line_number=line_number,
+            )
+        )
+
+    html = HTMLReporter(include_timestamp=False).render_all([result])
+
+    assert _findings_kpi(html) == ("2", "")
+    assert '<span class="issue-count-badge">2 findings</span>' in html
+
+
+def test_workflow_scope_note_is_not_an_issue_without_a_finding() -> None:
+    from skillevaluator.tier_workflows import _record_scope
+
+    result = ValidationResult(validator_name="Schema Validation", validator_description="Schema")
+    result.add_success(check_name="schema", message="Frontmatter is valid")
+    _record_scope([result], 1, {"llm": {"status": "skipped", "reason": "LLM checks disabled by --no-llm."}})
+    assert result.warnings == ["Workflow scope: llm skipped. LLM checks disabled by --no-llm."]
+
+    html = HTMLReporter(include_timestamp=False).render_all([result])
+    assert _findings_kpi(html) == ("0", "")
+    assert _html_report_data(html)["summary"]["total_issues"] == 0
+    data = json.loads(JSONReporter(include_timestamp=False).render_all([result]))
+    assert data["message_counts"]["independent_warnings"] == 0
+    assert data["total_warnings"] == 1
+    assert "| Total Issues | 0 unique findings / 0 occurrences / 0 raw records |" in MarkdownReporter().render_all(
+        [result]
+    )
+
+
+def test_folded_pii_finding_counts_each_listed_location_as_an_occurrence(tmp_path) -> None:
+    from skillevaluator.reporting.finding_summary import refresh_finding_identities
+    from skillevaluator.validators.security import SecurityValidator
+
+    skill = tmp_path / "demo"
+    skill.mkdir()
+    (skill / "SKILL.md").write_text(
+        "---\nname: demo\ndescription: A sample skill.\n---\n# Demo\n\n\n"
+        "See /Users/johndoe/a.\nSee /Users/johndoe/b.\n",
+        encoding="utf-8",
+    )
+    result = SecurityValidator(use_llm=False).validate_pii_only(skill)
+    result.validator_name = "PII Scan"
+    [finding] = [finding for finding in result.findings if "/Users/johndoe/" in finding.message]
+    assert finding.metadata["occurrence_count"] == 2
+
+    data = json.loads(JSONReporter(include_timestamp=False).render_all([result]))
+    [group] = [group for group in data["finding_groups"] if group["finding_id"] == finding.finding_id]
+    assert group["occurrence_count"] == 2
+    assert [(item["file_path"], item["line_number"]) for item in group["occurrences"]] == [
+        ("SKILL.md", 8),
+        ("SKILL.md", 9),
+    ]
+    assert finding.occurrence_id in {item["occurrence_id"] for item in group["occurrences"]}
+    counts = data["finding_counts"]
+    assert counts["distinct_occurrences"] == counts["raw_occurrences"] + 1
+    assert counts["duplicates_removed"] == 0
+    # Refreshing the IDs of an unredacted report changes nothing.
+    refreshed = copy.deepcopy(data)
+    refresh_finding_identities(refreshed)
+    assert refreshed == data
+
+    markdown = MarkdownReporter().render_all([result])
+    assert re.search(rf"\| `{finding.finding_id}` \| HIGH \| [^|]+ \| 2 \| PII Scan \|", markdown)
+    html = HTMLReporter(include_timestamp=False).render_all([result])
+    html_data = _html_report_data(html)
+    assert html_data["finding_counts"] == data["finding_counts"]
+    assert html_data["finding_groups"] == data["finding_groups"]
+    unique = counts["unique_findings"]
+    occurrences = counts["distinct_occurrences"]
+    assert f"/ {occurrences} occurrences /" in _findings_kpi(html)[1]
+    assert _findings_kpi(html)[0] == str(unique)
+
+
+def test_folded_pii_finding_in_a_folder_run_counts_each_location_once(tmp_path) -> None:
+    from skillevaluator.validators.security import SecurityValidator
+
+    for name, body in (("support", "Mail boss@company.com.\nAlso boss@company.com.\n"), ("other", "Nothing.\n")):
+        skill = tmp_path / name
+        skill.mkdir()
+        (skill / "SKILL.md").write_text(
+            f"---\nname: {name}\ndescription: A sample skill.\n---\n{body}",
+            encoding="utf-8",
+        )
+    original = ValidationResult(validator_name="PII Scan")
+    original.add_finding(
+        Finding(
+            category="PII",
+            severity=Severity.HIGH,
+            check_name="pii",
+            message="Folded",
+            file_path="SKILL.md",
+            line_number=5,
+            metadata={"occurrences": [{"file": "SKILL.md", "line": 5}, {"file": "SKILL.md", "line": 6}]},
+        )
+    )
+    ValidationResult(validator_name="PII Scan").merge_with_prefix(original, "support")
+    # Prefixing a merged copy leaves the original finding's metadata alone.
+    assert original.findings[0].metadata["occurrences"][0]["file"] == "SKILL.md"
+
+    result = SecurityValidator(use_llm=False).validate_pii_only(tmp_path)
+    result.validator_name = "PII Scan"
+    [finding] = [finding for finding in result.findings if "boss@company.com" in finding.message]
+    assert finding.file_path == "[support] SKILL.md"
+    assert "2 occurrences" in finding.message
+
+    data = json.loads(JSONReporter(include_timestamp=False).render_all([result]))
+    [group] = [group for group in data["finding_groups"] if group["finding_id"] == finding.finding_id]
+    assert [(item["file_path"], item["line_number"]) for item in group["occurrences"]] == [
+        ("[support] SKILL.md", 5),
+        ("[support] SKILL.md", 6),
+    ]
+    assert group["occurrence_count"] == 2
+    assert finding.occurrence_id in {item["occurrence_id"] for item in group["occurrences"]}
+    assert data["finding_counts"]["distinct_occurrences"] == data["finding_counts"]["raw_occurrences"] + 1
+
+    markdown = MarkdownReporter().render_all([result])
+    assert re.search(rf"\| `{finding.finding_id}` \| HIGH \| [^|]+ \| 2 \| PII Scan \|", markdown)
+
+
+def test_finding_group_occurrences_do_not_copy_the_source_line() -> None:
+    result = ValidationResult(validator_name="Code Risk")
+    for line_number in (3, 9):
+        result.add_finding(
+            Finding(
+                category="SECURITY",
+                severity=Severity.MEDIUM,
+                check_name="shell",
+                message="subprocess call with shell=True",
+                file_path="run.py",
+                line_number=line_number,
+                line_content="subprocess.run(command, shell=True)  # " + "x" * 200,
+            )
+        )
+
+    data = json.loads(JSONReporter(include_timestamp=False).render_all([result]))
+    html_data = _html_report_data(HTMLReporter(include_timestamp=False).render_all([result]))
+    [group] = data["finding_groups"]
+    assert html_data["finding_groups"] == data["finding_groups"]
+    # Each location keeps its identity; its source line is on the finding
+    # with the same occurrence_id, not repeated in the group.
+    assert [sorted(item) for item in group["occurrences"]] == [
+        ["file_path", "line_number", "occurrence_id", "validator"]
+    ] * 2
+    by_occurrence = {finding["occurrence_id"]: finding for finding in data["results"][0]["findings"]}
+    assert all(by_occurrence[item["occurrence_id"]]["line_content"] for item in group["occurrences"])
+    assert json.dumps(data).count("x" * 200) == 2
+
+
+def test_html_skill_entries_merge_only_occurrences_of_one_finding() -> None:
+    # Two checks with the same message and suggestion are two findings.
+    result = ValidationResult(validator_name="SECURITY", validator_description="Security")
+    for check_name, line_number in (("rule-a", 3), ("rule-b", 9)):
+        result.add_finding(
+            Finding(
+                category="SECURITY",
+                severity=Severity.HIGH,
+                check_name=check_name,
+                message="Unsafe command execution",
+                file_path="scripts/run.py",
+                line_number=line_number,
+                suggestion="Use an argument vector.",
+            )
+        )
+
+    data = _html_report_data(HTMLReporter(include_timestamp=False).render_all([result]))
+
+    group_of = {
+        item["occurrence_id"]: group["finding_id"] for group in data["finding_groups"] for item in group["occurrences"]
+    }
+    [skill] = data["skills"].values()
+    entries = [entry for validator in skill["validators"].values() for entry in validator["findings"]]
+    assert len(entries) == skill["finding_count"] == 2
+    for entry in entries:
+        assert entry["occurrence_ids"]
+        assert {group_of[occurrence_id] for occurrence_id in entry["occurrence_ids"]} == {entry["finding_id"]}
+
+
+def test_same_finding_in_several_skills_counts_once_with_one_occurrence_per_skill() -> None:
+    collection = ValidationResult(validator_name="SCHEMA", validator_description="Schema")
+    for skill in ("alpha", "beta", "gamma"):
+        per_skill = ValidationResult(validator_name="SCHEMA", validator_description="Schema")
+        per_skill.add_finding(
+            Finding("SCHEMA", Severity.HIGH, "missing-description", "Missing description field", "SKILL.md", 1)
+        )
+        collection.merge_with_prefix(per_skill, skill)
+    results = [collection]
+
+    json_data = json.loads(JSONReporter(include_timestamp=False).render_all(results))
+    markdown = MarkdownReporter(include_timestamp=False).render_all(results)
+    html = HTMLReporter(include_timestamp=False).render_all(results)
+
+    # Identical findings in different skills share one finding_id.
+    assert json_data["finding_counts"]["unique_findings"] == 1
+    assert json_data["finding_counts"]["distinct_occurrences"] == 3
+    assert [item["file_path"] for item in json_data["finding_groups"][0]["occurrences"]] == [
+        "[alpha] SKILL.md",
+        "[beta] SKILL.md",
+        "[gamma] SKILL.md",
+    ]
+    assert "| Total Issues | 1 unique finding (1 high) / 3 occurrences / 3 raw records |" in markdown
+    assert _findings_kpi(html) == ("1", "1 unique finding / 3 occurrences / 3 raw records")
+    # Each skill still has its own finding, and JSON skills[] keeps raw records.
+    assert html.count('<span class="issue-count-badge">1 finding</span>') == 3
+    assert sorted((skill["name"], skill["issue_count"]) for skill in json_data["skills"]) == [
+        ("alpha", 1),
+        ("beta", 1),
+        ("gamma", 1),
+    ]
+
+
+def test_markdown_reconciliation_table_lists_the_most_severe_findings_first() -> None:
+    result = ValidationResult(validator_name="SECURITY", validator_description="Security")
+    lows = [
+        Finding("SECURITY", Severity.LOW, "style", f"Low finding {index}", "SKILL.md", index + 1) for index in range(12)
+    ]
+    # Pick a critical finding that falls past the 10-row cap in finding_id order.
+    critical = next(
+        finding
+        for finding in (
+            Finding("SECURITY", Severity.CRITICAL, "secret", f"Hard-coded AWS key {index}", "config.py", 4)
+            for index in range(1000)
+        )
+        if sum(low.finding_id < finding.finding_id for low in lows) >= 10
+    )
+    for finding in [*lows, critical]:
+        result.add_finding(finding)
+    finding_ids = sorted(finding.finding_id for finding in result.findings)
+    assert finding_ids.index(critical.finding_id) >= 10
+
+    markdown = MarkdownReporter(include_timestamp=False).render_all([result])
+    json_data = json.loads(JSONReporter(include_timestamp=False).render_all([result]))
+
+    table = markdown.split("## Finding Reconciliation", 1)[1].split("\n\n", 2)[1]
+    rows = [line for line in table.splitlines() if line.startswith("| `SEF-")]
+    assert len(rows) == 10
+    assert rows[0].startswith(f"| `{critical.finding_id}` | CRITICAL | {critical.message} |")
+    assert "*3 more unique findings*" in table
+    # Machine output stays ordered by finding_id.
+    assert [group["finding_id"] for group in json_data["finding_groups"]] == finding_ids
+
+
+def test_message_counts_leave_out_passed_check_lines() -> None:
+    result = ValidationResult(validator_name="SECURITY", validator_description="Security")
+    result.add_success("no-secrets", "No secrets found")
+    result.add_success("no-shell", "No shell commands")
+    result.add_message("Scanned 4 files")
+
+    json_data = json.loads(JSONReporter(include_timestamp=False).render_all([result]))
+
+    assert json_data["message_counts"] == {"informational": 1, "independent_errors": 0, "independent_warnings": 0}
+
+
+def test_markdown_finding_reconciliation_escapes_untrusted_text() -> None:
+    result = ValidationResult(validator_name="SECURITY | @maintainers", validator_description="Security")
+    result.add_finding(
+        Finding(
+            category="SECURITY",
+            severity=Severity.HIGH,
+            check_name="unsafe-command",
+            message="bad | <img src=x onerror=alert(1)> [click](https://example.com) @maintainers",
+            file_path="scripts/run.py",
+            line_number=3,
+        )
+    )
+
+    markdown = MarkdownReporter(include_timestamp=False).render_all([result])
+
+    row = next(line for line in markdown.splitlines() if line.startswith(f"| `{result.findings[0].finding_id}`"))
+    assert len(row.strip("|").split("|")) == 5
+    assert "<img" not in row
+    assert "&lt;img" in row
+    assert "](" not in row
+    assert "@maintainers" not in row
+    assert "&#64;maintainers" in row
 
 
 class TestSARIFReporter:
@@ -1030,6 +1794,30 @@ class TestTier3HarborCanonicalPayload:
 class TestGatingSplit:
     """Tests for the CLI-consistent Tier 1/Tier 2 gate and advisory Tier 3."""
 
+    def test_tier2_advisory_policy_keeps_accurate_gate_counts(self) -> None:
+        tier1 = _failed_result("Security Scan")
+        tier2 = _failed_result("Similarity Check")
+        tier2.metadata["gating"] = {"tier": 2, "blocking": False}
+        output = HTMLReporter(
+            include_timestamp=False,
+            tabs=[{"id": "tier1", "label": "Tier 1"}, {"id": "tier2", "label": "Tier 2"}],
+        ).render_all([tier1, tier2])
+        assert "Blocking (Tier 1)" in output
+        assert "Advisory (Tier 2)" in output
+        assert output.count("0 critical · 1 high · 0 medium · 0 low") == 2
+
+    def test_tier3_blocking_policy_keeps_accurate_gate_counts(self) -> None:
+        tier1 = _failed_result("Security Scan")
+        tier3 = _failed_result("AGENT_EVAL")
+        tier3.metadata["gating"] = {"tier": 3, "blocking": True}
+        output = HTMLReporter(
+            include_timestamp=False,
+            tabs=[{"id": "tier1", "label": "Tier 1"}, {"id": "tier3", "label": "Tier 3"}],
+        ).render_all([tier1, tier3])
+        assert "Blocking (Tier 1 + Tier 3 agent-eval)" in output
+        assert "0 critical · 2 high · 0 medium · 0 low" in output
+        assert "Tier 3 agent-eval findings are advisory and don't block merge." not in output
+
     @pytest.mark.parametrize(
         "validator_name",
         [
@@ -1058,7 +1846,7 @@ class TestGatingSplit:
         report_data = _html_report_data(output)
         assert reports_passed is False
         assert 'data-target-tab="tier2"' in output
-        assert "<strong>0</strong>/1 checks passed" in output
+        assert "<strong>0</strong> of 1 checks passed" in output
         assert report_data["gating"] == {
             "blocking_tiers": ["tier1", "tier2"],
             "advisory_tiers": ["tier3"],
@@ -1085,6 +1873,14 @@ class TestGatingSplit:
         assert gating["blocking"]["high"] == 1
         assert gating["would_block"] is True
 
+    def test_tier1_report_does_not_claim_combined_tier_policy(self) -> None:
+        output = HTMLReporter(include_timestamp=False).render_all([_failed_result("Security Scan")])
+
+        assert "Blocking (Tier 1 + Tier 2)" not in output
+        assert "Advisory (Tier 3 agent-eval)" not in output
+        assert "Tier 2 · Not run" in output
+        assert "Tier 3 · Not run" in output
+
     def test_tier3_failure_remains_advisory(self) -> None:
         output = HTMLReporter(include_timestamp=False).render_all([_failed_result("AGENT_EVAL")])
 
@@ -1106,6 +1902,8 @@ class TestGatingSplit:
 
         assert "Blocking (Tier 1 + Tier 2)" in output
         assert "Advisory (Tier 3 agent-eval)" in output
+        assert output.count("0 critical · 1 high · 0 medium · 0 low") == 2
+        assert "Tier 3 agent-eval findings are advisory and don't block merge." in output
         assert "Advisory (Tier 2" not in output
         assert "Advisory findings (dedup + agent-eval)" not in output
 
@@ -1141,7 +1939,7 @@ class TestGatingSplit:
 
         assert report_data["quality_scores"]["demo-skill"]["overall_score"] == 72.5
         assert 'data-quality-skill-name="demo-skill"' in output
-        assert "Quality Score: 72.5/100" in output
+        assert "Quality score: 72.5 / 100" in output
         assert "Type: script-based" in output
         assert ">clarity</td>" in output
         assert '<td class="warning-text">1</td>' in output
@@ -1201,6 +1999,72 @@ class TestGatingSplit:
 
         assert "team-a/shared-skill" in tier2
         assert "team-b/shared-skill" in tier2
+
+
+@pytest.mark.parametrize(
+    ("baseline_scores", "expected_baseline", "expected_lift", "markdown_cells"),
+    [
+        ({}, None, None, "0.95 | NO SCORE | NO SCORE"),
+        ({"accuracy": 0.0}, 0.0, 0.95, "0.95 | 0.00 | +0.95"),
+        ({"accuracy": 0.95}, 0.95, 0.0, "0.95 | 0.95 | +0.00"),
+    ],
+)
+def test_emit_reports_preserves_unavailable_evaluator_lift(
+    tmp_path, capsys, baseline_scores, expected_baseline, expected_lift, markdown_cells
+) -> None:
+    agents = {
+        "codex": {
+            "execution_status": "succeeded",
+            "execution_errors": [],
+            "expected_attempts": 1,
+            "scored_attempts": 1,
+            "with_skill": {"accuracy": 0.95},
+            "without_skill": baseline_scores,
+            "rewards": [{"entry_id": "case-1", "accuracy": 0.95}],
+        }
+    }
+    original_agents = copy.deepcopy(agents)
+    payload = build_agent_eval_payload("demo-skill", agents, use_llm_judge=False)
+    assert payload is not None
+    expected_evaluator = {
+        "with_skill": 0.95,
+        "baseline": expected_baseline,
+        "lift": expected_lift,
+        "with_skill_status": "scored",
+        "baseline_status": "missing" if expected_baseline is None else "scored",
+    }
+    assert payload["evaluators"]["accuracy"] == expected_evaluator
+    assert payload["agents"]["codex"]["evaluators"]["accuracy"] == expected_evaluator
+    assert payload["evaluator_cards"][0]["lift"] == expected_lift
+    original_payload = copy.deepcopy(payload)
+    result = ValidationResult(validator_name="AGENT_EVAL")
+    result.metadata["agent_eval"] = payload
+    # Findings make emit_reports include the detailed CLI evaluator table.
+    result.add_finding(
+        Finding(
+            category="AGENT_EVAL",
+            severity=Severity.LOW,
+            check_name="diagnostic",
+            message="Review evaluation diagnostics.",
+            file_path="SKILL.md",
+        )
+    )
+
+    emit_reports([result], report_formats=("cli", "json", "html"), output_dir=tmp_path, basename="skip-baseline")
+
+    assert "Accuracy" in capsys.readouterr().out
+    json_report = json.loads((tmp_path / "skip-baseline.json").read_text())
+    saved_payload = json_report["tier3"]
+    assert json_report["results"][0]["tier3"]["evaluators"]["accuracy"] == expected_evaluator
+    assert saved_payload["evaluators"]["accuracy"] == expected_evaluator
+    assert saved_payload["agents"]["codex"]["evaluators"]["accuracy"] == expected_evaluator
+    html_report = (tmp_path / "skip-baseline.html").read_text()
+    assert "<!DOCTYPE html>" in html_report
+    assert "demo-skill" in html_report
+    replayed = ValidationResult(validator_name="AGENT_EVAL", metadata={"agent_eval": saved_payload})
+    assert f"| Accuracy | {markdown_cells} |" in MarkdownReporter(include_timestamp=False).render_all([replayed])
+    assert agents == original_agents
+    assert payload == original_payload
 
 
 class TestHTMLReporter:
@@ -1490,7 +2354,7 @@ class TestMarkdownReporter:
         output = MarkdownReporter(include_timestamp=False).render_all([result])
 
         assert "### Evaluator Scores" in output
-        assert "| Accuracy | 0.90 | N/A | +0.00 |" in output
+        assert "| Accuracy | 0.90 | NO SCORE | NO SCORE |" in output
 
     def test_render_tier3_normalized_evidence_uses_distinct_evidence_ids(self) -> None:
         result = _tier3_harbor_result()
@@ -1685,6 +2549,71 @@ class TestSkillSpectorVersionReporting:
 
         assert "SkillSpector <strong>v" not in html
         assert _html_report_data(html)["skillspector_versions"] == []
+
+
+class TestSkillSpectorProvenanceReporting:
+    @staticmethod
+    def _security_result(provenance: dict | None, provider_id: str | None = "nv_build") -> ValidationResult:
+        result = ValidationResult(validator_name="Security Scan", validator_description="Detect security issues")
+        if provenance is not None:
+            result.metadata["skillspector_llm_provenance"] = provenance
+        if provider_id is not None:
+            result.metadata["skillspector_provider_id"] = provider_id
+        return result
+
+    def test_json_report_exports_canonical_provenance(self) -> None:
+        provenance = json.loads(_SKILLSPECTOR_2_12_LLM_PROVENANCE.read_text(encoding="utf-8"))
+        result = self._security_result({**provenance, "prompt": "do-not-export"})
+
+        data = json.loads(JSONReporter(include_timestamp=False).render_all([result]))
+
+        exported = data["results"][0]
+        assert exported["skillspector_llm_provenance"] == provenance
+        assert exported["skillspector_provider_id"] == "nv_build"
+        assert "do-not-export" not in json.dumps(data)
+
+    def test_html_tier1_tab_lists_provenance(self) -> None:
+        provenance = json.loads(_SKILLSPECTOR_2_12_LLM_PROVENANCE.read_text(encoding="utf-8"))
+        result = self._security_result(provenance)
+
+        html = HTMLReporter(include_timestamp=False, target_path="skills/example").render_all([result])
+        tier1 = _html_tab(html, "tier1")
+
+        assert "Tier 1 LLM Provenance" in tier1
+        assert tier1.count("<td><code>gpt-6.1-sol</code></td>") == 5
+        assert "semantic_security_discovery" in tier1
+        assert "<td>nv_build</td>" in tier1
+        assert "<code>c0ffee000000</code>" in tier1
+        assert "nondeterministic / best_effort_controls_forwarded" in tier1
+        assert _html_report_data(html)["skillspector_provenance"] == [
+            {"provider_id": "nv_build", "provenance": provenance}
+        ]
+
+    def test_reports_drop_unsafe_provenance_but_keep_provider(self) -> None:
+        credential = "AI" + "za" + "A" * 35
+        provenance = json.loads(_SKILLSPECTOR_2_12_LLM_PROVENANCE.read_text(encoding="utf-8"))
+        provenance["analyzers"][0]["model"] = credential
+        result = self._security_result(provenance)
+
+        html = HTMLReporter(include_timestamp=False).render_all([result])
+        data = json.loads(JSONReporter(include_timestamp=False).render_all([result]))
+
+        assert credential not in html
+        assert credential not in json.dumps(data)
+        assert "skillspector_llm_provenance" not in data["results"][0]
+        assert "No valid LLM provenance was recorded for this scan." in _html_tab(html, "tier1")
+        assert _html_report_data(html)["skillspector_provenance"] == [{"provider_id": "nv_build", "provenance": None}]
+
+    def test_reports_without_provenance_add_nothing(self) -> None:
+        result = self._security_result(None, provider_id=None)
+
+        html = HTMLReporter(include_timestamp=False).render_all([result])
+        data = json.loads(JSONReporter(include_timestamp=False).render_all([result]))
+
+        assert "Tier 1 LLM Provenance" not in html
+        assert _html_report_data(html)["skillspector_provenance"] == []
+        assert "skillspector_llm_provenance" not in data["results"][0]
+        assert "skillspector_provider_id" not in data["results"][0]
 
 
 class TestHTMLReporterHeroHelpers:

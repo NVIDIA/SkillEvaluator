@@ -1,0 +1,30 @@
+{#- SPDX-License-Identifier: Apache-2.0 -#}
+{#-
+    SkillEvaluator logo, from docs/assets/skillevaluator-logo.svg.
+
+    The logo is inline SVG so it ships in the wheel and needs no image source:
+    the CI pages' Content-Security-Policy does not allow image files.
+
+    Colors come from the page's --se-logo-* theme variables instead of a
+    prefers-color-scheme query, so the logo follows the report's theme toggle.
+    The fallbacks are the light colors, for pages that define no variables.
+
+    ``uid`` prefixes the <title> and <desc> ids, so a page can show the logo
+    more than once and keep its ids unique. Pass ``label=''`` when the logo
+    sits next to visible "SkillEvaluator" text: it then has no ids and is
+    hidden from assistive technology, so the name is not read twice.
+-#}
+{%- macro se_logo(uid, size=28, label='SkillEvaluator logo') -%}
+<svg class="se-logo" xmlns="http://www.w3.org/2000/svg" width="{{ size }}" height="{{ size }}" viewBox="10 10 108 108" focusable="false"
+{%- if label %} role="img" aria-labelledby="{{ uid }}-title {{ uid }}-desc"{% else %} aria-hidden="true"{% endif %}>
+{%- if label %}<title id="{{ uid }}-title">{{ label }}</title><desc id="{{ uid }}-desc">Three concentric evaluation levels surrounding a verified core.</desc>{% endif -%}
+<rect x="10.5" y="10.5" width="107" height="107" rx="53.5" stroke-width="1" style="fill:var(--se-logo-panel,#f2f7ec);stroke:var(--se-logo-panel-edge,#d7e5cc)"/>
+<circle cx="64" cy="64" r="42" fill="none" stroke-width="5" style="stroke:var(--se-logo-ring-outer,#b8d3a5)"/>
+<circle cx="64" cy="64" r="30" fill="none" stroke-width="5" style="stroke:var(--se-logo-ring-middle,#83aa66)"/>
+<circle cx="64" cy="64" r="18" fill="none" stroke-width="5" style="stroke:var(--se-logo-ring-inner,#315b25)"/>
+<circle cx="64" cy="64" r="12" stroke-width="1.8" style="fill:var(--se-logo-core,#76b900);stroke:var(--se-logo-core-edge,#3e6500)"/>
+<path d="m57.5 64 4.4 4.6 8.8-9.3" fill="none" stroke-width="2.8" stroke-linecap="round" stroke-linejoin="round" style="stroke:var(--se-logo-check,#fff)"/>
+<circle cx="97" cy="38" r="5" stroke-width="1.4" style="fill:var(--se-logo-core,#76b900);stroke:var(--se-logo-core-edge,#3e6500)"/>
+<circle cx="34" cy="82" r="5" stroke-width="1.4" style="fill:var(--se-logo-core,#76b900);stroke:var(--se-logo-core-edge,#3e6500)"/>
+</svg>
+{%- endmacro -%}

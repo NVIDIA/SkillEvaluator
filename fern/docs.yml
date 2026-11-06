@@ -38,6 +38,9 @@ navigation:
       - page: Providers & Credentials
         path: ../docs/configuration.mdx
         slug: configuration
+      - page: Evaluate from Your Agent
+        path: ../docs/agent-skill.mdx
+        slug: agent-skill
   - section: Evaluate Your Skill
     skip-slug: true
     contents:
@@ -71,6 +74,18 @@ navigation:
       - page: "BENCHMARK.md Rollout and Backfill"
         path: ../docs/benchmark-rollout.mdx
         slug: benchmark-rollout
+      - page: Repository Integration
+        path: ../docs/repository-integration.mdx
+        slug: repository-integration
+      - page: GitHub Actions
+        path: ../docs/github-actions.mdx
+        slug: github-actions
+      - page: GitHub CLI Setup
+        path: ../docs/cli-onboarding.mdx
+        slug: cli-onboarding
+      - page: GitLab CI/CD
+        path: ../docs/gitlab-ci.mdx
+        slug: gitlab-ci
       - page: Gate Your CI
         path: ../docs/ci-integration.mdx
         slug: ci-integration

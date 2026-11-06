@@ -14,3 +14,22 @@ log/
 *.egg-info/
 .pytest_cache/
 .ruff_cache/
+# Neither image reads these. Leaving them out of the build context also stops
+# test, documentation and tooling edits from invalidating cached image layers.
+.claude/
+.github/
+.gitleaks.toml
+config/
+docs/
+fern/
+scripts/
+tests/
+CHANGELOG.md
+CITATION.cff
+CODE_OF_CONDUCT.md
+CONTRIBUTING.md
+GOVERNANCE.md
+Makefile
+SECURITY.md
+SUPPORT.md
+sonar-project.properties

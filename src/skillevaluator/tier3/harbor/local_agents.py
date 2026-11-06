@@ -21,13 +21,14 @@ from pathlib import Path, PurePosixPath
 from typing import TYPE_CHECKING, Any
 from urllib.parse import urlsplit
 
-from harbor.agents.installed.base import NonZeroAgentExitCodeError
+from harbor.agents.installed.base import NetworkConnectionError, NonZeroAgentExitCodeError
 from harbor.agents.installed.opencode import OpenCode
 from harbor.agents.model_connection import ResolvedModelConnection, without_inferred_endpoint
 from harbor.models.trial.paths import EnvironmentPaths
 from harbor.utils.env import parse_bool_env_value
 
 from skillevaluator.provider_config import is_claude_5_5_or_later, is_gpt6_model
+from skillevaluator.tier3.harbor import LOCAL_CODEX_HOME_DIRNAME, LOCAL_CODEX_SECRETS_DIRNAME
 from skillevaluator.tier3.harbor.installed_agents import SkillEvaluatorClaudeCode as _InstalledClaudeCode
 from skillevaluator.tier3.harbor.installed_agents import SkillEvaluatorCodex
 from skillevaluator.tier3.harbor.nvidia_build_bridge import (
@@ -133,6 +134,26 @@ def _rewrite_launcher_segment(command: str, rewrite: Callable[[str], str]) -> st
     if not separator:
         return rewrite(command)
     return f"{rewrite(launcher)}{separator}{prompt}"
+
+
+class AgentSetupNetworkError(RuntimeError):
+    """A network failure while Harbor set up an agent, before the agent received its task.
+
+    Harbor raises ``NetworkConnectionError`` for a network failure in any agent
+    command, during setup and during the task alike. This name marks the
+    setup-phase failure only, so a retry policy can rerun it without ever
+    rerunning an agent that may already have worked on its task.
+    """
+
+
+class SetupNetworkErrorAgent:
+    """Raise a network failure in Harbor's agent ``setup`` as :class:`AgentSetupNetworkError`."""
+
+    async def setup(self, environment: BaseEnvironment) -> None:
+        try:
+            await super().setup(environment)  # type: ignore[misc]
+        except NetworkConnectionError as exc:
+            raise AgentSetupNetworkError(f"Agent setup failed with a network error: {exc}") from exc
 
 
 class SkillEvaluatorClaudeCode(_InstalledClaudeCode):
@@ -426,8 +447,8 @@ class SkillEvaluatorGatewayCodex(SkillEvaluatorCodex):
 class SkillEvaluatorLocalCodex(SkillEvaluatorGatewayCodex):
     """Use the installed local CLI with per-trial state and gateway routing."""
 
-    _REMOTE_CODEX_HOME = PurePosixPath(EnvironmentPaths.agent_dir / "codex-home")
-    _REMOTE_CODEX_SECRETS_DIR = PurePosixPath(EnvironmentPaths.agent_dir / "codex-secrets")
+    _REMOTE_CODEX_HOME = PurePosixPath(EnvironmentPaths.agent_dir / LOCAL_CODEX_HOME_DIRNAME)
+    _REMOTE_CODEX_SECRETS_DIR = PurePosixPath(EnvironmentPaths.agent_dir / LOCAL_CODEX_SECRETS_DIRNAME)
 
     async def install(self, environment: BaseEnvironment) -> None:
         result = await self.exec_as_agent(environment, command="codex --version")

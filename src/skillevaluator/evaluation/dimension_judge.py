@@ -30,6 +30,7 @@ from skillevaluator.constants import (
     TIER3_LIFT_PASS_THRESHOLD,
 )
 from skillevaluator.inference.client import LLMClient
+from skillevaluator.inference.diagnostics import safe_llm_model
 from skillevaluator.logging_config import get_logger
 
 logger = get_logger(__name__)
@@ -181,9 +182,14 @@ class DimensionJudge(LLMClient):
         dims = data.get("dimensions", data) if isinstance(data, dict) else data
         if not isinstance(dims, list) or len(dims) < 5:
             raise ValueError(f"Expected 5 dimensions, got {len(dims) if isinstance(dims, list) else type(dims)}")
+        # The model that answered, which on the native Anthropic API can be
+        # the server-side fallback.
+        model = safe_llm_model(self.model_used) if self.model_used else None
         for dim in dims:
             if isinstance(dim, dict):
                 _normalise_reasoning_fields(dim)
+                if model:
+                    dim["model"] = model
         return dims
 
     def get_fallback_response(self, **kwargs: Any) -> list[dict]:
@@ -379,31 +385,29 @@ def _human_reasoning_bullets(
 
     bullets = [bullet_score, bullet_lift]
 
-    strongest = _strongest_signal(parts)
-    if strongest:
-        bullets.append(f"Strongest signal: {strongest}.")
+    regressed = lift is not None and baseline is not None and lift <= LIFT_EXPLANATION_FAIL_THRESHOLD
+    signal = _strongest_signal(parts, weakest=regressed)
+    if signal:
+        bullets.append(f"{'Weakest' if regressed else 'Strongest'} signal: {signal}.")
 
     return bullets
 
 
-def _strongest_signal(parts: list[str]) -> str | None:
-    """Return the highest-scoring ``name=value`` part for the strongest-signal bullet."""
-    if not parts:
-        return None
-    best_part: str | None = None
-    best_value = float("-inf")
+def _strongest_signal(parts: list[str], *, weakest: bool = False) -> str | None:
+    """Return the highest- (or lowest-) scoring ``name=value`` part for the signal bullet."""
+    scored: list[tuple[float, str]] = []
     for entry in parts:
-        if "=" not in entry:
+        name, sep, raw = entry.partition("=")
+        if not sep:
             continue
-        name, raw = entry.split("=", 1)
         try:
-            value = float(raw)
+            scored.append((float(raw), name))
         except ValueError:
             continue
-        if value > best_value:
-            best_value = value
-            best_part = f"{name} {value:.2f}"
-    return best_part
+    if not scored:
+        return None
+    value, name = (min if weakest else max)(scored, key=lambda item: item[0])
+    return f"{name} {value:.2f}"
 
 
 def compute_dimensions(
@@ -422,7 +426,9 @@ def compute_dimensions(
         use_llm: If False, skip LLM and use deterministic fallback.
 
     Returns:
-        List of 5 dimension dicts with id, score, verdict, explanation.
+        List of 5 dimension dicts with id, score, verdict, explanation. A
+        dimension the LLM wrote also names the model that wrote it as
+        ``model``; deterministic dimensions have no ``model``.
     """
     if not use_llm:
         return compute_dimensions_deterministic(evaluators)

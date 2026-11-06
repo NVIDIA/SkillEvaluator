@@ -116,7 +116,7 @@ grader must not overwrite reserved standard or reward-metadata names. These
 include `security`, `skill_execution`, `skill_efficiency`, `accuracy`,
 `goal_accuracy`, `behavior_check`, `overall`, `metrics`, `custom_metrics`,
 `custom_details`, `details`, `entry_id`, `metric_set`, `metric_set_version`,
-`evaluation_status`, `evaluation_errors`, `has_skill`, `error`,
+`evaluation_status`, `evaluation_errors`, `has_skill`, `judge_contract`, `error`,
 `trajectory_detail`, and `trajectory_source`. A collision fails grading.
 </Note>
 
@@ -239,7 +239,8 @@ The staged task also has explicit compatibility boundaries:
   environment controls are also rejected. An exact `${NAME}` assignment for a
   provider or judge control is accepted in task/step `verifier.env` only when
   the operator explicitly staged that same name; unrelated verifier variables
-  remain available. An operator-set `LLM_JUDGE_FALLBACK_MODELS` value is
+  remain available. Operator-set `LLM_JUDGE_FALLBACK_MODELS`,
+  `LLM_JUDGE_FALLBACK_POLICY`, and `LLM_JUDGE_RETRY_POLICY` values are
   forwarded only to the standard verifier job, never to the agent environment
   or a `custom_only` run. SkillEvaluator's Python verifier runs in isolated mode
   from a replaced `tests/skill_evaluator/` payload so authored helper modules
@@ -310,7 +311,10 @@ Custom scores flow into the same results tree as everything else:
 - In `custom_only` mode, your `overall` reward drives pass@k and the overall
   lift. The standard dimension rows stay visible but render `NO SCORE` —
   unscored metrics are never coerced to 0.0, and your custom metrics are
-  never re-labeled as standard dimensions.
+  never re-labeled as standard dimensions. An arm that produces no scoreable
+  reward (for example, every attempt fails) still records the `custom-only`
+  metric set and `custom-overall-v1` score policy in its summary and in the
+  run's attempt policy.
 
 Custom lift needs both arms — a `--skip-baseline` run reports your custom
 scores but no lift. [Reports & Results](reports.mdx) covers the full on-disk

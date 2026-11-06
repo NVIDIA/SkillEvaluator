@@ -1,7 +1,7 @@
 # SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 # SPDX-License-Identifier: Apache-2.0
 
-"""Accuracy scores must implement the applicable-criterion rubric in both runtimes."""
+"""Accuracy scores must be computed from the five outcome criteria in both runtimes."""
 
 from __future__ import annotations
 
@@ -38,30 +38,25 @@ def test_accuracy_derives_score_from_complete_criteria(monkeypatch, accuracy_jud
     assert "error" not in result
 
 
-@pytest.mark.parametrize("skill_verdict", [True, False])
-@pytest.mark.parametrize("passed", range(5))
-def test_negative_accuracy_scores_only_applicable_criteria(monkeypatch, accuracy_judge, passed, skill_verdict):
-    # Negative cases drop SKILL_IDENTIFIED from numerator and denominator; the model total stays ignored.
-    applicable = sorted(llm_judge._ACCURACY_CRITERIA_KEYS - {"SKILL_IDENTIFIED"})
-    criteria = {key: index < passed for index, key in enumerate(applicable)}
-    criteria["SKILL_IDENTIFIED"] = skill_verdict
-    payload = {"criteria": criteria, "score": 0.1, "reason": "declined correctly"}
-    monkeypatch.setattr(accuracy_judge, "call_public_llm", lambda *_args, **_kwargs: (json.dumps(payload), None))
+def test_accuracy_criteria_grade_the_outcome_not_skill_use(accuracy_judge):
+    # Skill use is scored by skill_execution. With no skill criterion, a correct
+    # answer from the no-skill baseline is not capped below 1.0.
+    outcome_criteria = {"ACTION_CORRECT", "FACTUALLY_ACCURATE", "TASK_ADDRESSED", "ACTIONABLE", "FORMAT_FOLLOWED"}
+    schema = accuracy_judge.ACCURACY_JSON_SCHEMA
 
-    result = accuracy_judge.judge_accuracy("question", "reference", "answer", skill_identification_applicable=False)
-
-    assert result["score"] == pytest.approx(passed / 4)
-    assert result["criteria"] == criteria
-    assert result["excluded_criteria"] == ["SKILL_IDENTIFIED"]
-    assert result["scoring_policy"] == "applicable-accuracy-criteria/v1"
+    assert set(accuracy_judge._ACCURACY_CRITERIA_KEYS) == outcome_criteria
+    assert set(schema["properties"]["criteria"]["required"]) == outcome_criteria
+    assert "score" not in schema["properties"]
+    assert "score" not in schema["required"]
 
 
 def test_tier3_docs_describe_criterion_derived_accuracy():
     docs = (Path(__file__).resolve().parents[1] / "docs" / "tier3-live-evaluation.mdx").read_text(encoding="utf-8")
     normalized = " ".join(docs.split())
 
-    assert "passing applicable criteria divided by applicable criteria" in normalized
-    assert "falls back to the judge's numeric score" in normalized
+    assert "passing criteria divided by five" in normalized
+    assert "FORMAT_FOLLOWED" in normalized
+    assert "falls back to the judge's numeric score" not in normalized
     assert "existing scoring contract" not in normalized
 
 
@@ -70,10 +65,10 @@ def test_tier3_docs_describe_criterion_derived_accuracy():
     [
         ({"criteria": _criteria(3), "score": 0.6}, 0.6),
         ({"criteria": _criteria(3)}, 0.6),
-        ({"score": 0.6}, 0.6),
+        ({"criteria": _criteria(3), "score": 1.0}, 0.6),
     ],
 )
-def test_accuracy_preserves_consistent_and_legacy_payloads(monkeypatch, accuracy_judge, payload, expected):
+def test_accuracy_ignores_the_judge_total(monkeypatch, accuracy_judge, payload, expected):
     monkeypatch.setattr(accuracy_judge, "call_public_llm", lambda *_args, **_kwargs: (json.dumps(payload), None))
     assert accuracy_judge.judge_accuracy("question", "reference", "answer")["score"] == expected
 

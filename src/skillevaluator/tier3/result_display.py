@@ -28,6 +28,8 @@ from skillevaluator.tier3.harbor.metrics import (
     DIMENSION_DISPLAY,
     LEGACY_SCORE_POLICY,
     METRIC_DISPLAY,
+    dimension_is_not_applicable,
+    not_applicable_list,
     overall_score_from_metrics,
 )
 from skillevaluator.tier3.harbor.progress import redact_progress_detail, secret_values_from_environment
@@ -70,6 +72,18 @@ def _score_cell(value: object, *, unavailable: str = "NO SCORE") -> tuple[Text, 
     return Text(f"{numeric:.2f}", style=f"bold {style}"), Text(_score_bar(numeric), style=style)
 
 
+def _not_applicable_cell() -> tuple[Text, Text]:
+    return Text("N/A", style="dim italic"), Text("")
+
+
+def _not_applicable_metrics(data: Mapping[str, Any], variant: str) -> frozenset[str]:
+    if not _condition_usable(data, variant):
+        return frozenset()
+    by_variant = data.get("not_applicable_metrics")
+    raw = by_variant.get(variant) if isinstance(by_variant, Mapping) else None
+    return frozenset(not_applicable_list(raw))
+
+
 def _delta_cell(value: object) -> Text:
     numeric = _finite_number(value)
     if numeric is None:
@@ -106,7 +120,9 @@ def _default_with_skill_overall(data: Mapping[str, Any]) -> float | None:
     scores = data.get("with_skill")
     if not isinstance(scores, Mapping):
         return None
-    score = overall_score_from_metrics(scores, DEFAULT_METRICS)
+    score = overall_score_from_metrics(
+        scores, DEFAULT_METRICS, not_applicable=_not_applicable_metrics(data, "with_skill")
+    )
     return round(score, 4) if score is not None else None
 
 
@@ -399,6 +415,8 @@ def _render_agent_scores(
     safe: Any,
 ) -> None:
     with_usable = _condition_usable(data, "with_skill")
+    # A baseline-only run (--skip-with-skill) deliberately leaves the with-skill arm unscored.
+    with_unavailable = "skipped" if _condition_status(data, "with_skill") == "skipped" else "NO SCORE"
     baseline_status = _condition_status(data, "without_skill")
     baseline_skipped = baseline_status == "skipped"
     baseline_usable = _condition_usable(data, "without_skill") and not baseline_skipped
@@ -434,7 +452,13 @@ def _render_agent_scores(
         with_value = with_scores.get(metric) if with_usable else None
         baseline_value = baseline_scores.get(metric) if baseline_usable else None
         label = Text(METRIC_DISPLAY.get(metric, metric.replace("_", " ").title()), style="bold")
-        with_score, with_bar = _score_cell(with_value)
+        with_na = metric in _not_applicable_metrics(data, "with_skill") and _finite_number(with_value) is None
+        baseline_na = (
+            metric in _not_applicable_metrics(data, "without_skill") and _finite_number(baseline_value) is None
+        )
+        with_score, with_bar = (
+            _not_applicable_cell() if with_na else _score_cell(with_value, unavailable=with_unavailable)
+        )
         row: list[Text] = [label, with_score, with_bar]
         if show_baseline:
             persisted = lift.get(metric) if isinstance(lift.get(metric), Mapping) else {}
@@ -443,10 +467,15 @@ def _render_agent_scores(
                 if _finite_number(with_value) is not None and _finite_number(baseline_value) is not None
                 else None
             )
-            baseline_score, baseline_bar = _score_cell(baseline_value)
+            baseline_score, baseline_bar = _not_applicable_cell() if baseline_na else _score_cell(baseline_value)
             row.extend([baseline_score, baseline_bar, _delta_cell(delta)])
         table.add_row(*row)
 
+    basis = lift.get("basis")
+    if isinstance(basis, Mapping) and basis.get("pairing") == "same_cases_per_metric":
+        table.caption = "Lift compares the cases scored by both arms for each evaluator."
+    if _not_applicable_metrics(data, "with_skill") or _not_applicable_metrics(data, "without_skill"):
+        table.caption = (str(table.caption or "") + " N/A: no applicable reference or skill in this arm.").strip()
     if custom_with or custom_without:
         if metrics:
             table.add_section()
@@ -454,7 +483,7 @@ def _render_agent_scores(
         for metric in custom_metrics:
             with_value = custom_with.get(metric) if with_usable else None
             baseline_value = custom_without.get(metric) if baseline_usable else None
-            with_score, with_bar = _score_cell(with_value)
+            with_score, with_bar = _score_cell(with_value, unavailable=with_unavailable)
             row = [Text(f"custom: {safe(metric)}", style="cyan"), with_score, with_bar]
             if show_baseline:
                 persisted = custom_lift.get(metric) if isinstance(custom_lift.get(metric), Mapping) else {}
@@ -611,12 +640,23 @@ def _render_dimensions(
             )
             with_numeric = _finite_number(with_score)
             baseline_numeric = _finite_number(baseline_score)
-            with_cell, with_bar = _score_cell(with_numeric)
+            with_na = with_numeric is None and dimension_is_not_applicable(
+                dimension, _not_applicable_metrics(data, "with_skill")
+            )
+            baseline_na = baseline_numeric is None and dimension_is_not_applicable(
+                dimension, _not_applicable_metrics(data, "without_skill")
+            )
+            with_skipped = _condition_status(data, "with_skill") == "skipped"
+            with_cell, with_bar = (
+                _not_applicable_cell()
+                if with_na
+                else _score_cell(with_numeric, unavailable="skipped" if with_skipped else "NO SCORE")
+            )
             baseline_skipped = _condition_status(data, "without_skill") == "skipped"
             if baseline_skipped:
                 baseline_cell, baseline_bar = Text("skipped", style="dim"), Text("")
             else:
-                baseline_cell, baseline_bar = _score_cell(baseline_numeric)
+                baseline_cell, baseline_bar = _not_applicable_cell() if baseline_na else _score_cell(baseline_numeric)
             delta = (
                 with_numeric - baseline_numeric
                 if not _never_activated(data) and with_numeric is not None and baseline_numeric is not None
@@ -745,8 +785,41 @@ def _render_feedback_and_suggestions(
     )
 
 
-def render_evaluation_result(result: Mapping[str, Any], *, console: Console) -> None:
-    """Render persisted engine truth, aggregating only canonical score components."""
+def _case_first_summary(result: Mapping[str, Any], *, console: Console, skill_path: Path | None) -> bool:
+    from skillevaluator.tier3.case_summary import (
+        load_case_findings,
+        render_case_summary,
+        save_case_findings,
+        what_to_fix,
+    )
+
+    run_dir = result.get("run_dir") or result.get("output_dir")
+    fixes = None
+    if run_dir and Path(str(run_dir)).is_dir():
+        try:
+            # The HTML report render writes this first; reuse it so CLI and report show the same fixes.
+            fixes = load_case_findings(Path(str(run_dir)))
+            if not isinstance(fixes, list):
+                fixes = what_to_fix(result, run_dir=Path(str(run_dir)), skill_path=skill_path)
+                save_case_findings(Path(str(run_dir)), fixes)
+        except Exception:  # advisory panel: never break the run summary
+            logging.getLogger(__name__).debug("What-to-fix skipped", exc_info=True)
+    return render_case_summary(result, console=console, fixes=fixes)
+
+
+def render_evaluation_result(
+    result: Mapping[str, Any],
+    *,
+    console: Console,
+    verbose: bool = True,
+    skill_path: Path | None = None,
+) -> None:
+    """Render persisted engine truth, aggregating only canonical score components.
+
+    The case-first summary always leads; ``verbose`` adds the per-evaluator and
+    per-dimension tables and the metric findings report, which are also shown
+    when the result has no per-case rows.
+    """
     secret_values = secret_values_from_environment(os.environ)
 
     def safe(value: object) -> str:
@@ -769,7 +842,11 @@ def render_evaluation_result(result: Mapping[str, Any], *, console: Console) -> 
     )
     if incomplete:
         rendered_feedback_messages = _render_incomplete_execution(result=result, console=console, safe=safe)
+    has_cases = False
     if isinstance(agents, Mapping) and agents and not incomplete:
+        has_cases = _case_first_summary(result, console=console, skill_path=skill_path)
+    detailed = verbose or not has_cases
+    if isinstance(agents, Mapping) and agents and not incomplete and detailed:
         metrics = _display_metrics(result, agents)
         for agent, raw in agents.items():
             data = raw if isinstance(raw, Mapping) else {}
@@ -821,32 +898,39 @@ def render_evaluation_result(result: Mapping[str, Any], *, console: Console) -> 
     if not incomplete and (rendered_errors or warnings):
         status_style = "bold red" if rendered_errors else "bold yellow"
         console.print(Text(f"Tier 3 Evaluation: {display_status.upper()}", style=status_style))
-        findings = Text()
-        if rendered_errors:
-            findings.append("Failures\n", style="bold red")
-            for error in dict.fromkeys(rendered_errors):
-                findings.append(f"  - {safe(error)}\n")
-        if warnings:
-            findings.append("Warnings\n", style="bold yellow")
+        if not detailed:
             for warning in warnings:
-                findings.append(f"  - {safe(warning)}\n")
-        console.print(
-            Panel(
-                findings,
-                title="[bold]Findings[/bold]",
-                border_style="red" if rendered_errors else "yellow",
-                padding=(1, 1),
+                console.print(Text(f"  warning: {safe(warning)}", style="yellow"))
+            if rendered_errors:
+                console.print(f"  {len(dict.fromkeys(rendered_errors))} failure detail(s): --verbose or report.html")
+        else:
+            findings = Text()
+            if rendered_errors:
+                findings.append("Failures\n", style="bold red")
+                for error in dict.fromkeys(rendered_errors):
+                    findings.append(f"  - {safe(error)}\n")
+            if warnings:
+                findings.append("Warnings\n", style="bold yellow")
+                for warning in warnings:
+                    findings.append(f"  - {safe(warning)}\n")
+            console.print(
+                Panel(
+                    findings,
+                    title="[bold]Findings[/bold]",
+                    border_style="red" if rendered_errors else "yellow",
+                    padding=(1, 1),
+                )
             )
-        )
 
     # Keep payload-only insights while filtering exact items already printed by
     # the detailed per-evaluator report.
-    _render_feedback_and_suggestions(
-        console=console,
-        result=result,
-        safe=safe,
-        excluded_messages=rendered_feedback_messages,
-    )
+    if detailed or incomplete:
+        _render_feedback_and_suggestions(
+            console=console,
+            result=result,
+            safe=safe,
+            excluded_messages=rendered_feedback_messages,
+        )
 
     artifact_rows: list[tuple[str, str]] = []
     report_path = result.get("report_path")

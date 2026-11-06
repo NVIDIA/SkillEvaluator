@@ -25,15 +25,22 @@ from skillevaluator.reporting.base import (
     get_skip_reason,
     is_advisory_agent_eval_skip,
     is_cleanly_skipped,
-    passes_required_gate,
     result_publication_target_conflict_marker,
     result_publication_target_dict,
     select_agent_eval_payload,
 )
+from skillevaluator.reporting.finding_summary import (
+    finding_counts,
+    merge_finding_summaries,
+    summarize_findings,
+    summarize_messages,
+)
+from skillevaluator.reporting.run_status import Status, resolve_run_status, result_status
+from skillevaluator.skillspector_provenance import sanitize_skillspector_provenance_metadata
 from skillevaluator.source_identity import recorded_evaluated_source
 
 if TYPE_CHECKING:
-    from skillevaluator.models import ValidationResult
+    from skillevaluator.models import Finding, ValidationResult
 
 
 def _json_safe_agent_eval(value: object) -> dict[str, Any]:
@@ -98,13 +105,16 @@ class JSONReporter(ReporterBase):
         """Render all results to JSON with overall summary."""
         from skillevaluator.reporting.html import HTMLReporter
 
-        all_passed = all(passes_required_gate(r) for r in results)
+        run_status = resolve_run_status(results)
+        all_passed = run_status.headline == Status.PASSED
         skip_count = sum(1 for r in results if is_cleanly_skipped(r))
         advisory_skip_count = sum(1 for r in results if is_advisory_agent_eval_skip(r))
         incomplete_scans = list(dict.fromkeys(tool for result in results for tool in result.incomplete_scans))
-        overall_status = "incomplete" if incomplete_scans else "passed" if all_passed else "failed"
+        overall_status = run_status.headline.value
         total_errors = sum(r.summary.errors for r in results)
         total_warnings = sum(r.summary.warnings for r in results)
+        result_finding_summaries = [summarize_findings([result]) for result in results]
+        finding_summary = merge_finding_summaries(result_finding_summaries)
 
         # Reuse HTML reporter's skill reorganization and contributor extraction
         html_reporter = HTMLReporter()
@@ -139,9 +149,17 @@ class JSONReporter(ReporterBase):
                 "medium": sum(r.summary.medium_count for r in results),
                 "low": sum(r.summary.low_count for r in results),
             },
+            # Raw totals above count every validator record. These reconcile
+            # them into unique findings and distinct locations by stable ID.
+            "finding_counts": finding_counts(finding_summary),
+            "finding_groups": finding_summary["groups"],
+            "message_counts": summarize_messages(results),
             "skills": skills_summary,
             "contributors": contributors,
-            "results": [self._result_to_dict(r) for r in results],
+            "results": [
+                self._result_to_dict(result, finding_summary=result_summary)
+                for result, result_summary in zip(results, result_finding_summaries, strict=True)
+            ],
         }
 
         agent_eval = select_agent_eval_payload(results)
@@ -256,17 +274,25 @@ class JSONReporter(ReporterBase):
 
         return json.dumps(data, indent=self.indent, default=str, allow_nan=False)
 
-    def _result_to_dict(self, result: ValidationResult) -> dict[str, Any]:
+    def _result_to_dict(
+        self,
+        result: ValidationResult,
+        *,
+        finding_summary: dict[str, Any] | None = None,
+    ) -> dict[str, Any]:
         """Convert ValidationResult to serializable dictionary."""
+        if finding_summary is None:
+            finding_summary = summarize_findings([result])
         skipped = is_cleanly_skipped(result)
         data: dict[str, Any] = {
             "validator": result.validator_name,
             "description": result.validator_description,
             "passed": result.passed,
-            "status": "skipped" if skipped else result.status,
+            "status": result_status(result).value,
             "skipped": skipped,
             "skip_reason": get_skip_reason(result) if skipped else None,
             "incomplete_scans": result.incomplete_scans,
+            **({"scanners": result.scanners} if result.scanners else {}),
             "summary": {
                 "files_scanned": result.summary.files_scanned,
                 "checks_performed": result.summary.checks_performed,
@@ -277,20 +303,8 @@ class JSONReporter(ReporterBase):
                 "medium_count": result.summary.medium_count,
                 "low_count": result.summary.low_count,
             },
-            "findings": [
-                {
-                    "category": f.category,
-                    "severity": f.severity.value,
-                    "check_name": f.check_name,
-                    "message": f.message,
-                    "file_path": f.file_path,
-                    "line_number": f.line_number,
-                    "line_content": f.line_content,
-                    "suggestion": f.suggestion,
-                    "metadata": f.metadata or None,
-                }
-                for f in result.findings
-            ],
+            "finding_counts": finding_counts(finding_summary),
+            "findings": [self._finding_to_dict(finding) for finding in result.findings],
             "success_details": [
                 {
                     "check": s.check_name,
@@ -307,6 +321,16 @@ class JSONReporter(ReporterBase):
             },
         }
 
+        if result.metadata.get("confirmed_failure") is True:
+            data["confirmed_failure"] = True
+
+        skillspector_version = result.metadata.get("skillspector_version")
+        if isinstance(skillspector_version, str):
+            data["skillspector_version"] = skillspector_version
+        # Tier 1 SkillSpector LLM provenance (``--llm``), revalidated here so
+        # only the canonical record reaches the report.
+        data.update(sanitize_skillspector_provenance_metadata(result.metadata))
+
         if result.gate_failures:
             data["gate_failures"] = result.gate_failures
 
@@ -315,9 +339,21 @@ class JSONReporter(ReporterBase):
         if isinstance(coverage, list):
             data["dependency_coverage"] = coverage
 
+        # Tier 1 SkillSpector file-role scoping: retained and suppressed issue
+        # counts, and the raw versus applicable aggregate risk score.
+        skillspector_applicability = result.metadata.get("skillspector_applicability")
+        if isinstance(skillspector_applicability, dict):
+            data["skillspector_applicability"] = skillspector_applicability
+
         qs = result.metadata.get("quality_scores")
         if qs:
             data["quality"] = qs
+
+        # Whether an explicitly requested SkillSpector baseline was applied, so
+        # CI can tell an inert baseline from one that matched nothing.
+        skillspector_baseline = result.metadata.get("skillspector_baseline")
+        if isinstance(skillspector_baseline, dict):
+            data["skillspector_baseline"] = dict(skillspector_baseline)
 
         # Tier 3: Agent evaluation data
         ae = result.metadata.get("agent_eval")
@@ -355,7 +391,18 @@ class JSONReporter(ReporterBase):
         llm_analysis = result.metadata.get("llm_analysis")
         if isinstance(llm_analysis, dict):
             data["llm_analysis"] = llm_analysis
+        # A Tier 2 work limit makes the scan incomplete; record which limit stopped it.
+        work_limit = result.metadata.get("work_limit")
+        if isinstance(work_limit, dict):
+            data["work_limit"] = work_limit
 
+        return data
+
+    @staticmethod
+    def _finding_to_dict(finding: Finding) -> dict[str, Any]:
+        """Preserve the legacy JSON null for findings without metadata."""
+        data = finding.to_dict()
+        data["metadata"] = data["metadata"] or None
         return data
 
     def get_file_extension(self) -> str:

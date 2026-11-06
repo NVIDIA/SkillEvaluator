@@ -19,15 +19,18 @@ import click
 
 from skillevaluator import __version__
 from skillevaluator.cli_help import GroupedOption, RichGroup
+from skillevaluator.config import load_pii_patterns
 from skillevaluator.constants import (
     SIMILARITY_DEFAULT_MAX_ENTRIES,
     SIMILARITY_DEFAULT_MAX_SCALAR_COMPARISONS,
     SIMILARITY_MAX_ENTRIES,
 )
+from skillevaluator.doctor import DEFAULT_PROBE_TIMEOUT_SEC, MAX_PROBE_TIMEOUT_SEC
 from skillevaluator.logging_config import setup_logging
 from skillevaluator.models.result import ValidationResult
 from skillevaluator.quality_config import QualityConfigError, load_quality_config
 from skillevaluator.reporting.console_ui import (
+    TierRow,
     ValidateView,
     ViewProgressReporter,
     check_ticker_row,
@@ -47,6 +50,7 @@ from skillevaluator.reporting.naming import report_basename
 # imported lazily inside the command callbacks. This keeps `import skillevaluator.cli`
 # and the CLI surface available on a base install without those extras.
 from skillevaluator.tier1.commands import (
+    RECOGNIZED_CHECKS,
     console,
     emit_reports,
     enabled_check_lineup,
@@ -66,11 +70,27 @@ from skillevaluator.utils.tier2_paths import (
     paths_refer_to_same_location,
     sanitize_tier2_results,
 )
+from skillevaluator.validators.pii_waivers import (
+    PIIWaiverError,
+    configured_pii_categories,
+    load_pii_waivers,
+    today_utc,
+)
 
 CONTEXT_SETTINGS = {"help_option_names": ["-h", "--help"]}
 
 
 ENV_MODE_CHOICE = click.Choice(list(all_env_modes()))
+
+
+class _FiniteFloatRange(click.FloatRange):
+    """Click float range that also rejects NaN and infinities."""
+
+    def convert(self, value, param, ctx):
+        converted = super().convert(value, param, ctx)
+        if not math.isfinite(converted):
+            self.fail(f"{value!r} is not a finite number", param, ctx)
+        return converted
 
 
 class _AliasChoice(click.Choice):
@@ -115,11 +135,48 @@ class _QualityConfigPath(click.Path):
 
 
 QUALITY_CONFIG_PATH = _QualityConfigPath()
+# Resolved so parallel catalog children receive the same absolute file.
+SKILLSPECTOR_BASELINE_PATH = click.Path(exists=True, dir_okay=False, readable=True, resolve_path=True, path_type=Path)
+_SKILLSPECTOR_BASELINE_HELP = (
+    "Apply an audited SkillSpector YAML/JSON suppression baseline. Never discovered from the scanned skill."
+)
+
+
+class _PIIWaiversPath(click.Path):
+    """A ``--pii-waivers`` file, validated while arguments are parsed."""
+
+    def __init__(self) -> None:
+        super().__init__(exists=True, dir_okay=False, path_type=Path)
+
+    def convert(self, value, param, ctx):
+        path = super().convert(value, param, ctx)
+        try:
+            load_pii_waivers(path, configured_pii_categories(load_pii_patterns()), today=today_utc())
+        except PIIWaiverError as exc:
+            self.fail(f"{path}: {exc}", param, ctx)
+        return path
+
+
+PII_WAIVERS_PATH = _PIIWaiversPath()
+_PII_WAIVERS_HELP = "Apply reviewed, expiring PII waivers from this YAML file to the PII check."
 
 
 def _validate_similarity_threshold(_ctx: click.Context, _param: click.Parameter, value: float) -> float:
     if not math.isfinite(value) or not 0.0 <= value <= 1.0:
         raise click.BadParameter("must be finite and within [0, 1]")
+    return value
+
+
+def _validate_progress_interval(_ctx: click.Context, _param: click.Parameter, value: float | None) -> float | None:
+    if value is None:
+        return None
+    from skillevaluator.tier3.harbor.progress import MAX_REFRESH_INTERVAL_SECONDS, MIN_REFRESH_INTERVAL_SECONDS
+
+    # NaN passes every range comparison, so check finiteness explicitly.
+    if not math.isfinite(value) or not MIN_REFRESH_INTERVAL_SECONDS <= value <= MAX_REFRESH_INTERVAL_SECONDS:
+        raise click.BadParameter(
+            f"must be finite and within [{MIN_REFRESH_INTERVAL_SECONDS:g}, {MAX_REFRESH_INTERVAL_SECONDS:g}] seconds"
+        )
     return value
 
 
@@ -168,7 +225,7 @@ Examples:
   skillevaluator validate ./my-skill -r cli,json,html       # comma-separated too
   skillevaluator validate ./my-skill -o reports/            # custom output dir
   skillevaluator validate ./my-skill --no-dedup             # skip Tier 2 dedup
-  skillevaluator validate ./my-skill --external             # strict publish profile
+  skillevaluator validate ./my-skill --profile default      # standard validation policy
   skillevaluator validate ./my-skill -c                     # continue on failure (record all issues)
   skillevaluator validate ./my-skill -a codex               # choose the Tier 3 agent
   skillevaluator validate ./my-skill --no-autopilot         # require an existing dataset
@@ -183,6 +240,7 @@ Examples:
 _TOP_LEVEL_COMMAND_HELP_GROUPS = (
     ("Tier workflows", ("tier1", "tier2", "tier3")),
     ("Core workflows", ("validate", "health-check", "doctor", "models", "dashboard")),
+    ("Repository CI", ("ci",)),
     (
         "Tier 1 · Static and security",
         ("quality-check", "rubric-eval", "security-scan", "pii-scan", "lint-scripts"),
@@ -768,6 +826,58 @@ def _evaluated_source_from_options(
     return identity or None
 
 
+def _validate_skip(_ctx: click.Context, _param: click.Parameter, value: str | None) -> str | None:
+    """Reject ``--skip`` values that name no known Tier 1 check."""
+    from skillevaluator.tier1.commands import SKIPPABLE_CHECKS, skipped_checks
+
+    if value is None:
+        return None
+    names = skipped_checks(value)
+    if not names or names - SKIPPABLE_CHECKS:
+        unknown = ", ".join(sorted(names - SKIPPABLE_CHECKS)) or repr(value)
+        raise click.BadParameter(f"unknown check {unknown}; choose from {', '.join(sorted(SKIPPABLE_CHECKS))}")
+    return value
+
+
+def _offer_scanner_install(checks: str | None = None, skip: str | None = None) -> None:
+    """Before Tier 1, install the pinned, checksum-verified SkillSpector and Gitleaks when missing."""
+    from skillevaluator.tier1.commands import runs_secrets_scan, runs_security_scan
+    from skillevaluator.utils.scanner_install import (
+        GITLEAKS_VERSION,
+        SKILLSPECTOR_VERSION,
+        ensure_gitleaks,
+        managed_skillspector_wheel,
+        prepare_skillspector,
+    )
+    from skillevaluator.utils.tool_runner import Tools
+
+    steps = []
+    wheel = managed_skillspector_wheel()
+    if (
+        runs_security_scan(checks, skip)
+        and Tools.skillspector.resolution_source == "uv tool run"
+        and wheel is not None
+        and not wheel.is_file()
+    ):
+        uv = Tools.skillspector.path
+        steps.append((f"SkillSpector {SKILLSPECTOR_VERSION}", lambda: prepare_skillspector(uv)))
+    path = Tools.gitleaks.path
+    if (
+        runs_secrets_scan(checks, skip)
+        and Tools.gitleaks.resolution_source == "managed"
+        and path is not None
+        and not Path(path).is_file()
+    ):
+        steps.append((f"Gitleaks {GITLEAKS_VERSION}", ensure_gitleaks))
+    for label, install in steps:
+        with console.status(f"Installing {label}…"):
+            error = install()
+        if error:
+            console.print(f"[red]✗ {error[:1].upper()}{error[1:]}[/red]", highlight=False)
+        else:
+            console.print(f"[dim]✓ {label} installed (checksum-verified)[/dim]", highlight=False)
+
+
 def _run_agent_eval_or_skip(
     target_path: Path,
     *,
@@ -777,6 +887,7 @@ def _run_agent_eval_or_skip(
     skip_baseline: bool,
     n_concurrent: int | None,
     max_agents: int | None,
+    max_cases: int | None = None,
     n_attempts: int | None = None,
     pass_threshold: float | None = None,
     stop_on_pass: bool | None = None,
@@ -836,6 +947,7 @@ def _run_agent_eval_or_skip(
         skip_baseline=skip_baseline,
         n_concurrent=n_concurrent,
         max_agents=max_agents,
+        max_cases=max_cases,
         n_attempts=n_attempts,
         pass_threshold=pass_threshold,
         stop_on_pass=stop_on_pass,
@@ -910,6 +1022,42 @@ _TIER_BANNERS = {
     "tier2": "Tier 2: Deduplication",
     "tier3": "Tier 3: Live Agent Evaluation",
 }
+
+
+def _offer_local_runtime_install(raw_agents: str | None) -> None:
+    """Before a local-mode run, offer to install each missing agent CLI (pinned, managed root)."""
+    import shlex
+    import sys
+
+    from skillevaluator.provider_config import ProviderConfigurationError, resolve_llm_provider
+    from skillevaluator.tier3.commands import resolve_agents
+    from skillevaluator.tier3.harbor.local_runtime import (
+        install_local_runtime,
+        managed_install_argv,
+        managed_runtime_prefix,
+        missing_local_runtimes,
+    )
+
+    # Without a provider Tier 3 cannot run, so there is nothing to install yet; Tier 3 reports why.
+    try:
+        agents = resolve_agents(raw_agents, provider=resolve_llm_provider().provider)
+    except (ProviderConfigurationError, ValueError):
+        return
+    for agent in missing_local_runtimes(agents):
+        argv = managed_install_argv(agent)
+        console.print(f"[yellow]Local mode needs the {agent} CLI, and it is not installed.[/yellow]")
+        console.print(f"  [dim]{shlex.join(argv)}[/dim]", highlight=False, soft_wrap=True)
+        if not sys.stdin.isatty():
+            console.print("  [dim]Run the command above, or use --env-mode docker.[/dim]")
+            continue
+        if not click.confirm(f"  Install it into {managed_runtime_prefix(agent)}?", default=True):
+            continue
+        with console.status(f"Installing {agent}…"):
+            error = install_local_runtime(agent)
+        if error:
+            console.print(f"  [red]✗ {error}[/red]", highlight=False)
+        else:
+            console.print(f"  [green]✓ {agent} installed[/green]")
 
 
 def _ensure_autopilot_dataset(skill_path: Path, *, quiet: bool = False, progress: str = "auto") -> str | None:
@@ -1089,6 +1237,8 @@ def _catalog_child_argv_from_ctx(
         argv.extend(["--tiers", str(params["tiers"])])
     if params.get("checks"):
         argv.extend(["--checks", str(params["checks"])])
+    if params.get("skip"):
+        argv.extend(["--skip", str(params["skip"])])
     if params.get("previous_version"):
         argv.extend(["--previous-version", str(params["previous_version"])])
     if params.get("fail_fast"):
@@ -1101,6 +1251,8 @@ def _catalog_child_argv_from_ctx(
         argv.append("--no-llm")
     if params.get("llm_verify"):
         argv.append("--llm-verify")
+    if params.get("skillspector_baseline"):
+        argv.extend(["--skillspector-baseline", str(params["skillspector_baseline"])])
     if not params.get("dedup", True):
         argv.append("--no-dedup")
     block_on_dedup = params.get("block_on_dedup")
@@ -1113,6 +1265,10 @@ def _catalog_child_argv_from_ctx(
         argv.extend(["--min-score", str(min_score)])
     if params.get("quality_config"):
         argv.extend(["--quality-config", str(Path(params["quality_config"]).resolve())])
+    if params.get("pii_waivers"):
+        # Not resolved: a waiver file's entries are relative to the directory the file (or the
+        # symlink to it) is in, so a child must see the same path the parent was given.
+        argv.extend(["--pii-waivers", str(Path(params["pii_waivers"]).absolute())])
     if params.get("external"):
         argv.append("--external")
     if params.get("policy_path"):
@@ -1146,6 +1302,8 @@ def _catalog_child_argv_from_ctx(
         argv.extend(["--n-concurrent", str(params["n_concurrent"])])
     if params.get("max_agents") is not None:
         argv.extend(["--max-agents", str(params["max_agents"])])
+    if params.get("max_cases") is not None:
+        argv.extend(["--max-cases", str(params["max_cases"])])
     if params.get("n_attempts") is not None:
         argv.extend(["--n-attempts", str(params["n_attempts"])])
     if params.get("pass_threshold") is not None:
@@ -1479,7 +1637,7 @@ def _finish_pipeline_view(
     agent_eval: bool,
 ) -> None:
     """Render the quiet-mode verdict panel and report footer."""
-    from skillevaluator.reporting.console_ui import Verdict, _is_skipped, first_fix
+    from skillevaluator.reporting.console_ui import MUTED, Verdict, _is_skipped, first_fix
 
     ext = {"html": ".html", "json": ".json", "markdown": ".md", "sarif": ".sarif.json"}
     links: list[tuple[str, str]] = [
@@ -1497,6 +1655,11 @@ def _finish_pipeline_view(
             headline = "gating tiers passed · advisory tier reported findings (see report)"
         else:
             headline = f"all {ran} tier{'s' if ran != 1 else ''} passed"
+            skipped = sum(
+                1 for r in tier_gate_results if isinstance(r.metadata, dict) and r.metadata.get("skipped_by_user")
+            )
+            if skipped:
+                headline += f"  ·  {skipped} check{'s' if skipped != 1 else ''} skipped"
             lift = summary.get("overall_lift")
             if agent_eval and isinstance(lift, (int, float)):
                 headline += f"  ·  skill lift {lift:+.2f}"
@@ -1504,19 +1667,29 @@ def _finish_pipeline_view(
         return
 
     failed = [result for result in tier_gate_results if not result.passed and not _is_skipped(result)]
-    if failed:
-        first = failed[0].validator_name or "validation"
-        extra = f" (+{len(failed) - 1} more)" if len(failed) > 1 else ""
-        tier_no = (failed[0].metadata.get("gating") or {}).get("tier")
-        tier_label = f" in Tier {tier_no}" if tier_no is not None else ""
-        headline = f"{first}{extra} failed{tier_label}"
+    if len(failed) == 1:
+        only = failed[0]
+        tier_no = (only.metadata.get("gating") or {}).get("tier")
+        state = "didn't run" if only.is_incomplete else "failed"
+        headline = f"{only.validator_name or 'validation'} {state}" + (
+            f" in Tier {tier_no}" if tier_no is not None else ""
+        )
     else:
-        headline = "validation failed"
+        by_tier: dict[object, list] = {}
+        for result in failed:
+            by_tier.setdefault((result.metadata.get("gating") or {}).get("tier"), []).append(result)
+        parts = []
+        for tier_no, results in by_tier.items():
+            broken = sum(1 for r in results if not r.is_incomplete)
+            counts = [
+                f"{broken} failed" if broken else "",
+                f"{len(results) - broken} didn't run" if broken < len(results) else "",
+            ]
+            parts.append((f"Tier {tier_no}: " if tier_no is not None else "") + ", ".join(c for c in counts if c))
+        headline = " · ".join(parts) or "validation failed"
     rerun = _rerun_hint(target_path, agent_eval)
-    view.finish(
-        Verdict(passed=False, headline=headline, fix=first_fix(tier_gate_results), rerun=rerun),
-        links,
-    )
+    fix = [("see what to fix above, then rerun", MUTED)] if failed else first_fix(tier_gate_results)
+    view.finish(Verdict(passed=False, headline=headline, fix=fix, rerun=rerun), links)
 
 
 def _print_tier_banner(title: str) -> None:
@@ -1588,6 +1761,16 @@ def _print_run_banner(target_path: Path, content_type: str, profile: str | None)
     "quality/lint/version are skill-only and skipped for rules/workflows.",
 )
 @click.option(
+    "--skip",
+    default=None,
+    metavar="CHECKS",
+    callback=_validate_skip,
+    cls=GroupedOption,
+    help_group=_TIER1_GROUP,
+    help="Comma-separated Tier 1 checks to leave out, e.g. secrets (the Gitleaks scan). "
+    "Skipped checks are shown and recorded as skipped in the report, and nothing is installed for them.",
+)
+@click.option(
     "--previous-version",
     default=None,
     metavar="VERSION",
@@ -1632,6 +1815,14 @@ def _print_run_banner(target_path: Path, content_type: str, profile: str | None)
     help="Run a second LLM pass to suppress false-positive findings.",
 )
 @click.option(
+    "--skillspector-baseline",
+    type=SKILLSPECTOR_BASELINE_PATH,
+    default=None,
+    cls=GroupedOption,
+    help_group=_TIER1_GROUP,
+    help=_SKILLSPECTOR_BASELINE_HELP,
+)
+@click.option(
     "--min-score",
     type=int,
     default=70,
@@ -1649,18 +1840,26 @@ def _print_run_banner(target_path: Path, content_type: str, profile: str | None)
     help="Override the packaged quality-default.yaml with a custom YAML file.",
 )
 @click.option(
+    "--pii-waivers",
+    type=PII_WAIVERS_PATH,
+    default=None,
+    cls=GroupedOption,
+    help_group=_TIER1_GROUP,
+    help=_PII_WAIVERS_HELP,
+)
+@click.option(
     "--profile",
     default=None,
     cls=GroupedOption,
     help_group=_RUN_GROUP,
-    help="Validation profile: external or a custom name. Default: $SKILLEVALUATOR_PROFILE env var, then external.",
+    help="Validation policy: default (external is a compatibility alias). Default: $SKILLEVALUATOR_PROFILE, then default.",
 )
 @click.option(
     "--external",
     is_flag=True,
     cls=GroupedOption,
     help_group=_RUN_GROUP,
-    help="Shortcut for --profile external (validate for public publication).",
+    help="Compatibility alias for --profile default; does not change repository visibility.",
 )
 @click.option(
     "--policy",
@@ -1773,6 +1972,14 @@ def _print_run_banner(target_path: Path, content_type: str, profile: str | None)
     cls=GroupedOption,
     help_group=_TIER3_GROUP,
     help="Maximum agents to run in parallel.",
+)
+@click.option(
+    "--max-cases",
+    type=click.IntRange(min=1),
+    default=None,
+    cls=GroupedOption,
+    help_group=_TIER3_GROUP,
+    help="Run only the first N eval cases (default: every case); a partial run is not publication evidence.",
 )
 @click.option(
     "--n-attempts",
@@ -1893,13 +2100,16 @@ def validate(
     full: bool,
     verbose: bool,
     checks: str | None,
+    skip: str | None,
     previous_version: str | None,
     fail_fast: bool,
     continue_on_failure: bool,
     llm: bool,
     llm_verify: bool,
+    skillspector_baseline: Path | None,
     min_score: int,
     quality_config: Path | None,
+    pii_waivers: Path | None,
     profile: str | None,
     external: bool,
     policy_path: Path | None,
@@ -1914,6 +2124,7 @@ def validate(
     skip_baseline: bool,
     n_concurrent: int | None,
     max_agents: int | None,
+    max_cases: int | None,
     n_attempts: int | None,
     pass_threshold: float | None,
     stop_on_pass: bool | None,
@@ -1977,7 +2188,7 @@ def validate(
     from skillevaluator.utils.helpers import make_timestamped_basename, resolve_git_remote_url, resolve_git_root
     from skillevaluator.validators.policy import apply_policy, resolve_policy
 
-    if external and profile and profile != "external":
+    if external and profile and profile not in {"default", "external"}:
         raise click.ClickException(f"--external conflicts with --profile {profile}; pass one or the other.")
     profile_name = "external" if external else profile
     try:
@@ -2086,12 +2297,16 @@ def validate(
         _print_run_banner(target_path, resolved_type, getattr(policy, "profile", None))
         _print_tier_banner(_TIER_BANNERS["tier1"])
 
+    if run_tier3 and env_mode == "local":
+        _offer_local_runtime_install(agents)
+
     # Autopilot source generation must precede every tier's publication-target
     # capture so one combined report cannot bind otherwise valid tier evidence
     # to different source trees. Generation remains advisory: retain any error
     # for the later Tier 3 skip result and continue through Tier 1/2.
     autopilot_error: str | None = None
     autopilot_dataset_note: str | None = None
+    _offer_scanner_install(checks, skip)
     view.start()
     if autopilot:
         # Generation now precedes Tier 1, so surface it on the first live block
@@ -2124,14 +2339,17 @@ def validate(
         checks=checks,
         use_llm=llm,
         llm_verify=llm_verify,
+        skillspector_baseline=skillspector_baseline,
         min_score=min_score,
         quality_config=quality_config,
+        pii_waivers=pii_waivers,
         previous_version=previous_version,
         policy=policy,
         content_type=resolved_type,
         fail_fast=fail_fast,
         continue_on_failure=continue_on_failure,
         on_check=_on_check if quiet else None,
+        skip=skip,
     )
     # The raw pass/fail signal drives --fail-fast identically in both modes;
     # the DISPLAYED tier summary must reflect policy-finalized severities or
@@ -2206,10 +2424,29 @@ def validate(
             [*tier3_config_rows, stage_hint_row("status", "running with-skill and baseline trials…")],
         )
 
-        def _on_engine_tail(lines: list[str]) -> None:
-            view.tier_progress(tier3_index, [*tier3_config_rows, *engine_feed_rows(lines)])
+        from threading import Lock
 
-        reporter = ViewProgressReporter(_on_engine_tail) if quiet else None
+        live_case_rows: list[TierRow] = []
+        engine_tail: list[str] = []
+        progress_lock = Lock()  # case rows refresh from a polling thread, engine lines from the runner
+
+        def _show_tier3_progress() -> None:
+            with progress_lock:
+                view.tier_progress(tier3_index, [*tier3_config_rows, *live_case_rows, *engine_feed_rows(engine_tail)])
+
+        def _on_engine_tail(lines: list[str]) -> None:
+            engine_tail[:] = lines
+            _show_tier3_progress()
+
+        def _on_case_rows(rows: list[TierRow]) -> None:
+            live_case_rows[:] = rows
+            _show_tier3_progress()
+
+        reporter = (
+            ViewProgressReporter(_on_engine_tail, on_cases=_on_case_rows, pass_threshold=pass_threshold)
+            if quiet
+            else None
+        )
         repo_context_exclude_paths = [output_dir] if report_output_required else []
         catalog_report_root = click.get_current_context().meta.get("skillevaluator_catalog_report_root")
         if isinstance(catalog_report_root, Path) and not paths_refer_to_same_location(
@@ -2225,6 +2462,7 @@ def validate(
             skip_baseline=skip_baseline,
             n_concurrent=n_concurrent,
             max_agents=max_agents,
+            max_cases=max_cases,
             n_attempts=n_attempts,
             pass_threshold=pass_threshold,
             stop_on_pass=stop_on_pass,
@@ -2244,7 +2482,14 @@ def validate(
             repo_context_exclude_paths=tuple(repo_context_exclude_paths),
         )
         results.append(tier3_result)
-        tier3_ran, tier3_ok, tier3_rows, tier3_skip = summarize_tier3(tier3_result)
+        # The panel follows the formats this run emits: with cli the full report
+        # lists the source errors under the Tier 3 finding, so the panel keeps
+        # the count; it shortens its own list only when an HTML or JSON report
+        # keeps every error.
+        tier3_ran, tier3_ok, tier3_rows, tier3_skip = summarize_tier3(
+            tier3_result,
+            report_formats=_effective_report_formats(report_formats, quiet=quiet),
+        )
         if autopilot_error and not tier3_ran:
             from skillevaluator.reporting.base import get_skip_reason
 
@@ -2352,9 +2597,9 @@ def validate(
         )
     if tier3_result is not None and block_on_agent_eval_effective:
         effective_gate_results.append(tier3_result)
-    from skillevaluator.reporting.base import passes_required_gate
+    from skillevaluator.reporting.run_status import Status, resolve_run_status
 
-    gate_failed = not all(passes_required_gate(result) for result in effective_gate_results)
+    gate_failed = resolve_run_status(effective_gate_results).headline != Status.PASSED
     if quiet:
         _finish_pipeline_view(
             view,
@@ -2428,14 +2673,22 @@ def rubric_eval(target_path: Path, min_score: int, report_formats: tuple[str, ..
 @_target_argument
 @click.option("--llm/--no-llm", default=False, show_default=True, help="Enable LLM security analysis.")
 @click.option("--llm-verify", is_flag=True, help="Use LLM verification to reduce false positives.")
+@click.option(
+    "--skillspector-baseline", type=SKILLSPECTOR_BASELINE_PATH, default=None, help=_SKILLSPECTOR_BASELINE_HELP
+)
 @_report_options
 def security_scan(
-    target_path: Path, llm: bool, llm_verify: bool, report_formats: tuple[str, ...], output_dir: Path
+    target_path: Path,
+    llm: bool,
+    llm_verify: bool,
+    skillspector_baseline: Path | None,
+    report_formats: tuple[str, ...],
+    output_dir: Path,
 ) -> None:
     """Scan for security vulnerabilities."""
     output_dir = _resolve_file_report_output_location(target_path.resolve(), output_dir, report_formats)
     if not emit_reports(
-        run_security_scan(target_path, use_llm=llm, llm_verify=llm_verify),
+        run_security_scan(target_path, use_llm=llm, llm_verify=llm_verify, skillspector_baseline=skillspector_baseline),
         report_formats=report_formats,
         output_dir=output_dir,
         basename=report_basename("security"),
@@ -2446,12 +2699,19 @@ def security_scan(
 @cli.command("pii-scan")
 @_target_argument
 @click.option("--llm-verify", is_flag=True, help="Use LLM verification to reduce false positives.")
+@click.option("--pii-waivers", type=PII_WAIVERS_PATH, default=None, help=_PII_WAIVERS_HELP)
 @_report_options
-def pii_scan(target_path: Path, llm_verify: bool, report_formats: tuple[str, ...], output_dir: Path) -> None:
+def pii_scan(
+    target_path: Path,
+    llm_verify: bool,
+    pii_waivers: Path | None,
+    report_formats: tuple[str, ...],
+    output_dir: Path,
+) -> None:
     """Scan for PII and local identifiers."""
     output_dir = _resolve_file_report_output_location(target_path.resolve(), output_dir, report_formats)
     if not emit_reports(
-        run_pii_scan(target_path, llm_verify=llm_verify),
+        run_pii_scan(target_path, llm_verify=llm_verify, pii_waivers=pii_waivers),
         report_formats=report_formats,
         output_dir=output_dir,
         basename=report_basename("pii"),
@@ -2666,6 +2926,13 @@ def _workflow_report_options(func):
 @click.argument("skill_path", metavar="PATH", type=click.Path(exists=True, file_okay=False, path_type=Path))
 @click.option("--checks", default=None, help="Select static checks; by default all checks include dependency auditing.")
 @click.option(
+    "--skip",
+    default=None,
+    metavar="CHECKS",
+    callback=_validate_skip,
+    help="Leave out these checks, e.g. secrets; they are reported as skipped.",
+)
+@click.option(
     "--llm/--no-llm", default=None, help="Include rubric, LLM security, and verification [default: when configured]."
 )
 @click.option("--min-score", type=click.IntRange(0, 100), default=70, show_default=True)
@@ -2675,17 +2942,24 @@ def _workflow_report_options(func):
     default=None,
     help="Override the packaged quality-default.yaml with a custom YAML file.",
 )
-@click.option("--profile", default=None, help="Validation policy profile [default: external].")
+@click.option("--pii-waivers", type=PII_WAIVERS_PATH, default=None, help=_PII_WAIVERS_HELP)
+@click.option("--profile", default=None, help="Validation policy [default: default; external is a compatibility alias].")
 @click.option("--previous-version", default=None, help="Previous version for version checks.")
+@click.option(
+    "--skillspector-baseline", type=SKILLSPECTOR_BASELINE_PATH, default=None, help=_SKILLSPECTOR_BASELINE_HELP
+)
 @_workflow_report_options
 def _tier1_workflow(
     skill_path: Path,
     checks: str | None,
+    skip: str | None,
     llm: bool | None,
     min_score: int,
     quality_config: Path | None,
+    pii_waivers: Path | None,
     profile: str | None,
     previous_version: str | None,
+    skillspector_baseline: Path | None,
     report_formats: tuple[str, ...],
     output_dir: Path,
 ) -> None:
@@ -2697,14 +2971,18 @@ def _tier1_workflow(
         policy = resolve_policy(profile=profile)
     except (FileNotFoundError, ValueError) as exc:
         raise click.ClickException(str(exc)) from exc
+    _offer_scanner_install(checks, skip)
     results = run_tier1_workflow(
         skill_path,
         checks=checks,
+        skip=skip,
         llm=llm,
         min_score=min_score,
         quality_config=quality_config,
+        pii_waivers=pii_waivers,
         profile=policy,
         previous_version=previous_version,
+        skillspector_baseline=skillspector_baseline,
     )
     # Resolved after the run so configuration errors still leave no output.
     output_dir = _resolve_file_report_output_location(skill_path.resolve(), output_dir, report_formats)
@@ -2821,6 +3099,11 @@ def _tier2_workflow(
     help="Create one eval case when no dataset/task source exists, then evaluate.",
 )
 @click.option("--skip-baseline", is_flag=True, help="Skip without-skill baseline.")
+@click.option(
+    "--skip-with-skill",
+    is_flag=True,
+    help="Skip the with-skill arm and run only the without-skill baseline (no lift analysis).",
+)
 @click.option("--n-attempts", type=int, default=None)
 @click.option("--pass-threshold", type=float, default=None)
 @click.option(
@@ -2830,6 +3113,12 @@ def _tier2_workflow(
 )
 @click.option("--n-concurrent", type=int, default=None)
 @click.option("--max-agents", type=int, default=None)
+@click.option(
+    "--max-cases",
+    type=click.IntRange(min=1),
+    default=None,
+    help="Run only the first N eval cases (default: every case); a partial run is not publication evidence.",
+)
 @click.option("--model", default=None, help="Global agent model override.")
 @click.option("--agent-model", multiple=True, help="Per-agent model override, AGENT=MODEL.")
 @click.option("--custom-dockerfile-mode", type=click.Choice(["preserve", "rebase"]), default=None)
@@ -2872,6 +3161,19 @@ def _tier2_workflow(
     show_default=True,
     help="Tier 3 progress presentation (auto uses Rich on a TTY and plain lines otherwise).",
 )
+@click.option(
+    "--progress-interval",
+    type=float,
+    default=None,
+    metavar="SECONDS",
+    callback=_validate_progress_interval,
+    help="Seconds between Tier 3 progress heartbeats (defaults to 1 for Rich and 60 for plain/CI output).",
+)
+@click.option(
+    "--verbose",
+    is_flag=True,
+    help="Also print per-evaluator and per-dimension tables and the metric findings report.",
+)
 def evaluate(
     skill_path: Path,
     agents: str | None,
@@ -2880,11 +3182,13 @@ def evaluate(
     environment_kwarg: tuple[str, ...],
     autopilot: bool,
     skip_baseline: bool,
+    skip_with_skill: bool,
     n_attempts: int | None,
     pass_threshold: float | None,
     stop_on_pass: bool | None,
     n_concurrent: int | None,
     max_agents: int | None,
+    max_cases: int | None,
     model: str | None,
     agent_model: tuple[str, ...],
     custom_dockerfile_mode: str | None,
@@ -2903,11 +3207,16 @@ def evaluate(
     evaluated_source_revision: str | None,
     evaluator_container_revision: str | None,
     progress: str,
+    progress_interval: float | None,
+    verbose: bool,
 ) -> None:
     """Run Tier 3 live agent evaluation."""
     from skillevaluator.evaluation import EvaluationOptions, EvaluationService
     from skillevaluator.tier3.harbor.progress import create_progress_reporter
 
+    if skip_baseline and skip_with_skill:
+        # Reject before --autopilot can spend a generation call on a run that cannot start.
+        raise click.UsageError("--skip-baseline and --skip-with-skill are mutually exclusive (no arm would run)")
     service = EvaluationService()
     # Resolved before the service is built so a non-canonical value is refused
     # at the boundary rather than after a long live run has already started.
@@ -2928,11 +3237,13 @@ def evaluate(
         backend=backend,
         environment_kwarg=environment_kwarg,
         skip_baseline=skip_baseline,
+        skip_with_skill=skip_with_skill,
         n_attempts=n_attempts,
         pass_threshold=pass_threshold,
         stop_on_pass=stop_on_pass,
         n_concurrent=n_concurrent,
         max_agents=max_agents,
+        max_cases=max_cases,
         model=model,
         agent_model=agent_model,
         custom_dockerfile_mode=custom_dockerfile_mode,
@@ -2952,6 +3263,7 @@ def evaluate(
     )
     try:
         if env_mode == "local":
+            _offer_local_runtime_install(agents)
             from rich.panel import Panel
             from rich.text import Text
 
@@ -2992,7 +3304,11 @@ def evaluate(
                         padding=(0, 1),
                     )
                 )
-        progress_reporter = create_progress_reporter(progress, stream=click.get_text_stream("stderr"))
+        progress_reporter = create_progress_reporter(
+            progress,
+            stream=click.get_text_stream("stderr"),
+            refresh_interval=progress_interval,
+        )
         engine_result = service.evaluate(options, progress_reporter=progress_reporter)
         failure = service.failure_reason(engine_result)
         display_result = engine_result
@@ -3008,7 +3324,7 @@ def evaluate(
         if isinstance(display_result, dict):
             from skillevaluator.tier3.result_display import render_evaluation_result
 
-            render_evaluation_result(display_result, console=console)
+            render_evaluation_result(display_result, console=console, verbose=verbose, skill_path=skill_path)
         if failure:
             raise click.exceptions.Exit(1)
     except (click.ClickException, click.exceptions.Exit):
@@ -3174,53 +3490,161 @@ def dashboard_command(paths: tuple[Path, ...], port: int | None, no_browser: boo
     raise SystemExit(launch_dashboard(paths, port=port, no_browser=no_browser))
 
 
+_DOCTOR_TIERS = ("1", "2", "3", "all")
+# Options that apply only to some tiers. An explicit value for a tier that was
+# not selected is rejected instead of being silently ignored.
+_DOCTOR_OPTION_TIERS = {
+    "checks": frozenset({"1"}),
+    "timeout": frozenset({"1", "2"}),
+    "verify_models": frozenset({"2", "3"}),
+    "agents": frozenset({"3"}),
+    "env_mode": frozenset({"3"}),
+    "environment_kwarg": frozenset({"3"}),
+    "agent_model": frozenset({"3"}),
+}
+
+
+def _doctor_tier_options(*, timeout_help: str):
+    """Add the tier selection and Tier 1/2 options shared by doctor and health-check."""
+
+    def decorate(func):
+        func = click.option(
+            "--timeout",
+            default=DEFAULT_PROBE_TIMEOUT_SEC,
+            show_default=True,
+            type=_FiniteFloatRange(min=0, min_open=True, max=MAX_PROBE_TIMEOUT_SEC),
+            help=timeout_help,
+        )(func)
+        func = click.option(
+            "--checks",
+            default=None,
+            help="Tier 1 checks whose scanners to probe, named as in validate --checks (default: validate's checks).",
+        )(func)
+        return click.option(
+            "--tier",
+            type=click.Choice(_DOCTOR_TIERS),
+            default="3",
+            show_default=True,
+            help="Readiness to check: 1 scanners, 2 embedding and LLM providers, 3 live evaluation, or all.",
+        )(func)
+
+    return decorate
+
+
+def _tier3_doctor_options(func):
+    """Add the Tier 3 options shared by doctor and tier3 doctor."""
+    func = click.option("--agent-model", multiple=True, help="Per-agent model override, AGENT=MODEL.")(func)
+    func = click.option(
+        "--environment-kwarg",
+        "--ek",
+        multiple=True,
+        help="Harbor environment constructor kwarg, KEY=VALUE. Repeat for multiple values; never pass secrets.",
+    )(func)
+    func = click.option("--env-mode", default="docker", show_default=True, type=ENV_MODE_CHOICE, metavar="MODE")(func)
+    return click.option(
+        "-a",
+        "--agents",
+        default=None,
+        help=(
+            "Comma-separated Harbor agents (claude aliases claude-code). Default follows the provider: "
+            "NVIDIA Build=opencode, OpenAI=codex, Anthropic=claude-code."
+        ),
+    )(func)
+
+
+def _run_doctor(
+    ctx: click.Context,
+    *,
+    tier: str,
+    agents: str | None,
+    env_mode: str,
+    environment_kwarg: tuple[str, ...],
+    checks: str | None = None,
+    timeout: float = DEFAULT_PROBE_TIMEOUT_SEC,
+    agent_model: tuple[str, ...] = (),
+    verify_models: bool = False,
+) -> int:
+    """Validate every option before any probe, then check each selected tier in order."""
+    selected_tiers = ("1", "2", "3") if tier == "all" else (tier,)
+
+    def explicit(name: str) -> bool:
+        return ctx.get_parameter_source(name) not in (None, click.core.ParameterSource.DEFAULT)
+
+    for name, tiers in _DOCTOR_OPTION_TIERS.items():
+        if explicit(name) and tiers.isdisjoint(selected_tiers):
+            raise click.UsageError(f"--{name.replace('_', '-')} does not apply to --tier {tier}.")
+    if explicit("timeout") and selected_tiers == ("2",) and not verify_models:
+        # Tier 2 stays offline unless --verify-models sends live requests, so
+        # there is nothing for --timeout to bound.
+        condition = " without --verify-models" if "verify_models" in ctx.params else ""
+        raise click.UsageError(f"--timeout does not apply to --tier 2{condition}.")
+    if "1" in selected_tiers:
+        unknown = sorted(set(enabled_check_lineup(checks)) - RECOGNIZED_CHECKS)
+        if unknown:
+            raise click.BadParameter(f"unknown Tier 1 check(s): {', '.join(unknown)}", param_hint="'--checks'")
+    parsed_environment_kwargs = (
+        _parse_environment_kwargs_cli(environment_kwarg, env_mode=env_mode) if "3" in selected_tiers else {}
+    )
+
+    # Tiers are independent: a failed tier never hides the readiness of the next.
+    exit_codes = []
+    for selected in selected_tiers:
+        if selected == "3":
+            from skillevaluator.tier3.commands import doctor as tier3_doctor
+
+            exit_codes.append(
+                tier3_doctor(
+                    agents=agents,
+                    env_mode=env_mode,
+                    environment_kwarg=environment_kwarg,
+                    verify_models=verify_models,
+                    agent_model=agent_model,
+                    environment_kwargs=parsed_environment_kwargs,
+                )
+            )
+        else:
+            from skillevaluator.doctor import doctor as lower_tier_doctor
+
+            exit_codes.append(
+                lower_tier_doctor(tier=selected, checks=checks, verify_models=verify_models, timeout=timeout)
+            )
+    return 1 if any(exit_codes) else 0
+
+
 @cli.command()
+@_doctor_tier_options(
+    timeout_help="Seconds allowed for each Tier 1 scanner probe and, with --verify-models, each Tier 2 live request."
+)
+@_tier3_doctor_options
 @click.option(
-    "-a",
-    "--agents",
-    default=None,
+    "--verify-models",
+    is_flag=True,
     help=(
-        "Comma-separated Harbor agents (claude aliases claude-code). Default follows the provider: "
-        "NVIDIA Build=opencode, OpenAI=codex, Anthropic=claude-code."
+        "Make live credential-bearing requests: Tier 3 checks resolved agent-model catalog reachability; "
+        "Tier 2 sends one embedding and one chat request."
     ),
 )
-@click.option("--env-mode", default="docker", show_default=True, type=ENV_MODE_CHOICE, metavar="MODE")
-@click.option(
-    "--environment-kwarg",
-    "--ek",
-    multiple=True,
-    help="Harbor environment constructor kwarg, KEY=VALUE. Repeat for multiple values; never pass secrets.",
-)
-@click.option("--agent-model", multiple=True, help="Per-agent model override, AGENT=MODEL.")
+@click.pass_context
+def doctor(ctx: click.Context, **options: Any) -> None:
+    """Check live-evaluation readiness, or select another tier with --tier."""
+    raise SystemExit(_run_doctor(ctx, **options))
+
+
+@click.command("doctor", cls=cli.command_class, context_settings=CONTEXT_SETTINGS)
+@_tier3_doctor_options
 @click.option(
     "--verify-models",
     is_flag=True,
     help="Check resolved agent-model catalog reachability with a live credential-bearing request.",
 )
-def doctor(
-    agents: str | None,
-    env_mode: str,
-    environment_kwarg: tuple[str, ...],
-    agent_model: tuple[str, ...],
-    verify_models: bool,
-) -> None:
+@click.pass_context
+def tier3_doctor_command(ctx: click.Context, **options: Any) -> None:
     """Check live-evaluation runtime readiness."""
-    from skillevaluator.tier3.commands import doctor as tier3_doctor
-
-    parsed_environment_kwargs = _parse_environment_kwargs_cli(environment_kwarg, env_mode=env_mode)
-    raise SystemExit(
-        tier3_doctor(
-            agents=agents,
-            env_mode=env_mode,
-            environment_kwarg=environment_kwarg,
-            verify_models=verify_models,
-            agent_model=agent_model,
-            environment_kwargs=parsed_environment_kwargs,
-        )
-    )
+    raise SystemExit(_run_doctor(ctx, tier="3", **options))
 
 
 @cli.command("health-check")
+@_doctor_tier_options(timeout_help="Seconds allowed for each Tier 1 scanner probe.")
 @click.option(
     "-a",
     "--agents",
@@ -3234,21 +3658,10 @@ def doctor(
     multiple=True,
     help="Harbor environment constructor kwarg, KEY=VALUE. Repeat for multiple values; never pass secrets.",
 )
-def health_check(agents: str | None, env_mode: str, environment_kwarg: tuple[str, ...]) -> None:
-    """Quick readiness check for the CLI and selected live-eval backend."""
-    from skillevaluator.tier3.commands import doctor as tier3_doctor
-
-    parsed_environment_kwargs = _parse_environment_kwargs_cli(environment_kwarg, env_mode=env_mode)
-    raise SystemExit(
-        tier3_doctor(
-            agents=agents,
-            env_mode=env_mode,
-            environment_kwarg=environment_kwarg,
-            verify_models=False,
-            agent_model=(),
-            environment_kwargs=parsed_environment_kwargs,
-        )
-    )
+@click.pass_context
+def health_check(ctx: click.Context, **options: Any) -> None:
+    """Quick readiness check for the CLI and selected live-eval backend, or another tier with --tier."""
+    raise SystemExit(_run_doctor(ctx, **options))
 
 
 @tier3.command("validate")
@@ -3261,6 +3674,22 @@ def tier3_validate(skill_path: Path, as_json: bool, strict: bool, harbor_contrac
     from skillevaluator.tier3.commands import validate_evals as tier3_validate_evals
 
     raise SystemExit(tier3_validate_evals(skill_path, as_json=as_json, strict=strict, harbor_contract=harbor_contract))
+
+
+@tier3.command("feedback")
+@click.argument("run_dir", type=click.Path(exists=True, file_okay=False, dir_okay=True, path_type=Path))
+@click.option(
+    "--skill",
+    "skill_path",
+    type=click.Path(exists=True, file_okay=False, dir_okay=True, path_type=Path),
+    default=None,
+    help="Evaluated skill directory; inferred from the run when omitted.",
+)
+def tier3_feedback(run_dir: Path, skill_path: Path | None) -> None:
+    """Chat about one completed run's results and possible skill improvements."""
+    from skillevaluator.tier3.commands import run_feedback_chat
+
+    raise SystemExit(run_feedback_chat(run_dir, skill_path=skill_path))
 
 
 @tier3.command("harbor-view")
@@ -3299,12 +3728,20 @@ tier3.add_command(init_custom_grader, "init-custom-grader")
 tier3.add_command(init_harbor_task, "init-harbor-task")
 tier3.add_command(compare, "compare")
 tier3.add_command(view, "view")
-tier3.add_command(doctor, "doctor")
+tier3.add_command(tier3_doctor_command, "doctor")
+
+from skillevaluator.tier3.decoy_commands import select_decoys_command
+
+tier3.add_command(select_decoys_command, "select-decoys")
 
 from skillevaluator.tier3.workflow import build_tier3_workflow
 
 tier3.workflow = build_tier3_workflow(evaluate)
 cli.add_command(harbor_view, "harbor-view")
+
+from skillevaluator.ci_onboarding import ci as ci_onboarding_group
+
+cli.add_command(ci_onboarding_group)
 
 
 if __name__ == "__main__":

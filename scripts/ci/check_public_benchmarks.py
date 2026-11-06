@@ -17,6 +17,7 @@ import sys
 import unicodedata
 from dataclasses import dataclass
 from datetime import UTC, date, datetime, timedelta
+from decimal import Context, Decimal, localcontext
 from functools import lru_cache
 from html import unescape
 from html.parser import HTMLParser
@@ -27,6 +28,7 @@ from urllib.parse import unquote as url_unquote
 from markdown_it import MarkdownIt
 
 from skillevaluator.publication_text import publication_confusable_skeleton, publication_identity_present
+from skillevaluator.source_identity import evaluated_source_revision, normalized_evaluated_source
 
 if TYPE_CHECKING:
     from markdown_it.token import Token
@@ -94,6 +96,15 @@ LINE_RULES = (
         "legacy Num score column",
         re.compile(r"\|\s*Dimension\s*\|\s*Num\s*\|", flags=re.IGNORECASE),
     ),
+)
+
+# A `baseline% → score% (uplift points)` transition in a Results at a Glance
+# cell. The uplift must equal the exact difference of the two displayed scores,
+# whatever their precision, so consistent whole-number cells from earlier
+# releases still pass.
+_SCORE_TRANSITION = re.compile(
+    r"(?<![\d.])(?P<baseline>-?\d+(?:\.\d+)?)%\s*(?:→|->)\s*(?P<score>-?\d+(?:\.\d+)?)%\s*"
+    r"\((?P<delta>[+±-]\d+(?:\.\d+)?) points?\)"
 )
 
 _AGENT_MODEL_STATE = re.compile(
@@ -288,6 +299,69 @@ _PASS_SOURCE_PROVENANCE_RULES = (
     ("Evaluated source revision", re.compile(_SOURCE_REVISION_VALUE).fullmatch),
     ("Evaluator container revision", _valid_pass_container_revision),
 )
+
+# Card label, ExpectedSource attribute and the accepted shape, in card order.
+_EXPECTED_SOURCE_FIELDS = (
+    ("Evaluated source", "repository", "an owner/name repository"),
+    ("Evaluated source revision", "revision", "a full Git commit or a sha256, sha384 or sha512 digest"),
+    (
+        "Evaluator container revision",
+        "evaluator_container_revision",
+        "a full Git commit or a container reference with a tag or digest",
+    ),
+)
+
+
+def _normalized_identity_value(field: str, value: str) -> str | None:
+    """Return one card identity value in ``source_identity``'s canonical spelling.
+
+    Both the expectation and the card go through the library's normalizer, so a
+    hex revision written in upper case still matches and a value the library
+    would never publish matches nothing.
+    """
+    if field == "Evaluated source revision":
+        # The card's revision line is the commit when the run supplied one and
+        # the content digest otherwise; a value can only take one of the shapes.
+        return (
+            evaluated_source_revision(normalized_evaluated_source({"commit": value, "content_digest": value})) or None
+        )
+    key = "repository" if field == "Evaluated source" else "evaluator_container_revision"
+    normalized = normalized_evaluated_source({key: value})
+    return normalized[key] if normalized else None
+
+
+@dataclass(frozen=True)
+class ExpectedSource:
+    """The source identity a publishing pipeline asked to evaluate.
+
+    Each attribute names one card line. A card scanned against an expectation
+    must record each named line exactly once, with the same canonical value, so
+    a stale card or one generated for another source cannot be published under
+    this request. An attribute left as ``None`` is not checked.
+    """
+
+    repository: str | None = None
+    revision: str | None = None
+    evaluator_container_revision: str | None = None
+
+    def __post_init__(self) -> None:
+        for field, attribute, shape in _EXPECTED_SOURCE_FIELDS:
+            value = getattr(self, attribute)
+            if value is None:
+                continue
+            normalized = _normalized_identity_value(field, value) if isinstance(value, str) else None
+            if normalized is None:
+                raise ValueError(f"expected {field.lower()} must be {shape}: {value!r}")
+            object.__setattr__(self, attribute, normalized)
+
+    def fields(self) -> tuple[tuple[str, str], ...]:
+        """Return ``(card label, canonical value)`` for every expected line."""
+        return tuple(
+            (field, value)
+            for field, attribute, _shape in _EXPECTED_SOURCE_FIELDS
+            if (value := getattr(self, attribute)) is not None
+        )
+
 
 _TIER_COMPLETION_STATUSES = {
     1: frozenset({"PASSED", "PASSED WITH OBSERVATIONS"}),
@@ -527,7 +601,9 @@ class _HTMLAttributeParser(HTMLParser):
         self.values.extend(value for _name, value in attrs if value is not None)
         alt = next((value for name, value in attrs if name.casefold() == "alt"), None)
         line = self.getpos()[0]
-        self.events.append(("start", normalized_tag, _html_element_is_visually_hidden(normalized_tag, attrs), alt, line))
+        self.events.append(
+            ("start", normalized_tag, _html_element_is_visually_hidden(normalized_tag, attrs), alt, line)
+        )
         attribute_names = {name.casefold() for name, _value in attrs}
         if (
             normalized_tag in _AMBIGUOUS_HTML_RENDERING_TAGS
@@ -686,7 +762,12 @@ def benchmark_files(roots: list[Path]) -> list[Path]:
     return sorted(found)
 
 
-def scan_file(path: Path, *, require_source_provenance: bool = False) -> list[Offender]:
+def scan_file(
+    path: Path,
+    *,
+    require_source_provenance: bool = False,
+    expected_source: ExpectedSource | None = None,
+) -> list[Offender]:
     try:
         if path.stat().st_size > _MAX_BENCHMARK_BYTES:
             return [Offender(path, 1, f"BENCHMARK.md exceeds {_MAX_BENCHMARK_BYTES:,} bytes")]
@@ -750,8 +831,7 @@ def scan_file(path: Path, *, require_source_provenance: bool = False) -> list[Of
                     if environment_field is not None:
                         candidate_lines = (
                             *candidate_lines,
-                            "- Environment: "
-                            + publication_confusable_skeleton(environment_field.group("value")),
+                            "- Environment: " + publication_confusable_skeleton(environment_field.group("value")),
                         )
             if any(pattern.search(candidate_line) for candidate_line in candidate_lines):
                 offenders.append(Offender(path, line_number, reason))
@@ -761,17 +841,62 @@ def scan_file(path: Path, *, require_source_provenance: bool = False) -> list[Of
         if reason not in {"retired product identity", "internal environment identity"}:
             continue
         if (
-            pattern.search(semantic_document)
-            or pattern.search(publication_confusable_skeleton(semantic_document))
+            pattern.search(semantic_document) or pattern.search(publication_confusable_skeleton(semantic_document))
         ) and not any(offender.reason == reason for offender in offenders):
             offenders.append(Offender(path, 1, reason))
 
     _check_required_headings(path, text, offenders)
     _check_metadata_semantics(path, text, offenders, require_source_provenance=require_source_provenance)
     _check_verdict_tier_consistency(path, text, offenders, require_source_provenance=require_source_provenance)
+    if expected_source is not None:
+        _check_expected_source(path, text, offenders, expected_source)
+    _check_score_transitions(path, text, offenders)
     _check_untrusted_structural_headings(path, text, offenders)
     _check_html_rendering_safety(path, text, offenders)
     return offenders
+
+
+def _check_score_transitions(path: Path, text: str, offenders: list[Offender]) -> None:
+    """Check the score transitions in Results at a Glance table body cells.
+
+    The reporter writes only its own numbers into these cells, so untrusted
+    finding or label text elsewhere on the card cannot trip this check.
+    """
+    for _start_line, section_tokens in _section_occurrences(text, "Results at a Glance"):
+        in_body_cell = False
+        for token in section_tokens:
+            if token.type in {"td_open", "td_close"}:
+                in_body_cell = token.type == "td_open"
+                continue
+            if not in_body_cell or token.type != "inline" or token.map is None:
+                continue
+            cell = _semantic_text(" ".join(_inline_visible_lines(token, include_code=True)))
+            problems = {
+                problem
+                for match in _SCORE_TRANSITION.finditer(cell)
+                if (problem := _score_transition_problem(match)) is not None
+            }
+            offenders.extend(Offender(path, token.map[0] + 1, problem) for problem in sorted(problems))
+
+
+def _score_transition_problem(match: re.Match[str]) -> str | None:
+    """Return why a score transition is malformed or inconsistent, or ``None`` when it is exact."""
+    raw_baseline, raw_score, raw_delta = match.group("baseline", "score", "delta")
+    # Enough precision for an exact difference of any two matched decimals.
+    with localcontext(Context(prec=len(match.group(0)))):
+        baseline = Decimal(raw_baseline)
+        score = Decimal(raw_score)
+        magnitude = Decimal(raw_delta[1:])
+        difference = score - baseline
+    if "-" in raw_baseline + raw_score or baseline > 100 or score > 100:
+        return "malformed score transition"
+    # A zero uplift is written as an unsigned ±0; a sign claims a direction.
+    if raw_delta[0] == "±":
+        return None if magnitude == 0 and difference == 0 else "score transition uplift does not match displayed scores"
+    expected = magnitude if raw_delta[0] == "+" else -magnitude
+    if magnitude == 0 or difference != expected:
+        return "score transition uplift does not match displayed scores"
+    return None
 
 
 def _check_required_headings(path: Path, text: str, offenders: list[Offender]) -> None:
@@ -1714,10 +1839,7 @@ def _contains_disallowed_category_c(value: str, *, allow_layout_whitespace: bool
     """Return whether text contains a disallowed control or line separator."""
     return any(
         (not allow_layout_whitespace or character not in {"\n", "\r", "\t"})
-        and (
-            unicodedata.category(character).startswith("C")
-            or unicodedata.category(character) in {"Zl", "Zp"}
-        )
+        and (unicodedata.category(character).startswith("C") or unicodedata.category(character) in {"Zl", "Zp"})
         for character in value
     )
 
@@ -1837,6 +1959,48 @@ def _check_source_provenance(path: Path, text: str, offenders: list[Offender]) -
             offenders.append(Offender(path, line_number, f"publication PASS without recorded {field.lower()}"))
 
 
+def _check_expected_source(path: Path, text: str, offenders: list[Offender], expected: ExpectedSource) -> None:
+    """Reject a card that does not name the source the publishing pipeline requested.
+
+    This applies to every verdict: a FAIL card for another commit is as wrong
+    to publish under this request as a PASS card.
+
+    Only a plain one-line list item counts as the field's line, which is how
+    the reporter renders it. ``_metadata_list_items`` leaves out an item with a
+    link, image or inline HTML, or one that continues onto a second line, so
+    such a line is reported as not recorded rather than as not canonical. The
+    strict provenance scan treats it as missing too. Only top-level items are
+    read, so a nested item is ignored rather than counted as a duplicate. The parser stays strict on
+    purpose: a link or inline HTML can make the visible value differ from the
+    raw text.
+    """
+    metadata_lines = _metadata_section_lines(text)
+    fallback_line = metadata_lines[0][0] if metadata_lines else 1
+    for field, expected_value in expected.fields():
+        name = field.lower()
+        matches = _metadata_field_matches(metadata_lines, field)
+        line_number = matches[0][0] if matches else fallback_line
+        if len(matches) > 1:
+            offenders.append(Offender(path, line_number, f"{name} recorded more than once, so it cannot match"))
+            continue
+        value = matches[0][1] if matches else ""
+        if not value or _NOT_RECORDED_VALUE.fullmatch(value):
+            offenders.append(Offender(path, line_number, f"{name} not recorded, but an expected value was given"))
+            continue
+        # The line is there but holds something the library would never render,
+        # so point the operator at the malformed value rather than a missing line.
+        recorded = _code_span_value(value)
+        # Padding inside the code span is never rendered, and a parser that reads
+        # the raw value would not see the canonical identity.
+        if recorded is not None and recorded != recorded.strip():
+            recorded = None
+        normalized = _normalized_identity_value(field, recorded) if recorded is not None else None
+        if normalized is None:
+            offenders.append(Offender(path, line_number, f"{name} is not a canonical value, so it cannot match"))
+        elif normalized != expected_value:
+            offenders.append(Offender(path, line_number, f"{name} does not match the expected value"))
+
+
 def _check_pass_provenance(path: Path, text: str, offenders: list[Offender]) -> None:
     """Reject PASS cards that replace required provenance with legacy placeholders."""
     metadata_lines = _metadata_section_lines(text)
@@ -1885,6 +2049,7 @@ def find_offenders(
     roots: list[Path],
     *,
     require_source_provenance: bool = False,
+    expected_source: ExpectedSource | None = None,
 ) -> tuple[list[Path], list[Offender]]:
     files: set[Path] = set()
     offenders: list[Offender] = []
@@ -1898,7 +2063,11 @@ def find_offenders(
     offenders.extend(
         offender
         for path in sorted_files
-        for offender in scan_file(path, require_source_provenance=require_source_provenance)
+        for offender in scan_file(
+            path,
+            require_source_provenance=require_source_provenance,
+            expected_source=expected_source,
+        )
     )
     return sorted_files, offenders
 
@@ -1922,14 +2091,45 @@ def _parser() -> argparse.ArgumentParser:
         action="store_true",
         help="Fail PASS cards that do not record an evaluated source repository and revision",
     )
+    parser.add_argument(
+        "--expected-source-repository",
+        metavar="OWNER/NAME",
+        help="Fail cards whose Evaluated source is missing or names another repository; implies --require-files",
+    )
+    parser.add_argument(
+        "--expected-source-revision",
+        metavar="REVISION",
+        help=(
+            "Fail cards whose Evaluated source revision is missing or differs (a full Git commit or a "
+            "sha256/sha384/sha512 digest); implies --require-files"
+        ),
+    )
+    parser.add_argument(
+        "--expected-evaluator-container-revision",
+        metavar="REFERENCE",
+        help="Fail cards whose Evaluator container revision is missing or differs; implies --require-files",
+    )
     return parser
 
 
 def main(argv: list[str] | None = None) -> int:
-    args = _parser().parse_args(argv)
+    parser = _parser()
+    args = parser.parse_args(argv)
+    expected_values = {
+        "repository": args.expected_source_repository,
+        "revision": args.expected_source_revision,
+        "evaluator_container_revision": args.expected_evaluator_container_revision,
+    }
+    expected_source = None
+    if any(value is not None for value in expected_values.values()):
+        try:
+            expected_source = ExpectedSource(**expected_values)
+        except ValueError as error:
+            parser.error(str(error))
     files, offenders = find_offenders(
         args.paths,
         require_source_provenance=args.require_source_provenance,
+        expected_source=expected_source,
     )
 
     if offenders:
@@ -1937,7 +2137,9 @@ def main(argv: list[str] | None = None) -> int:
         for offender in offenders:
             print(f"  {offender}")
         return 1
-    if args.require_files and not files:
+    # An expectation exists to bind a card to a request, so finding no card to
+    # bind is a failure rather than a vacuous pass.
+    if (args.require_files or expected_source is not None) and not files:
         print("Public benchmark scan FAILED: no BENCHMARK.md files found.")
         return 1
 

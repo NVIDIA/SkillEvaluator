@@ -6,6 +6,11 @@ All notable changes to SkillEvaluator are documented in this file.
 
 ### Changed
 
+- Root help shows the SkillEvaluator wordmark in more terminals: the
+  one-line wordmark still needs 115 columns, 76-114 columns now get the same
+  letters stacked (SKILL over EVALUATOR), and 60-75 columns get a two-row
+  wordmark. Narrower terminals keep the plain title.
+
 - When CI redaction masks a credential inside a reported PII value, remove the
   finding's digest as well.
 

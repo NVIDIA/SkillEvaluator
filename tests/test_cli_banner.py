@@ -47,7 +47,29 @@ def test_interactive_root_help_has_wordmark_and_installed_version(terminal, monk
     assert all(len(line) <= 80 for line in help_text.splitlines())
 
 
-@pytest.mark.parametrize("formatter_width,terminal_width", [(78, 40), (78, 80), (78, 114)])
+@pytest.mark.parametrize("terminal_width", [76, 114])
+def test_medium_help_stacks_the_full_wordmark(terminal, monkeypatch, terminal_width):
+    monkeypatch.setattr(shutil, "get_terminal_size", lambda: os.terminal_size((terminal_width, 40)))
+    banner = root_help(78).split("Usage:", 1)[0]
+
+    assert len([line for line in banner.splitlines() if "█" in line]) == 10
+    assert "╚══════╝" in banner
+    assert f"v{__version__}" in banner
+    assert all(len(line) <= terminal_width for line in banner.splitlines())
+
+
+@pytest.mark.parametrize("terminal_width", [60, 75])
+def test_small_help_uses_two_row_wordmark(terminal, monkeypatch, terminal_width):
+    monkeypatch.setattr(shutil, "get_terminal_size", lambda: os.terminal_size((terminal_width, 40)))
+    banner = root_help(78).split("Usage:", 1)[0]
+
+    assert len([line for line in banner.splitlines() if "█" in line]) == 2
+    assert "╚══════╝" not in banner
+    assert f"v{__version__}" in banner
+    assert all(len(line) <= terminal_width for line in banner.splitlines())
+
+
+@pytest.mark.parametrize("formatter_width,terminal_width", [(78, 40), (78, 57)])
 def test_narrow_help_uses_compact_banner(terminal, monkeypatch, formatter_width, terminal_width):
     monkeypatch.setattr(shutil, "get_terminal_size", lambda: os.terminal_size((terminal_width, 40)))
     banner = root_help(formatter_width).split("Usage:", 1)[0]

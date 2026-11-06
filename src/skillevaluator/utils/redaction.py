@@ -134,6 +134,10 @@ _PEM_REDACTIONS = (
         "private-key-<redacted>",
     ),
 )
+# Every token pattern below (the JWT and ``_REDACTIONS``) matches only letters,
+# digits and ``_TOKEN_PUNCTUATION``. ``credential_safe_cut`` relies on that: a new
+# pattern that takes other characters inside a token must widen this set.
+_TOKEN_PUNCTUATION = "._~+/=-"
 # A JWT used to start at any ``\beyJ``, so in a run of JWT characters such as
 # "eyJ-" * n every "-eyJ" was a start, and each start scanned to the end of the run
 # looking for ".". Now a match starts only at the beginning of a run. The part of
@@ -282,6 +286,28 @@ def redact_sensitive_text(value: str, *, max_len: int | None = None, max_input_c
             return out[:max_len]
         return out[: max_len - 14] + "...<truncated>"
     return out
+
+
+def credential_safe_cut(value: str, end: int) -> int:
+    """Return how much of ``value[:end]`` can be redacted on its own, from 0 to ``end``.
+
+    The cut follows the last whitespace or punctuation character that no token
+    pattern takes inside a token, so no credential is left partly before it.
+    Cut assignments, authorization headers and private keys are still redacted
+    to the end. A cut inside a URL's user info would leave the part before it
+    unredacted, so the cut moves in front of a ``://`` that only user-info
+    characters follow.
+    """
+    index = min(end, len(value)) - 1
+    while index >= 0:
+        char = value[index]
+        if char.isspace() or not (char.isalnum() or char in _TOKEN_PUNCTUATION):
+            scheme = value.rfind("://", 0, index)
+            if scheme < 0 or any(part.isspace() or part in "/?#" for part in value[scheme + 3 : index + 1]):
+                return index + 1
+            index = scheme
+        index -= 1
+    return 0
 
 
 def redact_printable_text(value: str, *, max_len: int | None = None, max_input_chars: int | None = None) -> str:

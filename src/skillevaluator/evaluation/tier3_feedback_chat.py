@@ -254,7 +254,8 @@ _ABSOLUTE_PATH_ROOT = re.compile(r"[\\/]|~[\w.-]*[\\/]|[A-Za-z]:[\\/]|(?:\$HOME|
 # A root right after one of these starts a path of its own: ``/opt/bin,/home/a``,
 # ``--out=/home/a``, ``log(/home/a)``. A colon counts unless it is a drive letter's.
 _PATH_LIST_SEPARATORS = ",;:=([{"
-_URL_SPAN_RE = re.compile(r"(?i)\b[a-z][a-z0-9+.-]*://\S+")
+_FILE_URL_LOCALHOST_PATH_RE = re.compile(r"(?i)\b(?P<prefix>file://localhost)(?P<path>/\S*)")
+_URL_SPAN_RE = re.compile(r"(?i)\b(?!file:)[a-z][a-z0-9+.-]*://\S+")
 
 
 def _starts_absolute_path(value: str, index: int) -> bool:
@@ -403,6 +404,12 @@ class _Scrubber:
 
         def scrub_segment(segment: str) -> str:
             if self.local_paths is not None:
+
+                def scrub_localhost_file_url(match: re.Match[str]) -> str:
+                    path = self.local_paths.sub(self._local, match.group("path"))
+                    return f"{match.group('prefix')}/{path.lstrip('/')}"
+
+                segment = _FILE_URL_LOCALHOST_PATH_RE.sub(scrub_localhost_file_url, segment)
                 segment = self.local_paths.sub(self._local, segment)
             if not self.run_id or self.run_id not in segment:
                 return segment

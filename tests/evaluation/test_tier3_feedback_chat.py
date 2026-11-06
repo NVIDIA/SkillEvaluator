@@ -384,10 +384,14 @@ def test_context_leaves_url_path_values_unchanged_while_scrubbing_other_paths(tm
     skill = home / "work" / "acme-skill"
     query_url = f"https://example.test/?path={skill / 'guide'}"
     fragment_url = f"https://example.test/guide#{home / 'work' / 'acme-skill' / 'references' / 'a.md'}"
+    file_url = f"file:///{skill.as_posix().lstrip('/')}/SKILL.md"
+    localhost_file_url = f"file://localhost/{skill.as_posix().lstrip('/')}/SKILL.md"
     payload = {
         "dataset": [
             {"id": "query", "question": query_url, "ground_truth": ""},
             {"id": "fragment", "question": fragment_url, "ground_truth": ""},
+            {"id": "file", "question": file_url, "ground_truth": ""},
+            {"id": "localhost-file", "question": localhost_file_url, "ground_truth": ""},
         ],
         "agents": {"codex": {"execution_errors": [f"Failed at {skill / 'SKILL.md'}; URL: {query_url}"]}},
     }
@@ -400,8 +404,15 @@ def test_context_leaves_url_path_values_unchanged_while_scrubbing_other_paths(tm
     )
 
     questions = {case["entry_id"]: case["question"] for case in context["cases"]}
-    assert questions == {"query": query_url, "fragment": fragment_url}
-    assert context["agents"]["codex"]["execution_errors"] == [f"Failed at acme-skill/SKILL.md; URL: {query_url}"]
+    scrubbed_skill_path = Path("acme-skill") / "SKILL.md"
+    file_prefix = "file:///" if skill.drive else "file://"
+    assert questions == {
+        "query": query_url,
+        "fragment": fragment_url,
+        "file": f"{file_prefix}{scrubbed_skill_path.as_posix()}",
+        "localhost-file": f"file://localhost/{scrubbed_skill_path.as_posix()}",
+    }
+    assert context["agents"]["codex"]["execution_errors"] == [f"Failed at {scrubbed_skill_path}; URL: {query_url}"]
 
 
 def test_context_redacts_credentials_but_keeps_measurements() -> None:

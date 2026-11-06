@@ -141,6 +141,12 @@ def run(reports, output):
                     "() => document.querySelector('.t3-agent-panel.active').id === document.querySelector('.t3-agent-anchor').dataset.tier3AgentPanelId",
                     "unusual agent link",
                 )
+                # Focus lands on the named panel, never on the aria-hidden scroll anchor.
+                check(
+                    page,
+                    "() => document.activeElement.id === document.querySelector('.t3-agent-anchor').dataset.tier3AgentPanelId",
+                    "agent link focus",
+                )
                 # Sticky tier and local navigation occupy separate vertical bands.
                 page.evaluate("() => window.scrollBy(0, 350)")
                 if width <= 760:
@@ -236,6 +242,23 @@ def run(reports, output):
                     page,
                     "() => document.querySelector('#results-by-validator').classList.contains('active') && document.querySelector('#validator-1').getClientRects().length > 0 && document.activeElement.id === 'validator-1' && document.querySelector('#validator-1 .validator-content').classList.contains('active')",
                     "validator fragment reload",
+                )
+                # Whole tiers and the skip link are sections: open at their top, never centred.
+                page.goto((reports / "full.html").as_uri() + "#tab-tier3")
+                page.reload()
+                check(
+                    page,
+                    "() => document.querySelector('.tab-content.active').id === 'tab-tier3' && Math.abs(document.getElementById('tab-tier3').getBoundingClientRect().top) < 200",
+                    "tier fragment reload",
+                )
+                page.goto((reports / "full.html").as_uri())
+                page.evaluate("() => window.scrollTo(0, document.documentElement.scrollHeight)")
+                page.locator(".skip-link").focus()
+                page.keyboard.press("Enter")
+                check(
+                    page,
+                    "() => document.activeElement.id === 'report-workspace' && Math.abs(document.getElementById('report-workspace').getBoundingClientRect().top) < 2",
+                    "skip link",
                 )
                 page.goto((reports / "absent.html").as_uri())
                 page.select_option("#report-theme", theme)

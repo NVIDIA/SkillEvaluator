@@ -1306,7 +1306,18 @@
                     <span class="agent-hero-eyebrow">{{ content_label }} evaluation</span>
                     <h1 class="agent-hero-title" id="report-title">{{ hero_title }}</h1>
                     <p class="hero-command-status verdict-chip {{ verdict_class }}">{{ presentation.command_label }}</p>
-                    <p class="hero-decision-reason">{{ presentation.tiers.values() | sum(attribute='failed') }} failed · {{ presentation.tiers.values() | sum(attribute='incomplete') }} incomplete check(s). See tier evidence for reasons.</p>
+                    {#- Advisory tiers never change the required result, so count them apart from it. -#}
+                    {%- set hero_counts = namespace(failed=0, incomplete=0, advisory=0) -%}
+                    {%- for number, tier in presentation.tiers.items() -%}
+                    {%- if ('tier' ~ number) in nonblocking_tiers -%}
+                    {%- set hero_counts.advisory = hero_counts.advisory + tier.failed + tier.incomplete -%}
+                    {%- else -%}
+                    {%- set hero_counts.failed = hero_counts.failed + tier.failed -%}
+                    {%- set hero_counts.incomplete = hero_counts.incomplete + tier.incomplete -%}
+                    {%- endif -%}
+                    {%- endfor %}
+                    {% if hero_counts.failed or hero_counts.incomplete %}<p class="hero-decision-reason">{{ hero_counts.failed }} failed · {{ hero_counts.incomplete }} incomplete required check(s). See tier evidence for reasons.</p>{% endif %}
+                    {% if hero_counts.advisory %}<p class="hero-decision-reason">{{ hero_counts.advisory }} advisory check(s) failed or incomplete; advisory tiers do not change the required result.</p>{% endif %}
                     {#-
                         Show the *full* path/URL only when it actually adds
                         information (i.e. it differs from the friendly label).
@@ -3875,7 +3886,9 @@
                 // off-screen position.
                 var scroll = function () {
                     reportScrollTo(anchor, 'start');
-                    anchor.focus({preventScroll:true});
+                    // The anchor is aria-hidden; focus the named agent panel instead.
+                    var panel = panelId ? document.getElementById(panelId) : null;
+                    if (panel) panel.focus({preventScroll:true});
                 };
                 if (typeof requestAnimationFrame === 'function') {
                     requestAnimationFrame(scroll);

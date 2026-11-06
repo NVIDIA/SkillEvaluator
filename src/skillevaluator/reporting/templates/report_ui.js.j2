@@ -125,10 +125,29 @@ function openFinding(id) {
     setTimeout(function() { target.classList.remove('finding-flash'); }, 2000);
     return false;
 }
+// Sidebar sections and the skip link open at their top and take focus, like a native anchor.
+function openReportSection(target) {
+    if (target.tagName === 'DETAILS') target.open = true;
+    target.tabIndex = -1;
+    reportScrollTo(target);
+    target.focus({preventScroll:true});
+    reportCurrentSection(target.id);
+}
 // Share destination routing for initial URLs and clicks, including the alternate validator view.
 function openReportDestination(id) {
     const target = document.getElementById(id);
     if (!target) return true;
+    // Whole tiers and sections are not evidence: never centre a container taller than the viewport.
+    if (/^tab-tier\d$/.test(id) && target.classList.contains('tab-content')) {
+        activateReportTier(id.slice(4));
+        try { history.replaceState(null, '', '#' + id); } catch (err) { /* file:// history is optional. */ }
+        return false;
+    }
+    if (Array.from(document.querySelectorAll('[data-report-section]')).some(link => link.dataset.reportSection === id)) {
+        openReportSection(target);
+        try { history.replaceState(null, '', '#' + id); } catch (err) { /* file:// history is optional. */ }
+        return false;
+    }
     if (target.classList.contains('validator-card') && /^validator-\d+$/.test(id)) {
         scrollToValidator(id.slice('validator-'.length));
         try { history.replaceState(null, '', '#' + id); } catch (err) { /* file:// history is optional. */ }
@@ -274,12 +293,7 @@ document.addEventListener('DOMContentLoaded', function() {
     document.querySelectorAll('[data-report-section]').forEach(link => link.addEventListener('click', function(event) {
         event.preventDefault();
         const target = document.getElementById(link.dataset.reportSection);
-        if (!target) return;
-        if (target.tagName === 'DETAILS') target.open = true;
-        target.tabIndex = -1;
-        reportScrollTo(target);
-        target.focus({preventScroll:true});
-        reportCurrentSection(target.id);
+        if (target) openReportSection(target);
     }));
     reportMeasureNavigation();
     if (window.ResizeObserver) {

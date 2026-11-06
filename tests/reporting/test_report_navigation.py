@@ -119,3 +119,54 @@ def test_overall_command_badge_is_prominent_and_agent_quality_is_named():
     badge = next(element for element in doc.elements if "hero-command-status" in element.get("class", "").split())
     assert {"verdict-chip", "fail"} <= set(badge["class"].split())
     assert "Tier 3 quality: " in html.split('<div class="hero-side">', 1)[1].split("</div>", 1)[0]
+
+
+def _gated(result, tier, blocking=True):
+    result.metadata["gating"] = {"tier": tier, "blocking": blocking}
+    return result
+
+
+def _hero_reasons(html):
+    import re
+
+    return re.findall(r'<p class="hero-decision-reason">([^<]*)</p>', html)
+
+
+def test_hero_reason_counts_advisory_failures_apart_from_the_required_result():
+    passed = ValidationResult(validator_name="License Compliance")
+    passed.add_success("license", "License found")
+    advisory = ValidationResult(validator_name="Similarity Check")
+    advisory.add_error("Similarity provider failed")
+    html = HTMLReporter(include_timestamp=False).render_all([_gated(passed, 1), _gated(advisory, 2, blocking=False)])
+    assert "Passed required checks" in html
+    assert _hero_reasons(html) == [
+        "1 advisory check(s) failed or incomplete; advisory tiers do not change the required result."
+    ]
+
+    clean = ValidationResult(validator_name="License Compliance")
+    clean.add_success("license", "License found")
+    assert _hero_reasons(HTMLReporter(include_timestamp=False).render_all([_gated(clean, 1)])) == []
+
+    required = ValidationResult(validator_name="Schema")
+    required.add_error("Missing name")
+    html = HTMLReporter(include_timestamp=False).render_all([_gated(required, 1)])
+    assert _hero_reasons(html) == ["1 failed · 0 incomplete required check(s). See tier evidence for reasons."]
+
+
+def test_nojs_dark_fallback_mirrors_every_hard_coded_dark_override():
+    import re
+    from pathlib import Path
+
+    templates = Path(__file__).resolve().parents[2] / "src/skillevaluator/reporting/templates"
+    report = (templates / "report.html.j2").read_text(encoding="utf-8")
+    styles = (templates / "report_ui.css.j2").read_text(encoding="utf-8")
+    overrides = re.findall(r'^\s*@media screen \{ \[data-theme="dark"\] (.*\}) \}\s*$', report, re.MULTILINE)
+    assert overrides, "expected hard-coded dark overrides in report.html.j2"
+    fallback = next(
+        block
+        for block in re.findall(r"@media screen and \(prefers-color-scheme:dark\)\{(.*)\}$", styles, re.MULTILINE)
+        if not block.startswith(":root:not([data-theme]){")
+    )
+    for rule in overrides:
+        mirrored = ":root:not([data-theme]) " + rule.replace('[data-theme="dark"]', ":root:not([data-theme])")
+        assert mirrored in fallback, rule

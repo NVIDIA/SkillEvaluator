@@ -315,7 +315,9 @@ def test_emitting_human_reports_preserves_canonical_json_and_return_value(tmp_pa
         is False
     )
     assert "Passed required checks" in output.getvalue()
-    assert "3 scored trials: 3 with skill, baseline skipped" in (tmp_path / "projection.html").read_text()
+    assert "3 scored trials: 3 with skill, baseline skipped" in (tmp_path / "projection.html").read_text(
+        encoding="utf-8"
+    )
     assert source == snapshot
     assert JSONReporter(include_timestamp=False).render(source) == before
 
@@ -474,3 +476,254 @@ def test_zero_execution_counts_stay_explicit_at_terminal_widths(monkeypatch, wid
     assert "0 of 0 checks passed" not in output
     assert "Passed required checks" in output
     assert "Publication eligibility: Incomplete" in output
+
+
+@pytest.mark.parametrize(
+    ("mode", "present", "expected"),
+    [
+        ("with_skill_only", "with_skill", "3 scored trials: 3 with skill, baseline skipped"),
+        ("baseline_only", "without_skill", "3 scored trials: with skill skipped, 3 baseline"),
+    ],
+)
+def test_producer_one_arm_mode_marks_the_missing_arm_skipped(mode, present, expected):
+    # --skip-baseline / --skip-with-skill omit the unexecuted condition; the
+    # payload-level mode is the producer's explicit skip marker.
+    counts = {"execution_status": "succeeded", "scored_attempts": 3, "expected_attempts": 3}
+    coverage = presentation.trial_coverage({"mode": mode, "agents": {"a": {"conditions": {present: counts}}}})
+    assert coverage.text == expected
+    assert "unavailable" not in coverage.text
+
+
+def test_advisory_tier3_skip_reports_skipped_arms_not_unavailable_counts():
+    coverage = presentation.trial_coverage({"execution_status": "skipped", "agents": {}})
+    assert (coverage.with_skill.status, coverage.baseline.status) == ("skipped", "skipped")
+    assert "unavailable" not in coverage.text
+    source = result(3, skipped=True, agent_eval={"execution_status": "skipped", "agents": {}})
+    output = CLIReporter().render_all([source])
+    assert "scored trials unavailable" not in output
+
+
+def test_standalone_tier3_report_header_follows_failing_tier3_verdict():
+    from skillevaluator.evaluation.tier3_report import _validation_result_from_payload, build_agent_eval_payload
+    from skillevaluator.tier3.harbor.metrics import DEFAULT_METRICS
+
+    def arm(n):
+        return {"execution_status": "succeeded", "execution_errors": [], "expected_attempts": n, "scored_attempts": n}
+
+    payload = build_agent_eval_payload(
+        "demo",
+        {
+            "agent": {
+                "with_skill": dict.fromkeys(DEFAULT_METRICS, 0.2),
+                "without_skill": dict.fromkeys(DEFAULT_METRICS, 0.9),
+                "execution_status": "succeeded",
+                "execution_errors": [],
+                "expected_attempts": 2,
+                "scored_attempts": 2,
+                "conditions": {"with_skill": arm(1), "without_skill": arm(1)},
+                "num_trials": 1,
+                "num_trials_baseline": 1,
+            }
+        },
+        dataset=[{"id": "case-a"}],
+        attempt_policy={"max_attempts": 1, "stop_on_pass": False, "pass_threshold": 0.5},
+        use_llm_judge=False,
+    )
+    source = _validation_result_from_payload(payload)
+    assert payload["verdict"] == "fail" and "gating" not in source.metadata
+    ctx = context([source], report_scope="tier3")
+    assert ctx.command_status == Status.FAILED
+    html = HTMLReporter(report_scope="tier3", tabs=[{"id": "tier3", "label": "Tier 3"}]).render_all([source])
+    assert re.search(r'header-status-badge[^>]*data-verdict="fail"', html)
+    assert "Passed required checks" not in html
+
+
+def test_not_applicable_rows_show_their_recorded_reason():
+    covered = ValidationResult(validator_name="Code Risk", metadata={"gating": {"tier": 1, "blocking": True}})
+    covered.add_success("code_file_discovery", "No code files found - code risk analysis is not applicable")
+    skipped = result(skipped=True, skip_reason="Lint is not applicable: no scripts directory")
+    output = re.sub(r"\s+", " ", CLIReporter().render_all([covered, skipped]))
+    assert "1 checks passed" not in output
+    assert "Skipped (see warnings)" not in output
+    assert "No code files found" in output
+    assert "Lint is not applicable: no scripts directory" in output
+
+
+def test_executed_tier_counts_stay_on_one_line_at_narrow_widths(monkeypatch):
+    monkeypatch.setenv("COLUMNS", "60")
+    monkeypatch.setenv("TERM", "xterm-256color")
+    monkeypatch.setenv("CI", "true")
+    passed = result()
+    passed.add_success("lint", "Lint passed")
+    failed = result()
+    failed.add_error("Lint failed")
+    output = CLIReporter().render_all([passed, failed, result(skipped=True)])
+    assert "Tier 1: 1 of 2 checks passed; 1 failed, 0 incomplete, 1 skipped, 0 N/A" in output
+
+
+@pytest.mark.parametrize(
+    "mode",
+    [
+        pytest.param([], id="empty-list"),
+        pytest.param({}, id="empty-object"),
+        pytest.param(["with_skill_only"], id="list-mode"),
+        pytest.param({"baseline_only": True}, id="object-mode"),
+        pytest.param(None, id="null"),
+        pytest.param(1, id="number"),
+        pytest.param(True, id="boolean"),
+        pytest.param("unrecognized", id="unknown-string"),
+    ],
+)
+@pytest.mark.parametrize("recorded", [False, True], ids=["unavailable", "recorded-conditions"])
+def test_malformed_or_unknown_mode_preserves_coverage_evidence_and_payload(mode, recorded):
+    agents = {}
+    if recorded:
+        agents = {
+            "a": {
+                "conditions": {
+                    "with_skill": {"execution_status": "succeeded", "scored_attempts": 2, "expected_attempts": 3},
+                    "without_skill": {"execution_status": "incomplete", "scored_attempts": 1, "expected_attempts": 3},
+                }
+            }
+        }
+    payload = {"mode": mode, "agents": agents}
+    before = copy.deepcopy(payload)
+    coverage = presentation.trial_coverage(payload)
+    if recorded:
+        assert coverage.with_skill.status == "succeeded"
+        assert coverage.baseline.status == "incomplete"
+        assert coverage.with_skill.scored == 2
+        assert coverage.baseline.scored == 1
+        assert coverage.with_skill.expected == coverage.baseline.expected == 3
+        assert coverage.text == "3 scored trials: 2 with skill, 1 baseline"
+    else:
+        assert coverage.with_skill.status == coverage.baseline.status == "unavailable"
+        assert coverage.with_skill.scored is coverage.baseline.scored is None
+        assert coverage.with_skill.expected is coverage.baseline.expected is None
+        assert "with skill scored trials unavailable" in coverage.text
+        assert "baseline scored trials unavailable" in coverage.text
+    assert payload == before
+
+
+@pytest.fixture
+def passing_tier3_counts_payload():
+    from skillevaluator.evaluation.tier3_report import build_agent_eval_payload
+    from skillevaluator.tier3.harbor.metrics import DEFAULT_METRICS
+
+    arm = {"execution_status": "succeeded", "execution_errors": [], "expected_attempts": 1, "scored_attempts": 1}
+    return build_agent_eval_payload(
+        "demo",
+        {
+            "agent": {
+                "with_skill": dict.fromkeys(DEFAULT_METRICS, 0.8),
+                "without_skill": dict.fromkeys(DEFAULT_METRICS, 0.4),
+                "execution_status": "succeeded",
+                "execution_errors": [],
+                "expected_attempts": 2,
+                "scored_attempts": 2,
+                "conditions": {"with_skill": arm, "without_skill": arm},
+                "num_trials": 1,
+                "num_trials_baseline": 1,
+            }
+        },
+        dataset=[{"id": "case-a"}],
+        attempt_policy={"max_attempts": 1, "stop_on_pass": False, "pass_threshold": 0.5},
+        use_llm_judge=False,
+    )
+
+
+@pytest.mark.parametrize("tier", [1, 2, 3])
+@pytest.mark.parametrize(
+    ("adverse", "blocking", "expected", "label"),
+    [
+        ("fail", True, (1, 0, 0), "Changes required"),
+        ("incomplete", True, (0, 1, 0), "Incomplete"),
+        ("fail", False, (0, 0, 1), "Passed required checks"),
+        ("incomplete", False, (0, 0, 1), "Passed required checks"),
+    ],
+)
+def test_per_result_adverse_counts_handle_mixed_tier_gates(
+    tier, adverse, blocking, expected, label, passing_tier3_counts_payload
+):
+    passing, unfavorable = result(tier), result(tier)
+    if tier == 3:
+        passing.metadata["agent_eval"] = copy.deepcopy(passing_tier3_counts_payload)
+        unfavorable.metadata["agent_eval"] = copy.deepcopy(passing_tier3_counts_payload)
+    unfavorable.metadata["gating"]["blocking"] = blocking
+    if adverse == "fail":
+        unfavorable.add_error("failed required or advisory check")
+    else:
+        unfavorable.mark_scan_incomplete("scanner")
+    sources = [passing, unfavorable]
+    before = copy.deepcopy(sources)
+    ctx = context(sources)
+    assert (ctx.required_failed, ctx.required_incomplete, ctx.advisory_unfavorable) == expected
+    assert ctx.command_label == label
+    assert sources == before
+
+
+@pytest.mark.parametrize(
+    ("verdict", "advisory", "expected", "label"),
+    [
+        ("fail", False, (1, 0, 0), "Changes required"),
+        ("inconclusive", False, (0, 1, 0), "Incomplete"),
+        ("fail", True, (0, 0, 1), "Passed required checks"),
+        ("inconclusive", True, (0, 0, 1), "Passed required checks"),
+    ],
+)
+def test_standalone_adverse_counts_follow_existing_headline_override(verdict, advisory, expected, label):
+    source = ValidationResult(validator_name="AGENT_EVAL", passed=True, metadata={"agent_eval": {"verdict": verdict}})
+    if advisory:
+        source.metadata["gating"] = {"tier": 3, "blocking": False}
+    before = copy.deepcopy(source)
+    ctx = context([source], report_scope="tier3")
+    assert (ctx.required_failed, ctx.required_incomplete, ctx.advisory_unfavorable) == expected
+    assert ctx.command_label == label
+    assert source == before
+
+
+def test_gate_rejected_pass_shaped_tier3_counts_as_required_failure():
+    source = result(3, agent_eval={"verdict": "pass"})
+    before = copy.deepcopy(source)
+    ctx = context([source])
+    assert ctx.result_statuses[id(source)] == "pass"
+    assert (ctx.required_failed, ctx.required_incomplete, ctx.advisory_unfavorable) == (1, 0, 0)
+    assert ctx.command_label == "Changes required"
+    assert source == before
+
+
+def test_adverse_counts_default_for_existing_context_constructor_and_are_immutable():
+    ctx = context([])
+    legacy = presentation.FinalRenderContext(
+        ctx.command_status,
+        ctx.command_label,
+        ctx.publication_status,
+        ctx.publication_label,
+        ctx.tiers,
+        ctx.result_statuses,
+        ctx.score_scope,
+        ctx.coverage,
+    )
+    assert (legacy.required_failed, legacy.required_incomplete, legacy.advisory_unfavorable) == (0, 0, 0)
+    with pytest.raises(FrozenInstanceError):
+        legacy.required_failed = 1
+
+
+def test_adverse_counts_accumulate_across_required_and_advisory_results_in_all_tiers(passing_tier3_counts_payload):
+    failed = result(1)
+    failed.add_error("required failure")
+    missing = result(2)
+    missing.mark_scan_incomplete("required-scanner")
+    advisory_failed = result(2)
+    advisory_failed.metadata["gating"]["blocking"] = False
+    advisory_failed.add_error("advisory failure")
+    passed = result(3, agent_eval=copy.deepcopy(passing_tier3_counts_payload))
+    advisory_missing = result(3, agent_eval=copy.deepcopy(passing_tier3_counts_payload))
+    advisory_missing.metadata["gating"]["blocking"] = False
+    advisory_missing.mark_scan_incomplete("advisory-scanner")
+    sources = [result(1), failed, missing, advisory_failed, passed, advisory_missing]
+    before = copy.deepcopy(sources)
+    ctx = context(sources)
+    assert (ctx.required_failed, ctx.required_incomplete, ctx.advisory_unfavorable) == (1, 1, 2)
+    assert ctx.command_status == Status.FAILED
+    assert sources == before

@@ -1306,7 +1306,8 @@
                     <span class="agent-hero-eyebrow">{{ content_label }} evaluation</span>
                     <h1 class="agent-hero-title" id="report-title">{{ hero_title }}</h1>
                     <p class="hero-command-status verdict-chip {{ verdict_class }}">{{ presentation.command_label }}</p>
-                    <p class="hero-decision-reason">{{ presentation.tiers.values() | sum(attribute='failed') }} failed · {{ presentation.tiers.values() | sum(attribute='incomplete') }} incomplete check(s). See tier evidence for reasons.</p>
+                    {% if presentation.required_failed or presentation.required_incomplete %}<p class="hero-decision-reason">{{ presentation.required_failed }} failed · {{ presentation.required_incomplete }} incomplete required check(s). See tier evidence for reasons.</p>{% endif %}
+                    {% if presentation.advisory_unfavorable %}<p class="hero-decision-reason">{{ presentation.advisory_unfavorable }} advisory check(s) failed or incomplete; advisory checks do not change the required result.</p>{% endif %}
                     {#-
                         Show the *full* path/URL only when it actually adds
                         information (i.e. it differs from the friendly label).
@@ -3899,7 +3900,9 @@
                 // off-screen position.
                 var scroll = function () {
                     reportScrollTo(anchor, 'start');
-                    anchor.focus({preventScroll:true});
+                    // The anchor is aria-hidden; focus the named agent panel instead.
+                    var panel = panelId ? document.getElementById(panelId) : null;
+                    if (panel) panel.focus({preventScroll:true});
                 };
                 if (typeof requestAnimationFrame === 'function') {
                     requestAnimationFrame(scroll);

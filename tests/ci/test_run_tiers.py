@@ -578,3 +578,140 @@ def test_aggregate_rejects_foreign_or_future_tier_attempts(consumer, tmp_path, d
     with pytest.raises(run_tiers.ConfigurationError):
         run_tiers.aggregate(reports, (1, 2), env)
     assert not (reports / "ci-results.json").exists()
+
+
+def _commit_change(consumer, *, write=(), rename=()):
+    git = ["git", "-C", str(consumer), "-c", "user.name=CI tests", "-c", "user.email=ci@example.com"]
+    for relative, text in write:
+        path = consumer / relative
+        path.parent.mkdir(parents=True, exist_ok=True)
+        path.write_text(text)
+    for source, target in rename:
+        (consumer / target).parent.mkdir(parents=True, exist_ok=True)
+        subprocess.run([*git, "mv", source, target], check=True)
+    subprocess.run([*git, "add", "-A"], check=True)
+    subprocess.run([*git, "commit", "-m", "change"], check=True, capture_output=True)
+    return subprocess.check_output(["git", "-C", str(consumer), "rev-parse", "HEAD"], text=True).strip()
+
+
+def test_unrelated_ci_directory_change_keeps_the_tier1_changed_selection(consumer):
+    base = subprocess.check_output(["git", "-C", str(consumer), "rev-parse", "HEAD"], text=True).strip()
+    # A consumer's own ci/ scripts are not SkillEvaluator setup; Tier 1 keeps changed mode here too.
+    _commit_change(
+        consumer, write=[("ci/build.sh", "echo build\n"), ("skills/alpha/SKILL.md", "---\nname: alpha\n---\n")]
+    )
+    selected, selection = run_tiers.select_skills(consumer, env_for(consumer, DIFF_BASE_SHA=base))
+    assert [p.name for p in selected] == ["alpha"]
+    assert selection["mode"] == "changed" and "reason" not in selection
+
+
+def test_setup_file_renamed_away_still_selects_full_collection(consumer):
+    _commit_change(consumer, write=[(".gitlab/skill-feedback.yml", "include: []\n" * 20)])
+    base = subprocess.check_output(["git", "-C", str(consumer), "rev-parse", "HEAD"], text=True).strip()
+    # GitHub eligibility checks a rename's previous path; native selection must see it too.
+    _commit_change(consumer, rename=[(".gitlab/skill-feedback.yml", "docs/skill-feedback.yml")])
+    selected, selection = run_tiers.select_skills(consumer, env_for(consumer, DIFF_BASE_SHA=base))
+    assert [p.name for p in selected] == ["alpha", "beta"]
+    assert selection["reason"] == "ci_configuration_changed"
+
+
+def test_aggregate_keeps_each_tier_selection_so_unselected_skills_are_not_incomplete(consumer, tmp_path):
+    from ci.comment_summary import render_comment_summary
+
+    reports = tmp_path / "reports"
+    env = env_for(consumer)
+    for tier, selected in ((1, ["skills/alpha"]), (2, ["skills/alpha", "skills/beta"])):
+        write_tier(reports, tier, env, "passed")
+        path = reports / f"tier{tier}/ci-tier.json"
+        document = json.loads(path.read_text())
+        document["selection"] = {"mode": "changed", "selected": selected}
+        document["tiers"][0]["selected"] = ["forged"]
+        skill = document["tiers"][0]["skills"][0]
+        document["tiers"][0]["skills"] = [
+            {
+                **skill,
+                "path": p,
+                "report_json": f"tier{tier}/skill-00{i}/r.json",
+                "report_html": f"tier{tier}/skill-00{i}/r.html",
+            }
+            for i, p in enumerate(selected, 1)
+        ]
+        path.write_text(json.dumps(document))
+    assert run_tiers.aggregate(reports, (1, 2), env) == 0
+    manifest = json.loads((reports / "ci-results.json").read_text())
+    assert [row["selected"] for row in manifest["tiers"]] == [["skills/alpha"], ["skills/alpha", "skills/beta"]]
+    body = render_comment_summary(manifest, "https://github.com/example/consumer/actions/runs/123/artifacts/9")
+    beta = next(line for line in body.splitlines() if line.startswith("| skills/beta |"))
+    assert "Required gate: **Passed**" in body
+    assert beta.split(" | ")[1] == "SKIPPED · issues unknown · Not selected for this tier"
+    assert "INCOMPLETE" not in beta
+
+
+def _failed_tier2_report(output: Path) -> None:
+    from skillevaluator.models import ValidationResult
+    from skillevaluator.reporting.json_reporter import JSONReporter
+
+    result = ValidationResult(
+        validator_name="Context Deduplication",
+        passed=False,
+        errors=["Duplicate deployment instructions"],
+        metadata={"gating": {"tier": 2, "blocking": True}},
+    )
+    (output / "skillevaluator-tier2.json").write_text(JSONReporter().render_all([result]))
+
+
+@pytest.mark.parametrize(("code", "retained"), [(1, False), (2, True), (-9, True)])
+def test_worker_diagnostics_are_kept_for_execution_problems_not_complete_verdicts(
+    consumer, tmp_path, monkeypatch, code, retained
+):
+    def execute(args, *, log, **_kwargs):
+        if "catalog" in args:
+            return 0
+        log.write_text("worker output\n")
+        _failed_tier2_report(Path(args[args.index("-o") + 1]))
+        return code
+
+    monkeypatch.setattr(run_tiers, "run_command", execute)
+    reports = tmp_path / "reports"
+    assert run_tiers.evaluate(2, consumer, reports, env_for(consumer, NVIDIA_API_KEY="test-provider-value-1234")) == 0
+    skills = json.loads((reports / "tier2/ci-tier.json").read_text())["tiers"][0]["skills"]
+    assert [s["status"] for s in skills] == ["failed", "failed"]
+    assert bool(list((reports / "tier2").rglob("diagnostics"))) is retained
+
+
+def test_neutral_tier3_verdict_keeps_no_worker_diagnostics(consumer, tmp_path, monkeypatch):
+    def execute(args, *, log, **_kwargs):
+        log.write_text("worker output\n")
+        if "doctor" in args:
+            return 0
+        trial = Path(args[args.index("--output") + 1]) / "harbor/run/_harbor-jobs/job/trial"
+        trial.mkdir(parents=True)
+        (trial / "trial.log").write_text("trial ran\n")
+        return 1  # native-tier3 exits 1 for any headline other than passed
+
+    monkeypatch.setattr(run_tiers, "dataset_preflight", lambda _skill: {})
+    monkeypatch.setattr(run_tiers, "run_command", execute)
+    monkeypatch.setattr(run_tiers, "_retain", lambda *_args: {"status": "neutral", "metrics": {}})
+    reports = tmp_path / "reports"
+    assert run_tiers.evaluate(3, consumer, reports, env_for(consumer, NVIDIA_API_KEY="test-provider-value-1234")) == 0
+    tier = json.loads((reports / "tier3/ci-tier.json").read_text())["tiers"][0]
+    assert {s["status"] for s in tier["skills"]} == {"neutral"}
+    assert not list((reports / "tier3").rglob("diagnostics"))
+
+
+def test_tier_diagnostics_budget_is_shared_by_every_skill(consumer, tmp_path, monkeypatch):
+    from ci import diagnostics
+
+    def execute(args, *, log, **_kwargs):
+        log.write_text("worker startup failed\n")
+        return 0 if "catalog" in args else 1
+
+    monkeypatch.setattr(diagnostics, "MAX_TIER_FILES", 1)
+    monkeypatch.setattr(run_tiers, "run_command", execute)
+    reports = tmp_path / "reports"
+    assert run_tiers.evaluate(2, consumer, reports, env_for(consumer, NVIDIA_API_KEY="test-provider-value-1234")) == 0
+    first, second = (reports / "tier2/skill-001/diagnostics", reports / "tier2/skill-002/diagnostics")
+    assert (first / "command.log").is_file()
+    assert not (second / "command.log").exists()
+    index = json.loads((second / "index.json").read_text())
+    assert index["omitted"] == [{"path": "command.log", "reason": "tier_limit"}]

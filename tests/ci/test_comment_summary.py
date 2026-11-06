@@ -318,3 +318,23 @@ def test_rejects_unsafe_artifact_links(url):
 
     with pytest.raises(ValueError, match="artifact"):
         render_comment_summary(manifest(), url)
+
+
+def test_skill_a_tier_did_not_select_is_skipped_not_incomplete():
+    payload = manifest()
+    other = copy.deepcopy(payload["tiers"][1]["skills"][0])
+    other["path"] = "skills/other"
+    for record in payload["tiers"][1:]:
+        record["skills"].append(copy.deepcopy(other))
+    # Tier 1 recorded its selection; Tier 2 selected both skills but lost one result.
+    payload["tiers"][0]["selected"] = ["skills/demo"]
+    payload["tiers"][1]["selected"] = ["skills/demo", "skills/other"]
+    payload["tiers"][1]["skills"].pop()
+    payload["tiers"][1]["status"] = "incomplete"
+
+    row = next(row for row in data_rows(render(payload)) if row.startswith("| skills/other |"))
+    tier1, tier2, tier3 = row.split(" | ")[1:4]
+
+    assert tier1 == "SKIPPED · issues unknown · Not selected for this tier"
+    assert tier2 == "INCOMPLETE · issues unknown · No retained result for this skill"
+    assert tier3.startswith("PASSED · 0 issues")

@@ -65,12 +65,16 @@ def _cell_text(status: str, issues: str, reason: str = "") -> str:
     return prefix + " · " + _text(reason, max(1, _CELL_CHARACTERS - len(prefix) - 3))
 
 
-def _cell(record: dict | None, skill: dict | None, *, expected: bool) -> str:
+def _cell(record: dict | None, skill: dict | None, *, expected: bool, path: str | None = None) -> str:
     if record is None:
         reason = "No retained result" if expected else "Not requested"
         return _cell_text("not_run", "issues unknown", reason)
     if skill is None:
         if record["skills"]:
+            # Tiers can select different skills; a skill this tier never selected is not missing evidence.
+            selected = record.get("selected")
+            if isinstance(selected, list) and path not in selected:
+                return _cell_text("skipped", "issues unknown", "Not selected for this tier")
             return _cell_text("incomplete", "issues unknown", "No retained result for this skill")
         reason = _reason(record) or "No retained skill evidence"
         return _cell_text(record["status"], "issues unknown", reason)
@@ -140,7 +144,12 @@ def render_comment_summary(manifest: dict, artifact_url: str) -> str:
     size = len("\n".join(lines).encode("utf-8"))
     for index, path in enumerate(paths or [None]):
         cells = [
-            _cell(records.get(tier), by_skill.get(tier, {}).get(path), expected=tier in manifest["expected_tiers"])
+            _cell(
+                records.get(tier),
+                by_skill.get(tier, {}).get(path),
+                expected=tier in manifest["expected_tiers"],
+                path=path,
+            )
             for tier in (1, 2, 3)
         ]
         label = _text(path) if path is not None else "No skills evaluated"

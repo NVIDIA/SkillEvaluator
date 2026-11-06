@@ -433,3 +433,93 @@ def test_gitlab_feedback_pipeline_guard_is_offered_and_documented():
     assert "extends: .skill-evaluation-not-feedback" in docs
     assert "no comment is posted or updated" in docs
     assert "Merge these guards to the default branch before the setup MR" in docs
+
+
+def _heredoc(script, marker):
+    return script.split(f"<<'{marker}'\n", 1)[1].split(f"\n{marker}\n", 1)[0] + "\n"
+
+
+def _setup_literals(source):
+    """Return the prefixes and exact paths that an inline setup predicate checks."""
+    import ast
+
+    prefixes, files = set(), set()
+    for node in ast.walk(ast.parse(source)):
+        if isinstance(node, ast.Call) and isinstance(node.func, ast.Attribute) and node.func.attr == "startswith":
+            prefixes.update(ast.literal_eval(node.args[0]))
+        elif isinstance(node, ast.Compare) and isinstance(node.left, ast.Name) and node.left.id == "path":
+            assert all(isinstance(op, ast.Eq) for op in node.ops)
+            files.update(ast.literal_eval(value) for value in node.comparators)
+    text = {value.decode() if isinstance(value, bytes) else value for value in prefixes}
+    return text, {value.decode() if isinstance(value, bytes) else value for value in files}
+
+
+def test_tier1_setup_predicates_equal_the_shared_native_predicate():
+    from ci.select_changed_skills import SETUP_FILES, SETUP_PREFIXES
+
+    jobs = load(".github/workflows/evaluate-all-tiers.yml")["jobs"]
+    github = _heredoc(jobs["eligibility"]["steps"][0]["run"], "PY")
+    gitlab = _heredoc("\n".join(load("ci/gitlab/all-tiers.yml")["skill-evaluation"]["script"]), "PYTHON")
+    for source in (github, gitlab):
+        assert _setup_literals(source) == (set(SETUP_PREFIXES), set(SETUP_FILES))
+    # GitHub also widens when the PR file listing is too long to certify; the
+    # paid tiers take that decision instead of recomputing a different one.
+    paid = jobs["paid-tiers"]
+    assert paid["env"]["SKILL_EVAL_SCAN_MODE"] == jobs["tier1"]["with"]["scan-mode"]
+    assert "needs.eligibility.outputs.scan-mode" in paid["env"]["SKILL_EVAL_SCAN_MODE"]
+
+
+def test_gitlab_tier1_and_native_tiers_select_the_same_skills(tmp_path):
+    import os
+    import subprocess
+    import sys
+
+    from ci import run_tiers
+
+    heredoc = _heredoc("\n".join(load("ci/gitlab/all-tiers.yml")["skill-evaluation"]["script"]), "PYTHON")
+    heredoc = heredoc.replace('"/opt/skillevaluator/ci"', repr(str(ROOT / "ci")))
+    cases = {
+        "skill only": ([("skills/alpha/SKILL.md", "# alpha v2\n")], []),
+        "consumer ci script": ([("ci/build.sh", "echo build\n"), ("skills/alpha/SKILL.md", "# alpha v3\n")], []),
+        "workflow": ([(".github/workflows/skills.yml", "name: skills\n")], []),
+        "root pipeline": ([(".gitlab-ci.yml", "include: []\n")], []),
+        "renamed feedback include": ([], [(".gitlab/skill-feedback.yml", "docs/skill-feedback.yml")]),
+    }
+    for name, (writes, renames) in cases.items():
+        repo = tmp_path / name.replace(" ", "-")
+        repo.mkdir()
+        git = ["git", "-C", str(repo), "-c", "user.name=CI", "-c", "user.email=ci@example.com"]
+        subprocess.run([*git, "init", "-q", "-b", "main"], check=True)
+        for skill in ("alpha", "beta"):
+            (repo / "skills" / skill).mkdir(parents=True)
+            (repo / "skills" / skill / "SKILL.md").write_text(f"# {skill}\n")
+        (repo / ".gitlab").mkdir()
+        (repo / ".gitlab/skill-feedback.yml").write_text("include: []\n" * 20)
+        subprocess.run([*git, "add", "-A"], check=True)
+        subprocess.run([*git, "commit", "-qm", "base"], check=True)
+        base = subprocess.check_output([*git, "rev-parse", "HEAD"], text=True).strip()
+        for relative, text in writes:
+            (repo / relative).parent.mkdir(parents=True, exist_ok=True)
+            (repo / relative).write_text(text)
+        for source, target in renames:
+            (repo / target).parent.mkdir(parents=True, exist_ok=True)
+            subprocess.run([*git, "mv", source, target], check=True)
+        subprocess.run([*git, "add", "-A"], check=True)
+        subprocess.run([*git, "commit", "-qm", "head"], check=True)
+        head = subprocess.check_output([*git, "rev-parse", "HEAD"], text=True).strip()
+        tier1 = subprocess.run(
+            [sys.executable, "-I", "-"],
+            input=heredoc,
+            env={"PATH": os.environ["PATH"], "DIFF_BASE_SHA": base, "DIFF_HEAD_SHA": head, "CI_PROJECT_DIR": str(repo)},
+            capture_output=True,
+            text=True,
+            check=True,
+        ).stdout.strip()
+        selected, selection = run_tiers.select_skills(
+            repo, {"SKILL_EVAL_PATHS": "skills", "DIFF_BASE_SHA": base, "REPORT_COMMIT": head}
+        )
+        native = "all" if selection.get("reason") == "ci_configuration_changed" else "changed"
+        assert tier1 == native, name
+        assert (native == "all") == (name not in {"skill only", "consumer ci script"}), name
+        if native == "changed":
+            assert [p.name for p in selected] == ["alpha"], name

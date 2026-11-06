@@ -136,7 +136,8 @@ jobs:
               with urllib.request.urlopen(request, timeout=30) as response:
                   current = json.load(response)
               allowed = actor_allowed and current['state'] == 'open' and current['head']['sha'] == pr['head']['sha'] and current['head']['repo'] and current['head']['repo']['full_name'] == repo
-              # A setup/configuration PR must exercise every selected skill.
+              # A setup/configuration PR must exercise every selected skill. This
+              # predicate equals select_changed_skills.setup_changed (tests check it).
               for page in range(1, 31):
                   files_url = url + '/files?per_page=100&page=' + str(page)
                   request = urllib.request.Request(files_url, headers={'Authorization':'Bearer '+os.environ['GH_TOKEN'], 'Accept':'application/vnd.github+json'})
@@ -177,7 +178,8 @@ jobs:
     env:
       SKILLEVALUATOR_TOOLS_REF: ${{ inputs.tools-ref }}
       SKILL_EVAL_PATHS: ${{ inputs.paths }}
-      SKILL_EVAL_SCAN_MODE: ${{ inputs.scan-mode }}
+      # Tier 1's decision, including the full scan for a PR too large to list.
+      SKILL_EVAL_SCAN_MODE: ${{ needs.eligibility.outputs.scan-mode || inputs.scan-mode }}
       SKILL_EVAL_MIN_SCORE: ${{ inputs.min-score }}
       SKILL_EVAL_ENV_MODE: ${{ inputs.env-mode }}
       SKILL_EVAL_PROVIDER: ${{ inputs.provider }}

@@ -46,6 +46,11 @@ configuration-only scope notices are excluded. Incomplete or missing evidence
 shows an unknown count; it cannot imply zero findings or a completed check.
 The Tier 1 gate and each advisory tier's status stay separate, so this example
 can pass the required CI gate while still needing review of Tier 2 and Tier 3.
+Every tier selects the same skills: the changed skills, or every skill when
+the pull request changes CI setup under `.github/`, `.gitlab/`,
+`.skillevaluator/ci` or `.gitlab-ci.yml` (on GitHub, also when it changes more
+files than the API can list). A cell for a skill that its tier did not select
+reads `Skipped · issues unknown · Not selected for this tier`.
 
 ```text
 ci-results.json
@@ -57,7 +62,7 @@ tier2/ci-tier.json
 tier2/skill-001/       # native retained JSON and HTML
 tier3/ci-tier.json
 tier3/skill-001/       # native retained JSON and HTML
-  diagnostics/        # redacted startup logs for failed/incomplete execution
+  diagnostics/        # redacted worker logs when execution failed or is incomplete
 ```
 
 `ci-results.json` uses report contract `skillevaluator-ci-v1` and records the
@@ -80,9 +85,15 @@ Tier 3 reports retain paired scores and coverage, Skill Lift, attempts,
 latency/resource metrics and available trial links. Download and extract the
 artifact, then open `index.html` to inspect the aggregate and native reports.
 Detailed files remain available even when a tier fails or needs configuration.
-Failed or incomplete native jobs retain bounded, redacted worker, Docker and
+When a native skill's execution fails or is incomplete, or its worker exits
+abnormally, the skill retains bounded, redacted worker, Docker and
 agent-installation diagnostics under `diagnostics/`, even if no canonical report
-was produced. Its `index.json` records retained, omitted and truncated files.
+was produced. A complete run with a failed or neutral verdict retains none. The
+worker's `command.log` comes first, then logs from one trial of each Harbor
+job (a failing trial when there is one), at most four trials per skill. All
+skills of one tier share a limit of 1000 diagnostic files and 16 MiB. Each
+`index.json` records retained, omitted and truncated files, including those
+omitted at a limit.
 Catalog failures retain diagnostics under `tier2/catalog/diagnostics/`.
 Agent trajectories, credentials and runtime configuration are excluded.
 The publisher renders validated retained JSON; it does not execute artifacts

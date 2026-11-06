@@ -95,6 +95,8 @@ def test_large_text_is_bounded_and_preserves_terminal_stderr(tmp_path, monkeypat
 
 
 def test_file_count_and_total_bytes_are_bounded(tmp_path, monkeypatch):
+    monkeypatch.setattr(diagnostics, "MAX_TRIALS_PER_JOB", 10)
+    monkeypatch.setattr(diagnostics, "MAX_TRIALS", 10)
     monkeypatch.setattr(diagnostics, "MAX_FILES", 2)
     monkeypatch.setattr(diagnostics, "MAX_TOTAL_BYTES", 70)
     raw = tmp_path / "raw"
@@ -198,3 +200,89 @@ print('unchanged')
         check=True,
     )
     assert completed.stdout == "unchanged\n"
+
+
+def test_only_the_first_failing_trial_of_each_job_and_four_per_skill_are_kept(tmp_path):
+    jobs = tmp_path / "raw/harbor/run/_harbor-jobs"
+    trials = {
+        "skill-claude-with/case-1": True,
+        "skill-claude-without/case-1": True,
+        "skill-codex-with/case-1": False,
+        "skill-codex-with/case-2": True,
+        "skill-codex-with/case-3": True,
+        "skill-codex-without/case-1": False,
+        "skill-codex-without/case-2": False,
+        "skill-opencode-with/case-1": True,
+    }
+    for name, failed in trials.items():
+        trial = jobs / name
+        (trial / "agent/setup").mkdir(parents=True)
+        (trial / "trial.log").write_text(f"{name} started\n")
+        (trial / "agent/setup/install-agent-runtime.failed.log").write_text("install failed\n")
+        if failed:
+            (trial / "exception.txt").write_text(f"{name} failed\n")
+    output = tmp_path / "output"
+    result = diagnostics.retain_diagnostics(tmp_path / "raw", output, set())
+    kept = {item["path"].split("/")[3] + "/" + item["path"].split("/")[4] for item in result["retained"]}
+    assert kept == {
+        "skill-claude-with/case-1",
+        "skill-claude-without/case-1",
+        "skill-codex-with/case-2",
+        "skill-codex-without/case-1",
+    }
+    assert len(result["retained"]) == 4 * 2 + 3  # trial.log and setup log each, exception.txt for failures
+    limited = {item["path"] for item in result["omitted"] if item["reason"] == "trial_limit"}
+    assert limited == {
+        "harbor/run/_harbor-jobs/skill-codex-with/case-1",
+        "harbor/run/_harbor-jobs/skill-codex-with/case-3",
+        "harbor/run/_harbor-jobs/skill-codex-without/case-2",
+        "harbor/run/_harbor-jobs/skill-opencode-with/case-1",
+    }
+
+
+def test_tier_budget_is_shared_across_skills_and_keeps_command_logs_first(tmp_path, monkeypatch):
+    monkeypatch.setattr(diagnostics, "MAX_TIER_FILES", 3)
+    budget = diagnostics.TierBudget()
+    results = []
+    for index in (1, 2):
+        raw = tmp_path / f"raw-{index}"
+        trial = raw / "harbor/job/trial"
+        trial.mkdir(parents=True)
+        (trial / "trial.log").write_text("trial started\n")
+        (trial / "exception.txt").write_text("startup failed\n")
+        command = tmp_path / f"skill-{index}.log"
+        command.write_text("worker failed\n")
+        results.append(
+            diagnostics.retain_diagnostics(raw, tmp_path / f"out-{index}", set(), command_log=command, budget=budget)
+        )
+    assert results[0]["retained"][0]["path"] == "command.log"
+    assert len(results[0]["retained"]) == 3 and budget.files == 0
+    assert results[1]["retained"] == []
+    assert {item["reason"] for item in results[1]["omitted"]} == {"tier_limit"}
+    assert (tmp_path / "out-2/diagnostics/index.json").is_file()
+
+    monkeypatch.setattr(diagnostics, "MAX_TIER_BYTES", 20)
+    budget = diagnostics.TierBudget()
+    raw = tmp_path / "raw-3"
+    raw.mkdir()
+    (raw / "stderr.log").write_text("x" * 15 + "\n")
+    (raw / "stdout.log").write_text("y" * 15 + "\n")
+    result = diagnostics.retain_diagnostics(raw, tmp_path / "out-3", set(), budget=budget)
+    assert [item["path"] for item in result["retained"]] == ["stderr.log"]
+    assert result["omitted"] == [{"path": "stdout.log", "reason": "tier_limit"}]
+
+
+def test_tier_caps_stay_within_what_the_feedback_reader_accepts():
+    from ci import feedback
+
+    # Each tier has at most one index.json per skill plus the Tier 2 catalog root.
+    roots = feedback.MAX_SKILLS + 1
+    files = diagnostics.MAX_TIER_FILES + roots
+    # A GitLab archive also lists every directory of a retained path: diagnostics/,
+    # up to MAX_DEPTH walked levels, and an agent/setup pair below the deepest one.
+    members = 2 * files * (1 + 1 + diagnostics.MAX_DEPTH + 2)
+    assert members <= feedback.MAX_DIAGNOSTIC_MEMBERS
+    # Logs share the tier byte budget; an index.json stays below one file's size.
+    assert 2 * (diagnostics.MAX_TIER_BYTES + roots * diagnostics.MAX_FILE_BYTES) <= feedback.MAX_DIAGNOSTIC_BYTES
+    # Even incompressible logs from both native tiers leave half of the archive for reports.
+    assert 2 * diagnostics.MAX_TIER_BYTES <= feedback.MAX_BYTES // 2

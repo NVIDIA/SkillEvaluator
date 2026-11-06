@@ -1222,10 +1222,14 @@ def test_member_limit_admits_the_documented_maximum_skill_count_on_every_platfor
 
 @pytest.mark.parametrize("trials", [24, 40])
 @pytest.mark.parametrize("directories", [False, True])
-def test_member_limit_admits_worker_diagnostics_for_every_non_success_skill(tmp_path, directories, trials):
+def test_member_limit_admits_worker_diagnostics_for_every_non_success_skill(tmp_path, monkeypatch, directories, trials):
     from ci import diagnostics
 
     module = adapter()
+    # The bound covers any layout up to the per-root file cap, not only the
+    # few trials the producer keeps today, so lift the trial caps here.
+    monkeypatch.setattr(diagnostics, "MAX_TRIALS_PER_JOB", trials)
+    monkeypatch.setattr(diagnostics, "MAX_TRIALS", trials)
     files, folders = _retained_diagnostics(tmp_path, trials)
     # 40 trials reach the producer's own retained-file cap.
     assert "diagnostics/index.json" in files

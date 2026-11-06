@@ -33,17 +33,31 @@ from skillevaluator.reporting.run_status import resolve_run_status
 from skillevaluator.utils.secret_redaction import Redactor
 
 try:
-    from diagnostics import retain_diagnostics
+    from diagnostics import TierBudget, retain_diagnostics
     from github_api import strict_json
     from run_tier1 import discover_skills
     from secret_redaction import collect_sensitive_values
-    from select_changed_skills import SelectionError, _git, _paths, select_changed_skills, skill_roots
+    from select_changed_skills import (
+        SelectionError,
+        _git,
+        _paths,
+        select_changed_skills,
+        setup_changed,
+        skill_roots,
+    )
 except ModuleNotFoundError:
-    from ci.diagnostics import retain_diagnostics
+    from ci.diagnostics import TierBudget, retain_diagnostics
     from ci.github_api import strict_json
     from ci.run_tier1 import discover_skills
     from ci.secret_redaction import collect_sensitive_values
-    from ci.select_changed_skills import SelectionError, _git, _paths, select_changed_skills, skill_roots
+    from ci.select_changed_skills import (
+        SelectionError,
+        _git,
+        _paths,
+        select_changed_skills,
+        setup_changed,
+        skill_roots,
+    )
 
 SHA = re.compile(r"[0-9a-f]{40}")
 MAX_JSON_BYTES = 32 * 1024 * 1024
@@ -73,6 +87,8 @@ SAFE_ENV = {
     "SKILLEVALUATOR_RUNTIME_DIR",
 }
 SUCCESS = {"passed", "skipped"}
+# Worker diagnostics explain execution problems, not complete failed or neutral verdicts.
+EXECUTION_FAILURES = {"incomplete", "not_run"}
 ATTEMPT = re.compile(r"[1-9][0-9]{0,7}")
 TIER_ARTIFACT = re.compile(r"skill-evaluator-tier([123])-attempt-([1-9][0-9]{0,7})")
 
@@ -141,12 +157,9 @@ def select_skills(workspace: Path, env: dict) -> tuple[list[Path], dict]:
         raise ConfigurationError("The evaluated commit must match the checkout HEAD.")
     if base and mode == "auto":
         selected, selection = select_changed_skills(workspace, roots, base, head)
-        changed = _paths(_git(workspace, "diff", "--name-only", "-z", f"{base}...{head}", "--"))
-        if not any(
-            p.startswith((".github/", ".gitlab/", ".skillevaluator/", "ci/"))
-            or p in {".gitlab-ci.yml", ".gitlab-ci.yaml"}
-            for p in changed
-        ):
+        # Tier 1 applies the same setup predicate, so every tier selects the same skills.
+        changed = _paths(_git(workspace, "diff", "--name-only", "-z", "--no-renames", f"{base}...{head}", "--"))
+        if not setup_changed(changed):
             return selected, selection
         reason = "ci_configuration_changed"
     else:
@@ -468,6 +481,7 @@ def evaluate(tier: int, workspace: Path, reports: Path, env: dict[str, str]) -> 
         retain()
         return int(required)
     deadline = time.monotonic() + integer(env, "SKILL_EVAL_TIMEOUT_SECONDS", 18000, 1, 86400)
+    budget = TierBudget()
     with tempfile.TemporaryDirectory(prefix="skillevaluator-ci-") as temporary:
         scratch = Path(temporary).resolve()
         child["HOME"] = str(scratch / "home")
@@ -502,7 +516,11 @@ def evaluate(tier: int, workspace: Path, reports: Path, env: dict[str, str]) -> 
                     diagnostics = scratch / "catalog-diagnostics"
                     diagnostics.mkdir()
                     retain_diagnostics(
-                        diagnostics, destination / "catalog", provider_tokens, command_log=scratch / "catalog.log"
+                        diagnostics,
+                        destination / "catalog",
+                        provider_tokens,
+                        command_log=scratch / "catalog.log",
+                        budget=budget,
                     )
                     retain()
                     return int(required)
@@ -514,6 +532,7 @@ def evaluate(tier: int, workspace: Path, reports: Path, env: dict[str, str]) -> 
             leaf = destination / f"skill-{index:03}"
             tokens = provider_tokens
             command_log = scratch / f"skill-{index:03}.log"
+            code = None
             try:
                 digests = dataset_preflight(skill) if tier == 3 else {}
                 tokens = collect_sensitive_values(skill) | provider_tokens
@@ -585,13 +604,15 @@ def evaluate(tier: int, workspace: Path, reports: Path, env: dict[str, str]) -> 
                     else "Evaluation evidence could not be safely retained; check the runtime and provider."
                 )
             finally:
-                if skill_row["status"] not in SUCCESS:
+                # Exit codes other than pass (0) and fail (1) mean the worker itself went wrong.
+                if skill_row["status"] in EXECUTION_FAILURES or code not in {None, 0, 1}:
                     try:
                         retain_diagnostics(
                             raw,
                             leaf,
                             tokens,
                             command_log=command_log if command_log.is_file() else None,
+                            budget=budget,
                         )
                     except (OSError, ValueError):
                         # Diagnostic failures must never replace the evaluation
@@ -652,6 +673,13 @@ def _source_attempts(reports: Path, current: int) -> dict[int, str]:
     return {int(key): value for key, value in recorded.items()}
 
 
+def _keep_selected(row: dict, selected) -> None:
+    """Record which skills the tier selected, so a summary can tell 'not selected' from missing."""
+    row.pop("selected", None)
+    if isinstance(selected, list) and all(isinstance(path, str) for path in selected):
+        row["selected"] = selected
+
+
 def aggregate(reports: Path, tiers: tuple[int, ...], env: dict) -> int:
     try:
         from tier_manifest import validate_manifest, write_reports
@@ -678,7 +706,8 @@ def aggregate(reports: Path, tiers: tuple[int, ...], env: dict) -> int:
             if not isinstance(rows, list) or len(rows) != 1 or rows[0].get("tier") != tier:
                 raise ConfigurationError("A tier artifact does not identify its expected tier.")
             row = {**rows[0], "required": required, "source_attempt": attempt}
-            selected = incoming.get("selection", {}).get("selected")
+            selection = incoming.get("selection", {})
+            selected = selection.get("selected") if isinstance(selection, dict) else None
             # A retained checkpoint must cover every selected skill before it can claim completion.
             if (
                 row.get("status") in {"passed", "neutral", "skipped"}
@@ -688,6 +717,7 @@ def aggregate(reports: Path, tiers: tuple[int, ...], env: dict) -> int:
                 row.update(
                     status="incomplete", reason="Results are missing for selected skills; the tier did not complete."
                 )
+            _keep_selected(row, selected)
         elif tier == 1 and (reports / "tier1/summary.json").is_file():
             legacy = read_json(reports / "tier1/summary.json")
             try:
@@ -727,6 +757,8 @@ def aggregate(reports: Path, tiers: tuple[int, ...], env: dict) -> int:
                 )
             if row["skills"]:
                 row["status"] = _combined([s["status"] for s in row["skills"]])
+            selection = legacy.get("selection")
+            _keep_selected(row, selection.get("selected") if isinstance(selection, dict) else None)
             if tier in recorded:
                 row["source_attempt"] = recorded[tier]
         else:

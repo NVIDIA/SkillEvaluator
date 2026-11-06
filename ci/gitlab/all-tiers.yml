@@ -68,7 +68,9 @@ skill-evaluation:
         export DIFF_BASE_SHA="${CI_MERGE_REQUEST_DIFF_BASE_SHA:-}"
         export DIFF_HEAD_SHA="${CI_COMMIT_SHA:-}"
       fi
-      # Changes to CI onboarding must exercise real skills on the setup MR.
+      # Changes to CI onboarding must exercise real skills on the setup MR. The
+      # inline check equals select_changed_skills.setup_changed, which Tiers 2
+      # and 3 use; it stays inline because the pinned image can predate it.
       if [ "$SCAN_MODE" = changed ]; then
         SCAN_MODE="$(python -I - <<'PYTHON'
       import os, re, sys

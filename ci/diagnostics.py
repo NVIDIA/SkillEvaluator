@@ -19,6 +19,16 @@ MAX_TOTAL_BYTES = 8 * 1024 * 1024
 MAX_FILES = 100
 MAX_ENTRIES = 10_000
 MAX_RECORDS = 200
+MAX_DEPTH = 64
+# Harbor writes one directory per trial (its trial.log, and exception.txt when it
+# failed). Startup problems repeat across trials, so keep the first failing trial
+# of each job (one arm of one agent) and a few per skill.
+MAX_TRIALS_PER_JOB = 1
+MAX_TRIALS = 4
+# Every skill of one tier shares this budget (index.json files excluded), which
+# keeps a tier's diagnostics far below what the feedback reader accepts.
+MAX_TIER_FILES = 1000
+MAX_TIER_BYTES = 16 * 1024 * 1024
 _NAMES = frozenset({"failure.json", "exception.txt", "traceback.txt", "trial.log", "stderr.log", "stdout.log"})
 _EXCLUDED = frozenset(
     {
@@ -77,6 +87,27 @@ def _mask_object(value, redactor: Redactor):
     return value
 
 
+class TierBudget:
+    """Diagnostic files and bytes that remain for the rest of one tier's skills."""
+
+    def __init__(self) -> None:
+        self.files = MAX_TIER_FILES
+        self.bytes = MAX_TIER_BYTES
+
+
+def _trial(directory: Path) -> tuple[bool, bool]:
+    """Return whether a directory is a Harbor trial and whether that trial failed."""
+
+    def regular(name: str) -> bool:
+        try:
+            return stat.S_ISREG((directory / name).lstat().st_mode)
+        except OSError:
+            return False
+
+    failed = regular("exception.txt")
+    return failed or regular("trial.log"), failed
+
+
 def _regular_root(path: Path) -> Path:
     path = Path(path).absolute()
     if any(parent.is_symlink() for parent in (path, *path.parents)):
@@ -125,14 +156,23 @@ def _read(root: SecureRoot, relative: Path, metadata: os.stat_result) -> tuple[b
     return head + _MARKER + tail, True
 
 
-def retain_diagnostics(raw: Path, destination: Path, tokens: set[str], *, command_log: Path | None = None) -> dict:
+def retain_diagnostics(
+    raw: Path,
+    destination: Path,
+    tokens: set[str],
+    *,
+    command_log: Path | None = None,
+    budget: TierBudget | None = None,
+) -> dict:
     """Retain whitelisted worker diagnostics below ``destination/diagnostics``.
 
     The caller supplies an evaluator-owned output root. The optional command log
-    is an explicit separate input, retained as ``command.log``. Each unsafe or
-    unsupported child is omitted with a fixed reason; input content and absolute
-    paths never appear in index errors. No HTML or agent/state/config files are
-    copied, and no diagnostic changes the evaluation verdict.
+    is an explicit separate input, retained first as ``command.log``. Each unsafe
+    or unsupported child is omitted with a fixed reason; input content and
+    absolute paths never appear in index errors. No HTML or agent/state/config
+    files are copied, and no diagnostic changes the evaluation verdict. Files
+    from at most ``MAX_TRIALS`` Harbor trials are kept, failing trials first, and
+    an optional ``budget`` bounds what all skills of one tier retain together.
     """
     raw, destination = _regular_root(raw), _regular_root(destination)
     if not raw.is_dir() or destination.is_relative_to(raw) or raw.is_relative_to(destination):
@@ -152,7 +192,7 @@ def retain_diagnostics(raw: Path, destination: Path, tokens: set[str], *, comman
         "omitted_count": 0,
         "total_bytes": 0,
     }
-    reads = visited = 0
+    reads = visited = trials = 0
 
     def label(relative: Path) -> str:
         text = relative.as_posix()
@@ -176,6 +216,9 @@ def retain_diagnostics(raw: Path, destination: Path, tokens: set[str], *, comman
             return
         if result["total_bytes"] >= MAX_TOTAL_BYTES:
             record("omitted", target, "total_limit")
+            return
+        if budget is not None and (budget.files <= 0 or budget.bytes <= 0):
+            record("omitted", target, "tier_limit")
             return
         if label(target) == "[REDACTED PATH]":
             record("omitted", target, "unsafe_or_sensitive_path")
@@ -206,11 +249,17 @@ def retain_diagnostics(raw: Path, destination: Path, tokens: set[str], *, comman
             if result["total_bytes"] + len(payload) > MAX_TOTAL_BYTES:
                 record("omitted", target, "total_limit")
                 return
+            if budget is not None and len(payload) > budget.bytes:
+                record("omitted", target, "tier_limit")
+                return
             _write(output, target, payload)
             result["retained"].append(
                 {"path": target.as_posix(), "bytes": len(payload), "source_bytes": metadata.st_size}
             )
             result["total_bytes"] += len(payload)
+            if budget is not None:
+                budget.files -= 1
+                budget.bytes -= len(payload)
             if truncated:
                 result["truncated"].append(target.as_posix())
         except UnicodeError:
@@ -255,6 +304,14 @@ def retain_diagnostics(raw: Path, destination: Path, tokens: set[str], *, comman
         except OSError:
             record("errors", setup.relative_to(raw), "read_or_write_error")
 
+    # The evaluator's own output explains most failures; keep it before trial logs.
+    if command_log is not None:
+        command_log = _regular_root(command_log)
+        try:
+            with SecureRoot(command_log.parent) as source:
+                collect(source, Path(command_log.name), Path("command.log"), command_log.lstat())
+        except OSError:
+            record("errors", Path("command.log"), "read_or_write_error")
     with SecureRoot(raw) as source:
         for directory, directories, names in os.walk(raw, followlinks=False):
             directories.sort()
@@ -270,11 +327,22 @@ def retain_diagnostics(raw: Path, destination: Path, tokens: set[str], *, comman
                 if path.is_symlink():
                     directories.remove(name)
                     record("errors", relative, "unsafe_link")
-                elif name.casefold() in _EXCLUDED or len(relative.parts) > 64:
+                elif name.casefold() in _EXCLUDED or len(relative.parts) > MAX_DEPTH:
                     directories.remove(name)
                     if name == "agent":
                         collect_setup(source, path)
                     record("omitted", relative, "not_allowed")
+            candidates = []
+            for name in directories:
+                is_trial, failed = _trial(Path(directory) / name)
+                if is_trial:
+                    candidates.append((not failed, name))
+            for kept, (_, name) in enumerate(sorted(candidates)):
+                if kept < MAX_TRIALS_PER_JOB and trials < MAX_TRIALS:
+                    trials += 1
+                else:
+                    directories.remove(name)
+                    record("omitted", (Path(directory) / name).relative_to(raw), "trial_limit")
             for name in names:
                 visited += 1
                 relative = (Path(directory) / name).relative_to(raw)
@@ -297,12 +365,5 @@ def retain_diagnostics(raw: Path, destination: Path, tokens: set[str], *, comman
                     collect(source, relative, relative, metadata)
             if visited > MAX_ENTRIES:
                 break
-    if command_log is not None:
-        command_log = _regular_root(command_log)
-        try:
-            with SecureRoot(command_log.parent) as source:
-                collect(source, Path(command_log.name), Path("command.log"), command_log.lstat())
-        except OSError:
-            record("errors", Path("command.log"), "read_or_write_error")
     _write(output, Path("index.json"), (json.dumps(result, ensure_ascii=True, indent=2) + "\n").encode())
     return result

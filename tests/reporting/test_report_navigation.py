@@ -3,6 +3,8 @@
 
 from html.parser import HTMLParser
 
+import pytest
+
 from skillevaluator.evaluation.tier3_report import build_agent_eval_payload
 from skillevaluator.models import ValidationResult
 from skillevaluator.reporting.html import HTMLReporter
@@ -140,7 +142,7 @@ def test_hero_reason_counts_advisory_failures_apart_from_the_required_result():
     html = HTMLReporter(include_timestamp=False).render_all([_gated(passed, 1), _gated(advisory, 2, blocking=False)])
     assert "Passed required checks" in html
     assert _hero_reasons(html) == [
-        "1 advisory check(s) failed or incomplete; advisory tiers do not change the required result."
+        "1 advisory check(s) failed or incomplete; advisory checks do not change the required result."
     ]
 
     clean = ValidationResult(validator_name="License Compliance")
@@ -151,6 +153,25 @@ def test_hero_reason_counts_advisory_failures_apart_from_the_required_result():
     required.add_error("Missing name")
     html = HTMLReporter(include_timestamp=False).render_all([_gated(required, 1)])
     assert _hero_reasons(html) == ["1 failed · 0 incomplete required check(s). See tier evidence for reasons."]
+
+
+@pytest.mark.parametrize("tier", [1, 2, 3])
+@pytest.mark.parametrize("incomplete", [False, True])
+def test_hero_reason_keeps_advisory_results_separate_within_a_mixed_tier(tier, incomplete):
+    required = ValidationResult(validator_name="Required check")
+    required.add_success("required", "Required check passed")
+    advisory = ValidationResult(validator_name="Advisory check")
+    if incomplete:
+        advisory.mark_scan_incomplete("optional comparison")
+    else:
+        advisory.add_error("Optional comparison failed")
+    html = HTMLReporter(include_timestamp=False).render_all(
+        [_gated(required, tier), _gated(advisory, tier, blocking=False)]
+    )
+    assert "Passed required checks" in html
+    assert _hero_reasons(html) == [
+        "1 advisory check(s) failed or incomplete; advisory checks do not change the required result."
+    ]
 
 
 def test_nojs_dark_fallback_mirrors_every_hard_coded_dark_override():

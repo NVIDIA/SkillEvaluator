@@ -137,6 +137,11 @@ function openReportSection(target) {
 function openReportDestination(id) {
     const target = document.getElementById(id);
     if (!target) return true;
+    if (target.classList.contains('t3-agent-anchor') && typeof jumpToTier3Agent === 'function') {
+        jumpToTier3Agent(id);
+        try { history.replaceState(null, '', '#' + id); } catch (err) { /* file:// history is optional. */ }
+        return false;
+    }
     // Whole tiers and sections are not evidence: never centre a container taller than the viewport.
     if (/^tab-tier\d$/.test(id) && target.classList.contains('tab-content')) {
         activateReportTier(id.slice(4));

@@ -147,6 +147,14 @@ def run(reports, output):
                     "() => document.activeElement.id === document.querySelector('.t3-agent-anchor').dataset.tier3AgentPanelId",
                     "agent link focus",
                 )
+                anchor_id = page.locator(".t3-agent-anchor").first.get_attribute("id")
+                page.goto((reports / "full.html").as_uri() + "#" + anchor_id)
+                page.reload()
+                check(
+                    page,
+                    "() => document.activeElement.id === document.querySelector('.t3-agent-anchor').dataset.tier3AgentPanelId && document.activeElement.getAttribute('aria-hidden') !== 'true'",
+                    "agent fragment reload focus",
+                )
                 # Sticky tier and local navigation occupy separate vertical bands.
                 page.evaluate("() => window.scrollBy(0, 350)")
                 if width <= 760:

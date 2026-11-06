@@ -141,7 +141,8 @@ screens, a sticky tier bar keeps navigation available while reading long evidenc
 Tier 3 retains Overview, Insights, Agent Details, Trials, Dataset and Diagnostics.
 For its tabs, Left/Right and Home/End move focus; Enter or Space opens the focused
 view. Finding links clear incompatible filters, open their evidence and move focus
-to the exact finding.
+to the exact finding. Direct agent links open and focus the named agent panel;
+section links open at the start of the section.
 
 The **Theme** control offers System, Light and Dark. System follows live device
 changes; an explicit choice persists until System is selected again. Reports use
@@ -173,6 +174,8 @@ words: **Passed**, **Changes required**, **Incomplete**, **Skipped** and
 whose gate does not block, such as deduplication with `--no-block-on-dedup` or
 live evaluation without `--block-on-agent-eval`, shows **Failed (advisory)**
 when it fails, because it does not require changes. Publication eligibility is
+shown separately from the command result. Summary reasons count required and
+advisory checks individually, including when a tier contains both. Eligibility is
 shown next to the verdict, because a report can pass its checks and still not
 be eligible for publication. The report follows the system light or dark theme
 until you pick one, and always prints dark text on white paper.

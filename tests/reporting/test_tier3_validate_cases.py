@@ -264,6 +264,26 @@ def test_llm_fix_without_a_provider_gives_every_export(monkeypatch):
     assert item.actions[0] == "export SKILL_EVAL_LLM_PROVIDER=nv_build NVIDIA_API_KEY='your-api-key'"
 
 
+def test_live_view_prints_log_records_through_its_own_console():
+    import io
+
+    from rich.console import Console
+
+    from skillevaluator.logging_config import get_logger
+    from skillevaluator.reporting.console_ui import ValidateView
+
+    out = io.StringIO()
+    view = ValidateView(
+        "skill: x", [(1, "Static", "static")], console=Console(file=out, force_terminal=True, width=100)
+    )
+    view.start()
+    get_logger("skillevaluator.test_live_view").warning("LLM call failed")
+    view.stop()
+    get_logger("skillevaluator.test_live_view").warning("after the view")
+    assert "LLM call failed" in out.getvalue()
+    assert "after the view" not in out.getvalue()
+
+
 def test_llm_fix_points_at_doctor_when_the_provider_call_fails(monkeypatch):
     from skillevaluator import provider_config
     from skillevaluator.reporting.console_ui import _llm_fix
@@ -302,3 +322,28 @@ def test_tier1_summary_counts_named_checks_and_their_sub_checks():
     results.append(secrets)
     _ok, rows = summarize_tier1(results, lineup=["code-integrity", "schema", "security"])
     assert "1/3 checks passed (13 sub-checks)  ·  1 failed  ·  1 didn't run" in _text(rows)
+
+
+def test_live_view_draws_the_header_and_finished_tiers_once():
+    import io
+    import re
+
+    from rich.console import Console
+
+    from skillevaluator.reporting.console_ui import TierRow, ValidateView, Verdict
+
+    out = io.StringIO()
+    console = Console(file=out, force_terminal=True, width=100, height=10)
+    view = ValidateView("x", [(1, "Static", "static"), (2, "Dedup", "dedup")], console=console)
+    view.start()
+    for index in range(2):
+        view.tier_start(index)
+        for step in range(5):
+            view.tier_progress(index, [TierRow("checks", [(f"step {step}", "")])])
+            view._live.refresh()
+        view.tier_done(index, rows=[TierRow("summary", [(f"tier {index} done", "")])])
+    view.finish(Verdict(passed=True, headline="all passed"), [])
+    text = re.sub(r"\x1b\[[0-9;?]*[A-Za-z]", "", out.getvalue())
+    assert text.count("skillevaluator validate") == 1
+    assert text.count("tier 0 done") == 1
+    assert text.count("tier 1 done") == 1

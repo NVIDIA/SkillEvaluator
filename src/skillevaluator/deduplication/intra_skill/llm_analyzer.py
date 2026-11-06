@@ -75,9 +75,11 @@ def build_user_prompt(cluster: ContentCluster) -> str:
     entry with file, section and lines, its own heading line, and a
     ``[SHARED CONTENT n]`` reference in place of the shared text. A repeated
     text is shared only when its block and references are shorter than its
-    inline copies, so a short text repeated under long headings stays
-    inline. Distinct text is never dropped or shortened, so a request still
-    over budget stays over budget.
+    inline copies. A short text, such as a one-line body, stays inline
+    because its reference would be longer than the text; the heading line
+    stays with every occurrence either way, so its length does not matter.
+    Distinct text is never dropped or shortened, so a request still over
+    budget stays over budget.
     """
     prompt = _render_user_prompt(cluster)
     if len(SYSTEM_PROMPT) + len(prompt) <= MAX_PROMPT_CHARS:

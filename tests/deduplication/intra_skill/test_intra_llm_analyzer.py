@@ -181,6 +181,35 @@ class TestBuildUserPrompt:
             assert "SHARED CONTENT 10" not in prompt
             assert prompt.count(f"Content:\n{text}\n\n") == 2
 
+    @pytest.mark.parametrize(
+        "heading",
+        [
+            pytest.param("## H{}", id="short-headings"),
+            pytest.param("## Configuration option for the workflow runner, number {:04d}", id="long-headings"),
+        ],
+    )
+    def test_short_repeated_body_stays_inline_whatever_its_heading_length(self, make_chunk, heading: str) -> None:
+        # The heading line stays with every occurrence whether or not the body
+        # is shared, so only the body's length and repeat count decide.
+        short_body = "See guide."
+        long_body = "Boilerplate paragraph about safety and usage. " * 20
+        short_members = [
+            make_chunk(heading=heading.format(index), text=f"{heading.format(index)}\n{short_body}")
+            for index in range(200)
+        ]
+        long_members = [
+            make_chunk(heading=f"## Big {index}", text=f"## Big {index}\n{long_body}") for index in range(60)
+        ]
+        cluster = ContentCluster([*short_members, *long_members], 0.95, 0.85, False, {"markdown"})
+        assert _request_chars(llm_analyzer._render_user_prompt(cluster)) > llm_analyzer.MAX_PROMPT_CHARS
+
+        prompt = build_user_prompt(cluster)
+
+        assert prompt.count("---SHARED CONTENT ") == 1
+        assert prompt.count(f"---SHARED CONTENT 1---\n{long_body}\n\n") == 1
+        for member in short_members:
+            assert f"Section: {member.heading}\nLines: 1-5\nContent:\n{member.text}\n\n" in prompt
+
     def test_short_repeated_bodies_under_long_headings_stay_inline(self, make_chunk) -> None:
         short_body = "See guide."
         long_body = "Boilerplate paragraph about safety and usage. " * 20

@@ -20,7 +20,9 @@ Two sources are used, never mixed within one trajectory:
   which also includes harness and queue time, is LLM time. A trajectory with
   any other tool call (``update_plan``, web search, MCP tools ...), or a call
   whose output has no such header, has no measured duration for that call, so
-  nothing is inferred.
+  nothing is inferred. Nor is anything inferred when a tool step is not
+  followed by an agent step, since a user or system step there can follow idle
+  or user time.
 
 Each step of a merged multi-step trajectory is timed on its own, so the gap
 between Harbor steps (verifier and setup time) is never counted. Steps marked
@@ -317,7 +319,9 @@ def _segment_timing_ms(steps: list[dict[str, Any]]) -> tuple[float, float] | Non
             llm_ms += timestamp - stamped[index - 1][1]
         has_tools = bool(durations)
         if has_tools:
-            if index + 1 == len(stamped):
+            # Only the agent's next step shows when the model finished with the tool
+            # output; a user or system step there can follow idle or user time.
+            if index + 1 == len(stamped) or stamped[index + 1][0].get("source") != "agent":
                 return None
             gap_ms = stamped[index + 1][1] - timestamp
             step_tool_ms = max(durations) * 1000.0

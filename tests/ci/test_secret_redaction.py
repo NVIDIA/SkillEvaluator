@@ -10,6 +10,7 @@ import importlib.util
 import io
 import json
 import subprocess
+import sys
 import zipfile
 from pathlib import Path
 from urllib.parse import quote
@@ -356,6 +357,66 @@ def test_refreshing_ids_keeps_the_shape_of_reports_written_before_ids() -> None:
     refresh_finding_identities(document)
 
     assert document == before
+
+
+def _pii_finding(value: str) -> Finding:
+    from skillevaluator.validators.pii_waivers import pii_evidence_sha256
+
+    return Finding(
+        category="PII",
+        severity=Severity.MEDIUM,
+        check_name="email",
+        message=f"Email address: {value}",
+        file_path="SKILL.md",
+        line_number=4,
+        line_content=f"Contact {value}",
+        metadata={"matched_value": value, "evidence_sha256": pii_evidence_sha256("email", value)},
+    )
+
+
+def test_redacting_a_reported_pii_value_drops_its_evidence_digest() -> None:
+    from skillevaluator.reporting.finding_summary import refresh_finding_identities
+    from skillevaluator.utils.secret_redaction import Redactor
+    from skillevaluator.validators.pii_waivers import pii_evidence_sha256
+
+    masked, kept = "ops-sampletoken@example.com", "team@example.com"
+    result = ValidationResult(validator_name="PII Scan")
+    result.add_structured_finding(_pii_finding(masked), is_error=False)
+    result.add_structured_finding(_pii_finding(kept), is_error=False)
+    document = Redactor({"sampletoken"}).object(json.loads(JSONReporter().render_all([result])))
+
+    refresh_finding_identities(document)
+
+    by_value = {f["metadata"]["matched_value"]: f["metadata"] for f in document["results"][0]["findings"]}
+    assert masked not in by_value
+    redacted = next(meta for value, meta in by_value.items() if value != kept)
+    assert "evidence_sha256" not in redacted
+    assert by_value[kept]["evidence_sha256"] == pii_evidence_sha256("email", kept)
+    rendered = json.dumps(document)
+    assert pii_evidence_sha256("email", masked) not in rendered
+    assert pii_evidence_sha256("email", kept) in rendered
+
+
+def test_a_digest_that_does_not_match_its_reported_value_is_dropped() -> None:
+    from skillevaluator.reporting.finding_summary import refresh_finding_identities
+
+    finding = _pii_finding("team@example.com").to_dict()
+    finding["metadata"]["evidence_sha256"] = "0" * 64
+    document = {"results": [{"validator": "PII Scan", "findings": [finding]}]}
+
+    refresh_finding_identities(document)
+
+    assert "evidence_sha256" not in document["results"][0]["findings"][0]["metadata"]
+
+
+def test_refreshing_finding_ids_does_not_load_the_validators() -> None:
+    probe = (
+        "import sys, skillevaluator.reporting.finding_summary; "
+        "print(sorted(m for m in sys.modules if m.startswith('skillevaluator.validators')))"
+    )
+    loaded = subprocess.run([sys.executable, "-c", probe], capture_output=True, text=True, check=True).stdout
+
+    assert loaded.strip() == "[]"
 
 
 def test_interrupted_scan_never_copies_raw_output(tmp_path, capsys):

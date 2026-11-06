@@ -40,6 +40,7 @@ from skillevaluator.reporting.base import (
     additional_errors,
     get_skip_reason,
     is_advisory_agent_eval_skip,
+    is_cleanly_skipped,
     passes_required_gate,
     source_validation_errors,
     source_validation_preview,
@@ -86,12 +87,17 @@ def _rich_source_error(error: dict[str, str]) -> str:
     return escape_markup(text)
 
 
+def _rich_line(text: str) -> str:
+    """Return one bounded, single-line message inert to Rich markup."""
+    line = " ".join(text.replace("\r\n", "\n").replace("\r", "\n").split())
+    if len(line) > _SKIP_REASON_MAX_CHARS:
+        line = line[: _SKIP_REASON_MAX_CHARS - 1] + "…"
+    return escape_markup(line)
+
+
 def _rich_skip_reason(result: ValidationResult) -> str:
     """Return one bounded, single-line skip reason inert to Rich markup."""
-    reason = " ".join(get_skip_reason(result).replace("\r\n", "\n").replace("\r", "\n").split())
-    if len(reason) > _SKIP_REASON_MAX_CHARS:
-        reason = reason[: _SKIP_REASON_MAX_CHARS - 1] + "…"
-    return escape_markup(reason)
+    return _rich_line(get_skip_reason(result))
 
 
 class CLIReporter(ReporterBase):
@@ -205,11 +211,11 @@ class CLIReporter(ReporterBase):
         for number, tier in context.tiers.items():
             if not tier.displayed:
                 continue
-            console.print(f"Tier {number}: {tier.summary}", highlight=False)
-        if context.tiers[3].status != Status.NOT_RUN:
-            console.print(context.coverage.text)
+            console.print(f"Tier {number}: {tier.summary}", highlight=False, soft_wrap=True)
+        if context.tiers[3].status not in (Status.NOT_RUN, Status.SKIPPED):
+            console.print(context.coverage.text, highlight=False, soft_wrap=True)
             for line in context.coverage.details:
-                console.print(line)
+                console.print(line, highlight=False, soft_wrap=True)
         console.print(f"Publication eligibility: {context.publication_label}\n")
 
     def render_result(self, result: ValidationResult, console: Console) -> None:
@@ -645,8 +651,11 @@ class CLIReporter(ReporterBase):
             s = result.summary
             static_test_evidence = self._static_test_evidence_message(result)
 
-            if advisory_skip:
+            if advisory_skip or (outcome == "not_applicable" and is_cleanly_skipped(result)):
                 details = _rich_skip_reason(result)
+            elif outcome == "not_applicable":
+                # Keep the recorded reason; "N/A │ 1 checks passed" contradicts itself.
+                details = _rich_line(result.success_details[0].message) if result.success_details else "Not applicable"
             elif outcome == "incomplete":
                 scanners = escape_markup(", ".join(result.incomplete_scans))
                 details = f"[bold yellow]{scanners} did not complete[/bold yellow]"

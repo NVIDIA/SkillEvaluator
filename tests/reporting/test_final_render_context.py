@@ -315,7 +315,9 @@ def test_emitting_human_reports_preserves_canonical_json_and_return_value(tmp_pa
         is False
     )
     assert "Passed required checks" in output.getvalue()
-    assert "3 scored trials: 3 with skill, baseline skipped" in (tmp_path / "projection.html").read_text()
+    assert "3 scored trials: 3 with skill, baseline skipped" in (tmp_path / "projection.html").read_text(
+        encoding="utf-8"
+    )
     assert source == snapshot
     assert JSONReporter(include_timestamp=False).render(source) == before
 
@@ -474,3 +476,86 @@ def test_zero_execution_counts_stay_explicit_at_terminal_widths(monkeypatch, wid
     assert "0 of 0 checks passed" not in output
     assert "Passed required checks" in output
     assert "Publication eligibility: Incomplete" in output
+
+
+@pytest.mark.parametrize(
+    ("mode", "present", "expected"),
+    [
+        ("with_skill_only", "with_skill", "3 scored trials: 3 with skill, baseline skipped"),
+        ("baseline_only", "without_skill", "3 scored trials: with skill skipped, 3 baseline"),
+    ],
+)
+def test_producer_one_arm_mode_marks_the_missing_arm_skipped(mode, present, expected):
+    # --skip-baseline / --skip-with-skill omit the unexecuted condition; the
+    # payload-level mode is the producer's explicit skip marker.
+    counts = {"execution_status": "succeeded", "scored_attempts": 3, "expected_attempts": 3}
+    coverage = presentation.trial_coverage({"mode": mode, "agents": {"a": {"conditions": {present: counts}}}})
+    assert coverage.text == expected
+    assert "unavailable" not in coverage.text
+
+
+def test_advisory_tier3_skip_reports_skipped_arms_not_unavailable_counts():
+    coverage = presentation.trial_coverage({"execution_status": "skipped", "agents": {}})
+    assert (coverage.with_skill.status, coverage.baseline.status) == ("skipped", "skipped")
+    assert "unavailable" not in coverage.text
+    source = result(3, skipped=True, agent_eval={"execution_status": "skipped", "agents": {}})
+    output = CLIReporter().render_all([source])
+    assert "scored trials unavailable" not in output
+
+
+def test_standalone_tier3_report_header_follows_failing_tier3_verdict():
+    from skillevaluator.evaluation.tier3_report import _validation_result_from_payload, build_agent_eval_payload
+    from skillevaluator.tier3.harbor.metrics import DEFAULT_METRICS
+
+    def arm(n):
+        return {"execution_status": "succeeded", "execution_errors": [], "expected_attempts": n, "scored_attempts": n}
+
+    payload = build_agent_eval_payload(
+        "demo",
+        {
+            "agent": {
+                "with_skill": dict.fromkeys(DEFAULT_METRICS, 0.2),
+                "without_skill": dict.fromkeys(DEFAULT_METRICS, 0.9),
+                "execution_status": "succeeded",
+                "execution_errors": [],
+                "expected_attempts": 2,
+                "scored_attempts": 2,
+                "conditions": {"with_skill": arm(1), "without_skill": arm(1)},
+                "num_trials": 1,
+                "num_trials_baseline": 1,
+            }
+        },
+        dataset=[{"id": "case-a"}],
+        attempt_policy={"max_attempts": 1, "stop_on_pass": False, "pass_threshold": 0.5},
+        use_llm_judge=False,
+    )
+    source = _validation_result_from_payload(payload)
+    assert payload["verdict"] == "fail" and "gating" not in source.metadata
+    ctx = context([source], report_scope="tier3")
+    assert ctx.command_status == Status.FAILED
+    html = HTMLReporter(report_scope="tier3", tabs=[{"id": "tier3", "label": "Tier 3"}]).render_all([source])
+    assert re.search(r'header-status-badge[^>]*data-verdict="fail"', html)
+    assert "Passed required checks" not in html
+
+
+def test_not_applicable_rows_show_their_recorded_reason():
+    covered = ValidationResult(validator_name="Code Risk", metadata={"gating": {"tier": 1, "blocking": True}})
+    covered.add_success("code_file_discovery", "No code files found - code risk analysis is not applicable")
+    skipped = result(skipped=True, skip_reason="Lint is not applicable: no scripts directory")
+    output = re.sub(r"\s+", " ", CLIReporter().render_all([covered, skipped]))
+    assert "1 checks passed" not in output
+    assert "Skipped (see warnings)" not in output
+    assert "No code files found" in output
+    assert "Lint is not applicable: no scripts directory" in output
+
+
+def test_executed_tier_counts_stay_on_one_line_at_narrow_widths(monkeypatch):
+    monkeypatch.setenv("COLUMNS", "60")
+    monkeypatch.setenv("TERM", "xterm-256color")
+    monkeypatch.setenv("CI", "true")
+    passed = result()
+    passed.add_success("lint", "Lint passed")
+    failed = result()
+    failed.add_error("Lint failed")
+    output = CLIReporter().render_all([passed, failed, result(skipped=True)])
+    assert "Tier 1: 1 of 2 checks passed; 1 failed, 0 incomplete, 1 skipped, 0 N/A" in output

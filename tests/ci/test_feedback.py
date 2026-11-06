@@ -338,8 +338,8 @@ class GitLab:
         self.flip_head_on_recheck = False
         self.head_checks = 0
         self.variables = [
-            {"key": "SKILL_EVAL_FEEDBACK", "value": "true"},
-            {"key": "SKILL_EVAL_SOURCE_PIPELINE_ID", "value": "123"},
+            {"key": "SKILL_EVAL_FEEDBACK", "value": "true", "variable_type": "env_var"},
+            {"key": "SKILL_EVAL_SOURCE_PIPELINE_ID", "value": "123", "variable_type": "env_var"},
         ]
 
     def get(self, path):
@@ -434,6 +434,73 @@ def test_gitlab_binds_protected_downstream_source_job_config_head_job_and_bot(gi
     assert "https://gitlab.example/acme/skills/-/pipelines/123" in body
     assert module.gitlab_feedback(api, "https://gitlab.example/api/v4", "12", 123)["comment_action"] == "unchanged"
     assert len(api.writes) == 1
+
+
+@pytest.mark.parametrize(
+    "payload",
+    [
+        '{"id":"12","ref":"main","variables":{"SKILL_EVAL_FEEDBACK":"true","SKILL_EVAL_SOURCE_PIPELINE_ID":"123"}}',
+        "opaque content: not JSON; $(do-not-execute)",
+    ],
+)
+def test_gitlab_accepts_server_added_file_trigger_payload_without_using_its_contents(gitlab, payload):
+    module, api = gitlab
+    api.variables.append({"key": "TRIGGER_PAYLOAD", "value": payload, "variable_type": "file"})
+    result = module.gitlab_feedback(api, "https://gitlab.example/api/v4", "12", 123)
+    assert result["comment_action"] == "created"
+    assert payload not in api.notes[0]["body"]
+
+
+@pytest.mark.parametrize(
+    "change",
+    [
+        "payload-env",
+        "payload-type-missing",
+        "payload-nonstring",
+        "payload-oversized",
+        "payload-duplicate",
+        "selector-duplicate",
+        "selector-file",
+        "selector-type-missing",
+        "extra-env",
+        "feedback-value",
+        "source-value",
+        "invalid-key",
+    ],
+)
+def test_gitlab_rejects_extra_duplicate_or_mistyped_trigger_variables(gitlab, change):
+    module, api = gitlab
+    payload = {"key": "TRIGGER_PAYLOAD", "value": "opaque server payload", "variable_type": "file"}
+    api.variables.append(payload)
+    if change == "payload-env":
+        payload["variable_type"] = "env_var"
+    elif change == "payload-type-missing":
+        payload.pop("variable_type")
+    elif change == "payload-nonstring":
+        payload["value"] = {"ref": "main"}
+    elif change == "payload-oversized":
+        payload["value"] = "x" * (64 * 1024 + 1)
+    elif change == "payload-duplicate":
+        api.variables.append(copy.deepcopy(payload))
+    elif change == "selector-duplicate":
+        api.variables[-1] = copy.deepcopy(api.variables[0])
+    elif change == "selector-file":
+        api.variables[0]["variable_type"] = "file"
+        api.variables.pop()
+    elif change == "selector-type-missing":
+        api.variables[0].pop("variable_type")
+        api.variables.pop()
+    elif change == "extra-env":
+        api.variables[-1] = {"key": "CI_PIPELINE_ID", "value": "123", "variable_type": "env_var"}
+    elif change == "feedback-value":
+        api.variables[0]["value"] = "false"
+    elif change == "source-value":
+        api.variables[1]["value"] = "124"
+    else:
+        payload["key"] = []
+    with pytest.raises(module.FeedbackError, match="forwarded variables"):
+        module.gitlab_feedback(api, "https://gitlab.example/api/v4", "12", 123)
+    assert not api.writes
 
 
 @pytest.mark.parametrize("ref", ["ci/skillevaluator-all-tiers-setup", "refs/merge-requests/7/head"])

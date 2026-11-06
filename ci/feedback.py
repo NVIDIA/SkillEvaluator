@@ -693,12 +693,30 @@ def gitlab_feedback(api, api_url: str, project: str, pipeline_id: int) -> dict:
         "The authenticated job is not the exact running trusted feedback job.",
     )
     variables = api.get(f"{root}/pipelines/{publisher['id']}/variables")
+    expected_variables = {"SKILL_EVAL_FEEDBACK": "true", "SKILL_EVAL_SOURCE_PIPELINE_ID": str(pipeline_id)}
+    # GitLab adds an opaque file variable for API trigger parameters. It is
+    # never parsed, executed or published; only the server-bound relation below
+    # authenticates the source job and pipeline.
     _require(
         isinstance(variables, list)
-        and len(variables) == 2
-        and all(isinstance(v, dict) for v in variables)
-        and {v.get("key"): v.get("value") for v in variables}
-        == {"SKILL_EVAL_FEEDBACK": "true", "SKILL_EVAL_SOURCE_PIPELINE_ID": str(pipeline_id)},
+        and len(variables) in {2, 3}
+        and all(isinstance(v, dict) and isinstance(v.get("key"), str) for v in variables)
+        and len({v["key"] for v in variables}) == len(variables)
+        and expected_variables.keys() <= {v["key"] for v in variables}
+        and all(
+            (
+                v["key"] in expected_variables
+                and v.get("variable_type") == "env_var"
+                and v.get("value") == expected_variables[v["key"]]
+            )
+            or (
+                v["key"] == "TRIGGER_PAYLOAD"
+                and v.get("variable_type") == "file"
+                and isinstance(v.get("value"), str)
+                and len(v["value"]) <= 64 * 1024
+            )
+            for v in variables
+        ),
         "The downstream pipeline has unsupported forwarded variables.",
     )
     source = api.get(f"{root}/pipelines/{pipeline_id}")

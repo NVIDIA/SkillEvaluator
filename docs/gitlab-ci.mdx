@@ -68,6 +68,9 @@ token. After aggregation, a small job uses its short-lived `CI_JOB_TOKEN` with
 GitLab's pipeline trigger API to request a separate pipeline on the protected
 default branch. It sends only `SKILL_EVAL_FEEDBACK=true` and the source pipeline
 ID, without forwarding repository variables or caller-supplied pipeline overrides.
+GitLab also adds its own `TRIGGER_PAYLOAD` file variable. The publisher accepts
+that bounded file entry alongside the two selectors and treats its contents as
+opaque; additional caller variables remain disallowed.
 The API supports same-project pipelines; GitLab's declarative multi-project
 bridge rejects a target in the same project. That trusted pipeline uses validated include inputs for fixed evaluator pins,
 API host and project, so forwarded MR variables cannot replace its privileged

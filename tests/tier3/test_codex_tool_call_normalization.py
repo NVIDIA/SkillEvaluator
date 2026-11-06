@@ -1578,3 +1578,54 @@ def test_quiet_probe_reads_only_a_whole_record(checker, observation, clean):
     call = {"action": "bash", "action_input": {"command": "grep foo f"}, "observation": observation}
 
     assert checker([call])["first_attempt_clean"] is clean
+
+
+@pytest.mark.parametrize("extractor", _EXTRACTORS)
+@pytest.mark.parametrize(
+    "source",
+    [
+        'const r=await tools.exec_command({cmd:"cat /skills/example/SKILL.md"});text(r);',
+        'const r=await tools.exec_command({cmd:"cat /skills/example/SKILL.md"});text(r)',
+        "const r=await tools.exec_command({cmd:'cat /skills/example/SKILL.md'});text(r);",
+        'text(await tools.exec_command({cmd:"cat /skills/example/SKILL.md"}));',
+    ],
+    ids=["double-quoted", "no-final-semicolon", "single-quoted", "inline"],
+)
+def test_extended_codex_failed_call_grades_the_same_in_every_spelling(extractor, source):
+    record = {"exit_code": 1, "output": "cat: /skills/example/SKILL.md: No such file or directory\n"}
+    trajectory = _trajectory(source, _record_observation([record]))
+    calls = extractor(trajectory)
+
+    assert calls[0]["is_error"] is True
+    assert _scorer(extractor, "check_activation")(calls, "example")["score"] == 0.0
+    assert _error_recovery(trajectory, extractor)["first_attempt_clean"] is False
+
+
+@pytest.mark.parametrize("extractor", _EXTRACTORS)
+def test_extended_codex_two_bound_calls_each_get_their_own_record(extractor):
+    source = (
+        'const a=await tools.exec_command({cmd:"false"});const b=await tools.exec_command({cmd:"pwd"});'
+        "text(a);text(b);"
+    )
+    records = [{"exit_code": 3, "output": "boom\n"}, {"exit_code": 0, "output": "/workspace\n"}]
+    calls = extractor(_trajectory(source, _record_observation(records)))
+
+    assert [call["observation_status"] for call in calls] == ["mapped_outer_exec_result"] * 2
+    assert [call["is_error"] for call in calls] == [True, False]
+
+
+@pytest.mark.parametrize("extractor", _EXTRACTORS)
+@pytest.mark.parametrize(
+    "source",
+    [
+        'const a=await tools.exec_command({cmd:"pwd"});const b=await tools.exec_command({cmd:"ls"});text(a);',
+        'const a=await tools.exec_command({cmd:"pwd"});const b=await tools.exec_command({cmd:"ls"});'
+        "text(a.output);text(b.output);",
+    ],
+    ids=["one-rendered", "output-field"],
+)
+def test_extended_codex_bound_forms_it_cannot_split_keep_the_upstream_result(extractor, source):
+    calls = extractor(_trajectory(source, "outer observation"))
+
+    assert [call["action"] for call in calls] == ["exec_command", "exec_command"]
+    assert "is_error" not in calls[0]

@@ -776,7 +776,8 @@ def normalize_tool_call(tool_call: dict[str, Any]) -> list[dict[str, Any]]:
 # ── Extended static grammar for inline and Promise.allSettled wrappers (#235) ──
 # Codex 0.161.0 also emits `text(await tools.NAME(...))`, single-quoted strings and literal
 # `Promise.allSettled` batches. This grammar decodes only those static forms, without evaluating
-# JavaScript, and runs only where the grammar above returned unsupported. A wrapper with more
+# JavaScript. It runs first for every `exec` wrapper, so a call is graded the same whatever its
+# spelling, and the grammar above answers only where this one declines. A wrapper with more
 # than one call is decoded only when each call renders one JSON record of the outer output: the
 # call owns that record, and a missing, extra, reordered, changed, truncated or duplicate-key
 # record leaves the whole wrapper unsupported. A record's own exit code or rejection decides
@@ -1151,14 +1152,13 @@ _upstream_normalized_tool_call_error_flag = normalized_tool_call_error_flag
 def _normalize_tool_call_with_records(tool_call: dict[str, Any]) -> list[dict[str, Any]]:
     """Unwrap proven native Codex calls, adding the inline and allSettled forms of #235."""
     normalized = _upstream_normalize_tool_call(tool_call)
-    if len(normalized) != 1 or normalized[0].get("_atif_normalization_status") != UNSUPPORTED_NATIVE_CODEX_EXEC:
-        return normalized
-    source = normalized[0]["arguments"]["input"]
-    parsed = _extended_codex_program(source) if len(source) <= _MAX_SOURCE_CHARS else None
+    arguments = tool_call.get("arguments")
+    source = arguments.get("input") if tool_call.get("function_name") == "exec" and isinstance(arguments, dict) else None
+    parsed = _extended_codex_program(source) if isinstance(source, str) and len(source) <= _MAX_SOURCE_CHARS else None
     if parsed is None:
         return normalized
     calls, observation_owner, record_format = parsed
-    outer = {key: value for key, value in normalized[0].items() if key != "_atif_normalization_status"}
+    outer = {key: value for key, value in tool_call.items() if not key.startswith("_atif_")}
     result: list[dict[str, Any]] = []
     for inner_index, (function_name, inner_arguments) in enumerate(calls):
         call = {

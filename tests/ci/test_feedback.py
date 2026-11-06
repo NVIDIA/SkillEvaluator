@@ -8,8 +8,11 @@ import copy
 import importlib
 import io
 import json
+import re
 import stat
+import sys
 import zipfile
+from pathlib import Path
 
 import pytest
 
@@ -945,6 +948,145 @@ def test_gitlab_cli_does_not_fall_back_to_job_token(monkeypatch, capsys):
         == 1
     )
     assert "never-use-me" not in capsys.readouterr().err
+
+
+def _failed_gitlab_main(module):
+    return module.main(
+        [
+            "--platform",
+            "gitlab",
+            "--api-url",
+            "https://gitlab.example/api/v4",
+            "--project-id",
+            "12",
+            "--pipeline-id",
+            "123",
+        ]
+    )
+
+
+def _safe_diagnostic(stderr, category):
+    match = re.fullmatch(
+        r"Trusted feedback could not validate its producer, current head, or bot-owned comment\. "
+        r"\[check=feedback\.py:([1-9][0-9]*); category=" + category + r"\]\n",
+        stderr,
+    )
+    assert match is not None
+    return int(match[1])
+
+
+@pytest.mark.parametrize(
+    "failure,category", [("feedback", "validation"), ("http", "http_401"), ("named", "validation")]
+)
+def test_cli_failure_diagnostic_uses_only_trusted_line_and_finite_category(
+    gitlab, monkeypatch, capsys, failure, category
+):
+    import urllib.error
+
+    module, api = gitlab
+    secret = "synthetic-private-token-with-claims-and-headers"
+    monkeypatch.setenv("SKILLEVALUATOR_GITLAB_TOKEN", secret)
+    monkeypatch.setattr(module, "GitLabAPI", lambda *_args: api)
+    error = module.FeedbackError(secret)
+    if failure == "http":
+        error = urllib.error.HTTPError(
+            "https://private.example/" + secret, 401, secret, {"Authorization": secret}, None
+        )
+    elif failure == "named":
+        error = type(secret, (module.FeedbackError,), {})(secret)
+    error.add_note("private notes: " + secret)
+    original = api.get
+
+    def get(path):
+        if "/notes?" in path:
+            raise error
+        return original(path)
+
+    api.get = get
+    assert _failed_gitlab_main(module) == 1
+    output = capsys.readouterr()
+    assert output.out == ""
+    line = _safe_diagnostic(output.err, category)
+    assert "api.get(" in Path(module.__file__).read_text().splitlines()[line - 1]
+    assert secret not in output.err and "https://" not in output.err
+
+
+def test_cli_validation_diagnostic_identifies_guard_callsite_not_shared_require(gitlab, monkeypatch, capsys):
+    module, api = gitlab
+    monkeypatch.setenv("SKILLEVALUATOR_GITLAB_TOKEN", "synthetic-private-token")
+    monkeypatch.setattr(module, "GitLabAPI", lambda *_args: api)
+    api.variables = []
+    original = module._require
+    failed_lines = []
+
+    def require(condition, message):
+        if not condition:
+            failed_lines.append(sys._getframe(1).f_lineno)
+        original(condition, message)
+
+    monkeypatch.setattr(module, "_require", require)
+    assert _failed_gitlab_main(module) == 1
+    assert _safe_diagnostic(capsys.readouterr().err, "validation") == failed_lines[0]
+
+
+@pytest.mark.parametrize(
+    "exception_name,category",
+    [
+        ("ExpiredSignatureError", "auth_expired"),
+        ("InvalidAudienceError", "auth_audience"),
+        ("InvalidSignatureError", "auth_signature"),
+        ("InvalidIssuerError", "auth_issuer"),
+        ("ImmatureSignatureError", "auth_immature"),
+        ("MissingRequiredClaimError", "auth_missing_claim"),
+        ("DecodeError", "auth_invalid"),
+        ("spoofed", "validation"),
+    ],
+)
+def test_cli_auth_diagnostic_whitelists_classes_without_messages(monkeypatch, capsys, exception_name, category):
+    import jwt
+
+    module = adapter()
+    secret = "synthetic-jwt-claim-and-signature-value"
+    monkeypatch.setenv("SKILLEVALUATOR_GITLAB_TOKEN", secret)
+    cause = (
+        type("ExpiredSignatureError", (Exception,), {})(secret)
+        if exception_name == "spoofed"
+        else getattr(jwt, exception_name)(secret)
+    )
+    cause.add_note(secret)
+
+    def fail(*_args):
+        raise module.FeedbackError(secret) from cause
+
+    monkeypatch.setattr(module, "gitlab_feedback", fail)
+    assert _failed_gitlab_main(module) == 1
+    output = capsys.readouterr()
+    _safe_diagnostic(output.err, category)
+    assert secret not in output.err and output.out == ""
+
+
+def test_cli_auth_diagnostic_reports_only_finite_wrapped_http_code(monkeypatch, capsys):
+    import urllib.error
+
+    import jwt
+
+    module = adapter()
+    secret = "synthetic-jwks-url-token-and-header"
+    monkeypatch.setenv("SKILLEVALUATOR_GITLAB_TOKEN", secret)
+    cause = jwt.PyJWKClientError(secret)
+    cause.__cause__ = urllib.error.HTTPError(
+        "https://private.example/" + secret, 404, secret, {"Authorization": secret}, None
+    )
+    cause.add_note(secret)
+
+    def fail(*_args):
+        raise module.FeedbackError(secret) from cause
+
+    monkeypatch.setattr(module, "gitlab_feedback", fail)
+    assert _failed_gitlab_main(module) == 1
+    output = capsys.readouterr()
+    _safe_diagnostic(output.err, "http_404")
+    assert output.out == "" and secret not in output.err
 
 
 def test_all_tier_receipt_caller_path_is_explicit_and_legacy_default_is_unchanged(monkeypatch):

@@ -86,6 +86,10 @@ maintainers; a job token does not bypass protected-branch or deployment permissi
 The feedback request is advisory; the aggregate remains the required evaluation
 gate when the first setup MR has not yet installed feedback on the default branch.
 
+For a rejected publisher, open its job log. The check location refers to the
+pinned `ci/feedback.py` revision, and the category distinguishes validation,
+authentication and transport failures.
+
 Install both configuration files on the default branch before the first demo
 MR. GitLab must permit the downstream pipeline and the protected feedback job;
 a setup MR alone cannot establish trusted automatic feedback. On instances

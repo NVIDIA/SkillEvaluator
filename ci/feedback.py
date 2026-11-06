@@ -916,6 +916,55 @@ def gitlab_feedback(api, api_url: str, project: str, pipeline_id: int) -> dict:
     return result
 
 
+def _failure_diagnostic(error: BaseException) -> str:
+    """Expose only trusted code locations and a finite set of failure labels."""
+    line = main.__code__.co_firstlineno
+    trace = error.__traceback__
+    for _ in range(128):
+        if trace is None:
+            break
+        frame = trace.tb_frame
+        if frame.f_globals is globals() and frame.f_code.co_filename == __file__ and frame.f_code.co_name != "_require":
+            line = trace.tb_lineno
+        trace = trace.tb_next
+
+    if isinstance(error, urllib.error.HTTPError):
+        category = "http"
+    elif isinstance(error, (FeedbackError, publish_reports.PublicationError)):
+        category = "validation"
+    elif isinstance(error, (OSError, http.client.HTTPException)):
+        category = "transport"
+    else:
+        category = "response"
+
+    # JWT verification already imports this trusted dependency. Match actual
+    # classes, never an exception's printable name, message, notes or values.
+    jwt = sys.modules.get("jwt")
+    cause = error
+    for _ in range(8):
+        if isinstance(cause, urllib.error.HTTPError):
+            codes = {401: "http_401", 403: "http_403", 404: "http_404", 429: "http_429"}
+            category = codes.get(cause.code, "http") if type(cause.code) is int else "http"
+            return f"check=feedback.py:{line}; category={category}"
+        if jwt is not None:
+            for kind, label in (
+                (jwt.ExpiredSignatureError, "auth_expired"),
+                (jwt.InvalidAudienceError, "auth_audience"),
+                (jwt.InvalidSignatureError, "auth_signature"),
+                (jwt.InvalidIssuerError, "auth_issuer"),
+                (jwt.ImmatureSignatureError, "auth_immature"),
+                (jwt.MissingRequiredClaimError, "auth_missing_claim"),
+            ):
+                if isinstance(cause, kind):
+                    return f"check=feedback.py:{line}; category={label}"
+            if isinstance(cause, jwt.PyJWTError):
+                category = "auth_invalid"
+        cause = cause.__cause__
+        if cause is None:
+            break
+    return f"check=feedback.py:{line}; category={category}"
+
+
 def main(argv=None) -> int:
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--platform", choices=("github", "gitlab"), required=True)
@@ -950,9 +999,14 @@ def main(argv=None) -> int:
         KeyError,
         AttributeError,
         urllib.error.URLError,
-    ):
+        http.client.HTTPException,
+    ) as error:
         # Do not print provider errors, request URLs, tokens or artifact content.
-        print("Trusted feedback could not validate its producer, current head, or bot-owned comment.", file=sys.stderr)
+        print(
+            "Trusted feedback could not validate its producer, current head, or bot-owned comment. "
+            f"[{_failure_diagnostic(error)}]",
+            file=sys.stderr,
+        )
         return 1
 
 

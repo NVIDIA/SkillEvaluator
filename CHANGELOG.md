@@ -41,7 +41,8 @@ All notable changes to SkillEvaluator are documented in this file.
   Same-project feedback uses the short-lived job-token trigger API and verifies
   the server-bound upstream pipeline and source job, preserving protected-branch
   and deployment permissions. Its persisted GraphQL MR association supports
-  GitLab 17.x without requiring the newer pipeline/MR REST endpoint.
+  GitLab 17.x without requiring the newer pipeline/MR REST endpoint. Publisher
+  failures include a trusted check location and finite diagnostic category.
 
 - Private runtime runs retain sanitized loading, coverage, MCP, behavior and
   comparison views before cleanup. The saved snapshot supports offline reports

@@ -34,6 +34,7 @@ from skillevaluator.tier3.harbor.metrics import (
     score_value,
 )
 from skillevaluator.tier3.harbor.resource_usage import agent_execution_seconds
+from skillevaluator.tier3.harbor.trajectory_timing import trajectory_timing
 
 logger = logging.getLogger(__name__)
 
@@ -859,6 +860,9 @@ def load_agent_data(
                                 ),
                                 "cached_tokens": _trajectory_token_counter(final_metrics.get("total_cached_tokens")),
                             }
+                            timing = trajectory_timing(trajectory)
+                            if timing is not None:
+                                reward["_traj"]["timing"] = timing
                     trial_list.append(reward)
             else:
                 rewards_complete = expected_logical_trials == 0

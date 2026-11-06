@@ -20,6 +20,7 @@ from rich.panel import Panel
 from rich.table import Table
 from rich.text import Text
 
+from skillevaluator.reporting.harbor_viewer import harbor_job_links, normalize_harbor_viewer_for_display
 from skillevaluator.tier3.harbor.metrics import (
     CUSTOM_ONLY_METRIC_SET,
     DEFAULT_METRIC_SET,
@@ -933,6 +934,30 @@ def render_evaluation_result(
         )
 
     artifact_rows: list[tuple[str, str]] = []
+    viewer_source = dict(result)
+    raw_viewer = viewer_source.get("harbor_viewer")
+    uploads = raw_viewer.get("uploads") if isinstance(raw_viewer, dict) else None
+    if isinstance(raw_viewer, dict) and isinstance(uploads, list) and uploads:
+        # Project raw uploads without replacing canonical jobs or run metadata.
+        from skillevaluator.evaluation.tier3_report import _harbor_viewer_from_engine_result
+
+        uploaded = _harbor_viewer_from_engine_result({"harbor_viewer": {"uploads": uploads}})
+        jobs = normalize_harbor_viewer_for_display(viewer_source).get("jobs", [])
+        by_url = {job["url"]: job for job in jobs}
+        for job in uploaded.get("jobs", []):
+            retained = by_url.get(job["url"])
+            if retained is None:
+                jobs.append(job)
+                by_url[job["url"]] = job
+            elif not retained.get("analysis_url") and job.get("analysis_url"):
+                # Enrich only the same validated job; canonical metadata wins.
+                retained["analysis_url"] = job["analysis_url"]
+        viewer_source["harbor_viewer"] = {**raw_viewer, "jobs": jobs}
+    for job in harbor_job_links(viewer_source):
+        artifact_rows.append(("Harbor job", safe(job["name"])))
+        for key, label in (("url", "Results"), ("analysis_url", "Analysis")):
+            if job.get(key):
+                artifact_rows.append((label, safe(job[key])))
     report_path = result.get("report_path")
     if report_path:
         raw_report_path = str(report_path)

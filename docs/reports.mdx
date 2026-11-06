@@ -92,6 +92,37 @@ scored totals. Preview limits and physical retry rows do not replace recorded
 attempt counts. These are display projections; canonical JSON and evaluation
 payloads are unchanged.
 
+### Tier 2 comparison scopes and evidence
+
+The HTML Tier 2 view separates **Within this skill** (redundant content among
+its files) from **Across skills** (catalog or collection comparisons). Each
+scope shows Checks completed, Duplicate findings, Affected files or skills,
+and Catalog entries compared. Completion uses recorded comparison
+evidence; a completed check can still fail its gate because it found duplicates.
+Refused LLM classifications and file safety errors remain visible findings,
+but do not count as confirmed duplicates within a skill.
+
+A completed comparison with no matches shows zero. A skipped catalog comparison,
+missing metadata, or an incomplete scan shows the recorded reason and unavailable
+counts. Target against catalog comparisons exclude the target's recorded self
+entry. Within-skill checks and recorded pairwise scans mark Catalog entries compared
+as not applicable. Pairwise scans identify the collection size separately. Affected counts use recorded file or skill paths,
+so equal display names do not merge distinct skills. Token or context savings
+are not estimated from duplicate counts.
+
+HTML, terminal, and Markdown reports link every recorded Harbor job to its
+**Results** and available **Analysis**, using the job's recorded name or
+`Job N` when no name is available. Legacy single-job and analysis-only links
+remain usable. Job names do not establish which agent or condition produced a
+job. Links use the existing URL validation and output escaping.
+
+HTML disclosures show recorded scanner versions and LLM provenance, plus
+sanitized model, evaluator, dataset digest, and evaluated source metadata under
+Tier 3 Diagnostics. Missing values remain unavailable. These views use existing
+report data and do not read the source tree or contact providers while rendering.
+Full downloads and preview omission counts remain available; with-skill token
+charts are labeled separately from the resource table's two-arm comparisons.
+
 ## File naming
 
 Report filenames follow two patterns, both under the output directory:

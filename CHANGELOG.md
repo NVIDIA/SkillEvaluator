@@ -9,6 +9,12 @@ All notable changes to SkillEvaluator are documented in this file.
 - When CI redaction masks a credential inside a reported PII value, remove the
   finding's digest as well.
 
+- Separate HTML Tier 2 evidence into within-skill and across-skill comparisons,
+  with recorded completion, duplicate, affected-path, and catalog counts. Keep
+  skipped or unavailable comparisons distinct from completed zero-match scans.
+  Link every recorded Harbor job in HTML, terminal, and Markdown reports and
+  disclose recorded scanner, evaluator, model, dataset, and source provenance.
+
 - Give HTML summaries, tier tiles, KPI labels and values, findings, evidence
   tables and all six Tier 3 views more reading room. Use relaxed body line
   spacing and wrap Tier 3 navigation on narrow screens in both themes.

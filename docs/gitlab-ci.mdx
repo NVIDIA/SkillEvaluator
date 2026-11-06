@@ -31,6 +31,15 @@ retains `skill-evaluator-results/ci-results.json`, `index.html`, `summary.md`,
 and each tier's native reports for 14 days. Reports stay behind your normal
 GitLab artifact access controls.
 
+Trusted MR feedback uses one summary table with a row per skill. Each row has
+one-line results for Static and Security Validation, Deduplication, and Live
+Agent Evaluation, with status, recorded issue count and the main finding or
+blocker. Incomplete or missing evidence shows an unknown count. One **Report**
+link per skill downloads the combined aggregate artifact; extract it and open
+`index.html` for the detailed aggregate and native reports. Separate tier
+sections and per-tier links stay out of the comment. See the
+[comment and report contract](reports.mdx#retained-three-tier-ci-evidence).
+
 Configure a runner matching `SKILL_EVAL_RUNNER` (default `docker`), the protected
 `SKILL_EVAL_ENVIRONMENT` (default `skillevaluator`) and provider secrets scoped
 to that execution environment. The default Docker service needs a privileged

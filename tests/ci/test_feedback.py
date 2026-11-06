@@ -163,8 +163,9 @@ def test_github_creates_one_owned_comment_with_private_artifact_and_gate(github)
     body = api.comments[0]["body"]
     assert module.MARKER in body
     assert "https://github.com/acme/skills/actions/runs/123/artifacts/21" in body
-    assert "Tier 2 | skipped | Required" in body
-    assert "Tier 3 | skipped | Advisory" in body
+    assert "Required tiers: Tier 1, Tier 2. Advisory tiers: Tier 3." in body
+    assert body.count("SKIPPED") == 3
+    assert body.count("[Report](") == 1
     assert "(tier" not in body  # archive members are not live web pages
     assert module.github_feedback(api, REPO, 123, 1)["comment_action"] == "unchanged"
     assert len(api.writes) == 1
@@ -213,10 +214,96 @@ def test_trusted_feedback_keeps_paid_failures_advisory_and_tier1_blocking(reques
         report_url = "https://gitlab.example/acme/skills/-/jobs/91/artifacts/download"
     assert result["comment_action"] == "created"
     assert f"Required gate: **{'Passed' if tier1_status == 'passed' else 'Not passed'}**" in body
-    assert f"Tier 1 | {tier1_status} | Required" in body
-    assert "Tier 2 | failed | Advisory | Duplication check failed" in body
-    assert "Tier 3 | incomplete | Advisory | Paired evaluation timed out" in body
+    assert tier1_status.upper() in body
+    assert "FAILED" in body and "Duplication check failed" in body
+    assert "INCOMPLETE" in body and "Paired evaluation timed out" in body
+    assert "Only Tier 1 blocks CI; Tier 2 and Tier 3 are advisory." in body
     assert report_url in body
+
+
+def compact_archive(platform):
+    from skillevaluator.models import Finding, Severity, ValidationResult
+    from skillevaluator.reporting.json_reporter import JSONReporter
+
+    native = ValidationResult(validator_name="Security", metadata={"gating": {"tier": 1, "blocking": True}})
+    for severity, message in (
+        (Severity.LOW, "Missing optional metadata"),
+        (Severity.CRITICAL, "Exposed credential pattern"),
+        (Severity.HIGH, "Unsafe shell command"),
+        (Severity.INFO, "Static checks completed"),
+    ):
+        native.add_finding(
+            Finding(category="SECURITY", severity=severity, check_name="fixture", message=message, file_path="SKILL.md")
+        )
+    payload = manifest(platform)
+    for tier in payload["tiers"]:
+        tier.update(
+            status="failed" if tier["tier"] == 1 else "incomplete",
+            required=tier["tier"] == 1,
+            reason="Validation findings" if tier["tier"] == 1 else "Missing provider credentials",
+            skills=[
+                {
+                    "path": "skills/demo",
+                    "status": "failed" if tier["tier"] == 1 else "incomplete",
+                    "report_json": None,
+                    "report_html": None,
+                    # Producer-supplied counters are not trusted comment evidence.
+                    "metrics": {"issue_count": 0, "issue_count_known": True, "critical_count": 0},
+                }
+            ],
+        )
+    skill = payload["tiers"][0]["skills"][0]
+    skill.update(
+        report_json="tier1/skill-001/skillevaluator-tier1.json",
+        report_html="tier1/skill-001/skillevaluator-tier1.html",
+    )
+    prefix = "skill-evaluator-results/" if platform == "gitlab" else ""
+    extra = {
+        prefix + skill["report_json"]: JSONReporter().render_all([native]),
+        prefix + skill["report_html"]: "<p>Complete retained Tier 1 findings</p>",
+    }
+    return archive(payload, extra, prefix=prefix)
+
+
+@pytest.mark.parametrize("platform", ["github", "gitlab"])
+def test_trusted_comment_has_one_combined_report_link_and_compact_verified_skill_summary(request, platform):
+    module, api = request.getfixturevalue(platform)
+    api.payload = compact_archive(platform)
+    if platform == "github":
+        result = module.github_feedback(api, REPO, 123, 1)
+        body = api.comments[0]["body"]
+        report_url = "https://github.com/acme/skills/actions/runs/123/artifacts/21"
+    else:
+        result = module.gitlab_feedback(api, "https://gitlab.example/api/v4", "12", 123)
+        body = api.notes[0]["body"]
+        report_url = "https://gitlab.example/acme/skills/-/jobs/91/artifacts/download"
+    assert result["comment_action"] == "created"
+    assert body.count("| Skill |") == 1
+    assert body.count("[Report](" + report_url + ")") == 1
+    assert body.count(report_url) == 1
+    assert all(name in body for name in ("Static and Security Validation", "Deduplication", "Live Agent Evaluation"))
+    skill_row = next(line for line in body.splitlines() if line.startswith("| skills/demo |"))
+    assert "FAILED" in skill_row and "3 issues" in skill_row
+    assert "1 critical" in skill_row and "1 high" in skill_row
+    assert "Exposed credential pattern" in skill_row
+    assert skill_row.count("INCOMPLETE") == 2
+    assert skill_row.lower().count("issues unknown") == 2
+    assert "skill evidence" not in body and "In downloadable artifact" not in body
+    assert "Required gate: **Not passed**" in body
+
+
+@pytest.mark.parametrize("platform", ["github", "gitlab"])
+def test_feedback_issue_counts_are_derived_from_native_evidence_and_unknown_without_it(platform):
+    module = adapter()
+    prefix = "skill-evaluator-results/" if platform == "gitlab" else ""
+    retained = module.read_results(compact_archive(platform), prefix=prefix)
+    metrics = retained["tiers"][0]["skills"][0]["metrics"]
+    assert metrics["issue_count"] == 3
+    assert metrics["critical_count"] == 1
+    assert metrics["high_count"] == 1
+    assert metrics["issue_count_known"] is True
+    for tier in retained["tiers"][1:]:
+        assert tier["skills"][0].get("metrics", {}).get("issue_count_known", False) is False
 
 
 @pytest.mark.parametrize(

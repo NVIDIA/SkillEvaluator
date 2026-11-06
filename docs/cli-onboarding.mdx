@@ -93,6 +93,15 @@ results; they do not count as a passing tier. A passing Tier 1 CI gate does not
 mean the advisory tiers completed or passed. Central dataset mappings are not
 supported by this initial workflow.
 
+The trusted PR or MR comment shows one summary table with a row per skill:
+Static and Security Validation, Deduplication, and Live Agent Evaluation each
+get a one-line status, issue count and main finding or blocker. Counts remain
+unknown for incomplete or missing evidence. Each skill has one **Report** link
+to the run's combined artifact; normal repository authentication and artifact
+expiry apply. Download and extract it, then open `index.html` for the detailed
+aggregate and native reports. Hosted HTML remains optional. See
+[Reports & Results](reports.mdx#retained-three-tier-ci-evidence) for an example.
+
 Create the `skillevaluator` execution environment and store provider secrets
 there (`OPENAI_API_KEY`, `ANTHROPIC_API_KEY`, or `NVIDIA_API_KEY`). GitHub also
 supports the generated explicit mappings from repository CI secrets; scoped

@@ -53,8 +53,15 @@ normal repository access; they do not create public report hosting.
 
 The feedback workflow starts from `workflow_run` on the default branch. It
 checks out only pinned trusted tools, validates the producer and current PR
-head, and updates one comment linking the exact run's private artifact. It
-never checks out the candidate with a write token. Merge this feedback file
+head, and updates one comment with a single summary table. Each skill has
+one-line results for Static and Security Validation, Deduplication, and Live
+Agent Evaluation, plus one **Report** link to the exact run's combined private
+artifact. The lines show status, recorded issue count and the main finding or
+blocker; incomplete or missing evidence shows an unknown count. Download and
+extract the artifact, then open `index.html` for the detailed aggregate and
+native reports. See the
+[comment and report contract](reports.mdx#retained-three-tier-ci-evidence).
+The workflow never checks out the candidate with a write token. Merge this feedback file
 onto the default branch before expecting the first automatic comment. Changes
 to the caller must refresh its approved Git blob in `trusted-caller-blobs`.
 

@@ -24,6 +24,29 @@ names it `skill-evaluator-results-attempt-N`; GitLab retains the aggregate job's
 actual artifact download for that run. Authentication and artifact expiry still
 apply; this link does not imply publicly hosted HTML.
 
+The PR or MR comment presents one summary table with a row for each skill.
+Each row shows a one-line status, issue count and the most important available
+finding or blocker for **Tier 1 — Static and Security Validation**,
+**Tier 2 — Deduplication** and **Tier 3 — Live Agent Evaluation**. A single
+**Report** link per skill opens the combined report artifact for that run;
+download and extract it, then open `index.html` to inspect the detailed aggregate
+and native reports. The comment keeps tier details in those reports rather
+than adding separate tier sections or report links.
+
+This schematic shows the information in a row; real results supply the statuses,
+counts, findings and authenticated **Report** link:
+
+| Skill | Tier 1 — Static and Security Validation | Tier 2 — Deduplication | Tier 3 — Live Agent Evaluation | Combined report |
+| --- | --- | --- | --- | --- |
+| `skills/example` | Passed · 0 issues | Failed · 1 issue · duplicate content found | Incomplete · issues unknown · paired evidence missing | Report |
+
+Issue counts summarize unique actionable findings plus independent validation
+errors and warnings from retained native evidence; informational notes and
+configuration-only scope notices are excluded. Incomplete or missing evidence
+shows an unknown count; it cannot imply zero findings or a completed check.
+The Tier 1 gate and each advisory tier's status stay separate, so this example
+can pass the required CI gate while still needing review of Tier 2 and Tier 3.
+
 ```text
 ci-results.json
 index.html

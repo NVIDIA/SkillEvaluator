@@ -35,10 +35,14 @@ if not __package__:
 try:
     import github_api
     import publish_reports
-    from tier_manifest import render_markdown, tier3_execution_complete, validate_manifest
+    from comment_summary import render_comment_summary
+    from summary_metrics import summarize_results
+    from tier_manifest import tier3_execution_complete, validate_manifest
     from verify_provenance import ProvenanceError, verify_receipt
 except ModuleNotFoundError:
-    from ci.tier_manifest import render_markdown, tier3_execution_complete, validate_manifest
+    from ci.comment_summary import render_comment_summary
+    from ci.summary_metrics import summarize_results
+    from ci.tier_manifest import tier3_execution_complete, validate_manifest
     from ci.verify_provenance import ProvenanceError, verify_receipt
 
     from ci import github_api, publish_reports
@@ -132,7 +136,11 @@ def read_results(raw: bytes, *, prefix: str = "") -> dict:
 
             seen = set()
             for tier in result["tiers"]:
+                # Comment counters come from validated native findings, never
+                # from arbitrary producer-supplied manifest metrics.
+                tier.pop("metrics", None)
                 for skill in tier["skills"]:
+                    skill.pop("metrics", None)
                     json_path, html_path = skill["report_json"], skill["report_html"]
                     if json_path is None:
                         _require(skill["status"] not in {"passed", "failed"}, "A verdict lacks its retained evidence.")
@@ -169,6 +177,13 @@ def read_results(raw: bytes, *, prefix: str = "") -> dict:
                             tier3_execution_complete(native),
                             "Tier 3 passing evidence lacks complete paired execution.",
                         )
+                    skill["metrics"] = summarize_results(retained, tier=tier["tier"], native=native)
+                    if skill["status"] in {"incomplete", "skipped", "not_run", "needs_action"}:
+                        skill["metrics"]["issue_count_known"] = False
+                    if tier["tier"] == 3 and not tier3_execution_complete(native):
+                        skill["metrics"]["issue_count_known"] = False
+                        skill["metrics"].pop("score", None)
+                        skill["metrics"].pop("skill_lift", None)
             return result
     except FeedbackError:
         raise
@@ -177,16 +192,13 @@ def read_results(raw: bytes, *, prefix: str = "") -> dict:
 
 
 def _body(manifest, run_url, artifact_url, receipt):
-    # A download archive is not an HTTP directory. The comment links to the
-    # actual private artifact and leaves member navigation to the downloaded index.
-    display = json.loads(json.dumps(manifest, allow_nan=False))
-    for tier in display["tiers"]:
-        for skill in tier["skills"]:
-            skill["report_json"] = skill["report_html"] = None
-    rendered = render_markdown(display).replace("Unavailable", "In downloadable artifact").replace("@", "@\u200b")
+    # Every skill links once to the combined report archive. Its members are
+    # navigated through index.html after download, never as fabricated web URLs.
+    rendered = render_comment_summary(manifest, artifact_url)
     body = (
         f"{MARKER}\n<!-- skillevaluator-all-tiers-run:{receipt[0]}:{receipt[1]} -->\n"
-        f"[Evaluation run]({run_url}) · [Download complete native reports]({artifact_url})\n\n{rendered}"
+        f"[Evaluation run]({run_url})\n\n{rendered}\n\n"
+        f"Commit: `{manifest['commit']}` · Environment: {manifest['environment']}\n"
     )
     _require(len(body.encode("utf-8")) <= MAX_BODY_BYTES, "The feedback comment exceeds its size limit.")
     return body

@@ -6,6 +6,11 @@ All notable changes to SkillEvaluator are documented in this file.
 
 ### Changed
 
+- Compact all-tier CI PR and MR feedback into one summary table with a row per
+  skill, one-line tier statuses and issue counts, and one combined **Report**
+  link per skill. Incomplete or missing evidence keeps issue counts unknown;
+  detailed aggregate and native reports remain in the authenticated artifact.
+
 - Make Tier 1 the only gate in opt-in all-tier GitHub and GitLab CI. Tier 2 and
   Tier 3 retain failed and incomplete advisory outcomes and native reports.
   Deprecate and ignore onboarding's `--tier3-required`, GitHub's

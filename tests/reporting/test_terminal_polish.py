@@ -163,7 +163,14 @@ def test_direct_tier3_preserves_conditions_and_bars_at_narrow_width(width):
     assert all(Text(line).cell_len <= width for line in lines)
 
 
-def test_interactive_footer_links_require_capability_and_preserve_real_path(monkeypatch, tmp_path):
+@pytest.mark.parametrize(
+    ("is_tty", "no_color", "legacy_windows", "expect_link"),
+    [(True, False, False, True), (True, True, False, False), (False, False, False, False), (True, False, True, False)],
+    ids=["modern-tty", "no-color", "redirected", "legacy-windows-tty"],
+)
+def test_interactive_footer_links_require_capability_and_preserve_real_path(
+    monkeypatch, tmp_path, is_tty, no_color, legacy_windows, expect_link
+):
     monkeypatch.setenv("TERM", "xterm-256color")
 
     class TTY(io.StringIO):
@@ -173,21 +180,22 @@ def test_interactive_footer_links_require_capability_and_preserve_real_path(monk
     report_path = tmp_path / "actual [name].html"
     expected_uri = report_path.as_uri()
     assert expected_uri.endswith("/actual%20%5Bname%5D.html")
-    for stream, no_color, expect_link in [(TTY(), False, True), (TTY(), True, False), (io.StringIO(), False, False)]:
-        console = Console(
-            file=stream,
-            force_terminal=True,
-            no_color=no_color,
-            color_system="truecolor",
-            width=max(120, len(str(report_path)) + 30),
-        )
-        view = ValidateView("demo", [], console=console)
-        view.links = [("report", str(report_path))]
-        console.print(next(view._footer_lines()))
-        text = stream.getvalue()
-        assert str(report_path) in text
-        assert ("\x1b]8" in text) is expect_link
-        assert (expected_uri in text) is expect_link
+    stream = TTY() if is_tty else io.StringIO()
+    console = Console(
+        file=stream,
+        force_terminal=True,
+        no_color=no_color,
+        color_system="truecolor",
+        legacy_windows=legacy_windows,
+        width=max(120, len(str(report_path)) + 30),
+    )
+    view = ValidateView("demo", [], console=console)
+    view.links = [("report", str(report_path))]
+    console.print(next(view._footer_lines()))
+    text = stream.getvalue()
+    assert str(report_path) in text
+    assert ("\x1b]8" in text) is expect_link
+    assert (expected_uri in text) is expect_link
 
 
 def test_noninteractive_check_ticker_reports_only_active_check(monkeypatch):
@@ -297,7 +305,8 @@ def test_real_tty_capture_excludes_links_but_ordinary_print_keeps_them(monkeypat
         os.close(master)
 
 
-def test_footer_links_follow_capture_at_render_time(monkeypatch, tmp_path):
+@pytest.mark.parametrize("legacy_windows", [False, True], ids=["modern-tty", "legacy-windows-tty"])
+def test_footer_links_follow_capture_at_render_time(monkeypatch, tmp_path, legacy_windows):
     monkeypatch.setenv("TERM", "xterm-256color")
 
     class TTY(io.StringIO):
@@ -308,7 +317,14 @@ def test_footer_links_follow_capture_at_render_time(monkeypatch, tmp_path):
     expected_uri = report_path.as_uri()
     assert expected_uri.endswith("/actual%20%5Bname%5D.html")
     stream = TTY()
-    console = Console(file=stream, color_system="truecolor", no_color=False, width=max(120, len(str(report_path)) + 30))
+    console = Console(
+        file=stream,
+        force_terminal=True,
+        color_system="truecolor",
+        no_color=False,
+        legacy_windows=legacy_windows,
+        width=max(120, len(str(report_path)) + 30),
+    )
     view = ValidateView("demo", [], console=console)
     view.links = [("report", str(report_path))]
     view.verdict = Verdict(True, "Passed required checks")
@@ -319,8 +335,8 @@ def test_footer_links_follow_capture_at_render_time(monkeypatch, tmp_path):
     assert expected_uri not in capture.get()
     console.print(view)
     assert str(report_path) in stream.getvalue()
-    assert "\x1b]8" in stream.getvalue()
-    assert expected_uri in stream.getvalue()
+    assert ("\x1b]8" in stream.getvalue()) is (not legacy_windows)
+    assert (expected_uri in stream.getvalue()) is (not legacy_windows)
 
 
 @pytest.mark.parametrize(

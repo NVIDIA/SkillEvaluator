@@ -4,7 +4,7 @@ description: Run and interpret SkillEvaluator for agent skills. Use for any skil
 license: Apache-2.0
 compatibility: Requires Python 3.12-3.14 and the skillevaluator CLI; live evaluation also needs Docker (or another backend) and an LLM provider key.
 metadata:
-  author: SkillEvaluator Maintainers <maintainers@example.com>
+  author: Christopher Kevin <christopherk@nvidia.com>
   version: "1.0.0"
   domain: [evaluation, ai-ml]
   tags: [skills, evaluation, benchmarking, ci, security]

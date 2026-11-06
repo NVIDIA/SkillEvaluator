@@ -1636,6 +1636,8 @@ def _network_executable(token: str, assignments: dict[str, str], names: dict[str
 
 
 _SHELL_QUOTE_CHARS = str.maketrans("", "", "\"'\\")
+# A brace group the shell may expand: a list such as {@,} or a range such as {?..A}.
+_SHELL_BRACE_EXPANSION_RE = re.compile(r"\{[^{}]*(?:,|\.\.)[^{}]*\}")
 
 
 def _spelled_with_capitals(token: str) -> bool:
@@ -1660,11 +1662,22 @@ def _may_be_header_file_item(token: str) -> bool:
 
     The shell removes quotes and backslashes, so ``X-Data:"@.env"``,
     ``"X-Data:"@.env`` and ``X-Data:\\@.env`` all pass ``X-Data:@.env``. A
-    ``$VAR`` or backtick word may expand to such an item.
+    ``$VAR`` or backtick word may expand to such an item, and so may a brace
+    expansion: ``X-Data:{@,}.env`` passes ``X-Data:@.env X-Data:.env``. A brace
+    list only repeats the word's own characters, so it needs a ``:`` and an
+    ``@`` in the word, while a range such as ``{?..A}`` adds the characters
+    between its ends, so any range counts. A brace group without a comma or
+    range, such as ``/items/{id}``, is not expanded.
     """
     if "$" in token or "`" in token:
         return True
-    return ":@" in token.translate(_SHELL_QUOTE_CHARS)
+    name = token.translate(_SHELL_QUOTE_CHARS)
+    if ":@" in name:
+        return True
+    groups = _SHELL_BRACE_EXPANSION_RE.findall(name)
+    if not groups:
+        return False
+    return any(".." in group for group in groups) or (":" in name and "@" in name)
 
 
 def _network_client_uploads(executable: str, args: list[str], stdin_piped: bool) -> bool:
@@ -2248,8 +2261,14 @@ def _network_tokens_exfiltrate(tokens: list[str], _depth: int) -> bool:
 
         # A printer whose output is piped on, as in "echo curl -d @.env URL |
         # sh", may be feeding its words to a shell, so they are checked below.
-        if executable in _INERT_PRINT_COMMANDS and not dynamic and not (idx < len(tokens) and tokens[idx] == "|"):
+        printer_piped = executable in _INERT_PRINT_COMMANDS and idx < len(tokens) and tokens[idx] == "|"
+        if executable in _INERT_PRINT_COMMANDS and not dynamic and not printer_piped:
             continue
+        # A pass-through wrapper runs its next word as the command, as in
+        # "strace -f HTTP POST URL", a piped printer may feed its words to a
+        # shell, as in "echo HTTP POST URL | sh", and a "$VAR" command word may
+        # hold either, so a later HTTP word there may be a command word.
+        may_start_later_word = dynamic or printer_piped or executable in _PASS_THROUGH_WRAPPERS
 
         # Other commands may run a later word as a command, as find -exec and
         # poetry run do, or only name a client as data, as in apt-get install
@@ -2318,10 +2337,14 @@ def _network_tokens_exfiltrate(tokens: list[str], _depth: int) -> bool:
             # read as an upload unless a later argument may be a name:@file
             # item, which may send a file as a header; its body items, stdin
             # and --raw still are. A path or .exe word is not prose, so it keeps
-            # the method rule. A capitalized bare word covers a later one,
-            # which sees a suffix of the same arguments, but not a later
+            # the method rule, and so does a word that a wrapper, piped printer
+            # or "$VAR" command word may start, which keeps the case-insensitive
+            # match of a command word. A capitalized bare word covers a later
+            # one, which sees a suffix of the same arguments, but not a later
             # lowercase http word.
-            capitalized = client in ("http", "https") and _spelled_with_capitals(command[sub_idx])
+            capitalized = (
+                not may_start_later_word and client in ("http", "https") and _spelled_with_capitals(command[sub_idx])
+            )
             seen_key = f"{client}:capitalized" if capitalized else client
             if client in seen_clients or seen_key in seen_clients:
                 continue

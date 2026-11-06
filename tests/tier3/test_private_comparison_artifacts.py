@@ -90,7 +90,7 @@ def _runtime(tmp_path, *, case_count=1, n_attempts=1, n_pieces=0):
         logical_trials={
             agent: dict.fromkeys(arms if agent == "claude-code" else arms[:2], records) for agent in agents
         },
-        context=SimpleNamespace(case_spec=lambda _case: {"cross_component": True}),
+        context=SimpleNamespace(cross_component_cases=frozenset(cases)),
     )
     native = SimpleNamespace(observer=observer, decisions={}, collect_evidence=lambda *_args: None)
     package = SimpleNamespace(

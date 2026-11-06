@@ -761,7 +761,13 @@ def evaluate(
                 copy_repo=copy_repo,
                 environment_kwargs=merged_environment_kwargs,
                 override_storage_mb=override_storage_mb,
+                agent_runtime_preflight=bool(agent_runtime_preflight),
             )
+            multi_model_agents = sorted(agent for agent, models in agent_models.items() if len(models) != 1)
+            if multi_model_agents:
+                capability_errors.append(
+                    "--backend nemo-gym runs one --agent-model per agent; got several for " + ", ".join(multi_model_agents)
+                )
             if capability_errors:
                 raise ValueError("; ".join(capability_errors))
             engine_started = True
@@ -769,11 +775,16 @@ def evaluate(
                 skill_path=skill_path.resolve(),
                 agents=agent_list,
                 skip_baseline=skip_baseline,
+                skip_with_skill=skip_with_skill,
                 n_attempts=n_attempts,
                 pass_threshold=pass_threshold,
+                stop_on_pass=stop_on_pass,
                 n_concurrent=n_concurrent,
+                max_cases=max_cases,
                 model=model,
-                agent_models=agent_models or None,
+                agent_models={agent: models[0] for agent, models in agent_models.items()} or None,
+                custom_dockerfile_mode=custom_dockerfile_mode,
+                agent_runtime_preflight=agent_runtime_preflight,
                 skill_workspace_mode=skill_workspace_mode,
                 include_skills=[p.resolve() for p in include_skills] or None,
                 grading_mode=grading_mode,

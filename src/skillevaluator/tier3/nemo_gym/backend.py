@@ -82,6 +82,7 @@ def nemo_gym_capability_errors(
     copy_repo: bool = False,
     environment_kwargs: dict[str, str] | None = None,
     override_storage_mb: int | None = None,
+    agent_runtime_preflight: bool = False,
 ) -> list[str]:
     """Reject configurations the NeMo Gym backend cannot run equivalently, before anything starts."""
     errors: list[str] = []
@@ -105,4 +106,6 @@ def nemo_gym_capability_errors(
         errors.append("--environment-kwarg applies to the Harbor environment providers only")
     if override_storage_mb is not None:
         errors.append("--override-storage-mb is not supported with --backend nemo-gym")
+    if agent_runtime_preflight:
+        errors.append("--agent-runtime-preflight applies to the Harbor backend only")
     return errors

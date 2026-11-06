@@ -226,3 +226,163 @@ def test_verifier_judge_env_stages_templates_not_values(tmp_path: Path, monkeypa
     assert templates["OPENAI_API_KEY"] == "${OPENAI_API_KEY}"
     assert "sk-test-secret" not in templates.values()
     assert process_env["OPENAI_API_KEY"] == "sk-test-secret"
+
+
+def test_nemo_gym_forwards_arm_case_and_model_selection(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> None:
+    calls = _evaluate(
+        monkeypatch,
+        tmp_path,
+        backend="nemo-gym",
+        skip_baseline=False,
+        skip_with_skill=True,
+        max_cases=1,
+        agent_model=("codex=gpt-custom",),
+    )
+    gym_call = calls["nemo-gym"]
+    assert gym_call["skip_with_skill"] is True and gym_call["max_cases"] == 1
+    assert gym_call["agent_models"] == {"codex": "gpt-custom"}
+
+
+def test_nemo_gym_rejects_agent_runtime_preflight(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> None:
+    with pytest.raises(ValueError, match="agent-runtime-preflight"):
+        _evaluate(monkeypatch, tmp_path, backend="nemo-gym", agent_runtime_preflight=True)
+
+
+_FAKE_GYM = """#!{python}
+import json, os, sys
+from pathlib import Path
+
+args = sys.argv[1:]
+tasks = Path(args[2])
+output = Path(args[args.index("--output") + 1])
+repeats = int(next(a for a in args if a.startswith("+num_repeats=")).split("=", 1)[1])
+Path(os.environ["FAKE_GYM_ENV_LOG"]).open("a").write(json.dumps({{"arm": tasks.name, "repeats": repeats, "env": sorted(os.environ)}}) + "\\n")
+with output.open("w") as rows:
+    for task in sorted(p for p in tasks.iterdir() if (p / "task.toml").is_file()):
+        for attempt in range(repeats):
+            logs = output.parent / "logs" / f"{{task.name}}-{{attempt}}"
+            logs.mkdir(parents=True)
+            (logs / "reward.json").write_text(json.dumps({{"overall": 0.75}}))
+            (logs / "skill_evaluator_reward.json").write_text(json.dumps({{"overall": 0.75}}))
+            row = {{"_ng_task_id": {{"taskset": tasks.name, "task_id": task.name}}, "verifier_return_code": 0,
+                    "verifier_logs_dir": str(logs), "episode_id": {{"rollout_id": f"r{{attempt}}", "attempt": 0}}}}
+            rows.write(json.dumps(row) + "\\n")
+"""
+
+
+def _fake_gym_skill(tmp_path: Path, monkeypatch: pytest.MonkeyPatch, config: str = "") -> tuple[Path, Path]:
+    import sys
+
+    from skillevaluator import provider_config
+    from skillevaluator.provider_config import ProviderConfig
+
+    skill = tmp_path / "calc"
+    (skill / "evals").mkdir(parents=True)
+    (skill / "SKILL.md").write_text("---\nname: calc\ndescription: Adds numbers.\n---\n# Calc\n")
+    cases = [
+        {"id": f"calc-00{i}", "prompt": f"Add {i}+{i}", "expected_output": str(2 * i), "assertions": ["adds"]}
+        for i in (1, 2)
+    ]
+    (skill / "evals" / "evals.json").write_text(json.dumps({"skill_name": "calc", "evals": cases}))
+    if config:
+        (skill / "evals" / "config.yml").write_text(config)
+    gym = tmp_path / "gym-venv" / "gym"
+    gym.parent.mkdir()
+    gym.write_text(_FAKE_GYM.format(python=sys.executable))
+    gym.chmod(0o755)
+    env_log = tmp_path / "gym-env.jsonl"
+    provider = ProviderConfig(
+        provider="openai",
+        model="gpt-4.1-mini",
+        api_key="judge-key",
+        base_url="https://api.openai.com/v1",
+        litellm_model="openai/gpt-4.1-mini",
+    )
+    monkeypatch.setattr(provider_config, "resolve_llm_provider", lambda: provider)
+    monkeypatch.setenv("SKILL_EVAL_NEMO_GYM_BIN", str(gym))
+    monkeypatch.setenv("SKILL_EVAL_NEMO_GYM_MODEL_URL", "http://127.0.0.1:9/v1")
+    monkeypatch.setenv(MODEL_API_KEY_ENV, "policy-key")
+    monkeypatch.setenv("FAKE_GYM_ENV_LOG", str(env_log))
+    monkeypatch.setenv("GITHUB_TOKEN", "host-only-token")
+    monkeypatch.setenv("ANTHROPIC_API_KEY", "host-only-key")
+    return skill, env_log
+
+
+def _run_fake_gym(skill: Path, tmp_path: Path, **overrides) -> dict:
+    from skillevaluator.tier3.nemo_gym.runner import run_nemo_gym_eval
+
+    kwargs = {
+        "skill_path": skill,
+        "agents": ["codex"],
+        "skip_baseline": False,
+        "n_attempts": None,
+        "pass_threshold": None,
+        "n_concurrent": 1,
+        "model": "policy-model",
+        "agent_models": None,
+        "skill_workspace_mode": None,
+        "include_skills": None,
+        "grading_mode": None,
+        "output_dir": tmp_path / "results",
+        "env_mode": "docker",
+        "timeout_multiplier": None,
+        "evaluated_source": None,
+        "override_cpus": None,
+        "override_memory_mb": None,
+    }
+    kwargs.update(overrides)
+    return run_nemo_gym_eval(**kwargs)
+
+
+def test_fake_gym_run_honors_arm_case_limit_config_and_is_discoverable(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    from skillevaluator.tier3.results_location import ordered_run_directories
+
+    skill, env_log = _fake_gym_skill(tmp_path, monkeypatch, config="schema_version: 1\nharbor:\n  n_attempts: 2\n")
+    result = _run_fake_gym(skill, tmp_path, skip_with_skill=True, max_cases=1)
+
+    run_dir = Path(result["run_dir"])
+    assert sorted(p.name for p in (run_dir / "_harbor-tasks" / "codex").iterdir()) == ["without"]
+    assert len(list((run_dir / "_harbor-tasks" / "codex" / "without").glob("*/task.toml"))) == 1
+    launches = [json.loads(line) for line in env_log.read_text().splitlines()]
+    assert [(launch["arm"], launch["repeats"]) for launch in launches] == [("without", 2)]
+    assert MODEL_API_KEY_ENV in launches[0]["env"]
+    assert "GITHUB_TOKEN" not in launches[0]["env"] and "ANTHROPIC_API_KEY" not in launches[0]["env"]
+    assert result["run_config"]["case_selection"]["selected_ids"] == ["calc-001"]
+    assert result["attempt_policy"]["max_attempts"] == 2
+    assert result["agents"]["codex"]["num_trials_with"] == 0
+    assert ordered_run_directories(tmp_path / "results", completed_only=True) == [run_dir]
+    assert json.loads((run_dir / "run_config.json").read_text()) == result["run_config"]
+
+
+def test_fake_gym_run_rejects_config_options_gym_cannot_honor(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    skill, env_log = _fake_gym_skill(
+        tmp_path, monkeypatch, config="schema_version: 1\nharbor:\n  n_attempts: 2\n  stop_on_pass: true\n"
+    )
+    result = _run_fake_gym(skill, tmp_path)
+    assert "stop-on-pass" in result["error"][0]
+    assert not env_log.exists()
+
+
+def test_cli_rejects_unsupported_gym_flags_before_autopilot_writes_a_dataset(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    from click.testing import CliRunner
+
+    from skillevaluator.cli import cli
+    from skillevaluator.evaluation import EvaluationService
+
+    skill = tmp_path / "calc"
+    skill.mkdir()
+    (skill / "SKILL.md").write_text("---\nname: calc\ndescription: Adds numbers.\n---\n# Calc\n")
+    monkeypatch.setattr(
+        EvaluationService, "create_autopilot_dataset", lambda *_args, **_kwargs: pytest.fail("must not generate")
+    )
+    result = CliRunner().invoke(
+        cli,
+        ["evaluate", str(skill), "--backend", "nemo-gym", "--autopilot", "--harbor-keep-jobs", "--progress", "off"],
+    )
+    assert result.exit_code == 2, result.output
+    assert "--harbor-keep-jobs" in result.output
+    assert not (skill / "evals" / "evals.json").exists()

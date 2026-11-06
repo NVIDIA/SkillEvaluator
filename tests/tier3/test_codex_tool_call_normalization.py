@@ -1701,3 +1701,13 @@ def test_quiet_probe_exemption_does_not_depend_on_the_settled_field_name(extract
     result = _error_recovery(_trajectory(source, _record_observation(records)), extractor)
 
     assert result["first_attempt_clean"] is True
+
+
+@pytest.mark.parametrize("extractor", _EXTRACTORS)
+def test_valid_non_ascii_javascript_name_still_decodes(extractor):
+    # U+00E9 is a valid JavaScript identifier character, unlike U+00B2.
+    source = "const résultat=await tools.exec_command({cmd:'pwd'});text(résultat);"
+    calls = extractor(_trajectory(source, "/workspace"))
+
+    assert [call["action"] for call in calls] == ["exec_command"]
+    assert calls[0]["action_input"] == {"cmd": "pwd"}

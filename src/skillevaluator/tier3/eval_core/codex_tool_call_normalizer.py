@@ -211,7 +211,7 @@ def _decode_static_js_object(source: str, start: int) -> tuple[dict[str, Any], i
     return None
 
 
-_JS_IDENTIFIER = r"[A-Za-z_$][A-Za-z0-9_$]*"
+_JS_IDENTIFIER = r"[A-Za-z_$][\w$]*"
 _CODEX_CALL_RE = re.compile(rf"const\s+({_JS_IDENTIFIER})\s*=\s*await\s+tools\.({_JS_IDENTIFIER})\s*\(\s*")
 _CODEX_RENDER_RE = re.compile(
     rf"text\s*\(\s*(?:JSON\.stringify\(\s*({_JS_IDENTIFIER})\s*\)|"
@@ -221,6 +221,19 @@ _CODEX_RENDER_RE = re.compile(
 _CODEX_PRAGMA_RE = re.compile(r"[ \t]*// @exec:[^\r\n\u2028\u2029]*\r?\n")
 _CODEX_PRAGMA_PREFIX_RE = re.compile(r"[ \t]*// @exec:")
 _CODEX_TOOL_REF_RE = re.compile(r"\b(?:tools|globalThis)\b|\\u(?:\{[0-9A-Fa-f]{1,6}\}|[0-9A-Fa-f]{4})")
+
+
+def _js_name(name: str) -> bool:
+    """Whether JavaScript accepts ``name``: `\\w` also takes U+00B2, which it rejects."""
+    return name.replace("$", "_").isidentifier()
+
+
+def _js_match(pattern: re.Pattern[str], source: str, index: int) -> re.Match[str] | None:
+    """Match ``pattern`` at ``index``, keeping only a match whose names JavaScript accepts."""
+    match = pattern.match(source, index)
+    return match if match and all(_js_name(name) for name in match.groups() if name) else None
+
+
 _JS_IDENTIFIER_ESCAPE_RE = re.compile(r"\\u(?:\{([0-9A-Fa-f]{1,6})\}|([0-9A-Fa-f]{4}))")
 _JS_LINE_TERMINATORS = "\r\n\u2028\u2029"
 _JS_EXPRESSION_OPERATORS = {
@@ -693,7 +706,7 @@ def _static_codex_tool_calls(source: str) -> tuple[list[tuple[str, dict[str, Any
         if index == len(source):
             break
 
-        call = _CODEX_CALL_RE.match(source, index)
+        call = _js_match(_CODEX_CALL_RE, source, index)
         if call:
             statements += 1
             if statements > _MAX_STATEMENTS or len(calls) >= _MAX_TOOL_CALLS:
@@ -713,7 +726,7 @@ def _static_codex_tool_calls(source: str) -> tuple[list[tuple[str, dict[str, Any
             index = end + close.end()
             continue
 
-        render = _CODEX_RENDER_RE.match(source, index)
+        render = _js_match(_CODEX_RENDER_RE, source, index)
         rendered_variable = next((name for name in render.groups() if name), None) if render else None
         if rendered_variable in variables:
             statements += 1
@@ -856,7 +869,7 @@ class _StaticExecSource:
     def name(self) -> str:
         self.at_end()
         match = _JS_NAME_RE.match(self.source, self.index)
-        if match is None:
+        if match is None or not _js_name(match.group(0)):
             raise _NotStatic("identifier")
         self.index = match.end()
         return match.group(0)

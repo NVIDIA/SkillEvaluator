@@ -234,6 +234,27 @@ def _js_match(pattern: re.Pattern[str], source: str, index: int) -> re.Match[str
     return match if match and all(_js_name(name) for name in match.groups() if name) else None
 
 
+# `isspace()` and `\\s` take these, but JavaScript does not, so a script using one never runs.
+_NON_JS_SPACE = frozenset("\x1c\x1d\x1e\x1f\x85")
+
+
+def _has_non_js_space(source: str) -> bool:
+    """Whether the code, outside string literals and the pragma line, holds a `_NON_JS_SPACE` character."""
+    pragma = _CODEX_PRAGMA_RE.match(source)
+    index = pragma.end() if pragma else 0
+    while index < len(source):
+        char = source[index]
+        if char in "\"'":
+            index = _skip_js_quoted(source, index, char)
+            if index < 0:
+                return False
+        else:
+            if char in _NON_JS_SPACE:
+                return True
+            index += 1
+    return False
+
+
 _JS_IDENTIFIER_ESCAPE_RE = re.compile(r"\\u(?:\{([0-9A-Fa-f]{1,6})\}|([0-9A-Fa-f]{4}))")
 _JS_LINE_TERMINATORS = "\r\n\u2028\u2029"
 _JS_EXPRESSION_OPERATORS = {
@@ -1194,6 +1215,10 @@ def _normalize_tool_call_with_records(tool_call: dict[str, Any]) -> list[dict[st
     source = arguments.get("input") if tool_call.get("function_name") == "exec" and isinstance(arguments, dict) else None
     parsed = _extended_codex_program(source) if isinstance(source, str) and len(source) <= _MAX_SOURCE_CHARS else None
     if parsed is None:
+        if "_atif_inner_tool_index" in normalized[0] and _has_non_js_space(source):
+            # The upstream lexer accepted a character JavaScript rejects, so nothing in it ran.
+            outer = {key: value for key, value in tool_call.items() if not key.startswith("_atif_")}
+            return [{**outer, "_atif_normalization_status": UNSUPPORTED_NATIVE_CODEX_EXEC}]
         return normalized
     calls, observation_owner, record_format = parsed
     outer = {key: value for key, value in tool_call.items() if not key.startswith("_atif_")}

@@ -1776,3 +1776,54 @@ def test_lone_call_with_a_plain_text_result_keeps_the_whole_output(extractor, so
     assert len(calls) == 1
     assert "normalization_status" not in calls[0]
     assert calls[0]["observation"] == observation
+
+
+_SKILL_CAT = "cat /skills/example/SKILL.md"
+
+
+@pytest.mark.parametrize("extractor", _EXTRACTORS)
+@pytest.mark.parametrize("space", ["\x1c", "\x1f", "\x85"], ids=["U+001C", "U+001F", "U+0085"])
+@pytest.mark.parametrize(
+    "source",
+    [
+        'const r=await{s}tools.exec_command({{cmd:"{c}"}});text(r);',
+        'const r=await tools.exec_command({{cmd:"{c}"}});{s}text(r);',
+        'const r=await tools.exec_command({{cmd:"{c}"}});text(r);{s}',
+        'const r={s}await tools.exec_command({{cmd:"{c}"}});text(r);',
+    ],
+    ids=["after-await", "before-text", "trailing", "after-equals"],
+)
+def test_upstream_grammar_form_with_a_non_javascript_space_stays_unsupported(extractor, space, source):
+    # Python's isspace() and \s take these characters, JavaScript does not, so the script never runs.
+    calls = extractor(_trajectory(source.format(s=space, c=_SKILL_CAT), "SyntaxError"))
+
+    assert len(calls) == 1
+    assert calls[0]["normalization_status"] == "unsupported_native_codex_exec_wrapper"
+    assert _scorer(extractor, "check_activation")(calls, "example")["score"] != 0.75
+
+
+@pytest.mark.parametrize("extractor", _EXTRACTORS)
+@pytest.mark.parametrize(
+    "source",
+    [
+        'const r=await tools.exec_command({cmd:"echo a\x85b"});text(r);',
+        '// @exec: {"note":"a\x1cb"}\nconst r=await tools.exec_command({cmd:"pwd"});text(r);',
+        'const r=await\u00a0tools.exec_command({cmd:"pwd"});text(r);',
+    ],
+    ids=["inside-a-string", "on-the-pragma-line", "valid-javascript-space"],
+)
+def test_wrapper_whose_only_odd_characters_are_valid_javascript_still_decodes(extractor, source):
+    calls = extractor(_trajectory(source, "/workspace"))
+
+    assert [call["action"] for call in calls] == ["exec_command"]
+    assert "normalization_status" not in calls[0]
+
+
+@pytest.mark.parametrize("extractor", _EXTRACTORS)
+def test_exec_call_that_is_not_a_codex_wrapper_is_left_alone_by_the_space_check(extractor):
+    source = "echo\x1chello"
+    trajectory = _trajectory(source, "hello")
+    calls = extractor(trajectory)
+
+    assert [call["action"] for call in calls] == ["exec"]
+    assert "normalization_status" not in calls[0]

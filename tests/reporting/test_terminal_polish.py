@@ -163,21 +163,31 @@ def test_direct_tier3_preserves_conditions_and_bars_at_narrow_width(width):
     assert all(Text(line).cell_len <= width for line in lines)
 
 
-def test_interactive_footer_links_require_capability_and_preserve_real_path(monkeypatch):
+def test_interactive_footer_links_require_capability_and_preserve_real_path(monkeypatch, tmp_path):
     monkeypatch.setenv("TERM", "xterm-256color")
 
     class TTY(io.StringIO):
         def isatty(self):
             return True
 
+    report_path = tmp_path / "actual [name].html"
+    expected_uri = report_path.as_uri()
+    assert expected_uri.endswith("/actual%20%5Bname%5D.html")
     for stream, no_color, expect_link in [(TTY(), False, True), (TTY(), True, False), (io.StringIO(), False, False)]:
-        console = Console(file=stream, force_terminal=True, no_color=no_color, color_system="truecolor", width=98)
+        console = Console(
+            file=stream,
+            force_terminal=True,
+            no_color=no_color,
+            color_system="truecolor",
+            width=max(120, len(str(report_path)) + 30),
+        )
         view = ValidateView("demo", [], console=console)
-        view.links = [("report", "/tmp/actual [name].html")]
+        view.links = [("report", str(report_path))]
         console.print(next(view._footer_lines()))
         text = stream.getvalue()
-        assert "actual [name].html" in text
+        assert str(report_path) in text
         assert ("\x1b]8" in text) is expect_link
+        assert (expected_uri in text) is expect_link
 
 
 def test_noninteractive_check_ticker_reports_only_active_check(monkeypatch):
@@ -287,24 +297,30 @@ def test_real_tty_capture_excludes_links_but_ordinary_print_keeps_them(monkeypat
         os.close(master)
 
 
-def test_footer_links_follow_capture_at_render_time(monkeypatch):
+def test_footer_links_follow_capture_at_render_time(monkeypatch, tmp_path):
     monkeypatch.setenv("TERM", "xterm-256color")
 
     class TTY(io.StringIO):
         def isatty(self):
             return True
 
+    report_path = tmp_path / "actual [name].html"
+    expected_uri = report_path.as_uri()
+    assert expected_uri.endswith("/actual%20%5Bname%5D.html")
     stream = TTY()
-    console = Console(file=stream, color_system="truecolor", no_color=False, width=120)
+    console = Console(file=stream, color_system="truecolor", no_color=False, width=max(120, len(str(report_path)) + 30))
     view = ValidateView("demo", [], console=console)
-    view.links = [("report", "/tmp/actual [name].html")]
+    view.links = [("report", str(report_path))]
     view.verdict = Verdict(True, "Passed required checks")
     with console.capture() as capture:
         console.print(view)
-    assert "actual [name].html" in capture.get()
+    assert str(report_path) in capture.get()
     assert "\x1b]8" not in capture.get()
+    assert expected_uri not in capture.get()
     console.print(view)
+    assert str(report_path) in stream.getvalue()
     assert "\x1b]8" in stream.getvalue()
+    assert expected_uri in stream.getvalue()
 
 
 @pytest.mark.parametrize(
@@ -407,3 +423,62 @@ def test_real_tty_live_lifecycle_prints_footer_once_with_capture_safe_links(monk
         assert ("\x1b]8" in output) is (not captured)
     finally:
         os.close(master)
+
+
+@pytest.mark.parametrize(
+    "value", [10**400, -(10**400), True, False, float("nan"), float("inf"), float("-inf"), None, "95"]
+)
+def test_success_summary_omits_unusable_quality_evidence_without_changing_payload(value):
+    import json
+
+    result = ValidationResult(
+        validator_name="CHECK",
+        passed=True,
+        metadata={
+            "quality_scores": {"grade": "A", "overall_score": value},
+        },
+    )
+    before = json.dumps(result.metadata, sort_keys=True)
+    output = io.StringIO()
+    CLIReporter(console=Console(file=output, width=120, color_system=None)).print_summary([result])
+    text = output.getvalue()
+    assert "PASS" in text
+    assert "quality" not in text.casefold()
+    assert "/100" not in text
+    assert json.dumps(result.metadata, sort_keys=True) == before
+
+
+@pytest.mark.parametrize(
+    "value", [10**400, -(10**400), True, False, float("nan"), float("inf"), float("-inf"), None, "0.25"]
+)
+def test_success_summary_omits_unusable_lift_evidence_without_changing_payload(value):
+    import json
+
+    result = ValidationResult(
+        validator_name="CHECK",
+        passed=True,
+        metadata={
+            "agent_eval": {"verdict": "pass", "summary": {"overall_lift": value}},
+        },
+    )
+    before = json.dumps(result.metadata, sort_keys=True)
+    output = io.StringIO()
+    CLIReporter(console=Console(file=output, width=120, color_system=None)).print_summary([result])
+    assert "PASS" in output.getvalue()
+    assert "lift" not in output.getvalue().casefold()
+    assert json.dumps(result.metadata, sort_keys=True) == before
+
+
+def test_success_summary_keeps_valid_numeric_zero_quality_and_lift():
+    result = ValidationResult(
+        validator_name="CHECK",
+        passed=True,
+        metadata={
+            "quality_scores": {"grade": "F", "overall_score": 0},
+            "agent_eval": {"verdict": "pass", "summary": {"overall_lift": 0}},
+        },
+    )
+    output = io.StringIO()
+    CLIReporter(console=Console(file=output, width=120, color_system=None)).print_summary([result])
+    assert "quality F 0.0/100" in output.getvalue()
+    assert "lift +0.00" in output.getvalue()

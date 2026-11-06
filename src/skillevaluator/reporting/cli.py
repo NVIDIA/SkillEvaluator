@@ -36,6 +36,7 @@ from skillevaluator.constants import (
 )
 from skillevaluator.reporting.base import (
     ReporterBase,
+    _agent_eval_finite_number,
     additional_errors,
     get_skip_reason,
     is_advisory_agent_eval_skip,
@@ -675,18 +676,18 @@ class CLIReporter(ReporterBase):
 
             if outcome in {"pass", "passed"}:
                 quality = result.metadata.get("quality_scores")
-                if isinstance(quality, dict) and isinstance(quality.get("overall_score"), int | float):
-                    grade = str(quality.get("grade", "?"))
-                    details += f"; quality {escape_markup(grade)} {quality['overall_score']:.1f}/100"
+                if isinstance(quality, dict):
+                    score = _agent_eval_finite_number(quality.get("overall_score"))
+                    if score is not None:
+                        grade = str(quality.get("grade", "?"))
+                        details += f"; quality {escape_markup(grade)} {score:.1f}/100"
                 agent = result.metadata.get("agent_eval")
                 if isinstance(agent, dict):
                     raw_summary = agent.get("summary")
                     summary = raw_summary if isinstance(raw_summary, dict) else agent
-                    lift = summary.get("overall_lift", agent.get("composite_lift"))
+                    lift = _agent_eval_finite_number(summary.get("overall_lift", agent.get("composite_lift")))
                     if (
-                        isinstance(lift, int | float)
-                        and not isinstance(lift, bool)
-                        and math.isfinite(lift)
+                        lift is not None
                         and agent.get("verdict") != "inconclusive"
                         and summary.get("verdict") != "inconclusive"
                     ):

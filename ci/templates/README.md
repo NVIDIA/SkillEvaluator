@@ -77,8 +77,14 @@ image pins. Existing 0.7.2 downloads remain Tier 1 only. The all-tier CLI
 renders these references and approves the exact GitHub caller blob. See
 [the onboarding guide](../../docs/cli-onboarding.mdx#opt-in-to-three-tier-ci).
 Merge the trusted feedback entrypoint onto the default branch before the
-first demo PR/MR. Only Tier 1 gates CI; Tier 2 and Tier 3 remain advisory,
-including failed or incomplete outcomes, with their native evidence retained.
+first demo PR/MR. On GitLab, merging into an existing root `.gitlab-ci.yml`
+means replacing the Tier 1 include with exactly the two all-tier includes and
+starting every other job's rules with
+`- if: '$SKILL_EVAL_FEEDBACK == "true"'` / `when: never`, because trusted
+feedback runs as a default-branch pipeline; see the
+[GitLab guide](../../docs/gitlab-ci.mdx#merge-into-an-existing-root-configuration).
+Only Tier 1 gates CI; Tier 2 and Tier 3 remain advisory, including failed or
+incomplete outcomes, with their native evidence retained.
 The CLI's `--tier3-required`, GitHub's `tier3-required` input and GitLab's
 `SKILL_EVAL_TIER3_REQUIRED` variable are deprecated and ignored; they cannot
 make Tier 3 blocking. Reports expire after 14 days, Docker is the default, and

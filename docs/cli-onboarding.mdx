@@ -66,7 +66,7 @@ agent CLIs on the selected CI runner. This setup supports these two modes only.
 
 ```bash title="Preview, then open a setup PR or MR"
 skillevaluator ci init --tiers 1,2,3 --release /path/to/reviewed-ci-release.json \
-  --platform github --provider openai --paths skills --mode preview --no-input
+  --platform github --provider openai --paths skills --mode preview --no-input --show-files
 skillevaluator ci init --tiers 1,2,3 --release /path/to/reviewed-ci-release.json \
   --platform github --provider openai --paths skills --mode pr --no-input
 ```
@@ -76,7 +76,8 @@ For GitLab 17.0 or later, select `--platform gitlab`. GitHub uses your local
 for the repository's host, never a generic `GITLAB_TOKEN`. Origins other than
 github.com need `--tiers 1,2,3` or `--platform gitlab` before any API request.
 GitLab setup does not require `glab`.
-`--mode preview` shows proposed files;
+`--mode preview` lists the files it would add or change without writing
+anything; add `--show-files` to print their contents.
 `--mode save` writes the two local configuration files; `--mode pr` opens the
 setup review through the platform API. These commands prepare CI configuration;
 they do not run the evaluators on your laptop.
@@ -127,12 +128,15 @@ NVIDIA Build uses OpenCode. CI installs Tier 2 or Tier 3 extras from the reviewe
 tools commit. Tier 3 checks the selected environment with `doctor`; local mode
 also installs pinned native CLIs into an isolated runtime directory.
 
-`--timeout-minutes` sets the runtime budget and native job duration (300 by
-default). GitLab receives a literal duration so the configuration also works on
-GitLab 17.8. `--runner` chooses a GitHub runner label or GitLab runner tag. GitHub defaults
+`--timeout-minutes` sets the native job duration (300 by default). The
+evaluator's runtime budget ends 20 minutes, or a quarter of a shorter duration,
+earlier so setup and retained evidence fit. GitLab receives a literal duration
+so the configuration also works on GitLab 17.8. `--runner` chooses a GitHub
+runner label or GitLab runner tag. GitHub defaults
 to `ubuntu-24.04`; GitLab defaults to a configured `docker` tag. Docker mode
 requires a working daemon, Docker CLI, Compose v2 and Buildx; GitLab's included Docker-in-Docker service requires
-a privileged runner. Local mode needs a compatible native runner with Node/npm;
+a privileged runner that shares `/certs/client` for the daemon's TLS client
+certificates. Local mode needs a compatible native runner with Node/npm;
 the generated GitLab local configuration removes the Docker service. Cloud
 sandbox backends are outside this onboarding path.
 
@@ -150,6 +154,8 @@ version prerequisite; offline preview/save leave admission readiness unverified.
 The MR jobs receive no comment token. GitLab's feedback request uses its
 short-lived job token; the initiating user needs permission to create a pipeline
 on the protected default branch and run the protected feedback environment.
+Without it, the request is an allowed failure: no comment is posted and the
+Tier 1 gate is unchanged.
 See the platform pages for
 [GitHub](github-actions.mdx#three-tier-checks-and-feedback) and
 [GitLab](gitlab-ci.mdx#three-tier-checks-and-feedback) details.
@@ -163,6 +169,15 @@ the old Tier 1 caller in the setup review once the new all-tier caller covers
 the same roots, so a PR does not run two independent scans. Merge the new
 feedback entrypoint and then open a fresh demo. Existing released bundles and
 Tier 1-only callers keep their current behavior.
+
+On GitLab, the Tier 1 and all-tier configurations share the root
+`.gitlab-ci.yml`, which the CLI never replaces. `--mode preview` prints the
+rendered files and the merge steps; `--mode save` and `--mode pr` stop with an
+error while a different root file exists. In your setup MR, replace the Tier 1
+`skill-evaluation.yml` include with the two rendered includes, add the rendered
+variables, workflow rules and job overrides, guard your other jobs with the
+`SKILL_EVAL_FEEDBACK` rule, and add `.gitlab/skill-feedback.yml`. See
+[Merge into an existing root configuration](gitlab-ci.mdx#merge-into-an-existing-root-configuration).
 
 ## Run the wizard
 

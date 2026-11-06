@@ -24,6 +24,34 @@ GL_FEEDBACK = ".gitlab/skill-feedback.yml"
 SETUP_BRANCH = "ci/skillevaluator-all-tiers-setup"
 DEMO_BRANCH = "ci/skillevaluator-all-tiers-test"
 SHA = re.compile(r"[0-9a-f]{40}")
+# Feedback pipelines run on the protected default branch; other root jobs must skip them.
+GL_FEEDBACK_GUARD = {"if": '$SKILL_EVAL_FEEDBACK == "true"', "when": "never"}
+GL_NOT_FEEDBACK = ".skill-evaluation-not-feedback"
+_GL_GUARD_IF = re.compile(r"""\s*\$SKILL_EVAL_FEEDBACK\s*==\s*(["'])true\1\s*""")
+_GL_GLOBAL_KEYS = {
+    "after_script",
+    "before_script",
+    "cache",
+    "default",
+    "image",
+    "include",
+    "services",
+    "stages",
+    "variables",
+    "workflow",
+}
+_GL_EVALUATOR_JOBS = {
+    "skill-evaluation",
+    "skill-evaluation-native",
+    "skill-evaluation-aggregate",
+    "skill-evaluation-request-feedback",
+    "skill-evaluation-feedback",
+}
+
+
+def evaluator_timeout_seconds(minutes: int) -> int:
+    """End the evaluator before the CI job limit so setup and evidence retention fit."""
+    return (minutes - min(20, minutes // 4)) * 60
 
 
 class _GitLabVariable(str):
@@ -373,7 +401,7 @@ def render(wizard, repo, release, platform, branch, roots, options):
         {
             "SKILL_EVAL_PATHS": "\n".join(roots),
             "SKILL_EVAL_IMAGE": release["image"],
-            "SKILL_EVAL_TIMEOUT_SECONDS": str(options["timeout_minutes"] * 60),
+            "SKILL_EVAL_TIMEOUT_SECONDS": str(evaluator_timeout_seconds(options["timeout_minutes"])),
             "SKILL_EVAL_TOOLS_REPOSITORY": release["repository"],
             "SKILL_EVAL_TOOLS_REF": release["tools_ref"],
             "SKILL_EVAL_ENVIRONMENT": options["environment"],
@@ -435,6 +463,53 @@ def render(wizard, repo, release, platform, branch, roots, options):
     }
 
 
+def _gitlab_root_needs_merge(repo, platform, files) -> bool:
+    """A different existing root .gitlab-ci.yml is merged by hand, never replaced."""
+    target = repo / GL_SCAN
+    return (
+        platform == "gitlab"
+        and not target.is_symlink()
+        and target.is_file()
+        and target.read_bytes() != files[GL_SCAN].encode()
+    )
+
+
+def _refuse_gitlab_root_replacement(mode):
+    if mode in {"save", "pr"}:
+        raise git.SetupError(
+            f"{GL_SCAN} already exists with different content; it will not be replaced. "
+            "Run --mode preview to print the rendered configuration and the manual merge steps, "
+            "then merge and commit it yourself."
+        )
+
+
+def _print_gitlab_root_merge_steps(wizard, existing):
+    unguarded = gitlab_unguarded_jobs(existing)
+    steps = [
+        f"{GL_SCAN} already exists; it will not be replaced. Merge the rendered files below by hand:",
+        f"1. Make the root include list exactly the two rendered entries: the pinned all-tiers.yml remote and "
+        f"the {GL_FEEDBACK} local include with its rule. Remove the Tier 1 skill-evaluation.yml include and any "
+        "other include; trusted feedback rejects other includes. Keep the root plain YAML (no !reference tags).",
+        "2. Add the rendered variables, replacing earlier SKILL_EVAL_* values.",
+        "3. Use the rendered workflow rules. Keep any of your own workflow rules after the two SKILL_EVAL_FEEDBACK "
+        "rules and before the final when: never, and only if they still allow merge-request, default-branch "
+        "and web pipelines.",
+        "4. Replace any skill-evaluation job override with the rendered skill-evaluation and "
+        "skill-evaluation-native entries.",
+        "5. Feedback pipelines run on the default branch. Start the rules of every other job with this "
+        f"guard, or add extends: {GL_NOT_FEEDBACK} to a job without rules:"
+        "\n     - if: '$SKILL_EVAL_FEEDBACK == \"true\"'\n       when: never",
+        (f"   Jobs to guard: {', '.join(unguarded)}. " if unguarded else "   ")
+        + "Merge the guards to the default branch first: the setup MR's own feedback request runs that "
+        "branch's current configuration.",
+        f"6. Create {GL_FEEDBACK} with the rendered content.",
+        "7. Commit both through a merge request; after it merges, ci status --tiers 1,2,3 reports whether "
+        "the root is recognized.",
+    ]
+    for line in steps:
+        wizard.console.print(line, markup=False)
+
+
 def initialize(
     wizard,
     *,
@@ -486,7 +561,12 @@ def initialize(
     )
     options["runner"] = options["runner"] or ("ubuntu-24.04" if platform == "github" else "docker")
     files = render(wizard, repo, release, platform, branch, selected, options)
-    changed = wizard.check_files(repo, files)
+    merge_root = _gitlab_root_needs_merge(repo, platform, files)
+    if merge_root:
+        _refuse_gitlab_root_replacement(mode)
+    changed = wizard.check_files(repo, {p: c for p, c in files.items() if not (merge_root and p == GL_SCAN)})
+    if merge_root:
+        changed.insert(0, GL_SCAN)
     if output:
         output = output.resolve()
         if output.exists() or output.is_relative_to(repo):
@@ -515,6 +595,8 @@ def initialize(
             "GitLab: protect the default branch and add a scoped protected SKILLEVALUATOR_GITLAB_TOKEN for trusted feedback. Permit job-token pipeline triggers; the initiating user needs protected-default-branch pipeline and feedback-environment permissions."
         )
     mode = mode or click.prompt("Next", default="preview", type=click.Choice(["preview", "save", "pr"]))
+    if merge_root:
+        _refuse_gitlab_root_replacement(mode)
     admission = None
     if platform == "gitlab":
         admission = gitlab_admission_prerequisite(origin, online=mode == "pr")
@@ -534,6 +616,17 @@ def initialize(
         plan["gitlab_admission"] = admission
     if mode == "preview":
         plan["action"] = "preview"
+        if merge_root:
+            _print_gitlab_root_merge_steps(wizard, (repo / GL_SCAN).read_text(errors="replace"))
+            show_files = True
+        if changed:
+            wizard.console.print(
+                "Proposed files:" if show_files else "Proposed files (add --show-files to print them):"
+            )
+            for path in changed:
+                wizard.console.print("  " + path, markup=False)
+        else:
+            wizard.console.print("The all-tier files already match this checkout.")
         wizard.console.print(
             "No changes applied. These are candidate pinned workflows; configuration is not a verified evaluation."
         )
@@ -561,7 +654,10 @@ def initialize(
         for path, content in files.items():
             current = client.file(path, branch)
             if current is not None and current != content:
-                raise git.SetupError(f"{path} differs on the default branch; it will not be replaced.")
+                raise git.SetupError(
+                    f"{path} differs on the default branch; it will not be replaced."
+                    + (" Merge it by hand; --mode preview prints the steps." if path == GL_SCAN else "")
+                )
             if current is None:
                 pending[path] = content
         if pending:
@@ -632,6 +728,51 @@ def gitlab_config_problem(text: str) -> str | None:
     return None
 
 
+def _gitlab_rules(document, job, depth=0):
+    if "rules" in job or depth > 10:
+        return job.get("rules")
+    extends = job.get("extends")
+    for parent in reversed([extends] if isinstance(extends, str) else extends if isinstance(extends, list) else []):
+        if parent == GL_NOT_FEEDBACK:
+            return [GL_FEEDBACK_GUARD]
+        base = document.get(parent)
+        rules = _gitlab_rules(document, base, depth + 1) if isinstance(base, dict) else None
+        if rules is not None:
+            return rules
+    return None
+
+
+def gitlab_unguarded_jobs(text: str) -> list[str]:
+    """Name root jobs that a trusted default-branch feedback pipeline would also run."""
+    try:
+        document = yaml.safe_load(text)
+    except yaml.YAMLError:
+        return []
+    if not isinstance(document, dict):
+        return []
+    unguarded = []
+    for name, job in document.items():
+        if (
+            not isinstance(name, str)
+            or not isinstance(job, dict)
+            or name.startswith(".")
+            or name in _GL_GLOBAL_KEYS
+            or name in _GL_EVALUATOR_JOBS
+        ):
+            continue
+        rules = _gitlab_rules(document, job)
+        first = rules[0] if isinstance(rules, list) and rules else None
+        if not (
+            isinstance(first, dict)
+            and set(first) == {"if", "when"}
+            and first["when"] == "never"
+            and isinstance(first["if"], str)
+            and _GL_GUARD_IF.fullmatch(first["if"])
+        ):
+            unguarded.append(name)
+    return unguarded
+
+
 def inspect(wizard, repo, platform="auto", tiers=None):
     if tiers is not None:
         validate_tiers(tiers)
@@ -655,6 +796,18 @@ def inspect(wizard, repo, platform="auto", tiers=None):
         markup=False,
     )
     wizard.console.print("Trusted feedback: " + ("configured" if feedback else "missing"))
+    # Advisory only; the trusted include check above keeps parity with feedback.
+    unguarded = gitlab_unguarded_jobs(scan) if scan and platform == "gitlab" and not problem else []
+    if unguarded:
+        wizard.console.print(
+            "Warning: trusted feedback pipelines on the default branch also run "
+            + ", ".join(unguarded)
+            + ". Start their rules with if: '$SKILL_EVAL_FEEDBACK == \"true\"' and when: never; a job without "
+            + "rules can extend "
+            + GL_NOT_FEEDBACK
+            + ".",
+            markup=False,
+        )
     if platform == "gitlab":
         _print_gitlab_admission_prerequisite(wizard, gitlab_admission_prerequisite(origin, online=True))
     if scan and feedback and platform == "github":

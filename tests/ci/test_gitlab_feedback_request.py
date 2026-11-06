@@ -150,6 +150,8 @@ def test_http_failure_logs_only_status(request_env, monkeypatch, capsys, code):
     assert module.main() == 2
     output = capsys.readouterr().out
     assert f"HTTP {code}" in output and request_env["CI_JOB_TOKEN"] not in output
+    # A refused request (e.g. no default-branch permission) skips comments, not the gate.
+    assert "feedback is skipped" in output and "still gates Tier 1" in output
 
 
 @pytest.mark.parametrize("error_type", [urllib.error.URLError, http.client.BadStatusLine])

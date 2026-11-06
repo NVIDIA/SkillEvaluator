@@ -16,6 +16,10 @@ from collections.abc import Mapping
 
 MAX_RESPONSE_BYTES = 1024 * 1024
 MAX_ID = 2**63 - 1
+SKIPPED = (
+    "Automatic MR feedback is skipped for this pipeline; the aggregate still gates Tier 1. "
+    "The pipeline user needs permission to run pipelines on the protected default branch."
+)
 
 
 class _NoRedirect(urllib.request.HTTPRedirectHandler):
@@ -115,9 +119,11 @@ def main() -> int:
             raise ValueError("Invalid feedback pipeline")
     except urllib.error.HTTPError as error:
         print(f"Feedback pipeline could not be requested (HTTP {error.code}).")
+        print(SKIPPED)
         return 2
     except (OSError, ValueError, http.client.HTTPException) as error:
         print(f"Feedback pipeline could not be requested ({type(error).__name__}).")
+        print(SKIPPED)
         return 2
     print(f"Feedback pipeline requested (pipeline {result['id']}).")
     return 0

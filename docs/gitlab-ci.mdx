@@ -15,8 +15,48 @@ The unreleased [all-tier CLI path](cli-onboarding.mdx#opt-in-to-three-tier-ci)
 creates two thin files: `.gitlab-ci.yml` includes the pinned shared evaluation
 configuration, and `.gitlab/skill-feedback.yml` includes pinned trusted feedback.
 Use a schema-version 2 descriptor declaring `all-tiers-gitlab`; released 0.7.2
-configurations below remain Tier 1 only. Merge with any existing root workflow
-rules and stages, retaining rules that allow merge-request pipelines.
+configurations below remain Tier 1 only. The CLI never replaces an existing,
+different `.gitlab-ci.yml`, such as a released Tier 1 setup: `--mode preview`
+prints the rendered files and the merge steps, and `--mode save` and `--mode pr`
+stop with an error until you merge by hand.
+
+### Merge into an existing root configuration
+
+The trusted feedback job validates the root `.gitlab-ci.yml` of the MR
+pipeline, so a merged file must keep this shape:
+
+1. Make `include` exactly the two rendered entries: the pinned `all-tiers.yml`
+   remote and the `.gitlab/skill-feedback.yml` local include with its rule.
+   Remove the Tier 1 `skill-evaluation.yml` include, which defines the same
+   `skill-evaluation` job, and any other include. Feedback rejects other
+   includes and reads the root as plain YAML, so do not use `!reference` tags.
+2. Add the rendered `variables`, replacing earlier `SKILL_EVAL_*` values.
+3. Use the rendered `workflow: rules`. Keep your own workflow rules after the
+   two `SKILL_EVAL_FEEDBACK` rules and before the final `when: never`, and
+   only if they still allow merge-request, default-branch and web pipelines.
+4. Replace any `skill-evaluation` override with the rendered
+   `skill-evaluation` and `skill-evaluation-native` entries.
+5. Guard every other job. Trusted feedback runs as a pipeline on the protected
+   default branch, so an unguarded job, such as a deployment gated on the
+   default branch, would run again for every MR. Start each job's rules with
+   the guard, or add `extends: .skill-evaluation-not-feedback` to a job that
+   has neither `rules` nor `only`/`except`:
+
+   ```yaml
+   deploy:
+     script: ./deploy.sh
+     rules:
+       - if: '$SKILL_EVAL_FEEDBACK == "true"'
+         when: never
+       - if: '$CI_COMMIT_BRANCH == $CI_DEFAULT_BRANCH'
+   ```
+
+   Merge these guards to the default branch before the setup MR. Its own
+   feedback request starts a pipeline from the current default-branch
+   configuration, and the guard is inert until `SKILL_EVAL_FEEDBACK` is set.
+6. Add `.gitlab/skill-feedback.yml` as rendered and merge both files through
+   a setup MR. After it merges, `skillevaluator ci status --tiers 1,2,3`
+   reports whether the root is recognized and warns about unguarded root jobs.
 
 The shared configuration runs the pinned Tier 1 image plus parallel native
 Tier 2 and Tier 3 jobs. Only Tier 1 is required; Tier 2 and Tier 3 are advisory,
@@ -42,8 +82,14 @@ sections and per-tier links stay out of the comment. See the
 
 Configure a runner matching `SKILL_EVAL_RUNNER` (default `docker`), the protected
 `SKILL_EVAL_ENVIRONMENT` (default `skillevaluator`) and provider secrets scoped
-to that execution environment. The default Docker service needs a privileged
-runner with Docker-in-Docker enabled. Docker mode also requires the Docker CLI,
+to that execution environment. The native jobs use `environment: action: prepare`:
+they receive the environment's scoped variables and access protection, but
+record no deployment, so GitLab's **Prevent outdated deployment jobs** setting
+cannot drop an older MR's jobs. The default Docker service needs a privileged
+runner with Docker-in-Docker enabled. The daemon accepts only TLS clients on
+port 2376 (`DOCKER_TLS_CERTDIR: /certs`), so agent containers cannot use the
+Docker API. Configure the runner with `volumes = ["/certs/client"]` so the job
+can read the generated client certificates. Docker mode also requires the Docker CLI,
 Compose v2 and Buildx; the shared job installs these clients in supported root
 Linux containers and checks readiness before evaluation. For local mode the generated caller
 removes that service; use a Linux or macOS native runner with Python 3.12,
@@ -95,8 +141,12 @@ The initiating pipeline user must be allowed to create a pipeline on
 the protected default branch, pass the two pipeline variables and run the
 protected feedback environment. Configure these permissions for authorized CI
 maintainers; a job token does not bypass protected-branch or deployment permissions.
-The feedback request is advisory; the aggregate continues to enforce Tier 1
-when the first setup MR has not yet installed feedback on the default branch.
+The feedback request is advisory. When GitLab refuses it, for example because
+the MR pipeline user cannot run pipelines on the protected default branch or
+may not pass pipeline variables, the request job fails as an allowed failure:
+the pipeline shows a warning, no comment is posted or updated, and the aggregate
+continues to enforce Tier 1. Before the setup MR installs feedback on the
+default branch, no comment is posted and the aggregate still enforces Tier 1.
 
 For a rejected publisher, open its job log. The check location refers to the
 pinned `ci/feedback.py` revision, and the category distinguishes validation,
@@ -111,13 +161,15 @@ remain actionable evidence rather than a pass. Review the pipeline's actual
 aggregate check before enabling merge restrictions; it gates Tier 1 only.
 
 The CLI's `--timeout-minutes` option writes a literal native-job duration and
-the corresponding runtime budget. The default is 300 minutes. On GitLab 17.8,
-CI variables are not expanded in a job's `timeout` field. For a manual consumer,
-set the literal directly:
+a shorter evaluator budget. The default is 300 minutes. The budget ends 20
+minutes, or a quarter of a shorter duration, before the job timeout, leaving
+time for setup and for retaining evidence: 300 minutes gives 16800 seconds.
+On GitLab 17.8, CI variables are not expanded in a job's `timeout` field. For
+a manual consumer, set the literal directly:
 
 ```yaml
 variables:
-  SKILL_EVAL_TIMEOUT_SECONDS: '2700'
+  SKILL_EVAL_TIMEOUT_SECONDS: '2040'
 skill-evaluation-native:
   timeout: 45 minutes
 ```

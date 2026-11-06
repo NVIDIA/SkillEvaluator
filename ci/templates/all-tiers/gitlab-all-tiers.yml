@@ -1,6 +1,10 @@
 # SPDX-License-Identifier: Apache-2.0
 # Root .gitlab-ci.yml; keep MR rules here even though jobs are included.
 # Tier 1 is required; Tier 2 and Tier 3 are advisory.
+# Merging into an existing root file: use exactly these two includes (remove
+# the Tier 1 skill-evaluation.yml include) and keep the file plain YAML.
+# Feedback pipelines run on the default branch, so start every other job's
+# rules with the guard shown on build-example below.
 include:
   - remote: https://raw.githubusercontent.com/NVIDIA/SkillEvaluator/RELEASE_WORKFLOW_SHA/ci/gitlab/all-tiers.yml
   - local: .gitlab/skill-feedback.yml
@@ -16,7 +20,8 @@ variables:
   SKILL_EVAL_PROVIDER: openai
   SKILL_EVAL_RUNNER: docker
   SKILL_EVAL_ENVIRONMENT: skillevaluator
-  SKILL_EVAL_TIMEOUT_SECONDS: '18000'
+  # Job minutes minus min(20, minutes / 4): leave time to retain evidence.
+  SKILL_EVAL_TIMEOUT_SECONDS: '16800'
 skill-evaluation:
   rules:
     - if: '$SKILL_EVAL_FEEDBACK == "true"'
@@ -28,3 +33,11 @@ skill-evaluation:
 # Job duration must be a literal; GitLab 17.8 does not expand CI variables here.
 skill-evaluation-native:
   timeout: 5 hours
+
+# Existing jobs: guard them so trusted feedback pipelines skip them. A job
+# without rules can use `extends: .skill-evaluation-not-feedback` instead.
+# build-example:
+#   rules:
+#     - if: '$SKILL_EVAL_FEEDBACK == "true"'
+#       when: never
+#     - if: '$CI_COMMIT_BRANCH == $CI_DEFAULT_BRANCH'

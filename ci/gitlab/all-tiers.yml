@@ -15,7 +15,9 @@ variables:
   SKILL_EVAL_AGENTS: ''
   SKILL_EVAL_N_ATTEMPTS: '1'
   SKILL_EVAL_N_CONCURRENT: '1'
-  SKILL_EVAL_TIMEOUT_SECONDS: '18000'
+  # Ends min(20 minutes, a quarter) before the 5-hour native job timeout so
+  # setup and the evidence copy fit; the CLI renders the same formula.
+  SKILL_EVAL_TIMEOUT_SECONDS: '16800'
   SKILL_EVAL_TOOLS_REPOSITORY: NVIDIA/SkillEvaluator
   GIT_DEPTH: '0'
   PYTHON_DOTENV_DISABLED: '1'
@@ -102,6 +104,15 @@ skill-evaluation:
     - if: '$CI_COMMIT_BRANCH == $CI_DEFAULT_BRANCH'
     - if: '$CI_PIPELINE_SOURCE == "web"'
 
+# Feedback pipelines run on the protected default branch. Root jobs outside this
+# include must not run there: start their rules with this guard, or extend this
+# job when they have no rules of their own.
+.skill-evaluation-not-feedback:
+  rules:
+    - if: '$SKILL_EVAL_FEEDBACK == "true"'
+      when: never
+    - when: on_success
+
 .skill-evaluation-tools:
   image: python:3.12.12-slim
   before_script:
@@ -142,19 +153,26 @@ skill-evaluation-native:
   stage: test
   timeout: 5 hours
   tags: [$SKILL_EVAL_RUNNER]
+  # Environment-scoped secrets and protection still apply. `prepare` records no
+  # deployment, so "Prevent outdated deployment jobs" never drops an older MR.
   environment:
     name: $SKILL_EVAL_ENVIRONMENT
+    action: prepare
   parallel:
     matrix:
       - SKILL_EVAL_TIER: ['2', '3']
-  # Docker mode requires a privileged runner supporting Docker-in-Docker.
-  # For local mode select a native runner and remove this service if necessary.
+  # Docker mode requires a privileged runner supporting Docker-in-Docker and
+  # sharing /certs/client (runner volumes = ["/certs/client"]). TLS client
+  # certificates stay in the job and service; agent containers cannot use the
+  # daemon. For local mode select a native runner and remove this service.
   services:
     - name: docker:28.5.1-dind
       alias: docker
   variables:
-    DOCKER_HOST: tcp://docker:2375
-    DOCKER_TLS_CERTDIR: ''
+    DOCKER_HOST: tcp://docker:2376
+    DOCKER_TLS_CERTDIR: /certs
+    DOCKER_TLS_VERIFY: '1'
+    DOCKER_CERT_PATH: /certs/client
   script:
     - |
       set -eu

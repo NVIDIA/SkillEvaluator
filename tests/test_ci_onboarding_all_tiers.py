@@ -311,7 +311,8 @@ def test_gitlab_local_render_sets_actual_runtime_inputs(repository, all_release)
     assert result.exit_code == 0, result.output
     scan = yaml.safe_load((repository / ".gitlab-ci.yml").read_text())
     assert scan["variables"]["SKILL_EVAL_IMAGE"] == ALL_RELEASE["image"]
-    assert scan["variables"]["SKILL_EVAL_TIMEOUT_SECONDS"] == "2700"
+    # 45 minutes minus min(20, 45 // 4) leaves time to retain evidence.
+    assert scan["variables"]["SKILL_EVAL_TIMEOUT_SECONDS"] == "2040"
     assert "SKILL_EVAL_JOB_TIMEOUT" not in scan["variables"]
     assert scan["skill-evaluation-native"]["timeout"] == "45 minutes"
     assert scan["variables"]["SKILL_EVAL_RUNNER"] == "docker"
@@ -440,8 +441,8 @@ def test_candidate_descriptor_is_declared_as_package_data():
     assert "ci-release-all-tiers.json" in project["tool"]["setuptools"]["package-data"]["skillevaluator"]
 
 
-@pytest.mark.parametrize("minutes", [45, 300])
-def test_gitlab_docker_render_sets_a_literal_job_timeout(repository, all_release, minutes):
+@pytest.mark.parametrize(("minutes", "seconds"), [(1, 60), (45, 2040), (80, 3600), (300, 16800)])
+def test_gitlab_docker_render_sets_a_literal_job_timeout(repository, all_release, minutes, seconds):
     subprocess.run(
         ["git", "-C", str(repository), "remote", "set-url", "origin", "https://gitlab.example.test/group/consumer.git"],
         check=True,
@@ -450,7 +451,7 @@ def test_gitlab_docker_render_sets_a_literal_job_timeout(repository, all_release
     assert result.exit_code == 0, result.output
     scan = yaml.safe_load((repository / ".gitlab-ci.yml").read_text())
     assert scan["skill-evaluation-native"] == {"timeout": f"{minutes} minutes"}
-    assert scan["variables"]["SKILL_EVAL_TIMEOUT_SECONDS"] == str(minutes * 60)
+    assert scan["variables"]["SKILL_EVAL_TIMEOUT_SECONDS"] == str(seconds)
     assert "SKILL_EVAL_JOB_TIMEOUT" not in scan["variables"]
 
 
@@ -736,3 +737,103 @@ def test_all_tier_receipt_parent_is_created_before_saving(repository, all_releas
     result = invoke(repository, all_release, "--mode", "save", "--paths", "skills", "--output", str(receipt))
     assert result.exit_code == 0, result.output
     assert json.loads(receipt.read_text())["action"] == "saved"
+
+
+def test_all_tier_preview_lists_proposed_files_without_show_files(repository, all_release):
+    result = invoke(repository, all_release, "--mode", "preview", "--paths", "skills")
+    assert result.exit_code == 0, result.output
+    assert ".github/workflows/skill-checks-all-tiers.yml" in result.output
+    assert ".github/workflows/feedback-all-tiers.yml" in result.output
+    assert "--show-files" in result.output
+    assert "jobs:" not in result.output
+
+
+def _gitlab_tier1_consumer(repository, extra=""):
+    from pathlib import Path
+
+    subprocess.run(
+        ["git", "-C", str(repository), "remote", "set-url", "origin", "https://gitlab.example.test/group/consumer.git"],
+        check=True,
+    )
+    released = (Path(__file__).parents[1] / "ci/bundles/0.7.2/gitlab-skill-checks.yml").read_text()
+    root = repository / ".gitlab-ci.yml"
+    root.write_text(released + extra)
+    subprocess.run(["git", "-C", str(repository), "add", "-A"], check=True)
+    subprocess.run(
+        ["git", "-C", str(repository), "-c", "commit.gpgsign=false", "commit", "-qm", "Tier 1"],
+        check=True,
+    )
+    return root, root.read_bytes()
+
+
+DEPLOY_JOB = "deploy:\n  script: ./deploy.sh\n  rules:\n    - if: '$CI_COMMIT_BRANCH == $CI_DEFAULT_BRANCH'\n"
+
+
+def test_gitlab_preview_prints_merge_steps_for_existing_root_config(repository, all_release):
+    root, before = _gitlab_tier1_consumer(repository, DEPLOY_JOB)
+    result = invoke(repository, all_release, "--mode", "preview", "--paths", "skills")
+    assert result.exit_code == 0, result.output
+    output = " ".join(result.output.split())
+    assert ".gitlab-ci.yml already exists; it will not be replaced" in output
+    assert "Remove the Tier 1 skill-evaluation.yml include" in output
+    assert "Jobs to guard: deploy." in output
+    assert "Merge the guards to the default branch first" in output
+    assert "- if: '$SKILL_EVAL_FEEDBACK == \"true\"' when: never" in output
+    # The rendered root and feedback files are printed even without --show-files.
+    assert ALL_RELEASE["gitlab_ref"] + "/ci/gitlab/all-tiers.yml" in output
+    assert "skill-evaluation-native: timeout: 300 minutes" in output
+    assert ".gitlab/skill-feedback.yml" in output and "/ci/gitlab/feedback.yml" in output
+    assert root.read_bytes() == before
+    assert not (repository / ".gitlab").exists()
+
+
+@pytest.mark.parametrize("mode", ["save", "pr"])
+def test_gitlab_save_and_pr_refuse_to_replace_existing_root_config(repository, all_release, monkeypatch, mode):
+    from skillevaluator import _ci_onboarding_all_tiers as all_tiers
+
+    monkeypatch.setattr(all_tiers, "gitlab_api", lambda *_a, **_k: pytest.fail("refused before any API call"))
+    root, before = _gitlab_tier1_consumer(repository)
+    result = invoke(repository, all_release, "--mode", mode, "--paths", "skills")
+    assert result.exit_code != 0
+    output = " ".join(result.output.split())
+    assert ".gitlab-ci.yml already exists with different content; it will not be replaced" in output
+    assert "--mode preview" in output and "merge" in output
+    assert root.read_bytes() == before
+    assert not (repository / ".gitlab").exists()
+
+
+def test_gitlab_interactive_save_refuses_existing_root_config(repository, all_release):
+    root, before = _gitlab_tier1_consumer(repository)
+    result = CliRunner().invoke(
+        cli,
+        ["ci", "init", "--repo", str(repository), "--release", str(all_release), "--tiers", "1,2,3"],
+        input="2\nsave\n",
+    )
+    assert result.exit_code != 0
+    assert "it will not be replaced" in result.output
+    assert root.read_bytes() == before
+    assert not (repository / ".gitlab").exists()
+
+
+def test_gitlab_status_warns_about_root_jobs_without_feedback_guard(repository, all_release, monkeypatch):
+    subprocess.run(
+        ["git", "-C", str(repository), "remote", "set-url", "origin", "https://gitlab.example.test/group/consumer.git"],
+        check=True,
+    )
+    assert invoke(repository, all_release, "--mode", "save").exit_code == 0
+    generated = (repository / ".gitlab-ci.yml").read_text()
+    output, _calls = _gitlab_status(repository, monkeypatch, generated)
+    assert "Warning" not in output
+    guarded = (
+        "lint:\n  script: make lint\n  rules:\n    - if: \"$SKILL_EVAL_FEEDBACK == 'true'\"\n      when: never\n"
+        "    - when: on_success\n"
+        "docs:\n  script: make docs\n  extends: .skill-evaluation-not-feedback\n"
+        ".base:\n  rules:\n    - if: '$SKILL_EVAL_FEEDBACK == \"true\"'\n      when: never\n"
+        "    - if: $CI_COMMIT_BRANCH\n"
+        "package:\n  script: make package\n  extends: [.base]\n"
+    )
+    output, _calls = _gitlab_status(repository, monkeypatch, generated + guarded + DEPLOY_JOB + "test:\n  script: t\n")
+    assert "All-tier checks: configured" in output
+    normalized = " ".join(output.split())
+    assert "also run deploy, test." in normalized
+    assert "SKILL_EVAL_FEEDBACK" in normalized and ".skill-evaluation-not-feedback" in normalized

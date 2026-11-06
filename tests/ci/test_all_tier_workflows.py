@@ -360,3 +360,53 @@ def test_gitlab_read_token_is_removed_before_provider_bootstrap_and_feedback_is_
         < script.index("-m pip")
     )
     assert config["skill-evaluation-request-feedback"]["allow_failure"] == "true"
+
+
+def _gitlab_minutes(duration):
+    import re
+
+    match = re.fullmatch(r"(\d+) (minutes|hours)", duration)
+    assert match, duration
+    return int(match[1]) * (60 if match[2] == "hours" else 1)
+
+
+def test_gitlab_evaluator_budget_ends_before_the_native_job_timeout():
+    for path in ("ci/gitlab/all-tiers.yml", "ci/templates/all-tiers/gitlab-all-tiers.yml"):
+        config = load(path)
+        minutes = _gitlab_minutes(config["skill-evaluation-native"]["timeout"])
+        assert "$" not in config["skill-evaluation-native"]["timeout"]
+        reserve = min(20, minutes // 4)
+        assert config["variables"]["SKILL_EVAL_TIMEOUT_SECONDS"] == str((minutes - reserve) * 60) == "16800", path
+
+
+def test_gitlab_dind_daemon_requires_tls_client_certificates():
+    job = load("ci/gitlab/all-tiers.yml")["skill-evaluation-native"]
+    variables = job["variables"]
+    assert variables["DOCKER_HOST"] == "tcp://docker:2376"
+    assert variables["DOCKER_TLS_CERTDIR"] == "/certs"
+    assert variables["DOCKER_TLS_VERIFY"] == "1"
+    assert variables["DOCKER_CERT_PATH"] == "/certs/client"
+    assert "2375" not in str(job)
+    docs = " ".join((ROOT / "docs/gitlab-ci.mdx").read_text().split())
+    assert 'volumes = ["/certs/client"]' in docs
+
+
+def test_gitlab_native_jobs_use_environment_without_recording_deployments():
+    job = load("ci/gitlab/all-tiers.yml")["skill-evaluation-native"]
+    assert job["environment"] == {"name": "$SKILL_EVAL_ENVIRONMENT", "action": "prepare"}
+    docs = " ".join((ROOT / "docs/gitlab-ci.mdx").read_text().split())
+    assert "`environment: action: prepare`" in docs and "Prevent outdated deployment jobs" in docs
+
+
+def test_gitlab_feedback_pipeline_guard_is_offered_and_documented():
+    guard = {"if": '$SKILL_EVAL_FEEDBACK == "true"', "when": "never"}
+    hidden = load("ci/gitlab/all-tiers.yml")[".skill-evaluation-not-feedback"]
+    assert hidden["rules"][0] == guard
+    assert hidden["rules"][1] == {"when": "on_success"}
+    for path in ("docs/gitlab-ci.mdx", "ci/templates/README.md", "ci/templates/all-tiers/gitlab-all-tiers.yml"):
+        text = (ROOT / path).read_text()
+        assert "- if: '$SKILL_EVAL_FEEDBACK == \"true\"'" in text, path
+    docs = " ".join((ROOT / "docs/gitlab-ci.mdx").read_text().split())
+    assert "extends: .skill-evaluation-not-feedback" in docs
+    assert "no comment is posted or updated" in docs
+    assert "Merge these guards to the default branch before the setup MR" in docs

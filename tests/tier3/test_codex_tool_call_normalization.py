@@ -1571,8 +1571,9 @@ def test_extended_codex_lone_inline_call_without_a_record_keeps_the_whole_output
         ('{"exit_code":1,"output":""}\nexit_code=1', True),
         ('{"exit_code":1,"output":""}\nexit_code=1\ngrep: f: Permission denied', False),
         ("[" * 100_000 + "\nexit_code=1", False),
+        ('{"a":{"output":""},"b":{"output":"x"}}\nexit_code=1', False),
     ],
-    ids=["record", "text-after-record", "deeply-nested-is-not-a-record"],
+    ids=["record", "text-after-record", "deeply-nested-is-not-a-record", "two-object-fields-are-ambiguous"],
 )
 def test_quiet_probe_reads_only_a_whole_record(checker, observation, clean):
     call = {"action": "bash", "action_input": {"command": "grep foo f"}, "observation": observation}
@@ -1688,3 +1689,15 @@ def test_wrapper_that_javascript_rejects_stays_unsupported(extractor, source):
 
     assert len(calls) == 1
     assert calls[0]["normalization_status"] == "unsupported_native_codex_exec_wrapper"
+
+
+@pytest.mark.parametrize("extractor", _EXTRACTORS)
+@pytest.mark.parametrize("field", ["result", "outcome", "settled"])
+def test_quiet_probe_exemption_does_not_depend_on_the_settled_field_name(extractor, field):
+    calls = 'tools.exec_command({cmd:"grep -q foo README.md"}),tools.exec_command({cmd:"pwd"})'
+    source = f"const results=await Promise.allSettled([{calls}]);results.forEach((r,i)=>text({{i,{field}:r}}));"
+    values = [{"exit_code": 1, "output": ""}, {"exit_code": 0, "output": "/workspace\n"}]
+    records = [{"i": i, field: {"status": "fulfilled", "value": value}} for i, value in enumerate(values)]
+    result = _error_recovery(_trajectory(source, _record_observation(records)), extractor)
+
+    assert result["first_attempt_clean"] is True

@@ -4601,7 +4601,8 @@ def check_error_recovery(
 
     def _record_output(observation: str) -> str | None:
         # A Codex `exec` record prints the command's output inside its JSON:
-        # `{"exit_code":1,"output":""}`, wrapped in `value` and `result` for settled promises.
+        # `{"exit_code":1,"output":""}`, wrapped for settled promises in an object under a field of
+        # any name. Follow a lone object-valued field; two of them make the record ambiguous.
         try:
             record, end = json.JSONDecoder().raw_decode(observation)
         except (ValueError, RecursionError):
@@ -4609,7 +4610,8 @@ def check_error_recovery(
         if exit_status_re.sub("", observation[end:]).strip():
             return None  # text after the record may be a diagnostic
         while isinstance(record, dict) and "output" not in record:
-            record = record.get("value", record.get("result"))
+            nested = [item for item in record.values() if isinstance(item, dict)]
+            record = nested[0] if len(nested) == 1 else None
         return record["output"] if isinstance(record, dict) and isinstance(record["output"], str) else None
 
     def _is_quiet_negative_probe(tc: dict[str, Any], observation: str) -> bool:

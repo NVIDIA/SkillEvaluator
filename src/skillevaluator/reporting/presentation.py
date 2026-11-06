@@ -187,9 +187,9 @@ def trial_coverage(payload: object) -> TrialCoverage:
     if payload.get("execution_status") == "skipped":
         skipped_arms = {"with_skill", "without_skill"}
     else:
-        skipped_arms = {"with_skill_only": {"without_skill"}, "baseline_only": {"with_skill"}}.get(
-            payload.get("mode"), set()
-        )
+        raw_mode = payload.get("mode")
+        mode = raw_mode if isinstance(raw_mode, str) else None
+        skipped_arms = {"with_skill_only": {"without_skill"}, "baseline_only": {"with_skill"}}.get(mode, set())
 
     def retained_rows(value: object) -> int | None:
         nonlocal remaining

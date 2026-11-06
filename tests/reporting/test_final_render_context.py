@@ -559,3 +559,47 @@ def test_executed_tier_counts_stay_on_one_line_at_narrow_widths(monkeypatch):
     failed.add_error("Lint failed")
     output = CLIReporter().render_all([passed, failed, result(skipped=True)])
     assert "Tier 1: 1 of 2 checks passed; 1 failed, 0 incomplete, 1 skipped, 0 N/A" in output
+
+
+@pytest.mark.parametrize(
+    "mode",
+    [
+        pytest.param([], id="empty-list"),
+        pytest.param({}, id="empty-object"),
+        pytest.param(["with_skill_only"], id="list-mode"),
+        pytest.param({"baseline_only": True}, id="object-mode"),
+        pytest.param(None, id="null"),
+        pytest.param(1, id="number"),
+        pytest.param(True, id="boolean"),
+        pytest.param("unrecognized", id="unknown-string"),
+    ],
+)
+@pytest.mark.parametrize("recorded", [False, True], ids=["unavailable", "recorded-conditions"])
+def test_malformed_or_unknown_mode_preserves_coverage_evidence_and_payload(mode, recorded):
+    agents = {}
+    if recorded:
+        agents = {
+            "a": {
+                "conditions": {
+                    "with_skill": {"execution_status": "succeeded", "scored_attempts": 2, "expected_attempts": 3},
+                    "without_skill": {"execution_status": "incomplete", "scored_attempts": 1, "expected_attempts": 3},
+                }
+            }
+        }
+    payload = {"mode": mode, "agents": agents}
+    before = copy.deepcopy(payload)
+    coverage = presentation.trial_coverage(payload)
+    if recorded:
+        assert coverage.with_skill.status == "succeeded"
+        assert coverage.baseline.status == "incomplete"
+        assert coverage.with_skill.scored == 2
+        assert coverage.baseline.scored == 1
+        assert coverage.with_skill.expected == coverage.baseline.expected == 3
+        assert coverage.text == "3 scored trials: 2 with skill, 1 baseline"
+    else:
+        assert coverage.with_skill.status == coverage.baseline.status == "unavailable"
+        assert coverage.with_skill.scored is coverage.baseline.scored is None
+        assert coverage.with_skill.expected is coverage.baseline.expected is None
+        assert "with skill scored trials unavailable" in coverage.text
+        assert "baseline scored trials unavailable" in coverage.text
+    assert payload == before

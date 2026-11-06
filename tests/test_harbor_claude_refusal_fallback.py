@@ -227,8 +227,11 @@ def _refusal_doc_texts() -> dict[str, str]:
     """Return each place that documents the switch, whitespace-normalized."""
     root = Path(__file__).resolve().parents[1]
     changelog = (root / "CHANGELOG.md").read_text(encoding="utf-8")
-    unreleased = changelog.split("\n## Unreleased\n", 1)[1].split("\n## ", 1)[0]
-    [entry] = [block for block in unreleased.split("\n\n") if _SWITCH in block]
+    # The switch shipped in 0.8.0: one release section and one entry in it name it.
+    [release] = [section for section in changelog.split("\n## ")[1:] if _SWITCH in section]
+    assert release.startswith("0.8.0 - "), release.splitlines()[0]
+    entries = re.findall(r"^- .*(?:\n  .*)*", release, flags=re.MULTILINE)
+    [entry] = [item for item in entries if _SWITCH in item]
     blocks = (root / "docs" / "agents-and-sandboxes.mdx").read_text(encoding="utf-8").split("\n\n")
     [index] = [index for index, block in enumerate(blocks) if f"{_SWITCH}=1" in block]
     troubleshooting = (root / "docs" / "tier3-live-evaluation.mdx").read_text(encoding="utf-8")

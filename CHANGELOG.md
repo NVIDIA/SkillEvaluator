@@ -4,6 +4,8 @@ All notable changes to SkillEvaluator are documented in this file.
 
 ## Unreleased
 
+## 0.8.0 - 2026-11-05
+
 ### Added
 
 - Private runtime runs retain sanitized loading, coverage, MCP, behavior and

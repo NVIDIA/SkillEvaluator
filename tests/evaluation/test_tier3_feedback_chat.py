@@ -379,6 +379,31 @@ def test_context_replaces_the_skill_and_home_directories(tmp_path: Path) -> None
     assert context["cases"][0]["question"] == f"Read {Path('acme-skill') / 'references' / 'a.md'}"
 
 
+def test_context_leaves_url_path_values_unchanged_while_scrubbing_other_paths(tmp_path: Path) -> None:
+    home = tmp_path / "home" / "alice"
+    skill = home / "work" / "acme-skill"
+    query_url = f"https://example.test/?path={skill / 'guide'}"
+    fragment_url = f"https://example.test/guide#{home / 'work' / 'acme-skill' / 'references' / 'a.md'}"
+    payload = {
+        "dataset": [
+            {"id": "query", "question": query_url, "ground_truth": ""},
+            {"id": "fragment", "question": fragment_url, "ground_truth": ""},
+        ],
+        "agents": {"codex": {"execution_errors": [f"Failed at {skill / 'SKILL.md'}; URL: {query_url}"]}},
+    }
+
+    context = compact_run_context(
+        payload,
+        run_dir=skill / "evals" / "results" / RUN_ID,
+        skill_dir=skill,
+        home=home,
+    )
+
+    questions = {case["entry_id"]: case["question"] for case in context["cases"]}
+    assert questions == {"query": query_url, "fragment": fragment_url}
+    assert context["agents"]["codex"]["execution_errors"] == [f"Failed at acme-skill/SKILL.md; URL: {query_url}"]
+
+
 def test_context_redacts_credentials_but_keeps_measurements() -> None:
     payload = {
         "agents": {

@@ -254,6 +254,7 @@ _ABSOLUTE_PATH_ROOT = re.compile(r"[\\/]|~[\w.-]*[\\/]|[A-Za-z]:[\\/]|(?:\$HOME|
 # A root right after one of these starts a path of its own: ``/opt/bin,/home/a``,
 # ``--out=/home/a``, ``log(/home/a)``. A colon counts unless it is a drive letter's.
 _PATH_LIST_SEPARATORS = ",;:=([{"
+_URL_SPAN_RE = re.compile(r"(?i)\b[a-z][a-z0-9+.-]*://\S+")
 
 
 def _starts_absolute_path(value: str, index: int) -> bool:
@@ -397,24 +398,36 @@ class _Scrubber:
         starts at the first absolute-path root after the preceding whitespace
         or quote, or at a later root that follows ``,;:=([{``. Such a path
         that contains a space is not recognized. Relative paths are kept.
+        URL spans through the next whitespace are left unchanged.
         """
-        if self.local_paths is not None:
-            value = self.local_paths.sub(self._local, value)
-        if not self.run_id or self.run_id not in value:
-            return value
+
+        def scrub_segment(segment: str) -> str:
+            if self.local_paths is not None:
+                segment = self.local_paths.sub(self._local, segment)
+            if not self.run_id or self.run_id not in segment:
+                return segment
+            pieces: list[str] = []
+            done = floor = 0
+            for match in self.run_reference.finditer(segment):
+                start = match.start()
+                # The walk back stops at the previous match, so the scan stays linear.
+                while start > floor and not segment[start - 1].isspace() and segment[start - 1] not in "\"'`<>|":
+                    start -= 1
+                root = _path_start(segment, start, match.start())
+                floor = match.end()
+                if root is not None:
+                    pieces.extend((segment[done:root], self.run_id))
+                    done = match.end()
+            pieces.append(segment[done:])
+            return "".join(pieces)
+
         pieces: list[str] = []
-        done = floor = 0
-        for match in self.run_reference.finditer(value):
-            start = match.start()
-            # The walk back stops at the previous match, so the scan stays linear.
-            while start > floor and not value[start - 1].isspace() and value[start - 1] not in "\"'`<>|":
-                start -= 1
-            root = _path_start(value, start, match.start())
-            floor = match.end()
-            if root is not None:
-                pieces.extend((value[done:root], self.run_id))
-                done = match.end()
-        pieces.append(value[done:])
+        done = 0
+        for match in _URL_SPAN_RE.finditer(value):
+            pieces.append(scrub_segment(value[done : match.start()]))
+            pieces.append(match.group())
+            done = match.end()
+        pieces.append(scrub_segment(value[done:]))
         return "".join(pieces)
 
     def text(self, value: str, limit: int | None = None) -> str:

@@ -261,3 +261,51 @@ def test_missing_chart_asset_keeps_the_report_and_visible_fallbacks(monkeypatch)
     assert "tier3-chart-notices" not in html
     _, fallback = report.elements["tier3-radar-fallback"]
     assert "hidden" not in fallback
+
+
+def test_chart_reference_opens_ancestor_evidence_and_reuses_shared_navigation() -> None:
+    node = shutil.which("node")
+    if not node:
+        pytest.skip("Node.js is needed to execute the generated chart reference handler")
+    html = _tier3_html()
+    helper = re.search(r"function openTier3Reference\(id\).*?(?=\s*function showTier3SubTab)", html, re.DOTALL)
+    assert helper
+    script = r"""
+const vm = require('vm');
+const state = {lookups:0, focused:false, hash:null, tab:null, routed:[]};
+const outer = {tagName:'DETAILS', open:false, parentElement:null};
+const inner = {tagName:'DETAILS', open:false, parentElement:outer};
+const page = {id:'tier3-page-trials', classList:{contains:()=>false}};
+const target = {
+    tagName:'TABLE', parentElement:inner, closest:()=>page,
+    setAttribute:(key,value)=>{state[key]=value;},
+    focus:()=>{state.focused=true;},
+    scrollIntoView:()=>{}
+};
+const context = {
+    document:{getElementById:()=>{state.lookups++; return target;}, querySelectorAll:()=>[{dataset:{tier3Tab:'trials'}}]},
+    history:{replaceState:(_data,_title,hash)=>{state.hash=hash;}},
+    showTier3SubTab:(tab)=>{state.tab=tab;}
+};
+vm.createContext(context);
+vm.runInContext(HELPER, context);
+const result = context.openTier3Reference('evidence-table');
+const standalone = {outer:outer.open,inner:inner.open,focused:state.focused,tabindex:state.tabindex,hash:state.hash,tab:state.tab,result};
+const before = state.lookups;
+context.openReportDestination = id => {state.routed.push(id); return false;};
+const routed = context.openTier3Reference('evidence-table');
+process.stdout.write(JSON.stringify({standalone,routed,targets:state.routed,extraLookups:state.lookups-before}));
+""".replace("HELPER", json.dumps(helper.group()))
+    states = json.loads(subprocess.run([node, "-e", script], check=True, capture_output=True, text=True).stdout)
+    assert states["standalone"] == {
+        "outer": True,
+        "inner": True,
+        "focused": True,
+        "tabindex": "-1",
+        "hash": "#evidence-table",
+        "tab": "trials",
+        "result": False,
+    }
+    assert states["routed"] is False
+    assert states["targets"] == ["evidence-table"]
+    assert states["extraLookups"] == 0

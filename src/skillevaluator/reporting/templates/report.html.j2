@@ -3861,6 +3861,7 @@
         <script>
         // Chart data links may point into another Tier 3 sub-tab; reveal it before jumping.
         function openTier3Reference(id) {
+            if (typeof openReportDestination === 'function') return openReportDestination(id);
             var target = document.getElementById(id);
             if (!target) return true;
             var page = target.closest('.t3-page');
@@ -3868,8 +3869,13 @@
                 var tab = page.id.slice('tier3-page-'.length);
                 showTier3SubTab(tab, Array.from(document.querySelectorAll('.t3-subtab')).find(function(b){ return b.dataset.tier3Tab === tab; }));
             }
-            if (target.tagName === 'DETAILS') target.open = true;
+            for (var ancestor = target; ancestor; ancestor = ancestor.parentElement) {
+                if (ancestor.tagName === 'DETAILS') ancestor.open = true;
+            }
+            try { history.replaceState(null, '', '#' + id); } catch (err) { /* file:// history is optional. */ }
             target.scrollIntoView({block: 'start'});
+            target.setAttribute('tabindex', '-1');
+            target.focus({preventScroll:true});
             return false;
         }
         function showTier3SubTab(id, btn) {

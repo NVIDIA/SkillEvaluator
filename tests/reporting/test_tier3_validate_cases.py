@@ -5,6 +5,8 @@ import json
 from pathlib import Path
 from types import SimpleNamespace
 
+import pytest
+
 from skillevaluator.reporting.console_ui import ViewProgressReporter, _fit_row, tier3_case_rows, tier3_fix_rows
 from skillevaluator.tier3.case_summary import live_case_marks
 
@@ -107,7 +109,7 @@ def test_fix_section_for_tier1_and_tier2():
     clean = ValidationResult(validator_name="Version Check", passed=True)
     _ok, rows = summarize_tier1([schema, secrets, clean])
     text = _text(rows)
-    assert "1/3 passed  ·  1 failed  ·  1 didn't run" in text
+    assert "1/3 checks passed  ·  1 failed  ·  1 didn't run" in text
     assert "Author not specified in metadata\n" + " " * 12 + "→ Add 'metadata.author'" in text
     assert "secrets didn't run: gitleaks not installed\n" + " " * 12 + "→ brew install gitleaks" in text
     assert [r.label for r in rows if r.glyph in {"1", "2"}][1] == "setup"
@@ -212,3 +214,91 @@ def test_setup_fix_names_failed_skillspector_setup():
         "or install it yourself: uv tool install skillspector.whl",
         "or skip it: --skip security",
     ]
+
+
+def _security_without_llm():
+    from skillevaluator.models.result import ValidationResult
+
+    security = ValidationResult(
+        validator_name="Security Scan",
+        passed=False,
+        metadata={"incomplete_scans": ["skillspector-llm", "llm-verification"], "scanners": {"skillspector": "2.13.3"}},
+    )
+    security.errors.append("skillspector-llm failed with unexpected exit code 2: scanner diagnostics were redacted")
+    return security
+
+
+def test_llm_fix_asks_for_the_key_not_a_scanner_install(monkeypatch):
+    from skillevaluator import provider_config
+    from skillevaluator.reporting.console_ui import _llm_fix
+
+    def no_key():
+        raise provider_config.ProviderConfigurationError(
+            "SKILL_EVAL_LLM_API_KEY is required for the selected provider.\n\n"
+            "Set it in your shell:\n  export SKILL_EVAL_LLM_API_KEY='your-api-key'\n"
+        )
+
+    monkeypatch.setattr(provider_config, "resolve_llm_provider", no_key)
+    item = _llm_fix([_security_without_llm()])
+    assert item.problem == (
+        "security LLM review didn't run: SKILL_EVAL_LLM_API_KEY is required for the selected provider"
+    )
+    assert item.actions == [
+        "export SKILL_EVAL_LLM_API_KEY='your-api-key'",
+        "or rerun without --llm / --llm-verify",
+    ]
+
+
+def test_llm_fix_without_a_provider_gives_every_export(monkeypatch):
+    from skillevaluator import provider_config
+    from skillevaluator.reporting.console_ui import _llm_fix
+
+    monkeypatch.delenv("SKILL_EVAL_LLM_PROVIDER", raising=False)
+    monkeypatch.delenv("SKILL_EVAL_LLM_API_KEY", raising=False)
+    for name in ("NVIDIA_API_KEY", "OPENAI_API_KEY", "ANTHROPIC_API_KEY"):
+        monkeypatch.delenv(name, raising=False)
+    with pytest.raises(provider_config.ProviderConfigurationError):
+        provider_config.resolve_llm_provider()
+    item = _llm_fix([_security_without_llm()])
+    assert item.problem == "security LLM review didn't run: No provider is configured"
+    assert item.actions[0] == "export SKILL_EVAL_LLM_PROVIDER=nv_build NVIDIA_API_KEY='your-api-key'"
+
+
+def test_llm_fix_points_at_doctor_when_the_provider_call_fails(monkeypatch):
+    from skillevaluator import provider_config
+    from skillevaluator.reporting.console_ui import _llm_fix
+
+    monkeypatch.setattr(provider_config, "resolve_llm_provider", object)
+    security = _security_without_llm()
+    security.metadata["incomplete_scans"] = ["llm-verification"]
+    item = _llm_fix([security])
+    assert item.problem == "security LLM review didn't run: the LLM provider call failed"
+    assert item.actions == [
+        "check the key and model with: skillevaluator doctor --tier 2 --verify-models",
+        "or rerun without --llm-verify",
+    ]
+
+
+def test_scanners_row_keeps_the_version_when_only_the_llm_stage_failed():
+    from skillevaluator.reporting.console_ui import _only_llm_stages_missing, _scanners_row
+
+    security = _security_without_llm()
+    assert _only_llm_stages_missing(security)
+    assert "SkillSpector 2.13.3, LLM didn't run" in _text(_scanners_row([security]))
+    security.metadata["incomplete_scans"] = ["skillspector"]
+    assert not _only_llm_stages_missing(security)
+
+
+def test_tier1_summary_counts_named_checks_and_their_sub_checks():
+    from skillevaluator.models.result import ValidationResult
+    from skillevaluator.reporting.console_ui import summarize_tier1
+
+    results = [ValidationResult(validator_name=name, passed=True) for name in ("Code Risk Analysis", "Schema")]
+    results.append(_security_without_llm())
+    for result, performed in zip(results, (2, 10, 1), strict=True):
+        result.summary.checks_performed = performed
+    secrets = ValidationResult(validator_name="Secrets Detection", passed=False)
+    secrets.errors.append("leaked token")
+    results.append(secrets)
+    _ok, rows = summarize_tier1(results, lineup=["code-integrity", "schema", "security"])
+    assert "1/3 checks passed (13 sub-checks)  ·  1 failed  ·  1 didn't run" in _text(rows)

@@ -813,7 +813,8 @@ def _scanners_row(results: list[ValidationResult]) -> list[TierRow]:
             states[scanner] = (version, MUTED)
         for scan in r.incomplete_scans:
             if (scanner := scan.removesuffix("-llm")) in _SCANNER_NAMES:
-                states[scanner] = ("didn't run", f"bold {RED}")
+                version = r.scanners.get(scanner) if scan != scanner else None
+                states[scanner] = (f"{version}, LLM didn't run" if version else "didn't run", f"bold {RED}")
     segments: list[tuple[str, str]] = []
     for scanner in [name for name in _SCANNER_NAMES if name in states]:
         state, style = states[scanner]
@@ -1037,7 +1038,6 @@ def summarize_tier1(results: list[ValidationResult], lineup: list[str] | None = 
     section with each check's final state (failed checks in red).
     """
     user_skipped = [r for r in results if _is_user_skipped(r)]
-    total = len(results) - len(user_skipped)
     failed = [r for r in results if not r.passed and not _is_skipped(r)]
     incomplete = [r for r in failed if r.is_incomplete]
     broken = [r for r in failed if not r.is_incomplete]
@@ -1054,13 +1054,26 @@ def summarize_tier1(results: list[ValidationResult], lineup: list[str] | None = 
     if lineup:
         rows.append(final_check_ticker_row(lineup, results))
         rows += scanners
-    checks_segments: list[tuple[str, str]] = [(f"{total - len(failed)}/{total} passed", TEXT)]
-    if broken:
-        checks_segments += [("  ·  ", FAINT), (f"{len(broken)} failed", f"bold {RED}")]
-    if incomplete:
-        checks_segments += [("  ·  ", FAINT), (f"{len(incomplete)} didn't run", f"bold {RED}")]
-    if user_skipped:
-        checks_segments += [("  ·  ", FAINT), (f"{len(user_skipped)} skipped", MUTED)]
+
+    # Count the named checks the lineup shows, not validators: code-integrity alone is three.
+    def check_of(r: ValidationResult) -> str:
+        return _check_key(r.validator_name) or _short_name(r.validator_name)
+
+    ran = [r for r in results if not _is_user_skipped(r)]
+    checks = set(map(check_of, ran))
+    broken_checks = set(map(check_of, broken))
+    incomplete_checks = set(map(check_of, incomplete)) - broken_checks
+    skipped_checks = set(map(check_of, user_skipped)) - checks
+    passed_checks = len(checks) - len(broken_checks) - len(incomplete_checks)
+    checks_segments: list[tuple[str, str]] = [(f"{passed_checks}/{len(checks)} checks passed", TEXT)]
+    if sub_checks := sum(r.summary.checks_performed for r in ran):
+        checks_segments.append((f" ({sub_checks} sub-checks)", MUTED))
+    if broken_checks:
+        checks_segments += [("  ·  ", FAINT), (f"{len(broken_checks)} failed", f"bold {RED}")]
+    if incomplete_checks:
+        checks_segments += [("  ·  ", FAINT), (f"{len(incomplete_checks)} didn't run", f"bold {RED}")]
+    if skipped_checks:
+        checks_segments += [("  ·  ", FAINT), (f"{len(skipped_checks)} skipped", MUTED)]
     if warnings:
         checks_segments += [("  ·  ", FAINT), (f"{warnings} warning{'s' if warnings != 1 else ''}", MUTED)]
     rows.append(TierRow("summary" if lineup else "checks", checks_segments))
@@ -1095,8 +1108,10 @@ def summarize_tier1(results: list[ValidationResult], lineup: list[str] | None = 
         grade, score = quality
         rows.append(TierRow("quality", [(grade, f"bold {GREEN}"), (f"  {score:.1f} / 100", TEXT)]))
     items = [_tier1_fix(r) for r in broken]
-    if incomplete:
-        items.append(_setup_fix(incomplete))
+    if setup := [r for r in incomplete if not _only_llm_stages_missing(r)]:
+        items.append(_setup_fix(setup))
+    if llm := [r for r in incomplete if _only_llm_stages_missing(r)]:
+        items.append(_llm_fix(llm))
     return not failed, rows + fix_section_rows(items)
 
 
@@ -1139,6 +1154,34 @@ def _setup_fix(results: list[ValidationResult]) -> FixItem:
         actions = list(hints)
         problem = f"{checks} didn't run: {', '.join(scanners) or 'a required scanner'} not installed"
     return FixItem("setup", problem, [*actions, f"or skip it: --skip {skip}"])
+
+
+def _only_llm_stages_missing(result: ValidationResult) -> bool:
+    """True when the check itself ran and only its ``--llm`` / ``--llm-verify`` stage did not."""
+    scans = result.incomplete_scans
+    return bool(scans) and all(s.endswith("-llm") or s.startswith("llm-") for s in scans)
+
+
+def _llm_fix(results: list[ValidationResult]) -> FixItem:
+    """One item for checks whose LLM stage could not run: a missing key or a failed provider call."""
+    from skillevaluator.provider_config import resolve_llm_provider
+
+    checks = ", ".join(dict.fromkeys(_short_name(r.validator_name) for r in results))
+    scans = {s for r in results for s in r.incomplete_scans}
+    flags = " / ".join(
+        f for f, on in (("--llm", "skillspector-llm" in scans), ("--llm-verify", "llm-verification" in scans)) if on
+    )
+    try:
+        resolve_llm_provider()
+    except ValueError as exc:
+        reason, *setup = str(exc).splitlines() or [""]
+        exports = [line.strip().removeprefix("export ") for line in setup if line.strip().startswith("export ")]
+        problem = f"{checks} LLM review didn't run: {reason.rstrip('.')}"
+        action = f"export {' '.join(exports)}" if exports else "set up an LLM provider and key, then rerun"
+    else:
+        problem = f"{checks} LLM review didn't run: the LLM provider call failed"
+        action = "check the key and model with: skillevaluator doctor --tier 2 --verify-models"
+    return FixItem("setup", problem, [action, f"or rerun without {flags or '--llm'}"])
 
 
 def _skip_name(validator_name: str) -> str:

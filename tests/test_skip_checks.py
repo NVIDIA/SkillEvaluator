@@ -46,7 +46,8 @@ def test_skipped_check_is_visible_in_tier1_summary():
     _ok, rows = summarize_tier1(results, lineup=["schema", "unicode"])
     text = "\n".join("".join(seg for seg, _style in row.segments) for row in rows)
     assert "\N{EN DASH} unicode" in text
-    assert "1/1 passed  ·  1 skipped" in text
+    assert "1/1 checks passed" in text
+    assert "  ·  1 skipped" in text
     assert "unicode  with --skip, not checked" in text
 
 

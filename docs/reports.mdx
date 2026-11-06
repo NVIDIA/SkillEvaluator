@@ -88,9 +88,10 @@ Detailed files remain available even when a tier fails or needs configuration.
 When a native skill's execution fails or is incomplete, or its worker exits
 abnormally, the skill retains bounded, redacted worker, Docker and
 agent-installation diagnostics under `diagnostics/`, even if no canonical report
-was produced. A complete run with a failed or neutral verdict retains none. The
-worker's `command.log` comes first, then logs from one trial of each Harbor
-job (a failing trial when there is one), at most four trials per skill. All
+was produced or its verdict is failed. A complete run with a failed or neutral
+verdict retains none. The worker's `command.log` comes first, then logs from
+one trial of each Harbor job (a failing trial when there is one), at most four
+trials per skill, with failing trials chosen before passing ones. All
 skills of one tier share a limit of 1000 diagnostic files and 16 MiB. Each
 `index.json` records retained, omitted and truncated files, including those
 omitted at a limit.

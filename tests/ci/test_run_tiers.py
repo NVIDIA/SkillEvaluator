@@ -425,7 +425,7 @@ def test_post_run_dataset_recheck_failure_downgrades_the_skill(consumer, tmp_pat
 
     monkeypatch.setattr(run_tiers, "dataset_preflight", preflight)
     monkeypatch.setattr(run_tiers, "run_command", lambda *_args, **_kwargs: 0)
-    monkeypatch.setattr(run_tiers, "_retain", lambda *_args: {"status": "passed", "metrics": {}})
+    monkeypatch.setattr(run_tiers, "_retain", lambda *_args: {"status": "passed", "metrics": {}, "complete": True})
     reports = tmp_path / "reports"
     env = env_for(consumer, NVIDIA_API_KEY="test-provider-value-1234")
     assert run_tiers.evaluate(3, consumer, reports, env) == 0
@@ -647,8 +647,8 @@ def test_aggregate_keeps_each_tier_selection_so_unselected_skills_are_not_incomp
     assert "INCOMPLETE" not in beta
 
 
-def _failed_tier2_report(output: Path) -> None:
-    from skillevaluator.models import ValidationResult
+def _failed_tier2_report(output: Path, *, incomplete: bool = False) -> None:
+    from skillevaluator.models import Finding, Severity, ValidationResult
     from skillevaluator.reporting.json_reporter import JSONReporter
 
     result = ValidationResult(
@@ -657,18 +657,32 @@ def _failed_tier2_report(output: Path) -> None:
         errors=["Duplicate deployment instructions"],
         metadata={"gating": {"tier": 2, "blocking": True}},
     )
+    if incomplete:
+        # A blocking finding outranks the incomplete scan, so the status stays failed.
+        result.add_finding(
+            Finding(
+                category="DEDUP",
+                severity=Severity.HIGH,
+                check_name="duplicate-instructions",
+                message="Duplicate deployment instructions",
+                file_path="SKILL.md",
+            )
+        )
+        result.mark_scan_incomplete("LLM review")
     (output / "skillevaluator-tier2.json").write_text(JSONReporter().render_all([result]))
 
 
-@pytest.mark.parametrize(("code", "retained"), [(1, False), (2, True), (-9, True)])
+@pytest.mark.parametrize(
+    ("code", "incomplete", "retained"), [(1, False, False), (1, True, True), (2, False, True), (-9, False, True)]
+)
 def test_worker_diagnostics_are_kept_for_execution_problems_not_complete_verdicts(
-    consumer, tmp_path, monkeypatch, code, retained
+    consumer, tmp_path, monkeypatch, code, incomplete, retained
 ):
     def execute(args, *, log, **_kwargs):
         if "catalog" in args:
             return 0
         log.write_text("worker output\n")
-        _failed_tier2_report(Path(args[args.index("-o") + 1]))
+        _failed_tier2_report(Path(args[args.index("-o") + 1]), incomplete=incomplete)
         return code
 
     monkeypatch.setattr(run_tiers, "run_command", execute)
@@ -691,12 +705,54 @@ def test_neutral_tier3_verdict_keeps_no_worker_diagnostics(consumer, tmp_path, m
 
     monkeypatch.setattr(run_tiers, "dataset_preflight", lambda _skill: {})
     monkeypatch.setattr(run_tiers, "run_command", execute)
-    monkeypatch.setattr(run_tiers, "_retain", lambda *_args: {"status": "neutral", "metrics": {}})
+    monkeypatch.setattr(run_tiers, "_retain", lambda *_args: {"status": "neutral", "metrics": {}, "complete": True})
     reports = tmp_path / "reports"
     assert run_tiers.evaluate(3, consumer, reports, env_for(consumer, NVIDIA_API_KEY="test-provider-value-1234")) == 0
     tier = json.loads((reports / "tier3/ci-tier.json").read_text())["tiers"][0]
     assert {s["status"] for s in tier["skills"]} == {"neutral"}
     assert not list((reports / "tier3").rglob("diagnostics"))
+
+
+@pytest.mark.parametrize("code", [0, 1])
+def test_failed_tier3_verdict_with_incomplete_execution_keeps_worker_diagnostics(consumer, tmp_path, monkeypatch, code):
+    from skillevaluator.evaluation.tier3_report import _validation_result_from_payload
+    from skillevaluator.reporting.json_reporter import JSONReporter
+
+    def execute(args, *, log, **_kwargs):
+        log.write_text("worker output: codex installation failed\n")
+        if "doctor" in args:
+            return 0
+        output = Path(args[args.index("--output") + 1])
+        trial = output / "harbor/run/_harbor-jobs/skill-codex-with/trial"
+        trial.mkdir(parents=True)
+        (trial / "trial.log").write_text("trial ran\n")
+        (trial / "exception.txt").write_text("AgentInstallError\n")
+        # One agent failed to execute while another finished with a failing score.
+        result = _validation_result_from_payload(
+            {
+                "execution_status": "failed",
+                "execution_errors": ["codex: agent installation failed"],
+                "overall_score": 0.41,
+                "verdict": "fail",
+                "summary": {"verdict": "fail"},
+            }
+        )
+        result.metadata["gating"] = {"tier": 3, "blocking": False}
+        result.mark_scan_incomplete("Tier 3 execution")  # as native_tier3 records a failure reason
+        (output / "skillevaluator-tier3.json").write_text(JSONReporter().render_all([result]))
+        return code
+
+    monkeypatch.setattr(run_tiers, "dataset_preflight", lambda _skill: {})
+    monkeypatch.setattr(run_tiers, "run_command", execute)
+    reports = tmp_path / "reports"
+    assert run_tiers.evaluate(3, consumer, reports, env_for(consumer, NVIDIA_API_KEY="test-provider-value-1234")) == 0
+    skills = json.loads((reports / "tier3/ci-tier.json").read_text())["tiers"][0]["skills"]
+    assert [(s["status"], s["metrics"]["execution_complete"]) for s in skills] == [("failed", False)] * 2
+    assert "complete" not in skills[0]
+    for number in (1, 2):
+        diagnostics = reports / f"tier3/skill-00{number}/diagnostics"
+        assert (diagnostics / "command.log").is_file()
+        assert (diagnostics / "harbor/run/_harbor-jobs/skill-codex-with/trial/exception.txt").is_file()
 
 
 def test_tier_diagnostics_budget_is_shared_by_every_skill(consumer, tmp_path, monkeypatch):

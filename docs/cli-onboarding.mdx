@@ -128,9 +128,12 @@ NVIDIA Build uses OpenCode. CI installs Tier 2 or Tier 3 extras from the reviewe
 tools commit. Tier 3 checks the selected environment with `doctor`; local mode
 also installs pinned native CLIs into an isolated runtime directory.
 
-`--timeout-minutes` sets the native job duration (300 by default). The
-evaluator's runtime budget ends 20 minutes, or a quarter of a shorter duration,
-earlier so setup and retained evidence fit. GitLab receives a literal duration
+`--timeout-minutes` sets the native job duration (10 to 360, 300 by default).
+The evaluator's runtime budget ends 20 minutes, or a quarter of a shorter
+duration, earlier so setup and retained evidence fit. If setup outlasts that
+reserve and GitLab stops the native job at its timeout, the job uploads no
+native evidence and the aggregate reports that tier's evidence as missing.
+GitLab receives a literal duration
 so the configuration also works on GitLab 17.8. `--runner` chooses a GitHub
 runner label or GitLab runner tag. GitHub defaults
 to `ubuntu-24.04`; GitLab defaults to a configured `docker` tag. Docker mode

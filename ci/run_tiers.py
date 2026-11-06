@@ -381,10 +381,13 @@ def _retain(raw: Path, destination: Path, tier: int, tokens: set[str], skill: Pa
     report = Redactor(tokens).object(read_json(documents[0]))
     results = retained_results(report, allowed_tiers={tier})
     status = resolve_run_status(results).tiers[tier].status.value
+    # A confirmed failure outranks incomplete evidence in the status, so record
+    # completeness on its own: the caller keeps diagnostics for incomplete runs.
+    complete = tier3_execution_complete(report) if tier == 3 else not any(result.is_incomplete for result in results)
     if status == "not_run" or (code and status == "passed"):
         status = "incomplete"
     if tier == 3:
-        if status == "passed" and not tier3_execution_complete(report):
+        if status == "passed" and not complete:
             status = "incomplete"
         elif status == "passed" and report.get("tier3", {}).get("verdict") == "neutral":
             status = "neutral"
@@ -412,10 +415,10 @@ def _retain(raw: Path, destination: Path, tier: int, tokens: set[str], skill: Pa
                 "score": summary.get("overall_score"),
                 "skill_lift": summary.get("overall_lift"),
                 "coverage": f"{summary.get('scored_attempts', 0)}/{summary.get('expected_attempts', 0)}",
-                "execution_complete": tier3_execution_complete(report),
+                "execution_complete": complete,
             }
         )
-    return {"status": status, "metrics": metrics}
+    return {"status": status, "metrics": metrics, "complete": complete}
 
 
 def _build_catalog(workspace: Path, selected: list[Path], path: Path) -> None:
@@ -533,6 +536,7 @@ def evaluate(tier: int, workspace: Path, reports: Path, env: dict[str, str]) -> 
             tokens = provider_tokens
             command_log = scratch / f"skill-{index:03}.log"
             code = None
+            complete = True
             try:
                 digests = dataset_preflight(skill) if tier == 3 else {}
                 tokens = collect_sensitive_values(skill) | provider_tokens
@@ -587,7 +591,9 @@ def evaluate(tier: int, workspace: Path, reports: Path, env: dict[str, str]) -> 
                 )
                 if code == 124:
                     skill_row["error"] = "Evaluation exceeded the configured time budget."
-                skill_row.update(_retain(raw, leaf, tier, tokens, skill, code))
+                retained = _retain(raw, leaf, tier, tokens, skill, code)
+                complete = retained.pop("complete")
+                skill_row.update(retained)
                 if tier == 3 and dataset_preflight(skill) != digests:
                     skill_row.update(status="incomplete", error="Authored evaluation inputs changed during execution.")
                 skill_row["dataset_digests"] = digests
@@ -604,8 +610,9 @@ def evaluate(tier: int, workspace: Path, reports: Path, env: dict[str, str]) -> 
                     else "Evaluation evidence could not be safely retained; check the runtime and provider."
                 )
             finally:
-                # Exit codes other than pass (0) and fail (1) mean the worker itself went wrong.
-                if skill_row["status"] in EXECUTION_FAILURES or code not in {None, 0, 1}:
+                # Incomplete execution keeps diagnostics even behind a failed verdict. Exit
+                # codes other than pass (0) and fail (1) mean the worker itself went wrong.
+                if skill_row["status"] in EXECUTION_FAILURES or not complete or code not in {None, 0, 1}:
                     try:
                         retain_diagnostics(
                             raw,

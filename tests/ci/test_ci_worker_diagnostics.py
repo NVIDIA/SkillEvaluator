@@ -224,20 +224,49 @@ def test_only_the_first_failing_trial_of_each_job_and_four_per_skill_are_kept(tm
     output = tmp_path / "output"
     result = diagnostics.retain_diagnostics(tmp_path / "raw", output, set())
     kept = {item["path"].split("/")[3] + "/" + item["path"].split("/")[4] for item in result["retained"]}
+    # Failing trials of every job come before the passing-only job that sorts earlier.
     assert kept == {
         "skill-claude-with/case-1",
         "skill-claude-without/case-1",
         "skill-codex-with/case-2",
-        "skill-codex-without/case-1",
+        "skill-opencode-with/case-1",
     }
-    assert len(result["retained"]) == 4 * 2 + 3  # trial.log and setup log each, exception.txt for failures
+    assert len(result["retained"]) == 4 * 3  # trial.log, setup log and exception.txt each
     limited = {item["path"] for item in result["omitted"] if item["reason"] == "trial_limit"}
     assert limited == {
         "harbor/run/_harbor-jobs/skill-codex-with/case-1",
         "harbor/run/_harbor-jobs/skill-codex-with/case-3",
+        "harbor/run/_harbor-jobs/skill-codex-without/case-1",
         "harbor/run/_harbor-jobs/skill-codex-without/case-2",
-        "harbor/run/_harbor-jobs/skill-opencode-with/case-1",
     }
+
+
+def test_failing_jobs_that_sort_last_keep_their_trials_before_passing_jobs(tmp_path):
+    jobs = tmp_path / "raw/harbor/run/_harbor-jobs"
+    # Three agents with two arms each; only the agent that sorts last failed.
+    for agent in ("claude-code", "codex", "opencode"):
+        for arm in ("with", "without"):
+            trial = jobs / f"skill-{agent}-{arm}/case-1"
+            trial.mkdir(parents=True)
+            (trial / "trial.log").write_text(f"{agent} {arm} started\n")
+            if agent == "opencode":
+                (trial / "exception.txt").write_text("opencode: agent installation failed\n")
+    command = tmp_path / "skill-001.log"
+    command.write_text("worker output\n")
+    result = diagnostics.retain_diagnostics(tmp_path / "raw", tmp_path / "output", set(), command_log=command)
+    assert [item["path"] for item in result["retained"]] == [
+        "command.log",
+        "harbor/run/_harbor-jobs/skill-claude-code-with/case-1/trial.log",
+        "harbor/run/_harbor-jobs/skill-claude-code-without/case-1/trial.log",
+        "harbor/run/_harbor-jobs/skill-opencode-with/case-1/exception.txt",
+        "harbor/run/_harbor-jobs/skill-opencode-with/case-1/trial.log",
+        "harbor/run/_harbor-jobs/skill-opencode-without/case-1/exception.txt",
+        "harbor/run/_harbor-jobs/skill-opencode-without/case-1/trial.log",
+    ]
+    assert [item["path"] for item in result["omitted"] if item["reason"] == "trial_limit"] == [
+        "harbor/run/_harbor-jobs/skill-codex-with/case-1",
+        "harbor/run/_harbor-jobs/skill-codex-without/case-1",
+    ]
 
 
 def test_tier_budget_is_shared_across_skills_and_keeps_command_logs_first(tmp_path, monkeypatch):

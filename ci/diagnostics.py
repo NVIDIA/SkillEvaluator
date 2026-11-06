@@ -22,7 +22,7 @@ MAX_RECORDS = 200
 MAX_DEPTH = 64
 # Harbor writes one directory per trial (its trial.log, and exception.txt when it
 # failed). Startup problems repeat across trials, so keep the first failing trial
-# of each job (one arm of one agent) and a few per skill.
+# of each job (one arm of one agent) and a few per skill, failing jobs first.
 MAX_TRIALS_PER_JOB = 1
 MAX_TRIALS = 4
 # Every skill of one tier shares this budget (index.json files excluded), which
@@ -106,6 +106,38 @@ def _trial(directory: Path) -> tuple[bool, bool]:
 
     failed = regular("exception.txt")
     return failed or regular("trial.log"), failed
+
+
+def _excluded(name: str, relative: Path) -> bool:
+    return name.casefold() in _EXCLUDED or len(relative.parts) > MAX_DEPTH
+
+
+def _select_trials(raw: Path) -> set[Path]:
+    """Choose the trials to keep across all Harbor jobs before any file is read.
+
+    Each job keeps its own first trials, failing ones first. Across jobs, failing
+    trials come before passing ones, so passing jobs that sort first cannot push
+    a later job's failure past ``MAX_TRIALS``.
+    """
+    jobs: dict[Path, list[tuple[bool, str]]] = {}
+    seen = 0
+    for directory, directories, names in os.walk(raw, followlinks=False):
+        seen += len(directories) + len(names)
+        if seen > MAX_ENTRIES:
+            break
+        directories.sort()
+        for name in list(directories):
+            path = Path(directory) / name
+            if path.is_symlink() or _excluded(name, path.relative_to(raw)):
+                directories.remove(name)
+                continue
+            is_trial, failed = _trial(path)
+            if is_trial:
+                jobs.setdefault(Path(directory).relative_to(raw), []).append((not failed, name))
+    kept = [
+        (passing, job, name) for job, trials in jobs.items() for passing, name in sorted(trials)[:MAX_TRIALS_PER_JOB]
+    ]
+    return {job / name for _, job, name in sorted(kept)[:MAX_TRIALS]}
 
 
 def _regular_root(path: Path) -> Path:
@@ -192,7 +224,7 @@ def retain_diagnostics(
         "omitted_count": 0,
         "total_bytes": 0,
     }
-    reads = visited = trials = 0
+    reads = visited = 0
 
     def label(relative: Path) -> str:
         text = relative.as_posix()
@@ -312,6 +344,7 @@ def retain_diagnostics(
                 collect(source, Path(command_log.name), Path("command.log"), command_log.lstat())
         except OSError:
             record("errors", Path("command.log"), "read_or_write_error")
+    trials = _select_trials(raw)
     with SecureRoot(raw) as source:
         for directory, directories, names in os.walk(raw, followlinks=False):
             directories.sort()
@@ -327,22 +360,16 @@ def retain_diagnostics(
                 if path.is_symlink():
                     directories.remove(name)
                     record("errors", relative, "unsafe_link")
-                elif name.casefold() in _EXCLUDED or len(relative.parts) > MAX_DEPTH:
+                elif _excluded(name, relative):
                     directories.remove(name)
                     if name == "agent":
                         collect_setup(source, path)
                     record("omitted", relative, "not_allowed")
-            candidates = []
-            for name in directories:
-                is_trial, failed = _trial(Path(directory) / name)
-                if is_trial:
-                    candidates.append((not failed, name))
-            for kept, (_, name) in enumerate(sorted(candidates)):
-                if kept < MAX_TRIALS_PER_JOB and trials < MAX_TRIALS:
-                    trials += 1
-                else:
+            for name in list(directories):
+                relative = (Path(directory) / name).relative_to(raw)
+                if relative not in trials and _trial(raw / relative)[0]:
                     directories.remove(name)
-                    record("omitted", (Path(directory) / name).relative_to(raw), "trial_limit")
+                    record("omitted", relative, "trial_limit")
             for name in names:
                 visited += 1
                 relative = (Path(directory) / name).relative_to(raw)

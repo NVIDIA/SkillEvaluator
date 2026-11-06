@@ -61,12 +61,16 @@ MAX_SKILLS = 100
 MEMBERS_PER_SKILL = 6 + 3 + 3 + 3
 MAX_AGGREGATE_MEMBERS = 64  # manifests, summaries, indexes and tier directories
 MAX_FILES = MAX_SKILLS * MEMBERS_PER_SKILL + MAX_AGGREGATE_MEMBERS
-# Every non-success Tier 2/3 skill and a failed Tier 2 catalog also retain worker
-# diagnostics (ci/diagnostics.py), which this job never opens: index.json plus
-# at most diagnostics.MAX_FILES logs (command.log included) and
-# diagnostics.MAX_TOTAL_BYTES. They have their own bound, outside the report
-# member and expansion limits, allowing each retained file up to seven nested
-# directory entries (Harbor job/trial/agent/setup paths on GitLab).
+# A Tier 2/3 skill whose execution failed or is incomplete, or whose worker exited
+# abnormally, and a failed Tier 2 catalog also retain worker diagnostics
+# (ci/diagnostics.py), which this job never opens. The producer keeps at most
+# diagnostics.MAX_TRIALS trials per skill and shares a per-tier budget of
+# diagnostics.MAX_TIER_FILES logs and diagnostics.MAX_TIER_BYTES. This bound
+# does not rely on those caps: every root may hold index.json plus
+# diagnostics.MAX_FILES logs (command.log included) and
+# diagnostics.MAX_TOTAL_BYTES. It is separate from the report member and
+# expansion limits, allowing each retained file up to seven nested directory
+# entries (Harbor job/trial/agent/setup paths on GitLab).
 DIAGNOSTIC_ROOTS = 2 * MAX_SKILLS + 1
 DIAGNOSTIC_FILES = 100 + 1  # diagnostics.MAX_FILES logs plus index.json
 MAX_DIAGNOSTIC_MEMBERS = DIAGNOSTIC_ROOTS * DIAGNOSTIC_FILES * 8

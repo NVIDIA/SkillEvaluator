@@ -877,7 +877,8 @@ ALL_TIER_ONLY_OPTIONS = (
 )
 @click.option("--n-attempts", type=click.IntRange(1, 10), default=1)
 @click.option("--n-concurrent", type=click.IntRange(1, 16), default=1)
-@click.option("--timeout-minutes", type=click.IntRange(1, 360), default=300)
+# Ten minutes keeps a reserve of at least two between the evaluator budget and the job timeout.
+@click.option("--timeout-minutes", type=click.IntRange(10, 360), default=300)
 @click.option("--environment", default="skillevaluator")
 @click.option("--repo", type=click.Path(path_type=Path, exists=True, file_okay=False), default=Path.cwd)
 @click.option(

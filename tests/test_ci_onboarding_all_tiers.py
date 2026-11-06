@@ -441,7 +441,7 @@ def test_candidate_descriptor_is_declared_as_package_data():
     assert "ci-release-all-tiers.json" in project["tool"]["setuptools"]["package-data"]["skillevaluator"]
 
 
-@pytest.mark.parametrize(("minutes", "seconds"), [(1, 60), (45, 2040), (80, 3600), (300, 16800)])
+@pytest.mark.parametrize(("minutes", "seconds"), [(10, 480), (45, 2040), (80, 3600), (300, 16800)])
 def test_gitlab_docker_render_sets_a_literal_job_timeout(repository, all_release, minutes, seconds):
     subprocess.run(
         ["git", "-C", str(repository), "remote", "set-url", "origin", "https://gitlab.example.test/group/consumer.git"],
@@ -453,6 +453,19 @@ def test_gitlab_docker_render_sets_a_literal_job_timeout(repository, all_release
     assert scan["skill-evaluation-native"] == {"timeout": f"{minutes} minutes"}
     assert scan["variables"]["SKILL_EVAL_TIMEOUT_SECONDS"] == str(seconds)
     assert "SKILL_EVAL_JOB_TIMEOUT" not in scan["variables"]
+
+
+@pytest.mark.parametrize("minutes", [1, 3, 9])
+def test_job_timeouts_without_an_evidence_reserve_are_rejected(repository, all_release, minutes):
+    subprocess.run(
+        ["git", "-C", str(repository), "remote", "set-url", "origin", "https://gitlab.example.test/group/consumer.git"],
+        check=True,
+    )
+    # Below ten minutes the reserve min(20, minutes // 4) is under two minutes, or none.
+    result = invoke(repository, all_release, "--mode", "save", "--timeout-minutes", str(minutes))
+    assert result.exit_code == 2
+    assert "--timeout-minutes" in result.output
+    assert not (repository / ".gitlab-ci.yml").exists()
 
 
 def test_gitlab_variable_scalars_are_explicit_strings_for_gitlab_yaml_parser(repository, all_release):

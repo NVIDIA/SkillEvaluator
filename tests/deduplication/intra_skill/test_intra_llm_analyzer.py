@@ -155,6 +155,32 @@ class TestBuildUserPrompt:
             assert "SHARED CONTENT 2" not in prompt
             assert prompt.count(f"Content:\n{text}\n\n") == 2
 
+    @pytest.mark.parametrize(
+        ("length", "shared"),
+        [pytest.param(64, False, id="saves-nothing-as-block-10"), pytest.param(65, True, id="saves-one-char")],
+    )
+    def test_two_digit_block_numbers_cost_one_more_character(self, make_chunk, length: int, shared: bool) -> None:
+        # As block 10, two copies cost two 19-character "[SHARED CONTENT 10]"
+        # references, the 24-character block header, one copy and a
+        # 2-character separator: length + 64. As block 1-9 they would cost
+        # length + 61, so a 64-character text would be shared there.
+        bigs = [letter * 1_500 for letter in "abcdefghi"]
+        text = "t" * length
+        members = [make_chunk(heading=f"Big {k}.{j}", text=big) for k, big in enumerate(bigs) for j in range(5)]
+        members += [make_chunk(heading=f"Small {index}", text=text) for index in range(2)]
+
+        prompt = build_user_prompt(ContentCluster(members, 0.95, 0.85, False, {"markdown"}))
+
+        assert _request_chars(prompt) <= llm_analyzer.MAX_PROMPT_CHARS
+        for index, big in enumerate(bigs, start=1):
+            assert prompt.count(f"---SHARED CONTENT {index}---\n{big}\n\n") == 1
+        if shared:
+            assert prompt.count(f"---SHARED CONTENT 10---\n{text}\n\n") == 1
+            assert prompt.count("Content:\n[SHARED CONTENT 10]") == 2
+        else:
+            assert "SHARED CONTENT 10" not in prompt
+            assert prompt.count(f"Content:\n{text}\n\n") == 2
+
     def test_short_repeated_bodies_under_long_headings_stay_inline(self, make_chunk) -> None:
         short_body = "See guide."
         long_body = "Boilerplate paragraph about safety and usage. " * 20

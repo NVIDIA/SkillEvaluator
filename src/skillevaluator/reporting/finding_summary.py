@@ -217,7 +217,9 @@ def refresh_finding_identities(document: dict[str, Any]) -> None:
     redacted value could be recovered by hashing guesses against them. Call
     this after redacting: it replaces only the ID and reconciliation fields
     the report already has, so a report written before finding IDs existed
-    keeps its shape. Message counts do not depend on text and are kept.
+    keeps its shape. Message counts do not depend on text and are kept. A PII
+    ``evidence_sha256`` that no longer matches the redacted value is removed
+    for the same reason.
     """
     rows = document.get("results")
     if not isinstance(rows, list):
@@ -230,6 +232,7 @@ def refresh_finding_identities(document: dict[str, Any]) -> None:
         for item in row["findings"]:
             if not isinstance(item, dict):
                 continue
+            _drop_stale_evidence_digest(item)
             finding = Finding(
                 category=item.get("category"),
                 severity=item.get("severity"),
@@ -254,6 +257,30 @@ def refresh_finding_identities(document: dict[str, Any]) -> None:
         document["finding_counts"] = finding_counts(merged)
     if "finding_groups" in document:
         document["finding_groups"] = merged["groups"]
+
+
+def _drop_stale_evidence_digest(item: dict[str, Any]) -> None:
+    """Remove a PII finding's ``evidence_sha256`` unless it is the digest of the value the finding shows.
+
+    A finding carries the digest only while it reports its value in full.
+    Once redaction masks part of that value, the digest of the original would
+    let anyone holding the report confirm a guess for the masked part.
+    """
+    metadata = item.get("metadata")
+    if not isinstance(metadata, dict) or "evidence_sha256" not in metadata:
+        return
+    # Imported here so that importing the reporting package does not load every validator.
+    from skillevaluator.validators.pii_waivers import pii_evidence_sha256
+
+    value = metadata.get("matched_value")
+    check_name = item.get("check_name")
+    if (
+        isinstance(value, str)
+        and isinstance(check_name, str)
+        and metadata["evidence_sha256"] == pii_evidence_sha256(check_name, value)
+    ):
+        return
+    del metadata["evidence_sha256"]
 
 
 def summarize_messages(results: list[ValidationResult]) -> dict[str, int]:

@@ -405,6 +405,18 @@
           "param_type": "option"
         },
         {
+          "choices": [
+            "harbor",
+            "nemo-gym"
+          ],
+          "default": "harbor",
+          "name": "backend",
+          "opts": [
+            "--backend"
+          ],
+          "param_type": "option"
+        },
+        {
           "multiple": true,
           "name": "environment_kwarg",
           "opts": [
@@ -2299,6 +2311,18 @@
               "param_type": "option"
             },
             {
+              "choices": [
+                "harbor",
+                "nemo-gym"
+              ],
+              "default": "harbor",
+              "name": "backend",
+              "opts": [
+                "--backend"
+              ],
+              "param_type": "option"
+            },
+            {
               "multiple": true,
               "name": "environment_kwarg",
               "opts": [
@@ -2801,6 +2825,18 @@
             "name": "env_mode",
             "opts": [
               "--env-mode"
+            ],
+            "param_type": "option"
+          },
+          {
+            "choices": [
+              "harbor",
+              "nemo-gym"
+            ],
+            "default": "harbor",
+            "name": "backend",
+            "opts": [
+              "--backend"
             ],
             "param_type": "option"
           },

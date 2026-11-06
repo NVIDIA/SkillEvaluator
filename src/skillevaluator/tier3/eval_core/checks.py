@@ -676,7 +676,7 @@ def _failed_single_skill_read(call):
     return len(files) == 1 and not _SHELL_EXPANSION_CHARS.intersection(files[0]) and _skill_md_arg(files[0], {})
 
 
-def _cmd_reads_skill_md(cmd) -> bool:
+def _cmd_reads_skill_md(cmd, _depth: int = 0) -> bool:
     """True if a shell command reads a SKILL.md via a file-view utility.
 
     Requires both a read verb (cat/sed/head/...) AND a ``SKILL.md`` filename
@@ -709,6 +709,11 @@ def _cmd_reads_skill_md(cmd) -> bool:
             executable = command[cmd_idx].rsplit("/", 1)[-1].lower()
             if executable in _FILE_READ_VERBS and _command_reads_skill_md_arg(command, cmd_idx, assignments):
                 return True
+            # ``bash -lc 'cat .../SKILL.md'``: harnesses such as NeMo Gym's Codex agent record the wrapper.
+            if executable in _SHELL_COMMAND_INTERPRETERS and _depth < _MAX_SHELL_WRAPPERS:
+                payload = _shell_c_payload(command, cmd_idx, assignments)
+                if payload and _cmd_reads_skill_md(payload, _depth + 1):
+                    return True
 
         idx = end + 1
     return False

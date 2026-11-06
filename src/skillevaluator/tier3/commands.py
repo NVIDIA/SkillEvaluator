@@ -658,6 +658,7 @@ def evaluate(
     *,
     agents: str | None,
     env_mode: str,
+    backend: str = "harbor",
     environment_kwarg: tuple[str, ...] = (),
     skip_baseline: bool,
     n_attempts: int | None,
@@ -684,8 +685,11 @@ def evaluate(
     progress_reporter: ProgressReporter | None = None,
     environment_kwargs: Mapping[str, str] | None = None,
 ) -> dict[str, Any]:
-    """Run Harbor live-agent evaluation for a skill."""
+    """Run a live-agent evaluation for a skill on the selected execution backend."""
+    from skillevaluator.tier3.nemo_gym.backend import NEMO_GYM_BACKEND, nemo_gym_capability_errors, normalize_backend
+
     env_mode = _engine_env_mode(env_mode)
+    execution_backend = normalize_backend(backend)
 
     if agents is None:
         try:
@@ -737,6 +741,44 @@ def evaluate(
             )
 
         output_dir = resolve_results_root(skill_path, results_dir)
+        if execution_backend == NEMO_GYM_BACKEND:
+            from skillevaluator.tier3.nemo_gym.runner import run_nemo_gym_eval
+
+            capability_errors = nemo_gym_capability_errors(
+                agents=agent_list,
+                env_mode=env_mode,
+                grading_mode=grading_mode,
+                harbor_keep_jobs=harbor_keep_jobs,
+                stop_on_pass=bool(stop_on_pass),
+                custom_dockerfile_mode=custom_dockerfile_mode,
+                copy_repo=copy_repo,
+                environment_kwargs=merged_environment_kwargs,
+                override_storage_mb=override_storage_mb,
+            )
+            if capability_errors:
+                raise ValueError("; ".join(capability_errors))
+            engine_started = True
+            return run_nemo_gym_eval(
+                skill_path=skill_path.resolve(),
+                agents=agent_list,
+                skip_baseline=skip_baseline,
+                n_attempts=n_attempts,
+                pass_threshold=pass_threshold,
+                n_concurrent=n_concurrent,
+                model=model,
+                agent_models=agent_models or None,
+                skill_workspace_mode=skill_workspace_mode,
+                include_skills=[p.resolve() for p in include_skills] or None,
+                grading_mode=grading_mode,
+                output_dir=output_dir,
+                env_mode=env_mode,
+                timeout_multiplier=timeout_multiplier,
+                evaluated_source=evaluated_source,
+                override_cpus=override_cpus,
+                override_memory_mb=override_memory_mb,
+                repo_context_exclude_paths=repo_context_exclude_paths,
+                progress_reporter=reporter,
+            )
         engine_started = True
         return run_harbor_eval(
             skill_path=skill_path.resolve(),

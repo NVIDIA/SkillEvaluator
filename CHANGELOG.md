@@ -6,6 +6,17 @@ All notable changes to SkillEvaluator are documented in this file.
 
 ### Added
 
+- `tier3 evaluate --backend nemo-gym` runs the Tier 3 cases on NeMo Gym instead
+  of Harbor (`--backend harbor`, the default, is unchanged). The same
+  `evals.json` cases are generated as task folders, and NeMo Gym's own
+  orchestrator, agent harness (Codex, Claude Code, OpenCode) and Docker sandbox
+  run them with the SkillEvaluator verifier. Its rollouts are written back as
+  the usual trial results, so scores, lift, reports and `result.json` are
+  shared; `result.json` records `execution_backend` with the NeMo Gym version.
+  Gym runs as a separate pinned process (`SKILL_EVAL_NEMO_GYM_BIN`) because it
+  needs Python 3.13.14 or later. Options the backend cannot honor (other
+  environment modes, `--harbor-keep-jobs`, `--stop-on-pass`, `--copy-repo`, ...)
+  are rejected before anything runs, with no fallback to Harbor.
 - `--quality-config PATH` on `validate`, `quality-check`, and `tier1` loads the
   deterministic quality check's expected Markdown headings from a YAML file
   instead of the built-in list. Each `expected_headers` entry sets a `heading`
@@ -39,6 +50,10 @@ All notable changes to SkillEvaluator are documented in this file.
 
 ### Fixed
 
+- Skill activation now credits a SKILL.md read wrapped in a shell, such as
+  `/bin/bash -lc 'cat skills/x/SKILL.md'`, which some agent harnesses record
+  instead of the bare command. Searches inside a wrapper (`bash -c 'grep SKILL
+  config.json'`) are still not counted.
 - Tier 3 error recovery now scores unrecovered command failures as zero and
   includes them in fault counts and failure verdicts/report reasons. Host and
   bundled verifier detection agree and use a result's execution status when it

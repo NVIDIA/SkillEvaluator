@@ -456,9 +456,7 @@ def _resolve_report_output_location(target_path: Path, output_dir: Path) -> Path
             if output_is_real_directory and is_generated_output_root(output_dir):
                 return output_dir
         except (OSError, RuntimeError, ValueError) as exc:
-            raise click.ClickException(
-                f"Cannot safely reserve default report output directory: {output_dir}"
-            ) from exc
+            raise click.ClickException(f"Cannot safely reserve default report output directory: {output_dir}") from exc
 
     if output_is_default:
         relocated = target_path.with_name(f"{target_path.name}-reports")
@@ -501,8 +499,7 @@ def _reject_copy_repo_root_output(
     try:
         context_roots = [(resolve_repo_context_root(target_path), "repository root")]
         context_roots.extend(
-            (included_skill.resolve(strict=True), "runtime source root")
-            for included_skill in include_skills
+            (included_skill.resolve(strict=True), "runtime source root") for included_skill in include_skills
         )
     except (OSError, RuntimeError, ValueError) as exc:
         raise click.ClickException(f"Cannot validate {mode_label} report output directory: {output_dir}") from exc
@@ -2806,6 +2803,13 @@ def _tier2_workflow(
 )
 @click.option("--env-mode", default="docker", show_default=True, type=ENV_MODE_CHOICE)
 @click.option(
+    "--backend",
+    default="harbor",
+    show_default=True,
+    type=click.Choice(["harbor", "nemo-gym"]),
+    help="Tier 3 execution backend: Harbor, or NeMo Gym's orchestrator, agent harness and sandbox.",
+)
+@click.option(
     "--environment-kwarg",
     "--ek",
     multiple=True,
@@ -2872,6 +2876,7 @@ def evaluate(
     skill_path: Path,
     agents: str | None,
     env_mode: str,
+    backend: str,
     environment_kwarg: tuple[str, ...],
     autopilot: bool,
     skip_baseline: bool,
@@ -2920,6 +2925,7 @@ def evaluate(
         skill_path=skill_path,
         agents=agents,
         env_mode=env_mode,
+        backend=backend,
         environment_kwarg=environment_kwarg,
         skip_baseline=skip_baseline,
         n_attempts=n_attempts,

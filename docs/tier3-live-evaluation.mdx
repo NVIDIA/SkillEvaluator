@@ -418,6 +418,37 @@ unavailable: `opencode` still works with `NVIDIA_API_KEY` directly, but
 `codex` and `claude-code` fall back to their own native credentials and
 explicit models — see [Agents & Sandboxes](agents-and-sandboxes.mdx).
 
+## Execution backends
+
+`--backend` chooses what executes the cases. Both backends read the same
+`evals.json`, stage the same task folders and grade with the same verifier, so the
+scores, Skill Lift, pass@k and report are produced the same way.
+
+| Backend | What runs the cases |
+| --- | --- |
+| `harbor` (default) | Harbor orchestrates the trials, runs the agent and the sandbox. Every `--env-mode` is available. |
+| `nemo-gym` | NeMo Gym runs the cases: `gym eval run` starts its Harbor-format environment server, model server and agent harness, runs each case in a Gym sandbox and grades it with the SkillEvaluator verifier. |
+
+```bash
+export SKILL_EVAL_NEMO_GYM_BIN=/opt/nemo-gym/.venv/bin/gym
+export SKILL_EVAL_NEMO_GYM_MODEL_URL=https://integrate.api.nvidia.com/v1
+export SKILL_EVAL_NEMO_GYM_MODEL_API_KEY="$NVIDIA_API_KEY"
+skillevaluator tier3 evaluate ./my-skill --backend nemo-gym --agents codex --model <model>
+```
+
+NeMo Gym requires Python 3.13.14 or later, so it runs as its own pinned install
+rather than a SkillEvaluator dependency. Point `SKILL_EVAL_NEMO_GYM_BIN` at that
+install's `gym` executable. The run records `execution_backend` (name, Gym version,
+sandbox) in `result.json`; keep Harbor and NeMo Gym scores apart unless the model,
+harness and judge match.
+
+The `nemo-gym` backend supports `--env-mode docker`, the `codex`, `claude-code` and
+`opencode` agents, and the `default`, `default_plus_custom` and `custom_only` grading
+modes. It rejects `--stop-on-pass`, `--harbor-keep-jobs`, `--copy-repo`,
+`--override-storage-mb`, `--timeout-multiplier`, `--environment-kwarg`, and custom
+Dockerfile modes other than the default before anything starts; it never falls back to
+Harbor.
+
 ## Where agents run
 
 `--env-mode` selects one of 27 environment modes: 26 Harbor-native backends,

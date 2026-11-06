@@ -934,7 +934,14 @@ def render_evaluation_result(
         )
 
     artifact_rows: list[tuple[str, str]] = []
-    for job in harbor_job_links(dict(result)):
+    viewer_source = dict(result)
+    raw_viewer = viewer_source.get("harbor_viewer")
+    if isinstance(raw_viewer, dict) and "uploads" in raw_viewer:
+        # Raw engine results carry Harbor uploads; normalize them as the HTML path does.
+        from skillevaluator.evaluation.tier3_report import _harbor_viewer_from_engine_result
+
+        viewer_source["harbor_viewer"] = _harbor_viewer_from_engine_result(viewer_source)
+    for job in harbor_job_links(viewer_source):
         artifact_rows.append(("Harbor job", safe(job["name"])))
         for key, label in (("url", "Results"), ("analysis_url", "Analysis")):
             if job.get(key):

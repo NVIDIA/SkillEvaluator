@@ -147,12 +147,12 @@ def test_harbor_projection_preserves_unmatched_legacy_analysis_and_deduplicates(
     }
     original = deepcopy(payload)
     jobs = harbor_job_links(payload)
-    assert [job["name"] for job in jobs] == ["a", "Job 2", "Job 3"]
+    assert [job["name"] for job in jobs] == ["a", "Job 2", "Run analysis"]
     assert jobs[2]["analysis_url"] == "https://example.test/legacy"
     assert jobs[1]["analysis_url"] == "https://example.test/b/analysis"
     assert payload == original
     assert harbor_job_links({"harbor_viewer": {"analysis_url": "https://example.test/analysis"}}) == [
-        {"name": "Job 1", "analysis_url": "https://example.test/analysis"}
+        {"name": "Run analysis", "analysis_url": "https://example.test/analysis"}
     ]
     assert harbor_job_links({}) == []
 
@@ -236,10 +236,13 @@ def test_catalog_kpi_marks_non_catalog_scopes_not_applicable():
     result = ValidationResult(validator_name="Similarity Check")
     result.add_success("index_built", "Indexed", entry_count=3, content_type="skill")
     output = HTMLReporter(include_timestamp=False).render_all([result])
-    for scope in ("within", "across"):
-        section = output.split(f'id="tier2-{scope}"', 1)[1].split("</section>", 1)[0]
-        catalog_card = section.split("Catalog entries compared</h3>", 1)[1].split("</div>", 1)[0]
-        assert "Not applicable" in catalog_card
+    across = output.split('id="tier2-across"', 1)[1].split("</section>", 1)[0]
+    catalog_card = across.split("Catalog entries compared</h3>", 1)[1].split("</div>", 1)[0]
+    assert "Not applicable" in catalog_card
+    # similarity-check never runs the within-skill scope: say so, without Unavailable KPIs.
+    within = output.split('id="tier2-within"', 1)[1].split("</section>", 1)[0]
+    assert "Not run by this command." in within
+    assert "Unavailable" not in within and "dashboard-card" not in within
 
 
 def test_passing_workflow_stages_alone_do_not_prove_comparison_completion():
@@ -257,3 +260,65 @@ def test_passing_workflow_stages_alone_do_not_prove_comparison_completion():
         output = HTMLReporter(include_timestamp=False).render_all([result])
         assert "No semantic overlaps detected." not in output
         assert result == original
+
+
+def test_single_entry_collection_index_is_not_a_completed_comparison():
+    from skillevaluator.reporting.tier2_views import tier2_scope_views
+
+    single = ValidationResult(validator_name="Similarity Check")
+    single.add_success("index_built", "Indexed", entry_count=1, content_type="skill")
+    across = tier2_scope_views([single])[1]
+    assert across.completed == 0
+    assert across.duplicates is None
+    assert not any("Pairwise comparison" in note for note in across.notes)
+    assert any(note.startswith("Comparison not applicable") for note in across.notes)
+
+
+def test_insufficient_content_note_is_not_contradicted_by_incomplete_coverage():
+    from skillevaluator.reporting.tier2_views import tier2_scope_views
+
+    result = ValidationResult(validator_name="Context Deduplication")
+    result.add_success("context_dedup", "Not enough content to compare")
+    within = tier2_scope_views([result])[0]
+    assert "Comparison not applicable: Not enough content to compare" in within.notes
+    assert not any("incomplete" in note for note in within.notes)
+
+
+def test_across_scope_counts_similarity_matches_not_duplicates():
+    result = ValidationResult(validator_name="Similarity Check")
+    result.add_success("catalog_compared", "Compared", catalog_entry_count=5, self_matches_excluded=1)
+    output = HTMLReporter(include_timestamp=False).render_all([result])
+    across = output.split('id="tier2-across"', 1)[1].split("</section>", 1)[0]
+    assert "Similarity matches</h3>" in across and "Duplicate findings" not in across
+
+
+def test_harbor_legacy_pair_stays_one_job_and_bad_shapes_do_not_crash():
+    from skillevaluator.reporting.harbor_viewer import harbor_job_links, normalize_harbor_viewer_for_display
+
+    viewer = {
+        "job_url": "https://example.test/legacy",
+        "analysis_url": "https://example.test/legacy/analysis",
+        "jobs": [{"url": "https://example.test/a", "name": "a"}],
+    }
+    jobs = harbor_job_links({"harbor_viewer": viewer})
+    assert [(job["name"], job.get("analysis_url")) for job in jobs] == [
+        ("a", None),
+        ("Job 2", "https://example.test/legacy/analysis"),
+    ]
+    assert normalize_harbor_viewer_for_display({"harbor_viewer": {"jobs": 1, "evidence_links": "x"}}) == {}
+
+
+def test_terminal_lists_harbor_jobs_from_engine_uploads():
+    from skillevaluator.tier3.result_display import render_result
+
+    engine = {
+        "execution_status": "succeeded",
+        "harbor_viewer": {
+            "uploads": [
+                {"viewer_url": "https://hv.example.test/jobs/with", "uploaded_job_name": "with-skill"},
+                {"viewer_url": "https://hv.example.test/jobs/base", "uploaded_job_name": "baseline"},
+            ]
+        },
+    }
+    output = render_result(engine)
+    assert "hv.example.test/jobs/with" in output and "hv.example.test/jobs/base" in output

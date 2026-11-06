@@ -2340,8 +2340,9 @@ class TestMarkdownReporter:
         """Tier 3 Markdown should include compact Harbor and evidence links."""
         output = MarkdownReporter(include_timestamp=False).render_all([_tier3_harbor_result()])
 
-        assert "**Harbor logs:** [Open Harbor logs](" in output
-        assert "**Harbor analysis:** [Open Harbor analysis](" in output
+        assert re.search(
+            r"^- \*\*[^*]+:\*\* \[Harbor logs\]\(https://[^)]+\) · \[Harbor analysis\]\(", output, re.MULTILINE
+        )
         assert "https://harbor.example.test/jobs/log-analyzer" in output
         assert "Evidence: [View Step 9](" in output
         assert "log-analyzer-001?step=9" in output
@@ -2762,7 +2763,7 @@ def test_legacy_analysis_only_harbor_evidence_is_available(reporter, summary_onl
         ae["harbor_viewer"] = viewer
     output = reporter().render_all([result])
     assert "https://harbor.example.test/analysis-only" in output
-    assert "Job 1" in output
+    assert "Run analysis" in output
 
 
 @pytest.mark.parametrize("colored", [False, True])

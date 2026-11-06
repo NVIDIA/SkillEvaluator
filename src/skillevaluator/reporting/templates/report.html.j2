@@ -2082,14 +2082,17 @@
         <section id="tier2-{{ scope.id }}" aria-labelledby="tier2-{{ scope.id }}-title">
             <h2 id="tier2-{{ scope.id }}-title">{{ scope.label }}</h2>
             <p>{{ 'Redundant content among files in the evaluated skill.' if scope.id == 'within' else 'Semantic overlap with catalog entries or among a collection of skills.' }}</p>
+            {% if not scope.not_run %}
             <div class="dashboard">
-                {% for label, value in [('Checks completed', scope.completed), ('Duplicate findings', scope.duplicates), ('Affected files' if scope.id == 'within' else 'Affected skills', scope.affected), ('Catalog entries compared', scope.catalog_entries)] %}
+                {#- Across skills counts every similarity match, not only duplicates. -#}
+                {% for label, value in [('Checks completed', scope.completed), ('Duplicate findings' if scope.id == 'within' else 'Similarity matches', scope.duplicates), ('Affected files' if scope.id == 'within' else 'Affected skills', scope.affected), ('Catalog entries compared', scope.catalog_entries)] %}
                 <div class="dashboard-card">
                     <h3 class="dashboard-card-title">{{ label }}</h3>
                     <p class="dashboard-card-value">{{ 'Not applicable' if label == 'Catalog entries compared' and scope.catalog_not_applicable else (value if value is not none else 'Unavailable') }}</p>
                 </div>
                 {% endfor %}
             </div>
+            {% endif %}
             {% for note in scope.notes %}<p class="t3-section-hint">{{ note }}</p>{% endfor %}
             {% for result in scope.results %}
                 {% set execution_errors = result | additional_errors %}

@@ -360,12 +360,22 @@ class MarkdownReporter(ReporterBase):
             runtime_number = _finite_report_number(runtime)
             runtime_text = f"{runtime_number:.1f}s" if runtime_number is not None else "N/A"
             lines.append(f"**Runtime:** {runtime_text}")
+            # One list item per job, so CommonMark keeps each job's links separate.
+            job_lines = []
             for job in harbor_job_links(ae):
-                lines.append(f"**{_markdown_inline_text(job['name'])}**")
-                if job_url := _markdown_safe_url(job.get("url")):
-                    lines.append(f"Results — **Harbor logs:** [Open Harbor logs]({job_url})")
-                if analysis_url := _markdown_safe_url(job.get("analysis_url")):
-                    lines.append(f"**Harbor analysis:** [Open Harbor analysis]({analysis_url})")
+                links = [
+                    f"[{label}]({url})"
+                    for label, url in (
+                        ("Harbor logs", _markdown_safe_url(job.get("url"))),
+                        ("Harbor analysis", _markdown_safe_url(job.get("analysis_url"))),
+                    )
+                    if url
+                ]
+                if links:
+                    job_lines.append(f"- **{_markdown_inline_text(job['name'])}:** " + " · ".join(links))
+            if job_lines:
+                lines.append("")
+                lines.extend(job_lines)
             lines.append("")
 
             evaluators = ae.get("evaluators", {})

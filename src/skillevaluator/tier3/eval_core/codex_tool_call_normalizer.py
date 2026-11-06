@@ -6,6 +6,7 @@
 from __future__ import annotations
 
 import json
+import math
 import re
 from typing import Any
 
@@ -210,7 +211,7 @@ def _decode_static_js_object(source: str, start: int) -> tuple[dict[str, Any], i
     return None
 
 
-_JS_IDENTIFIER = r"[A-Za-z_$][\w$]*"
+_JS_IDENTIFIER = r"[A-Za-z_$][A-Za-z0-9_$]*"
 _CODEX_CALL_RE = re.compile(rf"const\s+({_JS_IDENTIFIER})\s*=\s*await\s+tools\.({_JS_IDENTIFIER})\s*\(\s*")
 _CODEX_RENDER_RE = re.compile(
     rf"text\s*\(\s*(?:JSON\.stringify\(\s*({_JS_IDENTIFIER})\s*\)|"
@@ -789,6 +790,11 @@ _RECORD_INDEX = "_atif_record_index"
 _RECORD_OBSERVATION = "_atif_record_observation"
 _RECORD_IS_ERROR = "_atif_record_is_error"
 _EXEC_OUTPUT_RE = re.compile(r"Script completed\r?\nWall time [^\r\n]*\r?\nOutput:\r?\n\r?\n")
+# JavaScript's whitespace and line terminators; `str.isspace()` also takes U+001C-U+001F and U+0085.
+_JS_SPACE = frozenset("\t\n\v\f\r \xa0\u1680\u2028\u2029\u202f\u205f\u3000\ufeff") | {
+    chr(code) for code in range(0x2000, 0x200B)
+}
+_JS_LINE_BREAK_RE = re.compile("[\n\r\u2028\u2029]")
 _JS_NUMBER_RE = re.compile(r"-?(?:0|[1-9]\d*)(?:\.\d+)?(?:[eE][+-]?\d+)?(?![\w$.])")
 _JS_NAME_RE = re.compile(rf"{_JS_IDENTIFIER}(?![\w$\\])")
 # Names a binding may not take: the globals the grammar relies on, and reserved words.
@@ -814,9 +820,16 @@ class _StaticExecSource:
         self.index = pragma.end() if pragma else 0
 
     def at_end(self) -> bool:
-        while self.index < len(self.source) and self.source[self.index].isspace():
+        while self.index < len(self.source) and self.source[self.index] in _JS_SPACE:
             self.index += 1
         return self.index == len(self.source)
+
+    def same_line(self) -> None:
+        """Reject a line break before the next token: `=>` and a postfix `++` may not follow one."""
+        start = self.index
+        self.at_end()
+        if _JS_LINE_BREAK_RE.search(self.source, start, self.index):
+            raise _NotStatic("line break")
 
     def peek(self) -> str:
         self.at_end()
@@ -907,6 +920,8 @@ class _StaticExecSource:
             number_value = json.loads(number.group(0))
         except ValueError as exc:  # an integer beyond Python's digit limit
             raise _NotStatic("number") from exc
+        if isinstance(number_value, float) and not math.isfinite(number_value):
+            raise _NotStatic("number")
         self.index = number.end()
         return number_value
 
@@ -970,7 +985,9 @@ def _settled_renderer(cursor: _StaticExecSource, results: str, taken: set[str]) 
     if cursor.take("for"):
         cursor.expect("(", "let")
         index = cursor.binding(taken)
-        cursor.expect("=", "0", ";", index, "<", results, ".", "length", ";", index, "++", ")")
+        cursor.expect("=", "0", ";", index, "<", results, ".", "length", ";", index)
+        cursor.same_line()
+        cursor.expect("++", ")")
         return body(lambda: payload(index, lambda: cursor.expect(results, "[", index, "]")))
     cursor.expect(results, ".", "forEach", "(")
     if cursor.take("text"):
@@ -981,6 +998,7 @@ def _settled_renderer(cursor: _StaticExecSource, results: str, taken: set[str]) 
     index = cursor.binding(taken) if parenthesized and cursor.take(",") else None
     if parenthesized:
         cursor.expect(")")
+    cursor.same_line()
     cursor.expect("=>")
     if index is None:
         record_format = body(lambda: render_element(element))

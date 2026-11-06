@@ -1663,3 +1663,28 @@ def test_extended_codex_lone_successful_call_uses_its_own_record(extractor, oute
 
     assert calls[0]["is_error"] is False
     assert _error_recovery(trajectory, extractor)["first_attempt_clean"] is True
+
+
+@pytest.mark.parametrize("extractor", _EXTRACTORS)
+@pytest.mark.parametrize(
+    "source",
+    [
+        pytest.param("text(await\x1ctools.exec_command({cmd:'cat /skills/example/SKILL.md'}));", id="fs-whitespace"),
+        pytest.param("text(await\x85tools.exec_command({cmd:'cat /skills/example/SKILL.md'}));", id="nel-whitespace"),
+        pytest.param("const r²=await tools.exec_command({cmd:'cat /skills/example/SKILL.md'});text(r²);", id="name"),
+        pytest.param(_ALL_SETTLED_SOURCE + "results.forEach((r,i)\n=>text({i,...r}));", id="newline-before-arrow"),
+        pytest.param(
+            _ALL_SETTLED_SOURCE + "for (let i = 0; i < results.length; i\n++) text({i, ...results[i]});",
+            id="newline-before-increment",
+        ),
+        pytest.param("text(await tools.exec_command({cmd:'x',n:1e400}));", id="non-finite-number"),
+    ],
+)
+def test_wrapper_that_javascript_rejects_stays_unsupported(extractor, source):
+    # JavaScript throws a SyntaxError before any call runs, so no call may be credited. A batch gets
+    # valid records, so only its lexing can leave it unsupported.
+    observation = _record_observation(_ALL_SETTLED_SPREAD_RECORDS) if "allSettled" in source else "SyntaxError"
+    calls = extractor(_trajectory(source, observation))
+
+    assert len(calls) == 1
+    assert calls[0]["normalization_status"] == "unsupported_native_codex_exec_wrapper"

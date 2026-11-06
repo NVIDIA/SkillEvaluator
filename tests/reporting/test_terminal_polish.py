@@ -548,6 +548,13 @@ def test_windows_artifact_uri_avoids_deprecated_pure_path_as_uri():
         assert _artifact_uri(r"D:\a\b #%?;é.html", windows=True) == "file:///D:/a/b%20%23%25%3F%3B%C3%A9.html"
 
 
+@pytest.mark.parametrize("surrogate", ["\udcff", "\ud800"])
+def test_windows_artifact_paths_with_invalid_unicode_remain_unlinked(surrogate):
+    from skillevaluator.reporting.terminal_styles import _artifact_uri
+
+    assert _artifact_uri("C:\\reports\\surrogate" + surrogate + ".html", windows=True) is None
+
+
 def test_compact_dimension_table_keeps_agent_headers_free_of_condition_labels():
     from skillevaluator.tier3 import result_display
 

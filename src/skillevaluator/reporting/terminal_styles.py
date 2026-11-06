@@ -49,7 +49,11 @@ def _artifact_uri(target: str, *, windows: bool) -> str | None:
         if windows and len(windows_path.drive) == 2 and windows_path.is_absolute():
             # PurePath.as_uri() is deprecated from Python 3.14; build the same URI.
             drive = windows_path.drive
-            return "file:///" + drive + quote(windows_path.as_posix()[len(drive) :])
+            try:
+                return "file:///" + drive + quote(windows_path.as_posix()[len(drive) :])
+            except UnicodeEncodeError:
+                # An optional hyperlink must not prevent the path from being shown.
+                return None
         return None
     try:
         parts = urlsplit(target)

@@ -421,6 +421,22 @@ def test_gitlab_native_jobs_use_environment_without_recording_deployments():
     assert "`environment: action: prepare`" in docs and "Prevent outdated deployment jobs" in docs
 
 
+def test_gitlab_feedback_job_uses_its_protected_environment_without_recording_deployments():
+    # Scoped publisher token and deploy access still apply; no deployment means
+    # "Prevent outdated deployment jobs" cannot drop an older MR's feedback.
+    job = load("ci/gitlab/feedback.yml")["skill-evaluation-feedback"]
+    assert job["environment"] == {"name": "skillevaluator-feedback", "action": "prepare"}
+    # The publisher authenticates its job, pipeline and branch, never a deployment record.
+    assert "/deployments" not in (ROOT / "ci/feedback.py").read_text()
+    docs = " ".join((ROOT / "docs/gitlab-ci.mdx").read_text().split())
+    assert "The native jobs and the trusted feedback job use `environment: action: prepare`" in docs
+    # Approval rules gate deployments only; prepare jobs need deploy access instead.
+    assert "Deployment approval rules apply only to jobs that create deployments" in docs
+    assert "not with required approvals" in docs
+    onboarding = " ".join((ROOT / "docs/cli-onboarding.mdx").read_text().split())
+    assert "deployment approvals do not gate them" in onboarding
+
+
 def test_gitlab_feedback_pipeline_guard_is_offered_and_documented():
     guard = {"if": '$SKILL_EVAL_FEEDBACK == "true"', "when": "never"}
     hidden = load("ci/gitlab/all-tiers.yml")[".skill-evaluation-not-feedback"]
@@ -433,6 +449,17 @@ def test_gitlab_feedback_pipeline_guard_is_offered_and_documented():
     assert "extends: .skill-evaluation-not-feedback" in docs
     assert "no comment is posted or updated" in docs
     assert "Merge these guards to the default branch before the setup MR" in docs
+    # Included jobs use stage test, so a merged root's stages must keep it.
+    assert "If the root defines `stages`, keep `test` in the list" in docs
+    assert "neither `rules` nor `only`/`except`" in docs
+    template = " ".join((ROOT / "ci/templates/all-tiers/gitlab-all-tiers.yml").read_text().split())
+    assert "If the root defines stages, keep test" in template
+    assert "without rules, only or except can use" in template
+    # The upgrade path must order the guards before the setup MR as well.
+    onboarding = " ".join((ROOT / "docs/cli-onboarding.mdx").read_text().split())
+    guards = onboarding.index("merge those guards to the default branch")
+    assert guards < onboarding.index("Then, in your setup MR")
+    assert "keep `test` in any `stages` list" in onboarding
 
 
 def _heredoc(script, marker):

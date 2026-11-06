@@ -494,14 +494,15 @@ def _print_gitlab_root_merge_steps(wizard, existing):
         f"1. Make the root include list exactly the two rendered entries: the pinned all-tiers.yml remote and "
         f"the {GL_FEEDBACK} local include with its rule. Remove the Tier 1 skill-evaluation.yml include and any "
         "other include; trusted feedback rejects other includes. Keep the root plain YAML (no !reference tags).",
-        "2. Add the rendered variables, replacing earlier SKILL_EVAL_* values.",
+        "2. Add the rendered variables, replacing earlier SKILL_EVAL_* values. If the root defines stages, "
+        "keep test in the list; every SkillEvaluator job uses stage test.",
         "3. Use the rendered workflow rules. Keep any of your own workflow rules after the two SKILL_EVAL_FEEDBACK "
         "rules and before the final when: never, and only if they still allow merge-request, default-branch "
         "and web pipelines.",
         "4. Replace any skill-evaluation job override with the rendered skill-evaluation and "
         "skill-evaluation-native entries.",
         "5. Feedback pipelines run on the default branch. Start the rules of every other job with this "
-        f"guard, or add extends: {GL_NOT_FEEDBACK} to a job without rules:"
+        f"guard, or add extends: {GL_NOT_FEEDBACK} to a job without rules, only or except:"
         "\n     - if: '$SKILL_EVAL_FEEDBACK == \"true\"'\n       when: never",
         (f"   Jobs to guard: {', '.join(unguarded)}. " if unguarded else "   ")
         + "Merge the guards to the default branch first: the setup MR's own feedback request runs that "
@@ -660,7 +661,12 @@ def initialize(
             if current is not None and current != content:
                 raise git.SetupError(
                     f"{path} differs on the default branch; it will not be replaced."
-                    + (" Merge it by hand; --mode preview prints the steps." if path == GL_SCAN else "")
+                    + (
+                        " Update your checkout to the default branch, then run --mode preview to print the"
+                        " manual merge steps."
+                        if path == GL_SCAN
+                        else ""
+                    )
                 )
             if current is None:
                 pending[path] = content
@@ -746,6 +752,19 @@ def _gitlab_rules(document, job, depth=0):
     return None
 
 
+def _gitlab_only_except(document, job, depth=0) -> bool:
+    """GitLab rejects only/except beside rules, including rules inherited through extends."""
+    if not isinstance(job, dict) or depth > 10:
+        return False
+    if "only" in job or "except" in job:
+        return True
+    extends = job.get("extends")
+    parents = [extends] if isinstance(extends, str) else extends if isinstance(extends, list) else []
+    return any(
+        isinstance(parent, str) and _gitlab_only_except(document, document.get(parent), depth + 1) for parent in parents
+    )
+
+
 def gitlab_unguarded_jobs(text: str) -> list[str]:
     """Name root jobs that a trusted default-branch feedback pipeline would also run."""
     try:
@@ -766,7 +785,8 @@ def gitlab_unguarded_jobs(text: str) -> list[str]:
             continue
         rules = _gitlab_rules(document, job)
         first = rules[0] if isinstance(rules, list) and rules else None
-        if not (
+        # A job keeping only/except cannot also carry the guard rules.
+        if _gitlab_only_except(document, job) or not (
             isinstance(first, dict)
             and set(first) == {"if", "when"}
             and first["when"] == "never"
@@ -807,7 +827,7 @@ def inspect(wizard, repo, platform="auto", tiers=None):
             "Warning: trusted feedback pipelines on the default branch also run "
             + ", ".join(unguarded)
             + ". Start their rules with if: '$SKILL_EVAL_FEEDBACK == \"true\"' and when: never; a job without "
-            + "rules can extend "
+            + "rules, only or except can extend "
             + GL_NOT_FEEDBACK
             + ".",
             markup=False,

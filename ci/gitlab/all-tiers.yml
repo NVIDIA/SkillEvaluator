@@ -108,7 +108,7 @@ skill-evaluation:
 
 # Feedback pipelines run on the protected default branch. Root jobs outside this
 # include must not run there: start their rules with this guard, or extend this
-# job when they have no rules of their own.
+# job when they have no rules, only or except of their own.
 .skill-evaluation-not-feedback:
   rules:
     - if: '$SKILL_EVAL_FEEDBACK == "true"'

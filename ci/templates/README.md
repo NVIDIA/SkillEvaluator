@@ -78,10 +78,11 @@ renders these references and approves the exact GitHub caller blob. See
 [the onboarding guide](../../docs/cli-onboarding.mdx#opt-in-to-three-tier-ci).
 Merge the trusted feedback entrypoint onto the default branch before the
 first demo PR/MR. On GitLab, merging into an existing root `.gitlab-ci.yml`
-means replacing the Tier 1 include with exactly the two all-tier includes and
-starting every other job's rules with
+means replacing the Tier 1 include with exactly the two all-tier includes,
+keeping `test` in any `stages` list, and starting every other job's rules with
 `- if: '$SKILL_EVAL_FEEDBACK == "true"'` / `when: never`, because trusted
-feedback runs as a default-branch pipeline; see the
+feedback runs as a default-branch pipeline. Merge those guards to the default
+branch before the setup MR; see the
 [GitLab guide](../../docs/gitlab-ci.mdx#merge-into-an-existing-root-configuration).
 Only Tier 1 gates CI; Tier 2 and Tier 3 remain advisory, including failed or
 incomplete outcomes, with their native evidence retained.

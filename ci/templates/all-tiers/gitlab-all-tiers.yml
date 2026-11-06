@@ -3,8 +3,10 @@
 # Tier 1 is required; Tier 2 and Tier 3 are advisory.
 # Merging into an existing root file: use exactly these two includes (remove
 # the Tier 1 skill-evaluation.yml include) and keep the file plain YAML.
-# Feedback pipelines run on the default branch, so start every other job's
-# rules with the guard shown on build-example below.
+# If the root defines stages, keep test: every SkillEvaluator job uses it.
+# Start every other job's rules with the guard shown on build-example below and
+# merge those guards to the default branch first: feedback pipelines run that
+# branch's configuration.
 include:
   - remote: https://raw.githubusercontent.com/NVIDIA/SkillEvaluator/RELEASE_WORKFLOW_SHA/ci/gitlab/all-tiers.yml
   - local: .gitlab/skill-feedback.yml
@@ -35,7 +37,8 @@ skill-evaluation-native:
   timeout: 5 hours
 
 # Existing jobs: guard them so trusted feedback pipelines skip them. A job
-# without rules can use `extends: .skill-evaluation-not-feedback` instead.
+# without rules, only or except can use
+# `extends: .skill-evaluation-not-feedback` instead.
 # build-example:
 #   rules:
 #     - if: '$SKILL_EVAL_FEEDBACK == "true"'

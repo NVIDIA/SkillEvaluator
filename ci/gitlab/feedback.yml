@@ -17,11 +17,16 @@ spec:
 # SPDX-License-Identifier: Apache-2.0
 # Install the thin include on the protected default branch before opening MRs.
 skill-evaluation-feedback:
+  # Serializes comment updates; each job checks its own MR and current commit.
   resource_group: skillevaluator-feedback
   image: python:3.12.12-slim
   stage: test
+  # The protected environment scopes the publisher token and restricts who can
+  # run this job. `prepare` records no deployment, so "Prevent outdated
+  # deployment jobs" never drops an older MR's feedback.
   environment:
     name: skillevaluator-feedback
+    action: prepare
   id_tokens:
     SKILL_EVAL_GITLAB_ID_TOKEN:
       aud: urn:skillevaluator:feedback:v1

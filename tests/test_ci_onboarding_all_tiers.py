@@ -827,6 +827,71 @@ def test_gitlab_preview_prints_merge_steps_for_existing_root_config(repository, 
     assert not (repository / ".gitlab").exists()
 
 
+def test_gitlab_merge_steps_keep_the_test_stage_and_limit_extends_to_jobs_without_only(repository, all_release):
+    _gitlab_tier1_consumer(repository, "stages: [build, deploy]\nlegacy:\n  script: ./legacy.sh\n  only: [main]\n")
+    result = invoke(repository, all_release, "--mode", "preview", "--paths", "skills")
+    assert result.exit_code == 0, result.output
+    output = " ".join(result.output.split())
+    # Every included job uses stage test; a root stages list without it rejects the pipeline.
+    assert "If the root defines stages, keep test in the list" in output
+    # GitLab rejects only/except beside the rules a job would inherit from the hidden guard.
+    assert "to a job without rules, only or except:" in output
+    assert "Jobs to guard: legacy." in output
+
+
+def test_gitlab_jobs_keeping_only_or_except_are_never_counted_as_guarded():
+    from skillevaluator import _ci_onboarding_all_tiers as all_tiers
+
+    guard = "  rules:\n    - if: '$SKILL_EVAL_FEEDBACK == \"true\"'\n      when: never\n"
+    root = "".join(
+        [
+            ".old:\n  only: [main]\n",
+            "extended:\n  script: a\n  only: [main]\n  extends: .skill-evaluation-not-feedback\n",
+            "inherited:\n  script: b\n  extends: [.old, .skill-evaluation-not-feedback]\n",
+            "ruled:\n  script: c\n  except: [tags]\n" + guard,
+            "guarded:\n  script: d\n  extends: .skill-evaluation-not-feedback\n",
+            "plain:\n  script: e\n" + guard,
+        ]
+    )
+    assert all_tiers.gitlab_unguarded_jobs(root) == ["extended", "inherited", "ruled"]
+
+
+def test_gitlab_pr_remote_root_conflict_points_to_an_updated_checkout(repository, all_release, monkeypatch):
+    import base64
+
+    from skillevaluator import _ci_onboarding_all_tiers as all_tiers
+
+    subprocess.run(
+        ["git", "-C", str(repository), "remote", "set-url", "origin", "https://gitlab.example.test/group/consumer.git"],
+        check=True,
+    )
+    remote_root = "build:\n  script: make\n"
+
+    def api(origin, method, endpoint, payload=None, **kwargs):
+        assert method == "GET", "A conflicting remote root must stop before any mutation"
+        if endpoint == "version":
+            return {"version": "18.4.0"}
+        if endpoint == "projects/group%2Fconsumer":
+            return {"default_branch": "trunk"}
+        if endpoint == "projects/group%2Fconsumer/repository/files/.gitlab-ci.yml?ref=trunk":
+            return {"encoding": "base64", "content": base64.b64encode(remote_root.encode()).decode()}
+        raise AssertionError(endpoint)
+
+    monkeypatch.setattr(all_tiers, "gitlab_api", api)
+    # The stale checkout has no root, so preview alone would print no merge steps.
+    result = invoke(repository, all_release, "--mode", "pr", "--paths", "skills")
+    assert result.exit_code != 0
+    output = " ".join(result.output.split())
+    assert ".gitlab-ci.yml differs on the default branch; it will not be replaced" in output
+    assert "Update your checkout to the default branch, then run --mode preview" in output
+    assert not (repository / ".gitlab-ci.yml").exists()
+    # Following the hint reaches the merge steps.
+    (repository / ".gitlab-ci.yml").write_text(remote_root)
+    preview = invoke(repository, all_release, "--mode", "preview", "--paths", "skills")
+    assert preview.exit_code == 0, preview.output
+    assert "Merge the rendered files below by hand" in " ".join(preview.output.split())
+
+
 @pytest.mark.parametrize("mode", ["save", "pr"])
 def test_gitlab_save_and_pr_refuse_to_replace_existing_root_config(repository, all_release, monkeypatch, mode):
     from skillevaluator import _ci_onboarding_all_tiers as all_tiers
@@ -877,3 +942,4 @@ def test_gitlab_status_warns_about_root_jobs_without_feedback_guard(repository, 
     normalized = " ".join(output.split())
     assert "also run deploy, test." in normalized
     assert "SKILL_EVAL_FEEDBACK" in normalized and ".skill-evaluation-not-feedback" in normalized
+    assert "a job without rules, only or except can extend" in normalized

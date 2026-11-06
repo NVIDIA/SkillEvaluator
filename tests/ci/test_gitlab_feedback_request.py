@@ -111,6 +111,8 @@ def test_malformed_or_foreign_request_is_rejected_before_network(request_env, mo
     assert module.main() == 2
     output = capsys.readouterr().out
     assert all(secret not in output for name, secret in request_env.items() if "TOKEN" in name)
+    assert "feedback is skipped" in output and "same-project merge request pipeline" in output
+    assert "permission" not in output
 
 
 def test_redirect_is_refused_without_logging_token_or_response(request_env, monkeypatch, capsys):
@@ -152,6 +154,12 @@ def test_http_failure_logs_only_status(request_env, monkeypatch, capsys, code):
     assert f"HTTP {code}" in output and request_env["CI_JOB_TOKEN"] not in output
     # A refused request (e.g. no default-branch permission) skips comments, not the gate.
     assert "feedback is skipped" in output and "still gates Tier 1" in output
+    # Only a refusal points at permissions; other failures are retried or checked on the server.
+    refused = code in {400, 401, 403, 404}
+    assert ("permission to run pipelines on the protected default branch" in output) is refused
+    assert ("pass pipeline variables" in output) is refused
+    assert ("added no jobs" in output) is (code == 400)
+    assert ("retry this job" in output) is not refused
 
 
 @pytest.mark.parametrize("error_type", [urllib.error.URLError, http.client.BadStatusLine])
@@ -164,7 +172,10 @@ def test_transport_failure_does_not_print_server_data(request_env, monkeypatch, 
 
     monkeypatch.setattr(module.urllib.request, "build_opener", lambda *_handlers: Opener())
     assert module.main() == 2
-    assert request_env["CI_JOB_TOKEN"] not in capsys.readouterr().out
+    output = capsys.readouterr().out
+    assert request_env["CI_JOB_TOKEN"] not in output
+    assert "feedback is skipped" in output and "could not be reached" in output
+    assert "permission" not in output
 
 
 @pytest.mark.parametrize(
@@ -178,10 +189,13 @@ def test_transport_failure_does_not_print_server_data(request_env, monkeypatch, 
         {"id": 456, "project_id": 42, "ref": "main", "source": "trigger"},
     ],
 )
-def test_response_must_identify_same_project_default_branch_pipeline(request_env, monkeypatch, payload):
+def test_response_must_identify_same_project_default_branch_pipeline(request_env, monkeypatch, payload, capsys):
     module = helper()
     install_response(module, monkeypatch, payload)
     assert module.main() == 2
+    output = capsys.readouterr().out
+    assert "feedback is skipped" in output and "did not confirm a default-branch pipeline" in output
+    assert "permission" not in output
 
 
 def test_response_read_is_bounded(request_env, monkeypatch):

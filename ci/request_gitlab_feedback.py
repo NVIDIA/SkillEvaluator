@@ -16,10 +16,18 @@ from collections.abc import Mapping
 
 MAX_RESPONSE_BYTES = 1024 * 1024
 MAX_ID = 2**63 - 1
-SKIPPED = (
-    "Automatic MR feedback is skipped for this pipeline; the aggregate still gates Tier 1. "
-    "The pipeline user needs permission to run pipelines on the protected default branch."
+SKIPPED = "Automatic MR feedback is skipped for this pipeline; the aggregate still gates Tier 1."
+# GitLab refuses a trigger the job's user or token may not make with 400-404.
+REFUSED_STATUSES = frozenset({400, 401, 403, 404})
+REFUSED = (
+    "GitLab refused the request: the pipeline user needs permission to run pipelines on the protected "
+    "default branch and to pass pipeline variables."
 )
+NO_JOBS = "HTTP 400 can also mean the default-branch configuration added no jobs to the pipeline."
+SERVER_ERROR = "GitLab did not create the feedback pipeline; retry this job, and check the GitLab API if it persists."
+TRANSPORT_ERROR = "GitLab could not be reached; check the runner's access to the GitLab API, then retry this job."
+INVALID_CONTEXT = "This job needs a same-project merge request pipeline with GitLab's predefined CI variables."
+INVALID_RESPONSE = "GitLab's response did not confirm a default-branch pipeline in this project."
 
 
 class _NoRedirect(urllib.request.HTTPRedirectHandler):
@@ -83,6 +91,14 @@ def _configuration(env: Mapping[str, str]) -> tuple[str, int, str, str, str]:
     return endpoint, project, source, ref, token
 
 
+def _skipped(reason: str, hint: str) -> int:
+    print(f"Feedback pipeline could not be requested ({reason}).")
+    print(SKIPPED)
+    print(hint)
+    # The request job is allow_failure: a failure warns without blocking the MR.
+    return 2
+
+
 def main() -> int:
     try:
         base, project, source, ref, token = _configuration(os.environ)
@@ -100,10 +116,20 @@ def main() -> int:
             method="POST",
             headers={"Content-Type": "application/x-www-form-urlencoded", "Accept": "application/json"},
         )
+    except ValueError as error:
+        return _skipped(type(error).__name__, INVALID_CONTEXT)
+    try:
         # No inherited proxy can redirect this credential-bearing request.
         opener = urllib.request.build_opener(urllib.request.ProxyHandler({}), _NoRedirect())
         with opener.open(request, timeout=30) as response:
             body = response.read(MAX_RESPONSE_BYTES + 1)
+    except urllib.error.HTTPError as error:
+        if error.code not in REFUSED_STATUSES:
+            return _skipped(f"HTTP {error.code}", SERVER_ERROR)
+        return _skipped(f"HTTP {error.code}", REFUSED + (" " + NO_JOBS if error.code == 400 else ""))
+    except (OSError, ValueError, http.client.HTTPException) as error:
+        return _skipped(type(error).__name__, TRANSPORT_ERROR)
+    try:
         if len(body) > MAX_RESPONSE_BYTES:
             raise ValueError("Oversized response")
         result = json.loads(body)
@@ -117,14 +143,8 @@ def main() -> int:
             or result.get("source") != "pipeline"
         ):
             raise ValueError("Invalid feedback pipeline")
-    except urllib.error.HTTPError as error:
-        print(f"Feedback pipeline could not be requested (HTTP {error.code}).")
-        print(SKIPPED)
-        return 2
-    except (OSError, ValueError, http.client.HTTPException) as error:
-        print(f"Feedback pipeline could not be requested ({type(error).__name__}).")
-        print(SKIPPED)
-        return 2
+    except ValueError as error:
+        return _skipped(type(error).__name__, INVALID_RESPONSE)
     print(f"Feedback pipeline requested (pipeline {result['id']}).")
     return 0
 

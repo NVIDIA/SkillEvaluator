@@ -31,6 +31,8 @@ pipeline, so a merged file must keep this shape:
    `skill-evaluation` job, and any other include. Feedback rejects other
    includes and reads the root as plain YAML, so do not use `!reference` tags.
 2. Add the rendered `variables`, replacing earlier `SKILL_EVAL_*` values.
+   If the root defines `stages`, keep `test` in the list: every SkillEvaluator
+   job uses stage `test`, and GitLab rejects a job whose stage is not listed.
 3. Use the rendered `workflow: rules`. Keep your own workflow rules after the
    two `SKILL_EVAL_FEEDBACK` rules and before the final `when: never`, and
    only if they still allow merge-request, default-branch and web pipelines.
@@ -82,11 +84,14 @@ sections and per-tier links stay out of the comment. See the
 
 Configure a runner matching `SKILL_EVAL_RUNNER` (default `docker`), the protected
 `SKILL_EVAL_ENVIRONMENT` (default `skillevaluator`) and provider secrets scoped
-to that execution environment. The native jobs use `environment: action: prepare`:
-they receive the environment's scoped variables and access protection, but
-record no deployment, so GitLab's **Prevent outdated deployment jobs** setting
-cannot drop an older MR's jobs. The default Docker service needs a privileged
-runner with Docker-in-Docker enabled. The daemon accepts only TLS clients on
+to that execution environment. The native jobs and the trusted feedback job
+use `environment: action: prepare`: each receives its environment's scoped
+variables and access protection but records no deployment, so GitLab's
+**Prevent outdated deployment jobs** setting cannot drop an older MR's jobs.
+Deployment approval rules apply only to jobs that create deployments, so they
+do not gate these jobs. Restrict who can run them with the protected
+environments' deploy access, not with required approvals. The default Docker
+service needs a privileged runner with Docker-in-Docker enabled. The daemon accepts only TLS clients on
 port 2376 (`DOCKER_TLS_CERTDIR: /certs`), so agent containers cannot use the
 Docker API. Configure the runner with `volumes = ["/certs/client"]` so the job
 can read the generated client certificates. Docker mode also requires the Docker CLI,
@@ -140,13 +145,15 @@ the pipeline's persisted MR association supports GitLab 17.x as well.
 The initiating pipeline user must be allowed to create a pipeline on
 the protected default branch, pass the two pipeline variables and run the
 protected feedback environment. Configure these permissions for authorized CI
-maintainers; a job token does not bypass protected-branch or deployment permissions.
+maintainers; a job token does not bypass protected-branch or protected-environment permissions.
 The feedback request is advisory. When GitLab refuses it, for example because
 the MR pipeline user cannot run pipelines on the protected default branch or
 may not pass pipeline variables, the request job fails as an allowed failure:
 the pipeline shows a warning, no comment is posted or updated, and the aggregate
-continues to enforce Tier 1. Before the setup MR installs feedback on the
-default branch, no comment is posted and the aggregate still enforces Tier 1.
+continues to enforce Tier 1. Server and network errors fail the job the same
+way; its log says whether to fix permissions or retry. Before the setup MR
+installs feedback on the default branch, no comment is posted and the aggregate
+still enforces Tier 1.
 
 For a rejected publisher, open its job log. The check location refers to the
 pinned `ci/feedback.py` revision, and the category distinguishes validation,

@@ -156,9 +156,11 @@ Newer servers use `CI_JOB_TOKEN` by default. Online init/status report the serve
 version prerequisite; offline preview/save leave admission readiness unverified.
 The MR jobs receive no comment token. GitLab's feedback request uses its
 short-lived job token; the initiating user needs permission to create a pipeline
-on the protected default branch and run the protected feedback environment.
-Without it, the request is an allowed failure: no comment is posted and the
-Tier 1 gate is unchanged.
+on the protected default branch, pass pipeline variables and run the protected
+feedback environment. Without it, the request is an allowed failure: no comment
+is posted and the Tier 1 gate is unchanged. GitLab's provider-backed and
+feedback jobs record no deployments, so deployment approvals do not gate them;
+restrict them with the protected environments' deploy access.
 See the platform pages for
 [GitHub](github-actions.mdx#three-tier-checks-and-feedback) and
 [GitLab](gitlab-ci.mdx#three-tier-checks-and-feedback) details.
@@ -176,10 +178,13 @@ Tier 1-only callers keep their current behavior.
 On GitLab, the Tier 1 and all-tier configurations share the root
 `.gitlab-ci.yml`, which the CLI never replaces. `--mode preview` prints the
 rendered files and the merge steps; `--mode save` and `--mode pr` stop with an
-error while a different root file exists. In your setup MR, replace the Tier 1
-`skill-evaluation.yml` include with the two rendered includes, add the rendered
-variables, workflow rules and job overrides, guard your other jobs with the
-`SKILL_EVAL_FEEDBACK` rule, and add `.gitlab/skill-feedback.yml`. See
+error while a different root file exists. First guard your other jobs with the
+`SKILL_EVAL_FEEDBACK` rule and merge those guards to the default branch: the
+setup MR's own feedback request runs the default branch's current
+configuration. Then, in your setup MR, replace the Tier 1 `skill-evaluation.yml`
+include with the two rendered includes, add the rendered variables, workflow
+rules and job overrides, keep `test` in any `stages` list, and add
+`.gitlab/skill-feedback.yml`. See
 [Merge into an existing root configuration](gitlab-ci.mdx#merge-into-an-existing-root-configuration).
 
 ## Run the wizard

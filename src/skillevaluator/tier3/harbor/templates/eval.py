@@ -2096,7 +2096,7 @@ def _call_bedrock(prompt, model, max_tokens, temperature, timeout=90, provenance
     except _JudgeRefusedError:
         raise
     except Exception as exc:
-        if _STRICT_JUDGE_REQUESTS_LEFT.get() is not None and _strict_judge_failure(exc)[1]:
+        if _STRICT_JUDGE_REQUESTS_LEFT.get() is not None and _strict_judge_failure(exc, "bedrock")[1]:
             # The strict policy lets the next candidate answer for an unavailable model.
             raise
         return None, f"Bedrock request failed: {exc}"
@@ -2228,14 +2228,16 @@ def _call_judge_model(prompt, provider, model, max_tokens, temperature, response
     )
 
 
-def _strict_judge_failure(error):
+def _strict_judge_failure(error, provider=None):
     """Describe a failed strict judge request and whether the next candidate may answer instead.
 
     Only unavailability moves on: a transient HTTP status, connection failure
     or Bedrock throttling that outlasted its one retry, a model the provider
     does not have or the key cannot use (_should_try_fallback and
     _strict_model_unavailable), or a used-up per-model request limit.
-    Everything else ends the judge.
+    Everything else ends the judge. A Bedrock error keeps the
+    "Bedrock request failed" label that _call_bedrock gives the errors it
+    returns, so a model that moved on reads the same as one that ended the judge.
     """
     if isinstance(error, _JudgeRefusedError):
         return str(error), False
@@ -2246,7 +2248,8 @@ def _strict_judge_failure(error):
         if _strict_judge_error_stops(error):
             return detail, False
         return detail, model_unavailable or _strict_model_unavailable(error) or _is_retriable_http_status(error.code)
-    detail = f"Public provider call failed: {error}"
+    label = "Bedrock request failed" if provider == "bedrock" else "Public provider call failed"
+    detail = f"{label}: {error}"
     if isinstance(error, TimeoutError) and "LLM judge time budget exhausted" in str(error):
         return detail, False
     if _is_certificate_failure(error) or _strict_judge_error_stops(error):
@@ -2283,7 +2286,7 @@ def _call_strict_judge(provider, requested_model, models, call_model):
         try:
             content, error = call_model(candidate_model, provenance)
         except Exception as exc:
-            detail, move_on = _strict_judge_failure(exc)
+            detail, move_on = _strict_judge_failure(exc, provider)
             errors.append(f"{candidate_model}: {detail}")
             if not move_on:
                 # Keep the earlier models' errors, so the reason shows why they were passed over.

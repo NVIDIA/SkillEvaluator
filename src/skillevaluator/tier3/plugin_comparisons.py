@@ -419,9 +419,9 @@ class ComparisonRuntime:
                         )
                         by_case.setdefault(record.case_id, []).append(row)
             failures = load_failures_by_case(evidence)
-            cross_cases = {
-                case for case in self.expected_case_ids if observer.context.case_spec(case).get("cross_component")
-            }
+            # Signal specs deliberately omit dataset classification fields.
+            # Reuse the context's canonical two-member classification instead.
+            cross_cases = getattr(observer.context, "cross_component_cases", None)
             stats = build_agent_statistics(
                 arms,
                 expected_case_ids=self.expected_case_ids,

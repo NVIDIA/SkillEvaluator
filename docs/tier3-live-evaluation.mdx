@@ -106,6 +106,18 @@ using Harbor 0.24:
   a new session can escape process-group cleanup, so the host-side Harbor CLI,
   configuration, and local-mode skills must be trusted. Run untrusted evaluated
   workloads in Docker or another isolated Harbor backend instead of local mode.
+- Ctrl+C stops the whole run. Agents still waiting for a `--max-agents` slot,
+  queued conditions, and remaining `--stop-on-pass` attempts never start. Each
+  running Harbor job receives SIGTERM, which Harbor handles by stopping its
+  trial environments, and has up to 30 seconds to exit before its POSIX process
+  group is killed and reaped. The progress view shows the agents that are
+  stopping; a second Ctrl+C skips the wait. On Windows the Harbor task tree is
+  stopped immediately. A skipped or exceeded wait, or a Windows run, can leave
+  trial containers or in-container agent processes running. Harbor's Docker
+  backends name each Compose project after its trial, so
+  `docker ps --filter label=com.docker.compose.project` lists the candidates;
+  check their project names before removing them with `docker rm -f`. The
+  progress view marks unfinished stages as interrupted.
 - Docker accepts Harbor stdin payloads and isolates main-container execution
   from sidecar operations without placing environment values on Compose argv.
   For NVIDIA Build, the credential reaches the trusted parent over stdin; each
@@ -329,7 +341,9 @@ skillevaluator compare ./my-skill
 
 `view` opens the latest HTML report; `compare` summarizes stored results across
 agents and arms. [Reports & Results](reports.mdx) explains everything the run
-wrote and how to interpret it.
+wrote and how to interpret it. To ask follow-up questions about one run and get
+grounded advice on skill changes, pass its run directory to
+[`tier3 feedback`](cli-reference.mdx#tier3-feedback).
 
 </Steps>
 
@@ -572,6 +586,13 @@ The high-signal flags, with defaults:
 | `--copy-repo` | off | Copy the surrounding repository into the task environment |
 | `--include-skills` | none | Stage additional skill directories; requires `--skill-workspace-mode group` |
 
+With `--stop-on-pass`, `--n-concurrent` still limits concurrent eval cases per
+agent. Each case's attempts run one after another and stop after the first
+passing score. The with-skill and without-skill arms run one after the other,
+and each uses the full `--n-concurrent` budget. For example, two agents with
+`--n-concurrent 4` run up to eight trials at once, fewer when fewer cases
+remain.
+
 Every `tier3 evaluate` flag, including resource overrides and Dockerfile
 modes, is in the [CLI Reference](cli-reference.mdx).
 
@@ -610,14 +631,29 @@ grades each trial after the agent finishes. `security`, `skill_execution`, and
 `goal_accuracy`, and `behavior_check` are LLM judges that call the configured
 evaluator provider. `custom_only` runs none of them.
 
-Accuracy is calculated from the judge's criterion verdicts, not its numeric
-total: passing applicable criteria divided by applicable criteria. Positive
-cases score all five criteria; a positive-case reply with no criteria falls
-back to the judge's numeric score. When `should_trigger` is false or no
-`expected_skill` is declared, accuracy excludes `SKILL_IDENTIFIED` from both
-counts and scores the other four criterion verdicts. The reward details record
-the excluded criterion and `applicable-accuracy-criteria/v1` scoring policy.
-Missing criterion evidence is an error for these cases.
+The three LLM judges return verdicts only, and the verifier computes the
+scores. A `score` field in a judge reply is ignored.
+
+- `accuracy` is passing criteria divided by five. The criteria grade the
+  outcome: `ACTION_CORRECT`, `FACTUALLY_ACCURATE`, `TASK_ADDRESSED`,
+  `ACTIONABLE`, and `FORMAT_FOLLOWED` (the response follows any output format
+  the question explicitly requires; when none is required, it is true only if
+  the response gives an answer). A response that gives no answer fails all
+  five criteria and scores `0.0`, unless the expected answer is itself a
+  refusal. Every case and both arms use the same
+  five criteria. None of them asks whether the agent named or used the skill;
+  `skill_execution` scores that. A reply without all five true/false verdicts
+  is invalid.
+- `goal_accuracy` is `1.0` when the judge decides the goal was `achieved` and
+  `0.0` otherwise, the same binary scale as the RAGAS scorer.
+- `behavior_check` is the share of expected behaviors observed. The reply must
+  judge every behavior exactly once, identified by its 1-based `step` number.
+  A reply that skips, repeats, or invents a step is invalid.
+
+Rewards record `judge_contract: skill-evaluator-judges-v2`. Results written
+before this contract, whose `accuracy` included a `SKILL_IDENTIFIED` criterion,
+are not directly comparable with newer ones: a correct no-skill baseline answer
+used to be capped at `0.8` on positive cases.
 
 ### The graded trajectory
 
@@ -687,10 +723,13 @@ clipped cannot count, so on a long trajectory a behavior that appears only in
 truncated history can be judged as not observed. In the results tree, each
 judge's details in a trial's `reward.json` include an `omitted` record
 (`count`, `truncated`, and `reason`); when `truncated` is `true` on cases that
-matter, raise that judge's budget. Larger budgets send longer judge prompts and
-use more evaluator tokens. The behavior budget never falls below the
-final-response limit plus 4,000 characters, so raising the limit leaves room
-for the tool history. Set these variables in the host environment;
+matter, raise that judge's budget. For `behavior_check`, the reason names each
+setting that cut evidence: `SKILL_EVAL_BEHAVIOR_CHECK_BUDGET`,
+`SKILL_EVAL_BEHAVIOR_FINAL_RESPONSE_LIMIT`, or both. Raise each setting it
+names; raising the budget does not clear a cut made by the final-response
+limit. Larger budgets send longer judge prompts and use more evaluator
+tokens. The behavior budget never falls below the final-response limit plus
+4,000 characters, so raising the limit leaves room for the tool history. Set these variables in the host environment;
 SkillEvaluator forwards them to the verifier. Defaults and accepted values are
 in [Judge evidence budgets](environment-variables.mdx#judge-evidence-budgets).
 
@@ -709,10 +748,25 @@ in [Judge evidence budgets](environment-variables.mdx#judge-evidence-budgets).
   downgraded.
 - **Reply validation.** Replies are checked against the expected fields either
   way. An empty, unparseable, or invalid reply, including an empty reply from a
-  reasoning model that ran out of output tokens, gets one retry with a stricter
-  format reminder. `behavior_check` can also salvage complete per-behavior
-  results from a truncated reply and counts the missing behaviors as not
-  passed.
+  reasoning model that ran out of output tokens, gets one retry that names the
+  problem, for example `steps not judged: [2]`. `behavior_check` can also
+  salvage complete per-behavior results from a truncated reply and counts the
+  missing behaviors as not passed.
+- **Saved judge evidence.** The verifier writes every judge attempt to
+  `judge_attempts.json` next to the trial's `skill_evaluator_reward.json` as it
+  happens, so the file also explains a judge that failed. Each entry records
+  the metric, attempt number, method (`llm`, `ragas`, or `salvage`), judge
+  model, status (`accepted`, `rejected`, or `error`), and problem, along with
+  the prompt and reply. When `behavior_check` is scored from a truncated
+  reply, the LLM attempts keep their own status (`rejected`, or `error` if the
+  retry failed in transport), and an `accepted` `salvage` entry, numbered like
+  the truncated attempt, holds the rebuilt results.
+  Configured credentials, common key shapes, URL userinfo, `Authorization`,
+  API-key, token and `Cookie` header values, and credential flag values
+  (`--token`, `--password`, `curl -u user:password`) are masked, and long
+  prompts and replies are shortened. The prompts contain the task question,
+  expected answer, and agent evidence. Pass `--harbor-keep-jobs` to keep the
+  Harbor trial directories that hold this file.
 - **Reasoning models.** GPT-5 and GPT-6 judges get no `temperature` and at
   least 32,768 output tokens, because reasoning tokens count against the
   limit; other judges get 16,384. GPT-6 judges and Claude 5.5 or later judges
@@ -734,8 +788,14 @@ in [Judge evidence budgets](environment-variables.mdx#judge-evidence-budgets).
   `https://api.openai.com/v1` endpoint and a judge model that is not a GPT-5 or
   GPT-6 reasoning model, `goal_accuracy` first tries the RAGAS
   `AgentGoalAccuracyWithReference` scorer through its own client, without the
-  schema or retry handling above but within the same time budget. If RAGAS is
-  unavailable or fails, the prompt judge runs instead.
+  schema or retry handling above but within the same time budget. A RAGAS
+  score is recorded with `"method": "ragas"` and the judge-model fields above.
+  If RAGAS is unavailable, fails, or returns a score other than `0.0` or
+  `1.0`, the verifier log shows a warning with the redacted error, and the
+  prompt judge runs instead (`"method": "custom"`). A case scored by RAGAS in
+  one condition and by the prompt judge in the other counts as a judge mix
+  even with the same model, so it is left out of the `goal_accuracy` lift the
+  same way.
 - **Transient failures.** HTTP 408, 429, and every 5xx response except 501 and
   505 are retried, including 520–524 proxy errors and 529 overload responses.
   Connection errors, timeouts, and Bedrock throttling or service-unavailable
@@ -758,6 +818,56 @@ Retries and downgrades do not change scoring formulas. A judge that still fails
 is an evaluation infrastructure failure, not a `0.0` score, and the affected
 condition publishes no scores; see
 [Tier 3 judge failure semantics](environment-variables.mdx#tier-3-judge-failure-semantics).
+
+### Judge fallback and retry policies
+
+Two opt-in host variables limit which models may answer a standard judge and
+how often it is asked. Both default to the behavior above. They are forwarded
+like `LLM_JUDGE_FALLBACK_MODELS`: only to standard verifier jobs, never to the
+agent environment or `custom_only` runs.
+
+- **`LLM_JUDGE_FALLBACK_POLICY=replace`.** Only the judge model and your
+  `LLM_JUDGE_FALLBACK_MODELS` entries answer. The built-in `claude-opus-4-8`
+  refusal fallback for Claude 5.5 or later judges is not used, on the native
+  Claude API or on Bedrock. The default, `append`, keeps it.
+- **`LLM_JUDGE_RETRY_POLICY=strict`.** Each judge tries at most three models:
+  the judge model, then the first two `LLM_JUDGE_FALLBACK_MODELS` entries. It
+  sends at most two requests to each, and all of them share the judge's time
+  budget.
+  - A request that fails with a retryable HTTP status, a connection error, or
+    Bedrock throttling is retried at most once, then the next model is tried.
+    A model the provider reports as not found, invalid, or not accessible to
+    the key moves on without a retry. That covers the errors
+    `LLM_JUDGE_FALLBACK_MODELS` already falls back on, OpenAI's
+    `model_not_found`, a Claude `not_found_error` that names the model, and
+    Bedrock's `AccessDeniedException`, `ResourceNotFoundException`, and
+    invalid model identifier errors. A `Retry-After` wait above the maximum
+    retry delay moves on without waiting. A wait or request that would pass
+    the judge's deadline ends the judge.
+  - A refusal, a TLS certificate failure, an authentication error, and any
+    other non-retryable HTTP status end the judge. So does a provider error,
+    even on HTTP 429, that says a quota, budget, billing, or credit limit was
+    reached, or that a content filter, safety, or security policy rejected
+    the request. Only the provider's error code, type, and message are read
+    (the first 500 characters of a body that is not JSON), and only whole
+    phrases such as `insufficient_quota`, `budget exceeded`,
+    `credit balance`, or `content_filter` count, so a model id or proxy host
+    name in the error does not. These are not retried or handed to another
+    model, and the built-in refusal fallback is not used either.
+  - The first completed reply is final. It must be exactly one JSON object,
+    with only whitespace around it: no prose, Markdown fences, second object,
+    duplicate key, or `NaN`. An empty, invalid, or truncated reply fails the
+    judge without the format retry or `behavior_check` salvage, and
+    `goal_accuracy` skips the RAGAS scorer, which sends its own requests.
+  - The default, `legacy`, keeps the retries, fallbacks, format retry, and
+    salvage described above.
+
+Values are case-insensitive. Any other value stops a run with standard
+grading at configuration, before any trial starts. If one still reaches the
+verifier, every standard judge fails before a request is sent, so the affected
+conditions publish no scores. When set, `run_config.json` records the values as
+`judge.fallback_policy` and `judge.retry_policy`. A `custom_only` run does not
+read them.
 
 ## Reading results
 
@@ -791,6 +901,22 @@ that is not a runner, such as `strace -f curl URL`, is scored like a direct
 `curl URL`. A mention followed by an HTTP method, an upload flag, or a
 `key=value` word, such as `http POST` in prose or
 `grep -n http server.log status=500`, still warns.
+
+Linux finds a command by its exact name, so a later bare word spelled `HTTP`,
+`HTTPS`, or `Http`, as in the here-document or `apply_patch` prose
+`Use HTTP POST to create an item.`, does not start HTTPie. Its method word is
+not read as an upload, while a body item, piped or redirected input, or `--raw`
+after it still warns. Its method word still warns when a `name:@file` item
+follows, because that item may send a file as a header. The shell removes
+quotes and backslashes first, so a quoted or escaped item such as
+`X-Data:"@.env"` or `X-Data:\@.env` counts, and so does a `$VAR` word, which
+may hold one. A word with a slash or backslash, such as `./HTTP`,
+`/usr/local/bin/HTTP`, or the prose `HTTP/HTTPS`, and a word that ends in
+`.exe` in any case, such as `HTTP.exe` or `http.EXE`, are read as a path or a
+Windows program name, which a host may find in any case, so their method word
+still warns. A command word keeps the case-insensitive match, so
+`HTTP POST URL` still warns, and so does a here-document line or Markdown table
+cell that starts with `HTTP POST`, because each line is read as a command.
 
 A fixed set of runners that start a command in another host, container, root,
 user, or network namespace, such as `ssh`, `docker`, `docker-compose`,
@@ -977,6 +1103,19 @@ machine-readable JSON contract, and how to judge whether a given lift is good.
     Supply a model valid for that agent with `--agent-model AGENT=MODEL`. The
     evaluator provider's default model is not automatically valid for every
     agent.
+  </Accordion>
+  <Accordion title="A claude-code trial fails with AgentSafetyRefusalError">
+    The model provider's safety classifier stopped the selected model on that
+    case. SkillEvaluator turns Claude Code's refusal model fallback off
+    (`CLAUDE_CODE_DISABLE_REFUSAL_FALLBACK=1` in every staged task), so the
+    attempt ends on the selected model instead of retrying on another one.
+    Like any other failed trial, the attempt is not scored, so the arm no
+    longer has complete attempt coverage: after one refusal in 20 cases with 3
+    attempts each, it reports `Scored attempt coverage is 59/60` and its
+    execution fails. `tier3 evaluate` then exits 1, and so does
+    `validate --block-on-agent-eval`. Review the case prompt and the skill
+    content that the agent read, then rerun, or evaluate the case with another
+    model. See [Agents & Sandboxes](agents-and-sandboxes.mdx#supported-agents).
   </Accordion>
   <Accordion title="Results look wrong or a case is hard to diagnose">
     Re-run with `--harbor-keep-jobs` — Harbor artifacts are transient and

@@ -3,6 +3,7 @@
 
 """Tests for security validator."""
 
+import hashlib
 import json
 import os
 import re
@@ -26,6 +27,7 @@ from skillevaluator.validators.security import (
     _is_jpeg,
     _is_png,
     _skillspector_child_env,
+    _skillspector_incomplete_analysis_error,
     _skillspector_llm_env,
     _skillspector_timeout_seconds,
 )
@@ -194,12 +196,20 @@ def _skillspector_json_report(
     }
 
 
+def _merge_amplified_yaml(levels: int) -> str:
+    """Return YAML whose chained merge keys double the expanded size on every line."""
+    lines = ["a0: &a0 {k: 1}"]
+    lines += [f"a{n}: &a{n} {{<<: [*a{n - 1}, *a{n - 1}], k{n}: 1}}" for n in range(1, levels + 1)]
+    return "\n".join(lines)
+
+
 def _validate_skillspector_payload(
     mock_tools,
     sample_skill_dir: Path,
     payload: dict,
     *,
     exit_code: int = 0,
+    validator: SecurityValidator | None = None,
 ) -> ValidationResult:
     """Run one deterministic SkillSpector payload through the public validation seam."""
     mock_tools.skillspector.is_available = True
@@ -209,7 +219,7 @@ def _validate_skillspector_payload(
         stderr="",
         exit_code=exit_code,
     )
-    return SecurityValidator(use_llm=False).validate_security_only(sample_skill_dir)
+    return (validator or SecurityValidator(use_llm=False)).validate_security_only(sample_skill_dir)
 
 
 def _passwd_mount_issue(**overrides) -> dict:
@@ -283,6 +293,74 @@ def _skillspector_documentation_only_report() -> dict:
                 }
             )
     _set_universal_analyzer_work(payload)
+    return payload
+
+
+_REGULAR_ANALYZERS = ("static_patterns_prompt_injection", "static_patterns_tool_misuse")
+_SC8_BUDGET_ANALYZER = "static_patterns_supply_chain_bytecode_runtime_limit"
+
+
+def _ledger_exception(
+    path: str,
+    reason_code: str = "runtime_limit",
+    *,
+    analyzers: tuple[str, ...] = _REGULAR_ANALYZERS,
+    phase: str = "static",
+) -> dict:
+    """Return one non-fatal SkillSpector ledger exception."""
+    return {
+        "outcome": "partial",
+        "phase": phase,
+        "reason_code": reason_code,
+        "message": "Inspection reached its configured runtime limit.",
+        "path": path,
+        "start_line": None,
+        "end_line": None,
+        "fatal": False,
+        "analyzers": list(analyzers),
+    }
+
+
+def _skillspector_partial_report(ledger_exceptions: list[dict]) -> dict:
+    """Return a valid partial report whose only gaps are *ledger_exceptions*."""
+    payload = _skillspector_json_report()
+    payload["risk_assessment"]["recommendation"] = "CAUTION"
+    payload["analysis_completeness"].update(
+        {"is_complete": False, "status": "partial", "ledger_exceptions": ledger_exceptions}
+    )
+    return payload
+
+
+def _skillspector_partially_inspected_report(ledger_exceptions: list[dict], *, inspected: tuple[str, ...]) -> dict:
+    """Return a partial report whose inventory, counters and analyzer accounting match *ledger_exceptions*.
+
+    Files in *inspected* are fully inspected. Every ledger path is a partially inspected file, and every
+    analyzer a ledger row names is degraded on exactly those files.
+    """
+    payload = _skillspector_partial_report(ledger_exceptions)
+    partial_paths = list(dict.fromkeys(row["path"] for row in ledger_exceptions))
+    payload["components"] = [{"path": path, "executable": False} for path in (*inspected, *partial_paths)]
+    _set_universal_analyzer_work(payload)
+    completeness = payload["analysis_completeness"]
+    total = len(payload["components"])
+    completeness.update(
+        {
+            "total_components": total,
+            "scanned_components": len(inspected),
+            "fully_inspected_files": len(inspected),
+            "partially_inspected_files": len(partial_paths),
+            "coverage_percent": round(len(inspected) / total * 100, 1),
+        }
+    )
+    paths_by_analyzer: dict[str, set[str]] = {}
+    for row in ledger_exceptions:
+        for analyzer_id in row["analyzers"]:
+            paths_by_analyzer.setdefault(analyzer_id, set()).add(row["path"])
+    assert set(paths_by_analyzer) <= _SKILLSPECTOR_UNIVERSAL_ANALYZERS
+    for status in completeness["analyzer_statuses"]:
+        if partial := len(paths_by_analyzer.get(status["analyzer_id"], ())):
+            status.update({"status": "degraded", "completed": total - partial, "partial": partial})
+            completeness["limitations"].append(f"Analyzer {status['analyzer_id']} status: degraded.")
     return payload
 
 
@@ -418,6 +496,140 @@ description: A skill documenting REST API endpoints
         assert len(path_findings) == 0, (
             f"API routes should not trigger personal path detection. Findings: {path_findings}"
         )
+
+    @pytest.mark.parametrize(
+        ("file_name", "content"),
+        [
+            pytest.param(
+                "SKILL.md",
+                "- Saves: `~/.steam/debian-installation/steamapps/compatdata/1086940/pfx/drive_c/users/steamuser/"
+                "AppData/Local/Larian Studios/Baldur's Gate 3/PlayerProfiles/Public/Savegames/Story/test.lsv`\n",
+                id="markdown-code-span",
+            ),
+            pytest.param(
+                "SKILL.md",
+                "Config lives under ~/.local/share/Steam/steamapps/compatdata/1643320/pfx/drive_c/users/"
+                "steamuser/AppData/Local/Stalker2.\n",
+                id="markdown-prose",
+            ),
+            pytest.param(
+                "collect.sh",
+                'find "${HOME}/.local/share/Steam/steamapps/compatdata/${STEAM_APPID}/pfx/drive_c/'
+                'users/steamuser/Documents/Benchmark Results" -name "*.csv"\n',
+                id="shell-quoted-argument",
+            ),
+            pytest.param(
+                "collect.sh",
+                'save_root="${compat_data}/pfx/drive_c/users/steamuser/AppData/Local/Game/Saves"\n',
+                id="shell-assignment",
+            ),
+            pytest.param(
+                "collect.py",
+                'SAVES = compat_data / "pfx/drive_c/users/steamuser/AppData/Local/Game"\n',
+                id="python-relative-literal",
+            ),
+            pytest.param("notes.txt", "pfx\\drive_c/Users/steamuser/Documents/save.dat\n", id="backslash-prefix"),
+            pytest.param("notes.txt", "[save](PFX/Drive_C/uSeRs/StEaMuSeR/save.dat)\n", id="mixed-case-link"),
+            pytest.param(
+                "notes.txt",
+                'cd "compatdata/1/pfx/drive_c/users/steamuser/My Games/Saves..old/v1.. final"\n',
+                id="dots-inside-folder-names",
+            ),
+        ],
+    )
+    def test_proton_virtual_profile_is_not_a_personal_path(self, tmp_path: Path, file_name: str, content: str):
+        """Proton names every player's Windows profile ``steamuser``; that path identifies no one."""
+        (tmp_path / file_name).write_text(content, encoding="utf-8")
+
+        result = SecurityValidator(submitter_usernames=[]).validate_pii_only(tmp_path)
+
+        assert [f for f in result.findings if f.check_name == "personal_paths"] == []
+
+    @pytest.mark.parametrize(
+        ("content", "reported"),
+        [
+            pytest.param(
+                "pfx/drive_c/users/steamuser/AppData and /Users/alice/Documents\n",
+                "/Users/alice/",
+                id="native-path-on-same-line",
+            ),
+            pytest.param("/Users/steamuser/Documents/save.dat\n", "/Users/steamuser/", id="native-macos-user"),
+            pytest.param("notpfx/drive_c/users/steamuser/save.dat\n", "/users/steamuser/", id="pfx-not-a-component"),
+            pytest.param("~/.wine/drive_c/users/steamuser/save.dat\n", "/users/steamuser/", id="wine-prefix"),
+            pytest.param("pfx/drive_c/users/labuser/save.dat\n", "/users/labuser/", id="other-user"),
+            pytest.param("pfx/drive_c/users/steamuser/../alice/notes\n", "/users/steamuser/", id="traversal"),
+            pytest.param(
+                "pfx/drive_c/users/steamuser/My Games/../../alice/notes.txt\n",
+                "/users/steamuser/",
+                id="space-before-traversal",
+            ),
+            pytest.param(
+                '"pfx/drive_c/users/steamuser/Assassin\'s Creed/../../alice/notes.txt"\n',
+                "/users/steamuser/",
+                id="quote-before-traversal",
+            ),
+            pytest.param(
+                "pfx/drive_c/users/steamuser/%2e%2e%2falice/notes\n", "/users/steamuser/", id="encoded-traversal"
+            ),
+            pytest.param(
+                'p = "compatdata/1/pfx/drive_c/users/steamuser/" + "../alice/"\n',
+                "/users/steamuser/",
+                id="concatenated-traversal",
+            ),
+            pytest.param(
+                'Path("compatdata/1/pfx/drive_c/users/steamuser/") / ".." / "alice"\n',
+                "/users/steamuser/",
+                id="pathlib-traversal",
+            ),
+            pytest.param(
+                'os.path.join("compatdata/1/pfx/drive_c/users/steamuser/", "..", "alice")\n',
+                "/users/steamuser/",
+                id="joined-traversal",
+            ),
+            pytest.param(
+                "cd compatdata/1/pfx/drive_c/users/steamuser/ && cd ../alice\n",
+                "/users/steamuser/",
+                id="shell-traversal",
+            ),
+            pytest.param(
+                "cd compatdata/1/pfx/drive_c/users/steamuser/ && cd ..&& cd alice\n",
+                "/users/steamuser/",
+                id="shell-traversal-before-and",
+            ),
+            pytest.param(
+                "cd compatdata/1/pfx/drive_c/users/steamuser/&&cd ..&&cd alice\n",
+                "/users/steamuser/",
+                id="shell-traversal-unspaced-and",
+            ),
+            pytest.param(
+                "cd compatdata/1/pfx/drive_c/users/steamuser/ &&cd ..&cd alice\n",
+                "/users/steamuser/",
+                id="shell-traversal-before-background",
+            ),
+            pytest.param(
+                "PATH=compatdata/1/pfx/drive_c/users/steamuser/bin:..:/usr/bin\n",
+                "/users/steamuser/",
+                id="path-list-traversal",
+            ),
+            pytest.param("pfx/drive_c/users/\u017fteamuser/save.dat\n", "/users/\u017fteamuser/", id="lookalike"),
+            pytest.param("C:\\Users\\steamuser\\Documents\\save.dat\n", "C:\\Users\\steamuser", id="windows-path"),
+        ],
+    )
+    def test_paths_that_are_not_the_proton_profile_stay_reported(self, tmp_path: Path, content: str, reported: str):
+        (tmp_path / "notes.md").write_text(content, encoding="utf-8")
+
+        result = SecurityValidator(submitter_usernames=[]).validate_pii_only(tmp_path)
+
+        assert [f.metadata["matched_value"] for f in result.findings if f.check_name == "personal_paths"] == [reported]
+
+    def test_unrelated_home_path_does_not_hide_a_personal_home_path_on_the_line(self, tmp_path: Path):
+        """An unrelated home directory is dropped, not a reason to skip the line."""
+        (tmp_path / "notes.md").write_text("cp /home/runner/out.txt /home/alice/backup/\n", encoding="utf-8")
+
+        result = SecurityValidator(submitter_usernames=["alice"]).validate_pii_only(tmp_path)
+
+        home_paths = [f.metadata["matched_value"] for f in result.findings if f.check_name == "home_paths"]
+        assert home_paths == ["/home/alice/"]
 
     def test_detects_non_placeholder_email(self, tmp_path: Path):
         """Test detection of a non-placeholder email address."""
@@ -1210,6 +1422,22 @@ print(json.dumps([finding.metadata["matched_value"] for finding in result.findin
         assert not any(detail.check_name == "skillspector" for detail in result.success_details)
 
     @patch("skillevaluator.validators.security.Tools")
+    def test_llm_stage_keeps_the_static_applicability_block(self, mock_tools, sample_skill_dir: Path):
+        mock_tools.skillspector.is_available = True
+        static_block = {"artifact_type": "skill", "kept_issues": 0, "suppressed_inapplicable_issues": 3}
+        llm_block = {"artifact_type": "skill", "kept_issues": 0, "suppressed_inapplicable_issues": 1}
+        static_result, llm_result = ValidationResult(), ValidationResult()
+        static_result.metadata["skillspector_applicability"] = static_block
+        llm_result.metadata["skillspector_applicability"] = llm_block
+
+        validator = SecurityValidator(use_llm=True)
+        with patch.object(validator, "_run_skillspector_once", side_effect=[static_result, llm_result]):
+            result = validator._run_skillspector(sample_skill_dir)
+
+        assert result.metadata["skillspector_applicability"] == static_block
+        assert result.metadata["skillspector_llm_applicability"] == llm_block
+
+    @patch("skillevaluator.validators.security.Tools")
     def test_deeply_nested_skillspector_json_fails_closed(self, mock_tools, sample_skill_dir: Path):
         mock_tools.skillspector.is_available = True
         mock_tools.skillspector.run.return_value = ToolResult(
@@ -1674,6 +1902,521 @@ print(json.dumps([finding.metadata["matched_value"] for finding in result.findin
         assert any("unexpected suppressed findings" in error.lower() for error in result.errors)
 
     @patch("skillevaluator.validators.security.Tools")
+    def test_requested_skillspector_baseline_accepts_audited_suppressions(
+        self, mock_tools, sample_skill_dir: Path, tmp_path: Path
+    ) -> None:
+        baseline = tmp_path / "approved" / "skillspector-baseline.yaml"
+        baseline.parent.mkdir()
+        baseline.write_text(
+            'version: 2\nrules:\n  - id: "PE5"\n    path: "SKILL.md"\n    reason: "Reviewed"\n',
+            encoding="utf-8",
+        )
+        payload = _skillspector_json_report()
+        payload["suppressed_count"] = 1
+        payload["suppressed"] = [
+            {"id": "PE5", "severity": "HIGH", "suppressed": True, "suppression_reason": "Reviewed"}
+        ]
+        payload["analysis_completeness"].update({"findings_before_filtering": 1, "findings_after_filtering": 1})
+
+        result = _validate_skillspector_payload(
+            mock_tools,
+            sample_skill_dir,
+            payload,
+            validator=SecurityValidator(use_llm=False, skillspector_baseline=baseline),
+        )
+
+        args = mock_tools.skillspector.run.call_args.args[0]
+        assert args[args.index("--baseline") + 1] == str(baseline.resolve())
+        assert result.status == "passed"
+        state = result.metadata["skillspector_baseline"]
+        assert state["loaded"] is True
+        assert state["status"] == "applied"
+        assert (state["rule_count"], state["fingerprint_count"], state["suppressed_findings"]) == (1, 0, 1)
+        # CI can refuse a baseline that hides blocking findings.
+        assert state["suppressed_by_severity"] == {"HIGH": 1}
+        assert state["suppressed_rule_ids"] == ["PE5"]
+        rendered = JSONReporter(include_timestamp=False).render_all([result])
+        reported = json.loads(rendered)["results"][0]["skillspector_baseline"]
+        assert reported["status"] == "applied"
+        # Like quality_config provenance, the report names the file and its digest, never a local path.
+        assert reported["file"] == "skillspector-baseline.yaml"
+        assert reported["digest"] == f"sha256:{hashlib.sha256(baseline.read_bytes()).hexdigest()}"
+        assert str(baseline.parent) not in rendered
+        # Markdown and HTML reports disclose the suppression too; a clean-looking check would hide it.
+        markdown = MarkdownReporter(include_timestamp=False).render_all([result])
+        html = HTMLReporter(include_timestamp=False).render_all([result])
+        for text in (markdown, html):
+            assert "skillspector_baseline" in text
+            assert "skillspector-baseline.yaml" in text and "SkillSpector baseline applied" in text
+            assert "suppressed by the requested baseline" in text
+            assert "No security vulnerabilities detected" not in text
+            assert str(baseline.parent) not in text
+
+    @patch("skillevaluator.validators.security.Tools")
+    def test_skillspector_baseline_suppressions_do_not_loosen_risk_reconciliation(
+        self, mock_tools, sample_skill_dir: Path, tmp_path: Path
+    ) -> None:
+        """Suppressed rows are not unseen occurrences of the active finding."""
+        baseline = tmp_path / "baseline.yaml"
+        baseline.write_text('version: 2\nrules:\n  - id: "PE5"\n    reason: "Reviewed"\n', encoding="utf-8")
+        issue = {
+            "id": "PI-1",
+            "category": "Prompt Injection",
+            "pattern": "Instruction override",
+            "severity": "HIGH",
+            "finding": "Ignore prior instructions",
+            "location": {"file": "SKILL.md", "start_line": 8},
+        }
+        payload = _skillspector_json_report([issue])
+        payload["risk_assessment"] = {"score": 0, "severity": "LOW", "recommendation": "SAFE"}
+        payload["suppressed_count"] = 3
+        payload["suppressed"] = [{"id": "PE5", "suppressed": True} for _ in range(3)]
+        payload["analysis_completeness"].update({"findings_before_filtering": 4, "findings_after_filtering": 4})
+
+        result = _validate_skillspector_payload(
+            mock_tools,
+            sample_skill_dir,
+            payload,
+            validator=SecurityValidator(use_llm=False, skillspector_baseline=baseline),
+        )
+
+        assert result.status == "incomplete"
+        assert any("risk score understates" in error for error in result.errors)
+
+    @patch("skillevaluator.validators.security.Tools")
+    def test_skillspector_baseline_suppressions_do_not_lower_filtered_risk_floor(
+        self, mock_tools, sample_skill_dir: Path, tmp_path: Path
+    ) -> None:
+        """Suppressed rows must not weaken the score floor kept after generated-artifact issues are removed."""
+        baseline = tmp_path / "baseline.yaml"
+        baseline.write_text('version: 2\nrules:\n  - id: "PE5"\n    reason: "Reviewed"\n', encoding="utf-8")
+        issues = [
+            {
+                "id": f"M{index}",
+                "severity": "MEDIUM",
+                "finding": "retained advisory",
+                "location": {"file": "SKILL.md", "start_line": index + 1},
+            }
+            for index in range(6)
+        ]
+        issues.append(
+            {
+                "id": "G1",
+                "severity": "LOW",
+                "finding": "generated evaluation output",
+                "location": {"file": "evals/run-1/output.md", "start_line": 1},
+            }
+        )
+        payload = _skillspector_json_report(issues)
+        payload["risk_assessment"] = {"score": 60, "severity": "HIGH", "recommendation": "DO_NOT_INSTALL"}
+        payload["suppressed_count"] = 3
+        payload["suppressed"] = [{"id": "PE5", "suppressed": True} for _ in range(3)]
+        # One finding SkillSpector did not serialize, plus the three suppressed rows.
+        payload["analysis_completeness"].update({"findings_before_filtering": 11, "findings_after_filtering": 11})
+
+        result = _validate_skillspector_payload(
+            mock_tools,
+            sample_skill_dir,
+            payload,
+            exit_code=1,
+            validator=SecurityValidator(use_llm=False, skillspector_baseline=baseline),
+        )
+
+        assert any("generated artifact" in message for message in result.messages)
+        assert result.metadata["skillspector_baseline"]["status"] == "applied"
+        assert result.status == "failed"
+        assert any(finding.check_name == "skillspector_risk_score" for finding in result.findings)
+
+    @patch("skillevaluator.validators.security.Tools")
+    def test_requested_skillspector_baseline_requires_suppression_accounting(
+        self, mock_tools, sample_skill_dir: Path, tmp_path: Path
+    ) -> None:
+        baseline = tmp_path / "baseline.yaml"
+        baseline.write_text('version: 2\nrules:\n  - id: "PE5"\n    reason: "Reviewed"\n', encoding="utf-8")
+        payload = _skillspector_json_report()
+        del payload["suppressed_count"], payload["suppressed"]
+
+        result = _validate_skillspector_payload(
+            mock_tools,
+            sample_skill_dir,
+            payload,
+            validator=SecurityValidator(use_llm=False, skillspector_baseline=baseline),
+        )
+
+        assert result.status == "incomplete"
+        assert any("does not account for findings suppressed" in error for error in result.errors)
+
+    @pytest.mark.parametrize(("blocking", "status"), [(True, "failed"), (False, "passed")])
+    @patch("skillevaluator.validators.security.Tools")
+    def test_skillspector_fingerprint_version_mismatch_is_reported(
+        self, mock_tools, blocking: bool, status: str, sample_skill_dir: Path, tmp_path: Path
+    ) -> None:
+        baseline = tmp_path / "baseline.yaml"
+        baseline.write_text(
+            'version: 2\nscanner_version: "2.9.0"\nrules: []\nfingerprints:\n'
+            f'  - hash: "sha256:{"0" * 64}"\n    reason: "Reviewed"\n',
+            encoding="utf-8",
+        )
+        issue = {
+            "id": "PI-1",
+            "category": "Prompt Injection",
+            "pattern": "Instruction override",
+            "severity": "HIGH",
+            "finding": "Ignore prior instructions",
+            "location": {"file": "SKILL.md", "start_line": 8},
+        }
+        payload = _skillspector_json_report([issue] if blocking else [])
+
+        result = _validate_skillspector_payload(
+            mock_tools,
+            sample_skill_dir,
+            payload,
+            exit_code=1 if blocking else 0,
+            validator=SecurityValidator(use_llm=False, skillspector_baseline=baseline),
+        )
+
+        state = result.metadata["skillspector_baseline"]
+        assert state["status"] == "fingerprint_version_mismatch"
+        assert (state["baseline_scanner_version"], state["runtime_scanner_version"]) == ("2.9.0", "2.10.0")
+        assert state["active_blocking_findings"] == int(blocking)
+        assert result.status == status
+        # The explanation sits outside SkillSpector's findings, so no baseline entry can hide it.
+        reported = result.errors if blocking else result.warnings
+        assert any("fingerprints were ignored" in line and "SkillSpector 2.10.0" in line for line in reported)
+        assert not any("fingerprints were ignored" in finding.message for finding in result.findings)
+
+    @patch("skillevaluator.validators.security.Tools")
+    def test_rule_only_skillspector_baseline_ignores_scanner_version(
+        self, mock_tools, sample_skill_dir: Path, tmp_path: Path
+    ) -> None:
+        baseline = tmp_path / "baseline.yaml"
+        baseline.write_text(
+            'version: 2\nscanner_version: "2.9.0"\nrules:\n  - id: "PE5"\n    reason: "Reviewed"\n',
+            encoding="utf-8",
+        )
+
+        result = _validate_skillspector_payload(
+            mock_tools,
+            sample_skill_dir,
+            _skillspector_json_report(),
+            validator=SecurityValidator(use_llm=False, skillspector_baseline=baseline),
+        )
+
+        assert result.status == "passed"
+        assert result.metadata["skillspector_baseline"]["status"] == "no_matches"
+        assert any("matched no findings" in message for message in result.messages)
+        assert not result.warnings
+        assert "matched no findings" in MarkdownReporter(include_timestamp=False).render_all([result])
+
+    @pytest.mark.parametrize(
+        "content",
+        [
+            'version: 2\nrules:\n  - id: "*"\n    reason: "Too broad"\n',
+            'version: 2\nrules:\n  - id: "PE5"\n    reason: "Fine"\n  - path: "*/*"\n    message: "*?*"\n'
+            '    reason: "Too broad"\n',
+            'version: 2\nrules:\n  - message: "[!a]*"\n    reason: "Too broad"\n',
+            # A single common letter or digit still matches nearly every finding.
+            'version: 2\nrules:\n  - message: "*e*"\n    reason: "Too broad"\n',
+            'version: 2\nrules:\n  - path: "*s*"\n    reason: "Too broad"\n',
+            'version: 2\nrules:\n  - id: "*P*"\n    reason: "Too broad"\n',
+            'version: 2\nrules:\n  - message: "*a*b*c*d*"\n    reason: "Too broad"\n',
+            "version: 2\nrules:\n  - just-a-string\n",
+            "- not\n- a mapping\n",
+            "version: [2\n",
+            # Schema errors SkillSpector reports only as exit code 2.
+            'version: 2\nrules:\n  - id: "PE5"\n',
+            'version: 2\nrules:\n  - id: "PE5"\n    reason: "  "\n',
+            f'version: 2\nscanner_version: "2.12.0"\nfingerprints:\n  - hash: "sha256:{"0" * 64}"\n',
+            'version: 2\nrules:\n  PE5:\n    reason: "Not a list"\n',
+            'version: 2\nfingerprints: "sha256:abc"\n',
+            # SafeLoader raises a plain ValueError for an impossible timestamp.
+            'version: 2\nrules:\n  - id: "PE5"\n    reason: "Reviewed"\n    reviewed_on: 2026-06-31\n',
+            'version: !!int ""\n',
+            # Chained merge keys double the expanded size on every line.
+            _merge_amplified_yaml(20) + '\nversion: 2\nrules:\n  - id: "PE5"\n    reason: "Reviewed"\n',
+            "a: &a [*a]\nversion: 2\n",
+        ],
+    )
+    @patch("skillevaluator.validators.security.Tools")
+    def test_unusable_skillspector_baseline_blocks_the_scan(
+        self, mock_tools, content: str, sample_skill_dir: Path, tmp_path: Path
+    ) -> None:
+        baseline = tmp_path / "baseline.yaml"
+        baseline.write_text(content, encoding="utf-8")
+        mock_tools.skillspector.is_available = True
+
+        result = SecurityValidator(use_llm=False, skillspector_baseline=baseline).validate_security_only(
+            sample_skill_dir
+        )
+
+        assert result.status == "incomplete"
+        assert any("security scan did not run" in error for error in result.errors)
+        assert not any(str(tmp_path) in error for error in result.errors)
+        state = result.metadata["skillspector_baseline"]
+        assert state["status"] == "not_applied"
+        assert state["message"] and "baseline.yaml" in state["message"]
+        mock_tools.skillspector.run.assert_not_called()
+
+    @patch("skillevaluator.validators.security.Tools")
+    def test_skillspector_baseline_rejection_exit_points_at_the_baseline(
+        self, mock_tools, sample_skill_dir: Path, tmp_path: Path
+    ) -> None:
+        """SkillSpector rejects some baselines only at load time, with exit code 2 and redacted diagnostics."""
+        baseline = tmp_path / "baseline.yaml"
+        baseline.write_text('version: 2\nrules:\n  - id: "PE5"\n    reason: "Reviewed"\n', encoding="utf-8")
+        mock_tools.skillspector.is_available = True
+        mock_tools.skillspector.run.return_value = ToolResult(success=True, stdout="", stderr="", exit_code=2)
+
+        result = SecurityValidator(use_llm=False, skillspector_baseline=baseline).validate_security_only(
+            sample_skill_dir
+        )
+
+        assert result.status == "incomplete"
+        assert any("exit code 2" in error and "--baseline" in error for error in result.errors)
+        state = result.metadata["skillspector_baseline"]
+        assert state["status"] == "not_applied"
+        assert state["message"] and "outcome is unknown" in state["message"]
+
+    @patch("skillevaluator.validators.security.Tools")
+    def test_skillspector_exit_2_without_a_baseline_has_no_baseline_hint(
+        self, mock_tools, sample_skill_dir: Path
+    ) -> None:
+        mock_tools.skillspector.is_available = True
+        mock_tools.skillspector.run.return_value = ToolResult(success=True, stdout="", stderr="", exit_code=2)
+
+        result = SecurityValidator(use_llm=False).validate_security_only(sample_skill_dir)
+
+        assert result.status == "incomplete"
+        assert any("exit code 2" in error for error in result.errors)
+        assert not any("--baseline" in error for error in result.errors)
+        assert "skillspector_baseline" not in result.metadata
+
+    @patch("skillevaluator.validators.security.Tools")
+    def test_missing_skillspector_baseline_blocks_the_scan(
+        self, mock_tools, sample_skill_dir: Path, tmp_path: Path
+    ) -> None:
+        mock_tools.skillspector.is_available = True
+
+        result = SecurityValidator(
+            use_llm=False, skillspector_baseline=tmp_path / "missing.yaml"
+        ).validate_security_only(sample_skill_dir)
+
+        assert result.status == "incomplete"
+        assert any("missing.yaml does not exist" in error for error in result.errors)
+        assert not any(str(tmp_path) in error for error in result.errors)
+        mock_tools.skillspector.run.assert_not_called()
+
+    @pytest.mark.parametrize(
+        "rule",
+        [
+            {"id": "PE5"},
+            {"rule_id": "PE5"},
+            {"file": "SKILL.md"},
+            {"path": "*SKILL.md"},
+            {"message": "*--privilege[d]*"},
+            {"id": "*", "message": "*[t]elemetry*"},
+        ],
+    )
+    def test_bounded_skillspector_baseline_rules_are_accepted(self, rule: dict, tmp_path: Path) -> None:
+        from skillevaluator.validators.security import _inspect_skillspector_baseline
+
+        baseline = tmp_path / "baseline.yaml"
+        baseline.write_text(json.dumps({"version": 2, "rules": [{**rule, "reason": "Reviewed"}]}), encoding="utf-8")
+
+        state, error = _inspect_skillspector_baseline(baseline)
+
+        assert error is None
+        assert state["rule_count"] == 1
+
+    @pytest.mark.parametrize(
+        ("content", "expected"),
+        [
+            ("version: 2\nrules:\n  - PE5\n", "rule 0 in baseline.yaml must be a mapping"),
+            (
+                f'version: 2\nscanner_version: "2.13.3"\nfingerprints:\n  - "sha256:{"0" * 64}"\n',
+                "fingerprint 0 in baseline.yaml must be a mapping with 'hash' and 'reason'",
+            ),
+            (
+                'version: 2\nrules:\n  - id: "PE5"\n    reason: "Reviewed"\n    reviewed_on: 2026-06-31\n',
+                "baseline.yaml could not be parsed (ValueError)",
+            ),
+            (
+                _merge_amplified_yaml(20),
+                "baseline.yaml exceeds the expanded YAML node limit",
+            ),
+        ],
+    )
+    def test_skillspector_baseline_rejections_name_the_actual_problem(
+        self, content: str, expected: str, tmp_path: Path
+    ) -> None:
+        """A shape, date, or expansion error is reported as such, not as an unbounded rule or a crash."""
+        from skillevaluator.validators.security import _inspect_skillspector_baseline
+
+        baseline = tmp_path / "baseline.yaml"
+        baseline.write_text(content, encoding="utf-8")
+
+        _state, error = _inspect_skillspector_baseline(baseline)
+
+        assert error is not None and error.endswith(expected), error
+
+    def test_oversized_skillspector_baseline_is_rejected_before_parsing(self, tmp_path: Path) -> None:
+        from skillevaluator.validators.security import (
+            _SKILLSPECTOR_BASELINE_MAX_BYTES,
+            _inspect_skillspector_baseline,
+        )
+
+        baseline = tmp_path / "baseline.yaml"
+        baseline.write_bytes(b"#" * (_SKILLSPECTOR_BASELINE_MAX_BYTES + 1))
+
+        state, error = _inspect_skillspector_baseline(baseline)
+
+        assert error is not None and "byte limit" in error
+        assert state["digest"] is None
+
+    @pytest.mark.parametrize("content", ["", "# no exceptions yet\n"])
+    @patch("skillevaluator.validators.security.Tools")
+    def test_empty_skillspector_baseline_is_an_empty_baseline(
+        self, mock_tools, content: str, sample_skill_dir: Path, tmp_path: Path
+    ) -> None:
+        """SkillSpector loads an empty or comment-only baseline as one with no exceptions."""
+        baseline = tmp_path / "baseline.yaml"
+        baseline.write_text(content, encoding="utf-8")
+
+        result = _validate_skillspector_payload(
+            mock_tools,
+            sample_skill_dir,
+            _skillspector_json_report(),
+            validator=SecurityValidator(use_llm=False, skillspector_baseline=baseline),
+        )
+
+        assert result.status == "passed", result.errors
+        state = result.metadata["skillspector_baseline"]
+        assert (state["status"], state["rule_count"], state["fingerprint_count"]) == ("no_matches", 0, 0)
+
+    @pytest.mark.parametrize("version", [None, 1])
+    def test_legacy_rule_only_skillspector_baseline_needs_no_reason(self, version: int | None, tmp_path: Path) -> None:
+        """SkillSpector requires a reason only in version 2 baselines."""
+        from skillevaluator.validators.security import _inspect_skillspector_baseline
+
+        content: dict = {"rules": [{"id": "PE5"}]}
+        if version is not None:
+            content["version"] = version
+        baseline = tmp_path / "baseline.yaml"
+        baseline.write_text(json.dumps(content), encoding="utf-8")
+
+        state, error = _inspect_skillspector_baseline(baseline)
+
+        assert error is None
+        assert (state["schema_version"], state["rule_count"]) == (version, 1)
+
+    @patch("skillevaluator.validators.security.Tools")
+    def test_skillspector_baseline_reaches_llm_enrichment_stage(
+        self, mock_tools, sample_skill_dir: Path, tmp_path: Path, monkeypatch
+    ) -> None:
+        baseline = tmp_path / "baseline.yaml"
+        baseline.write_text('version: 2\nrules:\n  - id: "PE5"\n    reason: "Reviewed"\n', encoding="utf-8")
+        monkeypatch.setenv("SKILL_EVAL_LLM_PROVIDER", "nv_build")
+        monkeypatch.setenv("NVIDIA_API_KEY", "test-credential")
+        static = _skillspector_json_report()
+        enriched = _skillspector_json_report(llm_requested=True, llm_available=True)
+        mock_tools.skillspector.is_available = True
+        mock_tools.skillspector.run.side_effect = [
+            ToolResult(success=True, stdout=json.dumps(report), stderr="", exit_code=0) for report in (static, enriched)
+        ]
+
+        result = SecurityValidator(use_llm=True, skillspector_baseline=baseline).validate_security_only(
+            sample_skill_dir
+        )
+
+        assert result.status == "passed", result.errors
+        stages = [call.args[0] for call in mock_tools.skillspector.run.call_args_list]
+        assert ["--no-llm" in args for args in stages] == [True, False]
+        assert all(args[args.index("--baseline") + 1] == str(baseline.resolve()) for args in stages)
+
+    @pytest.mark.parametrize(("llm_suppressed", "status"), [(0, "llm_stage_unmatched"), (1, "applied")])
+    @patch("skillevaluator.validators.security.Tools")
+    def test_skillspector_baseline_outcome_accounts_for_each_stage(
+        self,
+        mock_tools,
+        llm_suppressed: int,
+        status: str,
+        sample_skill_dir: Path,
+        tmp_path: Path,
+        monkeypatch,
+    ) -> None:
+        """LLM meta-analysis rewrites findings, so static fingerprints can stop matching in that stage."""
+        baseline = tmp_path / "baseline.yaml"
+        baseline.write_text(
+            f'version: 2\nscanner_version: "2.10.0"\nfingerprints:\n  - hash: "sha256:{"1" * 64}"\n'
+            '    reason: "Reviewed"\n',
+            encoding="utf-8",
+        )
+        monkeypatch.setenv("SKILL_EVAL_LLM_PROVIDER", "nv_build")
+        monkeypatch.setenv("NVIDIA_API_KEY", "test-credential")
+        static = _skillspector_json_report()
+        static["suppressed_count"] = 1
+        static["suppressed"] = [{"id": "PE5", "suppressed": True}]
+        static["analysis_completeness"].update({"findings_before_filtering": 1, "findings_after_filtering": 1})
+        privileged = {
+            "id": "PE5",
+            "category": "Privilege Escalation",
+            "pattern": "Privileged container",
+            "severity": "HIGH",
+            "finding": "Container runs with full host privileges (LLM-confirmed)",
+            "location": {"file": "SKILL.md", "start_line": 5},
+        }
+        enriched = _skillspector_json_report(
+            [] if llm_suppressed else [privileged], llm_requested=True, llm_available=True
+        )
+        if llm_suppressed:
+            enriched["suppressed_count"] = 1
+            enriched["suppressed"] = [{"id": "PE5", "suppressed": True}]
+            enriched["analysis_completeness"].update({"findings_before_filtering": 1, "findings_after_filtering": 1})
+        mock_tools.skillspector.is_available = True
+        mock_tools.skillspector.run.side_effect = [
+            ToolResult(success=True, stdout=json.dumps(static), stderr="", exit_code=0),
+            ToolResult(success=True, stdout=json.dumps(enriched), stderr="", exit_code=0 if llm_suppressed else 1),
+        ]
+
+        result = SecurityValidator(use_llm=True, skillspector_baseline=baseline).validate_security_only(
+            sample_skill_dir
+        )
+
+        state = result.metadata["skillspector_baseline"]
+        assert state["status"] == status
+        # The static stage's count is not overwritten by the LLM stage's.
+        assert (state["suppressed_findings"], state["llm_stage_suppressed_findings"]) == (1, llm_suppressed)
+        if llm_suppressed:
+            assert result.status == "passed", result.errors
+        else:
+            assert result.status == "failed"
+            assert state["active_blocking_findings"] == 1
+            assert any("only 0 in the LLM stage" in error and "--llm" in error for error in result.errors)
+            # The outcome stays visible when the error list is rebuilt later.
+            assert any(
+                detail.check_name == "skillspector_baseline" and "only 0 in the LLM stage" in detail.message
+                for detail in result.success_details
+            )
+            assert not any("matched no findings" in message for message in result.messages)
+
+    def test_folder_scan_keeps_the_baseline_outcome_in_each_passing_skill_line(self, tmp_path: Path) -> None:
+        folder = tmp_path / "skills"
+        for name in ("a", "b"):
+            (folder / name).mkdir(parents=True)
+            (folder / name / "SKILL.md").write_text(f"---\nname: {name}\ndescription: d\n---\n", encoding="utf-8")
+
+        def single(skill_dir: Path) -> ValidationResult:
+            outcome = ValidationResult()
+            outcome.add_success(check_name="skillspector_baseline", message=f"{skill_dir.name}: baseline applied")
+            return outcome
+
+        result = SecurityValidator(use_llm=False)._validate_folder_or_skill(folder, single, "Scanning")
+
+        markdown = MarkdownReporter(include_timestamp=False).render_all([result])
+        assert "a: baseline applied" in markdown
+        assert "b: baseline applied" in markdown
+
+    @patch("skillevaluator.validators.security.Tools")
     def test_skillspector_2_10_partial_scan_reports_incomplete_before_recommendation(
         self,
         mock_tools,
@@ -1813,6 +2556,137 @@ print(json.dumps([finding.metadata["matched_value"] for finding in result.findin
 
         assert result.status == "incomplete"
         assert any("risk_assessment.recommendation" in error for error in result.errors)
+
+    @patch("skillevaluator.validators.security.Tools")
+    def test_skillspector_partial_scan_names_incomplete_files_by_reason(
+        self,
+        mock_tools,
+        sample_skill_dir: Path,
+    ) -> None:
+        """A truncated incomplete-analysis error still says why every file was cut short."""
+        ledger = [_ledger_exception(f"references/sect-{index}.html") for index in range(6)]
+        # A second analyzer group on the same file must not count the file twice.
+        ledger.append(_ledger_exception("references/sect-0.html", analyzers=("static_yara",)))
+        ledger.append(_ledger_exception("references/base.css", "obfuscated_instruction_text"))
+        payload = _skillspector_partially_inspected_report(ledger, inspected=("SKILL.md",))
+
+        result = _validate_skillspector_payload(mock_tools, sample_skill_dir, payload)
+
+        assert result.status == "incomplete"
+        assert len(result.errors) == 1
+        analyzers = ",".join(_REGULAR_ANALYZERS)
+        assert result.errors[0].startswith(
+            "skillspector JSON field 'analysis_completeness' reports incomplete analysis (status 'partial'): "
+            f"references/sect-0.html [static; runtime_limit; analyzers={analyzers}]; "
+            f"references/sect-1.html [static; runtime_limit; analyzers={analyzers}]; "
+            f"references/sect-2.html [static; runtime_limit; analyzers={analyzers}]; "
+            "and 5 more (incomplete files by reason: runtime_limit 6, obfuscated_instruction_text 1); "
+            "security scan did not complete. "
+            "SkillSpector reached a runtime limit before it finished 6 file(s). When many files are affected, "
+            "the skill most likely bundles more content than SkillSpector can inspect within its time budgets"
+        )
+        assert "keep large reference material outside the skill" in result.errors[0]
+        assert "a plain rerun may complete" in result.errors[0]
+
+    @patch("skillevaluator.validators.security.Tools")
+    def test_skillspector_sub_analysis_time_budget_does_not_blame_bundle_size(
+        self,
+        mock_tools,
+        sample_skill_dir: Path,
+    ) -> None:
+        """SkillSpector 2.12.0's SC8 bytecode walk can stop at its own budget on a skill without bytecode."""
+        payload = _skillspector_partial_report([_ledger_exception("references", analyzers=(_SC8_BUDGET_ANALYZER,))])
+        supply_chain = next(
+            status
+            for status in payload["analysis_completeness"]["analyzer_statuses"]
+            if status["analyzer_id"] == "static_patterns_supply_chain"
+        )
+        supply_chain.update({"status": "degraded", "planned_work": 1, "completed": 0, "partial": 1})
+        payload["analysis_completeness"]["limitations"] = ["Analyzer static_patterns_supply_chain status: degraded."]
+
+        result = _validate_skillspector_payload(mock_tools, sample_skill_dir, payload)
+
+        assert result.status == "incomplete"
+        assert result.errors == [
+            "skillspector JSON field 'analysis_completeness' reports incomplete analysis (status 'partial'): "
+            f"references [static; runtime_limit; analyzers={_SC8_BUDGET_ANALYZER}]; "
+            "security scan did not complete. "
+            "A SkillSpector sub-analysis stopped at its own time budget on 1 file(s). That budget is separate "
+            "from the whole-scan limit, so reducing bundled content does not change it. Rerun the scan; if the "
+            "limit repeats, update SkillSpector or report the completeness exceptions to the SkillSpector project."
+        ]
+
+    def test_skillspector_runtime_limit_hint_counts_only_scan_budget_files(self) -> None:
+        ledger = [
+            _ledger_exception("SKILL.md", analyzers=(_SC8_BUDGET_ANALYZER,)),
+            *(_ledger_exception(f"references/sect-{index}.html") for index in range(3)),
+            # A stage budget such as bundle discovery names no analyzer; bundle size still matters.
+            _ledger_exception("references", analyzers=(), phase="discovery"),
+        ]
+
+        error = _skillspector_incomplete_analysis_error("partial", ledger)
+
+        assert "SkillSpector reached a runtime limit before it finished 4 file(s)." in error
+        assert "keep large reference material outside the skill" in error
+        # The bytecode-budget file still gets its own rerun or update advice.
+        assert error.endswith(
+            "a plain rerun may complete. A SkillSpector sub-analysis stopped at its own time budget on 1 file(s). "
+            "That budget is separate from the whole-scan limit, so reducing bundled content does not change it. "
+            "Rerun the scan; if the limit repeats, update SkillSpector or report the completeness exceptions to "
+            "the SkillSpector project."
+        )
+        assert error.count("runtime limit before it finished") == 1
+        # The report does not say which budget ran out, so the hint names no specific deadline.
+        assert "seconds" not in error
+
+    def test_skillspector_runtime_limit_hint_covers_every_runtime_limit_file_in_the_count(self) -> None:
+        """With both kinds of runtime_limit rows, the two hints add up to the by-reason file count."""
+        ledger = [
+            *(_ledger_exception(f"references/sect-{index}.html") for index in range(3)),
+            _ledger_exception("scripts/build.py", analyzers=(_SC8_BUDGET_ANALYZER,)),
+        ]
+
+        error = _skillspector_incomplete_analysis_error("partial", ledger)
+
+        assert "and 1 more (incomplete files by reason: runtime_limit 4);" in error
+        assert "SkillSpector reached a runtime limit before it finished 3 file(s)." in error
+        assert "A SkillSpector sub-analysis stopped at its own time budget on 1 file(s)." in error
+
+    def test_skillspector_incomplete_analysis_error_without_runtime_limit_has_no_hint(self) -> None:
+        ledger = [
+            {**_ledger_exception("scripts/render.py", "static_parse_limit"), "start_line": 12},
+            _ledger_exception(
+                "references/guide.md", "reference_unresolved", analyzers=(), phase="reference_resolution"
+            ),
+        ]
+
+        assert _skillspector_incomplete_analysis_error("partial", ledger) == (
+            "skillspector JSON field 'analysis_completeness' reports incomplete analysis (status 'partial'): "
+            f"scripts/render.py:12 [static; static_parse_limit; analyzers={','.join(_REGULAR_ANALYZERS)}]; "
+            "references/guide.md [reference_resolution; reference_unresolved]; security scan did not complete"
+        )
+        # Without ledger exceptions (limitations or counters only) the error is unchanged.
+        assert _skillspector_incomplete_analysis_error("partial", []) == (
+            "skillspector JSON field 'analysis_completeness' reports incomplete analysis (status 'partial'); "
+            "security scan did not complete"
+        )
+
+    def test_skillspector_incomplete_analysis_error_bounds_untrusted_report_text(self) -> None:
+        ledger = [
+            {
+                "fatal": False,
+                "reason_code": "runtime_limit\n- injected",
+                "path": "docs/a\nb.md",
+                "analyzers": ["x" * 500, 7],
+            },
+            {"fatal": False, "reason_code": None, "path": None, "start_line": True},
+        ]
+
+        error = _skillspector_incomplete_analysis_error("partial", ledger)
+
+        assert "\n" not in error
+        assert f"docs/a b.md [runtime_limit - injected; analyzers={'x' * 197}...]; unknown; " in error
+        assert "x" * 198 not in error
 
     @pytest.mark.parametrize(
         ("failure_mode", "expected_error"),
@@ -5651,6 +6525,534 @@ description: Test
         assert "aws" in findings_text
 
 
+_GENERIC_LLM_EXIT_2_ERROR = "skillspector-llm failed with unexpected exit code 2: scanner diagnostics were redacted"
+_PROVIDER_OUTAGE_ERROR_START = "skillspector-llm did not complete: the LLM provider kept failing"
+_SEMANTIC_RUNTIME_ROW = {
+    "outcome": "partial",
+    "phase": "semantic_runtime",
+    "reason_code": "semantic_runtime_incomplete",
+    "message": "Requested semantic analysis did not produce complete per-source runtime telemetry.",
+    "path": "SKILL.md",
+    "start_line": None,
+    "end_line": None,
+    "fatal": False,
+}
+
+
+def _skillspector_provider_outage_report(*, old_scanner: bool = False) -> dict:
+    """Return a SkillSpector 2.13.3 LLM-stage report whose only fatal cause is provider retry exhaustion.
+
+    ``old_scanner`` adds what SkillSpector can also emit for the same outage: a
+    failed row for ``SKILL.md``, a High AE1 finding derived from the outage, and
+    the run-level ``semantic_runtime_incomplete`` row.
+    """
+    row = {
+        "outcome": "failed",
+        "phase": "semantic",
+        "reason_code": "llm_connection_retries_exhausted",
+        "message": "Transient LLM provider failure persisted after bounded retries.",
+        "path": "references/guide.md",
+        "start_line": None,
+        "end_line": None,
+        "fatal": True,
+        "error_class": "RateLimitError",
+        "analyzers": ["mcp_tool_poisoning", "semantic_security_discovery"],
+    }
+    payload = _skillspector_json_report(llm_requested=True, llm_available=True)
+    payload["metadata"]["skillspector_version"] = "2.13.3"
+    payload["components"] = [
+        {"path": "SKILL.md", "executable": False},
+        {"path": "references/guide.md", "executable": False},
+    ]
+    payload["execution_successful"] = False
+    completeness = payload["analysis_completeness"]
+    completeness.update(
+        {
+            "execution_successful": False,
+            "status": "failed",
+            "is_complete": False,
+            "total_components": 2,
+            "scanned_components": 1,
+            "fully_inspected_files": 1,
+            "partially_inspected_files": 1,
+            "coverage_percent": 50.0,
+            "ledger_exceptions": [row],
+            "limitations": [f"Analyzer {analyzer} status: failed." for analyzer in row["analyzers"]],
+        }
+    )
+    for status in completeness["analyzer_statuses"]:
+        if status["analyzer_id"] in row["analyzers"]:
+            status.update({"status": "failed", "planned_work": 2, "completed": 1, "failed": 1})
+    if old_scanner:
+        completeness["ledger_exceptions"].append({**row, "path": "SKILL.md"})
+        completeness["ledger_exceptions"].append(dict(_SEMANTIC_RUNTIME_ROW))
+        for status in completeness["analyzer_statuses"]:
+            if status["analyzer_id"] in row["analyzers"]:
+                status.update({"planned_work": 3, "failed": 2})
+        payload["issues"] = [
+            {
+                "id": "AE1",
+                "finding_id": "finding-ae1",
+                "confidence": 1.0,
+                "category": "Analysis Evasion",
+                "pattern": "Incomplete referenced artifact analysis",
+                "severity": "HIGH",
+                "finding": "references/guide.md (failed)",
+                "location": {"file": "SKILL.md", "start_line": 7},
+                "evidence": {
+                    "target_path": "references/guide.md",
+                    "target_disposition": "failed",
+                    "reasons": [
+                        {
+                            "reason_code": row["reason_code"],
+                            "phase": row["phase"],
+                            "message": row["message"],
+                            "analyzers": list(row["analyzers"]),
+                        }
+                    ],
+                },
+            }
+        ]
+        payload["risk_assessment"].update({"score": 80, "severity": "HIGH"})
+    return payload
+
+
+def _run_llm_scan(
+    mock_tools,
+    skill_dir: Path,
+    llm_report: dict,
+    *,
+    exit_code: int = 2,
+    static_issues: list[dict] | None = None,
+    error_message: str | None = None,
+    baseline: Path | None = None,
+) -> ValidationResult:
+    """Run a static stage that completes, then an LLM stage that returns *llm_report*."""
+    mock_tools.skillspector.is_available = True
+    mock_tools.skillspector.run.side_effect = [
+        ToolResult(
+            success=True,
+            stdout=json.dumps(_skillspector_json_report(static_issues)),
+            stderr="",
+            exit_code=1 if static_issues else 0,
+        ),
+        ToolResult(
+            success=True,
+            stdout=json.dumps(llm_report),
+            stderr="",
+            exit_code=exit_code,
+            error_message=error_message,
+        ),
+    ]
+    return SecurityValidator(use_llm=True, skillspector_baseline=baseline).validate_security_only(skill_dir)
+
+
+class TestSkillspectorProviderOutage:
+    """A SkillSpector LLM provider outage stays INCOMPLETE and says the scan can be retried."""
+
+    @pytest.mark.parametrize("old_scanner", [False, True], ids=["provider-rows", "with-ae1"])
+    @patch("skillevaluator.validators.security.Tools")
+    def test_provider_only_failure_is_incomplete_with_retry_advice(
+        self,
+        mock_tools,
+        old_scanner: bool,
+        sample_skill_dir: Path,
+    ) -> None:
+        result = _run_llm_scan(
+            mock_tools, sample_skill_dir, _skillspector_provider_outage_report(old_scanner=old_scanner)
+        )
+
+        assert result.status == "incomplete"
+        assert not result.passed
+        assert result.incomplete_scans == ["skillspector-llm"]
+        # Issues in the failed LLM report, including an outage-derived AE1, are not converted.
+        assert result.findings == []
+        assert len(result.errors) == 1
+        error = result.errors[0]
+        assert error.startswith(_PROVIDER_OUTAGE_ERROR_START)
+        assert "(llm_connection_retries_exhausted)" in error
+        assert "retriable provider failure" in error
+        assert "Retry the full scan when the provider is available." in error
+        assert "unexpected exit code" not in error
+        report = json.loads(JSONReporter(include_timestamp=False).render_all([result]))
+        assert report["overall_status"] == "incomplete"
+        assert report["overall_passed"] is False
+        # Strip styling and line wrapping, which depend on the terminal.
+        cli_text = " ".join(re.sub(r"\x1b\[[0-9;]*m", "", CLIReporter().render_all([result])).split())
+        assert "[INCOMPLETE] skillspector-llm did not complete" in cli_text
+        assert "retriable provider failure, not a security finding" in cli_text
+
+    @patch("skillevaluator.validators.security.Tools")
+    def test_provider_outage_with_a_baseline_gets_only_the_retry_advice(
+        self,
+        mock_tools,
+        sample_skill_dir: Path,
+        tmp_path: Path,
+    ) -> None:
+        baseline = tmp_path / "audit" / "skillspector-baseline.yaml"
+        baseline.parent.mkdir()
+        baseline.write_text(
+            'version: 2\nrules:\n  - id: "PE5"\n    path: "SKILL.md"\n    reason: "Reviewed"\n',
+            encoding="utf-8",
+        )
+
+        result = _run_llm_scan(mock_tools, sample_skill_dir, _skillspector_provider_outage_report(), baseline=baseline)
+
+        assert result.incomplete_scans == ["skillspector-llm"]
+        [error] = result.errors
+        assert error.startswith(_PROVIDER_OUTAGE_ERROR_START)
+        assert "--baseline" not in error
+        assert ".." not in error
+
+    @patch("skillevaluator.validators.security.Tools")
+    def test_provider_failure_keeps_static_findings_and_failed_verdict(
+        self,
+        mock_tools,
+        sample_skill_dir: Path,
+    ) -> None:
+        static_issue = {
+            "id": "DE1",
+            "category": "Data Exfiltration",
+            "pattern": "Data exfiltration",
+            "severity": "HIGH",
+            "finding": "Sends secrets to an untrusted endpoint",
+            "location": {"file": "SKILL.md", "start_line": 3},
+        }
+
+        result = _run_llm_scan(
+            mock_tools,
+            sample_skill_dir,
+            _skillspector_provider_outage_report(old_scanner=True),
+            static_issues=[static_issue],
+        )
+
+        assert result.incomplete_scans == ["skillspector-llm"]
+        assert [finding.check_name for finding in result.findings] == ["Data exfiltration (DE1)"]
+        assert result.findings[0].severity == Severity.HIGH
+        assert any(error.startswith(_PROVIDER_OUTAGE_ERROR_START) for error in result.errors)
+        report = json.loads(JSONReporter(include_timestamp=False).render_all([result]))
+        assert report["overall_status"] == "failed"
+        assert report["overall_passed"] is False
+
+    @pytest.mark.parametrize("exit_code", [0, 1])
+    @patch("skillevaluator.validators.security.Tools")
+    def test_failed_execution_with_policy_exit_code_gets_provider_message(
+        self,
+        mock_tools,
+        exit_code: int,
+        sample_skill_dir: Path,
+    ) -> None:
+        """A report with execution_successful=false is explained the same way after exit 0 or 1."""
+        result = _run_llm_scan(
+            mock_tools,
+            sample_skill_dir,
+            _skillspector_provider_outage_report(),
+            exit_code=exit_code,
+        )
+
+        assert result.incomplete_scans == ["skillspector-llm"]
+        assert result.findings == []
+        assert len(result.errors) == 1
+        assert result.errors[0].startswith(_PROVIDER_OUTAGE_ERROR_START)
+
+    @pytest.mark.parametrize("phase", ["semantic", "meta"])
+    @patch("skillevaluator.validators.security.Tools")
+    def test_run_level_runtime_row_accompanies_provider_failure(
+        self,
+        mock_tools,
+        phase: str,
+        sample_skill_dir: Path,
+    ) -> None:
+        """The SKILL.md runtime row may accompany a helper-file or meta-analysis outage."""
+        payload = _skillspector_provider_outage_report(old_scanner=True)
+        completeness = payload["analysis_completeness"]
+        provider_row, _skill_md_row, runtime_row = completeness["ledger_exceptions"]
+        completeness["ledger_exceptions"] = [provider_row, runtime_row]
+        if phase == "meta":
+            provider_row.update({"phase": "meta", "analyzers": ["meta_analyzer"]})
+            for status in completeness["analyzer_statuses"]:
+                if status["analyzer_id"] == "meta_analyzer":
+                    status.update({"status": "failed", "planned_work": 1, "completed": 0, "failed": 1})
+                elif status["status"] == "failed":
+                    status.update({"status": "completed", "completed": status["planned_work"], "failed": 0})
+            completeness["limitations"] = ["Analyzer meta_analyzer status: failed."]
+
+        result = _run_llm_scan(mock_tools, sample_skill_dir, payload)
+
+        assert result.incomplete_scans == ["skillspector-llm"]
+        assert len(result.errors) == 1
+        assert result.errors[0].startswith(_PROVIDER_OUTAGE_ERROR_START)
+
+    @pytest.mark.parametrize("exit_code", [2, 0])
+    @pytest.mark.parametrize(
+        ("version", "provider_message"),
+        [("2.11.2", False), ("2.12.0", True)],
+        ids=["sdk-retries-only", "own-retry-loop"],
+    )
+    @patch("skillevaluator.validators.security.Tools")
+    def test_provider_message_needs_skillspector_2_12_0(
+        self,
+        mock_tools,
+        version: str,
+        provider_message: bool,
+        exit_code: int,
+        sample_skill_dir: Path,
+    ) -> None:
+        """Before 2.12.0 the reason covered only a connection error left after the provider SDK's retries."""
+        payload = _skillspector_provider_outage_report()
+        payload["metadata"]["skillspector_version"] = version
+
+        result = _run_llm_scan(mock_tools, sample_skill_dir, payload, exit_code=exit_code)
+
+        assert result.status == "incomplete"
+        assert result.incomplete_scans == ["skillspector-llm"]
+        if provider_message:
+            assert len(result.errors) == 1
+            assert result.errors[0].startswith(_PROVIDER_OUTAGE_ERROR_START)
+        else:
+            assert not any("LLM provider kept failing" in error for error in result.errors)
+            if exit_code == 2:
+                assert result.errors == [_GENERIC_LLM_EXIT_2_ERROR]
+
+    @pytest.mark.parametrize("exit_code", [2, 0])
+    @pytest.mark.parametrize(
+        "mutation",
+        [
+            "mixed_static_failure",
+            "mixed_llm_failure",
+            "partial_runtime_limit",
+            "truncated_ledger",
+            "malformed_row",
+            "non_llm_analyzer",
+            "meta_analyzer_in_semantic_phase",
+            "duplicate_analyzer",
+            "older_scanner",
+            "missing_version",
+            "unknown_limitation",
+            "unfinished_static_analyzer",
+            "unaccounted_provider_work",
+            "runtime_row_elsewhere",
+            "runtime_row_reworded",
+            "runtime_row_only",
+            "reported_errors",
+            "provider_analyzer_completed",
+            "duplicate_status",
+            "status_reason_mismatch",
+            "unexplained_status_message",
+            "unhashable_phase",
+            "unhashable_status",
+            "unhashable_status_message",
+            "provider_analyzer_missing_status",
+            "completeness_not_failed",
+            "completeness_marked_complete",
+            "empty_row_path",
+            "oversized_row_message",
+            "top_level_errors",
+            "top_level_execution_successful",
+            "completeness_execution_successful",
+            "provider_status_partial",
+            "provider_status_skipped",
+            "row_outcome_skipped",
+            "empty_row_analyzers",
+            "empty_row_message",
+            "oversized_ledger",
+            "runtime_row_fatal_zero",
+        ],
+    )
+    @patch("skillevaluator.validators.security.Tools")
+    def test_uncertain_evidence_keeps_generic_error(
+        self,
+        mock_tools,
+        mutation: str,
+        exit_code: int,
+        sample_skill_dir: Path,
+    ) -> None:
+        """Mixed, malformed, truncated or older reports cannot pass for a provider outage."""
+        payload = _skillspector_provider_outage_report(old_scanner=True)
+        completeness = payload["analysis_completeness"]
+        rows = completeness["ledger_exceptions"]
+        provider_row = rows[0]
+        if mutation == "mixed_static_failure":
+            rows.append({**provider_row, "phase": "static", "reason_code": "syntax_error", "path": "scripts/run.py"})
+        elif mutation == "mixed_llm_failure":
+            rows.append({**provider_row, "reason_code": "llm_response_refused"})
+        elif mutation == "partial_runtime_limit":
+            rows.append({**provider_row, "outcome": "partial", "fatal": False, "reason_code": "runtime_limit"})
+        elif mutation == "truncated_ledger":
+            completeness["ledger_exceptions_truncated"] = True
+        elif mutation == "malformed_row":
+            provider_row["fatal"] = "yes"
+        elif mutation == "non_llm_analyzer":
+            # A consistent report in which a static analyzer, not an LLM
+            # analyzer, failed with the provider reason: only the LLM-analyzer
+            # allowlist rejects it.
+            provider_row["analyzers"] = ["static_yara"]
+            completeness["ledger_exceptions"] = [provider_row, rows[-1]]
+            for status in completeness["analyzer_statuses"]:
+                if status["analyzer_id"] == "static_yara":
+                    status.update({"status": "failed", "completed": status["planned_work"] - 1, "failed": 1})
+                elif status["status"] == "failed":
+                    status.update({"status": "completed", "completed": status["planned_work"], "failed": 0})
+            completeness["limitations"] = ["Analyzer static_yara status: failed."]
+        elif mutation == "meta_analyzer_in_semantic_phase":
+            provider_row["analyzers"] = ["meta_analyzer"]
+        elif mutation == "duplicate_analyzer":
+            provider_row["analyzers"] = ["semantic_security_discovery", "semantic_security_discovery"]
+        elif mutation == "older_scanner":
+            payload["metadata"]["skillspector_version"] = "2.11.1"
+        elif mutation == "missing_version":
+            del payload["metadata"]["skillspector_version"]
+        elif mutation == "unknown_limitation":
+            completeness["limitations"].append("Artifact inspection incomplete for an unknown reason.")
+        elif mutation == "unfinished_static_analyzer":
+            static_status = next(s for s in completeness["analyzer_statuses"] if s["analyzer_id"] == "static_yara")
+            static_status.update({"status": "failed", "completed": 0, "failed": static_status["planned_work"]})
+        elif mutation == "unaccounted_provider_work":
+            next(
+                s for s in completeness["analyzer_statuses"] if s["analyzer_id"] == "semantic_security_discovery"
+            ).update({"unaccounted": 1, "planned_work": 4})
+        elif mutation == "runtime_row_elsewhere":
+            rows[-1]["path"] = "references/guide.md"
+        elif mutation == "runtime_row_reworded":
+            rows[-1]["message"] = "Unrelated runtime data is missing."
+        elif mutation == "runtime_row_only":
+            completeness["ledger_exceptions"] = [rows[-1]]
+        elif mutation == "reported_errors":
+            completeness["errors"] = ["scanner fault"]
+        elif mutation == "completeness_not_failed":
+            completeness["status"] = "partial"
+        elif mutation == "completeness_marked_complete":
+            completeness["is_complete"] = True
+        elif mutation == "empty_row_path":
+            provider_row["path"] = "  "
+        elif mutation == "oversized_row_message":
+            provider_row["message"] = "x" * 4097
+        elif mutation == "top_level_errors":
+            payload["errors"] = ["scanner fault"]
+        elif mutation == "top_level_execution_successful":
+            payload["execution_successful"] = True
+        elif mutation == "completeness_execution_successful":
+            completeness["execution_successful"] = True
+        elif mutation == "row_outcome_skipped":
+            provider_row["outcome"] = "skipped"
+        elif mutation == "empty_row_analyzers":
+            rows.append({**provider_row, "path": "references/extra.md", "analyzers": []})
+        elif mutation == "empty_row_message":
+            provider_row["message"] = ""
+        elif mutation == "oversized_ledger":
+            # Valid provider rows, one more than the 4096-row bound.
+            rows.extend({**provider_row, "path": f"references/extra-{index}.md"} for index in range(4097 - len(rows)))
+        elif mutation == "runtime_row_fatal_zero":
+            # 0 == False, so only an identity check tells this row apart.
+            rows[-1]["fatal"] = 0
+        else:
+            statuses = completeness["analyzer_statuses"]
+            discovery = next(s for s in statuses if s["analyzer_id"] == "semantic_security_discovery")
+            if mutation == "provider_analyzer_completed":
+                discovery.update({"status": "completed", "completed": discovery["planned_work"], "failed": 0})
+                completeness["limitations"].remove("Analyzer semantic_security_discovery status: failed.")
+            elif mutation == "duplicate_status":
+                statuses.append(dict(discovery))
+            elif mutation == "status_reason_mismatch":
+                discovery["reason_code"] = "analyzer_runtime_error"
+            elif mutation == "unexplained_status_message":
+                discovery["message"] = "Analyzer failed after beginning applicable work."
+                completeness["limitations"] = ["Analyzer failed after beginning applicable work."]
+            elif mutation == "unhashable_phase":
+                provider_row["phase"] = ["semantic"]
+            elif mutation == "unhashable_status":
+                discovery["status"] = ["failed"]
+            elif mutation == "unhashable_status_message":
+                discovery["message"] = ["Transient LLM provider failure persisted after bounded retries."]
+            elif mutation in ("provider_status_partial", "provider_status_skipped"):
+                discovery.update({mutation.removeprefix("provider_status_"): 1, "planned_work": 4})
+            elif mutation == "provider_analyzer_missing_status":
+                # The row names an analyzer whose work no status accounts for.
+                statuses.remove(next(s for s in statuses if s["analyzer_id"] == "mcp_tool_poisoning"))
+                completeness["limitations"].remove("Analyzer mcp_tool_poisoning status: failed.")
+
+        result = _run_llm_scan(mock_tools, sample_skill_dir, payload, exit_code=exit_code)
+
+        assert result.status == "incomplete"
+        assert result.incomplete_scans == ["skillspector-llm"]
+        assert not any("LLM provider kept failing" in error for error in result.errors)
+        if exit_code == 2:
+            assert result.errors == [_GENERIC_LLM_EXIT_2_ERROR]
+
+    @patch("skillevaluator.validators.security.Tools")
+    def test_tool_error_message_wins_over_provider_message(
+        self,
+        mock_tools,
+        sample_skill_dir: Path,
+    ) -> None:
+        """A runner error on the LLM stage is reported as is, even with an outage report on exit 2."""
+        result = _run_llm_scan(
+            mock_tools,
+            sample_skill_dir,
+            _skillspector_provider_outage_report(),
+            error_message="skillspector execution failed: interrupted",
+        )
+
+        assert result.status == "incomplete"
+        assert result.incomplete_scans == ["skillspector-llm"]
+        assert result.errors == ["skillspector execution failed: interrupted"]
+
+    @pytest.mark.parametrize(
+        ("use_llm", "exit_code", "expected"),
+        [
+            (True, 3, "skillspector-llm failed with unexpected exit code 3: scanner diagnostics were redacted"),
+            (False, 2, "skillspector failed with unexpected exit code 2: scanner diagnostics were redacted"),
+        ],
+        ids=["llm-exit-3", "static-stage"],
+    )
+    @patch("skillevaluator.validators.security.Tools")
+    def test_provider_message_needs_llm_stage_exit_2(
+        self,
+        mock_tools,
+        use_llm: bool,
+        exit_code: int,
+        expected: str,
+        sample_skill_dir: Path,
+    ) -> None:
+        report = ToolResult(
+            success=True,
+            stdout=json.dumps(_skillspector_provider_outage_report()),
+            stderr="",
+            exit_code=exit_code,
+        )
+        static = ToolResult(success=True, stdout=json.dumps(_skillspector_json_report()), stderr="", exit_code=0)
+        mock_tools.skillspector.is_available = True
+        mock_tools.skillspector.run.side_effect = [static, report] if use_llm else [report]
+
+        result = SecurityValidator(use_llm=use_llm).validate_security_only(sample_skill_dir)
+
+        assert result.status == "incomplete"
+        assert result.errors == [expected]
+
+    def test_cli_provider_only_failure_exits_nonzero_as_incomplete(self, sample_skill_dir: Path) -> None:
+        from click.testing import CliRunner
+
+        from skillevaluator.cli import cli
+
+        static = ToolResult(success=True, stdout=json.dumps(_skillspector_json_report()), stderr="", exit_code=0)
+        outage = ToolResult(
+            success=True,
+            stdout=json.dumps(_skillspector_provider_outage_report(old_scanner=True)),
+            stderr="",
+            exit_code=2,
+        )
+        with patch("skillevaluator.validators.security.Tools") as mock_tools:
+            mock_tools.skillspector.is_available = True
+            mock_tools.skillspector.run.side_effect = [static, outage]
+            outcome = CliRunner().invoke(cli, ["security-scan", str(sample_skill_dir), "--llm", "--report", "cli"])
+
+        assert outcome.exit_code == 1, outcome.output
+        output = " ".join(re.sub(r"\x1b\[[0-9;]*m", "", outcome.output).split())
+        assert "INCOMPLETE" in output
+        assert "retriable provider failure" in output
+        assert "unexpected exit code" not in output
+
+
 class TestFalsePositivePrevention:
     """Tests that known false-positive scenarios are correctly suppressed."""
 
@@ -5713,6 +7115,229 @@ class TestFalsePositivePrevention:
         gps_errors = [f for f in result.errors + result.warnings if "gps" in f.lower() or "coordinate" in f.lower()]
         assert len(gps_errors) == 0, f"Low-precision pairs should not be flagged: {gps_errors}"
 
+    @pytest.mark.parametrize(
+        "technical_value",
+        [
+            "waypoint = [0.387236, 0.247973, 0.666778]",
+            "waypoints: [[0.387236, 0.247973], [0.412345, 0.256789]]",
+            "quaternion = [0.707107, 0.000000, 0.707107, 0.000000]",
+            "pose_translation = (37.123456, -12.654321, 4.000000)",
+            "calibration_pair: 12.345678, 45.678901",
+            "coordinates = [0.123456, 0.654321]",
+            "coordinates: [0.123456, 0.654321]",
+            "long vector = 0.123456, 0.654321",
+            "37.123456, -12.654321",
+            '{"type": "feature", "weights": [0.123456, 0.654321]}',
+            # A bare GeoJSON type must use GeoJSON's spelling, so a point light is not a cue.
+            "type: point\nposition: [12.345678, 45.678901]",
+        ],
+    )
+    def test_gps_shape_requires_geospatial_context(self, tmp_path: Path, technical_value: str):
+        """Precise vectors and unlabeled decimal pairs are not location PII without a geospatial cue."""
+        (tmp_path / "values.txt").write_text(f"{technical_value}\n", encoding="utf-8")
+
+        result = SecurityValidator().validate_pii_only(tmp_path)
+
+        assert not any(finding.check_name == "gps_coordinates" for finding in result.findings)
+
+    @pytest.mark.parametrize(
+        "line",
+        [
+            "Location: 37.774929, -122.419416 (map scale 1:5000)",
+            "Office: 37.774929, -122.419416; vector tiles from the same provider",
+            "Address: 37.774929, -122.419416 roi=downtown, calibration=none",
+        ],
+    )
+    def test_gps_technical_word_after_pair_does_not_hide_location_label(self, tmp_path: Path, line: str):
+        """A technical word that follows the pair does not label it, so the location cue still counts."""
+        (tmp_path / "values.txt").write_text(f"{line}\n", encoding="utf-8")
+
+        result = SecurityValidator().validate_pii_only(tmp_path)
+
+        assert any(finding.check_name == "gps_coordinates" for finding in result.findings)
+
+    @pytest.mark.parametrize(
+        "line",
+        [
+            "map scale 1:5000; Location: 37.774929, -122.419416",
+            "Camera pose 10.123456, 20.123456; home location: 37.774929, -122.419416",
+        ],
+    )
+    def test_gps_labels_are_applied_per_pair(self, tmp_path: Path, line: str):
+        data_file = tmp_path / "values.txt"
+        data_file.write_text(f"{line}\n", encoding="utf-8")
+
+        candidates = SecurityValidator()._scan_file_for_pii(data_file)
+
+        assert [item["matched_value"] for item in candidates if item["category"] == "gps_coordinates"] == [
+            "37.774929, -122.419416"
+        ]
+
+    @pytest.mark.parametrize(
+        ("filename", "contents"),
+        [
+            ("values.txt", "Location data formats\nquaternion = [0.707107, 0.000000, 0.707107, 0.000000]\n"),
+            ("values.txt", "calibration_location_offset = [0.123456, 0.654321]\n"),
+            ("values.txt", "Pixel coordinates of the office logo\n0.123456, 0.654321\n"),
+            ("robotics_coordinates.txt", "Pick location\n0.123456, 0.654321\n"),
+            ("mesh.json", '{"type": "Mesh", "coordinates": [0.123456, 0.654321]}\n'),
+            # Degrees describe rotations and joint limits too, so they are a soft cue.
+            (
+                "values.txt",
+                "Rotate the gripper 90 degrees about Y:\nquaternion = [0.707107, 0.000000, 0.707107, 0.000000]\n",
+            ),
+            ("values.txt", "pose (yaw in degrees): 12.345678, 45.678901\n"),
+            ("values.txt", "Joint limits are +/-170\u00b0\nwaypoint = [12.345678, 45.678901]\n"),
+        ],
+    )
+    def test_gps_technical_context_outweighs_soft_location_cue(self, tmp_path: Path, filename: str, contents: str):
+        """Technical coordinate labels win over location, office, or address wording."""
+        (tmp_path / filename).write_text(contents, encoding="utf-8")
+
+        result = SecurityValidator().validate_pii_only(tmp_path)
+
+        assert not any(finding.check_name == "gps_coordinates" for finding in result.findings)
+
+    @pytest.mark.parametrize(
+        ("filename", "contents"),
+        [
+            ("values.txt", "lng pair: 37.7749, -122.4194\n"),
+            ("values.txt", "LatLng(37.7749, -122.4194)\n"),
+            ("values.yaml", "gps_coordinates: 37.7749,-122.4194\n"),
+            ("values.yaml", "latitude_longitude: 37.7749,-122.4194\n"),
+            ("location.json", '"coordinates": [37.7749, -122.4194]\n'),
+            ("gps_points.txt", "37.7749, -122.4194\n"),
+            ("values.txt", "Head office\n\n37.7749, -122.4194\n"),
+            ("values.txt", "GPS coordinates\nwaypoint = [37.7749, -122.4194]\n"),
+            ("point.json", '{"type": "Point", "coordinates": [-122.4194, 37.7749]}\n'),
+            ("feature.json", '{\n  "type": "Point",\n  "coordinates": [\n    -122.4194, 37.7749\n  ]\n}\n'),
+            ("sorted.json", '{"geometry": {\n  "coordinates": [-122.4194, 37.7749],\n  "type": "Point"}}\n'),
+            ("values.json", '{\n  "type": "Feature",\n  "bbox": [-122.4194, 37.7749, -122.4094, 37.7849]\n}\n'),
+            # Map links, RFC 5870 geo URIs, and combined lat/lon keys are geospatial cues.
+            ("SKILL.md", "Open https://www.google.com/maps/@37.774929,-122.419416,17z to find my house\n"),
+            ("values.txt", "https://www.google.co.uk/maps/@37.7749,-122.4194,15z\n"),
+            ("values.txt", "https://maps.google.com/?q=37.7749,-122.4194\n"),
+            ("values.txt", "https://maps.apple.com/?ll=37.774929,-122.419416\n"),
+            ("values.txt", "https://www.bing.com/maps?cp=37.7749, -122.4194\n"),
+            ("values.txt", "geo:37.774929,-122.419416\n"),
+            ("values.yaml", "latlong: 37.774929, -122.419416\n"),
+            ("values.yaml", "latlon: 37.774929, -122.419416\n"),
+            ("values.yaml", "lonlat: -122.419416, 37.774929\n"),
+            ("values.yaml", "lnglat: -122.419416, 37.774929\n"),
+            # Plural cue words label lists of locations.
+            ("values.yaml", "locations:\n  - 37.774929, -122.419416\n"),
+            ("values.yaml", "store_locations:\n  - 37.774929, -122.419416\n"),
+            ("values.txt", "Our offices\n37.774929, -122.419416\n"),
+            ("values.txt", "latitudes_longitudes: 37.774929, -122.419416\n"),
+            ("locations.json", "[37.774929, -122.419416]\n"),
+            ("values.yaml", "geolocations:\n  - 37.774929, -122.419416\n"),
+            ("map.md", "var latlngs = [[37.774929, -122.419416]];\n"),
+            ("values.yaml", "lats: 37.774929, 37.784929\n"),
+            # A numeric suffix keeps the cue word.
+            ("haversine.py", "lat1, lon1 = 37.774929, -122.419416\n"),
+            ("values.yaml", "location1: 37.774929, -122.419416\n"),
+            ("data.json", '{"homeLocation2": [37.774929, -122.419416]}\n'),
+            # camelCase JSON keys carry the same cue words.
+            ("data.json", '{"homeLocation": [37.774929, -122.419416]}\n'),
+            ("data.json", '{"officeAddress": "37.774929, -122.419416"}\n'),
+            ("data.json", '{"gpsCoords": [37.774929, -122.419416]}\n'),
+            ("data.json", '{"lastKnownGps": [37.774929, -122.419416]}\n'),
+            # GeoJSON written as a JS object (in a Markdown snippet) or in YAML.
+            ("point.md", "const p = {type: 'Point', coordinates: [-122.4194, 37.7749]};\n"),
+            ("point.yaml", "type: Point\ncoordinates: [-122.4194, 37.7749]\n"),
+            # A strong cue nearby outweighs a technical coordinate label nearby.
+            ("world_coordinates.md", "GPS position of the office:\n37.7749, -122.4194\n"),
+            ("gps_world_coordinates.txt", "37.7749, -122.4194\n"),
+            ("values.txt", "Camera coordinates and GPS position below\n37.7749, -122.4194\n"),
+            # Degrees alone remain a cue when no technical label is present.
+            ("values.txt", "Coordinates in decimal degrees: 37.774929, -122.419416\n"),
+            # Vector labels count only on the pair's own line, so an office cue still applies.
+            ("values.txt", "Robot waypoints near the office:\n0.123456, 0.654321\n"),
+        ],
+    )
+    def test_gps_coordinates_with_geospatial_context_still_flagged(self, tmp_path: Path, filename: str, contents: str):
+        """A geospatial cue on the line, two lines above, or in the file name keeps the finding."""
+        (tmp_path / filename).write_text(contents, encoding="utf-8")
+
+        result = SecurityValidator().validate_pii_only(tmp_path)
+
+        assert any(finding.check_name == "gps_coordinates" for finding in result.findings)
+
+    @pytest.mark.parametrize(
+        ("contents", "expected_lines"),
+        [
+            (
+                '{\n  "type": "Polygon",\n  "coordinates": [\n    [\n      [-122.4194, 37.7749],\n'
+                "      [-122.4094, 37.7849],\n      [-122.3994, 37.7749],\n      [-122.4194, 37.7749]\n"
+                "    ]\n  ]\n}\n",
+                [5, 6, 7, 8],
+            ),
+            (
+                '{\n  "type": "FeatureCollection",\n  "features": [\n    {\n      "type": "Feature",\n'
+                '      "properties": {},\n      "geometry": {\n        "type": "MultiPolygon",\n'
+                '        "coordinates": [\n          [\n            [\n              [-122.4194, 37.7749],\n'
+                "              [-122.4094, 37.7849]\n            ]\n          ]\n        ]\n      }\n    }\n  ]\n}\n",
+                [12, 13],
+            ),
+            # Sorted keys put "type" after "coordinates".
+            (
+                '{\n  "coordinates": [\n    [\n      [\n        [-122.4194, 37.7749],\n'
+                '        [-122.4094, 37.7849]\n      ]\n    ]\n  ],\n  "type": "MultiLineString"\n}\n',
+                [5, 6],
+            ),
+            # A single-quoted Python dict.
+            (
+                "{\n    'type': 'Polygon',\n    'coordinates': [\n        [\n            [-122.4194, 37.7749],\n"
+                "            [-122.4094, 37.7849],\n        ]\n    ],\n}\n",
+                [5, 6],
+            ),
+            # A JS object with bare keys.
+            (
+                "{\n  type: 'MultiLineString',\n  coordinates: [\n    [\n      [-122.4194, 37.7749],\n"
+                "      [-122.4094, 37.7849]\n    ]\n  ]\n}\n",
+                [5, 6],
+            ),
+            # A bare type value must use GeoJSON's spelling.
+            (
+                "{\n  type: polygon,\n  coordinates: [\n    [\n      [0.123456, 0.654321],\n"
+                "      [0.234567, 0.765432]\n    ]\n  ]\n}\n",
+                [],
+            ),
+            # A non-geographic "type" does not make its coordinates location data.
+            (
+                '{\n  "type": "Mesh",\n  "coordinates": [\n    [\n      [\n'
+                "        [0.123456, 0.654321],\n        [0.234567, 0.765432]\n      ]\n    ]\n  ]\n}\n",
+                [],
+            ),
+        ],
+    )
+    def test_gps_pretty_printed_geojson_geometry_positions_flagged(
+        self, tmp_path: Path, contents: str, expected_lines: list[int]
+    ):
+        """Every position inside a GeoJSON geometry's coordinates array is cued, however deep it is nested."""
+        geojson_file = tmp_path / "area.json"
+        geojson_file.write_text(contents, encoding="utf-8")
+
+        candidates = SecurityValidator()._scan_file_for_pii(geojson_file)
+
+        assert [item["line"] for item in candidates if item["category"] == "gps_coordinates"] == expected_lines
+
+    def test_gps_deeply_nested_geojson_inner_position_flagged(self, tmp_path: Path):
+        """Nested coordinates arrays are merged before marking lines, and the inner position stays cued."""
+        depth = 2000
+        geojson_file = tmp_path / "nested.json"
+        geojson_file.write_text(
+            '{"type": "Point", "coordinates": [\n' * depth + "-122.419416, 37.774929\n" + "]}\n" * depth,
+            encoding="utf-8",
+        )
+
+        candidates = SecurityValidator()._scan_file_for_pii(geojson_file)
+
+        assert [item["line"] for item in candidates if item["category"] == "gps_coordinates"] == [depth + 1]
+        assert SecurityValidator._geojson_coordinate_lines(geojson_file.read_text(encoding="utf-8").splitlines()) == (
+            frozenset(range(1, 2 * depth + 2))
+        )
+
     # --- Phone number false positives ---
 
     def test_phone_bare_ten_digit_run_not_flagged(self, tmp_path: Path):
@@ -5743,7 +7368,140 @@ class TestFalsePositivePrevention:
             f"Formatted phone number should still be flagged: {all_findings}"
         )
 
+    def test_phone_scientific_notation_matrix_not_flagged(self, tmp_path: Path):
+        """The exponent of a scientific-notation value is not an international phone prefix."""
+        (tmp_path / "matrix.txt").write_text(
+            "1.000000e+00 0.000000e+00 0.000000e+00 1.234567e-01\n+1.000000e+00 -2.500000E+03\n",
+            encoding="utf-8",
+        )
+
+        result = SecurityValidator().validate_pii_only(tmp_path)
+
+        assert not any(finding.check_name == "phone_numbers" for finding in result.findings)
+
+    def test_phone_after_scientific_notation_still_flagged(self, tmp_path: Path):
+        """Dropping a candidate inside a scientific literal keeps a real phone later on the line."""
+        (tmp_path / "notes.txt").write_text(
+            "scale 1.000000e+00 0.000000e+00, support +44 20 7946 0958\n",
+            encoding="utf-8",
+        )
+
+        result = SecurityValidator().validate_pii_only(tmp_path)
+
+        phones = [
+            finding.metadata["matched_value"] for finding in result.findings if finding.check_name == "phone_numbers"
+        ]
+        assert phones == ["+44 20 7946 0958"]
+
     # --- Credit card false positives ---
+
+    @pytest.mark.parametrize(
+        "technical_value",
+        [
+            "timestamp_microseconds: 1707938736269577",
+            "epoch nanoseconds = 1707938736269577",
+            '{"unix_time": 1707938736269577}',
+            "sha256: 1707938736269577",
+            "checksum=1707938736269577",
+            "sha256 1707938736269577",
+            '"sha256" "1707938736269577"',
+            f"sha256={'a' * 24}1707938736269577{'b' * 24}",
+            "build id_1707938736269577",
+            "1707938736269577_suffix",
+            # A snake_case prefix still names a timestamp or digest field.
+            "event_timestamp: 1707938736269577",
+            '"created_at_epoch": 1707938736269577',
+            "file_sha256: 1707938736269577",
+            # Short unit suffixes after epoch and unix_time name microsecond epochs.
+            "epoch_us: 1707938736269577",
+            '"epoch_us": 1707938736269577',
+            "epoch_micros: 1707938736269577",
+            "unix_time_us: 1707938736269577",
+        ],
+    )
+    def test_credit_card_shape_in_timestamp_or_hash_context_not_flagged(self, tmp_path: Path, technical_value: str):
+        """A Luhn-valid timestamp, digest, or identifier is not a blocking card number."""
+        (tmp_path / "data.txt").write_text(f"{technical_value}\n", encoding="utf-8")
+
+        result = SecurityValidator().validate_pii_only(tmp_path)
+
+        assert result.passed
+        assert not any(finding.check_name == "credit_cards" for finding in result.findings)
+
+    @pytest.mark.parametrize(
+        ("contents", "card"),
+        [
+            ("timestamp_microseconds: 1707938736269577 card_number: 4532015112830366", "4532015112830366"),
+            ("known=4111111111111111; card_number=4532015112830366", "4532015112830366"),
+            ("Use 4111-1111-1111-1111 or 4532 0151 1283 0366", "4532 0151 1283 0366"),
+            ("checksum verified; card: 4532015112830366", "4532015112830366"),
+            # Markdown underscore emphasis is not an identifier joining the number to a word.
+            ("Use _4532015112830366_ at checkout", "4532015112830366"),
+            ("Use __4532015112830366__ at checkout", "4532015112830366"),
+            # Letters outside ASCII do not hide a card written directly next to them.
+            ("カード番号は4532015112830366です", "4532015112830366"),
+            ("我的卡号是4532015112830366。", "4532015112830366"),
+            ("카드번호는4532015112830366입니다", "4532015112830366"),
+            ("หมายเลขบัตร4532015112830366", "4532015112830366"),
+            # IGNORECASE must not let the ASCII class match the dotless i or the Kelvin sign.
+            ("Kart numaras\u01314532015112830366", "4532015112830366"),
+            ("Ref \u212a4532015112830366", "4532015112830366"),
+            # A backslash escape or a percent-encoded byte is a separator, not part of a token.
+            ('{"prompt": "Charge this card:\\n4532015112830366\\nExp 12/27"}', "4532015112830366"),
+            ('{"input": "Card\\t4532015112830366"}', "4532015112830366"),
+            ('prompt: "Pay with\\r4532015112830366 now"', "4532015112830366"),
+            ('msg = "Card:\\n4532 0151 1283 0366"', "4532 0151 1283 0366"),
+            ("https://pay.acme.io/charge?q=card%3D4532015112830366", "4532015112830366"),
+            # A payment word before the underscore names a card, not an identifier.
+            ("card_4532015112830366", "4532015112830366"),
+            ("CARD_4532015112830366.png", "4532015112830366"),
+            ("cc_4532015112830366", "4532015112830366"),
+            ("creditCard_4532015112830366", "4532015112830366"),
+            ("cardNumber_4532015112830366", "4532015112830366"),
+            ("ccNum_4532015112830366", "4532015112830366"),
+            ("payment_card_4532015112830366", "4532015112830366"),
+        ],
+    )
+    def test_credit_card_next_to_technical_or_test_value_still_flagged(self, tmp_path: Path, contents: str, card: str):
+        """A timestamp label, test card, emphasis, or non-ASCII letter excludes no card number next to it."""
+        data_file = tmp_path / "data.txt"
+        data_file.write_text(f"{contents}\n", encoding="utf-8")
+
+        result = SecurityValidator().validate_pii_only(tmp_path)
+
+        assert not result.passed
+        assert [finding.check_name for finding in result.findings].count("credit_cards") == 1
+        # Reports may redact card values, so check the scanner's own candidate.
+        candidates = SecurityValidator()._scan_file_for_pii(data_file)
+        assert [item["matched_value"] for item in candidates if item["category"] == "credit_cards"] == [card]
+
+    @pytest.mark.parametrize("card", ["4111 1111 1111 1111", "5500 0000 0000 0004", "4111111111111111"])
+    def test_known_test_card_in_any_grouping_not_flagged(self, tmp_path: Path, card: str):
+        """Known test card numbers are excepted whether written with spaces, dashes, or no separators."""
+        (tmp_path / "data.txt").write_text(f"Sandbox card: {card}\n", encoding="utf-8")
+
+        result = SecurityValidator().validate_pii_only(tmp_path)
+
+        assert not any(finding.check_name == "credit_cards" for finding in result.findings)
+
+    @pytest.mark.parametrize(
+        "contents",
+        [
+            "Cards: 4111111111111111, 4242424242424242",
+            "Sandbox cards: 378282246310005 and 5555555555554444",
+            "Test cards: 4111-1111-1111-1111 / 5555-5555-5555-4444",
+            "Visa 4012 8888 8888 1881, Mastercard 5105-1051-0510-5100, Discover 6011111111111117",
+            "Debit 4000056655665556, 2-series 2223003122003222, JCB 3530111333300000",
+        ],
+    )
+    def test_line_of_published_test_cards_not_flagged(self, tmp_path: Path, contents: str):
+        """Payment docs that list several published test cards on one line pass the gate."""
+        (tmp_path / "SKILL.md").write_text(f"{contents}\n", encoding="utf-8")
+
+        result = SecurityValidator().validate_pii_only(tmp_path)
+
+        assert result.passed
+        assert not any(finding.check_name == "credit_cards" for finding in result.findings)
 
     def test_credit_card_non_luhn_number_not_flagged(self, tmp_path: Path):
         """16-digit numbers that fail Luhn should not be flagged as credit cards."""
@@ -5814,6 +7572,112 @@ class TestFalsePositivePrevention:
         result = validator.validate_pii_only(skill_dir)
         cc_errors = [e for e in result.errors if "credit" in e.lower() or "card" in e.lower()]
         assert len(cc_errors) == 0, f"Long digit run should not be flagged: {cc_errors}"
+
+    @staticmethod
+    def _card_values(path: Path, text: str) -> list[str]:
+        """Raw credit-card values the PII scan reports for *text* written to *path*."""
+        path.write_text(text, encoding="utf-8")
+        return [
+            finding["matched_value"]
+            for finding in SecurityValidator()._scan_file_for_pii(path)
+            if finding["category"] == "credit_cards"
+        ]
+
+    @pytest.mark.parametrize(
+        "identifier",
+        [
+            "00000000-0000-0000-c000-000000000046",
+            "{00000000-0000-0000-C000-000000000046}",
+            "{00000091-0000-0000-C000-000000000046}",
+            "00000000-0000-0000-0000-000000000000",
+            "45320151-1283-0366-c000-000000000046",
+            "{45320151-1283-0366-c000-000000000046}",
+            "ABCDEFAB-CDEF-ABCD-4532-015112830366",
+            "{ABCDEFAB-CDEF-ABCD-4532-015112830366}",
+            "45320151-1283-0366-4532-015112830366",
+        ],
+    )
+    @pytest.mark.parametrize("template", ['IID_IUNKNOWN_TEXT = "{}"', "{}", "interface_id: {}", "card driver GUID {}"])
+    def test_credit_card_shape_inside_guid_not_flagged(self, tmp_path: Path, identifier: str, template: str):
+        """GUID digit groups (COM interface IDs, nil UUIDs) can pass Luhn without being a card."""
+        (tmp_path / "com.py").write_text(template.format(identifier) + "\n", encoding="utf-8")
+
+        result = SecurityValidator().validate_pii_only(tmp_path)
+
+        assert result.passed
+        assert not any(finding.check_name == "credit_cards" for finding in result.findings)
+
+    @pytest.mark.parametrize(
+        ("filename", "template"),
+        [
+            ("payment.txt", 'card_number="{}"\n'),
+            ("payment.txt", "Credit card: {}\n"),
+            ("payment.txt", 'cc_no: "{}"\n'),
+            ("payment.txt", "cc_number={}\n"),
+            ("payment.txt", "PAN {}\n"),
+            ("payment.json", '{{"credit_card": "{}"}}\n'),
+            ("payment.json", '{{"creditCardNumber": "{}"}}\n'),
+            ("payment.json", '{{\n  "card_number":\n    "{}"\n}}\n'),
+            ("payment.yaml", "card_number: {}\n"),
+            ("payment.yaml", "card_number:\n  {}\n"),
+        ],
+    )
+    @pytest.mark.parametrize(
+        ("identifier", "card_number"),
+        [
+            ("45320151-1283-0366-c000-000000000046", "45320151-1283-0366"),
+            ("{45320151-1283-0366-c000-000000000046}", "45320151-1283-0366"),
+            ("ABCDEFAB-CDEF-ABCD-4532-015112830366", "4532-015112830366"),
+            ("{ABCDEFAB-CDEF-ABCD-4532-015112830366}", "4532-015112830366"),
+        ],
+    )
+    def test_payment_label_overrides_guid_shape(
+        self, tmp_path: Path, filename: str, template: str, identifier: str, card_number: str
+    ):
+        """A payment label directly before a GUID-shaped value keeps the card candidate reportable."""
+        assert self._card_values(tmp_path / filename, template.format(identifier)) == [card_number]
+
+    def test_payment_labelled_guid_shape_blocks_pii_scan(self, tmp_path: Path):
+        (tmp_path / "payment.yaml").write_text("card_number: 45320151-1283-0366-c000-000000000046\n", encoding="utf-8")
+
+        result = SecurityValidator().validate_pii_only(tmp_path)
+
+        assert not result.passed
+        assert [finding.check_name for finding in result.findings] == ["credit_cards"]
+
+    @pytest.mark.parametrize(
+        "template",
+        [
+            'card_number: unavailable; identifier: "{}"\n',
+            'credit_card_id: "{}"\n',
+            "cardholder_guid = {}\n",
+            "card_number: unavailable\nidentifier: {}\n",
+            "pan_id: {}\n",
+        ],
+    )
+    def test_unrelated_payment_label_does_not_taint_guid(self, tmp_path: Path, template: str):
+        text = template.format("45320151-1283-0366-c000-000000000046")
+
+        assert self._card_values(tmp_path / "records.txt", text) == []
+
+    @pytest.mark.parametrize("number", ["0000000000000000", "0000-0000-0000-0000", "0000 0000 0000 0000"])
+    def test_zero_only_number_not_flagged_as_credit_card(self, tmp_path: Path, number: str):
+        assert self._card_values(tmp_path / "data.txt", f"card_number={number}\n") == []
+
+    @pytest.mark.parametrize("card_number", ["4532015112830366", "4532-0151-1283-0366", "4532 0151 1283 0366"])
+    @pytest.mark.parametrize("card_first", [False, True])
+    def test_guid_does_not_hide_adjacent_payment_card(self, tmp_path: Path, card_number: str, card_first: bool):
+        fields = ['identifier="45320151-1283-0366-c000-000000000046"', f'card_number="{card_number}"']
+        if card_first:
+            fields.reverse()
+
+        assert self._card_values(tmp_path / "data.txt", "; ".join(fields) + "\n") == [card_number]
+
+    def test_non_luhn_number_does_not_hide_later_card(self, tmp_path: Path):
+        """Every card-shaped number on a line is checked, not only the first one."""
+        text = "ref 1234-5678-9012-3456 card 4532 0151 1283 0366\n"
+
+        assert self._card_values(tmp_path / "data.txt", text) == ["4532 0151 1283 0366"]
 
     # --- Eval/results/versions directory exclusion (Tier 1) ---
 
@@ -5942,6 +7806,7 @@ class TestFalsePositivePrevention:
         assert not SecurityValidator._passes_luhn("1234567890123456")
         assert not SecurityValidator._passes_luhn("4532123456789010")
         assert not SecurityValidator._passes_luhn("1111111111111112")
+        assert not SecurityValidator._passes_luhn("0000000000000000")
 
     # --- Skillspector 1.0 field handling tests ---
 

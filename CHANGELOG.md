@@ -242,11 +242,17 @@ All notable changes to SkillEvaluator are documented in this file.
   so a later bare `HTTP`, `HTTPS`, or `Http` word does not start HTTPie, and
   its method word is no longer read as an upload. Its body items, piped or
   redirected input, `--raw`, and a method word before a `name:@file` header
-  item, even a quoted or escaped one, or before a `$VAR` word still warn, as do
-  a lowercase `http PUT URL`, a path or `.exe` word such as `./HTTP POST URL`
-  or `HTTP.exe POST URL`, an `HTTP POST URL` command word, and any upload in
-  the same action. Both the host checker and the bundled Harbor verifier apply
-  the rule.
+  item, even a quoted, escaped, or brace-expanded one such as
+  `X-Data:{@,}.env`, or before a `$VAR` or backtick word, such as an inline
+  code span, still warn, as do a lowercase `http PUT URL`, a path or `.exe`
+  word such as `./HTTP POST URL` or `HTTP.exe POST URL`, an `HTTP POST URL`
+  command word, a word that a pass-through wrapper runs, a printer pipes on,
+  or a `$VAR` command word may start, such as `strace -f HTTP POST URL` or
+  `echo HTTP POST URL | sh`, and any upload in the same action. Each
+  here-document line is still read as a command, and `|` and `;` start a new
+  one, so a line that starts with `HTTP POST`, a Markdown table row with an
+  `HTTP` word in any cell, and `HTTP PUT` right after a `;` still warn. Both
+  the host checker and the bundled Harbor verifier apply the rule.
 
 - Tier 3 Docker and Kata runs retry a Claude Code or Codex install that fails,
   for example on a dropped download or a package mirror error, instead of

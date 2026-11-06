@@ -63,7 +63,11 @@ blocker; incomplete or missing evidence shows an unknown count. Download and
 extract the artifact, then open `index.html` for the detailed aggregate and
 native reports. See the
 [comment and report contract](reports.mdx#retained-three-tier-ci-evidence).
-The workflow never checks out the candidate with a write token. Merge this feedback file
+The workflow never checks out the candidate with a write token. Fork PR runs and
+producer attempts superseded by a re-run are skipped without a comment rather than
+failed. An existing report comment is kept only when its run marker names a
+producer run of this caller for the same PR head; other `github-actions[bot]`
+report comments are treated as stale and overwritten. Merge this feedback file
 onto the default branch before expecting the first automatic comment. Changes
 to the caller must refresh its approved Git blob in `trusted-caller-blobs`.
 

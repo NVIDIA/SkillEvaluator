@@ -53,8 +53,18 @@ CALLER_PATH = ".github/workflows/skill-checks-all-tiers.yml"
 MAX_BYTES = 64 * 1024 * 1024
 MAX_FILE_BYTES = 32 * 1024 * 1024
 MAX_BODY_BYTES = 60000
-MAX_FILES = 1000
+# Size the archive member bound from the documented per-run skill limit
+# (run_tier1.MAX_SKILLS). Each skill retains six Tier 1 files (JSON, HTML,
+# Markdown, SARIF, stdout and stderr) and JSON, HTML and Markdown for Tiers 2
+# and 3; GitLab archives also list each skill's directory once per tier.
+MAX_SKILLS = 100
+MEMBERS_PER_SKILL = 6 + 3 + 3 + 3
+MAX_AGGREGATE_MEMBERS = 64  # manifests, summaries, indexes and tier directories
+MAX_FILES = MAX_SKILLS * MEMBERS_PER_SKILL + MAX_AGGREGATE_MEMBERS
 MAX_PAGES = 10
+MAX_MARKER_RUNS = 20
+MAX_REDIRECTS = 5
+REDIRECT_CODES = frozenset({301, 302, 303, 307, 308})
 GL_AUDIENCE = "urn:skillevaluator:feedback:v1"
 
 
@@ -162,20 +172,22 @@ def read_results(raw: bytes, *, prefix: str = "") -> dict:
                     )
                     native = _json(read(prefix + json_path))
                     retained = retained_results(native, copy_metadata=False, allowed_tiers={tier["tier"]})
-                    status = resolve_run_status(retained).tiers[tier["tier"]].status.value
+                    native_status = resolve_run_status(retained).tiers[tier["tier"]].status.value
+                    status = native_status
                     if tier["tier"] == 3 and status == "passed" and native.get("tier3", {}).get("verdict") == "neutral":
                         status = "neutral"
                     # A producer may downgrade a clean result after an execution
-                    # error; it may never promote failed/incomplete evidence.
+                    # error, before any neutral mapping; it may never promote
+                    # failed/incomplete evidence.
                     _require(
                         skill["status"] == status
-                        or (skill["status"] == "incomplete" and status in {"passed", "not_run"}),
+                        or (skill["status"] == "incomplete" and native_status in {"passed", "not_run"}),
                         "The aggregate verdict contradicts retained native evidence.",
                     )
-                    if tier["tier"] == 3 and skill["status"] == "passed":
+                    if tier["tier"] == 3 and skill["status"] in {"passed", "neutral"}:
                         _require(
                             tier3_execution_complete(native),
-                            "Tier 3 passing evidence lacks complete paired execution.",
+                            "Tier 3 passing or neutral evidence lacks complete paired execution.",
                         )
                     skill["metrics"] = summarize_results(retained, tier=tier["tier"], native=native)
                     if skill["status"] in {"incomplete", "skipped", "not_run", "needs_action"}:
@@ -225,14 +237,20 @@ def _listing(api, path, *, key=None):
     raise FeedbackError("An API listing exceeds its pagination limit.")
 
 
-def _upsert(api, *, collection, member, owned, body, receipt, current, method="patch"):
+def _upsert(api, *, collection, member, owned, body, receipt, current, method="patch", verified=None):
     comments = [c for c in _listing(api, collection) if owned(c)]
+    stale = []
+    if verified is not None:
+        # A shared bot identity can be used by other workflows. Defer only to
+        # markers bound to a genuine producer run; overwrite unverifiable ones.
+        stale = [c for c in comments if not verified(c)]
+        comments = [c for c in comments if c not in stale]
     _require(len(comments) <= 1, "Multiple owned report comments require manual reconciliation.")
     if any(_identity(c) > receipt for c in comments):
         return {"comment_action": "skipped", "comment_reason": "A newer report comment already exists."}
     if not current():
         return {"comment_action": "skipped", "comment_reason": "The source head or producer attempt changed."}
-    canonical = comments[0] if comments else None
+    canonical = comments[0] if comments else (stale[0] if stale else None)
     if canonical:
         identifier = _positive(canonical.get("id"))
         # Re-read ownership immediately before updating an existing note.
@@ -241,7 +259,7 @@ def _upsert(api, *, collection, member, owned, body, receipt, current, method="p
             owned(check) and check.get("id") == identifier and check.get("body") == canonical["body"],
             "The report comment changed ownership or content before update.",
         )
-        if _identity(check) > receipt:
+        if canonical in comments and _identity(check) > receipt:
             return {"comment_action": "skipped", "comment_reason": "A newer report comment already exists."}
         if canonical["body"] == body:
             action = "unchanged"
@@ -324,6 +342,14 @@ def github_feedback(api, repository: str, run_id: int, attempt: int) -> dict:
     _positive(attempt)
     root = f"/repos/{repository}"
     run = api.get(f"{root}/actions/runs/{run_id}")
+    if isinstance(run, dict) and run.get("id") == run_id and run.get("repository", {}).get("full_name") == repository:
+        # Fork PRs get no receipt, and a re-run supersedes this attempt; neither is a feedback failure.
+        head = run.get("head_repository")
+        if not isinstance(head, dict) or head.get("full_name") != repository:
+            return {"comment_action": "skipped", "comment_reason": "Fork pull-request runs do not receive feedback."}
+        latest = run.get("run_attempt")
+        if (type(latest) is int and latest > attempt) or (latest == attempt and run.get("status") != "completed"):
+            return {"comment_action": "skipped", "comment_reason": "The producer attempt was superseded."}
     _github_run(run, repository, run_id, attempt)
     reference = os.environ.get("SKILL_EVAL_TRUSTED_WORKFLOW_REF", "")
     match = re.fullmatch(
@@ -412,6 +438,37 @@ def github_feedback(api, repository: str, run_id: int, attempt: int) -> dict:
             and comment["body"].startswith(MARKER + "\n")
         )
 
+    producers = {run_id: run}
+
+    def verified(comment):
+        # Same-repository workflows can post as github-actions[bot]; bind the
+        # marker to an existing producer run of this caller for this PR head.
+        markers = RUN_MARKER.findall(comment["body"])
+        if len(markers) != 1:
+            return False
+        marker_run, marker_attempt = (int(n) for n in markers[0])
+        if marker_run not in producers:
+            if len(producers) > MAX_MARKER_RUNS:
+                return False
+            try:
+                producers[marker_run] = api.get(f"{root}/actions/runs/{marker_run}")
+            except urllib.error.HTTPError as exc:
+                if exc.code != 404:
+                    raise
+                producers[marker_run] = None
+        marked = producers[marker_run]
+        return (
+            isinstance(marked, dict)
+            and marked.get("id") == marker_run
+            and marked.get("path") == CALLER_PATH
+            and marked.get("event") == "pull_request"
+            and isinstance(marked.get("repository"), dict)
+            and marked["repository"].get("full_name") == repository
+            and marked.get("head_sha") == run["head_sha"]
+            and type(marked.get("run_attempt")) is int
+            and marked["run_attempt"] >= marker_attempt
+        )
+
     result = _upsert(
         api,
         collection=f"{root}/issues/{number}/comments",
@@ -420,6 +477,7 @@ def github_feedback(api, repository: str, run_id: int, attempt: int) -> dict:
         body=body,
         receipt=(run_id, attempt),
         current=current,
+        verified=verified,
     )
     if "comment_id" in result:
         result["comment_url"] = f"https://github.com/{repository}/pull/{number}#issuecomment-{result['comment_id']}"
@@ -448,8 +506,28 @@ def _gitlab_origin(api_url):
         raise FeedbackError("The GitLab API URL is invalid.") from exc
 
 
+def _artifact_redirect(base, location):
+    """Resolve one object-storage redirect to an HTTPS URL without credentials."""
+    try:
+        url = urllib.parse.urljoin(base, location) if isinstance(location, str) and location else ""
+        parsed = urllib.parse.urlsplit(url)
+        valid = (
+            parsed.scheme == "https"
+            and bool(parsed.hostname)
+            and not parsed.username
+            and not parsed.password
+            and (parsed.port is None or 1 <= parsed.port <= 65535)
+            and "\\" not in url
+            and not any(ord(c) < 33 or ord(c) == 127 for c in url)
+        )
+    except (ValueError, TypeError):
+        valid = False
+    _require(valid, "The GitLab artifact download redirected to an unsupported location.")
+    return url
+
+
 class GitLabAPI:
-    """Bounded private-token API client; no redirects and no credential forwarding."""
+    """Bounded private-token API client; artifact redirects never receive credentials."""
 
     def __init__(self, api_url: str, project: str, token: str):
         self.origin = _gitlab_origin(api_url)
@@ -538,7 +616,27 @@ class GitLabAPI:
 
     def download_artifact(self, job_id):
         _positive(job_id)
-        return self._call("GET", f"/projects/{self.project}/jobs/{job_id}/artifacts", binary=True)
+        path = f"/projects/{self.project}/jobs/{job_id}/artifacts"
+        try:
+            return self._call("GET", path, binary=True)
+        except urllib.error.HTTPError as exc:
+            if exc.code not in REDIRECT_CODES:
+                raise
+            url, location = self.api_url + path, exc.headers.get("Location")
+        # Object storage serves a signed URL; never forward PRIVATE-TOKEN to it.
+        for _ in range(MAX_REDIRECTS):
+            url = _artifact_redirect(url, location)
+            request = urllib.request.Request(url, headers={"User-Agent": "SkillEvaluator-trusted-feedback"})
+            try:
+                with self.opener.open(request, timeout=github_api.TIMEOUT_SECONDS) as response:
+                    return github_api.bounded_read(
+                        response, MAX_BYTES, FeedbackError, "The GitLab artifact exceeds its size limit."
+                    )
+            except urllib.error.HTTPError as exc:
+                if exc.code not in REDIRECT_CODES:
+                    raise
+                location = exc.headers.get("Location")
+        raise FeedbackError("The GitLab artifact download exceeded its redirect limit.")
 
 
 def _gitlab_signing_keys(origin):
@@ -732,13 +830,14 @@ def gitlab_feedback(api, api_url: str, project: str, pipeline_id: int) -> dict:
         "The downstream pipeline has unsupported forwarded variables.",
     )
     source = api.get(f"{root}/pipelines/{pipeline_id}")
+    # Other consumer jobs may keep the source pipeline pending, running or
+    # manual; completion is proven by the bound aggregate and request jobs.
     _require(
         source.get("id") == pipeline_id
         and source.get("source") == "merge_request_event"
         and isinstance(source.get("sha"), str)
-        and github_api.COMMIT_SHA.fullmatch(source["sha"])
-        and source.get("status") in {"running", "success", "failed", "canceled", "skipped"},
-        "Only active or completed same-project merge-request producers may receive feedback.",
+        and github_api.COMMIT_SHA.fullmatch(source["sha"]),
+        "Only same-project merge-request producers may receive feedback.",
     )
     _require(
         api.get(f"{root}/pipelines/{pipeline_id}/variables") == [],

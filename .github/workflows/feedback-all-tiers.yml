@@ -26,7 +26,8 @@ jobs:
     concurrency:
       group: skillevaluator-feedback-${{ github.repository }}
       cancel-in-progress: false
-    if: ${{ github.event_name == 'workflow_run' && github.event.workflow_run.event == 'pull_request' }}
+    # Fork PR runs have no producer receipt; skip them instead of failing.
+    if: ${{ github.event_name == 'workflow_run' && github.event.workflow_run.event == 'pull_request' && github.event.workflow_run.head_repository.full_name == github.repository }}
     runs-on: ubuntu-24.04
     permissions:
       contents: read

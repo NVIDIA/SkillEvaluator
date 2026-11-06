@@ -66,6 +66,7 @@ class GitHub:
             "status": "completed",
             "conclusion": "success",
             "repository": {"full_name": REPO, "id": 12},
+            "head_repository": {"full_name": REPO, "id": 12},
             "run_started_at": "2026-11-01T00:00:00Z",
             "updated_at": "2026-11-01T00:10:00Z",
             "pull_requests": [{"number": 7}],
@@ -95,6 +96,8 @@ class GitHub:
         self.comments = []
         self.writes = []
         self.gets = []
+        self.downloads = []
+        self.other_runs = {}
         self.flip_head_on_recheck = False
 
     def get(self, path):
@@ -102,6 +105,13 @@ class GitHub:
         prefix = "/repos/" + REPO
         if path == prefix + "/actions/runs/123":
             return copy.deepcopy(self.run)
+        if path.startswith(prefix + "/actions/runs/") and path.rsplit("/", 1)[-1].isdigit():
+            identifier = int(path.rsplit("/", 1)[-1])
+            if identifier not in self.other_runs:
+                import urllib.error
+
+                raise urllib.error.HTTPError("https://api.github.com" + path, 404, "Not Found", {}, None)
+            return copy.deepcopy(self.other_runs[identifier])
         if path == prefix + "/actions/runs/123/artifacts?per_page=100":
             return {"total_count": len(self.artifacts), "artifacts": copy.deepcopy(self.artifacts)}
         if path.startswith(prefix + "/contents/"):
@@ -120,6 +130,7 @@ class GitHub:
         raise AssertionError(path)
 
     def download_artifact(self, identifier):
+        self.downloads.append(identifier)
         return self.payload if identifier == 21 else b"signed-receipt"
 
     def post(self, path, payload):
@@ -347,6 +358,7 @@ def test_github_rechecks_head_after_comments_and_preserves_human_marker(github):
 
 def test_github_does_not_overwrite_newer_run_receipt(github):
     module, api = github
+    api.other_runs[124] = {**copy.deepcopy(api.run), "id": 124}
     api.comments = [
         {
             "id": 5,
@@ -356,6 +368,100 @@ def test_github_does_not_overwrite_newer_run_receipt(github):
     ]
     assert module.github_feedback(api, REPO, 123, 1)["comment_action"] == "skipped"
     assert not api.writes
+
+
+def _bot_comment(module, identifier, marker):
+    body = module.MARKER + f"\n<!-- skillevaluator-all-tiers-run:{marker} -->\nRequired gate: **Passed**"
+    return {"id": identifier, "body": body, "user": {"login": "github-actions[bot]", "type": "Bot"}}
+
+
+@pytest.mark.parametrize(
+    "marker",
+    [
+        "99999999999:1",  # no such run
+        "124:1",  # another workflow's run
+        "125:1",  # producer run for a different PR head
+        "126:1",  # producer run from another event
+        "123:9",  # attempt that never existed
+    ],
+)
+def test_github_overwrites_unverifiable_bot_marker_instead_of_deferring(github, marker):
+    module, api = github
+    api.other_runs[124] = {**copy.deepcopy(api.run), "id": 124, "path": ".github/workflows/other.yml"}
+    api.other_runs[125] = {**copy.deepcopy(api.run), "id": 125, "head_sha": "e" * 40}
+    api.other_runs[126] = {**copy.deepcopy(api.run), "id": 126, "event": "push"}
+    api.comments = [_bot_comment(module, 5, marker)]
+    result = module.github_feedback(api, REPO, 123, 1)
+    assert result["comment_action"] == "updated"
+    assert [(method, path) for method, path, _ in api.writes] == [("PATCH", f"/repos/{REPO}/issues/comments/5")]
+    assert "<!-- skillevaluator-all-tiers-run:123:1 -->" in api.comments[0]["body"]
+    assert "Required gate: **Passed**" not in api.comments[0]["body"]
+
+
+def test_github_multiple_unverifiable_bot_markers_do_not_block_genuine_feedback(github):
+    module, api = github
+    api.comments = [
+        _bot_comment(module, 5, "99999999999:1"),
+        _bot_comment(module, 6, "99999999998:1"),
+        {**_bot_comment(module, 7, "1:1"), "body": module.MARKER + "\nno producer receipt"},
+    ]
+    assert module.github_feedback(api, REPO, 123, 1)["comment_action"] == "updated"
+    assert [path for _, path, _ in api.writes] == [f"/repos/{REPO}/issues/comments/5"]
+    # A verified genuine comment is preferred over leftover unverifiable ones.
+    assert module.github_feedback(api, REPO, 123, 1)["comment_action"] == "unchanged"
+    assert len(api.writes) == 1
+
+
+def test_github_marker_verification_does_not_hide_api_failures(github):
+    import urllib.error
+
+    module, api = github
+    api.comments = [_bot_comment(module, 5, "124:1")]
+    original = api.get
+
+    def unavailable(path):
+        if path.endswith("/actions/runs/124"):
+            raise urllib.error.HTTPError("https://api.github.com" + path, 503, "Unavailable", {}, None)
+        return original(path)
+
+    api.get = unavailable
+    with pytest.raises(urllib.error.HTTPError):
+        module.github_feedback(api, REPO, 123, 1)
+    assert not api.writes
+
+
+@pytest.mark.parametrize(
+    "change",
+    ["fork", "deleted-fork", "rerun-started", "rerun-completed", "rerun-in-progress"],
+)
+def test_github_skips_fork_and_superseded_producer_runs_without_failing(github, change):
+    module, api = github
+    if change == "fork":
+        api.run["head_repository"] = {"full_name": "contributor/skills", "id": 99}
+        # Fork runs have no OIDC token, so no provenance receipt is uploaded.
+        api.artifacts = [a for a in api.artifacts if "provenance" not in a["name"]]
+    elif change == "deleted-fork":
+        api.run["head_repository"] = None
+    elif change == "rerun-started":
+        api.run.update(run_attempt=2, status="in_progress")
+    elif change == "rerun-completed":
+        api.run["run_attempt"] = 2
+    else:
+        api.run["status"] = "in_progress"
+    result = module.github_feedback(api, REPO, 123, 1)
+    assert result["comment_action"] == "skipped"
+    assert not api.writes and not api.downloads
+    assert not any("/artifacts" in path for path in api.gets)
+
+
+def test_github_feedback_job_skips_fork_pull_request_runs():
+    import yaml
+
+    root = Path(__file__).resolve().parents[2]
+    workflow = yaml.safe_load((root / ".github/workflows/feedback-all-tiers.yml").read_text())
+    condition = workflow["jobs"]["feedback"]["if"]
+    assert "github.event.workflow_run.event == 'pull_request'" in condition
+    assert "github.event.workflow_run.head_repository.full_name == github.repository" in condition
 
 
 @pytest.mark.parametrize("name", ["../ci-results.json", "/ci-results.json", "tier1/../../secret.json", "evil\\file"])
@@ -738,6 +844,16 @@ def test_gitlab_accepts_running_source_when_request_job_and_aggregate_are_bound(
     assert result["comment_action"] == "created"
 
 
+@pytest.mark.parametrize("status", ["manual", "pending", "created", "waiting_for_resource", "preparing", "scheduled"])
+def test_gitlab_accepts_unfinished_source_pipeline_when_other_consumer_jobs_remain(gitlab, status):
+    module, api = gitlab
+    # Merged consumer CI can leave later or blocking manual jobs after the
+    # finished aggregate and request jobs, which carry the bound evidence.
+    api.pipeline["status"] = status
+    result = module.gitlab_feedback(api, "https://gitlab.example/api/v4", "12", 123)
+    assert result["comment_action"] == "created"
+
+
 def test_gitlab_uses_persisted_graphql_mr_without_unsupported_pipeline_rest_endpoint(gitlab):
     import urllib.error
 
@@ -972,6 +1088,115 @@ def test_native_pass_requires_matching_retained_tier_evidence():
         module.read_results(archive(payload, extra))
 
 
+def _tier3_neutral_archive(status, *, complete=True, blocking=True):
+    from tests.ci.test_tier3_execution_complete import complete_report
+
+    from skillevaluator.models import ValidationResult
+    from skillevaluator.reporting.json_reporter import JSONReporter
+
+    payload = complete_report()["tier3"]
+    payload["verdict"] = payload["summary"]["verdict"] = "neutral"
+    if not complete:
+        payload.pop("run_id")
+        payload["summary"].pop("run_id")
+    result = ValidationResult(
+        validator_name="AGENT_EVAL",
+        passed=True,
+        metadata={"gating": {"tier": 3, "blocking": blocking}, "agent_eval": payload},
+    )
+    native = JSONReporter(expected_skill_name="demo").render_all([result])
+    document = manifest()
+    document["tiers"][2].update(
+        status=status,
+        skills=[
+            {
+                "path": "skills/demo",
+                "status": status,
+                "report_json": "tier3/skill-001/skillevaluator-tier3.json",
+                "report_html": "tier3/skill-001/skillevaluator-tier3.html",
+            }
+        ],
+    )
+    document["tiers"][2].pop("reason")
+    return archive(
+        document,
+        {
+            "tier3/skill-001/skillevaluator-tier3.json": native,
+            "tier3/skill-001/skillevaluator-tier3.html": "<p>Tier 3</p>",
+        },
+    )
+
+
+@pytest.mark.parametrize("blocking", [True, False])
+@pytest.mark.parametrize(("complete", "status"), [(True, "neutral"), (True, "incomplete"), (False, "incomplete")])
+def test_tier3_neutral_evidence_accepts_recorded_neutral_or_producer_incomplete_downgrade(blocking, complete, status):
+    module = adapter()
+    retained = module.read_results(_tier3_neutral_archive(status, complete=complete, blocking=blocking))
+    assert retained["tiers"][2]["skills"][0]["status"] == status
+
+
+@pytest.mark.parametrize(("complete", "status"), [(True, "passed"), (False, "neutral"), (False, "passed")])
+def test_tier3_neutral_evidence_is_never_promoted(complete, status):
+    module = adapter()
+    with pytest.raises(module.FeedbackError):
+        module.read_results(_tier3_neutral_archive(status, complete=complete))
+
+
+def _aggregate_layout(skills, *, directories):
+    """Member names of a full three-tier aggregate as its producers retain them."""
+    prefix = "skill-evaluator-results/" if directories else ""
+    names = [
+        "ci-results.json",
+        "index.html",
+        "summary.md",
+        "tier1/summary.json",
+        "tier1/index.html",
+        "tier2/ci-tier.json",
+        "tier3/ci-tier.json",
+    ]
+    folders = ["", "tier1/", "tier2/", "tier3/"]
+    for number in range(1, skills + 1):
+        leaf = f"skill-{number:03d}"
+        tier1 = ("json", "html", "md", "sarif.json")
+        names += [f"tier1/{leaf}/skillevaluator-tier1.{ext}" for ext in tier1]
+        names += [f"tier1/{leaf}/stdout.log", f"tier1/{leaf}/stderr.log"]
+        for tier in (2, 3):
+            names += [f"tier{tier}/{leaf}/skillevaluator-tier{tier}.{ext}" for ext in ("json", "html", "md")]
+        folders += [f"tier{tier}/{leaf}/" for tier in (1, 2, 3)]
+    output = io.BytesIO()
+    with zipfile.ZipFile(output, "w") as zipped:
+        for folder in folders if directories else []:
+            zipped.writestr(prefix + folder, "")
+        for name in names:
+            zipped.writestr(prefix + name, json.dumps(manifest()) if name == "ci-results.json" else "{}")
+    return output.getvalue(), prefix, len(zipped.infolist())
+
+
+@pytest.mark.parametrize("directories", [False, True])
+def test_member_limit_admits_the_documented_maximum_skill_count_on_every_platform(directories):
+    from ci import run_tier1, select_changed_skills
+
+    module = adapter()
+    assert module.MAX_SKILLS == run_tier1.MAX_SKILLS == select_changed_skills.MAX_SELECTED_SKILLS
+    raw, prefix, members = _aggregate_layout(module.MAX_SKILLS, directories=directories)
+    assert members <= module.MAX_FILES
+    assert module.read_results(raw, prefix=prefix)["tiers"][0]["status"] == "skipped"
+
+
+def test_member_limit_still_rejects_one_member_above_the_derived_bound():
+    module = adapter()
+    output = io.BytesIO()
+    with zipfile.ZipFile(output, "w") as zipped:
+        zipped.writestr("ci-results.json", json.dumps(manifest()))
+        for number in range(module.MAX_FILES - 1):
+            zipped.writestr(f"tier1/extra-{number:05d}.json", "{}")
+    assert module.read_results(output.getvalue())["tiers"][0]["status"] == "skipped"
+    with zipfile.ZipFile(output, "a") as zipped:
+        zipped.writestr("tier1/one-too-many.json", "{}")
+    with pytest.raises(module.FeedbackError, match="member or expansion limits"):
+        module.read_results(output.getvalue())
+
+
 def test_gitlab_signed_job_claims_are_not_replaced_by_ci_environment(monkeypatch):
     module = adapter()
     import time
@@ -1072,27 +1297,90 @@ def test_gitlab_preserves_other_bot_marker_and_requires_its_own_readback(gitlab,
         module.gitlab_feedback(api, "https://gitlab.example/api/v4", "12", 123)
 
 
-def test_gitlab_never_forwards_token_on_artifact_redirect():
+class _ArtifactResponse(io.BytesIO):
+    def __init__(self, payload):
+        super().__init__(payload)
+        self.headers = {}
+
+
+class _RedirectingStorage:
+    """Answer the artifact endpoint with a redirect chain, then the archive bytes."""
+
+    def __init__(self, locations, payload=b"zip-bytes"):
+        self.locations, self.payload, self.requests = list(locations), payload, []
+
+    def open(self, request, *, timeout):
+        import urllib.error
+
+        assert timeout > 0
+        self.requests.append(request)
+        if self.locations:
+            location = self.locations.pop(0)
+            raise urllib.error.HTTPError(request.full_url, 302, "Found", {"Location": location}, None)
+        return _ArtifactResponse(self.payload)
+
+
+def test_gitlab_follows_object_storage_artifact_redirect_without_the_token():
     module = adapter()
+    api = module.GitLabAPI("https://gitlab.example/api/v4", "12", "secret")
+    api.opener = _RedirectingStorage(["https://objects.example/bucket/artifact.zip?X-Amz-Signature=abc"])
+    assert api.download_artifact(91) == b"zip-bytes"
+    first, second = api.opener.requests
+    assert first.full_url == "https://gitlab.example/api/v4/projects/12/jobs/91/artifacts"
+    assert first.get_header("Private-token") == "secret"
+    assert second.full_url == "https://objects.example/bucket/artifact.zip?X-Amz-Signature=abc"
+    assert all("secret" not in str(value) for value in second.header_items())
+    assert second.get_header("Private-token") is None and second.get_header("Authorization") is None
+
+
+def test_gitlab_artifact_redirect_resolves_relative_locations_and_stays_bounded():
+    module = adapter()
+    api = module.GitLabAPI("https://gitlab.example/api/v4", "12", "secret")
+    api.opener = _RedirectingStorage(["/-/object-storage/artifact.zip", "https://cdn.example/signed"])
+    assert api.download_artifact(91) == b"zip-bytes"
+    assert [r.full_url for r in api.opener.requests[1:]] == [
+        "https://gitlab.example/-/object-storage/artifact.zip",
+        "https://cdn.example/signed",
+    ]
+    api.opener = _RedirectingStorage(["https://objects.example/hop"] * module.MAX_REDIRECTS)
+    assert api.download_artifact(91) == b"zip-bytes"
+    api.opener = _RedirectingStorage(["https://objects.example/zip"], payload=b"x" * (module.MAX_BYTES + 1))
+    with pytest.raises(module.FeedbackError, match="size limit"):
+        api.download_artifact(91)
+
+
+@pytest.mark.parametrize(
+    "locations",
+    [
+        ["http://objects.example/artifact.zip"],
+        ["https://user:pass@objects.example/artifact.zip"],
+        ["https://user@objects.example/artifact.zip"],
+        ["https://objects.example/artifact.zip\r\nX-Injected: 1"],
+        ["ftp://objects.example/artifact.zip"],
+        [""],
+        ["https://objects.example/1", "http://objects.example/2"],
+        ["https://objects.example/hop"] * 6,  # one more than MAX_REDIRECTS
+    ],
+)
+def test_gitlab_artifact_redirect_rejects_insecure_credentialed_or_looping_targets(locations):
+    module = adapter()
+    api = module.GitLabAPI("https://gitlab.example/api/v4", "12", "secret")
+    api.opener = _RedirectingStorage(locations)
+    with pytest.raises(module.FeedbackError, match="redirect"):
+        api.download_artifact(91)
+    assert all(r.get_header("Private-token") is None for r in api.opener.requests[1:])
+    assert all(r.full_url.startswith("https://") and "@" not in r.full_url for r in api.opener.requests)
+
+
+def test_gitlab_json_api_calls_still_never_follow_redirects():
     import urllib.error
 
-    class Redirect:
-        def __init__(self):
-            self.requests = []
-
-        def open(self, request, *, timeout):
-            assert timeout > 0
-            self.requests.append(request)
-            raise urllib.error.HTTPError(
-                request.full_url, 302, "redirect", {"Location": "https://evil.example/data"}, None
-            )
-
+    module = adapter()
     api = module.GitLabAPI("https://gitlab.example/api/v4", "12", "secret")
-    api.opener = Redirect()
+    api.opener = _RedirectingStorage(["https://evil.example/data"])
     with pytest.raises(urllib.error.HTTPError):
-        api.download_artifact(91)
+        api.get("/projects/12/pipelines/123")
     assert len(api.opener.requests) == 1
-    assert api.opener.requests[0].full_url == "https://gitlab.example/api/v4/projects/12/jobs/91/artifacts"
 
 
 def test_gitlab_cli_does_not_fall_back_to_job_token(monkeypatch, capsys):

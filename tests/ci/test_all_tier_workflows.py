@@ -145,13 +145,18 @@ def test_gitlab_privileged_bootstrap_uses_fixed_include_inputs():
     assert job["id_tokens"]["SKILL_EVAL_GITLAB_ID_TOKEN"]["aud"] == "urn:skillevaluator:feedback:v1"
 
 
-def test_gitlab_feedback_bridge_forwards_only_source_identity():
-    bridge = load("ci/gitlab/all-tiers.yml")["skill-evaluation-request-feedback"]
-    assert "script" not in bridge
-    assert bridge["inherit"]["variables"] == "false"
-    assert set(bridge["variables"]) == {"SKILL_EVAL_FEEDBACK", "SKILL_EVAL_SOURCE_PIPELINE_ID"}
-    assert bridge["trigger"]["branch"] == "$CI_DEFAULT_BRANCH"
-    assert bridge["trigger"]["forward"] == {"yaml_variables": "true", "pipeline_variables": "false"}
+def test_gitlab_feedback_request_uses_job_token_api_without_candidate_checkout():
+    job = load("ci/gitlab/all-tiers.yml")["skill-evaluation-request-feedback"]
+    assert "trigger" not in job
+    assert "environment" not in job
+    assert job["variables"] == {"GIT_STRATEGY": "none"}
+    assert job["extends"] == ".skill-evaluation-tools"
+    assert job["needs"] == [{"job": "skill-evaluation-aggregate", "artifacts": "false"}]
+    assert job["when"] == "always"
+    assert job["allow_failure"] == "true"
+    script = "\n".join(job["script"])
+    assert 'python -I "$SKILL_EVAL_TOOLS_DIR/ci/request_gitlab_feedback.py"' in script
+    assert "uv" not in script and "bootstrap" not in script
 
 
 def test_gitlab_bridge_rules_do_not_disable_their_own_feedback_flag():

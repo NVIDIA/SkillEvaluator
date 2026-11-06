@@ -4,7 +4,7 @@
 
 GitHub authenticates the producer through its signed reusable-job receipt.
 GitLab authenticates this protected downstream job through its own ID token,
-then binds its parent bridge, producer configuration and exact aggregate job.
+then binds its source job, producer configuration and exact aggregate job.
 All artifact processing is bounded in memory; HTML is never interpreted.
 """
 
@@ -13,6 +13,7 @@ from __future__ import annotations
 import argparse
 import base64
 import binascii
+import http.client
 import io
 import json
 import os
@@ -482,6 +483,47 @@ class GitLabAPI:
     def put(self, path, payload):
         return self._call("PUT", path, payload)
 
+    def graphql(self, query: str, variables: dict) -> dict:
+        """Read server-owned relationships at this instance's fixed GraphQL endpoint."""
+        _require(
+            isinstance(query, str) and 0 < len(query) <= 16384 and isinstance(variables, dict),
+            "The GitLab relationship request is invalid.",
+        )
+        try:
+            data = json.dumps({"query": query, "variables": variables}, allow_nan=False).encode("utf-8")
+            _require(len(data) <= 64 * 1024, "The GitLab relationship request exceeds its size limit.")
+            request = urllib.request.Request(
+                self.origin + "/api/graphql",
+                method="POST",
+                data=data,
+                headers={
+                    "PRIVATE-TOKEN": self.token,
+                    "Content-Type": "application/json",
+                    "Accept": "application/json",
+                    "User-Agent": "SkillEvaluator-trusted-feedback",
+                },
+            )
+            with self.opener.open(request, timeout=github_api.TIMEOUT_SECONDS) as response:
+                _require(response.getcode() == 200, "The GitLab relationship response has an invalid HTTP status.")
+                raw = github_api.bounded_read(
+                    response,
+                    github_api.MAX_API_BYTES,
+                    FeedbackError,
+                    "The GitLab relationship response exceeds its size limit.",
+                )
+            payload = _json(raw)
+        except FeedbackError:
+            raise
+        except (http.client.HTTPException, OSError, TypeError, ValueError, RecursionError):
+            raise FeedbackError("The GitLab relationship request could not be verified.") from None
+        _require(
+            isinstance(payload, dict)
+            and ("errors" not in payload or payload["errors"] == [])
+            and isinstance(payload.get("data"), dict),
+            "The GitLab relationship response is incomplete or invalid.",
+        )
+        return payload["data"]
+
     def download_artifact(self, job_id):
         _positive(job_id)
         return self._call("GET", f"/projects/{self.project}/jobs/{job_id}/artifacts", binary=True)
@@ -665,24 +707,47 @@ def gitlab_feedback(api, api_url: str, project: str, pipeline_id: int) -> dict:
         and source.get("source") == "merge_request_event"
         and isinstance(source.get("sha"), str)
         and github_api.COMMIT_SHA.fullmatch(source["sha"])
-        and source.get("status") in {"success", "failed", "canceled", "skipped"},
-        "Only completed same-project merge-request producers may receive feedback.",
+        and source.get("status") in {"running", "success", "failed", "canceled", "skipped"},
+        "Only active or completed same-project merge-request producers may receive feedback.",
     )
     _require(
         api.get(f"{root}/pipelines/{pipeline_id}/variables") == [],
         "Source merge-request pipelines may not override trusted producer configuration through pipeline variables.",
     )
-    bridges = _listing(api, f"{root}/pipelines/{pipeline_id}/bridges")
-    relation = [
-        b
-        for b in bridges
-        if b.get("name") == "skill-evaluation-request-feedback"
-        and b.get("downstream_pipeline", {}).get("id") == publisher["id"]
-    ]
+    namespace = info.get("path_with_namespace")
     _require(
-        len(relation) == 1 and relation[0]["downstream_pipeline"].get("project_id", project_id) == project_id,
-        "The producer lacks an authenticated parent bridge to this downstream pipeline.",
+        isinstance(namespace, str) and re.fullmatch(r"[A-Za-z0-9_.-]+(?:/[A-Za-z0-9_.-]+)+", namespace),
+        "The authenticated GitLab project has no valid namespace.",
     )
+    relationship = api.graphql(
+        "query($project:ID!,$pipeline:CiPipelineID!){project(fullPath:$project){fullPath "
+        "pipeline(id:$pipeline){id project{fullPath} sourceJob{id} upstream{id project{fullPath}}}}}",
+        {"project": namespace, "pipeline": f"gid://gitlab/Ci::Pipeline/{publisher['id']}"},
+    )
+    relation_project = relationship.get("project") if isinstance(relationship, dict) else None
+    relation = relation_project.get("pipeline") if isinstance(relation_project, dict) else None
+    _require(
+        isinstance(relation_project, dict)
+        and relation_project.get("fullPath") == namespace
+        and isinstance(relation, dict)
+        and relation.get("id") == f"gid://gitlab/Ci::Pipeline/{publisher['id']}"
+        and isinstance(relation.get("project"), dict)
+        and relation["project"].get("fullPath") == namespace
+        and isinstance(relation.get("upstream"), dict)
+        and relation["upstream"].get("id") == f"gid://gitlab/Ci::Pipeline/{pipeline_id}"
+        and isinstance(relation["upstream"].get("project"), dict)
+        and relation["upstream"]["project"].get("fullPath") == namespace
+        and isinstance(relation.get("sourceJob"), dict),
+        "The publisher lacks a server-bound same-project source pipeline and job.",
+    )
+    source_job_gid = relation["sourceJob"].get("id")
+    source_job_match = (
+        re.fullmatch(r"gid://gitlab/Ci::Build/([1-9][0-9]{0,29})", source_job_gid)
+        if isinstance(source_job_gid, str)
+        else None
+    )
+    _require(source_job_match is not None, "The publisher source must be an ordinary authenticated request job.")
+    request_job_id = int(source_job_match[1])
 
     # Read both configurations at immutable API revisions. A pipeline variable
     # allowlist is not a trust anchor because upstream variables can override it.
@@ -718,6 +783,22 @@ def gitlab_feedback(api, api_url: str, project: str, pipeline_id: int) -> dict:
 
     def aggregate_job():
         jobs = _listing(api, f"{root}/pipelines/{pipeline_id}/jobs?include_retried=false")
+        requests = [
+            j for j in jobs if j.get("name") == "skill-evaluation-request-feedback" and j.get("retried") is not True
+        ]
+        request_job = api.get(f"{root}/jobs/{request_job_id}")
+        _require(
+            len(requests) == 1
+            and requests[0].get("id") == request_job_id
+            and request_job.get("id") == request_job_id
+            and request_job.get("name") == "skill-evaluation-request-feedback"
+            and request_job.get("retried") is not True
+            and request_job.get("pipeline", {}).get("id") == pipeline_id
+            and request_job.get("commit", {}).get("id") == source["sha"]
+            and request_job.get("ref") == source.get("ref")
+            and request_job.get("status") in {"running", "success", "failed", "canceled"},
+            "The publisher source request job is not the exact current producer job.",
+        )
         matches = [j for j in jobs if j.get("name") == "skill-evaluation-aggregate" and j.get("retried") is not True]
         _require(len(matches) == 1, "The producer has no unique current aggregate job.")
         value = matches[0]

@@ -38,6 +38,9 @@ All notable changes to SkillEvaluator are documented in this file.
   compatible with GitLab 17.8, and safely select changes in runner-owned checkouts.
   GitLab before 18.4 uses a separate read-only admission credential; feedback
   initiation is advisory so first-install reporting does not change the tier gate.
+  Same-project feedback uses the short-lived job-token trigger API and verifies
+  the server-bound upstream pipeline and source job, preserving protected-branch
+  and deployment permissions.
 
 - Private runtime runs retain sanitized loading, coverage, MCP, behavior and
   comparison views before cleanup. The saved snapshot supports offline reports

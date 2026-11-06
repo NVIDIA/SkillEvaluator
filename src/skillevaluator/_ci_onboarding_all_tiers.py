@@ -508,7 +508,7 @@ def initialize(
     )
     if platform == "gitlab":
         wizard.console.print(
-            "GitLab: protect the default branch and add a scoped protected SKILLEVALUATOR_GITLAB_TOKEN for trusted feedback. Enable job-token pipeline triggers for this project."
+            "GitLab: protect the default branch and add a scoped protected SKILLEVALUATOR_GITLAB_TOKEN for trusted feedback. Permit job-token pipeline triggers; the initiating user needs protected-default-branch pipeline and feedback-environment permissions."
         )
     mode = mode or click.prompt("Next", default="preview", type=click.Choice(["preview", "save", "pr"]))
     admission = None

@@ -64,15 +64,21 @@ provenance as well as reading artifacts and updating MR notes; GitLab 17.8
 rejects the variables request for a Developer token. Store the token as masked, protected
 `SKILLEVALUATOR_GITLAB_TOKEN`, scoped only to the protected
 `skillevaluator-feedback` environment. The MR pipeline never receives that
-token. After aggregation, a declarative bridge requests a separate pipeline on the
-protected default branch with only `SKILL_EVAL_FEEDBACK=true` and the source
-pipeline ID. It forwards no repository variables or caller-supplied pipeline
-overrides. That trusted pipeline uses validated include inputs for fixed evaluator pins,
+token. After aggregation, a small job uses its short-lived `CI_JOB_TOKEN` with
+GitLab's pipeline trigger API to request a separate pipeline on the protected
+default branch. It sends only `SKILL_EVAL_FEEDBACK=true` and the source pipeline
+ID, without forwarding repository variables or caller-supplied pipeline overrides.
+The API supports same-project pipelines; GitLab's declarative multi-project
+bridge rejects a target in the same project. That trusted pipeline uses validated include inputs for fixed evaluator pins,
 API host and project, so forwarded MR variables cannot replace its privileged
-bootstrap. It fetches only pinned evaluator tools and validates source
-pipeline, MR and current commit before updating
-one comment. Permit this same-project downstream pipeline and its protected execution environment.
-The feedback bridge is advisory; the aggregate remains the required evaluation
+bootstrap. It fetches only pinned evaluator tools and authenticates the server's
+upstream pipeline and source job relationship, then validates the source
+configuration, aggregate artifact, MR and current commit before updating one
+comment. The initiating pipeline user must be allowed to create a pipeline on
+the protected default branch, pass the two pipeline variables and run the
+protected feedback environment. Configure these permissions for authorized CI
+maintainers; a job token does not bypass protected-branch or deployment permissions.
+The feedback request is advisory; the aggregate remains the required evaluation
 gate when the first setup MR has not yet installed feedback on the default branch.
 
 Install both configuration files on the default branch before the first demo

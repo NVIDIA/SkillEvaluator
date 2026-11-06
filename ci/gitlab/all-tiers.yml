@@ -249,23 +249,17 @@ skill-evaluation-aggregate:
 
 skill-evaluation-request-feedback:
   allow_failure: true
+  extends: .skill-evaluation-tools
   stage: test
   needs:
     - job: skill-evaluation-aggregate
       artifacts: false
   when: always
-  inherit:
-    variables: false
   variables:
-    SKILL_EVAL_FEEDBACK: 'true'
-    SKILL_EVAL_SOURCE_PIPELINE_ID: $CI_PIPELINE_ID
-  # A real bridge supplies verifiable source/downstream pipeline identity.
-  # No repository variables or caller-supplied pipeline overrides are forwarded.
-  trigger:
-    project: $CI_PROJECT_PATH
-    branch: $CI_DEFAULT_BRANCH
-    forward:
-      yaml_variables: true
-      pipeline_variables: false
+    GIT_STRATEGY: none
+  # The job-token API records the real source job/pipeline relationship and
+  # supports the same project's protected default branch. No provider work runs.
+  script:
+    - python -I "$SKILL_EVAL_TOOLS_DIR/ci/request_gitlab_feedback.py"
   rules:
     - if: '$CI_PIPELINE_SOURCE == "merge_request_event" && $CI_MERGE_REQUEST_SOURCE_PROJECT_ID == $CI_PROJECT_ID'

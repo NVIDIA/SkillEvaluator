@@ -309,10 +309,27 @@ class GitLab:
             "source_branch": "feature",
             "head_pipeline": {"id": 123},
         }
-        self.bridge = {
+        self.request_job = {
+            "id": 93,
             "name": "skill-evaluation-request-feedback",
-            "downstream_pipeline": {"id": 456, "project_id": 12},
+            "status": "success",
+            "retried": False,
+            "pipeline": {"id": 123},
+            "commit": {"id": SHA},
+            "ref": "feature",
         }
+        self.relationship = {
+            "project": {
+                "fullPath": REPO,
+                "pipeline": {
+                    "id": "gid://gitlab/Ci::Pipeline/456",
+                    "project": {"fullPath": REPO},
+                    "sourceJob": {"id": "gid://gitlab/Ci::Build/93"},
+                    "upstream": {"id": "gid://gitlab/Ci::Pipeline/123", "project": {"fullPath": REPO}},
+                },
+            }
+        }
+        self.current_request_id = 93
         self.notes = []
         self.writes = []
         self.payload = archive(manifest("gitlab"), prefix="skill-evaluator-results/")
@@ -350,10 +367,11 @@ class GitLab:
                 "pipeline": {"id": 456},
                 "commit": {"id": MERGE},
             }
-        if path.startswith(root + "/pipelines/123/bridges?"):
-            return [copy.deepcopy(self.bridge)]
+        if path == root + "/jobs/93":
+            return copy.deepcopy(self.request_job)
         if path.startswith(root + "/pipelines/123/jobs?"):
-            return [copy.deepcopy(self.job)]
+            request = {**self.request_job, "id": self.current_request_id}
+            return [copy.deepcopy(self.job), copy.deepcopy(request)]
         if path == root + "/repository/files/.gitlab-ci.yml?ref=" + SHA:
             return {"file_path": ".gitlab-ci.yml", "blob_id": self.source_blob, "commit_id": SHA, **config_content()}
         if path == root + "/repository/files/.gitlab-ci.yml?ref=" + MERGE:
@@ -371,6 +389,11 @@ class GitLab:
         if path.startswith(root + "/merge_requests/7/notes/"):
             return copy.deepcopy(next(n for n in self.notes if n["id"] == int(path.rsplit("/", 1)[-1])))
         raise AssertionError(path)
+
+    def graphql(self, query, variables):
+        assert "sourceJob" in query and "upstream" in query
+        assert variables == {"project": REPO, "pipeline": "gid://gitlab/Ci::Pipeline/456"}
+        return copy.deepcopy(self.relationship)
 
     def download_artifact(self, job):
         assert job == 91
@@ -402,7 +425,7 @@ def gitlab(monkeypatch):
     return module, GitLab()
 
 
-def test_gitlab_binds_protected_downstream_bridge_config_head_job_and_bot(gitlab):
+def test_gitlab_binds_protected_downstream_source_job_config_head_job_and_bot(gitlab):
     module, api = gitlab
     result = module.gitlab_feedback(api, "https://gitlab.example/api/v4", "acme/skills", 123)
     assert result["comment_action"] == "created"
@@ -417,7 +440,7 @@ def test_gitlab_binds_protected_downstream_bridge_config_head_job_and_bot(gitlab
 def test_gitlab_accepts_current_mr_branch_or_exact_detached_head_ref(gitlab, ref):
     module, api = gitlab
     api.mr["source_branch"] = "ci/skillevaluator-all-tiers-setup"
-    api.pipeline["ref"] = api.job["ref"] = ref
+    api.pipeline["ref"] = api.job["ref"] = api.request_job["ref"] = ref
     result = module.gitlab_feedback(api, "https://gitlab.example/api/v4", "12", 123)
     assert result["comment_action"] == "created"
     assert len(api.writes) == 1
@@ -435,7 +458,7 @@ def test_gitlab_accepts_current_mr_branch_or_exact_detached_head_ref(gitlab, ref
 )
 def test_gitlab_rejects_unrelated_or_non_head_mr_producer_refs(gitlab, ref):
     module, api = gitlab
-    api.pipeline["ref"] = api.job["ref"] = ref
+    api.pipeline["ref"] = api.job["ref"] = api.request_job["ref"] = ref
     result = module.gitlab_feedback(api, "https://gitlab.example/api/v4", "12", 123)
     assert result["comment_action"] == "skipped"
     assert not api.writes
@@ -444,7 +467,7 @@ def test_gitlab_rejects_unrelated_or_non_head_mr_producer_refs(gitlab, ref):
 @pytest.mark.parametrize("branch", [None, "", ["feature"]])
 def test_gitlab_detached_head_ref_still_requires_a_source_branch(gitlab, branch):
     module, api = gitlab
-    api.pipeline["ref"] = api.job["ref"] = "refs/merge-requests/7/head"
+    api.pipeline["ref"] = api.job["ref"] = api.request_job["ref"] = "refs/merge-requests/7/head"
     api.mr["source_branch"] = branch
     result = module.gitlab_feedback(api, "https://gitlab.example/api/v4", "12", 123)
     assert result["comment_action"] == "skipped"
@@ -454,7 +477,7 @@ def test_gitlab_detached_head_ref_still_requires_a_source_branch(gitlab, branch)
 @pytest.mark.parametrize("change", ["head", "head-pipeline", "job-ref", "recheck"])
 def test_gitlab_detached_head_ref_keeps_exact_current_producer_guards(gitlab, change):
     module, api = gitlab
-    api.pipeline["ref"] = api.job["ref"] = "refs/merge-requests/7/head"
+    api.pipeline["ref"] = api.job["ref"] = api.request_job["ref"] = "refs/merge-requests/7/head"
     if change == "head":
         api.mr["sha"] = "e" * 40
     elif change == "head-pipeline":
@@ -472,10 +495,87 @@ def test_gitlab_detached_head_ref_keeps_exact_current_producer_guards(gitlab, ch
     assert not api.writes
 
 
+def test_gitlab_accepts_running_source_when_request_job_and_aggregate_are_bound(gitlab):
+    module, api = gitlab
+    api.pipeline["status"] = api.request_job["status"] = "running"
+    result = module.gitlab_feedback(api, "https://gitlab.example/api/v4", "12", 123)
+    assert result["comment_action"] == "created"
+
+
 @pytest.mark.parametrize(
     "change",
     [
-        "bridge",
+        "project",
+        "publisher",
+        "publisher-project",
+        "upstream",
+        "upstream-project",
+        "missing-job",
+        "bridge-job",
+        "job-name",
+        "job-pipeline",
+        "job-sha",
+        "job-ref",
+        "retried",
+        "not-current",
+        "aggregate-running",
+    ],
+)
+def test_gitlab_api_trigger_requires_server_bound_current_request_job(gitlab, change):
+    module, api = gitlab
+    relation = api.relationship["project"]["pipeline"]
+    if change == "project":
+        api.relationship["project"]["fullPath"] = "other/project"
+    elif change == "publisher":
+        relation["id"] = "gid://gitlab/Ci::Pipeline/457"
+    elif change == "publisher-project":
+        relation["project"]["fullPath"] = "other/project"
+    elif change == "upstream":
+        relation["upstream"]["id"] = "gid://gitlab/Ci::Pipeline/124"
+    elif change == "upstream-project":
+        relation["upstream"]["project"]["fullPath"] = "other/project"
+    elif change == "missing-job":
+        relation["sourceJob"] = None
+    elif change == "bridge-job":
+        relation["sourceJob"]["id"] = "gid://gitlab/Ci::Bridge/93"
+    elif change == "job-name":
+        api.request_job["name"] = "untrusted-job"
+    elif change == "job-pipeline":
+        api.request_job["pipeline"]["id"] = 124
+    elif change == "job-sha":
+        api.request_job["commit"]["id"] = "e" * 40
+    elif change == "job-ref":
+        api.request_job["ref"] = "other"
+    elif change == "retried":
+        api.request_job["retried"] = True
+    elif change == "not-current":
+        api.current_request_id = 94
+    else:
+        api.job["status"] = "running"
+    with pytest.raises(module.FeedbackError):
+        module.gitlab_feedback(api, "https://gitlab.example/api/v4", "12", 123)
+    assert not api.writes
+
+
+def test_gitlab_rechecks_request_job_after_artifact_download(gitlab):
+    module, api = gitlab
+    original = api.download_artifact
+
+    def replaced(job):
+        payload = original(job)
+        api.current_request_id = 94
+        return payload
+
+    api.download_artifact = replaced
+    with pytest.raises(module.FeedbackError):
+        module.gitlab_feedback(api, "https://gitlab.example/api/v4", "12", 123)
+    assert not api.writes
+
+
+@pytest.mark.parametrize(
+    "change",
+    [
+        "relationship",
         "producer-config",
         "ref",
         "fork",
@@ -490,8 +590,8 @@ def test_gitlab_detached_head_ref_keeps_exact_current_producer_guards(gitlab, ch
 )
 def test_gitlab_rejects_forged_producer_or_privileged_context(gitlab, change):
     module, api = gitlab
-    if change == "bridge":
-        api.bridge["downstream_pipeline"]["id"] = 457
+    if change == "relationship":
+        api.relationship["project"]["pipeline"]["upstream"]["id"] = "gid://gitlab/Ci::Pipeline/124"
     if change == "producer-config":
         api.source_blob = "e" * 40
     if change == "ref":

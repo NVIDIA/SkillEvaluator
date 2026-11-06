@@ -134,7 +134,10 @@ environment. GitLab before 18.4 also needs a separate project Reporter/read_api
 (`skillevaluator` by default). The read credential is removed before provider work.
 Newer servers use `CI_JOB_TOKEN` by default. Online init/status report the server
 version prerequisite; offline preview/save leave admission readiness unverified.
-The MR jobs receive no comment token. See the platform pages for
+The MR jobs receive no comment token. GitLab's feedback request uses its
+short-lived job token; the initiating user needs permission to create a pipeline
+on the protected default branch and run the protected feedback environment.
+See the platform pages for
 [GitHub](github-actions.mdx#three-tier-checks-and-feedback) and
 [GitLab](gitlab-ci.mdx#three-tier-checks-and-feedback) details.
 

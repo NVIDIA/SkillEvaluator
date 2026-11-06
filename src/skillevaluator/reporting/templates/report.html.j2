@@ -2154,7 +2154,7 @@
         {% set t3_agents = tier3.agents or {} %}
         {% macro tier3_chart(id, title, description, reference, reference_label, height) %}
             <h3>{{ title }}</h3>
-            <p class="chart-description" id="{{ id }}-description">{{ description }} <a href="#{{ reference }}">{{ reference_label }}</a>.</p>
+            <p class="chart-description" id="{{ id }}-description">{{ description }} <a href="#{{ reference }}" onclick="return openTier3Reference(this.getAttribute('href').slice(1))">{{ reference_label }}</a>.</p>
             <canvas id="{{ id }}" height="{{ height }}" role="img" aria-label="{{ title }}" aria-describedby="{{ id }}-description" hidden></canvas>
             <p class="chart-fallback" id="{{ id }}-fallback" role="status">Chart unavailable. Use the data link above to read the results.</p>
         {% endmacro %}
@@ -2771,7 +2771,7 @@
                         </div>
                     {% endfor %}
                     </div>
-                    {% set dimension_reference = ('tier3-multi-agent-dimension-table' if t3_agents | length > 1 else 'tier3-dimension-table') if tier3.dimensions else 'tier3-page-provenance' %}
+                    {% set dimension_reference = ('tier3-multi-agent-dimension-table' if t3_agents | length > 1 else 'tier3-dimension-table') if tier3.dimensions else 'tier3-json-downloads' %}
                     {% set dimension_reference_label = 'Read the dimension scores table' if tier3.dimensions else 'Read JSON Downloads (dimension scores unavailable)' %}
                     <div class="chart-card">{{ tier3_chart('tier3-radar', 'Dimension Comparison (Radar)', 'Dimension scores for each agent, on a scale from 0 to 1; missing measurements are gaps.', dimension_reference, dimension_reference_label, 260) }}</div>
                     <div class="chart-card">{{ tier3_chart('tier3-metric-bar', 'Dimension Scores by Agent', 'Dimension scores grouped by dimension and agent, on a scale from 0 to 1; missing measurements are gaps.', dimension_reference, dimension_reference_label, 260) }}</div>
@@ -3725,7 +3725,7 @@
             </div>
             {% endif %}
 
-            <details class="t3-details" open>
+            <details class="t3-details" id="tier3-json-downloads" open>
                 <summary>JSON Downloads</summary>
                 <div class="t3-details-body">
                     <p style="color:var(--text-secondary);font-size:0.85rem;margin:0 0 0.75rem;">
@@ -3850,13 +3850,28 @@
         {# Sub-tab switcher and Chart.js charts #}
         {% if t3_agents or (t3_steps_chart is defined and t3_steps_chart.datasets) %}
         {% set chart_runtime, chart_notices = chart_assets() %}
+        {% if chart_runtime %}
         <details class="chart-notices" id="tier3-chart-notices">
             <summary>Chart software notices: Chart.js 4.5.1 and @kurkle/color 0.3.2 (MIT)</summary>
             <pre>{{ chart_notices }}</pre>
         </details>
         <script id="tier3-chart-runtime">{{ chart_runtime | safe }}</script>
         {% endif %}
+        {% endif %}
         <script>
+        // Chart data links may point into another Tier 3 sub-tab; reveal it before jumping.
+        function openTier3Reference(id) {
+            var target = document.getElementById(id);
+            if (!target) return true;
+            var page = target.closest('.t3-page');
+            if (page && !page.classList.contains('active')) {
+                var tab = page.id.slice('tier3-page-'.length);
+                showTier3SubTab(tab, Array.from(document.querySelectorAll('.t3-subtab')).find(function(b){ return b.dataset.tier3Tab === tab; }));
+            }
+            if (target.tagName === 'DETAILS') target.open = true;
+            target.scrollIntoView({block: 'start'});
+            return false;
+        }
         function showTier3SubTab(id, btn) {
             document.querySelectorAll('.t3-page').forEach(function(p){ p.classList.remove('active'); });
             document.querySelectorAll('.t3-subtab').forEach(function(t){ t.classList.remove('active'); });
@@ -4123,14 +4138,17 @@
             function createChart(canvas, config) {
                 var fallback = document.getElementById(canvas.id + "-fallback");
                 canvas.hidden = false;
+                var chart = null;
                 try {
-                    var chart = new Chart(canvas, config);
+                    chart = new Chart(canvas, config);
                     // Chart.js can return an instance without a context instead of throwing.
                     if (!chart.ctx) throw new Error("Chart canvas unavailable");
                     charts.push(chart);
                     if (fallback) fallback.hidden = true;
                 } catch (error) {
-                    var partial = Chart.getChart && Chart.getChart(canvas);
+                    // A context-less instance is registered with canvas=null, so
+                    // Chart.getChart(canvas) cannot find it; destroy what was built.
+                    var partial = chart || (Chart.getChart && Chart.getChart(canvas));
                     if (partial) partial.destroy();
                     canvas.hidden = true;
                     if (fallback) fallback.hidden = false;

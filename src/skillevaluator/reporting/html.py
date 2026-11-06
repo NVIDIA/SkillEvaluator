@@ -1582,10 +1582,15 @@ def _fix_first(
 def _load_chart_assets() -> tuple[str, str]:
     """Read fixed, trusted chart resources once, only for reports containing charts."""
     assets = resources.files("skillevaluator.reporting").joinpath("assets")
-    runtime = assets.joinpath("chart.umd.min.js").read_text(encoding="utf-8")
-    notices = "\n\n".join(
-        assets.joinpath(name).read_text(encoding="utf-8") for name in ("Chart.js-LICENSE.md", "kurkle-color-LICENSE.md")
-    )
+    try:
+        runtime = assets.joinpath("chart.umd.min.js").read_text(encoding="utf-8")
+        notices = "\n\n".join(
+            assets.joinpath(name).read_text(encoding="utf-8")
+            for name in ("Chart.js-LICENSE.md", "kurkle-color-LICENSE.md")
+        )
+    except OSError:
+        # A broken install keeps the report; each chart shows its data-link fallback.
+        return "", ""
     return runtime, notices
 
 

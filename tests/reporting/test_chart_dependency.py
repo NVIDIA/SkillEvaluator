@@ -180,9 +180,12 @@ context.Chart = class {constructor() {throw new Error('Canvas unavailable');}};
 context.window.rebuildTier3Charts();
 const failed = ids.map(id => [elements[id].hidden, elements[id + '-fallback'].hidden]);
 let released = 0;
+// Like Chart.js 4.5.1: a context-less instance is registered with canvas=null,
+// so getChart(canvas) cannot find it; only the constructed instance can release it.
 context.Chart = class {
     constructor() {this.ctx = null;}
-    static getChart() {return {destroy() {released++;}};}
+    destroy() {released++;}
+    static getChart() {return undefined;}
 };
 context.window.rebuildTier3Charts();
 const missingContext = ids.map(id => [elements[id].hidden, elements[id + '-fallback'].hidden]);
@@ -219,3 +222,42 @@ process.stdout.write(JSON.stringify({missing, failed, missingContext, released, 
     assert states["printAnimations"][4:8] == [False] * 4
     assert states["colors"] == ["#e2e8f0"] * 4 + ["#0f172a"] * 4 + ["#e2e8f0"] * 4
     assert states["theme"] == "dark"
+
+
+def test_charts_without_dimension_scores_link_to_an_openable_download_section() -> None:
+    result = ValidationResult(validator_name="AGENT_EVAL")
+    result.metadata["agent_eval"] = build_agent_eval_payload(
+        "example",
+        {"agent": {"execution_status": "failed", "expected_attempts": 1, "scored_attempts": 0, "with_skill": {}}},
+        use_llm_judge=False,
+    )
+    html = HTMLReporter(include_timestamp=False).render_all([result])
+    report = _parse(html)
+    links = re.findall(r'class="chart-description"[^>]*>[^<]*<a href="#([^"]+)" onclick="([^"]+)"', html)
+    dimension_links = [link for link in links if link[0] != "t3-trials-table"][:2]
+    assert [target for target, _ in dimension_links] == ["tier3-json-downloads"] * 2
+    assert report.elements["tier3-json-downloads"][0] == "details"
+    # The section sits in the hidden Diagnostics sub-tab; the static handler reveals it.
+    assert all("openTier3Reference" in handler for _, handler in dimension_links)
+    assert "function openTier3Reference(id)" in html
+
+
+def test_missing_chart_asset_keeps_the_report_and_visible_fallbacks(monkeypatch) -> None:
+    class Missing:
+        def joinpath(self, *_parts):
+            return self
+
+        def read_text(self, **_kwargs):
+            raise FileNotFoundError("chart.umd.min.js")
+
+    html_module._load_chart_assets.cache_clear()
+    monkeypatch.setattr(html_module.resources, "files", lambda _package: Missing())
+    try:
+        html = _tier3_html()
+    finally:
+        html_module._load_chart_assets.cache_clear()
+    report = _parse(html)
+    assert "tier3-chart-runtime" not in report.scripts
+    assert "tier3-chart-notices" not in html
+    _, fallback = report.elements["tier3-radar-fallback"]
+    assert "hidden" not in fallback

@@ -6,6 +6,9 @@ All notable changes to SkillEvaluator are documented in this file.
 
 ### Changed
 
+- When CI redaction masks a credential inside a reported PII value, remove the
+  finding's digest as well.
+
 - Align final terminal and HTML command outcomes: Passed required checks,
   Changes required, or Incomplete. Keep publication eligibility and Best agent
   score separate. Tier counts exclude explicit N/A checks from execution;
@@ -14,6 +17,13 @@ All notable changes to SkillEvaluator are documented in this file.
 ## 0.8.0 - 2026-11-05
 
 ### Added
+
+- `skills/skillevaluator/` is an agent skill for operating SkillEvaluator: it
+  routes requests to the right tier, readiness check, dataset, report, or CI
+  command, and ships Tier 3 evaluation cases for itself. A test keeps every
+  command and option it documents in sync with the CLI. The new "Evaluate from
+  Your Agent" docs page shows how to install it in Codex, Claude Code, OpenCode,
+  OpenClaw, and other skill-aware agents.
 
 - Private runtime runs retain sanitized loading, coverage, MCP, behavior and
   comparison views before cleanup. The saved snapshot supports offline reports
@@ -266,16 +276,18 @@ All notable changes to SkillEvaluator are documented in this file.
   512-chunk ceiling, which the chunk check already enforces, so it is only a
   guard and never stops a scan on its own; the per-cluster prompt, total
   prompt, and cluster-count limits decide. When a cluster's request (system
-  prompt plus cluster text) would exceed 64,000 characters, each exactly
-  repeated text is sent once as `SHARED CONTENT n` when that makes the request
-  shorter; a short text repeated under long headings stays inline. A Markdown
-  section is compared without its own heading line, so the same body under
-  different headings is shared too. Every occurrence keeps its own entry with
-  its file, section, line range, and heading line. Distinct text is never
-  dropped or sampled, so a cluster still over the budget stays incomplete with
-  `llm_prompt_size_limit`. Duplicate and `llm_refused` finding messages name
-  at most 64 member locations and source files and count the rest; the JSON
-  `source_files` list stays complete.
+  prompt plus cluster text) would exceed 64,000 characters, exactly repeated
+  texts are sent once as `SHARED CONTENT n`, choosing the ones that make the
+  request shortest. A short text, such as a one-line body, stays inline
+  because its reference would be longer than the text. The most repeated texts
+  get blocks 1-9, whose references are one character shorter than those of
+  later blocks. A Markdown section is compared without its own heading line,
+  so the same body under different headings is shared too. Every occurrence
+  keeps its own entry with its file, section, line range, and heading line.
+  Distinct text is never dropped or sampled, so a cluster still over the
+  budget stays incomplete with `llm_prompt_size_limit`. Duplicate and
+  `llm_refused` finding messages name at most 64 member locations and source
+  files and count the rest; the JSON `source_files` list stays complete.
 
 - On the native Claude API, the Tier 3 judges' `judge_model_used` names the
   server-side fallback model when the API serves a repeated request straight
@@ -338,14 +350,14 @@ All notable changes to SkillEvaluator are documented in this file.
   agents ignore the variable. The variable was checked with Claude Code
   2.1.292, the release Harbor installs; local mode keeps the fallback off only
   if the host's Claude Code honors it. A refused attempt is not scored, like
-  any other failed trial, so the arm no longer has complete attempt coverage:
-  after one refusal in 20 cases with 3 attempts each, it reports
-  `Scored attempt coverage is 59/60` and its execution fails.
+  any other failed trial, so the arm no longer has complete attempt coverage
+  and its execution fails: after one refusal in 20 cases with 3 attempts
+  each, the run's `result.json` records `Scored attempt coverage is 59/60`.
   `tier3 evaluate` then exits 1, and so does `validate --block-on-agent-eval`.
   On a route that serves the fallback model, such as the Anthropic API, the
-  retry used to finish such an attempt and the arm succeeded, so a run that
-  completed before can now fail. Rerun it, or evaluate the refused case with
-  another model.
+  retry used to finish such an attempt, and the attempt was scored, so a run
+  that completed before can now fail. Rerun it, or run the arm with another
+  model through `--agent-model claude-code=MODEL`.
 
 - Tier 3 staging no longer fails with `chmod: cannot use dir_fd and
   follow_symlinks together` when it replaces or merges into an existing

@@ -32,7 +32,7 @@ from skillevaluator.inference.diagnostics import llm_failure_diagnostic
 from skillevaluator.inference.types import LLMClientError, LLMClientRefusedError, LLMClientTruncatedError
 from skillevaluator.logging_config import get_logger
 from skillevaluator.provider_config import ProviderConfigurationError, resolve_llm_provider
-from skillevaluator.utils.redaction import redact_sensitive_text
+from skillevaluator.utils.redaction import credential_safe_cut, redact_sensitive_text
 
 logger = get_logger(__name__)
 
@@ -52,7 +52,8 @@ _MAX_EXPLANATION_CHARS = 600
 _MAX_CASE_EVIDENCE_CHARS = 300_000
 # A field is masked over ``limit * 4 + 256`` characters, cut back to the last
 # whitespace. Text with no whitespace after its limit is masked over this many
-# characters instead, so the token that crosses the limit is kept.
+# characters instead, so the token that crosses the limit is kept; past this
+# window it is cut back to the last punctuation no credential contains.
 _MAX_UNBROKEN_MASK_CHARS = 65_536
 # Ends every shortened field, as in ``redact_sensitive_text(max_len=...)``.
 _TRUNCATED_MARKER = "...<truncated>"
@@ -424,7 +425,10 @@ class _Scrubber:
         bounded window, as in the plugin evidence helpers, and drops the
         token cut at the window's edge. When that token starts before
         ``limit`` (compact JSON, a minified error), a larger window is masked
-        so the field is not blanked. A shortened field ends in the marker.
+        so the field is not blanked. Text longer than that window is cut at
+        its last punctuation that no credential contains (``,`` ``"`` ``}``),
+        so a long minified body keeps its prefix too. A shortened field ends
+        in the marker.
         """
         value = self.paths(value)
         if limit is None:
@@ -432,6 +436,9 @@ class _Scrubber:
         window = limit * 4 + 256
         if len(value) > window and not any(char.isspace() for char in value[limit:window]):
             window = max(window, _MAX_UNBROKEN_MASK_CHARS)
+            if len(value) > window:
+                masked = redact_sensitive_text(value[: credential_safe_cut(value, window)])
+                return masked[: limit - len(_TRUNCATED_MARKER)] + _TRUNCATED_MARKER
         masked = redact_sensitive_text(value, max_input_chars=window)
         if len(masked) <= limit and len(value) <= window:
             return masked

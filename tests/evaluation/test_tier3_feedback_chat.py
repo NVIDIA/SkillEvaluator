@@ -496,20 +496,25 @@ def test_context_keeps_long_text_without_spaces() -> None:
     ground_truth = json.dumps({"files": [f"src/module_{index}.py" for index in range(60)]}, separators=(",", ":"))
     minified = "{" + ",".join(f'"k{index}":"v{index}"' for index in range(400)) + "}"
     token_inside = "x" * (limits._MAX_ERROR_CHARS - 100) + "," + _FAKE_GITHUB_TOKEN + "," + "y" * 3000
+    # Longer than the larger window, so it is cut at punctuation no credential contains.
+    long_minified = "{" + ",".join(f'"k{index}":"v{index}"' for index in range(8000)) + "}"
+    # A cut inside a URL's user info could leave part of it, so the cut moves in front of the URL.
+    user_info = "Error: https://alice:" + "p" * 30 + "," + "q" * 70_000 + "@host.example/x"
     payload = {
         "dataset": [{"id": "case-1", "question": "Which files? " + minified, "ground_truth": ground_truth}],
         "agents": {
             "codex": {
                 "execution_errors": [minified, "Error: " + minified, token_inside, "z" * 100_000],
                 "trials": [{"entry_id": "case-1", "overall": 1.0, "warnings": [minified]}],
-            }
+            },
+            "opencode": {"execution_errors": ["Error: " + long_minified, user_info]},
         },
     }
 
     context = compact_run_context(payload, run_dir=_PRIVATE_RUN)
 
     assert len(ground_truth) > limits._MAX_GROUND_TRUTH_CHARS * 4 + 256
-    (row,) = context["cases"]
+    (row, _other_agent_row) = context["cases"]
     errors = context["agents"]["codex"]["execution_errors"]
     for text, prefix, limit in (
         (row["ground_truth"], '{"files":["src/module_0.py",', limits._MAX_GROUND_TRUTH_CHARS),
@@ -525,6 +530,12 @@ def test_context_keeps_long_text_without_spaces() -> None:
     assert errors[2].startswith("x" * 100) and "github-token-<redacted>" in errors[2]
     # Past the larger window the cut token is still dropped, and the field says so.
     assert errors[3] == "...<truncated>"
+    assert len(long_minified) > limits._MAX_UNBROKEN_MASK_CHARS
+    long_error, user_info_error = context["agents"]["opencode"]["execution_errors"]
+    assert long_error.startswith('Error: {"k0":"v0","k1":"v1",')
+    assert long_error.endswith("...<truncated>")
+    assert len(long_error) == limits._MAX_ERROR_CHARS
+    assert user_info_error == "Error: ...<truncated>"
 
 
 # -- case summaries -------------------------------------------------------------

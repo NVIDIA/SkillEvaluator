@@ -49,13 +49,20 @@ _HELP_THEME = Theme(
 _INDENT = (0, 0, 0, 2)
 
 # ANSI Shadow lettering, stored as text so no font dependency is needed at runtime.
-# Keep the full letter shapes; smaller terminals get a plain title, not squeezed art.
+# Narrower terminals get the same letters stacked, then a two-row wordmark, then a plain title.
 _WORDMARK = """███████╗██╗  ██╗██╗██╗     ██╗         ███████╗██╗   ██╗ █████╗ ██╗     ██╗   ██╗ █████╗ ████████╗ ██████╗ ██████╗
 ██╔════╝██║ ██╔╝██║██║     ██║         ██╔════╝██║   ██║██╔══██╗██║     ██║   ██║██╔══██╗╚══██╔══╝██╔═══██╗██╔══██╗
 ███████╗█████╔╝ ██║██║     ██║         █████╗  ██║   ██║███████║██║     ██║   ██║███████║   ██║   ██║   ██║██████╔╝
 ╚════██║██╔═██╗ ██║██║     ██║         ██╔══╝  ╚██╗ ██╔╝██╔══██║██║     ██║   ██║██╔══██║   ██║   ██║   ██║██╔══██╗
 ███████║██║  ██╗██║███████╗███████╗    ███████╗ ╚████╔╝ ██║  ██║███████╗╚██████╔╝██║  ██║   ██║   ╚██████╔╝██║  ██║
 ╚══════╝╚═╝  ╚═╝╚═╝╚══════╝╚══════╝    ╚══════╝  ╚═══╝  ╚═╝  ╚═╝╚══════╝ ╚═════╝ ╚═╝  ╚═╝   ╚═╝    ╚═════╝ ╚═╝  ╚═╝"""
+
+_WORDMARK_STACKED = "\n".join(
+    [line[:35].rstrip() for line in _WORDMARK.splitlines()] + [line[39:].rstrip() for line in _WORDMARK.splitlines()]
+)
+
+_WORDMARK_SMALL = """█▀ █▄▀ █ █   █     █▀▀ █ █ ▄▀█ █   █ █ ▄▀█ ▀█▀ █▀█ █▀█
+▄█ █ █ █ █▄▄ █▄▄   ██▄ ▀▄▀ █▀█ █▄▄ █▄█ █▀█  █  █▄█ █▀▄"""
 
 
 def _welcome_banner(command: click.Command, ctx: click.Context, *, width: int) -> RenderableType | None:
@@ -75,10 +82,19 @@ def _welcome_banner(command: click.Command, ctx: click.Context, *, width: int) -
     except UnicodeEncodeError:
         supports_blocks = False
     tagline = "Static checks · Deduplication · Live evaluation"
-    if supports_blocks and width >= max(map(len, _WORDMARK.splitlines())):
-        heading = Text(_WORDMARK, style="bold #76b900")
+    subtitle = f"v{__version__}  ·  {tagline}"
+    wordmark = next(
+        (
+            art
+            for art in (_WORDMARK, _WORDMARK_STACKED, _WORDMARK_SMALL)
+            if supports_blocks and width >= max(len(subtitle), *map(len, art.splitlines()))
+        ),
+        None,
+    )
+    if wordmark is not None:
+        heading = Text(wordmark, style="bold #76b900")
         heading.highlight_regex(r"[╔╗╚╝═║]+", style="dim #76b900")
-        lines = [Text(""), heading, Text(""), Text(f"v{__version__}  ·  {tagline}", style="dim")]
+        lines = [Text(""), heading, Text(""), Text(subtitle, style="dim")]
     else:
         lines = [Text(f"SKILLEVALUATOR v{__version__}", style="bold #76b900"), Text(tagline, style="dim")]
     return Group(*lines)

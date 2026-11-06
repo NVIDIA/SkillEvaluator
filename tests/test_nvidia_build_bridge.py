@@ -453,6 +453,9 @@ def bridge_services(tmp_path: Path) -> _BridgeServices:
             time.sleep(0.025)
     else:
         pytest.fail("bridge server did not become healthy")
+    # The readiness probe's worker can still be finishing after its response is
+    # read; tests that count workers must start from an idle server.
+    assert servers[0].wait_for_workers(timeout=2)
 
     yield _BridgeServices(
         base_url,

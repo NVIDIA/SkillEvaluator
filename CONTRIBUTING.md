@@ -38,9 +38,7 @@ you confirm that you have the right to contribute it under the
 ## Signing Your Work
 
 The contribution requirement is the Developer Certificate of Origin (DCO)
-sign-off below. This guide does not introduce a Contributor License Agreement
-(CLA) requirement. Any future policy change must be approved and published
-explicitly; do not treat a proposal as an adopted requirement.
+sign-off below, not a Contributor License Agreement (CLA).
 
 - We require that all contributors "sign-off" on their commits. This certifies
   that the contribution is your original work, or you have rights to submit it

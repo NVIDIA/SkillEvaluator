@@ -11,8 +11,10 @@ CLI. It does not require an account, key, scanner, Docker runtime or GPU.
 
 Install [Git](https://git-scm.com/downloads) and
 [uv](https://docs.astral.sh/uv/getting-started/installation/). These commands use
-Python 3.13, provisioned by uv, and work without shell-specific environment
-variable syntax. Run them in a terminal on Linux, macOS, or Windows (PowerShell):
+Python 3.13, provisioned by uv, and avoid shell-specific environment variable
+syntax. The replay below is validated on Linux. Native macOS and Windows
+replay still need validation; cross-platform Python alone does not establish
+that coverage.
 
 ```bash
 git clone --depth 1 https://github.com/NVIDIA/SkillEvaluator.git
@@ -47,10 +49,6 @@ Expected scalar values live in
 they are checked against new results, not substituted for them. Historical
 benchmark scores are not evidence for this run.
 
-The keyless replay and released public-provider rubric path have been verified
-on Linux with Python 3.13. Native macOS and Windows replay still need validation;
-cross-platform Python and uv commands alone do not establish that coverage.
-
 ## Interpret the reports
 
 | Question | Fresh output | What it means |
@@ -59,6 +57,12 @@ cross-platform Python and uv commands alone do not establish that coverage.
 | Did the quality check pass? | `quality/skillevaluator-quality.json`: `overall_status: passed`, score 84.5, grade B, exit 0 | The original documentation meets the demo's explicit `--min-score 80` gate. Read findings even when it passes. |
 | Did quality regress? | `regressed/skillevaluator-quality.json`: `overall_status: failed`, score 71, grade C, exit 1 | Removing guidance lowered static quality below the same threshold. This seeded example is not a measurement of agent performance. |
 | Is the passing skill ready to publish? | The passing report has `publication_status: incomplete`, `publication.eligible: false` and `publication.reasons` | No: required security, deduplication and live execution evidence is missing. A successful command does not imply complete evidence. |
+
+In the released CLI, the passing command can print `All validations passed`
+without mentioning publication completeness. Open the **JSON** to see
+`publication_status` and its reasons; the demo runner also prints an explicit
+`publication INCOMPLETE` reminder. Do not infer publication readiness from the
+terminal PASS line alone.
 
 The failing quality report has `publication_status: fail`; a known failure takes
 precedence over missing evidence. Do not interpret incomplete evidence as a

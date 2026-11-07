@@ -31,7 +31,7 @@ This guide gets you from a fresh clone to a mergeable pull request. You need Pyt
   uv run make build
   ```
 
-  Make is an additional dependency. On Windows without Make, use `uv run python -m ruff check src tests`,
+  Make is an additional dependency. Without Make, the equivalent commands are `uv run python -m ruff check src tests`,
   `uv run python -m pytest`, and `uv run python -m build` instead.
 
   If you prefer pip, `make install` runs the equivalent editable install:
@@ -98,6 +98,9 @@ not reuse historical scores as a fresh run or silently change expectations to
 make a check green. A fresh-user review should ask someone unfamiliar with the
 tool to explain the passing, regressed and incomplete outputs before showing
 the walkthrough's answers, and record what confused them in the pull request.
+The focused test intentionally runs the checkout's evaluator, so a scoring
+change on main can fail it even when the released replay still passes. Review
+both results before changing expectations.
 
 ## Code style and dependencies
 
@@ -156,10 +159,6 @@ Contributions flow through GitHub pull requests:
 <Warning>
 Every commit needs a Developer Certificate of Origin sign-off — commit with `git commit -s`. Pull requests containing unsigned commits are not accepted. By contributing, you confirm you have the right to submit the work under the Apache License 2.0.
 </Warning>
-
-The current requirement is DCO, not a Contributor License Agreement (CLA).
-Proposed policy changes are not adopted requirements; any approved change must
-be published explicitly in the contribution policy.
 
 ## Project resources
 

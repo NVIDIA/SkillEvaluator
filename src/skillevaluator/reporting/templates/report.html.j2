@@ -1484,7 +1484,7 @@
         {% set contributors = tier1_contributors %}
         {% set total_validators = ui_t1_executed %}
         {% set passed_count = ui_t1_pass %}
-        {% set skipped_count = tier1_display_summary.skipped_count %}
+        {% set skipped_count = ui_t1.get('skipped', tier1_display_summary.skipped_count) %}
         {% set failed_count = ui_t1.get('fail', tier1_display_summary.failed_count) %}
         {% set incomplete_count = ui_t1.get('incomplete', 0) %}
         {% set total_issues = tier1_display_summary.total_issues %}

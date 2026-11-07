@@ -121,6 +121,16 @@ All notable changes to SkillEvaluator are documented in this file.
   `Use HTTP POST to create an item.` in a here-document or an unpiped `echo`
   still does not warn.
 
+- `skillevaluator validate` on a target with no skill, rules, workflows, or
+  plugin, such as an ordinary source repository, no longer fails Tier 1 with
+  three `No skills found` errors and exit 1 when every content scan passes.
+  When `--type auto` detects the type as `unknown`, the `schema`, `version`,
+  and `quality` checks are now recorded as not applicable, counted as N/A
+  rather than as passes, and the JSON report adds a root `tier1_applicability`
+  object. The content scans still run with their unrestricted scope, so a
+  real finding still fails the run; such a run is never eligible for
+  publication. `--type skill` still validates the target as a skill.
+
 ## 0.8.0 - 2026-11-05
 
 ### Added

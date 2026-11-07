@@ -19,6 +19,7 @@ from skillevaluator.constants import (
     DIMENSION_MAPPING,
     DIMENSION_VERDICT_NEUTRAL_THRESHOLD,
     DIMENSION_VERDICT_PASS_THRESHOLD,
+    SIGNAL_EVIDENCE_SOURCES,
     TIER3_LIFT_FAIL_THRESHOLD,
     TIER3_LIFT_PASS_THRESHOLD,
 )
@@ -466,12 +467,14 @@ class BenchmarkReporter(ReporterBase):
         lines.append("| " + " | ".join(_md_cell(header, private_labels) for header in headers) + " |")
         lines.append("|---|" + "|".join(["---:"] * len(agents)) + "|")
 
+        baseline_only = (ae or {}).get("mode") == "baseline_only"
         overall_row = ["Overall"]
         overall_row.extend(
             _score_transition_values(
                 agent.get("baseline"),
                 agent.get("with_skill", agent.get("overall_score")),
                 skill_never_activated=_mapping(agent.get("skill_activation")).get("status") == "never_activated",
+                baseline_only=baseline_only,
             )
             for agent in agents.values()
         )
@@ -485,11 +488,13 @@ class BenchmarkReporter(ReporterBase):
                 if dimension and dimension.get("partial"):
                     has_partial = True
                 row.append(
-                    _score_transition(
-                        dimension,
+                    _dimension_cell(
+                        agent,
+                        dim_id,
                         skill_never_activated=(
                             _mapping(agent.get("skill_activation")).get("status") == "never_activated"
                         ),
+                        baseline_only=baseline_only,
                     )
                 )
             lines.append("| " + " | ".join(_md_cell(value, private_labels) for value in row) + " |")
@@ -507,6 +512,12 @@ class BenchmarkReporter(ReporterBase):
                 (
                     "Example: `47.0% → 92.0% (+45.0 points)` means the skill-assisted run scored 92.0%, "
                     "45.0 percentage points above its 47.0% no-skill baseline."
+                ),
+                "",
+                (
+                    "**Not scored** means a signal the dimension needs produced no score, and **Not applicable** "
+                    "means no eval case gave its signals anything to judge; neither is a score of zero. "
+                    "Scoring Methodology below explains each dimension and where its evidence comes from."
                 ),
                 "",
             ]
@@ -687,14 +698,29 @@ class BenchmarkReporter(ReporterBase):
                 "<details>",
                 "<summary>Show dimension definitions, source signals, and thresholds</summary>",
                 "",
-                "| Dimension | Question | Scored signals |",
-                "|---|---|---|",
+                "| Dimension | What it measures | Scored signals | Evidence source | Baseline in this run |",
+                "|---|---|---|---|---|",
             ]
         )
+        agents = _agents(ae)
+        baseline_only = (ae or {}).get("mode") == "baseline_only"
         for dim_id, config in DIMENSION_MAPPING.items():
             signals = _weighted_signals(config)
-            question = config.get("question") or DIMENSION_HINTS.get(dim_id, "")
-            lines.append(f"| {dim_id.title()} | {_trusted_md_cell(question)} | {_trusted_md_cell(signals)} |")
+            meaning = " ".join(
+                part for part in (config.get("question"), DIMENSION_HINTS.get(dim_id)) if isinstance(part, str) and part
+            )
+            evidence = "; ".join(
+                dict.fromkeys(
+                    SIGNAL_EVIDENCE_SOURCES[signal]
+                    for signal in config.get("evaluators", [])
+                    if signal in SIGNAL_EVIDENCE_SOURCES
+                )
+            )
+            baseline = _baseline_coverage(agents, dim_id, baseline_only=baseline_only)
+            lines.append(
+                f"| {dim_id.title()} | {_trusted_md_cell(meaning)} | {_trusted_md_cell(signals)} | "
+                f"{_trusted_md_cell(evidence[:1].upper() + evidence[1:])} | {_trusted_md_cell(baseline)} |"
+            )
 
         lines.extend(
             [
@@ -728,6 +754,35 @@ class BenchmarkReporter(ReporterBase):
                 (
                     "- Token efficiency is a separate report-only signal. It does not change a dimension "
                     "score or the overall verdict."
+                ),
+                (
+                    "- The baseline is the same eval cases run by the same agent without the skill. Every "
+                    "dimension is compared with it when the baseline arm ran and scored that dimension."
+                ),
+                "",
+                "Which number answers which question:",
+                "",
+                (
+                    "- **Overall verdict** (top of this card): whether the evidence supports publishing the skill. "
+                    "It needs every required tier, not only Tier 3 scores."
+                ),
+                (
+                    "- **Dimension score**: how well the agent did on one question above when it had the skill, "
+                    "from 0% to 100%."
+                ),
+                "- **Overall** row: the equal-weight mean of the five dimension scores with the skill.",
+                (
+                    "- **Uplift** (Skill Lift in other reports): the skill score minus the no-skill baseline score. "
+                    "It shows whether the skill helped; it does not set the verdict."
+                ),
+                (
+                    "- **pass@k** (HTML report and `pass_at_k_lift.json`): the share of eval cases with at least "
+                    "one passing attempt out of k. It measures how repeatable success is, separately from the "
+                    "dimension scores."
+                ),
+                (
+                    "- **Quality Score** (Tier 1, out of 100): a static review of the skill's files. It is not an "
+                    "input to any Tier 3 score or uplift."
                 ),
                 "",
             ]
@@ -1171,17 +1226,73 @@ def _agent_dimension(agent: dict[str, Any], dim_id: str) -> dict[str, Any] | Non
     return None
 
 
-def _score_transition(dimension: dict[str, Any] | None, *, skill_never_activated: bool = False) -> str:
+def _score_transition(
+    dimension: dict[str, Any] | None,
+    *,
+    skill_never_activated: bool = False,
+    baseline_only: bool = False,
+) -> str:
     if not dimension:
         return "Not available"
     return _score_transition_values(
         dimension.get("baseline"),
         dimension.get("with_skill", dimension.get("score")),
         skill_never_activated=skill_never_activated,
+        baseline_only=baseline_only,
     )
 
 
-def _score_transition_values(baseline: object, score: object, *, skill_never_activated: bool = False) -> str:
+def _single_score_label(score: float) -> str:
+    decimal_places = _score_display_decimal_places(score)
+    return _format_percentage(_percentage_point_units(score, decimal_places), decimal_places)
+
+
+def _baseline_coverage(agents: dict[str, dict[str, Any]], dim_id: str, *, baseline_only: bool) -> str:
+    """Say whether this run has a no-skill baseline score for one dimension."""
+    if not agents:
+        return "Compared when the baseline arm runs"
+    with_baseline = 0
+    for agent in agents.values():
+        baseline = _number((_agent_dimension(agent, dim_id) or {}).get("baseline"))
+        if baseline is not None and 0 <= baseline <= 1:
+            with_baseline += 1
+    if baseline_only:
+        return "Baseline only; no with-skill arm ran" if with_baseline else "Not scored in this run"
+    if with_baseline == len(agents):
+        return "Yes, a no-skill baseline was scored"
+    if with_baseline == 0:
+        return "No baseline score; uplift unavailable"
+    return f"Baseline for {with_baseline} of {len(agents)} agents"
+
+
+def _dimension_cell(
+    agent: dict[str, Any],
+    dim_id: str,
+    *,
+    skill_never_activated: bool = False,
+    baseline_only: bool = False,
+) -> str:
+    """Render one Results at a Glance dimension cell, explaining a missing score."""
+    dimension = _agent_dimension(agent, dim_id)
+    if dimension is not None:
+        return _score_transition(dimension, skill_never_activated=skill_never_activated, baseline_only=baseline_only)
+    not_applicable = agent.get("not_applicable_dimensions")
+    if isinstance(not_applicable, list) and any(
+        isinstance(entry, dict) and entry.get("id") == dim_id for entry in not_applicable
+    ):
+        return "Not applicable — no eval case gave its signals anything to judge"
+    if isinstance(agent.get("dimensions"), list):
+        return "Not scored — a signal this dimension needs produced no score"
+    return "Not available"
+
+
+def _score_transition_values(
+    baseline: object,
+    score: object,
+    *,
+    skill_never_activated: bool = False,
+    baseline_only: bool = False,
+) -> str:
     """Render ``baseline → score (uplift)`` so the visible arithmetic is exact.
 
     Scores are fractions in [0, 1]. A missing, non-finite, or out-of-range score,
@@ -1189,9 +1300,14 @@ def _score_transition_values(baseline: object, score: object, *, skill_never_act
     rather than clamped or published.
     """
     parsed_score = _number(score)
+    parsed_baseline = _number(baseline)
+    if score is None and parsed_baseline is not None and 0 <= parsed_baseline <= 1:
+        baseline_label = _single_score_label(parsed_baseline)
+        if baseline_only:
+            return f"Baseline {baseline_label} — baseline-only run; no with-skill score or uplift"
+        return f"Not scored with the skill — baseline {baseline_label}; uplift unavailable"
     if parsed_score is None or not 0 <= parsed_score <= 1:
         return "Not available"
-    parsed_baseline = _number(baseline)
     if skill_never_activated:
         # No uplift is shown, so the baseline neither sets the precision nor withholds the score.
         parsed_baseline = None

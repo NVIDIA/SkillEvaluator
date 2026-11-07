@@ -12,6 +12,7 @@ folder holds MDX pages published to <https://docs.nvidia.com/skills/skillevaluat
 
 - `index.mdx` — landing page and three-tier overview (Fern slug `/`)
 - `quickstart.mdx` — install, one provider and key, and first runs
+- `starter-demo.mdx` — reproducible public terminal starter, output checks and adaptation
 - `installation.mdx` — extras, uv, pip, Docker, requirements
 - `configuration.mdx` — providers, embeddings, and Tier 3 credential roles
 - `agent-skill.mdx` — installing and using the `skills/skillevaluator` agent skill

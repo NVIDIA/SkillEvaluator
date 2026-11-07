@@ -1,0 +1,172 @@
+---
+title: "Reproducible Terminal Demo"
+description: "Replay a public starter, check its real outputs, distinguish a passing check from complete evidence, and adapt the same skill and task."
+---
+
+Use one example from terminal replay to your own skill. This demo uses the public
+`text-analyzer` reference skill, a two-line text fixture, and the released 0.8.0
+CLI. It does not require an account, key, scanner, Docker runtime or GPU.
+
+## Replay and run the same example
+
+Install [Git](https://git-scm.com/downloads) and
+[uv](https://docs.astral.sh/uv/getting-started/installation/). These commands use
+Python 3.13, provisioned by uv, and work without shell-specific environment
+variable syntax. Run them in a terminal on Linux, macOS, or Windows (PowerShell):
+
+```bash
+git clone --depth 1 https://github.com/NVIDIA/SkillEvaluator.git
+cd SkillEvaluator
+uv run --isolated --no-project --python 3.13 --with "skillevaluator @ https://github.com/NVIDIA/SkillEvaluator/releases/download/v0.8.0/skillevaluator-0.8.0-py3-none-any.whl" python scripts/demo_starter.py --output reports/starter
+```
+
+The demo files come from your checkout; `--isolated --no-project --with` uses
+the public release wheel, not an editable development install. The 0.8.0 wheel
+is available on [GitHub Releases](https://github.com/NVIDIA/SkillEvaluator/releases/tag/v0.8.0);
+do not assume the same version is already on PyPI. Installation needs
+internet access. The demo then runs locally. For standalone pip installations
+and supported Python versions, see [Installation](installation.mdx).
+
+The runner prints each command and its real terminal output. It copies the
+installed skill into `reports/starter/text-analyzer`, stages the public input
+and task, runs the analysis script, and evaluates quality. It also makes a
+separate intentionally shortened documentation copy to demonstrate a regression.
+Your source checkout and the installed reference skill are not edited.
+
+The final line starts with `PASS: starter output and quality regression checked`.
+An expected `Error: quality check failed` appears earlier for the seeded
+regression. The runner itself exits 0 only after the report checks succeed.
+It never overwrites an existing output directory: use `--output reports/starter-2`
+to repeat it.
+
+This executable replay is the demo source, not a video recording. To produce the
+same demonstration, run the command above; `quality.txt` and `regressed.txt`
+retain the terminal output, and `receipt.json` records the version and time.
+Expected scalar values live in
+[`examples/starter/expected.json`](https://github.com/NVIDIA/SkillEvaluator/blob/main/examples/starter/expected.json);
+they are checked against new results, not substituted for them. Historical
+benchmark scores are not evidence for this run.
+
+The keyless replay and released public-provider rubric path have been verified
+on Linux with Python 3.13. Native macOS and Windows replay still need validation;
+cross-platform Python and uv commands alone do not establish that coverage.
+
+## Interpret the reports
+
+| Question | Fresh output | What it means |
+| --- | --- | --- |
+| Did the script do the task? | `analysis.json`: 4 words, 2 lines, 27 characters, 2 sentences; `hello` appears twice | The direct script agrees with the public fixture. No agent was involved. |
+| Did the quality check pass? | `quality/skillevaluator-quality.json`: `overall_status: passed`, score 84.5, grade B, exit 0 | The original documentation meets the demo's explicit `--min-score 80` gate. Read findings even when it passes. |
+| Did quality regress? | `regressed/skillevaluator-quality.json`: `overall_status: failed`, score 71, grade C, exit 1 | Removing guidance lowered static quality below the same threshold. This seeded example is not a measurement of agent performance. |
+| Is the passing skill ready to publish? | The passing report has `publication_status: incomplete`, `publication.eligible: false` and `publication.reasons` | No: required security, deduplication and live execution evidence is missing. A successful command does not imply complete evidence. |
+
+The failing quality report has `publication_status: fail`; a known failure takes
+precedence over missing evidence. Do not interpret incomplete evidence as a
+zero score, a pass, or proof of a skill defect. Fix execution/setup problems and
+rerun before drawing performance conclusions. For live agent results, compare
+with-skill and without-skill outcomes, inspect failed attempts and coverage, and
+use the verdict and completion fields together; see [Reports & Results](reports.mdx).
+
+### Replay a single command manually
+
+From the repository root after the demo, use the same copied skill and threshold:
+
+```bash
+uv run --isolated --no-project --python 3.13 --with "skillevaluator @ https://github.com/NVIDIA/SkillEvaluator/releases/download/v0.8.0/skillevaluator-0.8.0-py3-none-any.whl" skillevaluator quality-check reports/starter/text-analyzer --min-score 80 -r cli -r json -o reports/manual-quality
+```
+
+The runner invokes this installed Click CLI through the same Python interpreter
+with `python -m skillevaluator.cli`; it does not mock the evaluator or render a
+prebuilt report. The usual quality threshold is 70; this demo deliberately uses
+80 so the seeded regression fails.
+
+## Add model feedback or a live agent
+
+For fresh model-backed instruction feedback on this same skill, configure an
+account and key using [NVIDIA Build](quickstart.mdx#use-nvidia-build) or another
+[public provider](configuration.mdx). Never put a key in a report or fixture.
+Then run:
+
+```bash
+uv run --isolated --no-project --python 3.13 --with "skillevaluator[llm] @ https://github.com/NVIDIA/SkillEvaluator/releases/download/v0.8.0/skillevaluator-0.8.0-py3-none-any.whl" skillevaluator models --limit 100
+uv run --isolated --no-project --python 3.13 --with "skillevaluator[llm] @ https://github.com/NVIDIA/SkillEvaluator/releases/download/v0.8.0/skillevaluator-0.8.0-py3-none-any.whl" skillevaluator rubric-eval reports/starter/text-analyzer -r cli -r json -o reports/starter-rubric
+```
+
+Model catalogs and account access change. A visible catalog entry does not
+guarantee inference access. If the default model returns HTTP 404 or 410, select
+a model available to your account with `SKILL_EVAL_LLM_MODEL` as described in
+[configuration](configuration.mdx). Authentication errors, rate limits, and
+unavailable models are not low rubric scores. Inspect the JSON findings for
+`llm_unavailable`; do not present a fallback response as a completed evaluation.
+
+For example, a fresh public Build rubric run was verified with
+`SKILL_EVAL_LLM_MODEL=nvidia/nemotron-3.5-bolt-e4b`. Set the variable in the same
+shell before the rubric command (`export SKILL_EVAL_LLM_MODEL=nvidia/nemotron-3.5-bolt-e4b`
+on POSIX shells, or `$env:SKILL_EVAL_LLM_MODEL="nvidia/nemotron-3.5-bolt-e4b"` in
+PowerShell). This is an instruction-feedback example, not a promised score or
+an agent benchmark. If the response has `llm_invalid_response`, the call reached
+the model but did not produce valid rubric evidence; retain it and retry with a
+supported model rather than interpreting it as a completed low-scoring run.
+
+Rubric feedback is not agent uplift. For the paired agent experiment, keep the
+same copied task and input and follow the
+[live evaluation prerequisites](tier3-live-evaluation.mdx#before-you-start).
+After installing the `tier3` extra, configuring evaluator/agent credentials and
+starting Docker, run:
+
+```bash
+uv run --isolated --no-project --python 3.13 --with "skillevaluator[tier3] @ https://github.com/NVIDIA/SkillEvaluator/releases/download/v0.8.0/skillevaluator-0.8.0-py3-none-any.whl" skillevaluator doctor --env-mode docker
+uv run --isolated --no-project --python 3.13 --with "skillevaluator[tier3] @ https://github.com/NVIDIA/SkillEvaluator/releases/download/v0.8.0/skillevaluator-0.8.0-py3-none-any.whl" skillevaluator tier3 evaluate reports/starter/text-analyzer --n-attempts 1
+```
+
+The authored task is `evals/evals.json`; `evals/files/input.txt` is staged into
+the sandbox at `/workspace/input/input.txt`. Read both before paying for agent
+runs. One tiny task is a plumbing example, not representative coverage or
+independent validation of a grader. Model and sandbox usage can incur charges.
+Read [Eval Datasets](eval-datasets.mdx) for additional cases, grading and policy,
+and retain all completed attempts and errors rather than publishing only a score.
+
+## Adapt the example
+
+1. Copy `reports/starter/text-analyzer` to a new skill directory. Keep output
+   reports outside that directory; do not start from the regressed copy.
+2. Change `SKILL.md`, the script, and `evals/files/input.txt` to your use case.
+   Update the task prompt and expected outcome together. Preserve the input's
+   final newline if you still expect 27 characters.
+3. Check the script independently, then run `quality-check` on your directory.
+   Inspect individual findings rather than optimizing only the aggregate score.
+4. For agent impact, add varied realistic cases and independently checked
+   outcomes, then repeat the paired live evaluation. Do not carry the starter's
+   scores or expected values over to your own skill.
+
+### Check your understanding
+
+Before looking at answers, open the two JSON reports and answer:
+
+- Which command failed, and why is the demo's final exit still 0?
+- Can the passing skill claim an agent benefit or publication eligibility?
+- What changed between the original and regressed copy? Which findings explain
+  the score change?
+
+Answers: the intentionally shortened copy fails the 80 gate; the runner expects
+that failure. No agent benefit or publication readiness was established.
+Only the copied documentation changed, not the script, task, or input. Inspect
+`quality_summary` and `finding_groups` for the changed quality findings. These
+self-checks are not a substitute for feedback from a first-time human user.
+
+## Recover and continue
+
+| Symptom | Action |
+| --- | --- |
+| Python or dependencies cannot download | Check internet/proxy access and uv installation; see [installation](installation.mdx). No key is needed for the keyless route. |
+| Output directory already exists | Keep it as evidence; use a new `--output` path. Nothing is overwritten. |
+| A checked score or report field differs | Read the retained JSON/text, confirm `receipt.json` if present and the installed version; do not blindly update expectations. A failed demo does not write a success receipt. |
+| Analysis count differs | Check file contents, encoding and newlines; the input is UTF-8 plain text with a final newline. |
+| Scanner or sandbox is missing | The keyless demo does not need either. Follow [scanner setup](installation.mdx#system-tools) or [agent setup](agents-and-sandboxes.mdx) before adding those stages. |
+| Template reference asks you to sign in | Use the [public template reference](https://github.com/NVIDIA/SkillEvaluator/blob/main/ci/templates/README.md) and [versioned bundles](https://github.com/NVIDIA/SkillEvaluator/tree/main/ci/bundles/0.8.0), not a private mirror. Check bundle files against `SHA256SUMS.txt`. |
+
+The public template reference and versioned downloadable bundles were consolidated
+in [the public template update](https://github.com/NVIDIA/SkillEvaluator/pull/328).
+They require no private account. For repository automation, continue with
+[Repository Integration](repository-integration.mdx); for improvements to this
+starter, see [Contributing](developer-guide.mdx).

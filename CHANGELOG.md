@@ -6,6 +6,13 @@ All notable changes to SkillEvaluator are documented in this file.
 
 ### Added
 
+- A reproducible public terminal starter runs the released CLI against the
+  bundled text-analyzer skill, checks real script/report output and a seeded
+  quality regression, and retains an editable task, fixture and run receipt.
+  The walkthrough connects setup, interpretation, live-evaluation prerequisites,
+  troubleshooting and adaptation; contributor guidance clarifies environment
+  setup, example verification and the existing DCO policy.
+
 - `skills/skillevaluator/` is an agent skill for operating SkillEvaluator: it
   routes requests to the right tier, readiness check, dataset, report, or CI
   command, and ships Tier 3 evaluation cases for itself. A test keeps every

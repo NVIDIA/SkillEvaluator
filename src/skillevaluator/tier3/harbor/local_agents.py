@@ -30,7 +30,7 @@ from harbor.utils.env import parse_bool_env_value
 from skillevaluator.provider_config import is_claude_5_5_or_later, is_gpt6_model
 from skillevaluator.tier3.harbor import LOCAL_CODEX_HOME_DIRNAME, LOCAL_CODEX_SECRETS_DIRNAME
 from skillevaluator.tier3.harbor.installed_agents import SkillEvaluatorClaudeCode as _InstalledClaudeCode
-from skillevaluator.tier3.harbor.installed_agents import SkillEvaluatorCodex
+from skillevaluator.tier3.harbor.installed_agents import SkillEvaluatorCodex, SkillEvaluatorOpenCode
 from skillevaluator.tier3.harbor.nvidia_build_bridge import (
     MAX_REQUESTS_PER_BRIDGE,
     RunningBridge,
@@ -475,7 +475,7 @@ class SkillEvaluatorLocalCodex(SkillEvaluatorGatewayCodex):
         return await super().exec_as_agent(environment, command=command, env=env, cwd=cwd, timeout_sec=timeout_sec)
 
 
-class SkillEvaluatorGatewayOpenCode(OpenCode):
+class SkillEvaluatorGatewayOpenCode(SkillEvaluatorOpenCode):
     """Use Chat Completions for an explicitly OpenAI-compatible gateway."""
 
     def __init__(self, *args: Any, **kwargs: Any) -> None:

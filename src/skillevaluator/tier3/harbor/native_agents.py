@@ -53,6 +53,7 @@ from skillevaluator.tier3.harbor.local_agents import (
     SkillEvaluatorLocalOpenCode,
     SkillEvaluatorNvidiaBuildClaudeCode,
     SkillEvaluatorNvidiaBuildCodex,
+    SkillEvaluatorOpenCode,
 )
 from skillevaluator.tier3.plugin_native import SETUP_SCRIPT, ClaudeCodeAdapter, OpenCodeAdapter
 
@@ -282,6 +283,10 @@ class NativeOpenCode(_NativeOpenCodeMixin, OpenCode):
     """OpenCode with ``OPENCODE_CONFIG`` and ``OPENCODE_CONFIG_DIR`` pointing at the staged plugin."""
 
 
+class NativeInstalledOpenCode(_NativeOpenCodeMixin, SkillEvaluatorOpenCode):
+    """Installer-aware OpenCode (the Docker-engine baselines' wrapper) with the staged plugin config."""
+
+
 class NativeGatewayOpenCode(_NativeOpenCodeMixin, SkillEvaluatorGatewayOpenCode):
     """Gateway-routed OpenCode with the staged plugin config."""
 
@@ -322,6 +327,10 @@ class PrivateNvidiaBuildCodex(SetupNetworkErrorAgent, SkillEvaluatorNvidiaBuildC
 
 class PrivateOpenCode(SetupNetworkErrorAgent, OpenCode):
     """Stock OpenCode with setup-only network error classification."""
+
+
+class PrivateInstalledOpenCode(SetupNetworkErrorAgent, SkillEvaluatorOpenCode):
+    """Installer-aware OpenCode with setup-only network error classification."""
 
 
 class PrivateGatewayOpenCode(SetupNetworkErrorAgent, SkillEvaluatorGatewayOpenCode):

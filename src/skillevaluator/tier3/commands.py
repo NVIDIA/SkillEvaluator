@@ -619,7 +619,7 @@ skills_dir = {toml_quote("/workspace/skills")}
             """FROM python:3.12-slim
 
 RUN apt-get -o Acquire::Retries=3 update && \\
-    apt-get -o Acquire::Retries=3 install -y --no-install-recommends bash curl git jq ripgrep && \\
+    apt-get -o Acquire::Retries=3 install -y --no-install-recommends bash curl git jq procps ripgrep && \\
     rm -rf /var/lib/apt/lists/*
 
 RUN mkdir -p /workspace/skills /logs/agent /logs/verifier

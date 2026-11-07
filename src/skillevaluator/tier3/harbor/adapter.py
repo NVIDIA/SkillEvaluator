@@ -73,6 +73,12 @@ logger = logging.getLogger(__name__)
 TEMPLATES_DIR = Path(__file__).parent / "templates"
 _EVAL_CORE_DIR = Path(__file__).resolve().parent.parent / "eval_core"
 _EVALUATOR_TESTS_SUBDIR = "skill_evaluator"
+# Harbor's agent setup checks each prerequisite command (curl, bash, pgrep, rg,
+# stdbuf) in every trial and apt-installs the missing ones. Claude Code's setup
+# needs pgrep, so procps in every generated image removes that per-trial apt
+# step and its package mirror dependency. The starter Dockerfile that
+# `tier3 init-harbor-task` writes (tier3/commands.py) lists the same packages.
+_BASE_APT_PACKAGES = "bash curl git jq procps ripgrep"
 _BASE_IMAGE_PREFIX = "skillevaluator-base"
 _MAX_REPO_CONTEXT_FILE_BYTES = 10 * 1024 * 1024
 _MAX_REPO_CONTEXT_TOTAL_BYTES = 200 * 1024 * 1024
@@ -1517,7 +1523,7 @@ def build_eval_base_image(
         "",
         "RUN apt-get -o Acquire::Retries=3 update && \\",
         "    apt-get -o Acquire::Retries=3 install -y --no-install-recommends \\",
-        "    bash curl git jq ripgrep \\",
+        f"    {_BASE_APT_PACKAGES} \\",
     ]
     if extra_apt:
         lines[-1] += " \\"
@@ -4354,7 +4360,7 @@ def _write_dockerfile(
         "",
         "RUN apt-get -o Acquire::Retries=3 update && \\",
         "    apt-get -o Acquire::Retries=3 install -y --no-install-recommends \\",
-        "    bash curl git jq ripgrep \\",
+        f"    {_BASE_APT_PACKAGES} \\",
     ]
     if apt_pkgs:
         dockerfile_lines[-1] += " \\"
@@ -4490,7 +4496,7 @@ def _write_default_environment_dockerfile(
         "",
         "RUN apt-get -o Acquire::Retries=3 update && \\",
         "    apt-get -o Acquire::Retries=3 install -y --no-install-recommends \\",
-        "    bash curl git jq ripgrep \\",
+        f"    {_BASE_APT_PACKAGES} \\",
     ]
     if apt_pkgs:
         dockerfile_lines[-1] += " \\"

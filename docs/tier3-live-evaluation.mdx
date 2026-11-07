@@ -1065,6 +1065,10 @@ agent passes only when every dimension passes. The top-level Tier 3 verdict is:
 | Neutral | No agent passes, but at least one has no dimension below 0.40 |
 | Fail | Every successful agent has a dimension below 0.40 |
 
+A dimension with no score, such as Correctness when no case defines
+`ground_truth`, keeps that agent from passing. It does not hide another
+dimension below 0.40: that agent still counts as Fail.
+
 Skill Lift is `with-skill overall score - without-skill overall score` for
 comparable cases. Judge-model exclusions can make it differ from subtracting
 the displayed arm means; when no complete comparison with matching judges

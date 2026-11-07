@@ -73,8 +73,11 @@ def _score_cell(value: object, *, unavailable: str = "NO SCORE") -> tuple[Text, 
     return Text(f"{numeric:.2f}", style=f"bold {style}"), Text(_score_bar(numeric), style=style)
 
 
+_NOT_APPLICABLE_LABEL = "N/A"
+
+
 def _not_applicable_cell() -> tuple[Text, Text]:
-    return Text("N/A", style="dim italic"), Text("")
+    return Text(_NOT_APPLICABLE_LABEL, style="dim italic"), Text("")
 
 
 def _not_applicable_metrics(data: Mapping[str, Any], variant: str) -> frozenset[str]:
@@ -85,9 +88,12 @@ def _not_applicable_metrics(data: Mapping[str, Any], variant: str) -> frozenset[
     return frozenset(not_applicable_list(raw))
 
 
-def _delta_cell(value: object) -> Text:
+def _delta_cell(value: object, *, not_applicable: bool = False) -> Text:
+    """Lift cell. A row that is N/A in either arm has no lift, so it reads N/A, not NO SCORE."""
     numeric = _finite_number(value)
     if numeric is None:
+        if not_applicable:
+            return Text(_NOT_APPLICABLE_LABEL, style="dim italic")
         return Text("NO SCORE", style="dim")
     style = lift_style(numeric)
     return Text(f"{numeric:+.2f}", style=f"bold {style}")
@@ -502,14 +508,17 @@ def _render_agent_scores(
                 else None
             )
             baseline_score, baseline_bar = _not_applicable_cell() if baseline_na else _score_cell(baseline_value)
-            row.extend([baseline_score, baseline_bar, _delta_cell(delta)])
+            row.extend([baseline_score, baseline_bar, _delta_cell(delta, not_applicable=with_na or baseline_na)])
         table.add_row(*row)
 
     basis = lift.get("basis")
     if isinstance(basis, Mapping) and basis.get("pairing") == "same_cases_per_metric":
         table.caption = "Lift compares the cases scored by both arms for each evaluator."
     if _not_applicable_metrics(data, "with_skill") or _not_applicable_metrics(data, "without_skill"):
-        table.caption = (str(table.caption or "") + " N/A: no applicable reference or skill in this arm.").strip()
+        table.caption = (
+            str(table.caption or "")
+            + " N/A: no applicable reference or skill in this arm, so it is left out of scores and lift."
+        ).strip()
     if custom_with or custom_without:
         if metrics:
             table.add_section()
@@ -703,7 +712,7 @@ def _render_dimensions(
                 with_bar,
                 baseline_cell,
                 baseline_bar,
-                _delta_cell(delta),
+                _delta_cell(delta, not_applicable=with_na or baseline_na),
             ]
             table.add_row(*row)
 

@@ -5,6 +5,7 @@
 
 from __future__ import annotations
 
+import json
 import logging
 import math
 from pathlib import Path
@@ -21,6 +22,7 @@ from skillevaluator.deduplication.utils.chunker import ContentChunk
 from skillevaluator.embedding.client import MAX_EMBEDDING_VECTOR_DIMENSION, SimilarityConfigError
 from skillevaluator.inference import LLMClientError, LLMClientRefusedError, LLMVerdict
 from skillevaluator.models.result import Severity
+from skillevaluator.reporting.json_reporter import JSONReporter
 
 
 def _numbered_sections(count: int) -> str:
@@ -975,6 +977,36 @@ class TestIntraSkillValidatorValidate:
         assert "LLM" in result.errors[0]
         assert "private provider data" not in str(result.errors)
         assert "private provider data" not in caplog.text
+
+    @pytest.mark.parametrize("confidence", ["NaN", "Infinity", 85, True])
+    @patch("skillevaluator.deduplication.intra_skill.intra_skill_validator.LLMClient")
+    @patch("skillevaluator.deduplication.intra_skill.intra_skill_validator.EmbeddingClient")
+    def test_out_of_range_confidence_is_incomplete_without_skill_finding(
+        self, mock_embed, mock_llm, tmp_path: Path, confidence: object
+    ) -> None:
+        skill_dir = tmp_path / "skill"
+        skill_dir.mkdir()
+        (skill_dir / "SKILL.md").write_text(
+            "## Section A\n" + "a" * 200 + "\n## Section B\n" + "b" * 200, encoding="utf-8"
+        )
+        mock_embed.return_value.embed.return_value = [[1.0, 0.0], [1.0, 0.0]]
+        mock_llm.return_value.extract_json_from_response.return_value = {
+            "verdict": "DUPLICATE",
+            "confidence": confidence,
+            "rationale": "Same content",
+            "suggestion": "Remove one",
+        }
+
+        result = IntraSkillValidator().validate(skill_dir)
+
+        assert mock_llm.return_value.extract_json_from_response.call_count == 1
+        assert result.status == "incomplete"
+        assert result.incomplete_scans == ["deduplication-llm"]
+        assert result.findings == []
+        assert result.metadata["llm_analysis"]["clusters_failed"] == 1
+        assert "LLM configuration or response was invalid" in result.errors[0]
+        # Strict JSON (no NaN or Infinity) still renders for the incomplete result.
+        json.loads(JSONReporter().render(result))
 
     @patch("skillevaluator.deduplication.intra_skill.intra_skill_validator.analyze_cluster")
     @patch("skillevaluator.deduplication.intra_skill.intra_skill_validator.LLMClient")

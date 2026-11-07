@@ -240,6 +240,9 @@ SIMILARITY_DEFAULT_MODEL = EMBEDDING_DEFAULT_NVIDIA
 SIMILARITY_CHUNK_SIZE = 512  # tokens per chunk for full-body mode
 SIMILARITY_CHUNK_OVERLAP = 64  # token overlap between chunks
 
+# Longest rationale or suggestion string accepted from one Tier 2 LLM verdict.
+TIER2_LLM_MAX_RESPONSE_SCALAR_CHARS = 8_192
+
 
 # =============================================================================
 # CONTEXT DEDUPLICATION CONSTANTS (Phase 1)

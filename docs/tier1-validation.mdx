@@ -434,6 +434,32 @@ For `validate`, the default set is `schema`, `version`, `security`, `pii`, `lice
     requested and actually audited pins. Unreadable declarations have unknown
     declaration counts and an empty audited inventory, not a completed scan.
 
+    Each advisory is a `DEPENDENCY` finding whose check name is the advisory ID
+    (a numeric Safety ID reads `SAFETY-<id>`). It points at the requirements
+    file and the line that pins the package, or at `pyproject.toml`, so it
+    appears in JSON `findings`, the severity counts, and SARIF results. The
+    finding metadata records:
+
+    - `package_name` and `resolved_version`: the package and version the
+      scanner checked.
+    - `declared_constraint` and `declaration`: the exact pin as the target
+      spells it, such as `PyYAML==5.3`, and where it is declared (`line 3`, or
+      `optional group docs, declaration 2` in `pyproject.toml`). The raw line,
+      with its markers and options, is never copied.
+    - `resolution_status: resolved` and `dependency_relationship: direct`: only
+      exact pins are audited, with `--no-deps`, so the advisory applies to the
+      version the target declares.
+    - `dependency_role`: `runtime`, `dev`, `test`, `docs`, or `build`, from the
+      requirements file name (`requirements-dev.txt`) or the optional group.
+    - `advisory_id`, `advisory_source` (`pip-audit` or `Safety`),
+      `affected_range` (Safety only; `null` for pip-audit), `fixed_versions`,
+      and `aliases`.
+
+    A `high` or `critical` advisory fails the run. A Safety advisory without a
+    known severity is `medium`. A policy overlay can change one advisory with
+    `DEPENDENCY.<advisory-id>`, such as `DEPENDENCY.PYSEC-2020-176: low`, or
+    every advisory with `DEPENDENCY.*`.
+
     ```bash title="Opt-in dependency audit"
     skillevaluator validate ./my-skill --checks dependency
     ```

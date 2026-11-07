@@ -121,6 +121,21 @@ All notable changes to SkillEvaluator are documented in this file.
   `Use HTTP POST to create an item.` in a here-document or an unpiped `echo`
   still does not warn.
 
+- The `dependency` check now reports each pip-audit and Safety advisory as a
+  `DEPENDENCY` finding named by its advisory ID, at the requirements file and
+  line, or the `pyproject.toml`, that pins the package. In 0.8.0 an advisory
+  was only an error string such as `[CVE-HIGH] pyyaml==5.3: ...`: it failed
+  the run, but JSON `findings`, the severity counts and SARIF results left it
+  out, and a policy overlay could not change its severity. The finding
+  metadata now binds the scanned version to the declared exact pin and records
+  the advisory source, fixed versions, aliases, and a runtime, dev, test, docs,
+  or build role from the requirements file name or optional group. Safety JSON
+  with a null or object `severity`, a non-text `advisory`, or a top-level list,
+  and a pip-audit advisory with a null `severity`, no longer stop the check
+  with an `AttributeError`; such a Safety advisory is `medium`. Warnings about
+  a requirements line now give the physical line number when `--hash`
+  continuation lines come before it.
+
 ## 0.8.0 - 2026-11-05
 
 ### Added

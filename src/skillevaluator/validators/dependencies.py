@@ -5,27 +5,74 @@
 
 Scans Python dependencies for known CVE vulnerabilities by querying
 the PyPI Advisory Database, OSV, and PyUp.io Safety DB.
+
+Each advisory is a structured ``DEPENDENCY`` finding named by its advisory ID
+and located at the requirements line, or the ``pyproject.toml``, that pins the
+vulnerable version. Its metadata binds the scanned (resolved) version to the
+declared exact pin.
 """
 
 from __future__ import annotations
 
+import contextlib
 import json
 import math
 import re
 import tempfile
 import tomllib
+from collections.abc import Mapping
+from dataclasses import dataclass
 from pathlib import Path
 
 from packaging.requirements import InvalidRequirement, Requirement
 from packaging.utils import canonicalize_name
-from packaging.version import Version
+from packaging.version import InvalidVersion, Version
 
 from skillevaluator.utils.secure_fs import SecurePathError, SecureRoot
 from skillevaluator.utils.tool_runner import Severity, ToolResult, Tools, cvss_to_severity, parse_json_output
-from skillevaluator.validators.base import ValidationResult, ValidatorBase
+from skillevaluator.validators.base import Finding, ValidationResult, ValidatorBase
 
 _PIP_AUDIT_COMPLETED_EXIT_CODES = frozenset({0, 1})
 _PIP_AUDIT_SEVERITIES = frozenset(severity.value for severity in Severity)
+# Name tokens of a requirements file stem (``requirements-dev``) or an optional
+# dependency group (``docs``) that mark a non-runtime dependency. Whole tokens
+# only, so ``requirements-latest`` stays runtime.
+_DEPENDENCY_ROLE_TOKENS = {
+    "dev": "dev",
+    "develop": "dev",
+    "development": "dev",
+    "test": "test",
+    "tests": "test",
+    "testing": "test",
+    "doc": "docs",
+    "docs": "docs",
+    "documentation": "docs",
+    "build": "build",
+}
+
+
+@dataclass(frozen=True)
+class DependencyDeclaration:
+    """Where the audited target declared one exact pin.
+
+    Holds the declared package name and version as parsed, never the raw
+    declaration text, which may carry markers, pip options or URL credentials.
+    """
+
+    name: str
+    exact_version: str
+    line_number: int | None
+    declaration: str
+    role: str
+
+    @property
+    def declared_constraint(self) -> str:
+        """The exact pin as the target spelled it, e.g. ``PyYAML==5.3``."""
+        return f"{self.name}=={self.exact_version}"
+
+
+# Declared pins keyed by (PEP 503 name, version), as pip-audit reports them.
+_DeclaredPins = Mapping[tuple[str, Version], DependencyDeclaration]
 
 
 class DependencySecurityValidator(ValidatorBase):
@@ -120,11 +167,12 @@ class DependencySecurityValidator(ValidatorBase):
         result = ValidationResult()
         result.add_message(f"Auditing {req_file.name}")
 
-        audit_result = self._run_pip_audit_on_file(req_file)
+        declared: dict[tuple[str, Version], DependencyDeclaration] = {}
+        audit_result = self._run_pip_audit_on_file(req_file, declared=declared)
         result.merge(audit_result)
 
         if self.use_safety and not audit_result.is_incomplete and Tools.safety.is_available:
-            result.merge(self._run_safety(req_file))
+            result.merge(self._run_safety(req_file, declared))
 
         return result
 
@@ -173,6 +221,7 @@ class DependencySecurityValidator(ValidatorBase):
         else:
             groups.update({f"optional group {name}": values for name, values in optional.items()})
         pins: set[str] = set()
+        declared: dict[tuple[str, Version], DependencyDeclaration] = {}
         declaration_count = 0
         for group, declarations in groups.items():
             if not isinstance(declarations, list):
@@ -212,6 +261,21 @@ class DependencySecurityValidator(ValidatorBase):
                     incomplete(f"{label}: an exact version pin is required; supply resolved requirements.txt")
                     continue
                 pins.add(f"{requirement.name}=={specifiers[0].version}")
+                # Runtime dependencies are read first, so a pin an optional group
+                # repeats keeps its runtime role.
+                with contextlib.suppress(InvalidVersion):
+                    declared.setdefault(
+                        (canonicalize_name(requirement.name), Version(specifiers[0].version)),
+                        DependencyDeclaration(
+                            name=requirement.name,
+                            exact_version=specifiers[0].version,
+                            line_number=None,
+                            declaration=label,
+                            role=self._role_from_name(group.removeprefix("optional group "))
+                            if group.startswith("optional group ")
+                            else "runtime",
+                        ),
+                    )
 
         result.metadata["dependency_coverage"].update(
             {"declarations": declaration_count, "requested_pins": sorted(pins)}
@@ -306,7 +370,9 @@ class DependencySecurityValidator(ValidatorBase):
                 incomplete("pip-audit returned incomplete or invalid target evidence")
                 return result
             batch_result = ValidationResult()
-            self._process_pip_audit(tool_result.stdout, batch_result, pyproject.name, exit_code=exit_code)
+            self._process_pip_audit(
+                tool_result.stdout, batch_result, pyproject.name, exit_code=exit_code, declared=declared
+            )
             result.merge(batch_result)
             if batch_result.is_incomplete:
                 return result
@@ -315,13 +381,22 @@ class DependencySecurityValidator(ValidatorBase):
 
         return result
 
-    def _run_pip_audit_on_file(self, req_file: Path) -> ValidationResult:
+    def _run_pip_audit_on_file(
+        self,
+        req_file: Path,
+        *,
+        declared: dict[tuple[str, Version], DependencyDeclaration] | None = None,
+    ) -> ValidationResult:
         """Audit only explicit pins, without installing packages or running build code.
 
         Parse the untrusted file ourselves so pip cannot follow includes, URLs,
         local projects, index options, or environment substitutions. Unsupported
         declarations make coverage incomplete; valid pins are still audited.
+        Each accepted pin is recorded in ``declared`` (a new mapping when none
+        is given), so advisories can name the line that declared the version.
         """
+        if declared is None:
+            declared = {}
         result = ValidationResult()
         result.add_message(f"{req_file.name}: auditing explicit pins only; dependencies are not resolved or installed")
         try:
@@ -336,12 +411,13 @@ class DependencySecurityValidator(ValidatorBase):
         pins: set[str] = set()
         # Accept pip-compile's hash continuations, but pass only parsed package
         # names and versions to the scanner. Never forward arbitrary pip syntax.
-        declarations = re.sub(r"\\\r?\n", " ", text).splitlines()
+        declarations = self._requirement_lines(text)
         if len(declarations) > 4096:
             result.add_warning(f"{req_file.name}: dependency declaration limit (4096) exceeded")
             result.mark_scan_incomplete("pip-audit")
             return result
-        for index, declaration in enumerate(declarations, 1):
+        role = self._role_from_name(req_file.stem)
+        for index, declaration in declarations:
             declaration = re.split(r"\s+#", declaration, maxsplit=1)[0].strip()
             if not declaration or declaration.startswith("#"):
                 continue
@@ -361,7 +437,18 @@ class DependencySecurityValidator(ValidatorBase):
                         f"{req_file.name}: line {index} skipped (marker does not match scanner platform)"
                     )
                     continue
-                pins.add(f"{canonicalize_name(requirement.name)}=={Version(specifiers[0].version)}")
+                name, version = canonicalize_name(requirement.name), Version(specifiers[0].version)
+                pins.add(f"{name}=={version}")
+                declared.setdefault(
+                    (name, version),
+                    DependencyDeclaration(
+                        name=requirement.name,
+                        exact_version=specifiers[0].version,
+                        line_number=index,
+                        declaration=f"line {index}",
+                        role=role,
+                    ),
+                )
             except (InvalidRequirement, KeyError, TypeError, ValueError, RecursionError):
                 # Do not leak URL credentials or arbitrary source text in diagnostics.
                 result.add_warning(
@@ -385,7 +472,7 @@ class DependencySecurityValidator(ValidatorBase):
                 ["-r", str(sanitized), "--no-deps", "--disable-pip", "--format", "json", "--progress-spinner", "off"],
                 timeout=180,
             )
-        self._process_pip_audit_result(tool_result, result, req_file.name)
+        self._process_pip_audit_result(tool_result, result, req_file.name, declared=declared)
         inventory = self._validated_pip_audit_report(tool_result.stdout)
         try:
             returned = (
@@ -406,11 +493,38 @@ class DependencySecurityValidator(ValidatorBase):
 
         return result
 
+    @staticmethod
+    def _requirement_lines(text: str) -> list[tuple[int, str]]:
+        """Join backslash continuations into ``(first physical line, text)`` pairs.
+
+        Each backslash before a newline becomes a space, as before, and the
+        number is the physical line where the declaration starts, so a
+        pip-compile pin followed by ``--hash`` lines keeps its own line.
+        """
+        lines: list[tuple[int, str]] = []
+        pending = ""
+        start = 1
+        for number, physical in enumerate(text.splitlines(keepends=True), 1):
+            if not pending:
+                start = number
+            for continuation in ("\\\n", "\\\r\n"):
+                if physical.endswith(continuation):
+                    pending += physical[: -len(continuation)] + " "
+                    break
+            else:
+                lines.append((start, pending + physical.splitlines()[0]))
+                pending = ""
+        if pending:
+            lines.append((start, pending))
+        return lines
+
     def _process_pip_audit_result(
         self,
         tool_result: ToolResult,
         result: ValidationResult,
         source: str,
+        *,
+        declared: _DeclaredPins | None = None,
     ) -> None:
         """Accept a pip-audit run only when its process state can be trusted."""
         if tool_result.success is not True or tool_result.error_message:
@@ -429,7 +543,7 @@ class DependencySecurityValidator(ValidatorBase):
             result.mark_scan_incomplete("pip-audit")
             return
 
-        self._process_pip_audit(tool_result.stdout, result, source, exit_code=exit_code)
+        self._process_pip_audit(tool_result.stdout, result, source, exit_code=exit_code, declared=declared)
 
     def _process_pip_audit(
         self,
@@ -438,6 +552,7 @@ class DependencySecurityValidator(ValidatorBase):
         source: str,
         *,
         exit_code: int,
+        declared: _DeclaredPins | None = None,
     ) -> None:
         """Parse a completed pip-audit process and report trustworthy evidence."""
         report = self._validated_pip_audit_report(output)
@@ -457,11 +572,14 @@ class DependencySecurityValidator(ValidatorBase):
                 vuln_count += 1
                 self._report_vulnerability(
                     result,
+                    source=source,
                     pkg_name=pkg_name,
                     pkg_version=pkg_version,
                     vuln_id=vuln["id"],
                     fix_versions=vuln["fix_versions"],
+                    aliases=[alias for alias in vuln.get("aliases", []) if isinstance(alias, str)],
                     severity=self._get_vuln_severity(vuln),
+                    declared=declared,
                 )
 
         if skipped_count:
@@ -573,7 +691,7 @@ class DependencySecurityValidator(ValidatorBase):
         description = vulnerability.get("description")
         return description is None or isinstance(description, str)
 
-    def _run_safety(self, req_file: Path) -> ValidationResult:
+    def _run_safety(self, req_file: Path, declared: _DeclaredPins | None = None) -> ValidationResult:
         """Run Safety check for supplementary coverage."""
         result = ValidationResult()
 
@@ -584,35 +702,80 @@ class DependencySecurityValidator(ValidatorBase):
 
         # Safety errors are non-critical (pip-audit is primary)
         if tool_result.success:
-            self._process_safety(tool_result.stdout, result)
+            self._process_safety(tool_result.stdout, result, req_file.name, declared=declared)
 
         return result
 
-    def _process_safety(self, output: str, result: ValidationResult) -> None:
+    def _process_safety(
+        self,
+        output: str,
+        result: ValidationResult,
+        source: str = "requirements.txt",
+        *,
+        declared: _DeclaredPins | None = None,
+    ) -> None:
         """Parse Safety output and report additional findings."""
-        data = parse_json_output(output)
-        if not data:
+        try:
+            data = parse_json_output(output)
+        except (RecursionError, ValueError):
             return
 
-        # Handle varying Safety output formats
-        vulnerabilities = data.get("vulnerabilities", data if isinstance(data, list) else [])
+        # Safety reports a {"vulnerabilities": [...]} object; older releases a bare list.
+        vulnerabilities = data.get("vulnerabilities") if isinstance(data, dict) else data
+        if not isinstance(vulnerabilities, list):
+            return
 
         for vuln in vulnerabilities:
             if not isinstance(vuln, dict):
                 continue
 
-            pkg_name = vuln.get("package_name", vuln.get("name", "unknown"))
-            severity_str = vuln.get("severity", "medium").lower()
+            pkg_name = self._text_field(vuln, "package_name", "name") or "unknown"
+            # Safety reports severity as null without an API key, or as an object;
+            # only a known level is trusted.
+            severity_str = (self._text_field(vuln, "severity") or "").casefold()
             severity = Severity(severity_str) if severity_str in Severity else Severity.MEDIUM
 
-            vuln_id = vuln.get("vulnerability_id", vuln.get("id", "Unknown"))
-            advisory = vuln.get("advisory", "")[:100]
+            vuln_id = self._text_field(vuln, "vulnerability_id", "id") or "Unknown"
+            # Safety database IDs are bare numbers; name the source in the check.
+            advisory_id = f"SAFETY-{vuln_id}" if vuln_id.isdigit() else vuln_id
+            advisory = (self._text_field(vuln, "advisory") or "")[:100]
+            pkg_version = self._text_field(vuln, "analyzed_version")
+            declaration = self._declared_pin(declared, pkg_name, pkg_version)
+            if pkg_version is None and declaration is not None:
+                pkg_version = declaration.exact_version
+            fix_versions = self._text_list_field(
+                vuln, "fixed_versions", "closest_versions_without_known_vulnerabilities"
+            )
+            aliases = self._text_list_field(vuln, "aliases")
+            cve = self._text_field(vuln, "CVE", "cve")
+            if cve and cve != advisory_id and cve not in aliases:
+                aliases.append(cve)
+            affected_range = self._text_field(vuln, "affected_range", "specifier", "vulnerable_spec") or ", ".join(
+                self._text_list_field(vuln, "vulnerable_spec")
+            )
 
-            # Safety findings are supplementary - only critical as errors
+            # Safety findings are supplementary: fail_on_medium does not apply.
             result.add_finding(
-                tag="SAFETY",
-                severity=severity,
-                message=f"{pkg_name}: {vuln_id} - {advisory}",
+                Finding(
+                    category="DEPENDENCY",
+                    severity=severity,
+                    check_name=advisory_id,
+                    message=f"{pkg_name}: {advisory_id} - {advisory}" if advisory else f"{pkg_name}: {advisory_id}",
+                    file_path=source,
+                    line_number=declaration.line_number if declaration else None,
+                    suggestion=self._upgrade_suggestion(pkg_name, fix_versions),
+                    metadata=self._advisory_metadata(
+                        pkg_name=pkg_name,
+                        pkg_version=pkg_version,
+                        advisory_id=advisory_id,
+                        advisory_source="Safety",
+                        affected_range=affected_range or None,
+                        fix_versions=fix_versions,
+                        aliases=aliases,
+                        declaration=declaration,
+                        source=source,
+                    ),
+                ),
                 fail_on_medium=False,
             )
 
@@ -620,27 +783,139 @@ class DependencySecurityValidator(ValidatorBase):
         self,
         result: ValidationResult,
         *,
+        source: str,
         pkg_name: str,
         pkg_version: str,
         vuln_id: str,
         fix_versions: list[str],
+        aliases: list[str],
         severity: Severity,
+        declared: _DeclaredPins | None = None,
     ) -> None:
-        """Report a single vulnerability finding."""
+        """Report one pip-audit advisory as a ``DEPENDENCY`` finding at its declaration.
+
+        ``declared`` is ``None`` only for a caller that audited pins it collected
+        itself and builds its own findings from the tagged ``CVE`` message.
+        """
         fix_hint = f" -> upgrade to {fix_versions[0]}" if fix_versions else ""
         message = f"{pkg_name}=={pkg_version}: {vuln_id}{fix_hint}"
+        if declared is None:
+            result.add_finding(tag="CVE", severity=severity, message=message, fail_on_medium=self.fail_on_medium)
+            return
 
+        declaration = self._declared_pin(declared, pkg_name, pkg_version)
         result.add_finding(
-            tag="CVE",
-            severity=severity,
-            message=message,
+            Finding(
+                category="DEPENDENCY",
+                severity=severity,
+                check_name=vuln_id,
+                message=message,
+                file_path=source,
+                line_number=declaration.line_number if declaration else None,
+                suggestion=self._upgrade_suggestion(pkg_name, fix_versions),
+                metadata=self._advisory_metadata(
+                    pkg_name=pkg_name,
+                    pkg_version=pkg_version,
+                    advisory_id=vuln_id,
+                    advisory_source="pip-audit",
+                    # pip-audit JSON names fixed versions, not the affected range.
+                    affected_range=None,
+                    fix_versions=fix_versions,
+                    aliases=aliases,
+                    declaration=declaration,
+                    source=source,
+                ),
+            ),
             fail_on_medium=self.fail_on_medium,
         )
 
+    def _advisory_metadata(
+        self,
+        *,
+        pkg_name: str,
+        pkg_version: str | None,
+        advisory_id: str,
+        advisory_source: str,
+        affected_range: str | None,
+        fix_versions: list[str],
+        aliases: list[str],
+        declaration: DependencyDeclaration | None,
+        source: str,
+    ) -> dict:
+        """Bind an advisory to the scanned version and the exact pin that declared it."""
+        return {
+            "package_name": pkg_name,
+            "resolved_version": pkg_version,
+            "declared_constraint": declaration.declared_constraint if declaration else None,
+            "declaration": declaration.declaration if declaration else None,
+            # Only exact pins are audited, so a bound advisory applies to the
+            # version the target declares, not to one pip resolved at scan time.
+            "resolution_status": "resolved",
+            "dependency_role": declaration.role if declaration else self._role_from_name(Path(source).stem),
+            # pip-audit runs with --no-deps, so every audited package is a pin
+            # the file declares directly.
+            "dependency_relationship": "direct" if declaration else None,
+            "advisory_id": advisory_id,
+            "advisory_source": advisory_source,
+            "affected_range": affected_range,
+            "fixed_versions": list(fix_versions),
+            "aliases": list(aliases),
+        }
+
+    @staticmethod
+    def _declared_pin(declared: _DeclaredPins | None, name: str, version: str | None) -> DependencyDeclaration | None:
+        """Return the declaration of a scanned package version, matching PEP 503 names."""
+        if not declared:
+            return None
+        canonical = canonicalize_name(name)
+        if version is None:
+            # Without a scanned version, bind only a package pinned once.
+            matches = [item for (key, _version), item in declared.items() if key == canonical]
+            return matches[0] if len(matches) == 1 else None
+        try:
+            return declared.get((canonical, Version(version)))
+        except InvalidVersion:
+            return None
+
+    @staticmethod
+    def _upgrade_suggestion(pkg_name: str, fix_versions: list[str]) -> str:
+        if fix_versions:
+            listed = ", ".join(fix_versions[:3]) + (", ..." if len(fix_versions) > 3 else "")
+            return f"Upgrade {pkg_name} to a fixed version ({listed}) and update the pin."
+        return f"No fixed version of {pkg_name} is listed; review the advisory before shipping this dependency."
+
+    @staticmethod
+    def _role_from_name(name: str) -> str:
+        """Classify a requirements file stem or optional group name as runtime, dev, test, docs or build."""
+        for token in name.casefold().replace("_", "-").replace(".", "-").split("-"):
+            if token in _DEPENDENCY_ROLE_TOKENS:
+                return _DEPENDENCY_ROLE_TOKENS[token]
+        return "runtime"
+
+    @staticmethod
+    def _text_field(data: dict, *keys: str) -> str | None:
+        """Return the first non-empty string value among ``keys``."""
+        for key in keys:
+            value = data.get(key)
+            if isinstance(value, str) and value.strip():
+                return value.strip()
+        return None
+
+    @staticmethod
+    def _text_list_field(data: dict, *keys: str) -> list[str]:
+        """Return the first non-empty list of strings among ``keys``."""
+        for key in keys:
+            value = data.get(key)
+            if isinstance(value, list):
+                items = [item.strip() for item in value if isinstance(item, str) and item.strip()]
+                if items:
+                    return items
+        return []
+
     def _get_vuln_severity(self, vuln: dict) -> Severity:
         """Extract severity from vulnerability data."""
-        # Explicit severity field
-        if "severity" in vuln:
+        # Explicit severity field (the report validator allows null)
+        if isinstance(vuln.get("severity"), str):
             sev = vuln["severity"].strip().casefold()
             try:
                 return Severity(sev)

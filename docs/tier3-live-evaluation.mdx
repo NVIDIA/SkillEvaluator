@@ -475,15 +475,14 @@ as on Harbor, and Gym enforces them. `harbor.agent_workdir` and `harbor.pre_agen
 that working directory and runs the setup commands as the task's environment healthcheck
 before the agent. `--copy-repo` stages the whole repository under
 `/workspace/repo/` as on Harbor, and a `skill_workspace.decoy_manifest` stages the same
-verified decoy snapshot into every arm. `--custom-dockerfile-mode preserve` is accepted; with no
+verified decoy snapshot into every arm. Native `evals/harbor/` tasks (`task_source: native_harbor`, or
+`auto` without `evals/evals.json`) are staged with Harbor's own native staging and run on Gym. `--custom-dockerfile-mode preserve` is accepted; with no
 shared base image, preserve and rebase build the same image, as on Harbor. `--environment-kwarg` is rejected, as Harbor rejects it in
 Docker mode. It rejects `--stop-on-pass`,
 `--harbor-keep-jobs`, `--agent-runtime-preflight`, `--override-storage-mb`,
 and the config keys `harbor.base_image_mode` (reuse/rebuild),
-`task_source: native_harbor`,
 `resources.storage_mb`, MCP
-servers in `evals/environment/mcp_servers.toml`, native `evals/harbor/` tasks (also when
-`task_source: auto` resolves to them), a model URL with embedded credentials, and Windows hosts,
+servers in `evals/environment/mcp_servers.toml`, a model URL with embedded credentials, and Windows hosts,
 whether set by flag or config (a flag overrides its config key), before anything
 starts (`tier3 PATH --autopilot` checks these before it writes a dataset); it never
 falls back to Harbor. `runtime_env` (alias `passthrough_env`) entries reach the agent's sandbox as `${NAME}`

@@ -36,7 +36,6 @@ from skillevaluator.tier3.nemo_gym.backend import (
     MCP_SERVERS_ERROR,
     MODEL_API_KEY_ENV,
     MODEL_URL_ENV,
-    NATIVE_HARBOR_ERROR,
     NEMO_GYM_AGENTS,
     NEMO_GYM_BACKEND,
     NEMO_GYM_BIN_ENV,
@@ -518,7 +517,7 @@ def run_nemo_gym_eval(
     from skillevaluator.source_identity import normalized_evaluated_source
     from skillevaluator.tier3.case_ids import validate_case_ids
     from skillevaluator.tier3.evals_config import EvalsConfigError, load_evals_config
-    from skillevaluator.tier3.harbor.adapter import generate_harbor_tasks
+    from skillevaluator.tier3.harbor.adapter import generate_harbor_tasks, stage_native_harbor_tasks
     from skillevaluator.tier3.harbor.artifact_retention import HarborArtifactLifecycle
     from skillevaluator.tier3.harbor.collector import _score_definition_for_policy, collect_harbor_results
     from skillevaluator.tier3.harbor.metrics import DEFAULT_METRICS, score_policy_for_metrics
@@ -604,8 +603,12 @@ def run_nemo_gym_eval(
         errors.append("n_concurrent must be >= 1")
     if max_cases is not None and not _is_positive_int(max_cases):
         errors.append("max_cases must be >= 1")
-    if uses_native_harbor_tasks(skill_path, harbor_config.get("task_source", "auto")):
-        errors.append(NATIVE_HARBOR_ERROR)
+    configured_task_source = harbor_config.get("task_source", "auto")
+    if configured_task_source not in ("auto", "evals_json", "native_harbor"):
+        errors.append("harbor.task_source must be auto, evals_json, or native_harbor")
+    task_source = "native_harbor" if uses_native_harbor_tasks(skill_path, configured_task_source) else "evals_json"
+    if task_source == "native_harbor" and not (skill_path / "evals" / "harbor").is_dir():
+        errors.append("No native Harbor task source found at evals/harbor.")
     if mcp_servers_declared(skill_path):
         errors.append(MCP_SERVERS_ERROR)
     pre_agent_setup = list(harbor_config.get("pre_agent_setup") or [])
@@ -728,7 +731,8 @@ def run_nemo_gym_eval(
             for agent in agents:
                 for arm, with_skill in arms:
                     arm_dir = tasks_root / agent / arm
-                    task_paths = generate_harbor_tasks(
+                    emit_tasks = stage_native_harbor_tasks if task_source == "native_harbor" else generate_harbor_tasks
+                    task_paths = emit_tasks(
                         skill_path,
                         arm_dir,
                         with_skill=with_skill,
@@ -904,7 +908,7 @@ def run_nemo_gym_eval(
             },
             "provider": {"name": provider.provider, "model": provider.model},
             "judge": _judge_model_config(provider, _provider_environment(provider), effective_grading),
-            "task_source": "evals_json",
+            "task_source": task_source,
             "grading": {"mode": effective_grading},
             "agents": resolved_models,
             "evaluated_source": normalized_evaluated_source(evaluated_source),

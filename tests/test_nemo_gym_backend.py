@@ -427,7 +427,7 @@ def test_fake_gym_run_uses_config_agent_model_and_resources(
 
 @pytest.mark.parametrize(
     "harbor_config",
-    ["  resources:\n    storage_mb: 4096\n", "  task_source: native_harbor\n"],
+    ["  resources:\n    storage_mb: 4096\n"],
 )
 def test_fake_gym_run_rejects_harbor_only_config_keys(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch, harbor_config: str
@@ -784,7 +784,7 @@ def test_gym_environment_keeps_uv_credentials_and_anchors_paths(
     assert env["SSL_CERT_FILE"] == str(tmp_path / "certs" / "ca.pem")
 
 
-def test_native_harbor_tasks_under_auto_are_rejected(tmp_path: Path) -> None:
+def test_native_harbor_task_source_resolves_like_harbor(tmp_path: Path) -> None:
     from skillevaluator.tier3.nemo_gym.backend import uses_native_harbor_tasks
 
     skill = tmp_path / "skill"
@@ -901,3 +901,36 @@ def test_tier3_doctor_accepts_backend_option() -> None:
 
     result = CliRunner().invoke(cli, ["tier3", "doctor", "--help"])
     assert result.exit_code == 0 and "--backend" in result.output
+
+
+def test_fake_gym_run_stages_native_harbor_tasks(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    from skillevaluator.tier3.nemo_gym import runner as gym_runner
+
+    config = "schema_version: 1\nharbor:\n  task_source: native_harbor\ngrading:\n  mode: custom_only\n"
+    skill, _env_log = _fake_gym_skill(tmp_path, monkeypatch, config=config)
+    task = skill / "evals" / "harbor" / "case-001"
+    (task / "environment").mkdir(parents=True)
+    (task / "tests").mkdir()
+    (task / "task.toml").write_text(
+        'schema_version = "1.3"\n\n[task]\nname = "nvidia/case-001"\n\n[metadata]\nentry_id = "case-001"\n\n'
+        "[agent]\ntimeout_sec = 300.0\n\n[verifier]\ntimeout_sec = 600.0\n\n[environment]\n"
+        'skills_dir = "/workspace/skills"\n'
+    )
+    (task / "instruction.md").write_text("Native instruction NATIVE-7341.\n")
+    (task / "environment" / "Dockerfile").write_text("FROM python:3.12-slim\nWORKDIR /workspace\n")
+    (task / "tests" / "test.sh").write_text("#!/bin/bash\necho 1 > /logs/verifier/reward.txt\n")
+    staged: dict[str, str] = {}
+    original_stage = gym_runner.stage_for_gym
+
+    def recording_stage(arm_dir: Path, *args, **kwargs) -> None:
+        original_stage(arm_dir, *args, **kwargs)
+        for instruction in arm_dir.glob("*/instruction.md"):
+            staged[arm_dir.name] = instruction.read_text()
+            assert "skills_dir" not in (instruction.parent / "task.toml").read_text()
+
+    monkeypatch.setattr(gym_runner, "stage_for_gym", recording_stage)
+    result = _run_fake_gym(skill, tmp_path)
+    assert set(staged) == {"with", "without"}
+    assert all("NATIVE-7341" in text for text in staged.values())
+    run_config = json.loads((Path(result["run_dir"]) / "run_config.json").read_text())
+    assert run_config["task_source"] == "native_harbor"

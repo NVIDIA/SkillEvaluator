@@ -218,10 +218,6 @@ def mcp_servers_declared(skill_path: Path) -> bool:
 
 
 MCP_SERVERS_ERROR = "evals/environment/mcp_servers.toml is not supported with --backend nemo-gym yet"
-NATIVE_HARBOR_ERROR = (
-    "native Harbor tasks (harbor.task_source native_harbor, or an evals/harbor/ source without "
-    "evals/evals.json) are not supported with --backend nemo-gym yet"
-)
 
 
 def nemo_gym_config_errors(
@@ -251,8 +247,6 @@ def nemo_gym_config_errors(
         errors.append("harbor.agent_runtime_preflight applies to the Harbor backend only")
     if harbor.get("base_image_mode", "disabled") != "disabled":
         errors.append("harbor.base_image_mode reuse/rebuild applies to the Harbor backend only")
-    if uses_native_harbor_tasks(skill_path, harbor.get("task_source", "auto")):
-        errors.append(NATIVE_HARBOR_ERROR)
     if mcp_servers_declared(skill_path):
         errors.append(MCP_SERVERS_ERROR)
     if "storage_mb" in (harbor.get("resources") or {}):

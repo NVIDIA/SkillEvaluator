@@ -121,6 +121,20 @@ All notable changes to SkillEvaluator are documented in this file.
   `Use HTTP POST to create an item.` in a here-document or an unpiped `echo`
   still does not warn.
 
+- Docker OpenCode containers no longer get the distribution `nodejs` and
+  `npm` packages from agent setup, except on Alpine images, and generated
+  images now include `procps`. Before, OpenCode, the default agent with NVIDIA
+  Build, installed Debian's Node.js and npm with `apt-get` in every trial and
+  then its own Node.js with nvm, and Claude Code installed `procps` (for
+  `pgrep`) in every trial. Both took time from the 360-second agent setup
+  timeout, and a package mirror error failed the trial. Like Claude Code and
+  Codex containers since 0.6.0, OpenCode containers on Debian-based images now
+  have no `gcc`, `g++`, or `make`, and OpenCode's Node.js is on `PATH` only for
+  the OpenCode process and the commands it runs. Skills whose scripts, tasks,
+  verifier, or stdio MCP servers need these tools must install them through
+  `scripts/apt-packages.txt` or a custom `evals/environment/Dockerfile`. The
+  auto-generated base image is rebuilt once for the new package list.
+
 ## 0.8.0 - 2026-11-05
 
 ### Added

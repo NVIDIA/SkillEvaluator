@@ -312,16 +312,22 @@ transport = "stdio"
 ```
 
 <Note>
-  In Docker mode, Claude Code and Codex setup no longer installs the
+  In Docker mode, Claude Code, Codex, and OpenCode setup no longer installs the
   distribution `nodejs` and `npm` packages, except on Alpine images. On
   Debian-based images, including the default `python:3.12-slim` image, those
   packages also brought `npx` and a C/C++ toolchain (`gcc`, `g++`, `make`).
   Claude Code containers now have no Node.js unless the image provides it.
-  Codex installs its own Node.js, which is on `PATH` only for the Codex process
-  and the commands it runs. If your skill's scripts, its tasks, or a stdio MCP
+  Codex and OpenCode install their own Node.js with nvm. Its `node`, `npm`, and
+  `npx` are on `PATH` only for the agent process and the commands it runs,
+  including stdio MCP servers, not for the verifier (`test.sh`) or task
+  healthchecks. If your skill's scripts, its tasks, the verifier, or a stdio MCP
   server (for example `command = "npx ..."`) need these tools, install them in
   the image: list the packages in `scripts/apt-packages.txt`, one per line, for
   the auto-generated image, or install them in `evals/environment/Dockerfile`.
+  The auto-generated image and the `init-harbor-task` starter Dockerfile also
+  include `procps`, so Claude Code setup no longer installs it (for `pgrep`)
+  with `apt-get` in every trial. A custom Dockerfile with
+  `custom_dockerfile_mode: preserve` should install `procps` for the same reason.
 </Note>
 
 ```text title="my-skill/scripts/apt-packages.txt"

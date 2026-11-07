@@ -580,17 +580,36 @@ agent timeout, fails the agent and the run, and the other arm keeps its
 scores. Reports describe such an arm by how many of its attempts scored,
 never as not run. In `BENCHMARK.md`, the agent's cells read
 `90.0% — baseline incomplete (1 of 2 attempts scored); uplift unavailable`, or
-`baseline unavailable` when no baseline attempt scored, while a baseline
-skipped with `--skip-baseline` still reads `baseline not run`. An
-**Agent coverage** list under the table names each failed arm, how many of its
-attempts scored, and the first Harbor exception type it recorded, in words
-such as `agent timeout error`. The Tier 3 row of the tier status table names
-the agent and arm. The canonical JSON payload lists the same facts in
-`coverage_notices`, one entry per failed arm with `agent`, `condition`,
-`state` (`incomplete`, `unavailable`, or `failed` when no attempt is missing),
-`scored_attempts`, `expected_attempts`, `failure`, and `message`. The HTML
-report lists each message under **Agent coverage notes** at the top of the
-Tier 3 section, and the terminal prints them in the Tier 3 block.
+`baseline unavailable` when no baseline attempt scored. They read
+`baseline failed (2 of 2 attempts scored)` when the arm failed with no attempt
+missing, and `baseline failed` with no counts when its recorded counts are
+unusable. A baseline skipped with `--skip-baseline` still reads
+`baseline not run`. An **Agent coverage** list under the table names each
+failed arm, how many of its attempts scored, and the first Harbor exception
+type it recorded, in words such as `agent timeout error`. When the agent is
+marked failed, the entry also says that the agent and the Tier 3 run are
+marked failed. The Tier 3 row of the tier status table names the agent and
+arm.
+
+The canonical JSON payload lists the same facts in `coverage_notices`, one
+entry per failed arm:
+
+- `code`: `baseline_failed` or `with_skill_failed`, the arm whose recorded
+  status is `failed`.
+- `agent` and `condition` (`without_skill` or `with_skill`).
+- `state`: `incomplete` when some attempts scored, `unavailable` when none
+  scored, or `failed` when no attempt is missing or the counts are unusable.
+- `scored_attempts` and `expected_attempts`: `null`, with `state` `failed`,
+  when the arm's counters are missing or inconsistent, for example more scored
+  than expected attempts, or no expected attempts after a job failure.
+- `failure`: the first Harbor exception type in words, or `null`.
+- `message`: the sentence the reports show.
+
+The HTML report lists each message under **Agent coverage notes** at the top
+of the Tier 3 section. `validate` prints them under **Agent coverage notes** in
+the Tier 3 block, also when Tier 3 is non-blocking, which is the default.
+`tier3 evaluate` lists each agent's failed condition with its errors, as
+before.
 
 ### Measured agent resources
 

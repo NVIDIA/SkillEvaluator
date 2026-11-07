@@ -152,7 +152,7 @@ def _normalize_entry(entry: dict[str, Any], *, skill_name: Any | None = None) ->
 
 def _load_jsonl(path: Path) -> list[dict[str, Any]]:
     entries: list[dict[str, Any]] = []
-    with path.open() as f:
+    with path.open(encoding="utf-8") as f:
         for line in f:
             line = line.strip()
             if line:
@@ -161,10 +161,10 @@ def _load_jsonl(path: Path) -> list[dict[str, Any]]:
 
 
 def _load_yaml(path: Path) -> Any:
-    with path.open() as f:
+    with path.open(encoding="utf-8") as f:
         return yaml.safe_load(f)
 
 
 def _load_json(path: Path) -> Any:
-    with path.open() as f:
+    with path.open(encoding="utf-8") as f:
         return json.load(f)

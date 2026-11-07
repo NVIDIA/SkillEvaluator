@@ -525,6 +525,18 @@
           "type": "text"
         },
         {
+          "choices": [
+            "harbor",
+            "nemo-gym"
+          ],
+          "default": "harbor",
+          "name": "backend",
+          "opts": [
+            "--backend"
+          ],
+          "param_type": "option"
+        },
+        {
           "default": "False",
           "is_flag": true,
           "name": "verify_models",
@@ -2576,6 +2588,18 @@
               ],
               "param_type": "option",
               "type": "text"
+            },
+            {
+              "choices": [
+                "harbor",
+                "nemo-gym"
+              ],
+              "default": "harbor",
+              "name": "backend",
+              "opts": [
+                "--backend"
+              ],
+              "param_type": "option"
             },
             {
               "default": "False",

@@ -77,7 +77,7 @@ def _write_findings(result: dict) -> list[dict]:
     ("header", "entry"),
     [
         ("*** Add File: /root/.bashrc", "/root/.bashrc"),
-        ("*** Update File: ~/.ssh/authorized_keys", "~/.ssh"),
+        ("*** Update File: ~/.ssh/authorized_keys", "~/.ssh/authorized_keys"),
         ("*** Delete File: $HOME/.zshrc", "~/.zshrc"),
         ("*** Update File: src/app.py\n*** Move to: ${HOME}/.profile", "~/.profile"),
         ("*** Add File: /home/agent/.bashrc", "~/.bashrc"),
@@ -105,7 +105,7 @@ def test_apply_patch_to_protected_path_is_critical_write(run, header, entry):
         # "/.." is "/", so a path cannot climb above the root.
         ("*** Add File: /../home/agent/.bashrc", "~/.bashrc"),
         ("*** Add File: /../root/.profile", "~/.profile"),
-        ("*** Update File: /../home/agent/.ssh/authorized_keys", "~/.ssh"),
+        ("*** Update File: /../home/agent/.ssh/authorized_keys", "~/.ssh/authorized_keys"),
         ("*** Add File: //../home/agent/.zshrc", "~/.zshrc"),
         # Relative paths resolve against the /workspace working directory.
         ("*** Add File: ../root/.profile", "~/.profile"),

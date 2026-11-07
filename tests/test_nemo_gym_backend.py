@@ -5,6 +5,7 @@
 from __future__ import annotations
 
 import json
+import os
 from pathlib import Path
 
 import pytest
@@ -539,6 +540,30 @@ def test_failed_gym_launch_is_reported_not_succeeded(tmp_path: Path, monkeypatch
     result = _run_fake_gym(skill, tmp_path)
     assert result.get("execution_status") != "succeeded"
     assert "exited 3" in json.dumps(result)
+
+
+def test_rerendered_report_keeps_a_failed_gym_launch(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    from skillevaluator.evaluation.tier3_report import agent_eval_result_from_directory, render_agent_eval_html_report
+
+    skill, _env_log = _fake_gym_skill(tmp_path, monkeypatch)
+    gym = Path(os.environ["SKILL_EVAL_NEMO_GYM_BIN"])
+    wrapper = tmp_path / "gym-then-exit-3"
+    wrapper.write_text(f'#!/bin/sh\n"{gym}" "$@"\nexit 3\n')
+    wrapper.chmod(0o755)
+    monkeypatch.setenv("SKILL_EVAL_NEMO_GYM_BIN", str(wrapper))
+    result = _run_fake_gym(skill, tmp_path)
+    run_dir = Path(result["run_dir"])
+    assert result["execution_status"] == "failed"
+    (run_dir / "report.html").unlink(missing_ok=True)
+
+    report = render_agent_eval_html_report(skill, run_dir)
+    assert "exited 3" in report.read_text(encoding="utf-8")
+    validation = agent_eval_result_from_directory(skill, run_dir)
+    assert validation is not None and not validation.passed
+    payload = validation.metadata["agent_eval"]
+    assert payload["summary"]["execution_status"] == "failed"
+    assert any("exited 3" in error for error in payload["summary"]["execution_errors"])
+    assert payload["agents"]["codex"]["execution_status"] == "failed"
 
 
 def test_gym_run_publishes_latest_stages_runtime_env_and_records_dataset(

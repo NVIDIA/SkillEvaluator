@@ -551,8 +551,17 @@ def agent_eval_result_from_directory(
         use_llm_judge=use_llm_judge,
         enforce_embedded_size=enforce_embedded_size,
     )
-    _apply_engine_failure(payload, engine_result)
+    _apply_engine_failure(payload, engine_result if isinstance(engine_result, dict) else _persisted_run_result(run_dir))
     return _validation_result_from_payload(payload)
+
+
+def _persisted_run_result(run_dir: Path) -> dict[str, Any] | None:
+    """Read the run's own ``result.json`` so re-rendered reports keep the engine status."""
+    try:
+        persisted = json.loads((run_dir / "result.json").read_text(encoding="utf-8"))
+    except (OSError, ValueError):
+        return None
+    return persisted if isinstance(persisted, dict) else None
 
 
 def _apply_engine_failure(payload: dict[str, Any] | None, engine_result: dict[str, Any] | None) -> None:
@@ -564,11 +573,28 @@ def _apply_engine_failure(payload: dict[str, Any] | None, engine_result: dict[st
         return
     if engine_result.get("execution_status") != "failed":
         return
-    payload["execution_status"] = "failed"
     raw_errors = engine_result.get("execution_errors") or []
     engine_errors = [str(error) for error in (raw_errors if isinstance(raw_errors, list) else [raw_errors]) if error]
-    existing = [str(error) for error in payload.get("execution_errors") or [] if error]
-    payload["execution_errors"] = list(dict.fromkeys([*existing, *engine_errors])) or [
+    agents = payload.get("agents")
+    agent_payloads = (
+        {name: agent for name, agent in agents.items() if isinstance(agent, dict)} if isinstance(agents, dict) else {}
+    )
+    attributed = {
+        name: [error for error in engine_errors if error.startswith((f"{name} ", f"{name}:"))]
+        for name in agent_payloads
+    }
+    failed_agents = [name for name, errors in attributed.items() if errors] or list(agent_payloads)
+    for name in failed_agents:
+        _mark_failed(agent_payloads[name], attributed[name] or engine_errors)
+    summary = payload.get("summary")
+    for target in (payload, summary) if isinstance(summary, dict) else (payload,):
+        _mark_failed(target, engine_errors)
+
+
+def _mark_failed(target: dict[str, Any], errors: list[str]) -> None:
+    target["execution_status"] = "failed"
+    existing = [str(error) for error in target.get("execution_errors") or [] if error]
+    target["execution_errors"] = list(dict.fromkeys([*existing, *errors])) or [
         "Tier 3 execution backend reported a failed run"
     ]
 

@@ -559,6 +559,8 @@ def _sanitize_tier3_pass_condition(value: object) -> dict[str, Any]:
             case = dict(raw_case)
             for key in ("attempts_used", "attempts_missing", "attempts_skipped"):
                 case[key] = _nonnegative_count(case.get(key))
+            if "attempts_recovered" in case:
+                case["attempts_recovered"] = _nonnegative_count(case.get("attempts_recovered"))
             case["best_score"] = _finite_number(case.get("best_score"), minimum=0.0, maximum=1.0)
             first_pass = case.get("first_pass_attempt")
             case["first_pass_attempt"] = (

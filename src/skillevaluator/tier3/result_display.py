@@ -238,6 +238,30 @@ def _attempt_coverage(data: Mapping[str, Any]) -> str:
     return ""
 
 
+def _recovered_timeout_lines(agents: Mapping[str, Any]) -> list[str]:
+    """One line per agent whose agent timeouts a later scored attempt recovered."""
+    lines = []
+    for agent, raw in agents.items():
+        conditions = raw.get("conditions") if isinstance(raw, Mapping) else None
+        if not isinstance(conditions, Mapping):
+            continue
+        counts: dict[str, int] = {}
+        for variant, label in (("with_skill", "with skill"), ("without_skill", "baseline")):
+            condition = conditions.get(variant)
+            count = condition.get("recovered_attempts_total") if isinstance(condition, Mapping) else None
+            if isinstance(count, int) and not isinstance(count, bool) and count > 0:
+                counts[label] = count
+        total = sum(counts.values())
+        if total:
+            arms = ", ".join(f"{count} {label}" for label, count in counts.items())
+            subject = "the timed-out attempt is" if total == 1 else "timed-out attempts are"
+            lines.append(
+                f"{agent}: {total} agent timeout{'s' if total != 1 else ''} recovered by a later scored "
+                f"attempt ({arms}); {subject} not scored and stay{'s' if total == 1 else ''} in the run history."
+            )
+    return lines
+
+
 def _concise_trial_reason(reason: str) -> str:
     """Collapse identical judge errors while retaining the affected metrics."""
     prefix = "Required judge evaluation failed: "
@@ -919,6 +943,10 @@ def render_evaluation_result(
             )
         except Exception:  # advisory panel: never break the run summary
             logging.getLogger(__name__).debug("Findings report skipped", exc_info=True)
+
+    # A recovered timeout is neither a failure nor a score; say so instead of staying silent.
+    for line in _recovered_timeout_lines(agents) if isinstance(agents, Mapping) else []:
+        console.print(Text(safe(line), style="yellow"))
 
     errors = result.get("execution_errors") or result.get("error") or []
     if isinstance(errors, str):

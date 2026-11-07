@@ -6,6 +6,7 @@ from __future__ import annotations
 
 import copy
 import json
+import re
 from datetime import UTC, datetime, timedelta
 from pathlib import Path
 from uuid import uuid4
@@ -17,6 +18,8 @@ pytest.importorskip("harbor")
 from harbor.models.job.result import JobResult, JobStats
 from harbor.models.trial.result import TrialResult
 
+from skillevaluator.evaluation.tier3_report import agent_eval_result_from_directory, render_agent_eval_html_report
+from skillevaluator.reporting import HTMLReporter
 from skillevaluator.tier3.harbor.collector import (
     _pass_summary,
     _shared_metric_scorer,
@@ -25,6 +28,7 @@ from skillevaluator.tier3.harbor.collector import (
     harbor_timeout_job_recovered,
 )
 from skillevaluator.tier3.harbor.runner import _merge_attempt_jobs
+from skillevaluator.tier3.result_display import render_result
 
 
 @pytest.mark.parametrize(
@@ -114,8 +118,8 @@ def native_attempt(root: Path, attempt: int, *, timeout: bool = False, reward: f
     return job
 
 
-def collect(root: Path, failed: Path, successful: Path, *, stop_on_pass: bool = True):
-    _merge_attempt_jobs([failed, successful], root / "jobs" / "demo-opencode-with")
+def collect(root: Path, *attempt_jobs: Path, stop_on_pass: bool = True):
+    _merge_attempt_jobs(list(attempt_jobs), root / "jobs" / "demo-opencode-with")
     return collect_harbor_results(
         skill_name="demo",
         agents=["opencode"],
@@ -351,3 +355,126 @@ def test_recovery_does_not_depend_on_directory_order(tmp_path, monkeypatch):
     assert agent["overall_with_skill"] == 1.0
     assert len(agent["recovered_trial_failures"]["with_skill"]) == 2
     assert agent["trial_failures"]["with_skill"] == []
+
+
+def attempt_details_rows(html: str) -> list[str]:
+    """Return each Attempt Details body row as its visible text."""
+    body = html.split('id="t3-attempts-table"', 1)[1].split("<tbody>", 1)[1].split("</tbody>", 1)[0]
+    return [" ".join(re.sub(r"<[^>]+>", " ", row).split()) for row in re.findall(r"<tr>(.*?)</tr>", body, re.DOTALL)]
+
+
+def render_html(root: Path) -> str:
+    return render_agent_eval_html_report(root, root / "results", use_llm_judge=False).read_text(encoding="utf-8")
+
+
+def test_attempt_details_show_recovered_timeout_in_the_attempt_budget(tmp_path):
+    result = collect(
+        tmp_path,
+        native_attempt(tmp_path / "attempts", 1, timeout=True),
+        native_attempt(tmp_path / "attempts", 2),
+    )
+    assert result["execution_status"] == "succeeded", result.get("execution_errors")
+
+    html = render_html(tmp_path)
+
+    # Attempt 1 timed out, attempt 2 passed, attempt 3 was skipped: three attempts, one scored.
+    assert attempt_details_rows(html) == [
+        "opencode With skill case-a A1: timed out, recovered A2: 1.00 pass 1 of 3 scored 1.00 passed on attempt 2"
+    ]
+    assert "passed on scored attempt" not in html
+    assert '"Timed out, recovered" marks an agent timeout that a later scored' in html
+    assert 'title="Includes 1 recovered agent timeout, which is not scored"' in html
+
+
+def test_attempt_details_place_each_recovered_timeout_at_its_attempt_number(tmp_path):
+    result = collect(
+        tmp_path,
+        native_attempt(tmp_path / "attempts", 1, reward=0.0),
+        native_attempt(tmp_path / "attempts", 2, timeout=True),
+        native_attempt(tmp_path / "attempts", 3),
+    )
+    assert result["execution_status"] == "succeeded", result.get("execution_errors")
+    case = result["agents"]["opencode"]["pass_at_k"]["with_skill"]["cases"]["case-a"]
+    assert (case["attempts_used"], case["attempts_recovered"], case["first_pass_attempt"]) == (2, 1, 3)
+
+    [row] = attempt_details_rows(render_html(tmp_path))
+
+    assert row == (
+        "opencode With skill case-a A1: 0.00 fail A2: timed out, recovered A3: 1.00 pass "
+        "2 of 3 scored 1.00 passed on attempt 3"
+    )
+
+
+def test_attempt_details_without_recovery_only_reword_the_passing_attempt(tmp_path):
+    result = collect(
+        tmp_path,
+        native_attempt(tmp_path / "attempts", 1, reward=0.0),
+        native_attempt(tmp_path / "attempts", 2),
+    )
+    assert result["execution_status"] == "succeeded", result.get("execution_errors")
+
+    html = render_html(tmp_path)
+
+    assert attempt_details_rows(html) == [
+        "opencode With skill case-a A1: 0.00 fail A2: 1.00 pass 2 of 3 scored 1.00 passed on attempt 2"
+    ]
+    assert "recovered" not in html.split('id="t3-attempts-table"', 1)[1].split("</table>", 1)[0]
+    assert '"Timed out, recovered"' not in html
+    assert "recovered by a later scored attempt" not in render_result(result)
+
+
+def test_attempt_details_read_recovered_attempt_numbers_from_the_rows_own_arm(tmp_path):
+    collect(
+        tmp_path,
+        native_attempt(tmp_path / "attempts", 1, timeout=True),
+        native_attempt(tmp_path / "attempts", 2),
+    )
+    result = agent_eval_result_from_directory(tmp_path, tmp_path / "results", use_llm_judge=False)
+    agent = result.metadata["agent_eval"]["agents"]["opencode"]
+    # Give the baseline arm the same recovered case, then drop the with-skill recovery list
+    # (compacted payloads keep the per-case count but not the bounded list).
+    agent["conditions"]["without_skill"] = copy.deepcopy(agent["conditions"]["with_skill"])
+    agent["pass_at_k"]["without_skill"] = copy.deepcopy(agent["pass_at_k"]["with_skill"])
+    del agent["conditions"]["with_skill"]["recovered_attempts"]
+
+    html = HTMLReporter(report_scope="tier3").render(result)
+
+    assert attempt_details_rows(html) == [
+        "opencode With skill case-a A2: 1.00 pass 1 timed out, recovered 1 of 3 scored 1.00 passed on attempt 2",
+        "opencode Without skill case-a A1: timed out, recovered A2: 1.00 pass 1 of 3 scored 1.00 passed on attempt 2",
+    ]
+
+
+def test_tier3_evaluate_prints_one_recovery_line_per_agent(tmp_path):
+    # Imported here so the rest of the module still runs against a tree without the helper.
+    from skillevaluator.tier3.result_display import _recovered_timeout_lines
+
+    result = collect(
+        tmp_path,
+        native_attempt(tmp_path / "attempts", 1, timeout=True),
+        native_attempt(tmp_path / "attempts", 2),
+    )
+
+    rendered = render_result(result)
+
+    assert (
+        "opencode: 1 agent timeout recovered by a later scored attempt (1 with skill); "
+        "the timed-out attempt is not scored and stays in the run history."
+    ) in rendered
+    assert "AgentTimeoutError" not in rendered
+    assert _recovered_timeout_lines(
+        {
+            "both": {
+                "conditions": {
+                    "with_skill": {"recovered_attempts_total": 2},
+                    "without_skill": {"recovered_attempts_total": 1},
+                }
+            },
+            "none": {"conditions": {"with_skill": {"recovered_attempts_total": 0}}},
+            "malformed": {"conditions": {"with_skill": {"recovered_attempts_total": True}}},
+            "missing": {"conditions": None},
+        }
+    ) == [
+        "both: 3 agent timeouts recovered by a later scored attempt (2 with skill, 1 baseline); "
+        "timed-out attempts are not scored and stay in the run history."
+    ]

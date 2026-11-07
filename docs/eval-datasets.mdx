@@ -67,11 +67,11 @@ top-level object with `skill_name` and an `evals` array.
   "evals": [
     {
       "id": "my-skill-001",
-      "prompt": "Use my-skill to do the thing",
-      "expected_output": "Expected outcome description",
+      "prompt": "Summarize the failing checks in build.log",
+      "expected_output": "The three failing checks, each with its error line",
       "assertions": [
-        "Read my-skill/SKILL.md",
-        "Returned correct result"
+        "Lists every failing check from build.log",
+        "Quotes the error line for each failing check"
       ]
     }
   ]
@@ -89,6 +89,16 @@ top-level object with `skill_name` and an `evals` array.
 | `expected_skill` | No | Skill the agent should route to; `null` for negative cases. |
 | `expected_script` | No | Script the agent should run; `null` if none applies. |
 | `acceptable_skills` | No | Closely related skills that earn partial routing credit (legacy alias: `acceptable_alternates`). |
+
+Both arms get the same `prompt` and are graded on the same `expected_output`
+and `assertions`; the no-skill baseline runs without the skill installed. Write
+them about the task outcome. A prompt that points at the skill's files, or an
+expected output or assertion that the agent read `SKILL.md`, ran the skill's
+script, or used the skill, cannot be met by the baseline and inflates lift.
+`skill_execution` scores skill use separately (see
+[How standard grading judges a trial](tier3-live-evaluation.mdx#how-standard-grading-judges-a-trial)).
+`create-eval-dataset` writes outcome-only expected output and assertions, and
+`tier3 validate` warns about entries that grade skill use.
 
 The dataset file can be named `evals.json`, `evals.jsonl`, `evals.yaml`, or
 `evals.yml` — `tier3 evaluate` accepts all four.

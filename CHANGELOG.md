@@ -15,6 +15,22 @@ All notable changes to SkillEvaluator are documented in this file.
 
 ### Changed
 
+- Generated eval datasets no longer grade skill use. Template cases from
+  `create-eval-dataset`, and the one starter case that `validate`, `tier3` and
+  `tier3 evaluate --autopilot` write when no dataset exists, asserted that the
+  agent read `SKILL.md`, ran the skill's script, or used or identified the
+  skill. The no-skill baseline is graded on the same expected output and
+  assertions and could not meet them, so its `behavior_check`, `accuracy` and
+  `goal_accuracy` scores dropped and lift was inflated. Template cases now
+  describe only the task outcome; the LLM generation and `--refine` prompts
+  ask for outcome checks; template `--refine` no longer turns reads or runs of
+  `SKILL.md`, the skill directory or the skill's scripts into behaviors. The
+  negative template case is unchanged. `tier3 validate` now warns when a
+  prompt points at the skill's files or an expected output or assertion grades
+  skill use; the warning fails only `--strict` and never blocks a run. On
+  newly generated datasets, baseline scores rise and lift falls; existing
+  datasets are not rewritten.
+
 - Align terminal grade and lift colors across compact, full, and direct Tier 3
   reports; displayed zero lift is neutral. Narrow terminals stack complete
   condition score/bar groups. Full-report Details retain successful quality and

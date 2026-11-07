@@ -297,14 +297,8 @@ def _generate_simple(skill: dict[str, Any]) -> list[dict[str, Any]]:
     desc = skill["description"] or f"the {name} skill"
     eval_hints = _extract_eval_hints(skill.get("eval_prompt", ""))
 
-    question = eval_hints["questions"][0] if eval_hints["questions"] else f"Use {name} to {desc.lower().rstrip('.')}"
-
-    behaviors = [f"The agent read the {name} SKILL.md before taking action"]
-    if script:
-        behaviors.append(f"The agent executed {script} or explained how to run it")
-    behaviors.append("The agent's final response directly addresses the user's request")
-    behaviors.extend(eval_hints["behaviors"])
-    behaviors.append(SECURITY_BEHAVIOR)
+    desc_lower = desc.lower().rstrip(".")
+    question = eval_hints["questions"][0] if eval_hints["questions"] else f"Use {name} to {desc_lower}"
 
     return [
         {
@@ -312,9 +306,23 @@ def _generate_simple(skill: dict[str, Any]) -> list[dict[str, Any]]:
             "question": question,
             "expected_skill": name,
             "expected_script": script,
-            "ground_truth": f"The agent used the {name} skill and provided a response showing {desc.lower().rstrip('.')}",
-            "expected_behavior": behaviors,
+            "ground_truth": f"A correct, complete result for: {desc_lower}",
+            "expected_behavior": _outcome_behaviors(desc_lower, eval_hints["behaviors"]),
         }
+    ]
+
+
+def _outcome_behaviors(desc_lower: str, hint_behaviors: list[str]) -> list[str]:
+    """Behaviors about the task outcome, which both arms can be graded on.
+
+    Reading SKILL.md or running the skill's script is scored by skill_execution;
+    asserting it here would grade the no-skill baseline on something it cannot do.
+    """
+    return [
+        f"The agent produced concrete results for the request ({desc_lower}), not only a plan",
+        "The agent's final response directly addresses the user's request",
+        *hint_behaviors,
+        SECURITY_BEHAVIOR,
     ]
 
 
@@ -331,12 +339,7 @@ def _generate_full(skill: dict[str, Any]) -> list[dict[str, Any]]:
     eval_hints = _extract_eval_hints(skill.get("eval_prompt", ""))
     hint_qs = eval_hints["questions"]
 
-    pos_behaviors = [f"The agent read the {name} SKILL.md before taking action"]
-    if script:
-        pos_behaviors.append(f"The agent executed {script} or explained how to run it")
-    pos_behaviors.append("The agent's final response directly addresses the user's request")
-    pos_behaviors.extend(eval_hints["behaviors"])
-    pos_behaviors.append(SECURITY_BEHAVIOR)
+    pos_behaviors = _outcome_behaviors(desc_lower, eval_hints["behaviors"])
 
     cases = [
         {
@@ -344,7 +347,7 @@ def _generate_full(skill: dict[str, Any]) -> list[dict[str, Any]]:
             "question": hint_qs[0] if len(hint_qs) > 0 else f"Use {name} to {desc_lower}",
             "expected_skill": name,
             "expected_script": script,
-            "ground_truth": f"The agent used the {name} skill and provided a response showing {desc_lower}",
+            "ground_truth": f"A correct, complete result for: {desc_lower}",
             "expected_behavior": pos_behaviors,
         },
         {
@@ -352,11 +355,8 @@ def _generate_full(skill: dict[str, Any]) -> list[dict[str, Any]]:
             "question": hint_qs[1] if len(hint_qs) > 1 else f"I need to {desc_lower}",
             "expected_skill": name,
             "expected_script": script,
-            "ground_truth": f"The agent identified {name} as the correct skill and provided results for {desc_lower}",
-            "expected_behavior": [
-                f"The agent identified {name} as the appropriate skill without being told explicitly",
-                *pos_behaviors[1:],
-            ],
+            "ground_truth": f"A correct, complete result for: {desc_lower}",
+            "expected_behavior": pos_behaviors,
         },
         {
             "id": f"{name}-003",
@@ -365,7 +365,7 @@ def _generate_full(skill: dict[str, Any]) -> list[dict[str, Any]]:
             else f"I'm working on a project and need help with {desc_lower}. Can you assist?",
             "expected_skill": name,
             "expected_script": script,
-            "ground_truth": f"The agent used {name} in a project context and provided actionable results for {desc_lower}",
+            "ground_truth": f"Actionable results for {desc_lower} that fit the user's project",
             "expected_behavior": pos_behaviors,
         },
     ]
@@ -415,15 +415,22 @@ async def _generate_with_llm(
     guidelines = f"""
 FIELD QUALITY GUIDELINES (follow strictly):
 
-"ground_truth": Write as an OUTCOME, not a rubric.
-  GOOD: "The agent used {name} and provided deployment status with health checks"
-  BAD:  "The response should explain how to deploy and mention health checks"
+"ground_truth" and "expected_behavior" are graded for runs with AND without the skill installed.
+Whether the agent read SKILL.md, picked this skill, or ran its scripts is scored separately
+(skill_execution), so these two fields must describe the task outcome only.
 
-"expected_behavior": Each item must be OBSERVABLE in a conversation trace.
+"ground_truth": Write as an OUTCOME, not a rubric. Do not say the agent used the skill.
+  GOOD: "Deployment status for each service, with the result of its health check"
+  BAD:  "The response should explain how to deploy and mention health checks" (rubric, not outcome)
+  BAD:  "The agent used {name} and provided deployment status" (grades skill use)
+
+"expected_behavior": Each item must be OBSERVABLE in a conversation trace and about the task result.
   Use the pattern: "The agent [OBSERVABLE_ACTION] [VERIFIABLE_CONDITION]"
-  GOOD: "The agent read the {name} SKILL.md before executing commands"
-  GOOD: "The agent executed {script or "the primary script"} or explained how to run it"
+  GOOD: "The agent reported the deployment status of every requested service"
+  GOOD: "The agent's final response includes the health check result for each service"
   BAD:  "Agent should recognize this as a deployment request" (cognitive state, not observable)
+  BAD:  "The agent read the {name} SKILL.md before executing commands" (skill use, scored separately)
+  BAD:  "The agent executed {script or "the primary script"}" (skill use, scored separately)
 
 "expected_script": Use the first non-interactive script. Set null if all scripts are interactive
   (e.g., OAuth scripts that open a browser). Current scripts: {", ".join(skill["scripts"]) or "none"}"""
@@ -459,7 +466,7 @@ Return ONLY a JSON array. Each item must have:
 - "expected_skill": "{name}" (or null for negative)
 - "expected_script": "{script}" (or null)
 - "ground_truth": outcome-oriented description of what the agent accomplished
-- "expected_behavior": list of 2-4 observable agent actions
+- "expected_behavior": list of 2-4 observable checks on the task outcome
 {guidelines}
 
 No other fields. No should_trigger. No bucket."""
@@ -478,7 +485,7 @@ Return ONLY a JSON array with 1 item having:
 - "expected_skill": "{name}"
 - "expected_script": "{script}" (or null if no scripts)
 - "ground_truth": outcome-oriented description of what the agent accomplished
-- "expected_behavior": list of 2-3 observable agent actions
+- "expected_behavior": list of 2-3 observable checks on the task outcome
 {guidelines}
 
 No other fields."""
@@ -863,16 +870,20 @@ REFINEMENT INSTRUCTIONS (follow this priority order strictly):
 PRIORITY 1 — DEVELOPER GUIDANCE (above):
   The skill author's guidance is the HIGHEST PRIORITY source. Any behaviors, constraints,
   workflows, or notes described in the developer guidance MUST be preserved in the refined
-  output. If the developer says "the agent should use parse_openapi.py before call_api.py",
+  output. If the developer says "the agent should validate the spec before calling the API",
   that behavior MUST appear in expected_behavior — even if the trajectory shows the agent
   skipped that step (that means the agent got it wrong, and the eval should catch it).
 
 PRIORITY 2 — AGENT TRAJECTORY (above):
   Use the trajectory to GROUND the evals in reality:
   - Update "ground_truth" based on what the agent ACTUALLY said in its final response.
-    Write as an OUTCOME, not a rubric.
-  - ADD trajectory-observed tool calls to "expected_behavior" (e.g., "The agent executed
-    call_api.py with --url ... --method POST"). These supplement the developer behaviors.
+    Write as an OUTCOME, not a rubric, and do not say the agent used the skill.
+  - Make "expected_behavior" concrete with the task results the trajectory shows (e.g., "The
+    agent's final response lists every GET endpoint with its path"). These supplement the
+    developer behaviors.
+  - Do NOT add behaviors about reading SKILL.md, picking this skill, or running the skill's own
+    scripts. ground_truth and expected_behavior are graded for runs with AND without the skill
+    installed; skill use is scored separately (skill_execution).
 
 PRIORITY 3 — DEFAULTS:
   - Keep "question" unchanged unless the agent clearly misunderstood it.
@@ -925,6 +936,15 @@ def _extract_agent_final_message(trajectory: dict[str, Any]) -> str:
     return ""
 
 
+def _uses_skill_files(text: str, skill_name: str | None, scripts: Sequence[str | None]) -> bool:
+    """Whether a read path or shell command touches SKILL.md, the skill's directory, or one of its scripts."""
+    if "SKILL.md" in text:
+        return True
+    names = [rf"skills/{re.escape(skill_name)}"] if skill_name else []
+    names.extend(re.escape(Path(script).name) for script in scripts if script)
+    return any(re.search(rf"(?<![\w.-]){name}(?![\w.-])", text) for name in names)
+
+
 def _refine_from_trajectory_template(
     cases: list[dict[str, Any]],
     trajectories: dict[str, dict[str, Any]],
@@ -934,7 +954,10 @@ def _refine_from_trajectory_template(
 
     Priority order for expected_behavior:
     1. EVAL.md ## Behaviors (developer intent — highest priority)
-    2. Trajectory-extracted tool calls (grounded evidence)
+    2. Trajectory-extracted tool calls (grounded evidence), except calls on the
+       skill's own files (SKILL.md, the skill directory, its scripts): the
+       no-skill baseline is graded on the same behaviors, and skill_execution
+       scores skill use separately
     3. Standard behaviors (response addresses request, security)
 
     Also refines ground_truth from the agent's final message in the trajectory.
@@ -956,6 +979,8 @@ def _refine_from_trajectory_template(
             continue
 
         case = dict(case)
+        skill_name = (skill or {}).get("name") or case.get("expected_skill")
+        skill_scripts = [*(skill or {}).get("scripts", []), case.get("expected_script")]
 
         # --- Refine expected_behavior ---
         traj_behaviors: list[str] = []
@@ -965,17 +990,17 @@ def _refine_from_trajectory_template(
                 fn = tc.get("function_name", "")
                 args = tc.get("arguments", {})
                 if fn in ("read", "read_file"):
-                    path = args.get("path", args.get("file_path", ""))
-                    if "SKILL.md" in path:
-                        b = "The agent read SKILL.md before taking action"
-                    else:
-                        b = f"The agent read {path.split('/')[-1] if '/' in path else path}"
+                    path = str(args.get("path", args.get("file_path", "")))
+                    if not path or _uses_skill_files(path, skill_name, skill_scripts):
+                        continue
+                    b = f"The agent read {path.rsplit('/', 1)[-1]}"
                     if b not in seen:
                         traj_behaviors.append(b)
                         seen.add(b)
                 elif fn in ("bash", "execute", "shell", "Shell"):
-                    cmd = str(args.get("command", ""))[:120]
-                    if cmd:
+                    full_cmd = str(args.get("command", ""))
+                    if full_cmd and not _uses_skill_files(full_cmd, skill_name, skill_scripts):
+                        cmd = full_cmd[:120]
                         b = f"The agent executed: {cmd}"
                         if b not in seen:
                             traj_behaviors.append(b)

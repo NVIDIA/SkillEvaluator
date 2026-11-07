@@ -3767,6 +3767,10 @@ from skillevaluator.tier3.decoy_commands import select_decoys_command
 
 tier3.add_command(select_decoys_command, "select-decoys")
 
+from skillevaluator.tier3.interaction_commands import interact_command
+
+tier3.add_command(interact_command, "interact")
+
 from skillevaluator.tier3.workflow import build_tier3_workflow
 
 tier3.workflow = build_tier3_workflow(evaluate)

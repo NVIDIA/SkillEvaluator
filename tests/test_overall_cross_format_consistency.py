@@ -107,8 +107,8 @@ def _json_values(payload: object, key: str) -> list[object]:
 @pytest.mark.parametrize(
     ("baseline_not_applicable", "with_overall", "baseline_overall", "lift_pair", "lift", "benchmark_row"),
     [
-        # A six-metric mean would give 0.667 vs 0.567 (+0.10); the five-dimension
-        # policy reverses the lift and drops the with-skill arm below 0.65.
+        # A six-metric mean would give 0.667 vs 0.567 (+0.10, a passing lift); the
+        # five-dimension policy reverses its sign to a failing -0.08.
         ((), 0.6, 0.68, (0.6, 0.68), -0.08, "68.0% → 60.0% (-8.0 points)"),
         # The baseline has no skill under test, so Discoverability and Efficiency
         # drop out of both arms for lift but stay in the with-skill arm score.

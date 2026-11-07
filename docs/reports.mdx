@@ -575,6 +575,23 @@ count as activation opportunities; missing or unsupported evidence remains
 unknown. Eligibility is determined separately for each agent, so another
 agent with observed activation can still contribute a comparison.
 
+An arm that ran but failed, for example because one baseline attempt hit the
+agent timeout, fails the agent and the run, and the other arm keeps its
+scores. Reports describe such an arm by how many of its attempts scored,
+never as not run. In `BENCHMARK.md`, the agent's cells read
+`90.0% — baseline incomplete (1 of 2 attempts scored); uplift unavailable`, or
+`baseline unavailable` when no baseline attempt scored, while a baseline
+skipped with `--skip-baseline` still reads `baseline not run`. An
+**Agent coverage** list under the table names each failed arm, how many of its
+attempts scored, and the first Harbor exception type it recorded, in words
+such as `agent timeout error`. The Tier 3 row of the tier status table names
+the agent and arm. The canonical JSON payload lists the same facts in
+`coverage_notices`, one entry per failed arm with `agent`, `condition`,
+`state` (`incomplete`, `unavailable`, or `failed` when no attempt is missing),
+`scored_attempts`, `expected_attempts`, `failure`, and `message`. The HTML
+report lists each message under **Agent coverage notes** at the top of the
+Tier 3 section, and the terminal prints them in the Tier 3 block.
+
 ### Measured agent resources
 
 Each agent's canonical JSON payload contains a `resources` object. The HTML

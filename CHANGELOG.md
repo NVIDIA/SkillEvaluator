@@ -88,6 +88,20 @@ All notable changes to SkillEvaluator are documented in this file.
   leaves its arm's LLM and tool totals `N/A` (`null` in JSON). Native ATIF
   timing is unchanged.
 
+- Tier 3 reports no longer say `baseline not run` for an agent whose baseline
+  arm ran but failed, for example after one baseline attempt hit the agent
+  timeout. `BENCHMARK.md` now shows that agent's with-skill scores as
+  `90.0% — baseline incomplete (1 of 2 attempts scored); uplift unavailable`,
+  or `baseline unavailable` when no baseline attempt scored, and keeps
+  `baseline not run` for a skipped baseline. An **Agent coverage** list under
+  the score table names each failed arm, including a failed with-skill arm,
+  with its scored and expected attempts and the first Harbor exception type in
+  words, such as `agent timeout error`; the Tier 3 row of the tier status
+  table names the agent and arm. The JSON payload records the same facts in
+  `coverage_notices`, which the HTML report shows under
+  **Agent coverage notes** and the terminal prints in the Tier 3 block. A
+  failed arm still fails the agent and the run.
+
 - Tier 3 standard judges under `LLM_JUDGE_RETRY_POLICY=strict` with Bedrock
   as the provider no longer label a Bedrock error that the policy treats as an
   unavailable model, such as throttling, a missing or inaccessible model, or

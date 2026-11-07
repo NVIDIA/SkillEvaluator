@@ -11,6 +11,7 @@ failed first, instead of printing ``baseline not run``.
 
 from __future__ import annotations
 
+import copy
 import html as html_lib
 import io
 import json
@@ -28,6 +29,7 @@ from skillevaluator.evaluation.tier3_report import (
     build_agent_eval_payload,
 )
 from skillevaluator.reporting import BenchmarkReporter, CLIReporter, HTMLReporter
+from skillevaluator.reporting.html import _TIER3_HTML_PREVIEW_TRIGGER_BYTES
 from skillevaluator.reporting.tier3_coverage import IncompleteArm, coverage_notices, incomplete_arms
 from skillevaluator.tier3.harbor.metrics import DEFAULT_METRICS
 
@@ -40,6 +42,7 @@ TIMEOUT_ERROR = (
 SETUP_ERROR = (
     "Agent runtime failed in case-1__attempt1: AgentSetupTimeoutError: Agent setup timed out after 360 seconds"
 )
+FAILED_AGENT = "The agent and the Tier 3 run are marked failed."
 
 
 def _condition(status: str, scored: int, expected: int = 2, errors: list[str] | None = None) -> dict[str, Any]:
@@ -166,8 +169,15 @@ def test_incomplete_arm_states_and_counts(scored: int | None, expected: int, sta
         (["Scored attempt coverage is 1/2", TIMEOUT_ERROR], "agent timeout error"),
         (["Without skill trial case-1__attempt2: harbor.trial.errors.VerifierTimeoutError"], "verifier timeout error"),
         (["Without skill trial case-1__attempt2: HTTPError: 503"], "http error"),
+        # An acronym keeps its trailing digits.
+        (["Without skill trial case-1__attempt2: S3UploadFailedError: denied"], "s3 upload failed error"),
+        (["Without skill aggregate job: HTTP2Error: stream reset"], "http2 error"),
+        (["Without skill trial case-1__attempt2: Http2ProtocolError"], "http2 protocol error"),
         # A case ID shaped like an exception type is not a failure type.
         (["Without skill trial FakeError: AgentTimeoutError: timed out"], "agent timeout error"),
+        (["Missing scored attempts for cases: ParseError", "Scored attempt coverage is 1/2"], None),
+        (["Excess scored attempts for cases: ParseError", TIMEOUT_ERROR], "agent timeout error"),
+        (["Unexpected scored cases: ValueError"], None),
         (["Scored attempt coverage is 1/2", "Unscoreable reward in case-1__attempt2: judge failed"], None),
         ("AgentTimeoutError: not a list", None),
     ],
@@ -176,6 +186,23 @@ def test_first_failure_names_the_first_harbor_exception_type(errors: object, fai
     agent = {"conditions": {"without_skill": {"execution_status": "failed", "execution_errors": errors}}}
     (arm,) = incomplete_arms(agent)
     assert arm.failure == failure
+
+
+def test_notice_says_the_agent_failed_only_when_the_agent_is_marked_failed() -> None:
+    baseline = _condition("failed", 1, errors=[TIMEOUT_ERROR])
+    failed = {"execution_status": "failed", "conditions": {"without_skill": baseline}}
+    # An agent kept scored although its baseline arm failed.
+    scored = {"execution_status": "succeeded", "conditions": {"without_skill": baseline}}
+
+    notices = coverage_notices({"failed-agent": failed, "scored-agent": scored})
+
+    assert [notice["code"] for notice in notices] == ["baseline_failed", "baseline_failed"]
+    assert [notice["message"] for notice in notices] == [
+        "failed-agent baseline incomplete (1 of 2 attempts scored; first failure: agent timeout error). "
+        f"{FAILED_AGENT} Baseline and uplift are not reported for this agent.",
+        "scored-agent baseline incomplete (1 of 2 attempts scored; first failure: agent timeout error). "
+        "Baseline and uplift are not reported for this agent.",
+    ]
 
 
 @pytest.mark.parametrize(
@@ -207,7 +234,7 @@ def test_payload_records_a_coverage_notice_for_a_failed_baseline_arm() -> None:
 
     assert payload["coverage_notices"] == [
         {
-            "code": "baseline_incomplete",
+            "code": "baseline_failed",
             "agent": "claude-code",
             "condition": "without_skill",
             "state": "incomplete",
@@ -216,7 +243,7 @@ def test_payload_records_a_coverage_notice_for_a_failed_baseline_arm() -> None:
             "failure": "agent timeout error",
             "message": (
                 "claude-code baseline incomplete (1 of 2 attempts scored; first failure: agent timeout error). "
-                "Baseline and uplift are not reported for this agent."
+                f"{FAILED_AGENT} Baseline and uplift are not reported for this agent."
             ),
         }
     ]
@@ -308,7 +335,7 @@ def test_benchmark_says_a_failed_baseline_is_incomplete_not_not_run() -> None:
         assert skipped == "90.0% — baseline not run; uplift unavailable"
     assert _coverage_section(benchmark) == [
         "- Claude Code: baseline incomplete (1 of 2 attempts scored; first failure: agent timeout error). "
-        "Baseline and uplift are not reported for this agent."
+        f"{FAILED_AGENT} Baseline and uplift are not reported for this agent."
     ]
     assert _tier3_evidence(benchmark).endswith("; Claude Code baseline incomplete (1 of 2 attempts scored)")
 
@@ -339,7 +366,7 @@ def test_benchmark_explains_a_failed_with_skill_arm_below_the_table() -> None:
         assert "points" not in failed
     assert _coverage_section(benchmark) == [
         "- Codex: with-skill run unavailable (0 of 2 attempts scored; first failure: agent setup timeout error). "
-        "With-skill scores and uplift are not reported for this agent."
+        f"{FAILED_AGENT} With-skill scores and uplift are not reported for this agent."
     ]
     assert _tier3_evidence(benchmark).endswith("; Codex with-skill run unavailable (0 of 2 attempts scored)")
 
@@ -388,3 +415,50 @@ def test_html_and_terminal_escape_agent_names_in_coverage_notes() -> None:
     assert "<li><b>" not in report
     assert _html_coverage_notes(report) == [message]
     assert f"• {message}" in _cli_output(result)
+
+
+@pytest.mark.parametrize(
+    "notices",
+    [5, True, {"message": "claude-code baseline incomplete"}, ["claude-code", None, {"message": 5}, {"message": ""}]],
+)
+def test_html_drops_malformed_coverage_notices(notices: object) -> None:
+    _, result, _, _ = _render({"claude-code": _agent(baseline=_condition("failed", 1, errors=[TIMEOUT_ERROR]))})
+    result.metadata["agent_eval"]["coverage_notices"] = notices
+
+    report = HTMLReporter(include_timestamp=False).render_all([result])
+
+    assert "tier3-coverage-notices" not in report
+    assert _html_coverage_notes(report) == []
+
+
+def test_html_keeps_coverage_notes_whole_in_the_bounded_preview() -> None:
+    """A payload above the preview trigger still shows every coverage message in full."""
+    payload, result, _, _ = _render(
+        {
+            "claude-code": _agent(baseline=_condition("failed", 1, errors=[TIMEOUT_ERROR])),
+            "codex": _agent(baseline=_condition("succeeded", 2)),
+        }
+    )
+    messages = [notice["message"] for notice in payload["coverage_notices"]]
+    large = copy.deepcopy(result)
+    prompt = "Summarize the attached quarterly report and list each follow-up action. " * 40
+    large.metadata["agent_eval"]["dataset"] = [{"id": f"case-{index}", "prompt": prompt} for index in range(100)]
+    assert len(json.dumps(large.metadata["agent_eval"]).encode("utf-8")) > _TIER3_HTML_PREVIEW_TRIGGER_BYTES
+
+    report = HTMLReporter(include_timestamp=False).render_all([large])
+
+    assert "HTML preview omitted" in report
+    assert _html_coverage_notes(report) == messages
+
+
+def test_terminal_prints_coverage_notes_for_a_non_blocking_tier3_result() -> None:
+    """``validate`` runs Tier 3 non-blocking by default; the failed run has errors but no findings."""
+    payload, result, _, _ = _render({"claude-code": _agent(baseline=_condition("failed", 1, errors=[TIMEOUT_ERROR]))})
+    result.metadata["gating"] = {"tier": 3, "blocking": False}
+    assert not result.findings
+
+    output = _cli_output(result)
+
+    assert "Agent coverage notes" in output
+    (notice,) = payload["coverage_notices"]
+    assert f"• {notice['message']}" in output

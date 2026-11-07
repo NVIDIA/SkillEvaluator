@@ -2470,7 +2470,7 @@
         </div>
         {% endif %}
 
-        {% set t3_coverage_messages = (tier3.coverage_notices or []) | selectattr('message', 'string') | map(attribute='message') | list %}
+        {% set t3_coverage_messages = (tier3.coverage_notices or []) | selectattr('message', 'string') | map(attribute='message') | select | list %}
         {% if t3_coverage_messages %}
         <div class="t3-truncation-notice t3-coverage-notice" id="tier3-coverage-notices" role="status">
             <strong>Agent coverage notes</strong>

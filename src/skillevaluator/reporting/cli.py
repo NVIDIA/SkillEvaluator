@@ -100,6 +100,16 @@ def _rich_skip_reason(result: ValidationResult) -> str:
     return _rich_line(get_skip_reason(result))
 
 
+def _coverage_notice_messages(agent_eval: object) -> list[str]:
+    """Return the Tier 3 coverage notice messages the Tier 3 block prints."""
+    notices = agent_eval.get("coverage_notices") if isinstance(agent_eval, dict) else None
+    return [
+        notice["message"]
+        for notice in (notices if isinstance(notices, list) else [])
+        if isinstance(notice, dict) and isinstance(notice.get("message"), str) and notice["message"]
+    ]
+
+
 class CLIReporter(ReporterBase):
     """Terminal-based reporter with Rich formatting.
 
@@ -194,7 +204,14 @@ class CLIReporter(ReporterBase):
             for result in failed:
                 self.render_result(result, console)
 
-        non_blocking = [result for result in results if passes_required_gate(result) and result.findings]
+        # A non-blocking Tier 3 result (the ``validate`` default) can fail with
+        # no findings; its coverage notes still say which agent arm failed.
+        non_blocking = [
+            result
+            for result in results
+            if passes_required_gate(result)
+            and (result.findings or _coverage_notice_messages((result.metadata or {}).get("agent_eval")))
+        ]
         if non_blocking:
             console.print(
                 Panel.fit(
@@ -461,12 +478,7 @@ class CLIReporter(ReporterBase):
             console.print()
 
         # Name arms that ran but failed, so a missing baseline or score is not read as an arm that never ran.
-        coverage_notices = agent_eval.get("coverage_notices")
-        coverage_messages = [
-            notice["message"]
-            for notice in (coverage_notices if isinstance(coverage_notices, list) else [])
-            if isinstance(notice, dict) and isinstance(notice.get("message"), str)
-        ]
+        coverage_messages = _coverage_notice_messages(agent_eval)
         if coverage_messages:
             console.print("[bold]Agent coverage notes[/bold]")
             for message in coverage_messages:

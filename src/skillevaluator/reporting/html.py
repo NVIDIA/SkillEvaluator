@@ -113,6 +113,9 @@ _TIER3_JSON_SAFE_PRIORITY_KEYS = (
     "schema_version",
     "verdict",
     "execution_status",
+    # A few hundred bytes that explain a failed agent arm. Walked before the
+    # bulky keys, so the bounded HTML preview keeps every message whole.
+    "coverage_notices",
     "summary",
     "skill_name",
     "publication_target",
@@ -1101,6 +1104,16 @@ def _sanitize_tier3_display_payload(value: dict[str, Any]) -> dict[str, Any]:
         payload[key] = _tier3_identifier_list(payload.get(key))
     for key in ("execution_errors", "suggestions"):
         payload[key] = _string_list(payload.get(key))
+    # The template lists each notice's message; drop entries without one.
+    coverage_notices = [
+        notice
+        for notice in _dict_list(payload.get("coverage_notices"))
+        if isinstance(notice.get("message"), str) and notice["message"]
+    ]
+    if coverage_notices:
+        payload["coverage_notices"] = coverage_notices
+    else:
+        payload.pop("coverage_notices", None)
     # ``skill_name`` was already validated above as an exact NFC filesystem
     # identity. Do not pass it through compatibility-normalizing display text.
     for key in ("best_agent", "verdict", "execution_status"):

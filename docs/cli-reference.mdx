@@ -508,7 +508,7 @@ Use `skillevaluator tier3 PATH` for the complete workflow with automatic missing
 | `--evaluated-source-repository TEXT` | unset | Repository (`owner/name`) of the source tree being evaluated, persisted into the run's `run_config.json`. |
 | `--evaluated-source-revision TEXT` | unset | Immutable revision of the evaluated source: a full Git object id, or a `sha256`/`sha384`/`sha512` digest. A short prefix is refused. |
 | `--evaluator-container-revision TEXT` | unset | Digest-pinned evaluator image reference recorded beside the evaluated source. |
-| `--progress [auto\|rich\|plain\|off]` | `auto` | Progress display for the run: `rich` live view, `plain` line output, or `off`. |
+| `--progress [auto\|rich\|plain\|off]` | `auto` | Progress display for the run: `rich` live view (a fixed-height table of the run plan and recent stages), `plain` line output, or `off`. |
 | `--progress-interval SECONDS` | mode default | Seconds between progress heartbeats, from `0.05` to `86400`: how often the `rich` view refreshes elapsed times and how often `plain` output repeats a `still running` line for active stages. Defaults to 1 second for `rich` and 60 seconds for `plain`, including `auto` with redirected or CI output. |
 
 Without a `--model`/`--agent-model` override, agent execution uses

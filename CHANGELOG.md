@@ -121,6 +121,18 @@ All notable changes to SkillEvaluator are documented in this file.
   `Use HTTP POST to create an item.` in a here-document or an unpiped `echo`
   still does not warn.
 
+- The interactive Tier 3 progress view (`--progress rich`, or `auto` in a
+  terminal) now keeps one height for the whole run, so redraws no longer leave
+  repeated or jumbled table frames. The Provider and Run plan rows show a
+  placeholder until the plan resolves, each row is one line that ends in an
+  ellipsis when its value is too long, and stages fill a fixed number of rows,
+  at least six and one per agent, showing the most recently updated. The view
+  redraws only on progress events and heartbeats, no longer also from Rich's
+  own refresh thread. If drawing fails on the heartbeat thread, the view now
+  stops and progress turns off while the run continues. Before, that thread
+  ended with a traceback and the view stopped updating elapsed times but stayed
+  active.
+
 ## 0.8.0 - 2026-11-05
 
 ### Added

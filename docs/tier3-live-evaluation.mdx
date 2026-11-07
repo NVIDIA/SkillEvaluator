@@ -1065,6 +1065,12 @@ agent passes only when every dimension passes. The top-level Tier 3 verdict is:
 | Neutral | No agent passes, but at least one has no dimension below 0.40 |
 | Fail | Every successful agent has a dimension below 0.40 |
 
+The table applies when every agent finishes. When one of several agents fails,
+the run fails and has no whole-run score, even if another agent completed. The
+HTML report and `tier3-benchmark.md` still show the best completed agent's
+score and mark it as needing attention; see
+[Completed agents in an incomplete run](reports.mdx#completed-agents-in-an-incomplete-run).
+
 Skill Lift is `with-skill overall score - without-skill overall score` for
 comparable cases. Judge-model exclusions can make it differ from subtracting
 the displayed arm means; when no complete comparison with matching judges

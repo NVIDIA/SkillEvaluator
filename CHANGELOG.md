@@ -60,6 +60,15 @@ All notable changes to SkillEvaluator are documented in this file.
   `HTTP` word in any cell, because `|` reads as a pipe; and `HTTP PUT` right
   after a `;`, which starts a new command.
 
+- Reports & Results now explains the completed-agent result in Tier 3
+  reports. When one of several agents fails, the HTML report and
+  `tier3-benchmark.md` show the best agent's score and mark it as needing
+  attention, while the run stays failed and has no whole-run score. The new
+  section says when an agent qualifies and how recovered timeout attempts are
+  shown. The results tree now lists `tier3-benchmark.md`, which is written as a
+  pair with `report.html`, and the Tier 3 verdict table in the live evaluation
+  guide links to the new section.
+
 ### Fixed
 
 - A PII finding no longer keeps its `evidence_sha256` after CI redaction masks

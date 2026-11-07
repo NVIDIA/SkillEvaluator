@@ -121,6 +121,16 @@ All notable changes to SkillEvaluator are documented in this file.
   `Use HTTP POST to create an item.` in a here-document or an unpiped `echo`
   still does not warn.
 
+- `rubric-eval` now asks the judge once more, naming the problem, when its
+  reply is not valid JSON or its criterion evidence cannot be scored: a
+  criterion is missing, repeated or unknown, or has a score outside 0 to 10 or
+  a pass flag that is not a boolean. In 0.8.0 the first such reply failed
+  Tier 1 with a HIGH `llm_invalid_response` or `llm_unavailable` finding; now
+  only a second one does. A failed request, a refusal or a truncated reply is
+  still not retried. The JSON report records the number of requests as
+  `judge_attempts` in the skill's `rubric_eval` success detail or `llm_*`
+  finding and, for a single skill, also in the `rubric_eval` object.
+
 ## 0.8.0 - 2026-11-05
 
 ### Added

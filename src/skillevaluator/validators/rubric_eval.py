@@ -35,7 +35,7 @@ from skillevaluator.constants import (
     SKILL_MANIFEST_VARIANTS,
 )
 from skillevaluator.inference.client import LLMClient
-from skillevaluator.inference.diagnostics import safe_llm_labels
+from skillevaluator.inference.diagnostics import llm_failure_diagnostic, safe_llm_labels
 from skillevaluator.logging_config import get_logger
 from skillevaluator.models.result import Finding, Severity, ValidationResult
 from skillevaluator.utils.secure_fs import SecureRoot
@@ -198,6 +198,14 @@ def _aggregate_rubric_score(checks: list[dict]) -> float:
     return round(weighted_score / total_weight * 10, 1)
 
 
+def _rubric_report_problem(report: Any) -> str | None:
+    """Return why a parsed judge reply cannot be scored, or ``None`` when it can."""
+    if not isinstance(report, dict):
+        return "LLM judge returned invalid rubric evidence: response must be an object"
+    _checks, problem = _normalize_rubric_checks(report.get("checks"))
+    return problem
+
+
 class _UnavailableRubricReport(dict):
     """Internal marker distinguishing transport fallback from model evidence."""
 
@@ -240,6 +248,8 @@ class RubricJudge(LLMClient):
     default_reasoning_effort: str | None = RUBRIC_REASONING_EFFORT
     response_schema: dict[str, Any] | None = RUBRIC_JSON_SCHEMA
     schema_name: str = "rubric_evaluation"
+    # Judge requests sent by the last process() call: 2 after one rejected reply.
+    last_attempts: int = 0
 
     _SYSTEM_PROMPT = (
         "You are evaluating an AI Agent Skill documentation file (SKILL.md).\n"
@@ -309,6 +319,54 @@ class RubricJudge(LLMClient):
 
     def parse_response(self, response_text: str, **_kwargs: Any) -> dict:
         return _extract_json(response_text)
+
+    def process(self, **kwargs: Any) -> Any:
+        """Ask the judge, and ask once more, naming the problem, if its reply cannot be scored.
+
+        A reply that is not JSON, or whose ``checks`` miss, repeat or invent a
+        criterion or break a criterion's score or pass flag, gets one more
+        request: the same prompts plus the problem. The second reply is
+        returned as parsed, so the validator still fails closed when it is
+        invalid too. A provider error (a failed request, a refusal or a
+        truncated reply) is not retried: as in :meth:`LLMClient.process`,
+        ``last_failure`` records it and the fallback is returned. A truncated
+        reply is never salvaged. ``last_attempts`` counts the requests sent.
+        """
+        self.last_failure = None
+        self.last_attempts = 0
+        try:
+            system_prompt = self.get_system_prompt()
+            user_prompt = self.create_user_prompt(**kwargs)
+            raw = self._request_rubric(system_prompt, user_prompt)
+            try:
+                report = self.parse_response(raw, **kwargs)
+            except json.JSONDecodeError as exc:
+                problem = exc.msg
+            else:
+                problem = _rubric_report_problem(report)
+                if problem is None:
+                    return report
+            logger.warning("Rubric judge reply rejected (%s) - asking once more", problem)
+            retry_prompt = (
+                f"{user_prompt}\nYOUR PREVIOUS REPLY WAS REJECTED: {problem}. "
+                "Reply again with ONLY one JSON object in the shape described above.\n"
+            )
+            return self.parse_response(self._request_rubric(system_prompt, retry_prompt), **kwargs)
+        except NotImplementedError:
+            raise
+        except Exception as exc:
+            self.last_failure = llm_failure_diagnostic(exc)
+            logger.warning("LLM call failed (%s) - using fallback response", self.last_failure)
+            return self.get_fallback_response(**kwargs)
+
+    def _request_rubric(self, system_prompt: str, user_prompt: str) -> str:
+        self.last_attempts += 1
+        return self.completions(
+            system_prompt,
+            user_prompt,
+            response_schema=self.response_schema,
+            schema_name=self.schema_name,
+        )
 
     def get_fallback_response(self, **_kwargs: Any) -> dict:
         return _UnavailableRubricReport(
@@ -570,6 +628,11 @@ class RubricEvalValidator(ValidatorBase):
         provider, model = safe_llm_labels(self._judge.provider, self._judge.model_used)
         return {"llm_provider": provider, "llm_model_used": model}
 
+    def _judge_attempts(self) -> dict[str, int]:
+        """Count the judge requests behind this skill's result, when the judge was asked."""
+        attempts = self._judge.last_attempts
+        return {"judge_attempts": attempts} if attempts else {}
+
     @staticmethod
     def _record_judge_failure(
         result: ValidationResult,
@@ -580,6 +643,7 @@ class RubricEvalValidator(ValidatorBase):
         message: str,
         check_name: str,
         suggestion: str,
+        judge_attempts: dict[str, int] | None = None,
     ) -> ValidationResult:
         judge_report = report if isinstance(report, dict) else {}
         result.metadata["rubric_eval"] = {
@@ -592,6 +656,7 @@ class RubricEvalValidator(ValidatorBase):
             "judge_overall_pass": judge_report.get("overall_pass"),
             "skill_name": skill_path.name,
             "checks": [],
+            **(judge_attempts or {}),
         }
         result.add_finding(
             Finding(
@@ -601,6 +666,7 @@ class RubricEvalValidator(ValidatorBase):
                 message=message,
                 file_path=str(manifest),
                 suggestion=suggestion,
+                metadata=dict(judge_attempts or {}),
             )
         )
         return result
@@ -667,6 +733,7 @@ class RubricEvalValidator(ValidatorBase):
                 skill_content=content,
                 supplementary_content=supplementary,
             )
+        judge_attempts = self._judge_attempts()
 
         if not isinstance(report, dict):
             return self._record_judge_failure(
@@ -677,6 +744,7 @@ class RubricEvalValidator(ValidatorBase):
                 message="LLM judge returned invalid rubric evidence: response must be an object",
                 check_name="llm_invalid_response",
                 suggestion="Retry rubric evaluation; the judge response was malformed",
+                judge_attempts=judge_attempts,
             )
 
         if isinstance(report, _UnavailableRubricReport):
@@ -689,6 +757,7 @@ class RubricEvalValidator(ValidatorBase):
                 message=f"LLM judge unavailable; rubric evaluation did not run{cause}",
                 check_name="llm_unavailable",
                 suggestion="Configure a public LLM provider to enable LLM rubric evaluation",
+                judge_attempts=judge_attempts,
             )
 
         checks, validation_error = _normalize_rubric_checks(report.get("checks"))
@@ -701,6 +770,7 @@ class RubricEvalValidator(ValidatorBase):
                 message=validation_error,
                 check_name="llm_invalid_response",
                 suggestion="Retry rubric evaluation; the judge response did not contain valid complete criterion evidence",
+                judge_attempts=judge_attempts,
             )
 
         overall_score = _aggregate_rubric_score(checks)
@@ -769,16 +839,18 @@ class RubricEvalValidator(ValidatorBase):
                 "requires_all_criteria_pass": True,
             },
             **judge_labels,
+            **judge_attempts,
         }
 
-        # The success detail also names the model, so each skill of a folder
-        # run keeps its own.
+        # The success detail also names the model and counts the judge
+        # requests, so each skill of a folder run keeps its own.
         result.add_success(
             check_name="rubric_eval",
             message=f"LLM Rubric Score: {overall_score}/100",
             overall_score=overall_score,
             overall_pass=overall_pass,
             **judge_labels,
+            **judge_attempts,
         )
 
         return result

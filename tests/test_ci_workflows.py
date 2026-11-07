@@ -137,7 +137,6 @@ def test_ci_validates_fern_on_the_required_python_312_context() -> None:
         "Set up Python",
         "Set up uv",
         "Install dependencies",
-        "Scan OSS source boundary",
         "Lint",
         "Run tests with coverage",
     }

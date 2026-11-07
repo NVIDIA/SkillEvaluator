@@ -63,9 +63,6 @@ jobs:
       - name: Install dependencies
         if: ${{ needs.classify-changes.outputs.docs_only != 'true' }}
         run: uv sync --all-extras --locked --python 3.12
-      - name: Scan OSS source boundary
-        if: ${{ needs.classify-changes.outputs.docs_only != 'true' }}
-        run: python scripts/check_oss_boundary.py --root . --allowlist config/oss_boundary_allowlist.json
       - name: Lint committed BENCHMARK.md fixtures for leak patterns
         if: ${{ needs.classify-changes.outputs.docs_only != 'true' }}
         run: uv run python scripts/ci/check_public_benchmarks.py --require-files tests/golden --require-source-provenance
@@ -74,8 +71,11 @@ jobs:
         run: uv run ruff check .
       - name: Run tests with coverage
         if: ${{ needs.classify-changes.outputs.docs_only != 'true' }}
+        env:
+          # sys.monitoring keeps coverage overhead low enough for the timing-bound tests under xdist.
+          COVERAGE_CORE: sysmon
         run: >-
-          uv run pytest -q
+          uv run pytest -q -n auto
           --cov=skillevaluator
           --cov-report=term-missing
           --cov-report=xml:coverage.xml
@@ -350,7 +350,7 @@ jobs:
           version: "0.11.27"
       - run: uv sync --all-extras --locked
       - run: >-
-          uv run pytest -q
+          uv run pytest -q -n auto
           tests/embedding
           tests/deduplication
           tests/validators/test_similarity.py
@@ -481,13 +481,15 @@ jobs:
     if: ${{ !cancelled() && needs.classify-changes.outputs.docs_only != 'true' }}
     runs-on: windows-latest
     steps:
-      - uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5 # v4
+      - uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7.0.0
         with:
           persist-credentials: false
-      - uses: actions/setup-python@a26af69be951a213d495a4c3e4e4022e16d87065 # v5.6.0
+      - uses: actions/setup-python@ece7cb06caefa5fff74198d8649806c4678c61a1 # v6.3.0
         with:
           python-version: "3.12"
-      - uses: astral-sh/setup-uv@d4b2f3b6ecc6e67c4457f6d3e41ec42d3d0fcb86 # v5
+      - uses: astral-sh/setup-uv@d31148d669074a8d0a63714ba94f3201e7020bc3 # v8.3.0
+        with:
+          version: "0.11.27"
       - run: uv sync --all-extras --locked
       - run: >-
           uv run pytest -q

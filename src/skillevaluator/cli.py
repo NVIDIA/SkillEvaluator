@@ -904,6 +904,7 @@ def _run_agent_eval_or_skip(
     timeout_multiplier: float | None = None,
     harbor_keep_jobs: bool = False,
     agent_runtime_preflight: bool | None = None,
+    tolerate_baseline_timeouts: bool | None = None,
     block_on_agent_eval: bool = False,
     validate_source: bool = True,
     repo_context_exclude_paths: tuple[Path, ...] = (),
@@ -964,6 +965,7 @@ def _run_agent_eval_or_skip(
         timeout_multiplier=timeout_multiplier,
         harbor_keep_jobs=harbor_keep_jobs,
         agent_runtime_preflight=agent_runtime_preflight,
+        tolerate_baseline_timeouts=tolerate_baseline_timeouts,
         evaluated_source=evaluated_source,
         repo_context_exclude_paths=repo_context_exclude_paths,
     )
@@ -1339,6 +1341,11 @@ def _catalog_child_argv_from_ctx(
         argv.append("--agent-runtime-preflight")
     elif agent_runtime_preflight is False:
         argv.append("--no-agent-runtime-preflight")
+    tolerate_baseline_timeouts = params.get("tolerate_baseline_timeouts")
+    if tolerate_baseline_timeouts is True:
+        argv.append("--tolerate-baseline-timeouts")
+    elif tolerate_baseline_timeouts is False:
+        argv.append("--no-tolerate-baseline-timeouts")
     # Every child renders its own BENCHMARK.md, so the identity has to reach
     # each one: dropping it here would publish a catalog of cards that all say
     # the evaluated source was never recorded.
@@ -2092,6 +2099,16 @@ def _print_run_banner(target_path: Path, content_type: str, profile: str | None)
     help="Run an extra agent-only execution of the first staged task before measured Tier 3 [default: disabled].",
 )
 @click.option(
+    "--tolerate-baseline-timeouts/--no-tolerate-baseline-timeouts",
+    default=None,
+    cls=GroupedOption,
+    help_group=_TIER3_GROUP,
+    help=(
+        "Keep an agent scored on its clean with-skill arm when only baseline attempts hit the agent "
+        "execution timeout; its baseline and uplift are not reported [default: disabled]."
+    ),
+)
+@click.option(
     "--evaluated-source-repository",
     default=None,
     cls=GroupedOption,
@@ -2157,6 +2174,7 @@ def validate(
     timeout_multiplier: float | None,
     harbor_keep_jobs: bool,
     agent_runtime_preflight: bool | None,
+    tolerate_baseline_timeouts: bool | None,
     workers: int,
     evaluated_source_repository: str | None,
     evaluated_source_revision: str | None,
@@ -2500,6 +2518,7 @@ def validate(
             timeout_multiplier=timeout_multiplier,
             harbor_keep_jobs=harbor_keep_jobs,
             agent_runtime_preflight=agent_runtime_preflight,
+            tolerate_baseline_timeouts=tolerate_baseline_timeouts,
             block_on_agent_eval=block_on_agent_eval_effective,
             validate_source=preflight_tier3_source,
             evaluated_source=evaluated_source,
@@ -3163,6 +3182,14 @@ def _tier2_workflow(
     default=None,
     help="Run an extra agent-only execution of the first staged task before the full matrix [default: disabled].",
 )
+@click.option(
+    "--tolerate-baseline-timeouts/--no-tolerate-baseline-timeouts",
+    default=None,
+    help=(
+        "Keep an agent scored on its clean with-skill arm when only baseline attempts hit the agent "
+        "execution timeout; its baseline and uplift are not reported [default: disabled]."
+    ),
+)
 @click.option("--timeout-multiplier", type=float, default=None)
 @click.option("--override-cpus", type=int, default=None)
 @click.option("--override-memory-mb", type=int, default=None)
@@ -3228,6 +3255,7 @@ def evaluate(
     results_dir: Path | None,
     harbor_keep_jobs: bool,
     agent_runtime_preflight: bool | None,
+    tolerate_baseline_timeouts: bool | None,
     timeout_multiplier: float | None,
     override_cpus: int | None,
     override_memory_mb: int | None,
@@ -3282,6 +3310,7 @@ def evaluate(
         results_dir=results_dir,
         harbor_keep_jobs=harbor_keep_jobs,
         agent_runtime_preflight=agent_runtime_preflight,
+        tolerate_baseline_timeouts=tolerate_baseline_timeouts,
         timeout_multiplier=timeout_multiplier,
         override_cpus=override_cpus,
         override_memory_mb=override_memory_mb,

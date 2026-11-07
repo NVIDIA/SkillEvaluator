@@ -21,6 +21,7 @@ from itertools import islice
 from pathlib import Path
 from typing import Any
 
+from skillevaluator.tier3.harbor import baseline_timeouts
 from skillevaluator.tier3.harbor.metrics import (
     CUSTOM_ONLY_METRIC_SET,
     DEFAULT_METRIC_SET,
@@ -635,6 +636,33 @@ def _trajectory_token_counter(value: Any) -> int | None:
     )
 
 
+def _matching_baseline_tolerance(record: Any, conditions: dict[str, dict[str, Any]]) -> dict[str, Any] | None:
+    """Return an agent's baseline-timeout record when it still matches the on-disk arms.
+
+    The collector writes the record only for an agent it kept scored on its
+    with-skill arm under ``--tolerate-baseline-timeouts``. It is honored only
+    while the with-skill arm succeeded with every attempt scored and no errors,
+    and the baseline failed with exactly the recorded attempt counts; anything
+    else keeps the agent failed.
+    """
+    if not isinstance(record, dict):
+        return None
+    with_skill = conditions.get("with_skill") or {}
+    baseline = conditions.get("without_skill") or {}
+    expected, scored = record.get("expected_attempts"), record.get("scored_attempts")
+    matches = (
+        with_skill.get("execution_status") == "succeeded"
+        and not with_skill.get("execution_errors")
+        and 0 < with_skill.get("expected_attempts", 0) == with_skill.get("scored_attempts")
+        and baseline.get("execution_status") == "failed"
+        and type(expected) is int
+        and type(scored) is int
+        and 0 <= scored < expected
+        and (baseline.get("expected_attempts"), baseline.get("scored_attempts")) == (expected, scored)
+    )
+    return dict(record) if matches else None
+
+
 def _condition_status(agent_info: dict[str, Any], condition: str) -> str:
     conditions = agent_info.get("conditions")
     data = conditions.get(condition) if isinstance(conditions, dict) else None
@@ -785,6 +813,13 @@ def load_agent_data(
             if custom_lift is not _INVALID_JSON:
                 agent_info["custom_lift"] = custom_lift if isinstance(custom_lift, dict) else {}
 
+        tolerance_record: Any = None
+        tolerance_file = agent_dir / baseline_timeouts.RECORD_ARTIFACT
+        if tolerance_file.exists():
+            tolerance_record = _load_bounded_json(
+                tolerance_file, agent_diagnostics, artifact="baseline_timeout_tolerance"
+            )
+
         for variant_key, variant_dir_name in (("rewards", "with-skill"), ("rewards_baseline", "without-skill")):
             trial_list: list[dict[str, Any]] = []
             count_key = "num_trials" if variant_key == "rewards" else "num_trials_baseline"
@@ -886,24 +921,30 @@ def load_agent_data(
             agent_info["skill_activation"] = activation
 
         active_conditions = list(condition_execution.values())
+        tolerance = _matching_baseline_tolerance(tolerance_record, condition_execution)
+        # A tolerated agent's status and errors follow its with-skill arm; the
+        # attempt totals below still count both conditions.
+        status_conditions = active_conditions if tolerance is None else [condition_execution["with_skill"]]
         execution_errors = [
-            error for condition in active_conditions for error in condition.get("execution_errors", []) if error
+            error for condition in status_conditions for error in condition.get("execution_errors", []) if error
         ]
-        if not active_conditions or any(
-            condition.get("execution_status") in {"failed", "unknown"} for condition in active_conditions
+        if not status_conditions or any(
+            condition.get("execution_status") in {"failed", "unknown"} for condition in status_conditions
         ):
             execution_status = "failed" if execution_errors else "unknown"
-        elif all(condition.get("execution_status") == "skipped" for condition in active_conditions):
+        elif all(condition.get("execution_status") == "skipped" for condition in status_conditions):
             execution_status = "skipped"
         else:
             execution_status = "succeeded"
         public_execution_errors = list(dict.fromkeys(execution_errors))
+        if tolerance is not None:
+            agent_info[baseline_timeouts.RECORD_KEY] = tolerance
         agent_info.update(
             {
                 "conditions": condition_execution,
                 "execution_status": execution_status,
                 "execution_errors": public_execution_errors,
-                **aggregate_execution_error_details(active_conditions, len(public_execution_errors)),
+                **aggregate_execution_error_details(status_conditions, len(public_execution_errors)),
                 "expected_attempts": sum(
                     _nonnegative_counter(condition.get("expected_attempts")) for condition in active_conditions
                 ),

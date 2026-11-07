@@ -133,8 +133,8 @@ def nemo_gym_capability_errors(
         errors.append("--harbor-keep-jobs applies to the Harbor backend only")
     if stop_on_pass:
         errors.append("--stop-on-pass is not supported with --backend nemo-gym yet")
-    if custom_dockerfile_mode not in (None, "rebase"):
-        errors.append("--backend nemo-gym supports --custom-dockerfile-mode rebase only")
+    if custom_dockerfile_mode not in (None, "rebase", "preserve"):
+        errors.append(f"unsupported --custom-dockerfile-mode {custom_dockerfile_mode!r}")
     if environment_kwargs:
         errors.append("--environment-kwarg applies to the Harbor environment providers only")
     if override_storage_mb is not None:
@@ -251,8 +251,6 @@ def nemo_gym_config_errors(
         errors.append("harbor.agent_runtime_preflight applies to the Harbor backend only")
     if harbor.get("base_image_mode", "disabled") != "disabled":
         errors.append("harbor.base_image_mode reuse/rebuild applies to the Harbor backend only")
-    if custom_dockerfile_mode is None and harbor.get("custom_dockerfile_mode") not in (None, "rebase"):
-        errors.append("--backend nemo-gym supports --custom-dockerfile-mode rebase only")
     if uses_native_harbor_tasks(skill_path, harbor.get("task_source", "auto")):
         errors.append(NATIVE_HARBOR_ERROR)
     if mcp_servers_declared(skill_path):

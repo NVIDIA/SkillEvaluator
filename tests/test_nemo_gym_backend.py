@@ -658,7 +658,7 @@ def test_config_errors_let_cli_overrides_win(tmp_path: Path) -> None:
         "schema_version: 1\nharbor:\n  stop_on_pass: true\n  timeout_multiplier: 2\n"
         "  agent_runtime_preflight: true\n  custom_dockerfile_mode: preserve\n"
     )
-    assert len(nemo_gym_config_errors(tmp_path)) == 3
+    assert len(nemo_gym_config_errors(tmp_path)) == 2
     assert (
         nemo_gym_config_errors(
             tmp_path,

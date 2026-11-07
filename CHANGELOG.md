@@ -18,8 +18,8 @@ All notable changes to SkillEvaluator are documented in this file.
   environment modes, `--harbor-keep-jobs`, `--stop-on-pass`, ...)
   are rejected before anything runs, with no fallback to Harbor.
   `--timeout-multiplier`, `--copy-repo`, `harbor.agent_workdir` and
-  `harbor.pre_agent_setup` and `skill_workspace.decoy_manifest` work as on
-  Harbor, and
+  `harbor.pre_agent_setup`, `skill_workspace.decoy_manifest` and
+  `--custom-dockerfile-mode preserve` work as on Harbor, and
   `tier3 doctor --backend nemo-gym` checks Gym readiness.
 - `skills/skillevaluator/` is an agent skill for operating SkillEvaluator: it
   routes requests to the right tier, readiness check, dataset, report, or CI

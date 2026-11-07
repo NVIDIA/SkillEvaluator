@@ -898,6 +898,8 @@ def run_nemo_gym_eval(
                 "n_concurrent": concurrency,
                 "timeout_multiplier": effective_timeout,
                 "base_image_mode": "disabled",
+                "custom_dockerfile_mode": custom_dockerfile_mode
+                or harbor_config.get("custom_dockerfile_mode", "rebase"),
                 "jobs_retained": False,
             },
             "provider": {"name": provider.provider, "model": provider.model},

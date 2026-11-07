@@ -115,7 +115,7 @@ def test_overall_lift_headline_is_per_agent_and_highlighted_without_a_background
         assert headline.plain == f"OVERALL SKILL LIFT   {delta:+.2f} · {name}"
         style = headline.get_style_at_offset(console, headline.plain.index(f"{delta:+.2f}"))
         assert style.bold
-        assert style.color.name == ("green" if delta > 0 else "red")
+        assert style.color.name == ("#76b900" if delta > 0 else "#f5524c")
         assert style.bgcolor is None
 
 

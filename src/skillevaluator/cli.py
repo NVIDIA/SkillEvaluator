@@ -2468,7 +2468,12 @@ def validate(
             _show_tier3_progress()
 
         reporter = (
-            ViewProgressReporter(_on_engine_tail, on_cases=_on_case_rows, pass_threshold=pass_threshold)
+            ViewProgressReporter(
+                _on_engine_tail,
+                on_cases=_on_case_rows,
+                pass_threshold=pass_threshold,
+                progress_reporter=view.progress_reporter,
+            )
             if quiet
             else None
         )
@@ -2978,7 +2983,9 @@ def _workflow_report_options(func):
     help="Override the packaged quality-default.yaml with a custom YAML file.",
 )
 @click.option("--pii-waivers", type=PII_WAIVERS_PATH, default=None, help=_PII_WAIVERS_HELP)
-@click.option("--profile", default=None, help="Validation policy [default: default; external is a compatibility alias].")
+@click.option(
+    "--profile", default=None, help="Validation policy [default: default; external is a compatibility alias]."
+)
 @click.option("--previous-version", default=None, help="Previous version for version checks.")
 @click.option(
     "--skillspector-baseline", type=SKILLSPECTOR_BASELINE_PATH, default=None, help=_SKILLSPECTOR_BASELINE_HELP

@@ -124,7 +124,7 @@ include = ["skillevaluator*"]
 [tool.setuptools.package-data]
 "skillevaluator" = ["ci-release.json"]
 "skillevaluator.config" = ["*.yaml", "profiles/*.yaml"]
-"skillevaluator.reporting" = ["templates/*.j2"]
+"skillevaluator.reporting" = ["templates/*.j2", "assets/*.js", "assets/*.md"]
 "skillevaluator.tier3.harbor" = [
     "templates/*.py",
     "templates/*.sh",

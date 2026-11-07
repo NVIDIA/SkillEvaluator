@@ -1585,6 +1585,22 @@ def _fix_first(
     return items[:limit]
 
 
+@cache
+def _load_chart_assets() -> tuple[str, str]:
+    """Read fixed, trusted chart resources once, only for reports containing charts."""
+    assets = resources.files("skillevaluator.reporting").joinpath("assets")
+    try:
+        runtime = assets.joinpath("chart.umd.min.js").read_text(encoding="utf-8")
+        notices = "\n\n".join(
+            assets.joinpath(name).read_text(encoding="utf-8")
+            for name in ("Chart.js-LICENSE.md", "kurkle-color-LICENSE.md")
+        )
+    except OSError:
+        # A broken install keeps the report; each chart shows its data-link fallback.
+        return "", ""
+    return runtime, notices
+
+
 class PackageLoader(BaseLoader):
     """Custom Jinja2 loader that loads templates from package resources."""
 
@@ -3318,6 +3334,7 @@ class HTMLReporter(ReporterBase):
             content_label_plural=cl + "s",
             quality_scores=quality_scores_by_skill,
             tier3=tier3_preview,
+            chart_assets=_load_chart_assets,
             tier3_canonical_data=tier3_canonical_data,
             tier3_canonical_encoding=tier3_canonical_encoding,
             tier3_truncation=tier3_truncation,

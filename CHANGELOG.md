@@ -121,6 +121,26 @@ All notable changes to SkillEvaluator are documented in this file.
   `Use HTTP POST to create an item.` in a here-document or an unpiped `echo`
   still does not warn.
 
+- Tier 2 `similarity-check` and context deduplication now parse Markdown
+  frontmatter within fixed structure limits: 100 nesting levels, 20,000 nodes,
+  1,024 alias references, 1,024 items in one mapping or sequence, and 65,536
+  characters in one value, with aliases and merge keys counted after
+  expansion. In 0.8.0 both used plain `yaml.safe_load`, and `similarity-check`
+  converted a `name` or `description` that was not a string to text. A
+  477-byte `SKILL.md` whose frontmatter chains YAML aliases produced an
+  82-million-character description, and a 543-byte one that chains merge keys
+  took 180 MB in context deduplication; each further level multiplies the cost
+  by ten. Frontmatter over a limit now stops `similarity-check` with an
+  error that names the manifest, and context deduplication with a CRITICAL
+  `manifest_complexity_limit` finding, before any provider call.
+  `similarity-check` also rejects a `name`, `title`, or `description` that is
+  not a string or is longer than 16,384 characters, the description
+  embedding-text limit, instead of converting it. An invalid tagged value such
+  as `!!int ""` now counts as invalid frontmatter instead of stopping either
+  check with an unexpected `IndexError`. `similarity-check` still skips a
+  manifest with invalid YAML or a missing or empty value, and a repeated key
+  still keeps its last value in both checks.
+
 ## 0.8.0 - 2026-11-05
 
 ### Added

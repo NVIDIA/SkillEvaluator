@@ -119,9 +119,13 @@ vocabulary.
 | Other extensions | Skipped |
 
 Valid mapping frontmatter is removed from Markdown before chunking. Malformed,
-empty, or non-mapping frontmatter remains part of the analyzed text. Every
-retained chunk keeps its source file and line range, so findings point you to
-the exact overlapping sections.
+empty, or non-mapping frontmatter remains part of the analyzed text. Tier 2
+parses frontmatter within the
+[frontmatter structure limits](#defaults-and-safety-limits), so YAML aliases and
+merge keys are never expanded past them. A file whose frontmatter exceeds a
+limit fails the scan with a CRITICAL `manifest_complexity_limit` finding that
+names the file, before any provider call. Every retained chunk keeps its source
+file and line range, so findings point you to the exact overlapping sections.
 
 Each embedding input is capped at 3,000 characters, including long table rows,
 Python docstrings, and shell functions. Oversized Markdown sections are packed
@@ -244,6 +248,16 @@ skills with 2,048-dimensional embeddings need 255,488,000 scalar comparisons:
 ```bash title="Allow a larger comparison workload"
 skillevaluator similarity-check ./skills --max-entries 500 --max-scalar-comparisons 256000000
 ```
+
+`similarity-check` reads `name` (`title` for rules and workflows) and
+`description` from each manifest's frontmatter, within the same
+[frontmatter structure limits](#defaults-and-safety-limits) as context
+deduplication. Each value must be a string of at most 16,384 characters, the
+description embedding-text limit. A list, mapping, number, or boolean is never
+converted to text, so quote a value such as `name: "2048"`. A manifest that
+breaks one of these rules stops the scan with an error that names it, before
+any embedding request. Invalid YAML and a missing or empty value still skip the
+manifest.
 
 The entry budget counts selected manifests even when their frontmatter is
 invalid. It applies before any embedding request and never truncates a scan.
@@ -375,6 +389,8 @@ you intend to skip Tier 2 entirely.
 | Intra-skill cluster members | 512 | Same as the chunk ceiling, so it never stops a scan on its own; the review prompt limits decide |
 | Intra-skill review prompt | 64,000 characters | One cluster's request, system prompt included; exactly repeated text (a Markdown section's body after its heading line) is listed once before this limit applies, when that shortens the request |
 | Intra-skill review prompts in total | 1,000,000 characters | All cluster requests for one skill, checked before the first chat-LLM call |
+| Frontmatter structure | 100 nesting levels, 20,000 nodes, 1,024 alias references, 1,024 items per mapping or sequence, 65,536 characters per value | Bounds every Markdown frontmatter Tier 2 parses; aliases and merge keys count after expansion |
+| Inter-skill name and description | 16,384 characters each | Matches the description embedding-text limit; a non-string value is rejected, not converted |
 
 Intra-skill clustering compares every pair of chunks, so its work is
 `n * (n - 1) / 2 * dimensions`. A skill over the chunk ceiling stops before any
@@ -400,7 +416,8 @@ that target as a regular directory. The alias is never followed, so the target
 directory is scanned once. Absolute links and Windows junctions, broken links,
 links that escape the root, and aliases that point at another link remain
 rejected. Explicit limits bound
-discovered paths, file counts, per-file and total input bytes, content chunks,
+discovered paths, file counts, per-file and total input bytes, frontmatter
+structure, content chunks,
 candidate clusters, catalog size and entry count, vector length, returned
 matches, and pairwise scalar work. Catalog loading also rejects duplicate JSON
 keys, unexpected fields, invalid identities, non-finite vectors, and
@@ -443,6 +460,7 @@ handling terms before sending confidential skill content to a hosted endpoint.
     | A directory is a Windows junction, other reparse point, or a symbolic link that does not qualify as a contained alias | Rejected during the walk, before descent |
     | Embedding or chat-LLM analysis is incomplete | Reports an error; does not claim a clean result |
     | Skill exceeds the content-chunk, comparison-work, or LLM-review limit (candidate clusters or prompt size) | Stops before the remaining analysis and reports the scan as incomplete; no duplicate-content finding is added |
+    | Markdown frontmatter exceeds a structure limit, for example through chained YAML aliases or merge keys | Fails closed with a CRITICAL `manifest_complexity_limit` finding before any provider call |
     | The chat LLM declines to classify a cluster | Reports an advisory MEDIUM `llm_refused` finding for that cluster's sections |
   </Accordion>
   <Accordion title="Inter-skill analysis">
@@ -452,6 +470,7 @@ handling terms before sending confidential skill content to a hosted endpoint.
     | Catalog source collection is empty | Refuses to save an empty catalog |
     | Catalog path is missing | Returns an error and does not rebuild it silently |
     | Candidate lacks a root `SKILL.md` | Rejects the catalog query |
+    | A manifest's frontmatter exceeds a structure limit, or its name or description is not a string of at most 16,384 characters | Fails with an error that names the manifest, before any embedding request |
     | A skill contains an exactly named, single-link regular `AGENTS.md` plus `CLAUDE.md -> AGENTS.md` | Validates and skips the unrelated compatibility alias while discovering `SKILL.md` |
     | The collection contains a relative directory alias such as `.agents -> .claude` whose target is a regular directory in the same collection | Skips the alias without following it, so manifests in the target are discovered once |
     | Candidate matches multiple catalog entries | Reports matches in descending similarity order |

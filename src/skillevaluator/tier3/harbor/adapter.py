@@ -3560,6 +3560,8 @@ _AGENT_SKILL_PATHS = [
     "COPY skills/ /root/.config/opencode/skills/",
 ]
 _RUNTIME_SKILL_DIRS = (
+    "/tmp/hermes/skills",
+    "/root/.hermes/skills",
     "/etc/codex/skills",
     "/tmp/codex-home/skills",
     "/workspace/skills",
@@ -3588,6 +3590,7 @@ _RUNTIME_SKILL_DIRS = (
     "/tmp/agent-home/sessions/skills",
 )
 _PROJECT_SKILL_RELATIVE_DIRS = (
+    ".hermes/skills",
     ".agents/skills",
     ".claude/commands",
     ".claude/skills",

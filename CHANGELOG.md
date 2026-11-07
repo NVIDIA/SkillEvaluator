@@ -6,6 +6,11 @@ All notable changes to SkillEvaluator are documented in this file.
 
 ### Added
 
+- Experimental `hermes` Tier 3 agent for Docker and native NVIDIA Build routing,
+  pinned to Hermes v2026.9.24. Includes isolated skill staging, ATIF trajectories,
+  activation evidence, token accounting and retained execution diagnostics.
+  Other providers/environments fail early; existing agent defaults are unchanged.
+
 - `skills/skillevaluator/` is an agent skill for operating SkillEvaluator: it
   routes requests to the right tier, readiness check, dataset, report, or CI
   command, and ships Tier 3 evaluation cases for itself. A test keeps every

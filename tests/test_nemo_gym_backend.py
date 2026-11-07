@@ -794,3 +794,35 @@ def test_gym_run_removes_staged_tasks_and_jobs(tmp_path: Path, monkeypatch: pyte
     assert (run_dir / "_nemo-gym").is_dir()
     assert result["run_config"]["harbor"]["jobs_retained"] is False
     assert json.loads((run_dir / "run_config.json").read_text())["harbor"]["jobs_retained"] is False
+
+
+def test_doctor_reports_nemo_gym_readiness(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    from skillevaluator.tier3 import commands
+    from skillevaluator.tier3.nemo_gym import backend
+
+    gym = tmp_path / "gym"
+    gym.write_text("#!/bin/sh\n")
+    gym.chmod(0o755)
+    monkeypatch.setenv("SKILL_EVAL_NEMO_GYM_BIN", str(gym))
+    monkeypatch.setattr(backend, "nemo_gym_version", lambda _bin: "0.7.0")
+    monkeypatch.setattr("shutil.which", lambda name: f"/usr/bin/{name}")
+    rows = commands._nemo_gym_doctor_rows(["codex"], "docker", {})
+    assert rows == [
+        ("NeMo Gym CLI", "pass", f"{gym} (nemo-gym 0.7.0)"),
+        ("NeMo Gym backend", "pass", "docker sandbox ready"),
+    ]
+
+    monkeypatch.setenv("SKILL_EVAL_NEMO_GYM_BIN", str(tmp_path / "missing"))
+    rows = commands._nemo_gym_doctor_rows(["codex", "goose"], "local", {})
+    assert rows[0][:2] == ("NeMo Gym CLI", "fail")
+    details = " ".join(detail for _name, status, detail in rows[1:] if status == "fail")
+    assert "goose" in details and "docker only" in details
+
+
+def test_tier3_doctor_accepts_backend_option() -> None:
+    from click.testing import CliRunner
+
+    from skillevaluator.cli import cli
+
+    result = CliRunner().invoke(cli, ["tier3", "doctor", "--help"])
+    assert result.exit_code == 0 and "--backend" in result.output

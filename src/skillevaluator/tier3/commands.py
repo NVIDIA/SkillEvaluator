@@ -847,9 +847,13 @@ def doctor(
     verify_models: bool = False,
     agent_model: tuple[str, ...] = (),
     environment_kwargs: Mapping[str, Any] | None = None,
+    backend: str | None = None,
 ) -> int:
     """Check whether live evaluation dependencies are available."""
     from skillevaluator.tier3.evals_config import parse_environment_kwarg_overrides
+    from skillevaluator.tier3.nemo_gym.backend import NEMO_GYM_BACKEND, normalize_backend
+
+    gym_backend = normalize_backend(backend) == NEMO_GYM_BACKEND
 
     env_mode = _engine_env_mode(env_mode)
     agent_list = parse_agents(agents) if agents is not None else []
@@ -904,7 +908,7 @@ def doctor(
             for agent in agent_list
         }
         plan_error: str | None = None
-        if not unknown_model_agents and not validate_agents(agent_list):
+        if not gym_backend and not unknown_model_agents and not validate_agents(agent_list):
             try:
                 runtime_plans = _resolve_agent_runtime_plan(
                     provider=provider,
@@ -943,6 +947,9 @@ def doctor(
 
     if kwarg_parse_error is not None:
         prereq_errors = [kwarg_parse_error]
+    elif gym_backend:
+        rows.extend(_nemo_gym_doctor_rows(agent_list, env_mode, merged_cli_kwargs))
+        prereq_errors = None
     else:
         prerequisite_subprocess_env = dict(next(iter(runtime_plans.values())).subprocess_env) if runtime_plans else None
         prereq_errors = _check_prerequisites(
@@ -955,10 +962,12 @@ def doctor(
     if prereq_errors:
         for error in prereq_errors:
             rows.append((f"{env_mode} prerequisite", "fail", error))
-    else:
+    elif prereq_errors is not None:
         rows.append((f"{env_mode} prerequisite", "pass", "ready"))
 
-    if verify_models:
+    if verify_models and gym_backend:
+        rows.append(("provider model", "warn", "--verify-models is not checked for --backend nemo-gym yet"))
+    elif verify_models:
         if provider is None or not runtime_plans:
             rows.append(("provider model", "fail", "provider model resolution was unavailable"))
         else:
@@ -1002,6 +1011,50 @@ def doctor(
         table.add_row(escape_markup(str(name)), f"[{style}]{status}[/{style}]", escape_markup(str(detail)))
     console.print(table)
     return 1 if any(row[1] == "fail" for row in rows) else 0
+
+
+def _nemo_gym_doctor_rows(
+    agents: list[str], env_mode: str, environment_kwargs: Mapping[str, Any]
+) -> list[tuple[str, str, str]]:
+    """Readiness rows for ``--backend nemo-gym``: the Gym CLI, its sandbox, and the options it can run."""
+    from skillevaluator.tier3.nemo_gym.backend import (
+        MODEL_URL_ENV,
+        NEMO_GYM_BIN_ENV,
+        model_url_credential_error,
+        nemo_gym_bin,
+        nemo_gym_capability_errors,
+        nemo_gym_settings_errors,
+        nemo_gym_version,
+    )
+
+    rows: list[tuple[str, str, str]] = []
+    gym = nemo_gym_bin()
+    if gym is None:
+        rows.append(
+            (
+                "NeMo Gym CLI",
+                "fail",
+                f"not found: install nemo-gym (Python >=3.13.14) in its own environment and set "
+                f"{NEMO_GYM_BIN_ENV} to its `gym` executable",
+            )
+        )
+    elif version := nemo_gym_version(gym):
+        rows.append(("NeMo Gym CLI", "pass", f"{gym} (nemo-gym {version})"))
+    else:
+        rows.append(("NeMo Gym CLI", "warn", f"{gym} (could not read the nemo-gym version)"))
+    errors = nemo_gym_capability_errors(
+        agents=agents, env_mode=env_mode, grading_mode=None, environment_kwargs=dict(environment_kwargs)
+    )
+    errors += nemo_gym_settings_errors()
+    url = os.environ.get(MODEL_URL_ENV, "").strip()
+    if url and (url_error := model_url_credential_error(url)):
+        errors.append(url_error)
+    if env_mode == "docker" and shutil.which("docker") is None:
+        errors.append("NeMo Gym's docker sandbox needs the docker CLI on PATH")
+    rows += [("NeMo Gym backend", "fail", error) for error in errors] or [
+        ("NeMo Gym backend", "pass", f"{env_mode} sandbox ready")
+    ]
+    return rows
 
 
 def validate_evals(skill_path: Path, *, as_json: bool, strict: bool, harbor_contract: bool) -> int:

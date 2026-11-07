@@ -447,8 +447,14 @@ scores, Skill Lift, pass@k and report are produced the same way.
 export SKILL_EVAL_NEMO_GYM_BIN=/opt/nemo-gym/.venv/bin/gym
 export SKILL_EVAL_NEMO_GYM_MODEL_URL=https://integrate.api.nvidia.com/v1
 export SKILL_EVAL_NEMO_GYM_MODEL_API_KEY="$NVIDIA_API_KEY"
+skillevaluator tier3 doctor --backend nemo-gym --agents codex
 skillevaluator tier3 evaluate ./my-skill --backend nemo-gym --agents codex --model <model>
 ```
+
+`tier3 doctor --backend nemo-gym` checks the Gym CLI and its version, the docker CLI,
+the `SKILL_EVAL_NEMO_GYM_*` settings, and whether the selected agents and `--env-mode`
+run on Gym. During a run, the live per-case progress rows fill in from Gym's
+`rollouts.jsonl` as each attempt finishes.
 
 NeMo Gym requires Python 3.13.14 or later, so it runs as its own pinned install
 rather than a SkillEvaluator dependency. Point `SKILL_EVAL_NEMO_GYM_BIN` at that

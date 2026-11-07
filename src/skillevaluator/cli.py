@@ -3573,6 +3573,7 @@ _DOCTOR_OPTION_TIERS = {
     "env_mode": frozenset({"3"}),
     "environment_kwarg": frozenset({"3"}),
     "agent_model": frozenset({"3"}),
+    "backend": frozenset({"3"}),
 }
 
 
@@ -3605,6 +3606,13 @@ def _doctor_tier_options(*, timeout_help: str):
 
 def _tier3_doctor_options(func):
     """Add the Tier 3 options shared by doctor and tier3 doctor."""
+    func = click.option(
+        "--backend",
+        default="harbor",
+        show_default=True,
+        type=click.Choice(["harbor", "nemo-gym"]),
+        help="Tier 3 execution backend to check: Harbor, or NeMo Gym.",
+    )(func)
     func = click.option("--agent-model", multiple=True, help="Per-agent model override, AGENT=MODEL.")(func)
     func = click.option(
         "--environment-kwarg",
@@ -3635,6 +3643,7 @@ def _run_doctor(
     timeout: float = DEFAULT_PROBE_TIMEOUT_SEC,
     agent_model: tuple[str, ...] = (),
     verify_models: bool = False,
+    backend: str = "harbor",
 ) -> int:
     """Validate every option before any probe, then check each selected tier in order."""
     selected_tiers = ("1", "2", "3") if tier == "all" else (tier,)
@@ -3672,6 +3681,7 @@ def _run_doctor(
                     verify_models=verify_models,
                     agent_model=agent_model,
                     environment_kwargs=parsed_environment_kwargs,
+                    backend=backend,
                 )
             )
         else:

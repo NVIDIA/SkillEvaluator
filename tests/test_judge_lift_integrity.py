@@ -6,13 +6,26 @@
 from __future__ import annotations
 
 import json
+import re
 from pathlib import Path
 
 import pytest
 
-from skillevaluator.evaluation.tier3_report import agent_eval_result_from_directory
+from skillevaluator.evaluation import tier3_report
+from skillevaluator.evaluation.tier3_report import (
+    _validation_result_from_payload,
+    agent_eval_result_from_directory,
+    build_agent_eval_payload,
+    render_agent_eval_html_report,
+)
+from skillevaluator.reporting import HTMLReporter
 from skillevaluator.tier3.harbor.collector import _extract_rewards, collect_harbor_results
-from skillevaluator.tier3.harbor.metrics import DEFAULT_METRIC_SET, DEFAULT_METRICS, DEFAULT_SCORE_POLICY
+from skillevaluator.tier3.harbor.metrics import (
+    DEFAULT_METRIC_SET,
+    DEFAULT_METRICS,
+    DEFAULT_SCORE_POLICY,
+    mark_not_applicable,
+)
 
 
 def _write_json(path: Path, payload: dict) -> None:
@@ -322,3 +335,211 @@ def test_native_aggregate_keeps_numeric_authority_and_only_declared_step_judges(
     assert rows[0]["accuracy"] == 0.25
     assert rows[0]["_judge_models"] == {"accuracy": ["fallback", "primary"]}
     assert rows[0]["details"]["accuracy"]["judge_models"] == ["fallback", "primary"]
+
+
+_LIFT_NOTE = "scored by different judge models; the arm scores include"
+_TRIAL_LABEL = "Left out of lift: different judge models"
+_BASIS_REASON = (
+    "Cases whose arms were scored by different judge models are left out of this metric's lift; "
+    "the arm scores include them."
+)
+
+
+def _card(agent: dict, metric: str = "accuracy") -> dict:
+    return next(card for card in agent["evaluator_cards"] if card["id"] == metric)
+
+
+def _card_html(html: str, label: str) -> str:
+    """Return one evaluator card's markup, failing unless its ``div`` elements close."""
+    for match in re.finditer(r'<div class="t3-eval-card ', html):
+        depth = 0
+        for tag in re.finditer(r"<(/?)div\b", html[match.start() :]):
+            depth += -1 if tag.group(1) else 1
+            if depth == 0:
+                card = html[match.start() : match.start() + tag.end()]
+                break
+        else:
+            raise AssertionError("unbalanced evaluator card markup")
+        if f'<div class="t3-eval-title">{label}</div>' in card:
+            return card
+    raise AssertionError(f"no {label} evaluator card")
+
+
+def _text(fragment: str) -> str:
+    return re.sub(r"\s+", " ", re.sub(r"<[^>]+>", " ", fragment)).strip()
+
+
+def _render(payload: dict) -> str:
+    result = _validation_result_from_payload(payload)
+    assert result is not None
+    return HTMLReporter(include_timestamp=False).render_all([result])
+
+
+@pytest.mark.parametrize("all_mixed", [False, True])
+def test_evaluator_card_names_the_cases_its_lift_left_out(tmp_path: Path, all_mixed: bool) -> None:
+    _, run = _collect(tmp_path, all_mixed=all_mixed)
+    report = _report(run)
+    agent = report["agents"]["codex"]
+    mixed = ["case-1", "case-2"] if all_mixed else ["case-1"]
+    evaluator = agent["evaluators"]["accuracy"]
+    # The arm scores keep every scored case; only the lift leaves the mixed cases out.
+    assert (evaluator["with_skill"], evaluator["baseline"]) == (0.5, 0.2)
+    assert evaluator["lift"] == (None if all_mixed else -0.4)
+    assert evaluator["lift_excluded_cases"] == len(mixed)
+    assert all(
+        "lift_excluded_cases" not in agent["evaluators"][metric] for metric in DEFAULT_METRICS if metric != "accuracy"
+    )
+    card = _card(agent)
+    assert (card["with_skill"], card["baseline"], card["lift"]) == (0.5, 0.2, evaluator["lift"])
+    assert card["comparison_basis"] == {
+        "excluded_cases": len(mixed),
+        "case_ids": mixed,
+        "excluded_attempts": len(mixed),
+        "contributing_attempts": 0 if all_mixed else 1,
+        "reason": _BASIS_REASON,
+    }
+    assert [item["entry_id"] for item in card["evidence"] if item.get("comparison_excluded")] == mixed
+    assert all("comparison_basis" not in other for other in agent["evaluator_cards"] if other["id"] != "accuracy")
+    assert _card(report) == card
+
+    skill = tmp_path / "demo"
+    skill.mkdir()
+    html = render_agent_eval_html_report(skill, run, use_llm_judge=False).read_text(encoding="utf-8")
+    card_html = _card_html(html, "Accuracy")
+    note = (
+        "Lift leaves out 2 cases scored by different judge models; the arm scores include them."
+        if all_mixed
+        else "Lift leaves out 1 case scored by different judge models; the arm scores include it."
+    )
+    assert note in _text(card_html)
+    assert ("-0.40 lift" in _text(card_html)) is not all_mixed
+    assert card_html.count(_TRIAL_LABEL) == len(mixed)
+    assert html.count(_LIFT_NOTE) == 1
+
+
+def _attempt(case: str, trial_id: str, accuracy: float | None, judge: str | None) -> dict:
+    reward = {**dict.fromkeys(DEFAULT_METRICS, 0.5), "entry_id": case, "trial_id": trial_id, "details": {}}
+    if accuracy is None:
+        mark_not_applicable(reward, "accuracy")
+    else:
+        reward.update(accuracy=accuracy, details={"accuracy": {"score": accuracy, "judge_model_used": judge}})
+    return reward
+
+
+def _info(with_rewards: list[dict], baseline_rewards: list[dict]) -> dict:
+    succeeded = {"execution_status": "succeeded"}
+    return {
+        "execution_status": "succeeded",
+        "expected_attempts": len(with_rewards) + len(baseline_rewards),
+        "scored_attempts": len(with_rewards) + len(baseline_rewards),
+        "num_trials": len(with_rewards),
+        "num_trials_baseline": len(baseline_rewards),
+        "with_skill": {**dict.fromkeys(DEFAULT_METRICS, 0.5), "accuracy": 0.5},
+        "without_skill": dict.fromkeys(DEFAULT_METRICS, 0.5),
+        "rewards": with_rewards,
+        "rewards_baseline": baseline_rewards,
+        "rewards_complete": True,
+        "rewards_baseline_complete": True,
+        "conditions": {"with_skill": succeeded, "without_skill": succeeded},
+    }
+
+
+def test_comparison_basis_counts_repeated_attempts_apart_from_na_and_unpaired_cases() -> None:
+    info = _info(
+        [
+            _attempt("kept", "kept__a1", 1.0, "primary"),
+            _attempt("mixed", "mixed__a1", 0.0, "fallback"),
+            _attempt("mixed", "mixed__a2", 0.5, "primary"),
+            _attempt("mixed", "mixed__a3", None, None),
+        ],
+        [
+            _attempt("kept", "kept__b1", 0.5, "primary"),
+            _attempt("mixed", "mixed__b1", 0.5, "primary"),
+            # A case only the baseline scored is unpaired, not judge-mixed.
+            _attempt("baseline-only", "baseline-only__b1", 0.5, "fallback"),
+        ],
+    )
+    payload = build_agent_eval_payload("demo", {"codex": info}, use_llm_judge=False)
+    assert payload is not None
+    agent = payload["agents"]["codex"]
+    assert agent["evaluators"]["accuracy"]["lift"] == 0.5
+    assert agent["evaluators"]["accuracy"]["lift_excluded_cases"] == 1
+    basis = _card(agent)["comparison_basis"]
+    # Two scored attempts of the mixed case are left out; its N/A attempt never had a score.
+    assert (basis["case_ids"], basis["excluded_attempts"], basis["contributing_attempts"]) == (["mixed"], 2, 1)
+    flagged = {item["entry_id"]: item.get("comparison_excluded", False) for item in _card(agent)["evidence"]}
+    assert flagged == {"kept": False, "mixed": True}
+
+
+def test_matching_judges_add_no_lift_note() -> None:
+    info = _info(
+        [_attempt("case-1", "case-1__a1", 1.0, "primary"), _attempt("case-2", "case-2__a1", 0.0, "primary")],
+        [_attempt("case-1", "case-1__b1", 0.5, "primary"), _attempt("case-2", "case-2__b1", 0.5, "primary")],
+    )
+    payload = build_agent_eval_payload("demo", {"codex": info}, use_llm_judge=False)
+    assert payload is not None
+    agent = payload["agents"]["codex"]
+    assert agent["evaluators"]["accuracy"]["lift"] == 0.0
+    assert all("lift_excluded_cases" not in evaluator for evaluator in agent["evaluators"].values())
+    assert all("comparison_basis" not in card for card in agent["evaluator_cards"])
+    assert all("comparison_excluded" not in item for card in agent["evaluator_cards"] for item in card["evidence"])
+    html = _render(payload)
+    assert _LIFT_NOTE not in html
+    assert _TRIAL_LABEL not in html
+
+
+def test_saved_run_without_the_mixed_case_rewards_shows_only_the_recorded_count(tmp_path: Path) -> None:
+    collected, run = _collect(tmp_path)
+    lift_path = run / "codex" / "lift.json"
+    legacy_lift = json.loads(lift_path.read_text(encoding="utf-8"))
+    legacy_lift.pop("basis", None)
+    _write_json(lift_path, legacy_lift)
+    for reward in (run / "codex" / "with-skill" / "trials").glob("*/reward.json"):
+        if json.loads(reward.read_text(encoding="utf-8"))["entry_id"] == "case-1":
+            reward.unlink()
+    agent = _report(run)["agents"]["codex"]
+    # The recorded lift and its exclusion count stand; no loaded reward names the case.
+    assert agent["evaluators"]["accuracy"]["lift"] == collected["agents"]["codex"]["lift"]["accuracy"]["delta"]
+    assert agent["evaluators"]["accuracy"]["lift_excluded_cases"] == 1
+    card = _card(agent)
+    assert card["comparison_basis"] == {
+        "excluded_cases": 1,
+        "case_ids": [],
+        "excluded_attempts": None,
+        "contributing_attempts": None,
+        "reason": _BASIS_REASON,
+    }
+    assert [item["entry_id"] for item in card["evidence"]] == ["case-2"]
+    assert not any(item.get("comparison_excluded") for item in card["evidence"])
+
+    skill = tmp_path / "demo"
+    skill.mkdir()
+    card_html = _card_html(
+        render_agent_eval_html_report(skill, run, use_llm_judge=False).read_text(encoding="utf-8"), "Accuracy"
+    )
+    assert "Lift leaves out 1 case scored by different judge models" in _text(card_html)
+    assert _TRIAL_LABEL not in card_html
+
+
+def test_trimmed_card_evidence_keeps_the_lift_note(monkeypatch: pytest.MonkeyPatch) -> None:
+    info = _info(
+        [_attempt("case-1", "case-1__a1", 1.0, "fallback"), _attempt("case-2", "case-2__a1", 0.0, "primary")],
+        [_attempt("case-1", "case-1__b1", 0.5, "primary"), _attempt("case-2", "case-2__b1", 0.5, "primary")],
+    )
+    real_size = tier3_report._serialized_payload_size
+
+    def size_until_evidence_trimmed(payload: dict) -> int:
+        cards = [card for agent in payload.get("agents", {}).values() for card in agent.get("evaluator_cards", [])]
+        evidence = any(card.get("evidence") for card in cards)
+        return real_size(payload) + (tier3_report._MAX_EMBEDDED_REPORT_BYTES if evidence else 0)
+
+    monkeypatch.setattr(tier3_report, "_serialized_payload_size", size_until_evidence_trimmed)
+    payload = build_agent_eval_payload("demo", {"codex": info}, use_llm_judge=False)
+    assert payload is not None
+    assert payload["report_truncation"]["omitted"]["evidence_entries"] > 0
+    card = _card(payload["agents"]["codex"])
+    assert card["evidence"] == []
+    assert card["comparison_basis"]["excluded_cases"] == 1
+    card_html = _card_html(_render(payload), "Accuracy")
+    assert "Lift leaves out 1 case scored by different judge models" in _text(card_html)
+    assert _TRIAL_LABEL not in card_html

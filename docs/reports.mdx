@@ -565,7 +565,14 @@ cases, while evaluator, dimension, and overall lift use the eligible
 comparisons. A reported lift can therefore differ from subtracting the two
 displayed arm scores, even reversing their apparent direction. When no complete
 comparison with matching judge models remains, the affected metric, dimension,
-and overall lift are unavailable rather than zero.
+and overall lift are unavailable rather than zero. The HTML report's evaluator
+card says how many cases its lift left out, and its per-trial evidence labels
+them **Left out of lift: different judge models**. In the canonical JSON the
+evaluator records that count in `lift_excluded_cases`; its card's
+`comparison_basis` lists the `case_ids` the loaded rewards identify (at most
+64) and the with-skill `excluded_attempts` and `contributing_attempts`, which
+are `null` unless both arms' rewards loaded completely, and the matching
+evidence entries carry `comparison_excluded: true`.
 
 If every positive with-skill trial has confirmed zero activation, the agent's
 result is **INCONCLUSIVE: skill never activated**. Reports keep its arm scores

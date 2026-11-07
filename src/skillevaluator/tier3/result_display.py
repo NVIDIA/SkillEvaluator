@@ -88,12 +88,15 @@ def _not_applicable_metrics(data: Mapping[str, Any], variant: str) -> frozenset[
     return frozenset(not_applicable_list(raw))
 
 
-def _delta_cell(value: object, *, not_applicable: bool = False) -> Text:
-    """Lift cell. A row that is N/A in either arm has no lift, so it reads N/A, not NO SCORE."""
+def _delta_cell(value: object, *, not_applicable: bool = False, skipped: bool = False) -> Text:
+    """Lift cell. With no delta it reads N/A for a row that is N/A in either arm, then
+    ``skipped`` when the with-skill arm never ran, then NO SCORE, like the other reporters."""
     numeric = _finite_number(value)
     if numeric is None:
         if not_applicable:
             return Text(_NOT_APPLICABLE_LABEL, style="dim italic")
+        if skipped:
+            return Text("skipped", style="dim")
         return Text("NO SCORE", style="dim")
     style = lift_style(numeric)
     return Text(f"{numeric:+.2f}", style=f"bold {style}")
@@ -456,7 +459,8 @@ def _render_agent_scores(
 ) -> None:
     with_usable = _condition_usable(data, "with_skill")
     # A baseline-only run (--skip-with-skill) deliberately leaves the with-skill arm unscored.
-    with_unavailable = "skipped" if _condition_status(data, "with_skill") == "skipped" else "NO SCORE"
+    with_skipped = _condition_status(data, "with_skill") == "skipped"
+    with_unavailable = "skipped" if with_skipped else "NO SCORE"
     baseline_status = _condition_status(data, "without_skill")
     baseline_skipped = baseline_status == "skipped"
     baseline_usable = _condition_usable(data, "without_skill") and not baseline_skipped
@@ -508,7 +512,8 @@ def _render_agent_scores(
                 else None
             )
             baseline_score, baseline_bar = _not_applicable_cell() if baseline_na else _score_cell(baseline_value)
-            row.extend([baseline_score, baseline_bar, _delta_cell(delta, not_applicable=with_na or baseline_na)])
+            lift_cell = _delta_cell(delta, not_applicable=with_na or baseline_na, skipped=with_skipped)
+            row.extend([baseline_score, baseline_bar, lift_cell])
         table.add_row(*row)
 
     basis = lift.get("basis")
@@ -536,7 +541,7 @@ def _render_agent_scores(
                     else None
                 )
                 baseline_score, baseline_bar = _score_cell(baseline_value)
-                row.extend([baseline_score, baseline_bar, _delta_cell(delta)])
+                row.extend([baseline_score, baseline_bar, _delta_cell(delta, skipped=with_skipped)])
             table.add_row(*row)
 
     if not metrics and not custom_with and not custom_without and not show_baseline:
@@ -712,7 +717,7 @@ def _render_dimensions(
                 with_bar,
                 baseline_cell,
                 baseline_bar,
-                _delta_cell(delta, not_applicable=with_na or baseline_na),
+                _delta_cell(delta, not_applicable=with_na or baseline_na, skipped=with_skipped),
             ]
             table.add_row(*row)
 

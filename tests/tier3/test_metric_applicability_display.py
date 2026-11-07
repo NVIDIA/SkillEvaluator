@@ -85,3 +85,36 @@ def test_terminal_lift_reads_na_when_either_arm_is_na():
     # Scored rows keep their numeric lift.
     assert rows["Accuracy"] == ["0.90", "0.50", "+0.40"]
     assert rows["Correctness"] == ["0.90", "0.50", "+0.40"]
+
+
+def test_terminal_lift_reads_skipped_in_a_baseline_only_run_unless_the_row_is_na():
+    baseline_scores = {"security": 1.0, "accuracy": 0.5, "goal_accuracy": 0.5, "behavior_check": 0.5}
+    baseline_na = ["skill_execution", "skill_efficiency"]
+    result = {
+        "execution_status": "succeeded",
+        "metrics": list(DEFAULT_METRICS),
+        "agents": {
+            "codex": {
+                "execution_status": "succeeded",
+                "conditions": {
+                    "with_skill": {"execution_status": "skipped"},
+                    "without_skill": {"execution_status": "succeeded"},
+                },
+                "with_skill": {},
+                "without_skill": baseline_scores,
+                "not_applicable_metrics": {"with_skill": [], "without_skill": baseline_na},
+                "lift": {},
+                "dimensions_with_skill": {},
+                "dimensions_without_skill": dimension_scores(baseline_scores, baseline_na),
+            }
+        },
+    }
+
+    rows = _rows(render_result(result))
+
+    # --skip-with-skill: the arm never ran, so its cells and the lift read skipped, as in the other reports.
+    assert rows["Accuracy"] == ["skipped", "0.50", "skipped"]
+    assert rows["Correctness"] == ["skipped", "0.50", "skipped"]
+    # N/A wins over skipped: the baseline has no skill to activate.
+    assert rows["Skill Execution"] == ["skipped", "N/A", "N/A"]
+    assert rows["Discoverability"] == ["skipped", "N/A", "N/A"]

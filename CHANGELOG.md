@@ -15,6 +15,11 @@ All notable changes to SkillEvaluator are documented in this file.
 
 ### Changed
 
+- Tier 3 reports missing skill runtime dependencies as environment problems,
+  with declaration and custom Dockerfile guidance. Unrecovered environment
+  failures leave the trial UNSCORED instead of reducing the skill's score;
+  recovered environment failures carry no deduction.
+
 - Align terminal grade and lift colors across compact, full, and direct Tier 3
   reports; displayed zero lift is neutral. Narrow terminals stack complete
   condition score/bar groups. Full-report Details retain successful quality and

@@ -68,6 +68,7 @@ from skillevaluator.publication_identity import (
     publication_target_from_path,
 )
 from skillevaluator.source_identity import normalized_evaluated_source
+from skillevaluator.tier3.baseline_store import baseline_description, comparison_identity, select_baseline
 from skillevaluator.tier3.case_ids import validate_case_ids
 from skillevaluator.tier3.eval_core.llm_judge import JUDGE_REASONING_EFFORT
 from skillevaluator.tier3.evals_config import (
@@ -5020,6 +5021,7 @@ def _run_harbor_eval_impl(
     *,
     skip_baseline: bool = False,
     skip_with_skill: bool = False,
+    reuse_baseline: str | None = None,
     n_attempts: int | None = None,
     pass_threshold: float | None = None,
     stop_on_pass: bool | None = None,
@@ -5066,6 +5068,10 @@ def _run_harbor_eval_impl(
         return {"error": ["At least one Harbor agent is required."]}
     if skip_baseline and skip_with_skill:
         detail = "skip_baseline and skip_with_skill are mutually exclusive (no arm would run)"
+        reporter.emit(ProgressEvent(stage="configuration", state="failed", detail=detail))
+        return {"error": [detail]}
+    if reuse_baseline and (skip_baseline or skip_with_skill):
+        detail = "--reuse-baseline is mutually exclusive with --skip-baseline and --skip-with-skill"
         reporter.emit(ProgressEvent(stage="configuration", state="failed", detail=detail))
         return {"error": [detail]}
     if env_mode == ENV_MODE_LOCAL:
@@ -5522,6 +5528,11 @@ def _run_harbor_eval_impl(
             "n_concurrent": n_concurrent,
             "timeout_multiplier": timeout_multiplier,
             "base_image_mode": base_image_mode,
+            "resources": {
+                "cpus": override_cpus,
+                "memory_mb": override_memory_mb,
+                "storage_mb": override_storage_mb,
+            },
             "jobs_retained": keep_harbor_jobs,
         },
         "provider": {"name": provider.provider, "model": provider.model},
@@ -5532,6 +5543,9 @@ def _run_harbor_eval_impl(
         },
         "task_source": task_source,
         "grading": {"mode": grading_mode},
+        "skill_workspace": {"mode": workspace_mode},
+        "copy_repo": copy_repo,
+        "repo_context_exclude_paths": [str(path) for path in repo_context_exclude_paths],
         "agents": model_resolution,
         # Persisted so a card rendered later from this run directory records the
         # source tree that was evaluated, not the evaluator build that ran it.
@@ -5949,6 +5963,34 @@ def _run_harbor_eval_impl(
     except DatasetSnapshotContractError as exc:
         return _persist_pre_execution_failure([str(exc)])
     expected_trials = len(task_selectors) * n_attempts
+    identity = comparison_identity(
+        run_config,
+        {
+            "dataset_digest": dataset_truth["dataset_digest"],
+            "expected_case_ids": case_ids,
+            "evaluator_version": dataset_truth["evaluator_version"],
+            "publication_target": publication_target,
+            "attempt_policy": {
+                "max_attempts": n_attempts,
+                "pass_threshold": float(pass_threshold),
+                "stop_on_pass": bool(stop_on_pass),
+            },
+            "score_policy": None,
+        },
+    )
+    baseline = {"mode": "skipped" if skip_baseline else "fresh"}
+    reused_baseline_dir = None
+    if reuse_baseline:
+        try:
+            baseline = select_baseline(run_dir.parent, reuse_baseline, agents, identity)
+        except ValueError as exc:
+            return _persist_pre_execution_failure([str(exc)])
+        if baseline["mode"] == "reused":
+            reused_baseline_dir = Path(baseline["source_run_dir"])
+            skip_baseline = True
+    run_config["baseline"] = baseline
+    if reuse_baseline:
+        reporter.emit(ProgressEvent(stage="baseline", state="complete", detail=baseline_description(baseline)))
     variants = 2 - int(skip_baseline) - int(skip_with_skill)
     matrix_trials = expected_trials * sum(variants + len(additional_arms.get(agent, ())) for agent in agents)
     try:
@@ -6071,7 +6113,7 @@ def _run_harbor_eval_impl(
             model=model_resolution[agent]["model"],
             env_mode=env_mode,
             with_skill=agent_task_dirs[agent][0],
-            baseline=agent_task_dirs[agent][1],
+            baseline=None if reused_baseline_dir is not None else agent_task_dirs[agent][1],
             jobs_dir=jobs_dir,
             run_env={**runtime_plans[agent].subprocess_env, **job_judge_subprocess_env},
             n_attempts=n_attempts,
@@ -6203,8 +6245,9 @@ def _run_harbor_eval_impl(
             agents=agents,
             output_dir=run_dir,
             jobs_dir=jobs_dir,
-            skip_baseline=skip_baseline,
+            skip_baseline=skip_baseline and reused_baseline_dir is None,
             skip_with_skill=skip_with_skill,
+            reused_baseline_dir=reused_baseline_dir,
             n_attempts=n_attempts,
             pass_threshold=float(pass_threshold),
             stop_on_pass=bool(stop_on_pass),
@@ -6224,8 +6267,12 @@ def _run_harbor_eval_impl(
         _emit_run_finished("failed", "result collection failed")
         raise
     reporter.emit(ProgressEvent(stage="collection", state="complete", detail="Harbor results collected"))
+    identity["score_policy"] = results.get("score_policy", identity["score_policy"])
     results.update(
         {
+            "baseline": baseline,
+            "comparison_identity": identity,
+            "expected_case_ids": case_ids,
             "skill_name": skill_path.name,
             "run_id": run_id,
             **_run_owned_publication_fields(),

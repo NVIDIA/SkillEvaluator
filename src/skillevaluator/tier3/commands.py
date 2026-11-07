@@ -663,6 +663,7 @@ def evaluate(
     environment_kwarg: tuple[str, ...] = (),
     skip_baseline: bool,
     skip_with_skill: bool = False,
+    reuse_baseline: str | None = None,
     n_attempts: int | None,
     pass_threshold: float | None,
     stop_on_pass: bool | None = None,
@@ -721,6 +722,8 @@ def evaluate(
         reporter.emit(ProgressEvent(stage="configuration", state="running"))
         if skip_baseline and skip_with_skill:
             raise ValueError("--skip-baseline and --skip-with-skill are mutually exclusive (no arm would run)")
+        if reuse_baseline and (skip_baseline or skip_with_skill):
+            raise ValueError("--reuse-baseline is mutually exclusive with --skip-baseline and --skip-with-skill")
         unknown = validate_agents(agent_list)
         if unknown:
             supported = ", ".join(sorted(HARBOR_AGENTS_SUPPORTED))
@@ -750,6 +753,7 @@ def evaluate(
             agents=agent_list,
             skip_baseline=skip_baseline,
             skip_with_skill=skip_with_skill,
+            reuse_baseline=reuse_baseline,
             n_attempts=n_attempts,
             pass_threshold=pass_threshold,
             stop_on_pass=stop_on_pass,

@@ -407,6 +407,16 @@ completed run directly:
   relative path, byte size, and SHA-256 digest. The in-process return value
   remains complete; readers rebuilding a report from disk follow those
   artifact references.
+- **Baseline provenance** — `result.json` and `run_config.json` include a
+  `baseline` block with mode `fresh`, `reused`, or `skipped`. Reused baselines
+  record `source_run_id`, `source_evaluated_at`, `source_run_dir`, and
+  `source_identity`. A `latest` fallback records bounded `rejected_candidates`
+  and a `reuse_reason`. `comparison_identity` separates baseline configuration
+  from skill revision. Each agent's `execution_counts` and `measured_usage`
+  distinguish fresh execution from reused evidence (not new spend). Missing
+  token/cost measurements stay unavailable rather than becoming zero. Reused
+  baseline rows remain in the new run; its without-skill summary is marked
+  `reused`.
 - **`run_config.json`** / **`attempt_policy.json`** — exactly how the run was
   configured: environment, attempts, concurrency, grading mode, pass threshold.
 - **`report.html`** — the human-readable report, generated automatically at

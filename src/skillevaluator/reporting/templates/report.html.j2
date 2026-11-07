@@ -2146,6 +2146,7 @@
 
         {# Helpers / locals used across the Tier 3 sub-tabs #}
         {% set t3_summary = tier3.summary or {} %}
+        {% if tier3.baseline_description %}<p>{{ tier3.baseline_description }}</p>{% endif %}
         {% set t3_agents = tier3.agents or {} %}
         {% macro tier3_chart(id, title, description, reference, reference_label, height) %}
             <h3>{{ title }}</h3>

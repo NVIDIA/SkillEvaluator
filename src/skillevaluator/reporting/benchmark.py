@@ -52,6 +52,7 @@ from skillevaluator.reporting.base import (
 from skillevaluator.reporting.run_status import resolve_run_status
 from skillevaluator.reporting.tier3_scope import completed_agent_result, validate_report_scope
 from skillevaluator.source_identity import evaluated_source_revision, recorded_evaluated_source
+from skillevaluator.tier3.baseline_store import baseline_description
 from skillevaluator.tier3_environments import HARBOR_ENV_MODES
 
 if TYPE_CHECKING:
@@ -397,6 +398,8 @@ class BenchmarkReporter(ReporterBase):
             if tier3_run_id
             else "- Tier 3 run ID: not recorded (Tier 3 did not complete)"
         )
+        if baseline := _mapping((ae or {}).get("baseline")):
+            lines.append(f"- {_publication_safe_inline(baseline_description(baseline))}")
 
         policy = _mapping((ae or {}).get("attempt_policy"))
         attempts = _nonnegative_int(policy.get("max_attempts"))

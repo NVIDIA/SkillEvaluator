@@ -573,6 +573,7 @@ The high-signal flags, with defaults:
 | `--max-agents` | selected-agent count | Maximum agents run in parallel |
 | `--max-cases` | every case | Run only the first N eval cases; a run that skips cases is not publication evidence |
 | `--skip-baseline` | off | Skip the without-skill arm; faster, but no Skill Lift |
+| `--reuse-baseline RUN` | off | Reuse a compatible fresh baseline from a retained run id, or `latest` |
 | `--skip-with-skill` | off | Run only the without-skill arm, for example to calibrate a task set; the report shows baseline scores with no Skill Lift or skill verdict |
 | `--stop-on-pass` | off | Stop a case's remaining attempts once one passes |
 | `--agent-runtime-preflight` | off | Add one agent-only execution of the first staged task per agent before the full A/B matrix; `--no-agent-runtime-preflight` overrides a config value that enables it |
@@ -600,6 +601,30 @@ modes, is in the [CLI Reference](cli-reference.mdx).
 While iterating on a dataset, `--skip-baseline` roughly halves the runtime.
 Re-enable the baseline arm for any run whose Skill Lift you intend to trust.
 </Tip>
+
+### Reuse a baseline
+
+Use `skillevaluator tier3 evaluate ./my-skill --reuse-baseline latest` to run
+the with-skill arm against an existing without-skill baseline in the same
+results root. An explicit retained run id can replace `latest`. This option
+cannot be combined with `--skip-baseline` or `--skip-with-skill`.
+
+Reuse requires matching datasets and case coverage, selected agents and resolved
+models (including model sources), environment configuration, judge/scorer,
+attempt policy, evaluator version, and workspace/repository-context settings.
+Skill content and evaluated revision are separate from baseline compatibility.
+The source must have a successful, complete, freshly executed without-skill arm
+with readable persisted case/attempt evidence. Older runs without that evidence,
+failed or partial baselines, and runs which themselves reused a baseline are
+not sources. Keep the original fresh run if you want to reuse it again.
+
+An incompatible explicit id fails before agent jobs launch and lists the
+rejection reasons. `latest` searches completed runs newest first; if none is
+compatible, evaluation runs a fresh baseline and records bounded rejection
+diagnostics. Reports identify the source and timestamp when reuse succeeds.
+The new run retains its own baseline rows. Fresh execution counts and reused
+trial counts are separate; reused evidence is not another independent attempt.
+Cost savings depend on the run, including agent, judge, and environment usage.
 
 ### Baseline-only runs
 

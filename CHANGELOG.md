@@ -35,6 +35,19 @@ All notable changes to SkillEvaluator are documented in this file.
   include accessible descriptions, links to data tables and visible fallbacks
   when canvas initialization is unavailable; Tier 1 reports omit chart assets.
 
+- Tier 3 tool efficiency counts writing, editing and patching files, scoped
+  native searches (`Grep`, `Glob`, `LS`, Codex `list_dir` and `grep_files`)
+  and MCP tool calls as productive. Most of these counted as wasted before, so
+  a with-skill trial that read the skill, edited four files and ran the tests
+  scored tool efficiency 0.33. Planning and bookkeeping calls (`TodoWrite`,
+  `update_plan`, background-shell polling such as `BashOutput`, and sub-agent
+  calls) are left out of the score, and the reason says how many were not
+  counted. Polling a background shell no longer counts as running a command.
+  Efficiency scores rise for write-, edit-, patch-, search- and MCP-heavy runs.
+  Root searches in commands recorded as an argument list, such as Codex
+  `["bash", "-lc", "find / -name x"]`, now count as waste, like the same
+  command written as text.
+
 ### Documentation
 
 - The 0.8.0 entry for refused `claude-code` attempts said the arm reports its

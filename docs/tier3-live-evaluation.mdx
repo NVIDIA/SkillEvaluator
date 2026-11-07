@@ -631,6 +631,14 @@ grades each trial after the agent finishes. `security`, `skill_execution`, and
 `goal_accuracy`, and `behavior_check` are LLM judges that call the configured
 evaluator provider. `custom_only` runs none of them.
 
+`skill_efficiency` averages skill routing with tool efficiency, the share of
+scored tool calls that did productive work. Reading, searching, writing,
+editing or patching files, running commands, activating a skill and calling
+MCP tools are productive. Help, version and install probes and searches rooted
+at `/` are wasted. Planning and bookkeeping calls, such as `TodoWrite`,
+`update_plan`, background-shell polling and sub-agent calls, are not counted.
+[Reports](reports.mdx) lists the tool classes.
+
 The three LLM judges return verdicts only, and the verifier computes the
 scores. A `score` field in a judge reply is ignored.
 

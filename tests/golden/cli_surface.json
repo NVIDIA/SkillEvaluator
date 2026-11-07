@@ -3187,7 +3187,6 @@
         "validate-grader": {
           "params": [
             {
-              "default": "/home/ubuntu/wt/grader-validation/src/skillevaluator/tier3/grader_reference",
               "name": "suite_dir",
               "opts": [
                 "suite_dir"

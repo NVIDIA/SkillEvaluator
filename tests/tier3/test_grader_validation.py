@@ -175,6 +175,20 @@ def test_bundled_check_suite_and_usage(monkeypatch):
         assert runner.invoke(cli, ["tier3", "validate-grader", "--check-suite", *args]).exit_code == 2
 
 
+def test_suite_default_is_portable_and_documented():
+    argument = next(param for param in gv.validate_grader.params if param.name == "suite_dir")
+    assert argument.default is None
+    assert argument.required is False
+    runner = CliRunner()
+    help_result = runner.invoke(cli, ["tier3", "validate-grader", "--help"])
+    assert help_result.exit_code == 0
+    assert "SUITE_DIR defaults to the bundled reference suite when omitted." in help_result.output
+    implicit = runner.invoke(cli, ["tier3", "validate-grader", "--check-suite", "--json"])
+    explicit = runner.invoke(cli, ["tier3", "validate-grader", str(gv.REFERENCE_SUITE), "--check-suite", "--json"])
+    assert implicit.exit_code == explicit.exit_code == 0
+    assert json.loads(implicit.output) == json.loads(explicit.output)
+
+
 def test_missing_provider(monkeypatch):
     from skillevaluator.provider_config import ProviderConfigurationError
 

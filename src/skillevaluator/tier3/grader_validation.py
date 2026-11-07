@@ -500,7 +500,7 @@ def gate_failures(result, gates):
 
 
 @click.command("validate-grader")
-@click.argument("suite_dir", type=click.Path(path_type=Path, exists=True, file_okay=False), default=REFERENCE_SUITE)
+@click.argument("suite_dir", type=click.Path(path_type=Path, exists=True, file_okay=False), default=None)
 @click.option("--repeats", type=click.IntRange(min=1), default=3, show_default=True)
 @click.option("--split", type=click.Choice(["assessment", "tuning", "all"]), default="assessment", show_default=True)
 @click.option("--case", "case_ids", multiple=True)
@@ -528,7 +528,11 @@ def validate_grader(
     max_false_fail_rate,
     max_unjudgeable_rate,
 ):
-    """Qualify the shipped Tier 3 verifier against independently labelled cases."""
+    """Qualify the shipped Tier 3 verifier against independently labelled cases.
+
+    SUITE_DIR defaults to the bundled reference suite when omitted.
+    """
+    suite_dir = REFERENCE_SUITE if suite_dir is None else suite_dir
     try:
         suite = load_suite(suite_dir)
         unknown = set(case_ids) - {case["id"] for case in suite["cases"]}

@@ -49,6 +49,80 @@ When at least one positive trial activates the skill, lift remains eligible
 subject to the comparison requirements below. This also makes activation
 failures visible with `--skip-baseline`.
 
+## Skill interaction experiments
+
+Use the opt-in `tier3 interact` command to measure whether selected skills
+produce more or less improvement together than the sum of their individual
+improvements. Choose one reviewed evaluation source before running:
+
+```bash
+skillevaluator tier3 interact ./skills/research ./skills/summarize \
+  --eval-source ./skills/research --agents codex --n-attempts 3 \
+  --results-dir ./interaction-results
+```
+
+`--eval-source` is a skill directory containing an existing valid `evals/`
+dataset or native Harbor task suite. The command never generates or refines
+tasks. It freezes that source and the selected skills once, then reuses the
+existing Harbor evaluator and skill staging to run:
+
+| Configuration | Installed skills |
+| --- | --- |
+| Baseline | None |
+| Individual | One run for each selected skill alone |
+| Combined | Every selected skill together |
+
+For two skills this is four configurations. For a group of N skills it is
+N + 2 configurations, each with the full task suite, selected agents, and the
+same `--n-attempts` budget. Early stopping is disabled, including when the source
+config enables it. Source-config companion selections, partial task suites, and
+`pre_agent_setup` are rejected before execution. Skill roots must have distinct
+names and be self-contained: runtime snapshots include each skill's files,
+while common task inputs belong in the fixed source's `evals/files/`. Results
+must be outside the selected skills and evaluation source.
+
+The default outcome metric is `goal_accuracy`; `--metric accuracy` is also
+available. These compare task outcomes on the same cases instead of the
+standard overall score, whose discovery and skill-usage components differ
+between installed-skill and baseline configurations. For `custom_only` grading,
+use `--metric overall` with one shared task-outcome grader.
+
+For two skills, the interaction is:
+
+```text
+I(A, B) = P(A, B) - P(A) - P(B) + P(empty)
+```
+
+For a selected group S:
+
+```text
+I(S) = [P(S) - P(empty)] - sum(P(skill) - P(empty) for skill in S)
+```
+
+P is the mean per-case outcome, averaging the fixed number of attempts within
+each case first. A positive interaction means more than additive improvement;
+a negative interaction means less; zero means additive. For example, baseline
+0.50, individual scores 0.75 and 0.70, and combined score 0.65 yield interaction
+-0.30 and combined lift +0.15. Negative interaction does not imply performance
+below baseline. For more than two skills this is total departure from additive
+individual gains, rather than an isolated higher-order interaction.
+
+The terminal prints baseline, individual and combined scores, combined lift,
+and signed interaction separately for each agent/model. Add `--json` for a
+machine-readable report on stdout; progress goes to stderr. Every experiment
+also saves `interaction.json`, its fixed evaluation source, and independent
+Tier 3 run directories containing reports, dataset snapshots, and trial
+evidence. The interaction report records original source paths, content
+identities, per-case calculations, and the reward artifacts used.
+
+Missing trials, N/A outcomes, changed cases, unequal attempt budgets, or
+different agent models, evaluator versions, or outcome scorers produce an
+explicit `incomplete` or `incomparable` result with no interaction estimate and
+exit code 1. Judge fallback to a different model is incomparable. Multiple
+retained reward rows for one logical attempt are also incomparable rather than
+being counted as extra attempts. Other completed configuration evidence remains
+available for inspection.
+
 ## Before you start
 
 Every row below is checkable in seconds; the linked guide covers setup in

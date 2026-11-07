@@ -121,6 +121,15 @@ All notable changes to SkillEvaluator are documented in this file.
   `Use HTTP POST to create an item.` in a here-document or an unpiped `echo`
   still does not warn.
 
+- `skillevaluator view` no longer asks the LLM again when it regenerates a
+  missing `report.html` for a Tier 3 run that saved its report feedback in
+  `result.json`. The regenerated report shows the conclusions,
+  recommendations, and suggestions that run produced, needs no provider key,
+  and leaves the run's `what_to_fix.json` as it was. In 0.8.0 the Insights
+  judge and the what-to-fix writer ran again, which cost tokens, could show
+  different advice from the run's, and replaced `what_to_fix.json`. A run that
+  saved no feedback still has it rebuilt.
+
 ## 0.8.0 - 2026-11-05
 
 ### Added

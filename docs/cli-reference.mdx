@@ -576,7 +576,7 @@ skillevaluator init-harbor-task ./my-skill
 
 ## view
 
-Open the latest HTML live-evaluation report for a skill. If the results exist but `report.html` is missing, `view` regenerates it before opening.
+Open the latest HTML live-evaluation report for a skill. If the results exist but `report.html` is missing, `view` regenerates it before opening. It reuses the feedback the run saved in `result.json` and makes no LLM call; a run that saved no feedback has it rebuilt, with LLM-written advice when a provider is configured.
 
 ```bash title="Open the latest report"
 skillevaluator view ./my-skill

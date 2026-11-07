@@ -604,8 +604,15 @@ def render_agent_eval_html_report(
     engine_result: dict[str, Any] | None = None,
     use_llm_judge: bool = True,
     include_benchmark: bool = False,
+    saved_feedback: dict[str, list[Any]] | None = None,
 ) -> Path:
-    """Render a standalone Tier 3 HTML report and optional standard benchmark."""
+    """Render a standalone Tier 3 HTML report and optional standard benchmark.
+
+    ``saved_feedback`` is the report feedback a completed run saved in
+    ``result.json``. It replaces the rebuilt feedback fields, and neither the
+    Insights judge nor the case-findings pass runs, so the run's
+    ``what_to_fix.json`` stays as the run wrote it.
+    """
     from skillevaluator.reporting import BenchmarkReporter, HTMLReporter
 
     skill_path = skill_path.expanduser().resolve()
@@ -615,14 +622,20 @@ def render_agent_eval_html_report(
         run_dir,
         env_mode=env_mode,
         engine_result=engine_result,
-        use_llm_judge=use_llm_judge,
+        use_llm_judge=use_llm_judge and not saved_feedback,
     )
     if result is None:
         raise ValueError(f"No agent results found in {run_dir}")
 
     canonical_payload = result.metadata.get("agent_eval")
     if isinstance(canonical_payload, dict):
-        _apply_case_findings(canonical_payload, engine_result, run_dir, skill_path, use_llm=use_llm_judge)
+        if saved_feedback:
+            # The saved fields already hold the run's case findings.
+            canonical_payload.update(
+                {field: list(saved_feedback[field]) for field in _TIER3_FEEDBACK_FIELDS if field in saved_feedback}
+            )
+        else:
+            _apply_case_findings(canonical_payload, engine_result, run_dir, skill_path, use_llm=use_llm_judge)
     if engine_result is not None and isinstance(canonical_payload, dict):
         # Persist only the compact feedback contract needed by the CLI. The
         # complete canonical payload remains in the HTML report and can be much

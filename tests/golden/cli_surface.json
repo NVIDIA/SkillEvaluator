@@ -624,6 +624,14 @@
           "type": "boolean"
         },
         {
+          "name": "reuse_baseline",
+          "opts": [
+            "--reuse-baseline"
+          ],
+          "param_type": "option",
+          "type": "text"
+        },
+        {
           "default": "False",
           "is_flag": true,
           "name": "skip_with_skill",
@@ -2665,6 +2673,14 @@
               "type": "boolean"
             },
             {
+              "name": "reuse_baseline",
+              "opts": [
+                "--reuse-baseline"
+              ],
+              "param_type": "option",
+              "type": "text"
+            },
+            {
               "default": "False",
               "is_flag": true,
               "name": "skip_with_skill",
@@ -3293,6 +3309,14 @@
             ],
             "param_type": "option",
             "type": "boolean"
+          },
+          {
+            "name": "reuse_baseline",
+            "opts": [
+              "--reuse-baseline"
+            ],
+            "param_type": "option",
+            "type": "text"
           },
           {
             "default": "False",

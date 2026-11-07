@@ -53,6 +53,7 @@ from skillevaluator.reporting.harbor_viewer import (
 from skillevaluator.reporting.presentation import FinalRenderContext, build_final_render_context, trial_coverage
 from skillevaluator.reporting.run_status import Status, result_status
 from skillevaluator.reporting.terminal_styles import AMBER, FAINT, GREEN, RED, TEXT, grade_style, lift_style
+from skillevaluator.tier3.baseline_store import baseline_description
 from skillevaluator.utils.rich_markup import escape_markup
 
 if TYPE_CHECKING:
@@ -374,6 +375,8 @@ class CLIReporter(ReporterBase):
     @staticmethod
     def _print_agent_eval_tables(agent_eval: dict, console: Console) -> None:
         """Print Tier 3 agent evaluation results."""
+        if agent_eval.get("baseline"):
+            console.print(escape_markup(baseline_description(agent_eval["baseline"])))
         verdict = agent_eval.get("verdict", "unknown")
         composite = agent_eval.get("composite_lift")
         runtime = agent_eval.get("runtime_seconds", 0.0)

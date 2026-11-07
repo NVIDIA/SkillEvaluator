@@ -42,6 +42,7 @@ from skillevaluator.reporting.harbor_viewer import (
     safe_url,
 )
 from skillevaluator.reporting.run_status import Status, resolve_run_status, result_status
+from skillevaluator.tier3.baseline_store import baseline_description
 
 if TYPE_CHECKING:
     from skillevaluator.models import Finding, ValidationResult
@@ -353,6 +354,9 @@ class MarkdownReporter(ReporterBase):
 
             lines.append("## Tier 3: Agent Evaluation")
             lines.append("")
+            if ae.get("baseline"):
+                lines.append(baseline_description(ae["baseline"]))
+                lines.append("")
             composite_text = _format_report_number(composite, signed=True)
             lines.append(f"**Verdict:** {verdict} (composite lift = {composite_text})")
             if verdict == "INCONCLUSIVE":

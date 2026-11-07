@@ -964,6 +964,7 @@ def build_agent_eval_payload(
 
     payload = {
         "schema_version": _SCHEMA_VERSION,
+        "baseline": (run_config or {}).get("baseline", {}),
         "summary": summary,
         "skill_name": skill_name,
         "mode": mode,

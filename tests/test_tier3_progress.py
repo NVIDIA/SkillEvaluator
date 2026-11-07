@@ -272,6 +272,162 @@ def test_rich_reporter_owns_live_table_and_updates_stage_rows(monkeypatch: pytes
     assert reporter.is_active is False
 
 
+def _rendered_live_lines(reporter: Any, *, width: int = 80) -> list[str]:
+    from rich.console import Console
+
+    stream = io.StringIO()
+    Console(file=stream, width=width, color_system=None).print(reporter._build_live_table())
+    return stream.getvalue().splitlines()
+
+
+def test_rich_progress_frame_height_stays_fixed_as_plan_and_events_grow() -> None:
+    progress = _progress_module()
+    reporter = progress.RichProgressReporter(stream=io.StringIO(), refresh_interval=60)
+    reporter._live_plan = progress.Tier3RunPlan(
+        skill_name="demo",
+        environment="docker",
+        agents=("codex",),
+        agent_models=(("codex", "example/model"),),
+    )
+
+    initial_lines = _rendered_live_lines(reporter)
+    reporter._live_plan = progress.Tier3RunPlan(
+        skill_name="demo",
+        environment="docker",
+        agents=("codex",),
+        agent_models=(("codex", "example/model"),),
+        provider="example-provider",
+        task_count=2,
+        case_count=1,
+        attempts=1,
+        baseline=True,
+        concurrency=4,
+        timeout_multiplier=2,
+        matrix_trials=2,
+        total_containers=2,
+    )
+    for index in range(10):
+        reporter.emit(
+            progress.ProgressEvent(
+                stage=f"stage-{index}",
+                state="complete",
+                detail=f"completed stage {index} " + "with a detail too long for one line " * 3,
+            )
+        )
+    populated_lines = _rendered_live_lines(reporter)
+
+    assert len(populated_lines) == len(initial_lines)
+    assert "example-provider" in "\n".join(populated_lines)
+    assert "…" in "\n".join(populated_lines)
+
+
+def test_rich_progress_title_does_not_change_frame_height_in_a_narrow_terminal() -> None:
+    progress = _progress_module()
+    reporter = progress.RichProgressReporter(stream=io.StringIO(), refresh_interval=60)
+    reporter._live_plan = progress.Tier3RunPlan(
+        skill_name="a-skill-with-a-very-long-name",
+        environment="docker",
+        agents=tuple(f"agent-{index}" for index in range(8)),
+    )
+
+    initial_height = len(_rendered_live_lines(reporter, width=20))
+    reporter._live_plan = progress.Tier3RunPlan(
+        skill_name="a-skill-with-a-very-long-name",
+        environment="docker",
+        agents=("agent-0",),
+        provider="example-provider",
+        task_count=2,
+        case_count=1,
+        attempts=1,
+        baseline=True,
+        concurrency=4,
+        timeout_multiplier=2,
+        total_containers=2,
+    )
+    for index in range(10):
+        reporter.emit(
+            progress.ProgressEvent(
+                stage=f"stage-{index}",
+                state="complete",
+                detail=f"completed stage {index}",
+            )
+        )
+
+    assert len(_rendered_live_lines(reporter, width=20)) == initial_height
+
+
+def test_rich_progress_frame_does_not_shrink_when_the_agent_set_shrinks() -> None:
+    progress = _progress_module()
+    reporter = progress.RichProgressReporter(stream=io.StringIO(), refresh_interval=60)
+
+    reporter._live_plan = progress.Tier3RunPlan(
+        skill_name="demo",
+        environment="docker",
+        agents=tuple(f"agent-{index}" for index in range(8)),
+    )
+    initial_height = len(_rendered_live_lines(reporter))
+    reporter._live_plan = progress.Tier3RunPlan(skill_name="demo", environment="docker", agents=("agent-0",))
+
+    assert len(_rendered_live_lines(reporter)) == initial_height
+
+
+def test_rich_progress_uses_manual_refresh_and_recent_event_window(monkeypatch: pytest.MonkeyPatch) -> None:
+    import rich.live
+    from rich.console import Console
+
+    progress = _progress_module()
+    _FakeLive.instances.clear()
+    monkeypatch.setattr(rich.live, "Live", _FakeLive)
+    reporter = progress.RichProgressReporter(stream=_TTYBuffer(), refresh_interval=60)
+    reporter.start(_plan(progress))
+
+    for index in range(7):
+        reporter.emit(
+            progress.ProgressEvent(
+                stage=f"stage-{index}",
+                state="complete",
+                detail=f"completed stage {index}",
+            )
+        )
+    reporter.emit(progress.ProgressEvent(stage="stage-0", state="running", detail="active again"))
+
+    live = _FakeLive.instances[0]
+    rendered = io.StringIO()
+    Console(file=rendered, width=80, color_system=None).print(live.renderables[-1])
+    text = rendered.getvalue()
+    # Rich's own refresh thread would redraw outside the reporter lock.
+    assert live.kwargs["auto_refresh"] is False
+    assert "refresh_per_second" not in live.kwargs
+    # The six most recently updated stages stay visible; the oldest drops out.
+    assert "active again" in text
+    assert all(f"completed stage {index}" in text for index in range(2, 7))
+    assert "completed stage 1" not in text
+    reporter.close()
+
+
+def test_rich_progress_resets_state_when_live_initialization_fails() -> None:
+    progress = _progress_module()
+    reporter = progress.RichProgressReporter(stream=io.StringIO(), refresh_interval=60)
+
+    def _fail_live_initialization(*_args, **_kwargs):
+        raise RuntimeError("terminal initialization failed")
+
+    reporter._live_factory = _fail_live_initialization
+    plan = progress.Tier3RunPlan(
+        skill_name="demo",
+        environment="docker",
+        agents=tuple(f"agent-{index}" for index in range(8)),
+    )
+    with pytest.raises(RuntimeError, match="terminal initialization failed"):
+        reporter.start(plan)
+    reporter.close()
+
+    assert reporter._live is None
+    assert reporter._live_plan is None
+    assert reporter._live_events == {}
+    assert reporter._live_event_slots == progress._LIVE_MIN_EVENT_ROWS
+
+
 def test_rich_reporter_immediately_starts_one_live_box_and_keeps_stage_updates_inside_it(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
@@ -555,14 +711,123 @@ def test_safe_reporter_disables_broken_presentation_without_raising() -> None:
 
     reporter.set_secret_values(["secret"])
     reporter.start(_plan(progress))
+    # A disabled reporter shows nothing, so starting it must not mark it active.
+    assert reporter.is_active is False
     reporter.emit(progress.ProgressEvent(stage="configuration", state="running"))
     reporter.heartbeat()
     reporter.close()
 
     assert broken.close_calls >= 1
     reporter.start(_plan(progress))
+    assert reporter.is_active is False
     reporter.close()
     assert broken.start_calls == 1
+
+
+def test_safe_reporter_becomes_inactive_after_post_start_failure() -> None:
+    progress = _progress_module()
+
+    class FailingReporter:
+        active = False
+
+        @property
+        def is_active(self) -> bool:
+            return self.active
+
+        def start(self, _plan) -> None:
+            self.active = True
+
+        def set_secret_values(self, _values) -> None:
+            pass
+
+        def emit(self, _event) -> None:
+            raise RuntimeError("redraw failed")
+
+        def heartbeat(self) -> None:
+            pass
+
+        def close(self) -> None:
+            self.active = False
+
+    reporter = progress.safe_progress_reporter(FailingReporter())
+    reporter.start(_plan(progress))
+    assert reporter.is_active is True
+
+    reporter.emit(progress.ProgressEvent(stage="configuration", state="ready"))
+
+    assert reporter.is_active is False
+    reporter.close()
+
+
+def test_safe_reporter_disables_after_heartbeat_redraw_failure() -> None:
+    progress = _progress_module()
+    heartbeat_failed = threading.Event()
+    failed_on: list[threading.Thread] = []
+
+    class FailingLive:
+        def __init__(self, _table, **_kwargs) -> None:
+            self.update_calls = 0
+            self.stop_calls = 0
+
+        def start(self, *, refresh: bool = False) -> None:
+            assert refresh
+
+        def update(self, _table, *, refresh: bool = False) -> None:
+            assert refresh
+            self.update_calls += 1
+            if self.update_calls == 2:
+                failed_on.append(threading.current_thread())
+                heartbeat_failed.set()
+                raise RuntimeError("heartbeat redraw failed")
+
+        def stop(self) -> None:
+            self.stop_calls += 1
+
+    rich_reporter = progress.RichProgressReporter(stream=io.StringIO(), refresh_interval=0.05)
+    rich_reporter._live_factory = FailingLive
+    reporter = progress.safe_progress_reporter(rich_reporter)
+    reporter.start(_plan(progress))
+    heartbeat = rich_reporter._thread
+    live = rich_reporter._live
+    assert heartbeat is not None and live is not None
+    reporter.emit(progress.ProgressEvent(stage="agent:codex", state="running", detail="evaluating"))
+
+    assert heartbeat_failed.wait(timeout=10)
+    # The redraw sets the event before it raises, so the heartbeat thread may still
+    # be turning the reporter off. That thread ends right after, so wait for it.
+    heartbeat.join(timeout=10)
+    assert not heartbeat.is_alive()
+    assert failed_on == [heartbeat]
+    assert reporter.is_active is False
+    assert live.stop_calls == 1
+    assert rich_reporter._live is None
+    updates_before = live.update_calls
+    reporter.emit(progress.ProgressEvent(stage="agent:codex", state="complete"))
+    assert live.update_calls == updates_before
+    reporter.close()
+
+
+def test_heartbeat_failure_without_a_safety_wrapper_stops_the_thread(monkeypatch: pytest.MonkeyPatch) -> None:
+    progress = _progress_module()
+    uncaught: list[BaseException | None] = []
+    monkeypatch.setattr(threading, "excepthook", lambda args: uncaught.append(args.exc_value))
+
+    class FailingHeartbeatReporter(progress.PlainProgressReporter):
+        def heartbeat(self) -> None:
+            raise RuntimeError("heartbeat failed")
+
+    reporter = FailingHeartbeatReporter(stream=io.StringIO(), refresh_interval=0.05)
+    reporter.start(_plan(progress))
+    reporter.emit(progress.ProgressEvent(stage="agent:codex", state="running"))
+    heartbeat = reporter._thread
+    assert heartbeat is not None
+
+    heartbeat.join(timeout=10)
+
+    assert not heartbeat.is_alive()
+    assert reporter.is_active is False
+    assert uncaught == []
+    reporter.close()
 
 
 def test_safe_reporter_tracks_lifecycle_when_delegate_has_no_active_state() -> None:

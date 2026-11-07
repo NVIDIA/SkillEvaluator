@@ -250,22 +250,78 @@ def _finite_score(value: Any) -> float | None:
 _NAME_CHARS = "_.~-"
 # An absolute-path root: POSIX or UNC, the home of this or another user (``~/``,
 # ``~alice/``), a drive letter, or a home variable.
-_ABSOLUTE_PATH_ROOT = re.compile(r"[\\/]|~[\w.-]*[\\/]|[A-Za-z]:[\\/]|(?:\$HOME|\$\{HOME\}|%USERPROFILE%)[\\/]")
+_ABSOLUTE_PATH_ROOT_PATTERN = r"[\\/]|~[\w.-]*[\\/]|[A-Za-z]:[\\/]|(?:\$HOME|\$\{HOME\}|%USERPROFILE%)[\\/]"
+_ABSOLUTE_PATH_ROOT = re.compile(_ABSOLUTE_PATH_ROOT_PATTERN)
 # A root right after one of these starts a path of its own: ``/opt/bin,/home/a``,
 # ``--out=/home/a``, ``log(/home/a)``. A colon counts unless it is a drive letter's.
 _PATH_LIST_SEPARATORS = ",;:=([{"
 _FILE_URL_LOCALHOST_PATH_RE = re.compile(r"(?i)\b(?P<prefix>file://localhost)(?P<path>/\S*)")
-_URL_SPAN_RE = re.compile(r"(?i)\b(?!file:)[a-z][a-z0-9+.-]*://\S+")
+# The rest of a Windows folder name after ``\n`` ``\r`` or ``\t``.
+_FOLDER_NAME_TAIL = re.compile(r"[\w.~$%-]*")
+# A URL that path masking leaves unchanged: any scheme but ``file:`` and a
+# ``+file:`` one such as ``git+file:``, which name local paths. The scheme is at
+# most 64 characters, so a long dotted word is not rescanned from every word
+# boundary. The URL ends at whitespace; at a character a URL never holds
+# unencoded (``"`` ``<`` ``>`` a backtick ``^`` ``{`` ``|`` ``}``); at a single
+# quote, which closes a quoted URL far more often than it appears in one; at a
+# ``\n`` ``\r`` or ``\t`` escape (JSON or repr text), so the next line is not
+# part of it; and before an absolute-path root or another scheme that follows a
+# ``,`` or ``;`` (a list), a ``,`` or ``;`` and an option or variable name with
+# ``=`` (``DOC=https://h/e;LOG=/home/a``, ``,--find-links=file:///home/a``), or
+# a Markdown ``](``. So a ``file:`` URL in a list is masked. The escape's
+# backslash may be doubled (JSON inside JSON). It is a Windows folder instead
+# when a name and as many backslashes follow it: ``C:\Users\t\runs``,
+# ``C:\\Users\\t\\runs``. Other backslashes stay in the URL, so a Windows path
+# in one is kept. So in
+# ``{"doc":"https://host/e","log":"/home/a/<id>"}``,
+# ``"https://host/e\nLOG=/home/a/<id>"`` or ``https://host/a,/home/a/<id>`` the
+# path after the URL is still masked. The scheme starts after such an escape,
+# not inside it: ``\nfile:///home/a`` is a ``file:`` URL, not ``nfile:``.
+_URL_SPAN_RE = re.compile(
+    r"(?i)(?:\b(?<!\\)|(?<=(?-i:\\[nrt])))(?!(?:[a-z0-9+.-]{0,62}\+)?file:)[a-z][a-z0-9+.-]{0,63}://"
+    r"(?:(?!(?:[,;](?:-{0,2}[a-z_][\w.-]*=)?|\]\()(?:"
+    + _ABSOLUTE_PATH_ROOT_PATTERN
+    + r"|[a-z][a-z0-9+.-]{0,63}:)|(?<!\\)(\\+)(?-i:[nrt])(?!"
+    + _FOLDER_NAME_TAIL.pattern
+    + r"\1(?!\\)))[^\s\"'<>`^{|}])*"
+)
+
+
+def _follows_line_escape(value: str, index: int) -> bool:
+    """Whether a JSON or repr escape for a line break or tab (``\\n`` ``\\r`` ``\\t``) ends right before ``index``.
+
+    Its backslash may be doubled, as in JSON inside JSON. A Windows folder name
+    and as many backslashes after it make it a folder instead:
+    ``C:\\Users\\t\\runs`` has a folder ``t``.
+    """
+    if index < 2 or value[index - 2] != "\\" or value[index - 1] not in "nrt":
+        return False
+    start = index - 2
+    while start and value[start - 1] == "\\":
+        start -= 1
+    backslashes = value[start : index - 1]
+    after = _FOLDER_NAME_TAIL.match(value, index).end()
+    return not (
+        value.startswith(backslashes, after) and value[after + len(backslashes) : after + len(backslashes) + 1] != "\\"
+    )
 
 
 def _starts_absolute_path(value: str, index: int) -> bool:
     """Whether a POSIX, home, UNC, drive-letter or home-variable absolute path starts at ``index``.
 
-    The character before it must not belong to a name, so ``a/b`` is not read as ``/b``.
+    The character before it must not belong to a name, so ``a/b`` is not read as ``/b``,
+    unless it ends a ``\\n`` ``\\r`` or ``\\t`` escape. Such an escape is not a root itself
+    when a root follows it.
     """
     if value[index] not in "/\\~$%" and value[index + 1 : index + 2] != ":":
         return False
-    if index and (value[index - 1].isalnum() or value[index - 1] in _NAME_CHARS):
+    if (
+        index
+        and (value[index - 1].isalnum() or value[index - 1] in _NAME_CHARS)
+        and not _follows_line_escape(value, index)
+    ):
+        return False
+    if value[index] == "\\" and _follows_line_escape(value, index + 2) and _ABSOLUTE_PATH_ROOT.match(value, index + 2):
         return False
     return _ABSOLUTE_PATH_ROOT.match(value, index) is not None
 
@@ -284,7 +340,11 @@ def _follows_path_separator(value: str, index: int) -> bool:
         letter >= 0
         and value[letter].isascii()
         and value[letter].isalpha()
-        and (letter == 0 or not (value[letter - 1].isalnum() or value[letter - 1] in _NAME_CHARS + "/\\"))
+        and (
+            letter == 0
+            or not (value[letter - 1].isalnum() or value[letter - 1] in _NAME_CHARS + "/\\")
+            or _follows_line_escape(value, letter)
+        )
     )
     return not is_drive
 
@@ -293,16 +353,16 @@ def _path_start(value: str, start: int, end: int) -> int | None:
     """Where the absolute path that ends at ``end`` starts, searching from ``start``.
 
     It starts at the first root, unless a later root follows a path separator
-    (``/opt/bin,/home/a``, ``PATH=/usr/bin:/home/a``); then that later root
-    starts it and the text before it is kept. A separator that is not followed
-    by a root (``/home/a/my(project)``) is part of the path.
+    (``/opt/bin,/home/a``, ``PATH=/usr/bin:/home/a``) or a ``\\n`` ``\\r`` or
+    ``\\t`` escape; then that later root starts it and the text before it is
+    kept. A separator that is not followed by a root (``/home/a/my(project)``)
+    is part of the path.
     """
     for index in range(end, start, -1):
         if (
-            value[index - 1] in _PATH_LIST_SEPARATORS
-            and _follows_path_separator(value, index)
-            and _starts_absolute_path(value, index)
-        ):
+            (value[index - 1] in _PATH_LIST_SEPARATORS and _follows_path_separator(value, index))
+            or _follows_line_escape(value, index)
+        ) and _starts_absolute_path(value, index):
             return index
     return next((index for index in range(start, end + 1) if _starts_absolute_path(value, index)), None)
 
@@ -361,7 +421,9 @@ class _Scrubber:
         run_id = run_dir.name
         # The run directory is replaced wherever it occurs, as a prefix of
         # longer names too. The skill and home directories are replaced only as
-        # whole paths, so ``/home/alice2`` is not read as ``~2``.
+        # whole paths, so ``/home/alice2`` is not read as ``~2``; one right after
+        # a JSON or repr escape for a line break or tab (``\n`` ``\r`` ``\t``)
+        # starts a line, so it counts as whole.
         entries: dict[str, tuple[str, bool]] = {}
         for spelling in (str(run_dir), run_dir.as_posix()):
             entries.setdefault(spelling, (run_id, False))
@@ -375,7 +437,7 @@ class _Scrubber:
             reverse=True,
         )
         alternatives = [
-            rf"(?<![\w.~-])(?P<p{index}>{re.escape(spelling)})(?![\w-]|\.\w)"
+            rf"(?:(?<![\w.~-])|(?<=\\[nrt]))(?P<p{index}>{re.escape(spelling)})(?![\w-]|\.\w)"
             if whole
             else rf"(?P<p{index}>{re.escape(spelling)})"
             for index, (spelling, _replacement, whole) in enumerate(ordered)
@@ -399,7 +461,8 @@ class _Scrubber:
         starts at the first absolute-path root after the preceding whitespace
         or quote, or at a later root that follows ``,;:=([{``. Such a path
         that contains a space is not recognized. Relative paths are kept.
-        URL spans through the next whitespace are left unchanged.
+        A URL other than a ``file:`` URL is left unchanged, up to where
+        ``_URL_SPAN_RE`` ends it.
         """
 
         def scrub_segment(segment: str) -> str:

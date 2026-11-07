@@ -415,6 +415,153 @@ def test_context_leaves_url_path_values_unchanged_while_scrubbing_other_paths(tm
     assert context["agents"]["codex"]["execution_errors"] == [f"Failed at {scrubbed_skill_path}; URL: {query_url}"]
 
 
+def test_context_masks_paths_that_follow_a_url_in_minified_json(tmp_path: Path) -> None:
+    # The URL ends at its closing quote, so the run, skill and home paths after
+    # it in the same unbroken JSON text are still masked; the URL is kept.
+    home = tmp_path / "home" / "alice"
+    skill = home / "work" / "acme-skill"
+    run_dir = skill / "evals" / "results" / RUN_ID
+    error = json.dumps(
+        {
+            "doc": "https://docs.example.test/errors/e1",
+            "log": str(run_dir / "agent.log"),
+            "skill": str(skill / "SKILL.md"),
+            "cache": str(home / ".cache"),
+        },
+        separators=(",", ":"),
+    )
+    payload = {"agents": {"codex": {"execution_errors": [f"Error: {error}"]}}}
+
+    context = compact_run_context(payload, run_dir=run_dir, skill_dir=skill, home=home)
+
+    [sent] = context["agents"]["codex"]["execution_errors"]
+    assert json.loads(sent.removeprefix("Error: ")) == {
+        "doc": "https://docs.example.test/errors/e1",
+        "log": str(Path(RUN_ID) / "agent.log"),
+        "skill": str(Path("acme-skill") / "SKILL.md"),
+        "cache": str(Path("~") / ".cache"),
+    }
+    assert str(home) not in sent
+
+
+@pytest.mark.parametrize(
+    ("text", "expected"),
+    [
+        # A character a URL never holds unencoded, or a quote, ends it.
+        ('"https://h.test/a","/home/alice/x"', '"https://h.test/a","~/x"'),
+        ("'https://h.test/a','/home/alice/x'", "'https://h.test/a','~/x'"),
+        ("`https://h.test/a`/home/alice/x", "`https://h.test/a`~/x"),
+        ("<https://h.test/a>/home/alice/x", "<https://h.test/a>~/x"),
+        ("https://h.test/a|/home/alice/x", "https://h.test/a|~/x"),
+        ("{https://h.test/a}/home/alice/x", "{https://h.test/a}~/x"),
+        # A `,` or `;` that an absolute-path root follows starts a path list.
+        (
+            f"fetch https://h.test/a,/home/bob/ci/results/{RUN_ID}/x",
+            f"fetch https://h.test/a,{RUN_ID}/x",
+        ),
+        ("https://h.test/a;/home/alice/x", "https://h.test/a;~/x"),
+        (f"https://h.test/a,~/ci/results/{RUN_ID}/x", f"https://h.test/a,{RUN_ID}/x"),
+        # So do a `,` or `;` with an option or variable name and `=`, and a
+        # Markdown `](`, each before a root; the path is masked.
+        ("DOC=https://h.test/e;LOG=/home/alice/x", "DOC=https://h.test/e;LOG=~/x"),
+        ("OPTS=https://h.test/e;--log-dir=/home/alice/x", "OPTS=https://h.test/e;--log-dir=~/x"),
+        ("DOC=https://h.test/e,log-file=/home/alice/x", "DOC=https://h.test/e,log-file=~/x"),
+        ("[https://h.test/e](/home/alice/x)", "[https://h.test/e](~/x)"),
+        # A `\n` `\r` or `\t` escape (JSON or repr text) ends a URL, so the
+        # next line of an env dump or stderr is masked; the escape is kept.
+        ('"https://h.test/a\\n/home/alice/x"', '"https://h.test/a\\n~/x"'),
+        (f'"https://h.test/a\\n/home/alice/runs/{RUN_ID}/x"', f'"https://h.test/a\\n{RUN_ID}/x"'),
+        (f'"https://h.test/a\\t/home/bob/ci/results/{RUN_ID}/x"', f'"https://h.test/a\\t{RUN_ID}/x"'),
+        ("line1\\n/home/alice/x", "line1\\n~/x"),
+        (
+            f'"URL=https://h.test/e\\nHOME=/home/alice\\nLOG=/home/alice/runs/{RUN_ID}/a.log"',
+            f'"URL=https://h.test/e\\nHOME=~\\nLOG={RUN_ID}/a.log"',
+        ),
+        (
+            f'"GET https://h.test/e\\nERROR:/home/bob/ci/results/{RUN_ID}/a.log"',
+            f'"GET https://h.test/e\\nERROR:{RUN_ID}/a.log"',
+        ),
+        ('"https://h.test/e\\r\\n--log=/home/alice/x"', '"https://h.test/e\\r\\n--log=~/x"'),
+        ('"https://h.test/e\\nfile:///home/alice/x"', '"https://h.test/e\\nfile://~/x"'),
+        ('"https://h.test/e\\tgit+file:///home/alice/x"', '"https://h.test/e\\tgit+file://~/x"'),
+        # In JSON inside JSON the escape's backslash is doubled.
+        (
+            '{"s":"{\\"e\\":\\"https://h.test/e\\\\n/home/alice/x\\"}"}',
+            '{"s":"{\\"e\\":\\"https://h.test/e\\\\n~/x\\"}"}',
+        ),
+        (
+            f'{{"s":"{{\\"e\\":\\"https://h.test/e\\\\nLOG=/home/bob/ci/results/{RUN_ID}/a\\"}}"}}',
+            f'{{"s":"{{\\"e\\":\\"https://h.test/e\\\\nLOG={RUN_ID}/a\\"}}"}}',
+        ),
+        # Another scheme after a `,` `;` (with or without a name and `=`) or
+        # `](` starts its own URL, so a `file:` or `+file:` one there is
+        # masked like one on its own.
+        ("pip install git+file:///home/alice/x", "pip install git+file://~/x"),
+        ("links=https://h.test/e,file:///home/alice/x", "links=https://h.test/e,file://~/x"),
+        ("[a](https://h.test/e)[b](git+file:///home/alice/x)", "[a](https://h.test/e)[b](git+file://~/x)"),
+        ("https://h.test/e,FIND_LINKS=file:///home/alice/x", "https://h.test/e,FIND_LINKS=file://~/x"),
+        ("https://h.test/e;--find-links=git+file:///home/alice/x", "https://h.test/e;--find-links=git+file://~/x"),
+        ("pip install git+https://h.test/x", "pip install git+https://h.test/x"),
+        # A copied run's path after a list separator and an escape keeps both.
+        (f"PATH=/usr/bin:\\n/srv/runs/{RUN_ID}", f"PATH=/usr/bin:\\n{RUN_ID}"),
+        (f"x\\tD:\\runs\\{RUN_ID}\\a.log", f"x\\t{RUN_ID}\\a.log"),
+        # A Windows folder named n, r or t is not an escape: its name is
+        # followed by as many backslashes as precede it. So the whole copied
+        # path is masked.
+        (f"C:\\Users\\bob\\t\\runs\\{RUN_ID}\\agent.log", f"{RUN_ID}\\agent.log"),
+        (
+            f'{{"log":"C:\\\\Users\\\\bob\\\\t\\\\runs\\\\{RUN_ID}\\\\agent.log"}}',
+            f'{{"log":"{RUN_ID}\\\\agent.log"}}',
+        ),
+        (f"\\\\srv\\share\\n\\{RUN_ID}\\a.log", f"{RUN_ID}\\a.log"),
+        (f"C:\\Users\\t~1\\runs\\{RUN_ID}", RUN_ID),
+        # Inside a URL, `,` `;` `(` `)` `=` and the like do not end it.
+        ("https://h.test/a,b;c=d/e(f)!*+$&@:%20~[0]", "https://h.test/a,b;c=d/e(f)!*+$&@:%20~[0]"),
+        ("https://h.test/a;jsessionid=abc/x?v=1,2&w=3;z", "https://h.test/a;jsessionid=abc/x?v=1,2&w=3;z"),
+        # Other backslashes stay in the URL, so a Windows path in one is kept,
+        # with folders named n, r or t and JSON-escaped backslashes too.
+        (
+            f"http://localhost:8080/runs\\{RUN_ID}\\report.html",
+            f"http://localhost:8080/runs\\{RUN_ID}\\report.html",
+        ),
+        (f"https://h.test/dir\\t\\runs\\{RUN_ID}/log", f"https://h.test/dir\\t\\runs\\{RUN_ID}/log"),
+        (f"smb://srv/share\\n\\{RUN_ID}", f"smb://srv/share\\n\\{RUN_ID}"),
+        (
+            f'"vscode://file/C:\\\\Users\\\\bob\\\\new\\\\{RUN_ID}\\\\a"',
+            f'"vscode://file/C:\\\\Users\\\\bob\\\\new\\\\{RUN_ID}\\\\a"',
+        ),
+        (
+            f'"vscode://file/C:\\\\Users\\\\bob\\\\t\\\\runs\\\\{RUN_ID}"',
+            f'"vscode://file/C:\\\\Users\\\\bob\\\\t\\\\runs\\\\{RUN_ID}"',
+        ),
+        (f"https://ci.example.test/runs/{RUN_ID}/log", f"https://ci.example.test/runs/{RUN_ID}/log"),
+        ("https://h.test/?path=/home/alice/x", "https://h.test/?path=/home/alice/x"),
+    ],
+)
+def test_a_url_ends_where_a_path_after_it_can_start(text: str, expected: str) -> None:
+    scrub = _Scrubber.for_run(Path("/home/alice/runs") / RUN_ID, home=Path("/home/alice"))
+
+    assert scrub.paths(text) == expected
+
+
+def test_url_matching_stays_linear_on_long_dotted_text() -> None:
+    # An unbounded scheme was rescanned from every word boundary, so 300,000
+    # characters of `a.a.a` took minutes. The regex holds the GIL, so a thread
+    # cannot time it out; a child process is killed instead. The budget is far
+    # above the linear time (well under a second).
+    import subprocess
+    import sys
+
+    code = (
+        "from pathlib import Path\n"
+        "from skillevaluator.evaluation.tier3_feedback_chat import _Scrubber\n"
+        "text = 'a.' * 150_000\n"
+        "assert _Scrubber.for_run(Path('/runs') / 'run-1').paths(text) == text\n"
+    )
+
+    subprocess.run([sys.executable, "-c", code], check=True, timeout=60)
+
+
 def test_context_redacts_credentials_but_keeps_measurements() -> None:
     payload = {
         "agents": {

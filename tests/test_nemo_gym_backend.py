@@ -212,6 +212,11 @@ def test_nemo_gym_backend_dispatches_to_gym_runner(monkeypatch: pytest.MonkeyPat
     assert calls["nemo-gym"]["agents"] == ["codex"] and calls["nemo-gym"]["n_attempts"] == 2
 
 
+def test_nemo_gym_backend_forwards_copy_repo(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> None:
+    calls = _evaluate(monkeypatch, tmp_path, backend="nemo-gym", copy_repo=True)
+    assert calls["nemo-gym"]["copy_repo"] is True
+
+
 def test_nemo_gym_rejects_unsupported_env_before_execution(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> None:
     with pytest.raises(ValueError, match="docker"):
         _evaluate(monkeypatch, tmp_path, backend="nemo-gym", env_mode="e2b")
@@ -422,7 +427,7 @@ def test_fake_gym_run_uses_config_agent_model_and_resources(
 
 @pytest.mark.parametrize(
     "harbor_config",
-    ["  pre_agent_setup:\n    - echo hi\n", "  resources:\n    storage_mb: 4096\n", "  task_source: native_harbor\n"],
+    ["  resources:\n    storage_mb: 4096\n", "  task_source: native_harbor\n"],
 )
 def test_fake_gym_run_rejects_harbor_only_config_keys(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch, harbor_config: str
@@ -430,6 +435,48 @@ def test_fake_gym_run_rejects_harbor_only_config_keys(
     skill, env_log = _fake_gym_skill(tmp_path, monkeypatch, config=f"schema_version: 1\nharbor:\n{harbor_config}")
     result = _run_fake_gym(skill, tmp_path)
     assert "not supported with --backend nemo-gym" in result["error"][0]
+    assert not env_log.exists()
+
+
+def test_fake_gym_run_rejects_pre_agent_setup_with_a_baseline_arm(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    skill, env_log = _fake_gym_skill(
+        tmp_path, monkeypatch, config="schema_version: 1\nharbor:\n  pre_agent_setup:\n    - echo hi\n"
+    )
+    result = _run_fake_gym(skill, tmp_path)
+    assert "cannot run in a paired evaluation" in result["error"][0]
+    assert not env_log.exists()
+
+
+def test_fake_gym_run_stages_agent_workdir_and_pre_agent_setup(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    config = "schema_version: 1\nharbor:\n  agent_workdir: /work\n  setup_commands:\n    - touch /tmp/ready\n"
+    skill, _env_log = _fake_gym_skill(tmp_path, monkeypatch, config=config)
+    from skillevaluator.tier3.nemo_gym import runner as gym_runner
+
+    staged: list[str] = []
+    original_stage = gym_runner.stage_for_gym
+
+    def recording_stage(arm_dir: Path, *args, **kwargs) -> None:
+        original_stage(arm_dir, *args, **kwargs)
+        staged.extend(path.read_text() for path in sorted(arm_dir.glob("*/task.toml")))
+
+    monkeypatch.setattr(gym_runner, "stage_for_gym", recording_stage)
+    result = _run_fake_gym(skill, tmp_path, skip_baseline=True)
+    assert result.get("execution_status") == "succeeded", result
+    assert staged
+    for text in staged:
+        assert 'workdir = "/work"' in text
+        assert "[environment.healthcheck]" in text
+        assert "touch /tmp/ready" in text
+
+
+def test_fake_gym_run_rejects_an_invalid_agent_workdir(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    skill, env_log = _fake_gym_skill(
+        tmp_path, monkeypatch, config="schema_version: 1\nharbor:\n  agent_workdir: relative/dir\n"
+    )
+    result = _run_fake_gym(skill, tmp_path)
+    assert any("agent_workdir" in error for error in result["error"])
     assert not env_log.exists()
 
 

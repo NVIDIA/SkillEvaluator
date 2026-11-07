@@ -509,6 +509,7 @@ def run_nemo_gym_eval(
     stop_on_pass: bool | None = None,
     agent_runtime_preflight: bool | None = None,
     custom_dockerfile_mode: str | None = None,
+    copy_repo: bool = False,
 ) -> dict[str, Any]:
     """Run the selected arms on NeMo Gym and return the shared results mapping."""
     from skillevaluator.evaluation.tier3_report import render_agent_eval_html_report
@@ -605,11 +606,26 @@ def run_nemo_gym_eval(
         errors.append(NATIVE_HARBOR_ERROR)
     if mcp_servers_declared(skill_path):
         errors.append(MCP_SERVERS_ERROR)
-    errors += [
-        f"harbor.{key} is not supported with --backend nemo-gym yet"
-        for key in ("agent_workdir", "pre_agent_setup")
-        if harbor_config.get(key)
-    ]
+    pre_agent_setup = list(harbor_config.get("pre_agent_setup") or [])
+    if pre_agent_setup and not skip_baseline:
+        if skip_with_skill:
+            errors.append(
+                "harbor.pre_agent_setup/setup_commands cannot run in a baseline-only run (--skip-with-skill); "
+                "the baseline arm must stay isolated from skill-owned setup commands"
+            )
+        else:
+            errors.append(
+                "harbor.pre_agent_setup/setup_commands cannot run in a paired evaluation; "
+                "use --skip-baseline for a with-skill-only run"
+            )
+    agent_workdir = harbor_config.get("agent_workdir")
+    if agent_workdir is not None:
+        from skillevaluator.tier3.harbor.adapter import _validated_agent_workdir
+
+        try:
+            agent_workdir = _validated_agent_workdir(agent_workdir)
+        except ValueError as exc:
+            errors.append(f"harbor.{exc}")
     resource_config = dict(harbor_config.get("resources") or {})
     if "storage_mb" in resource_config:
         errors.append("harbor.resources.storage_mb is not supported with --backend nemo-gym")
@@ -709,6 +725,9 @@ def run_nemo_gym_eval(
                     task_resources=task_resources or None,
                     runtime_env=agent_runtime_env or None,
                     arm_suffix=f"-{arm}-skill" if len(arms) == 2 else "",
+                    pre_agent_setup=pre_agent_setup or None,
+                    agent_workdir=agent_workdir,
+                    copy_repo=copy_repo,
                 )
                 if max_cases is not None:
                     selectors = validate_case_ids(task.name for task in task_paths)

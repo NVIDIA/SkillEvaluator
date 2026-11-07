@@ -796,6 +796,7 @@ def evaluate(
                 override_cpus=override_cpus,
                 override_memory_mb=override_memory_mb,
                 repo_context_exclude_paths=repo_context_exclude_paths,
+                copy_repo=copy_repo,
                 progress_reporter=reporter,
             )
         engine_started = True

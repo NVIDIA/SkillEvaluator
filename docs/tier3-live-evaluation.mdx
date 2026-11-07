@@ -470,12 +470,16 @@ modes. Unset flags fall back to these `evals/config.yml` keys, as on Harbor:
 `skill_workspace.mode`/`include`. `--skip-baseline`, `--skip-with-skill`, `--max-cases` and
 `--agent-model` (one model per agent) apply the same way. `--timeout-multiplier` (or
 `harbor.timeout_multiplier`) scales each task's agent, verifier, and environment-build timeouts
-as on Harbor, and Gym enforces them. `--environment-kwarg` is rejected, as Harbor rejects it in
+as on Harbor, and Gym enforces them. `harbor.agent_workdir` and `harbor.pre_agent_setup`
+(alias `setup_commands`, with-skill-only runs) work as on Harbor: Gym starts the agent in
+that working directory and runs the setup commands as the task's environment healthcheck
+before the agent. `--copy-repo` stages the whole repository under
+`/workspace/repo/` as on Harbor. `--environment-kwarg` is rejected, as Harbor rejects it in
 Docker mode. It rejects `--stop-on-pass`,
-`--harbor-keep-jobs`, `--copy-repo`, `--agent-runtime-preflight`, `--override-storage-mb`,
+`--harbor-keep-jobs`, `--agent-runtime-preflight`, `--override-storage-mb`,
 custom Dockerfile modes other than the
 default, and the config keys `harbor.base_image_mode` (reuse/rebuild),
-`task_source: native_harbor`, `agent_workdir`, `pre_agent_setup` (alias `setup_commands`),
+`task_source: native_harbor`,
 `resources.storage_mb`, `skill_workspace.decoy_manifest`, MCP
 servers in `evals/environment/mcp_servers.toml`, native `evals/harbor/` tasks (also when
 `task_source: auto` resolves to them), a model URL with embedded credentials, and Windows hosts,

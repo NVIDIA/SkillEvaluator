@@ -135,8 +135,6 @@ def nemo_gym_capability_errors(
         errors.append("--stop-on-pass is not supported with --backend nemo-gym yet")
     if custom_dockerfile_mode not in (None, "rebase"):
         errors.append("--backend nemo-gym supports --custom-dockerfile-mode rebase only")
-    if copy_repo:
-        errors.append("--copy-repo is not supported with --backend nemo-gym yet")
     if environment_kwargs:
         errors.append("--environment-kwarg applies to the Harbor environment providers only")
     if override_storage_mb is not None:
@@ -260,11 +258,6 @@ def nemo_gym_config_errors(
         errors.append(NATIVE_HARBOR_ERROR)
     if mcp_servers_declared(skill_path):
         errors.append(MCP_SERVERS_ERROR)
-    errors += [
-        f"harbor.{key} is not supported with --backend nemo-gym yet"
-        for key in ("agent_workdir", "pre_agent_setup")
-        if harbor.get(key)
-    ]
     if "storage_mb" in (harbor.get("resources") or {}):
         errors.append("harbor.resources.storage_mb is not supported with --backend nemo-gym")
     if workspace.get("decoy_manifest"):

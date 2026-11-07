@@ -15,9 +15,10 @@ All notable changes to SkillEvaluator are documented in this file.
   shared; `result.json` records `execution_backend` with the NeMo Gym version.
   Gym runs as a separate pinned process (`SKILL_EVAL_NEMO_GYM_BIN`) because it
   needs Python 3.13.14 or later. Options the backend cannot honor (other
-  environment modes, `--harbor-keep-jobs`, `--stop-on-pass`, `--copy-repo`, ...)
+  environment modes, `--harbor-keep-jobs`, `--stop-on-pass`, ...)
   are rejected before anything runs, with no fallback to Harbor.
-  `--timeout-multiplier` scales each task's timeouts as on Harbor, and
+  `--timeout-multiplier`, `--copy-repo`, `harbor.agent_workdir` and
+  `harbor.pre_agent_setup` work as on Harbor, and
   `tier3 doctor --backend nemo-gym` checks Gym readiness.
 - `skills/skillevaluator/` is an agent skill for operating SkillEvaluator: it
   routes requests to the right tier, readiness check, dataset, report, or CI

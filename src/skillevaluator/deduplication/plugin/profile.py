@@ -10,10 +10,11 @@ from dataclasses import dataclass
 from pathlib import Path, PurePosixPath
 from typing import Any
 
-from skillevaluator.constants import DESCRIPTION_MAX_LENGTH
+from skillevaluator.constants import DESCRIPTION_MAX_LENGTH, PLUGIN_OPENCLAW_MANIFEST_TYPE
 from skillevaluator.embedding.extractor import ContentEntry
-from skillevaluator.plugin_formats import parse_manifest_text
+from skillevaluator.plugin_formats import manifest_identity, parse_manifest_text
 from skillevaluator.plugin_manifest import PluginManifestPathError, locate_plugin_manifest
+from skillevaluator.plugin_paths import normalize_declared_path
 from skillevaluator.plugin_refs import normalize_ref
 from skillevaluator.utils.secure_fs import SecurePathError
 from skillevaluator.utils.structured_data import require_bounded_string
@@ -38,6 +39,8 @@ class BundledSkill:
     path: Path
     entry: ContentEntry | None
     skip_reason: str | None = None
+    #: Paths a skill-only catalog built from a declared native skill root records (OpenClaw).
+    catalog_relative_paths: tuple[str, ...] = ()
 
     @property
     def rel(self) -> str:
@@ -110,9 +113,26 @@ def load_plugin_profile(plugin_root: Path) -> PluginProfile:
     data: Any = parse_manifest_text(located.manifest_type, raw.removeprefix("\ufeff"))
     if not isinstance(data, dict):
         raise ValueError("Bundle manifest could not be parsed")
+    openclaw = located.manifest_type == PLUGIN_OPENCLAW_MANIFEST_TYPE
+    # OpenClaw's name is display text; its id alone is the stable plugin identity.
+    raw_name = manifest_identity(located.manifest_type, data)
     name = require_bounded_string(
-        data.get("name") or inventory.root.name, "Bundle name", max_chars=PLUGIN_NAME_MAX_REPORT_CHARS
+        raw_name if openclaw else raw_name or inventory.root.name, "Bundle name", max_chars=PLUGIN_NAME_MAX_REPORT_CHARS
     ).strip()
+    if openclaw and not name:
+        raise ValueError("OpenClaw plugin id must be a non-empty string")
+    if openclaw and not isinstance(data.get("configSchema"), dict):
+        raise ValueError("OpenClaw configSchema must be an object")
+    # Catalog identities are portable POSIX paths, never host path flavours.
+    catalog_roots = (
+        [
+            declared.rel
+            for raw in data.get("skills", [])
+            if isinstance(raw, str) and (declared := normalize_declared_path(raw, ())).rel is not None
+        ]
+        if openclaw and isinstance(data.get("skills"), list)
+        else []
+    )
     description = data.get("description")
     if description is not None:
         description = (
@@ -151,9 +171,12 @@ def load_plugin_profile(plugin_root: Path) -> PluginProfile:
             reason = None
         label = skill_name if isinstance(skill_name, str) and skill_name.strip() else relative.name or name
         members.add(_member(label))
-        bundled.append(BundledSkill(relative.as_posix(), inventory.root / skill.path, entry, reason))
+        catalog_paths = tuple(
+            sorted({relative.relative_to(root).as_posix() for root in catalog_roots if relative.is_relative_to(root)})
+        )
+        bundled.append(BundledSkill(relative.as_posix(), inventory.root / skill.path, entry, reason, catalog_paths))
     section = data.get("skills")
-    refs = section.get("refs") if isinstance(section, dict) else None
+    refs = section.get("refs") if not openclaw and isinstance(section, dict) else None
     if isinstance(refs, list):
         if len(refs) > MAX_PLUGIN_MEMBERS:
             raise ValueError("Bundle member reference limit exceeded")

@@ -13,6 +13,22 @@ All notable changes to SkillEvaluator are documented in this file.
   Your Agent" docs page shows how to install it in Codex, Claude Code, OpenCode,
   OpenClaw, and other skill-aware agents.
 
+- Private plugin helpers recognize native OpenClaw manifests
+  (`openclaw.plugin.json`) after the existing manifest formats. `id` is the
+  plugin identity and `configSchema` must be an object. Only the `skills` roots
+  the manifest declares are members, searched recursively without implicit
+  `skills/` or hidden and `node_modules` children. `package.json#openclaw`
+  entrypoints are boundary-checked without being imported or run. Every native
+  manifest keeps an unsupported OpenClaw runtime row, so portable skill
+  results never certify tools, hooks, channels, providers or services. Inline
+  `mcpServers` follow OpenClaw's transport, SSE default and verbatim-URL rules;
+  disabled TLS verification and literal enterprise secrets are blocking.
+  Runtime preparation never copies the plugin root as a member, never starts
+  stdio servers whose plugin-root working directory cannot be kept, records
+  unapplied host options as incomplete, and keeps host metadata out of staged
+  manifests. `scripts/ci/smoke_openclaw_plugins.py` repeats these checks
+  against real plugin sources without executing plugin code.
+
 ### Changed
 
 - Align terminal grade and lift colors across compact, full, and direct Tier 3
@@ -78,6 +94,11 @@ All notable changes to SkillEvaluator are documented in this file.
   after a `;`, which starts a new command.
 
 ### Fixed
+
+- Private native Claude Code staging keeps the source client's skill
+  declarations: Codex paths that Codex ignores are no longer copied into the
+  staged `plugin.json` (where Claude Code rejected or loaded them), and
+  undotted Cursor skill roots become `./` paths Claude Code accepts.
 
 - Read JSON, JSONL and YAML evaluation datasets as UTF-8 so Unicode prompts and
   answers load correctly on hosts with a non-UTF-8 default text encoding.

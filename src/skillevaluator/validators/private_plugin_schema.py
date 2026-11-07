@@ -14,12 +14,13 @@ from skillevaluator.constants import (
     PLUGIN_AGENT_PLUGINS_V1_MANIFEST_TYPE,
     PLUGIN_CODEX_MANIFEST_TYPE,
     PLUGIN_MANIFEST_TYPE,
+    PLUGIN_OPENCLAW_MANIFEST_TYPE,
 )
 from skillevaluator.models.plugin import PluginManifest
 from skillevaluator.models.result import Finding, Severity, ValidationResult
 from skillevaluator.plugin_dependency_records import dependency_records
 from skillevaluator.plugin_format_schema import validate_manifest_fields
-from skillevaluator.plugin_formats import parse_manifest_text
+from skillevaluator.plugin_formats import manifest_identity, parse_manifest_text
 from skillevaluator.plugin_manifest import PluginManifestPathError
 from skillevaluator.utils.structured_data import StructuredDataError
 
@@ -47,7 +48,9 @@ def validate_inventory_schema(inventory: PluginInventory) -> ValidationResult:
                 "manifest_type": manifest.manifest_type,
                 "manifest_filename": manifest.manifest_filename,
                 "selected": manifest == inventory.selected_manifest,
-                "name": data.get("name") if data else None,
+                # OpenClaw's stable identity is its id; its name is only a display label.
+                "name": manifest_identity(manifest.manifest_type, data) if data else None,
+                "identity_field": "id" if manifest.manifest_type == PLUGIN_OPENCLAW_MANIFEST_TYPE else "name",
                 "version": data.get("version") if data else None,
             }
         )
@@ -82,7 +85,7 @@ def validate_inventory_schema(inventory: PluginInventory) -> ValidationResult:
         if not data:
             continue
         if manifest == inventory.selected_manifest:
-            selected_data = data
+            selected_data = {**data, "name": manifest_identity(manifest.manifest_type, data)}
         if manifest.case_variant:
             findings.append(
                 Finding(
@@ -129,18 +132,35 @@ def validate_inventory_schema(inventory: PluginInventory) -> ValidationResult:
                     )
                 )
     if selected_data:
+        selected_row = next(row for row in declarations if row["selected"])
         for row in declarations:
             if not row["selected"] and any(
                 row[k] is not None and selected_data.get(k) is not None and row[k] != selected_data[k]
                 for k in ("name", "version")
             ):
+                openclaw_identity = row["name"] != selected_data.get("name") and "id" in {
+                    row["identity_field"],
+                    selected_row["identity_field"],
+                }
                 findings.append(
                     Finding(
                         category="PLUGIN_SCHEMA",
                         severity=Severity.MEDIUM,
                         check_name="plugin_manifest_conflict",
-                        message="Client manifests declare different names or versions.",
+                        message=(
+                            f"{row['manifest_filename']} declares {row['identity_field']} {row['name']!r}, but the "
+                            f"selected {selected_row['manifest_filename']} declares {selected_row['identity_field']} "
+                            f"{selected_data.get('name')!r}; clients that load different manifests see different "
+                            "plugins."
+                            if openclaw_identity
+                            else "Client manifests declare different names or versions."
+                        ),
                         file_path=str(inventory.root / row["manifest_filename"]),
+                        suggestion=(
+                            "Keep the OpenClaw id equal to the plugin name in the other manifests."
+                            if openclaw_identity
+                            else None
+                        ),
                         metadata=row,
                     )
                 )

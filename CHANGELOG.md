@@ -13,6 +13,15 @@ All notable changes to SkillEvaluator are documented in this file.
   Your Agent" docs page shows how to install it in Codex, Claude Code, OpenCode,
   OpenClaw, and other skill-aware agents.
 
+- When the RAGAS goal scorer judges `goal_accuracy`, `judge_attempts.json`
+  now saves each request it sends and the judge's reply, so a RAGAS score can
+  be audited like the prompt judges' scores. Each request is a `ragas` entry
+  with status `replied`, or `error` with the HTTP status and body or the
+  reason the reply was not received, before the entry that holds the score or
+  the problem. The prompts and replies are redacted and shortened like the
+  other judge evidence. A failure while saving this evidence is only logged
+  and never changes a score.
+
 ### Changed
 
 - Align terminal grade and lift colors across compact, full, and direct Tier 3

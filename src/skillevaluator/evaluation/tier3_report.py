@@ -3566,6 +3566,10 @@ def _apply_case_findings(
         for fix in fixes
     ]
     payload["suggestions"] = [fix["action"] for fix in fixes if fix.get("action")]
+    from skillevaluator.tier3.next_steps import next_steps
+
+    with contextlib.suppress(Exception):  # advisory, like the fixes above
+        payload["next_steps"] = next_steps(source, run_dir=run_dir, fixes=fixes)
 
 
 def _recommendation_title_from(text: str) -> str:

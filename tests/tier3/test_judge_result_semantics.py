@@ -81,6 +81,36 @@ def test_behavior_inventory_keeps_all_expectations_after_judge_error(module, mon
 
 
 @pytest.mark.parametrize("module", [llm_judge, eval_template])
+@pytest.mark.parametrize("exception", [TimeoutError, RuntimeError])
+def test_behavior_inventory_survives_unexpected_provider_exceptions(module, exception, monkeypatch):
+    def raise_error(*_args, **_kwargs):
+        raise exception("provider failed")
+
+    monkeypatch.setattr(module, "call_public_llm", raise_error)
+    result = module.judge_behavior_check("conversation", ["first", "second"])
+    assert result["score"] is None and result["status"] == "error"
+    assert result["results"] == []
+    assert [item["requirement"] for item in result["expectations"]] == ["first", "second"]
+    assert all(item["status"] == "not_checked" for item in result["expectations"])
+    assert all(exception.__name__ in item["reason"] for item in result["expectations"])
+
+
+@pytest.mark.parametrize("keyword_arguments", [False, True])
+def test_required_behavior_judge_wrapper_keeps_inventory_on_unexpected_exception(keyword_arguments):
+    def raise_timeout(*_args, **_kwargs):
+        raise TimeoutError("judge deadline")
+
+    args = () if keyword_arguments else ("conversation", ["first", "second"])
+    kwargs = {"conversation_text": "conversation", "expected_behaviors": ["first", "second"]} if keyword_arguments else {}
+    result = eval_template._call_required_judge("behavior_check", raise_timeout, *args, **kwargs)
+    assert result["score"] is None and result["status"] == "error"
+    assert result["results"] == []
+    assert [item["requirement"] for item in result["expectations"]] == ["first", "second"]
+    assert all(item["status"] == "not_checked" for item in result["expectations"])
+    assert all("TimeoutError" in item["reason"] for item in result["expectations"])
+
+
+@pytest.mark.parametrize("module", [llm_judge, eval_template])
 def test_behavior_judge_can_abstain_without_calling_missing_evidence_a_violation(module, monkeypatch):
     response = json.dumps(
         {

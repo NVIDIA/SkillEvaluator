@@ -171,17 +171,21 @@ def _judgment(
 
 
 def build_case_diagnostics(
-    dataset: list[dict[str, Any]], agents: dict[str, dict[str, Any]], *, baseline_only: bool = False
+    dataset: list[dict[str, Any]], agents: dict[str, dict[str, Any]], *, evaluation_mode: str = "both"
 ) -> tuple[list[dict[str, Any]], dict[str, int]]:
     from skillevaluator.tier3.harbor.report_data import logical_trial_reward_groups
 
     condition_trials = []
     for agent, info in agents.items():
         for condition, key in (("with_skill", "rewards"), ("without_skill", "rewards_baseline")):
-            if baseline_only and condition == "with_skill":
+            if evaluation_mode == "baseline_only" and condition == "with_skill":
+                continue
+            if evaluation_mode == "with_skill_only" and condition == "without_skill":
                 continue
             conditions = _mapping(info.get("conditions"))
-            if key not in info and condition not in conditions:
+            if _mapping(conditions.get(condition)).get("execution_status") == "skipped":
+                continue
+            if not info.get(key) and condition not in conditions:
                 continue
             rows = info.get(key)
             groups_by_case: dict[str, list[list[dict[str, Any]]]] = {}

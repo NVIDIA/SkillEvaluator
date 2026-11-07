@@ -3436,17 +3436,20 @@ Example of the shape for this task's {expected_count} behaviors (the values are 
             return None
         return candidate
 
-    parsed, error, _provenance = _call_validated_json_judge(
-        prompt,
-        lambda payload: _behavior_payload_error(payload, expected_count),
-        call_public_llm,
-        extract_json,
-        metric="behavior_check",
-        salvage=salvage,
-        max_tokens=BEHAVIOR_JUDGE_MAX_TOKENS,
-        response_schema=BEHAVIOR_CHECK_JSON_SCHEMA,
-        schema_name="behavior_check_judgment",
-    )
+    try:
+        parsed, error, _provenance = _call_validated_json_judge(
+            prompt,
+            lambda payload: _behavior_payload_error(payload, expected_count),
+            call_public_llm,
+            extract_json,
+            metric="behavior_check",
+            salvage=salvage,
+            max_tokens=BEHAVIOR_JUDGE_MAX_TOKENS,
+            response_schema=BEHAVIOR_CHECK_JSON_SCHEMA,
+            schema_name="behavior_check_judgment",
+        )
+    except Exception as exc:
+        error = f"Required behavior_check judge raised {type(exc).__name__}: {exc}"
     if error:
         return _judge_error(error, results=[], expectations=_behavior_expectations(expected_behaviors, [], error))
 
@@ -3617,7 +3620,15 @@ def _call_required_judge(metric, judge, *args, allow_not_applicable=False, **kwa
                 finally:
                     signal.signal(signal.SIGALRM, previous_alarm_handler)
     except Exception as exc:
-        result = _judge_error(f"Required {metric} judge raised {type(exc).__name__}: {exc}")
+        error = f"Required {metric} judge raised {type(exc).__name__}: {exc}"
+        metadata = {}
+        if metric == "behavior_check":
+            expected_behaviors = kwargs.get("expected_behaviors", args[1] if len(args) > 1 else [])
+            metadata = {
+                "results": [],
+                "expectations": _behavior_expectations(expected_behaviors or [], [], error),
+            }
+        result = _judge_error(error, **metadata)
     finally:
         _ACTIVE_JUDGE_DEADLINE.reset(token)
         _ACTIVE_JUDGE_CALLS.reset(calls_token)

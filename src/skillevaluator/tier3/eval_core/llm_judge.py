@@ -1039,14 +1039,17 @@ def judge_behavior_check(
             return None
         return candidate
 
-    parsed, error, _provenance = _call_validated_json_judge(
-        prompt,
-        lambda payload: _behavior_payload_error(payload, expected_count),
-        call_public_llm,
-        _extract_json,
-        salvage=salvage,
-        **kwargs,
-    )
+    try:
+        parsed, error, _provenance = _call_validated_json_judge(
+            prompt,
+            lambda payload: _behavior_payload_error(payload, expected_count),
+            call_public_llm,
+            _extract_json,
+            salvage=salvage,
+            **kwargs,
+        )
+    except Exception as exc:
+        error = f"Required behavior_check judge raised {type(exc).__name__}: {exc}"
     if error:
         return _judge_error(error, results=[], expectations=_behavior_expectations(expected_behaviors, [], error))
 

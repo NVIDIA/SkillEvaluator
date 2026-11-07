@@ -4,6 +4,7 @@
 from __future__ import annotations
 
 import json
+import re
 
 import pytest
 
@@ -14,6 +15,7 @@ from skillevaluator.reporting import HTMLReporter
 from skillevaluator.reporting.html import _bounded_tier3_preview
 from skillevaluator.tier3.eval_core import llm_judge
 from skillevaluator.tier3.harbor.metrics import DEFAULT_METRICS
+from skillevaluator.tier3.harbor.report_data import load_agent_data
 
 
 def _reward(**overrides):
@@ -91,6 +93,12 @@ def test_full_and_partial_judge_results_reach_case_report(monkeypatch):
     assert "Write &lt;output.txt&gt;" in dataset_html
     assert "Ownership is not established by the score" in dataset_html
     assert "trial-1" in dataset_html and "trial-2" in dataset_html
+    assert '<ul class="t3-ds-diagnostics">' in dataset_html
+    assert '<ul class="t3-ds-behaviors">' not in dataset_html
+    assert "<div><b>expected_behavior/1</b>:" in dataset_html
+    diagnostic_styles = re.findall(r"\.t3-ds-diagnostics[^{}]*\{([^{}]*)\}", html)
+    assert diagnostic_styles
+    assert not any("grid" in style or "counter" in style for style in diagnostic_styles)
 
 
 @pytest.mark.parametrize(
@@ -247,9 +255,91 @@ def test_baseline_only_omits_unrun_with_skill_condition():
         {
             "codex": {"rewards": [], "rewards_baseline": [_reward()]},
         },
-        baseline_only=True,
+        evaluation_mode="baseline_only",
     )
     assert [attempt["condition"] for attempt in cases[0]["attempts"]] == ["without_skill"]
+
+
+@pytest.mark.parametrize("baseline_status", [None, "skipped"])
+def test_loaded_with_skill_only_report_has_no_phantom_baseline(tmp_path, monkeypatch, baseline_status):
+    monkeypatch.setattr(tier3_expectations, "_MAX_ATTEMPTS", 2)
+    active = tmp_path / "codex" / "with-skill"
+    active.mkdir(parents=True)
+    (active / "summary.json").write_text(
+        json.dumps(
+            {
+                "scores": dict.fromkeys(DEFAULT_METRICS, 1.0),
+                "metrics": list(DEFAULT_METRICS),
+                "execution_status": "succeeded",
+                "num_trials": 2,
+                "expected_attempts": 2,
+                "scored_attempts": 2,
+            }
+        )
+    )
+    for entry_id in ("case-1", "case-2"):
+        trial = active / "trials" / entry_id
+        trial.mkdir(parents=True)
+        (trial / "reward.json").write_text(json.dumps(_reward(entry_id=entry_id, trial_id=f"trial-{entry_id}")))
+    if baseline_status:
+        baseline = tmp_path / "codex" / "without-skill"
+        baseline.mkdir()
+        (baseline / "summary.json").write_text(json.dumps({"scores": {}, "execution_status": baseline_status}))
+    agents = load_agent_data(tmp_path)
+    assert agents["codex"]["rewards_baseline"] == []
+    payload = tier3_report.build_agent_eval_payload(
+        "demo",
+        agents,
+        dataset=[{"id": entry_id, "assertions": ["first"]} for entry_id in ("case-1", "case-2")],
+        use_llm_judge=False,
+    )
+    assert payload["mode"] == "with_skill_only"
+    assert len(payload["case_diagnostics"]) == 2
+    for case in payload["case_diagnostics"]:
+        assert [(attempt["condition"], attempt["trial_id"]) for attempt in case["attempts"]] == [
+            ("with_skill", f"trial-{case['entry_id']}")
+        ]
+    assert "expectation_attempts" not in payload.get("report_truncation", {}).get("omitted", {})
+
+
+def test_skipped_conditions_and_absent_empty_arms_do_not_consume_attempt_budget(monkeypatch):
+    monkeypatch.setattr(tier3_expectations, "_MAX_ATTEMPTS", 3)
+    cases, omitted = build_case_diagnostics(
+        [{"id": "case-1", "assertions": ["first"]}],
+        {
+            "codex": {
+                "rewards": [_reward()],
+                "rewards_baseline": [],
+                "conditions": {"without_skill": {"execution_status": "skipped"}},
+            },
+            "other": {"rewards": [_reward()], "rewards_baseline": [_reward()]},
+            "absent": {"rewards": [], "rewards_baseline": []},
+        },
+    )
+    assert not omitted
+    assert [(a["agent"], a["condition"]) for a in cases[0]["attempts"]] == [
+        ("codex", "with_skill"),
+        ("other", "with_skill"),
+        ("other", "without_skill"),
+    ]
+
+
+@pytest.mark.parametrize("status", ["failed", "unknown"])
+def test_unscored_failed_or_unknown_arm_remains_visible(status):
+    cases, omitted = build_case_diagnostics(
+        [{"id": "case-1", "assertions": ["first"]}],
+        {
+            "codex": {
+                "rewards": [_reward()],
+                "rewards_baseline": [],
+                "conditions": {"without_skill": {"execution_status": status, "execution_errors": ["No result"]}},
+            }
+        },
+    )
+    assert not omitted
+    assert [attempt["condition"] for attempt in cases[0]["attempts"]] == ["with_skill", "without_skill"]
+    assert _statuses(cases[0], 1) == {"assertions/0": "not_checked"}
+    assert cases[0]["attempts"][1]["errors"] == ["No result"]
 
 
 def test_large_preview_omits_whole_diagnostics_without_corrupting_identities():
@@ -274,3 +364,33 @@ def test_canonical_budget_records_dropped_diagnostics(monkeypatch):
     assert "case_diagnostics" not in payload
     assert payload["report_truncation"]["omitted"]["case_diagnostics"] == 1
     assert payload["summary"]["overall_score"] == 0.8
+
+
+@pytest.mark.parametrize("oversized_reasons", [False, True])
+def test_canonical_budget_restores_reasons_after_dropping_diagnostics(monkeypatch, oversized_reasons):
+    monkeypatch.setattr(tier3_report, "_MAX_EMBEDDED_REPORT_BYTES", 1500)
+    reason = "x" * (2000 if oversized_reasons else 100)
+    evidence = {"reason": reason, "excerpt": "observed result"}
+    cards = [{"evidence": [evidence]}]
+    payload = {
+        "summary": {"overall_score": 0.2},
+        "agents": {"codex": {"evaluator_cards": cards, "trials_baseline": [{"score_reasons": {"accuracy": reason}}]}},
+        "evaluator_cards": cards,
+        "trials": [{"agent": "codex", "score_reasons": {"accuracy": reason}}],
+        "case_diagnostics": [{"entry_id": "case-1", "large": "x" * 2000}],
+    }
+    budget = tier3_report._ReportBudget()
+    tier3_report._enforce_report_payload_budget(payload, budget)
+    assert "case_diagnostics" not in payload
+    assert budget.omitted.get("case_diagnostics") == 1
+    assert tier3_report._serialized_payload_size(payload) <= 1500
+    if oversized_reasons:
+        assert budget.omitted["failure_reasons"] == 4
+        assert "reason" not in evidence and "excerpt" not in evidence
+        assert "score_reasons" not in payload["trials"][0]
+        assert "score_reasons" not in payload["agents"]["codex"]["trials_baseline"][0]
+    else:
+        assert "failure_reasons" not in budget.omitted
+        assert evidence == {"reason": reason, "excerpt": "observed result"}
+        assert payload["trials"][0]["score_reasons"] == {"accuracy": reason}
+        assert payload["agents"]["codex"]["trials_baseline"][0]["score_reasons"] == {"accuracy": reason}

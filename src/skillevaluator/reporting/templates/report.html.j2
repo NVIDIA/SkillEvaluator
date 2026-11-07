@@ -2232,6 +2232,9 @@
             .t3-ds-behaviors { counter-reset:behavior; list-style:none; margin:0.45rem 0 0; padding:0; display:grid; gap:0.35rem; }
             .t3-ds-behaviors li { counter-increment:behavior; display:grid; grid-template-columns:1.7rem 1fr; gap:0.5rem; align-items:start; color:var(--dark-text); font-size:0.87rem; line-height:1.45; }
             .t3-ds-behaviors li::before { content:counter(behavior); display:inline-flex; align-items:center; justify-content:center; width:1.35rem; height:1.35rem; border-radius:999px; background:var(--bg-secondary); color:var(--secondary-color); font-weight:800; font-size:0.72rem; border:1px solid var(--border-color); }
+            .t3-ds-diagnostics { list-style:none; margin:0.45rem 0 0; padding:0; }
+            .t3-ds-diagnostics > li { margin-top:0.65rem; padding:0.65rem; border:1px solid var(--border-color); border-radius:0.4rem; overflow-wrap:anywhere; color:var(--dark-text); font-size:0.87rem; line-height:1.45; }
+            .t3-ds-diagnostics > li > div { margin-top:0.25rem; }
             .t3-conclusion { border-left:4px solid var(--warning-color); }
             .t3-conclusion.pass { border-left-color:var(--success-color); }
             .t3-conclusion.fail { border-left-color:var(--danger-color); }
@@ -3593,11 +3596,11 @@
                             {% set judgments = attempt.judgments | selectattr('status', 'equalto', status) | list %}
                             {% if judgments %}
                             <h4>{{ status | replace('_', ' ') | title }} ({{ judgments | length }})</h4>
-                            <ul class="t3-ds-behaviors">
+                            <ul class="t3-ds-diagnostics">
                             {% for judgment in judgments %}
                             <li>
                                 {% for requirement in diagnostic.requirements if requirement.expectation_id == judgment.expectation_id %}
-                                <b>{{ requirement.expectation_id }}</b>: <span style="white-space:pre-wrap;">{{ requirement.requirement }}</span>
+                                <div><b>{{ requirement.expectation_id }}</b>: <span style="white-space:pre-wrap;">{{ requirement.requirement }}</span></div>
                                 {% endfor %}
                                 <div>{{ judgment.reason }}</div>
                                 {% if judgment.unmet_checks %}<div>Unmet rubric checks: {{ judgment.unmet_checks | join(', ') }}</div>{% endif %}

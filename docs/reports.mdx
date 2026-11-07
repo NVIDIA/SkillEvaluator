@@ -690,6 +690,8 @@ requirement. A low score alone never assigns ownership to the skill or test.
 Negative controls may correctly avoid the skill while completing an unrelated
 task; being unrelated is not a reason to remove the case. The no-skill baseline
 can mark skill checks inapplicable while still judging the task outcome.
+Intentionally skipped conditions do not create diagnostic attempts. Failed or
+unknown conditions remain visible even when no trial result was retained.
 
 Behavior judges may return `passed: null` with an explanation when evidence
 does not permit a check. The rich behavior result's `expectations` retains all
@@ -703,6 +705,8 @@ across the report and 8,192 judgments. Any omissions are recorded under
 `report_truncation.omitted`. Oversized HTML previews omit whole diagnostic
 inventories rather than truncating identity or status fields; JSON Downloads
 retain them unless the canonical 2 MiB limit also requires dropping them.
+Dropping an oversized diagnostic inventory preserves built failure reasons
+whenever those reasons still fit within the canonical limit.
 Retained run artifacts remain the source for details omitted by either limit.
 
 ### pass@k

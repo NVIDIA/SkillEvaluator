@@ -8,9 +8,10 @@ All notable changes to SkillEvaluator are documented in this file.
 
 - Tier 3 reports show per-case expectation inventories with explicit met,
   unmet, unchecked, unscored and inapplicable judgments, evidence and next
-  diagnostic steps for both conditions. Behavior judges can abstain when
+  diagnostic steps for executed conditions. Behavior judges can abstain when
   evidence is missing; partial results preserve every original requirement
-  without presenting missing judgments as verified skill defects.
+  without presenting missing judgments as verified skill defects. Unexpected
+  judge errors retain that inventory; intentionally skipped arms add no attempts.
 
 - `skills/skillevaluator/` is an agent skill for operating SkillEvaluator: it
   routes requests to the right tier, readiness check, dataset, report, or CI

@@ -16,6 +16,13 @@ Tier 3 executes these cases through
 evaluation framework. Native Harbor task bundles are the bring-your-own-task
 alternative to the `evals.json` dataset described below.
 
+## Candidates from production trace exports
+
+Use `tier3 import-traces` to create a redacted review bundle outside the skill,
+then `tier3 accept-traces` to promote only explicitly reviewed expectations.
+Observed production behavior never automatically becomes an expected answer.
+See [Trace Datasets](trace-datasets.mdx) for the export contract and review decisions.
+
 ## The evals/ directory
 
 SkillEvaluator recognizes this tree inside your skill:

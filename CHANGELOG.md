@@ -6,6 +6,10 @@ All notable changes to SkillEvaluator are documented in this file.
 
 ### Added
 
+- Import production trace exports into redacted review candidates with
+  `tier3 import-traces`, then promote only explicitly human-reviewed expectations
+  and replay fixtures with `tier3 accept-traces`.
+
 - `skills/skillevaluator/` is an agent skill for operating SkillEvaluator: it
   routes requests to the right tier, readiness check, dataset, report, or CI
   command, and ships Tier 3 evaluation cases for itself. A test keeps every

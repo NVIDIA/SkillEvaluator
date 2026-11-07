@@ -44,6 +44,8 @@ commands referenced below.
 | [health-check](#health-check) | Quick CLI + backend readiness check, or another tier with `--tier` | Nothing |
 | [models](#models) | List models visible through the selected provider's catalog | Provider configuration/key |
 | [tier3 validate](#tier3-validate) | Validate `evals/` and the optional Harbor contract | Nothing |
+| [tier3 import-traces](#tier3-import-traces) | Import redacted trace review candidates | Nothing |
+| [tier3 accept-traces](#tier3-accept-traces) | Promote explicitly reviewed trace candidates | Nothing |
 
 ## Global conventions
 
@@ -170,6 +172,38 @@ pipeline.
 [tier3 evaluate](#tier3-evaluate), [tier3 select-decoys](#tier3-select-decoys),
 [tier3 feedback](#tier3-feedback), and `tier3 validate` are advertised **only**
 inside the `tier3` group:
+
+### tier3 import-traces
+
+Import a production trace export into redacted candidates outside the skill.
+See [Trace Datasets](trace-datasets.mdx) for the v1 JSON/JSONL contract and redaction limits.
+
+```bash
+skillevaluator tier3 import-traces ./my-skill ./sessions.jsonl -o ./review
+```
+
+| Option | Default | Purpose |
+| --- | --- | --- |
+| `-o`, `--output DIR` | `./<skill-dir-name>-trace-review` | Review bundle directory, outside the skill. |
+| `--force` | off | Overwrite an existing candidates file. |
+| `--dry-run` | off | Print classifications, warnings, and the next-step hint; write nothing. |
+
+### tier3 accept-traces
+
+Promote only explicitly reviewed candidates into `evals/evals.json`. Requires
+`SKILL_PATH` and `REVIEW_DIR`. `accept` requires a reviewer-written expectation;
+`accept_observed` is allowed only for successful sessions with non-empty output.
+Pending and rejected candidates are skipped. All decision/redaction errors abort
+before writing; dataset validation errors after writing return a non-zero status.
+
+```bash
+skillevaluator tier3 accept-traces ./my-skill ./review --dry-run
+skillevaluator tier3 accept-traces ./my-skill ./review
+```
+
+| Option | Default | Purpose |
+| --- | --- | --- |
+| `--dry-run` | off | Report additions and already-present ids without writing. |
 
 ### tier3 validate
 

@@ -121,6 +121,12 @@ All notable changes to SkillEvaluator are documented in this file.
   `Use HTTP POST to create an item.` in a here-document or an unpiped `echo`
   still does not warn.
 
+- `tier3 compare` now shows the same Overall lift as `lift.json` and the
+  reports when a metric is N/A in only one arm, such as the skill metrics in a
+  baseline without the skill. It used to subtract the two arm overall scores
+  (for example +0.03 where the run published +0.10); it now drops those metrics
+  from both arms, as the run's lift does, and notes it below the table.
+
 ## 0.8.0 - 2026-11-05
 
 ### Added

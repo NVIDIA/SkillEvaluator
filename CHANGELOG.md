@@ -77,6 +77,10 @@ All notable changes to SkillEvaluator are documented in this file.
   `/bin/bash -lc 'cat skills/x/SKILL.md'`, which some agent harnesses record
   instead of the bare command. Searches inside a wrapper (`bash -c 'grep SKILL
   config.json'`) are still not counted.
+
+- Read JSON, JSONL and YAML evaluation datasets as UTF-8 so Unicode prompts and
+  answers load correctly on hosts with a non-UTF-8 default text encoding.
+
 - A PII finding no longer keeps its `evidence_sha256` after CI redaction masks
   a credential inside the value the finding reports. In 0.8.0 the finding kept
   the digest of the unmasked value, so anyone holding the redacted report could

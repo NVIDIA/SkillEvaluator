@@ -517,7 +517,11 @@ def run_nemo_gym_eval(
     from skillevaluator.source_identity import normalized_evaluated_source
     from skillevaluator.tier3.case_ids import validate_case_ids
     from skillevaluator.tier3.evals_config import EvalsConfigError, load_evals_config
-    from skillevaluator.tier3.harbor.adapter import generate_harbor_tasks, stage_native_harbor_tasks
+    from skillevaluator.tier3.harbor.adapter import (
+        build_eval_base_image,
+        generate_harbor_tasks,
+        stage_native_harbor_tasks,
+    )
     from skillevaluator.tier3.harbor.artifact_retention import HarborArtifactLifecycle
     from skillevaluator.tier3.harbor.collector import _score_definition_for_policy, collect_harbor_results
     from skillevaluator.tier3.harbor.metrics import DEFAULT_METRICS, score_policy_for_metrics
@@ -595,8 +599,6 @@ def run_nemo_gym_eval(
         effective_timeout = _validated_timeout_multiplier(effective_timeout)
     except ValueError as exc:
         errors.append(str(exc))
-    if harbor_config.get("base_image_mode", "disabled") != "disabled":
-        errors.append("harbor.base_image_mode reuse/rebuild applies to the Harbor backend only")
     if not _is_positive_int(attempts):
         errors.append("n_attempts must be >= 1")
     if not _is_positive_int(concurrency):
@@ -721,6 +723,25 @@ def run_nemo_gym_eval(
         # Stage every agent and arm before the first launch, so all arms see the same skill inputs.
         planned: list[tuple[str, str, Path, dict[str, str]]] = []
         staged_task_paths: list[Path] = []
+        base_image_mode = harbor_config.get("base_image_mode", "disabled")
+        base_image = ""
+        if base_image_mode != "disabled":
+            reporter.emit(
+                ProgressEvent(
+                    stage="docker-images",
+                    state="running",
+                    detail=f"preparing shared eval base image ({base_image_mode})",
+                )
+            )
+            base_image = build_eval_base_image(
+                skill_path.resolve(),
+                None,
+                workspace_skill_paths=workspace_source_paths,
+                excluded_roots=repo_context_exclude_paths,
+                force_rebuild=base_image_mode == "rebuild",
+            )
+            detail = f"eval base image ready: {base_image}" if base_image else "using full per-task Dockerfiles"
+            reporter.emit(ProgressEvent(stage="docker-images", state="complete", detail=detail))
         # Every arm stages the same verified decoy bytes, as on Harbor.
         with (
             _private_decoy_workspace_snapshot(selected_decoys, decoy_manifest)
@@ -747,6 +768,9 @@ def run_nemo_gym_eval(
                         pre_agent_setup=pre_agent_setup or None,
                         agent_workdir=agent_workdir,
                         copy_repo=copy_repo,
+                        base_image=base_image,
+                        custom_dockerfile_mode=custom_dockerfile_mode
+                        or harbor_config.get("custom_dockerfile_mode", "rebase"),
                     )
                     if max_cases is not None:
                         selectors = validate_case_ids(task.name for task in task_paths)
@@ -901,7 +925,7 @@ def run_nemo_gym_eval(
                 "stop_on_pass": False,
                 "n_concurrent": concurrency,
                 "timeout_multiplier": effective_timeout,
-                "base_image_mode": "disabled",
+                "base_image_mode": base_image_mode,
                 "custom_dockerfile_mode": custom_dockerfile_mode
                 or harbor_config.get("custom_dockerfile_mode", "rebase"),
                 "jobs_retained": False,

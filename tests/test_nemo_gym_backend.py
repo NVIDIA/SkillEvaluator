@@ -934,3 +934,32 @@ def test_fake_gym_run_stages_native_harbor_tasks(tmp_path: Path, monkeypatch: py
     assert all("NATIVE-7341" in text for text in staged.values())
     run_config = json.loads((Path(result["run_dir"]) / "run_config.json").read_text())
     assert run_config["task_source"] == "native_harbor"
+
+
+def test_fake_gym_run_reuses_the_shared_base_image(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    from skillevaluator.tier3.harbor import adapter
+    from skillevaluator.tier3.nemo_gym import runner as gym_runner
+
+    skill, _env_log = _fake_gym_skill(
+        tmp_path, monkeypatch, config="schema_version: 1\nharbor:\n  base_image_mode: rebuild\n"
+    )
+    builds: list[bool] = []
+
+    def fake_build(*_args, force_rebuild: bool = False, **_kwargs) -> str:
+        builds.append(force_rebuild)
+        return "skillevaluator-base:test"
+
+    monkeypatch.setattr(adapter, "build_eval_base_image", fake_build)
+    dockerfiles: list[str] = []
+    original_stage = gym_runner.stage_for_gym
+
+    def recording_stage(arm_dir: Path, *args, **kwargs) -> None:
+        original_stage(arm_dir, *args, **kwargs)
+        dockerfiles.extend(path.read_text() for path in arm_dir.glob("*/environment/Dockerfile"))
+
+    monkeypatch.setattr(gym_runner, "stage_for_gym", recording_stage)
+    result = _run_fake_gym(skill, tmp_path)
+    assert builds == [True]
+    assert dockerfiles and all("FROM skillevaluator-base:test" in text for text in dockerfiles)
+    run_config = json.loads((Path(result["run_dir"]) / "run_config.json").read_text())
+    assert run_config["harbor"]["base_image_mode"] == "rebuild"

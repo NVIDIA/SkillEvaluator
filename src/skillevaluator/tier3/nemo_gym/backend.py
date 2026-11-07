@@ -245,8 +245,6 @@ def nemo_gym_config_errors(
         errors.append("harbor.stop_on_pass is not supported with --backend nemo-gym yet")
     if agent_runtime_preflight is None and harbor.get("agent_runtime_preflight"):
         errors.append("harbor.agent_runtime_preflight applies to the Harbor backend only")
-    if harbor.get("base_image_mode", "disabled") != "disabled":
-        errors.append("harbor.base_image_mode reuse/rebuild applies to the Harbor backend only")
     if mcp_servers_declared(skill_path):
         errors.append(MCP_SERVERS_ERROR)
     if "storage_mb" in (harbor.get("resources") or {}):

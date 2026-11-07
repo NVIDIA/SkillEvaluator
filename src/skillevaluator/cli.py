@@ -3711,6 +3711,44 @@ def tier3_validate(skill_path: Path, as_json: bool, strict: bool, harbor_contrac
     raise SystemExit(tier3_validate_evals(skill_path, as_json=as_json, strict=strict, harbor_contract=harbor_contract))
 
 
+@tier3.command("history")
+@_skill_argument
+@click.option("--results-dir", type=click.Path(file_okay=False, path_type=Path), default=None)
+@click.option("--agent", default=None, help="Include only this agent's history.")
+@click.option("--json", "as_json", is_flag=True, help="Print history as JSON.")
+@click.option(
+    "--output",
+    type=click.Path(dir_okay=False, path_type=Path),
+    default=None,
+    help="Export to .json, .csv or .md outside the results root.",
+)
+def tier3_history(
+    skill_path: Path, results_dir: Path | None, agent: str | None, as_json: bool, output: Path | None
+) -> None:
+    """List retained Skill Lift runs chronologically without execution."""
+    from skillevaluator.tier3.history import collect_history, export_history, print_history
+    from skillevaluator.tier3.results_location import iter_candidate_results_roots
+
+    try:
+        if output is not None:
+            if output.suffix.lower() not in {".json", ".csv", ".md"}:
+                raise click.UsageError("--output must end in .json, .csv or .md")
+            if any(
+                output.resolve().is_relative_to(root.resolve())
+                for root in iter_candidate_results_roots(skill_path, results_dir)
+            ):
+                raise click.UsageError("--output must be outside the results roots (history is read-only)")
+        history = collect_history(skill_path, results_dir, agent)
+        if output is not None:
+            output.write_text(export_history(history, output.suffix.lower()), encoding="utf-8")
+        if as_json:
+            click.echo(export_history(history, ".json"), nl=False)
+        else:
+            print_history(history, console)
+    except (OSError, ValueError) as exc:
+        raise click.ClickException(str(exc)) from exc
+
+
 @tier3.command("feedback")
 @click.argument("run_dir", type=click.Path(exists=True, file_okay=False, dir_okay=True, path_type=Path))
 @click.option(

@@ -37,6 +37,7 @@ commands referenced below.
 | [init-harbor-task](#init-harbor-task) | Scaffold a bring-your-own-task Harbor starter | Nothing |
 | [view](#view) | Open the latest HTML live-evaluation report | A previous `tier3 evaluate` run |
 | [compare](#compare) | Compare live-evaluation results across agents | A previous `tier3 evaluate` run |
+| [tier3 history](#tier3-history) | Inspect retained Skill Lift over skill revisions, grouped by compatible configuration | Retained Tier 3 summaries |
 | [tier3 feedback](#tier3-feedback) | Chat about one completed live-evaluation run and possible skill changes | A completed `tier3 evaluate` run, LLM provider key |
 | [dashboard](#dashboard) | Filter quantitative tables and paired usage differences | Saved JSON reports or retained runs; dashboard extra |
 | [harbor-view](#harbor-view) | Browse retained Harbor job artifacts | A run made with `--harbor-keep-jobs` |
@@ -586,6 +587,31 @@ skillevaluator view ./my-skill
 | Flag | Default | Effect |
 | --- | --- | --- |
 | `--results-dir DIRECTORY` | unset | Results directory to read from (default resolution in [Reports & Results](reports.mdx)). |
+
+## tier3 history
+
+```bash
+skillevaluator tier3 history ./my-skill
+skillevaluator tier3 history ./my-skill --results-dir ./saved-runs --agent opencode --json
+skillevaluator tier3 history ./my-skill --output ./lift-history.md
+```
+
+List every retained run chronologically, with one row per run and agent,
+including failed, incomplete, and corrupt runs. An unavailable lift is JSON
+`null` with `lift_status` and reasons, never an inferred zero. Segments and
+visible break markers separate model, dataset, attempt, scoring-policy, and
+other configuration changes; the change column never crosses a segment boundary.
+Skill revisions alone do not break baseline compatibility.
+
+| Flag | Default | Effect |
+| --- | --- | --- |
+| `--results-dir DIRECTORY` | normal results-root resolution | External root containing the per-skill directory; honors the configured location and legacy fallback like `compare`. |
+| `--agent TEXT` | all | Include only this agent's rows. |
+| `--json` | off | Print the complete history as JSON instead of a table. |
+| `--output FILE` | none | Write exactly this `.json`, `.csv`, or `.md` export. The file must be outside all candidate results roots; no directories are created. Stdout still follows `--json`. |
+
+The command reads summaries only: no agents, provider credentials, or raw
+trajectories are needed. See [Lift history and retention](reports.mdx#lift-history-and-retention).
 
 ## compare
 

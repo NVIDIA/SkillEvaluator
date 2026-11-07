@@ -101,10 +101,12 @@ All notable changes to SkillEvaluator are documented in this file.
   Lift of an evaluator or dimension that is N/A in either arm, as the Markdown
   and HTML reports already do. Most runs with a baseline hit this: Skill
   Execution, Efficiency and Discoverability are N/A in a baseline with no
-  skill it could activate, and `accuracy`, `goal_accuracy` and
-  `behavior_check` are N/A when the cases have no `ground_truth` or
-  `expected_behavior`. A lift that is missing for another reason still reads
-  `NO SCORE`.
+  skill it could activate, `behavior_check` is N/A when the cases have no
+  `assertions` (legacy `expected_behavior`), and `accuracy` and
+  `goal_accuracy` when they have no `expected_output` (legacy
+  `ground_truth`). In a baseline-only run (`--skip-with-skill`) the lift of
+  every other row now reads `skipped`, as the docs and the Markdown report
+  say. A lift that is missing for another reason still reads `NO SCORE`.
 
 - `skillevaluator tier3 feedback` now writes the evaluated skill's directory
   (known from `--skill` or a run in the skill's `evals/results`) as its name

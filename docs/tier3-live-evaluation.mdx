@@ -885,19 +885,25 @@ unscored rather than converted to `0.0`.
 A metric can also be N/A (not applicable) for an eval case. It never counts as
 `1.0` or `0.0`:
 
-- `accuracy` and `goal_accuracy` are N/A when the case has no `ground_truth`,
-  and `behavior_check` when it has no `expected_behavior`. The verifier does
-  not call those judges. `0`, `0.0` and `false` are real reference answers.
+- `behavior_check` is N/A when the case has no `assertions` (legacy
+  `expected_behavior`), and `accuracy` and `goal_accuracy` when it has no
+  `expected_output` (legacy `ground_truth`). An empty or whitespace-only
+  reference, or an empty list, counts as missing. The verifier does not call
+  those judges. `expected_output` is required, so only legacy cases without
+  `ground_truth` make `accuracy` and `goal_accuracy` N/A.
 - `skill_execution` and `skill_efficiency` are N/A in a baseline arm that has
   no skill it could activate.
 - Security is never N/A.
 
-An N/A metric is `null` with `status: "not_applicable"` and a reason in
-`skill_evaluator_reward.json`, and Harbor's numeric `reward.json` leaves it
-out. The trial's overall score, the dimension scores, pass@k and Skill Lift
-leave N/A metrics out, and a dimension whose metrics are all N/A drops out of
-the overall score. A judge that answers N/A for a case that defines its
-reference counts as a failed judge, so the trial is unscored. Each arm's
+In `skill_evaluator_reward.json` an N/A metric's value is `null`, and
+`details.<metric>` records `status: "not_applicable"` and a `reason`.
+Harbor's numeric `reward.json` leaves the metric out. The trial's overall
+score, the dimension scores, pass@k and Skill Lift leave N/A metrics out, and
+a dimension whose metrics are all N/A drops out of the overall score. That
+dimension has no score, and the verdict needs a with-skill score in every
+dimension, so the agent's verdict is NEUTRAL, never PASS. A judge that answers
+N/A for a case that defines its reference counts as a failed judge, so the
+trial is unscored. Each arm's
 `summary.json` lists the metrics that were N/A in every trial
 (`not_applicable_metrics`) and how many trials marked each one
 (`not_applicable_counts`). The terminal summary and the Markdown and HTML

@@ -457,11 +457,13 @@ signals up into the five dimensions below. A metric the run couldn't score
 renders as `NO SCORE` — it is never coerced to 0.0 — and unscored metrics are
 omitted from the averages, so `overall_score` can be `null` in the JSON. A
 metric that does not apply to an arm renders as `N/A`, and so does its Skill
-Lift: for example `accuracy` when the cases have no `ground_truth`, or Skill
-Execution in a baseline with no skill it could activate. N/A metrics are left
-out of the scores and the lift. In a
-baseline-only run (`--skip-with-skill`) the with-skill and Skill Lift cells read
-`skipped` instead, because that arm never ran. The
+Lift: for example Behavior Check when the cases have no `assertions` (legacy
+`expected_behavior`), Accuracy when they have no `expected_output` (legacy
+`ground_truth`), or Skill Execution in a baseline with no skill it could
+activate. N/A metrics are left out of the scores and the lift. In a
+baseline-only run (`--skip-with-skill`) the with-skill cells read `skipped`,
+because that arm never ran, and so does the Skill Lift of every row that is
+not N/A. The
 Artifacts panel shows the HTML report path, the output directory, and — only
 when a retained Harbor jobs directory exists — a ready-to-paste `harbor-view`
 command.

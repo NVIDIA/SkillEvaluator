@@ -28,6 +28,7 @@ from itertools import islice
 from pathlib import Path, PurePosixPath, PureWindowsPath
 from typing import Any
 
+from skillevaluator.tier3.attempt_verdict import attempt_verdict, scored_goal_accuracy
 from skillevaluator.tier3.eval_core.atif_helpers import extract_tool_calls_as_dicts, get_skill_tool_calls
 from skillevaluator.tier3.eval_core.checks import check_negative_case
 from skillevaluator.tier3.eval_core.codex_tool_call_normalizer import atif_content_text
@@ -4675,7 +4676,11 @@ def harbor_job_passed(job_dir: Path, pass_threshold: float) -> bool:
         return False
     rewards, _ = _partition_scoreable_rewards(_extract_rewards(job_dir))
     return any(
-        (score := _overall_score(reward)) is not None and score >= pass_threshold
+        attempt_verdict(
+            _overall_score(reward),
+            pass_threshold,
+            scored_goal_accuracy(reward),
+        ).passed
         for reward in _logical_attempt_rewards(rewards)
     )
 
@@ -4964,7 +4969,13 @@ def _pass_summary(
     expected_ids = _validated_expected_case_ids(expected_case_ids)
     expected_id_set = set(expected_ids) if expected_ids else None
     grouped: dict[str, list[tuple[dict[str, Any], float]]] = {}
+    correct_answers = 0
+    scored_answers = 0
     for reward in _logical_attempt_rewards(rewards):
+        goal_accuracy = scored_goal_accuracy(reward)
+        if goal_accuracy is not None:
+            scored_answers += 1
+            correct_answers += int(attempt_verdict(None, pass_threshold, goal_accuracy).correct_answer is True)
         overall = score_of(reward)
         if overall is None:
             continue
@@ -4993,7 +5004,8 @@ def _pass_summary(
         for idx, (reward, overall) in enumerate(sorted(attempts, key=lambda item: _attempt_sort_key(item[0])), start=1):
             idx = _attempt_ordinal(reward) or idx
             score = round(overall, 4)
-            passed = score >= pass_threshold
+            verdict = attempt_verdict(score, pass_threshold, scored_goal_accuracy(reward))
+            passed = verdict.passed
             attempt_passes.append({"passed": passed})
             if passed and first_pass_attempt is None:
                 first_pass_attempt = idx
@@ -5009,6 +5021,8 @@ def _pass_summary(
                         "trial": _published_trial_label(reward.get("_trial_name", "")),
                         "score": score,
                         "passed": passed,
+                        "goal_accuracy": scored_goal_accuracy(reward),
+                        "reason": verdict.reason,
                     }
                 )
                 published_attempt_details += 1
@@ -5060,6 +5074,7 @@ def _pass_summary(
     return {
         "k": n_attempts,
         "pass_threshold": pass_threshold,
+        "correct_answers": {"correct": correct_answers, "scored": scored_answers},
         "stop_on_pass": stop_on_pass,
         "passed_cases": passed_cases,
         "failed_cases": failed_cases,
@@ -6695,9 +6710,9 @@ def _condition_execution_summary(
     for reward in _logical_attempt_rewards(rewards):
         score = _overall_score(reward)
         if score is not None:
-            logical_passed[str(reward.get("_trial_root_name") or reward.get("_trial_name") or "")] = (
-                score >= pass_threshold
-            )
+            logical_passed[str(reward.get("_trial_root_name") or reward.get("_trial_name") or "")] = attempt_verdict(
+                score, pass_threshold, scored_goal_accuracy(reward)
+            ).passed
     roots: dict[str, dict[str, Any]] = {}
     for reward in rewards:
         root = str(reward.get("_trial_root_name") or "").strip()
@@ -6720,7 +6735,9 @@ def _condition_execution_summary(
                 "case_id": case_id,
                 "steps": {step_name} if step_name else set(),
                 "reward": reward,
-                "passed": logical_passed.get(root, score >= pass_threshold),
+                "passed": logical_passed.get(
+                    root, attempt_verdict(score, pass_threshold, scored_goal_accuracy(reward)).passed
+                ),
                 "attempt_ordinal": _attempt_ordinal(reward),
             }
             continue

@@ -385,9 +385,30 @@ class CLIReporter(ReporterBase):
         composite_text = f"{composite:+.2f}" if scored_lift else "N/A"
         composite_style = lift_style(composite) if scored_lift else "dim"
         verdict_text = escape_markup(str(verdict).upper())
+        correct_answers = agent_eval.get("correct_answers")
+        correct_text = ""
+        if isinstance(correct_answers, dict):
+            with_skill = correct_answers.get("with_skill")
+            without_skill = correct_answers.get("without_skill")
+            difference = correct_answers.get("difference")
+            if isinstance(with_skill, dict) and isinstance(without_skill, dict):
+                counts = (
+                    with_skill.get("correct"),
+                    with_skill.get("scored"),
+                    without_skill.get("correct"),
+                    without_skill.get("scored"),
+                )
+                if all(isinstance(count, int) and not isinstance(count, bool) and count >= 0 for count in counts):
+                    delta = (
+                        f"{difference:+d}"
+                        if isinstance(difference, int) and not isinstance(difference, bool)
+                        else "N/A"
+                    )
+                    correct_text = f"; correct answers = {counts[0]}/{counts[1]} | {counts[2]}/{counts[3]} | {delta}"
         console.print(
             f"\n  [{vc}]Verdict: {verdict_text}[/{vc}] "
-            f"(composite lift = [{composite_style}]{composite_text}[/{composite_style}])"
+            f"(composite lift = [{composite_style}]{composite_text}[/{composite_style}]"
+            f"{escape_markup(correct_text)})"
         )
         if verdict == "inconclusive":
             console.print(

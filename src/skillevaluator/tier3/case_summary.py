@@ -22,6 +22,7 @@ from rich.table import Table
 from rich.text import Text
 
 from skillevaluator.reporting.terminal_styles import AMBER
+from skillevaluator.tier3.attempt_verdict import attempt_verdict, scored_goal_accuracy
 from skillevaluator.tier3.harbor.progress import redact_progress_detail, secret_values_from_environment
 from skillevaluator.utils.redaction import redact_sensitive_text
 from skillevaluator.utils.secret_redaction import Redactor
@@ -187,8 +188,20 @@ def _scored_trials(agent: Mapping[str, Any], key: str) -> dict[str, dict[str, An
         score = reward.get("overall") if isinstance(reward, Mapping) else None
         if isinstance(score, int | float) and not isinstance(score, bool):
             attempts = cases.setdefault(trial.name.split("__", 1)[0], {"attempts": []})["attempts"]
+            verdict = attempt_verdict(
+                score,
+                threshold,
+                scored_goal_accuracy(dict(reward)),
+            )
             attempts.append(
-                {"attempt": len(attempts) + 1, "trial": trial.name, "score": score, "passed": score >= threshold}
+                {
+                    "attempt": len(attempts) + 1,
+                    "trial": trial.name,
+                    "score": score,
+                    "passed": verdict.passed,
+                    "goal_accuracy": scored_goal_accuracy(dict(reward)),
+                    "reason": verdict.reason,
+                }
             )
     return cases
 
@@ -1195,7 +1208,7 @@ def _live_mark(trial: Path, run_dir: Path, pass_threshold: float) -> str | None:
     rewards = verifier.get("rewards") if isinstance(verifier, Mapping) else None
     score = rewards.get("overall") if isinstance(rewards, Mapping) else None
     if isinstance(score, int | float) and not isinstance(score, bool):
-        return PASS if score >= pass_threshold else FAIL
+        return PASS if attempt_verdict(score, pass_threshold, scored_goal_accuracy(dict(rewards))).passed else FAIL
     return ERROR
 
 

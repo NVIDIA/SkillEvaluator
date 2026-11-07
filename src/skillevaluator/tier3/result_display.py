@@ -607,17 +607,41 @@ def _render_agent_scores(
             Text(""),
             table,
         )
-    elif (
-        with_usable
-        and baseline_usable
-        and all(_finite_number(value) is not None for value in (with_overall, baseline_overall, overall.get("delta")))
-    ):
-        headline = Text("OVERALL SKILL LIFT   ", style="bold")
-        headline.append_text(_delta_cell(overall["delta"]))
-        agents = result.get("agents")
-        if isinstance(agents, Mapping) and len(agents) > 1:
-            headline.append(f" · {safe(agent)}", style="dim")
-        content = Group(headline, Text(""), table)
+    else:
+        headlines = []
+        if (
+            with_usable
+            and baseline_usable
+            and all(
+                _finite_number(value) is not None for value in (with_overall, baseline_overall, overall.get("delta"))
+            )
+        ):
+            headline = Text("OVERALL SKILL LIFT   ", style="bold")
+            headline.append_text(_delta_cell(overall["delta"]))
+            agents = result.get("agents")
+            if isinstance(agents, Mapping) and len(agents) > 1:
+                headline.append(f" · {safe(agent)}", style="dim")
+            headlines.append(headline)
+        pass_at_k = data.get("pass_at_k")
+        with_pass = pass_at_k.get("with_skill") if isinstance(pass_at_k, Mapping) else None
+        without_pass = pass_at_k.get("without_skill") if isinstance(pass_at_k, Mapping) else None
+        with_answers = with_pass.get("correct_answers") if isinstance(with_pass, Mapping) else None
+        without_answers = without_pass.get("correct_answers") if isinstance(without_pass, Mapping) else None
+        if isinstance(with_answers, Mapping) and isinstance(without_answers, Mapping):
+            counts = (
+                with_answers.get("correct"),
+                with_answers.get("scored"),
+                without_answers.get("correct"),
+                without_answers.get("scored"),
+            )
+            if all(isinstance(count, int) and not isinstance(count, bool) and count >= 0 for count in counts):
+                difference = counts[0] - counts[2] if counts[1] and counts[3] else None
+                line = Text("CORRECT ANSWERS   ", style="bold")
+                delta = f"{difference:+d}" if difference is not None else "N/A"
+                line.append(f"{counts[0]}/{counts[1]} | {counts[2]}/{counts[3]} | {delta}")
+                headlines.append(line)
+        if headlines:
+            content = Group(*headlines, Text(""), table)
     console.print(
         Panel(
             content,

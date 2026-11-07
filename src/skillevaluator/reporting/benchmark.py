@@ -477,6 +477,35 @@ class BenchmarkReporter(ReporterBase):
         )
         lines.append("| " + " | ".join(_md_cell(value, private_labels) for value in overall_row) + " |")
 
+        correct_answers_row = ["Correct answers"]
+        for agent in agents.values():
+            correct_answers = agent.get("correct_answers")
+            with_skill = correct_answers.get("with_skill") if isinstance(correct_answers, dict) else None
+            without_skill = correct_answers.get("without_skill") if isinstance(correct_answers, dict) else None
+            difference = correct_answers.get("difference") if isinstance(correct_answers, dict) else None
+            counts = (
+                (
+                    with_skill.get("correct"),
+                    with_skill.get("scored"),
+                    without_skill.get("correct"),
+                    without_skill.get("scored"),
+                )
+                if isinstance(with_skill, dict) and isinstance(without_skill, dict)
+                else ()
+            )
+            if (
+                len(counts) == 4
+                and all(isinstance(count, int) and not isinstance(count, bool) and count >= 0 for count in counts)
+                and counts[1] > 0
+                and counts[3] > 0
+                and isinstance(difference, int)
+                and not isinstance(difference, bool)
+            ):
+                correct_answers_row.append(f"{counts[0]}/{counts[1]} | {counts[2]}/{counts[3]} | {difference:+d}")
+            else:
+                correct_answers_row.append("N/A")
+        lines.append("| " + " | ".join(_md_cell(value, private_labels) for value in correct_answers_row) + " |")
+
         has_partial = False
         for dim_id in DIMENSION_MAPPING:
             row = [dim_id.title()]

@@ -2534,6 +2534,18 @@
                     <p class="dashboard-card-value">{{ "%+.2f" | format(tier3.get('overall_lift')) if tier3.get('overall_lift') is not none else "N/A" }}</p>
                     <p class="dashboard-card-subtitle">Compared with baseline</p>
                 </div>
+                {% set t3_correct_answers = tier3.get('correct_answers') or {} %}
+                {% set t3_correct_with = t3_correct_answers.get('with_skill') or {} %}
+                {% set t3_correct_without = t3_correct_answers.get('without_skill') or {} %}
+                <div class="dashboard-card">
+                    <h3 class="dashboard-card-title">Correct Answers</h3>
+                    <p class="dashboard-card-value" style="font-size:1.05rem;">
+                        {% if t3_correct_with.get('scored') and t3_correct_without.get('scored') and t3_correct_answers.get('difference') is not none %}
+                        {{ t3_correct_with.get('correct') }}/{{ t3_correct_with.get('scored') }} | {{ t3_correct_without.get('correct') }}/{{ t3_correct_without.get('scored') }} | {{ "%+d" | format(t3_correct_answers.get('difference')) }}
+                        {% else %}N/A{% endif %}
+                    </p>
+                    <p class="dashboard-card-subtitle">With skill | No skill | Difference</p>
+                </div>
             </div>
 
             {% set t3_preview_conclusion = (tier3.conclusions[0] if tier3.conclusions and (tier3.conclusions | length) > 0 else None) %}
@@ -3034,8 +3046,6 @@
                 {% endfor %}
             {% endif %}
 
-            {% set t3_goal_by_trial = {} %}
-            {% for trial in tier3.trials or [] %}{% if trial.scores and trial.scores.goal_accuracy is defined %}{% set _ = t3_goal_by_trial.update({(trial.agent, trial.trial_id): trial.scores.goal_accuracy}) %}{% endif %}{% endfor %}
             {% if t3_attempt_rows %}
             <details class="t3-details" id="tier3-attempt-details" open>
                 <summary>Attempt Details</summary>
@@ -3043,7 +3053,8 @@
                 <p class="t3-section-hint">
                     Each row is one eval case for one agent under one condition. Attempt Scores
                     lists the scored attempts only; a score at or above
-                    {{ "%.2f" | format(t3_pass_threshold) }} counts as passed for Pass@{{ t3_max_attempts }}.
+                    {{ "%.2f" | format(t3_pass_threshold) }} counts as passed for Pass@{{ t3_max_attempts }}
+                    when scored goal accuracy is not below its pass threshold.
                     "Not scored" means no reward was found for that expected attempt; it is excluded from pass/fail.
                 </p>
                 <div class="t3-filter-bar">
@@ -3086,9 +3097,9 @@
                                         {% if sc is none %}
                                             <span class="t3-attempt-chip muted" title="Attempt {{ att_idx }}: not scored">A{{ att_idx }}: not scored</span>
                                         {% else %}
-                                            {% set chip_cls = 'pass' if sc >= t3_pass_threshold else ('warn' if sc >= 0.4 else 'fail') %}
-                                            {% set chip_label = 'pass' if sc >= t3_pass_threshold else 'fail' %}
-                                            <span class="t3-attempt-chip {{ chip_cls }}">A{{ att_idx }}: {{ "%.2f" | format(sc) }} {{ chip_label }}</span>
+                                            {% set chip_cls = 'pass' if att.get('passed') else ('warn' if sc >= 0.4 else 'fail') %}
+                                            {% set chip_label = 'PASS' if att.get('passed') else 'FAIL' %}
+                                            <span class="t3-attempt-chip {{ chip_cls }}" title="{{ att.get('reason') or '' }}">A{{ att_idx }}: {{ "%.2f" | format(sc) }} {{ chip_label }}</span>
                                         {% endif %}
                                     {% endfor %}
                                 </div>
@@ -3107,14 +3118,14 @@
                                 {% endif %}
                             </td>
                             <td>
-                                {% set goal = namespace(missed=0) %}
-                                {% if row.condition == 'With skill' %}{% for att in attempts %}{% if att.get('passed') and t3_goal_by_trial.get((row.agent, att.get('trial'))) == 0 %}{% set goal.missed = goal.missed + 1 %}{% endif %}{% endfor %}{% endif %}
-                                {% if passed and goal.missed %}
-                                    <span class="t3-pill warning" title="{{ goal.missed }} passing attempt(s) scored goal accuracy 0.00">passed{% if first_pass_attempt is not none %} on scored attempt {{ first_pass_attempt | int }}{% endif %} · goal not met (0.00)</span>
-                                {% elif passed and first_pass_attempt is not none %}
+                                {% set failure = namespace(reason=none) %}
+                                {% for att in attempts %}{% if not att.get('passed') and att.get('reason') and failure.reason is none %}{% set failure.reason = att.get('reason') %}{% endif %}{% endfor %}
+                                {% if passed and first_pass_attempt is not none %}
                                     <span class="t3-pill ok">passed on scored attempt {{ first_pass_attempt | int }}</span>
                                 {% elif passed %}
                                     <span class="t3-pill ok">passed</span>
+                                {% elif attempts_used > 0 and failure.reason %}
+                                    <span class="t3-pill critical">FAIL</span> {{ failure.reason }}
                                 {% elif attempts_used > 0 %}
                                     <span class="t3-pill critical">failed across {{ attempts_used }} scored attempt{{ 's' if attempts_used != 1 else '' }}</span>
                                 {% else %}

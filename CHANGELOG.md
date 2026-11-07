@@ -15,6 +15,11 @@ All notable changes to SkillEvaluator are documented in this file.
 
 ### Changed
 
+- A scored Tier 3 attempt now fails when `goal_accuracy` is below 1.0, even if
+  its Overall score meets the pass threshold. N/A or unscored goal accuracy
+  preserves the existing Overall-only verdict; reports include correct-answer
+  counts for both arms and their difference.
+
 - Align terminal grade and lift colors across compact, full, and direct Tier 3
   reports; displayed zero lift is neutral. Narrow terminals stack complete
   condition score/bar groups. Full-report Details retain successful quality and

@@ -1981,12 +1981,13 @@ def test_saved_fallback_steps_keep_logical_trial_weight_in_findings_and_html(
 
 
 @pytest.mark.parametrize(
-    ("aggregate", "step_rewards", "expected_custom_scores"),
+    ("aggregate", "step_rewards", "expected_custom_scores", "expected_pass_rate"),
     [
         (
             {"overall": 0.75, "domain_quality": 0.8},
             [{"overall": 0.5, "domain_quality": 0.6}, {"overall": 1.0, "domain_quality": 1.0}],
             {"domain_quality": 0.8},
+            1.0,
         ),
         (
             _default_reward("case-001", 0.8),
@@ -1995,11 +1996,13 @@ def test_saved_fallback_steps_keep_logical_trial_weight_in_findings_and_html(
                 {**_default_reward("case-001", 0.8), "domain_quality": 1.0},
             ],
             {},
+            0.0,
         ),
         (
             _default_reward("case-001", 0.8),
             [_default_reward("case-001", 0.7), _default_reward("case-001", 0.9)],
             {},
+            0.0,
         ),
     ],
     ids=("custom-only", "default-with-custom-metric", "complete-default"),
@@ -2009,6 +2012,7 @@ def test_authoritative_multistep_reward_preserves_complete_custom_topologies(
     aggregate: dict[str, object],
     step_rewards: list[dict[str, object]],
     expected_custom_scores: dict[str, float],
+    expected_pass_rate: float,
 ) -> None:
     job_dir = tmp_path / "jobs" / "demo-opencode-with"
     _write_authoritative_multistep_result(
@@ -2024,7 +2028,7 @@ def test_authoritative_multistep_reward_preserves_complete_custom_topologies(
     assert result["execution_status"] == "succeeded"
     assert agent["conditions"]["with_skill"]["scored_attempts"] == 1
     assert agent["custom_with_skill"] == expected_custom_scores
-    assert agent["pass_at_k"]["with_skill"]["rate"] == 1.0
+    assert agent["pass_at_k"]["with_skill"]["rate"] == expected_pass_rate
 
 
 def test_authoritative_root_preserves_flat_numeric_custom_metric(tmp_path: Path) -> None:

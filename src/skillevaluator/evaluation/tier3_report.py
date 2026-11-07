@@ -889,6 +889,7 @@ def build_agent_eval_payload(
         "agents_run": list(agent_payloads.keys()),
         "overall_score": round(overall_score, 4) if overall_score is not None else None,
         "overall_lift": round(overall_lift, 4) if overall_lift is not None else None,
+        "correct_answers": best.get("correct_answers"),
         "environment": env_mode,
         "runtime_seconds": _finite_float(runtime_seconds) or 0.0,
         "evaluated_at": evaluated_at,
@@ -1001,6 +1002,7 @@ def build_agent_eval_payload(
         "cases": best.get("cases", []),
         "trials": canonical_trials,
         "pass_at_k": best.get("pass_at_k", {}),
+        "correct_answers": best.get("correct_answers"),
         "insights": _insights_from_dimensions(best_dimensions),
         "conclusions": list(deterministic_conclusions),
         "recommendations": recommendations,
@@ -1471,6 +1473,7 @@ def _replace_with_minimal_payload(payload: dict[str, Any], report_budget: _Repor
             "verdict",
             "overall_score",
             "overall_lift",
+            "correct_answers",
             "environment",
             "runtime_seconds",
             "score_policy",
@@ -1506,6 +1509,7 @@ def _replace_with_minimal_payload(payload: dict[str, Any], report_budget: _Repor
         "environment": payload.get("environment"),
         "overall_score": payload.get("overall_score"),
         "overall_lift": payload.get("overall_lift"),
+        "correct_answers": summary.get("correct_answers"),
         "composite_lift": payload.get("composite_lift"),
         "execution_status": payload.get("execution_status"),
         "execution_errors": compact_summary["execution_errors"],
@@ -2124,6 +2128,7 @@ def _build_agent(
         "trials": trials,
         "trials_baseline": baseline_trials,
         "resources": resources,
+        "correct_answers": _correct_answer_comparison(info),
         "pass_at_k": {
             "with_skill": info.get("pass_with_skill") or {},
             "without_skill": info.get("pass_without_skill") or {},
@@ -2858,6 +2863,35 @@ def _cases(info: dict[str, Any]) -> list[dict[str, Any]]:
     return cases
 
 
+def _correct_answer_arm(value: object) -> dict[str, int | None]:
+    summary = value.get("correct_answers") if isinstance(value, dict) else None
+    summary = summary if isinstance(summary, dict) else {}
+
+    def count(name: str) -> int | None:
+        number = summary.get(name)
+        return number if isinstance(number, int) and not isinstance(number, bool) and number >= 0 else None
+
+    return {"correct": count("correct"), "scored": count("scored")}
+
+
+def _correct_answer_comparison(info: dict[str, Any]) -> dict[str, Any]:
+    with_skill = _correct_answer_arm(info.get("pass_with_skill"))
+    without_skill = _correct_answer_arm(info.get("pass_without_skill"))
+    difference = None
+    if (
+        with_skill["correct"] is not None
+        and with_skill["scored"]
+        and without_skill["correct"] is not None
+        and without_skill["scored"]
+    ):
+        difference = with_skill["correct"] - without_skill["correct"]
+    return {
+        "with_skill": with_skill,
+        "without_skill": without_skill,
+        "difference": difference,
+    }
+
+
 # ---------------------------------------------------------------------------
 # Trials (Trials tab)
 # ---------------------------------------------------------------------------
@@ -2875,6 +2909,7 @@ def _normalize_trials(rewards: list[dict[str, Any]], metrics: list[str]) -> list
     # Import lazily: ``skillevaluator.tier3`` imports report construction through
     # its command module, so importing Harbor metrics at module load time creates
     # a collector-first circular import.
+    from skillevaluator.tier3.attempt_verdict import scored_goal_accuracy
     from skillevaluator.tier3.harbor.metrics import (
         DEFAULT_METRIC_SET,
         LEGACY_METRIC_SET,
@@ -2913,11 +2948,13 @@ def _normalize_trials(rewards: list[dict[str, Any]], metrics: list[str]) -> list
             )
             if value is not None:
                 scores[metric] = value
+        goal_accuracy_values = [value for item in group if (value := scored_goal_accuracy(item)) is not None]
         trial: dict[str, Any] = {
             "trial_id": reward.get("trial_id"),
             "entry_id": reward.get("entry_id"),
             "scores": scores,
             "overall": _complete_mean([overall_score(item) for item in group]) if group_is_consistent else None,
+            "goal_accuracy_for_verdict": _complete_mean(goal_accuracy_values),
         }
         from skillevaluator.tier3.harbor.metrics import not_applicable_metrics
 
@@ -3619,11 +3656,14 @@ def _build_conclusions(
             }
         )
 
+    from skillevaluator.tier3.attempt_verdict import attempt_verdict
+
     failing_trials: list[str] = []
     for agent_name, agent in agents.items():
         for trial in agent.get("trials") or []:
             overall = _finite_float(trial.get("overall"))
-            if overall is None or overall < pass_threshold:
+            goal_accuracy = _finite_float(trial.get("goal_accuracy_for_verdict"))
+            if not attempt_verdict(overall, pass_threshold, goal_accuracy).passed:
                 failing_trials.append(f"{agent_name}/{trial.get('entry_id') or trial.get('trial_id')}")
     if failing_trials:
         conclusions.append(
@@ -4133,9 +4173,13 @@ def _dataset_summary(dataset: list[dict[str, Any]], trials: list[dict[str, Any]]
 
 def _verdict_policy(attempt_policy: dict[str, Any]) -> dict[str, Any]:
     """Expose the distinct task-attempt, dimension, and overall-lift gates."""
+    from skillevaluator.tier3.attempt_verdict import DEFAULT_GOAL_ACCURACY_PASS_THRESHOLD
+
     attempt_threshold = attempt_policy.get("pass_threshold")
     return {
         "attempt_pass_threshold": _finite_float(attempt_threshold),
+        "goal_accuracy_pass_threshold": DEFAULT_GOAL_ACCURACY_PASS_THRESHOLD,
+        "attempt_pass_rule": "overall_threshold_and_goal_accuracy_threshold_when_scored",
         "dimension_pass_threshold": DIMENSION_VERDICT_PASS_THRESHOLD,
         "dimension_neutral_threshold": DIMENSION_VERDICT_NEUTRAL_THRESHOLD,
         "lift_pass_threshold": TIER3_LIFT_PASS_THRESHOLD,

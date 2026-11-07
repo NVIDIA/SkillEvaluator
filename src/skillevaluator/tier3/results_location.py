@@ -500,6 +500,8 @@ def _legacy_pass_at_k_is_complete(
     allow_coverage_failure: bool = False,
 ) -> bool:
     """Validate the historical collector's complete pass-at-k structure."""
+    from skillevaluator.tier3.attempt_verdict import attempt_verdict
+
     if not isinstance(payload, dict):
         return False
     k = payload.get("k")
@@ -617,7 +619,13 @@ def _legacy_pass_at_k_is_complete(
             ):
                 return False
             score = attempt.get("score")
-            if attempt["passed"] != (score >= threshold):
+            goal_accuracy = attempt.get("goal_accuracy")
+            if goal_accuracy is not None and (not _is_finite_number(goal_accuracy) or not 0 <= goal_accuracy <= 1):
+                return False
+            verdict = attempt_verdict(score, threshold, goal_accuracy)
+            if attempt["passed"] != verdict.passed:
+                return False
+            if "goal_accuracy" in attempt and attempt.get("reason") != verdict.reason:
                 return False
         passing_ordinals = [ordinal for ordinal, attempt in enumerate(attempts, start=1) if attempt["passed"]]
         expected_first_pass = passing_ordinals[0] if passing_ordinals else None

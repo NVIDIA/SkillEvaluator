@@ -114,6 +114,7 @@ _TIER3_JSON_SAFE_PRIORITY_KEYS = (
     "verdict",
     "execution_status",
     "summary",
+    "correct_answers",
     "skill_name",
     "publication_target",
     "run_id",

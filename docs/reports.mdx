@@ -668,7 +668,12 @@ missing or partial step telemetry is a gap, not a zero.
 pass@k is the reliability signal, reported separately from the dimension
 scores. With `--n-attempts k`, each eval case runs k times per arm, and a case
 counts as passed when at least one attempt clears the `--pass-threshold`
-score using the same overall formula above. Comparing pass@k across arms (in
+score using the same overall formula above. If `goal_accuracy` is scored, it
+must also meet its default 1.0 pass threshold; a below-threshold attempt fails
+with a wrong-answer reason even when its Overall score passes. N/A or unscored
+`goal_accuracy` leaves the Overall-only rule unchanged. Correct-answer counts
+report scored attempts whose `goal_accuracy` meets that threshold in each arm.
+Comparing pass@k across arms (in
 `pass_at_k_lift.json`) tells you
 whether the skill makes success more *repeatable*, not just whether the average
 score moved. Each arm also records a case-level 95% Wilson score interval for

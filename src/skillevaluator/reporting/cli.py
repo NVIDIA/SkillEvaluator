@@ -460,6 +460,19 @@ class CLIReporter(ReporterBase):
             console.print(table)
             console.print()
 
+        # Name arms that ran but failed, so a missing baseline or score is not read as an arm that never ran.
+        coverage_notices = agent_eval.get("coverage_notices")
+        coverage_messages = [
+            notice["message"]
+            for notice in (coverage_notices if isinstance(coverage_notices, list) else [])
+            if isinstance(notice, dict) and isinstance(notice.get("message"), str)
+        ]
+        if coverage_messages:
+            console.print("[bold]Agent coverage notes[/bold]")
+            for message in coverage_messages:
+                console.print(f"  • {escape_markup(message)}", soft_wrap=True)
+            console.print()
+
         recommendations = agent_eval.get("recommendations") or []
         if recommendations:
             printed = False

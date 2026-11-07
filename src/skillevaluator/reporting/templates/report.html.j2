@@ -2385,6 +2385,7 @@
             .t3-truncation-notice { background:var(--badge-warn-bg); border:1px solid var(--warning-color); border-left:4px solid var(--warning-color); border-radius:10px; color:var(--dark-text); margin:0 0 1rem; padding:0.8rem 1rem; }
             .t3-truncation-notice strong { display:block; margin-bottom:0.3rem; }
             .t3-truncation-notice ul { display:flex; flex-wrap:wrap; gap:0.25rem 1rem; margin:0.35rem 0 0; padding-left:1.2rem; font-size:0.82rem; color:var(--text-secondary); }
+            .t3-coverage-notice ul { display:block; font-size:0.88rem; color:var(--dark-text); }
             /* Insight source tag (deterministic vs LLM) */
             .t3-insight-source { display:inline-block; padding:0.05rem 0.4rem; border-radius:4px; font-size:0.65rem; font-weight:800; text-transform:uppercase; letter-spacing:0.04em; vertical-align:middle; margin-left:0.35rem; }
             .insight-source-deterministic { background:var(--bg-secondary); color:var(--text-secondary); border:1px solid var(--border-color); }
@@ -2466,6 +2467,18 @@
                 {% endfor %}
             </ul>
             {% endif %}
+        </div>
+        {% endif %}
+
+        {% set t3_coverage_messages = (tier3.coverage_notices or []) | selectattr('message', 'string') | map(attribute='message') | list %}
+        {% if t3_coverage_messages %}
+        <div class="t3-truncation-notice t3-coverage-notice" id="tier3-coverage-notices" role="status">
+            <strong>Agent coverage notes</strong>
+            <ul>
+                {% for message in t3_coverage_messages %}
+                <li>{{ message }}</li>
+                {% endfor %}
+            </ul>
         </div>
         {% endif %}
 

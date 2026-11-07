@@ -50,6 +50,7 @@ from skillevaluator.reporting.base import (
     unrecognized_tier2_results,
 )
 from skillevaluator.reporting.run_status import resolve_run_status
+from skillevaluator.reporting.tier3_coverage import IncompleteArm, incomplete_arms
 from skillevaluator.reporting.tier3_scope import completed_agent_result, validate_report_scope
 from skillevaluator.source_identity import evaluated_source_revision, recorded_evaluated_source
 from skillevaluator.tier3_environments import HARBOR_ENV_MODES
@@ -254,6 +255,7 @@ class BenchmarkReporter(ReporterBase):
         )
         self._render_report_purpose(lines)
         self._render_results_at_a_glance(lines, ae, private_labels)
+        lines.extend(_agent_coverage_lines(ae, private_labels))
         self._render_tier_status(
             lines,
             results,
@@ -449,7 +451,7 @@ class BenchmarkReporter(ReporterBase):
         private_labels: tuple[str, ...],
     ) -> None:
         lines.extend(["## Results at a Glance", ""])
-        agents = _agents(ae)
+        agents = {name: _with_incomplete_baseline(agent) for name, agent in _agents(ae).items()}
         if not agents:
             lines.extend(
                 [
@@ -568,6 +570,8 @@ class BenchmarkReporter(ReporterBase):
                     evidence = "Completed-agent quality result; publication not assessed"
                     if completed["needs_attention"]:
                         evidence += "; other execution failures need attention"
+            if tier == "Tier 3" and tier_results and (incomplete := _incomplete_arm_evidence(ae, private_labels)):
+                evidence = f"{evidence}; {incomplete}"
             lines.append(f"| {tier} | {purpose} | **{status}** | {_md_cell(evidence, private_labels)} |")
         lines.append("")
 
@@ -977,6 +981,43 @@ def _human_agent_name(name: str) -> str:
     return humanized.replace("Skill" + "evaluator", "SkillEvaluator")
 
 
+def _with_incomplete_baseline(agent: dict[str, Any]) -> dict[str, Any]:
+    """Return ``agent`` for the score table, with a failed baseline arm in place of its baseline scores.
+
+    A baseline arm that ran but failed has no baseline score, which the table
+    would otherwise print as ``baseline not run``. With the arm in its place,
+    each cell says how many baseline attempts scored instead.
+    """
+    arm = next((arm for arm in incomplete_arms(agent) if arm.condition == "without_skill"), None)
+    if arm is None:
+        return agent
+    dimensions = agent.get("dimensions")
+    if isinstance(dimensions, list):
+        dimensions = [{**item, "baseline": arm} if isinstance(item, dict) else item for item in dimensions]
+    return {**agent, "baseline": arm, "dimensions": dimensions}
+
+
+def _agent_coverage_lines(ae: dict[str, Any] | None, private_labels: tuple[str, ...]) -> list[str]:
+    """List each agent arm that ran but failed, with its scored attempts and first recorded failure."""
+    notes = [
+        f"{_agent_display_label(name, agent, private_labels)}: {arm.describe()}"
+        for name, agent in _agents(ae).items()
+        for arm in incomplete_arms(agent)
+    ]
+    if not notes:
+        return []
+    return ["### Agent coverage", "", *(f"- {_publication_safe_inline(note, private_labels)}" for note in notes), ""]
+
+
+def _incomplete_arm_evidence(ae: dict[str, Any] | None, private_labels: tuple[str, ...]) -> str:
+    """Name each agent arm that ran but failed, for the Tier 3 evidence cell."""
+    return ", ".join(
+        f"{_agent_display_label(name, agent, private_labels)} {arm}"
+        for name, agent in _agents(ae).items()
+        for arm in incomplete_arms(agent)
+    )
+
+
 def _evaluated_at(ae: dict[str, Any] | None) -> str | None:
     return agent_eval_publication_evaluated_at(ae)
 
@@ -1195,7 +1236,12 @@ def _score_transition_values(baseline: object, score: object, *, skill_never_act
     if skill_never_activated:
         # No uplift is shown, so the baseline neither sets the precision nor withholds the score.
         parsed_baseline = None
-    elif baseline is not None and (parsed_baseline is None or not 0 <= parsed_baseline <= 1):
+    elif (
+        baseline is not None
+        # A failed baseline arm (see ``_with_incomplete_baseline``) is described below, not scored.
+        and not isinstance(baseline, IncompleteArm)
+        and (parsed_baseline is None or not 0 <= parsed_baseline <= 1)
+    ):
         return "Not available"
     endpoints = (parsed_score,) if parsed_baseline is None else (parsed_baseline, parsed_score)
     decimal_places = _score_display_decimal_places(*endpoints)
@@ -1203,6 +1249,8 @@ def _score_transition_values(baseline: object, score: object, *, skill_never_act
     skill_label = _format_percentage(displayed_score, decimal_places)
     if skill_never_activated:
         return f"{skill_label} — INCONCLUSIVE: skill never activated; uplift unavailable"
+    if isinstance(baseline, IncompleteArm):
+        return f"{skill_label} — {baseline}; uplift unavailable"
     if parsed_baseline is None:
         return f"{skill_label} — baseline not run; uplift unavailable"
     # Subtract the displayed values, not the raw scores, so a rounding carry can

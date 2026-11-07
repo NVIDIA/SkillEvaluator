@@ -1029,6 +1029,12 @@ def build_agent_eval_payload(
         payload["case_selection"] = dict(case_selection)
     if harbor_summary:
         payload["harbor_viewer"] = harbor_summary
+    from skillevaluator.reporting.tier3_coverage import coverage_notices
+
+    # Name each arm that ran but failed, so no report reads its missing scores
+    # as an arm that never ran.
+    if notices := coverage_notices(agent_payloads):
+        payload["coverage_notices"] = notices
 
     _layer_llm_insights(
         payload,

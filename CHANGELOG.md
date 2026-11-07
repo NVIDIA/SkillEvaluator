@@ -141,6 +141,16 @@ All notable changes to SkillEvaluator are documented in this file.
   `Use HTTP POST to create an item.` in a here-document or an unpiped `echo`
   still does not warn.
 
+### Fixed
+
+- `validate` Tier 1 output: when only the `--llm` / `--llm-verify` stage
+  can't run, `what to fix` gives the exact `export` lines for the missing
+  provider or key instead of a scanner install or `--skip security`, and the
+  scanners row keeps the scanner version (`SkillSpector 2.12.0, LLM didn't
+  run`). The summary row now counts the named checks shown above it, plus
+  their sub-checks (`9/9 checks passed (24 sub-checks)`), instead of
+  validators (`11/11 passed`).
+
 ## 0.8.0 - 2026-11-05
 
 ### Added

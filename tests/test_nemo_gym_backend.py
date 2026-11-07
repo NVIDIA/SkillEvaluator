@@ -303,6 +303,9 @@ def _fake_gym_skill(tmp_path: Path, monkeypatch: pytest.MonkeyPatch, config: str
     monkeypatch.setenv("SKILL_EVAL_NEMO_GYM_MODEL_URL", "http://127.0.0.1:9/v1")
     monkeypatch.setenv(MODEL_API_KEY_ENV, "policy-key")
     monkeypatch.setenv("FAKE_GYM_ENV_LOG", str(env_log))
+    from skillevaluator.tier3.nemo_gym import runner as gym_runner
+
+    monkeypatch.setattr(gym_runner, "_GYM_HOST_ENV_VARS", gym_runner._GYM_HOST_ENV_VARS | {"FAKE_GYM_ENV_LOG"})
     monkeypatch.setenv("GITHUB_TOKEN", "host-only-token")
     monkeypatch.setenv("ANTHROPIC_API_KEY", "host-only-key")
     return skill, env_log
@@ -413,3 +416,96 @@ def test_fake_gym_run_rejects_harbor_only_config_keys(
     result = _run_fake_gym(skill, tmp_path)
     assert "not supported with --backend nemo-gym" in result["error"][0]
     assert not env_log.exists()
+
+
+def test_truncated_rollout_line_is_skipped_and_reported(tmp_path: Path) -> None:
+    from skillevaluator.tier3.nemo_gym.results import read_rollouts
+
+    rollouts = tmp_path / "rollouts.jsonl"
+    rollouts.write_bytes(b'{"task_id": "a"}\n{"task_id": "b", "reward\xff')
+    errors: list[str] = []
+    assert read_rollouts(rollouts, errors) == [{"task_id": "a"}]
+    assert "1 unreadable line" in errors[0]
+
+
+def test_custom_model_url_requires_its_own_key(monkeypatch: pytest.MonkeyPatch) -> None:
+    from skillevaluator.tier3.nemo_gym.runner import _model_endpoint
+
+    monkeypatch.setenv("SKILL_EVAL_NEMO_GYM_MODEL_URL", "http://policy.example/v1")
+    monkeypatch.delenv(MODEL_API_KEY_ENV, raising=False)
+    with pytest.raises(ValueError, match=MODEL_API_KEY_ENV):
+        _model_endpoint("policy-model")
+    monkeypatch.setenv(MODEL_API_KEY_ENV, "EMPTY")
+    assert _model_endpoint("policy-model") == ("policy-model", "http://policy.example/v1", "EMPTY")
+
+
+@pytest.mark.parametrize("value", ["abc", "0", "-5", "nan", "inf"])
+def test_invalid_gym_timeout_is_rejected_before_launch(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, value: str
+) -> None:
+    skill, env_log = _fake_gym_skill(tmp_path, monkeypatch)
+    monkeypatch.setenv("SKILL_EVAL_NEMO_GYM_TIMEOUT_S", value)
+    result = _run_fake_gym(skill, tmp_path)
+    assert "SKILL_EVAL_NEMO_GYM_TIMEOUT_S" in result["error"][0]
+    assert not env_log.exists()
+
+
+def test_gym_bin_is_absolute_and_version_follows_symlinks(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    import sys
+
+    from skillevaluator.tier3.nemo_gym.backend import _gym_interpreters, nemo_gym_bin
+
+    real = tmp_path / "tools" / "gym"
+    real.parent.mkdir()
+    real.write_text(f"#!{sys.executable}\nprint('gym')\n")
+    real.chmod(0o755)
+    (tmp_path / "bin").mkdir()
+    (tmp_path / "bin" / "gym").symlink_to(real)
+    monkeypatch.chdir(tmp_path)
+    monkeypatch.setenv("SKILL_EVAL_NEMO_GYM_BIN", "bin/gym")
+    found = nemo_gym_bin()
+    assert found is not None and Path(found).is_absolute()
+    assert _gym_interpreters(found)[0] == Path(sys.executable)
+
+
+def test_failed_gym_launch_is_reported_not_succeeded(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    skill, _env_log = _fake_gym_skill(tmp_path, monkeypatch)
+    failing = tmp_path / "failing-gym"
+    failing.write_text("#!/bin/sh\nexit 3\n")
+    failing.chmod(0o755)
+    monkeypatch.setenv("SKILL_EVAL_NEMO_GYM_BIN", str(failing))
+    result = _run_fake_gym(skill, tmp_path)
+    assert result.get("execution_status") != "succeeded"
+    assert "exited 3" in json.dumps(result)
+
+
+def test_gym_run_publishes_latest_stages_runtime_env_and_records_dataset(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    from skillevaluator.tier3.results_location import publish_latest_results
+
+    skill, _env_log = _fake_gym_skill(
+        tmp_path, monkeypatch, config='schema_version: 1\nharbor:\n  runtime_env:\n    GYM_TEST_FLAG: "on"\n'
+    )
+    earlier = tmp_path / "results" / "20200101_000000_1_harbor"
+    earlier.mkdir(parents=True)
+    publish_latest_results(tmp_path / "results", earlier.name)
+    result = _run_fake_gym(skill, tmp_path, skip_with_skill=True, max_cases=1)
+    run_dir = Path(result["run_dir"])
+    assert (tmp_path / "results" / "latest").resolve() == run_dir.resolve()
+    task_toml = next((run_dir / "_harbor-tasks" / "codex" / "without").glob("*/task.toml")).read_text()
+    assert '"GYM_TEST_FLAG" = "${GYM_TEST_FLAG}"' in task_toml
+    assert "on" not in task_toml.split("GYM_TEST_FLAG", 1)[1].splitlines()[0]
+    assert result["dataset_digest"] and (run_dir / "dataset_snapshot.json").is_file()
+    assert "publication_target" in result
+
+
+def test_config_errors_reject_decoys_and_timeout_multiplier(tmp_path: Path) -> None:
+    from skillevaluator.tier3.nemo_gym.backend import nemo_gym_config_errors
+
+    (tmp_path / "evals").mkdir()
+    (tmp_path / "evals" / "config.yml").write_text(
+        "schema_version: 1\nharbor:\n  timeout_multiplier: 2\nskill_workspace:\n  decoy_manifest: decoys.json\n"
+    )
+    errors = " ".join(nemo_gym_config_errors(tmp_path))
+    assert "timeout_multiplier" in errors and "decoy_manifest" in errors

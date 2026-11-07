@@ -11,9 +11,12 @@ trial layout the shared collector reads, so scores, lift and reports are unchang
 
 from __future__ import annotations
 
+import contextlib
 import json
+import math
 import os
 import re
+import signal
 import subprocess
 import time
 import tomllib
@@ -71,6 +74,9 @@ def _model_endpoint(model: str | None) -> tuple[str, str, str]:
 
     url = os.environ.get(MODEL_URL_ENV, "").strip()
     key = os.environ.get(MODEL_API_KEY_ENV, "").strip()
+    if url and not key:
+        # Never send the evaluator's provider key to a policy server it was not issued for.
+        raise ValueError(f"{MODEL_URL_ENV} is set, so also set {MODEL_API_KEY_ENV} (use EMPTY for a keyless server)")
     resolved_model = model
     if not url or not key or not resolved_model:
         provider = resolve_llm_provider()
@@ -167,11 +173,45 @@ def gym_eval_command(
     return command
 
 
+# Package-index settings Gym's own ``uv sync`` of its servers reads.
+_GYM_HOST_ENV_VARS = frozenset({"UV_DEFAULT_INDEX", "UV_EXTRA_INDEX_URL", "UV_INDEX", "UV_INDEX_URL"})
+_GYM_SHUTDOWN_GRACE_SECONDS = 30.0
+
+
+def _run_gym(command: list[str], *, cwd: Path, env: dict[str, str], log: Any, timeout_s: float) -> int | None:
+    """Run ``gym eval run`` in its own process group; return its exit code, or None on timeout.
+
+    On timeout or Ctrl-C the group gets SIGTERM and a grace period, so Gym's own
+    shutdown stops its servers and removes its sandboxes, before SIGKILL.
+    """
+    process = subprocess.Popen(command, cwd=cwd, env=env, stdout=log, stderr=subprocess.STDOUT, start_new_session=True)
+
+    def _stop() -> None:
+        with contextlib.suppress(ProcessLookupError):
+            os.killpg(process.pid, signal.SIGTERM)
+        try:
+            process.wait(timeout=_GYM_SHUTDOWN_GRACE_SECONDS)
+        except subprocess.TimeoutExpired:
+            with contextlib.suppress(ProcessLookupError):
+                os.killpg(process.pid, signal.SIGKILL)
+            process.wait()
+
+    try:
+        return process.wait(timeout=timeout_s)
+    except subprocess.TimeoutExpired:
+        _stop()
+        return None
+    except BaseException:
+        _stop()
+        raise
+
+
 def gym_launch_environment(credentials: dict[str, str]) -> dict[str, str]:
     """Return Gym's process environment: the host variables a Harbor backend may receive, plus its credentials."""
-    from skillevaluator.tier3.harbor.runner import _backend_may_forward
+    from skillevaluator.tier3.harbor.runner import _HARBOR_BASE_ENV_VARS, _HARBOR_ENV_MODE_VARS
 
-    return {**{name: value for name, value in os.environ.items() if _backend_may_forward(name)}, **credentials}
+    allowed = _HARBOR_BASE_ENV_VARS | _HARBOR_ENV_MODE_VARS["docker"] | _GYM_HOST_ENV_VARS
+    return {**{name: value for name, value in os.environ.items() if name in allowed}, **credentials}
 
 
 def _is_positive_int(value: object) -> bool:
@@ -208,22 +248,29 @@ def run_nemo_gym_eval(
     """Run the selected arms on NeMo Gym and return the shared results mapping."""
     from skillevaluator.evaluation.tier3_report import render_agent_eval_html_report
     from skillevaluator.provider_config import ProviderConfigurationError, resolve_llm_provider
+    from skillevaluator.publication_identity import publication_target_from_path
     from skillevaluator.source_identity import normalized_evaluated_source
     from skillevaluator.tier3.case_ids import validate_case_ids
     from skillevaluator.tier3.evals_config import EvalsConfigError, load_evals_config
     from skillevaluator.tier3.harbor.adapter import generate_harbor_tasks
     from skillevaluator.tier3.harbor.collector import _score_definition_for_policy, collect_harbor_results
     from skillevaluator.tier3.harbor.metrics import DEFAULT_METRICS, score_policy_for_metrics
+    from skillevaluator.tier3.harbor.report_data import dataset_snapshot_manifest
     from skillevaluator.tier3.harbor.runner import (
         _limit_staged_cases,
+        _merge_launch_execution_errors,
         _native_entry_id,
+        _persist_dataset_truth,
         _reserve_run_dir,
+        _resolve_runtime_env,
         _validated_pass_threshold,
         _workspace_skills,
         _write_final_result,
     )
+    from skillevaluator.tier3.results_location import publish_latest_results
 
     started_at = time.monotonic()
+    publication_target = publication_target_from_path(skill_path)
     reporter = progress_reporter or NullProgressReporter()
 
     def _config_failure(detail: str) -> dict[str, Any]:
@@ -291,6 +338,15 @@ def run_nemo_gym_eval(
     include_values = [*workspace_config.get("include", []), *(include_skills or [])]
     if include_values and workspace_mode != "group":
         errors.append("include_skills requires skill_workspace.mode=group")
+    if workspace_config.get("decoy_manifest"):
+        errors.append("skill_workspace.decoy_manifest is not supported with --backend nemo-gym yet")
+    raw_timeout = os.environ.get(RUN_TIMEOUT_ENV, "").strip()
+    try:
+        timeout_s = float(raw_timeout) if raw_timeout else 21600.0
+    except ValueError:
+        timeout_s = math.nan
+    if not math.isfinite(timeout_s) or timeout_s <= 0:
+        errors.append(f"{RUN_TIMEOUT_ENV} must be a finite number of seconds greater than 0")
     if errors:
         return _config_failure("; ".join(errors))
     try:
@@ -304,7 +360,6 @@ def run_nemo_gym_eval(
     gym_version = nemo_gym_version(gym)
     sandbox = os.environ.get(SANDBOX_ENV, "docker").strip() or "docker"
     execution_backend = {"name": NEMO_GYM_BACKEND, "version": gym_version, "sandbox": sandbox}
-    timeout_s = float(os.environ.get(RUN_TIMEOUT_ENV, "21600"))
     resolved_models: dict[str, dict[str, str]] = {}
     endpoints: dict[str, tuple[str, str, str]] = {}
     config_agents = harbor_config.get("agents") or {}
@@ -340,6 +395,9 @@ def run_nemo_gym_eval(
     except ValueError as exc:
         return _config_failure(str(exc))
     reporter.set_secret_values(set(judge_process_env.values()))
+    # harbor.runtime_env reaches the agent as ${NAME} templates, resolved from Gym's environment.
+    runtime_values, _runtime_errors = _resolve_runtime_env(harbor_config.get("runtime_env"), env_mode=env_mode)
+    agent_runtime_env = {name: f"${{{name}}}" for name in runtime_values}
     reporter.emit(ProgressEvent(stage="configuration", state="ready", detail="evaluation config validated"))
     launch_errors: list[str] = []
     case_ids: list[str] = []
@@ -359,6 +417,7 @@ def run_nemo_gym_eval(
                 verifier_env=judge_verifier_env or None,
                 repo_context_exclude_paths=repo_context_exclude_paths,
                 task_resources=task_resources or None,
+                runtime_env=agent_runtime_env or None,
                 arm_suffix=f"-{arm}-skill" if len(arms) == 2 else "",
             )
             if max_cases is not None:
@@ -387,28 +446,27 @@ def run_nemo_gym_eval(
             reporter.emit(ProgressEvent(stage=f"agent:{agent}", state="running", detail=f"NeMo Gym {arm}-skill arm"))
             with log_path.open("w", encoding="utf-8") as log:
                 try:
-                    completed = subprocess.run(
+                    returncode = _run_gym(
                         command,
                         cwd=rollouts_path.parent,
                         env=gym_launch_environment({**judge_process_env, MODEL_API_KEY_ENV: api_key}),
-                        stdout=log,
-                        stderr=subprocess.STDOUT,
-                        timeout=timeout_s,
-                        check=False,
+                        log=log,
+                        timeout_s=timeout_s,
                     )
-                    if completed.returncode != 0:
-                        launch_errors.append(
-                            f"{agent} {arm}-skill: gym eval run exited {completed.returncode}; see {log_path}"
-                        )
-                except subprocess.TimeoutExpired:
-                    launch_errors.append(f"{agent} {arm}-skill: gym eval run timed out after {timeout_s:.0f}s")
+                except OSError as exc:
+                    launch_errors.append(f"{agent} {arm}-skill: gym eval run could not start: {exc}")
+                else:
+                    if returncode is None:
+                        launch_errors.append(f"{agent} {arm}-skill: gym eval run timed out after {timeout_s:.0f}s")
+                    elif returncode != 0:
+                        launch_errors.append(f"{agent} {arm}-skill: gym eval run exited {returncode}; see {log_path}")
             launch_errors += write_job_from_rollouts(
-                read_rollouts(rollouts_path),
+                read_rollouts(rollouts_path, launch_errors),
                 jobs_dir / f"{skill_path.name}-{agent}-{arm}",
                 eval_name=f"{agent}__{agent_model}",
                 task_case_ids=task_case_ids,
                 n_attempts=attempts,
-                failures=read_rollout_failures(rollouts_path),
+                failures=read_rollout_failures(rollouts_path, launch_errors),
             )
         reporter.emit(ProgressEvent(stage=f"agent:{agent}", state="complete"))
 
@@ -430,6 +488,8 @@ def run_nemo_gym_eval(
         launch_errors=launch_errors,
         grading_mode=effective_grading,
     )
+    if launch_errors:
+        _merge_launch_execution_errors(results, launch_errors)
     reporter.emit(ProgressEvent(stage="collection", state="complete", detail="NeMo Gym results collected"))
 
     # The same completion contract as a Harbor run, so result discovery (`view`, compare) finds Gym runs.
@@ -475,6 +535,33 @@ def run_nemo_gym_eval(
             or _score_definition_for_policy(selected_metrics, score_policy),
         }
     )
+    # The same immutable dataset and publication identity a Harbor run records.
+    try:
+        dataset_truth = _persist_dataset_truth(run_dir, fallback_task_ids=case_ids)
+    except Exception as exc:
+        dataset_truth = None
+        results.setdefault("warnings", []).append(f"Dataset snapshot was not recorded: {type(exc).__name__}")
+    if dataset_truth is not None:
+        results.update(
+            {
+                "evaluated_at": datetime.now(UTC).isoformat(),
+                "evaluator_version": dataset_truth["evaluator_version"],
+                "dataset_snapshot": dataset_snapshot_manifest(dataset_truth),
+                "dataset_snapshot_path": str(run_dir / "dataset_snapshot.json"),
+                "dataset_summary": dataset_truth["dataset_summary"],
+                "dataset_digest": dataset_truth["dataset_digest"],
+                "dataset_digest_algorithm": dataset_truth["dataset_digest_algorithm"],
+            }
+        )
+    run_end_target = publication_target_from_path(skill_path)
+    if run_end_target == publication_target:
+        results["publication_target"] = dict(publication_target) if publication_target is not None else None
+    else:
+        results["publication_target"] = None
+        results["publication_target_conflict"] = {
+            "run_start": dict(publication_target) if publication_target is not None else None,
+            "run_end": dict(run_end_target) if run_end_target is not None else None,
+        }
     result_path = run_dir / "result.json"
     results.update(
         {
@@ -500,4 +587,6 @@ def run_nemo_gym_eval(
         results.setdefault("warnings", []).append(f"HTML report was not generated: {type(exc).__name__}")
         results["report_status"] = "degraded"
     results["duration_seconds"] = round(time.monotonic() - started_at, 3)
-    return _write_final_result(result_path, results)
+    final = _write_final_result(result_path, results)
+    publish_latest_results(output_dir, run_dir.name)
+    return final

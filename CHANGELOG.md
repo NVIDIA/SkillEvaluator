@@ -17,21 +17,6 @@ All notable changes to SkillEvaluator are documented in this file.
   needs Python 3.13.14 or later. Options the backend cannot honor (other
   environment modes, `--harbor-keep-jobs`, `--stop-on-pass`, `--copy-repo`, ...)
   are rejected before anything runs, with no fallback to Harbor.
-- `--quality-config PATH` on `validate`, `quality-check`, and `tier1` loads the
-  deterministic quality check's expected Markdown headings from a YAML file
-  instead of the built-in list. Each `expected_headers` entry sets a `heading`
-  and optional `alternatives`, `points` (default 5), `message`, and
-  `suggestion`; omitted message and suggestion text is generated from the
-  headings. Without the flag, the packaged `quality-default.yaml` reproduces
-  the previous Prerequisites, Limitations, and Troubleshooting checks and
-  wording, so default scores are unchanged. An invalid file (bad YAML or
-  unparseable values, unknown keys, duplicate keys or headings, non-heading
-  values) is rejected before validation starts with exit code 2 and a message
-  naming the file and field, even when `--checks` leaves out `quality`. The JSON report, Markdown report,
-  and BENCHMARK.md record which config produced the quality score as
-  `quality_config` (`packaged` or `custom`, the custom file's name, a
-  `sha256:` digest of the normalized rules, and the `--min-score` pass
-  threshold, which is kept out of the digest).
 - `skills/skillevaluator/` is an agent skill for operating SkillEvaluator: it
   routes requests to the right tier, readiness check, dataset, report, or CI
   command, and ships Tier 3 evaluation cases for itself. A test keeps every
@@ -92,41 +77,6 @@ All notable changes to SkillEvaluator are documented in this file.
   `/bin/bash -lc 'cat skills/x/SKILL.md'`, which some agent harnesses record
   instead of the bare command. Searches inside a wrapper (`bash -c 'grep SKILL
   config.json'`) are still not counted.
-- Tier 3 error recovery now scores unrecovered command failures as zero and
-  includes them in fault counts and failure verdicts/report reasons. Host and
-  bundled verifier detection agree and use a result's execution status when it
-  has one: a Codex exit code, a whole `exit code N` line, or Harbor marking a
-  Claude Code result as successful. Only results without a status, such as
-  OpenCode's, are judged by their text: tracebacks, `error:` lines, pytest,
-  jest, go test, tsc and npm failures and OpenCode's timeout note count, while
-  `0 errors`, exception handlers, numeric timeout settings and type annotations
-  do not. Exit-1 probes with no other output (`grep`, `rg`, `test`, `diff`,
-  `cmp`, `command -v`, `which`, `git diff --quiet`, including `grep -c` zero
-  counts, `/dev/null` redirects, a leading `cd` or `pwd` and pipelines) remain
-  clean. Recovery matches whole command words after a leading `cd`; beyond the
-  original five-call retry window, only a successful repeat of the same command
-  and arguments counts.
-- Catalog validation now includes nested and lowercase skill manifests, skips
-  generated directories, and stops at skill boundaries to avoid validating
-  bundled templates as separate skills. External linked directories containing
-  skills and unreadable directories appear as failures without stopping other
-  skills; links back into the catalog are ignored. Linked manifests retain
-  direct-target behavior, plugin discovery errors produce findings, and reports
-  and external Tier 3 results preserve catalog-relative paths for skills with
-  the same basename.
-- Changing finding severities through a policy no longer clears an independent
-  quality-score threshold failure. A score below `--min-score` still fails,
-  and its reason appears in the terminal, HTML, benchmark, and JSON reports.
-- Tier 3 on Windows passes `PROGRAMFILES`, `PROGRAMW6432` and `PROGRAMDATA` to
-  Harbor, so Docker Desktop finds its `compose` plugin, and passes
-  `PYTHONUTF8` and `PYTHONIOENCODING` so Python UTF-8 mode reaches Harbor on
-  non-UTF-8 locales.
-- A `SKILL.md` `metadata` value that is not a mapping, such as `true`, `1.5`, a
-  date, or a list or string containing `author` or `tags`, no longer crashes
-  the quality check with a `TypeError`, which aborted `validate`, `tier1`, and
-  `quality-check` before any report was written. The schema check reports the
-  malformed `metadata`, and the quality score counts `metadata.author` and
-  `metadata.tags` as missing, as it already did for other non-mapping values.
 - A PII finding no longer keeps its `evidence_sha256` after CI redaction masks
   a credential inside the value the finding reports. In 0.8.0 the finding kept
   the digest of the unmasked value, so anyone holding the redacted report could

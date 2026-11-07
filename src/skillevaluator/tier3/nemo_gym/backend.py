@@ -48,27 +48,44 @@ def nemo_gym_bin() -> str | None:
     configured = os.environ.get(NEMO_GYM_BIN_ENV, "").strip()
     if configured:
         path = Path(configured).expanduser()
-        return str(path) if path.is_file() and os.access(path, os.X_OK) else None
-    return shutil.which("gym")
+        return str(path.absolute()) if path.is_file() and os.access(path, os.X_OK) else None
+    found = shutil.which("gym")
+    return str(Path(found).absolute()) if found else None
+
+
+def _gym_interpreters(gym_bin: str) -> list[Path]:
+    """Return candidate interpreters for the Gym install: the script's shebang, then its sibling Python."""
+    script = Path(gym_bin).resolve()
+    candidates: list[Path] = []
+    try:
+        first_line = script.read_bytes()[:512].split(b"\n", 1)[0].decode("utf-8", "replace")
+    except OSError:
+        first_line = ""
+    if first_line.startswith("#!"):
+        parts = first_line[2:].strip().split()
+        if parts and Path(parts[0]).name.startswith("python"):
+            candidates.append(Path(parts[0]))
+    candidates += [script.with_name("python"), script.with_name("python.exe")]
+    return [candidate for candidate in candidates if candidate.is_file()]
 
 
 def nemo_gym_version(gym_bin: str) -> str | None:
     """Return the installed NeMo Gym version from the worker's own interpreter."""
-    python = Path(gym_bin).with_name("python")
-    if not python.is_file():
-        return None
-    try:
-        completed = subprocess.run(
-            [str(python), "-c", "import nemo_gym; print(nemo_gym.__version__)"],
-            capture_output=True,
-            text=True,
-            timeout=60,
-            check=False,
-        )
-    except (OSError, subprocess.SubprocessError):
-        return None
-    version = completed.stdout.strip().splitlines()
-    return version[-1] if completed.returncode == 0 and version else None
+    for python in _gym_interpreters(gym_bin):
+        try:
+            completed = subprocess.run(
+                [str(python), "-c", "import nemo_gym; print(nemo_gym.__version__)"],
+                capture_output=True,
+                text=True,
+                timeout=60,
+                check=False,
+            )
+        except (OSError, subprocess.SubprocessError):
+            continue
+        version = completed.stdout.strip().splitlines()
+        if completed.returncode == 0 and version:
+            return version[-1]
+    return None
 
 
 def nemo_gym_capability_errors(
@@ -83,6 +100,7 @@ def nemo_gym_capability_errors(
     environment_kwargs: dict[str, str] | None = None,
     override_storage_mb: int | None = None,
     agent_runtime_preflight: bool = False,
+    timeout_multiplier: float | None = None,
 ) -> list[str]:
     """Reject configurations the NeMo Gym backend cannot run equivalently, before anything starts."""
     errors: list[str] = []
@@ -108,4 +126,41 @@ def nemo_gym_capability_errors(
         errors.append("--override-storage-mb is not supported with --backend nemo-gym")
     if agent_runtime_preflight:
         errors.append("--agent-runtime-preflight applies to the Harbor backend only")
+    if timeout_multiplier not in (None, 1, 1.0):
+        errors.append("--timeout-multiplier is not supported with --backend nemo-gym yet")
+    return errors
+
+
+def nemo_gym_config_errors(skill_path: Path) -> list[str]:
+    """Reject ``evals/config.yml`` settings the NeMo Gym backend cannot honor, before any dataset work."""
+    from skillevaluator.tier3.evals_config import EvalsConfigError, load_evals_config
+
+    try:
+        config, _config_path = load_evals_config(skill_path)
+    except EvalsConfigError as exc:
+        return [str(exc)]
+    harbor = config.get("harbor") or {}
+    workspace = config.get("skill_workspace") or {}
+    errors: list[str] = []
+    if harbor.get("stop_on_pass"):
+        errors.append("harbor.stop_on_pass is not supported with --backend nemo-gym yet")
+    if harbor.get("timeout_multiplier", 1.0) not in (1, 1.0):
+        errors.append("harbor.timeout_multiplier is not supported with --backend nemo-gym yet")
+    if harbor.get("agent_runtime_preflight"):
+        errors.append("harbor.agent_runtime_preflight applies to the Harbor backend only")
+    if harbor.get("base_image_mode", "disabled") != "disabled":
+        errors.append("harbor.base_image_mode reuse/rebuild applies to the Harbor backend only")
+    if harbor.get("custom_dockerfile_mode") not in (None, "rebase"):
+        errors.append("--backend nemo-gym supports --custom-dockerfile-mode rebase only")
+    if harbor.get("task_source", "auto") == "native_harbor":
+        errors.append("harbor.task_source native_harbor is not supported with --backend nemo-gym yet")
+    errors += [
+        f"harbor.{key} is not supported with --backend nemo-gym yet"
+        for key in ("agent_workdir", "pre_agent_setup", "setup_commands", "passthrough_env")
+        if harbor.get(key)
+    ]
+    if "storage_mb" in (harbor.get("resources") or {}):
+        errors.append("harbor.resources.storage_mb is not supported with --backend nemo-gym")
+    if workspace.get("decoy_manifest"):
+        errors.append("skill_workspace.decoy_manifest is not supported with --backend nemo-gym yet")
     return errors

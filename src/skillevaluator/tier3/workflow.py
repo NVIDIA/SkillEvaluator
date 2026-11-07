@@ -234,6 +234,30 @@ def _preflight_environment(
         raise ValueError("; ".join(errors))
 
 
+def _preflight_nemo_gym(skill_path: Path, params: dict[str, Any]) -> None:
+    """Reject options and config the NeMo Gym backend cannot honor, before the dataset step."""
+    from skillevaluator.tier3.commands import parse_agents
+    from skillevaluator.tier3.nemo_gym.backend import nemo_gym_bin, nemo_gym_capability_errors, nemo_gym_config_errors
+
+    errors = nemo_gym_capability_errors(
+        agents=parse_agents(params["agents"]) if params.get("agents") else [],
+        env_mode=params["env_mode"],
+        grading_mode=params.get("grading_mode"),
+        harbor_keep_jobs=bool(params.get("harbor_keep_jobs")),
+        stop_on_pass=bool(params.get("stop_on_pass")),
+        custom_dockerfile_mode=params.get("custom_dockerfile_mode"),
+        copy_repo=bool(params.get("copy_repo")),
+        environment_kwargs=dict.fromkeys(params.get("environment_kwargs") or (), ""),
+        override_storage_mb=params.get("override_storage_mb"),
+        agent_runtime_preflight=bool(params.get("agent_runtime_preflight")),
+        timeout_multiplier=params.get("timeout_multiplier"),
+    ) + nemo_gym_config_errors(skill_path)
+    if nemo_gym_bin() is None:
+        errors.append("--backend nemo-gym needs the NeMo Gym CLI: set SKILL_EVAL_NEMO_GYM_BIN to its `gym` executable")
+    if errors:
+        raise click.UsageError("; ".join(errors))
+
+
 def _prepare_dataset(skill_path: Path, *, source_path: Path, progress: str = "auto") -> None:
     """Reuse valid authored sources; create one starter case only when absent."""
     from skillevaluator.cli import _ensure_autopilot_dataset
@@ -291,8 +315,12 @@ def build_tier3_workflow(evaluate_command: click.Command) -> click.Command:
             _validate_skill_root(params["skill_path"])
             params["skill_path"] = params["skill_path"].resolve()
             with _source_snapshot(params["skill_path"]) as source_path:
-                resolved_environment_kwargs = _preflight_options(source_path, params)
-                _preflight_environment(params, environment_kwargs=resolved_environment_kwargs)
+                if params.get("backend") == "nemo-gym":
+                    # Gym agents use the NeMo Gym model endpoint, not Harbor's runtime credentials.
+                    _preflight_nemo_gym(source_path, params)
+                else:
+                    resolved_environment_kwargs = _preflight_options(source_path, params)
+                    _preflight_environment(params, environment_kwargs=resolved_environment_kwargs)
                 _prepare_dataset(params["skill_path"], source_path=source_path, progress=params["progress"])
         except ImportError as exc:
             raise click.ClickException(

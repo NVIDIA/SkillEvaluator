@@ -3264,7 +3264,11 @@ def evaluate(
     )
     if backend == "nemo-gym":
         from skillevaluator.tier3.commands import parse_agents
-        from skillevaluator.tier3.nemo_gym.backend import nemo_gym_capability_errors
+        from skillevaluator.tier3.nemo_gym.backend import (
+            nemo_gym_bin,
+            nemo_gym_capability_errors,
+            nemo_gym_config_errors,
+        )
 
         capability_errors = nemo_gym_capability_errors(
             agents=parse_agents(agents) if agents else [],
@@ -3277,7 +3281,13 @@ def evaluate(
             environment_kwargs=dict.fromkeys(environment_kwarg, ""),
             override_storage_mb=override_storage_mb,
             agent_runtime_preflight=bool(agent_runtime_preflight),
+            timeout_multiplier=timeout_multiplier,
         )
+        capability_errors += nemo_gym_config_errors(skill_path)
+        if nemo_gym_bin() is None:
+            capability_errors.append(
+                "--backend nemo-gym needs the NeMo Gym CLI: set SKILL_EVAL_NEMO_GYM_BIN to its `gym` executable"
+            )
         if capability_errors:
             # Rejected before --autopilot can write a dataset for a run that cannot start.
             raise click.UsageError("; ".join(capability_errors))

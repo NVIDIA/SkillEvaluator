@@ -26,18 +26,35 @@ def _safe(value: str) -> str:
     return _UNSAFE.sub("-", value).strip("-") or "task"
 
 
-def read_rollouts(path: Path) -> list[dict[str, Any]]:
-    """Read a Gym rollouts JSONL file, skipping blank lines."""
+def read_rollouts(path: Path, errors: list[str] | None = None) -> list[dict[str, Any]]:
+    """Read a Gym rollouts JSONL file, skipping blank lines.
+
+    A line Gym was still writing when it was stopped (timeout, OOM, full disk) is
+    skipped and reported through ``errors``, so it becomes a missing trial.
+    """
     if not path.is_file():
         return []
-    rows = (json.loads(line) for line in path.read_text(encoding="utf-8").splitlines() if line.strip())
-    return [row for row in rows if isinstance(row, dict)]
+    rows: list[dict[str, Any]] = []
+    skipped = 0
+    for line in path.read_text(encoding="utf-8", errors="replace").splitlines():
+        if not line.strip():
+            continue
+        try:
+            row = json.loads(line)
+        except ValueError:
+            skipped += 1
+            continue
+        if isinstance(row, dict):
+            rows.append(row)
+    if skipped and errors is not None:
+        errors.append(f"NeMo Gym wrote {skipped} unreadable line(s) to {path.name}; those rollouts were not collected")
+    return rows
 
 
-def read_rollout_failures(rollouts_path: Path) -> dict[str, list[str]]:
+def read_rollout_failures(rollouts_path: Path, errors: list[str] | None = None) -> dict[str, list[str]]:
     """Map each task folder name to the failure messages Gym recorded in ``<stem>_failures.jsonl``."""
     failures: dict[str, list[str]] = defaultdict(list)
-    for row in read_rollouts(rollouts_path.with_name(f"{rollouts_path.stem}_failures.jsonl")):
+    for row in read_rollouts(rollouts_path.with_name(f"{rollouts_path.stem}_failures.jsonl"), errors):
         task_id = row.get("_ng_task_id")
         if isinstance(task_id, str):
             with contextlib.suppress(ValueError):

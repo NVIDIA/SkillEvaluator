@@ -189,6 +189,29 @@ class TestChunkPython:
         chunks = chunk_python(_cf(content, ".py", "mod.py"), min_chars=80)
         assert chunks == []
 
+    def test_source_lines_are_split_once_for_many_functions(self) -> None:
+        class _CountingText(str):
+            __slots__ = ()
+            calls = 0
+
+            def splitlines(self, *args, **kwargs):
+                type(self).calls += 1
+                return super().splitlines(*args, **kwargs)
+
+        content = _CountingText(
+            "\n".join(
+                f'def function_{index}():\n    """' + ("documented function " * 6) + '"""\n    pass'
+                for index in range(100)
+            )
+        )
+        collected = _cf(content, ".py", "many.py")
+        _CountingText.calls = 0
+
+        chunks = chunk_python(collected, min_chars=80)
+
+        assert len(chunks) == 100
+        assert _CountingText.calls == 1
+
 
 class TestChunkShell:
     def test_function_body(self) -> None:
@@ -197,6 +220,25 @@ class TestChunkShell:
         assert len(chunks) == 1
         assert chunks[0].heading == "setup()"
         assert chunks[0].source_format == "shell"
+
+    def test_function_ranges_follow_matching_braces(self) -> None:
+        lines = [
+            "}",
+            "broken() {",
+            "outer() {",
+            "  if true; then { echo nested; }; fi",
+            "  echo ${HOME}",
+            "}",
+            "inner() { echo one; }",
+        ]
+        content = "\n".join(lines) + "\n"
+        chunks = chunk_shell(_cf(content, ".sh", "run.sh"), min_chars=1)
+
+        assert [(c.heading, c.start_line, c.end_line) for c in chunks] == [
+            ("outer()", 3, 6),
+            ("inner()", 7, 7),
+        ]
+        assert chunks[0].text == "\n".join(lines[2:6])
 
     def test_comment_block_3_plus_lines(self) -> None:
         content = "# Comment line one about setup\n# Comment line two about config\n# Comment line three about usage\n\necho hello\n"
@@ -214,6 +256,23 @@ class TestChunkShell:
         chunks = chunk_shell(_cf(content, ".sh", "run.sh"), min_chars=10)
         comment_chunks = [c for c in chunks if c.heading == "(comment)"]
         assert len(comment_chunks) == 0
+
+    def test_many_unclosed_function_headers_have_linear_character_scanning(self) -> None:
+        class _CountingText(str):
+            __slots__ = ()
+            indexed = 0
+
+            def __getitem__(self, key):
+                if isinstance(key, int):
+                    type(self).indexed += 1
+                return super().__getitem__(key)
+
+        content = _CountingText("\n".join(f"function_{index}() {{" for index in range(1_000)))
+        collected = _cf(content, ".sh", "malformed.sh")
+        _CountingText.indexed = 0
+
+        assert chunk_shell(collected, min_chars=1) == []
+        assert _CountingText.indexed <= len(content) * 3
 
 
 class TestSplitIntoParagraphs:

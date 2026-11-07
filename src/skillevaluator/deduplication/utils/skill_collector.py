@@ -17,8 +17,6 @@ from dataclasses import dataclass
 from itertools import islice
 from pathlib import Path
 
-import yaml
-
 from skillevaluator.constants import (
     CONTENT_DEDUP_EXCLUDED_DIRS,
     CONTENT_DEDUP_EXCLUDED_FILES,
@@ -29,6 +27,11 @@ from skillevaluator.constants import (
     CONTENT_DEDUP_SCANNABLE_EXTENSIONS,
 )
 from skillevaluator.utils.path_security import matches_filesystem_name
+from skillevaluator.utils.structured_data import (
+    StructuredDataLimitError,
+    StructuredDataSyntaxError,
+    load_bounded_yaml,
+)
 from skillevaluator.utils.tier2_paths import (
     contained_directory_alias_target,
     is_contained_compatibility_alias,
@@ -341,15 +344,20 @@ def _is_link_or_reparse(path: Path, rel_path: str | None = None) -> bool:
 
 
 def _strip_valid_frontmatter(raw_text: str) -> tuple[str, int]:
-    """Strip valid mapping frontmatter and return its original line offset."""
+    """Strip valid mapping frontmatter and return its original line offset.
+
+    Raises :class:`StructuredDataLimitError` when the frontmatter exceeds a
+    nesting, node, alias, merge, or scalar limit.
+    """
     match = FRONTMATTER_PATTERN.match(raw_text)
     if not match:
         return raw_text, 0
 
     frontmatter_yaml, markdown_content = match.groups()
     try:
-        data = yaml.safe_load(frontmatter_yaml)
-    except yaml.YAMLError:
+        # Agent clients keep the last value of a repeated frontmatter key.
+        data = load_bounded_yaml(frontmatter_yaml, last_key_wins=True)
+    except StructuredDataSyntaxError:
         return raw_text, 0
     if not data or not isinstance(data, dict):
         return raw_text, 0
@@ -664,7 +672,15 @@ def _collect_files_anchored(
         content = raw_text
         line_offset = 0
         if candidate.extension in {".md", ".mdc"}:
-            content, line_offset = _strip_valid_frontmatter(raw_text)
+            try:
+                content, line_offset = _strip_valid_frontmatter(raw_text)
+            except StructuredDataLimitError as e:
+                raise SkillCollectionError(
+                    "manifest_complexity_limit",
+                    f"Frontmatter structured-data complexity limit exceeded: {candidate.rel_path}",
+                    rel_path=candidate.rel_path,
+                    suggestion="Reduce frontmatter nesting, collection sizes, scalar lengths, or YAML aliases.",
+                ) from e
 
         collected.append(
             CollectedFile(

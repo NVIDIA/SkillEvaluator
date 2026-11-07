@@ -133,6 +133,58 @@ class TestCollectFiles:
         assert len(result) == 1
         assert result[0].extension == ".mdc"
 
+    @pytest.mark.parametrize(
+        "frontmatter",
+        [
+            pytest.param(
+                "\n".join(
+                    ["m0: &m0 {" + ", ".join(f"k{index}: {index}" for index in range(10)) + "}"]
+                    + [f"m{level}: &m{level} {{<<: [{', '.join([f'*m{level - 1}'] * 10)}]}}" for level in range(1, 5)]
+                ),
+                id="merge-key-chain",
+            ),
+            pytest.param(
+                "\n".join(
+                    ["a0: &a0 safe"]
+                    + [f"a{level}: &a{level} [*a{level - 1}, *a{level - 1}]" for level in range(1, 19)]
+                    + ["description: *a18"]
+                ),
+                id="alias-dag",
+            ),
+            pytest.param("extra: " + "[" * 1_500 + "safe" + "]" * 1_500, id="deep-nesting"),
+            pytest.param("description: " + "x" * 65_537, id="long-scalar"),
+        ],
+    )
+    def test_frontmatter_complexity_limit_fails_closed(self, skill_root: Path, frontmatter: str) -> None:
+        references = skill_root / "references"
+        references.mkdir()
+        (references / "guide.md").write_text(f"---\nname: guide\n{frontmatter}\n---\n# Guide\n", encoding="utf-8")
+
+        with pytest.raises(SkillCollectionError, match=r"complexity limit exceeded: references/guide\.md") as exc:
+            collect_files(skill_root)
+
+        assert exc.value.check_name == "manifest_complexity_limit"
+        assert exc.value.rel_path == "references/guide.md"
+        assert "YAML aliases" in exc.value.suggestion
+
+    @pytest.mark.parametrize("value", ['!!int ""', "!!bool nope", "!!float x"])
+    def test_invalid_tagged_scalar_keeps_frontmatter_in_the_analyzed_text(self, skill_root: Path, value: str) -> None:
+        text = f"---\nname: tagged\nversion: {value}\n---\n# Body\nContent."
+        (skill_root / "SKILL.md").write_text(text, encoding="utf-8")
+
+        result = collect_files(skill_root)
+
+        assert result[0].content == text
+        assert result[0].line_offset == 0
+
+    def test_repeated_frontmatter_key_is_still_stripped(self, skill_root: Path) -> None:
+        (skill_root / "SKILL.md").write_text("---\nname: first\nname: second\n---\n# Body\nContent.", encoding="utf-8")
+
+        result = collect_files(skill_root)
+
+        assert result[0].content == "# Body\nContent."
+        assert result[0].line_offset == 4
+
     def test_openclaw_compatibility_alias_is_skipped_and_regular_target_is_collected_once(
         self,
         skill_root: Path,

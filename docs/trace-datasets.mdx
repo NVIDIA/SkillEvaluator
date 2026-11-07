@@ -1,0 +1,116 @@
+---
+title: "Trace Datasets"
+description: "Import a production trace export as redacted candidates, then promote only human-reviewed expectations into an eval dataset."
+---
+
+Production behavior is evidence, **not an expected answer**. Import creates a
+review bundle outside the skill; nothing is promoted until a reviewer explicitly
+chooses a decision. This workflow is local and does not call an LLM.
+
+## Import and review
+
+```bash
+skillevaluator tier3 import-traces ./my-skill ./sessions.jsonl
+skillevaluator tier3 import-traces ./my-skill ./sessions.json -o ./review --dry-run
+```
+
+The default output is `./my-skill-trace-review`, relative to the current working
+directory. Output inside the skill is refused. Existing `candidates.json` requires
+`--force` to replace it. `--dry-run` prints classifications without writing.
+Keep the original export and review bundle private; do not ship either with a skill.
+
+The bundle contains `candidates.json` and redacted replay inputs under
+`fixtures/<candidate-id>/`. Each candidate has observed evidence, provenance,
+redaction counts, warnings, and a pending review. Observed read/open calls for
+files outside the skill that were not exported as fixtures produce
+`missing replay input` warnings (deduplicated, capped at 20 per candidate).
+Tool-derived
+`suggested_assertions` are hints only, never promoted automatically.
+
+## Export contract v1
+
+Accepts JSONL (one session object per line), or a JSON wrapper:
+
+```json
+{
+  "format": "skillevaluator.trace-export",
+  "version": 1,
+  "sessions": [
+    {"session_id": "session-1", "prompt": "Summarize the input", "outcome": "unknown"}
+  ]
+}
+```
+
+Other wrapper formats and versions are rejected. JSONL uses the v1 session
+contract without a wrapper. Records are numbered from 1 (physical line numbers
+for JSONL).
+
+| Field | Contract |
+| --- | --- |
+| `session_id` | Required non-empty string; hashed into a stable `trace-` id. |
+| `prompt` | User request; falls back to the first user trajectory message. |
+| `outcome` | `success`, `failure`, or `unknown` (default). Other values are unsupported. |
+| `skill` | Optional skill name, matched against frontmatter name or directory name. Non-matches are skipped. |
+| `trajectory` | ATIF object containing `steps`. |
+| `agent`, `agent_log` | Alternative raw log input; agents: `claude-code`, `cursor-cli`, `cline`, `opencode`, `codex`. Unknown formats retain a candidate with a warning and no tool summary. |
+| `final_output` | Optional string; otherwise the last agent trajectory message. |
+| `files` | List of objects with relative `path` and string `content`. Absolute/traversing paths and invalid content are dropped with incomplete warnings. |
+| `source`, `started_at`, `tags` | Optional provenance, redacted before writing. |
+| Other fields | Dropped, with unsupported-field warnings. |
+
+The summary and output explicitly report candidates and skipped records:
+`duplicate` (normalized prompt and identical fixture contents, pointing to the
+earlier candidate), `incomplete` (missing id or prompt), `unsupported` (including
+invalid JSON and non-object records), and `other skill`.
+
+## Review decisions and promotion
+
+Edit each candidate's `review` in `candidates.json`:
+
+| Decision | Effect |
+| --- | --- |
+| `pending` | Skip; the default. |
+| `reject` | Skip. |
+| `accept` | Requires a non-empty, reviewer-written `expected_output`. Optional `assertions` is a list of strings. |
+| `accept_observed` | Explicit opt-in to use the observed output, only for `success` with non-empty output. Failure/unknown outcomes require an independent expectation instead. |
+
+Unknown decisions and missing expectations abort the whole operation before
+writing. Write expectations that define correct behavior, not merely what a
+production session happened to do. Move only independently reviewed suggestions
+into `assertions`; `suggested_assertions` and review notes are not eval criteria.
+
+```bash
+skillevaluator tier3 accept-traces ./my-skill ./my-skill-trace-review --dry-run
+skillevaluator tier3 accept-traces ./my-skill ./my-skill-trace-review
+```
+
+Accepted entries append to agentskills-shaped `evals/evals.json`. Legacy flat
+lists or other dataset extensions require manual migration first. Fixtures copy
+to `evals/files/trace/<candidate-id>/`; entry-local `files` references prevent
+unrelated fixtures from being staged. Fixture-free entries explicitly use `[]`.
+`trace_source` records the redacted session id, export hash, outcome, and review
+decision. Re-running skips ids already present for the same session; a different
+session colliding with an id is an error. Dataset validation runs after writing;
+validation errors are printed and return a non-zero exit status.
+
+## Redaction guarantees and limits
+
+Before writing, import applies the shared credential redactor and configured PII
+patterns for email addresses, phone numbers, SSNs, personal macOS/Windows paths,
+and **all** Linux `/home/<name>/` paths (replaced by `/home/<user>/`). Placeholder
+exceptions in matching patterns are respected. Prompts, observed outputs, tool
+summaries, fixtures, and provenance strings are redacted; raw logs and unknown
+fields are not copied. Per-candidate counts record introduced secret-redaction markers and PII
+matches. The export hash is calculated from the original bytes, not redacted text.
+
+Promotion rechecks prompts, expectations, assertions, provenance, and fixtures;
+if redaction would still change them, it refuses the candidate rather than
+silently editing the reviewed expectation. Reviewers must sanitize newly pasted
+material before trying again.
+
+Pattern redaction is **best effort**, not a guarantee that every secret or person
+is detected. Reviewers must still inspect all bundle files for sensitive data,
+missing replay inputs, and suitability for publication. Review decisions are
+explicit local metadata, not authenticated signatures or proof of who reviewed.
+
+See [Eval Datasets](eval-datasets.mdx) for the promoted dataset contract.

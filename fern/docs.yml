@@ -56,6 +56,9 @@ navigation:
       - page: Eval Datasets
         path: ../docs/eval-datasets.mdx
         slug: eval-datasets
+      - page: Trace Datasets
+        path: ../docs/trace-datasets.mdx
+        slug: trace-datasets
       - page: Agents & Sandboxes
         path: ../docs/agents-and-sandboxes.mdx
         slug: agents-and-sandboxes

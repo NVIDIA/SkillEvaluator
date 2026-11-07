@@ -525,6 +525,18 @@
           "type": "text"
         },
         {
+          "choices": [
+            "harbor",
+            "nemo-gym"
+          ],
+          "default": "harbor",
+          "name": "backend",
+          "opts": [
+            "--backend"
+          ],
+          "param_type": "option"
+        },
+        {
           "default": "False",
           "is_flag": true,
           "name": "verify_models",
@@ -590,6 +602,18 @@
           "name": "env_mode",
           "opts": [
             "--env-mode"
+          ],
+          "param_type": "option"
+        },
+        {
+          "choices": [
+            "harbor",
+            "nemo-gym"
+          ],
+          "default": "harbor",
+          "name": "backend",
+          "opts": [
+            "--backend"
           ],
           "param_type": "option"
         },
@@ -2566,6 +2590,18 @@
               "type": "text"
             },
             {
+              "choices": [
+                "harbor",
+                "nemo-gym"
+              ],
+              "default": "harbor",
+              "name": "backend",
+              "opts": [
+                "--backend"
+              ],
+              "param_type": "option"
+            },
+            {
               "default": "False",
               "is_flag": true,
               "name": "verify_models",
@@ -2631,6 +2667,18 @@
               "name": "env_mode",
               "opts": [
                 "--env-mode"
+              ],
+              "param_type": "option"
+            },
+            {
+              "choices": [
+                "harbor",
+                "nemo-gym"
+              ],
+              "default": "harbor",
+              "name": "backend",
+              "opts": [
+                "--backend"
               ],
               "param_type": "option"
             },
@@ -3261,6 +3309,18 @@
             "name": "env_mode",
             "opts": [
               "--env-mode"
+            ],
+            "param_type": "option"
+          },
+          {
+            "choices": [
+              "harbor",
+              "nemo-gym"
+            ],
+            "default": "harbor",
+            "name": "backend",
+            "opts": [
+              "--backend"
             ],
             "param_type": "option"
           },

@@ -6,6 +6,22 @@ All notable changes to SkillEvaluator are documented in this file.
 
 ### Added
 
+- `tier3 evaluate --backend nemo-gym` runs the Tier 3 cases on NeMo Gym instead
+  of Harbor (`--backend harbor`, the default, is unchanged). The same
+  `evals.json` cases are generated as task folders, and NeMo Gym's own
+  orchestrator, agent harness (Codex, Claude Code, OpenCode) and Docker sandbox
+  run them with the SkillEvaluator verifier. Its rollouts are written back as
+  the usual trial results, so scores, lift, reports and `result.json` are
+  shared; `result.json` records `execution_backend` with the NeMo Gym version.
+  Gym runs as a separate pinned process (`SKILL_EVAL_NEMO_GYM_BIN`) because it
+  needs Python 3.13.14 or later. Options the backend cannot honor (other
+  environment modes, `--harbor-keep-jobs`, `--stop-on-pass`, ...)
+  are rejected before anything runs, with no fallback to Harbor.
+  `--timeout-multiplier`, `--copy-repo`, `harbor.agent_workdir` and
+  `harbor.pre_agent_setup`, `skill_workspace.decoy_manifest` and
+  `--custom-dockerfile-mode preserve`, `harbor.base_image_mode` and native
+  `evals/harbor/` tasks work as on Harbor, and
+  `tier3 doctor --backend nemo-gym` checks Gym readiness.
 - `skills/skillevaluator/` is an agent skill for operating SkillEvaluator: it
   routes requests to the right tier, readiness check, dataset, report, or CI
   command, and ships Tier 3 evaluation cases for itself. A test keeps every
@@ -78,6 +94,16 @@ All notable changes to SkillEvaluator are documented in this file.
   after a `;`, which starts a new command.
 
 ### Fixed
+
+- A failed Tier 3 execution (for example a backend launch failure) now marks the
+  report payload, its summary and the affected agents as failed with their
+  errors, instead of only the top-level `result.json`. A report re-rendered by
+  `tier3 view` reads the status from the run's `result.json`. Scores from the
+  completed trials are kept.
+- Skill activation now credits a SKILL.md read wrapped in a shell, such as
+  `/bin/bash -lc 'cat skills/x/SKILL.md'`, which some agent harnesses record
+  instead of the bare command. Searches inside a wrapper (`bash -c 'grep SKILL
+  config.json'`) are still not counted.
 
 - Read JSON, JSONL and YAML evaluation datasets as UTF-8 so Unicode prompts and
   answers load correctly on hosts with a non-UTF-8 default text encoding.

@@ -3123,6 +3123,13 @@ def _tier2_workflow(
 )
 @click.option("--env-mode", default="docker", show_default=True, type=ENV_MODE_CHOICE)
 @click.option(
+    "--backend",
+    default="harbor",
+    show_default=True,
+    type=click.Choice(["harbor", "nemo-gym"]),
+    help="Tier 3 execution backend: Harbor, or NeMo Gym's orchestrator, agent harness and sandbox.",
+)
+@click.option(
     "--environment-kwarg",
     "--ek",
     multiple=True,
@@ -3213,6 +3220,7 @@ def evaluate(
     skill_path: Path,
     agents: str | None,
     env_mode: str,
+    backend: str,
     environment_kwarg: tuple[str, ...],
     autopilot: bool,
     skip_baseline: bool,
@@ -3259,6 +3267,41 @@ def evaluate(
         evaluated_source_revision,
         evaluator_container_revision,
     )
+    if backend == "nemo-gym":
+        from skillevaluator.tier3.commands import parse_agents
+        from skillevaluator.tier3.nemo_gym.backend import (
+            nemo_gym_bin,
+            nemo_gym_capability_errors,
+            nemo_gym_config_errors,
+        )
+
+        capability_errors = nemo_gym_capability_errors(
+            agents=parse_agents(agents) if agents else [],
+            env_mode=env_mode,
+            grading_mode=grading_mode,
+            harbor_keep_jobs=harbor_keep_jobs,
+            stop_on_pass=bool(stop_on_pass),
+            custom_dockerfile_mode=custom_dockerfile_mode,
+            copy_repo=copy_repo,
+            environment_kwargs=dict.fromkeys(environment_kwarg, ""),
+            override_storage_mb=override_storage_mb,
+            agent_runtime_preflight=bool(agent_runtime_preflight),
+            timeout_multiplier=timeout_multiplier,
+        )
+        capability_errors += nemo_gym_config_errors(
+            skill_path,
+            stop_on_pass=stop_on_pass,
+            timeout_multiplier=timeout_multiplier,
+            agent_runtime_preflight=agent_runtime_preflight,
+            custom_dockerfile_mode=custom_dockerfile_mode,
+        )
+        if nemo_gym_bin() is None:
+            capability_errors.append(
+                "--backend nemo-gym needs the NeMo Gym CLI: set SKILL_EVAL_NEMO_GYM_BIN to its `gym` executable"
+            )
+        if capability_errors:
+            # Rejected before --autopilot can write a dataset for a run that cannot start.
+            raise click.UsageError("; ".join(capability_errors))
     if autopilot:
         _ensure_autopilot_dataset(skill_path, progress=progress)
 
@@ -3268,6 +3311,7 @@ def evaluate(
         skill_path=skill_path,
         agents=agents,
         env_mode=env_mode,
+        backend=backend,
         environment_kwarg=environment_kwarg,
         skip_baseline=skip_baseline,
         skip_with_skill=skip_with_skill,
@@ -3534,6 +3578,7 @@ _DOCTOR_OPTION_TIERS = {
     "env_mode": frozenset({"3"}),
     "environment_kwarg": frozenset({"3"}),
     "agent_model": frozenset({"3"}),
+    "backend": frozenset({"3"}),
 }
 
 
@@ -3566,6 +3611,13 @@ def _doctor_tier_options(*, timeout_help: str):
 
 def _tier3_doctor_options(func):
     """Add the Tier 3 options shared by doctor and tier3 doctor."""
+    func = click.option(
+        "--backend",
+        default="harbor",
+        show_default=True,
+        type=click.Choice(["harbor", "nemo-gym"]),
+        help="Tier 3 execution backend to check: Harbor, or NeMo Gym.",
+    )(func)
     func = click.option("--agent-model", multiple=True, help="Per-agent model override, AGENT=MODEL.")(func)
     func = click.option(
         "--environment-kwarg",
@@ -3596,6 +3648,7 @@ def _run_doctor(
     timeout: float = DEFAULT_PROBE_TIMEOUT_SEC,
     agent_model: tuple[str, ...] = (),
     verify_models: bool = False,
+    backend: str = "harbor",
 ) -> int:
     """Validate every option before any probe, then check each selected tier in order."""
     selected_tiers = ("1", "2", "3") if tier == "all" else (tier,)
@@ -3633,6 +3686,7 @@ def _run_doctor(
                     verify_models=verify_models,
                     agent_model=agent_model,
                     environment_kwargs=parsed_environment_kwargs,
+                    backend=backend,
                 )
             )
         else:

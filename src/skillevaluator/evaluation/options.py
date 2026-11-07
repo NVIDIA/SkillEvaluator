@@ -57,6 +57,8 @@ class EvaluationOptions:
     environment_kwargs: dict[str, str] = field(default_factory=dict)
     # Appended so legacy positional construction keeps its field order.
     max_cases: int | None = None
+    # Tier 3 execution backend ("harbor" or "nemo-gym"); appended to keep positional order stable.
+    backend: str = "harbor"
 
     def engine_kwargs(self) -> dict[str, Any]:
         """Return keyword arguments (excluding ``skill_path``) for the engine."""

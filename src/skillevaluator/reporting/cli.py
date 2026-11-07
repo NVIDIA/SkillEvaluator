@@ -767,6 +767,23 @@ class CLIReporter(ReporterBase):
                     parts.append(f"{s.warnings} warnings")
                 details = ", ".join(parts) if parts else "Failed"
 
+            agent_eval = result.metadata.get("agent_eval")
+            if (
+                result.validator_name == "AGENT_EVAL"
+                and isinstance(agent_eval, dict)
+                and agent_eval.get("verdict") == "fail"
+            ):
+                raw_summary = agent_eval.get("summary")
+                summary = raw_summary if isinstance(raw_summary, dict) else agent_eval
+                reason = agent_eval.get("verdict_reason") or summary.get("verdict_reason")
+                if isinstance(reason, str) and reason:
+                    details = escape_markup(reason)
+                    lift = _agent_eval_finite_number(summary.get("overall_lift"))
+                    if lift is None:
+                        lift = _agent_eval_finite_number(agent_eval.get("composite_lift"))
+                    if lift is not None:
+                        details += f"; lift [{lift_style(lift)}]{lift:+.2f}[/]"
+
             if outcome in {"pass", "passed"}:
                 quality = result.metadata.get("quality_scores")
                 if isinstance(quality, dict):

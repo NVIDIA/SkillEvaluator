@@ -321,6 +321,30 @@ def test_agent_eval_summary_shows_required_counts_and_failed_case_reason():
     assert "WARNING" in rendered
 
 
+def test_failed_agent_eval_summary_row_shows_verdict_reason_and_lift():
+    result = ValidationResult(
+        validator_name="AGENT_EVAL",
+        passed=True,
+        metadata={
+            "agent_eval": {
+                "verdict": "fail",
+                "verdict_reason": "2 of 4 cases failed required checks (1 wrong answer, 1 security)",
+                "composite_lift": 0.0,
+            }
+        },
+    )
+    result.summary.checks_performed = 1
+    output = io.StringIO()
+
+    CLIReporter(console=Console(file=output, width=180, color_system=None)).print_summary([result])
+
+    rendered = output.getvalue()
+    assert "AGENT_EVAL" in rendered
+    assert "FAIL" in rendered
+    assert "2 of 4 cases failed required checks (1 wrong answer, 1 security); lift +0.00" in rendered
+    assert "1 checks passed" not in rendered
+
+
 def test_full_summary_shows_completed_agent_eval_counts_without_findings():
     result = ValidationResult(
         validator_name="AGENT_EVAL",

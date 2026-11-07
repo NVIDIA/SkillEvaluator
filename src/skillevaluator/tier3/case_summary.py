@@ -362,15 +362,33 @@ def _case_diagnostics(case: Mapping[str, Any] | None, safe: Callable[[object], s
     return text
 
 
-def _condition_cell(case: Mapping[str, Any] | None, safe: Callable[[object], str]) -> Text:
+def _condition_cell(
+    case: Mapping[str, Any] | None, safe: Callable[[object], str], *, include_diagnostics: bool = True
+) -> Text:
     marks = _marks(case)
     p, n = _attempt_rate(marks)
     cell = Text(f"{p}/{n} " if n else "", style="bold")
     cell.append_text(_marks_text(marks))
     if (mean := _mean_score(case)) is not None:
         cell.append(f" ({mean:.2f})", style="dim")
-    cell.append_text(_case_diagnostics(case, safe))
+    if include_diagnostics:
+        cell.append_text(_case_diagnostics(case, safe))
     return cell
+
+
+def _effect_diagnostics(
+    effect: Text,
+    with_case: Mapping[str, Any] | None,
+    without_case: Mapping[str, Any] | None,
+    safe: Callable[[object], str],
+) -> Text:
+    for label, case in (("with skill", with_case), ("without skill", without_case)):
+        diagnostics = _case_diagnostics(case, safe).plain
+        for diagnostic in diagnostics.splitlines():
+            if diagnostic:
+                style = "bold red" if diagnostic.startswith("FAIL:") else "yellow"
+                effect.append(f"\n↳ {label}: {diagnostic}", style=style)
+    return effect
 
 
 def _effect(
@@ -451,14 +469,18 @@ def _condition_grid(
     table = _table(title, "with skill", "without skill", "effect")
     for case_id in case_ids:
         with_case, without_case = _cases(agent, "with_skill").get(case_id), _cases(agent, "without_skill").get(case_id)
-        table.add_row(
-            Text(safe(case_id)),
-            _condition_cell(with_case, safe),
-            _condition_cell(without_case, safe),
-            # No with-skill arm ran (--skip-with-skill), so there is no effect to call.
+        effect = (
             Text("-", style="dim")
             if with_skill_skipped
-            else _effect(with_case, without_case, comparable=_case_comparable(agent, with_case, without_case)),
+            else _effect(with_case, without_case, comparable=_case_comparable(agent, with_case, without_case))
+        )
+        if not with_skill_skipped:
+            effect = _effect_diagnostics(effect, with_case, without_case, safe)
+        table.add_row(
+            Text(safe(case_id)),
+            _condition_cell(with_case, safe, include_diagnostics=False),
+            _condition_cell(without_case, safe, include_diagnostics=False),
+            effect,
         )
     table.add_section()
     rates = _agent_rates(agent)

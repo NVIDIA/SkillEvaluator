@@ -159,6 +159,66 @@ def test_default_case_first_display_includes_verdict_and_counts_before_cases() -
     assert rendered.index("QUALITY VERDICT") < rendered.index("REQUIRED CHECKS PASSED") < rendered.index("wrong-case")
 
 
+def test_case_first_display_keeps_case_matrix_columns_and_ids_at_width_80() -> None:
+    def case(score: float, passed: bool, *, reason: str | None = None, warnings: list[str] | None = None) -> dict:
+        attempt = {"score": score, "passed": passed, "warnings": warnings or []}
+        summary = {
+            "passed": passed,
+            "attempts_used": 1,
+            "best_score": score,
+            "attempt_details_total": 1,
+            "attempt_details_shown": 1,
+            "warnings": warnings or [],
+            "attempts": [attempt],
+        }
+        if reason:
+            summary["reason"] = reason
+            attempt["reason"] = reason
+        return summary
+
+    case_ids = ("correct-answer", "missed-step", "security-warning", "wrong-ground-truth")
+    with_skill = {
+        "correct-answer": case(0.95, True),
+        "missed-step": case(0.95, True, warnings=["missed expected step 1 of 2 (behavior 0.50)"]),
+        "security-warning": case(0.60, False, reason="security warning (security 0.50): network command"),
+        "wrong-ground-truth": case(0.82, False, reason="wrong answer (goal accuracy 0.00)"),
+    }
+    without_skill = {
+        "correct-answer": case(1.00, True),
+        "missed-step": case(0.92, True),
+        "security-warning": case(0.83, False, reason="security warning (security 0.50): network command"),
+        "wrong-ground-truth": case(0.70, False, reason="wrong answer (goal accuracy 0.00)"),
+    }
+    result = {
+        "execution_status": "succeeded",
+        "agents": {
+            "opencode": {
+                "execution_status": "succeeded",
+                "lift": {"overall": {"with_skill": 0.83, "without_skill": 0.86, "delta": -0.03}},
+                "dimensions_with_skill": {"security": {"score": 0.75}, "accuracy": {"score": 0.90}},
+                "dimensions_without_skill": {"security": {"score": 0.83}, "accuracy": {"score": 0.90}},
+                "pass_at_k": {
+                    "with_skill": {"k": 1, "pass_threshold": 0.5, "cases": with_skill},
+                    "without_skill": {"k": 1, "pass_threshold": 0.5, "cases": without_skill},
+                },
+            }
+        },
+    }
+    output = io.StringIO()
+
+    render_evaluation_result(result, console=Console(file=output, width=80, color_system=None), verbose=False)
+
+    rendered = " ".join(output.getvalue().split())
+    assert "test case (k=1)" in rendered
+    assert "with skill" in rendered
+    assert "without skill" in rendered
+    assert "effect" in rendered
+    assert all(case_id in rendered for case_id in case_ids)
+    assert "security" in rendered
+    assert "accuracy" in rendered
+    assert "FAIL: wrong answer (goal accuracy 0.00)" in rendered
+
+
 @pytest.mark.parametrize(
     "change",
     [

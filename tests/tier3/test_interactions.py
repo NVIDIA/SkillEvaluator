@@ -7,6 +7,7 @@ from __future__ import annotations
 
 import copy
 import json
+import subprocess
 from pathlib import Path
 from typing import Any
 
@@ -373,6 +374,8 @@ def test_existing_harbor_staging_installs_the_configuration_and_keeps_tasks_fixe
     staged = []
 
     def inspect(index, options):
+        # Bound the fixture's repository context even when TMPDIR is inside a checkout.
+        subprocess.run(["git", "init", "-q", str(options.skill_path.parent)], check=True)
         task = generate_harbor_tasks(
             options.skill_path,
             tmp_path / f"staged-{index}",
@@ -387,7 +390,7 @@ def test_existing_harbor_staging_installs_the_configuration_and_keeps_tasks_fixe
 
     _fake_engine(monkeypatch, on_run=inspect)
     report = run_interaction(skills, eval_source=source, options=EvaluationOptions(source))
-    assert report["status"] == "complete"
+    assert report["status"] == "complete", report.get("reasons")
     assert [row[0] for row in staged] == [set(), {"a"}, {"b"}, {"a", "b"}]
     assert len({row[2] for row in staged}) == 1
     assert len({row[1]["ground_truth"] for row in staged}) == 1
@@ -404,6 +407,7 @@ def test_native_harbor_source_reuses_the_reviewed_tasks(monkeypatch, tmp_path):
     staged = []
 
     def inspect(index, options):
+        subprocess.run(["git", "init", "-q", str(options.skill_path.parent)], check=True)
         task = stage_native_harbor_tasks(
             options.skill_path,
             tmp_path / f"native-staged-{index}",
@@ -416,7 +420,7 @@ def test_native_harbor_source_reuses_the_reviewed_tasks(monkeypatch, tmp_path):
 
     _fake_engine(monkeypatch, on_run=inspect)
     report = run_interaction(skills, eval_source=source, options=EvaluationOptions(source))
-    assert report["status"] == "complete"
+    assert report["status"] == "complete", report.get("reasons")
     assert len(staged) == 4 and all(instruction == staged[0] for instruction in staged)
 
 

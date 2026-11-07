@@ -11,6 +11,7 @@ from pathlib import Path
 from types import SimpleNamespace
 from unittest.mock import MagicMock, patch
 
+import httpx
 import pytest
 
 from skillevaluator.inference import (
@@ -199,17 +200,21 @@ class TestLLMClientGetClient:
         ],
     )
     def test_rejects_noncanonical_aliases_normalized_to_native_openai_before_request(self, base_url: str) -> None:
-        client = LLMClient(
-            model="gpt-5.4-mini",
-            api_key="test-key",
-            base_url=base_url,
-            max_tokens=512,
-        )
+        # This exercises SDK URL normalization without using a host proxy or making requests.
+        transport = httpx.MockTransport(lambda _request: pytest.fail("Endpoint validation must precede requests"))
+        with httpx.Client(transport=transport, trust_env=False) as http_client:
+            client = LLMClient(
+                model="gpt-5.4-mini",
+                api_key="test-key",
+                base_url=base_url,
+                max_tokens=512,
+                http_client=http_client,
+            )
 
-        with pytest.raises(LLMClientError, match="noncanonical alias for the native OpenAI endpoint"):
-            client._get_client()
+            with pytest.raises(LLMClientError, match="noncanonical alias for the native OpenAI endpoint"):
+                client._get_client()
 
-        assert client._client is None
+            assert client._client is None
 
     @pytest.mark.parametrize(
         ("provider", "api_key_env", "base_url_env", "base_url"),

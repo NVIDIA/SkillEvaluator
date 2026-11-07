@@ -85,6 +85,9 @@ All notable changes to SkillEvaluator are documented in this file.
 
 ### Fixed
 
+- Honor `TMPDIR` for temporary GitLab scan reports, with `/tmp` as the default,
+  so scans work with configurable temporary storage.
+
 - Read JSON, JSONL and YAML evaluation datasets as UTF-8 so Unicode prompts and
   answers load correctly on hosts with a non-UTF-8 default text encoding.
 

@@ -97,6 +97,68 @@ def test_required_check_verdict_precedes_counts_and_positive_lift_is_reference()
     assert output.index("SECURITY CLEAN") < output.index("With Skill")
 
 
+def test_default_case_first_display_includes_verdict_and_counts_before_cases() -> None:
+    result = {
+        "execution_status": "succeeded",
+        "agents": {
+            "opencode": {
+                "execution_status": "succeeded",
+                "lift": {"overall": {"with_skill": 0.8, "without_skill": 0.6, "delta": 0.2}},
+                "pass_at_k": {
+                    "with_skill": {
+                        "required_checks": {"passed": 1, "scored": 2, "wrong_answer": 1, "security": 0},
+                        "correct_answers": {"correct": 1, "scored": 2},
+                        "security_clean": {"clean": 2, "scored": 2},
+                        "cases": {
+                            "wrong-case": {
+                                "passed": False,
+                                "attempts_used": 1,
+                                "best_score": 0.82,
+                                "attempt_details_total": 1,
+                                "attempt_details_shown": 1,
+                                "reason": "wrong answer (goal accuracy 0.00)",
+                                "warnings": ["missed expected step 1 of 1 (behavior 0.00)"],
+                                "attempts": [
+                                    {
+                                        "attempt": 1,
+                                        "score": 0.82,
+                                        "passed": False,
+                                        "reason": "wrong answer (goal accuracy 0.00)",
+                                        "warnings": ["missed expected step 1 of 1 (behavior 0.00)"],
+                                    }
+                                ],
+                            }
+                        },
+                    },
+                    "without_skill": {
+                        "required_checks": {"passed": 2, "scored": 2, "wrong_answer": 0, "security": 0},
+                        "correct_answers": {"correct": 2, "scored": 2},
+                        "security_clean": {"clean": 2, "scored": 2},
+                        "cases": {},
+                    },
+                },
+            }
+        },
+    }
+    output = io.StringIO()
+    render_evaluation_result(
+        result,
+        console=Console(file=output, width=180, color_system=None),
+        verbose=False,
+    )
+    rendered = output.getvalue()
+
+    assert "QUALITY VERDICT: FAIL — 1 of 2 cases failed required checks (1 wrong answer, 0 security)" in rendered
+    assert "OVERALL SKILL LIFT (for reference)" in rendered
+    assert "REQUIRED CHECKS PASSED   1/2 | 2/2 | -1" in rendered
+    assert "CORRECT ANSWERS   1/2 | 2/2 | -1" in rendered
+    assert "SECURITY CLEAN   2/2 | 2/2 | +0" in rendered
+    assert "FAIL: wrong answer (goal accuracy 0.00)" in rendered
+    assert "WARNING: missed expected step 1 of 1 (behavior 0.00)" in rendered
+    assert "0.82" in rendered
+    assert rendered.index("QUALITY VERDICT") < rendered.index("REQUIRED CHECKS PASSED") < rendered.index("wrong-case")
+
+
 @pytest.mark.parametrize(
     "change",
     [

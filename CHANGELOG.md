@@ -78,6 +78,16 @@ All notable changes to SkillEvaluator are documented in this file.
   characters: a text that saves only a few characters stays inline when sharing
   it would push another text past block 9 and cost more than it saves.
 
+- Tier 2 context deduplication now checks each chat-LLM verdict before it
+  becomes a finding. The confidence must be a JSON number from 0 to 1, and the
+  rationale and suggestion must be strings of at most 8,192 characters. In
+  0.8.0 any value that `float()` accepted was used: a confidence of `85` or
+  `true` made a HIGH finding, and the string `"NaN"` made a MEDIUM finding
+  whose `NaN` confidence then stopped the JSON and SARIF reports from
+  rendering. A list or object in a text field reached the finding unchanged.
+  Such a reply now counts as a failed analysis, so the scan is reported as
+  incomplete, like any other malformed reply.
+
 - Tier 3 **Measured Agent Resources** no longer count idle or user time as LLM
   seconds when timing is inferred from step timestamps and an agent step with
   tool calls is followed by a user or system step. The whole gap up to that

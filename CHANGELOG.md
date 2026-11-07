@@ -121,6 +121,16 @@ All notable changes to SkillEvaluator are documented in this file.
   `Use HTTP POST to create an item.` in a here-document or an unpiped `echo`
   still does not warn.
 
+- The Tier 3 verdict is now FAIL when a scored dimension is below 0.40 and
+  another dimension has no score. In 0.8.0 a dimension with no score made the
+  agent NEUTRAL before the 0.40 check ran. Correctness has no score when no
+  case defines `ground_truth`, so an agent with Security 0.0, for example after
+  a `destructive_command` finding, got a NEUTRAL Tier 3 verdict in the HTML
+  report and the JSON report's `tier3.verdict`, and `INCOMPLETE` in
+  `BENCHMARK.md` and `publication_status`. These now read FAIL. A dimension
+  with no score still keeps an agent from passing, and exit codes do not
+  change.
+
 ## 0.8.0 - 2026-11-05
 
 ### Added

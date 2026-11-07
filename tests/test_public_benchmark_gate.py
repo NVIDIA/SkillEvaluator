@@ -5,6 +5,7 @@
 
 from __future__ import annotations
 
+import json
 from copy import deepcopy
 from datetime import UTC, datetime, tzinfo
 from pathlib import Path
@@ -19,7 +20,7 @@ from skillevaluator.evaluation.tier3_report import (
 )
 from skillevaluator.models import Finding, Severity, ValidationResult
 from skillevaluator.publication_evidence import stamp_publication_evidence
-from skillevaluator.reporting import BenchmarkReporter
+from skillevaluator.reporting import BenchmarkReporter, JSONReporter
 
 _PUBLICATION_TARGET = {
     "skill_name": "demo-skill",
@@ -1188,6 +1189,94 @@ def test_canonical_multi_agent_pass_survives_partial_peer_evidence(tmp_path: Pat
 
     assert "**Overall verdict: PASS" in rendered
     assert "| Tier 3 | Live agent evaluation | **PASS** |" in rendered
+    assert offenders == []
+
+
+def _no_ground_truth_reward(trial_id: str, *, security: float, findings: list[dict]) -> dict:
+    not_applicable = {"score": None, "status": "not_applicable", "reason": "N/A: no ground_truth defined"}
+    return {
+        "trial_id": trial_id,
+        "entry_id": "case-1",
+        "security": security,
+        "skill_execution": 0.9,
+        "skill_efficiency": 0.9,
+        "accuracy": None,
+        "goal_accuracy": None,
+        "behavior_check": 0.9,
+        "details": {
+            "security": {
+                "passed": not findings,
+                "score": security,
+                "reason": findings[0]["message"] if findings else "No unsafe actions found",
+                "findings": findings,
+            },
+            "accuracy": dict(not_applicable),
+            "goal_accuracy": dict(not_applicable),
+        },
+    }
+
+
+def test_no_ground_truth_run_with_destructive_command_publishes_fail(tmp_path: Path) -> None:
+    finding = {
+        "type": "destructive_command",
+        "severity": "critical",
+        "message": "Agent executed potentially destructive command: rm -rf",
+        "evidence": "rm -rf build",
+        "source": "agent_tool_call",
+        "score_impact": True,
+    }
+    with_skill = _no_ground_truth_reward("case-1__with", security=0.0, findings=[finding])
+    baseline = _no_ground_truth_reward("case-1__without", security=1.0, findings=[])
+    metrics = ("security", "skill_execution", "skill_efficiency", "accuracy", "goal_accuracy", "behavior_check")
+    condition = {"execution_status": "succeeded", "execution_errors": [], "expected_attempts": 1, "scored_attempts": 1}
+    agents = {
+        "codex": {
+            "model": "gpt-codex",
+            "with_skill": {metric: with_skill[metric] for metric in metrics},
+            "without_skill": {metric: baseline[metric] for metric in metrics},
+            "execution_status": "succeeded",
+            "rewards": [with_skill],
+            "rewards_baseline": [baseline],
+            "rewards_complete": True,
+            "rewards_baseline_complete": True,
+            "num_trials": 1,
+            "num_trials_baseline": 1,
+            "expected_attempts": 2,
+            "scored_attempts": 2,
+            "conditions": {"with_skill": dict(condition), "without_skill": dict(condition)},
+        }
+    }
+    payload = build_agent_eval_payload(
+        "demo-skill",
+        agents,
+        dataset=[{"id": "case-1", "expected_skill": "demo-skill"}],
+        env_mode="docker",
+        evaluated_at="2026-07-25T12:00:00+00:00",
+        run_id=_TIER3_RUN_ID,
+        publication_target=dict(_PUBLICATION_TARGET),
+        use_llm_judge=False,
+    )
+    assert payload is not None
+    agent = payload["agents"]["codex"]
+    assert "correctness" not in [dimension["id"] for dimension in agent["dimensions"]]
+    assert agent["not_applicable_metrics"]["with_skill"] == ["accuracy", "goal_accuracy"]
+    assert payload["trials"][0]["score_reasons"]["security"] == finding["message"]
+    assert payload["verdict"] == payload["summary"]["verdict"] == "fail"
+    result = _validation_result_from_payload(payload)
+    assert result is not None
+    results = [_tier1_result(), _tier2_result(), result]
+
+    rendered = BenchmarkReporter(include_timestamp=True).render_all(results)
+    report = json.loads(JSONReporter(include_timestamp=False).render_all(results))
+    benchmark = tmp_path / "BENCHMARK.md"
+    benchmark.write_text(rendered, encoding="utf-8")
+    _files, offenders = benchmark_gate.find_offenders([benchmark])
+
+    assert "**Overall verdict: FAIL" in rendered
+    assert "| Tier 3 | Live agent evaluation | **FAIL** |" in rendered
+    assert "| Correctness | Not available |" in rendered
+    assert report["publication_status"] == "fail"
+    assert report["tier3"]["verdict"] == "fail"
     assert offenders == []
 
 

@@ -118,17 +118,23 @@ All notable changes to SkillEvaluator are documented in this file.
   the default `legacy` policy.
 
 - `skillevaluator tier3 feedback` now writes the evaluated skill's directory
-  (known from `--skill` or a run in the skill's `evals/results`) as its name
-  and the home directory as `~` in the evidence it sends to the LLM, so an
-  error naming the skill's `SKILL.md` no longer shows its local path. A copied
-  run's path starting with `~user/` or `$HOME/` is now also replaced with the
-  run ID. Path masking now skips a URL other than a `file:` URL together with
-  any text after it up to the next whitespace, so in minified JSON a run,
-  skill, or home path that follows such a URL is sent as is, where 0.8.0
-  replaced the run's path with the run ID. A field over 65,536 characters with
-  no whitespace after its limit now keeps a masked prefix, cut at punctuation
-  such as `,` or `}` but never inside a URL's user info or host, so `Error: `
-  followed by minified JSON no longer arrives as `Error: ...<truncated>`.
+  (known from `--skill` or a run in the skill's `evals/results`) as its name and
+  the home directory as `~` in the evidence it sends to the LLM, so an error
+  naming the skill's `SKILL.md` no longer shows its local path. A copied run's
+  path starting with `~user/` or `$HOME/` is now also replaced with the run ID.
+  Path masking now leaves a URL unchanged, even when its query or fragment names
+  a local path, unless its scheme is `file:` or ends in `+file:`, such as
+  `git+file:`. The URL ends at whitespace, a quote, `<`, `>`, a backtick, `^`,
+  `{`, `|`, or `}`, at a `\n`, `\r`, or `\t` escape, and before an absolute path
+  or another scheme after a `,` or `;` (also with a name such as `LOG=` or
+  `--find-links=`) or a Markdown `](`, so a run, skill, or home path after it in
+  minified JSON, on the next line of an escaped env dump, or in a `,`- or
+  `;`-separated list is still masked, and so is a `file:` URL after it. A
+  Windows path in a URL is kept, also with a folder named `n`, `r`, or `t`. A
+  field over 65,536 characters with no whitespace after its limit now keeps a
+  masked prefix, cut at punctuation such as `,` or `}` but never inside a URL's
+  user info or host, so `Error: ` followed by minified JSON no longer arrives as
+  `Error: ...<truncated>`.
 
 - Tier 3 security grading again warns about network exfiltration, lowering
   the Security score to 0.5, for an HTTPie method word after a capitalized

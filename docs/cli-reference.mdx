@@ -647,11 +647,24 @@ where it ran, also when it starts with `~user/`, `$HOME/`, `${HOME}/` or
 `/usr/bin` in `PATH=/usr/bin:/home/ci/results/RUN_ID`, is kept. A root right after
 `,` `;` `:` `=` `(` `[` or `{` starts a new path, so a directory name that ends in
 one of those characters before a `/` is read as two paths and only the second is
-replaced. The evaluated skill's directory
-is replaced with its name and your home directory with `~`; the skill directory
-is known when you pass `--skill` or the run is in the skill's `evals/results`
-directory. Credential-shaped text is redacted before the text is shortened, and
-a shortened field ends in `...<truncated>`. The command writes nothing to disk.
+replaced. The evaluated skill's directory is replaced with its name and your
+home directory with `~`; the skill directory is known when you pass `--skill` or
+the run is in the skill's `evals/results` directory. Path masking leaves a URL
+unchanged, even a path in its query or fragment, unless its scheme is `file:` or
+ends in `+file:`, such as `git+file:`. A URL ends at whitespace; at a quote,
+`<`, `>`, a backtick, `^`, `{`, `|` or `}`; at a `\n`, `\r` or `\t` escape; and
+before an absolute path or another scheme that follows a `,` or `;` (also with
+an option or variable name and `=`, such as `LOG=` or `--find-links=`) or a
+Markdown `](`. So a path after a URL in JSON, on the next line of an escaped
+env dump or stderr, in a `,`- or `;`-separated list or in
+`DOC=https://host/e;LOG=/path`, and a `file:` URL listed after one, are still
+replaced. A path joined to a URL by any other character, such as `:`, `=`, `(`
+or `)`, is not. The escape may have a doubled backslash, as in JSON inside JSON.
+A backslash and `n`, `r` or `t` that start a Windows folder name, such as
+`\runs\` or `\t\` (`\\runs\\` in JSON), are not an escape, so a Windows path in
+a URL is kept. Credential-shaped text is redacted before the text is shortened,
+and a shortened field ends in `...<truncated>`.
+The command writes nothing to disk.
 
 No request is sent before the first question, so the command exits 0
 immediately when standard input is empty. Piped input sends each line as a

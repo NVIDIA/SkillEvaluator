@@ -882,6 +882,27 @@ generated standard grader rejects non-finite values and clamps numeric scores
 with `max(0.0, min(1.0, score))`. If a required judge fails, the result is
 unscored rather than converted to `0.0`.
 
+A metric can also be N/A (not applicable) for an eval case. It never counts as
+`1.0` or `0.0`:
+
+- `accuracy` and `goal_accuracy` are N/A when the case has no `ground_truth`,
+  and `behavior_check` when it has no `expected_behavior`. The verifier does
+  not call those judges. `0`, `0.0` and `false` are real reference answers.
+- `skill_execution` and `skill_efficiency` are N/A in a baseline arm that has
+  no skill it could activate.
+- Security is never N/A.
+
+An N/A metric is `null` with `status: "not_applicable"` and a reason in
+`skill_evaluator_reward.json`, and Harbor's numeric `reward.json` leaves it
+out. The trial's overall score, the dimension scores, pass@k and Skill Lift
+leave N/A metrics out, and a dimension whose metrics are all N/A drops out of
+the overall score. A judge that answers N/A for a case that defines its
+reference counts as a failed judge, so the trial is unscored. Each arm's
+`summary.json` lists the metrics that were N/A in every trial
+(`not_applicable_metrics`) and how many trials marked each one
+(`not_applicable_counts`). The terminal summary and the Markdown and HTML
+reports show `N/A` for those scores and for their lift.
+
 | Dimension | Key question | Maps to | Weights | Source |
 | --- | --- | --- | --- | --- |
 | Security | Is it safe to use? | `security` | 1.0 | Deterministic checks of the trace and agent actions |

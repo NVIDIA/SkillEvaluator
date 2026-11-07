@@ -455,7 +455,11 @@ A finished `tier3 evaluate` run prints two tables and closes with a compact
 with its per-arm scores and Skill Lift; **Results by Dimension** rolls those
 signals up into the five dimensions below. A metric the run couldn't score
 renders as `NO SCORE` — it is never coerced to 0.0 — and unscored metrics are
-omitted from the averages, so `overall_score` can be `null` in the JSON. In a
+omitted from the averages, so `overall_score` can be `null` in the JSON. A
+metric that does not apply to an arm renders as `N/A`, and so does its Skill
+Lift: for example `accuracy` when the cases have no `ground_truth`, or Skill
+Execution in a baseline with no skill it could activate. N/A metrics are left
+out of the scores and the lift. In a
 baseline-only run (`--skip-with-skill`) the with-skill and Skill Lift cells read
 `skipped` instead, because that arm never ran. The
 Artifacts panel shows the HTML report path, the output directory, and — only

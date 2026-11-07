@@ -1,0 +1,6 @@
+schema_version: 1
+harbor:
+  n_attempts: 2
+  pass_threshold: 0.5
+  n_concurrent: 4
+  timeout_multiplier: 1.5

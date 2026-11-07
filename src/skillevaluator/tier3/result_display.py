@@ -20,6 +20,8 @@ from rich.panel import Panel
 from rich.table import Table
 from rich.text import Text
 
+from skillevaluator.reporting.harbor_viewer import harbor_job_links, normalize_harbor_viewer_for_display
+from skillevaluator.reporting.terminal_styles import AMBER, FAINT, GREEN, RED, TEXT, lift_style
 from skillevaluator.tier3.harbor.metrics import (
     CUSTOM_ONLY_METRIC_SET,
     DEFAULT_METRIC_SET,
@@ -52,10 +54,10 @@ def _finite_number(value: object) -> float | None:
 
 def _score_style(score: float) -> str:
     if score >= 0.8:
-        return "green"
+        return GREEN
     if score >= 0.6:
-        return "yellow"
-    return "red"
+        return AMBER
+    return RED
 
 
 def _score_bar(score: float) -> str:
@@ -88,7 +90,7 @@ def _delta_cell(value: object) -> Text:
     numeric = _finite_number(value)
     if numeric is None:
         return Text("NO SCORE", style="dim")
-    style = "green" if numeric > 0 else "red" if numeric < 0 else "dim"
+    style = lift_style(numeric)
     return Text(f"{numeric:+.2f}", style=f"bold {style}")
 
 
@@ -405,6 +407,39 @@ def _resolved_skill_name(result: Mapping[str, Any]) -> str:
     return "Skill Evaluation"
 
 
+def _responsive_conditions(table: Table, console: Console) -> Table:
+    """Stack complete labeled score/bar groups when paired columns do not fit."""
+    if getattr(console, "width", 98) >= 98:
+        return table
+    compact = Table(show_header=True, header_style="bold dim", box=SIMPLE, padding=(0, 1), show_edge=False, expand=True)
+    compact.add_column(str(table.columns[0].header), ratio=1, overflow="fold")
+    compact.add_column("Conditions", no_wrap=True, min_width=26)
+    columns = [list(column.cells) for column in table.columns]
+    for index, row in enumerate(table.rows):
+        cells = [column[index] for column in columns]
+        conditions = Text()
+        if not any(str(cell).strip() for cell in cells[1:]):
+            # Agent header rows carry no scores; keep them as a single heading line.
+            compact.add_row(cells[0], conditions, end_section=row.end_section)
+            continue
+        for offset, label in ((1, "With Skill"), (3, "No Skill")):
+            if offset >= len(cells):
+                continue
+            if conditions:
+                conditions.append("\n")
+            conditions.append(f"{label:<10} ", style="dim")
+            conditions.append(cells[offset])
+            if offset + 1 < len(cells):
+                conditions.append(" ")
+                conditions.append(cells[offset + 1])
+        if len(cells) > 5:
+            conditions.append("\nLift       ", style="dim")
+            conditions.append(cells[5])
+        compact.add_row(cells[0], conditions, end_section=row.end_section)
+    compact.caption = table.caption
+    return compact
+
+
 def _render_agent_scores(
     *,
     console: Console,
@@ -440,7 +475,7 @@ def _render_agent_scores(
         show_edge=False,
         expand=True,
     )
-    table.add_column("Evaluator", style="white", min_width=14, ratio=2)
+    table.add_column("Evaluator", style=TEXT, min_width=14, ratio=2)
     table.add_column("With Skill", justify="right", no_wrap=True, width=10)
     table.add_column("", no_wrap=True, width=10)
     if show_baseline:
@@ -484,7 +519,7 @@ def _render_agent_scores(
             with_value = custom_with.get(metric) if with_usable else None
             baseline_value = custom_without.get(metric) if baseline_usable else None
             with_score, with_bar = _score_cell(with_value, unavailable=with_unavailable)
-            row = [Text(f"custom: {safe(metric)}", style="cyan"), with_score, with_bar]
+            row = [Text(f"custom: {safe(metric)}", style=TEXT), with_score, with_bar]
             if show_baseline:
                 persisted = custom_lift.get(metric) if isinstance(custom_lift.get(metric), Mapping) else {}
                 delta = (
@@ -538,7 +573,8 @@ def _render_agent_scores(
 
     model = _resolved_agent_model(result, agent, data)
     skill = _resolved_skill_name(result)
-    title = Text("Results by Evaluator", style="bold cyan")
+    table = _responsive_conditions(table, console)
+    title = Text("Results by Evaluator", style=f"bold {TEXT}")
     subtitle = Text()
     subtitle.append(" / ".join(part for part in (safe(skill), safe(agent)) if part), style="dim")
     trials = data.get("num_trials_with")
@@ -588,7 +624,7 @@ def _render_agent_scores(
             content,
             title=title,
             subtitle=subtitle if subtitle.plain else None,
-            border_style="cyan",
+            border_style=FAINT,
             padding=(1, 1),
         )
     )
@@ -608,7 +644,7 @@ def _render_dimensions(
         show_edge=False,
         expand=True,
     )
-    table.add_column("Dimension", style="white", min_width=15, ratio=2, no_wrap=True)
+    table.add_column("Dimension", style=TEXT, min_width=15, ratio=2, no_wrap=True)
     table.add_column("With Skill", justify="right", no_wrap=True, width=10)
     table.add_column("", no_wrap=True, width=10)
     table.add_column("No Skill", justify="right", no_wrap=True, width=9)
@@ -619,7 +655,7 @@ def _render_dimensions(
         if agent_index:
             table.add_section()
         if len(agents) > 1:
-            table.add_row(Text(f"Agent: {safe(agent)}", style="bold cyan"), "", "", "", "", "")
+            table.add_row(Text(f"Agent: {safe(agent)}", style=f"bold {TEXT}"), "", "", "", "", "")
         data = raw if isinstance(raw, Mapping) else {}
         for dimension in DIMENSION_DISPLAY:
             with_dimensions = data.get("dimensions_with_skill")
@@ -677,11 +713,12 @@ def _render_dimensions(
         "Dimensions are report-only rollups; custom metrics do not change them."
     )
     table.caption = caption
+    table = _responsive_conditions(table, console)
     console.print(
         Panel(
             table,
             title="[bold]Results by Dimension[/bold]",
-            border_style="cyan",
+            border_style=FAINT,
             padding=(1, 0),
         )
     )
@@ -769,7 +806,7 @@ def _render_feedback_and_suggestions(
             body.append("\n")
         body.append("Suggestions\n", style="bold")
         for index, (_severity, message) in enumerate(suggestions[:5], start=1):
-            body.append(f"  {index}. ", style="cyan")
+            body.append(f"  {index}. ", style=AMBER)
             body.append(f"{safe(message)}\n")
         if len(suggestions) > 5:
             location = "in the HTML report" if has_html_report else "not shown"
@@ -778,8 +815,8 @@ def _render_feedback_and_suggestions(
     console.print(
         Panel(
             body,
-            title=Text("Feedback & Suggestions", style="bold cyan"),
-            border_style="cyan",
+            title=Text("Feedback & Suggestions", style=f"bold {TEXT}"),
+            border_style=FAINT,
             padding=(1, 1),
         )
     )
@@ -933,6 +970,30 @@ def render_evaluation_result(
         )
 
     artifact_rows: list[tuple[str, str]] = []
+    viewer_source = dict(result)
+    raw_viewer = viewer_source.get("harbor_viewer")
+    uploads = raw_viewer.get("uploads") if isinstance(raw_viewer, dict) else None
+    if isinstance(raw_viewer, dict) and isinstance(uploads, list) and uploads:
+        # Project raw uploads without replacing canonical jobs or run metadata.
+        from skillevaluator.evaluation.tier3_report import _harbor_viewer_from_engine_result
+
+        uploaded = _harbor_viewer_from_engine_result({"harbor_viewer": {"uploads": uploads}})
+        jobs = normalize_harbor_viewer_for_display(viewer_source).get("jobs", [])
+        by_url = {job["url"]: job for job in jobs}
+        for job in uploaded.get("jobs", []):
+            retained = by_url.get(job["url"])
+            if retained is None:
+                jobs.append(job)
+                by_url[job["url"]] = job
+            elif not retained.get("analysis_url") and job.get("analysis_url"):
+                # Enrich only the same validated job; canonical metadata wins.
+                retained["analysis_url"] = job["analysis_url"]
+        viewer_source["harbor_viewer"] = {**raw_viewer, "jobs": jobs}
+    for job in harbor_job_links(viewer_source):
+        artifact_rows.append(("Harbor job", safe(job["name"])))
+        for key, label in (("url", "Results"), ("analysis_url", "Analysis")):
+            if job.get(key):
+                artifact_rows.append((label, safe(job[key])))
     report_path = result.get("report_path")
     if report_path:
         raw_report_path = str(report_path)
@@ -964,7 +1025,7 @@ def render_evaluation_result(
             Panel(
                 artifacts,
                 title="[bold]Artifacts[/bold]",
-                border_style="cyan",
+                border_style=FAINT,
                 padding=(0, 1),
             )
         )

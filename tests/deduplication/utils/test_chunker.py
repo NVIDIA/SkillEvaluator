@@ -211,7 +211,17 @@ class TestChunkShell:
         first_line = len(prefix.splitlines()) + 1
         assert (chunks[0].start_line, chunks[0].end_line) == (first_line, first_line + 2)
 
-    @pytest.mark.parametrize("content", ["", "#!/bin/sh\n", "# Short\n# Two lines", "# A\n# B\n# C"])
+    @pytest.mark.parametrize(
+        "content",
+        [
+            "",
+            "#!/bin/sh\n",
+            "# Short\n# Two lines",
+            "# This first long comment line explains the helper setup in detail.\n"
+            "# This second long comment line explains the workspace output rules.",
+            "# A\n# B\n# C",
+        ],
+    )
     def test_eof_comments_keep_existing_filters(self, content: str) -> None:
         assert chunk_shell(_cf(content, ".sh", "run.sh"), min_chars=80) == []
 

@@ -104,6 +104,16 @@ Reports for any of these runs are selected with `-r`/`--report` (`cli`, `json`, 
 
 Plugins are validated against their public contract; the `quality`, `lint`, and `version` checks are skill-only and are skipped for plugins, rules, and workflows.
 
+When `--type auto` finds none of these signals, for example in an ordinary source repository, the target's type is `unknown`. There is no manifest to check, so Tier 1:
+
+- Records `schema`, `version`, and `quality` as not applicable instead of failing them with `No skills found`. The terminal summary and reports count them as N/A, never as passes.
+- Still runs the content scans (`security`, `pii`, `license`, `code-integrity`, `unicode`, `lint`, and `dependency` when selected), so a real secret or card number still fails the run. The security scan keeps its unrestricted scope.
+- Exits `0` when those scans pass. A misspelled `--checks` name still fails.
+- Adds a root `tier1_applicability` object to the JSON report: `applicability` (`not_applicable`), `reason_code` (`unsupported_content_type`), `detected_content_type` (`unknown`), and `supported_content_types`.
+- Is never eligible for publication, because a not-applicable check is not evidence.
+
+Pass `--type skill` (or another type) to validate the target as that type anyway; a missing `SKILL.md` then fails as before. A folder that holds skills below it, such as `.claude/skills/<name>/SKILL.md` or `.agents/skills/<name>/SKILL.md`, is still validated as a collection of skills.
+
 For collections, pass a folder containing skills under `skills/` or `team-skills/`. Folder-level validation discovers each live `SKILL.md` below the target while excluding configured names such as `evals`, `results`, `versions`, `.git`, `.venv`, `node_modules`, and `__pycache__`.
 
 ```bash title="Validate a skill or a collection"

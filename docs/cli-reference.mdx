@@ -232,6 +232,8 @@ The [evaluated source provenance](#evaluated-source-provenance) flags also appea
 
 Auto-detection recognizes: a `SKILL.md` for skills, `.mdc` files for rules, `workflow-rules.mdc` for workflows, and — for plugins — a bundle-reference `agent_plugin.yaml`/`.yml` manifest or a contained `.claude-plugin/plugin.json` manifest. Plugins are validated against their public contract; quality, lint, and version checks are skill-only and skipped for plugins.
 
+When auto-detection finds none of these, the type is `unknown`. Tier 1 then records the `schema`, `version`, and `quality` checks as not applicable (N/A) instead of failing them with `No skills found`, and still runs the content scans. The run exits `0` when those scans pass, and the JSON report adds a root `tier1_applicability` object. Pass `--type` to validate the target as a given type anyway. See [Content types](tier1-validation.mdx#content-types).
+
 `validate` also takes the standard `-r/--report` and `-o/--output-dir` options described under [Global conventions](#global-conventions).
 
 ### Tier 1 · Static & Security

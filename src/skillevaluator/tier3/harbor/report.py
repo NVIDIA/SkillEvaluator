@@ -16,6 +16,7 @@ import math
 from pathlib import Path
 from typing import Any
 
+from skillevaluator.evaluation.tier3_findings import TRIAL_PASS_THRESHOLD
 from skillevaluator.evidence import evidence_ref_identity
 from skillevaluator.tier3.eval_core.llm_judge import _redact_configured_credentials
 from skillevaluator.tier3.harbor import report_data
@@ -35,6 +36,8 @@ from skillevaluator.utils.redaction import redact_sensitive_data, redact_sensiti
 logger = logging.getLogger(__name__)
 
 DISPLAY_METRICS = DEFAULT_METRICS
+FINDING_OK_THRESHOLD = TRIAL_PASS_THRESHOLD
+FINDING_CRITICAL_THRESHOLD = 0.4
 _MAX_FINDINGS = len(DEFAULT_METRICS) + MAX_CUSTOM_METRICS
 _MAX_FINDING_REASONS = 4
 _MAX_FINDING_EVIDENCE_REFS = 3
@@ -311,7 +314,7 @@ def _extract_findings(
                 _seen.add(k)
                 _refs.append(r)
 
-        if avg_score >= 0.8:
+        if avg_score >= FINDING_OK_THRESHOLD:
             reasons = _collect_pass_reasons(metric, trials)
             findings.append(
                 {
@@ -325,7 +328,7 @@ def _extract_findings(
             )
         else:
             reasons = _collect_fail_reasons(metric, trials)
-            severity = "critical" if avg_score < 0.4 else "warning"
+            severity = "critical" if avg_score < FINDING_CRITICAL_THRESHOLD else "warning"
             findings.append(
                 {
                     "metric": metric,
@@ -347,6 +350,13 @@ def _render_findings_body(findings: list[dict[str, Any]]) -> Any:
     from skillevaluator.utils.rich_markup import strip_terminal_controls
 
     body = Text()
+    body.append(
+        f"  Advisory metric severity: ok ≥ {FINDING_OK_THRESHOLD:.2f} · "
+        f"warning {FINDING_CRITICAL_THRESHOLD:.2f}\u2013<{FINDING_OK_THRESHOLD:.2f} · "
+        f"critical < {FINDING_CRITICAL_THRESHOLD:.2f}. "
+        "Dimension verdicts use pass ≥ 0.50 (see Results by Dimension).\n\n",
+        style="dim",
+    )
     for finding in findings:
         if finding["severity"] == "critical":
             icon = "⚠ CRITICAL"
@@ -900,7 +910,7 @@ def _prioritized_evidence_rewards(rewards: list[dict[str, Any]]) -> list[dict[st
 def _reward_has_failing_signal(reward: dict[str, Any]) -> bool:
     for metric in DISPLAY_METRICS:
         value = _metric_score(reward, metric)
-        if value is not None and value < 0.8:
+        if value is not None and value < FINDING_OK_THRESHOLD:
             return True
     details = reward.get("details")
     if not isinstance(details, dict):
@@ -910,7 +920,7 @@ def _reward_has_failing_signal(reward: dict[str, Any]) -> bool:
             continue
         score = detail.get("score")
         numeric_score = extract_custom_metrics({"detail_score": score}).get("detail_score")
-        if numeric_score is not None and numeric_score < 0.8:
+        if numeric_score is not None and numeric_score < FINDING_OK_THRESHOLD:
             return True
         results = detail.get("results")
         if isinstance(results, list) and any(
@@ -1005,6 +1015,11 @@ def _bounded_findings_payload(
         "skill_name": _bounded_json_text(skill_name, max_encoded_bytes=512),
         "agent": _bounded_json_text(agent, max_encoded_bytes=512),
         "suggestion_mode": _bounded_json_text(suggestion_mode, max_encoded_bytes=64),
+        "severity_thresholds": {
+            "ok_at_or_above": FINDING_OK_THRESHOLD,
+            "critical_below": FINDING_CRITICAL_THRESHOLD,
+            "scale": "advisory_metric",
+        },
         "findings": bounded_findings,
         "findings_total": len(findings),
         "findings_shown": len(bounded_findings),

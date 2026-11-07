@@ -6,6 +6,10 @@ All notable changes to SkillEvaluator are documented in this file.
 
 ### Added
 
+- Document per-agent Tier 3 `findings.json` artifacts and distinguish advisory
+  metric severity from dimension verdicts; include severity thresholds in the
+  artifact and a muted CLI legend without changing scores or thresholds.
+
 - `skills/skillevaluator/` is an agent skill for operating SkillEvaluator: it
   routes requests to the right tier, readiness check, dataset, report, or CI
   command, and ships Tier 3 evaluation cases for itself. A test keeps every

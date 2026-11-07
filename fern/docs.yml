@@ -32,6 +32,9 @@ navigation:
       - page: Quickstart
         path: ../docs/quickstart.mdx
         slug: quickstart
+      - page: Reproducible Terminal Demo
+        path: ../docs/starter-demo.mdx
+        slug: starter-demo
       - page: Installation
         path: ../docs/installation.mdx
         slug: installation

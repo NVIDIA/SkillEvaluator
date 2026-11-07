@@ -632,6 +632,14 @@
           "type": "text"
         },
         {
+          "name": "compare_to",
+          "opts": [
+            "--compare-to"
+          ],
+          "param_type": "option",
+          "type": "text"
+        },
+        {
           "default": "False",
           "is_flag": true,
           "name": "skip_with_skill",
@@ -2419,6 +2427,55 @@
             }
           ]
         },
+        "compare-versions": {
+          "params": [
+            {
+              "name": "skill_path",
+              "opts": [
+                "skill_path"
+              ],
+              "param_type": "argument",
+              "required": true,
+              "type": "path"
+            },
+            {
+              "name": "current",
+              "opts": [
+                "--current"
+              ],
+              "param_type": "option",
+              "required": true,
+              "type": "text"
+            },
+            {
+              "name": "prior",
+              "opts": [
+                "--prior"
+              ],
+              "param_type": "option",
+              "required": true,
+              "type": "text"
+            },
+            {
+              "name": "results_dir",
+              "opts": [
+                "--results-dir"
+              ],
+              "param_type": "option",
+              "type": "directory"
+            },
+            {
+              "default": "False",
+              "is_flag": true,
+              "name": "as_json",
+              "opts": [
+                "--json"
+              ],
+              "param_type": "option",
+              "type": "boolean"
+            }
+          ]
+        },
         "create-eval-dataset": {
           "params": [
             {
@@ -2676,6 +2733,14 @@
               "name": "reuse_baseline",
               "opts": [
                 "--reuse-baseline"
+              ],
+              "param_type": "option",
+              "type": "text"
+            },
+            {
+              "name": "compare_to",
+              "opts": [
+                "--compare-to"
               ],
               "param_type": "option",
               "type": "text"
@@ -3314,6 +3379,14 @@
             "name": "reuse_baseline",
             "opts": [
               "--reuse-baseline"
+            ],
+            "param_type": "option",
+            "type": "text"
+          },
+          {
+            "name": "compare_to",
+            "opts": [
+              "--compare-to"
             ],
             "param_type": "option",
             "type": "text"

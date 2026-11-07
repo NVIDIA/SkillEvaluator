@@ -626,6 +626,36 @@ The new run retains its own baseline rows. Fresh execution counts and reused
 trial counts are separate; reused evidence is not another independent attempt.
 Cost savings depend on the run, including agent, judge, and environment usage.
 
+### Compare skill versions
+
+Add `--compare-to RUN` to compare the current with-skill arm with a retained
+run's with-skill arm. This is separate from Skill Lift, which still compares
+with-skill against no-skill. It can be combined with `--reuse-baseline latest`:
+
+```bash
+skillevaluator tier3 evaluate ./my-skill --compare-to RUN --reuse-baseline latest
+skillevaluator tier3 compare-versions ./my-skill --current CURRENT --prior PRIOR
+skillevaluator tier3 compare-versions ./my-skill --current CURRENT --prior PRIOR --json
+```
+
+Both runs must have compatible datasets/cases, agents and resolved models,
+environment, judge/scoring policy, attempts, evaluator version, and workspace
+configuration. The prior with-skill arm must have complete successful scored
+evidence; it may itself have reused a no-skill baseline. An incompatible
+explicit id is refused before agent execution. `--compare-to latest` searches
+newest first for an eligible different skill revision, records bounded rejected
+candidates, and continues without a version comparison if none is available.
+An explicitly selected identical skill identity is allowed but flagged as
+not a version change.
+
+Version deltas use the same per-case pairing and score policy as Skill Lift.
+A negative available delta is marked as a regression; missing or unscored
+evidence is unavailable, never zero or a regression. Reports show the source
+run/revision and prior-to-current score transition. `compare-versions` is
+read-only, needs no provider credentials, and uses the same results-root
+resolution via `--results-dir`. It exits nonzero when comparison is unavailable.
+The static semver option `--previous-version` is unrelated and unchanged.
+
 ### Baseline-only runs
 
 `--skip-with-skill` is the counterpart of `--skip-baseline`: it stages and runs

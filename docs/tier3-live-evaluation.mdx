@@ -1038,6 +1038,29 @@ targets stay unresolved for the rest of the trace, and once the work budget
 is spent, every force-only target counts as protected. Both receive the
 finding.
 
+Security findings keep credentials out of their `evidence`, which is saved in
+the verifier's `skill_evaluator_reward.json`, the collected results, and the
+reports. A sensitive-path or sensitive-file-write finding records only the
+protected entry it matched, such as `~/.bashrc` or `/root/.ssh`, never the
+command or tool input. Destructive-command, network, prompt-injection, and
+refusal findings keep their command, prompt, or response text with these parts
+masked:
+
+- private key blocks, and the key shapes that log redaction masks, such as
+  `sk-`, `nvapi-`, `AKIA`, GitHub tokens, and JWTs;
+- URL user info, as in `https://user:token@host`;
+- `Authorization` header values; the `Bearer`, `Basic`, or `Token` word stays;
+- the values of `--password`, `--token`, `--api-key`, and similar flags, and a
+  `user:password` value of `-u` or `--user` (`python -u` and `pip --user` are
+  left alone);
+- values assigned to a credential name, such as `_authToken=...` or
+  `aws_secret_access_key = ...`;
+- `glpat-`, `npm_`, `xox*-`, and `hf_` tokens.
+
+Only the first 2,000 characters are scanned, and a word that this limit cuts in
+half is dropped. The evidence is then cut to 500 characters, or 300 for prompt
+and response text.
+
 `token_efficiency` is a standalone report signal, not a dimension source. It
 never changes a dimension score or the overall verdict.
 

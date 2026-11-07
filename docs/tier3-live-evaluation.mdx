@@ -163,8 +163,14 @@ for NVIDIA Build, Codex for OpenAI, or Claude Code for Anthropic. If no accepted
 dataset or task source exists, it generates one starter case and proceeds to the
 live with-skill and without-skill comparison. It reuses valid existing sources
 unchanged; invalid sources produce an error rather than being replaced.
-A generated starter case lets you try the pipeline, but does not establish
-broad positive and negative coverage.
+A generated one-case starter is a starting point, not a representative
+evaluation. Generation prints its concrete coverage gaps to stderr, such as
+the absence of a negative/non-trigger case or missing expected outcomes and
+assertions. Expand and review it with
+`skillevaluator create-eval-dataset ./my-skill --full`, then inspect the counts
+and gaps with `skillevaluator tier3 validate ./my-skill`. Larger case counts
+do not by themselves establish representative coverage. Native Harbor task
+sources do not receive an eval-dataset coverage summary.
 
 The same agent, model, environment, grading, and reporting options described for
 `tier3 evaluate` apply to this direct workflow. For example:

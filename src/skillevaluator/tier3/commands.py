@@ -29,6 +29,7 @@ from skillevaluator.evaluation.results import DatasetGenerationError, DatasetGen
 from skillevaluator.evaluation.tier3_report import render_agent_eval_html_report
 from skillevaluator.provider_config import ProviderConfigurationError, resolve_llm_provider
 from skillevaluator.tier3.case_ids import safe_child, validate_case_id, validate_case_ids
+from skillevaluator.tier3.dataset_coverage import dataset_coverage_result
 from skillevaluator.tier3.dataset_utils import DATASET_EXTENSIONS, load_dataset_entries_with_format
 from skillevaluator.tier3.evals_config import CONFIG_FILENAMES, _validate_config, load_evals_config
 from skillevaluator.tier3.evals_spec import validate_harbor_contract, validate_skillevaluators
@@ -966,15 +967,19 @@ def validate_evals(skill_path: Path, *, as_json: bool, strict: bool, harbor_cont
                 )
             ]
 
+    coverage = dataset_coverage_result(skill_path)
     if as_json:
         console.print_json(
             json.dumps(
-                [{"path": r.path, "status": r.status, "message": r.message} for r in results],
+                [{"path": r.path, "status": r.status, "message": r.message} for r in results]
+                + ([coverage] if coverage is not None else []),
                 indent=2,
             )
         )
     else:
         _print_validate_results(skill_path, results)
+        if coverage is not None:
+            console.print(Text(coverage["message"]))
 
     has_errors = any(r.status == "error" for r in results)
     has_warnings = any(r.status == "warning" for r in results)

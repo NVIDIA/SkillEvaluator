@@ -6,6 +6,10 @@ All notable changes to SkillEvaluator are documented in this file.
 
 ### Added
 
+- `tier3 validate` reports informational dataset coverage counts and concrete
+  gaps in text and JSON. Generated one-case starters now explain their limits
+  and point authors to full dataset generation and coverage validation.
+
 - `skills/skillevaluator/` is an agent skill for operating SkillEvaluator: it
   routes requests to the right tier, readiness check, dataset, report, or CI
   command, and ships Tier 3 evaluation cases for itself. A test keeps every

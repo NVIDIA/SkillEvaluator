@@ -111,6 +111,10 @@ def test_direct_workflow_generates_missing_dataset_then_evaluates(skill, configu
     result = CliRunner().invoke(_command(), [str(skill), "--progress", "off"])
     assert result.exit_code == 0, result.output
     assert calls == [True]
+    assert "One-case starter: a starting point, not a representative evaluation" in result.stderr
+    assert "no negative case that should not trigger the skill" in result.stderr
+    assert f"skillevaluator create-eval-dataset {skill} --full" in result.stderr
+    assert f"skillevaluator tier3 validate {skill}" in result.stderr
     assert len(configured) == 1
     assert configured[0].agents == "opencode"
     assert configured[0].skip_baseline is False

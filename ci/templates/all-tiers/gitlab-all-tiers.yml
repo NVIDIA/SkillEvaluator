@@ -37,8 +37,10 @@ skill-evaluation-native:
   timeout: 5 hours
 
 # Existing jobs: guard them so trusted feedback pipelines skip them. A job
-# without rules, only or except can use
-# `extends: .skill-evaluation-not-feedback` instead.
+# without rules, only or except gets the guard followed by `- when: on_success`.
+# Write the guards as rules: the all-tiers include defines the hidden job, so
+# only a job added after this file is on the default branch, without rules,
+# only or except, can use `extends: .skill-evaluation-not-feedback` instead.
 # build-example:
 #   rules:
 #     - if: '$SKILL_EVAL_FEEDBACK == "true"'

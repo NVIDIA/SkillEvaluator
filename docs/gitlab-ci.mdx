@@ -41,8 +41,8 @@ pipeline, so a merged file must keep this shape:
 5. Guard every other job. Trusted feedback runs as a pipeline on the protected
    default branch, so an unguarded job, such as a deployment gated on the
    default branch, would run again for every MR. Start each job's rules with
-   the guard, or add `extends: .skill-evaluation-not-feedback` to a job that
-   has neither `rules` nor `only`/`except`:
+   the guard. A job that has neither `rules` nor `only`/`except` gets the guard
+   followed by `- when: on_success`:
 
    ```yaml
    deploy:
@@ -51,11 +51,22 @@ pipeline, so a merged file must keep this shape:
        - if: '$SKILL_EVAL_FEEDBACK == "true"'
          when: never
        - if: '$CI_COMMIT_BRANCH == $CI_DEFAULT_BRANCH'
+   lint:
+     script: make lint
+     rules:
+       - if: '$SKILL_EVAL_FEEDBACK == "true"'
+         when: never
+       - when: on_success
    ```
 
    Merge these guards to the default branch before the setup MR. Its own
    feedback request starts a pipeline from the current default-branch
    configuration, and the guard is inert until `SKILL_EVAL_FEEDBACK` is set.
+   Write these guards as rules: `.skill-evaluation-not-feedback` is defined by
+   the all-tiers include, so until the setup MR merges,
+   `extends: .skill-evaluation-not-feedback` fails validation with
+   `unknown keys in extends`. After that, a job added later with neither
+   `rules` nor `only`/`except` can use that `extends` instead.
 6. Add `.gitlab/skill-feedback.yml` as rendered and merge both files through
    a setup MR. After it merges, `skillevaluator ci status --tiers 1,2,3`
    reports whether the root is recognized and warns about unguarded root jobs.
@@ -88,9 +99,11 @@ to that execution environment. The native jobs and the trusted feedback job
 use `environment: action: prepare`: each receives its environment's scoped
 variables and access protection but records no deployment, so GitLab's
 **Prevent outdated deployment jobs** setting cannot drop an older MR's jobs.
-Deployment approval rules apply only to jobs that create deployments, so they
-do not gate these jobs. Restrict who can run them with the protected
-environments' deploy access, not with required approvals. The default Docker
+Do not add deployment approval rules to these environments. Depending on the
+GitLab version and its `prevent_blocking_non_deployment_jobs` feature flag,
+approval rules either do not gate these jobs or turn them into manual jobs
+that wait to be run. Restrict who can run them with the protected
+environments' deploy access. The default Docker
 service needs a privileged runner with Docker-in-Docker enabled. The daemon accepts only TLS clients on
 port 2376 (`DOCKER_TLS_CERTDIR: /certs`), so agent containers cannot use the
 Docker API. Configure the runner with `volumes = ["/certs/client"]` so the job

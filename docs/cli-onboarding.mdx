@@ -159,8 +159,10 @@ short-lived job token; the initiating user needs permission to create a pipeline
 on the protected default branch, pass pipeline variables and run the protected
 feedback environment. Without it, the request is an allowed failure: no comment
 is posted and the Tier 1 gate is unchanged. GitLab's provider-backed and
-feedback jobs record no deployments, so deployment approvals do not gate them;
-restrict them with the protected environments' deploy access.
+feedback jobs record no deployments. Do not add deployment approval rules to
+their environments: depending on the GitLab version, approvals either do not
+gate these jobs or turn them into manual jobs. Restrict them with the protected
+environments' deploy access.
 See the platform pages for
 [GitHub](github-actions.mdx#three-tier-checks-and-feedback) and
 [GitLab](gitlab-ci.mdx#three-tier-checks-and-feedback) details.

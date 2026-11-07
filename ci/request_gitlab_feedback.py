@@ -26,7 +26,9 @@ REFUSED = (
 NO_JOBS = "HTTP 400 can also mean the default-branch configuration added no jobs to the pipeline."
 SERVER_ERROR = "GitLab did not create the feedback pipeline; retry this job, and check the GitLab API if it persists."
 TRANSPORT_ERROR = "GitLab could not be reached; check the runner's access to the GitLab API, then retry this job."
-INVALID_CONTEXT = "This job needs a same-project merge request pipeline with GitLab's predefined CI variables."
+INVALID_CONTEXT = (
+    "This job needs a same-project merge request pipeline with GitLab's predefined CI variables and an HTTPS API URL."
+)
 INVALID_RESPONSE = "GitLab's response did not confirm a default-branch pipeline in this project."
 
 

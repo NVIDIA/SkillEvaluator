@@ -430,11 +430,16 @@ def test_gitlab_feedback_job_uses_its_protected_environment_without_recording_de
     assert "/deployments" not in (ROOT / "ci/feedback.py").read_text()
     docs = " ".join((ROOT / "docs/gitlab-ci.mdx").read_text().split())
     assert "The native jobs and the trusted feedback job use `environment: action: prepare`" in docs
-    # Approval rules gate deployments only; prepare jobs need deploy access instead.
-    assert "Deployment approval rules apply only to jobs that create deployments" in docs
-    assert "not with required approvals" in docs
+    # Some GitLab versions turn prepare jobs on an environment with approval
+    # rules into manual jobs, so deploy access is the only safe restriction.
+    assert "Deployment approval rules apply only to jobs that create deployments" not in docs
+    assert "Do not add deployment approval rules to these environments" in docs
+    assert "turn them into manual jobs" in docs and "`prevent_blocking_non_deployment_jobs`" in docs
+    assert "Restrict who can run them with the protected environments' deploy access" in docs
     onboarding = " ".join((ROOT / "docs/cli-onboarding.mdx").read_text().split())
-    assert "deployment approvals do not gate them" in onboarding
+    assert "so deployment approvals do not gate them" not in onboarding
+    assert "Do not add deployment approval rules to their environments" in onboarding
+    assert "turn them into manual jobs" in onboarding
 
 
 def test_gitlab_feedback_pipeline_guard_is_offered_and_documented():
@@ -452,9 +457,18 @@ def test_gitlab_feedback_pipeline_guard_is_offered_and_documented():
     # Included jobs use stage test, so a merged root's stages must keep it.
     assert "If the root defines `stages`, keep `test` in the list" in docs
     assert "neither `rules` nor `only`/`except`" in docs
+    # Guards merge before the setup MR, while only all-tiers.yml defines the
+    # hidden job, so they use rules; a job without rules needs a fallback rule.
+    assert "gets the guard followed by `- when: on_success`" in docs
+    assert "- when: on_success" in (ROOT / "docs/gitlab-ci.mdx").read_text()
+    assert "Write these guards as rules" in docs
+    assert "until the setup MR merges, `extends: .skill-evaluation-not-feedback` fails validation" in docs
+    assert ".skill-evaluation-not-feedback" not in (ROOT / "ci/gitlab/skill-evaluation.yml").read_text()
     template = " ".join((ROOT / "ci/templates/all-tiers/gitlab-all-tiers.yml").read_text().split())
     assert "If the root defines stages, keep test" in template
-    assert "without rules, only or except can use" in template
+    assert "gets the guard followed by `- when: on_success`" in template
+    assert "Write the guards as rules" in template
+    assert "added after this file is on the default branch" in template
     # The upgrade path must order the guards before the setup MR as well.
     onboarding = " ".join((ROOT / "docs/cli-onboarding.mdx").read_text().split())
     guards = onboarding.index("merge those guards to the default branch")

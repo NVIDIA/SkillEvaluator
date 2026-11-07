@@ -502,11 +502,12 @@ def _print_gitlab_root_merge_steps(wizard, existing):
         "4. Replace any skill-evaluation job override with the rendered skill-evaluation and "
         "skill-evaluation-native entries.",
         "5. Feedback pipelines run on the default branch. Start the rules of every other job with this "
-        f"guard, or add extends: {GL_NOT_FEEDBACK} to a job without rules, only or except:"
+        "guard; give a job without rules, only or except the guard followed by - when: on_success:"
         "\n     - if: '$SKILL_EVAL_FEEDBACK == \"true\"'\n       when: never",
         (f"   Jobs to guard: {', '.join(unguarded)}. " if unguarded else "   ")
         + "Merge the guards to the default branch first: the setup MR's own feedback request runs that "
-        "branch's current configuration.",
+        f"branch's current configuration. Write those guards as rules: extends: {GL_NOT_FEEDBACK} works only "
+        "after the all-tiers include is on the default branch, for example for a job added later.",
         f"6. Create {GL_FEEDBACK} with the rendered content.",
         "7. Commit both through a merge request; after it merges, ci status --tiers 1,2,3 reports whether "
         "the root is recognized.",
@@ -597,7 +598,7 @@ def initialize(
     )
     if platform == "gitlab":
         wizard.console.print(
-            "GitLab: protect the default branch and add a scoped protected SKILLEVALUATOR_GITLAB_TOKEN for trusted feedback. Permit job-token pipeline triggers; the initiating user needs protected-default-branch pipeline and feedback-environment permissions."
+            "GitLab: protect the default branch and add a scoped protected SKILLEVALUATOR_GITLAB_TOKEN for trusted feedback. Permit job-token pipeline triggers; the initiating user needs permission to run protected-default-branch pipelines, pass pipeline variables and run the feedback environment."
         )
     mode = mode or click.prompt("Next", default="preview", type=click.Choice(["preview", "save", "pr"]))
     if merge_root:
@@ -752,17 +753,29 @@ def _gitlab_rules(document, job, depth=0):
     return None
 
 
-def _gitlab_only_except(document, job, depth=0) -> bool:
-    """GitLab rejects only/except beside rules, including rules inherited through extends."""
+_GL_UNSET = object()
+
+
+def _gitlab_inherited(document, job, key, depth=0):
+    """Resolve key as extends does: the job's own value, even null, wins, then the last parent defining it."""
     if not isinstance(job, dict) or depth > 10:
-        return False
-    if "only" in job or "except" in job:
-        return True
+        return _GL_UNSET
+    if key in job:
+        return job[key]
     extends = job.get("extends")
-    parents = [extends] if isinstance(extends, str) else extends if isinstance(extends, list) else []
-    return any(
-        isinstance(parent, str) and _gitlab_only_except(document, document.get(parent), depth + 1) for parent in parents
-    )
+    for parent in reversed([extends] if isinstance(extends, str) else extends if isinstance(extends, list) else []):
+        value = (
+            _gitlab_inherited(document, document.get(parent), key, depth + 1) if isinstance(parent, str) else _GL_UNSET
+        )
+        if value is not _GL_UNSET:
+            return value
+    return _GL_UNSET
+
+
+def _gitlab_only_except(document, job) -> bool:
+    """GitLab rejects only/except beside rules, including inherited ones; a null value drops an inherited key."""
+    values = [_gitlab_inherited(document, job, key) for key in ("only", "except")]
+    return any(value is not None and value is not _GL_UNSET for value in values)
 
 
 def gitlab_unguarded_jobs(text: str) -> list[str]:

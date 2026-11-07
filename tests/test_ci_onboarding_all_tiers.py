@@ -835,8 +835,13 @@ def test_gitlab_merge_steps_keep_the_test_stage_and_limit_extends_to_jobs_withou
     # Every included job uses stage test; a root stages list without it rejects the pipeline.
     assert "If the root defines stages, keep test in the list" in output
     # GitLab rejects only/except beside the rules a job would inherit from the hidden guard.
-    assert "to a job without rules, only or except:" in output
+    assert "a job without rules, only or except" in output
     assert "Jobs to guard: legacy." in output
+    # Guards merge before the setup MR, when the hidden job is not yet defined.
+    assert "guard followed by - when: on_success" in output
+    assert "Write those guards as rules: extends: .skill-evaluation-not-feedback works only after" in output
+    # Feedback triggers pass pipeline variables, which GitLab can restrict per project.
+    assert "pass pipeline variables" in output
 
 
 def test_gitlab_jobs_keeping_only_or_except_are_never_counted_as_guarded():
@@ -851,9 +856,16 @@ def test_gitlab_jobs_keeping_only_or_except_are_never_counted_as_guarded():
             "ruled:\n  script: c\n  except: [tags]\n" + guard,
             "guarded:\n  script: d\n  extends: .skill-evaluation-not-feedback\n",
             "plain:\n  script: e\n" + guard,
+            # A null value drops an inherited key, and GitLab ignores null only/except beside rules.
+            ".mid:\n  extends: .old\n  only: null\n",
+            "dropped:\n  script: f\n  extends: .old\n  only: null\n" + guard + "    - when: on_success\n",
+            "nulled:\n  script: g\n  except: null\n" + guard + "    - when: on_success\n",
+            "middle:\n  script: h\n  extends: [.mid, .skill-evaluation-not-feedback]\n",
+            # The last parent defining a key wins, so a later .old restores only.
+            "restored:\n  script: i\n  extends: [.mid, .old, .skill-evaluation-not-feedback]\n",
         ]
     )
-    assert all_tiers.gitlab_unguarded_jobs(root) == ["extended", "inherited", "ruled"]
+    assert all_tiers.gitlab_unguarded_jobs(root) == ["extended", "inherited", "ruled", "restored"]
 
 
 def test_gitlab_pr_remote_root_conflict_points_to_an_updated_checkout(repository, all_release, monkeypatch):

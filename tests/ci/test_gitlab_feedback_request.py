@@ -113,6 +113,8 @@ def test_malformed_or_foreign_request_is_rejected_before_network(request_env, mo
     assert all(secret not in output for name, secret in request_env.items() if "TOKEN" in name)
     assert "feedback is skipped" in output and "same-project merge request pipeline" in output
     assert "permission" not in output
+    # An HTTP-only instance satisfies the MR context; the hint must name the HTTPS requirement.
+    assert "an HTTPS API URL" in output
 
 
 def test_redirect_is_refused_without_logging_token_or_response(request_env, monkeypatch, capsys):

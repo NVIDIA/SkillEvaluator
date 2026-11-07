@@ -515,7 +515,7 @@ def test_gym_run_publishes_latest_stages_runtime_env_and_records_dataset(
     assert "publication_target" in result
 
 
-def test_config_errors_reject_decoys_and_timeout_multiplier(tmp_path: Path) -> None:
+def test_config_errors_reject_decoys_but_accept_timeout_multiplier(tmp_path: Path) -> None:
     from skillevaluator.tier3.nemo_gym.backend import nemo_gym_config_errors
 
     (tmp_path / "evals").mkdir()
@@ -523,7 +523,44 @@ def test_config_errors_reject_decoys_and_timeout_multiplier(tmp_path: Path) -> N
         "schema_version: 1\nharbor:\n  timeout_multiplier: 2\nskill_workspace:\n  decoy_manifest: decoys.json\n"
     )
     errors = " ".join(nemo_gym_config_errors(tmp_path))
-    assert "timeout_multiplier" in errors and "decoy_manifest" in errors
+    assert "decoy_manifest" in errors and "timeout_multiplier" not in errors
+
+
+def test_timeout_multiplier_scales_staged_task_timeouts(tmp_path: Path) -> None:
+    import tomllib
+
+    from skillevaluator.tier3.nemo_gym.runner import stage_for_gym
+
+    task = tmp_path / "case-1"
+    task.mkdir()
+    (task / "task.toml").write_text(
+        'instruction = """\n[agent]\ntimeout_sec = 1\n"""\n\n[agent]\ntimeout_sec = 300.0\n\n'
+        '[verifier]\ntimeout_sec = 600  # judges\n\n[verifier.env]\nA = "1"\n\n[environment]\ncpus = 1\n'
+    )
+    stage_for_gym(tmp_path, timeout_multiplier=2.5)
+    data = tomllib.loads((task / "task.toml").read_text())
+    assert data["agent"]["timeout_sec"] == 750.0
+    assert data["verifier"]["timeout_sec"] == 1500.0
+    assert data["environment"]["build_timeout_sec"] == 1500.0
+    assert data["environment"]["cpus"] == 1
+    assert "timeout_sec = 1\n" in data["instruction"]
+
+
+def test_timeout_multiplier_is_validated_and_recorded(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, keep_staged_tasks: None
+) -> None:
+    import tomllib
+
+    skill, _env_log = _fake_gym_skill(tmp_path, monkeypatch)
+    bad = _run_fake_gym(skill, tmp_path, timeout_multiplier=0.0)
+    assert any("timeout_multiplier" in error for error in bad["error"])
+
+    result = _run_fake_gym(skill, tmp_path, timeout_multiplier=2.0, skip_baseline=True, max_cases=1)
+    run_dir = Path(result["run_dir"])
+    task_toml = next((run_dir / "_harbor-tasks" / "codex" / "with").glob("*/task.toml")).read_text()
+    assert tomllib.loads(task_toml)["agent"]["timeout_sec"] == 600.0
+    run_config = json.loads((run_dir / "run_config.json").read_text())
+    assert run_config["harbor"]["timeout_multiplier"] == 2.0
 
 
 def test_passthrough_env_alias_reaches_the_gym_agent(
@@ -546,7 +583,7 @@ def test_config_errors_let_cli_overrides_win(tmp_path: Path) -> None:
         "schema_version: 1\nharbor:\n  stop_on_pass: true\n  timeout_multiplier: 2\n"
         "  agent_runtime_preflight: true\n  custom_dockerfile_mode: preserve\n"
     )
-    assert len(nemo_gym_config_errors(tmp_path)) == 4
+    assert len(nemo_gym_config_errors(tmp_path)) == 3
     assert (
         nemo_gym_config_errors(
             tmp_path,

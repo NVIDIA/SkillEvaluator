@@ -143,8 +143,13 @@ def nemo_gym_capability_errors(
         errors.append("--override-storage-mb is not supported with --backend nemo-gym")
     if agent_runtime_preflight:
         errors.append("--agent-runtime-preflight applies to the Harbor backend only")
-    if timeout_multiplier not in (None, 1, 1.0):
-        errors.append("--timeout-multiplier is not supported with --backend nemo-gym yet")
+    if timeout_multiplier is not None:
+        from skillevaluator.tier3.harbor.runner import _validated_timeout_multiplier
+
+        try:
+            _validated_timeout_multiplier(timeout_multiplier)
+        except ValueError as exc:
+            errors.append(str(exc))
     return errors
 
 
@@ -245,8 +250,6 @@ def nemo_gym_config_errors(
     errors: list[str] = []
     if stop_on_pass is None and harbor.get("stop_on_pass"):
         errors.append("harbor.stop_on_pass is not supported with --backend nemo-gym yet")
-    if timeout_multiplier is None and harbor.get("timeout_multiplier", 1.0) not in (1, 1.0):
-        errors.append("harbor.timeout_multiplier is not supported with --backend nemo-gym yet")
     if agent_runtime_preflight is None and harbor.get("agent_runtime_preflight"):
         errors.append("harbor.agent_runtime_preflight applies to the Harbor backend only")
     if harbor.get("base_image_mode", "disabled") != "disabled":

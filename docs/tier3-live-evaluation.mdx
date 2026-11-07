@@ -462,12 +462,15 @@ modes. Unset flags fall back to these `evals/config.yml` keys, as on Harbor:
 `harbor.n_attempts`, `pass_threshold`, `n_concurrent`, `max_cases`, `agents.<agent>.model`,
 `resources` (`cpus`, `memory_mb`), `runtime_env`, `grading.mode`, and
 `skill_workspace.mode`/`include`. `--skip-baseline`, `--skip-with-skill`, `--max-cases` and
-`--agent-model` (one model per agent) apply the same way. It rejects `--stop-on-pass`,
+`--agent-model` (one model per agent) apply the same way. `--timeout-multiplier` (or
+`harbor.timeout_multiplier`) scales each task's agent, verifier, and environment-build timeouts
+as on Harbor, and Gym enforces them. `--environment-kwarg` is rejected, as Harbor rejects it in
+Docker mode. It rejects `--stop-on-pass`,
 `--harbor-keep-jobs`, `--copy-repo`, `--agent-runtime-preflight`, `--override-storage-mb`,
-`--timeout-multiplier`, `--environment-kwarg`, custom Dockerfile modes other than the
+custom Dockerfile modes other than the
 default, and the config keys `harbor.base_image_mode` (reuse/rebuild),
 `task_source: native_harbor`, `agent_workdir`, `pre_agent_setup` (alias `setup_commands`),
-`timeout_multiplier`, `resources.storage_mb`, `skill_workspace.decoy_manifest`, MCP
+`resources.storage_mb`, `skill_workspace.decoy_manifest`, MCP
 servers in `evals/environment/mcp_servers.toml`, native `evals/harbor/` tasks (also when
 `task_source: auto` resolves to them), a model URL with embedded credentials, and Windows hosts,
 whether set by flag or config (a flag overrides its config key), before anything

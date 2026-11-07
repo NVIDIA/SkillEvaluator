@@ -60,14 +60,18 @@ HOST_ENV = "SKILL_EVAL_NEMO_GYM_HOST"
 _SKILLS_DIR_LINE = re.compile(r"^skills_dir\s*=.*\n?", re.MULTILINE)
 
 
-def stage_for_gym(arm_dir: Path, verifier_env: dict[str, str] | None = None) -> None:
+def stage_for_gym(
+    arm_dir: Path, verifier_env: dict[str, str] | None = None, *, timeout_multiplier: float = 1.0
+) -> None:
     """Adapt Harbor-format tasks for Gym's agents and verifier.
 
     Drops Harbor's ``skills_dir`` task hook, which Gym's CLI agents reject. The task image
     already carries the skills at each agent's native location (``/root/.agents/skills``,
     ``/root/.claude/skills``, ...), so the with-skill arm is unchanged and the baseline image
     still has none. Adds ``verifier_env`` (``${NAME}`` templates) to ``[verifier.env]``: Harbor
-    passes the judge overrides at job level, and Gym has no job-level verifier env.
+    passes the judge overrides at job level, and Gym has no job-level verifier env. Scales the
+    agent, verifier and environment-build timeouts by ``timeout_multiplier``, as Harbor's
+    ``--timeout-multiplier`` does, because Gym enforces the task's own timeouts.
     """
     for task_toml in arm_dir.glob("*/task.toml"):
         text = task_toml.read_text(encoding="utf-8")
@@ -84,8 +88,81 @@ def stage_for_gym(arm_dir: Path, verifier_env: dict[str, str] | None = None) -> 
                 staged = staged[: header.end()] + lines + staged[header.end() :]
             else:
                 staged = staged.rstrip("\n") + "\n\n[verifier.env]\n" + lines
+        if timeout_multiplier != 1.0:
+            staged = _scaled_task_timeouts(staged, timeout_multiplier, task_file=task_toml)
         if staged != text:
             task_toml.write_text(staged, encoding="utf-8")
+
+
+_TIMEOUT_FIELDS = {
+    "agent": "timeout_sec",
+    "verifier": "timeout_sec",
+    "environment": "build_timeout_sec",
+    "steps.agent": "timeout_sec",
+    "steps.verifier": "timeout_sec",
+}
+# Harbor's default environment build timeout, which its multiplier also scales when a task names none.
+_DEFAULT_BUILD_TIMEOUT_SEC = 600.0
+_TABLE_RE = re.compile(r"^[ \t]*\[{1,2}[ \t]*([A-Za-z0-9_.-]+)[ \t]*\]{1,2}[ \t]*(?:#.*)?$")
+_NUMBER_RE = re.compile(r"^([ \t]*)([A-Za-z_]+)([ \t]*=[ \t]*)([0-9][0-9_.eE+-]*)([ \t]*(?:#.*)?)$")
+
+
+def _scaled_task_timeouts(text: str, multiplier: float, *, task_file: Path) -> str:
+    """Scale a staged task.toml's timeouts by Harbor's multiplier, checking nothing else changed."""
+    from skillevaluator.tier3.harbor.runner import _scaled_harbor_timeout
+
+    lines = text.split("\n")
+    table = ""
+    open_string: str | None = None
+    build_timeout_seen = False
+    environment_end: int | None = None
+    for index, line in enumerate(lines):
+        if open_string is not None:
+            if line.count(open_string) % 2:
+                open_string = None
+            continue
+        header = _TABLE_RE.match(line)
+        if header:
+            if table == "environment" and environment_end is None:
+                environment_end = index
+            table = header.group(1)
+            continue
+        number = _NUMBER_RE.match(line)
+        if number and _TIMEOUT_FIELDS.get(table) == number.group(2):
+            field = f"{table}.{number.group(2)}"
+            scaled = _scaled_harbor_timeout(number.group(4), multiplier, task_file=task_file, field=field)
+            build_timeout_seen = build_timeout_seen or table == "environment"
+            lines[index] = f"{number.group(1)}{number.group(2)}{number.group(3)}{scaled!r}{number.group(5)}"
+            continue
+        open_string = next((quote for quote in ('"""', "'''") if line.count(quote) % 2), None)
+    if table == "environment" and environment_end is None:
+        environment_end = len(lines)
+    expected = tomllib.loads(text)
+    _scale_timeout_values(expected, multiplier)
+    if not build_timeout_seen and environment_end is not None:
+        while environment_end > 0 and not lines[environment_end - 1].strip():
+            environment_end -= 1
+        lines.insert(environment_end, f"build_timeout_sec = {_DEFAULT_BUILD_TIMEOUT_SEC * multiplier!r}")
+        expected["environment"]["build_timeout_sec"] = _DEFAULT_BUILD_TIMEOUT_SEC * multiplier
+    staged = "\n".join(lines)
+    if tomllib.loads(staged) != expected:
+        raise ValueError(f"{task_file}: could not apply --timeout-multiplier to the task timeouts")
+    return staged
+
+
+def _scale_timeout_values(data: dict[str, Any], multiplier: float) -> None:
+    tables = [(data, section) for section in ("agent", "verifier", "environment")]
+    tables += [
+        (step, section)
+        for step in data.get("steps") or []
+        if isinstance(step, dict)
+        for section in ("agent", "verifier")
+    ]
+    for parent, section in tables:
+        key = "steps." + section if parent is not data else section
+        table = parent.get(section)
+        if isinstance(table, dict) and _TIMEOUT_FIELDS[key] in table:
+            table[_TIMEOUT_FIELDS[key]] = float(table[_TIMEOUT_FIELDS[key]]) * multiplier
 
 
 def _task_case_ids(arm_dir: Path) -> dict[str, str]:
@@ -510,8 +587,12 @@ def run_nemo_gym_eval(
             else harbor_config.get("agent_runtime_preflight", False)
         ),
     )
-    if effective_timeout not in (1, 1.0):
-        errors.append("--timeout-multiplier is not supported with --backend nemo-gym yet")
+    from skillevaluator.tier3.harbor.runner import _validated_timeout_multiplier
+
+    try:
+        effective_timeout = _validated_timeout_multiplier(effective_timeout)
+    except ValueError as exc:
+        errors.append(str(exc))
     if harbor_config.get("base_image_mode", "disabled") != "disabled":
         errors.append("harbor.base_image_mode reuse/rebuild applies to the Harbor backend only")
     if not _is_positive_int(attempts):
@@ -635,7 +716,7 @@ def run_nemo_gym_eval(
                     case_selection = _limit_staged_cases(
                         selectors, dict(zip(selectors, selector_case_ids, strict=True)), task_paths, max_cases=max_cases
                     )
-                stage_for_gym(arm_dir, judge_job_env)
+                stage_for_gym(arm_dir, judge_job_env, timeout_multiplier=effective_timeout)
                 task_case_ids = _task_case_ids(arm_dir)
                 case_ids = case_ids or sorted(set(task_case_ids.values()))
                 staged_task_paths += [task for task in task_paths if task.is_dir()]
@@ -778,7 +859,7 @@ def run_nemo_gym_eval(
                 "n_attempts": attempts,
                 "stop_on_pass": False,
                 "n_concurrent": concurrency,
-                "timeout_multiplier": 1.0,
+                "timeout_multiplier": effective_timeout,
                 "base_image_mode": "disabled",
                 "jobs_retained": False,
             },

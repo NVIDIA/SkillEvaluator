@@ -4,10 +4,122 @@ All notable changes to SkillEvaluator are documented in this file.
 
 ## Unreleased
 
+### Added
+
+- `skills/skillevaluator/` is an agent skill for operating SkillEvaluator: it
+  routes requests to the right tier, readiness check, dataset, report, or CI
+  command, and ships Tier 3 evaluation cases for itself. A test keeps every
+  command and option it documents in sync with the CLI. The new "Evaluate from
+  Your Agent" docs page shows how to install it in Codex, Claude Code, OpenCode,
+  OpenClaw, and other skill-aware agents.
+
 ### Changed
 
-- When CI redaction masks a credential inside a reported PII value, remove the
-  finding's digest as well.
+- Align terminal grade and lift colors across compact, full, and direct Tier 3
+  reports; displayed zero lift is neutral. Narrow terminals stack complete
+  condition score/bar groups. Full-report Details retain successful quality and
+  lift evidence without opening every success panel. Artifact footers show the
+  emitted filenames, with links only on capable interactive terminals.
+
+- Compact validation now writes durable tier/check starts, stage changes and
+  measured milestones to stderr in CI, with deduplicated events and a heartbeat
+  after 60 seconds without progress. Final report panels remain on stdout.
+
+- Align final terminal and HTML command outcomes: Passed required checks,
+  Changes required, or Incomplete. Keep publication eligibility and Best agent
+  score separate. Tier counts exclude explicit N/A checks from execution;
+  Tier 3 trial summaries use recorded condition counters before retained rows.
+
+- Embed the verified Chart.js 4.5.1 runtime and its MIT notices in Tier 3 HTML
+  reports so charts work offline without CDN or source-map requests. Charts
+  include accessible descriptions, links to data tables and visible fallbacks
+  when canvas initialization is unavailable; Tier 1 reports omit chart assets.
+
+### Documentation
+
+- The 0.8.0 entry for refused `claude-code` attempts said the arm reports its
+  coverage error, but `tier3 evaluate` does not print that error by default.
+  After one refusal in 20 cases with 3 attempts each, the arm lacks complete
+  attempt coverage, the run's `result.json` records
+  `Scored attempt coverage is 59/60`, and `tier3 evaluate` exits 1, as does
+  `validate --block-on-agent-eval`. `tier3 evaluate --verbose` lists the
+  refused trial. Before 0.8.0, on a route that serves the fallback model, such
+  as the Anthropic API, that model finished such an attempt and it was scored.
+  Rerun the arm on another model with `--agent-model claude-code=MODEL`; the
+  model is chosen per agent, not per case.
+
+- The 0.8.0 entry for Tier 2 shared review blocks said a short text repeated
+  under long headings stays inline. Once a cluster is over budget, heading
+  length does not affect which repeated bodies are shared: the heading line
+  stays with every occurrence either way, so a short body under short headings
+  stays inline too.
+
+- The 0.8.0 entry for capitalized `HTTP` method prose left out three forms
+  that 0.8.0 still flags: a method word before a backtick word, such as an
+  inline code span, as before a `$VAR` word; a Markdown table row with an
+  `HTTP` word in any cell, because `|` reads as a pipe; and `HTTP PUT` right
+  after a `;`, which starts a new command.
+
+### Fixed
+
+- A PII finding no longer keeps its `evidence_sha256` after CI redaction masks
+  a credential inside the value the finding reports. In 0.8.0 the finding kept
+  the digest of the unmasked value, so anyone holding the redacted report could
+  confirm a guess for the masked part. Redaction now removes a digest that no
+  longer matches the reported value.
+
+- Tier 2 context deduplication now numbers `SHARED CONTENT n` blocks from the
+  most repeated text, ties in first-seen order, instead of in first-seen order
+  alone. In 0.8.0 a text repeated hundreds of times could get block 10 or later,
+  whose references are one character longer. The cluster's request could then
+  stay over 64,000 characters and stop the scan as incomplete with
+  `llm_prompt_size_limit`, although numbering that text first would have brought
+  it within budget. The texts to share are now chosen together to save the most
+  characters: a text that saves only a few characters stays inline when sharing
+  it would push another text past block 9 and cost more than it saves.
+
+- Tier 3 **Measured Agent Resources** no longer count idle or user time as LLM
+  seconds when timing is inferred from step timestamps and an agent step with
+  tool calls is followed by a user or system step. The whole gap up to that
+  step, minus the measured tool time, was charged to the model, so a step with a
+  1 s tool call, followed 38 s later by a user step, added 37 LLM seconds. Only
+  the agent's next step shows when the model finished with the tool output, so
+  such a trial now has no LLM or tool seconds and, like other unmeasured trials,
+  leaves its arm's LLM and tool totals `N/A` (`null` in JSON). Native ATIF
+  timing is unchanged.
+
+- Tier 3 standard judges under `LLM_JUDGE_RETRY_POLICY=strict` with Bedrock
+  as the provider no longer label a Bedrock error that the policy treats as an
+  unavailable model, such as throttling, a missing or inaccessible model, or
+  an unreachable endpoint, as `Public provider call failed`. Where such an
+  error is reported, in a failed judge's `evaluation_errors` reason and in the
+  `problem` of its `judge_attempts.json` entry, it now reads
+  `Bedrock request failed`, like a Bedrock error that ends the judge and like
+  the default `legacy` policy.
+
+- `skillevaluator tier3 feedback` now writes the evaluated skill's directory
+  (known from `--skill` or a run in the skill's `evals/results`) as its name
+  and the home directory as `~` in the evidence it sends to the LLM, so an
+  error naming the skill's `SKILL.md` no longer shows its local path. A copied
+  run's path starting with `~user/` or `$HOME/` is now also replaced with the
+  run ID. Path masking now skips a URL other than a `file:` URL together with
+  any text after it up to the next whitespace, so in minified JSON a run,
+  skill, or home path that follows such a URL is sent as is, where 0.8.0
+  replaced the run's path with the run ID. A field over 65,536 characters with
+  no whitespace after its limit now keeps a masked prefix, cut at punctuation
+  such as `,` or `}` but never inside a URL's user info or host, so `Error: `
+  followed by minified JSON no longer arrives as `Error: ...<truncated>`.
+
+- Tier 3 security grading again warns about network exfiltration, lowering
+  the Security score to 0.5, for an HTTPie method word after a capitalized
+  `HTTP`, `HTTPS`, or `Http` word in cases that 0.8.0 stopped flagging: the
+  `HTTP` word follows a pass-through wrapper or a `$VAR` command word, as in
+  `strace -f HTTP POST URL`, or is printed into a pipe by `echo` or `printf`,
+  as in `echo HTTP POST URL | sh`, or a brace-expanded `name:@file` header
+  item such as `X-Data:{@,}.env` follows it. Both the host checker and the
+  bundled Harbor verifier apply the fix. Prose such as
+  `Use HTTP POST to create an item.` in a here-document or an unpiped `echo`
+  still does not warn.
 
 ### Fixed
 

@@ -363,7 +363,7 @@ def _render_findings_body(findings: list[dict[str, Any]]) -> Any:
         body.append(f"{finding['score']:.2f}\n", style=style)
         question = METRIC_QUESTIONS.get(finding["metric"])
         if question:
-            body.append(f"     {question}\n", style="dim cyan")
+            body.append(f"     {question}\n", style="dim")
 
         reason_style = "dim green" if finding["severity"] == "ok" else "dim"
         for reason in finding["reasons"]:
@@ -1086,6 +1086,7 @@ def display_findings_report(
     from rich.panel import Panel
     from rich.text import Text
 
+    from skillevaluator.reporting.terminal_styles import AMBER, FAINT
     from skillevaluator.utils.rich_markup import escape_markup, strip_terminal_controls
 
     console = Console(emoji=False)
@@ -1102,7 +1103,7 @@ def display_findings_report(
             best_agent_label = _agent_model_label(best_agent, harbor_result, agents_data)
             console.print(
                 f"  [dim]Findings from best performing agent/model combination for your skill:[/dim] "
-                f"[bold cyan]{escape_markup(best_agent_label)}[/bold cyan]"
+                f"[bold]{escape_markup(best_agent_label)}[/bold]"
             )
             console.print()
     else:
@@ -1166,16 +1167,18 @@ def display_findings_report(
     if suggestions:
         rendered_messages.update(str(suggestion).strip() for suggestion in suggestions if str(suggestion).strip())
         suggestions = add_evidence_links_to_suggestions(suggestions, rewards)
-        body.append("  \U0001f4a1 SUGGESTIONS\n", style="bold cyan")
+        body.append("  \U0001f4a1 SUGGESTIONS\n", style=f"bold {AMBER}")
         for i, suggestion in enumerate(suggestions, 1):
-            body.append(f"    {i}. {strip_terminal_controls(str(suggestion))}\n", style="white")
+            body.append(f"    {i}. ", style=AMBER)
+            body.append(f"{strip_terminal_controls(str(suggestion))}\n")
     else:
-        body.append("  \U0001f4a1 NEXT STEPS\n", style="bold cyan")
+        body.append("  \U0001f4a1 NEXT STEPS\n", style="bold")
         suggestions = _passing_skill_suggestions(findings, rewards)
         rendered_messages.update(str(suggestion).strip() for suggestion in suggestions if str(suggestion).strip())
         suggestions = add_evidence_links_to_suggestions(suggestions, rewards)
         for i, suggestion in enumerate(suggestions, 1):
-            body.append(f"    {i}. {strip_terminal_controls(str(suggestion))}\n", style="white")
+            body.append(f"    {i}. ", style=AMBER)
+            body.append(f"{strip_terminal_controls(str(suggestion))}\n")
     rendered_messages.update(str(suggestion).strip() for suggestion in suggestions if str(suggestion).strip())
 
     for agent, (agent_findings, _agent_rewards) in agent_reports.items():
@@ -1202,7 +1205,7 @@ def display_findings_report(
                 f"[bold]{escape_markup(f'{skill_name} / {panel_agent_label}')} \u2014 Findings[/bold]",
                 emoji=False,
             ),
-            border_style="cyan",
+            border_style=FAINT,
             padding=(1, 1),
         )
     )

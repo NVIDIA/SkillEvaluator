@@ -70,7 +70,7 @@ def test_fix_rows():
     assert rows[1].label == "what to fix"
     assert [r.label for r in rows if r.glyph in "123" and r.glyph != " "] == ["001, 002"] * 3
     assert "Goal not met: asked for a file" in text and "claude-code" not in text
-    assert "→ add the file" in text and "+1 more in report.html" in text
+    assert "→ add the file" in text and "+1 more in detailed reports" in text
     assert "(claude-code)" in _text(tier3_fix_rows([finding], agents=2))
     long = {
         **finding,

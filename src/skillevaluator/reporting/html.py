@@ -56,8 +56,6 @@ from skillevaluator.reporting.base import (
     get_skip_reason,
     is_advisory_agent_eval_skip,
     is_cleanly_skipped,
-    is_tier2_result,
-    is_tier3_result,
     passes_required_gate,
     publication_free_text,
     publication_identity_present,
@@ -80,8 +78,14 @@ from skillevaluator.reporting.finding_summary import (
     total_issue_count,
 )
 from skillevaluator.reporting.harbor_viewer import normalize_agent_eval_harbor_links
-from skillevaluator.reporting.presentation import success_is_not_applicable
-from skillevaluator.reporting.run_status import Status, resolve_run_status, result_status
+from skillevaluator.reporting.presentation import (
+    FinalRenderContext,
+    TierPresentation,
+    build_final_render_context,
+    result_execution_status,
+    success_is_not_applicable,
+)
+from skillevaluator.reporting.run_status import Status, result_status, result_tier
 from skillevaluator.reporting.tier3_scope import completed_agent_result, validate_report_scope
 from skillevaluator.reporting.trial_charts import steps_by_case_chart
 from skillevaluator.skillspector_provenance import skillspector_provenance_records
@@ -1578,6 +1582,22 @@ def _fix_first(
     return items[:limit]
 
 
+@cache
+def _load_chart_assets() -> tuple[str, str]:
+    """Read fixed, trusted chart resources once, only for reports containing charts."""
+    assets = resources.files("skillevaluator.reporting").joinpath("assets")
+    try:
+        runtime = assets.joinpath("chart.umd.min.js").read_text(encoding="utf-8")
+        notices = "\n\n".join(
+            assets.joinpath(name).read_text(encoding="utf-8")
+            for name in ("Chart.js-LICENSE.md", "kurkle-color-LICENSE.md")
+        )
+    except OSError:
+        # A broken install keeps the report; each chart shows its data-link fallback.
+        return "", ""
+    return runtime, notices
+
+
 class PackageLoader(BaseLoader):
     """Custom Jinja2 loader that loads templates from package resources."""
 
@@ -1605,21 +1625,7 @@ def _detail_display_status(detail: Any) -> str:
 
 def _result_display_status(result: ValidationResult) -> str:
     """Describe execution separately from the preserved gate boolean."""
-    not_applicable = (
-        bool(result.success_details)
-        and not result.findings
-        and all(_detail_display_status(detail) == "not_applicable" for detail in result.success_details)
-    )
-    outcome = result_status(result)
-    if outcome == Status.FAILED:
-        return "fail"
-    if outcome == Status.INCOMPLETE:
-        return "incomplete"
-    if is_cleanly_skipped(result):
-        return "not_applicable" if "not applicable" in get_skip_reason(result).casefold() else "skipped"
-    if result.passed and not_applicable:
-        return "not_applicable"
-    return "pass" if result.passed else "fail"
+    return result_execution_status(result)
 
 
 def _validated_ci_context(context: dict[str, str] | None) -> dict[str, str]:
@@ -1677,6 +1683,9 @@ class HTMLReporter(ReporterBase):
         ci_context: dict[str, str] | None = None,
         report_scope: str = "publication",
         scan_root: str | None = None,
+        requested_tiers: tuple[int, ...] | None = None,
+        displayed_tiers: tuple[int, ...] | None = None,
+        presentation_context: FinalRenderContext | None = None,
     ) -> None:
         self.include_timestamp = include_timestamp
         self.title = title or "SkillEvaluator Validation Report"
@@ -1696,6 +1705,9 @@ class HTMLReporter(ReporterBase):
         # The folder the scanners ran on, used to show finding locations
         # relative to the skill in "Fix first".
         self.scan_root = scan_root
+        self.requested_tiers = requested_tiers
+        self.displayed_tiers = displayed_tiers
+        self.presentation_context = presentation_context
         self._env = self._create_environment()
 
     @staticmethod
@@ -2403,20 +2415,15 @@ class HTMLReporter(ReporterBase):
         name rather than relying on list slicing (which would silently break
         if a tier ever produced zero results).
         """
-        tier1: list[ValidationResult] = []
-        tier2: list[ValidationResult] = []
-        tier3: list[ValidationResult] = []
-        for r in results:
-            if is_tier3_result(r):
-                tier3.append(r)
-            elif is_tier2_result(r):
-                tier2.append(r)
-            else:
-                tier1.append(r)
-        return tier1, tier2, tier3
+        buckets: dict[int, list[ValidationResult]] = {1: [], 2: [], 3: []}
+        for result in results:
+            buckets[result_tier(result)].append(result)
+        return buckets[1], buckets[2], buckets[3]
 
     @staticmethod
-    def _compute_tier_summary(results: list[ValidationResult]) -> dict[str, Any]:
+    def _compute_tier_summary(
+        results: list[ValidationResult], *, presentation: TierPresentation | None = None
+    ) -> dict[str, Any]:
         """Compact stats for a single tier — what the hero chip displays.
 
         Returns ``passed`` (boolean), executed/pass/skip counts,
@@ -2430,12 +2437,14 @@ class HTMLReporter(ReporterBase):
         extra "did this tier run?" predicate.
         """
         total = len(results)
-        skipped_count = sum(1 for r in results if is_cleanly_skipped(r))
-        executed_count = total - skipped_count
-        passed_count = sum(1 for r in results if r.passed and not r.is_incomplete and not is_cleanly_skipped(r))
+        statuses = [result_execution_status(r) for r in results] if presentation is None else []
+        skipped_count = presentation.skipped if presentation else statuses.count("skipped")
+        not_applicable_count = presentation.not_applicable if presentation else statuses.count("not_applicable")
+        passed_count = presentation.passed if presentation else statuses.count("pass")
+        failed_count = presentation.failed if presentation else statuses.count("fail")
+        incomplete_count = presentation.incomplete if presentation else statuses.count("incomplete")
+        executed_count = passed_count + failed_count + incomplete_count
         advisory_skipped_count = sum(1 for r in results if is_advisory_agent_eval_skip(r))
-        failed_count = sum(1 for r in results if result_status(r) == Status.FAILED)
-        incomplete_count = sum(1 for r in results if result_status(r) == Status.INCOMPLETE)
         findings = summarize_findings(results)
         messages = summarize_messages(results)
         unique_by_severity = findings["unique_by_severity"]
@@ -2450,6 +2459,7 @@ class HTMLReporter(ReporterBase):
             "executed_count": executed_count,
             "passed_count": passed_count,
             "skipped_count": skipped_count,
+            "not_applicable_count": not_applicable_count,
             "advisory_skipped_count": advisory_skipped_count,
             "failed_count": failed_count,
             "issue_count": findings["unique_findings"],
@@ -2537,7 +2547,9 @@ class HTMLReporter(ReporterBase):
         return output
 
     @staticmethod
-    def _tier3_report_data(results: list[ValidationResult]) -> dict[str, Any] | None:
+    def _tier3_report_data(
+        results: list[ValidationResult], *, selected: tuple[ValidationResult, dict] | None = None
+    ) -> dict[str, Any] | None:
         """Return safe Tier 3 display data without certifying partial evidence."""
         if not results:
             return None
@@ -2672,7 +2684,7 @@ class HTMLReporter(ReporterBase):
                 return payload_has_agent_evidence(candidate)
             return not execution_status and result_has_execution_evidence(result)
 
-        selected = select_agent_eval_candidate(results)
+        selected = selected if selected is not None else select_agent_eval_candidate(results)
         payload_result, payload = selected if selected is not None else (None, None)
         serialization_issue = agent_eval_report_serialization_issue(payload) if payload is not None else None
         rejected_assessment = (
@@ -2875,12 +2887,14 @@ class HTMLReporter(ReporterBase):
     def render_all(self, results: list[ValidationResult]) -> str:
         validate_report_scope(self.report_scope, results)
         tier1_results, tier2_results, tier3_results = self._split_results_by_tier(results)
-        tier3_data = self._tier3_report_data(tier3_results)
+        selected = select_agent_eval_candidate(tier3_results)
+        raw_payload = selected[1] if selected is not None else None
+        tier3_data = self._tier3_report_data(tier3_results, selected=selected)
         completed_agent = completed_agent_result(tier3_data)
         # Preserve the raw policy/provenance assessment, then let the emitted
         # payload make the decision only more conservative. Display shaping
         # must never invent a successful run or erase a persisted waiver.
-        raw_publication = assess_publication(results, expected_skill_name=self.expected_skill_name)
+        raw_publication = assess_publication(results, raw_payload, expected_skill_name=self.expected_skill_name)
         # Without a persisted payload, tier3_data is a synthesized display
         # fallback rather than evidence, so only the raw assessment applies.
         emitted_publication = (
@@ -2889,7 +2903,7 @@ class HTMLReporter(ReporterBase):
                 tier3_data,
                 expected_skill_name=self.expected_skill_name,
             )
-            if select_agent_eval_candidate(tier3_results) is not None
+            if selected is not None
             else raw_publication
         )
         publication = max(
@@ -2900,14 +2914,22 @@ class HTMLReporter(ReporterBase):
             ),
         )
 
-        run_status = resolve_run_status(results)
-        all_passed = run_status.headline == Status.PASSED
-        has_incomplete = run_status.headline == Status.INCOMPLETE
-        overall_status = run_status.headline.value
+        context = self.presentation_context or build_final_render_context(
+            results,
+            requested_tiers=self.requested_tiers,
+            displayed_tiers=self.displayed_tiers,
+            report_scope=self.report_scope,
+            expected_skill_name=self.expected_skill_name,
+            agent_eval=raw_payload,
+            publication_assessment=publication,
+        )
+        all_passed = context.command_status == Status.PASSED
+        has_incomplete = context.command_status == Status.INCOMPLETE
+        overall_status = context.command_status.value
         finding_summary = summarize_findings(results)
         message_summary = summarize_messages(results)
         skipped_count = sum(1 for r in results if is_cleanly_skipped(r))
-        passed_count = sum(1 for r in results if r.passed and not r.is_incomplete and not is_cleanly_skipped(r))
+        passed_count = sum(tier.passed for tier in context.tiers.values())
         advisory_skipped_count = sum(1 for r in results if is_advisory_agent_eval_skip(r))
         failed_count = sum(1 for r in results if not passes_required_gate(r))
         # Count unique findings rather than raw validator records that repeat
@@ -2915,7 +2937,7 @@ class HTMLReporter(ReporterBase):
         # (failed gates, scanner and execution errors), as Markdown does.
         total_issues = total_issue_count(finding_summary, message_summary)
         total_validators = len(results)
-        executed_count = total_validators - skipped_count
+        executed_count = sum(tier.executed for tier in context.tiers.values())
         pass_percentage = round((passed_count / executed_count * 100) if executed_count > 0 else 0, 1)
 
         timestamp = ""
@@ -2964,11 +2986,11 @@ class HTMLReporter(ReporterBase):
         # Per-tier summaries so the hero card chips can show "Tier 1: 6/7
         # passed (0 critical)" etc. without leaking Tier 2 / Tier 3 stats
         # from the global aggregate counters.
-        tier1_summary = self._compute_tier_summary(tier1_results)
+        tier1_summary = self._compute_tier_summary(tier1_results, presentation=context.tiers[1])
         tier1_skillspector_versions = _skillspector_versions(tier1_results)
         tier1_skillspector_provenance = _skillspector_provenance(tier1_results)
-        tier2_summary = self._compute_tier_summary(tier2_results)
-        tier3_summary = self._compute_tier_summary(tier3_results)
+        tier2_summary = self._compute_tier_summary(tier2_results, presentation=context.tiers[2])
+        tier3_summary = self._compute_tier_summary(tier3_results, presentation=context.tiers[3])
         tier3_preview, tier3_preview_notice = _bounded_tier3_preview(tier3_data)
         tier3_canonical_data, tier3_canonical_encoding = _canonical_tier3_embed(tier3_data)
         tier3_truncation = tier3_data.get("report_truncation", {}) if isinstance(tier3_data, dict) else {}
@@ -2981,15 +3003,9 @@ class HTMLReporter(ReporterBase):
         tier1_top_issues = self._compute_top_issues(tier1_skills)
         tier1_contributors = self._extract_contributors(tier1_skills, tier1_display_results)
         tier1_display_skipped = sum(1 for result in tier1_display_results if is_cleanly_skipped(result))
-        tier1_display_total = len(tier1_display_results) - tier1_display_skipped
-        tier1_display_passed = sum(
-            1
-            for result in tier1_display_results
-            if result.passed and not result.is_incomplete and not is_cleanly_skipped(result)
-        )
-        tier1_display_failed = sum(
-            1 for result in tier1_display_results if not result.passed and not is_cleanly_skipped(result)
-        )
+        tier1_display_total = context.tiers[1].executed
+        tier1_display_passed = context.tiers[1].passed
+        tier1_display_failed = context.tiers[1].failed
         tier1_display_total_skills = len(tier1_skills)
         tier1_display_passed_skills = sum(1 for skill in tier1_skills.values() if skill["passed"])
         tier1_display_summary = {
@@ -3255,12 +3271,13 @@ class HTMLReporter(ReporterBase):
         cl = self.content_label
         return template.render(
             report_scope=self.report_scope,
+            presentation=context,
             completed_agent=completed_agent,
             title=self.title,
             ci_context=self.ci_context,
             explicit_skill_name=self.explicit_skill_name,
             tier1_execution_summary={
-                status: sum(_result_display_status(r) == status for r in tier1_results)
+                status: sum(context.result_statuses[id(r)] == status for r in tier1_results)
                 for status in ("pass", "fail", "incomplete", "skipped", "not_applicable")
             },
             timestamp=timestamp,
@@ -3314,6 +3331,7 @@ class HTMLReporter(ReporterBase):
             content_label_plural=cl + "s",
             quality_scores=quality_scores_by_skill,
             tier3=tier3_preview,
+            chart_assets=_load_chart_assets,
             tier3_canonical_data=tier3_canonical_data,
             tier3_canonical_encoding=tier3_canonical_encoding,
             tier3_truncation=tier3_truncation,

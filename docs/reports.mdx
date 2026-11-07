@@ -47,7 +47,20 @@ into unrelated content.
 
 For `validate`, that compact default is a pipeline view — a per-check ticker
 plus a summary. Pass `--verbose` to get the full per-check detail stream in
-the terminal instead.
+the terminal instead. Final panels are written to stdout. When output is
+redirected or running in CI, tier and check starts, stage changes, measured
+completion counts, and completion lines remain visible on stderr. Unchanged
+updates are omitted; a running stage emits a heartbeat after 60 seconds without
+progress. Counts describe observed work, without estimating a completion
+percentage. Interruption tears down the progress display and its worker.
+
+Terminal grades use green for A/B, amber for C, and red for D/F; failed,
+incomplete, and unavailable evidence retains its status treatment. Lift that
+rounds to zero is neutral. At narrow widths, condition labels, numeric scores,
+and their complete bars stack together. The full terminal summary includes
+successful quality and lift evidence in Details. Artifact paths use the emitted
+filenames and become clickable only on capable interactive terminals; plain,
+no-color, redirected, and string-rendered output retains readable paths.
 
 | Format | What it is | Reach for it when |
 | --- | --- | --- |
@@ -62,6 +75,35 @@ skillevaluator validate ./my-skill -r json,html,markdown,sarif -o reports
 ```
 
 For gating a pipeline on the JSON output, see [Gate Your CI](ci-integration.mdx).
+
+## Reading the final status
+
+The compact terminal summary, full terminal report, and HTML header describe the
+same command outcome: **Passed required checks**, **Changes required**, or
+**Incomplete**. A confirmed failure takes precedence over missing evidence.
+Advisory tiers retain their own findings and execution status without changing
+the required gate or process exit code.
+
+**Publication eligibility** is a separate, stricter assessment of the recorded
+policy, provenance, and evidence coverage. A passed required gate does not imply
+publication eligibility. Standalone Tier 3 reports show **Not assessed (Tier 3
+only)**. **Best agent score** describes one evaluated agent, rather than approval
+of the whole validation run.
+
+Each tier counts its own passed, failed, incomplete, skipped, and N/A results.
+Skipped and explicitly inapplicable checks are excluded from executed-check
+denominators. A tier that produced no results is **Not run**; presentation of an
+unrequested tier does not create evidence that it ran.
+
+Tier 3 summaries prefer recorded per-condition counters: for example,
+**188 scored trials: 101 with skill, 87 baseline**. Condition details retain
+expected counts and execution status, so partial execution and early stopping
+remain distinguishable. Missing or malformed counters are **unavailable**, and
+explicitly skipped arms remain **skipped**. Legacy reports with trial rows but
+no counters show **retained rows**, which are observations rather than complete
+scored totals. Preview limits and physical retry rows do not replace recorded
+attempt counts. These are display projections; canonical JSON and evaluation
+payloads are unchanged.
 
 ## File naming
 
@@ -104,6 +146,14 @@ the evidence below it:
   and gate failures are always shown and printed; raw scanner lines that only
   repeat a finding are folded away.
 - **Run details.** Scope, the target path, provenance and the gate policy.
+
+Tier 3 charts include Chart.js 4.5.1 inside the HTML file and work offline;
+they make no CDN or source-map requests. Each chart describes its measurements
+and links to the underlying data table. If JavaScript or canvas initialization
+is unavailable, a visible message points readers to the data. Theme changes and
+printing redraw the charts. **Chart software notices** retains the full MIT
+licenses for Chart.js and its bundled color library. Tier 1 reports do not
+load or embed these chart resources.
 
 A finding is one problem a check reports, with a severity. The same problem
 reported on several lines, or in several files or skills, counts once at its
@@ -555,19 +605,24 @@ Inference covers trajectories whose tool calls are all Codex shell tools
 `shell_command`) or `apply_patch`, each with a recorded wall time. A trial that
 also calls a tool with no recorded duration, such as web search,
 `update_plan`, or an MCP tool, or whose step timestamps are missing, lack a UTC
-offset, or run backwards, has no LLM or tool time. Agents without native timing
-or Codex `Wall time` headers are timed only when their trajectory has no tool
-calls.
+offset, or run backwards, has no LLM or tool time. Inferred timing also needs
+the agent's next step right after each tool step: a user or system step there
+can follow idle or user time, so the trial has no timing. Agents without native
+timing or Codex `Wall time` headers are timed only when their trajectory has no
+tool calls.
+
 Each step of a multi-step task is timed on its own, so the time between Harbor
 steps is not counted. Steps marked `is_copied_context` repeat context from an
 earlier trajectory and are not timed; a copied step after new steps leaves the
 trial without timing. Copied timestamps do not show when the first new response
 started, so inferred timing also leaves the trial without timing when the new
-steps after copied context start with an agent step. Trials whose `trajectory.json` was omitted (too large, or
-redaction or validation failed) and multi-step trials scored per step have no
-timing. Missing timing stays `N/A` (`null` in JSON), never zero, and follows the
-same complete-arm and matching-case rules as tokens. Timing is diagnostic and
-does not change scores, verdicts, or gates.
+steps after copied context start with an agent step.
+
+Trials whose `trajectory.json` was omitted (too large, or redaction or
+validation failed) and multi-step trials scored per step have no timing.
+Missing timing stays `N/A` (`null` in JSON), never zero, and follows the same
+complete-arm and matching-case rules as tokens. Timing is diagnostic and does
+not change scores, verdicts, or gates.
 
 ### Failure reasons and per-trial rows
 

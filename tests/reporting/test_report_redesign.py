@@ -408,7 +408,8 @@ def test_tier3_charts_are_redrawn_with_print_colors() -> None:
     assert 'window.addEventListener("afterprint", function(){ redrawForPrint(false); });' in script
     assert 'window.matchMedia("print")' in script
     assert 'if (printing && theme === "dark") root.setAttribute("data-theme", "light");' in script
-    assert script.count("new Chart(") == script.count("options: chartOptions({") == 4
+    # All four chart types' print redraw, colors and theme restoration are
+    # executed in test_chart_dependency rather than counting constructor sites.
 
 
 def _rules(css: str):

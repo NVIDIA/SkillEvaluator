@@ -39,6 +39,7 @@ from pathlib import Path
 from typing import TYPE_CHECKING, TextIO
 
 from rich import box
+from rich.cells import cell_len
 from rich.console import Console, Group
 from rich.live import Live
 from rich.panel import Panel
@@ -50,21 +51,25 @@ from skillevaluator.reporting.base import (
     source_validation_errors,
     source_validation_preview,
 )
+from skillevaluator.reporting.terminal_styles import (
+    AMBER,
+    BRIGHT,
+    FAINT,
+    GREEN,
+    INK,
+    MUTED,
+    RED,
+    TEXT,
+    artifact_text,
+    grade_style,
+    lift_style,
+)
 from skillevaluator.utils.rich_markup import strip_terminal_controls
 
 if TYPE_CHECKING:
     from collections.abc import Iterable
 
     from skillevaluator.models.result import ValidationResult
-
-GREEN = "#76B900"  # NVIDIA green: success + identity moments only
-RED = "#F5524C"  # failure highlights only
-TEXT = "#D9DEE3"  # body
-MUTED = "#8A8F98"  # labels / secondary
-FAINT = "#565B66"  # chrome, pending, bar remainders
-BRIGHT = "#EDEDED"  # the actively-running element
-INK = "#101403"  # pill/badge foreground on green fills
-AMBER = "#E5A33B"  # the "what to fix" section only
 
 _TIER2_SCAN_FAILURE_CHECKS = frozenset(
     {
@@ -129,6 +134,7 @@ class ViewProgressReporter:
         on_cases=None,
         pass_threshold: float | None = None,
         poll_seconds: float = 2.0,
+        progress_reporter=None,
     ):
         self._on_tail = on_tail
         self._max_lines = max_lines
@@ -138,6 +144,9 @@ class ViewProgressReporter:
         self._pass_threshold = 0.5 if pass_threshold is None else pass_threshold
         self._poll_seconds = poll_seconds
         self._plan = None
+        self._progress_reporter = progress_reporter
+        self._last_case_rows = None
+        self._last_event = None
         self._stop = threading.Event()
         self._poller: threading.Thread | None = None
 
@@ -147,6 +156,8 @@ class ViewProgressReporter:
 
     def start(self, plan) -> None:
         """Track the run plan; once it names the run directory, poll case results."""
+        if self._progress_reporter is not None:
+            self._progress_reporter.start(plan)
         if self._on_cases is None or not getattr(plan, "output_dir", None):
             return
         self._plan = plan
@@ -179,7 +190,8 @@ class ViewProgressReporter:
             progress=(done, plan.matrix_trials) if plan.matrix_trials else None,
             show_agent=False,
         )
-        if rows:
+        if rows and rows != self._last_case_rows:
+            self._last_case_rows = rows
             self._on_cases(rows)
 
     def _poll_loop(self) -> None:
@@ -191,10 +203,17 @@ class ViewProgressReporter:
 
     def set_secret_values(self, values) -> None:
         self._secrets.update(str(v) for v in values if v)
+        if self._progress_reporter is not None:
+            self._progress_reporter.set_secret_values(values)
 
     def emit(self, event) -> None:
         from skillevaluator.tier3.harbor.progress import redact_progress_detail
 
+        if self._progress_reporter is not None:
+            self._progress_reporter.emit(event)
+        if event == self._last_event:
+            return
+        self._last_event = event
         state = str(getattr(event.state, "value", event.state))
         glyph = {"complete": "✓", "ready": "✓", "failed": "✗", "degraded": "⚠", "skipped": "·"}.get(state)
         if glyph is None:
@@ -240,6 +259,7 @@ class TierRow:
     glyph_style: str = MUTED
     label_style: str = MUTED
     fit: str = ""  # "wrap": word-wrap the last segment to the panel; "rule": a full-width divider
+    atomic_groups: list[list[tuple[str, str]]] | None = None
 
 
 def detail_row(label: str, value: str, note: str = "") -> TierRow:
@@ -257,9 +277,9 @@ def lift_row(lift: float, with_score: float, baseline: float) -> TierRow:
         filled = max(0, min(BAR, round(score * BAR)))
         return [("█" * filled, color), ("░" * (BAR - filled), FAINT)]
 
-    lift_style = f"bold {GREEN}" if lift >= 0 else f"bold {RED}"
+    delta_style = f"bold {lift_style(lift)}"
     segments: list[tuple[str, str]] = [
-        (f"{lift:+.2f}", lift_style),
+        (f"{lift:+.2f}", delta_style),
         ("   with-skill ", MUTED),
         (f"{with_score:.2f} ", f"bold {TEXT}"),
         *bar(with_score, GREEN),
@@ -267,7 +287,7 @@ def lift_row(lift: float, with_score: float, baseline: float) -> TierRow:
         (f"{baseline:.2f} ", f"bold {TEXT}"),
         *bar(baseline, MUTED),
     ]
-    return TierRow("lift", segments)
+    return TierRow("lift", segments, atomic_groups=[segments[:1], segments[1:5], segments[5:]])
 
 
 _CASES_PER_LINE = 8
@@ -405,7 +425,7 @@ def fix_section_rows(items: list[FixItem]) -> list[TierRow]:
         )
         rows += [TierRow("", [("→ ", AMBER), (action, MUTED)], fit="wrap") for action in item.actions]
     if len(items) > _FIX_ITEMS_SHOWN:
-        rows.append(TierRow("", [(f"+{len(items) - _FIX_ITEMS_SHOWN} more in report.html", FAINT)]))
+        rows.append(TierRow("", [(f"+{len(items) - _FIX_ITEMS_SHOWN} more in detailed reports", FAINT)]))
     return rows
 
 
@@ -443,6 +463,14 @@ def tier3_fix_rows(findings: list[dict] | None, *, agents: int = 1) -> list[Tier
 
 def _fit_row(row: TierRow, room: int) -> list[list[tuple[str, str]]]:
     """Lay a row out in ``room`` columns so nothing wraps under the label column."""
+    if row.atomic_groups:
+        lines: list[list[tuple[str, str]]] = [[]]
+        for group in row.atomic_groups:
+            if lines[-1] and cell_len("".join(c for c, _ in [*lines[-1], *group])) > room:
+                lines.append([])
+                group = [(group[0][0].lstrip(), group[0][1]), *group[1:]]
+            lines[-1].extend(group)
+        return lines
     if row.fit == "rule":
         return [[("─" * room, row.segments[0][1])]]
     if row.fit != "wrap" or not row.segments:
@@ -458,13 +486,13 @@ def _wrap_segments(segments: list[tuple[str, str]], room: int) -> list[list[tupl
     lines: list[list[tuple[str, str]]] = [[]]
     used = 0
     for chunk, style in segments:
-        if used and used + len(chunk) > room:
+        if used and used + cell_len(chunk) > room:
             lines.append([])
             used = 0
             if chunk.strip() in {"·", ""}:
                 continue
         lines[-1].append((chunk, style))
-        used += len(chunk)
+        used += cell_len(chunk)
     return lines
 
 
@@ -522,14 +550,27 @@ class ValidateView:
         self.verdict: Verdict | None = None
         self.links: list[tuple[str, str]] = []
         self._live: Live | None = None
+        self.progress_reporter = None
+        self._progress_stage: dict[int, set[str]] = {}
         self._static_printed = 0  # blocks already flushed in non-tty mode
 
     # ── lifecycle ────────────────────────────────────────────────
 
+    def _live_capable(self) -> bool:
+        """Live redraws need a real, capable TTY, as Harbor progress requires.
+
+        FORCE_COLOR/TTY_COMPATIBLE make Rich treat a CI pipe as a terminal; that
+        stream still needs durable stderr progress, not cursor-control frames.
+        """
+        console = self.console
+        return bool(
+            console.is_terminal and not console.is_dumb_terminal and getattr(console.file, "isatty", lambda: False)()
+        )
+
     def start(self) -> None:
         if not self.enabled:
             return
-        if self.console.is_terminal:
+        if self._live_capable():
             self._live = Live(
                 self,
                 console=self.console,
@@ -538,6 +579,10 @@ class ValidateView:
             )
             self._live.start()
         else:
+            from skillevaluator.tier3.harbor.progress import PlainProgressReporter
+
+            self.progress_reporter = PlainProgressReporter(stream=sys.stderr)
+            self.progress_reporter.start_progress()
             self.console.print(self._header())
             self.console.print()
 
@@ -546,7 +591,9 @@ class ValidateView:
             return
         block = self.blocks[index]
         block.status = RUNNING
-        block.started_at = time.time()
+        if block.started_at is None:
+            block.started_at = time.time()
+        self._progress_event(index, "running")
         self._refresh()
 
     def tier_progress(self, index: int, rows: list[TierRow]) -> None:
@@ -554,6 +601,17 @@ class ValidateView:
         if not self.enabled:
             return
         self.blocks[index].rows = rows
+        meaningful = [row for row in rows if row.label in {"checks", "status", "stages", "progress"}]
+        for row in meaningful:
+            detail = "".join(chunk for chunk, _ in row.segments).strip()
+            if row.label == "checks":
+                detail = next((chunk.removeprefix("▸ ") for chunk, _ in row.segments if chunk.startswith("▸ ")), detail)
+            elif row.label == "progress" and row.segments:
+                # The bar cells only make sense in Live; durable logs keep the count.
+                detail = row.segments[-1][0].strip()
+            stage = f"Tier {self.blocks[index].number}/{row.label}"
+            self._progress_stage.setdefault(index, set()).add(stage)
+            self._progress_event(index, "running", detail, stage=stage)
         self._refresh()
 
     def tier_done(self, index: int, *, failed: bool = False, rows: list[TierRow] | None = None) -> None:
@@ -563,6 +621,7 @@ class ValidateView:
         block.status = FAIL if failed else PASS
         block.duration = time.time() - block.started_at if block.started_at else None
         block.rows = rows or []
+        self._complete_progress(index, "failed" if failed else "complete")
         self._refresh()
         self._flush_static()
 
@@ -571,6 +630,7 @@ class ValidateView:
             return
         block = self.blocks[index]
         block.status = SKIP
+        self._complete_progress(index, "skipped", reason)
         # Multi-line reasons (setup instructions) continue on unlabeled rows.
         lines = reason.split("\n") or [""]
         block.rows = [TierRow("skipped" if index == 0 else "", [(line, MUTED)]) for index, line in enumerate(lines)]
@@ -580,26 +640,49 @@ class ValidateView:
     def finish(self, verdict: Verdict, links: list[tuple[str, str]]) -> None:
         if not self.enabled:
             return
+        if self.progress_reporter is not None:
+            self.progress_reporter.close()
         self.verdict = verdict
-        self.links = links
+        # Keep artifacts out of Live's refresh/stop buffers. After its render
+        # hook is removed, normal printing can distinguish TTY from capture.
+        self.links = []
         if self._live is not None:
-            self._live.update(self)
-            self._live.stop()
-            self._live = None
+            live = self._live
+            try:
+                live.update(self)
+            finally:
+                try:
+                    live.stop()
+                finally:
+                    self._live = None
         else:
             if len(self.blocks) >= 2:
                 self.console.print(self._gate())
                 self.console.print()
             self.console.print(self._verdict_panel(verdict))
             self.console.print()
-            for line in self._footer_lines():
-                self.console.print(line)
+        self.links = links
+        for line in self._footer_lines():
+            self.console.print(line)
 
     def stop(self) -> None:
         """Tear down the live display (safe on errors / KeyboardInterrupt)."""
+        if self.progress_reporter is not None:
+            self.progress_reporter.close()
         if self._live is not None:
             self._live.stop()
             self._live = None
+
+    def _progress_event(self, index, state, detail=None, *, stage=None):
+        if self.progress_reporter is not None:
+            from skillevaluator.tier3.harbor.progress import ProgressEvent
+
+            self.progress_reporter.emit(ProgressEvent(stage or f"Tier {self.blocks[index].number}", state, detail))
+
+    def _complete_progress(self, index, state, detail=None):
+        for stage in sorted(self._progress_stage.pop(index, set())):
+            self._progress_event(index, state, stage=stage)
+        self._progress_event(index, state, detail)
 
     # ── rendering ────────────────────────────────────────────────
 
@@ -705,10 +788,16 @@ class ValidateView:
         lines = []
         room = self.width - 8 - LABEL
         for row in block.rows:
+            label = strip_terminal_controls(row.label)
+            if cell_len(label) > LABEL:
+                lines.append(Text(label, style=row.label_style))
+                label = ""
             for i, segments in enumerate(_fit_row(row, room)):
                 t = Text()
                 t.append(f"{row.glyph if i == 0 else ' '} ", style=row.glyph_style)
-                t.append(f"{strip_terminal_controls(row.label if i == 0 else ''):<{LABEL}}", style=row.label_style)
+                t.append(
+                    (label if i == 0 else "") + " " * (LABEL - cell_len(label if i == 0 else "")), style=row.label_style
+                )
                 for chunk, style in segments:
                     t.append(strip_terminal_controls(chunk), style=style)
                 lines.append(t)
@@ -728,9 +817,7 @@ class ValidateView:
     def _verdict_panel(self, verdict: Verdict) -> Panel:
         headline = strip_terminal_controls(verdict.headline)
         if verdict.passed:
-            body = _pill("✓ PASS", GREEN) + Text.assemble(
-                ("  ", ""), (headline, f"bold {TEXT}"), ("  ·  exit 0", MUTED)
-            )
+            body = Text.assemble(_pill("✓ PASS", GREEN), ("  ", ""), (headline, f"bold {TEXT}"), ("  ·  exit 0", MUTED))
             return Panel(
                 Group(body, *(Text(strip_terminal_controls(line), style=MUTED) for line in verdict.details)),
                 box=box.ROUNDED,
@@ -739,8 +826,11 @@ class ValidateView:
                 padding=(0, 2),
             )
         color = AMBER if verdict.incomplete else RED
-        line1 = _pill("INCOMPLETE" if verdict.incomplete else "✗ FAIL", color, ink="#1C0605") + Text.assemble(
-            ("  ", ""), (headline, f"bold {TEXT}"), ("  ·  exit 1", MUTED)
+        line1 = Text.assemble(
+            _pill("INCOMPLETE" if verdict.incomplete else "✗ FAIL", color, ink="#1C0605"),
+            ("  ", ""),
+            (headline, f"bold {TEXT}"),
+            ("  ·  exit 1", MUTED),
         )
         parts: list = [line1, *(Text(strip_terminal_controls(line), style=MUTED) for line in verdict.details)]
         if verdict.fix:
@@ -754,11 +844,8 @@ class ValidateView:
 
     def _footer_lines(self):
         for label, target in self.links:
-            yield Text.assemble(
-                ("      ", ""),
-                (f"{strip_terminal_controls(label):<{LABEL}}", MUTED),
-                (strip_terminal_controls(target), MUTED),
-            )
+            prefix = Text.assemble(("      ", ""), (f"{strip_terminal_controls(label):<{LABEL}}", MUTED))
+            yield artifact_text(target, self.console, prefix=prefix)
 
     def _refresh(self) -> None:
         if self._live is not None:
@@ -766,7 +853,7 @@ class ValidateView:
 
     def _flush_static(self) -> None:
         """Non-tty mode: print blocks once, as they complete."""
-        if self._live is not None or self.console.is_terminal:
+        if self._live is not None or self._live_capable():
             return
         for block in self.blocks[self._static_printed :]:
             if block.status in (PENDING, RUNNING):
@@ -917,9 +1004,7 @@ def sanitize_tier3_console_text(value: object, *, limit: int = _TIER3_TEXT_MAX_C
     sample = value[:sample_limit]
     flattened = " ".join(
         "".join(
-            " "
-            if character.isspace() or unicodedata.category(character).startswith("C")
-            else character
+            " " if character.isspace() or unicodedata.category(character).startswith("C") else character
             for character in sample
         ).split()
     )
@@ -1102,7 +1187,13 @@ def summarize_tier1(results: list[ValidationResult], lineup: list[str] | None = 
     quality = _quality_stats(results)
     if quality:
         grade, score = quality
-        rows.append(TierRow("quality", [(grade, f"bold {GREEN}"), (f"  {score:.1f} / 100", TEXT)]))
+        quality_result = next((r for r in results if _quality_stats([r])), None)
+        from skillevaluator.reporting.run_status import result_status
+
+        status = result_status(quality_result).value if quality_result else "unavailable"
+        rows.append(
+            TierRow("quality", [(grade, f"bold {grade_style(grade, status=status)}"), (f"  {score:.1f} / 100", TEXT)])
+        )
     items = [_tier1_fix(r) for r in broken]
     if incomplete:
         items.append(_setup_fix(incomplete))
@@ -1316,12 +1407,7 @@ def summarize_tier3(
         rows.append(TierRow("verdict", [("INCONCLUSIVE: skill never activated", TEXT)]))
     lift = _tier3_finite_number(summary.get("overall_lift"))
     with_score = _tier3_finite_number(summary.get("overall_score"))
-    if (
-        lift is not None
-        and -1.0 <= lift <= 1.0
-        and with_score is not None
-        and 0.0 <= with_score <= 1.0
-    ):
+    if lift is not None and -1.0 <= lift <= 1.0 and with_score is not None and 0.0 <= with_score <= 1.0:
         baseline = with_score - lift
         if 0.0 <= baseline <= 1.0:
             rows.append(lift_row(lift, with_score, baseline))

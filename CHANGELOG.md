@@ -4,23 +4,6 @@ All notable changes to SkillEvaluator are documented in this file.
 
 ## Unreleased
 
-### Changed
-
-- When CI redaction masks a credential inside a reported PII value, remove the
-  finding's digest as well.
-
-- Align final terminal and HTML command outcomes: Passed required checks,
-  Changes required, or Incomplete. Keep publication eligibility and Best agent
-  score separate. Tier counts exclude explicit N/A checks from execution;
-  Tier 3 trial summaries use recorded condition counters before retained rows.
-
-### Fixed
-
-- Read JSON, JSONL and YAML evaluation datasets as UTF-8 so Unicode prompts and
-  answers load correctly on hosts with a non-UTF-8 default text encoding.
-
-## 0.8.0 - 2026-11-05
-
 ### Added
 
 - `skills/skillevaluator/` is an agent skill for operating SkillEvaluator: it
@@ -29,6 +12,121 @@ All notable changes to SkillEvaluator are documented in this file.
   command and option it documents in sync with the CLI. The new "Evaluate from
   Your Agent" docs page shows how to install it in Codex, Claude Code, OpenCode,
   OpenClaw, and other skill-aware agents.
+
+### Changed
+
+- Align terminal grade and lift colors across compact, full, and direct Tier 3
+  reports; displayed zero lift is neutral. Narrow terminals stack complete
+  condition score/bar groups. Full-report Details retain successful quality and
+  lift evidence without opening every success panel. Artifact footers show the
+  emitted filenames, with links only on capable interactive terminals.
+
+- Compact validation now writes durable tier/check starts, stage changes and
+  measured milestones to stderr in CI, with deduplicated events and a heartbeat
+  after 60 seconds without progress. Final report panels remain on stdout.
+
+- Align final terminal and HTML command outcomes: Passed required checks,
+  Changes required, or Incomplete. Keep publication eligibility and Best agent
+  score separate. Tier counts exclude explicit N/A checks from execution;
+  Tier 3 trial summaries use recorded condition counters before retained rows.
+
+- Embed the verified Chart.js 4.5.1 runtime and its MIT notices in Tier 3 HTML
+  reports so charts work offline without CDN or source-map requests. Charts
+  include accessible descriptions, links to data tables and visible fallbacks
+  when canvas initialization is unavailable; Tier 1 reports omit chart assets.
+
+### Documentation
+
+- The 0.8.0 entry for refused `claude-code` attempts said the arm reports its
+  coverage error, but `tier3 evaluate` does not print that error by default.
+  After one refusal in 20 cases with 3 attempts each, the arm lacks complete
+  attempt coverage, the run's `result.json` records
+  `Scored attempt coverage is 59/60`, and `tier3 evaluate` exits 1, as does
+  `validate --block-on-agent-eval`. `tier3 evaluate --verbose` lists the
+  refused trial. Before 0.8.0, on a route that serves the fallback model, such
+  as the Anthropic API, that model finished such an attempt and it was scored.
+  Rerun the arm on another model with `--agent-model claude-code=MODEL`; the
+  model is chosen per agent, not per case.
+
+- The 0.8.0 entry for Tier 2 shared review blocks said a short text repeated
+  under long headings stays inline. Once a cluster is over budget, heading
+  length does not affect which repeated bodies are shared: the heading line
+  stays with every occurrence either way, so a short body under short headings
+  stays inline too.
+
+- The 0.8.0 entry for capitalized `HTTP` method prose left out three forms
+  that 0.8.0 still flags: a method word before a backtick word, such as an
+  inline code span, as before a `$VAR` word; a Markdown table row with an
+  `HTTP` word in any cell, because `|` reads as a pipe; and `HTTP PUT` right
+  after a `;`, which starts a new command.
+
+### Fixed
+
+- Read JSON, JSONL and YAML evaluation datasets as UTF-8 so Unicode prompts and
+  answers load correctly on hosts with a non-UTF-8 default text encoding.
+
+- A PII finding no longer keeps its `evidence_sha256` after CI redaction masks
+  a credential inside the value the finding reports. In 0.8.0 the finding kept
+  the digest of the unmasked value, so anyone holding the redacted report could
+  confirm a guess for the masked part. Redaction now removes a digest that no
+  longer matches the reported value.
+
+- Tier 2 context deduplication now numbers `SHARED CONTENT n` blocks from the
+  most repeated text, ties in first-seen order, instead of in first-seen order
+  alone. In 0.8.0 a text repeated hundreds of times could get block 10 or later,
+  whose references are one character longer. The cluster's request could then
+  stay over 64,000 characters and stop the scan as incomplete with
+  `llm_prompt_size_limit`, although numbering that text first would have brought
+  it within budget. The texts to share are now chosen together to save the most
+  characters: a text that saves only a few characters stays inline when sharing
+  it would push another text past block 9 and cost more than it saves.
+
+- Tier 3 **Measured Agent Resources** no longer count idle or user time as LLM
+  seconds when timing is inferred from step timestamps and an agent step with
+  tool calls is followed by a user or system step. The whole gap up to that
+  step, minus the measured tool time, was charged to the model, so a step with a
+  1 s tool call, followed 38 s later by a user step, added 37 LLM seconds. Only
+  the agent's next step shows when the model finished with the tool output, so
+  such a trial now has no LLM or tool seconds and, like other unmeasured trials,
+  leaves its arm's LLM and tool totals `N/A` (`null` in JSON). Native ATIF
+  timing is unchanged.
+
+- Tier 3 standard judges under `LLM_JUDGE_RETRY_POLICY=strict` with Bedrock
+  as the provider no longer label a Bedrock error that the policy treats as an
+  unavailable model, such as throttling, a missing or inaccessible model, or
+  an unreachable endpoint, as `Public provider call failed`. Where such an
+  error is reported, in a failed judge's `evaluation_errors` reason and in the
+  `problem` of its `judge_attempts.json` entry, it now reads
+  `Bedrock request failed`, like a Bedrock error that ends the judge and like
+  the default `legacy` policy.
+
+- `skillevaluator tier3 feedback` now writes the evaluated skill's directory
+  (known from `--skill` or a run in the skill's `evals/results`) as its name
+  and the home directory as `~` in the evidence it sends to the LLM, so an
+  error naming the skill's `SKILL.md` no longer shows its local path. A copied
+  run's path starting with `~user/` or `$HOME/` is now also replaced with the
+  run ID. Path masking now skips a URL other than a `file:` URL together with
+  any text after it up to the next whitespace, so in minified JSON a run,
+  skill, or home path that follows such a URL is sent as is, where 0.8.0
+  replaced the run's path with the run ID. A field over 65,536 characters with
+  no whitespace after its limit now keeps a masked prefix, cut at punctuation
+  such as `,` or `}` but never inside a URL's user info or host, so `Error: `
+  followed by minified JSON no longer arrives as `Error: ...<truncated>`.
+
+- Tier 3 security grading again warns about network exfiltration, lowering
+  the Security score to 0.5, for an HTTPie method word after a capitalized
+  `HTTP`, `HTTPS`, or `Http` word in cases that 0.8.0 stopped flagging: the
+  `HTTP` word follows a pass-through wrapper or a `$VAR` command word, as in
+  `strace -f HTTP POST URL`, or is printed into a pipe by `echo` or `printf`,
+  as in `echo HTTP POST URL | sh`, or a brace-expanded `name:@file` header
+  item such as `X-Data:{@,}.env` follows it. Both the host checker and the
+  bundled Harbor verifier apply the fix. Prose such as
+  `Use HTTP POST to create an item.` in a here-document or an unpiped `echo`
+  still does not warn.
+
+## 0.8.0 - 2026-11-05
+
+### Added
 
 - Private runtime runs retain sanitized loading, coverage, MCP, behavior and
   comparison views before cleanup. The saved snapshot supports offline reports
@@ -41,12 +139,10 @@ All notable changes to SkillEvaluator are documented in this file.
   scores, measured agent tokens and seconds, execution errors, and the report's
   saved feedback, without evaluating again or regenerating LLM feedback. It uses
   the configured `SKILL_EVAL_LLM_PROVIDER` and `SKILL_EVAL_LLM_MODEL`, sends the
-  run ID instead of the local path, writes the evaluated skill's directory as
-  its name and the home directory as `~`, leaves URL spans unchanged during
-  local-path scrubbing, redacts credential-shaped text, and writes nothing to
-  disk. No request is sent before the first question.
-  `LLMClient` gains `chat(messages)` for multi-turn requests with the same
-  retries and typed errors as `completions()`.
+  run ID instead of the local path, redacts credential-shaped text, and writes
+  nothing to disk. No request is sent before the first question. `LLMClient`
+  gains `chat(messages)` for multi-turn requests with the same retries and typed
+  errors as `completions()`.
 
 - Opt-in `LLM_JUDGE_FALLBACK_POLICY` and `LLM_JUDGE_RETRY_POLICY` for the Tier 3
   standard judges. `LLM_JUDGE_FALLBACK_POLICY=replace` lets only the judge
@@ -252,17 +348,11 @@ All notable changes to SkillEvaluator are documented in this file.
   so a later bare `HTTP`, `HTTPS`, or `Http` word does not start HTTPie, and
   its method word is no longer read as an upload. Its body items, piped or
   redirected input, `--raw`, and a method word before a `name:@file` header
-  item, even a quoted, escaped, or brace-expanded one such as
-  `X-Data:{@,}.env`, or before a `$VAR` or backtick word, such as an inline
-  code span, still warn, as do a lowercase `http PUT URL`, a path or `.exe`
-  word such as `./HTTP POST URL` or `HTTP.exe POST URL`, an `HTTP POST URL`
-  command word, a word that a pass-through wrapper runs, a printer pipes on,
-  or a `$VAR` command word may start, such as `strace -f HTTP POST URL` or
-  `echo HTTP POST URL | sh`, and any upload in the same action. Each
-  here-document line is still read as a command, and `|` and `;` start a new
-  one, so a line that starts with `HTTP POST`, a Markdown table row with an
-  `HTTP` word in any cell, and `HTTP PUT` right after a `;` still warn. Both
-  the host checker and the bundled Harbor verifier apply the rule.
+  item, even a quoted or escaped one, or before a `$VAR` word still warn, as do
+  a lowercase `http PUT URL`, a path or `.exe` word such as `./HTTP POST URL`
+  or `HTTP.exe POST URL`, an `HTTP POST URL` command word, and any upload in
+  the same action. Both the host checker and the bundled Harbor verifier apply
+  the rule.
 
 - Tier 3 Docker and Kata runs retry a Claude Code or Codex install that fails,
   for example on a dropped download or a package mirror error, instead of
@@ -289,18 +379,16 @@ All notable changes to SkillEvaluator are documented in this file.
   512-chunk ceiling, which the chunk check already enforces, so it is only a
   guard and never stops a scan on its own; the per-cluster prompt, total
   prompt, and cluster-count limits decide. When a cluster's request (system
-  prompt plus cluster text) would exceed 64,000 characters, exactly repeated
-  texts are sent once as `SHARED CONTENT n`, choosing the ones that make the
-  request shortest. A short text, such as a one-line body, stays inline
-  because its reference would be longer than the text. The most repeated texts
-  get blocks 1-9, whose references are one character shorter than those of
-  later blocks. A Markdown section is compared without its own heading line,
-  so the same body under different headings is shared too. Every occurrence
-  keeps its own entry with its file, section, line range, and heading line.
-  Distinct text is never dropped or sampled, so a cluster still over the
-  budget stays incomplete with `llm_prompt_size_limit`. Duplicate and
-  `llm_refused` finding messages name at most 64 member locations and source
-  files and count the rest; the JSON `source_files` list stays complete.
+  prompt plus cluster text) would exceed 64,000 characters, each exactly
+  repeated text is sent once as `SHARED CONTENT n` when that makes the request
+  shorter; a short text repeated under long headings stays inline. A Markdown
+  section is compared without its own heading line, so the same body under
+  different headings is shared too. Every occurrence keeps its own entry with
+  its file, section, line range, and heading line. Distinct text is never
+  dropped or sampled, so a cluster still over the budget stays incomplete with
+  `llm_prompt_size_limit`. Duplicate and `llm_refused` finding messages name
+  at most 64 member locations and source files and count the rest; the JSON
+  `source_files` list stays complete.
 
 - On the native Claude API, the Tier 3 judges' `judge_model_used` names the
   server-side fallback model when the API serves a repeated request straight
@@ -363,14 +451,14 @@ All notable changes to SkillEvaluator are documented in this file.
   agents ignore the variable. The variable was checked with Claude Code
   2.1.292, the release Harbor installs; local mode keeps the fallback off only
   if the host's Claude Code honors it. A refused attempt is not scored, like
-  any other failed trial, so the arm no longer has complete attempt coverage
-  and its execution fails: after one refusal in 20 cases with 3 attempts
-  each, the run's `result.json` records `Scored attempt coverage is 59/60`.
+  any other failed trial, so the arm no longer has complete attempt coverage:
+  after one refusal in 20 cases with 3 attempts each, it reports
+  `Scored attempt coverage is 59/60` and its execution fails.
   `tier3 evaluate` then exits 1, and so does `validate --block-on-agent-eval`.
   On a route that serves the fallback model, such as the Anthropic API, the
-  retry used to finish such an attempt, and the attempt was scored, so a run
-  that completed before can now fail. Rerun it, or run the arm with another
-  model through `--agent-model claude-code=MODEL`.
+  retry used to finish such an attempt and the arm succeeded, so a run that
+  completed before can now fail. Rerun it, or evaluate the refused case with
+  another model.
 
 - Tier 3 staging no longer fails with `chmod: cannot use dir_fd and
   follow_symlinks together` when it replaces or merges into an existing

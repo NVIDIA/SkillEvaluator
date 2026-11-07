@@ -244,7 +244,6 @@ def nemo_gym_config_errors(
     except EvalsConfigError as exc:
         return [str(exc)]
     harbor = config.get("harbor") or {}
-    workspace = config.get("skill_workspace") or {}
     errors: list[str] = []
     if stop_on_pass is None and harbor.get("stop_on_pass"):
         errors.append("harbor.stop_on_pass is not supported with --backend nemo-gym yet")
@@ -260,6 +259,4 @@ def nemo_gym_config_errors(
         errors.append(MCP_SERVERS_ERROR)
     if "storage_mb" in (harbor.get("resources") or {}):
         errors.append("harbor.resources.storage_mb is not supported with --backend nemo-gym")
-    if workspace.get("decoy_manifest"):
-        errors.append("skill_workspace.decoy_manifest is not supported with --backend nemo-gym yet")
     return errors

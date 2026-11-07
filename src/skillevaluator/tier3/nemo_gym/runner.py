@@ -527,11 +527,13 @@ def run_nemo_gym_eval(
         _VERIFIER_JUDGE_CONTROL_ENV_VARS,
         _VERIFIER_JUDGE_MODEL_ENV_VARS,
         _apply_retention_outcome,
+        _decoy_workspace_skills,
         _judge_model_config,
         _limit_staged_cases,
         _merge_launch_execution_errors,
         _native_entry_id,
         _persist_dataset_truth,
+        _private_decoy_workspace_snapshot,
         _provider_environment,
         _reserve_run_dir,
         _resolve_runtime_env,
@@ -632,8 +634,6 @@ def run_nemo_gym_eval(
     include_values = [*workspace_config.get("include", []), *(include_skills or [])]
     if include_values and workspace_mode != "group":
         errors.append("include_skills requires skill_workspace.mode=group")
-    if workspace_config.get("decoy_manifest"):
-        errors.append("skill_workspace.decoy_manifest is not supported with --backend nemo-gym yet")
     for name, value in (("cpus", override_cpus), ("memory_mb", override_memory_mb)):
         if value is not None and value <= 0:
             errors.append(f"--{name.replace('_', '-')} must be greater than 0")
@@ -648,7 +648,15 @@ def run_nemo_gym_eval(
         threshold = _validated_pass_threshold(
             pass_threshold if pass_threshold is not None else harbor_config.get("pass_threshold", 0.5)
         )
-        workspace_skills = _workspace_skills(skill_path, include_values if workspace_mode == "group" else [])
+        decoy_manifest: dict[str, Any] | None = None
+        selected_decoys: list[Path] = []
+        if "decoy_manifest" in workspace_config:
+            workspace_skills, selected_decoys, decoy_manifest = _decoy_workspace_skills(
+                skill_path, workspace_config, workspace_mode, include_skills
+            )
+        else:
+            workspace_skills = _workspace_skills(skill_path, include_values if workspace_mode == "group" else [])
+        workspace_source_paths = [*workspace_skills, *selected_decoys]
     except ValueError as exc:
         return _config_failure(str(exc))
 
@@ -710,41 +718,51 @@ def run_nemo_gym_eval(
         # Stage every agent and arm before the first launch, so all arms see the same skill inputs.
         planned: list[tuple[str, str, Path, dict[str, str]]] = []
         staged_task_paths: list[Path] = []
-        for agent in agents:
-            for arm, with_skill in arms:
-                arm_dir = tasks_root / agent / arm
-                task_paths = generate_harbor_tasks(
-                    skill_path,
-                    arm_dir,
-                    with_skill=with_skill,
-                    workspace_skill_paths=workspace_skills,
-                    workspace_mode=workspace_mode,
-                    grading_mode=effective_grading,
-                    verifier_env=judge_verifier_env or None,
-                    repo_context_exclude_paths=repo_context_exclude_paths,
-                    task_resources=task_resources or None,
-                    runtime_env=agent_runtime_env or None,
-                    arm_suffix=f"-{arm}-skill" if len(arms) == 2 else "",
-                    pre_agent_setup=pre_agent_setup or None,
-                    agent_workdir=agent_workdir,
-                    copy_repo=copy_repo,
-                )
-                if max_cases is not None:
-                    selectors = validate_case_ids(task.name for task in task_paths)
-                    selector_case_ids = validate_case_ids(_native_entry_id(task) for task in task_paths)
-                    case_selection = _limit_staged_cases(
-                        selectors, dict(zip(selectors, selector_case_ids, strict=True)), task_paths, max_cases=max_cases
+        # Every arm stages the same verified decoy bytes, as on Harbor.
+        with (
+            _private_decoy_workspace_snapshot(selected_decoys, decoy_manifest)
+            if decoy_manifest is not None
+            else contextlib.nullcontext([])
+        ) as frozen_decoys:
+            staged_workspace_skills = [*workspace_skills, *frozen_decoys]
+            for agent in agents:
+                for arm, with_skill in arms:
+                    arm_dir = tasks_root / agent / arm
+                    task_paths = generate_harbor_tasks(
+                        skill_path,
+                        arm_dir,
+                        with_skill=with_skill,
+                        workspace_skill_paths=staged_workspace_skills,
+                        workspace_mode=workspace_mode,
+                        grading_mode=effective_grading,
+                        verifier_env=judge_verifier_env or None,
+                        repo_context_exclude_paths=repo_context_exclude_paths,
+                        task_resources=task_resources or None,
+                        runtime_env=agent_runtime_env or None,
+                        arm_suffix=f"-{arm}-skill" if len(arms) == 2 else "",
+                        pre_agent_setup=pre_agent_setup or None,
+                        agent_workdir=agent_workdir,
+                        copy_repo=copy_repo,
                     )
-                stage_for_gym(arm_dir, judge_job_env, timeout_multiplier=effective_timeout)
-                task_case_ids = _task_case_ids(arm_dir)
-                case_ids = case_ids or sorted(set(task_case_ids.values()))
-                staged_task_paths += [task for task in task_paths if task.is_dir()]
-                planned.append((agent, arm, arm_dir, task_case_ids))
+                    if max_cases is not None:
+                        selectors = validate_case_ids(task.name for task in task_paths)
+                        selector_case_ids = validate_case_ids(_native_entry_id(task) for task in task_paths)
+                        case_selection = _limit_staged_cases(
+                            selectors,
+                            dict(zip(selectors, selector_case_ids, strict=True)),
+                            task_paths,
+                            max_cases=max_cases,
+                        )
+                    stage_for_gym(arm_dir, judge_job_env, timeout_multiplier=effective_timeout)
+                    task_case_ids = _task_case_ids(arm_dir)
+                    case_ids = case_ids or sorted(set(task_case_ids.values()))
+                    staged_task_paths += [task for task in task_paths if task.is_dir()]
+                    planned.append((agent, arm, arm_dir, task_case_ids))
         runtime_context_bound = _runtime_context_is_bound_to_publication_target(
             skill_path,
             staged_task_paths,
             reference_skills_dir=None,
-            workspace_skill_paths=workspace_skills,
+            workspace_skill_paths=workspace_source_paths,
         )
         # The same immutable dataset identity a Harbor run records, taken before any agent runs.
         dataset_warning: str | None = None
@@ -894,6 +912,8 @@ def run_nemo_gym_eval(
             run_config["harbor"]["max_cases"] = max_cases
         if case_selection is not None:
             run_config["case_selection"] = case_selection
+        if decoy_manifest is not None:
+            run_config["skill_workspace"] = {"mode": workspace_mode, "decoy_manifest": decoy_manifest}
         selected_metrics = tuple(results.get("metrics", DEFAULT_METRICS))
         attempt_policy = dict(results.get("attempt_policy") or {})
         score_policy = results.get("score_policy") or attempt_policy.get("score_policy")

@@ -562,15 +562,43 @@ def test_gym_run_publishes_latest_stages_runtime_env_and_records_dataset(
     assert "publication_target" in result
 
 
-def test_config_errors_reject_decoys_but_accept_timeout_multiplier(tmp_path: Path) -> None:
+def test_config_errors_accept_decoys_and_timeout_multiplier(tmp_path: Path) -> None:
     from skillevaluator.tier3.nemo_gym.backend import nemo_gym_config_errors
 
     (tmp_path / "evals").mkdir()
     (tmp_path / "evals" / "config.yml").write_text(
-        "schema_version: 1\nharbor:\n  timeout_multiplier: 2\nskill_workspace:\n  decoy_manifest: decoys.json\n"
+        "schema_version: 1\nharbor:\n  timeout_multiplier: 2\n"
+        "skill_workspace:\n  mode: group\n  decoy_manifest: decoys.json\n"
     )
-    errors = " ".join(nemo_gym_config_errors(tmp_path))
-    assert "decoy_manifest" in errors and "timeout_multiplier" not in errors
+    assert nemo_gym_config_errors(tmp_path) == []
+
+
+def test_fake_gym_run_stages_frozen_decoys_in_every_arm(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    from skillevaluator.tier3 import decoys
+    from skillevaluator.tier3.decoy_identity import decoy_source_digest
+    from skillevaluator.tier3.nemo_gym import runner as gym_runner
+
+    config = "schema_version: 1\nskill_workspace:\n  mode: group\n  decoy_manifest: frozen.json\n"
+    skill, _env_log = _fake_gym_skill(tmp_path, monkeypatch, config=config)
+    decoy = tmp_path / "catalog" / "decoy"
+    decoy.mkdir(parents=True)
+    (decoy / "SKILL.md").write_text("---\nname: decoy\ndescription: Use this decoy workflow.\n---\n# decoy\n")
+    manifest = {"selected": [{"path": "decoy", "skill_name": "decoy", "source_digest": decoy_source_digest(decoy)}]}
+    monkeypatch.setattr(decoys, "load_decoy_manifest", lambda *_: ([decoy], manifest))
+    staged_arms: list[str] = []
+    original_stage = gym_runner.stage_for_gym
+
+    def recording_stage(arm_dir: Path, *args, **kwargs) -> None:
+        original_stage(arm_dir, *args, **kwargs)
+        if any(path.parent.name == "decoy" for path in arm_dir.rglob("SKILL.md")):
+            staged_arms.append(arm_dir.name)
+
+    monkeypatch.setattr(gym_runner, "stage_for_gym", recording_stage)
+    result = _run_fake_gym(skill, tmp_path)
+    assert result.get("execution_status") == "succeeded", result
+    assert "with" in staged_arms
+    run_config = json.loads((Path(result["run_dir"]) / "run_config.json").read_text())
+    assert run_config["skill_workspace"] == {"mode": "group", "decoy_manifest": manifest}
 
 
 def test_timeout_multiplier_scales_staged_task_timeouts(tmp_path: Path) -> None:

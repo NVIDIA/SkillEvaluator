@@ -54,6 +54,7 @@ from skillevaluator.reporting.presentation import FinalRenderContext, build_fina
 from skillevaluator.reporting.run_status import Status, result_status
 from skillevaluator.reporting.terminal_styles import AMBER, FAINT, GREEN, RED, TEXT, grade_style, lift_style
 from skillevaluator.tier3.baseline_store import baseline_description
+from skillevaluator.tier3.version_comparison import version_comparison_lines
 from skillevaluator.utils.rich_markup import escape_markup
 
 if TYPE_CHECKING:
@@ -709,6 +710,12 @@ class CLIReporter(ReporterBase):
             table.add_row(escape_markup(str(result.validator_name)), status, details)
 
         console.print(table)
+
+        for result in results:
+            agent_eval = result.metadata.get("agent_eval")
+            if isinstance(agent_eval, dict) and (comparison := agent_eval.get("prior_version_comparison")):
+                for line in version_comparison_lines(comparison):
+                    console.print(escape_markup(line))
 
     @staticmethod
     def _static_test_evidence_message(result: ValidationResult) -> str | None:

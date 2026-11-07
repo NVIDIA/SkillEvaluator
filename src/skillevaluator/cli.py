@@ -3133,6 +3133,12 @@ def _tier2_workflow(
     "--reuse-baseline", metavar="RUN", default=None, help="Reuse a compatible retained baseline run id or latest."
 )
 @click.option(
+    "--compare-to",
+    metavar="RUN",
+    default=None,
+    help="Compare with-skill scores to a retained skill version or latest.",
+)
+@click.option(
     "--skip-with-skill",
     is_flag=True,
     help="Skip the with-skill arm and run only the without-skill baseline (no lift analysis).",
@@ -3216,6 +3222,7 @@ def evaluate(
     skip_baseline: bool,
     skip_with_skill: bool,
     reuse_baseline: str | None,
+    compare_to: str | None,
     n_attempts: int | None,
     pass_threshold: float | None,
     stop_on_pass: bool | None,
@@ -3273,6 +3280,7 @@ def evaluate(
         skip_baseline=skip_baseline,
         skip_with_skill=skip_with_skill,
         reuse_baseline=reuse_baseline,
+        compare_to=compare_to,
         n_attempts=n_attempts,
         pass_threshold=pass_threshold,
         stop_on_pass=stop_on_pass,
@@ -3709,6 +3717,43 @@ def tier3_validate(skill_path: Path, as_json: bool, strict: bool, harbor_contrac
     from skillevaluator.tier3.commands import validate_evals as tier3_validate_evals
 
     raise SystemExit(tier3_validate_evals(skill_path, as_json=as_json, strict=strict, harbor_contract=harbor_contract))
+
+
+@tier3.command("compare-versions")
+@_skill_argument
+@click.option("--current", required=True, metavar="RUN", help="Current retained run id or latest.")
+@click.option("--prior", required=True, metavar="RUN", help="Prior retained run id or latest different revision.")
+@click.option("--results-dir", type=click.Path(file_okay=False, path_type=Path), default=None)
+@click.option("--json", "as_json", is_flag=True, help="Print the comparison as JSON.")
+def compare_versions_command(
+    skill_path: Path, current: str, prior: str, results_dir: Path | None, as_json: bool
+) -> None:
+    """Compare two retained skill versions without execution or writes."""
+    from skillevaluator.tier3.results_location import resolve_results_root
+    from skillevaluator.tier3.version_comparison import compare_retained_runs, version_comparison_lines
+
+    comparison = compare_retained_runs(resolve_results_root(skill_path, results_dir), current, prior)
+    if as_json:
+        click.echo(json.dumps(comparison, indent=2))
+    else:
+        from rich.table import Table
+        from rich.text import Text
+
+        for line in version_comparison_lines(comparison):
+            console.print(Text(line))
+        if comparison.get("status") == "available":
+            table = Table("Agent", "Prior", "Current", "Delta", "Regression")
+            for agent, values in comparison["agents"].items():
+                table.add_row(
+                    Text(agent),
+                    f"{values['prior_overall']:.4f}",
+                    f"{values['current_overall']:.4f}",
+                    f"{values['delta']:+.4f}",
+                    str(values["regression"]),
+                )
+            console.print(table)
+    if comparison.get("status") != "available":
+        raise click.exceptions.Exit(1)
 
 
 @tier3.command("feedback")

@@ -32,6 +32,7 @@ commands referenced below.
 | [similarity-check](#similarity-check) | Detect duplicate content across a collection | Embeddings provider key |
 | [tier3 evaluate](#tier3-evaluate) | Run Tier 3 live agent evaluation | Provider key plus a credential the selected agents can use (one `NVIDIA_API_KEY` covers both on NVIDIA Build), backend (Docker by default) |
 | [tier3 select-decoys](#tier3-select-decoys) | Save a reproducible set of neighboring skills for group evaluation | Local description-embedding catalog, skill collection, embeddings provider key |
+| [tier3 compare-versions](#tier3-compare-versions) | Compare current and prior retained with-skill scores without writes | Two compatible retained runs |
 | [create-eval-dataset](#create-eval-dataset) | Generate synthetic eval datasets | LLM provider key (none with `--no-llm`) |
 | [init-custom-grader](#init-custom-grader) | Scaffold a bring-your-own-grader starter | Nothing |
 | [init-harbor-task](#init-harbor-task) | Scaffold a bring-your-own-task Harbor starter | Nothing |
@@ -464,6 +465,23 @@ without contacting the embedding provider. See
 [Select a reproducible decoy set](agents-and-sandboxes.mdx#select-a-reproducible-decoy-set)
 for a complete example and the limits of similarity-based selection.
 
+## tier3 compare-versions
+
+```bash
+skillevaluator tier3 compare-versions ./my-skill --current CURRENT --prior PRIOR --results-dir ./results --json
+```
+
+Read-only comparison of two retained runs; no agent execution, credentials,
+or artifact writes. Without `--json`, prints the prior/current score table.
+Unavailable comparisons print reasons and exit nonzero.
+
+| Flag | Default | Effect |
+| --- | --- | --- |
+| `--current RUN` | required | Current retained run id, or `latest` completed run. |
+| `--prior RUN` | required | Prior retained run id, or `latest` eligible different skill revision. |
+| `--results-dir DIRECTORY` | normal results-root resolution | External results root containing the per-skill directory. |
+| `--json` | off | Print the complete comparison block as JSON. |
+
 ## tier3 evaluate
 
 Run Tier 3 live agent evaluation: real agents attempt your eval cases with and without the skill, and the difference becomes Skill Lift. Requires the `tier3` extra, a provider key for grading, a credential the selected agents can use — with NVIDIA Build in `--env-mode docker`, `kata`, or `local`, the one `NVIDIA_API_KEY` covers both roles — and a running backend (Docker by default). The full walkthrough is [Tier 3: Live Evaluation](tier3-live-evaluation.mdx).
@@ -485,6 +503,7 @@ Use `skillevaluator tier3 PATH` for the complete workflow with automatic missing
 | `--skip-baseline` | off | Skip the without-skill baseline (no lift analysis, faster). |
 | `--skip-with-skill` | off | Run only the without-skill baseline, for example to calibrate a task set or measure a model change before running the skill. The report is marked baseline-only: the overall score is the baseline score, with-skill and lift are unavailable (shown as `skipped` or N/A, never 0.0), and no skill verdict is given. Mutually exclusive with `--skip-baseline`. Not available on `validate`. |
 | `--reuse-baseline RUN` | off | Reuse a compatible fresh without-skill baseline from a retained run id in the same results root, or `latest`. An incompatible explicit id fails before execution; `latest` falls back to a fresh baseline. Mutually exclusive with `--skip-baseline` and `--skip-with-skill`. |
+| `--compare-to RUN` | off | Compare with-skill scores to a compatible retained run. `latest` selects the newest eligible different skill revision, or records an unavailable comparison and continues. An incompatible explicit id fails before execution. Independent of no-skill Skill Lift. |
 | `--n-attempts INTEGER` | unset | Attempts per eval case (pass@k). |
 | `--pass-threshold FLOAT` | unset | Score threshold (0.0–1.0) for a case to count as passed. |
 | `--stop-on-pass / --no-stop-on-pass` | unset | Stop a case's remaining attempts once one passes. |

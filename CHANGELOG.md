@@ -6,6 +6,10 @@ All notable changes to SkillEvaluator are documented in this file.
 
 ### Added
 
+- Tier 3 `evaluate --compare-to RUN` and read-only `compare-versions` compare
+  compatible retained skill versions, report paired per-agent deltas and
+  regressions, and keep version comparisons separate from no-skill Skill Lift.
+
 - Tier 3 `evaluate --reuse-baseline RUN` reuses compatible retained fresh
   without-skill evidence, preserving lift calculations and baseline provenance.
   `latest` searches completed runs and falls back to a fresh baseline when needed.

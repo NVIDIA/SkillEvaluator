@@ -977,8 +977,10 @@ the configuration that produced it. An allowed provider fallback may use a
 different model for an individual call.
 
 This provenance does not establish that the LLM judgments are correct. The
-repository does not publish inter-rater agreement, calibration results, or a
-comparison against human-labeled ground truth for these judges.
+[grader validation workflow](grader-validation.mdx) runs the shipped verifier
+against independently labelled cases and reports agreement, abstentions,
+errors and repeat variability. The bundled reference suite is not a published
+claim of inter-rater agreement or universal judge reliability.
 
 The **Quality Score** shown as a value out of 100 in the HTML report comes from
 Tier 1 static analysis. It is separate from the Tier 3 evaluator scores,

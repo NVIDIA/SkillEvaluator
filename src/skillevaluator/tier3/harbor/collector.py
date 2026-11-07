@@ -130,6 +130,7 @@ AGENT_LOG_ARTIFACTS = (
     "gemini-cli.txt",
     "cline.txt",
     "opencode.txt",
+    "hermes.txt",
 )
 GENERATED_AGENT_ARTIFACTS = (
     "lift.json",
@@ -857,6 +858,8 @@ def _agent_log_runtime_failure_reason(
         trial_dir / "codex.txt",
         trial_dir / "agent" / "opencode.txt",
         trial_dir / "opencode.txt",
+        trial_dir / "agent" / "hermes.txt",
+        trial_dir / "hermes.txt",
     ):
         text = _read_bounded_text(path)
         if text is None:

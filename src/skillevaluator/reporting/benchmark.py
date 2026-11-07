@@ -467,14 +467,28 @@ class BenchmarkReporter(ReporterBase):
         lines.append("|---|" + "|".join(["---:"] * len(agents)) + "|")
 
         overall_row = ["Overall"]
-        overall_row.extend(
-            _score_transition_values(
-                agent.get("baseline"),
-                agent.get("with_skill", agent.get("overall_score")),
-                skill_never_activated=_mapping(agent.get("skill_activation")).get("status") == "never_activated",
+        shared_basis_agents: list[str] = []
+        for name, agent in agents.items():
+            with_skill = agent.get("with_skill", agent.get("overall_score"))
+            baseline = agent.get("baseline")
+            lift_overall = _mapping(agent.get("lift_overall"))
+            if (
+                _number(lift_overall.get("with_skill")) is not None
+                and _number(lift_overall.get("baseline")) is not None
+            ):
+                # Show the scores the published lift subtracts so the row matches it.
+                if _number(lift_overall["with_skill"]) != _number(with_skill) or _number(
+                    lift_overall["baseline"]
+                ) != _number(baseline):
+                    shared_basis_agents.append(name)
+                with_skill, baseline = lift_overall["with_skill"], lift_overall["baseline"]
+            overall_row.append(
+                _score_transition_values(
+                    baseline,
+                    with_skill,
+                    skill_never_activated=_mapping(agent.get("skill_activation")).get("status") == "never_activated",
+                )
             )
-            for agent in agents.values()
-        )
         lines.append("| " + " | ".join(_md_cell(value, private_labels) for value in overall_row) + " |")
 
         has_partial = False
@@ -511,6 +525,20 @@ class BenchmarkReporter(ReporterBase):
                 "",
             ]
         )
+        if shared_basis_agents:
+            lines.extend(
+                [
+                    _md_cell(
+                        "Overall for "
+                        + ", ".join(shared_basis_agents)
+                        + " compares only the dimensions both arms scored, matching the published Skill Lift; "
+                        "the with-skill and baseline overall scores in the detailed report also include "
+                        "dimensions that only one arm scored.",
+                        private_labels,
+                    ),
+                    "",
+                ]
+            )
         if has_partial:
             lines.extend(
                 [

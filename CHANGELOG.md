@@ -62,6 +62,13 @@ All notable changes to SkillEvaluator are documented in this file.
 
 ### Fixed
 
+- `BENCHMARK.md` no longer publishes an Overall uplift that disagrees with
+  `lift.json` and the JSON, HTML, Markdown and terminal reports when a metric is
+  N/A in only one arm. The Overall row now shows the two scores the published
+  Skill Lift subtracts, which the canonical report records per agent as
+  `lift_overall`, and notes when they differ from the arm overall scores. A
+  cross-format test reconciles Overall and lift across every output of one run.
+
 - A PII finding no longer keeps its `evidence_sha256` after CI redaction masks
   a credential inside the value the finding reports. In 0.8.0 the finding kept
   the digest of the unmasked value, so anyone holding the redacted report could

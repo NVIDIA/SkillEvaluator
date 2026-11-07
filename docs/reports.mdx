@@ -529,7 +529,12 @@ agents scored under different policies or metric sets.
 
 Skill Lift is `with-skill overall score - without-skill overall score` for
 comparable cases. It uses the same score units as both arms and ranges from
--1.0 to +1.0. Because live agent runs are noisy, especially at low attempt
+-1.0 to +1.0. A metric that is N/A in one arm, such as the skill metrics in a
+baseline without the skill, drops out of both arms for lift, so the two scores
+it subtracts can differ from the arm overall scores. The canonical report
+records that pair per agent as `lift_overall`, and the `BENCHMARK.md` Overall
+row shows it, with a note, so its visible uplift equals the published lift.
+Because live agent runs are noisy, especially at low attempt
 counts, small deltas are kept neutral. The verdict bands:
 
 | Lift | Verdict | Read it as |

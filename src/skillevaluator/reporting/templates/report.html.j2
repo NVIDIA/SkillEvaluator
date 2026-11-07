@@ -2588,6 +2588,18 @@
                 <p class="t3-next-steps-conclusion">No recommendations were generated for this evaluation.</p>
                 {% endif %}
                 {% endif %}
+                {% set t3_run_next_steps = tier3.next_steps or [] %}
+                {% if t3_run_next_steps %}
+                <p class="t3-next-steps-conclusion" id="tier3-run-next-steps">Next steps for the run:</p>
+                <ol class="t3-next-steps-list">
+                    {% for step in t3_run_next_steps %}
+                    <li>
+                        <strong>{{ step.problem }}</strong> [{{ step.target }}{% if step.strength and step.strength != 'supported' %} · {{ step.strength }}{% endif %}]:
+                        {{ step.action }} Check: {{ step.check }}{% if step.evidence %} Evidence: {{ step.evidence }}{% endif %}
+                    </li>
+                    {% endfor %}
+                </ol>
+                {% endif %}
                 {% if (t3_source_errors | length) == 1 %}
                 <p class="t3-next-steps-conclusion">
                     Source validation error: {% if t3_source_errors[0].path %}{{ t3_source_errors[0].path }}: {% endif %}{{ t3_source_errors[0].message }}

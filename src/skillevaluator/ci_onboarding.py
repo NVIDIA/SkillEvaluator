@@ -988,7 +988,7 @@ def init(
         release = load_release(release_path or Path(__file__).with_name("ci-release.json"))
         if release["schema_version"] == 2:
             raise SetupError("Use --tiers 1,2,3 with an all-tier release descriptor.")
-        name = git_helpers.parse_remote(git_helpers.git(repo, "remote", "get-url", "origin").strip())
+        name = git_helpers.parse_origin(repo, git_helpers.parse_remote)
         branch = git_helpers.infer_branch(repo, default_branch)
         roots = git_helpers.discover(repo)
         git_helpers.no_symlinks(repo, SCAN)
@@ -1186,7 +1186,7 @@ def status(repo, platform, tiers):
         repo = git_helpers.repository_root(repo)
         if all_tier_helpers.is_all_tier(repo, platform, tiers):
             return all_tier_helpers.inspect(sys.modules[__name__], repo, platform, tiers)
-        name = git_helpers.parse_remote(git_helpers.git(repo, "remote", "get-url", "origin").strip())
+        name = git_helpers.parse_origin(repo, git_helpers.parse_remote)
         info = github_api("GET", f"repos/{name}")
         branch = info["default_branch"]
         pages = github_api("GET", f"repos/{name}/pages", missing_ok=True)
@@ -1237,7 +1237,7 @@ def demo(repo, no_input, platform, tiers):
         git_helpers.require_clean(repo)
         if all_tier_helpers.is_all_tier(repo, platform, tiers):
             return all_tier_helpers.demo(sys.modules[__name__], repo, platform, tiers, no_input)
-        name = git_helpers.parse_remote(git_helpers.git(repo, "remote", "get-url", "origin").strip())
+        name = git_helpers.parse_origin(repo, git_helpers.parse_remote)
         info = github_api("GET", f"repos/{name}")
         permissions = info.get("permissions", {})
         if info.get("archived") or not (permissions.get("push") or permissions.get("admin")):

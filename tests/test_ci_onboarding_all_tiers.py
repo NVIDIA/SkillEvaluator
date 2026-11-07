@@ -555,6 +555,33 @@ def test_gitlab_status_reports_admission_version_prerequisite(repository, monkey
     assert "credential validity is not verified" in result.output
 
 
+@pytest.mark.parametrize("tiers", [None, "1,2,3"])
+def test_preview_ignores_user_insteadof_rewrite_of_a_supported_origin(
+    repository, release_file, all_release, tmp_path, monkeypatch, tiers
+):
+    # A developer-level rewrite to ssh:// must not hide the configured github.com origin.
+    home = tmp_path / "home"
+    home.mkdir()
+    (home / ".gitconfig").write_text('[url "ssh://git@github.com/"]\n\tinsteadOf = https://github.com/\n')
+    monkeypatch.setenv("HOME", str(home))
+    rewritten = subprocess.check_output(["git", "-C", str(repository), "remote", "get-url", "origin"], text=True)
+    assert rewritten.startswith("ssh://")
+    args = ["ci", "init", "--repo", str(repository), "--no-input", "--mode", "preview"]
+    args += ["--release", str(release_file)] if tiers is None else ["--release", str(all_release), "--tiers", tiers]
+    result = CliRunner().invoke(cli, args)
+    assert result.exit_code == 0, result.output
+
+
+def test_alias_origin_parses_after_insteadof_rewrite(repository, all_release):
+    subprocess.run(["git", "-C", str(repository), "remote", "set-url", "origin", "gh:example-org/consumer"], check=True)
+    subprocess.run(
+        ["git", "-C", str(repository), "config", "url.https://github.com/.insteadOf", "gh:"],
+        check=True,
+    )
+    result = invoke(repository, all_release, "--mode", "preview")
+    assert result.exit_code == 0, result.output
+
+
 @pytest.mark.parametrize("command", [["status"], ["demo", "--no-input"]])
 def test_unrecognized_origin_never_receives_generic_gitlab_token(repository, monkeypatch, command):
     import urllib.request

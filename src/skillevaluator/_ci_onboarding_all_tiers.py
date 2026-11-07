@@ -109,7 +109,17 @@ def validate_tiers(value: str) -> str:
 
 
 def remote(repo: Path, platform: str = "auto") -> tuple[str, str, str]:
-    value = git.git(repo, "remote", "get-url", "origin").strip()
+    host, origin, name = git.parse_origin(repo, _parse_origin)
+    detected = "github" if host == "github.com" else "gitlab"
+    selected = detected if platform == "auto" else platform
+    if selected == "github" and host != "github.com":
+        raise git.SetupError("GitHub onboarding currently supports github.com origins.")
+    if selected == "gitlab" and host == "github.com":
+        raise git.SetupError("The selected platform does not match the repository origin.")
+    return selected, origin, name
+
+
+def _parse_origin(value: str) -> tuple[str, str, str]:
     match = re.fullmatch(r"git@([A-Za-z0-9.-]+):(.+)", value)
     if match:
         host, name = match.groups()
@@ -133,13 +143,7 @@ def remote(repo: Path, platform: str = "auto") -> tuple[str, str, str]:
         p in {".", ".."} for p in name.split("/")
     ):
         raise git.SetupError("The origin does not identify a supported project path.")
-    detected = "github" if host == "github.com" else "gitlab"
-    selected = detected if platform == "auto" else platform
-    if selected == "github" and host != "github.com":
-        raise git.SetupError("GitHub onboarding currently supports github.com origins.")
-    if selected == "gitlab" and host == "github.com":
-        raise git.SetupError("The selected platform does not match the repository origin.")
-    return selected, origin, name
+    return host, origin, name
 
 
 def gitlab_api(origin: str, method: str, endpoint: str, payload=None, *, missing_ok=False):

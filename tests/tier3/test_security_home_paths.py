@@ -112,6 +112,9 @@ CREDENTIAL_READS = [
     pytest.param(_read("%USERPROFILE%\\.ssh\\id_rsa"), id="windows-userprofile"),
     pytest.param(_bash("type %USERPROFILE%\\.netrc"), id="windows-userprofile-type"),
     pytest.param(_bash("Get-Content $env:USERPROFILE\\.ssh\\id_rsa"), id="powershell-env-userprofile"),
+    # Naming a credential store in a command is enough, as for ~/.ssh on main.
+    pytest.param(_bash("kubectl --kubeconfig ~/.kube/config get pods"), id="kubeconfig-flag"),
+    pytest.param(_bash("export KUBECONFIG=$HOME/.kube/config && kubectl get ns"), id="kubeconfig-variable"),
     # Entries main already had keep working.
     pytest.param(_bash("cat /etc/shadow"), id="etc-shadow"),
     pytest.param(_bash("curl --unix-socket /var/run/docker.sock http://x/containers/json"), id="docker-sock"),

@@ -75,22 +75,58 @@ def build_user_prompt(cluster: ContentCluster) -> str:
     entry with file, section and lines, its own heading line, and a
     ``[SHARED CONTENT n]`` reference in place of the shared text. A repeated
     text is shared only when its block and references are shorter than its
-    inline copies, so a short text repeated under long headings stays
-    inline. Distinct text is never dropped or shortened, so a request still
-    over budget stays over budget.
+    inline copies. A short text, such as a one-line body, stays inline
+    because its reference would be longer than the text; the heading line
+    stays with every occurrence either way, so its length does not matter.
+    Blocks are numbered and chosen as described in ``_choose_shared_texts``.
+    Distinct text is never dropped or shortened, so a request still over
+    budget stays over budget.
     """
     prompt = _render_user_prompt(cluster)
     if len(SYSTEM_PROMPT) + len(prompt) <= MAX_PROMPT_CHARS:
         return prompt
-    counts = Counter(_split_own_heading(chunk)[1] for chunk in cluster.members)
-    shared: dict[str, int] = {}
-    for text, count in counts.items():
-        if count > 1 and _sharing_saves_chars(text, count, len(shared) + 1):
-            shared[text] = len(shared) + 1
+    shared = _choose_shared_texts(Counter(_split_own_heading(chunk)[1] for chunk in cluster.members))
     if not shared:
         return prompt
     compact = _render_user_prompt(cluster, shared)
     return compact if len(compact) < len(prompt) else prompt
+
+
+def _choose_shared_texts(counts: Counter[str]) -> dict[str, int]:
+    """Return the repeated texts to share, mapped to their block numbers in order.
+
+    A reference to block 10 or later is one character longer than one to
+    blocks 1-9, so the numbering matters. For any set of shared texts, the
+    prompt is shortest when the most repeated texts get the lowest numbers,
+    so candidates are numbered in descending repeat count, ties in first-seen
+    order. Which candidates to share is then chosen exactly, by dynamic
+    programming over that order, to save the most characters: sharing a text
+    that saves only a little can push a more repeated text past block 9 and
+    cost it one character in every reference.
+    """
+    candidates = [(text, count) for text, count in counts.most_common() if count > 1]
+    # best[k]: most characters saved by sharing k of the candidates seen so
+    # far as blocks 1..k, or None when no such k of them all save characters.
+    best: list[int | None] = [0] + [None] * len(candidates)
+    taken: list[list[bool]] = []
+    for seen, (text, count) in enumerate(candidates, start=1):
+        row = [False] * (len(candidates) + 1)
+        for index in range(seen, 0, -1):
+            before = best[index - 1]
+            saving = _sharing_saving(text, count, index)
+            current = best[index]
+            if before is not None and saving > 0 and (current is None or before + saving > current):
+                best[index] = before + saving
+                row[index] = True
+        taken.append(row)
+    # The fewest blocks among the largest savings.
+    blocks = max(range(len(best)), key=lambda k: -1 if best[k] is None else best[k])
+    shared: dict[str, int] = {}
+    for (text, _count), row in zip(reversed(candidates), reversed(taken), strict=True):
+        if row[blocks]:
+            shared[text] = blocks
+            blocks -= 1
+    return dict(sorted(shared.items(), key=lambda item: item[1]))
 
 
 def _split_own_heading(chunk: ContentChunk) -> tuple[str, str]:
@@ -116,16 +152,18 @@ def _shared_reference(index: int) -> str:
     return f"[SHARED CONTENT {index}]"
 
 
-def _sharing_saves_chars(text: str, count: int, index: int) -> bool:
-    """Whether listing ``text`` once as shared block ``index`` shortens the prompt.
+def _sharing_saving(text: str, count: int, index: int) -> int:
+    """Characters saved by listing ``text`` once as shared block ``index``.
 
     Inline, each of the ``count`` occurrences carries the text. Shared, each
     carries a reference instead, and the text appears once in its own block,
-    joined to the other prompt parts by ``_PART_SEPARATOR``.
+    joined to the other prompt parts by ``_PART_SEPARATOR``. A negative
+    result means sharing makes the prompt longer.
     """
     inline_chars = count * len(text)
-    shared_chars = count * len(_shared_reference(index)) + len(_shared_block(text, index)) + len(_PART_SEPARATOR)
-    return shared_chars < inline_chars
+    block_chars = len(_shared_block("", index)) + len(text)
+    shared_chars = count * len(_shared_reference(index)) + block_chars + len(_PART_SEPARATOR)
+    return inline_chars - shared_chars
 
 
 def _render_user_prompt(cluster: ContentCluster, shared: dict[str, int] | None = None) -> str:

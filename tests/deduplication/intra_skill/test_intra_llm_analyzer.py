@@ -55,7 +55,7 @@ class TestBuildUserPrompt:
         assert f"Section: Unique\nLines: 1-5\nContent:\n{unique}" in prompt
         assert prompt.endswith("Classify this content overlap.")
 
-    def test_each_repeated_text_is_shared_once_in_first_seen_order(self, make_chunk) -> None:
+    def test_equally_repeated_texts_are_numbered_in_first_seen_order(self, make_chunk) -> None:
         first = "f" * 1_500
         second = "s" * 1_500
         members = [make_chunk(heading=f"Section {index}", text=first if index % 2 else second) for index in range(60)]
@@ -69,6 +69,56 @@ class TestBuildUserPrompt:
         assert prompt.count("Content:\n[SHARED CONTENT 1]") == 30
         assert prompt.count("Content:\n[SHARED CONTENT 2]") == 30
         assert "Section: Section 1\nLines: 1-5\nContent:\n[SHARED CONTENT 2]" in prompt
+
+    def test_most_repeated_text_gets_the_shortest_reference(self, make_chunk) -> None:
+        # Nine 62-character texts seen first, each twice, save one character
+        # each as blocks 1-9. Numbered after them, a 40-character body repeated
+        # 400 times would be block 10, and its 19-character references would
+        # cost 400 characters more in all than references to blocks 1-9.
+        pairs = [letter * 62 for letter in "acdefghij"]
+        body = "b" * 40
+        members = [make_chunk(heading=f"Pair {k}.{j}", text=text) for k, text in enumerate(pairs) for j in range(2)]
+        members += [make_chunk(heading=f"Body {j}", text=body) for j in range(400)]
+        filler = make_chunk(source_file="unique.md", heading="Filler", text="u")
+        cluster = ContentCluster([*members, filler], 0.95, 0.85, False, {"markdown"})
+        budget = llm_analyzer.MAX_PROMPT_CHARS
+        first_seen = {text: index for index, text in enumerate([*pairs, body], start=1)}
+        filler.text += "u" * (budget + 200 - _request_chars(llm_analyzer._render_user_prompt(cluster, first_seen)))
+        assert _request_chars(llm_analyzer._render_user_prompt(cluster, first_seen)) == budget + 200
+
+        prompt = build_user_prompt(cluster)
+
+        assert _request_chars(prompt) == budget - 200
+        assert prompt.count(f"---SHARED CONTENT 1---\n{body}\n\n") == 1
+        assert prompt.count("Content:\n[SHARED CONTENT 1]") == 400
+        # Equally repeated, the pairs keep first-seen order; the ninth would be
+        # block 10, where sharing it costs characters, so it stays inline.
+        for index, text in enumerate(pairs[:8], start=2):
+            assert prompt.count(f"---SHARED CONTENT {index}---\n{text}\n\n") == 1
+        assert "SHARED CONTENT 10" not in prompt
+        assert prompt.count(f"Content:\n{pairs[8]}\n\n") == 2
+
+    def test_text_that_would_push_a_more_repeated_text_past_block_9_stays_inline(self, make_chunk) -> None:
+        # The most repeated text saves 14 characters as block 1 and none past
+        # block 9. Sharing it moves the ninth other text to block 10, which
+        # costs that text's 19 references and its header one character each.
+        marginal = "m" * 21
+        others = [letter * 200 for letter in "abcdefghi"]
+        members = [make_chunk(heading=f"Marginal {j}", text=marginal) for j in range(20)]
+        members += [make_chunk(heading=f"Other {k}.{j}", text=text) for k, text in enumerate(others) for j in range(19)]
+        members.append(make_chunk(source_file="unique.md", heading="Filler", text="u" * 20_000))
+        cluster = ContentCluster(members, 0.95, 0.85, False, {"markdown"})
+        greedy = {marginal: 1, **{text: index for index, text in enumerate(others, start=2)}}
+        assert _request_chars(llm_analyzer._render_user_prompt(cluster)) > llm_analyzer.MAX_PROMPT_CHARS
+
+        prompt = build_user_prompt(cluster)
+
+        assert len(llm_analyzer._render_user_prompt(cluster, greedy)) - len(prompt) == 20 - 14
+        assert prompt.count(f"Content:\n{marginal}\n\n") == 20
+        for index, text in enumerate(others, start=1):
+            assert prompt.count(f"---SHARED CONTENT {index}---\n{text}\n\n") == 1
+            assert prompt.count(f"Content:\n[SHARED CONTENT {index}]") == 19
+        assert "SHARED CONTENT 10" not in prompt
 
     def test_request_budget_includes_the_system_prompt(self, make_chunk, monkeypatch) -> None:
         repeated = "r" * 2_000
@@ -154,6 +204,61 @@ class TestBuildUserPrompt:
         else:
             assert "SHARED CONTENT 2" not in prompt
             assert prompt.count(f"Content:\n{text}\n\n") == 2
+
+    @pytest.mark.parametrize(
+        ("length", "shared"),
+        [pytest.param(64, False, id="saves-nothing-as-block-10"), pytest.param(65, True, id="saves-one-char")],
+    )
+    def test_two_digit_block_numbers_cost_one_more_character(self, make_chunk, length: int, shared: bool) -> None:
+        # As block 10, two copies cost two 19-character "[SHARED CONTENT 10]"
+        # references, the 24-character block header, one copy and a
+        # 2-character separator: length + 64. As block 1-9 they would cost
+        # length + 61, so a 64-character text would be shared there.
+        bigs = [letter * 1_500 for letter in "abcdefghi"]
+        text = "t" * length
+        members = [make_chunk(heading=f"Big {k}.{j}", text=big) for k, big in enumerate(bigs) for j in range(5)]
+        members += [make_chunk(heading=f"Small {index}", text=text) for index in range(2)]
+
+        prompt = build_user_prompt(ContentCluster(members, 0.95, 0.85, False, {"markdown"}))
+
+        assert _request_chars(prompt) <= llm_analyzer.MAX_PROMPT_CHARS
+        for index, big in enumerate(bigs, start=1):
+            assert prompt.count(f"---SHARED CONTENT {index}---\n{big}\n\n") == 1
+        if shared:
+            assert prompt.count(f"---SHARED CONTENT 10---\n{text}\n\n") == 1
+            assert prompt.count("Content:\n[SHARED CONTENT 10]") == 2
+        else:
+            assert "SHARED CONTENT 10" not in prompt
+            assert prompt.count(f"Content:\n{text}\n\n") == 2
+
+    @pytest.mark.parametrize(
+        "heading",
+        [
+            pytest.param("## H{}", id="short-headings"),
+            pytest.param("## Configuration option for the workflow runner, number {:04d}", id="long-headings"),
+        ],
+    )
+    def test_short_repeated_body_stays_inline_whatever_its_heading_length(self, make_chunk, heading: str) -> None:
+        # The heading line stays with every occurrence whether or not the body
+        # is shared, so only the body's length and repeat count decide.
+        short_body = "See guide."
+        long_body = "Boilerplate paragraph about safety and usage. " * 20
+        short_members = [
+            make_chunk(heading=heading.format(index), text=f"{heading.format(index)}\n{short_body}")
+            for index in range(200)
+        ]
+        long_members = [
+            make_chunk(heading=f"## Big {index}", text=f"## Big {index}\n{long_body}") for index in range(60)
+        ]
+        cluster = ContentCluster([*short_members, *long_members], 0.95, 0.85, False, {"markdown"})
+        assert _request_chars(llm_analyzer._render_user_prompt(cluster)) > llm_analyzer.MAX_PROMPT_CHARS
+
+        prompt = build_user_prompt(cluster)
+
+        assert prompt.count("---SHARED CONTENT ") == 1
+        assert prompt.count(f"---SHARED CONTENT 1---\n{long_body}\n\n") == 1
+        for member in short_members:
+            assert f"Section: {member.heading}\nLines: 1-5\nContent:\n{member.text}\n\n" in prompt
 
     def test_short_repeated_bodies_under_long_headings_stay_inline(self, make_chunk) -> None:
         short_body = "See guide."

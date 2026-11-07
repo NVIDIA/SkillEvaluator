@@ -214,8 +214,8 @@ class TestCLIReporter:
         output = CLIReporter().render_all([result])
 
         assert "SKIP" in output
-        assert "Required validations passed" in output
-        assert "live evaluation skipped" in output
+        assert "Passed required checks" in output
+        assert "1 skipped" in output
 
     @pytest.mark.parametrize(
         ("baseline", "lift", "expected_baseline", "expected_lift"),
@@ -380,7 +380,7 @@ class TestCLIReporter:
 
         assert result.passed is True
         assert "same-name similarity match" in output
-        assert "All validations passed" in output
+        assert "Passed required checks" in output
 
     def test_render_finding_shows_both_related_paths(self) -> None:
         result = _similarity_result()
@@ -937,7 +937,7 @@ def test_tier1_dashboard_reconciles_only_tier1_findings() -> None:
     tier_cards = html.split('class="tier-cards', 1)[1].split('<section class="exec-summary', 1)[0]
     assert re.search(r"<strong>1</strong> finding</span>", tier_cards)
     assert '<span class="tier-card-sev-pill high">1 high</span>' in tier_cards
-    assert re.search(r"<strong>1</strong> duplicate\(s\)</span>", tier_cards)
+    assert re.search(r"<strong>1</strong> finding\(s\)</span>", tier_cards)
     # The gate policy counts each tier's unique findings.
     gate_policy = html.split('class="gate-policy"', 1)[1].split("</div>", 1)[0]
     assert "0 critical · 2 high · 0 medium · 0 low" in gate_policy
@@ -1716,7 +1716,7 @@ class TestTier3HarborCanonicalPayload:
         cli_output = CLIReporter().render_all([result])
         assert "SKIP" in cli_output
         assert "Validation failed" not in cli_output
-        assert "Required validations passed" in cli_output
+        assert "Passed required checks" in cli_output
 
     def test_legacy_summary_without_execution_status_is_unknown(self, tmp_path: Path) -> None:
         from skillevaluator.tier3.harbor.report_data import load_agent_data
@@ -1963,6 +1963,32 @@ class TestGatingSplit:
         tier2 = _html_tab(output, "tier2")
         assert "same-name similarity match" in tier2
         assert "Intra-skill check was not run" not in tier2
+
+    @pytest.mark.parametrize("tier", [2, 3])
+    @pytest.mark.parametrize("comprehensive", [False, True])
+    def test_emit_reports_uses_recorded_tier_for_custom_validator_names(
+        self, tmp_path: Path, tier: int, comprehensive: bool
+    ) -> None:
+        result = _similarity_result(severity=Severity.HIGH) if tier == 2 else _failed_result("Custom live evaluation")
+        result.validator_name = "Custom recorded check"
+        result.metadata["gating"] = {"tier": tier, "blocking": tier == 2}
+        before = JSONReporter(include_timestamp=False).render_all([result])
+        scope = {"requested_tiers": (tier,), "displayed_tiers": (1, 2, 3)} if comprehensive else {}
+
+        assert (
+            emit_reports([result], report_formats=("html",), output_dir=tmp_path, basename="recorded", **scope) is False
+        )
+
+        output = (tmp_path / "recorded.html").read_text(encoding="utf-8")
+        panel = _html_tab(output, f"tier{tier}")
+        assert "No check evidence was recorded for this tier." not in panel
+        if tier == 2:
+            assert "same-name similarity match" in panel
+        else:
+            assert 'class="tab-content active"' in panel
+        if not comprehensive:
+            assert 'id="tab-tier1"' not in output
+        assert JSONReporter(include_timestamp=False).render_all([result]) == before
 
     def test_default_html_reporter_classifies_similarity_as_tier2(self) -> None:
         output = HTMLReporter(include_timestamp=False).render_all([_similarity_result(severity=Severity.HIGH)])
@@ -2314,8 +2340,9 @@ class TestMarkdownReporter:
         """Tier 3 Markdown should include compact Harbor and evidence links."""
         output = MarkdownReporter(include_timestamp=False).render_all([_tier3_harbor_result()])
 
-        assert "**Harbor logs:** [Open Harbor logs](" in output
-        assert "**Harbor analysis:** [Open Harbor analysis](" in output
+        assert re.search(
+            r"^- \*\*[^*]+:\*\* \[Harbor logs\]\(https://[^)]+\) · \[Harbor analysis\]\(", output, re.MULTILINE
+        )
         assert "https://harbor.example.test/jobs/log-analyzer" in output
         assert "Evidence: [View Step 9](" in output
         assert "log-analyzer-001?step=9" in output
@@ -2664,3 +2691,107 @@ class TestTopIssuesDeepLink:
             )
         )
         return result
+
+
+@pytest.mark.parametrize("reporter", [CLIReporter, MarkdownReporter, HTMLReporter])
+def test_all_harbor_jobs_are_navigable_without_attribution_guessing(reporter):
+    from copy import deepcopy
+
+    result = _tier3_harbor_result()
+    viewer = result.metadata["agent_eval"]["harbor_viewer"]
+    viewer["jobs"] += [
+        {
+            "url": "https://harbor.example.test/jobs/second",
+            "analysis_url": "https://harbor.example.test/analysis/second",
+            "name": "<job>[bad](x)",
+        },
+        {"url": "https://harbor.example.test/jobs/third"},
+        {"url": "https://harbor.example.test/jobs/second", "name": "duplicate"},
+        {"url": "javascript:alert(99)", "name": "unsafe"},
+    ]
+    original = deepcopy(result)
+    output = reporter().render_all([result])
+    assert "https://harbor.example.test/jobs/second" in output
+    assert "https://harbor.example.test/analysis/second" in output
+    assert "https://harbor.example.test/jobs/third" in output
+    assert "Job 3" in output
+    assert "Results" in output
+    assert "javascript:alert(99)" not in output
+    if reporter is HTMLReporter:
+        assert "&lt;job&gt;[bad](x)" in output
+        assert "<job>" not in output
+        panel = output.split('class="t3-harbor-panel"', 1)[1].split("</div>\n            </div>", 1)[0]
+        assert panel.count('href="https://harbor.example.test/jobs/second"') == 1
+    elif reporter is MarkdownReporter:
+        assert "&lt;job&gt;&#91;bad&#93;(x)" in output
+    else:
+        assert "<job>[bad](x)" in output
+    assert result == original
+
+
+def test_html_discloses_only_recorded_validated_provenance_without_changing_payload():
+    from copy import deepcopy
+
+    result = _tier3_harbor_result()
+    ae = result.metadata["agent_eval"]
+    ae["evaluator_version"] = "recorded-evaluator-v1"
+    ae["dataset_digest"] = "sha256:" + "a" * 64
+    ae["dataset_digest_algorithm"] = "skill-evaluator-dataset-snapshot/1"
+    ae["agents"] = {"agent": {"model": "recorded-model-v1"}}
+    result.metadata["evaluated_source"] = {"repository": "org/skill", "commit": "b" * 40}
+    original = deepcopy(result)
+    output = HTMLReporter(include_timestamp=False).render_all([result])
+    diagnostics = output.split('id="tier3-page-provenance"', 1)[1].split("</section>", 1)[0]
+    assert "Recorded evaluation provenance" in diagnostics
+    assert "recorded-evaluator-v1" in diagnostics
+    assert "recorded-model-v1" in diagnostics
+    assert "sha256:" + "a" * 64 in diagnostics
+    assert "org/skill" in diagnostics and "b" * 40 in diagnostics
+    assert result == original
+
+
+@pytest.mark.parametrize("reporter", [CLIReporter, MarkdownReporter, HTMLReporter])
+@pytest.mark.parametrize("summary_only", [False, True])
+def test_legacy_analysis_only_harbor_evidence_is_available(reporter, summary_only):
+    result = _tier3_harbor_result()
+    ae = result.metadata["agent_eval"]
+    ae.pop("harbor_viewer", None)
+    viewer = {"analysis_url": "https://harbor.example.test/analysis-only"}
+    if summary_only:
+        ae["summary"]["harbor_viewer"] = viewer
+    else:
+        ae["harbor_viewer"] = viewer
+    output = reporter().render_all([result])
+    assert "https://harbor.example.test/analysis-only" in output
+    assert "Run analysis" in output
+
+
+@pytest.mark.parametrize("colored", [False, True])
+def test_cli_harbor_job_labels_remain_neutral_and_literal(colored):
+    from io import StringIO
+
+    from rich.console import Console
+
+    stream = StringIO()
+    console = Console(
+        file=stream, force_terminal=colored, color_system="standard" if colored else None, record=True, width=160
+    )
+    payload = {
+        "harbor_viewer": {
+            "jobs": [
+                {
+                    "name": "Job 3 [bad]",
+                    "url": "https://example.test/jobs/3",
+                    "analysis_url": "https://example.test/analysis/3",
+                }
+            ]
+        }
+    }
+    CLIReporter._print_harbor_artifacts(payload, console)
+    output = stream.getvalue()
+    assert "Job 3 [bad]" in output
+    assert "Harbor logs: Results https://example.test/jobs/3" in output
+    assert "Harbor analysis: https://example.test/analysis/3" in output
+    assert "Job 3 [bad]" in console.export_text()
+    if colored:
+        assert "\x1b[1mJob 3 [bad]\x1b[0m" in output

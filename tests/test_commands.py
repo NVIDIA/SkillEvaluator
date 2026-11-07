@@ -234,7 +234,7 @@ def test_validate_fixture_no_llm(tmp_path: Path) -> None:
     )
 
     assert result.exit_code == 0, result.output
-    assert "All validations passed" in result.output
+    assert "Passed required checks" in result.output
 
 
 def test_validate_reports_malformed_policy_without_traceback(tmp_path: Path) -> None:

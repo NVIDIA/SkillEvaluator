@@ -1514,7 +1514,11 @@ def test_instruction_token_estimate_uses_frontmatter_boundary(tmp_path, newline,
     [
         "## Instructions\n\n- Run the task.\n\n---\nSupporting prose.\n",
         "---\nname: unclosed-frontmatter\n",
+        "---\nname: unclosed-frontmatter\n\n## Instructions\n\n- Run the task.\n\n---\nSupporting prose.\n",
+        "---\n---\n## Instructions\n\n- Run the task.\n\n---\nSupporting prose.\n",
+        "---\nname: [invalid-yaml\n---\n## Instructions\n\n- Run the task.\n",
     ],
+    ids=["body-separator", "unclosed", "unclosed-with-body-separator", "empty-with-body-separator", "invalid-yaml"],
 )
 def test_instruction_tokens_do_not_infer_frontmatter_from_body_separators(tmp_path, content):
     skill_dir = tmp_path / "no-frontmatter"
@@ -1524,5 +1528,6 @@ def test_instruction_tokens_do_not_infer_frontmatter_from_body_separators(tmp_pa
     result = QualityScoreValidator(min_score=0).validate(skill_dir)
     metrics = result.metadata["quality_scores"]["metrics"]
 
+    assert metrics["has_frontmatter"] is False
     assert metrics["frontmatter_tokens"] == 0
     assert metrics["instructions_tokens"] == 0

@@ -529,6 +529,13 @@ agent process killed is the classic out-of-memory symptom; raise
 
 ### Custom Dockerfiles
 
+Declare system tools in `scripts/apt-packages.txt` and Python packages in
+`scripts/requirements.txt` anywhere under the skill directory. These files are
+auto-installed only when there is no custom `evals/environment/Dockerfile`.
+With a custom Dockerfile, install those dependencies there yourself. A required
+tool or module that is unavailable makes the case `environment_invalid` and
+UNSCORED, not a skill defect; the report names the missing dependency and fix.
+
 When a skill ships its own `evals/environment/Dockerfile`,
 `--custom-dockerfile-mode` decides how it combines with the eval image:
 

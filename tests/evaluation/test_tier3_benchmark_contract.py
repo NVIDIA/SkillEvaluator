@@ -95,7 +95,9 @@ def test_payload_exposes_report_truth_metadata() -> None:
     assert payload["verdict_policy"] == {
         "attempt_pass_threshold": 0.6,
         "goal_accuracy_pass_threshold": 1.0,
-        "attempt_pass_rule": "overall_threshold_and_goal_accuracy_threshold_when_scored",
+        "security_pass_threshold": 1.0,
+        "attempt_pass_rule": "overall_threshold_and_goal_accuracy_and_security_threshold_when_scored",
+        "run_fail_policy": "any_with_skill_required_check_failure",
         "dimension_pass_threshold": DIMENSION_VERDICT_PASS_THRESHOLD,
         "dimension_neutral_threshold": DIMENSION_VERDICT_NEUTRAL_THRESHOLD,
         "lift_pass_threshold": TIER3_LIFT_PASS_THRESHOLD,

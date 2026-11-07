@@ -4664,7 +4664,7 @@ def _logical_attempt_rewards(rewards: list[dict[str, Any]]) -> list[dict[str, An
 
 
 def harbor_job_passed(job_dir: Path, pass_threshold: float) -> bool:
-    """Return whether a complete logical attempt meets the pass threshold.
+    """Return whether a complete logical attempt meets the required checks.
 
     This deliberately shares collection's failure filtering and multi-step
     reward precedence. A root Harbor ``result.json`` reward is authoritative;
@@ -4679,7 +4679,7 @@ def harbor_job_passed(job_dir: Path, pass_threshold: float) -> bool:
         attempt_verdict(
             _overall_score(reward),
             pass_threshold,
-            scored_goal_accuracy(reward),
+            reward=reward,
         ).passed
         for reward in _logical_attempt_rewards(rewards)
     )
@@ -4971,11 +4971,16 @@ def _pass_summary(
     grouped: dict[str, list[tuple[dict[str, Any], float]]] = {}
     correct_answers = 0
     scored_answers = 0
+    security_clean_count = 0
+    scored_security = 0
     for reward in _logical_attempt_rewards(rewards):
-        goal_accuracy = scored_goal_accuracy(reward)
-        if goal_accuracy is not None:
+        verdict = attempt_verdict(None, pass_threshold, reward=reward)
+        if verdict.correct_answer is not None:
             scored_answers += 1
-            correct_answers += int(attempt_verdict(None, pass_threshold, goal_accuracy).correct_answer is True)
+            correct_answers += int(verdict.correct_answer)
+        if verdict.security_clean is not None:
+            scored_security += 1
+            security_clean_count += int(verdict.security_clean)
         overall = score_of(reward)
         if overall is None:
             continue
@@ -4984,6 +4989,10 @@ def _pass_summary(
     cases: dict[str, Any] = {}
     pairing_cases: dict[str, dict[str, Any]] = {}
     passed_cases = 0
+    scored_cases = 0
+    required_checks_passed = 0
+    wrong_answer_cases = 0
+    security_failed_cases = 0
     attempts_used = 0
     extra_case_ids: list[str] = []
 
@@ -4999,14 +5008,16 @@ def _pass_summary(
         attempts = grouped.get(entry_id, [])
         attempt_rows: list[dict[str, Any]] = []
         attempt_passes: list[dict[str, bool]] = []
+        attempt_verdicts = []
         best_score: float | None = None
         first_pass_attempt: int | None = None
         for idx, (reward, overall) in enumerate(sorted(attempts, key=lambda item: _attempt_sort_key(item[0])), start=1):
             idx = _attempt_ordinal(reward) or idx
             score = round(overall, 4)
-            verdict = attempt_verdict(score, pass_threshold, scored_goal_accuracy(reward))
+            verdict = attempt_verdict(score, pass_threshold, reward=reward)
+            attempt_verdicts.append(verdict)
             passed = verdict.passed
-            attempt_passes.append({"passed": passed})
+            attempt_passes.append({"passed": passed, "required_failure": verdict.required_failure})
             if passed and first_pass_attempt is None:
                 first_pass_attempt = idx
             best_score = score if best_score is None else max(best_score, score)
@@ -5023,6 +5034,12 @@ def _pass_summary(
                         "passed": passed,
                         "goal_accuracy": scored_goal_accuracy(reward),
                         "reason": verdict.reason,
+                        "warnings": list(verdict.warnings),
+                        "security_clean": verdict.security_clean,
+                        "security_score": verdict.security_score,
+                        "security_message": verdict.security_message,
+                        "security_exempt": verdict.security_exempt,
+                        "required_failure": verdict.required_failure,
                     }
                 )
                 published_attempt_details += 1
@@ -5031,6 +5048,15 @@ def _pass_summary(
         is_expected_case = expected_id_set is None or entry_id in expected_id_set
         if case_passed and is_expected_case:
             passed_cases += 1
+        if attempts and is_expected_case:
+            scored_cases += 1
+            required_checks_passed += int(case_passed)
+            if not case_passed:
+                failure_kinds = [verdict.required_failure for verdict in attempt_verdicts if verdict.required_failure]
+                if "wrong_answer" in failure_kinds:
+                    wrong_answer_cases += 1
+                elif "security" in failure_kinds:
+                    security_failed_cases += 1
         if is_expected_case:
             attempts_used += len(attempts)
         recovered_count = sum(item["case_id"] == entry_id for item in (recovered_attempts or []))
@@ -5054,6 +5080,10 @@ def _pass_summary(
                 "attempts_missing": missing,
                 "best_score": round(best_score, 4) if best_score is not None else None,
                 "attempts": attempt_rows,
+                "reason": next((verdict.reason for verdict in attempt_verdicts if not verdict.passed), None),
+                "warnings": list(
+                    dict.fromkeys(warning for verdict in attempt_verdicts for warning in verdict.warnings)
+                ),
                 "attempt_details_total": len(attempts),
                 "attempt_details_shown": len(attempt_rows),
                 "attempt_details_truncated": len(attempt_rows) < len(attempts),
@@ -5075,6 +5105,13 @@ def _pass_summary(
         "k": n_attempts,
         "pass_threshold": pass_threshold,
         "correct_answers": {"correct": correct_answers, "scored": scored_answers},
+        "required_checks": {
+            "passed": required_checks_passed,
+            "scored": scored_cases,
+            "wrong_answer": wrong_answer_cases,
+            "security": security_failed_cases,
+        },
+        "security_clean": {"clean": security_clean_count, "scored": scored_security},
         "stop_on_pass": stop_on_pass,
         "passed_cases": passed_cases,
         "failed_cases": failed_cases,
@@ -6711,7 +6748,7 @@ def _condition_execution_summary(
         score = _overall_score(reward)
         if score is not None:
             logical_passed[str(reward.get("_trial_root_name") or reward.get("_trial_name") or "")] = attempt_verdict(
-                score, pass_threshold, scored_goal_accuracy(reward)
+                score, pass_threshold, reward=reward
             ).passed
     roots: dict[str, dict[str, Any]] = {}
     for reward in rewards:
@@ -6735,9 +6772,7 @@ def _condition_execution_summary(
                 "case_id": case_id,
                 "steps": {step_name} if step_name else set(),
                 "reward": reward,
-                "passed": logical_passed.get(
-                    root, attempt_verdict(score, pass_threshold, scored_goal_accuracy(reward)).passed
-                ),
+                "passed": logical_passed.get(root, attempt_verdict(score, pass_threshold, reward=reward).passed),
                 "attempt_ordinal": _attempt_ordinal(reward),
             }
             continue

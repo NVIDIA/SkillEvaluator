@@ -172,18 +172,21 @@ class BenchmarkReporter(ReporterBase):
         policy = _benchmark_policy(results, ae, expected_skill_name=expected_skill_name)
         status = _overall_status(results, ae, policy, expected_skill_name=expected_skill_name)
 
-        lines: list[str] = [
-            f"# Skill Benchmark: {skill_name}",
-            "",
-            (
-                f"> **Tier 3 completed-agent result: {completed['verdict'].upper()}**"
-                if completed
-                else "> **Tier 3: No complete agent result**"
+        tier3_callout = (
+            f"> **Tier 3 completed-agent result: {completed['verdict'].upper()}**"
+            + (
+                f" — {_publication_safe_inline(completed['reason'], private_labels)}"
+                if completed and completed.get("reason")
+                else ""
             )
+            if completed
+            else "> **Tier 3: No complete agent result**"
+        )
+        lines: list[str] = (
+            [tier3_callout, "", f"# Skill Benchmark: {skill_name}", ""]
             if self.report_scope == "tier3"
-            else _verdict_callout(status),
-            "",
-        ]
+            else [f"# Skill Benchmark: {skill_name}", "", _verdict_callout(status), ""]
+        )
         if self.report_scope == "tier3":
             lines.extend(
                 [
@@ -477,34 +480,39 @@ class BenchmarkReporter(ReporterBase):
         )
         lines.append("| " + " | ".join(_md_cell(value, private_labels) for value in overall_row) + " |")
 
-        correct_answers_row = ["Correct answers"]
-        for agent in agents.values():
-            correct_answers = agent.get("correct_answers")
-            with_skill = correct_answers.get("with_skill") if isinstance(correct_answers, dict) else None
-            without_skill = correct_answers.get("without_skill") if isinstance(correct_answers, dict) else None
-            difference = correct_answers.get("difference") if isinstance(correct_answers, dict) else None
-            counts = (
-                (
-                    with_skill.get("correct"),
-                    with_skill.get("scored"),
-                    without_skill.get("correct"),
-                    without_skill.get("scored"),
+        for label, field, numerator in (
+            ("Required checks passed", "required_checks", "passed"),
+            ("Correct answers", "correct_answers", "correct"),
+            ("Security clean", "security_clean", "clean"),
+        ):
+            row = [label]
+            for agent in agents.values():
+                comparison = agent.get(field)
+                with_skill = comparison.get("with_skill") if isinstance(comparison, dict) else None
+                without_skill = comparison.get("without_skill") if isinstance(comparison, dict) else None
+                difference = comparison.get("difference") if isinstance(comparison, dict) else None
+                counts = (
+                    (
+                        with_skill.get(numerator),
+                        with_skill.get("scored"),
+                        without_skill.get(numerator),
+                        without_skill.get("scored"),
+                    )
+                    if isinstance(with_skill, dict) and isinstance(without_skill, dict)
+                    else ()
                 )
-                if isinstance(with_skill, dict) and isinstance(without_skill, dict)
-                else ()
-            )
-            if (
-                len(counts) == 4
-                and all(isinstance(count, int) and not isinstance(count, bool) and count >= 0 for count in counts)
-                and counts[1] > 0
-                and counts[3] > 0
-                and isinstance(difference, int)
-                and not isinstance(difference, bool)
-            ):
-                correct_answers_row.append(f"{counts[0]}/{counts[1]} | {counts[2]}/{counts[3]} | {difference:+d}")
-            else:
-                correct_answers_row.append("N/A")
-        lines.append("| " + " | ".join(_md_cell(value, private_labels) for value in correct_answers_row) + " |")
+                if (
+                    len(counts) == 4
+                    and all(isinstance(count, int) and not isinstance(count, bool) and count >= 0 for count in counts)
+                    and counts[1] > 0
+                    and counts[3] > 0
+                    and isinstance(difference, int)
+                    and not isinstance(difference, bool)
+                ):
+                    row.append(f"{counts[0]}/{counts[1]} | {counts[2]}/{counts[3]} | {difference:+d}")
+                else:
+                    row.append("N/A")
+            lines.append("| " + " | ".join(_md_cell(value, private_labels) for value in row) + " |")
 
         has_partial = False
         for dim_id in DIMENSION_MAPPING:
@@ -522,6 +530,55 @@ class BenchmarkReporter(ReporterBase):
                     )
                 )
             lines.append("| " + " | ".join(_md_cell(value, private_labels) for value in row) + " |")
+
+        failed_cases: list[tuple[str, object, str]] = []
+        warning_cases: list[tuple[str, str]] = []
+        for agent_name, agent in agents.items():
+            pass_at_k = _mapping(agent.get("pass_at_k"))
+            with_skill = _mapping(pass_at_k.get("with_skill"))
+            cases = _mapping(with_skill.get("cases"))
+            for case_id, case in cases.items():
+                if not isinstance(case, dict):
+                    continue
+                label = f"{agent_name}: {case_id}" if len(agents) > 1 else str(case_id)
+                attempts = case.get("attempts") if isinstance(case.get("attempts"), list) else []
+                if case.get("passed") is False and case.get("attempts_used", 0) > 0:
+                    reason = case.get("reason") or next(
+                        (
+                            attempt.get("reason")
+                            for attempt in attempts
+                            if isinstance(attempt, dict) and not attempt.get("passed") and attempt.get("reason")
+                        ),
+                        "required check failed",
+                    )
+                    failed_cases.append((label, case.get("best_score"), str(reason)))
+                warning_cases.extend(
+                    (label, str(warning))
+                    for warning in case.get("warnings", [])
+                    if isinstance(warning, str) and warning.strip()
+                )
+        if failed_cases:
+            lines.extend(["", "### Failed cases", "", "| Case | Score | Reason |", "|---|---:|---|"])
+            for case_id, score, reason in failed_cases:
+                score_text = f"{score:.2f}" if isinstance(score, int | float) and not isinstance(score, bool) else "N/A"
+                lines.append(
+                    "| "
+                    + " | ".join(
+                        (
+                            _md_cell(case_id, private_labels),
+                            _md_cell(score_text, private_labels),
+                            _md_cell(_publication_safe_inline(reason, private_labels), private_labels),
+                        )
+                    )
+                    + " |"
+                )
+        if warning_cases:
+            lines.extend(["", "### Warnings", ""])
+            lines.extend(
+                f"- **{_publication_safe_inline(case_id, private_labels)}**: "
+                f"{_publication_safe_inline(warning, private_labels)}"
+                for case_id, warning in warning_cases
+            )
 
         lines.extend(
             [

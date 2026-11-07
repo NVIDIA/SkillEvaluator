@@ -385,17 +385,30 @@ class CLIReporter(ReporterBase):
         composite_text = f"{composite:+.2f}" if scored_lift else "N/A"
         composite_style = lift_style(composite) if scored_lift else "dim"
         verdict_text = escape_markup(str(verdict).upper())
-        correct_answers = agent_eval.get("correct_answers")
-        correct_text = ""
-        if isinstance(correct_answers, dict):
-            with_skill = correct_answers.get("with_skill")
-            without_skill = correct_answers.get("without_skill")
-            difference = correct_answers.get("difference")
+        verdict_reason = agent_eval.get("verdict_reason")
+        safe_reason = f" — {escape_markup(str(verdict_reason))}" if verdict == "fail" and verdict_reason else ""
+        lift_label = (
+            "composite lift (for reference)"
+            if verdict == "fail" and scored_lift and composite > 0
+            else "composite lift"
+        )
+        console.print(
+            f"\n  [{vc}]Verdict: {verdict_text}[/{vc}]{safe_reason} "
+            f"({lift_label} = [{composite_style}]{composite_text}[/{composite_style}])"
+        )
+        for label, count_data, numerator in (
+            ("Required checks passed", agent_eval.get("required_checks"), "passed"),
+            ("Correct answers", agent_eval.get("correct_answers"), "correct"),
+            ("Security clean", agent_eval.get("security_clean"), "clean"),
+        ):
+            with_skill = count_data.get("with_skill") if isinstance(count_data, dict) else None
+            without_skill = count_data.get("without_skill") if isinstance(count_data, dict) else None
+            difference = count_data.get("difference") if isinstance(count_data, dict) else None
             if isinstance(with_skill, dict) and isinstance(without_skill, dict):
                 counts = (
-                    with_skill.get("correct"),
+                    with_skill.get(numerator),
                     with_skill.get("scored"),
-                    without_skill.get("correct"),
+                    without_skill.get(numerator),
                     without_skill.get("scored"),
                 )
                 if all(isinstance(count, int) and not isinstance(count, bool) and count >= 0 for count in counts):
@@ -404,12 +417,7 @@ class CLIReporter(ReporterBase):
                         if isinstance(difference, int) and not isinstance(difference, bool)
                         else "N/A"
                     )
-                    correct_text = f"; correct answers = {counts[0]}/{counts[1]} | {counts[2]}/{counts[3]} | {delta}"
-        console.print(
-            f"\n  [{vc}]Verdict: {verdict_text}[/{vc}] "
-            f"(composite lift = [{composite_style}]{composite_text}[/{composite_style}]"
-            f"{escape_markup(correct_text)})"
-        )
+                    console.print(f"  {label}: {counts[0]}/{counts[1]} | {counts[2]}/{counts[3]} | {delta}")
         if verdict == "inconclusive":
             console.print(
                 "  [yellow]Skill never activated. Scores are diagnostic only; no lift verdict was computed.[/yellow]"
@@ -429,6 +437,48 @@ class CLIReporter(ReporterBase):
                     f"    [dim]Harbor analysis:[/dim] [dim]{escape_markup(harbor_viewer['analysis_url'])}[/dim]",
                     soft_wrap=True,
                 )
+        pass_at_k = agent_eval.get("pass_at_k")
+        with_skill_pass = pass_at_k.get("with_skill") if isinstance(pass_at_k, dict) else None
+        case_summaries = with_skill_pass.get("cases") if isinstance(with_skill_pass, dict) else None
+        if isinstance(case_summaries, dict) and case_summaries:
+            table = Table(title="Tier 3 Cases", border_style=FAINT, show_header=True)
+            table.add_column("Case", style="bold")
+            table.add_column("Score", justify="right")
+            table.add_column("Result")
+            table.add_column("Warnings")
+            for case_id, case in case_summaries.items():
+                if not isinstance(case, dict):
+                    continue
+                score = case.get("best_score")
+                score_text = f"{score:.2f}" if isinstance(score, int | float) and not isinstance(score, bool) else "N/A"
+                if case.get("passed") is True:
+                    result_text = "[green]PASS[/green]"
+                elif (
+                    isinstance(case.get("attempts_used"), int)
+                    and not isinstance(case.get("attempts_used"), bool)
+                    and case.get("attempts_used") > 0
+                ):
+                    result_text = "[red]FAIL[/red]"
+                    reason = case.get("reason")
+                    if isinstance(reason, str) and reason:
+                        result_text += f" — {escape_markup(reason)}"
+                else:
+                    result_text = "[yellow]not scored[/yellow]"
+                warnings = case.get("warnings")
+                warning_text = (
+                    "; ".join(str(item) for item in warnings if isinstance(item, str))
+                    if isinstance(warnings, list)
+                    else ""
+                )
+                table.add_row(
+                    escape_markup(str(case_id)),
+                    score_text,
+                    result_text,
+                    f"[yellow]WARNING[/yellow] {escape_markup(warning_text)}" if warning_text else "",
+                )
+            if table.rows:
+                console.print(table)
+                console.print()
         console.print(f"  {trial_coverage(agent_eval).text}")
         console.print()
 

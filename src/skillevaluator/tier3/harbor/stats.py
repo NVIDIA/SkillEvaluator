@@ -32,7 +32,7 @@ from skillevaluator.constants import (
     LIFT_CI_MIN_PAIRED_CASES,
     TOKEN_EFFICIENCY_HALF_LIFE,
 )
-from skillevaluator.tier3.attempt_verdict import attempt_verdict, scored_goal_accuracy
+from skillevaluator.tier3.attempt_verdict import attempt_verdict
 from skillevaluator.tier3.harbor.lift_basis import pair_metric_scores
 from skillevaluator.tier3.harbor.metrics import (
     CUSTOM_SCORE_POLICY,
@@ -1455,7 +1455,7 @@ def _scored_pass_flags(trials: Sequence[TrialObservation], pass_threshold: float
         if score is None:
             continue
         flags.setdefault(trial.case_id, []).append(
-            attempt_verdict(round(score, 4), pass_threshold, scored_goal_accuracy(dict(trial.reward))).passed
+            attempt_verdict(round(score, 4), pass_threshold, reward=trial.reward).passed
         )
     return flags
 

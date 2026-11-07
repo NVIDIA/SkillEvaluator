@@ -270,6 +270,57 @@ def test_full_agent_verdict_keeps_displayed_zero_lift_neutral():
     assert style.color.name == "#8a8f98"
 
 
+def test_agent_eval_summary_shows_required_counts_and_failed_case_reason():
+    output = io.StringIO()
+    CLIReporter._print_agent_eval_tables(
+        {
+            "verdict": "fail",
+            "verdict_reason": "1 of 2 cases failed required checks (1 wrong answer, 0 security)",
+            "composite_lift": 0.2,
+            "required_checks": {
+                "with_skill": {"passed": 1, "scored": 2},
+                "without_skill": {"passed": 2, "scored": 2},
+                "difference": -1,
+            },
+            "correct_answers": {
+                "with_skill": {"correct": 1, "scored": 2},
+                "without_skill": {"correct": 2, "scored": 2},
+                "difference": -1,
+            },
+            "security_clean": {
+                "with_skill": {"clean": 2, "scored": 2},
+                "without_skill": {"clean": 2, "scored": 2},
+                "difference": 0,
+            },
+            "pass_at_k": {
+                "with_skill": {
+                    "cases": {
+                        "wrong-ground-truth": {
+                            "passed": False,
+                            "attempts_used": 1,
+                            "best_score": 0.82,
+                            "reason": "wrong answer (goal accuracy 0.00)",
+                            "warnings": ["missed expected step 1 of 1 (behavior 0.00)"],
+                        }
+                    }
+                }
+            },
+        },
+        Console(file=output, width=140, color_system=None),
+    )
+
+    rendered = output.getvalue()
+    assert "Verdict: FAIL — 1 of 2 cases failed required checks (1 wrong answer, 0 security)" in rendered
+    assert "composite lift (for reference)" in rendered
+    assert "Required checks passed: 1/2 | 2/2 | -1" in rendered
+    assert "Correct answers: 1/2 | 2/2 | -1" in rendered
+    assert "Security clean: 2/2 | 2/2 | +0" in rendered
+    assert "wrong-ground-truth" in rendered
+    assert "0.82" in rendered
+    assert "wrong answer (goal accuracy 0.00)" in rendered
+    assert "WARNING" in rendered
+
+
 def test_verdict_badge_background_does_not_fill_headline():
     from rich.console import Group
 

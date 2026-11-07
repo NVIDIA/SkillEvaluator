@@ -15,10 +15,12 @@ All notable changes to SkillEvaluator are documented in this file.
 
 ### Changed
 
-- A scored Tier 3 attempt now fails when `goal_accuracy` is below 1.0, even if
-  its Overall score meets the pass threshold. N/A or unscored goal accuracy
-  preserves the existing Overall-only verdict; reports include correct-answer
-  counts for both arms and their difference.
+- A scored Tier 3 attempt now fails when `goal_accuracy` or security is below
+  1.0, even if its Overall score meets the pass threshold. N/A or unscored
+  metrics preserve the existing verdict behavior; missed behavior-check steps
+  are warnings. A with-skill required-check failure fails the quality verdict,
+  while no-skill failures do not. Reports show required-check, correct-answer,
+  and security-clean counts for both arms, plus failed-case reasons.
 
 - Align terminal grade and lift colors across compact, full, and direct Tier 3
   reports; displayed zero lift is neutral. Narrow terminals stack complete

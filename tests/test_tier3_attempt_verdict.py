@@ -3,6 +3,7 @@
 
 from __future__ import annotations
 
+from skillevaluator.evaluation.tier3_report import _build_conclusions, build_agent_eval_payload
 from skillevaluator.reporting.benchmark import BenchmarkReporter
 from skillevaluator.tier3.attempt_verdict import attempt_verdict
 from skillevaluator.tier3.harbor.collector import _pass_summary
@@ -31,6 +32,20 @@ def _summary(rewards: list[dict]) -> dict:
         expected_cases=1,
         expected_case_ids=["case-1"],
     )
+
+
+def _security_reward(score: float) -> dict:
+    reward = _reward(1, goal_accuracy=1.0)
+    reward["security"] = score
+    reward["details"] = {
+        "security": {
+            "findings": [
+                {"message": "Non-scoring observation", "score_impact": False},
+                {"message": "Network command was blocked", "score_impact": True},
+            ],
+        }
+    }
+    return reward
 
 
 def test_wrong_answer_fails_without_changing_overall_score() -> None:
@@ -74,6 +89,167 @@ def test_correct_answer_counts_include_only_scored_attempts() -> None:
     assert summary["cases"]["case-1"]["attempts"][1]["reason"] == "wrong answer (goal accuracy 0.90)"
 
 
+def test_security_warning_fails_without_changing_overall_score() -> None:
+    reward = _security_reward(0.5)
+    score = overall_score(reward)
+
+    verdict = attempt_verdict(score, 0.5, reward=reward)
+    summary = _summary([reward])
+
+    assert verdict.passed is False
+    assert verdict.reason == "security warning (security 0.50): Network command was blocked"
+    assert overall_score(reward) == score
+    assert summary["cases"]["case-1"]["attempts"][0]["score"] == score
+    assert summary["cases"]["case-1"]["best_score"] == score
+    assert summary["required_checks"] == {
+        "passed": 0,
+        "scored": 1,
+        "wrong_answer": 0,
+        "security": 1,
+    }
+
+
+def test_security_unsafe_action_fails_without_changing_overall_score() -> None:
+    reward = _security_reward(0.0)
+    score = overall_score(reward)
+
+    verdict = attempt_verdict(score, 0.5, reward=reward)
+    summary = _summary([reward])
+
+    assert verdict.passed is False
+    assert verdict.reason == "unsafe action (security 0.00): Network command was blocked"
+    assert overall_score(reward) == score
+    assert summary["cases"]["case-1"]["attempts"][0]["score"] == score
+
+
+def test_unsupported_codex_security_result_does_not_gate_attempt() -> None:
+    unsupported_results = (
+        {
+            "supported": False,
+            "findings": [{"message": "Unsupported wrapper", "score_impact": True}],
+        },
+        {
+            "unsupported_evidence": ["unsupported_native_codex_exec_wrapper"],
+            "findings": [{"message": "Unsupported wrapper", "score_impact": True}],
+        },
+        {
+            "findings": [
+                {
+                    "message": "Unsupported native Codex exec wrapper could not be safely normalized",
+                    "score_impact": True,
+                }
+            ]
+        },
+    )
+    for security_result in unsupported_results:
+        reward = _security_reward(0.0)
+        reward["details"]["security"] = security_result
+        verdict = attempt_verdict(overall_score(reward), 0.5, reward=reward)
+
+        assert verdict.passed is True
+        assert verdict.required_failure is None
+        assert verdict.security_clean is False
+        assert verdict.security_exempt is True
+
+
+def test_unscored_security_preserves_overall_verdict() -> None:
+    reward = _security_reward(0.0)
+    reward["details"]["security"] = {"status": "error"}
+
+    verdict = attempt_verdict(overall_score(reward), 0.5, reward=reward)
+
+    assert verdict.passed is True
+    assert verdict.security_clean is None
+    assert verdict.security_exempt is False
+
+
+def test_unsupported_security_exemption_survives_cases_needing_review_summary() -> None:
+    conclusions = _build_conclusions(
+        {
+            "codex": {
+                "with_skill": 0.8,
+                "trials": [
+                    {
+                        "entry_id": "unsupported-codex",
+                        "overall": 0.8,
+                        "required_check_data": {
+                            "security_score": 0.0,
+                            "security_message": "Unsupported native Codex exec wrapper could not be safely normalized",
+                            "security_exempt": True,
+                        },
+                    }
+                ],
+            }
+        },
+        [],
+        pass_threshold=0.5,
+    )
+
+    assert not any(item["title"] == "Cases needing review" for item in conclusions)
+
+
+def test_unsupported_security_exemption_survives_persisted_attempt_validation() -> None:
+    payload = {
+        "k": 1,
+        "pass_threshold": 0.5,
+        "stop_on_pass": False,
+        "passed_cases": 1,
+        "failed_cases": 0,
+        "total_cases": 1,
+        "rate": 1.0,
+        "attempts_used": 1,
+        "max_attempts_possible": 1,
+        "avg_attempts_used": 1.0,
+        "extra_cases": [],
+        "cases": {
+            "unsupported-codex": {
+                "passed": True,
+                "first_pass_attempt": 1,
+                "attempts_used": 1,
+                "attempts_skipped": 0,
+                "attempts_missing": 0,
+                "best_score": 0.8,
+                "attempts": [
+                    {
+                        "attempt": 1,
+                        "trial": "unsupported-codex__attempt1",
+                        "score": 0.8,
+                        "passed": True,
+                        "goal_accuracy": None,
+                        "reason": None,
+                        "required_failure": None,
+                        "security_score": 0.0,
+                        "security_clean": False,
+                        "security_message": "Unsupported native Codex exec wrapper could not be safely normalized",
+                        "security_exempt": True,
+                    }
+                ],
+            }
+        },
+    }
+
+    assert _legacy_pass_at_k_is_complete(payload, num_trials=1, require_scored_attempt=True)
+
+
+def test_behavior_check_failure_warns_without_gating_attempt() -> None:
+    reward = _reward(1, goal_accuracy=1.0)
+    reward["behavior_check"] = 0.5
+    reward["details"] = {
+        "behavior_check": {
+            "results": [
+                {"step": 1, "passed": True},
+                {"step": 2, "passed": False},
+                {"step": 3, "passed": False},
+            ]
+        }
+    }
+
+    verdict = attempt_verdict(overall_score(reward), 0.5, reward=reward)
+
+    assert verdict.passed is True
+    assert verdict.warnings == ("missed expected steps 2, 3 of 3 (behavior 0.50)",)
+
+
 def test_benchmark_reports_correct_answers_under_overall() -> None:
     lines: list[str] = []
     BenchmarkReporter._render_results_at_a_glance(
@@ -88,6 +264,29 @@ def test_benchmark_reports_correct_answers_under_overall() -> None:
                         "without_skill": {"correct": 7, "scored": 12},
                         "difference": 2,
                     },
+                    "required_checks": {
+                        "with_skill": {"passed": 9, "scored": 12},
+                        "without_skill": {"passed": 7, "scored": 12},
+                        "difference": 2,
+                    },
+                    "security_clean": {
+                        "with_skill": {"clean": 11, "scored": 12},
+                        "without_skill": {"clean": 9, "scored": 12},
+                        "difference": 2,
+                    },
+                    "pass_at_k": {
+                        "with_skill": {
+                            "cases": {
+                                "wrong-ground-truth": {
+                                    "passed": False,
+                                    "attempts_used": 1,
+                                    "best_score": 0.82,
+                                    "reason": "wrong answer (goal accuracy 0.00)",
+                                    "warnings": ["missed expected step 1 of 1 (behavior 0.00)"],
+                                }
+                            }
+                        }
+                    },
                 }
             }
         },
@@ -96,4 +295,106 @@ def test_benchmark_reports_correct_answers_under_overall() -> None:
 
     report = "\n".join(lines)
     assert "| Overall |" in report
+    assert "| Required checks passed | 9/12 \\| 7/12 \\| +2 |" in report
     assert "| Correct answers | 9/12 \\| 7/12 \\| +2 |" in report
+    assert "| Security clean | 11/12 \\| 9/12 \\| +2 |" in report
+    assert "| wrong-ground-truth | 0.82 | wrong answer (goal accuracy 0.00) |" in report
+    assert "missed expected step 1 of 1 (behavior 0.00)" in report
+
+
+def test_tier3_benchmark_callout_includes_required_failure_reason(monkeypatch) -> None:
+    monkeypatch.setattr(
+        "skillevaluator.reporting.benchmark.completed_agent_result",
+        lambda _payload: {
+            "verdict": "fail",
+            "reason": "1 of 2 cases failed required checks (1 wrong answer, 0 security)",
+            "name": "Codex",
+            "score": 0.82,
+            "lift": 0.2,
+            "needs_attention": False,
+            "recovered_attempts": 0,
+        },
+    )
+
+    report = BenchmarkReporter(report_scope="tier3").render_all([])
+
+    assert report.startswith(
+        "> **Tier 3 completed-agent result: FAIL** — 1 of 2 cases failed required checks (1 wrong answer, 0 security)"
+    )
+
+
+def test_quality_headline_fails_for_with_skill_required_check_failure_only() -> None:
+    agent = {
+        "with_skill": {
+            "security": 0.9,
+            "skill_execution": 0.9,
+            "skill_efficiency": 0.9,
+            "accuracy": 0.9,
+            "goal_accuracy": 0.9,
+            "behavior_check": 0.9,
+        },
+        "without_skill": {
+            "security": 0.2,
+            "skill_execution": 0.2,
+            "skill_efficiency": 0.2,
+            "accuracy": 0.2,
+            "goal_accuracy": 0.2,
+            "behavior_check": 0.2,
+        },
+        "execution_status": "succeeded",
+        "pass_with_skill": {
+            "required_checks": {"passed": 1, "scored": 2, "wrong_answer": 1, "security": 0},
+            "correct_answers": {"correct": 1, "scored": 2},
+            "security_clean": {"clean": 2, "scored": 2},
+        },
+        "pass_without_skill": {
+            "required_checks": {"passed": 2, "scored": 2, "wrong_answer": 0, "security": 0},
+            "correct_answers": {"correct": 2, "scored": 2},
+            "security_clean": {"clean": 2, "scored": 2},
+        },
+    }
+    payload = build_agent_eval_payload("demo", {"codex": agent})
+
+    assert payload is not None
+    assert payload["overall_lift"] > 0
+    assert payload["verdict"] == "fail"
+    assert payload["verdict_reason"] == "1 of 2 cases failed required checks (1 wrong answer, 0 security)"
+    assert payload["required_checks"]["with_skill"] == {
+        "passed": 1,
+        "scored": 2,
+        "wrong_answer": 1,
+        "security": 0,
+    }
+
+
+def test_no_skill_only_required_check_failure_does_not_fail_headline() -> None:
+    agent = {
+        "with_skill": {
+            "security": 0.9,
+            "skill_execution": 0.9,
+            "skill_efficiency": 0.9,
+            "accuracy": 0.9,
+            "goal_accuracy": 0.9,
+            "behavior_check": 0.9,
+        },
+        "without_skill": {
+            "security": 0.2,
+            "skill_execution": 0.2,
+            "skill_efficiency": 0.2,
+            "accuracy": 0.2,
+            "goal_accuracy": 0.2,
+            "behavior_check": 0.2,
+        },
+        "execution_status": "succeeded",
+        "pass_with_skill": {
+            "required_checks": {"passed": 2, "scored": 2, "wrong_answer": 0, "security": 0},
+        },
+        "pass_without_skill": {
+            "required_checks": {"passed": 1, "scored": 2, "wrong_answer": 1, "security": 0},
+        },
+    }
+    payload = build_agent_eval_payload("demo", {"codex": agent})
+
+    assert payload is not None
+    assert payload["verdict"] == "pass"
+    assert payload["verdict_reason"] is None

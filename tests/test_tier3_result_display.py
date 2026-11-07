@@ -47,6 +47,56 @@ def test_overall_lift_headline_preserves_signed_persisted_value_and_original_tab
     assert result == original
 
 
+def test_required_check_verdict_precedes_counts_and_positive_lift_is_reference() -> None:
+    result = {
+        "execution_status": "succeeded",
+        "agents": {
+            "codex": {
+                "execution_status": "succeeded",
+                "lift": {"overall": {"with_skill": 0.8, "without_skill": 0.6, "delta": 0.2}},
+                "pass_at_k": {
+                    "with_skill": {
+                        "required_checks": {"passed": 1, "scored": 2, "wrong_answer": 1, "security": 0},
+                        "correct_answers": {"correct": 1, "scored": 2},
+                        "security_clean": {"clean": 2, "scored": 2},
+                        "cases": {
+                            "wrong-case": {
+                                "passed": False,
+                                "attempts_used": 1,
+                                "best_score": 0.82,
+                                "attempt_details_total": 1,
+                                "attempt_details_shown": 0,
+                                "reason": "wrong answer (goal accuracy 0.00)",
+                                "warnings": ["missed expected step 1 of 1 (behavior 0.00)"],
+                                "attempts": [],
+                            }
+                        },
+                    },
+                    "without_skill": {
+                        "required_checks": {"passed": 2, "scored": 2, "wrong_answer": 0, "security": 0},
+                        "correct_answers": {"correct": 2, "scored": 2},
+                        "security_clean": {"clean": 2, "scored": 2},
+                        "cases": {},
+                    },
+                },
+            }
+        },
+    }
+
+    output = render_result(result)
+
+    assert "QUALITY VERDICT: FAIL — 1 of 2 cases failed required checks (1 wrong answer, 0 security)" in output
+    assert "OVERALL SKILL LIFT (for reference)" in output
+    assert "REQUIRED CHECKS PASSED   1/2 | 2/2 | -1" in output
+    assert "CORRECT ANSWERS   1/2 | 2/2 | -1" in output
+    assert "SECURITY CLEAN   2/2 | 2/2 | +0" in output
+    assert "FAIL: wrong answer (goal accuracy 0.00)" in output
+    assert "WARNING: missed expected step 1 of 1 (behavior 0.00)" in output
+    assert "0.82" in output
+    assert output.index("QUALITY VERDICT") < output.index("REQUIRED CHECKS PASSED")
+    assert output.index("SECURITY CLEAN") < output.index("With Skill")
+
+
 @pytest.mark.parametrize(
     "change",
     [

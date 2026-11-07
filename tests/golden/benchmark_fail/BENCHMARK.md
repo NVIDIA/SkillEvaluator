@@ -39,7 +39,9 @@ The three-tier evaluation checks whether the skill:
 | Measure | Claude Code (Baseline → Skill Uplift) | Codex (Baseline → Skill Uplift) |
 |---|---:|---:|
 | Overall | 72.0% → 31.0% (-41.0 points) | 65.0% → 38.0% (-27.0 points) |
+| Required checks passed | N/A | N/A |
 | Correct answers | N/A | N/A |
+| Security clean | N/A | N/A |
 | Security | 72.0% → 31.0% (-41.0 points) | 65.0% → 38.0% (-27.0 points) |
 | Correctness | 72.0% → 31.0% (-41.0 points) | 65.0% → 38.0% (-27.0 points) |
 | Discoverability | 72.0% → 31.0% (-41.0 points) | 65.0% → 38.0% (-27.0 points) |

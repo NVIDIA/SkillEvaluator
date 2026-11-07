@@ -21,6 +21,7 @@ from rich.table import Table
 from rich.text import Text
 
 from skillevaluator.reporting.terminal_styles import AMBER, FAINT, GREEN, RED, TEXT, lift_style
+from skillevaluator.tier3.attempt_verdict import required_check_failure_reason
 from skillevaluator.tier3.harbor.metrics import (
     CUSTOM_ONLY_METRIC_SET,
     DEFAULT_METRIC_SET,
@@ -609,6 +610,13 @@ def _render_agent_scores(
         )
     else:
         headlines = []
+        pass_at_k = data.get("pass_at_k")
+        with_pass = pass_at_k.get("with_skill") if isinstance(pass_at_k, Mapping) else None
+        without_pass = pass_at_k.get("without_skill") if isinstance(pass_at_k, Mapping) else None
+        required_checks = with_pass.get("required_checks") if isinstance(with_pass, Mapping) else None
+        verdict_reason = required_check_failure_reason(required_checks)
+        if verdict_reason:
+            headlines.append(Text(f"QUALITY VERDICT: FAIL — {safe(verdict_reason)}", style=f"bold {RED}"))
         if (
             with_usable
             and baseline_usable
@@ -616,30 +624,42 @@ def _render_agent_scores(
                 _finite_number(value) is not None for value in (with_overall, baseline_overall, overall.get("delta"))
             )
         ):
-            headline = Text("OVERALL SKILL LIFT   ", style="bold")
+            lift_label = "OVERALL SKILL LIFT"
+            if verdict_reason and _finite_number(overall.get("delta")) is not None and overall["delta"] > 0:
+                lift_label += " (for reference)"
+            headline = Text(f"{lift_label}   ", style="bold")
             headline.append_text(_delta_cell(overall["delta"]))
             agents = result.get("agents")
             if isinstance(agents, Mapping) and len(agents) > 1:
                 headline.append(f" · {safe(agent)}", style="dim")
             headlines.append(headline)
-        pass_at_k = data.get("pass_at_k")
-        with_pass = pass_at_k.get("with_skill") if isinstance(pass_at_k, Mapping) else None
-        without_pass = pass_at_k.get("without_skill") if isinstance(pass_at_k, Mapping) else None
-        with_answers = with_pass.get("correct_answers") if isinstance(with_pass, Mapping) else None
-        without_answers = without_pass.get("correct_answers") if isinstance(without_pass, Mapping) else None
-        if isinstance(with_answers, Mapping) and isinstance(without_answers, Mapping):
+        for label, field, numerator in (
+            ("REQUIRED CHECKS PASSED", "required_checks", "passed"),
+            ("CORRECT ANSWERS", "correct_answers", "correct"),
+            ("SECURITY CLEAN", "security_clean", "clean"),
+        ):
+            with_counts = with_pass.get(field) if isinstance(with_pass, Mapping) else None
+            without_counts = without_pass.get(field) if isinstance(without_pass, Mapping) else None
             counts = (
-                with_answers.get("correct"),
-                with_answers.get("scored"),
-                without_answers.get("correct"),
-                without_answers.get("scored"),
+                (
+                    with_counts.get(numerator),
+                    with_counts.get("scored"),
+                    without_counts.get(numerator),
+                    without_counts.get("scored"),
+                )
+                if isinstance(with_counts, Mapping) and isinstance(without_counts, Mapping)
+                else ()
             )
-            if all(isinstance(count, int) and not isinstance(count, bool) and count >= 0 for count in counts):
+            line = Text(f"{label}   ", style="bold")
+            if len(counts) == 4 and all(
+                isinstance(count, int) and not isinstance(count, bool) and count >= 0 for count in counts
+            ):
                 difference = counts[0] - counts[2] if counts[1] and counts[3] else None
-                line = Text("CORRECT ANSWERS   ", style="bold")
                 delta = f"{difference:+d}" if difference is not None else "N/A"
                 line.append(f"{counts[0]}/{counts[1]} | {counts[2]}/{counts[3]} | {delta}")
-                headlines.append(line)
+            else:
+                line.append("N/A")
+            headlines.append(line)
         if headlines:
             content = Group(*headlines, Text(""), table)
     console.print(

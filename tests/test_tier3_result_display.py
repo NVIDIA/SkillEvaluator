@@ -115,7 +115,7 @@ def test_overall_lift_headline_is_per_agent_and_highlighted_without_a_background
         assert headline.plain == f"OVERALL SKILL LIFT   {delta:+.2f} · {name}"
         style = headline.get_style_at_offset(console, headline.plain.index(f"{delta:+.2f}"))
         assert style.bold
-        assert style.color.name == ("green" if delta > 0 else "red")
+        assert style.color.name == ("#76b900" if delta > 0 else "#f5524c")
         assert style.bgcolor is None
 
 
@@ -1206,3 +1206,22 @@ def test_result_panel_title_cannot_inject_rich_markup_or_links() -> None:
 
     assert "evil.example" in stream.getvalue()
     assert "\x1b]8;" not in stream.getvalue()
+
+
+def test_standalone_result_displays_all_normalized_harbor_links():
+    result = {
+        "execution_status": "succeeded",
+        "harbor_viewer": {
+            "jobs": [
+                {"url": "https://example.test/a", "analysis_url": "https://example.test/analysis", "name": "[bad]"},
+                {"url": "https://example.test/b"},
+            ]
+        },
+    }
+    original = deepcopy(result)
+    output = render_result(result)
+    assert "https://example.test/a" in output
+    assert "https://example.test/b" in output
+    assert "https://example.test/analysis" in output
+    assert "Job 2" in output
+    assert result == original

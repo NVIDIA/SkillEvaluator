@@ -10,10 +10,11 @@ from html import unescape
 from pathlib import Path
 
 import pytest
-from ci.native_reports import _trusted_inline_code, constrain_native_html, render_native_reports
+from ci.native_reports import _InlineCode, _trusted_inline_code, constrain_native_html, render_native_reports
 from ci.run_tier1 import _summary
 
 from skillevaluator.models import Finding, ValidationResult
+from skillevaluator.reporting.html import HTMLReporter
 from skillevaluator.reporting.json_reporter import JSONReporter
 
 
@@ -445,3 +446,16 @@ def test_runtime_retains_public_json_and_regenerates_each_native_tier(tmp_path, 
         assert retained["status"] == "incomplete"
     else:
         assert retained["metrics"]["findings"] == 1
+
+
+def test_native_tier_navigation_remains_within_static_trusted_code():
+    document = HTMLReporter(requested_tiers=(1,), displayed_tiers=(1, 2, 3)).render_all(
+        [ValidationResult(validator_name="Schema")]
+    )
+    parser = _InlineCode()
+    parser.feed(document)
+    assert set(parser.handlers + parser.scripts) <= _trusted_inline_code()
+    constrained = constrain_native_html(document)
+    for tier in (1, 2, 3):
+        assert f'href="#tab-tier{tier}" data-report-tier="tier{tier}"' in constrained
+        assert f'data-target-tab="tier{tier}"' in constrained

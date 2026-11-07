@@ -67,6 +67,13 @@ _NEGATIVE_CONTROL_SEMANTIC_PATTERNS = (
 )
 
 
+_WEAKENING_PATTERN = re.compile(
+    r"\b(?:loosen|relax|weaken|lower|soften)\w*\b.{0,40}"
+    r"\b(?:expect\w*|assertions?|ground[\s_-]*truth|pass[\s_-]*threshold|threshold|requirements?|criteria)\b",
+    re.IGNORECASE,
+)
+
+
 _SYSTEM_PROMPT = """\
 You are an expert Skill Quality Reviewer summarising a Tier 3 (live agent)
 evaluation of an Agent Skill.
@@ -128,6 +135,14 @@ an error message, or a comparison).
 RECOMMENDATIONS (up to {max_recommendations}): concrete, actionable next
 steps for the skill author. Each must be one short imperative sentence.
 Tag each with a category from this set: {categories}.
+- Make each recommendation a distinct action; do not restate a
+  deterministic recommendation or another recommendation in other words.
+- Never recommend loosening, relaxing, or lowering an expectation,
+  assertion, ground truth, or pass threshold so that a failing agent passes.
+- Recommend a different agent or model only when the supplied trials compare
+  agents; otherwise phrase it as an experiment to try ("Try ... to test
+  whether ..."). Phrase any cause the evidence does not establish the same
+  way.
 
 SEVERITY: tag every conclusion and recommendation with one of:
 - \"pass\"   - positive observation / low-effort recommendation
@@ -439,6 +454,14 @@ def _text_case_ids(text: str, known_case_ids: set[str]) -> set[str]:
     return references
 
 
+def _weakens_requirements(text: str) -> bool:
+    return bool(_WEAKENING_PATTERN.search(text))
+
+
+def _normalized_text(text: object) -> str:
+    return " ".join(str(text or "").lower().split())
+
+
 def _has_negative_control_semantics(text: str) -> bool:
     return any(pattern.search(text) for pattern in _NEGATIVE_CONTROL_SEMANTIC_PATTERNS)
 
@@ -562,6 +585,8 @@ class InsightsJudge(LLMClient):
                 }
             )
 
+        deterministic = kwargs.get("deterministic") if isinstance(kwargs.get("deterministic"), dict) else {}
+        seen_messages = {_normalized_text(text) for text in deterministic.get("suggestions") or []}
         recommendations: list[dict] = []
         for item in (data.get("recommendations") or [])[:INSIGHTS_JUDGE_MAX_RECOMMENDATIONS]:
             if not isinstance(item, dict):
@@ -572,6 +597,11 @@ class InsightsJudge(LLMClient):
             message = (item.get("message") or "").strip()
             if not title and not message:
                 continue
+            if _weakens_requirements(f"{title} {message}"):
+                continue
+            if (key := _normalized_text(message or title)) in seen_messages:
+                continue
+            seen_messages.add(key)
             recommendations.append(
                 {
                     "claim_type": item["claim_type"],

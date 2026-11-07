@@ -811,7 +811,10 @@ Both paths speak the same dialect: standalone `tier3 evaluate` and
 `validate --tier3` share one HTML renderer for `report.html`, and both embed
 the Tier 3 payload at schema version `2.0`. In that payload, conclusions and
 recommendations written by the LLM carry `source: "llm"` and name the model
-that wrote them as `model`. For a Claude 5.5 or later model on the native
+that wrote them as `model`. LLM recommendations that restate a deterministic
+one, or that loosen an expectation, assertion, ground truth, or pass threshold,
+are dropped, and LLM suggestions keep only evidence references the run
+recorded. For a Claude 5.5 or later model on the native
 Claude API this is the model the reply names, which can be the server-side
 refusal fallback model rather than the configured model. Otherwise it is the
 configured model, unless a server-side `fallback` block in the reply names

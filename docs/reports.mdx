@@ -90,6 +90,10 @@ publication eligibility. Standalone Tier 3 reports show **Not assessed (Tier 3
 only)**. **Best agent score** describes one evaluated agent, rather than approval
 of the whole validation run.
 
+When one of several Tier 3 agents fails, the run fails, and a score shown for
+it belongs to one completed agent; see
+[Completed agents in an incomplete run](#completed-agents-in-an-incomplete-run).
+
 Each tier counts its own passed, failed, incomplete, skipped, and N/A results.
 Skipped and explicitly inapplicable checks are excluded from executed-check
 denominators. A tier that produced no results is **Not run**; presentation of an
@@ -104,42 +108,6 @@ no counters show **retained rows**, which are observations rather than complete
 scored totals. Preview limits and physical retry rows do not replace recorded
 attempt counts. These are display projections; canonical JSON and evaluation
 payloads are unchanged.
-
-### Completed agents in an incomplete run
-
-When you evaluate several agents and one of them fails, the Tier 3 run fails.
-The run's `execution_status` is `failed`, the payload's whole-run
-`summary.overall_score` is `null`, and the publication assessment does not
-change: one agent's result cannot stand for the whole run. The reports still
-show the result of the run's best agent when its evidence is complete. The best
-agent is the successful agent with the highest with-skill score; an agent that
-never activated the skill is chosen only when no other successful agent has a
-score.
-
-- The HTML Tier 3 hero shows that agent's score and the warning
-  **Completed-agent result. Other execution failures need attention**. The
-  overview's score card reads **Completed Agent Score**.
-- `tier3-benchmark.md` names the agent and gives its score and, when its
-  baseline is comparable, its lift, followed by **Needs attention: other
-  execution failures remain**. In a `validate` run, `BENCHMARK.md` shows the
-  same lines under its unchanged overall verdict.
-- When `--stop-on-pass` recovered an agent timeout with a later scored attempt,
-  both reports give the number of recovered attempts. The timed-out attempts
-  stay in the failure history and are not scored.
-
-In a standalone report, the Tier 3 verdict chip and the **Quality Verdict** card
-show that agent's own dimension verdict. They describe one agent, not the run.
-
-The evidence is complete when the agent succeeded with no execution errors, has
-a with-skill score from 0 to 1, and scored every expected attempt of every case
-in each arm. `tier3-benchmark.md` shows lift only when the baseline arm also
-succeeded and used the same metric set; after `--skip-baseline`, it shows the
-score without a baseline or lift. If the best agent's evidence is incomplete,
-the reports do not fall back to another agent. When no agent qualifies, for
-example because every agent failed or the agents were scored on different
-metric sets, no completed-agent score is shown and `tier3-benchmark.md` reads
-**Tier 3: No complete agent result**. To get a whole-run result, fix and rerun
-the failed agent.
 
 ## File naming
 
@@ -754,6 +722,42 @@ These uncertainty fields describe the cases in one configured run. They do not
 make heterogeneous cases independent, correct dataset leakage, or promote a
 small p-value into proof that a skill generalizes. Keep the dataset, attempt
 policy, agent, model, and environment fixed when interpreting them.
+
+### Completed agents in an incomplete run
+
+When you evaluate several agents and one of them fails, the Tier 3 run fails.
+The run's `execution_status` is `failed`, the payload's whole-run
+`summary.overall_score` is `null`, and the publication assessment does not
+change: one agent's result cannot stand for the whole run. The reports still
+show the result of the run's best agent when its evidence is complete. The best
+agent is the successful agent with the highest with-skill score; an agent that
+never activated the skill is chosen only when no other successful agent has a
+score.
+
+- The HTML Tier 3 hero shows that agent's score and the warning
+  **Completed-agent result. Other execution failures need attention**. The
+  overview's score card reads **Completed Agent Score**.
+- `tier3-benchmark.md` names the agent and gives its score and, when its
+  baseline is comparable, its lift, followed by **Needs attention: other
+  execution failures remain**. In a `validate` run, `BENCHMARK.md` shows the
+  same lines under its unchanged overall verdict.
+- When `--stop-on-pass` recovered an agent timeout with a later scored attempt,
+  both reports give the number of recovered attempts. The timed-out attempts
+  stay in the failure history and are not scored.
+
+In a standalone report, the Tier 3 verdict chip and the **Quality Verdict** card
+show that agent's own dimension verdict. They describe one agent, not the run.
+
+The evidence is complete when the agent succeeded with no execution errors, has
+a with-skill score from 0 to 1, and scored every expected attempt of every case
+in each arm. `tier3-benchmark.md` shows lift only when the baseline arm also
+succeeded and used the same metric set; after `--skip-baseline`, it shows the
+score without a baseline or lift. If the best agent's evidence is incomplete,
+the reports do not fall back to another agent. When no agent qualifies, for
+example because every agent failed or the agents were scored on different
+metric sets, no completed-agent score is shown and `tier3-benchmark.md` reads
+**Tier 3: No complete agent result**. To get a whole-run result, fix and rerun
+the failed agent.
 
 ## Browse results
 

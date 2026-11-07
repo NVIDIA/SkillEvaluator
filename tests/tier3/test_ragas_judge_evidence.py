@@ -1,0 +1,347 @@
+# SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+# SPDX-License-Identifier: Apache-2.0
+
+"""RAGAS goal_accuracy requests and replies are saved as judge evidence, like the prompt judges' attempts.
+
+The RAGAS modules are fakes, but their requests go through the real OpenAI SDK
+and httpx client; a stubbed httpx transport answers them, so nothing leaves the
+machine.
+"""
+
+from __future__ import annotations
+
+import json
+import logging
+import sys
+from collections.abc import Iterator
+from contextlib import contextmanager
+from pathlib import Path
+from types import ModuleType, SimpleNamespace
+from typing import Any
+
+import httpx
+import openai
+import pytest
+from tests.conftest import load_harbor_eval_template
+
+_OPENAI_TEST_KEY = "test-key-fake"
+_CHAT_URL = "https://api.openai.com/v1/chat/completions"
+_JUDGE_MESSAGES = [{"role": "user", "content": "judge"}]
+_ACCURACY_REPLY = json.dumps(
+    {
+        "criteria": {
+            "ACTION_CORRECT": True,
+            "FACTUALLY_ACCURATE": True,
+            "TASK_ADDRESSED": True,
+            "ACTIONABLE": True,
+            "FORMAT_FOLLOWED": True,
+        },
+        "reason": "judged from evidence",
+    }
+)
+
+
+@pytest.fixture
+def verifier(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> ModuleType:
+    """Load the verifier with a canonical OpenAI non-reasoning judge, which routes goal_accuracy to RAGAS."""
+    module = load_harbor_eval_template(f"harbor_eval_ragas_evidence_{tmp_path.name}")
+    agent_dir = tmp_path / "logs" / "agent"
+    verifier_dir = tmp_path / "logs" / "verifier"
+    tests_dir = tmp_path / "tests"
+    for directory in (agent_dir, verifier_dir, tests_dir):
+        directory.mkdir(parents=True)
+    module.VERIFIER_DIR = verifier_dir
+    module.ATIF_PATH = agent_dir / "trajectory.json"
+    module.ENTRY_PATH = tests_dir / "entry.json"
+    module.REWARD_JSON = verifier_dir / "reward.json"
+    module.REWARD_TXT = verifier_dir / "reward.txt"
+    module.SKILL_EVALUATOR_REWARD_JSON = verifier_dir / "skill_evaluator_reward.json"
+
+    monkeypatch.setenv("SKILL_EVAL_LLM_PROVIDER", "openai")
+    monkeypatch.setenv("OPENAI_API_KEY", _OPENAI_TEST_KEY)
+    monkeypatch.setenv("LLM_JUDGE_MODEL", "gpt-4.1")
+    for name in (
+        "SKILL_EVAL_JUDGE_MODEL",
+        "SKILL_EVAL_LLM_MODEL",
+        "LLM_JUDGE_FALLBACK_MODELS",
+        "LLM_JUDGE_FALLBACK_POLICY",
+        "LLM_JUDGE_RETRY_POLICY",
+        "OPENAI_BASE_URL",
+        "SKILL_EVAL_LLM_BASE_URL",
+        # Character facts select the prompt goal judge instead of RAGAS.
+        "SKILL_EVAL_JUDGE_CHARACTER_FACTS",
+    ):
+        monkeypatch.delenv(name, raising=False)
+    assert module._ragas_goal_accuracy_enabled()
+    return module
+
+
+def _install_ragas(
+    monkeypatch: pytest.MonkeyPatch, *, messages: list[dict[str, Any]] | None = None, score: float = 1.0
+) -> None:
+    """Install the RAGAS 0.4 modules the verifier imports; the metric sends one request through the OpenAI SDK."""
+
+    class Message:
+        def __init__(self, *, content: str):
+            self.content = content
+
+    class Metric:
+        def __init__(self, *, llm):
+            self.llm = llm
+
+        async def ascore(self, **_kwargs):
+            await self.llm.client.chat.completions.create(model=self.llm.model, messages=messages or _JUDGE_MESSAGES)
+            return SimpleNamespace(value=score)
+
+    modules = {
+        name: ModuleType(name)
+        for name in (
+            "ragas",
+            "ragas.llms",
+            "ragas.llms.base",
+            "ragas.messages",
+            "ragas.metrics",
+            "ragas.metrics.collections",
+        )
+    }
+    modules["ragas.llms.base"].llm_factory = lambda model, *, client: SimpleNamespace(model=model, client=client)
+    modules["ragas.messages"].AIMessage = Message
+    modules["ragas.messages"].HumanMessage = Message
+    modules["ragas.metrics.collections"].AgentGoalAccuracyWithReference = Metric
+    for name, module in modules.items():
+        monkeypatch.setitem(sys.modules, name, module)
+
+
+def _chat_reply(content: str) -> dict[str, Any]:
+    return {
+        "id": "chatcmpl-test",
+        "object": "chat.completion",
+        "created": 0,
+        "model": "gpt-4.1",
+        "choices": [{"index": 0, "message": {"role": "assistant", "content": content}, "finish_reason": "stop"}],
+    }
+
+
+class _CutOffBody(httpx.AsyncByteStream):
+    """A reply body that stops partway, as when the connection drops mid-reply."""
+
+    async def __aiter__(self):
+        yield b'{"choices":['
+        raise httpx.RemoteProtocolError("peer closed connection without sending complete message body")
+
+
+def _stub_provider(monkeypatch: pytest.MonkeyPatch, replies: list[Any]) -> list[httpx.Request]:
+    """Answer async httpx requests in order: an error status, "cut-off", or a 200 JSON body."""
+    received: list[httpx.Request] = []
+
+    async def handle_async_request(_transport, request: httpx.Request) -> httpx.Response:
+        received.append(request)
+        reply = replies[min(len(received) - 1, len(replies) - 1)]
+        if reply == "cut-off":
+            return httpx.Response(200, headers={"content-type": "application/json"}, stream=_CutOffBody())
+        if isinstance(reply, int):
+            # The provider echoes the key, so the saved problem must be redacted.
+            error = {"error": {"message": f"temporary outage for {_OPENAI_TEST_KEY}", "type": "server_error"}}
+            return httpx.Response(reply, headers={"retry-after-ms": "1"}, json=error)
+        return httpx.Response(200, json=reply)
+
+    monkeypatch.setattr(httpx.AsyncHTTPTransport, "handle_async_request", handle_async_request)
+    return received
+
+
+@contextmanager
+def _judge_evidence(verifier: ModuleType) -> Iterator[None]:
+    """Collect judge evidence the way main() does while it runs the judges."""
+    token = verifier._ACTIVE_JUDGE_EVIDENCE.set([])
+    try:
+        yield
+    finally:
+        verifier._ACTIVE_JUDGE_EVIDENCE.reset(token)
+
+
+def _attempts(verifier: ModuleType) -> list[dict[str, Any]]:
+    payload = json.loads((verifier.VERIFIER_DIR / "judge_attempts.json").read_text(encoding="utf-8"))
+    assert payload["judge_contract"] == verifier.JUDGE_CONTRACT
+    return payload["attempts"]
+
+
+def test_ragas_request_and_reply_are_saved_redacted(verifier: ModuleType, monkeypatch: pytest.MonkeyPatch) -> None:
+    leaked = "nvapi-" + "s" * 40
+    _install_ragas(
+        monkeypatch,
+        messages=[
+            {"role": "system", "content": "Compare the end state with the reference."},
+            {"role": "user", "content": f"The agent printed {leaked}"},
+        ],
+    )
+    received = _stub_provider(monkeypatch, [_chat_reply(f"achieved; the agent used {_OPENAI_TEST_KEY}")])
+
+    with _judge_evidence(verifier):
+        result = verifier._call_required_judge(
+            "goal_accuracy", verifier.judge_goal_accuracy, "question", "expected", "agent answer"
+        )
+
+    assert (result["score"], result["method"]) == (1.0, "ragas")
+    assert [str(request.url) for request in received] == [_CHAT_URL]
+    exchange, outcome = _attempts(verifier)
+    assert (exchange["metric"], exchange["attempt"], exchange["method"], exchange["status"]) == (
+        "goal_accuracy",
+        1,
+        "ragas",
+        "replied",
+    )
+    assert exchange["model"] == "gpt-4.1"
+    assert exchange["problem"] is None
+    assert exchange["prompt"].startswith(
+        "[system]\nCompare the end state with the reference.\n\n[user]\nThe agent printed "
+    )
+    assert len(exchange["prompt_sha256"]) == 64
+    assert exchange["reply"].startswith("achieved; the agent used ")
+    assert (outcome["method"], outcome["status"], outcome["score"]) == ("ragas", "accepted", 1.0)
+    assert "prompt" not in outcome
+    assert "reply" not in outcome
+    saved = (verifier.VERIFIER_DIR / "judge_attempts.json").read_text(encoding="utf-8")
+    assert leaked not in saved
+    assert _OPENAI_TEST_KEY not in saved
+
+
+def test_ragas_reply_behind_a_rejected_score_is_saved(verifier: ModuleType, monkeypatch: pytest.MonkeyPatch) -> None:
+    _install_ragas(monkeypatch, score=0.5)
+    _stub_provider(monkeypatch, [_chat_reply("ok")])
+    custom = {"score": 0.0, "reason": "custom judgment", "method": "custom"}
+    monkeypatch.setattr(verifier, "_judge_goal_accuracy_custom", lambda *_args, **_kwargs: custom)
+
+    with _judge_evidence(verifier):
+        assert verifier.judge_goal_accuracy("question", "expected", "agent answer") == custom
+
+    exchange, failure = _attempts(verifier)
+    assert (exchange["status"], exchange["prompt"], exchange["reply"]) == ("replied", "[user]\njudge", "ok")
+    assert (failure["method"], failure["status"], failure["model"]) == ("ragas", "error", "gpt-4.1")
+    assert "non-binary" in failure["problem"]
+
+
+@pytest.mark.parametrize(
+    ("first_reply", "problem"),
+    [(503, "HTTP 503: "), ("cut-off", "the reply was not received (RemoteProtocolError)")],
+    ids=["http-error", "cut-off"],
+)
+def test_failed_ragas_provider_replies_are_saved_with_their_prompt(
+    verifier: ModuleType, monkeypatch: pytest.MonkeyPatch, first_reply: Any, problem: str
+) -> None:
+    _install_ragas(monkeypatch)
+    received = _stub_provider(monkeypatch, [first_reply, _chat_reply("ok")])
+
+    with _judge_evidence(verifier):
+        result = verifier.judge_goal_accuracy("question", "expected", "agent answer")
+
+    assert (result["score"], result["method"]) == (1.0, "ragas")
+    assert len(received) == 2
+    failed, exchange, outcome = _attempts(verifier)
+    assert (failed["method"], failed["status"], failed["prompt"]) == ("ragas", "error", "[user]\njudge")
+    assert failed["problem"].startswith(problem)
+    assert _OPENAI_TEST_KEY not in failed["problem"]
+    assert "reply" not in failed
+    assert [exchange["status"], outcome["status"]] == ["replied", "accepted"]
+
+
+def test_ragas_evidence_reads_every_request_message_and_tool_call_replies(verifier: ModuleType) -> None:
+    request = {
+        "model": "judge-model",
+        "messages": [
+            {"role": "system", "content": "rubric"},
+            {"role": "user", "content": [{"type": "text", "text": "conversation"}]},
+        ],
+    }
+    tool_reply = {
+        "choices": [
+            {
+                "message": {
+                    "role": "assistant",
+                    "content": None,
+                    "tool_calls": [
+                        {"type": "function", "function": {"name": "Verdict", "arguments": '{"verdict": 1}'}}
+                    ],
+                }
+            }
+        ]
+    }
+
+    assert verifier._ragas_request_text(json.dumps(request).encode()) == (
+        "judge-model",
+        '[system]\nrubric\n\n[user]\n[{"type": "text", "text": "conversation"}]',
+    )
+    assert verifier._ragas_request_text(b"not a chat request") == (None, "not a chat request")
+    assert verifier._ragas_reply_text(json.dumps(tool_reply).encode()) == '{"verdict": 1}'
+    assert verifier._ragas_reply_text(json.dumps(_chat_reply("ok")).encode()) == "ok"
+    assert verifier._ragas_reply_text(b"not a chat completion") == "not a chat completion"
+
+
+@pytest.mark.parametrize("broken", ["request-parser", "http-client"])
+def test_ragas_evidence_failure_never_changes_the_score(
+    verifier: ModuleType, monkeypatch: pytest.MonkeyPatch, caplog: pytest.LogCaptureFixture, broken: str
+) -> None:
+    _install_ragas(monkeypatch)
+    received = _stub_provider(monkeypatch, [_chat_reply("ok")])
+
+    def fail(*_args: Any, **_kwargs: Any):
+        raise RuntimeError(f"evidence code failed for {_OPENAI_TEST_KEY}")
+
+    if broken == "request-parser":
+        monkeypatch.setattr(verifier, "_ragas_request_text", fail)
+    else:
+        monkeypatch.setattr(openai, "DefaultAsyncHttpxClient", fail)
+
+    with caplog.at_level(logging.WARNING, logger=verifier.logger.name), _judge_evidence(verifier):
+        result = verifier.judge_goal_accuracy("question", "expected", "agent answer")
+
+    assert (result["score"], result["method"]) == (1.0, "ragas")
+    assert len(received) == 1
+    warnings = [record.getMessage() for record in caplog.records if record.levelno == logging.WARNING]
+    assert warnings == ["Could not save RAGAS judge evidence: RuntimeError"]
+    (outcome,) = _attempts(verifier)
+    assert (outcome["method"], outcome["status"], outcome["score"]) == ("ragas", "accepted", 1.0)
+
+
+def test_judge_deadline_is_not_swallowed_by_the_ragas_evidence_hook(
+    verifier: ModuleType, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    def deadline(*_args: Any, **_kwargs: Any):
+        raise TimeoutError("LLM judge time budget exhausted")
+
+    monkeypatch.setattr(verifier, "_record_judge_attempt", deadline)
+    request = httpx.Request("POST", _CHAT_URL, json={"model": "gpt-4.1", "messages": _JUDGE_MESSAGES})
+    response = httpx.Response(200, json=_chat_reply("ok"), request=request)
+
+    with pytest.raises(TimeoutError):
+        verifier._record_ragas_exchange(response)
+
+
+def test_verifier_run_saves_ragas_exchanges_with_the_other_judges(
+    verifier: ModuleType, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    verifier.ATIF_PATH.write_text(
+        json.dumps({"steps": [{"source": "agent", "message": "I completed the task."}]}), encoding="utf-8"
+    )
+    verifier.ENTRY_PATH.write_text(
+        json.dumps({"id": "case-1", "has_skill": False, "question": "Complete the task", "ground_truth": "Done"}),
+        encoding="utf-8",
+    )
+    _install_ragas(monkeypatch)
+    _stub_provider(monkeypatch, [_chat_reply("ok")])
+    verifier.call_public_llm = lambda _prompt, **_kwargs: (_ACCURACY_REPLY, None)
+    verifier._call_public_llm_with_provenance = lambda _prompt, **_kwargs: (
+        _ACCURACY_REPLY,
+        None,
+        {"provider": "openai", "model": "gpt-4.1"},
+    )
+
+    verifier.main()
+
+    rich = json.loads(verifier.SKILL_EVALUATOR_REWARD_JSON.read_text(encoding="utf-8"))
+    assert rich["goal_accuracy"] == 1.0
+    assert rich["details"]["goal_accuracy"]["method"] == "ragas"
+    assert [(attempt["metric"], attempt["method"], attempt["status"]) for attempt in _attempts(verifier)] == [
+        ("accuracy", "llm", "accepted"),
+        ("goal_accuracy", "ragas", "replied"),
+        ("goal_accuracy", "ragas", "accepted"),
+    ]

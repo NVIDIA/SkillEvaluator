@@ -766,7 +766,8 @@ def evaluate(
             multi_model_agents = sorted(agent for agent, models in agent_models.items() if len(models) != 1)
             if multi_model_agents:
                 capability_errors.append(
-                    "--backend nemo-gym runs one --agent-model per agent; got several for " + ", ".join(multi_model_agents)
+                    "--backend nemo-gym runs one --agent-model per agent; got several for "
+                    + ", ".join(multi_model_agents)
                 )
             if capability_errors:
                 raise ValueError("; ".join(capability_errors))

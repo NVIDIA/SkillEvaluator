@@ -466,11 +466,11 @@ modes. Unset flags fall back to these `evals/config.yml` keys, as on Harbor:
 `--harbor-keep-jobs`, `--copy-repo`, `--agent-runtime-preflight`, `--override-storage-mb`,
 `--timeout-multiplier`, `--environment-kwarg`, custom Dockerfile modes other than the
 default, and the config keys `harbor.base_image_mode` (reuse/rebuild),
-`task_source: native_harbor`, `agent_workdir`, `pre_agent_setup`, `setup_commands`,
-`passthrough_env`, `timeout_multiplier`, `resources.storage_mb` and
-`skill_workspace.decoy_manifest`, whether set by flag or config, before anything
+`task_source: native_harbor`, `agent_workdir`, `pre_agent_setup` (alias `setup_commands`),
+`timeout_multiplier`, `resources.storage_mb` and `skill_workspace.decoy_manifest`,
+whether set by flag or config (a flag overrides its config key), before anything
 starts (`tier3 PATH --autopilot` checks these before it writes a dataset); it never
-falls back to Harbor. `runtime_env` entries reach the agent's sandbox as `${NAME}`
+falls back to Harbor. `runtime_env` (alias `passthrough_env`) entries reach the agent's sandbox as `${NAME}`
 references resolved from Gym's environment. Gym receives only the variables Harbor's
 Docker backend allows (including `DOCKER_HOST`, `DOCKER_CONTEXT` and TLS settings),
 Gym's `UV_*` package-index settings, and the policy and judge credentials. A finished

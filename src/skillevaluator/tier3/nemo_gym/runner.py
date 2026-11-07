@@ -329,7 +329,7 @@ def run_nemo_gym_eval(
         errors.append("harbor.task_source native_harbor is not supported with --backend nemo-gym yet")
     errors += [
         f"harbor.{key} is not supported with --backend nemo-gym yet"
-        for key in ("agent_workdir", "pre_agent_setup", "setup_commands", "passthrough_env")
+        for key in ("agent_workdir", "pre_agent_setup")
         if harbor_config.get(key)
     ]
     resource_config = dict(harbor_config.get("resources") or {})

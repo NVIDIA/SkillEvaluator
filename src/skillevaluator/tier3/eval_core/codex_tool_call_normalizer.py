@@ -81,11 +81,7 @@ def _outer_tool_call_observation(
     return "".join(
         atif_content_text(result.get("content"))
         for result in (step.get("observation") or {}).get("results") or []
-        if (
-            tool_call_id
-            and result.get("source_call_id")
-            and result.get("source_call_id") == tool_call_id
-        )
+        if (tool_call_id and result.get("source_call_id") and result.get("source_call_id") == tool_call_id)
         or (include_unscoped and not result.get("source_call_id"))
     )
 
@@ -133,10 +129,14 @@ def normalized_tool_call_is_error(step: dict[str, Any], tool_call: dict[str, Any
 
 def normalized_tool_call_wrapper_observation(step: dict[str, Any], tool_call: dict[str, Any]) -> str:
     """Return an unattributed wrapper observation once for security scanning."""
-    if tool_call.get("_atif_observation_status") not in (
-        AMBIGUOUS_OUTER_EXEC_OBSERVATION,
-        UNOBSERVED_INNER_CALL,
-    ) or tool_call.get("_atif_inner_tool_index") != 0:
+    if (
+        tool_call.get("_atif_observation_status")
+        not in (
+            AMBIGUOUS_OUTER_EXEC_OBSERVATION,
+            UNOBSERVED_INNER_CALL,
+        )
+        or tool_call.get("_atif_inner_tool_index") != 0
+    ):
         return ""
     observation_owner = tool_call.get("_atif_outer_observation_owner")
     if isinstance(observation_owner, int) and observation_owner >= 0:
@@ -427,20 +427,24 @@ def _js_code_tokens(source: str) -> list[tuple[str, str]]:
             if previous == "newline":
                 previous_significant_index -= 1
                 previous_significant = tokens[previous_significant_index][1] if previous_significant_index >= 0 else ""
-            regex_context = previous_significant in (
-                _JS_EXPRESSION_OPERATORS
-                | {
-                    "",
-                    "(",
-                    "[",
-                    "{",
-                    "=",
-                    ":",
-                    ",",
-                    ";",
-                    "=>",
-                }
-            ) or previous_significant in _JS_EXPRESSION_KEYWORDS
+            regex_context = (
+                previous_significant
+                in (
+                    _JS_EXPRESSION_OPERATORS
+                    | {
+                        "",
+                        "(",
+                        "[",
+                        "{",
+                        "=",
+                        ":",
+                        ",",
+                        ";",
+                        "=>",
+                    }
+                )
+                or previous_significant in _JS_EXPRESSION_KEYWORDS
+            )
             if previous_significant == ")":
                 regex_context = previous_significant_index in control_condition_closes
             elif previous_significant == "}":
@@ -501,9 +505,7 @@ def _js_code_tokens(source: str) -> list[tuple[str, str]]:
         previous_significant_index = len(tokens) - 1
         if previous_significant_index >= 0 and tokens[previous_significant_index][1] == "newline":
             previous_significant_index -= 1
-        previous_significant = (
-            tokens[previous_significant_index][1] if previous_significant_index >= 0 else ""
-        )
+        previous_significant = tokens[previous_significant_index][1] if previous_significant_index >= 0 else ""
         if operator == "(":
             control_parentheses.append(previous_significant in {"if", "for", "while", "switch", "with"})
         elif operator == ")" and control_parentheses and control_parentheses.pop():
@@ -512,10 +514,7 @@ def _js_code_tokens(source: str) -> list[tuple[str, str]]:
             block_braces.append(
                 previous_significant in {"", ";", "newline", "{", "}", "do", "else", "finally", "try"}
                 or previous_significant == "=>"
-                or (
-                    previous_significant == ")"
-                    and previous_significant_index in control_condition_closes
-                )
+                or (previous_significant == ")" and previous_significant_index in control_condition_closes)
             )
         elif operator == "}" and block_braces and block_braces.pop():
             block_closes.add(len(tokens))
@@ -581,9 +580,7 @@ def _skip_balanced_member(tokens: list[tuple[str, str]], start: int, ends: dict[
     return len(tokens) if end is None else end + 1
 
 
-def _tools_reference_is_called(
-    tokens: list[tuple[str, str]], end: int, bracket_ends: dict[int, int]
-) -> bool:
+def _tools_reference_is_called(tokens: list[tuple[str, str]], end: int, bracket_ends: dict[int, int]) -> bool:
     cursor = end
     saw_member = False
     while cursor < len(tokens):
@@ -623,9 +620,7 @@ def _matching_delimiters(tokens: list[tuple[str, str]], opening: str, closing: s
     return matches
 
 
-def _reference_contexts(
-    tokens: list[tuple[str, str]], references: list[tuple[int, int]]
-) -> list[bool]:
+def _reference_contexts(tokens: list[tuple[str, str]], references: list[tuple[int, int]]) -> list[bool]:
     results: list[bool] = []
     reference_index = 0
     strong_context = False
@@ -639,11 +634,7 @@ def _reference_contexts(
             _, end = references[reference_index]
             called = _tools_reference_is_called(tokens, end, bracket_ends)
             immediate_expression_context = called and previous in call_prefixes
-            results.append(
-                strong_context
-                or immediate_expression_context
-                or last_identifier in _JS_EXPRESSION_KEYWORDS
-            )
+            results.append(strong_context or immediate_expression_context or last_identifier in _JS_EXPRESSION_KEYWORDS)
             reference_index += 1
         if index == len(tokens):
             break

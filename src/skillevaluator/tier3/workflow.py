@@ -247,11 +247,17 @@ def _preflight_nemo_gym(skill_path: Path, params: dict[str, Any]) -> None:
         stop_on_pass=bool(params.get("stop_on_pass")),
         custom_dockerfile_mode=params.get("custom_dockerfile_mode"),
         copy_repo=bool(params.get("copy_repo")),
-        environment_kwargs=dict.fromkeys(params.get("environment_kwargs") or (), ""),
+        environment_kwargs=dict.fromkeys(params.get("environment_kwarg") or (), ""),
         override_storage_mb=params.get("override_storage_mb"),
         agent_runtime_preflight=bool(params.get("agent_runtime_preflight")),
         timeout_multiplier=params.get("timeout_multiplier"),
-    ) + nemo_gym_config_errors(skill_path)
+    ) + nemo_gym_config_errors(
+        skill_path,
+        stop_on_pass=params.get("stop_on_pass"),
+        timeout_multiplier=params.get("timeout_multiplier"),
+        agent_runtime_preflight=params.get("agent_runtime_preflight"),
+        custom_dockerfile_mode=params.get("custom_dockerfile_mode"),
+    )
     if nemo_gym_bin() is None:
         errors.append("--backend nemo-gym needs the NeMo Gym CLI: set SKILL_EVAL_NEMO_GYM_BIN to its `gym` executable")
     if errors:

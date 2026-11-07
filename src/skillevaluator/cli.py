@@ -3283,7 +3283,13 @@ def evaluate(
             agent_runtime_preflight=bool(agent_runtime_preflight),
             timeout_multiplier=timeout_multiplier,
         )
-        capability_errors += nemo_gym_config_errors(skill_path)
+        capability_errors += nemo_gym_config_errors(
+            skill_path,
+            stop_on_pass=stop_on_pass,
+            timeout_multiplier=timeout_multiplier,
+            agent_runtime_preflight=agent_runtime_preflight,
+            custom_dockerfile_mode=custom_dockerfile_mode,
+        )
         if nemo_gym_bin() is None:
             capability_errors.append(
                 "--backend nemo-gym needs the NeMo Gym CLI: set SKILL_EVAL_NEMO_GYM_BIN to its `gym` executable"

@@ -131,8 +131,19 @@ def nemo_gym_capability_errors(
     return errors
 
 
-def nemo_gym_config_errors(skill_path: Path) -> list[str]:
-    """Reject ``evals/config.yml`` settings the NeMo Gym backend cannot honor, before any dataset work."""
+def nemo_gym_config_errors(
+    skill_path: Path,
+    *,
+    stop_on_pass: bool | None = None,
+    timeout_multiplier: float | None = None,
+    agent_runtime_preflight: bool | None = None,
+    custom_dockerfile_mode: str | None = None,
+) -> list[str]:
+    """Reject ``evals/config.yml`` settings the NeMo Gym backend cannot honor, before any dataset work.
+
+    A setting also given on the command line is skipped here: the CLI value wins, and
+    ``nemo_gym_capability_errors`` already rejects an unsupported CLI value.
+    """
     from skillevaluator.tier3.evals_config import EvalsConfigError, load_evals_config
 
     try:
@@ -142,21 +153,21 @@ def nemo_gym_config_errors(skill_path: Path) -> list[str]:
     harbor = config.get("harbor") or {}
     workspace = config.get("skill_workspace") or {}
     errors: list[str] = []
-    if harbor.get("stop_on_pass"):
+    if stop_on_pass is None and harbor.get("stop_on_pass"):
         errors.append("harbor.stop_on_pass is not supported with --backend nemo-gym yet")
-    if harbor.get("timeout_multiplier", 1.0) not in (1, 1.0):
+    if timeout_multiplier is None and harbor.get("timeout_multiplier", 1.0) not in (1, 1.0):
         errors.append("harbor.timeout_multiplier is not supported with --backend nemo-gym yet")
-    if harbor.get("agent_runtime_preflight"):
+    if agent_runtime_preflight is None and harbor.get("agent_runtime_preflight"):
         errors.append("harbor.agent_runtime_preflight applies to the Harbor backend only")
     if harbor.get("base_image_mode", "disabled") != "disabled":
         errors.append("harbor.base_image_mode reuse/rebuild applies to the Harbor backend only")
-    if harbor.get("custom_dockerfile_mode") not in (None, "rebase"):
+    if custom_dockerfile_mode is None and harbor.get("custom_dockerfile_mode") not in (None, "rebase"):
         errors.append("--backend nemo-gym supports --custom-dockerfile-mode rebase only")
     if harbor.get("task_source", "auto") == "native_harbor":
         errors.append("harbor.task_source native_harbor is not supported with --backend nemo-gym yet")
     errors += [
         f"harbor.{key} is not supported with --backend nemo-gym yet"
-        for key in ("agent_workdir", "pre_agent_setup", "setup_commands", "passthrough_env")
+        for key in ("agent_workdir", "pre_agent_setup")
         if harbor.get(key)
     ]
     if "storage_mb" in (harbor.get("resources") or {}):

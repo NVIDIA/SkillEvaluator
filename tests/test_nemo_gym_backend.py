@@ -509,3 +509,43 @@ def test_config_errors_reject_decoys_and_timeout_multiplier(tmp_path: Path) -> N
     )
     errors = " ".join(nemo_gym_config_errors(tmp_path))
     assert "timeout_multiplier" in errors and "decoy_manifest" in errors
+
+
+def test_passthrough_env_alias_reaches_the_gym_agent(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    skill, _env_log = _fake_gym_skill(
+        tmp_path, monkeypatch, config="schema_version: 1\nharbor:\n  passthrough_env:\n    - GYM_ALIAS_FLAG\n"
+    )
+    monkeypatch.setenv("GYM_ALIAS_FLAG", "on")
+    result = _run_fake_gym(skill, tmp_path, skip_with_skill=True, max_cases=1)
+    task_toml = next((Path(result["run_dir"]) / "_harbor-tasks" / "codex" / "without").glob("*/task.toml")).read_text()
+    assert '"GYM_ALIAS_FLAG" = "${GYM_ALIAS_FLAG}"' in task_toml
+
+
+def test_config_errors_let_cli_overrides_win(tmp_path: Path) -> None:
+    from skillevaluator.tier3.nemo_gym.backend import nemo_gym_config_errors
+
+    (tmp_path / "evals").mkdir()
+    (tmp_path / "evals" / "config.yml").write_text(
+        "schema_version: 1\nharbor:\n  stop_on_pass: true\n  timeout_multiplier: 2\n"
+        "  agent_runtime_preflight: true\n  custom_dockerfile_mode: preserve\n"
+    )
+    assert len(nemo_gym_config_errors(tmp_path)) == 4
+    assert (
+        nemo_gym_config_errors(
+            tmp_path,
+            stop_on_pass=False,
+            timeout_multiplier=1.0,
+            agent_runtime_preflight=False,
+            custom_dockerfile_mode="rebase",
+        )
+        == []
+    )
+
+
+def test_workflow_preflight_rejects_environment_kwarg(tmp_path: Path) -> None:
+    import click
+
+    from skillevaluator.tier3.workflow import _preflight_nemo_gym
+
+    with pytest.raises(click.UsageError, match="--environment-kwarg"):
+        _preflight_nemo_gym(tmp_path, {"agents": "codex", "env_mode": "docker", "environment_kwarg": ("cpus=2",)})

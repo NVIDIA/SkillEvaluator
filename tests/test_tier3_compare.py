@@ -784,3 +784,82 @@ def test_compare_never_mixes_agents_across_candidate_roots(
     output = capsys.readouterr().out
     assert "codex" in output
     assert "opencode" not in output
+
+
+def _write_harbor_job(job_dir: Path, scores: dict[str, float], not_applicable: tuple[str, ...] = ()) -> None:
+    from skillevaluator.tier3.harbor.metrics import DEFAULT_METRIC_SET
+
+    trials = []
+    for index in (1, 2):
+        trial = f"case-{index}__trial"
+        trials.append(trial)
+        reward: dict[str, object] = dict(scores)
+        details: dict[str, dict[str, object]] = {}
+        for metric in not_applicable:
+            reward[metric] = None
+            details[metric] = {"score": None, "status": "not_applicable", "reason": "no skill under test"}
+        if "skill_execution" not in not_applicable:
+            details["skill_execution"] = {"activation": {"passed": True, "score": 1.0}}
+        reward.update(
+            entry_id=f"case-{index}",
+            metric_set=DEFAULT_METRIC_SET,
+            score_policy=DEFAULT_SCORE_POLICY,
+            details=details,
+        )
+        path = job_dir / trial / "verifier" / "reward.json"
+        path.parent.mkdir(parents=True)
+        path.write_text(json.dumps(reward), encoding="utf-8")
+    stats = {
+        "n_completed_trials": 2,
+        "n_errored_trials": 0,
+        "n_running_trials": 0,
+        "n_pending_trials": 0,
+        "n_cancelled_trials": 0,
+        "n_retries": 0,
+        "evals": {"agent__model___tasks": {"n_trials": 2, "n_errors": 0, "reward_stats": {"overall": {"0.5": trials}}}},
+    }
+    (job_dir / "result.json").write_text(json.dumps({"n_total_trials": 2, "stats": stats}), encoding="utf-8")
+
+
+@pytest.mark.parametrize(
+    ("baseline_not_applicable", "with_overall", "lift"),
+    [
+        # A six-metric mean would give a passing +0.10; the five-dimension policy gives -0.08.
+        ((), 0.6, -0.08),
+        # The baseline has no skill under test, so the skill metrics drop out of both arms for lift.
+        (("skill_execution", "skill_efficiency"), 0.6, 0.1),
+    ],
+    ids=["five-dimension-reverses-six-metric-lift", "baseline-skill-metrics-not-applicable"],
+)
+def test_compare_publishes_the_same_overall_and_lift_as_the_run_outputs(
+    tmp_path: Path,
+    capsys: pytest.CaptureFixture[str],
+    baseline_not_applicable: tuple[str, ...],
+    with_overall: float,
+    lift: float,
+) -> None:
+    from skillevaluator.evaluation.tier3_report import agent_eval_result_from_directory
+    from skillevaluator.tier3.harbor.collector import collect_harbor_results
+
+    skill_path = tmp_path / "demo"
+    skill_path.mkdir()
+    (skill_path / "SKILL.md").write_text("---\nname: demo\ndescription: Demo skill.\n---\nBody.\n", encoding="utf-8")
+    with_skill = {**dict.fromkeys(DEFAULT_METRICS, 0.5), "goal_accuracy": 1.0, "behavior_check": 1.0}
+    baseline = {**dict.fromkeys(DEFAULT_METRICS, 0.85), "goal_accuracy": 0.0, "behavior_check": 0.0}
+    jobs = tmp_path / "jobs"
+    _write_harbor_job(jobs / "demo-codex-with", with_skill)
+    _write_harbor_job(jobs / "demo-codex-without", baseline, baseline_not_applicable)
+    run_dir = tmp_path / "results" / "demo" / "run"
+    collect_harbor_results("demo", ["codex"], run_dir, jobs, expected_case_ids=["case-1", "case-2"], expected_trials=2)
+    summary = json.loads((run_dir / "codex" / "with-skill" / "summary.json").read_text(encoding="utf-8"))
+    recorded_lift = json.loads((run_dir / "codex" / "lift.json").read_text(encoding="utf-8"))["overall"]["delta"]
+    agent_eval = agent_eval_result_from_directory(skill_path, run_dir, use_llm_judge=False).metadata["agent_eval"]
+    assert summary["overall_score"] == pytest.approx(with_overall)
+    assert recorded_lift == agent_eval["overall_lift"] == pytest.approx(lift)
+    capsys.readouterr()
+
+    assert compare_results(skill_path, results_dir=tmp_path / "results") == 0
+
+    output = capsys.readouterr().out
+    assert re.search(rf"Overall\s+{with_overall:.2f}\s+{re.escape(f'{lift:+.2f}')}\s", output)
+    assert ("compares only the" in output) is bool(baseline_not_applicable)

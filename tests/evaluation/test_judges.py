@@ -849,3 +849,62 @@ def test_regressed_dimension_reasoning_names_the_weakest_signal() -> None:
 
     assert regressed[-1] == "Weakest signal: goal_accuracy 0.25."
     assert improved[-1] == "Strongest signal: behavior_check 0.81."
+
+
+class TestInsightsJudgeRecommendationQuality:
+    @staticmethod
+    def _recommendation(message: str, title: str = "Next step") -> dict:
+        return {
+            "claim_type": "general",
+            "category": "Improve",
+            "title": title,
+            "message": message,
+            "severity": "warn",
+            "evidence_case_ids": ["positive-001"],
+        }
+
+    def _parse(self, *messages: str, deterministic: dict | None = None) -> list[str]:
+        response = json.dumps(
+            {
+                "conclusions": [],
+                "recommendations": [self._recommendation(message) for message in messages],
+            }
+        )
+        parsed = InsightsJudge().parse_response(
+            response,
+            canonical={"dataset": [{"id": "positive-001", "expected_skill": "calculator"}], "trials": []},
+            deterministic=deterministic or {},
+        )
+        return [item["message"] for item in parsed["recommendations"]]
+
+    @pytest.mark.parametrize(
+        "message",
+        [
+            "Loosen the expected output of positive-001 so the agent passes.",
+            "Relax the assertions for positive-001.",
+            "Lower the pass threshold for positive-001 to 0.3.",
+            "Soften positive-001's ground truth to accept partial answers.",
+        ],
+    )
+    def test_drops_advice_that_weakens_requirements(self, message: str) -> None:
+        assert self._parse(message) == []
+
+    def test_keeps_advice_that_clarifies_requirements(self) -> None:
+        message = "Make the expected output of positive-001 explicit in evals.json."
+        assert self._parse(message) == [message]
+
+    def test_drops_repeats_of_deterministic_and_earlier_recommendations(self) -> None:
+        first = "Document the rounding rule that positive-001 depends on in SKILL.md."
+        repeated = "Add a units example for positive-001 to SKILL.md."
+        assert self._parse(
+            first,
+            first.upper(),
+            repeated,
+            deterministic={"suggestions": ["add a units example for positive-001 to  SKILL.md."]},
+        ) == [first]
+
+    def test_prompt_requires_distinct_actions_and_experiments_for_untested_causes(self) -> None:
+        prompt = InsightsJudge().get_system_prompt()
+        assert "do not restate a\n  deterministic recommendation" in prompt
+        assert "Never recommend loosening, relaxing, or lowering an expectation" in prompt
+        assert "Recommend a different agent or model only when the supplied trials compare" in prompt

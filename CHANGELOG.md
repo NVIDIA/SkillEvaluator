@@ -78,6 +78,15 @@ All notable changes to SkillEvaluator are documented in this file.
   characters: a text that saves only a few characters stays inline when sharing
   it would push another text past block 9 and cost more than it saves.
 
+- Tier 2 deduplication no longer rescans a shell script once per function
+  header. In 0.8.0 each `name() {` header without a closing brace walked the
+  rest of the script, and line numbers were counted from the start of the file
+  for every function, so chunking grew with the square of the script's size: a
+  53 KiB script of such headers took about 20 seconds, and a 1 MiB one could
+  take hours. Braces and line breaks are now indexed in one pass. Python files
+  are also split into lines once instead of once per function or class. Chunk
+  text and line ranges are unchanged.
+
 - Tier 3 **Measured Agent Resources** no longer count idle or user time as LLM
   seconds when timing is inferred from step timestamps and an agent step with
   tool calls is followed by a user or system step. The whole gap up to that

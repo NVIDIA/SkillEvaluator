@@ -598,6 +598,36 @@ skillevaluator compare ./my-skill
 | --- | --- | --- |
 | `--results-dir DIRECTORY` | unset | Results directory to read from. |
 
+## tier3 validate-grader
+
+Qualify the shipped Tier 3 verifier against independently labelled evidence.
+See [Grader Validation](grader-validation.mdx) for the versioned suite format,
+denominators, provenance and interpretation.
+
+```bash
+skillevaluator tier3 validate-grader --check-suite
+skillevaluator tier3 validate-grader ./suite --repeats 3 -o qualification
+```
+
+| Option | Default | Meaning |
+| --- | --- | --- |
+| `SUITE_DIR` | bundled reference suite | Directory containing suite.json |
+| `--repeats N` | 3 | Positive number of grades per case |
+| `--split assessment\|tuning\|all` | assessment | Split selection; all keeps statistics separate |
+| `--case ID` | all selected cases | Repeatable case filter |
+| `-o, --output DIR` | grader-validation-output | Empty output directory for JSON and attempt artifacts |
+| `--json` | off | Print full report as JSON |
+| `--check-suite` | off | Validate suite and executable labels only, no provider needed |
+| `--concurrency N` | 1 | Maximum concurrent verifier subprocesses |
+| `--timeout SECONDS` | 300 | Positive per-attempt timeout |
+| `--max-false-pass-rate RATE` | unset | Gate any reported metric's false-pass rate |
+| `--max-false-fail-rate RATE` | unset | Gate any reported metric's false-fail rate |
+| `--max-unjudgeable-rate RATE` | unset | Gate any reported metric's error/insufficient rate |
+
+Rates must be between 0 and 1. Exit 0 reports results (including disagreement),
+exit 1 means an explicitly supplied gate was exceeded, and exit 2 means invalid
+usage, suite or provider configuration. Gates use assessment only with split all.
+
 ## tier3 feedback
 
 Chat in the terminal about one completed live-evaluation run: which cases

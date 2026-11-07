@@ -1,0 +1,244 @@
+---
+title: "Grader Validation"
+description: "Qualify the shipped Tier 3 verifier against independently labelled evidence."
+---
+
+Grader validation measures agreement with independent labels, not agent quality.
+It runs the **real shipped verifier**, including deterministic security, execution
+and efficiency checks and the configured accuracy, goal and behavior judges.
+It does not change judge prompts or scoring.
+
+## Quickstart
+
+Check the bundled reference suite without credentials or model calls:
+
+```bash
+skillevaluator tier3 validate-grader --check-suite
+```
+
+Configure a [judge provider](configuration.mdx), then grade held-out assessment
+cases three times each:
+
+```bash
+skillevaluator tier3 validate-grader --repeats 3 -o qualification
+skillevaluator tier3 validate-grader ./my-suite --case correct-answer --repeats 5 --json -o qualification-custom
+```
+
+The bundled suite contains 14 assessment and 2 tuning cases with hand-written
+calculator trajectories. It demonstrates every category, including recovery,
+missing evidence, correct non-use, a baseline without the skill and mixed
+per-step behavior. It is intentionally small and is not a reliability benchmark.
+
+## Suite contract
+
+A directory contains `suite.json` and referenced ATIF trajectory JSON files.
+The exact schema identifier is `skillevaluator.grader-qualification/v1`.
+Unknown fields are rejected in every structured object, including entries and
+checks. Case IDs are unique letters, digits, hyphens and underscores; paths must
+be relative files inside the suite directory (including after symlink resolution).
+
+```json
+{
+  "schema": "skillevaluator.grader-qualification/v1",
+  "suite": {
+    "name": "Arithmetic qualification",
+    "version": "1.0.0",
+    "description": "Independently checked arithmetic"
+  },
+  "thresholds": {"accuracy": 0.8, "goal_accuracy": 1.0, "overall": 0.5},
+  "cases": [{
+    "id": "correct-answer",
+    "split": "assessment",
+    "category": "baseline",
+    "source": {"kind": "synthetic", "origin": "Hand-written example", "trace_id": "addition-1"},
+    "entry": {
+      "question": "What is 2 + 2?",
+      "ground_truth": "4",
+      "expected_behavior": ["Return 4."],
+      "has_skill": false
+    },
+    "trajectory": "trajectories/addition.json",
+    "expected": {
+      "overall": "pass",
+      "metrics": {
+        "accuracy": "pass",
+        "goal_accuracy": "pass",
+        "skill_execution": "not_applicable",
+        "skill_efficiency": "not_applicable",
+        "behavior_check": [true]
+      }
+    },
+    "label": {
+      "method": "executable",
+      "reviewed_by": "Suite authors",
+      "reviewed_on": "2026-11-06",
+      "rationale": "Addition independently computed; final evidence checked.",
+      "checks": [{"type": "final_response_contains", "value": "4"}]
+    }
+  }]
+}
+```
+
+Required case fields are shown above. Categories are `positive`, `negative`,
+`edge`, `failure_recovery`, `unavailable_evidence`, `non_use`, and `baseline`.
+Source kind, origin and trace ID are nonempty strings identifying the evidence.
+Splits are `assessment` (held out) and `tuning` (used for development).
+
+Entry fields accepted by this mode are `id`, `question`, `ground_truth`,
+`expected_behavior`, `expected_skill`, `expected_script`, `evaluated_skill`,
+`should_trigger`, `has_skill`, `acceptable_skills`, `acceptable_alternates`,
+`skill_workspace_mode` and `workspace_skill_names`. Question is required;
+behavior, accepted skills and workspace skill names are lists of strings;
+trigger and installed-skill flags are booleans. The verifier receives these
+unchanged. Baseline skill metrics are N/A; a trusted evaluated skill identity
+lets a non-use case receive credit for correctly avoiding that skill.
+
+Expected overall is `pass`, `fail` or `insufficient_evidence`. Metric labels
+also allow `not_applicable`; omit metrics without independent labels.
+Behavior can instead be a boolean list exactly matching expected behavior length.
+A null trajectory is allowed only for unavailable-evidence cases labelled
+insufficient evidence. Missing referenced files are errors, not abstentions.
+
+Label metadata is required even for executable labels. Use `reviewed` with a
+rationale for assertions that cannot be expressed mechanically.
+Executable labels require at least one check. Checks assert recorded evidence:
+`final_response_contains`, `final_response_not_contains`, `tool_result_contains`
+each take a nonempty `value`; `file_written_contains` additionally takes `path`
+and checks a recorded Write/write_file tool call, not a live filesystem file.
+All checks run whenever the suite is loaded, even with `--check-suite`.
+These checks anchor a reviewed label; a substring alone does not prove semantic
+correctness. Authors must independently establish the expected outcome.
+
+## Reading the report
+
+Each attempt runs the template in a separate subprocess with an isolated entry,
+trajectory and reward directory. Attempts inherit provider credentials but
+provenance does not record keys. `--concurrency` defaults to 1 and `--timeout`
+to 300 seconds per attempt. Output directories must be empty to avoid mixing
+old and new evidence.
+
+Scores at or above the metric threshold pass. Defaults are accuracy 0.8,
+goal accuracy 1.0, security/execution/efficiency/behavior 1.0, and overall 0.5
+(the Harbor pass threshold). Suite thresholds override defaults.
+
+`overall` is the score policy's dimension mean, compared with the default 0.5
+threshold. The shipped policy averages security, accuracy, skill execution,
+goal achievement (the mean of goal_accuracy and behavior_check), and skill
+efficiency. N/A metrics are omitted from their dimension; dimensions with no
+scored metrics are omitted from the overall mean. A known task failure with
+clean deterministic dimensions can therefore still receive an overall pass.
+The suite reports this as a false pass against the independent overall label
+rather than hiding it or changing the verifier's scoring.
+
+Per-step behavior uses the verifier's boolean results, not a new judge.
+N/A comes from detail status; missing trajectory is insufficient evidence.
+Judge failure is an unscored error, including overall when required judging
+failed. A process failure or timeout without a valid failure artifact is an error.
+
+For every labelled metric, the behavior-step pool, and overall, JSON reports:
+
+- **Confusion matrix:** expected pass/fail rows by observed pass, fail, N/A,
+  error and insufficient evidence. Other expected labels have their own rows.
+- **False-pass rate:** observed passes among known-fail attempts divided by
+  known-fail attempts observed pass or fail. Errors, N/A and abstentions do not
+  enter that denominator.
+- **False-fail rate:** observed fails among known-pass attempts divided by
+  known-pass attempts observed pass or fail.
+- **Unjudgeable rate:** errors plus insufficient-evidence observations divided
+  by all attempts with known pass/fail labels. Both counts are reported
+  separately. N/A is separate, not counted as an error or as a scored attempt.
+- **Disagreement:** count of any label/verdict mismatch, including N/A or errors.
+- **Expected-insufficient evidence:** total attempts, correct abstentions,
+  confident pass/fail verdicts and errors. An error is not a correct abstention.
+- **Variability:** non-unanimous judgments divided by judgments repeated more
+  than once. A judgment is one case/metric or case/behavior-step, not an attempt.
+  Numeric score spreads are max minus min for each judgment, excluding missing
+  scores. Verdict unanimity and score stability are different concepts.
+- **Counts:** attempts, distinct judgments, cases, expected class counts,
+  category and split counts, missing categories, cases with trajectories, and
+  truncation count over details carrying omission metadata. The pooled behavior
+  denominator counts steps, not just cases.
+
+Rates include numerator, denominator and a Wilson 95% interval. Zero denominators
+produce null rates and intervals, not zero. Attempt-level intervals treat attempts
+as independent; repeated grades of one case are dependent, so these are descriptive
+bounds, not a substitute for independent case sampling. Metric kinds distinguish
+deterministic checks, model judgments and composite overall.
+
+`grader-validation.json` contains the full report. Each case/attempt has
+`reward.json` (Harbor numeric payload), `skill_evaluator_reward.json` (rich
+details and contract metadata), `judge_attempts.json` and
+`expected-vs-observed.json`. Contract provenance is read from the rich sidecar
+because the shipped verifier intentionally keeps Harbor's reward numeric-only.
+
+## Reproducible qualification procedure
+
+1. Establish outcomes independently using executable assertions and review.
+   Record case/trace identity, reviewer, date, rationale and suite version.
+2. Freeze the assessment cases before changing judge configuration. Develop
+   on `--split tuning`; never use assessment mistakes as undisclosed tuning data.
+3. Validate the suite offline. Save its source and trajectories alongside results.
+4. Pin the package, provider/model, thresholds and non-secret judge settings.
+   Run repeats with an explicit output directory.
+5. Read class counts and denominators before comparing rates. Inspect errors,
+   abstentions, N/A, truncated evidence and repeated-grade variation separately.
+6. Save the report with its timestamp, selected case IDs, split, package version,
+   verifier SHA-256, suite content SHA-256, judge contracts, actual models used
+   (including fallback), goal method, thresholds, repeats and concurrency.
+   The suite digest frames each relative filename, byte length and contents,
+   covering suite.json plus all referenced trajectories, even unselected ones.
+7. Add independently reviewed cases when coverage gaps matter; version changes
+   and rerun the frozen assessment suite. Do not claim a particular case count
+   establishes statistical sufficiency.
+
+Default output covers assessment only. `--split all` emits separate
+`by_split.assessment` and `by_split.tuning` statistics with no mixed aggregate.
+The top-level `metrics` object is empty (`{}`) in this mode; read the metric
+summaries under those two `by_split` objects instead.
+Explicit gates on an all-split run apply only to assessment.
+
+## Optional automation gates
+
+```bash
+skillevaluator tier3 validate-grader --max-false-pass-rate 0.1 --max-false-fail-rate 0.1 --max-unjudgeable-rate 0.05 -o gated-qualification
+```
+
+Gates have no defaults. Exit 1 means at least one supplied rate limit was
+strictly exceeded for any reported metric or the behavior-step pool; equality
+passes. Undefined rates do not trip a gate: always inspect coverage. Exit 2
+means invalid usage, suite, output path or provider configuration. Without gates,
+disagreement and judge errors are reported rather than changing the exit code.
+`--check-suite` never requires a provider.
+
+## Measured baseline
+
+On 2026-11-07, SkillEvaluator 0.8.0 graded the bundled assessment split with
+the `openai-compatible` provider: 14 cases × 3 repeats = 42 attempts per model.
+Suite SHA-256 prefix: `5e85ceac…`; verifier SHA-256 prefix: `d444e2c4…`.
+The fractions below use the scored known-fail and known-pass denominators
+defined above, not all 42 attempts.
+
+| Metric | gpt-oss-120b false passes | gpt-oss-120b false fails | gpt-5-mini false passes | gpt-5-mini false fails |
+| --- | --- | --- | --- | --- |
+| accuracy | 6/12 | 3/27 | 4/12 | 3/27 |
+| goal_accuracy | 8/15 | 0/24 | 2/15 | 0/24 |
+| behavior_check | 0/15 | 0/24 | 0/15 | 0/24 |
+| skill_execution | 0/3 | 3/33 | 0/3 | 3/33 |
+| overall | 15/15 | 0/24 | 15/15 | 0/24 |
+
+For both models, the failure-recovery case received skill_execution 0.975,
+below its 1.0 threshold. Every known task failure exceeded the overall 0.5
+dimension-mean threshold. There were no unjudgeable observations against
+pass/fail labels; all 3 unavailable-evidence attempts correctly abstained.
+
+These results describe this suite, scorer and model only. They are a baseline,
+not an acceptance threshold. No gate thresholds or CI cadence for live runs
+are set yet; offline `--check-suite` runs in the test suite.
+
+## Limitations
+
+Results describe this suite, scorer and model only. A fixed case count or score
+band is not evidence of statistical sufficiency or universal grader reliability.
+Labels can be wrong and synthetic evidence may not represent real agents.
+Agreement is not proof of causal validity. Repeated attempts can be correlated,
+providers can change, and a model may have seen public examples before.

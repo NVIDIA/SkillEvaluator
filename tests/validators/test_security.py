@@ -29,6 +29,9 @@ from skillevaluator.validators.security import (
     _skillspector_child_env,
     _skillspector_incomplete_analysis_error,
     _skillspector_llm_env,
+    _skillspector_missing_reference_note,
+    _skillspector_reference_row_is_advisory,
+    _skillspector_report_path_is_bundled_file,
     _skillspector_timeout_seconds,
 )
 
@@ -8855,3 +8858,331 @@ class TestSkillspectorReferencedImages:
         jpeg = b"\xff\xd8" + _JPEG_DQT + _JPEG_SOF + _JPEG_DHT + scans + b"\xff\xd9"
 
         assert not _is_jpeg(jpeg)
+
+
+# The skills scanned for the captured missing- and ambiguous-reference reports.
+# SkillSpector 2.12.0+ records `output/notes.md` (SKILL.md line 10) as
+# reference_missing; 2.11.2 records it as reference_unresolved with a "missing"
+# entry in analysis_completeness.references. `guide.md` matches two bundled
+# files, which every release records as reference_unresolved ("ambiguous").
+_NOTES_WRITER_FILES = {
+    "SKILL.md": (
+        "---\nname: notes-writer\n"
+        "description: Summarize meeting text into notes. Use when the user asks for meeting notes.\n---\n\n"
+        "# Notes writer\n\nRun `scripts/summarize.py` on the transcript.\n\n"
+        "Write the summary to `output/notes.md` and keep it short.\n"
+    ),
+    "scripts/summarize.py": "import sys\n\nprint(sys.stdin.read()[:200])\n",
+}
+_GUIDE_READER_FILES = {
+    "SKILL.md": (
+        "---\nname: guide-reader\n"
+        "description: Read the guide before answering. Use when the user asks about setup.\n---\n\n"
+        "# Guide reader\n\nRead `guide.md` before answering.\n"
+    ),
+    "a/guide.md": "# Guide A\n\nSetup steps.\n",
+    "b/guide.md": "# Guide B\n\nOther steps.\n",
+}
+
+
+def _write_skill(root: Path, files: dict[str, str]) -> Path:
+    for relative, text in files.items():
+        path = root / relative
+        path.parent.mkdir(parents=True, exist_ok=True)
+        path.write_text(text, encoding="utf-8", newline="\n")
+    return root
+
+
+def _reference_report(version: str, case: str = "missing") -> dict:
+    """Load a captured SkillSpector ``--no-llm`` report for :data:`_NOTES_WRITER_FILES` or the guide reader."""
+    name = f"skillspector-{version}-{case}-reference-no-llm.json"
+    return json.loads((Path(__file__).parents[1] / "fixtures" / name).read_text(encoding="utf-8"))
+
+
+def _missing_reference_note(payload: dict, scanned_root: Path | None) -> str | None:
+    completeness = payload["analysis_completeness"]
+    keys = (
+        "total_components",
+        "partially_inspected_files",
+        "entirely_uninspected_files",
+        "findings_before_filtering",
+        "findings_after_filtering",
+    )
+    version = tuple(int(part) for part in payload["metadata"]["skillspector_version"].split("."))
+    return _skillspector_missing_reference_note(
+        completeness["ledger_exceptions"],
+        completeness["analyzer_statuses"],
+        {key: completeness[key] for key in keys},
+        completeness["limitations"],
+        completeness["scope_exclusions"],
+        payload["components"],
+        scanned_root,
+        references=completeness.get("references"),
+        skillspector_version=version,
+    )
+
+
+class TestSkillspectorMissingReferences:
+    """SkillSpector records a reference to a file the skill does not bundle as a ``partial`` analysis."""
+
+    @pytest.mark.parametrize(
+        ("version", "reason_code"),
+        [("2.11.2", "reference_unresolved"), ("2.12.0", "reference_missing"), ("2.13.3", "reference_missing")],
+    )
+    @patch("skillevaluator.validators.security.Tools")
+    def test_missing_reference_completes_the_scan(
+        self, mock_tools, tmp_path: Path, version: str, reason_code: str
+    ) -> None:
+        skill = _write_skill(tmp_path / "notes-writer", _NOTES_WRITER_FILES)
+
+        result = _validate_skillspector_payload(mock_tools, skill, _reference_report(version))
+
+        assert result.passed
+        assert result.status == "passed"
+        assert not result.errors
+        assert result.incomplete_scans == []
+        assert result.warnings == [
+            "SkillSpector reported 1 reference(s) to files the skill does not bundle "
+            f"(SKILL.md:10 [reference_resolution; {reason_code}]); every bundled file was inspected, "
+            "so the scan is not marked incomplete. Files outside the skill were not scanned"
+        ]
+        assert any(detail.check_name == "skillspector" for detail in result.success_details)
+
+    @patch("skillevaluator.validators.security.Tools")
+    def test_missing_reference_completes_the_llm_stage(self, mock_tools, tmp_path: Path) -> None:
+        skill = _write_skill(tmp_path / "notes-writer", _NOTES_WRITER_FILES)
+        static = _reference_report("2.13.3")
+        enriched = _reference_report("2.13.3")
+        enriched["metadata"].update({"llm_requested": True, "llm_available": True})
+        for status in enriched["analysis_completeness"]["analyzer_statuses"]:
+            if status["status"] == "disabled":
+                status.update({"status": "completed", "planned_work": 1, "completed": 1, "reason_code": None})
+        mock_tools.skillspector.is_available = True
+        mock_tools.skillspector.run.side_effect = [
+            ToolResult(success=True, stdout=json.dumps(report), stderr="", exit_code=0) for report in (static, enriched)
+        ]
+
+        result = SecurityValidator(use_llm=True).validate_security_only(skill)
+
+        assert mock_tools.skillspector.run.call_count == 2
+        assert result.passed
+        assert result.incomplete_scans == []
+        assert sum("does not bundle" in warning for warning in result.warnings) == 1
+
+    @pytest.mark.parametrize("version", ["2.11.2", "2.13.3"])
+    @patch("skillevaluator.validators.security.Tools")
+    def test_ambiguous_reference_stays_incomplete(self, mock_tools, tmp_path: Path, version: str) -> None:
+        skill = _write_skill(tmp_path / "guide-reader", _GUIDE_READER_FILES)
+
+        result = _validate_skillspector_payload(mock_tools, skill, _reference_report(version, "ambiguous"))
+
+        assert result.is_incomplete
+        assert result.incomplete_scans == ["skillspector"]
+        assert result.errors == [
+            "skillspector JSON field 'analysis_completeness' reports incomplete analysis (status 'partial'): "
+            "SKILL.md:8 [reference_resolution; reference_unresolved]; security scan did not complete"
+        ]
+        assert not result.warnings
+
+    @patch("skillevaluator.validators.security.Tools")
+    def test_reference_missing_is_advisory_on_any_version(self, mock_tools, tmp_path: Path) -> None:
+        skill = _write_skill(tmp_path / "notes-writer", _NOTES_WRITER_FILES)
+        payload = _reference_report("2.11.2")
+        payload["analysis_completeness"]["ledger_exceptions"][0]["reason_code"] = "reference_missing"
+        payload["analysis_completeness"]["references"] = []
+
+        result = _validate_skillspector_payload(mock_tools, skill, payload)
+
+        assert result.passed
+        assert not result.is_incomplete
+
+    @patch("skillevaluator.validators.security.Tools")
+    def test_reference_unresolved_from_2_12_0_stays_incomplete(self, mock_tools, tmp_path: Path) -> None:
+        """From 2.12.0 the code only means an ambiguous match, whatever the references list says."""
+        skill = _write_skill(tmp_path / "notes-writer", _NOTES_WRITER_FILES)
+        payload = _reference_report("2.12.0")
+        payload["analysis_completeness"]["ledger_exceptions"][0]["reason_code"] = "reference_unresolved"
+
+        result = _validate_skillspector_payload(mock_tools, skill, payload)
+
+        assert result.incomplete_scans == ["skillspector"]
+        assert "SKILL.md:10 [reference_resolution; reference_unresolved]" in result.errors[0]
+
+    @pytest.mark.parametrize(
+        "case",
+        [
+            "fatal",
+            "wrong-phase",
+            "skipped-outcome",
+            "names-analyzer",
+            "error-class",
+            "other-reason",
+            "absolute-path",
+            "escaping-path",
+            "backslash-path",
+            "dot-segment-path",
+            "control-character-path",
+            "unlisted-path",
+            "directory-path",
+            "missing-file",
+            "symlinked-file",
+            "symlinked-directory",
+            "mixed-with-runtime-limit",
+            "unexplained-limitation",
+            "degraded-analyzer",
+            "fatal-scope-exclusion",
+        ],
+    )
+    @patch("skillevaluator.validators.security.Tools")
+    def test_near_misses_stay_incomplete(self, mock_tools, tmp_path: Path, case: str) -> None:
+        skill = _write_skill(tmp_path / "notes-writer", _NOTES_WRITER_FILES)
+        payload = _reference_report("2.13.3")
+        completeness = payload["analysis_completeness"]
+        row = completeness["ledger_exceptions"][0]
+        if case in {"symlinked-file", "symlinked-directory"} and os.name == "nt":
+            pytest.skip("POSIX symlink semantics")
+        if case == "fatal":
+            row["fatal"] = True
+        elif case == "wrong-phase":
+            row["phase"] = "static"
+        elif case == "skipped-outcome":
+            row["outcome"] = "skipped"
+        elif case == "names-analyzer":
+            row["analyzers"] = ["static_patterns_prompt_injection"]
+        elif case == "error-class":
+            row["error_class"] = "OSError"
+        elif case == "other-reason":
+            row["reason_code"] = "referenced_uninspected"
+        elif case == "absolute-path":
+            row["path"] = str((skill / "SKILL.md").resolve())
+        elif case == "escaping-path":
+            row["path"] = "../notes-writer/SKILL.md"
+        elif case == "backslash-path":
+            row["path"] = payload["components"][1]["path"] = "scripts\\summarize.py"
+        elif case == "dot-segment-path":
+            row["path"] = payload["components"][0]["path"] = "./SKILL.md"
+        elif case == "control-character-path":
+            row["path"] = payload["components"][0]["path"] = "SKILL.md\u0007"
+        elif case == "unlisted-path":
+            row["path"] = "README.md"
+            (skill / "README.md").write_text("# Notes\n", encoding="utf-8")
+        elif case == "directory-path":
+            row["path"] = payload["components"][1]["path"] = "scripts"
+        elif case == "missing-file":
+            (skill / "SKILL.md").unlink()
+        elif case == "symlinked-file":
+            outside = tmp_path / "outside.md"
+            outside.write_text(_NOTES_WRITER_FILES["SKILL.md"], encoding="utf-8")
+            (skill / "SKILL.md").unlink()
+            (skill / "SKILL.md").symlink_to(outside)
+        elif case == "symlinked-directory":
+            row["path"] = "scripts/summarize.py"
+            elsewhere = tmp_path / "elsewhere"
+            (skill / "scripts").rename(elsewhere)
+            (skill / "scripts").symlink_to(elsewhere, target_is_directory=True)
+        elif case == "mixed-with-runtime-limit":
+            completeness["ledger_exceptions"].append(
+                {**row, "phase": "static", "reason_code": "runtime_limit", "start_line": None, "end_line": None}
+            )
+        elif case == "unexplained-limitation":
+            completeness["limitations"].append("Reference graph was truncated.")
+        elif case == "degraded-analyzer":
+            status = next(
+                status
+                for status in completeness["analyzer_statuses"]
+                if status["analyzer_id"] == "static_patterns_prompt_injection"
+            )
+            status.update({"status": "degraded", "completed": 1, "partial": 1})
+            completeness["limitations"].append("Analyzer static_patterns_prompt_injection status: degraded.")
+        elif case == "fatal-scope-exclusion":
+            completeness["scope_exclusions"].append(
+                {"outcome": "out_of_scope", "path": ".git", "reason_code": "vcs_metadata", "fatal": True}
+            )
+
+        result = _validate_skillspector_payload(mock_tools, skill, payload)
+
+        assert result.is_incomplete
+        assert result.incomplete_scans == ["skillspector"]
+        assert not any("does not bundle" in warning for warning in result.warnings)
+
+    def test_report_accounting_must_match_a_fully_inspected_bundle(self, tmp_path: Path) -> None:
+        skill = _write_skill(tmp_path / "notes-writer", _NOTES_WRITER_FILES)
+        assert _missing_reference_note(_reference_report("2.13.3"), skill) is not None
+
+        assert _missing_reference_note(_reference_report("2.13.3"), None) is None
+        for field in ("partially_inspected_files", "entirely_uninspected_files", "findings_before_filtering"):
+            payload = _reference_report("2.13.3")
+            payload["analysis_completeness"][field] = 1
+            assert _missing_reference_note(payload, skill) is None, field
+        payload = _reference_report("2.13.3")
+        universal = next(
+            status
+            for status in payload["analysis_completeness"]["analyzer_statuses"]
+            if status["analyzer_id"] == "static_yara"
+        )
+        payload["analysis_completeness"]["analyzer_statuses"].append(dict(universal))
+        assert _missing_reference_note(payload, skill) is None
+        payload["analysis_completeness"]["analyzer_statuses"].remove(universal)
+        payload["analysis_completeness"]["analyzer_statuses"].remove(universal)
+        assert _missing_reference_note(payload, skill) is None
+
+    def test_pre_2_12_unresolved_row_needs_a_missing_reference_on_its_line(self) -> None:
+        row = _reference_report("2.11.2")["analysis_completeness"]["ledger_exceptions"][0]
+        missing = {"source_path": "SKILL.md", "line": 10, "status": "missing"}
+        ambiguous = {**missing, "status": "ambiguous"}
+
+        assert _skillspector_reference_row_is_advisory(row, (2, 11, 2), [missing])
+        assert _skillspector_reference_row_is_advisory(row, (2, 10, 0), [missing, {**ambiguous, "line": 9}])
+        assert not _skillspector_reference_row_is_advisory(row, (2, 12, 0), [missing])
+        assert not _skillspector_reference_row_is_advisory(row, None, [missing])
+        assert not _skillspector_reference_row_is_advisory(row, (2, 11, 2), [missing, ambiguous])
+        assert not _skillspector_reference_row_is_advisory(row, (2, 11, 2), [{**missing, "line": True}])
+        assert not _skillspector_reference_row_is_advisory(row, (2, 11, 2), [{**missing, "source_path": "a.md"}])
+        assert not _skillspector_reference_row_is_advisory(row, (2, 11, 2), [])
+        assert not _skillspector_reference_row_is_advisory(row, (2, 11, 2), None)
+        assert not _skillspector_reference_row_is_advisory({**row, "start_line": None}, (2, 11, 2), [missing])
+
+    def test_bundled_file_path_is_contained_and_listed_once(self, tmp_path: Path) -> None:
+        skill = _write_skill(tmp_path / "notes-writer", _NOTES_WRITER_FILES)
+        components = [{"path": "SKILL.md"}, {"path": "scripts/summarize.py"}]
+
+        assert _skillspector_report_path_is_bundled_file("SKILL.md", components, skill)
+        assert _skillspector_report_path_is_bundled_file("scripts/summarize.py", components, skill)
+        assert not _skillspector_report_path_is_bundled_file("SKILL.md", components, None)
+        assert not _skillspector_report_path_is_bundled_file("SKILL.md", [*components, {"path": "SKILL.md"}], skill)
+        assert not _skillspector_report_path_is_bundled_file(["SKILL.md"], components, skill)
+        for path in ("", ".", "scripts/", "scripts//summarize.py", "/SKILL.md", "scripts/../SKILL.md"):
+            assert not _skillspector_report_path_is_bundled_file(path, [*components, {"path": path}], skill), path
+        (skill / "large.md").write_bytes(b"x" * 1_000_001)
+        assert not _skillspector_report_path_is_bundled_file("large.md", [{"path": "large.md"}], skill)
+
+    def test_single_file_root_accepts_only_its_own_name(self, tmp_path: Path) -> None:
+        rules = tmp_path / "AGENTS.md"
+        rules.write_text("Write the summary to `output/notes.md`.\n", encoding="utf-8")
+
+        assert _skillspector_report_path_is_bundled_file("AGENTS.md", [{"path": "AGENTS.md"}], rules)
+        assert not _skillspector_report_path_is_bundled_file("SKILL.md", [{"path": "SKILL.md"}], rules)
+
+    @pytest.mark.skipif(os.name == "nt", reason="POSIX hard-link semantics")
+    def test_hard_linked_file_is_not_a_bundled_file(self, tmp_path: Path) -> None:
+        skill = _write_skill(tmp_path / "notes-writer", _NOTES_WRITER_FILES)
+        os.link(skill / "SKILL.md", tmp_path / "elsewhere.md")
+
+        assert not _skillspector_report_path_is_bundled_file("SKILL.md", [{"path": "SKILL.md"}], skill)
+
+    def test_warning_quotes_three_rows(self, tmp_path: Path) -> None:
+        skill = _write_skill(tmp_path / "notes-writer", _NOTES_WRITER_FILES)
+        payload = _reference_report("2.13.3")
+        row = payload["analysis_completeness"]["ledger_exceptions"][0]
+        payload["analysis_completeness"]["ledger_exceptions"] = [
+            {**row, "start_line": line, "end_line": line} for line in (2, 4, 6, 8, 10)
+        ]
+
+        note = _missing_reference_note(payload, skill)
+
+        assert note is not None
+        assert note.startswith(
+            "SkillSpector reported 5 reference(s) to files the skill does not bundle (SKILL.md:2 "
+            "[reference_resolution; reference_missing]; SKILL.md:4 [reference_resolution; reference_missing]; "
+            "SKILL.md:6 [reference_resolution; reference_missing]; and 2 more); "
+        )

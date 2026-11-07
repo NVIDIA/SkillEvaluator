@@ -23,6 +23,7 @@ import math
 import os
 import re
 import shutil
+import stat
 import struct
 import tempfile
 import tokenize
@@ -55,7 +56,7 @@ from skillevaluator.skillspector_provenance import SKILLSPECTOR_LLM_ANALYZERS, s
 from skillevaluator.spdx import is_spdx_only_html_comment
 from skillevaluator.utils.path_security import matches_filesystem_name
 from skillevaluator.utils.scanner_install import prepare_skillspector
-from skillevaluator.utils.secure_fs import SecurePathError, SecureRoot
+from skillevaluator.utils.secure_fs import SecurePathError, SecureRoot, stat_is_link_or_reparse
 from skillevaluator.utils.tool_runner import Tools, parse_json_output
 from skillevaluator.validators.base import (
     Finding,
@@ -1544,6 +1545,180 @@ def _skillspector_passive_raster_note(
     )
 
 
+# SkillSpector 2.12.0 split ``reference_unresolved``: a path-like reference that
+# matches no bundled file became ``reference_missing``, and ``reference_unresolved``
+# now means a reference that matches several bundled files.
+_SKILLSPECTOR_REFERENCE_MISSING_VERSION = (2, 12, 0)
+# SkillSpector inspects at most 1,000,000 bytes of a file, so a larger file
+# holding a reference is never fully inspected and is not accepted.
+_SKILLSPECTOR_REFERENCE_SOURCE_MAX_BYTES = 1_000_000
+
+
+def _skillspector_report_path_is_bundled_file(path: object, components: object, scanned_root: Path | None) -> bool:
+    """Whether a SkillSpector report *path* names one scanned component that is a regular file.
+
+    The path must be relative POSIX text with no backslash, no empty, ``.`` or
+    ``..`` part and no anchor, and exactly one ``components`` entry must carry
+    it. Under a directory *scanned_root* it must name a regular, single-link
+    file reached without following a link at any component (:class:`SecureRoot`);
+    a single-file *scanned_root* matches only its own name. Without a root
+    nothing is accepted.
+    """
+    if scanned_root is None or not isinstance(path, str) or not isinstance(components, list):
+        return False
+    parts = path.split("/")
+    if (
+        "\\" in path
+        or not _is_filesystem_safe_path_text(path)
+        or any(part in {"", ".", ".."} or Path(part).anchor for part in parts)
+        or [component.get("path") for component in components if isinstance(component, dict)].count(path) != 1
+    ):
+        return False
+    try:
+        root_metadata = scanned_root.lstat()
+        if stat.S_ISREG(root_metadata.st_mode) and not stat_is_link_or_reparse(root_metadata):
+            return path == scanned_root.name
+        with SecureRoot(scanned_root) as root:
+            root.read_bytes(Path(*parts), _SKILLSPECTOR_REFERENCE_SOURCE_MAX_BYTES)
+    except (OSError, SecurePathError):
+        return False
+    return True
+
+
+def _skillspector_reference_row_is_advisory(
+    row: Mapping[str, object],
+    skillspector_version: tuple[int, int, int] | None,
+    references: object,
+) -> bool:
+    """Whether a ledger row only records a reference to a file the skill does not bundle.
+
+    The row must be a nonfatal ``partial`` row in phase ``reference_resolution``
+    that names no analyzer and no error class. SkillSpector 2.12.0 and later
+    report such a reference as ``reference_missing``; there
+    ``reference_unresolved`` means a reference that matches several bundled
+    files, which is not advisory. Earlier releases report both cases as
+    ``reference_unresolved``, so that row is advisory only when the report's
+    ``references`` list records each reference on the row's line as ``missing``.
+    """
+    if (
+        row.get("fatal") is not False
+        or row.get("outcome") != "partial"
+        or row.get("phase") != "reference_resolution"
+        or row.get("analyzers") not in (None, [])
+        or row.get("error_class") is not None
+    ):
+        return False
+    reason = row.get("reason_code")
+    if reason == "reference_missing":
+        return True
+    line = row.get("start_line")
+    if (
+        reason != "reference_unresolved"
+        or skillspector_version is None
+        or skillspector_version >= _SKILLSPECTOR_REFERENCE_MISSING_VERSION
+        or not isinstance(references, list)
+        or isinstance(line, bool)
+        or not isinstance(line, int)
+    ):
+        return False
+    statuses = {
+        reference.get("status")
+        for reference in references
+        if isinstance(reference, dict)
+        and reference.get("source_path") == row.get("path")
+        and not isinstance(reference.get("line"), bool)
+        and reference.get("line") == line
+        and reference.get("status") in {"missing", "ambiguous"}
+    }
+    return statuses == {"missing"}
+
+
+def _skillspector_missing_reference_warning(rows: list[Mapping[str, object]]) -> str:
+    """Describe accepted missing-reference ledger rows, quoting up to three of them."""
+    shown = rows[:_SKILLSPECTOR_INCOMPLETE_EXAMPLES]
+    labels = "; ".join(_skillspector_ledger_exception_label(row) for row in shown)
+    if len(rows) > len(shown):
+        labels = f"{labels}; and {len(rows) - len(shown)} more"
+    return (
+        f"SkillSpector reported {len(rows)} reference(s) to files the skill does not bundle ({labels}); "
+        "every bundled file was inspected, so the scan is not marked incomplete. "
+        "Files outside the skill were not scanned"
+    )
+
+
+def _skillspector_missing_reference_note(
+    ledger_exceptions: list[dict],
+    analyzer_statuses: list[dict],
+    counts: Mapping[str, int],
+    limitations: list[str],
+    scope_exclusions: object,
+    components: object,
+    scanned_root: Path | None,
+    *,
+    references: object,
+    skillspector_version: tuple[int, int, int] | None,
+) -> str | None:
+    """A note for a ``partial`` analysis whose only gaps are references to files not bundled, else ``None``.
+
+    SkillSpector records a path-like reference in the skill's instructions that
+    matches no bundled file, such as a file the skill writes at run time or a
+    repository source, as a nonfatal ``reference_resolution`` ledger row and
+    reports the analysis as ``partial``, although every bundled file was
+    inspected.
+
+    That gap is accepted only when every ledger row passes
+    :func:`_skillspector_reference_row_is_advisory` and names a bundled file
+    (:func:`_skillspector_report_path_is_bundled_file`), no file is partially
+    or entirely uninspected, no finding was filtered out, there is no
+    limitation and no fatal scope exclusion, every analyzer is ``completed``,
+    ``not_applicable`` or ``disabled``, and each universal analyzer completed
+    one work item per component. Anything else keeps the scan INCOMPLETE.
+    """
+    if (
+        scanned_root is None
+        or not ledger_exceptions
+        or limitations
+        or counts["partially_inspected_files"]
+        or counts["entirely_uninspected_files"]
+        or counts["findings_before_filtering"] != counts["findings_after_filtering"]
+        or not isinstance(scope_exclusions, list)
+        or any(not isinstance(row, dict) or row.get("fatal") is not False for row in scope_exclusions)
+    ):
+        return None
+    paths: set[str] = set()
+    for row in ledger_exceptions:
+        path = row.get("path")
+        if not isinstance(path, str) or not _skillspector_reference_row_is_advisory(
+            row, skillspector_version, references
+        ):
+            return None
+        paths.add(path)
+
+    total = counts["total_components"]
+    universal = _SKILLSPECTOR_COMMON_UNIVERSAL_ANALYZERS | {"artifact_integrity"}
+    accounted: set[str] = set()
+    for status in analyzer_statuses:
+        analyzer_id = status.get("analyzer_id")
+        state = status.get("status")
+        if analyzer_id not in universal:
+            if state not in {"completed", "not_applicable", "disabled"}:
+                return None
+            continue
+        if (
+            analyzer_id in accounted
+            or state != "completed"
+            or status.get("planned_work") != total
+            or status.get("completed") != total
+        ):
+            return None
+        accounted.add(analyzer_id)
+    if accounted != universal or not all(
+        _skillspector_report_path_is_bundled_file(path, components, scanned_root) for path in sorted(paths)
+    ):
+        return None
+    return _skillspector_missing_reference_warning(ledger_exceptions)
+
+
 class SecurityValidator(ValidatorBase):
     """Scans skills for security vulnerabilities and PII leakage.
 
@@ -2107,9 +2282,11 @@ class SecurityValidator(ValidatorBase):
         explicit baseline, and that report must then account for them.
 
         A ``partial`` analysis makes the scan INCOMPLETE unless its only gaps are
-        referenced PNG or JPEG images that the files under *scanned_root* confirm
-        (:func:`_skillspector_passive_raster_note`); that is a warning instead.
-        *scanned_root* is the directory the report's relative paths start from.
+        references to files the skill does not bundle
+        (:func:`_skillspector_missing_reference_note`) or referenced PNG or JPEG
+        images (:func:`_skillspector_passive_raster_note`), each confirmed by the
+        files under *scanned_root*; that is a warning instead. *scanned_root* is
+        the directory the report's relative paths start from.
         """
         partial_reported = False
         if "error" in data and data["error"] is not None:
@@ -2634,7 +2811,17 @@ class SecurityValidator(ValidatorBase):
                         )
                         return False
                     partial_reported = True
-                    raster_note = _skillspector_passive_raster_note(
+                    gap_note = _skillspector_missing_reference_note(
+                        ledger_exceptions,
+                        analyzer_statuses,
+                        counts,
+                        limitations,
+                        analysis_completeness.get("scope_exclusions", []),
+                        data.get("components"),
+                        scanned_root,
+                        references=analysis_completeness.get("references"),
+                        skillspector_version=skillspector_version,
+                    ) or _skillspector_passive_raster_note(
                         ledger_exceptions,
                         analyzer_statuses,
                         counts,
@@ -2643,8 +2830,8 @@ class SecurityValidator(ValidatorBase):
                         data.get("components"),
                         scanned_root,
                     )
-                    if raster_note is not None:
-                        result.add_warning(raster_note)
+                    if gap_note is not None:
+                        result.add_warning(gap_note)
                     else:
                         result.add_error(
                             _skillspector_incomplete_analysis_error(completeness_status, ledger_exceptions)

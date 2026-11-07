@@ -13,6 +13,23 @@ All notable changes to SkillEvaluator are documented in this file.
   Your Agent" docs page shows how to install it in Codex, Claude Code, OpenCode,
   OpenClaw, and other skill-aware agents.
 
+- Opt-in three-tier GitHub and GitLab CI entrypoints with required Tier 1,
+  advisory Tier 2 and paired Tier 3, Docker and native local execution, pinned
+  local agent bootstrap, retained aggregate/native reports, and trusted default-branch
+  feedback. Candidate templates require a capability-bearing release descriptor;
+  released Tier 1 bundles and workflows remain unchanged. Incomplete runs retain
+  redacted startup diagnostics. Interrupted Tier 1 selections cannot pass on
+  partial results; advisory tiers preserve their failed or incomplete status.
+  GitLab callers quote variable values, use literal job timeouts
+  compatible with GitLab 17.8, and safely select changes in runner-owned checkouts.
+  GitLab before 18.4 uses a separate read-only admission credential; feedback
+  initiation is advisory so first-install reporting does not change the tier gate.
+  Same-project feedback uses the short-lived job-token trigger API and verifies
+  the server-bound upstream pipeline and source job, preserving protected-branch
+  and deployment permissions. Its persisted GraphQL MR association supports
+  GitLab 17.x without requiring the newer pipeline/MR REST endpoint. Publisher
+  failures include a trusted check location and finite diagnostic category.
+
 ### Changed
 
 - Align terminal grade and lift colors across compact, full, and direct Tier 3
@@ -51,6 +68,22 @@ All notable changes to SkillEvaluator are documented in this file.
   complete expanded evidence, and readable no-JavaScript/print views. Keep
   required and advisory summary reasons distinct within mixed tiers and focus
   direct agent links on their named panels.
+
+- Compact all-tier CI PR and MR feedback into one summary table with a row per
+  skill, one-line tier statuses and issue counts, and one combined **Report**
+  link per skill. Incomplete or missing evidence keeps issue counts unknown;
+  detailed aggregate and native reports remain in the authenticated artifact.
+
+- Make Tier 1 the only gate in opt-in all-tier GitHub and GitLab CI. Tier 2 and
+  Tier 3 retain failed and incomplete advisory outcomes and native reports.
+  Deprecate and ignore onboarding's `--tier3-required`, GitHub's
+  `tier3-required` input and GitLab's `SKILL_EVAL_TIER3_REQUIRED` variable;
+  none can make Tier 3 block CI. Standalone validation and benchmark
+  publication policies are unchanged.
+
+- Give staged Tier 3 main images a fixed liveness healthcheck so Docker Compose
+  2 can wait for readiness while authored image healthchecks remain suppressed.
+  Keep custom service healthchecks and their readiness dependencies intact.
 
 ### Documentation
 

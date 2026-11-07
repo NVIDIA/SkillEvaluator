@@ -13,6 +13,17 @@ All notable changes to SkillEvaluator are documented in this file.
   Your Agent" docs page shows how to install it in Codex, Claude Code, OpenCode,
   OpenClaw, and other skill-aware agents.
 
+- `--tolerate-baseline-timeouts` (and `harbor.tolerate_baseline_timeouts` in
+  `evals/config.yml`) keeps a Tier 3 agent scored on its clean with-skill arm
+  when its only baseline failures are attempts that hit the agent execution
+  timeout while the agent was still producing output. By default one such
+  attempt still fails the agent and the whole run. The option needs both arms,
+  standard dimension grading, a peer agent that completed both arms and no
+  other launch errors; it refuses a timeout whose logs show provider overload,
+  rate limit or authentication errors. The baseline condition stays `failed`,
+  baseline scores and Skill Lift are not reported for that agent, the run
+  lists a warning, and the run is still not complete publication evidence.
+
 ### Changed
 
 - Align terminal grade and lift colors across compact, full, and direct Tier 3

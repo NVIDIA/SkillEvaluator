@@ -15,8 +15,6 @@ import stat
 from dataclasses import dataclass
 from pathlib import Path
 
-import yaml
-
 from skillevaluator.constants import (
     CONTENT_DEDUP_MAX_FILE_BYTES,
     CONTENT_DEDUP_MAX_TOTAL_BYTES,
@@ -33,6 +31,12 @@ from skillevaluator.constants import (
 from skillevaluator.deduplication.utils.skill_collector import _SecureReadError, _SecureRoot
 from skillevaluator.embedding.limits import validate_max_entries
 from skillevaluator.logging_config import get_logger
+from skillevaluator.utils.structured_data import (
+    StructuredDataLimitError,
+    StructuredDataSyntaxError,
+    load_bounded_yaml,
+    require_bounded_string,
+)
 from skillevaluator.utils.tier2_paths import (
     contained_directory_alias_target,
     is_contained_compatibility_alias,
@@ -46,6 +50,10 @@ MAX_MANIFEST_BYTES = CONTENT_DEDUP_MAX_FILE_BYTES
 MAX_COLLECTION_BYTES = CONTENT_DEDUP_MAX_TOTAL_BYTES
 MAX_DISCOVERED_PATHS = SIMILARITY_MAX_DISCOVERED_PATHS
 DISCOVERY_EXCLUDED_DIRS = SCAN_EXCLUDED_DIRS
+# Longest name or description read from frontmatter. It matches the registry's
+# description embedding text and catalog text limits, so every extracted entry
+# can be embedded and saved, and the Tier 1 length rules stay with Tier 1.
+MAX_FRONTMATTER_FIELD_CHARS = 16_384
 
 
 @dataclass
@@ -271,11 +279,15 @@ def _extract_from_file(
         return None
 
     frontmatter_yaml, _markdown_content = match.groups()
+    label = relative_path.as_posix() if relative_path is not None else file_path.name
     try:
-        data = yaml.safe_load(frontmatter_yaml)
-    except yaml.YAMLError as exc:
+        # Agent clients keep the last value of a repeated frontmatter key.
+        data = load_bounded_yaml(frontmatter_yaml, last_key_wins=True)
+    except StructuredDataSyntaxError as exc:
         logger.debug("Invalid YAML frontmatter in %s: %s", file_path, exc)
         return None
+    except StructuredDataLimitError as exc:
+        raise ValueError(f"Manifest structured-data complexity limit exceeded: {label}") from exc
     if not data or not isinstance(data, dict):
         logger.debug("Frontmatter in %s is not a non-empty mapping", file_path)
         return None
@@ -291,9 +303,19 @@ def _extract_from_file(
         )
         return None
 
+    # Never call str() on a frontmatter value: a list or mapping built from
+    # YAML aliases renders to a string far larger than the manifest.
+    try:
+        name = require_bounded_string(name, name_field, max_chars=MAX_FRONTMATTER_FIELD_CHARS, allow_empty=True)
+        description = require_bounded_string(
+            description, description_field, max_chars=MAX_FRONTMATTER_FIELD_CHARS, allow_empty=True
+        )
+    except ValueError as exc:
+        raise ValueError(f"Manifest frontmatter {exc}: {label}") from exc
+
     return ContentEntry(
-        name=str(name),
-        description=str(description),
+        name=name,
+        description=description,
         path=str(file_path.parent if content_type == CONTENT_TYPE_SKILL else file_path),
         content_type=content_type,
         full_text=full_text,

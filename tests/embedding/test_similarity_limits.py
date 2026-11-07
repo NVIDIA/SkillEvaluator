@@ -291,3 +291,24 @@ def test_loaded_catalog_rejects_over_budget_work_before_normalizing(
 
     normalize.assert_not_called()
     client.embed_single.assert_not_called()
+
+
+@pytest.mark.parametrize("full_body", [False, True])
+def test_alias_amplified_frontmatter_fails_the_scan_before_any_embedding_request(
+    tmp_path: Path, monkeypatch, full_body: bool
+) -> None:
+    _collection(tmp_path, 2)
+    lines = ["seed: &a0 safe"]
+    lines += [f"a{level}: &a{level} [*a{level - 1}, *a{level - 1}]" for level in range(1, 19)]
+    lines += ["name: alias-dag", "description: *a18"]
+    (tmp_path / "alias-dag").mkdir()
+    (tmp_path / "alias-dag" / "SKILL.md").write_text("---\n" + "\n".join(lines) + "\n---\n", encoding="utf-8")
+    client = _client()
+    monkeypatch.setattr("skillevaluator.validators.similarity.EmbeddingClient", lambda **_kwargs: client)
+
+    (result,) = run_similarity_check(tmp_path, content_type="skill", full_body=full_body)
+
+    assert result.passed is False
+    assert result.errors == ["Manifest structured-data complexity limit exceeded: alias-dag/SKILL.md"]
+    client.embed.assert_not_called()
+    client.embed_single.assert_not_called()

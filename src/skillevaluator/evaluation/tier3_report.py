@@ -851,6 +851,11 @@ def build_agent_eval_payload(
         for trial in agent.get("trials", []):
             trial.pop("score_reasons", None)
     public_dataset = deduplicate_dataset_entries([entry for entry in (dataset or []) if isinstance(entry, dict)])
+    from skillevaluator.evaluation.tier3_expectations import build_case_diagnostics
+
+    case_diagnostics, expectation_omissions = build_case_diagnostics(public_dataset, agents, baseline_only=baseline_only)
+    for section, count in expectation_omissions.items():
+        report_budget.omit(section, count)
     computed_dataset_truth = (
         build_dataset_snapshot(public_dataset, evaluator_version=evaluator_version or "") if public_dataset else None
     )
@@ -1014,6 +1019,7 @@ def build_agent_eval_payload(
         "metric_labels": metric_labels,
         "attempt_policy": policy,
         "dataset": public_dataset,
+        "case_diagnostics": case_diagnostics,
         "provenance": _build_provenance(
             agent_payloads,
             agents,
@@ -1367,6 +1373,8 @@ def _enforce_report_payload_budget(
     # Built failure reasons and excerpts only explain scores the payload already
     # carries, so they go before any recorded evidence.
     report_budget.omit("failure_reasons", strip_failure_reason_text(payload))
+    if _serialized_payload_size(payload) > _MAX_EMBEDDED_REPORT_BYTES:
+        report_budget.omit("case_diagnostics", len(payload.pop("case_diagnostics", [])))
     refresh_signal()
     if _serialized_payload_size(payload) <= _MAX_EMBEDDED_REPORT_BYTES:
         return

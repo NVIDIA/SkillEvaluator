@@ -2456,6 +2456,9 @@
                 {% if tier3_preview_notice.failure_reasons %}
                 HTML preview left out {{ tier3_preview_notice.failure_reasons }} failure reason{{ 's' if tier3_preview_notice.failure_reasons != 1 else '' }} or excerpt{{ 's' if tier3_preview_notice.failure_reasons != 1 else '' }} to keep the overview complete.
                 {% endif %}
+                {% if tier3_preview_notice.case_diagnostics %}
+                Expectation diagnostics for {{ tier3_preview_notice.case_diagnostics }} case(s) were omitted from the HTML preview; use JSON Downloads for the retained inventory.
+                {% endif %}
                 JSON Downloads preserve the complete bounded canonical payload.
             </span>
             {% endif %}
@@ -3576,6 +3579,41 @@
                         <ol class="t3-ds-behaviors">{% for b in case_assertions %}<li>{{ b }}</li>{% endfor %}</ol>
                     </div>
                     {% endif %}
+                    {% for diagnostic in tier3.case_diagnostics or [] if diagnostic.entry_id == case.id %}
+                    <div class="t3-ds-field">
+                        <span class="t3-ds-label">Expectation diagnostics</span>
+                        <p>Recorded verdicts, not inferred skill defects. Evidence excerpts are metric-level context; inspect the trial for attribution.</p>
+                        {% for attempt in diagnostic.attempts %}
+                        <details class="t3-details" open>
+                            <summary>{{ attempt.agent }} · {{ 'With skill' if attempt.condition == 'with_skill' else 'Without skill' }} · {{ attempt.trial_id or 'No matched trial' }}</summary>
+                            <div class="t3-details-body">
+                            {% for error in attempt.errors %}<p>{{ error }}</p>{% endfor %}
+                            {% if attempt.judge_note %}<p>{{ attempt.judge_note }}</p>{% endif %}
+                            {% for status in ['unmet', 'not_checked', 'unscored', 'not_applicable', 'met'] %}
+                            {% set judgments = attempt.judgments | selectattr('status', 'equalto', status) | list %}
+                            {% if judgments %}
+                            <h4>{{ status | replace('_', ' ') | title }} ({{ judgments | length }})</h4>
+                            <ul class="t3-ds-behaviors">
+                            {% for judgment in judgments %}
+                            <li>
+                                {% for requirement in diagnostic.requirements if requirement.expectation_id == judgment.expectation_id %}
+                                <b>{{ requirement.expectation_id }}</b>: <span style="white-space:pre-wrap;">{{ requirement.requirement }}</span>
+                                {% endfor %}
+                                <div>{{ judgment.reason }}</div>
+                                {% if judgment.unmet_checks %}<div>Unmet rubric checks: {{ judgment.unmet_checks | join(', ') }}</div>{% endif %}
+                                {% if judgment.inapplicable_checks %}<div>Inapplicable rubric checks: {{ judgment.inapplicable_checks | join(', ') }}</div>{% endif %}
+                                {% for excerpt in judgment.evidence %}<div><code>{{ excerpt }}</code></div>{% endfor %}
+                                {% if status != 'met' %}<div>Next diagnostic step: {{ judgment.next_step }}</div>{% endif %}
+                            </li>
+                            {% endfor %}
+                            </ul>
+                            {% endif %}
+                            {% endfor %}
+                            </div>
+                        </details>
+                        {% endfor %}
+                    </div>
+                    {% endfor %}
                     </div>
                 </details>
                 {% endfor %}

@@ -3082,7 +3082,7 @@ BEHAVIOR_CHECK_JSON_SCHEMA = {
                 "type": "object",
                 "properties": {
                     "step": {"type": "integer"},
-                    "passed": {"type": "boolean"},
+                    "passed": {"type": ["boolean", "null"]},
                     "reason": {"type": "string"},
                 },
                 "required": ["step", "passed", "reason"],
@@ -3378,8 +3378,14 @@ def _behavior_prompt_example(expected_count):
             "results": [
                 {
                     "step": step,
-                    "passed": step % 2 == 1,
-                    "reason": "Seen in the transcript." if step % 2 == 1 else "Not seen in the transcript.",
+                    "passed": None if step % 3 == 0 else step % 3 == 1,
+                    "reason": (
+                        "Required tool output was not captured."
+                        if step % 3 == 0
+                        else "Seen in the transcript."
+                        if step % 3 == 1
+                        else "Observed output violates the requirement."
+                    ),
                 }
                 for step in range(1, expected_count + 1)
             ],
@@ -3407,7 +3413,12 @@ EXPECTED BEHAVIORS:
 
 Respond with ONLY one JSON object. "results" must hold exactly {expected_count} entries, one per \
 expected behavior: "step" is the behavior's number (each number from 1 to {expected_count} exactly \
-once), "passed" is true (observed) or false (not observed), and "reason" is under 15 words. Add a \
+once), "passed" is true (observed), false (evidence supports a violation or absence), or null \
+when missing or incomplete evidence prevents checking the behavior. Missing artifact contents, \
+unavailable tool output, or a truncated trace require null, NOT false, for checks that depend on \
+that evidence. A missing observation alone is not proof the behavior failed. Explain that evidence gap \
+in "reason" (under 15 words). An unrelated task \
+can be a valid negative control: evaluate its stated behavior without requiring skill use. Add a \
 one-sentence "summary". Do not include a score: it is computed from the results.
 Example of the shape for this task's {expected_count} behaviors (the values are only an illustration):
 {_behavior_prompt_example(expected_count)}"""
@@ -3437,23 +3448,41 @@ Example of the shape for this task's {expected_count} behaviors (the values are 
         schema_name="behavior_check_judgment",
     )
     if error:
-        return _judge_error(error, results=[])
+        return _judge_error(error, results=[], expectations=_behavior_expectations(expected_behaviors, [], error))
 
-    # A salvaged reply leaves the behaviors after the cut unjudged; they count as not observed.
+    # Keep the conservative score denominator without calling missing verdicts failures.
     results = sorted(parsed["results"], key=lambda result: result["step"])
     score = sum(1 for result in results if result["passed"]) / expected_count
     return {
         "score": round(score, 4),
         "reason": parsed.get("summary", ""),
         "results": results,
+        "expectations": _behavior_expectations(expected_behaviors, results),
     }
+
+
+def _behavior_expectations(expected_behaviors, results, error=""):
+    by_step = {result["step"]: result for result in results}
+    return [
+        {
+            "step": step,
+            "requirement": requirement,
+            "status": ("met" if by_step[step]["passed"] else "unmet")
+            if step in by_step and type(by_step[step]["passed"]) is bool
+            else "not_checked",
+            "reason": by_step[step].get("reason", "")
+            if step in by_step
+            else _redact_configured_credentials(error) or "No judgment returned for this expectation",
+        }
+        for step, requirement in enumerate(expected_behaviors, 1)
+    ]
 
 
 def _behavior_payload_error(parsed, expected_count, *, allow_partial=False):
     """Describe what is wrong with a behavior reply, or return ``None`` when it is usable.
 
     Each expected behavior is judged exactly once, identified by its 1-based
-    ``step`` number, with a boolean ``passed``. *allow_partial* accepts a
+    ``step`` number, with a boolean ``passed`` or an explicit null abstention. *allow_partial* accepts a
     salvaged prefix that judges each of its steps once. The score is computed
     from the verdicts, so a ``score`` field in the reply is ignored.
     """
@@ -3469,8 +3498,16 @@ def _behavior_payload_error(parsed, expected_count, *, allow_partial=False):
         return f'"results" has {len(results)} entries; it needs exactly {expected_count}, one per behavior'
     if any(not isinstance(result, dict) for result in results):
         return 'every "results" entry must be an object'
-    if any(not isinstance(result.get("passed"), bool) for result in results):
-        return 'every "results" entry needs "passed" set to true or false'
+    if any(
+        "passed" not in result or (result["passed"] is not None and type(result["passed"]) is not bool)
+        for result in results
+    ):
+        return 'every "results" entry needs "passed" set to true, false, or null'
+    if any(
+        result["passed"] is None and (not isinstance(result.get("reason"), str) or not result["reason"].strip())
+        for result in results
+    ):
+        return 'unchecked entries need a nonempty "reason" explaining the missing evidence'
     steps = [result.get("step") for result in results]
     if any(isinstance(step, bool) or not isinstance(step, int) for step in steps):
         return 'every "results" entry needs an integer "step" number'

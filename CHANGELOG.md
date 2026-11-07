@@ -73,6 +73,9 @@ All notable changes to SkillEvaluator are documented in this file.
 
 ### Fixed
 
+- A failed Tier 3 execution (for example a backend launch failure) now marks the
+  per-agent report payload as failed with its errors, instead of only the
+  top-level `result.json`. Scores from the completed trials are kept.
 - Skill activation now credits a SKILL.md read wrapped in a shell, such as
   `/bin/bash -lc 'cat skills/x/SKILL.md'`, which some agent harnesses record
   instead of the bare command. Searches inside a wrapper (`bash -c 'grep SKILL

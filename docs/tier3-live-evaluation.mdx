@@ -467,15 +467,25 @@ modes. Unset flags fall back to these `evals/config.yml` keys, as on Harbor:
 `--timeout-multiplier`, `--environment-kwarg`, custom Dockerfile modes other than the
 default, and the config keys `harbor.base_image_mode` (reuse/rebuild),
 `task_source: native_harbor`, `agent_workdir`, `pre_agent_setup` (alias `setup_commands`),
-`timeout_multiplier`, `resources.storage_mb` and `skill_workspace.decoy_manifest`,
+`timeout_multiplier`, `resources.storage_mb`, `skill_workspace.decoy_manifest`, MCP
+servers in `evals/environment/mcp_servers.toml`, native `evals/harbor/` tasks (also when
+`task_source: auto` resolves to them), a model URL with embedded credentials, and Windows hosts,
 whether set by flag or config (a flag overrides its config key), before anything
 starts (`tier3 PATH --autopilot` checks these before it writes a dataset); it never
 falls back to Harbor. `runtime_env` (alias `passthrough_env`) entries reach the agent's sandbox as `${NAME}`
 references resolved from Gym's environment. Gym receives only the variables Harbor's
 Docker backend allows (including `DOCKER_HOST`, `DOCKER_CONTEXT` and TLS settings),
-Gym's `UV_*` package-index settings, and the policy and judge credentials. A finished
-run updates `latest` and records the same dataset snapshot and publication target as
-a Harbor run.
+Gym's `UV_*` package-index settings and credentials, `NETRC`, and the policy and judge
+credentials; relative Docker and TLS paths are made absolute first. Judge overrides
+(`LLM_JUDGE_MODEL`, `SKILL_EVAL_JUDGE_*`) reach Gym's verifier as on Harbor, and Vertex
+AI ADC tokens are refreshed before every `gym eval run`. Every agent and arm is staged
+from one skill snapshot before the first launch. A missing or failed attempt counts as a
+failed trial, and the arm keeps its other scored trials; any launch failure marks the
+run, the agent's progress row and the report as failed. A finished run updates `latest`
+and records the same dataset snapshot and publication target as a Harbor run. As on
+Harbor without `--harbor-keep-jobs`, the staged tasks and per-trial files are removed at
+the end; Gym's own redacted `gym.log` and its `rollouts.jsonl` stay under `_nemo-gym/`
+in the run folder, and the rollouts hold the raw agent responses.
 
 ## Where agents run
 

@@ -5,6 +5,7 @@
 
 from __future__ import annotations
 
+import os
 import stat
 from collections.abc import Iterator
 from contextlib import contextmanager
@@ -102,8 +103,12 @@ def _resolve_workflow_environment_kwargs(params: dict[str, Any]) -> dict[str, An
     )
 
 
-def _preflight_options(skill_path: Path, params: dict[str, Any]) -> dict[str, Any]:
-    """Reject known configuration errors before generating a paid dataset."""
+def _preflight_options(skill_path: Path, params: dict[str, Any], *, harbor_runtime: bool = True) -> dict[str, Any]:
+    """Reject known configuration errors before generating a paid dataset.
+
+    ``harbor_runtime=False`` keeps the backend-neutral checks but skips the Harbor agent
+    runtime and credential plan, for backends that run their own agent harness.
+    """
     from skillevaluator.cli import _evaluated_source_from_options
     from skillevaluator.provider_config import resolve_llm_provider
     from skillevaluator.tier3.commands import parse_agent_model_overrides, resolve_agents, validate_agents
@@ -192,15 +197,16 @@ def _preflight_options(skill_path: Path, params: dict[str, Any]) -> dict[str, An
     runtime_env, errors = _resolve_runtime_env(harbor.get("runtime_env"), env_mode=params["env_mode"])
     if errors:
         raise ValueError("; ".join(errors))
-    _resolve_agent_runtime_plan(
-        provider=provider,
-        agents=agents,
-        models={agent: value[0] for agent, value in resolution.items()},
-        configured_runtime_env=runtime_env,
-        env_mode=params["env_mode"],
-        model_sources={agent: value[1] for agent, value in resolution.items()},
-        environment_kwargs=resolved_environment_kwargs,
-    )
+    if harbor_runtime:
+        _resolve_agent_runtime_plan(
+            provider=provider,
+            agents=agents,
+            models={agent: value[0] for agent, value in resolution.items()},
+            configured_runtime_env=runtime_env,
+            env_mode=params["env_mode"],
+            model_sources={agent: value[1] for agent, value in resolution.items()},
+            environment_kwargs=resolved_environment_kwargs,
+        )
     _evaluated_source_from_options(
         params["evaluated_source_repository"],
         params["evaluated_source_revision"],
@@ -237,7 +243,14 @@ def _preflight_environment(
 def _preflight_nemo_gym(skill_path: Path, params: dict[str, Any]) -> None:
     """Reject options and config the NeMo Gym backend cannot honor, before the dataset step."""
     from skillevaluator.tier3.commands import parse_agents
-    from skillevaluator.tier3.nemo_gym.backend import nemo_gym_bin, nemo_gym_capability_errors, nemo_gym_config_errors
+    from skillevaluator.tier3.nemo_gym.backend import (
+        MODEL_URL_ENV,
+        model_url_credential_error,
+        nemo_gym_bin,
+        nemo_gym_capability_errors,
+        nemo_gym_config_errors,
+        nemo_gym_settings_errors,
+    )
 
     errors = nemo_gym_capability_errors(
         agents=parse_agents(params["agents"]) if params.get("agents") else [],
@@ -258,10 +271,23 @@ def _preflight_nemo_gym(skill_path: Path, params: dict[str, Any]) -> None:
         agent_runtime_preflight=params.get("agent_runtime_preflight"),
         custom_dockerfile_mode=params.get("custom_dockerfile_mode"),
     )
+    errors += nemo_gym_settings_errors()
+    for url in (os.environ.get(MODEL_URL_ENV, "").strip(), str(params.get("model") or "")):
+        if url and (url_error := model_url_credential_error(url)) and url_error not in errors:
+            errors.append(url_error)
+    for name in ("override_cpus", "override_memory_mb"):
+        value = params.get(name)
+        if value is not None and value <= 0:
+            errors.append(f"--{name.removeprefix('override_').replace('_', '-')} must be greater than 0")
     if nemo_gym_bin() is None:
         errors.append("--backend nemo-gym needs the NeMo Gym CLI: set SKILL_EVAL_NEMO_GYM_BIN to its `gym` executable")
     if errors:
         raise click.UsageError("; ".join(errors))
+    # The same backend-neutral checks Harbor runs, without Harbor's own agent runtime plan.
+    try:
+        _preflight_options(skill_path, params, harbor_runtime=False)
+    except ValueError as exc:
+        raise click.UsageError(str(exc)) from exc
 
 
 def _prepare_dataset(skill_path: Path, *, source_path: Path, progress: str = "auto") -> None:

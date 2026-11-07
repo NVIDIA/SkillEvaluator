@@ -4,10 +4,12 @@
 
 from __future__ import annotations
 
+import math
 import os
 import shutil
 import subprocess
 from pathlib import Path
+from urllib.parse import urlsplit
 
 HARBOR_BACKEND = "harbor"
 NEMO_GYM_BACKEND = "nemo-gym"
@@ -15,6 +17,10 @@ EXECUTION_BACKENDS = (HARBOR_BACKEND, NEMO_GYM_BACKEND)
 DEFAULT_EXECUTION_BACKEND = HARBOR_BACKEND
 
 NEMO_GYM_BIN_ENV = "SKILL_EVAL_NEMO_GYM_BIN"
+MODEL_API_KEY_ENV = "SKILL_EVAL_NEMO_GYM_MODEL_API_KEY"
+MODEL_URL_ENV = "SKILL_EVAL_NEMO_GYM_MODEL_URL"
+RUN_TIMEOUT_ENV = "SKILL_EVAL_NEMO_GYM_TIMEOUT_S"
+DEFAULT_RUN_TIMEOUT_S = 21600.0
 NEMO_GYM_AGENTS = {
     "codex": "codex_agent",
     "claude-code": "claude_code_agent",
@@ -58,7 +64,8 @@ def _gym_interpreters(gym_bin: str) -> list[Path]:
     script = Path(gym_bin).resolve()
     candidates: list[Path] = []
     try:
-        first_line = script.read_bytes()[:512].split(b"\n", 1)[0].decode("utf-8", "replace")
+        with script.open("rb") as handle:
+            first_line = handle.read(512).split(b"\n", 1)[0].decode("utf-8", "replace")
     except OSError:
         first_line = ""
     if first_line.startswith("#!"):
@@ -70,11 +77,19 @@ def _gym_interpreters(gym_bin: str) -> list[Path]:
 
 
 def nemo_gym_version(gym_bin: str) -> str | None:
-    """Return the installed NeMo Gym version from the worker's own interpreter."""
+    """Return the installed NeMo Gym version from the worker's own interpreter.
+
+    ``-P`` keeps the caller's directory off ``sys.path``, so a ``nemo_gym`` module in the
+    skill under evaluation is never imported, and the probe gets only Gym's launch environment.
+    """
+    from skillevaluator.tier3.nemo_gym.runner import gym_launch_environment
+
     for python in _gym_interpreters(gym_bin):
         try:
             completed = subprocess.run(
-                [str(python), "-c", "import nemo_gym; print(nemo_gym.__version__)"],
+                [str(python), "-P", "-c", "import nemo_gym; print(nemo_gym.__version__)"],
+                cwd=python.parent,
+                env=gym_launch_environment({}),
                 capture_output=True,
                 text=True,
                 timeout=60,
@@ -104,6 +119,8 @@ def nemo_gym_capability_errors(
 ) -> list[str]:
     """Reject configurations the NeMo Gym backend cannot run equivalently, before anything starts."""
     errors: list[str] = []
+    if os.name != "posix":
+        errors.append("--backend nemo-gym needs a POSIX host (Linux or macOS); NeMo Gym does not run on Windows")
     unsupported = [agent for agent in agents if agent not in NEMO_GYM_AGENTS]
     if unsupported:
         supported = ", ".join(sorted(NEMO_GYM_AGENTS))
@@ -129,6 +146,79 @@ def nemo_gym_capability_errors(
     if timeout_multiplier not in (None, 1, 1.0):
         errors.append("--timeout-multiplier is not supported with --backend nemo-gym yet")
     return errors
+
+
+def nemo_gym_timeout_s() -> float:
+    """Return ``SKILL_EVAL_NEMO_GYM_TIMEOUT_S`` in seconds, or raise ``ValueError``."""
+    raw = os.environ.get(RUN_TIMEOUT_ENV, "").strip()
+    try:
+        timeout_s = float(raw) if raw else DEFAULT_RUN_TIMEOUT_S
+    except ValueError:
+        timeout_s = math.nan
+    if not math.isfinite(timeout_s) or timeout_s <= 0:
+        raise ValueError(f"{RUN_TIMEOUT_ENV} must be a finite number of seconds greater than 0")
+    return timeout_s
+
+
+def nemo_gym_settings_errors() -> list[str]:
+    """Reject invalid ``SKILL_EVAL_NEMO_GYM_*`` settings, before any dataset work."""
+    errors: list[str] = []
+    try:
+        nemo_gym_timeout_s()
+    except ValueError as exc:
+        errors.append(str(exc))
+    url = os.environ.get(MODEL_URL_ENV, "").strip()
+    if url and not os.environ.get(MODEL_API_KEY_ENV, "").strip():
+        errors.append(f"{MODEL_URL_ENV} is set, so also set {MODEL_API_KEY_ENV} (use EMPTY for a keyless server)")
+    return errors
+
+
+def model_url_credential_error(url: str) -> str | None:
+    """Return an error when a policy URL carries userinfo, which would land on Gym's command line."""
+    try:
+        parts = urlsplit(url)
+    except ValueError:
+        return None
+    if parts.username or parts.password:
+        return (
+            "the NeMo Gym policy model URL must not embed a username or password; "
+            f"put the credential in {MODEL_API_KEY_ENV} instead"
+        )
+    return None
+
+
+def uses_native_harbor_tasks(skill_path: Path, task_source: object) -> bool:
+    """Return True when the Tier 3 source resolves to native ``evals/harbor/`` tasks, as on Harbor."""
+    if task_source == "native_harbor":
+        return True
+    if task_source not in (None, "auto"):
+        return False
+    from skillevaluator.tier3.harbor.adapter import find_evals_file
+
+    try:
+        has_evals_file = find_evals_file(skill_path) is not None
+    except (OSError, ValueError):
+        return False
+    return not has_evals_file and (skill_path / "evals" / "harbor").is_dir()
+
+
+def mcp_servers_declared(skill_path: Path) -> bool:
+    """Return True when ``evals/environment/mcp_servers.toml`` declares any MCP server."""
+    from skillevaluator.tier3.harbor.adapter import _load_mcp_servers
+
+    if not (skill_path / "evals" / "environment" / "mcp_servers.toml").is_file():
+        return False
+    try:
+        return bool(_load_mcp_servers(skill_path))
+    except Exception:
+        return True
+
+
+MCP_SERVERS_ERROR = "evals/environment/mcp_servers.toml is not supported with --backend nemo-gym yet"
+NATIVE_HARBOR_ERROR = (
+    "native Harbor tasks (harbor.task_source native_harbor, or an evals/harbor/ source without "
+    "evals/evals.json) are not supported with --backend nemo-gym yet"
+)
 
 
 def nemo_gym_config_errors(
@@ -163,8 +253,10 @@ def nemo_gym_config_errors(
         errors.append("harbor.base_image_mode reuse/rebuild applies to the Harbor backend only")
     if custom_dockerfile_mode is None and harbor.get("custom_dockerfile_mode") not in (None, "rebase"):
         errors.append("--backend nemo-gym supports --custom-dockerfile-mode rebase only")
-    if harbor.get("task_source", "auto") == "native_harbor":
-        errors.append("harbor.task_source native_harbor is not supported with --backend nemo-gym yet")
+    if uses_native_harbor_tasks(skill_path, harbor.get("task_source", "auto")):
+        errors.append(NATIVE_HARBOR_ERROR)
+    if mcp_servers_declared(skill_path):
+        errors.append(MCP_SERVERS_ERROR)
     errors += [
         f"harbor.{key} is not supported with --backend nemo-gym yet"
         for key in ("agent_workdir", "pre_agent_setup")

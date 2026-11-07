@@ -1210,10 +1210,18 @@ def _failed_single_skill_read(call):
     """
     if call.get("is_error") is not True:
         return False
-    tokens = _shell_tokens(_command_text(call))
+    return _isolated_skill_read(_command_text(call))
+
+
+def _isolated_skill_read(cmd, _depth: int = 0) -> bool:
+    """True if ``cmd`` is one plain read of one SKILL.md, also inside ``bash -c '...'`` wrappers."""
+    tokens = _shell_tokens(cmd)
     if not tokens or any(token in _SHELL_SEPARATORS for token in tokens):
         return False
     command = tokens[0].rsplit("/", 1)[-1].lower()
+    if command in _SHELL_COMMAND_INTERPRETERS and _depth < _MAX_SHELL_WRAPPERS:
+        payload = _shell_c_payload(tokens, 0, {})
+        return bool(payload) and _isolated_skill_read(payload, _depth + 1)
     if command not in {"cat", "nl", "bat", "less", "more"}:
         return False
     files = []

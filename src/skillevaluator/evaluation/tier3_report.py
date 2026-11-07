@@ -551,7 +551,26 @@ def agent_eval_result_from_directory(
         use_llm_judge=use_llm_judge,
         enforce_embedded_size=enforce_embedded_size,
     )
+    _apply_engine_failure(payload, engine_result)
     return _validation_result_from_payload(payload)
+
+
+def _apply_engine_failure(payload: dict[str, Any] | None, engine_result: dict[str, Any] | None) -> None:
+    """Carry a failed engine status (for example a backend launch failure) into the report payload.
+
+    Scores from the trials that did complete are kept; only the status and errors change.
+    """
+    if not isinstance(payload, dict) or not isinstance(engine_result, dict):
+        return
+    if engine_result.get("execution_status") != "failed":
+        return
+    payload["execution_status"] = "failed"
+    raw_errors = engine_result.get("execution_errors") or []
+    engine_errors = [str(error) for error in (raw_errors if isinstance(raw_errors, list) else [raw_errors]) if error]
+    existing = [str(error) for error in payload.get("execution_errors") or [] if error]
+    payload["execution_errors"] = list(dict.fromkeys([*existing, *engine_errors])) or [
+        "Tier 3 execution backend reported a failed run"
+    ]
 
 
 def _validation_result_from_payload(payload: dict[str, Any] | None) -> ValidationResult | None:

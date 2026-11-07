@@ -21,6 +21,19 @@ from skillevaluator.tier3.nemo_gym.results import rollout_task_name, write_job_f
 from skillevaluator.tier3.nemo_gym.runner import MODEL_API_KEY_ENV, gym_eval_command, stage_for_gym
 
 
+@pytest.fixture
+def keep_staged_tasks(monkeypatch: pytest.MonkeyPatch) -> None:
+    """Keep the staged task folders, which a Gym run removes at the end, for inspection."""
+    from skillevaluator.tier3.harbor import artifact_retention
+
+    class _Keep(artifact_retention.HarborArtifactLifecycle):
+        def __init__(self, paths: list[Path], *, keep_requested: bool) -> None:
+            del keep_requested
+            super().__init__(paths, keep_requested=True)
+
+    monkeypatch.setattr(artifact_retention, "HarborArtifactLifecycle", _Keep)
+
+
 def test_backend_defaults_to_harbor_and_is_forwarded() -> None:
     assert DEFAULT_EXECUTION_BACKEND == "harbor"
     assert normalize_backend(None) == "harbor"
@@ -338,7 +351,7 @@ def _run_fake_gym(skill: Path, tmp_path: Path, **overrides) -> dict:
 
 
 def test_fake_gym_run_honors_arm_case_limit_config_and_is_discoverable(
-    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, keep_staged_tasks: None
 ) -> None:
     from skillevaluator.tier3.results_location import ordered_run_directories
 
@@ -391,7 +404,9 @@ def test_cli_rejects_unsupported_gym_flags_before_autopilot_writes_a_dataset(
     assert not (skill / "evals" / "evals.json").exists()
 
 
-def test_fake_gym_run_uses_config_agent_model_and_resources(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+def test_fake_gym_run_uses_config_agent_model_and_resources(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, keep_staged_tasks: None
+) -> None:
     config = "schema_version: 1\nharbor:\n  agents:\n    codex:\n      model: cfg-model\n  resources:\n    cpus: 3\n"
     skill, _env_log = _fake_gym_skill(tmp_path, monkeypatch, config=config)
     result = _run_fake_gym(skill, tmp_path, model=None, skip_baseline=True)
@@ -480,7 +495,7 @@ def test_failed_gym_launch_is_reported_not_succeeded(tmp_path: Path, monkeypatch
 
 
 def test_gym_run_publishes_latest_stages_runtime_env_and_records_dataset(
-    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, keep_staged_tasks: None
 ) -> None:
     from skillevaluator.tier3.results_location import publish_latest_results
 
@@ -511,7 +526,9 @@ def test_config_errors_reject_decoys_and_timeout_multiplier(tmp_path: Path) -> N
     assert "timeout_multiplier" in errors and "decoy_manifest" in errors
 
 
-def test_passthrough_env_alias_reaches_the_gym_agent(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+def test_passthrough_env_alias_reaches_the_gym_agent(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, keep_staged_tasks: None
+) -> None:
     skill, _env_log = _fake_gym_skill(
         tmp_path, monkeypatch, config="schema_version: 1\nharbor:\n  passthrough_env:\n    - GYM_ALIAS_FLAG\n"
     )
@@ -549,3 +566,194 @@ def test_workflow_preflight_rejects_environment_kwarg(tmp_path: Path) -> None:
 
     with pytest.raises(click.UsageError, match="--environment-kwarg"):
         _preflight_nemo_gym(tmp_path, {"agents": "codex", "env_mode": "docker", "environment_kwarg": ("cpus=2",)})
+
+
+def test_version_probe_ignores_the_callers_directory_and_environment(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    import subprocess
+
+    from skillevaluator.tier3.nemo_gym import backend
+
+    python = tmp_path / "venv" / "python"
+    python.parent.mkdir()
+    python.write_text("")
+    calls: list[dict] = []
+
+    def _run(args, **kwargs):
+        calls.append({"args": args, **kwargs})
+        return subprocess.CompletedProcess(args, 0, stdout="0.7.0\n", stderr="")
+
+    monkeypatch.setattr(backend, "_gym_interpreters", lambda _gym: [python])
+    monkeypatch.setattr(backend.subprocess, "run", _run)
+    monkeypatch.setenv("GITHUB_TOKEN", "host-only-token")
+    assert backend.nemo_gym_version("gym") == "0.7.0"
+    assert calls[0]["args"][1] == "-P"
+    assert calls[0]["cwd"] == python.parent
+    assert "GITHUB_TOKEN" not in calls[0]["env"]
+
+
+def test_stage_for_gym_adds_job_level_judge_env(tmp_path: Path) -> None:
+    import tomllib
+
+    task = tmp_path / "arm" / "calc-001"
+    task.mkdir(parents=True)
+    (task / "task.toml").write_text(
+        'skills_dir = "/skills"\n[verifier]\ntimeout_sec = 1.0\n\n[verifier.env]\nOPENAI_API_KEY = "${OPENAI_API_KEY}"\n'
+    )
+    stage_for_gym(
+        tmp_path / "arm",
+        {"LLM_JUDGE_MODEL": "${LLM_JUDGE_MODEL}", "OPENAI_API_KEY": "${OTHER}"},
+    )
+    staged = tomllib.loads((task / "task.toml").read_text())
+    assert "skills_dir" not in staged
+    assert staged["verifier"]["env"] == {"OPENAI_API_KEY": "${OPENAI_API_KEY}", "LLM_JUDGE_MODEL": "${LLM_JUDGE_MODEL}"}
+
+
+def test_missing_attempts_become_failed_trials_and_keep_scored_ones(tmp_path: Path) -> None:
+    job_dir = tmp_path / "job"
+    errors = write_job_from_rollouts(
+        [_rollout(tmp_path / "with", "calc-001", 1, 0.9)],
+        job_dir,
+        eval_name="codex__m",
+        task_case_ids={"calc-001": "calc-001"},
+        n_attempts=2,
+    )
+    assert len(errors) == 1 and "1/2" in errors[0]
+    assert len([path for path in job_dir.iterdir() if path.is_dir()]) == 2
+    stats = json.loads((job_dir / "result.json").read_text())["stats"]
+    assert stats["n_trials"] == 2 and stats["n_errors"] == 1
+    assert stats["evals"]["codex__m"]["n_trials"] == 1
+
+
+def test_rollout_reader_splits_only_on_newlines(tmp_path: Path) -> None:
+    from skillevaluator.tier3.nemo_gym.results import read_rollouts
+
+    path = tmp_path / "rollouts.jsonl"
+    path.write_text(json.dumps({"text": "a\u2028b\u0085c"}, ensure_ascii=False) + "\n", encoding="utf-8")
+    errors: list[str] = []
+    assert read_rollouts(path, errors) == [{"text": "a\u2028b\u0085c"}] and errors == []
+
+
+def test_codex_inherits_the_sandbox_environment_when_runtime_env_is_set(tmp_path: Path) -> None:
+    kwargs = {
+        "agent": "codex",
+        "model": "m",
+        "model_url": "http://127.0.0.1:9/v1",
+        "rollouts_path": tmp_path / "r.jsonl",
+        "n_attempts": 1,
+        "n_concurrent": 1,
+        "sandbox": "docker",
+    }
+    override = "++codex_agent.responses_api_agents.codex_agent.inherit_sandbox_environment=true"
+    assert override in gym_eval_command("gym", tmp_path, inherit_sandbox_environment=True, **kwargs)
+    assert override not in gym_eval_command("gym", tmp_path, **kwargs)
+
+
+def test_model_url_with_userinfo_is_rejected() -> None:
+    from skillevaluator.tier3.nemo_gym.backend import model_url_credential_error
+
+    assert model_url_credential_error("https://user:pass@models.example/v1")
+    assert model_url_credential_error("https://models.example/v1") is None
+
+
+def test_gym_environment_keeps_uv_credentials_and_anchors_paths(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    from skillevaluator.tier3.nemo_gym.runner import gym_launch_environment
+
+    monkeypatch.chdir(tmp_path)
+    monkeypatch.setenv("UV_INDEX_INTERNAL_PASSWORD", "index-secret")
+    monkeypatch.setenv("NETRC", "netrc")
+    monkeypatch.setenv("SSL_CERT_FILE", "certs/ca.pem")
+    env = gym_launch_environment({})
+    assert env["UV_INDEX_INTERNAL_PASSWORD"] == "index-secret"
+    assert env["NETRC"] == "netrc" or env["NETRC"] == str(tmp_path / "netrc")
+    assert env["SSL_CERT_FILE"] == str(tmp_path / "certs" / "ca.pem")
+
+
+def test_native_harbor_tasks_under_auto_are_rejected(tmp_path: Path) -> None:
+    from skillevaluator.tier3.nemo_gym.backend import uses_native_harbor_tasks
+
+    skill = tmp_path / "skill"
+    (skill / "evals" / "harbor" / "task-1").mkdir(parents=True)
+    assert uses_native_harbor_tasks(skill, "auto")
+    (skill / "evals" / "evals.json").write_text("{}")
+    assert not uses_native_harbor_tasks(skill, "auto")
+    assert uses_native_harbor_tasks(skill, "native_harbor")
+
+
+def test_gym_log_is_redacted(tmp_path: Path) -> None:
+    import sys
+
+    from skillevaluator.tier3.nemo_gym.runner import _run_gym
+
+    log_path = tmp_path / "gym.log"
+    with log_path.open("w", encoding="utf-8") as log:
+        code = _run_gym(
+            [sys.executable, "-c", "print('key=super-secret-value done')"],
+            cwd=tmp_path,
+            env={"PATH": "/usr/bin:/bin"},
+            log=log,
+            timeout_s=30,
+            secret_values={"super-secret-value"},
+        )
+    assert code == 0
+    text = log_path.read_text()
+    assert "super-secret-value" not in text and "done" in text
+
+
+def test_gym_timeout_kills_the_whole_process_group(tmp_path: Path) -> None:
+    import os
+    import sys
+
+    from skillevaluator.tier3.nemo_gym import runner as gym_runner
+
+    pid_file = tmp_path / "child.pid"
+    script = (
+        "import os, signal, subprocess, sys, time\n"
+        "signal.signal(signal.SIGTERM, lambda *_: sys.exit(0))\n"
+        f"child = subprocess.Popen([sys.executable, '-c', 'import signal, time; signal.signal(signal.SIGTERM, signal.SIG_IGN); time.sleep(60)'])\n"
+        f"open({str(pid_file)!r}, 'w').write(str(child.pid))\n"
+        "time.sleep(60)\n"
+    )
+    with (tmp_path / "gym.log").open("w") as log:
+        code = gym_runner._run_gym(
+            [sys.executable, "-c", script], cwd=tmp_path, env=dict(os.environ), log=log, timeout_s=2
+        )
+    assert code is None
+    child = int(pid_file.read_text())
+    import time
+
+    for _ in range(50):
+        try:
+            os.kill(child, 0)
+        except ProcessLookupError:
+            break
+        time.sleep(0.1)
+    else:
+        pytest.fail("child of the Gym leader survived")
+
+
+def test_gym_judge_override_reaches_the_staged_verifier(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, keep_staged_tasks: None
+) -> None:
+    import tomllib
+
+    skill, _env_log = _fake_gym_skill(tmp_path, monkeypatch)
+    monkeypatch.setenv("LLM_JUDGE_MODEL", "judge-override-model")
+    result = _run_fake_gym(skill, tmp_path)
+    task_toml = next((Path(result["run_dir"]) / "_harbor-tasks" / "codex" / "with").glob("*/task.toml"))
+    verifier_env = tomllib.loads(task_toml.read_text())["verifier"]["env"]
+    assert verifier_env["LLM_JUDGE_MODEL"] == "${LLM_JUDGE_MODEL}"
+    assert result["run_config"]["judge"]["model"] == "judge-override-model"
+
+
+def test_gym_run_removes_staged_tasks_and_jobs(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    skill, _env_log = _fake_gym_skill(tmp_path, monkeypatch)
+    result = _run_fake_gym(skill, tmp_path)
+    run_dir = Path(result["run_dir"])
+    assert not (run_dir / "_harbor-tasks").exists() and not (run_dir / "_harbor-jobs").exists()
+    assert (run_dir / "_nemo-gym").is_dir()
+    assert result["run_config"]["harbor"]["jobs_retained"] is False
+    assert json.loads((run_dir / "run_config.json").read_text())["harbor"]["jobs_retained"] is False

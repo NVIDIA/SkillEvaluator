@@ -36,7 +36,8 @@ def read_rollouts(path: Path, errors: list[str] | None = None) -> list[dict[str,
         return []
     rows: list[dict[str, Any]] = []
     skipped = 0
-    for line in path.read_text(encoding="utf-8", errors="replace").splitlines():
+    # Gym ends each row with "\n"; str.splitlines() would also split on raw U+2028/U+0085 inside strings.
+    for line in path.read_text(encoding="utf-8", errors="replace").split("\n"):
         if not line.strip():
             continue
         try:
@@ -47,8 +48,16 @@ def read_rollouts(path: Path, errors: list[str] | None = None) -> list[dict[str,
         if isinstance(row, dict):
             rows.append(row)
     if skipped and errors is not None:
-        errors.append(f"NeMo Gym wrote {skipped} unreadable line(s) to {path.name}; those rollouts were not collected")
+        lost = (
+            "those failure reasons were lost"
+            if path.name.endswith("_failures.jsonl")
+            else "those rollouts were not collected"
+        )
+        errors.append(f"NeMo Gym wrote {skipped} unreadable line(s) to {path.name}; {lost}")
     return rows
+
+
+_MISSING_ROLLOUT = "_skillevaluator_missing_rollout"
 
 
 def read_rollout_failures(rollouts_path: Path, errors: list[str] | None = None) -> dict[str, list[str]]:
@@ -127,7 +136,8 @@ def write_job_from_rollouts(
         by_task[task_name].append(row)
 
     rewarded: dict[str, list[str]] = defaultdict(list)
-    n_trials = 0
+    n_scored = 0
+    n_written = 0
     n_errors = 0
     for task_name, case_id in task_case_ids.items():
         task_rows = by_task.get(task_name, [])
@@ -135,7 +145,9 @@ def write_job_from_rollouts(
             reasons = sorted(set((failures or {}).get(task_name, [])))
             detail = f": {'; '.join(reasons)}" if reasons else ""
             errors.append(f"NeMo Gym returned {len(task_rows)}/{n_attempts} rollouts for case {case_id}{detail}")
-            n_errors += n_attempts - len(task_rows)
+            # Every expected attempt gets a failed trial, so the collector keeps the arm's scored trials.
+            missing = {"failure": f"NeMo Gym returned no rollout{detail}", _MISSING_ROLLOUT: True}
+            task_rows = [*task_rows, *([missing] * (n_attempts - len(task_rows)))]
         for attempt, row in enumerate(task_rows[:n_attempts], start=1):
             trial_name = f"{_safe(task_name)}__gym{attempt:03d}"
             trial_dir = job_dir / trial_name
@@ -157,9 +169,10 @@ def write_job_from_rollouts(
             if rewards is None:
                 failure = failure or "SkillEvaluator verifier wrote no reward.json"
                 n_errors += 1
-                errors.append(f"case {case_id} attempt {attempt}: {failure}")
+                if not row.get(_MISSING_ROLLOUT):
+                    errors.append(f"case {case_id} attempt {attempt}: {failure}")
             else:
-                n_trials += 1
+                n_scored += 1
                 rewarded[str(rewards.get("overall", row.get("reward", 0.0)))].append(trial_name)
             (trial_dir / "result.json").write_text(
                 json.dumps(
@@ -177,6 +190,7 @@ def write_job_from_rollouts(
                 ),
                 encoding="utf-8",
             )
+            n_written += 1
 
     (job_dir / "result.json").write_text(
         json.dumps(
@@ -184,11 +198,11 @@ def write_job_from_rollouts(
                 "execution_backend": "nemo-gym",
                 "n_total_trials": len(task_case_ids) * n_attempts,
                 "stats": {
-                    "n_trials": n_trials,
+                    "n_trials": n_written,
                     "n_errors": n_errors,
                     "evals": {
                         eval_name: {
-                            "n_trials": n_trials,
+                            "n_trials": n_scored,
                             "n_errors": n_errors,
                             "reward_stats": {"reward": dict(rewarded)},
                         }

@@ -321,6 +321,61 @@ def test_agent_eval_summary_shows_required_counts_and_failed_case_reason():
     assert "WARNING" in rendered
 
 
+def test_full_summary_shows_completed_agent_eval_counts_without_findings():
+    result = ValidationResult(
+        validator_name="AGENT_EVAL",
+        passed=True,
+        metadata={
+            "agent_eval": {
+                "verdict": "fail",
+                "verdict_reason": "1 of 2 cases failed required checks (1 wrong answer, 0 security)",
+                "composite_lift": 0.2,
+                "required_checks": {
+                    "with_skill": {"passed": 1, "scored": 2},
+                    "without_skill": {"passed": 2, "scored": 2},
+                    "difference": -1,
+                },
+                "correct_answers": {
+                    "with_skill": {"correct": 1, "scored": 2},
+                    "without_skill": {"correct": 2, "scored": 2},
+                    "difference": -1,
+                },
+                "security_clean": {
+                    "with_skill": {"clean": 2, "scored": 2},
+                    "without_skill": {"clean": 2, "scored": 2},
+                    "difference": 0,
+                },
+                "pass_at_k": {
+                    "with_skill": {
+                        "cases": {
+                            "wrong-ground-truth": {
+                                "passed": False,
+                                "attempts_used": 1,
+                                "best_score": 0.82,
+                                "reason": "wrong answer (goal accuracy 0.00)",
+                                "warnings": ["missed expected step 1 of 1 (behavior 0.00)"],
+                            }
+                        }
+                    }
+                },
+            }
+        },
+    )
+    output = io.StringIO()
+
+    CLIReporter(console=Console(file=output, width=140, color_system=None)).print_all([result])
+
+    rendered = output.getvalue()
+    assert "Verdict: FAIL — 1 of 2 cases failed required checks (1 wrong answer, 0 security)" in rendered
+    assert "Required checks passed: 1/2 | 2/2 | -1" in rendered
+    assert "Correct answers: 1/2 | 2/2 | -1" in rendered
+    assert "Security clean: 2/2 | 2/2 | +0" in rendered
+    assert "wrong-ground-truth" in rendered
+    assert "0.82" in rendered
+    assert "wrong answer (goal accuracy 0.00)" in rendered
+    assert "missed expected step 1 of 1 (behavior 0.00)" in rendered
+
+
 def test_verdict_badge_background_does_not_fill_headline():
     from rich.console import Group
 

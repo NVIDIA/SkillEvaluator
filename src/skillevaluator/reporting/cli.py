@@ -181,8 +181,22 @@ class CLIReporter(ReporterBase):
         self._print_summary_table(results, console, presentation=context)
         console.print()
 
+        failed = [result for result in results if not passes_required_gate(result)]
+        non_blocking = [result for result in results if passes_required_gate(result) and result.findings]
+        rendered_result_ids = {id(result) for result in (*failed, *non_blocking)}
+        for result in results:
+            metadata = result.metadata if isinstance(result.metadata, dict) else {}
+            agent_eval = metadata.get("agent_eval")
+            if (
+                result.validator_name == "AGENT_EVAL"
+                and id(result) not in rendered_result_ids
+                and not self._is_advisory_agent_eval_skip(result)
+                and isinstance(agent_eval, dict)
+                and result_status(result) not in {Status.SKIPPED, Status.INCOMPLETE}
+            ):
+                self._print_agent_eval_tables(agent_eval, console)
+
         # Print detailed results for failures
-        failed = [r for r in results if not passes_required_gate(r)]
         if failed:
             console.print(
                 Panel.fit(
@@ -194,7 +208,6 @@ class CLIReporter(ReporterBase):
             for result in failed:
                 self.render_result(result, console)
 
-        non_blocking = [result for result in results if passes_required_gate(result) and result.findings]
         if non_blocking:
             console.print(
                 Panel.fit(

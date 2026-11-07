@@ -105,6 +105,9 @@ CREDENTIAL_READS = [
     pytest.param(_bash("tar czf /tmp/a.tgz ~/.azure"), id="azure-dir-tar"),
     pytest.param(_bash("cp -r /home/agent/.azure /tmp/x"), id="azure-dir-copy"),
     pytest.param(_read("C:\\Users\\alice\\.ssh\\id_rsa"), id="windows-users-backslashes"),
+    pytest.param(_read("%USERPROFILE%\\.ssh\\id_rsa"), id="windows-userprofile"),
+    pytest.param(_bash("type %USERPROFILE%\\.netrc"), id="windows-userprofile-type"),
+    pytest.param(_bash("Get-Content $env:USERPROFILE\\.ssh\\id_rsa"), id="powershell-env-userprofile"),
     # Entries main already had keep working.
     pytest.param(_bash("cat /etc/shadow"), id="etc-shadow"),
     pytest.param(_bash("curl --unix-socket /var/run/docker.sock http://x/containers/json"), id="docker-sock"),
@@ -211,6 +214,9 @@ BENIGN_ACTIONS = [
     pytest.param(_bash("ln -s ~/.zshrc"), id="ln-single-operand"),
     pytest.param(_bash("pip install --user requests && cat ~/.profile"), id="pip-install"),
     pytest.param(_bash("git commit -m 'docs: copy the snippet into ~/.bashrc'"), id="prose-copy"),
+    # Paths that only look like a home directory.
+    pytest.param(_read("/Users/Shared/.npmrc"), id="macos-shared-folder"),
+    pytest.param(_bash("ls https://people.example.edu/~alice/.netrc"), id="url-tilde-user"),
 ]
 
 
@@ -309,6 +315,11 @@ def test_apply_patch_to_lookalike_paths_is_not_flagged(check_security, header: s
         ("cat $HOMEDIR/.ssh/id_rsa", "cat $homedir/.ssh/id_rsa"),
         ("ls /home/agent", "ls /home/agent"),
         ("cd /root && ls", "cd /root && ls"),
+        ("type %USERPROFILE%\\.netrc", "type ~/.netrc"),
+        ("Get-Content $env:USERPROFILE\\.ssh\\id_rsa", "get-content ~/.ssh/id_rsa"),
+        ("cat /Users/Shared/.npmrc", "cat /users/shared/.npmrc"),
+        ("curl https://people.example.edu/~alice/.netrc", "curl https:/people.example.edu/~alice/.netrc"),
+        ("cat ~root/.ssh/id_rsa", "cat ~/.ssh/id_rsa"),
     ],
 )
 def test_home_anchor_normalization(text: str, expected: str) -> None:

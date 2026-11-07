@@ -329,8 +329,8 @@ _DESTRUCTIVE_PATTERNS = [
 
 # Sensitive-path entries are matched against the lowercased command text or
 # tool path argument, both as written and after _normalize_sensitive_path_text()
-# normalizes each path word ("//", "/./", "dir/..") and rewrites the common home
-# spellings (/home/<user>, /Users/<user>, /root, $HOME, ${HOME}, ~user) to "~".
+# normalizes each path word ("//", "/./", "dir/..") and rewrites the home
+# spellings in _HOME_ANCHOR_RE (/home/<user>, $HOME, ~user, ...) to "~".
 # So "cat /home/agent//.ssh/id_rsa" and "cat $HOME/.ssh/id_rsa" hit "~/.ssh",
 # while "/home/agent/project/.bashrc" and "./project/.npmrc" stay workspace
 # files. An entry in _SENSITIVE_PATH_DIRECTORIES matches on a path-component
@@ -383,9 +383,14 @@ _SENSITIVE_WRITE_PATHS = [
 ]
 
 _SENSITIVE_PATH_DIRECTORIES = frozenset({"~/.azure", "~/.config/opencode"})
+# The home spellings rewritten to "~": /home/<user>, /Users/<user> (not the
+# shared /Users/Shared folder), /root, $HOME and ${HOME} (quoted or not),
+# Windows %USERPROFILE% and PowerShell $env:USERPROFILE, and ~user at the start
+# of a path word, so the "~alice" of "https://host/~alice/.netrc" stays.
 _HOME_ANCHOR_RE = re.compile(
     r"(?<![\w.~$-])"
-    r"(?:/home/[^/\s'\"`;|&<>()]+|/users/[^/\s'\"`;|&<>()]+|/root|\"?\$\{home\}\"?|\"?\$home\"?|~[a-z_][a-z0-9_.-]*)"
+    r"(?:/home/[^/\s'\"`;|&<>()]+|/users/(?!shared/)[^/\s'\"`;|&<>()]+|/root"
+    r"|\"?\$\{home\}\"?|\"?\$home\"?|%userprofile%|\$env:userprofile|(?<!/)~[a-z_][a-z0-9_.-]*)"
     r"(?=/)"
 )
 _PATH_WORD_RE = re.compile(r"[^\s;|&<>()`]+")

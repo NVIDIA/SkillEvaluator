@@ -376,6 +376,12 @@ class BenchmarkReporter(ReporterBase):
         if dataset_summary["total_tasks"] > 0:
             composition = _dataset_composition_label(dataset_summary)
             lines.append(f"- Tasks: {dataset_summary['total_tasks']} evaluation tasks{composition}")
+        sufficiency = ae.get("dataset_sufficiency")
+        if isinstance(sufficiency, dict):
+            lines.append(
+                f"- Dataset sufficiency: {sufficiency.get('status', 'provisional')} — "
+                f"{_safe_scalar_text(sufficiency.get('reason')) or 'Dataset sufficiency is provisional'}"
+            )
         else:
             lines.append("- Tasks: not recorded (legacy or non-live result)")
 

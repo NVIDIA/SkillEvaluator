@@ -417,6 +417,11 @@ class CLIReporter(ReporterBase):
             )
         if runtime:
             console.print(f"  [dim]Runtime: {runtime:.1f}s[/dim]")
+        sufficiency = agent_eval.get("dataset_sufficiency")
+        if isinstance(sufficiency, dict):
+            status = str(sufficiency.get("status") or "provisional")
+            style = "yellow" if status == "provisional" else "green"
+            console.print(f"  [{style}]Dataset sufficiency: {status} — {sufficiency.get('reason', '')}[/{style}]")
         CLIReporter._print_harbor_artifacts(agent_eval, console)
         console.print(f"  {trial_coverage(agent_eval).text}")
         console.print()

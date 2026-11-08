@@ -11,6 +11,13 @@ You can generate a starter dataset with no API key; LLM-backed generation and
 refinement need a configured provider (see
 [Providers & Credentials](configuration.mdx)).
 
+Tier 3 reports also assess dataset sufficiency under the
+`dataset-sufficiency-v1` policy: at least 10 distinct cases, at least 1
+negative case, a 95% Wilson pass-rate interval half-width no greater than
+0.20, and at least 10 paired cases for lift comparison. Runs that do not meet
+every assessable requirement are labeled provisional; this is a reporting
+policy, not a verdict or statistical-significance claim.
+
 Tier 3 executes these cases through
 [Harbor](https://github.com/harbor-framework/harbor), the open-source agent
 evaluation framework. Native Harbor task bundles are the bring-your-own-task

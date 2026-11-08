@@ -500,3 +500,26 @@ def test_compact_validate_view_leaves_coverage_notes_to_the_report_files_and_the
         assert "`-r cli`" in text, name
         assert "compact default" in text, name
         assert "`validate` prints" not in text, name
+
+
+def test_html_agent_details_label_a_failed_baseline_like_a_skipped_one_and_the_docs_say_so() -> None:
+    """Only the callout tells a baseline that ran and failed from one that was skipped."""
+    _, _, _, report = _render(
+        {
+            "claude-code": _agent(baseline=_condition("failed", 1, errors=[TIMEOUT_ERROR])),
+            "opencode": _agent(baseline=_condition("skipped", 0, 0)),
+        }
+    )
+
+    kpi_subs = re.findall(r'<div class="t3-kpi-sub">(.*?)</div>', report)
+    assert kpi_subs.count("baseline N/A") == 2
+    assert kpi_subs.count("no baseline") == 2
+    (note,) = _html_coverage_notes(report)
+    assert note.startswith("claude-code baseline incomplete")
+
+    definition = _doc_block("docs/reports.mdx", "When the HTML report has no lift for an agent or dimension")
+    assert "**no baseline** means" in definition
+    assert "a baseline arm that ran but failed" in definition
+    assert "**Agent coverage notes**" in definition
+    details = _doc_block("docs/reports.mdx", "The HTML report lists each message under **Agent coverage notes**")
+    assert "**no baseline** and `baseline N/A`" in details

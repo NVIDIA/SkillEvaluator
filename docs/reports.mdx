@@ -552,9 +552,11 @@ arms; if you ran with `--skip-baseline`, there is no lift to report. In
 
 When the HTML report has no lift for an agent or dimension, its label says
 why. **no baseline** means that row has no baseline score, for example after
-`--skip-baseline`. **comparison unavailable** means a baseline score was
-recorded but cannot be compared with the with-skill score, for example because
-the arms used different score policies or no case kept matching judge models.
+`--skip-baseline`, or after a baseline arm that ran but failed; the
+**Agent coverage notes** described below tell the two apart.
+**comparison unavailable** means a baseline score was recorded but cannot be
+compared with the with-skill score, for example because the arms used
+different score policies or no case kept matching judge models.
 
 For each LLM metric (`accuracy`, `goal_accuracy`, and `behavior_check`), cases
 that used different judge models across the arms are excluded from that
@@ -606,11 +608,13 @@ entry per failed arm:
 - `message`: the sentence the reports show.
 
 The HTML report lists each message under **Agent coverage notes** at the top
-of the Tier 3 section. The full terminal report, from `validate --verbose` or
-an explicit `-r cli`, prints the notes under **Agent coverage notes** in the
-Tier 3 block, also when Tier 3 is non-blocking (the default). The compact
-default view of `validate` does not print them and leaves them to the HTML
-and JSON reports and `BENCHMARK.md`.
+of the Tier 3 section. Its agent details label an agent whose baseline arm
+failed the way they label a skipped baseline, for example **no baseline** and
+`baseline N/A`, so the callout is what tells the two apart. The full terminal
+report, from `validate --verbose` or an explicit `-r cli`, prints the notes
+under **Agent coverage notes** in the Tier 3 block, also when Tier 3 is
+non-blocking (the default). The compact default view of `validate` does not
+print them and leaves them to the HTML and JSON reports and `BENCHMARK.md`.
 `tier3 evaluate` lists each agent's failed condition with its errors, as
 before.
 

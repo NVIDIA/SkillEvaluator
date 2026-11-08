@@ -65,6 +65,10 @@ def _rendered(rows) -> str:
     return "\n".join("".join(text for text, _style in row.segments) for row in rows)
 
 
+def _row_text(row) -> str:
+    return "".join(text for text, _style in row.segments)
+
+
 def _broken_skill(root: Path) -> Path:
     """A folder that is meant to be a skill but whose manifest the checks cannot read."""
     root.mkdir(parents=True)
@@ -315,9 +319,21 @@ def test_tier1_summary_counts_not_applicable_checks_apart(tmp_path: Path) -> Non
     text = _rendered(rows)
 
     assert passed is True
-    assert "1/1 passed" in text
-    assert "4/4 passed" not in text
-    assert "schema, version, quality" in text
+    # "1/1 passed" today; "1/1 checks passed" once the per-check count wording
+    # changes. Counting the N/A checks would give 4/4 in either wording.
+    assert re.search(r"\b1/1 (checks )?passed\b", text), text
+    assert not re.search(r"\b4/4 (checks )?passed\b", text), text
+    assert not re.search(r"\b\d+/4 (checks )?passed\b", text), text
+    # The N/A checks are named on the n/a row only: never marked passed or
+    # failed in the check ticker, and absent from every other row.
+    not_applicable_rows = [row for row in rows if row.label == "n/a"]
+    assert [_row_text(row) for row in not_applicable_rows] == ["schema, version, quality"]
+    ticker = next(_row_text(row) for row in rows if row.label == "checks")
+    assert "✓ pii" in ticker
+    for check_id in MANIFEST_VALIDATORS:
+        assert f"✓ {check_id}" not in ticker
+        assert f"✗ {check_id}" not in ticker
+        assert not any(check_id in _row_text(row) for row in rows if row.label not in {"checks", "n/a"})
     assert "not applicable" in text
 
     tier = build_final_render_context(results).tiers[1]
@@ -380,8 +396,12 @@ def test_validate_ordinary_repository_passes_and_records_applicability(tmp_path:
         assert reason.startswith("not applicable")
 
 
-def test_validate_default_tiers_on_ordinary_repository_report_n_a(tmp_path: Path) -> None:
+def test_validate_default_tiers_on_ordinary_repository_report_n_a(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
     repository = _ordinary_repository(tmp_path / "repository")
+    # The assertions read the final panel, which wraps at the terminal width.
+    monkeypatch.setenv("COLUMNS", "120")
 
     exit_code, output = _validate(
         str(repository), "--no-dedup", "--checks", "schema,version,pii", "--output-dir", str(tmp_path / "reports")

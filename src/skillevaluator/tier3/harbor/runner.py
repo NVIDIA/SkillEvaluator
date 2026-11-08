@@ -5077,13 +5077,21 @@ def _run_harbor_eval_impl(
             reporter.emit(ProgressEvent(stage="configuration", state="failed", detail=str(exc)))
             return {"error": [str(exc)]}
 
+    from skillevaluator.tier3.plugin_execution import runtime_source_path
+
+    publication_source = runtime_source_path(skill_path)
+    publication_name = (
+        _snapshot_publication_target.get("skill_name", publication_source.name)
+        if _snapshot_publication_target
+        else publication_source.name
+    )
     if _evaluator_skill_path is None:
         assert forwarded is not None
         forwarded.pop("skill_path")
         forwarded.pop("agents")
         with ExitStack() as snapshot_stack:
             try:
-                snapshot_publication_target = publication_target_from_path(skill_path)
+                snapshot_publication_target = publication_target_from_path(publication_source)
                 evaluator_skill_path = snapshot_stack.enter_context(private_evaluator_skill_snapshot(skill_path))
                 snapshot_config, _ = load_evals_config(evaluator_skill_path)
                 snapshot_workspace = snapshot_config.get("skill_workspace", {})
@@ -5114,7 +5122,7 @@ def _run_harbor_eval_impl(
                     forwarded["_decoy_workspace_paths"] = [*manual, *frozen]
                     forwarded["_decoy_workspace_source_paths"] = source_paths
                     forwarded["_decoy_manifest"] = manifest
-                if publication_target_from_path(skill_path) != snapshot_publication_target:
+                if publication_target_from_path(publication_source) != snapshot_publication_target:
                     raise ValueError("Publication source changed while its private evaluator snapshot was created")
             except (OSError, ValueError) as exc:
                 reporter.emit(ProgressEvent(stage="configuration", state="failed", detail=str(exc)))
@@ -5620,7 +5628,7 @@ def _run_harbor_eval_impl(
             if isinstance(reason_code, str):
                 conflict["reason_code"] = reason_code
             return {"publication_target": None, "publication_target_conflict": conflict}
-        run_end_target = publication_target_from_path(skill_path)
+        run_end_target = publication_target_from_path(publication_source)
         if run_end_target == publication_target:
             return {
                 "publication_target": dict(publication_target) if publication_target is not None else None,
@@ -5654,7 +5662,7 @@ def _run_harbor_eval_impl(
         """Retain redacted probe provenance for failures after run reservation."""
         published_errors, error_total = _published_execution_errors(errors)
         failed_result: dict[str, Any] = {
-            "skill_name": skill_path.name,
+            "skill_name": publication_name,
             "execution_status": "failed",
             "execution_errors": published_errors,
             "execution_error_details_total": error_total,
@@ -5930,7 +5938,7 @@ def _run_harbor_eval_impl(
         )
 
     if not _runtime_context_is_bound_to_publication_target(
-        skill_path,
+        publication_source,
         staged_task_paths,
         reference_skills_dir=reference_skills_dir,
         workspace_skill_paths=_decoy_workspace_source_paths or workspace_skills,
@@ -6226,7 +6234,7 @@ def _run_harbor_eval_impl(
     reporter.emit(ProgressEvent(stage="collection", state="complete", detail="Harbor results collected"))
     results.update(
         {
-            "skill_name": skill_path.name,
+            "skill_name": publication_name,
             "run_id": run_id,
             **_run_owned_publication_fields(),
             "run_dir": str(run_dir),

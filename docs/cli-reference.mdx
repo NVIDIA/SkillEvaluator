@@ -230,7 +230,27 @@ Applies to the whole run: target typing, policy profile, reports, tier selection
 
 The [evaluated source provenance](#evaluated-source-provenance) flags also appear in this panel.
 
-Auto-detection recognizes: a `SKILL.md` for skills, `.mdc` files for rules, `workflow-rules.mdc` for workflows, and — for plugins — a bundle-reference `agent_plugin.yaml`/`.yml` manifest or a contained `.claude-plugin/plugin.json` manifest. Plugins are validated against their public contract; quality, lint, and version checks are skill-only and skipped for plugins.
+Auto-detection recognizes `SKILL.md`, rules and workflows, plus YAML, Claude Code,
+Codex, Cursor, and Agent Plugins v1 plugin manifests. Plugin checks include the
+whole tree and applicable bundled-skill schema, quality, lint, and version checks.
+See [Assess Plugins](plugin-assessment.mdx) for manifest precedence and evidence limits.
+
+Plugin controls on `validate` and `tier3 evaluate-plugin`:
+
+| Option | Default | Purpose |
+| --- | --- | --- |
+| `--plugin-load wrapper\|native\|auto` | config, then `wrapper` | Select the loading adapter |
+| `--lift-mode effectiveness\|integration\|both\|ladder` | config, then `effectiveness` | Select comparison arms |
+| `--trial-retries 0..5` | config, then `0` | Retry setup failures before task execution |
+| `--probe-mcp` | off | Request bounded host MCP proof |
+| `--probe-mcp-env TEXT` | none | Explicit host environment grant; repeatable and requires probing |
+| `--repo-root PATH` | none | Repository context for dependency resolution |
+
+`validate` additionally accepts `--resolve-endpoints` and `--claude-validate` for
+opt-in endpoint audits and advisory installed-client parity checks.
+`tier3 evaluate-plugin` shares the existing run controls and accepts all six
+report formats. `tier3 report-plugin RUN_DIR` replays a retained snapshot without
+source files or optional runtime dependencies, with `-r` and `-o`.
 
 `validate` also takes the standard `-r/--report` and `-o/--output-dir` options described under [Global conventions](#global-conventions).
 

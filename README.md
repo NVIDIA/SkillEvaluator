@@ -213,6 +213,15 @@ issue.
 Release changes are recorded in [CHANGELOG.md](CHANGELOG.md) and
 [GitHub Releases](https://github.com/NVIDIA/SkillEvaluator/releases).
 
+## Assess plugins
+
+Use `skillevaluator validate ./my-plugin --tiers 1` for static checks and
+`skillevaluator tier3 evaluate-plugin ./my-plugin --agents claude-code` for
+runtime comparisons. `tier3 report-plugin RUN_DIR` replays retained evidence
+without the original source or runtime dependencies.
+See the [plugin assessment guide](docs/plugin-assessment.mdx) for supported
+formats, loading modes, comparison arms, and evidence limits.
+
 ## License
 
 Apache License 2.0 — see [LICENSE](LICENSE), [NOTICE](NOTICE), and

@@ -6,6 +6,13 @@ All notable changes to SkillEvaluator are documented in this file.
 
 ### Added
 
+- Complete the public plugin workflow: five-format detection, bounded component
+  checks and bundled-skill validation, advisory deduplication and compatible local
+  catalogs, shared runtime options and loading adapters, MCP/behavior evidence,
+  multi-arm comparisons, and static/runtime report hooks. Add `tier3 evaluate-plugin`
+  and base-install `tier3 report-plugin` replay of retained snapshots, with setup-only
+  retry controls and published usage documentation.
+
 - `skills/skillevaluator/` is an agent skill for operating SkillEvaluator: it
   routes requests to the right tier, readiness check, dataset, report, or CI
   command, and ships Tier 3 evaluation cases for itself. A test keeps every

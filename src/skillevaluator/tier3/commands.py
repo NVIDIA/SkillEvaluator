@@ -743,7 +743,9 @@ def evaluate(
                 "--agent-model provided for agent(s) not selected by -a/--agents: " + ", ".join(unknown_model_agents)
             )
 
-        output_dir = resolve_results_root(skill_path, results_dir)
+        from skillevaluator.tier3.plugin_execution import runtime_source_path
+
+        output_dir = resolve_results_root(runtime_source_path(skill_path), results_dir)
         engine_started = True
         return run_harbor_eval(
             skill_path=skill_path.resolve(),

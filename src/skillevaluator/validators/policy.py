@@ -34,6 +34,7 @@ import yaml
 
 from skillevaluator.logging_config import get_logger
 from skillevaluator.models.result import Severity, ValidationResult
+from skillevaluator.validators.plugin_policy import normalize_plugin_allowlist, overlay_sets, plugin_policy_block
 
 logger = get_logger(__name__)
 
@@ -70,6 +71,23 @@ class ValidationPolicy:
     author_email_regex: re.Pattern[str] | None = None
     severity_overrides: dict[str, Severity] = field(default_factory=dict)
     source: Path | None = None
+    mcp_allowed_private_hosts: tuple[str, ...] = ()
+    hook_allowed_urls: tuple[str, ...] = ()
+    resolve_endpoints: bool = False
+
+    def __post_init__(self) -> None:
+        object.__setattr__(
+            self,
+            "mcp_allowed_private_hosts",
+            normalize_plugin_allowlist(self.mcp_allowed_private_hosts, "mcp.allowed_private_hosts", 255),
+        )
+        object.__setattr__(
+            self,
+            "hook_allowed_urls",
+            normalize_plugin_allowlist(self.hook_allowed_urls, "hooks.allowed_urls", 2048),
+        )
+        if type(self.resolve_endpoints) is not bool:
+            raise ValueError("endpoints.resolve must be a boolean")
 
     @property
     def digest(self) -> str:
@@ -80,6 +98,12 @@ class ValidationPolicy:
             "author_email_regex": self.author_email_regex.pattern if self.author_email_regex else None,
             "severity_overrides": {key: value.value for key, value in sorted(self.severity_overrides.items())},
         }
+        if self.mcp_allowed_private_hosts:
+            payload["mcp_allowed_private_hosts"] = sorted(self.mcp_allowed_private_hosts)
+        if self.hook_allowed_urls:
+            payload["hook_allowed_urls"] = sorted(self.hook_allowed_urls)
+        if self.resolve_endpoints:
+            payload["resolve_endpoints"] = True
         canonical = json.dumps(payload, sort_keys=True, separators=(",", ":")).encode()
         return f"sha256:{hashlib.sha256(canonical).hexdigest()}"
 
@@ -114,7 +138,7 @@ class ValidationPolicy:
 
     def to_dict(self) -> dict[str, Any]:
         """Serialize for inclusion in reports (read-only summary)."""
-        return {
+        summary = {
             "profile": self.profile,
             "audience": self.audience,
             "digest": self.digest,
@@ -122,6 +146,13 @@ class ValidationPolicy:
             "severity_overrides": {k: v.value for k, v in self.severity_overrides.items()},
             "source": str(self.source) if self.source else None,
         }
+        if self.mcp_allowed_private_hosts:
+            summary["mcp_allowed_private_host_count"] = len(self.mcp_allowed_private_hosts)
+        if self.hook_allowed_urls:
+            summary["hook_allowed_url_count"] = len(self.hook_allowed_urls)
+        if self.resolve_endpoints:
+            summary["resolve_endpoints"] = True
+        return summary
 
 
 # ---------------------------------------------------------------------------
@@ -157,17 +188,23 @@ def _coerce_email_regex(value: Any, source: str) -> re.Pattern[str] | None:
         return None
 
 
-_KNOWN_TOP_LEVEL_KEYS = {"profile", "identity", "severity_overrides"}
+_KNOWN_TOP_LEVEL_KEYS = {"profile", "identity", "severity_overrides", "mcp", "hooks", "endpoints"}
 _KNOWN_IDENTITY_KEYS = {"author_email_regex"}
 
 
 def _load_policy_yaml(path: Path) -> Any:
     """Load policy YAML and normalize parser failures to the public contract."""
     try:
-        with path.open(encoding="utf-8") as fh:
-            return yaml.safe_load(fh) or {}
-    except (yaml.YAMLError, UnicodeError, RecursionError) as exc:
-        raise ValueError(f"Invalid policy YAML in {path}: {exc}") from exc
+        from skillevaluator.utils.structured_data import load_bounded_yaml
+
+        with path.open("rb") as fh:
+            raw = fh.read((1 << 20) + 1)
+        if len(raw) > (1 << 20):
+            raise ValueError("Policy YAML exceeds its 1 MiB read bound")
+        return load_bounded_yaml(raw.decode("utf-8-sig"), last_key_wins=True) or {}
+    except (ValueError, RecursionError) as exc:
+        cause = exc.__cause__ if isinstance(exc.__cause__, (yaml.YAMLError, RecursionError)) else exc
+        raise ValueError(f"Invalid policy YAML in {path}") from cause
     except FileNotFoundError:
         raise
     except OSError as exc:
@@ -220,12 +257,18 @@ def _policy_from_data(
             if sev is not None:
                 severity_overrides[key] = sev
 
+    mcp = plugin_policy_block(data, "mcp", {"allowed_private_hosts"})
+    hooks = plugin_policy_block(data, "hooks", {"allowed_urls"})
+    endpoints = plugin_policy_block(data, "endpoints", {"resolve"})
     return ValidationPolicy(
         profile=profile_name,
         audience="all",
         author_email_regex=author_email_regex,
         severity_overrides=severity_overrides,
         source=source,
+        mcp_allowed_private_hosts=mcp.get("allowed_private_hosts", ()),
+        hook_allowed_urls=hooks.get("allowed_urls", ()),
+        resolve_endpoints=False if endpoints.get("resolve") is None else endpoints["resolve"],
     )
 
 
@@ -282,6 +325,17 @@ def load_policy_file(
         author_email_regex=(custom.author_email_regex if overlay_sets_email_regex else base.author_email_regex),
         severity_overrides=merged_overrides,
         source=path,
+        mcp_allowed_private_hosts=(
+            custom.mcp_allowed_private_hosts
+            if overlay_sets(custom_data, "mcp", "allowed_private_hosts")
+            else base.mcp_allowed_private_hosts
+        ),
+        hook_allowed_urls=(
+            custom.hook_allowed_urls if overlay_sets(custom_data, "hooks", "allowed_urls") else base.hook_allowed_urls
+        ),
+        resolve_endpoints=(
+            custom.resolve_endpoints if overlay_sets(custom_data, "endpoints", "resolve") else base.resolve_endpoints
+        ),
     )
 
 

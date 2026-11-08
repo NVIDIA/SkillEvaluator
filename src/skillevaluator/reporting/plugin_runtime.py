@@ -414,7 +414,7 @@ def project_plugin_runtime(
     projection.add("run", "Execution status", result.get("execution_status") or "unknown")
     if "attempts" in provenance:
         projection.add("run", "Setup attempts", _count(provenance["attempts"]))
-    for reason in islice(provenance.get("retry_reasons") or (), 2):
+    for reason in islice(provenance.get("retry_reasons") or (), 5):
         projection.add("run", "Setup retry reason", reason)
     source = _mapping(provenance.get("source") or observed.get("source"))
     source = {

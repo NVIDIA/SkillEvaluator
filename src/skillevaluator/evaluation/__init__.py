@@ -15,7 +15,7 @@ from skillevaluator.evaluation.dimension_judge import (
     compute_dimensions_deterministic,
 )
 from skillevaluator.evaluation.insights_judge import InsightsJudge, build_insights
-from skillevaluator.evaluation.options import DatasetOptions, EvaluationOptions
+from skillevaluator.evaluation.options import DatasetOptions, EvaluationOptions, PluginOptions
 from skillevaluator.evaluation.results import DatasetGenerationError, DatasetGenerationResult
 from skillevaluator.evaluation.service import EvaluationService
 
@@ -27,6 +27,7 @@ __all__ = [
     "EvaluationOptions",
     "EvaluationService",
     "InsightsJudge",
+    "PluginOptions",
     "build_insights",
     "compute_dimensions",
     "compute_dimensions_deterministic",

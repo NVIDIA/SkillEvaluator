@@ -53,6 +53,9 @@ navigation:
       - page: "Tier 3: Live Evaluation"
         path: ../docs/tier3-live-evaluation.mdx
         slug: tier3-live-evaluation
+      - page: Assess Plugins
+        path: ../docs/plugin-assessment.mdx
+        slug: plugin-assessment
       - page: Eval Datasets
         path: ../docs/eval-datasets.mdx
         slug: eval-datasets

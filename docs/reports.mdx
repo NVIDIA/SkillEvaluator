@@ -606,8 +606,11 @@ entry per failed arm:
 - `message`: the sentence the reports show.
 
 The HTML report lists each message under **Agent coverage notes** at the top
-of the Tier 3 section. `validate` prints them under **Agent coverage notes** in
-the Tier 3 block, also when Tier 3 is non-blocking, which is the default.
+of the Tier 3 section. The full terminal report, from `validate --verbose` or
+an explicit `-r cli`, prints the notes under **Agent coverage notes** in the
+Tier 3 block, also when Tier 3 is non-blocking (the default). The compact
+default view of `validate` does not print them and leaves them to the HTML
+and JSON reports and `BENCHMARK.md`.
 `tier3 evaluate` lists each agent's failed condition with its errors, as
 before.
 

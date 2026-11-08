@@ -99,9 +99,11 @@ All notable changes to SkillEvaluator are documented in this file.
   words, such as `agent timeout error`; the Tier 3 row of the tier status
   table names the agent and arm. The JSON payload records the same facts in
   `coverage_notices`, which the HTML report shows under
-  **Agent coverage notes** and `validate` prints in the Tier 3 block, also
-  when Tier 3 is non-blocking. A failed arm still fails the agent and the
-  run, and the notes say so.
+  **Agent coverage notes** and the full terminal report
+  (`validate --verbose` or `-r cli`) prints in the Tier 3 block, also when
+  Tier 3 is non-blocking. The compact default `validate` view leaves them to
+  the HTML and JSON reports and `BENCHMARK.md`. A failed arm still fails the
+  agent and the run, and the notes say so.
 
 - Tier 3 standard judges under `LLM_JUDGE_RETRY_POLICY=strict` with Bedrock
   as the provider no longer label a Bedrock error that the policy treats as an

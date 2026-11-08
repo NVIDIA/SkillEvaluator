@@ -22,6 +22,7 @@ from typing import TYPE_CHECKING, Any
 import pytest
 from rich.console import Console
 
+from skillevaluator.cli import _effective_report_formats
 from skillevaluator.constants import DIMENSION_MAPPING
 from skillevaluator.evaluation.tier3_report import (
     _validation_result_from_payload,
@@ -29,6 +30,7 @@ from skillevaluator.evaluation.tier3_report import (
     build_agent_eval_payload,
 )
 from skillevaluator.reporting import BenchmarkReporter, CLIReporter, HTMLReporter
+from skillevaluator.reporting.console_ui import summarize_tier3
 from skillevaluator.reporting.html import _TIER3_HTML_PREVIEW_TRIGGER_BYTES
 from skillevaluator.reporting.tier3_coverage import IncompleteArm, coverage_notices, incomplete_arms
 from skillevaluator.tier3.harbor.metrics import DEFAULT_METRICS
@@ -43,6 +45,7 @@ SETUP_ERROR = (
     "Agent runtime failed in case-1__attempt1: AgentSetupTimeoutError: Agent setup timed out after 360 seconds"
 )
 FAILED_AGENT = "The agent and the Tier 3 run are marked failed."
+REPO_ROOT = Path(__file__).resolve().parents[2]
 
 
 def _condition(status: str, scored: int, expected: int = 2, errors: list[str] | None = None) -> dict[str, Any]:
@@ -137,6 +140,13 @@ def _cli_output(result: ValidationResult) -> str:
     output = io.StringIO()
     CLIReporter(console=Console(file=output, width=400, color_system=None)).print_all([result])
     return output.getvalue()
+
+
+def _doc_block(name: str, lead: str) -> str:
+    """Return the one blank-line separated block of ``name`` that starts with ``lead``, whitespace-normalized."""
+    blocks = [" ".join(block.split()) for block in (REPO_ROOT / name).read_text(encoding="utf-8").split("\n\n")]
+    [block] = [block for block in blocks if block.startswith(lead)]
+    return block
 
 
 # -- arm classification -------------------------------------------------------
@@ -452,7 +462,10 @@ def test_html_keeps_coverage_notes_whole_in_the_bounded_preview() -> None:
 
 
 def test_terminal_prints_coverage_notes_for_a_non_blocking_tier3_result() -> None:
-    """``validate`` runs Tier 3 non-blocking by default; the failed run has errors but no findings."""
+    """``validate`` runs Tier 3 non-blocking by default; the failed run has errors but no findings.
+
+    The full terminal report (``validate --verbose`` or ``-r cli``) must still print the notes.
+    """
     payload, result, _, _ = _render({"claude-code": _agent(baseline=_condition("failed", 1, errors=[TIMEOUT_ERROR]))})
     result.metadata["gating"] = {"tier": 3, "blocking": False}
     assert not result.findings
@@ -462,3 +475,28 @@ def test_terminal_prints_coverage_notes_for_a_non_blocking_tier3_result() -> Non
     assert "Agent coverage notes" in output
     (notice,) = payload["coverage_notices"]
     assert f"• {notice['message']}" in output
+
+
+def test_compact_validate_view_leaves_coverage_notes_to_the_report_files_and_the_docs_say_so() -> None:
+    """Only the full terminal report prints the notes; a plain ``validate`` shows the compact view."""
+    payload, result, _, _ = _render({"claude-code": _agent(baseline=_condition("failed", 1, errors=[TIMEOUT_ERROR]))})
+    result.metadata["gating"] = {"tier": 3, "blocking": False}
+    (notice,) = payload["coverage_notices"]
+
+    # A plain ``validate`` swaps the ``cli`` reporter for HTML and JSON; ``--verbose`` keeps it.
+    assert "cli" not in _effective_report_formats(("cli",), quiet=True)
+    assert _effective_report_formats(("cli",), quiet=False) == ("cli",)
+    # The compact Tier 3 rows show at most the first raw execution error, never the notes.
+    _, _, rows, _ = summarize_tier3(result, report_formats=("html", "json"))
+    compact = " ".join(text for row in rows for text, _ in row.segments)
+    assert "AgentTimeoutError" in compact
+    assert notice["message"] not in compact
+    assert "baseline incomplete" not in compact
+
+    docs = _doc_block("docs/reports.mdx", "The HTML report lists each message under **Agent coverage notes**")
+    changelog = _doc_block("CHANGELOG.md", "- Tier 3 reports no longer say `baseline not run`")
+    for name, text in (("docs/reports.mdx", docs), ("CHANGELOG.md", changelog)):
+        assert "`validate --verbose`" in text, name
+        assert "`-r cli`" in text, name
+        assert "compact default" in text, name
+        assert "`validate` prints" not in text, name

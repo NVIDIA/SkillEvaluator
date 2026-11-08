@@ -427,6 +427,7 @@ _SED_IN_PLACE_FLAG_RE = re.compile(r"--in-place\b.*|-[nsuzre]*i.*")
 # env X=1, timeout 5, xargs -I{}, ...) are stepped over. A shell -c script, an
 # su -c command, an eval string, a command substitution, and a find -exec
 # command are read as commands too. Each of these writes:
+#   - tee: every operand; sed -i / --in-place: every file operand;
 #   - cp, ln, install: the last operand, or the -t / --target-directory
 #     directory (-T is --no-target-directory and changes nothing), and each
 #     source's name inside it, should it be a directory; install -d: every
@@ -436,9 +437,12 @@ _SED_IN_PLACE_FLAG_RE = re.compile(r"--in-place\b.*|-[nsuzre]*i.*")
 #   - curl -o, -D, -c and their long forms; wget -O, -o, -a, -P and theirs;
 #   - rsync and scp: a local destination, read as for cp;
 #   - perl -i and ruby -i: the files they edit.
-# These targets match an entry from their start to a path-component boundary,
+# tee and sed -i targets match an entry as a substring, as the first reading's
+# do. The others match an entry from their start to a path-component boundary,
 # so the backup "cp ~/.bashrc ~/.bashrc.bak" is not a write to ~/.bashrc, while
-# a ".d" drop-in directory such as ~/.bashrc.d is.
+# a ".d" drop-in directory such as ~/.bashrc.d is. A target that climbs out of
+# its directory with ".." may reach the root, so it is also read from its last
+# ".." on: "../etc/sudoers.d/x" and "~/../root/.bashrc" match.
 _WRITE_PARSE_MAX_DEPTH = 3
 _WRITE_PARSE_MAX_CHARS = 65_536
 _WRITE_PARSE_MAX_SUBSTITUTIONS = 16
@@ -512,6 +516,11 @@ _COPY_COMMANDS = frozenset({"cp", "mv", "ln", "install"})
 _COPY_VALUE_LETTERS = "Smog"
 _COPY_VALUE_LONG_OPTIONS = frozenset({"--suffix", "--mode", "--owner", "--group", "--strip-program"})
 _TOUCH_VALUE_OPTIONS = frozenset({"-r", "--reference", "-d", "--date", "-t", "-A", "-s", "--size"})
+# sed: the short option letters and long options that take a value. With -e or
+# -f (or their long forms) every operand is a file; otherwise the first is the
+# script. -i takes only an attached suffix.
+_SED_VALUE_LETTERS = "efl"
+_SED_VALUE_LONG_OPTIONS = frozenset({"--expression", "--file", "--line-length"})
 # curl and wget: the short options that take a value, those of them that name
 # a file the client writes, and the long forms of those.
 _DOWNLOAD_OUTPUT_OPTIONS: dict[str, tuple[str, str, frozenset[str]]] = {
@@ -530,6 +539,7 @@ _WRITE_DESTINATION_PATTERNS = tuple(
     for suffix in ("", r"\.d")
     for entry in _SENSITIVE_WRITE_PATHS
 )
+_PARENT_CLIMB_RE = re.compile(r"^(?:.*/)?\.\.(?=/)")
 
 # The parsed targets do not cover every way to write a file, so the earlier
 # rule stays as a fallback for what the readings leave open. A protected path
@@ -988,7 +998,11 @@ def _executed_command_text(tool_call: dict[str, Any]) -> str:
 
 def _normpath_word(match: re.Match[str]) -> str:
     word = match.group()
-    return posixpath.normpath(word) if "/" in word else word
+    if "/" not in word:
+        return word
+    # posixpath keeps a leading "//", which names the root as "/" does.
+    normalized = posixpath.normpath(word)
+    return normalized[1:] if normalized.startswith("//") else normalized
 
 
 def _normalize_sensitive_path_text(text: Any) -> str:
@@ -1315,9 +1329,60 @@ def _in_place_edit_targets(args: list[str]) -> list[str]:
     return operands if in_place else []
 
 
+def _sed_in_place_targets(args: list[str]) -> list[str]:
+    """Return the files a sed -i or --in-place command edits."""
+    in_place = False
+    script_given = False
+    operands: list[str] = []
+    options = True
+    index = 0
+    while index < len(args):
+        word = args[index]
+        index += 1
+        if not options or word == "-" or not word.startswith("-"):
+            operands.append(word)
+        elif word == "--":
+            options = False
+        elif word.startswith("--"):
+            option, equals, _ = word.partition("=")
+            if option == "--in-place":
+                in_place = True
+            elif option in _SED_VALUE_LONG_OPTIONS:
+                script_given |= option != "--line-length"
+                index += not equals
+        else:
+            # -i takes the rest of the cluster as its suffix; -e, -f, and -l
+            # take the rest of it, or the next word when they end it.
+            for position, letter in enumerate(word[1:], start=2):
+                if letter == "i":
+                    in_place = True
+                    break
+                if letter in _SED_VALUE_LETTERS:
+                    script_given |= letter != "l"
+                    index += position == len(word)
+                    break
+    if not in_place:
+        return []
+    return operands if script_given else operands[1:]
+
+
+def _command_operand_words(args: list[str]) -> list[str]:
+    """Return *args* without their redirections."""
+    return [word for word in _without_redirections(args) if not _ATTACHED_REDIRECT_RE.match(word)]
+
+
+def _command_edit_targets(name: str, args: list[str]) -> list[str]:
+    """Return the files a tee or sed -i command writes; they match an entry as a substring."""
+    if name == "tee":
+        return _option_operands(_command_operand_words(args), frozenset())
+    if name == "sed":
+        return _sed_in_place_targets(_command_operand_words(args))
+    return []
+
+
 def _command_write_targets(name: str, args: list[str]) -> list[str]:
     """Return the files the simple command *name* writes through its operands."""
-    args = [word for word in _without_redirections(args) if not _ATTACHED_REDIRECT_RE.match(word)]
+    args = _command_operand_words(args)
     if name in _COPY_COMMANDS:
         return _copy_write_targets(name, args)
     if name == "dd":
@@ -1335,7 +1400,11 @@ def _command_write_targets(name: str, args: list[str]) -> list[str]:
 
 def _protected_write_destination(target: str) -> str | None:
     """Return the protected entry a parsed write target is, or lies inside, on a path-component boundary."""
-    texts = (str(target).lower(), _normalize_sensitive_path_text(target))
+    texts = [str(target).lower(), _normalize_sensitive_path_text(target)]
+    # A target that climbs out of its directory with ".." may reach the root.
+    for text in texts[:2]:
+        if (climbed := _PARENT_CLIMB_RE.sub("", text, count=1)) != text:
+            texts.extend((climbed, _normalize_sensitive_path_text(climbed)))
     return next(
         (entry for entry, pattern in _WRITE_DESTINATION_PATTERNS if any(pattern.match(text) for text in texts)),
         None,
@@ -1360,6 +1429,10 @@ def _sensitive_write_target(command: str) -> str | None:
     commands = _shell_commands(text) if len(text) <= _WRITE_PARSE_MAX_CHARS else None
     if commands is None:
         return named if named is not None and _SHELL_WRITE_HINT_RE.search(lowered) else None
+    edit_targets = [target for name, args, _, _ in commands for target in _command_edit_targets(name, args)]
+    for target in edit_targets:
+        if (entry := _sensitive_path_match(target, _SENSITIVE_WRITE_PATHS)) is not None:
+            return entry
     command_targets = [target for name, args, _, _ in commands for target in _command_write_targets(name, args)]
     for target in command_targets:
         if (entry := _protected_write_destination(target)) is not None:
@@ -1368,7 +1441,7 @@ def _sensitive_write_target(command: str) -> str | None:
         return None
     if any(
         _UNRESOLVED_WRITE_TARGET_RE.search(_normalize_sensitive_path_text(target))
-        for target in [*text_targets, *command_targets]
+        for target in [*text_targets, *edit_targets, *command_targets]
     ):
         return named
     if _SHELL_WRITE_HINT_RE.search(lowered):

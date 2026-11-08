@@ -1753,14 +1753,16 @@ def _judge_mixed_lift_exclusions(info: dict[str, Any], metrics: Collection[str])
 
     Reads the logical attempts the lift rebuild compares, so a case listed here
     is one that ``_compute_lift`` left out of that metric. Per metric it returns
-    ``case_ids`` and ``excluded_attempts``, the with-skill attempts that scored
-    the metric on those cases. A saved run without loaded rewards yields no
-    entry; its recorded per-metric counts still describe the exclusion.
+    ``case_ids``, ``excluded_attempts``, the with-skill attempts that scored the
+    metric on those cases, and ``complete``, whether both arms' rewards loaded
+    completely with every logical trial naming one case. A saved run without
+    loaded rewards yields no entry; its recorded per-metric counts still
+    describe the exclusion.
     """
     from skillevaluator.tier3.harbor.collector import _entry_id, _judge_mixed_cases
     from skillevaluator.tier3.harbor.metrics import metric_set_for_reward, metric_value
 
-    (with_rows, without_rows), _complete = _logical_condition_rewards(info)
+    (with_rows, without_rows), complete = _logical_condition_rewards(info)
     if not with_rows or not without_rows:
         return {}
     exclusions: dict[str, dict[str, Any]] = {}
@@ -1777,6 +1779,7 @@ def _judge_mixed_lift_exclusions(info: dict[str, Any], metrics: Collection[str])
                 and metric in metric_set_for_reward(row)[1]
                 and metric_value(row, metric) is not None
             ),
+            "complete": complete,
         }
     return exclusions
 
@@ -2274,7 +2277,8 @@ def _lift_excluded_case_count(mixed: object, metric: str) -> int:
     from skillevaluator.tier3.harbor.collector import _LLM_JUDGE_METRICS
 
     count = mixed.get(metric) if isinstance(mixed, dict) and metric in _LLM_JUDGE_METRICS else None
-    return count if type(count) is int and count > 0 else 0
+    # A count JSON cannot carry exactly is left out rather than published as ``null``.
+    return count if type(count) is int and 0 < count <= _MAX_JSON_SAFE_INTEGER else 0
 
 
 def _build_dimensions(
@@ -2846,7 +2850,12 @@ def _evaluator_card(
         card["evidence_sampling"] = evidence_sampling
     if excluded_cases:
         card["comparison_basis"] = _card_comparison_basis(
-            metric, excluded_cases, excluded_case_ids, lift_exclusion, lift_basis
+            metric,
+            excluded_cases,
+            excluded_case_ids,
+            lift_exclusion,
+            lift_basis,
+            arm_scores=scores.get("with_skill") is not None and scores.get("baseline") is not None,
         )
     return card
 
@@ -2857,33 +2866,41 @@ def _card_comparison_basis(
     case_ids: set[str],
     lift_exclusion: dict[str, Any] | None,
     lift_basis: dict[str, Any] | None,
+    *,
+    arm_scores: bool,
 ) -> dict[str, Any]:
     """Explain which cases an evaluator card's lift left out while its arm scores keep them.
 
     ``excluded_cases`` is the comparison's own count. ``case_ids`` lists the
-    cases the loaded rewards identify, which can be fewer, for example for a
-    saved run whose rewards were not loaded. The with-skill attempt counts are
-    ``None`` unless both arms' rewards loaded completely and identify every
-    left-out case: ``excluded_attempts`` scored the metric on those cases, and
-    ``contributing_attempts`` fed the metric's lift.
+    lift's keys for the cases the loaded rewards identify (case IDs without an
+    attempt suffix), which can be fewer, for example for a saved run whose
+    rewards were not loaded. The with-skill attempt counts are both ``None``
+    unless both arms' rewards loaded completely and identify every left-out
+    case: ``excluded_attempts`` scored the metric on those cases, and
+    ``contributing_attempts`` fed the metric's lift. ``arm_scores`` says whether
+    both arm scores exist for the reason to point at.
     """
-    # The lift basis is published only for complete loads of both arms.
-    complete = isinstance(lift_basis, dict) and len(case_ids) == excluded_cases
+    exclusion = lift_exclusion or {}
+    # The lift basis is published whenever both arms' reward loads report complete,
+    # even when a logical trial named two cases and left the comparison short.
+    complete = exclusion.get("complete") is True and isinstance(lift_basis, dict) and len(case_ids) == excluded_cases
     metrics_basis = lift_basis.get("metrics") if complete else None
     metric_basis = metrics_basis.get(metric) if isinstance(metrics_basis, dict) else None
     trials = metric_basis.get("trials") if isinstance(metric_basis, dict) else None
     contributing = trials.get("with_skill") if isinstance(trials, dict) else None
-    excluded_attempts = (lift_exclusion or {}).get("excluded_attempts") if complete else None
+    excluded_attempts = exclusion.get("excluded_attempts") if complete else None
+    if type(contributing) is not int or type(excluded_attempts) is not int:
+        contributing = excluded_attempts = None
+    reason = "Cases whose arms were scored by different judge models are left out of this metric's lift"
     return {
         "excluded_cases": excluded_cases,
-        "case_ids": [
-            case_id[:_MAX_LIFT_EXCLUDED_CASE_ID_CHARS]
-            for case_id in sorted(case_ids)[:_MAX_LIFT_EXCLUDED_CASE_IDS_PER_CARD]
+        # Cutting can make two long keys equal; each is listed once.
+        "case_ids": sorted({case_id[:_MAX_LIFT_EXCLUDED_CASE_ID_CHARS] for case_id in case_ids})[
+            :_MAX_LIFT_EXCLUDED_CASE_IDS_PER_CARD
         ],
-        "excluded_attempts": excluded_attempts if type(excluded_attempts) is int else None,
-        "contributing_attempts": contributing if type(contributing) is int else None,
-        "reason": "Cases whose arms were scored by different judge models are left out of this metric's lift; "
-        "the arm scores include them.",
+        "excluded_attempts": excluded_attempts,
+        "contributing_attempts": contributing,
+        "reason": f"{reason}; the arm scores include them." if arm_scores else f"{reason}.",
     }
 
 

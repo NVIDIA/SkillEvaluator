@@ -3438,7 +3438,16 @@
                                 {% endif %}
                                 {% set lift_excluded_cases = card.comparison_basis.excluded_cases if card.comparison_basis else 0 %}
                                 {% if lift_excluded_cases %}
-                                    <div class="t3-dim-hint t3-eval-lift-note">Lift leaves out {{ lift_excluded_cases }} case{{ '' if lift_excluded_cases == 1 else 's' }} scored by different judge models; the arm scores include {{ 'it' if lift_excluded_cases == 1 else 'them' }}.</div>
+                                    {% set one_lift_excluded_case = lift_excluded_cases == 1 %}
+                                    {% set lift_excluded_label = lift_excluded_cases ~ (' case' if one_lift_excluded_case else ' cases') %}
+                                    {# Only a card with both arm scores can say they include the cases. #}
+                                    <div class="t3-dim-hint t3-eval-lift-note">
+                                        {%- if card.lift is none -%}
+                                            No lift: {{ lift_excluded_label }} {{ 'was' if one_lift_excluded_case else 'were' }} scored by different judge models and no comparable result remains
+                                        {%- else -%}
+                                            Lift leaves out {{ lift_excluded_label }} scored by different judge models
+                                        {%- endif -%}
+                                        {%- if card.baseline is not none %}; the arm scores include {{ 'it' if one_lift_excluded_case else 'them' }}{% endif %}.</div>
                                 {% endif %}
                             </div>
                         </div>

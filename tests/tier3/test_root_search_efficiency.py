@@ -224,3 +224,45 @@ def test_argv_list_root_search_and_script_run_score_half(module):
     ]
     result = module.check_tool_efficiency(calls, expected_skill="task", expected_script="task.py")
     assert result["score"] == 0.5, result
+
+
+@pytest.mark.parametrize("module", [checks, template], ids=["host", "bundled"])
+@pytest.mark.parametrize(
+    "argv",
+    [
+        ["grep", "-r", "#TODO", "/"],
+        ["find", "/", "-name", "$HOME"],
+        ["rg", "`task`", "/"],
+        ["env", "LC_ALL=C", "grep", "-r", "#TODO", "/"],
+    ],
+)
+def test_argv_list_words_are_literal(module, argv):
+    # An argv list runs without a shell, so "$", backticks and "#" in its
+    # words are literal and do not hide the root operand.
+    result = module.check_tool_efficiency(
+        [{"action": "shell", "action_input": {"command": argv}}], expected_skill="task", expected_script="task.py"
+    )
+    assert result["score"] == 0.0, result
+
+
+@pytest.mark.parametrize("module", [checks, template], ids=["host", "bundled"])
+@pytest.mark.parametrize("argv", [["grep", "-r", "#TODO", "src"], ["find", ".", "-name", "$HOME"]])
+def test_scoped_argv_lists_with_shell_characters_stay_productive(module, argv):
+    result = module.check_tool_efficiency(
+        [{"action": "shell", "action_input": {"command": argv}}], expected_skill="task", expected_script="task.py"
+    )
+    assert result["score"] == 1.0, result
+
+
+@pytest.mark.parametrize("module", [checks, template], ids=["host", "bundled"])
+@pytest.mark.parametrize("payload", ["find / -name task.py # locate", "echo $(find / -name task.py)"])
+def test_shell_payload_in_an_argv_list_scores_like_the_same_text(module, payload):
+    # The payload of "bash -lc" is shell text, so the expansion and comment
+    # rule applies to it exactly as to the same command written as text.
+    as_text = module.check_tool_efficiency(
+        [{"action": "exec_command", "action_input": {"cmd": payload}}], expected_skill="task"
+    )
+    as_argv = module.check_tool_efficiency(
+        [{"action": "shell", "action_input": {"command": ["bash", "-lc", payload]}}], expected_skill="task"
+    )
+    assert as_argv["score"] == as_text["score"], (as_argv, as_text)

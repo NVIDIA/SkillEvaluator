@@ -5365,6 +5365,10 @@ def _tool_efficiency_target(name: str, args: dict[str, Any]) -> Any:
     )
 
 
+def _is_argv(target: Any) -> bool:
+    return isinstance(target, list) and bool(target) and all(isinstance(item, str) for item in target)
+
+
 def _tool_efficiency_text(target: Any) -> str:
     """Shell text for a tool call target.
 
@@ -5373,7 +5377,7 @@ def _tool_efficiency_text(target: Any) -> str:
     lets the root-search and expected-script checks see the command instead of
     a Python list repr.
     """
-    if isinstance(target, list) and target and all(isinstance(item, str) for item in target):
+    if _is_argv(target):
         return shlex.join(target)
     return str(target)
 
@@ -5416,7 +5420,7 @@ def _tool_call_productivity(tc: dict[str, Any], expected_skill: Any, expected_sc
         search_action = "exec_command"
     cmd = _tool_efficiency_text(target)
     # A search rooted at "/" is waste even when it names the expected skill or script.
-    if _tool_searches_root(search_action, args, cmd) or _mcp_call_targets_root(name, args):
+    if _tool_searches_root(search_action, args, cmd, argv=_is_argv(target)) or _mcp_call_targets_root(name, args):
         return "wasted"
     if ("read" in name and expected_skill and expected_skill in cmd) or (
         runs_command and expected_script and expected_script in cmd

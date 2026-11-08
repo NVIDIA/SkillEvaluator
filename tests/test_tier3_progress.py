@@ -427,6 +427,153 @@ def test_rich_progress_resets_state_when_live_initialization_fails() -> None:
     assert reporter._live_plan is None
     assert reporter._live_events == {}
     assert reporter._live_event_slots == progress._LIVE_MIN_EVENT_ROWS
+    # A stale record of printed plan lines would hide the next run's plan.
+    assert reporter._printed_plan_lines == {}
+
+
+def test_rich_progress_prints_the_full_plan_above_the_fixed_frame(monkeypatch: pytest.MonkeyPatch) -> None:
+    import rich.live
+
+    progress = _progress_module()
+    _FakeLive.instances.clear()
+    monkeypatch.setattr(rich.live, "Live", _FakeLive)
+    monkeypatch.setenv("COLUMNS", "80")
+    output = _TTYBuffer()
+    reporter = progress.RichProgressReporter(stream=output, refresh_interval=60)
+    agents = ("claude-code", "codex")
+    options = {"attempts": 3, "baseline": True, "with_skill": True, "concurrency": 4, "max_agents": 2}
+    reporter.start(
+        progress.Tier3RunPlan(
+            skill_name="pdf-processing",
+            environment="docker",
+            agents=agents,
+            timeout_multiplier=1.5,
+            **options,
+        )
+    )
+    resolved = progress.Tier3RunPlan(
+        skill_name="pdf-processing",
+        environment="docker",
+        agents=agents,
+        agent_models=(("claude-code", "anthropic/claude-sonnet-4-5"), ("codex", "openai/gpt-5.1-codex")),
+        provider="nv_build",
+        task_count=3,
+        case_count=12,
+        timeout_multiplier=1.5,
+        matrix_trials=72,
+        preflight_trials=2,
+        total_containers=74,
+        task_timeout_seconds=1350,
+        **options,
+    )
+    reporter.start(resolved)
+    # An unchanged plan update prints nothing again.
+    reporter.start(resolved)
+
+    live = _FakeLive.instances[0]
+    frame_heights = {len(_render(renderable).splitlines()) for renderable in live.renderables}
+    printed = output.getvalue().splitlines()
+    reporter.close()
+
+    assert printed == [
+        "Agents / models: claude-code, codex",
+        "Run plan: Attempts 3 · With skill yes · Baseline yes · Concurrency 4 · Max agents 2 · Timeout 1.5x",
+        "Agents / models: claude-code=anthropic/claude-sonnet-4-5, codex=openai/gpt-5.1-codex",
+        "Provider: nv_build",
+        "Run plan: Tasks 3 · Cases 12 · Attempts 3 · With skill yes · Baseline yes · Concurrency 4 · "
+        "Max agents 2 · Timeout 1.5x · Matrix trials 72 · Preflight trials 2 · Containers 74 · "
+        "Max scaled top-level agent timeout 1350s",
+    ]
+    # The frame below keeps one height at 80 columns while the plan resolves.
+    assert len(frame_heights) == 1
+
+
+def _stopping_frame_reporter(progress: Any, output: io.StringIO, agents: tuple[str, ...], stopping_detail: str) -> Any:
+    """Return a Rich reporter whose stage sequence matches a run stopped by Ctrl+C."""
+    reporter = progress.RichProgressReporter(stream=output, refresh_interval=60)
+    plan = progress.Tier3RunPlan(
+        skill_name="pdf-processing",
+        environment="docker",
+        agents=agents,
+        agent_models=tuple((agent, f"provider/{agent}-large-model") for agent in agents),
+        provider="nv_build",
+        task_count=3,
+        case_count=12,
+        attempts=3,
+        baseline=True,
+        with_skill=True,
+        concurrency=4,
+        max_agents=2,
+        timeout_multiplier=1.5,
+        matrix_trials=72,
+        preflight_trials=0,
+        total_containers=72,
+        task_timeout_seconds=1350,
+    )
+    reporter.start(plan)
+    for stage in (
+        "configuration",
+        "model-resolution",
+        "environment-preflight",
+        "credential-validation",
+        "with-skill-tasks",
+        "baseline-tasks",
+        "case-selection",
+        "docker-images",
+    ):
+        reporter.emit(progress.ProgressEvent(stage=stage, state="complete", detail="done"))
+    # The longest built-in stage label stays in the recent-stage window.
+    reporter.emit(
+        progress.ProgressEvent(
+            stage="agent-runtime-preflight",
+            state="skipped",
+            detail="disabled by default; enable with --agent-runtime-preflight",
+        )
+    )
+    for agent in agents:
+        reporter.emit(progress.ProgressEvent(stage=f"agent:{agent}", state="running", detail="with-skill + baseline"))
+    for agent in agents:
+        reporter.emit(progress.ProgressEvent(stage=f"agent:{agent}", state="running", detail=stopping_detail))
+    return reporter
+
+
+@pytest.mark.parametrize("agents", [("claude-code", "codex"), ("mini-swe-agent",)])
+def test_rich_progress_at_80_columns_shows_the_ctrl_c_hint_and_the_full_plan(
+    monkeypatch: pytest.MonkeyPatch,
+    agents: tuple[str, ...],
+) -> None:
+    import rich.live
+
+    from skillevaluator.tier3.harbor import runner
+
+    progress = _progress_module()
+    _FakeLive.instances.clear()
+    monkeypatch.setattr(rich.live, "Live", _FakeLive)
+    monkeypatch.setenv("COLUMNS", "80")
+    stream = _TTYBuffer()
+    reporter = _stopping_frame_reporter(progress, stream, agents, runner._HARBOR_RUN_STOPPING_DETAIL)
+    output = stream.getvalue()
+    frame = _render(_FakeLive.instances[0].renderables[-1], width=80)
+    reporter.close()
+
+    agent_rows = [line for line in frame.splitlines() if line.startswith("│ Agent ") and "running" in line]
+    assert len(agent_rows) == len(agents)
+    # The frame cuts each row to the terminal width; the second Ctrl+C hint
+    # comes first in the detail and is short, so it is still readable.
+    hint = runner._HARBOR_RUN_STOPPING_DETAIL.split(";")[0]
+    assert hint.startswith("Ctrl+C again")
+    assert all(hint in row for row in agent_rows)
+    # Every plan value is printed in full above the frame.
+    assert all(f"{agent}=provider/{agent}-large-model" in output for agent in agents)
+    for value in (
+        "Concurrency 4",
+        "Max agents 2",
+        "Timeout 1.5x",
+        "Matrix trials 72",
+        "Containers 72",
+        "Max scaled top-level agent timeout 1350s",
+    ):
+        assert value in output
 
 
 def test_rich_reporter_immediately_starts_one_live_box_and_keeps_stage_updates_inside_it(
@@ -451,7 +598,13 @@ def test_rich_reporter_immediately_starts_one_live_box_and_keeps_stage_updates_i
     Console(file=initial, force_terminal=False, width=180).print(live.renderables[0])
     assert "Harbor Run Configuration" in initial.getvalue()
     assert "demo-skill" in initial.getvalue()
-    assert output.getvalue() == ""
+    # Only the full plan lines are printed above the box; no stage line is.
+    plan_lines = (
+        "Agents / models: codex=gpt-5, opencode=nvidia/llama\n"
+        "Provider: openai\n"
+        "Run plan: Tasks 2 · Cases 2 · Attempts 3 · Baseline yes · Concurrency 4 · Max agents 2 · Timeout 1.5x\n"
+    )
+    assert output.getvalue() == plan_lines
 
     reporter.emit(progress.ProgressEvent(stage="agent-runtime-preflight", state="running"))
 
@@ -459,7 +612,7 @@ def test_rich_reporter_immediately_starts_one_live_box_and_keeps_stage_updates_i
     Console(file=updated, force_terminal=False, width=180).print(live.renderables[-1])
     assert "Agent Runtime Preflight" in updated.getvalue()
     assert "running" in updated.getvalue()
-    assert output.getvalue() == ""
+    assert output.getvalue() == plan_lines
     reporter.close()
 
 
@@ -3272,7 +3425,9 @@ def test_second_interrupt_forces_running_agents_to_stop(
     assert reporter.interrupts == 2
     events = [(event.stage, event.state, event.detail) for event in reporter.events]
     stopping = [detail for stage, state, detail in events if stage == "agent:codex" and state == "running"]
-    assert stopping[-1].startswith("stopping Harbor jobs; press Ctrl+C again")
+    assert stopping[-1] == runner._HARBOR_RUN_STOPPING_DETAIL
+    assert stopping[-1].startswith("Ctrl+C again skips wait; stopping Harbor jobs")
+    assert stopping[-1].endswith("up to 30s of environment cleanup")
     assert ("agent:codex", "failed", "interrupted before completion") in events
     assert events[-1] == ("run-finished", "failed", "Tier 3 evaluation interrupted")
 

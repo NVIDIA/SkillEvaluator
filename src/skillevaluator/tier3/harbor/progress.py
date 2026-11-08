@@ -395,6 +395,7 @@ class RichProgressReporter(PlainProgressReporter):
         self._live_plan: Tier3RunPlan | None = None
         self._live_events: dict[str, tuple[ProgressEvent, str | None]] = {}
         self._live_event_slots = _LIVE_MIN_EVENT_ROWS
+        self._printed_plan_lines: dict[str, str] = {}
 
     def emit(self, event: ProgressEvent) -> None:
         with self._lock:
@@ -438,6 +439,7 @@ class RichProgressReporter(PlainProgressReporter):
                     self._live_plan = None
                     self._live_events.clear()
                     self._live_event_slots = _LIVE_MIN_EVENT_ROWS
+                    self._printed_plan_lines.clear()
 
     def close_after_failure(self) -> None:
         """Stop the live view after a drawing failure and say that the run goes on."""
@@ -457,19 +459,67 @@ class RichProgressReporter(PlainProgressReporter):
 
     def _render_plan(self, plan: Tier3RunPlan) -> None:
         self._live_plan = plan
+        # The frame cuts long rows to keep its height, so each plan line is
+        # also printed in full above it whenever that line changes.
+        for label, text in self._plan_lines(plan):
+            if self._printed_plan_lines.get(label) != text:
+                self._printed_plan_lines[label] = text
+                self._write_line(f"{label}: {text}")
         table = self._build_live_table()
         if self._live is None:
             self._live = self._live_factory(
                 table,
                 console=self._console,
-                # Redraw only from progress events and the heartbeat, which
-                # hold the reporter lock, never from Rich's own refresh thread.
+                # Rich never redraws on its own timer. The frame is redrawn when
+                # the plan or a stage changes, on each heartbeat, and when other
+                # output is printed above it.
                 auto_refresh=False,
                 transient=False,
             )
             self._live.start(refresh=True)
         else:
             self._live.update(table, refresh=True)
+
+    def _plan_agents_text(self, plan: Tier3RunPlan) -> str:
+        model_map = dict(plan.agent_models)
+        return ", ".join(
+            f"{self._safe_text(agent)}={self._safe_text(model_map[agent])}"
+            if agent in model_map
+            else self._safe_text(agent)
+            for agent in plan.agents
+        )
+
+    def _plan_values_text(self, plan: Tier3RunPlan) -> str:
+        values = (
+            ("Tasks", plan.task_count),
+            ("Cases", plan.case_count),
+            ("Attempts", plan.attempts),
+            ("With skill", None if plan.with_skill is None else "yes" if plan.with_skill else "no"),
+            ("Baseline", None if plan.baseline is None else "yes" if plan.baseline else "no"),
+            ("Concurrency", plan.concurrency),
+            ("Max agents", plan.max_agents),
+            ("Timeout", None if plan.timeout_multiplier is None else f"{plan.timeout_multiplier:g}x"),
+            ("Matrix trials", plan.matrix_trials),
+            ("Preflight trials", plan.preflight_trials),
+            ("Containers", plan.total_containers),
+            (
+                "Max scaled top-level agent timeout",
+                None if plan.task_timeout_seconds is None else f"{plan.task_timeout_seconds:g}s",
+            ),
+        )
+        return " · ".join(f"{label} {value}" for label, value in values if value is not None)
+
+    def _plan_lines(self, plan: Tier3RunPlan) -> list[tuple[str, str]]:
+        lines = []
+        agents = self._plan_agents_text(plan)
+        if agents:
+            lines.append(("Agents / models", agents))
+        if plan.provider:
+            lines.append(("Provider", self._safe_text(plan.provider)))
+        known = self._plan_values_text(plan)
+        if known:
+            lines.append(("Run plan", known))
+        return lines
 
     def _build_live_table(self):
         from rich import box
@@ -502,13 +552,7 @@ class RichProgressReporter(PlainProgressReporter):
         table.add_column("Elapsed", justify="right", no_wrap=True, overflow="ellipsis")
 
         table.add_row("Environment", Text("configured", style=TEXT), Text(self._safe_text(plan.environment)), "")
-        model_map = dict(plan.agent_models)
-        agents = ", ".join(
-            f"{self._safe_text(agent)}={self._safe_text(model_map[agent])}"
-            if agent in model_map
-            else self._safe_text(agent)
-            for agent in plan.agents
-        )
+        agents = self._plan_agents_text(plan)
         table.add_row("Agents / models", Text("configured", style=TEXT), Text(agents or "none"), "")
         # The Provider and Run plan rows are always present, with a placeholder
         # until the plan resolves, so a plan update does not add rows.
@@ -518,24 +562,7 @@ class RichProgressReporter(PlainProgressReporter):
             Text(self._safe_text(plan.provider or "resolving")),
             "",
         )
-        values = (
-            ("Tasks", plan.task_count),
-            ("Cases", plan.case_count),
-            ("Attempts", plan.attempts),
-            ("With skill", None if plan.with_skill is None else "yes" if plan.with_skill else "no"),
-            ("Baseline", None if plan.baseline is None else "yes" if plan.baseline else "no"),
-            ("Concurrency", plan.concurrency),
-            ("Max agents", plan.max_agents),
-            ("Timeout", None if plan.timeout_multiplier is None else f"{plan.timeout_multiplier:g}x"),
-            ("Matrix trials", plan.matrix_trials),
-            ("Preflight trials", plan.preflight_trials),
-            ("Containers", plan.total_containers),
-            (
-                "Max scaled top-level agent timeout",
-                None if plan.task_timeout_seconds is None else f"{plan.task_timeout_seconds:g}s",
-            ),
-        )
-        known = " · ".join(f"{label} {value}" for label, value in values if value is not None)
+        known = self._plan_values_text(plan)
         table.add_row(
             "Run plan",
             Text("configured" if known else "pending", style=TEXT if known else MUTED),

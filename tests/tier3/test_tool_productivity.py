@@ -372,8 +372,23 @@ def test_scoped_searches_stay_productive(module, command):
 
 
 @pytest.mark.parametrize("module", _MODULES)
-def test_setup_noise_in_an_argv_command_is_wasted(module):
-    assert _classify(module, _call("shell", command=["pip", "install", "requests"])) == "wasted"
+@pytest.mark.parametrize(
+    "argv",
+    [
+        ["pip", "install", "requests"],
+        ["pip", "install", "-e", "."],
+        ["brew", "install", "jq"],
+        ["npm", "install"],
+        ["which", "jq"],
+        ["python", "--version"],
+    ],
+    ids=" ".join,
+)
+def test_setup_noise_in_an_argv_command_is_wasted(module, argv):
+    # Help, version and install commands recorded as an argument list are
+    # waste, like the same command written as text.
+    assert _classify(module, _call("shell", command=argv)) == "wasted"
+    assert _classify(module, _call("Bash", command=" ".join(argv))) == "wasted"
 
 
 @pytest.mark.parametrize("module", _MODULES)

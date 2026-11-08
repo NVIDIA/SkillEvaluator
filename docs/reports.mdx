@@ -533,24 +533,38 @@ dimensions, each answering one question:
 scored tool calls that did productive work. For Claude Code and Codex tool
 names alike, these calls are productive: reading, searching, writing, editing
 or patching files (`Write`, `Edit`, `MultiEdit`, `apply_patch`, `list_dir`,
-`grep_files` and similar), running commands, activating a skill and calling
-MCP tools (`mcp__*`). Help, version and install probes are wasted, as is any
-tool outside these classes. Planning and bookkeeping calls are neutral and left
-out of the score: `TodoWrite`, `update_plan`, background-shell polling such as
-`BashOutput` and `KillShell`, `TaskStop`, `ToolSearch`, and sub-agent calls
-such as `Task` and Codex `spawn_agent` or `wait_agent`. The reason names how
-many calls were not counted. A trial whose only calls are neutral scores tool
-efficiency like a trial with no tool calls.
+`grep_files` and similar), running commands and activating a skill. MCP tools
+named `mcp__server__tool`, as Claude Code records them, are productive too.
+Codex records an MCP call under the bare tool name, so that call is classified
+by its name like any other tool, and most such names count as wasted. A Codex
+name with a namespace, such as `functions.apply_patch`, is classified by the
+part after the last dot. Help, version and install commands are wasted, whether
+written as text or recorded as an argument list, as is any tool outside these
+classes.
+
+Planning and bookkeeping calls are neutral and left out of the score:
+`TodoWrite`, `update_plan`, task lists (`TaskCreate`, `TaskUpdate`, `TaskList`,
+`TaskGet`), `EnterPlanMode` and `ExitPlanMode`, background-shell polling such
+as `BashOutput` and `KillShell`, `TaskStop`, `ToolSearch`, and sub-agent calls
+such as `Task` and Codex `spawn_agent`, `wait` or `wait_agent`. Codex
+`write_stdin` with no input, or only Enter or Ctrl-C, polls its session and is
+neutral, as is a `Monitor` watch with no command. A command typed with
+`write_stdin` or run by `Monitor` is classified like any other command. The
+reason names how many calls were not counted. A trial whose only calls are
+neutral did no work: it scores tool efficiency 0.0, so its `skill_efficiency`
+is 0.0, the same as a trial with no tool calls.
 
 Tool-efficiency checks classify explicit searches rooted at `/` as wasted work,
 whether or not the command names the expected skill or script. This includes
-native `Grep`, `Glob`, `LS`, `list_dir` and `grep_files` calls on `/`, and
-commands recorded as an argument list, such as Codex
-`["bash", "-lc", "find / -name x"]`, which are read as the command they run.
-Scoped searches and `/` used as a search pattern are productive. This rule
-recognizes common search commands, including ones with redirections or wrapped in
-`sh -c`; it does not interpret expansions, comments, here-documents or other
-dynamically constructed shell programs.
+native `Grep`, `Glob`, `LS`, `list_dir` and `grep_files` calls on `/`, MCP tool
+calls whose `path` or `dir_path` is `/`, and commands recorded as an argument
+list, such as Codex `["bash", "-lc", "find / -name x"]`, which are read as the
+command they run. Scoped searches and `/` used as a search pattern are
+productive. This rule recognizes common search commands, including ones with
+redirections or wrapped in `sh -c`; it does not interpret expansions, comments,
+here-documents or other dynamically constructed shell programs. An argument
+list runs without a shell, so `$`, backticks and `#` in its own words are
+literal.
 
 
 Every evaluator and dimension score is on a 0.0 to 1.0 scale. The generated

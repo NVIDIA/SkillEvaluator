@@ -5296,7 +5296,6 @@ _NEUTRAL_TOOL_NAMES = frozenset(
         "todowrite",
         "todoread",
         "update_plan",
-        "write_stdin",
         "bashoutput",
         "killshell",
         "killbash",
@@ -5340,6 +5339,11 @@ _PRODUCTIVE_TOOL_NAMES = frozenset(
         "applypatch",
     }
 )
+# Tools that send text to a running shell session (Codex write_stdin) or start
+# a background watch (Claude Code Monitor), and the argument with that text.
+# Without text they only poll or watch and are neutral; with text they run it,
+# and it is classified like any other command.
+_SESSION_INPUT_TOOL_ARGS = {"write_stdin": "chars", "monitor": "command"}
 
 
 def _tool_efficiency_args(tool_call: dict[str, Any]) -> dict[str, Any]:
@@ -5347,8 +5351,10 @@ def _tool_efficiency_args(tool_call: dict[str, Any]) -> dict[str, Any]:
     return args if isinstance(args, dict) else {}
 
 
-def _tool_efficiency_target(args: dict[str, Any]) -> Any:
+def _tool_efficiency_target(name: str, args: dict[str, Any]) -> Any:
     """The command, code or path a tool call acts on, as recorded."""
+    if name in _SESSION_INPUT_TOOL_ARGS:
+        return args.get(_SESSION_INPUT_TOOL_ARGS[name], "")
     return (
         args.get("command", "")
         or args.get("cmd", "")
@@ -5381,29 +5387,45 @@ def _tool_efficiency_name(action: Any) -> str:
     return name if name.startswith("mcp__") else name.rsplit(".", 1)[-1]
 
 
+def _session_input_is_text(value: Any) -> bool:
+    """Whether session input types something; Enter or Ctrl-C alone only polls or interrupts."""
+    return isinstance(value, str) and any(char.isprintable() and not char.isspace() for char in value)
+
+
+def _mcp_call_targets_root(name: str, args: dict[str, Any]) -> bool:
+    """An MCP call whose path or dir_path is "/" searches or lists the whole filesystem."""
+    return name.startswith("mcp__") and any(
+        isinstance(args.get(key), str) and _search_path_is_root(args[key].strip()) for key in ("path", "dir_path")
+    )
+
+
 def _tool_call_productivity(tc: dict[str, Any], expected_skill: Any, expected_script: Any) -> str:
     """Classify one tool call as ``productive``, ``wasted`` or ``neutral`` (not scored)."""
     name = _tool_efficiency_name(tc["action"])
     if name in _NEUTRAL_TOOL_NAMES:
         return "neutral"
     args = _tool_efficiency_args(tc)
-    cmd = _tool_efficiency_text(_tool_efficiency_target(args))
+    target = _tool_efficiency_target(name, args)
+    runs_command = _is_execution_action(name)
+    search_action = name
+    if name in _SESSION_INPUT_TOOL_ARGS:
+        if not _session_input_is_text(target):
+            return "neutral"
+        # The text is a command typed into a shell or run as a watch script.
+        runs_command = True
+        search_action = "exec_command"
+    cmd = _tool_efficiency_text(target)
     # A search rooted at "/" is waste even when it names the expected skill or script.
-    if _tool_searches_root(name, args, cmd):
+    if _tool_searches_root(search_action, args, cmd) or _mcp_call_targets_root(name, args):
         return "wasted"
     if ("read" in name and expected_skill and expected_skill in cmd) or (
-        _is_execution_action(name) and expected_script and expected_script in cmd
+        runs_command and expected_script and expected_script in cmd
     ):
         return "productive"
     full_text = f"{name} {cmd}".lower()
     if any(waste in full_text for waste in WASTE_INDICATORS):
         return "wasted"
-    if (
-        "read" in name
-        or name in _PRODUCTIVE_TOOL_NAMES
-        or name.startswith("mcp__")
-        or _is_execution_action(name)
-    ):
+    if "read" in name or name in _PRODUCTIVE_TOOL_NAMES or name.startswith("mcp__") or runs_command:
         return "productive"
     return "wasted"
 
@@ -5429,7 +5451,7 @@ def check_tool_efficiency(
         kind = _tool_call_productivity(tc, expected_skill, expected_script)
         counts[kind] += 1
         if kind == "wasted":
-            label = str(_tool_efficiency_target(_tool_efficiency_args(tc)))
+            label = str(_tool_efficiency_target(_tool_efficiency_name(tc["action"]), _tool_efficiency_args(tc)))
             wasted_details.append(f"{tc['action']}({label[:60]})")
 
     productive, wasted, neutral = counts["productive"], counts["wasted"], counts["neutral"]

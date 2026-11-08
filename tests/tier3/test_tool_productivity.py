@@ -101,6 +101,70 @@ def test_bookkeeping_is_neutral(module, action):
 
 
 @pytest.mark.parametrize("module", _MODULES)
+@pytest.mark.parametrize(
+    ("call", "kind"),
+    [
+        (_call("write_stdin", session_id=1), "neutral"),
+        (_call("write_stdin", session_id=1, chars=""), "neutral"),
+        (_call("write_stdin", session_id=1, chars="\n"), "neutral"),
+        (_call("write_stdin", session_id=1, chars="\x03"), "neutral"),
+        (_call("write_stdin", session_id=1, chars="python review.py\n"), "productive"),
+        (_call("write_stdin", session_id=1, chars="pytest -q\n"), "productive"),
+        (_call("write_stdin", session_id=1, chars="find / -name review.py\n"), "wasted"),
+        (_call("write_stdin", session_id=1, chars="pip install requests\n"), "wasted"),
+        (_call("Monitor", description="deploy events", ws={"url": "wss://events.example.test"}), "neutral"),
+        (_call("Monitor", description="errors", command="tail -f build.log | grep --line-buffered ERROR"), "productive"),
+        (_call("Monitor", description="skills", command="find / -name SKILL.md"), "wasted"),
+    ],
+    ids=lambda value: value if isinstance(value, str) else f"{value['action']}:{value['action_input']}",
+)
+def test_session_input_is_classified_by_the_text_it_sends(module, call, kind):
+    # Polling a session or watching a socket is bookkeeping. Typing a command
+    # into a shell, or starting a watch script, runs that command.
+    assert _classify(module, call, "review.py") == kind
+
+
+@pytest.mark.parametrize("module", _MODULES)
+def test_root_search_typed_into_an_interactive_shell_is_wasted(module):
+    calls = [
+        _call("exec_command", cmd="bash", tty=True),
+        _call("write_stdin", session_id=1, chars="find / -name review.py\n"),
+        _call("write_stdin", session_id=1, chars=""),
+    ]
+
+    result = module.check_tool_efficiency(calls, _SKILL, "review.py")
+
+    assert result["score"] == 0.5
+    assert result["reason"] == "1/2 productive calls (50%); 1 planning or bookkeeping call(s) not counted"
+
+
+def test_wasted_session_input_is_labelled_with_its_text():
+    calls = [_call("write_stdin", session_id=1, chars="find / -name review.py\n")]
+
+    result = checks.check_tool_efficiency(calls, _SKILL)
+
+    assert result["details"]["wasted_calls"] == ["write_stdin(find / -name review.py\n)"]
+
+
+@pytest.mark.parametrize("module", _MODULES)
+@pytest.mark.parametrize(
+    ("call", "kind"),
+    [
+        (_call("mcp__filesystem__search_files", path="/", pattern="SKILL.md"), "wasted"),
+        (_call("mcp__filesystem__list_directory", path="/"), "wasted"),
+        (_call("mcp__filesystem__directory_tree", path="//"), "wasted"),
+        (_call("mcp__workspace__list", dir_path="/"), "wasted"),
+        (_call("mcp__filesystem__search_files", path="/workspace", pattern="SKILL.md"), "productive"),
+        (_call("mcp__filesystem__list_directory", path="/workspace/src"), "productive"),
+        (_call("mcp__github__search_code", query="path:/ release"), "productive"),
+    ],
+    ids=lambda value: value if isinstance(value, str) else f"{value['action']}:{value['action_input']}",
+)
+def test_mcp_calls_rooted_at_filesystem_root_are_wasted(module, call, kind):
+    assert _classify(module, call) == kind
+
+
+@pytest.mark.parametrize("module", _MODULES)
 def test_claude_code_task_list_calls_are_left_out_of_the_score(module):
     calls = [
         _call("Read", file_path=f"/workspace/skills/{_SKILL}/SKILL.md"),

@@ -15,6 +15,9 @@ All notable changes to SkillEvaluator are documented in this file.
 
 ### Changed
 
+- Document per-arm Tier 3 dimension applicability and test how N/A baseline
+  metrics are handled in Overall scores and Skill Lift comparisons.
+
 - Align terminal grade and lift colors across compact, full, and direct Tier 3
   reports; displayed zero lift is neutral. Narrow terminals stack complete
   condition score/bar groups. Full-report Details retain successful quality and

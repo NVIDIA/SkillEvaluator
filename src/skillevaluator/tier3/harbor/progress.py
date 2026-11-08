@@ -615,11 +615,19 @@ class SafeProgressReporter:
         self._reporter = reporter
         self._disabled = False
         self._started = False
+        # start() holds this lock while the reporter draws a plan, so a failure
+        # reported from the reporter's heartbeat thread waits for that plan
+        # update and then stops what it drew, instead of letting it start a new
+        # live view after progress was turned off.
+        self._lock = threading.RLock()
         # A reporter's own heartbeat thread reports failures here, so a redraw
         # error there turns progress off just like one on the caller's thread.
-        set_failure_callback = getattr(reporter, "set_failure_callback", None)
-        if callable(set_failure_callback):
-            set_failure_callback(self._disable)
+        try:
+            set_failure_callback = getattr(reporter, "set_failure_callback", None)
+            if callable(set_failure_callback):
+                set_failure_callback(self._disable)
+        except Exception:
+            logger.debug("Tier 3 progress reporter failure callback registration failed", exc_info=True)
 
     @property
     def is_active(self) -> bool:
@@ -632,12 +640,18 @@ class SafeProgressReporter:
             return self._started
 
     def start(self, plan: Tier3RunPlan) -> None:
-        if self._disabled:
-            return
-        self._started = True
-        self._call(self._reporter.start, plan)
-        if self._disabled:
-            self._started = False
+        with self._lock:
+            if self._disabled:
+                return
+            self._started = True
+            try:
+                self._reporter.start(plan)
+                return
+            except Exception:
+                logger.debug("Tier 3 progress reporter disabled after presentation failure", exc_info=True)
+        # Closed outside the lock: closing joins the heartbeat thread, which
+        # may be waiting for the lock to report its own failure.
+        self._disable()
 
     def set_secret_values(self, values: list[str] | tuple[str, ...] | set[str]) -> None:
         self._call(self._reporter.set_secret_values, values)
@@ -649,13 +663,16 @@ class SafeProgressReporter:
         self._call(self._reporter.heartbeat)
 
     def close(self) -> None:
+        # The lock is not held here: closing joins the heartbeat thread, which
+        # may be waiting for the lock to report a failure.
         try:
             self._reporter.close()
         except Exception:
             logger.debug("Tier 3 progress reporter cleanup failed", exc_info=True)
         finally:
-            self._started = False
-            self._disabled = False
+            with self._lock:
+                self._started = False
+                self._disabled = False
 
     def _call(self, callback, *args: object) -> None:
         if self._disabled:
@@ -667,11 +684,12 @@ class SafeProgressReporter:
             self._disable()
 
     def _disable(self) -> None:
-        if self._disabled:
-            return
-        self._disabled = True
-        # A disabled reporter shows nothing, so it is no longer active.
-        self._started = False
+        with self._lock:
+            if self._disabled:
+                return
+            self._disabled = True
+            # A disabled reporter shows nothing, so it is no longer active.
+            self._started = False
         # Only the display failed, so a reporter that can stop without marking
         # its running stages failed does so.
         try:

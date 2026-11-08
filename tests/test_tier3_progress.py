@@ -863,6 +863,85 @@ def test_heartbeat_skips_a_transient_write_error_and_keeps_progress_on(monkeypat
     assert uncaught == []
 
 
+def test_heartbeat_failure_during_a_plan_update_stops_what_the_update_drew(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    import rich.live
+
+    progress = _progress_module()
+    _FakeLive.instances.clear()
+    monkeypatch.setattr(rich.live, "Live", _FakeLive)
+
+    class RacingReporter(progress.RichProgressReporter):
+        report_failure: Any = None
+        failure_thread: threading.Thread | None = None
+        race = False
+
+        def set_failure_callback(self, callback) -> None:
+            super().set_failure_callback(callback)
+            self.report_failure = callback
+
+        def start(self, plan) -> None:
+            if self.race:
+                # The heartbeat thread reports a redraw failure while this plan
+                # update is in flight.
+                self.failure_thread = threading.Thread(target=self.report_failure)
+                self.failure_thread.start()
+                self.failure_thread.join(timeout=0.2)
+            super().start(plan)
+
+    rich_reporter = RacingReporter(stream=_TTYBuffer(), refresh_interval=60)
+    reporter = progress.safe_progress_reporter(rich_reporter)
+    reporter.start(_plan(progress))
+    rich_reporter.race = True
+    reporter.start(_plan(progress))
+    failure_thread = rich_reporter.failure_thread
+    assert failure_thread is not None
+    failure_thread.join(timeout=10)
+
+    assert not failure_thread.is_alive()
+    # The failure waited for the update, then stopped the frame it drew.
+    assert reporter.is_active is False
+    assert rich_reporter.is_active is False
+    assert [live.stop_calls for live in _FakeLive.instances] == [1]
+    reporter.close()
+
+
+def test_safe_reporter_wraps_a_reporter_whose_callback_registration_fails() -> None:
+    progress = _progress_module()
+
+    class RefusingReporter(progress.NullProgressReporter):
+        def __init__(self) -> None:
+            self.events: list[Any] = []
+
+        def set_failure_callback(self, _callback) -> None:
+            raise RuntimeError("failure callbacks are not supported")
+
+        def emit(self, event) -> None:
+            self.events.append(event)
+
+    class StrictProxy:
+        """Forwards the reporter protocol and refuses any other attribute."""
+
+        def __init__(self) -> None:
+            self.target = RefusingReporter()
+
+        def __getattr__(self, name: str) -> Any:
+            if name in {"is_active", "start", "set_secret_values", "emit", "heartbeat", "close"}:
+                return getattr(self.target, name)
+            raise RuntimeError(f"unsupported attribute: {name}")
+
+    refusing = RefusingReporter()
+    proxy = StrictProxy()
+
+    for target, events in ((refusing, refusing.events), (proxy, proxy.target.events)):
+        reporter = progress.safe_progress_reporter(target)
+        reporter.start(_plan(progress))
+        reporter.emit(progress.ProgressEvent(stage="configuration", state="running"))
+        reporter.close()
+        assert [event.stage for event in events] == ["configuration"]
+
+
 def test_heartbeat_failure_without_a_safety_wrapper_stops_the_thread(monkeypatch: pytest.MonkeyPatch) -> None:
     progress = _progress_module()
     uncaught: list[BaseException | None] = []

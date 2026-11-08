@@ -360,11 +360,20 @@ def test_safety_findings_use_the_common_applicability_metadata(tmp_path, pip_aud
         [{"package_name": "idna", "vulnerability_id": "1", "severity": "critical"}],
         {"vulnerabilities": [{"package_name": "idna", "vulnerability_id": "1", "severity": {"cvssv3": 9.8}}]},
         {"vulnerabilities": [{"package_name": "idna", "vulnerability_id": "1", "advisory": 7}]},
+        {"vulnerabilities": [{"package_name": "idna", "vulnerability_id": "1", "advisory": {"text": "x"}}]},
         {"vulnerabilities": [{"package_name": None, "vulnerability_id": None, "severity": None}]},
         {"vulnerabilities": "invalid"},
         "not a report",
     ],
-    ids=["top-level-list", "cvss-not-an-object", "non-text-advisory", "null-fields", "invalid-list", "not-a-report"],
+    ids=[
+        "top-level-list",
+        "cvss-not-an-object",
+        "numeric-advisory",
+        "object-advisory",
+        "null-fields",
+        "invalid-list",
+        "not-a-report",
+    ],
 )
 def test_malformed_safety_output_never_crashes(tmp_path, pip_audit, safety, report):
     safety["report"] = report
@@ -575,7 +584,7 @@ def test_null_pip_audit_severity_falls_back_instead_of_crashing(tmp_path, pip_au
 
 
 def test_callers_without_declarations_keep_the_tagged_message():
-    """The private plugin audit binds its own pins and converts this tagged form."""
+    """A caller that audits pins it collected itself converts this tagged form into its own findings."""
     report = {"dependencies": [{"name": "foo", "version": "1.0", "vulns": [{"id": "GHSA-x", "fix_versions": []}]}]}
     result = ValidationResult()
 

@@ -440,8 +440,10 @@ For `validate`, the default set is `schema`, `version`, `security`, `pii`, `lice
     Each advisory is a `DEPENDENCY` finding whose check name is the advisory ID
     (a numeric Safety ID reads `SAFETY-<id>`). It points at the requirements
     file and the line that pins the package, or at `pyproject.toml`, so it
-    appears in JSON `findings`, the severity counts, and SARIF results. The
-    finding metadata records:
+    appears in JSON `findings`, the severity counts, and SARIF results. In a
+    folder run, a skill whose audit passes is summarized as one passed check,
+    so its medium or low advisories are not listed; validate that skill on its
+    own to see them. The finding metadata records:
 
     - `package_name` and `resolved_version`: the package and version the
       scanner checked.

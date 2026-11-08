@@ -135,12 +135,14 @@ All notable changes to SkillEvaluator are documented in this file.
   a CVSS 9.8 advisory is `critical` and fails the run; in 0.8.0 that object
   stopped the check with an `AttributeError`. A Safety advisory that
   pip-audit already reported under the same ID or CVE is not repeated. Safety
-  JSON with a null `severity`, a top-level list, or a non-text `advisory`, and
-  a pip-audit advisory with a null `severity`, no longer stop the check with
-  an `AttributeError` or `TypeError`. A pin on the line after a comment line
-  that ends in a backslash is now audited; in 0.8.0 it was read as part of the
-  comment, even though `pip install -r` installs it. A critical advisory does
-  not stop a folder run before the remaining skills are audited. Line numbers in
+  JSON with a null `severity` or a top-level list, and a pip-audit advisory
+  with a null `severity`, no longer stop the check with an `AttributeError`.
+  A Safety `advisory` that is a number or null no longer stops it with a
+  `TypeError`, and one that is an object no longer stops it with a
+  `KeyError`. A pin on the line after a comment line that ends in a
+  backslash is now audited; in 0.8.0 it was read as part of the comment, even
+  though `pip install -r` installs it. A critical advisory does not stop a
+  folder run before the remaining skills are audited. Line numbers in
   findings and warnings now count only line breaks an editor shows, so
   `--hash` continuation lines or a form feed before a pin no longer shift
   them. For every check, the CLI report now lists warnings that no finding

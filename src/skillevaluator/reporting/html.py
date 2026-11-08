@@ -111,6 +111,7 @@ _TIER3_HTML_PREVIEW_TRIGGER_BYTES = 256 * 1024
 _TIER3_HTML_PREVIEW_CHARS = 128 * 1024
 _TIER3_HTML_PREVIEW_STRING_CHARS = 4 * 1024
 _TIER3_HTML_PREVIEW_COLLECTION_ITEMS = 64
+_TIER3_HTML_PREVIEW_PRIORITY_KEYS = ("best_agent",)
 _TIER3_PREVIEW_MARKER = "... [HTML preview truncated; download the full Tier 3 payload]"
 _TIER3_JSON_SAFE_PRIORITY_KEYS = (
     "schema_version",
@@ -1207,6 +1208,8 @@ def _bounded_tier3_preview_value(value: Any, budget: _Tier3PreviewBudget) -> Any
 
     if isinstance(value, dict):
         items = list(value.items())
+        priority_keys = _TIER3_HTML_PREVIEW_PRIORITY_KEYS
+        items.sort(key=lambda item: item[0] not in priority_keys)
         kept = min(len(items), _TIER3_HTML_PREVIEW_COLLECTION_ITEMS)
         budget.omitted_items += len(items) - kept
         bounded_dict: dict[Any, Any] = {}

@@ -3017,6 +3017,11 @@ def _normalize_trials(rewards: list[dict[str, Any]], metrics: list[str]) -> list
             "goal_accuracy_for_verdict": _complete_mean(goal_accuracy_values),
         }
         verdict = attempt_verdict(trial["overall"], 0.5, reward=reward)
+        trial["attempt_verdict"] = {
+            "passed": verdict.passed,
+            "reason": verdict.reason,
+            "warnings": list(verdict.warnings),
+        }
         behavior_detail = (
             reward.get("details", {}).get("behavior_check") if isinstance(reward.get("details"), dict) else None
         )

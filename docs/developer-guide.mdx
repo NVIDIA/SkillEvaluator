@@ -79,6 +79,18 @@ The `dev` extra includes pytest-xdist, so you can parallelize any of these runs:
 pytest -n auto
 ```
 
+### Check the HTML report in a browser
+
+`tests/reporting/browser_navigation_checks.py` opens the HTML report in a headless browser and checks navigation, focus, themes, print view and layout at three screen widths. pytest doesn't collect it, and it needs Playwright:
+
+```bash title="Run the HTML report browser checks"
+pip install playwright
+python -m playwright install chromium
+python tests/reporting/browser_navigation_checks.py browser-checks
+```
+
+The script renders its own fixture reports, then writes screenshots and `navigation-results.json` to `browser-checks/`. To use an installed Chrome instead of Playwright's Chromium, set `SKILLEVALUATOR_TEST_BROWSER` to the browser's executable or pass `--browser`.
+
 ## Documentation and starter changes
 
 The [terminal starter](starter-demo.mdx) uses a public skill, task and input with

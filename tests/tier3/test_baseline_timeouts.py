@@ -433,6 +433,79 @@ def test_baseline_killed_by_the_runner_is_never_tolerated(
     assert results[RUN_KEY]["explained_launch_errors"] == []
 
 
+def _multi_step_timeout_trial(job: Path, name: str, case: str) -> None:
+    """Write a native multi-step trial as Harbor 0.24 records a step's agent timeout.
+
+    ``MultiStepTrial._run_step_agent`` stores the exception on the step only,
+    so the trial has no root exception and Harbor counts it as completed.
+    """
+    from harbor.models.trial.result import TrialResult
+
+    trial = job / name
+    finish = datetime(2026, 11, 1, 0, 20, tzinfo=UTC)
+    result = TrialResult.model_validate(
+        {
+            "id": uuid4(),
+            "task_name": case,
+            "trial_name": name,
+            "trial_uri": trial.as_uri(),
+            "task_id": {"path": f"/tasks/{case}"},
+            "task_checksum": "public-tolerance-example",
+            "config": {"task": {"path": f"/tasks/{case}"}, "trial_name": name, "trials_dir": str(job)},
+            "agent_info": {"name": "opencode", "version": "test", "model_info": {"name": "test-model"}},
+            "started_at": finish - timedelta(minutes=20),
+            "finished_at": finish,
+            "exception_info": None,
+            "step_results": [
+                {
+                    "step_name": "build",
+                    "agent_result": {"n_output_tokens": 321},
+                    "exception_info": {
+                        "exception_type": "AgentTimeoutError",
+                        "exception_message": TIMEOUT,
+                        "exception_traceback": "in _run_agent_phase\nraise AgentTimeoutError(...)",
+                        "occurred_at": finish,
+                    },
+                }
+            ],
+        }
+    )
+    trial.mkdir(parents=True)
+    (trial / "result.json").write_text(result.model_dump_json(indent=2), encoding="utf-8")
+    (trial / "steps" / "build" / "agent").mkdir(parents=True)
+    (trial / "steps" / "build" / "agent" / "opencode.txt").write_text(CLEAN_LOG, encoding="utf-8")
+
+
+def test_native_multi_step_timeouts_are_refused_by_name(tmp_path: Path) -> None:
+    pytest.importorskip("harbor")
+    jobs = tmp_path / "jobs"
+    _arm(jobs, "opencode", "with", [(case, "scored") for case in CASES])
+    _arm(jobs, "opencode", "without", [("case-001", "scored")])
+    job = jobs / f"{SKILL}-opencode-without"
+    _multi_step_timeout_trial(job, "case-002__without1", "case-002")
+    # Harbor counts the trial as completed, so the job reports no errored trial
+    # and the runner no launch error.
+    _job_result(job, errored=0)
+    _arm(jobs, "codex", "with", [(case, "scored") for case in CASES])
+    _arm(jobs, "codex", "without", [(case, "scored") for case in CASES])
+
+    results = _collect(tmp_path, [])
+
+    opencode = results["agents"]["opencode"]
+    assert results["execution_status"] == "failed"
+    assert opencode["execution_status"] == "failed"
+    assert (
+        f"Agent runtime failed in case-002__without1: AgentTimeoutError: {TIMEOUT}"
+        in opencode["conditions"]["without_skill"]["execution_errors"]
+    )
+    assert RECORD_KEY not in opencode
+    assert opencode[REJECTION_KEY] == "step_timeout_not_supported"
+    assert results["warnings"] == [
+        "opencode baseline timeouts were not tolerated: a baseline attempt timed out in a step of a native "
+        "multi-step task, which the option does not cover (step_timeout_not_supported)."
+    ]
+
+
 def test_trial_that_is_neither_scored_nor_timed_out_is_refused(tmp_path: Path) -> None:
     launch_errors = _two_agent_jobs(tmp_path / "jobs")
     (tmp_path / "jobs" / f"{SKILL}-opencode-without" / "case-002__stray" / "agent").mkdir(parents=True)

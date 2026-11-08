@@ -648,7 +648,9 @@ the run warning names the rule that did not hold:
 - Every missing baseline attempt is a trial that ended in Harbor's
   `AgentTimeoutError`, matched case by case and, with `--stop-on-pass`,
   attempt by attempt. A setup timeout, process exit, verifier failure or any
-  other baseline error is not tolerated.
+  other baseline error is not tolerated. Native multi-step tasks are not
+  covered: Harbor records their agent timeouts on the step rather than on the
+  trial, so such a baseline is refused (`step_timeout_not_supported`).
 - Every timed-out attempt shows agent output (output tokens above zero).
 - Each timed-out attempt left an agent log, and no log shows a known provider
   overload, rate limit, quota or authentication error identifier (such as

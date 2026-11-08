@@ -19,7 +19,9 @@ calls the pure rules here. Every rule must hold:
 * T3: no agent runtime failure other than the timeout: the timed-out trials'
   logs show no provider overload, rate limit or authentication errors, and each
   trial left an agent log to check.
-* T4: every failed baseline trial ended in ``AgentTimeoutError``.
+* T4: every failed baseline trial ended in ``AgentTimeoutError``. Native
+  multi-step tasks are not covered: Harbor records their agent timeouts on the
+  step and counts the trial as completed, so they are refused.
 * T5: the timeouts match the missing attempts one for one, per case and, when
   attempts carry labels, per attempt; every trial in the job is scored or timed out.
 * T6: every timed-out attempt shows agent output (output tokens > 0).
@@ -63,6 +65,7 @@ REJECTION_REASONS = {
     "no_agent_log": "a timed-out attempt left no agent log to check for provider errors",
     "reason_not_tolerated": "a baseline attempt failed with something other than an agent execution timeout",
     "untyped_trial_failure": "a failed baseline trial is not an agent execution timeout",
+    "step_timeout_not_supported": "a baseline attempt timed out in a step of a native multi-step task, which the option does not cover",
     "timed_out_trial_scored": "a timed-out baseline trial also has a scored reward",
     "unaccounted_trial": "the baseline job holds a trial that is neither scored nor timed out",
     "failures_do_not_account_for_missing": "the timeouts do not account for every missing attempt",

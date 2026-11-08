@@ -7165,6 +7165,13 @@ def _baseline_timeout_failures(
             continue
         if not harbor_result:
             return [], "unaccounted_trial"
+        step_details = _trial_step_exception_details(trial_dir)
+        if any(kind == baseline_timeouts.TOLERATED_EXCEPTION_TYPE for kind, _detail in step_details):
+            # Harbor records a native multi-step task's agent timeout on the
+            # step and counts the trial as completed, so the trial carries no
+            # root exception or errored count to bind. The option does not
+            # cover these tasks.
+            return [], "step_timeout_not_supported"
         selector = _task_selector_from_harbor_result(harbor_result)
         entry_id = _entry_id_from_harbor_result(
             harbor_result,
@@ -7183,10 +7190,7 @@ def _baseline_timeout_failures(
                 "attempt": _structural_attempt_ordinal(trial_dir.name, selector) if selector else None,
                 "exception_types": [
                     exception_type
-                    for exception_type, _detail in (
-                        (root_type, root_reason),
-                        *_trial_step_exception_details(trial_dir),
-                    )
+                    for exception_type, _detail in ((root_type, root_reason), *step_details)
                     if exception_type
                 ],
                 "output_tokens": _trial_output_tokens(trial_dir, harbor_result),

@@ -1163,9 +1163,11 @@ def _check_env_and_headers(server: _ServerFindings, config: dict[str, Any], *, c
     if isinstance(oauth, dict):
         # A literal client secret in the OAuth block ships with the plugin like any other credential.
         _check_secret_values(server, "oauth", oauth, tls_env=False)
-    if client == "openclaw" and isinstance(config.get("enterprise"), dict):
-        # OpenClaw's enterprise auth block ships with the plugin like any other credential.
-        _check_secret_values(server, "enterprise", config["enterprise"], tls_env=False)
+    if client == "openclaw":
+        # OpenClaw's auth and enterprise blocks ship with the plugin like any other credential.
+        for section in ("auth", "enterprise"):
+            if isinstance(config.get(section), dict):
+                _check_secret_values(server, section, config[section], tls_env=False)
     if client == "codex":
         for field_name in CODEX_UNAPPLIED_MCP_FIELDS:
             if config.get(field_name):

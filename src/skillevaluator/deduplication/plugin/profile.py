@@ -169,7 +169,9 @@ def load_plugin_profile(plugin_root: Path) -> PluginProfile:
                 skill_name, skill_description, str(inventory.root / skill.path), "skill", skill.text or ""
             )
             reason = None
-        label = skill_name if isinstance(skill_name, str) and skill_name.strip() else relative.name or name
+        # An OpenClaw root SKILL.md without a name is labelled like its Tier 1 row (the plugin folder).
+        fallback = inventory.root.name if openclaw and skill.path == "." else relative.name or name
+        label = skill_name if isinstance(skill_name, str) and skill_name.strip() else fallback
         members.add(_member(label))
         catalog_paths = tuple(
             sorted({relative.relative_to(root).as_posix() for root in catalog_roots if relative.is_relative_to(root)})

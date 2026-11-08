@@ -686,6 +686,20 @@ class _MemberCollector:
         """
         from skillevaluator.plugin_skills import discover_openclaw_skill_manifests
 
+        if self.manifest is not None and "skills" in self.manifest and not isinstance(declared_value, list):
+            # OpenClaw declares skill roots only as an array; never reinterpret a
+            # scalar or null as a root (schema reports the field as well).
+            self.inventory.findings.append(
+                _plugin_finding(
+                    Severity.HIGH,
+                    "plugin_component_path_invalid",
+                    "OpenClaw 'skills' must be an array of declared skill directory paths; no skill root was read",
+                    self.manifest_display,
+                    'Declare skill roots as an array, for example "skills": ["./skills"].',
+                )
+            )
+            self._add(PluginMember("skill", "skills", "declared", None, "evaluated", problem="invalid"))
+            return
         roots: list[str] = []
         for raw in self._declared_values("skills", declared_value):
             resolved = self._resolve_component("skill", "skills", raw, kinds=("dir",))

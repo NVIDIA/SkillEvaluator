@@ -147,6 +147,7 @@ def test_url_expansion_rejection_still_checks_inline_secrets() -> None:
         ({"sslVerify": False, "ssl_verify": True}, False),
         # A non-boolean value is not a decision; the next source applies.
         ({"sslVerify": "false", "ssl_verify": False}, False),
+        ({"sslVerify": None, "ssl_verify": True}, True),
     ],
 )
 def test_effective_tls_policy(options: dict, enabled: bool) -> None:
@@ -171,6 +172,8 @@ def test_tls_options_are_openclaw_specific() -> None:
         ({"sslVerify": True}, ()),
         ({"ssl_verify": True}, ()),
         ({"sslVerify": False}, ("sslVerify",)),
+        ({"ssl_verify": False}, ("ssl_verify",)),
+        ({"sslVerify": True, "ssl_verify": False}, ()),
         ({"auth": {"type": "oauth"}, "toolFilter": ["read"]}, ("auth", "toolFilter")),
         ({"enabled": False, "headers": {"X-Trace": "1"}}, ()),
     ],
@@ -180,18 +183,34 @@ def test_host_only_options_are_recorded_as_unapplied(tmp_path: Path, options: di
     assert declaration.unapplied == unapplied
 
 
-@pytest.mark.parametrize("key", ["idpClientSecret", "resourceClientSecret"])
-def test_enterprise_inline_credentials_block_without_echoing_values(key: str) -> None:
+@pytest.mark.parametrize(
+    ("section", "key"),
+    [
+        ("enterprise", "idpClientSecret"),
+        ("enterprise", "resourceClientSecret"),
+        ("auth", "token"),
+        ("auth", "clientSecret"),
+    ],
+)
+def test_auth_inline_credentials_block_without_echoing_values(section: str, key: str) -> None:
     # Assembled at run time so the full-history secret scan never sees a literal credential.
     sample = "s3cr3t-Value-" + "0123456789abcdef" + "ABCDEF"
-    config = {"url": "https://x.example/mcp", "enterprise": {key: sample, "idpClientId": "client"}}
+    config = {"url": "https://x.example/mcp", section: {key: sample, "type": "bearer"}}
     findings = validate_mcp_server_declaration("s", config, "f", manifest_type=PLUGIN_OPENCLAW_MANIFEST_TYPE)
     blocking = [f for f in findings if f.severity in {Severity.HIGH, Severity.CRITICAL}]
     assert blocking
     assert all(sample not in f.message for f in findings)
 
 
-def test_enterprise_credential_references_are_allowed() -> None:
-    config = {"url": "https://x.example/mcp", "enterprise": {"idpClientSecret": "${IDP_CLIENT_SECRET}"}}
+@pytest.mark.parametrize(
+    ("section", "block"),
+    [
+        ("enterprise", {"idpClientSecret": "${IDP_CLIENT_SECRET}"}),
+        ("auth", {"type": "oauth"}),
+        ("auth", {"type": "bearer", "token": "${MCP_TOKEN}"}),
+    ],
+)
+def test_auth_credential_references_are_allowed(section: str, block: dict) -> None:
+    config = {"url": "https://x.example/mcp", section: block}
     findings = validate_mcp_server_declaration("s", config, "f", manifest_type=PLUGIN_OPENCLAW_MANIFEST_TYPE)
     assert not [f for f in findings if f.severity in {Severity.HIGH, Severity.CRITICAL}]

@@ -140,6 +140,26 @@ def test_identity_conflict_names_the_actual_fields_in_both_directions(tmp_path: 
     assert conflict.metadata["identity_field"] == ("name" if selected_openclaw else "id")
 
 
+def test_version_only_conflict_is_not_reported_as_an_identity_conflict(tmp_path: Path) -> None:
+    _openclaw(tmp_path, {".claude-plugin/plugin.json": {"version": "2.0.0"}}, version="1.0.0")
+    result = validate_inventory_schema(_inventory(tmp_path))
+    [conflict] = [finding for finding in result.findings if finding.check_name == "plugin_manifest_conflict"]
+    assert conflict.message == "Client manifests declare different names or versions."
+    assert conflict.suggestion is None
+
+
+def test_matching_identity_with_a_different_version_stays_a_version_conflict(tmp_path: Path) -> None:
+    _openclaw(
+        tmp_path,
+        {".codex-plugin/plugin.json": {"name": "release-helper", "version": "2.0.0"}},
+        name="Release Helper",
+        version="1.0.0",
+    )
+    result = validate_inventory_schema(_inventory(tmp_path / MANIFEST))
+    [conflict] = [finding for finding in result.findings if finding.check_name == "plugin_manifest_conflict"]
+    assert conflict.message == "Client manifests declare different names or versions."
+
+
 def test_display_name_never_conflicts_with_another_manifest_name(tmp_path: Path) -> None:
     _openclaw(
         tmp_path,
@@ -419,3 +439,17 @@ def test_empty_runtime_array_allows_upstream_inference(tmp_path: Path) -> None:
     inventory = _inventory(_package(tmp_path, metadata, {"dist/index.js": "x"}))
     assert "openclaw.runtimeExtensions (inferred): dist/index.js" in _runtime_rows(inventory)
     assert inventory.complete
+
+
+@pytest.mark.parametrize("skills", ["./skills", None, {}, "skills"])
+def test_non_array_skills_declaration_reads_no_root(tmp_path: Path, skills: Any) -> None:
+    manifest = {"id": "release-helper", "configSchema": {"type": "object"}, "skills": skills}
+    _tree(tmp_path, {MANIFEST: manifest, "skills/a/SKILL.md": _skill("a")})
+    inventory = _inventory(tmp_path)
+    assert _members(inventory) == []
+    [broken] = [member for member in inventory.selected_components if member.type == "skill"]
+    assert broken.problem == "invalid"
+    assert "plugin_component_path_invalid" in _checks(inventory.findings)
+    assert not inventory.complete
+    result = validate_inventory_schema(inventory)
+    assert any(finding.check_name.startswith("schema:skills:") for finding in result.findings)

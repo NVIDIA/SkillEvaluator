@@ -30,6 +30,11 @@ def _skill(name: str) -> str:
     return f"---\nname: {name}\ndescription: {name} guidance.\n---\nBody.\n"
 
 
+def _leaks_host_path(text: str, path: Path) -> bool:
+    # JSON escapes Windows separators, so check the raw, POSIX and JSON-escaped spellings.
+    return any(form in text for form in {str(path), path.as_posix(), json.dumps(str(path))[1:-1]})
+
+
 def _plugin(root: Path, files: dict[str, Any] | None = None, **fields: Any) -> Path:
     manifest = {"id": root.name, "configSchema": {"type": "object"}, **fields}
     for rel, value in {"openclaw.plugin.json": manifest, **(files or {})}.items():
@@ -58,7 +63,7 @@ def test_smoke_covers_portable_root_and_runtime_only_boundaries(tmp_path: Path) 
     assert not second["portable_tier3_runnable"]
     assert any("OpenClaw runtime" in reason for reason in second["portable_tier3_incomplete_reasons"])
     assert second["runtime_components_unsupported"] == 2
-    assert str(tmp_path) not in json.dumps(result)
+    assert not _leaks_host_path(json.dumps(result), tmp_path)
 
 
 def test_smoke_keeps_existing_schema_findings_visible(tmp_path: Path) -> None:
@@ -93,5 +98,5 @@ def test_smoke_cli_writes_relative_report(tmp_path: Path, capsys: pytest.Capture
     smoke.main(["--plugin", f"p={plugin}", "--iterations", "1", "--output", str(output)])
     report = json.loads(output.read_text(encoding="utf-8"))
     assert report["plugins"]["p"]["portable_tier3_skill_paths"] == ["skills/alpha"]
-    assert str(tmp_path) not in output.read_text(encoding="utf-8")
+    assert not _leaks_host_path(output.read_text(encoding="utf-8"), tmp_path)
     assert "Passed 1 pipeline observations across 1 plugins" in capsys.readouterr().out

@@ -26,8 +26,11 @@ All notable changes to SkillEvaluator are documented in this file.
   Runtime preparation never copies the plugin root as a member, never starts
   stdio servers whose plugin-root working directory cannot be kept, records
   unapplied host options as incomplete, and keeps host metadata out of staged
-  manifests. `scripts/ci/smoke_openclaw_plugins.py` repeats these checks
-  against real plugin sources without executing plugin code.
+  manifests. Native Claude Code staging copies only the declared member
+  skills, never the plugin tree, so Claude Code's default skill, command,
+  agent, hook and `bin/` locations stay unloaded.
+  `scripts/ci/smoke_openclaw_plugins.py` repeats these checks against real
+  plugin sources without executing plugin code.
 
 ### Changed
 

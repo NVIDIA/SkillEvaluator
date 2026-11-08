@@ -1379,6 +1379,17 @@ class ClaudeCodeAdapter(HarnessAdapter):
     def plugin_name(self, source: NativePluginSource) -> str:
         return plugin_slug(source.plugin_name)
 
+    @staticmethod
+    def stages_members_only(source: NativePluginSource) -> bool:
+        """Whether only the inventoried member skills are staged, without a copy of the plugin tree.
+
+        A native OpenClaw plugin's members are exactly its declared skill roots.
+        Copying its tree would also load Claude Code's default ``skills/``,
+        ``commands/``, ``agents/``, ``hooks/`` and ``bin/`` locations and ship
+        the native manifest's host metadata, none of which OpenClaw loads.
+        """
+        return manifest_type_for_relative_path(source.manifest_rel) == PLUGIN_OPENCLAW_MANIFEST_TYPE
+
     def manifest(self, source: NativePluginSource) -> dict[str, Any]:
         """The staged ``plugin.json``: identity plus the component keys that stay native.
 
@@ -1399,13 +1410,14 @@ class ClaudeCodeAdapter(HarnessAdapter):
     def _skill_manifest_fields(self, source: NativePluginSource) -> dict[str, Any]:
         """Project the source client's skill declarations once, for the manifest and the census.
 
-        Only OpenClaw and Cursor load undotted roots as written, so those become
-        ``./`` paths Claude Code accepts. Codex drops the paths it rejects
-        instead; when none remain, omitting the field keeps its default
-        ``skills/`` discovery without enabling uninventoried folders. Native
+        Cursor loads undotted roots as written, so those become ``./`` paths
+        Claude Code accepts. Codex drops the paths it rejects instead; when none
+        remain, omitting the field keeps its default ``skills/`` discovery
+        without enabling uninventoried folders. A members-only source (OpenClaw)
+        declares nothing: its member skills are staged under ``skills/``. Native
         Claude declarations, including invalid ones, are not repaired.
         """
-        if not source.contained or "skills" not in source.manifest:
+        if not source.contained or "skills" not in source.manifest or self.stages_members_only(source):
             return {}
         value = source.manifest["skills"]
         manifest_type = manifest_type_for_relative_path(source.manifest_rel)
@@ -1414,7 +1426,7 @@ class ClaudeCodeAdapter(HarnessAdapter):
                 return {}
             if isinstance(value, list):
                 value = [raw for raw in value if codex_accepts_path(raw)]
-        elif manifest_type in {PLUGIN_OPENCLAW_MANIFEST_TYPE, PLUGIN_CURSOR_MANIFEST_TYPE}:
+        elif manifest_type == PLUGIN_CURSOR_MANIFEST_TYPE:
             # Normalize contained paths only, keeping the scalar/list shape and
             # invalid declarations rather than silently making them valid.
             paths = value if isinstance(value, list) else [value]
@@ -1442,12 +1454,15 @@ class ClaudeCodeAdapter(HarnessAdapter):
         plugin root, or inside it but somewhere Claude Code does not read) is
         copied to ``skills/<name>``. A name that is already taken fails closed,
         because Claude Code would load the other skill under that name; so do
-        two skill directories of the plugin itself with one name.
+        two skill directories of the plugin itself with one name. A members-only
+        source has no plugin copy, so each member skill is copied to ``skills/<name>``.
         """
         root = source.plugin_root.resolve()
         reader = PluginRootReader(root)
+        members_only = self.stages_members_only(source)
         loaded: list[str] = []
-        for read_dir in (PurePosixPath("skills"), *self._declared_skill_dirs(source)):
+        read_dirs = () if members_only else (PurePosixPath("skills"), *self._declared_skill_dirs(source))
+        for read_dir in read_dirs:
             if reader.kind(read_dir) != "dir":
                 continue
             if reader.kind(read_dir / "SKILL.md") == "file":
@@ -1483,7 +1498,7 @@ class ClaudeCodeAdapter(HarnessAdapter):
                 continue
             dest = PurePosixPath("skills") / safe_name(skill.name)
             taken = loaded_names.get(dest.name)
-            if taken is None and (dest.as_posix() in placed or reader.kind(dest) != "missing"):
+            if taken is None and (dest.as_posix() in placed or (not members_only and reader.kind(dest) != "missing")):
                 taken = dest.as_posix()
             if taken is not None:
                 raise ValueError(
@@ -1496,7 +1511,10 @@ class ClaudeCodeAdapter(HarnessAdapter):
         return staged
 
     def _unsupported_rows(self, source: NativePluginSource) -> list[tuple[str, str, str]]:
-        staged = {("bin", "bin"), *(("lsp", name) for name in source.lsp_servers)}
+        # bin/ reaches PATH only through the plugin copy.
+        staged = {("lsp", name) for name in source.lsp_servers}
+        if not self.stages_members_only(source):
+            staged.add(("bin", "bin"))
         if source.settings:
             staged.add(("settings", _PLUGIN_SETTINGS_FILE))
         rows: list[tuple[str, str, str]] = []
@@ -1516,8 +1534,9 @@ class ClaudeCodeAdapter(HarnessAdapter):
     def build(self, source: NativePluginSource) -> NativeBundle:
         bundle = self._base_bundle()
         # The plugin root is copied (secure copy, evals/ and unsupported files
-        # excluded) so hook scripts and other plugin-relative files resolve.
-        bundle.plugin_tree = self.bundle_dir
+        # excluded) so hook scripts and other plugin-relative files resolve. A
+        # members-only source stages its member skills and generated files only.
+        bundle.plugin_tree = None if self.stages_members_only(source) else self.bundle_dir
         bundle.harness = {"kind": "claude-code-init", "plugin": self.plugin_name(source)}
         manifest = self.manifest(source)
         checks: list[CensusCheck] = []

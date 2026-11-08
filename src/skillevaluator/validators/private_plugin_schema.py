@@ -138,10 +138,12 @@ def validate_inventory_schema(inventory: PluginInventory) -> ValidationResult:
                 row[k] is not None and selected_data.get(k) is not None and row[k] != selected_data[k]
                 for k in ("name", "version")
             ):
-                openclaw_identity = row["name"] != selected_data.get("name") and "id" in {
-                    row["identity_field"],
-                    selected_row["identity_field"],
-                }
+                openclaw_identity = (
+                    row["name"] is not None
+                    and selected_data.get("name") is not None
+                    and row["name"] != selected_data["name"]
+                    and "id" in {row["identity_field"], selected_row["identity_field"]}
+                )
                 findings.append(
                     Finding(
                         category="PLUGIN_SCHEMA",

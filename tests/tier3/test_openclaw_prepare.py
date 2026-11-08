@@ -14,6 +14,7 @@ import pytest
 from skillevaluator.evaluation.options import EvaluationOptions
 from skillevaluator.plugin_inventory import plugin_inventory_for_root
 from skillevaluator.tier3 import plugin_execution as px
+from skillevaluator.tier3.harbor.native_staging import build_native_task_staging, stage_native_bundle
 from skillevaluator.tier3.plugin_native import OPENCLAW_RUNTIME_NOT_LOADED, ClaudeCodeAdapter, NativePluginSource
 from skillevaluator.tier3.plugin_prepare import (
     OPENCLAW_ROOT_SKILL_REASON,
@@ -160,8 +161,52 @@ def test_host_metadata_never_reaches_the_staged_manifest(tmp_path: Path) -> None
     package = _package(_openclaw(tmp_path, {"portable/a/SKILL.md": _skill("a")}, **fields))
     assert set(package.native_source.manifest) == {"id", "skills"}
     manifest = ClaudeCodeAdapter().manifest(package.native_source)
-    assert manifest == {"name": "release-helper", "description": "", "skills": ["./portable"]}
+    # Member skills are staged under skills/, so the staged manifest declares no paths.
+    assert manifest == {"name": "release-helper", "description": ""}
     assert "never-forward" not in json.dumps(manifest)
+
+
+def test_native_claude_code_loads_only_the_inventoried_member_skills(tmp_path: Path) -> None:
+    files = {
+        "SKILL.md": _skill("root"),
+        "custom/a/SKILL.md": _skill("a"),
+        "custom/node_modules/dep/SKILL.md": _skill("dep"),
+        "skills/implicit/SKILL.md": _skill("implicit"),
+        "commands/deploy.md": "# Deploy\n",
+        "agents/helper.md": "---\nname: helper\ndescription: Helper.\n---\nBody.\n",
+        "hooks/hooks.json": {"hooks": {}},
+        "settings.json": {"agent": "helper"},
+        ".mcp.json": {"mcpServers": {}},
+        "bin/tool": "#!/bin/sh\n",
+        "package.json": {"name": "release-helper"},
+    }
+    schema = {"type": "object", "properties": {"token": {"default": "never-forward"}}}
+    plugin = _openclaw(tmp_path / "plugin", files, skills=[".", "custom"], configSchema=schema)
+    package = _package(plugin)
+    adapter = ClaudeCodeAdapter()
+    staged = adapter.staged_skills(package.native_source)
+    assert [(name, rel) for name, rel, _copy in staged] == [("a", "skills/a")]
+    assert staged[0][2] is not None and staged[0][2].resolve() == (plugin / "custom" / "a").resolve()
+    bundle = adapter.build(package.native_source)
+    assert bundle.plugin_tree is None
+    assert [dest for _copy, dest in bundle.trees] == [f"{adapter.bundle_dir}/skills/a"]
+    assert ("bin", "bin") in {(kind, name) for kind, name, _reason in adapter._unsupported_rows(package.native_source)}
+    staging = build_native_task_staging("claude-code", adapter, package.native_source)
+    stage_native_bundle(tmp_path / "environment", staging)
+    staged_root = tmp_path / "environment" / "skilleval" / "native" / "claude-code" / "plugin"
+    staged_files = sorted(path.relative_to(staged_root).as_posix() for path in staged_root.rglob("*") if path.is_file())
+    # Only adapter-generated files and the member skill; nothing else from the plugin tree.
+    assert staged_files == [".claude-plugin/plugin.json", ".mcp.json", "hooks/hooks.json", "skills/a/SKILL.md"]
+    assert json.loads((staged_root / ".mcp.json").read_text(encoding="utf-8")) == {"mcpServers": {}}
+    assert json.loads((staged_root / "hooks" / "hooks.json").read_text(encoding="utf-8"))["hooks"] == {}
+    assert "never-forward" not in (staged_root / ".claude-plugin" / "plugin.json").read_text(encoding="utf-8")
+
+
+def test_openclaw_member_skills_with_one_name_fail_closed_natively(tmp_path: Path) -> None:
+    files = {"one/a/SKILL.md": _skill("a"), "two/a/SKILL.md": _skill("a")}
+    package = _package(_openclaw(tmp_path, files, skills=["one", "two"]))
+    with pytest.raises(ValueError, match="already has skills/a"):
+        ClaudeCodeAdapter().staged_skills(package.native_source)
 
 
 # --------------------------------------------------------------------------- #
@@ -191,11 +236,20 @@ def _source(tmp_path: Path, manifest_rel: str, skills: Any) -> NativePluginSourc
         (["portable", "./other"], ["./portable", "./other"]),
     ],
 )
-@pytest.mark.parametrize("manifest_rel", [MANIFEST, ".cursor-plugin/plugin.json", ".Cursor-Plugin/plugin.json"])
-def test_openclaw_and_cursor_undotted_roots_become_valid_claude_paths(
+@pytest.mark.parametrize("manifest_rel", [".cursor-plugin/plugin.json", ".Cursor-Plugin/plugin.json"])
+def test_cursor_undotted_roots_become_valid_claude_paths(
     tmp_path: Path, manifest_rel: str, skills: Any, expected: Any
 ) -> None:
     assert ClaudeCodeAdapter().manifest(_source(tmp_path, manifest_rel, skills))["skills"] == expected
+
+
+@pytest.mark.parametrize("skills", ["skills", ["portable", "./other"], [".", "portable"], "./"])
+def test_openclaw_declares_no_skill_paths_to_claude(tmp_path: Path, skills: Any) -> None:
+    _tree(tmp_path, {"skills/implicit/SKILL.md": _skill("implicit"), "portable/a/SKILL.md": _skill("a")})
+    source = _source(tmp_path, MANIFEST, skills)
+    assert "skills" not in ClaudeCodeAdapter().manifest(source)
+    assert ClaudeCodeAdapter()._declared_skill_dirs(source) == []
+    assert ClaudeCodeAdapter().staged_skills(source) == []
 
 
 @pytest.mark.parametrize(
@@ -231,3 +285,40 @@ def test_codex_ignored_extras_are_not_enabled_in_the_staged_census(tmp_path: Pat
 @pytest.mark.parametrize("skills", ["extras", ["extras"], ["../escape"], [7], None, []])
 def test_other_formats_keep_their_declarations_unrepaired(tmp_path: Path, manifest_rel: str, skills: Any) -> None:
     assert ClaudeCodeAdapter().manifest(_source(tmp_path, manifest_rel, skills))["skills"] == skills
+
+
+def _blocking(inventory) -> list:
+    from skillevaluator.models.result import Severity
+
+    return [finding for finding in inventory.findings if finding.severity in {Severity.HIGH, Severity.CRITICAL}]
+
+
+@pytest.mark.parametrize(
+    ("server", "check"),
+    [
+        ({"url": "https://${HOST}/mcp"}, "mcp_url_env_not_expanded"),
+        ({"url": "https://mcp.example.com/mcp", "sslVerify": False}, "mcp_insecure_tls_config"),
+        ({"url": "https://mcp.example.com/mcp", "ssl_verify": False}, "mcp_insecure_tls_config"),
+    ],
+)
+def test_blocking_mcp_findings_refuse_preparation_under_the_callers_policy(
+    tmp_path: Path, server: dict, check: str
+) -> None:
+    inventory = plugin_inventory_for_root(_openclaw(tmp_path, mcpServers={"remote": server}))
+    assert inventory is not None
+    blocking = _blocking(inventory)
+    assert check in {finding.check_name for finding in blocking}
+    with pytest.raises(PreparationError, match=check):
+        prepare_runtime_package(inventory, blocking_findings=blocking)
+
+
+def test_literal_enterprise_secret_refuses_preparation_under_the_callers_policy(tmp_path: Path) -> None:
+    # Assembled at run time so the full-history secret scan never sees a literal credential.
+    sample = "s3cr3t-Value-" + "0123456789abcdef" + "ABCDEF"
+    server = {"url": "https://mcp.example.com/mcp", "enterprise": {"idpClientSecret": sample}}
+    inventory = plugin_inventory_for_root(_openclaw(tmp_path, mcpServers={"remote": server}))
+    assert inventory is not None
+    blocking = _blocking(inventory)
+    assert blocking and all(sample not in finding.message for finding in inventory.findings)
+    with pytest.raises(PreparationError, match="plugin policy blocks runtime evaluation"):
+        prepare_runtime_package(inventory, blocking_findings=blocking)

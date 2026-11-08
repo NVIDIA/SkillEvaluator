@@ -230,3 +230,36 @@ def test_context_comparison_uses_the_declared_roots(tmp_path: Path, monkeypatch)
     files = {"skills/implicit/SKILL.md": _skill("implicit"), "portable/deploy/SKILL.md": _skill("deploy")}
     commands.run_plugin_dedup_scan(_openclaw(tmp_path, files, skills=["portable"]))
     assert seen == [["portable/deploy"]]
+
+
+@pytest.mark.parametrize("skills", ["./custom", None, {}, [1]])
+def test_malformed_skill_root_declarations_never_reach_comparisons(tmp_path: Path, monkeypatch, skills: Any) -> None:
+    monkeypatch.setattr(commands, "run_plugin_skill_context_dedup", lambda *_a, **_k: pytest.fail("no paid work"))
+    plugin = _openclaw(tmp_path, {"custom/a/SKILL.md": _skill("alpha")}, skills=skills)
+    with pytest.raises(ValueError) as caught:
+        load_plugin_profile(plugin)
+    assert not isinstance(caught.value, SecurePathError)
+    results = commands.run_plugin_dedup_scan(plugin)
+    assert not any(result.metadata.get("security_failure") for result in results)
+    assert results[1].errors
+    assert all(result.metadata.get("optional_skip") for result in results[2:])
+
+
+def test_unnamed_root_skill_is_labelled_like_its_inventory_row(tmp_path: Path) -> None:
+    plugin = _openclaw(tmp_path / "root-folder", {"SKILL.md": "---\ndescription: No name.\n---\nBody.\n"}, skills=["."])
+    profile = load_plugin_profile(plugin)
+    assert profile.members == ("root-folder",)
+
+
+def test_built_catalog_over_openclaw_plugins_records_declared_paths_and_excludes_self(tmp_path: Path) -> None:
+    collection = tmp_path / "collection"
+    files = {"custom/a/SKILL.md": _skill("alpha"), "skills/implicit/SKILL.md": _skill("implicit")}
+    plugin = _openclaw(collection / "release", files, description="Release guidance.", skills=["custom"])
+    _openclaw(collection / "other", {"portable/b/SKILL.md": _skill("beta")}, id="other", skills=["portable"])
+    catalog = LocalCatalog.build(collection, client=FakeEmbedding())
+    assert sorted(entry.path for entry in catalog.skills) == ["other/portable/b", "release/custom/a"]
+    assert [entry.path for entry in catalog.plugins] == ["release"]
+    result = check_catalog_skills(load_plugin_profile(plugin), catalog, threshold=0.5)
+    assert [finding.metadata["catalog_path"] for finding in result.findings] == ["other/portable/b"]
+    [success] = [row for row in result.success_details if row.check_name == "skill_catalog_comparison"]
+    assert success.metadata["excluded_catalog_paths"] == ["release/custom/a"]

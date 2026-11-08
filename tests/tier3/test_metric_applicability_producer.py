@@ -337,6 +337,22 @@ def test_template_trial_without_trajectory_keeps_reference_less_judges_na(tmp_pa
     assert "goal_accuracy" not in scores
 
 
+def test_template_baseline_trial_without_trajectory_keeps_skill_metrics_na(tmp_path, monkeypatch):
+    entry = {"id": "a", "question": "q", "ground_truth": "42", "expected_skill": "demo", "has_skill": False}
+    verifier = _template_verifier(tmp_path, monkeypatch, entry, trajectory=False)
+
+    verifier.main()
+
+    numeric, rich = _template_outputs(tmp_path)
+    # A crashed baseline trial has no skill to activate, so its skill metrics stay N/A like the
+    # other baseline trials. A 0.0 here would hand the with-skill arm lift from activation alone.
+    for metric in ("skill_execution", "skill_efficiency"):
+        assert metric not in numeric
+        assert rich[metric] is None
+        assert metrics.metric_is_not_applicable(rich, metric)
+    assert numeric["accuracy"] == 0.0
+
+
 @pytest.mark.parametrize("metric", ["accuracy", "goal_accuracy", "behavior_check"])
 def test_template_trial_is_unscored_when_a_judge_claims_na_for_a_defined_reference(tmp_path, monkeypatch, metric):
     from skillevaluator.tier3.harbor.collector import _merge_reward_sidecars, _partition_scoreable_rewards

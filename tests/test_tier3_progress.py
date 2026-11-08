@@ -1137,6 +1137,69 @@ def test_heartbeat_write_that_would_block_turns_progress_off(
     assert uncaught == []
 
 
+class _InterleavingLock:
+    """A reentrant lock that runs a hook once, when the arming thread next releases it fully."""
+
+    def __init__(self) -> None:
+        self._lock = threading.RLock()
+        self._depth = 0
+        self._hook: tuple[threading.Thread, Any] | None = None
+
+    def arm(self, hook: Any) -> None:
+        self._hook = (threading.current_thread(), hook)
+
+    def __enter__(self) -> _InterleavingLock:
+        self._lock.acquire()
+        self._depth += 1
+        return self
+
+    def __exit__(self, *exc_info: object) -> None:
+        self._depth -= 1
+        released = self._depth == 0
+        self._lock.release()
+        armed = self._hook
+        if released and armed is not None and armed[0] is threading.current_thread():
+            self._hook = None
+            armed[1]()
+
+
+def test_an_update_that_races_a_drawing_failure_is_not_drawn_as_failed(monkeypatch: pytest.MonkeyPatch) -> None:
+    import rich.live
+
+    progress = _progress_module()
+    _FakeLive.instances.clear()
+    monkeypatch.setattr(rich.live, "Live", _FakeLive)
+    rich_reporter = progress.RichProgressReporter(stream=_TTYBuffer(), refresh_interval=60)
+    lock = _InterleavingLock()
+    rich_reporter._lock = lock
+    reporter = progress.safe_progress_reporter(rich_reporter)
+    reporter.start(_plan(progress))
+    reporter.emit(progress.ProgressEvent(stage="agent:codex", state="running", detail="attempt 1 of 3"))
+
+    def late_agent_update() -> None:
+        # The caller's next agent update passed the wrapper's check before the
+        # failure turned progress off, and reaches the reporter while it stops.
+        update = threading.Thread(
+            target=rich_reporter.emit,
+            args=(progress.ProgressEvent(stage="agent:codex", state="running", detail="attempt 2 of 3"),),
+        )
+        update.start()
+        update.join(timeout=10)
+
+    lock.arm(late_agent_update)
+    # What the heartbeat thread's failure callback runs.
+    reporter._disable()
+    live = _FakeLive.instances[0]
+    frames = [_render(renderable, width=180) for renderable in live.renderables]
+    reporter.close()
+
+    # Only the display failed: the agent is never drawn as failed, and the
+    # frame left on screen shows the update as still running.
+    assert not any("failed" in frame or "interrupted" in frame for frame in frames)
+    assert "attempt 2 of 3" in frames[-1]
+    assert live.stop_calls == 1
+
+
 def test_heartbeat_failure_during_a_plan_update_stops_what_the_update_drew(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:

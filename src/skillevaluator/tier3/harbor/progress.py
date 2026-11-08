@@ -244,16 +244,31 @@ class PlainProgressReporter:
             self._write_line(f"[{self._elapsed()}] still running: {stages}")
 
     def close(self) -> None:
+        self._close(after_failure=False)
+
+    def close_after_failure(self) -> None:
+        """Stop after a presentation failure without marking running stages failed.
+
+        Only the display failed. The run goes on, so a stage that is still
+        running has not been interrupted.
+        """
+        self._close(after_failure=True)
+
+    def _close(self, *, after_failure: bool) -> None:
         try:
             with self._lock:
-                for stage in tuple(self._active):
-                    self.emit(
-                        ProgressEvent(
-                            stage=stage,
-                            state="failed",
-                            detail="interrupted before completion",
+                # Decided under the same lock hold that would mark the stages,
+                # so an update that arrives while a failed display stops is
+                # never reported as interrupted.
+                if not after_failure:
+                    for stage in tuple(self._active):
+                        self.emit(
+                            ProgressEvent(
+                                stage=stage,
+                                state="failed",
+                                detail="interrupted before completion",
+                            )
                         )
-                    )
         finally:
             self._stop.set()
             thread = self._thread
@@ -266,16 +281,6 @@ class PlainProgressReporter:
                 self._plan_rendered = False
                 self._last_events.clear()
                 self._last_progress_at = None
-
-    def close_after_failure(self) -> None:
-        """Stop after a presentation failure without marking running stages failed.
-
-        Only the display failed. The run goes on, so a stage that is still
-        running has not been interrupted.
-        """
-        with self._lock:
-            self._active.clear()
-        self.close()
 
     def _render_plan(self, plan: Tier3RunPlan) -> None:
         first_plan = not self._plan_rendered
@@ -420,22 +425,21 @@ class RichProgressReporter(PlainProgressReporter):
             if self._active:
                 self._refresh_live()
 
-    def close(self) -> None:
-        self._close(final_frame=True)
-
-    def _close(self, *, final_frame: bool) -> None:
+    def _close(self, *, after_failure: bool) -> None:
         live = self._live
         try:
-            super().close()
+            super()._close(after_failure=after_failure)
         finally:
             with self._lock:
                 try:
                     if live is not None and live is self._live:
                         try:
-                            if final_frame:
+                            if not after_failure:
                                 # Once Live stops, its last frame stays in the
                                 # scrollback and no longer needs a fixed height,
-                                # so it lists every stage in full.
+                                # so it lists every stage in full. After a
+                                # drawing failure that frame could fail the same
+                                # way, so Live keeps the last frame it drew.
                                 live.update(self._build_live_table(final=True), refresh=False)
                         finally:
                             live.stop()
@@ -452,17 +456,12 @@ class RichProgressReporter(PlainProgressReporter):
     def close_after_failure(self) -> None:
         """Stop the live view after a drawing failure and say that the run goes on."""
         with self._lock:
-            # Only the display failed: the stages still running are not
-            # interrupted, so close() must not report them as failed.
-            self._active.clear()
             had_live = self._live is not None
-        # Drawing the final frame could fail the same way, so Live keeps the
-        # last frame it drew.
-        self._close(final_frame=False)
+        super().close_after_failure()
         if had_live:
             try:
-                # That frame stays on screen with its stages still running, so
-                # explain why it no longer updates.
+                # The last frame Live drew stays on screen with its stages
+                # still running, so explain why it no longer updates.
                 self._write_line("Tier 3 progress display stopped after a drawing error; the run continues.")
             except Exception:
                 logger.debug("Tier 3 progress stop notice failed", exc_info=True)

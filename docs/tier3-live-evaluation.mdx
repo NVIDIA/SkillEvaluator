@@ -889,7 +889,8 @@ A metric can also be N/A (not applicable) for an eval case. It never counts as
   `expected_behavior`), and `accuracy` and `goal_accuracy` when it has no
   `expected_output` (legacy `ground_truth`). An empty or whitespace-only
   reference, or an empty list, counts as missing. The verifier does not call
-  those judges. `expected_output` is required, so only legacy cases without
+  those judges. `skillevaluator tier3 ./my-skill` and `tier3 init-harbor-task`
+  reject an empty `expected_output`, so with them only legacy cases without
   `ground_truth` make `accuracy` and `goal_accuracy` N/A.
 - `skill_execution` and `skill_efficiency` are N/A in a baseline arm that has
   no skill it could activate.

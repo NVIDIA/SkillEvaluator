@@ -715,9 +715,13 @@ def _command_text(tool_call: dict[str, Any]) -> str:
 
 
 def _sensitive_path_match(text: Any, paths: list[str]) -> str | None:
-    """Return the entry of *paths* that *text* contains: the evidence a path finding records."""
+    """Return the entry of *paths* that *text* contains: the evidence a path finding records.
+
+    The longest entry wins, so a write to /etc/profile.d/npm.sh records
+    /etc/profile.d rather than the /etc/profile it also contains.
+    """
     lowered = str(text).lower()
-    return next((entry for entry in paths if entry in lowered), None)
+    return max((entry for entry in paths if entry in lowered), key=len, default=None)
 
 
 def _is_execution_action(action: str) -> bool:

@@ -125,11 +125,14 @@ All notable changes to SkillEvaluator are documented in this file.
   another dimension has no score. In 0.8.0 a dimension with no score made the
   agent NEUTRAL before the 0.40 check ran. Correctness has no score when no
   case defines `ground_truth`, so an agent with Security 0.0, for example after
-  a `destructive_command` finding, got a NEUTRAL Tier 3 verdict in the HTML
-  report and the JSON report's `tier3.verdict`, and `INCOMPLETE` in
-  `BENCHMARK.md` and `publication_status`. These now read FAIL. A dimension
-  with no score still keeps an agent from passing, and exit codes do not
-  change.
+  a `destructive_command` finding, got a NEUTRAL verdict. For such a run the
+  overall verdict in `BENCHMARK.md` now reads FAIL (was INCOMPLETE), and the
+  JSON report's `tier3.verdict` and `publication_status` read `fail` (were
+  `neutral` and `incomplete`). The Tier 3 result's JSON `status` and the
+  terminal's Tier 3 line now read failed, and the HTML Tier 3 card reads
+  `Failed (advisory)`, or `Changes required` with `--block-on-agent-eval`,
+  where it read Neutral. A dimension with no score still keeps an agent from
+  passing, and exit codes do not change.
 
 ## 0.8.0 - 2026-11-05
 

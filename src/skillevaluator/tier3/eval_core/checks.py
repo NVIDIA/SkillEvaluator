@@ -2722,30 +2722,46 @@ _FINDING_EVIDENCE_USER_FLAG_RE = re.compile(
     r"(?:\"[^\"\r\n:]*:[^\"\r\n]*\"?|'[^'\r\n:]*:[^'\r\n]*'?|[^\s'\"`:]*:[^\s'\"`]*)"
 )
 # "-p" is a password after a login subcommand ("docker login -u bot -p VALUE",
-# "az login -u ID -p VALUE", "helm registry login HOST -u bot -p VALUE") and
-# after sshpass, and attached to a MySQL-family client ("mysql -uroot
-# -pVALUE"); elsewhere it is a flag such as "mkdir -p", "ssh -p 2222" or
-# "git log -p". "login" is a subcommand only as a word after a command word,
-# not after a flag or "=" ("git log --author=login -p", "find -name login").
+# also attached as "-pVALUE"; "az login -u ID -p VALUE"; "helm registry login
+# HOST -u bot -p VALUE") and after sshpass, and attached to a MySQL-family
+# client ("mysql -uroot -pVALUE"); elsewhere it is a flag such as "mkdir -p",
+# "ssh -p 2222" or "git log -p". "login" is a subcommand only as a word after a
+# command word, not after a flag or "=" ("git log --author=login -p", "find
+# -name login -print").
 _FINDING_EVIDENCE_LOGIN_PASSWORD_RE = re.compile(
     r"((?<![^\s;&|('\"`])[^\s'\"`;&|()<>-][^\s'\"`;&|()<>]{0,63}[ \t]+login(?=[ \t])"
-    r"[^|;&\r\n]{0,256}?[ \t]-p(?:[ \t]+(?!-)|=))" + _FINDING_EVIDENCE_FLAG_VALUE
+    r"[^|;&\r\n]{0,256}?[ \t]-p(?:[ \t]+(?!-)|=)?)" + _FINDING_EVIDENCE_FLAG_VALUE
 )
 _FINDING_EVIDENCE_SSHPASS_RE = re.compile(r"(\bsshpass[ \t]+-p[ \t]*)" + _FINDING_EVIDENCE_FLAG_VALUE)
 _FINDING_EVIDENCE_MYSQL_PASSWORD_RE = re.compile(
     r"(\b(?:mysql|mysqldump|mysqladmin|mysqlimport|mysqlshow|mysqlcheck|mariadb|mariadb-dump)\b"
     r"[^|;&\r\n]{0,256}?[ \t]-p)(?:\"[^\"\r\n]*\"?|'[^'\r\n]*'?|[^\s'\"`|;&]+)"
 )
-# "aws configure set aws_secret_access_key VALUE" and a .netrc line
-# ("machine HOST login USER password VALUE").
+# "aws configure set aws_secret_access_key VALUE" and a .netrc entry
+# ("machine HOST login USER password VALUE"). A .netrc entry may span lines,
+# written as real line breaks (a here-document) or as "\n" inside a printf or
+# echo string, and a netrc word never holds a "\n".
 _FINDING_EVIDENCE_AWS_CONFIGURE_SET_RE = re.compile(
     r"(\baws[ \t]+configure[ \t]+set[ \t]+[\w.-]{0,64}?(?:secret|token|key)[\w.-]{0,64}[ \t]+(?!-))"
     + _FINDING_EVIDENCE_FLAG_VALUE,
     re.IGNORECASE,
 )
+_FINDING_EVIDENCE_NETRC_SEPARATOR = r"(?:[ \t\r\n]|\\n)+"
+_FINDING_EVIDENCE_NETRC_WORD = r"(?:(?!\\n)[^\s'\"`])+"
 _FINDING_EVIDENCE_NETRC_PASSWORD_RE = re.compile(
-    r"(\b(?:machine|login|account)[ \t]+[^\s'\"`]+[ \t]+password[ \t]+)" + _FINDING_EVIDENCE_FLAG_VALUE
+    r"((?:\b|(?<=\\n))(?:machine|login|account)"
+    + _FINDING_EVIDENCE_NETRC_SEPARATOR
+    + _FINDING_EVIDENCE_NETRC_WORD
+    + _FINDING_EVIDENCE_NETRC_SEPARATOR
+    + "password"
+    + _FINDING_EVIDENCE_NETRC_SEPARATOR
+    + r")(?:\"[^\"\r\n]*\"?|'[^'\r\n]*'?|"
+    + _FINDING_EVIDENCE_NETRC_WORD
+    + ")"
 )
+# curl's "-b NAME=VALUE" sends a cookie; "-b FILE" reads a cookie jar and is
+# kept. This follows the report excerpts' _CLI_COOKIE_FLAG_RE.
+_FINDING_EVIDENCE_COOKIE_FLAG_RE = re.compile(r"((?<![^\s'\"])-b[ \t]+)(?=[^\s]*=)" + _FINDING_EVIDENCE_FLAG_VALUE)
 # Bearer, Basic and Token stay visible after a credential name too
 # ("Authorization: Bearer <redacted>").
 _FINDING_EVIDENCE_AUTH_SCHEME = r"(?:(?:bearer|basic|token)[ \t]+)?"
@@ -2760,9 +2776,12 @@ _FINDING_EVIDENCE_ASSIGNMENT_NAME_RE = re.compile(
     r"(?<![\w./-])([\w.-]+)(\\?[\"']?)([ \t]*:[ \t]*|[ \t]+=[ \t]*|=)" + _FINDING_EVIDENCE_AUTH_SCHEME,
     re.IGNORECASE,
 )
-# "auth" also starts author and authority, which name no credential.
+# "auth" also starts author and authority, which name no credential. A name
+# that ends in a "_pass", "_pwd" or "pw" part ("DB_PASS", "MYSQL_PWD", "PW")
+# names a password too; a bare "PWD" is the working directory.
 _FINDING_EVIDENCE_CREDENTIAL_NAME_RE = re.compile(
-    r"token|secret|passw(?:or)?d|passphrase|api[_-]?key|access[_-]?key|private[_-]?key|credential|auth(?!or(?!i[sz]))",
+    r"token|secret|passw(?:or)?d|passphrase|api[_-]?key|access[_-]?key|private[_-]?key|credential|auth(?!or(?!i[sz]))"
+    r"|[_.-](?:pass|pwd)$|(?:^|[_.-])pw$",
     re.IGNORECASE,
 )
 # A name that ends in a location word holds a path or URL, not a credential
@@ -2783,6 +2802,7 @@ _FINDING_EVIDENCE_ASSIGNMENT_VALUE_RE = re.compile(
 # A word stuck to the quote that closes a string around an empty assignment
 # ('"PASSWORD="hunter2' is PASSWORD=hunter2 to a shell).
 _FINDING_EVIDENCE_STUCK_VALUE_RE = re.compile(r"[^\s'\"`;|&()<>]+")
+_FINDING_EVIDENCE_SPACES_RE = re.compile(r"[ \t]*")
 # "host.example:8443" is a host and port, not a "name: value" pair.
 _FINDING_EVIDENCE_PORT_RE = re.compile(r"[0-9]{1,5}(?![\w.-])")
 _FINDING_EVIDENCE_TOKEN_PREFIX_RE = re.compile(
@@ -2821,6 +2841,7 @@ def _redact_finding_evidence(text: Any, limit: int = 500) -> str:
         _FINDING_EVIDENCE_MYSQL_PASSWORD_RE,
         _FINDING_EVIDENCE_AWS_CONFIGURE_SET_RE,
         _FINDING_EVIDENCE_NETRC_PASSWORD_RE,
+        _FINDING_EVIDENCE_COOKIE_FLAG_RE,
     ):
         redacted = pattern.sub(r"\1<redacted>", redacted)
     redacted = _mask_credential_assignments(redacted)
@@ -2870,7 +2891,12 @@ def _mask_credential_assignments(text: str) -> str:
             continue
         start = match.end()
         opening = text[match.start() - 1] if match.start() else ""
-        if opening in ("'", '"') and not name_quote and text.startswith((opening, "\\" + opening), start):
+        in_quotes = opening in ("'", '"') and not name_quote
+        if in_quotes and separator == "=":
+            # Inside a quoted string "name= value" is not a shell assignment,
+            # so the value may follow spaces ("echo 'password= VALUE' >> f").
+            start = _FINDING_EVIDENCE_SPACES_RE.match(text, start).end()
+        if in_quotes and text.startswith((opening, "\\" + opening), start):
             # The value is empty and the quote after it closes the string that
             # opened before the name ('grep "token=" ...', "printf 'password: '"),
             # so it is not the opening quote of a value.

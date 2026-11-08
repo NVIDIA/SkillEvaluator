@@ -267,6 +267,16 @@ class PlainProgressReporter:
                 self._last_events.clear()
                 self._last_progress_at = None
 
+    def close_after_failure(self) -> None:
+        """Stop after a presentation failure without marking running stages failed.
+
+        Only the display failed. The run goes on, so a stage that is still
+        running has not been interrupted.
+        """
+        with self._lock:
+            self._active.clear()
+        self.close()
+
     def _render_plan(self, plan: Tier3RunPlan) -> None:
         first_plan = not self._plan_rendered
         self._plan_rendered = True
@@ -326,11 +336,19 @@ class PlainProgressReporter:
                 return
             try:
                 self.heartbeat()
+            except (BlockingIOError, InterruptedError):
+                # A terminal that another process made non-blocking can refuse
+                # one write; the next heartbeat draws the frame again.
+                logger.debug("Tier 3 progress heartbeat skipped after a transient write error", exc_info=True)
+                continue
             except Exception:
                 # A redraw failure here must turn progress off through the
                 # safety wrapper, which stops the live display, instead of
                 # killing this thread and leaving a half-drawn frame behind.
                 logger.debug("Tier 3 progress heartbeat failed", exc_info=True)
+                if self._stop.is_set():
+                    # close() is already stopping this reporter.
+                    return
                 callback = self._failure_callback
                 if callback is None:
                     self._stop.set()
@@ -420,6 +438,22 @@ class RichProgressReporter(PlainProgressReporter):
                     self._live_plan = None
                     self._live_events.clear()
                     self._live_event_slots = _LIVE_MIN_EVENT_ROWS
+
+    def close_after_failure(self) -> None:
+        """Stop the live view after a drawing failure and say that the run goes on."""
+        with self._lock:
+            # Only the display failed: the stages still running are not
+            # interrupted, so close() must not report them as failed.
+            self._active.clear()
+            had_live = self._live is not None
+        self.close()
+        if had_live:
+            try:
+                # The last frame stays on screen with its stages still running,
+                # so explain why it no longer updates.
+                self._write_line("Tier 3 progress display stopped after a drawing error; the run continues.")
+            except Exception:
+                logger.debug("Tier 3 progress stop notice failed", exc_info=True)
 
     def _render_plan(self, plan: Tier3RunPlan) -> None:
         self._live_plan = plan
@@ -548,7 +582,7 @@ class RichProgressReporter(PlainProgressReporter):
             self._live.update(self._build_live_table(), refresh=True)
 
     def _write_line(self, line: str) -> None:
-        self._console.print(line, markup=False, soft_wrap=True)
+        self._console.print(line, markup=False, highlight=False, soft_wrap=True)
 
 
 class NullProgressReporter:
@@ -636,13 +670,21 @@ class SafeProgressReporter:
         if self._disabled:
             return
         self._disabled = True
+        # A disabled reporter shows nothing, so it is no longer active.
+        self._started = False
+        # Only the display failed, so a reporter that can stop without marking
+        # its running stages failed does so.
         try:
-            self._reporter.close()
+            close_after_failure = getattr(self._reporter, "close_after_failure", None)
+        except Exception:
+            close_after_failure = None
+        try:
+            if callable(close_after_failure):
+                close_after_failure()
+            else:
+                self._reporter.close()
         except Exception:
             logger.debug("Tier 3 progress reporter cleanup failed", exc_info=True)
-        finally:
-            # A disabled reporter shows nothing, so it is no longer active.
-            self._started = False
 
 
 def safe_progress_reporter(reporter: ProgressReporter | None) -> SafeProgressReporter:

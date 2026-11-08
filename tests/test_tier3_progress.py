@@ -272,12 +272,16 @@ def test_rich_reporter_owns_live_table_and_updates_stage_rows(monkeypatch: pytes
     assert reporter.is_active is False
 
 
-def _rendered_live_lines(reporter: Any, *, width: int = 80) -> list[str]:
+def _render(renderable: Any, *, width: int = 80) -> str:
     from rich.console import Console
 
     stream = io.StringIO()
-    Console(file=stream, width=width, color_system=None).print(reporter._build_live_table())
-    return stream.getvalue().splitlines()
+    Console(file=stream, width=width, color_system=None).print(renderable)
+    return stream.getvalue()
+
+
+def _rendered_live_lines(reporter: Any, *, width: int = 80) -> list[str]:
+    return _render(reporter._build_live_table(), width=width).splitlines()
 
 
 def test_rich_progress_frame_height_stays_fixed_as_plan_and_events_grow() -> None:
@@ -373,7 +377,6 @@ def test_rich_progress_frame_does_not_shrink_when_the_agent_set_shrinks() -> Non
 
 def test_rich_progress_uses_manual_refresh_and_recent_event_window(monkeypatch: pytest.MonkeyPatch) -> None:
     import rich.live
-    from rich.console import Console
 
     progress = _progress_module()
     _FakeLive.instances.clear()
@@ -392,9 +395,7 @@ def test_rich_progress_uses_manual_refresh_and_recent_event_window(monkeypatch: 
     reporter.emit(progress.ProgressEvent(stage="stage-0", state="running", detail="active again"))
 
     live = _FakeLive.instances[0]
-    rendered = io.StringIO()
-    Console(file=rendered, width=80, color_system=None).print(live.renderables[-1])
-    text = rendered.getvalue()
+    text = _render(live.renderables[-1])
     # Rich's own refresh thread would redraw outside the reporter lock.
     assert live.kwargs["auto_refresh"] is False
     assert "refresh_per_second" not in live.kwargs
@@ -765,15 +766,17 @@ def test_safe_reporter_disables_after_heartbeat_redraw_failure() -> None:
     failed_on: list[threading.Thread] = []
 
     class FailingLive:
-        def __init__(self, _table, **_kwargs) -> None:
+        def __init__(self, table, **_kwargs) -> None:
+            self.renderables = [table]
             self.update_calls = 0
             self.stop_calls = 0
 
         def start(self, *, refresh: bool = False) -> None:
             assert refresh
 
-        def update(self, _table, *, refresh: bool = False) -> None:
+        def update(self, table, *, refresh: bool = False) -> None:
             assert refresh
+            self.renderables.append(table)
             self.update_calls += 1
             if self.update_calls == 2:
                 failed_on.append(threading.current_thread())
@@ -783,7 +786,8 @@ def test_safe_reporter_disables_after_heartbeat_redraw_failure() -> None:
         def stop(self) -> None:
             self.stop_calls += 1
 
-    rich_reporter = progress.RichProgressReporter(stream=io.StringIO(), refresh_interval=0.05)
+    output = io.StringIO()
+    rich_reporter = progress.RichProgressReporter(stream=output, refresh_interval=0.05)
     rich_reporter._live_factory = FailingLive
     reporter = progress.safe_progress_reporter(rich_reporter)
     reporter.start(_plan(progress))
@@ -801,10 +805,62 @@ def test_safe_reporter_disables_after_heartbeat_redraw_failure() -> None:
     assert reporter.is_active is False
     assert live.stop_calls == 1
     assert rich_reporter._live is None
+    # Only the display failed: the agent is never drawn as failed or interrupted,
+    # and a line under the frozen frame says the run goes on.
+    frames = [_render(table, width=180) for table in live.renderables]
+    assert not any("failed" in frame or "interrupted" in frame for frame in frames)
+    assert "running" in frames[-1]
+    assert "Tier 3 progress display stopped after a drawing error; the run continues." in output.getvalue()
     updates_before = live.update_calls
     reporter.emit(progress.ProgressEvent(stage="agent:codex", state="complete"))
     assert live.update_calls == updates_before
     reporter.close()
+
+
+def test_heartbeat_skips_a_transient_write_error_and_keeps_progress_on(monkeypatch: pytest.MonkeyPatch) -> None:
+    import rich.live
+
+    progress = _progress_module()
+    failed_once = threading.Event()
+    redrawn_after_failure = threading.Event()
+    uncaught: list[BaseException | None] = []
+    monkeypatch.setattr(threading, "excepthook", lambda args: uncaught.append(args.exc_value))
+
+    class FlakyLive(_FakeLive):
+        """Refuses one heartbeat write, as a terminal made non-blocking by a child process can."""
+
+        def update(self, renderable, *, refresh: bool = False) -> None:
+            on_heartbeat = threading.current_thread().name == "tier3-progress-heartbeat"
+            if on_heartbeat and not failed_once.is_set():
+                failed_once.set()
+                raise BlockingIOError(errno.EAGAIN, "write could not complete without blocking")
+            super().update(renderable, refresh=refresh)
+            if on_heartbeat:
+                redrawn_after_failure.set()
+
+    _FakeLive.instances.clear()
+    monkeypatch.setattr(rich.live, "Live", FlakyLive)
+    reporter = progress.safe_progress_reporter(
+        progress.RichProgressReporter(stream=_TTYBuffer(), refresh_interval=0.05)
+    )
+    reporter.start(_plan(progress))
+    reporter.emit(progress.ProgressEvent(stage="agent:codex", state="running", detail="evaluating"))
+
+    assert failed_once.wait(timeout=10)
+    assert redrawn_after_failure.wait(timeout=10)
+    assert reporter.is_active is True
+    reporter.emit(progress.ProgressEvent(stage="agent:codex", state="complete", detail="agent finished"))
+    reporter.emit(progress.ProgressEvent(stage="run-finished", state="complete", detail="Tier 3 evaluation finished"))
+    live = _FakeLive.instances[0]
+    frame = _render(live.renderables[-1], width=180)
+    reporter.close()
+
+    assert "agent finished" in frame
+    assert "Tier 3 evaluation finished" in frame
+    assert "failed" not in frame
+    assert "interrupted" not in frame
+    assert live.stop_calls == 1
+    assert uncaught == []
 
 
 def test_heartbeat_failure_without_a_safety_wrapper_stops_the_thread(monkeypatch: pytest.MonkeyPatch) -> None:

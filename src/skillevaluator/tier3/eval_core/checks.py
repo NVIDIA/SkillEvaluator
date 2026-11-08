@@ -2714,17 +2714,22 @@ _FINDING_EVIDENCE_CREDENTIAL_FLAG_RE = re.compile(
 # "-u", "-U" and "--user" also name ordinary options (python -u, pip -U, pip
 # --user), so only a value with a colon is masked: "user:password", or an API
 # key with an empty password ("-u KEY:"). curl also takes it attached
-# ("-uadmin:password") and as "--proxy-user".
+# ("-uadmin:password") and as "--proxy-user". A value with "://" is a URL
+# ("pip install -U git+https://..."), whose userinfo is already masked.
 _FINDING_EVIDENCE_USER_FLAG_RE = re.compile(
     r"((?<![^\s'\"])(?:(?:-u|-U|--user|--proxy-user)(?:[ \t]+|=)|-u(?=[^\s'\"`:=-][^\s'\"`:]*:)))"
+    r"(?![\"']?[^\s'\"`]*://)"
     r"(?:\"[^\"\r\n:]*:[^\"\r\n]*\"?|'[^'\r\n:]*:[^'\r\n]*'?|[^\s'\"`:]*:[^\s'\"`]*)"
 )
-# "-p" is a password after a login command ("docker login -u bot -p VALUE",
-# "az login -u ID -p VALUE") and after sshpass, and attached to a MySQL-family
-# client ("mysql -uroot -pVALUE"); elsewhere it is a flag such as "mkdir -p" or
-# "ssh -p 2222".
+# "-p" is a password after a login subcommand ("docker login -u bot -p VALUE",
+# "az login -u ID -p VALUE", "helm registry login HOST -u bot -p VALUE") and
+# after sshpass, and attached to a MySQL-family client ("mysql -uroot
+# -pVALUE"); elsewhere it is a flag such as "mkdir -p", "ssh -p 2222" or
+# "git log -p". "login" is a subcommand only as a word after a command word,
+# not after a flag or "=" ("git log --author=login -p", "find -name login").
 _FINDING_EVIDENCE_LOGIN_PASSWORD_RE = re.compile(
-    r"((?<![\w@.-])login(?![\w@.-])[^|;&\r\n]{0,256}?[ \t]-p(?:[ \t]+(?!-)|=))" + _FINDING_EVIDENCE_FLAG_VALUE
+    r"((?<![^\s;&|('\"`])[^\s'\"`;&|()<>-][^\s'\"`;&|()<>]{0,63}[ \t]+login(?=[ \t])"
+    r"[^|;&\r\n]{0,256}?[ \t]-p(?:[ \t]+(?!-)|=))" + _FINDING_EVIDENCE_FLAG_VALUE
 )
 _FINDING_EVIDENCE_SSHPASS_RE = re.compile(r"(\bsshpass[ \t]+-p[ \t]*)" + _FINDING_EVIDENCE_FLAG_VALUE)
 _FINDING_EVIDENCE_MYSQL_PASSWORD_RE = re.compile(

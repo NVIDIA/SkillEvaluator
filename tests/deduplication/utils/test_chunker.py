@@ -36,12 +36,20 @@ def _cf(
 
 
 class _ReadCountingText(str):
-    """A str that adds up the characters read through its Python-level methods.
+    """A str that adds up the characters read through some of its methods.
 
     Indexing and slicing add the length of the result, iteration adds one per
     character, ``find`` and ``index`` add the span searched, and ``count`` and
-    ``splitlines`` add the span scanned. Regular expressions read the string's
-    buffer directly and are not counted.
+    ``splitlines`` add the span scanned. Nothing else is counted:
+
+    - reads through ``re``, which reads the string's buffer directly;
+    - other ``str`` methods, such as ``split``, ``strip`` or ``startswith``;
+    - any read of a plain ``str`` made from it, for example with ``str()``,
+      ``replace()`` or ``"".join()``.
+
+    A quadratic rewrite that reads only in those ways passes the read-count
+    tests. They pin the old per-character and per-function walks, not every
+    possible quadratic scan.
     """
 
     __slots__ = ()

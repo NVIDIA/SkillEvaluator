@@ -393,7 +393,7 @@ you intend to skip Tier 2 entirely.
 | Minimum content chunk | 80 characters | Drops sections and chunks too small to compare usefully; short paragraphs of an oversized section stay attached to a neighbour |
 | Embedding input cap | 3,000 characters | Caps every Markdown, Python, and shell embedding input; oversized Markdown sections are packed at paragraph boundaries |
 | High-confidence duplicate boundary | `0.70` | Maps actionable duplicate verdicts to HIGH rather than MEDIUM |
-| Frontmatter structure | 100 nesting levels, 20,000 nodes, 1,024 alias references, 1,024 items per mapping or sequence, 65,536 characters per value, integers up to 14,000 bits (about 4,200 digits) | Bounds every Markdown mapping frontmatter Tier 2 parses; aliases and merge keys count after expansion |
+| Frontmatter structure | 100 nesting levels, 20,000 nodes, 1,024 alias references, 1,024 items per mapping or sequence, 65,536 characters per value, integers up to 14,000 bits (about 4,200 digits) | Bounds every Markdown mapping frontmatter Tier 2 parses; aliases and merge keys count after expansion. A decimal integer longer than 4,300 digits, Python's default limit for converting text to an integer, counts as invalid YAML, not as a limit failure |
 | Inter-skill name and description | 16,384 characters each | Per-field catalog text limit, in every embedding mode; description mode also caps `name: description` at 16,384 characters. A value that is not a string skips the manifest |
 | Intra-skill content chunks | 512 | Per-skill ceiling, checked before any embedding request |
 | Intra-skill comparison work | 267,911,168 scalar comparisons | Bounds all-pairs clustering; allows all 512 chunks with embeddings of up to 2,048 dimensions, 418 chunks at 3,072, and 362 at 4,096 |

@@ -9,6 +9,7 @@ import logging
 import os
 import stat
 import subprocess
+import sys
 from pathlib import Path
 from types import SimpleNamespace
 from unittest.mock import patch
@@ -22,6 +23,15 @@ from skillevaluator.deduplication.utils.skill_collector import (
     SkillCollectionError,
     collect_files,
 )
+
+
+@pytest.fixture
+def default_int_digit_limit():
+    """Pin Python's default 4,300-digit limit for converting text to an int."""
+    previous = sys.get_int_max_str_digits()
+    sys.set_int_max_str_digits(4_300)
+    yield
+    sys.set_int_max_str_digits(previous)
 
 
 class TestCollectedFile:
@@ -133,6 +143,7 @@ class TestCollectFiles:
         assert len(result) == 1
         assert result[0].extension == ".mdc"
 
+    @pytest.mark.usefixtures("default_int_digit_limit")
     @pytest.mark.parametrize(
         "frontmatter",
         [
@@ -156,6 +167,8 @@ class TestCollectFiles:
             pytest.param("tags:\n" + "\n".join(f"  - tag{index}" for index in range(1_100)), id="long-list"),
             # 3,600 hex digits are 14,400 bits, over the 14,000-bit integer limit.
             pytest.param("version: 0x" + "f" * 3_600, id="big-integer"),
+            # 4,250 decimal digits are about 14,118 bits, within Python's 4,300-digit limit.
+            pytest.param("version: " + "9" * 4_250, id="big-decimal-integer"),
         ],
     )
     def test_frontmatter_complexity_limit_fails_closed(self, skill_root: Path, frontmatter: str) -> None:
@@ -170,6 +183,7 @@ class TestCollectFiles:
         assert exc.value.rel_path == "references/guide.md"
         assert "YAML aliases" in exc.value.suggestion
 
+    @pytest.mark.usefixtures("default_int_digit_limit")
     @pytest.mark.parametrize(
         "line",
         [
@@ -177,6 +191,8 @@ class TestCollectFiles:
             pytest.param("version: !!bool nope", id="tagged-bool"),
             pytest.param("version: !!float x", id="tagged-float"),
             pytest.param("last_updated: 2024-02-30", id="impossible-date"),
+            # int() rejects more than 4,300 decimal digits before the bit limit applies.
+            pytest.param("version: " + "9" * 5_000, id="decimal-over-digit-limit"),
         ],
     )
     def test_unconstructible_value_keeps_frontmatter_in_the_analyzed_text(self, skill_root: Path, line: str) -> None:

@@ -141,9 +141,11 @@ All notable changes to SkillEvaluator are documented in this file.
   names the manifest when a value is longer than 16,384 characters, the
   per-field catalog text limit; description mode still also caps
   `name: description` at 16,384 characters. An invalid tagged value such as
-  `!!int ""` or an impossible date such as `2024-02-30` now counts as invalid
-  frontmatter instead of stopping either check with an unexpected error. A
-  repeated key still keeps its last value in both checks.
+  `!!int ""`, an impossible date such as `2024-02-30`, or a decimal integer
+  longer than 4,300 digits (Python's default limit for converting text to an
+  integer) now counts as invalid frontmatter instead of stopping either check
+  with an unexpected error. A repeated key still keeps its last value in both
+  checks.
 
 ## 0.8.0 - 2026-11-05
 

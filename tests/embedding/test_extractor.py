@@ -7,6 +7,7 @@ from __future__ import annotations
 
 import os
 import stat
+import sys
 from pathlib import Path
 from unittest.mock import MagicMock
 
@@ -695,6 +696,15 @@ def _write_skill_manifest(root: Path, name: str, manifest: str) -> Path:
     return skill_dir
 
 
+@pytest.fixture
+def default_int_digit_limit():
+    """Pin Python's default 4,300-digit limit for converting text to an int."""
+    previous = sys.get_int_max_str_digits()
+    sys.set_int_max_str_digits(4_300)
+    yield
+    sys.set_int_max_str_digits(previous)
+
+
 class TestBoundedFrontmatter:
     """Frontmatter is parsed with structured-data limits and never coerced to text."""
 
@@ -712,10 +722,19 @@ class TestBoundedFrontmatter:
         with pytest.raises(ValueError, match=r"structured-data complexity limit exceeded: merge-chain/SKILL\.md$"):
             extract_from_skill(skill_dir)
 
-    def test_oversized_integer_fails_closed(self, tmp_path: Path) -> None:
-        # 3,600 hex digits are 14,400 bits, over the 14,000-bit integer limit.
+    @pytest.mark.usefixtures("default_int_digit_limit")
+    @pytest.mark.parametrize(
+        "value",
+        [
+            # 3,600 hex digits are 14,400 bits, over the 14,000-bit integer limit.
+            pytest.param("0x" + "f" * 3_600, id="hex"),
+            # 4,250 decimal digits are about 14,118 bits, within Python's 4,300-digit limit.
+            pytest.param("9" * 4_250, id="decimal"),
+        ],
+    )
+    def test_oversized_integer_fails_closed(self, tmp_path: Path, value: str) -> None:
         skill_dir = _write_skill_manifest(
-            tmp_path, "big-int", "---\nname: big-int\ndescription: Big\nversion: 0x" + "f" * 3_600 + "\n---\n"
+            tmp_path, "big-int", f"---\nname: big-int\ndescription: Big\nversion: {value}\n---\n"
         )
 
         with pytest.raises(ValueError, match=r"structured-data complexity limit exceeded: big-int/SKILL\.md$"):
@@ -817,6 +836,7 @@ class TestBoundedFrontmatter:
         assert entry is not None
         assert entry.name == "second"
 
+    @pytest.mark.usefixtures("default_int_digit_limit")
     @pytest.mark.parametrize(
         "line",
         [
@@ -824,6 +844,8 @@ class TestBoundedFrontmatter:
             pytest.param("version: !!bool nope", id="tagged-bool"),
             pytest.param("version: !!float x", id="tagged-float"),
             pytest.param("last_updated: 2024-02-30", id="impossible-date"),
+            # int() rejects more than 4,300 decimal digits before the bit limit applies.
+            pytest.param("version: " + "9" * 5_000, id="decimal-over-digit-limit"),
         ],
     )
     def test_unconstructible_value_is_invalid_frontmatter(self, tmp_path: Path, line: str) -> None:

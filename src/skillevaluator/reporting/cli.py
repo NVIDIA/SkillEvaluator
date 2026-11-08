@@ -47,7 +47,7 @@ from skillevaluator.reporting.base import (
 )
 from skillevaluator.reporting.harbor_viewer import (
     harbor_evidence_link_text,
-    normalize_harbor_viewer_for_display,
+    harbor_job_links,
     safe_url,
 )
 from skillevaluator.reporting.presentation import FinalRenderContext, build_final_render_context, trial_coverage
@@ -219,6 +219,14 @@ class CLIReporter(ReporterBase):
             for result in non_blocking:
                 self.render_result(result, console)
 
+        # Successful results do not enter the detailed failure/finding sections.
+        rendered = {id(result) for result in (*failed, *non_blocking)}
+        for result in results:
+            if id(result) not in rendered:
+                agent_eval = result.metadata.get("agent_eval")
+                if isinstance(agent_eval, dict):
+                    self._print_harbor_artifacts(agent_eval, console)
+
         color = {Status.PASSED: "green", Status.FAILED: "red"}.get(context.command_status, "yellow")
         console.print(f"\n[bold {color}][{context.command_status.verdict}] {context.command_label}[/bold {color}]")
         for number, tier in context.tiers.items():
@@ -385,6 +393,20 @@ class CLIReporter(ReporterBase):
         console.print()
 
     @staticmethod
+    def _print_harbor_artifacts(agent_eval: dict, console: Console) -> None:
+        jobs = harbor_job_links(agent_eval)
+        if jobs:
+            console.print("  [bold]Harbor artifacts:[/bold]")
+        for job in jobs:
+            console.print(f"    [bold]{escape_markup(job['name'])}[/bold]", highlight=False)
+            if job.get("url"):
+                console.print(f"    Harbor logs: Results {escape_markup(job['url'])}", soft_wrap=True, highlight=False)
+            if job.get("analysis_url"):
+                console.print(
+                    f"    Harbor analysis: {escape_markup(job['analysis_url'])}", soft_wrap=True, highlight=False
+                )
+
+    @staticmethod
     def _print_agent_eval_tables(agent_eval: dict, console: Console) -> None:
         """Print Tier 3 agent evaluation results."""
         verdict = agent_eval.get("verdict", "unknown")
@@ -437,19 +459,7 @@ class CLIReporter(ReporterBase):
             )
         if runtime:
             console.print(f"  [dim]Runtime: {runtime:.1f}s[/dim]")
-        harbor_viewer = normalize_harbor_viewer_for_display(agent_eval)
-        if harbor_viewer.get("job_url") or harbor_viewer.get("analysis_url"):
-            console.print("  [dim]Harbor artifacts:[/dim]")
-            if harbor_viewer.get("job_url"):
-                console.print(
-                    f"    [dim]Harbor logs:[/dim] [dim]{escape_markup(harbor_viewer['job_url'])}[/dim]",
-                    soft_wrap=True,
-                )
-            if harbor_viewer.get("analysis_url"):
-                console.print(
-                    f"    [dim]Harbor analysis:[/dim] [dim]{escape_markup(harbor_viewer['analysis_url'])}[/dim]",
-                    soft_wrap=True,
-                )
+        CLIReporter._print_harbor_artifacts(agent_eval, console)
         pass_at_k = agent_eval.get("pass_at_k")
         with_skill_pass = pass_at_k.get("with_skill") if isinstance(pass_at_k, dict) else None
         case_summaries = with_skill_pass.get("cases") if isinstance(with_skill_pass, dict) else None

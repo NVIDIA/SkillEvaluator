@@ -105,6 +105,37 @@ scored totals. Preview limits and physical retry rows do not replace recorded
 attempt counts. These are display projections; canonical JSON and evaluation
 payloads are unchanged.
 
+### Tier 2 comparison scopes and evidence
+
+The HTML Tier 2 view separates **Within this skill** (redundant content among
+its files) from **Across skills** (catalog or collection comparisons). Each
+scope shows Checks completed, Duplicate findings, Affected files or skills,
+and Catalog entries compared. Completion uses recorded comparison
+evidence; a completed check can still fail its gate because it found duplicates.
+Refused LLM classifications and file safety errors remain visible findings,
+but do not count as confirmed duplicates within a skill.
+
+A completed comparison with no matches shows zero. A skipped catalog comparison,
+missing metadata, or an incomplete scan shows the recorded reason and unavailable
+counts. Target against catalog comparisons exclude the target's recorded self
+entry. Within-skill checks and recorded pairwise scans mark Catalog entries compared
+as not applicable. Pairwise scans identify the collection size separately. Affected counts use recorded file or skill paths,
+so equal display names do not merge distinct skills. Token or context savings
+are not estimated from duplicate counts.
+
+HTML, terminal, and Markdown reports link every recorded Harbor job to its
+**Results** and available **Analysis**, using the job's recorded name or
+`Job N` when no name is available. Legacy single-job and analysis-only links
+remain usable. Job names do not establish which agent or condition produced a
+job. Links use the existing URL validation and output escaping.
+
+HTML disclosures show recorded scanner versions and LLM provenance, plus
+sanitized model, evaluator, dataset digest, and evaluated source metadata under
+Tier 3 Diagnostics. Missing values remain unavailable. These views use existing
+report data and do not read the source tree or contact providers while rendering.
+Full downloads and preview omission counts remain available; with-skill token
+charts are labeled separately from the resource table's two-arm comparisons.
+
 ## File naming
 
 Report filenames follow two patterns, both under the output directory:
@@ -147,6 +178,27 @@ the evidence below it:
   repeat a finding are folded away.
 - **Run details.** Scope, the target path, provenance and the gate policy.
 
+Use the sidebar or tier tiles to open a tier. A comprehensive `validate` report
+keeps all three tiers visible, including **Not run** and **Not run (not requested)**
+when evidence is absent. Targeted reports keep their narrower scope. On small
+screens, a sticky tier bar keeps navigation available while reading long evidence.
+Tier 3 retains Overview, Insights, Agent Details, Trials, Dataset and Diagnostics.
+For its tabs, Left/Right and Home/End move focus; Enter or Space opens the focused
+view. Finding links clear incompatible filters, open their evidence and move focus
+to the exact finding. Direct agent links open and focus the named agent panel;
+section links open at the start of the section.
+
+The **Theme** control offers System, Light and Dark. System follows live device
+changes; an explicit choice persists until System is selected again. Reports use
+native theme-aware scrollbars and respect reduced motion. Without JavaScript,
+all tier and agent evidence remains readable. Printing exposes supporting evidence
+and then restores disclosure and filter state when returning to the screen.
+
+Reports use 14-pixel body text with relaxed line spacing, distinct label/value
+gaps, and consistent space between cards, findings and table rows. Tier 3 view
+tabs wrap on narrow screens; wide evidence tables keep their own horizontal
+scroll area. The same reading rhythm applies in Light and Dark themes.
+
 Tier 3 charts include Chart.js 4.5.1 inside the HTML file and work offline;
 they make no CDN or source-map requests. Each chart describes its measurements
 and links to the underlying data table. If JavaScript or canvas initialization
@@ -174,6 +226,8 @@ words: **Passed**, **Changes required**, **Incomplete**, **Skipped** and
 whose gate does not block, such as deduplication with `--no-block-on-dedup` or
 live evaluation without `--block-on-agent-eval`, shows **Failed (advisory)**
 when it fails, because it does not require changes. Publication eligibility is
+shown separately from the command result. Summary reasons count required and
+advisory checks individually, including when a tier contains both. Eligibility is
 shown next to the verdict, because a report can pass its checks and still not
 be eligible for publication. The report follows the system light or dark theme
 until you pick one, and always prints dark text on white paper.

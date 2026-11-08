@@ -522,8 +522,9 @@ def test_reason_names_failed_checks_criteria_and_attribution() -> None:
     )
 
     assert reason == (
-        "Failed criteria: ACTIONABLE, TASK_ADDRESSED; Command injection check failed; "
-        "The skill instructions requested the command."
+        "The answer does not address what the user asked (criterion TASK_ADDRESSED); "
+        "The answer does not give the user a result they can act on (criterion ACTIONABLE); "
+        "Check `command injection check` did not pass; no reason was recorded"
     )
 
 
@@ -550,7 +551,10 @@ def test_reason_ignores_criteria_excluded_from_the_score() -> None:
         "excluded_criteria": ["SKILL_IDENTIFIED"],
     }
 
-    assert failure_reason(detail) == "Answer omitted the retry limit.; Failed criteria: FACTUALLY_ACCURATE"
+    assert failure_reason(detail) == (
+        "Answer omitted the retry limit.; The answer's facts do not match the expected answer "
+        "(criterion FACTUALLY_ACCURATE)"
+    )
     assert failure_reason({"criteria": {"SKILL_IDENTIFIED": False}, "excluded_criteria": ["SKILL_IDENTIFIED"]}) == ""
 
 
@@ -748,10 +752,10 @@ def test_html_preview_does_not_report_unrendered_top_level_card_reasons() -> Non
     preview, notice = html_module._bounded_tier3_preview(data)
 
     assert preview is not None
-    assert notice == {}
-    assert _rendered_reason_count(preview) == _rendered_reason_count(data)
+    assert notice == {"failure_reasons": 5}
+    assert _rendered_reason_count(preview) == _rendered_reason_count(data) - notice["failure_reasons"]
     html = _render(payload)
-    assert "HTML preview left out" not in html
+    assert "HTML preview left out 5 failure reasons or excerpts" in html
     assert "HTML preview omitted" not in html
 
 

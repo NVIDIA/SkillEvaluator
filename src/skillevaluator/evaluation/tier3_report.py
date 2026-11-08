@@ -2558,6 +2558,26 @@ def _metric_evidence(
 
         notes: list[str] = []
         reason = sanitize_grader_text(detail.get("reason"))
+        if score_failed and metric in ("accuracy", "goal_accuracy"):
+            from skillevaluator.tier3.harbor.report import (
+                _accuracy_criterion_failure_reason,
+                _applicable_accuracy_criteria,
+                _expected_observed_suffix,
+            )
+
+            reason_parts = [reason] if reason else []
+            reason_parts.extend(
+                _accuracy_criterion_failure_reason(name)
+                for name, passed in _applicable_accuracy_criteria(detail).items()
+                if passed is False
+            )
+            suffix = _expected_observed_suffix(detail, reward)
+            if suffix:
+                if reason_parts:
+                    reason_parts[-1] = f"{reason_parts[-1]}; {suffix}"
+                else:
+                    reason_parts.append(suffix)
+            reason = "; ".join(reason_parts)
         if reason:
             notes.append(reason[:512])
 
@@ -2586,6 +2606,10 @@ def _metric_evidence(
             "checks": checks,
             "evidence_refs": _compact_evidence_refs(detail.get("evidence_refs")),
         }
+        if score_failed and not entry["evidence_refs"]:
+            from skillevaluator.evaluation.tier3_findings import evidence_unavailable_reason
+
+            entry["evidence_unavailable_reason"] = evidence_unavailable_reason(reward)
         # The built reason and excerpt are not part of the fingerprint: attempts
         # of one case often quote different commands under the same grader
         # reason, and they still collapse into one entry with ``occurrences``.
@@ -2611,7 +2635,9 @@ def _metric_evidence(
             # still explain a failing score. The built reason stays separate from
             # the grader's own notes so size limits can drop it first, and leaves
             # out failing results, which the card already lists as ``failures``.
-            if not notes and (fallback_reason := failure_reason(detail, include_results=False)):
+            if not notes and (
+                fallback_reason := failure_reason(detail, include_results=False, metric=metric, reward=reward)
+            ):
                 entry["reason"] = fallback_reason
             if excerpt := failure_excerpt(detail):
                 entry["excerpt"] = excerpt
@@ -2998,7 +3024,7 @@ def _trial_score_reasons(
                 continue
             if lowest is not None and row_score >= lowest[0]:
                 continue
-            reason = failure_reason(_metric_detail(row, metric))
+            reason = failure_reason(_metric_detail(row, metric), metric=metric, reward=row)
             if reason:
                 lowest = (row_score, reason)
         if lowest is not None:

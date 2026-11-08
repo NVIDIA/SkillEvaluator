@@ -118,7 +118,7 @@ def test_report_reasons_still_omit_criteria_excluded_by_older_rewards():
     findings = {finding["metric"]: finding for finding in report._extract_findings([reward])}
     reasons = findings["accuracy"]["reasons"]
     assert findings["accuracy"]["score"] == 0.75
-    assert "ACTION_CORRECT failed" in reasons
+    assert "The agent did not take the action the expected answer calls for (criterion ACTION_CORRECT)" in reasons
     assert not any("SKILL_IDENTIFIED" in reason for reason in reasons)
 
 

@@ -823,6 +823,13 @@ def _sanitize_tier3_evaluator_card(value: dict[str, Any]) -> dict[str, Any] | No
         for key in FAILURE_REASON_EVIDENCE_KEYS:
             if not (isinstance(entry.get(key), str) and entry[key]):
                 entry.pop(key, None)
+        unavailable_reason = entry.get("evidence_unavailable_reason")
+        if isinstance(unavailable_reason, str) and unavailable_reason:
+            entry["evidence_unavailable_reason"] = unavailable_reason[:512]
+        else:
+            entry.pop("evidence_unavailable_reason", None)
+        if entry["score"] is not None and entry["score"] < 0.8 and not entry["evidence_refs"]:
+            entry.setdefault("evidence_unavailable_reason", "No trajectory evidence was recorded for this metric")
         evidence.append(entry)
     card["evidence"] = evidence
     sampling = card.get("evidence_sampling") if isinstance(card.get("evidence_sampling"), dict) else {}

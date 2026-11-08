@@ -416,13 +416,6 @@ completed run directly:
 - **`<agent>/lift.json`** and **`<agent>/pass_at_k_lift.json`** — per-metric
   deltas between the two arms; written only when both arms produced scores
   (a `--skip-baseline` or `--skip-with-skill` run has neither).
-- **`<agent>/baseline_timeout_tolerance.json`** — written only for an agent
-  kept scored by `--tolerate-baseline-timeouts`: the baseline attempts that hit
-  the agent execution timeout. `result.json` carries the same record as
-  `agents.<agent>.baseline_timeout_tolerance`, a refused agent's
-  `agents.<agent>.baseline_timeout_tolerance_rejection` code, and the run-level
-  `baseline_timeout_tolerance` (tolerated agents and the launch errors they
-  explain). See [Baseline timeouts](tier3-live-evaluation.mdx#baseline-timeouts).
 - **`<agent>/{with-skill,without-skill}/`** — each arm's `summary.json`
   (scores, dimensions, pass@k, trial counts) and a `trials/` directory of
   per-trial artifacts: the trial's `reward.json`, Harbor's `trajectory.json`
@@ -435,6 +428,13 @@ completed run directly:
   `behavior_check`, the final-response section limit
   (`SKILL_EVAL_BEHAVIOR_FINAL_RESPONSE_LIMIT`). For `behavior_check`, the
   record's `reason` names each setting that applied.
+- **`<agent>/baseline_timeout_tolerance.json`** — written only for an agent
+  kept scored by `--tolerate-baseline-timeouts`: the baseline attempts that hit
+  the agent execution timeout. `result.json` carries the same record as
+  `agents.<agent>.baseline_timeout_tolerance`, a refused agent's
+  `agents.<agent>.baseline_timeout_tolerance_rejection` code, and the run-level
+  `baseline_timeout_tolerance` (tolerated agents and the launch errors they
+  explain). See [Baseline timeouts](tier3-live-evaluation.mdx#baseline-timeouts).
 
 <Note>
   Read commands (`view`, `compare`, `create-eval-dataset --refine`) honor the

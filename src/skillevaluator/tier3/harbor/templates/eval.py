@@ -195,6 +195,7 @@ _mark_literal_dollars = _shared_checks._mark_literal_dollars
 _mark_quoted_newlines = _shared_checks._mark_quoted_newlines
 _mark_quoted_syntax = _shared_checks._mark_quoted_syntax
 _mask_non_assignment_equals = _shared_checks._mask_non_assignment_equals
+_may_hold_protected_file = _shared_checks._may_hold_protected_file
 _mentions_skill_artifact = _shared_checks._mentions_skill_artifact
 _names_script_anywhere = _shared_checks._names_script_anywhere
 _network_client_uploads = _shared_checks._network_client_uploads
@@ -305,6 +306,7 @@ _value_now = _shared_checks._value_now
 _walk_for_invocation = _shared_checks._walk_for_invocation
 _without_plain_patch_headers = _shared_checks._without_plain_patch_headers
 _without_redirections = _shared_checks._without_redirections
+_wrapper_option_end = _shared_checks._wrapper_option_end
 _write_command = _shared_checks._write_command
 check_error_recovery = _shared_checks.check_error_recovery
 check_script_execution = _shared_checks.check_script_execution
@@ -533,6 +535,7 @@ _WRITE_PARSE_MAX_CHARS = _shared_checks._WRITE_PARSE_MAX_CHARS
 _WRITE_PARSE_MAX_DEPTH = _shared_checks._WRITE_PARSE_MAX_DEPTH
 _WRITE_PARSE_MAX_SUBSTITUTIONS = _shared_checks._WRITE_PARSE_MAX_SUBSTITUTIONS
 _WRITE_TOOL_HINTS = _shared_checks._WRITE_TOOL_HINTS
+_XARGS_INPUT_MARKER = _shared_checks._XARGS_INPUT_MARKER
 
 # Fifteen compatibility adapters preserve existing argument names, positional
 # options, trajectory input, and output shape.

@@ -423,10 +423,12 @@ _SED_IN_PLACE_FLAG_RE = re.compile(r"--in-place\b.*|-[nsuzre]*i.*")
 
 # The second reading takes the simple commands from the shell tokenizer, one by
 # one. Keywords (if, then, do, ...), variable assignments, redirections, and the
-# wrappers in _WRITE_COMMAND_WRAPPERS with their own options (sudo -u root,
+# wrappers in _WRITE_COMMAND_WRAPPERS with their own options (sudo -nu root,
 # env X=1, timeout 5, xargs -I{}, ...) are stepped over. A shell -c script, an
 # su -c command, an eval string, a command substitution, and a find -exec
-# command are read as commands too. Each of these writes:
+# command are read as commands too. The words xargs adds to its command are
+# unknown, so they are a marker that leaves a write target unresolved. Each of
+# these writes:
 #   - tee: every operand; sed -i / --in-place: every file operand;
 #   - cp, ln, install: the last operand, or the -t / --target-directory
 #     directory (-T is --no-target-directory and changes nothing), and each
@@ -447,67 +449,55 @@ _WRITE_PARSE_MAX_DEPTH = 3
 _WRITE_PARSE_MAX_CHARS = 65_536
 _WRITE_PARSE_MAX_SUBSTITUTIONS = 16
 _SHELL_COMMAND_KEYWORDS = frozenset({"if", "then", "elif", "else", "do", "while", "until", "!", "{", "}"})
-# Each wrapper with its options that take the next word as a value.
-_WRITE_COMMAND_WRAPPERS: dict[str, frozenset[str]] = {
-    "busybox": frozenset(),
-    "command": frozenset(),
-    "doas": frozenset({"-u", "-C"}),
-    "env": frozenset({"-u", "--unset", "-C", "--chdir", "-S", "--split-string"}),
-    "exec": frozenset({"-a"}),
-    "ionice": frozenset({"-c", "--class", "-n", "--classdata"}),
-    "nice": frozenset({"-n", "--adjustment"}),
-    "nohup": frozenset(),
-    "setsid": frozenset(),
-    "stdbuf": frozenset({"-i", "--input", "-o", "--output", "-e", "--error"}),
-    "sudo": frozenset(
-        {
-            "-u",
-            "--user",
-            "-g",
-            "--group",
-            "-C",
-            "--close-from",
-            "-D",
-            "--chdir",
-            "-h",
-            "--host",
-            "-p",
-            "--prompt",
-            "-r",
-            "--role",
-            "-t",
-            "--type",
-            "-T",
-            "--command-timeout",
-            "-U",
-            "--other-user",
-            "-R",
-            "--chroot",
-        }
+# Each wrapper with its short option letters and long options that take a
+# value. In a cluster of short options, the first letter that takes a value
+# takes the rest of the word, or the next word when it ends the cluster, so
+# "sudo -nu root" runs as root and "sudo -uroot" does too.
+_WRITE_COMMAND_WRAPPERS: dict[str, tuple[str, frozenset[str]]] = {
+    "busybox": ("", frozenset()),
+    "command": ("", frozenset()),
+    "doas": ("Cu", frozenset()),
+    "env": ("CSu", frozenset({"--unset", "--chdir", "--split-string"})),
+    "exec": ("a", frozenset()),
+    "ionice": ("cnpPu", frozenset({"--class", "--classdata", "--pid", "--pgid", "--uid"})),
+    "nice": ("n", frozenset({"--adjustment"})),
+    "nohup": ("", frozenset()),
+    "setsid": ("", frozenset()),
+    "stdbuf": ("eio", frozenset({"--input", "--output", "--error"})),
+    "sudo": (
+        "aCcDghpRrTtUu",
+        frozenset(
+            {
+                "--auth-type",
+                "--chdir",
+                "--chroot",
+                "--close-from",
+                "--command-timeout",
+                "--group",
+                "--host",
+                "--login-class",
+                "--other-user",
+                "--prompt",
+                "--role",
+                "--type",
+                "--user",
+            }
+        ),
     ),
-    "time": frozenset({"-f", "--format", "-o", "--output"}),
-    "timeout": frozenset({"-s", "--signal", "-k", "--kill-after"}),
-    "xargs": frozenset(
-        {
-            "-I",
-            "-L",
-            "-n",
-            "-P",
-            "-s",
-            "-d",
-            "-E",
-            "-a",
-            "--arg-file",
-            "--delimiter",
-            "--eof",
-            "--max-args",
-            "--max-chars",
-            "--max-lines",
-            "--max-procs",
-            "--process-slot-var",
-        }
+    "time": ("fo", frozenset({"--format", "--output"})),
+    "timeout": ("ks", frozenset({"--kill-after", "--signal"})),
+    # xargs -e, -i, and -l (--eof, --replace, --max-lines) take only an
+    # attached value; -i and --replace without one replace "{}".
+    "xargs": (
+        "adEILnPs",
+        frozenset({"--arg-file", "--delimiter", "--max-args", "--max-chars", "--max-procs", "--process-slot-var"}),
     ),
 }
+# The words xargs adds to the command it runs are unknown. Where -I, -i, or
+# --replace names a replacement string, each one is replaced by this marker;
+# otherwise the marker is appended, as xargs appends its input. A write target
+# that holds it is unresolved (_UNRESOLVED_WRITE_TARGET_RE).
+_XARGS_INPUT_MARKER = "{}"
 _SHELL_VALUE_OPTIONS = frozenset({"-o", "+o", "-O", "+O", "--rcfile", "--init-file"})
 _COMMAND_SUBSTITUTION_TEXT_RE = re.compile(r"\$\(([^()]*)\)|`([^`]*)`")
 _COPY_COMMANDS = frozenset({"cp", "mv", "ln", "install"})
@@ -545,12 +535,13 @@ _PARENT_CLIMB_RE = re.compile(r"^(?:.*/)?\.\.(?=/)")
 # rule stays as a fallback for what the readings leave open. A protected path
 # named in the command line still counts as a write when:
 #   - the command line has a write target neither reading can resolve: a
-#     variable other than $HOME, a command substitution, or "{}", such as the
-#     $RC of an append after RC=~/.bashrc;
+#     variable other than $HOME, a command substitution, "{}", or a word xargs
+#     supplies, such as the $RC of an append after RC=~/.bashrc or the files
+#     of "grep -l x ~/.bashrc | xargs sed -i s/x/y/";
 #   - or a command that names the path is one the parse does not read in full
-#     (a variable assignment, a for loop, interpreter code, any other program),
-#     and the text has a redirection, tee, or sed -i (_SHELL_WRITE_HINT_RE, the
-#     earlier rule's test).
+#     (a variable assignment, a for loop, interpreter code, a command xargs
+#     runs, any other program), and the text has a redirection, tee, or sed -i
+#     (_SHELL_WRITE_HINT_RE, the earlier rule's test).
 # Commands that only read the files they name, the writers whose targets the
 # parse reads in full, sed without a "w" command, and a shell -c or eval whose
 # script was read are exempt from the second case, so "cat ~/.bashrc
@@ -1059,14 +1050,44 @@ def _shell_command_word_lists(text: str) -> list[list[str]] | None:
     return commands
 
 
-def _write_command(words: list[str]) -> tuple[str, list[str]] | None:
-    """Return the program a simple command runs and its arguments.
+def _wrapper_option_end(name: str, words: list[str], index: int) -> tuple[int, str | None]:
+    """Step over the option at *words[index]* of the wrapper *name*.
+
+    Return the index after the option and its value, and the replacement
+    string an xargs -I, -i, or --replace option names.
+    """
+    value_letters, long_value_options = _WRITE_COMMAND_WRAPPERS[name]
+    word = words[index]
+    index += 1
+    if word.startswith("--"):
+        option, equals, value = word.partition("=")
+        if name == "xargs" and option == "--replace":
+            return index, value or _XARGS_INPUT_MARKER
+        return index + (not equals and option in long_value_options), None
+    for position, letter in enumerate(word[1:], start=2):
+        value = word[position:]
+        if name == "xargs" and letter in "eil":
+            return index, (value or _XARGS_INPUT_MARKER) if letter == "i" else None
+        if letter in value_letters:
+            if not value and index < len(words):
+                value = words[index]
+                index += 1
+            return index, value if name == "xargs" and letter == "I" else None
+    return index, None
+
+
+def _write_command(words: list[str]) -> tuple[str, list[str], bool] | None:
+    """Return the program a simple command runs, its arguments, and whether xargs runs it.
 
     Keywords, variable assignments, redirections, and the wrappers in
-    _WRITE_COMMAND_WRAPPERS with their own options are stepped over. None means
-    the words run no program, as in a bare assignment.
+    _WRITE_COMMAND_WRAPPERS with their own options are stepped over. When
+    xargs runs the program, the words xargs supplies are _XARGS_INPUT_MARKER
+    in the arguments. None means the words run no program, as in a bare
+    assignment.
     """
     index = 0
+    xargs = False
+    replacement: str | None = None
     for _ in range(_MAX_SHELL_WRAPPERS):
         while index < len(words):
             word = words[index]
@@ -1079,17 +1100,24 @@ def _write_command(words: list[str]) -> tuple[str, list[str]] | None:
         if index >= len(words):
             return None
         name = _shell_executable(words[index]).removesuffix(".exe")
-        value_options = _WRITE_COMMAND_WRAPPERS.get(name)
         index += 1
-        if value_options is None:
-            return name, words[index:]
+        if name not in _WRITE_COMMAND_WRAPPERS:
+            args = words[index:]
+            if xargs and replacement:
+                args = [word.replace(replacement, _XARGS_INPUT_MARKER) for word in args]
+            elif xargs:
+                args = [*args, _XARGS_INPUT_MARKER]
+            return name, args, xargs
+        if name == "xargs":
+            xargs, replacement = True, None
         while index < len(words):
             word = words[index]
             if word == "--":
                 index += 1
                 break
             if len(word) > 1 and word.startswith("-"):
-                index += 2 if word in value_options else 1
+                index, option_replacement = _wrapper_option_end(name, words, index)
+                replacement = option_replacement or replacement
             elif (name == "env" and _SHELL_ASSIGNMENT_RE.match(word)) or (
                 name == "timeout" and _DURATION_ARG_RE.match(word)
             ):
@@ -1150,8 +1178,9 @@ def _shell_commands(text: str, depth: int = 0) -> list[tuple[str, list[str], lis
     Each command is ``(name, args, words, exempt)``. ``exempt`` marks a command
     whose writes the parse reads in full: one that only reads the files it
     names, a writer in _PARSED_WRITE_COMMANDS, sed without a ``w`` command, or a
-    shell -c or eval whose script was read. The commands of a -c or eval script,
-    a find -exec, and a command substitution follow the command they are in.
+    shell -c or eval whose script was read, unless xargs runs it. The commands
+    of a -c or eval script, a find -exec, and a command substitution follow the
+    command they are in.
     """
     word_lists = _shell_command_word_lists(text)
     if word_lists is None:
@@ -1167,9 +1196,10 @@ def _simple_write_commands(words: list[str], depth: int) -> list[tuple[str, list
     parsed = _write_command(words)
     if parsed is None:
         return [("", [], words, False)]
-    name, args = parsed
+    name, args, xargs = parsed
     joined = " ".join(words)
-    exempt = (
+    # A command xargs runs gets operands the parse cannot see, so it is never exempt.
+    exempt = not xargs and (
         name in _FILE_READER_COMMANDS
         or name in _PARSED_WRITE_COMMANDS
         or (name == "sed" and not any(_SED_WRITE_COMMAND_RE.search(arg) for arg in args))
@@ -1191,12 +1221,29 @@ def _simple_write_commands(words: list[str], depth: int) -> list[tuple[str, list
     return [(name, args, words, exempt), *nested]
 
 
+def _may_hold_protected_file(directory: str) -> bool:
+    """Return whether a file of any name inside *directory*, or below it, may be a protected file."""
+    text = _normalize_sensitive_path_text(directory).rstrip("/") + "/"
+    if text[0] not in "/~" or _UNRESOLVED_WRITE_TARGET_RE.search(text):
+        return True
+    return text.startswith(("/home/", "/users/")) or any(
+        entry.startswith(text) or text.startswith(entry + "/") for entry in _SENSITIVE_WRITE_PATHS
+    )
+
+
 def _directory_write_targets(directory: str, sources: list[str]) -> list[str]:
-    """Return *directory* and the path each source gets inside it, should it be a directory."""
+    """Return *directory* and the path each source gets inside it, should it be a directory.
+
+    A source whose name is unresolved, such as the {} of find -exec or a word
+    xargs supplies, keeps its name only where the directory may hold a
+    protected file: inside /tmp/backup it stays under /tmp/backup.
+    """
     targets = [directory]
     for source in sources:
         if source and not source.endswith("/"):
-            targets.append(posixpath.join(directory, posixpath.basename(source)))
+            name = posixpath.basename(source)
+            if not _UNRESOLVED_WRITE_TARGET_RE.search(name) or _may_hold_protected_file(directory):
+                targets.append(posixpath.join(directory, name))
     return targets
 
 

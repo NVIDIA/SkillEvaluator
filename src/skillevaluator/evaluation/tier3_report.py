@@ -609,9 +609,8 @@ def render_agent_eval_html_report(
     """Render a standalone Tier 3 HTML report and optional standard benchmark.
 
     ``saved_feedback`` is the report feedback a completed run saved in
-    ``result.json``. It replaces the rebuilt feedback fields, and neither the
-    Insights judge nor the case-findings pass runs, so the run's
-    ``what_to_fix.json`` stays as the run wrote it.
+    ``result.json``. It replaces the rebuilt feedback fields and nothing calls
+    an LLM; see ``_apply_saved_feedback``.
     """
     from skillevaluator.reporting import BenchmarkReporter, HTMLReporter
 
@@ -630,10 +629,7 @@ def render_agent_eval_html_report(
     canonical_payload = result.metadata.get("agent_eval")
     if isinstance(canonical_payload, dict):
         if saved_feedback:
-            # The saved fields already hold the run's case findings.
-            canonical_payload.update(
-                {field: list(saved_feedback[field]) for field in _TIER3_FEEDBACK_FIELDS if field in saved_feedback}
-            )
+            _apply_saved_feedback(canonical_payload, saved_feedback, engine_result, run_dir, skill_path)
         else:
             _apply_case_findings(canonical_payload, engine_result, run_dir, skill_path, use_llm=use_llm_judge)
     if engine_result is not None and isinstance(canonical_payload, dict):
@@ -3515,6 +3511,51 @@ def _recommendation_category_from(text: str) -> str:
     return _RECO_CATEGORY_HINTS.get(first, "Action")
 
 
+def _is_case_verdict(conclusion: object) -> bool:
+    """Whether a conclusion is the per-case verdict that ``_apply_case_findings`` adds (the report headline)."""
+    return isinstance(conclusion, dict) and conclusion.get("title") == "Skill effect"
+
+
+def _saved_case_fixes(run_dir: Path) -> list[dict[str, Any]] | None:
+    """The run's ``what_to_fix.json`` when the report can show it as is, else ``None``."""
+    from skillevaluator.tier3.case_summary import load_case_findings
+
+    fixes = load_case_findings(run_dir)
+    if fixes is None or any(
+        not all(isinstance(fix.get(key), str) for key in ("case", "scope", "kind", "what"))
+        or not all(isinstance(fix.get(key) or "", str) for key in ("action", "evidence"))
+        for fix in fixes
+    ):
+        return None
+    return fixes
+
+
+def _apply_saved_feedback(
+    payload: dict[str, Any],
+    saved_feedback: dict[str, list[Any]],
+    engine_result: dict[str, Any] | None,
+    run_dir: Path,
+    skill_path: Path,
+) -> None:
+    """Show the report feedback a completed run saved, with no LLM call.
+
+    The case-findings pass still runs without the LLM, on the run's own
+    ``what_to_fix.json`` when it is usable (otherwise it writes the rule-based
+    fixes, as before), so what it adds beyond the saved fields stays. Saved
+    conclusions that carry the per-case verdict replace the pass's verdict and
+    fixes; feedback saved before the verdict existed gets both added, as a
+    fresh render shows them.
+    """
+    saved = {field: list(saved_feedback[field]) for field in _TIER3_FEEDBACK_FIELDS if field in saved_feedback}
+    fixes = _saved_case_fixes(run_dir)
+    if any(_is_case_verdict(item) for item in saved.get("conclusions", [])):
+        _apply_case_findings(payload, engine_result, run_dir, skill_path, use_llm=False, fixes=fixes)
+        payload.update(saved)
+    else:
+        payload.update(saved)
+        _apply_case_findings(payload, engine_result, run_dir, skill_path, use_llm=False, fixes=fixes)
+
+
 def _apply_case_findings(
     payload: dict[str, Any],
     engine_result: dict[str, Any] | None,
@@ -3522,8 +3563,12 @@ def _apply_case_findings(
     skill_path: Path,
     *,
     use_llm: bool,
+    fixes: list[dict[str, Any]] | None = None,
 ) -> None:
-    """Lead the report with the case-based verdict and fixes; also saves them as what_to_fix.json for the CLI."""
+    """Lead the report with the case-based verdict and fixes; also saves them as what_to_fix.json for the CLI.
+
+    ``fixes`` already saved for the run are reused as they are and not written again.
+    """
     from skillevaluator.tier3.case_summary import goal_not_met_count, save_case_findings, what_to_fix
     from skillevaluator.tier3.case_summary import verdict as case_verdict
 
@@ -3534,8 +3579,9 @@ def _apply_case_findings(
     if not isinstance(source, dict) or not isinstance(source.get("agents"), dict):
         return
     try:
-        fixes = what_to_fix(source, run_dir=run_dir, skill_path=skill_path, use_llm=use_llm)
-        save_case_findings(run_dir, fixes)
+        if fixes is None:
+            fixes = what_to_fix(source, run_dir=run_dir, skill_path=skill_path, use_llm=use_llm)
+            save_case_findings(run_dir, fixes)
     except Exception:  # advisory: the report keeps its metric-based insights
         logger.debug("Case findings skipped", exc_info=True)
         return

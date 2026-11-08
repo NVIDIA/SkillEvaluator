@@ -125,11 +125,15 @@ All notable changes to SkillEvaluator are documented in this file.
   plugin, such as an ordinary source repository, no longer fails Tier 1 with
   three `No skills found` errors and exit 1 when every content scan passes.
   When `--type auto` detects the type as `unknown`, the `schema`, `version`,
-  and `quality` checks are now recorded as not applicable, counted as N/A
-  rather than as passes, and the JSON report adds a root `tier1_applicability`
-  object. The content scans still run with their unrestricted scope, so a
-  real finding still fails the run; such a run is never eligible for
-  publication. `--type skill` still validates the target as a skill.
+  and `quality` checks are now recorded as not applicable, never as passes:
+  the terminal summary and the HTML report count them as N/A, and the JSON
+  and Markdown reports list them as skipped with a `not applicable` reason.
+  The JSON report of every such run adds a root `tier1_applicability` object.
+  The content scans still run with their unrestricted scope, so a real
+  finding still fails the run; such a run is never eligible for publication.
+  A folder with a mis-cased `SKILL.md` (such as `Skill.md`) or a dangling
+  `SKILL.md` symlink still fails as a broken skill, and `--type skill` still
+  validates the target as a skill.
 
 ## 0.8.0 - 2026-11-05
 

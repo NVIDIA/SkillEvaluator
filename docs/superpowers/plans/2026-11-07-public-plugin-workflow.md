@@ -34,5 +34,19 @@
 - [x] Export shared runtime options; apply configuration precedence and expose the existing lifecycle through the service.
 - [x] Add public runtime and saved-report commands, reusing existing command options and report adapters.
 - [x] Publish consistent static/runtime evidence through report hooks and document supported behavior and limitations.
-- [ ] Run focused regression tests, independent review, package/base-install and installed public acceptance checks.
-- [ ] Push the signed-off branch and open an accurate Item 25 PR; close superseded PR #28 without a comment.
+- [x] Run focused regression tests, independent review, package/base-install and installed public acceptance checks.
+- [x] Push the signed-off branch and open an accurate Item 25 PR; close superseded PR #28 without a comment.
+
+## Verification record
+
+392 affected regressions passed. Installed public acceptance covered five manifest
+profiles, default deduplication, four arms with five cases and two attempts,
+source removal and six-format replay. All 283 package files matched the wheel,
+source archive and installation. The default results location also retained the
+original source identity without creating an authored `evals/` directory.
+
+Independent review findings were fixed and rechecked. Ruff, the OSS boundary
+scan, documentation validation and the changed-file secrets scan passed.
+Supplemental parallel runs reached outer deadlines; unchanged serial acceptance
+passed. These checks use local execution fixtures and do not qualify live
+providers, agents, remote backends or MCP services.

@@ -1008,6 +1008,64 @@ class TestIntraSkillValidatorValidate:
         # Strict JSON (no NaN or Infinity) still renders for the incomplete result.
         json.loads(JSONReporter().render(result))
 
+    @pytest.mark.parametrize(
+        "reply",
+        [
+            {"verdict": "INTENTIONAL_DETAIL", "confidence": 0.9, "rationale": "Summary vs detail", "suggestion": None},
+            {"verdict": "RELATED_BUT_DISTINCT", "confidence": "0.9", "rationale": "Different", "suggestion": "Keep"},
+            {"verdict": "DUPLICATE", "confidence": "0.9", "rationale": "Same content", "suggestion": "Remove one"},
+        ],
+        ids=["intentional-null-suggestion", "related-string-confidence", "duplicate-string-confidence"],
+    )
+    @patch("skillevaluator.deduplication.intra_skill.intra_skill_validator.LLMClient")
+    @patch("skillevaluator.deduplication.intra_skill.intra_skill_validator.EmbeddingClient")
+    def test_malformed_reply_field_is_incomplete_whatever_the_verdict(
+        self, mock_embed, mock_llm, tmp_path: Path, reply: dict[str, object]
+    ) -> None:
+        # A non-finding verdict passed before these checks, and a "0.9"
+        # DUPLICATE confidence made a HIGH finding; both now fail the analysis.
+        skill_dir = tmp_path / "skill"
+        skill_dir.mkdir()
+        (skill_dir / "SKILL.md").write_text(
+            "## Section A\n" + "a" * 200 + "\n## Section B\n" + "b" * 200, encoding="utf-8"
+        )
+        mock_embed.return_value.embed.return_value = [[1.0, 0.0], [1.0, 0.0]]
+        mock_llm.return_value.extract_json_from_response.return_value = reply
+
+        result = IntraSkillValidator().validate(skill_dir)
+
+        assert result.passed is False
+        assert result.status == "incomplete"
+        assert result.incomplete_scans == ["deduplication-llm"]
+        assert result.findings == []
+        assert result.metadata["llm_analysis"]["clusters_failed"] == 1
+        assert "LLM configuration or response was invalid" in result.errors[0]
+
+    @patch("skillevaluator.deduplication.intra_skill.intra_skill_validator.LLMClient")
+    @patch("skillevaluator.deduplication.intra_skill.intra_skill_validator.EmbeddingClient")
+    def test_duplicate_without_confidence_is_medium_advisory_finding(
+        self, mock_embed, mock_llm, tmp_path: Path
+    ) -> None:
+        skill_dir = tmp_path / "skill"
+        skill_dir.mkdir()
+        (skill_dir / "SKILL.md").write_text(
+            "## Section A\n" + "a" * 200 + "\n## Section B\n" + "b" * 200, encoding="utf-8"
+        )
+        mock_embed.return_value.embed.return_value = [[1.0, 0.0], [1.0, 0.0]]
+        mock_llm.return_value.extract_json_from_response.return_value = {
+            "verdict": "DUPLICATE",
+            "rationale": "Same content",
+            "suggestion": "Remove one",
+        }
+
+        result = IntraSkillValidator().validate(skill_dir)
+
+        assert result.passed is True
+        assert result.incomplete_scans == []
+        assert result.errors == []
+        assert [(f.check_name, f.severity) for f in result.findings] == [("duplicate", Severity.MEDIUM)]
+        assert result.findings[0].metadata["confidence"] == 0.0
+
     @patch("skillevaluator.deduplication.intra_skill.intra_skill_validator.analyze_cluster")
     @patch("skillevaluator.deduplication.intra_skill.intra_skill_validator.LLMClient")
     @patch("skillevaluator.deduplication.intra_skill.intra_skill_validator.EmbeddingClient")

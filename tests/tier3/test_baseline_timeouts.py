@@ -666,19 +666,22 @@ def _tolerated_line(agent: str) -> str:
     )
 
 
-def test_reports_rank_a_tolerated_agent_below_its_complete_peer(tmp_path: Path) -> None:
+def test_reports_rank_tolerated_agents_below_their_complete_peer(tmp_path: Path) -> None:
     from skillevaluator.tier3.harbor.report import _pick_best_agent
     from skillevaluator.tier3.harbor.report_data import load_agent_data
 
-    # The tolerated agent scores higher than its complete peer.
+    # Both tolerated agents score higher than their complete peer.
     low = {**dict.fromkeys(SCORES, 0.55), "security": 1.0}
     jobs = tmp_path / "jobs"
-    _arm(jobs, "opencode", "with", [(case, "scored") for case in CASES])
-    _arm(jobs, "opencode", "without", [("case-001", "scored"), ("case-002", "timeout")])
+    for agent in ("opencode", "claude-code"):
+        _arm(jobs, agent, "with", [(case, "scored") for case in CASES])
+        _arm(jobs, agent, "without", [("case-001", "scored"), ("case-002", "timeout")])
     _arm(jobs, "codex", "with", [(case, "scored") for case in CASES], scores=low)
     _arm(jobs, "codex", "without", [(case, "scored") for case in CASES], scores=low)
-    results = _collect(tmp_path, [LAUNCH_ERROR.format(agent="opencode", count=1)])
+    launch_errors = [LAUNCH_ERROR.format(agent=agent, count=1) for agent in ("opencode", "claude-code")]
+    results = _collect(tmp_path, launch_errors, agents=["opencode", "claude-code", "codex"])
     assert results["execution_status"] == "succeeded"
+    assert results[RUN_KEY]["tolerated_agents"] == ["claude-code", "opencode"]
 
     payload, benchmark, html = _render_reports(tmp_path, results)
     assert payload["execution_status"] == "succeeded"
@@ -692,12 +695,16 @@ def test_reports_rank_a_tolerated_agent_below_its_complete_peer(tmp_path: Path) 
     assert "> **Tier 3 completed-agent result: " in benchmark
     assert "Completed agent: **codex**; score **0.6400**" in benchmark
     assert "**Needs attention:** other execution failures remain." in benchmark
-    assert _tolerated_line("opencode") in benchmark
+    assert f"{_tolerated_line('claude-code')}\n{_tolerated_line('opencode')}\n" in benchmark
     assert (
         "Completed-agent quality result; publication not assessed; other execution failures need attention" in benchmark
     )
-    assert "Baseline incomplete for <strong>opencode</strong> (1 of 2 attempts scored)" in html
-    assert "<code>--tolerate-baseline-timeouts</code>" in html
+    # Each HTML notice is its own block, never run together with the next one.
+    assert ".t3-overview-lead .tolerated-baseline { display:block;" in html
+    for agent in ("claude-code", "opencode"):
+        assert f"Baseline incomplete for <strong>{agent}</strong> (1 of 2 attempts scored)" in html
+    assert html.count("<code>--tolerate-baseline-timeouts</code>, so its baseline and uplift are not reported.") == 2
+    assert "not reported.</span><span" not in html
 
 
 def test_reports_never_fall_back_to_a_tolerated_agent(tmp_path: Path) -> None:

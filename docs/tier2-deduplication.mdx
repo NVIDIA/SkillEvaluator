@@ -178,11 +178,15 @@ no complete object or with more than one counts as a failed analysis. An object
 nested inside an array or inside a malformed container is never used as the
 verdict, and neither is an object with a repeated key, a `NaN` or `Infinity`
 value, a number too large for a float, or more than 128 levels of nesting.
-The verdict must be one of the three names above, the confidence a JSON number
-from 0 to 1, and the rationale and suggestion strings of at most 8,192
-characters each. A reply that breaks any of these also counts as a failed
-analysis rather than a finding: for example a confidence of `85` (a
-percentage), `true`, or `"0.9"` (a string), or a suggestion given as a list.
+The verdict must be one of the three names above. When present, the confidence
+must be a JSON number from 0 to 1, and the rationale and suggestion must be
+strings of at most 8,192 characters each. A missing confidence reads as 0, so a
+`DUPLICATE` verdict without one maps to MEDIUM in the table above, and a missing
+rationale or suggestion reads as empty. A reply that breaks any of these rules
+counts as a failed analysis rather than a finding, whatever its verdict: for
+example a confidence of `85` (a percentage), `true`, or `"0.9"` (a string), or
+a suggestion that is `null` or a list. This applies to `INTENTIONAL_DETAIL` and
+`RELATED_BUT_DISTINCT` replies too, although they never become findings.
 
 If chat-LLM analysis fails for a candidate cluster, Tier 2 reports the
 incomplete analysis as a blocking error rather than treating the content as
@@ -379,8 +383,8 @@ you intend to skip Tier 2 entirely.
 | Intra-skill LLM review clusters | 50 | Most candidate clusters sent for chat-LLM review in one skill |
 | Intra-skill cluster members | 512 | Same as the chunk ceiling, so it never stops a scan on its own; the review prompt limits decide |
 | Intra-skill review prompt | 64,000 characters | One cluster's request, system prompt included; exactly repeated text (a Markdown section's body after its heading line) is listed once before this limit applies, when that shortens the request |
-| Intra-skill review prompts in total | 1,000,000 characters | All cluster requests for one skill, checked before the first chat-LLM call |
 | Intra-skill verdict text | 8,192 characters | Longest rationale or suggestion accepted in one chat-LLM verdict; a longer one fails that cluster's analysis |
+| Intra-skill review prompts in total | 1,000,000 characters | All cluster requests for one skill, checked before the first chat-LLM call |
 
 Intra-skill clustering compares every pair of chunks, so its work is
 `n * (n - 1) / 2 * dimensions`. A skill over the chunk ceiling stops before any

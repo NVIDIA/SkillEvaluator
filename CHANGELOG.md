@@ -130,10 +130,15 @@ All notable changes to SkillEvaluator are documented in this file.
   prompt-injection, and refusal findings stored their text unmasked; and
   network findings masked only known key shapes, so a `curl -u user:password`
   value was kept. Path findings now record the protected entry they matched,
-  such as `~/.bashrc`, and the other findings mask private key blocks, URL user
-  info, `Authorization` header values, credential flags and assignments, and
-  common token prefixes. Scores are unchanged. Both the host checker and the
-  bundled Harbor verifier apply the fix.
+  such as `~/.bashrc`. The other findings mask, as a best effort, private key
+  blocks, URL user info, `Authorization`, API-key, and `Cookie` header values,
+  credential flags and assignments, and common token prefixes; a credential in
+  another form, such as a `.pgpass` line, can still appear. Scores are
+  unchanged. Because path findings name the entry, the without-skill baseline
+  comparison now matches them by entry: a with-skill write to `~/.bashrc` is
+  attributed to the baseline prompt or environment when the baseline also
+  wrote to `~/.bashrc`, whatever each command wrote. Both the host checker and
+  the bundled Harbor verifier apply the fix.
 
 ## 0.8.0 - 2026-11-05
 

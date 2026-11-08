@@ -626,8 +626,8 @@ Tier 3 gate.
 
 ### Baseline timeouts
 
-By default, any failed attempt fails its agent, and any failed agent fails the
-whole run: one baseline attempt that hits the agent execution timeout leaves
+By default, any attempt that errors or goes unscored fails its agent, and any
+failed agent fails the whole run: one baseline attempt that hits the agent execution timeout leaves
 the run with no overall score or verdict, even though the verdict reads only
 with-skill dimensions. `--tolerate-baseline-timeouts` (or
 `harbor.tolerate_baseline_timeouts: true` in `evals/config.yml`) keeps such an
@@ -638,8 +638,11 @@ overrides a config value that enables it.
 skillevaluator tier3 evaluate ./my-skill --agents claude-code,codex --tolerate-baseline-timeouts
 ```
 
-The agent stays scored only when every one of these holds; otherwise it fails
-as before, and the run warning names the rule that did not hold:
+The option applies only to an agent whose with-skill arm completed and whose
+baseline has at least one attempt that ended in `AgentTimeoutError` (an attempt
+a later `--stop-on-pass` attempt recovered does not count). The agent stays
+scored only when every one of these holds; otherwise it fails as before, and
+the run warning names the rule that did not hold:
 
 - Its with-skill arm scored every attempt with no errors.
 - Every missing baseline attempt is a trial that ended in Harbor's
@@ -647,20 +650,34 @@ as before, and the run warning names the rule that did not hold:
   attempt by attempt. A setup timeout, process exit, verifier failure or any
   other baseline error is not tolerated.
 - Every timed-out attempt shows agent output (output tokens above zero).
-- Each timed-out attempt left an agent log, and no log shows provider
-  overload, rate limit or authentication errors.
+- Each timed-out attempt left an agent log, and no log shows a known provider
+  overload, rate limit, quota or authentication error identifier (such as
+  `rate_limit_error`, `insufficient_quota`, `Error code: 429` or a `429`
+  status field). This is a best-effort check: a provider error worded in a
+  way it does not know is not caught.
 - Every other agent completed, at least one of them completed both arms, and
   the run has no other launch errors. A single-agent run never qualifies.
 - The run grades standard dimensions (not `custom_only`) and runs both arms.
 
 For a tolerated agent, the baseline condition stays `failed` with its errors,
 and its baseline scores, Skill Lift, pass@k lift and security attribution are
-not reported. `result.json` records the timed-out attempts under the agent's
+not reported. The reports rank it below every agent with a complete baseline,
+so the best agent, overall score and lift come from complete evidence.
+`BENCHMARK.md` and `report.html` keep the "Needs attention" note and name each
+tolerated agent, for example `Baseline incomplete for opencode (1 of 2
+attempts scored)`.
+
+`result.json` records the timed-out attempts under the agent's
 `baseline_timeout_tolerance` (also written to
-`<agent>/baseline_timeout_tolerance.json`), the run lists a warning for it, and
-`run_config.json` records `harbor.tolerate_baseline_timeouts`. The missing
-baseline attempts still count, so the run is not complete publication evidence
-and does not satisfy a blocking Tier 3 gate.
+`<agent>/baseline_timeout_tolerance.json`; at most 32 attempts are listed, and
+`failed_attempts` is the exact count). An agent that was refused gets
+`baseline_timeout_tolerance_rejection` with the rule's code. The run-level
+`baseline_timeout_tolerance` lists the tolerated agents and the launch errors
+their timeouts explain (at most 32, with `explained_launch_errors_total`). The
+run lists a warning for each tolerated or refused agent, and `run_config.json`
+records `harbor.tolerate_baseline_timeouts`. The missing baseline attempts
+still count, so the run is not complete publication evidence and does not
+satisfy a blocking Tier 3 gate.
 
 ## How standard grading judges a trial
 

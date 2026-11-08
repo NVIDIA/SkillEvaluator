@@ -19,10 +19,12 @@ All notable changes to SkillEvaluator are documented in this file.
   timeout while the agent was still producing output. By default one such
   attempt still fails the agent and the whole run. The option needs both arms,
   standard dimension grading, a peer agent that completed both arms and no
-  other launch errors; it refuses a timeout whose logs show provider overload,
-  rate limit or authentication errors. The baseline condition stays `failed`,
-  baseline scores and Skill Lift are not reported for that agent, the run
-  lists a warning, and the run is still not complete publication evidence.
+  other launch errors; it refuses a timeout whose logs show a known provider
+  overload, rate limit, quota or authentication error. The baseline condition
+  stays `failed`, baseline scores and Skill Lift are not reported for that
+  agent, reports rank it below agents with a complete baseline and name it in
+  a "Baseline incomplete" note, the run lists a warning, and the run is still
+  not complete publication evidence.
 
 ### Changed
 

@@ -488,6 +488,107 @@ def test_rich_progress_prints_the_full_plan_above_the_fixed_frame(monkeypatch: p
     assert len(frame_heights) == 1
 
 
+def test_rich_final_frame_marks_a_plan_that_never_resolved(monkeypatch: pytest.MonkeyPatch) -> None:
+    import rich.live
+
+    progress = _progress_module()
+    _FakeLive.instances.clear()
+    monkeypatch.setattr(rich.live, "Live", _FakeLive)
+    reporter = progress.RichProgressReporter(stream=_TTYBuffer(), refresh_interval=60)
+    # The CLI's first plan has no provider or counts; then configuration fails.
+    reporter.start(progress.Tier3RunPlan(skill_name="demo", environment="docker", agents=("codex",)))
+    reporter.emit(
+        progress.ProgressEvent(
+            stage="configuration",
+            state="failed",
+            detail="A public LLM provider is required for live evaluation",
+        )
+    )
+    live = _FakeLive.instances[0]
+    running_frame = _render(live.renderables[-1], width=180)
+    reporter.close()
+    final_frame = _render(live.renderables[-1], width=180)
+
+    assert "resolving" in running_frame
+    assert "preparing" in running_frame
+    provider_row = next(line for line in final_frame.splitlines() if "Provider" in line)
+    plan_row = next(line for line in final_frame.splitlines() if "Run plan" in line)
+    assert "not resolved" in provider_row
+    assert "not resolved" in plan_row
+    assert not any(word in final_frame for word in ("pending", "resolving", "preparing"))
+    assert "A public LLM provider is required for live evaluation" in final_frame
+    assert live.stop_calls == 1
+
+
+def test_rich_final_frame_lists_every_stage(monkeypatch: pytest.MonkeyPatch) -> None:
+    import rich.live
+
+    progress = _progress_module()
+    _FakeLive.instances.clear()
+    monkeypatch.setattr(rich.live, "Live", _FakeLive)
+    reporter = progress.RichProgressReporter(stream=_TTYBuffer(), refresh_interval=60)
+    reporter.start(_plan(progress))
+    reporter.emit(progress.ProgressEvent(stage="docker-images", state="skipped", detail="local environment selected"))
+    for index in range(7):
+        reporter.emit(
+            progress.ProgressEvent(
+                stage=f"agent:agent-{index}",
+                state="complete",
+                detail=f"agent {index} finished",
+            )
+        )
+    reporter.emit(progress.ProgressEvent(stage="run-finished", state="complete", detail="Tier 3 evaluation finished"))
+    live = _FakeLive.instances[0]
+    running_frame = _render(live.renderables[-1], width=180)
+    reporter.close()
+    final_frame = _render(live.renderables[-1], width=180)
+
+    assert "local environment selected" not in running_frame
+    assert "agent 0 finished" not in running_frame
+    # Once the run is over the frame stays in the scrollback, so it keeps every outcome.
+    assert "local environment selected" in final_frame
+    assert all(f"agent {index} finished" in final_frame for index in range(7))
+    assert "Tier 3 evaluation finished" in final_frame
+    assert live.stop_calls == 1
+
+
+def _row_detail(frame: str, stage_label: str) -> str:
+    """Return a row's Detail cell, joining the lines it wraps onto."""
+    detail: list[str] = []
+    for line in frame.splitlines():
+        cells = [cell.strip() for cell in line.split("│")[1:-1]]
+        if len(cells) != 4:
+            continue
+        # A wrapped row continues on lines whose Stage cell is empty.
+        if cells[0] == stage_label or (detail and not cells[0]):
+            detail.append(cells[2])
+        elif detail:
+            break
+    return " ".join(part for part in detail if part)
+
+
+def test_rich_final_frame_wraps_details_the_running_frame_cuts(monkeypatch: pytest.MonkeyPatch) -> None:
+    import rich.live
+
+    progress = _progress_module()
+    _FakeLive.instances.clear()
+    monkeypatch.setattr(rich.live, "Live", _FakeLive)
+    reporter = progress.RichProgressReporter(stream=_TTYBuffer(), refresh_interval=60)
+    reporter.start(_plan(progress))
+    reason = "one or more Harbor jobs failed; inspect the retained artifacts and the trial logs"
+    reporter.emit(progress.ProgressEvent(stage="agent:codex", state="failed", detail=reason))
+    live = _FakeLive.instances[0]
+    running_frame = _render(live.renderables[-1])
+    reporter.close()
+    final_frame = _render(live.renderables[-1])
+
+    # At 80 columns the running frame cuts the reason to keep one line per row.
+    assert _row_detail(running_frame, "Agent codex") != reason
+    assert "…" in _row_detail(running_frame, "Agent codex")
+    # The final frame no longer needs a fixed height, so it shows the reason in full.
+    assert _row_detail(final_frame, "Agent codex") == reason
+
+
 def _stopping_frame_reporter(progress: Any, output: io.StringIO, agents: tuple[str, ...], stopping_detail: str) -> Any:
     """Return a Rich reporter whose stage sequence matches a run stopped by Ctrl+C."""
     reporter = progress.RichProgressReporter(stream=output, refresh_interval=60)

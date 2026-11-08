@@ -423,6 +423,9 @@ class RichProgressReporter(PlainProgressReporter):
                 self._refresh_live()
 
     def close(self) -> None:
+        self._close(final_frame=True)
+
+    def _close(self, *, final_frame: bool) -> None:
         live = self._live
         try:
             super().close()
@@ -430,7 +433,14 @@ class RichProgressReporter(PlainProgressReporter):
             with self._lock:
                 try:
                     if live is not None and live is self._live:
-                        live.stop()
+                        try:
+                            if final_frame:
+                                # Once Live stops, its last frame stays in the
+                                # scrollback and no longer needs a fixed height,
+                                # so it lists every stage in full.
+                                live.update(self._build_live_table(final=True), refresh=False)
+                        finally:
+                            live.stop()
                 finally:
                     # Reset even when Live never started, so a failed start
                     # leaves no plan or rows behind for the next run.
@@ -448,11 +458,13 @@ class RichProgressReporter(PlainProgressReporter):
             # interrupted, so close() must not report them as failed.
             self._active.clear()
             had_live = self._live is not None
-        self.close()
+        # Drawing the final frame could fail the same way, so Live keeps the
+        # last frame it drew.
+        self._close(final_frame=False)
         if had_live:
             try:
-                # The last frame stays on screen with its stages still running,
-                # so explain why it no longer updates.
+                # That frame stays on screen with its stages still running, so
+                # explain why it no longer updates.
                 self._write_line("Tier 3 progress display stopped after a drawing error; the run continues.")
             except Exception:
                 logger.debug("Tier 3 progress stop notice failed", exc_info=True)
@@ -521,7 +533,7 @@ class RichProgressReporter(PlainProgressReporter):
             lines.append(("Run plan", known))
         return lines
 
-    def _build_live_table(self):
+    def _build_live_table(self, *, final: bool = False):
         from rich import box
         from rich.spinner import Spinner
         from rich.table import Table
@@ -545,30 +557,39 @@ class RichProgressReporter(PlainProgressReporter):
         )
         table = Table(title=title, box=box.ROUNDED, border_style=FAINT, expand=True, show_lines=False)
         # One line per row: long values are cut with an ellipsis rather than
-        # wrapped, so the frame height does not depend on the text.
+        # wrapped, so the frame height does not depend on the text. The final
+        # frame stays in the scrollback, so there the details wrap in full.
         table.add_column("Stage", style="bold", no_wrap=True, overflow="ellipsis")
         table.add_column("State", width=12, no_wrap=True, overflow="ellipsis")
-        table.add_column("Detail", ratio=1, no_wrap=True, overflow="ellipsis")
+        if final:
+            table.add_column("Detail", ratio=1, overflow="fold")
+        else:
+            table.add_column("Detail", ratio=1, no_wrap=True, overflow="ellipsis")
         table.add_column("Elapsed", justify="right", no_wrap=True, overflow="ellipsis")
 
         table.add_row("Environment", Text("configured", style=TEXT), Text(self._safe_text(plan.environment)), "")
         agents = self._plan_agents_text(plan)
         table.add_row("Agents / models", Text("configured", style=TEXT), Text(agents or "none"), "")
-        # The Provider and Run plan rows are always present, with a placeholder
-        # until the plan resolves, so a plan update does not add rows.
-        table.add_row(
-            "Provider",
-            Text("configured" if plan.provider else "pending", style=TEXT if plan.provider else MUTED),
-            Text(self._safe_text(plan.provider or "resolving")),
-            "",
-        )
+
+        def placeholder(waiting_detail: str) -> tuple[Text, Text]:
+            # The row is always present so a plan update does not add rows. A
+            # finished run's frame stays on screen, so there it no longer says
+            # the value is still on its way.
+            if final:
+                return Text("-", style=MUTED), Text("not resolved", style=MUTED)
+            return Text("pending", style=MUTED), Text(waiting_detail)
+
+        if plan.provider:
+            provider_state, provider_detail = Text("configured", style=TEXT), Text(self._safe_text(plan.provider))
+        else:
+            provider_state, provider_detail = placeholder("resolving")
+        table.add_row("Provider", provider_state, provider_detail, "")
         known = self._plan_values_text(plan)
-        table.add_row(
-            "Run plan",
-            Text("configured" if known else "pending", style=TEXT if known else MUTED),
-            Text(known or "preparing"),
-            "",
-        )
+        if known:
+            plan_state, plan_detail = Text("configured", style=TEXT), Text(known)
+        else:
+            plan_state, plan_detail = placeholder("preparing")
+        table.add_row("Run plan", plan_state, plan_detail, "")
         state_styles = {
             "ready": GREEN,
             "complete": GREEN,
@@ -579,11 +600,12 @@ class RichProgressReporter(PlainProgressReporter):
         }
         # Show only the most recently updated stages in a fixed number of rows.
         # The slot count only grows (to fit every agent), so the frame never
-        # shrinks either.
+        # shrinks either. The final frame lists every stage, without padding.
         self._live_event_slots = max(self._live_event_slots, len(plan.agents))
         event_slots = self._live_event_slots
-        recent_events = list(self._live_events.items())[-event_slots:]
-        for stage, (event, finished_at) in recent_events:
+        events = list(self._live_events.items())
+        shown_events = events if final else events[-event_slots:]
+        for stage, (event, finished_at) in shown_events:
             label = (
                 f"Agent {stage.removeprefix('agent:')}"
                 if stage.startswith("agent:")
@@ -600,8 +622,9 @@ class RichProgressReporter(PlainProgressReporter):
                 Text(event.detail or ""),
                 Text(finished_at or self._elapsed()),
             )
-        for _ in range(event_slots - len(recent_events)):
-            table.add_row("", "", "", "")
+        if not final:
+            for _ in range(event_slots - len(shown_events)):
+                table.add_row("", "", "", "")
         return table
 
     def _refresh_live(self) -> None:

@@ -35,6 +35,23 @@ All notable changes to SkillEvaluator are documented in this file.
   include accessible descriptions, links to data tables and visible fallbacks
   when canvas initialization is unavailable; Tier 1 reports omit chart assets.
 
+- Separate HTML Tier 2 evidence into within-skill and across-skill comparisons,
+  with recorded completion, duplicate, affected-path, and catalog counts. Keep
+  skipped or unavailable comparisons distinct from completed zero-match scans.
+  Link every recorded Harbor job in HTML, terminal, and Markdown reports and
+  disclose recorded scanner, evaluator, model, dataset, and source provenance.
+
+- Give HTML summaries, tier tiles, KPI labels and values, findings, evidence
+  tables and all six Tier 3 views more reading room. Use relaxed body line
+  spacing and wrap Tier 3 navigation on narrow screens in both themes.
+
+- Keep HTML tier navigation synchronized across sidebar, tiles and a mobile
+  sticky bar, including absent tiers in comprehensive reports. Add accessible
+  keyboard navigation for Tier 3 and agent tabs, a System/Light/Dark preference,
+  complete expanded evidence, and readable no-JavaScript/print views. Keep
+  required and advisory summary reasons distinct within mixed tiers and focus
+  direct agent links on their named panels.
+
 - Tier 3 tool efficiency counts writing, editing and patching files, scoped
   native searches (`Grep`, `Glob`, `LS`, Codex `list_dir` and `grep_files`)
   and MCP tool calls as productive. Most of these counted as wasted before, so
@@ -74,6 +91,9 @@ All notable changes to SkillEvaluator are documented in this file.
   after a `;`, which starts a new command.
 
 ### Fixed
+
+- Read JSON, JSONL and YAML evaluation datasets as UTF-8 so Unicode prompts and
+  answers load correctly on hosts with a non-UTF-8 default text encoding.
 
 - A PII finding no longer keeps its `evidence_sha256` after CI redaction masks
   a credential inside the value the finding reports. In 0.8.0 the finding kept

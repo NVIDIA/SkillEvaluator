@@ -604,6 +604,14 @@ def test_lift_and_pass_at_k_share_the_canonical_default_score() -> None:
             "trial": "case-001__attempt1",
             "score": 0.49,
             "passed": False,
+            "goal_accuracy": 0.9,
+            "reason": "goal not met (goal accuracy 0.90)",
+            "warnings": ["missed expected behavior (behavior 0.90)"],
+            "security_clean": False,
+            "security_score": 0.3875,
+            "security_message": None,
+            "security_exempt": False,
+            "required_failure": "wrong_answer",
         }
     ]
 

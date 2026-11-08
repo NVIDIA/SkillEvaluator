@@ -462,9 +462,15 @@ class CLIReporter(ReporterBase):
         CLIReporter._print_harbor_artifacts(agent_eval, console)
         pass_at_k = agent_eval.get("pass_at_k")
         with_skill_pass = pass_at_k.get("with_skill") if isinstance(pass_at_k, dict) else None
+        case_arm_label = "with skill"
         case_summaries = with_skill_pass.get("cases") if isinstance(with_skill_pass, dict) else None
+        if not isinstance(case_summaries, dict) or not case_summaries:
+            without_skill_pass = pass_at_k.get("without_skill") if isinstance(pass_at_k, dict) else None
+            case_summaries = without_skill_pass.get("cases") if isinstance(without_skill_pass, dict) else None
+            case_arm_label = "without skill"
         if isinstance(case_summaries, dict) and case_summaries:
-            table = Table(title="Tier 3 Cases", border_style=FAINT, show_header=True)
+            title = "Tier 3 Cases" if case_arm_label == "with skill" else "Tier 3 Cases (without skill)"
+            table = Table(title=title, border_style=FAINT, show_header=True)
             table.add_column("Case", style="bold")
             table.add_column("Score", justify="right")
             table.add_column("Result")

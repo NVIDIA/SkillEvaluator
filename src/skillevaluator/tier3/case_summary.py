@@ -474,8 +474,7 @@ def _condition_grid(
             if with_skill_skipped
             else _effect(with_case, without_case, comparable=_case_comparable(agent, with_case, without_case))
         )
-        if not with_skill_skipped:
-            effect = _effect_diagnostics(effect, with_case, without_case, safe)
+        effect = _effect_diagnostics(effect, with_case, without_case, safe)
         table.add_row(
             Text(safe(case_id)),
             _condition_cell(with_case, safe, include_diagnostics=False),

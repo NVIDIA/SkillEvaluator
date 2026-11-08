@@ -153,7 +153,7 @@ def test_judge_filtered_lift_respects_activation_eligibility(tmp_path: Path, act
     if activated:
         assert collected["agents"]["codex"]["lift"]["judge_mixed_cases"] == {"accuracy": 1}
     else:
-        assert report["verdict"] == "inconclusive"
+        assert report["verdict"] == "fail"
         assert collected["agents"]["codex"]["lift"] == {}
         assert all(dimension["lift"] is None for dimension in agent["dimensions"])
 

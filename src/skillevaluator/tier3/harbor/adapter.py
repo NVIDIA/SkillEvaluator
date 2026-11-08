@@ -3925,8 +3925,8 @@ def _rebase_custom_dockerfile_content(
 ) -> tuple[str, str]:
     """Return custom Dockerfile content layered on top of the eval base image.
 
-    The base image already contains: python:3.12-slim, system packages
-    (bash/curl/git/jq), verifier dependencies, and the
+    The base image already contains: python:3.12-slim, the system packages in
+    ``_BASE_APT_PACKAGES``, verifier dependencies, and the
     standard directory structure (/workspace/skills, /logs, etc.).
 
     The custom Dockerfile's FROM line is replaced so the skill author's

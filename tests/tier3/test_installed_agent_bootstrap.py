@@ -443,3 +443,57 @@ def test_generated_images_satisfy_docker_agent_setup_dependencies(
         assert dockerfile.startswith("FROM python:3.12-slim\n"), writer
         image = _apt_packages(dockerfile) | _SLIM_BASE_APT_PACKAGES
         assert needed - image == set(), writer
+
+
+def _docker_setup_note() -> str:
+    """The eval-datasets note on Docker agent setup packages, with whitespace collapsed."""
+    docs = (Path(__file__).resolve().parents[2] / "docs" / "eval-datasets.mdx").read_text(encoding="utf-8")
+    notes = [block.split("</Note>", 1)[0] for block in docs.split("<Note>")[1:]]
+    (note,) = [note for note in notes if "`procps`" in note]
+    return " ".join(note.split())
+
+
+def test_custom_dockerfiles_reach_procps_only_through_the_shared_base_image_rebase(tmp_path: Path) -> None:
+    """A custom Dockerfile keeps its own base, and so needs procps, unless it is rebased."""
+    custom_from = "FROM debian:bookworm-slim"
+    first_lines: dict[str, str] = {}
+    for name, kwargs in {
+        # The runner passes an empty base_image unless harbor.base_image_mode is reuse or rebuild.
+        "default": {},
+        "preserve": {"base_image": "skillevaluator-base:test", "custom_dockerfile_mode": "preserve"},
+        "rebase": {"base_image": "skillevaluator-base:test", "custom_dockerfile_mode": "rebase"},
+    }.items():
+        skill = _skill(tmp_path / f"{name}-skill")
+        (skill / "evals" / "environment").mkdir(parents=True)
+        (skill / "evals" / "environment" / "Dockerfile").write_text(f"{custom_from}\nRUN true\n", encoding="utf-8")
+        task = tmp_path / f"{name}-task"
+        adapter._write_dockerfile(
+            task_dir=task,
+            skill_path=skill,
+            reference_skills_dir=None,
+            workspace_skill_paths=None,
+            has_skill=True,
+            **kwargs,
+        )
+        first_lines[name] = (task / "environment" / "Dockerfile").read_text(encoding="utf-8").splitlines()[0]
+
+    assert first_lines == {
+        "default": custom_from,
+        "preserve": custom_from,
+        "rebase": "FROM skillevaluator-base:test",
+    }
+    note = _docker_setup_note()
+    assert "A custom `evals/environment/Dockerfile` keeps its own base image, so it should install `procps` too" in note
+    assert (
+        "unless `harbor.base_image_mode` is `reuse` or `rebuild` and `harbor.custom_dockerfile_mode` is `rebase`"
+        in note
+    )
+
+
+def test_docker_setup_note_scopes_the_npx_mcp_example_to_claude_code() -> None:
+    """Codex and OpenCode stdio MCP servers inherit nvm's npx; only Claude Code has no Node.js."""
+    note = _docker_setup_note()
+
+    assert "including stdio MCP servers" in note
+    assert 'Node.js with Claude Code, for example `command = "npx ..."`' in note
+    assert "or `gcc`, `g++`, or `make` with any agent" in note

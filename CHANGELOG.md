@@ -130,10 +130,12 @@ All notable changes to SkillEvaluator are documented in this file.
   timeout, and a package mirror error failed the trial. Like Claude Code and
   Codex containers since 0.6.0, OpenCode containers on Debian-based images now
   have no `gcc`, `g++`, or `make`, and OpenCode's Node.js is on `PATH` only for
-  the OpenCode process and the commands it runs. Skills whose scripts, tasks,
-  verifier, or stdio MCP servers need these tools must install them through
-  `scripts/apt-packages.txt` or a custom `evals/environment/Dockerfile`. The
-  auto-generated base image is rebuilt once for the new package list.
+  the OpenCode process and the commands it runs, including its stdio MCP
+  servers. Skills whose scripts, tasks, or verifier need these tools, or whose
+  stdio MCP servers need `gcc`, `g++`, or `make`, must install them through
+  `scripts/apt-packages.txt` or a custom `evals/environment/Dockerfile`.
+  Generated images rebuild once for the new package list: the per-task images,
+  or the shared base image when `harbor.base_image_mode` is `reuse`.
 
 ## 0.8.0 - 2026-11-05
 

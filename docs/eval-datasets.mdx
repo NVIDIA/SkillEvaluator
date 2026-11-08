@@ -320,14 +320,18 @@ transport = "stdio"
   Codex and OpenCode install their own Node.js with nvm. Its `node`, `npm`, and
   `npx` are on `PATH` only for the agent process and the commands it runs,
   including stdio MCP servers, not for the verifier (`test.sh`) or task
-  healthchecks. If your skill's scripts, its tasks, the verifier, or a stdio MCP
-  server (for example `command = "npx ..."`) need these tools, install them in
-  the image: list the packages in `scripts/apt-packages.txt`, one per line, for
-  the auto-generated image, or install them in `evals/environment/Dockerfile`.
-  The auto-generated image and the `init-harbor-task` starter Dockerfile also
-  include `procps`, so Claude Code setup no longer installs it (for `pgrep`)
-  with `apt-get` in every trial. A custom Dockerfile with
-  `custom_dockerfile_mode: preserve` should install `procps` for the same reason.
+  healthchecks. If your skill's scripts, its tasks, or the verifier need these
+  tools, or a stdio MCP server does (Node.js with Claude Code, for example
+  `command = "npx ..."`, or `gcc`, `g++`, or `make` with any agent), install
+  them in the image: list the packages in `scripts/apt-packages.txt`, one per
+  line, for the auto-generated image, or install them in
+  `evals/environment/Dockerfile`. The auto-generated image and the
+  `init-harbor-task` starter Dockerfile also include `procps`, so Claude Code
+  setup no longer installs it (for `pgrep`) with `apt-get` in every trial. A
+  custom `evals/environment/Dockerfile` keeps its own base image, so it should
+  install `procps` too, unless `harbor.base_image_mode` is `reuse` or `rebuild`
+  and `harbor.custom_dockerfile_mode` is `rebase`. Then it is rebased onto the
+  shared base image, which has `procps`.
 </Note>
 
 ```text title="my-skill/scripts/apt-packages.txt"

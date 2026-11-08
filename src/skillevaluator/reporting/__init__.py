@@ -39,6 +39,9 @@ from skillevaluator.reporting.html import HTMLReporter
 from skillevaluator.reporting.json_reporter import JSONReporter
 from skillevaluator.reporting.junit_reporter import JUnitReporter
 from skillevaluator.reporting.markdown import MarkdownReporter
+from skillevaluator.reporting.plugin_runtime_io import load_plugin_runtime_report
+from skillevaluator.reporting.plugin_runtime_render import render_plugin_runtime_reports
+from skillevaluator.reporting.plugin_static_render import render_plugin_static_reports
 from skillevaluator.reporting.sarif_reporter import SARIFReporter
 
 __all__ = [
@@ -50,4 +53,7 @@ __all__ = [
     "MarkdownReporter",
     "ReporterBase",
     "SARIFReporter",
+    "load_plugin_runtime_report",
+    "render_plugin_runtime_reports",
+    "render_plugin_static_reports",
 ]

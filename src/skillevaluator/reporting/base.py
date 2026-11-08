@@ -2694,6 +2694,12 @@ class ReporterBase(ABC):
         """
         ...
 
+    def render_report(self, results: list[ValidationResult]) -> str:
+        """Render the standard report together with available plugin evidence."""
+        from skillevaluator.reporting.plugin_reports import render_plugin_report
+
+        return render_plugin_report(self, results)
+
     def save(self, results: list[ValidationResult], output_path: Path) -> None:
         """Save rendered output to file.
 
@@ -2710,7 +2716,7 @@ class ReporterBase(ABC):
         """
         # A file name that is not valid UTF-8 reaches messages as lone
         # surrogates; write those as escapes instead of failing the report.
-        payload = self.render_all(results).encode("utf-8", "backslashreplace")
+        payload = self.render_report(results).encode("utf-8", "backslashreplace")
         _write_report_atomically(output_path, payload)
 
     def get_file_extension(self) -> str:

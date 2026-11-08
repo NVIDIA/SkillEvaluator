@@ -4,13 +4,16 @@
 
 from __future__ import annotations
 
+import io
 import json
 import re
 from pathlib import Path
 
 import pytest
+from rich.console import Console
 
-from skillevaluator.reporting import JSONReporter
+from skillevaluator.reporting import JSONReporter, MarkdownReporter
+from skillevaluator.reporting.cli import CLIReporter
 from skillevaluator.reporting.sarif_reporter import SARIFReporter
 from skillevaluator.utils.tool_runner import Severity, ToolResult, Tools
 from skillevaluator.validators.base import ValidationResult
@@ -20,12 +23,12 @@ from skillevaluator.validators.policy import ValidationPolicy, apply_policy
 PYYAML_ADVISORY = {"id": "PYSEC-2020-176", "fix_versions": ["5.4"], "aliases": ["CVE-2020-14343"]}
 
 
-def _skill(tmp_path: Path, files: dict[str, str]) -> Path:
-    skill = tmp_path / "demo-skill"
+def _skill(tmp_path: Path, files: dict[str, str], name: str = "demo-skill") -> Path:
+    skill = tmp_path / name
     skill.mkdir()
-    (skill / "SKILL.md").write_text("---\nname: demo-skill\ndescription: Demo\n---\n", encoding="utf-8")
-    for name, text in files.items():
-        (skill / name).write_text(text, encoding="utf-8")
+    (skill / "SKILL.md").write_text(f"---\nname: {name}\ndescription: Demo\n---\n", encoding="utf-8")
+    for filename, text in files.items():
+        (skill / filename).write_text(text, encoding="utf-8")
     return skill
 
 
@@ -148,7 +151,13 @@ def test_package_names_use_pep_503_normalization(tmp_path, pip_audit):
         ("requirements_test.txt", "test"),
         ("requirements.tests.txt", "test"),
         ("requirements-build.txt", "build"),
+        ("requirements-devel.txt", "dev"),
+        ("requirements-devtools.txt", "dev"),
+        ("requirements_unittest.txt", "test"),
+        ("requirements-pytest.txt", "test"),
+        ("requirements-lint.txt", "dev"),
         ("requirements-latest.txt", "runtime"),
+        ("requirements-docker.txt", "runtime"),
     ],
 )
 def test_requirement_filename_sets_dependency_role(tmp_path, pip_audit, filename, role):
@@ -160,6 +169,45 @@ def test_requirement_filename_sets_dependency_role(tmp_path, pip_audit, filename
 
     assert [(finding.file_path, finding.metadata["dependency_role"]) for finding in result.findings] == [
         (filename, role)
+    ]
+
+
+@pytest.mark.parametrize(
+    ("group", "role"),
+    [
+        ("devtools", "dev"),
+        ("dev-tools", "dev"),
+        ("unittest", "test"),
+        ("testutils", "test"),
+        ("pytest", "test"),
+        ("Docs", "docs"),
+        ("device", "runtime"),
+        ("latest", "runtime"),
+        ("docker", "runtime"),
+    ],
+)
+def test_optional_group_name_sets_dependency_role(group, role):
+    assert DependencySecurityValidator._role_from_name(group) == role
+
+
+def test_requirements_files_are_audited_in_sorted_order(tmp_path, pip_audit, monkeypatch):
+    advisories, _ = pip_audit
+    advisories["pyyaml"] = [PYYAML_ADVISORY]
+    advisories["idna"] = [{"id": "PYSEC-2024-60", "fix_versions": ["3.7"]}]
+    skill = _skill(tmp_path, {"requirements.txt": "pyyaml==5.3\n", "requirements-dev.txt": "idna==3.6\n"})
+    # Directory order differs between filesystems; list the files in reverse.
+    glob = Path.glob
+
+    def reversed_glob(self, pattern, *args, **kwargs):
+        return iter(sorted(glob(self, pattern, *args, **kwargs), reverse=True))
+
+    monkeypatch.setattr(Path, "glob", reversed_glob)
+
+    result = DependencySecurityValidator(use_safety=False).validate(skill)
+
+    assert [(finding.file_path, finding.check_name) for finding in result.findings] == [
+        ("requirements-dev.txt", "PYSEC-2024-60"),
+        ("requirements.txt", "PYSEC-2020-176"),
     ]
 
 
@@ -204,6 +252,33 @@ def test_policy_overlay_can_change_one_advisory(tmp_path, pip_audit):
 
     assert overlaid.passed
     assert overlaid.findings[0].severity == Severity.LOW
+
+
+def test_policy_overlay_keeps_the_incomplete_reason(tmp_path, pip_audit):
+    """Rebuilding a result from changed findings keeps warnings that no finding mirrors."""
+    advisories, _ = pip_audit
+    advisories["pyyaml"] = [PYYAML_ADVISORY]
+    skill = _skill(tmp_path, {"requirements.txt": "pyyaml==5.3\nrequests>=2\n"})
+    result = DependencySecurityValidator(use_safety=False).validate(skill)
+    reason = (
+        "requirements.txt: line 2 requires an exact package version; "
+        "URLs, local paths, includes and pip options are not audited"
+    )
+    assert result.warnings == [reason]
+
+    policy = ValidationPolicy(profile="reviewed", severity_overrides={"DEPENDENCY.PYSEC-2020-176": Severity.LOW})
+    (overlaid,) = apply_policy([result], policy)
+
+    assert overlaid.is_incomplete and not overlaid.passed
+    assert overlaid.errors == []
+    assert overlaid.warnings == [
+        "[DEPENDENCY-LOW] pyyaml==5.3: PYSEC-2020-176 -> upgrade to 5.4 in requirements.txt:1",
+        reason,
+    ]
+    assert (overlaid.summary.errors, overlaid.summary.warnings) == (0, 2)
+    # apply_policy runs more than once in a CLI run; a second pass changes nothing.
+    apply_policy([overlaid], policy)
+    assert overlaid.warnings[1:] == [reason]
 
 
 def test_safety_findings_use_the_common_applicability_metadata(tmp_path, pip_audit, safety):
@@ -258,7 +333,7 @@ def test_safety_findings_use_the_common_applicability_metadata(tmp_path, pip_aud
         {"vulnerabilities": "invalid"},
         "not a report",
     ],
-    ids=["top-level-list", "object-severity", "non-text-advisory", "null-fields", "invalid-list", "not-a-report"],
+    ids=["top-level-list", "cvss-not-an-object", "non-text-advisory", "null-fields", "invalid-list", "not-a-report"],
 )
 def test_malformed_safety_output_never_crashes(tmp_path, pip_audit, safety, report):
     safety["report"] = report
@@ -273,6 +348,186 @@ def test_malformed_safety_output_never_crashes(tmp_path, pip_audit, safety, repo
         assert finding.severity in {Severity.CRITICAL, Severity.MEDIUM}
     # Only a high or critical advisory fails the run.
     assert result.passed is not any(finding.severity == Severity.CRITICAL for finding in result.findings)
+
+
+# The severity object Safety prints with an API key.
+SAFETY_CVSS_OBJECT = {
+    "source": "CVE-2024-3651",
+    "cvssv2": None,
+    "cvssv3": {
+        "base_score": 9.8,
+        "impact_score": 5.9,
+        "base_severity": "CRITICAL",
+        "vector_string": "CVSS:3.1/AV:N/AC:L/PR:N/UI:N/S:U/C:H/I:H/A:H",
+    },
+}
+
+
+@pytest.mark.parametrize(
+    ("severity", "expected"),
+    [
+        ("high", Severity.HIGH),
+        (" Critical ", Severity.CRITICAL),
+        (None, Severity.MEDIUM),
+        ("unknown", Severity.MEDIUM),
+        (SAFETY_CVSS_OBJECT, Severity.CRITICAL),
+        ({"cvssv3": {"base_severity": "NONE", "base_score": 9.1}}, Severity.CRITICAL),
+        ({"cvssv3": {"base_score": 7.5}}, Severity.HIGH),
+        ({"cvss_v3": {"base_severity": "high"}}, Severity.HIGH),
+        ({"cvssv3": {"base_score": "9.8"}, "cvssv2": {"base_score": 7.5}}, Severity.HIGH),
+        ({"cvssv2": {"base_score": 9.3, "base_severity": "HIGH"}}, Severity.CRITICAL),
+        ({"cvss_v2": {"base_severity": "HIGH"}}, Severity.HIGH),
+        ({"source": "CVE-2024-3651"}, Severity.MEDIUM),
+        ({"cvssv3": {"base_score": True}}, Severity.MEDIUM),
+        ({"cvssv3": {"base_score": float("nan")}}, Severity.MEDIUM),
+        ({"cvssv3": {"base_score": 11}}, Severity.MEDIUM),
+    ],
+    ids=[
+        "word-high",
+        "word-padded",
+        "null",
+        "unknown-word",
+        "object-critical",
+        "object-v3-score",
+        "object-v3-score-only",
+        "object-v3-key-spelling",
+        "object-v2-score-after-bad-v3",
+        "object-v2-score",
+        "object-v2-level-only",
+        "object-without-score",
+        "object-bool-score",
+        "object-nan-score",
+        "object-out-of-range",
+    ],
+)
+def test_safety_severity_reads_level_words_and_cvss_objects(tmp_path, pip_audit, safety, severity, expected):
+    """With an API key, Safety prints severity as a CVSS object; a critical one fails the run."""
+    safety["report"] = {
+        "vulnerabilities": [
+            {
+                "package_name": "idna",
+                "analyzed_version": "3.6",
+                "vulnerability_id": "51457",
+                "advisory": "x",
+                "severity": severity,
+            }
+        ]
+    }
+    skill = _skill(tmp_path, {"requirements.txt": "idna==3.6\n"})
+
+    result = DependencySecurityValidator().validate(skill)
+
+    assert not result.is_incomplete
+    assert [(finding.check_name, finding.severity) for finding in result.findings] == [("SAFETY-51457", expected)]
+    assert result.passed is (expected not in {Severity.CRITICAL, Severity.HIGH})
+
+
+@pytest.mark.parametrize(
+    ("advisory", "check_name"),
+    [
+        ({"vulnerability_id": "51457"}, "SAFETY-51457"),
+        ({"vulnerability_id": 51457}, "SAFETY-51457"),
+        ({"vulnerability_id": None, "id": 7}, "SAFETY-7"),
+        ({"vulnerability_id": "PYUP-2024-1"}, "PYUP-2024-1"),
+        ({"vulnerability_id": True}, "Unknown"),
+    ],
+    ids=["text", "number", "id-number", "named", "bool"],
+)
+def test_safety_advisory_ids_name_the_finding(tmp_path, pip_audit, safety, advisory, check_name):
+    safety["report"] = {
+        "vulnerabilities": [{"package_name": "idna", "analyzed_version": "3.6", "severity": "high", **advisory}]
+    }
+    skill = _skill(tmp_path, {"requirements.txt": "idna==3.6\n"})
+
+    result = DependencySecurityValidator().validate(skill)
+
+    (finding,) = result.findings
+    assert (finding.check_name, finding.message) == (check_name, f"idna: {check_name}")
+    assert finding.metadata["advisory_id"] == check_name
+
+
+def test_folder_run_audits_every_skill_after_a_critical_advisory(tmp_path, pip_audit):
+    """A critical advisory is not a configuration error, so a folder run still audits later skills."""
+    advisories, calls = pip_audit
+    advisories["aaa"] = [{"id": "GHSA-crit-0001", "fix_versions": ["2.0"], "severity": "critical"}]
+    advisories["pyyaml"] = [PYYAML_ADVISORY]
+    root = tmp_path / "skills"
+    root.mkdir()
+    _skill(root, {"requirements.txt": "aaa==1.0\n"}, name="a-skill")
+    _skill(root, {"requirements.txt": "pyyaml==5.3\n"}, name="b-skill")
+    _skill(root, {"requirements.txt": "numpy>=1\n"}, name="c-skill")
+
+    result = DependencySecurityValidator(use_safety=False).validate(root)
+
+    assert calls == [["aaa==1.0"], ["pyyaml==5.3"]]
+    assert [(finding.file_path, finding.check_name, finding.severity) for finding in result.findings] == [
+        ("[a-skill] requirements.txt", "GHSA-crit-0001", Severity.CRITICAL),
+        ("[b-skill] requirements.txt", "PYSEC-2020-176", Severity.HIGH),
+    ]
+    assert result.incomplete_scans == ["pip-audit"]
+    # Accepting the first skill's advisory leaves the second one failing the run.
+    policy = ValidationPolicy(profile="reviewed", severity_overrides={"DEPENDENCY.GHSA-crit-0001": Severity.LOW})
+    (overlaid,) = apply_policy([result], policy)
+    assert not overlaid.passed
+    assert overlaid.summary.high_count == 1
+
+
+def test_safety_skips_an_advisory_pip_audit_already_reported(tmp_path, pip_audit, safety):
+    """One vulnerability is one finding: Safety's copy of a pip-audit advisory is dropped by ID or CVE."""
+    advisories, _ = pip_audit
+    advisories["pyyaml"] = [{"id": "PYSEC-2021-142", "fix_versions": ["5.4"], "aliases": ["CVE-2020-14343"]}]
+    safety["report"] = {
+        "vulnerabilities": [
+            {
+                "package_name": "PyYAML",
+                "analyzed_version": "5.3.0",
+                "vulnerability_id": "39611",
+                "CVE": "CVE-2020-14343",
+            },
+            {"package_name": "pyyaml", "analyzed_version": "5.3", "vulnerability_id": "PYSEC-2021-142"},
+            {"package_name": "pyyaml", "analyzed_version": "5.3", "vulnerability_id": "38100", "CVE": "CVE-2019-20477"},
+            {"package_name": "pyyaml", "analyzed_version": "5.2", "vulnerability_id": "39612", "CVE": "CVE-2020-14343"},
+        ]
+    }
+    skill = _skill(tmp_path, {"requirements.txt": "pyyaml==5.3\n"})
+
+    result = DependencySecurityValidator().validate(skill)
+
+    assert [(finding.check_name, finding.metadata["advisory_source"]) for finding in result.findings] == [
+        ("PYSEC-2021-142", "pip-audit"),
+        ("SAFETY-38100", "Safety"),
+        ("SAFETY-39612", "Safety"),
+    ]
+
+
+def test_safety_advisory_without_a_matching_pin_is_unbound(tmp_path, pip_audit, safety):
+    """Safety reads the raw file, so it can report a pin the audit skipped for its marker."""
+    safety["report"] = {
+        "vulnerabilities": [
+            {"package_name": "legacy-lib", "analyzed_version": "1.0", "vulnerability_id": "70001", "severity": "high"}
+        ]
+    }
+    skill = _skill(tmp_path, {"requirements-dev.txt": 'idna==3.10\nlegacy-lib==1.0; python_version < "3"\n'})
+
+    result = DependencySecurityValidator().validate(skill)
+
+    (finding,) = result.findings
+    assert (finding.file_path, finding.line_number) == ("requirements-dev.txt", None)
+    assert finding.metadata == {
+        "package_name": "legacy-lib",
+        "resolved_version": "1.0",
+        "declared_constraint": None,
+        "declaration": None,
+        "resolution_status": "unbound",
+        "dependency_role": "dev",
+        "dependency_relationship": None,
+        "advisory_id": "SAFETY-70001",
+        "advisory_source": "Safety",
+        "affected_range": None,
+        "fixed_versions": [],
+        "aliases": [],
+    }
+    assert not result.passed
 
 
 def test_null_pip_audit_severity_falls_back_instead_of_crashing(tmp_path, pip_audit):
@@ -312,23 +567,102 @@ def test_warnings_name_the_physical_line_after_hash_continuations(tmp_path, pip_
 
 
 @pytest.mark.parametrize(
-    "text",
+    ("text", "numbers"),
     [
-        "",
-        "a==1\nb==2",
-        "a==1 \\\n  --hash=sha256:00 \\\r\n  --hash=sha256:11\r\nb==2\r\n",
-        "a==1 \\",
-        "a==1 \\\n",
-        "a==1 \\\\\nb==2\n",
-        "a==1 \\\rb==2\n",
-        "a==1 \\\r\r\nb==2",
-        "\\\n\\\n\nc==3\x0bd==4\x85",
+        ("", []),
+        ("a==1\nb==2", [1, 2]),
+        ("a==1 \\\n  --hash=sha256:00 \\\r\n  --hash=sha256:11\r\nb==2\r\n", [1, 4]),
+        ("a==1 \\", [1]),
+        ("a==1 \\\n", [1]),
+        ("a==1 \\\\\nb==2\n", [1]),
+        ("a==1 \\\rb==2\n", [1, 2]),
+        ("a==1 \\\r\r\nb==2", [1, 2, 3]),
+        ("\\\n\\\n\nc==3\x0bd==4\x85", [1, 4, 4]),
+        ("# a\x0cnote\npyyaml==5.3\n", [1, 1, 2]),
+        ("a==1\u2028b==2\nc==3\x1ed==4", [1, 1, 2, 2]),
+    ],
+    ids=[
+        "empty",
+        "no-final-newline",
+        "hash-continuations-crlf",
+        "trailing-backslash",
+        "continuation-at-end",
+        "escaped-backslash",
+        "backslash-cr",
+        "backslash-cr-crlf",
+        "vertical-tab-and-nel",
+        "form-feed",
+        "line-separator-and-record-separator",
     ],
 )
-def test_continuation_join_matches_the_previous_text(text):
+def test_continuation_join_matches_the_previous_text(text, numbers):
+    """The joined text is unchanged; only CR, LF and CRLF end a numbered line."""
     lines = DependencySecurityValidator._requirement_lines(text)
 
     assert [line for _number, line in lines] == re.sub(r"\\\r?\n", " ", text).splitlines()
-    physical = text.splitlines()
-    for number, line in lines:
-        assert line.startswith(physical[number - 1].removesuffix("\\"))
+    assert [number for number, _line in lines] == numbers
+
+
+def test_finding_line_follows_editor_line_breaks(tmp_path, pip_audit):
+    """A form feed inside a comment does not shift the line that SARIF and editors show."""
+    advisories, _ = pip_audit
+    advisories["pyyaml"] = [PYYAML_ADVISORY]
+    skill = _skill(tmp_path, {"requirements.txt": "# a\x0cnote\npyyaml==5.3\n"})
+
+    result = DependencySecurityValidator(use_safety=False).validate(skill)
+
+    assert [(finding.file_path, finding.line_number) for finding in result.findings] == [("requirements.txt", 2)]
+
+
+def test_cli_report_keeps_the_incomplete_reason_next_to_an_advisory(tmp_path, pip_audit):
+    """A confirmed advisory fails the check, and the CLI still says why the audit was incomplete."""
+    advisories, _ = pip_audit
+    advisories["pyyaml"] = [PYYAML_ADVISORY]
+    skill = _skill(tmp_path, {"requirements.txt": "pyyaml==5.3\nrequests>=2\n"})
+    validator = DependencySecurityValidator(use_safety=False)
+    result = validator.validate(skill)
+    result.validator_name = validator.name
+    buffer = io.StringIO()
+    console = Console(file=buffer, width=200, color_system=None)
+
+    CLIReporter(console=console).render_result(result, console)
+
+    output = buffer.getvalue()
+    assert result.is_incomplete and result.status == "incomplete"
+    assert "[FAIL] Validation failed" in output
+    assert "[WARN] requirements.txt: line 2 requires an exact package version" in output
+    assert output.count("PYSEC-2020-176 -> upgrade to 5.4") == 1
+    assert output.index("Warnings:") < output.index("Issues:")
+
+
+def test_markdown_report_keeps_the_incomplete_reason_next_to_an_advisory(tmp_path, pip_audit):
+    """The PR-comment report still says why the audit was incomplete when an advisory is listed."""
+    advisories, _ = pip_audit
+    advisories["idna"] = [{"id": "OSV-2024-1", "fix_versions": ["3.11"], "severity": "medium"}]
+    skill = _skill(tmp_path, {"requirements.txt": "idna==3.10\nrequests>=2\n"})
+    validator = DependencySecurityValidator(use_safety=False)
+    result = validator.validate(skill)
+    result.validator_name = validator.name
+
+    output = MarkdownReporter().render_all([result])
+
+    assert result.status == "incomplete"
+    assert "**Incomplete scanners:** pip-audit" in output
+    assert "- ⚠️ requirements.txt: line 2 requires an exact package version" in output
+    assert "idna==3.10: OSV-2024-1 -&gt; upgrade to 3.11 | <code>requirements.txt:1</code>" in output
+    # The advisory is in the findings table, not repeated as a warning line.
+    assert "- ⚠️ [DEPENDENCY-MEDIUM]" not in output
+
+
+def test_markdown_report_keeps_execution_errors_as_the_incomplete_reason():
+    """With an execution error and no finding, the error explains the incomplete scan, as before."""
+    result = ValidationResult()
+    result.validator_name = "Dependency Vulnerability Audit"
+    result.add_error("pip-audit crashed")
+    result.add_warning("requirements.txt: pip-audit did not complete")
+    result.mark_scan_incomplete("pip-audit")
+
+    output = MarkdownReporter().render_all([result])
+
+    assert "- ❌ pip-audit crashed" in output
+    assert "- ⚠️ requirements.txt: pip-audit did not complete" not in output

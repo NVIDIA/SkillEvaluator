@@ -38,6 +38,7 @@ from skillevaluator.reporting.base import (
     ReporterBase,
     _agent_eval_finite_number,
     additional_errors,
+    additional_warnings,
     get_skip_reason,
     is_advisory_agent_eval_skip,
     is_cleanly_skipped,
@@ -579,7 +580,15 @@ class CLIReporter(ReporterBase):
                     console.print(f"  [yellow][WARN][/yellow] {escape_markup(str(warning))}")
             return
 
-        if errors:
+        # Warnings no finding repeats, such as why a scan is incomplete.
+        warnings = additional_warnings(result)
+        if warnings:
+            if errors:
+                console.print()
+            console.print("[dim]Warnings:[/dim]")
+            for warning in warnings:
+                console.print(f"  [yellow][WARN][/yellow] {escape_markup(str(warning))}")
+        if errors or warnings:
             console.print()
         console.print("[dim]Issues:[/dim]")
         for i, finding in enumerate(result.findings, 1):

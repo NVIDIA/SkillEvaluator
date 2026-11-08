@@ -127,14 +127,25 @@ All notable changes to SkillEvaluator are documented in this file.
   was only an error string such as `[CVE-HIGH] pyyaml==5.3: ...`: it failed
   the run, but JSON `findings`, the severity counts and SARIF results left it
   out, and a policy overlay could not change its severity. The finding
-  metadata now binds the scanned version to the declared exact pin and records
-  the advisory source, fixed versions, aliases, and a runtime, dev, test, docs,
-  or build role from the requirements file name or optional group. Safety JSON
-  with a null or object `severity`, a non-text `advisory`, or a top-level list,
-  and a pip-audit advisory with a null `severity`, no longer stop the check
-  with an `AttributeError`; such a Safety advisory is `medium`. Warnings about
-  a requirements line now give the physical line number when `--hash`
-  continuation lines come before it.
+  metadata binds the scanned version to the declared exact pin, or marks a
+  Safety advisory that matches no audited pin `unbound`, and records the
+  advisory source, fixed versions, aliases, and a runtime, dev, test, docs, or
+  build role from the requirements file name or optional group. Safety's
+  severity now also comes from the CVSS object it prints with an API key, so
+  a CVSS 9.8 advisory is `critical` and fails the run; in 0.8.0 that object
+  stopped the check with an `AttributeError`. A Safety advisory that
+  pip-audit already reported under the same ID or CVE is not repeated. Safety
+  JSON with a null `severity`, a top-level list, or a non-text `advisory`, and
+  a pip-audit advisory with a null `severity`, no longer stop the check with
+  an `AttributeError` or `TypeError`. A critical advisory does not stop a
+  folder run before the remaining skills are audited. Line numbers in
+  findings and warnings now count only line breaks an editor shows, so
+  `--hash` continuation lines or a form feed before a pin no longer shift
+  them. For every check, the CLI report now lists warnings that no finding
+  repeats next to the findings, the Markdown report does so for an
+  `INCOMPLETE` check without an error, and a policy overlay that changes a
+  finding's severity keeps those warnings, so the reason a scan is
+  `INCOMPLETE` stays visible.
 
 ## 0.8.0 - 2026-11-05
 

@@ -446,19 +446,41 @@ For `validate`, the default set is `schema`, `version`, `security`, `pii`, `lice
       spells it, such as `PyYAML==5.3`, and where it is declared (`line 3`, or
       `optional group docs, declaration 2` in `pyproject.toml`). The raw line,
       with its markers and options, is never copied.
-    - `resolution_status: resolved` and `dependency_relationship: direct`: only
-      exact pins are audited, with `--no-deps`, so the advisory applies to the
-      version the target declares.
-    - `dependency_role`: `runtime`, `dev`, `test`, `docs`, or `build`, from the
-      requirements file name (`requirements-dev.txt`) or the optional group.
+    - `resolution_status` and `dependency_relationship`: `resolved` and
+      `direct` when the advisory matches an audited exact pin. Only exact pins
+      are audited, with `--no-deps`, so the advisory applies to the version the
+      target declares. Safety reads the raw requirements file, so it can
+      report a version that no audited pin declares, such as a pin skipped
+      because its marker does not match the scanner platform. That advisory is
+      `unbound`: `declared_constraint`, `declaration`, and
+      `dependency_relationship` are `null`, and the finding has no line.
+    - `dependency_role`: `runtime`, `dev`, `test`, `docs`, or `build`, from a
+      whole word of the requirements file name or the optional group name.
+      Words are split at `-`, `_`, and `.`. `dev`, `devel`, `develop`,
+      `development`, `devtools`, `lint`, and `linting` mean `dev`; `test`,
+      `tests`, `testing`, `testutils`, `pytest`, and `unittest` mean `test`;
+      `doc`, `docs`, and `documentation` mean `docs`; `build` means `build`.
+      So `requirements-dev.txt` is `dev`, while `requirements-latest.txt` and
+      `requirements-docker.txt` are `runtime`.
     - `advisory_id`, `advisory_source` (`pip-audit` or `Safety`),
       `affected_range` (Safety only; `null` for pip-audit), `fixed_versions`,
       and `aliases`.
 
-    A `high` or `critical` advisory fails the run. A Safety advisory without a
-    known severity is `medium`. A policy overlay can change one advisory with
-    `DEPENDENCY.<advisory-id>`, such as `DEPENDENCY.PYSEC-2020-176: low`, or
-    every advisory with `DEPENDENCY.*`.
+    A `high` or `critical` advisory fails the run. Safety's severity is its
+    level word or, when Safety runs with an API key, its CVSS object: the
+    CVSS v3 level, then the v3 score, then the v2 score and level. A Safety
+    advisory with none of these is `medium`. When pip-audit already reported
+    the same advisory ID or CVE for that package version, Safety's copy is
+    left out, so one vulnerability is one finding. A critical advisory does not
+    stop a folder run at that skill, as a critical finding of other checks
+    does without `--continue-on-failure`: every skill is audited.
+
+    A policy overlay can change one advisory with `DEPENDENCY.<advisory-id>`,
+    such as `DEPENDENCY.PYSEC-2020-176: low`, or every advisory with
+    `DEPENDENCY.*`. The warnings that say why an audit is `INCOMPLETE`, such
+    as a line without an exact pin, still appear in the CLI and Markdown
+    reports next to the advisories, and after a policy overlay changes an
+    advisory's severity.
 
     ```bash title="Opt-in dependency audit"
     skillevaluator validate ./my-skill --checks dependency

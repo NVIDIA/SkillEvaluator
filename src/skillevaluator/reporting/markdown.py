@@ -24,6 +24,7 @@ from skillevaluator.evidence import evidence_ref_identity
 from skillevaluator.reporting.base import (
     ReporterBase,
     additional_errors,
+    additional_warnings,
     assess_publication,
     get_skip_reason,
     is_advisory_agent_eval_skip,
@@ -609,8 +610,10 @@ class MarkdownReporter(ReporterBase):
         lines.append(f"**Incomplete scanners:** {', '.join(result.incomplete_scans)}")
         lines.append("")
         self._render_failure(result, lines)
-        if not result.findings and not result.errors:
-            for warning in result.warnings[: self.max_findings_shown]:
+        # Warnings say why a scan did not complete. Show them unless an error
+        # already does; the findings table never repeats them.
+        if not additional_errors(result):
+            for warning in additional_warnings(result)[: self.max_findings_shown]:
                 lines.append(f"- ⚠️ {warning}")
 
     def _render_finding_detail(self, index: int, finding: Finding, lines: list[str]) -> None:

@@ -20,7 +20,7 @@ import math
 import re
 import tempfile
 import tomllib
-from collections.abc import Mapping
+from collections.abc import Collection, Mapping
 from dataclasses import dataclass
 from pathlib import Path
 
@@ -30,25 +30,36 @@ from packaging.version import InvalidVersion, Version
 
 from skillevaluator.utils.secure_fs import SecurePathError, SecureRoot
 from skillevaluator.utils.tool_runner import Severity, ToolResult, Tools, cvss_to_severity, parse_json_output
-from skillevaluator.validators.base import Finding, ValidationResult, ValidatorBase
+from skillevaluator.validators.base import Finding, ValidationResult, ValidatorBase, continue_on_failure_scope
 
 _PIP_AUDIT_COMPLETED_EXIT_CODES = frozenset({0, 1})
 _PIP_AUDIT_SEVERITIES = frozenset(severity.value for severity in Severity)
 # Name tokens of a requirements file stem (``requirements-dev``) or an optional
 # dependency group (``docs``) that mark a non-runtime dependency. Whole tokens
-# only, so ``requirements-latest`` stays runtime.
+# only, so ``requirements-latest`` stays runtime and ``requirements-docker``
+# is not docs.
 _DEPENDENCY_ROLE_TOKENS = {
     "dev": "dev",
+    "devel": "dev",
     "develop": "dev",
     "development": "dev",
+    "devtools": "dev",
+    "lint": "dev",
+    "linting": "dev",
     "test": "test",
     "tests": "test",
     "testing": "test",
+    "testutils": "test",
+    "pytest": "test",
+    "unittest": "test",
     "doc": "docs",
     "docs": "docs",
     "documentation": "docs",
     "build": "build",
 }
+# Safety prints severity as a level word, null without an API key, or a CVSS
+# object such as {"cvssv3": {"base_severity": "CRITICAL", "base_score": 9.8}}.
+_SAFETY_CVSS_KEYS = (("cvssv3", "cvss_v3"), ("cvssv2", "cvss_v2"))
 
 
 @dataclass(frozen=True)
@@ -73,6 +84,8 @@ class DependencyDeclaration:
 
 # Declared pins keyed by (PEP 503 name, version), as pip-audit reports them.
 _DeclaredPins = Mapping[tuple[str, Version], DependencyDeclaration]
+# An advisory pip-audit reported: (PEP 503 name, version, advisory ID or alias).
+_AdvisoryKey = tuple[str, Version | str, str]
 
 
 class DependencySecurityValidator(ValidatorBase):
@@ -121,11 +134,14 @@ class DependencySecurityValidator(ValidatorBase):
                 )
             return result
 
-        result = self._validate_folder_or_skill(
-            skill_path,
-            audit_target,
-            action_description="Auditing dependencies for",
-        )
+        # A critical advisory is about one skill's pins, not a configuration
+        # error that affects every skill, so a folder run never stops early on it.
+        with continue_on_failure_scope(True):
+            result = self._validate_folder_or_skill(
+                skill_path,
+                audit_target,
+                action_description="Auditing dependencies for",
+            )
         if coverages:
             result.metadata["dependency_coverage"] = coverages
         return result
@@ -156,7 +172,8 @@ class DependencySecurityValidator(ValidatorBase):
     def _find_dependency_files(self, skill_path: Path) -> dict:
         """Locate dependency files in skill directory."""
         return {
-            "requirements": list(skill_path.glob("requirements*.txt")),
+            # Sorted, so findings and SARIF results keep one order on every filesystem.
+            "requirements": sorted(skill_path.glob("requirements*.txt")),
             "pyproject": skill_path / "pyproject.toml"
             if (skill_path / "pyproject.toml").exists() or (skill_path / "pyproject.toml").is_symlink()
             else None,
@@ -172,7 +189,7 @@ class DependencySecurityValidator(ValidatorBase):
         result.merge(audit_result)
 
         if self.use_safety and not audit_result.is_incomplete and Tools.safety.is_available:
-            result.merge(self._run_safety(req_file, declared))
+            result.merge(self._run_safety(req_file, declared, reported=self._reported_advisories(audit_result)))
 
         return result
 
@@ -497,16 +514,21 @@ class DependencySecurityValidator(ValidatorBase):
     def _requirement_lines(text: str) -> list[tuple[int, str]]:
         """Join backslash continuations into ``(first physical line, text)`` pairs.
 
-        Each backslash before a newline becomes a space, as before, and the
-        number is the physical line where the declaration starts, so a
-        pip-compile pin followed by ``--hash`` lines keeps its own line.
+        Each backslash before a newline becomes a space, and the text is split
+        where ``str.splitlines`` splits it, as before. The number is the line
+        an editor or SARIF viewer shows where the declaration starts: only
+        ``\\n``, ``\\r\\n`` and ``\\r`` end a line, so a form feed or
+        ``\\u2028`` does not shift it, and a pip-compile pin followed by
+        ``--hash`` lines keeps its own line.
         """
         lines: list[tuple[int, str]] = []
         pending = ""
-        start = 1
-        for number, physical in enumerate(text.splitlines(keepends=True), 1):
+        start = line = 1
+        for physical in text.splitlines(keepends=True):
             if not pending:
-                start = number
+                start = line
+            if physical.endswith(("\n", "\r")):
+                line += 1
             for continuation in ("\\\n", "\\\r\n"):
                 if physical.endswith(continuation):
                     pending += physical[: -len(continuation)] + " "
@@ -691,7 +713,13 @@ class DependencySecurityValidator(ValidatorBase):
         description = vulnerability.get("description")
         return description is None or isinstance(description, str)
 
-    def _run_safety(self, req_file: Path, declared: _DeclaredPins | None = None) -> ValidationResult:
+    def _run_safety(
+        self,
+        req_file: Path,
+        declared: _DeclaredPins | None = None,
+        *,
+        reported: Collection[_AdvisoryKey] = (),
+    ) -> ValidationResult:
         """Run Safety check for supplementary coverage."""
         result = ValidationResult()
 
@@ -702,9 +730,34 @@ class DependencySecurityValidator(ValidatorBase):
 
         # Safety errors are non-critical (pip-audit is primary)
         if tool_result.success:
-            self._process_safety(tool_result.stdout, result, req_file.name, declared=declared)
+            self._process_safety(tool_result.stdout, result, req_file.name, declared=declared, reported=reported)
 
         return result
+
+    @classmethod
+    def _reported_advisories(cls, result: ValidationResult) -> set[_AdvisoryKey]:
+        """Return ``(package, version, ID or alias)`` keys of the pip-audit advisories in ``result``."""
+        reported: set[_AdvisoryKey] = set()
+        for finding in result.findings:
+            metadata = finding.metadata
+            if finding.category != "DEPENDENCY" or metadata.get("advisory_source") != "pip-audit":
+                continue
+            package = cls._advisory_package_key(metadata.get("package_name"), metadata.get("resolved_version"))
+            if package is not None:
+                aliases = metadata.get("aliases")
+                identifiers = [metadata.get("advisory_id"), *(aliases if isinstance(aliases, list) else [])]
+                reported.update((*package, item) for item in identifiers if isinstance(item, str))
+        return reported
+
+    @staticmethod
+    def _advisory_package_key(name: object, version: object) -> tuple[str, Version | str] | None:
+        """Return a PEP 503 name and parsed version, so both scanners' spellings compare equal."""
+        if not isinstance(name, str) or not isinstance(version, str):
+            return None
+        try:
+            return canonicalize_name(name), Version(version)
+        except InvalidVersion:
+            return canonicalize_name(name), version
 
     def _process_safety(
         self,
@@ -713,8 +766,14 @@ class DependencySecurityValidator(ValidatorBase):
         source: str = "requirements.txt",
         *,
         declared: _DeclaredPins | None = None,
+        reported: Collection[_AdvisoryKey] = (),
     ) -> None:
-        """Parse Safety output and report additional findings."""
+        """Parse Safety output and report additional findings.
+
+        ``reported`` holds the pip-audit advisories of the same file as
+        ``(package, version, ID or alias)`` keys. A Safety advisory whose ID or
+        CVE pip-audit already reported for that package version is not repeated.
+        """
         try:
             data = parse_json_output(output)
         except (RecursionError, ValueError):
@@ -730,12 +789,9 @@ class DependencySecurityValidator(ValidatorBase):
                 continue
 
             pkg_name = self._text_field(vuln, "package_name", "name") or "unknown"
-            # Safety reports severity as null without an API key, or as an object;
-            # only a known level is trusted.
-            severity_str = (self._text_field(vuln, "severity") or "").casefold()
-            severity = Severity(severity_str) if severity_str in Severity else Severity.MEDIUM
+            severity = self._safety_severity(vuln.get("severity"))
 
-            vuln_id = self._text_field(vuln, "vulnerability_id", "id") or "Unknown"
+            vuln_id = self._identifier_field(vuln, "vulnerability_id", "id") or "Unknown"
             # Safety database IDs are bare numbers; name the source in the check.
             advisory_id = f"SAFETY-{vuln_id}" if vuln_id.isdigit() else vuln_id
             advisory = (self._text_field(vuln, "advisory") or "")[:100]
@@ -750,6 +806,10 @@ class DependencySecurityValidator(ValidatorBase):
             cve = self._text_field(vuln, "CVE", "cve")
             if cve and cve != advisory_id and cve not in aliases:
                 aliases.append(cve)
+            package = self._advisory_package_key(pkg_name, pkg_version)
+            if package is not None and any((*package, item) in reported for item in (vuln_id, advisory_id, *aliases)):
+                # pip-audit is the primary scanner; one vulnerability is one finding.
+                continue
             affected_range = self._text_field(vuln, "affected_range", "specifier", "vulnerable_spec") or ", ".join(
                 self._text_list_field(vuln, "vulnerable_spec")
             )
@@ -850,7 +910,9 @@ class DependencySecurityValidator(ValidatorBase):
             "declaration": declaration.declaration if declaration else None,
             # Only exact pins are audited, so a bound advisory applies to the
             # version the target declares, not to one pip resolved at scan time.
-            "resolution_status": "resolved",
+            # Safety reads the raw file, so it can report a version no audited
+            # pin declares, such as a pin skipped for its platform marker.
+            "resolution_status": "resolved" if declaration else "unbound",
             "dependency_role": declaration.role if declaration else self._role_from_name(Path(source).stem),
             # pip-audit runs with --no-deps, so every audited package is a pin
             # the file declares directly.
@@ -891,6 +953,50 @@ class DependencySecurityValidator(ValidatorBase):
             if token in _DEPENDENCY_ROLE_TOKENS:
                 return _DEPENDENCY_ROLE_TOKENS[token]
         return "runtime"
+
+    @staticmethod
+    def _safety_severity(value: object) -> Severity:
+        """Return Safety's severity: a level word, else its CVSS object, else medium.
+
+        Safety prints null without an API key and, with one, an object such as
+        ``{"cvssv3": {"base_severity": "CRITICAL", "base_score": 9.8}}``. The
+        CVSS v3 level wins, then the v3 score, then the v2 score and level.
+        """
+        if isinstance(value, str):
+            level = value.strip().casefold()
+            return Severity(level) if level in Severity else Severity.MEDIUM
+        if not isinstance(value, dict):
+            return Severity.MEDIUM
+        v3, v2 = (
+            next((value[key] for key in keys if isinstance(value.get(key), dict)), {}) for keys in _SAFETY_CVSS_KEYS
+        )
+        level = v3.get("base_severity")
+        if isinstance(level, str) and level.strip().casefold() in Severity:
+            return Severity(level.strip().casefold())
+        for block in (v3, v2):
+            score = block.get("base_score")
+            if (
+                not isinstance(score, bool)
+                and isinstance(score, int | float)
+                and math.isfinite(score)
+                and 0.0 <= score <= 10.0
+            ):
+                return cvss_to_severity(score)
+        level = v2.get("base_severity")
+        if isinstance(level, str) and level.strip().casefold() in Severity:
+            return Severity(level.strip().casefold())
+        return Severity.MEDIUM
+
+    @staticmethod
+    def _identifier_field(data: dict, *keys: str) -> str | None:
+        """Return the first non-empty string or integer ID among ``keys``, as text."""
+        for key in keys:
+            value = data.get(key)
+            if isinstance(value, int) and not isinstance(value, bool):
+                return str(value)
+            if isinstance(value, str) and value.strip():
+                return value.strip()
+        return None
 
     @staticmethod
     def _text_field(data: dict, *keys: str) -> str | None:

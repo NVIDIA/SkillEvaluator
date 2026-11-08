@@ -415,6 +415,26 @@ class TestLocalCatalogWorkflow:
 
     @patch("skillevaluator.validators.similarity.EmbeddingRegistry")
     @patch("skillevaluator.validators.similarity.EmbeddingClient")
+    def test_catalog_target_with_a_non_string_name_explains_the_frontmatter_rule(
+        self, _mock_client_cls, mock_registry_cls, tmp_path: Path
+    ) -> None:
+        catalog = tmp_path / "catalog.json"
+        catalog.write_text("{}")
+        target = tmp_path / "target"
+        target.mkdir()
+        (target / "SKILL.md").write_text("---\nname: 2048\ndescription: Numeric name\n---\n", encoding="utf-8")
+
+        result = SimilarityValidator(content_type="skill", catalog_path=catalog).validate(target)
+
+        assert not result.passed
+        assert result.errors == [
+            "Catalog comparison requires a skill directory with a root SKILL.md "
+            "whose frontmatter has a string name and description"
+        ]
+        mock_registry_cls.return_value.query_entry.assert_not_called()
+
+    @patch("skillevaluator.validators.similarity.EmbeddingRegistry")
+    @patch("skillevaluator.validators.similarity.EmbeddingClient")
     def test_catalog_extracts_only_the_root_skill(self, _mock_client_cls, mock_registry_cls, tmp_path: Path) -> None:
         catalog = tmp_path / "catalog.json"
         catalog.write_text("{}")

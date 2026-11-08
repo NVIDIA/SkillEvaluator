@@ -312,3 +312,66 @@ def test_alias_amplified_frontmatter_fails_the_scan_before_any_embedding_request
     assert result.errors == ["Manifest structured-data complexity limit exceeded: alias-dag/SKILL.md"]
     client.embed.assert_not_called()
     client.embed_single.assert_not_called()
+
+
+def _embedded_texts(client: MagicMock) -> list[str]:
+    return [text for call in client.embed.call_args_list for text in call.args[0]]
+
+
+@pytest.mark.parametrize(
+    "manifest",
+    [
+        pytest.param("---\nname: yes\ndescription: Odd\n---\n", id="boolean-name"),
+        pytest.param("---\nname: odd\ndescription: Odd\nlast_updated: 2024-02-30\n---\n", id="impossible-date"),
+    ],
+)
+def test_invalid_manifest_is_skipped_and_the_rest_are_compared(tmp_path: Path, monkeypatch, manifest: str) -> None:
+    _collection(tmp_path, 2)
+    (tmp_path / "odd").mkdir()
+    (tmp_path / "odd" / "SKILL.md").write_text(manifest, encoding="utf-8")
+    client = _client()
+    monkeypatch.setattr("skillevaluator.validators.similarity.EmbeddingClient", lambda **_kwargs: client)
+
+    (result,) = run_similarity_check(tmp_path, content_type="skill")
+
+    assert result.passed is True
+    assert result.errors == []
+    assert sorted(_embedded_texts(client)) == ["skill-0: Description 0", "skill-1: Description 1"]
+
+
+@pytest.mark.parametrize("full_body", [False, True])
+def test_frontmatter_field_over_the_catalog_text_limit_fails_in_every_mode(
+    tmp_path: Path, monkeypatch, full_body: bool
+) -> None:
+    _collection(tmp_path, 2)
+    (tmp_path / "odd").mkdir()
+    (tmp_path / "odd" / "SKILL.md").write_text(
+        "---\nname: odd\ndescription: " + "x" * 16_385 + "\n---\n", encoding="utf-8"
+    )
+    client = _client()
+    monkeypatch.setattr("skillevaluator.validators.similarity.EmbeddingClient", lambda **_kwargs: client)
+
+    (result,) = run_similarity_check(tmp_path, content_type="skill", full_body=full_body)
+
+    assert result.passed is False
+    assert result.errors == ["Manifest frontmatter description exceeds the 16384-character limit: odd/SKILL.md"]
+    client.embed.assert_not_called()
+    client.embed_single.assert_not_called()
+
+
+def test_name_and_description_must_fit_the_embedding_text_limit_together(tmp_path: Path, monkeypatch) -> None:
+    # Each field is within the 16,384-character per-field limit, but description
+    # mode embeds "name: description", which is over the same limit.
+    _collection(tmp_path, 2)
+    (tmp_path / "odd").mkdir()
+    (tmp_path / "odd" / "SKILL.md").write_text(
+        "---\nname: " + "n" * 9_000 + "\ndescription: " + "d" * 9_000 + "\n---\n", encoding="utf-8"
+    )
+    client = _client()
+    monkeypatch.setattr("skillevaluator.validators.similarity.EmbeddingClient", lambda **_kwargs: client)
+
+    (result,) = run_similarity_check(tmp_path, content_type="skill")
+
+    assert result.passed is False
+    assert result.errors == ["Description embedding text character limit exceeded (16384) before embedding"]
+    client.embed.assert_not_called()

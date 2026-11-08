@@ -13,6 +13,7 @@ from unittest.mock import MagicMock
 import pytest
 
 import skillevaluator.embedding.extractor as extractor_module
+import skillevaluator.embedding.registry as registry_module
 from skillevaluator.embedding.extractor import (
     _is_symlink_or_reparse,
     discover_and_extract,
@@ -669,10 +670,28 @@ def _merge_chain(*, levels: int, fanout: int) -> str:
     return "---\n" + "\n".join(lines) + "\n---\n# Body\n"
 
 
+# Markdown whose text between two ``---`` lines is not a YAML mapping, so it is
+# not frontmatter. Each is over a structure limit if parsed as YAML: a list of
+# 1,100 items, a plain scalar of about 70,400 characters, a sequence of mappings
+# that chains merge keys, and a 1,100-item ``!!set``, which loads as a set.
+NON_MAPPING_BLOCKS = [
+    pytest.param("\n".join(f"- item {index}" for index in range(1_100)), id="thematic-break-list"),
+    pytest.param("A line of prose that holds no key or colon.\n" * 1_600, id="thematic-break-prose"),
+    pytest.param(
+        "\n".join(
+            ["- &m0 {" + ", ".join(f"k{index}: {index}" for index in range(10)) + "}"]
+            + [f"- &m{level} {{<<: [{', '.join([f'*m{level - 1}'] * 10)}]}}" for level in range(1, 5)]
+        ),
+        id="sequence-merge-chain",
+    ),
+    pytest.param("!!set\n" + "\n".join(f"? item{index}" for index in range(1_100)), id="set-root"),
+]
+
+
 def _write_skill_manifest(root: Path, name: str, manifest: str) -> Path:
     skill_dir = root / name
     skill_dir.mkdir(parents=True)
-    (skill_dir / "SKILL.md").write_text(manifest, encoding="utf-8")
+    (skill_dir / "SKILL.md").write_bytes(manifest.encode("utf-8"))
     return skill_dir
 
 
@@ -684,13 +703,22 @@ class TestBoundedFrontmatter:
         # 2**18 list items from under 450 bytes; str() of the list would be megabytes.
         skill_dir = _write_skill_manifest(tmp_path, "alias-dag", _alias_dag(field, levels=18, fanout=2))
 
-        with pytest.raises(ValueError, match=r"structured-data complexity limit exceeded: SKILL\.md"):
+        with pytest.raises(ValueError, match=r"structured-data complexity limit exceeded: alias-dag/SKILL\.md$"):
             extract_from_skill(skill_dir)
 
     def test_merge_key_chain_fails_closed(self, tmp_path: Path) -> None:
         skill_dir = _write_skill_manifest(tmp_path, "merge-chain", _merge_chain(levels=4, fanout=10))
 
-        with pytest.raises(ValueError, match=r"structured-data complexity limit exceeded: SKILL\.md"):
+        with pytest.raises(ValueError, match=r"structured-data complexity limit exceeded: merge-chain/SKILL\.md$"):
+            extract_from_skill(skill_dir)
+
+    def test_oversized_integer_fails_closed(self, tmp_path: Path) -> None:
+        # 3,600 hex digits are 14,400 bits, over the 14,000-bit integer limit.
+        skill_dir = _write_skill_manifest(
+            tmp_path, "big-int", "---\nname: big-int\ndescription: Big\nversion: 0x" + "f" * 3_600 + "\n---\n"
+        )
+
+        with pytest.raises(ValueError, match=r"structured-data complexity limit exceeded: big-int/SKILL\.md$"):
             extract_from_skill(skill_dir)
 
     def test_deep_nesting_fails_closed_without_recursion_error(self, tmp_path: Path) -> None:
@@ -699,7 +727,7 @@ class TestBoundedFrontmatter:
             tmp_path, "deep", f"---\nname: deep\ndescription: Deep\nextra: {nested}\n---\n# Body\n"
         )
 
-        with pytest.raises(ValueError, match=r"structured-data complexity limit exceeded: SKILL\.md"):
+        with pytest.raises(ValueError, match=r"structured-data complexity limit exceeded: deep/SKILL\.md$"):
             extract_from_skill(skill_dir)
 
     @pytest.mark.parametrize(
@@ -712,21 +740,23 @@ class TestBoundedFrontmatter:
             ("name", "true"),
         ],
     )
-    def test_non_string_field_is_never_coerced(self, tmp_path: Path, field: str, value: str) -> None:
+    def test_non_string_field_skips_the_manifest_without_coercion(
+        self, tmp_path: Path, monkeypatch, field: str, value: str
+    ) -> None:
         # Three alias levels stay within the graph limits, yet str() of *items
         # would turn this 278-byte frontmatter into an 8,222-character description.
         lines = ["seed: &a0 safe"]
         lines += [f"a{level}: &a{level} [{', '.join([f'*a{level - 1}'] * 10)}]" for level in (1, 2, 3)]
         lines += ["anchor: &items [*a3]", "name: safe-name", "description: Safe description", f"{field}: {value}"]
         skill_dir = _write_skill_manifest(tmp_path, "typed", "---\n" + "\n".join(lines) + "\n---\n# Body\n")
+        monkeypatch.setattr(extractor_module, "ContentEntry", MagicMock(side_effect=AssertionError("entry built")))
 
-        with pytest.raises(ValueError, match=rf"frontmatter {field} must be a string: SKILL\.md"):
-            extract_from_skill(skill_dir)
+        assert extract_from_skill(skill_dir) is None
 
     @pytest.mark.parametrize("field", ["name", "description"])
-    def test_field_length_matches_the_embedding_text_limit(self, tmp_path: Path, field: str) -> None:
+    def test_field_length_matches_the_catalog_text_limit(self, tmp_path: Path, field: str) -> None:
         limit = extractor_module.MAX_FRONTMATTER_FIELD_CHARS
-        assert limit == 16_384
+        assert limit == registry_module.MAX_CATALOG_TEXT_LENGTH == 16_384
         values = {"name": "safe-name", "description": "Safe description"}
 
         values[field] = "x" * limit
@@ -741,8 +771,41 @@ class TestBoundedFrontmatter:
         rejected = _write_skill_manifest(
             tmp_path, "over-limit", f"---\nname: {values['name']}\ndescription: {values['description']}\n---\n"
         )
-        with pytest.raises(ValueError, match=rf"frontmatter {field} exceeds the 16384-character limit: SKILL\.md"):
+        with pytest.raises(
+            ValueError, match=rf"frontmatter {field} exceeds the 16384-character limit: over-limit/SKILL\.md$"
+        ):
             extract_from_skill(rejected)
+
+    def test_single_workflow_error_names_its_directory(self, tmp_path: Path) -> None:
+        workflow_dir = tmp_path / "long-workflow"
+        workflow_dir.mkdir()
+        (workflow_dir / "workflow-rules.mdc").write_bytes(
+            ("---\ntitle: Workflow\ndescription: " + "x" * 16_385 + "\n---\n").encode("utf-8")
+        )
+
+        with pytest.raises(
+            ValueError, match=r"description exceeds the 16384-character limit: long-workflow/workflow-rules\.mdc$"
+        ):
+            extract_from_workflow(workflow_dir)
+
+    def test_single_rule_error_names_its_directory(self, tmp_path: Path) -> None:
+        rule_dir = tmp_path / "rules-dir"
+        rule_dir.mkdir()
+        (rule_dir / "long.mdc").write_bytes(
+            ("---\ntitle: " + "x" * 16_385 + "\ndescription: Rule\n---\n").encode("utf-8")
+        )
+
+        with pytest.raises(ValueError, match=r"title exceeds the 16384-character limit: rules-dir/long\.mdc$"):
+            extract_from_rule(rule_dir / "long.mdc")
+
+    @pytest.mark.parametrize("relative", [".", "nested/.."])
+    def test_relative_directory_is_named_by_its_own_name(self, tmp_path: Path, monkeypatch, relative: str) -> None:
+        skill_dir = _write_skill_manifest(tmp_path, "here", _merge_chain(levels=4, fanout=10))
+        (skill_dir / "nested").mkdir()
+        monkeypatch.chdir(skill_dir)
+
+        with pytest.raises(ValueError, match=r"structured-data complexity limit exceeded: here/SKILL\.md$"):
+            extract_from_skill(Path(*relative.split("/")))
 
     def test_repeated_key_keeps_the_last_value_like_agent_clients(self, tmp_path: Path) -> None:
         skill_dir = _write_skill_manifest(
@@ -754,17 +817,29 @@ class TestBoundedFrontmatter:
         assert entry is not None
         assert entry.name == "second"
 
-    @pytest.mark.parametrize("value", ['!!int ""', "!!bool nope", "!!float x"])
-    def test_invalid_tagged_scalar_is_invalid_frontmatter(self, tmp_path: Path, value: str) -> None:
-        skill_dir = _write_skill_manifest(
-            tmp_path, "tagged", f"---\nname: tagged\ndescription: Tagged\nversion: {value}\n---\n"
-        )
+    @pytest.mark.parametrize(
+        "line",
+        [
+            pytest.param('version: !!int ""', id="tagged-int"),
+            pytest.param("version: !!bool nope", id="tagged-bool"),
+            pytest.param("version: !!float x", id="tagged-float"),
+            pytest.param("last_updated: 2024-02-30", id="impossible-date"),
+        ],
+    )
+    def test_unconstructible_value_is_invalid_frontmatter(self, tmp_path: Path, line: str) -> None:
+        skill_dir = _write_skill_manifest(tmp_path, "tagged", f"---\nname: tagged\ndescription: Tagged\n{line}\n---\n")
 
         assert extract_from_skill(skill_dir) is None
 
     @pytest.mark.parametrize("value", ['""', "[]", "{}", "0", "false"])
     def test_empty_field_still_skips_the_manifest(self, tmp_path: Path, value: str) -> None:
         skill_dir = _write_skill_manifest(tmp_path, "empty", f"---\nname: empty\ndescription: {value}\n---\n")
+
+        assert extract_from_skill(skill_dir) is None
+
+    @pytest.mark.parametrize("block", NON_MAPPING_BLOCKS)
+    def test_block_that_is_not_a_mapping_skips_the_manifest_unparsed(self, tmp_path: Path, block: str) -> None:
+        skill_dir = _write_skill_manifest(tmp_path, "not-a-mapping", f"---\n{block}\n---\n# Body\n")
 
         assert extract_from_skill(skill_dir) is None
 
@@ -775,21 +850,21 @@ class TestBoundedFrontmatter:
                 "skill",
                 "nested/bomb/SKILL.md",
                 _alias_dag("description", levels=18, fanout=2),
-                "complexity limit",
+                "complexity limit exceeded",
                 id="skill",
             ),
             pytest.param(
                 "rules",
-                "nested/bomb.mdc",
-                "---\ntitle: [a, b]\ndescription: Rule\n---\n",
-                "title must be a string",
+                "nested/long.mdc",
+                "---\ntitle: " + "x" * 16_385 + "\ndescription: Rule\n---\n",
+                "title exceeds the 16384-character limit",
                 id="rules",
             ),
             pytest.param(
                 "workflows",
-                "nested/bomb/workflow-rules.mdc",
-                "---\ntitle: Workflow\ndescription: {a: b}\n---\n",
-                "description must be a string",
+                "nested/long/workflow-rules.mdc",
+                "---\ntitle: Workflow\ndescription: " + "x" * 16_385 + "\n---\n",
+                "description exceeds the 16384-character limit",
                 id="workflows",
             ),
         ],
@@ -802,7 +877,42 @@ class TestBoundedFrontmatter:
         _write_workflow(tmp_path, "valid-workflow", "valid-workflow", "A valid workflow")
         target = tmp_path.joinpath(*relative.split("/"))
         target.parent.mkdir(parents=True, exist_ok=True)
-        target.write_text(manifest, encoding="utf-8")
+        target.write_bytes(manifest.encode("utf-8"))
 
-        with pytest.raises(ValueError, match=rf"{message}.*: {relative}$"):
+        with pytest.raises(ValueError, match=rf"{message}: {relative}$"):
             discover_and_extract(tmp_path, content_type)
+
+    @pytest.mark.parametrize(
+        ("content_type", "relative", "manifest", "expected"),
+        [
+            pytest.param(
+                "skill", "nested/odd/SKILL.md", "---\nname: 2048\ndescription: Odd\n---\n", "valid-skill", id="skill"
+            ),
+            pytest.param(
+                "skill", "nested/odd/SKILL.md", "---\n- item\n- item\n---\n# Body\n", "valid-skill", id="skill-list"
+            ),
+            pytest.param(
+                "rules", "nested/odd.mdc", "---\ntitle: [a, b]\ndescription: Rule\n---\n", "valid-rule", id="rules"
+            ),
+            pytest.param(
+                "workflows",
+                "nested/odd/workflow-rules.mdc",
+                "---\ntitle: Workflow\ndescription: {a: b}\n---\n",
+                "valid-workflow",
+                id="workflows",
+            ),
+        ],
+    )
+    def test_collection_skips_a_manifest_whose_field_is_not_a_string(
+        self, tmp_path: Path, write_skill, content_type: str, relative: str, manifest: str, expected: str
+    ) -> None:
+        write_skill(tmp_path, "valid-skill", "A valid skill")
+        _write_rule(tmp_path, "valid.mdc", "valid-rule", "A valid rule")
+        _write_workflow(tmp_path, "valid-workflow", "valid-workflow", "A valid workflow")
+        target = tmp_path.joinpath(*relative.split("/"))
+        target.parent.mkdir(parents=True, exist_ok=True)
+        target.write_bytes(manifest.encode("utf-8"))
+
+        entries = discover_and_extract(tmp_path, content_type)
+
+        assert [entry.name for entry in entries] == [expected]

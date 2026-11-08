@@ -18,8 +18,7 @@ from harbor.agents.installed.base import BaseInstalledAgent, NetworkConnectionEr
 from harbor.agents.installed.opencode import OpenCode
 from harbor.utils.import_path import import_symbol
 
-from skillevaluator.tier3.harbor import runner
-from skillevaluator.tier3.harbor.installed_agents import SkillEvaluatorOpenCode
+from skillevaluator.tier3.harbor import CONTAINER_AGENT_IMPORT_PATHS, DOCKER_AGENT_IMPORT_PATHS, runner
 from skillevaluator.tier3.harbor.local_agents import AgentSetupNetworkError, SetupNetworkErrorAgent
 from skillevaluator.tier3.plugin_native import (
     NATIVE_AGENT_IMPORT_PATHS,
@@ -64,18 +63,24 @@ class _NativeHooks:
 
 
 @pytest.mark.parametrize(
-    ("env_mode", "baseline", "with_arm", "base"),
+    ("env_mode", "default_paths", "baseline", "with_arm"),
     [
-        ("docker", "PrivateInstalledOpenCode", "NativeInstalledOpenCode", SkillEvaluatorOpenCode),
-        ("gke", "PrivateOpenCode", "NativeOpenCode", OpenCode),
+        ("docker", DOCKER_AGENT_IMPORT_PATHS, "PrivateInstalledOpenCode", "NativeInstalledOpenCode"),
+        ("gke", CONTAINER_AGENT_IMPORT_PATHS, "PrivateOpenCode", "NativeOpenCode"),
     ],
 )
 def test_opencode_plugin_arms_share_the_environment_default_agent(
-    monkeypatch: pytest.MonkeyPatch, env_mode: str, baseline: str, with_arm: str, base: type
+    monkeypatch: pytest.MonkeyPatch,
+    env_mode: str,
+    default_paths: dict[str, str],
+    baseline: str,
+    with_arm: str,
 ) -> None:
-    # Docker-engine runs install OpenCode through the installer-aware wrapper,
-    # GKE through Harbor's stock agent; both plugin arms must match that run.
+    # Both plugin arms must set OpenCode up as an ordinary run in that
+    # environment does: through its default import path, else Harbor's stock agent.
     monkeypatch.setattr(runner, "_private_runtime_hooks", _NativeHooks)
+    default_path = default_paths.get("opencode")
+    default_agent = import_symbol(default_path) if default_path is not None else OpenCode
 
     baseline_path, with_path = runner._private_agent_paths(["opencode"], {}, env_mode)["opencode"]
 
@@ -83,10 +88,9 @@ def test_opencode_plugin_arms_share_the_environment_default_agent(
     assert with_path == f"skillevaluator.tier3.harbor.native_agents:{with_arm}"
     for path in (baseline_path, with_path):
         cls = import_symbol(path)
-        assert issubclass(cls, base)
-        assert issubclass(cls, SkillEvaluatorOpenCode) is (base is SkillEvaluatorOpenCode)
-        assert cls.ensure_system_dependencies is base.ensure_system_dependencies
-        assert cls.install is OpenCode.install
+        assert issubclass(cls, default_agent)
+        assert cls.install is default_agent.install
+        assert cls.ensure_system_dependencies is default_agent.ensure_system_dependencies
 
 
 def test_unknown_private_wrapper_does_not_silently_replace_custom_routing() -> None:

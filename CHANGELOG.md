@@ -126,10 +126,14 @@ All notable changes to SkillEvaluator are documented in this file.
   criterion is missing, repeated or unknown, or has a score outside 0 to 10 or
   a pass flag that is not a boolean. In 0.8.0 the first such reply failed
   Tier 1 with a HIGH `llm_invalid_response` or `llm_unavailable` finding; now
-  only a second one does. A failed request, a refusal or a truncated reply is
-  still not retried. The JSON report records the number of requests as
-  `judge_attempts` in the skill's `rubric_eval` success detail or `llm_*`
-  finding and, for a single skill, also in the `rubric_eval` object.
+  only a second one does. The LLM client still retries transient provider
+  errors as set by `SKILL_EVAL_LLM_MAX_RETRIES`; a request that still fails
+  after those retries, a refusal or a truncated reply is not asked again. The
+  JSON report records `judge_attempts`, the number of times the judge was
+  asked (1, or 2 after a rejected reply, not counting the client's retries),
+  in the skill's `rubric_eval` success detail or `llm_*` finding and, for a
+  single skill, also in the `rubric_eval` object. It is left out when the
+  first request fails, for example with no provider configured.
 
 ## 0.8.0 - 2026-11-05
 

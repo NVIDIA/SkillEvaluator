@@ -50,6 +50,9 @@ _MAX_SKILL_CONTENT_BYTES = 1024 * 1024
 _MAX_SUPPLEMENTARY_FILE_BYTES = 3000
 _MAX_SUPPLEMENTARY_TOTAL_BYTES = 30000
 _MAX_LINKED_MARKDOWN_FILES = 256
+# A rejected judge reply's problem text kept in the log line and retry note.
+# 500 characters hold every missing and some unexpected criterion ids.
+_MAX_RETRY_PROBLEM_CHARS = 500
 
 
 class _UnsafeRubricInputError(ValueError):
@@ -107,20 +110,21 @@ def _read_bounded_rubric_file(
     return text, len(bounded)
 
 
-def _normalize_rubric_checks(checks: Any) -> tuple[list[dict], str | None]:
+def _normalize_rubric_checks(checks: Any, criteria: list[dict] | None = None) -> tuple[list[dict], str | None]:
     """Validate criterion evidence and return it in rubric-schema order.
 
     The judge is authoritative only for each criterion's bounded score, pass
     flag, and notes. Criterion identity/order and description come from the
     local rubric schema so duplicate, missing, or invented criteria cannot
-    influence the aggregate.
+    influence the aggregate. ``criteria`` defaults to ``RUBRIC_CRITERIA``.
     """
+    criteria = RUBRIC_CRITERIA if criteria is None else criteria
     if not isinstance(checks, list):
         return [], "LLM judge returned invalid rubric evidence: checks must be a list"
     if not checks:
         return (
             [],
-            f"LLM judge returned incomplete rubric evidence: expected {len(RUBRIC_CRITERIA)} criteria, received 0",
+            f"LLM judge returned incomplete rubric evidence: expected {len(criteria)} criteria, received 0",
         )
 
     returned_ids: list[str] = []
@@ -132,7 +136,7 @@ def _normalize_rubric_checks(checks: Any) -> tuple[list[dict], str | None]:
             return [], f"LLM judge returned invalid rubric evidence: criterion at index {index} must have a string id"
         returned_ids.append(criterion_id)
 
-    expected_ids = [criterion["id"] for criterion in RUBRIC_CRITERIA]
+    expected_ids = [criterion["id"] for criterion in criteria]
     expected_id_set = set(expected_ids)
     id_counts = Counter(returned_ids)
     duplicates = sorted(criterion_id for criterion_id, count in id_counts.items() if count > 1)
@@ -150,7 +154,7 @@ def _normalize_rubric_checks(checks: Any) -> tuple[list[dict], str | None]:
 
     checks_by_id = {check["id"]: check for check in checks}
     normalized: list[dict] = []
-    for criterion in RUBRIC_CRITERIA:
+    for criterion in criteria:
         criterion_id = criterion["id"]
         check = checks_by_id[criterion_id]
         score = check.get("score")
@@ -198,12 +202,23 @@ def _aggregate_rubric_score(checks: list[dict]) -> float:
     return round(weighted_score / total_weight * 10, 1)
 
 
-def _rubric_report_problem(report: Any) -> str | None:
-    """Return why a parsed judge reply cannot be scored, or ``None`` when it can."""
+def _rubric_report_problem(report: Any, criteria: list[dict]) -> str | None:
+    """Return why a parsed judge reply cannot be scored against ``criteria``, or ``None`` when it can."""
     if not isinstance(report, dict):
         return "LLM judge returned invalid rubric evidence: response must be an object"
-    _checks, problem = _normalize_rubric_checks(report.get("checks"))
+    _checks, problem = _normalize_rubric_checks(report.get("checks"), criteria)
     return problem
+
+
+def _bounded_problem(problem: str) -> str:
+    """Shorten a rejection reason for the log line and the retry note.
+
+    The reason quotes the judge's own text, such as an invented criterion id,
+    which has no length limit.
+    """
+    if len(problem) <= _MAX_RETRY_PROBLEM_CHARS:
+        return problem
+    return f"{problem[:_MAX_RETRY_PROBLEM_CHARS]} ... [truncated]"
 
 
 class _UnavailableRubricReport(dict):
@@ -248,7 +263,8 @@ class RubricJudge(LLMClient):
     default_reasoning_effort: str | None = RUBRIC_REASONING_EFFORT
     response_schema: dict[str, Any] | None = RUBRIC_JSON_SCHEMA
     schema_name: str = "rubric_evaluation"
-    # Judge requests sent by the last process() call: 2 after one rejected reply.
+    # Times the last process() call asked the judge: 1, or 2 after a rejected
+    # reply; 0 when the first request failed, so no reply came back.
     last_attempts: int = 0
 
     _SYSTEM_PROMPT = (
@@ -324,13 +340,17 @@ class RubricJudge(LLMClient):
         """Ask the judge, and ask once more, naming the problem, if its reply cannot be scored.
 
         A reply that is not JSON, or whose ``checks`` miss, repeat or invent a
-        criterion or break a criterion's score or pass flag, gets one more
-        request: the same prompts plus the problem. The second reply is
-        returned as parsed, so the validator still fails closed when it is
-        invalid too. A provider error (a failed request, a refusal or a
-        truncated reply) is not retried: as in :meth:`LLMClient.process`,
+        criterion of ``criteria`` (``RUBRIC_CRITERIA`` unless given) or break
+        a criterion's score or pass flag, gets one more request: the same
+        prompts plus the problem, cut to ``_MAX_RETRY_PROBLEM_CHARS``. The
+        second reply is returned as parsed, so the validator still fails
+        closed when it is invalid too. A provider error that the client's own
+        transient-error retries do not clear (a failed request, a refusal or
+        a truncated reply) is not asked again: as in :meth:`LLMClient.process`,
         ``last_failure`` records it and the fallback is returned. A truncated
-        reply is never salvaged. ``last_attempts`` counts the requests sent.
+        reply is never salvaged. ``last_attempts`` counts the times the judge
+        was asked, not the client's retries, and stays 0 when the first
+        request fails.
         """
         self.last_failure = None
         self.last_attempts = 0
@@ -338,19 +358,22 @@ class RubricJudge(LLMClient):
             system_prompt = self.get_system_prompt()
             user_prompt = self.create_user_prompt(**kwargs)
             raw = self._request_rubric(system_prompt, user_prompt)
+            self.last_attempts = 1
             try:
                 report = self.parse_response(raw, **kwargs)
             except json.JSONDecodeError as exc:
                 problem = exc.msg
             else:
-                problem = _rubric_report_problem(report)
+                problem = _rubric_report_problem(report, kwargs.get("criteria", RUBRIC_CRITERIA))
                 if problem is None:
                     return report
+            problem = _bounded_problem(problem)
             logger.warning("Rubric judge reply rejected (%s) - asking once more", problem)
             retry_prompt = (
                 f"{user_prompt}\nYOUR PREVIOUS REPLY WAS REJECTED: {problem}. "
                 "Reply again with ONLY one JSON object in the shape described above.\n"
             )
+            self.last_attempts = 2
             return self.parse_response(self._request_rubric(system_prompt, retry_prompt), **kwargs)
         except NotImplementedError:
             raise
@@ -360,7 +383,6 @@ class RubricJudge(LLMClient):
             return self.get_fallback_response(**kwargs)
 
     def _request_rubric(self, system_prompt: str, user_prompt: str) -> str:
-        self.last_attempts += 1
         return self.completions(
             system_prompt,
             user_prompt,
@@ -629,7 +651,7 @@ class RubricEvalValidator(ValidatorBase):
         return {"llm_provider": provider, "llm_model_used": model}
 
     def _judge_attempts(self) -> dict[str, int]:
-        """Count the judge requests behind this skill's result, when the judge was asked."""
+        """Count the times the judge was asked for this skill, once a first reply came back."""
         attempts = self._judge.last_attempts
         return {"judge_attempts": attempts} if attempts else {}
 
@@ -842,8 +864,8 @@ class RubricEvalValidator(ValidatorBase):
             **judge_attempts,
         }
 
-        # The success detail also names the model and counts the judge
-        # requests, so each skill of a folder run keeps its own.
+        # The success detail also names the model and counts the times the
+        # judge was asked, so each skill of a folder run keeps its own.
         result.add_success(
             check_name="rubric_eval",
             message=f"LLM Rubric Score: {overall_score}/100",

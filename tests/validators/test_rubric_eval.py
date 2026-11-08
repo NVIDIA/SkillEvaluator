@@ -1132,6 +1132,27 @@ def _llm_findings(result) -> list:
     return [finding for finding in result.findings if finding.check_name.startswith("llm_")]
 
 
+def _use_anthropic(monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setenv("SKILL_EVAL_LLM_PROVIDER", "anthropic")
+    monkeypatch.setenv("SKILL_EVAL_LLM_MODEL", "claude-opus-5-5")
+    monkeypatch.setenv("ANTHROPIC_API_KEY", "test-key")
+    for name in ("SKILL_EVAL_LLM_BASE_URL", "ANTHROPIC_BASE_URL"):
+        monkeypatch.delenv(name, raising=False)
+
+
+def _anthropic_message(index: int, model: str, text: str) -> dict:
+    return {
+        "id": f"msg_test_{index}",
+        "type": "message",
+        "role": "assistant",
+        "model": model,
+        "content": [{"type": "text", "text": text}],
+        "stop_reason": "end_turn",
+        "stop_sequence": None,
+        "usage": {"input_tokens": 1, "output_tokens": 1},
+    }
+
+
 class TestInvalidReplyRetry:
     """One judge reply that cannot be scored gets one more request that names the problem."""
 
@@ -1241,11 +1262,39 @@ class TestInvalidReplyRetry:
         rubric = result.metadata["rubric_eval"]
         assert not result.passed
         assert rubric["execution_status"] == "failed"
-        assert rubric["judge_attempts"] == 1
+        assert "judge_attempts" not in rubric
         (finding,) = _llm_findings(result)
         assert finding.check_name == "llm_unavailable"
-        assert finding.metadata == {"judge_attempts": 1}
+        assert finding.metadata == {}
         assert diagnostic in finding.message
+
+    def test_no_provider_sends_no_request_and_records_no_attempts(self, tmp_path, monkeypatch: pytest.MonkeyPatch):
+        from skillevaluator.reporting import JSONReporter
+
+        for name in (
+            "SKILL_EVAL_LLM_PROVIDER",
+            "SKILL_EVAL_LLM_MODEL",
+            "SKILL_EVAL_LLM_API_KEY",
+            "SKILL_EVAL_LLM_BASE_URL",
+            "NVIDIA_API_KEY",
+            "OPENAI_API_KEY",
+            "OPENAI_BASE_URL",
+            "ANTHROPIC_API_KEY",
+            "ANTHROPIC_BASE_URL",
+        ):
+            monkeypatch.delenv(name, raising=False)
+
+        with patch.object(RubricJudge, "_get_client") as get_client:
+            result = RubricEvalValidator().validate(_write_skill(tmp_path))
+
+        get_client.assert_not_called()
+        data = json.loads(JSONReporter(include_timestamp=False).render_all([result]))
+        assert data["rubric_eval"]["execution_status"] == "failed"
+        assert "judge_attempts" not in data["rubric_eval"]
+        (finding,) = [item for item in data["results"][0]["findings"] if item["check_name"].startswith("llm_")]
+        assert finding["check_name"] == "llm_unavailable"
+        assert "did not run" in finding["message"]
+        assert "judge_attempts" not in (finding.get("metadata") or {})
 
     def test_provider_error_on_the_retry_reports_unavailable(self, tmp_path):
         result, requests = _validate_with(
@@ -1256,7 +1305,55 @@ class TestInvalidReplyRetry:
         assert result.metadata["rubric_eval"]["judge_attempts"] == 2
         (finding,) = _llm_findings(result)
         assert finding.check_name == "llm_unavailable"
+        assert finding.metadata == {"judge_attempts": 2}
         assert "safety refusal" in finding.message
+
+    def test_retry_note_keeps_a_bounded_part_of_a_long_problem(self, tmp_path):
+        long_id = "x" * 20_000
+        checks = _complete_checks()
+        checks.append({**checks[0], "id": long_id})
+        with patch("skillevaluator.validators.rubric_eval.logger") as log:
+            result, requests = _validate_with(tmp_path, _reply(checks), _reply())
+
+        assert len(requests) == 2
+        first, retry = requests
+        retry_note = retry["user"][len(first["user"]) :]
+        problem = retry_note.removeprefix(f"\n{_RETRY_MARKER}").removesuffix(f". {_RETRY_TAIL}")
+        assert problem.startswith("LLM judge returned invalid rubric evidence: unexpected criterion ids: xxx")
+        assert problem.endswith("x ... [truncated]")
+        # The log line and the retry note keep the first 500 characters.
+        assert len(problem) == 500 + len(" ... [truncated]")
+        (rejected,) = [call for call in log.warning.call_args_list if "rejected" in call.args[0]]
+        assert rejected.args[1:] == (problem,)
+        assert result.metadata["rubric_eval"]["judge_attempts"] == 2
+        assert result.passed
+
+    @pytest.mark.parametrize(
+        ("replies", "expected_requests"),
+        [(("valid",), 1), (("missing", "valid"), 2)],
+        ids=["valid", "missing-then-valid"],
+    )
+    def test_custom_criteria_are_checked_against_the_given_list(self, replies, expected_requests):
+        criteria = [
+            {"id": "custom_a", "criterion": "Custom A", "importance": "high"},
+            {"id": "custom_b", "criterion": "Custom B", "importance": "low"},
+        ]
+        checks = [
+            {"id": criterion["id"], "criterion": criterion["criterion"], "pass": True, "score": 9, "notes": "ok"}
+            for criterion in criteria
+        ]
+        scripted_replies = {"valid": _reply(checks), "missing": _reply(checks[:1])}
+        scripted = _ScriptedCompletions(*(scripted_replies[reply] for reply in replies))
+
+        with patch.object(RubricJudge, "completions", new=scripted):
+            report = RubricJudge().process(skill_name="demo", skill_content="# Demo", criteria=criteria)
+
+        assert len(scripted.requests) == expected_requests
+        assert report == json.loads(scripted_replies["valid"])
+        if expected_requests == 2:
+            retry_note = scripted.requests[1]["user"][len(scripted.requests[0]["user"]) :]
+            assert "missing criterion ids: custom_b." in retry_note
+            assert not any(criterion["id"] in retry_note for criterion in RUBRIC_CRITERIA)
 
     def test_judge_returns_the_second_reply_as_parsed(self):
         second = {"summary": "still incomplete", "checks": _invalid_checks("missing")}
@@ -1298,30 +1395,14 @@ class TestInvalidReplyRetry:
         httpx = pytest.importorskip("httpx")
         from skillevaluator.reporting import JSONReporter
 
-        monkeypatch.setenv("SKILL_EVAL_LLM_PROVIDER", "anthropic")
-        monkeypatch.setenv("SKILL_EVAL_LLM_MODEL", "claude-opus-5-5")
-        monkeypatch.setenv("ANTHROPIC_API_KEY", "test-key")
-        for name in ("SKILL_EVAL_LLM_BASE_URL", "ANTHROPIC_BASE_URL"):
-            monkeypatch.delenv(name, raising=False)
+        _use_anthropic(monkeypatch)
         replies = [("claude-opus-5-5", _reply(_invalid_checks("missing"))), ("claude-opus-4-8", _reply())]
         bodies: list[dict] = []
 
         def handler(request):
             bodies.append(json.loads(request.content))
             model, text = replies[len(bodies) - 1]
-            return httpx.Response(
-                200,
-                json={
-                    "id": f"msg_test_{len(bodies)}",
-                    "type": "message",
-                    "role": "assistant",
-                    "model": model,
-                    "content": [{"type": "text", "text": text}],
-                    "stop_reason": "end_turn",
-                    "stop_sequence": None,
-                    "usage": {"input_tokens": 1, "output_tokens": 1},
-                },
-            )
+            return httpx.Response(200, json=_anthropic_message(len(bodies), model, text))
 
         validator = RubricEvalValidator()
         with httpx.Client(transport=httpx.MockTransport(handler)) as http_client:
@@ -1337,3 +1418,31 @@ class TestInvalidReplyRetry:
         assert data["rubric_eval"]["execution_status"] == "succeeded"
         assert data["rubric_eval"]["judge_attempts"] == 2
         assert data["rubric_eval"]["llm_model_used"] == "claude-opus-4-8"
+
+    def test_client_retry_of_a_transient_error_is_not_counted(self, tmp_path, monkeypatch: pytest.MonkeyPatch):
+        pytest.importorskip("anthropic")
+        httpx = pytest.importorskip("httpx")
+
+        _use_anthropic(monkeypatch)
+        bodies: list[dict] = []
+
+        def handler(request):
+            bodies.append(json.loads(request.content))
+            if len(bodies) == 1:
+                return httpx.Response(
+                    503, json={"type": "error", "error": {"type": "overloaded_error", "message": "busy"}}
+                )
+            return httpx.Response(200, json=_anthropic_message(len(bodies), "claude-opus-5-5", _reply()))
+
+        validator = RubricEvalValidator()
+        with httpx.Client(transport=httpx.MockTransport(handler)) as http_client:
+            validator._judge = RubricJudge(
+                http_client=http_client, max_retries=1, retry_base_delay=0, retry_max_delay=0
+            )
+            result = validator.validate(_write_skill(tmp_path))
+
+        assert len(bodies) == 2
+        assert bodies[1] == bodies[0]
+        rubric = result.metadata["rubric_eval"]
+        assert rubric["execution_status"] == "succeeded"
+        assert rubric["judge_attempts"] == 1

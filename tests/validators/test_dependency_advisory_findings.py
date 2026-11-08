@@ -596,11 +596,44 @@ def test_warnings_name_the_physical_line_after_hash_continuations(tmp_path, pip_
     ],
 )
 def test_continuation_join_matches_the_previous_text(text, numbers):
-    """The joined text is unchanged; only CR, LF and CRLF end a numbered line."""
+    """Without a comment line, the joined text is unchanged; only CR, LF and CRLF end a numbered line."""
     lines = DependencySecurityValidator._requirement_lines(text)
 
     assert [line for _number, line in lines] == re.sub(r"\\\r?\n", " ", text).splitlines()
     assert [number for number, _line in lines] == numbers
+
+
+@pytest.mark.parametrize(
+    ("text", "expected"),
+    [
+        (
+            "idna==3.10\n# pinned for py2 \\\npyyaml==5.3\n",
+            [(1, "idna==3.10"), (2, "# pinned for py2 \\"), (3, "pyyaml==5.3")],
+        ),
+        ("  # indented \\\r\npyyaml==5.3", [(1, "  # indented \\"), (2, "pyyaml==5.3")]),
+        ("a==1 \\\n# note \\\nb==2\n", [(1, "a==1  # note \\"), (3, "b==2")]),
+        # Only a comment line ends the declaration; pip continues a pin whose
+        # trailing comment ends in a backslash, and ignores the next line too.
+        ("a==1  # note \\\nb==2\n", [(1, "a==1  # note  b==2")]),
+    ],
+    ids=["comment-line", "indented-comment-crlf", "comment-after-continuation", "trailing-comment"],
+)
+def test_a_comment_line_ending_in_a_backslash_ends_the_declaration(text, expected):
+    """As in pip's ``join_lines``, a backslash at the end of a comment line does not continue it."""
+    assert DependencySecurityValidator._requirement_lines(text) == expected
+
+
+def test_pin_after_a_commented_backslash_is_audited(tmp_path, pip_audit):
+    """``pip install -r`` installs the pin after ``# note \\``, so the audit checks it too."""
+    advisories, calls = pip_audit
+    advisories["pyyaml"] = [PYYAML_ADVISORY]
+    skill = _skill(tmp_path, {"requirements.txt": "idna==3.10\n# pinned for py2 \\\npyyaml==5.3\n"})
+
+    result = DependencySecurityValidator(use_safety=False).validate(skill)
+
+    assert calls == [["idna==3.10", "pyyaml==5.3"]]
+    assert not result.passed and not result.is_incomplete
+    assert [(finding.check_name, finding.line_number) for finding in result.findings] == [("PYSEC-2020-176", 3)]
 
 
 def test_finding_line_follows_editor_line_breaks(tmp_path, pip_audit):

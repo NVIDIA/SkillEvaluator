@@ -57,6 +57,9 @@ _DEPENDENCY_ROLE_TOKENS = {
     "documentation": "docs",
     "build": "build",
 }
+# pip's COMMENT_RE as ``join_lines`` matches it: a line that starts with ``#``
+# after optional whitespace is a comment, and pip never continues it.
+_COMMENT_LINE = re.compile(r"\s*#")
 # Safety prints severity as a level word, null without an API key, or a CVSS
 # object such as {"cvssv3": {"base_severity": "CRITICAL", "base_score": 9.8}}.
 _SAFETY_CVSS_KEYS = (("cvssv3", "cvss_v3"), ("cvssv2", "cvss_v2"))
@@ -515,11 +518,14 @@ class DependencySecurityValidator(ValidatorBase):
         """Join backslash continuations into ``(first physical line, text)`` pairs.
 
         Each backslash before a newline becomes a space, and the text is split
-        where ``str.splitlines`` splits it, as before. The number is the line
-        an editor or SARIF viewer shows where the declaration starts: only
-        ``\\n``, ``\\r\\n`` and ``\\r`` end a line, so a form feed or
-        ``\\u2028`` does not shift it, and a pip-compile pin followed by
-        ``--hash`` lines keeps its own line.
+        where ``str.splitlines`` splits it, as before. A comment line never
+        continues, as in pip's ``join_lines``: ``# note \\`` ends the
+        declaration, so the pin on the next line, which ``pip install -r``
+        installs, is audited too. The number is the line an editor or SARIF
+        viewer shows where the declaration starts: only ``\\n``, ``\\r\\n``
+        and ``\\r`` end a line, so a form feed or ``\\u2028`` does not shift
+        it, and a pip-compile pin followed by ``--hash`` lines keeps its own
+        line.
         """
         lines: list[tuple[int, str]] = []
         pending = ""
@@ -530,7 +536,7 @@ class DependencySecurityValidator(ValidatorBase):
             if physical.endswith(("\n", "\r")):
                 line += 1
             for continuation in ("\\\n", "\\\r\n"):
-                if physical.endswith(continuation):
+                if physical.endswith(continuation) and not _COMMENT_LINE.match(physical):
                     pending += physical[: -len(continuation)] + " "
                     break
             else:

@@ -427,7 +427,10 @@ For `validate`, the default set is `schema`, `version`, `security`, `pii`, `lice
     nonmatching declarations are reported as skipped. Version ranges, URL/path
     dependencies, dynamic or Poetry metadata, malformed declarations, and
     missing or failed scanner evidence leave the audit `INCOMPLETE`. Supply
-    pinned `requirements.txt` for unresolved declarations. `pip-audit` is the
+    pinned `requirements.txt` for unresolved declarations. A requirements line
+    that ends in a backslash continues on the next line unless it is a comment
+    line, as in `pip install -r`, so a pin after a comment line that ends in a
+    backslash is audited. `pip-audit` is the
     primary scanner; Safety supplies secondary coverage for requirements files
     when installed separately. The audit may use network-backed vulnerability databases.
     JSON and HTML export data retain `dependency_coverage` per target, including

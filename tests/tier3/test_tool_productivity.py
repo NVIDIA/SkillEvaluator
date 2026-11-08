@@ -287,11 +287,13 @@ def test_codex_sub_agent_calls_are_left_out_of_the_score(module):
 
 
 @pytest.mark.parametrize("module", _MODULES)
-def test_only_bookkeeping_calls_score_like_no_tool_calls(module):
+def test_only_bookkeeping_calls_score_zero(module):
+    # A trial that only plans did no work. It must not outscore a trial with
+    # no tool calls, whose skill_efficiency is 0.0.
     result = module.check_tool_efficiency([_call("TodoWrite"), _call("update_plan")], _SKILL)
 
-    assert result["passed"] is True
-    assert result["score"] == 1.0
+    assert result["passed"] is False
+    assert result["score"] == 0.0
     assert result["reason"] == "No scored tool calls; 2 planning or bookkeeping call(s) not counted"
 
 
@@ -310,13 +312,8 @@ def _tool_step(index: int, name: str, arguments: dict) -> dict:
     }
 
 
-def test_edit_heavy_run_keeps_full_tool_efficiency_in_skill_efficiency(tmp_path, monkeypatch):
-    calls = [
-        ("Read", {"file_path": f"/workspace/skills/{_SKILL}/SKILL.md"}),
-        ("TodoWrite", {"todos": []}),
-        *[("Edit", {"file_path": f"/workspace/src/module_{index}.py"}) for index in range(4)],
-        ("Bash", {"command": "pytest -q"}),
-    ]
+def _run_verifier(tmp_path: Path, monkeypatch: pytest.MonkeyPatch, calls: list[tuple[str, dict]]) -> dict:
+    """Run the bundled verifier's main() on a no-reference with-skill case."""
     trajectory = {
         "steps": [
             {"source": "user", "message": "Review the release notes and fix the modules."},
@@ -345,7 +342,19 @@ def test_edit_heavy_run_keeps_full_tool_efficiency_in_skill_efficiency(tmp_path,
 
     template.main()
 
-    rich = json.loads((verifier_dir / "skill_evaluator_reward.json").read_text(encoding="utf-8"))
+    return json.loads((verifier_dir / "skill_evaluator_reward.json").read_text(encoding="utf-8"))
+
+
+def test_edit_heavy_run_keeps_full_tool_efficiency_in_skill_efficiency(tmp_path, monkeypatch):
+    calls = [
+        ("Read", {"file_path": f"/workspace/skills/{_SKILL}/SKILL.md"}),
+        ("TodoWrite", {"todos": []}),
+        *[("Edit", {"file_path": f"/workspace/src/module_{index}.py"}) for index in range(4)],
+        ("Bash", {"command": "pytest -q"}),
+    ]
+
+    rich = _run_verifier(tmp_path, monkeypatch, calls)
+
     efficiency = rich["details"]["skill_efficiency"]
     assert efficiency["tool_efficiency"] == {
         "passed": True,
@@ -354,3 +363,21 @@ def test_edit_heavy_run_keeps_full_tool_efficiency_in_skill_efficiency(tmp_path,
     }
     routing = efficiency["routing"]["score"]
     assert rich["skill_efficiency"] == round((routing + 1.0) / 2, 4)
+
+
+@pytest.mark.parametrize(
+    "calls",
+    [
+        [],
+        [("TodoWrite", {"todos": []})],
+        [("update_plan", {"plan": []})],
+        [("Task", {"prompt": "Fix the modules"})],
+    ],
+    ids=["no-calls", "TodoWrite", "update_plan", "Task"],
+)
+def test_planning_only_run_scores_skill_efficiency_like_no_tool_calls(tmp_path, monkeypatch, calls):
+    rich = _run_verifier(tmp_path, monkeypatch, calls)
+
+    assert rich["skill_efficiency"] == 0.0
+    host = checks.score_skill_efficiency([_call(name, **arguments) for name, arguments in calls], _SKILL)
+    assert host["score"] == 0.0

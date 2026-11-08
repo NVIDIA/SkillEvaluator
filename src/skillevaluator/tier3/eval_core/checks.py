@@ -5072,11 +5072,13 @@ def _mask_non_assignment_equals(text: str) -> str:
     return "".join(out)
 
 
-def _tool_searches_root(action: str, args: dict, text: str, depth: int = 0) -> bool:
+def _tool_searches_root(action: str, args: dict, text: str, depth: int = 0, *, argv: bool = False) -> bool:
     """Recognize explicit root search operands, not '/' inside a pattern.
 
     This is bounded top-level command classification. It does not execute or
-    interpret dynamically constructed shell programs.
+    interpret dynamically constructed shell programs. ``argv`` marks text
+    joined from an argument list, which runs without a shell: its own words
+    are literal, while a ``sh -c`` payload inside it is still shell text.
     """
     if action in {"grep", "glob", "grep_files", "list_dir", "ls"}:
         for key in ("path", "dir_path"):
@@ -5093,7 +5095,7 @@ def _tool_searches_root(action: str, args: dict, text: str, depth: int = 0) -> b
     # Without a shell AST, comments, expansions, here-documents and process
     # substitutions cannot be classified reliably. Keep their prior score
     # instead of inventing a path.
-    if any(char in text for char in "$`#"):
+    if not argv and any(char in text for char in "$`#"):
         return False
     tokens = _shell_tokens(text)
     if any(_is_heredoc_redirect(token) or token in {"<(", ">("} for token in tokens):
@@ -5425,8 +5427,9 @@ def check_tool_efficiency(
     }
     not_counted = f"; {neutral} planning or bookkeeping call(s) not counted" if neutral else ""
     if total == 0:
-        # Only planning or bookkeeping calls: score like a run with no tool calls.
-        return {"passed": True, "score": 1.0, "reason": f"No scored tool calls{not_counted}", "details": details}
+        # Only planning or bookkeeping calls: no work was done, so score 0.0.
+        # skill_efficiency then matches a trajectory with no tool calls (0.0).
+        return {"passed": False, "score": 0.0, "reason": f"No scored tool calls{not_counted}", "details": details}
 
     score = productive / total
     return {

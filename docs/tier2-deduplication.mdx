@@ -123,11 +123,15 @@ empty, or non-mapping frontmatter remains part of the analyzed text. Every
 retained chunk keeps its source file and line range, so findings point you to
 the exact overlapping sections.
 
-A shell function runs from its `name() {` header to the matching closing
-brace. Every `{` and `}` in between counts, including those in strings and
-comments. A header without a matching closing brace yields no function chunk.
-Braces and line numbers are indexed in one pass over the script, so a
-malformed script with many unclosed headers is not rescanned once per header.
+A shell function starts at a `name() {` or `function name() {` header at the
+start of a line and runs to the matching closing brace. The name is letters,
+digits, and underscores, and the `{` may sit on the next line. Indented
+headers, `function name {` without parentheses, and names with hyphens are not
+chunked as functions. Every `{` and `}` inside a function counts, including
+those in strings and comments. A header without a matching closing brace
+yields no function chunk. Braces and line numbers are indexed in one pass over
+the script, so a script with many functions or unclosed headers is not
+rescanned once per header.
 
 Each embedding input is capped at 3,000 characters, including long table rows,
 Python docstrings, and shell functions. Oversized Markdown sections are packed

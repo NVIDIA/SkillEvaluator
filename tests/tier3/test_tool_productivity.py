@@ -113,7 +113,10 @@ def test_bookkeeping_is_neutral(module, action):
         (_call("write_stdin", session_id=1, chars="find / -name review.py\n"), "wasted"),
         (_call("write_stdin", session_id=1, chars="pip install requests\n"), "wasted"),
         (_call("Monitor", description="deploy events", ws={"url": "wss://events.example.test"}), "neutral"),
-        (_call("Monitor", description="errors", command="tail -f build.log | grep --line-buffered ERROR"), "productive"),
+        (
+            _call("Monitor", description="errors", command="tail -f build.log | grep --line-buffered ERROR"),
+            "productive",
+        ),
         (_call("Monitor", description="skills", command="find / -name SKILL.md"), "wasted"),
     ],
     ids=lambda value: value if isinstance(value, str) else f"{value['action']}:{value['action_input']}",

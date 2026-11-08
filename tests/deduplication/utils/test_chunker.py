@@ -35,6 +35,54 @@ def _cf(
     )
 
 
+class _ReadCountingText(str):
+    """A str that adds up the characters read through its Python-level methods.
+
+    Indexing and slicing add the length of the result, iteration adds one per
+    character, ``find`` and ``index`` add the span searched, and ``count`` and
+    ``splitlines`` add the span scanned. Regular expressions read the string's
+    buffer directly and are not counted.
+    """
+
+    __slots__ = ()
+    read = 0
+
+    def _span(self, start, end):
+        first, last, _ = slice(start, end).indices(len(self))
+        return first, last
+
+    def __getitem__(self, key):
+        result = super().__getitem__(key)
+        type(self).read += len(result)
+        return result
+
+    def __iter__(self):
+        for char in super().__iter__():
+            type(self).read += 1
+            yield char
+
+    def find(self, sub, start=None, end=None):
+        found = super().find(sub, start, end)
+        first, last = self._span(start, end)
+        type(self).read += max((found + len(sub) if found >= 0 else last) - first, 0)
+        return found
+
+    def index(self, sub, start=None, end=None):
+        found = self.find(sub, start, end)
+        if found < 0:
+            raise ValueError("substring not found")
+        return found
+
+    def count(self, sub, start=None, end=None):
+        first, last = self._span(start, end)
+        type(self).read += max(last - first, 0)
+        return super().count(sub, start, end)
+
+    def splitlines(self, keepends=False):
+        type(self).read += len(self)
+        return super().splitlines(keepends)
+
+
 class TestContentChunk:
     def test_char_count(self) -> None:
         chunk = ContentChunk("f.md", "## H", 1, 3, "hello world", "markdown")
@@ -239,6 +287,29 @@ class TestChunkShell:
             ("inner()", 7, 7),
         ]
         assert chunks[0].text == "\n".join(lines[2:6])
+
+    def test_many_closed_functions_get_line_ranges_without_rereading_the_script(self) -> None:
+        content = _ReadCountingText("".join(f"step_{index}() {{ :; }}\n" for index in range(1_000)))
+        collected = _cf(content, ".sh", "many.sh")
+        _ReadCountingText.read = 0
+
+        chunks = chunk_shell(collected, min_chars=1)
+
+        assert [(c.heading, c.start_line, c.end_line) for c in chunks] == [
+            (f"step_{index}()", index + 1, index + 1) for index in range(1_000)
+        ]
+        assert chunks[-1].text == "step_999() { :; }"
+        # One pass reads each character a few times. Rescanning or slicing the
+        # script once per function reads it hundreds of times.
+        assert _ReadCountingText.read <= len(content) * 10
+
+    def test_many_unclosed_function_headers_read_the_script_a_bounded_number_of_times(self) -> None:
+        content = _ReadCountingText("".join(f"function_{index}() {{\n" for index in range(1_000)))
+        collected = _cf(content, ".sh", "malformed.sh")
+        _ReadCountingText.read = 0
+
+        assert chunk_shell(collected, min_chars=1) == []
+        assert _ReadCountingText.read <= len(content) * 10
 
     def test_comment_block_3_plus_lines(self) -> None:
         content = "# Comment line one about setup\n# Comment line two about config\n# Comment line three about usage\n\necho hello\n"

@@ -130,9 +130,10 @@ def _pick_best_agent(
     # Keyed by whether the agent was kept with a failed baseline, which the
     # canonical report ranks below every agent with a complete baseline.
     best: dict[bool, tuple[tuple[float, float], str]] = {}
-    # Complete agents skipped here, for example because they never activated
-    # the skill. The canonical report still ranks them first, so a tolerated
-    # agent must not stand in for them.
+    # Agents skipped here that were not kept with a failed baseline, for
+    # example a complete agent that never activated the skill. The canonical
+    # report ranks any of them it can rank above every tolerated agent, so a
+    # tolerated agent must not stand in for them.
     skipped_complete: list[dict[str, Any]] = []
     scored_metric_sets: set[frozenset[str]] = set()
     for agent in sorted(agents_data):

@@ -2456,19 +2456,35 @@ validate.help_group_descriptions = {
     default=None,
     help="Also write the harness_compatibility block to this JSON file.",
 )
+@click.option(
+    "--context-tokens",
+    type=click.IntRange(min=0),
+    default=0,
+    help="Context window of your model in tokens; some loader limits depend on it (0 = unknown, assume the smallest).",
+)
+@click.option(
+    "--custom-provider",
+    is_flag=True,
+    help="Your model is served through a custom or OpenAI-compatible provider rather than the harness's own.",
+)
 def harness_check(
     target_path: Path,
     harness: str,
     harness_profiles: Path | None,
     verbose: bool,
     json_path: Path | None,
+    context_tokens: int,
+    custom_provider: bool,
 ) -> None:
     """Show whether each agent harness loads, degrades or drops a skill (advisory; exits 0)."""
     from skillevaluator.harness.report import run_harness_check
     from skillevaluator.reporting.console_ui import make_view_console
 
     try:
-        block = run_harness_check(target_path, harness, harness_profiles, console=make_view_console(), verbose=verbose)
+        config = {"context_tokens": context_tokens, "custom_provider": custom_provider}
+        block = run_harness_check(
+            target_path, harness, harness_profiles, console=make_view_console(), verbose=verbose, config=config
+        )
     except ValueError as exc:
         raise click.BadParameter(str(exc), param_hint="--harness") from exc
     if not block:

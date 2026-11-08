@@ -482,11 +482,30 @@ class _Rule:
         raise ValueError("Unsupported rule expression")
 
 
-def evaluate_profile(profile: dict[str, Any], facts: dict[str, Any]) -> HarnessResult:
-    """Evaluate one profile's rules against precomputed skill facts (stricter effect wins)."""
+def model_config(profile: dict[str, Any], config: dict[str, Any] | None = None) -> dict[str, Any]:
+    """Resolve the user's model setup for one profile: ``context_tokens`` (0 = unknown) and ``custom_provider``.
+
+    An unknown window falls back to the profile's ``config_defaults`` for a custom provider when one is set.
+    """
+    config = config or {}
+    custom = bool(config.get("custom_provider", False))
+    tokens = int(config.get("context_tokens") or 0)
+    if not tokens and custom:
+        tokens = int(profile.get("config_defaults", {}).get("custom_provider_context_tokens", 0))
+    return {"context_tokens": tokens, "custom_provider": custom}
+
+
+def evaluate_profile(
+    profile: dict[str, Any], facts: dict[str, Any], config: dict[str, Any] | None = None
+) -> HarnessResult:
+    """Evaluate one profile's rules against precomputed skill facts (stricter effect wins).
+
+    ``config`` describes the user's model setup (see :func:`model_config`); rules read it as
+    ``context_tokens`` and ``custom_provider``. Without it, rules assume an unknown context and a native provider.
+    """
     roots = profile.get("roots", {})
     all_roots = [*roots.get("project", []), *roots.get("user", [])]
-    names = {**facts, "always": True, "roots": _RootList(all_roots, roots)}
+    names = {**facts, **model_config(profile, config), "always": True, "roots": _RootList(all_roots, roots)}
     findings: list[dict[str, str]] = []
     worst = -1
     for rule in profile.get("rules", []):
@@ -543,8 +562,11 @@ class _RootList(list):
 
 
 def evaluate_harnesses(
-    skill_path: Path, harnesses: str | list[str] = "all", profiles_dir: Path | None = None
+    skill_path: Path,
+    harnesses: str | list[str] = "all",
+    profiles_dir: Path | None = None,
+    config: dict[str, Any] | None = None,
 ) -> list[HarnessResult]:
     """Evaluate one skill (and the catalog it is installed in) against the selected profiles."""
     facts = facts_for([skill_path])[skill_path]
-    return [evaluate_profile(profile, facts) for profile in load_profiles(harnesses, profiles_dir)]
+    return [evaluate_profile(profile, facts, config) for profile in load_profiles(harnesses, profiles_dir)]

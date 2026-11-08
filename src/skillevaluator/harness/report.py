@@ -241,6 +241,7 @@ def run_harness_check(
     *,
     console: Console,
     verbose: bool = False,
+    config: dict[str, Any] | None = None,
 ) -> Block:
     """Evaluate each skill harness by harness, updating a live panel as each finishes."""
     profiles = load_profiles(harness, profiles_dir)
@@ -278,7 +279,7 @@ def run_harness_check(
             for index, profile in enumerate(profiles):
                 rows[index] = {"harness": profile["harness"], "status": "checking"}
                 live.update(panel())
-                rows[index] = evaluate_profile(profile, facts).to_dict()
+                rows[index] = evaluate_profile(profile, facts, config).to_dict()
                 live.update(panel())
         console.print()
         block[str(skill)] = rows

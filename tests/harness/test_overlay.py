@@ -469,3 +469,37 @@ def test_quotes_in_description_are_escaped_in_copilot_and_openclaw_lists(tmp_pat
     rows = _rows(_skill(tmp_path, desc='Use when asked to "summarize" a file.'))
     assert "CP-DESC-ESCAPED" in _ids(rows, "copilot-cli") and "OW-DESC-ESCAPED" in _ids(rows, "openclaw")
     assert "CC-DESC-ESCAPED" not in _ids(rows, "claude-code") and rows["copilot-cli"]["status"] == "loads"
+
+
+def _rule_ids(skill: Path, harness: str, config: dict | None = None) -> set[str]:
+    return {f["id"] for r in evaluate_harnesses(skill, harness, config=config) for f in r.findings}
+
+
+def test_openclaw_read_budget_depends_on_model_context(tmp_path: Path):
+    mid = _skill(tmp_path / "mid", body="x" * 20_000)
+    big = _skill(tmp_path / "big", body="x" * 40_000)
+
+    assert "OW-READ-BUDGET" in _rule_ids(mid, "openclaw")
+    assert "OW-READ-BUDGET" not in _rule_ids(mid, "openclaw", {"context_tokens": 150_000})
+    assert "OW-READ-BUDGET" not in _rule_ids(mid, "openclaw", {"custom_provider": True})
+    assert "OW-READ-BUDGET" in _rule_ids(big, "openclaw", {"custom_provider": True})
+    assert "OW-READ-BUDGET" not in _rule_ids(big, "openclaw", {"context_tokens": 200_000})
+
+
+def test_codex_shell_cut_is_lower_for_custom_providers(tmp_path: Path):
+    skill = _skill(tmp_path, body="x" * 12_000)
+
+    assert "CX-SHELL-READ" not in _rule_ids(skill, "codex")
+    assert "CX-SHELL-READ" in _rule_ids(skill, "codex", {"custom_provider": True})
+
+
+def test_harness_check_accepts_model_config(tmp_path: Path):
+    skill = _skill(tmp_path, body="x" * 20_000)
+    out = tmp_path / "out.json"
+
+    result = CliRunner().invoke(
+        cli, ["harness-check", str(skill), "--harness", "openclaw", "--context-tokens", "150000", "--json", str(out)]
+    )
+
+    assert result.exit_code == 0, result.output
+    assert "OW-READ-BUDGET" not in out.read_text()

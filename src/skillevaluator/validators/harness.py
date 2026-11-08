@@ -18,9 +18,12 @@ _SEVERITY = {"not_loaded": Severity.MEDIUM, "degraded": Severity.LOW, "advisory"
 class HarnessValidator(ValidatorBase):
     """Evaluate each skill against the selected harness profiles."""
 
-    def __init__(self, harnesses: str | None = None, profiles_dir: Path | None = None) -> None:
+    def __init__(
+        self, harnesses: str | None = None, profiles_dir: Path | None = None, config: dict | None = None
+    ) -> None:
         self.harnesses = harnesses or "all"
         self.profiles_dir = profiles_dir
+        self.config = config
 
     @property
     def name(self) -> str:
@@ -36,7 +39,7 @@ class HarnessValidator(ValidatorBase):
         result = ValidationResult(validator_name=self.name, validator_description=self.description)
         block: dict[str, list[dict]] = {}
         for skill, facts in facts_for(skills).items():
-            rows = [evaluate_profile(profile, facts) for profile in profiles]
+            rows = [evaluate_profile(profile, facts, self.config) for profile in profiles]
             block[str(skill)] = [row.to_dict() for row in rows]
             for row in rows:
                 for finding in row.findings:

@@ -153,6 +153,9 @@ class TestCollectFiles:
             ),
             pytest.param("extra: " + "[" * 1_500 + "safe" + "]" * 1_500, id="deep-nesting"),
             pytest.param("description: " + "x" * 65_537, id="long-scalar"),
+            pytest.param("tags:\n" + "\n".join(f"  - tag{index}" for index in range(1_100)), id="long-list"),
+            # 3,600 hex digits are 14,400 bits, over the 14,000-bit integer limit.
+            pytest.param("version: 0x" + "f" * 3_600, id="big-integer"),
         ],
     )
     def test_frontmatter_complexity_limit_fails_closed(self, skill_root: Path, frontmatter: str) -> None:
@@ -167,18 +170,55 @@ class TestCollectFiles:
         assert exc.value.rel_path == "references/guide.md"
         assert "YAML aliases" in exc.value.suggestion
 
-    @pytest.mark.parametrize("value", ['!!int ""', "!!bool nope", "!!float x"])
-    def test_invalid_tagged_scalar_keeps_frontmatter_in_the_analyzed_text(self, skill_root: Path, value: str) -> None:
-        text = f"---\nname: tagged\nversion: {value}\n---\n# Body\nContent."
-        (skill_root / "SKILL.md").write_text(text, encoding="utf-8")
+    @pytest.mark.parametrize(
+        "line",
+        [
+            pytest.param('version: !!int ""', id="tagged-int"),
+            pytest.param("version: !!bool nope", id="tagged-bool"),
+            pytest.param("version: !!float x", id="tagged-float"),
+            pytest.param("last_updated: 2024-02-30", id="impossible-date"),
+        ],
+    )
+    def test_unconstructible_value_keeps_frontmatter_in_the_analyzed_text(self, skill_root: Path, line: str) -> None:
+        text = f"---\nname: tagged\n{line}\n---\n# Body\nContent."
+        # Bytes keep the LF line endings on every platform, so the exact text compares.
+        (skill_root / "SKILL.md").write_bytes(text.encode("utf-8"))
 
         result = collect_files(skill_root)
 
         assert result[0].content == text
         assert result[0].line_offset == 0
 
+    @pytest.mark.parametrize(
+        "block",
+        [
+            pytest.param("\n".join(f"- item {index}" for index in range(1_100)), id="thematic-break-list"),
+            pytest.param("A line of prose that holds no key or colon.\n" * 1_600, id="thematic-break-prose"),
+            pytest.param(
+                "\n".join(
+                    ["- &m0 {" + ", ".join(f"k{index}: {index}" for index in range(10)) + "}"]
+                    + [f"- &m{level} {{<<: [{', '.join([f'*m{level - 1}'] * 10)}]}}" for level in range(1, 5)]
+                ),
+                id="sequence-merge-chain",
+            ),
+            pytest.param("!!set\n" + "\n".join(f"? item{index}" for index in range(1_100)), id="set-root"),
+        ],
+    )
+    def test_block_that_is_not_a_mapping_stays_in_the_analyzed_text(self, skill_root: Path, block: str) -> None:
+        # Each block is over a structure limit if parsed as YAML, but text that
+        # is not a mapping is not frontmatter, so it is never built.
+        references = skill_root / "references"
+        references.mkdir()
+        text = f"---\n{block}\n---\n# Guide\nContent."
+        (references / "guide.md").write_bytes(text.encode("utf-8"))
+
+        result = {item.rel_path: item for item in collect_files(skill_root)}
+
+        assert result["references/guide.md"].content == text
+        assert result["references/guide.md"].line_offset == 0
+
     def test_repeated_frontmatter_key_is_still_stripped(self, skill_root: Path) -> None:
-        (skill_root / "SKILL.md").write_text("---\nname: first\nname: second\n---\n# Body\nContent.", encoding="utf-8")
+        (skill_root / "SKILL.md").write_bytes(b"---\nname: first\nname: second\n---\n# Body\nContent.")
 
         result = collect_files(skill_root)
 

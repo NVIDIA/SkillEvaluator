@@ -68,6 +68,22 @@ All notable changes to SkillEvaluator are documented in this file.
   confirm a guess for the masked part. Redaction now removes a digest that no
   longer matches the reported value.
 
+- Tier 2 context deduplication now checks each chat-LLM verdict before it
+  becomes a finding. When present, the confidence must be a JSON number from 0
+  to 1, and the rationale and suggestion must be strings of at most 8,192
+  characters; a missing confidence still reads as 0, and a missing rationale or
+  suggestion as empty. In 0.8.0 any value that `float()` accepted was used: a
+  confidence of `85` or `true` made a HIGH finding, and the string `"NaN"` made
+  a MEDIUM finding whose `NaN` confidence then stopped the JSON and SARIF
+  reports from rendering. A list or object in a text field reached the finding
+  unchanged. Such a reply now counts as a failed analysis, so the scan is
+  reported as incomplete, like any other malformed reply. The checks apply to
+  every verdict, including `INTENTIONAL_DETAIL` and `RELATED_BUT_DISTINCT`,
+  which never become findings: a skill that passed on 0.8.0 with such a reply,
+  for example one with a `null` suggestion or a `"0.9"` string confidence, is
+  now reported as incomplete, and so is a `DUPLICATE` reply with a `"0.9"`
+  confidence, which made a HIGH finding in 0.8.0.
+
 - Tier 2 context deduplication now numbers `SHARED CONTENT n` blocks from the
   most repeated text, ties in first-seen order, instead of in first-seen order
   alone. In 0.8.0 a text repeated hundreds of times could get block 10 or later,
@@ -77,16 +93,6 @@ All notable changes to SkillEvaluator are documented in this file.
   it within budget. The texts to share are now chosen together to save the most
   characters: a text that saves only a few characters stays inline when sharing
   it would push another text past block 9 and cost more than it saves.
-
-- Tier 2 context deduplication now checks each chat-LLM verdict before it
-  becomes a finding. The confidence must be a JSON number from 0 to 1, and the
-  rationale and suggestion must be strings of at most 8,192 characters. In
-  0.8.0 any value that `float()` accepted was used: a confidence of `85` or
-  `true` made a HIGH finding, and the string `"NaN"` made a MEDIUM finding
-  whose `NaN` confidence then stopped the JSON and SARIF reports from
-  rendering. A list or object in a text field reached the finding unchanged.
-  Such a reply now counts as a failed analysis, so the scan is reported as
-  incomplete, like any other malformed reply.
 
 - Tier 3 **Measured Agent Resources** no longer count idle or user time as LLM
   seconds when timing is inferred from step timestamps and an agent step with

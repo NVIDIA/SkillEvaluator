@@ -21,6 +21,7 @@ from rich.box import SIMPLE
 from rich.table import Table
 from rich.text import Text
 
+from skillevaluator.reporting.summary_copy import pass_at_k_summary
 from skillevaluator.reporting.terminal_styles import AMBER
 from skillevaluator.tier3.harbor.progress import redact_progress_detail, secret_values_from_environment
 from skillevaluator.utils.redaction import redact_sensitive_text
@@ -580,10 +581,14 @@ def render_case_summary(
     console.print(table)
     legend = f"{PASS} pass  {FAIL} fail  {ERROR} did not run  {SKIPPED} skipped after a pass"
     if len(agents) > 1:
-        legend += "  ? incomplete\n+50 = change in pass rate, in percentage points"
+        legend += "  ? incomplete\n+50 = pass-rate difference, in percentage points"
     else:
         legend += "  (0.82) mean score 0-1"
     console.print(Text(legend, style="dim"))
+    for agent, data in agents.items():
+        summary = pass_at_k_summary(data.get("pass_at_k"), result.get("attempt_policy"))
+        if summary:
+            console.print(Text(f"{safe(agent)}: {summary}" if len(agents) > 1 else summary, style="dim"))
     if fixes:
         console.print()
         heading = Text("How to improve", style="bold")

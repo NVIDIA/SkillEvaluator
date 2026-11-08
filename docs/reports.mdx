@@ -581,7 +581,7 @@ agents scored under different policies or metric sets.
 
 ### Skill Lift
 
-Skill Lift is `with-skill overall score - without-skill overall score` for
+Skill Lift is the headline claim: `Skill Lift = with-skill Overall − without-skill Overall` for
 comparable cases. It uses the same score units as both arms and ranges from
 -1.0 to +1.0. Because live agent runs are noisy, especially at low attempt
 counts, small deltas are kept neutral. The verdict bands:
@@ -719,14 +719,15 @@ missing or partial step telemetry is a gap, not a zero.
 
 ### pass@k
 
-pass@k is the reliability signal, reported separately from the dimension
-scores. With `--n-attempts k`, each eval case runs k times per arm, and a case
+pass@k and its pass-rate difference are supporting reliability, not the headline
+claim. The report labels the pass@k delta column **Pass-rate difference**.
+With `--n-attempts k`, each eval case runs k times per arm, and a case
 counts as passed when at least one attempt clears the `--pass-threshold`
 score using the same overall formula above. Comparing pass@k across arms (in
 `pass_at_k_lift.json`) tells you
 whether the skill makes success more *repeatable*, not just whether the average
 score moved. Each arm also records a case-level 95% Wilson score interval for
-its pass rate. When both arms contain the same identified cases,
+its pass rate; the paired value is the pass-rate difference. When both arms contain the same identified cases,
 `pass_at_k_lift.json` records the paired outcome counts — skill-only passes,
 baseline-only passes, both-pass, and neither-pass — plus a two-sided exact
 McNemar diagnostic over the discordant pairs. Partial or unidentified pairing

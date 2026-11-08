@@ -52,6 +52,7 @@ from skillevaluator.reporting.harbor_viewer import (
 )
 from skillevaluator.reporting.presentation import FinalRenderContext, build_final_render_context, trial_coverage
 from skillevaluator.reporting.run_status import Status, result_status
+from skillevaluator.reporting.summary_copy import SKILL_LIFT_DEFINITION, pass_at_k_summary
 from skillevaluator.reporting.terminal_styles import AMBER, FAINT, GREEN, RED, TEXT, grade_style, lift_style
 from skillevaluator.utils.rich_markup import escape_markup
 
@@ -409,8 +410,12 @@ class CLIReporter(ReporterBase):
         verdict_text = escape_markup(str(verdict).upper())
         console.print(
             f"\n  [{vc}]Verdict: {verdict_text}[/{vc}] "
-            f"(composite lift = [{composite_style}]{composite_text}[/{composite_style}])"
+            f"(Skill Lift = [{composite_style}]{composite_text}[/{composite_style}])"
         )
+        if scored_lift:
+            console.print(f"  [dim]{SKILL_LIFT_DEFINITION}[/dim]")
+        if pass_summary := pass_at_k_summary(agent_eval.get("pass_at_k"), agent_eval.get("attempt_policy")):
+            console.print(f"  [dim]{pass_summary}[/dim]")
         if verdict == "inconclusive":
             console.print(
                 "  [yellow]Skill never activated. Scores are diagnostic only; no lift verdict was computed.[/yellow]"

@@ -15,6 +15,9 @@ All notable changes to SkillEvaluator are documented in this file.
 
 ### Changed
 
+- Name Skill Lift as the headline comparison and label pass@k differences as
+  supporting reliability across reports and terminal output.
+
 - Align terminal grade and lift colors across compact, full, and direct Tier 3
   reports; displayed zero lift is neutral. Narrow terminals stack complete
   condition score/bar groups. Full-report Details retain successful quality and

@@ -31,6 +31,7 @@ from skillevaluator.reporting import HTMLReporter, JSONReporter
 from skillevaluator.reporting import html as html_module
 from skillevaluator.reporting.base import agent_eval_publication_evidence_complete
 from skillevaluator.reporting.html import PackageLoader, _compact_json
+from skillevaluator.reporting.summary_copy import SKILL_LIFT_DEFINITION
 from skillevaluator.tier3.harbor.collector import _paired_pass_comparison, _wilson_score_interval
 from skillevaluator.tier3.harbor.metrics import (
     DEFAULT_METRICS,
@@ -3466,7 +3467,10 @@ def test_pass_at_k_final_column_has_a_narrow_viewport_scroll_contract() -> None:
 
     assert region is not None
     assert 'class="summary-table pass-at-k-table"' in region.group("table")
-    assert re.search(r"<th>Lift</th>\s*</tr>", region.group("table"))
+    assert re.search(r"<th>Pass-rate difference</th>\s*</tr>", region.group("table"))
+    assert "Pass@1 (supporting reliability)" in html
+    assert "attempt passes at Overall ≥ 0.50" in html
+    assert SKILL_LIFT_DEFINITION in html
     assert ".table-scroll { max-width: 100%; overflow-x: auto;" in html
     assert ".pass-at-k-table { min-width: 720px; }" in html
 

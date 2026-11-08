@@ -42,6 +42,7 @@ from skillevaluator.reporting.harbor_viewer import (
     safe_url,
 )
 from skillevaluator.reporting.run_status import Status, resolve_run_status, result_status
+from skillevaluator.reporting.summary_copy import SKILL_LIFT_DEFINITION, pass_at_k_summary
 
 if TYPE_CHECKING:
     from skillevaluator.models import Finding, ValidationResult
@@ -354,7 +355,11 @@ class MarkdownReporter(ReporterBase):
             lines.append("## Tier 3: Agent Evaluation")
             lines.append("")
             composite_text = _format_report_number(composite, signed=True)
-            lines.append(f"**Verdict:** {verdict} (composite lift = {composite_text})")
+            lines.append(f"**Verdict:** {verdict} (Skill Lift = {composite_text})")
+            if _finite_report_number(composite) is not None:
+                lines.append(SKILL_LIFT_DEFINITION + ".")
+            if pass_summary := pass_at_k_summary(ae.get("pass_at_k"), ae.get("attempt_policy")):
+                lines.append(pass_summary)
             if verdict == "INCONCLUSIVE":
                 lines.append("Skill never activated. Scores are diagnostic only; no lift verdict was computed.")
             runtime_number = _finite_report_number(runtime)

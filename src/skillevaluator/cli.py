@@ -2465,7 +2465,7 @@ validate.help_group_descriptions = {
 @click.option(
     "--custom-provider",
     is_flag=True,
-    help="Your model is served through a custom or OpenAI-compatible provider rather than the harness's own.",
+    help="Your model is served through a custom or OpenAI-compatible provider, or is a model the harness ships no metadata for.",
 )
 def harness_check(
     target_path: Path,

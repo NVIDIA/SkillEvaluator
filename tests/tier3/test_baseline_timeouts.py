@@ -27,6 +27,7 @@ from skillevaluator.tier3.harbor.baseline_timeouts import (
     RUN_KEY,
     build_record,
     check_failures,
+    run_record,
     select_tolerated,
     settle,
     unexplained_launch_errors,
@@ -46,6 +47,10 @@ SCORES = {
 TIMEOUT = "Agent execution timed out after 1200.0 seconds"
 CLEAN_LOG = json.dumps({"type": "assistant", "message": "Reading the configuration"}) + "\n"
 LAUNCH_ERROR = "{agent} without-skill Harbor run failed: Harbor job did not complete successfully: {count} errored"
+# The runner's message when it kills a Harbor job that outlived the Google ADC token on GKE.
+ADC_LAUNCH_ERROR = (
+    "opencode without-skill Harbor run failed: Harbor job exceeded Google ADC token lifetime (3300s) in gke mode"
+)
 
 
 # -- synthetic arm-level Harbor jobs ------------------------------------------
@@ -69,12 +74,13 @@ def _trial_result(name: str, case: str, **fields: Any) -> dict[str, Any]:
     }
 
 
-def _scored_trial(job: Path, name: str, case: str) -> None:
-    reward = {**SCORES, "entry_id": case}
+def _scored_trial(job: Path, name: str, case: str, scores: dict[str, float] | None = None) -> None:
+    scores = scores or SCORES
+    reward = {**scores, "entry_id": case}
     _write_json(job / name / "verifier" / "reward.json", reward)
     _write_json(
         job / name / "result.json",
-        _trial_result(name, case, agent_result={"n_output_tokens": 500}, verifier_result={"rewards": SCORES}),
+        _trial_result(name, case, agent_result={"n_output_tokens": 500}, verifier_result={"rewards": scores}),
     )
 
 
@@ -127,7 +133,15 @@ def _job_result(job: Path, *, errored: int) -> None:
     _write_json(job / "result.json", {"n_total_trials": len(trials), "stats": stats})
 
 
-def _arm(jobs: Path, agent: str, variant: str, outcomes: list[tuple[str, str]], **failed: Any) -> None:
+def _arm(
+    jobs: Path,
+    agent: str,
+    variant: str,
+    outcomes: list[tuple[str, str]],
+    *,
+    scores: dict[str, float] | None = None,
+    **failed: Any,
+) -> None:
     """Write one arm-level job; each outcome is ``(case, "scored" | "timeout")``."""
     job = jobs / f"{SKILL}-{agent}-{variant}"
     job.mkdir(parents=True, exist_ok=True)
@@ -135,7 +149,7 @@ def _arm(jobs: Path, agent: str, variant: str, outcomes: list[tuple[str, str]], 
     for index, (case, outcome) in enumerate(outcomes):
         name = f"{case}__{variant}{index}"
         if outcome == "scored":
-            _scored_trial(job, name, case)
+            _scored_trial(job, name, case, scores)
         else:
             _failed_trial(job, name, case, **failed)
             errored += 1
@@ -225,7 +239,12 @@ def test_tolerated_agent_stays_scored_on_its_with_skill_arm(tmp_path: Path) -> N
         "failures": [{"trial": "case-002__without1", "case_id": "case-002", "attempt": None, "output_tokens": 321}],
         "failures_truncated": False,
     }
-    assert results[RUN_KEY] == {"tolerated_agents": ["opencode"], "explained_launch_errors": launch_errors}
+    assert results[RUN_KEY] == {
+        "tolerated_agents": ["opencode"],
+        "explained_launch_errors": launch_errors,
+        "explained_launch_errors_total": 1,
+        "explained_launch_errors_truncated": False,
+    }
     assert results["warnings"] == [
         "opencode baseline incomplete: 1 attempt(s) hit the agent execution timeout after 1200 seconds "
         "(1 of 2 scored). The agent stays scored on its with-skill arm (--tolerate-baseline-timeouts); its "
@@ -304,10 +323,26 @@ def test_trajectory_completion_tokens_prove_progress(tmp_path: Path) -> None:
             "provider_degradation_observed",
         ),
         ({"log": CLEAN_LOG + "unexpected status: 429 Too Many Requests\n"}, "provider_degradation_observed"),
+        # OpenAI-compatible providers through the OpenAI SDK, and OpenCode's APIError.
+        (
+            {
+                "log": CLEAN_LOG + "Error code: 429 - {'status': 429, 'title': 'Too Many Requests', "
+                "'detail': 'Rate limit exceeded'}\n"
+            },
+            "provider_degradation_observed",
+        ),
+        (
+            {
+                "log": CLEAN_LOG + '{"type":"error","error":{"name":"APIError","data":'
+                '{"message":"Too Many Requests","statusCode":429}}}\n'
+            },
+            "provider_degradation_observed",
+        ),
+        ({"log": CLEAN_LOG + "429 Too Many Requests\n"}, "provider_degradation_observed"),
+        ({"log": CLEAN_LOG + '{"error":{"code":"insufficient_quota"}}\n'}, "provider_degradation_observed"),
+        ({"log": CLEAN_LOG + '{"error":{"status":"RESOURCE_EXHAUSTED"}}\n'}, "provider_degradation_observed"),
         ({"log": CLEAN_LOG + "API Error: 529 Overloaded\n"}, "agent_runtime_failure"),
         ({"log": CLEAN_LOG + "Error: invalid_api_key\n"}, "agent_runtime_failure"),
-        ({"exception_type": "VerifierTimeoutError"}, "reason_not_tolerated"),
-        ({"exception_type": "NonZeroAgentExitCodeError"}, "reason_not_tolerated"),
     ],
 )
 def test_untrusted_baseline_timeouts_keep_the_agent_failed(tmp_path: Path, failed: dict[str, Any], code: str) -> None:
@@ -320,10 +355,82 @@ def test_untrusted_baseline_timeouts_keep_the_agent_failed(tmp_path: Path, faile
     assert opencode["execution_status"] == "failed"
     assert RECORD_KEY not in opencode
     assert opencode[REJECTION_KEY] == code
-    assert results[RUN_KEY] == {"tolerated_agents": [], "explained_launch_errors": []}
+    assert results[RUN_KEY] == run_record((), [])
     assert results["warnings"] == [
         f"opencode baseline timeouts were not tolerated: {baseline_timeouts.REJECTION_REASONS[code]} ({code})."
     ]
+
+
+@pytest.mark.parametrize("exception_type", ["VerifierTimeoutError", "NonZeroAgentExitCodeError"])
+def test_baseline_without_an_agent_timeout_is_left_as_on_main(tmp_path: Path, exception_type: str) -> None:
+    launch_errors = _two_agent_jobs(tmp_path / "jobs", exception_type=exception_type)
+
+    results = _collect(tmp_path, launch_errors)
+
+    # No attempt timed out, so the option has nothing to judge: no rejection
+    # code or warning names a timeout that never happened.
+    opencode = results["agents"]["opencode"]
+    assert results["execution_status"] == "failed"
+    assert opencode["execution_status"] == "failed"
+    assert RECORD_KEY not in opencode
+    assert REJECTION_KEY not in opencode
+    assert "warnings" not in results
+    assert results[RUN_KEY] == run_record((), [])
+
+
+def test_another_baseline_failure_beside_a_timeout_is_refused(tmp_path: Path) -> None:
+    jobs = tmp_path / "jobs"
+    _arm(jobs, "opencode", "with", [(case, "scored") for case in CASES])
+    _arm(jobs, "opencode", "without", [(case, "timeout") for case in CASES])
+    # case-001 failed another way; case-002 still timed out.
+    job = jobs / f"{SKILL}-opencode-without"
+    _failed_trial(job, "case-001__without0", "case-001", exception_type="NonZeroAgentExitCodeError")
+    _arm(jobs, "codex", "with", [(case, "scored") for case in CASES])
+    _arm(jobs, "codex", "without", [(case, "scored") for case in CASES])
+
+    results = _collect(tmp_path, [LAUNCH_ERROR.format(agent="opencode", count=2)])
+
+    assert results["agents"]["opencode"][REJECTION_KEY] == "reason_not_tolerated"
+    assert results["execution_status"] == "failed"
+
+
+@pytest.mark.parametrize(
+    ("killed", "code"),
+    [
+        # The runner killed Harbor while every attempt still ran: nothing timed out.
+        ({"case-001": "cancelled", "case-002": "cancelled"}, None),
+        # One attempt timed out, then the kill cancelled the other.
+        ({"case-001": "cancelled", "case-002": "timeout"}, "reason_not_tolerated"),
+        # One attempt timed out, then the kill left the other without a result.
+        ({"case-001": "no_result", "case-002": "timeout"}, "unaccounted_trial"),
+    ],
+)
+def test_baseline_killed_by_the_runner_is_never_tolerated(
+    tmp_path: Path, killed: dict[str, str], code: str | None
+) -> None:
+    jobs = tmp_path / "jobs"
+    _arm(jobs, "opencode", "with", [(case, "scored") for case in CASES])
+    job = jobs / f"{SKILL}-opencode-without"
+    for index, (case, outcome) in enumerate(killed.items()):
+        name = f"{case}__without{index}"
+        if outcome == "no_result":
+            (job / name / "agent").mkdir(parents=True)
+            (job / name / "agent" / "opencode.txt").write_text(CLEAN_LOG, encoding="utf-8")
+        else:
+            exception_type = "CancelledError" if outcome == "cancelled" else "AgentTimeoutError"
+            _failed_trial(job, name, case, exception_type=exception_type)
+    _job_result(job, errored=sum(outcome != "no_result" for outcome in killed.values()))
+    _arm(jobs, "codex", "with", [(case, "scored") for case in CASES])
+    _arm(jobs, "codex", "without", [(case, "scored") for case in CASES])
+
+    results = _collect(tmp_path, [ADC_LAUNCH_ERROR])
+
+    opencode = results["agents"]["opencode"]
+    assert results["execution_status"] == "failed"
+    assert opencode["execution_status"] == "failed"
+    assert RECORD_KEY not in opencode
+    assert opencode.get(REJECTION_KEY) == code
+    assert results[RUN_KEY]["explained_launch_errors"] == []
 
 
 def test_trial_that_is_neither_scored_nor_timed_out_is_refused(tmp_path: Path) -> None:
@@ -437,6 +544,68 @@ def test_other_launch_errors_keep_the_run_failed(tmp_path: Path, extra: str) -> 
     assert results["agents"]["opencode"]["execution_status"] == "failed"
     assert results["agents"]["opencode"][REJECTION_KEY] == "unbound_launch_error"
     assert results[RUN_KEY]["explained_launch_errors"] == []
+
+
+def test_reports_rank_a_tolerated_agent_below_its_complete_peer(tmp_path: Path) -> None:
+    from skillevaluator.evaluation.tier3_report import agent_eval_result_from_directory, render_agent_eval_html_report
+    from skillevaluator.tier3.harbor.report import _pick_best_agent
+    from skillevaluator.tier3.harbor.report_data import load_agent_data
+
+    # The tolerated agent scores higher than its complete peer.
+    low = {**dict.fromkeys(SCORES, 0.55), "security": 1.0}
+    jobs = tmp_path / "jobs"
+    _arm(jobs, "opencode", "with", [(case, "scored") for case in CASES])
+    _arm(jobs, "opencode", "without", [("case-001", "scored"), ("case-002", "timeout")])
+    _arm(jobs, "codex", "with", [(case, "scored") for case in CASES], scores=low)
+    _arm(jobs, "codex", "without", [(case, "scored") for case in CASES], scores=low)
+    results = _collect(tmp_path, [LAUNCH_ERROR.format(agent="opencode", count=1)])
+    assert results["execution_status"] == "succeeded"
+    run_dir = tmp_path / "results"
+    results.update(
+        {
+            "skill_name": SKILL,
+            "run_dir": str(run_dir),
+            "attempt_policy": {
+                **results["attempt_policy"],
+                "max_attempts": 1,
+                "pass_threshold": 0.5,
+                "stop_on_pass": False,
+            },
+        }
+    )
+    _write_json(run_dir / "result.json", results)
+    skill = tmp_path / SKILL
+    skill.mkdir()
+    (skill / "SKILL.md").write_text("---\nname: demo\ndescription: demo skill\n---\nbody\n", encoding="utf-8")
+
+    payload = agent_eval_result_from_directory(
+        skill, run_dir, env_mode="docker", engine_result=results, use_llm_judge=False
+    ).metadata["agent_eval"]
+    assert payload["execution_status"] == "succeeded"
+    assert payload["best_agent"] == "codex"
+    assert payload["overall_score"] == payload["agents"]["codex"]["with_skill"]
+    assert payload["agents"]["opencode"]["with_skill"] > payload["overall_score"]
+    assert payload["overall_lift"] == payload["agents"]["codex"]["lift"]
+    # Findings follow the same agent.
+    assert _pick_best_agent(load_agent_data(run_dir), results["agents"]) == "codex"
+
+    report = render_agent_eval_html_report(
+        skill, run_dir, env_mode="docker", engine_result=results, include_benchmark=True, use_llm_judge=False
+    )
+    benchmark = (run_dir / "tier3-benchmark.md").read_text(encoding="utf-8")
+    assert "> **Tier 3 completed-agent result: " in benchmark
+    assert "Completed agent: **codex**; score **0.6400**" in benchmark
+    assert "**Needs attention:** other execution failures remain." in benchmark
+    assert (
+        "Baseline incomplete for **opencode** (1 of 2 attempts scored): kept by `--tolerate-baseline-timeouts`, "
+        "so its baseline and uplift are not reported." in benchmark
+    )
+    assert (
+        "Completed-agent quality result; publication not assessed; other execution failures need attention" in benchmark
+    )
+    html = report.read_text(encoding="utf-8")
+    assert "Baseline incomplete for <strong>opencode</strong> (1 of 2 attempts scored)" in html
+    assert "<code>--tolerate-baseline-timeouts</code>" in html
 
 
 @pytest.mark.parametrize("kwargs", [{"grading_mode": "custom_only"}, {"skip_baseline": True}])
@@ -558,6 +727,60 @@ def test_stop_on_pass_timeouts_are_matched_attempt_by_attempt(tmp_path: Path) ->
     assert refused["execution_status"] == "failed"
 
 
+def test_stop_on_pass_recovered_timeout_beside_unrecovered_ones(tmp_path: Path) -> None:
+    pytest.importorskip("harbor")
+    from skillevaluator.tier3.harbor.runner import _merge_attempt_jobs
+
+    plan = {
+        ("opencode", "with"): {"case-a": ["pass"], "case-b": ["pass"]},
+        # case-a timed out once and then passed, so main's handling recovers it;
+        # case-b timed out on both attempts.
+        ("opencode", "without"): {"case-a": ["timeout", "pass"], "case-b": ["timeout", "timeout"]},
+        ("codex", "with"): {"case-a": ["pass"], "case-b": ["pass"]},
+        ("codex", "without"): {"case-a": ["fail", "fail"], "case-b": ["fail", "fail"]},
+    }
+    for (agent, variant), cases in plan.items():
+        jobs = [
+            _attempt_job(tmp_path, agent, variant, case, attempt, outcome)
+            for case, outcomes in cases.items()
+            for attempt, outcome in enumerate(outcomes, start=1)
+        ]
+        _merge_attempt_jobs(jobs, tmp_path / "jobs" / f"{SKILL}-{agent}-{variant}")
+    # The runner already dropped the recovered attempt's launch error.
+    launch_errors = [
+        f"opencode without-skill Harbor run failed: case-b attempt {attempt}: "
+        "Harbor job did not complete successfully: 1 errored"
+        for attempt in (1, 2)
+    ]
+
+    results = collect_harbor_results(
+        skill_name=SKILL,
+        agents=["opencode", "codex"],
+        output_dir=tmp_path / "results",
+        jobs_dir=tmp_path / "jobs",
+        n_attempts=2,
+        stop_on_pass=True,
+        expected_cases=2,
+        expected_case_ids=["case-a", "case-b"],
+        case_id_by_task_selector={"case-a": "case-a", "case-b": "case-b"},
+        launch_errors=launch_errors,
+        tolerate_baseline_timeouts=True,
+    )
+
+    opencode = results["agents"]["opencode"]
+    # Harbor's errored count includes the recovered timeout.
+    assert opencode["job_failures"]["without_skill"] == "Harbor job did not complete successfully: 3 errored"
+    assert opencode["conditions"]["without_skill"]["recovered_attempts_total"] == 1
+    assert results["execution_status"] == "succeeded", results.get("warnings")
+    assert opencode["execution_status"] == "succeeded"
+    record = opencode[RECORD_KEY]
+    assert [(failure["case_id"], failure["attempt"]) for failure in record["failures"]] == [
+        ("case-b", 1),
+        ("case-b", 2),
+    ]
+    assert results[RUN_KEY]["explained_launch_errors"] == launch_errors
+
+
 # -- pure rules -----------------------------------------------------------------
 
 
@@ -652,6 +875,7 @@ def test_select_tolerated_needs_a_peer_that_completed_both_arms() -> None:
         [LAUNCH_ERROR.format(agent="opencode", count=1)] * 2,
         ["opencode runtime preflight failed: model unavailable"],
         ["Harbor execution failed before any agent ran"],
+        [ADC_LAUNCH_ERROR],
     ],
 )
 def test_select_tolerated_refuses_launch_errors_it_cannot_bind(errors: list[str]) -> None:
@@ -687,10 +911,28 @@ def test_settle_and_unexplained_launch_errors() -> None:
     assert REJECTION_KEY not in agent
     assert agent["conditions"]["without_skill"] == {"execution_status": "failed", "execution_errors": ["kept"]}
 
-    error = LAUNCH_ERROR.format(agent="opencode", count=1)
-    results = {RUN_KEY: {"explained_launch_errors": [error]}}
-    assert unexplained_launch_errors(results, [error, error, "other"]) == [error, "other"]
-    assert unexplained_launch_errors({}, [error]) == [error]
+
+def test_run_record_bounds_launch_errors_and_the_runner_drops_only_explained_ones() -> None:
+    errors = [
+        f"opencode without-skill Harbor run failed: case-{n:03d} attempt 1: "
+        "Harbor job did not complete successfully: 1 errored"
+        for n in range(40)
+    ]
+    record = run_record({"opencode"}, errors)
+    assert record["tolerated_agents"] == ["opencode"]
+    assert record["explained_launch_errors"] == errors[: baseline_timeouts.LAUNCH_ERRORS_PUBLISHED_MAX]
+    assert record["explained_launch_errors_total"] == 40
+    assert record["explained_launch_errors_truncated"] is True
+
+    agents = {"opencode": {}, "opencode-cli": {}, "codex": {}}
+    other = "opencode-cli with-skill Harbor run failed: harbor run exited 1"
+    results = {"agents": agents, RUN_KEY: record}
+    # Every tolerated agent's error is dropped, even past the published sample.
+    assert unexplained_launch_errors(results, [*errors, other]) == [other]
+    # A count that no longer matches the record, or no tolerated agent, keeps every error.
+    assert unexplained_launch_errors(results, [*errors[:39], other]) == [*errors[:39], other]
+    assert unexplained_launch_errors({"agents": agents, RUN_KEY: run_record((), [])}, errors[:1]) == errors[:1]
+    assert unexplained_launch_errors({}, errors[:1]) == errors[:1]
 
 
 # -- engine and CLI plumbing ----------------------------------------------------

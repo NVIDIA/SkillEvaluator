@@ -30,7 +30,9 @@ calls the pure rules here. Every rule must hold:
 
 A tolerated run is still not complete publication evidence: its attempt
 coverage stays short, so publication and required-gate checks treat it as
-incomplete.
+incomplete. Reports rank a tolerated agent below every agent with a complete
+baseline (:func:`kept_with_failed_baseline`), so the run's best agent and
+headline score always come from complete evidence.
 """
 
 from __future__ import annotations
@@ -48,6 +50,7 @@ TOLERATED_REASON = "agent_execution_timeout"
 JOB_FAILURE = "Harbor job did not complete successfully: {count} errored"
 _LAUNCH_PREFIX = "{agent} without-skill Harbor run failed: "
 FAILURES_PUBLISHED_MAX = 32
+LAUNCH_ERRORS_PUBLISHED_MAX = 32
 
 REJECTION_REASONS = {
     "with_skill_incomplete": "the with-skill arm did not score every attempt",
@@ -263,17 +266,76 @@ def settle(agent_data: MutableMapping[str, Any], record: Mapping[str, Any]) -> N
     agent_data["execution_error_details_truncated"] = False
 
 
+def run_record(tolerated: Iterable[str], explained_launch_errors: Sequence[str]) -> dict[str, Any]:
+    """Return the run-level record: the tolerated agents and a bounded sample of the launch errors they explain.
+
+    ``explained_launch_errors_total`` is the exact count; only the first
+    :data:`LAUNCH_ERRORS_PUBLISHED_MAX` messages are published, since a
+    stop-on-pass baseline that timed out on many cases reports one per attempt.
+    """
+    explained = [str(error) for error in explained_launch_errors]
+    return {
+        "tolerated_agents": sorted(tolerated),
+        "explained_launch_errors": explained[:LAUNCH_ERRORS_PUBLISHED_MAX],
+        "explained_launch_errors_total": len(explained),
+        "explained_launch_errors_truncated": len(explained) > LAUNCH_ERRORS_PUBLISHED_MAX,
+    }
+
+
 def unexplained_launch_errors(results: Mapping[str, Any], launch_errors: Sequence[str]) -> list[str]:
-    """Return the launch errors that tolerated baselines do not explain, in order."""
+    """Return the launch errors that tolerated baselines do not explain, in order.
+
+    Tolerance applies only when every launch error is a tolerated baseline's
+    own timeout message, so those are exactly the errors a tolerated agent
+    owns. They are dropped only while their count still equals the recorded
+    ``explained_launch_errors_total``; otherwise every error is kept.
+    """
     run = results.get(RUN_KEY)
-    explained = Counter(run.get("explained_launch_errors") or ()) if isinstance(run, Mapping) else Counter()
-    remaining: list[str] = []
-    for error in launch_errors:
-        if explained[error] > 0:
-            explained[error] -= 1
-        else:
-            remaining.append(error)
+    if not isinstance(run, Mapping):
+        return list(launch_errors)
+    tolerated = {str(agent) for agent in run.get("tolerated_agents") or ()}
+    agents = results.get("agents")
+    names = [str(name) for name in agents] if isinstance(agents, Mapping) else []
+    remaining = [error for error in launch_errors if _owner(str(error), names) not in tolerated]
+    if not tolerated or len(launch_errors) - len(remaining) != _count(run.get("explained_launch_errors_total")):
+        return list(launch_errors)
     return remaining
+
+
+def kept_with_failed_baseline(agent: Mapping[str, Any]) -> bool:
+    """Return whether ``agent`` stays scored although its baseline condition failed.
+
+    Without tolerance a failed arm always fails its agent, so this shape marks
+    an agent kept by ``--tolerate-baseline-timeouts``, both in ``result.json``
+    and in the report payload built from it.
+    """
+    conditions = agent.get("conditions")
+    baseline = conditions.get("without_skill") if isinstance(conditions, Mapping) else None
+    return (
+        agent.get("execution_status") == "succeeded"
+        and isinstance(baseline, Mapping)
+        and baseline.get("execution_status") == "failed"
+    )
+
+
+def tolerated_baselines(agents: Any) -> list[dict[str, Any]]:
+    """Describe each agent kept with a failed baseline: ``{"name", "scored_attempts", "expected_attempts"}``."""
+    if not isinstance(agents, Mapping):
+        return []
+    described: list[dict[str, Any]] = []
+    for name in sorted(agents, key=str):
+        agent = agents[name]
+        if not isinstance(agent, Mapping) or not kept_with_failed_baseline(agent):
+            continue
+        baseline = agent["conditions"]["without_skill"]
+        described.append(
+            {
+                "name": str(name),
+                "scored_attempts": _count(baseline.get("scored_attempts")),
+                "expected_attempts": _count(baseline.get("expected_attempts")),
+            }
+        )
+    return described
 
 
 def tolerance_warning(agent: str, record: Mapping[str, Any]) -> str:

@@ -3884,11 +3884,17 @@ def _build_baseline_only_conclusions(
 
 
 def _pick_best_agent(agents: dict[str, dict[str, Any]], *, score_field: str = "with_skill") -> str:
+    from skillevaluator.tier3.harbor.baseline_timeouts import kept_with_failed_baseline
+
     eligible = {
         name: rank
         for name, agent in agents.items()
         if (rank := _canonical_agent_rank(agent, score_field=score_field)) is not None
     }
+    # An agent kept by --tolerate-baseline-timeouts never outranks one whose
+    # baseline completed, so the headline score has a complete comparison.
+    complete = {name: rank for name, rank in eligible.items() if not kept_with_failed_baseline(agents[name])}
+    eligible = complete or eligible
     activated = {name: rank for name, rank in eligible.items() if not _never_activated(agents[name])}
     eligible = activated or eligible
     if not eligible:

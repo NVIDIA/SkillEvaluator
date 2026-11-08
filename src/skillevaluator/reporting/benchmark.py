@@ -238,6 +238,15 @@ class BenchmarkReporter(ReporterBase):
                 lines.append(
                     "**Needs attention:** other execution failures remain. This completed-agent result does not certify the whole run."
                 )
+            for tolerated in completed.get("baseline_timeouts_tolerated", ()):
+                scored, expected = tolerated["scored_attempts"], tolerated["expected_attempts"]
+                counts = (
+                    f" ({scored} of {expected} attempts scored)" if scored is not None and expected is not None else ""
+                )
+                lines.append(
+                    f"Baseline incomplete for **{_publication_safe_inline(tolerated['name'], private_labels)}**"
+                    f"{counts}: kept by `--tolerate-baseline-timeouts`, so its baseline and uplift are not reported."
+                )
             if completed["recovered_attempts"]:
                 lines.append(
                     f"Recovered timeout attempts: {completed['recovered_attempts']}; failed history is retained and excluded from scoring."

@@ -6926,20 +6926,27 @@ _AGENT_TIMEOUT_SECONDS_RE = re.compile(r"after (\d+(?:\.\d+)?) seconds")
 _TOLERANCE_EVIDENCE_MAX_BYTES = 64 * 1024 * 1024
 # Provider overload, rate limiting or auth trouble that an agent can retry
 # through until the execution timeout kills it, so no terminal error is ever
-# written. Deliberately narrow: provider error identifiers (Anthropic and
-# OpenAI error types and codes, litellm's RateLimitError), Claude Code's
-# "API Error: <status>" and "Repeated 529 Overloaded", retry events'
-# "error_status", and Codex's "status: 429 Too Many Requests". Prose such as
-# "rate limit" in fetched pages or answers does not count, nor does a bare HTTP
-# status a page may print. A brief 5xx retry is common in healthy runs and
-# does not count either.
+# written. A best-effort check on known provider error identifiers: Anthropic,
+# OpenAI and Google error types and codes, litellm's RateLimitError, Claude
+# Code's "API Error: <status>" and "Repeated 529 Overloaded", retry events'
+# "error_status", the OpenAI SDK's "Error code: <status>", a JSON or Python
+# "status"/"statusCode" field of 429 or 529 (OpenAI-compatible providers,
+# OpenCode's APIError), and the "429 Too Many Requests" status line (Codex
+# prints "status: 429 Too Many Requests"). Prose such as "rate limit" in
+# fetched pages or answers does not count, nor does another bare HTTP status a
+# page may print. A brief 5xx retry is common in healthy runs and does not
+# count either.
 _PROVIDER_DEGRADATION_RE = re.compile(
     rb"overloaded_error|server_is_overloaded|Repeated 529 Overloaded"
     rb"|rate_limit_error|rate_limit_exceeded|\"error\"\s*:\s*\"rate_limit\"|RateLimitError"
+    rb"|insufficient_quota|RESOURCE_EXHAUSTED"
     rb"|authentication_error|permission_error|invalid[ _-]api[ _-]key"
     rb"|API Error:?\s*(?:401|403|429|529)\b"
+    rb"|Error code:\s*(?:401|403|429|529)\b"
     rb"|\"error_status\"\s*:\s*(?:401|403|429|529)\b"
-    rb"|\bstatus:?\s+(?:401|403|429)\s+(?:Unauthorized|Forbidden|Too Many Requests)",
+    rb"|[\"']status(?:_?code)?[\"']?\s*:\s*[\"']?(?:429|529)\b"
+    rb"|\b429\s+Too Many Requests"
+    rb"|\bstatus:?\s+(?:401|403)\s+(?:Unauthorized|Forbidden)",
     re.IGNORECASE,
 )
 # Where Harbor keeps a trial's text logs: single-step trials under agent/ or
@@ -7048,6 +7055,31 @@ def _provider_log_rejection(trial_dir: Path) -> str | None:
     return None if agent_log_scanned else "no_agent_log"
 
 
+def _job_has_unrecovered_agent_timeout(job_dir: Path, recovered: list[dict[str, Any]]) -> bool:
+    """Return whether a trial of the job, other than a recovered attempt, recorded ``AgentTimeoutError``.
+
+    Checks the trial and each native step. A baseline that failed without an
+    agent execution timeout is not a tolerance case, so it gets no rejection
+    or warning and fails exactly as it does without the option.
+    """
+    recovered_labels = {str(item.get("trial") or "") for item in recovered}
+    try:
+        entries = sorted(job_dir.iterdir())
+    except OSError:
+        return False
+    for ordinal, trial_dir in enumerate(entries, start=1):
+        if _inspect_trial_directory(trial_dir)[0] != "directory" or not _looks_like_trial_dir(trial_dir):
+            continue
+        if _published_trial_label(trial_dir.name, alias_ordinal=ordinal) in recovered_labels:
+            continue
+        harbor_result = _read_json(trial_dir / "result.json")
+        root = harbor_result.get("exception_info") if isinstance(harbor_result, dict) else None
+        exception_types = [_exception_details(root)[0], *(kind for kind, _ in _trial_step_exception_details(trial_dir))]
+        if baseline_timeouts.TOLERATED_EXCEPTION_TYPE in exception_types:
+            return True
+    return False
+
+
 def _with_skill_tolerance_rejection(
     execution: Mapping[str, Any],
     *,
@@ -7099,7 +7131,8 @@ def _baseline_timeout_failures(
     :func:`_condition_execution_summary`, and ``residual_errors`` that
     summary's errors recomputed without any trial failures or job failure.
     The runtime and trial failure lists include recovered rows; those are
-    set aside here, as they are for the summary.
+    set aside here, as they are for the summary. Harbor's errored count
+    still includes the recovered timeouts, so the job failure may count them.
     """
     if not expected_case_ids:
         return [], "no_case_identity"
@@ -7108,6 +7141,7 @@ def _baseline_timeout_failures(
     scored_roots = {str(reward.get("_trial_root_name") or "") for reward in rewards}
     failures: list[dict[str, Any]] = []
     exception_reasons: dict[str, str] = {}
+    recovered_timeouts = 0
     for ordinal, trial_dir in enumerate(sorted(job_dir.iterdir()), start=1):
         kind, _reason = _inspect_trial_directory(trial_dir)
         if kind == "link":
@@ -7123,6 +7157,11 @@ def _baseline_timeout_failures(
                 return [], "timed_out_trial_scored"
             continue
         if label in recovered_labels:
+            # A recovered attempt is an agent timeout a later attempt scored;
+            # it is counted only toward Harbor's errored total below.
+            if root_type != baseline_timeouts.TOLERATED_EXCEPTION_TYPE:
+                return [], "unaccounted_trial"
+            recovered_timeouts += 1
             continue
         if not harbor_result:
             return [], "unaccounted_trial"
@@ -7188,7 +7227,10 @@ def _baseline_timeout_failures(
         ),
         f"Scored attempt coverage is {execution.get('scored_attempts')}/{execution.get('expected_attempts')}",
     }
-    if job_failure not in {"", baseline_timeouts.JOB_FAILURE.format(count=len(failures))}:
+    if recovered_timeouts != len(recovered_labels) or job_failure not in {
+        "",
+        baseline_timeouts.JOB_FAILURE.format(count=len(failures) + recovered_timeouts),
+    }:
         return [], "unbound_error"
     if any(error not in allowed for error in residual_errors):
         return [], "unbound_error"
@@ -7971,6 +8013,7 @@ def collect_harbor_results(
             and without_job_dir is not None
             and with_execution.get("execution_status") == "succeeded"
             and without_execution.get("execution_status") == "failed"
+            and _job_has_unrecovered_agent_timeout(without_job_dir, without_recovered)
         ):
             with_recovered_names = {item["trial"] for item in with_recovered}
             tolerance_failures: list[dict[str, Any]] = []
@@ -8041,10 +8084,7 @@ def collect_harbor_results(
         for agent, code in sorted(rejected.items()):
             all_results["agents"][agent][baseline_timeouts.REJECTION_KEY] = code
             tolerance_warnings.append(baseline_timeouts.rejection_warning(agent, code))
-        all_results[baseline_timeouts.RUN_KEY] = {
-            "tolerated_agents": sorted(tolerated),
-            "explained_launch_errors": explained,
-        }
+        all_results[baseline_timeouts.RUN_KEY] = baseline_timeouts.run_record(tolerated, explained)
         if tolerance_warnings:
             all_results.setdefault("warnings", []).extend(tolerance_warnings)
 

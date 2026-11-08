@@ -1349,6 +1349,7 @@
                         {% if tier3.get('mode') == 'baseline_only' %}<div>Baseline-only run (<code>--skip-with-skill</code>): no with-skill arm, so no skill lift was measured.</div>{% endif %}
                         {% if completed_agent and completed_agent.needs_attention %}<div class="score-warn">Completed-agent result. Other execution failures need attention; see agent details.</div>{% endif %}
                         {% if completed_agent and completed_agent.recovered_attempts %}<div>{{ completed_agent.recovered_attempts }} timeout attempt(s) recovered; failed history retained.</div>{% endif %}
+                        {% for tolerated in (completed_agent.baseline_timeouts_tolerated if completed_agent else none) or [] %}<div class="score-warn tolerated-baseline">Baseline incomplete for <strong>{{ tolerated.name }}</strong>{% if tolerated.scored_attempts is not none and tolerated.expected_attempts is not none %} ({{ tolerated.scored_attempts }} of {{ tolerated.expected_attempts }} attempts scored){% endif %}: kept by <code>--tolerate-baseline-timeouts</code>, so its baseline and uplift are not reported.</div>{% endfor %}
                         <div class="trial-coverage">{{ hero_trials }}</div>{% for detail in presentation.coverage.details %}<div>{{ detail }}</div>{% endfor %}
                         <div><strong>Metrics:</strong> {{ hero_metric_count }} evaluators</div>
                         {% if tier3_environment %}<div><strong>Environment:</strong> <code>{{ tier3_environment }}</code></div>{% endif %}

@@ -125,9 +125,11 @@ def _pick_best_agent(
 ) -> str:
     """Select the same best agent identity as the canonical Tier 3 report."""
     from skillevaluator.evaluation.tier3_report import _canonical_agent_rank_from_info
+    from skillevaluator.tier3.harbor.baseline_timeouts import kept_with_failed_baseline
 
-    best_agent = ""
-    best_rank: tuple[float, float] | None = None
+    # Keyed by whether the agent was kept with a failed baseline, which the
+    # canonical report ranks below every agent with a complete baseline.
+    best: dict[bool, tuple[tuple[float, float], str]] = {}
     scored_metric_sets: set[frozenset[str]] = set()
     for agent in sorted(agents_data):
         data = agents_data[agent]
@@ -153,10 +155,10 @@ def _pick_best_agent(
             scored_metric_sets.add(frozenset(standard_metrics))
         if len(scored_metric_sets) > 1:
             return ""
-        if best_rank is None or rank > best_rank:
-            best_rank = rank
-            best_agent = agent
-    return best_agent
+        tolerated = kept_with_failed_baseline(ranking_data)
+        if tolerated not in best or rank > best[tolerated][0]:
+            best[tolerated] = (rank, agent)
+    return (best.get(False) or best.get(True) or ((0.0, 0.0), ""))[1]
 
 
 def _findings_eligible(agent_data: dict[str, Any]) -> bool:

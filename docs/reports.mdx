@@ -638,7 +638,9 @@ list. A case that scored below 0.80 also quotes a short excerpt of the
 offending command or artifact when the grader recorded one. When the attempts
 of one case disagree, the lowest-scoring attempt's reason is shown. In the
 **Per-Evaluator Drill-Down** table, hover a dotted-underlined score below 0.80
-to read the reason for that trial.
+to read the reason for that trial. A metric the trial recorded as N/A reads
+`N/A`, and hovering it says why; a score missing for any other reason reads
+`—`.
 
 Reasons are built from each trial's `reward.json` `details`, joining up to
 three distinct parts from the grader's `reason` or `message`, failing findings

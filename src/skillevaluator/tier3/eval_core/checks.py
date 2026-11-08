@@ -2669,11 +2669,19 @@ _FINDING_EVIDENCE_DIGEST_AUTH_HEADER_RE = re.compile(
     r"(\bauthorization" + _FINDING_EVIDENCE_HEADER_SEPARATOR + r"digest[ \t]{1,8})[^'`\r\n]{1,512}",
     re.IGNORECASE,
 )
-_FINDING_EVIDENCE_AUTH_HEADER_RE = re.compile(
+_FINDING_EVIDENCE_AUTH_HEADER_HEAD = (
     r"(\bauthorization"
     + _FINDING_EVIDENCE_HEADER_SEPARATOR
     + r"(?:(?:bearer|basic|token|digest)[ \t]{1,8}(?:\\?[\"'])?)?)"
-    r"[^\s'\"`,;\\][^'\"`\r\n\\]*",
+)
+_FINDING_EVIDENCE_AUTH_HEADER_RE = re.compile(
+    _FINDING_EVIDENCE_AUTH_HEADER_HEAD + r"[^\s'\"`,;\\][^'\"`\r\n\\]*",
+    re.IGNORECASE,
+)
+# Finds a header without reading its value, so an unquoted value does not
+# read to the end of the line for each header on it.
+_FINDING_EVIDENCE_AUTH_HEADER_START_RE = re.compile(
+    _FINDING_EVIDENCE_AUTH_HEADER_HEAD + r"(?=[^\s'\"`,;\\])",
     re.IGNORECASE,
 )
 # An unquoted Authorization value ("curl -H Authorization:$TOKEN -d @.env URL",
@@ -2704,13 +2712,17 @@ _FINDING_EVIDENCE_FLAG_VALUE = (
 # Any long flag whose name holds a credential word ("--password", "--db-password",
 # "--client-secret", "--github-token", "--oauth2-bearer", "--cookie"), and the
 # short "-password", "-token" and "-secret" forms. A space-separated value that
-# starts with "-" is the next flag.
-_FINDING_EVIDENCE_CREDENTIAL_FLAG_RE = re.compile(
-    r"((?<![^\s'\"])(?:-(?:password|passwd|(?:access-|auth-)?token|secret|api-?key)"
-    r"|--[a-z0-9-]*(?:password|passwd|passphrase|token|secret|api-?key|credential|bearer|cookie)[a-z0-9-]*)"
-    r"(?:[ \t]+(?!-)|=))" + _FINDING_EVIDENCE_FLAG_VALUE,
+# starts with "-" is the next flag. A long flag name is matched as a whole run
+# and checked for a credential word afterwards (see _mask_credential_flags), so
+# a long run is read once.
+_FINDING_EVIDENCE_CREDENTIAL_FLAG_NAME_RE = re.compile(
+    r"(?<![^\s'\"])(-(?:password|passwd|(?:access-|auth-)?token|secret|api-?key)|--[a-z0-9-]+)(?:[ \t]+(?!-)|=)",
     re.IGNORECASE,
 )
+_FINDING_EVIDENCE_CREDENTIAL_FLAG_WORD_RE = re.compile(
+    r"password|passwd|passphrase|token|secret|api-?key|credential|bearer|cookie", re.IGNORECASE
+)
+_FINDING_EVIDENCE_FLAG_VALUE_RE = re.compile(_FINDING_EVIDENCE_FLAG_VALUE)
 # "-u", "-U" and "--user" also name ordinary options (python -u, pip -U, pip
 # --user), so only a value with a colon is masked: "user:password", or an API
 # key with an empty password ("-u KEY:"). curl also takes it attached
@@ -2831,10 +2843,10 @@ def _redact_finding_evidence(text: Any, limit: int = 500) -> str:
     redacted = _FINDING_EVIDENCE_URL_USERINFO_RE.sub(r"\1<redacted>@", redacted)
     redacted = _FINDING_EVIDENCE_DIGEST_AUTH_HEADER_RE.sub(r"\1<redacted>", redacted)
     redacted = _mask_authorization_headers(redacted)
+    for pattern in (_FINDING_EVIDENCE_KEY_HEADER_RE, _FINDING_EVIDENCE_COOKIE_HEADER_RE):
+        redacted = pattern.sub(r"\1<redacted>", redacted)
+    redacted = _mask_credential_flags(redacted)
     for pattern in (
-        _FINDING_EVIDENCE_KEY_HEADER_RE,
-        _FINDING_EVIDENCE_COOKIE_HEADER_RE,
-        _FINDING_EVIDENCE_CREDENTIAL_FLAG_RE,
         _FINDING_EVIDENCE_USER_FLAG_RE,
         _FINDING_EVIDENCE_LOGIN_PASSWORD_RE,
         _FINDING_EVIDENCE_SSHPASS_RE,
@@ -2855,21 +2867,44 @@ def _mask_authorization_headers(text: str) -> str:
     """Mask Authorization header values: to the closing quote when quoted, else one word (two after a scheme)."""
     parts: list[str] = []
     pos = 0
-    while (match := _FINDING_EVIDENCE_AUTH_HEADER_RE.search(text, pos)) is not None:
+    while (match := _FINDING_EVIDENCE_AUTH_HEADER_START_RE.search(text, pos)) is not None:
         head = match.group(1)
-        end = match.end()
-        if not ((match.start() and text[match.start() - 1] in "'\"") or "'" in head or '"' in head):
-            word = _FINDING_EVIDENCE_UNQUOTED_WORD_RE.match(text, match.end(1))
-            if word is not None:
-                end = word.end()
-                if not _FINDING_EVIDENCE_KNOWN_SCHEME_RE.search(head) and _FINDING_EVIDENCE_SCHEME_WORD_RE.fullmatch(
-                    word.group()
-                ):
-                    credential = _FINDING_EVIDENCE_SCHEME_CREDENTIAL_RE.match(text, end)
-                    end = credential.end() if credential else end
+        if (match.start() and text[match.start() - 1] in "'\"") or "'" in head or '"' in head:
+            quoted = _FINDING_EVIDENCE_AUTH_HEADER_RE.match(text, match.start())
+            end = quoted.end() if quoted else match.end()
+        else:
+            word = _FINDING_EVIDENCE_UNQUOTED_WORD_RE.match(text, match.end())
+            if word is None:
+                # A shell operator follows the separator: the value is empty.
+                parts.append(text[pos : match.end()])
+                pos = match.end()
+                continue
+            end = word.end()
+            if not _FINDING_EVIDENCE_KNOWN_SCHEME_RE.search(head) and _FINDING_EVIDENCE_SCHEME_WORD_RE.fullmatch(
+                word.group()
+            ):
+                credential = _FINDING_EVIDENCE_SCHEME_CREDENTIAL_RE.match(text, end)
+                end = credential.end() if credential else end
         parts.append(text[pos : match.end(1)])
         parts.append("<redacted>")
         pos = end
+    parts.append(text[pos:])
+    return "".join(parts)
+
+
+def _mask_credential_flags(text: str) -> str:
+    """Mask the value of each flag whose name holds a credential word ("--client-secret VALUE")."""
+    parts: list[str] = []
+    pos = 0
+    for match in _FINDING_EVIDENCE_CREDENTIAL_FLAG_NAME_RE.finditer(text):
+        if match.start() < pos or not _FINDING_EVIDENCE_CREDENTIAL_FLAG_WORD_RE.search(match.group(1)):
+            continue
+        value = _FINDING_EVIDENCE_FLAG_VALUE_RE.match(text, match.end())
+        if value is None:
+            continue
+        parts.append(text[pos : value.start()])
+        parts.append("<redacted>")
+        pos = value.end()
     parts.append(text[pos:])
     return "".join(parts)
 

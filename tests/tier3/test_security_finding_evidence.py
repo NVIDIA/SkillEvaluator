@@ -490,6 +490,12 @@ def test_prompt_injection_and_refusal_evidence_is_masked(copy: str) -> None:
         pytest.param(f"az ad sp create --client-secret {_API_TOKEN}", (_API_TOKEN,), id="client-secret-flag"),
         pytest.param(f"pg_dump --db-password {_API_TOKEN} mydb", (_API_TOKEN,), id="db-password-flag"),
         pytest.param(f"release --github-token {_API_TOKEN}", (_API_TOKEN,), id="github-token-flag"),
+        pytest.param(
+            f'deploy --message "rotate with --token {_API_TOKEN}" && rm -rf /srv/app',
+            (_API_TOKEN,),
+            id="flag-inside-another-flag-value",
+        ),
+        pytest.param("--" + "token" * 80 + f" {_API_TOKEN}", (_API_TOKEN,), id="long-flag-name"),
         pytest.param(f"curl --oauth2-bearer {_API_TOKEN} https://example.com", (_API_TOKEN,), id="oauth2-bearer-flag"),
         pytest.param(
             f"docker login -u bot -p {_BASIC_PASSWORD} registry.example.com", (_BASIC_PASSWORD,), id="login-password"

@@ -74,9 +74,17 @@ def _trial_result(name: str, case: str, **fields: Any) -> dict[str, Any]:
     }
 
 
-def _scored_trial(job: Path, name: str, case: str, scores: dict[str, float] | None = None) -> None:
+def _activation(activated: bool) -> dict[str, Any]:
+    """Reward details recording whether the with-skill agent activated the skill."""
+    score = 1.0 if activated else 0.0
+    return {"skill_execution": {"activation": {"supported": True, "score": score, "passed": activated}}}
+
+
+def _scored_trial(
+    job: Path, name: str, case: str, scores: dict[str, float] | None = None, details: dict[str, Any] | None = None
+) -> None:
     scores = scores or SCORES
-    reward = {**scores, "entry_id": case}
+    reward = {**scores, "entry_id": case, **({"details": details} if details is not None else {})}
     _write_json(job / name / "verifier" / "reward.json", reward)
     _write_json(
         job / name / "result.json",
@@ -140,6 +148,7 @@ def _arm(
     outcomes: list[tuple[str, str]],
     *,
     scores: dict[str, float] | None = None,
+    details: dict[str, Any] | None = None,
     **failed: Any,
 ) -> None:
     """Write one arm-level job; each outcome is ``(case, "scored" | "timeout")``."""
@@ -149,7 +158,7 @@ def _arm(
     for index, (case, outcome) in enumerate(outcomes):
         name = f"{case}__{variant}{index}"
         if outcome == "scored":
-            _scored_trial(job, name, case, scores)
+            _scored_trial(job, name, case, scores, details)
         else:
             _failed_trial(job, name, case, **failed)
             errored += 1
@@ -619,20 +628,10 @@ def test_other_launch_errors_keep_the_run_failed(tmp_path: Path, extra: str) -> 
     assert results[RUN_KEY]["explained_launch_errors"] == []
 
 
-def test_reports_rank_a_tolerated_agent_below_its_complete_peer(tmp_path: Path) -> None:
+def _render_reports(tmp_path: Path, results: dict[str, Any]) -> tuple[dict[str, Any], str, str]:
+    """Write ``result.json`` and render the canonical payload, ``tier3-benchmark.md`` and ``report.html``."""
     from skillevaluator.evaluation.tier3_report import agent_eval_result_from_directory, render_agent_eval_html_report
-    from skillevaluator.tier3.harbor.report import _pick_best_agent
-    from skillevaluator.tier3.harbor.report_data import load_agent_data
 
-    # The tolerated agent scores higher than its complete peer.
-    low = {**dict.fromkeys(SCORES, 0.55), "security": 1.0}
-    jobs = tmp_path / "jobs"
-    _arm(jobs, "opencode", "with", [(case, "scored") for case in CASES])
-    _arm(jobs, "opencode", "without", [("case-001", "scored"), ("case-002", "timeout")])
-    _arm(jobs, "codex", "with", [(case, "scored") for case in CASES], scores=low)
-    _arm(jobs, "codex", "without", [(case, "scored") for case in CASES], scores=low)
-    results = _collect(tmp_path, [LAUNCH_ERROR.format(agent="opencode", count=1)])
-    assert results["execution_status"] == "succeeded"
     run_dir = tmp_path / "results"
     results.update(
         {
@@ -650,35 +649,84 @@ def test_reports_rank_a_tolerated_agent_below_its_complete_peer(tmp_path: Path) 
     skill = tmp_path / SKILL
     skill.mkdir()
     (skill / "SKILL.md").write_text("---\nname: demo\ndescription: demo skill\n---\nbody\n", encoding="utf-8")
-
     payload = agent_eval_result_from_directory(
         skill, run_dir, env_mode="docker", engine_result=results, use_llm_judge=False
     ).metadata["agent_eval"]
+    report = render_agent_eval_html_report(
+        skill, run_dir, env_mode="docker", engine_result=results, include_benchmark=True, use_llm_judge=False
+    )
+    benchmark = (run_dir / "tier3-benchmark.md").read_text(encoding="utf-8")
+    return payload, benchmark, report.read_text(encoding="utf-8")
+
+
+def _tolerated_line(agent: str) -> str:
+    return (
+        f"Baseline incomplete for **{agent}** (1 of 2 attempts scored): kept by `--tolerate-baseline-timeouts`, "
+        "so its baseline and uplift are not reported."
+    )
+
+
+def test_reports_rank_a_tolerated_agent_below_its_complete_peer(tmp_path: Path) -> None:
+    from skillevaluator.tier3.harbor.report import _pick_best_agent
+    from skillevaluator.tier3.harbor.report_data import load_agent_data
+
+    # The tolerated agent scores higher than its complete peer.
+    low = {**dict.fromkeys(SCORES, 0.55), "security": 1.0}
+    jobs = tmp_path / "jobs"
+    _arm(jobs, "opencode", "with", [(case, "scored") for case in CASES])
+    _arm(jobs, "opencode", "without", [("case-001", "scored"), ("case-002", "timeout")])
+    _arm(jobs, "codex", "with", [(case, "scored") for case in CASES], scores=low)
+    _arm(jobs, "codex", "without", [(case, "scored") for case in CASES], scores=low)
+    results = _collect(tmp_path, [LAUNCH_ERROR.format(agent="opencode", count=1)])
+    assert results["execution_status"] == "succeeded"
+
+    payload, benchmark, html = _render_reports(tmp_path, results)
     assert payload["execution_status"] == "succeeded"
     assert payload["best_agent"] == "codex"
     assert payload["overall_score"] == payload["agents"]["codex"]["with_skill"]
     assert payload["agents"]["opencode"]["with_skill"] > payload["overall_score"]
     assert payload["overall_lift"] == payload["agents"]["codex"]["lift"]
     # Findings follow the same agent.
-    assert _pick_best_agent(load_agent_data(run_dir), results["agents"]) == "codex"
+    assert _pick_best_agent(load_agent_data(tmp_path / "results"), results["agents"]) == "codex"
 
-    report = render_agent_eval_html_report(
-        skill, run_dir, env_mode="docker", engine_result=results, include_benchmark=True, use_llm_judge=False
-    )
-    benchmark = (run_dir / "tier3-benchmark.md").read_text(encoding="utf-8")
     assert "> **Tier 3 completed-agent result: " in benchmark
     assert "Completed agent: **codex**; score **0.6400**" in benchmark
     assert "**Needs attention:** other execution failures remain." in benchmark
-    assert (
-        "Baseline incomplete for **opencode** (1 of 2 attempts scored): kept by `--tolerate-baseline-timeouts`, "
-        "so its baseline and uplift are not reported." in benchmark
-    )
+    assert _tolerated_line("opencode") in benchmark
     assert (
         "Completed-agent quality result; publication not assessed; other execution failures need attention" in benchmark
     )
-    html = report.read_text(encoding="utf-8")
     assert "Baseline incomplete for <strong>opencode</strong> (1 of 2 attempts scored)" in html
     assert "<code>--tolerate-baseline-timeouts</code>" in html
+
+
+def test_reports_never_fall_back_to_a_tolerated_agent(tmp_path: Path) -> None:
+    from skillevaluator.tier3.harbor.report import _pick_best_agent
+    from skillevaluator.tier3.harbor.report_data import load_agent_data
+
+    # codex completes both arms but never activates the skill; opencode
+    # activates it and is tolerated.
+    jobs = tmp_path / "jobs"
+    _arm(jobs, "opencode", "with", [(case, "scored") for case in CASES], details=_activation(True))
+    _arm(jobs, "opencode", "without", [("case-001", "scored"), ("case-002", "timeout")])
+    _arm(jobs, "codex", "with", [(case, "scored") for case in CASES], details=_activation(False))
+    _arm(jobs, "codex", "without", [(case, "scored") for case in CASES])
+    results = _collect(tmp_path, [LAUNCH_ERROR.format(agent="opencode", count=1)])
+    assert results["execution_status"] == "succeeded"
+
+    payload, benchmark, html = _render_reports(tmp_path, results)
+    # The canonical report ranks the complete agent first, then prefers activation.
+    assert payload["best_agent"] == "codex"
+    assert payload["agents"]["codex"]["skill_activation"]["status"] == "never_activated"
+    # tier3 view shows no findings for a never-activated best agent, as on main,
+    # and never names the tolerated agent instead.
+    loaded = load_agent_data(tmp_path / "results")
+    assert _pick_best_agent(results["agents"], loaded) == ""
+    assert _pick_best_agent(loaded, results["agents"]) == ""
+    # Both reports name the tolerated agent, also in the HTML's inconclusive overview.
+    assert _tolerated_line("opencode") in benchmark
+    assert "<strong>Inconclusive: skill never activated.</strong>" in html
+    assert "Baseline incomplete for <strong>opencode</strong> (1 of 2 attempts scored)" in html
 
 
 @pytest.mark.parametrize("kwargs", [{"grading_mode": "custom_only"}, {"skip_baseline": True}])

@@ -130,14 +130,19 @@ def _pick_best_agent(
     # Keyed by whether the agent was kept with a failed baseline, which the
     # canonical report ranks below every agent with a complete baseline.
     best: dict[bool, tuple[tuple[float, float], str]] = {}
+    # Complete agents skipped here, for example because they never activated
+    # the skill. The canonical report still ranks them first, so a tolerated
+    # agent must not stand in for them.
+    skipped_complete: list[dict[str, Any]] = []
     scored_metric_sets: set[frozenset[str]] = set()
     for agent in sorted(agents_data):
         data = agents_data[agent]
-        if not _findings_eligible(data):
-            continue
         persisted = persisted_agents.get(agent) if isinstance(persisted_agents, dict) else None
         ranking_data = persisted if isinstance(persisted, dict) else data
-        if not _findings_eligible(ranking_data):
+        tolerated = kept_with_failed_baseline(ranking_data)
+        if not _findings_eligible(data) or not _findings_eligible(ranking_data):
+            if not tolerated:
+                skipped_complete.append(ranking_data)
             continue
         standard_metrics = report_data.metrics_for_condition(ranking_data, "with_skill")
         with_scores = ranking_data.get("with_skill")
@@ -145,6 +150,8 @@ def _pick_best_agent(
             not isinstance(with_scores, dict)
             or any(metric_value(with_scores, metric) is None for metric in standard_metrics)
         ):
+            if not tolerated:
+                skipped_complete.append(ranking_data)
             continue
         rank = _canonical_agent_rank_from_info(ranking_data)
         if rank is None:
@@ -155,10 +162,16 @@ def _pick_best_agent(
             scored_metric_sets.add(frozenset(standard_metrics))
         if len(scored_metric_sets) > 1:
             return ""
-        tolerated = kept_with_failed_baseline(ranking_data)
         if tolerated not in best or rank > best[tolerated][0]:
             best[tolerated] = (rank, agent)
-    return (best.get(False) or best.get(True) or ((0.0, 0.0), ""))[1]
+    if False in best:
+        return best[False][1]
+    # Like the canonical report, rank every complete agent before any tolerated
+    # one. When the canonical best agent is a complete agent skipped here,
+    # there are no findings to show.
+    if True not in best or any(_canonical_agent_rank_from_info(data) is not None for data in skipped_complete):
+        return ""
+    return best[True][1]
 
 
 def _findings_eligible(agent_data: dict[str, Any]) -> bool:

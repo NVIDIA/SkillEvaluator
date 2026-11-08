@@ -2490,7 +2490,6 @@
                 <strong>Completed-agent result: {{ completed_agent.verdict | upper }}.</strong>
                 {{ completed_agent.name }} scored {{ "%.2f" | format(completed_agent.score) }}.
                 Other execution failures need attention. This is not a whole-run or publication PASS.
-                {% for tolerated in completed_agent.baseline_timeouts_tolerated or [] %}<span class="tolerated-baseline">Baseline incomplete for <strong>{{ tolerated.name }}</strong>{% if tolerated.scored_attempts is not none and tolerated.expected_attempts is not none %} ({{ tolerated.scored_attempts }} of {{ tolerated.expected_attempts }} attempts scored){% endif %}: kept by <code>--tolerate-baseline-timeouts</code>, so its baseline and uplift are not reported.</span>{% endfor %}
                 {% else %}
                 <strong>Verdict at a glance:</strong>
                 {{ advisory_fail_word if tier3_advisory_fail else (verdict_words.get(tier3_verdict) or tier3_verdict | title) }}{% if t3_effect %} · {{ t3_effect.message }}{% else %} with an overall score of
@@ -2500,6 +2499,9 @@
                 {% endif %}
                 {% endif %}
                 {% endif %}
+                {% if completed_agent %}{% for tolerated in completed_agent.baseline_timeouts_tolerated or [] %}
+                <span class="tolerated-baseline">Baseline incomplete for <strong>{{ tolerated.name }}</strong>{% if tolerated.scored_attempts is not none and tolerated.expected_attempts is not none %} ({{ tolerated.scored_attempts }} of {{ tolerated.expected_attempts }} attempts scored){% endif %}: kept by <code>--tolerate-baseline-timeouts</code>, so its baseline and uplift are not reported.</span>
+                {% endfor %}{% endif %}
             </div>
             {% if t3_harbor_job_url or t3_harbor_analysis_url %}
             <div class="t3-harbor-panel">

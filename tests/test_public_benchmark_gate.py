@@ -6,6 +6,7 @@
 from __future__ import annotations
 
 import json
+import re
 from copy import deepcopy
 from datetime import UTC, datetime, tzinfo
 from pathlib import Path
@@ -20,7 +21,9 @@ from skillevaluator.evaluation.tier3_report import (
 )
 from skillevaluator.models import Finding, Severity, ValidationResult
 from skillevaluator.publication_evidence import stamp_publication_evidence
-from skillevaluator.reporting import BenchmarkReporter, JSONReporter
+from skillevaluator.reporting import BenchmarkReporter, HTMLReporter, JSONReporter
+from skillevaluator.reporting.presentation import build_final_render_context
+from skillevaluator.reporting.run_status import Status
 
 _PUBLICATION_TARGET = {
     "skill_name": "demo-skill",
@@ -1216,16 +1219,20 @@ def _no_ground_truth_reward(trial_id: str, *, security: float, findings: list[di
     }
 
 
-def test_no_ground_truth_run_with_destructive_command_publishes_fail(tmp_path: Path) -> None:
-    finding = {
-        "type": "destructive_command",
-        "severity": "critical",
-        "message": "Agent executed potentially destructive command: rm -rf",
-        "evidence": "rm -rf build",
-        "source": "agent_tool_call",
-        "score_impact": True,
-    }
-    with_skill = _no_ground_truth_reward("case-1__with", security=0.0, findings=[finding])
+_DESTRUCTIVE_FINDING = {
+    "type": "destructive_command",
+    "severity": "critical",
+    "message": "Agent executed potentially destructive command: rm -rf",
+    "evidence": "rm -rf build",
+    "source": "agent_tool_call",
+    "score_impact": True,
+}
+_TIER3_CARD_VERDICT = r'tier-card-label">Tier 3</span>\s*<span class="tier-card-verdict">([^<]+)</span>'
+
+
+def _no_ground_truth_destructive_payload() -> dict:
+    """Return a scored run with no ground_truth whose with-skill arm ran ``rm -rf build``."""
+    with_skill = _no_ground_truth_reward("case-1__with", security=0.0, findings=[_DESTRUCTIVE_FINDING])
     baseline = _no_ground_truth_reward("case-1__without", security=1.0, findings=[])
     metrics = ("security", "skill_execution", "skill_efficiency", "accuracy", "goal_accuracy", "behavior_check")
     condition = {"execution_status": "succeeded", "execution_errors": [], "expected_attempts": 1, "scored_attempts": 1}
@@ -1257,10 +1264,15 @@ def test_no_ground_truth_run_with_destructive_command_publishes_fail(tmp_path: P
         use_llm_judge=False,
     )
     assert payload is not None
+    return payload
+
+
+def test_no_ground_truth_run_with_destructive_command_publishes_fail(tmp_path: Path) -> None:
+    payload = _no_ground_truth_destructive_payload()
     agent = payload["agents"]["codex"]
     assert "correctness" not in [dimension["id"] for dimension in agent["dimensions"]]
     assert agent["not_applicable_metrics"]["with_skill"] == ["accuracy", "goal_accuracy"]
-    assert payload["trials"][0]["score_reasons"]["security"] == finding["message"]
+    assert payload["trials"][0]["score_reasons"]["security"] == _DESTRUCTIVE_FINDING["message"]
     assert payload["verdict"] == payload["summary"]["verdict"] == "fail"
     result = _validation_result_from_payload(payload)
     assert result is not None
@@ -1278,6 +1290,34 @@ def test_no_ground_truth_run_with_destructive_command_publishes_fail(tmp_path: P
     assert report["publication_status"] == "fail"
     assert report["tier3"]["verdict"] == "fail"
     assert offenders == []
+
+
+@pytest.mark.parametrize(
+    ("blocking", "overall_status", "tier3_card"),
+    [
+        pytest.param(False, "passed", "Failed (advisory)", id="advisory"),
+        pytest.param(True, "failed", "Changes required", id="block-on-agent-eval"),
+    ],
+)
+def test_no_ground_truth_destructive_command_reads_failed_in_tier3_status(
+    blocking: bool, overall_status: str, tier3_card: str
+) -> None:
+    result = _validation_result_from_payload(_no_ground_truth_destructive_payload())
+    assert result is not None
+    result.metadata["gating"] = {"tier": 3, "blocking": blocking}
+    results = [_tier1_result(), _tier2_result(), result]
+
+    report = json.loads(JSONReporter(include_timestamp=False).render_all(results))
+    context = build_final_render_context(results)
+    html = HTMLReporter(include_timestamp=False).render_all(results)
+
+    tier3_entries = [entry for entry in report["results"] if entry["validator"] == result.validator_name]
+    assert [entry["status"] for entry in tier3_entries] == ["failed"]
+    # The run's own status follows the Tier 3 gate, as it does for a NEUTRAL verdict.
+    assert report["overall_status"] == overall_status
+    assert context.tiers[3].status == Status.FAILED
+    assert context.publication_label == "Not eligible"
+    assert re.findall(_TIER3_CARD_VERDICT, html) == [tier3_card]
 
 
 @pytest.mark.parametrize(

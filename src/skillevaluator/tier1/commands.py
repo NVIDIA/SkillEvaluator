@@ -5,6 +5,7 @@
 
 from __future__ import annotations
 
+import os
 import time
 from collections.abc import Callable
 from copy import deepcopy
@@ -20,6 +21,7 @@ from skillevaluator.constants import (
     CONTENT_TYPE_WORKFLOWS,
     SCAN_EXCLUDED_DIRS,
     SCAN_EXCLUDED_FILES,
+    SKILL_MANIFEST_FILE,
 )
 from skillevaluator.models.result import ValidationResult
 from skillevaluator.publication_evidence import (
@@ -114,14 +116,16 @@ _SKIPPED_VALIDATORS = {
     "lint": ("Script Lint (Advisory)",),
 }
 # Checks that read a skill manifest (SKILL.md frontmatter, its version, its
-# quality). A target that ``--type auto`` detects as ``unknown`` has no
-# manifest, so these are recorded as not applicable rather than run.
+# quality). A target that ``--type auto`` detects as ``unknown`` and that holds
+# no ``SKILL.md`` entry has no manifest, so these are recorded as not
+# applicable rather than run.
 _MANIFEST_CHECKS = ("schema", "version", "quality")
 UNKNOWN_CONTENT_SKIP_REASON = (
     "not applicable: no supported skill, rules, workflows or plugin artifact detected; use --type to force"
 )
-# Machine-readable form of the applicability decision, also emitted at the
-# JSON report root as ``tier1_applicability``.
+# Machine-readable form of the applicability decision. Every result of such a
+# run carries it, and the JSON report emits it at the root as
+# ``tier1_applicability``.
 UNKNOWN_CONTENT_APPLICABILITY = {
     "applicability": "not_applicable",
     "reason_code": "unsupported_content_type",
@@ -141,6 +145,33 @@ def _stamp_tier1_scan_scope(results: list[ValidationResult], target: Path) -> No
     skipped = publication_paths_skipped_by_scan(target, SCAN_EXCLUDED_DIRS, SCAN_EXCLUDED_FILES)
     for result in results:
         result.metadata[TIER1_UNSCANNED_PATHS_KEY] = list(skipped)
+
+
+def _has_skill_manifest_entry(target: Path) -> bool:
+    """Return whether *target* is, or directly holds, an entry named ``SKILL.md`` in any letter case.
+
+    Entry names are compared instead of calling ``exists()``, so a dangling
+    ``SKILL.md`` symlink and a mis-cased ``Skill.md`` count on every
+    filesystem: such a folder is a broken skill, not a target without one. A
+    directory that cannot be listed also counts, so the manifest checks run
+    and report the problem instead of being recorded as not applicable.
+    """
+    manifest = SKILL_MANIFEST_FILE.casefold()
+    if target.name.casefold() == manifest and os.path.lexists(target):
+        return True
+    if not target.is_dir():
+        return False
+    try:
+        with os.scandir(target) as entries:
+            return any(entry.name.casefold() == manifest for entry in entries)
+    except OSError:
+        return True
+
+
+def _stamp_tier1_applicability(results: list[ValidationResult]) -> None:
+    """Record on every result that the manifest checks do not apply to the target."""
+    for result in results:
+        result.metadata["tier1_applicability"] = deepcopy(UNKNOWN_CONTENT_APPLICABILITY)
 
 
 def _as_result(
@@ -196,9 +227,10 @@ def _schema_validator_for(content_type: str | None, policy: ValidationPolicy | N
     """Return the schema validator matching the (forced or detected) content type.
 
     Rules, workflows, and plugins use their dedicated schema validators; skill
-    content and ``None`` fall back to the skill :class:`SchemaValidator` (the
-    historical default). ``run_validation`` records the schema check as not
-    applicable for ``unknown`` content instead of calling this.
+    content, ``None`` and an ``unknown`` folder that holds a ``SKILL.md``
+    entry fall back to the skill :class:`SchemaValidator` (the historical
+    default). ``run_validation`` records the schema check as not applicable for
+    any other ``unknown`` target instead of calling this.
     """
     if content_type == CONTENT_TYPE_RULES:
         return RulesSchemaValidator()
@@ -252,8 +284,11 @@ def run_validation(
     checks (``quality`` and ``lint`` are skipped for rules, workflows, and
     plugins). For ``unknown`` (``--type auto`` found no supported artifact) the
     manifest checks ``schema``, ``version`` and ``quality`` are recorded as not
-    applicable instead of run, while the content scans still run; ``None``
-    keeps the historical skill behavior. When *fail_fast* is set, the
+    applicable instead of run, and every result carries the
+    ``tier1_applicability`` record, while the content scans still run. A target
+    that holds a ``SKILL.md`` entry in any letter case, including a dangling
+    symlink, is a broken skill, so its manifest checks still run and fail.
+    ``None`` keeps the historical skill behavior. When *fail_fast* is set, the
     run stops after the first failing check. *continue_on_failure* overrides
     *fail_fast* and also keeps batch folder validation scanning every skill past
     a CRITICAL finding (parity with SkillEvaluator ``--continue-on-failure``).
@@ -271,6 +306,7 @@ def run_validation(
     results: list[ValidationResult] = []
     initial_target = publication_target_from_path(target_path)
     skill_like = content_type in (None, CONTENT_TYPE_SKILL, CONTENT_TYPE_UNKNOWN)
+    manifest_not_applicable = content_type == CONTENT_TYPE_UNKNOWN and not _has_skill_manifest_entry(target_path)
 
     def _run_result(
         check_id: str,
@@ -304,11 +340,7 @@ def run_validation(
         result = ValidationResult(
             validator_name=_SKIPPED_VALIDATORS[check_id][0],
             validator_description=UNKNOWN_CONTENT_SKIP_REASON,
-            metadata={
-                "skipped": True,
-                "skip_reason": UNKNOWN_CONTENT_SKIP_REASON,
-                "tier1_applicability": deepcopy(UNKNOWN_CONTENT_APPLICABILITY),
-            },
+            metadata={"skipped": True, "skip_reason": UNKNOWN_CONTENT_SKIP_REASON},
         )
         stamp_publication_evidence([result], tier=1, check_id=check_id)
         stamp_tier1_required_checks([result], skill_like=skill_like)
@@ -390,7 +422,7 @@ def run_validation(
     for check_name, _builder in [step for step in active if step[0] in skipped]:
         active.remove((check_name, _builder))
         results.extend(_skipped_result(check_name, name) for name in _SKIPPED_VALIDATORS[check_name])
-    if content_type == CONTENT_TYPE_UNKNOWN:
+    if manifest_not_applicable:
         # No skill, rules, workflows or plugin layout was detected, so there is
         # no manifest to validate: each manifest check would only report "No
         # skills found". The content scans below keep their unrestricted scope.
@@ -424,6 +456,8 @@ def run_validation(
                 )
 
             if fail_fast and not continue_on_failure and any(not r.passed for r in results):
+                if manifest_not_applicable:
+                    _stamp_tier1_applicability(results)
                 _stamp_tier1_scan_scope(results, target_path)
                 finalize_publication_target(results, target_path, initial_target)
                 return results
@@ -437,6 +471,11 @@ def run_validation(
         result.add_error(f"Unknown Tier 1 check(s): {', '.join(sorted(unknown))}")
         results.insert(0, result)
 
+    if manifest_not_applicable:
+        # Recorded whatever --checks/--skip selected, so CI can read the
+        # applicability of the target from any run, including one narrowed to
+        # the content scans.
+        _stamp_tier1_applicability(results)
     _stamp_tier1_scan_scope(results, target_path)
     finalize_publication_target(results, target_path, initial_target)
     return results

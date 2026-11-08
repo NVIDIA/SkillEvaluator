@@ -256,8 +256,9 @@ class JSONReporter(ReporterBase):
             data["rubric_eval"] = rubric_results[0]
 
         # Tier 1 applicability: ``--type auto`` found no supported artifact, so
-        # the manifest checks were recorded as not applicable. CI can read this
-        # instead of parsing skip reasons.
+        # the manifest checks were recorded as not applicable. Every result of
+        # such a run carries the record, whatever --checks selected, so CI can
+        # read this instead of parsing skip reasons.
         tier1_applicability = next(
             (
                 result.metadata.get("tier1_applicability")

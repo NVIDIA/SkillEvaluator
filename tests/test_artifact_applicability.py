@@ -5,7 +5,9 @@
 
 The skill-manifest checks (schema, version, quality) are recorded as not
 applicable instead of failing with "No skills found"; the content scans still
-run with their unrestricted scope, and such a run never certifies Tier 1.
+run with their unrestricted scope, and such a run never certifies Tier 1. A
+folder that holds a ``SKILL.md`` entry in any letter case, or a dangling
+``SKILL.md`` symlink, is a broken skill and still fails the manifest checks.
 """
 
 from __future__ import annotations
@@ -13,8 +15,8 @@ from __future__ import annotations
 import json
 import re
 from pathlib import Path
-from typing import TYPE_CHECKING
 
+import pytest
 from click.testing import CliRunner
 
 from skillevaluator.cli import cli
@@ -27,9 +29,6 @@ from skillevaluator.reporting.console_ui import summarize_tier1
 from skillevaluator.reporting.presentation import build_final_render_context
 from skillevaluator.tier1 import commands as tier1_commands
 from skillevaluator.tier1.commands import run_validation
-
-if TYPE_CHECKING:
-    import pytest
 
 MANIFEST_VALIDATORS = {
     "schema": "Schema & Repository Governance",
@@ -64,6 +63,13 @@ def _by_name(results: list[ValidationResult]) -> dict[str, ValidationResult]:
 
 def _rendered(rows) -> str:
     return "\n".join("".join(text for text, _style in row.segments) for row in rows)
+
+
+def _broken_skill(root: Path) -> Path:
+    """A folder that is meant to be a skill but whose manifest the checks cannot read."""
+    root.mkdir(parents=True)
+    (root / "README.md").write_text("# Example tool\n", encoding="utf-8")
+    return root
 
 
 def _validate(*args: str) -> tuple[int, str]:
@@ -141,6 +147,126 @@ def test_no_content_type_keeps_the_historical_skill_validation(tmp_path: Path) -
     schema = _by_name(results)["Schema & Repository Governance"]
     assert not schema.passed
     assert any("No skills found" in error for error in schema.errors)
+
+
+def test_unknown_content_with_a_mis_cased_manifest_still_fails_the_manifest_checks(tmp_path: Path) -> None:
+    # Case-sensitive filesystems detect this folder as unknown; spec-compliant
+    # agents do not load a Skill.md, so it must fail like any broken skill.
+    folder = _broken_skill(tmp_path / "my-tool")
+    (folder / "Skill.md").write_text(
+        "---\nname: my-tool\ndescription: A tool whose manifest name has the wrong letter case.\n---\n\n# My tool\n",
+        encoding="utf-8",
+    )
+
+    results = run_validation(
+        folder, checks="schema,quality,pii", content_type=CONTENT_TYPE_UNKNOWN, on_check=lambda _name: None
+    )
+
+    by_check = {result.metadata["publication_evidence"]["check_id"]: result for result in results}
+    assert sorted(by_check) == ["pii", "quality", "schema"]
+    for check_id in ("schema", "quality"):
+        assert not by_check[check_id].metadata.get("skipped")
+        assert not by_check[check_id].passed
+    assert not any("tier1_applicability" in result.metadata for result in results)
+    data = json.loads(JSONReporter(include_timestamp=False).render_all(results))
+    assert "tier1_applicability" not in data
+    assert data["overall_status"] == "failed"
+
+
+def test_unknown_content_with_a_dangling_manifest_symlink_still_fails_schema(tmp_path: Path) -> None:
+    folder = _broken_skill(tmp_path / "my-tool")
+    try:
+        (folder / "SKILL.md").symlink_to("missing-target.md")
+    except (OSError, NotImplementedError) as exc:
+        pytest.skip(f"symlinks unavailable: {exc}")
+
+    results = run_validation(
+        folder, checks="schema,quality,pii", content_type=CONTENT_TYPE_UNKNOWN, on_check=lambda _name: None
+    )
+
+    schema = _by_name(results)["Schema & Repository Governance"]
+    assert not schema.metadata.get("skipped")
+    assert not schema.passed
+    assert not any("tier1_applicability" in result.metadata for result in results)
+
+
+def test_validate_folder_with_a_dangling_manifest_symlink_still_fails(tmp_path: Path) -> None:
+    folder = _broken_skill(tmp_path / "my-tool")
+    try:
+        (folder / "SKILL.md").symlink_to("missing-target.md")
+    except (OSError, NotImplementedError) as exc:
+        pytest.skip(f"symlinks unavailable: {exc}")
+    reports = tmp_path / "reports"
+
+    exit_code, output = _validate(
+        str(folder), "--tiers", "1", "--checks", "schema,quality,pii", "-r", "json", "--output-dir", str(reports)
+    )
+
+    assert exit_code == 1, output
+    payload = _json_report(reports)
+    assert payload["overall_status"] == "failed"
+    assert "tier1_applicability" not in payload
+    schema = next(entry for entry in payload["results"] if entry["validator"] == "Schema & Repository Governance")
+    assert schema["status"] == "failed"
+
+
+@pytest.mark.parametrize(
+    ("checks", "skip"),
+    [("pii", None), ("security,pii,code-integrity", None), ("schema,version,quality,pii", "schema,version,quality")],
+)
+def test_unknown_content_records_applicability_for_any_check_selection(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, checks: str, skip: str | None
+) -> None:
+    repository = _ordinary_repository(tmp_path / "repository")
+
+    def fake_security_scan(_self, _target: Path) -> ValidationResult:
+        result = ValidationResult(validator_name="Security Scan")
+        result.add_success("skillspector", "No security issues found")
+        return result
+
+    monkeypatch.setattr(tier1_commands.SecurityValidator, "validate_security_only", fake_security_scan)
+
+    results = run_validation(
+        repository, checks=checks, skip=skip, content_type=CONTENT_TYPE_UNKNOWN, on_check=lambda _name: None
+    )
+
+    assert all(result.metadata["tier1_applicability"] == APPLICABILITY for result in results)
+    data = json.loads(JSONReporter(include_timestamp=False).render_all(results))
+    assert data["tier1_applicability"] == APPLICABILITY
+    assert data["overall_status"] == "passed"
+    assert data["publication"]["eligible"] is False
+
+
+def test_unknown_content_records_applicability_when_fail_fast_stops_early(tmp_path: Path) -> None:
+    repository = _ordinary_repository(tmp_path / "repository")
+    (repository / "README.md").write_text("# Example service\n\nBilling: 4532-0151-1283-0366\n", encoding="utf-8")
+    ran: list[str] = []
+
+    results = run_validation(
+        repository,
+        checks="schema,pii,unicode",
+        content_type=CONTENT_TYPE_UNKNOWN,
+        fail_fast=True,
+        on_check=ran.append,
+    )
+
+    assert ran == ["pii"]
+    assert not _by_name(results)["PII Scan"].passed
+    assert all(result.metadata["tier1_applicability"] == APPLICABILITY for result in results)
+
+
+def test_validate_ordinary_repository_narrowed_to_content_scans_records_applicability(tmp_path: Path) -> None:
+    repository = _ordinary_repository(tmp_path / "repository")
+    reports = tmp_path / "reports"
+
+    exit_code, output = _validate(
+        str(repository), "--tiers", "1", "--checks", "pii", "-r", "json", "--output-dir", str(reports)
+    )
+
+    assert exit_code == 0, output
+    payload = _json_report(reports)
+    assert payload["tier1_applicability"] == APPLICABILITY
+    assert [entry["validator"] for entry in payload["results"]] == ["PII Scan"]
 
 
 def test_not_applicable_results_never_certify_publication(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:

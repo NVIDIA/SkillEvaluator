@@ -2467,6 +2467,11 @@ validate.help_group_descriptions = {
     is_flag=True,
     help="Your model is served through a custom or OpenAI-compatible provider, or is a model the harness ships no metadata for.",
 )
+@click.option(
+    "--explicit-invocation",
+    is_flag=True,
+    help="Skills are activated by an explicit mention (e.g. Codex $skill), not opened by the model.",
+)
 def harness_check(
     target_path: Path,
     harness: str,
@@ -2475,13 +2480,18 @@ def harness_check(
     json_path: Path | None,
     context_tokens: int,
     custom_provider: bool,
+    explicit_invocation: bool,
 ) -> None:
     """Show whether each agent harness loads, degrades or drops a skill (advisory; exits 0)."""
     from skillevaluator.harness.report import run_harness_check
     from skillevaluator.reporting.console_ui import make_view_console
 
     try:
-        config = {"context_tokens": context_tokens, "custom_provider": custom_provider}
+        config = {
+            "context_tokens": context_tokens,
+            "custom_provider": custom_provider,
+            "explicit_invocation": explicit_invocation,
+        }
         block = run_harness_check(
             target_path, harness, harness_profiles, console=make_view_console(), verbose=verbose, config=config
         )

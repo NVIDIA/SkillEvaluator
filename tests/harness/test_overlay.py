@@ -493,6 +493,13 @@ def test_codex_shell_cut_is_lower_for_custom_providers(tmp_path: Path):
     assert "CX-SHELL-READ" in _rule_ids(skill, "codex", {"custom_provider": True})
 
 
+def test_codex_explicit_invocation_delivers_whole(tmp_path: Path):
+    skill = _skill(tmp_path, body="x" * 50_000)
+
+    assert "CX-SHELL-READ" in _rule_ids(skill, "codex", {"custom_provider": True})
+    assert "CX-SHELL-READ" not in _rule_ids(skill, "codex", {"custom_provider": True, "explicit_invocation": True})
+
+
 def test_harness_check_accepts_model_config(tmp_path: Path):
     skill = _skill(tmp_path, body="x" * 20_000)
     out = tmp_path / "out.json"

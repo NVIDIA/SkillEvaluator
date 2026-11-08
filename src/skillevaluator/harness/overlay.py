@@ -483,7 +483,8 @@ class _Rule:
 
 
 def model_config(profile: dict[str, Any], config: dict[str, Any] | None = None) -> dict[str, Any]:
-    """Resolve the user's model setup for one profile: ``context_tokens`` (0 = unknown) and ``custom_provider``.
+    """Resolve the user's setup for one profile: ``context_tokens`` (0 = unknown), ``custom_provider`` and
+    ``explicit_invocation`` (skills are activated by an explicit mention rather than opened by the model).
 
     An unknown window falls back to the profile's ``config_defaults`` for a custom provider when one is set.
     """
@@ -492,7 +493,8 @@ def model_config(profile: dict[str, Any], config: dict[str, Any] | None = None) 
     tokens = int(config.get("context_tokens") or 0)
     if not tokens and custom:
         tokens = int(profile.get("config_defaults", {}).get("custom_provider_context_tokens", 0))
-    return {"context_tokens": tokens, "custom_provider": custom}
+    explicit = bool(config.get("explicit_invocation", False))
+    return {"context_tokens": tokens, "custom_provider": custom, "explicit_invocation": explicit}
 
 
 def evaluate_profile(
@@ -501,7 +503,8 @@ def evaluate_profile(
     """Evaluate one profile's rules against precomputed skill facts (stricter effect wins).
 
     ``config`` describes the user's model setup (see :func:`model_config`); rules read it as
-    ``context_tokens`` and ``custom_provider``. Without it, rules assume an unknown context and a native provider.
+    ``context_tokens``, ``custom_provider`` and ``explicit_invocation``. Without it, rules assume an unknown context,
+    a native provider and model-initiated activation.
     """
     roots = profile.get("roots", {})
     all_roots = [*roots.get("project", []), *roots.get("user", [])]

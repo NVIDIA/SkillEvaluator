@@ -82,16 +82,90 @@ def test_real_work_is_productive(module, call):
         "ToolSearch",
         "Task",
         "Agent",
+        "TaskCreate",
+        "TaskGet",
+        "TaskList",
+        "TaskUpdate",
+        "EnterPlanMode",
+        "ExitPlanMode",
         "spawn_agent",
+        "wait",
         "wait_agent",
         "close_agent",
         "send_input",
         "resume_agent",
-        "ExitPlanMode",
     ],
 )
 def test_bookkeeping_is_neutral(module, action):
     assert _classify(module, _call(action)) == "neutral"
+
+
+@pytest.mark.parametrize("module", _MODULES)
+def test_claude_code_task_list_calls_are_left_out_of_the_score(module):
+    calls = [
+        _call("Read", file_path=f"/workspace/skills/{_SKILL}/SKILL.md"),
+        *[_call("TaskCreate", subject=f"step {index}") for index in range(3)],
+        _call("Edit", file_path="src/a.py"),
+        _call("Edit", file_path="src/b.py"),
+        *[_call("TaskUpdate", taskId=str(index), status="completed") for index in range(3)],
+        _call("Bash", command="pytest -q"),
+    ]
+
+    result = module.check_tool_efficiency(calls, _SKILL)
+
+    assert result["passed"] is True
+    assert result["score"] == 1.0
+    assert result["reason"] == "4/4 productive calls (100%); 6 planning or bookkeeping call(s) not counted"
+
+
+@pytest.mark.parametrize("module", _MODULES)
+def test_codex_wait_is_left_out_like_wait_agent(module):
+    for waiter in ("wait", "wait_agent"):
+        calls = [_call("spawn_agent", message="review"), _call(waiter), _call("exec_command", cmd="pytest -q")]
+        result = module.check_tool_efficiency(calls, _SKILL)
+        assert result["score"] == 1.0, (waiter, result)
+        assert result["reason"] == "1/1 productive calls (100%); 2 planning or bookkeeping call(s) not counted"
+
+
+@pytest.mark.parametrize("module", _MODULES)
+@pytest.mark.parametrize(
+    ("call", "kind"),
+    [
+        (_call("functions.apply_patch", input="*** Begin Patch\n*** End Patch"), "productive"),
+        (_call("functions.list_dir", dir_path="src"), "productive"),
+        (_call("functions.grep_files", pattern="TODO", path="src"), "productive"),
+        (_call("functions.exec_command", cmd="pytest -q"), "productive"),
+        (_call("functions.update_plan", plan=[]), "neutral"),
+        (_call("functions.spawn_agent", message="review"), "neutral"),
+        (_call("functions.list_dir", dir_path="/"), "wasted"),
+        (_call("functions.grep_files", pattern="release", path="/"), "wasted"),
+        (_call("functions.exec_command", cmd="find / -name review.py"), "wasted"),
+    ],
+    ids=lambda value: value if isinstance(value, str) else f"{value['action']}:{value['action_input']}",
+)
+def test_namespaced_codex_tools_are_classified_by_their_name(module, call, kind):
+    assert _classify(module, call, "review.py") == kind
+
+
+@pytest.mark.parametrize("module", _MODULES)
+def test_namespaced_codex_patch_run_keeps_full_tool_efficiency(module):
+    calls = [
+        _call("functions.exec_command", cmd="pytest -q"),
+        _call("functions.apply_patch", input="*** Begin Patch\n*** End Patch"),
+        _call("functions.apply_patch", input="*** Begin Patch\n*** End Patch"),
+        _call("functions.update_plan", plan=[]),
+    ]
+
+    result = module.check_tool_efficiency(calls, _SKILL)
+
+    assert result["score"] == 1.0
+    assert result["reason"] == "3/3 productive calls (100%); 1 planning or bookkeeping call(s) not counted"
+
+
+@pytest.mark.parametrize("module", _MODULES)
+@pytest.mark.parametrize("action", ["mcp__tasks__task", "mcp__planner__update_plan", "mcp__agents__wait"])
+def test_mcp_tools_named_like_bookkeeping_tools_stay_mcp_calls(module, action):
+    assert _classify(module, _call(action, id="1")) == "productive"
 
 
 @pytest.mark.parametrize("module", _MODULES)

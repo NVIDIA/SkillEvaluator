@@ -5306,13 +5306,20 @@ _NEUTRAL_TOOL_NAMES = frozenset(
         "toolsearch",
         "task",
         "agent",
+        # Claude Code task lists and plan mode.
+        "taskcreate",
+        "taskget",
+        "tasklist",
+        "taskupdate",
+        "enterplanmode",
+        "exitplanmode",
         # Codex multi-agent tools.
         "spawn_agent",
+        "wait",
         "wait_agent",
         "close_agent",
         "send_input",
         "resume_agent",
-        "exitplanmode",
     }
 )
 _PRODUCTIVE_TOOL_NAMES = frozenset(
@@ -5365,28 +5372,37 @@ def _tool_efficiency_text(target: Any) -> str:
     return str(target)
 
 
+def _tool_efficiency_name(action: Any) -> str:
+    """Lowercased tool name without a Codex namespace such as ``functions.``.
+
+    MCP tool names keep every part, so ``mcp__tasks__task`` stays an MCP call.
+    """
+    name = str(action).lower()
+    return name if name.startswith("mcp__") else name.rsplit(".", 1)[-1]
+
+
 def _tool_call_productivity(tc: dict[str, Any], expected_skill: Any, expected_script: Any) -> str:
     """Classify one tool call as ``productive``, ``wasted`` or ``neutral`` (not scored)."""
-    action = tc["action"].lower()
-    if action in _NEUTRAL_TOOL_NAMES:
+    name = _tool_efficiency_name(tc["action"])
+    if name in _NEUTRAL_TOOL_NAMES:
         return "neutral"
     args = _tool_efficiency_args(tc)
     cmd = _tool_efficiency_text(_tool_efficiency_target(args))
     # A search rooted at "/" is waste even when it names the expected skill or script.
-    if _tool_searches_root(action, args, cmd):
+    if _tool_searches_root(name, args, cmd):
         return "wasted"
-    if ("read" in action and expected_skill and expected_skill in cmd) or (
-        _is_execution_action(action) and expected_script and expected_script in cmd
+    if ("read" in name and expected_skill and expected_skill in cmd) or (
+        _is_execution_action(name) and expected_script and expected_script in cmd
     ):
         return "productive"
-    full_text = f"{action} {cmd}".lower()
+    full_text = f"{name} {cmd}".lower()
     if any(waste in full_text for waste in WASTE_INDICATORS):
         return "wasted"
     if (
-        "read" in action
-        or action in _PRODUCTIVE_TOOL_NAMES
-        or action.startswith("mcp__")
-        or _is_execution_action(action)
+        "read" in name
+        or name in _PRODUCTIVE_TOOL_NAMES
+        or name.startswith("mcp__")
+        or _is_execution_action(name)
     ):
         return "productive"
     return "wasted"

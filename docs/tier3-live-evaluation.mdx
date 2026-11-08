@@ -627,9 +627,9 @@ Tier 3 gate.
 ### Baseline timeouts
 
 By default, any attempt that errors or goes unscored fails its agent, and any
-failed agent fails the whole run: one baseline attempt that hits the agent execution timeout leaves
-the run with no overall score or verdict, even though the verdict reads only
-with-skill dimensions. `--tolerate-baseline-timeouts` (or
+failed agent fails the whole run: one baseline attempt that hits the agent
+execution timeout leaves the run with no overall score or verdict, even though
+the verdict reads only with-skill dimensions. `--tolerate-baseline-timeouts` (or
 `harbor.tolerate_baseline_timeouts: true` in `evals/config.yml`) keeps such an
 agent scored on its with-skill arm. `--no-tolerate-baseline-timeouts`
 overrides a config value that enables it.
@@ -664,8 +664,8 @@ and its baseline scores, Skill Lift, pass@k lift and security attribution are
 not reported. The reports rank it below every agent with a complete baseline,
 so the best agent, overall score and lift come from complete evidence.
 `BENCHMARK.md` and `report.html` keep the "Needs attention" note and name each
-tolerated agent, for example `Baseline incomplete for opencode (1 of 2
-attempts scored)`.
+tolerated agent, for example
+`Baseline incomplete for opencode (1 of 2 attempts scored)`.
 
 `result.json` records the timed-out attempts under the agent's
 `baseline_timeout_tolerance` (also written to

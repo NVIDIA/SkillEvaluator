@@ -1071,49 +1071,69 @@ def test_safe_reporter_disables_after_heartbeat_redraw_failure() -> None:
     reporter.close()
 
 
-def test_heartbeat_skips_a_transient_write_error_and_keeps_progress_on(monkeypatch: pytest.MonkeyPatch) -> None:
-    import rich.live
+@pytest.mark.parametrize("refused_writes", [1, None], ids=["refused-once", "refused-always"])
+def test_heartbeat_write_that_would_block_turns_progress_off(
+    monkeypatch: pytest.MonkeyPatch,
+    refused_writes: int | None,
+) -> None:
+    from rich.console import Console
 
     progress = _progress_module()
-    failed_once = threading.Event()
-    redrawn_after_failure = threading.Event()
+    monkeypatch.setenv("TERM", "xterm-256color")
     uncaught: list[BaseException | None] = []
     monkeypatch.setattr(threading, "excepthook", lambda args: uncaught.append(args.exc_value))
+    refused = threading.Event()
+    heartbeat_writes: list[int] = []
 
-    class FlakyLive(_FakeLive):
-        """Refuses one heartbeat write, as a terminal made non-blocking by a child process can."""
+    class NonBlockingTerminal(_TTYBuffer):
+        """A terminal another process made non-blocking: it refuses heartbeat writes."""
 
-        def update(self, renderable, *, refresh: bool = False) -> None:
-            on_heartbeat = threading.current_thread().name == "tier3-progress-heartbeat"
-            if on_heartbeat and not failed_once.is_set():
-                failed_once.set()
-                raise BlockingIOError(errno.EAGAIN, "write could not complete without blocking")
-            super().update(renderable, refresh=refresh)
-            if on_heartbeat:
-                redrawn_after_failure.set()
+        def write(self, text: str) -> int:
+            if threading.current_thread().name == "tier3-progress-heartbeat":
+                heartbeat_writes.append(len(text))
+                if refused_writes is None or len(heartbeat_writes) <= refused_writes:
+                    refused.set()
+                    raise BlockingIOError(errno.EAGAIN, "write could not complete without blocking", 0)
+            return super().write(text)
 
-    _FakeLive.instances.clear()
-    monkeypatch.setattr(rich.live, "Live", FlakyLive)
-    reporter = progress.safe_progress_reporter(
-        progress.RichProgressReporter(stream=_TTYBuffer(), refresh_interval=0.05)
+    stream = NonBlockingTerminal()
+    rich_reporter = progress.RichProgressReporter(stream=stream, refresh_interval=0.05)
+    # A real Rich Live, which keeps a refused frame in its buffer and sends it
+    # again with the next one.
+    rich_reporter._console = Console(
+        file=stream,
+        force_terminal=True,
+        legacy_windows=False,
+        width=120,
+        color_system=None,
     )
-    reporter.start(_plan(progress))
-    reporter.emit(progress.ProgressEvent(stage="agent:codex", state="running", detail="evaluating"))
+    reporter = progress.safe_progress_reporter(rich_reporter)
+    try:
+        reporter.start(_plan(progress))
+        heartbeat = rich_reporter._thread
+        assert heartbeat is not None
+        reporter.emit(progress.ProgressEvent(stage="agent:codex", state="running", detail="evaluating"))
 
-    assert failed_once.wait(timeout=10)
-    assert redrawn_after_failure.wait(timeout=10)
-    assert reporter.is_active is True
-    reporter.emit(progress.ProgressEvent(stage="agent:codex", state="complete", detail="agent finished"))
-    reporter.emit(progress.ProgressEvent(stage="run-finished", state="complete", detail="Tier 3 evaluation finished"))
-    live = _FakeLive.instances[0]
-    frame = _render(live.renderables[-1], width=180)
-    reporter.close()
-
-    assert "agent finished" in frame
-    assert "Tier 3 evaluation finished" in frame
-    assert "failed" not in frame
-    assert "interrupted" not in frame
-    assert live.stop_calls == 1
+        assert refused.wait(timeout=10)
+        # A refused write turns progress off, so the heartbeat thread ends
+        # instead of resending a growing backlog of frames.
+        heartbeat.join(timeout=10)
+        assert not heartbeat.is_alive()
+        assert reporter.is_active is False
+        assert rich_reporter._live is None
+        reporter.emit(progress.ProgressEvent(stage="agent:codex", state="complete", detail="agent finished"))
+        output = stream.getvalue()
+        assert "agent finished" not in output
+        # Only the display failed, so no stage is reported as failed.
+        assert "failed" not in output
+        assert "interrupted" not in output
+        if refused_writes == 1:
+            # The terminal took the stop, so the frame left behind and the line
+            # under it say that the agent is still running.
+            assert "running" in output
+            assert "Tier 3 progress display stopped after a drawing error; the run continues." in output
+    finally:
+        reporter.close()
     assert uncaught == []
 
 

@@ -336,15 +336,13 @@ class PlainProgressReporter:
                 return
             try:
                 self.heartbeat()
-            except (BlockingIOError, InterruptedError):
-                # A terminal that another process made non-blocking can refuse
-                # one write; the next heartbeat draws the frame again.
-                logger.debug("Tier 3 progress heartbeat skipped after a transient write error", exc_info=True)
-                continue
             except Exception:
                 # A redraw failure here must turn progress off through the
                 # safety wrapper, which stops the live display, instead of
                 # killing this thread and leaving a half-drawn frame behind.
+                # That includes a write a non-blocking terminal refuses: Rich
+                # keeps the refused frame and sends it again before the next
+                # one, so skipping it would only grow that backlog.
                 logger.debug("Tier 3 progress heartbeat failed", exc_info=True)
                 if self._stop.is_set():
                     # close() is already stopping this reporter.

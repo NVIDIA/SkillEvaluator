@@ -19,7 +19,7 @@ All notable changes to SkillEvaluator are documented in this file.
   1.0, even if its Overall score meets the pass threshold. N/A or unscored
   metrics preserve the existing verdict behavior; missed behavior-check steps
   are warnings. A with-skill required-check failure fails the quality verdict,
-  while no-skill failures do not. Reports show required-check, correct-answer,
+  while no-skill failures do not. Reports show required-check, goals-met,
   and security-clean counts for both arms, plus failed-case reasons.
 
 - Align terminal grade and lift colors across compact, full, and direct Tier 3

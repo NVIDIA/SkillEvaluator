@@ -66,7 +66,7 @@ def test_required_check_verdict_precedes_counts_and_positive_lift_is_reference()
                                 "best_score": 0.82,
                                 "attempt_details_total": 1,
                                 "attempt_details_shown": 0,
-                                "reason": "wrong answer (goal accuracy 0.00)",
+                                "reason": "goal not met (goal accuracy 0.00)",
                                 "warnings": ["missed expected step 1 of 1 (behavior 0.00)"],
                                 "attempts": [],
                             }
@@ -85,12 +85,12 @@ def test_required_check_verdict_precedes_counts_and_positive_lift_is_reference()
 
     output = render_result(result)
 
-    assert "QUALITY VERDICT: FAIL — 1 of 2 cases failed required checks (1 wrong answer, 0 security)" in output
+    assert "QUALITY VERDICT: FAIL — 1 of 2 cases failed: 1 goal not met" in output
     assert "OVERALL SKILL LIFT (for reference)" in output
     assert "REQUIRED CHECKS PASSED   1/2 | 2/2 | -1" in output
-    assert "CORRECT ANSWERS   1/2 | 2/2 | -1" in output
+    assert "GOALS MET   1/2 | 2/2 | -1" in output
     assert "SECURITY CLEAN   2/2 | 2/2 | +0" in output
-    assert "FAIL: wrong answer (goal accuracy 0.00)" in output
+    assert "FAIL: goal not met (goal accuracy 0.00)" in output
     assert "WARNING: missed expected step 1 of 1 (behavior 0.00)" in output
     assert "0.82" in output
     assert output.index("QUALITY VERDICT") < output.index("REQUIRED CHECKS PASSED")
@@ -116,14 +116,14 @@ def test_default_case_first_display_includes_verdict_and_counts_before_cases() -
                                 "best_score": 0.82,
                                 "attempt_details_total": 1,
                                 "attempt_details_shown": 1,
-                                "reason": "wrong answer (goal accuracy 0.00)",
+                                "reason": "goal not met (goal accuracy 0.00)",
                                 "warnings": ["missed expected step 1 of 1 (behavior 0.00)"],
                                 "attempts": [
                                     {
                                         "attempt": 1,
                                         "score": 0.82,
                                         "passed": False,
-                                        "reason": "wrong answer (goal accuracy 0.00)",
+                                        "reason": "goal not met (goal accuracy 0.00)",
                                         "warnings": ["missed expected step 1 of 1 (behavior 0.00)"],
                                     }
                                 ],
@@ -148,12 +148,12 @@ def test_default_case_first_display_includes_verdict_and_counts_before_cases() -
     )
     rendered = output.getvalue()
 
-    assert "QUALITY VERDICT: FAIL — 1 of 2 cases failed required checks (1 wrong answer, 0 security)" in rendered
+    assert "QUALITY VERDICT: FAIL — 1 of 2 cases failed: 1 goal not met" in rendered
     assert "OVERALL SKILL LIFT (for reference)" in rendered
     assert "REQUIRED CHECKS PASSED   1/2 | 2/2 | -1" in rendered
-    assert "CORRECT ANSWERS   1/2 | 2/2 | -1" in rendered
+    assert "GOALS MET   1/2 | 2/2 | -1" in rendered
     assert "SECURITY CLEAN   2/2 | 2/2 | +0" in rendered
-    assert "FAIL: wrong answer (goal accuracy 0.00)" in rendered
+    assert "FAIL: goal not met (goal accuracy 0.00)" in rendered
     assert "WARNING: missed expected step 1 of 1 (behavior 0.00)" in rendered
     assert "0.82" in rendered
     assert rendered.index("QUALITY VERDICT") < rendered.index("REQUIRED CHECKS PASSED") < rendered.index("wrong-case")
@@ -180,14 +180,14 @@ def test_case_first_display_keeps_case_matrix_columns_and_ids_at_width_80() -> N
     with_skill = {
         "correct-answer": case(0.95, True),
         "missed-step": case(0.95, True, warnings=["missed expected step 1 of 2 (behavior 0.50)"]),
-        "security-warning": case(0.60, False, reason="security warning (security 0.50): network command"),
-        "wrong-ground-truth": case(0.82, False, reason="wrong answer (goal accuracy 0.00)"),
+        "security-warning": case(0.60, False, reason="security issue (security 0.50): network command"),
+        "wrong-ground-truth": case(0.82, False, reason="goal not met (goal accuracy 0.00)"),
     }
     without_skill = {
         "correct-answer": case(1.00, True),
         "missed-step": case(0.92, True),
-        "security-warning": case(0.83, False, reason="security warning (security 0.50): network command"),
-        "wrong-ground-truth": case(0.70, False, reason="wrong answer (goal accuracy 0.00)"),
+        "security-warning": case(0.83, False, reason="security issue (security 0.50): network command"),
+        "wrong-ground-truth": case(0.70, False, reason="goal not met (goal accuracy 0.00)"),
     }
     result = {
         "execution_status": "succeeded",
@@ -216,7 +216,7 @@ def test_case_first_display_keeps_case_matrix_columns_and_ids_at_width_80() -> N
     assert all(case_id in rendered for case_id in case_ids)
     assert "security" in rendered
     assert "accuracy" in rendered
-    assert "FAIL: wrong answer (goal accuracy 0.00)" in rendered
+    assert "FAIL: goal not met (goal accuracy 0.00)" in rendered
 
 
 @pytest.mark.parametrize(

@@ -42,7 +42,7 @@ The three-tier evaluation checks whether the skill:
 |---|---:|---:|
 | Overall | 47.0% → 92.0% (+45.0 points) | 55.0% → 88.0% (+33.0 points) |
 | Required checks passed | N/A | N/A |
-| Correct answers | N/A | N/A |
+| Goals met | N/A | N/A |
 | Security clean | N/A | N/A |
 | Security | 47.0% → 92.0% (+45.0 points) | 55.0% → 88.0% (+33.0 points) |
 | Correctness | 47.0% → 92.0% (+45.0 points) | 55.0% → 88.0% (+33.0 points) |

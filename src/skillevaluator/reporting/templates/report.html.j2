@@ -2557,7 +2557,7 @@
                 {% set t3_correct_with = t3_correct_answers.get('with_skill') or {} %}
                 {% set t3_correct_without = t3_correct_answers.get('without_skill') or {} %}
                 <div class="dashboard-card">
-                    <h3 class="dashboard-card-title">Correct Answers</h3>
+                    <h3 class="dashboard-card-title">Goals met</h3>
                     <p class="dashboard-card-value" style="font-size:1.05rem;">
                         {% if t3_correct_with.get('scored') and t3_correct_without.get('scored') and t3_correct_answers.get('difference') is not none %}
                         {{ t3_correct_with.get('correct') }}/{{ t3_correct_with.get('scored') }} | {{ t3_correct_without.get('correct') }}/{{ t3_correct_without.get('scored') }} | {{ "%+d" | format(t3_correct_answers.get('difference')) }}

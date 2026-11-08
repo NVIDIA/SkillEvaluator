@@ -104,6 +104,7 @@ def test_payload_exposes_report_truth_metadata() -> None:
         "lift_fail_threshold": TIER3_LIFT_FAIL_THRESHOLD,
         "overall_pass_rule": "one_supported_agent_all_dimensions_pass",
     }
+    assert {"required_checks", "correct_answers", "security_clean"} <= payload.keys()
     assert payload["summary"]["dataset_summary"] == payload["dataset_summary"]
     assert payload["summary"]["score_policy"] == payload["score_policy"]
     assert payload["summary"]["verdict_policy"] == payload["verdict_policy"]

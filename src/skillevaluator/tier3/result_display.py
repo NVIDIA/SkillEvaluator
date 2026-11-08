@@ -483,7 +483,7 @@ def _agent_score_headlines(
 
     for label, field, numerator in (
         ("REQUIRED CHECKS PASSED", "required_checks", "passed"),
-        ("CORRECT ANSWERS", "correct_answers", "correct"),
+        ("GOALS MET", "correct_answers", "correct"),
         ("SECURITY CLEAN", "security_clean", "clean"),
     ):
         with_counts = with_pass.get(field) if isinstance(with_pass, Mapping) else None

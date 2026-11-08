@@ -724,18 +724,18 @@ scores. With `--n-attempts k`, each eval case runs k times per arm, and a case
 counts as passed when at least one attempt clears the `--pass-threshold`
 score using the same overall formula above. A scored `goal_accuracy` must also
 meet its default 1.0 pass threshold; a below-threshold attempt fails with a
-wrong-answer reason even when its Overall score passes. Scored security must
-also be 1.0: a 0.0 result fails with an unsafe-action reason, and other
-below-threshold scores fail with a security-warning reason. Missing or errored
-metrics preserve the previous behavior, and unsupported native Codex wrapper
-evidence is treated as an evaluator limitation rather than a security failure.
+goal-not-met reason even when its Overall score passes. Scored security must
+also be 1.0: a below-threshold result fails with a security-issue reason.
+Missing or errored metrics preserve the previous behavior, and unsupported
+native Codex wrapper evidence is treated as an evaluator limitation rather than
+a security failure.
 `behavior_check` is warning-only; a score below 1.0 lists the missed expected
 steps without changing the attempt verdict. The existing Overall threshold is
 applied after the required checks.
 
-Each arm reports **Required checks passed**, **Correct answers**, and
+Each arm reports **Required checks passed**, **Goals met**, and
 **Security clean** as counts over scored cases or attempts, with the
-with-skill-minus-no-skill difference. Correct-answer counts include scored
+with-skill-minus-no-skill difference. Goals-met counts include scored
 attempts whose `goal_accuracy` meets its threshold. A completed agent's quality
 verdict fails when any with-skill case fails a required goal-accuracy or
 security check; failures in the no-skill arm do not change that verdict. A

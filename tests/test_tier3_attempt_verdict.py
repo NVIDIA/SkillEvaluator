@@ -5,7 +5,7 @@ from __future__ import annotations
 
 from skillevaluator.evaluation.tier3_report import _build_conclusions, build_agent_eval_payload
 from skillevaluator.reporting.benchmark import BenchmarkReporter
-from skillevaluator.tier3.attempt_verdict import attempt_verdict
+from skillevaluator.tier3.attempt_verdict import attempt_verdict, required_check_failure_reason
 from skillevaluator.tier3.harbor.collector import _pass_summary
 from skillevaluator.tier3.harbor.metrics import DEFAULT_METRIC_SET, DEFAULT_METRICS, overall_score
 from skillevaluator.tier3.results_location import _legacy_pass_at_k_is_complete
@@ -48,7 +48,7 @@ def _security_reward(score: float) -> dict:
     return reward
 
 
-def test_wrong_answer_fails_without_changing_overall_score() -> None:
+def test_goal_not_met_fails_without_changing_overall_score() -> None:
     reward = _reward(1, goal_accuracy=0.0)
     score = overall_score(reward)
 
@@ -57,7 +57,7 @@ def test_wrong_answer_fails_without_changing_overall_score() -> None:
 
     assert score == 0.9
     assert verdict.passed is False
-    assert verdict.reason == "wrong answer (goal accuracy 0.00)"
+    assert verdict.reason == "goal not met (goal accuracy 0.00)"
     assert summary["cases"]["case-1"]["best_score"] == score
     assert summary["cases"]["case-1"]["attempts"][0]["passed"] is False
     assert summary["cases"]["case-1"]["attempts"][0]["reason"] == verdict.reason
@@ -86,10 +86,10 @@ def test_correct_answer_counts_include_only_scored_attempts() -> None:
     summary = _summary([_reward(1, goal_accuracy=1.0), _reward(2, goal_accuracy=0.9)])
 
     assert summary["correct_answers"] == {"correct": 1, "scored": 2}
-    assert summary["cases"]["case-1"]["attempts"][1]["reason"] == "wrong answer (goal accuracy 0.90)"
+    assert summary["cases"]["case-1"]["attempts"][1]["reason"] == "goal not met (goal accuracy 0.90)"
 
 
-def test_security_warning_fails_without_changing_overall_score() -> None:
+def test_security_issue_fails_without_changing_overall_score() -> None:
     reward = _security_reward(0.5)
     score = overall_score(reward)
 
@@ -97,7 +97,7 @@ def test_security_warning_fails_without_changing_overall_score() -> None:
     summary = _summary([reward])
 
     assert verdict.passed is False
-    assert verdict.reason == "security warning (security 0.50): Network command was blocked"
+    assert verdict.reason == "security issue (security 0.50): Network command was blocked"
     assert overall_score(reward) == score
     assert summary["cases"]["case-1"]["attempts"][0]["score"] == score
     assert summary["cases"]["case-1"]["best_score"] == score
@@ -117,9 +117,18 @@ def test_security_unsafe_action_fails_without_changing_overall_score() -> None:
     summary = _summary([reward])
 
     assert verdict.passed is False
-    assert verdict.reason == "unsafe action (security 0.00): Network command was blocked"
+    assert verdict.reason == "security issue (security 0.00): Network command was blocked"
     assert overall_score(reward) == score
     assert summary["cases"]["case-1"]["attempts"][0]["score"] == score
+
+
+def test_security_issue_without_finding_message_omits_colon() -> None:
+    reward = _security_reward(0.0)
+    reward["details"]["security"] = {"findings": []}
+
+    verdict = attempt_verdict(overall_score(reward), 0.5, reward=reward)
+
+    assert verdict.reason == "security issue (security 0.00)"
 
 
 def test_unsupported_codex_security_result_does_not_gate_attempt() -> None:
@@ -281,7 +290,7 @@ def test_benchmark_reports_correct_answers_under_overall() -> None:
                                     "passed": False,
                                     "attempts_used": 1,
                                     "best_score": 0.82,
-                                    "reason": "wrong answer (goal accuracy 0.00)",
+                                    "reason": "goal not met (goal accuracy 0.00)",
                                     "warnings": ["missed expected step 1 of 1 (behavior 0.00)"],
                                 }
                             }
@@ -296,9 +305,9 @@ def test_benchmark_reports_correct_answers_under_overall() -> None:
     report = "\n".join(lines)
     assert "| Overall |" in report
     assert "| Required checks passed | 9/12 \\| 7/12 \\| +2 |" in report
-    assert "| Correct answers | 9/12 \\| 7/12 \\| +2 |" in report
+    assert "| Goals met | 9/12 \\| 7/12 \\| +2 |" in report
     assert "| Security clean | 11/12 \\| 9/12 \\| +2 |" in report
-    assert "| wrong-ground-truth | 0.82 | wrong answer (goal accuracy 0.00) |" in report
+    assert "| wrong-ground-truth | 0.82 | goal not met (goal accuracy 0.00) |" in report
     assert "missed expected step 1 of 1 (behavior 0.00)" in report
 
 
@@ -307,7 +316,7 @@ def test_tier3_benchmark_callout_includes_required_failure_reason(monkeypatch) -
         "skillevaluator.reporting.benchmark.completed_agent_result",
         lambda _payload: {
             "verdict": "fail",
-            "reason": "1 of 2 cases failed required checks (1 wrong answer, 0 security)",
+            "reason": "1 of 2 cases failed: 1 goal not met",
             "name": "Codex",
             "score": 0.82,
             "lift": 0.2,
@@ -318,9 +327,7 @@ def test_tier3_benchmark_callout_includes_required_failure_reason(monkeypatch) -
 
     report = BenchmarkReporter(report_scope="tier3").render_all([])
 
-    assert report.startswith(
-        "> **Tier 3 completed-agent result: FAIL** — 1 of 2 cases failed required checks (1 wrong answer, 0 security)"
-    )
+    assert report.startswith("> **Tier 3 completed-agent result: FAIL** — 1 of 2 cases failed: 1 goal not met")
 
 
 def test_quality_headline_fails_for_with_skill_required_check_failure_only() -> None:
@@ -358,7 +365,7 @@ def test_quality_headline_fails_for_with_skill_required_check_failure_only() -> 
     assert payload is not None
     assert payload["overall_lift"] > 0
     assert payload["verdict"] == "fail"
-    assert payload["verdict_reason"] == "1 of 2 cases failed required checks (1 wrong answer, 0 security)"
+    assert payload["verdict_reason"] == "1 of 2 cases failed: 1 goal not met"
     assert payload["required_checks"]["with_skill"] == {
         "passed": 1,
         "scored": 2,
@@ -398,3 +405,18 @@ def test_no_skill_only_required_check_failure_does_not_fail_headline() -> None:
     assert payload is not None
     assert payload["verdict"] == "pass"
     assert payload["verdict_reason"] is None
+
+
+def test_required_check_failure_reason_pluralizes_and_omits_zero_counts() -> None:
+    assert required_check_failure_reason({"wrong_answer": 1, "security": 0, "scored": 2}) == (
+        "1 of 2 cases failed: 1 goal not met"
+    )
+    assert required_check_failure_reason({"wrong_answer": 2, "security": 0, "scored": 3}) == (
+        "2 of 3 cases failed: 2 goals not met"
+    )
+    assert required_check_failure_reason({"wrong_answer": 0, "security": 2, "scored": 3}) == (
+        "2 of 3 cases failed: 2 security issues"
+    )
+    assert required_check_failure_reason({"wrong_answer": 1, "security": 1, "scored": 4}) == (
+        "2 of 4 cases failed: 1 goal not met, 1 security issue"
+    )

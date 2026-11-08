@@ -433,7 +433,7 @@ class CLIReporter(ReporterBase):
         )
         for label, count_data, numerator in (
             ("Required checks passed", agent_eval.get("required_checks"), "passed"),
-            ("Correct answers", agent_eval.get("correct_answers"), "correct"),
+            ("Goals met", agent_eval.get("correct_answers"), "correct"),
             ("Security clean", agent_eval.get("security_clean"), "clean"),
         ):
             with_skill = count_data.get("with_skill") if isinstance(count_data, dict) else None

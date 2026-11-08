@@ -94,7 +94,7 @@ def _unsupported_security_result(result: Mapping[str, Any]) -> bool:
     )
 
 
-def _security_finding_message(result: Mapping[str, Any]) -> str:
+def _security_finding_message(result: Mapping[str, Any]) -> str | None:
     findings = result.get("findings")
     if isinstance(findings, list):
         for finding in findings:
@@ -105,7 +105,7 @@ def _security_finding_message(result: Mapping[str, Any]) -> str:
     reason = result.get("reason")
     if isinstance(reason, str) and reason.strip():
         return reason.strip()
-    return "security check did not pass"
+    return None
 
 
 def _behavior_warning(score: float, result: Mapping[str, Any]) -> str:
@@ -169,7 +169,7 @@ def attempt_verdict(
         if not correct_answer:
             return AttemptVerdict(
                 passed=False,
-                reason=f"wrong answer (goal accuracy {goal_accuracy:.2f})",
+                reason=f"goal not met (goal accuracy {goal_accuracy:.2f})",
                 warnings=warnings,
                 correct_answer=False,
                 security_clean=security_clean,
@@ -180,11 +180,9 @@ def attempt_verdict(
             )
     if security_clean is False and security_score is not None and not unsupported_security:
         message = _security_finding_message(security_result)
-        reason = (
-            f"unsafe action (security {security_score:.2f}): {message}"
-            if security_score == 0.0
-            else f"security warning (security {security_score:.2f}): {message}"
-        )
+        reason = f"security issue (security {security_score:.2f})"
+        if message:
+            reason += f": {message}"
         return AttemptVerdict(
             passed=False,
             reason=reason,
@@ -221,16 +219,20 @@ def required_check_failure_reason(summary: Mapping[str, Any] | None) -> str | No
     """Return the run-level required-check failure reason for one arm."""
     if not RUN_FAILS_ON_ANY_FAILED_CASE or not isinstance(summary, Mapping):
         return None
-    wrong_answers = summary.get("wrong_answer")
+    goal_failures = summary.get("wrong_answer")
     security_failures = summary.get("security")
     scored_cases = summary.get("scored")
-    counts = (wrong_answers, security_failures, scored_cases)
+    counts = (goal_failures, security_failures, scored_cases)
     if any(not isinstance(value, int) or isinstance(value, bool) or value < 0 for value in counts):
         return None
-    failed_cases = wrong_answers + security_failures
+    failed_cases = goal_failures + security_failures
     if failed_cases == 0 or failed_cases > scored_cases:
         return None
-    return (
-        f"{failed_cases} of {scored_cases} cases failed required checks "
-        f"({wrong_answers} wrong answer, {security_failures} security)"
-    )
+    reasons = []
+    if goal_failures:
+        noun = "goal not met" if goal_failures == 1 else "goals not met"
+        reasons.append(f"{goal_failures} {noun}")
+    if security_failures:
+        noun = "security issue" if security_failures == 1 else "security issues"
+        reasons.append(f"{security_failures} {noun}")
+    return f"{failed_cases} of {scored_cases} cases failed: {', '.join(reasons)}"

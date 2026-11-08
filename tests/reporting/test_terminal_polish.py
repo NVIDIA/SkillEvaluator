@@ -275,7 +275,7 @@ def test_agent_eval_summary_shows_required_counts_and_failed_case_reason():
     CLIReporter._print_agent_eval_tables(
         {
             "verdict": "fail",
-            "verdict_reason": "1 of 2 cases failed required checks (1 wrong answer, 0 security)",
+            "verdict_reason": "1 of 2 cases failed: 1 goal not met",
             "composite_lift": 0.2,
             "required_checks": {
                 "with_skill": {"passed": 1, "scored": 2},
@@ -299,7 +299,7 @@ def test_agent_eval_summary_shows_required_counts_and_failed_case_reason():
                             "passed": False,
                             "attempts_used": 1,
                             "best_score": 0.82,
-                            "reason": "wrong answer (goal accuracy 0.00)",
+                            "reason": "goal not met (goal accuracy 0.00)",
                             "warnings": ["missed expected step 1 of 1 (behavior 0.00)"],
                         }
                     }
@@ -310,14 +310,14 @@ def test_agent_eval_summary_shows_required_counts_and_failed_case_reason():
     )
 
     rendered = output.getvalue()
-    assert "Verdict: FAIL — 1 of 2 cases failed required checks (1 wrong answer, 0 security)" in rendered
+    assert "Verdict: FAIL — 1 of 2 cases failed: 1 goal not met" in rendered
     assert "composite lift (for reference)" in rendered
     assert "Required checks passed: 1/2 | 2/2 | -1" in rendered
-    assert "Correct answers: 1/2 | 2/2 | -1" in rendered
+    assert "Goals met: 1/2 | 2/2 | -1" in rendered
     assert "Security clean: 2/2 | 2/2 | +0" in rendered
     assert "wrong-ground-truth" in rendered
     assert "0.82" in rendered
-    assert "wrong answer (goal accuracy 0.00)" in rendered
+    assert "goal not met (goal accuracy 0.00)" in rendered
     assert "WARNING" in rendered
 
 
@@ -328,7 +328,7 @@ def test_failed_agent_eval_summary_row_shows_verdict_reason_and_lift():
         metadata={
             "agent_eval": {
                 "verdict": "fail",
-                "verdict_reason": "2 of 4 cases failed required checks (1 wrong answer, 1 security)",
+                "verdict_reason": "2 of 4 cases failed: 1 goal not met, 1 security issue",
                 "composite_lift": 0.0,
             }
         },
@@ -341,7 +341,7 @@ def test_failed_agent_eval_summary_row_shows_verdict_reason_and_lift():
     rendered = output.getvalue()
     assert "AGENT_EVAL" in rendered
     assert "FAIL" in rendered
-    assert "2 of 4 cases failed required checks (1 wrong answer, 1 security); lift +0.00" in rendered
+    assert "2 of 4 cases failed: 1 goal not met, 1 security issue; lift +0.00" in rendered
     assert "1 checks passed" not in rendered
 
 
@@ -352,7 +352,7 @@ def test_full_summary_shows_completed_agent_eval_counts_without_findings():
         metadata={
             "agent_eval": {
                 "verdict": "fail",
-                "verdict_reason": "1 of 2 cases failed required checks (1 wrong answer, 0 security)",
+                "verdict_reason": "1 of 2 cases failed: 1 goal not met",
                 "composite_lift": 0.2,
                 "required_checks": {
                     "with_skill": {"passed": 1, "scored": 2},
@@ -376,7 +376,7 @@ def test_full_summary_shows_completed_agent_eval_counts_without_findings():
                                 "passed": False,
                                 "attempts_used": 1,
                                 "best_score": 0.82,
-                                "reason": "wrong answer (goal accuracy 0.00)",
+                                "reason": "goal not met (goal accuracy 0.00)",
                                 "warnings": ["missed expected step 1 of 1 (behavior 0.00)"],
                             }
                         }
@@ -390,13 +390,13 @@ def test_full_summary_shows_completed_agent_eval_counts_without_findings():
     CLIReporter(console=Console(file=output, width=140, color_system=None)).print_all([result])
 
     rendered = output.getvalue()
-    assert "Verdict: FAIL — 1 of 2 cases failed required checks (1 wrong answer, 0 security)" in rendered
+    assert "Verdict: FAIL — 1 of 2 cases failed: 1 goal not met" in rendered
     assert "Required checks passed: 1/2 | 2/2 | -1" in rendered
-    assert "Correct answers: 1/2 | 2/2 | -1" in rendered
+    assert "Goals met: 1/2 | 2/2 | -1" in rendered
     assert "Security clean: 2/2 | 2/2 | +0" in rendered
     assert "wrong-ground-truth" in rendered
     assert "0.82" in rendered
-    assert "wrong answer (goal accuracy 0.00)" in rendered
+    assert "goal not met (goal accuracy 0.00)" in rendered
     assert "missed expected step 1 of 1 (behavior 0.00)" in rendered
 
 

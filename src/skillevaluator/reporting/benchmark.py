@@ -482,7 +482,7 @@ class BenchmarkReporter(ReporterBase):
 
         for label, field, numerator in (
             ("Required checks passed", "required_checks", "passed"),
-            ("Correct answers", "correct_answers", "correct"),
+            ("Goals met", "correct_answers", "correct"),
             ("Security clean", "security_clean", "clean"),
         ):
             row = [label]
